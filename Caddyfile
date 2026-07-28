@@ -111,11 +111,6 @@
 		reverse_proxy eva-core:{$EVA_CORE_PORT}
 	}
 
-	# Telegram delivers updates straight into n8n's webhook endpoint.
-	handle /telegram/* {
-		reverse_proxy n8n:5678
-	}
-
 	handle {
 		respond "not found" 404
 	}

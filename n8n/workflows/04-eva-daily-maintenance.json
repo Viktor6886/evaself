@@ -1,0 +1,105 @@
+{
+  "id": "evaself-daily-maintenance",
+  "name": "Eva — Daily maintenance",
+  "active": false,
+  "settings": { "executionOrder": "v1", "saveManualExecutions": true },
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "cronExpression", "expression": "15 3 * * *" }] }
+      },
+      "id": "d4000000-0000-4000-8000-000000000001",
+      "name": "Nightly at 03:15",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-660, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Subscriptions whose paid period has ended become 'expired'.\nUPDATE subscriptions\n   SET status = 'expired'\n WHERE status IN ('trialing', 'active', 'past_due')\n   AND current_period_end IS NOT NULL\n   AND current_period_end < now()\nRETURNING id, user_id, plan;",
+        "options": {}
+      },
+      "id": "d4000000-0000-4000-8000-000000000002",
+      "name": "Expire subscriptions",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [-440, 220],
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": { "id": "evaself-postgres", "name": "Evaself PostgreSQL" }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Usage counters older than 90 days are of no further use.\nDELETE FROM usage_counters WHERE period_start < CURRENT_DATE - INTERVAL '90 days';\n\n-- Partner-analysis invitations time out.\nUPDATE partner_analysis_links\n   SET status = 'expired'\n WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at < now();\n\n-- Notifications that failed too many times stop being retried.\nUPDATE notifications\n   SET status = 'failed'\n WHERE status = 'sending' AND attempts >= 5;\n\nSELECT\n    (SELECT count(*) FROM users)                                AS users,\n    (SELECT count(*) FROM agent_links WHERE status = 'active')  AS agents,\n    (SELECT count(*) FROM crisis_events WHERE handled = false)  AS open_crisis;",
+        "options": {}
+      },
+      "id": "d4000000-0000-4000-8000-000000000003",
+      "name": "Housekeeping",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [-220, 220],
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": { "id": "evaself-postgres", "name": "Evaself PostgreSQL" }
+      }
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.EVA_CORE_URL }}/health",
+        "options": { "timeout": 20000, "response": { "response": { "neverError": true, "fullResponse": true } } }
+      },
+      "id": "d4000000-0000-4000-8000-000000000004",
+      "name": "Check Eva Core health",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [0, 220]
+    },
+    {
+      "parameters": {
+        "jsCode": "// One short nightly digest for the owner.\nconst stats = $('Housekeeping').first().json ?? {};\nconst health = $input.first().json ?? {};\nconst body = health.body ?? {};\nconst healthy = (health.statusCode ?? 0) === 200 && body.status === 'ok';\n\nconst lines = [\n  '<b>Evaself — ночной отчёт</b>',\n  `Пользователей: ${stats.users ?? '?'}`,\n  `Агентов Letta: ${stats.agents ?? '?'}`,\n  `Необработанных crisis-событий: ${stats.open_crisis ?? '?'}`,\n  `Eva Core: ${healthy ? 'ok' : 'ПРОБЛЕМА — ' + JSON.stringify(body.checks ?? {})}`,\n];\n\nreturn [{ json: { text: lines.join('\\n') } }];"
+      },
+      "id": "d4000000-0000-4000-8000-000000000005",
+      "name": "Build digest",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 220]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.EVA_TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: Number($env.OWNER_TELEGRAM_ID), text: $json.text, parse_mode: 'HTML' }) }}",
+        "options": { "timeout": 30000, "response": { "response": { "neverError": true } } }
+      },
+      "id": "d4000000-0000-4000-8000-000000000006",
+      "name": "Notify owner",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 220]
+    }
+  ],
+  "connections": {
+    "Nightly at 03:15": {
+      "main": [[{ "node": "Expire subscriptions", "type": "main", "index": 0 }]]
+    },
+    "Expire subscriptions": {
+      "main": [[{ "node": "Housekeeping", "type": "main", "index": 0 }]]
+    },
+    "Housekeeping": {
+      "main": [[{ "node": "Check Eva Core health", "type": "main", "index": 0 }]]
+    },
+    "Check Eva Core health": {
+      "main": [[{ "node": "Build digest", "type": "main", "index": 0 }]]
+    },
+    "Build digest": {
+      "main": [[{ "node": "Notify owner", "type": "main", "index": 0 }]]
+    }
+  },
+  "pinData": {},
+  "tags": [{ "id": "evaself", "name": "evaself" }]
+}

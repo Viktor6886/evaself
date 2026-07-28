@@ -1,0 +1,127 @@
+{
+  "id": "evaself-notifications",
+  "name": "Eva — Notifications dispatcher",
+  "active": false,
+  "settings": { "executionOrder": "v1", "saveManualExecutions": true },
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "minutes", "minutesInterval": 5 }] }
+      },
+      "id": "b2000000-0000-4000-8000-000000000001",
+      "name": "Every 5 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-660, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Claim due notifications atomically so a second worker cannot\n-- pick up the same rows.\nWITH due AS (\n    SELECT n.id\n      FROM notifications n\n      JOIN users u ON u.id = n.user_id\n     WHERE n.status = 'scheduled'\n       AND n.scheduled_at <= now()\n       AND u.is_blocked = false\n     ORDER BY n.scheduled_at\n     LIMIT 50\n     FOR UPDATE SKIP LOCKED\n)\nUPDATE notifications n\n   SET status = 'sending', attempts = n.attempts + 1\n  FROM due, users u\n WHERE n.id = due.id AND u.id = n.user_id\nRETURNING n.id, n.kind, n.payload, u.telegram_id;",
+        "options": {}
+      },
+      "id": "b2000000-0000-4000-8000-000000000002",
+      "name": "Claim due notifications",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [-440, 300],
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": { "id": "evaself-postgres", "name": "Evaself PostgreSQL" }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "version": 2 },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "has-rows",
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true },
+              "leftValue": "={{ $json.id !== undefined }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "b2000000-0000-4000-8000-000000000003",
+      "name": "Anything to send?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [-220, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.EVA_TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $json.telegram_id, text: ($json.payload && $json.payload.text) ? $json.payload.text : 'Напоминание от Евы', parse_mode: 'HTML', disable_web_page_preview: true }) }}",
+        "options": { "timeout": 30000, "response": { "response": { "neverError": true, "fullResponse": true } } }
+      },
+      "id": "b2000000-0000-4000-8000-000000000004",
+      "name": "Send notification",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [0, 240]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Pair each Telegram result with the notification row it belongs to.\nconst claimed = $('Claim due notifications').all();\nconst results = $input.all();\n\nreturn results.map((item, index) => {\n  const row = claimed[index]?.json ?? {};\n  const status = item.json.statusCode ?? 200;\n  const ok = status >= 200 && status < 300 && item.json.body?.ok !== false;\n\n  return {\n    json: {\n      id: row.id,\n      status: ok ? 'sent' : 'failed',\n      error: ok ? null : JSON.stringify(item.json.body ?? {}).slice(0, 500),\n    },\n  };\n});"
+      },
+      "id": "b2000000-0000-4000-8000-000000000005",
+      "name": "Pair result with row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 240]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE notifications\n   SET status  = $2,\n       sent_at = CASE WHEN $2 = 'sent' THEN now() ELSE sent_at END,\n       error   = $3\n WHERE id = $1;",
+        "options": {
+          "queryReplacement": "={{ $json.id }},{{ $json.status }},{{ $json.error }}"
+        }
+      },
+      "id": "b2000000-0000-4000-8000-000000000006",
+      "name": "Mark notification",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [440, 240],
+      "credentials": {
+        "postgres": { "id": "evaself-postgres", "name": "Evaself PostgreSQL" }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "b2000000-0000-4000-8000-000000000007",
+      "name": "Nothing due",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [0, 400]
+    }
+  ],
+  "connections": {
+    "Every 5 minutes": {
+      "main": [[{ "node": "Claim due notifications", "type": "main", "index": 0 }]]
+    },
+    "Claim due notifications": {
+      "main": [[{ "node": "Anything to send?", "type": "main", "index": 0 }]]
+    },
+    "Anything to send?": {
+      "main": [
+        [{ "node": "Send notification", "type": "main", "index": 0 }],
+        [{ "node": "Nothing due", "type": "main", "index": 0 }]
+      ]
+    },
+    "Send notification": {
+      "main": [[{ "node": "Pair result with row", "type": "main", "index": 0 }]]
+    },
+    "Pair result with row": {
+      "main": [[{ "node": "Mark notification", "type": "main", "index": 0 }]]
+    }
+  },
+  "pinData": {},
+  "tags": [{ "id": "evaself", "name": "evaself" }]
+}

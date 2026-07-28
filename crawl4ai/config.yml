@@ -1,0 +1,61 @@
+# =====================================================================
+# Crawl4AI — OPTIONAL service (compose profile "crawl4ai")
+# ---------------------------------------------------------------------
+# Enabled during install by answering "yes" to
+#   "Install Crawl4AI for reading and cleaning web pages?"
+# which adds `crawl4ai` to COMPOSE_PROFILES in .env.
+#
+# Reachable only from evaself-network at http://crawl4ai:11235.
+# =====================================================================
+app:
+  title: "Evaself Crawl4AI"
+  host: "0.0.0.0"
+  port: 11235
+  reload: false
+  workers: 1
+  timeout_keep_alive: 300
+
+llm:
+  # Evaself does not use Crawl4AI's own LLM extraction: cleaning is enough
+  # and the model calls belong to Letta.
+  provider: ""
+  api_key_env: ""
+
+redis:
+  host: "valkey"
+  port: 6379
+
+rate_limiting:
+  enabled: true
+  default_limit: "60/minute"
+  storage_uri: "memory://"
+
+security:
+  enabled: true
+  jwt_enabled: false
+  # Requests must carry: Authorization: Bearer $CRAWL4AI_API_TOKEN
+  https_redirect: false
+  trusted_hosts: ["*"]
+
+crawler:
+  base_config:
+    simulate_user: true
+    verbose: false
+  memory_threshold_percent: 75.0
+  pool:
+    max_pages: 4
+    idle_ttl_sec: 900
+  browser:
+    kwargs:
+      headless: true
+      text_mode: true
+    extra_args:
+      - "--disable-gpu"
+      - "--disable-dev-shm-usage"
+      - "--no-sandbox"
+
+observability:
+  health_check:
+    endpoint: "/health"
+  prometheus:
+    enabled: false

@@ -1,0 +1,16 @@
+ARG N8N_RUNNERS_IMAGE=n8nio/runners
+ARG N8N_RUNNERS_VERSION=2.33.0
+FROM ${N8N_RUNNERS_IMAGE}:${N8N_RUNNERS_VERSION}
+
+# ---------------------------------------------------------------------
+# Evaself external task runner.
+#
+# The runner image version MUST match the n8n image version — the launcher
+# and the task broker speak a versioned protocol. Both tags come from
+# versions.env, which keeps them in lockstep.
+#
+# This layer exists as the single place to add anything Code nodes need at
+# runtime (extra builtins, CA certificates, native modules) without
+# touching the n8n image itself.
+# ---------------------------------------------------------------------
+ENV NODE_FUNCTION_ALLOW_BUILTIN=crypto,buffer,url,querystring

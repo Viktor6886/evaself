@@ -1,0 +1,20 @@
+ARG N8N_IMAGE=n8nio/n8n
+ARG N8N_VERSION=2.33.0
+FROM ${N8N_IMAGE}:${N8N_VERSION}
+
+# ---------------------------------------------------------------------
+# Evaself n8n image.
+#
+# Adds ffmpeg so workflows can inspect or repackage media without a round
+# trip to the media service, plus curl for in-container diagnostics.
+# Both the main process and the worker run this image.
+# ---------------------------------------------------------------------
+USER root
+
+RUN apk add --no-cache ffmpeg curl tzdata
+
+# Community/native modules that Code nodes may require.
+ENV NODE_FUNCTION_ALLOW_BUILTIN=crypto,buffer,url,querystring \
+    N8N_LOG_LEVEL=info
+
+USER node

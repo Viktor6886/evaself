@@ -1,0 +1,62 @@
+# =====================================================================
+# SearXNG for Evaself
+# ---------------------------------------------------------------------
+# Reachable only from evaself-network: n8n calls
+# http://searxng:8080/search?format=json. It is never routed by Caddy.
+# =====================================================================
+use_default_settings: true
+
+general:
+  instance_name: "Evaself Search"
+  debug: false
+  # No public instance, so no contact page is needed.
+  enable_metrics: false
+
+server:
+  base_url: false
+  port: 8080
+  bind_address: "0.0.0.0"
+  secret_key: "" # replaced from SEARXNG_SECRET at container start
+  limiter: true
+  image_proxy: false
+  method: "GET"
+
+search:
+  safe_search: 1
+  autocomplete: ""
+  default_lang: ""
+  # JSON is what the n8n HTTP node consumes; html stays on for debugging
+  # from inside the network.
+  formats:
+    - html
+    - json
+
+ui:
+  static_use_hash: true
+  infinite_scroll: false
+  default_theme: simple
+
+outgoing:
+  request_timeout: 6.0
+  max_request_timeout: 12.0
+  pool_connections: 50
+  pool_maxsize: 20
+  enable_http2: true
+
+# Engines that are noisy, rate-limited or useless for Eva are disabled to
+# keep latency predictable on a 4 vCPU box.
+engines:
+  - name: wikipedia
+    disabled: false
+  - name: duckduckgo
+    disabled: false
+  - name: brave
+    disabled: false
+  - name: startpage
+    disabled: false
+  - name: google
+    disabled: false
+  - name: bing
+    disabled: true
+  - name: qwant
+    disabled: true

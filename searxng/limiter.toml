@@ -1,0 +1,22 @@
+# Rate limiting for SearXNG.
+#
+# Evaself's SearXNG is not published, so the only client is n8n on the
+# internal network. Bot protection is relaxed for that network but the
+# per-IP burst limits stay on, so a runaway workflow cannot melt the
+# upstream engines.
+
+[real_ip]
+x_for = 1
+ipv4_prefix = 32
+ipv6_prefix = 48
+
+[botdetection.ip_limit]
+# The link-token check requires a browser; n8n is not one.
+link_token = false
+
+[botdetection.ip_lists]
+pass_ip = [
+  "172.16.0.0/12",  # default docker bridge networks
+  "10.0.0.0/8",
+  "192.168.0.0/16",
+]

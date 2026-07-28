@@ -258,7 +258,13 @@ services:
 
   n8n-runner:
     <<: [*restart, *logging]
-    image: ${N8N_RUNNERS_IMAGE}:${N8N_RUNNERS_VERSION}
+    image: evaself/n8n-runner:${N8N_RUNNERS_VERSION}
+    build:
+      context: ./n8n
+      dockerfile: Dockerfile.runner
+      args:
+        N8N_RUNNERS_IMAGE: ${N8N_RUNNERS_IMAGE}
+        N8N_RUNNERS_VERSION: ${N8N_RUNNERS_VERSION}
     container_name: evaself-n8n-runner
     # Shares the worker's network namespace: the n8n task broker only
     # ever listens on 127.0.0.1, so the runner must live in the same

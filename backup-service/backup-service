@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# =====================================================================
+# Entry point of the backup helper container.
+#
+#   backup-service idle            stay alive (default; used by compose)
+#   backup-service dump-all DIR    dump every database + globals into DIR
+#   backup-service restore-all DIR restore what dump-all produced
+#   backup-service check           verify the server is reachable
+#
+# scripts/backup.sh and scripts/restore.sh call these through
+# `docker compose exec`, so the pg_dump version always matches the server.
+# =====================================================================
+set -euo pipefail
+
+DATABASES=("${EVA_DB_NAME:-eva}" "${N8N_DB_NAME:-n8n}" "${NOCODB_DB_NAME:-nocodb}" "${LETTA_DB_NAME:-letta}")
+
+log() { printf '[backup-service] %s\n' "$*" >&2; }
+
+cmd_idle() {
+	log "idle; ready for dump-all / restore-all"
+	# `sleep infinity` keeps PID 1 responsive to SIGTERM.
+	exec tail -f /dev/null
+}
+
+cmd_check() {
+	pg_isready -q
+	psql -tAc 'SELECT version()'
+}
+
+cmd_dump_all() {
+	local target="${1:?usage: dump-all <dir>}"
+	mkdir -p "$target"
+
+	# Roles and their passwords live outside any single database.
+	log "dumping globals (roles, grants)"
+	pg_dumpall --globals-only > "$target/globals.sql"
+
+	for db in "${DATABASES[@]}"; do
+		if psql -tAc "SELECT 1 FROM pg_database WHERE datname='${db}'" | grep -q 1; then
+			log "dumping database ${db}"
+			# Custom format: parallel-restorable and compressed.
+			pg_dump --format=custom --compress=6 --file="$target/${db}.dump" "$db"
+		else
+			log "database ${db} does not exist, skipping"
+		fi
+	done
+
+	psql -tAc 'SELECT version()' > "$target/server-version.txt"
+	log "dump complete"
+}
+
+cmd_restore_all() {
+	local source="${1:?usage: restore-all <dir>}"
+
+	if [ -f "$source/globals.sql" ]; then
+		log "restoring globals"
+		# Roles may already exist on a fresh server created by compose.
+		psql --set ON_ERROR_STOP=off -f "$source/globals.sql" > /dev/null 2>&1 || true
+	fi
+
+	for db in "${DATABASES[@]}"; do
+		local dump="$source/${db}.dump"
+		[ -f "$dump" ] || { log "no dump for ${db}, skipping"; continue; }
+
+		log "restoring ${db}"
+		psql -tAc "SELECT 1 FROM pg_database WHERE datname='${db}'" | grep -q 1 \
+			|| psql -c "CREATE DATABASE \"${db}\"" > /dev/null
+
+		# --clean --if-exists makes the restore idempotent against a
+		# database compose has already initialised; pg_restore continues
+		# past "does not exist" notices by default.
+		pg_restore --dbname="$db" --clean --if-exists --no-owner --no-privileges \
+			"$dump" 2>&1 | grep -vi 'does not exist, skipping' || true
+	done
+
+	log "restore complete"
+}
+
+case "${1:-idle}" in
+	idle) cmd_idle ;;
+	check) cmd_check ;;
+	dump-all) shift; cmd_dump_all "$@" ;;
+	restore-all) shift; cmd_restore_all "$@" ;;
+	*) log "unknown command: $1"; exit 2 ;;
+esac
