@@ -277,7 +277,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS partner_analysis_links_token_uidx ON partner_a
 CREATE INDEX IF NOT EXISTS partner_analysis_links_owner_idx        ON partner_analysis_links (owner_user_id, status);
 
 -- =====================================================================
--- 12. notifications — outbound messages scheduled by n8n
+-- 12. notifications — outbound messages scheduled by the TypeScript runtime
 -- =====================================================================
 CREATE TABLE IF NOT EXISTS notifications (
     id            bigserial PRIMARY KEY,

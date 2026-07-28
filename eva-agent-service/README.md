@@ -5,9 +5,9 @@ TypeScript и использует официальный `@letta-ai/letta-agent
 self-hosted Letta App Server по WebSocket.
 
 ```text
-n8n/WebUI → HTTP + X-API-Key → eva-agent-service
-                                  ↓ Agent SDK
-                             Letta App Server
+Telegram webhook ─┐
+Background runtime├→ eva-agent-service → Agent SDK → Letta App Server
+Admin WebUI ──────┘
 ```
 
 Сервис:
@@ -20,7 +20,9 @@ n8n/WebUI → HTTP + X-API-Key → eva-agent-service
 - обновляет models agents/conversations через SDK с rollback;
 - хранит и применяет runtime-настройки SDK из PostgreSQL;
 - управляет agents/conversations и обслуживает WebUI-чат через SDK;
-- публикует защищённый `/v1/*` API для n8n и административной консоли.
+- принимает защищённый Telegram webhook;
+- выполняет задачи, heartbeat и пользовательские инструменты;
+- публикует защищённый `/v1/*` API для административной консоли.
 
 Прямого Letta REST/WebSocket client в проекте нет. Скрипт
 `scripts/verify-agent-sdk.mjs` проверяет эту границу в CI.
@@ -61,3 +63,10 @@ Slim и toolchain для нативной зависимости `node-pty`.
 
 Удаление agent требует `?confirm=<agentId>`. SDK 0.5.2 не предоставляет
 удаление conversation, поэтому `PATCH` меняет её признак `archived`.
+
+## Webhook API
+
+- `POST /telegram/webhook` — проверяет
+  `X-Telegram-Bot-Api-Secret-Token`;
+- `POST /payments/lava` — проверяет HTTP Basic Auth, продукт, сумму,
+  валюту и идемпотентно активирует подписку.

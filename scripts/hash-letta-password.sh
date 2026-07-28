@@ -24,10 +24,10 @@ PASSWORD="$(get_env LETTA_UI_PASSWORD)"
 EXISTING="$(get_env LETTA_UI_PASSWORD_HASH || true)"
 FORCE="${1:-}"
 
-[ -n "$PASSWORD" ] || die "LETTA_UI_PASSWORD is empty in .env"
+[ -n "$PASSWORD" ] || die "LETTA_UI_PASSWORD не задан в .env"
 
 if [ -n "$EXISTING" ] && [ "$FORCE" != "--force" ]; then
-	ok "the Letta console password is already hashed"
+	ok "пароль консоли Letta уже хеширован"
 	exit 0
 fi
 
@@ -42,14 +42,15 @@ if [ -z "$HASH" ] && command -v docker >/dev/null 2>&1; then
 fi
 
 if [ -z "$HASH" ]; then
-	fail "could not produce a bcrypt hash"
-	say "  Caddy is neither installed on the host nor available as an image."
-	say "  Until this is fixed, https://$(get_env DOMAIN_LETTA) will refuse"
-	say "  every login. Re-run after the images are pulled:"
+	fail "не удалось создать bcrypt-хеш"
+	say "  Caddy не установлен на хосте и его образ пока недоступен."
+	say "  До исправления вход на https://$(get_env DOMAIN_LETTA)"
+	say "  работать не будет. После загрузки образов повторите:"
 	say "    scripts/hash-letta-password.sh"
 	exit 1
 fi
 
-set_env LETTA_UI_PASSWORD_HASH "$HASH"
+# Single quotes make Compose treat every "$" in bcrypt literally.
+set_env LETTA_UI_PASSWORD_HASH "'$HASH'"
 chmod 600 "$ENV_FILE"
-ok "Letta console password hashed (bcrypt)"
+ok "пароль консоли Letta хеширован (bcrypt)"

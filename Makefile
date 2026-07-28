@@ -24,7 +24,7 @@ COMPOSE_FILE := $(ROOT_DIR)/compose.yaml
 # .env holds the installation's own configuration and secrets.
 COMPOSE := docker compose --env-file $(VERSIONS) --env-file $(ENV_FILE) -f $(COMPOSE_FILE)
 
-# `make logs s=n8n` / `make logs s=eva-agent-service`
+# `make logs s=eva-agent-service`
 s ?=
 BACKUP ?=
 
@@ -32,7 +32,6 @@ export ROOT_DIR SCRIPTS ENV_FILE VERSIONS COMPOSE_FILE
 
 .PHONY: help install configure start stop restart status logs doctor \
         backup restore update-preview update rollback \
-        import-n8n export-n8n \
         configure-llm test-llm list-models configure-letta \
         disk-cleanup build pull ps shell-db validate test
 
@@ -139,15 +138,6 @@ update: ## Backup, обновление, перезапуск и проверк�
 
 rollback: ## Вернуться к предыдущим версиям и commit
 	@$(SCRIPTS)/rollback.sh
-
-# ---------------------------------------------------------------------
-# n8n workflows
-# ---------------------------------------------------------------------
-import-n8n: ## Импортировать workflows и credentials n8n
-	@$(SCRIPTS)/n8n-import.sh
-
-export-n8n: ## Экспортировать рабочие workflows из n8n
-	@$(SCRIPTS)/n8n-export.sh
 
 # ---------------------------------------------------------------------
 # Maintenance

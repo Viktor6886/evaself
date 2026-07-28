@@ -3,20 +3,25 @@
  *
  * Boot order matters: the database and Valkey must be reachable before the
  * HTTP surface accepts traffic, but the App Server is allowed to be slow —
- * `/health` reports it as degraded and n8n retries, rather than the whole
+ * `/health` reports it as degraded and Telegram updates remain retryable, rather than the whole
  * service refusing to start because Letta is still warming up.
  */
 
 import { Redis } from "ioredis";
 
+import { AgentToolFactory } from "./agent-tools.js";
+import { BackgroundRuntime } from "./background.js";
 import { loadConfig, readPersona } from "./config.js";
 import { Database } from "./db.js";
+import { EvaWorkflow } from "./eva-workflow.js";
 import { LettaService } from "./letta.js";
 import { LlmManager } from "./llm.js";
 import { createLogger } from "./logger.js";
+import { LavaPayments } from "./payments.js";
 import { UserQueue } from "./queue.js";
 import { SdkSettingsManager } from "./sdk-settings.js";
 import { buildServer, VERSION } from "./server.js";
+import { TelegramClient } from "./telegram.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -40,6 +45,7 @@ async function main(): Promise<void> {
 
   const queue = new UserQueue(redis, { ttlSeconds: config.lockTtlSeconds });
   const letta = new LettaService(config, logger, persona);
+  const telegram = new TelegramClient(config, logger);
   const sdk = new SdkSettingsManager(config, db, letta);
   try {
     await sdk.initialize();
@@ -59,6 +65,11 @@ async function main(): Promise<void> {
       message: error instanceof Error ? error.message : String(error),
     });
   }
+  const toolFactory = new AgentToolFactory(config, db, telegram, logger);
+  letta.setToolFactory((conversationId) => toolFactory.forConversation(conversationId));
+  const workflow = new EvaWorkflow(config, db, letta, llm, queue, telegram, logger);
+  const payments = new LavaPayments(config, db, telegram, logger);
+  const background = new BackgroundRuntime(config, db, letta, queue, telegram, logger);
 
   const app = buildServer({
     config,
@@ -67,11 +78,14 @@ async function main(): Promise<void> {
     letta,
     sdk,
     llm,
+    workflow,
+    payments,
     queue,
     redisPing: async () => (await redis.ping()) === "PONG",
   });
 
   await app.listen({ port: config.port, host: config.host });
+  background.start();
   logger.info("eva-agent-service принимает запросы", {
     version: VERSION,
     port: config.port,
@@ -88,6 +102,7 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string) => {
     logger.info("Остановка сервиса", { signal });
     try {
+      background.stop();
       letta.shutdown();
       await app.close();
       await db.close();

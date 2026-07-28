@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import { EvaError, toEvaError, userBusy } from "../dist/errors.js";
 
-test("the error payload is the shape n8n branches on", () => {
+test("the error payload is the stable shape runtime callers branch on", () => {
   const payload = userBusy("busy", 12).toPayload() as {
     error: { code: string; retryable: boolean; details: unknown };
   };

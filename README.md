@@ -19,7 +19,6 @@ LLM-конфигурацию, генерирует остальные секре
 
 ```text
 Telegram
-  → n8n
   → eva-agent-service (TypeScript)
   → @letta-ai/letta-agent-sdk
   → self-hosted Letta App Server (WebSocket)
@@ -29,12 +28,17 @@ Telegram
 `eva-agent-service` — единственный компонент, который обращается к Letta.
 Он использует официальный Agent SDK, создаёт отдельные agent и conversation
 для каждого Telegram-пользователя и хранит их идентификаторы в PostgreSQL.
-n8n и браузер не подключаются к App Server напрямую.
+Telegram и браузер не подключаются к App Server напрямую.
 
-В состав также входят PostgreSQL, Valkey, Caddy, n8n, NocoDB, WebApp,
+В состав также входят PostgreSQL, Valkey, Caddy, NocoDB, WebApp,
 Media Service, SearXNG и механизмы backup, restore, update и
-rollback. Сейчас в n8n оставлен минимальный workflow для E2E-проверки;
-полные сценарии Евы, оплаты и подписки относятся к следующему этапу.
+rollback. Telegram webhook, идемпотентность, команды, квоты, фоновые задачи,
+heartbeat и webhook Lava реализованы кодом внутри TypeScript runtime.
+
+Пользовательские инструменты заметок, бюджета, задач, реакций и поиска
+регистрируются как внешние инструменты официального Agent SDK. Они
+выполняются локально и обращаются к PostgreSQL/SearXNG, поэтому секреты
+интеграций не попадают в память агента.
 
 ## Агенты и Letta Agent SDK
 
@@ -93,14 +97,12 @@ make update-preview
 make update
 make rollback
 
-make import-n8n
-make export-n8n
 make validate
 make test
 ```
 
 Команды, удаляющей volumes, намеренно нет: ошибочная команда не должна
-стереть память, conversations, workflows или credentials.
+стереть память, conversations или настройки.
 
 ## Требования
 

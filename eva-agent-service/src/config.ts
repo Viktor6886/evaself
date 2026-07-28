@@ -25,6 +25,30 @@ export interface Config {
   databaseUrl: string;
   valkeyUrl: string;
 
+  telegramBotToken: string;
+  telegramWebhookSecret: string;
+  ownerTelegramId: number | null;
+  telegramApiBaseUrl: string;
+  mediaServiceUrl: string;
+  searxngUrl: string;
+  todoistApiUrl: string;
+  todoistApiToken: string;
+  todoistProjectId: string;
+  schedulerIntervalMs: number;
+  heartbeatIntervalMs: number;
+  typingIntervalMs: number;
+  defaultTimezone: string;
+
+  lavaWebhookUser: string;
+  lavaWebhookPassword: string;
+  lavaPlans: Record<string, {
+    plan: string;
+    durationDays: number;
+    amountMinor: number;
+    currency: string;
+    paymentUrl?: string;
+  }>;
+
   lockTtlSeconds: number;
   turnTimeoutMs: number;
   /** How many idle sessions to keep open before evicting the oldest. */
@@ -38,6 +62,21 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const int = (name: string, fallback: number): number => {
     const parsed = Number.parseInt(str(name), 10);
     return Number.isFinite(parsed) ? parsed : fallback;
+  };
+  const nullableInt = (name: string): number | null => {
+    const value = str(name);
+    if (!value) return null;
+    const parsed = Number.parseInt(value, 10);
+    return Number.isSafeInteger(parsed) ? parsed : null;
+  };
+  const json = <T>(name: string, fallback: T): T => {
+    const value = str(name);
+    if (!value) return fallback;
+    try {
+      return JSON.parse(value) as T;
+    } catch {
+      return fallback;
+    }
   };
 
   return {
@@ -62,6 +101,24 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
     databaseUrl: str("DATABASE_URL"),
     valkeyUrl: str("VALKEY_URL"),
+
+    telegramBotToken: str("EVA_TELEGRAM_BOT_TOKEN"),
+    telegramWebhookSecret: str("EVA_TELEGRAM_WEBHOOK_SECRET"),
+    ownerTelegramId: nullableInt("OWNER_TELEGRAM_ID"),
+    telegramApiBaseUrl: str("EVA_TELEGRAM_API_BASE_URL", "https://api.telegram.org"),
+    mediaServiceUrl: str("EVA_MEDIA_SERVICE_URL", "http://media-service:8090"),
+    searxngUrl: str("SEARXNG_BASE_URL", "http://searxng:8080/"),
+    todoistApiUrl: str("TODOIST_API_URL", "https://api.todoist.com/api/v1"),
+    todoistApiToken: str("TODOIST_API_TOKEN"),
+    todoistProjectId: str("TODOIST_PROJECT_ID"),
+    schedulerIntervalMs: int("EVA_SCHEDULER_INTERVAL_MS", 30_000),
+    heartbeatIntervalMs: int("EVA_HEARTBEAT_INTERVAL_MS", 10 * 60_000),
+    typingIntervalMs: int("EVA_TELEGRAM_TYPING_INTERVAL_MS", 4_000),
+    defaultTimezone: str("TZ", "UTC"),
+
+    lavaWebhookUser: str("LAVA_WEBHOOK_USER"),
+    lavaWebhookPassword: str("LAVA_WEBHOOK_PASSWORD"),
+    lavaPlans: json("LAVA_PLANS_JSON", {}),
 
     lockTtlSeconds: int("EVA_AGENT_LOCK_TTL", 180),
     turnTimeoutMs: int("EVA_AGENT_TURN_TIMEOUT_MS", 240_000),

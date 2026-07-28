@@ -56,7 +56,6 @@ proposed() {
 
 ask DOMAIN_APP    "Домен WebApp"   "$(proposed DOMAIN_APP app)"
 ask DOMAIN_API    "Домен API"      "$(proposed DOMAIN_API api)"
-ask DOMAIN_N8N    "Домен n8n"      "$(proposed DOMAIN_N8N n8n)"
 ask DOMAIN_NOCODB "Домен NocoDB"   "$(proposed DOMAIN_NOCODB admin)"
 ask DOMAIN_LETTA  "Домен Letta UI" "$(proposed DOMAIN_LETTA letta)"
 ask DOMAIN_STATUS "Домен статуса"  "$(proposed DOMAIN_STATUS status)"
@@ -69,7 +68,7 @@ done
 
 echo
 info "HTTPS будет выпущен для:"
-for host in "$DOMAIN" "$DOMAIN_APP" "$DOMAIN_API" "$DOMAIN_N8N" "$DOMAIN_NOCODB" "$DOMAIN_LETTA" "$DOMAIN_STATUS"; do
+for host in "$DOMAIN" "$DOMAIN_APP" "$DOMAIN_API" "$DOMAIN_NOCODB" "$DOMAIN_LETTA" "$DOMAIN_STATUS"; do
 	info "  https://$host"
 done
 info "Все домены уже должны указывать на IP этого сервера."
@@ -122,9 +121,10 @@ while :; do
 done
 CURRENT_LLM_PARAMS="$(current EVA_LLM_ADDITIONAL_PARAMETERS || true)"
 CURRENT_LLM_PARAMS="${CURRENT_LLM_PARAMS#\'}"; CURRENT_LLM_PARAMS="${CURRENT_LLM_PARAMS%\'}"
+DEFAULT_LLM_PARAMS='{"request_timeout_ms":180000}'
 ask EVA_LLM_ADDITIONAL_PARAMETERS \
 	"Дополнительные параметры JSON" \
-	"${CURRENT_LLM_PARAMS:-{\"request_timeout_ms\":180000}}"
+	"${CURRENT_LLM_PARAMS:-$DEFAULT_LLM_PARAMS}"
 python3 - "$EVA_LLM_ADDITIONAL_PARAMETERS" <<'PY' || die "дополнительные параметры должны быть JSON-объектом"
 import json, sys
 value = json.loads(sys.argv[1])
@@ -181,7 +181,6 @@ keep_or_generate() {
 
 POSTGRES_SUPER_PASSWORD="$(keep_or_generate POSTGRES_SUPER_PASSWORD)"
 EVA_DB_PASSWORD="$(keep_or_generate EVA_DB_PASSWORD)"
-N8N_DB_PASSWORD="$(keep_or_generate N8N_DB_PASSWORD)"
 NOCODB_DB_PASSWORD="$(keep_or_generate NOCODB_DB_PASSWORD)"
 LETTA_DB_PASSWORD="$(keep_or_generate LETTA_DB_PASSWORD)"
 EVA_DB_READONLY_PASSWORD="$(keep_or_generate EVA_DB_READONLY_PASSWORD)"
@@ -192,11 +191,6 @@ SEARXNG_SECRET="$(keep_or_generate SEARXNG_SECRET)"
 NC_AUTH_JWT_SECRET="$(keep_or_generate NC_AUTH_JWT_SECRET)"
 CRAWL4AI_API_TOKEN="$(keep_or_generate CRAWL4AI_API_TOKEN)"
 EVA_TELEGRAM_WEBHOOK_SECRET="$(keep_or_generate EVA_TELEGRAM_WEBHOOK_SECRET)"
-N8N_RUNNERS_AUTH_TOKEN="$(keep_or_generate N8N_RUNNERS_AUTH_TOKEN)"
-
-# The encryption key is generated ONCE. Regenerating it makes every stored
-# n8n credential permanently undecryptable.
-N8N_ENCRYPTION_KEY="$(keep_or_generate N8N_ENCRYPTION_KEY)"
 # Ключ шифрования API key в таблице llm_providers также постоянный:
 # его потеря сделает сохранённые ключи нечитаемыми.
 LLM_CONFIG_ENCRYPTION_KEY="$(keep_or_generate LLM_CONFIG_ENCRYPTION_KEY)"
@@ -204,12 +198,12 @@ LLM_CONFIG_ENCRYPTION_KEY="$(keep_or_generate LLM_CONFIG_ENCRYPTION_KEY)"
 # Admin passwords are shown to the operator at the end of the install.
 NC_ADMIN_PASSWORD="$(keep_or_generate NC_ADMIN_PASSWORD gen_password)"
 LETTA_UI_PASSWORD="$(keep_or_generate LETTA_UI_PASSWORD gen_password)"
-N8N_OWNER_PASSWORD="$(keep_or_generate N8N_OWNER_PASSWORD gen_password)"
+LAVA_WEBHOOK_PASSWORD="$(keep_or_generate LAVA_WEBHOOK_PASSWORD)"
 
 NC_ADMIN_EMAIL="$(current NC_ADMIN_EMAIL || true)"
 NC_ADMIN_EMAIL="${NC_ADMIN_EMAIL:-$ACME_EMAIL}"
-N8N_OWNER_EMAIL="$(current N8N_OWNER_EMAIL || true)"
-N8N_OWNER_EMAIL="${N8N_OWNER_EMAIL:-$ACME_EMAIL}"
+LAVA_WEBHOOK_USER="$(current LAVA_WEBHOOK_USER || true)"
+LAVA_WEBHOOK_USER="${LAVA_WEBHOOK_USER:-eva}"
 LETTA_UI_USER="$(current LETTA_UI_USER || true)"
 LETTA_UI_USER="${LETTA_UI_USER:-admin}"
 
@@ -223,7 +217,6 @@ step "Запись .env"
 set_env DOMAIN         "$DOMAIN"
 set_env DOMAIN_APP     "$DOMAIN_APP"
 set_env DOMAIN_API     "$DOMAIN_API"
-set_env DOMAIN_N8N     "$DOMAIN_N8N"
 set_env DOMAIN_NOCODB  "$DOMAIN_NOCODB"
 set_env DOMAIN_LETTA   "$DOMAIN_LETTA"
 set_env DOMAIN_STATUS  "$DOMAIN_STATUS"
@@ -249,16 +242,10 @@ set_env EVA_EMBEDDING_DIM      "$EVA_EMBEDDING_DIM"
 
 set_env POSTGRES_SUPER_PASSWORD  "$POSTGRES_SUPER_PASSWORD"
 set_env EVA_DB_PASSWORD          "$EVA_DB_PASSWORD"
-set_env N8N_DB_PASSWORD          "$N8N_DB_PASSWORD"
 set_env NOCODB_DB_PASSWORD       "$NOCODB_DB_PASSWORD"
 set_env LETTA_DB_PASSWORD        "$LETTA_DB_PASSWORD"
 set_env EVA_DB_READONLY_PASSWORD "$EVA_DB_READONLY_PASSWORD"
 set_env VALKEY_PASSWORD          "$VALKEY_PASSWORD"
-
-set_env N8N_ENCRYPTION_KEY     "$N8N_ENCRYPTION_KEY"
-set_env N8N_RUNNERS_AUTH_TOKEN "$N8N_RUNNERS_AUTH_TOKEN"
-set_env N8N_OWNER_EMAIL        "$N8N_OWNER_EMAIL"
-set_env N8N_OWNER_PASSWORD     "$N8N_OWNER_PASSWORD"
 
 set_env EVA_AGENT_API_KEY      "$EVA_AGENT_API_KEY"
 set_env LETTA_APP_SERVER_TOKEN "$LETTA_APP_SERVER_TOKEN"
@@ -272,9 +259,10 @@ set_env NC_AUTH_JWT_SECRET "$NC_AUTH_JWT_SECRET"
 set_env SEARXNG_SECRET     "$SEARXNG_SECRET"
 set_env CRAWL4AI_API_TOKEN "$CRAWL4AI_API_TOKEN"
 set_env COMPOSE_PROFILES   "$PROFILES"
+set_env LAVA_WEBHOOK_USER     "$LAVA_WEBHOOK_USER"
+set_env LAVA_WEBHOOK_PASSWORD "$LAVA_WEBHOOK_PASSWORD"
 
 set_env TZ              "$TZ_VALUE"
-set_env GENERIC_TIMEZONE "$TZ_VALUE"
 set_env EVASELF_INSTALL_DIR "$ROOT_DIR"
 set_env EVASELF_INSTALLED_AT "$(date -Iseconds)"
 

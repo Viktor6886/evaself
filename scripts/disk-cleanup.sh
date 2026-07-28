@@ -3,7 +3,7 @@
 # Reclaim disk space.
 #
 # What this NEVER touches:
-#   * any named volume (postgres, valkey, letta, n8n, nocodb, caddy…)
+#   * any named volume (postgres, valkey, letta, nocodb, caddy…)
 #   * .env, backups inside the retention window, workflows, skills
 #
 # It removes dangling images, the build cache, stopped containers that

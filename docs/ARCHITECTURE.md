@@ -6,18 +6,18 @@
 Telegram
   │ webhook
   ▼
-n8n ──HTTP + X-API-Key──► eva-agent-service
-                              │
-                              │ @letta-ai/letta-agent-sdk
-                              ▼
-                         Letta App Server
-                              │ WebSocket
-                              ▼
-                     OpenAI-compatible LLM
+eva-agent-service (Telegram runtime + фоновые задачи)
+  │
+  │ @letta-ai/letta-agent-sdk
+  ▼
+Letta App Server
+  │ WebSocket
+  ▼
+OpenAI-compatible LLM
 ```
 
 Архитектурная граница жёсткая: только `eva-agent-service` знает URL и
-capability token App Server. n8n, WebApp и административная консоль
+capability token App Server. Telegram, WebApp и административная консоль
 работают через его HTTP API.
 
 ## Состояние
@@ -25,8 +25,9 @@ capability token App Server. n8n, WebApp и административная к�
 - PostgreSQL: пользователи, связь `user → agent → conversation`, реестры LLM
   и настроек SDK, квоты и операционные данные.
 - Letta App Server volume: agents, conversations и memory filesystem.
-- Valkey: очередь n8n и краткоживущие блокировки ходов.
-- n8n volume и PostgreSQL: workflows, executions и credentials.
+- Valkey: краткоживущие распределённые блокировки ходов.
+- PostgreSQL: идемпотентность Telegram, пользовательские инструменты,
+  расписание задач, heartbeat и платежные события.
 - shared provider volume: локальный provider store официального Letta CLI.
 
 `agent_id` и `conversation_id` сохраняются в `agent_links`; история
@@ -64,19 +65,31 @@ App Server остаются инфраструктурными: URL показы
 ## Сеть
 
 Наружу опубликованы только 80/443 Caddy. PostgreSQL, Valkey, App Server,
-`eva-agent-service`, Media Service, SearXNG, workers и backup helper доступны
+`eva-agent-service`, Media Service, SearXNG и backup helper доступны
 только в `evaself-network`.
 
 ## Компоненты
 
 - Caddy — HTTPS и маршрутизация;
-- n8n — workflows и бизнес-логика;
-- `eva-agent-service` — Agent SDK, сессии, настройки SDK, реестр LLM и
-  административный API;
+- `eva-agent-service` — Telegram runtime, фоновые задачи, Agent SDK, сессии,
+  настройки SDK, реестр LLM и административный API;
 - Letta App Server — self-hosted runtime агентов;
-- PostgreSQL/Valkey — постоянное состояние и очередь;
+- PostgreSQL/Valkey — постоянное состояние и блокировки;
 - NocoDB — административный просмотр данных;
 - Letta UI — agents, conversations, чат, настройки SDK и LLM;
 - Media Service — ASR/TTS и ffmpeg;
 - SearXNG/Crawl4AI — поиск и чтение страниц;
 - backup-service — согласованные backup/restore.
+
+## Замена старых workflow
+
+- главный Telegram workflow → `EvaWorkflow`;
+- создание персонального агента → `ensureUserAndAgent` через Agent SDK;
+- обработка ошибок → единый error handler, журнал и уведомление владельца;
+- typing → короткоживущий timer на время agent turn;
+- приветствие «по словам» → эфемерный Telegram `sendMessageDraft` с
+  обязательной финальной отправкой полного сообщения;
+- задачи и heartbeat → `BackgroundRuntime` с блокировками PostgreSQL;
+- заметки, бюджет, задачи, поиск и реакции → внешние инструменты Agent SDK;
+- Lava → публичный webhook с HTTP Basic Auth, проверкой суммы и
+  идемпотентной транзакцией.

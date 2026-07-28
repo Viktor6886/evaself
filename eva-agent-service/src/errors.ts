@@ -1,10 +1,10 @@
 /**
- * One error shape for everything that can go wrong between n8n and the
+ * One error shape for everything that can go wrong between the runtime and the
  * Letta App Server:
  *
  *   {"error": {"code": "app_server_unavailable", "message": "…", "retryable": true}}
  *
- * n8n only ever has to look at `code` and `retryable`.
+ * Callers only ever have to look at `code` and `retryable`.
  */
 
 export class EvaError extends Error {

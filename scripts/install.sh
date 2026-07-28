@@ -161,7 +161,7 @@ step "Проверка DNS"
 SERVER_IP="$(curl -fsS --max-time 8 https://api.ipify.org 2>/dev/null || true)"
 if [ -n "$SERVER_IP" ]; then
 	info "публичный IP сервера: $SERVER_IP"
-	for host in "$DOMAIN" "$DOMAIN_APP" "$DOMAIN_API" "$DOMAIN_N8N" "$DOMAIN_NOCODB" "$DOMAIN_LETTA"; do
+	for host in "$DOMAIN" "$DOMAIN_APP" "$DOMAIN_API" "$DOMAIN_NOCODB" "$DOMAIN_LETTA"; do
 		resolved="$(getent ahostsv4 "$host" 2>/dev/null | awk 'NR==1 {print $1}')"
 		if [ -z "$resolved" ]; then
 			warn "$host пока не разрешается — HTTPS не заработает"
@@ -198,7 +198,7 @@ step "Ожидание основных сервисов"
 for svc in postgres valkey; do
 	if wait_for_health "$svc" 180; then ok "$svc работает"; else die "$svc не прошёл healthcheck"; fi
 done
-for svc in letta-app-server eva-agent-service n8n nocodb; do
+for svc in letta-app-server eva-agent-service nocodb; do
 	if wait_for_health "$svc" 300; then ok "$svc запущен"; else warn "$svc ещё запускается — проверьте make logs s=$svc"; fi
 done
 
@@ -209,12 +209,7 @@ done
 "$SCRIPT_DIR/configure-llm.sh" --from-env
 
 # =====================================================================
-# 10. n8n workflows
-# =====================================================================
-"$SCRIPT_DIR/n8n-import.sh" || warn "импорт workflow не удался — после запуска n8n выполните make import-n8n"
-
-# =====================================================================
-# 11. systemd units (daily backup timer)
+# 10. systemd units (daily backup timer)
 # =====================================================================
 step "Установка systemd units"
 install -m 0644 "$ROOT_DIR/systemd/evaself-backup.service" /etc/systemd/system/
@@ -237,12 +232,13 @@ mkdir -p "${BACKUP_DIR:-/var/backups/evaself}"
 chmod 700 "${BACKUP_DIR:-/var/backups/evaself}"
 
 # =====================================================================
-# 12. verification
+# 11. Telegram webhook and verification
 # =====================================================================
+"$SCRIPT_DIR/telegram-webhook.sh" set || warn "Telegram webhook не зарегистрирован — повторите scripts/telegram-webhook.sh set"
 "$SCRIPT_DIR/doctor.sh" || warn "часть проверок не прошла — смотрите сообщения выше"
 
 # =====================================================================
-# 13. summary
+# 12. summary
 # =====================================================================
 step "Evaself установлена"
 cat <<SUMMARY
@@ -251,7 +247,6 @@ cat <<SUMMARY
     Сайт        https://${DOMAIN}
     WebApp      https://${DOMAIN_APP}
     API         https://${DOMAIN_API}/health
-    n8n         https://${DOMAIN_N8N}
     NocoDB      https://${DOMAIN_NOCODB}
     Letta       https://${DOMAIN_LETTA}
     Статус      https://${DOMAIN_STATUS}
@@ -259,19 +254,14 @@ cat <<SUMMARY
   ${C_BOLD}Административные данные${C_RESET}  (также в .env, mode 600)
     NocoDB      ${NC_ADMIN_EMAIL} / ${NC_ADMIN_PASSWORD}
     Letta UI    ${LETTA_UI_USER} / ${LETTA_UI_PASSWORD}
-    n8n         создайте owner account при первом входе,
-                предлагается: ${N8N_OWNER_EMAIL} / ${N8N_OWNER_PASSWORD}
-
   ${C_BOLD}Следующие шаги${C_RESET}
-    1. Откройте https://${DOMAIN_N8N} и создайте n8n owner account.
-    2. Зарегистрируйте Telegram webhook: scripts/telegram-webhook.sh set
-    3. Активируйте минимальный workflow в редакторе n8n.
-    4. Подключите NocoDB к базе eva: scripts/nocodb-connect.sh
-    5. Настройте агентов и проверьте чат в административной консоли Letta.
-    6. Для голоса заполните MEDIA_ASR_* / MEDIA_TTS_* и выполните make restart
+    1. Проверьте Telegram webhook: scripts/telegram-webhook.sh status
+    2. Подключите NocoDB к базе eva: scripts/nocodb-connect.sh
+    3. Настройте агентов и проверьте чат в административной консоли Letta.
+    4. Для голоса заполните MEDIA_ASR_* / MEDIA_TTS_* и выполните make restart
 
   ${C_BOLD}Основные команды${C_RESET}
-    make status | make doctor | make logs s=n8n
+    make status | make doctor | make logs s=eva-agent-service
     make test-llm | make list-models | make configure-llm
     make backup | make update-preview | make update | make rollback
 

@@ -1,7 +1,7 @@
 # =====================================================================
 # SearXNG for Evaself
 # ---------------------------------------------------------------------
-# Reachable only from evaself-network: n8n calls
+# Reachable only from evaself-network: eva-agent-service calls
 # http://searxng:8080/search?format=json. It is never routed by Caddy.
 # =====================================================================
 use_default_settings: true
@@ -25,7 +25,7 @@ search:
   safe_search: 1
   autocomplete: ""
   default_lang: ""
-  # JSON is what the n8n HTTP node consumes; html stays on for debugging
+  # JSON is what the Agent SDK tool consumes; html stays on for debugging
   # from inside the network.
   formats:
     - html

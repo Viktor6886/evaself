@@ -3,7 +3,7 @@
 ## Сеть
 
 Наружу опубликованы только Caddy 80/443. PostgreSQL, Valkey, Letta App
-Server, `eva-agent-service`, Media Service, SearXNG, n8n workers и backup
+Server, `eva-agent-service`, Media Service, SearXNG и backup
 helper находятся во внутренней `evaself-network`.
 
 Административная Letta UI защищена Caddy Basic Auth. Браузер вызывает
@@ -41,8 +41,8 @@ Capability token Letta App Server также не возвращается: ра
 
 ## Backup
 
-Backup содержит `.env`, Telegram tokens, ключи шифрования, n8n credentials,
-agents, memory и Letta provider store. Архив mode 600 — минимальная защита,
+Backup содержит `.env`, Telegram tokens, ключи шифрования, agents, memory,
+настройки runtime и Letta provider store. Архив mode 600 — минимальная защита,
 а не шифрование. Для внешнего хранения зашифруйте его отдельно.
 
 ## Проверка перед commit
@@ -55,3 +55,8 @@ git ls-files .env
 
 CI дополнительно проверяет отсутствие `.env`, приватных ключей и Telegram
 bot token в tracked files.
+
+Публичный Telegram webhook проверяет заголовок
+`X-Telegram-Bot-Api-Secret-Token`. Lava webhook использует отдельные HTTP
+Basic Auth credentials и до изменения подписки сверяет event type, product,
+сумму, валюту и уникальный payment ID.

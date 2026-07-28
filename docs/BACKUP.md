@@ -7,18 +7,19 @@ make restore BACKUP=/var/backups/evaself/evaself-backup-YYYY-MM-DD-HH-MM.tar.gz
 
 ## Что входит в архив
 
-- дампы PostgreSQL: `eva`, `n8n`, `nocodb`, legacy `letta` и роли;
+- дампы PostgreSQL: `eva`, `nocodb`, legacy `letta` и роли;
 - `letta_app_server_data`: agents, conversations и memory filesystem;
 - `letta_provider_config`: активная локальная конфигурация Letta provider;
-- volumes n8n, NocoDB и Caddy;
+- volumes NocoDB и Caddy;
 - `.env`, `versions.env`, Compose и Caddyfile;
-- n8n workflows/credentials и `N8N_ENCRYPTION_KEY`;
 - `skills/`, `library/`, WebApp и инвентарь agents/conversations.
 
 Таблица `llm_providers` попадает в дамп базы, API Key в ней зашифрован.
 Таблица `sdk_settings` также попадает в дамп, поэтому шаблоны агентов и
 runtime-настройки восстанавливаются вместе с PostgreSQL.
-`LLM_CONFIG_ENCRYPTION_KEY` находится в `.env`. Provider volume содержит
+Таблицы Telegram runtime, заметок, бюджета, задач, heartbeat и платежей
+входят в дамп `eva`. `LLM_CONFIG_ENCRYPTION_KEY` находится в `.env`.
+Provider volume содержит
 рабочие credentials Letta, поэтому весь архив является секретом.
 
 ## Защита архива

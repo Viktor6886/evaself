@@ -207,6 +207,61 @@ export class LlmManager {
     if (active) this.letta.setDefaultModel(modelHandle(active.model));
   }
 
+  /**
+   * Small provider-neutral completion used only to turn Telegram media into
+   * text before the actual agent turn. The decrypted key never leaves this
+   * process and is never included in the response.
+   */
+  async complete(messages: unknown[], options: { maxTokens?: number } = {}): Promise<string> {
+    const provider = await this.db.getActiveLlmProvider();
+    if (!provider) throw badRequest("Активная LLM-конфигурация не выбрана");
+    const timeout = numericParameter(
+      provider.additional_parameters,
+      "request_timeout_ms",
+      this.config.appServerRequestTimeoutMs,
+    );
+    const response = await fetch(
+      `${provider.base_url.replace(/\/+$/, "")}/chat/completions`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          Authorization: `Bearer ${this.secretBox.decrypt(provider.api_key_encrypted)}`,
+        },
+        body: JSON.stringify({
+          model: provider.model,
+          messages,
+          max_tokens: options.maxTokens ?? 2_000,
+          temperature: 0.1,
+        }),
+        signal: AbortSignal.timeout(timeout),
+      },
+    );
+    const raw = await response.text();
+    if (!response.ok) {
+      throw new Error(`LLM media analysis returned HTTP ${response.status}: ${raw.slice(0, 500)}`);
+    }
+    let body: {
+      choices?: Array<{ message?: { content?: string | Array<{ type?: string; text?: string }> } }>;
+    };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      throw new Error("LLM media analysis returned invalid JSON");
+    }
+    const content = body.choices?.[0]?.message?.content;
+    if (typeof content === "string" && content.trim()) return content.trim();
+    if (Array.isArray(content)) {
+      const joined = content
+        .map((part) => part.text ?? "")
+        .filter(Boolean)
+        .join("\n")
+        .trim();
+      if (joined) return joined;
+    }
+    throw new Error("LLM media analysis returned no text");
+  }
+
   async list(): Promise<PublicLlmProvider[]> {
     return (await this.db.listLlmProviders()).map(publicProvider);
   }

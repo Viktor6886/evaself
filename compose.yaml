@@ -4,7 +4,7 @@
 # All services share one internal bridge network (evaself-network) and
 # address each other by container name. Only Caddy publishes ports on
 # the host; PostgreSQL, Valkey, Letta, eva-agent-service, SearXNG, the media
-# service and the n8n internals are unreachable from the internet.
+# service and all background runtime internals are unreachable from the internet.
 #
 # Image tags come from versions.env, which is loaded by the Makefile and
 # by every script (`--env-file versions.env --env-file .env`).
@@ -22,63 +22,6 @@ x-logging: &logging
       max-size: "10m"
       max-file: "3"
 
-x-n8n-common: &n8n-common
-  image: evaself/n8n:${N8N_VERSION}
-  build:
-    context: ./n8n
-    dockerfile: Dockerfile.n8n
-    args:
-      N8N_IMAGE: ${N8N_IMAGE}
-      N8N_VERSION: ${N8N_VERSION}
-  environment: &n8n-env
-    # --- database -----------------------------------------------------
-    DB_TYPE: postgresdb
-    DB_POSTGRESDB_HOST: ${POSTGRES_HOST}
-    DB_POSTGRESDB_PORT: ${POSTGRES_PORT}
-    DB_POSTGRESDB_DATABASE: ${N8N_DB_NAME}
-    DB_POSTGRESDB_USER: ${N8N_DB_USER}
-    DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD}
-    # --- queue mode (Valkey speaks the Redis protocol) ----------------
-    EXECUTIONS_MODE: queue
-    QUEUE_BULL_REDIS_HOST: ${VALKEY_HOST}
-    QUEUE_BULL_REDIS_PORT: ${VALKEY_PORT}
-    QUEUE_BULL_REDIS_PASSWORD: ${VALKEY_PASSWORD}
-    QUEUE_HEALTH_CHECK_ACTIVE: "true"
-    # --- crypto & identity -------------------------------------------
-    N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
-    # --- runtime ------------------------------------------------------
-    GENERIC_TIMEZONE: ${GENERIC_TIMEZONE}
-    TZ: ${TZ}
-    N8N_DIAGNOSTICS_ENABLED: "false"
-    N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
-    N8N_TEMPLATES_ENABLED: "false"
-    N8N_HIRING_BANNER_ENABLED: "false"
-    N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
-    NODE_OPTIONS: "--max-old-space-size=1024"
-    # --- data retention ----------------------------------------------
-    EXECUTIONS_DATA_SAVE_ON_ERROR: all
-    EXECUTIONS_DATA_SAVE_ON_SUCCESS: none
-    EXECUTIONS_DATA_SAVE_ON_PROGRESS: "false"
-    EXECUTIONS_DATA_PRUNE: "true"
-    EXECUTIONS_DATA_MAX_AGE: ${EXECUTIONS_DATA_MAX_AGE}
-    EXECUTIONS_DATA_PRUNE_MAX_COUNT: ${EXECUTIONS_DATA_PRUNE_MAX_COUNT}
-    # --- addresses of the rest of the stack, for workflow expressions -
-    # n8n reaches Letta ONLY through eva-agent-service. It deliberately
-    # gets no App Server URL and no App Server token.
-    EVA_AGENT_URL: http://eva-agent-service:${EVA_AGENT_PORT}
-    EVA_AGENT_API_KEY: ${EVA_AGENT_API_KEY}
-    MEDIA_SERVICE_URL: http://media-service:8090
-    SEARXNG_URL: http://searxng:8080
-    CRAWL4AI_URL: http://crawl4ai:11235
-    EVA_TELEGRAM_BOT_TOKEN: ${EVA_TELEGRAM_BOT_TOKEN}
-    EVA_TELEGRAM_WEBHOOK_SECRET: ${EVA_TELEGRAM_WEBHOOK_SECRET}
-    DOMAIN_APP: ${DOMAIN_APP}
-  volumes:
-    - n8n_data:/home/node/.n8n
-    - ./n8n/workflows:/workflows:ro
-    - eva_media_shared:/data/media
-  networks: [evaself-network]
-
 services:
   # ===================================================================
   # EDGE
@@ -95,7 +38,6 @@ services:
       DOMAIN: ${DOMAIN}
       DOMAIN_APP: ${DOMAIN_APP}
       DOMAIN_API: ${DOMAIN_API}
-      DOMAIN_N8N: ${DOMAIN_N8N}
       DOMAIN_NOCODB: ${DOMAIN_NOCODB}
       DOMAIN_LETTA: ${DOMAIN_LETTA}
       DOMAIN_STATUS: ${DOMAIN_STATUS}
@@ -112,7 +54,6 @@ services:
     depends_on:
       - webapp
       - eva-agent-service
-      - n8n
       - nocodb
       - letta-ui
     healthcheck:
@@ -139,9 +80,6 @@ services:
       EVA_DB_PASSWORD: ${EVA_DB_PASSWORD}
       EVA_DB_READONLY_USER: ${EVA_DB_READONLY_USER}
       EVA_DB_READONLY_PASSWORD: ${EVA_DB_READONLY_PASSWORD}
-      N8N_DB_NAME: ${N8N_DB_NAME}
-      N8N_DB_USER: ${N8N_DB_USER}
-      N8N_DB_PASSWORD: ${N8N_DB_PASSWORD}
       NOCODB_DB_NAME: ${NOCODB_DB_NAME}
       NOCODB_DB_USER: ${NOCODB_DB_USER}
       NOCODB_DB_PASSWORD: ${NOCODB_DB_PASSWORD}
@@ -196,91 +134,6 @@ services:
       VALKEY_PASSWORD: ${VALKEY_PASSWORD}
 
   # ===================================================================
-  # N8N — main, worker, external task runner
-  # ===================================================================
-  n8n:
-    <<: [*n8n-common, *restart, *logging]
-    container_name: evaself-n8n
-    environment:
-      <<: *n8n-env
-      N8N_HOST: ${DOMAIN_N8N}
-      N8N_PORT: "5678"
-      N8N_PROTOCOL: https
-      N8N_EDITOR_BASE_URL: https://${DOMAIN_N8N}/
-      WEBHOOK_URL: https://${DOMAIN_N8N}/
-      N8N_PROXY_HOPS: "1"
-      # main process keeps the built-in (internal) runner; the worker
-      # gets the dedicated external one below.
-      N8N_RUNNERS_MODE: internal
-      N8N_RUNNERS_AUTH_TOKEN: ${N8N_RUNNERS_AUTH_TOKEN}
-      N8N_PUBLIC_API_DISABLED: ${N8N_DISABLE_PUBLIC_API}
-      # invite-only: nobody can self-register a second owner
-      N8N_USER_MANAGEMENT_DISABLED: "false"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      valkey:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5678/healthz || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 10
-      start_period: 60s
-
-  n8n-worker:
-    <<: [*n8n-common, *restart, *logging]
-    container_name: evaself-n8n-worker
-    command: worker --concurrency=${N8N_WORKER_CONCURRENCY}
-    environment:
-      <<: *n8n-env
-      N8N_PORT: "5678"
-      QUEUE_HEALTH_CHECK_PORT: "5678"
-      # the worker is the process that actually runs Code nodes, so it
-      # owns the external task runner sidecar
-      N8N_RUNNERS_MODE: external
-      N8N_RUNNERS_AUTH_TOKEN: ${N8N_RUNNERS_AUTH_TOKEN}
-      N8N_RUNNERS_BROKER_PORT: "5679"
-      N8N_RUNNERS_BROKER_LISTEN_ADDRESS: 127.0.0.1
-    depends_on:
-      postgres:
-        condition: service_healthy
-      valkey:
-        condition: service_healthy
-      n8n:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5678/healthz || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 10
-      start_period: 45s
-
-  n8n-runner:
-    <<: [*restart, *logging]
-    image: evaself/n8n-runner:${N8N_RUNNERS_VERSION}
-    build:
-      context: ./n8n
-      dockerfile: Dockerfile.runner
-      args:
-        N8N_RUNNERS_IMAGE: ${N8N_RUNNERS_IMAGE}
-        N8N_RUNNERS_VERSION: ${N8N_RUNNERS_VERSION}
-    container_name: evaself-n8n-runner
-    # Shares the worker's network namespace: the n8n task broker only
-    # ever listens on 127.0.0.1, so the runner must live in the same
-    # namespace to reach it. (n8n-io/n8n#29742)
-    network_mode: "service:n8n-worker"
-    environment:
-      N8N_RUNNERS_TASK_BROKER_URI: http://127.0.0.1:5679
-      N8N_RUNNERS_AUTH_TOKEN: ${N8N_RUNNERS_AUTH_TOKEN}
-      N8N_RUNNERS_MAX_CONCURRENCY: "5"
-      GENERIC_TIMEZONE: ${GENERIC_TIMEZONE}
-      TZ: ${TZ}
-    depends_on:
-      n8n-worker:
-        condition: service_started
-
-  # ===================================================================
   # AGENT LAYER
   # ===================================================================
   letta-app-server:
@@ -332,7 +185,7 @@ services:
     image: evaself/letta-ui:0.2.0
     container_name: evaself-letta-ui
     # The App Server is WebSocket-only, so the console cannot talk to it
-    # from a browser. It goes through eva-agent-service, exactly like n8n.
+    # from a browser. It goes through eva-agent-service.
     environment:
       EVA_AGENT_URL: http://eva-agent-service:${EVA_AGENT_PORT}
       EVA_AGENT_API_KEY: ${EVA_AGENT_API_KEY}
@@ -373,7 +226,7 @@ services:
       EVA_LLM_API_KEY: ${EVA_LLM_API_KEY}
       EVA_LLM_MODEL: ${EVA_LLM_MODEL}
       EVA_LLM_CONTEXT_WINDOW: ${EVA_LLM_CONTEXT_WINDOW}
-      EVA_LLM_ADDITIONAL_PARAMETERS: ${EVA_LLM_ADDITIONAL_PARAMETERS:-{}}
+      EVA_LLM_ADDITIONAL_PARAMETERS: ${EVA_LLM_ADDITIONAL_PARAMETERS}
       EVA_LLM_PROBE_TIMEOUT_MS: ${EVA_LLM_PROBE_TIMEOUT_MS:-20000}
       LLM_CONFIG_ENCRYPTION_KEY: ${LLM_CONFIG_ENCRYPTION_KEY}
       LETTA_PROVIDER_CONFIG_DIR: /data/letta-config
@@ -381,6 +234,21 @@ services:
       LETTA_CODE_CLI: /app/node_modules/.bin/letta
       DATABASE_URL: postgresql://${EVA_DB_USER}:${EVA_DB_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${EVA_DB_NAME}
       VALKEY_URL: redis://:${VALKEY_PASSWORD}@${VALKEY_HOST}:${VALKEY_PORT}/1
+      EVA_TELEGRAM_BOT_TOKEN: ${EVA_TELEGRAM_BOT_TOKEN}
+      EVA_TELEGRAM_WEBHOOK_SECRET: ${EVA_TELEGRAM_WEBHOOK_SECRET}
+      OWNER_TELEGRAM_ID: ${OWNER_TELEGRAM_ID}
+      EVA_TELEGRAM_API_BASE_URL: ${EVA_TELEGRAM_API_BASE_URL:-https://api.telegram.org}
+      EVA_MEDIA_SERVICE_URL: http://media-service:8090
+      SEARXNG_BASE_URL: http://searxng:8080/
+      TODOIST_API_URL: ${TODOIST_API_URL}
+      TODOIST_API_TOKEN: ${TODOIST_API_TOKEN}
+      TODOIST_PROJECT_ID: ${TODOIST_PROJECT_ID}
+      EVA_SCHEDULER_INTERVAL_MS: ${EVA_SCHEDULER_INTERVAL_MS:-30000}
+      EVA_HEARTBEAT_INTERVAL_MS: ${EVA_HEARTBEAT_INTERVAL_MS:-600000}
+      EVA_TELEGRAM_TYPING_INTERVAL_MS: ${EVA_TELEGRAM_TYPING_INTERVAL_MS:-4000}
+      LAVA_WEBHOOK_USER: ${LAVA_WEBHOOK_USER}
+      LAVA_WEBHOOK_PASSWORD: ${LAVA_WEBHOOK_PASSWORD}
+      LAVA_PLANS_JSON: ${LAVA_PLANS_JSON}
       TZ: ${TZ}
     volumes:
       - ./library:/app/library:ro
@@ -534,7 +402,6 @@ services:
       PGUSER: ${POSTGRES_SUPER_USER}
       PGPASSWORD: ${POSTGRES_SUPER_PASSWORD}
       EVA_DB_NAME: ${EVA_DB_NAME}
-      N8N_DB_NAME: ${N8N_DB_NAME}
       NOCODB_DB_NAME: ${NOCODB_DB_NAME}
       LETTA_DB_NAME: ${LETTA_DB_NAME}
       TZ: ${TZ}
@@ -598,8 +465,6 @@ volumes:
     name: evaself_caddy_data
   caddy_config:
     name: evaself_caddy_config
-  n8n_data:
-    name: evaself_n8n_data
   letta_app_server_data:
     name: evaself_letta_app_server_data
   letta_provider_config:

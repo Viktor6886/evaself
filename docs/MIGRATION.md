@@ -4,7 +4,7 @@
 
 ## Подготовка
 
-За сутки уменьшите TTL семи DNS-записей до 300 секунд. На старом сервере:
+За сутки уменьшите TTL шести DNS-записей до 300 секунд. На старом сервере:
 
 ```bash
 make doctor
@@ -33,7 +33,7 @@ make test-llm
 ## Проверка до DNS
 
 Временно добавьте домены в hosts на своём компьютере и проверьте HTTPS,
-n8n, NocoDB, Letta UI, активную LLM и тестовый agent turn.
+NocoDB, Letta UI, активную LLM и тестовый agent turn.
 
 ```bash
 make shell-db

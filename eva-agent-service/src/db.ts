@@ -20,6 +20,7 @@ export interface UserRow {
   first_name: string | null;
   last_name: string | null;
   language_code: string;
+  timezone: string;
   state: string;
   is_blocked: boolean;
   created_at: Date;
@@ -91,6 +92,21 @@ export interface SdkSettingsRow {
   app_server_request_timeout_ms: number;
   created_at: Date;
   updated_at: Date;
+}
+
+export interface AgentRuntimeContext {
+  userId: number;
+  telegramId: number;
+  chatId: number;
+  conversationId: string;
+  timezone: string;
+  responseMode: "text" | "voice" | "both";
+  useEmoji: boolean;
+}
+
+export interface ClaimedTelegramUpdate {
+  claimed: boolean;
+  previousStatus: string | null;
 }
 
 export class Database {
@@ -165,12 +181,156 @@ export class Database {
     return rows[0]!;
   }
 
+  async setUserState(userId: number, state: "onboarding" | "active" | "paused"): Promise<void> {
+    await this.require().query(
+      "UPDATE users SET state = $2, consent_at = COALESCE(consent_at, now()) WHERE id = $1",
+      [userId, state],
+    );
+  }
+
+  async claimTelegramUpdate(input: {
+    updateId: number;
+    telegramUserId?: number;
+    chatId?: number;
+    messageId?: number;
+    messageKind: string;
+    billable: boolean;
+  }): Promise<ClaimedTelegramUpdate> {
+    return await this.transaction(async (client) => {
+      const existing = await client.query<{ status: string; updated_at: Date }>(
+        "SELECT status, updated_at FROM telegram_updates WHERE update_id = $1 FOR UPDATE",
+        [input.updateId],
+      );
+      const previous = existing.rows[0];
+      if (
+        previous &&
+        (previous.status === "completed" ||
+          previous.status === "ignored" ||
+          (previous.status === "processing" &&
+            Date.now() - previous.updated_at.getTime() < 10 * 60_000))
+      ) {
+        return { claimed: false, previousStatus: previous.status };
+      }
+      await client.query(
+        `INSERT INTO telegram_updates
+           (update_id, telegram_user_id, chat_id, message_id, message_kind,
+            status, billable, error_code, error_message)
+         VALUES ($1, $2, $3, $4, $5, 'processing', $6, NULL, NULL)
+         ON CONFLICT (update_id) DO UPDATE SET
+           status = 'processing',
+           telegram_user_id = COALESCE(EXCLUDED.telegram_user_id, telegram_updates.telegram_user_id),
+           chat_id = COALESCE(EXCLUDED.chat_id, telegram_updates.chat_id),
+           message_id = COALESCE(EXCLUDED.message_id, telegram_updates.message_id),
+           message_kind = EXCLUDED.message_kind,
+           billable = EXCLUDED.billable,
+           error_code = NULL,
+           error_message = NULL,
+           completed_at = NULL`,
+        [
+          input.updateId,
+          input.telegramUserId ?? null,
+          input.chatId ?? null,
+          input.messageId ?? null,
+          input.messageKind,
+          input.billable,
+        ],
+      );
+      return { claimed: true, previousStatus: previous?.status ?? null };
+    });
+  }
+
+  async attachTelegramUpdateToUser(updateId: number, userId: number): Promise<void> {
+    await this.require().query(
+      "UPDATE telegram_updates SET user_id = $2 WHERE update_id = $1",
+      [updateId, userId],
+    );
+  }
+
+  async finishTelegramUpdate(
+    updateId: number,
+    input: {
+      status: "completed" | "failed" | "ignored";
+      usageCharged?: boolean;
+      errorCode?: string;
+      errorMessage?: string;
+    },
+  ): Promise<void> {
+    await this.require().query(
+      `UPDATE telegram_updates SET
+         status = $2,
+         usage_charged = usage_charged OR $3,
+         error_code = $4,
+         error_message = $5,
+         completed_at = CASE WHEN $2 IN ('completed', 'ignored') THEN now() ELSE NULL END
+       WHERE update_id = $1`,
+      [
+        updateId,
+        input.status,
+        input.usageCharged ?? false,
+        input.errorCode ?? null,
+        input.errorMessage?.slice(0, 2000) ?? null,
+      ],
+    );
+  }
+
+  async recordUserMessage(userId: number): Promise<void> {
+    await this.require().query(
+      `INSERT INTO heartbeat_state (user_id, last_user_message_at)
+       VALUES ($1, now())
+       ON CONFLICT (user_id) DO UPDATE SET last_user_message_at = now()`,
+      [userId],
+    );
+  }
+
   async getUserOverview(telegramId: number): Promise<Record<string, unknown> | null> {
     const { rows } = await this.require().query(
       "SELECT * FROM v_user_overview WHERE telegram_id = $1",
       [telegramId],
     );
     return rows[0] ?? null;
+  }
+
+  async getAgentRuntimeContext(conversationId: string): Promise<AgentRuntimeContext | null> {
+    const { rows } = await this.require().query<{
+      user_id: string;
+      telegram_id: string;
+      chat_id: string | null;
+      conversation_id: string;
+      timezone: string;
+      response_mode: "text" | "voice" | "both";
+      use_emoji: boolean;
+    }>(
+      `SELECT u.id AS user_id,
+              u.telegram_id,
+              COALESCE(t.chat_id, u.telegram_id) AS chat_id,
+              c.conversation_id,
+              u.timezone,
+              COALESCE(p.response_mode, 'text') AS response_mode,
+              COALESCE(p.use_emoji, true) AS use_emoji
+         FROM agent_conversations c
+         JOIN users u ON u.id = c.user_id
+         LEFT JOIN user_preferences p ON p.user_id = u.id
+         LEFT JOIN LATERAL (
+           SELECT chat_id FROM telegram_updates
+            WHERE user_id = u.id AND chat_id IS NOT NULL
+            ORDER BY received_at DESC LIMIT 1
+         ) t ON true
+        WHERE c.conversation_id = $1
+        LIMIT 1`,
+      [conversationId],
+    );
+    const row = rows[0];
+    return row
+      ? {
+          userId: Number(row.user_id),
+          telegramId: Number(row.telegram_id),
+          chatId: Number(row.chat_id ?? row.telegram_id),
+          conversationId: row.conversation_id,
+          timezone: row.timezone,
+          responseMode: row.response_mode,
+          useEmoji: row.use_emoji,
+        }
+      : null;
   }
 
   // -----------------------------------------------------------------
@@ -343,6 +503,32 @@ export class Database {
         [agentId],
       );
       await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Runtime modules share this bounded pool. SQL values must always be
+   * supplied separately, never interpolated into a query string.
+   */
+  async query<T extends pg.QueryResultRow = pg.QueryResultRow>(
+    text: string,
+    values: unknown[] = [],
+  ): Promise<pg.QueryResult<T>> {
+    return await this.require().query<T>(text, values);
+  }
+
+  async transaction<T>(work: (client: pg.PoolClient) => Promise<T>): Promise<T> {
+    const client = await this.require().connect();
+    try {
+      await client.query("BEGIN");
+      const result = await work(client);
+      await client.query("COMMIT");
+      return result;
     } catch (error) {
       await client.query("ROLLBACK");
       throw error;

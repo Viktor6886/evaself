@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   # ===================================================================
-  # Shell, compose, Caddy, workflows, migrations, secret scan
+  # Shell, compose, Caddy, migrations, secret scan
   # ===================================================================
   static:
     name: Static checks
@@ -39,6 +39,19 @@ jobs:
             bash -n "$f" || exit 1
           done
 
+      - name: .env loader treats bcrypt and JSON as data
+        run: |
+          cat > /tmp/evaself-loader.env <<'EOF'
+          LETTA_UI_PASSWORD_HASH='$2a$14$placeholderplaceholderpl'
+          EVA_LLM_ADDITIONAL_PARAMETERS='{"request_timeout_ms":180000}'
+          EOF
+          ENV_FILE=/tmp/evaself-loader.env VERSIONS="$PWD/versions.env" bash -euo pipefail -c '
+            . scripts/lib.sh
+            load_env
+            test "$LETTA_UI_PASSWORD_HASH" = "\$2a\$14\$placeholderplaceholderpl"
+            test "$EVA_LLM_ADDITIONAL_PARAMETERS" = "{\"request_timeout_ms\":180000}"
+          '
+
       - name: shellcheck
         run: shellcheck -S error -x scripts/*.sh backup-service/backup-service
 
@@ -53,7 +66,6 @@ jobs:
           DOMAIN: example.test
           DOMAIN_APP: app.example.test
           DOMAIN_API: api.example.test
-          DOMAIN_N8N: n8n.example.test
           DOMAIN_NOCODB: admin.example.test
           DOMAIN_LETTA: letta.example.test
           DOMAIN_STATUS: status.example.test
@@ -68,9 +80,6 @@ jobs:
           caddy validate --config Caddyfile
           caddy validate --config webapp/Caddyfile
           caddy validate --config letta-ui/Caddyfile
-
-      - name: n8n workflows are structurally valid
-        run: python3 scripts/validate-workflows.py n8n/workflows
 
       - name: Administrative WebUI JavaScript is valid
         run: node --check letta-ui/public/ui.js
@@ -176,7 +185,9 @@ jobs:
               'users','agent_links','agent_conversations','subscriptions','payments',
               'quotas','usage_counters','onboarding_fields','test_results','tasks',
               'referrals','partner_analysis_links','notifications','crisis_events',
-              'schema_migrations','llm_providers','sdk_settings'
+              'schema_migrations','llm_providers','sdk_settings','telegram_updates',
+              'user_preferences','eva_notes','budget_entries','heartbeat_state',
+              'payment_intents'
             ]) AS t
             WHERE to_regclass('public.' || t) IS NULL;
             IF missing IS NOT NULL THEN RAISE EXCEPTION 'missing tables: %', missing; END IF;
@@ -251,11 +262,6 @@ jobs:
             --build-arg CADDY_IMAGE="$CADDY_IMAGE" --build-arg CADDY_VERSION="$CADDY_VERSION" letta-ui
           docker build -t evaself/backup-service:ci \
             --build-arg POSTGRES_IMAGE="$POSTGRES_IMAGE" --build-arg POSTGRES_VERSION="$POSTGRES_VERSION" backup-service
-          docker build -t evaself/n8n:ci -f n8n/Dockerfile.n8n \
-            --build-arg N8N_IMAGE="$N8N_IMAGE" --build-arg N8N_VERSION="$N8N_VERSION" n8n
-          docker build -t evaself/n8n-runner:ci -f n8n/Dockerfile.runner \
-            --build-arg N8N_RUNNERS_IMAGE="$N8N_RUNNERS_IMAGE" \
-            --build-arg N8N_RUNNERS_VERSION="$N8N_RUNNERS_VERSION" n8n
 
       - name: The App Server image really serves the App Server
         run: |
@@ -282,7 +288,7 @@ jobs:
           text = path.read_text()
           values = {
             'DOMAIN': 'example.test', 'DOMAIN_APP': 'app.example.test',
-            'DOMAIN_API': 'api.example.test', 'DOMAIN_N8N': 'n8n.example.test',
+            'DOMAIN_API': 'api.example.test',
             'DOMAIN_NOCODB': 'admin.example.test', 'DOMAIN_LETTA': 'letta.example.test',
             'DOMAIN_STATUS': 'status.example.test', 'ACME_EMAIL': 'ci@example.test',
             'EVA_AGENT_PORT': '8070', 'LETTA_APP_SERVER_BACKEND': 'local',
@@ -292,11 +298,11 @@ jobs:
           }
           for key, value in values.items():
             text = re.sub(rf'^{key}=.*$', f'{key}={value}', text, flags=re.M)
-          for key in ('POSTGRES_SUPER_PASSWORD','EVA_DB_PASSWORD','N8N_DB_PASSWORD',
+          for key in ('POSTGRES_SUPER_PASSWORD','EVA_DB_PASSWORD',
                       'NOCODB_DB_PASSWORD','LETTA_DB_PASSWORD','EVA_DB_READONLY_PASSWORD',
                       'VALKEY_PASSWORD','EVA_AGENT_API_KEY','LETTA_APP_SERVER_TOKEN',
                       'LLM_CONFIG_ENCRYPTION_KEY',
-                      'N8N_ENCRYPTION_KEY','N8N_RUNNERS_AUTH_TOKEN','NC_AUTH_JWT_SECRET',
+                      'NC_AUTH_JWT_SECRET','LAVA_WEBHOOK_PASSWORD',
                       'SEARXNG_SECRET','EVA_TELEGRAM_WEBHOOK_SECRET'):
             text = re.sub(rf'^{key}=.*$', f'{key}={secrets.token_hex(24)}', text, flags=re.M)
           path.write_text(text)
@@ -338,6 +344,38 @@ jobs:
           echo "::error::eva-agent-service never became healthy"
           docker compose --env-file versions.env --env-file .env logs --tail=80 eva-agent-service letta-app-server
           exit 1
+
+      - name: Public webhooks reject forged requests
+        run: |
+          docker compose --env-file versions.env --env-file .env \
+            exec -T eva-agent-service node -e "
+              const base='http://127.0.0.1:8070';
+              (async()=>{
+                const forged=await fetch(base+'/telegram/webhook',{
+                  method:'POST',
+                  headers:{'Content-Type':'application/json','X-Telegram-Bot-Api-Secret-Token':'wrong'},
+                  body:JSON.stringify({update_id:1}),
+                });
+                if(forged.status!==401) throw new Error('forged Telegram status '+forged.status);
+                const valid=await fetch(base+'/telegram/webhook',{
+                  method:'POST',
+                  headers:{
+                    'Content-Type':'application/json',
+                    'X-Telegram-Bot-Api-Secret-Token':process.env.EVA_TELEGRAM_WEBHOOK_SECRET,
+                  },
+                  body:JSON.stringify({
+                    update_id:2,
+                    message:{message_id:1,chat:{id:1},from:{id:1,is_bot:true}},
+                  }),
+                });
+                if(valid.status!==200) throw new Error('valid Telegram status '+valid.status);
+                const lava=await fetch(base+'/payments/lava',{
+                  method:'POST',headers:{'Content-Type':'application/json'},body:'{}',
+                });
+                if(lava.status!==401) throw new Error('unauthorized Lava status '+lava.status);
+                console.log('webhook auth ok');
+              })().catch(e=>{console.error(e);process.exit(1)});
+            "
 
       - name: Start an isolated OpenAI-compatible test provider
         run: |

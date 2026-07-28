@@ -10,11 +10,10 @@
 # public.
 #
 # Contents:
-#   postgres/     dumps of eva, n8n, nocodb, letta + roles/globals
-#   volumes/      app-server state, n8n, nocodb, caddy data volumes
+#   postgres/     dumps of eva, nocodb, letta + roles/globals
+#   volumes/      app-server state, nocodb, caddy data volumes
 #   letta/        the agent/conversation inventory as the App Server and
 #                 PostgreSQL each see it
-#   n8n/          workflow + credential exports, and N8N_ENCRYPTION_KEY
 #   config/       .env, Caddyfile, versions.env
 #   content/      skills/, library/, webapp/
 #   MANIFEST      versions, git commit, checksums
@@ -38,7 +37,7 @@ chmod 700 "$BACKUP_DIR"
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 WORK="$STAGE/$NAME"
-mkdir -p "$WORK"/{postgres,volumes,letta,n8n,config,content}
+mkdir -p "$WORK"/{postgres,volumes,letta,config,content}
 
 step "Создание backup Evaself"
 info "архив: $ARCHIVE"
@@ -81,7 +80,6 @@ dump_volume() {
 
 dump_volume evaself_letta_app_server_data letta_app_server_data.tar.gz
 dump_volume evaself_letta_provider_config letta_provider_config.tar.gz
-dump_volume evaself_n8n_data    n8n_data.tar.gz
 dump_volume evaself_nocodb_data nocodb_data.tar.gz
 dump_volume evaself_caddy_data  caddy_data.tar.gz
 
@@ -115,29 +113,7 @@ else
 fi
 
 # ---------------------------------------------------------------------
-# 4. n8n
-# ---------------------------------------------------------------------
-step "n8n"
-if service_running n8n; then
-	compose exec -T n8n sh -c 'rm -rf /tmp/bk && mkdir -p /tmp/bk/workflows'
-	compose exec -T n8n n8n export:workflow --all --separate --pretty --output=/tmp/bk/workflows >/dev/null 2>&1 || true
-	# Credentials stay ENCRYPTED; N8N_ENCRYPTION_KEY is stored beside them.
-	compose exec -T n8n n8n export:credentials --all --output=/tmp/bk/credentials.json >/dev/null 2>&1 || true
-	CID="$(compose ps -q n8n)"
-	docker cp "$CID:/tmp/bk/." "$WORK/n8n/" >/dev/null 2>&1 || true
-	compose exec -T n8n sh -c 'rm -rf /tmp/bk'
-	ok "экспортированы workflows и credential store n8n"
-else
-	warn "n8n не запущен — используются workflows из репозитория"
-	cp -r "$ROOT_DIR/n8n/workflows" "$WORK/n8n/" 2>/dev/null || true
-fi
-
-# Without this key the credentials above cannot be decrypted anywhere.
-printf 'N8N_ENCRYPTION_KEY=%s\n' "$N8N_ENCRYPTION_KEY" > "$WORK/n8n/encryption-key.env"
-chmod 600 "$WORK/n8n/encryption-key.env"
-
-# ---------------------------------------------------------------------
-# 5. configuration and content
+# 4. configuration and content
 # ---------------------------------------------------------------------
 step "Конфигурация и контент"
 cp "$ENV_FILE"                 "$WORK/config/.env"
@@ -152,7 +128,7 @@ tar czf "$WORK/content/webapp.tar.gz"  -C "$ROOT_DIR" webapp
 ok "skills, library и WebApp сохранены"
 
 # ---------------------------------------------------------------------
-# 6. manifest
+# 5. manifest
 # ---------------------------------------------------------------------
 step "Манифест"
 GIT_COMMIT="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || echo 'not-a-git-checkout')"
@@ -188,7 +164,7 @@ GIT_DIRTY="$(git -C "$ROOT_DIR" status --porcelain 2>/dev/null | wc -l)"
 ok "манифест и checksums записаны"
 
 # ---------------------------------------------------------------------
-# 7. pack
+# 6. pack
 # ---------------------------------------------------------------------
 step "Упаковка"
 tar czf "$ARCHIVE" -C "$STAGE" "$NAME"
@@ -203,7 +179,7 @@ else
 fi
 
 # ---------------------------------------------------------------------
-# 8. rotation
+# 7. rotation
 # ---------------------------------------------------------------------
 RETENTION="${BACKUP_RETENTION_DAYS:-14}"
 step "Ротация (хранение ${RETENTION} дней)"

@@ -7,7 +7,7 @@ BEGIN;
 -- ---------------------------------------------------------------------
 -- Default quota matrix.
 -- limit_value = -1 means "unlimited".
--- Metrics are the names eva-agent-service / n8n increment in usage_counters.
+-- Metrics are the names eva-agent-service increments in usage_counters.
 -- ---------------------------------------------------------------------
 INSERT INTO quotas (plan, metric, period, limit_value, description) VALUES
     ('free',    'messages',      'day',   30,   'Messages to Eva per day'),

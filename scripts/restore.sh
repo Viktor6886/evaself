@@ -108,7 +108,7 @@ done
 # 3. stop everything that touches the data
 # ---------------------------------------------------------------------
 step "Остановка сервисов"
-compose stop n8n n8n-worker n8n-runner eva-agent-service letta-app-server letta-ui nocodb webapp caddy >/dev/null 2>&1 || true
+compose stop eva-agent-service letta-app-server letta-ui nocodb webapp caddy >/dev/null 2>&1 || true
 ok "контейнеры приложений остановлены; PostgreSQL оставлен для restore"
 
 # ---------------------------------------------------------------------
@@ -132,7 +132,6 @@ restore_volume() {
 
 restore_volume letta_app_server_data.tar.gz evaself_letta_app_server_data
 restore_volume letta_provider_config.tar.gz evaself_letta_provider_config
-restore_volume n8n_data.tar.gz    evaself_n8n_data
 restore_volume nocodb_data.tar.gz evaself_nocodb_data
 restore_volume caddy_data.tar.gz  evaself_caddy_data
 
@@ -156,35 +155,14 @@ ok "базы восстановлены"
 # ---------------------------------------------------------------------
 step "Запуск сервисов"
 compose up -d --remove-orphans >/dev/null
-for svc in letta-app-server eva-agent-service n8n; do
+for svc in letta-app-server eva-agent-service; do
 	wait_for_health "$svc" 300 && ok "$svc up" || warn "$svc is still starting"
 done
 
 "$SCRIPT_DIR/db-migrate.sh" || warn "миграции сообщили об ошибке"
 
 # ---------------------------------------------------------------------
-# 7. n8n workflows and credentials
-# ---------------------------------------------------------------------
-step "n8n"
-if [ -f "$SRC/n8n/credentials.json" ]; then
-	docker cp "$SRC/n8n/credentials.json" "$(compose ps -q n8n):/tmp/creds.json" >/dev/null
-	compose exec -T n8n n8n import:credentials --input=/tmp/creds.json >/dev/null 2>&1 \
-		&& ok "credentials restored (decrypted with the backed-up N8N_ENCRYPTION_KEY)" \
-		|| warn "credential import failed — check that N8N_ENCRYPTION_KEY in .env matches the backup"
-	compose exec -T n8n sh -c 'rm -f /tmp/creds.json'
-fi
-
-if [ -d "$SRC/n8n/workflows" ]; then
-	CID="$(compose ps -q n8n)"
-	compose exec -T n8n sh -c 'rm -rf /tmp/wf && mkdir -p /tmp/wf'
-	docker cp "$SRC/n8n/workflows/." "$CID:/tmp/wf/" >/dev/null
-	compose exec -T n8n n8n import:workflow --separate --input=/tmp/wf >/dev/null 2>&1 \
-		&& ok "workflows restored" || warn "workflow import failed"
-	compose exec -T n8n sh -c 'rm -rf /tmp/wf'
-fi
-
-# ---------------------------------------------------------------------
-# 8. verify
+# 7. verify
 # ---------------------------------------------------------------------
 "$SCRIPT_DIR/doctor.sh" || warn "post-restore checks reported problems"
 
@@ -194,6 +172,6 @@ say "  If this is a NEW server, finish the migration:"
 say "    1. Point DNS for ${DOMAIN} and its sub-domains at this server."
 say "    2. Wait for Caddy to issue certificates (make logs s=caddy)."
 say "    3. Re-register the Telegram webhook: scripts/telegram-webhook.sh set"
-say "    4. Check https://${DOMAIN_N8N} and activate the workflows."
+say "    4. Send a test message to the Telegram bot."
 say ""
 say "  See docs/MIGRATION.md for the full procedure."

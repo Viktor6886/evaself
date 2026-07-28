@@ -47,8 +47,25 @@ load_env() {
 	set -a
 	# shellcheck disable=SC1090
 	. "$VERSIONS_FILE"
-	# shellcheck disable=SC1090
-	. "$ENV_FILE"
+	# Do not source .env as shell code. A valid bcrypt hash starts with
+	# "$2", which under `set -u` used to expand as an unset positional
+	# parameter and abort clean installations.
+	while IFS= read -r line || [ -n "$line" ]; do
+		line="${line%$'\r'}"
+		[[ "$line" =~ ^[[:space:]]*# ]] && continue
+		[ -z "${line//[[:space:]]/}" ] && continue
+		[[ "$line" == *=* ]] || continue
+		key="${line%%=*}"
+		value="${line#*=}"
+		[[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+		if [[ "$value" == \'*\' && "$value" == *\' ]]; then
+			value="${value:1:${#value}-2}"
+		elif [[ "$value" == \"*\" && "$value" == *\" ]]; then
+			value="${value:1:${#value}-2}"
+		fi
+		printf -v "$key" '%s' "$value"
+		export "$key"
+	done < "$ENV_FILE"
 	set +a
 }
 

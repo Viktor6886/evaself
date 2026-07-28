@@ -13,8 +13,6 @@ Rules that matter:
     suffixed.
   * PostgreSQL never crosses a major version automatically. A major
     upgrade needs a dump/restore and is the operator's decision.
-  * n8n and its task runner must stay on the same version; the runner is
-    reported as whatever n8n resolves to.
 """
 
 from __future__ import annotations
@@ -34,8 +32,6 @@ TRACKED = [
     ("POSTGRES", "POSTGRES_IMAGE", "POSTGRES_VERSION"),
     ("VALKEY", "VALKEY_IMAGE", "VALKEY_VERSION"),
     ("CADDY", "CADDY_IMAGE", "CADDY_VERSION"),
-    ("N8N", "N8N_IMAGE", "N8N_VERSION"),
-    ("N8N_RUNNERS", "N8N_RUNNERS_IMAGE", "N8N_RUNNERS_VERSION"),
     ("LETTA", "LETTA_IMAGE", "LETTA_VERSION"),
     ("NOCODB", "NOCODB_IMAGE", "NOCODB_VERSION"),
     ("SEARXNG", "SEARXNG_IMAGE", "SEARXNG_VERSION"),
@@ -130,22 +126,13 @@ def newest(image: str, current: str) -> str | None:
 
 def main() -> int:
     env = read_env(VERSIONS_FILE)
-    n8n_resolved: str | None = None
-
     for label, image_key, version_key_name in TRACKED:
         image = env.get(image_key, "")
         current = env.get(version_key_name, "")
         if not image or not current:
             continue
 
-        # the runner always follows n8n
-        if label == "N8N_RUNNERS" and n8n_resolved:
-            latest = n8n_resolved
-        else:
-            latest = newest(image, current)
-
-        if label == "N8N":
-            n8n_resolved = latest
+        latest = newest(image, current)
 
         if latest is None:
             print(f"{version_key_name}\t{current}\t?\tunknown")

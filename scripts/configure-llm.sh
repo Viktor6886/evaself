@@ -20,7 +20,7 @@ if [ "${1:-}" = "--from-env" ]; then
 		printf '%s\n' "$RESULT" | python3 -c '
 import json, sys
 p = json.load(sys.stdin)["provider"]
-print(f"  ✔ Активна конфигурация «{p[\"name\"]}», модель {p[\"model_handle\"]}")
+print("  ✔ Активна конфигурация «{}», модель {}".format(p["name"], p["model_handle"]))
 '
 		exit 0
 	fi
@@ -84,7 +84,7 @@ if confirm "Сделать эту конфигурацию активной?" y;
 	printf '%s' "$ACTIVE" | python3 -c '
 import json,sys
 p=json.load(sys.stdin)["provider"]
-print(f"  ✔ Активна «{p[\"name\"]}»: {p[\"model_handle\"]}")
+print("  ✔ Активна «{}»: {}".format(p["name"], p["model_handle"]))
 '
 else
 	info "конфигурация сохранена неактивной"

@@ -6,8 +6,6 @@
 *.key
 !eva-core/**/*.key.example
 secrets/
-.hermes/
-hermes.config.json
 
 # --- data & backups ---
 data/

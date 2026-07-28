@@ -9,7 +9,6 @@
 # What an update does NOT do:
 #   * cross a PostgreSQL major version (needs a dump/restore — see
 #     docs/UPDATING.md);
-#   * let n8n and its task runner drift apart;
 #   * remove any data volume, ever.
 # =====================================================================
 set -euo pipefail
@@ -108,11 +107,6 @@ while IFS=$'\t' read -r key current latest status; do
 	set_env "$key" "$latest" "$VERSIONS_FILE"
 	ok "$key: $current -> $latest"
 done < "$REPORT"
-
-# n8n and the runner must never drift apart.
-N8N_NEW="$(get_env N8N_VERSION "$VERSIONS_FILE")"
-set_env N8N_RUNNERS_VERSION "$N8N_NEW" "$VERSIONS_FILE"
-info "task runner pinned to n8n $N8N_NEW"
 
 # =====================================================================
 step "Updating the repository"

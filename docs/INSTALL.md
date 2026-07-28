@@ -2,7 +2,7 @@
 
 ## До начала
 
-Подготовьте Ubuntu 24.04 x86_64, DNS-записи семи доменов, Telegram bot
+Подготовьте Ubuntu 24.04 x86_64, DNS-записи шести доменов, Telegram bot
 token, числовой Telegram ID владельца и данные OpenAI-compatible LLM:
 название конфигурации, Base URL, API Key, модель и context window.
 
@@ -28,7 +28,7 @@ sudo make install
 3. запускает PostgreSQL/Valkey и остальные сервисы;
 4. применяет миграции;
 5. создаёт, проверяет и активирует первую LLM-конфигурацию;
-6. импортирует минимальный n8n workflow;
+6. регистрирует прямой Telegram webhook TypeScript runtime;
 7. устанавливает systemd timer ежедневного backup;
 8. запускает `make doctor`.
 
@@ -44,8 +44,9 @@ make configure-llm       # дополнительные провайдеры
 make list-models
 ```
 
-Откройте n8n, создайте owner account и активируйте минимальный E2E workflow.
-В NocoDB подключите базу командой `scripts/nocodb-connect.sh`.
+В NocoDB подключите базу командой `scripts/nocodb-connect.sh`. После
+регистрации webhook бот готов принимать сообщения без ручной активации
+workflow.
 
 Административная консоль Letta защищена Basic Auth. В ней доступны agents,
 conversations, чат, «Настройки SDK» и «Настройки LLM». Секреты LLM и

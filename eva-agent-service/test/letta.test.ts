@@ -150,6 +150,10 @@ test("App Server-only settings are applied at session open, not agent creation",
   internal.runtime.allowed_tools = ["Read", "WebSearch"];
   internal.runtime.disallowed_tools = ["Bash"];
   internal.runtime.system_info_reminder = true;
+  service.setToolFactory(() => [
+    { name: "safe_tool" },
+    { name: "Bash" },
+  ] as never);
 
   let createOptions: Record<string, unknown> = {};
   let sessionOptions: Record<string, unknown> = {};
@@ -176,5 +180,9 @@ test("App Server-only settings are applied at session open, not agent creation",
   assert.equal("disallowedTools" in createOptions, false);
   assert.equal("systemInfoReminder" in createOptions, false);
   assert.deepEqual(sessionOptions.allowedTools, ["Read", "WebSearch"]);
+  assert.deepEqual(
+    (sessionOptions.tools as Array<{ name: string }>).map((tool) => tool.name),
+    ["safe_tool"],
+  );
   assert.equal(sessionOptions.permissionMode, "unrestricted");
 });

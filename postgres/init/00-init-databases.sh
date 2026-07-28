@@ -7,7 +7,6 @@
 # any single service cannot read another service's data:
 #
 #   eva      — Eva's business data (the only database NocoDB exposes)
-#   n8n      — n8n workflows, executions, credentials
 #   nocodb   — NocoDB's own metadata
 #   letta    — Letta agents, memory, messages (needs pgvector)
 #
@@ -50,7 +49,6 @@ create_role_and_db() {
 }
 
 create_role_and_db "$EVA_DB_USER"    "$EVA_DB_PASSWORD"    "$EVA_DB_NAME"
-create_role_and_db "$N8N_DB_USER"    "$N8N_DB_PASSWORD"    "$N8N_DB_NAME"
 create_role_and_db "$NOCODB_DB_USER" "$NOCODB_DB_PASSWORD" "$NOCODB_DB_NAME"
 create_role_and_db "$LETTA_DB_USER"  "$LETTA_DB_PASSWORD"  "$LETTA_DB_NAME"
 
@@ -100,7 +98,7 @@ if [ -d /migrations ]; then
 		echo "    - $(basename "$f")"
 		PGPASSWORD="$EVA_DB_PASSWORD" psql -v ON_ERROR_STOP=1 \
 			--username "$EVA_DB_USER" --dbname "$EVA_DB_NAME" \
-			--host 127.0.0.1 --file "$f"
+			--file "$f"
 	done
 fi
 

@@ -25,6 +25,16 @@
 - экран «Настройки SDK» для памяти, tools, skills, permissions, dreaming,
   model settings, пула сессий и таймаутов;
 - unit- и stack smoke-тесты настроек SDK, административных операций и чата.
+- migration `006_eva_runtime.sql` для Telegram updates, настроек пользователя,
+  заметок, бюджета, heartbeat и платежных намерений;
+- прямой Telegram webhook, команды, голос, изображения, документы, typing,
+  квоты и обработка ошибок в TypeScript;
+- безопасно перенесён шаблон эталонной Евы: персона, схема памяти и правила
+  инструментов без истории сообщений, личных значений и секретов экспорта;
+- динамическое приветствие через эфемерный Telegram draft;
+- кодовый планировщик задач и heartbeat с часовыми поясами;
+- внешние инструменты Agent SDK для заметок, бюджета, задач, поиска и реакций;
+- защищённый и идемпотентный webhook Lava.
 
 ### Изменено
 
@@ -42,6 +52,10 @@
 - пользовательские и административные материалы переведены на русский;
 - из стека удалены установка стороннего host-агента, его systemd unit,
   команды, вопросы установщика и интеграция с backup/restore/doctor.
+- оркестратор автоматизации и его worker/runner полностью удалены; бизнес-
+  логика выполняется кодом в `eva-agent-service`;
+- исправлены чистая инициализация PostgreSQL через Unix socket, безопасная
+  загрузка bcrypt из `.env`, JSON default мастера и вывод CLI LLM.
 
 ## 0.2.0 — Letta Agent SDK
 
@@ -49,10 +63,10 @@
   с официальным `@letta-ai/letta-agent-sdk`;
 - добавлен self-hosted Letta App Server по WebSocket;
 - для каждого пользователя сохраняются `agent_id` и `conversation_id`;
-- добавлены перезапуск, backup/restore, минимальный n8n E2E workflow и
+- добавлены перезапуск, backup/restore, минимальная E2E-проверка и
   административная консоль.
 
 ## 0.1.0 — первоначальный стек
 
-Первый self-hosted стек с PostgreSQL, Valkey, Caddy, n8n, NocoDB, WebApp,
+Первый self-hosted стек с PostgreSQL, Valkey, Caddy, NocoDB, WebApp,
 Media Service, SearXNG, backup, restore, update и rollback.

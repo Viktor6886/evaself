@@ -415,6 +415,9 @@
 					<label class="span-2">Описание<input name="description" /></label>
 					<label class="span-2">Persona<textarea name="persona" rows="6" placeholder="Пусто = шаблон из настроек SDK"></textarea></label>
 					<label class="span-2">Human memory<textarea name="human" rows="4"></textarea></label>
+					<label class="span-2">Дополнительные memory blocks (JSON-массив)
+						<textarea name="memory_json" rows="8" placeholder='[{"label":"project","value":"Контекст","description":"Описание","read_only":false,"limit":8000}]'></textarea>
+					</label>
 					<label>Теги через запятую<input name="tags" value="evaself" /></label>
 					<label>Permission mode<select name="permission_mode"><option>unrestricted</option><option>standard</option><option>acceptEdits</option></select></label>
 					<label class="check"><input name="memfs_enabled" type="checkbox" checked /> Memory filesystem</label>
@@ -438,6 +441,12 @@
 			}
 			$("new-agent-status").textContent = "создание…";
 			try {
+				const memoryRaw = String(form.get("memory_json") || "").trim();
+				if (memoryRaw) {
+					const memory = JSON.parse(memoryRaw);
+					if (!Array.isArray(memory)) throw new Error("Memory blocks должны быть JSON-массивом");
+					payload.memory = memory;
+				}
 				const result = await api("/v1/sdk/agents", { method: "POST", body: JSON.stringify(payload) });
 				state.selected = result.agent.id;
 				state.selectedConversation = result.conversation?.id || null;

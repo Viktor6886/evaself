@@ -3,8 +3,8 @@
 # Static validation — no service is started, nothing is changed.
 #
 # Runs the checks that catch a broken commit before it reaches a server:
-# compose renders, Caddyfiles parse, shell scripts parse, workflow JSON
-# is well-formed and internally consistent, SQL migrations are readable.
+# compose renders, Caddyfiles parse, shell scripts parse and SQL
+# migrations are readable.
 # =====================================================================
 set -uo pipefail
 
@@ -79,7 +79,7 @@ validate_caddyfile() {
 	local path="$1" label="$2"
 	if env \
 		DOMAIN=example.test DOMAIN_APP=app.example.test DOMAIN_API=api.example.test \
-		DOMAIN_N8N=n8n.example.test DOMAIN_NOCODB=admin.example.test \
+		DOMAIN_NOCODB=admin.example.test \
 		DOMAIN_LETTA=letta.example.test DOMAIN_STATUS=status.example.test \
 		ACME_EMAIL=ops@example.test ACME_CA=https://acme-v02.api.letsencrypt.org/directory \
 		LETTA_UI_USER=admin LETTA_UI_PASSWORD_HASH='$2a$14$placeholderplaceholderpl' \
@@ -94,13 +94,6 @@ validate_caddyfile() {
 validate_caddyfile "$ROOT_DIR/Caddyfile"          "Caddyfile (edge)"
 validate_caddyfile "$ROOT_DIR/webapp/Caddyfile"   "webapp/Caddyfile"
 validate_caddyfile "$ROOT_DIR/letta-ui/Caddyfile" "letta-ui/Caddyfile"
-
-# ---------------------------------------------------------------------
-step "n8n workflows"
-# ---------------------------------------------------------------------
-if ! python3 "$SCRIPT_DIR/validate-workflows.py" "$ROOT_DIR/n8n/workflows"; then
-	check_failed "workflow validation failed"
-fi
 
 # ---------------------------------------------------------------------
 step "TypeScript"

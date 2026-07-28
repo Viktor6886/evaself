@@ -13,7 +13,7 @@
 # =====================================================================
 set -euo pipefail
 
-DATABASES=("${EVA_DB_NAME:-eva}" "${N8N_DB_NAME:-n8n}" "${NOCODB_DB_NAME:-nocodb}" "${LETTA_DB_NAME:-letta}")
+DATABASES=("${EVA_DB_NAME:-eva}" "${NOCODB_DB_NAME:-nocodb}" "${LETTA_DB_NAME:-letta}")
 
 log() { printf '[backup-service] %s\n' "$*" >&2; }
 
@@ -54,7 +54,6 @@ cmd_dump_all() {
 owner_role_for() {
 	case "$1" in
 		"${EVA_DB_NAME:-eva}")       printf '%s' "${EVA_DB_USER:-eva}" ;;
-		"${N8N_DB_NAME:-n8n}")       printf '%s' "${N8N_DB_USER:-n8n}" ;;
 		"${NOCODB_DB_NAME:-nocodb}") printf '%s' "${NOCODB_DB_USER:-nocodb}" ;;
 		"${LETTA_DB_NAME:-letta}")   printf '%s' "${LETTA_DB_USER:-letta}" ;;
 		*) printf '' ;;

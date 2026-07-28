@@ -5,10 +5,9 @@
 # hard-coded domain anywhere in this repository. Caddy obtains and
 # renews HTTPS certificates automatically (HTTP-01 + TLS-ALPN-01).
 #
-# Only these seven names are reachable from the internet. PostgreSQL,
+# Only these six names are reachable from the internet. PostgreSQL,
 # Valkey, the Letta App Server (WebSocket), eva-agent-service's internal
-# API, SearXNG, the media service, the n8n worker and the task runner all
-# stay on evaself-network.
+# API, SearXNG and the media service stay on evaself-network.
 # =====================================================================
 {
 	email {$ACME_EMAIL}
@@ -92,8 +91,8 @@
 # ---------------------------------------------------------------------
 # 3. Public API — https://{$DOMAIN_API}
 # ---------------------------------------------------------------------
-# Only /health is exposed here. The internal /v1/* surface, which n8n
-# calls with EVA_AGENT_API_KEY, is never routed from the internet — and
+# Only health and authenticated provider webhooks are exposed here. The
+# administrative /v1/* surface is never routed from the internet — and
 # neither is the Letta App Server behind it.
 # ---------------------------------------------------------------------
 {$DOMAIN_API} {
@@ -112,27 +111,21 @@
 		reverse_proxy eva-agent-service:{$EVA_AGENT_PORT}
 	}
 
+	handle /telegram/webhook {
+		reverse_proxy eva-agent-service:{$EVA_AGENT_PORT}
+	}
+
+	handle /payments/lava {
+		reverse_proxy eva-agent-service:{$EVA_AGENT_PORT}
+	}
+
 	handle {
 		respond "not found" 404
 	}
 }
 
 # ---------------------------------------------------------------------
-# 4. n8n editor + webhooks — https://{$DOMAIN_N8N}
-# ---------------------------------------------------------------------
-{$DOMAIN_N8N} {
-	import security_headers
-	import compression
-	import logging
-
-	reverse_proxy n8n:5678 {
-		flush_interval -1
-		header_up X-Forwarded-Proto https
-	}
-}
-
-# ---------------------------------------------------------------------
-# 5. NocoDB admin panel — https://{$DOMAIN_NOCODB}
+# 4. NocoDB admin panel — https://{$DOMAIN_NOCODB}
 # ---------------------------------------------------------------------
 # NocoDB brings its own authentication; open sign-up is disabled with
 # NC_INVITE_ONLY_SIGNUP=true.
@@ -148,11 +141,11 @@
 }
 
 # ---------------------------------------------------------------------
-# 6. Letta console — https://{$DOMAIN_LETTA}
+# 5. Letta console — https://{$DOMAIN_LETTA}
 # ---------------------------------------------------------------------
 # Self-hosted console shipped with Evaself (see letta-ui/README.md). The
 # App Server speaks WebSocket only, so the console reads through
-# eva-agent-service exactly like n8n does — the App Server itself is never
+# eva-agent-service — the App Server itself is never
 # routed from the internet. Protected by HTTP basic auth on top of that.
 # ---------------------------------------------------------------------
 {$DOMAIN_LETTA} {
@@ -170,7 +163,7 @@
 }
 
 # ---------------------------------------------------------------------
-# 7. Status page — https://{$DOMAIN_STATUS}
+# 6. Status page — https://{$DOMAIN_STATUS}
 # ---------------------------------------------------------------------
 # Backed by Uptime Kuma, which is part of the optional "monitoring"
 # profile. When the profile is off, this host answers 503 instead of a

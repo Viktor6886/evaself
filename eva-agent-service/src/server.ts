@@ -1,7 +1,8 @@
 /**
- * HTTP surface. Only n8n calls it, always with `X-API-Key`.
+ * HTTP surface. Administrative routes use `X-API-Key`; Telegram and Lava
+ * have their own webhook authentication.
  *
- * n8n never reaches the Letta App Server directly — every agent, session,
+ * No public client reaches the Letta App Server directly — every agent, session,
  * memory, skill and tool operation goes through these routes.
  */
 
@@ -10,13 +11,17 @@ import { timingSafeEqual } from "node:crypto";
 
 import type { Config } from "./config.js";
 import type { Database } from "./db.js";
+import type { EvaWorkflow } from "./eva-workflow.js";
 import { EvaError, appServerUnavailable, badRequest, notFound, unauthorized } from "./errors.js";
 import type { LettaService } from "./letta.js";
 import type { ManagedAgentInput } from "./letta.js";
 import type { LlmManager, LlmProviderInput } from "./llm.js";
 import type { Logger } from "./logger.js";
+import type { LavaPayments } from "./payments.js";
 import type { UserQueue } from "./queue.js";
 import type { SdkSettingsInput, SdkSettingsManager } from "./sdk-settings.js";
+import type { TelegramUpdate } from "./telegram.js";
+import { webhookSecretMatches } from "./telegram.js";
 
 export const VERSION = "0.2.0";
 
@@ -27,6 +32,8 @@ export interface Services {
   letta: LettaService;
   sdk: SdkSettingsManager;
   llm: LlmManager;
+  workflow: EvaWorkflow;
+  payments: LavaPayments;
   queue: UserQueue;
   redisPing: () => Promise<boolean>;
 }
@@ -46,7 +53,7 @@ function telegramIdOf(request: FastifyRequest): number {
 }
 
 export function buildServer(services: Services): FastifyInstance {
-  const { config, logger, db, letta, sdk, llm, queue } = services;
+  const { config, logger, db, letta, sdk, llm, workflow, payments, queue } = services;
 
   // Fastify's own logger is off: this service logs through logger.ts so
   // every line in the stack has the same JSON shape.
@@ -144,6 +151,30 @@ export function buildServer(services: Services): FastifyInstance {
     const result = await letta.ping();
     if (!result.ok) throw appServerUnavailable(result.error);
     return { result };
+  });
+
+  // ---------------------------------------------------------------
+  // Public webhooks with provider-specific authentication
+  // ---------------------------------------------------------------
+  app.post("/telegram/webhook", async (request, reply) => {
+    if (
+      !webhookSecretMatches(
+        request.headers["x-telegram-bot-api-secret-token"],
+        config.telegramWebhookSecret,
+      )
+    ) {
+      throw unauthorized("Неверный секрет Telegram webhook");
+    }
+    const result = await workflow.accept(request.body as TelegramUpdate);
+    return reply.status(200).send({ ok: true, ...result });
+  });
+
+  app.post("/payments/lava", async (request, reply) => {
+    if (!payments.authorized(request.headers.authorization)) {
+      reply.header("WWW-Authenticate", 'Basic realm="Evaself Lava webhook"');
+      throw unauthorized("Неверная авторизация Lava webhook");
+    }
+    return reply.status(200).send(await payments.handle(request.body));
   });
 
   app.get("/v1/sdk/agents", async () => ({ agents: await letta.listAgents() }));
@@ -562,6 +593,7 @@ function managedAgentInput(value: unknown, requireName: boolean): ManagedAgentIn
     description: optionalText(body.description, "description", 0, 1000),
     persona: optionalText(body.persona, "persona", 0, 100000),
     human: optionalText(body.human, "human", 0, 10000),
+    memory: optionalMemoryBlocks(body.memory),
     tags: optionalStringArray(body.tags, "tags", 64),
     model: optionalText(body.model, "model", 1, 300),
     model_settings: optionalObject(body.model_settings, "model_settings"),
@@ -695,6 +727,34 @@ function optionalObject(
     throw badRequest(`${field} должен быть JSON-объектом`);
   }
   return value as Record<string, unknown>;
+}
+
+function optionalMemoryBlocks(
+  value: unknown,
+): ManagedAgentInput["memory"] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > 32) {
+    throw badRequest("memory должен быть массивом не более 32 блоков");
+  }
+  const labels = new Set<string>();
+  return value.map((item, index) => {
+    const block = requireObject(item, `memory[${index}]`);
+    const label = requiredText(block.label, `memory[${index}].label`, 1, 100);
+    if (labels.has(label)) throw badRequest(`memory: повторяющийся label ${label}`);
+    labels.add(label);
+    return {
+      label,
+      value: requiredText(block.value, `memory[${index}].value`, 0, 100_000),
+      description: optionalNullableText(
+        block.description,
+        `memory[${index}].description`,
+        2_000,
+      ),
+      read_only: optionalBoolean(block.read_only, `memory[${index}].read_only`),
+      hidden: optionalBoolean(block.hidden, `memory[${index}].hidden`),
+      limit: optionalInteger(block.limit, `memory[${index}].limit`, 1, 1_000_000) ?? undefined,
+    };
+  });
 }
 
 function optionalInteger(

@@ -3,12 +3,13 @@
  *
  * Everything goes through the official `@letta-ai/letta-agent-sdk` against a
  * self-hosted Letta App Server (`letta server --listen ws://…`). There is no
- * hand-written REST client any more, and nothing else in the stack — n8n
- * included — is allowed to reach the App Server directly.
+ * hand-written REST client any more, and nothing else in the stack is
+ * allowed to reach the App Server directly.
  */
 
 import { LettaAgentClient } from "@letta-ai/letta-agent-sdk";
 import type {
+  AnyAgentTool,
   CreateAgentOptions,
   DreamingOptions,
   LettaCodeSession,
@@ -49,6 +50,15 @@ interface PooledSession {
   recovered: boolean;
 }
 
+export interface EvaMemoryBlock {
+  label: string;
+  value: string;
+  description?: string | null;
+  read_only?: boolean;
+  hidden?: boolean | null;
+  limit?: number;
+}
+
 export interface RuntimeSdkSettings {
   agent_name_prefix: string;
   default_description: string;
@@ -81,6 +91,7 @@ export interface ManagedAgentInput {
   description?: string;
   persona?: string;
   human?: string;
+  memory?: EvaMemoryBlock[];
   tags?: string[];
   model?: string;
   model_settings?: Record<string, unknown>;
@@ -98,7 +109,7 @@ export interface ManagedAgentInput {
 }
 
 /**
- * Collapses the SDK's message stream into the handful of fields n8n needs.
+ * Collapses the SDK's message stream into the fields the runtime and WebUI need.
  * The stream carries assistant text, reasoning, tool calls and a final
  * `result`; a Telegram reply only wants the text, but the rest is worth
  * returning for logging and debugging.
@@ -188,6 +199,7 @@ export class LettaService {
   private persona: string;
   private defaultModel: string;
   private runtime: RuntimeSdkSettings;
+  private toolFactory: ((conversationId: string) => AnyAgentTool[]) | null = null;
 
   constructor(config: Config, logger: Logger, persona: string) {
     this.config = config;
@@ -239,6 +251,11 @@ export class LettaService {
 
   setDefaultModel(model: string): void {
     this.defaultModel = model;
+  }
+
+  setToolFactory(factory: (conversationId: string) => AnyAgentTool[]): void {
+    this.toolFactory = factory;
+    this.closeAllSessions();
   }
 
   get currentPersona(): string {
@@ -325,12 +342,15 @@ export class LettaService {
         ...this.runtime.default_tags,
         EVASELF_TAG,
         EVA_AGENT_TAG,
+        "psychology",
+        "self-knowledge",
         telegramTag(input.telegramId),
       ])],
       permissionMode: this.runtime.permissionMode,
       memfs: this.runtime.memfs_enabled,
       skillSources: this.runtime.skillSources,
       dreaming: this.runtime.dreaming as DreamingOptions,
+      memory: evaMemoryBlocks(),
       ...(this.runtime.system_prompt ? { systemPrompt: this.runtime.system_prompt } : {}),
       ...(this.runtime.base_tools !== null ? { baseTools: this.runtime.base_tools } : {}),
       ...(this.defaultModel ? { model: this.defaultModel } : {}),
@@ -472,7 +492,7 @@ export class LettaService {
 
     let session: LettaCodeSession;
     try {
-      session = this.client.resumeSession(conversationId, this.sessionOptions());
+      session = this.client.resumeSession(conversationId, this.sessionOptions(conversationId));
       await this.initialize(session);
     } catch (error) {
       throw toEvaError(error, `resuming conversation ${conversationId}`);
@@ -554,7 +574,7 @@ export class LettaService {
    * Run one turn and return the collapsed result.
    *
    * The SDK streams; we consume the stream to completion (or until the turn
-   * timeout) and hand n8n a single object. `onDelta` lets a caller forward
+   * timeout) and return a single object. `onDelta` lets a caller forward
    * incremental text — used by the streaming endpoint.
    */
   async runTurn(
@@ -669,13 +689,20 @@ export class LettaService {
    * created. Keeping that distinction here prevents unsupported create-agent
    * fields from being silently saved but never enforced.
    */
-  private sessionOptions(): LettaCodeClientSessionOptions {
+  private sessionOptions(conversationId: string): LettaCodeClientSessionOptions {
+    const tools = (this.toolFactory?.(conversationId) ?? []).filter(
+      (tool) => !this.runtime.disallowed_tools.includes(tool.name),
+    );
+    const allowed = this.runtime.allowed_tools?.filter(
+      (name) => !this.runtime.disallowed_tools.includes(name),
+    ) ?? null;
     return {
       permissionMode: this.runtime.permissionMode,
       skillSources: this.runtime.skillSources,
       dreaming: this.runtime.dreaming as LettaCodeClientSessionOptions["dreaming"],
-      ...(this.runtime.allowed_tools !== null
-        ? { allowedTools: this.runtime.allowed_tools }
+      ...(tools.length > 0 ? { tools } : {}),
+      ...(allowed !== null
+        ? { allowedTools: allowed }
         : {}),
     };
   }
@@ -783,6 +810,7 @@ export class LettaService {
       description: input.description ?? this.runtime.default_description,
       persona: input.persona ?? this.runtime.default_persona,
       human: input.human ?? "",
+      ...(input.memory ? { memory: input.memory } : {}),
       tags: input.tags ?? this.runtime.default_tags,
       permissionMode: input.permission_mode ?? this.runtime.permissionMode,
       memfs: input.memfs_enabled ?? this.runtime.memfs_enabled,
@@ -832,6 +860,52 @@ export class LettaService {
     if (!agentId) throw notFound("this user has no agent yet");
     return agentId;
   }
+}
+
+export function evaMemoryBlocks(): EvaMemoryBlock[] {
+  return [
+    {
+      label: "tools",
+      value: [
+        "Доступные внешние инструменты выполняются локально через официальный Agent SDK.",
+        "Используй заметки для фактов пользователя, задачи — для действий и напоминаний,",
+        "бюджет — только по явной просьбе, web_search — когда нужна актуальная информация.",
+      ].join(" "),
+      description: "Правила использования инструментов Evaself",
+      read_only: true,
+      limit: 4_000,
+    },
+    {
+      label: "therapy_goals",
+      value: "Цели саморефлексии пока не сформулированы.",
+      description: "Цели пользователя, сформулированные его словами; не медицинские диагнозы",
+      limit: 8_000,
+    },
+    {
+      label: "user_state",
+      value: "Актуальное состояние пока не описано.",
+      description: "Краткий текущий контекст, эмоции и жизненная ситуация",
+      limit: 8_000,
+    },
+    {
+      label: "progress_notes",
+      value: "Наблюдений о прогрессе пока нет.",
+      description: "Изменения и завершённые шаги без оценочных ярлыков",
+      limit: 12_000,
+    },
+    {
+      label: "mental_map",
+      value: "Карта значимых людей, тем и связей пока пуста.",
+      description: "Связи между людьми, событиями, ценностями и повторяющимися темами",
+      limit: 12_000,
+    },
+    {
+      label: "assistant_notes_and_recommendations",
+      value: "Рабочих гипотез и рекомендаций пока нет.",
+      description: "Осторожные рабочие гипотезы Евы, которые нужно сверять с пользователем",
+      limit: 12_000,
+    },
+  ];
 }
 
 async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {

@@ -35,7 +35,7 @@ step "Configuration"
 PERM="$(stat -c '%a' "$ENV_FILE" 2>/dev/null || echo '???')"
 if [ "$PERM" = "600" ]; then ok ".env mode 600"; else critical ".env mode is $PERM, expected 600"; fi
 
-for key in DOMAIN ACME_EMAIL EVA_TELEGRAM_BOT_TOKEN N8N_ENCRYPTION_KEY EVA_AGENT_API_KEY LETTA_APP_SERVER_TOKEN; do
+for key in DOMAIN ACME_EMAIL EVA_TELEGRAM_BOT_TOKEN EVA_TELEGRAM_WEBHOOK_SECRET EVA_AGENT_API_KEY LETTA_APP_SERVER_TOKEN; do
 	if [ -z "$(get_env "$key" || true)" ]; then critical "$key is empty in .env"; fi
 done
 [ -n "$(get_env EVA_LLM_API_KEY || true)" ] || soft "EVA_LLM_API_KEY is empty — Eva cannot answer"
@@ -44,7 +44,7 @@ done
 # =====================================================================
 step "Containers"
 # =====================================================================
-EXPECTED=(caddy postgres valkey n8n n8n-worker n8n-runner eva-agent-service letta-app-server letta-ui nocodb webapp searxng media-service backup-service)
+EXPECTED=(caddy postgres valkey eva-agent-service letta-app-server letta-ui nocodb webapp searxng media-service backup-service)
 for svc in "${EXPECTED[@]}"; do
 	cid="$(compose ps -q "$svc" 2>/dev/null)"
 	if [ -z "$cid" ]; then
@@ -69,7 +69,7 @@ step "Databases"
 # =====================================================================
 if compose exec -T postgres pg_isready -q -U "$POSTGRES_SUPER_USER" 2>/dev/null; then
 	ok "PostgreSQL accepting connections"
-	for db in "$EVA_DB_NAME" "$N8N_DB_NAME" "$NOCODB_DB_NAME" "$LETTA_DB_NAME"; do
+	for db in "$EVA_DB_NAME" "$NOCODB_DB_NAME" "$LETTA_DB_NAME"; do
 		if compose exec -T postgres psql -tAq -U "$POSTGRES_SUPER_USER" -d postgres \
 			-c "SELECT 1 FROM pg_database WHERE datname='$db'" 2>/dev/null | grep -q 1; then
 			ok "database $db exists"
@@ -81,7 +81,7 @@ if compose exec -T postgres pg_isready -q -U "$POSTGRES_SUPER_USER" 2>/dev/null;
 	TABLES="$(compose exec -T -e PGPASSWORD="$EVA_DB_PASSWORD" postgres \
 		psql -tAq -U "$EVA_DB_USER" -d "$EVA_DB_NAME" \
 		-c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE'" 2>/dev/null | tr -dc '0-9')"
-	if [ "${TABLES:-0}" -ge 15 ]; then
+	if [ "${TABLES:-0}" -ge 21 ]; then
 		ok "eva schema present (${TABLES} tables)"
 	else
 		critical "eva schema incomplete (${TABLES:-0} tables) — run scripts/db-migrate.sh"
@@ -123,7 +123,6 @@ probe() {
 }
 
 probe "agent service /health" eva-agent-service "http://127.0.0.1:${EVA_AGENT_PORT}/health"
-probe "n8n /healthz"      n8n           "http://127.0.0.1:5678/healthz"
 probe "searxng /healthz"  searxng       "http://127.0.0.1:8080/healthz"
 probe "media /health"     media-service "http://127.0.0.1:8090/health"
 probe "webapp /healthz"   webapp        "http://127.0.0.1:8082/healthz"
@@ -141,17 +140,10 @@ case "$APP_SERVER_STATE" in
 	*)   critical "Letta App Server not reachable through the Agent SDK: ${APP_SERVER_STATE:-no answer}" ;;
 esac
 
-# The queue is what makes n8n a distributed system; check both ends.
-if compose exec -T n8n-worker sh -c 'wget -qO- http://127.0.0.1:5678/healthz/readiness' >/dev/null 2>&1; then
-	ok "n8n worker connected to the queue"
-else
-	soft "n8n worker readiness probe did not answer"
-fi
-
 # =====================================================================
 step "Public HTTPS"
 # =====================================================================
-for pair in "site:$DOMAIN" "webapp:$DOMAIN_APP" "api:$DOMAIN_API/health" "n8n:$DOMAIN_N8N" "nocodb:$DOMAIN_NOCODB" "letta:$DOMAIN_LETTA"; do
+for pair in "site:$DOMAIN" "webapp:$DOMAIN_APP" "api:$DOMAIN_API/health" "nocodb:$DOMAIN_NOCODB" "letta:$DOMAIN_LETTA"; do
 	label="${pair%%:*}"; host="${pair#*:}"
 	code="$(http_status "https://$host" 12)"
 	case "$code" in

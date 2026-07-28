@@ -2,7 +2,7 @@
 #
 # The Letta App Server speaks WebSocket only, so a browser cannot be its
 # client. The console therefore reads through eva-agent-service — the same
-# HTTP surface n8n uses — and Caddy adds the internal API key on the way
+# protected administrative HTTP surface — Caddy adds the internal API key
 # out, so the key never reaches the browser and the App Server is never
 # routed from the internet.
 {
