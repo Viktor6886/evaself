@@ -633,6 +633,37 @@ export class LettaService {
   }
 
   /**
+   * Prove that the restarted App Server has discovered the selected model.
+   * A generic protocol ping is insufficient: the dynamic model catalog may
+   * still be refreshing, or the configured endpoint may not expose this ID.
+   */
+  async waitForModel(handle: string, attempts = 20): Promise<void> {
+    let available: string[] = [];
+    let lastError = "";
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        const catalog = await this.client.models.list();
+        available = [
+          ...(catalog.availableHandles ?? []),
+          ...catalog.entries
+            .map((entry) => entry.handle)
+            .filter((entry): entry is string => typeof entry === "string"),
+        ];
+        if (available.includes(handle)) return;
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : String(error);
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 500));
+    }
+    const suffix = lastError
+      ? ` Последняя ошибка каталога: ${lastError}`
+      : available.length > 0
+        ? ` Доступны: ${[...new Set(available)].slice(0, 20).join(", ")}`
+        : " App Server вернул пустой каталог.";
+    throw new Error(`Модель ${handle} не появилась в каталоге App Server.${suffix}`);
+  }
+
+  /**
    * App Server SDK 0.5.x applies client-side tool policy and runtime controls
    * when a conversation session is opened, not while the persistent agent is
    * created. Keeping that distinction here prevents unsupported create-agent

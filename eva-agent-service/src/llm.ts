@@ -95,7 +95,7 @@ export class SecretBox {
 
 export function modelHandle(model: string): string {
   const trimmed = model.trim();
-  return trimmed.includes("/") ? trimmed : `openai/${trimmed}`;
+  return trimmed.startsWith("lmstudio/") ? trimmed : `lmstudio/${trimmed}`;
 }
 
 export async function probeOpenAiProvider(
@@ -344,6 +344,7 @@ export class LlmManager {
     try {
       await this.configureProvider(candidate, candidateKey);
       await this.restartAppServer();
+      await this.letta.waitForModel(candidateHandle);
       await this.letta.applyModelToMappings(
         mappings,
         candidateHandle,
@@ -382,6 +383,7 @@ export class LlmManager {
       await this.configureProvider(previous, this.secretBox.decrypt(previous.api_key_encrypted));
       await this.restartAppServer();
       const handle = modelHandle(previous.model);
+      await this.letta.waitForModel(handle);
       await this.letta.applyModelToMappings(
         mappings,
         handle,
@@ -409,6 +411,11 @@ export class LlmManager {
       Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
     );
     environment.LETTA_LOCAL_BACKEND_DIR = this.config.llmProviderConfigDir;
+    // The local App Server's documented LM Studio connector is its dynamic
+    // OpenAI-compatible endpoint adapter: unlike the built-in OpenAI catalog,
+    // it discovers arbitrary model IDs from /models. The secret stays in the
+    // child environment and never appears in argv or logs.
+    environment.LMSTUDIO_API_KEY = apiKey;
 
     await new Promise<void>((resolve, reject) => {
       const terminal = spawnPty(
@@ -417,7 +424,7 @@ export class LlmManager {
         "--backend",
         "local",
         "connect",
-        "openai",
+        "lmstudio",
         "--base-url",
         provider.base_url,
         "--timeout",
@@ -454,7 +461,7 @@ export class LlmManager {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        if (exitCode === 0 && keySent) resolve();
+        if (exitCode === 0) resolve();
         else reject(new Error(`Letta CLI не сохранил провайдера (код ${exitCode})`));
       });
     });

@@ -45,6 +45,13 @@ healthcheck и rollback.
 
 Раздел «Настройки SDK» задаёт defaults новых объектов, memory filesystem,
 tools, skill sources, permission mode, dreaming и параметры пула сессий.
+
+Для произвольных OpenAI-compatible endpoints App Server использует свой
+динамический адаптер `lmstudio`: это внутреннее имя connector, а не требование
+устанавливать LM Studio. Он получает фактические ID через `/models` и отправляет
+chat-completions на указанный Base URL. После переключения Evaself ждёт появления
+выбранной модели в каталоге App Server; простой WebSocket healthcheck успешной
+активацией не считается.
 Сохранение настроек закрывает активные сессии; следующий запрос безопасно
 переподключает их к той же conversation.
 

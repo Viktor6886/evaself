@@ -19,9 +19,10 @@ test("API key encrypts with authenticated random ciphertext", () => {
   assert.throws(() => box.decrypt(`${first.slice(0, -2)}aa`));
 });
 
-test("modelHandle adds the local OpenAI provider only when needed", () => {
-  assert.equal(modelHandle("gpt-compatible"), "openai/gpt-compatible");
-  assert.equal(modelHandle("openai/already-qualified"), "openai/already-qualified");
+test("modelHandle routes arbitrary OpenAI-compatible IDs through dynamic discovery", () => {
+  assert.equal(modelHandle("gpt-compatible"), "lmstudio/gpt-compatible");
+  assert.equal(modelHandle("vendor/model"), "lmstudio/vendor/model");
+  assert.equal(modelHandle("lmstudio/already-qualified"), "lmstudio/already-qualified");
 });
 
 test("provider probe reads an OpenAI-compatible /models response", async () => {
@@ -101,10 +102,11 @@ test("failed model switch restores the previous provider and mappings", async ()
   const letta = {
     closeAllSessions: () => undefined,
     setDefaultModel: () => undefined,
+    waitForModel: async () => undefined,
     listAllModelMappings: async () => [{ agentId: "agent-1", conversationIds: ["conv-1"] }],
     applyModelToMappings: async (_mappings: unknown, model: string) => {
       applied.push(model);
-      if (model === "openai/candidate-model") throw new Error("synthetic SDK failure");
+      if (model === "lmstudio/candidate-model") throw new Error("synthetic SDK failure");
     },
   };
   const manager = new LlmManager(
@@ -129,7 +131,7 @@ test("failed model switch restores the previous provider and mappings", async ()
 
   await assert.rejects(() => manager.activate(candidate.id), /предыдущая конфигурация сохранена/i);
   assert.deepEqual(configured, ["candidate", "previous"]);
-  assert.deepEqual(applied, ["openai/candidate-model", "openai/previous-model"]);
+  assert.deepEqual(applied, ["lmstudio/candidate-model", "lmstudio/previous-model"]);
   assert.equal(active.id, previous.id);
 });
 

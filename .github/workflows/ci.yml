@@ -564,13 +564,13 @@ jobs:
                 if (serialized.includes('ci-key-') || serialized.includes('api_key_encrypted')) {
                   throw new Error('an API key leaked through the admin API');
                 }
-                if (!active.provider.is_active || active.provider.model_handle !== 'openai/ci-model-b') {
+                if (!active.provider.is_active || active.provider.model_handle !== 'lmstudio/ci-model-b') {
                   throw new Error('second provider was not activated');
                 }
                 const switchedAgent = await call(
                   '/v1/sdk/agents/' + encodeURIComponent(standalone.id),
                 );
-                if (switchedAgent.agent.model !== 'openai/ci-model-b') {
+                if (switchedAgent.agent.model !== 'lmstudio/ci-model-b') {
                   throw new Error('standalone WebUI agent was not switched');
                 }
                 await call(
@@ -587,7 +587,7 @@ jobs:
                 }));
               })().catch((error) => { console.error(error); process.exit(1); });
             " | tee /tmp/llm-switch
-          grep -q '"active":"openai/ci-model-b"' /tmp/llm-switch
+          grep -q '"active":"lmstudio/ci-model-b"' /tmp/llm-switch
           grep -q '"secret_hidden":true' /tmp/llm-switch
           grep -q '"standalone_updated":true' /tmp/llm-switch
 
@@ -658,7 +658,7 @@ jobs:
                 fetch('http://127.0.0.1:8070/v1/sdk/settings',{headers:{'X-API-Key':key}}).then(r=>r.json()),
               ]).then(([llm,agents,sdk]) => {
                 const active = llm.providers.find((p) => p.is_active);
-                if (llm.providers.length !== 2 || active?.model_handle !== 'openai/ci-model-b') process.exit(1);
+                if (llm.providers.length !== 2 || active?.model_handle !== 'lmstudio/ci-model-b') process.exit(1);
                 const agent = agents.agents.find((a) => String(a.telegram_id) === '424242');
                 if (!agent?.agent_id || !agent?.conversation_id) process.exit(1);
                 if (sdk.settings?.session_pool_size !== 17 || sdk.settings?.agent_name_prefix !== 'ci-eva') process.exit(1);
