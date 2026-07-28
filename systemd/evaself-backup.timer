@@ -1,0 +1,22 @@
+# =====================================================================
+# Daily backup at 03:40 local time.
+#
+# 03:40 is deliberately after the n8n nightly maintenance workflow
+# (03:15), so the backup captures a tidied database.
+#
+# Persistent=true means a server that was switched off at 03:40 runs the
+# backup shortly after it boots, instead of skipping the day.
+# =====================================================================
+[Unit]
+Description=Daily Evaself backup
+Documentation=https://github.com/viktor6886/evaself
+
+[Timer]
+OnCalendar=*-*-* 03:40:00
+# Spread the load if several Evaself servers share a host.
+RandomizedDelaySec=600
+Persistent=true
+Unit=evaself-backup.service
+
+[Install]
+WantedBy=timers.target

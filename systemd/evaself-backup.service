@@ -1,0 +1,24 @@
+# =====================================================================
+# Runs scripts/backup.sh. Triggered by evaself-backup.timer, and usable
+# on demand with `systemctl start evaself-backup`.
+#
+# The installer writes a drop-in override that sets EVASELF_DIR and
+# WorkingDirectory to wherever the repository was actually cloned, so the
+# unit works from any path — not just /opt/evaself.
+# =====================================================================
+[Unit]
+Description=Evaself daily backup
+Documentation=https://github.com/viktor6886/evaself
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+Environment=EVASELF_DIR=/opt/evaself
+Environment=NO_COLOR=1
+WorkingDirectory=/opt/evaself
+ExecStart=/bin/bash -c 'exec "$EVASELF_DIR/scripts/backup.sh"'
+# A backup must never be killed halfway through a pg_dump.
+TimeoutStartSec=3600
+Nice=10
+IOSchedulingClass=idle

@@ -1,0 +1,56 @@
+# =====================================================================
+# Hermes Agent — the server operator agent.
+#
+# Runs as root, unsandboxed, on purpose: Hermes exists to manage Docker,
+# systemd, packages, the project files, backups and updates. Adding
+# ProtectSystem / PrivateTmp / NoNewPrivileges here would break exactly
+# the job it is installed to do.
+#
+# The security boundary is therefore NOT the sandbox — it is the Telegram
+# allowlist in $HERMES_HOME/.env, which contains a single ID: the owner's.
+#
+# The installer does NOT enable this unit. Hermes has no LLM after a fresh
+# install and stays "awaiting-configuration" until `make configure-hermes`.
+# =====================================================================
+[Unit]
+Description=Hermes Agent (Evaself server operator)
+Documentation=https://github.com/NousResearch/hermes-agent
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+Environment=HERMES_HOME=/root/.hermes
+Environment=EVASELF_DIR=/opt/evaself
+# Non-interactive operation: no TTY to answer approval prompts on.
+Environment=HERMES_YOLO_MODE=1
+Environment=HERMES_ACCEPT_HOOKS=1
+Environment=HERMES_QUIET=1
+# Hermes must reach the stack on the internal Docker network.
+Environment=HERMES_ALLOW_PRIVATE_URLS=1
+# Keep secrets out of the journal.
+Environment=HERMES_REDACT_SECRETS=1
+
+WorkingDirectory=/opt/evaself
+EnvironmentFile=-/root/.hermes/.env
+
+ExecStart=/bin/bash -lc 'exec hermes gateway start'
+
+Restart=on-failure
+RestartSec=15
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=evaself-hermes
+
+# Generous limits: Hermes runs builds, dumps and container operations.
+LimitNOFILE=65535
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
