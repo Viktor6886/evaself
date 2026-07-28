@@ -63,6 +63,36 @@ export interface ModelMapping {
   conversationIds: string[];
 }
 
+export interface SdkSettingsRow {
+  id: number;
+  agent_name_prefix: string;
+  default_description: string;
+  default_persona: string;
+  default_human_template: string;
+  default_tags: string[];
+  permission_mode: "standard" | "acceptEdits" | "unrestricted";
+  memfs_enabled: boolean;
+  system_prompt: string | null;
+  base_tools: string[] | null;
+  allowed_tools: string[] | null;
+  disallowed_tools: string[];
+  skill_sources: Array<"bundled" | "global" | "agent" | "project">;
+  system_info_reminder: boolean;
+  dreaming: Record<string, unknown>;
+  model_settings: Record<string, unknown>;
+  default_context_window: number | null;
+  conversation_summary: string;
+  conversation_description: string;
+  conversation_hidden: boolean;
+  create_conversation: boolean;
+  session_pool_size: number;
+  session_idle_ms: number;
+  turn_timeout_ms: number;
+  app_server_request_timeout_ms: number;
+  created_at: Date;
+  updated_at: Date;
+}
+
 export class Database {
   private pool: pg.Pool | null = null;
   private readonly connectionString: string;
@@ -293,6 +323,103 @@ export class Database {
         WHERE status = 'active' AND runtime = 'letta-app-server'`,
       [model],
     );
+  }
+
+  /** Archive a PostgreSQL mapping after its Letta agent was explicitly deleted. */
+  async archiveAgentLink(agentId: string): Promise<void> {
+    const client = await this.require().connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        `UPDATE agent_links
+            SET status = 'archived', conversation_id = NULL
+          WHERE agent_id = $1 AND status = 'active'`,
+        [agentId],
+      );
+      await client.query(
+        `UPDATE agent_conversations
+            SET status = 'archived', archived_at = COALESCE(archived_at, now())
+          WHERE agent_id = $1 AND status = 'active'`,
+        [agentId],
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  // -----------------------------------------------------------------
+  // Letta Agent SDK settings
+  // -----------------------------------------------------------------
+
+  async getSdkSettings(): Promise<SdkSettingsRow> {
+    const { rows } = await this.require().query<SdkSettingsRow>(
+      "SELECT * FROM sdk_settings WHERE id = 1",
+    );
+    if (!rows[0]) throw databaseUnavailable("sdk_settings row is missing");
+    return rows[0];
+  }
+
+  async saveSdkSettings(input: SdkSettingsRow): Promise<SdkSettingsRow> {
+    const { rows } = await this.require().query<SdkSettingsRow>(
+      `UPDATE sdk_settings SET
+         agent_name_prefix = $1,
+         default_description = $2,
+         default_persona = $3,
+         default_human_template = $4,
+         default_tags = $5,
+         permission_mode = $6,
+         memfs_enabled = $7,
+         system_prompt = $8,
+         base_tools = $9,
+         allowed_tools = $10,
+         disallowed_tools = $11,
+         skill_sources = $12,
+         system_info_reminder = $13,
+         dreaming = $14::jsonb,
+         model_settings = $15::jsonb,
+         default_context_window = $16,
+         conversation_summary = $17,
+         conversation_description = $18,
+         conversation_hidden = $19,
+         create_conversation = $20,
+         session_pool_size = $21,
+         session_idle_ms = $22,
+         turn_timeout_ms = $23,
+         app_server_request_timeout_ms = $24
+       WHERE id = 1
+       RETURNING *`,
+      [
+        input.agent_name_prefix,
+        input.default_description,
+        input.default_persona,
+        input.default_human_template,
+        input.default_tags,
+        input.permission_mode,
+        input.memfs_enabled,
+        input.system_prompt,
+        input.base_tools,
+        input.allowed_tools,
+        input.disallowed_tools,
+        input.skill_sources,
+        input.system_info_reminder,
+        JSON.stringify(input.dreaming),
+        JSON.stringify(input.model_settings),
+        input.default_context_window,
+        input.conversation_summary,
+        input.conversation_description,
+        input.conversation_hidden,
+        input.create_conversation,
+        input.session_pool_size,
+        input.session_idle_ms,
+        input.turn_timeout_ms,
+        input.app_server_request_timeout_ms,
+      ],
+    );
+    return rows[0]!;
   }
 
   // -----------------------------------------------------------------

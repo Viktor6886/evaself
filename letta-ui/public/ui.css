@@ -221,6 +221,17 @@ label {
 	color: var(--muted);
 }
 
+label.check {
+	flex-direction: row;
+	align-items: center;
+	gap: 8px;
+	color: var(--text);
+}
+
+label.check input {
+	width: auto;
+}
+
 .section-nav {
 	display: grid;
 	gap: 4px;
@@ -248,6 +259,11 @@ label {
 }
 
 #filter {
+	margin-bottom: 8px;
+}
+
+.new-agent {
+	width: 100%;
 	margin-bottom: 8px;
 }
 
@@ -369,6 +385,16 @@ button.btn:disabled {
 	flex-wrap: wrap;
 	align-items: center;
 	margin-top: 10px;
+}
+
+.sticky-actions {
+	position: sticky;
+	bottom: 12px;
+	background: var(--panel);
+	border: 1px solid var(--border);
+	border-radius: 12px;
+	padding: 12px;
+	box-shadow: 0 8px 28px color-mix(in srgb, var(--text) 12%, transparent);
 }
 
 .tabs {

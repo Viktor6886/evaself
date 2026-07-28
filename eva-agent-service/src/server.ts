@@ -10,11 +10,13 @@ import { timingSafeEqual } from "node:crypto";
 
 import type { Config } from "./config.js";
 import type { Database } from "./db.js";
-import { EvaError, badRequest, notFound, unauthorized } from "./errors.js";
+import { EvaError, appServerUnavailable, badRequest, notFound, unauthorized } from "./errors.js";
 import type { LettaService } from "./letta.js";
+import type { ManagedAgentInput } from "./letta.js";
 import type { LlmManager, LlmProviderInput } from "./llm.js";
 import type { Logger } from "./logger.js";
 import type { UserQueue } from "./queue.js";
+import type { SdkSettingsInput, SdkSettingsManager } from "./sdk-settings.js";
 
 export const VERSION = "0.2.0";
 
@@ -23,6 +25,7 @@ export interface Services {
   logger: Logger;
   db: Database;
   letta: LettaService;
+  sdk: SdkSettingsManager;
   llm: LlmManager;
   queue: UserQueue;
   redisPing: () => Promise<boolean>;
@@ -43,7 +46,7 @@ function telegramIdOf(request: FastifyRequest): number {
 }
 
 export function buildServer(services: Services): FastifyInstance {
-  const { config, logger, db, letta, llm, queue } = services;
+  const { config, logger, db, letta, sdk, llm, queue } = services;
 
   // Fastify's own logger is off: this service logs through logger.ts so
   // every line in the stack has the same JSON shape.
@@ -128,6 +131,111 @@ export function buildServer(services: Services): FastifyInstance {
   // ---------------------------------------------------------------
   // users, agents and conversations
   // ---------------------------------------------------------------
+
+  // Настройки и управление официальным Letta Agent SDK. Эти маршруты
+  // использует только защищённая административная консоль.
+  app.get("/v1/sdk/settings", async () => ({ settings: await sdk.get() }));
+
+  app.patch("/v1/sdk/settings", async (request) => ({
+    settings: await sdk.update(requireObject(request.body, "Настройки SDK") as SdkSettingsInput),
+  }));
+
+  app.post("/v1/sdk/test", async () => {
+    const result = await letta.ping();
+    if (!result.ok) throw appServerUnavailable(result.error);
+    return { result };
+  });
+
+  app.get("/v1/sdk/agents", async () => ({ agents: await letta.listAgents() }));
+
+  app.post("/v1/sdk/agents", async (request, reply) => {
+    const input = managedAgentInput(request.body, true);
+    const result = await letta.createManagedAgent(input);
+    return reply.status(201).send(result);
+  });
+
+  app.get("/v1/sdk/agents/:agentId", async (request) => {
+    const { agentId } = request.params as { agentId: string };
+    return { agent: await letta.getAgent(requireId(agentId, "agent_id")) };
+  });
+
+  app.patch("/v1/sdk/agents/:agentId", async (request) => {
+    const { agentId } = request.params as { agentId: string };
+    const input = managedAgentPatch(request.body);
+    return { agent: await letta.updateAgent(requireId(agentId, "agent_id"), input) };
+  });
+
+  app.delete("/v1/sdk/agents/:agentId", async (request, reply) => {
+    const { agentId } = request.params as { agentId: string };
+    const id = requireId(agentId, "agent_id");
+    const confirmation = (request.query as { confirm?: string }).confirm;
+    if (confirmation !== id) {
+      throw badRequest("Удаление требует query-параметр confirm, равный agent_id");
+    }
+    await letta.deleteAgent(id);
+    await db.archiveAgentLink(id);
+    return reply.status(204).send();
+  });
+
+  app.get("/v1/sdk/agents/:agentId/conversations", async (request) => {
+    const { agentId } = request.params as { agentId: string };
+    return {
+      conversations: await letta.listConversations(requireId(agentId, "agent_id")),
+    };
+  });
+
+  app.post("/v1/sdk/agents/:agentId/conversations", async (request, reply) => {
+    const { agentId } = request.params as { agentId: string };
+    const input = conversationInput(request.body);
+    const conversation = await letta.createConversationRecord(
+      requireId(agentId, "agent_id"),
+      input,
+    );
+    return reply.status(201).send({ conversation });
+  });
+
+  app.get("/v1/sdk/conversations/:conversationId", async (request) => {
+    const { conversationId } = request.params as { conversationId: string };
+    return {
+      conversation: await letta.getConversation(requireId(conversationId, "conversation_id")),
+    };
+  });
+
+  app.patch("/v1/sdk/conversations/:conversationId", async (request) => {
+    const { conversationId } = request.params as { conversationId: string };
+    const input = conversationPatch(request.body);
+    return {
+      conversation: await letta.updateConversation(
+        requireId(conversationId, "conversation_id"),
+        input,
+      ),
+    };
+  });
+
+  app.get("/v1/sdk/conversations/:conversationId/messages", async (request) => {
+    const { conversationId } = request.params as { conversationId: string };
+    const id = requireId(conversationId, "conversation_id");
+    const limit = Number.parseInt(String((request.query as { limit?: string }).limit ?? "60"), 10);
+    return await letta.listMessages(id, Number.isFinite(limit) ? Math.min(Math.max(limit, 1), 200) : 60);
+  });
+
+  app.post("/v1/sdk/conversations/:conversationId/messages", async (request) => {
+    const { conversationId } = request.params as { conversationId: string };
+    const id = requireId(conversationId, "conversation_id");
+    const body = requireObject(request.body, "Сообщение");
+    const text = requiredText(body.text, "text", 1, 100000);
+    const conversation = await letta.getConversation(id) as {
+      agent_id?: string;
+      archived?: boolean;
+    };
+    if (conversation.archived) throw badRequest("Архивированный диалог нельзя продолжить");
+    return await queue.run(adminQueueId(id), async () => {
+      const result = await letta.runTurn(id, text);
+      if (conversation.agent_id) await db.markAgentUsed(conversation.agent_id);
+      return result;
+    });
+  });
+
   app.post("/v1/users/ensure", async (request) => {
     const body = request.body as {
       telegram_id?: number;
@@ -429,4 +537,209 @@ export function jsonable(value: unknown): unknown {
     return out;
   }
   return value;
+}
+
+function managedAgentInput(value: unknown, requireName: boolean): ManagedAgentInput {
+  const body = requireObject(value, "Агент");
+  const name = requireName
+    ? requiredText(body.name, "name", 1, 100)
+    : optionalText(body.name, "name", 1, 100);
+  const permission = optionalEnum(
+    body.permission_mode,
+    "permission_mode",
+    ["standard", "acceptEdits", "unrestricted"],
+  ) as ManagedAgentInput["permission_mode"];
+  const skillSources = optionalStringArray(body.skill_sources, "skill_sources", 4);
+  if (
+    skillSources?.some(
+      (source) => !["bundled", "global", "agent", "project"].includes(source),
+    )
+  ) {
+    throw badRequest("skill_sources содержит неизвестный источник");
+  }
+  return compact({
+    name,
+    description: optionalText(body.description, "description", 0, 1000),
+    persona: optionalText(body.persona, "persona", 0, 100000),
+    human: optionalText(body.human, "human", 0, 10000),
+    tags: optionalStringArray(body.tags, "tags", 64),
+    model: optionalText(body.model, "model", 1, 300),
+    model_settings: optionalObject(body.model_settings, "model_settings"),
+    context_window: optionalInteger(body.context_window, "context_window", 1024, 10_000_000),
+    permission_mode: permission,
+    memfs_enabled: optionalBoolean(body.memfs_enabled, "memfs_enabled"),
+    system_prompt: optionalNullableText(body.system_prompt, "system_prompt", 100000),
+    base_tools: optionalNullableStringArray(body.base_tools, "base_tools", 128),
+    allowed_tools: optionalNullableStringArray(body.allowed_tools, "allowed_tools", 128),
+    disallowed_tools: optionalStringArray(body.disallowed_tools, "disallowed_tools", 128),
+    skill_sources: skillSources as ManagedAgentInput["skill_sources"],
+    system_info_reminder: optionalBoolean(
+      body.system_info_reminder,
+      "system_info_reminder",
+    ),
+    dreaming: optionalObject(body.dreaming, "dreaming"),
+    create_conversation: optionalBoolean(body.create_conversation, "create_conversation"),
+  }) as ManagedAgentInput;
+}
+
+function managedAgentPatch(value: unknown): Parameters<LettaService["updateAgent"]>[1] {
+  const body = requireObject(value, "Изменения агента");
+  return compact({
+    name: optionalText(body.name, "name", 1, 100),
+    description: optionalText(body.description, "description", 0, 1000),
+    model: optionalText(body.model, "model", 1, 300),
+    model_settings: optionalObject(body.model_settings, "model_settings"),
+    system: optionalText(body.system, "system", 0, 100000),
+    tags: optionalStringArray(body.tags, "tags", 64),
+    hidden: optionalBoolean(body.hidden, "hidden"),
+    context_window: optionalInteger(body.context_window, "context_window", 1024, 10_000_000),
+  });
+}
+
+function conversationInput(value: unknown): Parameters<LettaService["createConversationRecord"]>[1] {
+  const body = value == null ? {} : requireObject(value, "Диалог");
+  return compact({
+    summary: optionalText(body.summary, "summary", 0, 1000),
+    description: optionalText(body.description, "description", 0, 5000),
+    model: optionalText(body.model, "model", 1, 300),
+    model_settings: optionalObject(body.model_settings, "model_settings"),
+    context_window: optionalInteger(body.context_window, "context_window", 1024, 10_000_000),
+    hidden: optionalBoolean(body.hidden, "hidden"),
+  });
+}
+
+function conversationPatch(value: unknown): Parameters<LettaService["updateConversation"]>[1] {
+  const body = requireObject(value, "Изменения диалога");
+  return compact({
+    summary: optionalText(body.summary, "summary", 0, 1000),
+    description: optionalText(body.description, "description", 0, 5000),
+    model: optionalText(body.model, "model", 1, 300),
+    model_settings: optionalObject(body.model_settings, "model_settings"),
+    context_window: optionalInteger(body.context_window, "context_window", 1024, 10_000_000),
+    archived: optionalBoolean(body.archived, "archived"),
+  });
+}
+
+function requireObject(value: unknown, label: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw badRequest(`${label}: ожидается JSON-объект`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function requireId(value: unknown, field: string): string {
+  return requiredText(value, field, 1, 300);
+}
+
+function requiredText(
+  value: unknown,
+  field: string,
+  min: number,
+  max: number,
+): string {
+  if (typeof value !== "string") throw badRequest(`${field} должен быть строкой`);
+  const result = value.trim();
+  if (result.length < min || result.length > max) {
+    throw badRequest(`${field}: допустимая длина ${min}–${max}`);
+  }
+  return result;
+}
+
+function optionalText(
+  value: unknown,
+  field: string,
+  min: number,
+  max: number,
+): string | undefined {
+  return value === undefined ? undefined : requiredText(value, field, min, max);
+}
+
+function optionalNullableText(
+  value: unknown,
+  field: string,
+  max: number,
+): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || value === "") return null;
+  return requiredText(value, field, 0, max);
+}
+
+function optionalStringArray(
+  value: unknown,
+  field: string,
+  maxItems: number,
+): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > maxItems) {
+    throw badRequest(`${field} должен быть массивом не более ${maxItems} строк`);
+  }
+  return [...new Set(value.map((item) => requiredText(item, field, 1, 200)))];
+}
+
+function optionalNullableStringArray(
+  value: unknown,
+  field: string,
+  maxItems: number,
+): string[] | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  return optionalStringArray(value, field, maxItems);
+}
+
+function optionalObject(
+  value: unknown,
+  field: string,
+): Record<string, unknown> | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw badRequest(`${field} должен быть JSON-объектом`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function optionalInteger(
+  value: unknown,
+  field: string,
+  min: number,
+  max: number,
+): number | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) {
+    throw badRequest(`${field} должен быть целым числом от ${min} до ${max}`);
+  }
+  return value;
+}
+
+function optionalBoolean(value: unknown, field: string): boolean | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "boolean") throw badRequest(`${field} должен быть boolean`);
+  return value;
+}
+
+function optionalEnum(
+  value: unknown,
+  field: string,
+  allowed: string[],
+): string | undefined {
+  if (value === undefined) return undefined;
+  const result = requiredText(value, field, 1, 100);
+  if (!allowed.includes(result)) throw badRequest(`${field}: недопустимое значение`);
+  return result;
+}
+
+function compact<T extends Record<string, unknown>>(value: T): T {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, item]) => item !== undefined),
+  ) as T;
+}
+
+/** Stable negative queue namespace for direct WebUI conversations. */
+function adminQueueId(conversationId: string): number {
+  let hash = 2166136261;
+  for (const character of conversationId) {
+    hash ^= character.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return -Math.max(hash >>> 0, 1);
 }

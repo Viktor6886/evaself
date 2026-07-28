@@ -3,7 +3,7 @@
 # ---------------------------------------------------------------------
 # All services share one internal bridge network (evaself-network) and
 # address each other by container name. Only Caddy publishes ports on
-# the host; PostgreSQL, Valkey, Letta, Eva Core, SearXNG, the media
+# the host; PostgreSQL, Valkey, Letta, eva-agent-service, SearXNG, the media
 # service and the n8n internals are unreachable from the internet.
 #
 # Image tags come from versions.env, which is loaded by the Makefile and

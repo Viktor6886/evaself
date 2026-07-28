@@ -18,6 +18,8 @@ n8n/WebUI → HTTP + X-API-Key → eva-agent-service
 - хранит mapping в PostgreSQL;
 - управляет зашифрованным реестром OpenAI-compatible LLM;
 - обновляет models agents/conversations через SDK с rollback;
+- хранит и применяет runtime-настройки SDK из PostgreSQL;
+- управляет agents/conversations и обслуживает WebUI-чат через SDK;
 - публикует защищённый `/v1/*` API для n8n и административной консоли.
 
 Прямого Letta REST/WebSocket client в проекте нет. Скрипт
@@ -46,3 +48,16 @@ Slim и toolchain для нативной зависимости `node-pty`.
 
 Ответы содержат только `api_key_configured`; plaintext и ciphertext API Key
 не возвращаются.
+
+## SDK API
+
+- `GET/PATCH /v1/sdk/settings`
+- `POST /v1/sdk/test`
+- `GET/POST /v1/sdk/agents`
+- `GET/PATCH/DELETE /v1/sdk/agents/:agentId`
+- `GET/POST /v1/sdk/agents/:agentId/conversations`
+- `GET/PATCH /v1/sdk/conversations/:conversationId`
+- `GET/POST /v1/sdk/conversations/:conversationId/messages`
+
+Удаление agent требует `?confirm=<agentId>`. SDK 0.5.2 не предоставляет
+удаление conversation, поэтому `PATCH` меняет её признак `archived`.

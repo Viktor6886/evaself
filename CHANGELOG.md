@@ -1,6 +1,6 @@
 # История изменений
 
-## Не выпущено — управление LLM и стабилизация CI
+## Не выпущено — управление SDK, agents, LLM и стабилизация CI
 
 ### Добавлено
 
@@ -16,7 +16,15 @@
   перезапуска App Server;
 - unit-тесты шифрования, проверки провайдера, сокрытия ключа и rollback;
 - smoke test двух провайдеров, переключения модели и сохранности ID после
-  перезапуска.
+  перезапуска;
+- migration `005_sdk_settings.sql` с постоянными runtime-настройками SDK;
+- защищённый `/v1/sdk/*` API управления settings, agents, conversations и
+  сообщениями;
+- создание, изменение и подтверждаемое удаление agents из WebUI;
+- создание и архивирование conversations, просмотр истории и прямой чат;
+- экран «Настройки SDK» для памяти, tools, skills, permissions, dreaming,
+  model settings, пула сессий и таймаутов;
+- unit- и stack smoke-тесты настроек SDK, административных операций и чата.
 
 ### Изменено
 
@@ -31,7 +39,9 @@
   003; CI применяет весь набор миграций три раза;
 - архитектурная проверка Agent SDK больше не принимает собственные маршруты
   Evaself за самописный Letta REST client;
-- пользовательские и административные материалы переведены на русский.
+- пользовательские и административные материалы переведены на русский;
+- из стека удалены установка стороннего host-агента, его systemd unit,
+  команды, вопросы установщика и интеграция с backup/restore/doctor.
 
 ## 0.2.0 — Letta Agent SDK
 
@@ -45,4 +55,4 @@
 ## 0.1.0 — первоначальный стек
 
 Первый self-hosted стек с PostgreSQL, Valkey, Caddy, n8n, NocoDB, WebApp,
-Media Service, SearXNG, Hermes, backup, restore, update и rollback.
+Media Service, SearXNG, backup, restore, update и rollback.

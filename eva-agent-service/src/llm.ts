@@ -334,7 +334,9 @@ export class LlmManager {
     if (!check.ok) throw badRequest(`Конфигурация не прошла проверку: ${check.message}`);
 
     const previous = rollbackOverride ?? await this.db.getActiveLlmProvider();
-    const mappings = await this.db.listModelMappings();
+    // App Server is the source of truth here: this includes both Telegram
+    // agents mapped in PostgreSQL and standalone agents created from WebUI.
+    const mappings = await this.letta.listAllModelMappings();
     const candidateKey = this.secretBox.decrypt(candidate.api_key_encrypted);
     const candidateHandle = modelHandle(candidate.model);
 

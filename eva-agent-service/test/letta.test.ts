@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { extractText, summarizeStream, telegramTag } from "../dist/letta.js";
+import { extractText, LettaService, summarizeStream, telegramTag } from "../dist/letta.js";
 
 test("extractText handles plain strings", () => {
   assert.equal(extractText("hello"), "hello");
@@ -70,4 +70,47 @@ test("summarizeStream on an empty stream is safe", () => {
 
 test("telegram tags are stable", () => {
   assert.equal(telegramTag(700001), "tg:700001");
+});
+
+test("model switching inventories standalone WebUI agents too", async () => {
+  const service = new LettaService(
+    {
+      appServerUrl: "ws://example.invalid/ws",
+      appServerToken: "",
+      appServerRequestTimeoutMs: 1000,
+      model: "",
+      sessionPoolSize: 5,
+      sessionIdleMs: 1000,
+      turnTimeoutMs: 1000,
+    } as never,
+    {
+      debug() {},
+      info() {},
+      warn() {},
+      error() {},
+    },
+    "persona",
+  );
+  (service as unknown as { client: unknown }).client = {
+    agents: {
+      list: async () => [
+        { id: "agent-telegram" },
+        { id: "agent-created-in-webui" },
+      ],
+    },
+    conversations: {
+      list: async ({ agentId }: { agentId: string }) =>
+        agentId === "agent-telegram"
+          ? [{ id: "conv-telegram" }]
+          : [{ id: "conv-webui-a" }, { id: "conv-webui-b" }],
+    },
+  };
+
+  assert.deepEqual(await service.listAllModelMappings(), [
+    { agentId: "agent-telegram", conversationIds: ["conv-telegram"] },
+    {
+      agentId: "agent-created-in-webui",
+      conversationIds: ["conv-webui-a", "conv-webui-b"],
+    },
+  ]);
 });

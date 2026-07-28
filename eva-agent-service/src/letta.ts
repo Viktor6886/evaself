@@ -10,10 +10,13 @@
 import { LettaAgentClient } from "@letta-ai/letta-agent-sdk";
 import type {
   CreateAgentOptions,
+  DreamingOptions,
   LettaCodeSession,
   ListMessagesResult,
+  PermissionMode,
   SDKMessage,
   SendMessage,
+  SkillSource,
 } from "@letta-ai/letta-agent-sdk";
 
 import type { Config } from "./config.js";
@@ -43,6 +46,54 @@ interface PooledSession {
   lastUsedAt: number;
   /** Set once bootstrapState() has reconciled a session resumed after a restart. */
   recovered: boolean;
+}
+
+export interface RuntimeSdkSettings {
+  agent_name_prefix: string;
+  default_description: string;
+  default_persona: string;
+  default_human_template: string;
+  default_tags: string[];
+  permissionMode: PermissionMode;
+  memfs_enabled: boolean;
+  system_prompt: string | null;
+  base_tools: string[] | null;
+  allowed_tools: string[] | null;
+  disallowed_tools: string[];
+  skillSources: SkillSource[];
+  system_info_reminder: boolean;
+  dreaming: Record<string, unknown>;
+  model_settings: Record<string, unknown>;
+  default_context_window: number | null;
+  conversation_summary: string;
+  conversation_description: string;
+  conversation_hidden: boolean;
+  create_conversation: boolean;
+  session_pool_size: number;
+  session_idle_ms: number;
+  turn_timeout_ms: number;
+  app_server_request_timeout_ms: number;
+}
+
+export interface ManagedAgentInput {
+  name: string;
+  description?: string;
+  persona?: string;
+  human?: string;
+  tags?: string[];
+  model?: string;
+  model_settings?: Record<string, unknown>;
+  context_window?: number | null;
+  permission_mode?: PermissionMode;
+  memfs_enabled?: boolean;
+  system_prompt?: string | null;
+  base_tools?: string[] | null;
+  allowed_tools?: string[] | null;
+  disallowed_tools?: string[];
+  skill_sources?: SkillSource[];
+  system_info_reminder?: boolean;
+  dreaming?: Record<string, unknown>;
+  create_conversation?: boolean;
 }
 
 /**
@@ -133,14 +184,41 @@ export class LettaService {
 
   private readonly config: Config;
   private readonly logger: Logger;
-  private readonly persona: string;
+  private persona: string;
   private defaultModel: string;
+  private runtime: RuntimeSdkSettings;
 
   constructor(config: Config, logger: Logger, persona: string) {
     this.config = config;
     this.logger = logger;
     this.persona = persona;
     this.defaultModel = config.model;
+    this.runtime = {
+      agent_name_prefix: "eva",
+      default_description: "Агент Evaself",
+      default_persona: persona,
+      default_human_template: "Имя: {{display_name}}\nTelegram ID: {{telegram_id}}",
+      default_tags: [EVASELF_TAG],
+      permissionMode: "unrestricted",
+      memfs_enabled: true,
+      system_prompt: null,
+      base_tools: null,
+      allowed_tools: null,
+      disallowed_tools: [],
+      skillSources: ["bundled", "global", "agent", "project"],
+      system_info_reminder: false,
+      dreaming: { trigger: "off" },
+      model_settings: {},
+      default_context_window: null,
+      conversation_summary: "Новый диалог",
+      conversation_description: "",
+      conversation_hidden: false,
+      create_conversation: true,
+      session_pool_size: config.sessionPoolSize,
+      session_idle_ms: config.sessionIdleMs,
+      turn_timeout_ms: config.turnTimeoutMs,
+      app_server_request_timeout_ms: config.appServerRequestTimeoutMs,
+    };
     this.client = this.createClient();
   }
 
@@ -149,7 +227,7 @@ export class LettaService {
       backend: "remote",
       url: this.config.appServerUrl,
       ...(this.config.appServerToken ? { authToken: this.config.appServerToken } : {}),
-      requestTimeoutMs: this.config.appServerRequestTimeoutMs,
+      requestTimeoutMs: this.runtime.app_server_request_timeout_ms,
     });
   }
 
@@ -160,6 +238,19 @@ export class LettaService {
 
   setDefaultModel(model: string): void {
     this.defaultModel = model;
+  }
+
+  get currentPersona(): string {
+    return this.persona;
+  }
+
+  applySdkSettings(settings: RuntimeSdkSettings): void {
+    const reconnect =
+      settings.app_server_request_timeout_ms !== this.runtime.app_server_request_timeout_ms;
+    this.runtime = settings;
+    this.persona = settings.default_persona || this.persona;
+    this.closeAllSessions();
+    if (reconnect) this.client = this.createClient();
   }
 
   // -----------------------------------------------------------------
@@ -219,21 +310,49 @@ export class LettaService {
     human?: string;
   }): Promise<string> {
     const options: CreateAgentOptions = {
-      name: `eva-${input.telegramId}`,
-      description: `Eva companion agent for Telegram user ${input.telegramId}`,
-      persona: this.persona,
+      name: `${this.runtime.agent_name_prefix}-${input.telegramId}`,
+      description:
+        this.runtime.default_description ||
+        `Агент Evaself для пользователя Telegram ${input.telegramId}`,
+      persona: this.runtime.default_persona || this.persona,
       human:
         input.human ??
-        `Name (from Telegram): ${input.displayName}\nTelegram ID: ${input.telegramId}`,
-      tags: [EVASELF_TAG, EVA_AGENT_TAG, telegramTag(input.telegramId)],
-      // Eva is a companion, not a coding agent: no shell, no file editing.
-      permissionMode: "unrestricted",
-      memfs: true,
+        this.runtime.default_human_template
+          .replaceAll("{{display_name}}", input.displayName)
+          .replaceAll("{{telegram_id}}", String(input.telegramId)),
+      tags: [...new Set([
+        ...this.runtime.default_tags,
+        EVASELF_TAG,
+        EVA_AGENT_TAG,
+        telegramTag(input.telegramId),
+      ])],
+      permissionMode: this.runtime.permissionMode,
+      memfs: this.runtime.memfs_enabled,
+      skillSources: this.runtime.skillSources,
+      systemInfoReminder: this.runtime.system_info_reminder,
+      dreaming: this.runtime.dreaming as DreamingOptions,
+      ...(this.runtime.system_prompt ? { systemPrompt: this.runtime.system_prompt } : {}),
+      ...(this.runtime.base_tools !== null ? { baseTools: this.runtime.base_tools } : {}),
+      ...(this.runtime.allowed_tools !== null ? { allowedTools: this.runtime.allowed_tools } : {}),
+      disallowedTools: this.runtime.disallowed_tools,
       ...(this.defaultModel ? { model: this.defaultModel } : {}),
     };
 
     try {
       const agentId = await this.client.createAgent(options);
+      if (
+        Object.keys(this.runtime.model_settings).length > 0 ||
+        this.runtime.default_context_window !== null
+      ) {
+        await this.client.agents.update(agentId, {
+          ...(Object.keys(this.runtime.model_settings).length > 0
+            ? { modelSettings: this.runtime.model_settings }
+            : {}),
+          ...(this.runtime.default_context_window !== null
+            ? { contextWindowLimit: this.runtime.default_context_window }
+            : {}),
+        } as never);
+      }
       this.logger.info("created agent", { telegramId: input.telegramId, agentId });
       return agentId;
     } catch (error) {
@@ -253,12 +372,75 @@ export class LettaService {
     }
   }
 
+  async getConversation(conversationId: string): Promise<unknown> {
+    try {
+      return await this.client.conversations.retrieve(conversationId);
+    } catch (error) {
+      throw toEvaError(error, `retrieving conversation ${conversationId}`);
+    }
+  }
+
+  async createConversationRecord(
+    agentId: string,
+    input: {
+      summary?: string;
+      description?: string;
+      model?: string;
+      model_settings?: Record<string, unknown>;
+      context_window?: number | null;
+      hidden?: boolean;
+    } = {},
+  ): Promise<unknown> {
+    try {
+      const modelSettings = input.model_settings ?? this.runtime.model_settings;
+      const contextWindow = input.context_window ?? this.runtime.default_context_window;
+      return await this.client.conversations.create({
+        agentId,
+        summary: input.summary ?? this.runtime.conversation_summary,
+        description: input.description ?? this.runtime.conversation_description,
+        ...(input.model ?? this.defaultModel ? { model: input.model ?? this.defaultModel } : {}),
+        ...(Object.keys(modelSettings).length > 0 ? { modelSettings } : {}),
+        ...(contextWindow !== null ? { contextWindowLimit: contextWindow } : {}),
+        hidden: input.hidden ?? this.runtime.conversation_hidden,
+      } as never);
+    } catch (error) {
+      throw toEvaError(error, `creating a conversation for ${agentId}`);
+    }
+  }
+
+  async updateConversation(
+    conversationId: string,
+    input: {
+      summary?: string;
+      description?: string;
+      model?: string;
+      model_settings?: Record<string, unknown>;
+      context_window?: number | null;
+      archived?: boolean;
+    },
+  ): Promise<unknown> {
+    this.closeSession(conversationId);
+    try {
+      return await this.client.conversations.update(conversationId, {
+        ...(input.summary !== undefined ? { summary: input.summary } : {}),
+        ...(input.description !== undefined ? { description: input.description } : {}),
+        ...(input.model !== undefined ? { model: input.model } : {}),
+        ...(input.model_settings !== undefined ? { modelSettings: input.model_settings } : {}),
+        ...(input.context_window !== undefined
+          ? { contextWindowLimit: input.context_window }
+          : {}),
+        ...(input.archived !== undefined ? { archived: input.archived } : {}),
+      } as never);
+    } catch (error) {
+      throw toEvaError(error, `updating conversation ${conversationId}`);
+    }
+  }
+
   /** Open a brand new conversation and return its id. */
   async createConversation(agentId: string): Promise<string> {
-    const session = this.client.createSession(agentId, {});
     try {
-      await this.initialize(session);
-      const conversationId = session.conversationId;
+      const conversation = await this.createConversationRecord(agentId) as { id?: string };
+      const conversationId = conversation.id;
       if (!conversationId) {
         throw toEvaError(new Error("app server returned no conversation id"), "creating a conversation");
       }
@@ -266,8 +448,6 @@ export class LettaService {
       return conversationId;
     } catch (error) {
       throw toEvaError(error, "creating a conversation");
-    } finally {
-      session.close();
     }
   }
 
@@ -332,11 +512,11 @@ export class LettaService {
   private evictIdleSessions(): void {
     const now = Date.now();
     for (const [id, pooled] of this.sessions) {
-      if (now - pooled.lastUsedAt > this.config.sessionIdleMs) {
+      if (now - pooled.lastUsedAt > this.runtime.session_idle_ms) {
         this.closeSession(id);
       }
     }
-    while (this.sessions.size >= this.config.sessionPoolSize) {
+    while (this.sessions.size >= this.runtime.session_pool_size) {
       let oldestId: string | null = null;
       let oldestAt = Number.POSITIVE_INFINITY;
       for (const [id, pooled] of this.sessions) {
@@ -392,13 +572,13 @@ export class LettaService {
       await session.send(message);
 
       const stream = session.stream();
-      const deadline = startedAt + this.config.turnTimeoutMs;
+      const deadline = startedAt + this.runtime.turn_timeout_ms;
 
       while (true) {
         const remaining = deadline - Date.now();
         if (remaining <= 0) {
           await session.abort().catch(() => undefined);
-          throw turnTimeout(`the agent did not finish within ${this.config.turnTimeoutMs} ms`);
+          throw turnTimeout(`the agent did not finish within ${this.runtime.turn_timeout_ms} ms`);
         }
 
         const next = await withTimeout(stream.next(), remaining);
@@ -454,6 +634,23 @@ export class LettaService {
     }
   }
 
+  /** Inventory every live App Server agent, including agents created only in WebUI. */
+  async listAllModelMappings(): Promise<Array<{ agentId: string; conversationIds: string[] }>> {
+    const agents = await this.listAgents() as Array<{ id?: string }>;
+    const mappings: Array<{ agentId: string; conversationIds: string[] }> = [];
+    for (const agent of agents) {
+      if (!agent.id) continue;
+      const conversations = await this.listConversations(agent.id) as Array<{ id?: string }>;
+      mappings.push({
+        agentId: agent.id,
+        conversationIds: conversations
+          .map((conversation) => conversation.id)
+          .filter((id): id is string => Boolean(id)),
+      });
+    }
+    return mappings;
+  }
+
   async applyModelToMappings(
     mappings: Array<{ agentId: string; conversationIds: string[] }>,
     model: string,
@@ -478,6 +675,107 @@ export class LettaService {
       } catch (error) {
         throw toEvaError(error, `updating model for agent ${mapping.agentId}`);
       }
+    }
+  }
+
+  async getAgent(agentId: string): Promise<unknown> {
+    try {
+      return await this.client.agents.retrieve(agentId);
+    } catch (error) {
+      throw toEvaError(error, `retrieving agent ${agentId}`);
+    }
+  }
+
+  async updateAgent(
+    agentId: string,
+    input: {
+      name?: string;
+      description?: string;
+      model?: string;
+      model_settings?: Record<string, unknown>;
+      system?: string;
+      tags?: string[];
+      hidden?: boolean;
+      context_window?: number | null;
+    },
+  ): Promise<unknown> {
+    try {
+      this.closeAllSessions();
+      return await this.client.agents.update(agentId, {
+        ...(input.name !== undefined ? { name: input.name } : {}),
+        ...(input.description !== undefined ? { description: input.description } : {}),
+        ...(input.model !== undefined ? { model: input.model } : {}),
+        ...(input.model_settings !== undefined ? { modelSettings: input.model_settings } : {}),
+        ...(input.system !== undefined ? { system: input.system } : {}),
+        ...(input.tags !== undefined ? { tags: input.tags } : {}),
+        ...(input.hidden !== undefined ? { hidden: input.hidden } : {}),
+        ...(input.context_window !== undefined
+          ? { contextWindowLimit: input.context_window }
+          : {}),
+      } as never);
+    } catch (error) {
+      throw toEvaError(error, `updating agent ${agentId}`);
+    }
+  }
+
+  async deleteAgent(agentId: string): Promise<void> {
+    try {
+      this.closeAllSessions();
+      await this.client.agents.delete(agentId);
+      this.logger.warn("agent deleted by administrator", { agentId });
+    } catch (error) {
+      throw toEvaError(error, `deleting agent ${agentId}`);
+    }
+  }
+
+  async createManagedAgent(input: ManagedAgentInput): Promise<{
+    agent: unknown;
+    conversation: unknown | null;
+  }> {
+    const options: CreateAgentOptions = {
+      name: input.name,
+      description: input.description ?? this.runtime.default_description,
+      persona: input.persona ?? this.runtime.default_persona,
+      human: input.human ?? "",
+      tags: input.tags ?? this.runtime.default_tags,
+      permissionMode: input.permission_mode ?? this.runtime.permissionMode,
+      memfs: input.memfs_enabled ?? this.runtime.memfs_enabled,
+      skillSources: input.skill_sources ?? this.runtime.skillSources,
+      systemInfoReminder:
+        input.system_info_reminder ?? this.runtime.system_info_reminder,
+      dreaming: (input.dreaming ?? this.runtime.dreaming) as DreamingOptions,
+      ...(input.system_prompt ?? this.runtime.system_prompt
+        ? { systemPrompt: input.system_prompt ?? this.runtime.system_prompt! }
+        : {}),
+      ...((input.base_tools ?? this.runtime.base_tools) !== null
+        ? { baseTools: input.base_tools ?? this.runtime.base_tools! }
+        : {}),
+      ...((input.allowed_tools ?? this.runtime.allowed_tools) !== null
+        ? { allowedTools: input.allowed_tools ?? this.runtime.allowed_tools! }
+        : {}),
+      disallowedTools: input.disallowed_tools ?? this.runtime.disallowed_tools,
+      ...(input.model ?? this.defaultModel ? { model: input.model ?? this.defaultModel } : {}),
+    };
+
+    try {
+      const agentId = await this.client.createAgent(options);
+      const modelSettings = input.model_settings ?? this.runtime.model_settings;
+      const contextWindow = input.context_window ?? this.runtime.default_context_window;
+      if (Object.keys(modelSettings).length > 0 || contextWindow !== null) {
+        await this.client.agents.update(agentId, {
+          ...(Object.keys(modelSettings).length > 0 ? { modelSettings } : {}),
+          ...(contextWindow !== null ? { contextWindowLimit: contextWindow } : {}),
+        } as never);
+      }
+      const agent = await this.client.agents.retrieve(agentId);
+      const shouldCreate = input.create_conversation ?? this.runtime.create_conversation;
+      const conversation = shouldCreate
+        ? await this.createConversationRecord(agentId)
+        : null;
+      this.logger.info("created agent from admin API", { agentId });
+      return { agent, conversation };
+    } catch (error) {
+      throw toEvaError(error, "creating an administrative agent");
     }
   }
 

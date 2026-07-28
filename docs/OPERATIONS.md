@@ -11,7 +11,7 @@ make logs s=letta-app-server
 ```
 
 `make doctor` возвращает ненулевой код при критической ошибке, поэтому его
-можно запускать из cron или Hermes.
+можно запускать из cron или systemd timer.
 
 ## LLM
 
@@ -33,12 +33,28 @@ make logs s=letta-app-server
 официальный Letta CLI, а `eva-agent-service` координирует restart,
 healthcheck и rollback.
 
+## Agents, conversations и чат
+
+В административной консоли:
+
+1. откройте «Агенты» и создайте agent;
+2. проверьте или измените его model, context window, tags и system prompt;
+3. создайте conversation;
+4. откройте «Чат» и отправьте проверочное сообщение;
+5. ненужный диалог архивируйте, а agent удаляйте только после backup.
+
+Раздел «Настройки SDK» задаёт defaults новых объектов, memory filesystem,
+tools, skill sources, permission mode, dreaming и параметры пула сессий.
+Сохранение настроек закрывает активные сессии; следующий запрос безопасно
+переподключает их к той же conversation.
+
 ## База и связь объектов
 
 ```bash
 make shell-db
 SELECT * FROM v_agent_runtime;
 SELECT name, model, is_active, last_check_ok FROM llm_providers;
+SELECT * FROM sdk_settings;
 ```
 
 Если у пользователя нет conversation, следующий `users/ensure` создаст его,

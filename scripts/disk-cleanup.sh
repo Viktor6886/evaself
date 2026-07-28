@@ -73,9 +73,6 @@ else
 	[ "$REMOVED" -gt 0 ] && ok "removed $REMOVED backup(s) older than ${RETENTION} days" || info "all backups are within retention"
 fi
 
-# Hermes config snapshots taken by update-hermes accumulate silently.
-find "$BACKUP_DIR" -maxdepth 1 -name 'hermes-config-*.tar.gz' -mtime +30 -delete 2>/dev/null || true
-
 # ---------------------------------------------------------------------
 step "APT cache"
 # ---------------------------------------------------------------------

@@ -214,12 +214,7 @@ done
 "$SCRIPT_DIR/n8n-import.sh" || warn "импорт workflow не удался — после запуска n8n выполните make import-n8n"
 
 # =====================================================================
-# 11. Hermes Agent (installed into Ubuntu, not into Docker)
-# =====================================================================
-"$SCRIPT_DIR/install-hermes.sh" || warn "Hermes не установлен — запустите scripts/install-hermes.sh вручную"
-
-# =====================================================================
-# 12. systemd units (daily backup timer)
+# 11. systemd units (daily backup timer)
 # =====================================================================
 step "Установка systemd units"
 install -m 0644 "$ROOT_DIR/systemd/evaself-backup.service" /etc/systemd/system/
@@ -242,12 +237,12 @@ mkdir -p "${BACKUP_DIR:-/var/backups/evaself}"
 chmod 700 "${BACKUP_DIR:-/var/backups/evaself}"
 
 # =====================================================================
-# 13. verification
+# 12. verification
 # =====================================================================
 "$SCRIPT_DIR/doctor.sh" || warn "часть проверок не прошла — смотрите сообщения выше"
 
 # =====================================================================
-# 14. summary
+# 13. summary
 # =====================================================================
 step "Evaself установлена"
 cat <<SUMMARY
@@ -272,7 +267,7 @@ cat <<SUMMARY
     2. Зарегистрируйте Telegram webhook: scripts/telegram-webhook.sh set
     3. Активируйте минимальный workflow в редакторе n8n.
     4. Подключите NocoDB к базе eva: scripts/nocodb-connect.sh
-    5. При необходимости настройте Hermes: make configure-hermes
+    5. Настройте агентов и проверьте чат в административной консоли Letta.
     6. Для голоса заполните MEDIA_ASR_* / MEDIA_TTS_* и выполните make restart
 
   ${C_BOLD}Основные команды${C_RESET}

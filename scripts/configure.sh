@@ -78,7 +78,7 @@ info "Все домены уже должны указывать на IP это�
 # 2. Telegram
 # =====================================================================
 step "Telegram"
-say "  Ева и Hermes используют двух разных bots. Создайте их через @BotFather."
+say "  Создайте Telegram bot Евы через @BotFather."
 echo
 
 while :; do
@@ -87,14 +87,7 @@ while :; do
 	warn "token выглядит как 123456789:AAE...; повторите ввод"
 done
 
-while :; do
-	ask HERMES_TELEGRAM_BOT_TOKEN "Token bot Hermes" "$(current HERMES_TELEGRAM_BOT_TOKEN || true)"
-	is_telegram_token "$HERMES_TELEGRAM_BOT_TOKEN" && break
-	warn "token выглядит как 123456789:AAE...; повторите ввод"
-done
-
 say "  Числовой Telegram ID можно узнать у @userinfobot."
-say "  Hermes будет принимать команды только от этого ID."
 while :; do
 	ask OWNER_TELEGRAM_ID "Telegram ID владельца" "$(current OWNER_TELEGRAM_ID || true)"
 	is_number "$OWNER_TELEGRAM_ID" && break
@@ -237,7 +230,6 @@ set_env DOMAIN_STATUS  "$DOMAIN_STATUS"
 set_env ACME_EMAIL     "$ACME_EMAIL"
 
 set_env EVA_TELEGRAM_BOT_TOKEN      "$EVA_TELEGRAM_BOT_TOKEN"
-set_env HERMES_TELEGRAM_BOT_TOKEN   "$HERMES_TELEGRAM_BOT_TOKEN"
 set_env OWNER_TELEGRAM_ID           "$OWNER_TELEGRAM_ID"
 set_env EVA_TELEGRAM_WEBHOOK_SECRET "$EVA_TELEGRAM_WEBHOOK_SECRET"
 

@@ -184,23 +184,7 @@ if [ -d "$SRC/n8n/workflows" ]; then
 fi
 
 # ---------------------------------------------------------------------
-# 8. Hermes
-# ---------------------------------------------------------------------
-step "Hermes"
-if [ -f "$SRC/config/hermes.tar.gz" ]; then
-	tar xzf "$SRC/config/hermes.tar.gz" -C /root/
-	ok "Hermes configuration restored to /root/.hermes"
-	if [ -f "$SRC/config/evaself-hermes.service" ]; then
-		install -m 0644 "$SRC/config/evaself-hermes.service" /etc/systemd/system/
-		systemctl daemon-reload
-		ok "Hermes systemd unit restored (start it with 'make start-hermes')"
-	fi
-else
-	info "the archive contains no Hermes configuration"
-fi
-
-# ---------------------------------------------------------------------
-# 9. verify
+# 8. verify
 # ---------------------------------------------------------------------
 "$SCRIPT_DIR/doctor.sh" || warn "post-restore checks reported problems"
 

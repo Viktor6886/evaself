@@ -15,6 +15,7 @@ import { LettaService } from "./letta.js";
 import { LlmManager } from "./llm.js";
 import { createLogger } from "./logger.js";
 import { UserQueue } from "./queue.js";
+import { SdkSettingsManager } from "./sdk-settings.js";
 import { buildServer, VERSION } from "./server.js";
 
 async function main(): Promise<void> {
@@ -39,6 +40,15 @@ async function main(): Promise<void> {
 
   const queue = new UserQueue(redis, { ttlSeconds: config.lockTtlSeconds });
   const letta = new LettaService(config, logger, persona);
+  const sdk = new SdkSettingsManager(config, db, letta);
+  try {
+    await sdk.initialize();
+  } catch (error) {
+    // Во время первого запуска миграции могут ещё применяться контейнером PostgreSQL.
+    logger.warn("Настройки SDK пока не загружены, используются безопасные defaults из .env", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
   const llm = new LlmManager(config, db, letta, logger);
   try {
     await llm.initializeDefaultModel();
@@ -55,6 +65,7 @@ async function main(): Promise<void> {
     logger,
     db,
     letta,
+    sdk,
     llm,
     queue,
     redisPing: async () => (await redis.ping()) === "PONG",

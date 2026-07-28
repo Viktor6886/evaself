@@ -15,7 +15,7 @@
 #   letta/        the agent/conversation inventory as the App Server and
 #                 PostgreSQL each see it
 #   n8n/          workflow + credential exports, and N8N_ENCRYPTION_KEY
-#   config/       .env, Caddyfile, versions.env, hermes config
+#   config/       .env, Caddyfile, versions.env
 #   content/      skills/, library/, webapp/
 #   MANIFEST      versions, git commit, checksums
 # =====================================================================
@@ -145,16 +145,6 @@ cp "$ROOT_DIR/Caddyfile"       "$WORK/config/Caddyfile"
 cp "$VERSIONS_FILE"            "$WORK/config/versions.env"
 cp "$ROOT_DIR/compose.yaml"    "$WORK/config/compose.yaml"
 chmod 600 "$WORK/config/.env"
-
-HERMES_HOME="${HERMES_HOME:-/root/.hermes}"
-if [ -d "$HERMES_HOME" ]; then
-	tar czf "$WORK/config/hermes.tar.gz" -C "$(dirname "$HERMES_HOME")" "$(basename "$HERMES_HOME")" 2>/dev/null || true
-	ok "конфигурация Hermes сохранена"
-else
-	info "конфигурация Hermes в $HERMES_HOME отсутствует"
-fi
-[ -f /etc/systemd/system/evaself-hermes.service ] && \
-	cp /etc/systemd/system/evaself-hermes.service "$WORK/config/" 2>/dev/null || true
 
 tar czf "$WORK/content/skills.tar.gz"  -C "$ROOT_DIR" skills
 tar czf "$WORK/content/library.tar.gz" -C "$ROOT_DIR" library

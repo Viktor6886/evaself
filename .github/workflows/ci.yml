@@ -176,7 +176,7 @@ jobs:
               'users','agent_links','agent_conversations','subscriptions','payments',
               'quotas','usage_counters','onboarding_fields','test_results','tasks',
               'referrals','partner_analysis_links','notifications','crisis_events',
-              'schema_migrations','llm_providers'
+              'schema_migrations','llm_providers','sdk_settings'
             ]) AS t
             WHERE to_regclass('public.' || t) IS NULL;
             IF missing IS NOT NULL THEN RAISE EXCEPTION 'missing tables: %', missing; END IF;
@@ -351,6 +351,37 @@ jobs:
                   res.end(JSON.stringify({object:'list',data:models}));
                   return;
                 }
+                if (req.url === '/v1/chat/completions' && req.method === 'POST') {
+                  let raw = '';
+                  req.on('data', chunk => raw += chunk);
+                  req.on('end', () => {
+                    const body = JSON.parse(raw || '{}');
+                    const id = 'chatcmpl-evaself-ci';
+                    if (body.stream) {
+                      res.writeHead(200, {'Content-Type':'text/event-stream'});
+                      res.write('data: ' + JSON.stringify({
+                        id, object:'chat.completion.chunk', created:Math.floor(Date.now()/1000),
+                        model:body.model || 'ci-model-b',
+                        choices:[{index:0,delta:{role:'assistant',content:'CI chat ok'},finish_reason:null}],
+                      }) + '\n\n');
+                      res.write('data: ' + JSON.stringify({
+                        id, object:'chat.completion.chunk', created:Math.floor(Date.now()/1000),
+                        model:body.model || 'ci-model-b',
+                        choices:[{index:0,delta:{},finish_reason:'stop'}],
+                        usage:{prompt_tokens:10,completion_tokens:3,total_tokens:13},
+                      }) + '\n\n');
+                      res.end('data: [DONE]\n\n');
+                    } else {
+                      res.end(JSON.stringify({
+                        id, object:'chat.completion', created:Math.floor(Date.now()/1000),
+                        model:body.model || 'ci-model-b',
+                        choices:[{index:0,message:{role:'assistant',content:'CI chat ok'},finish_reason:'stop'}],
+                        usage:{prompt_tokens:10,completion_tokens:3,total_tokens:13},
+                      }));
+                    }
+                  });
+                  return;
+                }
                 res.statusCode = 404;
                 res.end(JSON.stringify({error:{message:'not found'}}));
               }).listen(9000,'0.0.0.0');
@@ -381,6 +412,89 @@ jobs:
           echo "$RESULT"
           echo "$RESULT" | grep -q '"agent_id"'
           echo "$RESULT" | grep -q '"conversation_id"'
+
+      - name: WebUI API manages SDK settings, agents and conversations
+        run: |
+          docker compose --env-file versions.env --env-file .env \
+            exec -T eva-agent-service node -e "
+              const key = process.env.EVA_AGENT_API_KEY;
+              const base = 'http://127.0.0.1:8070';
+              async function call(path, options = {}) {
+                const response = await fetch(base + path, {
+                  headers: {
+                    'X-API-Key': key,
+                    ...(options.body ? {'Content-Type': 'application/json'} : {}),
+                  },
+                  ...options,
+                });
+                const body = response.status === 204 ? null : await response.json();
+                if (!response.ok) throw new Error(path + ': ' + JSON.stringify(body));
+                return body;
+              }
+              (async () => {
+                const settings = await call('/v1/sdk/settings');
+                if (!settings.settings.app_server_auth_configured) {
+                  throw new Error('App Server token presence is not reported');
+                }
+                const serialized = JSON.stringify(settings);
+                if (serialized.includes(process.env.LETTA_APP_SERVER_TOKEN)) {
+                  throw new Error('App Server token leaked through SDK settings');
+                }
+                const updated = await call('/v1/sdk/settings', {
+                  method: 'PATCH',
+                  body: JSON.stringify({
+                    agent_name_prefix: 'ci-eva',
+                    session_pool_size: 17,
+                    permission_mode: 'standard',
+                  }),
+                });
+                if (updated.settings.session_pool_size !== 17) {
+                  throw new Error('SDK settings were not applied');
+                }
+                const created = await call('/v1/sdk/agents', {
+                  method: 'POST',
+                  body: JSON.stringify({
+                    name: 'ci-admin-agent',
+                    description: 'Создано smoke test',
+                    tags: ['evaself', 'ci-admin'],
+                    permission_mode: 'standard',
+                    create_conversation: true,
+                  }),
+                });
+                const agentId = created.agent.id;
+                const conversationId = created.conversation.id;
+                const conversations = await call(
+                  '/v1/sdk/agents/' + encodeURIComponent(agentId) + '/conversations',
+                );
+                if (!conversations.conversations.some((item) => item.id === conversationId)) {
+                  throw new Error('created conversation is not listed');
+                }
+                await call('/v1/sdk/agents/' + encodeURIComponent(agentId), {
+                  method: 'PATCH',
+                  body: JSON.stringify({description: 'Изменено через WebUI API'}),
+                });
+                await call('/v1/sdk/conversations/' + encodeURIComponent(conversationId), {
+                  method: 'PATCH',
+                  body: JSON.stringify({archived: true}),
+                });
+                await call(
+                  '/v1/sdk/agents/' + encodeURIComponent(agentId) +
+                    '?confirm=' + encodeURIComponent(agentId),
+                  {method: 'DELETE'},
+                );
+                const listed = await call('/v1/sdk/agents');
+                if (listed.agents.some((item) => item.id === agentId)) {
+                  throw new Error('agent was not deleted');
+                }
+                console.log(JSON.stringify({
+                  settings_saved: true,
+                  agent_created: true,
+                  conversation_archived: true,
+                  agent_deleted: true,
+                }));
+              })().catch((error) => { console.error(error); process.exit(1); });
+            " | tee /tmp/sdk-admin
+          grep -q '"agent_deleted":true' /tmp/sdk-admin
 
       - name: The mapping is persisted in PostgreSQL
         run: |
@@ -431,6 +545,14 @@ jobs:
               (async () => {
                 const first = await create('CI provider A', 'ci-model-a');
                 const second = await create('CI provider B', 'ci-model-b');
+                const standalone = (await call('/v1/sdk/agents', {
+                  method:'POST',
+                  body:JSON.stringify({
+                    name:'ci-model-switch-agent',
+                    tags:['evaself','ci-switch'],
+                    create_conversation:true,
+                  }),
+                })).agent;
                 const tested = await call('/v1/llm/providers/' + first.id + '/test', {method:'POST'});
                 if (!tested.result.models.some((m) => m.id === 'ci-model-a')) {
                   throw new Error('/models did not return ci-model-a');
@@ -445,16 +567,59 @@ jobs:
                 if (!active.provider.is_active || active.provider.model_handle !== 'openai/ci-model-b') {
                   throw new Error('second provider was not activated');
                 }
+                const switchedAgent = await call(
+                  '/v1/sdk/agents/' + encodeURIComponent(standalone.id),
+                );
+                if (switchedAgent.agent.model !== 'openai/ci-model-b') {
+                  throw new Error('standalone WebUI agent was not switched');
+                }
+                await call(
+                  '/v1/sdk/agents/' + encodeURIComponent(standalone.id) +
+                    '?confirm=' + encodeURIComponent(standalone.id),
+                  {method:'DELETE'},
+                );
                 console.log(JSON.stringify({
                   provider_ids: [first.id, second.id],
                   active: active.provider.model_handle,
                   models: tested.result.models.map((m) => m.id),
                   secret_hidden: true,
+                  standalone_updated: true,
                 }));
               })().catch((error) => { console.error(error); process.exit(1); });
             " | tee /tmp/llm-switch
           grep -q '"active":"openai/ci-model-b"' /tmp/llm-switch
           grep -q '"secret_hidden":true' /tmp/llm-switch
+          grep -q '"standalone_updated":true' /tmp/llm-switch
+
+      - name: WebUI chat completes a real SDK turn through the test LLM
+        run: |
+          CONVERSATION_ID="$(cut -d'|' -f3 /tmp/mapping-before-llm)"
+          docker compose --env-file versions.env --env-file .env \
+            exec -T -e CONVERSATION_ID="$CONVERSATION_ID" eva-agent-service node -e "
+              const key = process.env.EVA_AGENT_API_KEY;
+              const conversationId = process.env.CONVERSATION_ID;
+              fetch(
+                'http://127.0.0.1:8070/v1/sdk/conversations/' +
+                  encodeURIComponent(conversationId) + '/messages',
+                {
+                  method:'POST',
+                  headers:{'Content-Type':'application/json','X-API-Key':key},
+                  body:JSON.stringify({text:'Ответь коротко для smoke test'}),
+                },
+              ).then(async (response) => {
+                const body = await response.json();
+                if (!response.ok) throw new Error(JSON.stringify(body));
+                if (!String(body.reply).includes('CI chat ok')) {
+                  throw new Error('unexpected chat reply: ' + JSON.stringify(body));
+                }
+                console.log(JSON.stringify({
+                  conversation_id: conversationId,
+                  reply: body.reply,
+                  agent_id: body.agentId,
+                }));
+              }).catch((error) => { console.error(error); process.exit(1); });
+            " | tee /tmp/sdk-chat
+          grep -q '"reply":"CI chat ok"' /tmp/sdk-chat
 
       - name: Agent, conversation and memory survive model switching
         run: |
@@ -490,15 +655,18 @@ jobs:
               Promise.all([
                 fetch('http://127.0.0.1:8070/v1/llm/providers',{headers:{'X-API-Key':key}}).then(r=>r.json()),
                 fetch('http://127.0.0.1:8070/v1/agents',{headers:{'X-API-Key':key}}).then(r=>r.json()),
-              ]).then(([llm,agents]) => {
+                fetch('http://127.0.0.1:8070/v1/sdk/settings',{headers:{'X-API-Key':key}}).then(r=>r.json()),
+              ]).then(([llm,agents,sdk]) => {
                 const active = llm.providers.find((p) => p.is_active);
                 if (llm.providers.length !== 2 || active?.model_handle !== 'openai/ci-model-b') process.exit(1);
                 const agent = agents.agents.find((a) => String(a.telegram_id) === '424242');
                 if (!agent?.agent_id || !agent?.conversation_id) process.exit(1);
-                console.log(JSON.stringify({providers:llm.providers.length,active:active.model_handle,agent_id:agent.agent_id,conversation_id:agent.conversation_id}));
+                if (sdk.settings?.session_pool_size !== 17 || sdk.settings?.agent_name_prefix !== 'ci-eva') process.exit(1);
+                console.log(JSON.stringify({providers:llm.providers.length,active:active.model_handle,agent_id:agent.agent_id,conversation_id:agent.conversation_id,sdk_persisted:true}));
               }).catch(()=>process.exit(1));
             " | tee /tmp/restart-state
           grep -q '"providers":2' /tmp/restart-state
+          grep -q '"sdk_persisted":true' /tmp/restart-state
           docker compose --env-file versions.env --env-file .env \
             exec -T postgres psql -tA -U postgres -d eva \
             -c "SELECT telegram_id, agent_id, conversation_id FROM v_agent_runtime" > /tmp/mapping-after-restart

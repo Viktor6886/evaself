@@ -7,7 +7,7 @@
 #   make backup / restore / update / rollback
 #
 # Every target is a thin wrapper around a script in scripts/ so the same
-# logic is reachable from Hermes, from systemd units and from a shell.
+# logic is reachable from systemd units and from a shell.
 # =====================================================================
 
 SHELL       := /bin/bash
@@ -34,8 +34,6 @@ export ROOT_DIR SCRIPTS ENV_FILE VERSIONS COMPOSE_FILE
         backup restore update-preview update rollback \
         import-n8n export-n8n \
         configure-llm test-llm list-models configure-letta \
-        configure-hermes start-hermes stop-hermes restart-hermes \
-        update-hermes hermes-status \
         disk-cleanup build pull ps shell-db validate test
 
 # ---------------------------------------------------------------------
@@ -150,28 +148,6 @@ import-n8n: ## Импортировать workflows и credentials n8n
 
 export-n8n: ## Экспортировать рабочие workflows из n8n
 	@$(SCRIPTS)/n8n-export.sh
-
-# ---------------------------------------------------------------------
-# Hermes Agent (installed directly in Ubuntu, not in Docker)
-# ---------------------------------------------------------------------
-configure-hermes: ## Настроить LLM Hermes и автозапуск
-	@$(SCRIPTS)/configure-hermes.sh
-
-start-hermes: ## Запустить systemd-сервис Hermes
-	@systemctl start evaself-hermes.service
-	@systemctl --no-pager --lines=0 status evaself-hermes.service || true
-
-stop-hermes: ## Остановить systemd-сервис Hermes
-	@systemctl stop evaself-hermes.service
-
-restart-hermes: ## Перезапустить systemd-сервис Hermes
-	@systemctl restart evaself-hermes.service
-
-update-hermes: ## Обновить Hermes Agent
-	@$(SCRIPTS)/update-hermes.sh
-
-hermes-status: ## Состояние, конфигурация и allowlist Hermes
-	@$(SCRIPTS)/hermes-status.sh
 
 # ---------------------------------------------------------------------
 # Maintenance

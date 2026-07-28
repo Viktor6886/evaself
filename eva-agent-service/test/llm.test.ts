@@ -92,7 +92,6 @@ test("failed model switch restores the previous provider and mappings", async ()
     getLlmProvider: async (id: string) => (id === candidate.id ? candidate : previous),
     getActiveLlmProvider: async () => active,
     recordLlmCheck: async () => candidate,
-    listModelMappings: async () => [{ agentId: "agent-1", conversationIds: ["conv-1"] }],
     setAgentModels: async () => undefined,
     activateLlmProvider: async (id: string) => {
       active = id === previous.id ? previous : candidate;
@@ -102,6 +101,7 @@ test("failed model switch restores the previous provider and mappings", async ()
   const letta = {
     closeAllSessions: () => undefined,
     setDefaultModel: () => undefined,
+    listAllModelMappings: async () => [{ agentId: "agent-1", conversationIds: ["conv-1"] }],
     applyModelToMappings: async (_mappings: unknown, model: string) => {
       applied.push(model);
       if (model === "openai/candidate-model") throw new Error("synthetic SDK failure");

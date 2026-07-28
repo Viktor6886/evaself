@@ -182,22 +182,6 @@ else
 fi
 
 # =====================================================================
-step "Hermes Agent"
-# =====================================================================
-if systemctl list-unit-files 2>/dev/null | grep -q '^evaself-hermes.service'; then
-	state="$(systemctl is-active evaself-hermes.service 2>/dev/null || true)"
-	enabled="$(systemctl is-enabled evaself-hermes.service 2>/dev/null || true)"
-	case "$state" in
-		active) ok "Hermes running (autostart: $enabled)" ;;
-		inactive) info "Hermes installed but stopped — awaiting-configuration until 'make configure-hermes'" ;;
-		failed) soft "Hermes service failed — journalctl -u evaself-hermes" ;;
-		*) info "Hermes state: $state" ;;
-	esac
-else
-	soft "Hermes systemd unit not installed"
-fi
-
-# =====================================================================
 step "Backups"
 # =====================================================================
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/evaself}"

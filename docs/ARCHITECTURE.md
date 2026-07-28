@@ -22,8 +22,8 @@ capability token App Server. n8n, WebApp и административная к�
 
 ## Состояние
 
-- PostgreSQL: пользователи, связь `user → agent → conversation`, реестр LLM,
-  квоты и операционные данные.
+- PostgreSQL: пользователи, связь `user → agent → conversation`, реестры LLM
+  и настроек SDK, квоты и операционные данные.
 - Letta App Server volume: agents, conversations и memory filesystem.
 - Valkey: очередь n8n и краткоживущие блокировки ходов.
 - n8n volume и PostgreSQL: workflows, executions и credentials.
@@ -32,6 +32,20 @@ capability token App Server. n8n, WebApp и административная к�
 `agent_id` и `conversation_id` сохраняются в `agent_links`; история
 conversations — в `agent_conversations`. Перезапуск сервисов не создаёт
 нового агента.
+
+## Административное управление SDK
+
+Браузер обращается к `/api/v1/sdk/*`; внутренний Caddy добавляет
+`X-API-Key`. `eva-agent-service` выполняет list/retrieve/create/update/delete
+agents и list/retrieve/create/update conversations через management API
+официального SDK. Физическое удаление conversation в SDK 0.5.2 отсутствует,
+поэтому WebUI архивирует его. Чат возобновляет выбранную conversation через
+SDK-сессию.
+
+Сериализуемые defaults новых agents/conversations и runtime-параметры
+сессий хранятся в singleton-строке `sdk_settings`. URL и capability token
+App Server остаются инфраструктурными: URL показывается только для
+диагностики, token в браузер не возвращается.
 
 ## Переключение LLM
 
@@ -57,12 +71,12 @@ conversations — в `agent_conversations`. Перезапуск сервисо�
 
 - Caddy — HTTPS и маршрутизация;
 - n8n — workflows и бизнес-логика;
-- `eva-agent-service` — Agent SDK, сессии, реестр LLM и административный API;
+- `eva-agent-service` — Agent SDK, сессии, настройки SDK, реестр LLM и
+  административный API;
 - Letta App Server — self-hosted runtime агентов;
 - PostgreSQL/Valkey — постоянное состояние и очередь;
 - NocoDB — административный просмотр данных;
-- Letta UI — агенты, conversations, сообщения и настройки LLM;
+- Letta UI — agents, conversations, чат, настройки SDK и LLM;
 - Media Service — ASR/TTS и ffmpeg;
 - SearXNG/Crawl4AI — поиск и чтение страниц;
-- Hermes — операторский агент на Ubuntu;
 - backup-service — согласованные backup/restore.

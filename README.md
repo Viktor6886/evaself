@@ -10,8 +10,8 @@ cd evaself
 sudo make install
 ```
 
-Установщик рассчитан на чистую Ubuntu 24.04. Он спрашивает домены, два
-Telegram-токена, Telegram ID владельца и первую OpenAI-compatible
+Установщик рассчитан на чистую Ubuntu 24.04. Он спрашивает домены,
+Telegram-токен, Telegram ID владельца и первую OpenAI-compatible
 LLM-конфигурацию, генерирует остальные секреты и поднимает стек за Caddy с
 автоматическим HTTPS.
 
@@ -32,9 +32,26 @@ Telegram
 n8n и браузер не подключаются к App Server напрямую.
 
 В состав также входят PostgreSQL, Valkey, Caddy, n8n, NocoDB, WebApp,
-Media Service, SearXNG, Hermes и механизмы backup, restore, update и
+Media Service, SearXNG и механизмы backup, restore, update и
 rollback. Сейчас в n8n оставлен минимальный workflow для E2E-проверки;
 полные сценарии Евы, оплаты и подписки относятся к следующему этапу.
+
+## Агенты и Letta Agent SDK
+
+Административная консоль показывает все реальные agents из self-hosted
+Letta App Server. В ней можно:
+
+- создавать, изменять и удалять agents;
+- создавать и архивировать conversations;
+- выбирать conversation, читать историю и общаться с агентом;
+- менять шаблоны Persona/Human, tags, tools, skill sources, permission mode,
+  memfs, dreaming, model settings, context window, пул сессий и таймауты;
+- проверить WebSocket-подключение SDK к App Server.
+
+Все операции идут через защищённый API `eva-agent-service` и официальный
+`@letta-ai/letta-agent-sdk`. Capability token App Server не передаётся
+браузеру. Удаление агента необратимо и требует ввода его точного `agent_id`;
+conversation можно архивировать без удаления истории и памяти.
 
 ## Управление LLM
 
@@ -78,8 +95,6 @@ make rollback
 
 make import-n8n
 make export-n8n
-make configure-hermes
-make hermes-status
 make validate
 make test
 ```
@@ -106,7 +121,6 @@ make test
 - [Перенос на другой сервер](docs/MIGRATION.md)
 - [Безопасность](docs/SECURITY.md)
 - [Проверки](docs/VERIFICATION.md)
-- [Hermes](docs/HERMES.md)
 
 Ева — инструмент поддержки и саморефлексии, а не врач или психотерапевт;
 она не ставит диагнозы.

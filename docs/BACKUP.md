@@ -16,6 +16,8 @@ make restore BACKUP=/var/backups/evaself/evaself-backup-YYYY-MM-DD-HH-MM.tar.gz
 - `skills/`, `library/`, WebApp и инвентарь agents/conversations.
 
 Таблица `llm_providers` попадает в дамп базы, API Key в ней зашифрован.
+Таблица `sdk_settings` также попадает в дамп, поэтому шаблоны агентов и
+runtime-настройки восстанавливаются вместе с PostgreSQL.
 `LLM_CONFIG_ENCRYPTION_KEY` находится в `.env`. Provider volume содержит
 рабочие credentials Letta, поэтому весь архив является секретом.
 
