@@ -1,0 +1,10 @@
+# Eva Core — pinned runtime dependencies.
+# Installed at image build time (never at container start).
+fastapi==0.140.7
+uvicorn[standard]==0.41.0
+httpx==0.28.1
+asyncpg==0.31.0
+redis==6.4.0
+pydantic==2.12.4
+pydantic-settings==2.13.0
+orjson==3.11.5
