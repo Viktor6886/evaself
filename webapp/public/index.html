@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="ru">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>Ева — ИИ-компаньон и ассистент по самопознанию</title>
+		<meta
+			name="description"
+			content="Ева — ИИ-компаньон и ассистент по самопознанию. Работает в Telegram, помнит ваш контекст и развивается вместе с вами."
+		/>
+		<link rel="stylesheet" href="/assets/styles.css" />
+	</head>
+	<body>
+		<main class="wrap">
+			<p class="eyebrow">Evaself</p>
+			<h1>Ева — ИИ-компаньон и ассистент по самопознанию</h1>
+			<p class="lead">
+				Ева живёт в Telegram, помнит ваш контекст между разговорами и помогает
+				лучше понимать себя: замечать закономерности, формулировать цели и
+				возвращаться к ним.
+			</p>
+
+			<p>
+				<a class="button" href="#" id="open-bot">Открыть в Telegram</a>
+			</p>
+
+			<h2>Что умеет</h2>
+			<div class="grid">
+				<div class="card">
+					<strong>Долгая память</strong>
+					<p class="small muted">
+						У каждого пользователя свой агент со своей памятью — Ева не
+						начинает знакомство заново после каждого сообщения.
+					</p>
+				</div>
+				<div class="card">
+					<strong>Голос</strong>
+					<p class="small muted">
+						Голосовые сообщения расшифровываются, ответ можно получить голосом.
+					</p>
+				</div>
+				<div class="card">
+					<strong>Практики и задачи</strong>
+					<p class="small muted">
+						Небольшие шаги, напоминания и возврат к тому, что вы для себя
+						наметили.
+					</p>
+				</div>
+				<div class="card">
+					<strong>Тесты и рефлексия</strong>
+					<p class="small muted">
+						Структурированные опросники, результаты которых сохраняются и
+						сравниваются во времени.
+					</p>
+				</div>
+			</div>
+
+			<h2>Важно</h2>
+			<div class="card">
+				<p class="small">
+					Ева — не психотерапевт и не ставит диагнозов. Это инструмент
+					самонаблюдения. Если вам тяжело и есть мысли о причинении вреда себе,
+					пожалуйста, обратитесь к близким или в службу экстренной
+					психологической помощи в вашей стране.
+				</p>
+			</div>
+
+			<footer>
+				<p>
+					Evaself — self-hosted платформа. Все данные, диалоги и память живут на
+					сервере владельца установки.
+				</p>
+			</footer>
+		</main>
+
+		<script>
+			// The bot handle is not baked into the build: the landing page is
+			// served from the same installation as the API, so we ask it.
+			(async () => {
+				const link = document.getElementById("open-bot");
+				link.href = "https://t.me";
+				try {
+					const response = await fetch("/api/public/bot", { cache: "no-store" });
+					if (response.ok) {
+						const data = await response.json();
+						if (data.username) link.href = `https://t.me/${data.username}`;
+					}
+				} catch (error) {
+					/* landing stays usable without the API */
+				}
+			})();
+		</script>
+	</body>
+</html>

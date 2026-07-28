@@ -50,7 +50,15 @@
 	import compression
 	import logging
 
-	reverse_proxy webapp:8082
+	# The landing page asks the API for the bot handle so no domain or bot
+	# name is ever baked into the built assets.
+	handle_path /api/* {
+		reverse_proxy eva-core:{$EVA_CORE_PORT}
+	}
+
+	handle {
+		reverse_proxy webapp:8082
+	}
 }
 
 # ---------------------------------------------------------------------

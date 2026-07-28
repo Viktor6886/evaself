@@ -1,0 +1,31 @@
+# Internal server for the Evaself Letta console.
+#
+# The browser never sees LETTA_SERVER_PASSWORD: it calls /api/* on this
+# container, and Caddy adds the Authorization header on the way to
+# letta:8283 inside evaself-network.
+{
+	auto_https off
+	admin off
+}
+
+:8081 {
+	handle /healthz {
+		respond "ok" 200
+	}
+
+	handle_path /api/* {
+		reverse_proxy {$LETTA_URL} {
+			header_up Authorization "Bearer {$LETTA_SERVER_PASSWORD}"
+			header_up Host {upstream_hostport}
+			# agent turns can run for minutes
+			flush_interval -1
+		}
+	}
+
+	handle {
+		root * /srv
+		encode zstd gzip
+		try_files {path} {path}/ /index.html
+		file_server
+	}
+}

@@ -1,0 +1,32 @@
+# Internal static server for the Evaself web front-end.
+# TLS, HTTP/3 and the public host names are handled by the edge Caddy;
+# this instance only serves files inside evaself-network.
+{
+	auto_https off
+	admin off
+}
+
+:8082 {
+	root * /srv
+
+	handle /healthz {
+		respond "ok" 200
+	}
+
+	encode zstd gzip
+
+	# The Mini App is a single page: unknown paths under /app fall back
+	# to its index so client-side routing keeps working.
+	handle /app/* {
+		try_files {path} {path}/ /app/index.html
+		file_server
+	}
+
+	handle {
+		try_files {path} {path}/ /index.html
+		file_server
+	}
+
+	header /assets/* Cache-Control "public, max-age=604800"
+	header /app/* Cache-Control "no-cache"
+}

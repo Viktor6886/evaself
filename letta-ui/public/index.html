@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>Letta console — Evaself</title>
+		<link rel="stylesheet" href="/ui.css" />
+	</head>
+	<body>
+		<div class="app">
+			<div class="brand">
+				<span>Letta console</span>
+				<span class="pill" id="server-version">…</span>
+			</div>
+
+			<div class="top">
+				<div id="crumb" class="muted small">Select an agent</div>
+				<div style="display: flex; align-items: center; gap: 12px">
+					<span class="small muted" id="agent-count"></span>
+					<span class="small"><span class="dot" id="health-dot"></span> <span id="health-text">checking…</span></span>
+					<button class="btn ghost" id="refresh">Refresh</button>
+				</div>
+			</div>
+
+			<aside class="side">
+				<input type="text" id="filter" placeholder="Filter agents…" style="margin-bottom: 8px" />
+				<div id="agent-list"><div class="empty small">Loading…</div></div>
+			</aside>
+
+			<main class="main" id="main">
+				<div class="empty">
+					<p>This is Evaself's self-hosted console for the Letta server running in this installation.</p>
+					<p class="small">Pick an agent on the left to inspect its memory, messages and tools.</p>
+				</div>
+			</main>
+		</div>
+
+		<script src="/ui.js"></script>
+	</body>
+</html>

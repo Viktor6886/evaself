@@ -20,9 +20,10 @@ from __future__ import annotations
 
 import logging
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Any
 
+import httpx
 from fastapi import Depends, FastAPI, Header, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -380,6 +381,40 @@ async def public_session(request: Request, tg_user: dict = Depends(require_teleg
             "quotas": await db.get_quota_status(int(tg_user["id"])),
         }
     )
+
+
+@app.get("/public/bot")
+async def public_bot(request: Request) -> dict:
+    """Eva's bot handle, so the landing page never hard-codes it.
+
+    Cached for an hour in Valkey: the landing page is public and must not
+    turn into a proxy that hammers the Telegram API.
+    """
+    settings: Settings = request.app.state.settings
+    redis = request.app.state.redis
+    cache_key = "eva:bot:username"
+
+    with suppress(Exception):
+        cached = await redis.get(cache_key)
+        if cached:
+            return {"username": cached}
+
+    if not settings.telegram_bot_token:
+        return {"username": None}
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                f"https://api.telegram.org/bot{settings.telegram_bot_token}/getMe"
+            )
+        username = (response.json().get("result") or {}).get("username")
+    except Exception:  # noqa: BLE001 - the landing page degrades gracefully
+        return {"username": None}
+
+    if username:
+        with suppress(Exception):
+            await redis.set(cache_key, username, ex=3600)
+    return {"username": username}
 
 
 @app.get("/public/tasks")
