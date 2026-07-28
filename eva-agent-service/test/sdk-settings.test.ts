@@ -46,6 +46,11 @@ test("SDK settings reject unsafe enum values and invalid timeouts", () => {
   }
 });
 
+test("SDK settings accept the strict permission mode from Agent SDK 0.5.5", () => {
+  const settings = validateSettings({ permission_mode: "strict" });
+  assert.equal(settings.permission_mode, "strict");
+});
+
 test("public SDK settings expose only token presence, never the token", async () => {
   const row = settingsRow();
   const manager = new SdkSettingsManager(

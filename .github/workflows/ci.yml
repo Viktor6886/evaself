@@ -52,6 +52,27 @@ jobs:
             test "$EVA_LLM_ADDITIONAL_PARAMETERS" = "{\"request_timeout_ms\":180000}"
           '
 
+      - name: Installer defaults and skipped optional settings
+        run: |
+          ENV_FILE=/tmp/evaself-config.env \
+          EVASELF_NONINTERACTIVE=1 \
+          EVASELF_SKIP_PASSWORD_HASH=1 \
+            ./scripts/configure.sh
+          ENV_FILE=/tmp/evaself-config.env VERSIONS="$PWD/versions.env" bash -euo pipefail -c '
+            . scripts/lib.sh
+            load_env
+            test "$DOMAIN" = "evaself.localhost"
+            test "$DOMAIN_APP" = "app.evaself.localhost"
+            test "$DOMAIN_NOCODB" = "nocodb.evaself.localhost"
+            test -z "$EVA_TELEGRAM_BOT_TOKEN"
+            test -z "$EVA_LLM_API_KEY"
+            test "$EVA_LLM_ADDITIONAL_PARAMETERS" = "{\"request_timeout_ms\":180000}"
+            [[ "$EVASELF_INCOMPLETE_SETTINGS" == *"Telegram Bot Token"* ]]
+            [[ "$EVASELF_INCOMPLETE_SETTINGS" == *"LLM-провайдер"* ]]
+            is_email "operator+alerts@example.com"
+            ! is_email "operator@example"
+          '
+
       - name: shellcheck
         run: shellcheck -S error -x scripts/*.sh backup-service/backup-service
 
@@ -187,7 +208,7 @@ jobs:
               'referrals','partner_analysis_links','notifications','crisis_events',
               'schema_migrations','llm_providers','sdk_settings','telegram_updates',
               'user_preferences','eva_notes','budget_entries','heartbeat_state',
-              'payment_intents'
+              'payment_intents','admin_audit_log'
             ]) AS t
             WHERE to_regclass('public.' || t) IS NULL;
             IF missing IS NOT NULL THEN RAISE EXCEPTION 'missing tables: %', missing; END IF;
@@ -511,6 +532,33 @@ jobs:
                   method: 'PATCH',
                   body: JSON.stringify({description: 'Изменено через WebUI API'}),
                 });
+                const bulk = await call('/v1/sdk/agents/bulk', {
+                  method: 'POST',
+                  body: JSON.stringify({
+                    agent_ids: [agentId],
+                    patch: {tags: ['evaself', 'ci-bulk']},
+                  }),
+                });
+                if (bulk.count !== 1) throw new Error('bulk update failed');
+                const exported = await call(
+                  '/v1/sdk/agents/export?ids=' + encodeURIComponent(agentId),
+                );
+                if (exported.format !== 'evaself-agent-export' || exported.agents.length !== 1) {
+                  throw new Error('agent export failed');
+                }
+                const imported = await call('/v1/sdk/agents/import', {
+                  method: 'POST',
+                  body: JSON.stringify({agents: exported.agents}),
+                });
+                if (imported.count !== 1 || !imported.imported[0].agent.id) {
+                  throw new Error('agent import failed');
+                }
+                const importedId = imported.imported[0].agent.id;
+                await call(
+                  '/v1/sdk/agents/' + encodeURIComponent(importedId) +
+                    '?confirm=' + encodeURIComponent(importedId),
+                  {method: 'DELETE'},
+                );
                 await call('/v1/sdk/conversations/' + encodeURIComponent(conversationId), {
                   method: 'PATCH',
                   body: JSON.stringify({archived: true}),
@@ -524,9 +572,22 @@ jobs:
                 if (listed.agents.some((item) => item.id === agentId)) {
                   throw new Error('agent was not deleted');
                 }
+                const system = await call('/v1/system');
+                if (!system.sdk_capabilities?.trace || system.runtime !== 'letta-agent-sdk') {
+                  throw new Error('system capability report is wrong');
+                }
+                const audit = await call('/v1/audit?limit=100');
+                if (!audit.events.some((item) => item.action === 'agent.bulk-update') ||
+                    !audit.events.some((item) => item.action === 'agent.export') ||
+                    !audit.events.some((item) => item.action === 'agent.import')) {
+                  throw new Error('administrative audit is incomplete');
+                }
                 console.log(JSON.stringify({
                   settings_saved: true,
                   agent_created: true,
+                  bulk_updated: true,
+                  export_import: true,
+                  audit_recorded: true,
                   conversation_archived: true,
                   agent_deleted: true,
                 }));
@@ -638,26 +699,36 @@ jobs:
               const conversationId = process.env.CONVERSATION_ID;
               fetch(
                 'http://127.0.0.1:8070/v1/sdk/conversations/' +
-                  encodeURIComponent(conversationId) + '/messages',
+                  encodeURIComponent(conversationId) + '/messages/stream',
                 {
                   method:'POST',
                   headers:{'Content-Type':'application/json','X-API-Key':key},
                   body:JSON.stringify({text:'Ответь коротко для smoke test'}),
                 },
               ).then(async (response) => {
-                const body = await response.json();
-                if (!response.ok) throw new Error(JSON.stringify(body));
+                const raw = await response.text();
+                if (!response.ok) throw new Error(raw);
+                const frame = raw.match(/event: result\r?\ndata: (.+)\r?\n\r?\n/);
+                if (!frame) throw new Error('result SSE event is missing: ' + raw);
+                const body = JSON.parse(frame[1]);
                 if (!String(body.reply).includes('CI chat ok')) {
                   throw new Error('unexpected chat reply: ' + JSON.stringify(body));
+                }
+                if (!Array.isArray(body.trace) || body.trace.length === 0 ||
+                    !body.conversationId || !body.agentId) {
+                  throw new Error('SDK trace or identifiers are missing');
                 }
                 console.log(JSON.stringify({
                   conversation_id: conversationId,
                   reply: body.reply,
                   agent_id: body.agentId,
+                  trace_events: body.trace.length,
+                  streamed: raw.includes('event: delta'),
                 }));
               }).catch((error) => { console.error(error); process.exit(1); });
             " | tee /tmp/sdk-chat
           grep -q '"reply":"CI chat ok"' /tmp/sdk-chat
+          grep -q '"streamed":true' /tmp/sdk-chat
 
       - name: Agent, conversation and memory survive model switching
         run: |

@@ -39,9 +39,20 @@ conversations — в `agent_conversations`. Перезапуск сервисо�
 Браузер обращается к `/api/v1/sdk/*`; внутренний Caddy добавляет
 `X-API-Key`. `eva-agent-service` выполняет list/retrieve/create/update/delete
 agents и list/retrieve/create/update conversations через management API
-официального SDK. Физическое удаление conversation в SDK 0.5.2 отсутствует,
+официального SDK. Физическое удаление conversation в SDK 0.5.5 отсутствует,
 поэтому WebUI архивирует его. Чат возобновляет выбранную conversation через
 SDK-сессию.
+
+Административный интерфейс доступен на корневом домене по `/admin/`.
+Маршрут `/admin-api/*` защищён той же Basic Auth, добавляет внутренний
+`X-API-Key` и не раскрывает его браузеру. Trace перед отдачей рекурсивно
+очищается от API key, token, password, authorization, cookie и похожих
+полей.
+
+SDK 0.5.5 не содержит management-операций для изменения уже существующих
+memory blocks, custom tools, MCP servers, skills и knowledge folders.
+Evaself не обходит это ограничение прямыми REST-запросами: такие секции
+read-only до появления соответствующих методов в официальном SDK.
 
 Сериализуемые defaults новых agents/conversations и runtime-параметры
 сессий хранятся в singleton-строке `sdk_settings`. URL и capability token
@@ -76,7 +87,8 @@ App Server остаются инфраструктурными: URL показы
 - Letta App Server — self-hosted runtime агентов;
 - PostgreSQL/Valkey — постоянное состояние и блокировки;
 - NocoDB — административный просмотр данных;
-- Letta UI — agents, conversations, чат, настройки SDK и LLM;
+- Letta UI — Dashboard, agents, conversations, чат/trace, массовые операции,
+  импорт/экспорт, audit, настройки SDK и LLM;
 - Media Service — ASR/TTS и ffmpeg;
 - SearXNG/Crawl4AI — поиск и чтение страниц;
 - backup-service — согласованные backup/restore.

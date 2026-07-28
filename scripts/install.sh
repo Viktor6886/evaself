@@ -14,6 +14,9 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/lib.sh"
 
 require_root
+export EVASELF_INSTALL_LOG="${EVASELF_INSTALL_LOG:-/var/log/evaself-install.log}"
+touch "$EVASELF_INSTALL_LOG"
+chmod 600 "$EVASELF_INSTALL_LOG"
 
 BANNER='
   ███████ ██    ██  █████  ███████ ███████ ██      ███████
@@ -59,7 +62,7 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq \
 	ca-certificates curl gnupg git jq openssl \
-	ufw fail2ban tar gzip cron python3 \
+	ufw fail2ban tar gzip cron python3 fzf \
 	apt-transport-https software-properties-common >/dev/null
 ok "базовые пакеты установлены"
 
@@ -159,7 +162,9 @@ load_env
 # =====================================================================
 step "Проверка DNS"
 SERVER_IP="$(curl -fsS --max-time 8 https://api.ipify.org 2>/dev/null || true)"
-if [ -n "$SERVER_IP" ]; then
+if [[ "$DOMAIN" == *.localhost ]]; then
+	info "локальный режим: публичная проверка DNS пропущена"
+elif [ -n "$SERVER_IP" ]; then
 	info "публичный IP сервера: $SERVER_IP"
 	for host in "$DOMAIN" "$DOMAIN_APP" "$DOMAIN_API" "$DOMAIN_NOCODB" "$DOMAIN_LETTA"; do
 		resolved="$(getent ahostsv4 "$host" 2>/dev/null | awk 'NR==1 {print $1}')"
@@ -179,20 +184,17 @@ fi
 # 8. build and start
 # =====================================================================
 step "Загрузка образов"
-compose pull --ignore-buildable 2>&1 | grep -Ev '^$' | tail -5 || true
-ok "upstream-образы загружены"
+run_with_progress "загрузка upstream-образов" compose pull --ignore-buildable
 
 # The Caddy image exists now, so the basic-auth hash can be produced even
 # on a host that had no Docker at all when configure.sh ran.
 "$SCRIPT_DIR/hash-letta-password.sh" || warn "пароль Letta UI не хеширован — вход на https://${DOMAIN_LETTA} не сработает"
 
 step "Сборка локальных образов"
-compose build --pull >/dev/null
-ok "образы собраны"
+run_with_progress "сборка локальных образов" compose build --pull
 
 step "Запуск стека"
-compose up -d --remove-orphans
-ok "контейнеры запущены"
+run_with_progress "создание и запуск контейнеров" compose up -d --remove-orphans
 
 step "Ожидание основных сервисов"
 for svc in postgres valkey; do
@@ -245,6 +247,7 @@ cat <<SUMMARY
 
   ${C_BOLD}Адреса${C_RESET}
     Сайт        https://${DOMAIN}
+    Консоль     https://${DOMAIN}/admin/
     WebApp      https://${DOMAIN_APP}
     API         https://${DOMAIN_API}/health
     NocoDB      https://${DOMAIN_NOCODB}
@@ -264,5 +267,7 @@ cat <<SUMMARY
     make status | make doctor | make logs s=eva-agent-service
     make test-llm | make list-models | make configure-llm
     make backup | make update-preview | make update | make rollback
+
+  Полный журнал установки: ${EVASELF_INSTALL_LOG}
 
 SUMMARY

@@ -42,6 +42,12 @@
 	}
 }
 
+(admin_auth) {
+	basic_auth {
+		{$LETTA_UI_USER} {$LETTA_UI_PASSWORD_HASH}
+	}
+}
+
 # ---------------------------------------------------------------------
 # 1. Main site — https://{$DOMAIN}
 # ---------------------------------------------------------------------
@@ -49,6 +55,25 @@
 	import security_headers
 	import compression
 	import logging
+
+	handle /admin {
+		redir /admin/ 308
+	}
+
+	handle_path /admin-api/* {
+		import admin_auth
+		reverse_proxy eva-agent-service:{$EVA_AGENT_PORT} {
+			header_up X-API-Key "{$EVA_AGENT_API_KEY}"
+			flush_interval -1
+		}
+	}
+
+	handle_path /admin/* {
+		import admin_auth
+		reverse_proxy letta-ui:8081 {
+			flush_interval -1
+		}
+	}
 
 	# The landing page asks the API for the bot handle so no domain or bot
 	# name is ever baked into the built assets.
@@ -153,12 +178,19 @@
 	import compression
 	import logging
 
-	basic_auth {
-		{$LETTA_UI_USER} {$LETTA_UI_PASSWORD_HASH}
+	import admin_auth
+
+	handle_path /api/* {
+		reverse_proxy eva-agent-service:{$EVA_AGENT_PORT} {
+			header_up X-API-Key "{$EVA_AGENT_API_KEY}"
+			flush_interval -1
+		}
 	}
 
-	reverse_proxy letta-ui:8081 {
-		flush_interval -1
+	handle {
+		reverse_proxy letta-ui:8081 {
+			flush_interval -1
+		}
 	}
 }
 

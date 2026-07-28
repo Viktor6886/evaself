@@ -10,10 +10,11 @@ cd evaself
 sudo make install
 ```
 
-Установщик рассчитан на чистую Ubuntu 24.04. Он спрашивает домены,
-Telegram-токен, Telegram ID владельца и первую OpenAI-compatible
-LLM-конфигурацию, генерирует остальные секреты и поднимает стек за Caddy с
-автоматическим HTTPS.
+Установщик рассчитан на чистую Ubuntu 24.04. В обычном режиме достаточно
+указать один корневой домен: адреса сервисов создаются автоматически.
+Telegram и первая OpenAI-compatible LLM-конфигурация необязательны — их
+можно добавить позже. Все дополнительные вопросы доступны через
+`make configure-advanced`.
 
 ## Архитектура
 
@@ -47,15 +48,27 @@ Letta App Server. В ней можно:
 
 - создавать, изменять и удалять agents;
 - создавать и архивировать conversations;
-- выбирать conversation, читать историю и общаться с агентом;
-- менять шаблоны Persona/Human, tags, tools, skill sources, permission mode,
-  memfs, dreaming, model settings, context window, пул сессий и таймауты;
+- выбирать conversation, читать историю, стримить ответ и прерывать ход;
+- видеть доступный SDK trace, tool events, идентификаторы и расход токенов;
+- задавать при создании Persona/Human, memory, system prompt, tools, skills,
+  dreaming, embedding, model settings и context window;
+- менять runtime defaults: tools, skills, permissions, dreaming,
+  reasoning effort, пул сессий и таймауты;
+- массово менять поддерживаемые поля с предварительным просмотром и
+  автоматическим откатом, экспортировать и импортировать JSON;
+- просматривать журнал административных действий;
 - проверить WebSocket-подключение SDK к App Server.
 
 Все операции идут через защищённый API `eva-agent-service` и официальный
 `@letta-ai/letta-agent-sdk`. Capability token App Server не передаётся
 браузеру. Удаление агента необратимо и требует ввода его точного `agent_id`;
 conversation можно архивировать без удаления истории и памяти.
+
+Текущая версия официального Agent SDK не предоставляет CRUD существующих
+memory blocks, custom tools, MCP, skills и knowledge folders. Консоль
+показывает доступное состояние таких объектов без самописного Letta REST
+клиента. Точная матрица возможностей приведена в
+[статусе реализации](docs/IMPLEMENTATION_STATUS.md).
 
 ## Управление LLM
 
@@ -87,6 +100,7 @@ make list-models         # запросить /models активного про�
 ```bash
 sudo make install
 make configure
+make configure-advanced
 make status
 make doctor
 make logs s=eva-agent-service
@@ -108,7 +122,8 @@ make test
 
 - Ubuntu 24.04 x86_64;
 - root/sudo;
-- DNS-записи доменов на IP сервера;
+- DNS-записи автоматически сформированных поддоменов на IP сервера
+  (для локального режима без домена HTTPS не выпускается);
 - открытые 80/tcp, 443/tcp и 443/udp;
 - минимум 4 ГБ RAM, рекомендуется 8 ГБ;
 - доступ к Docker Hub, GitHub, npm и выбранному LLM-провайдеру.
@@ -123,6 +138,7 @@ make test
 - [Перенос на другой сервер](docs/MIGRATION.md)
 - [Безопасность](docs/SECURITY.md)
 - [Проверки](docs/VERIFICATION.md)
+- [Статус реализации WebUI](docs/IMPLEMENTATION_STATUS.md)
 
 Ева — инструмент поддержки и саморефлексии, а не врач или психотерапевт;
 она не ставит диагнозы.

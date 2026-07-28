@@ -71,7 +71,8 @@ export interface SdkSettingsRow {
   default_persona: string;
   default_human_template: string;
   default_tags: string[];
-  permission_mode: "standard" | "acceptEdits" | "unrestricted";
+  permission_mode: "standard" | "acceptEdits" | "unrestricted" | "strict";
+  reasoning_effort: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
   memfs_enabled: boolean;
   system_prompt: string | null;
   base_tools: string[] | null;
@@ -102,6 +103,16 @@ export interface AgentRuntimeContext {
   timezone: string;
   responseMode: "text" | "voice" | "both";
   useEmoji: boolean;
+}
+
+export interface AdminAuditInput {
+  action: string;
+  targetType: string;
+  targetId?: string | null;
+  status?: "success" | "failed" | "rolled_back";
+  before?: unknown;
+  after?: unknown;
+  details?: Record<string, unknown>;
 }
 
 export interface ClaimedTelegramUpdate {
@@ -538,6 +549,46 @@ export class Database {
   }
 
   // -----------------------------------------------------------------
+  // protected administrative audit
+  // -----------------------------------------------------------------
+
+  async recordAdminAudit(input: AdminAuditInput): Promise<void> {
+    await this.require().query(
+      `INSERT INTO admin_audit_log
+         (action, target_type, target_id, status, before_data, after_data, details)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb)`,
+      [
+        input.action.slice(0, 200),
+        input.targetType.slice(0, 100),
+        input.targetId?.slice(0, 300) ?? null,
+        input.status ?? "success",
+        input.before === undefined ? null : JSON.stringify(input.before),
+        input.after === undefined ? null : JSON.stringify(input.after),
+        JSON.stringify(input.details ?? {}),
+      ],
+    );
+  }
+
+  async listAdminAudit(input: {
+    limit?: number;
+    targetType?: string;
+    targetId?: string;
+  } = {}): Promise<Array<Record<string, unknown>>> {
+    const limit = Math.min(Math.max(input.limit ?? 100, 1), 500);
+    const { rows } = await this.require().query(
+      `SELECT id, actor, action, target_type, target_id, status,
+              before_data, after_data, details, created_at
+         FROM admin_audit_log
+        WHERE ($2::text IS NULL OR target_type = $2)
+          AND ($3::text IS NULL OR target_id = $3)
+        ORDER BY created_at DESC, id DESC
+        LIMIT $1`,
+      [limit, input.targetType ?? null, input.targetId ?? null],
+    );
+    return rows;
+  }
+
+  // -----------------------------------------------------------------
   // Letta Agent SDK settings
   // -----------------------------------------------------------------
 
@@ -558,24 +609,25 @@ export class Database {
          default_human_template = $4,
          default_tags = $5,
          permission_mode = $6,
-         memfs_enabled = $7,
-         system_prompt = $8,
-         base_tools = $9,
-         allowed_tools = $10,
-         disallowed_tools = $11,
-         skill_sources = $12,
-         system_info_reminder = $13,
-         dreaming = $14::jsonb,
-         model_settings = $15::jsonb,
-         default_context_window = $16,
-         conversation_summary = $17,
-         conversation_description = $18,
-         conversation_hidden = $19,
-         create_conversation = $20,
-         session_pool_size = $21,
-         session_idle_ms = $22,
-         turn_timeout_ms = $23,
-         app_server_request_timeout_ms = $24
+         reasoning_effort = $7,
+         memfs_enabled = $8,
+         system_prompt = $9,
+         base_tools = $10,
+         allowed_tools = $11,
+         disallowed_tools = $12,
+         skill_sources = $13,
+         system_info_reminder = $14,
+         dreaming = $15::jsonb,
+         model_settings = $16::jsonb,
+         default_context_window = $17,
+         conversation_summary = $18,
+         conversation_description = $19,
+         conversation_hidden = $20,
+         create_conversation = $21,
+         session_pool_size = $22,
+         session_idle_ms = $23,
+         turn_timeout_ms = $24,
+         app_server_request_timeout_ms = $25
        WHERE id = 1
        RETURNING *`,
       [
@@ -585,6 +637,7 @@ export class Database {
         input.default_human_template,
         input.default_tags,
         input.permission_mode,
+        input.reasoning_effort,
         input.memfs_enabled,
         input.system_prompt,
         input.base_tools,

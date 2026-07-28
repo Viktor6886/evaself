@@ -4,7 +4,7 @@
 		<meta charset="utf-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<title>Администрирование Evaself</title>
-		<link rel="stylesheet" href="/ui.css" />
+		<link rel="stylesheet" href="ui.css" />
 	</head>
 	<body>
 		<div class="app">
@@ -18,19 +18,33 @@
 				<div class="toolbar compact">
 					<span class="small muted" id="agent-count"></span>
 					<span class="small"><span class="dot" id="health-dot"></span> <span id="health-text">проверка…</span></span>
+					<button class="btn ghost" id="theme-toggle" title="Сменить тему">Тема</button>
 					<button class="btn ghost" id="refresh">Обновить</button>
 				</div>
 			</div>
 
 			<aside class="side">
 				<nav class="section-nav">
-					<button class="nav-item active" data-section="agents">Агенты</button>
+					<button class="nav-item active" data-section="dashboard">Обзор системы</button>
+					<button class="nav-item" data-section="agents">Агенты</button>
 					<button class="nav-item" data-section="sdk">Настройки SDK</button>
 					<button class="nav-item" data-section="llm">Настройки LLM</button>
+					<button class="nav-item" data-section="audit">Журнал аудита</button>
 				</nav>
-				<div id="agent-panel">
+				<div id="agent-panel" hidden>
 					<button class="btn new-agent" id="new-agent">Создать агента</button>
 					<input type="text" id="filter" placeholder="Имя, agent ID или модель…" />
+					<div class="filter-row">
+						<select id="type-filter"><option value="">Все типы</option></select>
+						<select id="visibility-filter"><option value="">Все</option><option value="visible">Видимые</option><option value="hidden">Скрытые</option></select>
+					</div>
+					<div class="toolbar bulk-toolbar" id="bulk-toolbar">
+						<button class="btn ghost" id="select-all">Выбрать всё</button>
+						<button class="btn ghost" id="bulk-edit" disabled>Изменить</button>
+						<button class="btn ghost" id="export-agents">Экспорт</button>
+						<button class="btn ghost" id="import-agents">Импорт</button>
+						<input id="import-file" type="file" accept="application/json,.json" hidden />
+					</div>
 					<div id="agent-list"><div class="empty small">Загрузка…</div></div>
 				</div>
 			</aside>
@@ -43,6 +57,6 @@
 			</main>
 		</div>
 
-		<script src="/ui.js"></script>
+		<script src="ui.js"></script>
 	</body>
 </html>

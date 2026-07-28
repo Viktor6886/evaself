@@ -8,21 +8,29 @@
 	"use strict";
 
 	const state = {
-		section: "agents",
+		section: "dashboard",
 		agents: [],
 		filter: "",
+		typeFilter: "",
+		visibilityFilter: "",
 		selected: null,
+		selectedAgents: new Set(),
 		selectedConversation: null,
+		lastPrompt: "",
 		tab: "overview",
 		providers: [],
 		sdk: null,
+		system: null,
 	};
 	const $ = (id) => document.getElementById(id);
+	const API_PREFIX = window.location.pathname.startsWith("/admin/")
+		? "/admin-api"
+		: "/api";
 
 	async function api(path, options = {}) {
 		const headers = { ...(options.headers || {}) };
 		if (options.body) headers["Content-Type"] = "application/json";
-		const response = await fetch(`/api${path}`, {
+		const response = await fetch(`${API_PREFIX}${path}`, {
 			...options,
 			headers,
 		});
@@ -41,6 +49,44 @@
 			throw new Error(`${response.status}: ${detail}`);
 		}
 		return body;
+	}
+
+	async function streamApi(path, payload, onEvent) {
+		const response = await fetch(`${API_PREFIX}${path}`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+			body: JSON.stringify(payload),
+		});
+		if (!response.ok || !response.body) {
+			const text = await response.text();
+			throw new Error(`${response.status}: ${text || response.statusText}`);
+		}
+		const reader = response.body.getReader();
+		const decoder = new TextDecoder();
+		let buffer = "";
+		let finalResult = null;
+		while (true) {
+			const { value, done } = await reader.read();
+			buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+			const frames = buffer.split(/\r?\n\r?\n/);
+			buffer = frames.pop() || "";
+			for (const frame of frames) {
+				let name = "message";
+				const data = [];
+				for (const line of frame.split(/\r?\n/)) {
+					if (line.startsWith("event:")) name = line.slice(6).trim();
+					if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
+				}
+				if (!data.length) continue;
+				const value = JSON.parse(data.join("\n"));
+				onEvent(name, value);
+				if (name === "result") finalResult = value;
+				if (name === "error") throw new Error(value.message || "Ошибка streaming turn");
+			}
+			if (done) break;
+		}
+		if (!finalResult) throw new Error("Поток завершился без итогового события");
+		return finalResult;
 	}
 
 	const esc = (value) =>
@@ -92,7 +138,9 @@
 		}
 		$("agent-panel").hidden = section !== "agents";
 		$("agent-count").hidden = section !== "agents";
-		if (section === "llm") renderLlm();
+		if (section === "dashboard") renderDashboard();
+		else if (section === "audit") renderAudit();
+		else if (section === "llm") renderLlm();
 		else if (section === "sdk") renderSdk();
 		else if (state.selected) renderAgent();
 		else {
@@ -106,11 +154,111 @@
 		button.addEventListener("click", () => setSection(button.dataset.section));
 	}
 
+	/* --------------------------------------------------------- dashboard */
+	async function renderDashboard() {
+		$("crumb").textContent = "Обзор системы";
+		$("main").innerHTML = '<div class="empty small">Загрузка состояния…</div>';
+		try {
+			const [system, health, stats] = await Promise.all([
+				api("/v1/system"),
+				api("/health"),
+				api("/v1/stats"),
+			]);
+			state.system = system;
+			const links = Object.entries(system.links || {}).filter(([, value]) => value);
+			const integrations = Object.entries(system.integrations || {});
+			const capabilities = system.sdk_capabilities || {};
+			$("main").innerHTML = `
+				<div class="page-heading">
+					<div><h2>Evaself</h2><p class="muted">Self-hosted Letta App Server через официальный Agent SDK.</p></div>
+					<span class="pill">${esc(system.runtime)} · ${esc(system.version)}</span>
+				</div>
+				${system.setup_complete
+					? '<div class="notice">Первичная конфигурация завершена.</div>'
+					: `<div class="error"><strong>Настройка не завершена:</strong> ${esc((system.incomplete_settings || []).join(", "))}.
+					   Заполните через <code>make configure</code> или раздел LLM.</div>`}
+				<div class="grid">
+					<div class="card"><h3>Состояние</h3><dl class="kv">
+						<dt>App Server</dt><dd>${health.checks?.app_server?.ok ? "доступен" : esc(health.checks?.app_server?.error || "недоступен")}</dd>
+						<dt>PostgreSQL</dt><dd>${health.checks?.postgres?.ok ? "доступен" : "ошибка"}</dd>
+						<dt>Valkey</dt><dd>${health.checks?.valkey?.ok ? "доступен" : "ошибка"}</dd>
+						<dt>Агенты</dt><dd>${esc(stats.agents ?? state.agents.length)}</dd>
+						<dt>Открытые сессии</dt><dd>${esc(health.sessions_open ?? 0)}</dd>
+						<dt>Часовой пояс</dt><dd>${esc(system.timezone)}</dd>
+					</dl></div>
+					<div class="card"><h3>Интеграции</h3><dl class="kv">
+						${integrations.map(([name, enabled]) => `<dt>${esc(name)}</dt><dd>${enabled ? "настроена" : "не настроена"}</dd>`).join("")}
+					</dl></div>
+					<div class="card"><h3>Адреса</h3>
+						${links.map(([name, value]) => `<div><a href="${esc(value)}" target="_blank" rel="noopener">${esc(name)}</a> <span class="small muted">${esc(value)}</span></div>`).join("") || "—"}
+					</div>
+					<div class="card"><h3>Активная LLM</h3>
+						${system.active_llm
+							? `<strong>${esc(system.active_llm.name)}</strong><div><code>${esc(system.active_llm.model_handle)}</code></div><div class="small muted">${esc(system.active_llm.base_url)}</div>`
+							: '<span class="danger-text">Не выбрана</span>'}
+					</div>
+				</div>
+				<div class="card"><h3>Фактические возможности App Server SDK</h3>
+					<div class="capability-grid">
+						${capabilityRows(capabilities)}
+					</div>
+					<p class="small muted">Интерфейс не имитирует функции, которых нет в WebSocket management API установленной версии SDK.</p>
+				</div>`;
+		} catch (error) {
+			$("main").innerHTML = `<div class="error">${esc(error.message)}</div>`;
+		}
+	}
+
+	function capabilityRows(capabilities) {
+		const rows = [];
+		for (const [group, values] of Object.entries(capabilities || {})) {
+			for (const [name, value] of Object.entries(values || {})) {
+				if (name === "reason") continue;
+				if (typeof value !== "boolean") continue;
+				rows.push(`<div><span class="dot ${value ? "ok" : "bad"}"></span> ${esc(group)}.${esc(name)}</div>`);
+			}
+			if (values?.reason) rows.push(`<div class="small muted span-2">${esc(values.reason)}</div>`);
+		}
+		return rows.join("");
+	}
+
+	/* ------------------------------------------------------------- audit */
+	async function renderAudit() {
+		$("crumb").textContent = "Журнал аудита";
+		$("main").innerHTML = '<div class="empty small">Загрузка журнала…</div>';
+		try {
+			const body = await api("/v1/audit?limit=200");
+			const events = body.events || [];
+			$("main").innerHTML = `
+				<div class="page-heading"><div><h2>Журнал аудита</h2>
+					<p class="muted">Изменения агентов и диалогов; содержимое чатов не записывается.</p></div></div>
+				${events.length ? `<div class="card table-scroll"><table>
+					<tr><th>время</th><th>действие</th><th>объект</th><th>статус</th><th>детали</th></tr>
+					${events.map((event) => `<tr>
+						<td>${esc(when(event.created_at))}</td>
+						<td><code>${esc(event.action)}</code></td>
+						<td>${esc(event.target_type)}<br><code>${esc(event.target_id || "—")}</code></td>
+						<td>${esc(event.status)}</td>
+						<td><details><summary>JSON</summary><pre>${esc(JSON.stringify(event.details || {}, null, 2))}</pre></details></td>
+					</tr>`).join("")}
+				</table></div>` : '<div class="empty">Событий пока нет.</div>'}`;
+		} catch (error) {
+			$("main").innerHTML = `<div class="error">${esc(error.message)}</div>`;
+		}
+	}
+
 	/* ------------------------------------------------------------ agents */
 	async function loadAgents() {
 		try {
 			const body = await api("/v1/sdk/agents");
 			state.agents = body.agents ?? [];
+			const types = [...new Set(state.agents.map((agent) => agent.agent_type).filter(Boolean))].sort();
+			const currentType = $("type-filter").value;
+			$("type-filter").innerHTML =
+				'<option value="">Все типы</option>' +
+				types.map((type) => `<option ${type === currentType ? "selected" : ""}>${esc(type)}</option>`).join("");
+			const available = new Set(state.agents.map((agent) => agent.id));
+			state.selectedAgents = new Set([...state.selectedAgents].filter((id) => available.has(id)));
 		} catch (error) {
 			state.agents = [];
 			notice($("main"), `Не удалось получить агентов: ${error.message}`, "error");
@@ -122,22 +270,33 @@
 		const needle = state.filter.trim().toLowerCase();
 		const agents = state.agents.filter(
 			(agent) =>
-				!needle ||
-				(agent.name || "").toLowerCase().includes(needle) ||
-				(agent.id || "").toLowerCase().includes(needle) ||
-				(agent.model || "").toLowerCase().includes(needle),
+				(!state.typeFilter || agent.agent_type === state.typeFilter) &&
+				(!state.visibilityFilter ||
+					(state.visibilityFilter === "hidden" ? agent.hidden : !agent.hidden)) &&
+				(!needle ||
+					(agent.name || "").toLowerCase().includes(needle) ||
+					(agent.id || "").toLowerCase().includes(needle) ||
+					(agent.model || "").toLowerCase().includes(needle) ||
+					(agent.description || "").toLowerCase().includes(needle) ||
+					(agent.project_id || "").toLowerCase().includes(needle) ||
+					(agent.tags || []).some((tag) => String(tag).toLowerCase().includes(needle))),
 		);
 		$("agent-count").textContent = `агентов: ${state.agents.length}`;
 		$("agent-list").innerHTML = agents.length
 			? agents
 					.map(
 						(agent) => `
-						<button class="agent${state.selected === agent.id ? " active" : ""}"
-						        data-id="${esc(agent.id)}">
-							${esc(agent.name || "Без имени")}
-							<small>${esc(agent.id)}</small>
-							<small>${esc(agent.model || "модель по умолчанию")}</small>
-						</button>`,
+						<div class="agent-row">
+							<input class="agent-select" type="checkbox" data-select-id="${esc(agent.id)}"
+								${state.selectedAgents.has(agent.id) ? "checked" : ""} aria-label="Выбрать агента" />
+							<button class="agent${state.selected === agent.id ? " active" : ""}"
+							        data-id="${esc(agent.id)}">
+								${esc(agent.name || "Без имени")}
+								${agent.hidden ? '<span class="pill">hidden</span>' : ""}
+								<small>${esc(agent.id)}</small>
+								<small>${esc(agent.agent_type || "тип неизвестен")} · ${esc(agent.model || "модель по умолчанию")}</small>
+							</button>
+						</div>`,
 					)
 					.join("")
 			: '<div class="empty small">Совпадений нет.</div>';
@@ -151,6 +310,22 @@
 				renderAgentList();
 			});
 		}
+		for (const input of $("agent-list").querySelectorAll("[data-select-id]")) {
+			input.addEventListener("change", () => {
+				if (input.checked) state.selectedAgents.add(input.dataset.selectId);
+				else state.selectedAgents.delete(input.dataset.selectId);
+				updateBulkControls();
+			});
+		}
+		updateBulkControls();
+	}
+
+	function updateBulkControls() {
+		const count = state.selectedAgents.size;
+		$("bulk-edit").disabled = count === 0;
+		$("bulk-edit").textContent = count ? `Изменить (${count})` : "Изменить";
+		$("select-all").textContent =
+			count === state.agents.length && state.agents.length ? "Снять выбор" : "Выбрать всё";
 	}
 
 	async function renderAgent() {
@@ -160,6 +335,8 @@
 		$("crumb").textContent = `Агент · ${agent.name || agentId}`;
 		const tabs = {
 			overview: "Обзор",
+			memory: "Память",
+			tools: "Инструменты",
 			conversations: "Диалоги",
 			chat: "Чат",
 		};
@@ -182,6 +359,8 @@
 		const host = $("tab-body");
 		try {
 			if (state.tab === "overview") await renderOverview(host, agentId);
+			else if (state.tab === "memory") await renderMemory(host, agentId);
+			else if (state.tab === "tools") await renderTools(host, agentId);
 			else if (state.tab === "conversations") await renderConversations(host, agentId);
 			else await renderChat(host, agentId);
 		} catch (error) {
@@ -201,6 +380,7 @@
 					<label>Context window<input name="context_window" type="number" min="1024" value="${esc(agent.context_window_limit || "")}" /></label>
 					<label>Теги через запятую<input name="tags" value="${esc((agent.tags || []).join(", "))}" /></label>
 					<label class="span-2">System prompt<textarea name="system" rows="8">${esc(agent.system || "")}</textarea></label>
+					<label class="span-2">Model settings (JSON)<textarea name="model_settings" rows="5">${esc(JSON.stringify(agent.model_settings || {}, null, 2))}</textarea></label>
 					<label class="check"><input name="hidden" type="checkbox" ${agent.hidden ? "checked" : ""} /> Скрытый агент</label>
 				</div>
 				<div class="toolbar">
@@ -213,9 +393,15 @@
 			<div class="card"><h3>Технические данные</h3><dl class="kv">
 				<dt>agent_id</dt><dd>${esc(agent.id)}</dd>
 				<dt>создан</dt><dd>${esc(when(agent.created_at))}</dd>
+				<dt>обновлён</dt><dd>${esc(when(agent.updated_at))}</dd>
+				<dt>тип</dt><dd>${esc(agent.agent_type || "—")}</dd>
+				<dt>embedding</dt><dd>${esc(agent.embedding || "—")}</dd>
+				<dt>template/entity</dt><dd>${esc(agent.template_id || "—")} / ${esc(agent.entity_id || "—")}</dd>
+				<dt>project/deployment</dt><dd>${esc(agent.project_id || "—")} / ${esc(agent.deployment_id || "—")}</dd>
 				<dt>последний запуск</dt><dd>${esc(when(agent.last_run_completion))}</dd>
+				<dt>stop reason</dt><dd>${esc(agent.last_stop_reason || "—")}</dd>
 				<dt>tools</dt><dd>${esc((agent.tools || []).map((tool) => tool.name).filter(Boolean).join(", ") || "—")}</dd>
-			</dl></div>`;
+			</dl><details><summary>Полное состояние (read-only)</summary><pre>${esc(JSON.stringify(agent, null, 2))}</pre></details></div>`;
 
 		$("agent-form").addEventListener("submit", async (event) => {
 			event.preventDefault();
@@ -230,6 +416,7 @@
 			if (String(form.get("model") || "").trim()) payload.model = form.get("model");
 			if (String(form.get("context_window") || "").trim()) payload.context_window = Number(form.get("context_window"));
 			try {
+				payload.model_settings = parseJsonField(form, "model_settings");
 				await api(`/v1/sdk/agents/${encodeURIComponent(agentId)}`, {
 					method: "PATCH",
 					body: JSON.stringify(payload),
@@ -259,6 +446,41 @@
 				$("agent-status").textContent = error.message;
 			}
 		});
+	}
+
+	async function renderMemory(host, agentId) {
+		const { agent } = await api(`/v1/sdk/agents/${encodeURIComponent(agentId)}`);
+		const blocks = Array.isArray(agent.blocks)
+			? agent.blocks
+			: Array.isArray(agent.memory?.blocks)
+				? agent.memory.blocks
+				: [];
+		host.innerHTML = `
+			<div class="notice"><strong>Память читается из состояния Letta.</strong>
+				CRUD блоков существующего агента отсутствует в WebSocket management API текущего Agent SDK.
+				Новые блоки можно точно задать при создании или импорте агента.</div>
+			${blocks.length ? blocks.map((block) => `
+				<div class="card memory-block">
+					<div class="provider-title"><h3>${esc(block.label || "Без метки")}</h3>
+						<div><code>${esc(block.id || "")}</code> ${block.read_only ? '<span class="pill">read-only</span>' : ""}</div></div>
+					<p class="small muted">${esc(block.description || "Без описания")} · limit ${esc(block.limit || "—")}</p>
+					<textarea rows="8" readonly>${esc(block.value || "")}</textarea>
+					<details><summary>Метаданные</summary><pre>${esc(JSON.stringify(block, null, 2))}</pre></details>
+				</div>`).join("") : '<div class="empty">App Server не вернул блоки памяти.</div>'}`;
+	}
+
+	async function renderTools(host, agentId) {
+		const { agent } = await api(`/v1/sdk/agents/${encodeURIComponent(agentId)}`);
+		const tools = Array.isArray(agent.tools) ? agent.tools : [];
+		host.innerHTML = `
+			<div class="notice">Список инструментов читается из Letta. Локальные инструменты Evaself,
+				allowlist, permissions, skills и dreaming настраиваются в разделе «Настройки SDK».</div>
+			${tools.length ? tools.map((tool) => `
+				<div class="card"><div class="provider-title"><h3>${esc(tool.name || "Без имени")}</h3>
+					<span class="pill">${esc(tool.tool_type || tool.source_type || "tool")}</span></div>
+					<p>${esc(tool.description || "Без описания")}</p>
+					<details><summary>JSON schema и состояние</summary><pre>${esc(JSON.stringify(tool, null, 2))}</pre></details>
+				</div>`).join("") : '<div class="empty">Инструменты не прикреплены или не проецируются App Server.</div>'}`;
 	}
 
 	async function renderConversations(host, agentId) {
@@ -369,6 +591,10 @@
 				<textarea id="chat-input" rows="3" placeholder="Введите сообщение…"></textarea>
 				<div class="toolbar">
 					<button class="btn" id="send" ${state.selectedConversation ? "" : "disabled"}>Отправить</button>
+					<button class="btn danger" id="cancel-turn" disabled>Остановить</button>
+					<button class="btn ghost" id="retry-turn" ${state.lastPrompt ? "" : "disabled"}>Повторить</button>
+					<button class="btn ghost" id="new-chat" ${state.selectedConversation ? "" : "disabled"}>Очистить / новый диалог</button>
+					<button class="btn ghost" id="session-status" ${state.selectedConversation ? "" : "disabled"}>Состояние сессии</button>
 					<span class="small muted" id="chat-status"></span>
 				</div>
 				${state.selectedConversation ? "" : '<p class="error">Сначала создайте диалог на вкладке «Диалоги».</p>'}
@@ -378,30 +604,129 @@
 			await loadMessages(state.selectedConversation);
 		});
 		if (state.selectedConversation) await loadMessages(state.selectedConversation);
+		$("retry-turn").addEventListener("click", () => {
+			$("chat-input").value = state.lastPrompt;
+			$("send").click();
+		});
+		$("new-chat").addEventListener("click", async () => {
+			if (!confirm("Создать новый диалог? Старая история и память сохранятся в предыдущем диалоге.")) return;
+			try {
+				const result = await api(`/v1/sdk/agents/${encodeURIComponent(agentId)}/conversations`, {
+					method: "POST",
+					body: JSON.stringify({ summary: "Новый диалог из WebUI" }),
+				});
+				state.selectedConversation = result.conversation.id;
+				await renderChat(host, agentId);
+			} catch (error) {
+				$("chat-status").textContent = error.message;
+			}
+		});
+		$("session-status").addEventListener("click", async () => {
+			try {
+				const body = await api(`/v1/sdk/conversations/${encodeURIComponent(state.selectedConversation)}/session`);
+				$("chat-out").insertAdjacentHTML(
+					"afterbegin",
+					`<div class="card"><h3>Runtime session</h3><pre>${esc(JSON.stringify(body.session, null, 2))}</pre></div>`,
+				);
+			} catch (error) {
+				$("chat-status").textContent = error.message;
+			}
+		});
+		$("cancel-turn").addEventListener("click", async () => {
+			const id = $("cancel-turn").dataset.conversation;
+			if (!id) return;
+			$("chat-status").textContent = "отмена запроса…";
+			try {
+				const result = await api(`/v1/sdk/conversations/${encodeURIComponent(id)}/abort`, { method: "POST" });
+				$("chat-status").textContent = result.aborted ? "запрос остановлен" : "активный запрос уже завершён";
+			} catch (error) {
+				$("chat-status").textContent = error.message;
+			}
+		});
 		$("send").addEventListener("click", async () => {
 			const input = $("chat-input");
 			const text = input.value.trim();
 			if (!text) return;
+			const conversationId = state.selectedConversation;
+			state.lastPrompt = text;
 			$("send").disabled = true;
+			$("cancel-turn").disabled = false;
+			$("cancel-turn").dataset.conversation = conversationId;
 			$("chat-status").textContent = "ожидание ответа…";
 			try {
 				$("chat-out").insertAdjacentHTML("afterbegin", `<div class="msg user"><div class="role">Вы</div>${esc(text)}</div>`);
-				const result = await api(`/v1/sdk/conversations/${encodeURIComponent(state.selectedConversation)}/messages`, {
-					method: "POST",
-					body: JSON.stringify({ text }),
-				});
+				const streamId = `stream-${Date.now()}`;
 				$("chat-out").insertAdjacentHTML(
 					"afterbegin",
-					`<div class="msg"><div class="role">Агент · ${esc(result.durationMs)} мс</div>${esc(result.reply)}</div>`,
+					`<div class="msg" id="${streamId}"><div class="role">Агент · streaming</div><span></span></div>`,
 				);
+				let streamed = "";
+				const result = await streamApi(
+					`/v1/sdk/conversations/${encodeURIComponent(conversationId)}/messages/stream`,
+					{ text },
+					(name, value) => {
+						if (name !== "delta") return;
+						streamed += String(value.text || "");
+						const node = document.querySelector(`#${streamId} span`);
+						if (node) node.textContent = streamed;
+					},
+				);
+				const streamNode = $(streamId);
+				if (streamNode) {
+					streamNode.querySelector(".role").textContent = `Агент · ${result.durationMs} мс`;
+					streamNode.querySelector("span").textContent = result.reply;
+					streamNode.insertAdjacentHTML("afterend", turnTraceHtml(result));
+				} else {
+					$("chat-out").insertAdjacentHTML(
+						"afterbegin",
+						`<div class="msg"><div class="role">Агент · ${esc(result.durationMs)} мс</div>${esc(result.reply)}</div>
+						 ${turnTraceHtml(result)}`,
+					);
+				}
 				$("chat-status").textContent = "готово";
 				input.value = "";
 			} catch (error) {
 				$("chat-status").textContent = error.message;
 			} finally {
 				$("send").disabled = false;
+				$("cancel-turn").disabled = true;
+				delete $("cancel-turn").dataset.conversation;
 			}
 		});
+	}
+
+	function turnTraceHtml(result) {
+		const usage = result.usage ? JSON.stringify(result.usage, null, 2) : "нет данных";
+		const usageObject = result.usage || {};
+		const used = Number(
+			usageObject.total_tokens ??
+			usageObject.totalTokens ??
+			(Number(usageObject.input_tokens || usageObject.prompt_tokens || 0) +
+				Number(usageObject.output_tokens || usageObject.completion_tokens || 0)),
+		);
+		const selectedAgent = state.agents.find((agent) => agent.id === state.selected);
+		const context = Number(
+			selectedAgent?.context_window_limit ||
+			state.system?.active_llm?.context_window ||
+			0,
+		);
+		const percent = context > 0 && used > 0 ? Math.min(Math.round((used / context) * 100), 100) : 0;
+		return `<details class="card trace">
+			<summary>Trace · ${esc(result.messageCount)} событий · ${esc(result.stopReason || "без stop reason")}</summary>
+			<dl class="kv">
+				<dt>agent_id</dt><dd>${esc(result.agentId || "—")}</dd>
+				<dt>conversation_id</dt><dd>${esc(result.conversationId || "—")}</dd>
+				<dt>tools</dt><dd>${esc((result.toolCalls || []).join(", ") || "—")}</dd>
+				<dt>reasoning</dt><dd>${esc((result.reasoning || []).join("\n") || "—")}</dd>
+			</dl>
+			${context > 0
+				? `<div class="context-meter"><div style="width:${percent}%"></div></div>
+				   <div class="small muted">Контекст: ${esc(used || "—")} / ${esc(context)} tokens (${esc(percent)}%)</div>`
+				: ""}
+			<h4>Usage</h4><pre>${esc(usage)}</pre>
+			<h4>Raw SDK trace (секреты скрыты)</h4>
+			<pre>${esc(JSON.stringify(result.trace || [], null, 2))}</pre>
+		</details>`;
 	}
 
 	function renderNewAgent() {
@@ -412,15 +737,35 @@
 				<div class="form-grid">
 					<label>Имя<input name="name" required /></label>
 					<label>Модель (пусто = активная LLM)<input name="model" /></label>
+					<label>Embedding model<input name="embedding" /></label>
+					<label>Context window<input name="context_window" type="number" min="1024" /></label>
 					<label class="span-2">Описание<input name="description" /></label>
+					<label>System prompt preset<select name="system_prompt_preset">
+						<option value="">Собственный / из настроек SDK</option>
+						<option>default</option><option>letta-claude</option><option>letta-codex</option>
+						<option>letta-gemini</option><option>claude</option><option>codex</option><option>gemini</option>
+					</select></label>
+					<label>Personality preset<input name="personality" placeholder="например memo" /></label>
+					<label class="span-2">System prompt / append к preset<textarea name="system_prompt" rows="6"></textarea></label>
 					<label class="span-2">Persona<textarea name="persona" rows="6" placeholder="Пусто = шаблон из настроек SDK"></textarea></label>
 					<label class="span-2">Human memory<textarea name="human" rows="4"></textarea></label>
 					<label class="span-2">Дополнительные memory blocks (JSON-массив)
 						<textarea name="memory_json" rows="8" placeholder='[{"label":"project","value":"Контекст","description":"Описание","read_only":false,"limit":8000}]'></textarea>
 					</label>
 					<label>Теги через запятую<input name="tags" value="evaself" /></label>
-					<label>Permission mode<select name="permission_mode"><option>unrestricted</option><option>standard</option><option>acceptEdits</option></select></label>
+					<label>Permission mode<select name="permission_mode"><option>unrestricted</option><option>standard</option><option>acceptEdits</option><option>strict</option></select></label>
+					<label class="span-2">Base tools, по одному в строке<textarea name="base_tools" rows="3"></textarea></label>
+					<label>Allowed tools<textarea name="allowed_tools" rows="3"></textarea></label>
+					<label>Disallowed tools<textarea name="disallowed_tools" rows="3"></textarea></label>
+					<label>Skill sources<textarea name="skill_sources" rows="3">bundled
+global
+agent
+project</textarea></label>
+					<label>Dreaming (JSON)<textarea name="dreaming" rows="3">{"trigger":"off"}</textarea></label>
+					<label class="span-2">Model settings (JSON)<textarea name="model_settings" rows="4">{}</textarea></label>
 					<label class="check"><input name="memfs_enabled" type="checkbox" checked /> Memory filesystem</label>
+					<label class="check"><input name="hidden" type="checkbox" /> Скрытый агент</label>
+					<label class="check"><input name="system_info_reminder" type="checkbox" /> System info reminder</label>
 					<label class="check"><input name="create_conversation" type="checkbox" checked /> Сразу создать диалог</label>
 				</div>
 				<div class="toolbar"><button class="btn" type="submit">Создать</button><span class="small muted" id="new-agent-status"></span></div>
@@ -434,13 +779,31 @@
 				tags: String(form.get("tags") || "").split(",").map((item) => item.trim()).filter(Boolean),
 				permission_mode: form.get("permission_mode"),
 				memfs_enabled: form.get("memfs_enabled") === "on",
+				hidden: form.get("hidden") === "on",
+				system_info_reminder: form.get("system_info_reminder") === "on",
 				create_conversation: form.get("create_conversation") === "on",
+				base_tools: readLines(form.get("base_tools")),
+				allowed_tools: readLines(form.get("allowed_tools")),
+				disallowed_tools: readLines(form.get("disallowed_tools")),
+				skill_sources: readLines(form.get("skill_sources")),
 			};
-			for (const field of ["model", "persona", "human"]) {
+			for (const field of ["model", "embedding", "personality", "persona", "human"]) {
 				if (String(form.get(field) || "").trim()) payload[field] = form.get(field);
+			}
+			const contextWindow = String(form.get("context_window") || "").trim();
+			if (contextWindow) payload.context_window = Number(contextWindow);
+			const prompt = String(form.get("system_prompt") || "");
+			const preset = String(form.get("system_prompt_preset") || "");
+			if (preset) {
+				payload.system_prompt_preset = preset;
+				if (prompt.trim()) payload.system_prompt_append = prompt;
+			} else if (prompt.trim()) {
+				payload.system_prompt = prompt;
 			}
 			$("new-agent-status").textContent = "создание…";
 			try {
+				payload.dreaming = parseJsonField(form, "dreaming");
+				payload.model_settings = parseJsonField(form, "model_settings");
 				const memoryRaw = String(form.get("memory_json") || "").trim();
 				if (memoryRaw) {
 					const memory = JSON.parse(memoryRaw);
@@ -516,7 +879,10 @@
 					<div class="form-grid">
 						<label>Префикс имени<input name="agent_name_prefix" value="${esc(settings.agent_name_prefix)}" required /></label>
 						<label>Permission mode<select name="permission_mode">
-							${["standard", "acceptEdits", "unrestricted"].map((value) => `<option ${settings.permission_mode === value ? "selected" : ""}>${value}</option>`).join("")}
+							${["standard", "acceptEdits", "unrestricted", "strict"].map((value) => `<option ${settings.permission_mode === value ? "selected" : ""}>${value}</option>`).join("")}
+						</select></label>
+						<label>Reasoning effort<select name="reasoning_effort">
+							${["none", "minimal", "low", "medium", "high", "xhigh"].map((value) => `<option ${settings.reasoning_effort === value ? "selected" : ""}>${value}</option>`).join("")}
 						</select></label>
 						<label class="span-2">Описание<input name="default_description" value="${esc(settings.default_description)}" /></label>
 						<label class="span-2">Persona<textarea name="default_persona" rows="10">${esc(settings.default_persona)}</textarea></label>
@@ -581,6 +947,7 @@
 					default_human_template: form.get("default_human_template"),
 					default_tags: readLines(form.get("default_tags")),
 					permission_mode: form.get("permission_mode"),
+					reasoning_effort: form.get("reasoning_effort"),
 					memfs_enabled: form.get("memfs_enabled") === "on",
 					system_prompt: String(form.get("system_prompt") || "").trim() || null,
 					base_tools: readLines(form.get("base_tools")).length ? readLines(form.get("base_tools")) : null,
@@ -833,14 +1200,147 @@
 		}
 	}
 
+	/* ----------------------------------------------------- bulk/export */
+	$("select-all").addEventListener("click", () => {
+		if (state.selectedAgents.size === state.agents.length) state.selectedAgents.clear();
+		else state.selectedAgents = new Set(state.agents.map((agent) => agent.id));
+		renderAgentList();
+	});
+
+	$("bulk-edit").addEventListener("click", renderBulkEditor);
+
+	function renderBulkEditor() {
+		const ids = [...state.selectedAgents];
+		if (!ids.length) return;
+		$("crumb").textContent = `Пакетное изменение · ${ids.length}`;
+		$("main").innerHTML = `
+			<form class="card" id="bulk-form">
+				<h3>Изменить ${ids.length} агентов</h3>
+				<p class="muted">Пустые поля не изменяются. При первой ошибке уже применённые изменения автоматически откатываются.</p>
+				<div class="form-grid">
+					<label>Модель<input name="model" /></label>
+					<label>Context window<input name="context_window" type="number" min="1024" /></label>
+					<label class="span-2">Теги через запятую<input name="tags" /></label>
+					<label>Hidden<select name="hidden"><option value="">Не менять</option><option value="true">Да</option><option value="false">Нет</option></select></label>
+					<label class="span-2">System prompt<textarea name="system" rows="8"></textarea></label>
+					<label class="span-2">Model settings JSON (пусто = не менять)<textarea name="model_settings" rows="5"></textarea></label>
+				</div>
+				<details><summary>Выбранные agent_id</summary><pre>${esc(ids.join("\n"))}</pre></details>
+				<div class="toolbar"><button class="btn" type="submit">Проверить и применить</button>
+					<button class="btn ghost" type="button" id="cancel-bulk">Отмена</button>
+					<span id="bulk-status" class="small muted"></span></div>
+			</form>`;
+		$("cancel-bulk").addEventListener("click", () => setSection("agents"));
+		$("bulk-form").addEventListener("submit", async (event) => {
+			event.preventDefault();
+			const form = new FormData(event.currentTarget);
+			const patch = {};
+			for (const field of ["model", "system"]) {
+				const value = String(form.get(field) || "");
+				if (value.trim()) patch[field] = value;
+			}
+			const context = String(form.get("context_window") || "").trim();
+			if (context) patch.context_window = Number(context);
+			const tags = String(form.get("tags") || "").trim();
+			if (tags) patch.tags = tags.split(",").map((item) => item.trim()).filter(Boolean);
+			const hidden = String(form.get("hidden") || "");
+			if (hidden) patch.hidden = hidden === "true";
+			const settings = String(form.get("model_settings") || "").trim();
+			try {
+				if (settings) {
+					patch.model_settings = JSON.parse(settings);
+					if (!patch.model_settings || Array.isArray(patch.model_settings)) throw new Error("нужен JSON-объект");
+				}
+				if (!Object.keys(patch).length) throw new Error("Не выбрано ни одного изменения");
+				const preview = ids.slice(0, 10).map((id) => {
+					const before = state.agents.find((agent) => agent.id === id) || {};
+					return { agent_id: id, before: Object.fromEntries(Object.keys(patch).map((key) => [key, before[key]])), after: patch };
+				});
+				if (!confirm(`Применить изменения к ${ids.length} агентам?\n\n${JSON.stringify(preview, null, 2)}`)) return;
+				$("bulk-status").textContent = "применение…";
+				const body = await api("/v1/sdk/agents/bulk", {
+					method: "POST",
+					body: JSON.stringify({ agent_ids: ids, patch }),
+				});
+				state.selectedAgents.clear();
+				await loadAgents();
+				setSection("agents");
+				notice($("main"), `Обновлено агентов: ${body.count}.`);
+			} catch (error) {
+				$("bulk-status").textContent = error.message;
+			}
+		});
+	}
+
+	$("export-agents").addEventListener("click", async () => {
+		const ids = [...state.selectedAgents];
+		try {
+			const query = ids.length ? `?ids=${encodeURIComponent(ids.join(","))}` : "";
+			const body = await api(`/v1/sdk/agents/export${query}`);
+			const blob = new Blob([JSON.stringify(body, null, 2)], { type: "application/json" });
+			const link = document.createElement("a");
+			link.href = URL.createObjectURL(blob);
+			link.download = `evaself-agents-${new Date().toISOString().slice(0, 10)}.json`;
+			link.click();
+			URL.revokeObjectURL(link.href);
+		} catch (error) {
+			notice($("main"), error.message, "error");
+		}
+	});
+
+	$("import-agents").addEventListener("click", () => $("import-file").click());
+	$("import-file").addEventListener("change", async (event) => {
+		const file = event.target.files?.[0];
+		if (!file) return;
+		try {
+			const payload = JSON.parse(await file.text());
+			if (payload.format !== "evaself-agent-export" || !Array.isArray(payload.agents)) {
+				throw new Error("Файл не является экспортом Evaself");
+			}
+			if (!confirm(`Создать новых агентов из файла: ${payload.agents.length}? Существующие агенты не перезаписываются.`)) return;
+			const body = await api("/v1/sdk/agents/import", {
+				method: "POST",
+				body: JSON.stringify({ agents: payload.agents }),
+			});
+			await loadAgents();
+			setSection("agents");
+			notice($("main"), `Импортировано агентов: ${body.count}.`);
+		} catch (error) {
+			notice($("main"), error.message, "error");
+		} finally {
+			event.target.value = "";
+		}
+	});
+
+	/* ------------------------------------------------------------ theme */
+	function applyTheme(theme) {
+		document.documentElement.dataset.theme = theme;
+		localStorage.setItem("evaself-theme", theme);
+		$("theme-toggle").textContent = theme === "dark" ? "Светлая" : "Тёмная";
+	}
+	applyTheme(localStorage.getItem("evaself-theme") || "light");
+	$("theme-toggle").addEventListener("click", () => {
+		applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+	});
+
 	/* ------------------------------------------------------------ boot */
 	$("filter").addEventListener("input", (event) => {
 		state.filter = event.target.value;
 		renderAgentList();
 	});
+	$("type-filter").addEventListener("change", (event) => {
+		state.typeFilter = event.target.value;
+		renderAgentList();
+	});
+	$("visibility-filter").addEventListener("change", (event) => {
+		state.visibilityFilter = event.target.value;
+		renderAgentList();
+	});
 	$("refresh").addEventListener("click", async () => {
 		await refreshHealth();
-		if (state.section === "llm") await renderLlm();
+		if (state.section === "dashboard") await renderDashboard();
+		else if (state.section === "audit") await renderAudit();
+		else if (state.section === "llm") await renderLlm();
 		else if (state.section === "sdk") await renderSdk();
 		else {
 			await loadAgents();
@@ -850,5 +1350,6 @@
 
 	refreshHealth();
 	loadAgents();
+	setSection("dashboard");
 	setInterval(refreshHealth, 30000);
 })();

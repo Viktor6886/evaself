@@ -35,9 +35,12 @@ step "Configuration"
 PERM="$(stat -c '%a' "$ENV_FILE" 2>/dev/null || echo '???')"
 if [ "$PERM" = "600" ]; then ok ".env mode 600"; else critical ".env mode is $PERM, expected 600"; fi
 
-for key in DOMAIN ACME_EMAIL EVA_TELEGRAM_BOT_TOKEN EVA_TELEGRAM_WEBHOOK_SECRET EVA_AGENT_API_KEY LETTA_APP_SERVER_TOKEN; do
+for key in DOMAIN EVA_TELEGRAM_WEBHOOK_SECRET EVA_AGENT_API_KEY LETTA_APP_SERVER_TOKEN; do
 	if [ -z "$(get_env "$key" || true)" ]; then critical "$key is empty in .env"; fi
 done
+[ -n "$(get_env ACME_EMAIL || true)" ] || soft "ACME_EMAIL не задан — укажите его перед публичным HTTPS"
+[ -n "$(get_env EVA_TELEGRAM_BOT_TOKEN || true)" ] || soft "Telegram Bot Token не задан — бот пока отключён"
+[ -n "$(get_env OWNER_TELEGRAM_ID || true)" ] || soft "Telegram ID владельца не задан"
 [ -n "$(get_env EVA_LLM_API_KEY || true)" ] || soft "EVA_LLM_API_KEY is empty — Eva cannot answer"
 [ -n "$(get_env MEDIA_ASR_BASE_URL || true)" ] || info "ASR not configured yet (voice messages will be refused politely)"
 
@@ -137,22 +140,32 @@ fetch('http://127.0.0.1:'+(process.env.EVA_AGENT_PORT||8070)+'/health')
   .catch(e=>console.log('FAIL '+e.message))" 2>/dev/null | tr -d '\r')"
 case "$APP_SERVER_STATE" in
 	ok*) ok "Letta App Server reachable through the Agent SDK ($APP_SERVER_STATE)" ;;
-	*)   critical "Letta App Server not reachable through the Agent SDK: ${APP_SERVER_STATE:-no answer}" ;;
+	*)
+		if [ -z "$(get_env EVA_LLM_API_KEY || true)" ]; then
+			soft "Letta App Server ожидает настройку LLM: ${APP_SERVER_STATE:-нет ответа}"
+		else
+			critical "Letta App Server not reachable through the Agent SDK: ${APP_SERVER_STATE:-no answer}"
+		fi
+		;;
 esac
 
 # =====================================================================
 step "Public HTTPS"
 # =====================================================================
-for pair in "site:$DOMAIN" "webapp:$DOMAIN_APP" "api:$DOMAIN_API/health" "nocodb:$DOMAIN_NOCODB" "letta:$DOMAIN_LETTA"; do
-	label="${pair%%:*}"; host="${pair#*:}"
-	code="$(http_status "https://$host" 12)"
-	case "$code" in
-		200|204|301|302) ok "$label https://$host ($code)" ;;
-		401) ok "$label https://$host (401 — protected, as intended)" ;;
-		000) critical "$label https://$host unreachable (DNS, firewall or certificate)" ;;
-		*) soft "$label https://$host returned $code" ;;
-	esac
-done
+if [[ "$DOMAIN" == *.localhost ]]; then
+	info "локальный режим: DNS и публичные сертификаты не проверяются"
+else
+	for pair in "site:$DOMAIN" "webapp:$DOMAIN_APP" "api:$DOMAIN_API/health" "nocodb:$DOMAIN_NOCODB" "letta:$DOMAIN_LETTA"; do
+		label="${pair%%:*}"; host="${pair#*:}"
+		code="$(http_status "https://$host" 12)"
+		case "$code" in
+			200|204|301|302) ok "$label https://$host ($code)" ;;
+			401) ok "$label https://$host (401 — protected, as intended)" ;;
+			000) critical "$label https://$host unreachable (DNS, firewall or certificate)" ;;
+			*) soft "$label https://$host returned $code" ;;
+		esac
+	done
+fi
 
 if [ -n "${DOMAIN_STATUS:-}" ]; then
 	case ",${COMPOSE_PROFILES:-}," in

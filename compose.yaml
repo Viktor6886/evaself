@@ -182,7 +182,7 @@ services:
       args:
         CADDY_IMAGE: ${CADDY_IMAGE}
         CADDY_VERSION: ${CADDY_VERSION}
-    image: evaself/letta-ui:0.2.0
+    image: evaself/letta-ui:0.3.0
     container_name: evaself-letta-ui
     # The App Server is WebSocket-only, so the console cannot talk to it
     # from a browser. It goes through eva-agent-service.
@@ -206,7 +206,7 @@ services:
       context: ./eva-agent-service
       args:
         NODE_BASE_VERSION: ${NODE_BASE_VERSION}
-    image: evaself/eva-agent-service:0.2.0
+    image: evaself/eva-agent-service:0.3.0
     container_name: evaself-eva-agent-service
     # The ONLY component that talks to the Letta App Server, and it does so
     # exclusively through @letta-ai/letta-agent-sdk.
@@ -216,6 +216,13 @@ services:
       EVA_AGENT_LOG_LEVEL: ${EVA_AGENT_LOG_LEVEL}
       EVA_AGENT_LOCK_TTL: ${EVA_AGENT_LOCK_TTL}
       EVA_AGENT_TURN_TIMEOUT_MS: ${EVA_AGENT_TURN_TIMEOUT_MS}
+      DOMAIN: ${DOMAIN}
+      DOMAIN_APP: ${DOMAIN_APP}
+      DOMAIN_API: ${DOMAIN_API}
+      DOMAIN_NOCODB: ${DOMAIN_NOCODB}
+      DOMAIN_LETTA: ${DOMAIN_LETTA}
+      DOMAIN_STATUS: ${DOMAIN_STATUS}
+      EVASELF_INCOMPLETE_SETTINGS: ${EVASELF_INCOMPLETE_SETTINGS:-}
       EVA_AGENT_PERSONA_FILE: /app/library/persona/eva.md
       LETTA_APP_SERVER_URL: ws://letta-app-server:4500/ws
       LETTA_APP_SERVER_TOKEN: ${LETTA_APP_SERVER_TOKEN}

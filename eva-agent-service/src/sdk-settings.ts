@@ -1,4 +1,4 @@
-import type { PermissionMode, SkillSource } from "@letta-ai/letta-agent-sdk";
+import type { PermissionMode, ReasoningEffort, SkillSource } from "@letta-ai/letta-agent-sdk";
 
 import type { Config } from "./config.js";
 import type { Database, SdkSettingsRow } from "./db.js";
@@ -12,6 +12,7 @@ export interface SdkSettingsInput {
   default_human_template?: string;
   default_tags?: string[];
   permission_mode?: PermissionMode;
+  reasoning_effort?: ReasoningEffort;
   memfs_enabled?: boolean;
   system_prompt?: string | null;
   base_tools?: string[] | null;
@@ -40,7 +41,8 @@ export interface PublicSdkSettings extends SdkSettingsInput {
   updated_at: string;
 }
 
-const PERMISSION_MODES = new Set(["standard", "acceptEdits", "unrestricted"]);
+const PERMISSION_MODES = new Set(["standard", "acceptEdits", "unrestricted", "strict"]);
+const REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
 const SKILL_SOURCES = new Set(["bundled", "global", "agent", "project"]);
 const DREAMING_TRIGGERS = new Set(["off", "step-count", "compaction-event"]);
 
@@ -88,7 +90,11 @@ export class SdkSettingsManager {
 export function validateSettings(input: SdkSettingsInput): Required<SdkSettingsInput> {
   const permission = input.permission_mode ?? "unrestricted";
   if (!PERMISSION_MODES.has(permission)) {
-    throw badRequest("permission_mode должен быть standard, acceptEdits или unrestricted");
+    throw badRequest("permission_mode должен быть standard, acceptEdits, unrestricted или strict");
+  }
+  const reasoningEffort = input.reasoning_effort ?? "none";
+  if (!REASONING_EFFORTS.has(reasoningEffort)) {
+    throw badRequest("reasoning_effort должен быть none, minimal, low, medium, high или xhigh");
   }
   const skillSources = stringArray(input.skill_sources ?? [], "skill_sources", 4) as SkillSource[];
   if (skillSources.some((source) => !SKILL_SOURCES.has(source))) {
@@ -121,6 +127,7 @@ export function validateSettings(input: SdkSettingsInput): Required<SdkSettingsI
     default_human_template: text(input.default_human_template ?? "", "default_human_template", 0, 10000),
     default_tags: stringArray(input.default_tags ?? [], "default_tags", 64),
     permission_mode: permission,
+    reasoning_effort: reasoningEffort,
     memfs_enabled: boolean(input.memfs_enabled, true),
     system_prompt: nullableText(input.system_prompt, "system_prompt", 100000),
     base_tools: nullableStringArray(input.base_tools, "base_tools", 128),
@@ -172,6 +179,7 @@ function rowToInput(row: SdkSettingsRow): Required<SdkSettingsInput> {
     default_human_template: row.default_human_template,
     default_tags: row.default_tags,
     permission_mode: row.permission_mode,
+    reasoning_effort: row.reasoning_effort,
     memfs_enabled: row.memfs_enabled,
     system_prompt: row.system_prompt,
     base_tools: row.base_tools,

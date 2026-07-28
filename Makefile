@@ -30,7 +30,7 @@ BACKUP ?=
 
 export ROOT_DIR SCRIPTS ENV_FILE VERSIONS COMPOSE_FILE
 
-.PHONY: help install configure start stop restart status logs doctor \
+.PHONY: help install configure configure-advanced start stop restart status logs doctor \
         backup restore update-preview update rollback \
         configure-llm test-llm list-models configure-letta \
         disk-cleanup build pull ps shell-db validate test
@@ -56,6 +56,9 @@ install: ## Полная установка на чистую Ubuntu 24.04 (за
 
 configure: ## Повторно запустить мастер настройки .env
 	@$(SCRIPTS)/configure.sh
+
+configure-advanced: ## Мастер настройки с ручным изменением поддоменов и JSON LLM
+	@$(SCRIPTS)/configure.sh --advanced
 
 configure-llm: ## Добавить, проверить и при необходимости активировать LLM
 	@$(SCRIPTS)/configure-llm.sh

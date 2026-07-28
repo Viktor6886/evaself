@@ -7,6 +7,15 @@ export interface Config {
   host: string;
   logLevel: string;
   apiKey: string;
+  domains: {
+    root: string;
+    app: string;
+    api: string;
+    nocodb: string;
+    letta: string;
+    status: string;
+  };
+  incompleteSettings: string[];
 
   /** WebSocket URL of the self-hosted Letta App Server. */
   appServerUrl: string;
@@ -84,6 +93,19 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     host: str("EVA_AGENT_HOST", "0.0.0.0"),
     logLevel: str("EVA_AGENT_LOG_LEVEL", "info"),
     apiKey: str("EVA_AGENT_API_KEY"),
+    domains: {
+      root: str("DOMAIN"),
+      app: str("DOMAIN_APP"),
+      api: str("DOMAIN_API"),
+      nocodb: str("DOMAIN_NOCODB"),
+      letta: str("DOMAIN_LETTA"),
+      status: str("DOMAIN_STATUS"),
+    },
+    incompleteSettings: str("EVASELF_INCOMPLETE_SETTINGS")
+      .replace(/^['"]|['"]$/g, "")
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean),
 
     appServerUrl: str("LETTA_APP_SERVER_URL", "ws://letta-app-server:4500/ws"),
     appServerToken: str("LETTA_APP_SERVER_TOKEN"),

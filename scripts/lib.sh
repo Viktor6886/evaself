@@ -86,6 +86,11 @@ gen_password() { openssl rand -base64 18 | tr -d '/+=' | cut -c1-20; }
 # ask VAR "prompt" ["default"]  -> sets the named variable
 ask() {
 	local __var="$1" __prompt="$2" __default="${3:-}" __answer=""
+	if [ "${EVASELF_NONINTERACTIVE:-0}" = "1" ]; then
+		[ -n "$__default" ] || die "$__prompt: нет значения для non-interactive режима"
+		printf -v "$__var" '%s' "$__default"
+		return
+	fi
 	if [ -n "$__default" ]; then
 		read -r -p "  $__prompt [$__default]: " __answer </dev/tty || true
 		__answer="${__answer:-$__default}"
@@ -101,18 +106,26 @@ ask() {
 # ask_optional VAR "prompt" ["default"] — an empty answer is accepted
 ask_optional() {
 	local __var="$1" __prompt="$2" __default="${3:-}" __answer=""
+	if [ "${EVASELF_NONINTERACTIVE:-0}" = "1" ]; then
+		printf -v "$__var" '%s' "$__default"
+		return
+	fi
 	if [ -n "$__default" ]; then
 		read -r -p "  $__prompt [$__default]: " __answer </dev/tty || true
 		__answer="${__answer:-$__default}"
 	else
 		read -r -p "  $__prompt: " __answer </dev/tty || true
 	fi
+	[[ "${__answer,,}" == "skip" ]] && __answer="$__default"
 	printf -v "$__var" '%s' "$__answer"
 }
 
 # ask_secret VAR "prompt" — no echo
 ask_secret() {
 	local __var="$1" __prompt="$2" __answer=""
+	if [ "${EVASELF_NONINTERACTIVE:-0}" = "1" ]; then
+		die "$__prompt: секрет нельзя запросить в non-interactive режиме"
+	fi
 	while [ -z "$__answer" ]; do
 		read -r -s -p "  $__prompt: " __answer </dev/tty || true
 		echo
@@ -121,9 +134,30 @@ ask_secret() {
 	printf -v "$__var" '%s' "$__answer"
 }
 
+# ask_secret_optional VAR "prompt" ["default"] — hidden input; Enter keeps
+# the existing value or deliberately leaves the setting incomplete.
+ask_secret_optional() {
+	local __var="$1" __prompt="$2" __default="${3:-}" __answer=""
+	if [ "${EVASELF_NONINTERACTIVE:-0}" = "1" ]; then
+		printf -v "$__var" '%s' "$__default"
+		return
+	fi
+	local __hint=""
+	[ -n "$__default" ] && __hint=" (Enter = оставить сохранённое)"
+	read -r -s -p "  $__prompt$__hint: " __answer </dev/tty || true
+	echo
+	__answer="${__answer:-$__default}"
+	[[ "${__answer,,}" == "skip" ]] && __answer="$__default"
+	printf -v "$__var" '%s' "$__answer"
+}
+
 # confirm "question" [default_yes]
 confirm() {
 	local prompt="$1" default="${2:-n}" answer=""
+	if [ "${EVASELF_NONINTERACTIVE:-0}" = "1" ]; then
+		[[ "$default" = "y" ]]
+		return
+	fi
 	local hint="[y/N]"; [ "$default" = "y" ] && hint="[Y/n]"
 	read -r -p "  $prompt $hint: " answer </dev/tty || true
 	answer="${answer:-$default}"
@@ -169,9 +203,67 @@ get_env() {
 # validation helpers
 # ---------------------------------------------------------------------
 is_domain() { [[ "$1" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$ ]]; }
-is_email()  { [[ "$1" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[a-zA-Z]{2,}$ ]]; }
+is_email()  {
+	local value="${1#"${1%%[![:space:]]*}"}"
+	value="${value%"${value##*[![:space:]]}"}"
+	local pattern='^[A-Za-z0-9._%+~-]+@[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$'
+	[[ "$value" =~ $pattern ]]
+}
 is_number() { [[ "$1" =~ ^[0-9]+$ ]]; }
 is_telegram_token() { [[ "$1" =~ ^[0-9]{6,}:[A-Za-z0-9_-]{30,}$ ]]; }
+
+# Searchable timezone chooser. On a clean Ubuntu host install.sh supplies fzf;
+# non-interactive runs and minimal hosts safely keep the proposed value.
+choose_timezone() {
+	local __var="$1" __default="${2:-UTC}" __selected=""
+	if [ -t 0 ] && [ -t 1 ] && command -v timedatectl >/dev/null 2>&1 \
+		&& command -v fzf >/dev/null 2>&1; then
+		say "  Часовой пояс: начните печатать для поиска, ↑/↓ — выбор, Enter — подтвердить."
+		__selected="$(
+			{ printf '%s\n' "$__default"; timedatectl list-timezones 2>/dev/null; } \
+				| awk 'NF && !seen[$0]++' \
+				| fzf --height=45% --layout=reverse --border \
+					--prompt='  Часовой пояс › ' --query="$__default"
+		)" || true
+	fi
+	if [ -z "$__selected" ]; then
+		ask_optional __selected "Часовой пояс сервера" "$__default"
+	fi
+	printf -v "$__var" '%s' "${__selected:-$__default}"
+}
+
+# Run a noisy command with a compact spinner while preserving its complete
+# output in the installation log. In CI the spinner is suppressed.
+run_with_progress() {
+	local label="$1"; shift
+	local log_file="${EVASELF_INSTALL_LOG:-/var/log/evaself-install.log}"
+	mkdir -p "$(dirname "$log_file")"
+	touch "$log_file"
+	printf '\n[%s] %s\n' "$(date -Iseconds)" "$label" >>"$log_file"
+
+	if [ ! -t 1 ]; then
+		"$@" >>"$log_file" 2>&1
+		return
+	fi
+
+	"$@" >>"$log_file" 2>&1 &
+	local pid=$! frame=0
+	local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+	while kill -0 "$pid" 2>/dev/null; do
+		printf '\r  %s %s' "${frames[$frame]}" "$label"
+		frame=$(((frame + 1) % ${#frames[@]}))
+		sleep 0.15
+	done
+	local status=0
+	wait "$pid" || status=$?
+	if [ "$status" -eq 0 ]; then
+		printf '\r  %s✔%s %s\n' "$C_GREEN" "$C_RESET" "$label"
+		return 0
+	fi
+	printf '\r  %s✖%s %s\n' "$C_RED" "$C_RESET" "$label"
+	tail -n 40 "$log_file" >&2 || true
+	return "$status"
+}
 
 # ---------------------------------------------------------------------
 # service helpers

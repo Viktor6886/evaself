@@ -56,13 +56,24 @@ Slim и toolchain для нативной зависимости `node-pty`.
 - `GET/PATCH /v1/sdk/settings`
 - `POST /v1/sdk/test`
 - `GET/POST /v1/sdk/agents`
+- `POST /v1/sdk/agents/bulk`
+- `GET /v1/sdk/agents/export`
+- `POST /v1/sdk/agents/import`
 - `GET/PATCH/DELETE /v1/sdk/agents/:agentId`
 - `GET/POST /v1/sdk/agents/:agentId/conversations`
 - `GET/PATCH /v1/sdk/conversations/:conversationId`
 - `GET/POST /v1/sdk/conversations/:conversationId/messages`
+- `POST /v1/sdk/conversations/:conversationId/messages/stream`
+- `GET /v1/sdk/conversations/:conversationId/session`
+- `POST /v1/sdk/conversations/:conversationId/abort`
+- `GET /v1/system`
+- `GET /v1/audit`
 
-Удаление agent требует `?confirm=<agentId>`. SDK 0.5.2 не предоставляет
+Удаление agent требует `?confirm=<agentId>`. SDK 0.5.5 не предоставляет
 удаление conversation, поэтому `PATCH` меняет её признак `archived`.
+Стрим возвращает Server-Sent Events; trace очищается от секретов перед
+отправкой. Bulk update выполняется последовательно и автоматически
+восстанавливает уже изменённые agents при ошибке.
 
 ## Webhook API
 

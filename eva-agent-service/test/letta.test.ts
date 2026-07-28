@@ -45,6 +45,38 @@ test("summarizeStream picks the assistant text and separates reasoning", () => {
   assert.equal(summary.stopReason, "end_turn");
   assert.equal(summary.usage?.total_tokens, 120);
   assert.equal(summary.messageCount, 5);
+  assert.deepEqual(summary.trace.map((entry) => entry.type), [
+    "init",
+    "reasoning",
+    "tool_call",
+    "assistant",
+    "result",
+  ]);
+});
+
+test("administrative trace keeps tool details but redacts secrets", () => {
+  const summary = summarizeStream([
+    {
+      type: "tool_call",
+      toolName: "external_request",
+      toolInput: {
+        query: "safe",
+        api_key: "must-not-leak",
+        nested: { Authorization: "Bearer secret" },
+      },
+    },
+  ] as never);
+  assert.equal(summary.trace[0]?.toolName, "external_request");
+  assert.equal(
+    (summary.trace[0]?.toolInput as Record<string, unknown>).api_key,
+    "[скрыто]",
+  );
+  assert.equal(
+    ((summary.trace[0]?.toolInput as Record<string, unknown>).nested as Record<string, unknown>)
+      .Authorization,
+    "[скрыто]",
+  );
+  assert.doesNotMatch(JSON.stringify(summary.trace), /must-not-leak|Bearer secret/);
 });
 
 test("summarizeStream joins several assistant messages", () => {
@@ -139,6 +171,7 @@ test("App Server-only settings are applied at session open, not agent creation",
       allowed_tools: string[] | null;
       disallowed_tools: string[];
       system_info_reminder: boolean;
+      reasoning_effort: "high";
     };
     client: {
       createAgent(options: Record<string, unknown>): Promise<string>;
@@ -150,6 +183,7 @@ test("App Server-only settings are applied at session open, not agent creation",
   internal.runtime.allowed_tools = ["Read", "WebSearch"];
   internal.runtime.disallowed_tools = ["Bash"];
   internal.runtime.system_info_reminder = true;
+  internal.runtime.reasoning_effort = "high";
   service.setToolFactory(() => [
     { name: "safe_tool" },
     { name: "Bash" },
@@ -189,4 +223,5 @@ test("App Server-only settings are applied at session open, not agent creation",
     ["safe_tool"],
   );
   assert.equal(sessionOptions.permissionMode, "unrestricted");
+  assert.equal(sessionOptions.reasoningEffort, "high");
 });

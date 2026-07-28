@@ -145,6 +145,18 @@ body {
 	font: inherit;
 }
 
+.agent-row {
+	display: grid;
+	grid-template-columns: 24px minmax(0, 1fr);
+	align-items: center;
+	gap: 2px;
+}
+
+.agent-select {
+	width: auto;
+	margin: 0 0 0 5px;
+}
+
 .agent:hover {
 	background: var(--accent-soft);
 }
@@ -262,6 +274,13 @@ label.check input {
 	margin-bottom: 8px;
 }
 
+.filter-row {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: 6px;
+	margin-bottom: 8px;
+}
+
 .new-agent {
 	width: 100%;
 	margin-bottom: 8px;
@@ -269,6 +288,17 @@ label.check input {
 
 .toolbar.compact {
 	margin-top: 0;
+}
+
+.bulk-toolbar {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	margin: 0 0 8px;
+}
+
+.bulk-toolbar .btn {
+	padding: 6px 8px;
+	font-size: 11.5px;
 }
 
 .page-heading,
@@ -315,6 +345,26 @@ label.check input {
 	}
 }
 
+:root[data-theme="light"] {
+	--bg: #f7f8fa;
+	--panel: #ffffff;
+	--text: #14161c;
+	--muted: #6b7280;
+	--accent: #6b5cf0;
+	--accent-soft: #efedfe;
+	--border: #e4e6eb;
+}
+
+:root[data-theme="dark"] {
+	--bg: #101218;
+	--panel: #171a21;
+	--text: #e9ebf0;
+	--muted: #98a0ad;
+	--accent: #8f83f5;
+	--accent-soft: #23203a;
+	--border: #262a34;
+}
+
 button.btn.danger {
 	background: var(--danger);
 }
@@ -355,6 +405,36 @@ textarea.block {
 	font-family: var(--mono);
 	font-size: 12.5px;
 	min-height: 130px;
+}
+
+textarea[readonly] {
+	font-family: var(--mono);
+	font-size: 12.5px;
+}
+
+pre {
+	margin: 8px 0 0;
+	padding: 10px;
+	border-radius: 8px;
+	background: var(--bg);
+	color: var(--text);
+	font-family: var(--mono);
+	font-size: 11.5px;
+	line-height: 1.45;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	max-height: 520px;
+	overflow: auto;
+}
+
+details summary {
+	cursor: pointer;
+	color: var(--accent);
+	font-weight: 600;
+}
+
+a {
+	color: var(--accent);
 }
 
 button.btn {
@@ -452,6 +532,39 @@ button.btn:disabled {
 .msg.tool {
 	font-family: var(--mono);
 	font-size: 12.5px;
+}
+
+.trace {
+	border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+.context-meter {
+	height: 7px;
+	margin-top: 12px;
+	overflow: hidden;
+	border-radius: 999px;
+	background: var(--border);
+}
+
+.context-meter > div {
+	height: 100%;
+	background: var(--accent);
+}
+
+.capability-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+	gap: 8px 14px;
+}
+
+.capability-grid > div {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+}
+
+.table-scroll {
+	overflow-x: auto;
 }
 
 .muted {

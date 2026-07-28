@@ -10,6 +10,12 @@ load_env
 
 if [ "${1:-}" = "--from-env" ]; then
 	step "Импорт первой LLM-конфигурации из .env"
+	if [ -z "${EVA_LLM_BASE_URL:-}" ] || [ -z "${EVA_LLM_API_KEY:-}" ] \
+		|| [ -z "${EVA_LLM_MODEL:-}" ]; then
+		info "LLM в мастере пропущена; импорт не требуется"
+		info "добавьте провайдера через Letta UI или make configure-llm"
+		exit 0
+	fi
 	EXISTING="$(printf '' | "$SCRIPT_DIR/llm-api.sh" GET /v1/llm/providers)"
 	COUNT="$(printf '%s' "$EXISTING" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["providers"]))')"
 	if [ "$COUNT" -gt 0 ]; then

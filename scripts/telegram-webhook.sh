@@ -16,6 +16,11 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/lib.sh"
 
 load_env
+if [ -z "${EVA_TELEGRAM_BOT_TOKEN:-}" ]; then
+	info "Telegram Bot Token не настроен; действие пропущено"
+	info "заполните его через make configure и повторите команду"
+	exit 0
+fi
 API="https://api.telegram.org/bot${EVA_TELEGRAM_BOT_TOKEN}"
 URL="https://${DOMAIN_API}/telegram/webhook"
 

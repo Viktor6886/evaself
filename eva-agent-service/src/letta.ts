@@ -16,6 +16,7 @@ import type {
   LettaCodeClientSessionOptions,
   ListMessagesResult,
   PermissionMode,
+  ReasoningEffort,
   SDKMessage,
   SendMessage,
   SkillSource,
@@ -34,6 +35,8 @@ export interface TurnResult {
   reply: string;
   reasoning: string[];
   toolCalls: string[];
+  /** Sanitized SDK events for the protected administrative trace viewer. */
+  trace: Array<Record<string, unknown>>;
   stopReason: string | null;
   usage: Record<string, unknown> | null;
   messageCount: number;
@@ -59,6 +62,15 @@ export interface EvaMemoryBlock {
   limit?: number;
 }
 
+export type EvaSystemPromptPreset =
+  | "default"
+  | "letta-claude"
+  | "letta-codex"
+  | "letta-gemini"
+  | "claude"
+  | "codex"
+  | "gemini";
+
 export interface RuntimeSdkSettings {
   agent_name_prefix: string;
   default_description: string;
@@ -66,6 +78,7 @@ export interface RuntimeSdkSettings {
   default_human_template: string;
   default_tags: string[];
   permissionMode: PermissionMode;
+  reasoning_effort: ReasoningEffort;
   memfs_enabled: boolean;
   system_prompt: string | null;
   base_tools: string[] | null;
@@ -89,6 +102,9 @@ export interface RuntimeSdkSettings {
 export interface ManagedAgentInput {
   name: string;
   description?: string;
+  hidden?: boolean;
+  personality?: string;
+  embedding?: string;
   persona?: string;
   human?: string;
   memory?: EvaMemoryBlock[];
@@ -99,6 +115,8 @@ export interface ManagedAgentInput {
   permission_mode?: PermissionMode;
   memfs_enabled?: boolean;
   system_prompt?: string | null;
+  system_prompt_preset?: EvaSystemPromptPreset;
+  system_prompt_append?: string;
   base_tools?: string[] | null;
   allowed_tools?: string[] | null;
   disallowed_tools?: string[];
@@ -118,10 +136,12 @@ export function summarizeStream(messages: SDKMessage[]): Omit<TurnResult, "agent
   const replyParts: string[] = [];
   const reasoning: string[] = [];
   const toolCalls: string[] = [];
+  const trace: Array<Record<string, unknown>> = [];
   let stopReason: string | null = null;
   let usage: Record<string, unknown> | null = null;
 
   for (const message of messages) {
+    trace.push(sanitizeTraceMessage(message));
     switch (message.type) {
       case "assistant": {
         const content = (message as { content?: unknown }).content;
@@ -161,6 +181,7 @@ export function summarizeStream(messages: SDKMessage[]): Omit<TurnResult, "agent
     reply: replyParts.join("\n\n").trim(),
     reasoning,
     toolCalls,
+    trace,
     stopReason,
     usage,
     messageCount: messages.length,
@@ -213,6 +234,7 @@ export class LettaService {
       default_human_template: "Имя: {{display_name}}\nTelegram ID: {{telegram_id}}",
       default_tags: [EVASELF_TAG],
       permissionMode: "unrestricted",
+      reasoning_effort: "none",
       memfs_enabled: true,
       system_prompt: null,
       base_tools: null,
@@ -654,6 +676,45 @@ export class LettaService {
     }
   }
 
+  /** Interrupt an active turn without deleting its conversation or memory. */
+  async abortTurn(conversationId: string): Promise<{ aborted: boolean }> {
+    const pooled = this.sessions.get(conversationId);
+    if (!pooled) return { aborted: false };
+    try {
+      await pooled.session.abort();
+      this.closeSession(conversationId);
+      return { aborted: true };
+    } catch (error) {
+      this.closeSession(conversationId);
+      throw toEvaError(error, `aborting conversation ${conversationId}`);
+    }
+  }
+
+  /** Runtime state is available only for an already opened SDK session. */
+  async sessionStatus(conversationId: string): Promise<Record<string, unknown>> {
+    const pooled = this.sessions.get(conversationId);
+    if (!pooled) return { open: false, conversation_id: conversationId };
+    try {
+      const status = await pooled.session.getDeviceStatus({
+        timeoutMs: Math.min(this.runtime.app_server_request_timeout_ms, 15_000),
+      });
+      return {
+        open: true,
+        conversation_id: conversationId,
+        agent_id: pooled.session.agentId,
+        session_id: pooled.session.sessionId,
+        last_used_at: new Date(pooled.lastUsedAt).toISOString(),
+        ...status,
+      };
+    } catch (error) {
+      return {
+        open: true,
+        conversation_id: conversationId,
+        status_error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
   /**
    * Prove that the restarted App Server has discovered the selected model.
    * A generic protocol ping is insufficient: the dynamic model catalog may
@@ -700,6 +761,7 @@ export class LettaService {
     ) ?? null;
     return {
       permissionMode: this.runtime.permissionMode,
+      reasoningEffort: this.runtime.reasoning_effort,
       skillSources: this.runtime.skillSources,
       dreaming: this.runtime.dreaming as LettaCodeClientSessionOptions["dreaming"],
       ...(tools.length > 0 ? { tools } : {}),
@@ -818,6 +880,9 @@ export class LettaService {
     const options: CreateAgentOptions = {
       name: input.name,
       description: input.description ?? this.runtime.default_description,
+      ...(input.hidden !== undefined ? { hidden: input.hidden } : {}),
+      ...(input.personality ? { personality: input.personality as CreateAgentOptions["personality"] } : {}),
+      ...(input.embedding ? { embedding: input.embedding } : {}),
       persona,
       human,
       ...(input.memory
@@ -828,11 +893,26 @@ export class LettaService {
       memfs: input.memfs_enabled ?? this.runtime.memfs_enabled,
       skillSources: input.skill_sources ?? this.runtime.skillSources,
       dreaming: (input.dreaming ?? this.runtime.dreaming) as DreamingOptions,
-      ...(input.system_prompt ?? this.runtime.system_prompt
-        ? { systemPrompt: input.system_prompt ?? this.runtime.system_prompt! }
-        : {}),
+      ...(input.system_prompt_preset
+        ? {
+            systemPrompt: {
+              type: "preset" as const,
+              preset: input.system_prompt_preset,
+              ...(input.system_prompt_append
+                ? { append: input.system_prompt_append }
+                : {}),
+            },
+          }
+        : input.system_prompt ?? this.runtime.system_prompt
+          ? { systemPrompt: input.system_prompt ?? this.runtime.system_prompt! }
+          : {}),
       ...((input.base_tools ?? this.runtime.base_tools) !== null
         ? { baseTools: input.base_tools ?? this.runtime.base_tools! }
+        : {}),
+      ...(input.allowed_tools !== undefined ? { allowedTools: input.allowed_tools ?? undefined } : {}),
+      ...(input.disallowed_tools !== undefined ? { disallowedTools: input.disallowed_tools } : {}),
+      ...(input.system_info_reminder !== undefined
+        ? { systemInfoReminder: input.system_info_reminder }
         : {}),
       ...(input.model ?? this.defaultModel ? { model: input.model ?? this.defaultModel } : {}),
     };
@@ -872,6 +952,38 @@ export class LettaService {
     if (!agentId) throw notFound("this user has no agent yet");
     return agentId;
   }
+}
+
+const SECRET_TRACE_KEY =
+  /(api[_-]?key|authorization|password|secret|access[_-]?token|refresh[_-]?token|auth[_-]?token|(^|[_-])token$|cookie|credential)/i;
+
+/**
+ * Keep the raw shape useful for debugging while preventing accidental secret
+ * disclosure in the browser. Long values are bounded so one tool cannot make
+ * an administrative response unbounded.
+ */
+function sanitizeTraceMessage(message: SDKMessage): Record<string, unknown> {
+  return sanitizeTraceValue(message, 0) as Record<string, unknown>;
+}
+
+function sanitizeTraceValue(value: unknown, depth: number): unknown {
+  if (depth > 8) return "[глубина ограничена]";
+  if (typeof value === "string") {
+    return value.length > 100_000 ? `${value.slice(0, 100_000)}…` : value;
+  }
+  if (Array.isArray(value)) {
+    return value.slice(0, 500).map((item) => sanitizeTraceValue(item, depth + 1));
+  }
+  if (value && typeof value === "object") {
+    const result: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) {
+      result[key] = SECRET_TRACE_KEY.test(key)
+        ? "[скрыто]"
+        : sanitizeTraceValue(item, depth + 1);
+    }
+    return result;
+  }
+  return value;
 }
 
 export function evaMemoryBlocks(): EvaMemoryBlock[] {

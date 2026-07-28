@@ -10,7 +10,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import { timingSafeEqual } from "node:crypto";
 
 import type { Config } from "./config.js";
-import type { Database } from "./db.js";
+import type { AdminAuditInput, Database } from "./db.js";
 import type { EvaWorkflow } from "./eva-workflow.js";
 import { EvaError, appServerUnavailable, badRequest, notFound, unauthorized } from "./errors.js";
 import type { LettaService } from "./letta.js";
@@ -23,7 +23,7 @@ import type { SdkSettingsInput, SdkSettingsManager } from "./sdk-settings.js";
 import type { TelegramUpdate } from "./telegram.js";
 import { webhookSecretMatches } from "./telegram.js";
 
-export const VERSION = "0.2.0";
+export const VERSION = "0.3.0";
 
 export interface Services {
   config: Config;
@@ -153,6 +153,66 @@ export function buildServer(services: Services): FastifyInstance {
     return { result };
   });
 
+  app.get("/v1/system", async () => {
+    const providers = await llm.list();
+    const active = providers.find((provider) => provider.is_active) ?? null;
+    const url = (domain: string) => domain ? `https://${domain}` : null;
+    return {
+      version: VERSION,
+      runtime: "letta-agent-sdk",
+      timezone: config.defaultTimezone,
+      setup_complete: config.incompleteSettings.length === 0,
+      incomplete_settings: config.incompleteSettings,
+      integrations: {
+        telegram: Boolean(config.telegramBotToken),
+        telegram_owner: config.ownerTelegramId !== null,
+        todoist: Boolean(config.todoistApiToken),
+        lava: Boolean(config.lavaWebhookUser && config.lavaWebhookPassword),
+        llm: active !== null,
+      },
+      active_llm: active,
+      links: {
+        site: url(config.domains.root),
+        webapp: url(config.domains.app),
+        api: config.domains.api ? `${url(config.domains.api)}/health` : null,
+        nocodb: url(config.domains.nocodb),
+        letta: url(config.domains.letta),
+        status: url(config.domains.status),
+      },
+      sdk_capabilities: {
+        agents: { list: true, create: true, update: true, delete: true, export_json: true },
+        conversations: { list: true, create: true, update: true, chat: true, abort: true },
+        trace: true,
+        memory: {
+          create_with_agent: true,
+          read_existing: true,
+          update_existing: false,
+          reason: "Letta Agent SDK App Server management 0.5.x не предоставляет CRUD blocks",
+        },
+        tools: {
+          configure_sdk_tools: true,
+          inspect_attached: true,
+          mutate_attached: false,
+          reason: "App Server management SDK не предоставляет CRUD server-side tools",
+        },
+      },
+    };
+  });
+
+  const audit = async (input: AdminAuditInput): Promise<void> => {
+    try {
+      await db.recordAdminAudit(input);
+    } catch (error) {
+      // A successful Letta mutation must not be reported as failed only because
+      // an old installation has not applied the audit migration yet.
+      logger.warn("Не удалось записать административный аудит", {
+        action: input.action,
+        targetId: input.targetId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+
   // ---------------------------------------------------------------
   // Public webhooks with provider-specific authentication
   // ---------------------------------------------------------------
@@ -177,23 +237,177 @@ export function buildServer(services: Services): FastifyInstance {
     return reply.status(200).send(await payments.handle(request.body));
   });
 
-  app.get("/v1/sdk/agents", async () => ({ agents: await letta.listAgents() }));
+  app.get("/v1/sdk/agents", async () => ({
+    agents: (await letta.listAgents()).map((agent) => safeAdminValue(agent)),
+  }));
 
   app.post("/v1/sdk/agents", async (request, reply) => {
     const input = managedAgentInput(request.body, true);
     const result = await letta.createManagedAgent(input);
-    return reply.status(201).send(result);
+    const agentId = (result.agent as { id?: string }).id ?? null;
+    const safeAgent = safeAdminValue(result.agent);
+    await audit({
+      action: "agent.create",
+      targetType: "agent",
+      targetId: agentId,
+      after: jsonable(auditAgentProjection(safeAgent)),
+    });
+    return reply.status(201).send({ ...result, agent: safeAgent });
+  });
+
+  app.post("/v1/sdk/agents/bulk", async (request) => {
+    const body = requireObject(request.body, "Пакетное изменение");
+    const agentIds = optionalStringArray(body.agent_ids, "agent_ids", 100) ?? [];
+    if (agentIds.length === 0) throw badRequest("agent_ids должен содержать хотя бы один ID");
+    const patch = managedAgentPatch(body.patch);
+    if (Object.keys(patch).length === 0) throw badRequest("patch не содержит изменений");
+
+    const snapshots = new Map<string, unknown>();
+    const changed: string[] = [];
+    try {
+      for (const agentId of agentIds) {
+        const id = requireId(agentId, "agent_id");
+        const before = await letta.getAgent(id);
+        snapshots.set(id, before);
+        const after = await letta.updateAgent(id, patch);
+        changed.push(id);
+        await audit({
+          action: "agent.bulk-update",
+          targetType: "agent",
+          targetId: id,
+          before: jsonable(auditAgentProjection(before)),
+          after: jsonable(auditAgentProjection(after)),
+        });
+      }
+      return { updated: changed, rolled_back: [], count: changed.length };
+    } catch (error) {
+      const rolledBack: string[] = [];
+      const rollbackErrors: Array<{ agent_id: string; error: string }> = [];
+      for (const id of [...changed].reverse()) {
+        try {
+          await letta.updateAgent(id, rollbackPatch(snapshots.get(id)));
+          rolledBack.push(id);
+          await audit({
+            action: "agent.bulk-rollback",
+            targetType: "agent",
+            targetId: id,
+            status: "rolled_back",
+            after: jsonable(auditAgentProjection(snapshots.get(id))),
+          });
+        } catch (rollbackError) {
+          rollbackErrors.push({
+            agent_id: id,
+            error: rollbackError instanceof Error ? rollbackError.message : String(rollbackError),
+          });
+        }
+      }
+      await audit({
+        action: "agent.bulk-update",
+        targetType: "agent-set",
+        status: "failed",
+        details: {
+          requested: agentIds,
+          changed,
+          rolled_back: rolledBack,
+          rollback_errors: rollbackErrors,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      });
+      throw new EvaError("Пакетное изменение отменено из-за ошибки", {
+        code: "bulk_update_failed",
+        statusCode: 409,
+        details: {
+          changed,
+          rolled_back: rolledBack,
+          rollback_errors: rollbackErrors,
+          cause: error instanceof Error ? error.message : String(error),
+        },
+      });
+    }
+  });
+
+  app.post("/v1/sdk/agents/import", async (request, reply) => {
+    const body = requireObject(request.body, "Импорт");
+    const items = Array.isArray(body.agents) ? body.agents : [];
+    if (items.length === 0 || items.length > 50) {
+      throw badRequest("agents должен быть массивом из 1–50 экспортированных агентов");
+    }
+    const imported: Array<{ source_id: string | null; agent: unknown; conversation: unknown }> = [];
+    for (const item of items) {
+      const wrapper = requireObject(item, "Экспортированный агент");
+      const input = managedAgentInput(wrapper.input ?? wrapper, true);
+      const result = await letta.createManagedAgent({
+        ...input,
+        name: `${input.name} (импорт)`.slice(0, 100),
+      });
+      const id = (result.agent as { id?: string }).id ?? null;
+      const safeAgent = safeAdminValue(result.agent);
+      imported.push({
+        source_id: typeof wrapper.source_id === "string" ? wrapper.source_id : null,
+        agent: safeAgent,
+        conversation: result.conversation,
+      });
+      await audit({
+        action: "agent.import",
+        targetType: "agent",
+        targetId: id,
+        after: jsonable(auditAgentProjection(safeAgent)),
+      });
+    }
+    return reply.status(201).send({ imported, count: imported.length });
+  });
+
+  app.get("/v1/sdk/agents/export", async (request) => {
+    const rawIds = String((request.query as { ids?: string }).ids ?? "");
+    const requested = rawIds.split(",").map((item) => item.trim()).filter(Boolean);
+    const available = await letta.listAgents() as Array<{ id?: string }>;
+    const ids = requested.length > 0
+      ? [...new Set(requested)]
+      : available.map((agent) => agent.id).filter((id): id is string => Boolean(id));
+    if (ids.length > 100) throw badRequest("За один раз можно экспортировать не более 100 агентов");
+
+    const agents = [];
+    for (const id of ids) {
+      const agent = await letta.getAgent(requireId(id, "agent_id"));
+      agents.push({
+        source_id: id,
+        input: exportInput(agent),
+        state: jsonable(safeAdminValue(agent)),
+      });
+    }
+    await audit({
+      action: "agent.export",
+      targetType: ids.length === 1 ? "agent" : "agent-set",
+      targetId: ids.length === 1 ? ids[0] : null,
+      details: { ids, count: agents.length, format: "json" },
+    });
+    return {
+      format: "evaself-agent-export",
+      version: 1,
+      exported_at: new Date().toISOString(),
+      agents,
+    };
   });
 
   app.get("/v1/sdk/agents/:agentId", async (request) => {
     const { agentId } = request.params as { agentId: string };
-    return { agent: await letta.getAgent(requireId(agentId, "agent_id")) };
+    return { agent: safeAdminValue(await letta.getAgent(requireId(agentId, "agent_id"))) };
   });
 
   app.patch("/v1/sdk/agents/:agentId", async (request) => {
     const { agentId } = request.params as { agentId: string };
+    const id = requireId(agentId, "agent_id");
     const input = managedAgentPatch(request.body);
-    return { agent: await letta.updateAgent(requireId(agentId, "agent_id"), input) };
+    const before = await letta.getAgent(id);
+    const agent = await letta.updateAgent(id, input);
+    await audit({
+      action: "agent.update",
+      targetType: "agent",
+      targetId: id,
+      before: jsonable(auditAgentProjection(before)),
+      after: jsonable(auditAgentProjection(agent)),
+    });
+    return { agent: safeAdminValue(agent) };
   });
 
   app.delete("/v1/sdk/agents/:agentId", async (request, reply) => {
@@ -203,8 +417,15 @@ export function buildServer(services: Services): FastifyInstance {
     if (confirmation !== id) {
       throw badRequest("Удаление требует query-параметр confirm, равный agent_id");
     }
+    const before = await letta.getAgent(id);
     await letta.deleteAgent(id);
     await db.archiveAgentLink(id);
+    await audit({
+      action: "agent.delete",
+      targetType: "agent",
+      targetId: id,
+      before: jsonable(auditAgentProjection(before)),
+    });
     return reply.status(204).send();
   });
 
@@ -222,6 +443,14 @@ export function buildServer(services: Services): FastifyInstance {
       requireId(agentId, "agent_id"),
       input,
     );
+    const conversationId = (conversation as { id?: string }).id ?? null;
+    await audit({
+      action: "conversation.create",
+      targetType: "conversation",
+      targetId: conversationId,
+      after: jsonable(conversation),
+      details: { agent_id: agentId },
+    });
     return reply.status(201).send({ conversation });
   });
 
@@ -235,11 +464,18 @@ export function buildServer(services: Services): FastifyInstance {
   app.patch("/v1/sdk/conversations/:conversationId", async (request) => {
     const { conversationId } = request.params as { conversationId: string };
     const input = conversationPatch(request.body);
+    const id = requireId(conversationId, "conversation_id");
+    const before = await letta.getConversation(id);
+    const conversation = await letta.updateConversation(id, input);
+    await audit({
+      action: input.archived ? "conversation.archive" : "conversation.update",
+      targetType: "conversation",
+      targetId: id,
+      before: jsonable(before),
+      after: jsonable(conversation),
+    });
     return {
-      conversation: await letta.updateConversation(
-        requireId(conversationId, "conversation_id"),
-        input,
-      ),
+      conversation,
     };
   });
 
@@ -263,8 +499,113 @@ export function buildServer(services: Services): FastifyInstance {
     return await queue.run(adminQueueId(id), async () => {
       const result = await letta.runTurn(id, text);
       if (conversation.agent_id) await db.markAgentUsed(conversation.agent_id);
+      await audit({
+        action: "conversation.turn",
+        targetType: "conversation",
+        targetId: id,
+        details: {
+          agent_id: result.agentId,
+          duration_ms: result.durationMs,
+          stop_reason: result.stopReason,
+          message_count: result.messageCount,
+          tools: result.toolCalls,
+        },
+      });
       return result;
     });
+  });
+
+  app.post("/v1/sdk/conversations/:conversationId/messages/stream", async (request, reply) => {
+    const { conversationId } = request.params as { conversationId: string };
+    const id = requireId(conversationId, "conversation_id");
+    const body = requireObject(request.body, "Сообщение");
+    const text = requiredText(body.text, "text", 1, 100000);
+    const conversation = await letta.getConversation(id) as {
+      agent_id?: string;
+      archived?: boolean;
+    };
+    if (conversation.archived) throw badRequest("Архивированный диалог нельзя продолжить");
+
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+    let finished = false;
+    const event = (name: string, value: unknown) => {
+      if (finished || reply.raw.destroyed) return;
+      reply.raw.write(`event: ${name}\ndata: ${JSON.stringify(value)}\n\n`);
+    };
+    reply.raw.on("close", () => {
+      if (!finished) void letta.abortTurn(id);
+    });
+
+    try {
+      const result = await queue.run(adminQueueId(id), async () =>
+        await letta.runTurn(id, text, {
+          onDelta: (delta) => event("delta", { text: delta }),
+        }),
+      );
+      if (conversation.agent_id) await db.markAgentUsed(conversation.agent_id);
+      await audit({
+        action: "conversation.turn-stream",
+        targetType: "conversation",
+        targetId: id,
+        details: {
+          agent_id: result.agentId,
+          duration_ms: result.durationMs,
+          stop_reason: result.stopReason,
+          message_count: result.messageCount,
+          tools: result.toolCalls,
+        },
+      });
+      event("result", result);
+    } catch (error) {
+      event("error", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      finished = true;
+      if (!reply.raw.destroyed) reply.raw.end();
+    }
+  });
+
+  app.get("/v1/sdk/conversations/:conversationId/session", async (request) => {
+    const { conversationId } = request.params as { conversationId: string };
+    return {
+      session: await letta.sessionStatus(requireId(conversationId, "conversation_id")),
+    };
+  });
+
+  app.post("/v1/sdk/conversations/:conversationId/abort", async (request) => {
+    const { conversationId } = request.params as { conversationId: string };
+    const id = requireId(conversationId, "conversation_id");
+    const result = await letta.abortTurn(id);
+    await audit({
+      action: "conversation.abort",
+      targetType: "conversation",
+      targetId: id,
+      details: result,
+    });
+    return result;
+  });
+
+  app.get("/v1/audit", async (request) => {
+    const query = request.query as {
+      limit?: string;
+      target_type?: string;
+      target_id?: string;
+    };
+    const parsed = Number.parseInt(query.limit ?? "100", 10);
+    return {
+      events: await db.listAdminAudit({
+        limit: Number.isFinite(parsed) ? parsed : 100,
+        targetType: query.target_type,
+        targetId: query.target_id,
+      }),
+    };
   });
 
   app.post("/v1/users/ensure", async (request) => {
@@ -561,6 +902,7 @@ function publicAgent(link: Record<string, unknown> | object | null): unknown {
 /** Dates and BigInt-ish values become JSON-friendly primitives. */
 export function jsonable(value: unknown): unknown {
   if (value instanceof Date) return value.toISOString();
+  if (typeof value === "bigint") return value.toString();
   if (Array.isArray(value)) return value.map(jsonable);
   if (value && typeof value === "object") {
     const out: Record<string, unknown> = {};
@@ -568,6 +910,78 @@ export function jsonable(value: unknown): unknown {
     return out;
   }
   return value;
+}
+
+const ADMIN_SECRET_KEY =
+  /(^|[_-])(api[_-]?key|authorization|password|secret|credential|access[_-]?token|refresh[_-]?token|auth[_-]?token|cookie)$/i;
+const ADMIN_SECRET_CONTAINERS = new Set([
+  "environment",
+  "environment_variables",
+  "env",
+  "secrets",
+  "tool_exec_environment_variables",
+]);
+
+/** Never expose per-agent environment values through the browser or exports. */
+export function safeAdminValue(value: unknown, depth = 0, parentKey = ""): unknown {
+  if (depth > 12) return "[глубина ограничена]";
+  if (Array.isArray(value)) {
+    if (ADMIN_SECRET_CONTAINERS.has(parentKey)) {
+      return value.map((item) => {
+        if (!item || typeof item !== "object") return { configured: true };
+        const source = item as Record<string, unknown>;
+        return {
+          ...Object.fromEntries(
+            Object.entries(source)
+              .filter(([key]) => !["value", "secret", "encrypted_value"].includes(key))
+              .map(([key, nested]) => [key, safeAdminValue(nested, depth + 1, key)]),
+          ),
+          configured: true,
+          value: "[скрыто]",
+        };
+      });
+    }
+    return value.map((item) => safeAdminValue(item, depth + 1, parentKey));
+  }
+  if (value && typeof value === "object") {
+    if (ADMIN_SECRET_CONTAINERS.has(parentKey)) {
+      return Object.fromEntries(
+        Object.keys(value).map((key) => [key, "[скрыто]"]),
+      );
+    }
+    const result: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) {
+      result[key] = ADMIN_SECRET_KEY.test(key)
+        ? "[скрыто]"
+        : safeAdminValue(item, depth + 1, key);
+    }
+    return result;
+  }
+  return value;
+}
+
+function auditAgentProjection(value: unknown): Record<string, unknown> {
+  const safe = safeAdminValue(value) as Record<string, unknown>;
+  return Object.fromEntries(
+    [
+      "id",
+      "name",
+      "description",
+      "agent_type",
+      "model",
+      "model_settings",
+      "embedding",
+      "context_window_limit",
+      "system",
+      "tags",
+      "hidden",
+      "updated_at",
+      "last_run_completion",
+      "last_stop_reason",
+    ]
+      .filter((key) => safe[key] !== undefined)
+      .map((key) => [key, safe[key]]),
+  );
 }
 
 function managedAgentInput(value: unknown, requireName: boolean): ManagedAgentInput {
@@ -578,7 +992,7 @@ function managedAgentInput(value: unknown, requireName: boolean): ManagedAgentIn
   const permission = optionalEnum(
     body.permission_mode,
     "permission_mode",
-    ["standard", "acceptEdits", "unrestricted"],
+    ["standard", "acceptEdits", "unrestricted", "strict"],
   ) as ManagedAgentInput["permission_mode"];
   const skillSources = optionalStringArray(body.skill_sources, "skill_sources", 4);
   if (
@@ -591,6 +1005,9 @@ function managedAgentInput(value: unknown, requireName: boolean): ManagedAgentIn
   return compact({
     name,
     description: optionalText(body.description, "description", 0, 1000),
+    hidden: optionalBoolean(body.hidden, "hidden"),
+    personality: optionalText(body.personality, "personality", 1, 100),
+    embedding: optionalText(body.embedding, "embedding", 1, 300),
     persona: optionalText(body.persona, "persona", 0, 100000),
     human: optionalText(body.human, "human", 0, 10000),
     memory: optionalMemoryBlocks(body.memory),
@@ -601,6 +1018,17 @@ function managedAgentInput(value: unknown, requireName: boolean): ManagedAgentIn
     permission_mode: permission,
     memfs_enabled: optionalBoolean(body.memfs_enabled, "memfs_enabled"),
     system_prompt: optionalNullableText(body.system_prompt, "system_prompt", 100000),
+    system_prompt_preset: optionalEnum(
+      body.system_prompt_preset,
+      "system_prompt_preset",
+      ["default", "letta-claude", "letta-codex", "letta-gemini", "claude", "codex", "gemini"],
+    ) as ManagedAgentInput["system_prompt_preset"],
+    system_prompt_append: optionalText(
+      body.system_prompt_append,
+      "system_prompt_append",
+      0,
+      100000,
+    ),
     base_tools: optionalNullableStringArray(body.base_tools, "base_tools", 128),
     allowed_tools: optionalNullableStringArray(body.allowed_tools, "allowed_tools", 128),
     disallowed_tools: optionalStringArray(body.disallowed_tools, "disallowed_tools", 128),
@@ -792,6 +1220,76 @@ function compact<T extends Record<string, unknown>>(value: T): T {
   return Object.fromEntries(
     Object.entries(value).filter(([, item]) => item !== undefined),
   ) as T;
+}
+
+function rollbackPatch(value: unknown): Parameters<LettaService["updateAgent"]>[1] {
+  const agent = value && typeof value === "object"
+    ? value as Record<string, unknown>
+    : {};
+  return compact({
+    name: typeof agent.name === "string" ? agent.name : undefined,
+    description: typeof agent.description === "string" ? agent.description : "",
+    model: typeof agent.model === "string" ? agent.model : undefined,
+    model_settings:
+      agent.model_settings && typeof agent.model_settings === "object"
+        ? agent.model_settings as Record<string, unknown>
+        : undefined,
+    system: typeof agent.system === "string" ? agent.system : undefined,
+    tags: Array.isArray(agent.tags)
+      ? agent.tags.filter((item): item is string => typeof item === "string")
+      : undefined,
+    hidden: typeof agent.hidden === "boolean" ? agent.hidden : false,
+    context_window:
+      typeof agent.context_window_limit === "number"
+        ? agent.context_window_limit
+        : null,
+  });
+}
+
+function exportInput(value: unknown): Record<string, unknown> {
+  const agent = value && typeof value === "object"
+    ? value as Record<string, unknown>
+    : {};
+  const rawBlocks = Array.isArray(agent.blocks)
+    ? agent.blocks
+    : agent.memory && typeof agent.memory === "object"
+      && Array.isArray((agent.memory as { blocks?: unknown[] }).blocks)
+      ? (agent.memory as { blocks: unknown[] }).blocks
+      : [];
+  const memory = rawBlocks.flatMap((raw) => {
+    if (!raw || typeof raw !== "object") return [];
+    const block = raw as Record<string, unknown>;
+    if (typeof block.label !== "string" || typeof block.value !== "string") return [];
+    return [{
+      label: block.label,
+      value: block.value,
+      ...(typeof block.description === "string" ? { description: block.description } : {}),
+      ...(typeof block.read_only === "boolean" ? { read_only: block.read_only } : {}),
+      ...(typeof block.hidden === "boolean" ? { hidden: block.hidden } : {}),
+      ...(typeof block.limit === "number" ? { limit: block.limit } : {}),
+    }];
+  });
+  return compact({
+    name: typeof agent.name === "string" ? agent.name : "Импортированный агент",
+    description: typeof agent.description === "string" ? agent.description : "",
+    hidden: typeof agent.hidden === "boolean" ? agent.hidden : false,
+    embedding: typeof agent.embedding === "string" ? agent.embedding : undefined,
+    memory: memory.length > 0 ? memory : undefined,
+    tags: Array.isArray(agent.tags)
+      ? agent.tags.filter((item): item is string => typeof item === "string")
+      : [],
+    model: typeof agent.model === "string" ? agent.model : undefined,
+    model_settings:
+      agent.model_settings && typeof agent.model_settings === "object"
+        ? agent.model_settings as Record<string, unknown>
+        : undefined,
+    context_window:
+      typeof agent.context_window_limit === "number"
+        ? agent.context_window_limit
+        : undefined,
+    system_prompt: typeof agent.system === "string" ? agent.system : undefined,
+    create_conversation: true,
+  });
 }
 
 /** Stable negative queue namespace for direct WebUI conversations. */
