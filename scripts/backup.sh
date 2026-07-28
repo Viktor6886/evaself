@@ -11,8 +11,9 @@
 #
 # Contents:
 #   postgres/     dumps of eva, n8n, nocodb, letta + roles/globals
-#   volumes/      letta, n8n, nocodb, caddy data volumes
-#   letta/        one JSON export per agent (portable across servers)
+#   volumes/      app-server state, n8n, nocodb, caddy data volumes
+#   letta/        the agent/conversation inventory as the App Server and
+#                 PostgreSQL each see it
 #   n8n/          workflow + credential exports, and N8N_ENCRYPTION_KEY
 #   config/       .env, Caddyfile, versions.env, hermes config
 #   content/      skills/, library/, webapp/
@@ -78,58 +79,38 @@ dump_volume() {
 	ok "$volume -> volumes/${out} ($(du -h "${WORK}/volumes/${out}" | cut -f1))"
 }
 
-dump_volume evaself_letta_data  letta_data.tar.gz
+dump_volume evaself_letta_app_server_data letta_app_server_data.tar.gz
 dump_volume evaself_n8n_data    n8n_data.tar.gz
 dump_volume evaself_nocodb_data nocodb_data.tar.gz
 dump_volume evaself_caddy_data  caddy_data.tar.gz
 
 # ---------------------------------------------------------------------
-# 3. Letta agent exports — portable, server-independent
+# 3. Agent / conversation inventory
 # ---------------------------------------------------------------------
-step "Letta agents"
-if service_running eva-core; then
-	AGENT_LIST="$(compose exec -T eva-core python - <<'PY' 2>/dev/null || true
-import json, os, urllib.request
-req = urllib.request.Request(
-    f"http://127.0.0.1:{os.environ['EVA_CORE_PORT']}/v1/agents",
-    headers={"X-API-Key": os.environ["EVA_CORE_API_KEY"]},
-)
-try:
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        print(json.dumps(json.load(resp).get("agents", [])))
-except Exception:
-    print("[]")
-PY
-)"
-	COUNT="$(printf '%s' "$AGENT_LIST" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))' 2>/dev/null || echo 0)"
-
-	if [ "${COUNT:-0}" -gt 0 ]; then
-		printf '%s' "$AGENT_LIST" > "$WORK/letta/agents.json"
-		exported=0
-		while read -r tg_id; do
-			[ -n "$tg_id" ] || continue
-			if compose exec -T eva-core python - "$tg_id" > "$WORK/letta/agent-${tg_id}.json" <<'PY' 2>/dev/null
-import os, sys, urllib.request
-tg = sys.argv[1]
-req = urllib.request.Request(
-    f"http://127.0.0.1:{os.environ['EVA_CORE_PORT']}/v1/agents/{tg}/export",
-    headers={"X-API-Key": os.environ["EVA_CORE_API_KEY"]},
-)
-with urllib.request.urlopen(req, timeout=120) as resp:
-    sys.stdout.write(resp.read().decode())
-PY
-			then
-				exported=$((exported + 1))
-			else
-				rm -f "$WORK/letta/agent-${tg_id}.json"
-			fi
-		done < <(printf '%s' "$AGENT_LIST" | python3 -c 'import json,sys; [print(a["telegram_id"]) for a in json.load(sys.stdin)]' 2>/dev/null)
-		ok "exported ${exported}/${COUNT} agent(s)"
+# The App Server keeps agents, conversations and the memory filesystem on
+# disk, so volumes/letta_app_server_data.tar.gz IS the agent state. What is
+# captured here in addition is the inventory from both sides, so a restore
+# can be checked: PostgreSQL's user -> agent -> conversation mapping, and
+# the agent list the App Server itself reports.
+# ---------------------------------------------------------------------
+step "Agents and conversations"
+if service_running eva-agent-service; then
+	if compose exec -T eva-agent-service node -e "
+const key = process.env.EVA_AGENT_API_KEY;
+const base = 'http://127.0.0.1:' + (process.env.EVA_AGENT_PORT || 8070);
+const get = (p) => fetch(base + p, { headers: { 'X-API-Key': key } }).then((r) => r.json());
+Promise.all([get('/v1/agents'), get('/v1/agents/live').catch(() => ({ agents: [] }))])
+  .then(([db, live]) => console.log(JSON.stringify({ database: db.agents, app_server: live.agents }, null, 2)))
+  .catch((e) => { console.error(e.message); process.exit(1); });
+" > "$WORK/letta/inventory.json" 2>/dev/null; then
+		COUNT="$(python3 -c "import json;d=json.load(open('$WORK/letta/inventory.json'));print(len(d.get('database') or []))" 2>/dev/null || echo 0)"
+		ok "inventory captured (${COUNT} mapped agent(s))"
 	else
-		info "no agents to export yet"
+		rm -f "$WORK/letta/inventory.json"
+		warn "could not read the agent inventory — the App Server state volume is still backed up"
 	fi
 else
-	warn "eva-core is not running — agent exports skipped (the letta volume and database are still backed up)"
+	warn "eva-agent-service is not running — inventory skipped (state volume still captured)"
 fi
 
 # ---------------------------------------------------------------------
@@ -205,6 +186,11 @@ GIT_DIRTY="$(git -C "$ROOT_DIR" status --porcelain 2>/dev/null | wc -l)"
 	echo ""
 	echo "# postgres server"
 	cat "$WORK/postgres/server-version.txt" 2>/dev/null || true
+	echo ""
+	echo "# agent runtime"
+	echo "agent_runtime=letta-app-server"
+	echo "letta_code_version=${LETTA_CODE_VERSION:-unknown}"
+	echo "letta_agent_sdk_version=${LETTA_AGENT_SDK_VERSION:-unknown}"
 } > "$WORK/MANIFEST"
 
 ( cd "$WORK" && find . -type f ! -name CHECKSUMS -exec sha256sum {} + > CHECKSUMS )

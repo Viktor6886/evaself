@@ -5,14 +5,17 @@ FROM ${CADDY_IMAGE}:${CADDY_VERSION}
 # ---------------------------------------------------------------------
 # Evaself Letta console.
 #
-# Letta 0.16.x does NOT ship a self-hosted web UI: the server mounts only
-# a redirect from "/" to "/docs", and the official ADE is the hosted
-# application at app.letta.com. This container is Evaself's own console —
-# a static client plus a Caddy reverse proxy that injects the Letta server
-# password, so the Letta REST API itself is never exposed to the internet.
+# Two facts decide the shape of this container:
 #
-# See letta-ui/README.md for the reasoning and for how to use the official
-# cloud ADE against this server instead, if you prefer it.
+#   1. Letta ships no self-hosted web UI. `letta-oss-ui` does not exist as
+#      a published package (npm returns 404 for both `letta-oss-ui` and
+#      `@letta-ai/letta-oss-ui`), and the App Server serves no HTML.
+#   2. The App Server's only interface is a WebSocket protocol driven by
+#      @letta-ai/letta-agent-sdk, which is a Node SDK — a browser cannot
+#      be its client.
+#
+# So this is Evaself's own administrative interface: a static client that
+# reads through eva-agent-service, which owns the SDK. See README.md.
 # ---------------------------------------------------------------------
 COPY Caddyfile /etc/caddy/Caddyfile
 COPY public /srv

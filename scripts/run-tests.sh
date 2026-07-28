@@ -41,7 +41,18 @@ run_suite() {
 	fi
 }
 
-run_suite "eva-core"      "evaself/eva-core:0.1.0"      "eva-core"
+# The agent service's tests run inside its own image build (the Dockerfile
+# runs `node --test` in the build stage), so a successful build IS the test
+# run. Building it here keeps `make test` a single entry point.
+step "eva-agent-service (TypeScript, tested during the image build)"
+if compose build eva-agent-service >/dev/null 2>&1; then
+	ok "eva-agent-service built — typecheck and unit tests passed"
+else
+	fail "eva-agent-service build/tests failed"
+	compose build eva-agent-service 2>&1 | tail -30
+	FAILURES=$((FAILURES + 1))
+fi
+
 run_suite "media-service" "evaself/media-service:0.1.0" "media-service"
 
 step "Static validation"

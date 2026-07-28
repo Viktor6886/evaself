@@ -6,8 +6,9 @@
 # renews HTTPS certificates automatically (HTTP-01 + TLS-ALPN-01).
 #
 # Only these seven names are reachable from the internet. PostgreSQL,
-# Valkey, Letta's REST API, Eva Core's internal API, SearXNG, the media
-# service, the n8n worker and the task runner stay on evaself-network.
+# Valkey, the Letta App Server (WebSocket), eva-agent-service's internal
+# API, SearXNG, the media service, the n8n worker and the task runner all
+# stay on evaself-network.
 # =====================================================================
 {
 	email {$ACME_EMAIL}
@@ -53,7 +54,7 @@
 	# The landing page asks the API for the bot handle so no domain or bot
 	# name is ever baked into the built assets.
 	handle_path /api/* {
-		reverse_proxy eva-core:{$EVA_CORE_PORT}
+		reverse_proxy eva-agent-service:{$EVA_AGENT_PORT}
 	}
 
 	handle {
@@ -79,7 +80,7 @@
 	}
 
 	handle_path /api/* {
-		reverse_proxy eva-core:{$EVA_CORE_PORT}
+		reverse_proxy eva-agent-service:{$EVA_AGENT_PORT}
 	}
 
 	handle {
@@ -91,9 +92,9 @@
 # ---------------------------------------------------------------------
 # 3. Public API — https://{$DOMAIN_API}
 # ---------------------------------------------------------------------
-# Only the /public/* surface (authenticated with Telegram WebApp
-# initData) and /health are exposed. The internal /v1/* surface, which
-# n8n calls with EVA_CORE_API_KEY, is never routed from the internet.
+# Only /health is exposed here. The internal /v1/* surface, which n8n
+# calls with EVA_AGENT_API_KEY, is never routed from the internet — and
+# neither is the Letta App Server behind it.
 # ---------------------------------------------------------------------
 {$DOMAIN_API} {
 	import security_headers
@@ -104,11 +105,11 @@
 	respond @internal "not found" 404
 
 	handle /public/* {
-		reverse_proxy eva-core:{$EVA_CORE_PORT}
+		reverse_proxy eva-agent-service:{$EVA_AGENT_PORT}
 	}
 
 	handle /health {
-		reverse_proxy eva-core:{$EVA_CORE_PORT}
+		reverse_proxy eva-agent-service:{$EVA_AGENT_PORT}
 	}
 
 	handle {
@@ -149,10 +150,10 @@
 # ---------------------------------------------------------------------
 # 6. Letta console — https://{$DOMAIN_LETTA}
 # ---------------------------------------------------------------------
-# Self-hosted UI shipped with Evaself (see letta-ui/README.md). It talks
-# to letta:8283 over the internal network and injects the server
-# password, so the Letta REST API is never exposed directly.
-# Protected by HTTP basic auth on top of that.
+# Self-hosted console shipped with Evaself (see letta-ui/README.md). The
+# App Server speaks WebSocket only, so the console reads through
+# eva-agent-service exactly like n8n does — the App Server itself is never
+# routed from the internet. Protected by HTTP basic auth on top of that.
 # ---------------------------------------------------------------------
 {$DOMAIN_LETTA} {
 	import security_headers

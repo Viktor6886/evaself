@@ -26,9 +26,9 @@ HTTPS.
 |---|---|---|
 | **Caddy** | edge, automatic HTTPS (HTTP/1–3) | ports 80/443 |
 | **n8n** | Eva's business logic — main + worker + task runner | `n8n.<domain>` |
-| **Letta** | stateful agents, memory, tools, skills | internal only |
-| **Letta console** | self-hosted GUI for the Letta server | `letta.<domain>` |
-| **Eva Core** | thin service between n8n and Letta | internal only |
+| **Letta App Server** | stateful agents, conversations, memory, skills, tools | internal only |
+| **eva-agent-service** | TypeScript; owns `@letta-ai/letta-agent-sdk` | internal only |
+| **Letta console** | self-hosted admin GUI | `letta.<domain>` |
 | **NocoDB** | GUI over Eva's data | `admin.<domain>` |
 | **PostgreSQL** | the source of truth (4 separate databases) | internal only |
 | **Valkey** | n8n queue + Eva's per-user locks | internal only |
@@ -40,31 +40,35 @@ HTTPS.
 | **Uptime Kuma** | optional — status page | `status.<domain>` |
 | **Hermes Agent** | your server operator agent, in Ubuntu, not Docker | Telegram |
 
-Only seven host names are exposed. PostgreSQL, Valkey, Letta's API and Eva
-Core's internal API are never published.
+Only seven host names are exposed. PostgreSQL, Valkey, the Letta App
+Server and eva-agent-service's internal API are never published.
 
 ## How a message flows
 
 ```
 Telegram
-  └─> n8n            secret-token check, normalise, user + quota
-        └─> Eva Core     per-user lock, agent lookup
-              └─> Letta      memory, tools, skills
-                    └─> LLM API
+  └─> n8n                    secret-token check, normalise
+        └─> eva-agent-service    per-user lock, agent + conversation lookup
+              └─> @letta-ai/letta-agent-sdk
+                    └─> Letta App Server (ws://…)   memory, skills, tools
+                          └─> MiMo / any OpenAI-compatible model
               <─┘
         <─┘  normalised reply, or a typed retryable error
   <─┘  Telegram sendMessage
 ```
 
-Business logic lives in n8n. Eva Core stays small on purpose: it speaks
-the Letta API, creates one agent per user, serialises concurrent messages
-from the same person, and turns every failure into one error shape.
+Business logic lives in n8n. `eva-agent-service` stays small on purpose:
+it owns the official Agent SDK, creates one agent (and one conversation)
+per user, serialises concurrent messages from the same person, and turns
+every failure into one error shape. **n8n never reaches the App Server
+directly**, and neither does the browser.
 
 ## Commands
 
 ```bash
 sudo make install        # clean Ubuntu -> running system
 make configure           # change domains / tokens / model
+make configure-letta     # register Eva's model with the App Server
 make status              # what is running
 make doctor              # full health report
 make logs s=n8n          # follow one service
@@ -83,7 +87,7 @@ make configure-hermes    # give Hermes an LLM, enable autostart
 make hermes-status       # state, allowlist, capabilities
 
 make validate            # static checks, no services touched
-make test                # unit tests of eva-core and media-service
+make test                # unit tests of eva-agent-service and media-service
 make disk-cleanup        # reclaim space, never touches data volumes
 ```
 
@@ -111,24 +115,36 @@ There is deliberately **no** target that removes data volumes.
 | [docs/SECURITY.md](docs/SECURITY.md) | the actual security model |
 | [docs/VERIFICATION.md](docs/VERIFICATION.md) | what has been tested, and what has not |
 
-Per-component notes live next to the code: `eva-core/`, `letta-ui/`,
-`media-service/`, `n8n/`, `webapp/`, `crawl4ai/`, `skills/`, `library/`.
+Per-component notes live next to the code: `eva-agent-service/`,
+`letta-app-server/`, `letta-ui/`, `media-service/`, `n8n/`, `webapp/`,
+`crawl4ai/`, `skills/`, `library/`.
 
 ## A note on the Letta GUI
 
-Letta 0.16.x ships **no** self-hosted web interface — its server only
-redirects `/` to `/docs`, and the official ADE is the hosted application
-at `app.letta.com`. Evaself does not pass a cloud app off as a local one,
-so it ships its own console instead: static client, Caddy injecting the
-server password, Letta's API never leaving the internal network.
+The App Server speaks a **WebSocket protocol** driven by
+`@letta-ai/letta-agent-sdk`, a Node SDK — a browser cannot be its client,
+and `letta-oss-ui` is not a published package (npm returns 404). So the
+console is Evaself's own: a static client that reads through
+`eva-agent-service`, which owns the SDK.
 See [letta-ui/README.md](letta-ui/README.md).
+
+For an interactive client, the Letta Code CLI inside the App Server
+container is the supported one:
+`docker compose … exec letta-app-server letta agents list`.
 
 ## Positioning, honestly
 
-Eva is a companion and a self-reflection tool. She is not a therapist,
-she does not diagnose, and the crisis screen in
-`n8n/workflows/05-eva-crisis-check.json` exists because a system people
-talk to at 3 a.m. needs one.
+Eva is a companion and a self-reflection tool. She is not a therapist and
+she does not diagnose.
+
+**Status:** the architecture is in place and the agent path is proven, but
+this is not a finished product. `n8n/workflows/` currently holds a single
+minimal workflow that exercises
+Telegram → n8n → eva-agent-service → Agent SDK → App Server → model.
+Eva's full conversational logic, onboarding, payments, subscriptions and
+the WebApp are the next milestone. See
+[docs/VERIFICATION.md](docs/VERIFICATION.md) for exactly what has been run
+and what has not.
 
 ## Licence
 

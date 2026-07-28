@@ -63,10 +63,10 @@ x-n8n-common: &n8n-common
     EXECUTIONS_DATA_MAX_AGE: ${EXECUTIONS_DATA_MAX_AGE}
     EXECUTIONS_DATA_PRUNE_MAX_COUNT: ${EXECUTIONS_DATA_PRUNE_MAX_COUNT}
     # --- addresses of the rest of the stack, for workflow expressions -
-    EVA_CORE_URL: http://eva-core:${EVA_CORE_PORT}
-    EVA_CORE_API_KEY: ${EVA_CORE_API_KEY}
-    LETTA_URL: http://letta:8283
-    LETTA_SERVER_PASSWORD: ${LETTA_SERVER_PASSWORD}
+    # n8n reaches Letta ONLY through eva-agent-service. It deliberately
+    # gets no App Server URL and no App Server token.
+    EVA_AGENT_URL: http://eva-agent-service:${EVA_AGENT_PORT}
+    EVA_AGENT_API_KEY: ${EVA_AGENT_API_KEY}
     MEDIA_SERVICE_URL: http://media-service:8090
     SEARXNG_URL: http://searxng:8080
     CRAWL4AI_URL: http://crawl4ai:11235
@@ -103,7 +103,7 @@ services:
       ACME_CA: ${ACME_CA:-https://acme-v02.api.letsencrypt.org/directory}
       LETTA_UI_USER: ${LETTA_UI_USER}
       LETTA_UI_PASSWORD_HASH: ${LETTA_UI_PASSWORD_HASH}
-      EVA_CORE_PORT: ${EVA_CORE_PORT}
+      EVA_AGENT_PORT: ${EVA_AGENT_PORT}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
@@ -111,7 +111,7 @@ services:
     networks: [evaself-network]
     depends_on:
       - webapp
-      - eva-core
+      - eva-agent-service
       - n8n
       - nocodb
       - letta-ui
@@ -283,41 +283,44 @@ services:
   # ===================================================================
   # AGENT LAYER
   # ===================================================================
-  letta:
+  letta-app-server:
     <<: [*restart, *logging]
-    image: ${LETTA_IMAGE}:${LETTA_VERSION}
-    container_name: evaself-letta
+    build:
+      context: ./letta-app-server
+      args:
+        NODE_BASE_VERSION: ${NODE_BASE_VERSION}
+        LETTA_CODE_VERSION: ${LETTA_CODE_VERSION}
+    image: evaself/letta-app-server:${LETTA_CODE_VERSION}
+    container_name: evaself-letta-app-server
+    # The App Server speaks WebSocket, not REST, and is never published.
+    # Its only client is eva-agent-service, through the Agent SDK.
     environment:
-      LETTA_PG_URI: postgresql://${LETTA_DB_USER}:${LETTA_DB_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${LETTA_DB_NAME}
-      SECURE: "true"
-      LETTA_SERVER_PASSWORD: ${LETTA_SERVER_PASSWORD}
-      LETTA_DEBUG: "false"
-      # Eva's LLM reaches Letta through the OpenAI-compatible provider.
-      OPENAI_API_KEY: ${EVA_LLM_API_KEY}
-      OPENAI_API_BASE: ${EVA_LLM_BASE_URL}
-      LETTA_LLM_ENDPOINT: ${EVA_LLM_BASE_URL}
-      LETTA_LLM_ENDPOINT_TYPE: openai
-      LETTA_LLM_MODEL: ${EVA_LLM_MODEL}
-      LETTA_LLM_CONTEXT_WINDOW: ${EVA_LLM_CONTEXT_WINDOW}
-      LETTA_EMBEDDING_ENDPOINT_TYPE: openai
-      LETTA_EMBEDDING_ENDPOINT: ${EVA_EMBEDDING_BASE_URL:-${EVA_LLM_BASE_URL}}
-      LETTA_EMBEDDING_MODEL: ${EVA_EMBEDDING_MODEL}
-      LETTA_EMBEDDING_DIM: ${EVA_EMBEDDING_DIM}
+      LETTA_APP_SERVER_LISTEN: ws://0.0.0.0:4500
+      LETTA_APP_SERVER_TOKEN: ${LETTA_APP_SERVER_TOKEN}
+      LETTA_APP_SERVER_BACKEND: ${LETTA_APP_SERVER_BACKEND:-local}
+      LETTA_HOME: /data/letta
+      LETTA_LOCAL_BACKEND_DIR: /data/letta/lc-local-backend
+      # Eva's model endpoint. Configured once with `make configure-letta`,
+      # which runs `letta connect openai-compatible` inside this container.
+      EVA_LLM_BASE_URL: ${EVA_LLM_BASE_URL}
+      EVA_LLM_API_KEY: ${EVA_LLM_API_KEY}
+      EVA_LLM_MODEL: ${EVA_LLM_MODEL}
       TZ: ${TZ}
     volumes:
-      - letta_data:/root/.letta
+      # Agents, conversations and the memory filesystem all live here.
+      - letta_app_server_data:/data/letta
       - ./skills:/skills:ro
       - ./library:/library:ro
     networks: [evaself-network]
-    depends_on:
-      postgres:
-        condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8283/v1/health/').status==200 else 1)\" || exit 1"]
+      # The listener is a WebSocket upgrade endpoint; a TCP connect is the
+      # honest liveness signal. eva-agent-service /health proves the
+      # protocol works end to end.
+      test: ["CMD-SHELL", "node -e \"require('net').connect(4500,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))\""]
       interval: 20s
       timeout: 10s
-      retries: 15
-      start_period: 90s
+      retries: 10
+      start_period: 60s
 
   letta-ui:
     <<: [*restart, *logging]
@@ -326,14 +329,16 @@ services:
       args:
         CADDY_IMAGE: ${CADDY_IMAGE}
         CADDY_VERSION: ${CADDY_VERSION}
-    image: evaself/letta-ui:${LETTA_VERSION}
+    image: evaself/letta-ui:0.2.0
     container_name: evaself-letta-ui
+    # The App Server is WebSocket-only, so the console cannot talk to it
+    # from a browser. It goes through eva-agent-service, exactly like n8n.
     environment:
-      LETTA_URL: http://letta:8283
-      LETTA_SERVER_PASSWORD: ${LETTA_SERVER_PASSWORD}
+      EVA_AGENT_URL: http://eva-agent-service:${EVA_AGENT_PORT}
+      EVA_AGENT_API_KEY: ${EVA_AGENT_API_KEY}
     networks: [evaself-network]
     depends_on:
-      letta:
+      eva-agent-service:
         condition: service_started
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8081/healthz"]
@@ -342,26 +347,27 @@ services:
       retries: 5
       start_period: 15s
 
-  eva-core:
+  eva-agent-service:
     <<: [*restart, *logging]
     build:
-      context: ./eva-core
+      context: ./eva-agent-service
       args:
-        PYTHON_BASE_VERSION: ${PYTHON_BASE_VERSION}
-    image: evaself/eva-core:0.1.0
-    container_name: evaself-eva-core
+        NODE_BASE_VERSION: ${NODE_BASE_VERSION}
+    image: evaself/eva-agent-service:0.2.0
+    container_name: evaself-eva-agent-service
+    # The ONLY component that talks to the Letta App Server, and it does so
+    # exclusively through @letta-ai/letta-agent-sdk.
     environment:
-      EVA_CORE_PORT: ${EVA_CORE_PORT}
-      EVA_CORE_API_KEY: ${EVA_CORE_API_KEY}
-      EVA_CORE_LOG_LEVEL: ${EVA_CORE_LOG_LEVEL}
-      EVA_CORE_LOCK_TTL: ${EVA_CORE_LOCK_TTL}
-      EVA_CORE_LETTA_TIMEOUT: ${EVA_CORE_LETTA_TIMEOUT}
-      EVA_AGENT_PERSONA_FILE: ${EVA_AGENT_PERSONA_FILE}
-      LETTA_URL: http://letta:8283
-      LETTA_SERVER_PASSWORD: ${LETTA_SERVER_PASSWORD}
+      EVA_AGENT_PORT: ${EVA_AGENT_PORT}
+      EVA_AGENT_API_KEY: ${EVA_AGENT_API_KEY}
+      EVA_AGENT_LOG_LEVEL: ${EVA_AGENT_LOG_LEVEL}
+      EVA_AGENT_LOCK_TTL: ${EVA_AGENT_LOCK_TTL}
+      EVA_AGENT_TURN_TIMEOUT_MS: ${EVA_AGENT_TURN_TIMEOUT_MS}
+      EVA_AGENT_PERSONA_FILE: /app/library/persona/eva.md
+      LETTA_APP_SERVER_URL: ws://letta-app-server:4500/ws
+      LETTA_APP_SERVER_TOKEN: ${LETTA_APP_SERVER_TOKEN}
+      LETTA_APP_SERVER_TIMEOUT_MS: ${LETTA_APP_SERVER_TIMEOUT_MS:-180000}
       EVA_LLM_MODEL: ${EVA_LLM_MODEL}
-      EVA_LLM_CONTEXT_WINDOW: ${EVA_LLM_CONTEXT_WINDOW}
-      EVA_EMBEDDING_MODEL: ${EVA_EMBEDDING_MODEL}
       DATABASE_URL: postgresql://${EVA_DB_USER}:${EVA_DB_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${EVA_DB_NAME}
       VALKEY_URL: redis://:${VALKEY_PASSWORD}@${VALKEY_HOST}:${VALKEY_PORT}/1
       TZ: ${TZ}
@@ -374,14 +380,14 @@ services:
         condition: service_healthy
       valkey:
         condition: service_healthy
-      letta:
+      letta-app-server:
         condition: service_started
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,os,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:'+os.environ['EVA_CORE_PORT']+'/health').status==200 else 1)"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:'+(process.env.EVA_AGENT_PORT||8070)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 20s
-      timeout: 5s
+      timeout: 10s
       retries: 10
-      start_period: 30s
+      start_period: 40s
 
   # ===================================================================
   # ADMIN / DATA GUI
@@ -485,7 +491,6 @@ services:
       MEDIA_MAX_AUDIO_SECONDS: ${MEDIA_MAX_AUDIO_SECONDS}
       MEDIA_TMP_TTL_SECONDS: ${MEDIA_TMP_TTL_SECONDS}
       EVA_TELEGRAM_BOT_TOKEN: ${EVA_TELEGRAM_BOT_TOKEN}
-      EVA_CORE_API_KEY: ${EVA_CORE_API_KEY}
       TZ: ${TZ}
     volumes:
       - eva_media_shared:/data/media
@@ -582,8 +587,8 @@ volumes:
     name: evaself_caddy_config
   n8n_data:
     name: evaself_n8n_data
-  letta_data:
-    name: evaself_letta_data
+  letta_app_server_data:
+    name: evaself_letta_app_server_data
   nocodb_data:
     name: evaself_nocodb_data
   searxng_cache:

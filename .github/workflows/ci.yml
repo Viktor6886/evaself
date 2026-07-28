@@ -1,0 +1,367 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ===================================================================
+  # Shell, compose, Caddy, workflows, migrations, secret scan
+  # ===================================================================
+  static:
+    name: Static checks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck and Caddy
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          CADDY_VERSION="$(grep '^CADDY_VERSION=' versions.env | cut -d= -f2 | cut -d- -f1)"
+          curl -fsSL -o /tmp/caddy.tgz \
+            "https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}/caddy_${CADDY_VERSION}_linux_amd64.tar.gz"
+          sudo tar xzf /tmp/caddy.tgz -C /usr/local/bin caddy
+          caddy version
+
+      - name: Bash syntax
+        run: |
+          for f in scripts/*.sh backup-service/backup-service letta-app-server/entrypoint.sh; do
+            bash -n "$f" || exit 1
+          done
+
+      - name: shellcheck
+        run: shellcheck -S error -x scripts/*.sh backup-service/backup-service
+
+      - name: Compose renders
+        run: |
+          sed 's/^\([A-Z0-9_]*\)=$/\1=placeholder/' .env.example > /tmp/ci.env
+          docker compose --env-file versions.env --env-file /tmp/ci.env -f compose.yaml config -q
+          echo "services: $(docker compose --env-file versions.env --env-file /tmp/ci.env -f compose.yaml config --services | wc -l)"
+
+      - name: Caddyfiles validate
+        env:
+          DOMAIN: example.test
+          DOMAIN_APP: app.example.test
+          DOMAIN_API: api.example.test
+          DOMAIN_N8N: n8n.example.test
+          DOMAIN_NOCODB: admin.example.test
+          DOMAIN_LETTA: letta.example.test
+          DOMAIN_STATUS: status.example.test
+          ACME_EMAIL: ops@example.test
+          ACME_CA: https://acme-v02.api.letsencrypt.org/directory
+          LETTA_UI_USER: admin
+          LETTA_UI_PASSWORD_HASH: $2a$14$placeholderplaceholderpl
+          EVA_AGENT_PORT: "8070"
+          EVA_AGENT_URL: http://eva-agent-service:8070
+          EVA_AGENT_API_KEY: placeholder
+        run: |
+          caddy validate --config Caddyfile
+          caddy validate --config webapp/Caddyfile
+          caddy validate --config letta-ui/Caddyfile
+
+      - name: n8n workflows are structurally valid
+        run: python3 scripts/validate-workflows.py n8n/workflows
+
+      - name: No secrets in tracked files
+        run: |
+          if git ls-files --error-unmatch .env >/dev/null 2>&1; then
+            echo "::error::.env is tracked by git"; exit 1
+          fi
+          if git grep -lIE '(BEGIN (RSA|OPENSSH) PRIVATE KEY|[0-9]{8,}:AA[A-Za-z0-9_-]{30,})' \
+               -- . ':(exclude)scripts/validate.sh' ':(exclude).github/workflows/ci.yml'; then
+            echo "::error::possible secret material in tracked files"; exit 1
+          fi
+          echo "clean"
+
+  # ===================================================================
+  # eva-agent-service: the Agent SDK integration
+  # ===================================================================
+  agent-service:
+    name: eva-agent-service (TypeScript)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: eva-agent-service
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # The Agent SDK requires >= 22.19.
+          node-version: "22.22"
+          cache: npm
+          cache-dependency-path: eva-agent-service/package-lock.json
+
+      - run: npm ci --no-audit --no-fund
+
+      - name: Typecheck
+        run: npx tsc -p tsconfig.json --noEmit
+
+      - name: Build
+        run: npm run build
+
+      - name: Unit tests
+        run: node --test --experimental-strip-types test/*.test.ts
+
+      - name: The SDK is the official one, and it is actually used
+        run: |
+          node -e "
+          const pkg = require('./package.json');
+          const dep = pkg.dependencies['@letta-ai/letta-agent-sdk'];
+          if (!dep) { console.error('the Agent SDK is not a dependency'); process.exit(1); }
+          console.log('@letta-ai/letta-agent-sdk', dep);
+          "
+          # letta.ts must import the SDK, and nothing may hand-roll a Letta client.
+          grep -q 'from \"@letta-ai/letta-agent-sdk\"' src/letta.ts
+          if grep -rn "letta:8283\|/v1/agents/\|X-BARE-PASSWORD" src/ ; then
+            echo "::error::a hand-written Letta REST client crept back in"; exit 1
+          fi
+          echo "SDK-only access confirmed"
+
+  # ===================================================================
+  # PostgreSQL schema: applied for real, twice, to prove idempotency
+  # ===================================================================
+  migrations:
+    name: PostgreSQL migrations
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.5-pg17
+        env:
+          POSTGRES_PASSWORD: ci
+          POSTGRES_USER: postgres
+          POSTGRES_DB: eva
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      PGPASSWORD: ci
+      PGHOST: localhost
+      PGUSER: postgres
+      PGDATABASE: eva
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install psql
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+
+      - name: Extensions
+        run: |
+          psql -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS "uuid-ossp"'
+          psql -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS pg_trgm'
+          psql -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS vector'
+
+      - name: Apply migrations
+        run: |
+          for f in postgres/migrations/*.sql; do
+            echo "== $f"
+            psql -v ON_ERROR_STOP=1 -q -f "$f"
+          done
+
+      - name: Apply them again (must be idempotent)
+        run: |
+          for f in postgres/migrations/*.sql; do
+            psql -v ON_ERROR_STOP=1 -q -f "$f"
+          done
+
+      - name: The schema is what the services expect
+        run: |
+          psql -v ON_ERROR_STOP=1 -tA <<'SQL'
+          DO $$
+          DECLARE missing text;
+          BEGIN
+            SELECT string_agg(t, ', ') INTO missing
+            FROM unnest(ARRAY[
+              'users','agent_links','agent_conversations','subscriptions','payments',
+              'quotas','usage_counters','onboarding_fields','test_results','tasks',
+              'referrals','partner_analysis_links','notifications','crisis_events',
+              'schema_migrations'
+            ]) AS t
+            WHERE to_regclass('public.' || t) IS NULL;
+            IF missing IS NOT NULL THEN RAISE EXCEPTION 'missing tables: %', missing; END IF;
+
+            IF NOT EXISTS (
+              SELECT 1 FROM information_schema.columns
+              WHERE table_name = 'agent_links' AND column_name = 'conversation_id'
+            ) THEN RAISE EXCEPTION 'agent_links.conversation_id is missing'; END IF;
+
+            IF to_regclass('public.v_agent_runtime') IS NULL THEN
+              RAISE EXCEPTION 'v_agent_runtime is missing';
+            END IF;
+          END $$;
+          SQL
+          echo "schema verified"
+
+      - name: Seed data is not duplicated by a re-run
+        run: |
+          COUNT="$(psql -tA -c 'SELECT count(*) FROM quotas')"
+          [ "$COUNT" = "12" ] || { echo "::error::quotas has $COUNT rows, expected 12"; exit 1; }
+
+  # ===================================================================
+  # media-service
+  # ===================================================================
+  media-service:
+    name: media-service (Python + ffmpeg)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: media-service
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+
+      - run: pip install --quiet -r requirements.txt pytest
+
+      - name: Tests (real ffmpeg round-trips)
+        env:
+          MEDIA_WORK_DIR: /tmp/media
+        run: python -m pytest -q
+
+  # ===================================================================
+  # Images build (and, for the agent service, its tests run in-build)
+  # ===================================================================
+  images:
+    name: Docker images build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build every locally built image
+        run: |
+          set -e
+          . ./versions.env
+          docker build -t evaself/eva-agent-service:ci \
+            --build-arg NODE_BASE_VERSION="$NODE_BASE_VERSION" eva-agent-service
+          docker build -t evaself/letta-app-server:ci \
+            --build-arg NODE_BASE_VERSION="$NODE_BASE_VERSION" \
+            --build-arg LETTA_CODE_VERSION="$LETTA_CODE_VERSION" letta-app-server
+          docker build -t evaself/media-service:ci \
+            --build-arg PYTHON_BASE_VERSION="$PYTHON_BASE_VERSION" media-service
+          docker build -t evaself/webapp:ci \
+            --build-arg CADDY_IMAGE="$CADDY_IMAGE" --build-arg CADDY_VERSION="$CADDY_VERSION" webapp
+          docker build -t evaself/letta-ui:ci \
+            --build-arg CADDY_IMAGE="$CADDY_IMAGE" --build-arg CADDY_VERSION="$CADDY_VERSION" letta-ui
+          docker build -t evaself/backup-service:ci \
+            --build-arg POSTGRES_IMAGE="$POSTGRES_IMAGE" --build-arg POSTGRES_VERSION="$POSTGRES_VERSION" backup-service
+          docker build -t evaself/n8n:ci -f n8n/Dockerfile.n8n \
+            --build-arg N8N_IMAGE="$N8N_IMAGE" --build-arg N8N_VERSION="$N8N_VERSION" n8n
+          docker build -t evaself/n8n-runner:ci -f n8n/Dockerfile.runner \
+            --build-arg N8N_RUNNERS_IMAGE="$N8N_RUNNERS_IMAGE" \
+            --build-arg N8N_RUNNERS_VERSION="$N8N_RUNNERS_VERSION" n8n
+
+      - name: The App Server image really serves the App Server
+        run: |
+          docker run --rm evaself/letta-app-server:ci \
+            sh -c 'letta server --help' | tee /tmp/help
+          grep -q -- '--listen' /tmp/help
+
+  # ===================================================================
+  # The whole stack, started for real
+  # ===================================================================
+  stack:
+    name: Stack smoke test
+    runs-on: ubuntu-24.04
+    needs: [agent-service, images]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate a throwaway .env
+        run: |
+          sed 's/^\([A-Z0-9_]*\)=$/\1=ci-placeholder/' .env.example > .env
+          python3 - <<'PY'
+          import re, secrets, pathlib
+          path = pathlib.Path('.env')
+          text = path.read_text()
+          values = {
+            'DOMAIN': 'example.test', 'DOMAIN_APP': 'app.example.test',
+            'DOMAIN_API': 'api.example.test', 'DOMAIN_N8N': 'n8n.example.test',
+            'DOMAIN_NOCODB': 'admin.example.test', 'DOMAIN_LETTA': 'letta.example.test',
+            'DOMAIN_STATUS': 'status.example.test', 'ACME_EMAIL': 'ci@example.test',
+            'EVA_AGENT_PORT': '8070', 'LETTA_APP_SERVER_BACKEND': 'local',
+            'COMPOSE_PROFILES': '',
+          }
+          for key, value in values.items():
+            text = re.sub(rf'^{key}=.*$', f'{key}={value}', text, flags=re.M)
+          for key in ('POSTGRES_SUPER_PASSWORD','EVA_DB_PASSWORD','N8N_DB_PASSWORD',
+                      'NOCODB_DB_PASSWORD','LETTA_DB_PASSWORD','EVA_DB_READONLY_PASSWORD',
+                      'VALKEY_PASSWORD','EVA_AGENT_API_KEY','LETTA_APP_SERVER_TOKEN',
+                      'N8N_ENCRYPTION_KEY','N8N_RUNNERS_AUTH_TOKEN','NC_AUTH_JWT_SECRET',
+                      'SEARXNG_SECRET','EVA_TELEGRAM_WEBHOOK_SECRET'):
+            text = re.sub(rf'^{key}=.*$', f'{key}={secrets.token_hex(24)}', text, flags=re.M)
+          path.write_text(text)
+          PY
+          chmod 600 .env
+
+      - name: Start the data layer, the App Server and the agent service
+        run: |
+          docker compose --env-file versions.env --env-file .env \
+            up -d --build postgres valkey letta-app-server eva-agent-service
+
+      - name: Wait for the agent service to report healthy
+        run: |
+          for i in $(seq 1 60); do
+            STATUS="$(docker compose --env-file versions.env --env-file .env \
+              exec -T eva-agent-service node -e "
+                fetch('http://127.0.0.1:8070/health')
+                  .then(r=>r.json()).then(b=>console.log(b.status))
+                  .catch(()=>console.log('down'))" 2>/dev/null | tr -d '\r')"
+            echo "attempt $i: $STATUS"
+            [ "$STATUS" = "ok" ] && exit 0
+            sleep 5
+          done
+          echo "::error::eva-agent-service never became healthy"
+          docker compose --env-file versions.env --env-file .env logs --tail=80 eva-agent-service letta-app-server
+          exit 1
+
+      - name: An agent and a conversation are created through the Agent SDK
+        run: |
+          set -e
+          KEY="$(grep '^EVA_AGENT_API_KEY=' .env | cut -d= -f2)"
+          RESULT="$(docker compose --env-file versions.env --env-file .env \
+            exec -T eva-agent-service node -e "
+              const key = '$KEY';
+              fetch('http://127.0.0.1:8070/v1/users/ensure', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-API-Key': key },
+                body: JSON.stringify({ telegram_id: 424242, first_name: 'CI' }),
+              }).then(r=>r.json()).then(b=>console.log(JSON.stringify(b)));
+            " | tr -d '\r')"
+          echo "$RESULT"
+          echo "$RESULT" | grep -q '"agent_id"'
+          echo "$RESULT" | grep -q '"conversation_id"'
+
+      - name: The mapping is persisted in PostgreSQL
+        run: |
+          docker compose --env-file versions.env --env-file .env \
+            exec -T postgres psql -tA -U postgres -d eva \
+            -c "SELECT telegram_id, agent_id, conversation_id FROM v_agent_runtime" | tee /tmp/mapping
+          grep -q 424242 /tmp/mapping
+
+      - name: Logs on failure
+        if: failure()
+        run: |
+          docker compose --env-file versions.env --env-file .env logs --tail=200 || true
+
+      - name: Tear down
+        if: always()
+        run: docker compose --env-file versions.env --env-file .env down -v || true

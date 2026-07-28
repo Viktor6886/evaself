@@ -5,6 +5,7 @@
 #   backup-service idle            stay alive (default; used by compose)
 #   backup-service dump-all DIR    dump every database + globals into DIR
 #   backup-service restore-all DIR restore what dump-all produced
+#   backup-service fix-ownership DB  hand objects back to the service role
 #   backup-service check           verify the server is reachable
 #
 # scripts/backup.sh and scripts/restore.sh call these through
@@ -49,6 +50,46 @@ cmd_dump_all() {
 	log "dump complete"
 }
 
+# Map each database onto the role that must own its objects.
+owner_role_for() {
+	case "$1" in
+		"${EVA_DB_NAME:-eva}")       printf '%s' "${EVA_DB_USER:-eva}" ;;
+		"${N8N_DB_NAME:-n8n}")       printf '%s' "${N8N_DB_USER:-n8n}" ;;
+		"${NOCODB_DB_NAME:-nocodb}") printf '%s' "${NOCODB_DB_USER:-nocodb}" ;;
+		"${LETTA_DB_NAME:-letta}")   printf '%s' "${LETTA_DB_USER:-letta}" ;;
+		*) printf '' ;;
+	esac
+}
+
+cmd_fix_ownership() {
+	local db="${1:?usage: fix-ownership <db>}"
+	local role
+	role="$(owner_role_for "$db")"
+	[ -n "$role" ] || { log "no owner role known for ${db}, leaving ownership as is"; return 0; }
+
+	log "reassigning ownership in ${db} to ${role}"
+	psql --dbname="$db" -v ON_ERROR_STOP=1 -q <<-SQL
+		DO \$\$
+		DECLARE r record;
+		BEGIN
+		    EXECUTE format('ALTER SCHEMA public OWNER TO %I', '${role}');
+		    FOR r IN SELECT tablename FROM pg_tables WHERE schemaname = 'public' LOOP
+		        EXECUTE format('ALTER TABLE public.%I OWNER TO %I', r.tablename, '${role}');
+		    END LOOP;
+		    FOR r IN SELECT sequencename FROM pg_sequences WHERE schemaname = 'public' LOOP
+		        EXECUTE format('ALTER SEQUENCE public.%I OWNER TO %I', r.sequencename, '${role}');
+		    END LOOP;
+		    FOR r IN SELECT viewname FROM pg_views WHERE schemaname = 'public' LOOP
+		        EXECUTE format('ALTER VIEW public.%I OWNER TO %I', r.viewname, '${role}');
+		    END LOOP;
+		    FOR r IN SELECT matviewname FROM pg_matviews WHERE schemaname = 'public' LOOP
+		        EXECUTE format('ALTER MATERIALIZED VIEW public.%I OWNER TO %I', r.matviewname, '${role}');
+		    END LOOP;
+		END
+		\$\$;
+	SQL
+}
+
 cmd_restore_all() {
 	local source="${1:?usage: restore-all <dir>}"
 
@@ -71,6 +112,11 @@ cmd_restore_all() {
 		# past "does not exist" notices by default.
 		pg_restore --dbname="$db" --clean --if-exists --no-owner --no-privileges \
 			"$dump" 2>&1 | grep -vi 'does not exist, skipping' || true
+
+		# --no-owner leaves every object owned by the restoring superuser,
+		# which locks the service role out of its own tables ("permission
+		# denied for table users"). Hand ownership back.
+		cmd_fix_ownership "$db"
 	done
 
 	log "restore complete"
@@ -81,5 +127,6 @@ case "${1:-idle}" in
 	check) cmd_check ;;
 	dump-all) shift; cmd_dump_all "$@" ;;
 	restore-all) shift; cmd_restore_all "$@" ;;
+	fix-ownership) shift; cmd_fix_ownership "$@" ;;
 	*) log "unknown command: $1"; exit 2 ;;
 esac

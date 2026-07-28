@@ -15,7 +15,7 @@ cron job or as a Hermes command.
 
 ```bash
 make logs                         # everything, last 200 lines, follow
-make logs s=eva-core
+make logs s=eva-agent-service
 make logs s=letta
 docker compose --env-file versions.env --env-file .env logs --since 30m n8n-worker
 ```
@@ -23,7 +23,7 @@ docker compose --env-file versions.env --env-file .env logs --since 30m n8n-work
 Useful greps:
 
 ```bash
-make logs s=eva-core | grep -i 'user_busy\|letta_'
+make logs s=eva-agent-service | grep -i 'user_busy\|app_server_'
 make logs s=caddy    | grep -i 'certificate\|error'
 make logs s=n8n      | grep -i 'workflow\|error'
 ```
@@ -186,7 +186,7 @@ The same data is editable in NocoDB, which is what it is there for.
 ```bash
 COMPOSE="docker compose --env-file versions.env --env-file .env"
 $COMPOSE restart letta
-$COMPOSE up -d --force-recreate eva-core
+$COMPOSE up -d --force-recreate eva-agent-service
 ```
 
 Order matters only for PostgreSQL and Valkey; everything else reconnects.

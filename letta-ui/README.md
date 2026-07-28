@@ -1,75 +1,72 @@
 # Letta console (self-hosted)
 
-## Why this exists
+Administrative interface for the agents running on this installation's
+Letta App Server.
 
-**Letta 0.16.x does not ship a self-hosted web interface.**
+## Why it is not `letta-oss-ui`
 
-That is not a guess. In the released `letta` 0.16.8 package,
-`letta/server/rest_api/static_files.py` contains exactly one route:
-
-```python
-def mount_static_files(app: FastAPI):
-    @app.get("/", include_in_schema=False)
-    async def redirect_to_docs():
-        return RedirectResponse(url="/docs")
-```
-
-and the server prints, on start-up:
+The brief asked to check `letta-oss-ui` and use it only if it is genuinely
+compatible. It was checked, and it is not usable here:
 
 ```
-▶ View using ADE at: https://app.letta.com/development-servers/local/dashboard
+$ curl -s https://registry.npmjs.org/letta-oss-ui            -> 404 Not found
+$ curl -s https://registry.npmjs.org/@letta-ai/letta-oss-ui  -> 404 Not found
 ```
 
-So the only official graphical client for a self-hosted Letta server is the
-**hosted** ADE at `app.letta.com`, which connects *from your browser* to
-your server. Earlier releases bundled a local ADE; that was removed.
+No such package is published. Beyond the missing package, there is a
+structural reason a browser front-end cannot talk to the App Server at all:
 
-Evaself will not present a cloud application as a locally installed one.
-This container is therefore Evaself's own console: a static client served
-from your server, talking to your Letta instance over the internal Docker
-network, with no third-party dependency at runtime.
+* the App Server's only interface is a **WebSocket protocol** — it is
+  started as `letta server --listen ws://0.0.0.0:4500` and serves no HTML
+  and no REST;
+* that protocol is driven by `@letta-ai/letta-agent-sdk`, a **Node** SDK
+  (`engines: node >= 22.19`), which cannot run in a page.
+
+So the console is Evaself's own, and it reads through the one component
+that does own the SDK.
 
 ## How it works
 
 ```
 browser ──HTTPS──> Caddy (basic auth) ──> letta-ui:8081
                                               │  static client
-                                              └─ /api/*  ──> letta:8283
-                                                 + Authorization: Bearer $LETTA_SERVER_PASSWORD
+                                              └─ /api/*  ──> eva-agent-service:8070
+                                                 + X-API-Key (added by Caddy)
+                                                       │
+                                                       └── @letta-ai/letta-agent-sdk
+                                                              └── ws://letta-app-server:4500/ws
 ```
 
-The Letta server password is injected by the `letta-ui` container's Caddy
-and never reaches the browser. `letta:8283` itself is not routed by the
-edge, so the Letta REST API is not reachable from the internet at all.
+The internal API key is injected by this container's Caddy and never
+reaches the browser. Neither `eva-agent-service` nor the App Server is
+routed from the internet.
 
 Access is protected twice: HTTP basic auth at the edge
-(`LETTA_UI_USER` / `LETTA_UI_PASSWORD`, stored as a bcrypt hash in
-`.env`), and the fact that the whole host is only reachable over HTTPS.
+(`LETTA_UI_USER` / `LETTA_UI_PASSWORD`, stored as a bcrypt hash in `.env`)
+and the fact that the host is HTTPS-only.
 
-## What the console does
+## What the console shows
 
-| Tab | Letta endpoint |
+| Tab | Reads / writes |
 |---|---|
-| overview | `GET /v1/agents/{id}` + `GET /v1/agents/{id}/export` |
-| memory | `GET`/`PATCH /v1/agents/{id}/core-memory/blocks[/{label}]` |
-| messages | `GET /v1/agents/{id}/messages` |
-| chat | `POST /v1/agents/{id}/messages` |
-| archival | `GET /v1/agents/{id}/archival-memory` |
-| tools | `GET /v1/agents/{id}/tools` |
+| overview | the `user → agent → conversation` mapping from PostgreSQL, plus "new conversation" and "release turn lock" |
+| conversations | `GET /v1/conversations/{telegramId}` — every conversation of that agent, with the active one marked |
+| messages | `GET /v1/conversations/{telegramId}/messages` |
+| chat | `POST /v1/messages` — a real turn through the SDK, without Telegram |
 
-The sidebar lists and filters every agent (`GET /v1/agents/`), which for
-Evaself means one agent per Telegram user, tagged `evaself` and
-`tg:<telegram_id>`.
+The header shows the agent service version and the live App Server state
+(reachable, and how many models it offers).
 
-## Using the official cloud ADE instead
+## Using Letta's own clients instead
 
-If you prefer the official ADE, it can talk to this same server — but it
-runs in Letta's cloud, and it needs your server to be reachable and its
-password. Publish the Letta API deliberately if you want that:
+`letta` (the Letta Code CLI) is itself a client of the App Server. To use
+it against this installation, run it with the same URL and token:
 
-1. Add a host block to the root `Caddyfile` that proxies to `letta:8283`.
-2. In `app.letta.com`, add a self-hosted server with that URL and your
-   `LETTA_SERVER_PASSWORD`.
+```bash
+docker compose --env-file versions.env --env-file .env \
+  exec letta-app-server letta agents list
+```
 
-Evaself does not do this by default: it would put the agent API on the
-public internet for the convenience of a third-party front-end.
+That is the officially supported interactive client for a self-hosted App
+Server; Letta Cloud's web ADE is for cloud-hosted agents and is not what
+this installation runs.

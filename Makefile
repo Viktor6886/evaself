@@ -24,7 +24,7 @@ COMPOSE_FILE := $(ROOT_DIR)/compose.yaml
 # .env holds the installation's own configuration and secrets.
 COMPOSE := docker compose --env-file $(VERSIONS) --env-file $(ENV_FILE) -f $(COMPOSE_FILE)
 
-# `make logs s=n8n` / `make logs s=eva-core`
+# `make logs s=n8n` / `make logs s=eva-agent-service`
 s ?=
 BACKUP ?=
 
@@ -33,7 +33,7 @@ export ROOT_DIR SCRIPTS ENV_FILE VERSIONS COMPOSE_FILE
 .PHONY: help install configure start stop restart status logs doctor \
         backup restore update-preview update rollback \
         import-n8n export-n8n \
-        configure-hermes start-hermes stop-hermes restart-hermes \
+        configure-letta configure-hermes start-hermes stop-hermes restart-hermes \
         update-hermes hermes-status \
         disk-cleanup build pull ps shell-db validate test
 
@@ -47,7 +47,7 @@ help: ## Show this help
 	@echo ""
 	@echo "Examples:"
 	@echo "  sudo make install"
-	@echo "  make logs s=n8n"
+	@echo "  make logs s=eva-agent-service"
 	@echo "  make restore BACKUP=/var/backups/evaself/evaself-backup-2026-07-28-10-00.tar.gz"
 
 # ---------------------------------------------------------------------
@@ -58,6 +58,9 @@ install: ## Full install on a clean Ubuntu 24.04 host (run with sudo)
 
 configure: ## Re-run the interactive configuration wizard (rewrites .env)
 	@$(SCRIPTS)/configure.sh
+
+configure-letta: ## Register Eva's model endpoint with the Letta App Server
+	@$(SCRIPTS)/configure-letta.sh
 
 validate: ## Static validation of compose/Caddy/SQL/workflows (no services touched)
 	@$(SCRIPTS)/validate.sh
@@ -78,7 +81,7 @@ restart: ## Restart all containers
 	@$(SCRIPTS)/require-env.sh
 	@$(COMPOSE) restart
 
-build: ## Rebuild locally built images (eva-core, webapp, media, n8n, letta-ui)
+build: ## Rebuild locally built images (agent service, app server, webapp, media, n8n, letta-ui)
 	@$(SCRIPTS)/require-env.sh
 	@$(COMPOSE) build --pull
 
@@ -166,7 +169,7 @@ hermes-status: ## Hermes service state, config summary and allowlist
 disk-cleanup: ## Reclaim disk: dangling images, build cache, old logs and backups
 	@$(SCRIPTS)/disk-cleanup.sh
 
-test: ## Run the unit tests of eva-core and media-service
+test: ## Run the unit tests of eva-agent-service and media-service
 	@$(SCRIPTS)/run-tests.sh
 
 # ---------------------------------------------------------------------

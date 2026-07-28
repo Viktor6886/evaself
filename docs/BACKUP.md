@@ -19,13 +19,13 @@ evaself-backup-YYYY-MM-DD-HH-MM.tar.gz
 │   ├── letta.dump           agents, memory, messages, tools
 │   └── server-version.txt
 ├── volumes/
-│   ├── letta_data.tar.gz    Letta's on-disk state
+│   ├── letta_app_server_data.tar.gz   agents, conversations, memfs
 │   ├── n8n_data.tar.gz      ~/.n8n, including the settings file
 │   ├── nocodb_data.tar.gz
 │   └── caddy_data.tar.gz    issued certificates (saves a re-issue)
 ├── letta/
-│   ├── agents.json          the agent inventory
-│   └── agent-<telegram_id>.json   one portable export per agent
+│   └── inventory.json       the user->agent->conversation mapping as
+│                            PostgreSQL and the App Server each see it
 ├── n8n/
 │   ├── workflows/*.json
 │   ├── credentials.json     encrypted
@@ -43,9 +43,10 @@ evaself-backup-YYYY-MM-DD-HH-MM.tar.gz
     └── webapp.tar.gz
 ```
 
-Two independent copies of the agent state are kept on purpose: the raw
-`letta.dump` + volume (exact, but tied to this Letta version) and the
-per-agent JSON exports (portable, and restorable one agent at a time).
+The App Server keeps agents, conversations and the memory filesystem on
+disk, so `letta_app_server_data.tar.gz` **is** the agent state. The
+inventory is stored alongside it so a restore can be checked from both
+ends: the mapping PostgreSQL holds, and the agents the App Server reports.
 
 ## Not encrypted — and what that means
 
@@ -88,8 +89,8 @@ After `make restore` on a fresh server these are all intact:
 | users, subscriptions, payments, quotas | `eva.dump` |
 | tasks, tests, onboarding answers, referrals | `eva.dump` |
 | crisis events and their handling state | `eva.dump` |
-| Letta agents, memory blocks, archival, messages | `letta.dump` + volume |
-| the user → agent mapping | `eva.dump` (`agent_links`) |
+| Letta agents, conversations, memory (memfs) | `letta_app_server_data.tar.gz` |
+| the user → agent → conversation mapping | `eva.dump` (`agent_links`) |
 | n8n workflows | `n8n.dump` + the export |
 | n8n credentials | `n8n.dump` + `N8N_ENCRYPTION_KEY` |
 | NocoDB bases, views, users | `nocodb.dump` + volume |
@@ -138,17 +139,15 @@ select count(*) from users;
 select count(*) from agent_links where status='active';
 ```
 
-## Restoring one agent
-
-The per-agent exports are plain JSON and can be pushed back individually:
+## Checking a restore
 
 ```bash
-jq . agent-555000111.json | head
-curl -sX POST "http://localhost:8283/v1/agents/import" \
-  -H "Authorization: Bearer $LETTA_SERVER_PASSWORD" \
-  -H 'Content-Type: application/json' \
-  --data-binary @agent-555000111.json
+make shell-db
+SELECT telegram_id, agent_id, conversation_id FROM v_agent_runtime;
 ```
 
-Afterwards update `agent_links.agent_id` for that user, because the import
-creates a new agent id.
+Every row must have a `conversation_id`. A row without one means the App
+Server state and the database disagree; the next message from that user
+creates a fresh conversation, which keeps the agent and its memory but
+starts a new thread. Compare against `letta/inventory.json` in the archive
+if that is unexpected.

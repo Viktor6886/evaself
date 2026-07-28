@@ -43,7 +43,7 @@ sudo make install
 | 6 | Runs the configuration wizard if `.env` has no domain yet | yes |
 | 7 | Checks that every host name resolves to this server (warns only) | yes |
 | 8 | Pulls pinned images, hashes the Letta console password | yes |
-| 9 | Builds eva-core, media-service, webapp, letta-ui, n8n, backup | yes |
+| 9 | Builds letta-app-server, eva-agent-service, media, webapp, letta-ui, n8n, backup | yes |
 | 10 | `docker compose up -d` and waits for health | yes |
 | 11 | Applies SQL migrations (idempotent) | yes |
 | 12 | Imports the n8n workflows and generates the DB credential | yes |
@@ -104,16 +104,22 @@ any other.
 The installer prints these, and they are also in `.env`:
 
 ```
-1. Open https://n8n.<domain> and create the n8n owner account.
-2. scripts/telegram-webhook.sh set     register Eva's webhook
-3. Activate the two Telegram workflows in the n8n editor.
-4. scripts/nocodb-connect.sh           connect NocoDB to the eva database
-5. make configure-hermes               give Hermes an LLM when ready
-6. Fill in MEDIA_ASR_* / MEDIA_TTS_* in .env, then: make restart
+1. make configure-letta                register Eva's model with the App Server
+2. Open https://n8n.<domain> and create the n8n owner account.
+3. scripts/telegram-webhook.sh set     register Eva's webhook
+4. Activate "Eva — architecture E2E test" in the n8n editor.
+5. scripts/nocodb-connect.sh           connect NocoDB to the eva database
+6. make configure-hermes               give Hermes an LLM when ready
+7. Fill in MEDIA_ASR_* / MEDIA_TTS_* in .env, then: make restart
 ```
 
 Workflows are imported **inactive**. Activating a Telegram webhook is a
 decision, not an installation side effect.
+
+At this milestone `n8n/workflows/` holds one workflow: a minimal end-to-end
+test of the architecture (Telegram → n8n → eva-agent-service → Agent SDK →
+App Server → model → Telegram). Eva's full conversational logic, payments,
+subscriptions and the WebApp come next.
 
 ## Verifying
 
@@ -122,6 +128,7 @@ make doctor
 ```
 
 checks containers, health probes, the four databases, the Eva schema,
+that the Agent SDK can reach the App Server,
 every internal endpoint, public HTTPS on all six routed hosts, UFW,
 Fail2Ban, that PostgreSQL and Valkey are unpublished, Hermes's state, and
 the age of the last backup.
@@ -151,7 +158,7 @@ docker compose --env-file versions.env --env-file .env down
 Volumes survive that. Removing them is intentionally manual:
 
 ```bash
-docker volume rm evaself_postgres_data evaself_letta_data evaself_n8n_data …
+docker volume rm evaself_postgres_data evaself_letta_app_server_data evaself_n8n_data …
 ```
 
 Take a backup first; there is no undo.

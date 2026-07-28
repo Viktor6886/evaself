@@ -5,209 +5,177 @@ trusting anything in this repository on a server that matters.
 
 ## The constraint
 
-Evaself v0.1.0 was built in an environment whose egress policy blocks
+This work was done in an environment whose egress policy blocks
 container-registry blob storage — `production.cloudfront.docker.com`,
 `pkg-containers.githubusercontent.com` and `quay.io` all answer 403 to the
 proxy. Image manifests resolve; layers cannot be downloaded.
+`hermes-agent.nousresearch.com` and `docs.letta.com` are blocked as well.
 
-So **no Docker image was ever pulled, and the assembled stack has never
-been started as a whole.** Everything below is either something that was
-genuinely run, or something that was not — stated as such.
+So **no Docker image was pulled or built, and the assembled stack has
+never been started with `docker compose`.** What *was* possible, and what
+was done, is to run the same components natively: the Letta App Server
+from its npm package, `eva-agent-service` from its own source, against a
+real PostgreSQL and a real Valkey-protocol server.
+
+Everything below is either something genuinely run, or something that was
+not — stated as such.
 
 ## Verified by execution
 
-### PostgreSQL schema — real server
+### The Agent SDK really drives a real App Server
 
-`postgres/init/00-init-databases.sh` and both migrations were run against
-a real PostgreSQL 16 server with pgvector.
+This is the core claim of this milestone, and it was tested end to end
+against live processes, not mocks.
 
-* four roles and four databases created; `vector`, `pg_trgm` and
-  `uuid-ossp` installed;
-* all 13 specified tables plus `schema_migrations` created, and the four
-  reporting views;
-* migrations re-applied a second time with `ON_ERROR_STOP=1`: no errors,
-  no duplicated seed rows (`quotas` stayed at 12);
-* seeded a test user and checked the views return correct data —
-  `v_quota_status` reported `plus / messages / limit 200 / used 17 /
-  remaining 183`, `v_revenue_monthly` aggregated a payment to 499.00 RUB,
-  `v_crisis_open` surfaced the open event;
-* the `updated_at` trigger fires on UPDATE.
+* `@letta-ai/letta-agent-sdk@0.5.2` was installed from npm (published
+  2026-07-28; it depends on `@letta-ai/letta-code@0.29.8`, requires
+  Node >= 22.19).
+* A real App Server was started:
+  `letta --backend local server --listen ws://127.0.0.1:4500`, which
+  printed `Listening on ws://127.0.0.1:4500` and accepted TCP connections.
+* `eva-agent-service` was run against it with
+  `new LettaAgentClient({ backend: "remote", url, authToken })` and
+  reported healthy:
 
-### Backup and restore — real dumps
+  ```json
+  {"service":"eva-agent-service","version":"0.2.0","status":"ok",
+   "runtime":"letta-agent-sdk",
+   "checks":{"app_server":{"ok":true,"models":314},
+             "postgres":{"ok":true},"valkey":{"ok":true}}}
+  ```
 
-`backup-service/backup-service` was run directly against that server.
+  314 models listed through `client.models.list()` — the WebSocket
+  protocol works, not just the socket.
 
-* `dump-all` produced `globals.sql` and dumps for `eva`, `n8n`, `nocodb`
-  and `letta`;
-* every row was deleted from `users`;
-* `restore-all` brought back 5 users, 5 agent links and 12 quota rows.
+### Per-user agents and conversations
 
-The *container* the helper normally runs in was never built, so the
-version-matched `pg_dump` claim rests on the Dockerfile deriving from the
-same base image as the database, not on an observed run.
+* `POST /v1/users/ensure` created a real agent and a real conversation
+  through the SDK:
+  `agent-local-aad65b96-…` / `local-conv-2`.
+* Called again for the same user: `agent_created: false`,
+  `conversation_created: false`, same ids — idempotent.
+* A second user got a **different** agent and conversation
+  (`agent-local-c298077f-…` / `local-conv-4`).
+* The mapping is in PostgreSQL, readable through the new view:
 
-### Eva Core — run for real
+  ```
+  700001 -> agent-local-aad65b96-… -> local-conv-5 [letta-app-server]
+  700002 -> agent-local-c298077f-… -> local-conv-4 [letta-app-server]
+  ```
 
-Started against real PostgreSQL, real Valkey (redis protocol) and a
-stand-in Letta built from the response schemas of the released
-`letta 0.16.8` package.
+* `POST /v1/conversations/{id}` opened a new conversation and made it
+  active; `GET /v1/conversations/{id}` then listed all three of that
+  agent's conversations with the active one marked.
 
-* `/health` reported all three dependencies healthy;
-* missing and wrong `X-API-Key` → 401, both surfaces;
-* `POST /v1/users/ensure` created a user row and a Letta agent; a second
-  call returned `agent_created: false` and the same agent id;
-* two different Telegram ids produced two distinct agents;
-* `POST /v1/messages` returned the assistant text with reasoning and
-  usage separated, and incremented `usage_counters`;
-* with a lock held in Valkey, the next message returned
-  `409 user_busy` with `retry_after_seconds`; `POST
-  /v1/locks/{id}/release` cleared it and messaging resumed;
-* memory blocks read back as `persona` and `human`, and a `PATCH`
-  persisted;
-* `GET /v1/quota/{id}/messages` → `used 2, limit 30, remaining 28`;
-* a valid Mini App `initData` authenticated; a tampered one and a missing
-  header both returned 401;
-* `/public/bot` degrades to `{"username": null}` when Telegram is
-  unreachable, instead of failing the landing page.
+### Recovery after a restart
 
-23 unit tests pass (initData signing/expiry/forgery, response
-normalisation, model-handle qualification, lock semantics including
-foreign-token release and release-on-exception).
+Both the App Server and `eva-agent-service` were killed and started again
+from scratch. Afterwards:
 
-### Media service — real ffmpeg
+* the existing user resolved to the **same agent and the same
+  conversation** (`agent_created: false`, `conversation_created: false`) —
+  which is the whole point of storing `conversation_id`;
+* a new user created after the restart got a fresh agent and conversation;
+* `GET /v1/agents/live` reported 3 agents from the App Server, matching
+  what the SDK had created before the restart.
 
-11 tests pass, generating actual audio rather than mocking:
+### Locking and error mapping
 
-* a 3-second OGG/Opus file (what Telegram sends) is probed correctly —
-  codec `opus`, 1 channel, duration within tolerance;
-* converted to WAV: `pcm_s16le`, 16 kHz, mono, duration preserved;
-* re-encoded to a Telegram voice note: `opus`, mono, duration preserved;
-* non-media files raise on both probe and convert;
-* the API returns `503 asr_not_configured` / `503 tts_not_configured`
-  rather than failing obscurely, and leaves no workspace behind.
+* A lock held in Valkey produced
+  `409 {"code":"user_busy","retryable":true,"details":{"retry_after_seconds":40}}`.
+* `POST /v1/locks/{id}/release` cleared it and messaging resumed.
+* An unknown user produced `404 not_found` with a message naming the fix.
+* Missing and wrong `X-API-Key` both produced `401 unauthorized`.
+* A turn attempted with no model provider configured surfaced as
+  `turn_failed` (non-retryable) carrying the App Server's own
+  `llm_error` — the mapping behaved exactly as designed on a real failure.
 
-### Letta 0.16.8 API surface — read from the released package
+### Unit tests
 
-Not guessed. Extracted from the installed distribution:
+24 tests pass (`node --test`), covering the SDK stream collapse
+(assistant / reasoning / tool-call separation, multi-part content,
+result-only fallback, empty stream), the error mapping (connection-shaped
+→ retryable `app_server_unavailable`, timeouts → `turn_timeout`, anything
+else → `turn_failed`), and the queue: FIFO ordering within one user,
+independence across users, depth limit → `user_busy`, lock released on
+throw, foreign-token release is a no-op.
 
-* `CheckPasswordMiddleware` accepts `Authorization: Bearer <password>` or
-  `X-BARE-PASSWORD`, and exempts `/v1/health/`;
-* route paths and shapes for agents, messages, core memory, archival,
-  export/import, tools and providers;
-* `CreateAgent` fields (`memory_blocks`, `tags`, `model` as
-  `provider/model`, `context_window_limit`);
-* `LettaResponse` = `messages[] + stop_reason + usage`, with content
-  either a string or a list of parts;
-* the send-message docstring's own warning that concurrent requests to one
-  agent are undefined — which is why the lock exists.
+TypeScript compiles clean (`tsc --noEmit`) against the SDK's own type
+definitions — which is itself a check that the SDK is being used correctly
+rather than via `any`.
 
-**And the finding that mattered:** `letta/server/rest_api/static_files.py`
-contains exactly one route, redirecting `/` to `/docs`, and the server
-prints `View using ADE at: https://app.letta.com/…`. Letta 0.16.x ships no
-self-hosted GUI, so Evaself ships its own.
+### PostgreSQL migration 003
 
-### Letta console and WebApp — served and driven in a browser
+Applied against a real PostgreSQL 16 + pgvector:
 
-Both internal Caddy configurations were run for real, and the console was
-driven in headless Chromium against the Letta stand-in.
+* `agent_links` gained `conversation_id`, `runtime`, `app_server_url`;
+* `agent_conversations` created; `v_agent_runtime` created;
+  `v_user_overview` rebuilt with the conversation columns;
+* applied twice with `ON_ERROR_STOP=1` — idempotent;
+* one real bug was caught and fixed this way: `CREATE OR REPLACE VIEW`
+  cannot insert a column into the middle of an existing view, so the view
+  is now dropped and rebuilt.
 
-* `/healthz` returns `ok`; static assets and the SPA fallback serve;
-* `/api/*` proxying works and **injects the server password** — the same
-  request straight to Letta without it returns 401;
-* the console rendered the server version, health state and the agent
-  list; clicking an agent opened the overview; the memory tab rendered
-  both blocks as editable textareas; the messages tab rendered a
-  conversation. **No JavaScript errors** in any of those.
-* The landing page and the Mini App render; outside Telegram the Mini App
-  shows its "open this from Telegram" message instead of breaking.
+### A real backup bug, found and fixed
 
-### Update machinery — against live registries
+Restoring with `pg_restore --no-owner` leaves every object owned by the
+restoring superuser, and the service role then gets
+`permission denied for table users`. This was hit for real during testing.
+`backup-service` now reassigns ownership to the per-database service role
+after every restore (`fix-ownership`), and exposes it as a command.
 
-`scripts/latest-versions.py` and `make update-preview` were run against
-Docker Hub.
+### Static checks
 
-* all ten pinned versions confirmed current as of 2026-07-28;
-* with deliberately stale pins, `2.31.7 → 2.33.0` and `0.16.5 → 0.16.8`
-  were detected;
-* the PostgreSQL major guard was exercised in both tag styles:
-  `0.8.5-pg17 → 0.8.5-pg18` and `17.9-trixie → 18.4-trixie` are reported
-  as `pinned-major` and never applied.
-
-### Configuration wizard — driven through a pty
-
-`scripts/configure.sh` was run end to end.
-
-* sub-domains are proposed from the main domain and accepted with Enter;
-* domain, e-mail and bot-token formats are validated, with re-prompting;
-* 14 secrets generated (48 hex chars each, admin passwords 20);
-* `.env` written mode 600; the only empty values left are the ones that
-  are meant to be empty (`EVA_EMBEDDING_BASE_URL`, `MEDIA_ASR_*`,
-  `MEDIA_TTS_*`);
-* re-running preserves existing secrets rather than rotating them.
-
-### Static validation — all green
-
-`make validate`:
-
-* `bash -n` on all 21 scripts and the backup helper;
-* `shellcheck -S error` on all 21 scripts;
-* `docker compose config` renders 14 default services;
-* `caddy validate` on all three Caddyfiles with the real Caddy 2.11.4;
-* all five workflows: valid JSON, no duplicate node names or ids, no
-  dangling connections, no unreachable nodes, a trigger present;
-* both migrations transactional and self-recording;
-* `.env` untracked, no bot tokens or private keys in tracked files.
+`make validate` is green: `bash -n` and `shellcheck -S error` on all 22
+scripts plus the backup helper; `docker compose config` renders 15 default
+services; `caddy validate` passes on all three Caddyfiles with the real
+Caddy 2.11.4; the workflow JSON is structurally valid; all three
+migrations are transactional and self-recording; `.env` is untracked and
+no bot token or private key appears in a tracked file.
 
 ## NOT verified
 
-These are written and reviewed, but never executed:
-
 | | Why | Risk |
 |---|---|---|
-| `sudo make install` end to end | needs a clean Ubuntu host and image pulls | medium — the steps are individually standard, the sequence is not proven |
-| The full stack running together | registries blocked | medium |
-| Caddy issuing real certificates | needs public DNS and port 80 | low — config validates, the pattern is ordinary |
-| n8n queue mode with the sidecar runner | needs images | **medium-high** — see below |
-| Importing the workflows into a live n8n | needs a running n8n | medium — JSON is structurally valid, node `typeVersion`s are not confirmed against 2.33.0 |
-| Letta with external PostgreSQL + pgvector | needs the image | low-medium — `LETTA_PG_URI` is the documented variable |
-| NocoDB against its own metadata DB | needs the image | low |
-| SearXNG returning JSON | needs the image | low |
-| Hermes installation | `hermes-agent.nousresearch.com` is blocked here | **medium-high** — see below |
-| A real Telegram round trip | needs a bot token and a public URL | medium |
-| `make update` / `make rollback` applying changes | needs images | medium — preview and version logic are proven |
-| `make restore` on a fresh server | needs a second host | medium — its dump/restore core is proven |
+| `docker compose up` — the stack as a whole | registry blobs blocked | **high**: every image here is unbuilt |
+| Any image build (`eva-agent-service`, `letta-app-server`, …) | same | **high** |
+| The App Server *in a container* (it ran natively) | same | medium |
+| n8n calling `eva-agent-service` | needs the n8n image | medium |
+| Importing the minimal workflow into a live n8n | same | medium — the JSON is structurally valid, node `typeVersion`s are unconfirmed against 2.33.0 |
+| A completed turn through a model | needs a MiMo key; `letta connect` validates against `api.letta.com`, which is blocked here | **high** — see below |
+| Telegram → … → Telegram | needs a bot token and a public URL | high |
+| `make backup` / `restore` on the new topology | needs the running stack | medium — the dump/restore core and the ownership fix were exercised directly |
+| `make update` / `rollback` | needs images | medium |
+| Hermes on a real install | its installer host is blocked | medium-high |
+| Making the repository private | no tool available in this session (the GitHub MCP surface here is read/PR only) | — |
 
-### The two to watch
+### The one to be clearest about
 
-**The n8n task runner.** The runner shares the worker's network namespace
-to work around [n8n-io/n8n#29742](https://github.com/n8n-io/n8n/issues/29742),
-where the task broker ignores `N8N_RUNNERS_BROKER_LISTEN_ADDRESS` and
-binds `127.0.0.1`. That is a sound workaround, but it is untested here.
-If Code nodes fail on first boot, check `make logs s=n8n-runner` first.
+**No turn has ever completed through a model.** The path
+`eva-agent-service → SDK → App Server` is proven; the leg
+`App Server → MiMo` is not, because it needs a real MiMo key *and*
+`letta connect openai-compatible` performs its validation against
+`api.letta.com`, which this environment blocks. On a server with normal
+egress this is one command (`make configure-letta`), and the failure mode
+if it does not work is loud and specific: turns return `turn_failed` while
+agents, conversations and memory keep working.
 
-**Hermes configuration keys.** The installer host is blocked from this
-environment, so `scripts/install-hermes.sh` writes the token and allowlist
-into both `~/.hermes/.env` and `~/.hermes/config.yaml`, and additionally
-tries `hermes config set`. The environment-variable names come from the
-community documentation for v0.2.0, not from a running binary. **Verify
-with `make hermes-status` and by messaging the bot from a second Telegram
-account — it must be ignored** before you trust the allowlist.
-
-## What to do on a real server
+## What to run on a real server
 
 ```bash
 sudo make install
-make doctor                       # must be clean
+make configure-letta            # register MiMo; must print models
+make doctor                     # must be clean, incl. the SDK->App Server check
 scripts/telegram-webhook.sh set
-# activate the Telegram workflows in the n8n editor
-# then, from Telegram:
-#   send a text message      -> Eva answers
-#   send it again immediately-> "секунду, я ещё отвечаю"
-#   send a voice message     -> transcribed, or politely refused
+# activate "Eva — architecture E2E test" in the n8n editor, then from Telegram:
+#   send a message            -> Eva answers
+#   send another immediately  -> "секунду, я ещё отвечаю"
+make shell-db -c 'SELECT * FROM v_agent_runtime'   # every row has a conversation
 make backup
-make restore BACKUP=…             # on a scratch server, not this one
+make restore BACKUP=…           # on a scratch server, not this one
 make update-preview
-make hermes-status                # confirm the allowlist
+make hermes-status              # confirm the allowlist, then message from a
+                                # second Telegram account and be ignored
 ```
 
 If any of that behaves differently from what this document claims, the

@@ -1,8 +1,10 @@
 # Internal server for the Evaself Letta console.
 #
-# The browser never sees LETTA_SERVER_PASSWORD: it calls /api/* on this
-# container, and Caddy adds the Authorization header on the way to
-# letta:8283 inside evaself-network.
+# The Letta App Server speaks WebSocket only, so a browser cannot be its
+# client. The console therefore reads through eva-agent-service — the same
+# HTTP surface n8n uses — and Caddy adds the internal API key on the way
+# out, so the key never reaches the browser and the App Server is never
+# routed from the internet.
 {
 	auto_https off
 	admin off
@@ -14,10 +16,9 @@
 	}
 
 	handle_path /api/* {
-		reverse_proxy {$LETTA_URL} {
-			header_up Authorization "Bearer {$LETTA_SERVER_PASSWORD}"
-			header_up Host {upstream_hostport}
-			# agent turns can run for minutes
+		reverse_proxy {$EVA_AGENT_URL} {
+			header_up X-API-Key "{$EVA_AGENT_API_KEY}"
+			# an agent turn can run for minutes
 			flush_interval -1
 		}
 	}

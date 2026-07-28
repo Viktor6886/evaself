@@ -13,15 +13,14 @@
       │          │            │             │            │
   <domain>   app.<domain>  n8n.<domain>  admin.<domain> letta.<domain>
    webapp      webapp +       n8n          nocodb        letta-ui
-              eva-core                                  (basic auth)
-              /public
+            eva-agent-service                           (basic auth)
 
                     ═══ evaself-network (internal) ═══
 
-   eva-core ──► letta ──► PostgreSQL          n8n ──► Valkey (queue)
-      │           │            ▲               │
-      └───────────┴────────────┘               ├─► n8n-worker ─► n8n-runner
-                                               ├─► eva-core
+   eva-agent-service ═SDK═► letta-app-server    n8n ──► Valkey (queue)
+      │                          (WebSocket)     │
+      └──► PostgreSQL ◄──────────────────────────┼─► n8n-worker ─► n8n-runner
+                                                 ├─► eva-agent-service
    media-service   searxng   crawl4ai*         ├─► media-service
    backup-service  uptime-kuma*                └─► searxng
 
@@ -29,8 +28,9 @@
 ```
 
 Every container joins `evaself-network` and addresses the others by
-container name, exactly as in `selfhost-ai`. PostgreSQL, Valkey, Letta,
-Eva Core, SearXNG, the media service and the n8n worker publish nothing.
+container name, exactly as in `selfhost-ai`. PostgreSQL, Valkey, the Letta
+App Server, eva-agent-service, SearXNG, the media service and the n8n
+worker publish nothing.
 
 ## Message flow
 
@@ -39,14 +39,16 @@ Telegram update
   → n8n  webhook /webhook/eva-telegram
       1. verify X-Telegram-Bot-Api-Secret-Token
       2. normalise the update (text | voice, ids, language)
-      3. POST eva-core /v1/users/ensure     ── creates user + agent once
+      3. POST eva-agent-service /v1/users/ensure
+             → creates the user's Letta agent AND its conversation once
       4. SELECT … FROM v_quota_status       ── plan limits
       5. voice? → media-service /telegram/transcribe
-      6. POST eva-core /v1/messages
+      6. POST eva-agent-service /v1/messages
              → acquire Valkey lock for this Telegram ID
-             → POST letta /v1/agents/{id}/messages
-                   → LLM API
-             → normalise reasoning/tool/assistant messages
+             → SDK: resumeSession(conversation_id)
+             → SDK: session.send() + consume session.stream()
+                   → App Server → LLM API
+             → collapse assistant/reasoning/tool messages into one reply
              → release lock, bump usage counter
       7. build the reply (or a human sentence for a typed error)
       8. POST api.telegram.org/sendMessage
@@ -58,20 +60,25 @@ Telegram update
 reminders and routing change often and are better edited in a GUI than
 deployed. n8n owns them.
 
-**Eva Core exists for four things n8n does badly.** Talking to a moving
-API surface; the read-check-create sequence that must not produce two
-agents for one person; a lock that must be atomic; and turning a dozen
-failure modes into one shape. Everything else was deliberately left out.
+**eva-agent-service exists because the SDK is a Node library.**
+`@letta-ai/letta-agent-sdk` speaks a WebSocket protocol and needs
+Node >= 22.19; n8n cannot import it and a browser cannot run it. On top of
+that it does the four things n8n does badly: the read-check-create
+sequence that must not produce two agents for one person; keeping sessions
+alive between turns; an atomic per-user lock; and turning a dozen failure
+modes into one shape.
 
-**One Letta agent per Telegram user.** Agents are tagged `evaself`,
-`eva-companion` and `tg:<telegram_id>`, so a user's agent can be found
-from Letta alone even if the `eva` database is rebuilt from scratch. The
-mapping is also stored in `agent_links` for fast lookups and reporting.
+**One Letta agent — and one conversation — per Telegram user.** Agents are
+tagged `evaself`, `eva-companion` and `tg:<telegram_id>`, so a user's agent
+can be found from the App Server alone even if the `eva` database is
+rebuilt. The full mapping `user → agent → conversation` lives in
+`agent_links`; the conversation id is what `resumeSession()` needs, and
+without it a restart would silently start a new thread.
 
 **The per-user lock is not optional.** Letta's own API documentation
 states that concurrent requests to one agent produce undefined behaviour.
-Telegram will happily deliver three messages in two seconds. Eva Core
-takes `SET key token NX EX` in Valkey and releases it with a
+Telegram will happily deliver three messages in two seconds.
+eva-agent-service takes `SET key token NX EX` in Valkey and releases it with a
 compare-and-delete script, so an expired lock re-taken by another worker
 is never deleted by the previous owner. The second message gets
 `409 user_busy` with a retry hint.
@@ -88,16 +95,21 @@ which works regardless of how that bug is resolved.
 compromise of one service cannot read another's data, and each can be
 dumped and restored independently.
 
-**pgvector, not plain PostgreSQL.** Letta stores embeddings in `vector`
-columns and will not start without the extension.
+**The App Server keeps its state on disk, not in PostgreSQL.** Agents,
+conversations and the git-backed memory filesystem live in the
+`evaself_letta_app_server_data` volume — that volume *is* the agent state,
+and `make backup` captures it whole. pgvector is kept in the image because
+the `eva` database uses it and an upgraded v0.1.0 installation still has a
+`letta` database to dump.
 
 ## Data model
 
-The `eva` database holds thirteen tables:
+The `eva` database holds fourteen tables:
 
 ```
 users                  one row per Telegram user
-agent_links            user  ->  Letta agent (unique per kind, active)
+agent_links            user -> agent -> conversation (unique per kind)
+agent_conversations    history of a user's conversations
 subscriptions          plan and period; one active per user
 payments               minor units, provider-idempotent
 quotas                 limits per plan/metric/period  (-1 = unlimited)
@@ -111,8 +123,10 @@ notifications          outbound queue, claimed with SKIP LOCKED
 crisis_events          safety net, worst-first via v_crisis_open
 ```
 
-plus four views NocoDB shows directly: `v_user_overview`,
-`v_quota_status`, `v_revenue_monthly`, `v_crisis_open`.
+plus five views NocoDB shows directly: `v_user_overview`,
+`v_quota_status`, `v_revenue_monthly`, `v_crisis_open` and
+`v_agent_runtime` (the agent/conversation mapping, worst-first for the ones
+still missing a conversation).
 
 Migrations are idempotent and record themselves in `schema_migrations`,
 so `scripts/db-migrate.sh` is safe to run on every start.
@@ -121,9 +135,8 @@ so `scripts/db-migrate.sh` is safe to run on every start.
 
 | Surface | Who | How |
 |---|---|---|
-| `eva-core /v1/*` | n8n only | `X-API-Key: $EVA_CORE_API_KEY`, 404'd at the edge |
-| `eva-core /public/*` | Mini App | Telegram `initData` HMAC, max 24 h old |
-| `letta:8283` | eva-core, letta-ui | `Authorization: Bearer $LETTA_SERVER_PASSWORD` |
+| `eva-agent-service /v1/*` | n8n, letta-ui | `X-API-Key: $EVA_AGENT_API_KEY`, 404'd at the edge |
+| `letta-app-server:4500` | eva-agent-service only | capability token on the WebSocket upgrade |
 | `letta.<domain>` | operator | Caddy basic auth (bcrypt hash in `.env`) |
 | `admin.<domain>` | operator | NocoDB accounts, invite-only |
 | `n8n.<domain>` | operator | n8n accounts, owner created on first visit |
@@ -135,8 +148,8 @@ so `scripts/db-migrate.sh` is safe to run on every start.
 |---|---|---|
 | PostgreSQL | ~250 MB | ~600 MB |
 | n8n main + worker | ~500 MB | ~1.2 GB |
-| Letta | ~400 MB | ~900 MB |
-| Eva Core / media / webapp / letta-ui | ~180 MB | ~350 MB |
+| Letta App Server | ~350 MB | ~900 MB |
+| eva-agent-service / media / webapp / letta-ui | ~200 MB | ~400 MB |
 | SearXNG | ~120 MB | ~250 MB |
 | Caddy, Valkey, backup | ~120 MB | ~200 MB |
 | **Crawl4AI (optional)** | ~200 MB | ~1.5 GB |

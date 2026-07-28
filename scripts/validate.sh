@@ -103,6 +103,19 @@ if ! python3 "$SCRIPT_DIR/validate-workflows.py" "$ROOT_DIR/n8n/workflows"; then
 fi
 
 # ---------------------------------------------------------------------
+step "TypeScript"
+# ---------------------------------------------------------------------
+if command -v node >/dev/null 2>&1 && [ -d "$ROOT_DIR/eva-agent-service/node_modules" ]; then
+	if (cd "$ROOT_DIR/eva-agent-service" && npx --no-install tsc -p tsconfig.json --noEmit 2>&1 | head -20); then
+		ok "eva-agent-service typechecks"
+	else
+		check_failed "eva-agent-service does not typecheck"
+	fi
+else
+	info "node/node_modules not present — typecheck runs in CI and in the image build"
+fi
+
+# ---------------------------------------------------------------------
 step "SQL migrations"
 # ---------------------------------------------------------------------
 for file in "$ROOT_DIR"/postgres/migrations/*.sql; do

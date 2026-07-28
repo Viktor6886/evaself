@@ -43,7 +43,9 @@ if [ -f "$SRC/MANIFEST" ]; then
 		info "$(printf '%-12s %s' "$k" "$v")"
 	done
 	info "databases: $(find "$SRC/postgres" -name '*.dump' -printf '%f ' 2>/dev/null)"
-	info "agents:    $(find "$SRC/letta" -name 'agent-*.json' 2>/dev/null | wc -l) exported"
+	if [ -f "$SRC/letta/inventory.json" ]; then
+		info "agents:    $(python3 -c "import json;print(len(json.load(open('$SRC/letta/inventory.json')).get('database') or []))" 2>/dev/null || echo '?') mapped"
+	fi
 fi
 
 if [ -f "$SRC/CHECKSUMS" ]; then
@@ -106,7 +108,7 @@ done
 # 3. stop everything that touches the data
 # ---------------------------------------------------------------------
 step "Stopping services"
-compose stop n8n n8n-worker n8n-runner eva-core letta letta-ui nocodb webapp caddy >/dev/null 2>&1 || true
+compose stop n8n n8n-worker n8n-runner eva-agent-service letta-app-server letta-ui nocodb webapp caddy >/dev/null 2>&1 || true
 ok "application containers stopped (postgres stays up for the restore)"
 
 # ---------------------------------------------------------------------
@@ -128,7 +130,7 @@ restore_volume() {
 	ok "$volume restored from $file"
 }
 
-restore_volume letta_data.tar.gz  evaself_letta_data
+restore_volume letta_app_server_data.tar.gz evaself_letta_app_server_data
 restore_volume n8n_data.tar.gz    evaself_n8n_data
 restore_volume nocodb_data.tar.gz evaself_nocodb_data
 restore_volume caddy_data.tar.gz  evaself_caddy_data
@@ -153,7 +155,7 @@ ok "databases restored"
 # ---------------------------------------------------------------------
 step "Starting services"
 compose up -d --remove-orphans >/dev/null
-for svc in letta eva-core n8n; do
+for svc in letta-app-server eva-agent-service n8n; do
 	wait_for_health "$svc" 300 && ok "$svc up" || warn "$svc is still starting"
 done
 

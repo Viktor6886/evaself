@@ -74,7 +74,8 @@ Then check:
   credentials open without an "unable to decrypt" error;
 * `https://admin.<domain>` — NocoDB shows the users table with the
   expected row count;
-* `https://letta.<domain>` — the console lists the same agents;
+* `https://letta.<domain>` — the console lists the same agents, each with
+  its conversation id;
 * on the server: `make doctor`, then
 
   ```bash
@@ -166,16 +167,23 @@ tar xzf backup.tar.gz -O '*/n8n/encryption-key.env'
 
 Put that value in `.env` and `make restart`.
 
-**Eva does not remember anyone** — the Letta database restored but
-`agent_links` did not, or vice versa. Check both:
+**Eva does not remember anyone** — the App Server state volume restored
+but `agent_links` did not, or vice versa. Check both ends:
 
 ```bash
-make shell-db -c 'select count(*) from agent_links'
-curl -s http://localhost:8283/v1/agents/ -H "Authorization: Bearer $LETTA_SERVER_PASSWORD" | jq length
+make shell-db
+SELECT telegram_id, agent_id, conversation_id FROM v_agent_runtime;
 ```
 
-The per-agent JSON exports in the archive are the fallback: see the last
-section of [BACKUP.md](BACKUP.md).
+```bash
+docker compose --env-file versions.env --env-file .env \
+  exec letta-app-server letta agents list
+```
+
+The agent ids must match. A row whose `conversation_id` is NULL keeps the
+agent and its memory but starts a new thread on the next message. The
+archive's `letta/inventory.json` records what both sides looked like when
+the backup was taken.
 
 **Certificates not issuing after the switch** — port 80 must be reachable
 on the new server. Check the cloud provider's firewall, not just UFW.

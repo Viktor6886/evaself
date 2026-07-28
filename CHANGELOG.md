@@ -1,5 +1,67 @@
 # Changelog
 
+## Unreleased — Letta Agent SDK migration
+
+Replaces the v0.1.0 agent layer. The old path was
+
+    n8n -> Python Eva Core -> hand-written REST client -> letta/letta 0.16.8
+
+and it is now
+
+    n8n -> eva-agent-service (TypeScript) -> @letta-ai/letta-agent-sdk
+        -> self-hosted Letta App Server -> MiMo
+
+### Removed
+
+* `eva-core/` — the whole Python service, including
+  `eva-core/app/letta_client.py`, the hand-written REST client.
+* `letta/` — notes for the `letta/letta` Python REST server, which the
+  Agent SDK does not speak to.
+* The five full Eva workflows. They are replaced by one minimal workflow
+  that exercises the architecture; Eva's conversational logic, payments,
+  subscriptions and the WebApp are the next milestone.
+
+### Added
+
+* **`eva-agent-service/`** — TypeScript, Node 22, Fastify. Owns
+  `@letta-ai/letta-agent-sdk` and is the only component that talks to
+  Letta. n8n and the browser both go through it.
+* **`letta-app-server/`** — the self-hosted App Server as an internal
+  Docker service (`letta server --listen ws://0.0.0.0:4500` with a
+  capability token), state on a named volume.
+* **Conversations.** `postgres/migrations/003_agent_sdk.sql` stores
+  `user -> agent -> conversation`, adds `agent_conversations` and
+  `v_agent_runtime`. Without the conversation id a restart would silently
+  start a new thread.
+* **Streaming**, `POST /v1/messages/stream` (SSE) on top of
+  `session.stream()`.
+* **Restart recovery** — `bootstrapState()` + `recoverPendingApprovals()`
+  on the first turn after a session is resumed.
+* **`make configure-letta`** — registers Eva's OpenAI-compatible endpoint
+  with the App Server.
+* **GitHub Actions CI** — static checks, TypeScript typecheck/tests, the
+  migrations applied twice against a real PostgreSQL, media-service tests,
+  every image built, and a stack smoke test that creates an agent through
+  the SDK and asserts the mapping landed in PostgreSQL.
+
+### Changed
+
+* `letta-ui` is now an admin console for the App Server, reading through
+  `eva-agent-service`. `letta-oss-ui` was checked and is not a published
+  package; more fundamentally the App Server is WebSocket-only, so a
+  browser cannot be its client.
+* `make backup` captures the App Server state volume plus an
+  agent/conversation inventory, instead of per-agent REST exports.
+* **Fixed:** `pg_restore --no-owner` left restored objects owned by the
+  superuser, so the service role got `permission denied for table users`.
+  Ownership is now reassigned after every restore.
+
+### Not done yet
+
+No turn has completed through a model in this environment, and the stack
+has never been started with `docker compose` — see
+[docs/VERIFICATION.md](docs/VERIFICATION.md) for exactly what was run.
+
 ## v0.1.0 — 2026-07-28
 
 First release. Everything below is new.

@@ -186,7 +186,7 @@ ok "upstream images pulled"
 # on a host that had no Docker at all when configure.sh ran.
 "$SCRIPT_DIR/hash-letta-password.sh" || warn "the Letta console password is not hashed — https://${DOMAIN_LETTA} will reject logins"
 
-step "Building local images (eva-core, media-service, webapp, letta-ui, n8n, backup)"
+step "Building local images (letta-app-server, eva-agent-service, media, webapp, letta-ui, n8n, backup)"
 compose build --pull >/dev/null
 ok "images built"
 
@@ -198,7 +198,7 @@ step "Waiting for the core services"
 for svc in postgres valkey; do
 	if wait_for_health "$svc" 180; then ok "$svc healthy"; else die "$svc did not become healthy"; fi
 done
-for svc in letta eva-core n8n nocodb; do
+for svc in letta-app-server eva-agent-service n8n nocodb; do
 	if wait_for_health "$svc" 300; then ok "$svc up"; else warn "$svc is still starting — check 'make logs s=$svc'"; fi
 done
 
@@ -267,12 +267,13 @@ cat <<SUMMARY
                 suggested: ${N8N_OWNER_EMAIL} / ${N8N_OWNER_PASSWORD}
 
   ${C_BOLD}Next steps${C_RESET}
-    1. Open https://${DOMAIN_N8N} and create the n8n owner account.
-    2. Register Eva's Telegram webhook:   scripts/telegram-webhook.sh set
-    3. Activate the two Telegram workflows in the n8n editor.
-    4. Connect NocoDB to the eva database: scripts/nocodb-connect.sh
-    5. Give Hermes an LLM when you are ready:  make configure-hermes
-    6. Fill in MEDIA_ASR_* / MEDIA_TTS_* in .env for voice, then: make restart
+    1. Connect Eva's model to the App Server:  make configure-letta
+    2. Open https://${DOMAIN_N8N} and create the n8n owner account.
+    3. Register Eva's Telegram webhook:   scripts/telegram-webhook.sh set
+    4. Activate the workflows in the n8n editor.
+    5. Connect NocoDB to the eva database: scripts/nocodb-connect.sh
+    6. Give Hermes an LLM when you are ready:  make configure-hermes
+    7. Fill in MEDIA_ASR_* / MEDIA_TTS_* in .env for voice, then: make restart
 
   ${C_BOLD}Everyday commands${C_RESET}
     make status | make doctor | make logs s=n8n

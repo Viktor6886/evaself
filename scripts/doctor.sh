@@ -35,7 +35,7 @@ step "Configuration"
 PERM="$(stat -c '%a' "$ENV_FILE" 2>/dev/null || echo '???')"
 if [ "$PERM" = "600" ]; then ok ".env mode 600"; else critical ".env mode is $PERM, expected 600"; fi
 
-for key in DOMAIN ACME_EMAIL EVA_TELEGRAM_BOT_TOKEN N8N_ENCRYPTION_KEY EVA_CORE_API_KEY LETTA_SERVER_PASSWORD; do
+for key in DOMAIN ACME_EMAIL EVA_TELEGRAM_BOT_TOKEN N8N_ENCRYPTION_KEY EVA_AGENT_API_KEY LETTA_APP_SERVER_TOKEN; do
 	if [ -z "$(get_env "$key" || true)" ]; then critical "$key is empty in .env"; fi
 done
 [ -n "$(get_env EVA_LLM_API_KEY || true)" ] || soft "EVA_LLM_API_KEY is empty — Eva cannot answer"
@@ -44,7 +44,7 @@ done
 # =====================================================================
 step "Containers"
 # =====================================================================
-EXPECTED=(caddy postgres valkey n8n n8n-worker n8n-runner eva-core letta letta-ui nocodb webapp searxng media-service backup-service)
+EXPECTED=(caddy postgres valkey n8n n8n-worker n8n-runner eva-agent-service letta-app-server letta-ui nocodb webapp searxng media-service backup-service)
 for svc in "${EXPECTED[@]}"; do
 	cid="$(compose ps -q "$svc" 2>/dev/null)"
 	if [ -z "$cid" ]; then
@@ -81,7 +81,7 @@ if compose exec -T postgres pg_isready -q -U "$POSTGRES_SUPER_USER" 2>/dev/null;
 	TABLES="$(compose exec -T -e PGPASSWORD="$EVA_DB_PASSWORD" postgres \
 		psql -tAq -U "$EVA_DB_USER" -d "$EVA_DB_NAME" \
 		-c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE'" 2>/dev/null | tr -dc '0-9')"
-	if [ "${TABLES:-0}" -ge 14 ]; then
+	if [ "${TABLES:-0}" -ge 15 ]; then
 		ok "eva schema present (${TABLES} tables)"
 	else
 		critical "eva schema incomplete (${TABLES:-0} tables) — run scripts/db-migrate.sh"
@@ -91,7 +91,13 @@ if compose exec -T postgres pg_isready -q -U "$POSTGRES_SUPER_USER" 2>/dev/null;
 		psql -tAq -U "$EVA_DB_USER" -d "$EVA_DB_NAME" -c "SELECT count(*) FROM users" 2>/dev/null | tr -dc '0-9')"
 	AGENTS="$(compose exec -T -e PGPASSWORD="$EVA_DB_PASSWORD" postgres \
 		psql -tAq -U "$EVA_DB_USER" -d "$EVA_DB_NAME" -c "SELECT count(*) FROM agent_links WHERE status='active'" 2>/dev/null | tr -dc '0-9')"
-	info "users: ${USERS:-0}   active Letta agents: ${AGENTS:-0}"
+	CONVS="$(compose exec -T -e PGPASSWORD="$EVA_DB_PASSWORD" postgres \
+		psql -tAq -U "$EVA_DB_USER" -d "$EVA_DB_NAME" \
+		-c "SELECT count(*) FROM agent_links WHERE status='active' AND conversation_id IS NOT NULL" 2>/dev/null | tr -dc '0-9')"
+	info "users: ${USERS:-0}   agents: ${AGENTS:-0}   with a conversation: ${CONVS:-0}"
+	if [ "${AGENTS:-0}" -gt "${CONVS:-0}" ]; then
+		soft "$(( AGENTS - CONVS )) agent(s) have no conversation — they get one on the next message"
+	fi
 else
 	critical "PostgreSQL is not accepting connections"
 fi
@@ -116,13 +122,24 @@ probe() {
 	if [ "$code" = "$expect" ]; then ok "$name ($code)"; else critical "$name returned '${code:-no answer}', expected $expect"; fi
 }
 
-probe "eva-core /health"  eva-core      "http://127.0.0.1:${EVA_CORE_PORT}/health"
-probe "letta /v1/health/" eva-core      "http://letta:8283/v1/health/"
+probe "agent service /health" eva-agent-service "http://127.0.0.1:${EVA_AGENT_PORT}/health"
 probe "n8n /healthz"      n8n           "http://127.0.0.1:5678/healthz"
 probe "searxng /healthz"  searxng       "http://127.0.0.1:8080/healthz"
 probe "media /health"     media-service "http://127.0.0.1:8090/health"
 probe "webapp /healthz"   webapp        "http://127.0.0.1:8082/healthz"
 probe "letta-ui /healthz" letta-ui      "http://127.0.0.1:8081/healthz"
+
+# The agent service's own /health proves the Agent SDK can reach the App
+# Server over WebSocket, which a TCP probe cannot.
+APP_SERVER_STATE="$(compose exec -T eva-agent-service node -e "
+fetch('http://127.0.0.1:'+(process.env.EVA_AGENT_PORT||8070)+'/health')
+  .then(r=>r.json())
+  .then(b=>{const a=b.checks&&b.checks.app_server||{};console.log(a.ok?('ok '+(a.models||0)+' models'):('FAIL '+(a.error||'unknown')))})
+  .catch(e=>console.log('FAIL '+e.message))" 2>/dev/null | tr -d '\r')"
+case "$APP_SERVER_STATE" in
+	ok*) ok "Letta App Server reachable through the Agent SDK ($APP_SERVER_STATE)" ;;
+	*)   critical "Letta App Server not reachable through the Agent SDK: ${APP_SERVER_STATE:-no answer}" ;;
+esac
 
 # The queue is what makes n8n a distributed system; check both ends.
 if compose exec -T n8n-worker sh -c 'wget -qO- http://127.0.0.1:5678/healthz/readiness' >/dev/null 2>&1; then
