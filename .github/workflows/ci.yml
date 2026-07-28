@@ -398,7 +398,10 @@ jobs:
               const base = 'http://127.0.0.1:8070';
               async function call(path, options = {}) {
                 const response = await fetch(base + path, {
-                  headers: {'X-API-Key': key, 'Content-Type': 'application/json'},
+                  headers: {
+                    'X-API-Key': key,
+                    ...(options.body ? {'Content-Type': 'application/json'} : {}),
+                  },
                   ...options,
                 });
                 const body = response.status === 204 ? null : await response.json();
