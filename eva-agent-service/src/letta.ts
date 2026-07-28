@@ -327,17 +327,19 @@ export class LettaService {
     displayName: string;
     human?: string;
   }): Promise<string> {
+    const persona = this.runtime.default_persona || this.persona;
+    const human =
+      input.human ??
+      this.runtime.default_human_template
+        .replaceAll("{{display_name}}", input.displayName)
+        .replaceAll("{{telegram_id}}", String(input.telegramId));
     const options: CreateAgentOptions = {
       name: `${this.runtime.agent_name_prefix}-${input.telegramId}`,
       description:
         this.runtime.default_description ||
         `Агент Evaself для пользователя Telegram ${input.telegramId}`,
-      persona: this.runtime.default_persona || this.persona,
-      human:
-        input.human ??
-        this.runtime.default_human_template
-          .replaceAll("{{display_name}}", input.displayName)
-          .replaceAll("{{telegram_id}}", String(input.telegramId)),
+      persona,
+      human,
       tags: [...new Set([
         ...this.runtime.default_tags,
         EVASELF_TAG,
@@ -350,7 +352,7 @@ export class LettaService {
       memfs: this.runtime.memfs_enabled,
       skillSources: this.runtime.skillSources,
       dreaming: this.runtime.dreaming as DreamingOptions,
-      memory: evaMemoryBlocks(),
+      memory: ensureCoreMemoryBlocks(evaMemoryBlocks(), persona, human),
       ...(this.runtime.system_prompt ? { systemPrompt: this.runtime.system_prompt } : {}),
       ...(this.runtime.base_tools !== null ? { baseTools: this.runtime.base_tools } : {}),
       ...(this.defaultModel ? { model: this.defaultModel } : {}),
@@ -805,12 +807,22 @@ export class LettaService {
     agent: unknown;
     conversation: unknown | null;
   }> {
+    const persona =
+      input.persona ??
+      input.memory?.find((block) => block.label === "persona")?.value ??
+      this.runtime.default_persona;
+    const human =
+      input.human ??
+      input.memory?.find((block) => block.label === "human")?.value ??
+      "";
     const options: CreateAgentOptions = {
       name: input.name,
       description: input.description ?? this.runtime.default_description,
-      persona: input.persona ?? this.runtime.default_persona,
-      human: input.human ?? "",
-      ...(input.memory ? { memory: input.memory } : {}),
+      persona,
+      human,
+      ...(input.memory
+        ? { memory: ensureCoreMemoryBlocks(input.memory, persona, human) }
+        : {}),
       tags: input.tags ?? this.runtime.default_tags,
       permissionMode: input.permission_mode ?? this.runtime.permissionMode,
       memfs: input.memfs_enabled ?? this.runtime.memfs_enabled,
@@ -906,6 +918,31 @@ export function evaMemoryBlocks(): EvaMemoryBlock[] {
       limit: 12_000,
     },
   ];
+}
+
+function ensureCoreMemoryBlocks(
+  memory: EvaMemoryBlock[],
+  persona: string,
+  human: string,
+): EvaMemoryBlock[] {
+  const result = memory.map((block) => ({ ...block }));
+  if (!result.some((block) => block.label === "persona")) {
+    result.unshift({
+      label: "persona",
+      value: persona,
+      description: "Устойчивая персона и правила поведения Евы",
+      limit: 15_000,
+    });
+  }
+  if (!result.some((block) => block.label === "human")) {
+    result.splice(1, 0, {
+      label: "human",
+      value: human,
+      description: "Проверенные сведения о текущем пользователе",
+      limit: 10_000,
+    });
+  }
+  return result;
 }
 
 async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
