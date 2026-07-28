@@ -389,20 +389,14 @@ jobs:
             -c "SELECT telegram_id, agent_id, conversation_id FROM v_agent_runtime" | tee /tmp/mapping
           grep -q 424242 /tmp/mapping
           cp /tmp/mapping /tmp/mapping-before-llm
+          AGENT_ID="$(cut -d'|' -f2 /tmp/mapping-before-llm)"
           docker compose --env-file versions.env --env-file .env \
-            exec -T eva-agent-service node -e "
-              const key = process.env.EVA_AGENT_API_KEY;
-              fetch('http://127.0.0.1:8070/v1/agents/live', {headers:{'X-API-Key':key}})
-                .then(r=>r.json()).then(body => {
-                  const agent = body.agents.find((item) => item.tags?.includes('tg:424242'));
-                  const blocks = (agent?.blocks ?? [])
-                    .map(({label,value}) => ({label,value}))
-                    .sort((a,b) => a.label.localeCompare(b.label));
-                  if (!blocks.some((block) => block.label === 'persona') ||
-                      !blocks.some((block) => block.label === 'human')) process.exit(1);
-                  console.log(JSON.stringify(blocks));
-                }).catch(()=>process.exit(1));
-            " | tr -d '\r' > /tmp/memory-before-llm
+            exec -T -e AGENT_ID="$AGENT_ID" letta-app-server sh -c '
+              root="/data/letta/lc-local-backend/memfs/$AGENT_ID/memory"
+              test -s "$root/system/persona.md"
+              test -s "$root/system/human.md"
+              find "$root" -type f ! -path "*/.git/*" -exec sha256sum "{}" \; | sort
+            ' > /tmp/memory-before-llm
 
       - name: Two LLM configurations can be tested and switched
         run: |
@@ -468,18 +462,12 @@ jobs:
             exec -T postgres psql -tA -U postgres -d eva \
             -c "SELECT telegram_id, agent_id, conversation_id FROM v_agent_runtime" > /tmp/mapping-after-llm
           diff -u /tmp/mapping-before-llm /tmp/mapping-after-llm
+          AGENT_ID="$(cut -d'|' -f2 /tmp/mapping-after-llm)"
           docker compose --env-file versions.env --env-file .env \
-            exec -T eva-agent-service node -e "
-              const key = process.env.EVA_AGENT_API_KEY;
-              fetch('http://127.0.0.1:8070/v1/agents/live', {headers:{'X-API-Key':key}})
-                .then(r=>r.json()).then(body => {
-                  const agent = body.agents.find((item) => item.tags?.includes('tg:424242'));
-                  const blocks = (agent?.blocks ?? [])
-                    .map(({label,value}) => ({label,value}))
-                    .sort((a,b) => a.label.localeCompare(b.label));
-                  console.log(JSON.stringify(blocks));
-                }).catch(()=>process.exit(1));
-            " | tr -d '\r' > /tmp/memory-after-llm
+            exec -T -e AGENT_ID="$AGENT_ID" letta-app-server sh -c '
+              root="/data/letta/lc-local-backend/memfs/$AGENT_ID/memory"
+              find "$root" -type f ! -path "*/.git/*" -exec sha256sum "{}" \; | sort
+            ' > /tmp/memory-after-llm
           diff -u /tmp/memory-before-llm /tmp/memory-after-llm
 
       - name: LLM settings and mappings survive service restarts
@@ -515,18 +503,12 @@ jobs:
             exec -T postgres psql -tA -U postgres -d eva \
             -c "SELECT telegram_id, agent_id, conversation_id FROM v_agent_runtime" > /tmp/mapping-after-restart
           diff -u /tmp/mapping-before-llm /tmp/mapping-after-restart
+          AGENT_ID="$(cut -d'|' -f2 /tmp/mapping-after-restart)"
           docker compose --env-file versions.env --env-file .env \
-            exec -T eva-agent-service node -e "
-              const key = process.env.EVA_AGENT_API_KEY;
-              fetch('http://127.0.0.1:8070/v1/agents/live', {headers:{'X-API-Key':key}})
-                .then(r=>r.json()).then(body => {
-                  const agent = body.agents.find((item) => item.tags?.includes('tg:424242'));
-                  const blocks = (agent?.blocks ?? [])
-                    .map(({label,value}) => ({label,value}))
-                    .sort((a,b) => a.label.localeCompare(b.label));
-                  console.log(JSON.stringify(blocks));
-                }).catch(()=>process.exit(1));
-            " | tr -d '\r' > /tmp/memory-after-restart
+            exec -T -e AGENT_ID="$AGENT_ID" letta-app-server sh -c '
+              root="/data/letta/lc-local-backend/memfs/$AGENT_ID/memory"
+              find "$root" -type f ! -path "*/.git/*" -exec sha256sum "{}" \; | sort
+            ' > /tmp/memory-after-restart
           diff -u /tmp/memory-before-llm /tmp/memory-after-restart
 
       - name: Logs on failure
