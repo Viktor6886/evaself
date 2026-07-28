@@ -286,7 +286,7 @@ jobs:
             'DOMAIN_NOCODB': 'admin.example.test', 'DOMAIN_LETTA': 'letta.example.test',
             'DOMAIN_STATUS': 'status.example.test', 'ACME_EMAIL': 'ci@example.test',
             'EVA_AGENT_PORT': '8070', 'LETTA_APP_SERVER_BACKEND': 'local',
-            'EVA_LLM_PROVIDER_NAME': 'CI bootstrap', 'EVA_LLM_MODEL': '',
+            'EVA_LLM_PROVIDER_NAME': 'CI-bootstrap', 'EVA_LLM_MODEL': '',
             'EVA_LLM_CONTEXT_WINDOW': '32768',
             'COMPOSE_PROFILES': '',
           }
