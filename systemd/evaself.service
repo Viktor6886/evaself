@@ -1,0 +1,29 @@
+# =====================================================================
+# Brings the Evaself stack up at boot.
+#
+# The containers already carry `restart: unless-stopped`, so Docker
+# restarts them by itself. This unit exists so that `systemctl status
+# evaself` is meaningful, and so the stack comes back in one predictable
+# step after a reboot.
+#
+# The installer writes a drop-in override pointing EVASELF_DIR and
+# WorkingDirectory at the real clone location.
+# =====================================================================
+[Unit]
+Description=Evaself — Eva Telegram agent stack
+Documentation=https://github.com/viktor6886/evaself
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=EVASELF_DIR=/opt/evaself
+WorkingDirectory=/opt/evaself
+ExecStart=/bin/bash -c 'cd "$EVASELF_DIR" && exec docker compose --env-file versions.env --env-file .env -f compose.yaml up -d --remove-orphans'
+ExecStop=/bin/bash -c 'cd "$EVASELF_DIR" && exec docker compose --env-file versions.env --env-file .env -f compose.yaml stop'
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target

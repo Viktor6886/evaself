@@ -1,0 +1,45 @@
+# --- secrets & local state (never commit) ---
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+!eva-core/**/*.key.example
+secrets/
+.hermes/
+hermes.config.json
+
+# --- data & backups ---
+data/
+backups/
+*.tar.gz
+*.dump
+*.sql.gz
+
+# --- runtime state written by the installer ---
+.install-state
+.rollback/
+versions.lock.env
+
+# --- python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# --- node ---
+node_modules/
+npm-debug.log*
+
+# --- editors / os ---
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# --- typescript build output ---
+dist/
+*.tsbuildinfo

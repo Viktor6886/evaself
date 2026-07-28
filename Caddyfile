@@ -1,0 +1,191 @@
+# =====================================================================
+# Evaself — Caddy edge configuration
+# ---------------------------------------------------------------------
+# Every host name comes from .env via {$VAR} substitution: there is no
+# hard-coded domain anywhere in this repository. Caddy obtains and
+# renews HTTPS certificates automatically (HTTP-01 + TLS-ALPN-01).
+#
+# Only these seven names are reachable from the internet. PostgreSQL,
+# Valkey, the Letta App Server (WebSocket), eva-agent-service's internal
+# API, SearXNG, the media service, the n8n worker and the task runner all
+# stay on evaself-network.
+# =====================================================================
+{
+	email {$ACME_EMAIL}
+	acme_ca {$ACME_CA}
+	servers {
+		trusted_proxies static private_ranges
+	}
+	admin 0.0.0.0:2019
+}
+
+# ---------------------------------------------------------------------
+# Shared snippets
+# ---------------------------------------------------------------------
+(security_headers) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+}
+
+(compression) {
+	encode zstd gzip
+}
+
+(logging) {
+	log {
+		output stdout
+		format console
+	}
+}
+
+# ---------------------------------------------------------------------
+# 1. Main site — https://{$DOMAIN}
+# ---------------------------------------------------------------------
+{$DOMAIN} {
+	import security_headers
+	import compression
+	import logging
+
+	# The landing page asks the API for the bot handle so no domain or bot
+	# name is ever baked into the built assets.
+	handle_path /api/* {
+		reverse_proxy eva-agent-service:{$EVA_AGENT_PORT}
+	}
+
+	handle {
+		reverse_proxy webapp:8082
+	}
+}
+
+# ---------------------------------------------------------------------
+# 2. Eva WebApp (Telegram Mini App) — https://{$DOMAIN_APP}
+# ---------------------------------------------------------------------
+{$DOMAIN_APP} {
+	import compression
+	import logging
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# Telegram renders the Mini App inside its own iframe/webview,
+		# so X-Frame-Options must NOT be SAMEORIGIN here.
+		-X-Frame-Options
+		-Server
+	}
+
+	handle_path /api/* {
+		reverse_proxy eva-agent-service:{$EVA_AGENT_PORT}
+	}
+
+	handle {
+		rewrite * /app{uri}
+		reverse_proxy webapp:8082
+	}
+}
+
+# ---------------------------------------------------------------------
+# 3. Public API — https://{$DOMAIN_API}
+# ---------------------------------------------------------------------
+# Only /health is exposed here. The internal /v1/* surface, which n8n
+# calls with EVA_AGENT_API_KEY, is never routed from the internet — and
+# neither is the Letta App Server behind it.
+# ---------------------------------------------------------------------
+{$DOMAIN_API} {
+	import security_headers
+	import compression
+	import logging
+
+	@internal path /v1/* /internal/* /metrics
+	respond @internal "not found" 404
+
+	handle /public/* {
+		reverse_proxy eva-agent-service:{$EVA_AGENT_PORT}
+	}
+
+	handle /health {
+		reverse_proxy eva-agent-service:{$EVA_AGENT_PORT}
+	}
+
+	handle {
+		respond "not found" 404
+	}
+}
+
+# ---------------------------------------------------------------------
+# 4. n8n editor + webhooks — https://{$DOMAIN_N8N}
+# ---------------------------------------------------------------------
+{$DOMAIN_N8N} {
+	import security_headers
+	import compression
+	import logging
+
+	reverse_proxy n8n:5678 {
+		flush_interval -1
+		header_up X-Forwarded-Proto https
+	}
+}
+
+# ---------------------------------------------------------------------
+# 5. NocoDB admin panel — https://{$DOMAIN_NOCODB}
+# ---------------------------------------------------------------------
+# NocoDB brings its own authentication; open sign-up is disabled with
+# NC_INVITE_ONLY_SIGNUP=true.
+# ---------------------------------------------------------------------
+{$DOMAIN_NOCODB} {
+	import security_headers
+	import compression
+	import logging
+
+	reverse_proxy nocodb:8080 {
+		flush_interval -1
+	}
+}
+
+# ---------------------------------------------------------------------
+# 6. Letta console — https://{$DOMAIN_LETTA}
+# ---------------------------------------------------------------------
+# Self-hosted console shipped with Evaself (see letta-ui/README.md). The
+# App Server speaks WebSocket only, so the console reads through
+# eva-agent-service exactly like n8n does — the App Server itself is never
+# routed from the internet. Protected by HTTP basic auth on top of that.
+# ---------------------------------------------------------------------
+{$DOMAIN_LETTA} {
+	import security_headers
+	import compression
+	import logging
+
+	basic_auth {
+		{$LETTA_UI_USER} {$LETTA_UI_PASSWORD_HASH}
+	}
+
+	reverse_proxy letta-ui:8081 {
+		flush_interval -1
+	}
+}
+
+# ---------------------------------------------------------------------
+# 7. Status page — https://{$DOMAIN_STATUS}
+# ---------------------------------------------------------------------
+# Backed by Uptime Kuma, which is part of the optional "monitoring"
+# profile. When the profile is off, this host answers 503 instead of a
+# raw gateway error.
+# ---------------------------------------------------------------------
+{$DOMAIN_STATUS} {
+	import security_headers
+	import compression
+	import logging
+
+	reverse_proxy uptime-kuma:3001 {
+		flush_interval -1
+	}
+
+	handle_errors {
+		respond "Status page is not enabled on this installation (enable the 'monitoring' compose profile)." 503
+	}
+}

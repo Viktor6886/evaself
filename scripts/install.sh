@@ -1,0 +1,278 @@
+#!/usr/bin/env bash
+# =====================================================================
+# Evaself installer — clean Ubuntu 24.04 to a running system.
+#
+#   git clone <repo> && cd evaself && sudo make install
+#
+# Safe to re-run: every step checks its own state first, no data volume
+# is ever removed, and existing secrets in .env are preserved.
+# =====================================================================
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib.sh
+. "$SCRIPT_DIR/lib.sh"
+
+require_root
+
+BANNER='
+  ███████ ██    ██  █████  ███████ ███████ ██      ███████
+  ██      ██    ██ ██   ██ ██      ██      ██      ██
+  █████   ██    ██ ███████ ███████ █████   ██      █████
+  ██       ██  ██  ██   ██      ██ ██      ██      ██
+  ███████   ████   ██   ██ ███████ ███████ ███████ ██
+'
+printf '%s%s%s\n' "$C_BLUE" "$BANNER" "$C_RESET"
+say "  Ева — self-hosted ассистент для поддержки и саморефлексии."
+say ""
+
+# =====================================================================
+# 1. host checks
+# =====================================================================
+step "Проверка сервера"
+
+if [ -r /etc/os-release ]; then
+	# shellcheck disable=SC1091
+	. /etc/os-release
+	info "ОС: ${PRETTY_NAME:-неизвестно}"
+	if [ "${ID:-}" != "ubuntu" ]; then
+		warn "Evaself тестируется на Ubuntu 24.04; установка продолжается"
+	elif [ "${VERSION_ID:-}" != "24.04" ]; then
+		warn "ожидалась Ubuntu 24.04, найдена ${VERSION_ID:-?}; установка продолжается"
+	fi
+fi
+
+CPUS="$(nproc)"
+MEM_MB="$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo)"
+DISK_GB="$(df -BG --output=avail / | tail -1 | tr -dc '0-9')"
+info "CPU: ${CPUS} vCPU   RAM: ${MEM_MB} МБ   свободно: ${DISK_GB} ГБ"
+
+[ "$CPUS" -ge 2 ] || warn "меньше 2 vCPU — стек будет работать медленно"
+[ "$MEM_MB" -ge 5800 ] || warn "меньше 6 ГБ RAM — рекомендуется 8 ГБ"
+[ "$DISK_GB" -ge 25 ] || warn "меньше 25 ГБ — образам и backup может не хватить места"
+
+# =====================================================================
+# 2. system packages
+# =====================================================================
+step "Установка системных пакетов"
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq
+apt-get install -y -qq \
+	ca-certificates curl gnupg git jq openssl \
+	ufw fail2ban tar gzip cron python3 \
+	apt-transport-https software-properties-common >/dev/null
+ok "базовые пакеты установлены"
+
+# =====================================================================
+# 3. Docker
+# =====================================================================
+step "Установка Docker"
+if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+	ok "Docker $(docker --version | awk '{print $3}' | tr -d ,) и Compose уже установлены"
+else
+	install -m 0755 -d /etc/apt/keyrings
+	if [ ! -f /etc/apt/keyrings/docker.asc ]; then
+		curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+		chmod a+r /etc/apt/keyrings/docker.asc
+	fi
+	# shellcheck disable=SC1091
+	. /etc/os-release
+	echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+https://download.docker.com/linux/ubuntu ${VERSION_CODENAME} stable" \
+		> /etc/apt/sources.list.d/docker.list
+	apt-get update -qq
+	apt-get install -y -qq docker-ce docker-ce-cli containerd.io \
+		docker-buildx-plugin docker-compose-plugin >/dev/null
+	ok "Docker установлен"
+fi
+
+systemctl enable --now docker >/dev/null 2>&1 || true
+docker info >/dev/null 2>&1 || die "Docker daemon не запущен"
+
+# Keep container logs from eating the disk, in addition to the per-service
+# limits set in compose.yaml.
+if [ ! -f /etc/docker/daemon.json ]; then
+	mkdir -p /etc/docker
+	cat > /etc/docker/daemon.json <<-'JSON'
+		{
+		  "log-driver": "json-file",
+		  "log-opts": { "max-size": "10m", "max-file": "3" }
+		}
+	JSON
+	systemctl restart docker
+	ok "ротация логов Docker настроена"
+fi
+
+# =====================================================================
+# 4. firewall
+# =====================================================================
+step "Настройка firewall"
+SSH_PORT="$(sed -n 's/^[[:space:]]*Port[[:space:]]\+\([0-9]\+\).*/\1/p' /etc/ssh/sshd_config | head -n1)"
+SSH_PORT="${SSH_PORT:-22}"
+info "обнаружен SSH-порт: $SSH_PORT (SSH-настройки не изменяются)"
+
+ufw --force default deny incoming >/dev/null
+ufw --force default allow outgoing >/dev/null
+ufw allow "${SSH_PORT}/tcp" >/dev/null
+ufw allow 80/tcp >/dev/null
+ufw allow 443/tcp >/dev/null
+ufw allow 443/udp >/dev/null   # HTTP/3
+if ufw status | head -1 | grep -q inactive; then
+	ufw --force enable >/dev/null
+fi
+ok "UFW активен: SSH ${SSH_PORT}, HTTP 80, HTTPS 443 (tcp+udp)"
+info "PostgreSQL и Valkey не публикуются на host"
+
+# =====================================================================
+# 5. fail2ban
+# =====================================================================
+step "Настройка Fail2Ban"
+if [ ! -f /etc/fail2ban/jail.d/evaself.conf ]; then
+	cat > /etc/fail2ban/jail.d/evaself.conf <<-CONF
+		[sshd]
+		enabled  = true
+		port     = ${SSH_PORT}
+		maxretry = 5
+		bantime  = 1h
+		findtime = 10m
+	CONF
+fi
+systemctl enable --now fail2ban >/dev/null 2>&1 || warn "Fail2Ban не запустился"
+ok "Fail2Ban защищает SSH"
+
+# =====================================================================
+# 6. configuration
+# =====================================================================
+if [ -f "$ENV_FILE" ] && [ -n "$(get_env DOMAIN || true)" ]; then
+	step "Конфигурация"
+	ok "найден существующий .env для домена $(get_env DOMAIN)"
+	info "для изменения выполните make configure"
+else
+	"$SCRIPT_DIR/configure.sh"
+fi
+
+load_env
+[ -n "${DOMAIN:-}" ] || die "в .env нет DOMAIN — выполните make configure"
+
+# =====================================================================
+# 7. DNS sanity check (warning only — certificates need it, install does not)
+# =====================================================================
+step "Проверка DNS"
+SERVER_IP="$(curl -fsS --max-time 8 https://api.ipify.org 2>/dev/null || true)"
+if [ -n "$SERVER_IP" ]; then
+	info "публичный IP сервера: $SERVER_IP"
+	for host in "$DOMAIN" "$DOMAIN_APP" "$DOMAIN_API" "$DOMAIN_N8N" "$DOMAIN_NOCODB" "$DOMAIN_LETTA"; do
+		resolved="$(getent ahostsv4 "$host" 2>/dev/null | awk 'NR==1 {print $1}')"
+		if [ -z "$resolved" ]; then
+			warn "$host пока не разрешается — HTTPS не заработает"
+		elif [ "$resolved" != "$SERVER_IP" ]; then
+			warn "$host указывает на $resolved, а не $SERVER_IP"
+		else
+			ok "$host -> $resolved"
+		fi
+	done
+else
+	warn "не удалось определить публичный IP; проверка DNS пропущена"
+fi
+
+# =====================================================================
+# 8. build and start
+# =====================================================================
+step "Загрузка образов"
+compose pull --ignore-buildable 2>&1 | grep -Ev '^$' | tail -5 || true
+ok "upstream-образы загружены"
+
+# The Caddy image exists now, so the basic-auth hash can be produced even
+# on a host that had no Docker at all when configure.sh ran.
+"$SCRIPT_DIR/hash-letta-password.sh" || warn "пароль Letta UI не хеширован — вход на https://${DOMAIN_LETTA} не сработает"
+
+step "Сборка локальных образов"
+compose build --pull >/dev/null
+ok "образы собраны"
+
+step "Запуск стека"
+compose up -d --remove-orphans
+ok "контейнеры запущены"
+
+step "Ожидание основных сервисов"
+for svc in postgres valkey; do
+	if wait_for_health "$svc" 180; then ok "$svc работает"; else die "$svc не прошёл healthcheck"; fi
+done
+for svc in letta-app-server eva-agent-service n8n nocodb; do
+	if wait_for_health "$svc" 300; then ok "$svc запущен"; else warn "$svc ещё запускается — проверьте make logs s=$svc"; fi
+done
+
+# =====================================================================
+# 9. database migrations
+# =====================================================================
+"$SCRIPT_DIR/db-migrate.sh"
+"$SCRIPT_DIR/configure-llm.sh" --from-env
+
+# =====================================================================
+# 10. n8n workflows
+# =====================================================================
+"$SCRIPT_DIR/n8n-import.sh" || warn "импорт workflow не удался — после запуска n8n выполните make import-n8n"
+
+# =====================================================================
+# 11. systemd units (daily backup timer)
+# =====================================================================
+step "Установка systemd units"
+install -m 0644 "$ROOT_DIR/systemd/evaself-backup.service" /etc/systemd/system/
+install -m 0644 "$ROOT_DIR/systemd/evaself-backup.timer"   /etc/systemd/system/
+install -m 0644 "$ROOT_DIR/systemd/evaself.service"        /etc/systemd/system/
+
+# The units need to know where the installation lives.
+mkdir -p /etc/systemd/system/evaself-backup.service.d /etc/systemd/system/evaself.service.d
+printf '[Service]\nEnvironment=EVASELF_DIR=%s\nWorkingDirectory=%s\n' "$ROOT_DIR" "$ROOT_DIR" \
+	> /etc/systemd/system/evaself-backup.service.d/override.conf
+printf '[Service]\nEnvironment=EVASELF_DIR=%s\nWorkingDirectory=%s\n' "$ROOT_DIR" "$ROOT_DIR" \
+	> /etc/systemd/system/evaself.service.d/override.conf
+
+systemctl daemon-reload
+systemctl enable --now evaself-backup.timer >/dev/null 2>&1
+systemctl enable evaself.service >/dev/null 2>&1 || true
+ok "ежедневный timer backup включён ($(systemctl show -p TimersCalendar --value evaself-backup.timer 2>/dev/null | head -c 60))"
+
+mkdir -p "${BACKUP_DIR:-/var/backups/evaself}"
+chmod 700 "${BACKUP_DIR:-/var/backups/evaself}"
+
+# =====================================================================
+# 12. verification
+# =====================================================================
+"$SCRIPT_DIR/doctor.sh" || warn "часть проверок не прошла — смотрите сообщения выше"
+
+# =====================================================================
+# 13. summary
+# =====================================================================
+step "Evaself установлена"
+cat <<SUMMARY
+
+  ${C_BOLD}Адреса${C_RESET}
+    Сайт        https://${DOMAIN}
+    WebApp      https://${DOMAIN_APP}
+    API         https://${DOMAIN_API}/health
+    n8n         https://${DOMAIN_N8N}
+    NocoDB      https://${DOMAIN_NOCODB}
+    Letta       https://${DOMAIN_LETTA}
+    Статус      https://${DOMAIN_STATUS}
+
+  ${C_BOLD}Административные данные${C_RESET}  (также в .env, mode 600)
+    NocoDB      ${NC_ADMIN_EMAIL} / ${NC_ADMIN_PASSWORD}
+    Letta UI    ${LETTA_UI_USER} / ${LETTA_UI_PASSWORD}
+    n8n         создайте owner account при первом входе,
+                предлагается: ${N8N_OWNER_EMAIL} / ${N8N_OWNER_PASSWORD}
+
+  ${C_BOLD}Следующие шаги${C_RESET}
+    1. Откройте https://${DOMAIN_N8N} и создайте n8n owner account.
+    2. Зарегистрируйте Telegram webhook: scripts/telegram-webhook.sh set
+    3. Активируйте минимальный workflow в редакторе n8n.
+    4. Подключите NocoDB к базе eva: scripts/nocodb-connect.sh
+    5. Настройте агентов и проверьте чат в административной консоли Letta.
+    6. Для голоса заполните MEDIA_ASR_* / MEDIA_TTS_* и выполните make restart
+
+  ${C_BOLD}Основные команды${C_RESET}
+    make status | make doctor | make logs s=n8n
+    make test-llm | make list-models | make configure-llm
+    make backup | make update-preview | make update | make rollback
+
+SUMMARY

@@ -1,0 +1,618 @@
+# =====================================================================
+# Evaself — full stack
+# ---------------------------------------------------------------------
+# All services share one internal bridge network (evaself-network) and
+# address each other by container name. Only Caddy publishes ports on
+# the host; PostgreSQL, Valkey, Letta, eva-agent-service, SearXNG, the media
+# service and the n8n internals are unreachable from the internet.
+#
+# Image tags come from versions.env, which is loaded by the Makefile and
+# by every script (`--env-file versions.env --env-file .env`).
+# =====================================================================
+
+name: evaself
+
+x-restart: &restart
+  restart: unless-stopped
+
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+x-n8n-common: &n8n-common
+  image: evaself/n8n:${N8N_VERSION}
+  build:
+    context: ./n8n
+    dockerfile: Dockerfile.n8n
+    args:
+      N8N_IMAGE: ${N8N_IMAGE}
+      N8N_VERSION: ${N8N_VERSION}
+  environment: &n8n-env
+    # --- database -----------------------------------------------------
+    DB_TYPE: postgresdb
+    DB_POSTGRESDB_HOST: ${POSTGRES_HOST}
+    DB_POSTGRESDB_PORT: ${POSTGRES_PORT}
+    DB_POSTGRESDB_DATABASE: ${N8N_DB_NAME}
+    DB_POSTGRESDB_USER: ${N8N_DB_USER}
+    DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD}
+    # --- queue mode (Valkey speaks the Redis protocol) ----------------
+    EXECUTIONS_MODE: queue
+    QUEUE_BULL_REDIS_HOST: ${VALKEY_HOST}
+    QUEUE_BULL_REDIS_PORT: ${VALKEY_PORT}
+    QUEUE_BULL_REDIS_PASSWORD: ${VALKEY_PASSWORD}
+    QUEUE_HEALTH_CHECK_ACTIVE: "true"
+    # --- crypto & identity -------------------------------------------
+    N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+    # --- runtime ------------------------------------------------------
+    GENERIC_TIMEZONE: ${GENERIC_TIMEZONE}
+    TZ: ${TZ}
+    N8N_DIAGNOSTICS_ENABLED: "false"
+    N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
+    N8N_TEMPLATES_ENABLED: "false"
+    N8N_HIRING_BANNER_ENABLED: "false"
+    N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+    NODE_OPTIONS: "--max-old-space-size=1024"
+    # --- data retention ----------------------------------------------
+    EXECUTIONS_DATA_SAVE_ON_ERROR: all
+    EXECUTIONS_DATA_SAVE_ON_SUCCESS: none
+    EXECUTIONS_DATA_SAVE_ON_PROGRESS: "false"
+    EXECUTIONS_DATA_PRUNE: "true"
+    EXECUTIONS_DATA_MAX_AGE: ${EXECUTIONS_DATA_MAX_AGE}
+    EXECUTIONS_DATA_PRUNE_MAX_COUNT: ${EXECUTIONS_DATA_PRUNE_MAX_COUNT}
+    # --- addresses of the rest of the stack, for workflow expressions -
+    # n8n reaches Letta ONLY through eva-agent-service. It deliberately
+    # gets no App Server URL and no App Server token.
+    EVA_AGENT_URL: http://eva-agent-service:${EVA_AGENT_PORT}
+    EVA_AGENT_API_KEY: ${EVA_AGENT_API_KEY}
+    MEDIA_SERVICE_URL: http://media-service:8090
+    SEARXNG_URL: http://searxng:8080
+    CRAWL4AI_URL: http://crawl4ai:11235
+    EVA_TELEGRAM_BOT_TOKEN: ${EVA_TELEGRAM_BOT_TOKEN}
+    EVA_TELEGRAM_WEBHOOK_SECRET: ${EVA_TELEGRAM_WEBHOOK_SECRET}
+    DOMAIN_APP: ${DOMAIN_APP}
+  volumes:
+    - n8n_data:/home/node/.n8n
+    - ./n8n/workflows:/workflows:ro
+    - eva_media_shared:/data/media
+  networks: [evaself-network]
+
+services:
+  # ===================================================================
+  # EDGE
+  # ===================================================================
+  caddy:
+    <<: [*restart, *logging]
+    image: ${CADDY_IMAGE}:${CADDY_VERSION}
+    container_name: evaself-caddy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN}
+      DOMAIN_APP: ${DOMAIN_APP}
+      DOMAIN_API: ${DOMAIN_API}
+      DOMAIN_N8N: ${DOMAIN_N8N}
+      DOMAIN_NOCODB: ${DOMAIN_NOCODB}
+      DOMAIN_LETTA: ${DOMAIN_LETTA}
+      DOMAIN_STATUS: ${DOMAIN_STATUS}
+      ACME_EMAIL: ${ACME_EMAIL}
+      ACME_CA: ${ACME_CA:-https://acme-v02.api.letsencrypt.org/directory}
+      LETTA_UI_USER: ${LETTA_UI_USER}
+      LETTA_UI_PASSWORD_HASH: ${LETTA_UI_PASSWORD_HASH}
+      EVA_AGENT_PORT: ${EVA_AGENT_PORT}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [evaself-network]
+    depends_on:
+      - webapp
+      - eva-agent-service
+      - n8n
+      - nocodb
+      - letta-ui
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ===================================================================
+  # DATA LAYER (never published to the host)
+  # ===================================================================
+  postgres:
+    <<: [*restart, *logging]
+    image: ${POSTGRES_IMAGE}:${POSTGRES_VERSION}
+    container_name: evaself-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_SUPER_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_SUPER_PASSWORD}
+      POSTGRES_DB: postgres
+      # consumed by postgres/init/00-databases.sh
+      EVA_DB_NAME: ${EVA_DB_NAME}
+      EVA_DB_USER: ${EVA_DB_USER}
+      EVA_DB_PASSWORD: ${EVA_DB_PASSWORD}
+      EVA_DB_READONLY_USER: ${EVA_DB_READONLY_USER}
+      EVA_DB_READONLY_PASSWORD: ${EVA_DB_READONLY_PASSWORD}
+      N8N_DB_NAME: ${N8N_DB_NAME}
+      N8N_DB_USER: ${N8N_DB_USER}
+      N8N_DB_PASSWORD: ${N8N_DB_PASSWORD}
+      NOCODB_DB_NAME: ${NOCODB_DB_NAME}
+      NOCODB_DB_USER: ${NOCODB_DB_USER}
+      NOCODB_DB_PASSWORD: ${NOCODB_DB_PASSWORD}
+      LETTA_DB_NAME: ${LETTA_DB_NAME}
+      LETTA_DB_USER: ${LETTA_DB_USER}
+      LETTA_DB_PASSWORD: ${LETTA_DB_PASSWORD}
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - effective_cache_size=2GB
+      - -c
+      - work_mem=8MB
+      - -c
+      - maintenance_work_mem=128MB
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+      - ./postgres/migrations:/migrations:ro
+    networks: [evaself-network]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_SUPER_USER} -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  valkey:
+    <<: [*restart, *logging]
+    image: ${VALKEY_IMAGE}:${VALKEY_VERSION}
+    container_name: evaself-valkey
+    command: >
+      valkey-server
+      --requirepass ${VALKEY_PASSWORD}
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory 512mb
+      --maxmemory-policy noeviction
+    volumes:
+      - valkey_data:/data
+    networks: [evaself-network]
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli -a \"$$VALKEY_PASSWORD\" ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    environment:
+      VALKEY_PASSWORD: ${VALKEY_PASSWORD}
+
+  # ===================================================================
+  # N8N — main, worker, external task runner
+  # ===================================================================
+  n8n:
+    <<: [*n8n-common, *restart, *logging]
+    container_name: evaself-n8n
+    environment:
+      <<: *n8n-env
+      N8N_HOST: ${DOMAIN_N8N}
+      N8N_PORT: "5678"
+      N8N_PROTOCOL: https
+      N8N_EDITOR_BASE_URL: https://${DOMAIN_N8N}/
+      WEBHOOK_URL: https://${DOMAIN_N8N}/
+      N8N_PROXY_HOPS: "1"
+      # main process keeps the built-in (internal) runner; the worker
+      # gets the dedicated external one below.
+      N8N_RUNNERS_MODE: internal
+      N8N_RUNNERS_AUTH_TOKEN: ${N8N_RUNNERS_AUTH_TOKEN}
+      N8N_PUBLIC_API_DISABLED: ${N8N_DISABLE_PUBLIC_API}
+      # invite-only: nobody can self-register a second owner
+      N8N_USER_MANAGEMENT_DISABLED: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5678/healthz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  n8n-worker:
+    <<: [*n8n-common, *restart, *logging]
+    container_name: evaself-n8n-worker
+    command: worker --concurrency=${N8N_WORKER_CONCURRENCY}
+    environment:
+      <<: *n8n-env
+      N8N_PORT: "5678"
+      QUEUE_HEALTH_CHECK_PORT: "5678"
+      # the worker is the process that actually runs Code nodes, so it
+      # owns the external task runner sidecar
+      N8N_RUNNERS_MODE: external
+      N8N_RUNNERS_AUTH_TOKEN: ${N8N_RUNNERS_AUTH_TOKEN}
+      N8N_RUNNERS_BROKER_PORT: "5679"
+      N8N_RUNNERS_BROKER_LISTEN_ADDRESS: 127.0.0.1
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      n8n:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5678/healthz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 45s
+
+  n8n-runner:
+    <<: [*restart, *logging]
+    image: evaself/n8n-runner:${N8N_RUNNERS_VERSION}
+    build:
+      context: ./n8n
+      dockerfile: Dockerfile.runner
+      args:
+        N8N_RUNNERS_IMAGE: ${N8N_RUNNERS_IMAGE}
+        N8N_RUNNERS_VERSION: ${N8N_RUNNERS_VERSION}
+    container_name: evaself-n8n-runner
+    # Shares the worker's network namespace: the n8n task broker only
+    # ever listens on 127.0.0.1, so the runner must live in the same
+    # namespace to reach it. (n8n-io/n8n#29742)
+    network_mode: "service:n8n-worker"
+    environment:
+      N8N_RUNNERS_TASK_BROKER_URI: http://127.0.0.1:5679
+      N8N_RUNNERS_AUTH_TOKEN: ${N8N_RUNNERS_AUTH_TOKEN}
+      N8N_RUNNERS_MAX_CONCURRENCY: "5"
+      GENERIC_TIMEZONE: ${GENERIC_TIMEZONE}
+      TZ: ${TZ}
+    depends_on:
+      n8n-worker:
+        condition: service_started
+
+  # ===================================================================
+  # AGENT LAYER
+  # ===================================================================
+  letta-app-server:
+    <<: [*restart, *logging]
+    build:
+      context: ./letta-app-server
+      args:
+        NODE_BASE_VERSION: ${NODE_BASE_VERSION}
+        LETTA_CODE_VERSION: ${LETTA_CODE_VERSION}
+    image: evaself/letta-app-server:${LETTA_CODE_VERSION}
+    container_name: evaself-letta-app-server
+    # The App Server speaks WebSocket, not REST, and is never published.
+    # Its only client is eva-agent-service, through the Agent SDK.
+    environment:
+      LETTA_APP_SERVER_LISTEN: ws://0.0.0.0:4500
+      LETTA_APP_SERVER_TOKEN: ${LETTA_APP_SERVER_TOKEN}
+      LETTA_APP_SERVER_BACKEND: ${LETTA_APP_SERVER_BACKEND:-local}
+      LETTA_HOME: /data/letta
+      LETTA_LOCAL_BACKEND_DIR: /data/letta/lc-local-backend
+      LETTA_LLM_RESTART_FILE: /data/llm-control/restart.request
+      TZ: ${TZ}
+    volumes:
+      # Agents, conversations and the memory filesystem all live here.
+      - letta_app_server_data:/data/letta
+      # Конфигурация OpenAI-compatible провайдера записывается официальным
+      # Letta CLI из eva-agent-service и читается локальным App Server.
+      - letta_provider_config:/data/letta/lc-local-backend/providers
+      - letta_llm_control:/data/llm-control
+      - ./skills:/skills:ro
+      - ./library:/library:ro
+    networks: [evaself-network]
+    healthcheck:
+      # The listener is a WebSocket upgrade endpoint; a TCP connect is the
+      # honest liveness signal. eva-agent-service /health proves the
+      # protocol works end to end.
+      test: ["CMD-SHELL", "node -e \"require('net').connect(4500,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))\""]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  letta-ui:
+    <<: [*restart, *logging]
+    build:
+      context: ./letta-ui
+      args:
+        CADDY_IMAGE: ${CADDY_IMAGE}
+        CADDY_VERSION: ${CADDY_VERSION}
+    image: evaself/letta-ui:0.2.0
+    container_name: evaself-letta-ui
+    # The App Server is WebSocket-only, so the console cannot talk to it
+    # from a browser. It goes through eva-agent-service, exactly like n8n.
+    environment:
+      EVA_AGENT_URL: http://eva-agent-service:${EVA_AGENT_PORT}
+      EVA_AGENT_API_KEY: ${EVA_AGENT_API_KEY}
+    networks: [evaself-network]
+    depends_on:
+      eva-agent-service:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8081/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  eva-agent-service:
+    <<: [*restart, *logging]
+    build:
+      context: ./eva-agent-service
+      args:
+        NODE_BASE_VERSION: ${NODE_BASE_VERSION}
+    image: evaself/eva-agent-service:0.2.0
+    container_name: evaself-eva-agent-service
+    # The ONLY component that talks to the Letta App Server, and it does so
+    # exclusively through @letta-ai/letta-agent-sdk.
+    environment:
+      EVA_AGENT_PORT: ${EVA_AGENT_PORT}
+      EVA_AGENT_API_KEY: ${EVA_AGENT_API_KEY}
+      EVA_AGENT_LOG_LEVEL: ${EVA_AGENT_LOG_LEVEL}
+      EVA_AGENT_LOCK_TTL: ${EVA_AGENT_LOCK_TTL}
+      EVA_AGENT_TURN_TIMEOUT_MS: ${EVA_AGENT_TURN_TIMEOUT_MS}
+      EVA_AGENT_PERSONA_FILE: /app/library/persona/eva.md
+      LETTA_APP_SERVER_URL: ws://letta-app-server:4500/ws
+      LETTA_APP_SERVER_TOKEN: ${LETTA_APP_SERVER_TOKEN}
+      LETTA_APP_SERVER_TIMEOUT_MS: ${LETTA_APP_SERVER_TIMEOUT_MS:-180000}
+      EVA_LLM_PROVIDER_NAME: ${EVA_LLM_PROVIDER_NAME}
+      EVA_LLM_PROTOCOL: ${EVA_LLM_PROTOCOL:-openai-compatible}
+      EVA_LLM_BASE_URL: ${EVA_LLM_BASE_URL}
+      EVA_LLM_API_KEY: ${EVA_LLM_API_KEY}
+      EVA_LLM_MODEL: ${EVA_LLM_MODEL}
+      EVA_LLM_CONTEXT_WINDOW: ${EVA_LLM_CONTEXT_WINDOW}
+      EVA_LLM_ADDITIONAL_PARAMETERS: ${EVA_LLM_ADDITIONAL_PARAMETERS:-{}}
+      EVA_LLM_PROBE_TIMEOUT_MS: ${EVA_LLM_PROBE_TIMEOUT_MS:-20000}
+      LLM_CONFIG_ENCRYPTION_KEY: ${LLM_CONFIG_ENCRYPTION_KEY}
+      LETTA_PROVIDER_CONFIG_DIR: /data/letta-config
+      LETTA_LLM_RESTART_FILE: /data/llm-control/restart.request
+      LETTA_CODE_CLI: /app/node_modules/.bin/letta
+      DATABASE_URL: postgresql://${EVA_DB_USER}:${EVA_DB_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${EVA_DB_NAME}
+      VALKEY_URL: redis://:${VALKEY_PASSWORD}@${VALKEY_HOST}:${VALKEY_PORT}/1
+      TZ: ${TZ}
+    volumes:
+      - ./library:/app/library:ro
+      - ./skills:/app/skills:ro
+      - letta_provider_config:/data/letta-config/providers
+      - letta_llm_control:/data/llm-control
+    networks: [evaself-network]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      letta-app-server:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:'+(process.env.EVA_AGENT_PORT||8070)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+
+  # ===================================================================
+  # ADMIN / DATA GUI
+  # ===================================================================
+  nocodb:
+    <<: [*restart, *logging]
+    image: ${NOCODB_IMAGE}:${NOCODB_VERSION}
+    container_name: evaself-nocodb
+    environment:
+      # NocoDB metadata lives in its OWN database…
+      NC_DB: "pg://${POSTGRES_HOST}:${POSTGRES_PORT}?u=${NOCODB_DB_USER}&p=${NOCODB_DB_PASSWORD}&d=${NOCODB_DB_NAME}"
+      NC_PUBLIC_URL: https://${DOMAIN_NOCODB}
+      NC_AUTH_JWT_SECRET: ${NC_AUTH_JWT_SECRET}
+      NC_ADMIN_EMAIL: ${NC_ADMIN_EMAIL}
+      NC_ADMIN_PASSWORD: ${NC_ADMIN_PASSWORD}
+      NC_INVITE_ONLY_SIGNUP: ${NC_INVITE_ONLY_SIGNUP}
+      NC_DISABLE_TELE: ${NC_DISABLE_TELE}
+      # …and the `eva` database is connected as an external data source
+      # by scripts/nocodb-connect.sh (see nocodb/README.md).
+      EVA_PG_HOST: ${POSTGRES_HOST}
+      EVA_PG_PORT: ${POSTGRES_PORT}
+      EVA_PG_DATABASE: ${EVA_DB_NAME}
+      EVA_PG_USER: ${EVA_DB_USER}
+      EVA_PG_PASSWORD: ${EVA_DB_PASSWORD}
+      TZ: ${TZ}
+    volumes:
+      - nocodb_data:/usr/app/data
+    networks: [evaself-network]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/api/v1/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  # ===================================================================
+  # FRONT-END & SUPPORT SERVICES
+  # ===================================================================
+  webapp:
+    <<: [*restart, *logging]
+    build:
+      context: ./webapp
+      args:
+        CADDY_IMAGE: ${CADDY_IMAGE}
+        CADDY_VERSION: ${CADDY_VERSION}
+    image: evaself/webapp:0.1.0
+    container_name: evaself-webapp
+    environment:
+      EVA_API_BASE: https://${DOMAIN_API}
+    networks: [evaself-network]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8082/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  searxng:
+    <<: [*restart, *logging]
+    image: ${SEARXNG_IMAGE}:${SEARXNG_VERSION}
+    container_name: evaself-searxng
+    environment:
+      SEARXNG_BASE_URL: ${SEARXNG_BASE_URL}
+      SEARXNG_SECRET: ${SEARXNG_SECRET}
+      UWSGI_WORKERS: "2"
+      UWSGI_THREADS: "4"
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+      - ./searxng/limiter.toml:/etc/searxng/limiter.toml:ro
+      - searxng_cache:/var/cache/searxng
+    networks: [evaself-network]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  media-service:
+    <<: [*restart, *logging]
+    build:
+      context: ./media-service
+      args:
+        PYTHON_BASE_VERSION: ${PYTHON_BASE_VERSION}
+    image: evaself/media-service:0.1.0
+    container_name: evaself-media-service
+    environment:
+      MEDIA_ASR_BASE_URL: ${MEDIA_ASR_BASE_URL}
+      MEDIA_ASR_API_KEY: ${MEDIA_ASR_API_KEY}
+      MEDIA_ASR_MODEL: ${MEDIA_ASR_MODEL}
+      MEDIA_TTS_BASE_URL: ${MEDIA_TTS_BASE_URL}
+      MEDIA_TTS_API_KEY: ${MEDIA_TTS_API_KEY}
+      MEDIA_TTS_MODEL: ${MEDIA_TTS_MODEL}
+      MEDIA_TTS_VOICE: ${MEDIA_TTS_VOICE}
+      MEDIA_MAX_UPLOAD_MB: ${MEDIA_MAX_UPLOAD_MB}
+      MEDIA_MAX_AUDIO_SECONDS: ${MEDIA_MAX_AUDIO_SECONDS}
+      MEDIA_TMP_TTL_SECONDS: ${MEDIA_TMP_TTL_SECONDS}
+      EVA_TELEGRAM_BOT_TOKEN: ${EVA_TELEGRAM_BOT_TOKEN}
+      TZ: ${TZ}
+    volumes:
+      - eva_media_shared:/data/media
+    networks: [evaself-network]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8090/health').status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  backup-service:
+    <<: [*restart, *logging]
+    build:
+      context: ./backup-service
+      args:
+        POSTGRES_IMAGE: ${POSTGRES_IMAGE}
+        POSTGRES_VERSION: ${POSTGRES_VERSION}
+    image: evaself/backup-service:0.1.0
+    container_name: evaself-backup-service
+    # Long-lived helper container: it holds a pg_dump/pg_restore pair
+    # that exactly matches the server version, so scripts/backup.sh and
+    # scripts/restore.sh never depend on host packages.
+    entrypoint: ["/usr/local/bin/backup-service", "idle"]
+    environment:
+      PGHOST: ${POSTGRES_HOST}
+      PGPORT: ${POSTGRES_PORT}
+      PGUSER: ${POSTGRES_SUPER_USER}
+      PGPASSWORD: ${POSTGRES_SUPER_PASSWORD}
+      EVA_DB_NAME: ${EVA_DB_NAME}
+      N8N_DB_NAME: ${N8N_DB_NAME}
+      NOCODB_DB_NAME: ${NOCODB_DB_NAME}
+      LETTA_DB_NAME: ${LETTA_DB_NAME}
+      TZ: ${TZ}
+    volumes:
+      - backup_work:/work
+    networks: [evaself-network]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "pg_isready", "-q"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ===================================================================
+  # OPTIONAL — enabled via COMPOSE_PROFILES in .env
+  # ===================================================================
+  crawl4ai:
+    <<: [*restart, *logging]
+    profiles: ["crawl4ai"]
+    image: ${CRAWL4AI_IMAGE}:${CRAWL4AI_VERSION}
+    container_name: evaself-crawl4ai
+    environment:
+      CRAWL4AI_API_TOKEN: ${CRAWL4AI_API_TOKEN}
+      TZ: ${TZ}
+    volumes:
+      - ./crawl4ai/config.yml:/app/config.yml:ro
+    shm_size: 1gb
+    networks: [evaself-network]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:11235/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  uptime-kuma:
+    <<: [*restart, *logging]
+    profiles: ["monitoring"]
+    image: ${UPTIME_KUMA_IMAGE}:${UPTIME_KUMA_VERSION}
+    container_name: evaself-uptime-kuma
+    environment:
+      TZ: ${TZ}
+    volumes:
+      - uptime_kuma_data:/app/data
+    networks: [evaself-network]
+
+networks:
+  evaself-network:
+    name: evaself-network
+    driver: bridge
+
+volumes:
+  postgres_data:
+    name: evaself_postgres_data
+  valkey_data:
+    name: evaself_valkey_data
+  caddy_data:
+    name: evaself_caddy_data
+  caddy_config:
+    name: evaself_caddy_config
+  n8n_data:
+    name: evaself_n8n_data
+  letta_app_server_data:
+    name: evaself_letta_app_server_data
+  letta_provider_config:
+    name: evaself_letta_provider_config
+  letta_llm_control:
+    name: evaself_letta_llm_control
+  nocodb_data:
+    name: evaself_nocodb_data
+  searxng_cache:
+    name: evaself_searxng_cache
+  eva_media_shared:
+    name: evaself_media_shared
+  backup_work:
+    name: evaself_backup_work
+  uptime_kuma_data:
+    name: evaself_uptime_kuma_data

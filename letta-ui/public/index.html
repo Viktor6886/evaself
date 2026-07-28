@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="ru">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>Администрирование Evaself</title>
+		<link rel="stylesheet" href="/ui.css" />
+	</head>
+	<body>
+		<div class="app">
+			<div class="brand">
+				<span>Evaself</span>
+				<span class="pill" id="server-version">…</span>
+			</div>
+
+			<div class="top">
+				<div id="crumb" class="muted small">Агенты</div>
+				<div class="toolbar compact">
+					<span class="small muted" id="agent-count"></span>
+					<span class="small"><span class="dot" id="health-dot"></span> <span id="health-text">проверка…</span></span>
+					<button class="btn ghost" id="refresh">Обновить</button>
+				</div>
+			</div>
+
+			<aside class="side">
+				<nav class="section-nav">
+					<button class="nav-item active" data-section="agents">Агенты</button>
+					<button class="nav-item" data-section="sdk">Настройки SDK</button>
+					<button class="nav-item" data-section="llm">Настройки LLM</button>
+				</nav>
+				<div id="agent-panel">
+					<button class="btn new-agent" id="new-agent">Создать агента</button>
+					<input type="text" id="filter" placeholder="Имя, agent ID или модель…" />
+					<div id="agent-list"><div class="empty small">Загрузка…</div></div>
+				</div>
+			</aside>
+
+			<main class="main" id="main">
+				<div class="empty">
+					<p>Административная консоль Evaself и self-hosted Letta App Server.</p>
+					<p class="small">Выберите агента слева или откройте настройки SDK/LLM.</p>
+				</div>
+			</main>
+		</div>
+
+		<script src="/ui.js"></script>
+	</body>
+</html>
