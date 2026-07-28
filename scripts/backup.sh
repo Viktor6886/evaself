@@ -40,8 +40,8 @@ trap 'rm -rf "$STAGE"' EXIT
 WORK="$STAGE/$NAME"
 mkdir -p "$WORK"/{postgres,volumes,letta,n8n,config,content}
 
-step "Backing up Evaself"
-info "target: $ARCHIVE"
+step "Создание backup Evaself"
+info "архив: $ARCHIVE"
 
 # ---------------------------------------------------------------------
 # 1. PostgreSQL — through the version-matched helper container
@@ -52,15 +52,15 @@ if service_running backup-service; then
 	CID="$(compose ps -q backup-service)"
 	docker cp "$CID:/work/dump/." "$WORK/postgres/" >/dev/null
 	compose exec -T backup-service sh -c 'rm -rf /work/dump'
-	ok "dumped $(find "$WORK/postgres" -name '*.dump' | wc -l) database(s) + globals"
+	ok "сохранено баз: $(find "$WORK/postgres" -name '*.dump' | wc -l), включая globals"
 else
-	die "backup-service is not running — start the stack first"
+	die "backup-service не запущен — сначала запустите стек"
 fi
 
 # ---------------------------------------------------------------------
 # 2. Docker volumes
 # ---------------------------------------------------------------------
-step "Volumes"
+step "Docker volumes"
 # shellcheck disable=SC1090
 . "$VERSIONS_FILE"
 HELPER="evaself/backup-service:0.1.0"
@@ -68,7 +68,7 @@ HELPER="evaself/backup-service:0.1.0"
 dump_volume() {
 	local volume="$1" out="$2"
 	if ! docker volume inspect "$volume" >/dev/null 2>&1; then
-		info "volume $volume does not exist, skipping"
+		info "volume $volume отсутствует, пропуск"
 		return 0
 	fi
 	docker run --rm \
@@ -80,6 +80,7 @@ dump_volume() {
 }
 
 dump_volume evaself_letta_app_server_data letta_app_server_data.tar.gz
+dump_volume evaself_letta_provider_config letta_provider_config.tar.gz
 dump_volume evaself_n8n_data    n8n_data.tar.gz
 dump_volume evaself_nocodb_data nocodb_data.tar.gz
 dump_volume evaself_caddy_data  caddy_data.tar.gz
@@ -93,7 +94,7 @@ dump_volume evaself_caddy_data  caddy_data.tar.gz
 # can be checked: PostgreSQL's user -> agent -> conversation mapping, and
 # the agent list the App Server itself reports.
 # ---------------------------------------------------------------------
-step "Agents and conversations"
+step "Agents и conversations"
 if service_running eva-agent-service; then
 	if compose exec -T eva-agent-service node -e "
 const key = process.env.EVA_AGENT_API_KEY;
@@ -104,13 +105,13 @@ Promise.all([get('/v1/agents'), get('/v1/agents/live').catch(() => ({ agents: []
   .catch((e) => { console.error(e.message); process.exit(1); });
 " > "$WORK/letta/inventory.json" 2>/dev/null; then
 		COUNT="$(python3 -c "import json;d=json.load(open('$WORK/letta/inventory.json'));print(len(d.get('database') or []))" 2>/dev/null || echo 0)"
-		ok "inventory captured (${COUNT} mapped agent(s))"
+		ok "инвентарь сохранён (agents: ${COUNT})"
 	else
 		rm -f "$WORK/letta/inventory.json"
-		warn "could not read the agent inventory — the App Server state volume is still backed up"
+		warn "не удалось получить инвентарь; volume App Server всё равно сохранён"
 	fi
 else
-	warn "eva-agent-service is not running — inventory skipped (state volume still captured)"
+	warn "eva-agent-service не запущен; инвентарь пропущен, volume сохранён"
 fi
 
 # ---------------------------------------------------------------------
@@ -125,9 +126,9 @@ if service_running n8n; then
 	CID="$(compose ps -q n8n)"
 	docker cp "$CID:/tmp/bk/." "$WORK/n8n/" >/dev/null 2>&1 || true
 	compose exec -T n8n sh -c 'rm -rf /tmp/bk'
-	ok "exported $(find "$WORK/n8n/workflows" -name '*.json' 2>/dev/null | wc -l) workflow(s) and the credential store"
+	ok "экспортированы workflows и credential store n8n"
 else
-	warn "n8n is not running — using the repository copies of the workflows"
+	warn "n8n не запущен — используются workflows из репозитория"
 	cp -r "$ROOT_DIR/n8n/workflows" "$WORK/n8n/" 2>/dev/null || true
 fi
 
@@ -138,7 +139,7 @@ chmod 600 "$WORK/n8n/encryption-key.env"
 # ---------------------------------------------------------------------
 # 5. configuration and content
 # ---------------------------------------------------------------------
-step "Configuration and content"
+step "Конфигурация и контент"
 cp "$ENV_FILE"                 "$WORK/config/.env"
 cp "$ROOT_DIR/Caddyfile"       "$WORK/config/Caddyfile"
 cp "$VERSIONS_FILE"            "$WORK/config/versions.env"
@@ -148,9 +149,9 @@ chmod 600 "$WORK/config/.env"
 HERMES_HOME="${HERMES_HOME:-/root/.hermes}"
 if [ -d "$HERMES_HOME" ]; then
 	tar czf "$WORK/config/hermes.tar.gz" -C "$(dirname "$HERMES_HOME")" "$(basename "$HERMES_HOME")" 2>/dev/null || true
-	ok "Hermes configuration saved"
+	ok "конфигурация Hermes сохранена"
 else
-	info "no Hermes configuration at $HERMES_HOME"
+	info "конфигурация Hermes в $HERMES_HOME отсутствует"
 fi
 [ -f /etc/systemd/system/evaself-hermes.service ] && \
 	cp /etc/systemd/system/evaself-hermes.service "$WORK/config/" 2>/dev/null || true
@@ -158,12 +159,12 @@ fi
 tar czf "$WORK/content/skills.tar.gz"  -C "$ROOT_DIR" skills
 tar czf "$WORK/content/library.tar.gz" -C "$ROOT_DIR" library
 tar czf "$WORK/content/webapp.tar.gz"  -C "$ROOT_DIR" webapp
-ok "skills, library and webapp saved"
+ok "skills, library и WebApp сохранены"
 
 # ---------------------------------------------------------------------
 # 6. manifest
 # ---------------------------------------------------------------------
-step "Manifest"
+step "Манифест"
 GIT_COMMIT="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || echo 'not-a-git-checkout')"
 GIT_BRANCH="$(git -C "$ROOT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '-')"
 GIT_DIRTY="$(git -C "$ROOT_DIR" status --porcelain 2>/dev/null | wc -l)"
@@ -194,34 +195,34 @@ GIT_DIRTY="$(git -C "$ROOT_DIR" status --porcelain 2>/dev/null | wc -l)"
 } > "$WORK/MANIFEST"
 
 ( cd "$WORK" && find . -type f ! -name CHECKSUMS -exec sha256sum {} + > CHECKSUMS )
-ok "manifest and checksums written"
+ok "манифест и checksums записаны"
 
 # ---------------------------------------------------------------------
 # 7. pack
 # ---------------------------------------------------------------------
-step "Packing"
+step "Упаковка"
 tar czf "$ARCHIVE" -C "$STAGE" "$NAME"
 chmod 600 "$ARCHIVE"
 ok "$(du -h "$ARCHIVE" | cut -f1)  $ARCHIVE"
 
 # verify the archive is readable before deleting anything
 if tar tzf "$ARCHIVE" >/dev/null 2>&1; then
-	ok "archive verified"
+	ok "архив проверен"
 else
-	die "the archive is corrupt — nothing was rotated"
+	die "архив повреждён — ротация не выполнялась"
 fi
 
 # ---------------------------------------------------------------------
 # 8. rotation
 # ---------------------------------------------------------------------
 RETENTION="${BACKUP_RETENTION_DAYS:-14}"
-step "Rotation (keeping ${RETENTION} days)"
+step "Ротация (хранение ${RETENTION} дней)"
 removed=0
 while IFS= read -r old; do
 	rm -f "$old"; removed=$((removed + 1))
 done < <(find "$BACKUP_DIR" -maxdepth 1 -name 'evaself-backup-*.tar.gz' -mtime "+${RETENTION}" 2>/dev/null)
-[ "$removed" -eq 0 ] && info "nothing to remove" || ok "removed ${removed} old backup(s)"
+[ "$removed" -eq 0 ] && info "удалять нечего" || ok "удалено старых backup: ${removed}"
 
 REMAINING="$(find "$BACKUP_DIR" -maxdepth 1 -name 'evaself-backup-*.tar.gz' | wc -l)"
-step "Done — ${REMAINING} backup(s) in ${BACKUP_DIR}"
-say "  Restore with: make restore BACKUP=${ARCHIVE}"
+step "Готово — backup в ${BACKUP_DIR}: ${REMAINING}"
+say "  Восстановление: make restore BACKUP=${ARCHIVE}"

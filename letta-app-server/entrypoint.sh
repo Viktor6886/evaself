@@ -12,10 +12,20 @@
 # =====================================================================
 set -eu
 
+# Явная команда docker run/compose run используется для диагностики образа.
+if [ "$#" -gt 0 ]; then
+	case "$1" in
+		sh|bash|node|letta)
+			exec "$@"
+			;;
+	esac
+fi
+
 LISTEN_URL="${LETTA_APP_SERVER_LISTEN:-ws://0.0.0.0:4500}"
 STATE_DIR="${LETTA_HOME:-/data/letta}"
 TOKEN_FILE="${STATE_DIR}/ws-token"
 BACKEND="${LETTA_APP_SERVER_BACKEND:-local}"
+CONTROL_FILE="${LETTA_LLM_RESTART_FILE:-/data/llm-control/restart.request}"
 
 mkdir -p "$STATE_DIR" "${LETTA_LOCAL_BACKEND_DIR:-$STATE_DIR/lc-local-backend}"
 
@@ -44,4 +54,52 @@ log "state directory: ${STATE_DIR}"
 log "backend: ${BACKEND}"
 log "listening on: ${LISTEN_URL}"
 
-exec letta "$@"
+# Credentials провайдера записывает eva-agent-service официальным Letta CLI
+# в shared volume. Letta Code кеширует каталог моделей, поэтому успешное
+# переключение меняет CONTROL_FILE. Supervisor перезапускает только процесс
+# App Server; Docker, agents и постоянные conversations остаются на месте.
+mkdir -p "$(dirname "$CONTROL_FILE")"
+LAST_MARKER="$(cat "$CONTROL_FILE" 2>/dev/null || true)"
+CHILD_PID=""
+STOPPING=0
+
+stop_child() {
+	[ -n "$CHILD_PID" ] || return 0
+	kill -TERM "$CHILD_PID" 2>/dev/null || true
+	wait "$CHILD_PID" 2>/dev/null || true
+	CHILD_PID=""
+}
+
+shutdown() {
+	STOPPING=1
+	stop_child
+}
+
+trap shutdown INT TERM
+
+while [ "$STOPPING" -eq 0 ]; do
+	letta "$@" &
+	CHILD_PID=$!
+	log "process started (pid ${CHILD_PID})"
+
+	while kill -0 "$CHILD_PID" 2>/dev/null; do
+		sleep 1 || true
+		MARKER="$(cat "$CONTROL_FILE" 2>/dev/null || true)"
+		if [ "$MARKER" != "$LAST_MARKER" ]; then
+			LAST_MARKER="$MARKER"
+			log "конфигурация LLM изменилась; App Server перезапускается"
+			stop_child
+			break
+		fi
+	done
+
+	[ "$STOPPING" -eq 0 ] || break
+	if [ -n "$CHILD_PID" ]; then
+		if wait "$CHILD_PID"; then STATUS=0; else STATUS=$?; fi
+		CHILD_PID=""
+		log "процесс неожиданно завершился (status ${STATUS})"
+		exit "$STATUS"
+	fi
+done
+
+exit 0

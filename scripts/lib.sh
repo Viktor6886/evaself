@@ -35,11 +35,11 @@ die()   { fail "$*"; exit 1; }
 # preconditions
 # ---------------------------------------------------------------------
 require_root() {
-	[ "$(id -u)" -eq 0 ] || die "this command must be run as root (use sudo)"
+	[ "$(id -u)" -eq 0 ] || die "команду нужно запускать от root (используйте sudo)"
 }
 
 require_env_file() {
-	[ -f "$ENV_FILE" ] || die ".env not found — run 'sudo make install' first"
+	[ -f "$ENV_FILE" ] || die ".env не найден — сначала выполните 'sudo make install'"
 }
 
 load_env() {
@@ -75,7 +75,7 @@ ask() {
 	else
 		while [ -z "$__answer" ]; do
 			read -r -p "  $__prompt: " __answer </dev/tty || true
-			[ -n "$__answer" ] || warn "this value is required"
+			[ -n "$__answer" ] || warn "значение обязательно"
 		done
 	fi
 	printf -v "$__var" '%s' "$__answer"
@@ -99,7 +99,7 @@ ask_secret() {
 	while [ -z "$__answer" ]; do
 		read -r -s -p "  $__prompt: " __answer </dev/tty || true
 		echo
-		[ -n "$__answer" ] || warn "this value is required"
+		[ -n "$__answer" ] || warn "значение обязательно"
 	done
 	printf -v "$__var" '%s' "$__answer"
 }

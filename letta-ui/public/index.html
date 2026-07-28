@@ -1,36 +1,42 @@
 <!doctype html>
-<html lang="en">
+<html lang="ru">
 	<head>
 		<meta charset="utf-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
-		<title>Letta console — Evaself</title>
+		<title>Администрирование Evaself</title>
 		<link rel="stylesheet" href="/ui.css" />
 	</head>
 	<body>
 		<div class="app">
 			<div class="brand">
-				<span>Letta console</span>
+				<span>Evaself</span>
 				<span class="pill" id="server-version">…</span>
 			</div>
 
 			<div class="top">
-				<div id="crumb" class="muted small">Select an agent</div>
-				<div style="display: flex; align-items: center; gap: 12px">
+				<div id="crumb" class="muted small">Агенты</div>
+				<div class="toolbar compact">
 					<span class="small muted" id="agent-count"></span>
-					<span class="small"><span class="dot" id="health-dot"></span> <span id="health-text">checking…</span></span>
-					<button class="btn ghost" id="refresh">Refresh</button>
+					<span class="small"><span class="dot" id="health-dot"></span> <span id="health-text">проверка…</span></span>
+					<button class="btn ghost" id="refresh">Обновить</button>
 				</div>
 			</div>
 
 			<aside class="side">
-				<input type="text" id="filter" placeholder="Filter by telegram id / agent / conversation…" style="margin-bottom: 8px" />
-				<div id="agent-list"><div class="empty small">Loading…</div></div>
+				<nav class="section-nav">
+					<button class="nav-item active" data-section="agents">Агенты</button>
+					<button class="nav-item" data-section="llm">Настройки LLM</button>
+				</nav>
+				<div id="agent-panel">
+					<input type="text" id="filter" placeholder="Telegram ID, agent или conversation…" />
+					<div id="agent-list"><div class="empty small">Загрузка…</div></div>
+				</div>
 			</aside>
 
 			<main class="main" id="main">
 				<div class="empty">
-					<p>Evaself's console for the Letta App Server running in this installation.</p>
-					<p class="small">Pick an agent on the left to inspect its conversations, messages, and to run a turn.</p>
+					<p>Административная консоль Evaself и self-hosted Letta App Server.</p>
+					<p class="small">Выберите агента слева или откройте «Настройки LLM».</p>
 				</div>
 			</main>
 		</div>

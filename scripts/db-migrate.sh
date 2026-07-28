@@ -14,10 +14,10 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/lib.sh"
 
 load_env
-step "Applying database migrations"
+step "Применение миграций PostgreSQL"
 
 MIGRATIONS_DIR="$ROOT_DIR/postgres/migrations"
-[ -d "$MIGRATIONS_DIR" ] || { warn "no migrations directory"; exit 0; }
+[ -d "$MIGRATIONS_DIR" ] || { warn "каталог миграций отсутствует"; exit 0; }
 
 applied=0
 for file in $(find "$MIGRATIONS_DIR" -maxdepth 1 -name '*.sql' | sort); do
@@ -30,17 +30,17 @@ for file in $(find "$MIGRATIONS_DIR" -maxdepth 1 -name '*.sql' | sort); do
 		-c "SELECT 1 FROM schema_migrations WHERE version = '$version'" 2>/dev/null || true)"
 
 	if [ "$already" = "1" ]; then
-		info "$name already applied"
+		info "$name уже применена"
 		continue
 	fi
 
 	if compose exec -T -e PGPASSWORD="$EVA_DB_PASSWORD" postgres \
 		psql -v ON_ERROR_STOP=1 -q -U "$EVA_DB_USER" -d "$EVA_DB_NAME" < "$file" >/dev/null; then
-		ok "applied $name"
+		ok "применена $name"
 		applied=$((applied + 1))
 	else
-		die "migration $name failed"
+		die "миграция $name завершилась ошибкой"
 	fi
 done
 
-[ "$applied" -gt 0 ] || ok "schema already up to date"
+[ "$applied" -gt 0 ] || ok "схема уже актуальна"

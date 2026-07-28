@@ -27,7 +27,12 @@ ON CONFLICT (plan, metric, period) DO NOTHING;
 -- ---------------------------------------------------------------------
 -- v_user_overview — the table an operator actually wants to look at.
 -- ---------------------------------------------------------------------
-CREATE OR REPLACE VIEW v_user_overview AS
+-- Migration 003 добавляет в представление столбцы conversation/runtime.
+-- При повторном последовательном прогоне сначала восстанавливаем форму 002,
+-- после чего 003 снова безопасно расширит её. CREATE OR REPLACE не умеет
+-- удалять или переставлять уже существующие столбцы представления.
+DROP VIEW IF EXISTS v_user_overview;
+CREATE VIEW v_user_overview AS
 SELECT
     u.id,
     u.telegram_id,

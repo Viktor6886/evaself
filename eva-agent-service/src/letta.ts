@@ -128,23 +128,38 @@ export function extractText(content: unknown): string {
 }
 
 export class LettaService {
-  private readonly client: LettaAgentClient;
+  private client: LettaAgentClient;
   private readonly sessions = new Map<string, PooledSession>();
 
   private readonly config: Config;
   private readonly logger: Logger;
   private readonly persona: string;
+  private defaultModel: string;
 
   constructor(config: Config, logger: Logger, persona: string) {
     this.config = config;
     this.logger = logger;
     this.persona = persona;
-    this.client = new LettaAgentClient({
+    this.defaultModel = config.model;
+    this.client = this.createClient();
+  }
+
+  private createClient(): LettaAgentClient {
+    return new LettaAgentClient({
       backend: "remote",
-      url: config.appServerUrl,
-      ...(config.appServerToken ? { authToken: config.appServerToken } : {}),
-      requestTimeoutMs: config.appServerRequestTimeoutMs,
+      url: this.config.appServerUrl,
+      ...(this.config.appServerToken ? { authToken: this.config.appServerToken } : {}),
+      requestTimeoutMs: this.config.appServerRequestTimeoutMs,
     });
+  }
+
+  resetClient(): void {
+    this.closeAllSessions();
+    this.client = this.createClient();
+  }
+
+  setDefaultModel(model: string): void {
+    this.defaultModel = model;
   }
 
   // -----------------------------------------------------------------
@@ -154,8 +169,15 @@ export class LettaService {
   /** Cheap round trip that proves the WebSocket and the protocol both work. */
   async ping(): Promise<{ ok: true; models: number } | { ok: false; error: string }> {
     try {
-      const models = await this.client.models.list();
-      return { ok: true, models: models.entries?.length ?? 0 };
+      // agents.list proves WebSocket + protocol even when a provider does not
+      // implement /models and its model name was entered manually.
+      await this.client.agents.list({ limit: 1 });
+      try {
+        const models = await this.client.models.list();
+        return { ok: true, models: models.entries?.length ?? 0 };
+      } catch {
+        return { ok: true, models: -1 };
+      }
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
@@ -207,7 +229,7 @@ export class LettaService {
       // Eva is a companion, not a coding agent: no shell, no file editing.
       permissionMode: "unrestricted",
       memfs: true,
-      ...(this.config.model ? { model: this.config.model } : {}),
+      ...(this.defaultModel ? { model: this.defaultModel } : {}),
     };
 
     try {
@@ -432,9 +454,40 @@ export class LettaService {
     }
   }
 
+  async applyModelToMappings(
+    mappings: Array<{ agentId: string; conversationIds: string[] }>,
+    model: string,
+    contextWindow: number,
+    modelSettings?: Record<string, unknown>,
+  ): Promise<void> {
+    this.closeAllSessions();
+    for (const mapping of mappings) {
+      try {
+        await this.client.agents.update(mapping.agentId, {
+          model,
+          contextWindowLimit: contextWindow,
+          ...(modelSettings ? { modelSettings } : {}),
+        } as never);
+        for (const conversationId of mapping.conversationIds) {
+          await this.client.conversations.update(conversationId, {
+            model,
+            contextWindowLimit: contextWindow,
+            ...(modelSettings ? { modelSettings } : {}),
+          } as never);
+        }
+      } catch (error) {
+        throw toEvaError(error, `updating model for agent ${mapping.agentId}`);
+      }
+    }
+  }
+
   /** Close every pooled session; called on SIGTERM. */
-  shutdown(): void {
+  closeAllSessions(): void {
     for (const id of [...this.sessions.keys()]) this.closeSession(id);
+  }
+
+  shutdown(): void {
+    this.closeAllSessions();
   }
 
   requireAgent(agentId: string | null | undefined): string {

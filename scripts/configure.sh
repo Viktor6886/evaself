@@ -14,15 +14,15 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/lib.sh"
 
 TEMPLATE="$ROOT_DIR/.env.example"
-[ -f "$TEMPLATE" ] || die ".env.example is missing"
+[ -f "$TEMPLATE" ] || die ".env.example отсутствует"
 
 # ---------------------------------------------------------------------
 # start from the template, or from the current .env when reconfiguring
 # ---------------------------------------------------------------------
 if [ -f "$ENV_FILE" ]; then
-	step "Existing .env found — current values are offered as defaults"
+	step "Найден существующий .env — текущие значения предложены по умолчанию"
 	cp "$ENV_FILE" "$ENV_FILE.bak.$(date +%Y%m%d%H%M%S)"
-	info "previous file kept as $(basename "$ENV_FILE").bak.*"
+	info "предыдущий файл сохранён как $(basename "$ENV_FILE").bak.*"
 else
 	cp "$TEMPLATE" "$ENV_FILE"
 fi
@@ -33,16 +33,16 @@ current() { get_env "$1" || true; }
 # =====================================================================
 # 1. domains
 # =====================================================================
-step "Domains"
-say "  Evaself has no hard-coded domain. Enter your main domain; each"
-say "  service name is then proposed and can be changed individually."
+step "Домены"
+say "  Введите основной домен. Мастер предложит поддомены для сервисов,"
+say "  и каждый из них можно изменить."
 echo
 
 DOMAIN_DEFAULT="$(current DOMAIN)"
 while :; do
-	ask DOMAIN "Main domain (e.g. evaself.online)" "$DOMAIN_DEFAULT"
+	ask DOMAIN "Основной домен (например evaself.online)" "$DOMAIN_DEFAULT"
 	is_domain "$DOMAIN" && break
-	warn "that does not look like a domain name"
+	warn "значение не похоже на доменное имя"
 done
 
 # Each sub-domain is PROPOSED (prefix + main domain, or whatever is
@@ -54,105 +54,127 @@ proposed() {
 	printf '%s' "${existing:-${prefix}.${DOMAIN}}"
 }
 
-ask DOMAIN_APP    "WebApp domain"   "$(proposed DOMAIN_APP app)"
-ask DOMAIN_API    "API domain"      "$(proposed DOMAIN_API api)"
-ask DOMAIN_N8N    "n8n domain"      "$(proposed DOMAIN_N8N n8n)"
-ask DOMAIN_NOCODB "NocoDB domain"   "$(proposed DOMAIN_NOCODB admin)"
-ask DOMAIN_LETTA  "Letta UI domain" "$(proposed DOMAIN_LETTA letta)"
-ask DOMAIN_STATUS "Status domain"   "$(proposed DOMAIN_STATUS status)"
+ask DOMAIN_APP    "Домен WebApp"   "$(proposed DOMAIN_APP app)"
+ask DOMAIN_API    "Домен API"      "$(proposed DOMAIN_API api)"
+ask DOMAIN_N8N    "Домен n8n"      "$(proposed DOMAIN_N8N n8n)"
+ask DOMAIN_NOCODB "Домен NocoDB"   "$(proposed DOMAIN_NOCODB admin)"
+ask DOMAIN_LETTA  "Домен Letta UI" "$(proposed DOMAIN_LETTA letta)"
+ask DOMAIN_STATUS "Домен статуса"  "$(proposed DOMAIN_STATUS status)"
 
 while :; do
-	ask ACME_EMAIL "E-mail for Let's Encrypt" "$(current ACME_EMAIL || true)"
+	ask ACME_EMAIL "E-mail для Let's Encrypt" "$(current ACME_EMAIL || true)"
 	is_email "$ACME_EMAIL" && break
-	warn "that does not look like an e-mail address"
+	warn "значение не похоже на e-mail"
 done
 
 echo
-info "HTTPS will be issued for:"
+info "HTTPS будет выпущен для:"
 for host in "$DOMAIN" "$DOMAIN_APP" "$DOMAIN_API" "$DOMAIN_N8N" "$DOMAIN_NOCODB" "$DOMAIN_LETTA" "$DOMAIN_STATUS"; do
 	info "  https://$host"
 done
-info "All of them must already point at this server's IP address."
+info "Все домены уже должны указывать на IP этого сервера."
 
 # =====================================================================
 # 2. Telegram
 # =====================================================================
 step "Telegram"
-say "  Eva and Hermes use two separate bots. Create both with @BotFather."
+say "  Ева и Hermes используют двух разных bots. Создайте их через @BotFather."
 echo
 
 while :; do
-	ask EVA_TELEGRAM_BOT_TOKEN "Eva bot token" "$(current EVA_TELEGRAM_BOT_TOKEN || true)"
+	ask EVA_TELEGRAM_BOT_TOKEN "Token bot Евы" "$(current EVA_TELEGRAM_BOT_TOKEN || true)"
 	is_telegram_token "$EVA_TELEGRAM_BOT_TOKEN" && break
-	warn "a bot token looks like 123456789:AAE...; try again"
+	warn "token выглядит как 123456789:AAE...; повторите ввод"
 done
 
 while :; do
-	ask HERMES_TELEGRAM_BOT_TOKEN "Hermes bot token (server agent)" "$(current HERMES_TELEGRAM_BOT_TOKEN || true)"
+	ask HERMES_TELEGRAM_BOT_TOKEN "Token bot Hermes" "$(current HERMES_TELEGRAM_BOT_TOKEN || true)"
 	is_telegram_token "$HERMES_TELEGRAM_BOT_TOKEN" && break
-	warn "a bot token looks like 123456789:AAE...; try again"
+	warn "token выглядит как 123456789:AAE...; повторите ввод"
 done
 
-say "  Your numeric Telegram ID — ask @userinfobot if you do not know it."
-say "  Hermes will accept commands from this ID and from nobody else."
+say "  Числовой Telegram ID можно узнать у @userinfobot."
+say "  Hermes будет принимать команды только от этого ID."
 while :; do
-	ask OWNER_TELEGRAM_ID "Owner Telegram ID" "$(current OWNER_TELEGRAM_ID || true)"
+	ask OWNER_TELEGRAM_ID "Telegram ID владельца" "$(current OWNER_TELEGRAM_ID || true)"
 	is_number "$OWNER_TELEGRAM_ID" && break
-	warn "the Telegram ID is a number"
+	warn "Telegram ID должен быть числом"
 done
 
 # =====================================================================
-# 3. LLM for Eva
+# 3. LLM для Евы
 # =====================================================================
-step "LLM for Eva"
-say "  Any OpenAI-compatible endpoint. Used by Letta for Eva's agents."
+step "LLM для Евы"
+say "  Укажите первую OpenAI-compatible конфигурацию. После установки"
+say "  её можно менять без переустановки через WebUI или make configure-llm."
 echo
-ask EVA_LLM_BASE_URL "LLM base URL (…/v1)" "$(current EVA_LLM_BASE_URL || true)"
-if [ -n "$(current EVA_LLM_API_KEY || true)" ]; then
-	ask EVA_LLM_API_KEY "LLM API key (empty = keep current)" "$(current EVA_LLM_API_KEY)"
+CURRENT_PROVIDER_NAME="$(current EVA_LLM_PROVIDER_NAME || true)"
+CURRENT_PROVIDER_NAME="${CURRENT_PROVIDER_NAME#\'}"; CURRENT_PROVIDER_NAME="${CURRENT_PROVIDER_NAME%\'}"
+ask EVA_LLM_PROVIDER_NAME "Название конфигурации" "${CURRENT_PROVIDER_NAME:-Основной провайдер}"
+EVA_LLM_PROTOCOL="openai-compatible"
+ask EVA_LLM_BASE_URL "Base URL (обычно …/v1)" "$(current EVA_LLM_BASE_URL || true)"
+EXISTING_LLM_KEY="$(current EVA_LLM_API_KEY || true)"
+if [ -n "$EXISTING_LLM_KEY" ]; then
+	read -r -s -p "  API Key (Enter = оставить сохранённый): " EVA_LLM_API_KEY </dev/tty || true
+	echo
+	EVA_LLM_API_KEY="${EVA_LLM_API_KEY:-$EXISTING_LLM_KEY}"
 else
-	ask_secret EVA_LLM_API_KEY "LLM API key"
+	ask_secret EVA_LLM_API_KEY "API Key"
 fi
-ask EVA_LLM_MODEL "Model" "$(current EVA_LLM_MODEL || echo 'mimo-v2.5-pro')"
-ask EVA_LLM_CONTEXT_WINDOW "Context window" "$(current EVA_LLM_CONTEXT_WINDOW || echo 131072)"
+ask EVA_LLM_MODEL "Название модели" "$(current EVA_LLM_MODEL || true)"
+while :; do
+	ask EVA_LLM_CONTEXT_WINDOW "Context window" "$(current EVA_LLM_CONTEXT_WINDOW || echo 32768)"
+	is_number "$EVA_LLM_CONTEXT_WINDOW" && [ "$EVA_LLM_CONTEXT_WINDOW" -ge 1024 ] && break
+	warn "context window должен быть целым числом не меньше 1024"
+done
+CURRENT_LLM_PARAMS="$(current EVA_LLM_ADDITIONAL_PARAMETERS || true)"
+CURRENT_LLM_PARAMS="${CURRENT_LLM_PARAMS#\'}"; CURRENT_LLM_PARAMS="${CURRENT_LLM_PARAMS%\'}"
+ask EVA_LLM_ADDITIONAL_PARAMETERS \
+	"Дополнительные параметры JSON" \
+	"${CURRENT_LLM_PARAMS:-{\"request_timeout_ms\":180000}}"
+python3 - "$EVA_LLM_ADDITIONAL_PARAMETERS" <<'PY' || die "дополнительные параметры должны быть JSON-объектом"
+import json, sys
+value = json.loads(sys.argv[1])
+assert isinstance(value, dict)
+PY
 
 say ""
-say "  Embeddings power Letta's archival memory and recall search."
-ask_optional EVA_EMBEDDING_BASE_URL "Embedding base URL (empty = same as LLM)" "$(current EVA_EMBEDDING_BASE_URL || true)"
-ask EVA_EMBEDDING_MODEL "Embedding model" "$(current EVA_EMBEDDING_MODEL || echo 'text-embedding-3-small')"
-ask EVA_EMBEDDING_DIM "Embedding dimensions" "$(current EVA_EMBEDDING_DIM || echo 1536)"
+say "  Embeddings используются архивной памятью и recall search Letta."
+ask_optional EVA_EMBEDDING_BASE_URL "Base URL embeddings (пусто = как у LLM)" "$(current EVA_EMBEDDING_BASE_URL || true)"
+ask EVA_EMBEDDING_MODEL "Модель embeddings" "$(current EVA_EMBEDDING_MODEL || echo 'text-embedding-3-small')"
+ask EVA_EMBEDDING_DIM "Размерность embeddings" "$(current EVA_EMBEDDING_DIM || echo 1536)"
 EVA_EMBEDDING_API_KEY="$(current EVA_EMBEDDING_API_KEY || true)"
 EVA_EMBEDDING_API_KEY="${EVA_EMBEDDING_API_KEY:-$EVA_LLM_API_KEY}"
 
 # =====================================================================
 # 4. optional services
 # =====================================================================
-step "Optional services"
+step "Дополнительные сервисы"
 PROFILES="$(current COMPOSE_PROFILES || true)"
 
-if confirm "Install Crawl4AI for reading and cleaning web pages?" n; then
+if confirm "Установить Crawl4AI для чтения и очистки веб-страниц?" n; then
 	case ",$PROFILES," in *,crawl4ai,*) : ;; *) PROFILES="${PROFILES:+$PROFILES,}crawl4ai" ;; esac
-	ok "Crawl4AI enabled (headless Chromium, ~1-1.5 GB RAM while crawling)"
+	ok "Crawl4AI включён (до 1–1,5 ГБ RAM во время обработки)"
 else
 	PROFILES="$(printf '%s' "$PROFILES" | sed 's/crawl4ai//; s/,,/,/g; s/^,//; s/,$//')"
-	info "Crawl4AI skipped — enable it later by editing COMPOSE_PROFILES in .env"
+	info "Crawl4AI пропущен; позже измените COMPOSE_PROFILES в .env"
 fi
 
-if confirm "Install Uptime Kuma for the status page?" n; then
+if confirm "Установить Uptime Kuma для страницы статуса?" n; then
 	case ",$PROFILES," in *,monitoring,*) : ;; *) PROFILES="${PROFILES:+$PROFILES,}monitoring" ;; esac
-	ok "status page enabled at https://$DOMAIN_STATUS"
+	ok "страница статуса включена: https://$DOMAIN_STATUS"
 else
 	PROFILES="$(printf '%s' "$PROFILES" | sed 's/monitoring//; s/,,/,/g; s/^,//; s/,$//')"
 fi
 
 TZ_DEFAULT="$(current TZ || true)"
 TZ_DEFAULT="${TZ_DEFAULT:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
-ask TZ_VALUE "Server timezone" "$TZ_DEFAULT"
+ask TZ_VALUE "Часовой пояс сервера" "$TZ_DEFAULT"
 
 # =====================================================================
 # 5. generated secrets — only when missing, so re-running is safe
 # =====================================================================
-step "Secrets"
+step "Секреты"
 
 keep_or_generate() {
 	local key="$1" generator="${2:-gen_secret}" existing
@@ -182,6 +204,9 @@ N8N_RUNNERS_AUTH_TOKEN="$(keep_or_generate N8N_RUNNERS_AUTH_TOKEN)"
 # The encryption key is generated ONCE. Regenerating it makes every stored
 # n8n credential permanently undecryptable.
 N8N_ENCRYPTION_KEY="$(keep_or_generate N8N_ENCRYPTION_KEY)"
+# Ключ шифрования API key в таблице llm_providers также постоянный:
+# его потеря сделает сохранённые ключи нечитаемыми.
+LLM_CONFIG_ENCRYPTION_KEY="$(keep_or_generate LLM_CONFIG_ENCRYPTION_KEY)"
 
 # Admin passwords are shown to the operator at the end of the install.
 NC_ADMIN_PASSWORD="$(keep_or_generate NC_ADMIN_PASSWORD gen_password)"
@@ -195,12 +220,12 @@ N8N_OWNER_EMAIL="${N8N_OWNER_EMAIL:-$ACME_EMAIL}"
 LETTA_UI_USER="$(current LETTA_UI_USER || true)"
 LETTA_UI_USER="${LETTA_UI_USER:-admin}"
 
-ok "secrets ready (existing ones were preserved)"
+ok "секреты готовы; существующие значения сохранены"
 
 # =====================================================================
 # 6. write .env
 # =====================================================================
-step "Writing .env"
+step "Запись .env"
 
 set_env DOMAIN         "$DOMAIN"
 set_env DOMAIN_APP     "$DOMAIN_APP"
@@ -216,10 +241,15 @@ set_env HERMES_TELEGRAM_BOT_TOKEN   "$HERMES_TELEGRAM_BOT_TOKEN"
 set_env OWNER_TELEGRAM_ID           "$OWNER_TELEGRAM_ID"
 set_env EVA_TELEGRAM_WEBHOOK_SECRET "$EVA_TELEGRAM_WEBHOOK_SECRET"
 
+EVA_LLM_PROVIDER_NAME="${EVA_LLM_PROVIDER_NAME//\'/}"
+set_env EVA_LLM_PROVIDER_NAME  "'$EVA_LLM_PROVIDER_NAME'"
+set_env EVA_LLM_PROTOCOL       "$EVA_LLM_PROTOCOL"
 set_env EVA_LLM_BASE_URL       "$EVA_LLM_BASE_URL"
 set_env EVA_LLM_API_KEY        "$EVA_LLM_API_KEY"
 set_env EVA_LLM_MODEL          "$EVA_LLM_MODEL"
 set_env EVA_LLM_CONTEXT_WINDOW "$EVA_LLM_CONTEXT_WINDOW"
+set_env EVA_LLM_ADDITIONAL_PARAMETERS "'$EVA_LLM_ADDITIONAL_PARAMETERS'"
+set_env LLM_CONFIG_ENCRYPTION_KEY "$LLM_CONFIG_ENCRYPTION_KEY"
 set_env EVA_EMBEDDING_BASE_URL "$EVA_EMBEDDING_BASE_URL"
 set_env EVA_EMBEDDING_API_KEY  "$EVA_EMBEDDING_API_KEY"
 set_env EVA_EMBEDDING_MODEL    "$EVA_EMBEDDING_MODEL"
@@ -257,7 +287,7 @@ set_env EVASELF_INSTALL_DIR "$ROOT_DIR"
 set_env EVASELF_INSTALLED_AT "$(date -Iseconds)"
 
 chmod 600 "$ENV_FILE"
-ok ".env written with mode 600"
+ok ".env записан с mode 600"
 
 # ---------------------------------------------------------------------
 # bcrypt hash for the Letta console's basic auth
@@ -265,7 +295,7 @@ ok ".env written with mode 600"
 # On a truly clean host the Caddy image is not pulled yet, so this can
 # fail here; install.sh runs it again after the pull.
 "$SCRIPT_DIR/hash-letta-password.sh" --force 2>/dev/null \
-	|| warn "the Letta console password will be hashed after the images are pulled"
+	|| warn "пароль Letta UI будет хеширован после загрузки образов"
 
-step "Configuration complete"
-say "  Review it with: less .env"
+step "Настройка завершена"
+say "  Проверить файл: less .env"

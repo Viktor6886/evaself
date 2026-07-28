@@ -2,16 +2,6 @@
  * Configuration, read once from the process environment.
  */
 
-function str(name: string, fallback = ""): string {
-  return (process.env[name] ?? fallback).trim();
-}
-
-function int(name: string, fallback: number): number {
-  const raw = str(name);
-  const parsed = Number.parseInt(raw, 10);
-  return Number.isFinite(parsed) ? parsed : fallback;
-}
-
 export interface Config {
   port: number;
   host: string;
@@ -26,6 +16,11 @@ export interface Config {
 
   model: string;
   personaFile: string;
+  llmEncryptionKey: string;
+  llmProviderConfigDir: string;
+  llmControlFile: string;
+  lettaCliPath: string;
+  llmProbeTimeoutMs: number;
 
   databaseUrl: string;
   valkeyUrl: string;
@@ -38,7 +33,13 @@ export interface Config {
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
-  void env;
+  const str = (name: string, fallback = ""): string =>
+    (env[name] ?? fallback).trim();
+  const int = (name: string, fallback: number): number => {
+    const parsed = Number.parseInt(str(name), 10);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  };
+
   return {
     port: int("EVA_AGENT_PORT", 8070),
     host: str("EVA_AGENT_HOST", "0.0.0.0"),
@@ -51,6 +52,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
     model: str("EVA_LLM_MODEL"),
     personaFile: str("EVA_AGENT_PERSONA_FILE", "/app/library/persona/eva.md"),
+    // Для обновляемых установок EVA_AGENT_API_KEY служит безопасным fallback;
+    // новые установки всегда получают отдельный ключ из configure.sh.
+    llmEncryptionKey: str("LLM_CONFIG_ENCRYPTION_KEY", str("EVA_AGENT_API_KEY")),
+    llmProviderConfigDir: str("LETTA_PROVIDER_CONFIG_DIR", "/data/letta-config"),
+    llmControlFile: str("LETTA_LLM_RESTART_FILE", "/data/llm-control/restart.request"),
+    lettaCliPath: str("LETTA_CODE_CLI", "/app/node_modules/.bin/letta"),
+    llmProbeTimeoutMs: int("EVA_LLM_PROBE_TIMEOUT_MS", 20_000),
 
     databaseUrl: str("DATABASE_URL"),
     valkeyUrl: str("VALKEY_URL"),

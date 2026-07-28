@@ -1,31 +1,18 @@
 # WebApp
 
-Static front-end, served by Caddy inside `evaself-network`. No build step,
-no Node runtime.
+Статический landing page и оболочка Telegram Mini App, обслуживаемые Caddy.
+Build step и Node runtime не требуются.
 
-| Path | Served on | What it is |
-|---|---|---|
-| `/` | `https://{DOMAIN}` | Public landing page |
-| `/app/` | `https://{DOMAIN_APP}` | Eva's Telegram Mini App |
+```text
+/      → публичная страница
+/app/  → Telegram Mini App
+```
 
-The edge Caddy rewrites requests for `{DOMAIN_APP}` to `/app{uri}`, so both
-surfaces come out of one container and one image.
+Полные пользовательские функции WebApp относятся к следующему этапу. Сейчас
+она не управляет LLM и не получает административные secrets.
 
-## API access
-
-The Mini App calls `/api/*` on its own origin. Caddy strips the prefix and
-forwards to `eva-core`, which verifies the `X-Telegram-Init-Data` header —
-the launch payload Telegram signs with the bot token. The client never
-sends a user id the server would have to trust.
-
-Nothing in `public/` contains a domain name or a bot handle: the landing
-page asks `/api/public/bot` for the bot username at runtime, so the same
-image works for any installation.
-
-## Editing
-
-The files are plain HTML/CSS/JS. After changing them:
+Для локальной проверки:
 
 ```bash
-make build && make restart
+python3 -m http.server 8000 -d public
 ```

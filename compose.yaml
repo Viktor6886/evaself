@@ -300,15 +300,15 @@ services:
       LETTA_APP_SERVER_BACKEND: ${LETTA_APP_SERVER_BACKEND:-local}
       LETTA_HOME: /data/letta
       LETTA_LOCAL_BACKEND_DIR: /data/letta/lc-local-backend
-      # Eva's model endpoint. Configured once with `make configure-letta`,
-      # which runs `letta connect openai-compatible` inside this container.
-      EVA_LLM_BASE_URL: ${EVA_LLM_BASE_URL}
-      EVA_LLM_API_KEY: ${EVA_LLM_API_KEY}
-      EVA_LLM_MODEL: ${EVA_LLM_MODEL}
+      LETTA_LLM_RESTART_FILE: /data/llm-control/restart.request
       TZ: ${TZ}
     volumes:
       # Agents, conversations and the memory filesystem all live here.
       - letta_app_server_data:/data/letta
+      # Конфигурация OpenAI-compatible провайдера записывается официальным
+      # Letta CLI из eva-agent-service и читается локальным App Server.
+      - letta_provider_config:/data/letta/lc-local-backend/providers
+      - letta_llm_control:/data/llm-control
       - ./skills:/skills:ro
       - ./library:/library:ro
     networks: [evaself-network]
@@ -367,13 +367,26 @@ services:
       LETTA_APP_SERVER_URL: ws://letta-app-server:4500/ws
       LETTA_APP_SERVER_TOKEN: ${LETTA_APP_SERVER_TOKEN}
       LETTA_APP_SERVER_TIMEOUT_MS: ${LETTA_APP_SERVER_TIMEOUT_MS:-180000}
+      EVA_LLM_PROVIDER_NAME: ${EVA_LLM_PROVIDER_NAME}
+      EVA_LLM_PROTOCOL: ${EVA_LLM_PROTOCOL:-openai-compatible}
+      EVA_LLM_BASE_URL: ${EVA_LLM_BASE_URL}
+      EVA_LLM_API_KEY: ${EVA_LLM_API_KEY}
       EVA_LLM_MODEL: ${EVA_LLM_MODEL}
+      EVA_LLM_CONTEXT_WINDOW: ${EVA_LLM_CONTEXT_WINDOW}
+      EVA_LLM_ADDITIONAL_PARAMETERS: ${EVA_LLM_ADDITIONAL_PARAMETERS:-{}}
+      EVA_LLM_PROBE_TIMEOUT_MS: ${EVA_LLM_PROBE_TIMEOUT_MS:-20000}
+      LLM_CONFIG_ENCRYPTION_KEY: ${LLM_CONFIG_ENCRYPTION_KEY}
+      LETTA_PROVIDER_CONFIG_DIR: /data/letta-config
+      LETTA_LLM_RESTART_FILE: /data/llm-control/restart.request
+      LETTA_CODE_CLI: /app/node_modules/.bin/letta
       DATABASE_URL: postgresql://${EVA_DB_USER}:${EVA_DB_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${EVA_DB_NAME}
       VALKEY_URL: redis://:${VALKEY_PASSWORD}@${VALKEY_HOST}:${VALKEY_PORT}/1
       TZ: ${TZ}
     volumes:
       - ./library:/app/library:ro
       - ./skills:/app/skills:ro
+      - letta_provider_config:/data/letta-config/providers
+      - letta_llm_control:/data/llm-control
     networks: [evaself-network]
     depends_on:
       postgres:
@@ -589,6 +602,10 @@ volumes:
     name: evaself_n8n_data
   letta_app_server_data:
     name: evaself_letta_app_server_data
+  letta_provider_config:
+    name: evaself_letta_provider_config
+  letta_llm_control:
+    name: evaself_letta_llm_control
   nocodb_data:
     name: evaself_nocodb_data
   searxng_cache:

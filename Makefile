@@ -33,19 +33,20 @@ export ROOT_DIR SCRIPTS ENV_FILE VERSIONS COMPOSE_FILE
 .PHONY: help install configure start stop restart status logs doctor \
         backup restore update-preview update rollback \
         import-n8n export-n8n \
-        configure-letta configure-hermes start-hermes stop-hermes restart-hermes \
+        configure-llm test-llm list-models configure-letta \
+        configure-hermes start-hermes stop-hermes restart-hermes \
         update-hermes hermes-status \
         disk-cleanup build pull ps shell-db validate test
 
 # ---------------------------------------------------------------------
-help: ## Show this help
-	@echo "Evaself — available commands"
+help: ## Показать справку
+	@echo "Evaself — доступные команды"
 	@echo ""
 	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 	  | sort \
 	  | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 	@echo ""
-	@echo "Examples:"
+	@echo "Примеры:"
 	@echo "  sudo make install"
 	@echo "  make logs s=eva-agent-service"
 	@echo "  make restore BACKUP=/var/backups/evaself/evaself-backup-2026-07-28-10-00.tar.gz"
@@ -53,57 +54,66 @@ help: ## Show this help
 # ---------------------------------------------------------------------
 # Installation & configuration
 # ---------------------------------------------------------------------
-install: ## Full install on a clean Ubuntu 24.04 host (run with sudo)
+install: ## Полная установка на чистую Ubuntu 24.04 (запускать с sudo)
 	@$(SCRIPTS)/install.sh
 
-configure: ## Re-run the interactive configuration wizard (rewrites .env)
+configure: ## Повторно запустить мастер настройки .env
 	@$(SCRIPTS)/configure.sh
 
-configure-letta: ## Register Eva's model endpoint with the Letta App Server
+configure-llm: ## Добавить, проверить и при необходимости активировать LLM
+	@$(SCRIPTS)/configure-llm.sh
+
+test-llm: ## Проверить активный LLM; можно передать id=<UUID>
+	@$(SCRIPTS)/test-llm.sh "$(id)"
+
+list-models: ## Получить /models активного LLM; можно передать id=<UUID>
+	@$(SCRIPTS)/list-models.sh "$(id)"
+
+configure-letta: ## Устаревший псевдоним configure-llm
 	@$(SCRIPTS)/configure-letta.sh
 
-validate: ## Static validation of compose/Caddy/SQL/workflows (no services touched)
+validate: ## Статические проверки compose/Caddy/SQL/workflows
 	@$(SCRIPTS)/validate.sh
 
 # ---------------------------------------------------------------------
 # Lifecycle
 # ---------------------------------------------------------------------
-start: ## Start the whole stack
+start: ## Запустить весь стек
 	@$(SCRIPTS)/require-env.sh
 	@$(COMPOSE) up -d --remove-orphans
-	@echo "==> stack started; run 'make doctor' for a health report"
+	@echo "==> стек запущен; состояние: make doctor"
 
-stop: ## Stop all containers (volumes and data are kept)
+stop: ## Остановить контейнеры, сохранив volumes и данные
 	@$(SCRIPTS)/require-env.sh
 	@$(COMPOSE) stop
 
-restart: ## Restart all containers
+restart: ## Перезапустить все контейнеры
 	@$(SCRIPTS)/require-env.sh
 	@$(COMPOSE) restart
 
-build: ## Rebuild locally built images (agent service, app server, webapp, media, n8n, letta-ui)
+build: ## Пересобрать локальные Docker-образы
 	@$(SCRIPTS)/require-env.sh
 	@$(COMPOSE) build --pull
 
-pull: ## Pull the pinned upstream images
+pull: ## Скачать зафиксированные upstream-образы
 	@$(SCRIPTS)/require-env.sh
 	@$(COMPOSE) pull
 
-status: ## Container status overview
+status: ## Показать состояние контейнеров
 	@$(SCRIPTS)/require-env.sh
 	@$(COMPOSE) ps
 
-ps: status ## Alias for status
+ps: status ## Псевдоним status
 
-logs: ## Tail logs; use `make logs s=<service>` for a single service
+logs: ## Смотреть логи; один сервис: make logs s=<service>
 	@$(SCRIPTS)/require-env.sh
 	@if [ -z "$(s)" ]; then $(COMPOSE) logs -f --tail=200; \
 	else $(COMPOSE) logs -f --tail=200 $(s); fi
 
-doctor: ## Health report: containers, HTTPS, databases, queue, agents
+doctor: ## Проверить контейнеры, HTTPS, БД, очередь и агентов
 	@$(SCRIPTS)/doctor.sh
 
-shell-db: ## Open a psql shell on the eva database
+shell-db: ## Открыть psql для базы eva
 	@$(SCRIPTS)/require-env.sh
 	@set -a; . $(ENV_FILE); set +a; \
 	  $(COMPOSE) exec -e PGPASSWORD="$$EVA_DB_PASSWORD" postgres \
@@ -112,64 +122,64 @@ shell-db: ## Open a psql shell on the eva database
 # ---------------------------------------------------------------------
 # Backup / restore
 # ---------------------------------------------------------------------
-backup: ## Create a full backup in $BACKUP_DIR (default /var/backups/evaself)
+backup: ## Создать полную резервную копию в BACKUP_DIR
 	@$(SCRIPTS)/backup.sh
 
-restore: ## Restore from an archive: make restore BACKUP=/path/to/archive.tar.gz
+restore: ## Восстановить: make restore BACKUP=/path/to/archive.tar.gz
 	@if [ -z "$(BACKUP)" ]; then \
-	  echo "usage: make restore BACKUP=/path/to/evaself-backup-....tar.gz" >&2; exit 2; fi
+	  echo "использование: make restore BACKUP=/path/to/evaself-backup-....tar.gz" >&2; exit 2; fi
 	@$(SCRIPTS)/restore.sh "$(BACKUP)"
 
 # ---------------------------------------------------------------------
 # Updates
 # ---------------------------------------------------------------------
-update-preview: ## Show available updates without changing anything
+update-preview: ## Показать обновления, ничего не меняя
 	@$(SCRIPTS)/update.sh --preview
 
-update: ## Backup, update service versions, restart, verify (auto-rollback on failure)
+update: ## Backup, обновление, перезапуск и проверка с автооткатом
 	@$(SCRIPTS)/update.sh
 
-rollback: ## Return to the previous versions.env + git commit and restart
+rollback: ## Вернуться к предыдущим версиям и commit
 	@$(SCRIPTS)/rollback.sh
 
 # ---------------------------------------------------------------------
 # n8n workflows
 # ---------------------------------------------------------------------
-import-n8n: ## Import the workflows and credentials shipped in n8n/workflows
+import-n8n: ## Импортировать workflows и credentials n8n
 	@$(SCRIPTS)/n8n-import.sh
 
-export-n8n: ## Export the live workflows back into n8n/workflows
+export-n8n: ## Экспортировать рабочие workflows из n8n
 	@$(SCRIPTS)/n8n-export.sh
 
 # ---------------------------------------------------------------------
 # Hermes Agent (installed directly in Ubuntu, not in Docker)
 # ---------------------------------------------------------------------
-configure-hermes: ## Configure the Hermes LLM provider and enable autostart
+configure-hermes: ## Настроить LLM Hermes и автозапуск
 	@$(SCRIPTS)/configure-hermes.sh
 
-start-hermes: ## Start the Hermes systemd service
+start-hermes: ## Запустить systemd-сервис Hermes
 	@systemctl start evaself-hermes.service
 	@systemctl --no-pager --lines=0 status evaself-hermes.service || true
 
-stop-hermes: ## Stop the Hermes systemd service
+stop-hermes: ## Остановить systemd-сервис Hermes
 	@systemctl stop evaself-hermes.service
 
-restart-hermes: ## Restart the Hermes systemd service
+restart-hermes: ## Перезапустить systemd-сервис Hermes
 	@systemctl restart evaself-hermes.service
 
-update-hermes: ## Update the Hermes Agent binary in place
+update-hermes: ## Обновить Hermes Agent
 	@$(SCRIPTS)/update-hermes.sh
 
-hermes-status: ## Hermes service state, config summary and allowlist
+hermes-status: ## Состояние, конфигурация и allowlist Hermes
 	@$(SCRIPTS)/hermes-status.sh
 
 # ---------------------------------------------------------------------
 # Maintenance
 # ---------------------------------------------------------------------
-disk-cleanup: ## Reclaim disk: dangling images, build cache, old logs and backups
+disk-cleanup: ## Очистить образы, build cache, старые логи и backups
 	@$(SCRIPTS)/disk-cleanup.sh
 
-test: ## Run the unit tests of eva-agent-service and media-service
+test: ## Запустить unit-тесты eva-agent-service и media-service
 	@$(SCRIPTS)/run-tests.sh
 
 # ---------------------------------------------------------------------

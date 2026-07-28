@@ -72,6 +72,9 @@ jobs:
       - name: n8n workflows are structurally valid
         run: python3 scripts/validate-workflows.py n8n/workflows
 
+      - name: Administrative WebUI JavaScript is valid
+        run: node --check letta-ui/public/ui.js
+
       - name: No secrets in tracked files
         run: |
           if git ls-files --error-unmatch .env >/dev/null 2>&1; then
@@ -114,22 +117,10 @@ jobs:
         run: node --test --experimental-strip-types test/*.test.ts
 
       - name: The SDK is the official one, and it is actually used
-        run: |
-          node -e "
-          const pkg = require('./package.json');
-          const dep = pkg.dependencies['@letta-ai/letta-agent-sdk'];
-          if (!dep) { console.error('the Agent SDK is not a dependency'); process.exit(1); }
-          console.log('@letta-ai/letta-agent-sdk', dep);
-          "
-          # letta.ts must import the SDK, and nothing may hand-roll a Letta client.
-          grep -q 'from \"@letta-ai/letta-agent-sdk\"' src/letta.ts
-          if grep -rn "letta:8283\|/v1/agents/\|X-BARE-PASSWORD" src/ ; then
-            echo "::error::a hand-written Letta REST client crept back in"; exit 1
-          fi
-          echo "SDK-only access confirmed"
+        run: node ../scripts/verify-agent-sdk.mjs .
 
   # ===================================================================
-  # PostgreSQL schema: applied for real, twice, to prove idempotency
+  # PostgreSQL schema: applied for real, three times, to prove idempotency
   # ===================================================================
   migrations:
     name: PostgreSQL migrations
@@ -164,17 +155,14 @@ jobs:
           psql -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS pg_trgm'
           psql -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS vector'
 
-      - name: Apply migrations
+      - name: Apply migrations three times (must be idempotent)
         run: |
-          for f in postgres/migrations/*.sql; do
-            echo "== $f"
-            psql -v ON_ERROR_STOP=1 -q -f "$f"
-          done
-
-      - name: Apply them again (must be idempotent)
-        run: |
-          for f in postgres/migrations/*.sql; do
-            psql -v ON_ERROR_STOP=1 -q -f "$f"
+          for pass in 1 2 3; do
+            echo "== migration pass $pass"
+            for f in postgres/migrations/*.sql; do
+              echo "== $f"
+              psql -v ON_ERROR_STOP=1 -q -f "$f"
+            done
           done
 
       - name: The schema is what the services expect
@@ -188,7 +176,7 @@ jobs:
               'users','agent_links','agent_conversations','subscriptions','payments',
               'quotas','usage_counters','onboarding_fields','test_results','tasks',
               'referrals','partner_analysis_links','notifications','crisis_events',
-              'schema_migrations'
+              'schema_migrations','llm_providers'
             ]) AS t
             WHERE to_regclass('public.' || t) IS NULL;
             IF missing IS NOT NULL THEN RAISE EXCEPTION 'missing tables: %', missing; END IF;
@@ -298,6 +286,8 @@ jobs:
             'DOMAIN_NOCODB': 'admin.example.test', 'DOMAIN_LETTA': 'letta.example.test',
             'DOMAIN_STATUS': 'status.example.test', 'ACME_EMAIL': 'ci@example.test',
             'EVA_AGENT_PORT': '8070', 'LETTA_APP_SERVER_BACKEND': 'local',
+            'EVA_LLM_PROVIDER_NAME': 'CI bootstrap', 'EVA_LLM_MODEL': '',
+            'EVA_LLM_CONTEXT_WINDOW': '32768',
             'COMPOSE_PROFILES': '',
           }
           for key, value in values.items():
@@ -305,6 +295,7 @@ jobs:
           for key in ('POSTGRES_SUPER_PASSWORD','EVA_DB_PASSWORD','N8N_DB_PASSWORD',
                       'NOCODB_DB_PASSWORD','LETTA_DB_PASSWORD','EVA_DB_READONLY_PASSWORD',
                       'VALKEY_PASSWORD','EVA_AGENT_API_KEY','LETTA_APP_SERVER_TOKEN',
+                      'LLM_CONFIG_ENCRYPTION_KEY',
                       'N8N_ENCRYPTION_KEY','N8N_RUNNERS_AUTH_TOKEN','NC_AUTH_JWT_SECRET',
                       'SEARXNG_SECRET','EVA_TELEGRAM_WEBHOOK_SECRET'):
             text = re.sub(rf'^{key}=.*$', f'{key}={secrets.token_hex(24)}', text, flags=re.M)
@@ -333,6 +324,32 @@ jobs:
           docker compose --env-file versions.env --env-file .env logs --tail=80 eva-agent-service letta-app-server
           exit 1
 
+      - name: Start an isolated OpenAI-compatible test provider
+        run: |
+          docker run -d --name evaself-llm-mock --network evaself-network \
+            node:22.22-bookworm-slim node -e "
+              const http = require('http');
+              const models = [{id:'ci-model-a',object:'model'},{id:'ci-model-b',object:'model'}];
+              http.createServer((req,res) => {
+                res.setHeader('Content-Type','application/json');
+                if (req.url === '/v1/models') {
+                  res.end(JSON.stringify({object:'list',data:models}));
+                  return;
+                }
+                res.statusCode = 404;
+                res.end(JSON.stringify({error:{message:'not found'}}));
+              }).listen(9000,'0.0.0.0');
+            "
+          for i in $(seq 1 20); do
+            docker compose --env-file versions.env --env-file .env \
+              exec -T eva-agent-service node -e \
+              "fetch('http://evaself-llm-mock:9000/v1/models').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" \
+              && exit 0
+            sleep 1
+          done
+          echo "::error::test LLM provider did not start"
+          exit 1
+
       - name: An agent and a conversation are created through the Agent SDK
         run: |
           set -e
@@ -356,6 +373,103 @@ jobs:
             exec -T postgres psql -tA -U postgres -d eva \
             -c "SELECT telegram_id, agent_id, conversation_id FROM v_agent_runtime" | tee /tmp/mapping
           grep -q 424242 /tmp/mapping
+          cp /tmp/mapping /tmp/mapping-before-llm
+
+      - name: Two LLM configurations can be tested and switched
+        run: |
+          docker compose --env-file versions.env --env-file .env \
+            exec -T eva-agent-service node -e "
+              const key = process.env.EVA_AGENT_API_KEY;
+              const base = 'http://127.0.0.1:8070';
+              async function call(path, options = {}) {
+                const response = await fetch(base + path, {
+                  headers: {'X-API-Key': key, 'Content-Type': 'application/json'},
+                  ...options,
+                });
+                const body = response.status === 204 ? null : await response.json();
+                if (!response.ok) throw new Error(path + ': ' + JSON.stringify(body));
+                return body;
+              }
+              async function create(name, model) {
+                return (await call('/v1/llm/providers', {
+                  method: 'POST',
+                  body: JSON.stringify({
+                    name, protocol: 'openai-compatible',
+                    base_url: 'http://evaself-llm-mock:9000/v1',
+                    api_key: 'ci-key-' + name,
+                    model, context_window: 32768,
+                    additional_parameters: {request_timeout_ms: 30000},
+                  }),
+                })).provider;
+              }
+              (async () => {
+                const first = await create('CI provider A', 'ci-model-a');
+                const second = await create('CI provider B', 'ci-model-b');
+                const tested = await call('/v1/llm/providers/' + first.id + '/test', {method:'POST'});
+                if (!tested.result.models.some((m) => m.id === 'ci-model-a')) {
+                  throw new Error('/models did not return ci-model-a');
+                }
+                await call('/v1/llm/providers/' + first.id + '/activate', {method:'POST'});
+                const active = await call('/v1/llm/providers/' + second.id + '/activate', {method:'POST'});
+                const listed = await call('/v1/llm/providers');
+                const serialized = JSON.stringify(listed);
+                if (serialized.includes('ci-key-') || serialized.includes('api_key_encrypted')) {
+                  throw new Error('an API key leaked through the admin API');
+                }
+                if (!active.provider.is_active || active.provider.model_handle !== 'openai/ci-model-b') {
+                  throw new Error('second provider was not activated');
+                }
+                console.log(JSON.stringify({
+                  provider_ids: [first.id, second.id],
+                  active: active.provider.model_handle,
+                  models: tested.result.models.map((m) => m.id),
+                  secret_hidden: true,
+                }));
+              })().catch((error) => { console.error(error); process.exit(1); });
+            " | tee /tmp/llm-switch
+          grep -q '"active":"openai/ci-model-b"' /tmp/llm-switch
+          grep -q '"secret_hidden":true' /tmp/llm-switch
+
+      - name: Agent and conversation IDs survive model switching
+        run: |
+          docker compose --env-file versions.env --env-file .env \
+            exec -T postgres psql -tA -U postgres -d eva \
+            -c "SELECT telegram_id, agent_id, conversation_id FROM v_agent_runtime" > /tmp/mapping-after-llm
+          diff -u /tmp/mapping-before-llm /tmp/mapping-after-llm
+
+      - name: LLM settings and mappings survive service restarts
+        run: |
+          docker compose --env-file versions.env --env-file .env \
+            restart letta-app-server eva-agent-service
+          for i in $(seq 1 60); do
+            STATUS="$(docker compose --env-file versions.env --env-file .env \
+              exec -T eva-agent-service node -e "
+                fetch('http://127.0.0.1:8070/health')
+                  .then(r=>r.json()).then(b=>console.log(b.status))
+                  .catch(()=>console.log('down'))" 2>/dev/null | tr -d '\r')"
+            [ "$STATUS" = "ok" ] && break
+            [ "$i" = "60" ] && exit 1
+            sleep 3
+          done
+          docker compose --env-file versions.env --env-file .env \
+            exec -T eva-agent-service node -e "
+              const key = process.env.EVA_AGENT_API_KEY;
+              Promise.all([
+                fetch('http://127.0.0.1:8070/v1/llm/providers',{headers:{'X-API-Key':key}}).then(r=>r.json()),
+                fetch('http://127.0.0.1:8070/v1/agents',{headers:{'X-API-Key':key}}).then(r=>r.json()),
+              ]).then(([llm,agents]) => {
+                const active = llm.providers.find((p) => p.is_active);
+                if (llm.providers.length !== 2 || active?.model_handle !== 'openai/ci-model-b') process.exit(1);
+                const agent = agents.agents.find((a) => String(a.telegram_id) === '424242');
+                if (!agent?.agent_id || !agent?.conversation_id) process.exit(1);
+                console.log(JSON.stringify({providers:llm.providers.length,active:active.model_handle,agent_id:agent.agent_id,conversation_id:agent.conversation_id}));
+              }).catch(()=>process.exit(1));
+            " | tee /tmp/restart-state
+          grep -q '"providers":2' /tmp/restart-state
+          docker compose --env-file versions.env --env-file .env \
+            exec -T postgres psql -tA -U postgres -d eva \
+            -c "SELECT telegram_id, agent_id, conversation_id FROM v_agent_runtime" > /tmp/mapping-after-restart
+          diff -u /tmp/mapping-before-llm /tmp/mapping-after-restart
 
       - name: Logs on failure
         if: failure()
@@ -364,4 +478,6 @@ jobs:
 
       - name: Tear down
         if: always()
-        run: docker compose --env-file versions.env --env-file .env down -v || true
+        run: |
+          docker rm -f evaself-llm-mock 2>/dev/null || true
+          docker compose --env-file versions.env --env-file .env down -v || true

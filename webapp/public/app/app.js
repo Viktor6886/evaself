@@ -1,11 +1,11 @@
 /* Eva Mini App.
  *
  * Every request carries the launch payload Telegram signed with the bot
- * token in `X-Telegram-Init-Data`; Eva Core verifies the HMAC and derives
+ * token in `X-Telegram-Init-Data`; eva-agent-service verifies the HMAC and derives
  * the user from it. Nothing here trusts a user id sent by the client.
  *
  * The API lives on the same origin under /api (Caddy strips the prefix and
- * forwards to eva-core), so no domain is ever hard-coded in these assets.
+ * forwards to eva-agent-service), so no domain is ever hard-coded in these assets.
  */
 (() => {
 	"use strict";

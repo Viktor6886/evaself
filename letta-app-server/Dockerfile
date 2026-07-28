@@ -1,5 +1,5 @@
-ARG NODE_BASE_VERSION=22.22-alpine
-FROM node:${NODE_BASE_VERSION}
+ARG NODE_BASE_VERSION=22.22-bookworm-slim
+FROM node:${NODE_BASE_VERSION} AS build
 
 # ---------------------------------------------------------------------
 # Self-hosted Letta App Server.
@@ -19,21 +19,31 @@ FROM node:${NODE_BASE_VERSION}
 # ---------------------------------------------------------------------
 ARG LETTA_CODE_VERSION=0.29.8
 
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 make g++ git ca-certificates \
+ && npm install -g --prefix /opt/letta "@letta-ai/letta-code@${LETTA_CODE_VERSION}" \
+ && npm cache clean --force
+
+FROM node:${NODE_BASE_VERSION}
+
 ENV LETTA_HOME=/data/letta \
     LETTA_LOCAL_BACKEND_DIR=/data/letta/lc-local-backend \
     HOME=/data/letta \
-    NODE_ENV=production
+    NODE_ENV=production \
+    PATH=/opt/letta/bin:$PATH
 
-RUN apk add --no-cache ca-certificates git ripgrep tini curl \
- && npm install -g "@letta-ai/letta-code@${LETTA_CODE_VERSION}" \
- && npm cache clean --force
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates git ripgrep tini curl \
+ && rm -rf /var/lib/apt/lists/*
 
+COPY --from=build /opt/letta /opt/letta
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 # All state — agents, conversations, the memory filesystem — lives here and
 # is a named volume, so `make backup` can capture it.
-RUN mkdir -p /data/letta && chown -R node:node /data
+RUN mkdir -p /data/letta/lc-local-backend/providers /data/llm-control \
+ && chown -R node:node /data
 VOLUME ["/data/letta"]
 
 USER node
@@ -41,4 +51,4 @@ WORKDIR /data/letta
 
 EXPOSE 4500
 
-ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]

@@ -12,6 +12,7 @@ import type { Config } from "./config.js";
 import type { Database } from "./db.js";
 import { EvaError, badRequest, notFound, unauthorized } from "./errors.js";
 import type { LettaService } from "./letta.js";
+import type { LlmManager, LlmProviderInput } from "./llm.js";
 import type { Logger } from "./logger.js";
 import type { UserQueue } from "./queue.js";
 
@@ -22,6 +23,7 @@ export interface Services {
   logger: Logger;
   db: Database;
   letta: LettaService;
+  llm: LlmManager;
   queue: UserQueue;
   redisPing: () => Promise<boolean>;
 }
@@ -36,12 +38,12 @@ function constantTimeEquals(a: string, b: string): boolean {
 function telegramIdOf(request: FastifyRequest): number {
   const raw = (request.params as { telegramId?: string }).telegramId;
   const parsed = Number.parseInt(raw ?? "", 10);
-  if (!Number.isFinite(parsed)) throw badRequest(`invalid telegram id: ${raw}`);
+  if (!Number.isFinite(parsed)) throw badRequest(`Некорректный Telegram ID: ${raw}`);
   return parsed;
 }
 
 export function buildServer(services: Services): FastifyInstance {
-  const { config, logger, db, letta, queue } = services;
+  const { config, logger, db, letta, llm, queue } = services;
 
   // Fastify's own logger is off: this service logs through logger.ts so
   // every line in the stack has the same JSON shape.
@@ -55,10 +57,10 @@ export function buildServer(services: Services): FastifyInstance {
   // ---------------------------------------------------------------
   app.addHook("onRequest", async (request) => {
     if (!request.url.startsWith("/v1/")) return;
-    if (!config.apiKey) throw unauthorized("EVA_AGENT_API_KEY is not configured on the server");
+    if (!config.apiKey) throw unauthorized("EVA_AGENT_API_KEY не настроен на сервере");
     const presented = request.headers["x-api-key"];
     if (typeof presented !== "string" || !constantTimeEquals(presented, config.apiKey)) {
-      throw unauthorized("invalid or missing X-API-Key");
+      throw unauthorized("X-API-Key отсутствует или неверен");
     }
   });
 
@@ -70,7 +72,7 @@ export function buildServer(services: Services): FastifyInstance {
           { statusCode: (error as { statusCode?: number })?.statusCode ?? 500 },
         );
     if (evaError.statusCode >= 500) {
-      logger.error("request failed", {
+      logger.error("Ошибка запроса", {
         url: request.url,
         code: evaError.code,
         message: evaError.message,
@@ -80,7 +82,7 @@ export function buildServer(services: Services): FastifyInstance {
   });
 
   app.setNotFoundHandler((_request, reply) => {
-    reply.status(404).send(notFound("no such route").toPayload());
+    reply.status(404).send(notFound("Маршрут не найден").toPayload());
   });
 
   // ---------------------------------------------------------------
@@ -135,7 +137,7 @@ export function buildServer(services: Services): FastifyInstance {
       language_code?: string;
       create_agent?: boolean;
     };
-    if (typeof body?.telegram_id !== "number") throw badRequest("telegram_id is required");
+    if (typeof body?.telegram_id !== "number") throw badRequest("telegram_id обязателен");
 
     const user = await db.upsertUser({
       telegramId: body.telegram_id,
@@ -191,7 +193,7 @@ export function buildServer(services: Services): FastifyInstance {
   app.get("/v1/users/:telegramId", async (request) => {
     const telegramId = telegramIdOf(request);
     const overview = await db.getUserOverview(telegramId);
-    if (!overview) throw notFound(`no user with telegram_id=${telegramId}`);
+    if (!overview) throw notFound(`Пользователь с telegram_id=${telegramId} не найден`);
     return {
       ...(jsonable(overview) as Record<string, unknown>),
       quotas: await db.getQuotaStatus(telegramId),
@@ -222,7 +224,7 @@ export function buildServer(services: Services): FastifyInstance {
     const link = await requireLink(db, telegramId);
     const conversationId = await letta.createConversation(link.agent_id);
     await db.setConversation(link.agent_id, conversationId);
-    logger.info("switched conversation", { telegramId, conversationId });
+    logger.info("Активный conversation переключён", { telegramId, conversationId });
     return { agent_id: link.agent_id, conversation_id: conversationId };
   });
 
@@ -243,8 +245,8 @@ export function buildServer(services: Services): FastifyInstance {
       metric?: string;
       count_usage?: boolean;
     };
-    if (typeof body?.telegram_id !== "number") throw badRequest("telegram_id is required");
-    if (!body.text || !body.text.trim()) throw badRequest("text is required");
+    if (typeof body?.telegram_id !== "number") throw badRequest("telegram_id обязателен");
+    if (!body.text || !body.text.trim()) throw badRequest("text обязателен");
 
     const telegramId = body.telegram_id;
     const link = await requireLink(db, telegramId);
@@ -268,8 +270,8 @@ export function buildServer(services: Services): FastifyInstance {
    */
   app.post("/v1/messages/stream", async (request, reply) => {
     const body = request.body as { telegram_id?: number; text?: string };
-    if (typeof body?.telegram_id !== "number") throw badRequest("telegram_id is required");
-    if (!body.text?.trim()) throw badRequest("text is required");
+    if (typeof body?.telegram_id !== "number") throw badRequest("telegram_id обязателен");
+    if (!body.text?.trim()) throw badRequest("text обязателен");
 
     const telegramId = body.telegram_id;
     const link = await requireLink(db, telegramId);
@@ -312,6 +314,50 @@ export function buildServer(services: Services): FastifyInstance {
 
   app.get("/v1/models", async () => ({ models: await letta.listModels() }));
 
+  // ---------------------------------------------------------------
+  // Централизованные настройки OpenAI-compatible LLM
+  // ---------------------------------------------------------------
+  app.get("/v1/llm/providers", async () => ({
+    providers: await llm.list(),
+  }));
+
+  app.post("/v1/llm/providers", async (request, reply) => {
+    const provider = await llm.create(request.body as LlmProviderInput);
+    return reply.status(201).send({ provider });
+  });
+
+  app.patch("/v1/llm/providers/:id", async (request) => {
+    const { id } = request.params as { id: string };
+    return { provider: await llm.update(id, request.body as Partial<LlmProviderInput>) };
+  });
+
+  app.delete("/v1/llm/providers/:id", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    await llm.remove(id);
+    return reply.status(204).send();
+  });
+
+  app.post("/v1/llm/providers/:id/test", async (request) => {
+    const { id } = request.params as { id: string };
+    return { result: await llm.test(id) };
+  });
+
+  app.get("/v1/llm/providers/:id/models", async (request) => {
+    const { id } = request.params as { id: string };
+    return { result: await llm.models(id) };
+  });
+
+  app.post("/v1/llm/providers/:id/activate", async (request) => {
+    const { id } = request.params as { id: string };
+    return { provider: await llm.activate(id) };
+  });
+
+  // Установщик вызывает этот endpoint без передачи API key по argv.
+  // Повторный импорт запрещён менеджером, если в реестре уже есть записи.
+  app.post("/v1/llm/import-env", async () => ({
+    provider: await llm.importEnvironment(),
+  }));
+
   app.get("/v1/stats", async () => ({
     ...(jsonable(await db.stats()) as Record<string, unknown>),
     sessions_open: letta.openSessions,
@@ -331,14 +377,14 @@ export function buildServer(services: Services): FastifyInstance {
 async function requireLink(db: Database, telegramId: number) {
   const link = await db.getAgentLink(telegramId);
   if (!link) {
-    throw notFound(`no agent for telegram_id=${telegramId}; call /v1/users/ensure first`);
+    throw notFound(`Нет agent для telegram_id=${telegramId}; сначала вызовите /v1/users/ensure`);
   }
   return link;
 }
 
 function requireConversation(link: { conversation_id: string | null }): string {
   if (!link.conversation_id) {
-    throw notFound("this agent has no active conversation; call POST /v1/conversations/{id}");
+    throw notFound("У agent нет активного conversation; вызовите POST /v1/conversations/{id}");
   }
   return link.conversation_id;
 }
