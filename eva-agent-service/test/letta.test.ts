@@ -114,3 +114,67 @@ test("model switching inventories standalone WebUI agents too", async () => {
     },
   ]);
 });
+
+test("App Server-only settings are applied at session open, not agent creation", async () => {
+  const service = new LettaService(
+    {
+      appServerUrl: "ws://example.invalid/ws",
+      appServerToken: "",
+      appServerRequestTimeoutMs: 1000,
+      model: "",
+      sessionPoolSize: 5,
+      sessionIdleMs: 1000,
+      turnTimeoutMs: 1000,
+    } as never,
+    {
+      debug() {},
+      info() {},
+      warn() {},
+      error() {},
+    },
+    "persona",
+  );
+  const internal = service as unknown as {
+    runtime: {
+      allowed_tools: string[] | null;
+      disallowed_tools: string[];
+      system_info_reminder: boolean;
+    };
+    client: {
+      createAgent(options: Record<string, unknown>): Promise<string>;
+      agents: { update(): Promise<void> };
+      resumeSession(id: string, options: Record<string, unknown>): unknown;
+    };
+    acquireSession(id: string): Promise<unknown>;
+  };
+  internal.runtime.allowed_tools = ["Read", "WebSearch"];
+  internal.runtime.disallowed_tools = ["Bash"];
+  internal.runtime.system_info_reminder = true;
+
+  let createOptions: Record<string, unknown> = {};
+  let sessionOptions: Record<string, unknown> = {};
+  internal.client = {
+    createAgent: async (options) => {
+      createOptions = options;
+      return "agent-sdk-options";
+    },
+    agents: { update: async () => {} },
+    resumeSession: (_id, options) => {
+      sessionOptions = options;
+      return {
+        initialize: async () => {},
+        bootstrapState: async () => ({}),
+        recoverPendingApprovals: async () => ({ recovered: false }),
+      };
+    },
+  };
+
+  await service.createAgent({ telegramId: 123, displayName: "CI" });
+  await internal.acquireSession("conversation-sdk-options");
+
+  assert.equal("allowedTools" in createOptions, false);
+  assert.equal("disallowedTools" in createOptions, false);
+  assert.equal("systemInfoReminder" in createOptions, false);
+  assert.deepEqual(sessionOptions.allowedTools, ["Read", "WebSearch"]);
+  assert.equal(sessionOptions.permissionMode, "unrestricted");
+});

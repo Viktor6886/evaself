@@ -16,6 +16,12 @@ Persona/Human, tools, skill sources, permission mode, memfs, dreaming,
 model settings, context window, пулом сессий и таймаутами. Capability token
 App Server никогда не приходит в JSON.
 
+Политика `allowedTools`, permission mode, skill sources и dreaming применяется
+при открытии SDK-сессии, как требует App Server. Не поддерживаемые текущим
+официальным SDK параметры `disallowedTools`, `systemInfoReminder` и
+`dreaming.behavior` не имитируются: консоль сообщает об ограничении, а API
+отклоняет попытку их включить.
+
 В «Агентах» доступны создание, изменение и подтверждаемое удаление agent,
 создание/архивирование conversations, история сообщений и прямой чат.
 

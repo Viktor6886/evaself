@@ -12,6 +12,7 @@ import type {
   CreateAgentOptions,
   DreamingOptions,
   LettaCodeSession,
+  LettaCodeClientSessionOptions,
   ListMessagesResult,
   PermissionMode,
   SDKMessage,
@@ -329,12 +330,9 @@ export class LettaService {
       permissionMode: this.runtime.permissionMode,
       memfs: this.runtime.memfs_enabled,
       skillSources: this.runtime.skillSources,
-      systemInfoReminder: this.runtime.system_info_reminder,
       dreaming: this.runtime.dreaming as DreamingOptions,
       ...(this.runtime.system_prompt ? { systemPrompt: this.runtime.system_prompt } : {}),
       ...(this.runtime.base_tools !== null ? { baseTools: this.runtime.base_tools } : {}),
-      ...(this.runtime.allowed_tools !== null ? { allowedTools: this.runtime.allowed_tools } : {}),
-      disallowedTools: this.runtime.disallowed_tools,
       ...(this.defaultModel ? { model: this.defaultModel } : {}),
     };
 
@@ -474,7 +472,7 @@ export class LettaService {
 
     let session: LettaCodeSession;
     try {
-      session = this.client.resumeSession(conversationId, {});
+      session = this.client.resumeSession(conversationId, this.sessionOptions());
       await this.initialize(session);
     } catch (error) {
       throw toEvaError(error, `resuming conversation ${conversationId}`);
@@ -634,6 +632,23 @@ export class LettaService {
     }
   }
 
+  /**
+   * App Server SDK 0.5.x applies client-side tool policy and runtime controls
+   * when a conversation session is opened, not while the persistent agent is
+   * created. Keeping that distinction here prevents unsupported create-agent
+   * fields from being silently saved but never enforced.
+   */
+  private sessionOptions(): LettaCodeClientSessionOptions {
+    return {
+      permissionMode: this.runtime.permissionMode,
+      skillSources: this.runtime.skillSources,
+      dreaming: this.runtime.dreaming as LettaCodeClientSessionOptions["dreaming"],
+      ...(this.runtime.allowed_tools !== null
+        ? { allowedTools: this.runtime.allowed_tools }
+        : {}),
+    };
+  }
+
   /** Inventory every live App Server agent, including agents created only in WebUI. */
   async listAllModelMappings(): Promise<Array<{ agentId: string; conversationIds: string[] }>> {
     const agents = await this.listAgents() as Array<{ id?: string }>;
@@ -741,8 +756,6 @@ export class LettaService {
       permissionMode: input.permission_mode ?? this.runtime.permissionMode,
       memfs: input.memfs_enabled ?? this.runtime.memfs_enabled,
       skillSources: input.skill_sources ?? this.runtime.skillSources,
-      systemInfoReminder:
-        input.system_info_reminder ?? this.runtime.system_info_reminder,
       dreaming: (input.dreaming ?? this.runtime.dreaming) as DreamingOptions,
       ...(input.system_prompt ?? this.runtime.system_prompt
         ? { systemPrompt: input.system_prompt ?? this.runtime.system_prompt! }
@@ -750,10 +763,6 @@ export class LettaService {
       ...((input.base_tools ?? this.runtime.base_tools) !== null
         ? { baseTools: input.base_tools ?? this.runtime.base_tools! }
         : {}),
-      ...((input.allowed_tools ?? this.runtime.allowed_tools) !== null
-        ? { allowedTools: input.allowed_tools ?? this.runtime.allowed_tools! }
-        : {}),
-      disallowedTools: input.disallowed_tools ?? this.runtime.disallowed_tools,
       ...(input.model ?? this.defaultModel ? { model: input.model ?? this.defaultModel } : {}),
     };
 

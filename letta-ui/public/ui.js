@@ -518,12 +518,11 @@
 						<label>Skill sources<textarea name="skill_sources">${esc(lines(settings.skill_sources))}</textarea></label>
 						<label>Base tools (пусто = defaults SDK)<textarea name="base_tools">${esc(lines(settings.base_tools))}</textarea></label>
 						<label>Allowed tools (пусто = defaults SDK)<textarea name="allowed_tools">${esc(lines(settings.allowed_tools))}</textarea></label>
-						<label>Disallowed tools<textarea name="disallowed_tools">${esc(lines(settings.disallowed_tools))}</textarea></label>
 						<label>Context window<input name="default_context_window" type="number" min="1024" value="${esc(settings.default_context_window || "")}" placeholder="из активной LLM" /></label>
 						<label class="span-2">Model settings JSON<textarea class="block" name="model_settings">${esc(JSON.stringify(settings.model_settings || {}, null, 2))}</textarea></label>
 						<label class="span-2">Dreaming JSON<textarea class="block" name="dreaming">${esc(JSON.stringify(settings.dreaming || { trigger: "off" }, null, 2))}</textarea></label>
 						<label class="check"><input name="memfs_enabled" type="checkbox" ${settings.memfs_enabled ? "checked" : ""} /> Включать memory filesystem</label>
-						<label class="check"><input name="system_info_reminder" type="checkbox" ${settings.system_info_reminder ? "checked" : ""} /> System info reminder</label>
+						<p class="small muted span-2">Официальный SDK для self-hosted App Server пока не принимает <code>disallowedTools</code>, <code>systemInfoReminder</code> и <code>dreaming.behavior</code>. Для ограничения инструментов используйте Allowed tools; интерфейс не имитирует неподдерживаемые настройки.</p>
 					</div>
 				</div>
 				<div class="card">
@@ -577,9 +576,7 @@
 					system_prompt: String(form.get("system_prompt") || "").trim() || null,
 					base_tools: readLines(form.get("base_tools")).length ? readLines(form.get("base_tools")) : null,
 					allowed_tools: readLines(form.get("allowed_tools")).length ? readLines(form.get("allowed_tools")) : null,
-					disallowed_tools: readLines(form.get("disallowed_tools")),
 					skill_sources: readLines(form.get("skill_sources")),
-					system_info_reminder: form.get("system_info_reminder") === "on",
 					dreaming: parseJsonField(form, "dreaming"),
 					model_settings: parseJsonField(form, "model_settings"),
 					default_context_window: context ? Number(context) : null,

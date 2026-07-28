@@ -43,7 +43,6 @@ export interface PublicSdkSettings extends SdkSettingsInput {
 const PERMISSION_MODES = new Set(["standard", "acceptEdits", "unrestricted"]);
 const SKILL_SOURCES = new Set(["bundled", "global", "agent", "project"]);
 const DREAMING_TRIGGERS = new Set(["off", "step-count", "compaction-event"]);
-const DREAMING_BEHAVIORS = new Set(["reminder", "auto-launch"]);
 
 export class SdkSettingsManager {
   constructor(
@@ -98,10 +97,22 @@ export function validateSettings(input: SdkSettingsInput): Required<SdkSettingsI
   const dreaming = plainObject(input.dreaming ?? { trigger: "off" }, "dreaming");
   const trigger = String(dreaming.trigger ?? "off");
   if (!DREAMING_TRIGGERS.has(trigger)) throw badRequest("Некорректный dreaming.trigger");
-  if (dreaming.behavior !== undefined && !DREAMING_BEHAVIORS.has(String(dreaming.behavior))) {
-    throw badRequest("Некорректный dreaming.behavior");
+  if (dreaming.behavior !== undefined) {
+    throw badRequest(
+      "dreaming.behavior пока не поддерживается официальным SDK для self-hosted App Server",
+    );
   }
   if (dreaming.stepCount !== undefined) integer(dreaming.stepCount, "dreaming.stepCount", 1, 100000);
+  if ((input.disallowed_tools?.length ?? 0) > 0) {
+    throw badRequest(
+      "disallowed_tools пока не поддерживается официальным SDK для self-hosted App Server; используйте allowed_tools",
+    );
+  }
+  if (input.system_info_reminder === true) {
+    throw badRequest(
+      "system_info_reminder пока не поддерживается официальным SDK для self-hosted App Server",
+    );
+  }
 
   return {
     agent_name_prefix: text(input.agent_name_prefix ?? "eva", "agent_name_prefix", 1, 80),

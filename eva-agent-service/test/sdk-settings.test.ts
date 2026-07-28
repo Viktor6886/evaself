@@ -10,7 +10,7 @@ test("SDK settings validate all persisted runtime limits", () => {
     default_tags: ["evaself", "test", "test"],
     permission_mode: "standard",
     skill_sources: ["bundled", "agent"],
-    dreaming: { trigger: "step-count", behavior: "reminder", stepCount: 20 },
+    dreaming: { trigger: "step-count", stepCount: 20 },
     model_settings: { temperature: 0.4 },
     default_context_window: 65536,
     session_pool_size: 10,
@@ -34,6 +34,16 @@ test("SDK settings reject unsafe enum values and invalid timeouts", () => {
     () => validateSettings({ turn_timeout_ms: 500 }),
     (error: unknown) => error instanceof EvaError && error.code === "bad_request",
   );
+  for (const unsupported of [
+    { disallowed_tools: ["Bash"] },
+    { system_info_reminder: true },
+    { dreaming: { trigger: "step-count", behavior: "reminder", stepCount: 20 } },
+  ]) {
+    assert.throws(
+      () => validateSettings(unsupported),
+      (error: unknown) => error instanceof EvaError && error.code === "bad_request",
+    );
+  }
 });
 
 test("public SDK settings expose only token presence, never the token", async () => {
