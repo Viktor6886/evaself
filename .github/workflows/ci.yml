@@ -303,10 +303,25 @@ jobs:
           PY
           chmod 600 .env
 
-      - name: Start the data layer, the App Server and the agent service
+      - name: Start the data layer and apply migrations
         run: |
           docker compose --env-file versions.env --env-file .env \
-            up -d --build postgres valkey letta-app-server eva-agent-service
+            up -d postgres valkey
+          for i in $(seq 1 60); do
+            STATUS="$(docker inspect -f \
+              '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' \
+              evaself-postgres 2>/dev/null || echo down)"
+            echo "PostgreSQL, attempt $i: $STATUS"
+            [ "$STATUS" = "healthy" ] && break
+            [ "$i" = "60" ] && exit 1
+            sleep 2
+          done
+          ./scripts/db-migrate.sh
+
+      - name: Start the App Server and the agent service
+        run: |
+          docker compose --env-file versions.env --env-file .env \
+            up -d --build letta-app-server eva-agent-service
 
       - name: Wait for the agent service to report healthy
         run: |
