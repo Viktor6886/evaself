@@ -171,7 +171,7 @@ test("App Server-only settings are applied at session open, not agent creation",
       allowed_tools: string[] | null;
       disallowed_tools: string[];
       system_info_reminder: boolean;
-      reasoning_effort: "high";
+      reasoning_effort: "none" | "high";
     };
     client: {
       createAgent(options: Record<string, unknown>): Promise<string>;
@@ -179,6 +179,7 @@ test("App Server-only settings are applied at session open, not agent creation",
       resumeSession(id: string, options: Record<string, unknown>): unknown;
     };
     acquireSession(id: string): Promise<unknown>;
+    sessionOptions(id: string): Record<string, unknown>;
   };
   internal.runtime.allowed_tools = ["Read", "WebSearch"];
   internal.runtime.disallowed_tools = ["Bash"];
@@ -224,4 +225,7 @@ test("App Server-only settings are applied at session open, not agent creation",
   );
   assert.equal(sessionOptions.permissionMode, "unrestricted");
   assert.equal(sessionOptions.reasoningEffort, "high");
+
+  internal.runtime.reasoning_effort = "none";
+  assert.equal("reasoningEffort" in internal.sessionOptions("conversation-default"), false);
 });

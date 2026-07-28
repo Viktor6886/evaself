@@ -761,7 +761,13 @@ export class LettaService {
     ) ?? null;
     return {
       permissionMode: this.runtime.permissionMode,
-      reasoningEffort: this.runtime.reasoning_effort,
+      // "none" is our explicit UI/default value. Passing it to the SDK asks
+      // the model catalog for a literal "none" tier, which ordinary
+      // OpenAI-compatible models do not advertise. Omitting the option keeps
+      // the provider's non-reasoning/default model unchanged.
+      ...(this.runtime.reasoning_effort !== "none"
+        ? { reasoningEffort: this.runtime.reasoning_effort }
+        : {}),
       skillSources: this.runtime.skillSources,
       dreaming: this.runtime.dreaming as LettaCodeClientSessionOptions["dreaming"],
       ...(tools.length > 0 ? { tools } : {}),
