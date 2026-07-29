@@ -178,7 +178,10 @@ export function summarizeStream(messages: SDKMessage[]): Omit<TurnResult, "agent
   }
 
   return {
-    reply: replyParts.join("\n\n").trim(),
+    // SDKAssistantMessage.content is a streamed text delta. Concatenate the
+    // deltas verbatim; adding paragraph separators here breaks words whenever
+    // the provider splits a token between two events.
+    reply: replyParts.join("").trim(),
     reasoning,
     toolCalls,
     trace,

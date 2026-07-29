@@ -7,7 +7,12 @@ import { normalizeUpdate } from "../dist/eva-workflow.js";
 import { evaMemoryBlocks } from "../dist/letta.js";
 import { normalizeLavaEvent } from "../dist/payments.js";
 import { RuntimeContextBuilder } from "../dist/runtime/runtime-context.js";
-import { splitTelegramText, webhookSecretMatches } from "../dist/telegram.js";
+import {
+  progressiveTelegramDrafts,
+  splitTelegramText,
+  TelegramClient,
+  webhookSecretMatches,
+} from "../dist/telegram.js";
 
 test("Telegram text is split without losing content", () => {
   const source = `${"слово ".repeat(900)}конец`.trim();
@@ -15,6 +20,41 @@ test("Telegram text is split without losing content", () => {
   assert.ok(chunks.length > 1);
   assert.ok(chunks.every((chunk) => chunk.length <= 500));
   assert.equal(chunks.join(" ").replace(/\s+/g, " "), source.replace(/\s+/g, " "));
+});
+
+test("Telegram progressive drafts reveal only complete words", () => {
+  assert.deepEqual(
+    progressiveTelegramDrafts("Тут, Виктор. Была пауза, но я на месте. Что нужно?", 4),
+    [
+      "Тут, Виктор. Была пауза,",
+      "Тут, Виктор. Была пауза, но я на месте.",
+    ],
+  );
+  assert.deepEqual(progressiveTelegramDrafts("Короткий ответ", 4), ["Короткий ответ"]);
+});
+
+test("Telegram starts an empty draft before an answer", async () => {
+  const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
+  const telegram = new TelegramClient(
+    {
+      telegramBotToken: "test-token",
+      telegramApiBaseUrl: "https://api.telegram.invalid",
+    } as never,
+    { debug() {}, info() {}, warn() {}, error() {} },
+  );
+  telegram.call = async (method, body) => {
+    calls.push({ method, body });
+    return true as never;
+  };
+
+  const draft = await telegram.startMessageDraft(123);
+  draft?.stop();
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.method, "sendMessageDraft");
+  assert.equal(calls[0]?.body.chat_id, 123);
+  assert.equal(calls[0]?.body.text, "");
+  assert.equal(typeof calls[0]?.body.draft_id, "number");
 });
 
 test("Telegram webhook secret comparison fails closed", () => {

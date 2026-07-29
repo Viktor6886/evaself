@@ -79,12 +79,14 @@ test("administrative trace keeps tool details but redacts secrets", () => {
   assert.doesNotMatch(JSON.stringify(summary.trace), /must-not-leak|Bearer secret/);
 });
 
-test("summarizeStream joins several assistant messages", () => {
+test("summarizeStream concatenates assistant deltas without breaking words", () => {
   const summary = summarizeStream([
-    { type: "assistant", content: "one" },
-    { type: "assistant", content: [{ type: "text", text: "two" }] },
+    { type: "assistant", content: "Т" },
+    { type: "assistant", content: "ут, В" },
+    { type: "assistant", content: "иктор. Б" },
+    { type: "assistant", content: "ыла пауза, но я на месте." },
   ] as never);
-  assert.equal(summary.reply, "one\n\ntwo");
+  assert.equal(summary.reply, "Тут, Виктор. Была пауза, но я на месте.");
 });
 
 test("summarizeStream falls back to the result text", () => {

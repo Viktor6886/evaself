@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { randomInt, timingSafeEqual } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 
 import type { Config } from "./config.js";
@@ -51,6 +51,16 @@ interface TelegramResponse<T> {
   result?: T;
   description?: string;
 }
+
+export interface TelegramMessageDraft {
+  readonly chatId: number;
+  readonly draftId: number;
+  stop(): void;
+}
+
+const DRAFT_WORDS_PER_UPDATE = 4;
+const DRAFT_UPDATE_DELAY_MS = 500;
+const DRAFT_KEEPALIVE_MS = 20_000;
 
 export class TelegramClient implements OutboxTransport {
   private readonly token: string;
@@ -114,29 +124,93 @@ export class TelegramClient implements OutboxTransport {
   }
 
   /**
-   * Reproduces the old progressive welcome without persisting dozens of
-   * partial messages. Telegram drafts are ephemeral; the final sendMessage is
-   * always used to store the complete text.
+   * Reserve space for the answer before the model finishes. Bot API 10.0
+   * explicitly allows an empty draft and renders it as a “Thinking…”
+   * placeholder. It is refreshed because Telegram drafts are ephemeral.
    */
-  async sendProgressiveMessage(chatId: number, text: string): Promise<unknown[]> {
-    const clean = text.trim();
-    if (chatId <= 0 || clean.length === 0 || clean.length > 4_096) {
-      return await this.sendMessage(chatId, clean);
-    }
-    const draftId = Math.max(1, Date.now() % 2_147_483_647);
-    const words = clean.split(/\s+/);
-    const stepSize = Math.max(1, Math.ceil(words.length / 12));
-    try {
-      for (let end = stepSize; end < words.length; end += stepSize) {
+  async startMessageDraft(chatId: number): Promise<TelegramMessageDraft | null> {
+    if (!Number.isSafeInteger(chatId) || chatId <= 0) return null;
+    const draftId = randomInt(1, 2_147_483_647);
+    let stopped = false;
+    let refreshing = false;
+    const refresh = async () => {
+      if (stopped || refreshing) return;
+      refreshing = true;
+      try {
         await this.call("sendMessageDraft", {
           chat_id: chatId,
           draft_id: draftId,
-          text: words.slice(0, end).join(" "),
+          text: "",
         });
-        await delay(120);
+      } finally {
+        refreshing = false;
+      }
+    };
+
+    try {
+      await refresh();
+    } catch (error) {
+      stopped = true;
+      this.logger.debug("Telegram не поддержал пустой черновик", {
+        chatId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    }
+
+    const timer = setInterval(() => {
+      void refresh().catch((error) => {
+        this.logger.debug("Не удалось обновить пустой Telegram-черновик", {
+          chatId,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }, DRAFT_KEEPALIVE_MS);
+    timer.unref();
+
+    return {
+      chatId,
+      draftId,
+      stop() {
+        if (stopped) return;
+        stopped = true;
+        clearInterval(timer);
+      },
+    };
+  }
+
+  /**
+   * Reveals a completed answer by whole words in the same animated Telegram
+   * draft. Only the final sendMessage is durable and stored in the outbox.
+   */
+  async sendProgressiveMessage(
+    chatId: number,
+    text: string,
+    draft?: TelegramMessageDraft | null,
+  ): Promise<unknown[]> {
+    const clean = text.trim();
+    draft?.stop();
+    if (chatId <= 0 || clean.length === 0 || clean.length > 4_096) {
+      return await this.sendMessage(chatId, clean);
+    }
+
+    const activeDraft = draft === undefined
+      ? await this.startMessageDraft(chatId)
+      : draft;
+    activeDraft?.stop();
+    const draftId = activeDraft?.draftId ?? randomInt(1, 2_147_483_647);
+
+    try {
+      for (const draftText of progressiveTelegramDrafts(clean)) {
+        await this.call("sendMessageDraft", {
+          chat_id: chatId,
+          draft_id: draftId,
+          text: draftText,
+        });
+        await delay(DRAFT_UPDATE_DELAY_MS);
       }
     } catch (error) {
-      this.logger.debug("Telegram не поддержал динамический черновик", {
+      this.logger.debug("Telegram не поддержал пословный черновик", {
         chatId,
         message: error instanceof Error ? error.message : String(error),
       });
@@ -323,6 +397,26 @@ export function splitTelegramText(text: string, maxLength = 4_000): string[] {
   }
   if (rest) chunks.push(rest);
   return chunks;
+}
+
+/**
+ * Build cumulative draft snapshots without ever cutting a word or changing
+ * the whitespace inside the generated answer.
+ */
+export function progressiveTelegramDrafts(
+  text: string,
+  wordsPerUpdate = DRAFT_WORDS_PER_UPDATE,
+): string[] {
+  const clean = text.trim();
+  if (!clean) return [];
+  const tokens = clean.match(/\S+\s*/gu) ?? [];
+  const step = Math.max(1, Math.floor(wordsPerUpdate));
+  const snapshots: string[] = [];
+  for (let end = step; end < tokens.length; end += step) {
+    snapshots.push(tokens.slice(0, end).join("").trimEnd());
+  }
+  if (snapshots.length === 0) snapshots.push(clean);
+  return snapshots;
 }
 
 export const ALLOWED_REACTIONS = new Set([

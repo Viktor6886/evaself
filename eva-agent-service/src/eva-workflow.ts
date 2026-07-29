@@ -13,6 +13,7 @@ import type { UserQueue } from "./queue.js";
 import type { RuntimeContextBuilder } from "./runtime/runtime-context.js";
 import {
   type TelegramMessage,
+  type TelegramMessageDraft,
   type TelegramUpdate,
   TelegramClient,
 } from "./telegram.js";
@@ -59,6 +60,7 @@ export class EvaWorkflow {
 
   private async process(update: NormalizedUpdate): Promise<InboxResult> {
     const typing: { stop: (() => void) | null } = { stop: null };
+    const messageDraft: { current: TelegramMessageDraft | null } = { current: null };
     const started = performance.now();
     const metrics = {
       runtime_context_ms: 0,
@@ -155,6 +157,10 @@ export class EvaWorkflow {
         });
         metrics.runtime_context_ms = context.metrics?.runtimeContextMs ?? 0;
         metrics.profile_check_ms = context.metrics?.profileCheckMs ?? 0;
+        const responseMode = context.responseMode;
+        if (responseMode === "text" || responseMode === "both") {
+          messageDraft.current = await this.telegram.startMessageDraft(update.chatId);
+        }
         const lettaStarted = performance.now();
         let answer;
         try {
@@ -170,9 +176,9 @@ export class EvaWorkflow {
         const turn = answer;
 
         const reply = turn.reply.trim() || t(language, "emptyReply");
-        const responseMode = context.responseMode;
         if (responseMode === "text" || responseMode === "both") {
-          await this.telegram.sendMessage(update.chatId, reply);
+          await this.telegram.sendProgressiveMessage(update.chatId, reply, messageDraft.current);
+          messageDraft.current = null;
         }
         if (responseMode === "voice" || responseMode === "both") {
           try {
@@ -193,6 +199,7 @@ export class EvaWorkflow {
       metrics.db_query_count = measured.queryCount;
       return measured.result;
     } finally {
+      messageDraft.current?.stop();
       typing.stop?.();
       const delivery = this.telegram.getDeliveryMetrics();
       metrics.outbox_insert_ms = delivery.outboxInsertMs;
