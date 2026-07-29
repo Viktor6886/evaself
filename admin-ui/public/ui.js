@@ -179,21 +179,22 @@ async function loadAudit() {
 
 $("#login-form").addEventListener("submit", async (event) => {
   event.preventDefault();
+  const formElement = event.currentTarget;
   const submit = event.submitter;
-  submit.disabled = true;
+  if (submit) submit.disabled = true;
   try {
-    const form = new FormData(event.currentTarget);
+    const form = new FormData(formElement);
     const { payload } = await request("/auth/login", {
       method: "POST",
       body: JSON.stringify({ username: form.get("username"), password: form.get("password") }),
     });
-    event.currentTarget.reset();
+    formElement.reset();
     showApp(payload.user);
     openPage("settings");
   } catch (error) {
     showLogin(error.message);
   } finally {
-    submit.disabled = false;
+    if (submit) submit.disabled = false;
   }
 });
 
@@ -231,13 +232,14 @@ $("#sudo-form").addEventListener("submit", (event) => {
 });
 $("#password-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const data = new FormData(event.currentTarget);
+  const formElement = event.currentTarget;
+  const data = new FormData(formElement);
   try {
     await request("/auth/password", {
       method: "POST",
       body: JSON.stringify({ current_password: data.get("current_password"), new_password: data.get("new_password") }),
     });
-    event.currentTarget.reset();
+    formElement.reset();
     toast("Пароль изменён");
   } catch (error) { handleError(error); }
 });
