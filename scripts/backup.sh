@@ -2,12 +2,10 @@
 # =====================================================================
 # Full backup.
 #
-#   /var/backups/evaself/evaself-backup-YYYY-MM-DD-HH-MM.tar.gz
+#   /var/backups/evaself/evaself-backup-YYYY-MM-DD-HH-MM.tar.gz.enc
 #
-# Deliberately NOT encrypted, as specified. The archive contains .env and
-# therefore every secret of the installation — it is created with mode
-# 600 inside a 700 directory, and it must never be uploaded anywhere
-# public.
+# Архив содержит .env и Secret Store, поэтому всегда шифруется. Мастер-ключ
+# в архив не помещается: для восстановления его нужно хранить отдельно.
 #
 # Contents:
 #   postgres/     dumps of eva, nocodb, letta + roles/globals
@@ -29,7 +27,15 @@ load_env
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/evaself}"
 STAMP="$(date +%Y-%m-%d-%H-%M)"
 NAME="evaself-backup-${STAMP}"
-ARCHIVE="${BACKUP_DIR}/${NAME}.tar.gz"
+ARCHIVE="${BACKUP_DIR}/${NAME}.tar.gz.enc"
+MASTER_KEY_FILE="${EVA_BACKUP_MASTER_KEY_FILE:-${EVA_SECRETS_MASTER_KEY_FILE:-/etc/evaself/secrets-master-key}}"
+if [[ "$MASTER_KEY_FILE" != /* ]]; then
+	MASTER_KEY_FILE="$ROOT_DIR/${MASTER_KEY_FILE#./}"
+fi
+[ -s "$MASTER_KEY_FILE" ] ||
+	die "мастер-ключ Secret Store не найден: $MASTER_KEY_FILE"
+command -v openssl >/dev/null 2>&1 ||
+	die "для зашифрованного backup требуется openssl"
 
 mkdir -p "$BACKUP_DIR"
 chmod 700 "$BACKUP_DIR"
@@ -37,6 +43,7 @@ chmod 700 "$BACKUP_DIR"
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 WORK="$STAGE/$NAME"
+PLAIN_ARCHIVE="$STAGE/${NAME}.tar.gz"
 mkdir -p "$WORK"/{postgres,volumes,letta,config,content}
 
 step "Создание backup Evaself"
@@ -170,14 +177,19 @@ ok "манифест и checksums записаны"
 # ---------------------------------------------------------------------
 # 6. pack
 # ---------------------------------------------------------------------
-step "Упаковка"
-tar czf "$ARCHIVE" -C "$STAGE" "$NAME"
+step "Упаковка и шифрование"
+tar czf "$PLAIN_ARCHIVE" -C "$STAGE" "$NAME"
+openssl enc -aes-256-cbc -salt -pbkdf2 -iter 200000 \
+	-pass "file:$MASTER_KEY_FILE" \
+	-in "$PLAIN_ARCHIVE" -out "$ARCHIVE"
 chmod 600 "$ARCHIVE"
 ok "$(du -h "$ARCHIVE" | cut -f1)  $ARCHIVE"
 
-# verify the archive is readable before deleting anything
-if tar tzf "$ARCHIVE" >/dev/null 2>&1; then
-	ok "архив проверен"
+# Проверяем расшифровку и tar-поток до ротации старых файлов.
+if openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 \
+	-pass "file:$MASTER_KEY_FILE" -in "$ARCHIVE" 2>/dev/null |
+	tar tzf - >/dev/null 2>&1; then
+	ok "зашифрованный архив проверен"
 else
 	die "архив повреждён — ротация не выполнялась"
 fi
@@ -190,9 +202,13 @@ step "Ротация (хранение ${RETENTION} дней)"
 removed=0
 while IFS= read -r old; do
 	rm -f "$old"; removed=$((removed + 1))
-done < <(find "$BACKUP_DIR" -maxdepth 1 -name 'evaself-backup-*.tar.gz' -mtime "+${RETENTION}" 2>/dev/null)
+done < <(find "$BACKUP_DIR" -maxdepth 1 \
+	\( -name 'evaself-backup-*.tar.gz.enc' -o -name 'evaself-backup-*.tar.gz' \) \
+	-mtime "+${RETENTION}" 2>/dev/null)
 [ "$removed" -eq 0 ] && info "удалять нечего" || ok "удалено старых backup: ${removed}"
 
-REMAINING="$(find "$BACKUP_DIR" -maxdepth 1 -name 'evaself-backup-*.tar.gz' | wc -l)"
+REMAINING="$(find "$BACKUP_DIR" -maxdepth 1 \
+	\( -name 'evaself-backup-*.tar.gz.enc' -o -name 'evaself-backup-*.tar.gz' \) |
+	wc -l)"
 step "Готово — backup в ${BACKUP_DIR}: ${REMAINING}"
 say "  Восстановление: make restore BACKUP=${ARCHIVE}"

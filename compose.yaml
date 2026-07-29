@@ -365,6 +365,9 @@ services:
       EVA_ADMIN_BIND: 0.0.0.0
       EVA_ADMIN_LOG_LEVEL: ${EVA_AGENT_LOG_LEVEL:-info}
       EVA_ENV: ${EVA_ENV:-production}
+      EVA_UPDATER_SOCKET: /run/evaself-updater/updater.sock
+      EVA_INTERNAL_AGENT_URL: http://eva-agent-service:${EVA_AGENT_PORT}
+      EVA_OUTBOUND_HOST_ALLOWLIST: ${EVA_OUTBOUND_HOST_ALLOWLIST:-}
     command: ["node", "dist/admin/index.js"]
     volumes:
       - type: bind
@@ -373,18 +376,84 @@ services:
         read_only: true
         bind:
           create_host_path: false
+      - admin_updater_socket:/run/evaself-updater
     networks: [evaself-network]
     depends_on:
       admin-bootstrap:
         condition: service_completed_successfully
       valkey:
         condition: service_healthy
+      eva-updater:
+        condition: service_started
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8071/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 20s
       timeout: 5s
       retries: 10
       start_period: 20s
+
+  # Единственный привилегированный компонент административного контура.
+  # Контракт команд фиксирован в updater-index.ts; произвольные shell-команды
+  # по Unix socket не принимаются. admin-api Docker socket не получает.
+  eva-updater:
+    <<: [*restart, *logging]
+    build:
+      context: ./eva-agent-service
+      args:
+        NODE_BASE_VERSION: ${NODE_BASE_VERSION}
+    image: evaself/eva-agent-service:0.3.0
+    container_name: evaself-eva-updater
+    entrypoint: ["/usr/bin/tini", "--"]
+    command: ["node", "dist/admin/updater-index.js"]
+    environment:
+      EVA_UPDATER_SOCKET: /run/evaself-updater/updater.sock
+      EVA_UPDATER_PROJECT_DIR: ${EVASELF_INSTALL_DIR:-/workspace}
+      BACKUP_DIR: /var/backups/evaself
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - admin_updater_socket:/run/evaself-updater
+      - .:${EVASELF_INSTALL_DIR:-/workspace}
+      - ${BACKUP_DIR:-/var/backups/evaself}:/var/backups/evaself
+      - type: bind
+        source: ${EVA_SECRETS_MASTER_KEY_FILE:-/etc/evaself/secrets-master-key}
+        target: /run/secrets/eva-secrets-master-key
+        read_only: true
+        bind:
+          create_host_path: false
+    networks: [evaself-network]
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('net').createConnection('/run/evaself-updater/updater.sock').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  health-worker:
+    <<: [*restart, *logging]
+    build:
+      context: ./eva-agent-service
+      args:
+        NODE_BASE_VERSION: ${NODE_BASE_VERSION}
+    image: evaself/eva-agent-service:0.3.0
+    container_name: evaself-health-worker
+    environment:
+      DATABASE_URL: postgresql://${EVA_DB_USER}:${EVA_DB_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${EVA_DB_NAME}
+      VALKEY_URL: redis://:${VALKEY_PASSWORD}@${VALKEY_HOST}:${VALKEY_PORT}/2
+      EVA_UPDATER_SOCKET: /run/evaself-updater/updater.sock
+      EVA_HEALTH_INTERVAL_SECONDS: ${EVA_HEALTH_INTERVAL_SECONDS:-60}
+      EVA_HEALTH_TIMEOUT_MS: ${EVA_HEALTH_TIMEOUT_MS:-10000}
+      EVA_ADMIN_LOG_LEVEL: ${EVA_AGENT_LOG_LEVEL:-info}
+    command: ["node", "dist/admin/health-worker-index.js"]
+    volumes:
+      - admin_updater_socket:/run/evaself-updater
+    networks: [evaself-network]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      eva-updater:
+        condition: service_healthy
 
   # ===================================================================
   # ADMIN / DATA GUI
@@ -590,6 +659,8 @@ volumes:
     name: evaself_letta_provider_config
   letta_llm_control:
     name: evaself_letta_llm_control
+  admin_updater_socket:
+    name: evaself_admin_updater_socket
   nocodb_data:
     name: evaself_nocodb_data
   searxng_cache:

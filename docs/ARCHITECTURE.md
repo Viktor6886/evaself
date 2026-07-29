@@ -129,6 +129,12 @@ key, token, password, authorization, cookie и похожих полей.
 Letta, не имеет Docker socket и работает только с общесистемной
 конфигурацией, Secret Store, сессиями, RBAC, sudo и аудитом.
 
+Состояние установки опрашивает отдельный `health-worker`; `overview` читает
+только сохранённые снимки PostgreSQL. Перезапуск, backup и обновления
+передаются по Unix socket в `eva-updater`. Только updater видит Docker
+socket и принимает лишь фиксированный набор команд с проверкой имени
+сервиса. Пользовательские Base URL проходят через `OutboundGateway`.
+
 SDK 0.5.5 не содержит management-операций для изменения уже существующих
 memory blocks, custom tools, MCP servers, skills и knowledge folders.
 Evaself не обходит это ограничение прямыми REST-запросами: такие секции

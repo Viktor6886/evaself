@@ -26,6 +26,9 @@ const SAFE_EXTRA_SETTINGS = new Set([
   "EVA_EMBEDDING_BASE_URL", "EVA_EMBEDDING_MODEL", "EVA_EMBEDDING_DIM",
   "EVA_TELEGRAM_API_BASE_URL", "EVA_TELEGRAM_WEBAPP_MAX_AGE_SECONDS",
   "OWNER_TELEGRAM_ID", "TODOIST_API_URL", "TODOIST_PROJECT_ID",
+  "SEARXNG_BASE_URL", "MEDIA_ASR_BASE_URL", "MEDIA_ASR_MODEL",
+  "MEDIA_TTS_BASE_URL", "MEDIA_TTS_MODEL", "MEDIA_TTS_VOICE",
+  "MEDIA_MAX_UPLOAD_MB", "MEDIA_MAX_AUDIO_SECONDS", "MEDIA_TMP_TTL_SECONDS",
   "NC_ADMIN_EMAIL", "NC_INVITE_ONLY_SIGNUP", "LETTA_UI_USER",
 ]);
 
@@ -39,6 +42,8 @@ const SECRET_USED_BY: Record<string, string[]> = {
   TODOIST_API_TOKEN: ["agent-runtime"],
   CRAWL4AI_API_TOKEN: ["crawl4ai"],
   SEARXNG_SECRET: ["searxng"],
+  MEDIA_ASR_API_KEY: ["media-service"],
+  MEDIA_TTS_API_KEY: ["media-service"],
   NC_AUTH_JWT_SECRET: ["nocodb"],
   NC_ADMIN_PASSWORD: ["nocodb"],
   LETTA_UI_PASSWORD: ["letta-ui"],
@@ -135,8 +140,8 @@ async function bootstrapTransaction(
   try {
     await client.query("BEGIN");
     await client.query("SELECT pg_advisory_xact_lock(hashtext('evaself-admin-bootstrap'))");
-    const marker = await client.query(
-      "SELECT 1 FROM system_settings WHERE key = 'admin.bootstrap.env_import'",
+    const marker = await client.query<{ value_json: unknown }>(
+      "SELECT value_json FROM system_settings WHERE key = 'admin.bootstrap.env_import'",
     );
     const userCount = await client.query<{ count: string }>("SELECT count(*)::text AS count FROM admin_users");
     let ownerCreated = false;
@@ -153,7 +158,12 @@ async function bootstrapTransaction(
       );
       ownerCreated = true;
     }
-    if (marker.rowCount) {
+    const markerValue = marker.rows[0]?.value_json;
+    const markerSchema = markerValue && typeof markerValue === "object" &&
+      !Array.isArray(markerValue)
+      ? Number((markerValue as { schema?: unknown }).schema ?? 0)
+      : 0;
+    if (markerSchema >= 2) {
       await client.query("COMMIT");
       return { alreadyCompleted: true, ownerCreated, settingsImported: 0, secretsImported: 0 };
     }
@@ -207,7 +217,10 @@ async function bootstrapTransaction(
     await client.query(
       `INSERT INTO system_settings (key, value_json)
        VALUES ('admin.bootstrap.env_import',
-               jsonb_build_object('completed', true, 'schema', 1, 'source', 'environment'))`,
+               jsonb_build_object('completed', true, 'schema', 2, 'source', 'environment'))
+       ON CONFLICT (key) DO UPDATE SET
+         value_json = EXCLUDED.value_json,
+         updated_at = now()`,
     );
     await client.query("COMMIT");
     return { alreadyCompleted: false, ownerCreated, settingsImported, secretsImported };

@@ -24,3 +24,5 @@ export const adminLocked = (message: string, details: Record<string, unknown> = 
   new AdminApiError("account_locked", message, 423, details);
 export const preconditionRequired = () =>
   new AdminApiError("if_match_required", "Заголовок If-Match обязателен", 428);
+export const adminTooManyRequests = (message: string, details: Record<string, unknown> = {}) =>
+  new AdminApiError("rate_limited", message, 429, details);

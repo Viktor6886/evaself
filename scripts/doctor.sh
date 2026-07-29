@@ -227,7 +227,9 @@ else
 	soft "daily backup timer is not enabled"
 fi
 
-LATEST="$(find "$BACKUP_DIR" -maxdepth 1 -name 'evaself-backup-*.tar.gz' -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)"
+LATEST="$(find "$BACKUP_DIR" -maxdepth 1 \
+	\( -name 'evaself-backup-*.tar.gz.enc' -o -name 'evaself-backup-*.tar.gz' \) \
+	-printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)"
 if [ -n "$LATEST" ]; then
 	AGE_H=$(( ( $(date +%s) - $(stat -c %Y "$LATEST") ) / 3600 ))
 	SIZE="$(du -h "$LATEST" | cut -f1)"

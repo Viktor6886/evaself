@@ -5,8 +5,13 @@ import { createLogger } from "../logger.js";
 import { AuthService } from "./auth-service.js";
 import { AuditService } from "./audit-service.js";
 import { ConfigService } from "./config-service.js";
+import { HealthService } from "./health-service.js";
 import { loadMasterKey, SecretStore } from "./secret-store.js";
+import { OperationService } from "./operation-service.js";
+import { InternalAgentClient, ProviderService } from "./provider-service.js";
+import { OutboundGateway } from "./outbound-gateway.js";
 import { buildAdminServer } from "./server.js";
+import { UpdaterClient } from "./updater-client.js";
 
 const { Pool } = pg;
 
@@ -35,11 +40,21 @@ async function main(): Promise<void> {
   const auth = new AuthService(pool, redis);
   const audit = new AuditService(pool);
   const config = new ConfigService(pool, redis);
+  const health = new HealthService(pool, redis);
+  const operations = new OperationService(pool, redis, new UpdaterClient());
+  const providers = new ProviderService(
+    new InternalAgentClient(secrets),
+    new OutboundGateway(),
+  );
   const app = buildAdminServer({
     auth,
     audit,
     config,
     secrets,
+    health,
+    operations,
+    providers,
+    events: redis,
     logger,
     readiness: async () => {
       try {
@@ -53,7 +68,7 @@ async function main(): Promise<void> {
   const port = Number.parseInt(process.env.EVA_ADMIN_PORT ?? "8071", 10);
   const host = process.env.EVA_ADMIN_BIND ?? "0.0.0.0";
   await app.listen({ port, host });
-  logger.info("admin-api принимает запросы", { port, phase: 1 });
+  logger.info("admin-api принимает запросы", { port, phase: 2 });
 
   const shutdown = async (signal: string) => {
     logger.info("Остановка admin-api", { signal });

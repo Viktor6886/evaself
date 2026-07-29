@@ -136,14 +136,18 @@ make list-models         # запросить /models активного про�
 ## Общесистемная административная панель
 
 `https://<домен>/admin/` — отдельное приложение, не копия и не прокси
-Letta UI. В первой фазе оно предоставляет вход с server-side сессией,
-RBAC, sudo-подтверждение, системные настройки, write-only Secret Store и
-журнал административных изменений. Значения, маски, длина и хеш секретов
-не возвращаются браузеру.
+Letta UI. Оно предоставляет вход с server-side сессией, RBAC,
+sudo-подтверждение, системные настройки, write-only Secret Store, обзор,
+фоновые статусы, общий LLM-реестр, backup, обновления и журнал действий.
+Значения, маски, длина и хеш секретов не возвращаются браузеру.
+
+Перезапуск выполняет отдельный `eva-updater` с узким списком разрешённых
+операций; `admin-api` не имеет доступа к Docker socket.
 
 Управление agents, conversations, памятью и чатом остаётся только на
-`https://letta.<домен>/`. Контракт первой фазы описан в
-[документации административной панели](docs/ADMIN_PHASE1_CONTRACT.md).
+`https://letta.<домен>/`. Контракты описаны в
+[каркасе безопасности](docs/ADMIN_PHASE1_CONTRACT.md) и
+[эксплуатационных фазах](docs/ADMIN_PHASES_2_6_CONTRACT.md).
 
 ## Основные команды
 
@@ -156,7 +160,7 @@ make doctor
 make logs s=eva-agent-service
 
 make backup
-make restore BACKUP=/path/to/evaself-backup.tar.gz
+make restore BACKUP=/path/to/evaself-backup.tar.gz.enc
 make update-preview
 make update
 make rollback

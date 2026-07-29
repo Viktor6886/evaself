@@ -32,14 +32,14 @@
         <div><strong>Evaself</strong><span>Control Center</span></div>
       </div>
       <nav id="nav" aria-label="Разделы">
-        <button data-page="settings" class="nav-item active"><span>⌁</span>Системные настройки</button>
+        <button data-page="overview" class="nav-item active"><span>◉</span>Обзор</button>
+        <button data-page="services" class="nav-item"><span>▦</span>Сервисы и интеграции</button>
+        <button data-page="ai" class="nav-item"><span>✦</span>Искусственный интеллект</button>
+        <button data-page="operations" class="nav-item"><span>↻</span>Backup и обновления</button>
+        <div class="nav-caption">Управление</div>
+        <button data-page="settings" class="nav-item"><span>⌁</span>Системные настройки</button>
         <button data-page="security" class="nav-item"><span>◇</span>Безопасность и ключи</button>
         <button data-page="audit" class="nav-item"><span>≋</span>Журнал событий</button>
-        <div class="nav-caption">Следующие фазы</div>
-        <button class="nav-item disabled" disabled><span>◉</span>Обзор</button>
-        <button class="nav-item disabled" disabled><span>▦</span>Сервисы и интеграции</button>
-        <button class="nav-item disabled" disabled><span>✦</span>Искусственный интеллект</button>
-        <button class="nav-item disabled" disabled><span>↻</span>Backup и обновления</button>
       </nav>
       <a class="letta-link" href="https://letta.evaself.online/" target="_blank" rel="noreferrer">
         <span>↗</span><span><strong>Открыть Letta</strong><small>Агенты и диалоги</small></span>
@@ -49,7 +49,7 @@
     <section class="workspace">
       <header class="topbar">
         <button id="menu" class="icon-button menu" aria-label="Открыть меню">☰</button>
-        <div class="system-state"><i></i><span>Контур управления</span><strong>Фаза 1</strong></div>
+        <div class="system-state"><i id="system-dot"></i><span id="system-label">Контур управления</span><strong id="system-version">Evaself</strong></div>
         <div class="account">
           <div><strong id="account-name"></strong><span id="account-role"></span></div>
           <button id="logout" class="button ghost">Выйти</button>
@@ -57,14 +57,80 @@
       </header>
 
       <div class="content">
-        <section id="page-settings" class="page active">
+        <section id="page-overview" class="page active">
+          <div class="page-heading">
+            <div><p class="eyebrow">СОСТОЯНИЕ УСТАНОВКИ</p><h2>Обзор</h2><p>Быстрый снимок сервисов, ресурсов, backup и конфигурации без внешних запросов.</p></div>
+            <button id="reload-overview" class="button ghost">Обновить снимок</button>
+          </div>
+          <div id="overview-stats" class="stats overview-stats"></div>
+          <div id="host-stats" class="resource-grid"></div>
+          <div id="overview-groups" class="overview-groups"></div>
+        </section>
+
+        <section id="page-services" class="page">
+          <div class="page-heading">
+            <div><p class="eyebrow">HEALTH-WORKER</p><h2>Сервисы и интеграции</h2><p>Снимки обновляются в фоне. Ручная проверка выполняется асинхронно.</p></div>
+            <button id="reload-services" class="button ghost">Обновить</button>
+          </div>
+          <div class="tabs" role="tablist">
+            <button class="tab active" data-service-tab="services">Сервисы</button>
+            <button class="tab" data-service-tab="integrations">Интеграции</button>
+          </div>
+          <div id="services-list" class="status-grid"></div>
+          <div id="integrations-list" class="status-grid" hidden></div>
+        </section>
+
+        <section id="page-ai" class="page">
+          <div class="page-heading">
+            <div><p class="eyebrow">ОБЩИЕ AI-ПРОВАЙДЕРЫ</p><h2>Искусственный интеллект</h2><p>LLM всей установки. API Key доступен только на запись; переключение сохраняет агентов и память.</p></div>
+            <button id="new-provider" class="button primary">Добавить провайдера</button>
+          </div>
+          <div id="ai-summary" class="stats"></div>
+          <div id="providers-list" class="provider-list"></div>
+          <section id="provider-editor" class="card editor-card" hidden>
+            <div class="editor-heading"><div><h3 id="provider-editor-title">Новый LLM-провайдер</h3><p>OpenAI-compatible endpoint. Для локального адреса нужна серверная allowlist.</p></div><button id="close-provider" class="icon-button" aria-label="Закрыть">×</button></div>
+            <form id="provider-form" class="provider-form">
+              <input name="id" type="hidden">
+              <label>Название<input name="name" required maxlength="120"></label>
+              <label>Протокол<select name="protocol"><option value="openai-compatible">OpenAI-compatible</option></select></label>
+              <label class="span-2">Base URL<input name="base_url" type="url" placeholder="https://provider.example/v1" required></label>
+              <label>API Key<input name="api_key" type="password" autocomplete="new-password" placeholder="Для изменения введите новый"></label>
+              <label>Модель<input name="model" required></label>
+              <label>Context window<input name="context_window" type="number" min="1024" value="32768" required></label>
+              <label>Timeout, мс<input name="timeout_ms" type="number" min="1000" max="3600000" value="180000" required></label>
+              <label class="span-2">Дополнительные параметры JSON<textarea name="additional_parameters" rows="4">{}</textarea></label>
+              <div class="form-actions span-2"><button class="button ghost" id="cancel-provider" type="button">Отмена</button><button class="button primary" type="submit">Сохранить</button></div>
+            </form>
+          </section>
+        </section>
+
+        <section id="page-operations" class="page">
+          <div class="page-heading">
+            <div><p class="eyebrow">ЭКСПЛУАТАЦИЯ</p><h2>Backup и обновления</h2><p>Операции выполняет изолированный updater с фиксированным списком команд.</p></div>
+            <div class="heading-actions"><button id="check-updates" class="button ghost">Проверить обновления</button><button id="create-backup" class="button primary">Создать backup</button></div>
+          </div>
+          <div id="operations-summary" class="stats"></div>
+          <div class="operations-grid">
+            <section class="card operation-card">
+              <div class="section-heading"><div><h3>Архивы</h3><p>Мастер-ключ Secret Store в архив не включается.</p></div><button id="reload-backups" class="reset">Обновить</button></div>
+              <div id="backups-list" class="compact-list"></div>
+            </section>
+            <section class="card operation-card">
+              <div class="section-heading"><div><h3>Версия и обновление</h3><p>Перед установкой автоматически создаётся backup; при ошибке выполняется rollback.</p></div></div>
+              <div id="update-info"></div>
+              <button id="install-update" class="button danger wide" type="button">Установить обновление</button>
+            </section>
+          </div>
+          <section class="card table-card operation-history">
+            <div class="section-heading padded"><div><h3>История обновлений</h3></div></div>
+            <div class="table-wrap"><table><thead><tr><th>Начало</th><th>Компонент</th><th>Версия</th><th>Статус</th><th>Rollback</th></tr></thead><tbody id="update-history"></tbody></table></div>
+          </section>
+        </section>
+
+        <section id="page-settings" class="page">
           <div class="page-heading">
             <div><p class="eyebrow">КОНФИГУРАЦИЯ</p><h2>Системные настройки</h2><p>Единый реестр параметров runtime с серверной проверкой значений.</p></div>
-            <button id="save-settings" class="button primary">Сохранить изменения</button>
-          </div>
-          <div class="notice">
-            <strong>Agent SDK управляется в Letta</strong>
-            <span>Эта панель не создаёт и не удаляет агентов. Здесь находятся только общие параметры всей установки.</span>
+            <div class="heading-actions"><button id="save-settings" class="button ghost">Сохранить</button><button id="save-restart" class="button primary">Сохранить и перезапустить</button></div>
           </div>
           <div id="settings-meta" class="stats"></div>
           <form id="settings-form" class="settings-grid"></form>
@@ -108,10 +174,20 @@
   <dialog id="sudo-dialog">
     <form id="sudo-form" method="dialog">
       <p class="eyebrow">SUDO-РЕЖИМ</p>
-      <h2>Подтвердите действие</h2>
-      <p>Повторно введите пароль. Разрешение на запись секретов действует 10 минут.</p>
+      <h2 id="sudo-title">Подтвердите действие</h2>
+      <p id="sudo-description">Повторно введите пароль. Разрешение действует 10 минут.</p>
       <label>Пароль<input name="password" type="password" autocomplete="current-password" required></label>
       <div class="dialog-actions"><button value="cancel" class="button ghost">Отмена</button><button value="confirm" class="button primary">Подтвердить</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="confirm-dialog">
+    <form id="confirm-form" method="dialog">
+      <p class="eyebrow">ОПАСНАЯ ОПЕРАЦИЯ</p>
+      <h2 id="confirm-title">Подтвердите последствия</h2>
+      <p id="confirm-description"></p>
+      <label id="confirm-input-label">Контрольное слово<input name="confirmation" autocomplete="off" required></label>
+      <div class="dialog-actions"><button value="cancel" class="button ghost">Отмена</button><button value="confirm" class="button danger">Продолжить</button></div>
     </form>
   </dialog>
 

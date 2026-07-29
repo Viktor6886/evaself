@@ -61,7 +61,9 @@ step "Old backups"
 # ---------------------------------------------------------------------
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/evaself}"
 RETENTION="${BACKUP_RETENTION_DAYS:-14}"
-KEEP="$(find "$BACKUP_DIR" -maxdepth 1 -name 'evaself-backup-*.tar.gz' 2>/dev/null | wc -l)"
+KEEP="$(find "$BACKUP_DIR" -maxdepth 1 \
+	\( -name 'evaself-backup-*.tar.gz.enc' -o -name 'evaself-backup-*.tar.gz' \) \
+	2>/dev/null | wc -l)"
 
 if [ "$KEEP" -le 1 ]; then
 	info "only $KEEP backup(s) present — keeping all of them"
@@ -69,7 +71,9 @@ else
 	REMOVED=0
 	while IFS= read -r old; do
 		rm -f "$old"; REMOVED=$((REMOVED + 1))
-	done < <(find "$BACKUP_DIR" -maxdepth 1 -name 'evaself-backup-*.tar.gz' -mtime "+${RETENTION}" 2>/dev/null)
+	done < <(find "$BACKUP_DIR" -maxdepth 1 \
+		\( -name 'evaself-backup-*.tar.gz.enc' -o -name 'evaself-backup-*.tar.gz' \) \
+		-mtime "+${RETENTION}" 2>/dev/null)
 	[ "$REMOVED" -gt 0 ] && ok "removed $REMOVED backup(s) older than ${RETENTION} days" || info "all backups are within retention"
 fi
 

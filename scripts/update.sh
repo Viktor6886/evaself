@@ -97,7 +97,9 @@ fi
 step "Backup before updating"
 # =====================================================================
 "$SCRIPT_DIR/backup.sh" >/dev/null || die "the pre-update backup failed — update aborted"
-LATEST_BACKUP="$(find "${BACKUP_DIR:-/var/backups/evaself}" -maxdepth 1 -name 'evaself-backup-*.tar.gz' -printf '%T@ %p\n' | sort -rn | head -1 | cut -d' ' -f2-)"
+LATEST_BACKUP="$(find "${BACKUP_DIR:-/var/backups/evaself}" -maxdepth 1 \
+	\( -name 'evaself-backup-*.tar.gz.enc' -o -name 'evaself-backup-*.tar.gz' \) \
+	-printf '%T@ %p\n' | sort -rn | head -1 | cut -d' ' -f2-)"
 ok "backup created: $(basename "$LATEST_BACKUP")"
 
 # =====================================================================
@@ -159,7 +161,16 @@ fi
 # =====================================================================
 step "Restarting services"
 # =====================================================================
-compose up -d --remove-orphans >/dev/null
+if [ "${EVA_UPDATER_INVOCATION:-0}" = "1" ]; then
+	# updater завершает операцию и только после записи результата атомарно
+	# заменяет собственный контейнер через Docker API.
+	mapfile -t UPDATE_SERVICES < <(
+		compose config --services | grep -Ev '^(admin-api|eva-updater)$'
+	)
+	compose up -d --remove-orphans "${UPDATE_SERVICES[@]}" >/dev/null
+else
+	compose up -d --remove-orphans >/dev/null
+fi
 ok "containers recreated"
 recreate_caddy || die "Caddy не запустился с обновлённой конфигурацией"
 ok "Caddy пересоздан с актуальной конфигурацией"

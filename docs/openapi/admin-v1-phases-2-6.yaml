@@ -1,0 +1,119 @@
+openapi: 3.1.0
+info:
+  title: Evaself Admin API — фазы 2–4 и 6
+  version: 0.2.0
+servers:
+  - url: /api/admin/v1
+paths:
+  /overview:
+    get:
+      summary: Снимок состояния без внешних запросов
+      responses:
+        "200": {description: Снимок}
+  /services:
+    get:
+      summary: Сервисы и сохранённые статусы
+      responses:
+        "200": {description: Список}
+  /services/{id}/restart:
+    post:
+      summary: Асинхронный перезапуск разрешённого сервиса
+      parameters:
+        - {$ref: "#/components/parameters/Id"}
+      responses:
+        "202": {description: Операция принята}
+        "403": {description: Нужен sudo}
+  /integrations:
+    get:
+      summary: Интеграции и снимки состояния
+      responses:
+        "200": {description: Список}
+  /integrations/{id}/check:
+    post:
+      summary: Поставить ручную проверку в очередь
+      parameters:
+        - {$ref: "#/components/parameters/Id"}
+      responses:
+        "202": {description: Проверка принята}
+        "429": {description: Не чаще одного раза в 10 секунд}
+  /checks/{id}:
+    get:
+      summary: Результат асинхронной проверки
+      parameters:
+        - {$ref: "#/components/parameters/Id"}
+      responses:
+        "200": {description: Состояние проверки}
+        "404": {description: Не найдено}
+  /events:
+    get:
+      summary: SSE статусов и операций
+      responses:
+        "200":
+          description: text/event-stream
+  /providers:
+    get:
+      summary: Реестр AI-провайдеров
+      parameters:
+        - name: kind
+          in: query
+          schema: {type: string}
+      responses:
+        "200": {description: Список без секретных значений}
+    post:
+      summary: Создать провайдера
+      responses:
+        "201": {description: Создан}
+  /providers/{id}/check:
+    post:
+      summary: Проверить провайдера
+      parameters:
+        - {$ref: "#/components/parameters/Id"}
+      responses:
+        "202": {description: Проверка принята}
+  /providers/{id}/models/fetch:
+    post:
+      summary: Получить каталог моделей
+      parameters:
+        - {$ref: "#/components/parameters/Id"}
+      responses:
+        "200": {description: Каталог без Base URL и ключей для Letta}
+  /providers/{id}/activate:
+    post:
+      summary: Безопасно назначить активную модель
+      parameters:
+        - {$ref: "#/components/parameters/Id"}
+      responses:
+        "200": {description: Активирована либо выполнен rollback}
+  /backups:
+    get:
+      summary: Список архивов
+      responses:
+        "200": {description: Список}
+    post:
+      summary: Создать backup
+      parameters:
+        - {$ref: "#/components/parameters/IdempotencyKey"}
+      responses:
+        "202": {description: Операция принята}
+  /updates:
+    get:
+      summary: Версия, commit и история
+      responses:
+        "200": {description: Снимок}
+  /updates/check:
+    post:
+      summary: Проверить наличие обновления
+      responses:
+        "202": {description: Операция принята}
+components:
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: {type: string}
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: {type: string, minLength: 8, maxLength: 100}

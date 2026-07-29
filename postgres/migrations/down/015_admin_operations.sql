@@ -1,0 +1,13 @@
+BEGIN;
+DROP TABLE IF EXISTS update_history;
+DROP TABLE IF EXISTS backups;
+DROP TABLE IF EXISTS admin_operations;
+DROP TABLE IF EXISTS service_statuses;
+DROP TABLE IF EXISTS health_checks;
+DROP TABLE IF EXISTS provider_keys;
+DROP TABLE IF EXISTS provider_key_pools;
+DROP TABLE IF EXISTS provider_models;
+DROP TABLE IF EXISTS provider_configs;
+DROP TABLE IF EXISTS integration_configs;
+DELETE FROM schema_migrations WHERE version = '015_admin_operations';
+COMMIT;

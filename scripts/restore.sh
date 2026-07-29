@@ -2,7 +2,7 @@
 # =====================================================================
 # Restore an installation from a backup archive.
 #
-#   make restore BACKUP=/path/to/evaself-backup-....tar.gz
+#   make restore BACKUP=/path/to/evaself-backup-....tar.gz.enc
 #
 # Works both on the original server and on a brand new one. On a new
 # server the sequence is:
@@ -22,15 +22,32 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 require_root
 
-ARCHIVE="${1:?usage: restore.sh /path/to/evaself-backup-....tar.gz}"
+ARCHIVE="${1:?usage: restore.sh /path/to/evaself-backup-....tar.gz.enc}"
 [ -f "$ARCHIVE" ] || die "файл не найден: $ARCHIVE"
 
 step "Восстановление из $(basename "$ARCHIVE")"
-tar tzf "$ARCHIVE" >/dev/null 2>&1 || die "архив не является читаемым tar.gz"
-
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
-tar xzf "$ARCHIVE" -C "$STAGE"
+TAR_ARCHIVE="$ARCHIVE"
+if [[ "$ARCHIVE" == *.enc ]]; then
+	MASTER_KEY_FILE="${EVA_BACKUP_MASTER_KEY_FILE:-${EVA_SECRETS_MASTER_KEY_FILE:-/etc/evaself/secrets-master-key}}"
+	if [[ "$MASTER_KEY_FILE" != /* ]]; then
+		MASTER_KEY_FILE="$ROOT_DIR/${MASTER_KEY_FILE#./}"
+	fi
+	[ -s "$MASTER_KEY_FILE" ] ||
+		die "без мастер-ключа восстановление невозможно: $MASTER_KEY_FILE"
+	command -v openssl >/dev/null 2>&1 ||
+		die "для расшифровки backup требуется openssl"
+	TAR_ARCHIVE="$STAGE/decrypted.tar.gz"
+	if ! openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 \
+		-pass "file:$MASTER_KEY_FILE" \
+		-in "$ARCHIVE" -out "$TAR_ARCHIVE" 2>/dev/null; then
+		die "не удалось расшифровать backup: проверьте мастер-ключ"
+	fi
+fi
+tar tzf "$TAR_ARCHIVE" >/dev/null 2>&1 ||
+	die "архив не является читаемым backup Evaself"
+tar xzf "$TAR_ARCHIVE" -C "$STAGE"
 SRC="$(find "$STAGE" -maxdepth 1 -type d -name 'evaself-backup-*' | head -1)"
 [ -n "$SRC" ] || die "архив не похож на backup Evaself"
 

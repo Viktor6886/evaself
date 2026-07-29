@@ -2,7 +2,7 @@
 
 ```bash
 make backup
-make restore BACKUP=/var/backups/evaself/evaself-backup-YYYY-MM-DD-HH-MM.tar.gz
+make restore BACKUP=/var/backups/evaself/evaself-backup-YYYY-MM-DD-HH-MM.tar.gz.enc
 ```
 
 ## Что входит в архив
@@ -24,15 +24,17 @@ Provider volume содержит
 
 ## Защита архива
 
-Архив не шифруется автоматически, получает mode 600 и хранится в каталоге
-mode 700. Не загружайте его в публичное хранилище. Для передачи на другой
-сервер используйте SSH/SCP или предварительное шифрование.
+Новый архив автоматически шифруется `AES-256-CBC + PBKDF2`, получает
+mode 600 и хранится в каталоге mode 700. Мастер-ключ
+`EVA_SECRETS_MASTER_KEY` в архив не включается — храните его отдельно от
+VPS. Старые незашифрованные `.tar.gz` по-прежнему поддерживаются только для
+совместимости restore и помечаются в WebUI как `legacy`.
 
 ## Автоматический backup
 
 `evaself-backup.timer` запускается ежедневно. Срок хранения задаёт
 `BACKUP_RETENTION_DAYS` (по умолчанию 14 дней). Ротация начинается только
-после проверки нового архива через `tar tzf`.
+после пробной расшифровки и проверки tar-потока.
 
 ```bash
 systemctl list-timers evaself-backup.timer

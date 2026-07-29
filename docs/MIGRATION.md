@@ -21,7 +21,7 @@ ls -lh /var/backups/evaself/
 git clone https://github.com/Viktor6886/evaself.git
 cd evaself
 sudo make install
-make restore BACKUP=/root/evaself-backup-….tar.gz
+make restore BACKUP=/root/evaself-backup-….tar.gz.enc
 make doctor
 make test-llm
 ```

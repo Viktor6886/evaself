@@ -25,6 +25,10 @@ import {
 } from "./errors.js";
 import { auditParams, globalSecretRedactor } from "./redactor.js";
 import { SecretStore } from "./secret-store.js";
+import { HealthService } from "./health-service.js";
+import { OperationService } from "./operation-service.js";
+import { ProviderService } from "./provider-service.js";
+import type { Redis } from "ioredis";
 
 interface RouteAccess {
   public?: boolean;
@@ -45,6 +49,10 @@ export interface AdminServerServices {
   audit: AuditService;
   config: ConfigService;
   secrets: SecretStore;
+  health: HealthService;
+  operations: OperationService;
+  providers: ProviderService;
+  events: Redis;
   logger: Logger;
   readiness: () => Promise<boolean>;
 }
@@ -203,7 +211,7 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
     return reply.status(ready ? 200 : 503).send({
       service: "evaself-admin-api",
       status: ready ? "ok" : "degraded",
-      phase: 1,
+      phase: 6,
     });
   });
 
@@ -254,6 +262,200 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
   app.get("/api/admin/v1/me", {
     config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
   }, async (request) => ({ user: contexts.get(request)!.session!.user }));
+
+  app.get("/api/admin/v1/overview", {
+    config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
+  }, async () => await services.health.overview());
+
+  app.get("/api/admin/v1/services", {
+    config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
+  }, async () => await services.health.services());
+
+  app.get("/api/admin/v1/integrations", {
+    config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
+  }, async () => await services.health.integrations());
+
+  app.post("/api/admin/v1/services/:id/check", {
+    config: { roles: ["owner", "admin", "operator"] } satisfies RouteAccess,
+  }, async (request, reply) => {
+    const id = (request.params as { id?: string }).id ?? "";
+    const result = await services.health.enqueue(
+      "service",
+      id,
+      contexts.get(request)!.session!.user.id,
+    );
+    return reply.status(202).send(result);
+  });
+
+  app.post("/api/admin/v1/integrations/:id/check", {
+    config: { roles: ["owner", "admin", "operator"] } satisfies RouteAccess,
+  }, async (request, reply) => {
+    const id = (request.params as { id?: string }).id ?? "";
+    const result = await services.health.enqueue(
+      "integration",
+      id,
+      contexts.get(request)!.session!.user.id,
+    );
+    return reply.status(202).send(result);
+  });
+
+  app.get("/api/admin/v1/checks/:id", {
+    config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
+  }, async (request) => {
+    const id = (request.params as { id?: string }).id ?? "";
+    return { check: await services.health.check(id) };
+  });
+
+  app.post("/api/admin/v1/services/:id/restart", {
+    config: {
+      roles: ["owner", "admin"],
+      sudoScope: "services:restart",
+    } satisfies RouteAccess,
+  }, async (request, reply) => {
+    const id = (request.params as { id?: string }).id ?? "";
+    const operation = await services.operations.restart(
+      id,
+      contexts.get(request)!.session!.user.id,
+    );
+    return reply.status(202).send(operation);
+  });
+
+  app.get("/api/admin/v1/operations/:id", {
+    config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
+  }, async (request) => {
+    const id = (request.params as { id?: string }).id ?? "";
+    return { operation: await services.operations.get(id) };
+  });
+
+  app.get("/api/admin/v1/events", {
+    config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
+  }, async (request, reply) => {
+    const subscriber = services.events.duplicate();
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      "X-Accel-Buffering": "no",
+      Connection: "keep-alive",
+    });
+    reply.raw.write(`event: ready\ndata: ${JSON.stringify({ at: new Date().toISOString() })}\n\n`);
+    const heartbeat = setInterval(() => {
+      if (!reply.raw.destroyed) reply.raw.write(": keepalive\n\n");
+    }, 15_000);
+    heartbeat.unref();
+    const cleanup = () => {
+      clearInterval(heartbeat);
+      subscriber.disconnect();
+    };
+    request.raw.on("close", cleanup);
+    subscriber.on("message", (_channel, message) => {
+      if (!reply.raw.destroyed) reply.raw.write(`event: update\ndata: ${message}\n\n`);
+    });
+    await subscriber.subscribe("eva.admin.events");
+  });
+
+  app.get("/api/admin/v1/providers", {
+    config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
+  }, async (request) => {
+    const kind = String((request.query as { kind?: string }).kind ?? "llm");
+    return await services.providers.list(kind);
+  });
+
+  app.post("/api/admin/v1/providers", {
+    config: { roles: ["owner", "admin"] } satisfies RouteAccess,
+  }, async (request, reply) => {
+    const provider = await services.providers.create(objectBody(request.body));
+    return reply.status(201).send(provider);
+  });
+
+  app.patch("/api/admin/v1/providers/:id", {
+    config: { roles: ["owner", "admin"] } satisfies RouteAccess,
+  }, async (request) => {
+    const id = (request.params as { id?: string }).id ?? "";
+    return await services.providers.update(id, objectBody(request.body));
+  });
+
+  app.delete("/api/admin/v1/providers/:id", {
+    config: { roles: ["owner", "admin"] } satisfies RouteAccess,
+  }, async (request, reply) => {
+    const id = (request.params as { id?: string }).id ?? "";
+    await services.providers.remove(id);
+    return reply.status(204).send();
+  });
+
+  app.post("/api/admin/v1/providers/:id/check", {
+    config: { roles: ["owner", "admin", "operator"] } satisfies RouteAccess,
+  }, async (request) => {
+    const id = (request.params as { id?: string }).id ?? "";
+    return await services.providers.check(id);
+  });
+
+  app.post("/api/admin/v1/providers/:id/models/fetch", {
+    config: { roles: ["owner", "admin", "operator"] } satisfies RouteAccess,
+  }, async (request) => {
+    const id = (request.params as { id?: string }).id ?? "";
+    return await services.providers.models(id);
+  });
+
+  app.post("/api/admin/v1/providers/:id/activate", {
+    config: {
+      roles: ["owner", "admin"],
+      sudoScope: "providers:activate",
+    } satisfies RouteAccess,
+  }, async (request) => {
+    const id = (request.params as { id?: string }).id ?? "";
+    return await services.providers.activate(id);
+  });
+
+  app.get("/api/admin/v1/backups", {
+    config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
+  }, async () => await services.operations.backups());
+
+  app.post("/api/admin/v1/backups", {
+    config: { roles: ["owner", "admin"] } satisfies RouteAccess,
+  }, async (request, reply) => {
+    const key = typeof request.headers["idempotency-key"] === "string"
+      ? request.headers["idempotency-key"]
+      : undefined;
+    const operation = await services.operations.createBackup(
+      contexts.get(request)!.session!.user.id,
+      key,
+    );
+    return reply.status(202).send(operation);
+  });
+
+  app.get("/api/admin/v1/updates", {
+    config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
+  }, async () => await services.operations.updates());
+
+  app.post("/api/admin/v1/updates/check", {
+    config: { roles: ["owner", "admin", "operator"] } satisfies RouteAccess,
+  }, async (request, reply) => {
+    const operation = await services.operations.checkUpdate(
+      contexts.get(request)!.session!.user.id,
+    );
+    return reply.status(202).send(operation);
+  });
+
+  app.post("/api/admin/v1/updates/install", {
+    config: {
+      roles: ["owner"],
+      sudoScope: "operations:update",
+    } satisfies RouteAccess,
+  }, async (request, reply) => {
+    const body = objectBody(request.body);
+    if (body.confirm !== "UPDATE") {
+      throw adminBadRequest("Для установки обновления передайте confirm=UPDATE");
+    }
+    const key = typeof request.headers["idempotency-key"] === "string"
+      ? request.headers["idempotency-key"]
+      : undefined;
+    const operation = await services.operations.installUpdate(
+      contexts.get(request)!.session!.user.id,
+      key,
+    );
+    return reply.status(202).send(operation);
+  });
 
   app.post("/api/admin/v1/sudo", {
     config: { roles: ["owner", "admin"] } satisfies RouteAccess,

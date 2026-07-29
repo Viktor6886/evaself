@@ -246,7 +246,10 @@ jobs:
               'goal_recommendations','user_strategies','learning_attempts',
               'memory_nodes','memory_edges','conversation_highlights',
               'admin_users','admin_sessions','sudo_grants','system_settings',
-              'config_versions','secret_records','audit_log'
+              'config_versions','secret_records','audit_log',
+              'integration_configs','provider_configs','provider_models',
+              'provider_key_pools','provider_keys','health_checks',
+              'service_statuses','admin_operations','backups','update_history'
             ]) AS t
             WHERE to_regclass('public.' || t) IS NULL;
             IF missing IS NOT NULL THEN RAISE EXCEPTION 'missing tables: %', missing; END IF;
