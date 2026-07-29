@@ -145,3 +145,24 @@ test("Telegram replies get deterministic outbox keys for one durable update", as
     ],
   );
 });
+
+test("delivery metrics separate outbox insert from Telegram send", async () => {
+  const telegram = new TelegramClient({
+    telegramBotToken: "fake",
+    telegramApiBaseUrl: "https://api.telegram.invalid",
+  } as never, logger);
+  telegram.setOutbox({
+    send: async (envelope) => {
+      envelope.onMetrics?.({ outboxInsertMs: 1.5 });
+      envelope.onMetrics?.({ telegramSendMs: 4.25 });
+      return { ok: true };
+    },
+  });
+
+  let metrics = { outboxInsertMs: 0, telegramSendMs: 0 };
+  await telegram.withDeliveryContext("metric-test", async () => {
+    await telegram.sendMessage(123, "готово");
+    metrics = telegram.getDeliveryMetrics();
+  });
+  assert.deepEqual(metrics, { outboxInsertMs: 1.5, telegramSendMs: 4.25 });
+});

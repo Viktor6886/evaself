@@ -122,6 +122,14 @@ jobs:
   agent-service:
     name: eva-agent-service (TypeScript)
     runs-on: ubuntu-24.04
+    env:
+      EVA_PROFILE_COMPLETION_ENABLED: "true"
+      EVA_VECTOR_GOALS_ENABLED: "true"
+      EVA_GRAPH_MEMORY_ENABLED: "true"
+      EVA_GRAPH_CONTEXT_TIMEOUT_MS: "75"
+      EVA_PROFILE_CACHE_TTL_SECONDS: "60"
+      EVA_CONVERSATION_MIRROR_ENABLED: "false"
+      EVA_OUTBOX_ENABLED: "true"
     defaults:
       run:
         working-directory: eva-agent-service

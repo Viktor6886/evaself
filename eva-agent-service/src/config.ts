@@ -54,9 +54,13 @@ export interface Config {
   heartbeatIntervalMs: number;
   typingIntervalMs: number;
   defaultTimezone: string;
+  profileCompletionEnabled: boolean;
+  vectorGoalsEnabled: boolean;
   graphMemoryEnabled: boolean;
   graphContextTimeoutMs: number;
+  profileCacheTtlSeconds: number;
   conversationMirrorEnabled: boolean;
+  outboxEnabled: boolean;
 
   lavaWebhookUser: string;
   lavaWebhookPassword: string;
@@ -159,9 +163,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     heartbeatIntervalMs: int("EVA_HEARTBEAT_INTERVAL_MS", 10 * 60_000),
     typingIntervalMs: int("EVA_TELEGRAM_TYPING_INTERVAL_MS", 4_000),
     defaultTimezone: str("TZ", "UTC"),
+    profileCompletionEnabled: bool("EVA_PROFILE_COMPLETION_ENABLED", true),
+    vectorGoalsEnabled: bool("EVA_VECTOR_GOALS_ENABLED", true),
     graphMemoryEnabled: bool("EVA_GRAPH_MEMORY_ENABLED", true),
     graphContextTimeoutMs: int("EVA_GRAPH_CONTEXT_TIMEOUT_MS", 75),
+    profileCacheTtlSeconds: int("EVA_PROFILE_CACHE_TTL_SECONDS", 60),
     conversationMirrorEnabled: bool("EVA_CONVERSATION_MIRROR_ENABLED", false),
+    outboxEnabled: bool("EVA_OUTBOX_ENABLED", true),
 
     lavaWebhookUser: str("LAVA_WEBHOOK_USER"),
     lavaWebhookPassword: str("LAVA_WEBHOOK_PASSWORD"),

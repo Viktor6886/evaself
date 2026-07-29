@@ -45,6 +45,7 @@ export class AgentToolFactory {
   private readonly goals: GoalToolFactory;
   private readonly tasks: TaskToolFactory;
   private readonly todoist: TodoistToolFactory;
+  private readonly vectorGoalsEnabled: boolean;
   private readonly runtimeContexts = new Map<
     string,
     { expiresAt: number; value: Promise<AgentRuntimeContext> }
@@ -59,6 +60,7 @@ export class AgentToolFactory {
     goals?: GoalService,
     graph?: GraphRepository,
   ) {
+    this.vectorGoalsEnabled = config.vectorGoalsEnabled !== false;
     this.core = new CoreToolFactory(config, db, telegram);
     this.profile = new ProfileToolFactory(profile ?? new UserProfileService(db));
     this.goals = new GoalToolFactory(goals ?? new GoalService(db));
@@ -71,7 +73,7 @@ export class AgentToolFactory {
     return [
       ...this.core.build(tool),
       ...this.profile.build(tool),
-      ...this.goals.build(tool),
+      ...(this.vectorGoalsEnabled ? this.goals.build(tool) : []),
       ...this.tasks.build(tool),
       ...this.todoist.build(tool),
     ];

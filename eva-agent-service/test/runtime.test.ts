@@ -80,6 +80,36 @@ test("time context uses the configured timezone", () => {
   assert.match(prompt, /vector_protocol/);
 });
 
+test("VECTOR and profile hints are removed when their feature flags are off", () => {
+  const builder = new RuntimeContextBuilder({} as never, {
+    defaultTimezone: "UTC",
+    profileCompletionEnabled: false,
+    vectorGoalsEnabled: false,
+  });
+  const prompt = builder.wrapUserMessage({
+    userId: 1,
+    telegramId: 1,
+    agentId: "agent",
+    conversationId: "conversation",
+    purpose: "chat",
+    localTime: "2026-07-29T12:00:00Z",
+    timezone: "UTC",
+    city: null,
+    countryCode: null,
+    responseLanguage: "ru",
+    responseMode: "text",
+    useEmoji: true,
+    communicationStyle: null,
+    profileHint: "Скрытая подсказка",
+    activeGoal: "Цель",
+    nextResult: "Результат",
+    nextStep: "Шаг",
+    relevantMemory: [],
+  }, "Привет");
+  assert.doesNotMatch(prompt, /vector_protocol/);
+  assert.doesNotMatch(prompt, /Скрытая подсказка/);
+});
+
 test("cron supports wildcards, ranges, steps and Sunday alias", () => {
   assert.equal(cronFieldMatches("*/15", 30, 0, 59), true);
   assert.equal(cronFieldMatches("*/15", 31, 0, 59), false);

@@ -109,6 +109,36 @@ test("profile hint is suppressed during a crisis and selects no more than one fi
   assert.equal(shouldSuppressProfileQuestion("обычная беседа"), false);
 });
 
+test("profile hint query enforces cooldown, declined state and one-field limit", async () => {
+  let call = 0;
+  let queryText = "";
+  const service = new ProfileCompletenessService({
+    query: async (sql: string) => {
+      queryText = sql;
+      call += 1;
+      return call === 1
+        ? {
+            rows: [{
+              field_key: "interests",
+              title: "Интересы",
+              prompt_hint: "Спроси естественно.",
+              sensitivity: "normal",
+              status: null,
+              field_value: null,
+              field_json: null,
+            }],
+          }
+        : { rows: [] };
+    },
+  } as never);
+
+  assert.equal((await service.nextHint(1, "Расскажу о новом хобби"))?.fieldKey, "interests");
+  assert.equal(await service.nextHint(1, "Продолжим разговор"), null);
+  assert.match(queryText, /LIMIT 1/);
+  assert.match(queryText, /last_asked_at/);
+  assert.match(queryText, /'declined'/);
+});
+
 function definition(
   fieldKey: string,
   valueType: "string" | "string_array" | "object",

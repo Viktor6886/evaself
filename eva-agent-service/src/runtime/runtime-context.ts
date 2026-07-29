@@ -25,6 +25,11 @@ export interface RuntimeContext {
   nextResult: string | null;
   nextStep: string | null;
   relevantMemory: string[];
+  metrics?: {
+    runtimeContextMs: number;
+    profileCheckMs: number;
+    cacheHit: boolean;
+  };
 }
 
 interface RuntimeContextRow {
@@ -62,6 +67,8 @@ export class RuntimeContextBuilder {
       defaultTimezone: string;
       cacheTtlMs?: number;
       maxContextCharacters?: number;
+      profileCompletionEnabled?: boolean;
+      vectorGoalsEnabled?: boolean;
       now?: () => Date;
     },
   ) {
@@ -76,7 +83,9 @@ export class RuntimeContextBuilder {
     relevantMemory?: string[];
     detectLanguage?: boolean;
   }): Promise<RuntimeContext> {
-    const row = await this.load(input.userId, input.conversationId);
+    const started = performance.now();
+    const loaded = await this.load(input.userId, input.conversationId);
+    const row = loaded.row;
     const language = await this.languageResolver.resolve(
       input.userId,
       {
@@ -96,6 +105,12 @@ export class RuntimeContextBuilder {
     }
     const timezone = validTimezoneOr(row.timezone, this.options.defaultTimezone);
     const local = localNow(timezone, this.options.now?.() ?? new Date());
+    const profileStarted = performance.now();
+    const profileHint = this.options.profileCompletionEnabled === false ||
+      shouldSuppressProfileQuestion(input.languageMessage ?? input.userMessage)
+      ? null
+      : profileHintFrom(row);
+    const profileCheckMs = elapsed(profileStarted);
     return {
       userId: Number(row.user_id),
       telegramId: Number(row.telegram_id),
@@ -110,13 +125,22 @@ export class RuntimeContextBuilder {
       responseMode: row.response_mode,
       useEmoji: row.use_emoji,
       communicationStyle: row.communication_style,
-      profileHint: shouldSuppressProfileQuestion(input.languageMessage ?? input.userMessage)
+      profileHint,
+      activeGoal: this.options.vectorGoalsEnabled === false
         ? null
-        : profileHintFrom(row),
-      activeGoal: row.active_goal_title ?? null,
-      nextResult: row.next_result_title ?? null,
-      nextStep: row.next_action ?? null,
+        : row.active_goal_title ?? null,
+      nextResult: this.options.vectorGoalsEnabled === false
+        ? null
+        : row.next_result_title ?? null,
+      nextStep: this.options.vectorGoalsEnabled === false
+        ? null
+        : row.next_action ?? null,
       relevantMemory: (input.relevantMemory ?? []).slice(0, 5),
+      metrics: {
+        runtimeContextMs: elapsed(started),
+        profileCheckMs,
+        cacheHit: loaded.cacheHit,
+      },
     };
   }
 
@@ -128,7 +152,10 @@ export class RuntimeContextBuilder {
       ["response_language", context.responseLanguage],
       ["response_mode", context.responseMode],
       ["communication_style", context.communicationStyle],
-      ["profile_hint", context.profileHint],
+      [
+        "profile_hint",
+        this.options.profileCompletionEnabled === false ? null : context.profileHint,
+      ],
       ["active_goal", context.activeGoal],
       ["next_result", context.nextResult],
       ["next_step", context.nextStep],
@@ -136,9 +163,11 @@ export class RuntimeContextBuilder {
     const lines = fields
       .filter((entry): entry is [string, string] => Boolean(entry[1]))
       .map(([key, value]) => `${key}: ${escapeContextValue(value)}`);
-    lines.push(
-      "vector_protocol: черновик цели активируется только после явного подтверждения; действие должно иметь артефакт, первый физический шаг, время, длительность, if-then и критерий завершения; после действия спроси о факте, а при отклонении меняй один элемент и один следующий малый шаг без обвинений",
-    );
+    if (this.options.vectorGoalsEnabled !== false) {
+      lines.push(
+        "vector_protocol: черновик цели активируется только после явного подтверждения; действие должно иметь артефакт, первый физический шаг, время, длительность, if-then и критерий завершения; после действия спроси о факте, а при отклонении меняй один элемент и один следующий малый шаг без обвинений",
+      );
+    }
     if (context.relevantMemory.length > 0) {
       lines.push(
         "relevant_memory:",
@@ -164,10 +193,15 @@ export class RuntimeContextBuilder {
     }
   }
 
-  private async load(userId: number, conversationId: string): Promise<RuntimeContextRow> {
+  private async load(
+    userId: number,
+    conversationId: string,
+  ): Promise<{ row: RuntimeContextRow; cacheHit: boolean }> {
     const key = `${userId}:${conversationId}`;
     const cached = this.cache.get(key);
-    if (cached && cached.expiresAt > Date.now()) return cached.row;
+    if (cached && cached.expiresAt > Date.now()) {
+      return { row: cached.row, cacheHit: true };
+    }
     const { rows } = await this.db.query<RuntimeContextRow>(
       `SELECT
           u.id AS user_id,
@@ -213,6 +247,7 @@ export class RuntimeContextBuilder {
           LEFT JOIN onboarding_fields f
             ON f.user_id = u.id AND f.field_key = d.field_key
           WHERE d.enabled
+            AND $4::boolean
             AND COALESCE(f.status, 'missing') NOT IN
                 ('confirmed', 'declined', 'not_applicable', 'superseded')
             AND COALESCE(f.ask_count, 0) < d.max_ask_count
@@ -269,6 +304,7 @@ export class RuntimeContextBuilder {
              LIMIT 1
           ) next_block ON true
           WHERE g.user_id = u.id
+            AND $5::boolean
             AND g.status = 'active'
             AND g.user_confirmed
           ORDER BY g.priority, g.updated_at DESC
@@ -276,7 +312,13 @@ export class RuntimeContextBuilder {
         ) goal_context ON true
        WHERE u.id = $1
        LIMIT 1`,
-      [userId, conversationId, this.options.defaultTimezone],
+      [
+        userId,
+        conversationId,
+        this.options.defaultTimezone,
+        this.options.profileCompletionEnabled !== false,
+        this.options.vectorGoalsEnabled !== false,
+      ],
     );
     const row = rows[0];
     if (!row) throw new Error("Не найден runtime-контекст пользователя и conversation");
@@ -284,7 +326,7 @@ export class RuntimeContextBuilder {
       expiresAt: Date.now() + Math.max(1_000, this.options.cacheTtlMs ?? 45_000),
       row,
     });
-    return row;
+    return { row, cacheHit: false };
   }
 }
 
@@ -332,4 +374,8 @@ function escapeUserMessage(value: string): string {
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;");
+}
+
+function elapsed(started: number): number {
+  return Math.round((performance.now() - started) * 10) / 10;
 }

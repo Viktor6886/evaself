@@ -2,7 +2,11 @@ import { timingSafeEqual } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 
 import type { Config } from "./config.js";
-import type { OutboxDelivery, OutboxTransport } from "./delivery/outbox.js";
+import type {
+  DeliveryMetrics,
+  OutboxDelivery,
+  OutboxTransport,
+} from "./delivery/outbox.js";
 import type { Logger } from "./logger.js";
 
 export interface TelegramUser {
@@ -53,7 +57,11 @@ export class TelegramClient implements OutboxTransport {
   private readonly baseUrl: string;
   private readonly logger: Logger;
   private outbox: OutboxDelivery | null = null;
-  private readonly deliveryContext = new AsyncLocalStorage<{ prefix: string; sequence: number }>();
+  private readonly deliveryContext = new AsyncLocalStorage<{
+    prefix: string;
+    sequence: number;
+    metrics: DeliveryMetrics;
+  }>();
 
   constructor(config: Config, logger: Logger) {
     this.token = config.telegramBotToken;
@@ -70,7 +78,18 @@ export class TelegramClient implements OutboxTransport {
   }
 
   async withDeliveryContext<T>(prefix: string, work: () => Promise<T>): Promise<T> {
-    return await this.deliveryContext.run({ prefix, sequence: 0 }, work);
+    return await this.deliveryContext.run({
+      prefix,
+      sequence: 0,
+      metrics: { outboxInsertMs: 0, telegramSendMs: 0 },
+    }, work);
+  }
+
+  getDeliveryMetrics(): DeliveryMetrics {
+    const metrics = this.deliveryContext.getStore()?.metrics;
+    return metrics
+      ? { ...metrics }
+      : { outboxInsertMs: 0, telegramSendMs: 0 };
   }
 
   async sendMessage(
@@ -143,7 +162,12 @@ export class TelegramClient implements OutboxTransport {
       });
       return;
     }
-    await this.sendVoiceDirect(chatId, audio, filename);
+    const started = performance.now();
+    try {
+      await this.sendVoiceDirect(chatId, audio, filename);
+    } finally {
+      this.addDeliveryMetrics({ telegramSendMs: elapsed(started) });
+    }
   }
 
   async deliver(method: string, payload: Record<string, unknown>): Promise<unknown> {
@@ -225,12 +249,32 @@ export class TelegramClient implements OutboxTransport {
     chatId: number,
     payload: Record<string, unknown>,
   ): Promise<unknown> {
-    if (!this.outbox) return await this.call(method, payload);
+    if (!this.outbox) {
+      const started = performance.now();
+      try {
+        return await this.call(method, payload);
+      } finally {
+        this.addDeliveryMetrics({ telegramSendMs: elapsed(started) });
+      }
+    }
     const context = this.deliveryContext.getStore();
     const idempotencyKey = context
       ? `${context.prefix}:${String(context.sequence++).padStart(3, "0")}:${method}`
       : undefined;
-    return await this.outbox.send({ method, chatId, payload, idempotencyKey });
+    return await this.outbox.send({
+      method,
+      chatId,
+      payload,
+      idempotencyKey,
+      onMetrics: (metrics) => this.addDeliveryMetrics(metrics),
+    });
+  }
+
+  private addDeliveryMetrics(metrics: Partial<DeliveryMetrics>): void {
+    const store = this.deliveryContext.getStore();
+    if (!store) return;
+    store.metrics.outboxInsertMs += metrics.outboxInsertMs ?? 0;
+    store.metrics.telegramSendMs += metrics.telegramSendMs ?? 0;
   }
 
   private assertConfigured(): void {
@@ -294,4 +338,8 @@ export const ALLOWED_REACTIONS = new Set([
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function elapsed(started: number): number {
+  return Math.round((performance.now() - started) * 10) / 10;
 }

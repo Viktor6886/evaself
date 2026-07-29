@@ -31,6 +31,23 @@ test("local task time is converted to UTC with the stored IANA timezone", () => 
     localDateTimeToUtc("2026-01-15T09:00:00", "Europe/Helsinki"),
     "2026-01-15T07:00:00Z",
   );
+  assert.equal(
+    localDateTimeToUtc("2026-07-15T09:00:00", "Europe/Helsinki"),
+    "2026-07-15T06:00:00Z",
+  );
+});
+
+test("Perm and Helsinki aliases resolve to their IANA timezones", async () => {
+  const resolver = new TimezoneResolver({
+    query: async (_sql: string, values: unknown[]) => ({
+      rows: String(values[0]) === "пермь"
+        ? [{ city: "Пермь", country_code: "RU", timezone: "Asia/Yekaterinburg" }]
+        : [{ city: "Хельсинки", country_code: "FI", timezone: "Europe/Helsinki" }],
+    }),
+  } as never);
+
+  assert.equal((await resolver.resolve("Пермь")).resolved?.timezone, "Asia/Yekaterinburg");
+  assert.equal((await resolver.resolve("Хельсинки")).resolved?.timezone, "Europe/Helsinki");
 });
 
 test("timezone resolver validates IANA and returns ambiguity instead of guessing", async () => {

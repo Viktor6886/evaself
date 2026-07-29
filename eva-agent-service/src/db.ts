@@ -11,6 +11,7 @@
  */
 
 import pg from "pg";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { databaseUnavailable } from "./errors.js";
 
 export interface UserRow {
@@ -132,7 +133,9 @@ export interface AdminAuditInput {
 
 export class Database {
   private pool: pg.Pool | null = null;
+  private poolView: pg.Pool | null = null;
   private readonly connectionString: string;
+  private readonly queryMetrics = new AsyncLocalStorage<{ count: number }>();
 
   constructor(connectionString: string) {
     this.connectionString = connectionString;
@@ -146,17 +149,27 @@ export class Database {
       idleTimeoutMillis: 30_000,
       connectionTimeoutMillis: 10_000,
     });
+    this.poolView = this.instrumentPool(this.pool);
     await this.pool.query("SELECT 1");
   }
 
   async close(): Promise<void> {
     await this.pool?.end();
     this.pool = null;
+    this.poolView = null;
   }
 
   private require(): pg.Pool {
-    if (!this.pool) throw databaseUnavailable("the service has no database connection");
-    return this.pool;
+    if (!this.poolView) throw databaseUnavailable("the service has no database connection");
+    return this.poolView;
+  }
+
+  async withQueryMetrics<T>(
+    work: () => Promise<T>,
+  ): Promise<{ result: T; queryCount: number }> {
+    const counter = { count: 0 };
+    const result = await this.queryMetrics.run(counter, work);
+    return { result, queryCount: counter.count };
   }
 
   async ping(): Promise<boolean> {
@@ -484,6 +497,44 @@ export class Database {
     } finally {
       client.release();
     }
+  }
+
+  private instrumentPool(pool: pg.Pool): pg.Pool {
+    return new Proxy(pool, {
+      get: (target, property) => {
+        if (property === "query") {
+          return (...args: unknown[]) => {
+            this.incrementQueryCount();
+            return Reflect.apply(target.query, target, args);
+          };
+        }
+        if (property === "connect") {
+          return async () => this.instrumentClient(await target.connect());
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+  }
+
+  private instrumentClient(client: pg.PoolClient): pg.PoolClient {
+    return new Proxy(client, {
+      get: (target, property) => {
+        if (property === "query") {
+          return (...args: unknown[]) => {
+            this.incrementQueryCount();
+            return Reflect.apply(target.query, target, args);
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+  }
+
+  private incrementQueryCount(): void {
+    const metrics = this.queryMetrics.getStore();
+    if (metrics) metrics.count += 1;
   }
 
   // -----------------------------------------------------------------

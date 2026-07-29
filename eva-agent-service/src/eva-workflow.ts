@@ -7,6 +7,7 @@ import type { LettaService } from "./letta.js";
 import type { LlmManager } from "./llm.js";
 import type { Logger } from "./logger.js";
 import type { GraphContextService } from "./memory/graph-context.js";
+import type { ConversationHighlightService } from "./memory/conversation-highlights.js";
 import type { UserProfileService } from "./profile/profile-service.js";
 import type { UserQueue } from "./queue.js";
 import type { RuntimeContextBuilder } from "./runtime/runtime-context.js";
@@ -38,6 +39,7 @@ export class EvaWorkflow {
     private readonly profile: UserProfileService,
     private readonly logger: Logger,
     private readonly graphContext?: GraphContextService,
+    private readonly highlights?: ConversationHighlightService,
   ) {}
 
   /** Awaitable entry point used by tests and controlled reprocessing. */
@@ -57,8 +59,20 @@ export class EvaWorkflow {
 
   private async process(update: NormalizedUpdate): Promise<InboxResult> {
     const typing: { stop: (() => void) | null } = { stop: null };
+    const started = performance.now();
+    const metrics = {
+      runtime_context_ms: 0,
+      profile_check_ms: 0,
+      graph_query_ms: 0,
+      letta_turn_ms: 0,
+      outbox_insert_ms: 0,
+      telegram_send_ms: 0,
+      total_turn_ms: 0,
+      db_query_count: 0,
+    };
     try {
-      return await this.queue.run(update.telegramId, async () => {
+      const measured = await this.db.withQueryMetrics(async () =>
+        await this.queue.run(update.telegramId, async (): Promise<InboxResult> => {
         const { user, link } = await this.ensureUserAndAgent(update);
         const language = preferredResponseLanguage(user);
         await this.db.attachTelegramUpdateToUser(update.updateId, user.id);
@@ -120,6 +134,7 @@ export class EvaWorkflow {
         if (!conversationId) throw new Error("У агента отсутствует активный conversation");
 
         const graph = await this.graphContext?.findRelevant(user.id, prompt);
+        metrics.graph_query_ms = graph?.elapsedMs ?? 0;
         if (graph?.used) {
           this.logger.debug("Графовый контекст обработан", {
             userId: user.id,
@@ -138,11 +153,20 @@ export class EvaWorkflow {
             (update.kind === "voice" ? prompt : ""),
           relevantMemory: graph?.relevantMemory,
         });
-        const answer = await this.letta.runTurn(
-          conversationId,
-          this.runtimeContext.wrapUserMessage(context, prompt),
-        );
+        metrics.runtime_context_ms = context.metrics?.runtimeContextMs ?? 0;
+        metrics.profile_check_ms = context.metrics?.profileCheckMs ?? 0;
+        const lettaStarted = performance.now();
+        let answer;
+        try {
+          answer = await this.letta.runTurn(
+            conversationId,
+            this.runtimeContext.wrapUserMessage(context, prompt),
+          );
+        } finally {
+          metrics.letta_turn_ms = elapsed(lettaStarted);
+        }
         await this.db.markAgentUsed(link.agent_id);
+        this.highlights?.schedule(user.id, conversationId);
         const turn = answer;
 
         const reply = turn.reply.trim() || t(language, "emptyReply");
@@ -164,9 +188,21 @@ export class EvaWorkflow {
 
         await this.db.incrementUsage(update.telegramId, "messages");
         return { status: "completed", usageCharged: true };
-      });
+        }),
+      );
+      metrics.db_query_count = measured.queryCount;
+      return measured.result;
     } finally {
       typing.stop?.();
+      const delivery = this.telegram.getDeliveryMetrics();
+      metrics.outbox_insert_ms = delivery.outboxInsertMs;
+      metrics.telegram_send_ms = delivery.telegramSendMs;
+      metrics.total_turn_ms = elapsed(started);
+      this.logger.info("Telegram turn обработан", {
+        update_id: update.updateId,
+        telegram_id: update.telegramId,
+        ...metrics,
+      });
     }
   }
 
@@ -423,4 +459,8 @@ function quotaLabel(metric: string, language: SupportedLanguage): string {
         web_search: "Поиск",
         tests: "Тесты",
       })[metric] ?? metric;
+}
+
+function elapsed(started: number): number {
+  return Math.round((performance.now() - started) * 10) / 10;
 }

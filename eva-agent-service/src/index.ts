@@ -22,6 +22,7 @@ import { LettaService } from "./letta.js";
 import { LlmManager } from "./llm.js";
 import { createLogger } from "./logger.js";
 import { GraphContextService } from "./memory/graph-context.js";
+import { ConversationHighlightService } from "./memory/conversation-highlights.js";
 import { GraphRepository } from "./memory/graph-repository.js";
 import { LavaPayments } from "./payments.js";
 import { UserProfileService } from "./profile/profile-service.js";
@@ -60,7 +61,7 @@ async function main(): Promise<void> {
     leaseSeconds: config.telegramOutboxLeaseSeconds,
     maxAttempts: config.telegramOutboxMaxAttempts,
   });
-  telegram.setOutbox(outbox);
+  if (config.outboxEnabled) telegram.setOutbox(outbox);
   const sdk = new SdkSettingsManager(config, db, letta);
   try {
     await sdk.initialize();
@@ -82,6 +83,9 @@ async function main(): Promise<void> {
   }
   const runtimeContext = new RuntimeContextBuilder(db, {
     defaultTimezone: config.defaultTimezone,
+    cacheTtlMs: Math.max(1, config.profileCacheTtlSeconds) * 1_000,
+    profileCompletionEnabled: config.profileCompletionEnabled,
+    vectorGoalsEnabled: config.vectorGoalsEnabled,
   });
   const graph = config.graphMemoryEnabled ? new GraphRepository(db) : undefined;
   const graphContext = new GraphContextService(
@@ -92,6 +96,7 @@ async function main(): Promise<void> {
     },
     logger,
   );
+  const highlights = new ConversationHighlightService(db, letta, logger);
   const timezoneResolver = new TimezoneResolver(db);
   const profile = new UserProfileService(
     db,
@@ -121,6 +126,7 @@ async function main(): Promise<void> {
     profile,
     logger,
     graphContext,
+    highlights,
   );
   const inbox = new PostgresTelegramInbox(db);
   const inboxWorker = new TelegramInboxWorker(
@@ -179,7 +185,7 @@ async function main(): Promise<void> {
   });
 
   await app.listen({ port: config.port, host: config.host });
-  outbox.start();
+  if (config.outboxEnabled) outbox.start();
   inboxWorker.start();
   background.start();
   logger.info("eva-agent-service принимает запросы", {
@@ -200,7 +206,7 @@ async function main(): Promise<void> {
     try {
       background.stop();
       inboxWorker.stop();
-      outbox.stop();
+      if (config.outboxEnabled) outbox.stop();
       letta.shutdown();
       await app.close();
       await db.close();

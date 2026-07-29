@@ -9,6 +9,12 @@ export interface OutboxEnvelope {
   payload: Record<string, unknown>;
   idempotencyKey?: string;
   userId?: number;
+  onMetrics?: (metrics: Partial<DeliveryMetrics>) => void;
+}
+
+export interface DeliveryMetrics {
+  outboxInsertMs: number;
+  telegramSendMs: number;
 }
 
 export interface OutboxTransport {
@@ -55,6 +61,7 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
   }
 
   async send(envelope: OutboxEnvelope): Promise<unknown> {
+    const insertStarted = performance.now();
     const idempotencyKey = envelope.idempotencyKey ?? `telegram:${randomUUID()}`;
     const { rows } = await this.db.query<{ id: string; status: string }>(
       `INSERT INTO telegram_outbox
@@ -71,11 +78,14 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
         JSON.stringify(envelope.payload),
       ],
     );
+    envelope.onMetrics?.({
+      outboxInsertMs: elapsed(insertStarted),
+    });
     const row = rows[0];
     if (!row || row.status === "sent") return { queued: false, duplicate: true };
     const claimed = await this.claimById(row.id);
     if (!claimed) return { queued: true, duplicate: true };
-    return await this.deliver(claimed);
+    return await this.deliver(claimed, envelope.onMetrics);
   }
 
   async tick(): Promise<void> {
@@ -159,9 +169,15 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
     });
   }
 
-  private async deliver(row: OutboxRow): Promise<unknown> {
+  private async deliver(
+    row: OutboxRow,
+    onMetrics?: OutboxEnvelope["onMetrics"],
+  ): Promise<unknown> {
     try {
+      const sendStarted = performance.now();
       const result = await this.transport.deliver(row.telegram_method, row.payload);
+      const telegramSendMs = elapsed(sendStarted);
+      onMetrics?.({ telegramSendMs });
       const messageIds = extractMessageIds(result);
       await this.db.query(
         `UPDATE telegram_outbox
@@ -174,6 +190,10 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
           WHERE id = $1`,
         [row.id, messageIds],
       );
+      this.logger.debug("Telegram outbox доставлен", {
+        outboxId: row.id,
+        telegram_send_ms: telegramSendMs,
+      });
       return result;
     } catch (error) {
       const dead = row.attempts >= this.options.maxAttempts;
@@ -201,6 +221,10 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
       return { queued: !dead, dead };
     }
   }
+}
+
+function elapsed(started: number): number {
+  return Math.round((performance.now() - started) * 10) / 10;
 }
 
 function extractMessageIds(result: unknown): number[] {
