@@ -202,10 +202,10 @@ export class OperationService {
         const available = matched ? Number(matched[1]) : null;
         await this.pool.query(
           `UPDATE service_statuses
-              SET detail_json = detail_json || $2::jsonb,
+              SET detail_json = detail_json || $1::jsonb,
                   last_check_at = now(), updated_at = now()
             WHERE target_id = 'infrastructure:updates'`,
-          [id, JSON.stringify({
+          [JSON.stringify({
             checked: true,
             update_available: available === null ? null : available > 0,
             available_components: available,
