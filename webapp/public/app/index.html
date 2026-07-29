@@ -2,72 +2,119 @@
 <html lang="ru">
 	<head>
 		<meta charset="utf-8" />
-		<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+		<meta
+			name="viewport"
+			content="width=device-width, initial-scale=1, viewport-fit=cover"
+		/>
+		<meta name="theme-color" content="#f7f4ee" />
 		<title>Ева</title>
 		<link rel="stylesheet" href="/assets/styles.css" />
+		<link rel="stylesheet" href="/app/app.css" />
 		<script src="https://telegram.org/js/telegram-web-app.js"></script>
-		<style>
-			body {
-				background: var(--tg-theme-bg-color, var(--bg));
-				color: var(--tg-theme-text-color, var(--text));
-			}
-			.wrap {
-				padding: var(--space);
-				max-width: 560px;
-			}
-			.skeleton {
-				height: 14px;
-				border-radius: 6px;
-				background: var(--border);
-				animation: pulse 1.4s ease-in-out infinite;
-			}
-			@keyframes pulse {
-				0%,
-				100% {
-					opacity: 1;
-				}
-				50% {
-					opacity: 0.45;
-				}
-			}
-		</style>
 	</head>
 	<body>
-		<main class="wrap">
-			<header class="row" style="margin-bottom: 20px">
+		<div class="app-shell">
+			<header class="app-header">
+				<div class="brand-mark" aria-hidden="true">Е</div>
 				<div>
-					<p class="eyebrow" style="margin: 0">Ева</p>
-					<h1 style="font-size: 22px; margin: 2px 0 0" id="greeting">
-						<span class="skeleton" style="display: block; width: 160px"></span>
-					</h1>
+					<p class="app-kicker" id="header-kicker">Ева рядом</p>
+					<h1 id="screen-title">Сегодня</h1>
 				</div>
-				<span class="badge" id="plan">…</span>
+				<div class="local-time" id="local-time" aria-label="Локальное время">—</div>
 			</header>
 
-			<div id="error" class="status error" hidden></div>
+			<div id="notice" class="notice" role="status" hidden></div>
 
-			<section>
-				<h2 style="margin-top: 0">Лимиты на сегодня</h2>
-				<div id="quotas">
-					<div class="card"><div class="skeleton"></div></div>
-					<div class="card"><div class="skeleton"></div></div>
-				</div>
-			</section>
+			<main id="screens" aria-live="polite">
+				<section class="screen is-active" id="screen-today" data-screen="today">
+					<div id="today-content" class="screen-content">
+						<div class="hero-card skeleton-card">
+							<div class="skeleton skeleton-short"></div>
+							<div class="skeleton skeleton-title"></div>
+							<div class="skeleton"></div>
+							<div class="skeleton skeleton-button"></div>
+						</div>
+						<div class="skeleton-list">
+							<div class="skeleton skeleton-row"></div>
+							<div class="skeleton skeleton-row"></div>
+						</div>
+					</div>
+				</section>
 
-			<section>
-				<h2>Задачи и практики</h2>
-				<div class="card" id="tasks">
-					<div class="skeleton"></div>
-				</div>
-			</section>
+				<section class="screen" id="screen-goals" data-screen="goals" hidden>
+					<div id="goals-content" class="screen-content">
+						<div class="skeleton-list">
+							<div class="skeleton skeleton-card-line"></div>
+							<div class="skeleton skeleton-card-line"></div>
+						</div>
+					</div>
+					<form class="sheet-form" id="goal-form" hidden>
+						<div class="section-heading">
+							<div>
+								<p class="app-kicker">Новый ориентир</p>
+								<h2>Добавить цель</h2>
+							</div>
+							<button class="icon-button" type="button" id="close-goal-form" aria-label="Закрыть">×</button>
+						</div>
+						<label>
+							<span>Что хотите получить?</span>
+							<input name="title" maxlength="500" required placeholder="Например, подготовить запуск проекта" />
+						</label>
+						<label>
+							<span>Почему это важно?</span>
+							<textarea name="why_it_matters" maxlength="5000" rows="3" placeholder="Коротко, своими словами"></textarea>
+						</label>
+						<label>
+							<span>Желаемый срок</span>
+							<input name="target_date" type="date" />
+						</label>
+						<button class="primary-action" type="submit">Сохранить цель</button>
+					</form>
+					<button class="floating-action" id="add-goal" type="button">Добавить цель</button>
+				</section>
 
-			<footer>
-				<p class="small">
-					Ева — не психотерапевт и не ставит диагнозов. Это инструмент
-					самонаблюдения.
-				</p>
-			</footer>
-		</main>
+				<section class="screen" id="screen-progress" data-screen="progress" hidden>
+					<div id="progress-content" class="screen-content">
+						<div class="stats-grid">
+							<div class="skeleton skeleton-stat"></div>
+							<div class="skeleton skeleton-stat"></div>
+						</div>
+						<div class="skeleton-list">
+							<div class="skeleton skeleton-row"></div>
+							<div class="skeleton skeleton-row"></div>
+						</div>
+					</div>
+				</section>
+
+				<section class="screen" id="screen-profile" data-screen="profile" hidden>
+					<div id="profile-content" class="screen-content">
+						<div class="profile-score skeleton-card">
+							<div class="skeleton skeleton-title"></div>
+							<div class="skeleton"></div>
+						</div>
+					</div>
+				</section>
+			</main>
+
+			<nav class="bottom-nav" aria-label="Основная навигация">
+				<button class="nav-item is-active" type="button" data-target="today">
+					<span class="nav-icon" aria-hidden="true">●</span>
+					<span>Сегодня</span>
+				</button>
+				<button class="nav-item" type="button" data-target="goals">
+					<span class="nav-icon" aria-hidden="true">◎</span>
+					<span>Цели</span>
+				</button>
+				<button class="nav-item" type="button" data-target="progress">
+					<span class="nav-icon" aria-hidden="true">↗</span>
+					<span>Прогресс</span>
+				</button>
+				<button class="nav-item" type="button" data-target="profile">
+					<span class="nav-icon" aria-hidden="true">◌</span>
+					<span>Профиль</span>
+				</button>
+			</nav>
+		</div>
 
 		<script src="/app/app.js"></script>
 	</body>

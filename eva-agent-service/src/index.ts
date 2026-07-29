@@ -172,6 +172,7 @@ async function main(): Promise<void> {
     llm,
     inbox,
     profile,
+    goals,
     payments,
     queue,
     redisPing: async () => (await redis.ping()) === "PONG",

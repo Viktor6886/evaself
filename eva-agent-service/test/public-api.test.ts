@@ -50,6 +50,7 @@ test("expired Telegram initData is rejected", () => {
 test("/public/session and /public/tasks derive identity only from initData", async () => {
   let sessionTelegramId = 0;
   let tasksTelegramId = 0;
+  const protectedCalls: Array<{ operation: string; telegramId: number; id?: number }> = [];
   const repository: PublicDataSource = {
     openSession: async (user) => {
       sessionTelegramId = user.id;
@@ -66,6 +67,10 @@ test("/public/session and /public/tasks derive identity only from initData", asy
         quotas: [],
       };
     },
+    getToday: async (telegramId) => {
+      protectedCalls.push({ operation: "today", telegramId });
+      return { main_action: "Сделать первый шаг" };
+    },
     listTasks: async (telegramId) => {
       tasksTelegramId = telegramId;
       return [{
@@ -80,6 +85,18 @@ test("/public/session and /public/tasks derive identity only from initData", asy
         updated_at: NOW,
       }];
     },
+    listGoals: async (telegramId) => {
+      protectedCalls.push({ operation: "goals", telegramId });
+      return [{ id: "3", title: "Подготовить запуск" }];
+    },
+    createGoal: async (telegramId, input) => {
+      protectedCalls.push({ operation: "create-goal", telegramId });
+      return { id: "4", ...input };
+    },
+    updateGoal: async (telegramId, goalId, input) => {
+      protectedCalls.push({ operation: "update-goal", telegramId, id: goalId });
+      return { id: String(goalId), ...input };
+    },
     getProfile: async (telegramId) => ({
       telegram_id: telegramId,
       confirmed: [],
@@ -89,6 +106,18 @@ test("/public/session and /public/tasks derive identity only from initData", asy
       telegram_id: telegramId,
       input,
     }),
+    getProgress: async (telegramId) => {
+      protectedCalls.push({ operation: "progress", telegramId });
+      return { completed_results: [] };
+    },
+    startWorkBlock: async (telegramId, workBlockId) => {
+      protectedCalls.push({ operation: "start", telegramId, id: workBlockId });
+      return { id: String(workBlockId), status: "active" };
+    },
+    completeWorkBlock: async (telegramId, workBlockId) => {
+      protectedCalls.push({ operation: "complete", telegramId, id: workBlockId });
+      return { id: String(workBlockId), status: "completed" };
+    },
   };
   const app = Fastify();
   registerPublicRoutes(app, {
@@ -129,6 +158,28 @@ test("/public/session and /public/tasks derive identity only from initData", asy
   assert.equal(profile.statusCode, 200);
   assert.equal(profile.json().profile.telegram_id, USER.id);
   assert.equal(profile.json().profile.input.user_id, 999999);
+
+  const protectedRequests = [
+    { method: "GET", url: "/public/today" },
+    { method: "GET", url: "/public/goals" },
+    { method: "POST", url: "/public/goals", payload: { title: "Новая цель" } },
+    { method: "PATCH", url: "/public/goals/3", payload: { status: "paused" } },
+    { method: "GET", url: "/public/progress" },
+    { method: "POST", url: "/public/work-blocks/8/start", payload: {} },
+    { method: "POST", url: "/public/work-blocks/8/complete", payload: {} },
+  ] as const;
+  for (const request of protectedRequests) {
+    const response = await app.inject({
+      ...request,
+      headers: { "x-telegram-init-data": initData },
+    });
+    assert.equal(response.statusCode, 200, `${request.method} ${request.url}`);
+  }
+  assert.deepEqual(
+    protectedCalls.map((call) => call.telegramId),
+    Array(protectedRequests.length).fill(USER.id),
+  );
+  assert.equal(protectedCalls.find((call) => call.operation === "start")?.id, 8);
 
   const missing = await app.inject({ method: "GET", url: "/public/tasks" });
   assert.equal(missing.statusCode, 401);

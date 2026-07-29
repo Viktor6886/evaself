@@ -3,6 +3,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { Config } from "../config.js";
 import type { Database } from "../db.js";
 import { badRequest, unauthorized } from "../errors.js";
+import type { GoalService } from "../goals/goal-service.js";
 import type { UserProfileService } from "../profile/profile-service.js";
 import {
   type TelegramWebAppUser,
@@ -40,10 +41,32 @@ export interface PublicTask {
 
 export interface PublicDataSource {
   openSession(user: TelegramWebAppUser): Promise<PublicSession>;
+  getToday(telegramId: number): Promise<Record<string, unknown>>;
   listTasks(telegramId: number): Promise<PublicTask[]>;
+  listGoals(telegramId: number): Promise<Record<string, unknown>[]>;
+  createGoal(
+    telegramId: number,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+  updateGoal(
+    telegramId: number,
+    goalId: number,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
   getProfile(telegramId: number): Promise<Record<string, unknown>>;
   updateProfile(
     telegramId: number,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+  getProgress(telegramId: number): Promise<Record<string, unknown>>;
+  startWorkBlock(
+    telegramId: number,
+    workBlockId: number,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+  completeWorkBlock(
+    telegramId: number,
+    workBlockId: number,
     input: Record<string, unknown>,
   ): Promise<Record<string, unknown>>;
 }
@@ -52,6 +75,7 @@ export class PublicRepository implements PublicDataSource {
   constructor(
     private readonly db: Database,
     private readonly profile: UserProfileService,
+    private readonly goals: GoalService,
   ) {}
 
   async openSession(user: TelegramWebAppUser): Promise<PublicSession> {
@@ -95,6 +119,204 @@ export class PublicRepository implements PublicDataSource {
     return rows;
   }
 
+  async getToday(telegramId: number): Promise<Record<string, unknown>> {
+    const { rows } = await this.db.query<{
+      timezone: string;
+      local_time: string;
+      work_block_id: string | null;
+      work_block_status: string | null;
+      goal_id: string | null;
+      goal_title: string | null;
+      main_action: string | null;
+      expected_result: string | null;
+      first_step: string | null;
+      continuation: string | null;
+      tasks: unknown;
+    }>(
+      `SELECT u.timezone,
+              to_char(now() AT TIME ZONE u.timezone, 'HH24:MI') AS local_time,
+              focus.work_block_id,
+              focus.work_block_status,
+              COALESCE(focus.goal_id, nearest.goal_id) AS goal_id,
+              COALESCE(focus.goal_title, nearest.goal_title) AS goal_title,
+              COALESCE(focus.intention, nearest.first_action, nearest.result_title) AS main_action,
+              COALESCE(focus.completion_criterion, nearest.result_artifact, nearest.result_title)
+                AS expected_result,
+              COALESCE(focus.first_physical_step, nearest.first_action) AS first_step,
+              continuation.next_step AS continuation,
+              COALESCE(extra.tasks, '[]'::jsonb) AS tasks
+         FROM users u
+         LEFT JOIN LATERAL (
+           SELECT wb.id::text AS work_block_id,
+                  wb.status AS work_block_status,
+                  wb.goal_id::text AS goal_id,
+                  g.title AS goal_title,
+                  wb.intention,
+                  wb.completion_criterion,
+                  wb.first_physical_step
+             FROM work_blocks wb
+             JOIN goals g ON g.id = wb.goal_id AND g.user_id = wb.user_id
+            WHERE wb.user_id = u.id
+              AND wb.status IN ('active', 'planned')
+            ORDER BY CASE wb.status WHEN 'active' THEN 0 ELSE 1 END,
+                     COALESCE(wb.planned_start_at, wb.created_at),
+                     wb.id
+            LIMIT 1
+         ) focus ON true
+         LEFT JOIN LATERAL (
+           SELECT g.id::text AS goal_id,
+                  g.title AS goal_title,
+                  r.title AS result_title,
+                  r.result_artifact,
+                  r.first_action
+             FROM goals g
+             LEFT JOIN LATERAL (
+               SELECT title, result_artifact, first_action
+                 FROM goal_results
+                WHERE user_id = u.id
+                  AND goal_id = g.id
+                  AND status NOT IN ('completed', 'skipped')
+                ORDER BY is_critical_path DESC, sort_order, id
+                LIMIT 1
+             ) r ON true
+            WHERE g.user_id = u.id AND g.status = 'active'
+            ORDER BY g.priority, g.updated_at DESC
+            LIMIT 1
+         ) nearest ON focus.work_block_id IS NULL
+         LEFT JOIN LATERAL (
+           SELECT next_step
+             FROM work_blocks
+            WHERE user_id = u.id
+              AND status = 'completed'
+              AND next_step IS NOT NULL
+            ORDER BY completed_at DESC, id DESC
+            LIMIT 1
+         ) continuation ON true
+         LEFT JOIN LATERAL (
+           SELECT jsonb_agg(task ORDER BY selected_tasks.order_key) AS tasks
+             FROM (
+               SELECT jsonb_build_object(
+                        'id', t.id::text,
+                        'title', t.title,
+                        'status', t.status,
+                        'due_at', t.due_at,
+                        'estimated_minutes', t.estimated_minutes
+                      ) AS task,
+                      COALESCE(t.due_at, t.created_at) AS order_key
+                 FROM tasks t
+                WHERE t.user_id = u.id
+                  AND t.status IN ('open', 'in_progress')
+                ORDER BY CASE t.status WHEN 'in_progress' THEN 0 ELSE 1 END,
+                         COALESCE(t.due_at, t.created_at),
+                         t.id
+                LIMIT 3
+             ) selected_tasks
+         ) extra ON true
+        WHERE u.telegram_id = $1`,
+      [telegramId],
+    );
+    if (!rows[0]) throw unauthorized("Пользователь Telegram не найден");
+    return rows[0];
+  }
+
+  async listGoals(telegramId: number): Promise<Record<string, unknown>[]> {
+    const { rows } = await this.db.query<Record<string, unknown>>(
+      `SELECT g.id::text,
+              g.title,
+              g.why_it_matters,
+              g.target_date,
+              g.status,
+              g.priority,
+              g.vector_stage,
+              g.user_confirmed,
+              COALESCE(progress.progress_percent, 0) AS progress_percent,
+              next_result.id::text AS next_result_id,
+              next_result.title AS next_result,
+              next_result.first_action AS next_step,
+              next_result.target_date AS next_result_date
+         FROM goals g
+         JOIN users u ON u.id = g.user_id
+         LEFT JOIN LATERAL (
+           SELECT round(avg(progress_percent))::integer AS progress_percent
+             FROM goal_results
+            WHERE user_id = g.user_id AND goal_id = g.id
+         ) progress ON true
+         LEFT JOIN LATERAL (
+           SELECT id, title, first_action, target_date
+             FROM goal_results
+            WHERE user_id = g.user_id
+              AND goal_id = g.id
+              AND status NOT IN ('completed', 'skipped')
+            ORDER BY is_critical_path DESC, sort_order, id
+            LIMIT 1
+         ) next_result ON true
+        WHERE u.telegram_id = $1
+          AND g.status <> 'abandoned'
+        ORDER BY CASE g.status WHEN 'active' THEN 0 WHEN 'draft' THEN 1 ELSE 2 END,
+                 g.priority,
+                 g.updated_at DESC
+        LIMIT 50`,
+      [telegramId],
+    );
+    return rows;
+  }
+
+  async createGoal(
+    telegramId: number,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const user = await this.userByTelegramId(telegramId);
+    const draft = await this.goals.upsertGoal({
+      userId: user.id,
+      title: requiredText(input.title, "Название цели", 500),
+      whyItMatters: optionalText(input.why_it_matters, 5_000),
+      targetDate: optionalDate(input.target_date),
+      priority: optionalInteger(input.priority, 1, 5) ?? 3,
+      status: "draft",
+      vectorStage: "north",
+    }) as Record<string, unknown>;
+    return await this.goals.confirmGoal(user.id, Number(draft.id)) as Record<
+      string,
+      unknown
+    >;
+  }
+
+  async updateGoal(
+    telegramId: number,
+    goalId: number,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const user = await this.userByTelegramId(telegramId);
+    const status = optionalEnum(
+      input.status,
+      ["active", "paused", "completed", "abandoned"],
+      "Статус цели",
+    );
+    if (status === "active") {
+      return await this.goals.confirmGoal(user.id, goalId) as Record<
+        string,
+        unknown
+      >;
+    }
+    return await this.goals.upsertGoal({
+      userId: user.id,
+      id: goalId,
+      ...(Object.hasOwn(input, "title")
+        ? { title: requiredText(input.title, "Название цели", 500) }
+        : {}),
+      ...(Object.hasOwn(input, "why_it_matters")
+        ? { whyItMatters: optionalText(input.why_it_matters, 5_000) }
+        : {}),
+      ...(Object.hasOwn(input, "target_date")
+        ? { targetDate: optionalDate(input.target_date) }
+        : {}),
+      ...(Object.hasOwn(input, "priority")
+        ? { priority: optionalInteger(input.priority, 1, 5) ?? 3 }
+        : {}),
+      ...(status ? { status } : {}),
+    }) as Record<string, unknown>;
+  }
+
   async getProfile(telegramId: number): Promise<Record<string, unknown>> {
     const user = await this.userByTelegramId(telegramId);
     const profile = await this.profile.getProfile(user.id);
@@ -105,6 +327,8 @@ export class PublicRepository implements PublicDataSource {
         timezone: user.timezone,
         language_mode: user.language_mode,
         preferred_language: user.preferred_language,
+        interests: profileValue(profile.confirmed, "interests"),
+        communication_style: profileValue(profile.confirmed, "communication_style"),
       },
       confirmed: profile.confirmed.map(publicProfileField),
       candidates: profile.candidates.map(publicProfileField),
@@ -146,6 +370,98 @@ export class PublicRepository implements PublicDataSource {
     return await this.getProfile(telegramId);
   }
 
+  async getProgress(telegramId: number): Promise<Record<string, unknown>> {
+    const user = await this.userByTelegramId(telegramId);
+    const [results, workBlocks, strategies, goals] = await Promise.all([
+      this.db.query(
+        `SELECT r.id::text, r.title, r.result_artifact, r.completed_at,
+                g.id::text AS goal_id, g.title AS goal_title
+           FROM goal_results r
+           JOIN goals g ON g.id = r.goal_id AND g.user_id = r.user_id
+          WHERE r.user_id = $1 AND r.status = 'completed'
+          ORDER BY r.completed_at DESC NULLS LAST, r.updated_at DESC
+          LIMIT 30`,
+        [user.id],
+      ),
+      this.db.query(
+        `SELECT wb.id::text, wb.intention, wb.actual_result, wb.artifact,
+                wb.actual_minutes, wb.helpful_factor, wb.completed_at,
+                g.id::text AS goal_id, g.title AS goal_title
+           FROM work_blocks wb
+           JOIN goals g ON g.id = wb.goal_id AND g.user_id = wb.user_id
+          WHERE wb.user_id = $1 AND wb.status = 'completed'
+          ORDER BY wb.completed_at DESC
+          LIMIT 30`,
+        [user.id],
+      ),
+      this.db.query(
+        `SELECT id::text, title, description, uses_count, last_used_at
+           FROM user_strategies
+          WHERE user_id = $1 AND status = 'confirmed'
+          ORDER BY uses_count DESC, updated_at DESC
+          LIMIT 20`,
+        [user.id],
+      ),
+      this.db.query(
+        `SELECT g.id::text, g.title, g.status,
+                COALESCE(round(avg(r.progress_percent))::integer, 0) AS progress_percent
+           FROM goals g
+           LEFT JOIN goal_results r
+             ON r.goal_id = g.id AND r.user_id = g.user_id
+          WHERE g.user_id = $1 AND g.status IN ('active', 'completed')
+          GROUP BY g.id
+          ORDER BY CASE g.status WHEN 'active' THEN 0 ELSE 1 END, g.updated_at DESC
+          LIMIT 30`,
+        [user.id],
+      ),
+    ]);
+    return {
+      completed_results: results.rows,
+      work_blocks: workBlocks.rows,
+      strategies: strategies.rows,
+      goals: goals.rows,
+    };
+  }
+
+  async startWorkBlock(
+    telegramId: number,
+    workBlockId: number,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const owned = await this.ownedWorkBlock(telegramId, workBlockId);
+    return await this.goals.recordWorkBlock({
+      userId: owned.userId,
+      action: "start",
+      goalId: owned.goalId,
+      goalResultId: owned.goalResultId,
+      workBlockId,
+      energyBefore: optionalInteger(input.energy_before, 1, 5),
+    }) as Record<string, unknown>;
+  }
+
+  async completeWorkBlock(
+    telegramId: number,
+    workBlockId: number,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const owned = await this.ownedWorkBlock(telegramId, workBlockId);
+    return await this.goals.recordWorkBlock({
+      userId: owned.userId,
+      action: "complete",
+      goalId: owned.goalId,
+      goalResultId: owned.goalResultId,
+      workBlockId,
+      actualResult:
+        optionalText(input.actual_result, 10_000) ?? "Шаг отмечен выполненным",
+      artifact: optionalText(input.artifact, 10_000),
+      nextStep: optionalText(input.next_step, 5_000),
+      actualMinutes: optionalInteger(input.actual_minutes, 0, 10_080),
+      energyAfter: optionalInteger(input.energy_after, 1, 5),
+      resultCompleted: input.result_completed === true,
+      progressPercent: optionalInteger(input.progress_percent, 0, 100),
+    }) as Record<string, unknown>;
+  }
+
   private async userByTelegramId(telegramId: number): Promise<{
     id: number;
     city: string | null;
@@ -167,6 +483,31 @@ export class PublicRepository implements PublicDataSource {
     );
     if (!rows[0]) throw unauthorized("Пользователь Telegram не найден");
     return rows[0];
+  }
+
+  private async ownedWorkBlock(
+    telegramId: number,
+    workBlockId: number,
+  ): Promise<{ userId: number; goalId: number; goalResultId: number | null }> {
+    const { rows } = await this.db.query<{
+      user_id: string;
+      goal_id: string;
+      goal_result_id: string | null;
+    }>(
+      `SELECT wb.user_id, wb.goal_id, wb.goal_result_id
+         FROM work_blocks wb
+         JOIN users u ON u.id = wb.user_id
+        WHERE wb.id = $1 AND u.telegram_id = $2`,
+      [workBlockId, telegramId],
+    );
+    if (!rows[0]) throw new Error("Рабочий блок не найден");
+    return {
+      userId: Number(rows[0].user_id),
+      goalId: Number(rows[0].goal_id),
+      goalResultId: rows[0].goal_result_id
+        ? Number(rows[0].goal_result_id)
+        : null,
+    };
   }
 }
 
@@ -199,9 +540,44 @@ export function registerPublicRoutes(
       ...(await input.repository.openSession(publicUser(request))),
     }));
 
+    publicApp.get("/today", async (request) => ({
+      today: await input.repository.getToday(publicUser(request).id),
+    }));
+
     publicApp.get("/tasks", async (request) => ({
       tasks: await input.repository.listTasks(publicUser(request).id),
     }));
+
+    publicApp.get("/goals", async (request) => ({
+      goals: await input.repository.listGoals(publicUser(request).id),
+    }));
+
+    publicApp.post("/goals", async (request) => {
+      try {
+        return {
+          goal: await input.repository.createGoal(
+            publicUser(request).id,
+            requestBody(request),
+          ),
+        };
+      } catch (error) {
+        throw badRequest(error instanceof Error ? error.message : "Некорректная цель");
+      }
+    });
+
+    publicApp.patch("/goals/:id", async (request) => {
+      try {
+        return {
+          goal: await input.repository.updateGoal(
+            publicUser(request).id,
+            positiveId((request.params as { id?: string }).id, "цели"),
+            requestBody(request),
+          ),
+        };
+      } catch (error) {
+        throw badRequest(error instanceof Error ? error.message : "Некорректная цель");
+      }
+    });
 
     publicApp.get("/profile", async (request) => ({
       profile: await input.repository.getProfile(publicUser(request).id),
@@ -212,13 +588,45 @@ export function registerPublicRoutes(
         return {
           profile: await input.repository.updateProfile(
             publicUser(request).id,
-            request.body && typeof request.body === "object"
-              ? request.body as Record<string, unknown>
-              : {},
+              request.body && typeof request.body === "object"
+                ? request.body as Record<string, unknown>
+                : {},
           ),
         };
       } catch (error) {
         throw badRequest(error instanceof Error ? error.message : "Некорректный профиль");
+      }
+    });
+
+    publicApp.get("/progress", async (request) => ({
+      progress: await input.repository.getProgress(publicUser(request).id),
+    }));
+
+    publicApp.post("/work-blocks/:id/start", async (request) => {
+      try {
+        return {
+          work_block: await input.repository.startWorkBlock(
+            publicUser(request).id,
+            positiveId((request.params as { id?: string }).id, "рабочего блока"),
+            requestBody(request),
+          ),
+        };
+      } catch (error) {
+        throw badRequest(error instanceof Error ? error.message : "Не удалось начать шаг");
+      }
+    });
+
+    publicApp.post("/work-blocks/:id/complete", async (request) => {
+      try {
+        return {
+          work_block: await input.repository.completeWorkBlock(
+            publicUser(request).id,
+            positiveId((request.params as { id?: string }).id, "рабочего блока"),
+            requestBody(request),
+          ),
+        };
+      } catch (error) {
+        throw badRequest(error instanceof Error ? error.message : "Не удалось завершить шаг");
       }
     });
   }, { prefix: "/public" });
@@ -263,4 +671,65 @@ function stringList(value: unknown, limit: number): string[] {
       .filter(Boolean)
       .slice(0, limit)
     : [];
+}
+
+function requestBody(request: FastifyRequest): Record<string, unknown> {
+  return request.body && typeof request.body === "object" && !Array.isArray(request.body)
+    ? request.body as Record<string, unknown>
+    : {};
+}
+
+function positiveId(value: string | undefined, name: string): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(`Некорректный ID ${name}`);
+  }
+  return parsed;
+}
+
+function requiredText(value: unknown, name: string, max: number): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`${name}: требуется текст`);
+  }
+  return value.trim().slice(0, max);
+}
+
+function optionalText(value: unknown, max: number): string | null {
+  if (value == null || value === "") return null;
+  if (typeof value !== "string") throw new Error("Ожидается текст");
+  return value.trim().slice(0, max) || null;
+}
+
+function optionalInteger(
+  value: unknown,
+  min: number,
+  max: number,
+): number | undefined {
+  if (value == null || value === "") return undefined;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) {
+    throw new Error(`Ожидается целое число от ${min} до ${max}`);
+  }
+  return parsed;
+}
+
+function optionalDate(value: unknown): string | null {
+  const text = optionalText(value, 10);
+  if (text === null) return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text) || Number.isNaN(Date.parse(`${text}T00:00:00Z`))) {
+    throw new Error("Ожидается дата YYYY-MM-DD");
+  }
+  return text;
+}
+
+function optionalEnum<T extends string>(
+  value: unknown,
+  allowed: readonly T[],
+  name: string,
+): T | undefined {
+  if (value == null || value === "") return undefined;
+  if (typeof value !== "string" || !allowed.includes(value as T)) {
+    throw new Error(`${name}: недопустимое значение`);
+  }
+  return value as T;
 }
