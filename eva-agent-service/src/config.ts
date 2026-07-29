@@ -2,6 +2,8 @@
  * Configuration, read once from the process environment.
  */
 
+import { globalSecretRedactor } from "./admin/redactor.js";
+
 export interface Config {
   port: number;
   host: string;
@@ -80,6 +82,11 @@ export interface Config {
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
+  for (const [name, value] of Object.entries(env)) {
+    if (value && /(PASSWORD|SECRET|TOKEN|API_KEY|AUTHORIZATION|ENCRYPTION_KEY)/i.test(name)) {
+      globalSecretRedactor.register(value);
+    }
+  }
   const str = (name: string, fallback = ""): string =>
     (env[name] ?? fallback).trim();
   const int = (name: string, fallback: number): number => {

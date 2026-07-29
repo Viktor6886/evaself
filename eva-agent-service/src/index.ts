@@ -249,14 +249,8 @@ async function main(): Promise<void> {
 }
 
 main().catch((error) => {
-  process.stderr.write(
-    `${JSON.stringify({
-      ts: new Date().toISOString(),
-      level: "error",
-      service: "eva-agent-service",
-      message: "failed to start",
-      error: error instanceof Error ? error.message : String(error),
-    })}\n`,
-  );
+  createLogger("error").error("Не удалось запустить eva-agent-service", {
+    code: error instanceof Error ? error.name : "unknown_error",
+  });
   process.exit(1);
 });
