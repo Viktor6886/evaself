@@ -76,6 +76,7 @@ test("time context uses the configured timezone", () => {
   assert.match(prompt, /Привет/);
   assert.match(prompt, /<EVA_RUNTIME_CONTEXT>/);
   assert.match(prompt, /<USER_MESSAGE>/);
+  assert.match(prompt, /vector_protocol/);
 });
 
 test("cron supports wildcards, ranges, steps and Sunday alias", () => {
@@ -160,6 +161,12 @@ test("Agent SDK registers every migrated external tool", () => {
     "TODOIST_UPDATE_TASK",
     "TODOIST_CLOSE_TASK",
     "TODOIST_DELETE_TASK",
+    "get_goal_context",
+    "upsert_goal",
+    "confirm_goal",
+    "upsert_goal_result",
+    "record_work_block",
+    "record_goal_review",
   ]) {
     assert.equal(names.has(expected), true, `${expected} is not registered`);
   }

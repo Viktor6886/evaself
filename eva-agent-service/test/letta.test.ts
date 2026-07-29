@@ -225,6 +225,8 @@ test("App Server-only settings are applied at session open, not agent creation",
   );
   assert.equal(sessionOptions.permissionMode, "unrestricted");
   assert.equal(sessionOptions.reasoningEffort, "high");
+  assert.equal(sessionOptions.cwd, "/data/letta");
+  assert.deepEqual(sessionOptions.skillSources, ["bundled", "global", "agent", "project"]);
 
   internal.runtime.reasoning_effort = "none";
   assert.equal("reasoningEffort" in internal.sessionOptions("conversation-default"), false);

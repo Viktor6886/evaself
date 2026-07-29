@@ -5,7 +5,8 @@
 ```text
 skills/
 ├── memory-hygiene/SKILL.md
-└── reflection-session/SKILL.md
+├── reflection-session/SKILL.md
+└── vector-action/SKILL.md
 ```
 
 Каталог монтируется read-only, входит в Git и backup. Технические инструкции

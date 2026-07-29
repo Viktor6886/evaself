@@ -16,6 +16,7 @@ import { Database } from "./db.js";
 import { PostgresTelegramInbox, TelegramInboxWorker } from "./delivery/inbox.js";
 import { PostgresTelegramOutbox } from "./delivery/outbox.js";
 import { EvaWorkflow } from "./eva-workflow.js";
+import { GoalService } from "./goals/goal-service.js";
 import { LettaService } from "./letta.js";
 import { LlmManager } from "./llm.js";
 import { createLogger } from "./logger.js";
@@ -81,7 +82,8 @@ async function main(): Promise<void> {
   });
   const timezoneResolver = new TimezoneResolver(db);
   const profile = new UserProfileService(db, timezoneResolver, runtimeContext);
-  const toolFactory = new AgentToolFactory(config, db, telegram, logger, profile);
+  const goals = new GoalService(db, runtimeContext);
+  const toolFactory = new AgentToolFactory(config, db, telegram, logger, profile, goals);
   letta.setToolFactory((conversationId) => toolFactory.forConversation(conversationId));
   const workflow = new EvaWorkflow(
     config,

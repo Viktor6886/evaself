@@ -45,6 +45,9 @@ interface RuntimeContextRow {
   profile_title: string | null;
   profile_prompt_hint: string | null;
   profile_status: string | null;
+  active_goal_title: string | null;
+  next_result_title: string | null;
+  next_action: string | null;
 }
 
 export class RuntimeContextBuilder {
@@ -107,9 +110,9 @@ export class RuntimeContextBuilder {
       profileHint: shouldSuppressProfileQuestion(input.languageMessage ?? input.userMessage)
         ? null
         : profileHintFrom(row),
-      activeGoal: null,
-      nextResult: null,
-      nextStep: null,
+      activeGoal: row.active_goal_title ?? null,
+      nextResult: row.next_result_title ?? null,
+      nextStep: row.next_action ?? null,
       relevantMemory: (input.relevantMemory ?? []).slice(0, 5),
     };
   }
@@ -130,6 +133,9 @@ export class RuntimeContextBuilder {
     const lines = fields
       .filter((entry): entry is [string, string] => Boolean(entry[1]))
       .map(([key, value]) => `${key}: ${escapeContextValue(value)}`);
+    lines.push(
+      "vector_protocol: черновик цели активируется только после явного подтверждения; действие должно иметь артефакт, первый физический шаг, время, длительность, if-then и критерий завершения; после действия спроси о факте, а при отклонении меняй один элемент и один следующий малый шаг без обвинений",
+    );
     if (context.relevantMemory.length > 0) {
       lines.push(
         "relevant_memory:",
@@ -178,7 +184,10 @@ export class RuntimeContextBuilder {
           profile_hint.field_key AS profile_field_key,
           profile_hint.title AS profile_title,
           profile_hint.prompt_hint AS profile_prompt_hint,
-          profile_hint.status AS profile_status
+          profile_hint.status AS profile_status,
+          goal_context.active_goal_title,
+          goal_context.next_result_title,
+          goal_context.next_action
         FROM users u
         JOIN agent_links a
           ON a.user_id = u.id
@@ -210,6 +219,53 @@ export class RuntimeContextBuilder {
             d.sort_order
           LIMIT 1
         ) profile_hint ON true
+        LEFT JOIN LATERAL (
+          SELECT
+            g.title AS active_goal_title,
+            next_result.title AS next_result_title,
+            COALESCE(
+              next_block.first_physical_step,
+              next_block.intention,
+              next_result.first_action
+            ) AS next_action
+          FROM goals g
+          LEFT JOIN LATERAL (
+            SELECT r.title, r.first_action
+              FROM goal_results r
+             WHERE r.user_id = u.id
+               AND r.goal_id = g.id
+               AND r.status NOT IN ('completed', 'skipped')
+             ORDER BY
+               CASE r.status
+                 WHEN 'in_progress' THEN 0
+                 WHEN 'ready' THEN 1
+                 WHEN 'draft' THEN 2
+                 WHEN 'blocked' THEN 3
+                 ELSE 4
+               END,
+               r.is_critical_path DESC,
+               r.sort_order,
+               r.id
+             LIMIT 1
+          ) next_result ON true
+          LEFT JOIN LATERAL (
+            SELECT b.first_physical_step, b.intention
+              FROM work_blocks b
+             WHERE b.user_id = u.id
+               AND b.goal_id = g.id
+               AND b.status IN ('active', 'planned')
+             ORDER BY
+               CASE b.status WHEN 'active' THEN 0 ELSE 1 END,
+               b.planned_start_at NULLS LAST,
+               b.id
+             LIMIT 1
+          ) next_block ON true
+          WHERE g.user_id = u.id
+            AND g.status = 'active'
+            AND g.user_confirmed
+          ORDER BY g.priority, g.updated_at DESC
+          LIMIT 1
+        ) goal_context ON true
        WHERE u.id = $1
        LIMIT 1`,
       [userId, conversationId, this.options.defaultTimezone],

@@ -760,6 +760,10 @@ export class LettaService {
       (name) => !this.runtime.disallowed_tools.includes(name),
     ) ?? null;
     return {
+      // The remote path belongs to the self-hosted App Server container.
+      // compose mounts versioned project skills at /data/letta/.skills,
+      // which is the directory Letta Code discovers for source "project".
+      cwd: "/data/letta",
       permissionMode: this.runtime.permissionMode,
       // "none" is our explicit UI/default value. Passing it to the SDK asks
       // the model catalog for a literal "none" tier, which ordinary

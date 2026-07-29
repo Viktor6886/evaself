@@ -162,7 +162,8 @@ services:
       # Letta CLI из eva-agent-service и читается локальным App Server.
       - letta_provider_config:/data/letta/lc-local-backend/providers
       - letta_llm_control:/data/llm-control
-      - ./skills:/skills:ro
+      # Letta project skills are discovered in .skills under App Server cwd.
+      - ./skills:/data/letta/.skills:ro
       - ./library:/library:ro
     networks: [evaself-network]
     healthcheck:

@@ -209,7 +209,9 @@ jobs:
               'schema_migrations','llm_providers','sdk_settings','telegram_updates',
               'telegram_outbox','timezone_aliases','profile_field_definitions',
               'user_preferences','eva_notes','budget_entries','heartbeat_state',
-              'payment_intents','admin_audit_log'
+              'payment_intents','admin_audit_log','user_north','goals',
+              'goal_results','goal_dependencies','work_blocks','goal_reviews',
+              'goal_recommendations','user_strategies','learning_attempts'
             ]) AS t
             WHERE to_regclass('public.' || t) IS NULL;
             IF missing IS NOT NULL THEN RAISE EXCEPTION 'missing tables: %', missing; END IF;
@@ -367,6 +369,12 @@ jobs:
           echo "::error::eva-agent-service never became healthy"
           docker compose --env-file versions.env --env-file .env logs --tail=80 eva-agent-service letta-app-server
           exit 1
+
+      - name: VECTOR project skill is mounted where the Agent SDK session expects it
+        run: |
+          docker compose --env-file versions.env --env-file .env \
+            exec -T letta-app-server sh -c \
+            'test -s /data/letta/.skills/vector-action/SKILL.md'
 
       - name: Public webhooks reject forged requests
         run: |

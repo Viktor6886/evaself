@@ -3,6 +3,7 @@ import type { AnyAgentTool } from "@letta-ai/letta-agent-sdk";
 import { nextCronDate } from "./background.js";
 import type { Config } from "./config.js";
 import type { AgentRuntimeContext, Database } from "./db.js";
+import { GoalService } from "./goals/goal-service.js";
 import type { Logger } from "./logger.js";
 import { UserProfileService } from "./profile/profile-service.js";
 import { ALLOWED_REACTIONS, type TelegramClient } from "./telegram.js";
@@ -61,6 +62,7 @@ function result(value: unknown) {
 
 export class AgentToolFactory {
   private readonly profile: UserProfileService;
+  private readonly goals: GoalService;
 
   constructor(
     private readonly config: Config,
@@ -68,8 +70,10 @@ export class AgentToolFactory {
     private readonly telegram: TelegramClient,
     private readonly logger: Logger,
     profile?: UserProfileService,
+    goals?: GoalService,
   ) {
     this.profile = profile ?? new UserProfileService(db);
+    this.goals = goals ?? new GoalService(db);
   }
 
   forConversation(conversationId: string): AnyAgentTool[] {
@@ -369,6 +373,7 @@ export class AgentToolFactory {
         },
       ),
       ...this.profileTools(tool),
+      ...this.goalTools(tool),
       ...this.taskTools(tool),
       ...this.todoistTools(tool),
       tool(
@@ -461,6 +466,366 @@ export class AgentToolFactory {
     );
 
     return tools;
+  }
+
+  private goalTools(
+    tool: (
+      name: string,
+      label: string,
+      description: string,
+      parameters: JsonObject,
+      execute: (args: JsonObject, runtime: AgentRuntimeContext) => Promise<unknown>,
+    ) => AnyAgentTool,
+  ): AnyAgentTool[] {
+    const json = (description: string): JsonObject => ({
+      description,
+      anyOf: [{ type: "array" }, { type: "object" }],
+    });
+    return [
+      tool(
+        "get_goal_context",
+        "Получить контекст целей",
+        "Возвращает только цели, результаты, действия и обзоры текущего пользователя.",
+        objectSchema({ goal_id: integer("Необязательный ID конкретной цели") }),
+        async (args, runtime) => ({
+          ok: true,
+          ...(await this.goals.getGoalContext(
+            runtime.userId,
+            optionalInteger(args, "goal_id") ?? undefined,
+          )),
+        }),
+      ),
+      tool(
+        "upsert_goal",
+        "Сохранить паспорт цели",
+        "Создаёт черновик или обновляет цель VECTOR. Новая цель не активируется до отдельного явного confirm_goal.",
+        objectSchema({
+          id: integer("ID существующей цели; без него создаётся черновик"),
+          parent_goal_id: integer("ID родительской цели"),
+          life_area: text("Область жизни"),
+          horizon: text("Горизонт"),
+          title: text("Краткое название"),
+          why_it_matters: text("Почему это важно пользователю"),
+          result_artifact: text("Конкретный результат или артефакт"),
+          target_date: text("Дата YYYY-MM-DD"),
+          success_criteria: json("Проверяемые критерии успеха"),
+          minimum_version: text("Минимально приемлемая версия"),
+          target_version: text("Целевая версия"),
+          constraints: json("Ограничения"),
+          learning_goal: text("Что важно узнать"),
+          review_condition: text("Условие пересмотра"),
+          stop_condition: text("Условие остановки"),
+          priority: integer("Приоритет 1–5"),
+          status: { type: "string", enum: ["draft", "paused", "completed", "abandoned"] },
+          vector_stage: {
+            type: "string",
+            enum: ["north", "result", "map", "action", "feedback", "review"],
+          },
+          next_review_at: text("Дата и время обзора ISO 8601"),
+          north: {
+            type: "object",
+            description: "Направление: ценности, цена, конфликты и что уменьшить",
+            additionalProperties: false,
+            properties: {
+              desired_direction: text("Желаемое направление"),
+              why_it_matters: text("Почему оно важно"),
+              values: json("Ценности"),
+              acceptable_cost: text("Приемлемая цена"),
+              unacceptable_cost: text("Неприемлемая цена"),
+              conflicts: json("Конфликты"),
+              reduce_list: json("Что следует уменьшить"),
+              user_confirmed: boolean("Пользователь явно подтвердил направление"),
+            },
+          },
+        }),
+        async (args, runtime) => {
+          const north = args.north == null ? undefined : asObject(args.north);
+          return {
+            ok: true,
+            goal: await this.goals.upsertGoal({
+              userId: runtime.userId,
+              ...(Object.hasOwn(args, "id")
+                ? { id: optionalInteger(args, "id") ?? undefined }
+                : {}),
+              ...(Object.hasOwn(args, "parent_goal_id")
+                ? { parentGoalId: optionalInteger(args, "parent_goal_id") }
+                : {}),
+              ...(Object.hasOwn(args, "life_area")
+                ? { lifeArea: optionalString(args, "life_area", 200) }
+                : {}),
+              ...(Object.hasOwn(args, "horizon")
+                ? { horizon: optionalString(args, "horizon", 100) }
+                : {}),
+              ...(Object.hasOwn(args, "title")
+                ? { title: optionalString(args, "title", 500) ?? undefined }
+                : {}),
+              ...(Object.hasOwn(args, "why_it_matters")
+                ? { whyItMatters: optionalString(args, "why_it_matters", 5_000) }
+                : {}),
+              ...(Object.hasOwn(args, "result_artifact")
+                ? { resultArtifact: optionalString(args, "result_artifact", 5_000) }
+                : {}),
+              ...(Object.hasOwn(args, "target_date")
+                ? { targetDate: optionalString(args, "target_date", 10) }
+                : {}),
+              ...(Object.hasOwn(args, "success_criteria")
+                ? { successCriteria: args.success_criteria }
+                : {}),
+              ...(Object.hasOwn(args, "minimum_version")
+                ? { minimumVersion: optionalString(args, "minimum_version", 5_000) }
+                : {}),
+              ...(Object.hasOwn(args, "target_version")
+                ? { targetVersion: optionalString(args, "target_version", 5_000) }
+                : {}),
+              ...(Object.hasOwn(args, "constraints")
+                ? { constraints: args.constraints }
+                : {}),
+              ...(Object.hasOwn(args, "learning_goal")
+                ? { learningGoal: optionalString(args, "learning_goal", 5_000) }
+                : {}),
+              ...(Object.hasOwn(args, "review_condition")
+                ? { reviewCondition: optionalString(args, "review_condition", 5_000) }
+                : {}),
+              ...(Object.hasOwn(args, "stop_condition")
+                ? { stopCondition: optionalString(args, "stop_condition", 5_000) }
+                : {}),
+              ...(Object.hasOwn(args, "priority")
+                ? { priority: optionalInteger(args, "priority") ?? undefined }
+                : {}),
+              ...(Object.hasOwn(args, "status")
+                ? { status: optionalString(args, "status", 30) ?? undefined }
+                : {}),
+              ...(Object.hasOwn(args, "vector_stage")
+                ? { vectorStage: optionalString(args, "vector_stage", 30) ?? undefined }
+                : {}),
+              ...(Object.hasOwn(args, "next_review_at")
+                ? { nextReviewAt: optionalString(args, "next_review_at", 100) }
+                : {}),
+              ...(north
+                ? {
+                    north: {
+                      ...(Object.hasOwn(north, "desired_direction")
+                        ? { desiredDirection: optionalString(north, "desired_direction", 5_000) }
+                        : {}),
+                      ...(Object.hasOwn(north, "why_it_matters")
+                        ? { whyItMatters: optionalString(north, "why_it_matters", 5_000) }
+                        : {}),
+                      ...(Object.hasOwn(north, "values") ? { values: north.values } : {}),
+                      ...(Object.hasOwn(north, "acceptable_cost")
+                        ? { acceptableCost: optionalString(north, "acceptable_cost", 5_000) }
+                        : {}),
+                      ...(Object.hasOwn(north, "unacceptable_cost")
+                        ? { unacceptableCost: optionalString(north, "unacceptable_cost", 5_000) }
+                        : {}),
+                      ...(Object.hasOwn(north, "conflicts")
+                        ? { conflicts: north.conflicts }
+                        : {}),
+                      ...(Object.hasOwn(north, "reduce_list")
+                        ? { reduceList: north.reduce_list }
+                        : {}),
+                      ...(typeof north.user_confirmed === "boolean"
+                        ? { userConfirmed: north.user_confirmed }
+                        : {}),
+                    },
+                  }
+                : {}),
+            }),
+          };
+        },
+      ),
+      tool(
+        "confirm_goal",
+        "Подтвердить цель",
+        "Активирует паспорт цели только после явного подтверждения пользователя.",
+        objectSchema({ goal_id: integer("ID подтверждаемой цели") }, ["goal_id"]),
+        async (args, runtime) => ({
+          ok: true,
+          goal: await this.goals.confirmGoal(
+            runtime.userId,
+            optionalInteger(args, "goal_id") ?? 0,
+          ),
+        }),
+      ),
+      tool(
+        "upsert_goal_result",
+        "Сохранить результат карты",
+        "Создаёт или обновляет промежуточный результат, контрольную точку и его зависимости внутри одной цели пользователя.",
+        objectSchema({
+          id: integer("ID существующего результата"),
+          goal_id: integer("ID цели"),
+          parent_result_id: integer("ID родительского результата"),
+          title: text("Название результата"),
+          result_artifact: text("Проверяемый артефакт"),
+          success_criteria: json("Критерии успеха"),
+          minimum_version: text("Минимальная версия"),
+          target_date: text("Дата YYYY-MM-DD"),
+          sort_order: integer("Порядок на карте"),
+          status: {
+            type: "string",
+            enum: ["draft", "ready", "in_progress", "completed", "blocked", "skipped"],
+          },
+          is_checkpoint: boolean("Это контрольная точка"),
+          is_external: boolean("Это внешняя зависимость"),
+          external_dependency: text("Описание внешней зависимости"),
+          is_critical_path: boolean("На критическом пути"),
+          fallback_plan: text("Резервный вариант"),
+          first_action: text("Первое физическое действие"),
+          progress_percent: integer("Прогресс 0–100"),
+          depends_on_result_ids: {
+            type: "array",
+            items: { type: "integer" },
+            maxItems: 30,
+          },
+        }, ["goal_id"]),
+        async (args, runtime) => ({
+          ok: true,
+          result: await this.goals.upsertGoalResult({
+            userId: runtime.userId,
+            goalId: optionalInteger(args, "goal_id") ?? 0,
+            ...(Object.hasOwn(args, "id")
+              ? { id: optionalInteger(args, "id") ?? undefined }
+              : {}),
+            ...(Object.hasOwn(args, "parent_result_id")
+              ? { parentResultId: optionalInteger(args, "parent_result_id") }
+              : {}),
+            ...(Object.hasOwn(args, "title")
+              ? { title: optionalString(args, "title", 500) ?? undefined }
+              : {}),
+            ...(Object.hasOwn(args, "result_artifact")
+              ? { resultArtifact: optionalString(args, "result_artifact", 5_000) }
+              : {}),
+            ...(Object.hasOwn(args, "success_criteria")
+              ? { successCriteria: args.success_criteria }
+              : {}),
+            ...(Object.hasOwn(args, "minimum_version")
+              ? { minimumVersion: optionalString(args, "minimum_version", 5_000) }
+              : {}),
+            ...(Object.hasOwn(args, "target_date")
+              ? { targetDate: optionalString(args, "target_date", 10) }
+              : {}),
+            ...(Object.hasOwn(args, "sort_order")
+              ? { sortOrder: optionalInteger(args, "sort_order") ?? undefined }
+              : {}),
+            ...(Object.hasOwn(args, "status")
+              ? { status: optionalString(args, "status", 30) ?? undefined }
+              : {}),
+            ...(typeof args.is_checkpoint === "boolean"
+              ? { isCheckpoint: args.is_checkpoint }
+              : {}),
+            ...(typeof args.is_external === "boolean" ? { isExternal: args.is_external } : {}),
+            ...(Object.hasOwn(args, "external_dependency")
+              ? { externalDependency: optionalString(args, "external_dependency", 2_000) }
+              : {}),
+            ...(typeof args.is_critical_path === "boolean"
+              ? { isCriticalPath: args.is_critical_path }
+              : {}),
+            ...(Object.hasOwn(args, "fallback_plan")
+              ? { fallbackPlan: optionalString(args, "fallback_plan", 5_000) }
+              : {}),
+            ...(Object.hasOwn(args, "first_action")
+              ? { firstAction: optionalString(args, "first_action", 2_000) }
+              : {}),
+            ...(Object.hasOwn(args, "progress_percent")
+              ? { progressPercent: optionalInteger(args, "progress_percent") ?? undefined }
+              : {}),
+            ...(Array.isArray(args.depends_on_result_ids)
+              ? {
+                  dependsOnResultIds: args.depends_on_result_ids
+                    .map(Number)
+                    .filter(Number.isSafeInteger),
+                }
+              : {}),
+          }),
+        }),
+      ),
+      tool(
+        "record_work_block",
+        "Записать рабочий блок",
+        "Планирует, запускает или завершает одно действие. При завершении сохраняет факт, артефакт, время, препятствие, помощь и продолжение.",
+        objectSchema({
+          action: { type: "string", enum: ["plan", "start", "complete", "cancel"] },
+          goal_id: integer("ID цели"),
+          goal_result_id: integer("ID промежуточного результата"),
+          work_block_id: integer("ID рабочего блока для start/complete/cancel"),
+          intention: text("Ожидаемый артефакт действия"),
+          first_physical_step: text("Первый физический шаг"),
+          planned_start_at: text("Локально согласованное время в ISO 8601 с offset"),
+          planned_minutes: integer("Длительность в минутах"),
+          if_then_rule: text("Правило если-то"),
+          completion_criterion: text("Критерий завершения"),
+          energy_before: integer("Энергия до действия 1–5"),
+          energy_after: integer("Энергия после действия 1–5"),
+          actual_minutes: integer("Фактическое время"),
+          actual_result: text("Что удалось сделать в итоге"),
+          artifact: text("Получившийся артефакт"),
+          obstacle: text("Что мешало"),
+          helpful_factor: text("Что помогло"),
+          next_step: text("Продолжение"),
+          result_completed: boolean("Промежуточный результат завершён"),
+          progress_percent: integer("Прогресс промежуточного результата 0–100"),
+        }, ["action", "goal_id"]),
+        async (args, runtime) => ({
+          ok: true,
+          work_block: await this.goals.recordWorkBlock({
+            userId: runtime.userId,
+            action: requiredString(args, "action", 20) as "plan" | "start" | "complete" | "cancel",
+            goalId: optionalInteger(args, "goal_id") ?? 0,
+            goalResultId: optionalInteger(args, "goal_result_id"),
+            workBlockId: optionalInteger(args, "work_block_id") ?? undefined,
+            intention: optionalString(args, "intention", 2_000) ?? undefined,
+            firstPhysicalStep: optionalString(args, "first_physical_step", 2_000),
+            plannedStartAt: optionalString(args, "planned_start_at", 100),
+            plannedMinutes: optionalInteger(args, "planned_minutes"),
+            ifThenRule: optionalString(args, "if_then_rule", 2_000),
+            completionCriterion: optionalString(args, "completion_criterion", 2_000),
+            energyBefore: optionalInteger(args, "energy_before"),
+            energyAfter: optionalInteger(args, "energy_after"),
+            actualMinutes: optionalInteger(args, "actual_minutes"),
+            actualResult: optionalString(args, "actual_result", 10_000),
+            artifact: optionalString(args, "artifact", 10_000),
+            obstacle: optionalString(args, "obstacle", 5_000),
+            helpfulFactor: optionalString(args, "helpful_factor", 5_000),
+            nextStep: optionalString(args, "next_step", 5_000),
+            resultCompleted: args.result_completed === true,
+            progressPercent: optionalInteger(args, "progress_percent") ?? undefined,
+          }),
+        }),
+      ),
+      tool(
+        "record_goal_review",
+        "Записать обзор цели",
+        "Сохраняет разбор без обвинения: факт → сигнал системы → один изменяемый элемент → следующий малый шаг. Не перестраивает весь план автоматически.",
+        objectSchema({
+          goal_id: integer("ID цели"),
+          work_block_id: integer("Связанный рабочий блок"),
+          review_type: {
+            type: "string",
+            enum: ["feedback", "deviation", "checkpoint", "weekly", "completion"],
+          },
+          fact: text("Наблюдаемый факт без оценки личности"),
+          system_signal: text("Что показывает текущая система"),
+          changed_element: text("Один изменяемый элемент"),
+          next_small_step: text("Следующий малый шаг"),
+          plan_snapshot: { type: "object" },
+          fact_snapshot: { type: "object" },
+        }, ["goal_id", "fact"]),
+        async (args, runtime) => ({
+          ok: true,
+          review: await this.goals.recordGoalReview({
+            userId: runtime.userId,
+            goalId: optionalInteger(args, "goal_id") ?? 0,
+            workBlockId: optionalInteger(args, "work_block_id"),
+            reviewType: optionalString(args, "review_type", 30) ?? undefined,
+            fact: requiredString(args, "fact", 10_000),
+            systemSignal: optionalString(args, "system_signal", 5_000),
+            changedElement: optionalString(args, "changed_element", 5_000),
+            nextSmallStep: optionalString(args, "next_small_step", 5_000),
+            planSnapshot: args.plan_snapshot,
+            factSnapshot: args.fact_snapshot,
+          }),
+        }),
+      ),
+    ];
   }
 
   private profileTools(
