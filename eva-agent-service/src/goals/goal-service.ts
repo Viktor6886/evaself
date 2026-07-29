@@ -1,4 +1,5 @@
 import type { Database } from "../db.js";
+import type { GraphRepository } from "../memory/graph-repository.js";
 import type { RuntimeContextBuilder } from "../runtime/runtime-context.js";
 
 type JsonObject = Record<string, unknown>;
@@ -91,6 +92,7 @@ export class GoalService {
   constructor(
     private readonly db: Database,
     private readonly runtimeContext?: RuntimeContextBuilder,
+    private readonly graph?: GraphRepository,
   ) {}
 
   async getGoalContext(userId: number, goalId?: number): Promise<JsonObject> {
@@ -256,35 +258,90 @@ export class GoalService {
       return `${field.column} = $${values.length}${field.cast ? `::${field.cast}` : ""}`;
     });
     if (input.status === "completed") assignments.push("completed_at = COALESCE(completed_at, now())");
-    const { rows } = await this.db.query(
-      `UPDATE goals SET ${assignments.join(", ")}
-        WHERE id = $1 AND user_id = $2
-        RETURNING *`,
-      values,
-    );
+    const sql = `UPDATE goals SET ${assignments.join(", ")}
+      WHERE id = $1 AND user_id = $2
+      RETURNING *`;
+    const saved = this.graph && existing.user_confirmed === true
+      ? await this.db.transaction(async (client) => {
+          const { rows } = await client.query(sql, values);
+          const north = await client.query(
+            "SELECT values, reduce_list FROM user_north WHERE user_id = $1",
+            [input.userId],
+          );
+          if (rows[0]) {
+            await this.graph!.syncGoal(client, {
+              userId: input.userId,
+              goal: rows[0] as Record<string, unknown>,
+              values: north.rows[0]?.values,
+              antiGoals: north.rows[0]?.reduce_list,
+            });
+          }
+          return rows[0];
+        })
+      : (await this.db.query(sql, values)).rows[0];
     this.invalidate(input.userId);
-    return rows[0];
+    return saved;
   }
 
   async confirmGoal(userId: number, goalId: number): Promise<unknown> {
-    const { rows } = await this.db.query(
-      `UPDATE goals
-          SET user_confirmed = true,
-              confirmed_at = COALESCE(confirmed_at, now()),
-              status = 'active',
-              vector_stage = CASE WHEN vector_stage = 'north' THEN 'result' ELSE vector_stage END
-        WHERE id = $1 AND user_id = $2
-        RETURNING *`,
-      [goalId, userId],
-    );
-    if (!rows[0]) throw new Error("Цель не найдена");
+    const sql = `UPDATE goals
+            SET user_confirmed = true,
+                confirmed_at = COALESCE(confirmed_at, now()),
+                status = 'active',
+                vector_stage = CASE WHEN vector_stage = 'north' THEN 'result' ELSE vector_stage END
+          WHERE id = $1 AND user_id = $2
+          RETURNING *`;
+    const graph = this.graph;
+    const saved = graph
+      ? await this.db.transaction(async (client) => {
+        const { rows } = await client.query(sql, [goalId, userId]);
+        if (!rows[0]) throw new Error("Цель не найдена");
+        const north = await client.query(
+          "SELECT values, reduce_list FROM user_north WHERE user_id = $1",
+          [userId],
+        );
+        await graph.syncGoal(client, {
+          userId,
+          goal: rows[0] as Record<string, unknown>,
+          values: north.rows[0]?.values,
+          antiGoals: north.rows[0]?.reduce_list,
+        });
+        const [results, dependencies] = await Promise.all([
+          client.query(
+            "SELECT * FROM goal_results WHERE user_id = $1 AND goal_id = $2 ORDER BY sort_order, id",
+            [userId, goalId],
+          ),
+          client.query<{ result_id: string; depends_on_result_id: string }>(
+            `SELECT result_id, depends_on_result_id
+               FROM goal_dependencies
+              WHERE user_id = $1 AND goal_id = $2
+                AND depends_on_result_id IS NOT NULL`,
+            [userId, goalId],
+          ),
+        ]);
+        for (const result of results.rows) {
+          const resultId = Number(result.id);
+          await graph.syncGoalResult(client, {
+            userId,
+            goalId,
+            result: result as Record<string, unknown>,
+            dependencyIds: dependencies.rows
+              .filter((dependency) => Number(dependency.result_id) === resultId)
+              .map((dependency) => Number(dependency.depends_on_result_id)),
+            goalConfirmed: true,
+          });
+        }
+        return rows[0];
+      })
+      : (await this.db.query(sql, [goalId, userId])).rows[0];
+    if (!saved) throw new Error("Цель не найдена");
     this.invalidate(userId);
-    return rows[0];
+    return saved;
   }
 
   async upsertGoalResult(input: UpsertGoalResultInput): Promise<unknown> {
     validateResultInput(input);
-    await this.requireGoal(input.userId, input.goalId);
+    const ownedGoal = await this.requireGoal(input.userId, input.goalId);
     if (input.parentResultId != null) {
       await this.requireResult(input.userId, input.goalId, input.parentResultId);
     }
@@ -395,6 +452,13 @@ export class GoalService {
         "UPDATE goals SET vector_stage = 'map' WHERE id = $1 AND user_id = $2 AND vector_stage IN ('north', 'result')",
         [input.goalId, input.userId],
       );
+      await this.graph?.syncGoalResult(client, {
+        userId: input.userId,
+        goalId: input.goalId,
+        result: row,
+        dependencyIds: input.dependsOnResultIds,
+        goalConfirmed: ownedGoal.user_confirmed === true,
+      });
       return row;
     }).finally(() => this.invalidate(input.userId));
   }
@@ -407,6 +471,9 @@ export class GoalService {
         [input.goalId, input.userId],
       );
       if (!goal.rows[0]) throw new Error("Цель не найдена");
+      if (goal.rows[0].user_confirmed !== true) {
+        throw new Error("Действие можно записать только для подтверждённой цели");
+      }
       if (input.goalResultId != null) {
         const result = await client.query(
           "SELECT id FROM goal_results WHERE id = $1 AND goal_id = $2 AND user_id = $3",
@@ -543,6 +610,11 @@ export class GoalService {
           WHERE id = $1 AND user_id = $2`,
         [input.goalId, input.userId],
       );
+      await this.graph?.syncWorkBlockFeedback(client, {
+        userId: input.userId,
+        goalId: input.goalId,
+        workBlock: rows[0] as Record<string, unknown>,
+      });
       return rows[0];
     }).finally(() => this.invalidate(input.userId));
   }
@@ -610,6 +682,12 @@ export class GoalService {
       await client.query(
         "UPDATE goals SET vector_stage = 'review' WHERE id = $1 AND user_id = $2",
         [input.goalId, input.userId],
+      );
+      await this.graph?.syncReview(
+        client,
+        input.userId,
+        input.goalId,
+        rows[0] as Record<string, unknown>,
       );
       return rows[0];
     });

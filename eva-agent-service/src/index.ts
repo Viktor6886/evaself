@@ -20,6 +20,8 @@ import { GoalService } from "./goals/goal-service.js";
 import { LettaService } from "./letta.js";
 import { LlmManager } from "./llm.js";
 import { createLogger } from "./logger.js";
+import { GraphContextService } from "./memory/graph-context.js";
+import { GraphRepository } from "./memory/graph-repository.js";
 import { LavaPayments } from "./payments.js";
 import { UserProfileService } from "./profile/profile-service.js";
 import { UserQueue } from "./queue.js";
@@ -80,10 +82,32 @@ async function main(): Promise<void> {
   const runtimeContext = new RuntimeContextBuilder(db, {
     defaultTimezone: config.defaultTimezone,
   });
+  const graph = config.graphMemoryEnabled ? new GraphRepository(db) : undefined;
+  const graphContext = new GraphContextService(
+    db,
+    {
+      enabled: config.graphMemoryEnabled,
+      timeoutMs: config.graphContextTimeoutMs,
+    },
+    logger,
+  );
   const timezoneResolver = new TimezoneResolver(db);
-  const profile = new UserProfileService(db, timezoneResolver, runtimeContext);
-  const goals = new GoalService(db, runtimeContext);
-  const toolFactory = new AgentToolFactory(config, db, telegram, logger, profile, goals);
+  const profile = new UserProfileService(
+    db,
+    timezoneResolver,
+    runtimeContext,
+    graph,
+  );
+  const goals = new GoalService(db, runtimeContext, graph);
+  const toolFactory = new AgentToolFactory(
+    config,
+    db,
+    telegram,
+    logger,
+    profile,
+    goals,
+    graph,
+  );
   letta.setToolFactory((conversationId) => toolFactory.forConversation(conversationId));
   const workflow = new EvaWorkflow(
     config,
@@ -95,6 +119,7 @@ async function main(): Promise<void> {
     runtimeContext,
     profile,
     logger,
+    graphContext,
   );
   const inbox = new PostgresTelegramInbox(db);
   const inboxWorker = new TelegramInboxWorker(

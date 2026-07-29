@@ -211,7 +211,8 @@ jobs:
               'user_preferences','eva_notes','budget_entries','heartbeat_state',
               'payment_intents','admin_audit_log','user_north','goals',
               'goal_results','goal_dependencies','work_blocks','goal_reviews',
-              'goal_recommendations','user_strategies','learning_attempts'
+              'goal_recommendations','user_strategies','learning_attempts',
+              'memory_nodes','memory_edges'
             ]) AS t
             WHERE to_regclass('public.' || t) IS NULL;
             IF missing IS NOT NULL THEN RAISE EXCEPTION 'missing tables: %', missing; END IF;

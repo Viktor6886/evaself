@@ -56,7 +56,9 @@ test("completed work block stores fact and advances only the same user's goal", 
     query: async (sql: string, values: unknown[] = []) => {
       calls.push({ sql, values });
       if (sql.includes("FROM goals")) {
-        return { rows: [{ id: "9", user_id: "41", status: "active" }] };
+        return {
+          rows: [{ id: "9", user_id: "41", status: "active", user_confirmed: true }],
+        };
       }
       if (sql.includes("FROM work_blocks")) {
         return {

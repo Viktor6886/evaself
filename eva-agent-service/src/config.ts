@@ -54,6 +54,8 @@ export interface Config {
   heartbeatIntervalMs: number;
   typingIntervalMs: number;
   defaultTimezone: string;
+  graphMemoryEnabled: boolean;
+  graphContextTimeoutMs: number;
 
   lavaWebhookUser: string;
   lavaWebhookPassword: string;
@@ -84,6 +86,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     if (!value) return null;
     const parsed = Number.parseInt(value, 10);
     return Number.isSafeInteger(parsed) ? parsed : null;
+  };
+  const bool = (name: string, fallback: boolean): boolean => {
+    const value = str(name).toLowerCase();
+    if (!value) return fallback;
+    return ["1", "true", "yes", "on"].includes(value);
   };
   const json = <T>(name: string, fallback: T): T => {
     const value = str(name);
@@ -151,6 +158,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     heartbeatIntervalMs: int("EVA_HEARTBEAT_INTERVAL_MS", 10 * 60_000),
     typingIntervalMs: int("EVA_TELEGRAM_TYPING_INTERVAL_MS", 4_000),
     defaultTimezone: str("TZ", "UTC"),
+    graphMemoryEnabled: bool("EVA_GRAPH_MEMORY_ENABLED", true),
+    graphContextTimeoutMs: int("EVA_GRAPH_CONTEXT_TIMEOUT_MS", 75),
 
     lavaWebhookUser: str("LAVA_WEBHOOK_USER"),
     lavaWebhookPassword: str("LAVA_WEBHOOK_PASSWORD"),

@@ -1,4 +1,5 @@
 import type { Database } from "../db.js";
+import type { GraphRepository } from "../memory/graph-repository.js";
 import type { RuntimeContextBuilder } from "../runtime/runtime-context.js";
 import type { TimezoneResolver } from "../time/timezone-resolver.js";
 
@@ -49,6 +50,7 @@ export class UserProfileService {
     private readonly db: Database,
     private readonly timezoneResolver?: TimezoneResolver,
     private readonly runtimeContext?: RuntimeContextBuilder,
+    private readonly graph?: GraphRepository,
   ) {}
 
   async upsert(input: {
@@ -67,8 +69,9 @@ export class UserProfileService {
     const needsConfirmation =
       definition.confirmation_required || definition.sensitivity !== "normal";
     const status: ProfileStatus = needsConfirmation ? "candidate" : "confirmed";
-    const { rows } = await this.db.query<ProfileField>(
-      `INSERT INTO onboarding_fields
+    const persist = async (queryable: Pick<Database, "query">): Promise<ProfileField> => {
+      const { rows } = await queryable.query<ProfileField>(
+        `INSERT INTO onboarding_fields
          (user_id, field_key, field_value, field_json, status, confidence,
           source_type, source_id, source_quote, confirmed_at, sensitivity, meta)
        VALUES
@@ -88,22 +91,28 @@ export class UserProfileService {
          sensitivity = EXCLUDED.sensitivity,
          meta = EXCLUDED.meta,
          answered_at = now()
-       RETURNING *`,
-      [
-        input.userId,
-        definition.field_key,
-        normalized.text,
-        normalized.json === null ? null : JSON.stringify(normalized.json),
-        status,
-        confidence,
-        (input.sourceType ?? "conversation").slice(0, 100),
-        input.sourceId?.slice(0, 300) ?? null,
-        input.sourceQuote?.trim().slice(0, 2_000) ?? null,
-        definition.sensitivity,
-        JSON.stringify({ explicitly_stated: input.explicitlyStated === true }),
-      ],
-    );
-    const saved = rows[0]!;
+         RETURNING *`,
+        [
+          input.userId,
+          definition.field_key,
+          normalized.text,
+          normalized.json === null ? null : JSON.stringify(normalized.json),
+          status,
+          confidence,
+          (input.sourceType ?? "conversation").slice(0, 100),
+          input.sourceId?.slice(0, 300) ?? null,
+          input.sourceQuote?.trim().slice(0, 2_000) ?? null,
+          definition.sensitivity,
+          JSON.stringify({ explicitly_stated: input.explicitlyStated === true }),
+        ],
+      );
+      const saved = rows[0]!;
+      await this.graph?.syncProfile(queryable, input.userId, saved);
+      return saved;
+    };
+    const saved = this.graph
+      ? await this.db.transaction(async (client) => await persist(client as never))
+      : await persist(this.db);
     if (status === "confirmed") await this.syncConfirmed(input.userId, saved);
     this.runtimeContext?.invalidate(input.userId);
     return saved;
@@ -120,8 +129,9 @@ export class UserProfileService {
     // of truth to confirmed. A failed timezone resolution therefore leaves the
     // candidate available for correction.
     await this.syncConfirmed(userId, candidate.rows[0]);
-    const { rows } = await this.db.query<ProfileField>(
-      `UPDATE onboarding_fields
+    const save = async (queryable: Pick<Database, "query">): Promise<ProfileField> => {
+      const { rows } = await queryable.query<ProfileField>(
+        `UPDATE onboarding_fields
           SET status = 'confirmed',
               confirmed_at = now(),
               declined_at = NULL,
@@ -129,18 +139,25 @@ export class UserProfileService {
         WHERE user_id = $1
           AND field_key = $2
           AND status = 'candidate'
-      RETURNING *`,
-      [userId, fieldKey],
-    );
-    const saved = rows[0];
-    if (!saved) throw new Error("Сведение для подтверждения не найдено");
+         RETURNING *`,
+        [userId, fieldKey],
+      );
+      const saved = rows[0];
+      if (!saved) throw new Error("Сведение для подтверждения не найдено");
+      await this.graph?.syncProfile(queryable, userId, saved);
+      return saved;
+    };
+    const saved = this.graph
+      ? await this.db.transaction(async (client) => await save(client as never))
+      : await save(this.db);
     this.runtimeContext?.invalidate(userId);
     return saved;
   }
 
   async decline(userId: number, fieldKey: string): Promise<ProfileField> {
-    const { rows } = await this.db.query<ProfileField>(
-      `INSERT INTO onboarding_fields
+    const save = async (queryable: Pick<Database, "query">): Promise<ProfileField> => {
+      const { rows } = await queryable.query<ProfileField>(
+        `INSERT INTO onboarding_fields
          (user_id, field_key, status, declined_at, sensitivity)
        SELECT $1, d.field_key, 'declined', now(), d.sensitivity
          FROM profile_field_definitions d
@@ -153,12 +170,18 @@ export class UserProfileService {
          field_json = NULL,
          source_quote = NULL,
          source_id = NULL
-       RETURNING *`,
-      [userId, fieldKey],
-    );
-    if (!rows[0]) throw new Error("Неизвестное поле профиля");
+         RETURNING *`,
+        [userId, fieldKey],
+      );
+      if (!rows[0]) throw new Error("Неизвестное поле профиля");
+      await this.graph?.syncProfile(queryable, userId, rows[0]);
+      return rows[0];
+    };
+    const saved = this.graph
+      ? await this.db.transaction(async (client) => await save(client as never))
+      : await save(this.db);
     this.runtimeContext?.invalidate(userId);
-    return rows[0];
+    return saved;
   }
 
   async markAsked(userId: number, fieldKey: string): Promise<void> {

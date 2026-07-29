@@ -6,6 +6,7 @@ import type { SupportedLanguage } from "./i18n/language-resolver.js";
 import type { LettaService } from "./letta.js";
 import type { LlmManager } from "./llm.js";
 import type { Logger } from "./logger.js";
+import type { GraphContextService } from "./memory/graph-context.js";
 import type { UserProfileService } from "./profile/profile-service.js";
 import type { UserQueue } from "./queue.js";
 import type { RuntimeContextBuilder } from "./runtime/runtime-context.js";
@@ -36,6 +37,7 @@ export class EvaWorkflow {
     private readonly runtimeContext: RuntimeContextBuilder,
     private readonly profile: UserProfileService,
     private readonly logger: Logger,
+    private readonly graphContext?: GraphContextService,
   ) {}
 
   /** Awaitable entry point used by tests and controlled reprocessing. */
@@ -117,6 +119,15 @@ export class EvaWorkflow {
         const conversationId = link.conversation_id;
         if (!conversationId) throw new Error("У агента отсутствует активный conversation");
 
+        const graph = await this.graphContext?.findRelevant(user.id, prompt);
+        if (graph?.used) {
+          this.logger.debug("Графовый контекст обработан", {
+            userId: user.id,
+            graph_query_ms: graph.elapsedMs,
+            graph_nodes: graph.relevantMemory.length,
+            graph_timeout: graph.timedOut,
+          });
+        }
         const context = await this.runtimeContext.build({
           userId: user.id,
           conversationId,
@@ -125,6 +136,7 @@ export class EvaWorkflow {
             update.message.text?.trim() ||
             update.message.caption?.trim() ||
             (update.kind === "voice" ? prompt : ""),
+          relevantMemory: graph?.relevantMemory,
         });
         const answer = await this.letta.runTurn(
           conversationId,

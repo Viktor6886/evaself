@@ -5,6 +5,7 @@ import type { Config } from "./config.js";
 import type { AgentRuntimeContext, Database } from "./db.js";
 import { GoalService } from "./goals/goal-service.js";
 import type { Logger } from "./logger.js";
+import type { GraphRepository } from "./memory/graph-repository.js";
 import { UserProfileService } from "./profile/profile-service.js";
 import { ALLOWED_REACTIONS, type TelegramClient } from "./telegram.js";
 import { localDateTimeToUtc } from "./time/local-date-time.js";
@@ -71,6 +72,7 @@ export class AgentToolFactory {
     private readonly logger: Logger,
     profile?: UserProfileService,
     goals?: GoalService,
+    private readonly graph?: GraphRepository,
   ) {
     this.profile = profile ?? new UserProfileService(db);
     this.goals = goals ?? new GoalService(db);
@@ -929,6 +931,11 @@ export class AgentToolFactory {
       repeat: boolean("Повторять по cron"),
       priority: integer("Приоритет от 1 до 5"),
       timezone: text("Часовой пояс IANA"),
+      goal_id: integer("Связанная цель"),
+      goal_result_id: integer("Связанный промежуточный результат"),
+      work_block_id: integer("Связанный рабочий блок"),
+      estimated_minutes: integer("Оценка длительности в минутах"),
+      energy_required: integer("Требуемая энергия 1–5"),
     }, ["title"]);
     const save = async (args: JsonObject, runtime: AgentRuntimeContext) => {
       const priority = Math.min(Math.max(optionalInteger(args, "priority") ?? 3, 1), 5);
@@ -948,27 +955,94 @@ export class AgentToolFactory {
       if (repeat && !cron) throw new Error("Для повторяющейся задачи требуется cron");
       const nextRunAt = remindAt ?? dueAt ??
         (repeat && cron ? nextCronDate(cron, timezone, new Date()).toISOString() : null);
-      const { rows } = await this.db.query(
-        `INSERT INTO tasks
-           (user_id, title, description, priority, due_at, remind_at,
-            cron_expression, repeat_enabled, timezone, next_run_at)
-         VALUES ($1, $2, $3, $4, $5::timestamptz, $6::timestamptz,
-                 $7, $8, $9, $10::timestamptz)
-         RETURNING *`,
-        [
-          runtime.userId,
-          requiredString(args, "title", 500),
-          optionalString(args, "description", 5000),
-          priority,
-          dueAt,
-          remindAt,
-          cron,
-          repeat,
-          timezone,
-          nextRunAt,
-        ],
-      );
-      return { ok: true, task: rows[0] };
+      let goalId = optionalInteger(args, "goal_id");
+      let goalResultId = optionalInteger(args, "goal_result_id");
+      const workBlockId = optionalInteger(args, "work_block_id");
+      const estimatedMinutes = optionalInteger(args, "estimated_minutes");
+      const energyRequired = optionalInteger(args, "energy_required");
+      if (estimatedMinutes !== null && (estimatedMinutes < 1 || estimatedMinutes > 1440)) {
+        throw new Error("estimated_minutes должен быть от 1 до 1440");
+      }
+      if (energyRequired !== null && (energyRequired < 1 || energyRequired > 5)) {
+        throw new Error("energy_required должен быть от 1 до 5");
+      }
+      const task = await this.db.transaction(async (client) => {
+        if (goalId !== null) {
+          const owned = await client.query(
+            "SELECT id FROM goals WHERE id = $1 AND user_id = $2",
+            [goalId, runtime.userId],
+          );
+          if (!owned.rows[0]) throw new Error("Цель задачи не найдена");
+        }
+        if (goalResultId !== null) {
+          const owned = await client.query<{ id: string; goal_id: string }>(
+            "SELECT id, goal_id FROM goal_results WHERE id = $1 AND user_id = $2",
+            [goalResultId, runtime.userId],
+          );
+          if (!owned.rows[0]) throw new Error("Результат задачи не найден");
+          const resultGoalId = Number(owned.rows[0].goal_id);
+          if (goalId !== null && goalId !== resultGoalId) {
+            throw new Error("Результат задачи не принадлежит выбранной цели");
+          }
+          goalId = resultGoalId;
+        }
+        if (workBlockId !== null) {
+          const owned = await client.query<{
+            id: string;
+            goal_id: string;
+            goal_result_id: string | null;
+          }>(
+            `SELECT id, goal_id, goal_result_id FROM work_blocks
+              WHERE id = $1 AND user_id = $2`,
+            [workBlockId, runtime.userId],
+          );
+          if (!owned.rows[0]) throw new Error("Рабочий блок задачи не найден");
+          const blockGoalId = Number(owned.rows[0].goal_id);
+          const blockResultId = Number(owned.rows[0].goal_result_id) || null;
+          if (goalId !== null && goalId !== blockGoalId) {
+            throw new Error("Рабочий блок не принадлежит выбранной цели");
+          }
+          if (goalResultId !== null && blockResultId !== goalResultId) {
+            throw new Error("Рабочий блок не принадлежит выбранному результату");
+          }
+          goalId = blockGoalId;
+          goalResultId = goalResultId ?? blockResultId;
+        }
+        const { rows } = await client.query(
+          `INSERT INTO tasks
+             (user_id, title, description, priority, due_at, remind_at,
+              cron_expression, repeat_enabled, timezone, next_run_at,
+              goal_id, goal_result_id, work_block_id, estimated_minutes,
+              energy_required)
+           VALUES ($1, $2, $3, $4, $5::timestamptz, $6::timestamptz,
+                   $7, $8, $9, $10::timestamptz, $11, $12, $13, $14, $15)
+           RETURNING *`,
+          [
+            runtime.userId,
+            requiredString(args, "title", 500),
+            optionalString(args, "description", 5000),
+            priority,
+            dueAt,
+            remindAt,
+            cron,
+            repeat,
+            timezone,
+            nextRunAt,
+            goalId,
+            goalResultId,
+            workBlockId,
+            estimatedMinutes,
+            energyRequired,
+          ],
+        );
+        await this.graph?.syncTask(client, {
+          userId: runtime.userId,
+          task: rows[0] as Record<string, unknown>,
+          goalResultId,
+        });
+        return rows[0];
+      });
+      return { ok: true, task };
     };
 
     return [
