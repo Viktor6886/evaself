@@ -63,6 +63,9 @@ CMD ["node", "dist/index.js"]
 # фиксированных backup/update-скриптов. Обычный Agent Runtime и admin-api
 # собираются из финального target `app` и этих бинарников не получают.
 FROM runtime AS updater
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 \
+ && rm -rf /var/lib/apt/lists/*
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=docker-cli /usr/local/libexec/docker/cli-plugins \
     /usr/local/libexec/docker/cli-plugins

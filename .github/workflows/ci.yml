@@ -317,7 +317,8 @@ jobs:
             --build-arg NODE_BASE_VERSION="$NODE_BASE_VERSION" \
             --build-arg DOCKER_CLI_IMAGE="$DOCKER_CLI_IMAGE" \
             --build-arg DOCKER_CLI_VERSION="$DOCKER_CLI_VERSION" eva-agent-service
-          docker run --rm evaself/eva-updater:ci docker compose version
+          docker run --rm evaself/eva-updater:ci sh -c \
+            'docker compose version && python3 --version'
           docker build -t evaself/letta-app-server:ci \
             --build-arg NODE_BASE_VERSION="$NODE_BASE_VERSION" \
             --build-arg LETTA_CODE_VERSION="$LETTA_CODE_VERSION" letta-app-server
