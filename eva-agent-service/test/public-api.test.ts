@@ -80,6 +80,15 @@ test("/public/session and /public/tasks derive identity only from initData", asy
         updated_at: NOW,
       }];
     },
+    getProfile: async (telegramId) => ({
+      telegram_id: telegramId,
+      confirmed: [],
+      candidates: [],
+    }),
+    updateProfile: async (telegramId, input) => ({
+      telegram_id: telegramId,
+      input,
+    }),
   };
   const app = Fastify();
   registerPublicRoutes(app, {
@@ -110,6 +119,16 @@ test("/public/session and /public/tasks derive identity only from initData", asy
   assert.equal(tasks.statusCode, 200);
   assert.equal(tasks.json().tasks[0].id, "7");
   assert.equal(tasksTelegramId, USER.id);
+
+  const profile = await app.inject({
+    method: "PATCH",
+    url: "/public/profile",
+    headers: { "x-telegram-init-data": initData },
+    payload: { user_id: 999999, fields: { preferred_name: "Виктор" } },
+  });
+  assert.equal(profile.statusCode, 200);
+  assert.equal(profile.json().profile.telegram_id, USER.id);
+  assert.equal(profile.json().profile.input.user_id, 999999);
 
   const missing = await app.inject({ method: "GET", url: "/public/tasks" });
   assert.equal(missing.statusCode, 401);

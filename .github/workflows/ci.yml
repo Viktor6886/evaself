@@ -207,7 +207,7 @@ jobs:
               'quotas','usage_counters','onboarding_fields','test_results','tasks',
               'referrals','partner_analysis_links','notifications','crisis_events',
               'schema_migrations','llm_providers','sdk_settings','telegram_updates',
-              'telegram_outbox','timezone_aliases',
+              'telegram_outbox','timezone_aliases','profile_field_definitions',
               'user_preferences','eva_notes','budget_entries','heartbeat_state',
               'payment_intents','admin_audit_log'
             ]) AS t

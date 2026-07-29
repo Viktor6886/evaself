@@ -14,6 +14,8 @@ const ru = {
   emptyReply: "Я рядом. Попробуй сформулировать это немного иначе.",
   start:
     "Привет! Я Ева — собеседник и помощник в самопознании. Я запоминаю важный контекст на твоём сервере. Напиши, что сейчас занимает твои мысли.",
+  startFirst:
+    "Привет! Я Ева — собеседник и помощник в самопознании. Давай знакомиться без длинной анкеты: как мне лучше к тебе обращаться? Этот вопрос можно пропустить.",
   help:
     "Можно писать текстом или отправлять голосовые сообщения и изображения.\n\n/balance — текущие лимиты\n/subscription — варианты доступа\n/privacy — как хранятся данные",
   limitsTitle: "Текущие лимиты:",
@@ -39,6 +41,8 @@ const en: Record<keyof typeof ru, string> = {
   emptyReply: "I’m here. Try phrasing that a little differently.",
   start:
     "Hi! I’m Eva, a companion and self-discovery assistant. I keep important context on your server. Tell me what is on your mind right now.",
+  startFirst:
+    "Hi! I’m Eva, a companion and self-discovery assistant. Let’s get acquainted without a long form: what should I call you? You can skip this question.",
   help:
     "You can send text, voice messages, or images.\n\n/balance — current limits\n/subscription — access options\n/privacy — how data is stored",
   limitsTitle: "Current limits:",

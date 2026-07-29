@@ -18,6 +18,7 @@ import type { ManagedAgentInput } from "./letta.js";
 import type { LlmManager, LlmProviderInput } from "./llm.js";
 import type { Logger } from "./logger.js";
 import type { LavaPayments } from "./payments.js";
+import type { UserProfileService } from "./profile/profile-service.js";
 import { PublicRepository, registerPublicRoutes } from "./public/routes.js";
 import type { UserQueue } from "./queue.js";
 import type { SdkSettingsInput, SdkSettingsManager } from "./sdk-settings.js";
@@ -34,6 +35,7 @@ export interface Services {
   sdk: SdkSettingsManager;
   llm: LlmManager;
   inbox: TelegramInbox;
+  profile: UserProfileService;
   payments: LavaPayments;
   queue: UserQueue;
   redisPing: () => Promise<boolean>;
@@ -54,7 +56,7 @@ function telegramIdOf(request: FastifyRequest): number {
 }
 
 export function buildServer(services: Services): FastifyInstance {
-  const { config, logger, db, letta, sdk, llm, inbox, payments, queue } = services;
+  const { config, logger, db, letta, sdk, llm, inbox, profile, payments, queue } = services;
 
   // Fastify's own logger is off: this service logs through logger.ts so
   // every line in the stack has the same JSON shape.
@@ -98,7 +100,7 @@ export function buildServer(services: Services): FastifyInstance {
 
   registerPublicRoutes(app, {
     config,
-    repository: new PublicRepository(db),
+    repository: new PublicRepository(db, profile),
   });
 
   // ---------------------------------------------------------------

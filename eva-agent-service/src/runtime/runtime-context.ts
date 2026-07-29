@@ -3,6 +3,7 @@ import {
   LanguageResolver,
   type SupportedLanguage,
 } from "../i18n/language-resolver.js";
+import { shouldSuppressProfileQuestion } from "../profile/profile-completeness.js";
 import { localNow } from "../time/local-date-time.js";
 
 export interface RuntimeContext {
@@ -40,6 +41,10 @@ interface RuntimeContextRow {
   response_mode: "text" | "voice" | "both";
   use_emoji: boolean;
   communication_style: string | null;
+  profile_field_key: string | null;
+  profile_title: string | null;
+  profile_prompt_hint: string | null;
+  profile_status: string | null;
 }
 
 export class RuntimeContextBuilder {
@@ -99,7 +104,9 @@ export class RuntimeContextBuilder {
       responseMode: row.response_mode,
       useEmoji: row.use_emoji,
       communicationStyle: row.communication_style,
-      profileHint: null,
+      profileHint: shouldSuppressProfileQuestion(input.languageMessage ?? input.userMessage)
+        ? null
+        : profileHintFrom(row),
       activeGoal: null,
       nextResult: null,
       nextStep: null,
@@ -167,7 +174,11 @@ export class RuntimeContextBuilder {
           a.conversation_id,
           COALESCE(p.response_mode, 'text') AS response_mode,
           COALESCE(p.use_emoji, true) AS use_emoji,
-          p.character AS communication_style
+          p.character AS communication_style,
+          profile_hint.field_key AS profile_field_key,
+          profile_hint.title AS profile_title,
+          profile_hint.prompt_hint AS profile_prompt_hint,
+          profile_hint.status AS profile_status
         FROM users u
         JOIN agent_links a
           ON a.user_id = u.id
@@ -175,6 +186,30 @@ export class RuntimeContextBuilder {
          AND a.status = 'active'
          AND a.conversation_id = $2
         LEFT JOIN user_preferences p ON p.user_id = u.id
+        LEFT JOIN LATERAL (
+          SELECT
+            d.field_key,
+            d.title,
+            d.prompt_hint,
+            f.status
+          FROM profile_field_definitions d
+          LEFT JOIN onboarding_fields f
+            ON f.user_id = u.id AND f.field_key = d.field_key
+          WHERE d.enabled
+            AND COALESCE(f.status, 'missing') NOT IN
+                ('confirmed', 'declined', 'not_applicable', 'superseded')
+            AND COALESCE(f.ask_count, 0) < d.max_ask_count
+            AND (
+              f.last_asked_at IS NULL
+              OR f.last_asked_at <= now() - make_interval(days => d.cooldown_days)
+            )
+            AND d.sensitivity = 'normal'
+          ORDER BY
+            CASE WHEN f.status = 'candidate' THEN 0 ELSE 1 END,
+            d.priority,
+            d.sort_order
+          LIMIT 1
+        ) profile_hint ON true
        WHERE u.id = $1
        LIMIT 1`,
       [userId, conversationId, this.options.defaultTimezone],
@@ -187,6 +222,23 @@ export class RuntimeContextBuilder {
     });
     return row;
   }
+}
+
+function profileHintFrom(row: RuntimeContextRow): string | null {
+  if (!row.profile_field_key || !row.profile_title) return null;
+  if (row.profile_status === "candidate") {
+    return [
+      `Есть неподтверждённое сведение «${row.profile_title}».`,
+      "Если это естественно связано с текущей темой, попроси подтвердить или отклонить его.",
+      "Не задавай больше одного дополнительного вопроса.",
+    ].join(" ");
+  }
+  return [
+    `Не заполнено поле «${row.profile_title}».`,
+    row.profile_prompt_hint ?? "",
+    "Если пользователь явно назовёт ответ, сохрани его инструментом профиля.",
+    "Не превращай разговор в анкету.",
+  ].filter(Boolean).join(" ");
 }
 
 function validTimezoneOr(value: string, fallback: string): string {

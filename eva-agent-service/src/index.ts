@@ -20,11 +20,13 @@ import { LettaService } from "./letta.js";
 import { LlmManager } from "./llm.js";
 import { createLogger } from "./logger.js";
 import { LavaPayments } from "./payments.js";
+import { UserProfileService } from "./profile/profile-service.js";
 import { UserQueue } from "./queue.js";
 import { RuntimeContextBuilder } from "./runtime/runtime-context.js";
 import { SdkSettingsManager } from "./sdk-settings.js";
 import { buildServer, VERSION } from "./server.js";
 import { TelegramClient } from "./telegram.js";
+import { TimezoneResolver } from "./time/timezone-resolver.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -74,11 +76,13 @@ async function main(): Promise<void> {
       message: error instanceof Error ? error.message : String(error),
     });
   }
-  const toolFactory = new AgentToolFactory(config, db, telegram, logger);
-  letta.setToolFactory((conversationId) => toolFactory.forConversation(conversationId));
   const runtimeContext = new RuntimeContextBuilder(db, {
     defaultTimezone: config.defaultTimezone,
   });
+  const timezoneResolver = new TimezoneResolver(db);
+  const profile = new UserProfileService(db, timezoneResolver, runtimeContext);
+  const toolFactory = new AgentToolFactory(config, db, telegram, logger, profile);
+  letta.setToolFactory((conversationId) => toolFactory.forConversation(conversationId));
   const workflow = new EvaWorkflow(
     config,
     db,
@@ -87,6 +91,7 @@ async function main(): Promise<void> {
     queue,
     telegram,
     runtimeContext,
+    profile,
     logger,
   );
   const inbox = new PostgresTelegramInbox(db);
@@ -136,6 +141,7 @@ async function main(): Promise<void> {
     sdk,
     llm,
     inbox,
+    profile,
     payments,
     queue,
     redisPing: async () => (await redis.ping()) === "PONG",

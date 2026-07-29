@@ -6,6 +6,7 @@ import type { SupportedLanguage } from "./i18n/language-resolver.js";
 import type { LettaService } from "./letta.js";
 import type { LlmManager } from "./llm.js";
 import type { Logger } from "./logger.js";
+import type { UserProfileService } from "./profile/profile-service.js";
 import type { UserQueue } from "./queue.js";
 import type { RuntimeContextBuilder } from "./runtime/runtime-context.js";
 import {
@@ -33,6 +34,7 @@ export class EvaWorkflow {
     private readonly queue: UserQueue,
     private readonly telegram: TelegramClient,
     private readonly runtimeContext: RuntimeContextBuilder,
+    private readonly profile: UserProfileService,
     private readonly logger: Logger,
   ) {}
 
@@ -205,13 +207,16 @@ export class EvaWorkflow {
     language: SupportedLanguage,
   ): Promise<void> {
     switch (update.command) {
-      case "/start":
+      case "/start": {
+        const firstStart = user.state === "onboarding";
         await this.db.setUserState(user.id, "active");
         await this.telegram.sendProgressiveMessage(
           update.chatId,
-          t(language, "start"),
+          t(language, firstStart ? "startFirst" : "start"),
         );
+        if (firstStart) await this.profile.markAsked(user.id, "preferred_name");
         break;
+      }
       case "/help":
         await this.telegram.sendMessage(
           update.chatId,

@@ -4,6 +4,7 @@ import { nextCronDate } from "./background.js";
 import type { Config } from "./config.js";
 import type { AgentRuntimeContext, Database } from "./db.js";
 import type { Logger } from "./logger.js";
+import { UserProfileService } from "./profile/profile-service.js";
 import { ALLOWED_REACTIONS, type TelegramClient } from "./telegram.js";
 import { localDateTimeToUtc } from "./time/local-date-time.js";
 
@@ -59,12 +60,17 @@ function result(value: unknown) {
 }
 
 export class AgentToolFactory {
+  private readonly profile: UserProfileService;
+
   constructor(
     private readonly config: Config,
     private readonly db: Database,
     private readonly telegram: TelegramClient,
     private readonly logger: Logger,
-  ) {}
+    profile?: UserProfileService,
+  ) {
+    this.profile = profile ?? new UserProfileService(db);
+  }
 
   forConversation(conversationId: string): AnyAgentTool[] {
     const context = async (): Promise<AgentRuntimeContext> => {
@@ -362,6 +368,7 @@ export class AgentToolFactory {
           return { ok: true, deleted: deleted.rowCount ?? 0 };
         },
       ),
+      ...this.profileTools(tool),
       ...this.taskTools(tool),
       ...this.todoistTools(tool),
       tool(
@@ -454,6 +461,89 @@ export class AgentToolFactory {
     );
 
     return tools;
+  }
+
+  private profileTools(
+    tool: (
+      name: string,
+      label: string,
+      description: string,
+      parameters: JsonObject,
+      execute: (args: JsonObject, runtime: AgentRuntimeContext) => Promise<unknown>,
+    ) => AnyAgentTool,
+  ): AnyAgentTool[] {
+    return [
+      tool(
+        "upsert_user_profile_field",
+        "Сохранить поле профиля",
+        "Сохраняет только явно сообщённое или хорошо подтверждённое сведение текущего пользователя. Чувствительные сведения остаются кандидатами до подтверждения.",
+        objectSchema({
+          field_key: text("Разрешённый ключ поля профиля"),
+          value: { description: "Строка, массив строк или JSON-объект согласно типу поля" },
+          source_quote: text("Короткая точная цитата пользователя"),
+          confidence: { type: "number", minimum: 0, maximum: 1 },
+          explicitly_stated: boolean("Пользователь сообщил это прямо, без интерпретации"),
+        }, ["field_key", "value", "explicitly_stated"]),
+        async (args, runtime) => ({
+          ok: true,
+          field: await this.profile.upsert({
+            userId: runtime.userId,
+            fieldKey: requiredString(args, "field_key", 100),
+            value: args.value,
+            sourceQuote: optionalString(args, "source_quote", 2_000),
+            confidence: typeof args.confidence === "number" ? args.confidence : undefined,
+            explicitlyStated: args.explicitly_stated === true,
+          }),
+        }),
+      ),
+      tool(
+        "confirm_user_profile_field",
+        "Подтвердить поле профиля",
+        "Подтверждает существующий кандидат только после явного согласия пользователя.",
+        objectSchema({ field_key: text("Ключ поля профиля") }, ["field_key"]),
+        async (args, runtime) => ({
+          ok: true,
+          field: await this.profile.confirm(
+            runtime.userId,
+            requiredString(args, "field_key", 100),
+          ),
+        }),
+      ),
+      tool(
+        "decline_user_profile_field",
+        "Отклонить поле профиля",
+        "Помечает поле отклонённым только после явного отказа пользователя; Ева больше не спрашивает о нём автоматически.",
+        objectSchema({ field_key: text("Ключ поля профиля") }, ["field_key"]),
+        async (args, runtime) => ({
+          ok: true,
+          field: await this.profile.decline(
+            runtime.userId,
+            requiredString(args, "field_key", 100),
+          ),
+        }),
+      ),
+      tool(
+        "mark_profile_field_asked",
+        "Отметить вопрос профиля",
+        "Вызывается только если Ева действительно задала дополнительный вопрос о поле; включает cooldown и защищает от повторной анкеты.",
+        objectSchema({ field_key: text("Ключ заданного поля") }, ["field_key"]),
+        async (args, runtime) => {
+          const fieldKey = requiredString(args, "field_key", 100);
+          await this.profile.markAsked(runtime.userId, fieldKey);
+          return { ok: true, field_key: fieldKey };
+        },
+      ),
+      tool(
+        "get_user_profile",
+        "Получить профиль",
+        "Возвращает подтверждённые сведения и кандидаты текущего пользователя без данных других пользователей.",
+        objectSchema({}),
+        async (_args, runtime) => ({
+          ok: true,
+          ...(await this.profile.getProfile(runtime.userId)),
+        }),
+      ),
+    ];
   }
 
   private taskTools(
