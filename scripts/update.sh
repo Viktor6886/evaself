@@ -26,6 +26,17 @@ ROLLBACK_DIR="$ROOT_DIR/.rollback"
 REPORT="$(mktemp)"
 trap 'rm -f "$REPORT"' EXIT
 
+# A transition from a version that predates the admin Secret Store can pull
+# this script while the old copy is already running. In that case the first
+# run may stop after git pull because the old process never created the key.
+# Treat a missing key as pending update work so a safe re-run completes it.
+ADMIN_KEY_FILE="${EVA_SECRETS_MASTER_KEY_FILE:-$ROOT_DIR/secrets/eva-secrets-master-key}"
+if [[ "$ADMIN_KEY_FILE" != /* ]]; then
+	ADMIN_KEY_FILE="$ROOT_DIR/${ADMIN_KEY_FILE#./}"
+fi
+ADMIN_BOOTSTRAP_NEEDED=0
+[ -s "$ADMIN_KEY_FILE" ] || ADMIN_BOOTSTRAP_NEEDED=1
+
 # =====================================================================
 step "Checking upstream versions"
 # =====================================================================
@@ -72,9 +83,14 @@ if [ "$PREVIEW" -eq 1 ]; then
 fi
 # =====================================================================
 
-if [ "$UPDATES" -eq 0 ] && [ "$GIT_BEHIND" -eq 0 ]; then
+if [ "$UPDATES" -eq 0 ] && [ "$GIT_BEHIND" -eq 0 ] &&
+	[ "$ADMIN_BOOTSTRAP_NEEDED" -eq 0 ]; then
 	step "Already up to date"
 	exit 0
+fi
+
+if [ "$ADMIN_BOOTSTRAP_NEEDED" -eq 1 ]; then
+	info "требуется завершить подготовку Secret Store административной панели"
 fi
 
 # =====================================================================
