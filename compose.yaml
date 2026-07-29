@@ -454,6 +454,15 @@ services:
         condition: service_healthy
       eva-updater:
         condition: service_healthy
+    # В образе eva-agent-service задан HTTP healthcheck основного API.
+    # Worker не поднимает HTTP-порт: его процесс является единственной рабочей
+    # нагрузкой контейнера, а tini завершит контейнер при падении Node.js.
+    healthcheck:
+      test: ["CMD", "node", "-e", "process.kill(1, 0)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   # ===================================================================
   # ADMIN / DATA GUI
