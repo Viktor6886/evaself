@@ -1,0 +1,484 @@
+import type { AnyAgentTool } from "@letta-ai/letta-agent-sdk";
+
+import type { Config } from "../config.js";
+import type { AgentRuntimeContext, Database } from "../db.js";
+import { ALLOWED_REACTIONS, type TelegramClient } from "../telegram.js";
+import {
+  boolean,
+  integer,
+  objectSchema,
+  optionalInteger,
+  optionalString,
+  requiredString,
+  text,
+  type JsonObject,
+  type ToolBuilder,
+} from "./tool-kit.js";
+
+export class CoreToolFactory {
+  constructor(
+    private readonly config: Config,
+    private readonly db: Database,
+    private readonly telegram: TelegramClient,
+  ) {}
+
+  build(tool: ToolBuilder): AnyAgentTool[] {
+    const tools: AnyAgentTool[] = [
+      tool(
+        "update_response_mode",
+        "Режим ответа",
+        "Меняет формат ответа пользователю: текст, голос или оба варианта.",
+        objectSchema(
+          { mode: { type: "string", enum: ["text", "voice", "both"] } },
+          ["mode"],
+        ),
+        async (args, runtime) => {
+          const mode = requiredString(args, "mode");
+          if (!["text", "voice", "both"].includes(mode)) {
+            throw new Error("Неизвестный режим");
+          }
+          await this.db.query(
+            `INSERT INTO user_preferences (user_id, response_mode)
+             VALUES ($1, $2)
+             ON CONFLICT (user_id) DO UPDATE SET response_mode = EXCLUDED.response_mode`,
+            [runtime.userId, mode],
+          );
+          return { ok: true, response_mode: mode };
+        },
+      ),
+      tool(
+        "save_note",
+        "Сохранить заметку",
+        "Сохраняет личную заметку пользователя в PostgreSQL.",
+        objectSchema(
+          {
+            title: text("Короткий заголовок"),
+            content: text("Содержание заметки"),
+            category: text("Необязательная категория"),
+            tags: { type: "array", items: { type: "string" } },
+            pinned: boolean("Закрепить заметку"),
+          },
+          ["title", "content"],
+        ),
+        async (args, runtime) => {
+          const tags = Array.isArray(args.tags)
+            ? args.tags
+              .filter((item): item is string => typeof item === "string")
+              .slice(0, 30)
+            : [];
+          const { rows } = await this.db.query(
+            `INSERT INTO eva_notes (user_id, title, content, category, tags, pinned)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             RETURNING id, title, category, tags, pinned, created_at`,
+            [
+              runtime.userId,
+              requiredString(args, "title", 300),
+              requiredString(args, "content", 100_000),
+              optionalString(args, "category", 200),
+              tags,
+              args.pinned === true,
+            ],
+          );
+          return { ok: true, note: rows[0] };
+        },
+      ),
+      tool(
+        "get_notes",
+        "Получить заметки",
+        "Ищет заметки текущего пользователя по тексту или категории.",
+        objectSchema({
+          query: text("Текст для поиска"),
+          category: text("Категория"),
+          limit: integer("Количество, максимум 100"),
+        }),
+        async (args, runtime) => {
+          const limit = Math.min(Math.max(optionalInteger(args, "limit") ?? 20, 1), 100);
+          const query = optionalString(args, "query", 500);
+          const category = optionalString(args, "category", 200);
+          const { rows } = await this.db.query(
+            `SELECT id, title, content, category, tags, pinned, created_at, updated_at
+               FROM eva_notes
+              WHERE user_id = $1
+                AND ($2::text IS NULL OR title ILIKE '%' || $2 || '%' OR content ILIKE '%' || $2 || '%')
+                AND ($3::text IS NULL OR category = $3)
+              ORDER BY pinned DESC, updated_at DESC
+              LIMIT $4`,
+            [runtime.userId, query, category, limit],
+          );
+          return { ok: true, notes: rows };
+        },
+      ),
+      tool(
+        "update_note",
+        "Изменить заметку",
+        "Изменяет принадлежащую текущему пользователю заметку.",
+        objectSchema(
+          {
+            id: integer("ID заметки"),
+            title: text("Новый заголовок"),
+            content: text("Новое содержание"),
+            category: text("Новая категория"),
+            pinned: boolean("Закрепить"),
+          },
+          ["id"],
+        ),
+        async (args, runtime) => {
+          const { rows } = await this.db.query(
+            `UPDATE eva_notes SET
+               title = COALESCE($3, title),
+               content = COALESCE($4, content),
+               category = CASE WHEN $5::boolean THEN $6 ELSE category END,
+               pinned = COALESCE($7, pinned)
+             WHERE id = $1 AND user_id = $2
+             RETURNING id, title, content, category, tags, pinned, updated_at`,
+            [
+              optionalInteger(args, "id"),
+              runtime.userId,
+              optionalString(args, "title", 300),
+              optionalString(args, "content", 100_000),
+              Object.hasOwn(args, "category"),
+              optionalString(args, "category", 200),
+              typeof args.pinned === "boolean" ? args.pinned : null,
+            ],
+          );
+          return rows[0]
+            ? { ok: true, note: rows[0] }
+            : { ok: false, error: "Заметка не найдена" };
+        },
+      ),
+      tool(
+        "delete_notes",
+        "Удалить заметки",
+        "Удаляет заметки текущего пользователя только после confirm=DELETE.",
+        objectSchema(
+          {
+            ids: { type: "array", items: { type: "integer" }, maxItems: 100 },
+            confirm: text("Точное слово DELETE"),
+          },
+          ["ids", "confirm"],
+        ),
+        async (args, runtime) => {
+          requireDeleteConfirmation(args);
+          const ids = integerIds(args.ids);
+          if (ids.length === 0) throw new Error("ids не должен быть пустым");
+          const deleted = await this.db.query(
+            "DELETE FROM eva_notes WHERE user_id = $1 AND id = ANY($2::bigint[])",
+            [runtime.userId, ids],
+          );
+          return { ok: true, deleted: deleted.rowCount ?? 0 };
+        },
+      ),
+      tool(
+        "save_budget_record",
+        "Записать доход или расход",
+        "Сохраняет финансовую запись пользователя.",
+        objectSchema(
+          {
+            type: { type: "string", enum: ["income", "expense"] },
+            amount: { type: "number", minimum: 0 },
+            currency: text("Код валюты, например RUB"),
+            date: text("Дата YYYY-MM-DD"),
+            category: text("Категория"),
+            store: text("Магазин или источник"),
+            description: text("Описание"),
+            payment_method: text("Способ оплаты"),
+            quantity: { type: "number" },
+          },
+          ["type", "amount"],
+        ),
+        async (args, runtime) => {
+          const amount = Number(args.amount);
+          if (!Number.isFinite(amount) || amount < 0) {
+            throw new Error("Некорректная сумма");
+          }
+          const { rows } = await this.db.query(
+            `INSERT INTO budget_entries
+               (user_id, occurred_on, entry_type, amount_minor, currency, category,
+                store, description, payment_method, quantity)
+             VALUES ($1, COALESCE($2::date, CURRENT_DATE), $3, $4, $5, $6, $7, $8, $9, $10)
+             RETURNING *`,
+            [
+              runtime.userId,
+              optionalString(args, "date", 10),
+              requiredString(args, "type", 20),
+              Math.round(amount * 100),
+              optionalString(args, "currency", 3)?.toUpperCase() ?? "RUB",
+              optionalString(args, "category", 200),
+              optionalString(args, "store", 300),
+              optionalString(args, "description", 2_000),
+              optionalString(args, "payment_method", 100),
+              typeof args.quantity === "number" ? args.quantity : null,
+            ],
+          );
+          return { ok: true, record: rows[0] };
+        },
+      ),
+      tool(
+        "get_budget_records",
+        "Получить бюджет",
+        "Возвращает записи бюджета и итог за выбранный период.",
+        objectSchema({
+          date_from: text("Начальная дата YYYY-MM-DD"),
+          date_to: text("Конечная дата YYYY-MM-DD"),
+          type: { type: "string", enum: ["income", "expense"] },
+          category: text("Категория"),
+          limit: integer("Количество, максимум 200"),
+        }),
+        async (args, runtime) => {
+          const { rows } = await this.db.query(
+            `SELECT id, occurred_on, entry_type, amount_minor, currency, category,
+                    store, description, payment_method, quantity, created_at
+               FROM budget_entries
+              WHERE user_id = $1
+                AND ($2::date IS NULL OR occurred_on >= $2)
+                AND ($3::date IS NULL OR occurred_on <= $3)
+                AND ($4::text IS NULL OR entry_type = $4)
+                AND ($5::text IS NULL OR category = $5)
+              ORDER BY occurred_on DESC, id DESC
+              LIMIT $6`,
+            [
+              runtime.userId,
+              optionalString(args, "date_from", 10),
+              optionalString(args, "date_to", 10),
+              optionalString(args, "type", 20),
+              optionalString(args, "category", 200),
+              Math.min(Math.max(optionalInteger(args, "limit") ?? 50, 1), 200),
+            ],
+          );
+          const totals = rows.reduce<Record<string, number>>((acc, row) => {
+            const record = row as { entry_type: string; amount_minor: string };
+            acc[record.entry_type] =
+              (acc[record.entry_type] ?? 0) + Number(record.amount_minor);
+            return acc;
+          }, {});
+          return { ok: true, records: rows, totals_minor: totals };
+        },
+      ),
+      tool(
+        "update_budget_record",
+        "Изменить запись бюджета",
+        "Изменяет сумму, описание или категорию финансовой записи.",
+        objectSchema(
+          {
+            id: integer("ID записи"),
+            amount: { type: "number", minimum: 0 },
+            category: text("Категория"),
+            description: text("Описание"),
+            date: text("Дата YYYY-MM-DD"),
+          },
+          ["id"],
+        ),
+        async (args, runtime) => {
+          const amount =
+            typeof args.amount === "number" ? Math.round(args.amount * 100) : null;
+          const { rows } = await this.db.query(
+            `UPDATE budget_entries SET
+               amount_minor = COALESCE($3, amount_minor),
+               category = CASE WHEN $4::boolean THEN $5 ELSE category END,
+               description = CASE WHEN $6::boolean THEN $7 ELSE description END,
+               occurred_on = COALESCE($8::date, occurred_on)
+             WHERE id = $1 AND user_id = $2
+             RETURNING *`,
+            [
+              optionalInteger(args, "id"),
+              runtime.userId,
+              amount,
+              Object.hasOwn(args, "category"),
+              optionalString(args, "category", 200),
+              Object.hasOwn(args, "description"),
+              optionalString(args, "description", 2_000),
+              optionalString(args, "date", 10),
+            ],
+          );
+          return rows[0]
+            ? { ok: true, record: rows[0] }
+            : { ok: false, error: "Запись не найдена" };
+        },
+      ),
+      tool(
+        "delete_budget_records",
+        "Удалить записи бюджета",
+        "Удаляет финансовые записи текущего пользователя только после confirm=DELETE.",
+        objectSchema(
+          {
+            ids: { type: "array", items: { type: "integer" }, maxItems: 100 },
+            confirm: text("Точное слово DELETE"),
+          },
+          ["ids", "confirm"],
+        ),
+        async (args, runtime) => {
+          requireDeleteConfirmation(args);
+          const ids = integerIds(args.ids);
+          if (ids.length === 0) throw new Error("ids не должен быть пустым");
+          const deleted = await this.db.query(
+            "DELETE FROM budget_entries WHERE user_id = $1 AND id = ANY($2::bigint[])",
+            [runtime.userId, ids],
+          );
+          return { ok: true, deleted: deleted.rowCount ?? 0 };
+        },
+      ),
+      tool(
+        "set_reaction",
+        "Реакция Telegram",
+        "Ставит допустимую emoji-реакцию на последнее сообщение пользователя.",
+        objectSchema({ emoji: text("Одна поддерживаемая Telegram emoji") }, ["emoji"]),
+        async (args, runtime) => {
+          const emoji = requiredString(args, "emoji", 16);
+          if (!runtime.useEmoji) {
+            return { ok: false, skipped: "Пользователь отключил emoji" };
+          }
+          if (!ALLOWED_REACTIONS.has(emoji)) {
+            throw new Error("Telegram не поддерживает эту реакцию");
+          }
+          const { rows } = await this.db.query<{ message_id: string }>(
+            `SELECT message_id FROM telegram_updates
+              WHERE user_id = $1 AND message_id IS NOT NULL
+              ORDER BY received_at DESC LIMIT 1`,
+            [runtime.userId],
+          );
+          const messageId = Number(rows[0]?.message_id);
+          if (!Number.isSafeInteger(messageId)) {
+            throw new Error("Нет сообщения для реакции");
+          }
+          await this.telegram.setReaction(runtime.chatId, messageId, emoji);
+          return { ok: true, emoji };
+        },
+      ),
+      tool(
+        "web_search",
+        "Поиск в интернете",
+        "Ищет актуальную информацию через локальный приватный SearXNG.",
+        objectSchema(
+          {
+            query: text("Поисковый запрос"),
+            limit: integer("Количество результатов, максимум 10"),
+          },
+          ["query"],
+        ),
+        async (args, runtime) =>
+          await this.search(
+            requiredString(args, "query", 1_000),
+            optionalInteger(args, "limit") ?? 5,
+            runtime,
+          ),
+      ),
+    ];
+
+    tools.push(...this.compatibilityTools(tool));
+    return tools;
+  }
+
+  private compatibilityTools(tool: ToolBuilder): AnyAgentTool[] {
+    const searchAlias = (name: string) =>
+      tool(
+        name,
+        "Поиск в интернете",
+        "Совместимый псевдоним web_search; запрос выполняется через локальный SearXNG.",
+        objectSchema({ query: text("Поисковый запрос") }, ["query"]),
+        async (args, runtime) =>
+          await this.search(requiredString(args, "query", 1_000), 5, runtime),
+      );
+    return [
+      searchAlias("PERPLEXITY_SEARCH"),
+      searchAlias("brave_search"),
+      tool(
+        "LIGHTRAG_INSERT",
+        "Сохранить в архивную память",
+        "Сохраняет материал в приватные заметки пользователя.",
+        objectSchema(
+          { text: text("Материал"), title: text("Заголовок") },
+          ["text"],
+        ),
+        async (args, runtime) => {
+          const { rows } = await this.db.query(
+            `INSERT INTO eva_notes (user_id, title, content, category, tags)
+             VALUES ($1, $2, $3, 'archive', ARRAY['memory'])
+             RETURNING id, title`,
+            [
+              runtime.userId,
+              optionalString(args, "title", 300) ?? "Архивная память",
+              requiredString(args, "text", 100_000),
+            ],
+          );
+          return { ok: true, note: rows[0] };
+        },
+      ),
+      tool(
+        "LIGHTRAG_QUERY",
+        "Поиск в архивной памяти",
+        "Ищет по приватным заметкам и архивной памяти текущего пользователя.",
+        objectSchema(
+          { query: text("Что найти"), limit: integer("Количество") },
+          ["query"],
+        ),
+        async (args, runtime) => {
+          const { rows } = await this.db.query(
+            `SELECT id, title, content, category, updated_at
+               FROM eva_notes
+              WHERE user_id = $1
+                AND (title ILIKE '%' || $2 || '%' OR content ILIKE '%' || $2 || '%')
+              ORDER BY pinned DESC, updated_at DESC LIMIT $3`,
+            [
+              runtime.userId,
+              requiredString(args, "query", 1_000),
+              Math.min(optionalInteger(args, "limit") ?? 10, 30),
+            ],
+          );
+          return { ok: true, results: rows };
+        },
+      ),
+    ];
+  }
+
+  private async search(
+    query: string,
+    requestedLimit: number,
+    runtime: AgentRuntimeContext,
+  ): Promise<unknown> {
+    const quotas = await this.db.getQuotaStatus(runtime.telegramId);
+    const quota = quotas.find((item) => item.metric === "web_search") as
+      | { remaining?: string | number | null }
+      | undefined;
+    if (
+      quota?.remaining !== null &&
+      quota?.remaining !== undefined &&
+      Number(quota.remaining) <= 0
+    ) {
+      throw new Error("Лимит интернет-поиска на текущий период закончился");
+    }
+    const limit = Math.min(Math.max(requestedLimit, 1), 10);
+    const url = new URL(`${this.config.searxngUrl.replace(/\/+$/, "")}/search`);
+    url.searchParams.set("q", query);
+    url.searchParams.set("format", "json");
+    const response = await fetch(url, { signal: AbortSignal.timeout(20_000) });
+    if (!response.ok) throw new Error(`SearXNG вернул HTTP ${response.status}`);
+    const body = (await response.json()) as {
+      results?: Array<{
+        title?: string;
+        url?: string;
+        content?: string;
+        engine?: string;
+      }>;
+    };
+    const results = (body.results ?? []).slice(0, limit).map((item) => ({
+      title: item.title,
+      url: item.url,
+      snippet: item.content,
+      source: item.engine,
+    }));
+    await this.db.incrementUsage(runtime.telegramId, "web_search");
+    return { ok: true, query, results };
+  }
+}
+
+function requireDeleteConfirmation(args: JsonObject): void {
+  if (args.confirm !== "DELETE") {
+    throw new Error("Удаление требует confirm=DELETE");
+  }
+}
+
+function integerIds(value: unknown): number[] {
+  return Array.isArray(value)
+    ? value.map(Number).filter(Number.isSafeInteger).slice(0, 100)
+    : [];
+}

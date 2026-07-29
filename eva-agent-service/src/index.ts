@@ -12,6 +12,7 @@ import { Redis } from "ioredis";
 import { AgentToolFactory } from "./agent-tools.js";
 import { BackgroundRuntime } from "./background.js";
 import { loadConfig, readPersona } from "./config.js";
+import { ConversationPurposeService } from "./conversations/purpose-service.js";
 import { Database } from "./db.js";
 import { PostgresTelegramInbox, TelegramInboxWorker } from "./delivery/inbox.js";
 import { PostgresTelegramOutbox } from "./delivery/outbox.js";
@@ -150,6 +151,7 @@ async function main(): Promise<void> {
     },
   );
   const payments = new LavaPayments(config, db, telegram, logger);
+  const purposes = new ConversationPurposeService(db, letta, logger);
   const background = new BackgroundRuntime(
     config,
     db,
@@ -157,6 +159,7 @@ async function main(): Promise<void> {
     queue,
     telegram,
     runtimeContext,
+    purposes,
     logger,
   );
 

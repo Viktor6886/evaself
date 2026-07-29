@@ -11,6 +11,7 @@ export interface RuntimeContext {
   telegramId: number;
   agentId: string;
   conversationId: string;
+  purpose: string;
   localTime: string;
   timezone: string;
   city: string | null;
@@ -38,6 +39,7 @@ interface RuntimeContextRow {
   country_code: string | null;
   agent_id: string;
   conversation_id: string;
+  purpose: string;
   response_mode: "text" | "voice" | "both";
   use_emoji: boolean;
   communication_style: string | null;
@@ -99,6 +101,7 @@ export class RuntimeContextBuilder {
       telegramId: Number(row.telegram_id),
       agentId: row.agent_id,
       conversationId: row.conversation_id,
+      purpose: row.purpose,
       localTime: local.toISO({ suppressMilliseconds: true }) ?? local.toUTC().toISO()!,
       timezone,
       city: row.city,
@@ -177,7 +180,8 @@ export class RuntimeContextBuilder {
           u.city,
           u.country_code,
           a.agent_id,
-          a.conversation_id,
+          c.conversation_id,
+          c.purpose,
           COALESCE(p.response_mode, 'text') AS response_mode,
           COALESCE(p.use_emoji, true) AS use_emoji,
           p.character AS communication_style,
@@ -189,11 +193,15 @@ export class RuntimeContextBuilder {
           goal_context.next_result_title,
           goal_context.next_action
         FROM users u
+        JOIN agent_conversations c
+          ON c.user_id = u.id
+         AND c.conversation_id = $2
+         AND c.status = 'active'
         JOIN agent_links a
           ON a.user_id = u.id
+         AND a.agent_id = c.agent_id
          AND a.kind = 'eva'
          AND a.status = 'active'
-         AND a.conversation_id = $2
         LEFT JOIN user_preferences p ON p.user_id = u.id
         LEFT JOIN LATERAL (
           SELECT

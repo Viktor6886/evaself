@@ -374,7 +374,7 @@ export class LettaService {
       memfs: this.runtime.memfs_enabled,
       skillSources: this.runtime.skillSources,
       dreaming: this.runtime.dreaming as DreamingOptions,
-      memory: ensureCoreMemoryBlocks(evaMemoryBlocks(), persona, human),
+      memory: evaMemoryBlocks(persona, human),
       ...(this.runtime.system_prompt ? { systemPrompt: this.runtime.system_prompt } : {}),
       ...(this.runtime.base_tools !== null ? { baseTools: this.runtime.base_tools } : {}),
       ...(this.defaultModel ? { model: this.defaultModel } : {}),
@@ -895,9 +895,9 @@ export class LettaService {
       ...(input.embedding ? { embedding: input.embedding } : {}),
       persona,
       human,
-      ...(input.memory
-        ? { memory: ensureCoreMemoryBlocks(input.memory, persona, human) }
-        : {}),
+      memory: input.memory
+        ? ensureCoreMemoryBlocks(input.memory, persona, human)
+        : evaMemoryBlocks(persona, human),
       tags: input.tags ?? this.runtime.default_tags,
       permissionMode: input.permission_mode ?? this.runtime.permissionMode,
       memfs: input.memfs_enabled ?? this.runtime.memfs_enabled,
@@ -996,47 +996,45 @@ function sanitizeTraceValue(value: unknown, depth: number): unknown {
   return value;
 }
 
-export function evaMemoryBlocks(): EvaMemoryBlock[] {
+export function evaMemoryBlocks(
+  persona = "Персона Евы загружается из системной конфигурации.",
+  human = "Проверенные сведения о пользователе пока не заполнены.",
+): EvaMemoryBlock[] {
   return [
     {
-      label: "tools",
-      value: [
-        "Доступные внешние инструменты выполняются локально через официальный Agent SDK.",
-        "Используй заметки для фактов пользователя, задачи — для действий и напоминаний,",
-        "бюджет — только по явной просьбе, web_search — когда нужна актуальная информация.",
-      ].join(" "),
-      description: "Правила использования инструментов Evaself",
-      read_only: true,
-      limit: 4_000,
+      label: "persona",
+      value: persona,
+      description: "Устойчивая персона и правила поведения Евы",
+      limit: 15_000,
     },
     {
-      label: "therapy_goals",
-      value: "Цели саморефлексии пока не сформулированы.",
-      description: "Цели пользователя, сформулированные его словами; не медицинские диагнозы",
-      limit: 8_000,
+      label: "human",
+      value: human,
+      description: "Только проверенные сведения о текущем пользователе",
+      limit: 10_000,
     },
     {
-      label: "user_state",
+      label: "current_state",
       value: "Актуальное состояние пока не описано.",
       description: "Краткий текущий контекст, эмоции и жизненная ситуация",
       limit: 8_000,
     },
     {
-      label: "progress_notes",
-      value: "Наблюдений о прогрессе пока нет.",
-      description: "Изменения и завершённые шаги без оценочных ярлыков",
+      label: "goals_and_commitments",
+      value: "Подтверждённых целей и обязательств пока нет.",
+      description: "Цели и обязательства пользователя, сформулированные его словами",
       limit: 12_000,
     },
     {
-      label: "mental_map",
+      label: "relationships_and_patterns",
       value: "Карта значимых людей, тем и связей пока пуста.",
-      description: "Связи между людьми, событиями, ценностями и повторяющимися темами",
+      description: "Подтверждённые связи людей, событий, ценностей и повторяющихся тем",
       limit: 12_000,
     },
     {
-      label: "assistant_notes_and_recommendations",
-      value: "Рабочих гипотез и рекомендаций пока нет.",
-      description: "Осторожные рабочие гипотезы Евы, которые нужно сверять с пользователем",
+      label: "progress_and_hypotheses",
+      value: "Наблюдений о прогрессе и проверяемых гипотез пока нет.",
+      description: "Прогресс и осторожные гипотезы, которые нужно сверять с пользователем",
       limit: 12_000,
     },
   ];

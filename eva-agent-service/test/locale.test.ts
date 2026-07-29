@@ -62,6 +62,7 @@ test("runtime context is bounded and isolates the user message", () => {
     telegramId: 2,
     agentId: "agent",
     conversationId: "conversation",
+    purpose: "chat",
     localTime: "2026-07-29T12:00:00+05:00",
     timezone: "Asia/Yekaterinburg",
     city: "Пермь",

@@ -62,12 +62,15 @@ export class UserProfileService {
     sourceId?: string | null;
     confidence?: number;
     explicitlyStated?: boolean;
+    forceCandidate?: boolean;
   }): Promise<ProfileField> {
     const definition = await this.definition(input.fieldKey);
     const normalized = normalizeProfileValue(input.value, definition.value_type);
     const confidence = clamp(input.confidence ?? (input.explicitlyStated ? 1 : 0.7), 0, 1);
     const needsConfirmation =
-      definition.confirmation_required || definition.sensitivity !== "normal";
+      input.forceCandidate === true ||
+      definition.confirmation_required ||
+      definition.sensitivity !== "normal";
     const status: ProfileStatus = needsConfirmation ? "candidate" : "confirmed";
     const persist = async (queryable: Pick<Database, "query">): Promise<ProfileField> => {
       const { rows } = await queryable.query<ProfileField>(

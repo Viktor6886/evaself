@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import type { Config } from "./config.js";
+import type { ConversationPurposeService } from "./conversations/purpose-service.js";
 import type { Database } from "./db.js";
 import type { LettaService } from "./letta.js";
 import type { Logger } from "./logger.js";
@@ -47,6 +48,7 @@ export class BackgroundRuntime {
     private readonly queue: UserQueue,
     private readonly telegram: TelegramClient,
     private readonly runtimeContext: RuntimeContextBuilder,
+    private readonly purposes: ConversationPurposeService,
     private readonly logger: Logger,
   ) {}
 
@@ -180,6 +182,12 @@ export class BackgroundRuntime {
 
   private async executeTask(task: DueTask): Promise<void> {
     try {
+      const scheduler = await this.purposes.ensure({
+        userId: Number(task.user_id),
+        agentId: task.agent_id,
+        purpose: "scheduler",
+        parentConversationId: task.conversation_id,
+      });
       const userMessage = [
           "[ЗАПЛАНИРОВАННАЯ ЗАДАЧА]",
           `Задача: ${task.title}`,
@@ -188,13 +196,13 @@ export class BackgroundRuntime {
         ].filter(Boolean).join("\n");
       const context = await this.runtimeContext.build({
         userId: Number(task.user_id),
-        conversationId: task.conversation_id,
+        conversationId: scheduler.conversationId,
         userMessage,
         detectLanguage: false,
       });
       const prompt = this.runtimeContext.wrapUserMessage(context, userMessage);
       const turn = await this.queue.run(Number(task.telegram_id), () =>
-        this.letta.runTurn(task.conversation_id, prompt),
+        this.letta.runTurn(scheduler.conversationId, prompt),
       );
       if (turn.reply.trim()) await this.telegram.sendMessage(Number(task.chat_id), turn.reply);
       const nextRun = task.repeat_enabled && task.cron_expression
@@ -226,6 +234,12 @@ export class BackgroundRuntime {
 
   private async executeHeartbeat(candidate: HeartbeatCandidate): Promise<void> {
     try {
+      const scheduler = await this.purposes.ensure({
+        userId: Number(candidate.user_id),
+        agentId: candidate.agent_id,
+        purpose: "scheduler",
+        parentConversationId: candidate.conversation_id,
+      });
       const userMessage = [
           "[HEARTBEAT CONTROL]",
           "Пользователь давно не писал. Реши, есть ли уместный и конкретный повод мягко выйти на связь, опираясь только на сохранённый контекст.",
@@ -235,13 +249,13 @@ export class BackgroundRuntime {
         ].join("\n");
       const context = await this.runtimeContext.build({
         userId: Number(candidate.user_id),
-        conversationId: candidate.conversation_id,
+        conversationId: scheduler.conversationId,
         userMessage,
         detectLanguage: false,
       });
       const prompt = this.runtimeContext.wrapUserMessage(context, userMessage);
       const turn = await this.queue.run(Number(candidate.telegram_id), () =>
-        this.letta.runTurn(candidate.conversation_id, prompt),
+        this.letta.runTurn(scheduler.conversationId, prompt),
       );
       const reply = turn.reply.trim().slice(0, 1200);
       if (!reply || reply === "HEARTBEAT_SKIP") {

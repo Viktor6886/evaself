@@ -56,6 +56,7 @@ export interface Config {
   defaultTimezone: string;
   graphMemoryEnabled: boolean;
   graphContextTimeoutMs: number;
+  conversationMirrorEnabled: boolean;
 
   lavaWebhookUser: string;
   lavaWebhookPassword: string;
@@ -160,6 +161,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     defaultTimezone: str("TZ", "UTC"),
     graphMemoryEnabled: bool("EVA_GRAPH_MEMORY_ENABLED", true),
     graphContextTimeoutMs: int("EVA_GRAPH_CONTEXT_TIMEOUT_MS", 75),
+    conversationMirrorEnabled: bool("EVA_CONVERSATION_MIRROR_ENABLED", false),
 
     lavaWebhookUser: str("LAVA_WEBHOOK_USER"),
     lavaWebhookPassword: str("LAVA_WEBHOOK_PASSWORD"),

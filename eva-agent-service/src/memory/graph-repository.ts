@@ -421,6 +421,9 @@ export class GraphRepository {
         due_at: input.task.due_at ?? null,
         status: input.task.status ?? "open",
       },
+      status: ["done", "canceled"].includes(String(input.task.status))
+        ? "archived"
+        : "active",
       confidence: 1,
       sourceType: "task",
       sourceId: String(taskId),

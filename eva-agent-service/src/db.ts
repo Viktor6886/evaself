@@ -107,6 +107,14 @@ export interface AgentRuntimeContext {
   telegramId: number;
   chatId: number;
   conversationId: string;
+  purpose:
+    | "chat"
+    | "scheduler"
+    | "maintenance"
+    | "profile"
+    | "goal_review"
+    | "partner_analysis"
+    | "research";
   timezone: string;
   responseMode: "text" | "voice" | "both";
   useEmoji: boolean;
@@ -231,6 +239,7 @@ export class Database {
       telegram_id: string;
       chat_id: string | null;
       conversation_id: string;
+      purpose: AgentRuntimeContext["purpose"];
       timezone: string;
       response_mode: "text" | "voice" | "both";
       use_emoji: boolean;
@@ -239,6 +248,7 @@ export class Database {
               u.telegram_id,
               COALESCE(t.chat_id, u.telegram_id) AS chat_id,
               c.conversation_id,
+              c.purpose,
               u.timezone,
               COALESCE(p.response_mode, 'text') AS response_mode,
               COALESCE(p.use_emoji, true) AS use_emoji
@@ -261,6 +271,7 @@ export class Database {
           telegramId: Number(row.telegram_id),
           chatId: Number(row.chat_id ?? row.telegram_id),
           conversationId: row.conversation_id,
+          purpose: row.purpose,
           timezone: row.timezone,
           responseMode: row.response_mode,
           useEmoji: row.use_emoji,
@@ -318,10 +329,10 @@ export class Database {
       const row = rows[0]!;
       if (input.conversationId) {
         await client.query(
-          `INSERT INTO agent_conversations (user_id, agent_id, conversation_id)
-           VALUES ($1, $2, $3)
+          `INSERT INTO agent_conversations (user_id, agent_id, conversation_id, purpose)
+           VALUES ($1, $2, $3, 'chat')
            ON CONFLICT (conversation_id) DO UPDATE SET
-             status = 'active', archived_at = NULL`,
+             status = 'active', archived_at = NULL, purpose = 'chat'`,
           [input.userId, input.agentId, input.conversationId],
         );
       }
@@ -350,14 +361,17 @@ export class Database {
         await client.query(
           `UPDATE agent_conversations
               SET status = 'archived', archived_at = now()
-            WHERE agent_id = $1 AND status = 'active' AND conversation_id <> $2`,
+            WHERE agent_id = $1
+              AND purpose = 'chat'
+              AND status = 'active'
+              AND conversation_id <> $2`,
           [agentId, conversationId],
         );
         await client.query(
-          `INSERT INTO agent_conversations (user_id, agent_id, conversation_id)
-           VALUES ($1, $2, $3)
+          `INSERT INTO agent_conversations (user_id, agent_id, conversation_id, purpose)
+           VALUES ($1, $2, $3, 'chat')
            ON CONFLICT (conversation_id) DO UPDATE SET
-             status = 'active', archived_at = NULL`,
+             status = 'active', archived_at = NULL, purpose = 'chat'`,
           [rows[0].user_id, agentId, conversationId],
         );
       }

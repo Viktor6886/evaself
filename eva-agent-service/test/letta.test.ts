@@ -215,8 +215,15 @@ test("App Server-only settings are applied at session open, not agent creation",
   assert.equal("disallowedTools" in createOptions, false);
   assert.equal("systemInfoReminder" in createOptions, false);
   assert.deepEqual(
-    (createOptions.memory as Array<{ label: string }>).slice(0, 2).map((block) => block.label),
-    ["persona", "human"],
+    (createOptions.memory as Array<{ label: string }>).map((block) => block.label),
+    [
+      "persona",
+      "human",
+      "current_state",
+      "goals_and_commitments",
+      "relationships_and_patterns",
+      "progress_and_hypotheses",
+    ],
   );
   assert.deepEqual(sessionOptions.allowedTools, ["Read", "WebSearch"]);
   assert.deepEqual(

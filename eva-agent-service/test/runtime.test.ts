@@ -58,6 +58,7 @@ test("time context uses the configured timezone", () => {
     telegramId: 1,
     agentId: "agent",
     conversationId: "conversation",
+    purpose: "chat",
     localTime: "2026-07-29T12:00:00+05:00",
     timezone: "Asia/Yekaterinburg",
     city: "Пермь",
@@ -125,15 +126,16 @@ test("new Eva agents receive the structured memory blueprint", () => {
   assert.deepEqual(
     blocks.map((block) => block.label),
     [
-      "tools",
-      "therapy_goals",
-      "user_state",
-      "progress_notes",
-      "mental_map",
-      "assistant_notes_and_recommendations",
+      "persona",
+      "human",
+      "current_state",
+      "goals_and_commitments",
+      "relationships_and_patterns",
+      "progress_and_hypotheses",
     ],
   );
-  assert.equal(blocks.find((block) => block.label === "tools")?.read_only, true);
+  assert.equal(blocks.length, 6);
+  assert.equal(blocks.some((block) => block.label === "tools"), false);
 });
 
 test("Agent SDK registers every migrated external tool", () => {
