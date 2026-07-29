@@ -5,7 +5,11 @@ import {
   isBlockedAddress,
   OutboundGateway,
 } from "../dist/admin/outbound-gateway.js";
-import { statusColor } from "../dist/admin/service-catalog.js";
+import { optionalIntegrationEnabled } from "../dist/admin/health-worker.js";
+import {
+  SERVICES,
+  statusColor,
+} from "../dist/admin/service-catalog.js";
 
 test("единая функция статуса соблюдает приоритет состояний", () => {
   const fresh = new Date("2026-07-30T00:00:00Z");
@@ -44,6 +48,19 @@ test("единая функция статуса соблюдает приори
     lastOkAt: fresh,
     now: fresh,
   }), "green");
+});
+
+test("выключенный optional-сервис не становится аварийной интеграцией", () => {
+  assert.equal(optionalIntegrationEnabled(true, true, true, false), false);
+  assert.equal(optionalIntegrationEnabled(true, true, true, true), true);
+  assert.equal(optionalIntegrationEnabled(true, false, true, true), false);
+  assert.equal(optionalIntegrationEnabled(false, false, true, false), true);
+});
+
+test("Caddy проверяется штатным Docker healthcheck без чтения admin API", () => {
+  const caddy = SERVICES.find((service) => service.id === "caddy");
+  assert.ok(caddy);
+  assert.equal(caddy.healthUrl, undefined);
 });
 
 test("OutboundGateway блокирует локальные и служебные адреса", async () => {

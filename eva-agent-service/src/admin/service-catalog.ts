@@ -112,7 +112,6 @@ export const SERVICES: readonly ServiceDefinition[] = [
     purpose: "HTTPS, сертификаты и reverse proxy",
     group: "infrastructure",
     container: "caddy",
-    healthUrl: "http://caddy:2019/config/",
     restartable: true,
   },
   {

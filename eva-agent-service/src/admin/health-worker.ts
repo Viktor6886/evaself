@@ -46,6 +46,16 @@ const CHECK_TIMEOUT_MS = Math.min(
   Math.max(1_000, Number.parseInt(process.env.EVA_HEALTH_TIMEOUT_MS ?? "10000", 10) || 10_000),
 );
 
+export function optionalIntegrationEnabled(
+  optional: boolean,
+  configured: boolean,
+  hasService: boolean,
+  serviceEnabled: boolean,
+): boolean {
+  if (!optional) return true;
+  return configured && (!hasService || serviceEnabled);
+}
+
 export class HealthWorker {
   private timer?: NodeJS.Timeout;
   private running = false;
@@ -292,7 +302,12 @@ export class HealthWorker {
     });
     const configured = hasSecrets && hasSettings;
     const serviceRow = service.rows[0];
-    const enabled = definition.optional ? configured : true;
+    const enabled = optionalIntegrationEnabled(
+      definition.optional === true,
+      configured,
+      Boolean(definition.serviceId),
+      serviceRow?.enabled === true,
+    );
     const ok = Boolean(serviceRow && ["healthy", "running"].includes(serviceRow.state));
     const result: CheckResult = {
       ok: enabled ? ok && configured : true,
