@@ -59,7 +59,13 @@ export interface LoginResult {
 const SESSION_SECONDS = 12 * 60 * 60;
 const LOGIN_WINDOW_SECONDS = 15 * 60;
 const MAX_ATTEMPTS = 5;
-const ALLOWED_SUDO_SCOPES = new Set(["secrets:write"]);
+export const ADMIN_SUDO_SCOPES = Object.freeze([
+  "operations:update",
+  "providers:activate",
+  "secrets:write",
+  "services:restart",
+] as const);
+const ALLOWED_SUDO_SCOPES = new Set<string>(ADMIN_SUDO_SCOPES);
 
 function tokenHash(value: string): Buffer {
   return createHash("sha256").update(value, "utf8").digest();

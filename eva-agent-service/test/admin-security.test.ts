@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { roleAllowed } from "../dist/admin/auth-service.js";
+import {
+  ADMIN_SUDO_SCOPES,
+  roleAllowed,
+} from "../dist/admin/auth-service.js";
 import {
   assertPasswordPolicy,
   hashPassword,
@@ -117,4 +120,14 @@ test("RBAC matrix for phase 1 is explicit", () => {
       role === "owner" || role === "admin",
     );
   }
+});
+
+test("sudo accepts only the privileged scopes used by the admin API", () => {
+  assert.deepEqual([...ADMIN_SUDO_SCOPES], [
+    "operations:update",
+    "providers:activate",
+    "secrets:write",
+    "services:restart",
+  ]);
+  assert.equal(ADMIN_SUDO_SCOPES.includes("shell:execute" as never), false);
 });
