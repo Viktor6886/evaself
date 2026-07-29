@@ -329,7 +329,8 @@ services:
     container_name: evaself-admin-bootstrap
     restart: "no"
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       DATABASE_URL: postgresql://${EVA_DB_USER}:${EVA_DB_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${EVA_DB_NAME}
       EVA_SECRETS_MASTER_KEY_FILE: /run/secrets/eva-secrets-master-key
