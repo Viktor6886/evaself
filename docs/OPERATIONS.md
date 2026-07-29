@@ -55,6 +55,42 @@ chat-completions на указанный Base URL. После переключе
 Сохранение настроек закрывает активные сессии; следующий запрос безопасно
 переподключает их к той же conversation.
 
+## Feature flags
+
+```dotenv
+EVA_PROFILE_COMPLETION_ENABLED=true
+EVA_VECTOR_GOALS_ENABLED=true
+EVA_GRAPH_MEMORY_ENABLED=true
+EVA_GRAPH_CONTEXT_TIMEOUT_MS=75
+EVA_PROFILE_CACHE_TTL_SECONDS=60
+EVA_CONVERSATION_MIRROR_ENABLED=false
+EVA_OUTBOX_ENABLED=true
+```
+
+После изменения выполните `docker compose up -d eva-agent-service`.
+`EVA_OUTBOX_ENABLED=false` допустим только для диагностики: при прямой
+доставке теряется гарантия повтора только Telegram-отправки. Полное зеркало
+conversation не реализовано в обычном режиме и должно оставаться выключено.
+
+## Метрики turn
+
+```bash
+make logs s=eva-agent-service | grep 'Telegram turn обработан'
+```
+
+Строка содержит задержки runtime context, профиля, графа, Letta,
+PostgreSQL outbox и Telegram, общее время и `db_query_count`. При тёплом
+cache ориентируйтесь на сумму служебных этапов до `letta_turn_ms`; целевой
+порядок — до 100 мс, но реальное значение зависит от VPS и измеряется только
+на развернутом стеке.
+
+## Пользовательский WebApp
+
+Mini App открывается на `https://<домен>/app/` только из Telegram. Разделы
+«Сегодня», «Цели», «Прогресс» и «Профиль» используют HMAC-защищённый
+`/public/*` API. Если интерфейс пишет «Откройте приложение из Telegram»,
+проверьте URL Mini App у BotFather и актуальность bot token.
+
 ## База и связь объектов
 
 ```bash

@@ -52,6 +52,12 @@ Backend определяет язык только по содержательн
 `USER_MESSAGE`; SDK 0.5.5 не имеет отдельного типа системного context message,
 поэтому используется поддерживаемый SDK строковый `SendMessage`.
 
+Синхронный путь ограничен: claim inbox, агрегированный runtime SQL,
+необязательный ограниченный graph query, один Letta turn, outbox и
+немедленная доставка. Извлечение важных фрагментов conversation запускается
+после ответа асинхронно, читает недавнюю историю через
+`LettaService.listMessages()` и не вызывает дополнительную LLM.
+
 Локальные даты задач переводятся в UTC через Luxon с учётом IANA timezone и
 DST. Неоднозначный город не угадывается: `TimezoneResolver` возвращает до трёх
 кандидатов для подтверждения.
@@ -63,6 +69,46 @@ DST. Неоднозначный город не угадывается: `Timezon
 до отдельного подтверждения. `ProfileCompletenessService` выбирает максимум
 одну естественную подсказку, учитывает cooldown/отказ и полностью подавляет
 дополнительные вопросы в кризисной или срочной теме.
+
+## Цели и граф
+
+Система «ВЕКТОР — Действие» хранится в `user_north`, `goals`,
+`goal_results`, `goal_dependencies`, `work_blocks`, `goal_reviews`,
+`goal_recommendations`, `user_strategies` и `learning_attempts`. Цель
+остаётся черновиком до явного подтверждения. Основная запись и её узлы/связи
+графа обновляются одной транзакцией application-layer сервисом.
+
+`memory_nodes` и `memory_edges` изолированы по `user_id`. Первый выпуск
+использует FTS, trigram и графовые связи; embeddings необязательны.
+`GraphContextService` пропускает приветствия и простые команды, читает только
+активные нечувствительные узлы, ограничивает глубину двумя переходами,
+12 узлами, 18 связями и `statement_timeout`.
+
+## Conversations и память Letta
+
+`agent_conversations.purpose` разделяет `chat`, `scheduler`, `maintenance`,
+`profile`, `goal_review`, `partner_analysis` и `research`. Служебные
+conversations создаются лениво официальным SDK и имеют собственные политики
+инструментов. Планировщик не пишет prompts в основной чат.
+
+Новые agents получают блоки `persona`, `human`, `current_state`,
+`goals_and_commitments`, `relationships_and_patterns`,
+`progress_and_hypotheses`. Отдельного блока `tools` нет. Из-за отсутствия
+CRUD memory blocks в SDK 0.5.5 существующие agents не пересоздаются:
+актуальные данные приходят через runtime context.
+
+Полная история хранится Letta. `conversation_highlights` содержит только
+значимые решения, обязательства, артефакты, источники и наблюдения.
+`EVA_CONVERSATION_MIRROR_ENABLED=false` фиксирует запрет полного зеркала по
+умолчанию.
+
+## Метрики
+
+Каждый Telegram turn пишет один структурированный лог с
+`runtime_context_ms`, `profile_check_ms`, `graph_query_ms`,
+`letta_turn_ms`, `outbox_insert_ms`, `telegram_send_ms`, `total_turn_ms` и
+`db_query_count`. Это позволяет отдельно увидеть служебную задержку, LLM и
+доставку.
 
 ## Административное управление SDK
 
@@ -135,3 +181,5 @@ App Server остаются инфраструктурными: URL показы
 - заметки, бюджет, задачи, поиск и реакции → внешние инструменты Agent SDK;
 - Lava → публичный webhook с HTTP Basic Auth, проверкой суммы и
   идемпотентной транзакцией.
+- старые n8n workflows → durable TypeScript inbox/outbox, `EvaWorkflow`,
+  `BackgroundRuntime`, сервисы профиля, целей и памяти; n8n в стек не входит.

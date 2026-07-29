@@ -26,7 +26,7 @@
 - явно задокументированы management-функции, отсутствующие в официальном
   SDK: Evaself не подменяет их самописным Letta REST-клиентом.
 
-## Не выпущено — управление SDK, agents, LLM и стабилизация CI
+## Не выпущено — надёжный runtime, память, цели и WebApp
 
 ### Добавлено
 
@@ -51,6 +51,18 @@
 - экран «Настройки SDK» для памяти, tools, skills, permissions, dreaming,
   model settings, пула сессий и таймаутов;
 - unit- и stack smoke-тесты настроек SDK, административных операций и чата.
+- migrations `008`–`013`: durable Telegram inbox/outbox, язык и IANA
+  timezone, постепенный профиль, «ВЕКТОР — Действие», графовая память и
+  conversation purposes;
+- отдельные служебные conversations для scheduler, profile, goal review,
+  partner analysis и research;
+- ровно шесть memory blocks для новых agents без пересоздания существующих;
+- асинхронный индекс значимых решений и источников без полной копии истории;
+- Telegram Mini App с разделами «Сегодня», «Цели», «Прогресс» и «Профиль»;
+- HMAC-защищённый `/public/*` API без доверия к ID из браузера;
+- структурированные метрики всех этапов turn и счётчик SQL-запросов;
+- feature flags профиля, целей, графа, cache, зеркалирования и outbox;
+- 84 unit/integration tests TypeScript runtime.
 - migration `006_eva_runtime.sql` для Telegram updates, настроек пользователя,
   заметок, бюджета, heartbeat и платежных намерений;
 - прямой Telegram webhook, команды, голос, изображения, документы, typing,

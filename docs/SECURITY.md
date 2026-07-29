@@ -60,3 +60,12 @@ bot token в tracked files.
 `X-Telegram-Bot-Api-Secret-Token`. Lava webhook использует отдельные HTTP
 Basic Auth credentials и до изменения подписки сверяет event type, product,
 сумму, валюту и уникальный payment ID.
+
+Telegram Mini App использует другой механизм: каждый запрос к `/public/*`
+передаёт исходный `initData` в `X-Telegram-Init-Data`. Backend проверяет HMAC
+по bot token, ограничивает возраст `auth_date` и извлекает Telegram ID только
+из подписанного payload. ID из body или query не считается доверенным.
+
+Деструктивные Agent SDK tools проверяют `confirm=DELETE` в backend.
+Служебные conversation purposes дополнительно ограничивают доступные tools:
+например, `research` может искать, но не изменять профиль и не удалять данные.

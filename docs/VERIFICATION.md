@@ -22,6 +22,13 @@ GitHub Actions выполняет:
 16. сравнение `agent_id`/`conversation_id` до и после переключения;
 17. перезапуск App Server и `eva-agent-service`, затем повторную проверку
     LLM, SDK-настроек и идентификаторов.
+18. HMAC, срок `auth_date` и запрет подмены Telegram ID во всех public
+    WebApp-маршрутах;
+19. профиль, IANA timezone/DST, цели, граф, purpose conversations,
+    шесть memory blocks и backend-подтверждение удаления;
+20. durable inbox/outbox и разделение метрик PostgreSQL enqueue и Telegram
+    delivery;
+21. выборочное `conversation_highlights` без таблицы полного transcript.
 
 ## Локальные команды
 
@@ -60,6 +67,12 @@ make list-models
 10. проверьте повтор задачи и heartbeat в часовом поясе пользователя;
 11. выполните backup и restore на тестовом VPS;
 12. проверьте, что WebUI нигде не показывает API Key или App Server token.
+13. откройте Mini App из Telegram и проверьте «Сегодня», создание цели,
+    «Начать»/«Готово», прогресс и автосохранение профиля;
+14. перезапустите стек с queued inbox/outbox записью и убедитесь, что
+    обработка продолжается без второго Letta turn;
+15. проверьте структурированный лог `Telegram turn обработан` и измерьте
+    служебную задержку до `letta_turn_ms` на тёплом cache.
 
 Docker, сетевые сертификаты, реальный LLM turn, Telegram и восстановление на
 другом сервере зависят от VPS и не должны объявляться проверенными без
