@@ -12,7 +12,8 @@ import { Redis } from "ioredis";
 import { applyManagedRuntimeConfig } from "./admin/managed-runtime-config.js";
 import { AgentToolFactory } from "./agent-tools.js";
 import { BackgroundRuntime } from "./background.js";
-import { loadConfig, readPersona } from "./config.js";
+import { configWarnings, loadConfig, readPersona } from "./config.js";
+import { CrisisMonitor } from "./crisis.js";
 import { ConversationPurposeService } from "./conversations/purpose-service.js";
 import { Database } from "./db.js";
 import { PostgresTelegramInbox, TelegramInboxWorker } from "./delivery/inbox.js";
@@ -37,6 +38,8 @@ import { TimezoneResolver } from "./time/timezone-resolver.js";
 async function main(): Promise<void> {
   const config = loadConfig();
   let logger = createLogger(config.logLevel);
+
+  for (const warning of configWarnings(config)) logger.warn(warning);
 
   if (!config.apiKey) {
     logger.error("EVA_AGENT_API_KEY пуст — все запросы /v1 будут отклонены");
@@ -142,6 +145,7 @@ async function main(): Promise<void> {
     graph,
   );
   letta.setToolFactory((conversationId) => toolFactory.forConversation(conversationId));
+  const crisis = new CrisisMonitor(db, telegram, logger, config.ownerTelegramId);
   const workflow = new EvaWorkflow(
     config,
     db,
@@ -152,6 +156,7 @@ async function main(): Promise<void> {
     runtimeContext,
     profile,
     logger,
+    crisis,
     graphContext,
     highlights,
   );
@@ -208,6 +213,7 @@ async function main(): Promise<void> {
     goals,
     payments,
     queue,
+    telegram,
     redisPing: async () => (await redis.ping()) === "PONG",
   });
 

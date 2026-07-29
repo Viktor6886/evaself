@@ -195,16 +195,47 @@ else
 fi
 
 # ---------------------------------------------------------------------
+# 6b. optional off-site copy
+# ---------------------------------------------------------------------
+# A backup that lives on the same disk as the data does not survive losing
+# the machine. The archive is always encrypted with the master key, so
+# sending it to remote storage is safe — the key itself is never in it.
+#
+#   BACKUP_UPLOAD_COMMAND='rclone copy "$1" remote:evaself/'
+#
+# The command receives the finished archive path as "$1".
+if [ -n "${BACKUP_UPLOAD_COMMAND:-}" ]; then
+	step "Копия вне сервера"
+	if bash -c "$BACKUP_UPLOAD_COMMAND" _ "$ARCHIVE" >>"${EVASELF_INSTALL_LOG:-/dev/null}" 2>&1; then
+		ok "архив выгружен командой BACKUP_UPLOAD_COMMAND"
+	else
+		warn "BACKUP_UPLOAD_COMMAND завершилась с ошибкой — локальная копия сохранена"
+	fi
+else
+	info "копия вне сервера не настроена (BACKUP_UPLOAD_COMMAND)"
+fi
+
+# ---------------------------------------------------------------------
 # 7. rotation
 # ---------------------------------------------------------------------
 RETENTION="${BACKUP_RETENTION_DAYS:-14}"
-step "Ротация (хранение ${RETENTION} дней)"
+KEEP_MAX="${BACKUP_RETENTION_COUNT:-30}"
+step "Ротация (хранение ${RETENTION} дней, не более ${KEEP_MAX} архивов)"
 removed=0
 while IFS= read -r old; do
 	rm -f "$old"; removed=$((removed + 1))
 done < <(find "$BACKUP_DIR" -maxdepth 1 \
 	\( -name 'evaself-backup-*.tar.gz.enc' -o -name 'evaself-backup-*.tar.gz' \) \
 	-mtime "+${RETENTION}" 2>/dev/null)
+
+# Age alone cannot bound disk usage: a daily timer on a small VPS fills the
+# partition long before the oldest archive is two weeks old.
+while IFS= read -r extra; do
+	rm -f "$extra"; removed=$((removed + 1))
+done < <(find "$BACKUP_DIR" -maxdepth 1 \
+	\( -name 'evaself-backup-*.tar.gz.enc' -o -name 'evaself-backup-*.tar.gz' \) \
+	-printf '%T@ %p\n' 2>/dev/null | sort -rn | tail -n "+$((KEEP_MAX + 1))" | cut -d' ' -f2-)
+
 [ "$removed" -eq 0 ] && info "удалять нечего" || ok "удалено старых backup: ${removed}"
 
 REMAINING="$(find "$BACKUP_DIR" -maxdepth 1 \

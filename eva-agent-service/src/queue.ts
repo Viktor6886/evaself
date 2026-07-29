@@ -25,6 +25,18 @@ else
 end
 `;
 
+/**
+ * Extend the lease only while we still own it. A lock that expired and was
+ * re-taken by another worker must never be revived by the previous owner.
+ */
+const RENEW_SCRIPT = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('EXPIRE', KEYS[1], ARGV[2])
+else
+  return 0
+end
+`;
+
 export interface QueueOptions {
   ttlSeconds: number;
   maxQueueDepth?: number;
@@ -57,17 +69,43 @@ export class UserQueue {
     return `${this.prefix}${telegramId}`;
   }
 
-  /** Run `work` with the user's slot held, queueing locally if needed. */
+  /**
+   * Run `work` with the user's slot held, queueing locally if needed.
+   *
+   * The lease is renewed in the background for as long as `work` runs. A turn
+   * is allowed to take longer than the lock TTL (the default turn timeout is
+   * deliberately larger), and without renewal the lock would expire
+   * mid-answer and let a second worker start a concurrent turn on the same
+   * Letta conversation.
+   */
   async run<T>(telegramId: number, work: () => Promise<T>): Promise<T> {
     await this.enterLocalQueue(telegramId);
     let token: string | null = null;
+    let renewal: NodeJS.Timeout | null = null;
     try {
       token = await this.acquireDistributedLock(telegramId);
+      renewal = this.startRenewal(telegramId, token);
       return await work();
     } finally {
+      if (renewal) clearInterval(renewal);
       if (token) await this.releaseDistributedLock(telegramId, token);
       this.leaveLocalQueue(telegramId);
     }
+  }
+
+  /** Refresh the lease every third of its TTL, at least once a second. */
+  private startRenewal(telegramId: number, token: string): NodeJS.Timeout {
+    const everyMs = Math.max(Math.floor((this.ttl * 1000) / 3), 1_000);
+    const timer = setInterval(() => {
+      void this.redis
+        .eval(RENEW_SCRIPT, 1, this.key(telegramId), token, String(this.ttl))
+        .catch(() => {
+          // A missed renewal is not fatal on its own: the next tick retries,
+          // and the turn timeout still bounds the work.
+        });
+    }, everyMs);
+    timer.unref();
+    return timer;
   }
 
   private enterLocalQueue(telegramId: number): Promise<void> {

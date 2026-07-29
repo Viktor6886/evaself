@@ -52,7 +52,7 @@ export class AgentToolFactory {
   >();
 
   constructor(
-    config: Config,
+    private readonly config: Config,
     private readonly db: Database,
     telegram: TelegramClient,
     private readonly logger: Logger,
@@ -75,7 +75,9 @@ export class AgentToolFactory {
       ...this.profile.build(tool),
       ...(this.vectorGoalsEnabled ? this.goals.build(tool) : []),
       ...this.tasks.build(tool),
-      ...this.todoist.build(tool),
+      // Registering Todoist tools without a token only teaches the model
+      // about nine actions that always fail on the first call.
+      ...(this.config.todoistApiToken ? this.todoist.build(tool) : []),
     ];
   }
 

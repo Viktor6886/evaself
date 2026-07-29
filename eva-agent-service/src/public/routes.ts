@@ -516,9 +516,22 @@ export function registerPublicRoutes(
   input: {
     config: Config;
     repository: PublicDataSource;
+    telegram?: { username(): Promise<string | null> };
     now?: () => Date;
   },
 ): void {
+  // The landing page is an ordinary web page, not a Mini App launch, so it
+  // has no initData to present. The bot's @handle is public information
+  // anyway — this one route therefore sits OUTSIDE the hook below, which
+  // guards everything user-specific.
+  app.get("/public/bot", async (_request, reply) => {
+    reply.header("Cache-Control", "public, max-age=300");
+    return {
+      username: (await input.telegram?.username()) ?? null,
+      configured: Boolean(input.config.telegramBotToken),
+    };
+  });
+
   void app.register(async (publicApp) => {
     publicApp.addHook("onRequest", async (request) => {
       const header = request.headers["x-telegram-init-data"];

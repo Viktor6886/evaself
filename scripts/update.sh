@@ -64,7 +64,15 @@ step "Repository"
 GIT_LOCAL="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || echo '-')"
 GIT_BRANCH="$(git -C "$ROOT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '-')"
 GIT_BEHIND=0
-if git -C "$ROOT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+if [ "$GIT_BRANCH" = "HEAD" ]; then
+	# `make rollback` leaves a detached HEAD. Fetching "origin HEAD" would
+	# fail confusingly, so say what happened and skip the repository step.
+	warn "репозиторий в состоянии detached HEAD (обычно после make rollback)"
+	info "вернитесь на ветку, чтобы снова получать обновления кода:"
+	info "  git -C $ROOT_DIR checkout main"
+	info "обновление образов продолжится"
+	GIT_BRANCH="-"
+elif git -C "$ROOT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
 	git -C "$ROOT_DIR" fetch --quiet origin "$GIT_BRANCH" 2>/dev/null || warn "could not reach the git remote"
 	GIT_BEHIND="$(git -C "$ROOT_DIR" rev-list --count "HEAD..origin/${GIT_BRANCH}" 2>/dev/null || echo 0)"
 	info "branch $GIT_BRANCH at ${GIT_LOCAL:0:8}, ${GIT_BEHIND} commit(s) behind origin"

@@ -163,7 +163,8 @@ App Server остаются инфраструктурными: URL показы
 
 Наружу опубликованы только 80/443 Caddy. PostgreSQL, Valkey, App Server,
 `eva-agent-service`, Media Service, SearXNG и backup helper доступны
-только в `evaself-network`.
+только в сегментированных внутренних сетях (`evaself-edge`, `evaself-data`,
+`evaself-agent`, `evaself-tools`).
 
 ## Компоненты
 

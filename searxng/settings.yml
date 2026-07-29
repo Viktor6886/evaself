@@ -1,7 +1,7 @@
 # =====================================================================
 # SearXNG for Evaself
 # ---------------------------------------------------------------------
-# Reachable only from evaself-network: eva-agent-service calls
+# Reachable only from the evaself-tools segment: eva-agent-service calls
 # http://searxng:8080/search?format=json. It is never routed by Caddy.
 # =====================================================================
 use_default_settings: true

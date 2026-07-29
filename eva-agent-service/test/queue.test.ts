@@ -22,13 +22,18 @@ class FakeRedis {
   async ttl(key: string) {
     return this.ttls.get(key) ?? -1;
   }
-  async eval(_script: string, _numkeys: number, key: string, token: string) {
-    if (this.store.get(key) === token) {
-      this.store.delete(key);
-      this.ttls.delete(key);
+  // UserQueue uses two Lua scripts against the same key: compare-and-delete
+  // on release, compare-and-expire on renewal. Both are no-ops for a foreign
+  // token, which is the property that makes the lock safe.
+  async eval(script: string, _numkeys: number, key: string, token: string, seconds?: string) {
+    if (this.store.get(key) !== token) return 0;
+    if (script.includes("EXPIRE")) {
+      this.ttls.set(key, Number(seconds));
       return 1;
     }
-    return 0;
+    this.store.delete(key);
+    this.ttls.delete(key);
+    return 1;
   }
   async del(key: string) {
     const existed = this.store.has(key);
@@ -146,4 +151,43 @@ test("releasing with a foreign token is a no-op", async () => {
     return null;
   });
   assert.equal(redis.store.get("eva:lock:user:9"), "another-owner");
+});
+
+test("the lease is renewed while a long turn is still running", async () => {
+  // The default lock TTL is shorter than the default turn timeout: without
+  // renewal a slow answer loses its lock mid-turn and a second worker can
+  // start a concurrent turn on the same Letta conversation.
+  const redis = new FakeRedis();
+  const queue = new UserQueue(redis as never, { ttlSeconds: 1 });
+
+  const renewals: number[] = [];
+  const originalEval = redis.eval.bind(redis);
+  redis.eval = (script: string, ...rest: unknown[]) => {
+    if (script.includes("EXPIRE")) renewals.push(Date.now());
+    return originalEval(script, ...(rest as [number, ...unknown[]]));
+  };
+
+  await queue.run(1, async () => {
+    await new Promise((resolve) => setTimeout(resolve, 2_400));
+    assert.ok(await queue.isLocked(1), "the lock must still be held mid-turn");
+  });
+
+  assert.ok(renewals.length >= 2, `expected renewals, got ${renewals.length}`);
+  assert.equal(await queue.isLocked(1), false, "the lock is released afterwards");
+});
+
+test("renewal stops once the turn ends", async () => {
+  const redis = new FakeRedis();
+  const queue = new UserQueue(redis as never, { ttlSeconds: 1 });
+  let renewals = 0;
+  const originalEval = redis.eval.bind(redis);
+  redis.eval = (script: string, ...rest: unknown[]) => {
+    if (script.includes("EXPIRE")) renewals += 1;
+    return originalEval(script, ...(rest as [number, ...unknown[]]));
+  };
+
+  await queue.run(2, () => Promise.resolve("done"));
+  const afterTurn = renewals;
+  await new Promise((resolve) => setTimeout(resolve, 900));
+  assert.equal(renewals, afterTurn, "the renewal timer must not outlive the turn");
 });

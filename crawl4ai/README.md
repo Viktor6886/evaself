@@ -13,5 +13,5 @@ COMPOSE_PROFILES=crawl4ai
 make start
 ```
 
-Сервис доступен только внутри `evaself-network` и защищён
+Сервис доступен только внутри сегмента `evaself-tools` и защищён
 `CRAWL4AI_API_TOKEN`.

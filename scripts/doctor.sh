@@ -41,7 +41,7 @@ done
 [ -n "$(get_env ACME_EMAIL || true)" ] || soft "ACME_EMAIL не задан — укажите его перед публичным HTTPS"
 [ -n "$(get_env EVA_TELEGRAM_BOT_TOKEN || true)" ] || soft "Telegram Bot Token не задан — бот пока отключён"
 [ -n "$(get_env OWNER_TELEGRAM_ID || true)" ] || soft "Telegram ID владельца не задан"
-[ -n "$(get_env EVA_LLM_API_KEY || true)" ] || soft "EVA_LLM_API_KEY is empty — Eva cannot answer"
+[ -n "$(get_env MEDIA_SERVICE_TOKEN || true)" ] || soft "MEDIA_SERVICE_TOKEN пуст — media-service принимает запросы без аутентификации"
 [ -n "$(get_env MEDIA_ASR_BASE_URL || true)" ] || info "ASR not configured yet (voice messages will be refused politely)"
 
 # =====================================================================
@@ -144,6 +144,21 @@ probe "searxng /healthz"  searxng       "http://127.0.0.1:8080/healthz"
 probe "media /health"     media-service "http://127.0.0.1:8090/health"
 probe "webapp /healthz"   webapp        "http://127.0.0.1:8082/healthz"
 probe "letta-ui /healthz" letta-ui      "http://127.0.0.1:8081/healthz"
+
+# The active LLM lives in the `llm_providers` registry, not in .env: a key
+# rotated through the WebUI never touches the file.
+LLM_STATE="$(compose exec -T eva-agent-service node -e "
+const key = process.env.EVA_AGENT_API_KEY;
+fetch('http://127.0.0.1:'+(process.env.EVA_AGENT_PORT||8070)+'/v1/llm/providers',{headers:{'X-API-Key':key}})
+  .then(r=>r.json())
+  .then(b=>{const a=(b.providers||[]).find(p=>p.is_active);
+            console.log(a?('ok '+a.model_handle):'NONE')})
+  .catch(e=>console.log('FAIL '+e.message))" 2>/dev/null | tr -d '\r')"
+case "$LLM_STATE" in
+	ok\ *) ok "активный LLM: ${LLM_STATE#ok }" ;;
+	NONE)  soft "активная LLM-конфигурация не выбрана — Ева не сможет отвечать (make configure-llm)" ;;
+	*)     soft "не удалось прочитать реестр LLM: ${LLM_STATE:-нет ответа}" ;;
+esac
 
 # The agent service's own /health proves the Agent SDK can reach the App
 # Server over WebSocket, which a TCP probe cannot.

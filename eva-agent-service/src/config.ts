@@ -48,6 +48,8 @@ export interface Config {
   ownerTelegramId: number | null;
   telegramApiBaseUrl: string;
   mediaServiceUrl: string;
+  /** Shared secret presented to media-service as X-Media-Key. */
+  mediaServiceToken: string;
   searxngUrl: string;
   todoistApiUrl: string;
   todoistApiToken: string;
@@ -162,6 +164,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ownerTelegramId: nullableInt("OWNER_TELEGRAM_ID"),
     telegramApiBaseUrl: str("EVA_TELEGRAM_API_BASE_URL", "https://api.telegram.org"),
     mediaServiceUrl: str("EVA_MEDIA_SERVICE_URL", "http://media-service:8090"),
+    mediaServiceToken: str("MEDIA_SERVICE_TOKEN"),
     searxngUrl: str("SEARXNG_BASE_URL", "http://searxng:8080/"),
     todoistApiUrl: str("TODOIST_API_URL", "https://api.todoist.com/api/v1"),
     todoistApiToken: str("TODOIST_API_TOKEN"),
@@ -187,6 +190,31 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     sessionPoolSize: int("EVA_AGENT_SESSION_POOL", 25),
     sessionIdleMs: int("EVA_AGENT_SESSION_IDLE_MS", 600_000),
   };
+}
+
+/**
+ * Configuration combinations that are individually valid but broken together.
+ * Reported at boot as warnings rather than a hard failure: an operator should
+ * be told, not locked out of a running installation.
+ */
+export function configWarnings(config: Config): string[] {
+  const warnings: string[] = [];
+  // The lease is renewed while a turn runs, so a shorter TTL is survivable —
+  // but it means every long turn depends on the renewal timer never missing.
+  if (config.lockTtlSeconds * 1000 <= config.turnTimeoutMs) {
+    warnings.push(
+      `EVA_AGENT_LOCK_TTL (${config.lockTtlSeconds} с) не больше ` +
+        `EVA_AGENT_TURN_TIMEOUT_MS (${config.turnTimeoutMs} мс): лок держится только ` +
+        "за счёт фонового продления. Рекомендуется TTL > таймаута хода.",
+    );
+  }
+  if (config.telegramBotToken && !config.telegramWebhookSecret) {
+    warnings.push("EVA_TELEGRAM_WEBHOOK_SECRET пуст — webhook Telegram будет отклонять все запросы");
+  }
+  if (!config.mediaServiceToken) {
+    warnings.push("MEDIA_SERVICE_TOKEN пуст — media-service принимает запросы без аутентификации");
+  }
+  return warnings;
 }
 
 const FALLBACK_PERSONA =

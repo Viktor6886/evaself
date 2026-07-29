@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { AgentToolFactory } from "../dist/agent-tools.js";
-import { cronFieldMatches, nextCronDate } from "../dist/background.js";
+import { assertCronExpression, cronFieldMatches, nextCronDate } from "../dist/background.js";
 import { normalizeUpdate } from "../dist/eva-workflow.js";
 import { evaMemoryBlocks } from "../dist/letta.js";
 import { normalizeLavaEvent } from "../dist/payments.js";
@@ -208,14 +208,25 @@ test("new Eva agents receive the structured memory blueprint", () => {
   assert.equal(blocks.some((block) => block.label === "tools"), false);
 });
 
-test("Agent SDK registers every migrated external tool", () => {
-  const factory = new AgentToolFactory(
-    { searxngUrl: "http://search", todoistApiUrl: "https://api.todoist.test", todoistApiToken: "", todoistProjectId: "" } as never,
+function toolFactory(todoistApiToken = "") {
+  return new AgentToolFactory(
+    {
+      searxngUrl: "http://search",
+      todoistApiUrl: "https://api.todoist.test",
+      todoistApiToken,
+      todoistProjectId: "",
+    } as never,
     {} as never,
     {} as never,
     { debug() {}, info() {}, warn() {}, error() {} },
   );
-  const names = new Set(factory.forConversation("conversation-1").map((tool) => tool.name));
+}
+
+test("Agent SDK registers every migrated external tool", () => {
+  // Todoist tools are covered separately: they appear only with a token.
+  const names = new Set(
+    toolFactory("todoist-token").forConversation("conversation-1").map((tool) => tool.name),
+  );
   for (const expected of [
     "save_note",
     "get_notes",
@@ -242,4 +253,69 @@ test("Agent SDK registers every migrated external tool", () => {
   ]) {
     assert.equal(names.has(expected), true, `${expected} is not registered`);
   }
+});
+
+test("Todoist tools appear only once a token is configured", () => {
+  const without = new Set(toolFactory().forConversation("c").map((tool) => tool.name));
+  const withToken = new Set(
+    toolFactory("todoist-token").forConversation("c").map((tool) => tool.name),
+  );
+  for (const name of [
+    "TODOIST_CREATE_TASK",
+    "TODOIST_UPDATE_TASK",
+    "TODOIST_CLOSE_TASK",
+    "TODOIST_DELETE_TASK",
+  ]) {
+    // Advertising a tool that always fails on the first call only teaches
+    // the model a dead end.
+    assert.equal(without.has(name), false, `${name} must not be offered without a token`);
+    assert.equal(withToken.has(name), true, `${name} must be offered with a token`);
+  }
+});
+
+test("cron lookups stay fast for sparse expressions", () => {
+  // A naive minute-by-minute scan that rebuilds an Intl.DateTimeFormat each
+  // step took ~45 s for this expression and blocked the whole event loop —
+  // reachable from save_task with any cron the model chose.
+  const started = Date.now();
+  const next = nextCronDate("0 0 1 1 *", "Europe/Amsterdam", new Date("2026-02-01T00:00:00Z"));
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 1_000, `sparse cron search took ${elapsed} ms`);
+  const local = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/Amsterdam",
+    day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).format(next);
+  assert.match(local, /^01\/01, 00:00$/);
+});
+
+test("an impossible cron fails fast instead of scanning a year", () => {
+  const started = Date.now();
+  assert.throws(() => nextCronDate("0 0 30 2 *", "UTC", new Date("2026-02-01T00:00:00Z")));
+  assert.ok(Date.now() - started < 1_000, "an impossible cron must not spin");
+});
+
+test("assertCronExpression rejects what the scheduler could never run", () => {
+  assert.throws(() => assertCronExpression("0 0 30 2 *", "UTC"), /запуск|поле/);
+  assert.throws(() => assertCronExpression("0 0 *", "UTC"), /пять полей/);
+  assert.throws(() => assertCronExpression("99 * * * *", "UTC"), /поле/);
+  assert.throws(() => assertCronExpression("0 9 * * *", "Mars/Olympus"));
+  assert.doesNotThrow(() => assertCronExpression("0 9 * * 1-5", "Europe/Amsterdam"));
+  assert.doesNotThrow(() => assertCronExpression("*/15 * * * *", "UTC"));
+});
+
+test("cron results are stable across a DST transition", () => {
+  // Europe/Amsterdam moves the clock on 2026-03-29; a 09:00 local job must
+  // stay at 09:00 local rather than drifting an hour.
+  const before = nextCronDate("0 9 * * *", "Europe/Amsterdam", new Date("2026-03-20T12:00:00Z"));
+  const after = nextCronDate("0 9 * * *", "Europe/Amsterdam", new Date("2026-03-29T12:00:00Z"));
+  const local = (date: Date) =>
+    new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Europe/Amsterdam", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+    }).format(date);
+  assert.equal(local(before), "09:00");
+  assert.equal(local(after), "09:00");
+  // …and the underlying UTC instants really do differ by the DST offset:
+  // 08:00 UTC under CET before the switch, 07:00 UTC under CEST after it.
+  assert.equal(before.getUTCHours(), 8);
+  assert.equal(after.getUTCHours(), 7);
 });

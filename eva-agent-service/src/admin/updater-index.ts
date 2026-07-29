@@ -172,6 +172,8 @@ async function serviceLogs(service: unknown, rawTail: unknown) {
   });
   // Docker multiplexes stdout/stderr with an 8-byte header. Removing all
   // control bytes produces a readable tail without exposing request input.
+  // Stripping control characters is exactly the intent here.
+  // eslint-disable-next-line no-control-regex
   const text = raw.toString("utf8").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "");
   return {
     lines: String(globalSecretRedactor.redact(text))
@@ -380,7 +382,9 @@ async function main() {
     socket.setEncoding("utf8");
     let buffer = "";
     socket.on("data", (chunk) => {
-      buffer += chunk;
+      // setEncoding above means this is already a string at runtime; the
+      // node typings still say Buffer.
+      buffer += String(chunk);
       if (buffer.length > 64 * 1024) socket.destroy();
       const newline = buffer.indexOf("\n");
       if (newline < 0) return;
@@ -410,15 +414,27 @@ async function main() {
       })().catch(() => socket.destroy());
     });
   });
-  server.listen(updaterSocket, async () => {
-    await chmod(updaterSocket, 0o666);
-    process.stdout.write(`${JSON.stringify({
-      level: "info",
-      service: "eva-updater",
-      message: "Unix socket готов",
-      socket: updaterSocket,
-      command_count: 10,
-    })}\n`);
+  server.listen(updaterSocket, () => {
+    // The listen callback is void-returning: an async body would drop a
+    // rejected chmod on the floor as an unhandled rejection.
+    void (async () => {
+      await chmod(updaterSocket, 0o666);
+      process.stdout.write(`${JSON.stringify({
+        level: "info",
+        service: "eva-updater",
+        message: "Unix socket готов",
+        socket: updaterSocket,
+        command_count: 10,
+      })}\n`);
+    })().catch((error) => {
+      process.stderr.write(`${JSON.stringify({
+        level: "error",
+        service: "eva-updater",
+        message: "Не удалось подготовить Unix socket",
+        code: error instanceof Error ? error.name : "unknown",
+      })}\n`);
+      process.exit(1);
+    });
   });
   const shutdown = () => server.close(() => process.exit(0));
   process.on("SIGTERM", shutdown);

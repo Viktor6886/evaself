@@ -73,22 +73,6 @@
 			</footer>
 		</main>
 
-		<script>
-			// The bot handle is not baked into the build: the landing page is
-			// served from the same installation as the API, so we ask it.
-			(async () => {
-				const link = document.getElementById("open-bot");
-				link.href = "https://t.me";
-				try {
-					const response = await fetch("/api/public/bot", { cache: "no-store" });
-					if (response.ok) {
-						const data = await response.json();
-						if (data.username) link.href = `https://t.me/${data.username}`;
-					}
-				} catch (error) {
-					/* landing stays usable without the API */
-				}
-			})();
-		</script>
+		<script src="/assets/bot-link.js" defer></script>
 	</body>
 </html>

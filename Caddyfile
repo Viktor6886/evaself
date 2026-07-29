@@ -15,7 +15,10 @@
 	servers {
 		trusted_proxies static private_ranges
 	}
-	admin 0.0.0.0:2019
+	# Loopback only. On a shared bridge network any other container could
+	# otherwise reconfigure the proxy and read EVA_AGENT_API_KEY straight out
+	# of the running config. The healthcheck already calls 127.0.0.1:2019.
+	admin localhost:2019
 }
 
 # ---------------------------------------------------------------------
@@ -27,12 +30,30 @@
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "SAMEORIGIN"
 		Referrer-Policy "strict-origin-when-cross-origin"
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'self'; object-src 'none'"
 		-Server
 	}
 }
 
 (compression) {
 	encode zstd gzip
+}
+
+# The administrative surface is never reachable from the internet, on ANY
+# host name. X-API-Key is the second layer, not the only one.
+#
+# This is a `handle`, not a bare `respond`: Caddy sorts `respond` AFTER
+# `handle`, so a top-level deny on a host that proxies /api/* is silently
+# dead code. Sibling `handle` blocks are matched in the order written, so
+# importing this first inside the /api handler is what makes it win.
+#
+# /api/admin/v1/* on {$DOMAIN} is matched by an earlier, separate handle and
+# never reaches here — the admin panel keeps its own path.
+(deny_internal) {
+	@internal path /v1/* /internal/* /metrics
+	handle @internal {
+		respond "not found" 404
+	}
 }
 
 (logging) {
@@ -73,6 +94,7 @@
 	# The landing page asks the API for the bot handle so no domain or bot
 	# name is ever baked into the built assets.
 	handle_path /api/* {
+		import deny_internal
 		reverse_proxy eva-agent-service:{$EVA_AGENT_PORT}
 	}
 
@@ -93,12 +115,17 @@
 		X-Content-Type-Options "nosniff"
 		Referrer-Policy "strict-origin-when-cross-origin"
 		# Telegram renders the Mini App inside its own iframe/webview,
-		# so X-Frame-Options must NOT be SAMEORIGIN here.
+		# so X-Frame-Options must NOT be SAMEORIGIN here — and
+		# frame-ancestors has to name Telegram rather than 'self'.
+		# telegram-web-app.js is served from telegram.org by design; it is
+		# the only third-party origin the Mini App is allowed to load.
+		Content-Security-Policy "default-src 'self'; script-src 'self' https://telegram.org; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors https://web.telegram.org https://*.telegram.org tg://; base-uri 'none'; form-action 'self'; object-src 'none'"
 		-X-Frame-Options
 		-Server
 	}
 
 	handle_path /api/* {
+		import deny_internal
 		reverse_proxy eva-agent-service:{$EVA_AGENT_PORT}
 	}
 
@@ -120,8 +147,7 @@
 	import compression
 	import logging
 
-	@internal path /v1/* /internal/* /metrics
-	respond @internal "not found" 404
+	import deny_internal
 
 	handle /public/* {
 		reverse_proxy eva-agent-service:{$EVA_AGENT_PORT}

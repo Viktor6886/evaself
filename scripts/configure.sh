@@ -87,6 +87,20 @@ while :; do
 done
 
 echo
+ACME_STAGING="$(current ACME_STAGING || echo 0)"
+if [ "$ADVANCED" -eq 1 ]; then
+	say ""
+	say "  Staging CA Let's Encrypt выдаёт недоверенные сертификаты, но не"
+	say "  расходует строгий rate limit — удобно, пока проверяются DNS и порты."
+	if confirm "Использовать staging CA Let's Encrypt?" n; then ACME_STAGING=1; else ACME_STAGING=0; fi
+fi
+if [ "$ACME_STAGING" = "1" ]; then
+	ACME_CA="https://acme-staging-v02.api.letsencrypt.org/directory"
+	warn "включён staging CA: браузеры будут считать сертификаты недоверенными"
+else
+	ACME_CA="https://acme-v02.api.letsencrypt.org/directory"
+fi
+
 info "HTTPS будет выпущен для:"
 for host in "$DOMAIN" "$DOMAIN_APP" "$DOMAIN_API" "$DOMAIN_NOCODB" "$DOMAIN_LETTA" "$DOMAIN_STATUS"; do
 	info "  https://$host"
@@ -225,6 +239,7 @@ SEARXNG_SECRET="$(keep_or_generate SEARXNG_SECRET)"
 NC_AUTH_JWT_SECRET="$(keep_or_generate NC_AUTH_JWT_SECRET)"
 CRAWL4AI_API_TOKEN="$(keep_or_generate CRAWL4AI_API_TOKEN)"
 EVA_TELEGRAM_WEBHOOK_SECRET="$(keep_or_generate EVA_TELEGRAM_WEBHOOK_SECRET)"
+MEDIA_SERVICE_TOKEN="$(keep_or_generate MEDIA_SERVICE_TOKEN)"
 # Ключ шифрования API key в таблице llm_providers также постоянный:
 # его потеря сделает сохранённые ключи нечитаемыми.
 LLM_CONFIG_ENCRYPTION_KEY="$(keep_or_generate LLM_CONFIG_ENCRYPTION_KEY)"
@@ -259,6 +274,8 @@ set_env DOMAIN_NOCODB  "$DOMAIN_NOCODB"
 set_env DOMAIN_LETTA   "$DOMAIN_LETTA"
 set_env DOMAIN_STATUS  "$DOMAIN_STATUS"
 set_env ACME_EMAIL     "$ACME_EMAIL"
+set_env ACME_STAGING   "$ACME_STAGING"
+set_env ACME_CA        "$ACME_CA"
 
 set_env EVA_TELEGRAM_BOT_TOKEN      "$EVA_TELEGRAM_BOT_TOKEN"
 set_env OWNER_TELEGRAM_ID           "$OWNER_TELEGRAM_ID"
@@ -300,7 +317,8 @@ set_env NC_ADMIN_EMAIL     "$NC_ADMIN_EMAIL"
 set_env NC_ADMIN_PASSWORD  "$NC_ADMIN_PASSWORD"
 set_env NC_AUTH_JWT_SECRET "$NC_AUTH_JWT_SECRET"
 
-set_env SEARXNG_SECRET     "$SEARXNG_SECRET"
+set_env SEARXNG_SECRET      "$SEARXNG_SECRET"
+set_env MEDIA_SERVICE_TOKEN "$MEDIA_SERVICE_TOKEN"
 set_env CRAWL4AI_API_TOKEN "$CRAWL4AI_API_TOKEN"
 set_env COMPOSE_PROFILES   "$PROFILES"
 set_env LAVA_WEBHOOK_USER     "$LAVA_WEBHOOK_USER"

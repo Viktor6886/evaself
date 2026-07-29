@@ -129,6 +129,37 @@ jobs:
           node --check letta-ui/public/ui.js
           node --check admin-ui/public/ui.js
 
+      - name: The /v1 deny really precedes the proxy in the adapted config
+        env:
+          DOMAIN: example.test
+          DOMAIN_APP: app.example.test
+          DOMAIN_API: api.example.test
+          DOMAIN_NOCODB: admin.example.test
+          DOMAIN_LETTA: letta.example.test
+          DOMAIN_STATUS: status.example.test
+          ACME_EMAIL: ops@example.test
+          ACME_CA: https://acme-v02.api.letsencrypt.org/directory
+          LETTA_UI_USER: admin
+          LETTA_UI_PASSWORD_HASH: $2a$14$placeholderplaceholderpl
+          EVA_AGENT_PORT: "8070"
+          EVA_AGENT_API_KEY: placeholder
+        run: |
+          # `caddy validate` only proves the file parses. What matters here is
+          # ORDER: Caddy sorts a bare `respond` after every `handle`, so a
+          # top-level deny on a host that proxies /api/* is silently dead code.
+          caddy adapt --config Caddyfile > /tmp/caddy.json
+          python3 scripts/ci/assert-caddy-order.py /tmp/caddy.json
+
+      - name: Front-end JavaScript is valid
+        run: |
+          node --check letta-ui/public/ui.js
+          node --check admin-ui/public/ui.js
+          node --check webapp/public/app/app.js
+          node --check webapp/public/assets/bot-link.js
+
+      - name: Every API path the front-ends call exists in the service
+        run: python3 scripts/ci/assert-frontend-routes.py
+
       - name: No secrets in tracked files
         run: |
           if git ls-files --error-unmatch .env >/dev/null 2>&1; then
@@ -168,6 +199,9 @@ jobs:
           cache-dependency-path: eva-agent-service/package-lock.json
 
       - run: npm ci --no-audit --no-fund
+
+      - name: Lint
+        run: npm run lint
 
       - name: Typecheck
         run: npx tsc -p tsconfig.json --noEmit
@@ -236,8 +270,7 @@ jobs:
             SELECT string_agg(t, ', ') INTO missing
             FROM unnest(ARRAY[
               'users','agent_links','agent_conversations','subscriptions','payments',
-              'quotas','usage_counters','onboarding_fields','test_results','tasks',
-              'referrals','partner_analysis_links','notifications','crisis_events',
+              'quotas','usage_counters','onboarding_fields','tasks','crisis_events',
               'schema_migrations','llm_providers','sdk_settings','telegram_updates',
               'telegram_outbox','timezone_aliases','profile_field_definitions',
               'user_preferences','eva_notes','budget_entries','heartbeat_state',
@@ -269,7 +302,7 @@ jobs:
       - name: Seed data is not duplicated by a re-run
         run: |
           COUNT="$(psql -tA -c 'SELECT count(*) FROM quotas')"
-          [ "$COUNT" = "12" ] || { echo "::error::quotas has $COUNT rows, expected 12"; exit 1; }
+          [ "$COUNT" = "9" ] || { echo "::error::quotas has $COUNT rows, expected 9"; exit 1; }
 
   # ===================================================================
   # media-service
@@ -290,7 +323,10 @@ jobs:
       - name: Install ffmpeg
         run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
 
-      - run: pip install --quiet -r requirements.txt pytest
+      - run: pip install --quiet -r requirements.txt pytest ruff
+
+      - name: Lint
+        run: ruff check .
 
       - name: Tests (real ffmpeg round-trips)
         env:
@@ -378,7 +414,7 @@ jobs:
                       'NOCODB_DB_PASSWORD','LETTA_DB_PASSWORD','EVA_DB_READONLY_PASSWORD',
                       'VALKEY_PASSWORD','EVA_AGENT_API_KEY','LETTA_APP_SERVER_TOKEN',
                       'LLM_CONFIG_ENCRYPTION_KEY',
-                      'NC_AUTH_JWT_SECRET','LAVA_WEBHOOK_PASSWORD',
+                      'NC_AUTH_JWT_SECRET','LAVA_WEBHOOK_PASSWORD','MEDIA_SERVICE_TOKEN',
                       'SEARXNG_SECRET','EVA_TELEGRAM_WEBHOOK_SECRET'):
             text = re.sub(rf'^{key}=.*$', f'{key}={secrets.token_hex(24)}', text, flags=re.M)
           path.write_text(text)
@@ -706,9 +742,64 @@ jobs:
             sleep 1
           done
 
+      - name: The landing page's bot endpoint answers without initData
+        run: |
+          docker compose --env-file versions.env --env-file .env \
+            exec -T eva-agent-service node -e "
+              (async () => {
+                const base = 'http://127.0.0.1:8070';
+                // /public/bot is deliberately outside the initData hook: the
+                // landing page is an ordinary web page with nothing to sign.
+                const bot = await fetch(base + '/public/bot');
+                if (!bot.ok) throw new Error('/public/bot status ' + bot.status);
+                const body = await bot.json();
+                if (!('username' in body) || !('configured' in body)) {
+                  throw new Error('/public/bot payload is wrong: ' + JSON.stringify(body));
+                }
+                // Everything else under /public/* still demands a signature.
+                const guarded = await fetch(base + '/public/session', { method: 'POST' });
+                if (guarded.status !== 401) throw new Error('session without initData: ' + guarded.status);
+                console.log('public bot endpoint ok');
+              })().catch((error) => { console.error(error); process.exit(1); });
+            " | grep -q 'public bot endpoint ok'
+
+      - name: media-service refuses callers without the shared secret
+        run: |
+          docker compose --env-file versions.env --env-file .env \
+            exec -T eva-agent-service node -e "
+              (async () => {
+                const base = 'http://media-service:8090';
+                const open = await fetch(base + '/tts', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ text: 'test' }),
+                });
+                if (open.status !== 401) throw new Error('unauthenticated TTS status ' + open.status);
+                const health = await fetch(base + '/health');
+                if (!health.ok) throw new Error('health must stay open for the docker healthcheck');
+                if ((await health.json()).auth_required !== true) throw new Error('auth is not enabled');
+                console.log('media auth ok');
+              })().catch((e) => { console.error(e); process.exit(1); });
+            " | grep -q 'media auth ok'
+
+      - name: SearXNG cannot reach PostgreSQL or the Caddy admin API
+        run: |
+          # Network segmentation, asserted rather than assumed: a container
+          # that fetches untrusted external content must not see the data tier.
+          docker compose --env-file versions.env --env-file .env \
+            exec -T searxng sh -c '
+              if timeout 5 sh -c "echo > /dev/tcp/postgres/5432" 2>/dev/null; then
+                echo "::error::searxng can reach postgres"; exit 1
+              fi
+              if timeout 5 sh -c "echo > /dev/tcp/caddy/2019" 2>/dev/null; then
+                echo "::error::searxng can reach the caddy admin API"; exit 1
+              fi
+              echo "searxng is isolated from the data tier"
+            '
+
       - name: Start an isolated OpenAI-compatible test provider
         run: |
-          docker run -d --name evaself-llm-mock --network evaself-network \
+          docker run -d --name evaself-llm-mock --network evaself-agent \
             node:22.22-bookworm-slim node -e "
               const http = require('http');
               const models = [{id:'ci-model-a',object:'model'},{id:'ci-model-b',object:'model'}];

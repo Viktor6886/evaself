@@ -5,7 +5,7 @@
 #   "Install Crawl4AI for reading and cleaning web pages?"
 # which adds `crawl4ai` to COMPOSE_PROFILES in .env.
 #
-# Reachable only from evaself-network at http://crawl4ai:11235.
+# Reachable only from the evaself-tools segment at http://crawl4ai:11235.
 # =====================================================================
 app:
   title: "Evaself Crawl4AI"

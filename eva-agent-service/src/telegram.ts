@@ -67,6 +67,7 @@ export class TelegramClient implements OutboxTransport {
   private readonly baseUrl: string;
   private readonly logger: Logger;
   private outbox: OutboxDelivery | null = null;
+  private cachedUsername: string | null | undefined;
   private readonly deliveryContext = new AsyncLocalStorage<{
     prefix: string;
     sequence: number;
@@ -77,6 +78,27 @@ export class TelegramClient implements OutboxTransport {
     this.token = config.telegramBotToken;
     this.baseUrl = config.telegramApiBaseUrl.replace(/\/+$/, "");
     this.logger = logger;
+  }
+
+  /**
+   * The bot's own @handle, used by the landing page to build its deep link.
+   * Cached for the process lifetime: it only changes when an operator renames
+   * the bot, and a restart picks that up.
+   */
+  async username(): Promise<string | null> {
+    if (!this.token) return null;
+    if (this.cachedUsername !== undefined) return this.cachedUsername;
+    try {
+      const me = await this.call<{ username?: string }>("getMe", {});
+      this.cachedUsername = me.username ?? null;
+      return this.cachedUsername;
+    } catch (error) {
+      this.logger.warn("Не удалось получить имя бота через getMe", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+      // Deliberately not cached: a transient failure must not pin `null`.
+      return null;
+    }
   }
 
   get configured(): boolean {

@@ -35,7 +35,7 @@ async def _run(*args: str, timeout: float = 300.0) -> tuple[int, bytes, bytes]:
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError as exc:
+    except TimeoutError as exc:
         proc.kill()
         raise MediaError("ffmpeg timed out") from exc
     return proc.returncode or 0, stdout, stderr

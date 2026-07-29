@@ -1,4 +1,5 @@
 import type { Config } from "./config.js";
+import { type CrisisMonitor, safetyDirective } from "./crisis.js";
 import type { AgentLinkRow, Database, UserRow } from "./db.js";
 import type { InboxResult } from "./delivery/inbox.js";
 import { preferredResponseLanguage, t } from "./i18n/index.js";
@@ -39,6 +40,7 @@ export class EvaWorkflow {
     private readonly runtimeContext: RuntimeContextBuilder,
     private readonly profile: UserProfileService,
     private readonly logger: Logger,
+    private readonly crisis?: CrisisMonitor,
     private readonly graphContext?: GraphContextService,
     private readonly highlights?: ConversationHighlightService,
   ) {}
@@ -161,12 +163,23 @@ export class EvaWorkflow {
         if (responseMode === "text" || responseMode === "both") {
           messageDraft.current = await this.telegram.startMessageDraft(update.chatId);
         }
+        // Recorded and escalated before the turn runs, so a disclosure
+        // survives even if the model's answer is slow, truncated or unhelpful.
+        const signal = await this.crisis?.inspect({
+          userId: user.id,
+          telegramId: update.telegramId,
+          text: prompt,
+        });
+
         const lettaStarted = performance.now();
         let answer;
         try {
           answer = await this.letta.runTurn(
             conversationId,
-            this.runtimeContext.wrapUserMessage(context, prompt),
+            this.runtimeContext.wrapUserMessage(
+              context,
+              signal ? `${safetyDirective(signal)}\n\n${prompt}` : prompt,
+            ),
           );
         } finally {
           metrics.letta_turn_ms = elapsed(lettaStarted);
@@ -322,6 +335,13 @@ export class EvaWorkflow {
     }
   }
 
+  /** media-service rejects unauthenticated callers when a token is set. */
+  private mediaHeaders(): Record<string, string> {
+    return this.config.mediaServiceToken
+      ? { "x-media-key": this.config.mediaServiceToken }
+      : {};
+  }
+
   private async promptFromMessage(
     update: NormalizedUpdate,
     language: SupportedLanguage,
@@ -333,7 +353,7 @@ export class EvaWorkflow {
       if (!file) throw new Error("Голосовой файл отсутствует");
       const response = await fetch(`${this.config.mediaServiceUrl.replace(/\/+$/, "")}/telegram/transcribe`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", ...this.mediaHeaders() },
         body: JSON.stringify({
           file_id: file.file_id,
           language: message.from?.language_code ?? "ru",
@@ -408,7 +428,7 @@ export class EvaWorkflow {
   private async sendVoice(chatId: number, text: string, userId?: number): Promise<void> {
     const response = await fetch(`${this.config.mediaServiceUrl.replace(/\/+$/, "")}/tts`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...this.mediaHeaders() },
       body: JSON.stringify({ text: text.slice(0, 8_000), format: "voice" }),
       signal: AbortSignal.timeout(5 * 60_000),
     });

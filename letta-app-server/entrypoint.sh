@@ -40,7 +40,7 @@ if [ -n "${LETTA_APP_SERVER_TOKEN:-}" ]; then
 	log "capability-token authentication enabled"
 else
 	log "WARNING: LETTA_APP_SERVER_TOKEN is empty — the listener is unauthenticated."
-	log "         Only acceptable because the port is not published outside evaself-network."
+	log "         Only acceptable because the port is not published outside evaself-agent."
 fi
 
 # Serve OpenAI-compatible routes as well when asked. Off by default: it is

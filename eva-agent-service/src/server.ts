@@ -23,7 +23,7 @@ import type { UserProfileService } from "./profile/profile-service.js";
 import { PublicRepository, registerPublicRoutes } from "./public/routes.js";
 import type { UserQueue } from "./queue.js";
 import type { SdkSettingsInput, SdkSettingsManager } from "./sdk-settings.js";
-import type { TelegramUpdate } from "./telegram.js";
+import type { TelegramClient, TelegramUpdate } from "./telegram.js";
 import { webhookSecretMatches } from "./telegram.js";
 
 export const VERSION = "0.3.0";
@@ -40,6 +40,7 @@ export interface Services {
   goals: GoalService;
   payments: LavaPayments;
   queue: UserQueue;
+  telegram: TelegramClient;
   redisPing: () => Promise<boolean>;
 }
 
@@ -70,6 +71,7 @@ export function buildServer(services: Services): FastifyInstance {
     goals,
     payments,
     queue,
+    telegram,
   } = services;
 
   // Fastify's own logger is off: this service logs through logger.ts so
@@ -115,6 +117,7 @@ export function buildServer(services: Services): FastifyInstance {
   registerPublicRoutes(app, {
     config,
     repository: new PublicRepository(db, profile, goals),
+    telegram,
   });
 
   // ---------------------------------------------------------------

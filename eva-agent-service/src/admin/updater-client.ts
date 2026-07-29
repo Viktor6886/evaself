@@ -51,7 +51,7 @@ export class UpdaterClient {
         socket.write(`${JSON.stringify({ id, command, params })}\n`);
       });
       socket.on("data", (chunk) => {
-        buffer += chunk;
+        buffer += chunk.toString();
         const newline = buffer.indexOf("\n");
         if (newline < 0) return;
         clearTimeout(timer);

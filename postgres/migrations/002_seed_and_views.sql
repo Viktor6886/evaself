@@ -13,15 +13,12 @@ INSERT INTO quotas (plan, metric, period, limit_value, description) VALUES
     ('free',    'messages',      'day',   30,   'Messages to Eva per day'),
     ('free',    'voice_minutes', 'day',   5,    'Minutes of voice transcription per day'),
     ('free',    'web_search',    'day',   10,   'Web searches per day'),
-    ('free',    'tests',         'month', 2,    'Self-discovery tests per month'),
     ('plus',    'messages',      'day',   200,  'Messages to Eva per day'),
     ('plus',    'voice_minutes', 'day',   60,   'Minutes of voice transcription per day'),
     ('plus',    'web_search',    'day',   100,  'Web searches per day'),
-    ('plus',    'tests',         'month', 20,   'Self-discovery tests per month'),
     ('pro',     'messages',      'day',   -1,   'Unlimited messages'),
     ('pro',     'voice_minutes', 'day',   300,  'Minutes of voice transcription per day'),
-    ('pro',     'web_search',    'day',   -1,   'Unlimited web searches'),
-    ('pro',     'tests',         'month', -1,   'Unlimited tests')
+    ('pro',     'web_search',    'day',   -1,   'Unlimited web searches')
 ON CONFLICT (plan, metric, period) DO NOTHING;
 
 -- ---------------------------------------------------------------------

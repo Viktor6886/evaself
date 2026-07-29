@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import secrets
 import shutil
 import time
 import uuid
@@ -24,7 +25,7 @@ from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
@@ -51,6 +52,31 @@ TTS_VOICE = os.environ.get("MEDIA_TTS_VOICE", "nova")
 
 TELEGRAM_TOKEN = os.environ.get("EVA_TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_API = "https://api.telegram.org"
+
+# Shared secret presented by eva-agent-service. The service is not routed by
+# Caddy, but "not routed" is not "not reachable": every other container on the
+# compose network can address it, and these endpoints spend the bot token and
+# the paid ASR/TTS keys.
+SERVICE_TOKEN = os.environ.get("MEDIA_SERVICE_TOKEN", "")
+
+
+def require_service_token(x_media_key: str | None = Header(default=None)) -> None:
+    """Reject unauthenticated callers whenever a token is configured."""
+    if not SERVICE_TOKEN:
+        # Empty token keeps an already-running installation working after an
+        # upgrade; eva-agent-service logs a warning about it at boot.
+        return
+    if x_media_key is None or not secrets.compare_digest(x_media_key, SERVICE_TOKEN):
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "error": {
+                    "code": "unauthorized",
+                    "message": "X-Media-Key is missing or wrong",
+                    "retryable": False,
+                }
+            },
+        )
 
 
 def _error(code: str, message: str, status: int = 400, *, details: str | None = None):
@@ -140,6 +166,7 @@ async def health() -> dict:
         "ffmpeg": ffmpeg_ok,
         "asr_configured": bool(ASR_BASE_URL and ASR_API_KEY),
         "tts_configured": bool(TTS_BASE_URL and TTS_API_KEY),
+        "auth_required": bool(SERVICE_TOKEN),
         "work_dir": str(WORK_DIR),
     }
 
@@ -147,7 +174,7 @@ async def health() -> dict:
 # =====================================================================
 # probing
 # =====================================================================
-@app.post("/probe")
+@app.post("/probe", dependencies=[Depends(require_service_token)])
 async def probe_upload(file: UploadFile = File(...)):
     with Workspace(WORK_DIR) as work:
         try:
@@ -163,7 +190,7 @@ async def probe_upload(file: UploadFile = File(...)):
 # =====================================================================
 # transcription
 # =====================================================================
-@app.post("/transcribe")
+@app.post("/transcribe", dependencies=[Depends(require_service_token)])
 async def transcribe_upload(
     file: UploadFile = File(...),
     language: str | None = Form(default=None),
@@ -178,7 +205,7 @@ async def transcribe_upload(
         return await _transcribe_path(source, work, language, prompt)
 
 
-@app.post("/telegram/transcribe")
+@app.post("/telegram/transcribe", dependencies=[Depends(require_service_token)])
 async def transcribe_telegram(payload: TelegramTranscribeRequest):
     """Download a Telegram voice note by file_id, then transcribe it."""
     if not TELEGRAM_TOKEN:
@@ -266,7 +293,7 @@ async def _transcribe_path(
 # =====================================================================
 # speech synthesis
 # =====================================================================
-@app.post("/tts")
+@app.post("/tts", dependencies=[Depends(require_service_token)])
 async def synthesize(payload: TtsRequest):
     if not (TTS_BASE_URL and TTS_API_KEY):
         return _error(

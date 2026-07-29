@@ -7,7 +7,8 @@ Self-hosted runtime агентов Евы. Это режим зафиксиро�
 letta --backend local server --listen ws://0.0.0.0:4500
 ```
 
-App Server доступен только внутри `evaself-network`, использует capability
+App Server доступен только внутри сегмента `evaself-agent`, где кроме него
+живёт лишь его единственный клиент. Использует capability
 token и принимает подключения только от официального Agent SDK в
 `eva-agent-service`.
 

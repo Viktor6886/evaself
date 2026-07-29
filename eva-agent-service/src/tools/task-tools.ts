@@ -1,6 +1,6 @@
 import type { AnyAgentTool } from "@letta-ai/letta-agent-sdk";
 
-import { nextCronDate } from "../background.js";
+import { assertCronExpression, nextCronDate } from "../background.js";
 import type { AgentRuntimeContext, Database } from "../db.js";
 import type { GraphRepository } from "../memory/graph-repository.js";
 import { localDateTimeToUtc } from "../time/local-date-time.js";
@@ -110,6 +110,10 @@ export class TaskToolFactory {
     const remindAt = remindInput ? localDateTimeToUtc(remindInput, runtime.timezone) : null;
     const repeat = args.repeat === true;
     if (repeat && !cron) throw new Error("Для повторяющейся задачи требуется cron");
+    // Validated before the row is written: an expression that can never fire
+    // (or an unknown timezone) is a bad request, not a scheduler problem
+    // discovered minutes later in the background loop.
+    if (cron) assertCronExpression(cron, runtime.timezone);
     const nextRunAt = remindAt ?? dueAt ??
       (repeat && cron ? nextCronDate(cron, runtime.timezone, new Date()).toISOString() : null);
     let goalId = optionalInteger(args, "goal_id");

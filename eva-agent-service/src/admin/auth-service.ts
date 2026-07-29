@@ -160,7 +160,7 @@ export class AuthService {
     const sessionToken = randomBytes(32).toString("base64url");
     const csrfToken = randomBytes(24).toString("base64url");
     const expiresAt = new Date(Date.now() + SESSION_SECONDS * 1000);
-    const { rows: sessionRows } = await this.pool.query<{ id: string }>(
+    await this.pool.query<{ id: string }>(
       `INSERT INTO admin_sessions
          (user_id, token_hash, csrf_hash, expires_at, ip, user_agent)
        VALUES ($1, $2, $3, $4, $5::inet, $6)

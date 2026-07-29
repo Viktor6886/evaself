@@ -1,0 +1,21 @@
+# Lint configuration for media-service. Formatting is not enforced; these
+# rules are the ones that catch defects rather than style opinions.
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes: undefined names, unused imports
+    "B",    # bugbear: mutable defaults, silent except, loop-variable capture
+    "UP",   # pyupgrade
+    "SIM",  # obvious simplifications
+    "I",    # import order
+]
+# FastAPI's dependency-injection style is `def f(x = Depends(...))`, which
+# bugbear flags as a function call in a default argument.
+ignore = ["B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]

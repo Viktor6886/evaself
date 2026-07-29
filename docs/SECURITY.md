@@ -2,9 +2,37 @@
 
 ## Сеть
 
-Наружу опубликованы только Caddy 80/443. PostgreSQL, Valkey, Letta App
-Server, `eva-agent-service`, Media Service, SearXNG и backup
-helper находятся во внутренней `evaself-network`.
+Наружу опубликованы только Caddy 80/443. Внутренние сети сегментированы,
+чтобы компрометация одного контейнера не давала доступ ко всему стеку:
+
+| Сеть | Кто в ней |
+|---|---|
+| `evaself-edge` | Caddy и всё, что он проксирует: webapp, letta-ui, admin-ui, nocodb, uptime-kuma |
+| `evaself-data` | PostgreSQL, Valkey, NocoDB, backup helper, updater, bootstrap |
+| `evaself-agent` | только `eva-agent-service` ↔ Letta App Server |
+| `evaself-tools` | SearXNG, media-service, crawl4ai |
+
+`eva-agent-service` — единственный участник всех четырёх сегментов; это та
+же роль хаба, которую ему отводит архитектура. `admin-api` и `health-worker`
+входят в edge/data/tools, потому что опрашивают каталог сервисов из
+`src/admin/service-catalog.ts`; App Server им не нужен и остаётся наедине со
+своим единственным клиентом. SearXNG и crawl4ai обрабатывают недоверенный
+внешний контент и не видят ни PostgreSQL, ни Valkey, ни App Server, ни admin
+API Caddy. CI проверяет это утверждением, а не на словах.
+
+Admin API Caddy слушает `localhost:2019`, а не `0.0.0.0`: иначе любой сосед
+по сети мог бы перенастроить прокси и прочитать `EVA_AGENT_API_KEY` прямо из
+работающей конфигурации.
+
+Административная поверхность `/v1/*` закрыта на всех публичных хостах общим
+snippet `deny_internal`. Это `handle`, а не голый `respond`: Caddy сортирует
+`respond` после `handle`, поэтому на хосте с `/api/*` верхнеуровневый запрет
+был бы мёртвым кодом. Порядок закреплён проверкой
+`scripts/ci/assert-caddy-order.py`.
+
+`media-service` требует общий секрет `MEDIA_SERVICE_TOKEN` в заголовке
+`X-Media-Key`: он распоряжается токеном бота и платными ключами ASR/TTS.
+Открыт только `/health` — его дёргает Docker healthcheck.
 
 Консоль Letta защищена Caddy Basic Auth. Браузер вызывает только
 `/api/*`; Caddy добавляет внутренний `X-API-Key`, поэтому ключ
@@ -24,6 +52,24 @@ Capability token Letta App Server также не возвращается: ра
 
 Удаление agent требует точного повторного ввода `agent_id`. Операция
 необратима; перед массовыми изменениями выполните backup.
+
+## Telegram Mini App
+
+Браузерные маршруты `/public/*` не защищены `X-API-Key` — их вызывает
+браузер. Пользователь выводится из подписи запуска Telegram
+(`X-Telegram-Init-Data`), проверяемой в
+`src/public/telegram-webapp-auth.ts`; ни один идентификатор из тела запроса
+не используется. Единственное исключение — `/public/bot`: лендинг это
+обычная веб-страница без initData, а @handle бота и так публичен, поэтому
+маршрут вынесен за пределы hook'а с проверкой подписи.
+
+## Кризисные ситуации
+
+Кроме инструкций в персоне работает детерминированный слой
+(`src/crisis.ts`): сообщение проверяется на признаки риска до запуска хода,
+событие пишется в `crisis_events`, а при severity `high`/`critical` владелец
+получает уведомление в Telegram. Текст пользователя не пересылается — только
+указатель на запись. Ответ человеку не блокируется никогда.
 
 ## Секреты LLM
 
@@ -48,7 +94,13 @@ Capability token Letta App Server также не возвращается: ра
 ## Backup
 
 Backup содержит `.env`, Telegram tokens, ключи шифрования, agents, memory,
-настройки runtime и Letta provider store. Архив mode 600 — минимальная защита,
+настройки runtime и Letta provider store. Архив всегда шифруется мастер-ключом
+(AES-256-CBC, PBKDF2), а сам мастер-ключ в него не входит.
+
+Копия вне сервера настраивается `BACKUP_UPLOAD_COMMAND` — команда получает
+путь к уже зашифрованному архиву как `"$1"`. Ротация ограничена и сроком
+(`BACKUP_RETENTION_DAYS`), и количеством (`BACKUP_RETENTION_COUNT`): возраст
+сам по себе не удерживает размер каталога на маленьком диске. Архив mode 600 — минимальная защита,
 а не шифрование. Для внешнего хранения зашифруйте его отдельно.
 
 ## Проверка перед commit
