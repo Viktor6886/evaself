@@ -23,6 +23,7 @@ PREVIEW=0
 load_env
 
 ROLLBACK_DIR="$ROOT_DIR/.rollback"
+STASHED=0
 REPORT="$(mktemp)"
 trap 'rm -f "$REPORT"' EXIT
 
@@ -76,8 +77,31 @@ elif git -C "$ROOT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
 	git -C "$ROOT_DIR" fetch --quiet origin "$GIT_BRANCH" 2>/dev/null || warn "could not reach the git remote"
 	GIT_BEHIND="$(git -C "$ROOT_DIR" rev-list --count "HEAD..origin/${GIT_BRANCH}" 2>/dev/null || echo 0)"
 	info "branch $GIT_BRANCH at ${GIT_LOCAL:0:8}, ${GIT_BEHIND} commit(s) behind origin"
+	# An installation parked on a feature branch stops receiving releases
+	# without any obvious symptom: `make update` keeps succeeding, it just
+	# pulls a branch nobody advances any more.
+	DEFAULT_BRANCH="$(git -C "$ROOT_DIR" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')"
+	DEFAULT_BRANCH="${DEFAULT_BRANCH:-main}"
+	if [ "$GIT_BRANCH" != "$DEFAULT_BRANCH" ]; then
+		warn "установка стоит на ветке $GIT_BRANCH, а релизы идут в $DEFAULT_BRANCH"
+		info "переключиться: git -C $ROOT_DIR checkout $DEFAULT_BRANCH && make update"
+	fi
 	DIRTY="$(git -C "$ROOT_DIR" status --porcelain | wc -l)"
-	[ "$DIRTY" -eq 0 ] || warn "$DIRTY uncommitted change(s) — 'git pull' will be skipped to protect them"
+	if [ "$DIRTY" -gt 0 ]; then
+		# A dirty tree used to silently downgrade the update to "images
+		# only". Stashing keeps `make update` a single command without
+		# throwing anything away: `git stash pop` restores every change.
+		warn "$DIRTY локальн(ых) изменени(й) в репозитории — они будут убраны в git stash"
+		git -C "$ROOT_DIR" status --porcelain | sed 's/^/      /'
+		if git -C "$ROOT_DIR" stash push --include-untracked \
+			--message "evaself update $(date -Iseconds)" >/dev/null 2>&1; then
+			STASHED=1
+			ok "изменения сохранены в stash — вернуть: git -C $ROOT_DIR stash pop"
+			DIRTY=0
+		else
+			warn "не удалось создать stash — обновление кода будет пропущено"
+		fi
+	fi
 fi
 
 # =====================================================================
@@ -121,6 +145,7 @@ chmod 600 "$ROLLBACK_DIR/.env"
 	echo "git_commit=$GIT_LOCAL"
 	echo "git_branch=$GIT_BRANCH"
 	echo "backup=$LATEST_BACKUP"
+	echo "stashed_local_changes=$STASHED"
 	echo "recorded_at=$(date -Iseconds)"
 } > "$ROLLBACK_DIR/state"
 ok "rollback point saved in .rollback/"
@@ -147,14 +172,20 @@ if [ "$GIT_BEHIND" -gt 0 ] && [ "${DIRTY:-0}" -eq 0 ]; then
 		warn "git pull failed — continuing with image updates only"
 	fi
 	cp "$ROLLBACK_DIR/versions.env.new" "$VERSIONS_FILE"
+elif [ "$GIT_BEHIND" -eq 0 ]; then
+	info "репозиторий уже актуален"
 else
-	info "repository not changed"
+	warn "обновление кода пропущено: рабочее дерево не удалось очистить"
+	warn "разберите изменения вручную и повторите make update"
 fi
 
 # =====================================================================
 step "Pulling and rebuilding"
 # =====================================================================
 "$SCRIPT_DIR/ensure-admin-master-key.sh"
+# Settings introduced by the commits just pulled — added before the
+# containers are rebuilt so nothing starts with a missing value.
+"$SCRIPT_DIR/ensure-env-defaults.sh"
 load_env
 compose pull --ignore-buildable >/dev/null 2>&1 || warn "some images could not be pulled"
 compose build --pull >/dev/null || die "image build failed — nothing was restarted"
@@ -180,6 +211,17 @@ else
 	compose up -d --remove-orphans >/dev/null
 fi
 ok "containers recreated"
+
+# The single flat bridge was replaced by segmented networks; once every
+# container has moved off it, the empty leftover is just clutter.
+if docker network inspect evaself-network >/dev/null 2>&1; then
+	if docker network rm evaself-network >/dev/null 2>&1; then
+		ok "устаревшая сеть evaself-network удалена"
+	else
+		info "сеть evaself-network ещё используется — будет удалена позже"
+	fi
+fi
+
 recreate_caddy || die "Caddy не запустился с обновлённой конфигурацией"
 ok "Caddy пересоздан с актуальной конфигурацией"
 

@@ -16,7 +16,10 @@ install -d -m 0700 "$(dirname "$key_file")"
 if [ ! -s "$key_file" ]; then
 	umask 077
 	openssl rand -base64 32 > "$key_file"
-	ok "создан мастер-ключ Secret Store"
+	ok "создан мастер-ключ Secret Store: $key_file"
+	warn "ЭТИМ КЛЮЧОМ ШИФРУЮТСЯ BACKUP, И В САМ BACKUP ОН НЕ ВХОДИТ."
+	warn "Без него ни один архив не восстановить. Скопируйте его в другое место:"
+	warn "  cp $key_file <надёжное место вне этого сервера>"
 fi
 chmod 600 "$key_file"
 set_env EVA_SECRETS_MASTER_KEY_FILE "$key_file"
