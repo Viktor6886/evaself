@@ -1,4 +1,8 @@
 ARG NODE_BASE_VERSION=22.22-bookworm-slim
+ARG DOCKER_CLI_IMAGE=docker
+ARG DOCKER_CLI_VERSION=28.5.2-cli
+
+FROM ${DOCKER_CLI_IMAGE}:${DOCKER_CLI_VERSION} AS docker-cli
 
 # ---------------------------------------------------------------------
 # Build stage: install everything, compile TypeScript, run the tests.
@@ -27,7 +31,7 @@ RUN npm prune --omit=dev
 # ---------------------------------------------------------------------
 # Runtime stage
 # ---------------------------------------------------------------------
-FROM node:${NODE_BASE_VERSION}
+FROM node:${NODE_BASE_VERSION} AS runtime
 
 # The Agent SDK requires Node >= 22.19.
 ENV NODE_ENV=production \
@@ -54,3 +58,13 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=5 \
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/evaself-entrypoint"]
 CMD ["node", "dist/index.js"]
+
+# Docker CLI и Compose нужны только доверенному updater-процессу для
+# фиксированных backup/update-скриптов. Обычный Agent Runtime и admin-api
+# собираются из финального target `app` и этих бинарников не получают.
+FROM runtime AS updater
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=docker-cli /usr/local/libexec/docker/cli-plugins \
+    /usr/local/libexec/docker/cli-plugins
+
+FROM runtime AS app
