@@ -79,6 +79,13 @@ compose_no_stdin() {
 	compose "$@" </dev/null
 }
 
+recreate_caddy() {
+	# git checkout/pull may replace Caddyfile with a new inode. A reload would
+	# then reread the old bind mount, so the edge container must be recreated.
+	compose up -d --force-recreate caddy >/dev/null
+	wait_for_health caddy 120
+}
+
 # ---------------------------------------------------------------------
 # secrets & prompts
 # ---------------------------------------------------------------------

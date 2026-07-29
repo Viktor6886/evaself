@@ -82,6 +82,7 @@ compose pull --ignore-buildable >/dev/null 2>&1 || true
 compose build >/dev/null || warn "rebuild reported a problem"
 compose up -d --remove-orphans >/dev/null
 ok "containers recreated"
+recreate_caddy || warn "Caddy не запустился с восстановленной конфигурацией"
 
 sleep 10
 if "$SCRIPT_DIR/doctor.sh"; then

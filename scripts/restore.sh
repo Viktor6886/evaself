@@ -155,6 +155,7 @@ ok "базы восстановлены"
 # ---------------------------------------------------------------------
 step "Запуск сервисов"
 compose up -d --remove-orphans >/dev/null
+recreate_caddy || warn "Caddy не запустился с восстановленной конфигурацией"
 for svc in letta-app-server eva-agent-service; do
 	wait_for_health "$svc" 300 && ok "$svc up" || warn "$svc is still starting"
 done

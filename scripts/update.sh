@@ -161,6 +161,8 @@ step "Restarting services"
 # =====================================================================
 compose up -d --remove-orphans >/dev/null
 ok "containers recreated"
+recreate_caddy || die "Caddy не запустился с обновлённой конфигурацией"
+ok "Caddy пересоздан с актуальной конфигурацией"
 
 "$SCRIPT_DIR/db-migrate.sh" || die "миграции завершились ошибкой после перезапуска сервисов"
 "$SCRIPT_DIR/admin-finalize-env.sh" ||

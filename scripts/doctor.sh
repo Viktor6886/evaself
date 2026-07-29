@@ -169,9 +169,26 @@ step "Public HTTPS"
 if [[ "$DOMAIN" == *.localhost ]]; then
 	info "локальный режим: DNS и публичные сертификаты не проверяются"
 else
-	for pair in "site:$DOMAIN" "webapp:$DOMAIN_APP" "api:$DOMAIN_API/health" "nocodb:$DOMAIN_NOCODB" "letta:$DOMAIN_LETTA"; do
+	for pair in "site:$DOMAIN" "admin:$DOMAIN/admin/" "webapp:$DOMAIN_APP" "api:$DOMAIN_API/health" "nocodb:$DOMAIN_NOCODB" "letta:$DOMAIN_LETTA"; do
 		label="${pair%%:*}"; host="${pair#*:}"
 		code="$(http_status "https://$host" 12)"
+		if [ "$label" = "admin" ]; then
+			case "$code" in
+				200|204) ok "$label https://$host ($code)" ;;
+				401) critical "$label https://$host использует устаревшую Basic Auth — перезагрузите Caddy" ;;
+				000) critical "$label https://$host недоступна" ;;
+				*) critical "$label https://$host вернула $code" ;;
+			esac
+			continue
+		fi
+		if [ "$label" = "letta" ]; then
+			case "$code" in
+				401) ok "$label https://$host (401 — защищена, как и задумано)" ;;
+				000) critical "$label https://$host недоступна" ;;
+				*) critical "$label https://$host не защищена ожидаемой Basic Auth (код $code)" ;;
+			esac
+			continue
+		fi
 		case "$code" in
 			200|204|301|302) ok "$label https://$host ($code)" ;;
 			401) ok "$label https://$host (401 — protected, as intended)" ;;
