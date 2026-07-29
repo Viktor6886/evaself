@@ -5,6 +5,7 @@ import type { Config } from "./config.js";
 import type { AgentRuntimeContext, Database } from "./db.js";
 import type { Logger } from "./logger.js";
 import { ALLOWED_REACTIONS, type TelegramClient } from "./telegram.js";
+import { localDateTimeToUtc } from "./time/local-date-time.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -476,10 +477,18 @@ export class AgentToolFactory {
     }, ["title"]);
     const save = async (args: JsonObject, runtime: AgentRuntimeContext) => {
       const priority = Math.min(Math.max(optionalInteger(args, "priority") ?? 3, 1), 5);
-      const dueAt = optionalString(args, "due_at", 100);
-      const remindAt = optionalString(args, "remind_at", 100);
+      const dueAtInput = optionalString(args, "due_at", 100);
+      const remindAtInput = optionalString(args, "remind_at", 100);
       const cron = optionalString(args, "cron", 100);
-      const timezone = optionalString(args, "timezone", 100) ?? runtime.timezone;
+      const requestedTimezone = optionalString(args, "timezone", 100);
+      if (requestedTimezone && requestedTimezone !== runtime.timezone) {
+        throw new Error(
+          "Часовой пояс задачи должен совпадать с подтверждённым часовым поясом пользователя",
+        );
+      }
+      const timezone = runtime.timezone;
+      const dueAt = dueAtInput ? localDateTimeToUtc(dueAtInput, timezone) : null;
+      const remindAt = remindAtInput ? localDateTimeToUtc(remindAtInput, timezone) : null;
       const repeat = args.repeat === true;
       if (repeat && !cron) throw new Error("Для повторяющейся задачи требуется cron");
       const nextRunAt = remindAt ?? dueAt ??
@@ -589,7 +598,9 @@ export class AgentToolFactory {
               optionalString(args, "description", 5000),
               optionalString(args, "status", 30),
               Object.hasOwn(args, "due_at"),
-              optionalString(args, "due_at", 100),
+              optionalString(args, "due_at", 100)
+                ? localDateTimeToUtc(optionalString(args, "due_at", 100)!, runtime.timezone)
+                : null,
             ],
           );
           return rows[0] ? { ok: true, task: rows[0] } : { ok: false, error: "Задача не найдена" };
@@ -659,7 +670,9 @@ export class AgentToolFactory {
               runtime.userId,
               optionalString(args, "task", 500),
               optionalString(args, "status", 30),
-              optionalString(args, "due_date", 100),
+              optionalString(args, "due_date", 100)
+                ? localDateTimeToUtc(optionalString(args, "due_date", 100)!, runtime.timezone)
+                : null,
             ],
           );
           return rows[0] ? { ok: true, task: rows[0] } : { ok: false, error: "Задача не найдена" };

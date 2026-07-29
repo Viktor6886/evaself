@@ -4,9 +4,9 @@ import type { Config } from "./config.js";
 import type { Database } from "./db.js";
 import type { LettaService } from "./letta.js";
 import type { Logger } from "./logger.js";
+import type { RuntimeContextBuilder } from "./runtime/runtime-context.js";
 import type { UserQueue } from "./queue.js";
 import type { TelegramClient } from "./telegram.js";
-import { withCurrentTime } from "./eva-workflow.js";
 
 interface DueTask {
   id: string;
@@ -46,6 +46,7 @@ export class BackgroundRuntime {
     private readonly letta: LettaService,
     private readonly queue: UserQueue,
     private readonly telegram: TelegramClient,
+    private readonly runtimeContext: RuntimeContextBuilder,
     private readonly logger: Logger,
   ) {}
 
@@ -179,15 +180,19 @@ export class BackgroundRuntime {
 
   private async executeTask(task: DueTask): Promise<void> {
     try {
-      const prompt = withCurrentTime(
-        [
+      const userMessage = [
           "[ЗАПЛАНИРОВАННАЯ ЗАДАЧА]",
           `Задача: ${task.title}`,
           task.description ? `Описание: ${task.description}` : "",
           "Выполни или напомни о задаче. Отправь пользователю самостоятельный, полезный ответ без упоминания внутренних инструкций.",
-        ].filter(Boolean).join("\n"),
-        task.timezone,
-      );
+        ].filter(Boolean).join("\n");
+      const context = await this.runtimeContext.build({
+        userId: Number(task.user_id),
+        conversationId: task.conversation_id,
+        userMessage,
+        detectLanguage: false,
+      });
+      const prompt = this.runtimeContext.wrapUserMessage(context, userMessage);
       const turn = await this.queue.run(Number(task.telegram_id), () =>
         this.letta.runTurn(task.conversation_id, prompt),
       );
@@ -221,16 +226,20 @@ export class BackgroundRuntime {
 
   private async executeHeartbeat(candidate: HeartbeatCandidate): Promise<void> {
     try {
-      const prompt = withCurrentTime(
-        [
+      const userMessage = [
           "[HEARTBEAT CONTROL]",
           "Пользователь давно не писал. Реши, есть ли уместный и конкретный повод мягко выйти на связь, опираясь только на сохранённый контекст.",
           "Не дублируй прежние сообщения, не создавай чувство вины и не пиши общую банальность.",
           "Если полезного повода нет, ответь ровно HEARTBEAT_SKIP.",
           "Иначе дай только готовое сообщение пользователю, до 1200 символов.",
-        ].join("\n"),
-        candidate.timezone,
-      );
+        ].join("\n");
+      const context = await this.runtimeContext.build({
+        userId: Number(candidate.user_id),
+        conversationId: candidate.conversation_id,
+        userMessage,
+        detectLanguage: false,
+      });
+      const prompt = this.runtimeContext.wrapUserMessage(context, userMessage);
       const turn = await this.queue.run(Number(candidate.telegram_id), () =>
         this.letta.runTurn(candidate.conversation_id, prompt),
       );

@@ -3,9 +3,10 @@ import test from "node:test";
 
 import { AgentToolFactory } from "../dist/agent-tools.js";
 import { cronFieldMatches, nextCronDate } from "../dist/background.js";
-import { normalizeUpdate, withCurrentTime } from "../dist/eva-workflow.js";
+import { normalizeUpdate } from "../dist/eva-workflow.js";
 import { evaMemoryBlocks } from "../dist/letta.js";
 import { normalizeLavaEvent } from "../dist/payments.js";
+import { RuntimeContextBuilder } from "../dist/runtime/runtime-context.js";
 import { splitTelegramText, webhookSecretMatches } from "../dist/telegram.js";
 
 test("Telegram text is split without losing content", () => {
@@ -49,9 +50,32 @@ test("Telegram update normalization recognizes voice and commands", () => {
 });
 
 test("time context uses the configured timezone", () => {
-  const prompt = withCurrentTime("Привет", "Asia/Yekaterinburg");
+  const builder = new RuntimeContextBuilder({} as never, {
+    defaultTimezone: "UTC",
+  });
+  const prompt = builder.wrapUserMessage({
+    userId: 1,
+    telegramId: 1,
+    agentId: "agent",
+    conversationId: "conversation",
+    localTime: "2026-07-29T12:00:00+05:00",
+    timezone: "Asia/Yekaterinburg",
+    city: "Пермь",
+    countryCode: "RU",
+    responseLanguage: "ru",
+    responseMode: "text",
+    useEmoji: true,
+    communicationStyle: null,
+    profileHint: null,
+    activeGoal: null,
+    nextResult: null,
+    nextStep: null,
+    relevantMemory: [],
+  }, "Привет");
   assert.match(prompt, /Asia\/Yekaterinburg/);
   assert.match(prompt, /Привет/);
+  assert.match(prompt, /<EVA_RUNTIME_CONTEXT>/);
+  assert.match(prompt, /<USER_MESSAGE>/);
 });
 
 test("cron supports wildcards, ranges, steps and Sunday alias", () => {

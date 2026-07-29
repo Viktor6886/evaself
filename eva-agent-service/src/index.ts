@@ -21,6 +21,7 @@ import { LlmManager } from "./llm.js";
 import { createLogger } from "./logger.js";
 import { LavaPayments } from "./payments.js";
 import { UserQueue } from "./queue.js";
+import { RuntimeContextBuilder } from "./runtime/runtime-context.js";
 import { SdkSettingsManager } from "./sdk-settings.js";
 import { buildServer, VERSION } from "./server.js";
 import { TelegramClient } from "./telegram.js";
@@ -75,7 +76,19 @@ async function main(): Promise<void> {
   }
   const toolFactory = new AgentToolFactory(config, db, telegram, logger);
   letta.setToolFactory((conversationId) => toolFactory.forConversation(conversationId));
-  const workflow = new EvaWorkflow(config, db, letta, llm, queue, telegram, logger);
+  const runtimeContext = new RuntimeContextBuilder(db, {
+    defaultTimezone: config.defaultTimezone,
+  });
+  const workflow = new EvaWorkflow(
+    config,
+    db,
+    letta,
+    llm,
+    queue,
+    telegram,
+    runtimeContext,
+    logger,
+  );
   const inbox = new PostgresTelegramInbox(db);
   const inboxWorker = new TelegramInboxWorker(
     inbox,
@@ -105,7 +118,15 @@ async function main(): Promise<void> {
     },
   );
   const payments = new LavaPayments(config, db, telegram, logger);
-  const background = new BackgroundRuntime(config, db, letta, queue, telegram, logger);
+  const background = new BackgroundRuntime(
+    config,
+    db,
+    letta,
+    queue,
+    telegram,
+    runtimeContext,
+    logger,
+  );
 
   const app = buildServer({
     config,

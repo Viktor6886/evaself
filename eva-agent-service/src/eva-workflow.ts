@@ -1,10 +1,13 @@
 import type { Config } from "./config.js";
 import type { AgentLinkRow, Database, UserRow } from "./db.js";
 import type { InboxResult } from "./delivery/inbox.js";
+import { preferredResponseLanguage, t } from "./i18n/index.js";
+import type { SupportedLanguage } from "./i18n/language-resolver.js";
 import type { LettaService } from "./letta.js";
 import type { LlmManager } from "./llm.js";
 import type { Logger } from "./logger.js";
 import type { UserQueue } from "./queue.js";
+import type { RuntimeContextBuilder } from "./runtime/runtime-context.js";
 import {
   type TelegramMessage,
   type TelegramUpdate,
@@ -29,6 +32,7 @@ export class EvaWorkflow {
     private readonly llm: LlmManager,
     private readonly queue: UserQueue,
     private readonly telegram: TelegramClient,
+    private readonly runtimeContext: RuntimeContextBuilder,
     private readonly logger: Logger,
   ) {}
 
@@ -52,22 +56,23 @@ export class EvaWorkflow {
     try {
       return await this.queue.run(update.telegramId, async () => {
         const { user, link } = await this.ensureUserAndAgent(update);
+        const language = preferredResponseLanguage(user);
         await this.db.attachTelegramUpdateToUser(update.updateId, user.id);
 
         if (user.is_blocked || user.state === "blocked") {
-          await this.telegram.sendMessage(update.chatId, "Доступ к Еве временно ограничен.");
+          await this.telegram.sendMessage(update.chatId, t(language, "accessBlocked"));
           return { status: "ignored" };
         }
 
         if (update.command) {
-          await this.handleCommand(update, user);
+          await this.handleCommand(update, user, language);
           return { status: "completed" };
         }
 
         if (update.kind === "unsupported") {
           await this.telegram.sendMessage(
             update.chatId,
-            "Сейчас я понимаю текст, голосовые сообщения, изображения и небольшие документы.",
+            t(language, "unsupportedMessage"),
           );
           return { status: "ignored" };
         }
@@ -83,7 +88,7 @@ export class EvaWorkflow {
         ) {
           await this.telegram.sendMessage(
             update.chatId,
-            "Лимит сообщений на текущий период закончился. Проверить его можно командой /balance.",
+            t(language, "messageQuotaEnded"),
           );
           return { status: "ignored" };
         }
@@ -98,34 +103,42 @@ export class EvaWorkflow {
           ) {
             await this.telegram.sendMessage(
               update.chatId,
-              "Лимит распознавания голоса закончился. Можно продолжить текстом.",
+              t(language, "voiceQuotaEnded"),
             );
             return { status: "ignored" };
           }
         }
 
-        const prompt = await this.promptFromMessage(update);
+        const prompt = await this.promptFromMessage(update, language);
         typing.stop = this.telegram.startTyping(update.chatId, this.config.typingIntervalMs);
         await this.db.recordUserMessage(user.id);
         const conversationId = link.conversation_id;
         if (!conversationId) throw new Error("У агента отсутствует активный conversation");
 
+        const context = await this.runtimeContext.build({
+          userId: user.id,
+          conversationId,
+          userMessage: prompt,
+          languageMessage:
+            update.message.text?.trim() ||
+            update.message.caption?.trim() ||
+            (update.kind === "voice" ? prompt : ""),
+        });
         const answer = await this.letta.runTurn(
           conversationId,
-          withCurrentTime(prompt, user.timezone || this.config.defaultTimezone),
+          this.runtimeContext.wrapUserMessage(context, prompt),
         );
         await this.db.markAgentUsed(link.agent_id);
         const turn = answer;
 
-        const reply = turn.reply.trim() || "Я рядом. Попробуй сформулировать это немного иначе.";
-        const context = await this.db.getAgentRuntimeContext(conversationId);
-        const responseMode = context?.responseMode ?? "text";
+        const reply = turn.reply.trim() || t(language, "emptyReply");
+        const responseMode = context.responseMode;
         if (responseMode === "text" || responseMode === "both") {
           await this.telegram.sendMessage(update.chatId, reply);
         }
         if (responseMode === "voice" || responseMode === "both") {
           try {
-            await this.sendVoice(update.chatId, reply, context?.userId);
+            await this.sendVoice(update.chatId, reply, context.userId);
           } catch (error) {
             this.logger.warn("Голосовой ответ недоступен, отправлен текст", {
               updateId: update.updateId,
@@ -186,37 +199,39 @@ export class EvaWorkflow {
     return { user, link };
   }
 
-  private async handleCommand(update: NormalizedUpdate, user: UserRow): Promise<void> {
+  private async handleCommand(
+    update: NormalizedUpdate,
+    user: UserRow,
+    language: SupportedLanguage,
+  ): Promise<void> {
     switch (update.command) {
       case "/start":
         await this.db.setUserState(user.id, "active");
         await this.telegram.sendProgressiveMessage(
           update.chatId,
-          "Привет! Я Ева — собеседник и помощник в самопознании. Я запоминаю важный контекст на твоём сервере. Напиши, что сейчас занимает твои мысли.",
+          t(language, "start"),
         );
         break;
       case "/help":
         await this.telegram.sendMessage(
           update.chatId,
-          [
-            "Можно писать текстом или отправлять голосовые сообщения и изображения.",
-            "",
-            "/balance — текущие лимиты",
-            "/subscription — варианты доступа",
-            "/privacy — как хранятся данные",
-          ].join("\n"),
+          t(language, "help"),
         );
         break;
       case "/balance": {
         const quotas = await this.db.getQuotaStatus(update.telegramId);
         const lines = quotas.map((item) => {
           const row = item as Record<string, unknown>;
-          const remaining = row.remaining === null ? "без ограничений" : String(row.remaining);
-          return `${quotaLabel(String(row.metric))}: осталось ${remaining}`;
+          const remaining = row.remaining === null
+            ? t(language, "unlimited")
+            : t(language, "remaining", { value: String(row.remaining) });
+          return `${quotaLabel(String(row.metric), language)}: ${remaining}`;
         });
         await this.telegram.sendMessage(
           update.chatId,
-          lines.length ? `Текущие лимиты:\n${lines.join("\n")}` : "Лимиты пока не настроены.",
+          lines.length
+            ? `${t(language, "limitsTitle")}\n${lines.join("\n")}`
+            : t(language, "limitsMissing"),
         );
         break;
       }
@@ -230,8 +245,8 @@ export class EvaWorkflow {
         await this.telegram.sendMessage(
           update.chatId,
           buttons.length
-            ? "Выбери подходящий вариант доступа:"
-            : "Онлайн-оплата ещё не настроена администратором.",
+            ? t(language, "chooseSubscription")
+            : t(language, "subscriptionUnavailable"),
           buttons.length ? { reply_markup: { inline_keyboard: buttons } } : {},
         );
         break;
@@ -239,15 +254,18 @@ export class EvaWorkflow {
       case "/privacy":
         await this.telegram.sendMessage(
           update.chatId,
-          "Переписка, связь с агентом, заметки и задачи хранятся в PostgreSQL и Letta на сервере владельца Evaself. API-ключи зашифрованы и не выдаются в WebUI. Удаление агента доступно администратору.",
+          t(language, "privacy"),
         );
         break;
       default:
-        await this.telegram.sendMessage(update.chatId, "Неизвестная команда. Список: /help");
+        await this.telegram.sendMessage(update.chatId, t(language, "unknownCommand"));
     }
   }
 
-  private async promptFromMessage(update: NormalizedUpdate): Promise<string> {
+  private async promptFromMessage(
+    update: NormalizedUpdate,
+    language: SupportedLanguage,
+  ): Promise<string> {
     const message = update.message;
     if (update.kind === "text") return message.text?.trim() || message.caption?.trim() || "";
     if (update.kind === "voice") {
@@ -277,7 +295,10 @@ export class EvaWorkflow {
           Math.max(1, Math.ceil(body.duration_minutes)),
         );
       }
-      await this.telegram.sendMessage(update.chatId, `Распознала: ${body.text.trim()}`);
+      await this.telegram.sendMessage(
+        update.chatId,
+        t(language, "transcript", { text: body.text.trim() }),
+      );
       return body.text.trim();
     }
     if (update.kind === "image") {
@@ -371,30 +392,18 @@ export function normalizeUpdate(update: TelegramUpdate): NormalizedUpdate | null
   };
 }
 
-export function withCurrentTime(message: string, timezone: string): string {
-  let local: string;
-  try {
-    local = new Intl.DateTimeFormat("ru-RU", {
-      dateStyle: "full",
-      timeStyle: "long",
-      timeZone: timezone,
-    }).format(new Date());
-  } catch {
-    local = new Date().toISOString();
-  }
-  return [
-    `[СИСТЕМНЫЙ КОНТЕКСТ: текущие дата и время ${local}; часовой пояс ${timezone}.`,
-    "Используй это только когда время существенно для ответа. Не утверждай, что время другое.]",
-    "",
-    message,
-  ].join("\n");
-}
-
-function quotaLabel(metric: string): string {
-  return {
-    messages: "Сообщения",
-    voice_minutes: "Голосовые минуты",
-    web_search: "Поиск",
-    tests: "Тесты",
-  }[metric] ?? metric;
+function quotaLabel(metric: string, language: SupportedLanguage): string {
+  return (language === "en"
+    ? {
+        messages: "Messages",
+        voice_minutes: "Voice minutes",
+        web_search: "Search",
+        tests: "Tests",
+      }
+    : {
+        messages: "Сообщения",
+        voice_minutes: "Голосовые минуты",
+        web_search: "Поиск",
+        tests: "Тесты",
+      })[metric] ?? metric;
 }

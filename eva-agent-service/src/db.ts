@@ -20,7 +20,14 @@ export interface UserRow {
   first_name: string | null;
   last_name: string | null;
   language_code: string;
+  language_mode: "auto" | "fixed";
+  preferred_language: string | null;
+  last_message_language: string | null;
   timezone: string;
+  city: string | null;
+  country_code: string | null;
+  timezone_source: string | null;
+  timezone_confidence: string | null;
   state: string;
   is_blocked: boolean;
   created_at: Date;
