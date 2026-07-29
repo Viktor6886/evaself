@@ -193,6 +193,14 @@ run_with_progress "загрузка upstream-образов" compose pull --igno
 step "Сборка локальных образов"
 run_with_progress "сборка локальных образов" compose build --pull
 
+# При повторном запуске install PostgreSQL продолжает работать со старым
+# приложением. Совместимые миграции нужно применить до запуска нового worker,
+# иначе он несколько секунд обращается к ещё не созданным таблицам.
+if service_running postgres; then
+	step "Миграции перед обновлением сервисов"
+	"$SCRIPT_DIR/db-migrate.sh"
+fi
+
 step "Запуск стека"
 run_with_progress "создание и запуск контейнеров" compose up -d --remove-orphans
 
