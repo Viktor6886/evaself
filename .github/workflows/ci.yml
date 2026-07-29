@@ -39,6 +39,9 @@ jobs:
             bash -n "$f" || exit 1
           done
 
+      - name: NocoDB automatic connection unit tests
+        run: node --test nocodb/init-eva.test.mjs
+
       - name: .env loader treats bcrypt and JSON as data
         run: |
           cat > /tmp/evaself-loader.env <<'EOF'
@@ -346,6 +349,8 @@ jobs:
             'EVA_TELEGRAM_API_BASE_URL': 'http://127.0.0.1:1',
             'EVA_LLM_PROVIDER_NAME': 'CI-bootstrap', 'EVA_LLM_MODEL': '',
             'EVA_LLM_CONTEXT_WINDOW': '32768',
+            'NC_ADMIN_EMAIL': 'admin@example.test',
+            'NC_ADMIN_PASSWORD': 'Ci-NocoDB-2026-Strong-Password',
             'COMPOSE_PROFILES': '',
           }
           for key, value in values.items():
@@ -375,6 +380,46 @@ jobs:
             sleep 2
           done
           ./scripts/db-migrate.sh
+
+      - name: NocoDB automatically imports every Eva table
+        run: |
+          docker compose --env-file versions.env --env-file .env up -d nocodb
+          for i in $(seq 1 90); do
+            STATUS="$(docker inspect -f \
+              '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' \
+              evaself-nocodb 2>/dev/null || echo down)"
+            echo "NocoDB, attempt $i: $STATUS"
+            [ "$STATUS" = "healthy" ] && break
+            [ "$i" = "90" ] && exit 1
+            sleep 2
+          done
+          ./scripts/nocodb-connect.sh
+          ./scripts/nocodb-connect.sh
+          . scripts/lib.sh
+          load_env
+          IFS='|' read -r BASE_COUNT SOURCE_COUNT MODEL_COUNT <<<"$(
+            docker compose --env-file versions.env --env-file .env \
+              exec -T -e PGPASSWORD="$NOCODB_DB_PASSWORD" postgres \
+              psql -v ON_ERROR_STOP=1 -At \
+                -U "$NOCODB_DB_USER" -d "$NOCODB_DB_NAME" \
+                -c "SELECT (SELECT count(*) FROM nc_bases_v2),
+                           (SELECT count(*) FROM nc_sources_v2),
+                           (SELECT count(*) FROM nc_models_v2);"
+          )"
+          EVA_OBJECT_COUNT="$(
+            docker compose --env-file versions.env --env-file .env \
+              exec -T -e PGPASSWORD="$EVA_DB_PASSWORD" postgres \
+              psql -v ON_ERROR_STOP=1 -At \
+                -U "$EVA_DB_USER" -d "$EVA_DB_NAME" \
+                -c "SELECT count(*) FROM information_schema.tables
+                    WHERE table_schema = 'public'
+                      AND table_type IN ('BASE TABLE', 'VIEW');"
+          )"
+          test "$BASE_COUNT" -eq 1
+          test "$SOURCE_COUNT" -eq 1
+          test "$MODEL_COUNT" -eq "$EVA_OBJECT_COUNT"
+          printf 'NocoDB metadata: bases=%s sources=%s objects=%s\n' \
+            "$BASE_COUNT" "$SOURCE_COUNT" "$MODEL_COUNT"
 
       - name: Start the App Server and the agent service
         run: |

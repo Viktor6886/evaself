@@ -145,6 +145,8 @@ compose up -d --remove-orphans >/dev/null
 ok "containers recreated"
 
 "$SCRIPT_DIR/db-migrate.sh" || die "миграции завершились ошибкой после перезапуска сервисов"
+"$SCRIPT_DIR/nocodb-connect.sh" ||
+	die "таблицы Eva не синхронизировались с NocoDB"
 
 # =====================================================================
 step "Verifying"

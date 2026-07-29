@@ -311,8 +311,10 @@ services:
       NC_ADMIN_PASSWORD: ${NC_ADMIN_PASSWORD}
       NC_INVITE_ONLY_SIGNUP: ${NC_INVITE_ONLY_SIGNUP}
       NC_DISABLE_TELE: ${NC_DISABLE_TELE}
-      # …and the `eva` database is connected as an external data source
-      # by scripts/nocodb-connect.sh (see nocodb/README.md).
+      # Разрешаем NocoDB подключаться к PostgreSQL внутри Docker-сети. Без этой
+      # настройки NocoDB отклоняет внутренний адрес сервиса `postgres`.
+      NC_ALLOW_LOCAL_EXTERNAL_DBS: "true"
+      # База `eva` подключается автоматически скриптом nocodb-connect.sh.
       EVA_PG_HOST: ${POSTGRES_HOST}
       EVA_PG_PORT: ${POSTGRES_PORT}
       EVA_PG_DATABASE: ${EVA_DB_NAME}
@@ -321,6 +323,7 @@ services:
       TZ: ${TZ}
     volumes:
       - nocodb_data:/usr/app/data
+      - ./nocodb/init-eva.mjs:/opt/evaself/nocodb-init-eva.mjs:ro
     networks: [evaself-network]
     depends_on:
       postgres:

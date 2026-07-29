@@ -216,6 +216,7 @@ done
 # 9. database migrations
 # =====================================================================
 "$SCRIPT_DIR/db-migrate.sh"
+"$SCRIPT_DIR/nocodb-connect.sh"
 "$SCRIPT_DIR/configure-llm.sh" --from-env
 
 # =====================================================================
@@ -268,7 +269,7 @@ cat <<SUMMARY
     Пароли не выводятся в терминал и журнал; они сохранены только в .env (mode 600).
   ${C_BOLD}Следующие шаги${C_RESET}
     1. Проверьте Telegram webhook: scripts/telegram-webhook.sh status
-    2. Подключите NocoDB к базе eva: scripts/nocodb-connect.sh
+    2. Откройте NocoDB — все таблицы Eva уже подключены автоматически.
     3. Настройте агентов и проверьте чат в административной консоли Letta.
     4. Для голоса заполните MEDIA_ASR_* / MEDIA_TTS_* и выполните make restart
 
