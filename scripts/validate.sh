@@ -74,7 +74,7 @@ else
 	# shellcheck disable=SC1090
 	. "$VERSIONS_FILE"
 	CADDY_CMD=(
-		docker run --rm -i
+		docker run --rm
 		-v "$ROOT_DIR:/work:ro" -w /work
 		-e DOMAIN -e DOMAIN_APP -e DOMAIN_API -e DOMAIN_NOCODB
 		-e DOMAIN_LETTA -e DOMAIN_STATUS -e ACME_EMAIL -e ACME_CA

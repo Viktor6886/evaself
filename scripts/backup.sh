@@ -47,10 +47,10 @@ info "архив: $ARCHIVE"
 # ---------------------------------------------------------------------
 step "PostgreSQL"
 if service_running backup-service; then
-	compose exec -T backup-service /usr/local/bin/backup-service dump-all /work/dump >/dev/null
+	compose_no_stdin exec -T backup-service /usr/local/bin/backup-service dump-all /work/dump >/dev/null
 	CID="$(compose ps -q backup-service)"
 	docker cp "$CID:/work/dump/." "$WORK/postgres/" >/dev/null
-	compose exec -T backup-service sh -c 'rm -rf /work/dump'
+	compose_no_stdin exec -T backup-service sh -c 'rm -rf /work/dump'
 	ok "сохранено баз: $(find "$WORK/postgres" -name '*.dump' | wc -l), включая globals"
 else
 	die "backup-service не запущен — сначала запустите стек"
@@ -94,7 +94,7 @@ dump_volume evaself_caddy_data  caddy_data.tar.gz
 # ---------------------------------------------------------------------
 step "Agents и conversations"
 if service_running eva-agent-service; then
-	if compose exec -T eva-agent-service node -e "
+	if compose_no_stdin exec -T eva-agent-service node -e "
 const key = process.env.EVA_AGENT_API_KEY;
 const base = 'http://127.0.0.1:' + (process.env.EVA_AGENT_PORT || 8070);
 const get = (p) => fetch(base + p, { headers: { 'X-API-Key': key } }).then((r) => r.json());

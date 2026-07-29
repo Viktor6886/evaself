@@ -144,10 +144,10 @@ wait_for_health postgres 180 || die "PostgreSQL не запустился"
 
 CID="$(compose ps -q backup-service)"
 [ -n "$CID" ] || die "backup-service не запущен"
-compose exec -T backup-service sh -c 'rm -rf /work/restore && mkdir -p /work/restore'
+compose_no_stdin exec -T backup-service sh -c 'rm -rf /work/restore && mkdir -p /work/restore'
 docker cp "$SRC/postgres/." "$CID:/work/restore/" >/dev/null
-compose exec -T backup-service /usr/local/bin/backup-service restore-all /work/restore
-compose exec -T backup-service sh -c 'rm -rf /work/restore'
+compose_no_stdin exec -T backup-service /usr/local/bin/backup-service restore-all /work/restore
+compose_no_stdin exec -T backup-service sh -c 'rm -rf /work/restore'
 ok "базы восстановлены"
 
 # ---------------------------------------------------------------------

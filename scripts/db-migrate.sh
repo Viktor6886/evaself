@@ -25,7 +25,7 @@ for file in $(find "$MIGRATIONS_DIR" -maxdepth 1 -name '*.sql' | sort); do
 	version="${name%.sql}"
 
 	# Skip if this version is already recorded (the table may not exist yet).
-	already="$(compose exec -T -e PGPASSWORD="$EVA_DB_PASSWORD" postgres \
+	already="$(compose_no_stdin exec -T -e PGPASSWORD="$EVA_DB_PASSWORD" postgres \
 		psql -tAq -U "$EVA_DB_USER" -d "$EVA_DB_NAME" \
 		-c "SELECT 1 FROM schema_migrations WHERE version = '$version'" 2>/dev/null || true)"
 

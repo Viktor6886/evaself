@@ -70,10 +70,10 @@ done
 # =====================================================================
 step "Databases"
 # =====================================================================
-if compose exec -T postgres pg_isready -q -U "$POSTGRES_SUPER_USER" 2>/dev/null; then
+if compose_no_stdin exec -T postgres pg_isready -q -U "$POSTGRES_SUPER_USER" 2>/dev/null; then
 	ok "PostgreSQL accepting connections"
 	for db in "$EVA_DB_NAME" "$NOCODB_DB_NAME" "$LETTA_DB_NAME"; do
-		if compose exec -T postgres psql -tAq -U "$POSTGRES_SUPER_USER" -d postgres \
+		if compose_no_stdin exec -T postgres psql -tAq -U "$POSTGRES_SUPER_USER" -d postgres \
 			-c "SELECT 1 FROM pg_database WHERE datname='$db'" 2>/dev/null | grep -q 1; then
 			ok "database $db exists"
 		else
@@ -81,7 +81,7 @@ if compose exec -T postgres pg_isready -q -U "$POSTGRES_SUPER_USER" 2>/dev/null;
 		fi
 	done
 
-	TABLES="$(compose exec -T -e PGPASSWORD="$EVA_DB_PASSWORD" postgres \
+	TABLES="$(compose_no_stdin exec -T -e PGPASSWORD="$EVA_DB_PASSWORD" postgres \
 		psql -tAq -U "$EVA_DB_USER" -d "$EVA_DB_NAME" \
 		-c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE'" 2>/dev/null | tr -dc '0-9')"
 	if [ "${TABLES:-0}" -ge 21 ]; then
@@ -90,11 +90,11 @@ if compose exec -T postgres pg_isready -q -U "$POSTGRES_SUPER_USER" 2>/dev/null;
 		critical "eva schema incomplete (${TABLES:-0} tables) — run scripts/db-migrate.sh"
 	fi
 
-	USERS="$(compose exec -T -e PGPASSWORD="$EVA_DB_PASSWORD" postgres \
+	USERS="$(compose_no_stdin exec -T -e PGPASSWORD="$EVA_DB_PASSWORD" postgres \
 		psql -tAq -U "$EVA_DB_USER" -d "$EVA_DB_NAME" -c "SELECT count(*) FROM users" 2>/dev/null | tr -dc '0-9')"
-	AGENTS="$(compose exec -T -e PGPASSWORD="$EVA_DB_PASSWORD" postgres \
+	AGENTS="$(compose_no_stdin exec -T -e PGPASSWORD="$EVA_DB_PASSWORD" postgres \
 		psql -tAq -U "$EVA_DB_USER" -d "$EVA_DB_NAME" -c "SELECT count(*) FROM agent_links WHERE status='active'" 2>/dev/null | tr -dc '0-9')"
-	CONVS="$(compose exec -T -e PGPASSWORD="$EVA_DB_PASSWORD" postgres \
+	CONVS="$(compose_no_stdin exec -T -e PGPASSWORD="$EVA_DB_PASSWORD" postgres \
 		psql -tAq -U "$EVA_DB_USER" -d "$EVA_DB_NAME" \
 		-c "SELECT count(*) FROM agent_links WHERE status='active' AND conversation_id IS NOT NULL" 2>/dev/null | tr -dc '0-9')"
 	info "users: ${USERS:-0}   agents: ${AGENTS:-0}   with a conversation: ${CONVS:-0}"
@@ -105,7 +105,7 @@ else
 	critical "PostgreSQL is not accepting connections"
 fi
 
-if compose exec -T valkey sh -c 'valkey-cli -a "$VALKEY_PASSWORD" ping' 2>/dev/null | grep -q PONG; then
+if compose_no_stdin exec -T valkey sh -c 'valkey-cli -a "$VALKEY_PASSWORD" ping' 2>/dev/null | grep -q PONG; then
 	ok "Valkey responding"
 else
 	critical "Valkey is not responding"
@@ -117,20 +117,20 @@ step "Internal endpoints"
 probe() {
 	local name="$1" svc="$2" url="$3" expect="${4:-200}"
 	local code
-	code="$(compose exec -T "$svc" sh -c "wget -qO- -S '$url' 2>&1 | awk '/HTTP\\//{print \$2; exit}'" 2>/dev/null | tr -dc '0-9')"
+	code="$(compose_no_stdin exec -T "$svc" sh -c "wget -qO- -S '$url' 2>&1 | awk '/HTTP\\//{print \$2; exit}'" 2>/dev/null | tr -dc '0-9')"
 	if [ -z "$code" ]; then
 		# containers without wget: try curl
-		code="$(compose exec -T "$svc" sh -c "curl -s -o /dev/null -w '%{http_code}' '$url'" 2>/dev/null | tr -dc '0-9')"
+		code="$(compose_no_stdin exec -T "$svc" sh -c "curl -s -o /dev/null -w '%{http_code}' '$url'" 2>/dev/null | tr -dc '0-9')"
 	fi
 	if [ -z "$code" ]; then
 		# The Node service image deliberately contains neither wget nor curl.
-		code="$(compose exec -T "$svc" node -e \
+		code="$(compose_no_stdin exec -T "$svc" node -e \
 			"fetch(process.argv[1]).then(r=>console.log(r.status)).catch(()=>process.exit(1))" \
 			"$url" 2>/dev/null | tr -dc '0-9')"
 	fi
 	if [ -z "$code" ]; then
 		# The Python media image uses urllib in its Docker healthcheck.
-		code="$(compose exec -T "$svc" python -c \
+		code="$(compose_no_stdin exec -T "$svc" python -c \
 			"import sys,urllib.request; print(urllib.request.urlopen(sys.argv[1],timeout=5).status)" \
 			"$url" 2>/dev/null | tr -dc '0-9')"
 	fi
@@ -145,7 +145,7 @@ probe "letta-ui /healthz" letta-ui      "http://127.0.0.1:8081/healthz"
 
 # The agent service's own /health proves the Agent SDK can reach the App
 # Server over WebSocket, which a TCP probe cannot.
-APP_SERVER_STATE="$(compose exec -T eva-agent-service node -e "
+APP_SERVER_STATE="$(compose_no_stdin exec -T eva-agent-service node -e "
 fetch('http://127.0.0.1:'+(process.env.EVA_AGENT_PORT||8070)+'/health')
   .then(r=>r.json())
   .then(b=>{const a=b.checks&&b.checks.app_server||{};console.log(a.ok?('ok '+(a.models||0)+' models'):('FAIL '+(a.error||'unknown')))})

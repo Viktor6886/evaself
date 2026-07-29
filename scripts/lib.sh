@@ -73,6 +73,12 @@ compose() {
 	docker compose --env-file "$VERSIONS_FILE" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
 }
 
+# Diagnostic and maintenance commands must not consume the caller's stdin.
+# This keeps `make doctor && ...` and remote/CI pipelines deterministic.
+compose_no_stdin() {
+	compose "$@" </dev/null
+}
+
 # ---------------------------------------------------------------------
 # secrets & prompts
 # ---------------------------------------------------------------------
