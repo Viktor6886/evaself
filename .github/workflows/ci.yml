@@ -480,8 +480,10 @@ jobs:
 
       - name: Start the App Server and the agent service
         run: |
+          # media-service and searxng are needed by the auth and network
+          # isolation checks further down.
           docker compose --env-file versions.env --env-file .env \
-            up -d --build letta-app-server eva-agent-service
+            up -d --build letta-app-server eva-agent-service media-service searxng
 
       - name: Wait for the agent service to report healthy
         run: |
@@ -785,17 +787,26 @@ jobs:
       - name: SearXNG cannot reach PostgreSQL or the Caddy admin API
         run: |
           # Network segmentation, asserted rather than assumed: a container
-          # that fetches untrusted external content must not see the data tier.
+          # that fetches untrusted external content must not see the data
+          # tier. Probed with python (SearXNG is a python image) because
+          # /dev/tcp is a bash builtin and this image ships busybox sh —
+          # there the redirect always fails and the check would pass falsely.
           docker compose --env-file versions.env --env-file .env \
-            exec -T searxng sh -c '
-              if timeout 5 sh -c "echo > /dev/tcp/postgres/5432" 2>/dev/null; then
-                echo "::error::searxng can reach postgres"; exit 1
-              fi
-              if timeout 5 sh -c "echo > /dev/tcp/caddy/2019" 2>/dev/null; then
-                echo "::error::searxng can reach the caddy admin API"; exit 1
-              fi
-              echo "searxng is isolated from the data tier"
-            '
+            exec -T searxng python3 -c "
+          import socket, sys
+
+          blocked = []
+          for host, port in (('postgres', 5432), ('valkey', 6379), ('caddy', 2019)):
+              try:
+                  socket.create_connection((host, port), timeout=5).close()
+              except OSError:
+                  blocked.append(host)
+                  continue
+              print('::error::searxng can reach ' + host)
+              sys.exit(1)
+          print('searxng is isolated from: ' + ', '.join(blocked))
+          " | tee /tmp/isolation
+          grep -q 'isolated from: postgres, valkey, caddy' /tmp/isolation
 
       - name: Start an isolated OpenAI-compatible test provider
         run: |
