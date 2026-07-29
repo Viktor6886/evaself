@@ -337,7 +337,12 @@ services:
       EVA_ADMIN_BOOTSTRAP_PASSWORD: ${EVA_ADMIN_BOOTSTRAP_PASSWORD:-}
     command: ["node", "dist/admin/bootstrap-index.js"]
     volumes:
-      - ${EVA_SECRETS_MASTER_KEY_FILE:-/etc/evaself/secrets-master-key}:/run/secrets/eva-secrets-master-key:ro
+      - type: bind
+        source: ${EVA_SECRETS_MASTER_KEY_FILE:-/etc/evaself/secrets-master-key}
+        target: /run/secrets/eva-secrets-master-key
+        read_only: true
+        bind:
+          create_host_path: false
     networks: [evaself-network]
     depends_on:
       postgres:
@@ -361,7 +366,12 @@ services:
       EVA_ENV: ${EVA_ENV:-production}
     command: ["node", "dist/admin/index.js"]
     volumes:
-      - ${EVA_SECRETS_MASTER_KEY_FILE:-/etc/evaself/secrets-master-key}:/run/secrets/eva-secrets-master-key:ro
+      - type: bind
+        source: ${EVA_SECRETS_MASTER_KEY_FILE:-/etc/evaself/secrets-master-key}
+        target: /run/secrets/eva-secrets-master-key
+        read_only: true
+        bind:
+          create_host_path: false
     networks: [evaself-network]
     depends_on:
       admin-bootstrap:
