@@ -18,6 +18,7 @@ import type { ManagedAgentInput } from "./letta.js";
 import type { LlmManager, LlmProviderInput } from "./llm.js";
 import type { Logger } from "./logger.js";
 import type { LavaPayments } from "./payments.js";
+import { PublicRepository, registerPublicRoutes } from "./public/routes.js";
 import type { UserQueue } from "./queue.js";
 import type { SdkSettingsInput, SdkSettingsManager } from "./sdk-settings.js";
 import type { TelegramUpdate } from "./telegram.js";
@@ -93,6 +94,11 @@ export function buildServer(services: Services): FastifyInstance {
 
   app.setNotFoundHandler((_request, reply) => {
     reply.status(404).send(notFound("Маршрут не найден").toPayload());
+  });
+
+  registerPublicRoutes(app, {
+    config,
+    repository: new PublicRepository(db),
   });
 
   // ---------------------------------------------------------------

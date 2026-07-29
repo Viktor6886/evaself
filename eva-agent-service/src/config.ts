@@ -36,6 +36,7 @@ export interface Config {
 
   telegramBotToken: string;
   telegramWebhookSecret: string;
+  telegramWebAppMaxAgeSeconds: number;
   ownerTelegramId: number | null;
   telegramApiBaseUrl: string;
   mediaServiceUrl: string;
@@ -126,6 +127,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
     telegramBotToken: str("EVA_TELEGRAM_BOT_TOKEN"),
     telegramWebhookSecret: str("EVA_TELEGRAM_WEBHOOK_SECRET"),
+    telegramWebAppMaxAgeSeconds: int("EVA_TELEGRAM_WEBAPP_MAX_AGE_SECONDS", 3_600),
     ownerTelegramId: nullableInt("OWNER_TELEGRAM_ID"),
     telegramApiBaseUrl: str("EVA_TELEGRAM_API_BASE_URL", "https://api.telegram.org"),
     mediaServiceUrl: str("EVA_MEDIA_SERVICE_URL", "http://media-service:8090"),
