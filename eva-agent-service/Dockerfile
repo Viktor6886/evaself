@@ -34,22 +34,23 @@ ENV NODE_ENV=production \
     EVA_AGENT_PORT=8070
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends tini \
+ && apt-get install -y --no-install-recommends gosu tini \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/package.json ./package.json
+COPY docker-entrypoint.sh /usr/local/bin/evaself-entrypoint
 
 RUN mkdir -p /data/letta-config/providers /data/llm-control \
- && chown -R node:node /data/letta-config /data/llm-control
+ && chown -R node:node /data/letta-config /data/llm-control \
+ && chmod 0755 /usr/local/bin/evaself-entrypoint
 
-USER node
 EXPOSE 8070
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=5 \
     CMD node -e "fetch('http://127.0.0.1:'+(process.env.EVA_AGENT_PORT||8070)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-ENTRYPOINT ["/usr/bin/tini", "--"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/evaself-entrypoint"]
 CMD ["node", "dist/index.js"]
