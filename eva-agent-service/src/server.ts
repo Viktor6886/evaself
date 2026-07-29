@@ -11,7 +11,7 @@ import { timingSafeEqual } from "node:crypto";
 
 import type { Config } from "./config.js";
 import type { AdminAuditInput, Database } from "./db.js";
-import type { EvaWorkflow } from "./eva-workflow.js";
+import type { TelegramInbox } from "./delivery/inbox.js";
 import { EvaError, appServerUnavailable, badRequest, notFound, unauthorized } from "./errors.js";
 import type { LettaService } from "./letta.js";
 import type { ManagedAgentInput } from "./letta.js";
@@ -33,7 +33,7 @@ export interface Services {
   letta: LettaService;
   sdk: SdkSettingsManager;
   llm: LlmManager;
-  workflow: EvaWorkflow;
+  inbox: TelegramInbox;
   payments: LavaPayments;
   queue: UserQueue;
   redisPing: () => Promise<boolean>;
@@ -54,7 +54,7 @@ function telegramIdOf(request: FastifyRequest): number {
 }
 
 export function buildServer(services: Services): FastifyInstance {
-  const { config, logger, db, letta, sdk, llm, workflow, payments, queue } = services;
+  const { config, logger, db, letta, sdk, llm, inbox, payments, queue } = services;
 
   // Fastify's own logger is off: this service logs through logger.ts so
   // every line in the stack has the same JSON shape.
@@ -231,7 +231,7 @@ export function buildServer(services: Services): FastifyInstance {
     ) {
       throw unauthorized("Неверный секрет Telegram webhook");
     }
-    const result = await workflow.accept(request.body as TelegramUpdate);
+    const result = await inbox.enqueue(request.body as TelegramUpdate);
     return reply.status(200).send({ ok: true, ...result });
   });
 

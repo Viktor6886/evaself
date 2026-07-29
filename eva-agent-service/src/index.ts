@@ -13,6 +13,8 @@ import { AgentToolFactory } from "./agent-tools.js";
 import { BackgroundRuntime } from "./background.js";
 import { loadConfig, readPersona } from "./config.js";
 import { Database } from "./db.js";
+import { PostgresTelegramInbox, TelegramInboxWorker } from "./delivery/inbox.js";
+import { PostgresTelegramOutbox } from "./delivery/outbox.js";
 import { EvaWorkflow } from "./eva-workflow.js";
 import { LettaService } from "./letta.js";
 import { LlmManager } from "./llm.js";
@@ -46,6 +48,12 @@ async function main(): Promise<void> {
   const queue = new UserQueue(redis, { ttlSeconds: config.lockTtlSeconds });
   const letta = new LettaService(config, logger, persona);
   const telegram = new TelegramClient(config, logger);
+  const outbox = new PostgresTelegramOutbox(db, telegram, logger, {
+    pollMs: config.telegramOutboxPollMs,
+    leaseSeconds: config.telegramOutboxLeaseSeconds,
+    maxAttempts: config.telegramOutboxMaxAttempts,
+  });
+  telegram.setOutbox(outbox);
   const sdk = new SdkSettingsManager(config, db, letta);
   try {
     await sdk.initialize();
@@ -68,6 +76,34 @@ async function main(): Promise<void> {
   const toolFactory = new AgentToolFactory(config, db, telegram, logger);
   letta.setToolFactory((conversationId) => toolFactory.forConversation(conversationId));
   const workflow = new EvaWorkflow(config, db, letta, llm, queue, telegram, logger);
+  const inbox = new PostgresTelegramInbox(db);
+  const inboxWorker = new TelegramInboxWorker(
+    inbox,
+    async (update) => await workflow.processQueued(update),
+    logger,
+    {
+      pollMs: config.telegramInboxPollMs,
+      leaseSeconds: config.telegramInboxLeaseSeconds,
+      maxAttempts: config.telegramInboxMaxAttempts,
+      onDead: async (record, error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        await telegram.withDeliveryContext(`telegram-dead:${record.updateId}`, async () => {
+          if (record.chatId) {
+            await telegram.sendMessage(
+              record.chatId,
+              "Не получилось обработать сообщение после нескольких попыток. Ошибка сохранена; попробуйте отправить сообщение ещё раз.",
+            );
+          }
+          if (config.ownerTelegramId && config.ownerTelegramId !== record.chatId) {
+            await telegram.sendMessage(
+              config.ownerTelegramId,
+              `Ошибка Евы: update ${record.updateId}, user ${record.telegramUserId ?? "?"}: ${message.slice(0, 1200)}`,
+            );
+          }
+        });
+      },
+    },
+  );
   const payments = new LavaPayments(config, db, telegram, logger);
   const background = new BackgroundRuntime(config, db, letta, queue, telegram, logger);
 
@@ -78,13 +114,15 @@ async function main(): Promise<void> {
     letta,
     sdk,
     llm,
-    workflow,
+    inbox,
     payments,
     queue,
     redisPing: async () => (await redis.ping()) === "PONG",
   });
 
   await app.listen({ port: config.port, host: config.host });
+  outbox.start();
+  inboxWorker.start();
   background.start();
   logger.info("eva-agent-service принимает запросы", {
     version: VERSION,
@@ -103,6 +141,8 @@ async function main(): Promise<void> {
     logger.info("Остановка сервиса", { signal });
     try {
       background.stop();
+      inboxWorker.stop();
+      outbox.stop();
       letta.shutdown();
       await app.close();
       await db.close();

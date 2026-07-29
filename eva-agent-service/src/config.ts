@@ -37,6 +37,12 @@ export interface Config {
   telegramBotToken: string;
   telegramWebhookSecret: string;
   telegramWebAppMaxAgeSeconds: number;
+  telegramInboxPollMs: number;
+  telegramInboxLeaseSeconds: number;
+  telegramInboxMaxAttempts: number;
+  telegramOutboxPollMs: number;
+  telegramOutboxLeaseSeconds: number;
+  telegramOutboxMaxAttempts: number;
   ownerTelegramId: number | null;
   telegramApiBaseUrl: string;
   mediaServiceUrl: string;
@@ -128,6 +134,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     telegramBotToken: str("EVA_TELEGRAM_BOT_TOKEN"),
     telegramWebhookSecret: str("EVA_TELEGRAM_WEBHOOK_SECRET"),
     telegramWebAppMaxAgeSeconds: int("EVA_TELEGRAM_WEBAPP_MAX_AGE_SECONDS", 3_600),
+    telegramInboxPollMs: int("EVA_TELEGRAM_INBOX_POLL_MS", 500),
+    telegramInboxLeaseSeconds: int("EVA_TELEGRAM_INBOX_LEASE_SECONDS", 300),
+    telegramInboxMaxAttempts: int("EVA_TELEGRAM_INBOX_MAX_ATTEMPTS", 5),
+    telegramOutboxPollMs: int("EVA_TELEGRAM_OUTBOX_POLL_MS", 500),
+    telegramOutboxLeaseSeconds: int("EVA_TELEGRAM_OUTBOX_LEASE_SECONDS", 120),
+    telegramOutboxMaxAttempts: int("EVA_TELEGRAM_OUTBOX_MAX_ATTEMPTS", 8),
     ownerTelegramId: nullableInt("OWNER_TELEGRAM_ID"),
     telegramApiBaseUrl: str("EVA_TELEGRAM_API_BASE_URL", "https://api.telegram.org"),
     mediaServiceUrl: str("EVA_MEDIA_SERVICE_URL", "http://media-service:8090"),

@@ -6,7 +6,10 @@
 Telegram
   │ webhook
   ▼
-eva-agent-service (Telegram runtime + фоновые задачи)
+PostgreSQL inbox → eva-agent-service worker
+  │                  │ Telegram outbox → delivery worker
+  │                  ▼
+  │                Telegram Bot API
   │
   │ @letta-ai/letta-agent-sdk
   ▼
@@ -15,6 +18,13 @@ Letta App Server
   ▼
 OpenAI-compatible LLM
 ```
+
+Webhook сохраняет исходный update в `telegram_updates` и сразу отвечает
+Telegram. Worker забирает записи через `FOR UPDATE SKIP LOCKED`; после
+временной ошибки он использует backoff, а после исчерпания попыток переводит
+запись в `dead`. Ответы, уведомления, платежные сообщения и голос кладутся в
+`telegram_outbox` до обращения к Bot API. Повтор доставки читает готовый
+payload из outbox и не запускает ход LLM повторно.
 
 Архитектурная граница жёсткая: только `eva-agent-service` знает URL и
 capability token App Server. Telegram, WebApp и административная консоль

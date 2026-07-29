@@ -1,6 +1,8 @@
 import { timingSafeEqual } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 import type { Config } from "./config.js";
+import type { OutboxDelivery, OutboxTransport } from "./delivery/outbox.js";
 import type { Logger } from "./logger.js";
 
 export interface TelegramUser {
@@ -46,10 +48,12 @@ interface TelegramResponse<T> {
   description?: string;
 }
 
-export class TelegramClient {
+export class TelegramClient implements OutboxTransport {
   private readonly token: string;
   private readonly baseUrl: string;
   private readonly logger: Logger;
+  private outbox: OutboxDelivery | null = null;
+  private readonly deliveryContext = new AsyncLocalStorage<{ prefix: string; sequence: number }>();
 
   constructor(config: Config, logger: Logger) {
     this.token = config.telegramBotToken;
@@ -61,6 +65,14 @@ export class TelegramClient {
     return Boolean(this.token);
   }
 
+  setOutbox(outbox: OutboxDelivery): void {
+    this.outbox = outbox;
+  }
+
+  async withDeliveryContext<T>(prefix: string, work: () => Promise<T>): Promise<T> {
+    return await this.deliveryContext.run({ prefix, sequence: 0 }, work);
+  }
+
   async sendMessage(
     chatId: number,
     text: string,
@@ -69,7 +81,7 @@ export class TelegramClient {
     const results: unknown[] = [];
     const chunks = splitTelegramText(text);
     for (const chunk of chunks) {
-      results.push(await this.call("sendMessage", {
+      results.push(await this.dispatch("sendMessage", chatId, {
         chat_id: chatId,
         text: chunk,
         ...options,
@@ -123,6 +135,38 @@ export class TelegramClient {
   }
 
   async sendVoice(chatId: number, audio: Uint8Array, filename = "eva.ogg"): Promise<void> {
+    if (this.outbox) {
+      await this.dispatch("sendVoice", chatId, {
+        chat_id: chatId,
+        audio_base64: Buffer.from(audio).toString("base64"),
+        filename,
+      });
+      return;
+    }
+    await this.sendVoiceDirect(chatId, audio, filename);
+  }
+
+  async deliver(method: string, payload: Record<string, unknown>): Promise<unknown> {
+    if (method === "sendVoice") {
+      const encoded = typeof payload.audio_base64 === "string" ? payload.audio_base64 : "";
+      if (!encoded) throw new Error("Telegram outbox: отсутствуют данные голосового сообщения");
+      const chatId = Number(payload.chat_id);
+      if (!Number.isSafeInteger(chatId)) throw new Error("Telegram outbox: неверный chat_id");
+      await this.sendVoiceDirect(
+        chatId,
+        new Uint8Array(Buffer.from(encoded, "base64")),
+        typeof payload.filename === "string" ? payload.filename : "eva.ogg",
+      );
+      return {};
+    }
+    return await this.call(method, payload);
+  }
+
+  private async sendVoiceDirect(
+    chatId: number,
+    audio: Uint8Array,
+    filename: string,
+  ): Promise<void> {
     this.assertConfigured();
     const form = new FormData();
     form.set("chat_id", String(chatId));
@@ -174,6 +218,19 @@ export class TelegramClient {
       body: JSON.stringify(body),
     });
     return await this.parseResponse<T>(response, method);
+  }
+
+  private async dispatch(
+    method: string,
+    chatId: number,
+    payload: Record<string, unknown>,
+  ): Promise<unknown> {
+    if (!this.outbox) return await this.call(method, payload);
+    const context = this.deliveryContext.getStore();
+    const idempotencyKey = context
+      ? `${context.prefix}:${String(context.sequence++).padStart(3, "0")}:${method}`
+      : undefined;
+    return await this.outbox.send({ method, chatId, payload, idempotencyKey });
   }
 
   private assertConfigured(): void {

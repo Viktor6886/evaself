@@ -132,13 +132,19 @@ compose pull --ignore-buildable >/dev/null 2>&1 || warn "some images could not b
 compose build --pull >/dev/null || die "image build failed — nothing was restarted"
 ok "images ready"
 
+# Совместимые миграции применяются до запуска нового кода, если PostgreSQL
+# уже работает. Повтор после recreate покрывает обновление остановленного стека.
+if service_running postgres; then
+	"$SCRIPT_DIR/db-migrate.sh" || die "миграции завершились ошибкой — сервисы не перезапущены"
+fi
+
 # =====================================================================
 step "Restarting services"
 # =====================================================================
 compose up -d --remove-orphans >/dev/null
 ok "containers recreated"
 
-"$SCRIPT_DIR/db-migrate.sh" || warn "migrations reported a problem"
+"$SCRIPT_DIR/db-migrate.sh" || die "миграции завершились ошибкой после перезапуска сервисов"
 
 # =====================================================================
 step "Verifying"

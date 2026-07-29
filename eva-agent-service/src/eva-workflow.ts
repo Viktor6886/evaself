@@ -1,5 +1,6 @@
 import type { Config } from "./config.js";
 import type { AgentLinkRow, Database, UserRow } from "./db.js";
+import type { InboxResult } from "./delivery/inbox.js";
 import type { LettaService } from "./letta.js";
 import type { LlmManager } from "./llm.js";
 import type { Logger } from "./logger.js";
@@ -31,58 +32,36 @@ export class EvaWorkflow {
     private readonly logger: Logger,
   ) {}
 
-  /**
-   * Claim before acknowledging Telegram. Actual processing is detached so a
-   * long agent turn cannot make Telegram redeliver an otherwise valid update.
-   */
-  async accept(update: TelegramUpdate): Promise<{ accepted: boolean; duplicate?: boolean }> {
-    const normalized = normalizeUpdate(update);
-    if (!normalized) return { accepted: false };
-    const claimed = await this.db.claimTelegramUpdate({
-      updateId: normalized.updateId,
-      telegramUserId: normalized.telegramId,
-      chatId: normalized.chatId,
-      messageId: normalized.messageId,
-      messageKind: normalized.kind,
-      billable: normalized.command === null && normalized.kind !== "unsupported",
-    });
-    if (!claimed.claimed) return { accepted: true, duplicate: true };
-    void this.process(normalized);
-    return { accepted: true };
-  }
-
   /** Awaitable entry point used by tests and controlled reprocessing. */
   async handle(update: TelegramUpdate): Promise<void> {
-    const normalized = normalizeUpdate(update);
-    if (!normalized) return;
-    const claimed = await this.db.claimTelegramUpdate({
-      updateId: normalized.updateId,
-      telegramUserId: normalized.telegramId,
-      chatId: normalized.chatId,
-      messageId: normalized.messageId,
-      messageKind: normalized.kind,
-      billable: normalized.command === null && normalized.kind !== "unsupported",
-    });
-    if (claimed.claimed) await this.process(normalized);
+    await this.processQueued(update);
   }
 
-  private async process(update: NormalizedUpdate): Promise<void> {
+  /** The durable inbox is the only production caller of this method. */
+  async processQueued(update: TelegramUpdate): Promise<InboxResult> {
+    const normalized = normalizeUpdate(update);
+    if (!normalized) return { status: "ignored" };
+    return await this.telegram.withDeliveryContext(
+      `telegram-update:${normalized.updateId}`,
+      async () => await this.process(normalized),
+    );
+  }
+
+  private async process(update: NormalizedUpdate): Promise<InboxResult> {
     const typing: { stop: (() => void) | null } = { stop: null };
     try {
-      await this.queue.run(update.telegramId, async () => {
+      return await this.queue.run(update.telegramId, async () => {
         const { user, link } = await this.ensureUserAndAgent(update);
         await this.db.attachTelegramUpdateToUser(update.updateId, user.id);
 
         if (user.is_blocked || user.state === "blocked") {
           await this.telegram.sendMessage(update.chatId, "Доступ к Еве временно ограничен.");
-          await this.db.finishTelegramUpdate(update.updateId, { status: "ignored" });
-          return;
+          return { status: "ignored" };
         }
 
         if (update.command) {
           await this.handleCommand(update, user);
-          await this.db.finishTelegramUpdate(update.updateId, { status: "completed" });
-          return;
+          return { status: "completed" };
         }
 
         if (update.kind === "unsupported") {
@@ -90,8 +69,7 @@ export class EvaWorkflow {
             update.chatId,
             "Сейчас я понимаю текст, голосовые сообщения, изображения и небольшие документы.",
           );
-          await this.db.finishTelegramUpdate(update.updateId, { status: "ignored" });
-          return;
+          return { status: "ignored" };
         }
 
         const quota = await this.db.getQuotaStatus(update.telegramId);
@@ -107,8 +85,7 @@ export class EvaWorkflow {
             update.chatId,
             "Лимит сообщений на текущий период закончился. Проверить его можно командой /balance.",
           );
-          await this.db.finishTelegramUpdate(update.updateId, { status: "ignored" });
-          return;
+          return { status: "ignored" };
         }
         if (update.kind === "voice") {
           const voiceQuota = quota.find((item) => item.metric === "voice_minutes") as
@@ -123,8 +100,7 @@ export class EvaWorkflow {
               update.chatId,
               "Лимит распознавания голоса закончился. Можно продолжить текстом.",
             );
-            await this.db.finishTelegramUpdate(update.updateId, { status: "ignored" });
-            return;
+            return { status: "ignored" };
           }
         }
 
@@ -160,33 +136,8 @@ export class EvaWorkflow {
         }
 
         await this.db.incrementUsage(update.telegramId, "messages");
-        await this.db.finishTelegramUpdate(update.updateId, {
-          status: "completed",
-          usageCharged: true,
-        });
+        return { status: "completed", usageCharged: true };
       });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logger.error("Ошибка Telegram workflow", {
-        updateId: update.updateId,
-        telegramId: update.telegramId,
-        message,
-      });
-      await this.db.finishTelegramUpdate(update.updateId, {
-        status: "failed",
-        errorCode: "workflow_failed",
-        errorMessage: message,
-      }).catch(() => undefined);
-      await this.telegram.sendMessage(
-        update.chatId,
-        "Не получилось обработать сообщение. Я уже сохранила ошибку; попробуй ещё раз чуть позже.",
-      ).catch(() => undefined);
-      if (this.config.ownerTelegramId && this.config.ownerTelegramId !== update.chatId) {
-        await this.telegram.sendMessage(
-          this.config.ownerTelegramId,
-          `Ошибка Евы: update ${update.updateId}, user ${update.telegramId}: ${message.slice(0, 1200)}`,
-        ).catch(() => undefined);
-      }
     } finally {
       typing.stop?.();
     }

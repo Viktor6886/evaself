@@ -115,11 +115,6 @@ export interface AdminAuditInput {
   details?: Record<string, unknown>;
 }
 
-export interface ClaimedTelegramUpdate {
-  claimed: boolean;
-  previousStatus: string | null;
-}
-
 export class Database {
   private pool: pg.Pool | null = null;
   private readonly connectionString: string;
@@ -199,88 +194,10 @@ export class Database {
     );
   }
 
-  async claimTelegramUpdate(input: {
-    updateId: number;
-    telegramUserId?: number;
-    chatId?: number;
-    messageId?: number;
-    messageKind: string;
-    billable: boolean;
-  }): Promise<ClaimedTelegramUpdate> {
-    return await this.transaction(async (client) => {
-      const existing = await client.query<{ status: string; updated_at: Date }>(
-        "SELECT status, updated_at FROM telegram_updates WHERE update_id = $1 FOR UPDATE",
-        [input.updateId],
-      );
-      const previous = existing.rows[0];
-      if (
-        previous &&
-        (previous.status === "completed" ||
-          previous.status === "ignored" ||
-          (previous.status === "processing" &&
-            Date.now() - previous.updated_at.getTime() < 10 * 60_000))
-      ) {
-        return { claimed: false, previousStatus: previous.status };
-      }
-      await client.query(
-        `INSERT INTO telegram_updates
-           (update_id, telegram_user_id, chat_id, message_id, message_kind,
-            status, billable, error_code, error_message)
-         VALUES ($1, $2, $3, $4, $5, 'processing', $6, NULL, NULL)
-         ON CONFLICT (update_id) DO UPDATE SET
-           status = 'processing',
-           telegram_user_id = COALESCE(EXCLUDED.telegram_user_id, telegram_updates.telegram_user_id),
-           chat_id = COALESCE(EXCLUDED.chat_id, telegram_updates.chat_id),
-           message_id = COALESCE(EXCLUDED.message_id, telegram_updates.message_id),
-           message_kind = EXCLUDED.message_kind,
-           billable = EXCLUDED.billable,
-           error_code = NULL,
-           error_message = NULL,
-           completed_at = NULL`,
-        [
-          input.updateId,
-          input.telegramUserId ?? null,
-          input.chatId ?? null,
-          input.messageId ?? null,
-          input.messageKind,
-          input.billable,
-        ],
-      );
-      return { claimed: true, previousStatus: previous?.status ?? null };
-    });
-  }
-
   async attachTelegramUpdateToUser(updateId: number, userId: number): Promise<void> {
     await this.require().query(
       "UPDATE telegram_updates SET user_id = $2 WHERE update_id = $1",
       [updateId, userId],
-    );
-  }
-
-  async finishTelegramUpdate(
-    updateId: number,
-    input: {
-      status: "completed" | "failed" | "ignored";
-      usageCharged?: boolean;
-      errorCode?: string;
-      errorMessage?: string;
-    },
-  ): Promise<void> {
-    await this.require().query(
-      `UPDATE telegram_updates SET
-         status = $2,
-         usage_charged = usage_charged OR $3,
-         error_code = $4,
-         error_message = $5,
-         completed_at = CASE WHEN $2 IN ('completed', 'ignored') THEN now() ELSE NULL END
-       WHERE update_id = $1`,
-      [
-        updateId,
-        input.status,
-        input.usageCharged ?? false,
-        input.errorCode ?? null,
-        input.errorMessage?.slice(0, 2000) ?? null,
-      ],
     );
   }
 

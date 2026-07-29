@@ -207,6 +207,7 @@ jobs:
               'quotas','usage_counters','onboarding_fields','test_results','tasks',
               'referrals','partner_analysis_links','notifications','crisis_events',
               'schema_migrations','llm_providers','sdk_settings','telegram_updates',
+              'telegram_outbox',
               'user_preferences','eva_notes','budget_entries','heartbeat_state',
               'payment_intents','admin_audit_log'
             ]) AS t
@@ -313,6 +314,7 @@ jobs:
             'DOMAIN_NOCODB': 'admin.example.test', 'DOMAIN_LETTA': 'letta.example.test',
             'DOMAIN_STATUS': 'status.example.test', 'ACME_EMAIL': 'ci@example.test',
             'EVA_AGENT_PORT': '8070', 'LETTA_APP_SERVER_BACKEND': 'local',
+            'EVA_TELEGRAM_API_BASE_URL': 'http://127.0.0.1:1',
             'EVA_LLM_PROVIDER_NAME': 'CI-bootstrap', 'EVA_LLM_MODEL': '',
             'EVA_LLM_CONTEXT_WINDOW': '32768',
             'COMPOSE_PROFILES': '',
@@ -397,6 +399,54 @@ jobs:
                 console.log('webhook auth ok');
               })().catch(e=>{console.error(e);process.exit(1)});
             "
+
+      - name: Telegram inbox and outbox are durable
+        run: |
+          set -e
+          docker compose --env-file versions.env --env-file .env \
+            exec -T eva-agent-service node -e "
+              fetch('http://127.0.0.1:8070/telegram/webhook',{
+                method:'POST',
+                headers:{
+                  'Content-Type':'application/json',
+                  'X-Telegram-Bot-Api-Secret-Token':process.env.EVA_TELEGRAM_WEBHOOK_SECRET,
+                },
+                body:JSON.stringify({
+                  update_id:2,
+                  message:{message_id:1,chat:{id:1},from:{id:1,is_bot:true}},
+                }),
+              }).then(r=>{if(!r.ok)process.exit(1)});
+            "
+          for i in $(seq 1 20); do
+            INBOX="$(docker compose --env-file versions.env --env-file .env \
+              exec -T postgres psql -U eva -d eva -tAq -c \
+              "SELECT status || '|' || (payload IS NOT NULL)::text || '|' || count(*) OVER ()
+                 FROM telegram_updates WHERE update_id = 2" | tr -d '\r')"
+            [ "$INBOX" = "ignored|true|1" ] && break
+            [ "$i" = "20" ] && { echo "::error::durable inbox state: $INBOX"; exit 1; }
+            sleep 1
+          done
+
+          docker compose --env-file versions.env --env-file .env \
+            exec -T postgres psql -U eva -d eva -v ON_ERROR_STOP=1 -q -c \
+            "INSERT INTO telegram_outbox
+               (idempotency_key, chat_id, telegram_method, payload)
+             VALUES
+               ('ci-outbox-retry', 1, 'sendMessage',
+                '{\"chat_id\":1,\"text\":\"ci\"}'::jsonb)
+             ON CONFLICT (idempotency_key) DO NOTHING"
+          for i in $(seq 1 20); do
+            OUTBOX="$(docker compose --env-file versions.env --env-file .env \
+              exec -T postgres psql -U eva -d eva -tAq -c \
+              "SELECT status || '|' || attempts
+                 FROM telegram_outbox WHERE idempotency_key = 'ci-outbox-retry'" \
+              | tr -d '\r')"
+            case "$OUTBOX" in
+              retry\|*|dead\|*) break ;;
+            esac
+            [ "$i" = "20" ] && { echo "::error::durable outbox state: $OUTBOX"; exit 1; }
+            sleep 1
+          done
 
       - name: Start an isolated OpenAI-compatible test provider
         run: |
