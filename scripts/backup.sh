@@ -98,12 +98,16 @@ if service_running eva-agent-service; then
 const key = process.env.EVA_AGENT_API_KEY;
 const base = 'http://127.0.0.1:' + (process.env.EVA_AGENT_PORT || 8070);
 const get = (p) => fetch(base + p, { headers: { 'X-API-Key': key } }).then((r) => r.json());
-Promise.all([get('/v1/agents'), get('/v1/agents/live').catch(() => ({ agents: [] }))])
+Promise.all([get('/v1/agents'), get('/v1/sdk/agents').catch(() => ({ agents: [] }))])
   .then(([db, live]) => console.log(JSON.stringify({ database: db.agents, app_server: live.agents }, null, 2)))
   .catch((e) => { console.error(e.message); process.exit(1); });
 " > "$WORK/letta/inventory.json" 2>/dev/null; then
-		COUNT="$(python3 -c "import json;d=json.load(open('$WORK/letta/inventory.json'));print(len(d.get('database') or []))" 2>/dev/null || echo 0)"
-		ok "инвентарь сохранён (agents: ${COUNT})"
+		read -r DB_COUNT LIVE_COUNT < <(
+			python3 -c \
+				"import json;d=json.load(open('$WORK/letta/inventory.json'));print(len(d.get('database') or []),len(d.get('app_server') or []))" \
+				2>/dev/null || echo "0 0"
+		)
+		ok "инвентарь сохранён (PostgreSQL: ${DB_COUNT}, App Server: ${LIVE_COUNT})"
 	else
 		rm -f "$WORK/letta/inventory.json"
 		warn "не удалось получить инвентарь; volume App Server всё равно сохранён"

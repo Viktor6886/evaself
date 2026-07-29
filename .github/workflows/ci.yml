@@ -102,6 +102,19 @@ jobs:
           caddy validate --config webapp/Caddyfile
           caddy validate --config letta-ui/Caddyfile
 
+      - name: Validation works without Caddy installed on the host
+        run: |
+          sudo mv /usr/local/bin/caddy /usr/local/bin/caddy.disabled
+          trap 'sudo mv /usr/local/bin/caddy.disabled /usr/local/bin/caddy' EXIT
+          ./scripts/validate.sh
+
+      - name: Installer does not print generated passwords
+        run: |
+          if grep -Eq 'NocoDB.*NC_ADMIN_PASSWORD|Letta UI.*LETTA_UI_PASSWORD' scripts/install.sh; then
+            echo "::error::installer summary exposes an administrative password"
+            exit 1
+          fi
+
       - name: Administrative WebUI JavaScript is valid
         run: node --check letta-ui/public/ui.js
 

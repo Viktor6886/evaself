@@ -229,7 +229,7 @@ EVA_TELEGRAM_WEBHOOK_SECRET="$(keep_or_generate EVA_TELEGRAM_WEBHOOK_SECRET)"
 # его потеря сделает сохранённые ключи нечитаемыми.
 LLM_CONFIG_ENCRYPTION_KEY="$(keep_or_generate LLM_CONFIG_ENCRYPTION_KEY)"
 
-# Admin passwords are shown to the operator at the end of the install.
+# Admin passwords are stored only in the protected .env file.
 NC_ADMIN_PASSWORD="$(keep_or_generate NC_ADMIN_PASSWORD gen_password)"
 LETTA_UI_PASSWORD="$(keep_or_generate LETTA_UI_PASSWORD gen_password)"
 LAVA_WEBHOOK_PASSWORD="$(keep_or_generate LAVA_WEBHOOK_PASSWORD)"

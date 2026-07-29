@@ -254,9 +254,10 @@ cat <<SUMMARY
     Letta       https://${DOMAIN_LETTA}
     Статус      https://${DOMAIN_STATUS}
 
-  ${C_BOLD}Административные данные${C_RESET}  (также в .env, mode 600)
-    NocoDB      ${NC_ADMIN_EMAIL} / ${NC_ADMIN_PASSWORD}
-    Letta UI    ${LETTA_UI_USER} / ${LETTA_UI_PASSWORD}
+  ${C_BOLD}Административный доступ${C_RESET}
+    NocoDB      ${NC_ADMIN_EMAIL}
+    Letta UI    ${LETTA_UI_USER}
+    Пароли не выводятся в терминал и журнал; они сохранены только в .env (mode 600).
   ${C_BOLD}Следующие шаги${C_RESET}
     1. Проверьте Telegram webhook: scripts/telegram-webhook.sh status
     2. Подключите NocoDB к базе eva: scripts/nocodb-connect.sh
