@@ -156,6 +156,8 @@ fi
 
 load_env
 [ -n "${DOMAIN:-}" ] || die "в .env нет DOMAIN — выполните make configure"
+"$SCRIPT_DIR/ensure-admin-master-key.sh"
+load_env
 
 # =====================================================================
 # 7. DNS sanity check (warning only — certificates need it, install does not)
@@ -208,7 +210,7 @@ step "Ожидание основных сервисов"
 for svc in postgres valkey; do
 	if wait_for_health "$svc" 180; then ok "$svc работает"; else die "$svc не прошёл healthcheck"; fi
 done
-for svc in letta-app-server eva-agent-service nocodb; do
+for svc in letta-app-server eva-agent-service admin-api admin-ui nocodb; do
 	if wait_for_health "$svc" 300; then ok "$svc запущен"; else warn "$svc ещё запускается — проверьте make logs s=$svc"; fi
 done
 
@@ -216,6 +218,7 @@ done
 # 9. database migrations
 # =====================================================================
 "$SCRIPT_DIR/db-migrate.sh"
+"$SCRIPT_DIR/admin-finalize-env.sh"
 "$SCRIPT_DIR/nocodb-connect.sh"
 "$SCRIPT_DIR/configure-llm.sh" --from-env
 
@@ -264,9 +267,10 @@ cat <<SUMMARY
     Статус      https://${DOMAIN_STATUS}
 
   ${C_BOLD}Административный доступ${C_RESET}
+    Evaself    ${EVA_ADMIN_USERNAME:-admin}
     NocoDB      ${NC_ADMIN_EMAIL}
     Letta UI    ${LETTA_UI_USER}
-    Пароли не выводятся в терминал и журнал; они сохранены только в .env (mode 600).
+    Пароли не выводятся в терминал и журнал.
   ${C_BOLD}Следующие шаги${C_RESET}
     1. Проверьте Telegram webhook: scripts/telegram-webhook.sh status
     2. Откройте NocoDB — все таблицы Eva уже подключены автоматически.

@@ -107,6 +107,7 @@ jobs:
           caddy validate --config Caddyfile
           caddy validate --config webapp/Caddyfile
           caddy validate --config letta-ui/Caddyfile
+          caddy validate --config admin-ui/Caddyfile
 
       - name: Validation works without Caddy installed on the host
         run: |
@@ -124,7 +125,9 @@ jobs:
           fi
 
       - name: Administrative WebUI JavaScript is valid
-        run: node --check letta-ui/public/ui.js
+        run: |
+          node --check letta-ui/public/ui.js
+          node --check admin-ui/public/ui.js
 
       - name: No secrets in tracked files
         run: |
@@ -241,7 +244,9 @@ jobs:
               'payment_intents','admin_audit_log','user_north','goals',
               'goal_results','goal_dependencies','work_blocks','goal_reviews',
               'goal_recommendations','user_strategies','learning_attempts',
-              'memory_nodes','memory_edges','conversation_highlights'
+              'memory_nodes','memory_edges','conversation_highlights',
+              'admin_users','admin_sessions','sudo_grants','system_settings',
+              'config_versions','secret_records','audit_log'
             ]) AS t
             WHERE to_regclass('public.' || t) IS NULL;
             IF missing IS NOT NULL THEN RAISE EXCEPTION 'missing tables: %', missing; END IF;
@@ -314,6 +319,8 @@ jobs:
             --build-arg CADDY_IMAGE="$CADDY_IMAGE" --build-arg CADDY_VERSION="$CADDY_VERSION" webapp
           docker build -t evaself/letta-ui:ci \
             --build-arg CADDY_IMAGE="$CADDY_IMAGE" --build-arg CADDY_VERSION="$CADDY_VERSION" letta-ui
+          docker build -t evaself/admin-ui:ci \
+            --build-arg CADDY_IMAGE="$CADDY_IMAGE" --build-arg CADDY_VERSION="$CADDY_VERSION" admin-ui
           docker build -t evaself/backup-service:ci \
             --build-arg POSTGRES_IMAGE="$POSTGRES_IMAGE" --build-arg POSTGRES_VERSION="$POSTGRES_VERSION" backup-service
 
@@ -351,6 +358,9 @@ jobs:
             'EVA_LLM_CONTEXT_WINDOW': '32768',
             'NC_ADMIN_EMAIL': 'admin@example.test',
             'NC_ADMIN_PASSWORD': 'Ci-NocoDB-2026-Strong-Password',
+            'EVA_ADMIN_USERNAME': 'admin',
+            'EVA_ADMIN_BOOTSTRAP_PASSWORD': 'Ci-Admin-Phase1-Strong-Password!',
+            'EVA_SECRETS_MASTER_KEY_FILE': '/tmp/evaself-ci-master-key',
             'COMPOSE_PROFILES': '',
           }
           for key, value in values.items():
@@ -364,6 +374,8 @@ jobs:
             text = re.sub(rf'^{key}=.*$', f'{key}={secrets.token_hex(24)}', text, flags=re.M)
           path.write_text(text)
           PY
+          openssl rand -base64 32 > /tmp/evaself-ci-master-key
+          chmod 600 /tmp/evaself-ci-master-key
           chmod 600 .env
 
       - name: Start the data layer and apply migrations
@@ -441,6 +453,155 @@ jobs:
           echo "::error::eva-agent-service never became healthy"
           docker compose --env-file versions.env --env-file .env logs --tail=80 eva-agent-service letta-app-server
           exit 1
+
+      - name: Admin phase 1 — auth, RBAC, sudo, audit and no secret leaks
+        run: |
+          docker compose --env-file versions.env --env-file .env \
+            up -d --build admin-api admin-ui
+          for i in $(seq 1 60); do
+            STATUS="$(docker inspect -f \
+              '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' \
+              evaself-admin-api 2>/dev/null || echo down)"
+            echo "admin-api, attempt $i: $STATUS"
+            [ "$STATUS" = "healthy" ] && break
+            [ "$i" = "60" ] && {
+              docker compose --env-file versions.env --env-file .env \
+                logs --tail=100 admin-bootstrap admin-api
+              exit 1
+            }
+            sleep 2
+          done
+          docker compose --env-file versions.env --env-file .env \
+            exec -T admin-api node --input-type=module - <<'NODE'
+          import pg from 'pg';
+          import {hash, argon2id} from 'argon2';
+          const base = 'http://127.0.0.1:8071/api/admin/v1';
+          const password = 'Ci-Admin-Phase1-Strong-Password!';
+          async function login(username = 'admin') {
+            const response = await fetch(base + '/auth/login', {
+              method: 'POST',
+              headers: {'content-type':'application/json'},
+              body: JSON.stringify({username, password}),
+            });
+            if (!response.ok) throw new Error('login failed: ' + response.status);
+            const cookies = response.headers.getSetCookie();
+            const cookie = cookies.map(v => v.split(';')[0]).join('; ');
+            const csrf = /eva_admin_csrf=([^;]+)/.exec(cookie)?.[1];
+            return {cookie, csrf: decodeURIComponent(csrf), user: (await response.json()).user};
+          }
+          async function call(session, path, options = {}) {
+            const headers = {cookie: session.cookie, ...(options.headers || {})};
+            if (options.body) headers['content-type'] = 'application/json';
+            if (!['GET','HEAD'].includes(options.method || 'GET')) {
+              headers['x-csrf-token'] = session.csrf;
+            }
+            return await fetch(base + path, {...options, headers});
+          }
+          const session = await login();
+          let csrfFailure = await fetch(base + '/sudo', {
+            method:'POST',
+            headers:{cookie:session.cookie, 'content-type':'application/json'},
+            body:JSON.stringify({password, scope:'secrets:write'}),
+          });
+          if (csrfFailure.status !== 403) throw new Error('CSRF bypass was allowed');
+          let response = await call(session, '/settings');
+          if (!response.ok || !response.headers.get('etag')) throw new Error('settings GET failed');
+          const etag = response.headers.get('etag');
+          response = await call(session, '/settings', {
+            method:'PUT', headers:{'if-match':etag},
+            body:JSON.stringify({settings:{'runtime.telegram_typing_interval_ms':4500}}),
+          });
+          if (!response.ok) throw new Error('owner settings PUT failed: ' + response.status);
+          response = await call(session, '/secrets/sec_ci_acceptance_secret', {
+            method:'PUT',
+            body:JSON.stringify({value:'known-ci-secret-must-never-leak', used_by:['admin-api']}),
+          });
+          if (response.status !== 403) throw new Error('secret write without sudo was allowed');
+          response = await call(session, '/sudo', {
+            method:'POST', body:JSON.stringify({password, scope:'secrets:write'}),
+          });
+          if (response.status !== 201) throw new Error('sudo grant failed');
+          response = await call(session, '/secrets/sec_ci_acceptance_secret', {
+            method:'PUT',
+            body:JSON.stringify({value:'known-ci-secret-must-never-leak', used_by:['admin-api']}),
+          });
+          if (!response.ok) throw new Error('secret write with sudo failed');
+          const metadata = await response.text();
+          if (metadata.includes('known-ci-secret-must-never-leak')) throw new Error('secret leaked in PUT');
+          const pool = new pg.Pool({connectionString:process.env.DATABASE_URL});
+          await pool.query("UPDATE sudo_grants SET expires_at = now() - interval '1 second'");
+          response = await call(session, '/secrets/sec_ci_acceptance_secret', {
+            method:'PUT',
+            body:JSON.stringify({value:'known-ci-secret-must-never-leak', used_by:['admin-api']}),
+          });
+          if (response.status !== 403) throw new Error('expired sudo grant was accepted');
+
+          const roleHash = await hash(password, {
+            type:argon2id, memoryCost:19456, timeCost:2, parallelism:1, hashLength:32,
+          });
+          for (const role of ['admin','operator','viewer']) {
+            await pool.query(
+              `INSERT INTO admin_users(username,password_hash,role)
+               VALUES($1,$2,$3) ON CONFLICT DO NOTHING`,
+              ['ci-' + role, roleHash, role],
+            );
+          }
+          for (const role of ['owner','admin','operator','viewer']) {
+            const roleSession = role === 'owner' ? session : await login('ci-' + role);
+            for (const path of ['/me','/settings','/audit?limit=500']) {
+              const result = await call(roleSession, path);
+              const text = await result.text();
+              if (!result.ok) throw new Error(role + ' cannot GET ' + path);
+              if (text.includes('known-ci-secret-must-never-leak') ||
+                  text.includes('Ci-Admin-Phase1-Strong-Password!')) {
+                throw new Error('secret leaked to ' + role + ' from ' + path);
+              }
+            }
+            const secretList = await call(roleSession, '/secrets');
+            if ((['owner','admin'].includes(role)) !== secretList.ok) {
+              throw new Error('secret metadata RBAC mismatch for ' + role);
+            }
+            const current = await call(roleSession, '/settings');
+            const currentEtag = current.headers.get('etag');
+            const mutation = await call(roleSession, '/settings', {
+              method:'PUT', headers:{'if-match':currentEtag},
+              body:JSON.stringify({settings:{'runtime.telegram_typing_interval_ms':4600}}),
+            });
+            if ((['owner','admin'].includes(role)) !== mutation.ok) {
+              throw new Error('settings RBAC mismatch for ' + role + ': ' + mutation.status);
+            }
+          }
+          for (const path of ['/me','/settings','/secrets','/audit?limit=500']) {
+            const result = await call(session, path);
+            const text = await result.text();
+            if (!result.ok) throw new Error(path + ' failed');
+            if (text.includes('known-ci-secret-must-never-leak') ||
+                text.includes('Ci-Admin-Phase1-Strong-Password!')) {
+              throw new Error('secret leaked from ' + path);
+            }
+          }
+          const audit = await (await call(session, '/audit?limit=500')).json();
+          const mutations = audit.events.filter(e => e.request_id && !e.operation.startsWith('GET '));
+          if (!mutations.length || mutations.some(e => !['success','failure'].includes(e.result))) {
+            throw new Error('administrative mutation audit is incomplete');
+          }
+          await pool.end();
+          console.log(JSON.stringify({phase1:'ok', audited_mutations:mutations.length}));
+          NODE
+          if docker compose --env-file versions.env --env-file .env \
+            logs admin-api admin-bootstrap | grep -F \
+              -e 'known-ci-secret-must-never-leak' \
+              -e 'Ci-Admin-Phase1-Strong-Password!'; then
+            echo "::error::secret leaked to admin logs"
+            exit 1
+          fi
+          if grep -R -F \
+              -e 'known-ci-secret-must-never-leak' \
+              -e 'Ci-Admin-Phase1-Strong-Password!' \
+              admin-ui/public; then
+              echo "::error::secret leaked to admin UI bundle"
+              exit 1
+          fi
 
       - name: VECTOR project skill is mounted where the Agent SDK session expects it
         run: |

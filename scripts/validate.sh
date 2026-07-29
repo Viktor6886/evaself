@@ -109,6 +109,7 @@ validate_caddyfile() {
 validate_caddyfile "$ROOT_DIR/Caddyfile"          "Caddyfile (edge)"
 validate_caddyfile "$ROOT_DIR/webapp/Caddyfile"   "webapp/Caddyfile"
 validate_caddyfile "$ROOT_DIR/letta-ui/Caddyfile" "letta-ui/Caddyfile"
+validate_caddyfile "$ROOT_DIR/admin-ui/Caddyfile" "admin-ui/Caddyfile"
 
 # ---------------------------------------------------------------------
 step "TypeScript"

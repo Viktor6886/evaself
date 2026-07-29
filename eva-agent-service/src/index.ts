@@ -9,6 +9,7 @@
 
 import { Redis } from "ioredis";
 
+import { applyManagedRuntimeConfig } from "./admin/managed-runtime-config.js";
 import { AgentToolFactory } from "./agent-tools.js";
 import { BackgroundRuntime } from "./background.js";
 import { loadConfig, readPersona } from "./config.js";
@@ -35,7 +36,7 @@ import { TimezoneResolver } from "./time/timezone-resolver.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const logger = createLogger(config.logLevel);
+  let logger = createLogger(config.logLevel);
 
   if (!config.apiKey) {
     logger.error("EVA_AGENT_API_KEY пуст — все запросы /v1 будут отклонены");
@@ -45,6 +46,15 @@ async function main(): Promise<void> {
   const db = new Database(config.databaseUrl);
   await db.connect();
   logger.info("PostgreSQL подключён");
+  try {
+    const managedKeys = await applyManagedRuntimeConfig(config, db);
+    logger = createLogger(config.logLevel);
+    logger.info("Настройки Config Service применены", { count: managedKeys.length });
+  } catch (error) {
+    logger.warn("Config Service пока не готов, используются bootstrap-настройки", {
+      code: error instanceof Error ? error.name : "unknown_error",
+    });
+  }
 
   const redis = new Redis(config.valkeyUrl, {
     maxRetriesPerRequest: 3,
@@ -52,6 +62,23 @@ async function main(): Promise<void> {
     enableOfflineQueue: true,
   });
   redis.on("error", (error) => logger.warn("Ошибка Valkey", { message: error.message }));
+  const configEvents = redis.duplicate();
+  configEvents.on("error", () => logger.warn("Канал Config Service временно недоступен"));
+  await configEvents.subscribe("eva.config.changed");
+  configEvents.on("message", (_channel, message) => {
+    void applyManagedRuntimeConfig(config, db)
+      .then(() => logger.info("Кеш Config Service обновлён", {
+        event: (() => {
+          try {
+            const parsed = JSON.parse(message) as { version?: unknown };
+            return { version: parsed.version ?? null };
+          } catch {
+            return { version: null };
+          }
+        })(),
+      }))
+      .catch(() => logger.warn("Не удалось обновить кеш Config Service"));
+  });
 
   const queue = new UserQueue(redis, { ttlSeconds: config.lockTtlSeconds });
   const letta = new LettaService(config, logger, persona);
@@ -209,8 +236,9 @@ async function main(): Promise<void> {
       if (config.outboxEnabled) outbox.stop();
       letta.shutdown();
       await app.close();
-      await db.close();
+      configEvents.disconnect();
       redis.disconnect();
+      await db.close();
     } finally {
       process.exit(0);
     }

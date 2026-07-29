@@ -60,17 +60,12 @@
 		redir /admin/ 308
 	}
 
-	handle_path /admin-api/* {
-		import admin_auth
-		reverse_proxy eva-agent-service:{$EVA_AGENT_PORT} {
-			header_up X-API-Key "{$EVA_AGENT_API_KEY}"
-			flush_interval -1
-		}
+	handle /api/admin/v1/* {
+		reverse_proxy admin-api:8071
 	}
 
 	handle_path /admin/* {
-		import admin_auth
-		reverse_proxy letta-ui:8081 {
+		reverse_proxy admin-ui:8083 {
 			flush_interval -1
 		}
 	}

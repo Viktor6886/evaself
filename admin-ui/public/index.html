@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Evaself — управление системой</title>
+  <link rel="stylesheet" href="./ui.css">
+</head>
+<body>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <main id="login" class="login-shell">
+    <section class="login-card">
+      <div class="brand-mark" aria-hidden="true">E</div>
+      <p class="eyebrow">EVASELF CONTROL</p>
+      <h1>Управление системой</h1>
+      <p class="muted">Общие настройки, секреты доступа и журнал действий. Агенты настраиваются отдельно в Letta.</p>
+      <form id="login-form">
+        <label>Имя администратора<input name="username" autocomplete="username" required></label>
+        <label>Пароль<input name="password" type="password" autocomplete="current-password" minlength="12" required></label>
+        <button class="button primary wide" type="submit">Войти</button>
+      </form>
+      <p id="login-error" class="form-error" hidden></p>
+    </section>
+  </main>
+
+  <div id="app" class="app-shell" hidden>
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark small" aria-hidden="true">E</div>
+        <div><strong>Evaself</strong><span>Control Center</span></div>
+      </div>
+      <nav id="nav" aria-label="Разделы">
+        <button data-page="settings" class="nav-item active"><span>⌁</span>Системные настройки</button>
+        <button data-page="security" class="nav-item"><span>◇</span>Безопасность и ключи</button>
+        <button data-page="audit" class="nav-item"><span>≋</span>Журнал событий</button>
+        <div class="nav-caption">Следующие фазы</div>
+        <button class="nav-item disabled" disabled><span>◉</span>Обзор</button>
+        <button class="nav-item disabled" disabled><span>▦</span>Сервисы и интеграции</button>
+        <button class="nav-item disabled" disabled><span>✦</span>Искусственный интеллект</button>
+        <button class="nav-item disabled" disabled><span>↻</span>Backup и обновления</button>
+      </nav>
+      <a class="letta-link" href="https://letta.evaself.online/" target="_blank" rel="noreferrer">
+        <span>↗</span><span><strong>Открыть Letta</strong><small>Агенты и диалоги</small></span>
+      </a>
+    </aside>
+
+    <section class="workspace">
+      <header class="topbar">
+        <button id="menu" class="icon-button menu" aria-label="Открыть меню">☰</button>
+        <div class="system-state"><i></i><span>Контур управления</span><strong>Фаза 1</strong></div>
+        <div class="account">
+          <div><strong id="account-name"></strong><span id="account-role"></span></div>
+          <button id="logout" class="button ghost">Выйти</button>
+        </div>
+      </header>
+
+      <div class="content">
+        <section id="page-settings" class="page active">
+          <div class="page-heading">
+            <div><p class="eyebrow">КОНФИГУРАЦИЯ</p><h2>Системные настройки</h2><p>Единый реестр параметров runtime с серверной проверкой значений.</p></div>
+            <button id="save-settings" class="button primary">Сохранить изменения</button>
+          </div>
+          <div class="notice">
+            <strong>Agent SDK управляется в Letta</strong>
+            <span>Эта панель не создаёт и не удаляет агентов. Здесь находятся только общие параметры всей установки.</span>
+          </div>
+          <div id="settings-meta" class="stats"></div>
+          <form id="settings-form" class="settings-grid"></form>
+        </section>
+
+        <section id="page-security" class="page">
+          <div class="page-heading">
+            <div><p class="eyebrow">ЗАЩИЩЁННОЕ ХРАНИЛИЩЕ</p><h2>Безопасность и системные ключи</h2><p>Значения секретов доступны только на запись и никогда не загружаются в браузер.</p></div>
+            <button id="reload-secrets" class="button ghost">Обновить список</button>
+          </div>
+          <div class="security-note"><span>✓</span><div><strong>AES-256-GCM</strong><p>В интерфейсе нет масок, фрагментов, длины или хеша сохранённого значения.</p></div></div>
+          <div id="secrets-list" class="secret-list"></div>
+          <section class="card password-card">
+            <div><h3>Пароль администратора</h3><p>Смена пароля завершает остальные сессии и отзывает все sudo-гранты.</p></div>
+            <form id="password-form">
+              <input name="current_password" type="password" autocomplete="current-password" placeholder="Текущий пароль" required>
+              <input name="new_password" type="password" autocomplete="new-password" minlength="12" placeholder="Новый пароль, минимум 12 символов" required>
+              <button class="button secondary" type="submit">Сменить пароль</button>
+            </form>
+          </section>
+        </section>
+
+        <section id="page-audit" class="page">
+          <div class="page-heading">
+            <div><p class="eyebrow">КОНТРОЛЬ ИЗМЕНЕНИЙ</p><h2>Журнал событий</h2><p>Каждая административная мутация фиксируется до и после выполнения.</p></div>
+            <button id="reload-audit" class="button ghost">Обновить</button>
+          </div>
+          <div class="card table-card">
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Время</th><th>Администратор</th><th>Операция</th><th>Цель</th><th>Результат</th><th>Request ID</th></tr></thead>
+                <tbody id="audit-body"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      </div>
+    </section>
+  </div>
+
+  <dialog id="sudo-dialog">
+    <form id="sudo-form" method="dialog">
+      <p class="eyebrow">SUDO-РЕЖИМ</p>
+      <h2>Подтвердите действие</h2>
+      <p>Повторно введите пароль. Разрешение на запись секретов действует 10 минут.</p>
+      <label>Пароль<input name="password" type="password" autocomplete="current-password" required></label>
+      <div class="dialog-actions"><button value="cancel" class="button ghost">Отмена</button><button value="confirm" class="button primary">Подтвердить</button></div>
+    </form>
+  </dialog>
+
+  <script src="./ui.js" defer></script>
+</body>
+</html>

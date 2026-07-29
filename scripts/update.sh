@@ -128,6 +128,8 @@ fi
 # =====================================================================
 step "Pulling and rebuilding"
 # =====================================================================
+"$SCRIPT_DIR/ensure-admin-master-key.sh"
+load_env
 compose pull --ignore-buildable >/dev/null 2>&1 || warn "some images could not be pulled"
 compose build --pull >/dev/null || die "image build failed — nothing was restarted"
 ok "images ready"
@@ -145,6 +147,8 @@ compose up -d --remove-orphans >/dev/null
 ok "containers recreated"
 
 "$SCRIPT_DIR/db-migrate.sh" || die "миграции завершились ошибкой после перезапуска сервисов"
+"$SCRIPT_DIR/admin-finalize-env.sh" ||
+	warn "не удалось завершить bootstrap административной панели"
 "$SCRIPT_DIR/nocodb-connect.sh" ||
 	die "таблицы Eva не синхронизировались с NocoDB"
 

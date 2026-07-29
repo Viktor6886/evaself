@@ -57,6 +57,8 @@ services:
     depends_on:
       - webapp
       - eva-agent-service
+      - admin-api
+      - admin-ui
       - nocodb
       - letta-ui
     healthcheck:
@@ -204,6 +206,26 @@ services:
       retries: 5
       start_period: 15s
 
+  admin-ui:
+    <<: [*restart, *logging]
+    build:
+      context: ./admin-ui
+      args:
+        CADDY_IMAGE: ${CADDY_IMAGE}
+        CADDY_VERSION: ${CADDY_VERSION}
+    image: evaself/admin-ui:0.1.0
+    container_name: evaself-admin-ui
+    networks: [evaself-network]
+    depends_on:
+      admin-api:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8083/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
   eva-agent-service:
     <<: [*restart, *logging]
     build:
@@ -294,6 +316,64 @@ services:
       timeout: 10s
       retries: 10
       start_period: 40s
+
+  # Одноразовый идемпотентный импорт существующей конфигурации. Только этот
+  # init-контейнер видит legacy-переменные из .env; основной admin-api — нет.
+  admin-bootstrap:
+    <<: *logging
+    build:
+      context: ./eva-agent-service
+      args:
+        NODE_BASE_VERSION: ${NODE_BASE_VERSION}
+    image: evaself/eva-agent-service:0.3.0
+    container_name: evaself-admin-bootstrap
+    restart: "no"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${EVA_DB_USER}:${EVA_DB_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${EVA_DB_NAME}
+      EVA_SECRETS_MASTER_KEY_FILE: /run/secrets/eva-secrets-master-key
+      EVA_ADMIN_USERNAME: ${EVA_ADMIN_USERNAME:-admin}
+      EVA_ADMIN_BOOTSTRAP_PASSWORD: ${EVA_ADMIN_BOOTSTRAP_PASSWORD:-}
+    command: ["node", "dist/admin/bootstrap-index.js"]
+    volumes:
+      - ${EVA_SECRETS_MASTER_KEY_FILE:-/etc/evaself/secrets-master-key}:/run/secrets/eva-secrets-master-key:ro
+    networks: [evaself-network]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  admin-api:
+    <<: [*restart, *logging]
+    build:
+      context: ./eva-agent-service
+      args:
+        NODE_BASE_VERSION: ${NODE_BASE_VERSION}
+    image: evaself/eva-agent-service:0.3.0
+    container_name: evaself-admin-api
+    environment:
+      DATABASE_URL: postgresql://${EVA_DB_USER}:${EVA_DB_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${EVA_DB_NAME}
+      VALKEY_URL: redis://:${VALKEY_PASSWORD}@${VALKEY_HOST}:${VALKEY_PORT}/2
+      EVA_SECRETS_MASTER_KEY_FILE: /run/secrets/eva-secrets-master-key
+      EVA_ADMIN_PORT: 8071
+      EVA_ADMIN_BIND: 0.0.0.0
+      EVA_ADMIN_LOG_LEVEL: ${EVA_AGENT_LOG_LEVEL:-info}
+      EVA_ENV: ${EVA_ENV:-production}
+    command: ["node", "dist/admin/index.js"]
+    volumes:
+      - ${EVA_SECRETS_MASTER_KEY_FILE:-/etc/evaself/secrets-master-key}:/run/secrets/eva-secrets-master-key:ro
+    networks: [evaself-network]
+    depends_on:
+      admin-bootstrap:
+        condition: service_completed_successfully
+      valkey:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8071/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
 
   # ===================================================================
   # ADMIN / DATA GUI

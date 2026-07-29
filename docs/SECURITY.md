@@ -6,9 +6,15 @@
 Server, `eva-agent-service`, Media Service, SearXNG и backup
 helper находятся во внутренней `evaself-network`.
 
-Административная Letta UI защищена Caddy Basic Auth. Браузер вызывает
-только `/api/*`; Caddy добавляет внутренний `X-API-Key`, поэтому ключ
+Консоль Letta защищена Caddy Basic Auth. Браузер вызывает только
+`/api/*`; Caddy добавляет внутренний `X-API-Key`, поэтому ключ
 `eva-agent-service` не попадает в JavaScript.
+
+Общесистемная панель `/admin/` использует отдельный `admin-api`:
+Argon2id, server-side сессии, cookies `HttpOnly Secure SameSite=Strict`,
+double-submit CSRF, RBAC и scoped sudo-гранты на 10 минут. Secret Store
+шифрует значения AES-256-GCM мастер-ключом из отдельного host-файла.
+Мастер-ключ не хранится в PostgreSQL и не входит в backup.
 
 Capability token Letta App Server также не возвращается: раздел настроек SDK
 показывает только факт его наличия. WebUI не принимает исполняемые callback

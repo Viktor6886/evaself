@@ -47,7 +47,7 @@ done
 # =====================================================================
 step "Containers"
 # =====================================================================
-EXPECTED=(caddy postgres valkey eva-agent-service letta-app-server letta-ui nocodb webapp searxng media-service backup-service)
+EXPECTED=(caddy postgres valkey eva-agent-service admin-api admin-ui letta-app-server letta-ui nocodb webapp searxng media-service backup-service)
 for svc in "${EXPECTED[@]}"; do
 	cid="$(compose ps -q "$svc" 2>/dev/null)"
 	if [ -z "$cid" ]; then
@@ -138,6 +138,8 @@ probe() {
 }
 
 probe "agent service /health" eva-agent-service "http://127.0.0.1:${EVA_AGENT_PORT}/health"
+probe "admin-api /health" admin-api "http://127.0.0.1:8071/health"
+probe "admin-ui /healthz" admin-ui "http://127.0.0.1:8083/healthz"
 probe "searxng /healthz"  searxng       "http://127.0.0.1:8080/healthz"
 probe "media /health"     media-service "http://127.0.0.1:8090/health"
 probe "webapp /healthz"   webapp        "http://127.0.0.1:8082/healthz"

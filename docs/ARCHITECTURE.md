@@ -119,11 +119,15 @@ agents и list/retrieve/create/update conversations через management API
 поэтому WebUI архивирует его. Чат возобновляет выбранную conversation через
 SDK-сессию.
 
-Административный интерфейс доступен на корневом домене по `/admin/`.
-Маршрут `/admin-api/*` защищён той же Basic Auth, добавляет внутренний
-`X-API-Key` и не раскрывает его браузеру. Trace перед отдачей рекурсивно
-очищается от API key, token, password, authorization, cookie и похожих
-полей.
+Интерфейс управления Agent SDK доступен только на домене Letta. Его
+маршрут `/api/*` защищён Basic Auth, добавляет внутренний `X-API-Key` и не
+раскрывает его браузеру. Trace перед отдачей рекурсивно очищается от API
+key, token, password, authorization, cookie и похожих полей.
+
+Корневой `/admin/` обслуживается отдельным `admin-ui`, а
+`/api/admin/v1/*` — отдельным процессом `admin-api`. Он не проксирует
+Letta, не имеет Docker socket и работает только с общесистемной
+конфигурацией, Secret Store, сессиями, RBAC, sudo и аудитом.
 
 SDK 0.5.5 не содержит management-операций для изменения уже существующих
 memory blocks, custom tools, MCP servers, skills и knowledge folders.

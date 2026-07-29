@@ -1,0 +1,223 @@
+openapi: 3.1.0
+info:
+  title: Evaself Admin API — фаза 1
+  version: 1.0.0
+servers:
+  - url: /api/admin/v1
+paths:
+  /auth/login:
+    post:
+      summary: Войти
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string }
+                password: { type: string, writeOnly: true, minLength: 12 }
+      responses:
+        "200": { description: Сессия создана }
+        "401": { $ref: "#/components/responses/Error" }
+        "423": { $ref: "#/components/responses/Error" }
+  /auth/logout:
+    post:
+      summary: Завершить текущую сессию
+      security: [{ sessionCookie: [], csrfToken: [] }]
+      responses:
+        "204": { description: Сессия завершена }
+  /auth/password:
+    post:
+      summary: Сменить собственный пароль
+      security: [{ sessionCookie: [], csrfToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password, new_password]
+              properties:
+                current_password: { type: string, writeOnly: true }
+                new_password: { type: string, writeOnly: true, minLength: 12 }
+      responses:
+        "204": { description: Пароль изменён, другие сессии отозваны }
+        "400": { $ref: "#/components/responses/Error" }
+  /me:
+    get:
+      summary: Текущий администратор
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200":
+          description: Учётная запись без секретных данных
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Me"
+  /sudo:
+    post:
+      summary: Получить ограниченный sudo-грант на 10 минут
+      security: [{ sessionCookie: [], csrfToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password, scope]
+              properties:
+                password: { type: string, writeOnly: true }
+                scope: { type: string, enum: [secrets:write] }
+      responses:
+        "201": { description: Грант создан }
+        "403": { $ref: "#/components/responses/Error" }
+  /settings:
+    get:
+      summary: Реестр и текущие несекретные настройки
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200":
+          description: Настройки
+          headers:
+            ETag: { schema: { type: string } }
+    put:
+      summary: Пакетно изменить несекретные настройки
+      security: [{ sessionCookie: [], csrfToken: [] }]
+      parameters:
+        - name: If-Match
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [settings]
+              properties:
+                settings:
+                  type: object
+                  additionalProperties: true
+      responses:
+        "200": { description: Настройки сохранены }
+        "409": { $ref: "#/components/responses/Error" }
+        "428": { $ref: "#/components/responses/Error" }
+  /settings/rollback/{version_id}:
+    post:
+      summary: Откатить одну версию настройки
+      security: [{ sessionCookie: [], csrfToken: [] }]
+      parameters:
+        - name: version_id
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        "200": { description: Версия восстановлена }
+        "404": { $ref: "#/components/responses/Error" }
+  /secrets:
+    get:
+      summary: Метаданные секретов без значений, масок, длины и хеша
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200":
+          description: Метаданные секретов
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  secrets:
+                    type: array
+                    items: { $ref: "#/components/schemas/SecretMetadata" }
+  /secrets/{secret_ref}:
+    put:
+      summary: Записать секрет; значение никогда не возвращается
+      security: [{ sessionCookie: [], csrfToken: [] }]
+      parameters:
+        - name: secret_ref
+          in: path
+          required: true
+          schema: { type: string, pattern: "^sec_[a-z0-9_]+$" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [value, used_by]
+              properties:
+                value: { type: string, writeOnly: true, minLength: 1 }
+                used_by:
+                  type: array
+                  items: { type: string }
+      responses:
+        "200":
+          description: Только метаданные
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SecretMetadata" }
+        "403": { $ref: "#/components/responses/Error" }
+  /audit:
+    get:
+      summary: Журнал административных действий
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+      responses:
+        "200": { description: Редактированный журнал }
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: eva_admin_session
+    csrfToken:
+      type: apiKey
+      in: header
+      name: X-CSRF-Token
+  schemas:
+    Me:
+      type: object
+      required: [id, username, role, status]
+      properties:
+        id: { type: string, format: uuid }
+        username: { type: string }
+        role: { type: string, enum: [owner, admin, operator, viewer] }
+        status: { type: string, enum: [active, disabled] }
+        last_login_at: { type: [string, "null"], format: date-time }
+    SecretMetadata:
+      type: object
+      additionalProperties: false
+      required: [secret_ref, configured, created_at, last_rotated_at, used_by]
+      properties:
+        secret_ref: { type: string }
+        configured: { type: boolean }
+        created_at: { type: [string, "null"], format: date-time }
+        last_rotated_at: { type: [string, "null"], format: date-time }
+        used_by:
+          type: array
+          items: { type: string }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, details, request_id]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details: { type: object }
+            request_id: { type: string }
+  responses:
+    Error:
+      description: Ошибка без внешних или секретных деталей
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
