@@ -533,7 +533,11 @@ jobs:
           const metadata = await response.text();
           if (metadata.includes('known-ci-secret-must-never-leak')) throw new Error('secret leaked in PUT');
           const pool = new pg.Pool({connectionString:process.env.DATABASE_URL});
-          await pool.query("UPDATE sudo_grants SET expires_at = now() - interval '1 second'");
+          await pool.query(
+            `UPDATE sudo_grants
+                SET granted_at = now() - interval '11 minutes',
+                    expires_at = now() - interval '1 minute'`,
+          );
           response = await call(session, '/secrets/sec_ci_acceptance_secret', {
             method:'PUT',
             body:JSON.stringify({value:'known-ci-secret-must-never-leak', used_by:['admin-api']}),
