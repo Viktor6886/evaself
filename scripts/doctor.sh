@@ -122,6 +122,18 @@ probe() {
 		# containers without wget: try curl
 		code="$(compose exec -T "$svc" sh -c "curl -s -o /dev/null -w '%{http_code}' '$url'" 2>/dev/null | tr -dc '0-9')"
 	fi
+	if [ -z "$code" ]; then
+		# The Node service image deliberately contains neither wget nor curl.
+		code="$(compose exec -T "$svc" node -e \
+			"fetch(process.argv[1]).then(r=>console.log(r.status)).catch(()=>process.exit(1))" \
+			"$url" 2>/dev/null | tr -dc '0-9')"
+	fi
+	if [ -z "$code" ]; then
+		# The Python media image uses urllib in its Docker healthcheck.
+		code="$(compose exec -T "$svc" python -c \
+			"import sys,urllib.request; print(urllib.request.urlopen(sys.argv[1],timeout=5).status)" \
+			"$url" 2>/dev/null | tr -dc '0-9')"
+	fi
 	if [ "$code" = "$expect" ]; then ok "$name ($code)"; else critical "$name returned '${code:-no answer}', expected $expect"; fi
 }
 

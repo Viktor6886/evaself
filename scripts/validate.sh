@@ -69,22 +69,37 @@ step "Caddy configuration"
 # ---------------------------------------------------------------------
 if command -v caddy >/dev/null 2>&1; then
 	CADDY_CMD=(caddy)
+	CADDY_IN_CONTAINER=0
 else
 	# shellcheck disable=SC1090
 	. "$VERSIONS_FILE"
-	CADDY_CMD=(docker run --rm -i -v "$ROOT_DIR:/work:ro" -w /work "${CADDY_IMAGE}:${CADDY_VERSION}" caddy)
+	CADDY_CMD=(
+		docker run --rm -i
+		-v "$ROOT_DIR:/work:ro" -w /work
+		-e DOMAIN -e DOMAIN_APP -e DOMAIN_API -e DOMAIN_NOCODB
+		-e DOMAIN_LETTA -e DOMAIN_STATUS -e ACME_EMAIL -e ACME_CA
+		-e LETTA_UI_USER -e LETTA_UI_PASSWORD_HASH
+		-e EVA_AGENT_PORT -e EVA_AGENT_URL -e EVA_AGENT_API_KEY
+		"${CADDY_IMAGE}:${CADDY_VERSION}" caddy
+	)
+	CADDY_IN_CONTAINER=1
 fi
 
 validate_caddyfile() {
 	local path="$1" label="$2"
+	local config_path="$path"
+	if [ "$CADDY_IN_CONTAINER" -eq 1 ]; then
+		config_path="/work/${path#"$ROOT_DIR"/}"
+	fi
 	if env \
 		DOMAIN=example.test DOMAIN_APP=app.example.test DOMAIN_API=api.example.test \
 		DOMAIN_NOCODB=admin.example.test \
 		DOMAIN_LETTA=letta.example.test DOMAIN_STATUS=status.example.test \
 		ACME_EMAIL=ops@example.test ACME_CA=https://acme-v02.api.letsencrypt.org/directory \
 		LETTA_UI_USER=admin LETTA_UI_PASSWORD_HASH='$2a$14$placeholderplaceholderpl' \
-		EVA_CORE_PORT=8080 LETTA_URL=http://letta:8283 LETTA_SERVER_PASSWORD=placeholder \
-		"${CADDY_CMD[@]}" validate --config "$path" >/dev/null 2>&1; then
+		EVA_AGENT_PORT=8070 EVA_AGENT_URL=http://eva-agent-service:8070 \
+		EVA_AGENT_API_KEY=placeholder \
+		"${CADDY_CMD[@]}" validate --config "$config_path" >/dev/null 2>&1; then
 		ok "$label"
 	else
 		check_failed "$label does not validate"
