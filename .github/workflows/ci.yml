@@ -81,6 +81,9 @@ jobs:
           sed 's/^\([A-Z0-9_]*\)=$/\1=placeholder/' .env.example > /tmp/ci.env
           docker compose --env-file versions.env --env-file /tmp/ci.env -f compose.yaml config -q
           echo "services: $(docker compose --env-file versions.env --env-file /tmp/ci.env -f compose.yaml config --services | wc -l)"
+          docker compose --env-file versions.env --env-file /tmp/ci.env \
+            -f compose.yaml config --format json > /tmp/compose.json
+          jq -e '.services.caddy.environment.EVA_AGENT_API_KEY == "placeholder"' /tmp/compose.json
 
       - name: Caddyfiles validate
         env:

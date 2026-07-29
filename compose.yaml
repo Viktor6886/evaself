@@ -46,6 +46,9 @@ services:
       LETTA_UI_USER: ${LETTA_UI_USER}
       LETTA_UI_PASSWORD_HASH: ${LETTA_UI_PASSWORD_HASH}
       EVA_AGENT_PORT: ${EVA_AGENT_PORT}
+      # Used only by Caddy to inject the protected backend header.
+      # It is never returned to the browser.
+      EVA_AGENT_API_KEY: ${EVA_AGENT_API_KEY}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
