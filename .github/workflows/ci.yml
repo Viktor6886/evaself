@@ -82,6 +82,12 @@ jobs:
       - name: An update tells behind from diverged
         run: ./scripts/ci/test-ahead-behind.sh
 
+      # Взятый не тот ключ не мешает архиву создаться и провериться —
+      # расхождение всплывает при восстановлении, когда исходной установки
+      # уже нет. Поэтому архивы здесь шифруются и расшифровываются по-настоящему.
+      - name: Backup archive password selection round-trips
+        run: ./scripts/ci/test-backup-password.sh
+
       - name: The LLM Router is the only way out to a model
         run: |
           # Прямое обращение к провайдеру в обход роутера возвращает
@@ -815,6 +821,168 @@ jobs:
               exit 1
           fi
 
+      # Разделы, добавленные после первой фазы, до сих пор проверялись
+      # только модульно. Здесь они работают на настоящей базе и настоящем
+      # admin-api: важно не то, что функция вернула объект, а что
+      # блокировка действительно легла в оба поля, что operator не получил
+      # переписку и что её чтение осталось в журнале.
+      - name: Admin users section — RBAC, blocking and conversation privacy
+        run: |
+          docker compose --env-file versions.env --env-file .env \
+            exec -T admin-api node --input-type=module - <<'NODE'
+          import pg from 'pg';
+          const base = 'http://127.0.0.1:8071/api/admin/v1';
+          const password = 'Ci-Phase1-Strong-Passphrase-2026!';
+
+          async function login(username = 'admin') {
+            const response = await fetch(base + '/auth/login', {
+              method: 'POST',
+              headers: {'content-type':'application/json'},
+              body: JSON.stringify({username, password}),
+            });
+            if (!response.ok) throw new Error('login failed for ' + username);
+            const cookie = response.headers.getSetCookie()
+              .map(v => v.split(';')[0]).join('; ');
+            const csrf = /eva_admin_csrf=([^;]+)/.exec(cookie)?.[1];
+            return {cookie, csrf: decodeURIComponent(csrf)};
+          }
+          async function call(session, path, options = {}) {
+            const headers = {cookie: session.cookie, ...(options.headers || {})};
+            if (options.body) headers['content-type'] = 'application/json';
+            if (!['GET','HEAD'].includes(options.method || 'GET')) {
+              headers['x-csrf-token'] = session.csrf;
+            }
+            return await fetch(base + path, {...options, headers});
+          }
+          async function sudo(session, scope) {
+            const granted = await call(session, '/sudo', {
+              method:'POST', body:JSON.stringify({password, scope}),
+            });
+            if (granted.status !== 201) throw new Error('sudo ' + scope + ' failed');
+          }
+
+          const pool = new pg.Pool({connectionString: process.env.DATABASE_URL});
+          const seeded = await pool.query(
+            `INSERT INTO users (telegram_id, username, first_name, state, is_blocked)
+             VALUES (770001, 'ci_user', 'CI', 'active', false)
+             ON CONFLICT (telegram_id) DO UPDATE
+               SET state = 'active', is_blocked = false
+             RETURNING id`);
+          const userId = seeded.rows[0].id;
+
+          const owner = await login();
+
+          // Список и карточка доступны всем ролям, включая viewer.
+          for (const role of ['owner','admin','operator','viewer']) {
+            const session = role === 'owner' ? owner : await login('ci-' + role);
+            for (const path of ['/users?limit=5', '/users/' + userId]) {
+              const result = await call(session, path);
+              if (!result.ok) throw new Error(role + ' cannot GET ' + path);
+            }
+            // Блокировать может только owner и admin, и только под sudo.
+            const withoutSudo = await call(session, '/users/' + userId + '/block', {method:'POST'});
+            if (withoutSudo.status !== 403) {
+              throw new Error('block without sudo allowed for ' + role + ': ' + withoutSudo.status);
+            }
+            // Переписка — только owner и admin. Роль проверяется раньше
+            // sudo, поэтому operator и viewer получают отказ и с грантом.
+            if (['operator','viewer'].includes(role)) {
+              const denied = await call(session, '/users/' + userId + '/conversation');
+              if (denied.status !== 403) {
+                throw new Error(role + ' reached the conversation: ' + denied.status);
+              }
+            }
+          }
+
+          // Блокировка выставляет оба признака: диалог останавливается по
+          // любому из них, а фоновые рассылки требуют согласия обоих.
+          await sudo(owner, 'users:write');
+          const blocked = await call(owner, '/users/' + userId + '/block', {method:'POST'});
+          if (!blocked.ok) throw new Error('block failed: ' + blocked.status);
+          let row = (await pool.query(
+            'SELECT state, is_blocked FROM users WHERE id = $1', [userId])).rows[0];
+          if (row.state !== 'blocked' || row.is_blocked !== true) {
+            throw new Error('block left the flags apart: ' + JSON.stringify(row));
+          }
+
+          const unblocked = await call(owner, '/users/' + userId + '/unblock', {method:'POST'});
+          if (!unblocked.ok) throw new Error('unblock failed: ' + unblocked.status);
+          row = (await pool.query(
+            'SELECT state, is_blocked FROM users WHERE id = $1', [userId])).rows[0];
+          if (row.state !== 'active' || row.is_blocked !== false) {
+            throw new Error('unblock left the flags apart: ' + JSON.stringify(row));
+          }
+
+          // Состояние 'blocked' нельзя выставить правкой полей: иначе
+          // появился бы второй способ блокировать, минуя sudo.
+          const sneaky = await call(owner, '/users/' + userId, {
+            method:'PATCH', body:JSON.stringify({state:'blocked'}),
+          });
+          if (sneaky.status !== 400) {
+            throw new Error('state=blocked slipped through PATCH: ' + sneaky.status);
+          }
+
+          // Заметка идемпотентна по ключу: повтор не создаёт вторую.
+          const key = 'ci-note-' + Date.now();
+          for (let i = 0; i < 2; i += 1) {
+            const noted = await call(owner, '/users/' + userId + '/notes', {
+              method:'POST', headers:{'idempotency-key': key},
+              body:JSON.stringify({note:'заметка приёмки'}),
+            });
+            if (!noted.ok) throw new Error('note failed: ' + noted.status);
+          }
+          const notes = await pool.query(
+            'SELECT count(*)::int AS n FROM admin_user_notes WHERE idempotency_key = $1', [key]);
+          if (notes.rows[0].n !== 1) {
+            throw new Error('idempotency key produced ' + notes.rows[0].n + ' notes');
+          }
+
+          // Чтение переписки требует отдельного гранта.
+          const noGrant = await call(owner, '/users/' + userId + '/conversation');
+          if (noGrant.status !== 403) {
+            throw new Error('conversation read without sudo: ' + noGrant.status);
+          }
+          await sudo(owner, 'users:messages');
+          const conversation = await call(owner, '/users/' + userId + '/conversation?limit=20');
+          if (!conversation.ok) throw new Error('conversation failed: ' + conversation.status);
+          const payload = await conversation.json();
+          if (!Array.isArray(payload.messages) || !Array.isArray(payload.highlights)) {
+            throw new Error('conversation payload is malformed');
+          }
+
+          // Чтение переписки — безопасный метод, автоматический аудит его
+          // пропускает, поэтому запись делается вручную. Проверяем, что она
+          // есть и что текста в ней нет.
+          const audited = await pool.query(
+            `SELECT params_redacted_json::text AS params, message
+               FROM audit_log
+              WHERE operation = 'GET /api/admin/v1/users/:id/conversation'
+              ORDER BY at DESC LIMIT 1`);
+          if (!audited.rows.length) {
+            throw new Error('conversation read was not audited');
+          }
+          const entry = audited.rows[0];
+          if (!/user_id/.test(entry.params)) {
+            throw new Error('audit entry does not name the user');
+          }
+          if (/привет|content|"text"/i.test(entry.params + ' ' + (entry.message ?? ''))) {
+            throw new Error('conversation text reached the audit log');
+          }
+
+          // Карточка не должна отдавать прямую речь из кризисных событий.
+          await pool.query(
+            `INSERT INTO crisis_events (user_id, severity, trigger_text, response_text)
+             VALUES ($1, 'low', 'CI-CRISIS-TRIGGER-TEXT', 'CI-CRISIS-RESPONSE-TEXT')`,
+            [userId]);
+          const card = await (await call(owner, '/users/' + userId)).text();
+          if (card.includes('CI-CRISIS-TRIGGER-TEXT') || card.includes('CI-CRISIS-RESPONSE-TEXT')) {
+            throw new Error('crisis text leaked into the user card');
+          }
+
+          await pool.end();
+          console.log(JSON.stringify({users:'ok', user_id:userId}));
+          NODE
+
       - name: VECTOR project skill is mounted where the Agent SDK session expects it
         run: |
           docker compose --env-file versions.env --env-file .env \
@@ -1021,6 +1189,138 @@ jobs:
           done
           echo "::error::test LLM provider did not start"
           exit 1
+
+      # Роутер до сих пор не запускался в CI ни разу: он есть в compose, но
+      # ни один шаг его не поднимал, и вся отработка отказа держалась на
+      # модульных тестах с подставными адаптерами. Здесь он работает
+      # по-настоящему — с базой, живым провайдером и мёртвым портом.
+      - name: LLM router fails over from a dead provider to a live one
+        run: |
+          docker compose --env-file versions.env --env-file .env up -d --build llm-router
+          for i in $(seq 1 60); do
+            STATUS="$(docker inspect -f \
+              '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' \
+              evaself-llm-router 2>/dev/null || echo down)"
+            echo "llm-router, attempt $i: $STATUS"
+            [ "$STATUS" = "healthy" ] || [ "$STATUS" = "running" ] && break
+            [ "$i" = "60" ] && {
+              docker compose --env-file versions.env --env-file .env logs --tail=100 llm-router
+              exit 1
+            }
+            sleep 2
+          done
+
+          docker compose --env-file versions.env --env-file .env \
+            exec -T llm-router node --input-type=module - <<'NODE'
+          import pg from 'pg';
+          import {SecretBox} from '/app/dist/llm.js';
+
+          const pool = new pg.Pool({connectionString: process.env.DATABASE_URL});
+          const box = new SecretBox(process.env.LLM_CONFIG_ENCRYPTION_KEY);
+          const encrypted = box.encrypt('ci-provider-key');
+
+          // Первый в цепочке слушает порт, на котором никого нет: соединение
+          // отказывается сразу, без ожидания таймаута.
+          async function provider(name, baseUrl) {
+            // Уникальность имени задана индексом по lower(name), поэтому
+            // ON CONFLICT выводится по тому же выражению.
+            const {rows} = await pool.query(
+              `INSERT INTO llm_providers
+                 (name, protocol, base_url, model, context_window,
+                  api_key_encrypted, enabled, priority)
+               VALUES ($1, 'openai-compatible', $2, 'ci-model-b', 32768, $3, true, 1)
+               ON CONFLICT (lower(name)) DO UPDATE
+                 SET base_url = EXCLUDED.base_url,
+                     api_key_encrypted = EXCLUDED.api_key_encrypted,
+                     enabled = true
+               RETURNING id`, [name, baseUrl, encrypted]);
+            return rows[0].id;
+          }
+          const dead = await provider('ci-dead', 'http://127.0.0.1:9');
+          const live = await provider('ci-live', 'http://evaself-llm-mock:9000');
+
+          await pool.query('DELETE FROM llm_route_providers WHERE route_code = $1', ['chat']);
+          await pool.query(
+            `INSERT INTO llm_route_providers (route_code, provider_id, position)
+             VALUES ('chat', $1, 0), ('chat', $2, 1)`, [dead, live]);
+          // Предохранитель мог остаться разомкнутым от прошлых шагов.
+          await pool.query('DELETE FROM llm_breaker_state');
+
+          const before = (await pool.query('SELECT count(*)::int AS n FROM llm_requests')).rows[0].n;
+
+          const response = await fetch('http://127.0.0.1:8073/chat/completions', {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              authorization: 'Bearer ' + process.env.EVA_ROUTER_API_KEY,
+            },
+            body: JSON.stringify({
+              model: 'eva/chat',
+              messages: [{role:'user', content:'ping'}],
+            }),
+          });
+          if (!response.ok) {
+            throw new Error('router returned ' + response.status + ': ' + await response.text());
+          }
+          const payload = await response.json();
+          const content = payload.choices?.[0]?.message?.content;
+          if (content !== 'CI chat ok') {
+            throw new Error('unexpected content through the router: ' + JSON.stringify(content));
+          }
+
+          // Ответ сам по себе ничего не доказывает: он пришёл бы и если бы
+          // мёртвого провайдера просто пропустили, не пытаясь. Телеметрия
+          // хранит голову цепочки и того, кто ответил на самом деле, —
+          // отработка отказа видна именно по их расхождению.
+          const after = (await pool.query('SELECT count(*)::int AS n FROM llm_requests')).rows[0].n;
+          if (after <= before) throw new Error('router wrote no telemetry');
+          const {rows:[record]} = await pool.query(
+            `SELECT primary_provider_id, actual_provider_id, switches,
+                    switch_reason, succeeded, attempts
+               FROM llm_requests
+              WHERE route_code = 'chat'
+              ORDER BY started_at DESC LIMIT 1`);
+          if (!record.succeeded) throw new Error('router recorded a failed request');
+          if (record.primary_provider_id !== dead) {
+            throw new Error('the dead provider was not the head of the chain');
+          }
+          if (record.actual_provider_id !== live) {
+            throw new Error('the answer did not come from the live provider');
+          }
+          if (record.switches < 1 || record.attempts < 2) {
+            throw new Error('no switch recorded: ' + JSON.stringify(record));
+          }
+
+          // Неизвестное имя модели уходит в маршрут chat — это осознанное
+          // решение: разговор важнее строгости, и Letta, переключённая на
+          // чужое имя, не должна замолчать. Проверяем, что так и остаётся.
+          const unknown = await fetch('http://127.0.0.1:8073/chat/completions', {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              authorization: 'Bearer ' + process.env.EVA_ROUTER_API_KEY,
+            },
+            body: JSON.stringify({model:'eva/nope', messages:[{role:'user',content:'x'}]}),
+          });
+          if (!unknown.ok) {
+            throw new Error('unknown model name should fall back to chat, got ' + unknown.status);
+          }
+
+          // Без ключа роутер не должен отвечать вовсе.
+          const anonymous = await fetch('http://127.0.0.1:8073/chat/completions', {
+            method: 'POST',
+            headers: {'content-type':'application/json'},
+            body: JSON.stringify({model:'eva/chat', messages:[{role:'user',content:'x'}]}),
+          });
+          if (anonymous.status !== 401 && anonymous.status !== 403) {
+            throw new Error('router answered without a key: ' + anonymous.status);
+          }
+
+          await pool.end();
+          console.log(JSON.stringify({
+            router:'ok', switches:record.switches, reason:record.switch_reason,
+          }));
+          NODE
 
       - name: An agent and a conversation are created through the Agent SDK
         run: |

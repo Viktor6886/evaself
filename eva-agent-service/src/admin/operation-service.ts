@@ -66,6 +66,12 @@ export class OperationService {
     if (password && password.length < 16) {
       throw adminBadRequest("Пароль архива должен быть не короче 16 символов");
     }
+    // openssl -pass file: читает только первую строку, поэтому пароль с
+    // переводом строки зашифровал бы архив своим началом, а восстановить
+    // его потом пытались бы целым паролем.
+    if (/[\r\n]/.test(password)) {
+      throw adminBadRequest("Пароль архива не должен содержать перевод строки");
+    }
     const result = await this.updater.call<{ configured?: boolean }>(
       "set_backup_password",
       { password },
