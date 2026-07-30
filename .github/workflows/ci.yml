@@ -220,6 +220,18 @@ jobs:
       - name: Every API path the front-ends call exists in the service
         run: python3 scripts/ci/assert-frontend-routes.py
 
+      # Проверка роли в server.ts начинается с `access.roles &&`, поэтому
+      # маршрут, забывший объявить роли, её не проваливает, а пропускает —
+      # и становится доступен любому вошедшему, включая viewer.
+      - name: Every admin route declares who may call it
+        run: python3 scripts/ci/assert-admin-route-access.py
+
+      # Откат нужен ровно в аварии; узнавать тогда, что его файл сломан,
+      # поздно. Здесь проверяется хотя бы наличие и снятие версии, а
+      # работоспособность — в job migrations на настоящей базе.
+      - name: Every admin-era migration has a down file
+        run: python3 scripts/ci/assert-down-migrations.py
+
       - name: No secrets in tracked files
         run: |
           if git ls-files --error-unmatch .env >/dev/null 2>&1; then
@@ -365,6 +377,57 @@ jobs:
         run: |
           COUNT="$(psql -tA -c 'SELECT count(*) FROM quotas')"
           [ "$COUNT" = "9" ] || { echo "::error::quotas has $COUNT rows, expected 9"; exit 1; }
+
+      # Откат выполняется ровно тогда, когда что-то уже пошло не так, и
+      # проверять его в этот момент поздно. Здесь он прогоняется на
+      # заведомо целой базе: назад по всем down, затем снова вперёд.
+      - name: Rollback and re-apply (down migrations must actually work)
+        run: |
+          BEFORE="$(psql -tA -c 'SELECT count(*) FROM schema_migrations')"
+
+          for f in $(ls -r postgres/migrations/down/*.sql); do
+            echo "== down $f"
+            psql -v ON_ERROR_STOP=1 -q -f "$f"
+          done
+
+          AFTER="$(psql -tA -c 'SELECT count(*) FROM schema_migrations')"
+          COUNT="$(ls postgres/migrations/down/*.sql | wc -l)"
+          EXPECTED=$((BEFORE - COUNT))
+          if [ "$AFTER" != "$EXPECTED" ]; then
+            echo "::error::после отката ожидалось $EXPECTED записей schema_migrations, получено $AFTER"
+            exit 1
+          fi
+
+          for f in postgres/migrations/*.sql; do
+            echo "== up $f"
+            psql -v ON_ERROR_STOP=1 -q -f "$f"
+          done
+
+          FINAL="$(psql -tA -c 'SELECT count(*) FROM schema_migrations')"
+          if [ "$FINAL" != "$BEFORE" ]; then
+            echo "::error::после повторного наката ожидалось $BEFORE записей, получено $FINAL"
+            exit 1
+          fi
+
+          # Схема должна вернуться целиком, а не «почти», и сеяные строки
+          # после цикла не должны ни пропасть, ни удвоиться.
+          psql -v ON_ERROR_STOP=1 -tA <<'SQL'
+          DO $$
+          BEGIN
+            IF to_regclass('public.admin_users') IS NULL
+               OR to_regclass('public.llm_routes') IS NULL
+               OR to_regclass('public.admin_user_notes') IS NULL THEN
+              RAISE EXCEPTION 'после отката и наката схема восстановилась не полностью';
+            END IF;
+            IF (SELECT count(*) FROM quotas) <> 9 THEN
+              RAISE EXCEPTION 'quotas после цикла: %', (SELECT count(*) FROM quotas);
+            END IF;
+            IF (SELECT count(*) FROM llm_routes) <> 4 THEN
+              RAISE EXCEPTION 'llm_routes после цикла: %', (SELECT count(*) FROM llm_routes);
+            END IF;
+          END $$;
+          SQL
+          echo "rollback verified"
 
   # ===================================================================
   # media-service
