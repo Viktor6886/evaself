@@ -148,24 +148,52 @@
 
         <section id="page-operations" class="page">
           <div class="page-heading">
-            <div><p class="eyebrow">ЭКСПЛУАТАЦИЯ</p><h2>Backup и обновления</h2><p>Операции выполняет изолированный updater с фиксированным списком команд.</p></div>
+            <div><p class="eyebrow">ЭКСПЛУАТАЦИЯ</p><h2>Backup и обновления</h2></div>
             <div class="heading-actions"><button id="check-updates" class="button ghost">Проверить обновления</button><button id="create-backup" class="button primary">Создать backup</button></div>
           </div>
-          <div id="operations-summary" class="stats"></div>
+
+          <!-- Сводная строка убрана: все четыре её значения — число
+               архивов, дата последнего, commit и ветка — повторялись в
+               блоках ниже, буквально в первых строках. -->
           <div class="operations-grid">
             <section class="card operation-card">
-              <div class="section-heading"><div><h3>Архивы</h3><p>Мастер-ключ Secret Store в архив не включается.</p></div><button id="reload-backups" class="reset">Обновить</button></div>
+              <div class="section-heading">
+                <div>
+                  <h3>Архивы</h3>
+                  <p class="block-caption">Резервные копии базы и конфигурации, от новой к старой. Мастер-ключ Secret Store в архив не включается — храните его отдельно, иначе архивы нечем расшифровать.</p>
+                </div>
+                <button id="reload-backups" class="reset">Обновить</button>
+              </div>
               <div id="backups-list" class="compact-list"></div>
+              <dl class="legend">
+                <div><dt><span class="status-dot color-green"></span>готов</dt><dd>архив создан и пригоден для восстановления</dd></div>
+                <div><dt><span class="status-dot color-blue"></span>создаётся</dt><dd>операция ещё идёт</dd></div>
+                <div><dt><span class="status-dot color-red"></span>ошибка</dt><dd>архив неполный, восстанавливаться из него нельзя</dd></div>
+                <div><dt><span class="tag safe">зашифрован</span></dt><dd>AES-256 мастер-ключом Secret Store</dd></div>
+                <div><dt><span class="tag">legacy</span></dt><dd>создан до включения шифрования, лежит открытым</dd></div>
+              </dl>
             </section>
+
             <section class="card operation-card">
-              <div class="section-heading"><div><h3>Версия и обновление</h3><p>Перед установкой автоматически создаётся backup; при ошибке выполняется rollback.</p></div></div>
+              <div class="section-heading">
+                <div>
+                  <h3>Версия установки</h3>
+                  <p class="block-caption">Какой код сейчас развёрнут и есть ли что-то новее. Перед установкой автоматически создаётся backup; при ошибке выполняется откат.</p>
+                </div>
+              </div>
               <div id="update-info"></div>
               <button id="install-update" class="button danger wide" type="button">Установить обновление</button>
             </section>
           </div>
+
           <section class="card table-card operation-history">
-            <div class="section-heading padded"><div><h3>История обновлений</h3></div></div>
-            <div class="table-wrap"><table><thead><tr><th>Начало</th><th>Компонент</th><th>Версия</th><th>Статус</th><th>Rollback</th></tr></thead><tbody id="update-history"></tbody></table></div>
+            <div class="section-heading padded">
+              <div>
+                <h3>История обновлений</h3>
+                <p class="block-caption">Каждая попытка обновления по компонентам. Столбец «Откат» показывает, вернулась ли установка на прежнюю версию после неудачи.</p>
+              </div>
+            </div>
+            <div class="table-wrap"><table><thead><tr><th>Начало</th><th>Компонент</th><th>Версия</th><th>Результат</th><th>Откат</th></tr></thead><tbody id="update-history"></tbody></table></div>
           </section>
         </section>
 

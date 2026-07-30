@@ -303,7 +303,7 @@ function renderOverviewGroups(payload) {
       <section class="overview-group">
         <div class="section-heading">
           <div><h3>${escapeHtml(GROUP_NAMES[name] || name)}</h3></div>
-          <span>${items.filter((i) => i.status.color === "green").length} / ${items.length}</span>
+          <span class="group-count" title="Сколько из них сейчас в норме">${items.filter((i) => i.status.color === "green").length} из ${items.length} в норме</span>
         </div>
         <div class="mini-status-list">${items.map(overviewRow).join("")}</div>
       </section>`)
@@ -709,30 +709,57 @@ async function loadOperations() {
   ]);
   const items = backups.payload.backups || [];
   const current = updates.payload.current || {};
-  $("#operations-summary").innerHTML = `
-    <div class="stat"><strong>${items.length}</strong><span>архивов</span></div>
-    <div class="stat"><strong>${items[0] ? escapeHtml(localDate(items[0].created_at)) : "—"}</strong><span>последний backup</span></div>
-    <div class="stat"><strong>${escapeHtml(String(current.commit || "unknown").slice(0, 10))}</strong><span>текущий commit</span></div>
-    <div class="stat"><strong>${escapeHtml(current.branch || "unknown")}</strong><span>ветка</span></div>`;
+
   $("#backups-list").innerHTML = items.length
     ? items.map((item) => `
       <article class="compact-row">
-        <span class="status-dot color-${item.status === "ready" ? "green" : item.status === "failed" ? "red" : "blue"}"></span>
+        <span class="status-dot color-${escapeHtml(BACKUP_COLORS[item.status] || "blue")}"></span>
         <span><strong>${escapeHtml(item.archive_id)}</strong><small>${escapeHtml(localDate(item.created_at))} · ${bytes(item.size)}</small></span>
         <span class="tag ${item.encrypted ? "safe" : ""}">${item.encrypted ? "зашифрован" : "legacy"}</span>
       </article>`).join("")
-    : '<p class="muted">Архивов пока нет.</p>';
+    : '<p class="muted">Архивов пока нет. Первый можно создать кнопкой выше.</p>';
+
+  // Значения без пояснения читаются неверно: «dirty» звучит как мелочь,
+  // хотя блокирует обновление, а пустое «Доступно обновлений» означает
+  // «никто ещё не спрашивал», а не «обновлений нет».
   $("#update-info").innerHTML = `
     <dl class="details-list">
-      <div><dt>Ветка</dt><dd>${escapeHtml(current.branch || "unknown")}</dd></div>
-      <div><dt>Commit</dt><dd class="technical">${escapeHtml(current.commit || "unknown")}</dd></div>
-      <div><dt>Локальные изменения</dt><dd>${current.dirty ? "есть — update будет заблокирован" : "нет"}</dd></div>
-      <div><dt>Доступно обновлений</dt><dd>${current.update_available == null ? "нужна проверка" : current.update_available ? escapeHtml(current.available_components || "есть") : "нет"}</dd></div>
-      <div><dt>Последняя проверка</dt><dd>${escapeHtml(localDate(updates.payload.last_checked_at))}</dd></div>
+      <div><dt>Ветка</dt><dd>${escapeHtml(current.branch || "неизвестна")}</dd></div>
+      <div><dt>Развёрнутый commit</dt><dd class="technical">${escapeHtml(String(current.commit || "неизвестен").slice(0, 12))}</dd></div>
+      <div><dt>Незакоммиченные правки на сервере</dt>
+        <dd>${current.dirty
+          ? '<span class="warn-value">есть — обновление будет заблокировано</span>'
+          : "нет"}</dd></div>
+      <div><dt>Доступно обновлений</dt>
+        <dd>${current.update_available == null
+          ? "неизвестно — нажмите «Проверить обновления»"
+          : current.update_available
+            ? escapeHtml(current.available_components || "есть")
+            : "нет, установлена последняя версия"}</dd></div>
+      <div><dt>Последняя проверка</dt>
+        <dd>${updates.payload.last_checked_at ? escapeHtml(localDate(updates.payload.last_checked_at)) : "не выполнялась"}</dd></div>
     </dl>`;
-  $("#update-history").innerHTML = (updates.payload.history || []).map((item) => `
-    <tr><td>${escapeHtml(localDate(item.started_at))}</td><td>${escapeHtml(item.component)}</td><td>${escapeHtml(item.from_version || "—")} → ${escapeHtml(item.to_version || "—")}</td><td><span class="result ${escapeHtml(item.status)}">${escapeHtml(item.status)}</span></td><td>${item.rolled_back ? "да" : "нет"}</td></tr>`).join("");
+
+  const history = updates.payload.history || [];
+  $("#update-history").innerHTML = history.length
+    ? history.map((item) => `
+      <tr>
+        <td>${escapeHtml(localDate(item.started_at))}</td>
+        <td>${escapeHtml(item.component)}</td>
+        <td>${escapeHtml(item.from_version || "—")} → ${escapeHtml(item.to_version || "—")}</td>
+        <td><span class="result ${escapeHtml(item.status)}">${escapeHtml(UPDATE_RESULTS[item.status] || item.status)}</span></td>
+        <td>${item.rolled_back ? "да" : "нет"}</td>
+      </tr>`).join("")
+    : '<tr><td colspan="5" class="muted">Обновлений ещё не было.</td></tr>';
 }
+
+const BACKUP_COLORS = {
+  ready: "green", failed: "red", creating: "blue", restoring: "blue", deleted: "gray",
+};
+
+const UPDATE_RESULTS = {
+  running: "идёт", success: "успешно", failure: "ошибка", rolled_back: "откачено",
+};
 
 async function createBackup() {
   const key = `backup-${crypto.randomUUID()}`;

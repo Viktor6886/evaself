@@ -368,3 +368,44 @@ dialog .eyebrow { margin-top: 0; }
 .field-ok { background: rgba(53, 192, 122, .16); color: #4bd08c; }
 .field-missing { background: rgba(224, 90, 82, .16); color: #ec7a72; }
 #integration-dialog .form-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+
+/* ---------------------------------------------------------------------
+ * Подписи блоков и легенды (2.4)
+ * ------------------------------------------------------------------- */
+.block-caption {
+  max-width: 62ch;
+  margin: 4px 0 0;
+  color: var(--muted, #8b93a4);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+.group-count { color: var(--muted, #8b93a4); font-size: 12px; white-space: nowrap; }
+
+/* Значения вроде «зашифрован» или «legacy» ничего не говорят сами по
+   себе — рядом с блоком расшифровывается, что каждое из них означает. */
+.legend {
+  display: grid;
+  gap: 5px;
+  margin: 14px 0 0;
+  padding: 12px 0 0;
+  border-top: 1px dashed var(--line, #2a2f3a);
+}
+.legend > div { display: grid; grid-template-columns: minmax(120px, auto) minmax(0, 1fr); gap: 10px; align-items: baseline; }
+.legend dt { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; }
+.legend dd { margin: 0; color: var(--muted, #8b93a4); font-size: 12px; }
+.warn-value { color: #e0a33a; font-weight: 600; }
+
+/* В узкой карточке «Версия установки» пояснения длиннее ярлыка, и
+   двухколоночная строка ломала их посреди слова («заблокиров/ано»).
+   Здесь значение встаёт под подписью и занимает всю ширину. */
+#update-info .details-list > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 3px;
+}
+#update-info .details-list dt { font-size: 12px; }
+#update-info .details-list dd {
+  max-width: 100%;
+  overflow-wrap: break-word;
+  text-align: left;
+}
