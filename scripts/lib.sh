@@ -352,6 +352,20 @@ wait_for_health() {
 	return 1
 }
 
+# git_ahead_behind <repo> <branch>  ->  "<behind> <ahead>"
+#
+# Behind is what origin has and we do not; ahead is what we have and origin
+# does not. Both non-zero means the branch has diverged and `pull --ff-only`
+# will refuse. The two ranges are easy to write the wrong way round, which
+# is why this is a named function with a test rather than an inline pair of
+# rev-list calls.
+git_ahead_behind() {
+	local repo="$1" branch="$2" behind ahead
+	behind="$(git -C "$repo" rev-list --count "HEAD..origin/${branch}" 2>/dev/null || echo 0)"
+	ahead="$(git -C "$repo" rev-list --count "origin/${branch}..HEAD" 2>/dev/null || echo 0)"
+	printf '%s %s\n' "${behind:-0}" "${ahead:-0}"
+}
+
 http_status() {
 	curl -sS -o /dev/null -w '%{http_code}' --max-time "${2:-10}" "$1" 2>/dev/null || echo "000"
 }

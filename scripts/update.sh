@@ -72,6 +72,7 @@ step "Repository"
 GIT_LOCAL="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || echo '-')"
 GIT_BRANCH="$(git -C "$ROOT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '-')"
 GIT_BEHIND=0
+GIT_AHEAD=0
 DEFAULT_BRANCH="$(git -C "$ROOT_DIR" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')"
 DEFAULT_BRANCH="${DEFAULT_BRANCH:-main}"
 
@@ -117,8 +118,39 @@ if git -C "$ROOT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
 	if [ "$GIT_BRANCH" != "HEAD" ] && [ "$GIT_BRANCH" != "-" ]; then
 		git -C "$ROOT_DIR" fetch --quiet origin "$GIT_BRANCH" 2>/dev/null ||
 			warn "could not reach the git remote"
-		GIT_BEHIND="$(git -C "$ROOT_DIR" rev-list --count "HEAD..origin/${GIT_BRANCH}" 2>/dev/null || echo 0)"
+		read -r GIT_BEHIND GIT_AHEAD < <(git_ahead_behind "$ROOT_DIR" "$GIT_BRANCH")
 		info "branch $GIT_BRANCH at ${GIT_LOCAL:0:8}, ${GIT_BEHIND} commit(s) behind origin"
+
+		[ "$GIT_AHEAD" -gt 0 ] &&
+			info "и $GIT_AHEAD собственный(х) коммит(ов), которых нет на origin"
+
+		# Ahead AND behind at once means the branch has diverged, and
+		# `pull --ff-only` refuses. That used to be a warning in the middle
+		# of a long run: the images were rebuilt from the old checkout and
+		# the script still finished with a success message, so an update
+		# could be run again and again and change nothing. Stop here
+		# instead, before anything has been touched.
+		#
+		# Only ahead is fine — there is nothing to pull, so nothing breaks.
+		if [ "$GIT_AHEAD" -gt 0 ] && [ "$GIT_BEHIND" -gt 0 ] &&
+			[ "${EVASELF_ALLOW_DIVERGED:-0}" != "1" ]; then
+			warn "ветка $GIT_BRANCH разошлась с origin: $GIT_AHEAD собственный(х) коммит(ов) здесь,"
+			warn "$GIT_BEHIND на origin. Обновление кода в таком состоянии невозможно."
+			say ""
+			say "  Посмотреть, что именно локальное:"
+			say "    git -C $ROOT_DIR log --oneline origin/${GIT_BRANCH}..HEAD"
+			say ""
+			say "  Сохранить локальные коммиты поверх origin:"
+			say "    git -C $ROOT_DIR rebase origin/${GIT_BRANCH}"
+			say ""
+			say "  Или отказаться от них (сначала сделав резервную ветку):"
+			say "    git -C $ROOT_DIR branch local-backup-\$(date +%F)"
+			say "    git -C $ROOT_DIR reset --hard origin/${GIT_BRANCH}"
+			say ""
+			say "  Обновить только образы, оставив код как есть:"
+			say "    EVASELF_ALLOW_DIVERGED=1 make update"
+			die "обновление остановлено — ничего не изменено"
+		fi
 	else
 		warn "репозиторий в detached HEAD и переключиться не удалось — обновятся только образы"
 		GIT_BRANCH="-"
@@ -206,14 +238,24 @@ done < "$REPORT"
 # =====================================================================
 step "Updating the repository"
 # =====================================================================
-if [ "$GIT_BEHIND" -gt 0 ] && [ "${DIRTY:-0}" -eq 0 ]; then
+if [ "$GIT_AHEAD" -gt 0 ] && [ "$GIT_BEHIND" -gt 0 ]; then
+	# Only reachable with EVASELF_ALLOW_DIVERGED=1 — the check above stops
+	# the run otherwise. Say plainly that the code stays where it is.
+	warn "ветка разошлась с origin: код оставлен на ${GIT_LOCAL:0:8}, обновляются только образы"
+elif [ "$GIT_BEHIND" -gt 0 ] && [ "${DIRTY:-0}" -eq 0 ]; then
 	# versions.env was just modified; stash it around the pull.
 	cp "$VERSIONS_FILE" "$ROLLBACK_DIR/versions.env.new"
 	git -C "$ROOT_DIR" checkout -- versions.env 2>/dev/null || true
 	if git -C "$ROOT_DIR" pull --ff-only origin "$GIT_BRANCH" >/dev/null 2>&1; then
 		ok "pulled $GIT_BEHIND commit(s)"
 	else
-		warn "git pull failed — continuing with image updates only"
+		# Divergence is handled earlier, the remote answered during fetch,
+		# and the tree was cleaned above — so whatever is left here is not
+		# something to shrug at and build over. The old code would have
+		# rebuilt the stale checkout and still reported success.
+		cp "$ROLLBACK_DIR/versions.env.new" "$VERSIONS_FILE"
+		git -C "$ROOT_DIR" status --short | head -20
+		die "git pull не удался — обновление остановлено, ничего не пересобрано"
 	fi
 	cp "$ROLLBACK_DIR/versions.env.new" "$VERSIONS_FILE"
 elif [ "$GIT_BEHIND" -eq 0 ]; then
