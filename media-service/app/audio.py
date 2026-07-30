@@ -95,6 +95,29 @@ async def to_asr_wav(source: Path, destination: Path) -> Path:
     return destination
 
 
+async def make_test_tone(destination: Path, seconds: float = 1.0) -> Path:
+    """Короткий корректный WAV для проверки тракта распознавания.
+
+    Нужен именно валидный файл в том же формате, что и обычный запрос:
+    моно, 16 кГц, PCM. Речи в нём нет — тест проверяет, что провайдер
+    принимает файл и отвечает, а не качество распознавания.
+    """
+    code, _stdout, stderr = await _run(
+        FFMPEG,
+        "-hide_banner", "-loglevel", "error",
+        "-y",
+        "-f", "lavfi",
+        "-i", f"sine=frequency=440:duration={seconds}",
+        "-ac", "1",
+        "-ar", str(ASR_SAMPLE_RATE),
+        "-c:a", "pcm_s16le",
+        str(destination),
+    )
+    if code != 0:
+        raise MediaError("не удалось создать тестовый файл", details=stderr.decode()[:500])
+    return destination
+
+
 async def to_telegram_voice(source: Path, destination: Path) -> Path:
     """Encode to OGG/Opus so Telegram shows it as a real voice message."""
     code, _stdout, stderr = await _run(

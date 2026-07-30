@@ -368,6 +368,9 @@ services:
       EVA_ENV: ${EVA_ENV:-production}
       EVA_UPDATER_SOCKET: /run/evaself-updater/updater.sock
       EVA_INTERNAL_AGENT_URL: http://eva-agent-service:${EVA_AGENT_PORT}
+      # Панель правит настройки ASR/TTS и запускает их проверки — обе
+      # операции идут в media-service по внутренней сети tools.
+      EVA_MEDIA_SERVICE_URL: http://media-service:8090
       EVA_OUTBOUND_HOST_ALLOWLIST: ${EVA_OUTBOUND_HOST_ALLOWLIST:-}
     command: ["node", "dist/admin/index.js"]
     volumes:

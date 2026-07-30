@@ -42,6 +42,7 @@ const SECRET_USED_BY: Record<string, string[]> = {
   TODOIST_API_TOKEN: ["agent-runtime"],
   CRAWL4AI_API_TOKEN: ["crawl4ai"],
   SEARXNG_SECRET: ["searxng"],
+  MEDIA_SERVICE_TOKEN: ["media-service", "agent-runtime", "admin-api"],
   MEDIA_ASR_API_KEY: ["media-service"],
   MEDIA_TTS_API_KEY: ["media-service"],
   NC_AUTH_JWT_SECRET: ["nocodb"],

@@ -161,6 +161,9 @@ export interface IntegrationConfig {
   restart_required: string | null;
   note: string | null;
   fields: Array<IntegrationField & { value: string | null; configured: boolean }>;
+  /** Успели ли значения доехать до сервиса без перезапуска. */
+  applied_live?: boolean;
+  apply_error?: string | null;
   last_check: {
     state: string;
     color: string;
@@ -170,11 +173,87 @@ export interface IntegrationConfig {
   } | null;
 }
 
+/**
+ * Поля панели → поля рантайм-конфига media-service. Без этой таблицы
+ * пришлось бы полагаться на совпадение имён, а они намеренно разные:
+ * в панели поле называется api_key, в сервисе — тоже, но base_url в
+ * панели относится к секции, а в сервисе лежит внутри неё.
+ */
+const MEDIA_SECTIONS: Record<string, "asr" | "tts"> = { asr: "asr", tts: "tts" };
+
 export class IntegrationConfigService {
   constructor(
     private readonly pool: pg.Pool,
     private readonly secrets: SecretStore,
+    private readonly mediaUrl = process.env.EVA_MEDIA_SERVICE_URL ?? "http://media-service:8090",
   ) {}
+
+  /**
+   * Отправляет настройки ASR/TTS прямо в media-service.
+   *
+   * Это и есть «смена провайдера без правки workflow»: сервис
+   * перечитывает значения на следующем же запросе, .env не трогается и
+   * контейнер не пересоздаётся. Значения в system_settings всё равно
+   * пишутся — они переживут пересоздание тома media-service и попадут в
+   * backup.
+   */
+  private async pushToMedia(
+    section: "asr" | "tts",
+    values: Record<string, string>,
+  ): Promise<{ applied: boolean; error?: string }> {
+    if (Object.keys(values).length === 0) return { applied: false };
+    const token = await this.secrets.get("sec_media_service_token");
+    if (!token) {
+      return { applied: false, error: "MEDIA_SERVICE_TOKEN не импортирован в Secret Store" };
+    }
+    try {
+      const response = await fetch(`${this.mediaUrl.replace(/\/+$/, "")}/config/media`, {
+        method: "PUT",
+        headers: { "content-type": "application/json", "X-Media-Key": token },
+        body: JSON.stringify({ [section]: values }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!response.ok) {
+        return { applied: false, error: `media-service вернул HTTP ${response.status}` };
+      }
+      return { applied: true };
+    } catch (error) {
+      return {
+        applied: false,
+        error: error instanceof Error ? error.message : "media-service недоступен",
+      };
+    }
+  }
+
+  /** Запускает настоящую проверку синтеза или распознавания. */
+  async test(id: string): Promise<Record<string, unknown>> {
+    const section = MEDIA_SECTIONS[id];
+    if (!section) throw adminBadRequest("Для этой интеграции нет отдельной проверки");
+    const token = await this.secrets.get("sec_media_service_token");
+    if (!token) throw adminBadRequest("MEDIA_SERVICE_TOKEN не импортирован в Secret Store");
+
+    try {
+      const response = await fetch(`${this.mediaUrl.replace(/\/+$/, "")}/${section}/test`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "X-Media-Key": token },
+        body: "{}",
+        // Синтез и распознавание идут к внешнему провайдеру — минута
+        // тут реальный потолок, а не запас.
+        signal: AbortSignal.timeout(60_000),
+      });
+      const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+      if (!response.ok) {
+        const detail = (body.error as { message?: string } | undefined)?.message;
+        return { ok: false, message: detail ?? `media-service вернул HTTP ${response.status}` };
+      }
+      return { ok: true, ...body };
+    } catch (error) {
+      return {
+        ok: false,
+        message: error instanceof Error ? error.message : "media-service недоступен",
+      };
+    }
+  }
 
   async get(id: string): Promise<IntegrationConfig> {
     const definition = INTEGRATION_BY_ID.get(id);
@@ -278,7 +357,25 @@ export class IntegrationConfigService {
       await this.secrets.put(ref, value, undefined, actorId);
     }
 
-    return await this.get(id);
+    const result = await this.get(id);
+    const section = MEDIA_SECTIONS[id];
+    if (section) {
+      // Собираем то же, что сохранили, в терминах media-service.
+      const payload: Record<string, string> = {};
+      for (const field of form.fields) {
+        if (!(field.name in body)) continue;
+        const value = String(body[field.name] ?? "").trim();
+        if (field.kind === "secret" && !value) continue;
+        payload[field.name] = value;
+      }
+      const push = await this.pushToMedia(section, payload);
+      return {
+        ...result,
+        applied_live: push.applied,
+        apply_error: push.error ?? null,
+      } as IntegrationConfig;
+    }
+    return result;
   }
 
   private async settingValues(keys: string[]): Promise<Map<string, string>> {

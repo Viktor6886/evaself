@@ -425,6 +425,12 @@ async function openIntegration(id) {
     ? payload.fields.map(integrationField).join("")
     : '<p class="muted">У этой интеграции нет настраиваемых полей: она работает на внутренних значениях установки.</p>';
   $("#integration-save").hidden = !payload.editable;
+  const testBox = $("#integration-test-result");
+  testBox.hidden = true;
+  testBox.textContent = "";
+  $("#integration-check").textContent = ["asr", "tts"].includes(id)
+    ? (id === "tts" ? "Проверить синтез" : "Проверить распознавание")
+    : "Проверить соединение";
   $("#integration-dialog").showModal();
 }
 
@@ -453,6 +459,40 @@ function integrationField(field) {
     <small>${escapeHtml(field.hint)}</small></label>`;
 }
 
+async function runIntegrationTest(id) {
+  const button = $("#integration-check");
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = id === "tts" ? "Синтезирую…" : "Распознаю…";
+  const box = $("#integration-test-result");
+  box.hidden = false;
+  box.className = "integration-test";
+  box.textContent = "Идёт проверка у провайдера, это занимает несколько секунд…";
+  try {
+    const { payload } = await request(`/integrations/${encodeURIComponent(id)}/test`, {
+      method: "POST",
+    });
+    box.className = `integration-test ${payload.ok ? "is-ok" : "is-fail"}`;
+    box.textContent = payload.ok
+      ? [
+        payload.message,
+        payload.latency_ms != null ? `${payload.latency_ms} мс` : "",
+        payload.model ? `модель ${payload.model}` : "",
+        payload.voice ? `голос ${payload.voice}` : "",
+        // Пустая расшифровка тестового тона — нормальный результат, и об
+        // этом надо сказать, иначе выглядит как поломка.
+        id === "asr" ? `расшифровка: ${payload.transcript ? `«${payload.transcript}»` : "пусто, в тестовом сигнале нет речи"}` : "",
+      ].filter(Boolean).join(" · ")
+      : `Не прошло: ${payload.message || "провайдер не ответил"}`;
+  } catch (error) {
+    box.className = "integration-test is-fail";
+    box.textContent = `Не прошло: ${error.message}`;
+  } finally {
+    button.disabled = false;
+    button.textContent = label;
+  }
+}
+
 async function saveIntegration() {
   const id = state.integration?.id;
   if (!id) return;
@@ -464,11 +504,20 @@ async function saveIntegration() {
     title: "Сохранить настройки интеграции",
     description: "Значения без секретов попадут в настройки установки, ключи — в Secret Store.",
     action: async () => {
-      await request(`/integrations/${encodeURIComponent(id)}/config`, {
+      const { payload } = await request(`/integrations/${encodeURIComponent(id)}/config`, {
         method: "PUT",
         body: JSON.stringify(body),
       });
-      toast("Настройки сохранены");
+      // Для ASR/TTS значения применяются на лету; если не доехали —
+      // сказать прямо, а не оставить администратора в уверенности, что
+      // всё работает.
+      if (payload.applied_live === false && payload.apply_error) {
+        toast(`Сохранено, но сервис не принял значения: ${payload.apply_error}`, true);
+      } else if (payload.applied_live) {
+        toast("Настройки сохранены и применены без перезапуска");
+      } else {
+        toast("Настройки сохранены");
+      }
       await openIntegration(id);
       await loadServicesAndIntegrations();
     },
@@ -1030,7 +1079,11 @@ $("#integration-dialog").addEventListener("click", (event) => {
 $("#integration-save").addEventListener("click", () => saveIntegration().catch(handleError));
 $("#integration-check").addEventListener("click", () => {
   const id = state.integration?.id;
-  if (id) startCheck("integration", id).catch(handleError);
+  if (!id) return;
+  // У ASR и TTS есть настоящая проверка тракта; у остальных — только
+  // плановая проверка доступности, которую ставит health-worker.
+  if (["asr", "tts"].includes(id)) runIntegrationTest(id).catch(handleError);
+  else startCheck("integration", id).catch(handleError);
 });
 $("#new-provider").addEventListener("click", () => openProviderEditor());
 $("#close-provider").addEventListener("click", () => {

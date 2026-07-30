@@ -409,3 +409,16 @@ dialog .eyebrow { margin-top: 0; }
   overflow-wrap: break-word;
   text-align: left;
 }
+
+/* Результат проверки ASR/TTS (2.5) */
+.integration-test {
+  margin: 14px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line, #2a2f3a);
+  border-left-width: 3px;
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.integration-test.is-ok { border-left-color: #35c07a; }
+.integration-test.is-fail { border-left-color: #e05a52; }

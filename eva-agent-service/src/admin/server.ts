@@ -315,6 +315,16 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
     );
   });
 
+  // Настоящая проверка ASR и TTS: круговой запрос к провайдеру, а не
+  // доступность хоста. Operator может её запускать — она ничего не
+  // меняет, только тратит несколько центов на синтез короткой фразы.
+  app.post("/api/admin/v1/integrations/:id/test", {
+    config: { roles: ["owner", "admin", "operator"] } satisfies RouteAccess,
+  }, async (request) => {
+    const id = (request.params as { id?: string }).id ?? "";
+    return await services.integrations.test(id);
+  });
+
   app.post("/api/admin/v1/integrations/:id/check", {
     config: { roles: ["owner", "admin", "operator"] } satisfies RouteAccess,
   }, async (request, reply) => {

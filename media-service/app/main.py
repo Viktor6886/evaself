@@ -29,7 +29,8 @@ from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadF
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
-from .audio import MediaError, probe, to_asr_wav, to_telegram_voice
+from .audio import MediaError, make_test_tone, probe, to_asr_wav, to_telegram_voice
+from .runtime_config import RuntimeConfig
 
 VERSION = "0.1.0"
 
@@ -44,11 +45,33 @@ TMP_TTL_SECONDS = int(os.environ.get("MEDIA_TMP_TTL_SECONDS", "900"))
 ASR_BASE_URL = os.environ.get("MEDIA_ASR_BASE_URL", "").rstrip("/")
 ASR_API_KEY = os.environ.get("MEDIA_ASR_API_KEY", "")
 ASR_MODEL = os.environ.get("MEDIA_ASR_MODEL", "whisper-1")
+ASR_LANGUAGE = os.environ.get("MEDIA_ASR_LANGUAGE", "")
 
 TTS_BASE_URL = os.environ.get("MEDIA_TTS_BASE_URL", "").rstrip("/")
 TTS_API_KEY = os.environ.get("MEDIA_TTS_API_KEY", "")
 TTS_MODEL = os.environ.get("MEDIA_TTS_MODEL", "tts-1")
 TTS_VOICE = os.environ.get("MEDIA_TTS_VOICE", "nova")
+
+# Переопределения из админ-панели поверх окружения. Значения из .env
+# остаются значениями по умолчанию — установка без панели работает как
+# раньше.
+RUNTIME = RuntimeConfig(
+    WORK_DIR / "runtime-config.json",
+    {
+        "asr": {
+            "base_url": ASR_BASE_URL,
+            "api_key": ASR_API_KEY,
+            "model": ASR_MODEL,
+            "language": ASR_LANGUAGE,
+        },
+        "tts": {
+            "base_url": TTS_BASE_URL,
+            "api_key": TTS_API_KEY,
+            "model": TTS_MODEL,
+            "voice": TTS_VOICE,
+        },
+    },
+)
 
 TELEGRAM_TOKEN = os.environ.get("EVA_TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_API = "https://api.telegram.org"
@@ -164,8 +187,8 @@ async def health() -> dict:
         "version": VERSION,
         "status": "ok" if ffmpeg_ok else "degraded",
         "ffmpeg": ffmpeg_ok,
-        "asr_configured": bool(ASR_BASE_URL and ASR_API_KEY),
-        "tts_configured": bool(TTS_BASE_URL and TTS_API_KEY),
+        "asr_configured": bool(RUNTIME.asr().get("base_url") and RUNTIME.asr().get("api_key")),
+        "tts_configured": bool(RUNTIME.tts().get("base_url") and RUNTIME.tts().get("api_key")),
         "auth_required": bool(SERVICE_TOKEN),
         "work_dir": str(WORK_DIR),
     }
@@ -235,10 +258,11 @@ async def _transcribe_path(
             f"audio is {info['duration_seconds']:.0f}s, limit is {MAX_AUDIO_SECONDS}s",
             413,
         )
-    if not (ASR_BASE_URL and ASR_API_KEY):
+    asr = RUNTIME.asr()
+    if not (asr.get("base_url") and asr.get("api_key")):
         return _error(
             "asr_not_configured",
-            "MEDIA_ASR_BASE_URL / MEDIA_ASR_API_KEY are not set in .env",
+            "ASR не настроен: задайте Base URL и ключ в панели или в .env",
             503,
         )
 
@@ -248,17 +272,19 @@ async def _transcribe_path(
     except MediaError as exc:
         return _error("conversion_failed", exc.message, 422, details=exc.details)
 
-    data = {"model": ASR_MODEL}
-    if language:
-        data["language"] = language
+    data = {"model": asr["model"]}
+    # Язык из запроса важнее настройки: конкретное сообщение может быть
+    # на другом языке, чем обычно у пользователя.
+    if language or asr.get("language"):
+        data["language"] = language or asr["language"]
     if prompt:
         data["prompt"] = prompt
 
     try:
         with wav.open("rb") as handle:
             response = await app.state.http.post(
-                f"{ASR_BASE_URL}/audio/transcriptions",
-                headers={"Authorization": f"Bearer {ASR_API_KEY}"},
+                f"{asr['base_url']}/audio/transcriptions",
+                headers={"Authorization": f"Bearer {asr['api_key']}"},
                 data=data,
                 files={"file": ("audio.wav", handle, "audio/wav")},
             )
@@ -291,14 +317,149 @@ async def _transcribe_path(
 
 
 # =====================================================================
+# runtime configuration and self-tests
+# =====================================================================
+@app.get("/config/media", dependencies=[Depends(require_service_token)])
+async def read_media_config() -> dict:
+    """Действующие значения. Ключи не возвращаются — только «настроен»."""
+    return RUNTIME.describe()
+
+
+@app.put("/config/media", dependencies=[Depends(require_service_token)])
+async def write_media_config(payload: dict) -> dict:
+    """Переопределения из админ-панели.
+
+    Применяются немедленно: следующий же запрос к /transcribe или /tts
+    читает новые значения. Перезапуск контейнера не требуется — в этом и
+    смысл требования «смена провайдера без правки workflow».
+    """
+    applied = RUNTIME.update(payload if isinstance(payload, dict) else {})
+    if not applied:
+        return _error("nothing_to_apply", "в запросе нет известных полей", 400)
+    return {"applied": applied, "config": RUNTIME.describe()}
+
+
+@app.post("/tts/test", dependencies=[Depends(require_service_token)])
+async def test_tts(payload: dict | None = None) -> dict:
+    """Настоящий синтез короткой фразы.
+
+    Проверяет не доступность хоста, а весь путь: адрес, ключ, модель и
+    голос. Успех означает, что провайдер вернул воспроизводимый звук.
+    """
+    tts = RUNTIME.tts()
+    if not (tts.get("base_url") and tts.get("api_key")):
+        return _error("tts_not_configured", "TTS не настроен", 503)
+    phrase = (payload or {}).get("text") or "Проверка синтеза речи."
+
+    started = time.monotonic()
+    try:
+        response = await app.state.http.post(
+            f"{tts['base_url']}/audio/speech",
+            headers={"Authorization": f"Bearer {tts['api_key']}"},
+            json={
+                "model": tts["model"],
+                "voice": tts["voice"],
+                "input": phrase,
+                "response_format": "mp3",
+            },
+        )
+    except httpx.TimeoutException:
+        return _error("tts_timeout", "провайдер не ответил вовремя", 504)
+    except httpx.TransportError as exc:
+        return _error("tts_unavailable", f"не удалось соединиться: {exc}", 503)
+
+    if response.status_code >= 400:
+        return _error(
+            "tts_error",
+            f"провайдер вернул {response.status_code}",
+            502,
+            details=response.text[:300],
+        )
+    if not response.content:
+        return _error("tts_empty", "провайдер вернул пустой ответ", 502)
+
+    return {
+        "ok": True,
+        "provider": tts["base_url"],
+        "model": tts["model"],
+        "voice": tts["voice"],
+        "bytes": len(response.content),
+        "latency_ms": int((time.monotonic() - started) * 1000),
+        "message": f"синтез выполнен, получено {len(response.content)} байт аудио",
+    }
+
+
+@app.post("/asr/test", dependencies=[Depends(require_service_token)])
+async def test_asr() -> dict:
+    """Круговой тест распознавания.
+
+    Отправляет провайдеру короткий корректный WAV, сгенерированный
+    ffmpeg. Проверяется, что адрес, ключ и модель приняты и endpoint
+    вернул разбираемый ответ. Это проверка тракта, а не точности:
+    в записи нет речи, и пустой текст — нормальный успешный результат.
+    """
+    asr = RUNTIME.asr()
+    if not (asr.get("base_url") and asr.get("api_key")):
+        return _error("asr_not_configured", "ASR не настроен", 503)
+
+    with Workspace(WORK_DIR) as work:
+        sample = work / "probe.wav"
+        try:
+            await make_test_tone(sample)
+        except MediaError as exc:
+            return _error("sample_failed", exc.message, 500, details=exc.details)
+
+        started = time.monotonic()
+        data = {"model": asr["model"]}
+        if asr.get("language"):
+            data["language"] = asr["language"]
+        try:
+            with sample.open("rb") as handle:
+                response = await app.state.http.post(
+                    f"{asr['base_url']}/audio/transcriptions",
+                    headers={"Authorization": f"Bearer {asr['api_key']}"},
+                    data=data,
+                    files={"file": ("probe.wav", handle, "audio/wav")},
+                )
+        except httpx.TimeoutException:
+            return _error("asr_timeout", "провайдер не ответил вовремя", 504)
+        except httpx.TransportError as exc:
+            return _error("asr_unavailable", f"не удалось соединиться: {exc}", 503)
+
+    if response.status_code >= 400:
+        return _error(
+            "asr_error",
+            f"провайдер вернул {response.status_code}",
+            502,
+            details=response.text[:300],
+        )
+    try:
+        text = response.json().get("text", "")
+    except ValueError:
+        return _error("asr_invalid_response", "ответ не разбирается как JSON", 502,
+                      details=response.text[:300])
+
+    return {
+        "ok": True,
+        "provider": asr["base_url"],
+        "model": asr["model"],
+        "language": asr.get("language") or "автоопределение",
+        "latency_ms": int((time.monotonic() - started) * 1000),
+        "transcript": str(text).strip(),
+        "message": "тракт распознавания работает: провайдер принял файл и ответил",
+    }
+
+
+# =====================================================================
 # speech synthesis
 # =====================================================================
 @app.post("/tts", dependencies=[Depends(require_service_token)])
 async def synthesize(payload: TtsRequest):
-    if not (TTS_BASE_URL and TTS_API_KEY):
+    tts = RUNTIME.tts()
+    if not (tts.get("base_url") and tts.get("api_key")):
         return _error(
             "tts_not_configured",
-            "MEDIA_TTS_BASE_URL / MEDIA_TTS_API_KEY are not set in .env",
+            "TTS не настроен: задайте Base URL и ключ в панели или в .env",
             503,
         )
 
@@ -307,11 +468,11 @@ async def synthesize(payload: TtsRequest):
 
     try:
         response = await app.state.http.post(
-            f"{TTS_BASE_URL}/audio/speech",
-            headers={"Authorization": f"Bearer {TTS_API_KEY}"},
+            f"{tts['base_url']}/audio/speech",
+            headers={"Authorization": f"Bearer {tts['api_key']}"},
             json={
-                "model": payload.model or TTS_MODEL,
-                "voice": payload.voice or TTS_VOICE,
+                "model": payload.model or tts["model"],
+                "voice": payload.voice or tts["voice"],
                 "input": payload.text,
                 "response_format": "mp3",
             },
