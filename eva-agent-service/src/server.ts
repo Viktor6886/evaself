@@ -21,6 +21,7 @@ import type { Logger } from "./logger.js";
 import type { LavaPayments } from "./payments.js";
 import type { UserProfileService } from "./profile/profile-service.js";
 import { PublicRepository, registerPublicRoutes } from "./public/routes.js";
+import { registerWebappCoreRoutes } from "./public/webapp-core.js";
 import type { UserQueue } from "./queue.js";
 import type { SdkSettingsInput, SdkSettingsManager } from "./sdk-settings.js";
 import type { TelegramClient, TelegramUpdate } from "./telegram.js";
@@ -118,6 +119,14 @@ export function buildServer(services: Services): FastifyInstance {
     config,
     repository: new PublicRepository(db, profile, goals),
     telegram,
+  });
+
+  // Новые разделы Mini App (задачи, заметки, бюджет, решения, check-in,
+  // фокус-сессии) под собственным префиксом /public/v2. Существующие
+  // /public/* не трогаются: их продолжает обслуживать registerPublicRoutes.
+  registerWebappCoreRoutes(app, {
+    config,
+    db,
   });
 
   // ---------------------------------------------------------------

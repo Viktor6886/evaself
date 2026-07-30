@@ -47,6 +47,29 @@ export class CoreToolFactory {
         },
       ),
       tool(
+        "get_current_state",
+        "Текущее состояние",
+        "Возвращает последние немедицинские отметки настроения, энергии и напряжения пользователя.",
+        objectSchema({ days: integer("Количество дней, максимум 30") }),
+        async (args, runtime) => {
+          const days = Math.min(Math.max(optionalInteger(args, "days") ?? 7, 1), 30);
+          const { rows } = await this.db.query(
+            `SELECT local_date, mood, energy, tension, note
+               FROM user_checkins
+              WHERE user_id = $1
+                AND local_date >= (now() AT TIME ZONE $2)::date - ($3::integer - 1)
+              ORDER BY local_date DESC`,
+            [runtime.userId, runtime.timezone, days],
+          );
+          return {
+            ok: true,
+            disclaimer: "Это пользовательские отметки состояния, а не медицинская диагностика.",
+            observations: rows.length,
+            checkins: rows,
+          };
+        },
+      ),
+      tool(
         "save_note",
         "Сохранить заметку",
         "Сохраняет личную заметку пользователя в PostgreSQL.",

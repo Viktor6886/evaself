@@ -31,13 +31,20 @@ SOURCES = [
 ROUTE_FILES = [
     ("eva-agent-service/src/server.ts", ""),
     ("eva-agent-service/src/public/routes.ts", "/public"),
+    ("eva-agent-service/src/public/webapp-core.ts", "/public/v2"),
     ("eva-agent-service/src/admin/server.ts", "/api/admin/v1"),
 ]
 
 ROUTE_RE = re.compile(
-    r'(?:app|publicApp|adminApp|instance)\.(?:get|post|patch|delete)\(\s*"([^"]+)"'
+    r'(?:app|publicApp|webApp|adminApp|instance)\.(?:get|post|patch|delete)\(\s*"([^"]+)"'
 )
-CALL_RE = re.compile(r'(?:api|streamApi)\(\s*[`"\']([^`"\']+)')
+# Шаблонная строка может содержать кавычки внутри ${...}
+# (`/x/${encodeURIComponent(id || "0")}/y`), поэтому у backtick-варианта
+# своё правило: он читается до закрывающего backtick, а не до первой
+# кавычки. Иначе путь обрезался на середине и «не находился».
+CALL_RE = re.compile(
+    r'(?:api|streamApi)\(\s*(?:`([^`]+)`|"([^"]+)"|\'([^\']+)\')'
+)
 FETCH_RE = re.compile(r'fetch\(\s*"(/api/[^"?]+)')
 
 
@@ -74,11 +81,15 @@ def main() -> int:
         if not source.exists():
             continue
         text = source.read_text()
-        calls = [c.split("?")[0] for c in CALL_RE.findall(text)]
+        # findall с группами возвращает кортежи — берём непустую.
+        calls = [next(filter(None, m), "") for m in CALL_RE.findall(text)]
         # /api is stripped by Caddy before the service sees the request.
         calls += [c[len("/api"):] for c in FETCH_RE.findall(text)]
         for call in calls:
-            path = re.sub(r"\$\{[^}]*\}", SENTINEL, call)
+            # Плейсхолдеры снимаются ДО отрезания query string: внутри
+            # ${...} встречается optional chaining (session?.id), и
+            # split("?") резал путь на середине выражения.
+            path = re.sub(r"\$\{[^}]*\}", SENTINEL, call).split("?")[0]
             if not path.startswith("/"):
                 continue
             checked += 1

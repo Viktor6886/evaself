@@ -1,223 +1,135 @@
 <!doctype html>
 <html lang="ru">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="theme-color" content="#fbfaf6" />
-  <meta name="color-scheme" content="light" />
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#fbfaf6">
+  <meta name="color-scheme" content="light">
   <title>Ева</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Neucha&family=Nunito:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/app/app.css?v=20260730-final2" />
+  <link rel="stylesheet" href="/app/app.css?v=20260730-v3">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
-<body class="is-home">
-  <div class="app-shell">
+<body>
+  <div class="app-shell" id="app-shell">
     <main class="screens" id="screens">
-      <section class="screen home-screen" data-screen="today" id="screen-today">
+      <section class="screen screen-today is-active" data-screen="today">
         <header class="home-header">
-          <div class="greeting-wrap">
-            <h1 class="greeting" id="greeting-text">Добрый день</h1>
-            <span class="tiny-heart" aria-hidden="true">
-              <svg viewBox="0 0 24 22"><path d="M12 21 3 12C-1 7 5 0 10 5l2 2 2-2c5-5 11 2 7 7Z"/></svg>
-            </span>
-            <svg class="header-flourish" viewBox="0 0 45 24" aria-hidden="true"><path d="M2 7c7 0 10 3 12 8 2 5 8 6 11 2 2-4-2-7-6-5-4 3-2 9 5 9 5 0 10-4 13-10"/></svg>
+          <div class="greeting-block">
+            <h1 id="greeting">Добрый день</h1>
+            <p id="today-caption">Собираю твой день</p>
           </div>
-          <button class="icon-only notification-button" id="notifications-button" type="button" aria-label="Уведомления">
-            <svg viewBox="0 0 42 42" aria-hidden="true"><path d="M11 29c3-3 4-7 4-12a6 6 0 0 1 12 0c0 5 1 9 4 12Z"/><path d="M17 33a4 4 0 0 0 8 0M21 11V7"/></svg>
-            <span class="notification-dot" id="notification-dot" aria-hidden="true"></span>
+          <button class="icon-button" id="notifications-button" type="button" aria-label="Уведомления">
+            <span data-icon="bell"></span><span class="status-dot" id="notification-dot" hidden></span>
           </button>
         </header>
 
-        <section class="state-card surface-card">
-          <div class="state-content">
-            <div class="state-heading">
-              <svg class="state-sparks" viewBox="0 0 15 23" aria-hidden="true"><path d="m12 3-5 5m3 4-7 2m9 6-5-3"/></svg>
-              <h2>Как я сейчас?</h2>
-            </div>
-            <div class="state-grid">
-              <button class="state-item" type="button" data-checkin="mood">
-                <span class="state-icon" aria-hidden="true"><svg viewBox="0 0 44 44"><circle cx="22" cy="22" r="17"/><circle cx="16" cy="18" r="1.8" class="solid"/><circle cx="28" cy="18" r="1.8" class="solid"/><path d="M15 27c4 5 10 5 14 0"/></svg></span>
-                <span class="state-copy"><small>Настроение</small><strong id="mood-value">Отметить</strong></span>
-              </button>
-              <button class="state-item" type="button" data-checkin="energy">
-                <span class="state-icon" aria-hidden="true"><svg viewBox="0 0 44 44"><path d="m26 3-14 23h10l-3 15 15-25H24Z"/></svg></span>
-                <span class="state-copy"><small>Энергия</small><strong id="energy-value">— / 10</strong></span>
-              </button>
-              <button class="state-item" type="button" data-checkin="focus">
-                <span class="state-icon focus-state-icon" aria-hidden="true"><svg viewBox="0 0 44 44"><path d="M14 5h16M14 39h16M16 6c0 8 3 11 6 15-3 4-6 7-6 16M28 6c0 8-3 11-6 15 3 4 6 7 6 16"/><path class="accent-fill" d="M18 12h8c0 5-2 7-4 10-2-3-4-5-4-10Zm1 19c1-3 2-5 3-7 1 2 2 4 3 7Z"/></svg></span>
-                <span class="state-copy"><small>Фокус</small><strong id="focus-value">— / 10</strong></span>
-              </button>
-            </div>
+        <section class="checkin-card card" id="checkin-card">
+          <div class="checkin-head">
+            <div><span class="eyebrow">СОСТОЯНИЕ СЕГОДНЯ</span><h2>Как ты сейчас?</h2></div>
+            <button class="text-button" id="checkin-edit" type="button">Отметить</button>
           </div>
-          <div class="balloon" aria-hidden="true">
-            <svg viewBox="0 0 100 145">
-              <path class="balloon-fill" d="M50 6C22 6 8 28 12 59c4 32 21 55 38 62 17-7 34-30 38-62C92 28 78 6 50 6Z"/>
-              <path d="M37 42c3-4 8-4 11 0M56 40c4-4 9-3 11 2" class="balloon-brow"/>
-              <ellipse cx="41" cy="51" rx="3" ry="4" class="solid"/><ellipse cx="61" cy="51" rx="3" ry="4" class="solid"/>
-              <path d="M35 67c5 13 24 15 32 0"/>
-              <path class="paper-fill" d="M44 120c-1 5-5 8-6 12 7 4 17 4 24 0-2-4-6-7-7-12Z"/>
-              <path d="M53 135c1 8 11 4 13 10 2 5-5 8-8 4-2-4 3-7 7-4"/>
-              <path d="M13 24 5 17M23 11 20 2M9 42 1 40" class="thin"/>
-            </svg>
+          <div class="checkin-body">
+            <div class="checkin-metrics" id="checkin-metrics"></div>
+            <div class="balloon" aria-hidden="true" id="balloon"></div>
           </div>
         </section>
 
-        <button class="result-card surface-card" id="main-result-card" type="button" aria-label="Открыть главный результат дня">
-          <span class="result-star" aria-hidden="true"><svg viewBox="0 0 50 48"><path d="m25 3 7 14 15 2-11 11 3 15-14-8-14 8 3-15L3 19l15-2Z"/></svg></span>
-          <span class="result-text">
-            <small>Главный результат дня</small>
-            <strong id="main-result">Подбираю по контексту…</strong>
-            <em id="main-result-source">Ева сопоставляет цели, задачи и заметки</em>
-            <svg class="result-underline" viewBox="0 0 220 7" preserveAspectRatio="none" aria-hidden="true"><path d="M2 4c38-2 71-3 106-1 37 2 73 1 109-1"/></svg>
-          </span>
-          <span class="result-edit">Изменить</span>
-        </button>
+        <section class="main-focus card" id="main-focus-card">
+          <div class="focus-accent"></div>
+          <div class="focus-copy">
+            <span class="eyebrow">ГЛАВНОЕ НА СЕГОДНЯ</span>
+            <h2 id="main-focus-title">Подбираю по контексту…</h2>
+            <p id="main-focus-source">Цели, задачи и продолжение работы</p>
+            <div class="focus-result" id="main-focus-result" hidden></div>
+          </div>
+          <button class="primary-compact" id="main-focus-action" type="button">Открыть</button>
+        </section>
 
-        <section class="quick-actions" aria-label="Быстрые действия">
-          <button class="quick-action is-accent" type="button" data-quick="journal">
-            <span class="quick-icon" aria-hidden="true"><svg viewBox="0 0 52 52"><path class="accent-fill" d="m9 40 3-11L34 7l10 10-22 22Z"/><path d="m9 40 3-11L34 7l10 10-22 22Zm4-11 9 9M31 10l10 10M13 46c8-3 16-3 24 0"/></svg></span>
-            <span class="quick-label">Записать</span>
+        <section class="today-grid" id="today-grid">
+          <button class="info-card card" id="today-tasks-card" type="button">
+            <span class="info-icon" data-icon="checklist"></span>
+            <span class="info-copy"><small>Сегодня</small><strong id="today-tasks-title">Нет срочных задач</strong><em id="today-tasks-note">Можно выбрать следующий шаг</em></span>
           </button>
-          <button class="quick-action" type="button" data-quick="focus">
-            <span class="quick-icon" aria-hidden="true"><svg viewBox="0 0 52 52"><path d="M16 5h20M16 47h20M18 7c0 9 4 13 8 18-4 5-8 9-8 20M34 7c0 9-4 13-8 18 4 5 8 9 8 20"/><path class="accent-fill" d="M20 13h12c-1 6-3 9-6 13-3-4-5-7-6-13Zm1 25c2-4 3-7 5-10 2 3 3 6 5 10Z"/></svg></span>
-            <span class="quick-label">Фокус</span>
-          </button>
-          <button class="quick-action" type="button" data-quick="eva">
-            <span class="quick-icon eva-mini" aria-hidden="true">
-              <svg viewBox="0 0 62 62">
-                <path class="hair-fill" d="M12 58c2-12 3-22 2-31C13 12 21 4 31 4s18 8 17 23c-1 9 0 19 2 31-6-5-12-7-19-7s-13 2-19 7Z"/>
-                <ellipse cx="31" cy="29" rx="13" ry="16" class="skin-fill"/>
-                <path class="hair-fill" d="M17 24c2-11 7-16 14-16s12 5 14 16c-5-1-9-4-12-8-3 4-8 7-16 8Z"/>
-                <circle cx="26" cy="29" r="1.5" class="solid"/><circle cx="36" cy="29" r="1.5" class="solid"/>
-                <path d="M27 36c3 2 5 2 8 0"/>
-                <path class="accent-fill" d="M18 62c1-11 6-17 13-17s12 6 13 17Z"/>
-                <path class="accent-fill no-stroke" d="M50 8c3-4 8 0 4 5l-4 3-4-3c-4-5 1-9 4-5Z"/>
-              </svg>
-            </span>
-            <span class="quick-label">Ева</span>
-          </button>
-          <button class="quick-action" type="button" data-quick="practice">
-            <span class="quick-icon" aria-hidden="true"><svg viewBox="0 0 52 52"><path d="M26 46C23 33 14 25 4 26c3 12 11 19 22 20Zm0 0c3-13 12-21 22-20-3 12-11 19-22 20Zm0-1c-10-8-13-20-7-30 8 7 11 18 7 30Zm0 0c10-8 13-20 7-30-8 7-11 18-7 30Z"/></svg></span>
-            <span class="quick-label">Практика</span>
+          <button class="info-card card" id="continue-card" type="button">
+            <span class="info-icon" data-icon="route"></span>
+            <span class="info-copy"><small>Продолжить</small><strong id="continue-title">Активная цель</strong><em id="continue-note">Открыть развитие</em></span>
           </button>
         </section>
 
-        <section class="modules-area" aria-label="Модули Евы">
-          <div class="modules-grid" id="modules-grid"></div>
-          <svg class="decorative-trail" viewBox="0 0 170 54" aria-hidden="true"><path d="M3 41c14 9 18-8 31-4 10 3 5 13 14 14 12 1 19-8 27-14 12-10 29-18 47-18"/><path class="accent-fill no-stroke" d="M88 23c3-4 8 1 3 6l-3 3-3-3c-5-5 0-10 3-6Z"/></svg>
-          <button class="eva-fab" id="eva-fab" type="button" aria-label="Открыть помощника Ева" aria-expanded="false">
-            <svg viewBox="0 0 96 96" aria-hidden="true">
-              <circle cx="48" cy="48" r="44" class="portrait-bg"/>
-              <path class="hair-fill" d="M20 88c3-18 5-35 3-48C21 18 32 8 48 8s27 10 25 32c-2 13 0 30 3 48-8-8-17-12-28-12S28 80 20 88Z"/>
-              <ellipse cx="48" cy="44" rx="20" ry="24" class="skin-fill"/>
-              <path class="hair-fill" d="M27 35c3-16 11-24 21-24s18 8 21 24c-8-2-14-7-19-13-5 7-12 11-23 13Z"/>
-              <path d="M33 39c3-2 6-2 9 0M54 39c3-2 6-2 9 0" class="thin"/>
-              <circle cx="39" cy="44" r="2" class="solid"/><circle cx="57" cy="44" r="2" class="solid"/>
-              <path d="M42 55c4 3 8 3 12 0"/>
-              <path class="accent-fill" d="M25 96c2-18 10-28 23-28s21 10 23 28Z"/>
-              <path class="paper-fill" d="M48 78c4-5 11 1 5 7l-5 4-5-4c-6-6 1-12 5-7Z"/>
-            </svg>
-            <span class="eva-online-dot"></span>
-          </button>
+        <section class="insight-card card" id="insight-card">
+          <span class="insight-avatar" id="eva-mini"></span>
+          <div><span class="eyebrow">ЕВА ЗАМЕТИЛА</span><p id="insight-text">После нескольких отметок здесь появится полезное наблюдение без лишней психодиагностики.</p></div>
+        </section>
+
+        <section class="quick-row" aria-label="Быстрые действия">
+          <button class="quick-button" type="button" data-quick="write"><span data-icon="pencil"></span><b>Записать</b></button>
+          <button class="quick-button" type="button" data-quick="eva"><span data-icon="chat"></span><b>Спросить Еву</b></button>
+          <button class="quick-button" type="button" data-quick="reset"><span data-icon="wave"></span><b>Перезагрузка</b></button>
+          <button class="quick-button" type="button" data-quick="add"><span data-icon="plus"></span><b>Добавить</b></button>
         </section>
       </section>
 
-      <section class="screen inner-screen" data-screen="goals" id="screen-goals" hidden>
-        <header class="inner-header"><p>ЛИЧНОЕ РАЗВИТИЕ</p><h1>Развитие</h1></header>
-        <div class="section-tabs" id="development-tabs">
-          <button class="is-active" type="button" data-development-tab="goals">Цели</button>
-          <button type="button" data-development-tab="life">Карта жизни</button>
-          <button type="button" data-development-tab="programs">Программы</button>
-          <button type="button" data-development-tab="habits">Привычки</button>
-          <button type="button" data-development-tab="decisions">Решения</button>
+      <section class="screen inner-screen" data-screen="development" hidden>
+        <header class="inner-header"><div><span class="eyebrow">ДОЛГОСРОЧНЫЕ ИЗМЕНЕНИЯ</span><h1>Развитие</h1></div></header>
+        <nav class="segmented" id="development-tabs" aria-label="Разделы развития">
+          <button class="is-active" data-development="overview" type="button">Обзор</button>
+          <button data-development="goals" type="button">Цели</button>
+          <button data-development="programs" type="button">Программы</button>
+          <button data-development="habits" type="button">Привычки</button>
+          <button data-development="decisions" type="button">Решения</button>
+        </nav>
+        <div class="scroll-content" id="development-content"></div>
+      </section>
+
+      <section class="screen inner-screen" data-screen="organizer" hidden>
+        <header class="inner-header split-header"><div><span class="eyebrow">ДЕЙСТВИЯ И ЗАПИСИ</span><h1>Органайзер</h1></div><button class="round-add" id="organizer-add" type="button" aria-label="Добавить">+</button></header>
+        <nav class="segmented organizer-tabs" id="organizer-tabs">
+          <button class="is-active" data-organizer="tasks" type="button">Задачи <span id="task-count">0</span></button>
+          <button data-organizer="reminders" type="button">Напоминания <span id="reminder-count">0</span></button>
+          <button data-organizer="notes" type="button">Заметки <span id="note-count">0</span></button>
+        </nav>
+        <div class="filter-row" id="task-filters">
+          <button class="is-active" data-filter="open" type="button">Текущие</button>
+          <button data-filter="today" type="button">Сегодня</button>
+          <button data-filter="done" type="button">Готово</button>
         </div>
-        <div class="screen-content" id="development-content"></div>
+        <div class="scroll-content organizer-content" id="organizer-content"></div>
       </section>
 
-      <section class="screen inner-screen organizer-screen" data-screen="organizer" id="screen-organizer" hidden>
-        <header class="inner-header organizer-header">
-          <div><p>ПЛАН И НАПОМИНАНИЯ</p><h1>Органайзер</h1></div>
-          <button class="round-add" id="add-organizer-item" type="button" aria-label="Добавить">+</button>
-        </header>
-        <div class="organizer-switch" role="tablist">
-          <button class="is-active" type="button" role="tab" data-organizer-tab="tasks">Задачи <span id="tasks-count">0</span></button>
-          <button type="button" role="tab" data-organizer-tab="reminders">Напоминания <span id="reminders-count">0</span></button>
-        </div>
-        <div class="organizer-filters" id="organizer-filters">
-          <button class="is-active" type="button" data-task-filter="open">Текущие</button>
-          <button type="button" data-task-filter="today">Сегодня</button>
-          <button type="button" data-task-filter="done">Готово</button>
-        </div>
-        <div class="screen-content organizer-content" id="organizer-content"></div>
+      <section class="screen inner-screen" data-screen="hub" hidden>
+        <header class="inner-header"><div><span class="eyebrow">ИНСТРУМЕНТЫ EVASELF</span><h1>Пульт</h1></div></header>
+        <div class="scroll-content hub-grid" id="hub-content"></div>
       </section>
 
-      <section class="screen inner-screen" data-screen="pult" id="screen-pult" hidden>
-        <header class="inner-header"><p>УПРАВЛЕНИЕ EVASELF</p><h1>Пульт</h1></header>
-        <div class="pult-summary surface-card">
-          <div><strong>Ева настроена</strong><span id="pult-user-summary">Профиль и сервисы доступны</span></div>
-          <span class="status-badge">Работает</span>
-        </div>
-        <div class="pult-sections" id="pult-sections"></div>
+      <section class="screen inner-screen" data-screen="profile" hidden>
+        <header class="inner-header"><div><span class="eyebrow">ДАННЫЕ И НАСТРОЙКИ</span><h1>Профиль</h1></div></header>
+        <div class="scroll-content" id="profile-content"></div>
       </section>
 
-      <section class="screen inner-screen" data-screen="profile" id="screen-profile" hidden>
-        <header class="inner-header"><p>НАСТРОЙКИ И КОНТЕКСТ</p><h1>Профиль</h1></header>
-        <div class="screen-content" id="profile-content"></div>
-      </section>
-
-      <section class="screen inner-screen" data-screen="progress" id="screen-progress" hidden>
-        <header class="inner-header"><p>ИТОГИ И ДИНАМИКА</p><h1>Отчёты</h1></header>
-        <div class="screen-content" id="progress-content"></div>
-      </section>
-
-      <section class="screen inner-screen astro-screen" data-screen="astro" id="screen-astro" hidden>
-        <header class="inner-header"><p>СИМВОЛИЧЕСКИЙ ВЗГЛЯД</p><h1>Астрорефлексия</h1></header>
-        <div class="symbolic-notice">Символические практики предназначены для размышления и развлечения, а не для научной диагностики или предсказания событий.</div>
-        <div class="astro-tabs" role="tablist">
-          <button class="is-active" type="button" data-astro-tab="horoscope">Гороскоп</button>
-          <button type="button" data-astro-tab="tarot">Таро</button>
-          <button type="button" data-astro-tab="numerology">Нумерология</button>
-        </div>
-        <div class="screen-content astro-content" id="astro-content"></div>
-      </section>
-
-      <section class="screen inner-screen" data-screen="module" id="screen-module" hidden>
-        <header class="inner-header"><p id="module-kicker">МОДУЛЬ EVASELF</p><h1 id="module-title">Модуль</h1></header>
-        <div class="screen-content" id="module-content"></div>
+      <section class="screen inner-screen" data-screen="module" hidden>
+        <header class="inner-header module-header"><button class="back-button" id="module-back" type="button" aria-label="Назад"><span data-icon="back"></span></button><div><span class="eyebrow" id="module-kicker">МОДУЛЬ</span><h1 id="module-title">Раздел</h1></div></header>
+        <div class="scroll-content" id="module-content"></div>
       </section>
     </main>
 
     <nav class="bottom-nav" aria-label="Основная навигация">
-      <button class="nav-item is-active" type="button" data-target="today">
-        <span class="nav-icon"><svg viewBox="0 0 34 34"><path d="M4 16 17 5l13 11v14H21v-9h-8v9H4Z"/></svg></span><span>Сегодня</span>
-      </button>
-      <button class="nav-item" type="button" data-target="goals">
-        <span class="nav-icon"><svg viewBox="0 0 34 34"><path d="M17 30V16M17 19c-8-2-9-8-8-13 8 1 11 6 8 13Zm0-3c8-2 10-8 9-13-8 1-12 6-9 13Z"/></svg></span><span>Развитие</span>
-      </button>
-      <button class="nav-item" type="button" data-target="organizer">
-        <span class="nav-icon"><svg viewBox="0 0 34 34"><rect x="6" y="8" width="22" height="22" rx="3"/><path d="M11 4v8M23 4v8M6 14h22M11 19h4M20 19h4M11 25h4M20 25h4"/></svg></span><span>Органайзер</span>
-      </button>
-      <button class="nav-item" type="button" data-target="pult">
-        <span class="nav-icon"><svg viewBox="0 0 34 34"><path d="M5 9h24M5 17h24M5 25h24"/><circle cx="12" cy="9" r="3" class="paper-fill"/><circle cx="22" cy="17" r="3" class="paper-fill"/><circle cx="15" cy="25" r="3" class="paper-fill"/></svg></span><span>Пульт</span>
-      </button>
-      <button class="nav-item" type="button" data-target="profile">
-        <span class="nav-icon"><svg viewBox="0 0 34 34"><circle cx="17" cy="10" r="6"/><path d="M6 31c1-9 5-14 11-14s10 5 11 14"/></svg></span><span>Профиль</span>
-      </button>
+      <button class="nav-item is-active" data-target="today" type="button"><span data-icon="home"></span><b>Сегодня</b></button>
+      <button class="nav-item" data-target="development" type="button"><span data-icon="sprout"></span><b>Развитие</b></button>
+      <button class="nav-item" data-target="organizer" type="button"><span data-icon="calendar"></span><b>Органайзер</b></button>
+      <button class="nav-item" data-target="hub" type="button"><span data-icon="sliders"></span><b>Пульт</b></button>
+      <button class="nav-item" data-target="profile" type="button"><span data-icon="user"></span><b>Профиль</b></button>
     </nav>
 
-    <div class="toast" id="toast" hidden></div>
-
-    <dialog class="bottom-sheet" id="sheet">
-      <div class="sheet-grabber"></div>
-      <header class="sheet-header">
-        <div><h2 id="sheet-title">Действие</h2><p id="sheet-subtitle" hidden></p></div>
-        <button class="sheet-close" id="sheet-close" type="button" aria-label="Закрыть">×</button>
-      </header>
-      <div class="sheet-content" id="sheet-content"></div>
+    <dialog class="sheet" id="sheet">
+      <div class="sheet-card">
+        <div class="grabber"></div>
+        <header class="sheet-header"><div><h2 id="sheet-title">Действие</h2><p id="sheet-subtitle"></p></div><button class="sheet-close" id="sheet-close" type="button" aria-label="Закрыть">×</button></header>
+        <div class="sheet-content" id="sheet-content"></div>
+      </div>
     </dialog>
+
+    <div class="toast" id="toast" hidden></div>
   </div>
-  <script src="/app/app.js?v=20260730-final2"></script>
+  <script src="/app/app.js?v=20260730-v3"></script>
 </body>
 </html>
