@@ -13,6 +13,7 @@ const state = {
   etag: null,
   providers: [],
   router: null,
+  settingProfiles: [],
   pendingSudo: null,
   pendingConfirm: null,
   events: null,
@@ -1108,17 +1109,81 @@ async function loadSettings() {
   const { payload, response } = await request("/settings");
   state.settings = payload.settings;
   state.etag = response.headers.get("ETag");
-  $("#settings-meta").innerHTML = `
-    <div class="stat"><strong>${payload.settings.length}</strong><span>параметров в реестре</span></div>
-    <div class="stat"><strong>${payload.missing_required}</strong><span>обязательных не заполнено</span></div>
-    <div class="stat"><strong>${payload.version}</strong><span>версия конфигурации</span></div>`;
-  $("#settings-form").innerHTML = payload.settings.map((item) => `
+  state.settingProfiles = payload.profiles || [];
+  renderSettingProfiles();
+
+  const main = payload.settings.filter((item) => !item.advanced);
+  const advanced = payload.settings.filter((item) => item.advanced);
+  $("#settings-form").innerHTML = main.map(settingCard).join("");
+  $("#settings-form-advanced").innerHTML = advanced.map(settingCard).join("");
+  $("#advanced-count").textContent = advanced.length
+    ? `${advanced.length} параметра тонкой настройки`
+    : "";
+  $("#toggle-advanced").hidden = advanced.length === 0;
+}
+
+/**
+ * Карточка параметра. Рекомендация стоит НАД полем ввода: администратор
+ * читает её раньше, чем смотрит на текущее значение, и не гадает, что
+ * туда положить.
+ */
+function settingCard(item) {
+  const presets = item.presets?.length
+    ? `<label class="preset-row">Готовое значение
+        <select data-preset-for="${escapeHtml(item.key)}">
+          <option value="">— выбрать —</option>
+          ${item.presets.map((preset) => `<option value="${escapeHtml(JSON.stringify(preset.value))}"${JSON.stringify(preset.value) === JSON.stringify(item.value) ? " selected" : ""}>${escapeHtml(preset.title)}</option>`).join("")}
+        </select>
+      </label>`
+    : "";
+  return `
     <article class="setting-card">
-      <div class="setting-head"><div><h3>${escapeHtml(item.title)}</h3><span class="technical">${escapeHtml(item.key)}</span></div>${item.requires_restart ? '<span class="tag">нужен перезапуск</span>' : ""}</div>
+      <div class="setting-head">
+        <div><h3>${escapeHtml(item.title)}</h3><span class="technical">${escapeHtml(item.key)}</span></div>
+        ${item.requires_restart ? '<span class="tag">нужен перезапуск</span>' : ""}
+      </div>
       <p>${escapeHtml(item.description)}</p>
+      ${item.recommended ? `<p class="recommended"><span>Рекомендуется</span>${escapeHtml(item.recommended)}</p>` : ""}
+      ${presets}
       <label>Значение${inputFor(item)}</label>
-      <div class="setting-actions"><span class="technical">Влияет: ${escapeHtml(item.affects.join(", "))}</span><button class="reset" type="button" data-reset="${escapeHtml(item.key)}">По умолчанию</button></div>
-    </article>`).join("");
+      <div class="setting-actions">
+        <span class="technical">Влияет: ${escapeHtml(item.affects.join(", "))}</span>
+        <button class="reset" type="button" data-reset="${escapeHtml(item.key)}">По умолчанию</button>
+      </div>
+    </article>`;
+}
+
+function renderSettingProfiles() {
+  const profiles = state.settingProfiles || [];
+  $("#settings-profiles-card").hidden = profiles.length === 0;
+  $("#settings-profiles").innerHTML = profiles.map((profile) => `
+    <button class="profile-choice" type="button" data-profile="${escapeHtml(profile.code)}">
+      <strong>${escapeHtml(profile.title)}</strong>
+      <span>${escapeHtml(profile.description)}</span>
+    </button>`).join("");
+}
+
+/** Подставляет значения набора в поля, не сохраняя их. */
+function applySettingProfile(code) {
+  const profile = (state.settingProfiles || []).find((item) => item.code === code);
+  if (!profile) return;
+  let filled = 0;
+  for (const [key, value] of Object.entries(profile.values)) {
+    const input = document.querySelector(`[data-key="${CSS.escape(key)}"]`);
+    if (!input) continue;
+    input.value = typeof value === "boolean" ? String(value) : String(value);
+    const preset = document.querySelector(`[data-preset-for="${CSS.escape(key)}"]`);
+    if (preset) preset.value = JSON.stringify(value);
+    input.closest(".setting-card")?.classList.add("is-touched");
+    filled += 1;
+  }
+  document.querySelectorAll(".profile-choice").forEach((node) => {
+    node.classList.toggle("is-active", node.dataset.profile === code);
+  });
+  // Часть значений может лежать в свёрнутом блоке — сказать об этом,
+  // иначе выглядит, будто набор применился не полностью.
+  const hiddenBlock = $("#settings-form-advanced").hidden;
+  toast(`Набор «${profile.title}» подставлен в ${filled} пол(я)${hiddenBlock ? ", часть — в свёрнутых настройках" : ""}. Нажмите «Сохранить».`);
 }
 
 async function saveSettings(restart = false) {
@@ -1149,7 +1214,7 @@ async function saveSettings(restart = false) {
       scope: "services:restart",
       title: "Применить настройки перезапуском",
       description: "Agent Runtime будет перезапущен. Агенты, conversation и память сохранятся.",
-      action: async () => await restartService("agent-runtime"),
+      action: async () => await lifecycleService("restart", "agent-runtime"),
     });
   }
 }
@@ -1404,6 +1469,27 @@ $("#create-backup").addEventListener("click", () => createBackup().catch(handleE
 $("#check-updates").addEventListener("click", () => checkUpdates().catch(handleError));
 $("#reload-backups").addEventListener("click", () => loadOperations().catch(handleError));
 $("#install-update").addEventListener("click", installUpdate);
+$("#toggle-advanced").addEventListener("click", () => {
+  const form = $("#settings-form-advanced");
+  form.hidden = !form.hidden;
+  $("#toggle-advanced").textContent = form.hidden
+    ? "Показать остальные настройки"
+    : "Скрыть остальные настройки";
+});
+$("#settings-profiles").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-profile]");
+  if (button) applySettingProfile(button.dataset.profile);
+});
+// Пресет поля подставляет значение в сам инпут: сохраняется всегда то,
+// что в поле, поэтому выпадающий список не может разойтись с ним.
+document.addEventListener("change", (event) => {
+  const preset = event.target.closest("[data-preset-for]");
+  if (!preset || !preset.value) return;
+  const input = document.querySelector(`[data-key="${CSS.escape(preset.dataset.presetFor)}"]`);
+  if (!input) return;
+  input.value = String(JSON.parse(preset.value));
+  input.closest(".setting-card")?.classList.add("is-touched");
+});
 $("#save-settings").addEventListener("click", () => saveSettings(false).catch(handleError));
 $("#save-restart").addEventListener("click", () => saveSettings(true).catch(handleError));
 $("#settings-form").addEventListener("click", (event) => {

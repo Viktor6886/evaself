@@ -480,3 +480,54 @@ dialog .eyebrow { margin-top: 0; }
 .router-grid small { color: var(--muted, #8b93a4); font-size: 11px; }
 .router-flags { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 14px; }
 .router-flags .flag { display: flex; align-items: center; gap: 6px; font-size: 12.5px; }
+
+/* ---------------------------------------------------------------------
+ * Системные настройки: наборы, рекомендации, продвинутые (2.7)
+ * ------------------------------------------------------------------- */
+.profile-choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin-top: 4px; }
+.profile-choice {
+  display: grid;
+  gap: 5px;
+  padding: 13px;
+  border: 1px solid var(--line, #2a2f3a);
+  border-radius: 12px;
+  background: var(--bg, #0e1117);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.profile-choice:hover { border-color: var(--line-strong, #3a4150); }
+.profile-choice.is-active { border-color: #35c07a; }
+.profile-choice strong { font-size: 14px; }
+.profile-choice span { color: var(--muted, #8b93a4); font-size: 12px; line-height: 1.45; }
+
+/* Рекомендация стоит над полем ввода — её читают до того, как решают,
+   что вписать. */
+.recommended {
+  display: grid;
+  gap: 3px;
+  margin: 10px 0 0;
+  padding: 9px 11px;
+  border-left: 3px solid #35c07a;
+  border-radius: 0 8px 8px 0;
+  background: rgba(53, 192, 122, .07);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+.recommended span {
+  color: #4bd08c;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+.preset-row { display: grid; gap: 5px; margin-top: 10px; font-size: 12px; }
+.preset-row select {
+  padding: 8px 10px;
+  border: 1px solid var(--line, #2a2f3a);
+  border-radius: 9px;
+  background: var(--bg, #0e1117);
+  color: inherit;
+}
+.setting-card.is-touched { border-color: #35c07a; }
+.advanced-toggle { display: flex; align-items: center; gap: 12px; margin: 18px 0 12px; }

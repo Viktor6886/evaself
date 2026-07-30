@@ -1,7 +1,13 @@
 import type pg from "pg";
 
 import { adminBadRequest, adminConflict, adminNotFound, preconditionRequired } from "./errors.js";
-import { SETTINGS_REGISTRY, SETTING_BY_KEY, type SettingDefinition } from "./settings-registry.js";
+import {
+  SETTING_PROFILES,
+  SETTINGS_REGISTRY,
+  SETTING_BY_KEY,
+  type SettingDefinition,
+  type SettingProfile,
+} from "./settings-registry.js";
 
 interface Publisher {
   publish(channel: string, message: string): Promise<number>;
@@ -68,6 +74,7 @@ export class ConfigService {
       updated_at: Date | null;
     }>;
     missing_required: number;
+    profiles: readonly SettingProfile[];
   }> {
     const [{ rows }, version] = await Promise.all([
       this.pool.query<SettingRow>(
@@ -97,6 +104,7 @@ export class ConfigService {
       version,
       settings,
       missing_required: missingRequired,
+      profiles: SETTING_PROFILES,
     };
   }
 

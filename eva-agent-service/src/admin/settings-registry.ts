@@ -13,7 +13,71 @@ export interface SettingDefinition {
   requires_restart: boolean;
   description: string;
   affects: string[];
+  /** Что поставить, если не уверен. Показывается НАД полем ввода. */
+  recommended?: string;
+  /** Готовые значения выпадающим списком вместо ручного ввода. */
+  presets?: Array<{ value: string | number | boolean; title: string }>;
+  /**
+   * Параметр для тонкой настройки. Такие спрятаны за «показать
+   * остальные»: администратору в обычной ситуации они не нужны, а
+   * длинный список из пятнадцати полей читать невозможно.
+   */
+  advanced?: boolean;
 }
+
+/**
+ * Наборы значений сразу для нескольких параметров.
+ *
+ * Отдельные поля вроде «интервал планировщика» осмысленны только
+ * вместе: экономный режим — это одновременно редкий планировщик, редкий
+ * heartbeat и предупреждения в журнале. Поэтому кроме пресетов на поле
+ * есть пресеты на весь профиль.
+ */
+export interface SettingProfile {
+  code: string;
+  title: string;
+  description: string;
+  values: Record<string, string | number | boolean>;
+}
+
+export const SETTING_PROFILES: readonly SettingProfile[] = [
+  {
+    code: "economy",
+    title: "Экономный",
+    description: "Меньше фоновых обращений и логов. Для маленького VPS: Ева отвечает так же, но реже проверяет расписание.",
+    values: {
+      "runtime.scheduler_interval_seconds": 300,
+      "runtime.heartbeat_interval_seconds": 1800,
+      "runtime.log_level": "warn",
+      "runtime.graph_memory_enabled": false,
+      "runtime.profile_cache_ttl_seconds": 600,
+    },
+  },
+  {
+    code: "balanced",
+    title: "Сбалансированный",
+    description: "Значения по умолчанию. Подходит большинству установок.",
+    values: {
+      "runtime.scheduler_interval_seconds": 60,
+      "runtime.heartbeat_interval_seconds": 600,
+      "runtime.log_level": "info",
+      "runtime.graph_memory_enabled": true,
+      "runtime.profile_cache_ttl_seconds": 60,
+    },
+  },
+  {
+    code: "responsive",
+    title: "Отзывчивый",
+    description: "Частые проверки расписания и подробный журнал. Заметно нагружает сервер — для отладки и мощных машин.",
+    values: {
+      "runtime.scheduler_interval_seconds": 15,
+      "runtime.heartbeat_interval_seconds": 120,
+      "runtime.log_level": "debug",
+      "runtime.graph_memory_enabled": true,
+      "runtime.profile_cache_ttl_seconds": 15,
+    },
+  },
+] as const;
 
 export const SETTINGS_REGISTRY: readonly SettingDefinition[] = [
   {
@@ -27,6 +91,8 @@ export const SETTINGS_REGISTRY: readonly SettingDefinition[] = [
     requires_restart: true,
     description: "Часовой пояс установки в формате IANA",
     affects: ["agent-runtime", "scheduler"],
+    recommended: "Часовой пояс, в котором живёт владелец — от него считаются «утро» и «вечер» в напоминаниях.",
+    presets: [{ value: "Europe/Moscow", title: "Москва" }, { value: "Asia/Yekaterinburg", title: "Екатеринбург" }, { value: "Europe/Kaliningrad", title: "Калининград" }, { value: "Asia/Novosibirsk", title: "Новосибирск" }, { value: "UTC", title: "UTC" }],
   },
   {
     key: "runtime.scheduler_interval_seconds",
@@ -41,6 +107,8 @@ export const SETTINGS_REGISTRY: readonly SettingDefinition[] = [
     requires_restart: true,
     description: "Как часто scheduler опрашивает очередь задач",
     affects: ["scheduler"],
+    recommended: "60 секунд. Реже — меньше нагрузка, но напоминания приходят с задержкой до этого интервала.",
+    presets: [{ value: 300, title: "Экономно — раз в 5 минут" }, { value: 60, title: "Обычно — раз в минуту" }, { value: 15, title: "Часто — раз в 15 секунд" }],
   },
   {
     key: "runtime.heartbeat_interval_seconds",
@@ -55,6 +123,8 @@ export const SETTINGS_REGISTRY: readonly SettingDefinition[] = [
     requires_restart: true,
     description: "Период фоновой проверки контакта",
     affects: ["heartbeat"],
+    recommended: "60 секунд. Это проверка живости фоновых задач, а не опрос Telegram.",
+    presets: [{ value: 1800, title: "Экономно — раз в 30 минут" }, { value: 600, title: "Обычно — раз в 10 минут" }, { value: 120, title: "Часто — раз в 2 минуты" }],
   },
   {
     key: "runtime.telegram_typing_interval_ms",
@@ -69,6 +139,8 @@ export const SETTINGS_REGISTRY: readonly SettingDefinition[] = [
     requires_restart: false,
     description: "Частота продления индикатора набора сообщения",
     affects: ["telegram-runtime"],
+    recommended: "4000 мс. Telegram сам гасит индикатор через 5 секунд, чаще слать бессмысленно.",
+    advanced: true,
   },
   {
     key: "runtime.profile_completion_enabled",
@@ -81,6 +153,7 @@ export const SETTINGS_REGISTRY: readonly SettingDefinition[] = [
     requires_restart: true,
     description: "Разрешить Еве дополнять профиль пользователя",
     affects: ["agent-runtime"],
+    recommended: "Включено. Ева постепенно уточняет город, часовой пояс и предпочтения в разговоре.",
   },
   {
     key: "runtime.vector_goals_enabled",
@@ -93,6 +166,7 @@ export const SETTINGS_REGISTRY: readonly SettingDefinition[] = [
     requires_restart: true,
     description: "Включить инструменты VECTOR для целей",
     affects: ["agent-runtime"],
+    recommended: "Включено, если пользуетесь целями и рабочими блоками.",
   },
   {
     key: "runtime.graph_memory_enabled",
@@ -105,6 +179,7 @@ export const SETTINGS_REGISTRY: readonly SettingDefinition[] = [
     requires_restart: true,
     description: "Использовать граф связей памяти",
     affects: ["agent-runtime"],
+    recommended: "Включено. Выключение экономит память и время ответа, но Ева перестаёт связывать людей и события между собой.",
   },
   {
     key: "runtime.graph_context_timeout_ms",
@@ -119,6 +194,8 @@ export const SETTINGS_REGISTRY: readonly SettingDefinition[] = [
     requires_restart: true,
     description: "Максимальное время подготовки графового контекста",
     affects: ["agent-runtime"],
+    recommended: "Сколько ждать графовый контекст, прежде чем отвечать без него.",
+    advanced: true,
   },
   {
     key: "runtime.profile_cache_ttl_seconds",
@@ -133,6 +210,8 @@ export const SETTINGS_REGISTRY: readonly SettingDefinition[] = [
     requires_restart: true,
     description: "Срок кеширования профиля пользователя",
     affects: ["agent-runtime"],
+    recommended: "300 секунд. Больше — меньше запросов к базе, но правки профиля применяются с задержкой.",
+    advanced: true,
   },
   {
     key: "runtime.conversation_mirror_enabled",
@@ -145,6 +224,8 @@ export const SETTINGS_REGISTRY: readonly SettingDefinition[] = [
     requires_restart: true,
     description: "Хранить служебное зеркало диалога в PostgreSQL",
     affects: ["agent-runtime"],
+    recommended: "Включено. Нужно для истории переписки в панели.",
+    advanced: true,
   },
   {
     key: "runtime.outbox_enabled",
@@ -157,6 +238,8 @@ export const SETTINGS_REGISTRY: readonly SettingDefinition[] = [
     requires_restart: true,
     description: "Отправлять Telegram-сообщения через outbox",
     affects: ["telegram-runtime", "outbox"],
+    recommended: "Включено. Выключать только при разборе проблем с доставкой: без очереди сообщения теряются при сбое.",
+    advanced: true,
   },
   {
     key: "runtime.log_level",
@@ -169,6 +252,8 @@ export const SETTINGS_REGISTRY: readonly SettingDefinition[] = [
     requires_restart: true,
     description: "Минимальный уровень структурированных логов",
     affects: ["agent-runtime", "admin-api"],
+    recommended: "info в обычной работе, debug — только когда разбираете проблему: журнал растёт быстро.",
+    presets: [{ value: "warn", title: "Только предупреждения" }, { value: "info", title: "Обычный" }, { value: "debug", title: "Подробный — для отладки" }],
   },
   {
     key: "runtime.lock_ttl_seconds",
@@ -183,6 +268,8 @@ export const SETTINGS_REGISTRY: readonly SettingDefinition[] = [
     requires_restart: true,
     description: "Срок блокировки параллельной обработки пользователя",
     affects: ["agent-runtime"],
+    recommended: "Защита от параллельной обработки двух сообщений одного пользователя.",
+    advanced: true,
   },
   {
     key: "runtime.turn_timeout_ms",
@@ -197,6 +284,8 @@ export const SETTINGS_REGISTRY: readonly SettingDefinition[] = [
     requires_restart: true,
     description: "Максимальная длительность одного ответа агента",
     affects: ["agent-runtime"],
+    recommended: "Потолок на один ход агента вместе с инструментами.",
+    advanced: true,
   },
 ] as const;
 
