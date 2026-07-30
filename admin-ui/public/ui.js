@@ -3,6 +3,7 @@ const state = {
   me: null,
   page: "overview",
   overview: null,
+  integration: null,
   settings: null,
   etag: null,
   providers: [],
@@ -186,6 +187,11 @@ function statusCard(item, options = {}) {
   const link = item.public_url
     ? `<a class="button tiny ghost" href="${escapeHtml(item.public_url)}" target="_blank" rel="noreferrer">Открыть ↗</a>`
     : "";
+  // Настраиваются только интеграции: у сервисов правится не адрес, а
+  // системные настройки, и они живут на своей вкладке.
+  const configureButton = item.type === "integration" && ["owner", "admin"].includes(state.me.role)
+    ? `<button class="button tiny ghost" data-configure="${escapeHtml(item.id)}">Настроить</button>`
+    : "";
   return `
     <article class="status-card color-${escapeHtml(status.color)}">
       <div class="status-card-head">
@@ -199,7 +205,7 @@ function statusCard(item, options = {}) {
         <span>Длительность: <strong>${status.duration_ms == null ? "—" : `${status.duration_ms} мс`}</strong></span>
       </div>
       ${status.message ? `<p class="status-message">${escapeHtml(status.message)}</p>` : ""}
-      <div class="card-actions">${checkButton}${restartButton}${link}</div>
+      <div class="card-actions">${checkButton}${configureButton}${restartButton}${link}</div>
     </article>`;
 }
 
@@ -379,6 +385,94 @@ function applyLettaLink(services) {
   } else {
     link.hidden = true;
   }
+}
+
+/* ---------------------------------------------------------------------
+ * Редактор интеграции (2.3)
+ * ------------------------------------------------------------------- */
+const FIELD_STATE_LABELS = {
+  green: "работает", yellow: "требует внимания", red: "ошибка",
+  blue: "проверяется", gray: "выключено",
+};
+
+async function openIntegration(id) {
+  const { payload } = await request(`/integrations/${encodeURIComponent(id)}/config`);
+  state.integration = payload;
+  $("#integration-title").textContent = payload.title;
+  $("#integration-purpose").textContent = payload.purpose;
+
+  const check = payload.last_check;
+  const statusNode = $("#integration-status");
+  statusNode.className = `integration-status color-${check ? check.color : "gray"}`;
+  statusNode.textContent = check
+    ? `Последняя проверка: ${FIELD_STATE_LABELS[check.color] || check.state}` +
+      `${check.checked_at ? ` · ${localDate(check.checked_at)}` : ""}` +
+      `${check.message ? ` · ${check.message}` : ""}`
+    : "Проверок ещё не было";
+
+  const note = $("#integration-note");
+  const parts = [];
+  if (payload.note) parts.push(payload.note);
+  if (payload.restart_required) {
+    // Значения читают контейнеры при старте — об этом надо сказать
+    // прямо, иначе администратор ждёт мгновенного эффекта.
+    parts.push(`Изменения вступят в силу после перезапуска «${payload.restart_required}».`);
+  }
+  note.textContent = parts.join(" ");
+  note.hidden = parts.length === 0;
+
+  $("#integration-form").innerHTML = payload.editable
+    ? payload.fields.map(integrationField).join("")
+    : '<p class="muted">У этой интеграции нет настраиваемых полей: она работает на внутренних значениях установки.</p>';
+  $("#integration-save").hidden = !payload.editable;
+  $("#integration-dialog").showModal();
+}
+
+function integrationField(field) {
+  const mark = field.configured
+    ? '<span class="field-ok">настроен</span>'
+    : (field.required ? '<span class="field-missing">не задан</span>' : "");
+  if (field.kind === "select") {
+    const options = (field.options || [])
+      .map((option) => `<option value="${escapeHtml(option.value)}"${option.value === field.value ? " selected" : ""}>${escapeHtml(option.title)}</option>`)
+      .join("");
+    return `<label><span>${escapeHtml(field.title)} ${mark}</span>
+      <select name="${escapeHtml(field.name)}"><option value="">—</option>${options}</select>
+      <small>${escapeHtml(field.hint)}</small></label>`;
+  }
+  // У секрета поле всегда пустое: текущее значение не показывается, а
+  // пустое поле означает «оставить как есть».
+  const type = field.kind === "secret" ? "password" : "text";
+  const value = field.kind === "secret" ? "" : (field.value || "");
+  const placeholder = field.kind === "secret"
+    ? (field.configured ? "оставьте пустым, чтобы не менять" : "введите значение")
+    : (field.placeholder || "");
+  return `<label><span>${escapeHtml(field.title)} ${mark}</span>
+    <input type="${type}" name="${escapeHtml(field.name)}" value="${escapeHtml(value)}"
+      placeholder="${escapeHtml(placeholder)}"${field.kind === "secret" ? ' autocomplete="new-password"' : ""}>
+    <small>${escapeHtml(field.hint)}</small></label>`;
+}
+
+async function saveIntegration() {
+  const id = state.integration?.id;
+  if (!id) return;
+  const form = $("#integration-form");
+  const body = {};
+  for (const [key, value] of new FormData(form).entries()) body[key] = String(value);
+  askSudo({
+    scope: "secrets:write",
+    title: "Сохранить настройки интеграции",
+    description: "Значения без секретов попадут в настройки установки, ключи — в Secret Store.",
+    action: async () => {
+      await request(`/integrations/${encodeURIComponent(id)}/config`, {
+        method: "PUT",
+        body: JSON.stringify(body),
+      });
+      toast("Настройки сохранены");
+      await openIntegration(id);
+      await loadServicesAndIntegrations();
+    },
+  });
 }
 
 async function startCheck(targetType, id) {
@@ -884,6 +978,11 @@ $("#page-services").addEventListener("click", (event) => {
     startCheck(check.dataset.targetType, check.dataset.check).catch(handleError);
     return;
   }
+  const configure = event.target.closest("[data-configure]");
+  if (configure) {
+    openIntegration(configure.dataset.configure).catch(handleError);
+    return;
+  }
   const lifecycle = event.target.closest("[data-lifecycle]");
   if (lifecycle) {
     const action = lifecycle.dataset.lifecycle;
@@ -896,6 +995,15 @@ $("#page-services").addEventListener("click", (event) => {
       action: async () => await lifecycleService(action, lifecycle.dataset.service),
     });
   }
+});
+$("#close-integration").addEventListener("click", () => $("#integration-dialog").close());
+$("#integration-dialog").addEventListener("click", (event) => {
+  if (event.target === $("#integration-dialog")) $("#integration-dialog").close();
+});
+$("#integration-save").addEventListener("click", () => saveIntegration().catch(handleError));
+$("#integration-check").addEventListener("click", () => {
+  const id = state.integration?.id;
+  if (id) startCheck("integration", id).catch(handleError);
 });
 $("#new-provider").addEventListener("click", () => openProviderEditor());
 $("#close-provider").addEventListener("click", () => {

@@ -327,3 +327,44 @@ dialog .eyebrow { margin-top: 0; }
 .error-kind { color: var(--muted, #8b93a4); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
 .error-row p { margin: 4px 0; font-size: 13px; overflow-wrap: anywhere; }
 .error-row small { color: var(--muted, #8b93a4); font-size: 12px; }
+
+/* ---------------------------------------------------------------------
+ * Редактор внешней интеграции (2.3)
+ * ------------------------------------------------------------------- */
+.integration-status {
+  margin: 0 0 14px;
+  padding: 9px 12px;
+  border: 1px solid var(--line, #2a2f3a);
+  border-left-width: 3px;
+  border-radius: 10px;
+  font-size: 13px;
+}
+.integration-status.color-green { border-left-color: #35c07a; }
+.integration-status.color-yellow { border-left-color: #e0a33a; }
+.integration-status.color-red { border-left-color: #e05a52; }
+.integration-status.color-blue { border-left-color: #4f8ff0; }
+.integration-status.color-gray { border-left-color: #8b93a4; }
+
+.integration-form { display: grid; gap: 14px; }
+.integration-form label { display: grid; gap: 5px; font-size: 13px; }
+.integration-form label > span { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+.integration-form input,
+.integration-form select {
+  padding: 9px 11px;
+  border: 1px solid var(--line, #2a2f3a);
+  border-radius: 10px;
+  background: var(--bg, #0e1117);
+  color: inherit;
+}
+.integration-form small { color: var(--muted, #8b93a4); font-size: 12px; }
+.field-ok, .field-missing {
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.field-ok { background: rgba(53, 192, 122, .16); color: #4bd08c; }
+.field-missing { background: rgba(224, 90, 82, .16); color: #ec7a72; }
+#integration-dialog .form-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }

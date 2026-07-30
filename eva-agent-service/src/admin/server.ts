@@ -26,6 +26,7 @@ import {
 import { auditParams, globalSecretRedactor } from "./redactor.js";
 import { SecretStore } from "./secret-store.js";
 import { HealthService } from "./health-service.js";
+import { IntegrationConfigService } from "./integration-config-service.js";
 import { LlmRouterAdminService } from "./llm-router-service.js";
 import { OperationService } from "./operation-service.js";
 import { ProviderService } from "./provider-service.js";
@@ -54,6 +55,7 @@ export interface AdminServerServices {
   operations: OperationService;
   providers: ProviderService;
   llmRouter: LlmRouterAdminService;
+  integrations: IntegrationConfigService;
   events: Redis;
   logger: Logger;
   readiness: () => Promise<boolean>;
@@ -287,6 +289,30 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
       contexts.get(request)!.session!.user.id,
     );
     return reply.status(202).send(result);
+  });
+
+  // Значения без секрета читают и operator с viewer: там нет ключей,
+  // только адреса и модели. Правка — owner и admin, и через sudo, потому
+  // что тем же запросом меняется секрет в Secret Store.
+  app.get("/api/admin/v1/integrations/:id/config", {
+    config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
+  }, async (request) => {
+    const id = (request.params as { id?: string }).id ?? "";
+    return await services.integrations.get(id);
+  });
+
+  app.put("/api/admin/v1/integrations/:id/config", {
+    config: {
+      roles: ["owner", "admin"],
+      sudoScope: "secrets:write",
+    } satisfies RouteAccess,
+  }, async (request) => {
+    const id = (request.params as { id?: string }).id ?? "";
+    return await services.integrations.put(
+      id,
+      objectBody(request.body),
+      contexts.get(request)!.session!.user.id,
+    );
   });
 
   app.post("/api/admin/v1/integrations/:id/check", {

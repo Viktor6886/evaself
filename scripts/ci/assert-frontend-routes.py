@@ -19,11 +19,16 @@ import sys
 
 SENTINEL = "\x00"
 
+# (файл, префикс, который его helper подставляет к пути)
+#
+# Панели ходят через собственный request(), который сам дописывает
+# базовый путь — без этого их вызовы вообще не проверялись, и любая
+# опечатка в маршруте админки доезжала до продакшена молча.
 SOURCES = [
-    "webapp/public/app/app.js",
-    "webapp/public/assets/bot-link.js",
-    "letta-ui/public/ui.js",
-    "admin-ui/public/ui.js",
+    ("webapp/public/app/app.js", ""),
+    ("webapp/public/assets/bot-link.js", ""),
+    ("letta-ui/public/ui.js", ""),
+    ("admin-ui/public/ui.js", "/api/admin/v1"),
 ]
 
 # Fastify registers the public group under a prefix, and the admin API is
@@ -36,14 +41,14 @@ ROUTE_FILES = [
 ]
 
 ROUTE_RE = re.compile(
-    r'(?:app|publicApp|webApp|adminApp|instance)\.(?:get|post|patch|delete)\(\s*"([^"]+)"'
+    r'(?:app|publicApp|webApp|adminApp|instance)\.(?:get|post|put|patch|delete)\(\s*"([^"]+)"'
 )
 # Шаблонная строка может содержать кавычки внутри ${...}
 # (`/x/${encodeURIComponent(id || "0")}/y`), поэтому у backtick-варианта
 # своё правило: он читается до закрывающего backtick, а не до первой
 # кавычки. Иначе путь обрезался на середине и «не находился».
 CALL_RE = re.compile(
-    r'(?:api|streamApi)\(\s*(?:`([^`]+)`|"([^"]+)"|\'([^\']+)\')'
+    r'(?:api|streamApi|request)\(\s*(?:`([^`]+)`|"([^"]+)"|\'([^\']+)\')'
 )
 FETCH_RE = re.compile(r'fetch\(\s*"(/api/[^"?]+)')
 
@@ -76,7 +81,7 @@ def main() -> int:
     missing: list[str] = []
     checked = 0
 
-    for name in SOURCES:
+    for name, call_prefix in SOURCES:
         source = pathlib.Path(name)
         if not source.exists():
             continue
@@ -92,6 +97,8 @@ def main() -> int:
             path = re.sub(r"\$\{[^}]*\}", SENTINEL, call).split("?")[0]
             if not path.startswith("/"):
                 continue
+            if call_prefix and not path.startswith(call_prefix):
+                path = call_prefix + path
             checked += 1
             if not any(segments_match(path, route) for route in routes):
                 missing.append(f"{name}: {call}")

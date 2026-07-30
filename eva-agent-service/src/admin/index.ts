@@ -8,6 +8,7 @@ import { ConfigService } from "./config-service.js";
 import { HealthService } from "./health-service.js";
 import { loadMasterKey, SecretStore } from "./secret-store.js";
 import { OperationService } from "./operation-service.js";
+import { IntegrationConfigService } from "./integration-config-service.js";
 import { LlmRouterAdminService } from "./llm-router-service.js";
 import { InternalAgentClient, ProviderService } from "./provider-service.js";
 import { OutboundGateway } from "./outbound-gateway.js";
@@ -44,6 +45,7 @@ async function main(): Promise<void> {
   const health = new HealthService(pool, redis);
   const operations = new OperationService(pool, redis, new UpdaterClient());
   const llmRouter = new LlmRouterAdminService(pool);
+  const integrations = new IntegrationConfigService(pool, secrets);
   const providers = new ProviderService(
     new InternalAgentClient(secrets),
     new OutboundGateway(),
@@ -57,6 +59,7 @@ async function main(): Promise<void> {
     operations,
     providers,
     llmRouter,
+    integrations,
     events: redis,
     logger,
     readiness: async () => {

@@ -104,6 +104,22 @@
           </div>
           <div id="services-list" class="status-grid"></div>
           <div id="integrations-list" class="status-grid" hidden></div>
+
+          <!-- Редактор интеграции. Открывается кнопкой «Настроить» в
+               карточке: раньше карточка умела только показать цвет. -->
+          <dialog id="integration-dialog" class="sheet-dialog">
+            <div class="sheet-head">
+              <div><h3 id="integration-title">Интеграция</h3><p id="integration-purpose" class="muted"></p></div>
+              <button id="close-integration" class="icon-button" aria-label="Закрыть">×</button>
+            </div>
+            <p id="integration-status" class="integration-status"></p>
+            <form id="integration-form" class="integration-form"></form>
+            <p id="integration-note" class="muted" hidden></p>
+            <div class="form-actions">
+              <button id="integration-check" class="button ghost" type="button">Проверить соединение</button>
+              <button id="integration-save" class="button primary" type="button">Сохранить</button>
+            </div>
+          </dialog>
         </section>
 
         <section id="page-ai" class="page">
