@@ -12,62 +12,137 @@
 	</head>
 	<body>
 		<main class="wrap">
-			<p class="eyebrow">Evaself</p>
-			<h1>Ева — ИИ-компаньон и ассистент по самопознанию</h1>
-			<p class="lead">
-				Ева живёт в Telegram, помнит ваш контекст между разговорами и помогает
-				лучше понимать себя: замечать закономерности, формулировать цели и
-				возвращаться к ним.
-			</p>
-
-			<p>
-				<a class="button" href="#" id="open-bot">Открыть в Telegram</a>
-			</p>
-
-			<h2>Что умеет</h2>
-			<div class="grid">
-				<div class="card">
-					<strong>Долгая память</strong>
-					<p class="small muted">
-						У каждого пользователя свой агент со своей памятью — Ева не
-						начинает знакомство заново после каждого сообщения.
-					</p>
-				</div>
-				<div class="card">
-					<strong>Голос</strong>
-					<p class="small muted">
-						Голосовые сообщения расшифровываются, ответ можно получить голосом.
-					</p>
-				</div>
-				<div class="card">
-					<strong>Практики и задачи</strong>
-					<p class="small muted">
-						Небольшие шаги, напоминания и возврат к тому, что вы для себя
-						наметили.
-					</p>
-				</div>
-				<div class="card">
-					<strong>Тесты и рефлексия</strong>
-					<p class="small muted">
-						Структурированные опросники, результаты которых сохраняются и
-						сравниваются во времени.
-					</p>
-				</div>
-			</div>
-
-			<h2>Важно</h2>
-			<div class="card">
-				<p class="small">
-					Ева — не психотерапевт и не ставит диагнозов. Это инструмент
-					самонаблюдения. Если вам тяжело и есть мысли о причинении вреда себе,
-					пожалуйста, обратитесь к близким или в службу экстренной
-					психологической помощи в вашей стране.
+			<!-- Hero -->
+			<section class="hero">
+				<p class="eyebrow">Evaself</p>
+				<h1>Привет! Я — Ева 👋</h1>
+				<p class="lead">
+					Ваш ИИ-компаньон для самопознания. Живу в Telegram, помню ваш
+					контекст и помогаю лучше понимать себя: замечать закономерности,
+					формулировать цели и возвращаться к ним.
 				</p>
-			</div>
+			</section>
+
+			<!-- Goals preview -->
+			<section class="goals-section">
+				<h2>Ваши цели</h2>
+
+				<div class="goal-card">
+					<div class="goal-icon">
+						<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+							<circle cx="12" cy="12" r="10"/>
+							<path d="M8 12l3 3 5-5"/>
+						</svg>
+					</div>
+					<div class="goal-body">
+						<span class="goal-title">Научиться медитировать</span>
+						<div class="goal-progress">
+							<div class="goal-bar"><span style="width:65%"></span></div>
+							<span class="goal-pct">65%</span>
+						</div>
+					</div>
+				</div>
+
+				<div class="goal-card">
+					<div class="goal-icon">
+						<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+							<circle cx="12" cy="12" r="10"/>
+							<path d="M8 12l3 3 5-5"/>
+						</svg>
+					</div>
+					<div class="goal-body">
+						<span class="goal-title">Читать каждый день</span>
+						<div class="goal-progress">
+							<div class="goal-bar"><span style="width:40%"></span></div>
+							<span class="goal-pct">40%</span>
+						</div>
+					</div>
+				</div>
+			</section>
+
+			<!-- CTA -->
+			<p class="cta-wrap">
+				<a class="button" href="#" id="open-bot">Начать диалог с Евой</a>
+			</p>
+
+			<!-- Features -->
+			<section class="features">
+				<h2>Что умеет Ева</h2>
+				<div class="grid">
+					<div class="card">
+						<div class="card-icon">
+							<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+								<path d="M12 2a8 8 0 0 0-8 8c0 6 8 12 8 12s8-6 8-12a8 8 0 0 0-8-8z"/>
+								<circle cx="12" cy="10" r="3"/>
+							</svg>
+						</div>
+						<strong>Долгая память</strong>
+						<p class="small muted">
+							У каждого пользователя свой агент со своей памятью — Ева не
+							начинает знакомство заново.
+						</p>
+					</div>
+					<div class="card">
+						<div class="card-icon">
+							<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+								<path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+								<path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+								<line x1="12" y1="19" x2="12" y2="23"/>
+								<line x1="8" y1="23" x2="16" y2="23"/>
+							</svg>
+						</div>
+						<strong>Голос</strong>
+						<p class="small muted">
+							Голосовые сообщения расшифровываются, ответ можно получить
+							голосом.
+						</p>
+					</div>
+					<div class="card">
+						<div class="card-icon">
+							<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+								<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+								<path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+							</svg>
+						</div>
+						<strong>Практики и задачи</strong>
+						<p class="small muted">
+							Небольшие шаги, напоминания и возврат к тому, что вы для себя
+							наметили.
+						</p>
+					</div>
+					<div class="card">
+						<div class="card-icon">
+							<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+								<circle cx="12" cy="12" r="10"/>
+								<path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/>
+								<line x1="12" y1="17" x2="12.01" y2="17"/>
+							</svg>
+						</div>
+						<strong>Тесты и рефлексия</strong>
+						<p class="small muted">
+							Структурированные опросники, результаты которых сохраняются и
+							сравниваются во времени.
+						</p>
+					</div>
+				</div>
+			</section>
+
+			<!-- Disclaimer -->
+			<section class="disclaimer">
+				<div class="card">
+					<p class="small">
+						<strong>Важно:</strong> Ева — не психотерапевт и не ставит диагнозов.
+						Это инструмент самонаблюдения. Если вам тяжело и есть мысли о
+						причинении вреда себе, пожалуйста, обратитесь к близким или в
+						службу экстренной психологической помощи в вашей стране.
+					</p>
+				</div>
+			</section>
 
 			<footer>
-				<p>
-					Evaself — self-hosted платформа. Все данные, диалоги и память живут на
+				<p>Создано с ❤️ на Evaself</p>
+				<p class="muted small">
+					Self-hosted платформа. Все данные, диалоги и память живут на
 					сервере владельца установки.
 				</p>
 			</footer>
