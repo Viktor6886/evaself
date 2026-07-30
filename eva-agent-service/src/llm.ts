@@ -93,6 +93,13 @@ export class SecretBox {
   }
 }
 
+/**
+ * Имя модели, которое видит Letta. Это код маршрута роутера, а не модель
+ * провайдера: конкретную модель выбирает роутер, и она может смениться
+ * посреди дня без ведома App Server.
+ */
+export const ROUTER_ROUTE_HANDLE = "lmstudio/eva/chat";
+
 export function modelHandle(model: string): string {
   const trimmed = model.trim();
   return trimmed.startsWith("lmstudio/") ? trimmed : `lmstudio/${trimmed}`;
@@ -204,42 +211,45 @@ export class LlmManager {
 
   async initializeDefaultModel(): Promise<void> {
     const active = await this.db.getActiveLlmProvider();
-    if (active) this.letta.setDefaultModel(modelHandle(active.model));
+    if (active) this.letta.setDefaultModel(ROUTER_ROUTE_HANDLE);
   }
 
   /**
-   * Small provider-neutral completion used only to turn Telegram media into
-   * text before the actual agent turn. The decrypted key never leaves this
-   * process and is never included in the response.
+   * Небольшой запрос вне диалога — описание присланного медиа до хода
+   * агента. Раньше он ходил прямо к активному провайдеру; теперь идёт через
+   * LLM Router, поэтому получает ту же цепочку резервов и те же бюджеты,
+   * что и разговор, и не ломается, когда основной провайдер лежит.
+   *
+   * API key здесь больше не расшифровывается: ключи провайдеров знает
+   * только роутер.
    */
   async complete(messages: unknown[], options: { maxTokens?: number } = {}): Promise<string> {
-    const provider = await this.db.getActiveLlmProvider();
-    if (!provider) throw badRequest("Активная LLM-конфигурация не выбрана");
-    const timeout = numericParameter(
-      provider.additional_parameters,
-      "request_timeout_ms",
-      this.config.appServerRequestTimeoutMs,
-    );
+    if (!this.config.routerApiKey) {
+      throw badRequest("EVA_ROUTER_API_KEY не задан — LLM Router недоступен");
+    }
     const response = await fetch(
-      `${provider.base_url.replace(/\/+$/, "")}/chat/completions`,
+      `${this.config.routerUrl.replace(/\/+$/, "")}/chat/completions`,
       {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          Authorization: `Bearer ${this.secretBox.decrypt(provider.api_key_encrypted)}`,
+          authorization: `Bearer ${this.config.routerApiKey}`,
         },
         body: JSON.stringify({
-          model: provider.model,
+          // Описание изображения — это работа с картинкой, а не разговор,
+          // поэтому отдельный маршрут со своей цепочкой.
+          model: "eva/deep",
           messages,
           max_tokens: options.maxTokens ?? 2_000,
           temperature: 0.1,
+          metadata: { route: "deep", sensitive: true },
         }),
-        signal: AbortSignal.timeout(timeout),
+        signal: AbortSignal.timeout(this.config.appServerRequestTimeoutMs),
       },
     );
     const raw = await response.text();
     if (!response.ok) {
-      throw new Error(`LLM media analysis returned HTTP ${response.status}: ${raw.slice(0, 500)}`);
+      throw new Error(`LLM Router вернул HTTP ${response.status}: ${raw.slice(0, 500)}`);
     }
     let body: {
       choices?: Array<{ message?: { content?: string | Array<{ type?: string; text?: string }> } }>;
@@ -247,7 +257,7 @@ export class LlmManager {
     try {
       body = JSON.parse(raw) as typeof body;
     } catch {
-      throw new Error("LLM media analysis returned invalid JSON");
+      throw new Error("LLM Router вернул некорректный JSON");
     }
     const content = body.choices?.[0]?.message?.content;
     if (typeof content === "string" && content.trim()) return content.trim();
@@ -259,7 +269,7 @@ export class LlmManager {
         .trim();
       if (joined) return joined;
     }
-    throw new Error("LLM media analysis returned no text");
+    throw new Error("LLM Router не вернул текст");
   }
 
   async list(): Promise<PublicLlmProvider[]> {
@@ -393,7 +403,7 @@ export class LlmManager {
     // agents mapped in PostgreSQL and standalone agents created from WebUI.
     const mappings = await this.letta.listAllModelMappings();
     const candidateKey = this.secretBox.decrypt(candidate.api_key_encrypted);
-    const candidateHandle = modelHandle(candidate.model);
+    const candidateHandle = ROUTER_ROUTE_HANDLE;
 
     this.letta.closeAllSessions();
     try {
@@ -437,7 +447,7 @@ export class LlmManager {
     try {
       await this.configureProvider(previous, this.secretBox.decrypt(previous.api_key_encrypted));
       await this.restartAppServer();
-      const handle = modelHandle(previous.model);
+      const handle = ROUTER_ROUTE_HANDLE;
       await this.letta.waitForModel(handle);
       await this.letta.applyModelToMappings(
         mappings,
@@ -460,7 +470,22 @@ export class LlmManager {
     return this.probeProvider(provider, this.secretBox.decrypt(provider.api_key_encrypted));
   }
 
-  private async configureLettaProvider(provider: LlmProviderRow, apiKey: string): Promise<void> {
+  /**
+   * Подключает Letta App Server к LLM Router.
+   *
+   * Раньше сюда подставлялся base_url и ключ самого провайдера, поэтому
+   * смена провайдера означала перенастройку и перезапуск App Server —
+   * десятки секунд, за которые текущий диалог обрывался. Теперь App Server
+   * знает единственный адрес, роутер, и остаётся на нём навсегда: цепочка
+   * резервов и failover происходят за ним и рестарта не требуют.
+   *
+   * Аргумент apiKey сохранён в сигнатуре, но намеренно не используется:
+   * ключи провайдеров знает только роутер, и App Server их больше не видит.
+   */
+  private async configureLettaProvider(provider: LlmProviderRow, _apiKey: string): Promise<void> {
+    if (!this.config.routerApiKey) {
+      throw badRequest("EVA_ROUTER_API_KEY не задан — LLM Router не настроен");
+    }
     const timeout = numericParameter(provider.additional_parameters, "request_timeout_ms", 180_000);
     const environment = Object.fromEntries(
       Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
@@ -470,7 +495,7 @@ export class LlmManager {
     // OpenAI-compatible endpoint adapter: unlike the built-in OpenAI catalog,
     // it discovers arbitrary model IDs from /models. The secret stays in the
     // child environment and never appears in argv or logs.
-    environment.LMSTUDIO_API_KEY = apiKey;
+    environment.LMSTUDIO_API_KEY = this.config.routerApiKey;
 
     await new Promise<void>((resolve, reject) => {
       const terminal = spawnPty(
@@ -481,7 +506,7 @@ export class LlmManager {
         "connect",
         "lmstudio",
         "--base-url",
-        provider.base_url,
+        this.config.routerUrl,
         "--timeout",
         `${timeout}ms`,
         ],
@@ -509,7 +534,7 @@ export class LlmManager {
         promptBuffer = `${promptBuffer}${data}`.slice(-1024);
         if (!keySent && /API key:/i.test(promptBuffer)) {
           keySent = true;
-          terminal.write(`${apiKey}\r`);
+          terminal.write(`${this.config.routerApiKey}\r`);
         }
       });
       terminal.onExit(({ exitCode }) => {

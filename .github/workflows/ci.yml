@@ -82,6 +82,20 @@ jobs:
       - name: An update tells behind from diverged
         run: ./scripts/ci/test-ahead-behind.sh
 
+      - name: The LLM Router is the only way out to a model
+        run: |
+          # Прямое обращение к провайдеру в обход роутера возвращает
+          # прежнюю проблему: смена провайдера снова потребует правки кода
+          # и перезапуска App Server.
+          if grep -rn "chat/completions" eva-agent-service/src \
+               --include="*.ts" \
+               | grep -v "^eva-agent-service/src/router/" \
+               | grep -v "routerUrl"; then
+            echo "::error::обращение к /chat/completions в обход LLM Router"
+            exit 1
+          fi
+          echo "все вызовы моделей идут через роутер"
+
       - name: An upgrade backfills settings added since installation
         run: |
           # A release that introduces a new .env key used to need a manual
@@ -317,7 +331,9 @@ jobs:
             FROM unnest(ARRAY[
               'users','agent_links','agent_conversations','subscriptions','payments',
               'quotas','usage_counters','onboarding_fields','tasks','crisis_events',
-              'schema_migrations','llm_providers','sdk_settings','telegram_updates',
+              'schema_migrations','llm_providers','llm_routes','llm_route_providers',
+              'llm_requests','llm_spend_ledger','llm_breaker_state',
+              'sdk_settings','telegram_updates',
               'telegram_outbox','timezone_aliases','profile_field_definitions',
               'user_preferences','eva_notes','budget_entries','heartbeat_state',
               'payment_intents','admin_audit_log','user_north','goals',

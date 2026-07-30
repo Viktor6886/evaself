@@ -47,7 +47,7 @@ done
 # =====================================================================
 step "Containers"
 # =====================================================================
-EXPECTED=(caddy postgres valkey eva-agent-service admin-api admin-ui letta-app-server letta-ui nocodb webapp searxng media-service backup-service)
+EXPECTED=(caddy postgres valkey eva-agent-service llm-router admin-api admin-ui letta-app-server letta-ui nocodb webapp searxng media-service backup-service)
 for svc in "${EXPECTED[@]}"; do
 	cid="$(compose ps -q "$svc" 2>/dev/null)"
 	if [ -z "$cid" ]; then
@@ -143,6 +143,9 @@ probe "admin-ui /healthz" admin-ui "http://127.0.0.1:8083/healthz"
 probe "searxng /healthz"  searxng       "http://127.0.0.1:8080/healthz"
 probe "media /health"     media-service "http://127.0.0.1:8090/health"
 probe "webapp /healthz"   webapp        "http://127.0.0.1:8082/healthz"
+# Роутер — единственная точка выхода к языковым моделям: если он лёг,
+# Ева молчит целиком, поэтому проверка обязательная, а не мягкая.
+probe "llm-router /health" llm-router   "http://127.0.0.1:8073/health"
 probe "letta-ui /healthz" letta-ui      "http://127.0.0.1:8081/healthz"
 
 # The active LLM lives in the `llm_providers` registry, not in .env: a key

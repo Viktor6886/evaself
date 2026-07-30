@@ -75,6 +75,12 @@ export default tseslint.config(
       "@typescript-eslint/no-misused-promises": "off",
       "@typescript-eslint/no-floating-promises": "off",
       "@typescript-eslint/no-unnecessary-type-assertion": "off",
+      // Заглушки провайдеров отклоняют доменными ошибками (ProviderError
+      // наследует Error), но в нетипизированных литералах правило видит
+      // только any. И генератор, который умеет лишь бросить, — это ровно
+      // тот отказ, который проверяет тест.
+      "@typescript-eslint/prefer-promise-reject-errors": "off",
+      "require-yield": "off",
     },
   },
 );

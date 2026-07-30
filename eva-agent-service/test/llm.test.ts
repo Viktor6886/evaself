@@ -104,9 +104,12 @@ test("failed model switch restores the previous provider and mappings", async ()
     setDefaultModel: () => undefined,
     waitForModel: async () => undefined,
     listAllModelMappings: async () => [{ agentId: "agent-1", conversationIds: ["conv-1"] }],
+    // Handle больше не кодирует модель провайдера: Letta всегда видит один
+    // маршрут роутера, а конкретную модель выбирает роутер. Поэтому сбой
+    // привязывается к номеру попытки, а не к имени модели.
     applyModelToMappings: async (_mappings: unknown, model: string) => {
       applied.push(model);
-      if (model === "lmstudio/candidate-model") throw new Error("synthetic SDK failure");
+      if (applied.length === 1) throw new Error("synthetic SDK failure");
     },
   };
   const manager = new LlmManager(
@@ -131,7 +134,8 @@ test("failed model switch restores the previous provider and mappings", async ()
 
   await assert.rejects(() => manager.activate(candidate.id), /предыдущая конфигурация сохранена/i);
   assert.deepEqual(configured, ["candidate", "previous"]);
-  assert.deepEqual(applied, ["lmstudio/candidate-model", "lmstudio/previous-model"]);
+  // Обе привязки идут на маршрут роутера, а не на модель провайдера.
+  assert.deepEqual(applied, ["lmstudio/eva/chat", "lmstudio/eva/chat"]);
   assert.equal(active.id, previous.id);
 });
 

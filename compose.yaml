@@ -469,6 +469,46 @@ services:
       start_period: 10s
 
   # ===================================================================
+  # LLM ROUTER
+  # ===================================================================
+  # Единственная точка, через которую стек ходит в языковые модели.
+  # Letta App Server настроен на него как на обычный OpenAI-совместимый
+  # провайдер и больше не перенастраивается: цепочка резервов, circuit
+  # breaker и бюджеты живут внутри роутера, поэтому переключение не
+  # требует ни рестарта App Server, ни правки чего-либо на стороне Letta.
+  #
+  # Наружу не публикуется: сети agent и data, без ports.
+  llm-router:
+    <<: [*restart, *logging]
+    build:
+      context: ./eva-agent-service
+      args:
+        NODE_BASE_VERSION: ${NODE_BASE_VERSION}
+    image: evaself/eva-agent-service:0.3.0
+    container_name: evaself-llm-router
+    environment:
+      DATABASE_URL: postgresql://${EVA_DB_USER}:${EVA_DB_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${EVA_DB_NAME}
+      LLM_CONFIG_ENCRYPTION_KEY: ${LLM_CONFIG_ENCRYPTION_KEY}
+      EVA_ROUTER_API_KEY: ${EVA_ROUTER_API_KEY}
+      EVA_ROUTER_PORT: 8073
+      EVA_ROUTER_BIND: 0.0.0.0
+      EVA_ROUTER_LOG_LEVEL: ${EVA_AGENT_LOG_LEVEL:-info}
+      EVA_ROUTER_BREAKER_THRESHOLD: ${EVA_ROUTER_BREAKER_THRESHOLD:-3}
+      EVA_ROUTER_BREAKER_WINDOW_MS: ${EVA_ROUTER_BREAKER_WINDOW_MS:-300000}
+      EVA_ROUTER_BREAKER_COOLDOWN_MS: ${EVA_ROUTER_BREAKER_COOLDOWN_MS:-420000}
+    command: ["node", "dist/router/index.js"]
+    networks: [agent, data]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8073/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ===================================================================
   # ADMIN / DATA GUI
   # ===================================================================
   nocodb:

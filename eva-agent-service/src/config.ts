@@ -24,6 +24,8 @@ export interface Config {
   /** Capability token presented during the WebSocket upgrade. */
   appServerToken: string;
   appServerRequestTimeoutMs: number;
+  routerUrl: string;
+  routerApiKey: string;
 
   model: string;
   personaFile: string;
@@ -138,6 +140,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     appServerUrl: str("LETTA_APP_SERVER_URL", "ws://letta-app-server:4500/ws"),
     appServerToken: str("LETTA_APP_SERVER_TOKEN"),
     appServerRequestTimeoutMs: int("LETTA_APP_SERVER_TIMEOUT_MS", 180_000),
+    routerUrl: str("EVA_ROUTER_URL", "http://llm-router:8073"),
+    routerApiKey: str("EVA_ROUTER_API_KEY", ""),
 
     model: str("EVA_LLM_MODEL"),
     personaFile: str("EVA_AGENT_PERSONA_FILE", "/app/library/persona/eva.md"),
