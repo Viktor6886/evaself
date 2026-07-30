@@ -26,6 +26,7 @@ import {
 import { auditParams, globalSecretRedactor } from "./redactor.js";
 import { SecretStore } from "./secret-store.js";
 import { HealthService } from "./health-service.js";
+import { LlmRouterAdminService } from "./llm-router-service.js";
 import { OperationService } from "./operation-service.js";
 import { ProviderService } from "./provider-service.js";
 import type { Redis } from "ioredis";
@@ -52,6 +53,7 @@ export interface AdminServerServices {
   health: HealthService;
   operations: OperationService;
   providers: ProviderService;
+  llmRouter: LlmRouterAdminService;
   events: Redis;
   logger: Logger;
   readiness: () => Promise<boolean>;
@@ -395,6 +397,64 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
   }, async (request) => {
     const id = (request.params as { id?: string }).id ?? "";
     return await services.providers.models(id);
+  });
+
+  // -------------------------------------------------------------------
+  // LLM Router: цепочки, лимиты, бюджеты, circuit breaker
+  // -------------------------------------------------------------------
+  // Просмотр открыт и viewer'у: состояние моделей нужно дежурному, а
+  // секретов в ответе нет. Правки — только owner и admin.
+  app.get("/api/admin/v1/llm/state", {
+    config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
+  }, async () => await services.llmRouter.state());
+
+  app.get("/api/admin/v1/llm/usage", {
+    config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
+  }, async (request) => {
+    const days = Number((request.query as { days?: string }).days ?? 14);
+    return await services.llmRouter.usage(Number.isFinite(days) ? days : 14);
+  });
+
+  app.patch("/api/admin/v1/llm/providers/:id", {
+    config: { roles: ["owner", "admin"] } satisfies RouteAccess,
+  }, async (request) => {
+    const id = (request.params as { id?: string }).id ?? "";
+    const result = await services.llmRouter.updateProvider(id, objectBody(request.body));
+    return result;
+  });
+
+  app.patch("/api/admin/v1/llm/routes/:code", {
+    config: { roles: ["owner", "admin"] } satisfies RouteAccess,
+  }, async (request) => {
+    const code = (request.params as { code?: string }).code ?? "";
+    const result = await services.llmRouter.updateRoute(code, objectBody(request.body));
+    return result;
+  });
+
+  app.put("/api/admin/v1/llm/routes/:code/chain", {
+    config: { roles: ["owner", "admin"] } satisfies RouteAccess,
+  }, async (request) => {
+    const code = (request.params as { code?: string }).code ?? "";
+    const body = objectBody(request.body);
+    const result = await services.llmRouter.setChain(code, body.providers);
+    return result;
+  });
+
+  app.post("/api/admin/v1/llm/providers/:id/breaker/reset", {
+    config: { roles: ["owner", "admin", "operator"] } satisfies RouteAccess,
+  }, async (request) => {
+    const id = (request.params as { id?: string }).id ?? "";
+    const result = await services.llmRouter.resetBreaker(id);
+    return result;
+  });
+
+  app.post("/api/admin/v1/llm/providers/:id/pin", {
+    config: { roles: ["owner", "admin"] } satisfies RouteAccess,
+  }, async (request) => {
+    const id = (request.params as { id?: string }).id ?? "";
+    const pinned = objectBody(request.body).pinned_out === true;
+    const result = await services.llmRouter.setPinnedOut(id, pinned);
+    return result;
   });
 
   app.post("/api/admin/v1/providers/:id/activate", {
