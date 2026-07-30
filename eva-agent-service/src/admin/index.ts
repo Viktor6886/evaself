@@ -13,6 +13,7 @@ import { LlmRouterAdminService } from "./llm-router-service.js";
 import { InternalAgentClient, ProviderService } from "./provider-service.js";
 import { OutboundGateway } from "./outbound-gateway.js";
 import { buildAdminServer } from "./server.js";
+import { UserService } from "./user-service.js";
 import { UpdaterClient } from "./updater-client.js";
 
 const { Pool } = pg;
@@ -46,10 +47,11 @@ async function main(): Promise<void> {
   const operations = new OperationService(pool, redis, new UpdaterClient());
   const llmRouter = new LlmRouterAdminService(pool);
   const integrations = new IntegrationConfigService(pool, secrets);
-  const providers = new ProviderService(
-    new InternalAgentClient(secrets),
-    new OutboundGateway(),
-  );
+  const agentClient = new InternalAgentClient(secrets);
+  const providers = new ProviderService(agentClient, new OutboundGateway());
+  // Переписку admin-api читает через eva-agent-service: он единственный,
+  // кому разрешено обращаться к Letta App Server.
+  const users = new UserService(pool, agentClient);
   const app = buildAdminServer({
     auth,
     audit,
@@ -60,6 +62,7 @@ async function main(): Promise<void> {
     providers,
     llmRouter,
     integrations,
+    users,
     events: redis,
     logger,
     readiness: async () => {

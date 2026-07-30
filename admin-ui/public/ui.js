@@ -16,6 +16,8 @@ const state = {
   settingProfiles: [],
   secrets: [],
   showAllSecrets: false,
+  users: [],
+  currentUser: null,
   pendingSudo: null,
   pendingConfirm: null,
   events: null,
@@ -145,6 +147,7 @@ const LOADERS = {
   services: loadServicesAndIntegrations,
   ai: loadProviders,
   operations: loadOperations,
+  users: loadUsers,
   settings: loadSettings,
   security: loadSecrets,
   audit: loadAudit,
@@ -1221,6 +1224,214 @@ async function saveSettings(restart = false) {
   }
 }
 
+// =====================================================================
+// Пользователи Евы
+// =====================================================================
+
+const USER_STATE_LABELS = {
+  active: "Активен",
+  paused: "На паузе",
+  onboarding: "Знакомство",
+  blocked: "Заблокирован",
+};
+
+function userTitle(user) {
+  const name = [user.first_name, user.username ? `@${user.username}` : ""]
+    .filter(Boolean).join(" ");
+  return name || `id ${user.telegram_id}`;
+}
+
+async function loadUsers() {
+  const form = $("#users-filter-form");
+  const params = new URLSearchParams();
+  const query = form.elements.query.value.trim();
+  if (query) params.set("query", query);
+  if (form.elements.state.value) params.set("state", form.elements.state.value);
+  if (form.elements.blocked.value) params.set("blocked", form.elements.blocked.value);
+
+  const { payload } = await request(`/users?${params.toString()}`);
+  state.users = payload.users;
+
+  $("#users-body").innerHTML = payload.users.length
+    ? payload.users.map((user) => `
+      <tr class="user-row" data-user="${escapeHtml(user.id)}">
+        <td><strong>${escapeHtml(userTitle(user))}</strong><br><span class="muted">${escapeHtml(user.telegram_id)}</span></td>
+        <td>${user.is_blocked
+          ? '<span class="pill-blocked">Заблокирован</span>'
+          : escapeHtml(USER_STATE_LABELS[user.state] || user.state)}</td>
+        <td>${escapeHtml(user.plan)}<br><span class="muted">${escapeHtml(user.subscription_status)}</span></td>
+        <td>${escapeHtml(user.message_count ?? 0)}</td>
+        <td>${escapeHtml(localDate(user.last_seen_at || user.last_message_at))}</td>
+      </tr>`).join("")
+    : '<tr><td colspan="5" class="muted">Ничего не найдено.</td></tr>';
+
+  $("#users-total").textContent = payload.total
+    ? `Показано ${payload.users.length} из ${payload.total}.`
+    : "Пользователей пока нет.";
+}
+
+function quotaRows(quotas) {
+  if (!quotas.length) return '<p class="muted">Квоты для тарифа не заданы.</p>';
+  return `<table class="mini-table"><thead><tr><th>Метрика</th><th>Период</th><th>Использовано</th><th>Осталось</th></tr></thead><tbody>${
+    quotas.map((q) => `<tr><td>${escapeHtml(q.metric)}</td><td>${escapeHtml(q.period)}</td><td>${escapeHtml(q.used)} из ${q.limit_value < 0 ? "∞" : escapeHtml(q.limit_value)}</td><td>${q.remaining === null ? "∞" : escapeHtml(q.remaining)}</td></tr>`).join("")
+  }</tbody></table>`;
+}
+
+async function openUserCard(id) {
+  const { payload } = await request(`/users/${id}`);
+  const user = payload.user;
+  state.currentUser = payload;
+
+  $("#user-card").hidden = false;
+  $("#user-card-title").textContent = userTitle(user);
+  $("#user-card-subtitle").textContent =
+    `telegram_id ${user.telegram_id} · ${user.timezone} · язык ${user.language_code}`;
+
+  const canWrite = ["owner", "admin"].includes(state.me.role);
+  const canNote = ["owner", "admin", "operator"].includes(state.me.role);
+
+  $("#user-card-body").innerHTML = `
+    <div class="user-grid">
+      <div>
+        <h4>Состояние</h4>
+        <dl class="kv">
+          <dt>Состояние</dt><dd>${escapeHtml(USER_STATE_LABELS[user.state] || user.state)}</dd>
+          <dt>Доступ</dt><dd>${user.is_blocked ? "заблокирован" : "открыт"}</dd>
+          <dt>Тариф</dt><dd>${escapeHtml(user.plan)} (${escapeHtml(user.subscription_status)})</dd>
+          <dt>Оплачен до</dt><dd>${escapeHtml(localDate(user.current_period_end))}</dd>
+          <dt>Регистрация</dt><dd>${escapeHtml(localDate(user.created_at))}</dd>
+          <dt>Последняя активность</dt><dd>${escapeHtml(localDate(user.last_seen_at))}</dd>
+          <dt>Сообщений</dt><dd>${escapeHtml(user.message_count ?? 0)}</dd>
+          <dt>Обновлений Telegram</dt><dd>${escapeHtml(payload.activity?.updates_total ?? 0)} (сбоев ${escapeHtml(payload.activity?.updates_failed ?? 0)})</dd>
+        </dl>
+      </div>
+      <div>
+        <h4>Квоты на сегодня</h4>
+        ${quotaRows(payload.quotas)}
+        <h4>Настройки общения</h4>
+        ${payload.preferences ? `<dl class="kv">
+          <dt>Режим ответа</dt><dd>${escapeHtml(payload.preferences.response_mode)}</dd>
+          <dt>Роль Евы</dt><dd>${escapeHtml(payload.preferences.agent_mode)}</dd>
+          <dt>Инициативные сообщения</dt><dd>${payload.preferences.heartbeat_enabled ? "включены" : "выключены"}</dd>
+        </dl>` : '<p class="muted">Пользователь ничего не настраивал.</p>'}
+      </div>
+    </div>
+
+    ${payload.crisis_events.length ? `<div class="user-block">
+      <h4>События безопасности</h4>
+      <p class="block-caption">Только метаданные: severity и время. Текст обращения не показывается и не выгружается.</p>
+      <table class="mini-table"><thead><tr><th>Когда</th><th>Уровень</th><th>Обработано</th></tr></thead><tbody>${
+        payload.crisis_events.map((e) => `<tr><td>${escapeHtml(localDate(e.created_at))}</td><td>${escapeHtml(e.severity)}</td><td>${e.handled ? escapeHtml(localDate(e.handled_at)) : "нет"}</td></tr>`).join("")
+      }</tbody></table>
+    </div>` : ""}
+
+    ${canWrite ? `<div class="user-block">
+      <h4>Действия</h4>
+      <div class="form-actions">
+        ${user.is_blocked
+          ? `<button class="button secondary" data-action="unblock" data-user="${escapeHtml(user.id)}" type="button">Разблокировать</button>`
+          : `<button class="button ghost" data-action="block" data-user="${escapeHtml(user.id)}" type="button">Заблокировать</button>`}
+        ${user.state === "paused"
+          ? `<button class="button ghost" data-action="activate" data-user="${escapeHtml(user.id)}" type="button">Снять паузу</button>`
+          : user.state === "active"
+            ? `<button class="button ghost" data-action="pause" data-user="${escapeHtml(user.id)}" type="button">Поставить на паузу</button>`
+            : ""}
+        <button class="button ghost" data-action="conversation" data-user="${escapeHtml(user.id)}" type="button">Показать переписку</button>
+      </div>
+    </div>` : ""}
+
+    <div class="user-block">
+      <h4>Заметки оператора</h4>
+      ${canNote ? `<form id="user-note-form" data-user="${escapeHtml(user.id)}">
+        <label>Новая заметка<textarea name="note" rows="2" maxlength="4000" placeholder="Что важно помнить об этом пользователе"></textarea></label>
+        <button class="button secondary" type="submit">Добавить</button>
+      </form>` : ""}
+      ${payload.notes.length ? `<ul class="note-list">${
+        payload.notes.map((n) => `<li><span class="muted">${escapeHtml(localDate(n.created_at))} · ${escapeHtml(n.actor_name)}</span><p>${escapeHtml(n.note)}</p></li>`).join("")
+      }</ul>` : '<p class="muted">Заметок пока нет.</p>'}
+    </div>
+
+    <div class="user-block" id="user-conversation"></div>
+  `;
+  $("#user-card").scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+/**
+ * Переписка загружается только по явной кнопке и под sudo: открыть личный
+ * разговор — осознанное действие, а не побочный эффект просмотра карточки.
+ * Каждое открытие попадает в журнал (кто и чью, без текста).
+ */
+function showConversation(id) {
+  askSudo({
+    scope: "users:messages",
+    title: "Открыть переписку",
+    description: "Личный разговор пользователя с Евой. Факт открытия будет записан в журнал событий.",
+    action: async () => {
+      const { payload } = await request(`/users/${id}/conversation?limit=100`);
+      const target = $("#user-conversation");
+      const messages = payload.messages.map((message) => {
+        const role = message.role === "user" ? "Пользователь" : "Ева";
+        const text = typeof message.content === "string"
+          ? message.content
+          : JSON.stringify(message.content ?? message);
+        return `<li class="msg msg-${escapeHtml(message.role ?? "other")}"><span class="muted">${escapeHtml(role)} · ${escapeHtml(localDate(message.created_at || message.timestamp))}</span><p>${escapeHtml(text)}</p></li>`;
+      }).join("");
+
+      target.innerHTML = `
+        <h4>Переписка</h4>
+        ${payload.messages_error
+          ? `<p class="warn-value">Сообщения недоступны: ${escapeHtml(payload.messages_error)}. Выдержки ниже читаются из базы и не зависят от Letta.</p>`
+          : ""}
+        ${messages ? `<ul class="msg-list">${messages}</ul>` : '<p class="muted">Сообщений нет.</p>'}
+        ${payload.highlights.length ? `<h4>Выдержки</h4><ul class="note-list">${
+          payload.highlights.map((h) => `<li><span class="muted">${escapeHtml(h.highlight_type)} · ${escapeHtml(localDate(h.occurred_at || h.created_at))}</span><p><strong>${escapeHtml(h.title)}</strong> ${escapeHtml(h.content)}</p></li>`).join("")
+        }</ul>` : ""}`;
+      target.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    },
+  });
+}
+
+function setUserBlocked(id, blocked) {
+  askSudo({
+    scope: "users:write",
+    title: blocked ? "Заблокировать пользователя" : "Разблокировать пользователя",
+    description: blocked
+      ? "Ева перестанет отвечать и не будет писать сама. Выставляются оба признака сразу."
+      : "Доступ вернётся, состояние станет «активен».",
+    action: async () => {
+      await request(`/users/${id}/${blocked ? "block" : "unblock"}`, { method: "POST" });
+      toast(blocked ? "Пользователь заблокирован" : "Пользователь разблокирован");
+      await loadUsers();
+      await openUserCard(id);
+    },
+  });
+}
+
+async function setUserState(id, userState) {
+  await request(`/users/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ state: userState }),
+  });
+  toast(userState === "paused" ? "Пользователь на паузе" : "Пауза снята");
+  await loadUsers();
+  await openUserCard(id);
+}
+
+async function addUserNote(form) {
+  const note = form.elements.note.value.trim();
+  if (!note) {
+    toast("Заметка пустая", true);
+    return;
+  }
+  await request(`/users/${form.dataset.user}/notes`, {
+    method: "POST",
+    headers: { "Idempotency-Key": `note-${form.dataset.user}-${Date.now()}` },
+    body: JSON.stringify({ note }),
+  });
+  toast("Заметка добавлена");
+  await openUserCard(form.dataset.user);
+}
+
 async function loadSecrets() {
   if (!["owner", "admin"].includes(state.me.role)) {
     $("#secrets-list").innerHTML = '<article class="secret-card">Для просмотра метаданных секретов нужна роль owner или admin.</article>';
@@ -1543,6 +1754,36 @@ $("#toggle-advanced").addEventListener("click", () => {
 $("#settings-profiles").addEventListener("click", (event) => {
   const button = event.target.closest("[data-profile]");
   if (button) applySettingProfile(button.dataset.profile);
+});
+$("#reload-users").addEventListener("click", () => loadUsers().catch(handleError));
+$("#users-filter-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  loadUsers().catch(handleError);
+});
+$("#users-body").addEventListener("click", (event) => {
+  const row = event.target.closest(".user-row");
+  if (row) openUserCard(row.dataset.user).catch(handleError);
+});
+$("#close-user-card").addEventListener("click", () => {
+  $("#user-card").hidden = true;
+});
+$("#user-card-body").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-action][data-user]");
+  if (!button) return;
+  const id = button.dataset.user;
+  const actions = {
+    block: () => setUserBlocked(id, true),
+    unblock: () => setUserBlocked(id, false),
+    pause: () => setUserState(id, "paused").catch(handleError),
+    activate: () => setUserState(id, "active").catch(handleError),
+    conversation: () => showConversation(id),
+  };
+  actions[button.dataset.action]?.();
+});
+$("#user-card-body").addEventListener("submit", (event) => {
+  if (event.target.id !== "user-note-form") return;
+  event.preventDefault();
+  addUserNote(event.target).catch(handleError);
 });
 // Пресет поля подставляет значение в сам инпут: сохраняется всегда то,
 // что в поле, поэтому выпадающий список не может разойтись с ним.

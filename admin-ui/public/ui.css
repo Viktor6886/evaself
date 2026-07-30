@@ -110,6 +110,34 @@ table { width: 100%; border-collapse: collapse; min-width: 880px; }
 th, td { padding: 13px 15px; border-bottom: 1px solid var(--line); text-align: left; font-size: 12px; }
 th { color: #718c80; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
 td { color: #b7c9c0; }
+/* --- раздел «Пользователи» --- */
+.users-filters form { display: grid; grid-template-columns: minmax(0,2fr) minmax(0,1fr) minmax(0,1fr) auto; gap: 12px; align-items: end; }
+.users-filters label { margin: 0; }
+.users-total { margin: 12px 0 0; font-size: 12px; }
+.user-row { cursor: pointer; }
+.user-row:hover td { background: rgba(91,234,154,.05); }
+.pill-blocked { padding: 3px 8px; border-radius: 999px; color: var(--danger); background: rgba(255,120,111,.1); font-size: 11px; font-weight: 800; }
+.user-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 26px; }
+.user-block { margin-top: 26px; padding-top: 20px; border-top: 1px solid var(--line); }
+.user-block h4, .user-grid h4 { margin: 0 0 10px; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: #718c80; }
+.user-grid h4:not(:first-child) { margin-top: 22px; }
+.kv { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 6px 14px; margin: 0; font-size: 12px; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; color: #b7c9c0; }
+/* Вложенная таблица уже стоит в узкой колонке, общий min-width её ломает. */
+.mini-table { min-width: 0; }
+.mini-table th, .mini-table td { padding: 7px 9px; }
+.note-list, .msg-list { margin: 0; padding: 0; list-style: none; display: grid; gap: 12px; }
+.note-list li, .msg-list li { padding: 11px 13px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); font-size: 12px; }
+.note-list p, .msg-list p { margin: 5px 0 0; color: #b7c9c0; white-space: pre-wrap; }
+.msg-list { max-height: 520px; overflow: auto; }
+.msg-user { border-left: 2px solid var(--green); }
+.msg-assistant { border-left: 2px solid rgba(183,222,204,.3); }
+#user-note-form { display: grid; gap: 10px; justify-items: start; margin-bottom: 18px; }
+@media (max-width: 900px) {
+  .users-filters form { grid-template-columns: 1fr; }
+}
+
 .result { padding: 3px 7px; border-radius: 6px; font-weight: 800; }
 .result.success { color: var(--green); background: rgba(91,234,154,.08); }
 .result.failure { color: var(--danger); background: rgba(255,120,111,.08); }

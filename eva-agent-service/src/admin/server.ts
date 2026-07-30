@@ -30,6 +30,7 @@ import { IntegrationConfigService } from "./integration-config-service.js";
 import { LlmRouterAdminService } from "./llm-router-service.js";
 import { OperationService } from "./operation-service.js";
 import { ProviderService } from "./provider-service.js";
+import { UserService } from "./user-service.js";
 import type { Redis } from "ioredis";
 
 interface RouteAccess {
@@ -56,6 +57,7 @@ export interface AdminServerServices {
   providers: ProviderService;
   llmRouter: LlmRouterAdminService;
   integrations: IntegrationConfigService;
+  users: UserService;
   events: Redis;
   logger: Logger;
   readiness: () => Promise<boolean>;
@@ -685,6 +687,110 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
     const raw = (request.query as { limit?: string }).limit;
     const limit = raw ? Number.parseInt(raw, 10) : 100;
     return { events: await services.audit.list(Number.isFinite(limit) ? limit : 100) };
+  });
+
+  // -------------------------------------------------------------------
+  // пользователи Евы
+  // -------------------------------------------------------------------
+  app.get("/api/admin/v1/users", {
+    config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
+  }, async (request) => {
+    const query = request.query as Record<string, string | undefined>;
+    return await services.users.list({
+      query: query.query,
+      state: query.state,
+      plan: query.plan,
+      blocked: query.blocked === undefined ? undefined : query.blocked === "true",
+      limit: query.limit ? Number.parseInt(query.limit, 10) : undefined,
+      offset: query.offset ? Number.parseInt(query.offset, 10) : undefined,
+    });
+  });
+
+  app.get("/api/admin/v1/users/:id", {
+    config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
+  }, async (request) => {
+    return await services.users.get((request.params as { id: string }).id);
+  });
+
+  /**
+   * Переписка. Автоматический аудит пропускает безопасные методы, поэтому
+   * запись в журнал делается здесь руками: кто, чью переписку и сколько
+   * сообщений открыл. Самих сообщений в журнале нет — только счётчик.
+   */
+  app.get("/api/admin/v1/users/:id/conversation", {
+    config: {
+      roles: ["owner", "admin"],
+      sudoScope: "users:messages",
+    } satisfies RouteAccess,
+  }, async (request) => {
+    const context = contexts.get(request)!;
+    const { id } = request.params as { id: string };
+    const limit = (request.query as { limit?: string }).limit;
+    const entry = await services.audit.start({
+      requestId: context.requestId,
+      operation: "GET /api/admin/v1/users/:id/conversation",
+      target: `/api/admin/v1/users/${id}/conversation`,
+      ip: safeIp(request.ip),
+      actor: actorOf(context),
+      params: { user_id: id, limit: limit ?? null },
+    });
+    try {
+      const result = await services.users.conversation(id, limit);
+      await services.audit.finish(
+        entry.id,
+        entry.startedAt,
+        "success",
+        `сообщений: ${result.messages.length}, выдержек: ${result.highlights.length}`,
+        actorOf(context),
+      );
+      return result;
+    } catch (error) {
+      await services.audit.finish(
+        entry.id,
+        entry.startedAt,
+        "failure",
+        error instanceof AdminApiError ? error.code : "internal_error",
+        actorOf(context),
+      );
+      throw error;
+    }
+  });
+
+  app.post("/api/admin/v1/users/:id/block", {
+    config: { roles: ["owner", "admin"], sudoScope: "users:write" } satisfies RouteAccess,
+  }, async (request) => {
+    return await services.users.setBlocked((request.params as { id: string }).id, true);
+  });
+
+  app.post("/api/admin/v1/users/:id/unblock", {
+    config: { roles: ["owner", "admin"], sudoScope: "users:write" } satisfies RouteAccess,
+  }, async (request) => {
+    return await services.users.setBlocked((request.params as { id: string }).id, false);
+  });
+
+  app.patch("/api/admin/v1/users/:id", {
+    config: { roles: ["owner", "admin"] } satisfies RouteAccess,
+  }, async (request) => {
+    return await services.users.update(
+      (request.params as { id: string }).id,
+      objectBody(request.body),
+    );
+  });
+
+  app.post("/api/admin/v1/users/:id/notes", {
+    config: { roles: ["owner", "admin", "operator"] } satisfies RouteAccess,
+  }, async (request) => {
+    const body = objectBody(request.body);
+    const key = typeof request.headers["idempotency-key"] === "string"
+      ? request.headers["idempotency-key"]
+      : undefined;
+    const session = contexts.get(request)!.session!;
+    return await services.users.addNote(
+      (request.params as { id: string }).id,
+      { id: session.user.id, username: session.user.username },
+      body.note,
+      key,
+    );
   });
 
   return app;

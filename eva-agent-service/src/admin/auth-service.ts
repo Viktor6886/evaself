@@ -64,6 +64,11 @@ export const ADMIN_SUDO_SCOPES = Object.freeze([
   "providers:activate",
   "secrets:write",
   "services:restart",
+  // Блокировка отрезает человека от Евы, а чтение переписки открывает его
+  // личный разговор: оба — осознанные действия, а не побочный эффект
+  // перехода по разделу.
+  "users:write",
+  "users:messages",
 ] as const);
 const ALLOWED_SUDO_SCOPES = new Set<string>(ADMIN_SUDO_SCOPES);
 

@@ -37,6 +37,7 @@
         <button data-page="ai" class="nav-item"><span>✦</span>Искусственный интеллект</button>
         <button data-page="operations" class="nav-item"><span>↻</span>Backup и обновления</button>
         <div class="nav-caption">Управление</div>
+        <button data-page="users" class="nav-item"><span>◍</span>Пользователи</button>
         <button data-page="settings" class="nav-item"><span>⌁</span>Системные настройки</button>
         <button data-page="security" class="nav-item"><span>◇</span>Безопасность и ключи</button>
         <button data-page="audit" class="nav-item"><span>≋</span>Журнал событий</button>
@@ -323,6 +324,50 @@
               <input name="new_password" type="password" autocomplete="new-password" minlength="12" placeholder="Новый пароль, минимум 12 символов" required>
               <button class="button secondary" type="submit">Сменить пароль</button>
             </form>
+          </section>
+        </section>
+
+        <section id="page-users" class="page">
+          <div class="page-heading">
+            <div><p class="eyebrow">ЛЮДИ, КОТОРЫЕ ОБЩАЮТСЯ С ЕВОЙ</p><h2>Пользователи</h2><p>Список из Telegram: состояние, тариф, активность. Блокировка выставляет оба признака сразу — иначе диалог и рассылки расходятся.</p></div>
+            <button id="reload-users" class="button ghost">Обновить</button>
+          </div>
+
+          <div class="card users-filters">
+            <form id="users-filter-form">
+              <label>Поиск<input name="query" placeholder="Имя, username или telegram_id" autocomplete="off"></label>
+              <label>Состояние<select name="state">
+                <option value="">Любое</option>
+                <option value="active">active</option>
+                <option value="paused">paused</option>
+                <option value="onboarding">onboarding</option>
+                <option value="blocked">blocked</option>
+              </select></label>
+              <label>Доступ<select name="blocked">
+                <option value="">Любой</option>
+                <option value="false">Не заблокированные</option>
+                <option value="true">Заблокированные</option>
+              </select></label>
+              <button class="button secondary" type="submit">Найти</button>
+            </form>
+          </div>
+
+          <div class="card table-card">
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Пользователь</th><th>Состояние</th><th>Тариф</th><th>Сообщений</th><th>Последняя активность</th></tr></thead>
+                <tbody id="users-body"></tbody>
+              </table>
+            </div>
+            <p class="muted users-total" id="users-total"></p>
+          </div>
+
+          <section class="card" id="user-card" hidden>
+            <div class="page-heading">
+              <div><p class="eyebrow">КАРТОЧКА</p><h3 id="user-card-title">—</h3><p class="block-caption" id="user-card-subtitle"></p></div>
+              <button id="close-user-card" class="button ghost" type="button">Закрыть</button>
+            </div>
+            <div id="user-card-body"></div>
           </section>
         </section>
 

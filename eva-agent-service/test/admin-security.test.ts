@@ -128,6 +128,8 @@ test("sudo accepts only the privileged scopes used by the admin API", () => {
     "providers:activate",
     "secrets:write",
     "services:restart",
+    "users:write",
+    "users:messages",
   ]);
   assert.equal(ADMIN_SUDO_SCOPES.includes("shell:execute" as never), false);
 });
