@@ -288,6 +288,38 @@ jobs:
         run: node ../scripts/verify-agent-sdk.mjs .
 
   # ===================================================================
+  # admin-ui: поведение панели в настоящем браузере
+  # ===================================================================
+  # `node --check` доказывает лишь то, что файл разбирается. Всё, ради
+  # чего эти тесты написаны, — отрицательные проверки: какие запросы
+  # панель НЕ отправляет. Переписка не должна загружаться при открытии
+  # карточки, мутации — уходить до подтверждения sudo, а пустая форма
+  # пароля архива — снимать пароль. Ни одно из этих правил не держится
+  # сервером: он честно ответит на любой корректный запрос.
+  admin-ui:
+    name: admin-ui (браузерные тесты)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: admin-ui
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.22"
+          cache: npm
+          cache-dependency-path: admin-ui/package-lock.json
+
+      - run: npm ci --no-audit --no-fund
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Behaviour tests
+        run: npm test
+
+  # ===================================================================
   # PostgreSQL schema: applied for real, three times, to prove idempotency
   # ===================================================================
   migrations:
