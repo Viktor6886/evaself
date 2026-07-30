@@ -355,3 +355,11 @@ wait_for_health() {
 http_status() {
 	curl -sS -o /dev/null -w '%{http_code}' --max-time "${2:-10}" "$1" 2>/dev/null || echo "000"
 }
+
+# Content type only, lowercased, without the charset. A static server that
+# falls back to its SPA index answers 200 with text/html for a missing
+# asset, so a status code alone proves nothing about what actually came back.
+http_content_type() {
+	curl -sS -o /dev/null -w '%{content_type}' --max-time "${2:-10}" "$1" 2>/dev/null |
+		tr 'A-Z' 'a-z' | cut -d';' -f1
+}

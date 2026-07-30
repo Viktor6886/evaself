@@ -130,7 +130,16 @@
 	}
 
 	handle {
-		rewrite * /app{uri}
+		# The Mini App lives under /app on the static server, so the bare
+		# host is mapped onto it. A request that already carries the
+		# prefix must NOT get a second one: /app/app.css would become
+		# /app/app/app.css, miss, and fall through to index.html — which
+		# is served as text/html, and nosniff (set above) then makes the
+		# browser refuse to apply it as CSS or execute it as JS. The page
+		# still renders, completely unstyled and without scripts, which is
+		# why this failed silently instead of 404-ing.
+		@needs_prefix not path /app /app/*
+		rewrite @needs_prefix /app{uri}
 		reverse_proxy webapp:8082
 	}
 }

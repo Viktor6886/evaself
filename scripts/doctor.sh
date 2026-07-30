@@ -211,6 +211,23 @@ else
 			*) soft "$label https://$host returned $code" ;;
 		esac
 	done
+
+	# 200 on the Mini App's HTML is not enough. When its assets do not
+	# resolve, the static server answers them with index.html — status 200,
+	# type text/html — and the browser, told not to sniff, throws away the
+	# stylesheet and the script. The page then opens bare and nothing in the
+	# logs looks wrong. So check what actually comes back, not the code.
+	for pair in "app.css:text/css" "app.js:text/javascript"; do
+		asset="${pair%%:*}"; want="${pair#*:}"
+		got="$(http_content_type "https://$DOMAIN_APP/app/$asset" 12)"
+		case "$got" in
+			"$want") ok "Mini App /app/$asset отдаётся как $got" ;;
+			text/html)
+				critical "Mini App /app/$asset вернул HTML вместо $want — браузер его отбросит, экран откроется без стилей и скриптов" ;;
+			"") critical "Mini App /app/$asset недоступен" ;;
+			*) soft "Mini App /app/$asset отдаётся как $got, ожидалось $want" ;;
+		esac
+	done
 fi
 
 if [ -n "${DOMAIN_STATUS:-}" ]; then

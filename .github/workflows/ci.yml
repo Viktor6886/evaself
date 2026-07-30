@@ -188,6 +188,10 @@ jobs:
           # top-level deny on a host that proxies /api/* is silently dead code.
           caddy adapt --config Caddyfile > /tmp/caddy.json
           python3 scripts/ci/assert-caddy-order.py /tmp/caddy.json
+          # The Mini App host maps / onto /app. An unguarded rewrite fires on
+          # /app/app.css too, which then resolves to index.html and is refused
+          # as CSS under nosniff — the page renders, completely unstyled.
+          python3 scripts/ci/assert-caddy-prefix-rewrite.py /tmp/caddy.json
 
       - name: Front-end JavaScript is valid
         run: |
