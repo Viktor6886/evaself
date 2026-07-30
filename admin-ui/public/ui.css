@@ -422,3 +422,61 @@ dialog .eyebrow { margin-top: 0; }
 }
 .integration-test.is-ok { border-left-color: #35c07a; }
 .integration-test.is-fail { border-left-color: #e05a52; }
+
+/* ---------------------------------------------------------------------
+ * Вкладка «Искусственный интеллект»: цепочки, состояние, отказы (2.6)
+ * ------------------------------------------------------------------- */
+.router-card { padding: 18px; margin-bottom: 16px; }
+.router-routes { display: grid; gap: 16px; margin-top: 4px; }
+.route-block { padding: 14px; border: 1px solid var(--line, #2a2f3a); border-radius: 12px; }
+.route-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.route-head h4 { margin: 0; font-size: 15px; }
+.route-requires { color: var(--muted, #8b93a4); font-size: 11.5px; }
+
+.chain { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; counter-reset: chain; }
+.chain-link {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 11px;
+  border: 1px solid var(--line, #2a2f3a);
+  border-radius: 10px;
+  background: var(--bg, #0e1117);
+}
+.chain-link.is-off { opacity: .55; }
+.chain-rank { color: var(--muted, #8b93a4); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+.chain-name strong { display: block; font-size: 13.5px; }
+.chain-name small { color: var(--muted, #8b93a4); font-size: 11.5px; }
+.chain-move { display: flex; gap: 5px; }
+.chain-add { display: flex; gap: 8px; margin-top: 10px; }
+.chain-add select {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--line, #2a2f3a);
+  border-radius: 9px;
+  background: var(--bg, #0e1117);
+  color: inherit;
+}
+
+.router-health { display: grid; gap: 12px; margin-top: 4px; }
+.health-row { padding: 13px; border: 1px solid var(--line, #2a2f3a); border-radius: 12px; }
+.health-head { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; }
+.health-head strong { display: block; font-size: 14px; }
+.health-head small { color: var(--muted, #8b93a4); font-size: 11.5px; }
+.health-state { color: var(--muted, #8b93a4); font-size: 12px; white-space: nowrap; }
+.health-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 8px 18px; margin: 11px 0 0; }
+.health-facts > div { display: grid; gap: 1px; }
+.health-facts dt { color: var(--muted, #8b93a4); font-size: 11px; }
+.health-facts dd { margin: 0; font-size: 13px; font-variant-numeric: tabular-nums; }
+.health-row .card-actions { margin-top: 11px; }
+.failure-detail { color: var(--muted, #8b93a4); font-size: 12px; overflow-wrap: anywhere; }
+
+.router-fields { margin: 0; padding: 14px; border: 1px solid var(--line, #2a2f3a); border-radius: 12px; }
+.router-fields legend { padding: 0 6px; color: var(--muted, #8b93a4); font-size: 12px; }
+.router-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+.router-grid label { display: grid; gap: 4px; font-size: 12px; }
+.router-grid small { color: var(--muted, #8b93a4); font-size: 11px; }
+.router-flags { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 14px; }
+.router-flags .flag { display: flex; align-items: center; gap: 6px; font-size: 12.5px; }

@@ -1,4 +1,9 @@
 const API = "/api/admin/v1";
+const ROUTER_DEFAULTS = {
+  priority: 100, quality_tier: 3, max_output_tokens: 4096,
+  request_timeout_ms: 180000, max_retries: 2, max_concurrency: 8,
+};
+
 const state = {
   me: null,
   page: "overview",
@@ -7,6 +12,7 @@ const state = {
   settings: null,
   etag: null,
   providers: [],
+  router: null,
   pendingSudo: null,
   pendingConfirm: null,
   events: null,
@@ -594,16 +600,181 @@ async function pollOperation(id) {
 }
 
 async function loadProviders() {
-  const { payload } = await request("/providers?kind=llm");
-  state.providers = Array.isArray(payload.providers) ? payload.providers : [];
-  const active = state.providers.find((item) => item.is_active);
-  $("#ai-summary").innerHTML = `
-    <div class="stat"><strong>${state.providers.length}</strong><span>LLM-конфигураций</span></div>
-    <div class="stat"><strong>${active ? escapeHtml(active.name) : "—"}</strong><span>активный провайдер</span></div>
-    <div class="stat"><strong>${active ? escapeHtml(active.model) : "—"}</strong><span>активная модель</span></div>`;
+  const [list, router] = await Promise.all([
+    request("/providers?kind=llm"),
+    // Роутер мог ещё не получить ни одного запроса — тогда состояние
+    // пустое, но страница всё равно должна открыться.
+    request("/llm/state").catch(() => ({ payload: { providers: [], routes: [], recent_failures: [] } })),
+  ]);
+  state.providers = Array.isArray(list.payload.providers) ? list.payload.providers : [];
+  state.router = router.payload;
+
+  renderRouterRoutes();
+  renderRouterHealth();
+  renderRouterFailures();
+
   $("#providers-list").innerHTML = state.providers.length
     ? state.providers.map(providerCard).join("")
-    : '<article class="empty-card"><h3>LLM-провайдер ещё не добавлен</h3><p>Добавьте первую OpenAI-compatible конфигурацию.</p></article>';
+    : '<article class="empty-card"><h3>LLM-провайдер ещё не добавлен</h3><p>Добавьте первую конфигурацию — до тех пор Ева не сможет ответить.</p></article>';
+}
+
+const ROUTE_TITLES = {
+  chat: "Разговор", deep: "Глубокий анализ",
+  tools: "Работа с инструментами", json: "Строгий JSON",
+};
+
+/**
+ * Цепочка маршрута. Позиция 0 — основной, дальше резервы. Порядок
+ * меняется стрелками и уходит одним PUT: сервер принимает список
+ * целиком, поэтому перестановка не может оставить дыру в нумерации.
+ */
+function renderRouterRoutes() {
+  const routes = state.router?.routes || [];
+  const editable = ["owner", "admin"].includes(state.me.role);
+  $("#router-routes").innerHTML = routes.length
+    ? routes.map((route) => {
+      const chain = route.chain || [];
+      const requires = [
+        route.requires_tools ? "инструменты" : "",
+        route.requires_json ? "строгий JSON" : "",
+        route.requires_streaming ? "поток" : "",
+        `контекст от ${Number(route.min_context_window).toLocaleString("ru-RU")}`,
+      ].filter(Boolean).join(" · ");
+      return `
+        <section class="route-block" data-route="${escapeHtml(route.code)}">
+          <div class="route-head">
+            <h4>${escapeHtml(ROUTE_TITLES[route.code] || route.title || route.code)}</h4>
+            <span class="route-requires">требует: ${escapeHtml(requires)}</span>
+          </div>
+          ${chain.length ? `<ol class="chain">${chain.map((link, index) => `
+            <li class="chain-link${link.enabled ? "" : " is-off"}">
+              <span class="chain-rank">${index === 0 ? "основной" : `резерв ${index}`}</span>
+              <span class="chain-name"><strong>${escapeHtml(link.name)}</strong><small>${escapeHtml(link.model)} · ${escapeHtml(link.protocol)}</small></span>
+              ${editable ? `<span class="chain-move">
+                <button class="button tiny ghost" data-chain-move="up" data-route="${escapeHtml(route.code)}" data-provider="${escapeHtml(link.provider_id)}"${index === 0 ? " disabled" : ""}>↑</button>
+                <button class="button tiny ghost" data-chain-move="down" data-route="${escapeHtml(route.code)}" data-provider="${escapeHtml(link.provider_id)}"${index === chain.length - 1 ? " disabled" : ""}>↓</button>
+                <button class="button tiny danger-outline" data-chain-remove="${escapeHtml(link.provider_id)}" data-route="${escapeHtml(route.code)}">Убрать</button>
+              </span>` : ""}
+            </li>`).join("")}</ol>`
+            : '<p class="muted">Цепочка пуста — маршрут не обслуживается.</p>'}
+          ${editable ? chainAdder(route, chain) : ""}
+        </section>`;
+    }).join("")
+    : '<p class="muted">Маршруты появятся после применения миграций роутера.</p>';
+}
+
+function chainAdder(route, chain) {
+  const used = new Set(chain.map((link) => link.provider_id));
+  const free = state.providers.filter((item) => !used.has(item.id));
+  if (chain.length >= 6) {
+    return '<p class="muted">Достигнут предел: основной и пять резервов.</p>';
+  }
+  if (free.length === 0) return "";
+  return `<div class="chain-add">
+    <select data-chain-add-select="${escapeHtml(route.code)}">
+      ${free.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)} — ${escapeHtml(item.model)}</option>`).join("")}
+    </select>
+    <button class="button tiny secondary" data-chain-add="${escapeHtml(route.code)}">Добавить в конец</button>
+  </div>`;
+}
+
+const BREAKER_LABELS = {
+  closed: { title: "работает", color: "green" },
+  open: { title: "закрыт после ошибок", color: "red" },
+  half_open: { title: "пробный запрос", color: "yellow" },
+};
+
+function renderRouterHealth() {
+  const rows = state.router?.providers || [];
+  const editable = ["owner", "admin"].includes(state.me.role);
+  $("#router-health").innerHTML = rows.length
+    ? rows.map((row) => {
+      const breaker = BREAKER_LABELS[row.breaker_state] || BREAKER_LABELS.closed;
+      const failures = Number(row.failures_1h || 0);
+      const requests = Number(row.requests_1h || 0);
+      return `
+        <article class="health-row">
+          <div class="health-head">
+            <span class="status-dot color-${row.pinned_out ? "gray" : breaker.color}"></span>
+            <div>
+              <strong>${escapeHtml(row.name)}</strong>
+              <small>${escapeHtml(row.model)} · приоритет ${row.priority}${row.enabled ? "" : " · выключен"}</small>
+            </div>
+            <span class="health-state">${row.pinned_out ? "снят вручную" : escapeHtml(breaker.title)}</span>
+          </div>
+          <dl class="health-facts">
+            <div><dt>Запросов за час</dt><dd>${requests}${failures ? ` · ошибок ${failures}` : ""}</dd></div>
+            <div><dt>Задержка p95</dt><dd>${row.p95_latency_ms == null ? "нет данных" : `${row.p95_latency_ms} мс`}</dd></div>
+            <div><dt>Потрачено сегодня</dt><dd>${money(row.spent_today_micro)}${row.daily_budget_micro ? ` из ${money(row.daily_budget_micro)}` : " · без лимита"}</dd></div>
+            <div><dt>Потрачено за месяц</dt><dd>${money(row.spent_month_micro)}${row.monthly_budget_micro ? ` из ${money(row.monthly_budget_micro)}` : " · без лимита"}</dd></div>
+            ${row.last_error_code ? `<div><dt>Последняя ошибка</dt><dd>${escapeHtml(row.last_error_code)}</dd></div>` : ""}
+            ${row.probe_after ? `<div><dt>Пробный запрос после</dt><dd>${escapeHtml(localDate(row.probe_after))}</dd></div>` : ""}
+          </dl>
+          ${editable ? `<div class="card-actions">
+            ${row.breaker_state === "closed" ? "" : `<button class="button tiny secondary" data-breaker-reset="${escapeHtml(row.id)}">Вернуть в строй</button>`}
+            <button class="button tiny ghost" data-pin="${row.pinned_out ? "off" : "on"}" data-provider="${escapeHtml(row.id)}">${row.pinned_out ? "Вернуть автовозврат" : "Снять с автовозврата"}</button>
+          </div>` : ""}
+        </article>`;
+    }).join("")
+    : '<p class="muted">Роутер ещё не обслуживал запросы.</p>';
+}
+
+/** Микроединицы валюты в доллары. */
+function money(micro) {
+  const value = Number(micro || 0) / 1_000_000;
+  return `$${value.toFixed(value < 1 ? 4 : 2)}`;
+}
+
+function renderRouterFailures() {
+  const rows = state.router?.recent_failures || [];
+  $("#router-failures").innerHTML = rows.length
+    ? rows.map((row) => `
+      <article class="compact-row">
+        <span class="status-dot color-red"></span>
+        <span>
+          <strong>${escapeHtml(row.provider || "провайдер не выбран")}</strong>
+          <small>${escapeHtml(SWITCH_REASONS[row.switch_reason] || row.switch_reason || "ошибка")}${row.http_status ? ` · HTTP ${row.http_status}` : ""} · ${escapeHtml(localDate(row.started_at))}</small>
+        </span>
+        <span class="failure-detail">${escapeHtml(row.error_summary || "")}</span>
+      </article>`).join("")
+    : '<p class="muted">Отказов не зафиксировано.</p>';
+}
+
+const SWITCH_REASONS = {
+  rate_limited: "лимит запросов провайдера",
+  server_error: "ошибка на стороне провайдера",
+  connection_failed: "нет соединения",
+  timeout: "таймаут",
+  empty_response: "пустой ответ",
+  invalid_response: "нечитаемый ответ",
+  model_error: "модель отклонила запрос",
+  quota_exhausted: "исчерпана квота или баланс",
+  budget_exceeded: "превышен бюджет",
+  json_contract_failed: "ответ не JSON",
+  tool_calls_failed: "сломанный вызов инструмента",
+  latency_exceeded: "слишком долгий ответ",
+  breaker_open: "circuit breaker закрыт",
+  incompatible: "не подходит по возможностям",
+};
+
+async function moveChain(routeCode, providerId, direction) {
+  const route = (state.router?.routes || []).find((item) => item.code === routeCode);
+  if (!route) return;
+  const ids = (route.chain || []).map((link) => link.provider_id);
+  const at = ids.indexOf(providerId);
+  const to = direction === "up" ? at - 1 : at + 1;
+  if (at < 0 || to < 0 || to >= ids.length) return;
+  [ids[at], ids[to]] = [ids[to], ids[at]];
+  await saveChain(routeCode, ids);
+}
+
+async function saveChain(routeCode, providerIds) {
+  await request(`/llm/routes/${encodeURIComponent(routeCode)}/chain`, {
+    method: "PUT",
+    body: JSON.stringify({ providers: providerIds }),
+  });
+  toast("Цепочка сохранена");
+  await loadProviders();
 }
 
 function providerCard(item) {
@@ -650,6 +821,31 @@ function openProviderEditor(provider = null) {
     null,
     2,
   );
+
+  // Поля маршрутизации живут в таблице роутера, а не в
+  // additional_parameters: подставляем их из /llm/state.
+  const routing = (state.router?.providers || []).find((item) => item.id === provider?.id);
+  const full = ROUTER_DEFAULTS;
+  const set = (name, value) => { if (form.elements[name]) form.elements[name].value = value; };
+  const flag = (name, value) => { if (form.elements[name]) form.elements[name].checked = value; };
+  set("priority", routing?.priority ?? full.priority);
+  set("quality_tier", provider?.quality_tier ?? full.quality_tier);
+  set("max_output_tokens", provider?.max_output_tokens ?? full.max_output_tokens);
+  set("request_timeout_ms", provider?.additional_parameters?.request_timeout_ms ?? full.request_timeout_ms);
+  set("max_retries", provider?.max_retries ?? full.max_retries);
+  set("max_concurrency", provider?.max_concurrency ?? full.max_concurrency);
+  set("max_rpm", provider?.max_rpm ?? "");
+  set("max_tpm", provider?.max_tpm ?? "");
+  set("price_in", microToUnits(provider?.price_in_micro));
+  set("price_out", microToUnits(provider?.price_out_micro));
+  set("daily_budget", provider?.daily_budget_micro == null ? "" : microToUnits(provider.daily_budget_micro));
+  set("monthly_budget", provider?.monthly_budget_micro == null ? "" : microToUnits(provider.monthly_budget_micro));
+  flag("supports_tools", provider?.supports_tools ?? true);
+  flag("supports_json", provider?.supports_json ?? true);
+  flag("supports_streaming", provider?.supports_streaming ?? true);
+  flag("supports_vision", provider?.supports_vision ?? false);
+  flag("sensitive_data_allowed", provider?.sensitive_data_allowed ?? false);
+  flag("enabled", provider?.enabled ?? true);
   form.elements.api_key.required = !provider;
   $("#provider-editor-title").textContent = provider
     ? `Изменить «${provider.name}»`
@@ -679,14 +875,59 @@ async function saveProvider(form) {
     additional_parameters: additional,
   };
   if (form.elements.api_key.value) body.api_key = form.elements.api_key.value;
-  await request(id ? `/providers/${encodeURIComponent(id)}` : "/providers", {
+  const saved = await request(id ? `/providers/${encodeURIComponent(id)}` : "/providers", {
     method: id ? "PATCH" : "POST",
     body: JSON.stringify(body),
   });
+  // Поля маршрутизации хранятся отдельно и требуют id, который у нового
+  // провайдера появляется только сейчас.
+  await saveRoutingFields(form, id || saved.payload?.id);
+
   form.elements.api_key.value = "";
   $("#provider-editor").hidden = true;
   toast(id ? "Провайдер обновлён" : "Провайдер создан");
   await loadProviders();
+}
+
+function microToUnits(micro) {
+  return micro == null ? 0 : Number(micro) / 1_000_000;
+}
+
+function unitsToMicro(value) {
+  const num = Number(value);
+  return Number.isFinite(num) ? Math.round(num * 1_000_000) : 0;
+}
+
+/** Поля маршрутизации отправляются отдельным PATCH в API роутера. */
+async function saveRoutingFields(form, providerId) {
+  const nullableNumber = (name) => {
+    const raw = form.elements[name]?.value;
+    return raw === undefined || raw === "" ? null : Number(raw);
+  };
+  const body = {
+    priority: Number(form.elements.priority.value),
+    quality_tier: Number(form.elements.quality_tier.value),
+    max_output_tokens: Number(form.elements.max_output_tokens.value),
+    request_timeout_ms: Number(form.elements.request_timeout_ms.value),
+    max_retries: Number(form.elements.max_retries.value),
+    max_concurrency: Number(form.elements.max_concurrency.value),
+    max_rpm: nullableNumber("max_rpm"),
+    max_tpm: nullableNumber("max_tpm"),
+    price_in_micro: unitsToMicro(form.elements.price_in.value),
+    price_out_micro: unitsToMicro(form.elements.price_out.value),
+    daily_budget_micro: form.elements.daily_budget.value === "" ? null : unitsToMicro(form.elements.daily_budget.value),
+    monthly_budget_micro: form.elements.monthly_budget.value === "" ? null : unitsToMicro(form.elements.monthly_budget.value),
+    supports_tools: form.elements.supports_tools.checked,
+    supports_json: form.elements.supports_json.checked,
+    supports_streaming: form.elements.supports_streaming.checked,
+    supports_vision: form.elements.supports_vision.checked,
+    sensitive_data_allowed: form.elements.sensitive_data_allowed.checked,
+    enabled: form.elements.enabled.checked,
+  };
+  await request(`/llm/providers/${encodeURIComponent(providerId)}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
 }
 
 async function providerAction(action, id) {
@@ -1097,6 +1338,62 @@ $("#provider-form").addEventListener("submit", (event) => {
   const form = event.currentTarget;
   saveProvider(form).catch(handleError);
 });
+$("#reload-router").addEventListener("click", () => loadProviders().catch(handleError));
+
+$("#router-routes").addEventListener("click", (event) => {
+  const move = event.target.closest("[data-chain-move]");
+  if (move) {
+    moveChain(move.dataset.route, move.dataset.provider, move.dataset.chainMove).catch(handleError);
+    return;
+  }
+  const remove = event.target.closest("[data-chain-remove]");
+  if (remove) {
+    const route = (state.router?.routes || []).find((item) => item.code === remove.dataset.route);
+    const ids = (route?.chain || [])
+      .map((link) => link.provider_id)
+      .filter((id) => id !== remove.dataset.chainRemove);
+    if (ids.length === 0) {
+      // Сервер и так отклонит пустую цепочку, но сказать причину лучше
+      // до запроса, чем показать 400.
+      toast("В цепочке должен остаться хотя бы основной провайдер", true);
+      return;
+    }
+    saveChain(remove.dataset.route, ids).catch(handleError);
+    return;
+  }
+  const add = event.target.closest("[data-chain-add]");
+  if (add) {
+    const code = add.dataset.chainAdd;
+    const select = document.querySelector(`[data-chain-add-select="${CSS.escape(code)}"]`);
+    const route = (state.router?.routes || []).find((item) => item.code === code);
+    const ids = (route?.chain || []).map((link) => link.provider_id);
+    if (select?.value) saveChain(code, [...ids, select.value]).catch(handleError);
+  }
+});
+
+$("#router-health").addEventListener("click", (event) => {
+  const reset = event.target.closest("[data-breaker-reset]");
+  if (reset) {
+    request(`/llm/providers/${encodeURIComponent(reset.dataset.breakerReset)}/breaker/reset`, { method: "POST" })
+      .then(() => { toast("Провайдер возвращён в строй"); return loadProviders(); })
+      .catch(handleError);
+    return;
+  }
+  const pin = event.target.closest("[data-pin]");
+  if (pin) {
+    const on = pin.dataset.pin === "on";
+    request(`/llm/providers/${encodeURIComponent(pin.dataset.provider)}/pin`, {
+      method: "POST",
+      body: JSON.stringify({ pinned_out: on }),
+    })
+      .then(() => {
+        toast(on ? "Провайдер снят с автовозврата" : "Автовозврат включён");
+        return loadProviders();
+      })
+      .catch(handleError);
+  }
+});
+
 $("#providers-list").addEventListener("click", (event) => {
   const button = event.target.closest("[data-provider-action]");
   if (button) {
