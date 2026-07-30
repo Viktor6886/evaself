@@ -128,6 +128,12 @@ fi
 # =====================================================================
 step "Backup before updating"
 # =====================================================================
+# The key has to exist BEFORE the backup: archives are encrypted with it,
+# and backup.sh refuses to run without one. Creating it later meant the
+# very first update of an installation that predates the Secret Store
+# aborted on "the pre-update backup failed".
+"$SCRIPT_DIR/ensure-admin-master-key.sh"
+load_env
 "$SCRIPT_DIR/backup.sh" >/dev/null || die "the pre-update backup failed — update aborted"
 LATEST_BACKUP="$(find "${BACKUP_DIR:-/var/backups/evaself}" -maxdepth 1 \
 	\( -name 'evaself-backup-*.tar.gz.enc' -o -name 'evaself-backup-*.tar.gz' \) \
@@ -182,7 +188,6 @@ fi
 # =====================================================================
 step "Pulling and rebuilding"
 # =====================================================================
-"$SCRIPT_DIR/ensure-admin-master-key.sh"
 # Settings introduced by the commits just pulled — added before the
 # containers are rebuilt so nothing starts with a missing value.
 "$SCRIPT_DIR/ensure-env-defaults.sh"
