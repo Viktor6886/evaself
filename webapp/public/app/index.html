@@ -1,159 +1,199 @@
 <!doctype html>
 <html lang="ru">
-	<head>
-		<meta charset="utf-8" />
-		<meta
-			name="viewport"
-			content="width=device-width, initial-scale=1, viewport-fit=cover"
-		/>
-		<meta name="theme-color" content="#fffaf3" />
-		<title>Ева</title>
-		<link rel="stylesheet" href="/assets/styles.css" />
-		<link rel="stylesheet" href="/app/app.css" />
-		<script src="https://telegram.org/js/telegram-web-app.js"></script>
-	</head>
-	<body>
-		<div class="app-shell">
-			<header class="app-header">
-				<div class="header-copy">
-					<h1 id="screen-title">Сегодня</h1>
-					<p class="app-kicker" id="header-kicker">Ева рядом</p>
-				</div>
-				<div class="header-actions">
-					<div class="local-time" id="local-time" aria-label="Локальное время">—</div>
-					<button class="notification-button" type="button" aria-label="Уведомления" data-home-placeholder="Уведомления">
-						<svg viewBox="0 0 32 32" aria-hidden="true">
-							<path d="M9 23h14M12 26c1 2 2.4 3 4 3s3-1 4-3M10 22v-8c0-4 2.4-7 6-7s6 3 6 7v8l2 2H8l2-2Z" />
-						</svg>
-						<span class="notification-dot" aria-hidden="true"></span>
-					</button>
-				</div>
-			</header>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#fffdf9" />
+  <title>Ева</title>
+  <link rel="stylesheet" href="/app/app.css?v=20260730-compact1" />
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body class="is-today">
+  <div class="app-shell">
+    <header class="app-header" id="app-header">
+      <div class="header-copy">
+        <h1 id="screen-title">Доброе утро</h1>
+        <p id="header-kicker">Как ты себя чувствуешь сегодня?</p>
+      </div>
+      <button class="bell-button" id="notifications-button" type="button" aria-label="Уведомления">
+        <svg viewBox="0 0 40 40" aria-hidden="true">
+          <path d="M12 26h16M15 26V17a5 5 0 0 1 10 0v9M17 30c.8 2.4 5.2 2.4 6 0" />
+          <circle cx="29" cy="10" r="4" class="fill-orange no-stroke" />
+        </svg>
+      </button>
+    </header>
 
-			<div id="notice" class="notice" role="status" hidden></div>
+    <div id="notice" class="notice" role="status" hidden></div>
 
-			<main id="screens" aria-live="polite">
-				<section class="screen is-active" id="screen-today" data-screen="today">
-					<div class="screen-content home-dashboard">
-						<article class="checkin-card">
-							<div class="checkin-copy">
-								<h2>Как я сейчас?</h2>
-								<div class="checkin-grid">
-									<button class="checkin-pill" type="button" data-home-placeholder="Состояние"><span class="checkin-symbol">☺</span><strong>Настроение</strong><span>Отметить</span></button>
-									<button class="checkin-pill" type="button" data-home-placeholder="Состояние"><span class="checkin-symbol">ϟ</span><strong>Энергия</strong><span>— / 10</span></button>
-									<button class="checkin-pill" type="button" data-home-placeholder="Состояние"><span class="checkin-symbol">◎</span><strong>Фокус</strong><span>— / 10</span></button>
-								</div>
-							</div>
-							<div class="eva-balloon" aria-hidden="true">
-								<i class="balloon-brow left"></i><i class="balloon-brow right"></i>
-								<i class="balloon-eye left"></i><i class="balloon-eye right"></i>
-								<i class="balloon-smile"></i><i class="balloon-knot"></i>
-							</div>
-						</article>
+    <main id="screens">
+      <section class="screen is-active today-screen" id="screen-today" data-screen="today">
+        <div class="dashboard" id="today-content">
+          <section class="state-card doodle-card" aria-labelledby="state-title">
+            <div class="state-main">
+              <h2 id="state-title">Как я сейчас?</h2>
+              <div class="state-chips">
+                <button class="state-chip" type="button" data-checkin="mood">
+                  <span class="state-icon" aria-hidden="true">
+                    <svg viewBox="0 0 48 48"><circle cx="24" cy="24" r="18"/><circle cx="18" cy="20" r="1.5" class="fill-ink"/><circle cx="30" cy="20" r="1.5" class="fill-ink"/><path d="M16 28c4.5 6 11.5 6 16 0"/></svg>
+                  </span>
+                  <span><small>Настроение</small><strong id="mood-value">Отметить</strong></span>
+                </button>
+                <button class="state-chip" type="button" data-checkin="energy">
+                  <span class="state-icon" aria-hidden="true">
+                    <svg viewBox="0 0 48 48"><path d="M27 4 13 27h10l-2 17 14-25H25z"/></svg>
+                  </span>
+                  <span><small>Энергия</small><strong id="energy-value">— / 10</strong></span>
+                </button>
+                <button class="state-chip" type="button" data-checkin="focus">
+                  <span class="state-icon" aria-hidden="true">
+                    <svg viewBox="0 0 48 48"><circle cx="22" cy="26" r="16"/><circle cx="22" cy="26" r="10"/><circle cx="22" cy="26" r="4"/><path d="m25 23 13-13M31 10h7v7"/></svg>
+                  </span>
+                  <span><small>Фокус</small><strong id="focus-value">— / 10</strong></span>
+                </button>
+              </div>
+            </div>
+            <div class="balloon" aria-hidden="true">
+              <svg viewBox="0 0 110 140">
+                <path class="balloon-body" d="M55 8C25 8 10 31 13 62c3 32 19 56 42 62 23-6 39-30 42-62C100 31 85 8 55 8Z"/>
+                <path d="M49 124c-2 7-6 10-7 14h26c-1-4-5-7-7-14"/>
+                <circle cx="44" cy="58" r="3" class="fill-ink"/>
+                <circle cx="66" cy="58" r="3" class="fill-ink"/>
+                <path d="M36 72c7 15 31 15 38 0"/>
+                <path d="M68 137c18 0 18-12 31-12 10 0 10 8 2 8-8 0-9-7-3-11"/>
+              </svg>
+            </div>
+          </section>
 
-						<div id="today-content" class="screen-content dynamic-today">
-							<div class="hero-card skeleton-card">
-								<div class="skeleton skeleton-short"></div>
-								<div class="skeleton skeleton-title"></div>
-								<div class="skeleton"></div>
-								<div class="skeleton skeleton-button"></div>
-							</div>
-						</div>
+          <section class="result-card doodle-card">
+            <span class="result-star" aria-hidden="true">
+              <svg viewBox="0 0 48 48"><path d="m24 4 6 13 14 2-10 10 2 14-12-7-12 7 2-14L4 19l14-2z"/></svg>
+            </span>
+            <div class="result-copy">
+              <small>Главный результат дня</small>
+              <strong id="main-result">Загрузка…</strong>
+            </div>
+            <button class="ghost-button" id="edit-result" type="button">Изменить</button>
+          </section>
 
-						<div class="quick-actions" aria-label="Быстрые действия">
-							<button class="quick-action is-primary" type="button" data-home-action="record"><span class="quick-action-icon">✎</span><span>Записать</span></button>
-							<button class="quick-action" type="button" data-home-action="focus"><span class="quick-action-icon">◎</span><span>Фокус</span></button>
-							<button class="quick-action" type="button" data-home-action="eva"><span class="quick-action-icon">♡</span><span>Ева</span></button>
-							<button class="quick-action" type="button" data-home-action="practice"><span class="quick-action-icon">♧</span><span>Практика</span></button>
-						</div>
+          <section class="quick-actions" aria-label="Быстрые действия">
+            <button class="quick-action is-accent" type="button" data-quick="journal">
+              <span class="quick-icon" aria-hidden="true"><svg viewBox="0 0 48 48"><path d="m10 36 3-10L32 7l9 9-19 19zM28 11l9 9M13 26l9 9M10 36l12-1"/></svg></span>
+              <span>Записать</span>
+            </button>
+            <button class="quick-action" type="button" data-quick="focus">
+              <span class="quick-icon" aria-hidden="true"><svg viewBox="0 0 48 48"><circle cx="22" cy="26" r="16"/><circle cx="22" cy="26" r="9"/><circle cx="22" cy="26" r="3"/><path d="m25 23 13-13M31 10h7v7"/></svg></span>
+              <span>Фокус</span>
+            </button>
+            <button class="quick-action" type="button" data-quick="eva">
+              <span class="quick-icon eva-mini" aria-hidden="true"><svg viewBox="0 0 48 48"><path d="M12 42c1-9 5-14 12-14s11 5 12 14M15 20c0-8 4-13 9-13s9 5 9 13c0 6-4 10-9 10s-9-4-9-10Z"/><path d="M15 17c3-1 5-3 6-6 2 4 6 6 12 6M20 21h.1M28 21h.1M21 25c2 2 4 2 6 0"/><path class="fill-orange no-stroke" d="M36 8c4-5 10 1 4 6l-4 3-4-3c-6-5 0-11 4-6Z"/></svg></span>
+              <span>Ева</span>
+            </button>
+            <button class="quick-action" type="button" data-quick="practice">
+              <span class="quick-icon" aria-hidden="true"><svg viewBox="0 0 48 48"><path d="M24 42c-2-12-10-18-20-17 3 10 10 16 20 17Zm0 0c2-12 10-18 20-17-3 10-10 16-20 17Zm0-1c-10-7-12-18-7-27 8 6 10 16 7 27Zm0 0c10-7 12-18 7-27-8 6-10 16-7 27Z"/></svg></span>
+              <span>Практика</span>
+            </button>
+          </section>
 
-						<article class="today-feature">
-							<h2>Сегодня</h2>
-							<p>Твой день — твои решения</p>
-							<button type="button" data-home-action="plan">Открыть план →</button>
-							<span class="feature-sun" aria-hidden="true"><i class="feature-smile"></i></span>
-							<span class="feature-note" aria-hidden="true"></span>
-						</article>
+          <section class="modules-grid" id="modules-grid" aria-label="Модули Евы"></section>
+        </div>
+      </section>
 
-						<div class="module-section-heading"><h2>Модули Евы</h2><span>Всё важное рядом</span></div>
-						<div class="module-grid" aria-label="Модули Evaself">
-							<button class="module-card" type="button" data-home-module="Дневник"><span class="module-icon">📖</span><strong>Дневник</strong><small>Жизнь и мысли</small></button>
-							<button class="module-card" type="button" data-home-module="Состояние"><span class="module-icon">♡</span><strong>Состояние</strong><small>Настроение и энергия</small></button>
-							<button class="module-card" type="button" data-home-module="Совместимость"><span class="module-icon">♧</span><strong>Совместимость</strong><small>Люди и общение</small></button>
-							<button class="module-card" type="button" data-home-module="Бюджет"><span class="module-icon">▣</span><strong>Бюджет</strong><small>Доходы и расходы</small></button>
-							<button class="module-card" type="button" data-home-module="Практики"><span class="module-icon">❀</span><strong>Практики</strong><small>Перезагрузка</small></button>
-							<button class="module-card" type="button" data-home-module="Тесты"><span class="module-icon">☑</span><strong>Тесты</strong><small>Понять себя</small></button>
-							<button class="module-card" type="button" data-home-screen="progress"><span class="module-icon">▥</span><strong>Отчёты</strong><small>Итоги и динамика</small></button>
-							<button class="module-card" type="button" data-home-screen="goals"><span class="module-icon">◎</span><strong>Цели</strong><small>Направление и шаги</small></button>
-							<button class="module-card" type="button" data-home-module="Карта жизни"><span class="module-icon">⌖</span><strong>Карта жизни</strong><small>Важные сферы</small></button>
-							<button class="module-card" type="button" data-home-module="Программы"><span class="module-icon">⚑</span><strong>Программы</strong><small>7, 14 и 30 дней</small></button>
-							<button class="module-card" type="button" data-home-module="Привычки"><span class="module-icon">▦</span><strong>Привычки</strong><small>Поддерживающие ритмы</small></button>
-							<button class="module-card" type="button" data-home-action="focus"><span class="module-icon">△</span><strong>Фокус</strong><small>5, 15 или 25 минут</small></button>
-							<button class="module-card" type="button" data-home-module="Решения"><span class="module-icon">⇄</span><strong>Решения</strong><small>Факты и варианты</small></button>
-							<button class="module-card" type="button" data-home-module="Астрорефлексия"><span class="module-icon">◉</span><strong>Астрорефлексия</strong><small>Символический взгляд</small></button>
-						</div>
-					</div>
-				</section>
+      <section class="screen" id="screen-goals" data-screen="goals" hidden>
+        <div id="goals-content" class="screen-content loading-placeholder"></div>
+        <form class="sheet-form" id="goal-form" hidden>
+          <div class="section-heading">
+            <div><p class="app-kicker">Новый ориентир</p><h2>Добавить цель</h2></div>
+            <button class="icon-button" type="button" id="close-goal-form" aria-label="Закрыть">×</button>
+          </div>
+          <label><span>Что хотите получить?</span><input name="title" maxlength="500" required placeholder="Например, подготовить запуск проекта" /></label>
+          <label><span>Почему это важно?</span><textarea name="why_it_matters" maxlength="5000" rows="3" placeholder="Коротко, своими словами"></textarea></label>
+          <label><span>Желаемый срок</span><input name="target_date" type="date" /></label>
+          <button class="primary-action" type="submit">Сохранить цель</button>
+        </form>
+        <button class="floating-action" id="add-goal" type="button">Добавить цель</button>
+      </section>
 
-				<section class="screen" id="screen-goals" data-screen="goals" hidden>
-					<div id="goals-content" class="screen-content">
-						<div class="skeleton-list">
-							<div class="skeleton skeleton-card-line"></div>
-							<div class="skeleton skeleton-card-line"></div>
-						</div>
-					</div>
-					<form class="sheet-form" id="goal-form" hidden>
-						<div class="section-heading">
-							<div><p class="app-kicker">Новый ориентир</p><h2>Добавить цель</h2></div>
-							<button class="icon-button" type="button" id="close-goal-form" aria-label="Закрыть">×</button>
-						</div>
-						<label><span>Что хотите получить?</span><input name="title" maxlength="500" required placeholder="Например, подготовить запуск проекта" /></label>
-						<label><span>Почему это важно?</span><textarea name="why_it_matters" maxlength="5000" rows="3" placeholder="Коротко, своими словами"></textarea></label>
-						<label><span>Желаемый срок</span><input name="target_date" type="date" /></label>
-						<button class="primary-action" type="submit">Сохранить цель</button>
-					</form>
-					<button class="floating-action" id="add-goal" type="button">Добавить цель</button>
-				</section>
+      <section class="screen" id="screen-organizer" data-screen="organizer" hidden>
+        <div class="placeholder-screen">
+          <span class="placeholder-icon">▦</span>
+          <h2>Органайзер</h2>
+          <p>Заметки, задачи и связи будут подключены следующим этапом.</p>
+        </div>
+      </section>
 
-				<section class="screen" id="screen-progress" data-screen="progress" hidden>
-					<div id="progress-content" class="screen-content">
-						<div class="stats-grid"><div class="skeleton skeleton-stat"></div><div class="skeleton skeleton-stat"></div></div>
-						<div class="skeleton-list"><div class="skeleton skeleton-row"></div><div class="skeleton skeleton-row"></div></div>
-					</div>
-				</section>
+      <section class="screen" id="screen-pult" data-screen="pult" hidden>
+        <div class="screen-content">
+          <div class="section-heading"><div><p class="app-kicker">Все возможности</p><h2>Пульт Евы</h2></div></div>
+          <div class="pult-grid" id="pult-grid"></div>
+        </div>
+      </section>
 
-				<section class="screen" id="screen-profile" data-screen="profile" hidden>
-					<div id="profile-content" class="screen-content">
-						<div class="profile-score skeleton-card"><div class="skeleton skeleton-title"></div><div class="skeleton"></div></div>
-					</div>
-				</section>
-			</main>
+      <section class="screen" id="screen-progress" data-screen="progress" hidden>
+        <div id="progress-content" class="screen-content loading-placeholder"></div>
+      </section>
 
-			<div class="eva-panel" id="eva-panel" hidden>
-				<div class="eva-panel-heading">
-					<div><strong>Ева рядом</strong><span>Чем помочь на этом экране?</span></div>
-					<button class="eva-panel-close" id="eva-panel-close" type="button" aria-label="Закрыть">×</button>
-				</div>
-				<button type="button" data-home-placeholder="Диалог с Евой">Написать Еве</button>
-				<button type="button" data-home-placeholder="Голосовой ввод">Надиктовать сообщение</button>
-				<button type="button" data-home-placeholder="Обсуждение экрана">Обсудить этот экран</button>
-				<button type="button" data-home-placeholder="Создание заметки">Создать заметку</button>
-			</div>
+      <section class="screen" id="screen-profile" data-screen="profile" hidden>
+        <div id="profile-content" class="screen-content loading-placeholder"></div>
+      </section>
+    </main>
 
-			<button class="eva-fab" id="eva-fab" type="button" aria-label="Открыть помощника Ева" aria-expanded="false">
-				<span class="eva-avatar" aria-hidden="true"><span class="eva-hair"></span><span class="eva-face"><i class="eva-eye left"></i><i class="eva-eye right"></i><i class="eva-smile"></i></span><span class="eva-shirt">♡</span></span>
-				<span class="eva-online-dot" aria-hidden="true"></span>
-			</button>
+    <nav class="bottom-nav" aria-label="Основная навигация">
+      <button class="nav-item is-active" type="button" data-target="today">
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M4 15 16 5l12 10v13H20v-8h-8v8H4Z"/></svg></span><span>Сегодня</span>
+      </button>
+      <button class="nav-item" type="button" data-target="goals">
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M16 28V15M16 17C9 15 8 9 9 5c7 1 10 5 7 12Zm0-2c7-2 9-7 8-11-7 1-10 5-8 11Z"/></svg></span><span>Развитие</span>
+      </button>
+      <button class="nav-item" type="button" data-target="organizer">
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 32 32"><rect x="6" y="7" width="20" height="21" rx="3"/><path d="M10 4v6M22 4v6M6 13h20M11 18h3M18 18h3M11 23h3M18 23h3"/></svg></span><span>Органайзер</span>
+      </button>
+      <button class="nav-item" type="button" data-target="pult">
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M5 8h22M5 16h22M5 24h22"/><circle cx="12" cy="8" r="3" class="fill-bg"/><circle cx="21" cy="16" r="3" class="fill-bg"/><circle cx="15" cy="24" r="3" class="fill-bg"/></svg></span><span>Пульт</span>
+      </button>
+      <button class="nav-item" type="button" data-target="profile">
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 32 32"><circle cx="16" cy="10" r="6"/><path d="M5 29c1-8 5-12 11-12s10 4 11 12"/></svg></span><span>Профиль</span>
+      </button>
+    </nav>
 
-			<nav class="bottom-nav" aria-label="Основная навигация">
-				<button class="nav-item is-active" type="button" data-target="today"><span class="nav-icon" aria-hidden="true">⌂</span><span>Сегодня</span></button>
-				<button class="nav-item" type="button" data-target="goals"><span class="nav-icon" aria-hidden="true">♧</span><span>Развитие</span></button>
-				<button class="nav-item" type="button" data-target="progress"><span class="nav-icon" aria-hidden="true">▥</span><span>Прогресс</span></button>
-				<button class="nav-item" type="button" data-target="profile"><span class="nav-icon" aria-hidden="true">♙</span><span>Профиль</span></button>
-			</nav>
-		</div>
+    <button class="eva-fab" id="eva-fab" type="button" aria-label="Открыть Еву" aria-expanded="false">
+      <svg viewBox="0 0 72 72" aria-hidden="true">
+        <circle cx="36" cy="36" r="33" class="eva-circle"/>
+        <path d="M18 63c1-15 7-22 18-22s17 7 18 22" class="eva-shirt"/>
+        <path d="M22 31c0-13 6-21 14-21s14 8 14 21c0 9-6 15-14 15s-14-6-14-15Z" class="eva-face"/>
+        <path d="M21 28c5-2 8-6 10-12 3 7 9 11 20 12"/>
+        <circle cx="31" cy="32" r="1.5" class="fill-ink no-stroke"/><circle cx="41" cy="32" r="1.5" class="fill-ink no-stroke"/>
+        <path d="M31 37c3 3 7 3 10 0"/>
+        <path d="M36 51c4-5 10 1 4 6l-4 3-4-3c-6-5 0-11 4-6Z" class="heart-mark"/>
+      </svg>
+      <span class="eva-pulse" aria-hidden="true"></span>
+    </button>
 
-		<script src="/app/app.js"></script>
-		<script src="/app/home.js"></script>
-	</body>
+    <div class="eva-panel" id="eva-panel" hidden>
+      <div class="eva-panel-head"><strong>Ева рядом</strong><button type="button" id="eva-panel-close" aria-label="Закрыть">×</button></div>
+      <p>Что сделать?</p>
+      <button type="button" data-eva-action="write">Написать Еве</button>
+      <button type="button" data-eva-action="voice">Надиктовать сообщение</button>
+      <button type="button" data-eva-action="screen">Обсудить этот экран</button>
+      <button type="button" data-eva-action="note">Создать заметку</button>
+      <button type="button" data-eva-action="task">Создать задачу</button>
+    </div>
+  </div>
+
+  <dialog class="checkin-dialog" id="checkin-dialog">
+    <form method="dialog" id="checkin-form">
+      <div class="dialog-head"><div><small>Быстрый check-in</small><h2>Как ты сейчас?</h2></div><button value="cancel" aria-label="Закрыть">×</button></div>
+      <fieldset><legend>Настроение</legend><div class="mood-options">
+        <label><input type="radio" name="mood" value="Тяжёлое"/><span>Тяжёлое</span></label>
+        <label><input type="radio" name="mood" value="Спокойное"/><span>Спокойное</span></label>
+        <label><input type="radio" name="mood" value="Хорошее"/><span>Хорошее</span></label>
+        <label><input type="radio" name="mood" value="Отличное"/><span>Отличное</span></label>
+      </div></fieldset>
+      <label class="range-row"><span>Энергия <strong id="energy-output">5</strong>/10</span><input type="range" name="energy" min="1" max="10" value="5"/></label>
+      <label class="range-row"><span>Фокус <strong id="focus-output">5</strong>/10</span><input type="range" name="focus" min="1" max="10" value="5"/></label>
+      <button class="primary-action" value="save" type="submit">Сохранить</button>
+    </form>
+  </dialog>
+
+  <script src="/app/app.js?v=20260730-compact1"></script>
+</body>
 </html>
