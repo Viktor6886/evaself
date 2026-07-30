@@ -232,6 +232,12 @@ jobs:
       - name: Every admin route declares who may call it
         run: python3 scripts/ci/assert-admin-route-access.py
 
+      # Так был потерян EVA_ROUTER_API_KEY: он был в .env.example, в
+      # установщике и в апгрейде, исправно создавался на сервере — и не
+      # передавался агенту. Каждый файл по отдельности выглядел верным.
+      - name: Every variable the service reads is passed to it
+        run: python3 scripts/ci/assert-env-plumbing.py
+
       # Откат нужен ровно в аварии; узнавать тогда, что его файл сломан,
       # поздно. Здесь проверяется хотя бы наличие и снятие версии, а
       # работоспособность — в job migrations на настоящей базе.

@@ -261,6 +261,12 @@ services:
       EVA_LLM_CONTEXT_WINDOW: ${EVA_LLM_CONTEXT_WINDOW}
       EVA_LLM_ADDITIONAL_PARAMETERS: ${EVA_LLM_ADDITIONAL_PARAMETERS}
       EVA_LLM_PROBE_TIMEOUT_MS: ${EVA_LLM_PROBE_TIMEOUT_MS:-20000}
+      # Активация провайдера перенастраивает App Server на роутер и кладёт
+      # этот ключ в его окружение. Без него переключение LLM отказывает с
+      # «EVA_ROUTER_API_KEY не задан», хотя ключ есть в .env: он просто
+      # никогда не доходил до этого контейнера.
+      EVA_ROUTER_URL: ${EVA_ROUTER_URL:-http://llm-router:8073}
+      EVA_ROUTER_API_KEY: ${EVA_ROUTER_API_KEY}
       LLM_CONFIG_ENCRYPTION_KEY: ${LLM_CONFIG_ENCRYPTION_KEY}
       LETTA_PROVIDER_CONFIG_DIR: /data/letta-config
       LETTA_LLM_RESTART_FILE: /data/llm-control/restart.request
@@ -310,6 +316,12 @@ services:
       valkey:
         condition: service_healthy
       letta-app-server:
+        condition: service_started
+      # Через роутер идёт каждый ход Евы, поэтому он должен стартовать
+      # раньше. Именно service_started, а не service_healthy: нездоровый
+      # роутер иначе не дал бы агенту подняться вообще, превратив
+      # частичный отказ в полный.
+      llm-router:
         condition: service_started
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:'+(process.env.EVA_AGENT_PORT||8070)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
