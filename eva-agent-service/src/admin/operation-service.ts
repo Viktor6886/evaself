@@ -57,6 +57,22 @@ export class OperationService {
     return { operation_id: id, status: "pending", target: serviceId, action };
   }
 
+  /**
+   * Пароль шифрования архива backup. Значение уходит в updater и больше
+   * нигде не задерживается: ни в admin_operations, ни в аудите — там
+   * останется только факт смены.
+   */
+  async setBackupPassword(password: string): Promise<{ configured: boolean }> {
+    if (password && password.length < 16) {
+      throw adminBadRequest("Пароль архива должен быть не короче 16 символов");
+    }
+    const result = await this.updater.call<{ configured?: boolean }>(
+      "set_backup_password",
+      { password },
+    );
+    return { configured: result.configured === true };
+  }
+
   async get(id: string) {
     if (!/^[0-9a-f-]{36}$/i.test(id)) throw adminBadRequest("Некорректный operation_id");
     const { rows } = await this.pool.query(

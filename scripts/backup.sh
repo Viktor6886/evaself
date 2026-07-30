@@ -179,15 +179,21 @@ ok "манифест и checksums записаны"
 # ---------------------------------------------------------------------
 step "Упаковка и шифрование"
 tar czf "$PLAIN_ARCHIVE" -C "$STAGE" "$NAME"
+BACKUP_PASS="$(backup_pass_source "$ROOT_DIR")" ||
+	die "нет ни пароля архива, ни мастер-ключа — шифровать нечем"
+case "$BACKUP_PASS" in
+	*backup-archive-password) info "архив шифруется отдельным паролем backup" ;;
+	*) info "архив шифруется мастер-ключом Secret Store" ;;
+esac
 openssl enc -aes-256-cbc -salt -pbkdf2 -iter 200000 \
-	-pass "file:$MASTER_KEY_FILE" \
+	-pass "$BACKUP_PASS" \
 	-in "$PLAIN_ARCHIVE" -out "$ARCHIVE"
 chmod 600 "$ARCHIVE"
 ok "$(du -h "$ARCHIVE" | cut -f1)  $ARCHIVE"
 
 # Проверяем расшифровку и tar-поток до ротации старых файлов.
 if openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 \
-	-pass "file:$MASTER_KEY_FILE" -in "$ARCHIVE" 2>/dev/null |
+	-pass "$BACKUP_PASS" -in "$ARCHIVE" 2>/dev/null |
 	tar tzf - >/dev/null 2>&1; then
 	ok "зашифрованный архив проверен"
 else

@@ -14,6 +14,8 @@ const state = {
   providers: [],
   router: null,
   settingProfiles: [],
+  secrets: [],
+  showAllSecrets: false,
   pendingSudo: null,
   pendingConfirm: null,
   events: null,
@@ -1225,8 +1227,41 @@ async function loadSecrets() {
     return;
   }
   const { payload } = await request("/secrets");
-  $("#secrets-list").innerHTML = payload.secrets.length
-    ? payload.secrets.map((item) => `
+  state.secrets = payload.secrets;
+  renderSecrets();
+}
+
+/**
+ * Ключи, которые администратор действительно задаёт руками: внешние
+ * токены и пароли внешних систем. Всё остальное — пароли базы, внутренние
+ * секреты между контейнерами — создаёт установщик, и менять их из панели
+ * значит развалить работающую установку.
+ */
+const ADMIN_FACING_SECRETS = new Set([
+  "sec_eva_telegram_bot_token",
+  "sec_todoist_api_token",
+  "sec_media_asr_api_key",
+  "sec_media_tts_api_key",
+  "sec_lava_webhook_password",
+  "sec_eva_llm_api_key",
+  // Ключ эмбеддингов при установке копируется из ключа LLM, но провайдер
+  // у них может быть разный — тогда его меняют отдельно.
+  "sec_eva_embedding_api_key",
+]);
+
+function renderSecrets() {
+  const all = state.secrets || [];
+  const shown = state.showAllSecrets ? all : all.filter((item) => ADMIN_FACING_SECRETS.has(item.secret_ref));
+  const hidden = all.length - shown.length;
+  $("#toggle-all-secrets").textContent = state.showAllSecrets
+    ? "Показать только основные"
+    : `Показать все (${all.length})`;
+  $("#toggle-all-secrets").hidden = all.length === 0;
+  const notice = !state.showAllSecrets && hidden > 0
+    ? `<p class="muted secrets-hint">Скрыто ${hidden} служебных ключ(ей): их создаёт установщик, и смена вручную ломает связь между контейнерами.</p>`
+    : "";
+  $("#secrets-list").innerHTML = notice + (shown.length
+    ? shown.map((item) => `
       <article class="secret-card">
         <div class="secret-meta">
           <span class="status-pill">${item.configured ? "Настроен" : "Не настроен"}</span>
@@ -1241,7 +1276,36 @@ async function loadSecrets() {
           <button class="button secondary" type="submit">Сменить ключ</button>
         </form>
       </article>`).join("")
-    : '<article class="secret-card"><div><h3>Секреты ещё не импортированы</h3><p class="muted">Запустите идемпотентный admin-bootstrap.</p></div></article>';
+    : '<article class="secret-card"><div><h3>Нет ключей для показа</h3><p class="muted">Либо секреты ещё не импортированы, либо все они служебные — нажмите «Показать все».</p></div></article>');
+}
+
+/** Пароль архива backup. Значение уходит на сервер и обратно не возвращается. */
+async function setBackupPassword(password, form) {
+  await new Promise((resolve, reject) => {
+    askSudo({
+      scope: "secrets:write",
+      title: password ? "Задать пароль архива backup" : "Вернуться к мастер-ключу",
+      description: password
+        ? "Новые архивы будут шифроваться этим паролем. Без него восстановление станет невозможным — сохраните его вне сервера."
+        : "Новые архивы снова будут шифроваться мастер-ключом Secret Store.",
+      action: async () => {
+        try {
+          const { payload } = await request("/backups/password", {
+            method: "PUT",
+            body: JSON.stringify({ password }),
+          });
+          form.reset();
+          toast(payload.configured
+            ? "Пароль архива задан. Сохраните его вне сервера — восстановить его нельзя."
+            : "Пароль снят, архивы шифруются мастер-ключом");
+          resolve();
+        } catch (error) {
+          reject(error);
+          throw error;
+        }
+      },
+    });
+  }).catch(handleError);
 }
 
 async function writeSecret(form) {
@@ -1500,6 +1564,34 @@ $("#settings-form").addEventListener("click", (event) => {
   input.value = String(item.default);
 });
 $("#reload-secrets").addEventListener("click", () => loadSecrets().catch(handleError));
+$("#toggle-all-secrets").addEventListener("click", () => {
+  state.showAllSecrets = !state.showAllSecrets;
+  renderSecrets();
+});
+$("#backup-password-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const password = form.elements.password.value;
+  // Пустая отправка означала бы снятие пароля — то же разрушительное
+  // действие, что и кнопка рядом, но в обход её подтверждения.
+  if (!password) {
+    toast("Введите пароль или нажмите «Вернуться к мастер-ключу»", true);
+    return;
+  }
+  if (password !== form.elements.confirm.value) {
+    toast("Пароли не совпадают", true);
+    return;
+  }
+  setBackupPassword(password, form);
+});
+$("#clear-backup-password").addEventListener("click", () => {
+  askConfirm({
+    title: "Вернуться к мастер-ключу?",
+    description: "Новые архивы снова будут шифроваться мастер-ключом Secret Store. Уже созданные с паролем архивы останутся зашифрованными им — сохраните пароль, пока они нужны.",
+    expected: "МАСТЕР-КЛЮЧ",
+    action: async () => await setBackupPassword("", $("#backup-password-form")),
+  });
+});
 $("#secrets-list").addEventListener("submit", (event) => {
   event.preventDefault();
   const form = event.target;

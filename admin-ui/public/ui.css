@@ -95,6 +95,7 @@ nav { display: grid; gap: 4px; }
 .security-note span { width: 34px; height: 34px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 50%; color: #07110d; background: var(--green); font-weight: 900; }
 .security-note p { margin: 2px 0 0; }
 .secret-list { display: grid; gap: 12px; }
+.secrets-hint { margin: 0; font-size: 12px; }
 .secret-card { padding: 18px; display: grid; grid-template-columns: minmax(220px, .8fr) minmax(280px, 1.2fr); gap: 24px; }
 .secret-meta { display: grid; gap: 5px; color: var(--muted); font-size: 12px; }
 .secret-ref { color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }

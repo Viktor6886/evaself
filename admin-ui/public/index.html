@@ -289,6 +289,32 @@
             <button id="reload-secrets" class="button ghost">Обновить список</button>
           </div>
           <div class="security-note"><span>✓</span><div><strong>AES-256-GCM</strong><p>В интерфейсе нет масок, фрагментов, длины или хеша сохранённого значения.</p></div></div>
+
+          <!-- Пароль архива backup: без него копии шифруются мастер-ключом,
+               который лежит на том же сервере. -->
+          <section class="card password-card" id="backup-password-card">
+            <div>
+              <h3>Пароль архива backup</h3>
+              <p class="block-caption">Архивы шифруются AES-256. Без отдельного пароля используется мастер-ключ Secret Store — он лежит на этом же сервере, поэтому копия, увезённая в другое хранилище, остаётся привязанной к нему. Свой пароль эту привязку снимает.</p>
+              <p class="warn-value" id="backup-password-warning">Пароль нигде не хранится в открытом виде и не показывается. Потеряете — новые архивы восстановить будет нечем.</p>
+            </div>
+            <form id="backup-password-form">
+              <input name="password" type="password" autocomplete="new-password" minlength="16" placeholder="Новый пароль, минимум 16 символов">
+              <input name="confirm" type="password" autocomplete="new-password" minlength="16" placeholder="Повторите пароль">
+              <div class="form-actions">
+                <button class="button ghost" id="clear-backup-password" type="button">Вернуться к мастер-ключу</button>
+                <button class="button secondary" type="submit">Задать пароль</button>
+              </div>
+            </form>
+          </section>
+
+          <div class="section-heading">
+            <div>
+              <h3>Системные ключи</h3>
+              <p class="block-caption">Показаны только те, которые администратор задаёт сам. Остальные создаются установщиком и меняются вместе с сервисом, который их использует.</p>
+            </div>
+            <button id="toggle-all-secrets" class="button ghost" type="button">Показать все</button>
+          </div>
           <div id="secrets-list" class="secret-list"></div>
           <section class="card password-card">
             <div><h3>Пароль администратора</h3><p>Смена пароля завершает остальные сессии и отзывает все sudo-гранты.</p></div>

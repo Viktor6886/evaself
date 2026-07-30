@@ -388,6 +388,20 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
     return reply.status(202).send(operation);
   });
 
+  // Пароль архива меняет только owner и только через sudo: с ним
+  // архивы перестают расшифровываться мастер-ключом, и потеря пароля
+  // означает потерю всех новых копий.
+  app.put("/api/admin/v1/backups/password", {
+    config: {
+      roles: ["owner"],
+      sudoScope: "secrets:write",
+    } satisfies RouteAccess,
+  }, async (request) => {
+    const body = objectBody(request.body);
+    const password = typeof body.password === "string" ? body.password : "";
+    return await services.operations.setBackupPassword(password);
+  });
+
   app.get("/api/admin/v1/operations/:id", {
     config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
   }, async (request) => {

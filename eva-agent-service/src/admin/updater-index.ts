@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, readdir, rm, stat, readFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
@@ -218,6 +218,39 @@ async function serviceLogs(service: unknown, rawTail: unknown) {
   };
 }
 
+/**
+ * Пароль шифрования архива backup.
+ *
+ * Пишется отдельным файлом, а не в Secret Store: backup.sh — bash-скрипт
+ * и расшифровать хранилище не может. Пустое значение удаляет файл, и
+ * архивы снова шифруются мастер-ключом.
+ *
+ * Путь тот же, что читает backup_pass_source в scripts/lib.sh: репозиторий
+ * примонтирован сюда по projectDir, и скрипты запускаются оттуда же.
+ *
+ * Значение сюда приходит от admin-api и дальше никуда не уходит: ни в
+ * ответ, ни в журнал.
+ */
+async function setBackupPassword(value: unknown) {
+  const password = typeof value === "string" ? value : "";
+  const file = process.env.EVA_BACKUP_PASSWORD_FILE
+    ?? path.join(projectDir, "secrets/backup-archive-password");
+
+  if (!password) {
+    await rm(file, { force: true });
+    return { configured: false };
+  }
+  if (password.length < 16) {
+    throw new Error("пароль архива должен быть не короче 16 символов");
+  }
+  await mkdir(path.dirname(file), { recursive: true });
+  // Без перевода строки: openssl -pass file: читает первую строку, и
+  // лишний символ изменил бы ключ.
+  await writeFile(file, password, { encoding: "utf8", mode: 0o600 });
+  await chmod(file, 0o600);
+  return { configured: true };
+}
+
 async function hostMetrics() {
   const root = await statFsSafe("/");
   return {
@@ -423,6 +456,8 @@ async function dispatch(command: string, params: Record<string, unknown>) {
       return await restartService(params.service);
     case "get_service_logs":
       return await serviceLogs(params.service, params.tail);
+    case "set_backup_password":
+      return await setBackupPassword(params.password);
     case "host_metrics":
       return await hostMetrics();
     case "list_backups":

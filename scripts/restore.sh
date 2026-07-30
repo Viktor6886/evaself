@@ -34,16 +34,23 @@ if [[ "$ARCHIVE" == *.enc ]]; then
 	if [[ "$MASTER_KEY_FILE" != /* ]]; then
 		MASTER_KEY_FILE="$ROOT_DIR/${MASTER_KEY_FILE#./}"
 	fi
-	[ -s "$MASTER_KEY_FILE" ] ||
-		die "без мастер-ключа восстановление невозможно: $MASTER_KEY_FILE"
 	command -v openssl >/dev/null 2>&1 ||
 		die "для расшифровки backup требуется openssl"
 	TAR_ARCHIVE="$STAGE/decrypted.tar.gz"
-	if ! openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 \
-		-pass "file:$MASTER_KEY_FILE" \
-		-in "$ARCHIVE" -out "$TAR_ARCHIVE" 2>/dev/null; then
-		die "не удалось расшифровать backup: проверьте мастер-ключ"
-	fi
+	# Архивы бывают двух поколений: старые зашифрованы мастер-ключом,
+	# новые — отдельным паролем. Пробуем оба, начиная с пароля.
+	DECRYPTED=0
+	for pass in "$(backup_pass_source "$ROOT_DIR" || true)" "file:$MASTER_KEY_FILE"; do
+		[ -n "$pass" ] || continue
+		[ -s "${pass#file:}" ] || continue
+		if openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 \
+			-pass "$pass" -in "$ARCHIVE" -out "$TAR_ARCHIVE" 2>/dev/null; then
+			DECRYPTED=1
+			break
+		fi
+	done
+	[ "$DECRYPTED" -eq 1 ] ||
+		die "не удалось расшифровать backup: нужен пароль архива или мастер-ключ, которым он создан"
 fi
 tar tzf "$TAR_ARCHIVE" >/dev/null 2>&1 ||
 	die "архив не является читаемым backup Evaself"

@@ -366,6 +366,30 @@ git_ahead_behind() {
 	printf '%s %s\n' "${behind:-0}" "${ahead:-0}"
 }
 
+# Пароль для шифрования архива backup.
+#
+# Раньше архивы всегда шифровались мастер-ключом Secret Store. Он лежит
+# на сервере рядом с данными, поэтому увезти архив в чужое хранилище
+# означало увезти его вместе с зависимостью от того же сервера. Теперь
+# администратор может задать отдельный пароль: он хранится в собственном
+# файле, и мастер-ключ на архив больше не влияет.
+#
+# Печатает аргумент для openssl -pass. Мастер-ключ остаётся запасным
+# вариантом, иначе установки без пароля перестали бы делать backup.
+backup_pass_source() {
+	local repo="${1:-$ROOT_DIR}"
+	local file="${EVA_BACKUP_PASSWORD_FILE:-$repo/secrets/backup-archive-password}"
+	if [[ "$file" != /* ]]; then file="$repo/${file#./}"; fi
+	if [ -s "$file" ]; then
+		printf 'file:%s\n' "$file"
+		return 0
+	fi
+	local master="${EVA_BACKUP_MASTER_KEY_FILE:-${EVA_SECRETS_MASTER_KEY_FILE:-/etc/evaself/secrets-master-key}}"
+	if [[ "$master" != /* ]]; then master="$repo/${master#./}"; fi
+	[ -s "$master" ] || return 1
+	printf 'file:%s\n' "$master"
+}
+
 http_status() {
 	curl -sS -o /dev/null -w '%{http_code}' --max-time "${2:-10}" "$1" 2>/dev/null || echo "000"
 }
