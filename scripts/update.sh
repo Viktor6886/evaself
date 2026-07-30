@@ -72,27 +72,14 @@ step "Repository"
 GIT_LOCAL="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || echo '-')"
 GIT_BRANCH="$(git -C "$ROOT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '-')"
 GIT_BEHIND=0
-if [ "$GIT_BRANCH" = "HEAD" ]; then
-	# `make rollback` leaves a detached HEAD. Fetching "origin HEAD" would
-	# fail confusingly, so say what happened and skip the repository step.
-	warn "репозиторий в состоянии detached HEAD (обычно после make rollback)"
-	info "вернитесь на ветку, чтобы снова получать обновления кода:"
-	info "  git -C $ROOT_DIR checkout main"
-	info "обновление образов продолжится"
-	GIT_BRANCH="-"
-elif git -C "$ROOT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
-	git -C "$ROOT_DIR" fetch --quiet origin "$GIT_BRANCH" 2>/dev/null || warn "could not reach the git remote"
-	GIT_BEHIND="$(git -C "$ROOT_DIR" rev-list --count "HEAD..origin/${GIT_BRANCH}" 2>/dev/null || echo 0)"
-	info "branch $GIT_BRANCH at ${GIT_LOCAL:0:8}, ${GIT_BEHIND} commit(s) behind origin"
-	# An installation parked on a feature branch stops receiving releases
-	# without any obvious symptom: `make update` keeps succeeding, it just
-	# pulls a branch nobody advances any more.
-	DEFAULT_BRANCH="$(git -C "$ROOT_DIR" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')"
-	DEFAULT_BRANCH="${DEFAULT_BRANCH:-main}"
-	if [ "$GIT_BRANCH" != "$DEFAULT_BRANCH" ]; then
-		warn "установка стоит на ветке $GIT_BRANCH, а релизы идут в $DEFAULT_BRANCH"
-		info "переключиться: git -C $ROOT_DIR checkout $DEFAULT_BRANCH && make update"
-	fi
+DEFAULT_BRANCH="$(git -C "$ROOT_DIR" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')"
+DEFAULT_BRANCH="${DEFAULT_BRANCH:-main}"
+
+if git -C "$ROOT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+	# ---------------------------------------------------------------
+	# 1. clear the working tree first — nothing below can check out a
+	#    branch while local modifications are in the way.
+	# ---------------------------------------------------------------
 	DIRTY="$(git -C "$ROOT_DIR" status --porcelain | wc -l)"
 	if [ "$DIRTY" -gt 0 ]; then
 		# A dirty tree used to silently downgrade the update to "images
@@ -108,6 +95,33 @@ elif git -C "$ROOT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
 		else
 			warn "не удалось создать stash — обновление кода будет пропущено"
 		fi
+	fi
+
+	# ---------------------------------------------------------------
+	# 2. get back onto the branch releases actually land on.
+	#
+	#    An installation parked on a feature branch — or on the detached
+	#    HEAD `make rollback` leaves behind — keeps reporting successful
+	#    updates while quietly receiving nothing. Switching is automatic
+	#    only when the current position holds nothing of its own, so the
+	#    move cannot lose work.
+	# ---------------------------------------------------------------
+	if [ "$DIRTY" -eq 0 ]; then
+		GIT_BRANCH="$(reconcile_release_branch "$ROOT_DIR" "$DEFAULT_BRANCH")"
+		GIT_LOCAL="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || echo '-')"
+	fi
+
+	# ---------------------------------------------------------------
+	# 3. how far behind the branch we are actually on
+	# ---------------------------------------------------------------
+	if [ "$GIT_BRANCH" != "HEAD" ] && [ "$GIT_BRANCH" != "-" ]; then
+		git -C "$ROOT_DIR" fetch --quiet origin "$GIT_BRANCH" 2>/dev/null ||
+			warn "could not reach the git remote"
+		GIT_BEHIND="$(git -C "$ROOT_DIR" rev-list --count "HEAD..origin/${GIT_BRANCH}" 2>/dev/null || echo 0)"
+		info "branch $GIT_BRANCH at ${GIT_LOCAL:0:8}, ${GIT_BEHIND} commit(s) behind origin"
+	else
+		warn "репозиторий в detached HEAD и переключиться не удалось — обновятся только образы"
+		GIT_BRANCH="-"
 	fi
 fi
 

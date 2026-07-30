@@ -112,6 +112,26 @@ validate_caddyfile "$ROOT_DIR/letta-ui/Caddyfile" "letta-ui/Caddyfile"
 validate_caddyfile "$ROOT_DIR/admin-ui/Caddyfile" "admin-ui/Caddyfile"
 
 # ---------------------------------------------------------------------
+step "GitHub workflows"
+# ---------------------------------------------------------------------
+# A malformed workflow is the worst failure mode there is: GitHub simply
+# does not run it, so every check silently disappears instead of failing.
+if command -v python3 >/dev/null 2>&1; then
+	for file in "$ROOT_DIR"/.github/workflows/*.y*ml; do
+		[ -e "$file" ] || continue
+		if python3 -c "import sys,yaml; yaml.safe_load(open(sys.argv[1]))" "$file" 2>/dev/null; then
+			ok "$(basename "$file")"
+		else
+			check_failed "$(basename "$file") не парсится как YAML"
+			python3 -c "import sys,yaml; yaml.safe_load(open(sys.argv[1]))" "$file" 2>&1 |
+				tail -3 | sed 's/^/      /'
+		fi
+	done
+else
+	info "python3 недоступен — проверка workflow пропущена"
+fi
+
+# ---------------------------------------------------------------------
 step "TypeScript"
 # ---------------------------------------------------------------------
 if command -v node >/dev/null 2>&1 && [ -d "$ROOT_DIR/eva-agent-service/node_modules" ]; then

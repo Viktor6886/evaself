@@ -76,6 +76,9 @@ jobs:
             ! is_email "operator@example"
           '
 
+      - name: "`make update` returns to the release branch by itself"
+        run: ./scripts/ci/test-release-branch.sh
+
       - name: An upgrade backfills settings added since installation
         run: |
           # A release that introduces a new .env key used to need a manual

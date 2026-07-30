@@ -279,6 +279,55 @@ run_with_progress() {
 }
 
 # ---------------------------------------------------------------------
+# release branch
+# ---------------------------------------------------------------------
+
+# reconcile_release_branch <repo> <default-branch>
+#
+# Put the checkout back on the branch releases land on. An installation
+# parked on a feature branch — or on the detached HEAD `make rollback`
+# leaves behind — keeps reporting successful updates while quietly
+# receiving nothing.
+#
+# Switching happens ONLY when the current position holds nothing of its
+# own (HEAD is an ancestor of the default branch), so the move can never
+# discard work. Prints the branch it ended up on.
+#
+# Returns 0 when the checkout is on the default branch afterwards, 1 when
+# it was deliberately left alone.
+reconcile_release_branch() {
+	local repo="$1" default="$2" current head where
+	current="$(git -C "$repo" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '-')"
+	head="$(git -C "$repo" rev-parse --short HEAD 2>/dev/null || echo '-')"
+
+	if [ "$current" = "$default" ]; then
+		printf '%s\n' "$default"
+		return 0
+	fi
+
+	where="$current"
+	[ "$where" = "HEAD" ] && where="detached HEAD $head"
+
+	git -C "$repo" fetch --quiet origin "$default" 2>/dev/null || true
+	if ! git -C "$repo" merge-base --is-ancestor HEAD "origin/$default" 2>/dev/null; then
+		warn "установка стоит на «$where», где есть коммиты, которых нет в $default" >&2
+		warn "автоматически не переключаюсь: это выглядело бы как потеря работы" >&2
+		info "разберитесь вручную, затем: git -C $repo checkout $default" >&2
+		printf '%s\n' "$current"
+		return 1
+	fi
+
+	if git -C "$repo" checkout -q -B "$default" --track "origin/$default" 2>/dev/null; then
+		ok "переключено с «$where» на $default — там ничего своего не было" >&2
+		printf '%s\n' "$default"
+		return 0
+	fi
+	warn "не удалось переключиться на $default" >&2
+	printf '%s\n' "$current"
+	return 1
+}
+
+# ---------------------------------------------------------------------
 # service helpers
 # ---------------------------------------------------------------------
 service_running() {
