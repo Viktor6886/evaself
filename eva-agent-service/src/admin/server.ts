@@ -356,6 +356,20 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
     await subscriber.subscribe("eva.admin.events");
   });
 
+  // Кнопка «Ошибки» на Обзоре. Читают все роли: это операционные
+  // сообщения без секретов, и дежурному они нужны первыми.
+  app.get("/api/admin/v1/errors", {
+    config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
+  }, async (request) => {
+    const query = request.query as { hours?: string; limit?: string };
+    const hours = Number(query.hours ?? 24);
+    const limit = Number(query.limit ?? 50);
+    return await services.health.errors(
+      Number.isFinite(hours) ? hours : 24,
+      Number.isFinite(limit) ? limit : 50,
+    );
+  });
+
   app.get("/api/admin/v1/providers", {
     config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
   }, async (request) => {

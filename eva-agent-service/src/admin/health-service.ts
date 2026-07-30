@@ -101,10 +101,28 @@ export class HealthService {
         : colors.includes("blue")
           ? "blue"
           : "green";
+    // Индикатор обязан называть конкретный неработающий сервис, а не
+    // сообщать «система требует внимания». Собираем список здесь, чтобы
+    // UI не пересчитывал его из групп.
+    const failing = [...serviceCards, ...integrationCards]
+      .filter((item) => item.status.color === "red" || item.status.color === "yellow")
+      .map((item) => ({
+        id: item.id,
+        type: item.type,
+        title: item.title,
+        color: item.status.color,
+        state: item.status.state,
+        message: item.status.message,
+        last_ok_at: item.status.last_ok_at,
+      }))
+      // Красные вперёд: с них начинается разбор.
+      .sort((a, b) => (a.color === b.color ? 0 : a.color === "red" ? -1 : 1));
+
     return {
       generated_at: new Date().toISOString(),
       query_duration_ms: Math.round(performance.now() - started),
       overall_status: overall,
+      failing,
       installation: {
         environment: process.env.EVA_ENV ?? "production",
         version: process.env.EVA_RELEASE_VERSION ?? "0.3.0",
@@ -231,6 +249,98 @@ export class HealthService {
       [SETTING_KEYS],
     );
     return new Map(rows.map((row) => [row.key, row.value_json]));
+  }
+
+  /**
+   * Конкретные ошибки за окно времени: что, когда и в каком сервисе.
+   *
+   * Три источника, потому что ломается по-разному: административная
+   * операция (audit_log), ручная или плановая проверка (health_checks) и
+   * текущее нездоровое состояние (service_statuses). Последнее не имеет
+   * времени события, поэтому берётся last_check_at.
+   */
+  async errors(hours: number, limit: number) {
+    const window = Math.min(Math.max(1, Math.floor(hours)), 24 * 14);
+    const cap = Math.min(Math.max(1, Math.floor(limit)), 200);
+
+    const [operations, checks, statuses] = await Promise.all([
+      this.pool.query<{
+        at: Date; operation: string; target: string | null;
+        message: string | null; actor: string | null; request_id: string | null;
+      }>(
+        `SELECT at, operation, target, message, actor, request_id
+           FROM audit_log
+          WHERE result = 'failure'
+            AND at >= now() - ($1::text || ' hours')::interval
+          ORDER BY at DESC
+          LIMIT $2`,
+        [String(window), cap],
+      ),
+      this.pool.query<{
+        finished_at: Date | null; requested_at: Date; target_id: string;
+        target_type: string; error_code: string | null; error_message_short: string | null;
+      }>(
+        `SELECT finished_at, requested_at, target_id, target_type,
+                error_code, error_message_short
+           FROM health_checks
+          WHERE status = 'failure'
+            AND requested_at >= now() - ($1::text || ' hours')::interval
+          ORDER BY requested_at DESC
+          LIMIT $2`,
+        [String(window), cap],
+      ),
+      this.pool.query<{
+        target_id: string; target_type: string; state: string; color: string;
+        last_check_at: Date | null; last_ok_at: Date | null; detail_json: Record<string, unknown>;
+      }>(
+        `SELECT target_id, target_type, state, color, last_check_at, last_ok_at, detail_json
+           FROM service_statuses
+          WHERE color IN ('red', 'yellow')
+          ORDER BY color DESC, last_check_at DESC NULLS LAST`,
+      ),
+    ]);
+
+    const items = [
+      ...operations.rows.map((row) => ({
+        source: "operation" as const,
+        at: row.at,
+        target: row.target ?? row.operation,
+        title: row.operation,
+        message: row.message ?? "операция завершилась ошибкой",
+        actor: row.actor,
+        request_id: row.request_id,
+      })),
+      ...checks.rows.map((row) => ({
+        source: "check" as const,
+        at: row.finished_at ?? row.requested_at,
+        target: row.target_id,
+        title: this.titleOf(row.target_type, row.target_id),
+        message: row.error_message_short ?? row.error_code ?? "проверка не прошла",
+        actor: null,
+        request_id: null,
+      })),
+      ...statuses.rows.map((row) => ({
+        source: "status" as const,
+        at: row.last_check_at ?? new Date(0),
+        target: row.target_id,
+        title: this.titleOf(row.target_type, row.target_id),
+        message: typeof row.detail_json.message === "string"
+          ? row.detail_json.message
+          : `состояние: ${row.state}`,
+        actor: null,
+        request_id: null,
+      })),
+    ].sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime());
+
+    return { hours: window, count: items.length, items: items.slice(0, cap) };
+  }
+
+  /** Человеческое имя цели; для инфраструктуры каталога нет. */
+  private titleOf(targetType: string, targetId: string): string {
+    const bare = targetId.replace(/^integration:/, "");
+    return SERVICE_BY_ID.get(bare)?.title
+      ?? INTEGRATION_BY_ID.get(bare)?.title
+      ?? (targetType === "infrastructure" ? bare.replace(/^infrastructure:/, "") : bare);
   }
 
   private serviceCard(

@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, readdir, rm, stat } from "node:fs/promises";
+import { chmod, mkdir, readdir, rm, stat, readFile } from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
@@ -194,7 +194,35 @@ async function hostMetrics() {
     memory_free_bytes: os.freemem(),
     disk_total_bytes: root.total,
     disk_free_bytes: root.free,
+    ...(await networkTotals()),
   };
+}
+
+/**
+ * Суммарный трафик всех интерфейсов кроме loopback, из /proc/net/dev.
+ * Это счётчики с момента загрузки, а не скорость: панель показывает
+ * порядок величины, а не мгновенный поток. Если файла нет (не Linux),
+ * поля просто отсутствуют, и бар рисует прочерк.
+ */
+async function networkTotals(): Promise<Record<string, number>> {
+  try {
+    const raw = await readFile("/proc/net/dev", "utf8");
+    let rx = 0;
+    let tx = 0;
+    // Первые две строки — заголовки таблицы.
+    for (const line of raw.split("\n").slice(2)) {
+      const [name, rest] = line.split(":");
+      if (!name || !rest) continue;
+      if (name.trim() === "lo") continue;
+      const fields = rest.trim().split(/\s+/);
+      rx += Number(fields[0] ?? 0);
+      tx += Number(fields[8] ?? 0);
+    }
+    if (!Number.isFinite(rx) || !Number.isFinite(tx)) return {};
+    return { network_rx_bytes: rx, network_tx_bytes: tx };
+  } catch {
+    return {};
+  }
 }
 
 async function statFsSafe(target: string): Promise<{ total: number; free: number }> {

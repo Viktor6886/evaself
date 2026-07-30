@@ -61,12 +61,36 @@
       <div class="content">
         <section id="page-overview" class="page active">
           <div class="page-heading">
-            <div><p class="eyebrow">СОСТОЯНИЕ УСТАНОВКИ</p><h2>Обзор</h2><p>Быстрый снимок сервисов, ресурсов, backup и конфигурации без внешних запросов.</p></div>
-            <button id="reload-overview" class="button ghost">Обновить снимок</button>
+            <div><p class="eyebrow">СОСТОЯНИЕ УСТАНОВКИ</p><h2>Обзор</h2></div>
+            <div class="heading-actions">
+              <button id="show-errors" class="button ghost">Ошибки</button>
+              <button id="reload-overview" class="button ghost">Обновить</button>
+            </div>
           </div>
-          <div id="overview-stats" class="stats overview-stats"></div>
-          <div id="host-stats" class="resource-grid"></div>
+
+          <!-- Один сводный индикатор. В норме — ровный зелёный пульс без
+               текста о сервисах; при сбое называет конкретный сервис. -->
+          <section id="verdict" class="verdict">
+            <span class="verdict-beacon" aria-hidden="true"></span>
+            <div class="verdict-copy">
+              <strong id="verdict-title">Проверяю состояние…</strong>
+              <p id="verdict-detail"></p>
+            </div>
+            <button id="verdict-action" class="button tiny ghost" hidden>Показать</button>
+          </section>
+
+          <!-- Сервер одной строкой: раньше это были шесть отдельных карточек. -->
+          <div id="host-bar" class="host-bar"></div>
+
           <div id="overview-groups" class="overview-groups"></div>
+
+          <dialog id="errors-dialog" class="sheet-dialog">
+            <div class="sheet-head">
+              <div><h3>Ошибки</h3><p id="errors-window" class="muted"></p></div>
+              <button id="close-errors" class="icon-button" aria-label="Закрыть">×</button>
+            </div>
+            <div id="errors-list" class="compact-list"></div>
+          </dialog>
         </section>
 
         <section id="page-services" class="page">

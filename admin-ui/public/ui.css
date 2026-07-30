@@ -220,3 +220,110 @@ dialog .eyebrow { margin-top: 0; }
   .provider-form { grid-template-columns: 1fr; }
   .span-2 { grid-column: span 1; }
 }
+
+/* ---------------------------------------------------------------------
+ * Обзор: один индикатор, один бар сервера, раскрывающиеся карточки.
+ * ------------------------------------------------------------------- */
+.verdict {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  padding: 18px 20px;
+  border: 1px solid var(--line, #2a2f3a);
+  border-radius: 16px;
+  background: var(--panel, #161a22);
+}
+.verdict-copy strong { display: block; font-size: 17px; }
+.verdict-copy p { margin: 4px 0 0; color: var(--muted, #8b93a4); font-size: 13px; }
+
+/* Пульс — единственная анимация на экране: он должен читаться боковым
+   зрением, поэтому мигает только «всё в норме». Тревожные состояния
+   держатся ровным цветом, чтобы не превращать панель в гирлянду. */
+.verdict-beacon {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #8b93a4;
+}
+.verdict.color-green .verdict-beacon {
+  background: #35c07a;
+  animation: verdict-pulse 2.4s ease-in-out infinite;
+}
+.verdict.color-yellow .verdict-beacon { background: #e0a33a; }
+.verdict.color-blue .verdict-beacon { background: #4f8ff0; }
+.verdict.color-red .verdict-beacon { background: #e05a52; }
+.verdict.color-red { border-color: rgba(224, 90, 82, .45); }
+.verdict.color-yellow { border-color: rgba(224, 163, 58, .4); }
+
+@keyframes verdict-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(53, 192, 122, .55); }
+  60% { box-shadow: 0 0 0 9px rgba(53, 192, 122, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .verdict.color-green .verdict-beacon { animation: none; }
+}
+
+.host-bar {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 1px;
+  margin: 14px 0 18px;
+  overflow: hidden;
+  border: 1px solid var(--line, #2a2f3a);
+  border-radius: 14px;
+  background: var(--line, #2a2f3a);
+}
+.host-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 11px 14px;
+  background: var(--panel, #161a22);
+}
+.host-cell span { color: var(--muted, #8b93a4); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+.host-cell strong { font-size: 15px; font-variant-numeric: tabular-nums; }
+
+.mini-status { border-bottom: 1px solid var(--line, #2a2f3a); }
+.mini-status:last-child { border-bottom: 0; }
+.mini-status > summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 4px;
+  cursor: pointer;
+  list-style: none;
+}
+.mini-status > summary::-webkit-details-marker { display: none; }
+.mini-status > summary::after {
+  margin-left: auto;
+  color: var(--muted, #8b93a4);
+  content: "▾";
+  transition: transform .15s ease;
+}
+.mini-status[open] > summary::after { transform: rotate(180deg); }
+.mini-hint { overflow: hidden; color: var(--muted, #8b93a4); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.mini-details { display: grid; gap: 6px; margin: 0 0 10px; padding: 10px 4px 0; border-top: 1px dashed var(--line, #2a2f3a); }
+.mini-details > div { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 10px; font-size: 13px; }
+.mini-details dt { color: var(--muted, #8b93a4); }
+.mini-details dd { margin: 0; overflow-wrap: anywhere; }
+.mini-actions { padding: 0 4px 10px; }
+
+.sheet-dialog {
+  width: min(620px, calc(100vw - 32px));
+  padding: 18px;
+  border: 1px solid var(--line, #2a2f3a);
+  border-radius: 16px;
+  background: var(--panel, #161a22);
+  color: inherit;
+}
+.sheet-dialog::backdrop { background: rgba(6, 8, 12, .62); }
+.sheet-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.sheet-head h3 { margin: 0; }
+.sheet-head p { margin: 3px 0 0; font-size: 12px; }
+.error-row { padding: 11px 0; border-bottom: 1px solid var(--line, #2a2f3a); }
+.error-row:last-child { border-bottom: 0; }
+.error-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.error-kind { color: var(--muted, #8b93a4); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+.error-row p { margin: 4px 0; font-size: 13px; overflow-wrap: anywhere; }
+.error-row small { color: var(--muted, #8b93a4); font-size: 12px; }
