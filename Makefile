@@ -31,7 +31,7 @@ BACKUP ?=
 export ROOT_DIR SCRIPTS ENV_FILE VERSIONS COMPOSE_FILE
 
 .PHONY: help install configure configure-advanced start stop restart status logs doctor \
-        backup restore update-preview update rollback \
+        backup restore update-preview update update-force rollback \
         configure-llm test-llm list-models configure-letta \
         nocodb-sync disk-cleanup build pull ps shell-db validate test
 
@@ -141,6 +141,9 @@ update-preview: ## Показать обновления, ничего не ме
 
 update: ## Backup, обновление, перезапуск и проверка с автооткатом
 	@$(SCRIPTS)/update.sh
+
+update-force: ## То же, но даже когда скачивать нечего (после смены ветки)
+	@$(SCRIPTS)/update.sh --force
 
 rollback: ## Вернуться к предыдущим версиям и commit
 	@$(SCRIPTS)/rollback.sh

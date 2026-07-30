@@ -5,6 +5,8 @@
 #   scripts/update.sh --preview   show what would change, touch nothing
 #   scripts/update.sh             back up, update, verify, roll back on
 #                                 failure
+#   scripts/update.sh --force     run the whole cycle even when there is
+#                                 nothing new to fetch
 #
 # What an update does NOT do:
 #   * cross a PostgreSQL major version (needs a dump/restore — see
@@ -18,11 +20,16 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/lib.sh"
 
 PREVIEW=0
-[ "${1:-}" = "--preview" ] && PREVIEW=1
+FORCE=0
+case "${1:-}" in
+	--preview) PREVIEW=1 ;;
+	--force) FORCE=1 ;;
+esac
 
 load_env
 
 ROLLBACK_DIR="$ROOT_DIR/.rollback"
+DEPLOYED_MARKER="$ROLLBACK_DIR/deployed"
 STASHED=0
 REPORT="$(mktemp)"
 trap 'rm -f "$REPORT"' EXIT
@@ -115,10 +122,27 @@ if [ "$PREVIEW" -eq 1 ]; then
 fi
 # =====================================================================
 
+# "Nothing to fetch" is not the same as "what is running matches the
+# checkout". Switching branches, or a checkout that was never applied,
+# leaves new files on disk while the containers and the database stay on
+# the old code — and the old check happily reported success.
+DEPLOYED_COMMIT="$(cat "$DEPLOYED_MARKER" 2>/dev/null || true)"
+CHECKOUT_APPLIED=0
+[ -n "$DEPLOYED_COMMIT" ] && [ "$DEPLOYED_COMMIT" = "$GIT_LOCAL" ] && CHECKOUT_APPLIED=1
+
 if [ "$UPDATES" -eq 0 ] && [ "$GIT_BEHIND" -eq 0 ] &&
-	[ "$ADMIN_BOOTSTRAP_NEEDED" -eq 0 ]; then
+	[ "$ADMIN_BOOTSTRAP_NEEDED" -eq 0 ] &&
+	[ "$FORCE" -eq 0 ] && [ "$CHECKOUT_APPLIED" -eq 1 ]; then
 	step "Already up to date"
 	exit 0
+fi
+
+if [ "$CHECKOUT_APPLIED" -eq 0 ] && [ "$GIT_BEHIND" -eq 0 ] && [ "$UPDATES" -eq 0 ]; then
+	if [ -n "$DEPLOYED_COMMIT" ]; then
+		info "развёрнут ${DEPLOYED_COMMIT:0:8}, в рабочем дереве ${GIT_LOCAL:0:8} — применяю"
+	else
+		info "неизвестно, что именно развёрнуто — применяю текущее состояние целиком"
+	fi
 fi
 
 if [ "$ADMIN_BOOTSTRAP_NEEDED" -eq 1 ]; then
@@ -241,6 +265,8 @@ step "Verifying"
 # =====================================================================
 sleep 10
 if "$SCRIPT_DIR/doctor.sh"; then
+	mkdir -p "$ROLLBACK_DIR"
+	git -C "$ROOT_DIR" rev-parse HEAD > "$DEPLOYED_MARKER" 2>/dev/null || true
 	step "Update complete"
 	say "  Rollback point kept in .rollback/ — 'make rollback' returns to it."
 	exit 0
