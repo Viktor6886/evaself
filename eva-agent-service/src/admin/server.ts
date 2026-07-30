@@ -322,6 +322,36 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
     return reply.status(202).send(operation);
   });
 
+  // Старт и стоп идут под тем же sudo-scope, что и перезапуск: это одно
+  // и то же право «управлять жизненным циклом сервиса».
+  app.post("/api/admin/v1/services/:id/start", {
+    config: {
+      roles: ["owner", "admin"],
+      sudoScope: "services:restart",
+    } satisfies RouteAccess,
+  }, async (request, reply) => {
+    const id = (request.params as { id?: string }).id ?? "";
+    const operation = await services.operations.start(
+      id,
+      contexts.get(request)!.session!.user.id,
+    );
+    return reply.status(202).send(operation);
+  });
+
+  app.post("/api/admin/v1/services/:id/stop", {
+    config: {
+      roles: ["owner", "admin"],
+      sudoScope: "services:restart",
+    } satisfies RouteAccess,
+  }, async (request, reply) => {
+    const id = (request.params as { id?: string }).id ?? "";
+    const operation = await services.operations.stop(
+      id,
+      contexts.get(request)!.session!.user.id,
+    );
+    return reply.status(202).send(operation);
+  });
+
   app.get("/api/admin/v1/operations/:id", {
     config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
   }, async (request) => {

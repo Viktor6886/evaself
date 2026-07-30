@@ -171,8 +171,17 @@ function statusCard(item, options = {}) {
   const checkButton = options.check === false
     ? ""
     : `<button class="button tiny ghost" data-check="${escapeHtml(item.id)}" data-target-type="${escapeHtml(item.type)}">Проверить</button>`;
-  const restartButton = item.restartable && ["owner", "admin"].includes(state.me.role)
-    ? `<button class="button tiny secondary" data-restart="${escapeHtml(item.id)}">Перезапустить</button>`
+  // Старт показывается, когда сервис не работает, стоп — когда работает.
+  // Перезапуск доступен всегда: он же чинит «работает, но нездоров».
+  const managed = item.restartable && ["owner", "admin"].includes(state.me.role);
+  const running = ["healthy", "degraded", "running"].includes(item.status.state);
+  const restartButton = managed
+    ? [
+      running
+        ? `<button class="button tiny ghost" data-lifecycle="stop" data-service="${escapeHtml(item.id)}">Остановить</button>`
+        : `<button class="button tiny primary" data-lifecycle="start" data-service="${escapeHtml(item.id)}">Запустить</button>`,
+      `<button class="button tiny secondary" data-lifecycle="restart" data-service="${escapeHtml(item.id)}">Перезапустить</button>`,
+    ].join("")
     : "";
   const link = item.public_url
     ? `<a class="button tiny ghost" href="${escapeHtml(item.public_url)}" target="_blank" rel="noreferrer">Открыть ↗</a>`
@@ -407,11 +416,20 @@ function askSudo({ scope, title, description, action }) {
   $("#sudo-dialog").showModal();
 }
 
-async function restartService(id) {
-  const { payload } = await request(`/services/${encodeURIComponent(id)}/restart`, {
+const LIFECYCLE_LABELS = {
+  start: { verb: "Запуск", title: "Запустить сервис",
+    description: "Контейнер будет запущен. Данные и volumes не затрагиваются." },
+  stop: { verb: "Остановка", title: "Остановить сервис",
+    description: "Контейнер будет остановлен штатно. Данные сохраняются; функции, зависящие от сервиса, станут недоступны." },
+  restart: { verb: "Перезапуск", title: "Перезапустить сервис",
+    description: "Контейнер будет штатно перезапущен; его persistent volumes не удаляются." },
+};
+
+async function lifecycleService(action, id) {
+  const { payload } = await request(`/services/${encodeURIComponent(id)}/${action}`, {
     method: "POST",
   });
-  toast("Перезапуск принят. Состояние обновится автоматически.");
+  toast(`${LIFECYCLE_LABELS[action].verb} принят. Состояние обновится автоматически.`);
   await pollOperation(payload.operation_id);
 }
 
@@ -866,13 +884,16 @@ $("#page-services").addEventListener("click", (event) => {
     startCheck(check.dataset.targetType, check.dataset.check).catch(handleError);
     return;
   }
-  const restart = event.target.closest("[data-restart]");
-  if (restart) {
+  const lifecycle = event.target.closest("[data-lifecycle]");
+  if (lifecycle) {
+    const action = lifecycle.dataset.lifecycle;
+    const labels = LIFECYCLE_LABELS[action];
+    if (!labels) return;
     askSudo({
       scope: "services:restart",
-      title: "Перезапустить сервис",
-      description: "Контейнер будет штатно перезапущен; его persistent volumes не удаляются.",
-      action: async () => await restartService(restart.dataset.restart),
+      title: labels.title,
+      description: labels.description,
+      action: async () => await lifecycleService(action, lifecycle.dataset.service),
     });
   }
 });

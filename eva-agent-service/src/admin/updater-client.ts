@@ -5,6 +5,8 @@ import { AdminApiError } from "./errors.js";
 
 export type UpdaterCommand =
   | "restart_service"
+  | "start_service"
+  | "stop_service"
   | "get_service_status"
   | "get_service_logs"
   | "host_metrics"

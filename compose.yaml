@@ -661,11 +661,15 @@ services:
       start_period: 20s
 
   # ===================================================================
-  # OPTIONAL — enabled via COMPOSE_PROFILES in .env
+  # TOOLS — устанавливаются всегда
   # ===================================================================
+  # Crawl4AI раньше стоял за профилем "crawl4ai". Из-за этого на
+  # установке, где профиль не включали, контейнера просто не было, а
+  # панель пыталась перезапускать его через Docker API по имени — и
+  # молча ничего не делала. Сервис нужен инструментам Евы для чтения
+  # веб-страниц, поэтому ставится наравне с остальными.
   crawl4ai:
     <<: [*restart, *logging]
-    profiles: ["crawl4ai"]
     image: ${CRAWL4AI_IMAGE}:${CRAWL4AI_VERSION}
     container_name: evaself-crawl4ai
     environment:
@@ -682,6 +686,9 @@ services:
       retries: 5
       start_period: 60s
 
+  # ===================================================================
+  # OPTIONAL — enabled via COMPOSE_PROFILES in .env
+  # ===================================================================
   uptime-kuma:
     <<: [*restart, *logging]
     profiles: ["monitoring"]

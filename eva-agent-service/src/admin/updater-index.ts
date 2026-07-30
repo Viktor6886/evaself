@@ -123,6 +123,41 @@ async function serviceStatus(service: unknown) {
   }
 }
 
+/**
+ * Поднять сервис. 304 означает «уже запущен» — это не ошибка, а ответ на
+ * повторное нажатие. 404 отдаётся как понятное сообщение: контейнера нет,
+ * и его создаёт compose, а не Docker API.
+ */
+async function startService(service: unknown) {
+  const name = containerName(service);
+  try {
+    await dockerRequest("POST", `${dockerApi}/containers/${encodeURIComponent(name)}/start`, [204, 304]);
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("HTTP 404")) {
+      throw new Error(
+        `Контейнер ${name} не создан. Выполните на сервере: docker compose up -d ${String(service)}`,
+      );
+    }
+    throw error;
+  }
+  return await serviceStatus(service);
+}
+
+/**
+ * Остановить сервис. Останавливать сам admin-api запрещено: он исполняет
+ * эту же операцию и не смог бы сообщить о результате, а поднять его
+ * обратно из панели было бы уже некому.
+ */
+async function stopService(service: unknown) {
+  const serviceId = String(service ?? "");
+  if (serviceId === "admin-api") {
+    throw new Error("Административный API нельзя остановить из панели");
+  }
+  const name = containerName(service);
+  await dockerRequest("POST", `${dockerApi}/containers/${encodeURIComponent(name)}/stop?t=30`, [204, 304]);
+  return await serviceStatus(service);
+}
+
 async function restartService(service: unknown) {
   const serviceId = String(service ?? "");
   const name = containerName(service);
@@ -380,6 +415,10 @@ async function dispatch(command: string, params: Record<string, unknown>) {
   switch (command) {
     case "get_service_status":
       return await serviceStatus(params.service);
+    case "start_service":
+      return await startService(params.service);
+    case "stop_service":
+      return await stopService(params.service);
     case "restart_service":
       return await restartService(params.service);
     case "get_service_logs":

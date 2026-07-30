@@ -193,13 +193,12 @@ EVA_EMBEDDING_API_KEY="${EVA_EMBEDDING_API_KEY:-$EVA_LLM_API_KEY}"
 step "Дополнительные сервисы"
 PROFILES="$(current COMPOSE_PROFILES || true)"
 
-if confirm "Установить Crawl4AI для чтения и очистки веб-страниц?" n; then
-	case ",$PROFILES," in *,crawl4ai,*) : ;; *) PROFILES="${PROFILES:+$PROFILES,}crawl4ai" ;; esac
-	ok "Crawl4AI включён (до 1–1,5 ГБ RAM во время обработки)"
-else
-	PROFILES="$(printf '%s' "$PROFILES" | sed 's/crawl4ai//; s/,,/,/g; s/^,//; s/,$//')"
-	info "Crawl4AI пропущен; позже измените COMPOSE_PROFILES в .env"
-fi
+# Crawl4AI больше не за профилем: он нужен инструментам Евы для чтения
+# веб-страниц и ставится наравне с остальными сервисами. Оставшееся от
+# прежних установок значение вычищаем, иначе compose ругается на профиль,
+# которого больше нет ни у одного сервиса.
+PROFILES="$(printf '%s' "$PROFILES" | sed 's/crawl4ai//; s/,,/,/g; s/^,//; s/,$//')"
+info "Crawl4AI устанавливается всегда (до 1–1,5 ГБ RAM во время обработки)"
 
 if confirm "Установить Uptime Kuma для страницы статуса?" n; then
 	case ",$PROFILES," in *,monitoring,*) : ;; *) PROFILES="${PROFILES:+$PROFILES,}monitoring" ;; esac

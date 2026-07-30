@@ -103,7 +103,6 @@ export const SERVICES: readonly ServiceDefinition[] = [
     group: "ai",
     container: "crawl4ai",
     healthUrl: "http://crawl4ai:11235/health",
-    optional: true,
     restartable: true,
   },
   {

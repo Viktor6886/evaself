@@ -272,6 +272,20 @@ step "Pulling and rebuilding"
 # containers are rebuilt so nothing starts with a missing value.
 "$SCRIPT_DIR/ensure-env-defaults.sh"
 load_env
+# Crawl4AI перестал быть опциональным: профиля "crawl4ai" больше нет ни у
+# одного сервиса, и оставшееся в .env значение только вводит в
+# заблуждение. Убираем его до сборки, чтобы contain up -d поднял сервис
+# в этом же запуске, а не в следующем.
+CURRENT_PROFILES="$(get_env COMPOSE_PROFILES || true)"
+case ",$CURRENT_PROFILES," in
+	*,crawl4ai,*)
+		CLEANED="$(printf '%s' "$CURRENT_PROFILES" | sed 's/crawl4ai//; s/,,/,/g; s/^,//; s/,$//')"
+		set_env COMPOSE_PROFILES "$CLEANED"
+		load_env
+		ok "Crawl4AI больше не за профилем — устанавливается всегда"
+		;;
+esac
+
 compose pull --ignore-buildable >/dev/null 2>&1 || warn "some images could not be pulled"
 compose build --pull >/dev/null || die "image build failed — nothing was restarted"
 ok "images ready"

@@ -14,19 +14,47 @@ export class OperationService {
     private readonly updater: UpdaterClient,
   ) {}
 
-  async restart(serviceId: string, actorId: string) {
+  restart(serviceId: string, actorId: string) {
+    return this.lifecycle("restart", serviceId, actorId);
+  }
+
+  start(serviceId: string, actorId: string) {
+    return this.lifecycle("start", serviceId, actorId);
+  }
+
+  stop(serviceId: string, actorId: string) {
+    return this.lifecycle("stop", serviceId, actorId);
+  }
+
+  /**
+   * Старт, стоп и рестарт отличаются только именем команды: проверки,
+   * запись операции и публикация события одни и те же. Флаг restartable
+   * в каталоге означает «панель управляет жизненным циклом этого
+   * сервиса» и распространяется на все три действия.
+   */
+  private async lifecycle(
+    action: "restart" | "start" | "stop",
+    serviceId: string,
+    actorId: string,
+  ) {
     const service = SERVICE_BY_ID.get(serviceId);
     if (!service) throw adminNotFound("Сервис не найден");
-    if (!service.restartable) throw adminBadRequest("Для сервиса перезапуск запрещён");
+    if (!service.restartable) {
+      throw adminBadRequest("Панель не управляет жизненным циклом этого сервиса");
+    }
+    // Останов админ-API оборвал бы обработчик собственного запроса.
+    if (action === "stop" && serviceId === "admin-api") {
+      throw adminBadRequest("Административный API нельзя остановить из панели");
+    }
     const id = randomUUID();
     await this.pool.query(
       `INSERT INTO admin_operations
          (id, kind, status, target, requested_by)
-       VALUES ($1, 'restart', 'pending', $2, $3)`,
-      [id, serviceId, actorId],
+       VALUES ($1, $2, 'pending', $3, $4)`,
+      [id, action, serviceId, actorId],
     );
-    setImmediate(() => void this.executeRestart(id, serviceId));
-    return { operation_id: id, status: "pending", target: serviceId };
+    setImmediate(() => void this.executeLifecycle(id, action, serviceId));
+    return { operation_id: id, status: "pending", target: serviceId, action };
   }
 
   async get(id: string) {
@@ -86,37 +114,44 @@ export class OperationService {
     return await this.enqueueOperation("update", "repository", actorId, idempotencyKey);
   }
 
-  private async executeRestart(id: string, serviceId: string) {
+  private async executeLifecycle(
+    id: string,
+    action: "restart" | "start" | "stop",
+    serviceId: string,
+  ) {
     await this.pool.query(
       "UPDATE admin_operations SET status = 'running', started_at = now() WHERE id = $1",
       [id],
     );
     await this.pool.query(
       `UPDATE service_statuses
-          SET state = 'checking', color = 'blue', operation = 'restart',
+          SET state = 'checking', color = 'blue', operation = $2,
               updated_at = now()
         WHERE target_id = $1`,
-      [serviceId],
+      [serviceId, action],
     );
     try {
       const result = await this.updater.call<Record<string, unknown>>(
-        "restart_service",
+        `${action}_service`,
         { service: serviceId },
       );
       await this.pool.query(
         `UPDATE admin_operations
             SET status = 'success', finished_at = now(), result_json = $2::jsonb
           WHERE id = $1`,
-        [id, JSON.stringify({ restarted: true, state: result.state ?? null })],
+        [id, JSON.stringify({ action, state: result.state ?? null, running: result.running ?? null })],
       );
-    } catch {
+    } catch (error) {
+      // Сообщение updater'а полезнее общей фразы: именно там написано,
+      // что контейнер не создан и что делать.
+      const message = error instanceof Error ? error.message.slice(0, 300) : "неизвестная ошибка";
       await this.pool.query(
         `UPDATE admin_operations
             SET status = 'failure', finished_at = now(),
-                error_code = 'restart_failed',
-                error_message = 'Сервис не перезапущен'
+                error_code = $2,
+                error_message = $3
           WHERE id = $1`,
-        [id],
+        [id, `${action}_failed`, message],
       );
     }
     await this.publisher.publish("eva.admin.events", JSON.stringify({
