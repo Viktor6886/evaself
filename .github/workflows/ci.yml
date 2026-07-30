@@ -79,30 +79,36 @@ jobs:
       - name: An upgrade backfills settings added since installation
         run: |
           # A release that introduces a new .env key used to need a manual
-          # edit; make update now adds it. Simulated with a .env from the
-          # previous release.
-          git show HEAD~1:.env.example 2>/dev/null \
-            | sed 's/^\([A-Z0-9_]*\)=$/\1=preexisting/' > /tmp/old.env \
-            || sed 's/^\([A-Z0-9_]*\)=$/\1=preexisting/' .env.example > /tmp/old.env
-          # Drop a key that exists today to prove it gets added back.
-          grep -v '^MEDIA_SERVICE_TOKEN=' /tmp/old.env > /tmp/upgrade.env
+          # edit; make update now adds it. Simulated by taking today's
+          # example, filling it in as a configured installation would look,
+          # and then removing keys to stand in for "added since install".
+          #
+          # Deliberately not derived from HEAD~1: actions/checkout is a
+          # shallow clone, so that commit does not exist here.
+          sed 's/^\([A-Z0-9_]*\)=$/\1=preexisting/' .env.example > /tmp/upgrade.env
+          sed -i '/^MEDIA_SERVICE_TOKEN=/d; /^ACME_CA=/d; /^BACKUP_RETENTION_COUNT=/d' /tmp/upgrade.env
+          test -s /tmp/upgrade.env
           chmod 600 /tmp/upgrade.env
+
           ENV_FILE=/tmp/upgrade.env ./scripts/ensure-env-defaults.sh
           ENV_FILE=/tmp/upgrade.env VERSIONS="$PWD/versions.env" bash -euo pipefail -c '
             . scripts/lib.sh
             load_env
-            # generated, not copied from the empty example
+            # a missing secret is generated, not copied from the empty example
             [ "${#MEDIA_SERVICE_TOKEN}" -ge 32 ] || { echo "::error::MEDIA_SERVICE_TOKEN not generated"; exit 1; }
-            # copied verbatim, quoting intact
+            # a missing plain setting is copied verbatim
             test "$ACME_CA" = "https://acme-v02.api.letsencrypt.org/directory"
+            test "$BACKUP_RETENTION_COUNT" = "30"
+            # quoting survives the round trip
             test "$EVA_LLM_ADDITIONAL_PARAMETERS" = "{\"request_timeout_ms\":180000}"
-            # an existing value is never rewritten, and a password is never invented
+            # an existing value is never rewritten, and no password is invented
             test "$POSTGRES_SUPER_PASSWORD" = "preexisting"
           '
-          # second run must change nothing
-          BEFORE="$(sha256sum /tmp/upgrade.env)"
+
+          # a second run must not change a single byte
+          BEFORE="$(sha256sum < /tmp/upgrade.env)"
           ENV_FILE=/tmp/upgrade.env ./scripts/ensure-env-defaults.sh >/dev/null
-          test "$BEFORE" = "$(sha256sum /tmp/upgrade.env)" \
+          test "$BEFORE" = "$(sha256sum < /tmp/upgrade.env)" \
             || { echo "::error::ensure-env-defaults.sh is not idempotent"; exit 1; }
           echo "upgrade backfill ok"
 
