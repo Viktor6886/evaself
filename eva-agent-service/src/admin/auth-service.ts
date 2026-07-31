@@ -69,6 +69,17 @@ export const ADMIN_SUDO_SCOPES = Object.freeze([
   // перехода по разделу.
   "users:write",
   "users:messages",
+  // Распознавание речи. Два scope, а не семь отдельных прав из
+  // постановки: права здесь ролевые (owner/admin/operator/viewer), и
+  // отдельный пермишенный слой рядом с ролевым был бы вторым механизмом
+  // доступа — ровно тем, что задача запрещает.
+  //
+  //   stt:write    — сохранение и замена ключа, разрешение нестандартного
+  //                  base URL, архивирование;
+  //   stt:activate — активация конфигурации и смена primary/fallback,
+  //                  то есть перевод живого трафика на другого провайдера.
+  "stt:write",
+  "stt:activate",
 ] as const);
 const ALLOWED_SUDO_SCOPES = new Set<string>(ADMIN_SUDO_SCOPES);
 
