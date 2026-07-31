@@ -30,6 +30,7 @@ import { IntegrationConfigService } from "./integration-config-service.js";
 import { LlmRouterAdminService } from "./llm-router-service.js";
 import { OperationService } from "./operation-service.js";
 import { ProviderService } from "./provider-service.js";
+import { SttAdminService } from "./stt-service.js";
 import { UserService } from "./user-service.js";
 import type { Redis } from "ioredis";
 
@@ -56,6 +57,7 @@ export interface AdminServerServices {
   operations: OperationService;
   providers: ProviderService;
   llmRouter: LlmRouterAdminService;
+  stt: SttAdminService;
   integrations: IntegrationConfigService;
   users: UserService;
   events: Redis;
@@ -612,6 +614,124 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
     );
     return reply.status(202).send(operation);
   });
+
+  // -------------------------------------------------------------------
+  // Распознавание речи: конфигурации, маршруты, проверка, телеметрия
+  // -------------------------------------------------------------------
+  // Схемы форм проксируются из media-service — источник истины там же,
+  // где адаптеры. Панель не знает ни одного параметра провайдеров.
+  app.get("/api/admin/v1/stt/provider-schemas", {
+    config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
+  }, async () => await services.stt.providerSchemas());
+
+  app.get("/api/admin/v1/stt/configs", {
+    config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
+  }, async (request) => {
+    const withArchived = (request.query as { archived?: string }).archived === "true";
+    return { configs: await services.stt.list(withArchived) };
+  });
+
+  app.get("/api/admin/v1/stt/configs/:id", {
+    config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
+  }, async (request) => {
+    return await services.stt.get((request.params as { id?: string }).id ?? "");
+  });
+
+  // Сохранение конфигурации несёт в себе ключ провайдера, поэтому
+  // требует подтверждения паролем — как и любая запись секрета.
+  app.post("/api/admin/v1/stt/configs", {
+    config: { roles: ["owner", "admin"], sudoScope: "stt:write" } satisfies RouteAccess,
+  }, async (request, reply) => {
+    const actor = contexts.get(request)!.session!.user.id;
+    const created = await services.stt.create(objectBody(request.body), actor);
+    return reply.status(201).send(created);
+  });
+
+  app.patch("/api/admin/v1/stt/configs/:id", {
+    config: { roles: ["owner", "admin"], sudoScope: "stt:write" } satisfies RouteAccess,
+  }, async (request) => {
+    const id = (request.params as { id?: string }).id ?? "";
+    const actor = contexts.get(request)!.session!.user.id;
+    return await services.stt.update(id, objectBody(request.body), actor);
+  });
+
+  // Отдельная write-only операция замены ключа: форма редактирования не
+  // должна требовать заново вводить ключ ради правки модели.
+  app.put("/api/admin/v1/stt/configs/:id/secret", {
+    config: { roles: ["owner", "admin"], sudoScope: "stt:write" } satisfies RouteAccess,
+  }, async (request) => {
+    const id = (request.params as { id?: string }).id ?? "";
+    const actor = contexts.get(request)!.session!.user.id;
+    return await services.stt.replaceSecret(id, objectBody(request.body), actor);
+  });
+
+  // Проверка ничего не активирует и не сохраняет: это отдельное
+  // действие, доступное и оператору.
+  app.post("/api/admin/v1/stt/configs/:id/test", {
+    config: { roles: ["owner", "admin", "operator"] } satisfies RouteAccess,
+  }, async (request) => {
+    const id = (request.params as { id?: string }).id ?? "";
+    const body = request.body ? objectBody(request.body) : {};
+    const audio = typeof body.audio_base64 === "string" ? body.audio_base64 : undefined;
+    return await services.stt.test(id, audio);
+  });
+
+  app.post("/api/admin/v1/stt/configs/:id/activate", {
+    config: { roles: ["owner", "admin"], sudoScope: "stt:activate" } satisfies RouteAccess,
+  }, async (request) => {
+    const id = (request.params as { id?: string }).id ?? "";
+    const body = objectBody(request.body);
+    const useCase = String(body.use_case ?? "");
+    const slot = body.slot === "fallback" ? "fallback" : "primary";
+    const actor = contexts.get(request)!.session!.user.id;
+    return { routes: await services.stt.activate(id, useCase, slot, actor) };
+  });
+
+  app.post("/api/admin/v1/stt/configs/:id/rollback", {
+    config: { roles: ["owner", "admin"], sudoScope: "stt:activate" } satisfies RouteAccess,
+  }, async (request) => {
+    const id = (request.params as { id?: string }).id ?? "";
+    const actor = contexts.get(request)!.session!.user.id;
+    return await services.stt.rollback(id, actor);
+  });
+
+  // DELETE нет намеренно: конфигурация связана с телеметрией, и
+  // физическое удаление стёрло бы историю расходов.
+  app.post("/api/admin/v1/stt/configs/:id/archive", {
+    config: { roles: ["owner", "admin"], sudoScope: "stt:write" } satisfies RouteAccess,
+  }, async (request) => {
+    return await services.stt.archive((request.params as { id?: string }).id ?? "");
+  });
+
+  app.post("/api/admin/v1/stt/configs/:id/restore", {
+    config: { roles: ["owner", "admin"], sudoScope: "stt:write" } satisfies RouteAccess,
+  }, async (request) => {
+    return await services.stt.restore((request.params as { id?: string }).id ?? "");
+  });
+
+  app.get("/api/admin/v1/stt/routes", {
+    config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
+  }, async () => ({ routes: await services.stt.routes() }));
+
+  // Смена primary/fallback переводит живой трафик на другого провайдера.
+  app.put("/api/admin/v1/stt/routes/:useCase", {
+    config: { roles: ["owner", "admin"], sudoScope: "stt:activate" } satisfies RouteAccess,
+  }, async (request) => {
+    const useCase = (request.params as { useCase?: string }).useCase ?? "";
+    const actor = contexts.get(request)!.session!.user.id;
+    return { routes: await services.stt.updateRoute(useCase, objectBody(request.body), actor) };
+  });
+
+  app.get("/api/admin/v1/stt/usage", {
+    config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
+  }, async (request) => {
+    const days = Number((request.query as { days?: string }).days ?? 30);
+    return await services.stt.usage(Number.isFinite(days) ? days : 30);
+  });
+
+  app.get("/api/admin/v1/stt/health", {
+    config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
+  }, async () => await services.stt.health());
 
   app.post("/api/admin/v1/sudo", {
     config: { roles: ["owner", "admin"] } satisfies RouteAccess,

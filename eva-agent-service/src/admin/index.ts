@@ -11,6 +11,7 @@ import { OperationService } from "./operation-service.js";
 import { IntegrationConfigService } from "./integration-config-service.js";
 import { LlmRouterAdminService } from "./llm-router-service.js";
 import { InternalAgentClient, ProviderService } from "./provider-service.js";
+import { HttpMediaSttClient, SttAdminService } from "./stt-service.js";
 import { OutboundGateway } from "./outbound-gateway.js";
 import { buildAdminServer } from "./server.js";
 import { UserService } from "./user-service.js";
@@ -47,6 +48,9 @@ async function main(): Promise<void> {
   const operations = new OperationService(pool, redis, new UpdaterClient());
   const llmRouter = new LlmRouterAdminService(pool);
   const integrations = new IntegrationConfigService(pool, secrets);
+  // Схемы провайдеров и валидацию параметров admin-api спрашивает у
+  // media-service: правда живёт там, где адаптеры.
+  const stt = new SttAdminService(pool, secrets, new HttpMediaSttClient(secrets));
   const agentClient = new InternalAgentClient(secrets);
   const providers = new ProviderService(agentClient, new OutboundGateway());
   // Переписку admin-api читает через eva-agent-service: он единственный,
@@ -61,6 +65,7 @@ async function main(): Promise<void> {
     operations,
     providers,
     llmRouter,
+    stt,
     integrations,
     users,
     events: redis,
