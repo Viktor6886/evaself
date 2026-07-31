@@ -11,7 +11,7 @@
  */
 
 import Fastify from "fastify";
-import type { FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyPluginAsync, FastifyReply } from "fastify";
 
 import type { Logger } from "../logger.js";
 import { LlmRouter, NoProviderAvailable } from "./router.js";
@@ -53,21 +53,35 @@ export function createRouterServer(input: RouterServerInput): FastifyInstance {
     };
   });
 
-  /** Каталог маршрутов в формате /v1/models — его читает Letta. */
-  app.get("/models", async () => {
-    const routes = await input.store.routes();
-    return {
-      object: "list",
-      data: [...routes.values()].map((route) => ({
-        id: `${MODEL_PREFIX}${route.code}`,
-        object: "model",
-        owned_by: "evaself",
-        created: 0,
-      })),
-    };
-  });
+  /**
+   * OpenAI-совместимая часть висит и в корне, и под /v1.
+   *
+   * Клиенты не сходятся в том, где кончается base_url. Внутренний вызов из
+   * llm.ts складывает адрес роутера с "/chat/completions", а коннектор LM
+   * Studio, через который Letta ходит сюда, ждёт базу в стиле LM Studio и
+   * опрашивает "/v1/models". Пока каталог лежал только в корне, App Server
+   * получал 404, не находил ни одной модели, и lmstudio/eva/chat не
+   * появлялся в каталоге: активация провайдера падала с «модель не
+   * появилась», перечисляя встроенные модели App Server и ни одной своей.
+   *
+   * Отвечать по обоим путям дешевле, чем угадывать соглашение клиента.
+   */
+  const openAiSurface: FastifyPluginAsync = async (scope) => {
+    /** Каталог маршрутов в формате /v1/models — его читает Letta. */
+    scope.get("/models", async () => {
+      const routes = await input.store.routes();
+      return {
+        object: "list",
+        data: [...routes.values()].map((route) => ({
+          id: `${MODEL_PREFIX}${route.code}`,
+          object: "model",
+          owned_by: "evaself",
+          created: 0,
+        })),
+      };
+    });
 
-  app.post("/chat/completions", async (request, reply) => {
+    scope.post("/chat/completions", async (request, reply) => {
     let parsed: LlmRequest;
     try {
       parsed = fromOpenAi(request.body);
@@ -124,7 +138,11 @@ export function createRouterServer(input: RouterServerInput): FastifyInstance {
       reply.raw.end();
       return reply;
     }
-  });
+    });
+  };
+
+  void app.register(openAiSurface);
+  void app.register(openAiSurface, { prefix: "/v1" });
 
   return app;
 }

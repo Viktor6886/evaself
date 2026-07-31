@@ -19,7 +19,7 @@ import {
   withBackupDirective,
 } from "../dist/router/normalize.js";
 import { LlmRouter, NoProviderAvailable, stripFence } from "../dist/router/router.js";
-import { fromOpenAi } from "../dist/router/server.js";
+import { createRouterServer, fromOpenAi } from "../dist/router/server.js";
 import { ProviderError } from "../dist/router/types.js";
 
 const silentLogger = { debug() {}, info() {}, warn() {}, error() {} };
@@ -701,4 +701,88 @@ test("параллельные запросы упираются в max_concurre
   const [, , thirdResult] = await Promise.all([...pending, third]);
   assert.equal(thirdResult.provider_name, "backup");
   assert.equal(calls.filter((c) => c.provider === "primary").length, 2);
+});
+
+// ---------------------------------------------------------------------
+// HTTP-поверхность
+// ---------------------------------------------------------------------
+
+/**
+ * Каталог должен отвечать и в корне, и под /v1.
+ *
+ * Клиенты не сходятся в том, где кончается base_url: внутренний вызов из
+ * llm.ts складывает адрес роутера с "/chat/completions", а коннектор LM
+ * Studio, через который Letta ходит сюда, опрашивает "/v1/models". Пока
+ * каталог лежал только в корне, App Server получал 404 и не находил ни
+ * одной модели — активация провайдера падала с «lmstudio/eva/chat не
+ * появилась в каталоге», перечисляя встроенные модели и ни одной своей.
+ */
+function surface() {
+  const routes = new Map([["chat", { code: "chat" }], ["deep", { code: "deep" }]]);
+  return createRouterServer({
+    apiKey: "test-key",
+    logger: { info() {}, error() {}, warn() {}, debug() {} },
+    store: {
+      routes: async () => routes,
+      providers: async () => [{ id: "p1" }],
+      breakers: async () => new Map(),
+    },
+    router: {
+      complete: async () => ({
+        response: {
+          content: "ok", tool_calls: [], finish_reason: "stop",
+          usage: { tokens_in: 1, tokens_out: 1 }, model: "eva/chat",
+        },
+        request_id: "r1", provider_name: "primary", switches: 0,
+      }),
+      stream: async function* () { throw new Error("не используется"); },
+    },
+  });
+}
+
+test("каталог моделей отвечает и в корне, и под /v1", async () => {
+  const app = surface();
+  await app.ready();
+  try {
+    for (const path of ["/models", "/v1/models"]) {
+      const response = await app.inject({
+        method: "GET", url: path, headers: { authorization: "Bearer test-key" },
+      });
+      assert.equal(response.statusCode, 200, `${path} должен отвечать`);
+      const ids = JSON.parse(response.body).data.map((entry) => entry.id);
+      assert.ok(ids.includes("eva/chat"), `${path} не отдал eva/chat`);
+    }
+  } finally {
+    await app.close();
+  }
+});
+
+test("завершения принимаются по обоим путям", async () => {
+  const app = surface();
+  await app.ready();
+  try {
+    for (const path of ["/chat/completions", "/v1/chat/completions"]) {
+      const response = await app.inject({
+        method: "POST", url: path,
+        headers: { authorization: "Bearer test-key", "content-type": "application/json" },
+        payload: { model: "eva/chat", messages: [{ role: "user", content: "x" }] },
+      });
+      assert.equal(response.statusCode, 200, `${path} должен отвечать`);
+    }
+  } finally {
+    await app.close();
+  }
+});
+
+test("ключ обязателен на обоих путях", async () => {
+  const app = surface();
+  await app.ready();
+  try {
+    for (const path of ["/models", "/v1/models"]) {
+      const response = await app.inject({ method: "GET", url: path });
+      assert.equal(response.statusCode, 401, `${path} ответил без ключа`);
+    }
+  } finally {
+    await app.close();
+  }
 });
