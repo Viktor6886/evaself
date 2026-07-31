@@ -786,3 +786,37 @@ test("ключ обязателен на обоих путях", async () => {
     await app.close();
   }
 });
+
+/**
+ * Запрос без явной пометки считается чувствительным, поэтому провайдер,
+ * которому личные данные не разрешены, не обслужит вообще ничего.
+ *
+ * Именно так установка и вставала намертво: умолчание схемы было false,
+ * фикстура здесь — true, и расхождение никто не сверял. Роутер возвращал
+ * 503 «провайдеру не разрешены чувствительные данные» на весь трафик.
+ * Умолчание исправлено миграцией 023; тест фиксирует само правило, чтобы
+ * следующая такая пара не разошлась молча.
+ */
+test("провайдер без разрешения на личные данные не обслуживает обычный запрос", async () => {
+  const denied = provider({ id: "a", name: "denied", sensitive_data_allowed: false });
+  const { router } = harness([denied], {
+    denied: always(() => Promise.resolve(ok("не должно случиться"))),
+  });
+  await assert.rejects(
+    async () => await router.complete(request()),
+    (error) => {
+      assert.ok(error instanceof NoProviderAvailable);
+      assert.match(String(error.message), /чувствительные данные/);
+      return true;
+    },
+  );
+});
+
+test("тот же провайдер с разрешением запрос обслуживает", async () => {
+  const allowed = provider({ id: "a", name: "allowed", sensitive_data_allowed: true });
+  const { router } = harness([allowed], {
+    allowed: always(() => Promise.resolve(ok("ответ"))),
+  });
+  const result = await router.complete(request());
+  assert.equal(result.provider_name, "allowed");
+});

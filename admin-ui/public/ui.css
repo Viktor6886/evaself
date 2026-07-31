@@ -30,6 +30,21 @@ h3 { margin-bottom: 6px; font-size: 17px; }
 label { display: grid; gap: 7px; margin: 18px 0; color: #bdd0c7; font-weight: 650; font-size: 13px; }
 input, select, textarea { width: 100%; min-height: 44px; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; color: var(--text); background: #08130f; outline: none; transition: border .2s, box-shadow .2s; }
 textarea { resize: vertical; }
+/* Флажки под общее правило для полей ввода не попадают: width:100% и
+   min-height:44px превращали их в огромные квадраты, растянутые по высоте
+   подписи — у двухстрочных подписей они выходили вдвое больше, чем у
+   однострочных, и ряд выглядел рваным. */
+input[type="checkbox"], input[type="radio"] {
+  flex: none;
+  width: 17px;
+  height: 17px;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border-radius: 4px;
+  accent-color: var(--green);
+}
+input[type="radio"] { border-radius: 50%; }
 input:focus, select:focus, textarea:focus { border-color: rgba(91,234,154,.6); box-shadow: 0 0 0 3px rgba(91,234,154,.1); }
 .button { min-height: 40px; padding: 9px 15px; border: 1px solid transparent; border-radius: 10px; background: none; cursor: pointer; font-weight: 750; transition: transform .15s, background .15s; }
 .button:hover { transform: translateY(-1px); }
@@ -507,8 +522,10 @@ dialog .eyebrow { margin-top: 0; }
 .router-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
 .router-grid label { display: grid; gap: 4px; font-size: 12px; }
 .router-grid small { color: var(--muted, #8b93a4); font-size: 11px; }
-.router-flags { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 14px; }
-.router-flags .flag { display: flex; align-items: center; gap: 6px; font-size: 12.5px; }
+/* Сетка вместо переноса flex: колонки одинаковой ширины, поэтому подписи
+   разной длины не разваливают ряд. */
+.router-flags { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px 16px; margin-top: 14px; }
+.router-flags .flag { display: flex; align-items: center; gap: 8px; font-size: 12.5px; line-height: 1.3; }
 
 /* ---------------------------------------------------------------------
  * Системные настройки: наборы, рекомендации, продвинутые (2.7)

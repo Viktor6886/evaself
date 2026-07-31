@@ -850,7 +850,10 @@ function openProviderEditor(provider = null) {
   flag("supports_json", provider?.supports_json ?? true);
   flag("supports_streaming", provider?.supports_streaming ?? true);
   flag("supports_vision", provider?.supports_vision ?? false);
-  flag("sensitive_data_allowed", provider?.sensitive_data_allowed ?? false);
+  // Умолчание совпадает со схемой: провайдера заводит оператор, и это и
+  // есть решение о доверии. Снятая галочка у нового провайдера означала
+  // бы, что роутер отвергнет весь его трафик как чувствительный.
+  flag("sensitive_data_allowed", provider?.sensitive_data_allowed ?? true);
   flag("enabled", provider?.enabled ?? true);
   form.elements.api_key.required = !provider;
   $("#provider-editor-title").textContent = provider

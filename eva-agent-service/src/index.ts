@@ -102,15 +102,10 @@ async function main(): Promise<void> {
     });
   }
   const llm = new LlmManager(config, db, letta, logger);
-  try {
-    await llm.initializeDefaultModel();
-  } catch (error) {
-    // На чистой установке контейнер может стартовать до migration 004.
-    // После миграций install.sh импортирует первую конфигурацию из .env.
-    logger.warn("Реестр LLM пока не готов", {
-      message: error instanceof Error ? error.message : String(error),
-    });
-  }
+  // Указатель на роутер ставится безусловно и в базу не ходит, поэтому
+  // упасть здесь нечему: прежняя обёртка ловила ошибку чтения реестра LLM,
+  // которого больше нет.
+  await llm.initializeDefaultModel();
   const runtimeContext = new RuntimeContextBuilder(db, {
     defaultTimezone: config.defaultTimezone,
     cacheTtlMs: Math.max(1, config.profileCacheTtlSeconds) * 1_000,

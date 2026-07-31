@@ -417,6 +417,28 @@ jobs:
           SQL
           echo "schema verified"
 
+      # Роутер помечает чувствительным любой запрос без обратной пометки,
+      # поэтому провайдер, заведённый одними обязательными колонками,
+      # обязан обслуживать трафик. При умолчании false установка молча
+      # отвергала сто процентов запросов.
+      - name: A provider created with schema defaults may carry conversation
+        run: |
+          psql -v ON_ERROR_STOP=1 -tA <<'SQL'
+          DO $$
+          DECLARE allowed boolean;
+          BEGIN
+            INSERT INTO llm_providers (name, base_url, model, context_window, api_key_encrypted)
+            VALUES ('ci-defaults-probe', 'http://example.test/v1', 'm', 32768, 'v1:a:b:c');
+            SELECT sensitive_data_allowed INTO allowed
+              FROM llm_providers WHERE name = 'ci-defaults-probe';
+            DELETE FROM llm_providers WHERE name = 'ci-defaults-probe';
+            IF NOT allowed THEN
+              RAISE EXCEPTION 'новый провайдер не допущен к личным данным: роутер отвергнет весь трафик';
+            END IF;
+          END $$;
+          SQL
+          echo "provider defaults verified"
+
       - name: Seed data is not duplicated by a re-run
         run: |
           COUNT="$(psql -tA -c 'SELECT count(*) FROM quotas')"
