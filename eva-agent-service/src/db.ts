@@ -768,6 +768,21 @@ export class Database {
     return rows[0] ?? null;
   }
 
+  /**
+   * Активация провайдера: флаг is_active и голова всех цепочек маршрутов.
+   *
+   * До появления роутера флага было достаточно — App Server смотрел прямо
+   * на активного провайдера. Теперь модель выбирает роутер по цепочке
+   * llm_route_providers, и один флаг ничего не решает: провайдер, не
+   * попавший в цепочку, не получит ни одного запроса, каким бы активным он
+   * ни числился. Ровно это и происходило после обновления — цепочки были
+   * засеяны миграцией 018 тем провайдером, который был активен тогда, и
+   * больше их никто не трогал, кроме ручной настройки в панели.
+   *
+   * Поэтому активированный провайдер встаёт первым в каждую цепочку.
+   * Остальные не выбрасываются, а съезжают на резервные позиции: цепочка —
+   * это и есть failover, и терять его при смене основной модели незачем.
+   */
   async activateLlmProvider(id: string): Promise<LlmProviderRow | null> {
     const client = await this.require().connect();
     try {
@@ -777,6 +792,7 @@ export class Database {
         "UPDATE llm_providers SET is_active = true WHERE id = $1 RETURNING *",
         [id],
       );
+      if (rows[0]) await this.promoteInRouteChains(client, id);
       await client.query("COMMIT");
       return rows[0] ?? null;
     } catch (error) {
@@ -784,6 +800,40 @@ export class Database {
       throw error;
     } finally {
       client.release();
+    }
+  }
+
+  /**
+   * Ставит провайдера на позицию 0 каждого маршрута, сдвигая остальных.
+   *
+   * Цепочка перестраивается целиком, а не сдвигается на месте: позиции
+   * уникальны в пределах маршрута, и «position = position + 1» одним
+   * UPDATE нарушило бы уникальность в процессе.
+   */
+  private async promoteInRouteChains(client: pg.PoolClient, providerId: string): Promise<void> {
+    const { rows: routes } = await client.query<{ code: string }>(
+      "SELECT code FROM llm_routes",
+    );
+    for (const route of routes) {
+      const { rows: chain } = await client.query<{ provider_id: string }>(
+        `SELECT provider_id FROM llm_route_providers
+          WHERE route_code = $1 AND provider_id <> $2
+          ORDER BY position`,
+        [route.code, providerId],
+      );
+      // Ограничение position допускает 0..5, то есть шесть звеньев.
+      const ordered = [providerId, ...chain.map((row) => row.provider_id)].slice(0, 6);
+      await client.query(
+        "DELETE FROM llm_route_providers WHERE route_code = $1",
+        [route.code],
+      );
+      for (const [position, provider] of ordered.entries()) {
+        await client.query(
+          `INSERT INTO llm_route_providers (route_code, provider_id, position)
+           VALUES ($1, $2, $3)`,
+          [route.code, provider, position],
+        );
+      }
     }
   }
 

@@ -1542,8 +1542,14 @@ jobs:
                 const switchedAgent = await call(
                   '/v1/sdk/agents/' + encodeURIComponent(standalone.id),
                 );
-                if (switchedAgent.agent.model !== 'lmstudio/ci-model-b') {
-                  throw new Error('standalone WebUI agent was not switched');
+                // До роутера агент указывал прямо на модель провайдера. Теперь
+                // он всегда указывает на роутер, а модель выбирает цепочка
+                // маршрута — в этом и был смысл варианта А. Проверка ниже
+                // сверяет уже цепочку, а не имя модели у агента.
+                if (switchedAgent.agent.model !== 'lmstudio/eva/chat') {
+                  throw new Error(
+                    'standalone WebUI agent should point at the router, got ' +
+                    switchedAgent.agent.model);
                 }
                 await call(
                   '/v1/sdk/agents/' + encodeURIComponent(standalone.id) +
@@ -1562,6 +1568,30 @@ jobs:
           grep -q '"active":"lmstudio/ci-model-b"' /tmp/llm-switch
           grep -q '"secret_hidden":true' /tmp/llm-switch
           grep -q '"standalone_updated":true' /tmp/llm-switch
+
+          # Под роутером «сделать активным» означает встать головой цепочек:
+          # модель выбирает цепочка, и провайдер, не попавший в неё, не
+          # получит ни одного запроса, каким бы активным он ни числился.
+          # Ровно так и вышло после обновления — активация меняла флаг, а
+          # цепочки оставались от миграции, и переключение ничего не меняло.
+          . scripts/lib.sh
+          load_env
+          HEADS="$(docker compose --env-file versions.env --env-file .env \
+            exec -T -e PGPASSWORD="$EVA_DB_PASSWORD" postgres \
+            psql -v ON_ERROR_STOP=1 -At -U "$EVA_DB_USER" -d "$EVA_DB_NAME" \
+              -c "SELECT count(DISTINCT rp.route_code)
+                    FROM llm_route_providers rp
+                    JOIN llm_providers p ON p.id = rp.provider_id
+                   WHERE rp.position = 0 AND p.is_active;")"
+          ROUTES="$(docker compose --env-file versions.env --env-file .env \
+            exec -T -e PGPASSWORD="$EVA_DB_PASSWORD" postgres \
+            psql -v ON_ERROR_STOP=1 -At -U "$EVA_DB_USER" -d "$EVA_DB_NAME" \
+              -c "SELECT count(*) FROM llm_routes;")"
+          if [ "$HEADS" != "$ROUTES" ]; then
+            echo "::error::активный провайдер стоит головой $HEADS цепочек из $ROUTES"
+            exit 1
+          fi
+          echo "активный провайдер возглавляет все $ROUTES цепочки"
 
       - name: WebUI chat completes a real SDK turn through the test LLM
         run: |
