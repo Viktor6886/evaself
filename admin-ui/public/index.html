@@ -35,6 +35,7 @@
         <button data-page="overview" class="nav-item active"><span>◉</span>Обзор</button>
         <button data-page="services" class="nav-item"><span>▦</span>Сервисы и интеграции</button>
         <button data-page="ai" class="nav-item"><span>✦</span>Искусственный интеллект</button>
+        <button data-page="stt" class="nav-item"><span>◎</span>Распознавание речи</button>
         <button data-page="operations" class="nav-item"><span>↻</span>Backup и обновления</button>
         <div class="nav-caption">Управление</div>
         <button data-page="users" class="nav-item"><span>◍</span>Пользователи</button>
@@ -204,6 +205,61 @@
               <div class="form-actions span-2"><button class="button ghost" id="cancel-provider" type="button">Отмена</button><button class="button primary" type="submit">Сохранить</button></div>
             </form>
           </section>
+        </section>
+
+        <!-- Распознавание речи. Форма строится по схеме, которую
+             отдаёт media-service: панель не знает ни одного параметра
+             Deepgram или Google, поэтому новая модель провайдера не
+             требует правки этого файла. -->
+        <section id="page-stt" class="page">
+          <div class="page-heading">
+            <div>
+              <p class="eyebrow">РАСПОЗНАВАНИЕ РЕЧИ</p>
+              <h2>STT-провайдеры</h2>
+              <p>Голосовые сообщения Telegram и WebApp. Ключи доступны только на запись; смена маршрута применяется без перезапуска контейнеров.</p>
+            </div>
+            <button id="new-stt-config" class="button primary">Добавить конфигурацию</button>
+          </div>
+
+          <div class="tabs" role="tablist">
+            <button class="tab active" data-stt-tab="configs">Конфигурации</button>
+            <button class="tab" data-stt-tab="routes">Маршрутизация</button>
+            <button class="tab" data-stt-tab="usage">Статистика</button>
+          </div>
+
+          <div id="stt-configs" class="status-grid"></div>
+          <div id="stt-routes" class="status-grid" hidden></div>
+          <div id="stt-usage" hidden></div>
+
+          <!-- Редактор конфигурации -->
+          <dialog id="stt-dialog" class="sheet-dialog">
+            <div class="sheet-head">
+              <div><h3 id="stt-dialog-title">Конфигурация</h3><p id="stt-dialog-hint" class="muted"></p></div>
+              <button id="close-stt-dialog" class="icon-button" aria-label="Закрыть">×</button>
+            </div>
+            <form id="stt-form" class="integration-form"></form>
+            <p id="stt-form-error" class="integration-status" hidden></p>
+            <div class="form-actions">
+              <button id="stt-test" class="button ghost" type="button">Проверить</button>
+              <button id="stt-save" class="button primary" type="button">Сохранить</button>
+            </div>
+          </dialog>
+
+          <!-- Проверка на реальном аудио -->
+          <dialog id="stt-test-dialog" class="sheet-dialog">
+            <div class="sheet-head">
+              <div><h3>Проверка распознавания</h3><p class="muted">Встроенный тестовый сигнал или ваш файл. Проверка не активирует конфигурацию.</p></div>
+              <button id="close-stt-test" class="icon-button" aria-label="Закрыть">×</button>
+            </div>
+            <label class="field">
+              <span>Свой аудиофайл (необязательно)</span>
+              <input id="stt-test-file" type="file" accept="audio/*">
+            </label>
+            <div id="stt-test-result" class="integration-test" hidden></div>
+            <div class="form-actions">
+              <button id="stt-test-run" class="button primary" type="button">Запустить проверку</button>
+            </div>
+          </dialog>
         </section>
 
         <section id="page-operations" class="page">

@@ -22,6 +22,13 @@ const state = {
   pendingConfirm: null,
   events: null,
   refreshTimer: null,
+  // Распознавание речи. Схемы кэшируются: они меняются только с
+  // выкладкой media-service, а не между переходами по разделам.
+  sttSchemas: null,
+  sttConfigs: [],
+  sttRoutes: [],
+  sttEditing: null,
+  sttTestingId: null,
 };
 const $ = (selector) => document.querySelector(selector);
 
@@ -146,6 +153,7 @@ const LOADERS = {
   overview: loadOverview,
   services: loadServicesAndIntegrations,
   ai: loadProviders,
+  stt: loadStt,
   operations: loadOperations,
   users: loadUsers,
   settings: loadSettings,
@@ -1910,3 +1918,559 @@ request("/me").then(({ payload }) => {
   showApp(payload.user);
   openPage("overview");
 }).catch(() => showLogin());
+
+// =====================================================================
+// Распознавание речи
+// =====================================================================
+// Панель не знает ни одного параметра провайдеров. Форма строится по
+// GET /stt/provider-schemas, который admin-api проксирует из
+// media-service — источник истины там же, где адаптеры. Поэтому новая
+// модель или новый параметр Deepgram не требуют правки этого файла.
+
+const STT_SECTIONS = [
+  ["basic", "Основные настройки"],
+  ["model", "Модель и язык"],
+  ["formatting", "Форматирование"],
+  ["features", "Дополнительные возможности"],
+  ["secret", "Секрет"],
+  ["advanced", "Расширенные настройки"],
+];
+
+const STT_STATUS = {
+  draft: ["Черновик", "gray"],
+  healthy: ["Работает", "green"],
+  unhealthy: ["Ошибка", "red"],
+  disabled: ["Выключено", "gray"],
+  archived: ["В архиве", "gray"],
+};
+
+const STT_USE_CASE_LABELS = {
+  telegram_voice: "Голосовые в Telegram",
+  webapp_voice_message: "Голосовые в WebApp",
+  webapp_live: "Живой режим (в разработке)",
+};
+
+async function loadStt() {
+  if (!state.sttSchemas) {
+    const { payload } = await request("/stt/provider-schemas");
+    state.sttSchemas = payload.providers || [];
+  }
+  const [configs, routes] = await Promise.all([
+    request("/stt/configs"),
+    request("/stt/routes"),
+  ]);
+  state.sttConfigs = configs.payload.configs || [];
+  state.sttRoutes = routes.payload.routes || [];
+  renderSttConfigs();
+  renderSttRoutes();
+}
+
+function sttSchema(provider) {
+  return (state.sttSchemas || []).find((item) => item.provider === provider);
+}
+
+function renderSttConfigs() {
+  const host = $("#stt-configs");
+  if (!state.sttConfigs.length) {
+    host.innerHTML = `<p class="muted">Конфигураций пока нет. Пока их нет, распознавание работает
+      по устаревшим переменным MEDIA_ASR_* из .env.</p>`;
+    return;
+  }
+  host.innerHTML = state.sttConfigs.map((config) => {
+    const [label, color] = STT_STATUS[config.status] || [config.status, "gray"];
+    const schema = sttSchema(config.provider);
+    const test = config.last_test || {};
+    const usedBy = (config.used_by || [])
+      .map((useCase) => STT_USE_CASE_LABELS[useCase] || useCase)
+      .join(", ");
+    return `
+      <article class="status-card" data-stt-id="${config.id}">
+        <header>
+          <span class="dot ${color}"></span>
+          <div>
+            <h4>${escapeHtml(config.name)}</h4>
+            <p class="muted">${escapeHtml(schema?.label || config.provider)} · ${escapeHtml(config.model)} · ${config.mode}</p>
+          </div>
+          <span class="pill">${label}</span>
+        </header>
+        <dl class="status-meta">
+          <div><dt>Ключ</dt><dd>${config.secret?.configured ? "Настроен" : "Не настроен"}</dd></div>
+          <div><dt>Используется</dt><dd>${usedBy ? escapeHtml(usedBy) : "нигде"}</dd></div>
+          <div><dt>Последняя проверка</dt><dd>${
+            test.at ? `${new Date(test.at).toLocaleString("ru")} · ${test.ok ? "успешно" : "ошибка"}` : "не проводилась"
+          }</dd></div>
+          ${test.latency_ms ? `<div><dt>Задержка</dt><dd>${test.latency_ms} мс</dd></div>` : ""}
+        </dl>
+        ${test.ok === false && test.error_message
+          ? `<p class="integration-status error">${escapeHtml(String(test.error_message).slice(0, 200))}</p>` : ""}
+        <div class="card-actions">
+          <button class="button ghost" data-stt-action="edit" data-id="${config.id}">Настроить</button>
+          <button class="button ghost" data-stt-action="test" data-id="${config.id}">Проверить</button>
+          ${config.archived
+            ? `<button class="button ghost" data-stt-action="restore" data-id="${config.id}">Вернуть из архива</button>`
+            : `<button class="button ghost" data-stt-action="archive" data-id="${config.id}">В архив</button>`}
+        </div>
+      </article>`;
+  }).join("");
+}
+
+function renderSttRoutes() {
+  const options = (selected) => {
+    const items = state.sttConfigs
+      .filter((config) => !config.archived && config.secret?.configured)
+      .map((config) => `<option value="${config.id}" ${config.id === selected ? "selected" : ""}>${escapeHtml(config.name)}</option>`)
+      .join("");
+    return `<option value="">— не назначен —</option>${items}`;
+  };
+
+  $("#stt-routes").innerHTML = state.sttRoutes.map((route) => `
+    <article class="status-card" data-route="${route.use_case}">
+      <header>
+        <span class="dot ${route.enabled && route.primary_config_id ? "green" : "gray"}"></span>
+        <div><h4>${STT_USE_CASE_LABELS[route.use_case] || route.use_case}</h4>
+          <p class="muted">${route.use_case}</p></div>
+      </header>
+      <label class="field"><span>Основной</span>
+        <select data-route-field="primary_config_id">${options(route.primary_config_id)}</select></label>
+      <label class="field"><span>Резервный</span>
+        <select data-route-field="fallback_config_id">${options(route.fallback_config_id)}</select>
+        <small class="muted">Не может совпадать с основным: вторая попытка ушла бы туда же.</small></label>
+      <label class="field"><span>Таймаут, мс</span>
+        <input type="number" data-route-field="timeout_ms" value="${route.timeout_ms}" min="5000" max="600000"></label>
+      <label class="field"><span>Предел длительности, с</span>
+        <input type="number" data-route-field="max_audio_seconds" value="${route.max_audio_seconds ?? ""}" min="1" max="7200"></label>
+      <label class="switch"><input type="checkbox" data-route-field="enabled" ${route.enabled ? "checked" : ""}>
+        <span>Сценарий включён</span></label>
+      <div class="card-actions">
+        <button class="button primary" data-stt-action="save-route" data-id="${route.use_case}">Применить</button>
+      </div>
+    </article>`).join("");
+}
+
+async function loadSttUsage() {
+  const { payload } = await request("/stt/usage?days=30");
+  const totals = payload.totals || {};
+  const day = payload.last_24h || {};
+  const rate = Number(totals.requests) > 0
+    ? Math.round((Number(totals.successes) / Number(totals.attempts)) * 100) : null;
+
+  $("#stt-usage").innerHTML = `
+    <div class="status-grid">
+      <article class="status-card"><header><div><h4>За 24 часа</h4></div></header>
+        <dl class="status-meta">
+          <div><dt>Распознаваний</dt><dd>${day.requests ?? 0}</dd></div>
+          <div><dt>Ошибок</dt><dd>${day.failures ?? 0}</dd></div>
+        </dl></article>
+      <article class="status-card"><header><div><h4>За 30 дней</h4></div></header>
+        <dl class="status-meta">
+          <div><dt>Распознаваний</dt><dd>${totals.requests ?? 0}</dd></div>
+          <div><dt>Попыток к провайдерам</dt><dd>${totals.attempts ?? 0}</dd></div>
+          <div><dt>Уходов на резерв</dt><dd>${totals.fallbacks ?? 0}</dd></div>
+          <div><dt>Минут аудио</dt><dd>${(Number(totals.audio_seconds || 0) / 60).toFixed(1)}</dd></div>
+          <div><dt>Успешность</dt><dd>${rate === null ? "—" : `${rate}%`}</dd></div>
+          <div><dt>Задержка p50 / p95</dt><dd>${totals.p50_latency_ms ?? "—"} / ${totals.p95_latency_ms ?? "—"} мс</dd></div>
+        </dl></article>
+    </div>
+    <h3 class="section-title">По провайдерам</h3>
+    <table class="table"><thead><tr><th>Провайдер</th><th>Модель</th><th>Запросов</th><th>Минут</th><th>p95, мс</th></tr></thead>
+      <tbody>${(payload.by_provider || []).map((row) => `<tr>
+        <td>${escapeHtml(row.provider)}</td><td>${escapeHtml(row.model)}</td>
+        <td>${row.requests}</td><td>${(Number(row.audio_seconds || 0) / 60).toFixed(1)}</td>
+        <td>${row.p95_latency_ms ?? "—"}</td></tr>`).join("") || '<tr><td colspan="5" class="muted">Пока нет данных</td></tr>'}
+      </tbody></table>
+    <h3 class="section-title">Последние ошибки</h3>
+    <table class="table"><thead><tr><th>Когда</th><th>Сценарий</th><th>Провайдер</th><th>Код</th><th>Резерв</th></tr></thead>
+      <tbody>${(payload.recent_errors || []).map((row) => `<tr>
+        <td>${new Date(row.at).toLocaleString("ru")}</td>
+        <td>${escapeHtml(row.use_case)}</td><td>${escapeHtml(row.provider)}</td>
+        <td>${escapeHtml(row.error_code || "")}</td><td>${row.is_fallback ? "да" : "нет"}</td></tr>`).join("")
+        || '<tr><td colspan="5" class="muted">Ошибок нет</td></tr>'}
+      </tbody></table>`;
+}
+
+// ---------------------------------------------------------------------
+// редактор
+// ---------------------------------------------------------------------
+function sttField(spec, value, capabilities) {
+  // Поле, которого адаптер не поддерживает, не показывается вовсе —
+  // предлагать настройку, которую провайдер отвергнет, хуже, чем не
+  // предлагать ничего.
+  if (spec.requires_capability && !capabilities[spec.requires_capability]) return "";
+  const name = spec.name;
+  const hint = spec.hint ? `<small class="muted">${escapeHtml(spec.hint)}</small>` : "";
+  const current = value ?? spec.default ?? "";
+
+  if (spec.kind === "boolean") {
+    return `<label class="switch"><input type="checkbox" data-stt-field="${name}" ${current ? "checked" : ""}>
+      <span>${escapeHtml(spec.label)}</span></label>${hint}`;
+  }
+  if (spec.kind === "select") {
+    const options = (spec.options || [])
+      .map((option) => `<option value="${escapeHtml(option.value)}" ${option.value === String(current) ? "selected" : ""}>${escapeHtml(option.label)}</option>`)
+      .join("");
+    return `<label class="field"><span>${escapeHtml(spec.label)}</span>
+      <select data-stt-field="${name}">${options}</select>${hint}</label>`;
+  }
+  if (spec.kind === "multiselect") {
+    const selected = Array.isArray(current) ? current : [];
+    return `<fieldset class="field"><legend>${escapeHtml(spec.label)}</legend>${
+      (spec.options || []).map((option) => `<label class="switch">
+        <input type="checkbox" data-stt-multi="${name}" value="${escapeHtml(option.value)}" ${selected.includes(option.value) ? "checked" : ""}>
+        <span>${escapeHtml(option.label)}</span></label>`).join("")}${hint}</fieldset>`;
+  }
+  if (spec.kind === "string_list") {
+    const text = Array.isArray(current) ? current.join(", ") : String(current);
+    return `<label class="field"><span>${escapeHtml(spec.label)}</span>
+      <input type="text" data-stt-field="${name}" data-list="1" value="${escapeHtml(text)}"
+        placeholder="через запятую">${hint}</label>`;
+  }
+  if (spec.kind === "json") {
+    const text = typeof current === "object" ? JSON.stringify(current, null, 2) : String(current || "");
+    return `<label class="field"><span>${escapeHtml(spec.label)}</span>
+      <textarea data-stt-field="${name}" data-json="1" rows="4">${escapeHtml(text)}</textarea>${hint}</label>`;
+  }
+  const type = spec.kind === "number" ? "number" : "text";
+  const bounds = `${spec.minimum !== undefined ? ` min="${spec.minimum}"` : ""}${spec.maximum !== undefined ? ` max="${spec.maximum}"` : ""}`;
+  return `<label class="field"><span>${escapeHtml(spec.label)}</span>
+    <input type="${type}" data-stt-field="${name}"${bounds} value="${escapeHtml(String(current))}"
+      placeholder="${escapeHtml(spec.placeholder || "")}">${hint}</label>`;
+}
+
+function openSttEditor(config) {
+  state.sttEditing = config || null;
+  const providers = state.sttSchemas || [];
+  const provider = config?.provider || providers[0]?.provider;
+  const schema = sttSchema(provider);
+  if (!schema) return toast("Схемы провайдеров недоступны — media-service не отвечает", true);
+
+  $("#stt-dialog-title").textContent = config ? config.name : "Новая конфигурация";
+  $("#stt-dialog-hint").textContent = `${schema.summary} Параметры сверены ${schema.verified_on}.`;
+  $("#stt-form-error").hidden = true;
+  renderSttForm(schema, config);
+  $("#stt-dialog").showModal();
+}
+
+function renderSttForm(schema, config) {
+  const caps = schema.capabilities || {};
+  const params = config?.public_config || {};
+  const mode = config?.mode || "batch";
+  const providerSelect = (state.sttSchemas || [])
+    .map((item) => `<option value="${item.provider}" ${item.provider === schema.provider ? "selected" : ""}>${escapeHtml(item.label)}</option>`)
+    .join("");
+
+  // Модель: список проверенных пресетов плюс «Указать вручную».
+  // Неизвестная модель не должна требовать правки frontend-кода.
+  const presets = (schema.model_presets || [])
+    .map((preset) => `<option value="${escapeHtml(preset.value)}" ${preset.value === config?.model ? "selected" : ""}>${escapeHtml(preset.label)}${preset.hint ? ` — ${escapeHtml(preset.hint)}` : ""}</option>`)
+    .join("");
+  const custom = config?.model && !(schema.model_presets || []).some((preset) => preset.value === config.model);
+
+  const baseUrl = config?.base_url
+    || (mode === "streaming" && schema.default_streaming_base_url) || schema.default_base_url;
+
+  const bySection = new Map(STT_SECTIONS.map(([key]) => [key, []]));
+  for (const spec of schema.fields || []) {
+    if (spec.only_mode && spec.only_mode !== mode) continue;
+    const rendered = sttField(spec, params[spec.name], caps);
+    if (rendered) bySection.get(spec.section || "advanced")?.push(rendered);
+  }
+
+  const secretBlock = schema.provider === "google"
+    ? `<label class="field"><span>Service account JSON</span>
+         <input type="file" id="stt-credentials" accept="application/json,.json">
+         <small class="muted">Файл загружается один раз и целиком уходит в Secret Store.
+           В конфигурации остаются только project_id и маскированная почта.</small></label>
+       <p class="muted">${config?.secret?.configured ? "Учётные данные настроены." : "Учётные данные не заданы."}</p>`
+    : `<label class="field"><span>API-ключ</span>
+         <input type="password" id="stt-api-key" autocomplete="new-password" placeholder="${
+           config?.secret?.configured ? "Настроен — оставьте пустым, чтобы сохранить" : "Введите ключ"}">
+         <small class="muted">Показывается только признак «настроен». Просмотреть сохранённый ключ нельзя.</small></label>`;
+
+  $("#stt-form").innerHTML = `
+    <fieldset class="field"><legend>Основные настройки</legend>
+      <label class="field"><span>Название</span>
+        <input type="text" id="stt-name" value="${escapeHtml(config?.name || "")}" maxlength="120"></label>
+      <label class="field"><span>Провайдер</span>
+        <select id="stt-provider" ${config ? "disabled" : ""}>${providerSelect}</select>
+        ${config ? '<small class="muted">Провайдера существующей конфигурации менять нельзя — параметры несовместимы.</small>' : ""}</label>
+      <label class="field"><span>Режим</span>
+        <select id="stt-mode">
+          <option value="batch" ${mode === "batch" ? "selected" : ""}>batch — запись целиком</option>
+          ${caps.streaming ? `<option value="streaming" ${mode === "streaming" ? "selected" : ""}>streaming — поток</option>` : ""}
+        </select>${caps.streaming ? "" : '<small class="muted">Провайдер не поддерживает потоковое распознавание.</small>'}</label>
+      <label class="field"><span>Base URL</span>
+        <input type="text" id="stt-base-url" value="${escapeHtml(baseUrl)}"></label>
+      <label class="switch"><input type="checkbox" id="stt-allow-private">
+        <span>Разрешить адрес во внутренней сети (self-hosted)</span></label>
+      ${bySection.get("basic").join("")}
+    </fieldset>
+
+    <fieldset class="field"><legend>Модель и язык</legend>
+      <label class="field"><span>Модель</span>
+        <select id="stt-model-preset">${presets}<option value="__custom__" ${custom ? "selected" : ""}>Указать вручную…</option></select></label>
+      <label class="field" id="stt-model-custom-wrap" ${custom ? "" : "hidden"}><span>Своя модель</span>
+        <input type="text" id="stt-model-custom" value="${escapeHtml(custom ? config.model : "")}">
+        <small class="muted">Произвольное имя допустимо, но работоспособность подтверждает только кнопка «Проверить».</small></label>
+      ${bySection.get("model").join("")}
+    </fieldset>
+
+    ${["formatting", "features", "advanced"].map((key) => {
+      const items = bySection.get(key);
+      if (!items.length) return "";
+      const title = STT_SECTIONS.find(([code]) => code === key)[1];
+      return `<fieldset class="field"><legend>${title}</legend>${items.join("")}</fieldset>`;
+    }).join("")}
+
+    <fieldset class="field"><legend>Секрет</legend>${secretBlock}</fieldset>`;
+}
+
+function collectSttForm() {
+  const params = {};
+  for (const input of document.querySelectorAll("#stt-form [data-stt-field]")) {
+    const name = input.dataset.sttField;
+    if (input.type === "checkbox") { params[name] = input.checked; continue; }
+    const raw = input.value.trim();
+    if (!raw) continue;
+    if (input.dataset.list) {
+      params[name] = raw.split(",").map((item) => item.trim()).filter(Boolean);
+    } else if (input.dataset.json) {
+      try { params[name] = JSON.parse(raw); }
+      catch { throw new Error(`Поле «${name}» не разбирается как JSON`); }
+    } else if (input.type === "number") {
+      params[name] = Number(raw);
+    } else {
+      params[name] = raw;
+    }
+  }
+  const multi = {};
+  for (const input of document.querySelectorAll("#stt-form [data-stt-multi]")) {
+    const name = input.dataset.sttMulti;
+    multi[name] = multi[name] || [];
+    if (input.checked) multi[name].push(input.value);
+  }
+  for (const [name, values] of Object.entries(multi)) {
+    if (values.length) params[name] = values;
+  }
+
+  const preset = $("#stt-model-preset").value;
+  const model = preset === "__custom__" ? $("#stt-model-custom").value.trim() : preset;
+
+  return {
+    name: $("#stt-name").value.trim(),
+    provider: $("#stt-provider").value,
+    mode: $("#stt-mode").value,
+    base_url: $("#stt-base-url").value.trim(),
+    model,
+    public_config: params,
+    allow_private_endpoint: $("#stt-allow-private").checked,
+  };
+}
+
+async function readCredentialsFile() {
+  const input = $("#stt-credentials");
+  const file = input?.files?.[0];
+  if (!file) return null;
+  if (file.size > 16 * 1024) throw new Error("Файл слишком велик — ожидается service account JSON");
+  return await file.text();
+}
+
+async function saveSttConfig() {
+  const body = collectSttForm();
+  const editing = state.sttEditing;
+
+  if (body.provider === "google") {
+    const credentials = await readCredentialsFile();
+    if (credentials) body.credentials_json = credentials;
+    else if (!editing) throw new Error("Загрузите service account JSON");
+  } else {
+    const key = $("#stt-api-key").value.trim();
+    // Пустое поле при редактировании означает «оставить прежний ключ».
+    if (key) body.api_key = key;
+    else if (!editing) throw new Error("Введите API-ключ");
+  }
+
+  const send = async () => {
+    if (editing) {
+      body.config_version = editing.config_version;
+      await request(`/stt/configs/${editing.id}`, { method: "PATCH", body: JSON.stringify(body) });
+    } else {
+      await request("/stt/configs", { method: "POST", body: JSON.stringify(body) });
+    }
+    $("#stt-dialog").close();
+    toast("Конфигурация сохранена");
+    await loadStt();
+  };
+
+  askSudo({
+    scope: "stt:write",
+    title: "Сохранение конфигурации распознавания",
+    description: "Запись включает ключ провайдера. Подтвердите паролем.",
+    action: send,
+  });
+}
+
+async function runSttTest() {
+  const id = state.sttTestingId;
+  const file = $("#stt-test-file").files?.[0];
+  let audio;
+  if (file) {
+    const buffer = await file.arrayBuffer();
+    audio = btoa(String.fromCharCode(...new Uint8Array(buffer)));
+  }
+  const host = $("#stt-test-result");
+  host.hidden = false;
+  host.textContent = "Проверяю…";
+
+  const { payload } = await request(`/stt/configs/${id}/test`, {
+    method: "POST",
+    body: JSON.stringify(audio ? { audio_base64: audio } : {}),
+  });
+
+  if (payload.success) {
+    // Поля, которых провайдер не вернул, не показываем вовсе: пустое
+    // место честнее выдуманного числа.
+    host.innerHTML = `<strong>Успешно.</strong>
+      <dl class="status-meta">
+        <div><dt>Провайдер</dt><dd>${escapeHtml(payload.provider)}</dd></div>
+        <div><dt>Модель</dt><dd>${escapeHtml(payload.model)}</dd></div>
+        ${payload.upstream_provider ? `<div><dt>Фактический upstream</dt><dd>${escapeHtml(payload.upstream_provider)}</dd></div>` : ""}
+        <div><dt>Задержка</dt><dd>${payload.latency_ms} мс</dd></div>
+        <div><dt>Длительность</dt><dd>${payload.audio_duration_ms} мс</dd></div>
+        ${payload.language ? `<div><dt>Язык</dt><dd>${escapeHtml(payload.language)}</dd></div>` : ""}
+        ${payload.confidence !== undefined ? `<div><dt>Уверенность</dt><dd>${payload.confidence}</dd></div>` : ""}
+        ${payload.provider_request_id ? `<div><dt>Request ID</dt><dd>${escapeHtml(payload.provider_request_id)}</dd></div>` : ""}
+      </dl>
+      <p><em>Расшифровка:</em> ${escapeHtml(payload.transcript || "(пусто)")}</p>
+      ${(payload.warnings || []).length ? `<p class="muted">${payload.warnings.map(escapeHtml).join("; ")}</p>` : ""}`;
+  } else {
+    host.innerHTML = `<strong>Не удалось.</strong>
+      <p>${escapeHtml(payload.error?.message || "провайдер не ответил")}</p>
+      <p class="muted">Код: ${escapeHtml(payload.error?.code || "неизвестен")}</p>`;
+  }
+  await loadStt();
+}
+
+async function saveSttRoute(useCase) {
+  const card = document.querySelector(`[data-route="${useCase}"]`);
+  const body = {};
+  for (const input of card.querySelectorAll("[data-route-field]")) {
+    const name = input.dataset.routeField;
+    if (input.type === "checkbox") body[name] = input.checked;
+    else body[name] = input.value === "" ? null : input.value;
+  }
+  askSudo({
+    scope: "stt:activate",
+    title: "Смена маршрута распознавания",
+    description: "Новый маршрут применится немедленно, без перезапуска контейнеров.",
+    action: async () => {
+      await request(`/stt/routes/${encodeURIComponent(useCase)}`, {
+        method: "PUT", body: JSON.stringify(body),
+      });
+      toast("Маршрут применён");
+      await loadStt();
+    },
+  });
+}
+
+// ---------------------------------------------------------------------
+// события раздела
+// ---------------------------------------------------------------------
+document.addEventListener("click", (event) => {
+  const tab = event.target.closest("[data-stt-tab]");
+  if (tab) {
+    document.querySelectorAll("[data-stt-tab]").forEach((item) => item.classList.remove("active"));
+    tab.classList.add("active");
+    const active = tab.dataset.sttTab;
+    $("#stt-configs").hidden = active !== "configs";
+    $("#stt-routes").hidden = active !== "routes";
+    $("#stt-usage").hidden = active !== "usage";
+    if (active === "usage") loadSttUsage().catch(handleError);
+    return;
+  }
+
+  const action = event.target.closest("[data-stt-action]");
+  if (!action) return;
+  const id = action.dataset.id;
+  const config = state.sttConfigs?.find((item) => item.id === id);
+
+  switch (action.dataset.sttAction) {
+    case "edit":
+      openSttEditor(config);
+      break;
+    case "test":
+      state.sttTestingId = id;
+      $("#stt-test-result").hidden = true;
+      $("#stt-test-file").value = "";
+      $("#stt-test-dialog").showModal();
+      break;
+    case "archive":
+      askSudo({
+        scope: "stt:write",
+        title: "Архивирование конфигурации",
+        description: "Конфигурация перестанет быть доступной для маршрутов. История расходов сохранится.",
+        action: async () => {
+          await request(`/stt/configs/${id}/archive`, { method: "POST" });
+          toast("Конфигурация в архиве");
+          await loadStt();
+        },
+      });
+      break;
+    case "restore":
+      askSudo({
+        scope: "stt:write",
+        title: "Возврат из архива",
+        description: "Конфигурация снова станет доступной для назначения на маршрут.",
+        action: async () => {
+          await request(`/stt/configs/${id}/restore`, { method: "POST" });
+          await loadStt();
+        },
+      });
+      break;
+    case "save-route":
+      saveSttRoute(id);
+      break;
+    default:
+      break;
+  }
+});
+
+document.addEventListener("change", (event) => {
+  if (event.target.id === "stt-model-preset") {
+    $("#stt-model-custom-wrap").hidden = event.target.value !== "__custom__";
+  }
+  // Смена провайдера или режима перестраивает форму: у Deepgram и
+  // Google нет ни одного общего поля, а streaming добавляет свои.
+  if (event.target.id === "stt-provider" || event.target.id === "stt-mode") {
+    const schema = sttSchema($("#stt-provider").value);
+    if (schema) renderSttForm(schema, { ...(state.sttEditing || {}), mode: $("#stt-mode").value });
+  }
+});
+
+// Кнопки диалогов раздела распознавания. Регистрируются один раз здесь,
+// а не в разметке, чтобы обработчики жили рядом с логикой раздела.
+$("#new-stt-config")?.addEventListener("click", () => openSttEditor(null));
+$("#close-stt-dialog")?.addEventListener("click", () => $("#stt-dialog").close());
+$("#close-stt-test")?.addEventListener("click", () => $("#stt-test-dialog").close());
+$("#stt-save")?.addEventListener("click", () => {
+  saveSttConfig().catch((error) => {
+    const host = $("#stt-form-error");
+    host.hidden = false;
+    host.textContent = error instanceof Error ? error.message : String(error);
+  });
+});
+$("#stt-test")?.addEventListener("click", () => {
+  // Проверка из редактора имеет смысл только для сохранённой
+  // конфигурации: у несохранённой ещё нет ключа в Secret Store.
+  if (!state.sttEditing) {
+    const host = $("#stt-form-error");
+    host.hidden = false;
+    host.textContent = "Сначала сохраните конфигурацию — проверка использует ключ из Secret Store";
+    return;
+  }
+  state.sttTestingId = state.sttEditing.id;
+  $("#stt-test-result").hidden = true;
+  $("#stt-test-dialog").showModal();
+});
+$("#stt-test-run")?.addEventListener("click", () => {
+  runSttTest().catch(handleError);
+});
