@@ -133,20 +133,38 @@ export interface ManagedAgentInput {
  * returning for logging and debugging.
  */
 export function summarizeStream(messages: SDKMessage[]): Omit<TurnResult, "agentId" | "conversationId" | "durationMs"> {
-  const replyParts: string[] = [];
   const reasoning: string[] = [];
   const toolCalls: string[] = [];
   const trace: Array<Record<string, unknown>> = [];
   let stopReason: string | null = null;
   let usage: Record<string, unknown> | null = null;
 
+  // Сообщения ассистента приходят срезами: несколько событий с общим
+  // uuid — это один логический ответ, разрезанный потоком. Разные uuid —
+  // разные сообщения.
+  //
+  // В агентном ходе их несколько: перед каждым вызовом инструмента
+  // модель проговаривает, что собирается делать («Let me search for
+  // both.»), и только последнее сообщение — ответ пользователю. Раньше
+  // склеивались все подряд, и в Telegram уходил ход мыслей вместе с
+  // ответом и без разделителей.
+  const groups: Array<{ key: string; parts: string[] }> = [];
+
   for (const message of messages) {
     trace.push(sanitizeTraceMessage(message));
     switch (message.type) {
       case "assistant": {
-        const content = (message as { content?: unknown }).content;
-        const text = extractText(content);
-        if (text) replyParts.push(text);
+        const raw = message as { content?: unknown; uuid?: string; otid?: string | null };
+        const text = extractText(raw.content);
+        if (!text) break;
+        // otid — стабильный ключ среза, uuid — идентификатор сообщения.
+        // Если не пришло ни того, ни другого, считаем срез продолжением
+        // предыдущего: это прежнее поведение и для одиночного ответа оно
+        // верное.
+        const key = raw.otid ?? raw.uuid ?? groups.at(-1)?.key ?? "single";
+        const last = groups.at(-1);
+        if (last && last.key === key) last.parts.push(text);
+        else groups.push({ key, parts: [text] });
         break;
       }
       case "reasoning": {
@@ -166,9 +184,9 @@ export function summarizeStream(messages: SDKMessage[]): Omit<TurnResult, "agent
         stopReason = result.stopReason ?? result.stop_reason ?? null;
         usage = result.usage ?? null;
         // Some harness versions put the final text only on the result.
-        if (replyParts.length === 0) {
+        if (groups.length === 0) {
           const text = extractText(result.result);
-          if (text) replyParts.push(text);
+          if (text) groups.push({ key: "result", parts: [text] });
         }
         break;
       }
@@ -177,12 +195,18 @@ export function summarizeStream(messages: SDKMessage[]): Omit<TurnResult, "agent
     }
   }
 
+  // Внутри группы срезы склеиваются как есть: провайдер рвёт слова между
+  // событиями, и любой разделитель здесь разорвал бы слово.
+  const rendered = groups.map((group) => group.parts.join("").trim()).filter(Boolean);
+  // Ответ — последнее сообщение. Всё, что модель сказала до него, это
+  // рассуждение вслух: пользователю оно не нужно, администратору в
+  // трассе — да.
+  const reply = rendered.at(-1) ?? "";
+  const narration = rendered.slice(0, -1);
+
   return {
-    // SDKAssistantMessage.content is a streamed text delta. Concatenate the
-    // deltas verbatim; adding paragraph separators here breaks words whenever
-    // the provider splits a token between two events.
-    reply: replyParts.join("").trim(),
-    reasoning,
+    reply: reply.trim(),
+    reasoning: [...reasoning, ...narration],
     toolCalls,
     trace,
     stopReason,

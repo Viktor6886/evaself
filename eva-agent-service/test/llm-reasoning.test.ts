@@ -333,10 +333,12 @@ describe("адаптер OpenAI-совместимого провайдера", 
 // ---------------------------------------------------------------------
 // то, из-за чего это выглядело именно так
 // ---------------------------------------------------------------------
-test("Ева склеивает дельты ассистента без разделителя", () => {
-  // Это не дефект, а причина, по которой утёкшее рассуждение выглядело
-  // слипшимся с ответом: «Let me search for both.The search didn't…».
-  // Вставлять разделители нельзя — провайдер рвёт слова между событиями.
+test("без идентификаторов срезов дельты склеиваются как раньше", () => {
+  // Версии SDK, не присылающие uuid, обрабатываются по-старому: всё
+  // считается одним сообщением. Именно из-за этого утёкшее
+  // проговаривание выглядело слипшимся с ответом —
+  // «Let me search for both.The search didn't…». Вставлять разделители
+  // здесь нельзя: провайдер рвёт слова между событиями.
   const summary = summarizeStream([
     { type: "assistant", content: "Let me search for both." },
     { type: "assistant", content: "The search didn't help." },
@@ -354,4 +356,78 @@ test("сообщения типа reasoning в ответ не попадают"
 
   assert.equal(summary.reply, "Привет");
   assert.deepEqual(summary.reasoning, ["ход мыслей"]);
+});
+
+// ---------------------------------------------------------------------
+// агентный ход: проговаривание плана не должно уходить пользователю
+// ---------------------------------------------------------------------
+describe("сборка ответа из сообщений агентного хода", () => {
+  test("до пользователя доходит только последнее сообщение", () => {
+    // Ровно то, что наблюдалось: модель проговаривает план перед каждым
+    // вызовом инструмента, и всё это склеивалось в одно сообщение.
+    const summary = summarizeStream([
+      { type: "assistant", content: "Let me search for both.", uuid: "m1" },
+      { type: "tool_call", toolName: "web_search", uuid: "t1" },
+      { type: "assistant", content: "The search didn't give me weather info.", uuid: "m2" },
+      { type: "tool_call", toolName: "web_search", uuid: "t2" },
+      { type: "assistant", content: "Виктор, что нашла: +24°C, ясно.", uuid: "m3" },
+    ] as never);
+
+    assert.equal(summary.reply, "Виктор, что нашла: +24°C, ясно.");
+    assert.ok(!summary.reply.includes("Let me search"), "проговаривание утекло в ответ");
+    // Не выброшено — администратор видит его в трассе.
+    assert.deepEqual(summary.reasoning, [
+      "Let me search for both.",
+      "The search didn't give me weather info.",
+    ]);
+  });
+
+  test("срезы одного сообщения склеиваются без разделителей", () => {
+    // Один логический ответ, разрезанный потоком: uuid общий, поэтому
+    // склеивается как есть — разделитель разорвал бы слово.
+    const summary = summarizeStream([
+      { type: "assistant", content: "Привет", uuid: "m1", otid: "o1" },
+      { type: "assistant", content: ", Вик", uuid: "m1", otid: "o1" },
+      { type: "assistant", content: "тор 😄", uuid: "m1", otid: "o1" },
+    ] as never);
+
+    assert.equal(summary.reply, "Привет, Виктор 😄");
+    assert.deepEqual(summary.reasoning, []);
+  });
+
+  test("одиночный ответ без идентификаторов работает как раньше", () => {
+    // Совместимость: часть версий SDK не присылает uuid вовсе.
+    const summary = summarizeStream([
+      { type: "assistant", content: "При" },
+      { type: "assistant", content: "вет" },
+    ] as never);
+
+    assert.equal(summary.reply, "Привет");
+  });
+
+  test("настоящие reasoning-сообщения по-прежнему отделены", () => {
+    const summary = summarizeStream([
+      { type: "reasoning", content: "внутренний ход мыслей", uuid: "r1" },
+      { type: "assistant", content: "Ответ", uuid: "m1" },
+    ] as never);
+
+    assert.equal(summary.reply, "Ответ");
+    assert.ok(summary.reasoning.includes("внутренний ход мыслей"));
+  });
+
+  test("текст только в result по-прежнему подхватывается", () => {
+    const summary = summarizeStream([
+      { type: "result", result: "Ответ из result", stopReason: "end_turn" },
+    ] as never);
+
+    assert.equal(summary.reply, "Ответ из result");
+  });
+
+  test("пустой ход не превращается в мусор", () => {
+    const summary = summarizeStream([
+      { type: "tool_call", toolName: "noop", uuid: "t1" },
+    ] as never);
+
+    assert.equal(summary.reply, "");
+  });
 });
