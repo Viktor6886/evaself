@@ -390,18 +390,35 @@ export class LlmManager {
     candidate: LlmProviderRow,
     rollbackOverride?: LlmProviderRow,
   ): Promise<PublicLlmProvider> {
-    const check = await this.probe(candidate);
+    // Подготовка идёт до try, и раньше её падения не оставляли в журнале
+    // ничего: ни строки об успехе, ни строки об ошибке. Снаружи это
+    // выглядело как активация, которая молча ничего не сделала, и найти
+    // причину по логам было невозможно. Теперь каждый шаг подготовки
+    // назван, а его провал записан.
+    this.logger.info("Активация LLM: проверка конфигурации", {
+      providerId: candidate.id,
+      name: candidate.name,
+    });
+    const check = await this.step("проверка конфигурации", candidate, async () =>
+      await this.probe(candidate));
     await this.db.recordLlmCheck(candidate.id, {
       ok: check.ok,
       message: check.message,
       models: check.models_supported ? check.models : null,
     });
-    if (!check.ok) throw badRequest(`Конфигурация не прошла проверку: ${check.message}`);
+    if (!check.ok) {
+      this.logger.error("Активация LLM: конфигурация не прошла проверку", {
+        providerId: candidate.id,
+        message: check.message,
+      });
+      throw badRequest(`Конфигурация не прошла проверку: ${check.message}`);
+    }
 
     const previous = rollbackOverride ?? await this.db.getActiveLlmProvider();
     // App Server is the source of truth here: this includes both Telegram
     // agents mapped in PostgreSQL and standalone agents created from WebUI.
-    const mappings = await this.letta.listAllModelMappings();
+    const mappings = await this.step("опрос агентов App Server", candidate, async () =>
+      await this.letta.listAllModelMappings());
     const candidateKey = this.secretBox.decrypt(candidate.api_key_encrypted);
     const candidateHandle = ROUTER_ROUTE_HANDLE;
 
@@ -440,6 +457,30 @@ export class LlmManager {
         }`,
         { code: "llm_switch_failed", statusCode: 502 },
       );
+    }
+  }
+
+  /**
+   * Шаг подготовки к активации: называет себя в журнале, если упал.
+   *
+   * Ошибка возвращается наверх как есть — задача только в том, чтобы по
+   * логу было видно, на чём именно всё остановилось.
+   */
+  private async step<T>(
+    what: string,
+    provider: LlmProviderRow,
+    run: () => Promise<T>,
+  ): Promise<T> {
+    const startedAt = Date.now();
+    try {
+      return await run();
+    } catch (error) {
+      this.logger.error(`Активация LLM прервана: ${what}`, {
+        providerId: provider.id,
+        durationMs: Date.now() - startedAt,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
     }
   }
 
