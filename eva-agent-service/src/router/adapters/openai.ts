@@ -13,10 +13,15 @@ import type {
   ProviderProfile,
 } from "../types.js";
 import { ProviderError } from "../types.js";
+import { ReasoningStripper, stripReasoning } from "../normalize.js";
 import { classifyHttp, readSse } from "./shared.js";
 
 interface OpenAiChoiceMessage {
   content?: string | null;
+  // Reasoning-модели кладут ход мыслей сюда. Объявлено явно, чтобы было
+  // видно: поле известно и в content не подмешивается намеренно.
+  reasoning_content?: string | null;
+  reasoning?: string | null;
   tool_calls?: Array<{
     id?: string;
     function?: { name?: string; arguments?: string };
@@ -56,6 +61,13 @@ function buildBody(provider: ProviderProfile, request: LlmRequest, stream: boole
   }
 
   const body: Record<string, unknown> = {
+    // additional_parameters читались из базы, но в запрос не попадали.
+    // Без них оператору нечем отключить размышления у провайдера,
+    // который отдаёт их в content: именно сюда кладут
+    // chat_template_kwargs.enable_thinking, reasoning.exclude и подобное.
+    // Идут первыми — поля ниже задают сам роутер, и переопределять их
+    // произвольной настройкой нельзя.
+    ...provider.additional_parameters,
     ...provider.generation_defaults,
     model: provider.model,
     messages,
@@ -170,10 +182,25 @@ export const openAiAdapter: ProviderAdapter = {
       });
     }
     const choice = body.choices?.[0];
-    const content = typeof choice?.message?.content === "string" ? choice.message.content : "";
+    const raw_content = typeof choice?.message?.content === "string" ? choice.message.content : "";
+    // Модель, обслуживаемая без reasoning-парсера, присылает <think>…</think>
+    // прямо в content. Дальше по течению это уходит в историю conversation
+    // и в Telegram — вырезаем на границе.
+    const { content } = stripReasoning(raw_content);
     const toolCalls = toolCallsFrom(choice?.message);
     if (!content.trim() && toolCalls.length === 0) {
-      throw new ProviderError("пустой ответ модели", "empty_response", { retryable: true });
+      // Ответ, состоящий из одного рассуждения, — это не пустой ответ
+      // модели, а неверно настроенный провайдер. Различаем в сообщении,
+      // иначе оператор будет искать проблему не там.
+      throw new ProviderError(
+        raw_content.trim()
+          ? "модель вернула только рассуждение без ответа: провайдер отдаёт "
+            + "ход мыслей в content — отключите thinking или включите "
+            + "reasoning-парсер на стороне провайдера"
+          : "пустой ответ модели",
+        "empty_response",
+        { retryable: true },
+      );
     }
     return {
       content,
@@ -194,6 +221,9 @@ export const openAiAdapter: ProviderAdapter = {
     }
 
     let text = "";
+    // Теги приходят разрезанными между чанками, поэтому очистка потока
+    // ведётся с состоянием, а не по каждому дельта-куску отдельно.
+    const stripper = new ReasoningStripper();
     const calls = new Map<number, { id: string; name: string; arguments: string }>();
     let usage = { tokens_in: 0, tokens_out: 0 };
     let reason: LlmResponse["finish_reason"] = "unknown";
@@ -233,8 +263,11 @@ export const openAiAdapter: ProviderAdapter = {
 
       const delta = choice?.delta?.content;
       if (typeof delta === "string" && delta.length > 0) {
-        text += delta;
-        yield { type: "text", delta };
+        const visible = stripper.push(delta);
+        if (visible.length > 0) {
+          text += visible;
+          yield { type: "text", delta: visible };
+        }
       }
       // Аргументы инструмента приходят по кускам и собираются по индексу.
       for (const part of choice?.delta?.tool_calls ?? []) {
@@ -248,15 +281,27 @@ export const openAiAdapter: ProviderAdapter = {
       }
     }
 
+    // Хвост, придержанный на случай разрезанного тега.
+    const tail = stripper.flush();
+    if (tail.length > 0) {
+      text += tail;
+      yield { type: "text", delta: tail };
+    }
+
     const toolCalls: LlmToolCall[] = [...calls.entries()]
       .sort((a, b) => a[0] - b[0])
       .map(([, call]) => ({ id: call.id, name: call.name, arguments: call.arguments || "{}" }))
       .filter((call) => call.name);
 
     if (!text.trim() && toolCalls.length === 0) {
-      throw new ProviderError("поток закончился без содержимого", "empty_response", {
-        retryable: true,
-      });
+      throw new ProviderError(
+        stripper.reasoning()
+          ? "поток состоял из одного рассуждения: провайдер отдаёт ход мыслей "
+            + "в content — отключите thinking или включите reasoning-парсер"
+          : "поток закончился без содержимого",
+        "empty_response",
+        { retryable: true },
+      );
     }
     for (const call of toolCalls) yield { type: "tool_call", call };
     yield {
