@@ -303,4 +303,9 @@ CREATE TRIGGER stt_routes_touch
     BEFORE UPDATE ON stt_routes
     FOR EACH ROW EXECUTE FUNCTION stt_touch_updated_at();
 
+-- Отметка о применении: по ней db-migrate.sh понимает, что миграция
+-- уже прогонялась, и не запускает её повторно при каждом старте.
+INSERT INTO schema_migrations (version) VALUES ('024_stt_providers')
+ON CONFLICT (version) DO NOTHING;
+
 COMMIT;
