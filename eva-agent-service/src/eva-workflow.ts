@@ -211,6 +211,20 @@ export class EvaWorkflow {
           metrics.letta_turn_ms = elapsed(lettaStarted);
         }
         await this.db.markAgentUsed(link.agent_id);
+        // Ход, где модель прислала несколько сообщений, — это агентный
+        // цикл с проговариванием плана. В Telegram уходит только
+        // последнее; счётчики нужны, чтобы разбирать жалобы на утёкшие
+        // рассуждения по факту, а не по догадке. Текста здесь нет
+        // намеренно: содержимое разговора в логи не попадает.
+        if (answer.assistantGroups > 1 || !answer.assistantHadIds) {
+          this.logger.info("Ход состоял из нескольких сообщений модели", {
+            userId: user.id,
+            assistant_groups: answer.assistantGroups,
+            slice_ids_present: answer.assistantHadIds,
+            tool_calls: answer.toolCalls.length,
+            reasoning_items: answer.reasoning.length,
+          });
+        }
         this.highlights?.schedule(user.id, conversationId);
         const turn = answer;
 

@@ -1,3 +1,9 @@
+import {
+  isValidTelegramHtml,
+  markdownToTelegramHtml,
+  splitTelegramHtml,
+  stripTags,
+} from "./telegram-format.js";
 import { randomInt, timingSafeEqual } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 
@@ -124,19 +130,59 @@ export class TelegramClient implements OutboxTransport {
       : { outboxInsertMs: 0, telegramSendMs: 0 };
   }
 
+  /**
+   * Отправка с разметкой.
+   *
+   * Модель пишет markdown, Telegram его не понимает — без parse_mode
+   * пользователь видел сырые «**Сегодня в Перми:**». Переводим в
+   * поддерживаемый Telegram HTML.
+   *
+   * Если разметка почему-то оказалась негодной, сообщение уходит
+   * обычным текстом: потерять ответ из-за одной скобки хуже, чем
+   * потерять жирный шрифт.
+   */
   async sendMessage(
     chatId: number,
     text: string,
     options: Record<string, unknown> = {},
   ): Promise<unknown[]> {
+    // Служебные тексты передают parse_mode явно — их не трогаем.
+    if (options.parse_mode !== undefined) {
+      const results: unknown[] = [];
+      for (const chunk of splitTelegramText(text)) {
+        results.push(await this.dispatch("sendMessage", chatId, {
+          chat_id: chatId, text: chunk, ...options,
+        }));
+      }
+      return results;
+    }
+
+    const html = markdownToTelegramHtml(text);
+    const usable = html && isValidTelegramHtml(html);
+    const chunks = usable ? splitTelegramHtml(html) : splitTelegramText(text);
     const results: unknown[] = [];
-    const chunks = splitTelegramText(text);
+
     for (const chunk of chunks) {
-      results.push(await this.dispatch("sendMessage", chatId, {
-        chat_id: chatId,
-        text: chunk,
-        ...options,
-      }));
+      const payload: Record<string, unknown> = { chat_id: chatId, text: chunk, ...options };
+      if (usable) {
+        payload.parse_mode = "HTML";
+        // Ссылки в ответе — источники, а не украшение: превью на
+        // половину экрана мешает читать сам ответ.
+        payload.link_preview_options = { is_disabled: true };
+      }
+      try {
+        results.push(await this.dispatch("sendMessage", chatId, payload));
+      } catch (error) {
+        if (!usable) throw error;
+        // Telegram отверг разметку — отправляем то же самое текстом.
+        this.logger.warn("Telegram отклонил разметку, отправляю без неё", {
+          chatId,
+          message: error instanceof Error ? error.message.slice(0, 200) : String(error),
+        });
+        results.push(await this.dispatch("sendMessage", chatId, {
+          chat_id: chatId, text: stripTags(chunk), ...options,
+        }));
+      }
     }
     return results;
   }

@@ -34,6 +34,13 @@ export const telegramTag = (telegramId: number | string) => `tg:${telegramId}`;
 export interface TurnResult {
   reply: string;
   reasoning: string[];
+  /**
+   * Сколько отдельных сообщений ассистента пришло за ход и были ли у них
+   * идентификаторы срезов. Только счётчики, без текста: содержимое
+   * разговора в логи не попадает.
+   */
+  assistantGroups: number;
+  assistantHadIds: boolean;
   toolCalls: string[];
   /** Sanitized SDK events for the protected administrative trace viewer. */
   trace: Array<Record<string, unknown>>;
@@ -149,6 +156,9 @@ export function summarizeStream(messages: SDKMessage[]): Omit<TurnResult, "agent
   // склеивались все подряд, и в Telegram уходил ход мыслей вместе с
   // ответом и без разделителей.
   const groups: Array<{ key: string; parts: string[] }> = [];
+  // Если SDK не присылает ни uuid, ни otid, разделить сообщения нечем —
+  // это важно знать при разборе жалоб на утёкшие рассуждения.
+  let sawSliceIds = false;
 
   for (const message of messages) {
     trace.push(sanitizeTraceMessage(message));
@@ -161,6 +171,7 @@ export function summarizeStream(messages: SDKMessage[]): Omit<TurnResult, "agent
         // Если не пришло ни того, ни другого, считаем срез продолжением
         // предыдущего: это прежнее поведение и для одиночного ответа оно
         // верное.
+        if (raw.otid || raw.uuid) sawSliceIds = true;
         const key = raw.otid ?? raw.uuid ?? groups.at(-1)?.key ?? "single";
         const last = groups.at(-1);
         if (last && last.key === key) last.parts.push(text);
@@ -207,6 +218,8 @@ export function summarizeStream(messages: SDKMessage[]): Omit<TurnResult, "agent
   return {
     reply: reply.trim(),
     reasoning: [...reasoning, ...narration],
+    assistantGroups: rendered.length,
+    assistantHadIds: sawSliceIds,
     toolCalls,
     trace,
     stopReason,
