@@ -578,7 +578,10 @@ jobs:
 
       - name: Generate a throwaway .env
         run: |
-          sed 's/^\([A-Z0-9_]*\)=$/\1=ci-placeholder/' .env.example > .env
+          # Заглушка длиннее 16 символов: сервисы проверяют минимальную
+          # длину ключей, и короткое значение роняло бы их в crash loop —
+          # ровно так llm-router не поднимался, пока ключ не генерировался.
+          sed 's/^\([A-Z0-9_]*\)=$/\1=ci-placeholder-value-32-chars-long/' .env.example > .env
           python3 - <<'PY'
           import re, secrets, pathlib
           path = pathlib.Path('.env')
@@ -604,7 +607,7 @@ jobs:
           for key in ('POSTGRES_SUPER_PASSWORD','EVA_DB_PASSWORD',
                       'NOCODB_DB_PASSWORD','LETTA_DB_PASSWORD','EVA_DB_READONLY_PASSWORD',
                       'VALKEY_PASSWORD','EVA_AGENT_API_KEY','LETTA_APP_SERVER_TOKEN',
-                      'LLM_CONFIG_ENCRYPTION_KEY',
+                      'LLM_CONFIG_ENCRYPTION_KEY','EVA_ROUTER_API_KEY',
                       'NC_AUTH_JWT_SECRET','LAVA_WEBHOOK_PASSWORD','MEDIA_SERVICE_TOKEN',
                       'SEARXNG_SECRET','EVA_TELEGRAM_WEBHOOK_SECRET'):
             text = re.sub(rf'^{key}=.*$', f'{key}={secrets.token_hex(24)}', text, flags=re.M)
