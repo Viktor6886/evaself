@@ -481,6 +481,63 @@ describe("реестр STT-провайдеров", { skip: DATABASE_URL ? false
     );
   });
 
+  test("перенос MEDIA_ASR_* идемпотентен и не трогает готовый реестр", async () => {
+    await reset();
+    secrets.put = async (ref, value, usedBy) => {
+      await seedSecretRow(ref);
+      return new FakeSecretStore().put.call(secrets, ref, value, usedBy);
+    };
+
+    const env = {
+      MEDIA_ASR_BASE_URL: "https://api.openai.com/v1",
+      MEDIA_ASR_API_KEY: "sk-legacy-key",
+      MEDIA_ASR_MODEL: "whisper-1",
+      MEDIA_ASR_LANGUAGE: "ru",
+    } as NodeJS.ProcessEnv;
+
+    const first = await service.importLegacyEnv(env);
+    assert.equal(first.imported, true);
+
+    const configs = await service.list();
+    assert.equal(configs.length, 1);
+    assert.equal(configs[0]!.name, "migrated-default");
+    assert.equal(configs[0]!.provider, "openai");
+    assert.deepEqual(configs[0]!.public_config, { language: "ru" });
+    // Ключ переехал в Secret Store, а не остался в параметрах.
+    assert.ok(!JSON.stringify(configs).includes("sk-legacy-key"));
+    assert.equal(secrets.values.get(secrets.puts[0]!.ref), "sk-legacy-key");
+
+    const route = (await service.routes()).find((item) => item.use_case === "telegram_voice")!;
+    assert.equal(route.primary_config_id, configs[0]!.id);
+
+    // Второй запуск ничего не меняет — иначе перезапуск сервиса
+    // откатывал бы правки администратора.
+    const second = await service.importLegacyEnv(env);
+    assert.equal(second.imported, false);
+    assert.equal((await service.list()).length, 1);
+  });
+
+  test("перенос не выполняется без настроенных MEDIA_ASR_*", async () => {
+    await reset();
+    const result = await service.importLegacyEnv({ MEDIA_ASR_MODEL: "whisper-1" } as NodeJS.ProcessEnv);
+    assert.equal(result.imported, false);
+    assert.equal((await service.list()).length, 0);
+  });
+
+  test("перенос определяет OpenRouter по адресу", async () => {
+    await reset();
+    secrets.put = async (ref, value, usedBy) => {
+      await seedSecretRow(ref);
+      return new FakeSecretStore().put.call(secrets, ref, value, usedBy);
+    };
+    await service.importLegacyEnv({
+      MEDIA_ASR_BASE_URL: "https://openrouter.ai/api/v1",
+      MEDIA_ASR_API_KEY: "or-key",
+      MEDIA_ASR_MODEL: "openai/whisper-1",
+    } as NodeJS.ProcessEnv);
+    assert.equal((await service.list())[0]!.provider, "openrouter");
+  });
+
   test("Google: путь к файлу не сохраняется, а неполный JSON отклоняется", async () => {
     await reset();
     secrets.put = async (ref, value, usedBy) => {

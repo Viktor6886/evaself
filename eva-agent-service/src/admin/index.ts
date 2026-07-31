@@ -56,6 +56,25 @@ async function main(): Promise<void> {
   // Переписку admin-api читает через eva-agent-service: он единственный,
   // кому разрешено обращаться к Letta App Server.
   const users = new UserService(pool, agentClient);
+  // Перенос действующих MEDIA_ASR_* в реестр. Идемпотентно: если
+  // конфигурации уже есть, ничего не делает. Обновление работающей
+  // установки не должно ломать голосовые сообщения.
+  try {
+    const migration = await stt.importLegacyEnv();
+    if (migration.imported) {
+      logger.info("Настройки распознавания перенесены в реестр", { reason: migration.reason });
+    }
+    // Снимок рассылается на старте всегда: media-service мог быть
+    // пересоздан и потерять том со своей копией.
+    await stt.pushSnapshot();
+  } catch (error) {
+    // Реестр STT не должен мешать старту всей админки: без снимка
+    // media-service распознаёт по устаревшим переменным.
+    logger.warn("Не удалось разослать снимок STT", {
+      code: error instanceof Error ? error.name : "unknown_error",
+    });
+  }
+
   const app = buildAdminServer({
     auth,
     audit,

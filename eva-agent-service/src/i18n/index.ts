@@ -28,6 +28,11 @@ const ru = {
     "Связь с агентом, заметки и задачи хранятся в PostgreSQL и Letta на сервере владельца Evaself. API-ключи зашифрованы и не выдаются в WebUI. Администратор может удалить агента и его данные.",
   unknownCommand: "Неизвестная команда. Список: /help",
   transcript: "Распознала: {text}",
+  // Один текст на все технические причины отказа. Пользователю
+  // нечего делать с «провайдер вернул 429», а «попробуй ещё раз» —
+  // есть что. Полная причина остаётся в логе и в панели.
+  voiceFailed:
+    "Не получилось распознать голосовое сообщение. Попробуй отправить его ещё раз или напиши текстом.",
 } as const;
 
 const en: Record<keyof typeof ru, string> = {
@@ -55,6 +60,8 @@ const en: Record<keyof typeof ru, string> = {
     "Your agent link, notes, and tasks are stored in PostgreSQL and Letta on the Evaself owner’s server. API keys are encrypted and never returned to WebUI. An administrator can delete the agent and its data.",
   unknownCommand: "Unknown command. See /help",
   transcript: "Transcribed: {text}",
+  voiceFailed:
+    "I could not transcribe that voice message. Please send it again or write to me instead.",
 };
 
 export type MessageKey = keyof typeof ru;

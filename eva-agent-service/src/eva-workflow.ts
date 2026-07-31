@@ -19,6 +19,20 @@ import {
   TelegramClient,
 } from "./telegram.js";
 
+/**
+ * Распознавание не удалось.
+ *
+ * Отдельный тип, а не обычный Error, чтобы обработчик мог ответить
+ * пользователю понятной фразой вместо общего «что-то пошло не так».
+ * Техническая причина остаётся в message и уходит только в лог.
+ */
+export class VoiceTranscriptionError extends Error {
+  constructor(reason: string) {
+    super(reason);
+    this.name = "VoiceTranscriptionError";
+  }
+}
+
 interface NormalizedUpdate {
   updateId: number;
   message: TelegramMessage;
@@ -131,7 +145,19 @@ export class EvaWorkflow {
           }
         }
 
-        const prompt = await this.promptFromMessage(update, language);
+        let prompt: string;
+        try {
+          prompt = await this.promptFromMessage(update, language);
+        } catch (error) {
+          // Провал распознавания — не сбой Евы: разговор продолжается,
+          // просто этим сообщением. Технический текст провайдера сюда
+          // не попадает, он остался в логе.
+          if (error instanceof VoiceTranscriptionError) {
+            await this.telegram.sendMessage(update.chatId, t(language, "voiceFailed"));
+            return { status: "ignored" };
+          }
+          throw error;
+        }
         typing.stop = this.telegram.startTyping(update.chatId, this.config.typingIntervalMs);
         await this.db.recordUserMessage(user.id);
         const conversationId = link.conversation_id;
@@ -342,6 +368,104 @@ export class EvaWorkflow {
       : {};
   }
 
+  /**
+   * Распознавание через реестр STT-провайдеров.
+   *
+   * Маршрут, основной провайдер и резерв выбирает media-service: только
+   * он видит сам файл, и только он может не заплатить за одно аудио
+   * дважды. Здесь остаётся то, что относится к разговору, — квоты,
+   * текст пользователю и запись расхода.
+   *
+   * Пользователю не показывается ни код ошибки, ни сообщение
+   * провайдера: «Deepgram вернул HTTP 429» ему нечего с этим делать.
+   * Полная причина уходит в лог и в панель администратора.
+   */
+  private async transcribeVoice(
+    useCase: "telegram_voice" | "webapp_voice_message",
+    fileId: string,
+    idempotencyKey: string | null,
+    language: string,
+  ): Promise<{
+    text: string;
+    durationMinutes: number;
+    provider: string;
+    model: string;
+    durationMs: number;
+    latencyMs: number;
+    usedFallback: boolean;
+  }> {
+    let response: Response;
+    try {
+      response = await fetch(
+        `${this.config.mediaServiceUrl.replace(/\/+$/, "")}/stt/transcribe`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", ...this.mediaHeaders() },
+          body: JSON.stringify({
+            use_case: useCase,
+            file_id: fileId,
+            language,
+            idempotency_key: idempotencyKey,
+          }),
+          signal: AbortSignal.timeout(5 * 60_000),
+        },
+      );
+    } catch (error) {
+      this.logger.warn("media-service недоступен для распознавания", {
+        use_case: useCase,
+        code: error instanceof Error ? error.name : "unknown_error",
+      });
+      throw new VoiceTranscriptionError("media-service недоступен");
+    }
+
+    const body = await response.json().catch(() => ({})) as {
+      text?: string;
+      language?: string;
+      provider?: string;
+      model?: string;
+      duration_seconds?: number;
+      duration_minutes?: number;
+      latency_ms?: number;
+      used_fallback?: boolean;
+      attempts?: Array<Record<string, unknown>>;
+      error?: { code?: string; message?: string };
+    };
+
+    if (!response.ok) {
+      // Техническая причина остаётся здесь и в панели, к пользователю
+      // уходит один и тот же понятный текст.
+      this.logger.warn("распознавание не удалось", {
+        use_case: useCase,
+        error_code: body.error?.code ?? `http_${response.status}`,
+        message: body.error?.message?.slice(0, 200),
+      });
+      throw new VoiceTranscriptionError(body.error?.message ?? `HTTP ${response.status}`);
+    }
+    if (!body.text?.trim()) {
+      // Пустая расшифровка — это не сбой тракта, а тишина в записи.
+      // Но продолжать разговор с пустым сообщением бессмысленно.
+      this.logger.info("распознавание вернуло пустой текст", { use_case: useCase });
+      throw new VoiceTranscriptionError("пустая расшифровка");
+    }
+
+    if (body.used_fallback) {
+      this.logger.warn("распознавание ушло на резервного провайдера", {
+        use_case: useCase,
+        provider: body.provider,
+      });
+    }
+
+    return {
+      text: body.text.trim(),
+      durationMinutes: body.duration_minutes ?? 0,
+      provider: body.provider ?? "unknown",
+      model: body.model ?? "unknown",
+      durationMs: Math.round((body.duration_seconds ?? 0) * 1000),
+      latencyMs: body.latency_ms ?? 0,
+      usedFallback: body.used_fallback === true,
+    };
+  }
+
   private async promptFromMessage(
     update: NormalizedUpdate,
     language: SupportedLanguage,
@@ -351,35 +475,29 @@ export class EvaWorkflow {
     if (update.kind === "voice") {
       const file = message.voice ?? message.audio;
       if (!file) throw new Error("Голосовой файл отсутствует");
-      const response = await fetch(`${this.config.mediaServiceUrl.replace(/\/+$/, "")}/telegram/transcribe`, {
-        method: "POST",
-        headers: { "content-type": "application/json", ...this.mediaHeaders() },
-        body: JSON.stringify({
-          file_id: file.file_id,
-          language: message.from?.language_code ?? "ru",
-        }),
-        signal: AbortSignal.timeout(5 * 60_000),
-      });
-      const body = await response.json() as {
-        text?: string;
-        duration_minutes?: number;
-        error?: { message?: string };
-      };
-      if (!response.ok || !body.text?.trim()) {
-        throw new Error(body.error?.message ?? `ASR вернул HTTP ${response.status}`);
-      }
-      if (body.duration_minutes) {
+      const transcription = await this.transcribeVoice(
+        "telegram_voice",
+        file.file_id,
+        // file_unique_id не меняется при повторной доставке апдейта, в
+        // отличие от file_id. Telegram повторяет доставку при таймауте
+        // вебхука, и без этого ключа одно голосовое оплачивалось бы
+        // дважды.
+        file.file_unique_id ?? null,
+        message.from?.language_code ?? "ru",
+      );
+
+      if (transcription.durationMinutes) {
         await this.db.incrementUsage(
           update.telegramId,
           "voice_minutes",
-          Math.max(1, Math.ceil(body.duration_minutes)),
+          Math.max(1, Math.ceil(transcription.durationMinutes)),
         );
       }
       await this.telegram.sendMessage(
         update.chatId,
-        t(language, "transcript", { text: body.text.trim() }),
+        t(language, "transcript", { text: transcription.text }),
       );
-      return body.text.trim();
+      return transcription.text;
     }
     if (update.kind === "image") {
       const photo = message.photo?.at(-1);

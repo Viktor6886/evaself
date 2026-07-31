@@ -825,6 +825,89 @@ export class SttAdminService {
     }
   }
 
+  /**
+   * Перенос действующих настроек MEDIA_ASR_* в реестр.
+   *
+   * Требование 12: обновление через `make update` не должно ломать
+   * голосовые сообщения. До этого релиза распознавание настраивалось
+   * переменными окружения; после — реестром, но установка, где реестр
+   * ещё пуст, обязана продолжить работать.
+   *
+   * Импорт идемпотентен и делает ровно одну вещь: если конфигураций нет
+   * вовсе, создаёт migrated-default из окружения и назначает её
+   * основной для telegram_voice. Уже созданные конфигурации не
+   * трогаются никогда — иначе перезапуск сервиса откатывал бы правки
+   * администратора.
+   *
+   * Переменные не удаляются в этом же релизе: media-service продолжает
+   * распознавать по ним, если маршрут не настроен. Срок удаления —
+   * в docs/stt.md.
+   */
+  async importLegacyEnv(
+    env: NodeJS.ProcessEnv = process.env,
+  ): Promise<{ imported: boolean; reason: string }> {
+    const { rows } = await this.pool.query<{ n: number }>(
+      "SELECT count(*)::int AS n FROM stt_provider_configs",
+    );
+    if ((rows[0]?.n ?? 0) > 0) {
+      return { imported: false, reason: "реестр уже заполнен" };
+    }
+
+    const baseUrl = (env.MEDIA_ASR_BASE_URL ?? "").trim().replace(/\/+$/, "");
+    const apiKey = (env.MEDIA_ASR_API_KEY ?? "").trim();
+    const model = (env.MEDIA_ASR_MODEL ?? "whisper-1").trim();
+    const language = (env.MEDIA_ASR_LANGUAGE ?? "").trim();
+    if (!baseUrl || !apiKey) {
+      return { imported: false, reason: "MEDIA_ASR_* не настроены" };
+    }
+
+    // Старый путь был жёстко OpenAI-совместимым, поэтому провайдер
+    // определяется по адресу: openrouter.ai — это OpenRouter, всё
+    // остальное совместимо с OpenAI.
+    const provider = /(^|\.)openrouter\.ai$/i.test(new URL(baseUrl).hostname)
+      ? "openrouter"
+      : "openai";
+
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const created = await client.query<{ id: string }>(
+        `INSERT INTO stt_provider_configs
+           (name, provider, mode, base_url, model, public_config, status)
+         VALUES ('migrated-default', $1, 'batch', $2, $3, $4::jsonb, 'draft')
+         ON CONFLICT DO NOTHING
+         RETURNING id`,
+        [provider, baseUrl, model, JSON.stringify(language ? { language } : {})],
+      );
+      const id = created.rows[0]?.id;
+      if (!id) {
+        await client.query("ROLLBACK");
+        return { imported: false, reason: "конфигурация уже существует" };
+      }
+
+      const secretRef = await this.storeSecret(id, apiKey, null);
+      await client.query(
+        "UPDATE stt_provider_configs SET secret_ref = $2 WHERE id = $1",
+        [id, secretRef],
+      );
+      await client.query(
+        `UPDATE stt_routes
+            SET primary_config_id = $1, config_version = config_version + 1
+          WHERE use_case = 'telegram_voice' AND primary_config_id IS NULL`,
+        [id],
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw this.friendly(error);
+    } finally {
+      client.release();
+    }
+
+    await this.pushSnapshot();
+    return { imported: true, reason: `перенесена конфигурация ${provider}` };
+  }
+
   async health(): Promise<Record<string, unknown>> {
     const { rows } = await this.pool.query(
       `SELECT status, count(*)::int AS count
