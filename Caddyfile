@@ -30,7 +30,15 @@
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "SAMEORIGIN"
 		Referrer-Policy "strict-origin-when-cross-origin"
-		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'self'; object-src 'none'"
+		# media-src с blob: — прослушивание собственной записи в панели
+		# перед отправкой на проверку. URL.createObjectURL выдаёт blob:,
+		# и без явного разрешения он падает под default-src.
+		#
+		# Этот заголовок ставится на границе и перекрывает тот, что
+		# отдаёт admin-ui: у Caddy header задаёт значение, а не
+		# дополняет. Поэтому послабление нужно именно здесь, иначе
+		# правка во вложенном Caddyfile ни на что не влияет.
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; font-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'self'; object-src 'none'"
 		-Server
 	}
 }

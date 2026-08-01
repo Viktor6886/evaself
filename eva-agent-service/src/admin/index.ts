@@ -50,7 +50,7 @@ async function main(): Promise<void> {
   const integrations = new IntegrationConfigService(pool, secrets);
   // Схемы провайдеров и валидацию параметров admin-api спрашивает у
   // media-service: правда живёт там, где адаптеры.
-  const stt = new SttAdminService(pool, secrets, new HttpMediaSttClient(secrets));
+  const stt = new SttAdminService(pool, secrets, new HttpMediaSttClient(secrets), logger);
   const agentClient = new InternalAgentClient(secrets);
   const providers = new ProviderService(agentClient, new OutboundGateway());
   // Переписку admin-api читает через eva-agent-service: он единственный,
@@ -74,6 +74,26 @@ async function main(): Promise<void> {
       code: error instanceof Error ? error.name : "unknown_error",
     });
   }
+
+  /**
+   * Повторная рассылка снимка, пока он не доедет.
+   *
+   * media-service может подняться позже admin-api, перезапуститься или
+   * временно отвечать 401 из-за расхождения токенов. Без повтора
+   * несостоявшаяся доставка чинилась бы только следующей правкой в
+   * панели — то есть распознавание оставалось бы сломанным, пока
+   * администратор случайно что-нибудь не сохранит.
+   *
+   * Пока снимок доставлен, попытки не делаются вовсе: unref() снимает
+   * таймер со счётчика событий, чтобы он не держал процесс живым.
+   */
+  const snapshotRetry = setInterval(() => {
+    if (stt.pushStatus().delivered) return;
+    void stt.pushSnapshot().then((result) => {
+      if (result.applied) logger.info("Снимок STT доставлен после повторной попытки");
+    });
+  }, 60_000);
+  snapshotRetry.unref();
 
   const app = buildAdminServer({
     auth,

@@ -383,6 +383,15 @@ services:
       # Панель правит настройки ASR/TTS и запускает их проверки — обе
       # операции идут в media-service по внутренней сети tools.
       EVA_MEDIA_SERVICE_URL: http://media-service:8090
+      # Общий секрет с media-service. Без него панель получала HTTP 401
+      # на каждом обращении: адрес был, ключа не было.
+      #
+      # Со стороны это выглядело загадочно — голосовые сообщения
+      # работали, а панель нет. Разгадка в том, что распознаванием
+      # занимается eva-agent-service, которому переменную передают
+      # (см. его блок environment), а admin-api живёт отдельным
+      # контейнером и не получал её вовсе.
+      MEDIA_SERVICE_TOKEN: ${MEDIA_SERVICE_TOKEN}
       EVA_OUTBOUND_HOST_ALLOWLIST: ${EVA_OUTBOUND_HOST_ALLOWLIST:-}
     command: ["node", "dist/admin/index.js"]
     volumes:

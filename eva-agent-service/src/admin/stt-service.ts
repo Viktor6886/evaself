@@ -119,17 +119,22 @@ export class HttpMediaSttClient implements MediaSttClient {
   /**
    * Токен берётся из окружения, а копия в Secret Store — запасной путь.
    *
-   * Так было не всегда, и из-за этого панель возвращала HTTP 401 там,
-   * где голосовые сообщения работали. Копию в Secret Store создаёт
-   * bootstrap, а он выполняется один раз за жизнь установки: если
-   * MEDIA_SERVICE_TOKEN появился в .env позже (или запись потерялась),
-   * заголовок не отправлялся вовсе, и media-service справедливо отвечал
-   * 401. Переменная же лежит в процессе всегда — её выдаёт compose тому
-   * же контейнеру, и именно ею пользуется распознавание голосовых.
+   * Панель отвечала HTTP 401 при работающих голосовых сообщениях, и
+   * причин этому было две, обе про одно и то же значение.
    *
-   * Одно значение — один источник. Порядок «окружение, потом хранилище»
-   * выбран так, чтобы правка .env применялась перезапуском контейнера,
-   * а не требовала лезть в Secret Store.
+   * Первая: admin-api — отдельный контейнер, и MEDIA_SERVICE_TOKEN ему
+   * не передавали вовсе. Распознавание же идёт через
+   * eva-agent-service, которому переменную дают, — отсюда и расхождение
+   * «голос работает, панель нет». Исправлено в compose.yaml.
+   *
+   * Вторая: единственным источником была копия в Secret Store, которую
+   * кладёт bootstrap, а он выполняется один раз за жизнь установки.
+   * Появился токен в .env позже — записи нет, заголовок не
+   * отправляется, media-service справедливо отвечает 401.
+   *
+   * Порядок «окружение, потом хранилище» выбран так, чтобы правка .env
+   * применялась перезапуском контейнера, а не требовала лезть в Secret
+   * Store.
    */
   private async headers(): Promise<Record<string, string>> {
     const token = (process.env.MEDIA_SERVICE_TOKEN ?? "").trim()
@@ -212,6 +217,8 @@ export class SttAdminService {
     private readonly pool: pg.Pool,
     private readonly secrets: SecretStore,
     private readonly media: MediaSttClient,
+    /** Необязателен: тесты поднимают сервис без логгера. */
+    private readonly logger?: { warn(message: string, meta?: unknown): void },
   ) {}
 
   // -------------------------------------------------------------------
@@ -837,19 +844,32 @@ export class SttAdminService {
     const perKey: Array<Record<string, unknown>> = [];
     let best: Record<string, unknown> | null = null;
     for (const key of keys) {
-      const outcome = await this.media.test(
-        {
-          id: row.id,
-          name: row.name,
-          provider: row.provider,
-          mode: row.mode,
-          base_url: row.base_url,
-          model: row.model,
-          params: row.public_config ?? {},
-          secret: key.secret,
-        },
-        audioBase64,
-      );
+      // Сорвавшийся вызов — это результат проверки этого ключа, а не
+      // повод бросить остальные: администратор просил проверить все.
+      let outcome: Record<string, unknown>;
+      try {
+        outcome = await this.media.test(
+          {
+            id: row.id,
+            name: row.name,
+            provider: row.provider,
+            mode: row.mode,
+            base_url: row.base_url,
+            model: row.model,
+            params: row.public_config ?? {},
+            secret: key.secret,
+          },
+          audioBase64,
+        );
+      } catch (error) {
+        outcome = {
+          success: false,
+          error: {
+            code: "stt_provider_unavailable",
+            message: error instanceof Error ? error.message : "media-service недоступен",
+          },
+        };
+      }
       const keyOk = outcome.success === true;
       const keyError = outcome.error as { code?: string; message?: string } | undefined;
       perKey.push({
@@ -1254,8 +1274,42 @@ export class SttAdminService {
     // Версия снимка — сумма версий маршрутов: монотонно растёт при
     // любом изменении и не требует отдельного счётчика.
     const version = routeRows.reduce((sum, route) => sum + Number(route.config_version ?? 0), 0);
-    const result = await this.media.applySnapshot({ version, configs, routes });
-    return { applied: result.applied, errors: result.errors ?? [] };
+    try {
+      const result = await this.media.applySnapshot({ version, configs, routes });
+      this.lastPushError = result.applied ? null : (result.errors ?? []).join("; ");
+      return { applied: result.applied, errors: result.errors ?? [] };
+    } catch (error) {
+      // Недоступный media-service не должен превращать уже сделанную
+      // правку в ошибку.
+      //
+      // Раньше исключение отсюда поднималось наружу через removeKey,
+      // addKey, activate и updateRoute — то есть через каждую мутацию
+      // раздела. Ключ при этом удалялся: транзакция уже была
+      // зафиксирована. Но запрос возвращал ошибку, панель не обновляла
+      // список, и со стороны это выглядело как «ключ не удаляется».
+      // Одна недоступная зависимость ломала весь раздел.
+      //
+      // Правка в базе — свершившийся факт. Разослать снимок — отдельное
+      // дело, которое можно повторить: это делает следующая успешная
+      // мутация, перезапуск admin-api или фоновая попытка ниже.
+      const message = error instanceof Error ? error.message : "media-service недоступен";
+      this.lastPushError = message;
+      this.logger?.warn("Снимок STT не доставлен в media-service", { detail: message });
+      return { applied: false, errors: [message] };
+    }
+  }
+
+  /**
+   * Последняя причина, по которой снимок не доехал.
+   *
+   * Панель показывает это отдельной строкой: «сохранено, но пока не
+   * применено» — честнее, чем молчание, и полезнее, чем красная ошибка
+   * поверх успешного действия.
+   */
+  private lastPushError: string | null = null;
+
+  pushStatus(): { delivered: boolean; error: string | null } {
+    return { delivered: this.lastPushError === null, error: this.lastPushError };
   }
 
   // -------------------------------------------------------------------
@@ -1477,6 +1531,11 @@ export class SttAdminService {
         (route) => (route.chain as unknown[] ?? []).length > 0).length,
       routes_total: routes.length,
       routes,
+      // Доехал ли снимок до media-service. Правки в базе применяются
+      // независимо от этого, а вот распознавание пойдёт по новым
+      // настройкам только после доставки — и администратор должен
+      // видеть разницу, а не гадать.
+      snapshot: this.pushStatus(),
     };
   }
 

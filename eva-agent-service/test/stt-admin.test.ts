@@ -604,6 +604,73 @@ describe("реестр STT-провайдеров", { skip: DATABASE_URL ? false
   });
 
   // -------------------------------------------------------------------
+  // недоступный media-service
+  // -------------------------------------------------------------------
+  test("правка не отменяется из-за недоступного media-service", async () => {
+    // Так выглядела «ключ не удаляется»: транзакция фиксировалась,
+    // но applySnapshot бросал 401, исключение поднималось из
+    // pushSnapshot наружу, запрос возвращал ошибку — и панель не
+    // обновляла список. Ключа уже не было, а выглядело как отказ.
+    await reset();
+    secrets.put = async (ref, value, usedBy) => {
+      await seedSecretRow(ref);
+      return new FakeSecretStore().put.call(secrets, ref, value, usedBy);
+    };
+    const created = await service.create(deepgram(), null);
+    const id = created.id as string;
+    await service.addKey(id, { api_key: "dg-second", label: "Второй" }, null);
+    const keys = await service.listKeys(id);
+
+    media.applySnapshot = async () => {
+      throw new Error("media-service вернул HTTP 401");
+    };
+
+    // Ключ должен удалиться, а не «не удалиться».
+    await service.removeKey(id, keys[0]!.id as string);
+    const left = await service.listKeys(id);
+    assert.deepEqual(left.map((key) => key.label), ["Второй"]);
+
+    // И то же самое для остальных мутаций раздела.
+    await service.addKey(id, { api_key: "dg-third", label: "Третий" }, null);
+    await service.updateRoute("telegram_voice", { chain: [id] }, null);
+    assert.equal((await service.listKeys(id)).length, 2);
+  });
+
+  test("недоставленный снимок виден в состоянии раздела", async () => {
+    await reset();
+    secrets.put = async (ref, value, usedBy) => {
+      await seedSecretRow(ref);
+      return new FakeSecretStore().put.call(secrets, ref, value, usedBy);
+    };
+    const created = await service.create(deepgram(), null);
+    await service.updateRoute("telegram_voice", { chain: [created.id] }, null);
+
+    // Пока всё хорошо — сообщать не о чем.
+    assert.deepEqual(service.pushStatus(), { delivered: true, error: null });
+
+    media.applySnapshot = async () => {
+      throw new Error("media-service вернул HTTP 401");
+    };
+    const result = await service.pushSnapshot();
+    assert.equal(result.applied, false);
+    // «Сохранено, но не применено» — честнее молчания и полезнее
+    // красной ошибки поверх успешного действия.
+    const status = service.pushStatus();
+    assert.equal(status.delivered, false);
+    assert.match(String(status.error), /401/);
+    const health = await service.health() as { snapshot: { delivered: boolean } };
+    assert.equal(health.snapshot.delivered, false);
+
+    // media-service вернулся — состояние обязано само прийти в норму.
+    media.applySnapshot = async (snapshot: unknown) => {
+      media.snapshots.push(snapshot);
+      return { applied: true, errors: [] };
+    };
+    await service.pushSnapshot();
+    assert.deepEqual(service.pushStatus(), { delivered: true, error: null });
+  });
+
+  // -------------------------------------------------------------------
   // цепочка провайдеров и ротация
   // -------------------------------------------------------------------
   test("цепочка хранит порядок, заданный администратором", async () => {

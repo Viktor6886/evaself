@@ -2028,8 +2028,26 @@ async function loadStt() {
     }
   } catch (error) {
     state.sttSchemas = state.sttSchemas || [];
-    state.sttSchemaError = "media-service не отвечает: редактор параметров и проверка недоступны, "
-      + "ключи и маршруты работают";
+    // Сообщение называет причину, а не только следствие: «не отвечает»
+    // и «отвечает 401» чинят по-разному, и гадать администратор не
+    // должен.
+    const reason = String(error?.message || "");
+    state.sttSchemaError = /401|ключ|unauthor/i.test(reason)
+      ? "media-service отклоняет запросы панели (HTTP 401): не совпадает "
+        + "MEDIA_SERVICE_TOKEN. Проверьте переменную в .env и перезапустите "
+        + "admin-api и media-service."
+      : "media-service не отвечает: редактор параметров и проверка недоступны, "
+        + "ключи и маршруты работают";
+  }
+
+  // Правки в базе применяются всегда, а вот распознавание пойдёт по ним
+  // только после доставки снимка. Разницу надо показать: иначе
+  // «сохранено» читается как «работает».
+  try {
+    const { payload } = await request("/stt/health");
+    state.sttSnapshot = payload.snapshot || null;
+  } catch {
+    state.sttSnapshot = null;
   }
 
   renderSttConfigs();
@@ -2042,9 +2060,15 @@ function sttSchema(provider) {
 
 function renderSttConfigs() {
   const host = $("#stt-configs");
-  const notice = state.sttSchemaError
-    ? `<p class="integration-status error">${escapeHtml(state.sttSchemaError)}</p>`
+  const undelivered = state.sttSnapshot && state.sttSnapshot.delivered === false
+    ? `<p class="integration-status error">Настройки сохранены, но не применены:
+        media-service не принял снимок${state.sttSnapshot.error
+          ? ` (${escapeHtml(String(state.sttSnapshot.error).slice(0, 160))})` : ""}.
+        Распознавание работает по прежним настройкам; панель повторит попытку сама.</p>`
     : "";
+  const notice = (state.sttSchemaError
+    ? `<p class="integration-status error">${escapeHtml(state.sttSchemaError)}</p>`
+    : "") + undelivered;
   if (!state.sttConfigs.length) {
     host.innerHTML = `${notice}<p class="muted">Конфигураций пока нет. Пока их нет, распознавание
       работает по устаревшим переменным MEDIA_ASR_* из .env.</p>`;
@@ -2566,12 +2590,19 @@ async function toggleRecording() {
   let stream;
   try {
     stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  } catch {
-    // Разрешение на микрофон даётся один раз и отзывается в настройках
-    // сайта, поэтому «попробуйте ещё» тут не помощь.
+  } catch (error) {
+    // NotAllowedError приходит и когда отказал человек, и когда запретил
+    // сервер заголовком Permissions-Policy. Второе однажды уже случилось
+    // и выглядело как «кнопка не работает»: браузер даже не спрашивал
+    // разрешения. Поэтому названы обе причины — гадать не должен никто.
+    if (error?.name === "NotFoundError") {
+      throw new Error("Микрофон не найден. Подложите готовый файл в «Других способах»");
+    }
     throw new Error(
-      "Микрофон недоступен. Разрешите доступ в настройках сайта — "
-      + "или подложите готовый файл в «Других способах»",
+      "Микрофон недоступен. Проверьте разрешение для сайта в настройках браузера. "
+      + "Если разрешение выдано, а запись не идёт — доступ закрыт заголовком "
+      + "Permissions-Policy на сервере. Пока можно подложить готовый файл "
+      + "в «Других способах».",
     );
   }
 

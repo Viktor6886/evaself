@@ -9,8 +9,20 @@
 
 	header {
 		Cache-Control "no-store"
-		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
-		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		# blob: в media-src — это прослушивание собственной записи перед
+		# отправкой: URL.createObjectURL даёт blob:, и без него <audio>
+		# в окне проверки молчит.
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+		# Микрофон разрешён самой панели и никому больше.
+		#
+		# Было microphone=() — запрет для всех, включая себя. Кнопка
+		# «Записать голос» при этом получала отказ от getUserMedia ещё до
+		# того, как браузер спрашивал разрешение у пользователя: политика
+		# приходит заголовком и решает раньше человека. Проверить
+		# распознавание собственным голосом было невозможно в принципе.
+		#
+		# Камера и геолокация остаются запрещёнными: панели они не нужны.
+		Permissions-Policy "camera=(), microphone=(self), geolocation=()"
 		Referrer-Policy "no-referrer"
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
