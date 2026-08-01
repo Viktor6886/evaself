@@ -2058,6 +2058,33 @@ function sttSchema(provider) {
   return (state.sttSchemas || []).find((item) => item.provider === provider);
 }
 
+/**
+ * Предупреждение о ненастроенном сценарии.
+ *
+ * Здесь закрывается разрыв, из-за которого «всё сделал, а не работает»:
+ * ключ введён, проверка зелёная — и голосовые всё равно не
+ * распознаются, потому что провайдера никто не поставил в цепочку.
+ * Проверка обращается к провайдеру напрямую и про маршруты ничего не
+ * знает, так что её успех ни о чём в этом смысле не говорит.
+ *
+ * Раньше единственным следом было слово «нигде» в строке
+ * «Используется» — его легко прочесть как техническую подробность.
+ */
+function sttRouteWarning() {
+  const routes = state.sttRoutes || [];
+  if (!routes.length) return "";
+  const broken = routes.filter(
+    (route) => route.enabled && !(route.chain || []).length);
+  if (!broken.length) return "";
+  const names = broken
+    .map((route) => STT_USE_CASE_LABELS[route.use_case] || route.use_case)
+    .join(", ");
+  return `<p class="integration-status error">Не распознаётся: ${escapeHtml(names)}.
+    Для сценария не назначен ни один провайдер — введите ключ и нажмите
+    «Активировать». Успешная проверка сама по себе провайдера в работу не
+    вводит: она обращается к нему напрямую, минуя маршруты.</p>`;
+}
+
 function renderSttConfigs() {
   const host = $("#stt-configs");
   const undelivered = state.sttSnapshot && state.sttSnapshot.delivered === false
@@ -2068,7 +2095,7 @@ function renderSttConfigs() {
     : "";
   const notice = (state.sttSchemaError
     ? `<p class="integration-status error">${escapeHtml(state.sttSchemaError)}</p>`
-    : "") + undelivered;
+    : "") + undelivered + sttRouteWarning();
   if (!state.sttConfigs.length) {
     host.innerHTML = `${notice}<p class="muted">Конфигураций пока нет. Пока их нет, распознавание
       работает по устаревшим переменным MEDIA_ASR_* из .env.</p>`;
@@ -2108,7 +2135,9 @@ function renderSttConfigs() {
           </button>
           <button class="button ghost" data-stt-action="test" data-id="${config.id}"
                   ${config.secret?.configured ? "" : "disabled"}>Проверить</button>
-          <button class="button ghost" data-stt-action="activate" data-id="${config.id}"
+          <button class="button ${config.secret?.configured && !config.archived
+                    && !(config.used_by || []).length ? "primary" : "ghost"}"
+                  data-stt-action="activate" data-id="${config.id}"
                   ${config.secret?.configured && !config.archived ? "" : "disabled"}>Активировать</button>
           <button class="button ghost" data-stt-action="toggle" data-id="${config.id}"
                   data-enabled="${config.status !== "disabled"}">
@@ -2206,6 +2235,7 @@ function renderSttRoutes() {
         <span>Сценарий включён</span></label>
       <div class="card-actions">
         <button class="button primary" data-stt-action="save-route" data-id="${route.use_case}">Применить</button>
+        <button class="button ghost" data-stt-action="test-route" data-id="${route.use_case}">Проверить сценарий</button>
       </div>
     </article>`;
   }).join("");
@@ -2641,10 +2671,26 @@ async function toggleRecording() {
   }, 250);
 }
 
-/** Открывает окно проверки в чистом состоянии. */
-function openSttTestDialog(id, name) {
+/**
+ * Открывает окно проверки в чистом состоянии.
+ *
+ * Два режима, и разница между ними принципиальна. «config» обращается к
+ * провайдеру напрямую: отвечает ли он и принят ли ключ. «route» идёт
+ * той же дорогой, что голосовое из Telegram: назначен ли провайдер
+ * сценарию, доехал ли снимок до media-service, работают ли ключи.
+ * Зелёная проверка конфигурации ничего не говорит о втором — на этом
+ * уже спотыкались.
+ */
+function openSttTestDialog(id, name, mode = "config") {
   state.sttTestingId = id;
-  $("#stt-test-title").textContent = name ? `Проверка — ${name}` : "Проверка распознавания";
+  state.sttTestMode = mode;
+  $("#stt-test-title").textContent = mode === "route"
+    ? `Проверка сценария — ${name}`
+    : (name ? `Проверка — ${name}` : "Проверка распознавания");
+  $("#stt-test-hint").textContent = mode === "route"
+    ? "Тот же путь, которым идёт голосовое из Telegram: маршрут, провайдеры, ключи. "
+      + "Нужна запись — встроенного сигнала для этой проверки нет."
+    : "Обращение к провайдеру напрямую. Проверка не активирует конфигурацию.";
   $("#stt-test-result").hidden = true;
   if ($("#stt-test-file")) $("#stt-test-file").value = "";
   recorder.blob = null;
@@ -2667,7 +2713,10 @@ async function runSttTest() {
   host.hidden = false;
   host.textContent = "Проверяю…";
 
-  const { payload } = await request(`/stt/configs/${id}/test`, {
+  const path = state.sttTestMode === "route"
+    ? `/stt/routes/${encodeURIComponent(id)}/test`
+    : `/stt/configs/${id}/test`;
+  const { payload } = await request(path, {
     method: "POST",
     body: JSON.stringify(audio ? { audio_base64: audio } : {}),
   });
@@ -2763,6 +2812,9 @@ document.addEventListener("click", (event) => {
       break;
     case "test":
       openSttTestDialog(id, config?.name);
+      break;
+    case "test-route":
+      openSttTestDialog(id, STT_USE_CASE_LABELS[id] || id, "route");
       break;
     case "archive":
       sttAction(async () => {

@@ -64,6 +64,14 @@ class FakeMediaClient {
     return this.testResult;
   }
 
+  transcribeResult: Record<string, unknown> = { success: true, text: "проверка связи" };
+  transcribed: Array<{ useCase: string; bytes: number }> = [];
+
+  async transcribe(useCase: string, audioBase64: string) {
+    this.transcribed.push({ useCase, bytes: audioBase64.length });
+    return this.transcribeResult;
+  }
+
   async applySnapshot(snapshot: unknown) {
     this.snapshots.push(snapshot);
     return { applied: true, errors: [] };
@@ -601,6 +609,76 @@ describe("реестр STT-провайдеров", { skip: DATABASE_URL ? false
       [created.id],
     );
     assert.ok(!rows[0].text.includes("SECRET"));
+  });
+
+  // -------------------------------------------------------------------
+  // проверка сценария целиком
+  // -------------------------------------------------------------------
+  test("проверка сценария объясняет, что провайдер никому не назначен", async () => {
+    // Ровно тот случай, на котором спотыкались: ключ введён, проверка
+    // конфигурации зелёная, а голосовые не работают — потому что
+    // «Активировать» никто не нажимал.
+    await reset();
+    secrets.put = async (ref, value, usedBy) => {
+      await seedSecretRow(ref);
+      return new FakeSecretStore().put.call(secrets, ref, value, usedBy);
+    };
+    await service.create(deepgram(), null);
+
+    const verdict = await service.testRoute("telegram_voice", "AQIDBA==") as {
+      success: boolean; stage: string; error: { code: string; message: string };
+    };
+    assert.equal(verdict.success, false);
+    assert.equal(verdict.stage, "route");
+    assert.equal(verdict.error.code, "stt_route_not_configured");
+    assert.match(verdict.error.message, /Активировать/);
+    // До media-service дело не дошло: причину видно и без него.
+    assert.deepEqual(media.transcribed, []);
+  });
+
+  test("проверка сценария идёт тем же путём, что голосовое из Telegram", async () => {
+    await reset();
+    secrets.put = async (ref, value, usedBy) => {
+      await seedSecretRow(ref);
+      return new FakeSecretStore().put.call(secrets, ref, value, usedBy);
+    };
+    const created = await service.create(deepgram(), null);
+    await service.updateRoute("telegram_voice", { chain: [created.id] }, null);
+
+    const verdict = await service.testRoute("telegram_voice", "AQIDBA==") as {
+      success: boolean; chain: string[];
+    };
+    assert.equal(verdict.success, true);
+    // Цепочка в ответе — чтобы было видно, кого именно проверили.
+    assert.deepEqual(verdict.chain, ["Deepgram production"]);
+    assert.deepEqual(media.transcribed, [{ useCase: "telegram_voice", bytes: 8 }]);
+  });
+
+  test("проверка сценария требует записи, а не встроенного сигнала", async () => {
+    await reset();
+    secrets.put = async (ref, value, usedBy) => {
+      await seedSecretRow(ref);
+      return new FakeSecretStore().put.call(secrets, ref, value, usedBy);
+    };
+    const created = await service.create(deepgram(), null);
+    await service.updateRoute("telegram_voice", { chain: [created.id] }, null);
+
+    const verdict = await service.testRoute("telegram_voice") as {
+      success: boolean; error: { code: string };
+    };
+    assert.equal(verdict.success, false);
+    assert.equal(verdict.error.code, "stt_audio_invalid");
+  });
+
+  test("выключенный сценарий назван выключенным, а не сломанным", async () => {
+    await reset();
+    await pool.query(
+      "UPDATE stt_routes SET enabled = false WHERE use_case = 'webapp_live'");
+    const verdict = await service.testRoute("webapp_live", "AQIDBA==") as {
+      success: boolean; error: { code: string };
+    };
+    assert.equal(verdict.success, false);
+    assert.equal(verdict.error.code, "stt_route_disabled");
   });
 
   // -------------------------------------------------------------------

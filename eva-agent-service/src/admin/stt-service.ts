@@ -83,6 +83,7 @@ export interface MediaSttClient {
   providerSchemas(): Promise<{ providers: unknown[] }>;
   validate(config: ResolvedForMedia): Promise<{ ok: boolean; errors: string[]; warnings: string[] }>;
   test(config: ResolvedForMedia, audioBase64?: string): Promise<Record<string, unknown>>;
+  transcribe(useCase: string, audioBase64: string): Promise<Record<string, unknown>>;
   applySnapshot(snapshot: unknown): Promise<{ applied: boolean; errors?: string[] }>;
 }
 
@@ -201,6 +202,62 @@ export class HttpMediaSttClient implements MediaSttClient {
       body: { config, ...(audioBase64 ? { audio_base64: audioBase64 } : {}) },
       timeoutMs: 180_000,
     });
+  }
+
+  /**
+   * Распознавание по сценарию — тем же путём, каким идёт Telegram.
+   *
+   * Отличается от test() принципиально: тот обращается к провайдеру
+   * напрямую и про маршруты ничего не знает, поэтому его успех ничего
+   * не говорит о том, заработают ли голосовые. Здесь же проверяется всё
+   * разом — назначен ли провайдер сценарию, доехал ли снимок, работают
+   * ли ключи.
+   */
+  async transcribe(useCase: string, audioBase64: string) {
+    // media-service принимает аудио загрузкой, а не в JSON: там оно
+    // может быть большим, и гонять его через base64 в теле запроса
+    // между сервисами незачем.
+    const bytes = Buffer.from(audioBase64, "base64");
+    const form = new FormData();
+    form.append("use_case", useCase);
+    form.append("file", new Blob([bytes]), "probe.webm");
+
+    const token = (process.env.MEDIA_SERVICE_TOKEN ?? "").trim()
+      || await this.secrets.get("sec_media_service_token");
+    let response: Response;
+    try {
+      response = await fetch(
+        `${this.baseUrl.replace(/\/+$/, "")}/stt/transcribe/upload`,
+        {
+          method: "POST",
+          // content-type не задаём: его вместе с boundary проставит
+          // fetch, а заданный руками ломает разбор multipart.
+          headers: token ? { "x-media-key": token } : {},
+          body: form,
+          signal: AbortSignal.timeout(180_000),
+        },
+      );
+    } catch (error) {
+      throw new AdminApiError(
+        "media_unavailable",
+        `media-service недоступен: ${error instanceof Error ? error.message : "неизвестно"}`,
+        503,
+      );
+    }
+    const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+    if (!response.ok) {
+      const detail = body.error as { code?: string; message?: string } | undefined;
+      // Ошибка сценария — это результат проверки, а не сбой запроса:
+      // администратор пришёл сюда именно за причиной.
+      return {
+        success: false,
+        error: {
+          code: detail?.code ?? `http_${response.status}`,
+          message: detail?.message ?? `media-service вернул HTTP ${response.status}`,
+        },
+      };
+    }
+    return { success: true, ...body };
   }
 
   async applySnapshot(snapshot: unknown) {
@@ -908,6 +965,56 @@ export class SttAdminService {
       ],
     );
     return result;
+  }
+
+  /**
+   * Проверка сценария целиком — тем же путём, каким идёт Telegram.
+   *
+   * Именно этой проверки не хватало, когда «ключ введён, тест зелёный, а
+   * голосовые не работают»: тест конфигурации обращается к провайдеру
+   * напрямую и не проверяет ни назначение на сценарий, ни доставку
+   * снимка. Здесь проверяется вся дорога.
+   */
+  async testRoute(useCase: string, audioBase64?: string): Promise<Record<string, unknown>> {
+    this.assertUseCase(useCase);
+    const routes = await this.routes();
+    const route = routes.find((item) => item.use_case === useCase);
+    const chain = (route?.chain as Array<{ name: string }> ?? []);
+
+    // Две причины, которые видно, не спрашивая media-service. Сказать о
+    // них сразу полезнее, чем получить тот же вывод через таймаут.
+    if (!route?.enabled) {
+      return {
+        success: false,
+        stage: "route",
+        error: { code: "stt_route_disabled", message: "Сценарий выключен" },
+      };
+    }
+    if (!chain.length) {
+      return {
+        success: false,
+        stage: "route",
+        error: {
+          code: "stt_route_not_configured",
+          message: "Для сценария не назначен ни один провайдер — нажмите «Активировать» "
+            + "на нужной конфигурации",
+        },
+      };
+    }
+    if (!audioBase64) {
+      return {
+        success: false,
+        stage: "audio",
+        error: {
+          code: "stt_audio_invalid",
+          message: "Запишите голос: сценарий проверяется настоящим аудио, "
+            + "встроенного сигнала для него нет",
+        },
+      };
+    }
+
+    const outcome = await this.media.transcribe(useCase, audioBase64);
+    return { ...outcome, chain: chain.map((link) => link.name), snapshot: this.pushStatus() };
   }
 
   /**

@@ -767,6 +767,18 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
     return { routes: await services.stt.updateRoute(useCase, objectBody(request.body), actor) };
   });
 
+  // Проверка сценария целиком — тем же путём, каким идёт Telegram.
+  // Отдельно от проверки конфигурации: та обращается к провайдеру
+  // напрямую и о маршрутах ничего не знает.
+  app.post("/api/admin/v1/stt/routes/:useCase/test", {
+    config: { roles: ["owner", "admin", "operator"] } satisfies RouteAccess,
+  }, async (request) => {
+    const useCase = (request.params as { useCase?: string }).useCase ?? "";
+    const body = request.body ? objectBody(request.body) : {};
+    const audio = typeof body.audio_base64 === "string" ? body.audio_base64 : undefined;
+    return await services.stt.testRoute(useCase, audio);
+  });
+
   app.get("/api/admin/v1/stt/usage", {
     config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
   }, async (request) => {
