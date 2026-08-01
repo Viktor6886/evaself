@@ -30,10 +30,12 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from .errors import (
     STT_ALL_PROVIDERS_FAILED,
+    STT_AUTH_FAILED,
+    STT_RATE_LIMITED,
     STT_AUDIO_TOO_LONG,
     STT_CONFIG_INVALID,
     STT_ROUTE_NOT_CONFIGURED,
@@ -42,9 +44,21 @@ from .errors import (
 )
 from .registry import SttProviderRegistry
 from .runtime import SttRoute, SttRuntime
-from .types import SttAudioInput, SttResolvedConfig, SttResult
+from .types import SttAudioInput, SttKey, SttResolvedConfig, SttResult
 
 log = logging.getLogger("media.stt")
+
+# Ошибки, которые чинит следующий ключ того же провайдера.
+#
+# 401/403 — ключ отозван или неверен, 429 — по нему кончился лимит. Всё
+# остальное (таймаут, 5xx, битое аудио) от ключа не зависит: другой ключ
+# получит ровно тот же отказ, а запрос будет стоить вдвое дороже.
+KEY_ROTATION_CODES = frozenset({STT_AUTH_FAILED, STT_RATE_LIMITED})
+
+# Сколько ключ считается исчерпанным после 429. Суточные лимиты
+# сбрасываются сами, поэтому выключать ключ навсегда нельзя; но и
+# долбиться в него каждым сообщением бессмысленно.
+RATE_LIMIT_COOLDOWN_SECONDS = 15 * 60
 
 
 @dataclass
@@ -110,15 +124,40 @@ class SttRoutingService:
         # Конфигурации, помеченные неисправными до вмешательства
         # администратора. Ключ — config_id, значение — код ошибки.
         self._faulty: dict[str, str] = {}
+        # Состояние отдельных ключей: key_id → (код, до какого времени
+        # пропускать). Живёт в памяти: перебор должен быть мгновенным, а
+        # долговременную картину показывает admin-api по телеметрии.
+        self._key_state: dict[str, tuple[str, float]] = {}
 
     # -----------------------------------------------------------------
     def faulty(self) -> dict[str, str]:
         return dict(self._faulty)
 
+    def key_state(self) -> dict[str, dict]:
+        """Что известно о ключах: для GET /stt/runtime и панели.
+
+        Бесконечность отдаётся как null, а не как есть: json.dumps пишет
+        её литералом Infinity, которого в JSON нет, и JSON.parse в
+        браузере на нём падает. Для панели «не вернётся сам» и
+        «неизвестно когда» — одно и то же.
+        """
+        now = time.time()
+        return {
+            key_id: {
+                "error_code": code,
+                "skipped_until": None if until == float("inf") else until,
+                "active": until <= now,
+            }
+            for key_id, (code, until) in self._key_state.items()
+        }
+
     def clear_faulty(self, config_id: str | None = None) -> None:
         """Снимается при обновлении снимка: администратор что-то починил."""
         if config_id is None:
             self._faulty.clear()
+            # Новый снимок означает, что администратор что-то менял:
+            # возможно, как раз добавил рабочий ключ вместо мёртвого.
+            self._key_state.clear()
         else:
             self._faulty.pop(config_id, None)
 
@@ -218,82 +257,159 @@ class SttRoutingService:
 
         # Таймаут маршрута перекрывает таймаут конфигурации: сценарий
         # знает, сколько пользователь готов ждать, конфигурация — нет.
-        effective = SttResolvedConfig(
-            config_id=config.config_id,
-            name=config.name,
-            provider=config.provider,
-            mode=config.mode,
-            base_url=config.base_url,
-            model=config.model,
-            params=config.params,
-            secret=config.secret,
-            timeout_ms=min(config.timeout_ms, route.timeout_ms),
-        )
+        # replace, а не сборка по полям: при добавлении нового поля в
+        # SttResolvedConfig ручная копия молча теряла бы его. Именно так
+        # и потерялся список ключей, когда он появился.
+        effective = replace(config, timeout_ms=min(config.timeout_ms, route.timeout_ms))
 
-        started = time.monotonic()
-        try:
-            adapter = self._registry.get(effective.provider)
-            validation = adapter.validate(effective)
-            if not validation.ok:
-                raise SttError(
-                    STT_CONFIG_INVALID,
-                    f"конфигурация «{effective.name}» не проходит проверку: "
-                    + "; ".join(validation.errors),
-                )
-            result = await adapter.transcribe(effective, audio, options)
-        except SttError as error:
-            latency_ms = int((time.monotonic() - started) * 1000)
-            attempts.append(ProviderAttempt(
-                config_id=effective.config_id,
-                provider=effective.provider,
-                model=effective.model,
-                ok=False,
-                latency_ms=latency_ms,
-                is_fallback=is_fallback,
-                error_code=error.code,
-                error_message=error.message,
-                provider_request_id=error.provider_request_id,
-            ))
-            if error.marks_config_faulty and effective.config_id:
-                # Помечаем до возврата: если резерв тоже с плохим ключом,
-                # следующий же запрос его пропустит.
-                self._faulty[effective.config_id] = error.code
-                log.warning(
-                    "конфигурация «%s» помечена неисправной: %s",
-                    effective.name, error.code,
-                )
-            return error
-        except Exception as exc:  # noqa: BLE001 - чужой ответ не должен ронять сервис
-            latency_ms = int((time.monotonic() - started) * 1000)
-            log.exception("адаптер %s упал неожиданно", effective.provider)
+        # Ключи перебираются внутри одной попытки: для пользователя это
+        # один запрос, для провайдера — тот же провайдер и та же цена.
+        # Резервом (и вторыми деньгами) считается только смена
+        # провайдера, а не смена ключа.
+        keys = self._usable_keys(effective)
+        if not keys:
             error = SttError(
-                "stt_transcription_failed",
-                f"адаптер {effective.provider} завершился ошибкой",
+                STT_CONFIG_INVALID,
+                f"у конфигурации «{effective.name}» нет ни одного рабочего ключа",
             )
             attempts.append(ProviderAttempt(
-                config_id=effective.config_id,
-                provider=effective.provider,
-                model=effective.model,
-                ok=False,
-                latency_ms=latency_ms,
-                is_fallback=is_fallback,
-                error_code=error.code,
-                error_message=str(exc)[:200],
+                config_id=effective.config_id, provider=effective.provider,
+                model=effective.model, ok=False, latency_ms=0,
+                is_fallback=is_fallback, error_code=error.code, error_message=error.message,
             ))
             return error
 
+        started = time.monotonic()
+        key_failures: list[dict] = []
+        last_error: SttError | None = None
+
+        for index, key in enumerate(keys):
+            attempt_config = replace(effective, secret=key.secret)
+            try:
+                adapter = self._registry.get(attempt_config.provider)
+                validation = adapter.validate(attempt_config)
+                if not validation.ok:
+                    raise SttError(
+                        STT_CONFIG_INVALID,
+                        f"конфигурация «{attempt_config.name}» не проходит проверку: "
+                        + "; ".join(validation.errors),
+                    )
+                result = await adapter.transcribe(attempt_config, audio, options)
+            except SttError as error:
+                last_error = error
+                if error.code in KEY_ROTATION_CODES:
+                    self._mark_key(key, error.code)
+                    key_failures.append({
+                        "key_id": key.key_id, "label": key.label, "error_code": error.code,
+                    })
+                    if index + 1 < len(keys):
+                        log.info(
+                            "ключ «%s» отпал (%s), беру следующий",
+                            key.label, error.code,
+                        )
+                        continue
+                    # Ключи кончились. Для маршрутизации это по-прежнему
+                    # отказ провайдера: пусть решает, звать ли резерв.
+                break
+            except Exception as exc:  # noqa: BLE001 - чужой ответ не должен ронять сервис
+                latency_ms = int((time.monotonic() - started) * 1000)
+                log.exception("адаптер %s упал неожиданно", attempt_config.provider)
+                error = SttError(
+                    "stt_transcription_failed",
+                    f"адаптер {attempt_config.provider} завершился ошибкой",
+                )
+                attempts.append(ProviderAttempt(
+                    config_id=effective.config_id,
+                    provider=effective.provider,
+                    model=effective.model,
+                    ok=False,
+                    latency_ms=latency_ms,
+                    is_fallback=is_fallback,
+                    error_code=error.code,
+                    error_message=str(exc)[:200],
+                    key_id=key.key_id,
+                    key_label=key.label,
+                    keys_tried=index + 1,
+                    key_failures=key_failures,
+                ))
+                return error
+            else:
+                latency_ms = int((time.monotonic() - started) * 1000)
+                self._key_state.pop(key.key_id, None)
+                attempts.append(ProviderAttempt(
+                    config_id=effective.config_id,
+                    provider=effective.provider,
+                    model=result.model,
+                    ok=True,
+                    latency_ms=latency_ms,
+                    is_fallback=is_fallback,
+                    provider_request_id=result.provider_request_id,
+                    warnings=list(result.warnings),
+                    key_id=key.key_id,
+                    key_label=key.label,
+                    keys_tried=index + 1,
+                    key_failures=key_failures,
+                ))
+                if effective.config_id:
+                    self._faulty.pop(effective.config_id, None)
+                return result
+
+        # Сюда попадаем, только если ни один ключ не сработал.
+        error = last_error or SttError(STT_CONFIG_INVALID, "ключи исчерпаны")
         latency_ms = int((time.monotonic() - started) * 1000)
         attempts.append(ProviderAttempt(
             config_id=effective.config_id,
             provider=effective.provider,
-            model=result.model,
-            ok=True,
+            model=effective.model,
+            ok=False,
             latency_ms=latency_ms,
             is_fallback=is_fallback,
-            provider_request_id=result.provider_request_id,
-            warnings=list(result.warnings),
+            error_code=error.code,
+            error_message=error.message,
+            provider_request_id=error.provider_request_id,
+            keys_tried=len(key_failures) or 1,
+            key_failures=key_failures,
         ))
-        # Удачное распознавание снимает пометку: ключ мог быть заменён.
-        if effective.config_id:
-            self._faulty.pop(effective.config_id, None)
-        return result
+        # Конфигурацию помечаем неисправной, только если ВСЕ ключи
+        # отвергнуты по учётным данным: один мёртвый ключ из пяти — не
+        # повод считать провайдера сломанным.
+        if (
+            error.marks_config_faulty
+            and effective.config_id
+            and len(key_failures) >= len(keys)
+        ):
+            self._faulty[effective.config_id] = error.code
+            log.warning(
+                "конфигурация «%s» помечена неисправной: все %s ключа отвергнуты (%s)",
+                effective.name, len(keys), error.code,
+            )
+        return error
+
+    def _usable_keys(self, config: SttResolvedConfig) -> list[SttKey]:
+        """Ключи, которые имеет смысл пробовать сейчас.
+
+        Исчерпанный ключ пропускается до конца cooldown: суточный лимит
+        сбросится сам, а долбиться в него каждым сообщением бессмысленно.
+        Отвергнутый по учётным данным не вернётся, пока администратор не
+        обновит снимок.
+        """
+        now = time.time()
+        usable = [
+            key for key in config.keys
+            if self._key_state.get(key.key_id, ("", 0.0))[1] <= now
+        ]
+        if usable:
+            return usable
+        # Все под cooldown — пробуем всё равно: отказ провайдера честнее
+        # отказа «ключи кончились», когда лимит мог уже сброситься.
+        return list(config.keys)
+
+    def _mark_key(self, key: SttKey, code: str) -> None:
+        # Неверный ключ сам не починится — пропускаем до нового снимка.
+        # Исчерпанный вернётся, когда провайдер сбросит счётчик.
+        until = (
+            float("inf") if code == STT_AUTH_FAILED
+            else time.time() + RATE_LIMIT_COOLDOWN_SECONDS
+        )
+        self._key_state[key.key_id] = (code, until)
+

@@ -245,17 +245,28 @@
             </div>
           </dialog>
 
-          <!-- Ввод ключа: главный сценарий раздела -->
+          <!-- Ключи провайдера: главный сценарий раздела.
+               Ключей может быть несколько; когда один упирается в лимит,
+               media-service переходит к следующему внутри того же
+               запроса, и пользователь этого не замечает. -->
           <dialog id="stt-key-dialog" class="sheet-dialog">
             <div class="sheet-head">
-              <div><h3 id="stt-key-title">Ключ</h3><p id="stt-key-hint" class="muted"></p></div>
+              <div><h3 id="stt-key-title">Ключи</h3><p id="stt-key-hint" class="muted"></p></div>
               <button id="close-stt-key" class="icon-button" aria-label="Закрыть">×</button>
             </div>
-            <div id="stt-key-field"></div>
+            <div id="stt-key-list" class="key-list"></div>
+            <details id="stt-key-add" class="key-add">
+              <summary>Добавить ключ</summary>
+              <label class="field">
+                <span>Название</span>
+                <input id="stt-key-label" type="text" maxlength="80" placeholder="например, «Резервный»">
+              </label>
+              <div id="stt-key-field"></div>
+              <div class="form-actions">
+                <button id="stt-key-save" class="button primary" type="button">Добавить ключ</button>
+              </div>
+            </details>
             <p id="stt-key-error" class="integration-status" hidden></p>
-            <div class="form-actions">
-              <button id="stt-key-save" class="button primary" type="button">Сохранить ключ</button>
-            </div>
           </dialog>
 
           <!-- Проверка на реальном аудио -->

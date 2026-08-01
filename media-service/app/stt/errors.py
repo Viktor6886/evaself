@@ -182,3 +182,10 @@ class ProviderAttempt:
     error_message: str | None = None
     provider_request_id: str | None = None
     warnings: list[str] = field(default_factory=list)
+    # Каким ключом отработала попытка и сколько ключей пришлось
+    # перебрать. Смена ключа — не fallback: провайдер, модель и цена те
+    # же, поэтому в статистике это отдельная величина.
+    key_id: str | None = None
+    key_label: str | None = None
+    keys_tried: int = 1
+    key_failures: list[dict] = field(default_factory=list)

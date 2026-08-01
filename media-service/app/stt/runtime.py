@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .types import SttResolvedConfig
+from .types import SttKey, SttResolvedConfig
 
 log = logging.getLogger("media.stt")
 
@@ -88,6 +88,12 @@ class SttRuntime:
                         "model": config.model,
                         "base_url": config.base_url,
                         "secret_configured": bool(config.secret),
+                        # Только количество и подписи: значений здесь нет
+                        # и быть не может.
+                        "keys": [
+                            {"id": key.key_id, "label": key.label}
+                            for key in config.keys
+                        ],
                     }
                     for config in self._configs.values()
                 ],
@@ -176,6 +182,10 @@ class SttRuntime:
                     "model": config.model,
                     "params": config.params,
                     "secret": config.secret,
+                    "keys": [
+                        {"id": key.key_id, "label": key.label, "secret": key.secret}
+                        for key in config.keys
+                    ],
                     "timeout_ms": config.timeout_ms,
                 }
                 for config in self._configs.values()
@@ -241,6 +251,26 @@ def _parse_snapshot(
             errors.append("у конфигурации нет id")
             continue
         params = item.get("params")
+        # Ключей может быть несколько. Для установок, где admin-api ещё
+        # старый и присылает одиночный secret, он становится первым и
+        # единственным ключом — иначе обновление одного контейнера
+        # выключило бы распознавание.
+        keys: list[SttKey] = []
+        for raw_key in item.get("keys") or []:
+            if not isinstance(raw_key, dict):
+                continue
+            value = str(raw_key.get("secret") or "")
+            if not value:
+                continue
+            keys.append(SttKey(
+                key_id=str(raw_key.get("id") or f"{config_id}:{len(keys)}"),
+                label=str(raw_key.get("label") or f"ключ {len(keys) + 1}"),
+                secret=value,
+            ))
+        legacy = str(item.get("secret") or "")
+        if not keys and legacy:
+            keys.append(SttKey(key_id=f"{config_id}:0", label="Основной", secret=legacy))
+
         configs[config_id] = SttResolvedConfig(
             config_id=config_id,
             name=str(item.get("name") or config_id),
@@ -249,7 +279,10 @@ def _parse_snapshot(
             base_url=str(item.get("base_url") or ""),
             model=str(item.get("model") or ""),
             params=params if isinstance(params, dict) else {},
-            secret=str(item.get("secret") or ""),
+            # secret — первый ключ: адаптеры работают с одним значением,
+            # подстановку остальных делает маршрутизация.
+            secret=keys[0].secret if keys else "",
+            keys=keys,
             timeout_ms=_int_or(item.get("timeout_ms"), 120000),
         )
 

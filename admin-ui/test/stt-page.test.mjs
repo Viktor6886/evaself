@@ -94,6 +94,7 @@ const CONFIGS = {
       used_by: ["telegram_voice"],
       last_test: { at: "2026-07-31T08:00:00Z", ok: true, latency_ms: 420 },
       secret: { configured: true, updated_at: "2026-07-30T10:00:00Z", fingerprint: "sha256:ab12cd34ef56" },
+      keys: { total: 2, usable: 1, exhausted: 1, invalid: 0 },
     },
   ],
 };
@@ -117,10 +118,28 @@ const ROUTES_PAYLOAD = {
   ],
 };
 
+const KEYS_PAYLOAD = {
+  keys: [
+    {
+      id: "aaaaaaaa-0000-0000-0000-000000000001",
+      label: "Основной", position: 0, enabled: true, status: "active",
+      cooldown_until: null, last_error_code: null,
+      success_count: 42, failure_count: 0,
+    },
+    {
+      id: "aaaaaaaa-0000-0000-0000-000000000002",
+      label: "Резервный", position: 10, enabled: true, status: "exhausted",
+      cooldown_until: "2099-01-01T00:00:00Z", last_error_code: "stt_rate_limited",
+      success_count: 3, failure_count: 1,
+    },
+  ],
+};
+
 const BASE_ROUTES = {
   "/stt/provider-schemas": SCHEMAS,
   "/stt/configs": CONFIGS,
   "/stt/routes": ROUTES_PAYLOAD,
+  "/stt/configs/11111111-1111-1111-1111-111111111111/keys": KEYS_PAYLOAD,
 };
 
 const openStt = async (page) => {
@@ -152,7 +171,9 @@ describe("раздел распознавания речи", () => {
     const card = await panel.page.$eval("#stt-configs .status-card", (node) => node.textContent);
     assert.match(card, /Deepgram production/);
     assert.match(card, /nova-3/);
-    assert.match(card, /Настроен/);
+    // Не «настроен», а сколько ключей и сколько из них живы: пять
+    // ключей при четырёх исчерпанных — это повод зайти внутрь.
+    assert.match(card, /2 · 1 с исчерпанным лимитом/);
     assert.match(card, /Голосовые в Telegram/);
     // Отпечаток — служебное значение, ему не место на карточке, а
     // самого ключа тут нет и подавно.
@@ -369,11 +390,19 @@ describe("раздел распознавания речи", () => {
     assert.ok(await panel.page.$('[data-stt-action="key"]'), "ключ схем не требует");
   });
 
+  /** Открывает диалог ключей и раскрывает форму добавления. */
+  const openKeys = async (page) => {
+    await page.click('[data-stt-action="key"]');
+    await page.waitForSelector("#stt-key-dialog[open]");
+    await page.waitForFunction(
+      () => document.querySelectorAll("#stt-key-list .key-row").length > 0);
+    await page.evaluate(() => { document.querySelector("#stt-key-add").open = true; });
+  };
+
   test("ввод ключа не уходит на сервер до подтверждения паролем", async () => {
     const panel = await open({ routes: BASE_ROUTES });
     await openStt(panel.page);
-    await panel.page.click('[data-stt-action="key"]');
-    await panel.page.waitForSelector("#stt-key-dialog[open]");
+    await openKeys(panel.page);
 
     const field = await panel.page.$eval("#stt-key-value", (node) => ({
       type: node.type, value: node.value,
@@ -390,6 +419,74 @@ describe("раздел распознавания речи", () => {
       false,
       "ключ не должен уходить до подтверждения",
     );
+  });
+
+  test("список ключей показывает очередь и состояние, но не значения", async () => {
+    const panel = await open({ routes: BASE_ROUTES });
+    await openStt(panel.page);
+    await openKeys(panel.page);
+
+    const rows = await panel.page.$$eval(
+      "#stt-key-list .key-row", (nodes) => nodes.map((node) => node.textContent));
+    assert.equal(rows.length, 2);
+    // Порядок строк — порядок перебора, и он должен быть виден: иначе
+    // непонятно, какой ключ тратится первым.
+    assert.match(rows[0], /Основной/);
+    assert.match(rows[0], /1-й в очереди/);
+    assert.match(rows[1], /Резервный/);
+    assert.match(rows[1], /2-й в очереди/);
+    assert.match(rows[1], /лимит исчерпан/);
+
+    const dialog = await panel.page.$eval("#stt-key-dialog", (node) => node.innerHTML);
+    assert.doesNotMatch(dialog, /dg-live|sha256:/);
+  });
+
+  test("выключение и удаление ключа тоже требуют подтверждения паролем", async () => {
+    const panel = await open({ routes: BASE_ROUTES });
+    await openStt(panel.page);
+    await openKeys(panel.page);
+
+    await panel.page.click('[data-key-action="toggle"]');
+    await panel.page.waitForSelector("#sudo-dialog[open]");
+    assert.equal(
+      panel.requests.some((item) => item.method === "PATCH" && item.path.includes("/keys/")),
+      false,
+      "ключ не должен выключаться до подтверждения",
+    );
+  });
+
+  test("проверка сообщает состояние каждого ключа, а не только итог", async () => {
+    const panel = await open({
+      routes: {
+        ...BASE_ROUTES,
+        // Первый ключ отвергнут, второй работает — конфигурация жива,
+        // но администратор обязан узнать про первый.
+        "POST /stt/configs/11111111-1111-1111-1111-111111111111/test": {
+          success: true,
+          provider: "deepgram", model: "nova-3",
+          latency_ms: 300, audio_duration_ms: 3000,
+          transcript: "Проверка", warnings: [],
+          keys: [
+            { id: "k1", label: "Основной", success: false, latency_ms: null,
+              error_code: "stt_auth_failed", error_message: "Deepgram вернул HTTP 401" },
+            { id: "k2", label: "Резервный", success: true, latency_ms: 300,
+              error_code: null, error_message: null },
+          ],
+        },
+      },
+    });
+    await openStt(panel.page);
+    await panel.page.click('[data-stt-action="test"]');
+    await panel.page.waitForSelector("#stt-test-dialog[open]");
+    await panel.page.click("#stt-test-run");
+    await panel.page.waitForFunction(
+      () => document.querySelector("#stt-test-result").textContent.includes("Успешно"));
+
+    const text = await panel.page.$eval("#stt-test-result", (node) => node.textContent);
+    assert.match(text, /Основной/);
+    assert.match(text, /stt_auth_failed/);
+    assert.match(text, /Резервный/);
+    assert.match(text, /300 мс/);
   });
 
   test("без ключа проверка и активация недоступны", async () => {

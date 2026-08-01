@@ -2012,7 +2012,7 @@ function renderSttConfigs() {
           <span class="pill">${label}</span>
         </header>
         <dl class="status-meta">
-          <div><dt>Ключ</dt><dd>${config.secret?.configured ? "Настроен" : "Не настроен"}</dd></div>
+          <div><dt>Ключи</dt><dd>${sttKeySummary(config)}</dd></div>
           <div><dt>Используется</dt><dd>${usedBy ? escapeHtml(usedBy) : "нигде"}</dd></div>
           <div><dt>Последняя проверка</dt><dd>${
             test.at ? `${new Date(test.at).toLocaleString("ru")} · ${test.ok ? "успешно" : "ошибка"}` : "не проводилась"
@@ -2024,7 +2024,7 @@ function renderSttConfigs() {
         <div class="card-actions">
           <button class="button ${config.secret?.configured ? "ghost" : "primary"}"
                   data-stt-action="key" data-id="${config.id}">
-            ${config.secret?.configured ? "Заменить ключ" : "Ввести ключ"}
+            ${config.secret?.configured ? "Ключи" : "Ввести ключ"}
           </button>
           <button class="button ghost" data-stt-action="test" data-id="${config.id}"
                   ${config.secret?.configured ? "" : "disabled"}>Проверить</button>
@@ -2041,6 +2041,23 @@ function renderSttConfigs() {
         </div>
       </article>`;
   }).join("");
+}
+
+/**
+ * Ключи одной строкой для карточки.
+ *
+ * Важно не число ключей само по себе, а сколько из них сейчас можно
+ * пробовать: «5 ключей» при четырёх исчерпанных — повод зайти внутрь.
+ */
+function sttKeySummary(config) {
+  const keys = config.keys || {};
+  const total = Number(keys.total || 0);
+  if (!total) return config.secret?.configured ? "1 (основной)" : "не настроены";
+  const parts = [`${total}`];
+  if (keys.exhausted) parts.push(`${keys.exhausted} с исчерпанным лимитом`);
+  if (keys.invalid) parts.push(`${keys.invalid} отвергнут провайдером`);
+  if (!keys.usable) parts.push("рабочих нет");
+  return escapeHtml(parts.join(" · "));
 }
 
 function renderSttRoutes() {
@@ -2355,6 +2372,21 @@ async function runSttTest() {
     body: JSON.stringify(audio ? { audio_base64: audio } : {}),
   });
 
+  // Проверяются все ключи, а не только первый: список имеет смысл лишь
+  // тогда, когда известно состояние каждого.
+  const perKey = (payload.keys || []).length
+    ? `<div class="key-list">${payload.keys.map((key) => `
+        <article class="key-row">
+          <span class="dot ${key.success ? "green" : "red"}"></span>
+          <div class="key-main">
+            <strong>${escapeHtml(key.label)}</strong>
+            <p class="muted">${key.success
+              ? `работает · ${key.latency_ms ?? "?"} мс`
+              : escapeHtml(`${key.error_code || "ошибка"}${key.error_message ? ` — ${String(key.error_message).slice(0, 160)}` : ""}`)}</p>
+          </div>
+        </article>`).join("")}</div>`
+    : "";
+
   if (payload.success) {
     // Поля, которых провайдер не вернул, не показываем вовсе: пустое
     // место честнее выдуманного числа.
@@ -2370,11 +2402,13 @@ async function runSttTest() {
         ${payload.provider_request_id ? `<div><dt>Request ID</dt><dd>${escapeHtml(payload.provider_request_id)}</dd></div>` : ""}
       </dl>
       <p><em>Расшифровка:</em> ${escapeHtml(payload.transcript || "(пусто)")}</p>
-      ${(payload.warnings || []).length ? `<p class="muted">${payload.warnings.map(escapeHtml).join("; ")}</p>` : ""}`;
+      ${(payload.warnings || []).length ? `<p class="muted">${payload.warnings.map(escapeHtml).join("; ")}</p>` : ""}
+      ${perKey}`;
   } else {
     host.innerHTML = `<strong>Не удалось.</strong>
       <p>${escapeHtml(payload.error?.message || "провайдер не ответил")}</p>
-      <p class="muted">Код: ${escapeHtml(payload.error?.code || "неизвестен")}</p>`;
+      <p class="muted">Код: ${escapeHtml(payload.error?.code || "неизвестен")}</p>
+      ${perKey}`;
   }
   await loadStt();
 }
@@ -2456,7 +2490,7 @@ document.addEventListener("click", (event) => {
       });
       break;
     case "key":
-      openSttKeyDialog(config);
+      openSttKeyDialog(config).catch(handleError);
       break;
     case "activate":
       askSudo({
@@ -2546,15 +2580,17 @@ $("#stt-test-run")?.addEventListener("click", () => {
 // Главный сценарий раздела: у преднастроенного провайдера всё уже
 // заполнено, и остаётся вписать один ключ. Гонять оператора через
 // полный редактор параметров ради этого незачем.
-function openSttKeyDialog(config) {
+async function openSttKeyDialog(config) {
   if (!config) return;
   state.sttEditing = config;
   const isGoogleCloud = config.provider === "google";
 
-  $("#stt-key-title").textContent = `Ключ — ${config.name}`;
-  $("#stt-key-hint").textContent = config.secret?.configured
-    ? "Ключ уже настроен. Введите новый, чтобы заменить его."
-    : "Ключ хранится в зашифрованном Secret Store и не показывается обратно.";
+  $("#stt-key-title").textContent = `Ключи — ${config.name}`;
+  $("#stt-key-hint").textContent =
+    "Ключи перебираются сверху вниз. Когда один упирается в лимит или "
+    + "перестаёт работать, распознавание тут же продолжается следующим — "
+    + "пользователь ничего не замечает. Значения не показываются обратно.";
+  $("#stt-key-label").value = "";
   $("#stt-key-field").innerHTML = isGoogleCloud
     ? `<label class="field"><span>Service account JSON</span>
          <input type="file" id="stt-key-file" accept="application/json,.json">
@@ -2562,11 +2598,72 @@ function openSttKeyDialog(config) {
            останутся только project_id и маскированная почта.</small></label>`
     : `<label class="field"><span>API-ключ</span>
          <input type="password" id="stt-key-value" autocomplete="new-password"
-                placeholder="${config.secret?.configured ? "Введите новый ключ" : "Вставьте ключ"}">
+                placeholder="Вставьте ключ">
          <small class="muted">${keyHint(config.provider)}</small></label>`;
   $("#stt-key-error").hidden = true;
+  // Список первого ключа ещё нет — форма добавления раскрыта сразу,
+  // чтобы не заставлять кликать по пустому месту.
+  $("#stt-key-add").open = !(config.keys?.total > 0);
   $("#stt-key-dialog").showModal();
+  await refreshSttKeys(config.id);
 }
+
+/**
+ * Список ключей конфигурации.
+ *
+ * Значений здесь нет — только подписи, состояние и счётчики. Ошибка
+ * загрузки не закрывает диалог: добавить ключ можно и не видя списка.
+ */
+async function refreshSttKeys(configId) {
+  const host = $("#stt-key-list");
+  host.innerHTML = `<p class="muted">Загружаю…</p>`;
+  let keys = [];
+  try {
+    const { payload } = await request(`/stt/configs/${configId}/keys`);
+    keys = payload.keys || [];
+  } catch (error) {
+    host.innerHTML = `<p class="integration-status error">${escapeHtml(
+      error instanceof Error ? error.message : String(error),
+    )}</p>`;
+    return;
+  }
+  state.sttKeys = keys;
+
+  if (!keys.length) {
+    host.innerHTML = `<p class="muted">Ключей пока нет. Пока их нет, распознавание
+      этим провайдером не работает.</p>`;
+    return;
+  }
+
+  host.innerHTML = keys.map((key, index) => {
+    const [label, color] = STT_KEY_STATUS[key.status] || [key.status, "gray"];
+    const cooldown = key.cooldown_until && new Date(key.cooldown_until) > new Date()
+      ? ` до ${new Date(key.cooldown_until).toLocaleString("ru")}`
+      : "";
+    return `
+      <article class="key-row${key.enabled ? "" : " muted"}" data-key-id="${key.id}">
+        <span class="dot ${key.enabled ? color : "gray"}"></span>
+        <div class="key-main">
+          <strong>${escapeHtml(key.label)}</strong>
+          <p class="muted">${index + 1}-й в очереди · ${key.enabled ? label + cooldown : "выключен"}
+            · успешно ${key.success_count}, с ошибкой ${key.failure_count}</p>
+          ${key.last_error_code
+            ? `<p class="muted">Последняя ошибка: ${escapeHtml(key.last_error_code)}</p>` : ""}
+        </div>
+        <div class="key-actions">
+          <button class="button ghost" data-key-action="toggle" data-key-id="${key.id}"
+                  data-enabled="${key.enabled}">${key.enabled ? "Выключить" : "Включить"}</button>
+          <button class="button ghost" data-key-action="remove" data-key-id="${key.id}">Удалить</button>
+        </div>
+      </article>`;
+  }).join("");
+}
+
+const STT_KEY_STATUS = {
+  active: ["работает", "green"],
+  exhausted: ["лимит исчерпан", "yellow"],
+  invalid: ["отвергнут провайдером", "red"],
+};
 
 /** Где взять ключ — вопрос, который возникает у каждого нового провайдера. */
 function keyHint(provider) {
@@ -2583,6 +2680,8 @@ async function saveSttKey() {
   if (!config) return;
 
   const body = {};
+  const label = $("#stt-key-label").value.trim();
+  if (label) body.label = label;
   if (config.provider === "google") {
     const file = $("#stt-key-file")?.files?.[0];
     if (!file) throw new Error("Выберите файл service account JSON");
@@ -2596,17 +2695,48 @@ async function saveSttKey() {
 
   askSudo({
     scope: "stt:write",
-    title: "Сохранение ключа провайдера",
+    title: "Добавление ключа провайдера",
     description: "Ключ будет зашифрован и записан в Secret Store. Подтвердите паролем.",
     action: async () => {
-      await request(`/stt/configs/${config.id}/secret`, {
-        method: "PUT", body: JSON.stringify(body),
+      await request(`/stt/configs/${config.id}/keys`, {
+        method: "POST", body: JSON.stringify(body),
       });
-      $("#stt-key-dialog").close();
-      toast("Ключ сохранён");
+      // Диалог остаётся открытым: ключей обычно добавляют несколько
+      // подряд, и закрывать его после каждого — лишний клик.
+      if ($("#stt-key-value")) $("#stt-key-value").value = "";
+      if ($("#stt-key-file")) $("#stt-key-file").value = "";
+      $("#stt-key-label").value = "";
+      $("#stt-key-error").hidden = true;
+      toast("Ключ добавлен");
+      await refreshSttKeys(config.id);
       await loadStt();
     },
   });
+}
+
+/** Включение, выключение и удаление отдельного ключа. */
+async function sttKeyAction(action, keyId) {
+  const config = state.sttEditing;
+  if (!config) return;
+  const key = (state.sttKeys || []).find((item) => item.id === keyId);
+
+  if (action === "toggle") {
+    const enable = !key?.enabled;
+    await request(`/stt/configs/${config.id}/keys/${keyId}`, {
+      method: "PATCH", body: JSON.stringify({ enabled: enable }),
+    });
+    toast(enable ? "Ключ снова в очереди" : "Ключ выключен");
+  } else if (action === "remove") {
+    if (!confirm(`Удалить ключ «${key?.label ?? ""}»? Значение будет стёрто из Secret Store.`)) {
+      return;
+    }
+    await request(`/stt/configs/${config.id}/keys/${keyId}`, { method: "DELETE" });
+    toast("Ключ удалён");
+  } else {
+    return;
+  }
+  await refreshSttKeys(config.id);
+  await loadStt();
 }
 
 $("#close-stt-key")?.addEventListener("click", () => $("#stt-key-dialog").close());
@@ -2615,5 +2745,18 @@ $("#stt-key-save")?.addEventListener("click", () => {
     const host = $("#stt-key-error");
     host.hidden = false;
     host.textContent = error instanceof Error ? error.message : String(error);
+  });
+});
+
+$("#stt-key-list")?.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-key-action]");
+  if (!button) return;
+  // Изменение ключей — та же операция с секретами, что и добавление,
+  // поэтому и подтверждение то же.
+  askSudo({
+    scope: "stt:write",
+    title: "Изменение ключей провайдера",
+    description: "Действие затрагивает Secret Store. Подтвердите паролем.",
+    action: () => sttKeyAction(button.dataset.keyAction, button.dataset.keyId),
   });
 });

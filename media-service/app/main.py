@@ -376,6 +376,10 @@ async def stt_runtime_state() -> dict:
     """Действующий снимок без единого символа секретов."""
     state = STT_RUNTIME.describe()
     state["faulty"] = STT_ROUTER.faulty() if STT_ROUTER else {}
+    # Какие ключи сейчас пропускаются перебором. Живёт это только в
+    # памяти сервиса, и раздел здоровья в панели — единственное место,
+    # где картину видно целиком.
+    state["keys"] = STT_ROUTER.key_state() if STT_ROUTER else {}
     return state
 
 
@@ -520,6 +524,13 @@ async def _route_transcription(
                 "error_code": attempt.error_code,
                 "error_message": attempt.error_message,
                 "provider_request_id": attempt.provider_request_id,
+                # Каким ключом отработала попытка и что случилось с
+                # остальными. Состояние ключей живёт в памяти этого
+                # сервиса; другого способа довезти его до панели нет.
+                "key_id": attempt.key_id,
+                "key_label": attempt.key_label,
+                "keys_tried": attempt.keys_tried,
+                "key_failures": attempt.key_failures,
             }
             for attempt in outcome.attempts
         ],

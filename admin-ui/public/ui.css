@@ -577,3 +577,23 @@ dialog .eyebrow { margin-top: 0; }
 }
 .setting-card.is-touched { border-color: #35c07a; }
 .advanced-toggle { display: flex; align-items: center; gap: 12px; margin: 18px 0 12px; }
+
+/* Список ключей провайдера STT. Порядок строк — порядок перебора,
+   поэтому строки нумерованы и не переставляются визуально. */
+.key-list { display: grid; gap: 8px; margin: 4px 0 14px; }
+.key-row {
+  display: grid;
+  grid-template-columns: 12px 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--line, #2a2f3a);
+  border-radius: 10px;
+  background: var(--bg, #0e1117);
+}
+.key-row.muted { opacity: .55; }
+.key-row .key-main strong { font-size: 13px; }
+.key-row .key-main p { margin: 2px 0 0; font-size: 11.5px; }
+.key-row .key-actions { display: flex; gap: 6px; }
+.key-add > summary { cursor: pointer; font-size: 12.5px; padding: 6px 0; }
+.key-add[open] > summary { margin-bottom: 8px; }

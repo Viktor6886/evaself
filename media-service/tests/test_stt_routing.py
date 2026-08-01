@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -417,3 +418,255 @@ def test_snapshot_is_all_or_nothing(tmp_path):
     route = runtime.route("telegram_voice")
     assert route is not None and route.primary.name == "рабочая"
     assert runtime.describe()["version"] == 1
+
+
+# =====================================================================
+# перебор ключей внутри одного провайдера
+# =====================================================================
+# Смена ключа и смена провайдера — разные вещи. Первая бесплатна (тот же
+# провайдер, та же цена) и незаметна пользователю; вторая стоит вторых
+# денег и потому ограничена одной попыткой на аудио.
+class KeyAwareAdapter(FakeAdapter):
+    """Адаптер, отвечающий по-разному в зависимости от ключа."""
+
+    def __init__(self, provider: str, by_key: dict) -> None:
+        super().__init__(provider, [])
+        self._by_key = by_key
+        self.seen_keys: list[str] = []
+
+    async def transcribe(self, config, audio, options):
+        self.calls += 1
+        self.seen_keys.append(config.secret)
+        outcome = self._by_key.get(config.secret, f"ответ по ключу {config.secret}")
+        if isinstance(outcome, Exception):
+            raise outcome
+        return SttResult(
+            text=outcome, provider=self.provider, model=config.model, latency_ms=5
+        )
+
+
+def build_with_keys(tmp_path, adapters, keys, **route_overrides):
+    runtime = SttRuntime(tmp_path / "keys.json")
+    route = {
+        "use_case": "telegram_voice",
+        "primary_config_id": "primary",
+        "enabled": True,
+        "timeout_ms": 30000,
+    }
+    route.update(route_overrides)
+    applied = runtime.apply({
+        "version": 1,
+        "configs": [{
+            "id": "primary", "name": "Основной", "provider": "alpha", "mode": "batch",
+            "base_url": "https://alpha.example", "model": "m1", "params": {},
+            "keys": keys,
+        }],
+        "routes": [route],
+    })
+    assert applied["applied"], applied
+    return SttRoutingService(runtime, FakeRegistry(adapters), TranscriptCache())
+
+
+KEYS = [
+    {"id": "k1", "label": "Ключ 1", "secret": "key-one"},
+    {"id": "k2", "label": "Ключ 2", "secret": "key-two"},
+    {"id": "k3", "label": "Ключ 3", "secret": "key-three"},
+]
+
+
+@pytest.mark.asyncio
+async def test_first_working_key_wins(tmp_path, audio):
+    alpha = KeyAwareAdapter("alpha", {"key-one": "распознано первым ключом"})
+    router = build_with_keys(tmp_path, {"alpha": alpha}, KEYS)
+
+    outcome = await router.transcribe("telegram_voice", audio)
+
+    assert outcome.result.text == "распознано первым ключом"
+    assert alpha.seen_keys == ["key-one"], "лишние ключи трогать незачем"
+    assert outcome.attempts[0].keys_tried == 1
+    assert outcome.attempts[0].key_label == "Ключ 1"
+
+
+@pytest.mark.asyncio
+async def test_rotation_on_exhausted_limit(tmp_path, audio):
+    alpha = KeyAwareAdapter("alpha", {
+        "key-one": SttError(STT_RATE_LIMITED, "лимит исчерпан"),
+        "key-two": "распознано вторым ключом",
+    })
+    router = build_with_keys(tmp_path, {"alpha": alpha}, KEYS)
+
+    outcome = await router.transcribe("telegram_voice", audio)
+
+    assert outcome.result.text == "распознано вторым ключом"
+    assert alpha.seen_keys == ["key-one", "key-two"]
+    # Для пользователя это одно распознавание, а не два: провайдер и
+    # цена те же, поэтому событием резерва смена ключа не считается.
+    assert outcome.used_fallback is False
+    assert outcome.attempt_count == 1
+    assert outcome.attempts[0].keys_tried == 2
+    assert outcome.attempts[0].key_label == "Ключ 2"
+    assert outcome.attempts[0].key_failures[0]["error_code"] == STT_RATE_LIMITED
+
+
+@pytest.mark.asyncio
+async def test_rotation_on_invalid_key(tmp_path, audio):
+    alpha = KeyAwareAdapter("alpha", {
+        "key-one": SttError(STT_AUTH_FAILED, "ключ отозван"),
+        "key-two": SttError(STT_AUTH_FAILED, "и этот тоже"),
+        "key-three": "третий сработал",
+    })
+    router = build_with_keys(tmp_path, {"alpha": alpha}, KEYS)
+
+    outcome = await router.transcribe("telegram_voice", audio)
+
+    assert outcome.result.text == "третий сработал"
+    assert alpha.seen_keys == ["key-one", "key-two", "key-three"]
+
+
+@pytest.mark.asyncio
+async def test_all_keys_tried_before_giving_up(tmp_path, audio):
+    alpha = KeyAwareAdapter("alpha", {
+        key["secret"]: SttError(STT_RATE_LIMITED, "лимит") for key in KEYS
+    })
+    beta = FakeAdapter("beta", ["резерв справился"])
+    router = build_with_keys(tmp_path, {"alpha": alpha, "beta": beta}, KEYS,
+                             fallback_config_id=None)
+
+    with pytest.raises(SttError):
+        await router.transcribe("telegram_voice", audio)
+
+    assert alpha.seen_keys == ["key-one", "key-two", "key-three"], "перебрать надо все"
+
+
+@pytest.mark.asyncio
+async def test_no_rotation_on_errors_a_key_cannot_fix(tmp_path, audio):
+    # Битое аудио и таймаут от ключа не зависят: другой ключ получит тот
+    # же отказ, а запрос будет стоить вдвое дороже.
+    for code in (STT_AUDIO_INVALID, STT_TIMEOUT, "stt_provider_unavailable"):
+        alpha = KeyAwareAdapter("alpha", {key["secret"]: SttError(code, "не выйдет") for key in KEYS})
+        router = build_with_keys(tmp_path, {"alpha": alpha}, KEYS)
+
+        with pytest.raises(SttError):
+            await router.transcribe("telegram_voice", audio)
+        assert alpha.seen_keys == ["key-one"], f"{code}: перебор ключей бессмысленен"
+
+
+@pytest.mark.asyncio
+async def test_exhausted_key_is_skipped_next_time(tmp_path, audio):
+    alpha = KeyAwareAdapter("alpha", {
+        "key-one": SttError(STT_RATE_LIMITED, "лимит"),
+        "key-two": "второй работает",
+    })
+    router = build_with_keys(tmp_path, {"alpha": alpha}, KEYS)
+
+    await router.transcribe("telegram_voice", audio)
+    alpha.seen_keys.clear()
+    await router.transcribe("telegram_voice", audio)
+
+    # Долбиться в исчерпанный ключ каждым сообщением бессмысленно.
+    assert alpha.seen_keys == ["key-two"]
+    assert router.key_state()["k1"]["error_code"] == STT_RATE_LIMITED
+
+
+@pytest.mark.asyncio
+async def test_key_state_survives_json_encoding(tmp_path, audio):
+    """Отвергнутый ключ не возвращается никогда — но JSON про это не знает.
+
+    json.dumps пишет бесконечность литералом Infinity, которого в
+    спецификации JSON нет: JSON.parse в браузере на нём падает, и раздел
+    здоровья в панели остаётся пустым вместо того, чтобы показать
+    мёртвый ключ.
+    """
+    alpha = KeyAwareAdapter("alpha", {
+        "key-one": SttError(STT_AUTH_FAILED, "мёртв"),
+        "key-two": "второй работает",
+    })
+    router = build_with_keys(tmp_path, {"alpha": alpha}, KEYS)
+    await router.transcribe("telegram_voice", audio)
+
+    state = router.key_state()
+    assert state["k1"]["skipped_until"] is None
+    assert state["k1"]["active"] is False
+    encoded = json.dumps(state, allow_nan=False)
+    assert "Infinity" not in encoded
+
+
+@pytest.mark.asyncio
+async def test_new_snapshot_revives_all_keys(tmp_path, audio):
+    alpha = KeyAwareAdapter("alpha", {
+        "key-one": SttError(STT_AUTH_FAILED, "мёртв"),
+        "key-two": "второй работает",
+    })
+    router = build_with_keys(tmp_path, {"alpha": alpha}, KEYS)
+    await router.transcribe("telegram_voice", audio)
+    assert router.key_state()
+
+    # Администратор что-то менял — возможно, как раз заменил мёртвый ключ.
+    router.clear_faulty()
+    assert router.key_state() == {}
+
+
+@pytest.mark.asyncio
+async def test_one_dead_key_does_not_condemn_the_provider(tmp_path, audio):
+    alpha = KeyAwareAdapter("alpha", {
+        "key-one": SttError(STT_AUTH_FAILED, "мёртв"),
+        "key-two": "второй работает",
+    })
+    router = build_with_keys(tmp_path, {"alpha": alpha}, KEYS)
+
+    await router.transcribe("telegram_voice", audio)
+
+    # Один мёртвый ключ из трёх — не повод считать провайдера сломанным.
+    assert router.faulty() == {}
+
+
+@pytest.mark.asyncio
+async def test_provider_is_condemned_only_when_every_key_is_rejected(tmp_path, audio):
+    alpha = KeyAwareAdapter("alpha", {
+        key["secret"]: SttError(STT_AUTH_FAILED, "отозван") for key in KEYS
+    })
+    router = build_with_keys(tmp_path, {"alpha": alpha}, KEYS)
+
+    with pytest.raises(SttError):
+        await router.transcribe("telegram_voice", audio)
+
+    assert router.faulty() == {"primary": STT_AUTH_FAILED}
+
+
+@pytest.mark.asyncio
+async def test_fallback_provider_still_works_after_keys_run_out(tmp_path, audio):
+    # Ключи кончились — это по-прежнему отказ провайдера, и решение о
+    # резерве принимает маршрутизация, как и раньше.
+    runtime = SttRuntime(tmp_path / "both.json")
+    runtime.apply({
+        "version": 1,
+        "configs": [
+            {"id": "primary", "name": "Основной", "provider": "alpha", "mode": "batch",
+             "base_url": "https://alpha.example", "model": "m1", "params": {}, "keys": KEYS},
+            {"id": "backup", "name": "Резерв", "provider": "beta", "mode": "batch",
+             "base_url": "https://beta.example", "model": "m2", "params": {},
+             "keys": [{"id": "b1", "label": "Ключ", "secret": "beta-key"}]},
+        ],
+        "routes": [{"use_case": "telegram_voice", "primary_config_id": "primary",
+                    "fallback_config_id": "backup", "enabled": True, "timeout_ms": 30000}],
+    })
+    alpha = KeyAwareAdapter("alpha", {
+        key["secret"]: SttError(STT_RATE_LIMITED, "лимит") for key in KEYS
+    })
+    beta = KeyAwareAdapter("beta", {"beta-key": "резерв справился"})
+    router = SttRoutingService(runtime, FakeRegistry({"alpha": alpha, "beta": beta}), TranscriptCache())
+
+    outcome = await router.transcribe("telegram_voice", audio)
+
+    assert outcome.result.text == "резерв справился"
+    assert outcome.used_fallback is True
+    # Три ключа основного — всё ещё одна попытка провайдера.
+    assert outcome.attempt_count == 2
+    assert outcome.attempts[0].keys_tried == 3
+
+
+def test_key_never_leaks_into_repr():
+    from app.stt.types import SttKey
+
+    dumped = repr(SttKey(key_id="k1", label="Основной", secret="sk-super-secret"))
+    assert "sk-super-secret" not in dumped

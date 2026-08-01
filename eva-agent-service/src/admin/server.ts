@@ -665,6 +665,43 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
     return await services.stt.replaceSecret(id, objectBody(request.body), actor);
   });
 
+  // Несколько ключей на провайдера. Перебор между ними media-service
+  // делает внутри одного запроса, а заводит их администратор здесь.
+  // Чтение открыто оператору — значений в ответе нет, только подписи и
+  // состояние; запись требует sudo, как и любое обращение к секретам.
+  app.get("/api/admin/v1/stt/configs/:id/keys", {
+    config: { roles: ["owner", "admin", "operator"] } satisfies RouteAccess,
+  }, async (request) => {
+    const id = (request.params as { id?: string }).id ?? "";
+    return { keys: await services.stt.listKeys(id) };
+  });
+
+  app.post("/api/admin/v1/stt/configs/:id/keys", {
+    config: { roles: ["owner", "admin"], sudoScope: "stt:write" } satisfies RouteAccess,
+  }, async (request, reply) => {
+    const id = (request.params as { id?: string }).id ?? "";
+    const actor = contexts.get(request)!.session!.user.id;
+    const result = await services.stt.addKey(id, objectBody(request.body), actor);
+    reply.code(201);
+    return result;
+  });
+
+  app.patch("/api/admin/v1/stt/configs/:id/keys/:keyId", {
+    config: { roles: ["owner", "admin"], sudoScope: "stt:write" } satisfies RouteAccess,
+  }, async (request) => {
+    const params = request.params as { id?: string; keyId?: string };
+    return await services.stt.updateKey(
+      params.id ?? "", params.keyId ?? "", objectBody(request.body),
+    );
+  });
+
+  app.delete("/api/admin/v1/stt/configs/:id/keys/:keyId", {
+    config: { roles: ["owner", "admin"], sudoScope: "stt:write" } satisfies RouteAccess,
+  }, async (request) => {
+    const params = request.params as { id?: string; keyId?: string };
+    return await services.stt.removeKey(params.id ?? "", params.keyId ?? "");
+  });
+
   // Проверка ничего не активирует и не сохраняет: это отдельное
   // действие, доступное и оператору.
   app.post("/api/admin/v1/stt/configs/:id/test", {

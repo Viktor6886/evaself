@@ -51,6 +51,13 @@ const FORBIDDEN_PUBLIC_KEYS = new Set([
 /** Максимум для загружаемого service account JSON. */
 const MAX_CREDENTIALS_BYTES = 16 * 1024;
 
+/**
+ * Идентификаторы ключей приходят из media-service, то есть снаружи.
+ * Строка, не похожая на uuid, не должна доезжать до запроса: приведение
+ * к uuid отвалится, и вместе с ним — вся запись телеметрии.
+ */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export interface SttConfigRow {
   id: string;
   name: string;
@@ -88,6 +95,14 @@ export interface ResolvedForMedia {
   model: string;
   params: Record<string, unknown>;
   secret: string;
+  /**
+   * Все ключи провайдера в порядке перебора. media-service берёт
+   * следующий, когда предыдущий отвергнут или упёрся в лимит.
+   *
+   * Поле необязательное: снимок должен применяться и той версией
+   * media-service, которая знает только про одиночный secret.
+   */
+  keys?: Array<{ id: string; label: string; secret: string }>;
   timeout_ms?: number;
 }
 
@@ -302,6 +317,21 @@ export class SttAdminService {
         fingerprint: `sha256:${createHash("sha256").update(row.secret_ref).digest("hex").slice(0, 12)}`,
       };
     }
+
+    // Сводка по ключам нужна карточке в списке: «3 ключа, 1 исчерпан»
+    // читается с одного взгляда, а за подробностями пользователь идёт
+    // в диалог ключей.
+    const { rows: counts } = await this.pool.query<{
+      total: number; usable: number; exhausted: number; invalid: number;
+    }>(
+      `SELECT count(*)::int                                                   AS total,
+              count(*) FILTER (WHERE enabled AND status = 'active')::int      AS usable,
+              count(*) FILTER (WHERE status = 'exhausted')::int               AS exhausted,
+              count(*) FILTER (WHERE status = 'invalid')::int                 AS invalid
+         FROM stt_provider_keys WHERE config_id = $1`,
+      [row.id],
+    );
+
     return {
       id: row.id,
       name: row.name,
@@ -322,6 +352,7 @@ export class SttAdminService {
         error_message: row.last_error_message,
       },
       secret,
+      keys: counts[0] ?? { total: 0, usable: 0, exhausted: 0, invalid: 0 },
       created_at: row.created_at,
       updated_at: row.updated_at,
     };
@@ -359,6 +390,7 @@ export class SttAdminService {
           "UPDATE stt_provider_configs SET secret_ref = $2 WHERE id = $1",
           [created.id, secretRef],
         );
+        await this.listPrimaryKey(client, created.id, secretRef, actorId);
         created.secret_ref = secretRef;
       }
       await client.query("COMMIT");
@@ -435,6 +467,7 @@ export class SttAdminService {
           "UPDATE stt_provider_configs SET secret_ref = $2 WHERE id = $1",
           [id, secretRef],
         );
+        await this.listPrimaryKey(client, id, secretRef, actorId);
         updated.secret_ref = secretRef;
       }
       await client.query("COMMIT");
@@ -445,6 +478,236 @@ export class SttAdminService {
     } finally {
       client.release();
     }
+  }
+
+  // -------------------------------------------------------------------
+  // Ключи провайдера
+  // -------------------------------------------------------------------
+  /**
+   * Список ключей конфигурации. Значений здесь нет и быть не может —
+   * только подписи, порядок, состояние и счётчики.
+   */
+  async listKeys(configId: string): Promise<Record<string, unknown>[]> {
+    await this.row(configId);
+    const { rows } = await this.pool.query(
+      `SELECT k.id, k.label, k.position, k.enabled, k.status, k.cooldown_until,
+              k.last_used_at, k.last_error_at, k.last_error_code,
+              k.success_count, k.failure_count, k.created_at,
+              s.last_rotated_at
+         FROM stt_provider_keys k
+         LEFT JOIN secret_records s ON s.secret_ref = k.secret_ref
+        WHERE k.config_id = $1
+        ORDER BY k.position, k.created_at`,
+      [configId],
+    );
+    return rows;
+  }
+
+  /**
+   * Расшифрованные ключи конфигурации в порядке перебора — то, что
+   * уходит в снимок media-service.
+   *
+   * Выключенные пропускаются, помеченные exhausted — нет: срок
+   * остывания отсчитывает media-service, он же вернёт ключ в оборот,
+   * когда суточный лимит сбросится. Повторять этот отсчёт здесь значило
+   * бы завести вторые часы, которые разойдутся с первыми.
+   *
+   * Ключ, чья запись в Secret Store исчезла, молча выпадает из списка:
+   * пустое значение превратилось бы в запрос с пустым Authorization и
+   * потратило бы попытку впустую.
+   */
+  private async resolveKeys(
+    row: SttConfigRow,
+  ): Promise<Array<{ id: string; label: string; secret: string }>> {
+    const { rows } = await this.pool.query<{
+      id: string; label: string; secret_ref: string; enabled: boolean;
+    }>(
+      `SELECT id, label, secret_ref, enabled
+         FROM stt_provider_keys
+        WHERE config_id = $1
+        ORDER BY position, created_at`,
+      [row.id],
+    );
+
+    const out: Array<{ id: string; label: string; secret: string }> = [];
+    for (const key of rows) {
+      if (!key.enabled) continue;
+      const secret = await this.secrets.get(key.secret_ref);
+      if (!secret) continue;
+      out.push({ id: key.id, label: key.label, secret });
+    }
+
+    // Конфигурация, чей ключ ещё не попал в список — например, заведённая
+    // старой версией панели, — иначе осталась бы без ключа вовсе.
+    // Проверка идёт по всем строкам, включая выключенные: выключенный
+    // администратором ключ не должен возвращаться через эту дверь.
+    const listed = new Set(rows.map((key) => key.secret_ref));
+    if (row.secret_ref && !listed.has(row.secret_ref)) {
+      const legacy = await this.secrets.get(row.secret_ref);
+      if (legacy) out.unshift({ id: `${row.id}:0`, label: "Основной", secret: legacy });
+    }
+    return out;
+  }
+
+  /**
+   * Добавление ключа.
+   *
+   * Каждый ключ — отдельная запись в Secret Store. Хранить их списком в
+   * одной записи нельзя: ротация одного ключа перезаписывала бы
+   * остальные, а отозвать один из пяти стало бы невозможно.
+   */
+  async addKey(configId: string, body: Record<string, unknown>, actorId: string | null) {
+    const config = await this.row(configId);
+    if (config.archived_at) throw adminBadRequest("Архивной конфигурации ключи не нужны");
+
+    const value = this.extractSecret(body, config.provider);
+    if (!value) throw adminBadRequest("Не передано значение ключа");
+
+    // Тот же ключ дважды — не резерв, а два одинаковых запроса и два
+    // одинаковых отказа подряд. Уникальный индекс этого не ловит:
+    // ссылки у записей разные, совпадают значения. Выключенные тоже
+    // считаются: их включают обратно, и дубль всплыл бы тогда.
+    const { rows: present } = await this.pool.query<{ label: string; secret_ref: string }>(
+      "SELECT label, secret_ref FROM stt_provider_keys WHERE config_id = $1",
+      [configId],
+    );
+    if (config.secret_ref) present.push({ label: "Основной", secret_ref: config.secret_ref });
+    for (const key of present) {
+      if (await this.secrets.get(key.secret_ref) === value) {
+        throw adminBadRequest(`Такой ключ уже добавлен под названием «${key.label}»`);
+      }
+    }
+
+    const { rows: existing } = await this.pool.query<{ n: number; next: number }>(
+      `SELECT count(*)::int AS n, COALESCE(max(position), -1) + 10 AS next
+         FROM stt_provider_keys WHERE config_id = $1`,
+      [configId],
+    );
+    const count = existing[0]?.n ?? 0;
+    if (count >= 20) throw adminBadRequest("Больше двадцати ключей на провайдера — это уже не резерв");
+
+    const label = String(body.label ?? "").trim() || `Ключ ${count + 1}`;
+    // Ссылка уникальна на ключ, а не на конфигурацию: иначе второй ключ
+    // затёр бы первый.
+    const secretRef = `sec_stt_${configId.replace(/-/g, "").slice(0, 12)}`
+      + `_${randomBytes(4).toString("hex")}`;
+    await this.secrets.put(secretRef, value, ["media-service"], actorId);
+
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        `INSERT INTO stt_provider_keys (config_id, label, secret_ref, position, created_by)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [configId, label, secretRef, existing[0]?.next ?? 0, actorId],
+      );
+      // Первый ключ становится и ключом самой конфигурации: так она
+      // считается настроенной, и старый однокючевой путь продолжает
+      // работать.
+      if (!config.secret_ref) {
+        await client.query(
+          "UPDATE stt_provider_configs SET secret_ref = $2 WHERE id = $1",
+          [configId, secretRef],
+        );
+      }
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw this.friendly(error);
+    } finally {
+      client.release();
+    }
+
+    await this.pushSnapshot();
+    return { keys: await this.listKeys(configId) };
+  }
+
+  /** Включение, выключение и переименование ключа. */
+  async updateKey(configId: string, keyId: string, body: Record<string, unknown>) {
+    await this.row(configId);
+    const label = body.label === undefined ? null : String(body.label).trim();
+    const enabled = typeof body.enabled === "boolean" ? body.enabled : null;
+
+    try {
+      const { rowCount } = await this.pool.query(
+        `UPDATE stt_provider_keys
+            SET label = COALESCE($3, label),
+                enabled = COALESCE($4, enabled),
+                -- Ручное включение снимает и автоматическую пометку:
+                -- администратор мог заменить ключ у провайдера.
+                status = CASE WHEN $4 IS TRUE THEN 'active' ELSE status END,
+                cooldown_until = CASE WHEN $4 IS TRUE THEN NULL ELSE cooldown_until END
+          WHERE id = $2 AND config_id = $1`,
+        [configId, keyId, label || null, enabled],
+      );
+      if (!rowCount) throw adminNotFound("Ключ не найден");
+    } catch (error) {
+      throw this.friendly(error);
+    }
+    await this.pushSnapshot();
+    return { keys: await this.listKeys(configId) };
+  }
+
+  /**
+   * Удаление ключа.
+   *
+   * Запись в Secret Store тоже снимается: осиротевший секрет нельзя ни
+   * использовать, ни найти, а в списке секретов он мозолит глаза.
+   * Последний ключ удалить нельзя, если конфигурация активна: это
+   * молча выключило бы распознавание.
+   */
+  async removeKey(configId: string, keyId: string) {
+    const config = await this.row(configId);
+    const { rows } = await this.pool.query<{ secret_ref: string; total: number }>(
+      `SELECT k.secret_ref,
+              (SELECT count(*)::int FROM stt_provider_keys WHERE config_id = $1) AS total
+         FROM stt_provider_keys k
+        WHERE k.id = $2 AND k.config_id = $1`,
+      [configId, keyId],
+    );
+    const row = rows[0];
+    if (!row) throw adminNotFound("Ключ не найден");
+
+    const usedByRoute = await this.pool.query(
+      `SELECT 1 FROM stt_routes
+        WHERE primary_config_id = $1 OR fallback_config_id = $1`,
+      [configId],
+    );
+    if (row.total <= 1 && (usedByRoute.rowCount ?? 0) > 0) {
+      throw adminBadRequest(
+        "Это последний ключ работающей конфигурации. Добавьте другой "
+        + "или снимите её с маршрута.",
+      );
+    }
+
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("DELETE FROM stt_provider_keys WHERE id = $1 AND config_id = $2",
+        [keyId, configId]);
+      if (config.secret_ref === row.secret_ref) {
+        // Указатель конфигурации переезжает на следующий живой ключ.
+        const { rows: next } = await client.query<{ secret_ref: string }>(
+          `SELECT secret_ref FROM stt_provider_keys
+            WHERE config_id = $1 ORDER BY position, created_at LIMIT 1`,
+          [configId],
+        );
+        await client.query(
+          "UPDATE stt_provider_configs SET secret_ref = $2 WHERE id = $1",
+          [configId, next[0]?.secret_ref ?? null],
+        );
+      }
+      await client.query("DELETE FROM secret_records WHERE secret_ref = $1", [row.secret_ref]);
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw this.friendly(error);
+    } finally {
+      client.release();
+    }
+
+    await this.pushSnapshot();
+    return { keys: await this.listKeys(configId) };
   }
 
   /** Отдельная write-only операция замены ключа. */
@@ -463,27 +726,132 @@ export class SttAdminService {
         WHERE id = $1`,
       [id, secretRef],
     );
+    await this.listPrimaryKey(this.pool, id, secretRef, actorId);
+    await this.pushSnapshot();
     return await this.get(id);
   }
 
+  /**
+   * Заводит ключ самой конфигурации в общем списке.
+   *
+   * Ключ можно задать двумя дверями — полем в редакторе и кнопкой
+   * «Добавить ключ», — а список перебора должен быть один. Ссылка на
+   * секрет конфигурации детерминирована (см. storeSecret), поэтому
+   * повторный вызов ничего не дублирует: ON CONFLICT DO NOTHING
+   * срабатывает и по ссылке, и по подписи.
+   */
+  private async listPrimaryKey(
+    client: pg.PoolClient | pg.Pool,
+    configId: string,
+    secretRef: string,
+    actorId: string | null,
+  ): Promise<void> {
+    await client.query(
+      `INSERT INTO stt_provider_keys (config_id, label, secret_ref, position, created_by)
+       VALUES ($1, 'Основной', $2, 0, $3)
+       ON CONFLICT DO NOTHING`,
+      [configId, secretRef, actorId],
+    );
+  }
+
+  /**
+   * Итог одной попытки конкретного ключа.
+   *
+   * Отсюда берётся то, что панель показывает про ключ: работает,
+   * упёрся в лимит или отвергнут. Право решать при этом остаётся за
+   * media-service — здесь только отражение его решения, потому что
+   * ключ выбирает он.
+   *
+   * Ключ конфигурации, ещё не попавший в список, имеет
+   * псевдоидентификатор «uuid:0». Строки под него нет, и запрос с ним
+   * упал бы на приведении к uuid.
+   */
+  private async markKeyTested(
+    keyId: string,
+    ok: boolean,
+    errorCode: string | null,
+  ): Promise<void> {
+    if (!UUID_RE.test(keyId)) return;
+    // Лимит снимается сам — сутки у Deepgram и Google AI Studio,
+    // минута у OpenAI, — поэтому ключ выключается на время, а не
+    // насовсем. Отвергнутый ключ ждёт человека: сам он не починится.
+    const cooldownMinutes = errorCode === "stt_rate_limited" ? 15 : null;
+    const status = ok
+      ? "active"
+      : errorCode === "stt_rate_limited" ? "exhausted"
+        : errorCode === "stt_auth_failed" ? "invalid"
+          : null; // сеть или таймаут — ключ ни при чём
+    await this.pool.query(
+      `UPDATE stt_provider_keys
+          SET status         = COALESCE($2, status),
+              cooldown_until = CASE WHEN $3::int IS NULL THEN NULL
+                                    ELSE now() + ($3 || ' minutes')::interval END,
+              last_used_at   = now(),
+              last_error_at  = CASE WHEN $4 THEN last_error_at ELSE now() END,
+              last_error_code = CASE WHEN $4 THEN NULL ELSE $5 END,
+              success_count  = success_count + CASE WHEN $4 THEN 1 ELSE 0 END,
+              failure_count  = failure_count + CASE WHEN $4 THEN 0 ELSE 1 END
+        WHERE id = $1`,
+      [keyId, status, cooldownMinutes, ok, errorCode],
+    );
+  }
+
   // -------------------------------------------------------------------
+  /**
+   * Проверка конфигурации: прогоняются ВСЕ ключи, а не только первый.
+   *
+   * Иначе смысл списка теряется. Администратор вписал пять ключей,
+   * проверка сказала «работает» — и через неделю, когда первый упрётся
+   * в лимит, выясняется, что во втором опечатка. Проверять надо то, на
+   * что рассчитываешь, а рассчитываешь на весь список.
+   *
+   * Конфигурация считается рабочей, если работает хотя бы один ключ:
+   * ровно так же на неё смотрит маршрутизация.
+   */
   async test(id: string, audioBase64?: string) {
     const row = await this.row(id);
-    const secret = row.secret_ref ? await this.secrets.get(row.secret_ref) : null;
-    const result = await this.media.test(
-      {
-        id: row.id,
-        name: row.name,
-        provider: row.provider,
-        mode: row.mode,
-        base_url: row.base_url,
-        model: row.model,
-        params: row.public_config ?? {},
-        secret: secret ?? "",
-      },
-      audioBase64,
-    );
+    const keys = await this.resolveKeys(row);
+    if (keys.length === 0) {
+      return {
+        success: false,
+        error: { code: "stt_secret_missing", message: "У конфигурации нет ни одного ключа" },
+        keys: [],
+      };
+    }
 
+    const perKey: Array<Record<string, unknown>> = [];
+    let best: Record<string, unknown> | null = null;
+    for (const key of keys) {
+      const outcome = await this.media.test(
+        {
+          id: row.id,
+          name: row.name,
+          provider: row.provider,
+          mode: row.mode,
+          base_url: row.base_url,
+          model: row.model,
+          params: row.public_config ?? {},
+          secret: key.secret,
+        },
+        audioBase64,
+      );
+      const keyOk = outcome.success === true;
+      const keyError = outcome.error as { code?: string; message?: string } | undefined;
+      perKey.push({
+        id: key.id,
+        label: key.label,
+        success: keyOk,
+        latency_ms: outcome.latency_ms ?? null,
+        error_code: keyOk ? null : (keyError?.code ?? "stt_transcription_failed"),
+        error_message: keyOk ? null : keyError?.message ?? null,
+      });
+      await this.markKeyTested(key.id, keyOk, keyOk ? null : keyError?.code ?? null);
+      // Первый успех задаёт вердикт всей конфигурации, но перебор не
+      // прерывает: администратор просил проверить ключи, все.
+      if (best === null || (keyOk && best.success !== true)) best = outcome;
+    }
+
+    const result = { ...(best ?? {}), keys: perKey } as Record<string, unknown>;
     const ok = result.success === true;
     const error = result.error as { code?: string; message?: string } | undefined;
     await this.pool.query(
@@ -733,8 +1101,10 @@ export class SttAdminService {
 
     const configs: ResolvedForMedia[] = [];
     for (const row of rows) {
-      const secret = row.secret_ref ? await this.secrets.get(row.secret_ref) : null;
-      if (!secret) continue; // без ключа конфигурация нерабочая
+      const keys = await this.resolveKeys(row);
+      // Без единого ключа конфигурация нерабочая: отправлять её в
+      // снимок значит получить отказ на первом же аудио.
+      if (keys.length === 0) continue;
       configs.push({
         id: row.id,
         name: row.name,
@@ -743,7 +1113,10 @@ export class SttAdminService {
         base_url: row.base_url,
         model: row.model,
         params: row.public_config ?? {},
-        secret,
+        // Первый ключ дублируется в secret: так снимок понимает и та
+        // версия media-service, которая про список ещё не знает.
+        secret: keys[0]!.secret,
+        keys,
       });
     }
 
@@ -840,6 +1213,10 @@ export class SttAdminService {
       latency_ms: number;
       is_fallback?: boolean;
       error_code?: string | null;
+      key_id?: string | null;
+      key_label?: string | null;
+      keys_tried?: number;
+      key_failures?: Array<{ key_id?: string | null; error_code?: string | null }>;
     }>;
     audioSeconds: number;
     idempotencyKey?: string | null;
@@ -868,6 +1245,19 @@ export class SttAdminService {
           input.idempotencyKey ?? null,
         ],
       );
+
+      // Ключи, отвергнутые по дороге, помечаются каждый своей причиной,
+      // а тот, которым попытка закончилась, — её итогом. Без этого
+      // панель показывала бы «активен» ключу, который media-service
+      // молча обходит уже неделю.
+      for (const failure of attempt.key_failures ?? []) {
+        if (failure.key_id) {
+          await this.markKeyTested(failure.key_id, false, failure.error_code ?? null);
+        }
+      }
+      if (attempt.key_id) {
+        await this.markKeyTested(attempt.key_id, attempt.ok, attempt.error_code ?? null);
+      }
     }
   }
 

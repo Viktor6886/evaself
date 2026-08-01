@@ -588,4 +588,233 @@ describe("реестр STT-провайдеров", { skip: DATABASE_URL ? false
     );
     assert.ok(!rows[0].text.includes("SECRET"));
   });
+
+  // -------------------------------------------------------------------
+  // несколько ключей на провайдера
+  // -------------------------------------------------------------------
+  /** Настраивает Secret Store так, чтобы FK на secret_records не падал. */
+  const withSecretRows = () => {
+    const originalPut = secrets.put.bind(secrets);
+    secrets.put = async (ref, value, usedBy) => {
+      await seedSecretRow(ref);
+      return originalPut(ref, value, usedBy);
+    };
+  };
+
+  /** Конфигурация на маршруте telegram_voice — так снимок доходит до media. */
+  const routedDeepgram = async (overrides: Record<string, unknown> = {}) => {
+    withSecretRows();
+    const created = await service.create(deepgram(overrides), null);
+    await service.updateRoute("telegram_voice", { primary_config_id: created.id }, null);
+    return created.id as string;
+  };
+
+  test("ключей может быть несколько, и каждый лежит отдельной записью", async () => {
+    await reset();
+    const id = await routedDeepgram();
+    await service.addKey(id, { api_key: "dg-second", label: "Резервный" }, null);
+    await service.addKey(id, { api_key: "dg-third" }, null);
+
+    const keys = await service.listKeys(id);
+    assert.equal(keys.length, 3, "основной ключ плюс два добавленных");
+    assert.deepEqual(keys.map((key) => key.label), ["Основной", "Резервный", "Ключ 3"]);
+
+    // Ротация одного ключа не должна задевать остальные — значит, у
+    // каждого своя запись в Secret Store.
+    const refs = new Set(secrets.puts.map((put) => put.ref));
+    assert.equal(refs.size, 3);
+    for (const ref of refs) assert.match(ref, /^sec_stt_[0-9a-f_]+$/);
+  });
+
+  test("значения ключей не возвращаются из API ни в каком виде", async () => {
+    await reset();
+    const id = await routedDeepgram();
+    await service.addKey(id, { api_key: "dg-очень-секретный", label: "Резервный" }, null);
+
+    const dumped = JSON.stringify([
+      await service.listKeys(id),
+      await service.get(id),
+      await service.list(),
+    ]);
+    assert.ok(!dumped.includes("dg-очень-секретный"));
+    assert.ok(!dumped.includes("dg-live-key"));
+  });
+
+  test("в снимок для media-service уходят все включённые ключи по порядку", async () => {
+    await reset();
+    const id = await routedDeepgram();
+    await service.addKey(id, { api_key: "dg-second", label: "Второй" }, null);
+    await service.addKey(id, { api_key: "dg-third", label: "Третий" }, null);
+
+    const snapshot = media.snapshots.at(-1) as {
+      configs: Array<{ secret: string; keys: Array<{ label: string; secret: string }> }>;
+    };
+    const config = snapshot.configs[0]!;
+    assert.deepEqual(config.keys.map((key) => key.secret), ["dg-live-key", "dg-second", "dg-third"]);
+    assert.deepEqual(config.keys.map((key) => key.label), ["Основной", "Второй", "Третий"]);
+    // Первый ключ дублируется в secret: снимок должна понимать и та
+    // версия media-service, которая про список ещё не знает.
+    assert.equal(config.secret, "dg-live-key");
+  });
+
+  test("выключенный ключ остаётся в списке, но выпадает из снимка", async () => {
+    await reset();
+    const id = await routedDeepgram();
+    const added = await service.addKey(id, { api_key: "dg-second", label: "Второй" }, null);
+    const keyId = (added.keys.find((key) => key.label === "Второй") as { id: string }).id;
+
+    await service.updateKey(id, keyId, { enabled: false });
+
+    const keys = await service.listKeys(id);
+    assert.equal(keys.length, 2, "выключить и удалить — разные намерения");
+    assert.equal(keys.find((key) => key.id === keyId)!.enabled, false);
+
+    const snapshot = media.snapshots.at(-1) as { configs: Array<{ keys: unknown[] }> };
+    assert.deepEqual(
+      (snapshot.configs[0]!.keys as Array<{ secret: string }>).map((key) => key.secret),
+      ["dg-live-key"],
+    );
+  });
+
+  test("включение ключа снимает автоматическую пометку об исчерпании", async () => {
+    await reset();
+    const id = await routedDeepgram();
+    const added = await service.addKey(id, { api_key: "dg-second", label: "Второй" }, null);
+    const keyId = (added.keys.find((key) => key.label === "Второй") as { id: string }).id;
+
+    await pool.query(
+      `UPDATE stt_provider_keys
+          SET status = 'exhausted', cooldown_until = now() + interval '1 day', enabled = false
+        WHERE id = $1`,
+      [keyId],
+    );
+    await service.updateKey(id, keyId, { enabled: true });
+
+    const key = (await service.listKeys(id)).find((item) => item.id === keyId)!;
+    // Администратор мог заменить ключ у провайдера — держать его в
+    // остывании после ручного включения означало бы игнорировать это.
+    assert.equal(key.status, "active");
+    assert.equal(key.cooldown_until, null);
+  });
+
+  test("один и тот же ключ нельзя добавить дважды", async () => {
+    await reset();
+    const id = await routedDeepgram();
+    await assert.rejects(
+      () => service.addKey(id, { api_key: "dg-live-key", label: "Копия" }, null),
+      /уже добавлен/,
+    );
+  });
+
+  test("последний ключ работающей конфигурации не удаляется", async () => {
+    await reset();
+    const id = await routedDeepgram();
+    const keys = await service.listKeys(id);
+    await assert.rejects(
+      () => service.removeKey(id, keys[0]!.id as string),
+      /последний ключ/,
+    );
+
+    // С двумя ключами удаление разрешено, и указатель конфигурации
+    // переезжает на оставшийся.
+    await service.addKey(id, { api_key: "dg-second", label: "Второй" }, null);
+    await service.removeKey(id, keys[0]!.id as string);
+
+    const left = await service.listKeys(id);
+    assert.deepEqual(left.map((key) => key.label), ["Второй"]);
+    const { rows } = await pool.query<{ secret_ref: string }>(
+      "SELECT secret_ref FROM stt_provider_configs WHERE id = $1", [id],
+    );
+    assert.equal(await secrets.get(rows[0]!.secret_ref), "dg-second");
+  });
+
+  test("проверка прогоняет все ключи, а не только первый", async () => {
+    await reset();
+    const id = await routedDeepgram();
+    await service.addKey(id, { api_key: "dg-second", label: "Второй" }, null);
+    await service.addKey(id, { api_key: "dg-third", label: "Третий" }, null);
+
+    // Первый ключ отвергнут, второй упёрся в лимит, третий работает.
+    const verdicts: Record<string, Record<string, unknown>> = {
+      "dg-live-key": { success: false, error: { code: "stt_auth_failed", message: "401" } },
+      "dg-second": { success: false, error: { code: "stt_rate_limited", message: "429" } },
+      "dg-third": { success: true, latency_ms: 90, transcript: "тест" },
+    };
+    media.test = (async (config: { secret: string }) => verdicts[config.secret]) as never;
+
+    const result = await service.test(id) as {
+      success: boolean; keys: Array<Record<string, unknown>>;
+    };
+    assert.equal(result.success, true, "рабочий ключ есть — значит, конфигурация рабочая");
+    assert.deepEqual(result.keys.map((key) => key.label), ["Основной", "Второй", "Третий"]);
+    assert.deepEqual(result.keys.map((key) => key.success), [false, false, true]);
+    assert.equal(result.keys[0]!.error_code, "stt_auth_failed");
+
+    // Итог проверки виден в состоянии ключей: иначе панель показывала бы
+    // «активен» тому, кого провайдер уже отверг.
+    const stored = await service.listKeys(id);
+    assert.equal(stored.find((key) => key.label === "Основной")!.status, "invalid");
+    assert.equal(stored.find((key) => key.label === "Второй")!.status, "exhausted");
+    assert.ok(stored.find((key) => key.label === "Второй")!.cooldown_until);
+    assert.equal(stored.find((key) => key.label === "Третий")!.status, "active");
+  });
+
+  test("телеметрия распознавания переносит состояние ключей в базу", async () => {
+    await reset();
+    const id = await routedDeepgram();
+    const added = await service.addKey(id, { api_key: "dg-second", label: "Второй" }, null);
+    const second = (added.keys.find((key) => key.label === "Второй") as { id: string }).id;
+    const first = (added.keys.find((key) => key.label === "Основной") as { id: string }).id;
+
+    // Так выглядит успешное распознавание, которому пришлось сменить
+    // ключ: пользователь ничего не заметил, панель обязана заметить.
+    await service.recordUsage({
+      useCase: "telegram_voice",
+      audioSeconds: 4,
+      attempts: [{
+        config_id: id, provider: "deepgram", model: "nova-3", ok: true, latency_ms: 300,
+        key_id: second, key_label: "Второй", keys_tried: 2,
+        key_failures: [{ key_id: first, error_code: "stt_rate_limited" }],
+      }],
+    });
+
+    const keys = await service.listKeys(id);
+    const primary = keys.find((key) => key.id === first)!;
+    const backup = keys.find((key) => key.id === second)!;
+    assert.equal(primary.status, "exhausted");
+    assert.equal(String(primary.failure_count), "1");
+    assert.equal(backup.status, "active");
+    assert.equal(String(backup.success_count), "1");
+  });
+
+  test("идентификатор ключа из media-service не доходит до запроса непроверенным", async () => {
+    await reset();
+    const id = await routedDeepgram();
+    // media-service отдаёт псевдоидентификатор для конфигурации, чей
+    // ключ ещё не попал в список. Приведение к uuid уронило бы всю
+    // запись телеметрии вместе с ним.
+    await service.recordUsage({
+      useCase: "telegram_voice",
+      audioSeconds: 4,
+      attempts: [{
+        config_id: id, provider: "deepgram", model: "nova-3", ok: true, latency_ms: 300,
+        key_id: `${id}:0`, key_label: "Основной", keys_tried: 1,
+      }],
+    });
+    const { rows } = await pool.query("SELECT count(*)::int AS n FROM stt_usage_events");
+    assert.equal(rows[0].n, 1, "событие записано, несмотря на чужой формат идентификатора");
+  });
+
+  test("карточка показывает, сколько ключей и сколько из них живы", async () => {
+    await reset();
+    const id = await routedDeepgram();
+    const added = await service.addKey(id, { api_key: "dg-second", label: "Второй" }, null);
+    const second = (added.keys.find((key) => key.label === "Второй") as { id: string }).id;
+    await pool.query("UPDATE stt_provider_keys SET status = 'exhausted' WHERE id = $1", [second]);
+
+    const config = await service.get(id) as { keys: Record<string, number> };
+    assert.equal(config.keys.total, 2);
+    assert.equal(config.keys.usable, 1);
+    assert.equal(config.keys.exhausted, 1);
+  });
 });
