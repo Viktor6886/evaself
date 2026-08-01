@@ -598,17 +598,31 @@ async def stt_test(payload: dict):
         if uploaded:
             import base64
 
+            # Запись из браузера — это webm/opus в Chrome и mp4/aac в
+            # Safari, а не WAV. Раньше присланные байты клались прямо в
+            # probe.wav и уходили провайдеру под видом WAV: Deepgram это
+            # переживал, потому что определяет формат сам, а OpenAI
+            # получал multipart с враньём в имени файла. Поэтому сначала
+            # сохраняем как есть, а потом отдаём ffmpeg — ровно так же,
+            # как поступает обычное распознавание.
+            raw = work / "upload.bin"
             try:
-                sample.write_bytes(base64.b64decode(str(uploaded), validate=True))
+                raw.write_bytes(base64.b64decode(str(uploaded), validate=True))
             except (ValueError, TypeError):
                 return _error("stt_audio_invalid", "аудио не разбирается как base64", 400)
             try:
-                info = await probe(sample)
+                info = await probe(raw)
             except MediaError as exc:
                 return _error("stt_audio_invalid", exc.message, 422, details=exc.details)
+            if not info["has_audio"]:
+                return _error("stt_audio_invalid", "в записи нет звуковой дорожки", 422)
             duration = info["duration_seconds"]
             if duration > MAX_AUDIO_SECONDS:
                 return _error("stt_audio_too_long", "тестовая запись слишком длинная", 413)
+            try:
+                await to_asr_wav(raw, sample)
+            except MediaError as exc:
+                return _error("stt_audio_invalid", exc.message, 422, details=exc.details)
         else:
             try:
                 await make_test_tone(sample)

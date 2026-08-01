@@ -234,15 +234,25 @@
           <div id="stt-routes" class="status-grid" hidden></div>
           <div id="stt-usage" hidden></div>
 
+          <!-- Диалоги раздела.
+               Шапка каждого закреплена и содержит «Назад»: диалог на
+               телефоне длиннее экрана, и крестик, уехавший вверх вместе
+               с прокруткой, закрыть окно уже не помогает. -->
+
           <!-- Редактор конфигурации -->
           <dialog id="stt-dialog" class="sheet-dialog">
             <div class="sheet-head">
-              <div><h3 id="stt-dialog-title">Конфигурация</h3><p id="stt-dialog-hint" class="muted"></p></div>
-              <button id="close-stt-dialog" class="icon-button" aria-label="Закрыть">×</button>
+              <button class="sheet-back" data-close-dialog="stt-dialog" type="button">
+                <span aria-hidden="true">←</span> Назад
+              </button>
+              <div class="sheet-title">
+                <h3 id="stt-dialog-title">Конфигурация</h3>
+                <p id="stt-dialog-hint" class="muted"></p>
+              </div>
             </div>
             <form id="stt-form" class="integration-form"></form>
             <p id="stt-form-error" class="integration-status" hidden></p>
-            <div class="form-actions">
+            <div class="form-actions sheet-foot">
               <button id="stt-test" class="button ghost" type="button">Проверить</button>
               <button id="stt-save" class="button primary" type="button">Сохранить</button>
             </div>
@@ -254,8 +264,13 @@
                запроса, и пользователь этого не замечает. -->
           <dialog id="stt-key-dialog" class="sheet-dialog">
             <div class="sheet-head">
-              <div><h3 id="stt-key-title">Ключи</h3><p id="stt-key-hint" class="muted"></p></div>
-              <button id="close-stt-key" class="icon-button" aria-label="Закрыть">×</button>
+              <button class="sheet-back" data-close-dialog="stt-key-dialog" type="button">
+                <span aria-hidden="true">←</span> Назад
+              </button>
+              <div class="sheet-title">
+                <h3 id="stt-key-title">Ключи</h3>
+                <p id="stt-key-hint" class="muted"></p>
+              </div>
             </div>
             <div id="stt-key-list" class="key-list"></div>
             <details id="stt-key-add" class="key-add">
@@ -272,18 +287,43 @@
             <p id="stt-key-error" class="integration-status" hidden></p>
           </dialog>
 
-          <!-- Проверка на реальном аудио -->
+          <!-- Проверка на реальном аудио.
+               Записать голос прямо здесь — главный способ проверки:
+               встроенный сигнал говорит лишь о том, что провайдер
+               отвечает, а собственный голос — о том, что он понимает
+               именно вас, в вашей акустике и на вашем языке. -->
           <dialog id="stt-test-dialog" class="sheet-dialog">
             <div class="sheet-head">
-              <div><h3>Проверка распознавания</h3><p class="muted">Встроенный тестовый сигнал или ваш файл. Проверка не активирует конфигурацию.</p></div>
-              <button id="close-stt-test" class="icon-button" aria-label="Закрыть">×</button>
+              <button class="sheet-back" data-close-dialog="stt-test-dialog" type="button">
+                <span aria-hidden="true">←</span> Назад
+              </button>
+              <div class="sheet-title">
+                <h3 id="stt-test-title">Проверка распознавания</h3>
+                <p class="muted">Проверка не активирует конфигурацию.</p>
+              </div>
             </div>
-            <label class="field">
-              <span>Свой аудиофайл (необязательно)</span>
-              <input id="stt-test-file" type="file" accept="audio/*">
-            </label>
+
+            <div class="recorder">
+              <button id="stt-record" class="button primary recorder-button" type="button">
+                <span class="recorder-dot" aria-hidden="true"></span>
+                <span id="stt-record-label">Записать голос</span>
+              </button>
+              <p id="stt-record-state" class="muted">Скажите несколько слов — их и будем распознавать.</p>
+              <audio id="stt-record-preview" controls hidden></audio>
+            </div>
+
+            <details class="test-alt">
+              <summary>Другие способы</summary>
+              <label class="field">
+                <span>Свой аудиофайл</span>
+                <input id="stt-test-file" type="file" accept="audio/*">
+              </label>
+              <p class="muted">Без записи и без файла проверка уйдёт со встроенным
+                сигналом: он подтверждает связь и ключ, но не качество распознавания.</p>
+            </details>
+
             <div id="stt-test-result" class="integration-test" hidden></div>
-            <div class="form-actions">
+            <div class="form-actions sheet-foot">
               <button id="stt-test-run" class="button primary" type="button">Запустить проверку</button>
             </div>
           </dialog>

@@ -73,3 +73,109 @@ def test_temp_directory_is_empty_after_requests(client):
 
     leftovers = list(Path(WORK_DIR).glob("job-*"))
     assert leftovers == [], f"temporary workspaces were not cleaned up: {leftovers}"
+
+
+# =====================================================================
+# Проверка провайдера записью из браузера
+# =====================================================================
+def test_stt_test_converts_uploaded_recording_before_sending(client, monkeypatch):
+    """Запись из браузера не WAV, и уходить провайдеру как WAV не должна.
+
+    Chrome пишет webm/opus, Safari — mp4/aac. Раньше присланные байты
+    клались прямо в probe.wav и отправлялись под этим именем: Deepgram
+    выживал, потому что определяет формат сам, а OpenAI получал
+    multipart с враньём в имени файла. Теперь между ними стоит ffmpeg —
+    ровно тот же, через который проходит обычное распознавание.
+    """
+    import base64
+
+    from app import main as media_main
+
+    converted = {}
+
+    async def fake_probe(path):
+        # Пришло что угодно, только не WAV.
+        assert path.name == "upload.bin", f"сырьё должно лечь как есть, а не как {path.name}"
+        return {"has_audio": True, "duration_seconds": 2.0}
+
+    async def fake_to_asr_wav(source, destination):
+        converted["from"] = source.name
+        converted["to"] = destination.name
+        destination.write_bytes(b"RIFF....WAVE")
+        return destination
+
+    seen = {}
+
+    class FakeAdapter:
+        def validate(self, config):
+            from app.stt.types import ValidationResult
+            return ValidationResult(ok=True)
+
+        async def test(self, config, audio):
+            from app.stt.types import SttResult
+            seen["filename"] = audio.filename
+            seen["mime"] = audio.mime_type
+            return SttResult(
+                text="проверка", provider="deepgram", model=config.model, latency_ms=11,
+            )
+
+    class FakeRegistry:
+        def has(self, provider):
+            return True
+
+        def get(self, provider):
+            return FakeAdapter()
+
+    monkeypatch.setattr(media_main, "probe", fake_probe)
+    monkeypatch.setattr(media_main, "to_asr_wav", fake_to_asr_wav)
+    monkeypatch.setattr(media_main, "STT_REGISTRY", FakeRegistry())
+
+    response = client.post("/stt/test", json={
+        "config": {
+            "name": "Deepgram", "provider": "deepgram", "mode": "batch",
+            "base_url": "https://api.deepgram.com/v1/listen", "model": "nova-3",
+            "params": {}, "secret": "k",
+        },
+        # Заголовок webm — то, что реально присылает Chrome.
+        "audio_base64": base64.b64encode(b"\x1aE\xdf\xa3webm-data").decode(),
+    })
+
+    assert response.status_code == 200, response.text
+    assert response.json()["success"] is True
+    assert converted == {"from": "upload.bin", "to": "probe.wav"}
+    # Провайдеру уходит уже перекодированный WAV.
+    assert seen == {"filename": "probe.wav", "mime": "audio/wav"}
+
+
+def test_stt_test_rejects_a_recording_without_audio(client, monkeypatch):
+    from app import main as media_main
+
+    async def fake_probe(path):
+        return {"has_audio": False, "duration_seconds": 0.0}
+
+    class FakeRegistry:
+        def has(self, provider):
+            return True
+
+        def get(self, provider):
+            class Adapter:
+                def validate(self, config):
+                    from app.stt.types import ValidationResult
+                    return ValidationResult(ok=True)
+            return Adapter()
+
+    monkeypatch.setattr(media_main, "probe", fake_probe)
+    monkeypatch.setattr(media_main, "STT_REGISTRY", FakeRegistry())
+
+    import base64
+    response = client.post("/stt/test", json={
+        "config": {
+            "name": "Deepgram", "provider": "deepgram", "mode": "batch",
+            "base_url": "https://api.deepgram.com/v1/listen", "model": "nova-3",
+            "params": {}, "secret": "k",
+        },
+        "audio_base64": base64.b64encode(b"not audio at all").decode(),
+    })
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "stt_audio_invalid"

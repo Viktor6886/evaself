@@ -2116,6 +2116,22 @@ function sttKeySummary(config) {
   return escapeHtml(parts.join(" · "));
 }
 
+/**
+ * Действие раздела распознавания речи.
+ *
+ * Без подтверждения паролем — по решению владельца. Ключи провайдеров
+ * вводят, меняют и проверяют часто, и пароль на каждом шаге превращал
+ * настройку в пытку: за одну сессию его приходилось вводить десяток
+ * раз. Защита осталась там, где работает по-настоящему: вход в панель,
+ * роль owner или admin и запись каждого действия в аудит.
+ *
+ * Хелпер существует, чтобы это решение было видно в одном месте, а не
+ * растворилось в десятке мест, где раньше стоял askSudo.
+ */
+function sttAction(action) {
+  Promise.resolve().then(action).catch(handleError);
+}
+
 /** Предел цепочки. Тот же, что у сервера и у LLM Router. */
 const STT_MAX_CHAIN = 6;
 
@@ -2217,18 +2233,13 @@ function sttChainAction(action, useCase, configId) {
     }
   }
 
-  askSudo({
-    scope: "stt:activate",
-    title: "Изменение цепочки провайдеров",
-    description: "Новый порядок применится немедленно, без перезапуска контейнеров.",
-    action: async () => {
+  sttAction(async () => {
       await request(`/stt/routes/${encodeURIComponent(useCase)}`, {
         method: "PUT", body: JSON.stringify({ chain: ids }),
       });
       toast("Цепочка обновлена");
       await loadStt();
-    },
-  });
+    });
 }
 
 async function loadSttUsage() {
@@ -2485,22 +2496,142 @@ async function saveSttConfig() {
     await loadStt();
   };
 
-  askSudo({
-    scope: "stt:write",
-    title: "Сохранение конфигурации распознавания",
-    description: "Запись включает ключ провайдера. Подтвердите паролем.",
-    action: send,
-  });
+  sttAction(send);
+}
+
+/**
+ * Blob → base64 без рекурсии по стеку.
+ *
+ * `String.fromCharCode(...bytes)` на записи в несколько сотен килобайт
+ * падает с «too many arguments»: аргументы кладутся на стек, и он
+ * кончается. Поэтому кусками.
+ */
+async function blobToBase64(blob) {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let binary = "";
+  const CHUNK = 8 * 1024;
+  for (let offset = 0; offset < bytes.length; offset += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + CHUNK));
+  }
+  return btoa(binary);
+}
+
+/**
+ * Запись голоса прямо в окне проверки.
+ *
+ * Встроенный сигнал подтверждает, что провайдер отвечает и ключ принят.
+ * Это не то же самое, что «распознавание работает»: язык, акцент,
+ * микрофон и шум комнаты проверяются только собственным голосом. Ради
+ * этого запись и добавлена — раньше для неё приходилось искать
+ * стороннее приложение, сохранять файл и подкладывать его через
+ * «выбрать файл».
+ */
+const recorder = {
+  media: null,
+  chunks: [],
+  blob: null,
+  stream: null,
+  startedAt: 0,
+  timer: null,
+};
+
+/** Ставит запись на паузу и отпускает микрофон. */
+function stopRecording() {
+  clearInterval(recorder.timer);
+  recorder.timer = null;
+  if (recorder.media?.state === "recording") recorder.media.stop();
+  // Поток закрывается всегда: иначе индикатор микрофона в браузере
+  // горит и после того, как окно закрыли.
+  recorder.stream?.getTracks().forEach((track) => track.stop());
+  recorder.stream = null;
+}
+
+function renderRecorderIdle(message) {
+  $("#stt-record").classList.remove("is-recording");
+  $("#stt-record-label").textContent = recorder.blob ? "Записать заново" : "Записать голос";
+  if (message) $("#stt-record-state").textContent = message;
+}
+
+async function toggleRecording() {
+  const button = $("#stt-record");
+  if (button.classList.contains("is-recording")) {
+    stopRecording();
+    return;
+  }
+
+  if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+    throw new Error("Браузер не умеет записывать звук — подложите файл");
+  }
+
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch {
+    // Разрешение на микрофон даётся один раз и отзывается в настройках
+    // сайта, поэтому «попробуйте ещё» тут не помощь.
+    throw new Error(
+      "Микрофон недоступен. Разрешите доступ в настройках сайта — "
+      + "или подложите готовый файл в «Других способах»",
+    );
+  }
+
+  // Тип оставляем на усмотрение браузера: Chrome пишет webm/opus,
+  // Safari — mp4/aac, и навязывать им чужой контейнер значит получить
+  // пустую запись. Распаковкой занимается ffmpeg в media-service.
+  recorder.media = new MediaRecorder(stream);
+  recorder.stream = stream;
+  recorder.chunks = [];
+  recorder.blob = null;
+  recorder.startedAt = Date.now();
+
+  recorder.media.ondataavailable = (event) => {
+    if (event.data.size) recorder.chunks.push(event.data);
+  };
+  recorder.media.onstop = () => {
+    recorder.blob = new Blob(recorder.chunks, { type: recorder.media.mimeType });
+    const preview = $("#stt-record-preview");
+    preview.src = URL.createObjectURL(recorder.blob);
+    preview.hidden = false;
+    const seconds = Math.round((Date.now() - recorder.startedAt) / 1000);
+    renderRecorderIdle(`Записано ${seconds} с. Нажмите «Запустить проверку».`);
+  };
+
+  recorder.media.start();
+  button.classList.add("is-recording");
+  $("#stt-record-label").textContent = "Остановить";
+  $("#stt-record-preview").hidden = true;
+
+  recorder.timer = setInterval(() => {
+    const seconds = Math.round((Date.now() - recorder.startedAt) / 1000);
+    $("#stt-record-state").textContent = `Идёт запись… ${seconds} с`;
+    // Тридцати секунд хватает любому провайдеру, чтобы показать себя, а
+    // забытая включённой запись не должна превратиться в счёт за минуты.
+    if (seconds >= 30) stopRecording();
+  }, 250);
+}
+
+/** Открывает окно проверки в чистом состоянии. */
+function openSttTestDialog(id, name) {
+  state.sttTestingId = id;
+  $("#stt-test-title").textContent = name ? `Проверка — ${name}` : "Проверка распознавания";
+  $("#stt-test-result").hidden = true;
+  if ($("#stt-test-file")) $("#stt-test-file").value = "";
+  recorder.blob = null;
+  recorder.chunks = [];
+  $("#stt-record-preview").hidden = true;
+  renderRecorderIdle("Скажите несколько слов — их и будем распознавать.");
+  $("#stt-test-dialog").showModal();
 }
 
 async function runSttTest() {
   const id = state.sttTestingId;
-  const file = $("#stt-test-file").files?.[0];
+  const file = $("#stt-test-file")?.files?.[0];
   let audio;
-  if (file) {
-    const buffer = await file.arrayBuffer();
-    audio = btoa(String.fromCharCode(...new Uint8Array(buffer)));
-  }
+  // Своя запись важнее подложенного файла: её только что сделали
+  // именно для этой проверки.
+  if (recorder.blob) audio = await blobToBase64(recorder.blob);
+  else if (file) audio = await blobToBase64(file);
+
   const host = $("#stt-test-result");
   host.hidden = false;
   host.textContent = "Проверяю…";
@@ -2559,18 +2690,13 @@ async function saveSttRoute(useCase) {
     if (input.type === "checkbox") body[name] = input.checked;
     else body[name] = input.value === "" ? null : input.value;
   }
-  askSudo({
-    scope: "stt:activate",
-    title: "Смена маршрута распознавания",
-    description: "Новый маршрут применится немедленно, без перезапуска контейнеров.",
-    action: async () => {
+  sttAction(async () => {
       await request(`/stt/routes/${encodeURIComponent(useCase)}`, {
         method: "PUT", body: JSON.stringify(body),
       });
       toast("Маршрут применён");
       await loadStt();
-    },
-  });
+    });
 }
 
 // ---------------------------------------------------------------------
@@ -2605,68 +2731,42 @@ document.addEventListener("click", (event) => {
       openSttEditor(config);
       break;
     case "test":
-      state.sttTestingId = id;
-      $("#stt-test-result").hidden = true;
-      $("#stt-test-file").value = "";
-      $("#stt-test-dialog").showModal();
+      openSttTestDialog(id, config?.name);
       break;
     case "archive":
-      askSudo({
-        scope: "stt:write",
-        title: "Архивирование конфигурации",
-        description: "Конфигурация перестанет быть доступной для маршрутов. История расходов сохранится.",
-        action: async () => {
+      sttAction(async () => {
           await request(`/stt/configs/${id}/archive`, { method: "POST" });
           toast("Конфигурация в архиве");
           await loadStt();
-        },
-      });
+        });
       break;
     case "restore":
-      askSudo({
-        scope: "stt:write",
-        title: "Возврат из архива",
-        description: "Конфигурация снова станет доступной для назначения на маршрут.",
-        action: async () => {
+      sttAction(async () => {
           await request(`/stt/configs/${id}/restore`, { method: "POST" });
           await loadStt();
-        },
-      });
+        });
       break;
     case "key":
       openSttKeyDialog(config).catch(handleError);
       break;
     case "activate":
-      askSudo({
-        scope: "stt:activate",
-        title: `Активация «${config?.name ?? ""}»`,
-        description: "Перед сменой маршрута конфигурация будет проверена настоящим запросом "
-          + "к провайдеру. Если проверка не пройдёт, маршрут не изменится.",
-        action: async () => {
+      sttAction(async () => {
           await request(`/stt/configs/${id}/activate`, {
             method: "POST",
             body: JSON.stringify({ use_case: "telegram_voice", slot: "primary" }),
           });
           toast("Провайдер активирован для голосовых Telegram");
           await loadStt();
-        },
-      });
+        });
       break;
     case "toggle": {
       const enable = action.dataset.enabled !== "true";
-      askSudo({
-        scope: "stt:activate",
-        title: enable ? "Включение провайдера" : "Выключение провайдера",
-        description: enable
-          ? "Провайдер снова начнёт принимать запросы распознавания."
-          : "Провайдер останется в маршруте, но распознавать ему больше не поручат.",
-        action: async () => {
+      sttAction(async () => {
           await request(`/stt/configs/${id}/enabled`, {
             method: "POST", body: JSON.stringify({ enabled: enable }),
           });
           await loadStt();
-        },
-      });
+        });
       break;
     }
     case "save-route":
@@ -2692,8 +2792,46 @@ document.addEventListener("change", (event) => {
 // Кнопки диалогов раздела распознавания. Регистрируются один раз здесь,
 // а не в разметке, чтобы обработчики жили рядом с логикой раздела.
 $("#new-stt-config")?.addEventListener("click", () => openSttEditor(null));
-$("#close-stt-dialog")?.addEventListener("click", () => $("#stt-dialog").close());
-$("#close-stt-test")?.addEventListener("click", () => $("#stt-test-dialog").close());
+
+/**
+ * Закрытие любого диалога кнопкой «Назад».
+ *
+ * Обработчик один на всю страницу и работает по data-атрибуту: раньше
+ * каждому окну полагалась своя строчка, и окно, добавленное без неё,
+ * закрыть было нечем.
+ */
+document.addEventListener("click", (event) => {
+  const back = event.target.closest("[data-close-dialog]");
+  if (!back) return;
+  document.querySelector(`#${back.dataset.closeDialog}`)?.close();
+});
+
+/**
+ * Аппаратная кнопка «назад» на андроиде.
+ *
+ * Chrome закрывает по ней <dialog> не во всех версиях, а привычка
+ * нажимать её — первое, что делает рука. Запись в истории на время
+ * показа окна превращает «назад» в закрытие: браузер снимает запись,
+ * мы ловим popstate и закрываем окно сами.
+ */
+function trackDialogHistory(dialog) {
+  if (dialog.dataset.historyTracked) return;
+  dialog.dataset.historyTracked = "1";
+  const open = dialog.showModal.bind(dialog);
+  dialog.showModal = () => {
+    open();
+    history.pushState({ dialog: dialog.id }, "");
+  };
+  dialog.addEventListener("close", () => {
+    // Закрыли крестиком или Escape — лишнюю запись надо убрать, иначе
+    // следующее «назад» ничего не сделает.
+    if (history.state?.dialog === dialog.id) history.back();
+  });
+}
+window.addEventListener("popstate", () => {
+  document.querySelectorAll("dialog[open]").forEach((dialog) => dialog.close());
+});
+document.querySelectorAll("#page-stt dialog").forEach(trackDialogHistory);
 $("#stt-save")?.addEventListener("click", () => {
   saveSttConfig().catch((error) => {
     const host = $("#stt-form-error");
@@ -2710,12 +2848,24 @@ $("#stt-test")?.addEventListener("click", () => {
     host.textContent = "Сначала сохраните конфигурацию — проверка использует ключ из Secret Store";
     return;
   }
-  state.sttTestingId = state.sttEditing.id;
-  $("#stt-test-result").hidden = true;
-  $("#stt-test-dialog").showModal();
+  openSttTestDialog(state.sttEditing.id, state.sttEditing.name);
 });
 $("#stt-test-run")?.addEventListener("click", () => {
   runSttTest().catch(handleError);
+});
+$("#stt-record")?.addEventListener("click", () => {
+  toggleRecording().catch((error) => {
+    renderRecorderIdle(error instanceof Error ? error.message : String(error));
+  });
+});
+// Закрыли окно — микрофон отпускаем и запись забываем: чужой голос из
+// прошлой проверки не должен уехать в следующую.
+$("#stt-test-dialog")?.addEventListener("close", () => {
+  stopRecording();
+  recorder.blob = null;
+  recorder.chunks = [];
+  const preview = $("#stt-record-preview");
+  if (preview) { preview.hidden = true; preview.removeAttribute("src"); }
 });
 
 // ---------------------------------------------------------------------
@@ -2837,11 +2987,7 @@ async function saveSttKey() {
     body.api_key = value;
   }
 
-  askSudo({
-    scope: "stt:write",
-    title: "Добавление ключа провайдера",
-    description: "Ключ будет зашифрован и записан в Secret Store. Подтвердите паролем.",
-    action: async () => {
+  sttAction(async () => {
       await request(`/stt/configs/${config.id}/keys`, {
         method: "POST", body: JSON.stringify(body),
       });
@@ -2854,8 +3000,7 @@ async function saveSttKey() {
       toast("Ключ добавлен");
       await refreshSttKeys(config.id);
       await loadStt();
-    },
-  });
+    });
 }
 
 /** Включение, выключение и удаление отдельного ключа. */
@@ -2883,7 +3028,6 @@ async function sttKeyAction(action, keyId) {
   await loadStt();
 }
 
-$("#close-stt-key")?.addEventListener("click", () => $("#stt-key-dialog").close());
 $("#stt-key-save")?.addEventListener("click", () => {
   saveSttKey().catch((error) => {
     const host = $("#stt-key-error");
@@ -2897,10 +3041,5 @@ $("#stt-key-list")?.addEventListener("click", (event) => {
   if (!button) return;
   // Изменение ключей — та же операция с секретами, что и добавление,
   // поэтому и подтверждение то же.
-  askSudo({
-    scope: "stt:write",
-    title: "Изменение ключей провайдера",
-    description: "Действие затрагивает Secret Store. Подтвердите паролем.",
-    action: () => sttKeyAction(button.dataset.keyAction, button.dataset.keyId),
-  });
+  sttAction(() => sttKeyAction(button.dataset.keyAction, button.dataset.keyId));
 });

@@ -640,7 +640,7 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
   // Сохранение конфигурации несёт в себе ключ провайдера, поэтому
   // требует подтверждения паролем — как и любая запись секрета.
   app.post("/api/admin/v1/stt/configs", {
-    config: { roles: ["owner", "admin"], sudoScope: "stt:write" } satisfies RouteAccess,
+    config: { roles: ["owner", "admin"] } satisfies RouteAccess,
   }, async (request, reply) => {
     const actor = contexts.get(request)!.session!.user.id;
     const created = await services.stt.create(objectBody(request.body), actor);
@@ -648,7 +648,7 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
   });
 
   app.patch("/api/admin/v1/stt/configs/:id", {
-    config: { roles: ["owner", "admin"], sudoScope: "stt:write" } satisfies RouteAccess,
+    config: { roles: ["owner", "admin"] } satisfies RouteAccess,
   }, async (request) => {
     const id = (request.params as { id?: string }).id ?? "";
     const actor = contexts.get(request)!.session!.user.id;
@@ -658,7 +658,7 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
   // Отдельная write-only операция замены ключа: форма редактирования не
   // должна требовать заново вводить ключ ради правки модели.
   app.put("/api/admin/v1/stt/configs/:id/secret", {
-    config: { roles: ["owner", "admin"], sudoScope: "stt:write" } satisfies RouteAccess,
+    config: { roles: ["owner", "admin"] } satisfies RouteAccess,
   }, async (request) => {
     const id = (request.params as { id?: string }).id ?? "";
     const actor = contexts.get(request)!.session!.user.id;
@@ -677,7 +677,7 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
   });
 
   app.post("/api/admin/v1/stt/configs/:id/keys", {
-    config: { roles: ["owner", "admin"], sudoScope: "stt:write" } satisfies RouteAccess,
+    config: { roles: ["owner", "admin"] } satisfies RouteAccess,
   }, async (request, reply) => {
     const id = (request.params as { id?: string }).id ?? "";
     const actor = contexts.get(request)!.session!.user.id;
@@ -687,7 +687,7 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
   });
 
   app.patch("/api/admin/v1/stt/configs/:id/keys/:keyId", {
-    config: { roles: ["owner", "admin"], sudoScope: "stt:write" } satisfies RouteAccess,
+    config: { roles: ["owner", "admin"] } satisfies RouteAccess,
   }, async (request) => {
     const params = request.params as { id?: string; keyId?: string };
     return await services.stt.updateKey(
@@ -696,7 +696,7 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
   });
 
   app.delete("/api/admin/v1/stt/configs/:id/keys/:keyId", {
-    config: { roles: ["owner", "admin"], sudoScope: "stt:write" } satisfies RouteAccess,
+    config: { roles: ["owner", "admin"] } satisfies RouteAccess,
   }, async (request) => {
     const params = request.params as { id?: string; keyId?: string };
     return await services.stt.removeKey(params.id ?? "", params.keyId ?? "");
@@ -714,7 +714,7 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
   });
 
   app.post("/api/admin/v1/stt/configs/:id/activate", {
-    config: { roles: ["owner", "admin"], sudoScope: "stt:activate" } satisfies RouteAccess,
+    config: { roles: ["owner", "admin"] } satisfies RouteAccess,
   }, async (request) => {
     const id = (request.params as { id?: string }).id ?? "";
     const body = objectBody(request.body);
@@ -725,7 +725,7 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
   });
 
   app.post("/api/admin/v1/stt/configs/:id/rollback", {
-    config: { roles: ["owner", "admin"], sudoScope: "stt:activate" } satisfies RouteAccess,
+    config: { roles: ["owner", "admin"] } satisfies RouteAccess,
   }, async (request) => {
     const id = (request.params as { id?: string }).id ?? "";
     const actor = contexts.get(request)!.session!.user.id;
@@ -735,19 +735,19 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
   // DELETE нет намеренно: конфигурация связана с телеметрией, и
   // физическое удаление стёрло бы историю расходов.
   app.post("/api/admin/v1/stt/configs/:id/archive", {
-    config: { roles: ["owner", "admin"], sudoScope: "stt:write" } satisfies RouteAccess,
+    config: { roles: ["owner", "admin"] } satisfies RouteAccess,
   }, async (request) => {
     return await services.stt.archive((request.params as { id?: string }).id ?? "");
   });
 
   app.post("/api/admin/v1/stt/configs/:id/restore", {
-    config: { roles: ["owner", "admin"], sudoScope: "stt:write" } satisfies RouteAccess,
+    config: { roles: ["owner", "admin"] } satisfies RouteAccess,
   }, async (request) => {
     return await services.stt.restore((request.params as { id?: string }).id ?? "");
   });
 
   app.post("/api/admin/v1/stt/configs/:id/enabled", {
-    config: { roles: ["owner", "admin"], sudoScope: "stt:activate" } satisfies RouteAccess,
+    config: { roles: ["owner", "admin"] } satisfies RouteAccess,
   }, async (request) => {
     const id = (request.params as { id?: string }).id ?? "";
     const enabled = objectBody(request.body).enabled !== false;
@@ -760,7 +760,7 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
 
   // Смена primary/fallback переводит живой трафик на другого провайдера.
   app.put("/api/admin/v1/stt/routes/:useCase", {
-    config: { roles: ["owner", "admin"], sudoScope: "stt:activate" } satisfies RouteAccess,
+    config: { roles: ["owner", "admin"] } satisfies RouteAccess,
   }, async (request) => {
     const useCase = (request.params as { useCase?: string }).useCase ?? "";
     const actor = contexts.get(request)!.session!.user.id;

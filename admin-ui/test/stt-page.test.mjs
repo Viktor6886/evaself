@@ -4,8 +4,12 @@
  * Проверяется главное свойство раздела: форма строится по схеме,
  * которую отдаёт сервер, и ничего не знает о провайдерах сама. Плюс
  * отрицательные проверки, которые видно только здесь: сохранённый ключ
- * нельзя посмотреть, мутация не уходит до подтверждения sudo, а
- * неподдерживаемый параметр не показывается вовсе.
+ * нельзя посмотреть, неподдерживаемый параметр не показывается вовсе,
+ * а запись голоса не уезжает на сервер сама по себе.
+ *
+ * Подтверждения паролем в этом разделе больше нет — снято по решению
+ * владельца, и тесты сторожат именно это: окно пароля не должно
+ * появиться ни на одном действии.
  */
 
 import assert from "node:assert/strict";
@@ -287,7 +291,10 @@ describe("раздел распознавания речи", () => {
     assert.equal(reveal, null);
   });
 
-  test("сохранение не уходит на сервер до подтверждения паролем", async () => {
+  test("сохранение уходит сразу, без подтверждения паролем", async () => {
+    // Пароль на каждом шаге сняли по решению владельца: ключи вводят и
+    // меняют часто, и за одну сессию его приходилось вводить десяток
+    // раз. Защита осталась на входе в панель, на роли и в аудите.
     const panel = await open({ routes: BASE_ROUTES });
     await openStt(panel.page);
     await panel.page.evaluate(() => openSttEditor(null));
@@ -296,19 +303,20 @@ describe("раздел распознавания речи", () => {
     await panel.page.fill("#stt-api-key", "dg-secret-from-form");
 
     await panel.page.click("#stt-save");
-    await panel.page.waitForSelector("#sudo-dialog[open]");
+    await panel.page.waitForTimeout(400);
 
-    const mutations = panel.requests.filter(
-      (item) => item.method !== "GET" && item.path.startsWith("/stt"));
-    assert.deepEqual(mutations, [], "до подтверждения sudo мутаций быть не должно");
-    // И ключ из формы никуда не улетел.
     assert.equal(
-      panel.requests.some((item) => JSON.stringify(item.body ?? "").includes("dg-secret-from-form")),
+      await panel.page.evaluate(() => !!document.querySelector("#sudo-dialog[open]")),
       false,
+      "окно пароля больше не появляется",
     );
+    const created = panel.requests.find(
+      (item) => item.method === "POST" && item.path === "/stt/configs");
+    assert.ok(created, "конфигурация должна уйти на сервер сразу");
+    assert.equal(created.body.api_key, "dg-secret-from-form");
   });
 
-  test("смена маршрута тоже требует подтверждения", async () => {
+  test("смена маршрута тоже уходит сразу", async () => {
     const panel = await open({ routes: BASE_ROUTES });
     await openStt(panel.page);
     await panel.page.click('[data-stt-tab="routes"]');
@@ -316,10 +324,14 @@ describe("раздел распознавания речи", () => {
       () => document.querySelector("#stt-routes").hidden === false);
 
     await panel.page.click('[data-stt-action="save-route"]');
-    await panel.page.waitForSelector("#sudo-dialog[open]");
+    await panel.page.waitForTimeout(400);
 
-    const puts = panel.requests.filter((item) => item.method === "PUT");
-    assert.deepEqual(puts, [], "маршрут не должен меняться до подтверждения");
+    assert.equal(
+      await panel.page.evaluate(() => !!document.querySelector("#sudo-dialog[open]")),
+      false,
+    );
+    assert.ok(panel.requests.some((item) => item.method === "PUT"
+      && item.path.includes("/stt/routes/")));
   });
 
   test("результат проверки не показывает того, чего провайдер не вернул", async () => {
@@ -419,13 +431,17 @@ describe("раздел распознавания речи", () => {
 
     await panel.page.fill("#stt-key-value", "dg-secret-from-form");
     await panel.page.click("#stt-key-save");
-    await panel.page.waitForSelector("#sudo-dialog[open]");
+    await panel.page.waitForTimeout(400);
 
     assert.equal(
-      panel.requests.some((item) => JSON.stringify(item.body ?? "").includes("dg-secret-from-form")),
+      await panel.page.evaluate(() => !!document.querySelector("#sudo-dialog[open]")),
       false,
-      "ключ не должен уходить до подтверждения",
+      "пароль при вводе ключа больше не спрашивается",
     );
+    const posted = panel.requests.find(
+      (item) => item.method === "POST" && item.path.includes("/keys"));
+    assert.ok(posted, "ключ должен уйти сразу");
+    assert.equal(posted.body.api_key, "dg-secret-from-form");
   });
 
   test("список ключей показывает очередь и состояние, но не значения", async () => {
@@ -448,18 +464,124 @@ describe("раздел распознавания речи", () => {
     assert.doesNotMatch(dialog, /dg-live|sha256:/);
   });
 
-  test("выключение и удаление ключа тоже требуют подтверждения паролем", async () => {
+  test("выключение ключа тоже происходит сразу", async () => {
     const panel = await open({ routes: BASE_ROUTES });
     await openStt(panel.page);
     await openKeys(panel.page);
 
     await panel.page.click('[data-key-action="toggle"]');
-    await panel.page.waitForSelector("#sudo-dialog[open]");
+    await panel.page.waitForTimeout(400);
     assert.equal(
-      panel.requests.some((item) => item.method === "PATCH" && item.path.includes("/keys/")),
+      await panel.page.evaluate(() => !!document.querySelector("#sudo-dialog[open]")),
       false,
-      "ключ не должен выключаться до подтверждения",
     );
+    assert.ok(
+      panel.requests.some((item) => item.method === "PATCH" && item.path.includes("/keys/")),
+    );
+  });
+
+  test("каждое окно закрывается кнопкой «Назад»", async () => {
+    // Раньше на телефоне окно закрыть было нечем: крестик уезжал вверх
+    // вместе с прокруткой, и пользователь оставался в ловушке.
+    const panel = await open({ routes: BASE_ROUTES });
+    await openStt(panel.page);
+
+    const cases = [
+      ['[data-stt-action="key"]', "stt-key-dialog"],
+      ['[data-stt-action="test"]', "stt-test-dialog"],
+      ['[data-stt-action="edit"]', "stt-dialog"],
+    ];
+    for (const [opener, dialogId] of cases) {
+      await panel.page.click(opener);
+      await panel.page.waitForSelector(`#${dialogId}[open]`);
+
+      const back = await panel.page.$eval(
+        `#${dialogId} [data-close-dialog]`, (node) => {
+          const box = node.getBoundingClientRect();
+          return {
+            text: node.textContent.trim(),
+            // Шапка закреплена, поэтому кнопка обязана быть на экране
+            // независимо от того, докуда прокручено окно.
+            onScreen: box.top >= 0 && box.bottom <= window.innerHeight,
+          };
+        });
+      assert.match(back.text, /Назад/, `${dialogId}: нет кнопки «Назад»`);
+      assert.equal(back.onScreen, true, `${dialogId}: кнопка «Назад» вне экрана`);
+
+      await panel.page.click(`#${dialogId} [data-close-dialog]`);
+      await panel.page.waitForTimeout(150);
+      assert.equal(
+        await panel.page.evaluate((id) => !!document.querySelector(`#${id}[open]`), dialogId),
+        false,
+        `${dialogId} не закрылось`,
+      );
+    }
+  });
+
+  test("окно проверки предлагает записать голос, а файл прячет во второй план", async () => {
+    const panel = await open({ routes: BASE_ROUTES });
+    await openStt(panel.page);
+    await panel.page.click('[data-stt-action="test"]');
+    await panel.page.waitForSelector("#stt-test-dialog[open]");
+
+    const record = await panel.page.$eval("#stt-record", (node) => ({
+      text: node.textContent.replace(/\s+/g, " ").trim(),
+      height: Math.round(node.getBoundingClientRect().height),
+      primary: node.classList.contains("primary"),
+    }));
+    // Собственный голос — единственный способ проверить язык, акцент и
+    // микрофон, поэтому это главное действие окна, а не поле формы.
+    assert.match(record.text, /Записать голос/);
+    assert.equal(record.primary, true);
+    assert.ok(record.height >= 40, "кнопка записи должна быть крупной");
+
+    // Выбор файла остаётся, но свёрнут: им пользуются редко.
+    const collapsed = await panel.page.$eval(
+      ".test-alt", (node) => ({ open: node.open, has: !!node.querySelector("#stt-test-file") }));
+    assert.equal(collapsed.has, true);
+    assert.equal(collapsed.open, false);
+  });
+
+  test("запись не уходит на сервер сама — только по кнопке проверки", async () => {
+    const panel = await open({ routes: BASE_ROUTES });
+    await openStt(panel.page);
+    await panel.page.click('[data-stt-action="test"]');
+    await panel.page.waitForSelector("#stt-test-dialog[open]");
+
+    // Подкладываем «запись» напрямую: настоящий микрофон в браузере
+    // теста недоступен, а проверяем мы не MediaRecorder, а то, что
+    // аудио попадает в запрос и только по явному действию.
+    await panel.page.evaluate(() => {
+      recorder.blob = new Blob([new Uint8Array([1, 2, 3, 4])], { type: "audio/webm" });
+    });
+    assert.equal(
+      panel.requests.some((item) => item.path.includes("/test")),
+      false,
+      "до нажатия проверки запрос уходить не должен",
+    );
+
+    await panel.page.click("#stt-test-run");
+    await panel.page.waitForTimeout(500);
+    const sent = panel.requests.find(
+      (item) => item.method === "POST" && item.path.includes("/test"));
+    assert.ok(sent, "проверка должна уйти на сервер");
+    assert.equal(sent.body.audio_base64, "AQIDBA==", "запись должна доехать в base64");
+  });
+
+  test("закрытие окна проверки забывает запись", async () => {
+    // Иначе голос из прошлой проверки уедет в следующую — и на другого
+    // провайдера, где он ничего не проверяет.
+    const panel = await open({ routes: BASE_ROUTES });
+    await openStt(panel.page);
+    await panel.page.click('[data-stt-action="test"]');
+    await panel.page.waitForSelector("#stt-test-dialog[open]");
+    await panel.page.evaluate(() => {
+      recorder.blob = new Blob([new Uint8Array([1, 2, 3])], { type: "audio/webm" });
+    });
+
+    await panel.page.click('#stt-test-dialog [data-close-dialog]');
+    await panel.page.waitForTimeout(200);
+    assert.equal(await panel.page.evaluate(() => recorder.blob), null);
   });
 
   test("проверка сообщает состояние каждого ключа, а не только итог", async () => {
@@ -602,17 +724,9 @@ describe("раздел распознавания речи", () => {
     await panel.page.waitForFunction(
       () => document.querySelectorAll("#stt-routes .chain-link").length === 2);
 
-    // Поднять резерв наверх — это перестановка приоритетов, то есть
-    // операция с маршрутом, а значит sudo.
     await panel.page.click('[data-stt-chain="up"][data-config="55555555-5555-5555-5555-555555555555"]');
-    await panel.page.waitForSelector("#sudo-dialog[open]");
-    assert.equal(
-      panel.requests.some((item) => item.method === "PUT" && item.path.includes("/stt/routes/")),
-      false,
-      "цепочка не должна меняться до подтверждения",
-    );
+    await panel.page.waitForTimeout(400);
 
-    await panel.confirmSudo();
     const sent = panel.requests.find(
       (item) => item.method === "PUT" && item.path.includes("/stt/routes/"));
     assert.ok(sent, "после подтверждения запрос должен уйти");
@@ -636,8 +750,7 @@ describe("раздел распознавания речи", () => {
 
     await panel.page.uncheck(toggle);
     await panel.page.click('[data-stt-action="save-route"][data-id="telegram_voice"]');
-    await panel.page.waitForSelector("#sudo-dialog[open]");
-    await panel.confirmSudo();
+    await panel.page.waitForTimeout(400);
 
     const sent = panel.requests.find(
       (item) => item.method === "PUT" && item.path.includes("/stt/routes/telegram_voice"));

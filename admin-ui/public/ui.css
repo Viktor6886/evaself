@@ -200,6 +200,20 @@ dialog .eyebrow { margin-top: 0; }
 .status-card.color-red { border-left-color: var(--danger); }
 .status-card.color-blue { border-left-color: #64a8ff; }
 .status-card.color-gray { border-left-color: #61756c; opacity: .8; }
+/* Сводка карточки. Раньше это был <dl> вовсе без стилей: браузер ставил
+   dt на свою строку, а dd отодвигал на 40 пикселей влево-вправо, и
+   «Ключи / не настроены» выглядело как две несвязанные надписи.
+   Пара «подпись — значение» должна читаться как одна строка. */
+.status-meta { display: grid; gap: 4px 10px; margin: 10px 0 0; font-size: 12px; }
+.status-meta > div {
+  display: grid;
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr);
+  gap: 4px 10px;
+  align-items: baseline;
+}
+.status-meta dt { color: var(--muted); }
+.status-meta dd { margin: 0; color: #c8d7d0; text-align: right; overflow-wrap: anywhere; }
+
 .status-card-head, .status-card-head > div { display: flex; align-items: center; gap: 9px; }
 .status-card-head { justify-content: space-between; }
 .status-card-head h3 { margin: 0; }
@@ -362,9 +376,71 @@ dialog .eyebrow { margin-top: 0; }
   color: inherit;
 }
 .sheet-dialog::backdrop { background: rgba(6, 8, 12, .62); }
-.sheet-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
-.sheet-head h3 { margin: 0; }
-.sheet-head p { margin: 3px 0 0; font-size: 12px; }
+/* Шапка диалога закреплена наверху. Диалог на телефоне длиннее экрана,
+   и кнопка закрытия, уехавшая вверх вместе с прокруткой, окно уже не
+   закрывает — пользователь остаётся в ловушке. */
+.sheet-head {
+  position: sticky;
+  top: -18px;
+  z-index: 2;
+  display: grid;
+  gap: 4px;
+  margin: -18px -18px 12px;
+  padding: 14px 18px 10px;
+  background: var(--panel, #161a22);
+  border-bottom: 1px solid var(--line, #2a2f3a);
+}
+.sheet-head h3 { margin: 0; font-size: 16px; }
+.sheet-head p { margin: 2px 0 0; font-size: 12px; }
+.sheet-back {
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 0;
+  border: 0;
+  color: var(--green, #5bea9a);
+  background: none;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.sheet-back span { font-size: 16px; line-height: 1; }
+.sheet-foot { margin-top: 16px; }
+
+/* Запись голоса — главный способ проверки, поэтому она стоит первой и
+   выглядит как одно крупное действие, а не как поле формы. */
+.recorder { display: grid; gap: 8px; justify-items: start; margin-bottom: 14px; }
+.recorder-button { display: inline-flex; align-items: center; gap: 9px; }
+.recorder-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: .55;
+}
+.recorder-button.is-recording {
+  color: #ffd9d5;
+  background: #c0453c;
+  border-color: #c0453c;
+}
+.recorder-button.is-recording .recorder-dot {
+  opacity: 1;
+  background: #fff;
+  animation: recorder-pulse 1.1s ease-in-out infinite;
+}
+.recorder audio { width: 100%; max-width: 380px; }
+.recorder p { margin: 0; font-size: 12px; }
+@keyframes recorder-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(.6); opacity: .45; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .recorder-button.is-recording .recorder-dot { animation: none; }
+}
+.test-alt > summary { cursor: pointer; font-size: 12.5px; padding: 6px 0; color: var(--muted, #8b93a4); }
+.test-alt[open] > summary { margin-bottom: 8px; }
 .error-row { padding: 11px 0; border-bottom: 1px solid var(--line, #2a2f3a); }
 .error-row:last-child { border-bottom: 0; }
 .error-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
@@ -578,6 +654,30 @@ dialog .eyebrow { margin-top: 0; }
 .setting-card.is-touched { border-color: #35c07a; }
 .advanced-toggle { display: flex; align-items: center; gap: 12px; margin: 18px 0 12px; }
 
+/* ---------------------------------------------------------------------
+ * Карточки раздела STT: компактнее и спокойнее
+ *
+ * Шесть равновеликих кнопок под каждой карточкой превращали список
+ * провайдеров в стену: на телефоне одна карточка занимала полтора
+ * экрана, и «Ключи» терялись среди «В архив». Главное действие остаётся
+ * заметным, остальные ужимаются до размера ссылок.
+ * ------------------------------------------------------------------- */
+#page-stt .status-card { padding: 14px 15px; }
+#page-stt .status-card h4 { margin: 0; font-size: 15px; }
+#page-stt .status-card header { display: grid; gap: 2px; margin-bottom: 8px; }
+#page-stt .status-card header .muted { font-size: 11.5px; }
+#page-stt .status-meta { margin: 8px 0 12px; }
+#page-stt .card-actions { gap: 6px; }
+#page-stt .card-actions .button {
+  min-height: 34px;
+  padding: 7px 11px;
+  border-radius: 9px;
+  font-size: 12.5px;
+  font-weight: 650;
+}
+/* Первая кнопка карточки — то, ради чего на неё смотрят. */
+#page-stt .card-actions .button.primary { font-weight: 750; }
+
 /* Список ключей провайдера STT. Порядок строк — порядок перебора,
    поэтому строки нумерованы и не переставляются визуально. */
 .key-list { display: grid; gap: 8px; margin: 4px 0 14px; }
@@ -627,9 +727,13 @@ dialog .eyebrow { margin-top: 0; }
   /* Палец — не мышь. 40px это нижняя граница, ниже начинаются промахи. */
   .button, .tab, .icon-button { min-height: 42px; }
   .button.tiny { min-height: 38px; padding: 8px 12px; }
-  .card-actions .button,
   .form-actions .button,
   .heading-actions .button { flex: 1 1 auto; justify-content: center; }
+  /* Кнопки карточки не растягиваются: шесть штук по половине ширины —
+     это три ряда одинаковых прямоугольников, среди которых не видно
+     главного. Пусть занимают столько, сколько нужно тексту. */
+  .card-actions .button { flex: 0 0 auto; }
+  #page-stt .card-actions .button { min-height: 36px; }
 
   /* Поля ввода: 16px обязательны — при меньшем размере iOS и часть
      андроидных браузеров зумят страницу на фокусе и уже не отпускают. */
@@ -649,7 +753,10 @@ dialog .eyebrow { margin-top: 0; }
   .key-row .dot { justify-self: start; }
 
   .provider-details { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .status-meta { grid-template-columns: 1fr; }
+  /* Подпись и значение остаются в одной строке и на узком экране:
+     разложить их по двум строкам — это вдвое более длинная карточка,
+     от которой читать не легче. Переносится только значение. */
+  .status-meta > div { grid-template-columns: minmax(0, 1fr) minmax(0, auto); }
 
   /* Таблицы остаются таблицами, но прокрутка внутри своей рамки —
      с инерцией и видимым краем, иначе непонятно, что там ещё что-то
@@ -683,6 +790,8 @@ dialog .eyebrow { margin-top: 0; }
   }
   dialog form { padding: 20px 16px 26px; }
   .sheet-dialog { padding: 16px 16px 26px; }
+  .sheet-head { top: -16px; margin: -16px -16px 12px; padding: 12px 16px 10px; }
+  .sheet-back { min-height: 40px; }
   .dialog-actions { flex-direction: column-reverse; }
   .dialog-actions .button { width: 100%; justify-content: center; }
 

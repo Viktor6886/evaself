@@ -197,14 +197,28 @@ export class IntegrationConfigService {
    * пишутся — они переживут пересоздание тома media-service и попадут в
    * backup.
    */
+  /**
+   * Общий секрет с media-service.
+   *
+   * Окружение первично, копия в Secret Store — запасной путь: её
+   * создаёт bootstrap, а он выполняется один раз за жизнь установки.
+   * Если MEDIA_SERVICE_TOKEN появился в .env позже, записи нет, и
+   * обращения к media-service возвращали 401 при том, что переменная
+   * лежала в процессе всё это время.
+   */
+  private async mediaToken(): Promise<string | null> {
+    return (process.env.MEDIA_SERVICE_TOKEN ?? "").trim()
+      || await this.secrets.get("sec_media_service_token");
+  }
+
   private async pushToMedia(
     section: "asr" | "tts",
     values: Record<string, string>,
   ): Promise<{ applied: boolean; error?: string }> {
     if (Object.keys(values).length === 0) return { applied: false };
-    const token = await this.secrets.get("sec_media_service_token");
+    const token = await this.mediaToken();
     if (!token) {
-      return { applied: false, error: "MEDIA_SERVICE_TOKEN не импортирован в Secret Store" };
+      return { applied: false, error: "MEDIA_SERVICE_TOKEN не задан" };
     }
     try {
       const response = await fetch(`${this.mediaUrl.replace(/\/+$/, "")}/config/media`, {
@@ -229,8 +243,8 @@ export class IntegrationConfigService {
   async test(id: string): Promise<Record<string, unknown>> {
     const section = MEDIA_SECTIONS[id];
     if (!section) throw adminBadRequest("Для этой интеграции нет отдельной проверки");
-    const token = await this.secrets.get("sec_media_service_token");
-    if (!token) throw adminBadRequest("MEDIA_SERVICE_TOKEN не импортирован в Secret Store");
+    const token = await this.mediaToken();
+    if (!token) throw adminBadRequest("MEDIA_SERVICE_TOKEN не задан");
 
     try {
       const response = await fetch(`${this.mediaUrl.replace(/\/+$/, "")}/${section}/test`, {

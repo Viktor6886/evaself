@@ -116,8 +116,24 @@ export class HttpMediaSttClient implements MediaSttClient {
     private readonly baseUrl = process.env.EVA_MEDIA_SERVICE_URL ?? "http://media-service:8090",
   ) {}
 
+  /**
+   * Токен берётся из окружения, а копия в Secret Store — запасной путь.
+   *
+   * Так было не всегда, и из-за этого панель возвращала HTTP 401 там,
+   * где голосовые сообщения работали. Копию в Secret Store создаёт
+   * bootstrap, а он выполняется один раз за жизнь установки: если
+   * MEDIA_SERVICE_TOKEN появился в .env позже (или запись потерялась),
+   * заголовок не отправлялся вовсе, и media-service справедливо отвечал
+   * 401. Переменная же лежит в процессе всегда — её выдаёт compose тому
+   * же контейнеру, и именно ею пользуется распознавание голосовых.
+   *
+   * Одно значение — один источник. Порядок «окружение, потом хранилище»
+   * выбран так, чтобы правка .env применялась перезапуском контейнера,
+   * а не требовала лезть в Secret Store.
+   */
   private async headers(): Promise<Record<string, string>> {
-    const token = await this.secrets.get("sec_media_service_token");
+    const token = (process.env.MEDIA_SERVICE_TOKEN ?? "").trim()
+      || await this.secrets.get("sec_media_service_token");
     return {
       "content-type": "application/json",
       ...(token ? { "x-media-key": token } : {}),

@@ -17,7 +17,7 @@ import { after, before, describe, test } from "node:test";
 
 import pg from "pg";
 
-import { SttAdminService } from "../dist/admin/stt-service.js";
+import { HttpMediaSttClient, SttAdminService } from "../dist/admin/stt-service.js";
 
 const DATABASE_URL = process.env.STT_TEST_DATABASE_URL ?? "";
 
@@ -942,5 +942,60 @@ describe("реестр STT-провайдеров", { skip: DATABASE_URL ? false
     assert.equal(config.keys.total, 2);
     assert.equal(config.keys.usable, 1);
     assert.equal(config.keys.exhausted, 1);
+  });
+});
+
+// ---------------------------------------------------------------------
+// Общий секрет с media-service
+// ---------------------------------------------------------------------
+describe("аутентификация в media-service", () => {
+  /** Secret Store, в котором записи нет — как на давно живущей установке. */
+  const emptyStore = { async get() { return null; } } as never;
+
+  const headersOf = async (client: HttpMediaSttClient) =>
+    await (client as unknown as {
+      headers(): Promise<Record<string, string>>;
+    }).headers();
+
+  test("токен берётся из окружения, когда в Secret Store его нет", async () => {
+    // Ровно этот случай и давал HTTP 401 в панели при работающих
+    // голосовых: копию в Secret Store кладёт bootstrap, а он проходит
+    // один раз за жизнь установки. Появился MEDIA_SERVICE_TOKEN в .env
+    // позже — записи нет, заголовок не отправлялся вовсе.
+    const previous = process.env.MEDIA_SERVICE_TOKEN;
+    process.env.MEDIA_SERVICE_TOKEN = "token-from-env";
+    try {
+      const headers = await headersOf(new HttpMediaSttClient(emptyStore));
+      assert.equal(headers["x-media-key"], "token-from-env");
+    } finally {
+      if (previous === undefined) delete process.env.MEDIA_SERVICE_TOKEN;
+      else process.env.MEDIA_SERVICE_TOKEN = previous;
+    }
+  });
+
+  test("без переменной остаётся запасной путь через Secret Store", async () => {
+    const previous = process.env.MEDIA_SERVICE_TOKEN;
+    delete process.env.MEDIA_SERVICE_TOKEN;
+    const store = { async get() { return "token-from-store"; } } as never;
+    try {
+      const headers = await headersOf(new HttpMediaSttClient(store));
+      assert.equal(headers["x-media-key"], "token-from-store");
+    } finally {
+      if (previous !== undefined) process.env.MEDIA_SERVICE_TOKEN = previous;
+    }
+  });
+
+  test("нет ни там, ни там — заголовок не выдумывается", async () => {
+    const previous = process.env.MEDIA_SERVICE_TOKEN;
+    delete process.env.MEDIA_SERVICE_TOKEN;
+    try {
+      const headers = await headersOf(new HttpMediaSttClient(emptyStore));
+      // Пустой заголовок media-service отверг бы так же, как отсутствие,
+      // но в логах это выглядело бы как «прислали неверный ключ».
+      assert.equal("x-media-key" in headers, false);
+      assert.equal(headers["content-type"], "application/json");
+    } finally {
+      if (previous !== undefined) process.env.MEDIA_SERVICE_TOKEN = previous;
+    }
   });
 });
