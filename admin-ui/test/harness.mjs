@@ -96,10 +96,17 @@ async function launch() {
   }
 }
 
-export async function openPanel({ routes = {}, role = "owner" } = {}) {
+/**
+ * viewport задаётся явно там, где проверяется вёрстка под телефон.
+ * 360×740 — распространённый андроид (Galaxy A-серии, Redmi): если
+ * помещается сюда, поместится и в остальные.
+ */
+export const PHONE = { width: 360, height: 740 };
+
+export async function openPanel({ routes = {}, role = "owner", viewport = null } = {}) {
   const server = await servePublic();
   const browser = await launch();
-  const page = await browser.newPage();
+  const page = await browser.newPage(viewport ? { viewport } : {});
 
   /** Каждый запрос к API, который интерфейс успел отправить. */
   const requests = [];

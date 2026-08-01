@@ -195,51 +195,85 @@ class SttRoutingService:
         options = {"language": language} if language else {}
         attempts: list[ProviderAttempt] = []
 
-        primary_error = await self._attempt(
-            route.primary, audio, options, route, attempts, is_fallback=False
-        )
-        if isinstance(primary_error, SttResult):
-            outcome = TranscriptionOutcome(result=primary_error, attempts=attempts)
-            if idempotency_key:
-                self._cache.put(idempotency_key, primary_error)
-            return outcome
+        # Перебор идёт по цепочке сверху вниз. Ротация выключена —
+        # цепочка обрезана до первого, и отказ остаётся отказом.
+        chain = route.usable_chain
+        first_error: SttError | None = None
+        last_error: SttError | None = None
+        failures: list[str] = []
 
-        # Сюда попадаем только с ошибкой основного провайдера.
-        if not self._should_fallback(primary_error, route):
-            raise primary_error
+        for position, config in enumerate(chain):
+            if position > 0:
+                verdict = self._rotation_verdict(last_error, config, route)
+                if verdict == "stop":
+                    break
+                # Неисправного пропускаем, но цепочку не обрываем: за ним
+                # может стоять рабочий провайдер.
+                if verdict == "skip":
+                    continue
 
-        log.info(
-            "основной провайдер отказал (%s), пробую резерв %s",
-            primary_error.code,
-            route.fallback.name if route.fallback else "(нет)",
-        )
-        fallback_error = await self._attempt(
-            route.fallback, audio, options, route, attempts, is_fallback=True
-        )
-        if isinstance(fallback_error, SttResult):
-            outcome = TranscriptionOutcome(
-                result=fallback_error, attempts=attempts, used_fallback=True
+            outcome = await self._attempt(
+                config, audio, options, route, attempts, is_fallback=position > 0
             )
-            if idempotency_key:
-                self._cache.put(idempotency_key, fallback_error)
-            return outcome
+            if isinstance(outcome, SttResult):
+                if position:
+                    log.info(
+                        "распознал резервный провайдер «%s» (позиция %s из %s)",
+                        config.name, position + 1, len(chain),
+                    )
+                result = TranscriptionOutcome(
+                    result=outcome, attempts=attempts, used_fallback=position > 0,
+                )
+                if idempotency_key:
+                    self._cache.put(idempotency_key, outcome)
+                return result
 
-        # Оба отказали. Код общий, но причина первого важнее: резерв мог
-        # упасть по другой причине, а чинить надо основной.
-        raise SttError(
-            STT_ALL_PROVIDERS_FAILED,
-            f"основной провайдер: {primary_error.message}; "
-            f"резервный: {fallback_error.message}",
-        )
+            if first_error is None:
+                first_error = outcome
+            last_error = outcome
+            failures.append(f"«{config.name}»: {outcome.message}")
+
+        # Первая ошибка важнее последней: резерв мог упасть по своей
+        # причине, а чинить надо того, кто должен был справиться сам.
+        if first_error is None:
+            raise SttError(
+                STT_ROUTE_NOT_CONFIGURED,
+                f"для сценария «{use_case}» не назначен провайдер распознавания",
+            )
+        if len(failures) == 1:
+            raise first_error
+        raise SttError(STT_ALL_PROVIDERS_FAILED, "; ".join(failures))
 
     # -----------------------------------------------------------------
-    def _should_fallback(self, error: SttError, route: SttRoute) -> bool:
-        if route.fallback is None:
-            return False
-        if route.fallback.config_id in self._faulty:
-            log.info("резерв %s помечен неисправным — не пробую", route.fallback.name)
-            return False
-        return error.retryable
+    def _rotation_verdict(
+        self,
+        error: SttError | None,
+        candidate: SttResolvedConfig,
+        route: SttRoute,
+    ) -> str:
+        """«try» — пробовать, «skip» — пропустить этого, «stop» — хватит.
+
+        Отказ по учётным данным теперь тоже повод перейти дальше. Раньше
+        не был: считалось, что чинить его должен администратор. Но
+        конфигурация помечается неисправной, только когда мертвы ВСЕ её
+        ключи (026), — а это ровно тот случай, ради которого цепочка и
+        нужна. Молчать в ответ на голосовое, имея рабочего второго
+        провайдера, только потому, что у первого кончились ключи, —
+        именно та беспомощность, от которой ротация и избавляет.
+
+        На битом аудио и превышении лимита цепочка обрывается: следующий
+        провайдер отвергнет запись ровно так же, а стоить это будет как
+        настоящее распознавание.
+        """
+        if error is None or not route.rotation_enabled:
+            return "stop"
+        if not (error.retryable or error.marks_config_faulty):
+            log.info("ошибка %s не лечится сменой провайдера — цепочку не продолжаю", error.code)
+            return "stop"
+        if candidate.config_id in self._faulty:
+            log.info("провайдер «%s» помечен неисправным — пропускаю", candidate.name)
+            return "skip"
+        return "try"
 
     async def _attempt(
         self,

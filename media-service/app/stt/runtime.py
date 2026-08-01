@@ -38,12 +38,29 @@ USE_CASES = ("telegram_voice", "webapp_voice_message", "webapp_live")
 @dataclass
 class SttRoute:
     use_case: str
-    primary: SttResolvedConfig | None
-    fallback: SttResolvedConfig | None
+    # Цепочка провайдеров в порядке перебора: первый основной, дальше
+    # резервы. Список, а не пара «основной + резерв»: когда у провайдера
+    # кончились все ключи, второй — не роскошь, а единственный способ
+    # ответить пользователю, и если не смог он, есть смысл в третьем.
+    chain: list[SttResolvedConfig]
     enabled: bool
+    # Выключенная ротация оставляет в работе только первого провайдера.
+    # Это не теоретическая настройка: у провайдеров разная цена и разное
+    # качество, и «лучше промолчать, чем ответить дешёвой моделью» —
+    # законное решение владельца.
+    rotation_enabled: bool
     timeout_ms: int
     max_audio_seconds: int | None
     config_version: int
+
+    @property
+    def primary(self) -> SttResolvedConfig | None:
+        return self.chain[0] if self.chain else None
+
+    @property
+    def usable_chain(self) -> list[SttResolvedConfig]:
+        """Провайдеры, которых разрешено пробовать в этом запросе."""
+        return list(self.chain) if self.rotation_enabled else self.chain[:1]
 
 
 class SttRuntime:
@@ -104,8 +121,11 @@ class SttRuntime:
                         "timeout_ms": route.timeout_ms,
                         "max_audio_seconds": route.max_audio_seconds,
                         "config_version": route.config_version,
+                        "rotation_enabled": route.rotation_enabled,
+                        # Цепочка именами, в порядке перебора: раздел
+                        # здоровья в панели показывает именно её.
+                        "chain": [config.name for config in route.chain],
                         "primary": route.primary.name if route.primary else None,
-                        "fallback": route.fallback.name if route.fallback else None,
                     }
                     for route in self._routes.values()
                 ],
@@ -193,9 +213,9 @@ class SttRuntime:
             "routes": [
                 {
                     "use_case": route.use_case,
-                    "primary_config_id": route.primary.config_id if route.primary else None,
-                    "fallback_config_id": route.fallback.config_id if route.fallback else None,
+                    "chain": [config.config_id for config in route.chain],
                     "enabled": route.enabled,
+                    "rotation_enabled": route.rotation_enabled,
                     "timeout_ms": route.timeout_ms,
                     "max_audio_seconds": route.max_audio_seconds,
                     "config_version": route.config_version,
@@ -296,27 +316,46 @@ def _parse_snapshot(
             errors.append(f"неизвестный сценарий «{use_case}»")
             continue
 
-        primary_id = item.get("primary_config_id")
-        fallback_id = item.get("fallback_config_id")
-        primary = configs.get(str(primary_id)) if primary_id else None
-        fallback = configs.get(str(fallback_id)) if fallback_id else None
+        # Цепочка приходит списком идентификаторов в порядке перебора.
+        # Пара primary/fallback принимается тоже: снимок от admin-api
+        # прошлой версии не должен обнулять маршрут при обновлении
+        # одного контейнера из двух.
+        raw_chain = item.get("chain")
+        if not isinstance(raw_chain, list):
+            raw_chain = [
+                value for value in
+                (item.get("primary_config_id"), item.get("fallback_config_id"))
+                if value
+            ]
 
-        if primary_id and primary is None:
-            errors.append(f"маршрут {use_case}: основная конфигурация {primary_id} не пришла в снимке")
-            continue
-        if fallback_id and fallback is None:
-            errors.append(f"маршрут {use_case}: резервная конфигурация {fallback_id} не пришла в снимке")
-            continue
-        if primary and fallback and primary.config_id == fallback.config_id:
-            errors.append(f"маршрут {use_case}: резерв совпадает с основным провайдером")
+        chain: list[SttResolvedConfig] = []
+        broken = False
+        seen: set[str] = set()
+        for raw_id in raw_chain:
+            config_id = str(raw_id)
+            config = configs.get(config_id)
+            if config is None:
+                errors.append(
+                    f"маршрут {use_case}: конфигурация {config_id} не пришла в снимке")
+                broken = True
+                break
+            # Один провайдер дважды в цепочке — это не резерв, а второй
+            # такой же отказ за вторые деньги.
+            if config_id in seen:
+                errors.append(f"маршрут {use_case}: конфигурация {config_id} указана дважды")
+                broken = True
+                break
+            seen.add(config_id)
+            chain.append(config)
+        if broken:
             continue
 
         timeout_ms = _int_or(item.get("timeout_ms"), 120000)
         routes[use_case] = SttRoute(
             use_case=use_case,
-            primary=primary,
-            fallback=fallback,
+            chain=chain,
             enabled=bool(item.get("enabled", True)),
+            rotation_enabled=bool(item.get("rotation_enabled", True)),
             timeout_ms=timeout_ms,
             max_audio_seconds=(
                 _int_or(item.get("max_audio_seconds"), 0) or None

@@ -152,11 +152,16 @@ async def test_fallback_runs_on_retryable_errors(tmp_path, audio, code):
 
 @pytest.mark.parametrize(
     "code",
-    [STT_AUDIO_INVALID, "stt_audio_too_large", "stt_audio_too_long", "stt_config_invalid"],
+    [STT_AUDIO_INVALID, "stt_audio_too_large", "stt_audio_too_long"],
 )
 @pytest.mark.asyncio
-async def test_no_fallback_on_hopeless_errors(tmp_path, audio, code):
-    """Битое аудио резерв отвергнет так же — платить дважды незачем."""
+async def test_no_rotation_on_hopeless_errors(tmp_path, audio, code):
+    """Битое аудио следующий провайдер отвергнет так же.
+
+    Ротация нужна там, где второй провайдер может справиться. Запись,
+    которую не берёт никто, — не тот случай: перебор стоил бы как
+    настоящее распознавание за каждую попытку.
+    """
     alpha = FakeAdapter("alpha", [SttError(code, "не выйдет")])
     beta = FakeAdapter("beta", ["не должно быть вызвано"])
     router = build(tmp_path, {"alpha": alpha, "beta": beta})
@@ -168,8 +173,116 @@ async def test_no_fallback_on_hopeless_errors(tmp_path, audio, code):
     assert beta.calls == 0
 
 
+def build_chain(tmp_path: Path, adapters: dict, providers: list[str], **route_overrides):
+    """Маршрут из произвольного числа провайдеров в заданном порядке."""
+    runtime = SttRuntime(tmp_path / "snap.json")
+    configs = [
+        {"id": f"c{i}", "name": f"Провайдер {i + 1}", "provider": name, "mode": "batch",
+         "base_url": f"https://{name}.example", "model": "m", "params": {}, "secret": "k"}
+        for i, name in enumerate(providers)
+    ]
+    route = {
+        "use_case": "telegram_voice",
+        "chain": [config["id"] for config in configs],
+        "enabled": True,
+        "timeout_ms": 30000,
+    }
+    route.update(route_overrides)
+    applied = runtime.apply({"version": 1, "configs": configs, "routes": [route]})
+    assert applied["applied"], applied
+    return SttRoutingService(runtime, FakeRegistry(adapters), TranscriptCache())
+
+
 @pytest.mark.asyncio
-async def test_at_most_one_fallback(tmp_path, audio):
+async def test_rotation_walks_the_whole_chain(tmp_path, audio):
+    """Три провайдера подряд: перебор не останавливается на втором.
+
+    Прежнее правило «не более одного резерва» экономило деньги, но
+    оставляло пользователя без ответа, когда отказывали двое. Владелец
+    выбрал ответ.
+    """
+    adapters = {
+        "alpha": FakeAdapter("alpha", [SttError(STT_TIMEOUT, "первый лёг")]),
+        "beta": FakeAdapter("beta", [SttError(STT_RATE_LIMITED, "у второго лимит")]),
+        "gamma": FakeAdapter("gamma", ["третий справился"]),
+    }
+    router = build_chain(tmp_path, adapters, ["alpha", "beta", "gamma"])
+
+    outcome = await router.transcribe("telegram_voice", audio)
+
+    assert outcome.result.text == "третий справился"
+    assert outcome.used_fallback is True
+    assert outcome.attempt_count == 3
+    # Первая попытка не резерв, две следующие — резерв.
+    assert [a.is_fallback for a in outcome.attempts] == [False, True, True]
+    assert all(adapter.calls == 1 for adapter in adapters.values())
+
+
+@pytest.mark.asyncio
+async def test_rotation_can_be_switched_off(tmp_path, audio):
+    """Выключенная ротация оставляет в работе только первого.
+
+    У провайдеров разная цена и разное качество: «лучше промолчать, чем
+    ответить дешёвой моделью» — решение владельца, и панель обязана
+    позволять его принять.
+    """
+    adapters = {
+        "alpha": FakeAdapter("alpha", [SttError(STT_TIMEOUT, "лёг")]),
+        "beta": FakeAdapter("beta", ["резерв справился бы"]),
+    }
+    router = build_chain(
+        tmp_path, adapters, ["alpha", "beta"], rotation_enabled=False)
+
+    with pytest.raises(SttError) as caught:
+        await router.transcribe("telegram_voice", audio)
+
+    assert caught.value.code == STT_TIMEOUT
+    assert adapters["beta"].calls == 0, "ротация выключена — второго не трогаем"
+
+
+@pytest.mark.asyncio
+async def test_rotation_order_follows_the_chain(tmp_path, audio):
+    """Приоритет задаёт администратор, а не удача.
+
+    Тот же набор провайдеров в обратном порядке должен дать другого
+    исполнителя — иначе порядок в панели ничего не значит.
+    """
+    for order, expected in (
+        (["alpha", "beta"], "ответ alpha"),
+        (["beta", "alpha"], "ответ beta"),
+    ):
+        adapters = {"alpha": FakeAdapter("alpha", []), "beta": FakeAdapter("beta", [])}
+        router = build_chain(tmp_path / order[0], adapters, order)
+        outcome = await router.transcribe("telegram_voice", audio)
+        assert outcome.result.text == expected
+        assert outcome.used_fallback is False
+
+
+@pytest.mark.asyncio
+async def test_faulty_provider_is_skipped_not_chain_break(tmp_path, audio):
+    """Помеченный неисправным пропускается, но за ним пробуют дальше."""
+    adapters = {
+        "alpha": FakeAdapter("alpha", [
+            SttError(STT_TIMEOUT, "первый раз"), SttError(STT_TIMEOUT, "второй раз"),
+        ]),
+        "beta": FakeAdapter("beta", [SttError(STT_AUTH_FAILED, "ключи кончились")]),
+        "gamma": FakeAdapter("gamma", ["третий справился", "и снова справился"]),
+    }
+    router = build_chain(tmp_path, adapters, ["alpha", "beta", "gamma"])
+
+    await router.transcribe("telegram_voice", audio)
+    assert "c1" in router.faulty(), "второй провайдер должен быть помечен"
+
+    # Второй запрос: помеченного пропускаем, но до третьего доходим.
+    outcome = await router.transcribe("telegram_voice", audio)
+    assert outcome.result.text == "и снова справился"
+    assert adapters["beta"].calls == 1, "помеченного второй раз не трогаем"
+    assert adapters["gamma"].calls == 2
+
+
+@pytest.mark.asyncio
+async def test_chain_stops_when_it_runs_out(tmp_path, audio):
+    """Перебор кончается на последнем провайдере, а не зацикливается."""
     alpha = FakeAdapter("alpha", [SttError(STT_TIMEOUT, "раз")])
     beta = FakeAdapter("beta", [SttError(STT_TIMEOUT, "два"), "третья попытка"])
     router = build(tmp_path, {"alpha": alpha, "beta": beta})
@@ -178,23 +291,33 @@ async def test_at_most_one_fallback(tmp_path, audio):
         await router.transcribe("telegram_voice", audio)
 
     assert caught.value.code == STT_ALL_PROVIDERS_FAILED
+    # В сообщении обе причины: чинить, возможно, придётся обоих.
+    assert "раз" in caught.value.message and "два" in caught.value.message
     assert alpha.calls == 1
-    assert beta.calls == 1, "третьей попытки быть не должно"
+    assert beta.calls == 1
 
 
 @pytest.mark.asyncio
-async def test_auth_failure_marks_config_faulty(tmp_path, audio):
+async def test_auth_failure_marks_config_faulty_but_rotates(tmp_path, audio):
+    """Кончились ключи у первого — отвечает второй, а первый помечается.
+
+    Так было не всегда: раньше ошибка авторизации обрывала цепочку, и
+    голосовое оставалось без ответа до вмешательства администратора.
+    Но конфигурация помечается неисправной, только когда мертвы все её
+    ключи, — а это ровно тот случай, ради которого цепочка и заведена.
+    """
     alpha = FakeAdapter("alpha", [SttError(STT_AUTH_FAILED, "ключ не принят")])
     beta = FakeAdapter("beta", ["резерв справился"])
     router = build(tmp_path, {"alpha": alpha, "beta": beta})
 
-    with pytest.raises(SttError):
-        await router.transcribe("telegram_voice", audio)
+    outcome = await router.transcribe("telegram_voice", audio)
 
-    # Ошибка авторизации не временная: резерв не запускается, а
-    # конфигурация помечается, чтобы админ увидел предупреждение.
+    assert outcome.result.text == "резерв справился"
+    assert outcome.used_fallback is True
+    assert beta.calls == 1
+    # Пометка всё равно ставится: администратор должен увидеть, что у
+    # первого провайдера кончились ключи, даже когда ответ пришёл.
     assert router.faulty() == {"primary": STT_AUTH_FAILED}
-    assert beta.calls == 0
 
 
 @pytest.mark.asyncio
@@ -374,18 +497,19 @@ def test_describe_never_leaks_secrets(tmp_path):
     assert runtime.describe()["configs"][0]["secret_configured"] is True
 
 
-def test_snapshot_rejects_fallback_equal_to_primary(tmp_path):
+def test_snapshot_rejects_duplicate_in_chain(tmp_path):
+    """Один провайдер дважды в цепочке — второй такой же отказ за вторые деньги."""
     runtime = SttRuntime(tmp_path / "snap.json")
     applied = runtime.apply({
         "version": 1,
         "configs": [{"id": "c1", "name": "n", "provider": "openai", "mode": "batch",
                      "base_url": "https://api.openai.com/v1", "model": "whisper-1",
                      "params": {}, "secret": "k"}],
-        "routes": [{"use_case": "telegram_voice", "primary_config_id": "c1",
-                    "fallback_config_id": "c1", "enabled": True, "timeout_ms": 30000}],
+        "routes": [{"use_case": "telegram_voice", "chain": ["c1", "c1"],
+                    "enabled": True, "timeout_ms": 30000}],
     })
     assert applied["applied"] is False
-    assert any("резерв" in error for error in applied["errors"])
+    assert any("дважды" in error for error in applied["errors"])
 
 
 def test_snapshot_rejects_dangling_config_reference(tmp_path):

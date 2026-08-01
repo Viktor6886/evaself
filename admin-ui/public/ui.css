@@ -597,3 +597,122 @@ dialog .eyebrow { margin-top: 0; }
 .key-row .key-actions { display: flex; gap: 6px; }
 .key-add > summary { cursor: pointer; font-size: 12.5px; padding: 6px 0; }
 .key-add[open] > summary { margin-bottom: 8px; }
+
+/* =====================================================================
+ * Телефон
+ *
+ * Панель открывают с телефона не «иногда»: посмотреть, отвечает ли Ева,
+ * и переключить провайдера — это то, что делают в дороге, а за ноутбук
+ * ради этого не садятся. Поэтому телефон здесь — не деградация
+ * настольной вёрстки, а второй полноценный размер.
+ *
+ * Порог 720px, а не 680: между ними оказывались вкладки раздела STT,
+ * которые не помещались в строку и растягивали страницу до 456px при
+ * ширине экрана 360. Горизонтальная прокрутка всей страницы — худшее,
+ * что может случиться с интерфейсом на телефоне: промахиваешься мимо
+ * всего сразу.
+ * ------------------------------------------------------------------ */
+@media (max-width: 720px) {
+  /* Ни один блок не имеет права растянуть страницу вширь. */
+  html, body { overflow-x: hidden; }
+
+  .content { padding: 20px 14px 60px; }
+  .page-heading h2 { font-size: 20px; }
+  .page-heading > div > p { font-size: 13px; }
+
+  /* Вкладки переносятся вместо того, чтобы уезжать за экран. */
+  .tabs { flex-wrap: wrap; gap: 8px; }
+  .tab { min-height: 40px; padding: 9px 14px; font-size: 13px; }
+
+  /* Палец — не мышь. 40px это нижняя граница, ниже начинаются промахи. */
+  .button, .tab, .icon-button { min-height: 42px; }
+  .button.tiny { min-height: 38px; padding: 8px 12px; }
+  .card-actions .button,
+  .form-actions .button,
+  .heading-actions .button { flex: 1 1 auto; justify-content: center; }
+
+  /* Поля ввода: 16px обязательны — при меньшем размере iOS и часть
+     андроидных браузеров зумят страницу на фокусе и уже не отпускают. */
+  input, select, textarea,
+  .integration-form input,
+  .integration-form select { font-size: 16px; min-height: 44px; }
+  textarea { min-height: 88px; }
+
+  /* Цепочка провайдеров и список ключей: в строку не помещаются. */
+  .chain-link,
+  .key-row {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+  .chain-link .chain-move,
+  .key-row .key-actions { justify-content: flex-start; flex-wrap: wrap; }
+  .key-row .dot { justify-self: start; }
+
+  .provider-details { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .status-meta { grid-template-columns: 1fr; }
+
+  /* Таблицы остаются таблицами, но прокрутка внутри своей рамки —
+     с инерцией и видимым краем, иначе непонятно, что там ещё что-то
+     есть. */
+  .table-wrap {
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+    /* Тень у правого края: единственный честный намёк, что таблица
+       шире экрана. */
+    background:
+      linear-gradient(to right, var(--panel, #161a22) 30%, transparent),
+      linear-gradient(to left, var(--panel, #161a22) 30%, transparent) 100% 0;
+    background-size: 28px 100%, 28px 100%;
+    background-repeat: no-repeat;
+    background-attachment: local, local;
+  }
+  table { min-width: 620px; }
+  th, td { padding: 10px 11px; }
+
+  /* Диалог как нижний лист — то, чего ждёт рука на телефоне: он
+     появляется снизу, у большого пальца, а не в центре экрана. */
+  .sheet-dialog,
+  dialog {
+    width: 100%;
+    max-width: 100%;
+    max-height: 88vh;
+    margin: auto auto 0;
+    border-radius: 18px 18px 0 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  dialog form { padding: 20px 16px 26px; }
+  .sheet-dialog { padding: 16px 16px 26px; }
+  .dialog-actions { flex-direction: column-reverse; }
+  .dialog-actions .button { width: 100%; justify-content: center; }
+
+  /* Уведомление у нижнего края во всю ширину: в правом верхнем углу
+     его на телефоне просто не замечают. */
+  .toast {
+    right: 12px;
+    left: 12px;
+    bottom: 12px;
+    max-width: none;
+  }
+}
+
+/* Боковое меню на телефоне: затемнение под ним нужно не для красоты.
+   Без него единственный способ закрыть меню — попасть в ту же кнопку,
+   которой открыл, а промах уводит на другой раздел. */
+.sidebar-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 29;
+  background: rgba(4, 10, 8, .55);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .2s;
+}
+.sidebar-scrim.show { opacity: 1; pointer-events: auto; }
+@media (min-width: 981px) {
+  /* На широком экране меню не выезжает — затемнению там делать нечего. */
+  .sidebar-scrim { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sidebar, .sidebar-scrim { transition: none; }
+}

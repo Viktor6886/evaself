@@ -51,6 +51,11 @@ const ROUTE_BOOLEAN_FIELDS = [
   "requires_vision",
   "requires_streaming",
   "allows_sensitive",
+  // Выключенная ротация оставляет в работе только голову цепочки. Для
+  // маршрута chat, которым пользуется Letta, это значит: резервная
+  // модель не подменит основную незаметно — разница в стиле ответа
+  // заметна, и мириться с ней должен владелец, а не роутер.
+  "rotation_enabled",
 ] as const;
 
 export interface RouterHealthRow {
@@ -89,7 +94,7 @@ export class LlmRouterAdminService {
       this.pool.query(
         `SELECT code, title, description, requires_tools, requires_json,
                 requires_vision, requires_streaming, min_context_window,
-                max_quality_tier, allows_sensitive
+                max_quality_tier, allows_sensitive, rotation_enabled
            FROM llm_routes ORDER BY code`,
       ),
       this.pool.query(

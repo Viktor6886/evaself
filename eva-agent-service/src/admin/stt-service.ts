@@ -258,9 +258,9 @@ export class SttAdminService {
       `SELECT c.*,
               COALESCE(
                 ARRAY(
-                  SELECT r.use_case FROM stt_routes r
-                   WHERE r.primary_config_id = c.id OR r.fallback_config_id = c.id
-                   ORDER BY r.use_case
+                  SELECT rp.use_case FROM stt_route_providers rp
+                   WHERE rp.config_id = c.id
+                   ORDER BY rp.use_case
                 ), '{}'
               ) AS used_by
          FROM stt_provider_configs c
@@ -274,8 +274,8 @@ export class SttAdminService {
   async get(id: string): Promise<Record<string, unknown>> {
     const row = await this.row(id);
     const { rows } = await this.pool.query<{ use_case: string }>(
-      `SELECT use_case FROM stt_routes
-        WHERE primary_config_id = $1 OR fallback_config_id = $1
+      `SELECT use_case FROM stt_route_providers
+        WHERE config_id = $1
         ORDER BY use_case`,
       [id],
     );
@@ -669,8 +669,7 @@ export class SttAdminService {
     if (!row) throw adminNotFound("Ключ не найден");
 
     const usedByRoute = await this.pool.query(
-      `SELECT 1 FROM stt_routes
-        WHERE primary_config_id = $1 OR fallback_config_id = $1`,
+      `SELECT 1 FROM stt_route_providers WHERE config_id = $1`,
       [configId],
     );
     if (row.total <= 1 && (usedByRoute.rowCount ?? 0) > 0) {
@@ -876,11 +875,14 @@ export class SttAdminService {
   }
 
   /**
-   * Активация: конфигурация становится рабочей для сценария.
+   * Активация: конфигурация встаёт в цепочку сценария.
+   *
+   * «primary» — во главу, «fallback» — в хвост. Уже стоящая в цепочке
+   * конфигурация переезжает, а не задваивается.
    *
    * Требование «активация допускается только после успешного теста»
    * выполняется буквально — сначала прогоняется проверка, и при её
-   * провале маршрут не меняется.
+   * провале цепочка не меняется.
    */
   async activate(id: string, useCase: string, slot: "primary" | "fallback", actorId: string | null) {
     const row = await this.row(id);
@@ -896,27 +898,63 @@ export class SttAdminService {
       );
     }
 
-    const column = slot === "primary" ? "primary_config_id" : "fallback_config_id";
-    const other = slot === "primary" ? "fallback_config_id" : "primary_config_id";
-    try {
-      await this.pool.query(
-        `UPDATE stt_routes
-            SET ${column} = $2,
-                ${other} = CASE WHEN ${other} = $2 THEN NULL ELSE ${other} END,
-                config_version = config_version + 1,
-                updated_by = $3
-          WHERE use_case = $1`,
-        [useCase, id, actorId],
+    const { rows: current } = await this.pool.query<{ config_id: string }>(
+      "SELECT config_id FROM stt_route_providers WHERE use_case = $1 ORDER BY position",
+      [useCase],
+    );
+    const chain = current.map((link) => link.config_id).filter((link) => link !== id);
+    if (slot === "primary") chain.unshift(id);
+    else chain.push(id);
+
+    if (chain.length > SttAdminService.MAX_CHAIN) {
+      throw adminBadRequest(
+        `В цепочке уже ${SttAdminService.MAX_CHAIN} провайдеров — сначала уберите лишнего`,
       );
-      await this.pool.query(
-        "UPDATE stt_provider_configs SET status = 'healthy' WHERE id = $1",
-        [id],
-      );
-    } catch (error) {
-      throw this.friendly(error);
     }
+
+    await this.writeChain(useCase, chain, actorId);
+    await this.pool.query(
+      "UPDATE stt_provider_configs SET status = 'healthy' WHERE id = $1",
+      [id],
+    );
     await this.pushSnapshot();
     return await this.routes();
+  }
+
+  /**
+   * Перезапись цепочки целиком.
+   *
+   * Удалить и вставить заново, а не двигать по одной: позиции
+   * сдвигаются группой, и промежуточное состояние нарушило бы
+   * уникальность (use_case, position).
+   */
+  private async writeChain(
+    useCase: string, chain: string[], actorId: string | null,
+  ): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("DELETE FROM stt_route_providers WHERE use_case = $1", [useCase]);
+      for (const [position, configId] of chain.entries()) {
+        await client.query(
+          `INSERT INTO stt_route_providers (use_case, config_id, position, created_by)
+           VALUES ($1, $2, $3, $4)`,
+          [useCase, configId, position, actorId],
+        );
+      }
+      await client.query(
+        `UPDATE stt_routes
+            SET config_version = config_version + 1, updated_by = $2
+          WHERE use_case = $1`,
+        [useCase, actorId],
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw this.friendly(error);
+    } finally {
+      client.release();
+    }
   }
 
   /**
@@ -975,9 +1013,10 @@ export class SttAdminService {
 
     const { rows } = await this.pool.query<{ use_case: string; slot: string }>(
       `SELECT use_case,
-              CASE WHEN primary_config_id = $1 THEN 'основной' ELSE 'резервный' END AS slot
-         FROM stt_routes
-        WHERE primary_config_id = $1 OR fallback_config_id = $1`,
+              CASE WHEN position = 0 THEN 'основной'
+                   ELSE 'резерв ' || position END AS slot
+         FROM stt_route_providers
+        WHERE config_id = $1`,
       [id],
     );
     if (rows.length > 0) {
@@ -1015,62 +1054,120 @@ export class SttAdminService {
   // -------------------------------------------------------------------
   // маршруты
   // -------------------------------------------------------------------
+  /** Предел длины цепочки. Взят у LLM Router, чтобы правило было одно. */
+  static readonly MAX_CHAIN = 6;
+
   async routes(): Promise<Record<string, unknown>[]> {
     const { rows } = await this.pool.query(
-      `SELECT r.use_case, r.enabled, r.timeout_ms, r.max_audio_seconds, r.config_version,
-              r.primary_config_id, p.name AS primary_name, p.provider AS primary_provider,
-              r.fallback_config_id, f.name AS fallback_name, f.provider AS fallback_provider,
-              r.updated_at
+      `SELECT r.use_case, r.enabled, r.rotation_enabled, r.timeout_ms,
+              r.max_audio_seconds, r.config_version, r.updated_at,
+              COALESCE(
+                (SELECT jsonb_agg(link ORDER BY link->>'position')
+                   FROM (
+                     SELECT jsonb_build_object(
+                              'position',  rp.position,
+                              'config_id', rp.config_id,
+                              'name',      c.name,
+                              'provider',  c.provider,
+                              'model',     c.model,
+                              'status',    c.status,
+                              'archived',  c.archived_at IS NOT NULL
+                            ) AS link
+                       FROM stt_route_providers rp
+                       JOIN stt_provider_configs c ON c.id = rp.config_id
+                      WHERE rp.use_case = r.use_case
+                   ) AS links),
+                '[]'::jsonb
+              ) AS chain
          FROM stt_routes r
-         LEFT JOIN stt_provider_configs p ON p.id = r.primary_config_id
-         LEFT JOIN stt_provider_configs f ON f.id = r.fallback_config_id
         ORDER BY r.use_case`,
     );
     return rows;
   }
 
+  /**
+   * Настройки сценария: цепочка, ротация, таймауты.
+   *
+   * Цепочка приходит целиком списком идентификаторов, а не частями:
+   * «поставить вторым» и «убрать третьего» — это про позиции, и
+   * пересчитывать их на сервере по частичным правкам значит спорить с
+   * панелью о том, как выглядит результат.
+   */
   async updateRoute(useCase: string, body: Record<string, unknown>, actorId: string | null) {
     this.assertUseCase(useCase);
-    const primary = this.optionalUuid(body.primary_config_id, "primary_config_id");
-    const fallback = this.optionalUuid(body.fallback_config_id, "fallback_config_id");
 
-    if (primary && fallback && primary === fallback) {
-      throw adminBadRequest(
-        "Основной и резервный провайдер не могут совпадать: при отказе вторая " +
-        "попытка ушла бы туда же и стоила бы вторых денег",
-      );
-    }
-    for (const [id, role] of [[primary, "основной"], [fallback, "резервный"]] as const) {
-      if (!id) continue;
-      const row = await this.row(id);
-      if (row.archived_at) throw adminBadRequest(`Архивная конфигурация не может быть ${role}`);
-      if (!row.secret_ref) throw adminBadRequest(`У конфигурации «${row.name}» не задан ключ`);
+    let chain: string[] | null = null;
+    if (body.chain !== undefined) {
+      if (!Array.isArray(body.chain)) throw adminBadRequest("chain должен быть списком");
+      chain = body.chain.map((item, index) =>
+        this.optionalUuid(item, `chain[${index}]`) ?? "");
+      if (chain.some((id) => !id)) throw adminBadRequest("В цепочке пустая позиция");
+      if (chain.length > SttAdminService.MAX_CHAIN) {
+        throw adminBadRequest(
+          `Не больше ${SttAdminService.MAX_CHAIN} провайдеров в цепочке: дальше это `
+          + "уже не отказоустойчивость, а способ незаметно потратить деньги",
+        );
+      }
+      if (new Set(chain).size !== chain.length) {
+        throw adminBadRequest(
+          "Один провайдер дважды в цепочке — это не резерв, а второй такой же "
+          + "отказ за вторые деньги",
+        );
+      }
+      for (const id of chain) {
+        const row = await this.row(id);
+        if (row.archived_at) {
+          throw adminBadRequest(`Архивная конфигурация «${row.name}» не может быть в цепочке`);
+        }
+        if (!row.secret_ref) throw adminBadRequest(`У конфигурации «${row.name}» не задан ключ`);
+      }
     }
 
     const timeout = this.optionalInt(body.timeout_ms, "timeout_ms", 5_000, 600_000);
     const maxAudio = this.optionalInt(body.max_audio_seconds, "max_audio_seconds", 1, 7_200);
 
+    const client = await this.pool.connect();
     try {
-      const { rowCount } = await this.pool.query(
+      await client.query("BEGIN");
+      const { rowCount } = await client.query(
         `UPDATE stt_routes
-            SET primary_config_id = $2,
-                fallback_config_id = $3,
-                enabled = COALESCE($4, enabled),
-                timeout_ms = COALESCE($5, timeout_ms),
-                max_audio_seconds = COALESCE($6, max_audio_seconds),
+            SET enabled = COALESCE($2, enabled),
+                rotation_enabled = COALESCE($3, rotation_enabled),
+                timeout_ms = COALESCE($4, timeout_ms),
+                max_audio_seconds = COALESCE($5, max_audio_seconds),
                 config_version = config_version + 1,
-                updated_by = $7
+                updated_by = $6
           WHERE use_case = $1`,
         [
-          useCase, primary, fallback,
+          useCase,
           typeof body.enabled === "boolean" ? body.enabled : null,
+          typeof body.rotation_enabled === "boolean" ? body.rotation_enabled : null,
           timeout, maxAudio, actorId,
         ],
       );
       if (!rowCount) throw adminNotFound("Сценарий не найден");
+
+      if (chain !== null) {
+        // Удалить и записать заново, а не сверять по одной: позиции
+        // сдвигаются целиком, и промежуточное состояние нарушило бы
+        // уникальность (use_case, position).
+        await client.query("DELETE FROM stt_route_providers WHERE use_case = $1", [useCase]);
+        for (const [position, configId] of chain.entries()) {
+          await client.query(
+            `INSERT INTO stt_route_providers (use_case, config_id, position, created_by)
+             VALUES ($1, $2, $3, $4)`,
+            [useCase, configId, position, actorId],
+          );
+        }
+      }
+      await client.query("COMMIT");
     } catch (error) {
+      await client.query("ROLLBACK");
       throw this.friendly(error);
+    } finally {
+      client.release();
     }
+
     // Немедленная инвалидизация: следующий же запрос распознавания
     // пойдёт по новому маршруту, перезапуск контейнеров не нужен.
     await this.pushSnapshot();
@@ -1094,8 +1191,7 @@ export class SttAdminService {
     const { rows } = await this.pool.query<SttConfigRow>(
       `SELECT DISTINCT c.*
          FROM stt_provider_configs c
-         JOIN stt_routes r
-           ON r.primary_config_id = c.id OR r.fallback_config_id = c.id
+         JOIN stt_route_providers rp ON rp.config_id = c.id
         WHERE c.archived_at IS NULL`,
     );
 
@@ -1125,13 +1221,15 @@ export class SttAdminService {
     const routes = routeRows
       .map((route) => ({
         use_case: route.use_case,
-        // Ссылку на конфигурацию без ключа не отправляем: снимок с
-        // висящей ссылкой media-service отвергнет целиком.
-        primary_config_id: known.has(route.primary_config_id as string)
-          ? route.primary_config_id : null,
-        fallback_config_id: known.has(route.fallback_config_id as string)
-          ? route.fallback_config_id : null,
+        // Ссылки на конфигурации без ключей выбрасываются, а не
+        // обнуляют маршрут: снимок с висящей ссылкой media-service
+        // отвергнет целиком, и один недонастроенный резерв положил бы
+        // распознавание вместе с рабочим основным.
+        chain: (route.chain as Array<{ config_id: string }> ?? [])
+          .map((link) => link.config_id)
+          .filter((id) => known.has(id)),
         enabled: route.enabled,
+        rotation_enabled: route.rotation_enabled,
         timeout_ms: route.timeout_ms,
         max_audio_seconds: route.max_audio_seconds,
         config_version: route.config_version,
@@ -1326,11 +1424,18 @@ export class SttAdminService {
         "UPDATE stt_provider_configs SET secret_ref = $2 WHERE id = $1",
         [id, secretRef],
       );
+      // Во главу цепочки — но только если она пуста: перенос из
+      // окружения не должен подвинуть провайдера, назначенного руками.
       await client.query(
-        `UPDATE stt_routes
-            SET primary_config_id = $1, config_version = config_version + 1
-          WHERE use_case = 'telegram_voice' AND primary_config_id IS NULL`,
+        `INSERT INTO stt_route_providers (use_case, config_id, position)
+         SELECT 'telegram_voice', $1, 0
+          WHERE NOT EXISTS (
+                SELECT 1 FROM stt_route_providers WHERE use_case = 'telegram_voice')`,
         [id],
+      );
+      await client.query(
+        `UPDATE stt_routes SET config_version = config_version + 1
+          WHERE use_case = 'telegram_voice'`,
       );
       await client.query("COMMIT");
     } catch (error) {
@@ -1352,7 +1457,8 @@ export class SttAdminService {
     const routes = await this.routes();
     return {
       configs_by_status: Object.fromEntries(rows.map((row) => [row.status, row.count])),
-      routes_configured: routes.filter((route) => route.primary_config_id).length,
+      routes_configured: routes.filter(
+        (route) => (route.chain as unknown[] ?? []).length > 0).length,
       routes_total: routes.length,
       routes,
     };
@@ -1560,8 +1666,15 @@ export class SttAdminService {
     if (message.includes("stt_configs_name_uidx")) {
       return adminBadRequest("Конфигурация с таким названием уже есть");
     }
-    if (message.includes("stt_routes_distinct_check")) {
-      return adminBadRequest("Основной и резервный провайдер не могут совпадать");
+    if (message.includes("stt_route_providers_position_uidx")) {
+      return adminBadRequest("Две конфигурации не могут занимать одну позицию в цепочке");
+    }
+    if (message.includes("stt_route_providers_pkey")) {
+      return adminBadRequest("Один провайдер дважды в цепочке — это не резерв");
+    }
+    if (message.includes("stt_route_providers_position_check")) {
+      return adminBadRequest(
+        `Не больше ${SttAdminService.MAX_CHAIN} провайдеров в цепочке`);
     }
     if (message.includes("stt_configs_public_config_clean")) {
       return adminBadRequest("В открытых параметрах обнаружено секретное поле");
@@ -1569,8 +1682,7 @@ export class SttAdminService {
     if (message.includes("stt_configs_base_url_check")) {
       return adminBadRequest("Base URL должен начинаться с https://");
     }
-    if (message.includes("stt_routes_primary_config_id_fkey")
-      || message.includes("stt_routes_fallback_config_id_fkey")) {
+    if (message.includes("stt_route_providers_config_id_fkey")) {
       return adminBadRequest("Конфигурация используется маршрутом");
     }
     return error;

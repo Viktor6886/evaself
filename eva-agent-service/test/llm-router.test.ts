@@ -70,6 +70,7 @@ const ROUTE = {
   min_context_window: 8_192,
   max_quality_tier: 3,
   allows_sensitive: true,
+  rotation_enabled: true,
 };
 
 function request(overrides = {}) {
@@ -258,6 +259,45 @@ test("открытый breaker исключает провайдера, пока
     now: new Date(),
   });
   assert.equal(ready.usable.length, 1, "после выдержки провайдер снова в цепочке");
+});
+
+test("выключенная ротация оставляет в цепочке только основного", () => {
+  const primary = provider({ id: "a", name: "primary" });
+  const backup = provider({ id: "b", name: "backup" });
+  const input = {
+    request: request(),
+    providerIds: ["a", "b"],
+    providers: new Map([["a", primary], ["b", backup]]),
+    breakers: new Map(),
+    now: new Date(),
+  };
+
+  const rotating = buildChain({ ...input, route: ROUTE });
+  assert.deepEqual(rotating.usable.map((e) => e.provider.name), ["primary", "backup"]);
+
+  const pinned = buildChain({ ...input, route: { ...ROUTE, rotation_enabled: false } });
+  assert.deepEqual(pinned.usable.map((e) => e.provider.name), ["primary"]);
+  // Причина названа, а не проглочена: иначе в телеметрии это выглядит
+  // как «резерв почему-то не сработал».
+  assert.equal(pinned.rejected[0]?.reason, "rotation_disabled");
+  assert.match(pinned.rejected[0].detail, /ротация/);
+});
+
+test("выключенная ротация не мешает основному быть отвергнутым по существу", () => {
+  // Несовместимость важнее выключателя: подставлять модель без
+  // инструментов в маршрут, который их требует, нельзя ни при каких
+  // настройках ротации.
+  const without = provider({ id: "a", name: "no-tools", supports_tools: false });
+  const chain = buildChain({
+    route: { ...ROUTE, code: "tools", requires_tools: true, rotation_enabled: false },
+    request: request(),
+    providerIds: ["a"],
+    providers: new Map([["a", without]]),
+    breakers: new Map(),
+    now: new Date(),
+  });
+  assert.equal(chain.usable.length, 0);
+  assert.equal(chain.rejected[0]?.reason, "incompatible");
 });
 
 test("снятый администратором провайдер не возвращается автоматически", () => {

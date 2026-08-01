@@ -144,7 +144,8 @@ export class RouterStore {
     }
     const { rows } = await this.pool.query<RouteDefinition>(
       `SELECT code, title, requires_tools, requires_json, requires_vision,
-              requires_streaming, min_context_window, max_quality_tier, allows_sensitive
+              requires_streaming, min_context_window, max_quality_tier, allows_sensitive,
+              rotation_enabled
          FROM llm_routes`,
     );
     const map = new Map(rows.map((row) => [row.code, row]));

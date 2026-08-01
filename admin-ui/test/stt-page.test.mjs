@@ -104,16 +104,23 @@ const ROUTES_PAYLOAD = {
     {
       use_case: "telegram_voice",
       enabled: true,
+      rotation_enabled: true,
       timeout_ms: 120000,
       max_audio_seconds: 1800,
       config_version: 4,
-      primary_config_id: "11111111-1111-1111-1111-111111111111",
-      fallback_config_id: null,
+      chain: [{
+        position: 0,
+        config_id: "11111111-1111-1111-1111-111111111111",
+        name: "Deepgram production",
+        provider: "deepgram",
+        model: "nova-3",
+        status: "healthy",
+      }],
     },
     {
       use_case: "webapp_voice_message",
-      enabled: true, timeout_ms: 90000, max_audio_seconds: 600,
-      config_version: 1, primary_config_id: null, fallback_config_id: null,
+      enabled: true, rotation_enabled: true, timeout_ms: 90000,
+      max_audio_seconds: 600, config_version: 1, chain: [],
     },
   ],
 };
@@ -548,14 +555,92 @@ describe("раздел распознавания речи", () => {
     await panel.page.waitForFunction(
       () => document.querySelector("#stt-routes").hidden === false);
 
+    // Deepgram уже в цепочке — в списке добавления его быть не должно,
+    // зато он должен стоять первым звеном.
+    const links = await panel.page.$$eval(
+      '[data-route="telegram_voice"] .chain-link .chain-name strong',
+      (nodes) => nodes.map((node) => node.textContent.trim()),
+    );
+    assert.deepEqual(links, ["Deepgram production"]);
+
     const options = await panel.page.$$eval(
-      '[data-route="telegram_voice"] [data-route-field="primary_config_id"] option',
+      '[data-stt-chain-pick="telegram_voice"] option',
       (nodes) => nodes.map((node) => node.textContent),
     );
-    assert.ok(options.some((text) => text.includes("Deepgram production")));
     // Ни конфигурация без ключа, ни архивная работать не смогут —
     // предлагать их в списке значит готовить отказ на проде.
     assert.ok(!options.some((text) => text.includes("Без ключа")));
     assert.ok(!options.some((text) => text.includes("Архивная")));
+    assert.ok(!options.some((text) => text.includes("Deepgram production")),
+      "уже стоящего в цепочке предлагать второй раз нельзя");
+  });
+
+  test("порядок в цепочке меняется и уходит на сервер целиком", async () => {
+    const second = {
+      ...CONFIGS.configs[0],
+      id: "55555555-5555-5555-5555-555555555555",
+      name: "OpenAI резервный", provider: "openai", model: "gpt-4o-transcribe",
+    };
+    const panel = await open({
+      routes: {
+        ...BASE_ROUTES,
+        "/stt/configs": { configs: [...CONFIGS.configs, second] },
+        "/stt/routes": {
+          routes: [{
+            ...ROUTES_PAYLOAD.routes[0],
+            chain: [
+              ROUTES_PAYLOAD.routes[0].chain[0],
+              { position: 1, config_id: second.id, name: second.name,
+                provider: "openai", model: "gpt-4o-transcribe", status: "healthy" },
+            ],
+          }],
+        },
+      },
+    });
+    await openStt(panel.page);
+    await panel.page.click('[data-stt-tab="routes"]');
+    await panel.page.waitForFunction(
+      () => document.querySelectorAll("#stt-routes .chain-link").length === 2);
+
+    // Поднять резерв наверх — это перестановка приоритетов, то есть
+    // операция с маршрутом, а значит sudo.
+    await panel.page.click('[data-stt-chain="up"][data-config="55555555-5555-5555-5555-555555555555"]');
+    await panel.page.waitForSelector("#sudo-dialog[open]");
+    assert.equal(
+      panel.requests.some((item) => item.method === "PUT" && item.path.includes("/stt/routes/")),
+      false,
+      "цепочка не должна меняться до подтверждения",
+    );
+
+    await panel.confirmSudo();
+    const sent = panel.requests.find(
+      (item) => item.method === "PUT" && item.path.includes("/stt/routes/"));
+    assert.ok(sent, "после подтверждения запрос должен уйти");
+    // Цепочка отправляется целиком: позиции — свойство всего списка,
+    // а не одного звена.
+    assert.deepEqual(sent.body.chain, [
+      "55555555-5555-5555-5555-555555555555",
+      "11111111-1111-1111-1111-111111111111",
+    ]);
+  });
+
+  test("ротацию можно выключить, и это отдельная настройка маршрута", async () => {
+    const panel = await open({ routes: BASE_ROUTES });
+    await openStt(panel.page);
+    await panel.page.click('[data-stt-tab="routes"]');
+    await panel.page.waitForFunction(
+      () => document.querySelectorAll("#stt-routes .status-card").length > 0);
+
+    const toggle = '[data-route="telegram_voice"] [data-route-field="rotation_enabled"]';
+    assert.equal(await panel.page.$eval(toggle, (node) => node.checked), true);
+
+    await panel.page.uncheck(toggle);
+    await panel.page.click('[data-stt-action="save-route"][data-id="telegram_voice"]');
+    await panel.page.waitForSelector("#sudo-dialog[open]");
+    await panel.confirmSudo();
+
+    const sent = panel.requests.find(
+      (item) => item.method === "PUT" && item.path.includes("/stt/routes/telegram_voice"));
+    assert.equal(sent.body.rotation_enabled, false);
   });
 });

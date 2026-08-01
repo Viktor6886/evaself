@@ -90,7 +90,8 @@ export type SwitchReason =
   | "tool_calls_failed"
   | "latency_exceeded"
   | "breaker_open"
-  | "incompatible";
+  | "incompatible"
+  | "rotation_disabled";
 
 /** Ошибка провайдера, уже классифицированная адаптером. */
 export class ProviderError extends Error {
@@ -168,6 +169,13 @@ export interface RouteDefinition {
   min_context_window: number;
   max_quality_tier: number;
   allows_sensitive: boolean;
+  /**
+   * Разрешено ли подставлять резервную модель, когда основная не
+   * ответила. Выключается там, где подмена заметна: у маршрута chat,
+   * которым пользуется Letta, резервная модель отвечает в другом стиле,
+   * и владелец вправе предпочесть отказ.
+   */
+  rotation_enabled: boolean;
 }
 
 /** Адаптер конкретного семейства API. */

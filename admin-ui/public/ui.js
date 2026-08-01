@@ -170,7 +170,7 @@ function openPage(name) {
   document.querySelectorAll(".nav-item[data-page]").forEach((item) => {
     item.classList.toggle("active", item.dataset.page === name);
   });
-  $(".sidebar").classList.remove("open");
+  setSidebar(false);
   LOADERS[name]?.().catch(handleError);
 }
 
@@ -233,7 +233,10 @@ function statusCard(item, options = {}) {
 async function loadOverview() {
   const { payload } = await request("/overview");
   state.overview = payload;
-  $("#system-version").textContent = payload.installation.version;
+  // Версия — украшение шапки, а не смысл страницы. Её отсутствие не
+  // должно уносить с собой вердикт, состояние сервисов и загрузку
+  // сервера: именно за ними сюда и заходят.
+  $("#system-version").textContent = payload.installation?.version ?? "—";
   renderVerdict(payload);
   renderHostBar(payload);
   renderOverviewGroups(payload);
@@ -661,9 +664,10 @@ function renderRouterRoutes() {
             <h4>${escapeHtml(ROUTE_TITLES[route.code] || route.title || route.code)}</h4>
             <span class="route-requires">требует: ${escapeHtml(requires)}</span>
           </div>
-          ${chain.length ? `<ol class="chain">${chain.map((link, index) => `
-            <li class="chain-link${link.enabled ? "" : " is-off"}">
-              <span class="chain-rank">${index === 0 ? "основной" : `резерв ${index}`}</span>
+          ${chain.length ? `<ol class="chain${route.rotation_enabled === false ? " is-pinned" : ""}">${chain.map((link, index) => `
+            <li class="chain-link${link.enabled && (route.rotation_enabled !== false || index === 0) ? "" : " is-off"}">
+              <span class="chain-rank">${index === 0 ? "основной"
+                : route.rotation_enabled === false ? "не используется" : `резерв ${index}`}</span>
               <span class="chain-name"><strong>${escapeHtml(link.name)}</strong><small>${escapeHtml(link.model)} · ${escapeHtml(link.protocol)}</small></span>
               ${editable ? `<span class="chain-move">
                 <button class="button tiny ghost" data-chain-move="up" data-route="${escapeHtml(route.code)}" data-provider="${escapeHtml(link.provider_id)}"${index === 0 ? " disabled" : ""}>↑</button>
@@ -673,6 +677,15 @@ function renderRouterRoutes() {
             </li>`).join("")}</ol>`
             : '<p class="muted">Цепочка пуста — маршрут не обслуживается.</p>'}
           ${editable ? chainAdder(route, chain) : ""}
+          <label class="switch route-rotation">
+            <input type="checkbox" data-route-rotation="${escapeHtml(route.code)}"
+                   ${route.rotation_enabled === false ? "" : "checked"}${editable ? "" : " disabled"}>
+            <span>Ротация провайдеров</span>
+          </label>
+          <small class="muted">${route.code === "chat"
+            ? "Этим маршрутом отвечает Ева. Выключите, если подмена на резервную модель "
+              + "недопустима: стиль ответа у моделей разный."
+            : "Выключенная ротация оставляет в работе только основного, а отказ остаётся отказом."}</small>
         </section>`;
     }).join("")
     : '<p class="muted">Маршруты появятся после применения миграций роутера.</p>';
@@ -1617,7 +1630,31 @@ $("#logout").addEventListener("click", async () => {
   state.me = null;
   showLogin();
 });
-$("#menu").addEventListener("click", () => $(".sidebar").classList.toggle("open"));
+/**
+ * Боковое меню на телефоне.
+ *
+ * Открытое меню накрывает содержимое, поэтому у него должно быть три
+ * способа закрыться: та же кнопка, тычок мимо и Escape. С одним только
+ * первым промах по кнопке уводит в другой раздел вместо закрытия.
+ */
+function setSidebar(open) {
+  $(".sidebar").classList.toggle("open", open);
+  const scrim = $("#sidebar-scrim");
+  if (!scrim) return;
+  scrim.hidden = false;
+  scrim.classList.toggle("show", open);
+  // aria-expanded читают скринридеры, и без него кнопка «☰» не
+  // сообщает, открыто меню или нет.
+  $("#menu")?.setAttribute("aria-expanded", String(open));
+}
+
+$("#menu").addEventListener("click", () => {
+  setSidebar(!$(".sidebar").classList.contains("open"));
+});
+$("#sidebar-scrim")?.addEventListener("click", () => setSidebar(false));
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && $(".sidebar")?.classList.contains("open")) setSidebar(false);
+});
 $("#nav").addEventListener("click", (event) => {
   const button = event.target.closest("[data-page]");
   if (button) openPage(button.dataset.page);
@@ -1691,6 +1728,25 @@ $("#provider-form").addEventListener("submit", (event) => {
   saveProvider(form).catch(handleError);
 });
 $("#reload-router").addEventListener("click", () => loadProviders().catch(handleError));
+
+// Переключатель — это change, а не click: клавиатурное переключение
+// пробелом click не порождает, и настройка осталась бы недоступной.
+$("#router-routes").addEventListener("change", (event) => {
+  const toggle = event.target.closest("[data-route-rotation]");
+  if (!toggle) return;
+  const code = toggle.dataset.routeRotation;
+  request(`/llm/routes/${encodeURIComponent(code)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ rotation_enabled: toggle.checked }),
+  })
+    .then(() => {
+      toast(toggle.checked
+        ? "Ротация включена: при отказе основного ответит резерв"
+        : "Ротация выключена: работает только основной провайдер");
+      return loadProviders();
+    })
+    .catch(handleError);
+});
 
 $("#router-routes").addEventListener("click", (event) => {
   const move = event.target.closest("[data-chain-move]");
@@ -2060,27 +2116,48 @@ function sttKeySummary(config) {
   return escapeHtml(parts.join(" · "));
 }
 
-function renderSttRoutes() {
-  const options = (selected) => {
-    const items = state.sttConfigs
-      .filter((config) => !config.archived && config.secret?.configured)
-      .map((config) => `<option value="${config.id}" ${config.id === selected ? "selected" : ""}>${escapeHtml(config.name)}</option>`)
-      .join("");
-    return `<option value="">— не назначен —</option>${items}`;
-  };
+/** Предел цепочки. Тот же, что у сервера и у LLM Router. */
+const STT_MAX_CHAIN = 6;
 
-  $("#stt-routes").innerHTML = state.sttRoutes.map((route) => `
+function renderSttRoutes() {
+  $("#stt-routes").innerHTML = state.sttRoutes.map((route) => {
+    const chain = route.chain || [];
+    return `
     <article class="status-card" data-route="${route.use_case}">
       <header>
-        <span class="dot ${route.enabled && route.primary_config_id ? "green" : "gray"}"></span>
+        <span class="dot ${route.enabled && chain.length ? "green" : "gray"}"></span>
         <div><h4>${STT_USE_CASE_LABELS[route.use_case] || route.use_case}</h4>
           <p class="muted">${route.use_case}</p></div>
       </header>
-      <label class="field"><span>Основной</span>
-        <select data-route-field="primary_config_id">${options(route.primary_config_id)}</select></label>
-      <label class="field"><span>Резервный</span>
-        <select data-route-field="fallback_config_id">${options(route.fallback_config_id)}</select>
-        <small class="muted">Не может совпадать с основным: вторая попытка ушла бы туда же.</small></label>
+
+      <p class="muted">Провайдеры перебираются сверху вниз. Порядок — это и есть
+        приоритет: когда первый не отвечает или у него кончились ключи,
+        распознавание продолжает следующий.</p>
+
+      ${chain.length ? `<ol class="chain">${chain.map((link, index) => `
+        <li class="chain-link">
+          <span class="chain-rank">${index === 0 ? "основной" : `резерв ${index}`}</span>
+          <span class="chain-name"><strong>${escapeHtml(link.name)}</strong>
+            <small>${escapeHtml(link.model)} · ${escapeHtml(link.provider)}</small></span>
+          <span class="chain-move">
+            <button class="button tiny ghost" data-stt-chain="up" data-route="${route.use_case}"
+                    data-config="${link.config_id}"${index === 0 ? " disabled" : ""}>↑</button>
+            <button class="button tiny ghost" data-stt-chain="down" data-route="${route.use_case}"
+                    data-config="${link.config_id}"${index === chain.length - 1 ? " disabled" : ""}>↓</button>
+            <button class="button tiny danger-outline" data-stt-chain="remove"
+                    data-route="${route.use_case}" data-config="${link.config_id}">Убрать</button>
+          </span>
+        </li>`).join("")}</ol>`
+      : `<p class="muted">Провайдер не назначен — распознавание для этого сценария не работает.</p>`}
+
+      ${sttChainAdder(route, chain)}
+
+      <label class="switch"><input type="checkbox" data-route-field="rotation_enabled"
+             ${route.rotation_enabled ? "checked" : ""}>
+        <span>Ротация провайдеров</span></label>
+      <small class="muted">Выключите, если резервный провайдер не устраивает по цене
+        или качеству: тогда работает только основной, а отказ остаётся отказом.</small>
+
       <label class="field"><span>Таймаут, мс</span>
         <input type="number" data-route-field="timeout_ms" value="${route.timeout_ms}" min="5000" max="600000"></label>
       <label class="field"><span>Предел длительности, с</span>
@@ -2090,7 +2167,68 @@ function renderSttRoutes() {
       <div class="card-actions">
         <button class="button primary" data-stt-action="save-route" data-id="${route.use_case}">Применить</button>
       </div>
-    </article>`).join("");
+    </article>`;
+  }).join("");
+}
+
+/** Выпадающий список того, кого ещё можно поставить в цепочку. */
+function sttChainAdder(route, chain) {
+  if (chain.length >= STT_MAX_CHAIN) {
+    return `<p class="muted">Цепочка заполнена: ${STT_MAX_CHAIN} провайдеров — предел.</p>`;
+  }
+  const used = new Set(chain.map((link) => link.config_id));
+  const free = state.sttConfigs.filter(
+    (config) => !config.archived && config.secret?.configured && !used.has(config.id));
+  if (!free.length) {
+    return `<p class="muted">Свободных настроенных провайдеров нет.</p>`;
+  }
+  return `<div class="chain-add">
+    <select data-stt-chain-pick="${route.use_case}">
+      ${free.map((config) => `<option value="${config.id}">${escapeHtml(config.name)}</option>`).join("")}
+    </select>
+    <button class="button ghost" data-stt-chain="add" data-route="${route.use_case}">Добавить в цепочку</button>
+  </div>`;
+}
+
+/**
+ * Перестановка и удаление звеньев.
+ *
+ * Цепочка отправляется целиком: «поставить вторым» — это про позиции
+ * всех, а не одного, и спорить с сервером о том, как выглядит
+ * результат, незачем.
+ */
+function sttChainAction(action, useCase, configId) {
+  const route = state.sttRoutes.find((item) => item.use_case === useCase);
+  if (!route) return;
+  const ids = (route.chain || []).map((link) => link.config_id);
+
+  if (action === "add") {
+    const picked = document.querySelector(`[data-stt-chain-pick="${useCase}"]`)?.value;
+    if (!picked) return;
+    ids.push(picked);
+  } else {
+    const index = ids.indexOf(configId);
+    if (index < 0) return;
+    if (action === "remove") ids.splice(index, 1);
+    else {
+      const target = action === "up" ? index - 1 : index + 1;
+      if (target < 0 || target >= ids.length) return;
+      [ids[index], ids[target]] = [ids[target], ids[index]];
+    }
+  }
+
+  askSudo({
+    scope: "stt:activate",
+    title: "Изменение цепочки провайдеров",
+    description: "Новый порядок применится немедленно, без перезапуска контейнеров.",
+    action: async () => {
+      await request(`/stt/routes/${encodeURIComponent(useCase)}`, {
+        method: "PUT", body: JSON.stringify({ chain: ids }),
+      });
+      toast("Цепочка обновлена");
+      await loadStt();
+    },
+  });
 }
 
 async function loadSttUsage() {
@@ -2448,6 +2586,12 @@ document.addEventListener("click", (event) => {
     $("#stt-routes").hidden = active !== "routes";
     $("#stt-usage").hidden = active !== "usage";
     if (active === "usage") loadSttUsage().catch(handleError);
+    return;
+  }
+
+  const link = event.target.closest("[data-stt-chain]");
+  if (link) {
+    sttChainAction(link.dataset.sttChain, link.dataset.route, link.dataset.config);
     return;
   }
 

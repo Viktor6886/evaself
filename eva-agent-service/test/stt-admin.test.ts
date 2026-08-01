@@ -87,7 +87,12 @@ describe("реестр STT-провайдеров", { skip: DATABASE_URL ? false
   });
 
   const reset = async () => {
-    await pool.query("UPDATE stt_routes SET primary_config_id = NULL, fallback_config_id = NULL");
+    await pool.query("DELETE FROM stt_route_providers");
+    // Флаги маршрута тоже сбрасываются: тест, выключивший ротацию,
+    // иначе оставит её выключенной следующему прогону — и «по умолчанию
+    // включена» перестанет проверяться ровно тогда, когда сломается.
+    await pool.query(
+      "UPDATE stt_routes SET rotation_enabled = true, enabled = true, config_version = 1");
     await pool.query("DELETE FROM stt_usage_events");
     await pool.query("DELETE FROM stt_config_versions");
     await pool.query("DELETE FROM stt_provider_configs");
@@ -309,11 +314,11 @@ describe("реестр STT-провайдеров", { skip: DATABASE_URL ? false
     };
     const created = await service.create(deepgram(), null);
     const id = created.id as string;
-    await service.updateRoute("telegram_voice", { primary_config_id: id }, null);
+    await service.updateRoute("telegram_voice", { chain: [id] }, null);
 
     await assert.rejects(() => service.archive(id), /используется маршрутами/);
 
-    await service.updateRoute("telegram_voice", { primary_config_id: null }, null);
+    await service.updateRoute("telegram_voice", { chain: [] }, null);
     const archived = await service.archive(id);
     assert.equal(archived.archived, true);
     assert.equal(archived.status, "archived");
@@ -330,12 +335,12 @@ describe("реестр STT-провайдеров", { skip: DATABASE_URL ? false
     await service.archive(id);
 
     await assert.rejects(
-      () => service.updateRoute("telegram_voice", { primary_config_id: id }, null),
+      () => service.updateRoute("telegram_voice", { chain: [id] }, null),
       /Архивная/,
     );
   });
 
-  test("резерв не может совпадать с основным", async () => {
+  test("один провайдер не может стоять в цепочке дважды", async () => {
     await reset();
     secrets.put = async (ref, value, usedBy) => {
       await seedSecretRow(ref);
@@ -345,10 +350,8 @@ describe("реестр STT-провайдеров", { skip: DATABASE_URL ? false
     const id = created.id as string;
 
     await assert.rejects(
-      () => service.updateRoute("telegram_voice", {
-        primary_config_id: id, fallback_config_id: id,
-      }, null),
-      /не могут совпадать/,
+      () => service.updateRoute("telegram_voice", { chain: [id, id] }, null),
+      /вторые деньги/,
     );
   });
 
@@ -360,7 +363,7 @@ describe("реестр STT-провайдеров", { skip: DATABASE_URL ? false
        RETURNING id`,
     );
     await assert.rejects(
-      () => service.updateRoute("telegram_voice", { primary_config_id: rows[0].id }, null),
+      () => service.updateRoute("telegram_voice", { chain: [rows[0].id] }, null),
       /не задан ключ/,
     );
   });
@@ -386,10 +389,13 @@ describe("реестр STT-провайдеров", { skip: DATABASE_URL ? false
     await assert.rejects(() => service.activate(id, "telegram_voice", "primary", null), /Активация отменена/);
 
     const { rows } = await pool.query(
-      "SELECT primary_config_id, status FROM stt_routes r, stt_provider_configs c WHERE r.use_case = 'telegram_voice' AND c.id = $1",
+      `SELECT c.status,
+              (SELECT count(*)::int FROM stt_route_providers
+                WHERE use_case = 'telegram_voice') AS chain_length
+         FROM stt_provider_configs c WHERE c.id = $1`,
       [id],
     );
-    assert.equal(rows[0].primary_config_id, null, "маршрут не должен смениться");
+    assert.equal(rows[0].chain_length, 0, "цепочка не должна смениться");
     assert.equal(rows[0].status, "unhealthy");
   });
 
@@ -406,7 +412,7 @@ describe("реестр STT-провайдеров", { skip: DATABASE_URL ? false
 
     const routes = await service.routes();
     const route = routes.find((item) => item.use_case === "telegram_voice")!;
-    assert.equal(route.primary_config_id, id);
+    assert.deepEqual((route.chain as Array<{ config_id: string }>).map((l) => l.config_id), [id]);
     // Горячее применение: снимок ушёл в media-service сразу, без
     // перезапуска контейнеров.
     assert.equal(media.snapshots.length, 1);
@@ -414,20 +420,25 @@ describe("реестр STT-провайдеров", { skip: DATABASE_URL ? false
     assert.equal(snapshot.configs[0]!.secret, "dg-live-key", "media-service нужен настоящий ключ");
   });
 
-  test("активация в резерв снимает конфигурацию с роли основного", async () => {
+  test("активация переставляет провайдера в цепочке, а не задваивает", async () => {
     await reset();
     secrets.put = async (ref, value, usedBy) => {
       await seedSecretRow(ref);
       return new FakeSecretStore().put.call(secrets, ref, value, usedBy);
     };
-    const primary = await service.create(deepgram(), null);
-    const id = primary.id as string;
-    await service.activate(id, "telegram_voice", "primary", null);
-    await service.activate(id, "telegram_voice", "fallback", null);
+    const first = await service.create(deepgram(), null);
+    const second = await service.create(deepgram({ name: "Deepgram запасной" }), null);
+
+    await service.activate(first.id as string, "telegram_voice", "primary", null);
+    await service.activate(second.id as string, "telegram_voice", "fallback", null);
+    // Тот же провайдер во главу: он должен переехать, а не появиться дважды.
+    await service.activate(second.id as string, "telegram_voice", "primary", null);
 
     const route = (await service.routes()).find((item) => item.use_case === "telegram_voice")!;
-    assert.equal(route.fallback_config_id, id);
-    assert.equal(route.primary_config_id, null, "одна конфигурация не может быть и основной, и резервной");
+    assert.deepEqual(
+      (route.chain as Array<{ config_id: string }>).map((link) => link.config_id),
+      [second.id, first.id],
+    );
   });
 
   test("телеметрия различает запросы, попытки и события резерва", async () => {
@@ -463,7 +474,7 @@ describe("реестр STT-провайдеров", { skip: DATABASE_URL ? false
       return new FakeSecretStore().put.call(secrets, ref, value, usedBy);
     };
     const created = await service.create(deepgram(), null);
-    await service.updateRoute("telegram_voice", { primary_config_id: created.id }, null);
+    await service.updateRoute("telegram_voice", { chain: [created.id] }, null);
 
     // Секрет пропал из хранилища — снимок должен уйти без висящей ссылки.
     secrets.values.clear();
@@ -471,12 +482,12 @@ describe("реестр STT-провайдеров", { skip: DATABASE_URL ? false
     assert.equal(pushed.applied, true);
     const snapshot = media.snapshots.at(-1) as {
       configs: unknown[];
-      routes: Array<{ primary_config_id: string | null }>;
+      routes: Array<{ chain: string[] }>;
     };
     assert.equal(snapshot.configs.length, 0);
-    assert.equal(
-      snapshot.routes.find((route) => route.primary_config_id)?.primary_config_id,
-      undefined,
+    assert.deepEqual(
+      snapshot.routes.flatMap((route) => route.chain),
+      [],
       "ссылка на конфигурацию без ключа отправляться не должна",
     );
   });
@@ -508,7 +519,10 @@ describe("реестр STT-провайдеров", { skip: DATABASE_URL ? false
     assert.equal(secrets.values.get(secrets.puts[0]!.ref), "sk-legacy-key");
 
     const route = (await service.routes()).find((item) => item.use_case === "telegram_voice")!;
-    assert.equal(route.primary_config_id, configs[0]!.id);
+    assert.deepEqual(
+      (route.chain as Array<{ config_id: string }>).map((link) => link.config_id),
+      [configs[0]!.id],
+    );
 
     // Второй запуск ничего не меняет — иначе перезапуск сервиса
     // откатывал бы правки администратора.
@@ -590,6 +604,118 @@ describe("реестр STT-провайдеров", { skip: DATABASE_URL ? false
   });
 
   // -------------------------------------------------------------------
+  // цепочка провайдеров и ротация
+  // -------------------------------------------------------------------
+  test("цепочка хранит порядок, заданный администратором", async () => {
+    await reset();
+    secrets.put = async (ref, value, usedBy) => {
+      await seedSecretRow(ref);
+      return new FakeSecretStore().put.call(secrets, ref, value, usedBy);
+    };
+    const one = await service.create(deepgram({ name: "Первый" }), null);
+    const two = await service.create(deepgram({ name: "Второй" }), null);
+    const three = await service.create(deepgram({ name: "Третий" }), null);
+    const ids = [one.id, two.id, three.id] as string[];
+
+    await service.updateRoute("telegram_voice", { chain: ids }, null);
+    let route = (await service.routes()).find((item) => item.use_case === "telegram_voice")!;
+    assert.deepEqual(
+      (route.chain as Array<{ name: string; position: number }>)
+        .map((link) => [link.position, link.name]),
+      [[0, "Первый"], [1, "Второй"], [2, "Третий"]],
+    );
+
+    // Порядок — это и есть приоритет: обратная перестановка должна
+    // отразиться и в снимке, иначе панель врёт.
+    await service.updateRoute("telegram_voice", { chain: [...ids].reverse() }, null);
+    route = (await service.routes()).find((item) => item.use_case === "telegram_voice")!;
+    assert.deepEqual(
+      (route.chain as Array<{ name: string }>).map((link) => link.name),
+      ["Третий", "Второй", "Первый"],
+    );
+    const snapshot = media.snapshots.at(-1) as { routes: Array<{ chain: string[] }> };
+    const telegram = snapshot.routes.find((item) => item.chain.length)!;
+    assert.deepEqual(telegram.chain, [...ids].reverse());
+  });
+
+  test("цепочка длиннее шести не сохраняется", async () => {
+    await reset();
+    secrets.put = async (ref, value, usedBy) => {
+      await seedSecretRow(ref);
+      return new FakeSecretStore().put.call(secrets, ref, value, usedBy);
+    };
+    const ids: string[] = [];
+    for (let index = 0; index < 7; index += 1) {
+      const created = await service.create(deepgram({ name: `Провайдер ${index}` }), null);
+      ids.push(created.id as string);
+    }
+    await assert.rejects(
+      () => service.updateRoute("telegram_voice", { chain: ids }, null),
+      /Не больше 6/,
+    );
+  });
+
+  test("выключатель ротации сохраняется и доезжает до media-service", async () => {
+    await reset();
+    secrets.put = async (ref, value, usedBy) => {
+      await seedSecretRow(ref);
+      return new FakeSecretStore().put.call(secrets, ref, value, usedBy);
+    };
+    const created = await service.create(deepgram(), null);
+    await service.updateRoute("telegram_voice", { chain: [created.id] }, null);
+
+    // По умолчанию включена: установка, где резерв уже назначен, после
+    // обновления обязана вести себя как прежде.
+    let route = (await service.routes()).find((item) => item.use_case === "telegram_voice")!;
+    assert.equal(route.rotation_enabled, true);
+
+    await service.updateRoute("telegram_voice", { rotation_enabled: false }, null);
+    route = (await service.routes()).find((item) => item.use_case === "telegram_voice")!;
+    assert.equal(route.rotation_enabled, false);
+    // Решает media-service, значит знать об этом должен он, а не панель.
+    const snapshot = media.snapshots.at(-1) as {
+      routes: Array<{ use_case: string; rotation_enabled: boolean }>;
+    };
+    assert.equal(
+      snapshot.routes.find((item) => item.use_case === "telegram_voice")!.rotation_enabled,
+      false,
+    );
+
+    // Правка цепочки не должна незаметно включать ротацию обратно.
+    await service.updateRoute("telegram_voice", { chain: [created.id] }, null);
+    route = (await service.routes()).find((item) => item.use_case === "telegram_voice")!;
+    assert.equal(route.rotation_enabled, false);
+  });
+
+  test("недонастроенный резерв выпадает из снимка, но не рушит маршрут", async () => {
+    await reset();
+    secrets.put = async (ref, value, usedBy) => {
+      await seedSecretRow(ref);
+      return new FakeSecretStore().put.call(secrets, ref, value, usedBy);
+    };
+    const good = await service.create(deepgram({ name: "Рабочий" }), null);
+    const weak = await service.create(deepgram({ name: "Слабый" }), null);
+    await service.updateRoute("telegram_voice", { chain: [good.id, weak.id] }, null);
+
+    // У второго пропал ключ из Secret Store.
+    const { rows } = await pool.query<{ secret_ref: string }>(
+      "SELECT secret_ref FROM stt_provider_configs WHERE id = $1", [weak.id]);
+    secrets.values.delete(rows[0]!.secret_ref);
+    await pool.query("DELETE FROM stt_provider_keys WHERE config_id = $1", [weak.id]);
+
+    await service.pushSnapshot();
+    const snapshot = media.snapshots.at(-1) as {
+      routes: Array<{ use_case: string; chain: string[] }>;
+    };
+    // Один недонастроенный резерв не должен положить распознавание
+    // вместе с рабочим основным.
+    assert.deepEqual(
+      snapshot.routes.find((item) => item.use_case === "telegram_voice")!.chain,
+      [good.id],
+    );
+  });
+
+  // -------------------------------------------------------------------
   // несколько ключей на провайдера
   // -------------------------------------------------------------------
   /** Настраивает Secret Store так, чтобы FK на secret_records не падал. */
@@ -605,7 +731,7 @@ describe("реестр STT-провайдеров", { skip: DATABASE_URL ? false
   const routedDeepgram = async (overrides: Record<string, unknown> = {}) => {
     withSecretRows();
     const created = await service.create(deepgram(overrides), null);
-    await service.updateRoute("telegram_voice", { primary_config_id: created.id }, null);
+    await service.updateRoute("telegram_voice", { chain: [created.id] }, null);
     return created.id as string;
   };
 

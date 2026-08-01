@@ -81,6 +81,20 @@ export function buildChain(input: ChainInput): BuiltChain {
     usable.push({ provider, position });
   });
 
+  // Ротация выключена — резервы отсекаются здесь, а не в роутере: так
+  // причина попадает в rejected и видна в телеметрии, а не выглядит
+  // как «резерв почему-то не сработал».
+  if (input.route.rotation_enabled === false && usable.length > 1) {
+    for (const entry of usable.slice(1)) {
+      rejected.push({
+        provider: entry.provider,
+        reason: "rotation_disabled",
+        detail: "ротация провайдеров выключена для этого маршрута",
+      });
+    }
+    usable.length = 1;
+  }
+
   return { usable, rejected, primary };
 }
 
