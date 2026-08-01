@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { AgentToolFactory } from "../dist/agent-tools.js";
 import { assertCronExpression, cronFieldMatches, nextCronDate } from "../dist/background.js";
-import { normalizeUpdate } from "../dist/eva-workflow.js";
+import { formatVoiceTranscriptEcho, normalizeUpdate } from "../dist/eva-workflow.js";
 import { evaMemoryBlocks } from "../dist/letta.js";
 import { normalizeLavaEvent } from "../dist/payments.js";
 import { RuntimeContextBuilder } from "../dist/runtime/runtime-context.js";
@@ -55,6 +55,31 @@ test("Telegram starts an empty draft before an answer", async () => {
   assert.equal(calls[0]?.body.chat_id, 123);
   assert.equal(calls[0]?.body.text, "");
   assert.equal(typeof calls[0]?.body.draft_id, "number");
+});
+
+test("voice transcript echo matches Hermes and is sent without parse mode", async () => {
+  assert.equal(
+    formatVoiceTranscriptEcho("  проверь _точный_ текст  "),
+    '🎙️ "проверь _точный_ текст"',
+  );
+
+  const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
+  const telegram = new TelegramClient(
+    {
+      telegramBotToken: "test-token",
+      telegramApiBaseUrl: "https://api.telegram.invalid",
+    } as never,
+    { debug() {}, info() {}, warn() {}, error() {} },
+  );
+  telegram.call = async (method, body) => {
+    calls.push({ method, body });
+    return true as never;
+  };
+
+  await telegram.sendPlainMessage(123, '🎙️ "проверь _точный_ текст"');
+  assert.equal(calls[0]?.method, "sendMessage");
+  assert.equal(calls[0]?.body.text, '🎙️ "проверь _точный_ текст"');
+  assert.equal("parse_mode" in (calls[0]?.body ?? {}), false);
 });
 
 test("Telegram webhook secret comparison fails closed", () => {
@@ -118,6 +143,34 @@ test("time context uses the configured timezone", () => {
   assert.match(prompt, /<EVA_RUNTIME_CONTEXT>/);
   assert.match(prompt, /<USER_MESSAGE>/);
   assert.match(prompt, /vector_protocol/);
+});
+
+test("runtime context marks a transcript as voice without changing its words", () => {
+  const builder = new RuntimeContextBuilder({} as never, { defaultTimezone: "UTC" });
+  const prompt = builder.wrapUserMessage({
+    userId: 1,
+    telegramId: 1,
+    agentId: "agent",
+    conversationId: "conversation",
+    purpose: "chat",
+    localTime: "2026-08-02T12:00:00Z",
+    timezone: "UTC",
+    city: null,
+    countryCode: null,
+    responseLanguage: "ru",
+    responseMode: "text",
+    useEmoji: true,
+    communicationStyle: null,
+    profileHint: null,
+    activeGoal: null,
+    nextResult: null,
+    nextStep: null,
+    relevantMemory: [],
+  }, "Это расшифровка", { messageSource: "voice" });
+
+  assert.match(prompt, /message_source: voice/);
+  assert.match(prompt, /speech-to-text transcript of a voice message/);
+  assert.match(prompt, /<USER_MESSAGE>\nЭто расшифровка\n<\/USER_MESSAGE>/);
 });
 
 test("VECTOR and profile hints are removed when their feature flags are off", () => {

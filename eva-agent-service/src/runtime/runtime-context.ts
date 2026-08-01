@@ -32,6 +32,8 @@ export interface RuntimeContext {
   };
 }
 
+export type MessageSource = "text" | "voice" | "image" | "document" | "unsupported";
+
 interface RuntimeContextRow {
   user_id: string;
   telegram_id: string;
@@ -144,7 +146,11 @@ export class RuntimeContextBuilder {
     };
   }
 
-  wrapUserMessage(context: RuntimeContext, userMessage: string): string {
+  wrapUserMessage(
+    context: RuntimeContext,
+    userMessage: string,
+    options: { messageSource?: MessageSource } = {},
+  ): string {
     const fields: Array<[string, string | null]> = [
       ["local_time", context.localTime],
       ["timezone", context.timezone],
@@ -152,6 +158,13 @@ export class RuntimeContextBuilder {
       ["response_language", context.responseLanguage],
       ["response_mode", context.responseMode],
       ["communication_style", context.communicationStyle],
+      ["message_source", options.messageSource ?? null],
+      [
+        "message_source_note",
+        options.messageSource === "voice"
+          ? "USER_MESSAGE is the speech-to-text transcript of a voice message sent by the user"
+          : null,
+      ],
       [
         "profile_hint",
         this.options.profileCompletionEnabled === false ? null : context.profileHint,

@@ -131,6 +131,16 @@ export interface AdminAuditInput {
   details?: Record<string, unknown>;
 }
 
+export interface SttUsageAttempt {
+  configId: string | null;
+  provider: string;
+  model: string;
+  ok: boolean;
+  latencyMs: number;
+  isFallback: boolean;
+  errorCode: string | null;
+}
+
 export class Database {
   private pool: pg.Pool | null = null;
   private poolView: pg.Pool | null = null;
@@ -872,6 +882,52 @@ export class Database {
       [telegramId, metric, period, Database.periodStart(period), amount],
     );
     return Number(rows[0]?.used ?? 0);
+  }
+
+  /** Persist the real STT path used by Telegram voice messages. */
+  async recordSttUsage(input: {
+    useCase: string;
+    attempts: SttUsageAttempt[];
+    audioSeconds: number;
+    idempotencyKey: string | null;
+  }): Promise<void> {
+    if (input.attempts.length === 0) return;
+    await this.transaction(async (client) => {
+      if (input.idempotencyKey) {
+        // Serialise duplicate webhook deliveries without a schema-wide unique
+        // index: existing installations may already contain historical repeats.
+        await client.query(
+          "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
+          [input.idempotencyKey],
+        );
+      }
+      for (const [index, attempt] of input.attempts.slice(0, 6).entries()) {
+        await client.query(
+          `INSERT INTO stt_usage_events
+             (use_case, config_id, provider, model, outcome, attempt_index, is_fallback,
+              audio_seconds, latency_ms, error_code, idempotency_key)
+           SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+            WHERE $11::text IS NULL
+               OR NOT EXISTS (
+                    SELECT 1 FROM stt_usage_events
+                     WHERE idempotency_key = $11 AND attempt_index = $6
+                  )`,
+          [
+            input.useCase,
+            attempt.configId,
+            attempt.provider,
+            attempt.model,
+            attempt.ok ? "success" : "failure",
+            index + 1,
+            attempt.isFallback,
+            index === 0 ? input.audioSeconds : 0,
+            attempt.latencyMs,
+            attempt.errorCode,
+            input.idempotencyKey,
+          ],
+        );
+      }
+    });
   }
 
   async getQuotaStatus(telegramId: number): Promise<Array<Record<string, unknown>>> {

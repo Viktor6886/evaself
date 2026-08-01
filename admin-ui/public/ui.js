@@ -2105,22 +2105,33 @@ function renderSttConfigs() {
     const [label, color] = STT_STATUS[config.status] || [config.status, "gray"];
     const schema = sttSchema(config.provider);
     const test = config.last_test || {};
+    const activePlacements = sttActivePlacements(config.id);
+    const isActive = activePlacements.length > 0;
+    const isTelegramPrimary = activePlacements.some(
+      (item) => item.useCase === "telegram_voice" && item.position === 0);
     const usedBy = (config.used_by || [])
       .map((useCase) => STT_USE_CASE_LABELS[useCase] || useCase)
       .join(", ");
     return `
-      <article class="status-card" data-stt-id="${config.id}">
+      <article class="status-card${isActive ? " is-active" : ""}" data-stt-id="${config.id}">
         <header>
           <span class="dot ${color}"></span>
           <div>
             <h4>${escapeHtml(config.name)}</h4>
             <p class="muted">${escapeHtml(schema?.label || config.provider)} · ${escapeHtml(config.model)} · ${config.mode}</p>
           </div>
-          <span class="pill">${label}</span>
+          <div class="stt-card-badges">
+            ${isActive ? '<span class="status-pill stt-active-pill">Активен</span>' : ""}
+            <span class="pill">${label}</span>
+          </div>
         </header>
         <dl class="status-meta">
           <div><dt>Ключи</dt><dd>${sttKeySummary(config)}</dd></div>
           <div><dt>Используется</dt><dd>${usedBy ? escapeHtml(usedBy) : "нигде"}</dd></div>
+          ${isActive ? `<div><dt>Активен как</dt><dd>${activePlacements.map((item) =>
+            escapeHtml(`${STT_USE_CASE_LABELS[item.useCase] || item.useCase} — ${
+              item.position === 0 ? "основной" : `резерв ${item.position}`
+            }`)).join("<br>")}</dd></div>` : ""}
           <div><dt>Последняя проверка</dt><dd>${
             test.at ? `${new Date(test.at).toLocaleString("ru")} · ${test.ok ? "успешно" : "ошибка"}` : "не проводилась"
           }</dd></div>
@@ -2136,9 +2147,11 @@ function renderSttConfigs() {
           <button class="button ghost" data-stt-action="test" data-id="${config.id}"
                   ${config.secret?.configured ? "" : "disabled"}>Проверить</button>
           <button class="button ${config.secret?.configured && !config.archived
-                    && !(config.used_by || []).length ? "primary" : "ghost"}"
+                    && !isActive ? "primary" : "ghost"}"
                   data-stt-action="activate" data-id="${config.id}"
-                  ${config.secret?.configured && !config.archived ? "" : "disabled"}>Активировать</button>
+                  data-active="${isTelegramPrimary}"
+                  ${config.secret?.configured && !config.archived && !isTelegramPrimary ? "" : "disabled"}>
+            ${isTelegramPrimary ? "Активен" : "Активировать"}</button>
           <button class="button ghost" data-stt-action="toggle" data-id="${config.id}"
                   data-enabled="${config.status !== "disabled"}">
             ${config.status === "disabled" ? "Включить" : "Выключить"}
@@ -2150,6 +2163,20 @@ function renderSttConfigs() {
         </div>
       </article>`;
   }).join("");
+}
+
+/** Active route placements for a provider, including its primary/fallback role. */
+function sttActivePlacements(configId) {
+  const placements = [];
+  for (const route of state.sttRoutes || []) {
+    if (!route.enabled) continue;
+    for (const [position, link] of (route.chain || []).entries()) {
+      if (link.config_id === configId) {
+        placements.push({ useCase: route.use_case, position });
+      }
+    }
+  }
+  return placements;
 }
 
 /**
@@ -2298,6 +2325,7 @@ function sttChainAction(action, useCase, configId) {
 
 async function loadSttUsage() {
   const { payload } = await request("/stt/usage?days=30");
+  const allTime = payload.all_time || {};
   const totals = payload.totals || {};
   const day = payload.last_24h || {};
   const rate = Number(totals.requests) > 0
@@ -2305,6 +2333,11 @@ async function loadSttUsage() {
 
   $("#stt-usage").innerHTML = `
     <div class="status-grid">
+      <article class="status-card"><header><div><h4>За всё время</h4></div></header>
+        <dl class="status-meta">
+          <div><dt>Распознаваний</dt><dd>${allTime.requests ?? 0}</dd></div>
+          <div><dt>Распознано секунд</dt><dd>${formatSttSeconds(allTime.audio_seconds)}</dd></div>
+        </dl></article>
       <article class="status-card"><header><div><h4>За 24 часа</h4></div></header>
         <dl class="status-meta">
           <div><dt>Распознаваний</dt><dd>${day.requests ?? 0}</dd></div>
@@ -2315,16 +2348,16 @@ async function loadSttUsage() {
           <div><dt>Распознаваний</dt><dd>${totals.requests ?? 0}</dd></div>
           <div><dt>Попыток к провайдерам</dt><dd>${totals.attempts ?? 0}</dd></div>
           <div><dt>Уходов на резерв</dt><dd>${totals.fallbacks ?? 0}</dd></div>
-          <div><dt>Минут аудио</dt><dd>${(Number(totals.audio_seconds || 0) / 60).toFixed(1)}</dd></div>
+          <div><dt>Секунд аудио</dt><dd>${formatSttSeconds(totals.audio_seconds)}</dd></div>
           <div><dt>Успешность</dt><dd>${rate === null ? "—" : `${rate}%`}</dd></div>
           <div><dt>Задержка p50 / p95</dt><dd>${totals.p50_latency_ms ?? "—"} / ${totals.p95_latency_ms ?? "—"} мс</dd></div>
         </dl></article>
     </div>
     <h3 class="section-title">По провайдерам</h3>
-    <table class="table"><thead><tr><th>Провайдер</th><th>Модель</th><th>Запросов</th><th>Минут</th><th>p95, мс</th></tr></thead>
+    <table class="table"><thead><tr><th>Провайдер</th><th>Модель</th><th>Запросов</th><th>Секунд</th><th>p95, мс</th></tr></thead>
       <tbody>${(payload.by_provider || []).map((row) => `<tr>
         <td>${escapeHtml(row.provider)}</td><td>${escapeHtml(row.model)}</td>
-        <td>${row.requests}</td><td>${(Number(row.audio_seconds || 0) / 60).toFixed(1)}</td>
+        <td>${row.requests}</td><td>${formatSttSeconds(row.audio_seconds)}</td>
         <td>${row.p95_latency_ms ?? "—"}</td></tr>`).join("") || '<tr><td colspan="5" class="muted">Пока нет данных</td></tr>'}
       </tbody></table>
     <h3 class="section-title">Последние ошибки</h3>
@@ -2335,6 +2368,13 @@ async function loadSttUsage() {
         <td>${escapeHtml(row.error_code || "")}</td><td>${row.is_fallback ? "да" : "нет"}</td></tr>`).join("")
         || '<tr><td colspan="5" class="muted">Ошибок нет</td></tr>'}
       </tbody></table>`;
+}
+
+function formatSttSeconds(value) {
+  const seconds = Number(value || 0);
+  return Number.isFinite(seconds)
+    ? seconds.toLocaleString("ru-RU", { maximumFractionDigits: 3 })
+    : "0";
 }
 
 // ---------------------------------------------------------------------

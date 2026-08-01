@@ -1,6 +1,6 @@
 import type { Config } from "./config.js";
 import { type CrisisMonitor, safetyDirective } from "./crisis.js";
-import type { AgentLinkRow, Database, UserRow } from "./db.js";
+import type { AgentLinkRow, Database, SttUsageAttempt, UserRow } from "./db.js";
 import type { InboxResult } from "./delivery/inbox.js";
 import { preferredResponseLanguage, t } from "./i18n/index.js";
 import type { SupportedLanguage } from "./i18n/language-resolver.js";
@@ -147,7 +147,7 @@ export class EvaWorkflow {
 
         let prompt: string;
         try {
-          prompt = await this.promptFromMessage(update, language);
+          prompt = await this.promptFromMessage(update);
         } catch (error) {
           // Провал распознавания — не сбой Евы: разговор продолжается,
           // просто этим сообщением. Технический текст провайдера сюда
@@ -205,6 +205,7 @@ export class EvaWorkflow {
             this.runtimeContext.wrapUserMessage(
               context,
               signal ? `${safetyDirective(signal)}\n\n${prompt}` : prompt,
+              { messageSource: update.kind },
             ),
           );
         } finally {
@@ -401,12 +402,14 @@ export class EvaWorkflow {
     language: string,
   ): Promise<{
     text: string;
+    durationSeconds: number;
     durationMinutes: number;
     provider: string;
     model: string;
     durationMs: number;
     latencyMs: number;
     usedFallback: boolean;
+    fromCache: boolean;
   }> {
     let response: Response;
     try {
@@ -441,6 +444,7 @@ export class EvaWorkflow {
       duration_minutes?: number;
       latency_ms?: number;
       used_fallback?: boolean;
+      from_cache?: boolean;
       attempts?: Array<Record<string, unknown>>;
       error?: { code?: string; message?: string };
     };
@@ -469,20 +473,36 @@ export class EvaWorkflow {
       });
     }
 
+    const durationSeconds = Math.max(0, Number(body.duration_seconds) || 0);
+    const attempts = normalizeSttAttempts(body.attempts, {
+      provider: body.provider ?? "unknown",
+      model: body.model ?? "unknown",
+      latencyMs: body.latency_ms ?? 0,
+    });
+    if (!body.from_cache) {
+      await this.db.recordSttUsage({
+        useCase,
+        attempts,
+        audioSeconds: durationSeconds,
+        idempotencyKey,
+      });
+    }
+
     return {
       text: body.text.trim(),
+      durationSeconds,
       durationMinutes: body.duration_minutes ?? 0,
       provider: body.provider ?? "unknown",
       model: body.model ?? "unknown",
-      durationMs: Math.round((body.duration_seconds ?? 0) * 1000),
+      durationMs: Math.round(durationSeconds * 1000),
       latencyMs: body.latency_ms ?? 0,
       usedFallback: body.used_fallback === true,
+      fromCache: body.from_cache === true,
     };
   }
 
   private async promptFromMessage(
     update: NormalizedUpdate,
-    language: SupportedLanguage,
   ): Promise<string> {
     const message = update.message;
     if (update.kind === "text") return message.text?.trim() || message.caption?.trim() || "";
@@ -500,16 +520,16 @@ export class EvaWorkflow {
         message.from?.language_code ?? "ru",
       );
 
-      if (transcription.durationMinutes) {
+      if (!transcription.fromCache && transcription.durationMinutes) {
         await this.db.incrementUsage(
           update.telegramId,
           "voice_minutes",
           Math.max(1, Math.ceil(transcription.durationMinutes)),
         );
       }
-      await this.telegram.sendMessage(
+      await this.telegram.sendPlainMessage(
         update.chatId,
-        t(language, "transcript", { text: transcription.text }),
+        formatVoiceTranscriptEcho(transcription.text),
       );
       return transcription.text;
     }
@@ -602,6 +622,37 @@ export function normalizeUpdate(update: TelegramUpdate): NormalizedUpdate | null
     kind,
     command,
   };
+}
+
+/** Hermes-compatible transcript echo shown before the agent's answer. */
+export function formatVoiceTranscriptEcho(text: string): string {
+  return `🎙️ "${text.trim()}"`;
+}
+
+function normalizeSttAttempts(
+  value: Array<Record<string, unknown>> | undefined,
+  fallback: { provider: string; model: string; latencyMs: number },
+): SttUsageAttempt[] {
+  const attempts = (value ?? []).map((attempt) => ({
+    configId: typeof attempt.config_id === "string" ? attempt.config_id : null,
+    provider: typeof attempt.provider === "string" ? attempt.provider : fallback.provider,
+    model: typeof attempt.model === "string" ? attempt.model : fallback.model,
+    ok: attempt.ok === true,
+    latencyMs: Math.max(0, Math.round(Number(attempt.latency_ms) || 0)),
+    isFallback: attempt.is_fallback === true,
+    errorCode: typeof attempt.error_code === "string" ? attempt.error_code : null,
+  }));
+  return attempts.length > 0
+    ? attempts
+    : [{
+        configId: null,
+        provider: fallback.provider,
+        model: fallback.model,
+        ok: true,
+        latencyMs: Math.max(0, Math.round(fallback.latencyMs)),
+        isFallback: false,
+        errorCode: null,
+      }];
 }
 
 function quotaLabel(metric: string, language: SupportedLanguage): string {

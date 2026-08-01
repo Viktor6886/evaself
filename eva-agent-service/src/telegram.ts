@@ -204,6 +204,33 @@ export class TelegramClient implements OutboxTransport {
     return results;
   }
 
+  /**
+   * Send text byte-for-byte without treating user-controlled content as Markdown.
+   *
+   * STT transcripts use this path: a phrase such as `_secret_` or `<tag>` must
+   * stay the user's words, not turn into formatting or an HTML entity error.
+   */
+  async sendPlainMessage(
+    chatId: number,
+    text: string,
+    options: Record<string, unknown> = {},
+  ): Promise<unknown[]> {
+    const results: unknown[] = [];
+    const { reply_markup: replyMarkup, ...common } = options;
+    const chunks = splitTelegramText(text);
+    for (const [index, chunk] of chunks.entries()) {
+      results.push(await this.dispatch("sendMessage", chatId, {
+        chat_id: chatId,
+        text: chunk,
+        ...common,
+        ...(index === chunks.length - 1 && replyMarkup !== undefined
+          ? { reply_markup: replyMarkup }
+          : {}),
+      }));
+    }
+    return results;
+  }
+
   async sendChatAction(chatId: number, action = "typing"): Promise<void> {
     await this.call("sendChatAction", { chat_id: chatId, action });
   }

@@ -186,12 +186,54 @@ describe("раздел распознавания речи", () => {
     // ключей при четырёх исчерпанных — это повод зайти внутрь.
     assert.match(card, /2 · 1 с исчерпанным лимитом/);
     assert.match(card, /Голосовые в Telegram/);
+    assert.match(card, /Активен/);
+    assert.match(card, /Голосовые в Telegram — основной/);
+    assert.equal(
+      await panel.page.$eval("#stt-configs .status-card", (node) => node.classList.contains("is-active")),
+      true,
+    );
+    assert.equal(
+      await panel.page.$eval('[data-stt-action="activate"]', (node) => node.disabled),
+      true,
+    );
     // Отпечаток — служебное значение, ему не место на карточке, а
     // самого ключа тут нет и подавно.
     assert.doesNotMatch(card, /sha256:/);
 
     const section = await panel.page.$eval("#page-stt", (node) => node.innerHTML);
     assert.doesNotMatch(section, /dg-live|sha256:/);
+  });
+
+  test("статистика показывает точное общее количество распознанных секунд", async () => {
+    const panel = await open({
+      routes: {
+        ...BASE_ROUTES,
+        "/stt/usage": {
+          all_time: { requests: 9, audio_seconds: "125.375" },
+          totals: {
+            requests: 4, attempts: 5, fallbacks: 1, successes: 4,
+            audio_seconds: "65.125", p50_latency_ms: 200, p95_latency_ms: 450,
+          },
+          last_24h: { requests: 1, failures: 0 },
+          by_provider: [{
+            provider: "deepgram", model: "nova-3", requests: 4,
+            audio_seconds: "65.125", p95_latency_ms: 450,
+          }],
+          recent_errors: [],
+        },
+      },
+    });
+    await openStt(panel.page);
+    await panel.page.click('[data-stt-tab="usage"]');
+    await panel.page.waitForFunction(
+      () => document.querySelector("#stt-usage").textContent.includes("125,375"),
+    );
+
+    const usage = await panel.page.$eval("#stt-usage", (node) => node.textContent);
+    assert.match(usage, /За всё время/);
+    assert.match(usage, /Распознано секунд/);
+    assert.match(usage, /125,375/);
+    assert.match(usage, /65,125/);
   });
 
   test("форма строится по схеме сервера, а не по коду панели", async () => {

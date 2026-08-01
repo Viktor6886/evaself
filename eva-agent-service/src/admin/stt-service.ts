@@ -1424,6 +1424,12 @@ export class SttAdminService {
   // -------------------------------------------------------------------
   async usage(days: number): Promise<Record<string, unknown>> {
     const bounded = Math.min(Math.max(Math.trunc(days) || 30, 1), 365);
+    const { rows: allTime } = await this.pool.query(
+      `SELECT
+         count(*) FILTER (WHERE attempt_index = 1) AS requests,
+         COALESCE(sum(audio_seconds) FILTER (WHERE attempt_index = 1), 0) AS audio_seconds
+       FROM stt_usage_events`,
+    );
     const { rows: totals } = await this.pool.query(
       `SELECT
          count(*) FILTER (WHERE attempt_index = 1)                    AS requests,
@@ -1464,6 +1470,7 @@ export class SttAdminService {
     );
     return {
       period_days: bounded,
+      all_time: allTime[0] ?? {},
       totals: totals[0] ?? {},
       last_24h: last24[0] ?? {},
       by_provider: byProvider,
@@ -1509,7 +1516,7 @@ export class SttAdminService {
           attempt.provider,
           attempt.model,
           attempt.ok ? "success" : "failure",
-          Math.min(index + 1, 2),
+          Math.min(index + 1, SttAdminService.MAX_CHAIN),
           attempt.is_fallback ?? false,
           // Секунды пишутся только на первой попытке: одно голосовое
           // сообщение — одна длительность, сколько бы провайдеров её ни
