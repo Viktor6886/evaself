@@ -245,6 +245,19 @@
             </div>
           </dialog>
 
+          <!-- Ввод ключа: главный сценарий раздела -->
+          <dialog id="stt-key-dialog" class="sheet-dialog">
+            <div class="sheet-head">
+              <div><h3 id="stt-key-title">Ключ</h3><p id="stt-key-hint" class="muted"></p></div>
+              <button id="close-stt-key" class="icon-button" aria-label="Закрыть">×</button>
+            </div>
+            <div id="stt-key-field"></div>
+            <p id="stt-key-error" class="integration-status" hidden></p>
+            <div class="form-actions">
+              <button id="stt-key-save" class="button primary" type="button">Сохранить ключ</button>
+            </div>
+          </dialog>
+
           <!-- Проверка на реальном аудио -->
           <dialog id="stt-test-dialog" class="sheet-dialog">
             <div class="sheet-head">

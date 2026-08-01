@@ -129,6 +129,17 @@ export async function openPanel({ routes = {}, role = "owner" } = {}) {
 
     const handler = routes[`${method} ${pathname}`] ?? routes[pathname] ?? defaults[pathname];
     const payload = typeof handler === "function" ? handler() : handler;
+    // Отказ API описывается как { __status, __body }: без этого нельзя
+    // проверить, что интерфейс переживает недоступный бэкенд, а такие
+    // проверки — половина смысла браузерных тестов. Метка выбрана
+    // приметной, чтобы не столкнуться с обычным полем ответа.
+    if (payload && typeof payload === "object" && "__status" in payload) {
+      return await route.fulfill({
+        status: payload.__status,
+        contentType: "application/json",
+        body: JSON.stringify(payload.__body ?? {}),
+      });
+    }
     return await route.fulfill({
       status: 200,
       contentType: "application/json",

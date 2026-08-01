@@ -348,6 +348,77 @@ describe("раздел распознавания речи", () => {
     assert.match(text, /stt_auth_failed/);
   });
 
+  test("раздел живёт, когда media-service молчит", async () => {
+    // Схемы нужны только редактору параметров. Конфигурации, ключи и
+    // маршруты лежат в PostgreSQL, и недоступность media-service не
+    // должна превращать раздел в мёртвую страницу.
+    const panel = await open({
+      routes: {
+        ...BASE_ROUTES,
+        "/stt/provider-schemas": {
+          __status: 503,
+          __body: { error: { message: "media-service недоступен" } },
+        },
+      },
+    });
+    await openStt(panel.page);
+
+    const text = await panel.page.$eval("#page-stt", (node) => node.textContent);
+    assert.match(text, /Deepgram production/, "карточки должны отрисоваться");
+    assert.match(text, /media-service не отвечает/, "оператор должен понять, что недоступно");
+    assert.ok(await panel.page.$('[data-stt-action="key"]'), "ключ схем не требует");
+  });
+
+  test("ввод ключа не уходит на сервер до подтверждения паролем", async () => {
+    const panel = await open({ routes: BASE_ROUTES });
+    await openStt(panel.page);
+    await panel.page.click('[data-stt-action="key"]');
+    await panel.page.waitForSelector("#stt-key-dialog[open]");
+
+    const field = await panel.page.$eval("#stt-key-value", (node) => ({
+      type: node.type, value: node.value,
+    }));
+    assert.equal(field.type, "password");
+    assert.equal(field.value, "", "сохранённый ключ обратно не показывается");
+
+    await panel.page.fill("#stt-key-value", "dg-secret-from-form");
+    await panel.page.click("#stt-key-save");
+    await panel.page.waitForSelector("#sudo-dialog[open]");
+
+    assert.equal(
+      panel.requests.some((item) => JSON.stringify(item.body ?? "").includes("dg-secret-from-form")),
+      false,
+      "ключ не должен уходить до подтверждения",
+    );
+  });
+
+  test("без ключа проверка и активация недоступны", async () => {
+    const panel = await open({
+      routes: {
+        ...BASE_ROUTES,
+        "/stt/configs": {
+          configs: [{
+            ...CONFIGS.configs[0],
+            id: "44444444-4444-4444-4444-444444444444",
+            name: "Пресет без ключа",
+            status: "draft",
+            secret: { configured: false },
+          }],
+        },
+      },
+    });
+    await openStt(panel.page);
+
+    for (const action of ["test", "activate"]) {
+      const disabled = await panel.page.$eval(
+        `[data-stt-action="${action}"]`, (node) => node.disabled);
+      assert.equal(disabled, true, `${action} без ключа работать не может`);
+    }
+    const primary = await panel.page.$eval('[data-stt-action="key"]', (node) => node.className);
+    assert.match(primary, /primary/, "ввод ключа — главное действие пресета");
+  });
+
+
   test("в маршруте выбираются только рабочие конфигурации", async () => {
     const panel = await open({
       routes: {

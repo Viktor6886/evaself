@@ -12,6 +12,7 @@ import httpx
 
 from .adapters.deepgram import DeepgramAdapter
 from .adapters.google import GoogleSttAdapter
+from .adapters.google_ai_studio import GoogleAiStudioAdapter
 from .adapters.openai_compatible import (
     OPENAI_SCHEMA,
     OPENROUTER_SCHEMA,
@@ -20,7 +21,7 @@ from .adapters.openai_compatible import (
 from .errors import STT_CONFIG_INVALID, SttError
 from .types import SttProviderAdapter, SttResolvedConfig, ValidationResult
 
-PROVIDER_CODES = ("deepgram", "openai", "google", "openrouter")
+PROVIDER_CODES = ("deepgram", "google_ai_studio", "openai", "google", "openrouter")
 
 
 class SttProviderRegistry:
@@ -33,6 +34,8 @@ class SttProviderRegistry:
             "openai": OpenAiCompatibleAdapter(client, "openai", OPENAI_SCHEMA),
             "openrouter": OpenAiCompatibleAdapter(client, "openrouter", OPENROUTER_SCHEMA),
             "google": GoogleSttAdapter(client),
+            # Gemini через AI Studio: ключ за минуту, без облачного проекта.
+            "google_ai_studio": GoogleAiStudioAdapter(client),
         }
 
     def get(self, provider: str) -> SttProviderAdapter:

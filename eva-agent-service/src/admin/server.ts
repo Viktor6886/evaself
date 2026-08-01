@@ -709,6 +709,14 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
     return await services.stt.restore((request.params as { id?: string }).id ?? "");
   });
 
+  app.post("/api/admin/v1/stt/configs/:id/enabled", {
+    config: { roles: ["owner", "admin"], sudoScope: "stt:activate" } satisfies RouteAccess,
+  }, async (request) => {
+    const id = (request.params as { id?: string }).id ?? "";
+    const enabled = objectBody(request.body).enabled !== false;
+    return await services.stt.setEnabled(id, enabled);
+  });
+
   app.get("/api/admin/v1/stt/routes", {
     config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
   }, async () => ({ routes: await services.stt.routes() }));

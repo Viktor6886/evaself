@@ -36,7 +36,9 @@ import type { SecretStore } from "./secret-store.js";
 export const STT_USE_CASES = ["telegram_voice", "webapp_voice_message", "webapp_live"] as const;
 export type SttUseCase = (typeof STT_USE_CASES)[number];
 
-export const STT_PROVIDERS = ["deepgram", "openai", "google", "openrouter"] as const;
+export const STT_PROVIDERS = [
+  "deepgram", "google_ai_studio", "openai", "google", "openrouter",
+] as const;
 
 /** Ключи, которые нельзя записать в public_config ни при каких условиях. */
 const FORBIDDEN_PUBLIC_KEYS = new Set([
@@ -184,9 +186,53 @@ export class SttAdminService {
   // -------------------------------------------------------------------
   // схемы провайдеров
   // -------------------------------------------------------------------
-  /** Проксируется из media-service: источник истины там, где адаптеры. */
-  async providerSchemas(): Promise<{ providers: unknown[] }> {
-    return await this.media.providerSchemas();
+  /**
+   * Проксируется из media-service: источник истины там, где адаптеры.
+   *
+   * Ответ кэшируется, и при недоступности media-service отдаётся
+   * последний известный. Без этого раздел панели превращается в
+   * мёртвую страницу от одного перезапуска контейнера — а
+   * конфигурации, ключи и маршруты лежат в PostgreSQL и доступны
+   * независимо от того, отвечает media-service или нет.
+   */
+  private schemaCache: { providers: unknown[]; at: number } | null = null;
+
+  async providerSchemas(): Promise<{ providers: unknown[]; stale?: boolean }> {
+    try {
+      const fresh = await this.media.providerSchemas();
+      if (fresh.providers.length > 0) {
+        this.schemaCache = { providers: fresh.providers, at: Date.now() };
+      }
+      return fresh;
+    } catch (error) {
+      if (this.schemaCache) {
+        return { providers: this.schemaCache.providers, stale: true };
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Включение и выключение конфигурации.
+   *
+   * Выключенная остаётся на своём месте в маршруте, но распознавать ей
+   * больше не поручают: снимать её с маршрута ради временной паузы —
+   * значит потом собирать маршрут заново.
+   */
+  async setEnabled(id: string, enabled: boolean) {
+    const row = await this.row(id);
+    if (row.archived_at) throw adminBadRequest("Архивная конфигурация уже не работает");
+    if (enabled && !row.secret_ref) throw adminBadRequest("Сначала задайте ключ");
+
+    await this.pool.query(
+      `UPDATE stt_provider_configs
+          SET status = CASE WHEN $2 THEN 'draft' ELSE 'disabled' END,
+              config_version = config_version + 1
+        WHERE id = $1`,
+      [id, enabled],
+    );
+    await this.pushSnapshot();
+    return await this.get(id);
   }
 
   // -------------------------------------------------------------------

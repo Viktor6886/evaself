@@ -29,6 +29,7 @@ const state = {
   sttRoutes: [],
   sttEditing: null,
   sttTestingId: null,
+  sttSchemaError: null,
 };
 const $ = (selector) => document.querySelector(selector);
 
@@ -1951,16 +1952,30 @@ const STT_USE_CASE_LABELS = {
 };
 
 async function loadStt() {
-  if (!state.sttSchemas) {
-    const { payload } = await request("/stt/provider-schemas");
-    state.sttSchemas = payload.providers || [];
-  }
+  // Конфигурации и маршруты лежат в PostgreSQL и доступны всегда.
+  // Схемы форм приходят из media-service, и его недоступность не должна
+  // превращать раздел в мёртвую страницу: ключ, активацию и выключение
+  // можно сделать и без схемы, а редактор параметров подождёт.
   const [configs, routes] = await Promise.all([
     request("/stt/configs"),
     request("/stt/routes"),
   ]);
   state.sttConfigs = configs.payload.configs || [];
   state.sttRoutes = routes.payload.routes || [];
+  state.sttSchemaError = null;
+
+  try {
+    const { payload } = await request("/stt/provider-schemas");
+    state.sttSchemas = payload.providers || [];
+    if (payload.stale) {
+      state.sttSchemaError = "media-service не отвечает — показаны сохранённые схемы";
+    }
+  } catch (error) {
+    state.sttSchemas = state.sttSchemas || [];
+    state.sttSchemaError = "media-service не отвечает: редактор параметров и проверка недоступны, "
+      + "ключи и маршруты работают";
+  }
+
   renderSttConfigs();
   renderSttRoutes();
 }
@@ -1971,12 +1986,15 @@ function sttSchema(provider) {
 
 function renderSttConfigs() {
   const host = $("#stt-configs");
+  const notice = state.sttSchemaError
+    ? `<p class="integration-status error">${escapeHtml(state.sttSchemaError)}</p>`
+    : "";
   if (!state.sttConfigs.length) {
-    host.innerHTML = `<p class="muted">Конфигураций пока нет. Пока их нет, распознавание работает
-      по устаревшим переменным MEDIA_ASR_* из .env.</p>`;
+    host.innerHTML = `${notice}<p class="muted">Конфигураций пока нет. Пока их нет, распознавание
+      работает по устаревшим переменным MEDIA_ASR_* из .env.</p>`;
     return;
   }
-  host.innerHTML = state.sttConfigs.map((config) => {
+  host.innerHTML = notice + state.sttConfigs.map((config) => {
     const [label, color] = STT_STATUS[config.status] || [config.status, "gray"];
     const schema = sttSchema(config.provider);
     const test = config.last_test || {};
@@ -2004,8 +2022,19 @@ function renderSttConfigs() {
         ${test.ok === false && test.error_message
           ? `<p class="integration-status error">${escapeHtml(String(test.error_message).slice(0, 200))}</p>` : ""}
         <div class="card-actions">
-          <button class="button ghost" data-stt-action="edit" data-id="${config.id}">Настроить</button>
-          <button class="button ghost" data-stt-action="test" data-id="${config.id}">Проверить</button>
+          <button class="button ${config.secret?.configured ? "ghost" : "primary"}"
+                  data-stt-action="key" data-id="${config.id}">
+            ${config.secret?.configured ? "Заменить ключ" : "Ввести ключ"}
+          </button>
+          <button class="button ghost" data-stt-action="test" data-id="${config.id}"
+                  ${config.secret?.configured ? "" : "disabled"}>Проверить</button>
+          <button class="button ghost" data-stt-action="activate" data-id="${config.id}"
+                  ${config.secret?.configured && !config.archived ? "" : "disabled"}>Активировать</button>
+          <button class="button ghost" data-stt-action="toggle" data-id="${config.id}"
+                  data-enabled="${config.status !== "disabled"}">
+            ${config.status === "disabled" ? "Включить" : "Выключить"}
+          </button>
+          <button class="button ghost" data-stt-action="edit" data-id="${config.id}">Параметры</button>
           ${config.archived
             ? `<button class="button ghost" data-stt-action="restore" data-id="${config.id}">Вернуть из архива</button>`
             : `<button class="button ghost" data-stt-action="archive" data-id="${config.id}">В архив</button>`}
@@ -2426,6 +2455,42 @@ document.addEventListener("click", (event) => {
         },
       });
       break;
+    case "key":
+      openSttKeyDialog(config);
+      break;
+    case "activate":
+      askSudo({
+        scope: "stt:activate",
+        title: `Активация «${config?.name ?? ""}»`,
+        description: "Перед сменой маршрута конфигурация будет проверена настоящим запросом "
+          + "к провайдеру. Если проверка не пройдёт, маршрут не изменится.",
+        action: async () => {
+          await request(`/stt/configs/${id}/activate`, {
+            method: "POST",
+            body: JSON.stringify({ use_case: "telegram_voice", slot: "primary" }),
+          });
+          toast("Провайдер активирован для голосовых Telegram");
+          await loadStt();
+        },
+      });
+      break;
+    case "toggle": {
+      const enable = action.dataset.enabled !== "true";
+      askSudo({
+        scope: "stt:activate",
+        title: enable ? "Включение провайдера" : "Выключение провайдера",
+        description: enable
+          ? "Провайдер снова начнёт принимать запросы распознавания."
+          : "Провайдер останется в маршруте, но распознавать ему больше не поручат.",
+        action: async () => {
+          await request(`/stt/configs/${id}/enabled`, {
+            method: "POST", body: JSON.stringify({ enabled: enable }),
+          });
+          await loadStt();
+        },
+      });
+      break;
+    }
     case "save-route":
       saveSttRoute(id);
       break;
@@ -2473,4 +2538,82 @@ $("#stt-test")?.addEventListener("click", () => {
 });
 $("#stt-test-run")?.addEventListener("click", () => {
   runSttTest().catch(handleError);
+});
+
+// ---------------------------------------------------------------------
+// Ввод ключа отдельным окном
+// ---------------------------------------------------------------------
+// Главный сценарий раздела: у преднастроенного провайдера всё уже
+// заполнено, и остаётся вписать один ключ. Гонять оператора через
+// полный редактор параметров ради этого незачем.
+function openSttKeyDialog(config) {
+  if (!config) return;
+  state.sttEditing = config;
+  const isGoogleCloud = config.provider === "google";
+
+  $("#stt-key-title").textContent = `Ключ — ${config.name}`;
+  $("#stt-key-hint").textContent = config.secret?.configured
+    ? "Ключ уже настроен. Введите новый, чтобы заменить его."
+    : "Ключ хранится в зашифрованном Secret Store и не показывается обратно.";
+  $("#stt-key-field").innerHTML = isGoogleCloud
+    ? `<label class="field"><span>Service account JSON</span>
+         <input type="file" id="stt-key-file" accept="application/json,.json">
+         <small class="muted">Файл целиком уходит в Secret Store; в конфигурации
+           останутся только project_id и маскированная почта.</small></label>`
+    : `<label class="field"><span>API-ключ</span>
+         <input type="password" id="stt-key-value" autocomplete="new-password"
+                placeholder="${config.secret?.configured ? "Введите новый ключ" : "Вставьте ключ"}">
+         <small class="muted">${keyHint(config.provider)}</small></label>`;
+  $("#stt-key-error").hidden = true;
+  $("#stt-key-dialog").showModal();
+}
+
+/** Где взять ключ — вопрос, который возникает у каждого нового провайдера. */
+function keyHint(provider) {
+  return {
+    deepgram: "console.deepgram.com → API Keys",
+    google_ai_studio: "ai.google.dev → Get API key. Облачный проект и биллинг не нужны",
+    openai: "platform.openai.com → API keys",
+    openrouter: "openrouter.ai/keys",
+  }[provider] ?? "";
+}
+
+async function saveSttKey() {
+  const config = state.sttEditing;
+  if (!config) return;
+
+  const body = {};
+  if (config.provider === "google") {
+    const file = $("#stt-key-file")?.files?.[0];
+    if (!file) throw new Error("Выберите файл service account JSON");
+    if (file.size > 16 * 1024) throw new Error("Файл слишком велик — ожидается service account JSON");
+    body.credentials_json = await file.text();
+  } else {
+    const value = $("#stt-key-value").value.trim();
+    if (!value) throw new Error("Введите ключ");
+    body.api_key = value;
+  }
+
+  askSudo({
+    scope: "stt:write",
+    title: "Сохранение ключа провайдера",
+    description: "Ключ будет зашифрован и записан в Secret Store. Подтвердите паролем.",
+    action: async () => {
+      await request(`/stt/configs/${config.id}/secret`, {
+        method: "PUT", body: JSON.stringify(body),
+      });
+      $("#stt-key-dialog").close();
+      toast("Ключ сохранён");
+      await loadStt();
+    },
+  });
+}
+
+$("#close-stt-key")?.addEventListener("click", () => $("#stt-key-dialog").close());
+$("#stt-key-save")?.addEventListener("click", () => {
+  saveSttKey().catch((error) => {
+    const host = $("#stt-key-error");
+    host.hidden = false;
+    host.textContent = error instanceof Error ? error.message : String(error);
+  });
 });
