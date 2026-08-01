@@ -513,6 +513,17 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
     return await services.llmRouter.usage(Number.isFinite(days) ? days : 14);
   });
 
+  app.get("/api/admin/v1/llm/routing-settings", {
+    config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
+  }, async () => await services.llmRouter.routingSettings());
+
+  app.put("/api/admin/v1/llm/routing-settings", {
+    config: { roles: ["owner", "admin"] } satisfies RouteAccess,
+  }, async (request) => {
+    const actor = contexts.get(request)!.session!.user.id;
+    return await services.llmRouter.updateRoutingSettings(objectBody(request.body), actor);
+  });
+
   app.patch("/api/admin/v1/llm/providers/:id", {
     config: { roles: ["owner", "admin"] } satisfies RouteAccess,
   }, async (request) => {

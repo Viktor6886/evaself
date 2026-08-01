@@ -89,6 +89,14 @@
 
           <div id="overview-groups" class="overview-groups"></div>
 
+          <section class="card router-card" id="overview-models">
+            <div class="section-heading">
+              <div><h3>Модели Евы</h3><p class="block-caption">Текущий режим и модели для основных ролей.</p></div>
+              <button class="button tiny ghost" data-open-ai-routing>Настроить</button>
+            </div>
+            <div id="overview-model-routing" class="routing-summary"></div>
+          </section>
+
           <dialog id="errors-dialog" class="sheet-dialog">
             <div class="sheet-head">
               <div><h3>Ошибки</h3><p id="errors-window" class="muted"></p></div>
@@ -133,6 +141,12 @@
             <div><p class="eyebrow">ОБЩИЕ AI-ПРОВАЙДЕРЫ</p><h2>Искусственный интеллект</h2><p>LLM всей установки. API Key доступен только на запись; переключение сохраняет агентов и память.</p></div>
             <button id="new-provider" class="button primary">Добавить провайдера</button>
           </div>
+          <section class="card router-card" id="routing-settings-card">
+            <div class="section-heading">
+              <div><h3>Режим моделей Евы</h3><p class="block-caption">Адаптивный режим выбирает независимую модель по задаче. Режим одной модели не меняет сохранённые цепочки.</p></div>
+            </div>
+            <div id="routing-settings"></div>
+          </section>
           <!-- Цепочки маршрутов. Основной провайдер и до пяти резервов;
                порядок задаётся здесь, failover идёт строго по нему. -->
           <section class="card router-card">

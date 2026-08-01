@@ -77,6 +77,13 @@ export interface RouterHealthRow {
   requests_1h: string | null;
   failures_1h: string | null;
   p95_latency_ms: number | null;
+  protocol: string;
+  context_window: number;
+  supports_tools: boolean;
+  supports_json: boolean;
+  supports_vision: boolean;
+  supports_streaming: boolean;
+  sensitive_data_allowed: boolean;
 }
 
 export class LlmRouterAdminService {
@@ -87,9 +94,15 @@ export class LlmRouterAdminService {
   // -----------------------------------------------------------------
   /** Всё, что нужно вкладке «Искусственный интеллект», одним запросом. */
   async state(): Promise<Record<string, unknown>> {
-    const [health, routes, chains, recent] = await Promise.all([
+    const [health, routes, chains, recent, settings] = await Promise.all([
       this.pool.query<RouterHealthRow>(
-        "SELECT * FROM v_llm_provider_health ORDER BY priority, lower(name)",
+        `SELECT health.*, provider.protocol, provider.context_window,
+                provider.supports_tools, provider.supports_json,
+                provider.supports_vision, provider.supports_streaming,
+                provider.sensitive_data_allowed
+           FROM v_llm_provider_health health
+           JOIN llm_providers provider ON provider.id = health.id
+          ORDER BY health.priority, lower(health.name)`,
       ),
       this.pool.query(
         `SELECT code, title, description, requires_tools, requires_json,
@@ -116,6 +129,7 @@ export class LlmRouterAdminService {
           ORDER BY r.started_at DESC
           LIMIT 25`,
       ),
+      this.routingSettings(),
     ]);
 
     const byRoute = new Map<string, unknown[]>();
@@ -133,7 +147,104 @@ export class LlmRouterAdminService {
         chain: byRoute.get(String(route.code)) ?? [],
       })),
       recent_failures: recent.rows,
+      routing_settings: settings,
     };
+  }
+
+  async routingSettings(): Promise<Record<string, unknown>> {
+    const { rows } = await this.pool.query(
+      `SELECT mode, single_provider_id, single_failover_enabled,
+              auto_routing_enabled, llm_classifier_enabled, fast_max_score,
+              deep_min_score, classifier_confidence_threshold,
+              classifier_timeout_ms, classifier_max_input_chars,
+              uncertain_policy, economy_score_shift, quality_score_shift,
+              updated_at, updated_by
+         FROM llm_routing_settings WHERE singleton`,
+    );
+    return (rows[0] ?? {}) as Record<string, unknown>;
+  }
+
+  async updateRoutingSettings(
+    body: Record<string, unknown>,
+    actorId: string,
+  ): Promise<Record<string, unknown>> {
+    const allowed = new Set([
+      "mode", "single_provider_id", "single_failover_enabled",
+      "auto_routing_enabled", "llm_classifier_enabled", "fast_max_score",
+      "deep_min_score", "classifier_confidence_threshold",
+      "classifier_timeout_ms", "classifier_max_input_chars", "uncertain_policy",
+      "economy_score_shift", "quality_score_shift",
+    ]);
+    const unknown = Object.keys(body).find((key) => !allowed.has(key));
+    if (unknown) throw adminBadRequest(`Неизвестное поле ${unknown}`);
+    return await this.transaction(async (client) => {
+      const currentResult = await client.query<Record<string, unknown>>(
+        "SELECT * FROM llm_routing_settings WHERE singleton FOR UPDATE",
+      );
+      const next = { ...currentResult.rows[0], ...body };
+      const mode = String(next.mode ?? "adaptive");
+      if (!['adaptive', 'single'].includes(mode)) throw adminBadRequest("mode: adaptive или single");
+      const providerId = next.single_provider_id == null || next.single_provider_id === ""
+        ? null : String(next.single_provider_id);
+      const warnings: string[] = [];
+      if (mode === "single") {
+        if (!providerId) throw adminBadRequest("Для режима одной модели выберите provider");
+        const provider = await client.query<{
+          enabled: boolean; supports_tools: boolean; supports_json: boolean;
+          supports_streaming: boolean; supports_vision: boolean;
+          sensitive_data_allowed: boolean; context_window: number;
+        }>(
+          `SELECT enabled, supports_tools, supports_json, supports_streaming,
+                  supports_vision, sensitive_data_allowed, context_window
+             FROM llm_providers WHERE id = $1`,
+          [providerId],
+        );
+        const row = provider.rows[0];
+        if (!row || !row.enabled) throw adminBadRequest("Выбранный provider не существует или выключен");
+        if (!row.supports_tools || !row.supports_json || !row.sensitive_data_allowed) {
+          throw adminBadRequest("Одна модель должна поддерживать tools, JSON и чувствительные данные");
+        }
+        if (!row.supports_vision) warnings.push("Выбранная модель не поддерживает изображения");
+        if (!row.supports_streaming) warnings.push("Выбранная модель не поддерживает streaming");
+        if (Number(row.context_window) < 8192) warnings.push("Контекст модели меньше рекомендуемых 8192 токенов");
+      }
+      const numeric = (name: string, fallback: number): number => {
+        const value = Number(next[name] ?? fallback);
+        if (!Number.isFinite(value)) throw adminBadRequest(`${name}: ожидается число`);
+        return Math.trunc(value);
+      };
+      const fast = numeric("fast_max_score", 0);
+      const deep = numeric("deep_min_score", 5);
+      if (fast >= deep) throw adminBadRequest("fast_max_score должен быть меньше deep_min_score");
+      const confidence = Number(next.classifier_confidence_threshold ?? 0.75);
+      if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
+        throw adminBadRequest("classifier_confidence_threshold должен быть от 0 до 1");
+      }
+      const uncertain = String(next.uncertain_policy ?? "upgrade");
+      if (!["upgrade", "chat", "deterministic"].includes(uncertain)) {
+        throw adminBadRequest("Некорректная uncertain_policy");
+      }
+      const { rows } = await client.query(
+        `UPDATE llm_routing_settings SET
+           mode=$1, single_provider_id=$2, single_failover_enabled=$3,
+           auto_routing_enabled=$4, llm_classifier_enabled=$5,
+           fast_max_score=$6, deep_min_score=$7,
+           classifier_confidence_threshold=$8,
+           classifier_timeout_ms=$9, classifier_max_input_chars=$10,
+           uncertain_policy=$11, economy_score_shift=$12,
+           quality_score_shift=$13, updated_at=now(), updated_by=$14
+         WHERE singleton RETURNING *`,
+        [
+          mode, providerId, next.single_failover_enabled === true,
+          next.auto_routing_enabled !== false, next.llm_classifier_enabled !== false,
+          fast, deep, confidence, numeric("classifier_timeout_ms", 5000),
+          numeric("classifier_max_input_chars", 4000), uncertain,
+          numeric("economy_score_shift", -1), numeric("quality_score_shift", 1), actorId,
+        ],
+      );
+      await client.query("SELECT pg_notify('llm_routing_settings_changed', '')");
+      return { ...rows[0], warnings } as Record<string, unknown>;
+    });
   }
 
   /** Потребление и стоимость по дням — для графика и бюджетов. */
@@ -156,6 +267,19 @@ export class LlmRouterAdminService {
   // провайдеры: только то, что относится к маршрутизации
   // -----------------------------------------------------------------
   async updateProvider(id: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    if (
+      body.enabled === false || body.supports_tools === false ||
+      body.supports_json === false || body.sensitive_data_allowed === false
+    ) {
+      const selected = await this.pool.query(
+        `SELECT 1 FROM llm_routing_settings
+          WHERE singleton AND mode = 'single' AND single_provider_id = $1`,
+        [id],
+      );
+      if (selected.rowCount) throw adminBadRequest(
+        "Сначала выберите другую модель или включите адаптивный режим: выбранной модели нужны enabled, tools, JSON и sensitive data",
+      );
+    }
     const sets: string[] = [];
     const values: unknown[] = [id];
 

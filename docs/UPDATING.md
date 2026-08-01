@@ -28,6 +28,14 @@ Migrations `008`–`013` совместимо добавляют Telegram inbox/
 удалением таблиц: старый код игнорирует новые сущности, а `make rollback`
 возвращает только код и версии образов.
 
+Migration `028` добавляет managed LLM routing и `task_events`. Она оставляет
+режим `adaptive`, сохраняет существующие providers и chains, а новые цепочки
+заполняет только если они пусты (`fast` из chat, `classifier` из json/chat,
+`research` и `safety` из deep/chat, `vision` только совместимыми providers).
+Обычный `make update` применяет её автоматически; ручной SQL и
+перенастройка Letta не нужны. Парный down-файл предназначен для проверяемого
+отката схемы, но production rollback по-прежнему начинайте с backup.
+
 После обновления:
 
 ```bash

@@ -47,6 +47,28 @@ export class CoreToolFactory {
         },
       ),
       tool(
+        "update_llm_quality_mode",
+        "Качество ответов",
+        "Выбирает личный баланс экономики и качества: economy, auto или quality. Действует только в адаптивном режиме.",
+        objectSchema(
+          { mode: { type: "string", enum: ["economy", "auto", "quality"] } },
+          ["mode"],
+        ),
+        async (args, runtime) => {
+          const mode = requiredString(args, "mode");
+          if (!["economy", "auto", "quality"].includes(mode)) throw new Error("Неизвестный режим качества");
+          await this.db.query(
+            `INSERT INTO user_preferences (user_id, llm_quality_mode)
+             VALUES ($1, $2)
+             ON CONFLICT (user_id) DO UPDATE SET
+               llm_quality_mode = EXCLUDED.llm_quality_mode,
+               updated_at = now()`,
+            [runtime.userId, mode],
+          );
+          return { ok: true, llm_quality_mode: mode };
+        },
+      ),
+      tool(
         "get_current_state",
         "Текущее состояние",
         "Возвращает последние немедицинские отметки настроения, энергии и напряжения пользователя.",

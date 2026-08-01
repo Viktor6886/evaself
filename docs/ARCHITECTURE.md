@@ -16,7 +16,7 @@ PostgreSQL inbox → eva-agent-service worker
 Letta App Server
   │ WebSocket
   ▼
-OpenAI-compatible LLM
+LLM Router → route chain → OpenAI/Anthropic-compatible provider
 ```
 
 Webhook сохраняет исходный update в `telegram_updates` и сразу отвечает
@@ -29,6 +29,18 @@ payload из outbox и не запускает ход LLM повторно.
 Архитектурная граница жёсткая: только `eva-agent-service` знает URL и
 capability token App Server. Telegram, WebApp и административная консоль
 работают через его HTTP API.
+
+`RuntimeContextBuilder` добавляет подписанный сервером routing marker.
+LLM Router проверяет подпись, удаляет marker до внешнего provider и выбирает
+маршрут по mode, conversation purpose, обязательным правилам, score и —
+только при неоднозначности — короткому classifier-запросу. В `single` score
+и classifier полностью обходятся. Настройки кэшируются на пять секунд,
+PostgreSQL `NOTIFY` немедленно сбрасывает кэш, а последняя валидная копия
+используется при кратком сбое БД.
+
+События `task_events` связывают напоминание, Telegram `message_id` и точный
+`llm_request_id`; provider не определяется по времени. Ответ на сообщение
+напоминания связывается с задачей, а `reminder_sent` не меняет её на `done`.
 
 ## Состояние
 

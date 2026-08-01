@@ -5,6 +5,8 @@ import {
 } from "../i18n/language-resolver.js";
 import { shouldSuppressProfileQuestion } from "../profile/profile-completeness.js";
 import { localNow } from "../time/local-date-time.js";
+import { appendRoutingMarker, type RoutingMarkerClaims } from "../router/routing-marker.js";
+import { TaskEventService } from "../tasks/task-event-service.js";
 
 export interface RuntimeContext {
   userId: number;
@@ -25,6 +27,8 @@ export interface RuntimeContext {
   nextResult: string | null;
   nextStep: string | null;
   relevantMemory: string[];
+  llmQualityMode?: "economy" | "auto" | "quality";
+  taskActivity?: string[];
   metrics?: {
     runtimeContextMs: number;
     profileCheckMs: number;
@@ -57,10 +61,12 @@ interface RuntimeContextRow {
   active_goal_title: string | null;
   next_result_title: string | null;
   next_action: string | null;
+  llm_quality_mode: "economy" | "auto" | "quality";
 }
 
 export class RuntimeContextBuilder {
   private readonly languageResolver: LanguageResolver;
+  private readonly taskEvents: TaskEventService;
   private readonly cache = new Map<string, { expiresAt: number; row: RuntimeContextRow }>();
 
   constructor(
@@ -72,9 +78,11 @@ export class RuntimeContextBuilder {
       profileCompletionEnabled?: boolean;
       vectorGoalsEnabled?: boolean;
       now?: () => Date;
+      routingMarkerSecret?: string;
     },
   ) {
     this.languageResolver = new LanguageResolver(db);
+    this.taskEvents = new TaskEventService(db);
   }
 
   async build(input: {
@@ -113,6 +121,7 @@ export class RuntimeContextBuilder {
       ? null
       : profileHintFrom(row);
     const profileCheckMs = elapsed(profileStarted);
+    const taskActivity = await this.taskEvents.contextLines(input.userId).catch(() => []);
     return {
       userId: Number(row.user_id),
       telegramId: Number(row.telegram_id),
@@ -138,6 +147,8 @@ export class RuntimeContextBuilder {
         ? null
         : row.next_action ?? null,
       relevantMemory: (input.relevantMemory ?? []).slice(0, 5),
+      llmQualityMode: row.llm_quality_mode,
+      taskActivity,
       metrics: {
         runtimeContextMs: elapsed(started),
         profileCheckMs,
@@ -149,7 +160,12 @@ export class RuntimeContextBuilder {
   wrapUserMessage(
     context: RuntimeContext,
     userMessage: string,
-    options: { messageSource?: MessageSource } = {},
+    options: {
+      messageSource?: MessageSource;
+      crisisLevel?: "none" | "low" | "medium" | "high" | "critical";
+      internalOperationType?: string;
+      correlationId?: string;
+    } = {},
   ): string {
     const fields: Array<[string, string | null]> = [
       ["local_time", context.localTime],
@@ -187,6 +203,12 @@ export class RuntimeContextBuilder {
         ...context.relevantMemory.map((item) => `  - ${escapeContextValue(item)}`),
       );
     }
+    if (context.taskActivity?.length) {
+      lines.push(
+        "recent_task_events:",
+        ...context.taskActivity.slice(0, 5).map((item) => `  - ${escapeContextValue(item)}`),
+      );
+    }
     const limit = Math.max(1_000, this.options.maxContextCharacters ?? 6_000);
     // Лимит режет переменную часть: память и подсказки бывают длинными.
     // Указания о форме ответа ниже — фиксированные и обрезке не подлежат:
@@ -219,7 +241,7 @@ export class RuntimeContextBuilder {
       + "когда она уместна по контексту (согласие, поддержка, шутка, важная новость); "
       + "не ставь её на каждое сообщение и не заменяй ей ответ",
     ].join("\n");
-    return [
+    const wrapped = [
       "<EVA_RUNTIME_CONTEXT>",
       contextBlock,
       "</EVA_RUNTIME_CONTEXT>",
@@ -228,6 +250,17 @@ export class RuntimeContextBuilder {
       escapeUserMessage(userMessage),
       "</USER_MESSAGE>",
     ].join("\n");
+    return appendRoutingMarker(wrapped, {
+      purpose: context.purpose as RoutingMarkerClaims["purpose"],
+      message_source: options.messageSource,
+      crisis_level: options.crisisLevel ?? "none",
+      user_mode: context.llmQualityMode ?? "auto",
+      internal_operation_type: options.internalOperationType,
+      correlation_id: options.correlationId,
+      related_goals: context.activeGoal ? 1 : 0,
+      related_tasks: context.taskActivity?.length ? 1 : 0,
+      related_recent_events: context.taskActivity?.length ?? 0,
+    }, this.options.routingMarkerSecret ?? "");
   }
 
   invalidate(userId: number): void {
@@ -262,6 +295,7 @@ export class RuntimeContextBuilder {
           COALESCE(p.response_mode, 'text') AS response_mode,
           COALESCE(p.use_emoji, true) AS use_emoji,
           p.character AS communication_style,
+          COALESCE(p.llm_quality_mode, 'auto') AS llm_quality_mode,
           profile_hint.field_key AS profile_field_key,
           profile_hint.title AS profile_title,
           profile_hint.prompt_hint AS profile_prompt_hint,

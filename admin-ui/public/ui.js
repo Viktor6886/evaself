@@ -231,8 +231,12 @@ function statusCard(item, options = {}) {
 }
 
 async function loadOverview() {
-  const { payload } = await request("/overview");
+  const [{ payload }, routing] = await Promise.all([
+    request("/overview"),
+    request("/llm/state").catch(() => ({ payload: null })),
+  ]);
   state.overview = payload;
+  if (routing.payload) state.router = routing.payload;
   // Версия — украшение шапки, а не смысл страницы. Её отсутствие не
   // должно уносить с собой вердикт, состояние сервисов и загрузку
   // сервера: именно за ними сюда и заходят.
@@ -240,6 +244,30 @@ async function loadOverview() {
   renderVerdict(payload);
   renderHostBar(payload);
   renderOverviewGroups(payload);
+  renderRoutingOverview();
+}
+
+function renderRoutingOverview() {
+  const node = $("#overview-model-routing");
+  if (!node) return;
+  const settings = state.router?.routing_settings || {};
+  const mode = settings.mode || "adaptive";
+  const editable = ["owner", "admin"].includes(state.me.role);
+  const roles = ["chat", "deep", "fast", "classifier"];
+  const selected = mode === "single"
+    ? (state.router?.providers || []).find((provider) => provider.id === settings.single_provider_id)
+    : null;
+  node.innerHTML = `
+    <div class="routing-mode-line">
+      <label class="switch"><input type="checkbox" data-overview-routing-toggle ${mode === "adaptive" ? "checked" : ""}${editable ? "" : " disabled"}>
+        <span>Автоматический выбор моделей</span></label>
+      <span class="status-pill">${mode === "single" ? "Одна модель" : "Адаптивный"}</span>
+    </div>
+    ${mode === "single" ? `<article class="routing-single-card">
+      <span>Единая модель Евы</span><strong>${escapeHtml(selected?.name || "не настроена")}</strong>
+      <small>${escapeHtml(selected?.model || "Выберите provider на странице ИИ")} · аварийный резерв ${settings.single_failover_enabled ? "включён" : "выключен"}</small>
+    </article>` : '<div class="overview-route-chains"></div>'}`;
+  if (mode === "adaptive") renderRouteChains(node.querySelector(".overview-route-chains"), roles, true);
 }
 
 /**
@@ -628,6 +656,7 @@ async function loadProviders() {
   state.router = router.payload;
 
   renderRouterRoutes();
+  renderRoutingSettings();
   renderRouterHealth();
   renderRouterFailures();
 
@@ -637,9 +666,97 @@ async function loadProviders() {
 }
 
 const ROUTE_TITLES = {
-  chat: "Разговор", deep: "Глубокий анализ",
-  tools: "Работа с инструментами", json: "Строгий JSON",
+  chat: "Основная модель", deep: "Мощная модель",
+  tools: "Инструменты", json: "Структурированные данные",
+  fast: "Экономичная модель", classifier: "Классификатор",
+  research: "Исследования", safety: "Безопасность",
+  vision: "Изображения", single: "Одна модель",
 };
+
+function renderRoutingSettings() {
+  const node = $("#routing-settings");
+  if (!node) return;
+  const settings = state.router?.routing_settings || { mode: "adaptive" };
+  const editable = ["owner", "admin"].includes(state.me.role);
+  const providers = (state.router?.providers || []).filter((item) => item.enabled);
+  node.innerHTML = `
+    <div class="routing-mode-picker" role="group" aria-label="Режим моделей">
+      <button class="button ${settings.mode !== "single" ? "primary" : "ghost"}" data-routing-mode="adaptive"${editable ? "" : " disabled"}>Адаптивный</button>
+      <button class="button ${settings.mode === "single" ? "primary" : "ghost"}" data-routing-mode="single"${editable ? "" : " disabled"}>Одна модель</button>
+    </div>
+    ${settings.mode === "single" ? `
+      <div class="routing-single-editor">
+        <p class="muted">Автоматическая маршрутизация отключена. Цепочки сохранены, но сейчас не используются.</p>
+        <label>Модель для всех запросов<select id="single-provider"${editable ? "" : " disabled"}>
+          <option value="">Выберите модель</option>
+          ${providers.map((item) => `<option value="${escapeHtml(item.id)}"${item.id === settings.single_provider_id ? " selected" : ""}>${escapeHtml(item.name)} — ${escapeHtml(item.model)}</option>`).join("")}
+        </select></label>
+        <label class="switch"><input id="single-failover" type="checkbox" ${settings.single_failover_enabled ? "checked" : ""}${editable ? "" : " disabled"}><span>Аварийный резерв через цепочку разговора</span></label>
+        ${singleProviderWarnings(providers.find((item) => item.id === settings.single_provider_id))}
+        ${editable ? '<button class="button primary" data-save-routing>Сохранить</button>' : ""}
+      </div>` : `
+      <div class="routing-role-grid">${["chat", "deep", "fast", "classifier"].map((code) => {
+        const route = (state.router?.routes || []).find((item) => item.code === code);
+        const head = route?.chain?.[0];
+        return `<article><span>${escapeHtml(ROUTE_TITLES[code])}</span><strong>${escapeHtml(head?.name || "не настроена")}</strong><small>${escapeHtml(head?.model || "Выберите основную модель в цепочке ниже")}</small></article>`;
+      }).join("")}</div>
+      <details class="routing-advanced"><summary>Пороги и классификатор</summary>
+        <div class="router-grid">
+          <label class="switch"><input id="routing-auto" type="checkbox" ${settings.auto_routing_enabled !== false ? "checked" : ""}${editable ? "" : " disabled"}><span>Автоматическая маршрутизация</span></label>
+          <label>Fast до score<input id="routing-fast-score" type="number" value="${Number(settings.fast_max_score ?? 0)}"${editable ? "" : " disabled"}></label>
+          <label>Deep от score<input id="routing-deep-score" type="number" value="${Number(settings.deep_min_score ?? 5)}"${editable ? "" : " disabled"}></label>
+          <label class="switch"><input id="routing-classifier" type="checkbox" ${settings.llm_classifier_enabled !== false ? "checked" : ""}${editable ? "" : " disabled"}><span>LLM-классификатор для неоднозначных запросов</span></label>
+          <label>Минимальная уверенность<input id="routing-confidence" type="number" min="0" max="1" step="0.01" value="${Number(settings.classifier_confidence_threshold ?? 0.75)}"${editable ? "" : " disabled"}></label>
+          <label>Timeout classifier, мс<input id="routing-classifier-timeout" type="number" min="500" max="60000" value="${Number(settings.classifier_timeout_ms ?? 5000)}"${editable ? "" : " disabled"}></label>
+          <label>Максимум символов classifier<input id="routing-classifier-input" type="number" min="200" max="20000" value="${Number(settings.classifier_max_input_chars ?? 4000)}"${editable ? "" : " disabled"}></label>
+          <label>При неопределённости<select id="routing-uncertain"${editable ? "" : " disabled"}>
+            ${[["upgrade", "Повысить маршрут"], ["chat", "Основная модель"], ["deterministic", "Оставить score"]].map(([value, title]) => `<option value="${value}"${settings.uncertain_policy === value ? " selected" : ""}>${title}</option>`).join("")}
+          </select></label>
+          <label>Модель для будущего single<select id="single-provider"${editable ? "" : " disabled"}>
+            <option value="">Выберите модель</option>
+            ${providers.map((item) => `<option value="${escapeHtml(item.id)}"${item.id === settings.single_provider_id ? " selected" : ""}>${escapeHtml(item.name)} — ${escapeHtml(item.model)}</option>`).join("")}
+          </select></label>
+        </div>
+        ${editable ? '<button class="button primary" data-save-routing>Сохранить</button>' : ""}
+      </details>`}
+    <small class="muted">Изменено: ${escapeHtml(localDate(settings.updated_at))}${settings.updated_by ? ` · ${escapeHtml(String(settings.updated_by))}` : ""}. Пользовательские режимы economy/auto/quality учитываются только в adaptive.</small>
+  `;
+}
+
+function singleProviderWarnings(provider) {
+  if (!provider) return '<p class="form-error">Единая модель не выбрана.</p>';
+  const warnings = [];
+  if (!provider.supports_vision) warnings.push("изображения недоступны");
+  if (!provider.supports_streaming) warnings.push("нет streaming");
+  if (Number(provider.context_window) < 8192) warnings.push("контекст меньше 8192 токенов");
+  return warnings.length ? `<p class="form-error">Предупреждение: ${escapeHtml(warnings.join("; "))}.</p>` : "";
+}
+
+async function saveRoutingSettings(body) {
+  const { payload } = await request("/llm/routing-settings", {
+    method: "PUT", body: JSON.stringify(body),
+  });
+  const warnings = payload.warnings || [];
+  toast(warnings.length ? `Настройки сохранены. ${warnings.join(". ")}` : "Настройки маршрутизации сохранены");
+  await refreshRoutingPage();
+}
+
+async function changeRoutingMode(mode) {
+  const current = state.router?.routing_settings || {};
+  if (mode === current.mode) return;
+  const providerId = current.single_provider_id || $("#single-provider")?.value || null;
+  if (mode === "single" && !providerId) {
+    toast("Сначала выберите модель для режима одной модели", true);
+    if (state.page !== "ai") openPage("ai");
+    return;
+  }
+  const selected = (state.router?.providers || []).find((item) => item.id === providerId);
+  const message = mode === "single"
+    ? `Автоматический выбор будет отключён. Все сообщения, напоминания, инструменты и анализ пойдут через ${selected?.name || "выбранную модель"} / ${selected?.model || "provider"}. Настроенные цепочки сохранятся.`
+    : "Снова будут использованы сохранённые цепочки основной, мощной, экономичной и классифицирующей моделей.";
+  if (!window.confirm(message)) return;
+  await saveRoutingSettings({ mode, ...(mode === "single" ? { single_provider_id: providerId } : {}) });
+}
 
 /**
  * Цепочка маршрута. Позиция 0 — основной, дальше резервы. Порядок
@@ -647,9 +764,19 @@ const ROUTE_TITLES = {
  * целиком, поэтому перестановка не может оставить дыру в нумерации.
  */
 function renderRouterRoutes() {
-  const routes = state.router?.routes || [];
+  renderRouteChains($("#router-routes"));
+}
+
+function renderRouteChains(target, routeCodes = null, compact = false) {
+  if (!target) return;
+  const allowed = routeCodes ? new Set(routeCodes) : null;
+  const routes = (state.router?.routes || [])
+    .filter((route) => !allowed || allowed.has(route.code))
+    .sort((left, right) => routeCodes
+      ? routeCodes.indexOf(left.code) - routeCodes.indexOf(right.code)
+      : 0);
   const editable = ["owner", "admin"].includes(state.me.role);
-  $("#router-routes").innerHTML = routes.length
+  target.innerHTML = routes.length
     ? routes.map((route) => {
       const chain = route.chain || [];
       const requires = [
@@ -659,7 +786,7 @@ function renderRouterRoutes() {
         `контекст от ${Number(route.min_context_window).toLocaleString("ru-RU")}`,
       ].filter(Boolean).join(" · ");
       return `
-        <section class="route-block" data-route="${escapeHtml(route.code)}">
+        <section class="route-block${compact ? " compact" : ""}" data-route="${escapeHtml(route.code)}">
           <div class="route-head">
             <h4>${escapeHtml(ROUTE_TITLES[route.code] || route.title || route.code)}</h4>
             <span class="route-requires">требует: ${escapeHtml(requires)}</span>
@@ -693,7 +820,10 @@ function renderRouterRoutes() {
 
 function chainAdder(route, chain) {
   const used = new Set(chain.map((link) => link.provider_id));
-  const free = state.providers.filter((item) => !used.has(item.id));
+  const candidates = state.page === "overview"
+    ? (state.router?.providers || [])
+    : (state.providers.length ? state.providers : (state.router?.providers || []));
+  const free = candidates.filter((item) => item.enabled !== false && !used.has(item.id));
   if (chain.length >= 6) {
     return '<p class="muted">Достигнут предел: основной и пять резервов.</p>';
   }
@@ -802,7 +932,12 @@ async function saveChain(routeCode, providerIds) {
     body: JSON.stringify({ providers: providerIds }),
   });
   toast("Цепочка сохранена");
-  await loadProviders();
+  await refreshRoutingPage();
+}
+
+async function refreshRoutingPage() {
+  if (state.page === "overview") await loadOverview();
+  else await loadProviders();
 }
 
 function providerCard(item) {
@@ -812,10 +947,10 @@ function providerCard(item) {
       ? "red"
       : "yellow";
   return `
-    <article class="provider-card${item.is_active ? " active" : ""}">
+    <article class="provider-card">
       <div class="provider-title">
         <div><span class="status-dot color-${checkClass}"></span><div><h3>${escapeHtml(item.name)}</h3><span class="technical">${escapeHtml(item.protocol)}</span></div></div>
-        ${item.is_active ? '<span class="status-pill">Активен</span>' : ""}
+        <span class="status-pill">${escapeHtml(providerRouteLabel(item.id))}</span>
       </div>
       <div class="provider-details">
         <span>Base URL<strong>${escapeHtml(item.base_url)}</strong></span>
@@ -828,9 +963,18 @@ function providerCard(item) {
         <button class="button tiny ghost" data-provider-action="check" data-provider-id="${escapeHtml(item.id)}">Проверить</button>
         <button class="button tiny ghost" data-provider-action="models" data-provider-id="${escapeHtml(item.id)}">Получить модели</button>
         <button class="button tiny ghost" data-provider-action="edit" data-provider-id="${escapeHtml(item.id)}">Изменить</button>
-        ${item.is_active ? "" : `<button class="button tiny secondary" data-provider-action="activate" data-provider-id="${escapeHtml(item.id)}">Сделать активным</button><button class="button tiny danger-outline" data-provider-action="delete" data-provider-id="${escapeHtml(item.id)}">Удалить</button>`}
+        <select data-provider-route-select>${(state.router?.routes || []).filter((route) => route.code !== "single").map((route) => `<option value="${escapeHtml(route.code)}">${escapeHtml(ROUTE_TITLES[route.code] || route.code)}</option>`).join("")}</select>
+        <button class="button tiny secondary" data-provider-action="route-primary" data-provider-id="${escapeHtml(item.id)}">Сделать основным для маршрута</button>
+        <button class="button tiny danger-outline" data-provider-action="delete" data-provider-id="${escapeHtml(item.id)}">Удалить</button>
       </div>
     </article>`;
+}
+
+function providerRouteLabel(providerId) {
+  const placements = (state.router?.routes || []).flatMap((route) =>
+    (route.chain || []).map((link, index) => link.provider_id === providerId
+      ? `${ROUTE_TITLES[route.code] || route.code}: ${index === 0 ? "основной" : `резерв ${index}`}` : null).filter(Boolean));
+  return placements.length ? placements.slice(0, 2).join(" · ") : "не назначен";
 }
 
 function openProviderEditor(provider = null) {
@@ -987,18 +1131,13 @@ async function providerAction(action, id) {
     await loadProviders();
     return;
   }
-  if (action === "activate") {
-    askSudo({
-      scope: "providers:activate",
-      title: "Переключить активную LLM",
-      description: "Runtime проверит новую модель, обновит существующие агенты и выполнит rollback при ошибке.",
-      action: async () => {
-        toast("Переключение модели началось");
-        await request(`/providers/${encodeURIComponent(id)}/activate`, { method: "POST" });
-        toast("Новая модель активирована; агенты и память сохранены");
-        await loadProviders();
-      },
-    });
+  if (action === "route-primary") {
+    const card = document.querySelector(`[data-provider-id="${CSS.escape(id)}"]`)?.closest(".provider-card");
+    const routeCode = card?.querySelector("[data-provider-route-select]")?.value;
+    const route = (state.router?.routes || []).find((item) => item.code === routeCode);
+    if (!route) return;
+    const ids = [id, ...(route.chain || []).map((link) => link.provider_id).filter((providerId) => providerId !== id)].slice(0, 6);
+    await saveChain(routeCode, ids);
     return;
   }
   if (action === "delete") {
@@ -1728,10 +1867,51 @@ $("#provider-form").addEventListener("submit", (event) => {
   saveProvider(form).catch(handleError);
 });
 $("#reload-router").addEventListener("click", () => loadProviders().catch(handleError));
+$("#overview-models").addEventListener("click", (event) => {
+  if (event.target.closest("[data-open-ai-routing]")) return openPage("ai");
+  handleRouteChainClick(event);
+});
+$("#overview-models").addEventListener("change", (event) => {
+  const routing = event.target.closest("[data-overview-routing-toggle]");
+  if (routing) {
+    changeRoutingMode(routing.checked ? "adaptive" : "single").catch(handleError);
+    return;
+  }
+  handleRouteChainChange(event);
+});
+$("#routing-settings").addEventListener("click", (event) => {
+  const mode = event.target.closest("[data-routing-mode]")?.dataset.routingMode;
+  if (mode) {
+    changeRoutingMode(mode).catch(handleError);
+    return;
+  }
+  if (event.target.closest("[data-save-routing]")) {
+    const settings = state.router?.routing_settings || {};
+    const body = settings.mode === "single"
+      ? {
+          mode: "single",
+          single_provider_id: $("#single-provider")?.value || null,
+          single_failover_enabled: $("#single-failover")?.checked === true,
+        }
+      : {
+          mode: "adaptive",
+          fast_max_score: Number($("#routing-fast-score")?.value ?? 0),
+          deep_min_score: Number($("#routing-deep-score")?.value ?? 5),
+          single_provider_id: $("#single-provider")?.value || null,
+          auto_routing_enabled: $("#routing-auto")?.checked === true,
+          llm_classifier_enabled: $("#routing-classifier")?.checked === true,
+          classifier_confidence_threshold: Number($("#routing-confidence")?.value ?? 0.75),
+          classifier_timeout_ms: Number($("#routing-classifier-timeout")?.value ?? 5000),
+          classifier_max_input_chars: Number($("#routing-classifier-input")?.value ?? 4000),
+          uncertain_policy: $("#routing-uncertain")?.value || "upgrade",
+        };
+    saveRoutingSettings(body).catch(handleError);
+  }
+});
 
 // Переключатель — это change, а не click: клавиатурное переключение
 // пробелом click не порождает, и настройка осталась бы недоступной.
-$("#router-routes").addEventListener("change", (event) => {
+function handleRouteChainChange(event) {
   const toggle = event.target.closest("[data-route-rotation]");
   if (!toggle) return;
   const code = toggle.dataset.routeRotation;
@@ -1743,12 +1923,13 @@ $("#router-routes").addEventListener("change", (event) => {
       toast(toggle.checked
         ? "Ротация включена: при отказе основного ответит резерв"
         : "Ротация выключена: работает только основной провайдер");
-      return loadProviders();
+      return refreshRoutingPage();
     })
     .catch(handleError);
-});
+}
+$("#router-routes").addEventListener("change", handleRouteChainChange);
 
-$("#router-routes").addEventListener("click", (event) => {
+function handleRouteChainClick(event) {
   const move = event.target.closest("[data-chain-move]");
   if (move) {
     moveChain(move.dataset.route, move.dataset.provider, move.dataset.chainMove).catch(handleError);
@@ -1772,12 +1953,13 @@ $("#router-routes").addEventListener("click", (event) => {
   const add = event.target.closest("[data-chain-add]");
   if (add) {
     const code = add.dataset.chainAdd;
-    const select = document.querySelector(`[data-chain-add-select="${CSS.escape(code)}"]`);
+    const select = event.currentTarget.querySelector(`[data-chain-add-select="${CSS.escape(code)}"]`);
     const route = (state.router?.routes || []).find((item) => item.code === code);
     const ids = (route?.chain || []).map((link) => link.provider_id);
     if (select?.value) saveChain(code, [...ids, select.value]).catch(handleError);
   }
-});
+}
+$("#router-routes").addEventListener("click", handleRouteChainClick);
 
 $("#router-health").addEventListener("click", (event) => {
   const reset = event.target.closest("[data-breaker-reset]");

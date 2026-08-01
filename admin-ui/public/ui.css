@@ -598,6 +598,23 @@ dialog .eyebrow { margin-top: 0; }
 .router-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
 .router-grid label { display: grid; gap: 4px; font-size: 12px; }
 .router-grid small { color: var(--muted, #8b93a4); font-size: 11px; }
+.routing-summary, #routing-settings { display: grid; gap: 14px; }
+.overview-route-chains { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+.route-block.compact { margin: 0; padding: 16px; }
+.route-block.compact .route-requires,
+.route-block.compact .route-rotation + small { display: none; }
+.routing-single-card { display: grid; gap: 5px; padding: 18px; border: 1px solid var(--line); border-radius: 16px; }
+.routing-single-card span, .routing-single-card small { color: var(--muted); }
+.routing-mode-line { display: flex; align-items: center; gap: 10px; }
+.routing-mode-picker { display: flex; gap: 8px; flex-wrap: wrap; }
+.routing-role-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
+.routing-role-grid article { display: grid; gap: 4px; padding: 12px; border: 1px solid var(--line, #2a2f3a); border-radius: 10px; }
+.routing-role-grid article span, .routing-role-grid article small { color: var(--muted, #8b93a4); font-size: 11px; }
+.routing-role-grid article strong { font-size: 13px; }
+.routing-single-editor { display: grid; gap: 12px; max-width: 620px; }
+.routing-single-editor > label:not(.switch) { display: grid; gap: 6px; }
+.routing-advanced { padding: 12px; border: 1px solid var(--line, #2a2f3a); border-radius: 10px; }
+.routing-advanced summary { cursor: pointer; margin-bottom: 12px; }
 /* Сетка вместо переноса flex: колонки одинаковой ширины, поэтому подписи
    разной длины не разваливают ряд. */
 .router-flags { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px 16px; margin-top: 14px; }

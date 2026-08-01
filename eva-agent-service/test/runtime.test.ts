@@ -112,6 +112,22 @@ test("Telegram update normalization recognizes voice and commands", () => {
     },
   });
   assert.equal(voice?.kind, "voice");
+
+  const reply = normalizeUpdate({
+    update_id: 44,
+    message: {
+      message_id: 8,
+      chat: { id: 11 },
+      from: { id: 11, first_name: "Виктор" },
+      text: "Сделал",
+      reply_to_message: {
+        message_id: 77,
+        chat: { id: 11 },
+        text: "Напоминание",
+      },
+    },
+  });
+  assert.equal(reply?.replyToMessageId, 77);
 });
 
 test("time context uses the configured timezone", () => {

@@ -15,6 +15,7 @@ import type { FastifyInstance, FastifyPluginAsync, FastifyReply } from "fastify"
 
 import type { Logger } from "../logger.js";
 import { LlmRouter, NoProviderAvailable } from "./router.js";
+import { extractRoutingMarker, type RoutingMarkerClaims } from "./routing-marker.js";
 import type { RouterStore } from "./store.js";
 import type { LlmMessage, LlmRequest, LlmTool } from "./types.js";
 
@@ -84,7 +85,7 @@ export function createRouterServer(input: RouterServerInput): FastifyInstance {
     scope.post("/chat/completions", async (request, reply) => {
     let parsed: LlmRequest;
     try {
-      parsed = fromOpenAi(request.body);
+      parsed = fromOpenAi(request.body, input.apiKey);
     } catch (error) {
       return reply.code(400).send({
         error: {
@@ -189,7 +190,7 @@ interface OpenAiIn {
   user?: unknown;
 }
 
-export function fromOpenAi(raw: unknown): LlmRequest {
+export function fromOpenAi(raw: unknown, markerSecret = ""): LlmRequest {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error("тело запроса должно быть объектом");
   }
@@ -200,9 +201,12 @@ export function fromOpenAi(raw: unknown): LlmRequest {
 
   const messages: LlmMessage[] = [];
   let systemPrompt = "";
+  let routingClaims: RoutingMarkerClaims | null = null;
   for (const item of body.messages as Array<Record<string, unknown>>) {
     const role = String(item.role ?? "user");
-    const content = contentToText(item.content);
+    const extracted = extractRoutingMarker(contentToText(item.content), markerSecret);
+    const content = extracted.text;
+    if (extracted.claims) routingClaims = extracted.claims;
     if (role === "system" && messages.length === 0) {
       // Ведущий system становится system_prompt: Anthropic принимает его
       // только отдельным полем.
@@ -262,13 +266,27 @@ export function fromOpenAi(raw: unknown): LlmRequest {
       ? { type: "json_object" }
       : null,
     metadata: {
-      request_id: typeof metadata.request_id === "string" ? metadata.request_id : "",
+      request_id: routingClaims?.correlation_id && /^[0-9a-f-]{36}$/i.test(routingClaims.correlation_id)
+        ? routingClaims.correlation_id
+        : typeof metadata.request_id === "string" ? metadata.request_id : "",
       user_id: typeof metadata.user_id === "string"
         ? metadata.user_id
         : typeof body.user === "string" ? body.user : null,
       agent_id: typeof metadata.agent_id === "string" ? metadata.agent_id : null,
       route,
+      requested_route: route,
       sensitive: metadata.sensitive !== false,
+      purpose: routingClaims?.purpose ?? "chat",
+      internal_operation_type: routingClaims?.internal_operation_type,
+      user_mode: routingClaims?.user_mode ?? "auto",
+      message_source: routingClaims?.message_source,
+      has_image: routingClaims?.message_source === "image",
+      has_document: routingClaims?.message_source === "document",
+      has_voice: routingClaims?.message_source === "voice",
+      related_goals: routingClaims?.related_goals ?? 0,
+      related_tasks: routingClaims?.related_tasks ?? 0,
+      related_recent_events: routingClaims?.related_recent_events ?? 0,
+      crisis_level: routingClaims?.crisis_level ?? "none",
     },
   };
 }

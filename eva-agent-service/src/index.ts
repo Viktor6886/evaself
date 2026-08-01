@@ -111,6 +111,7 @@ async function main(): Promise<void> {
     cacheTtlMs: Math.max(1, config.profileCacheTtlSeconds) * 1_000,
     profileCompletionEnabled: config.profileCompletionEnabled,
     vectorGoalsEnabled: config.vectorGoalsEnabled,
+    routingMarkerSecret: config.routerApiKey,
   });
   const graph = config.graphMemoryEnabled ? new GraphRepository(db) : undefined;
   const graphContext = new GraphContextService(

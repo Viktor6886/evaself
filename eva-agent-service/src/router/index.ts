@@ -56,6 +56,7 @@ async function main(): Promise<void> {
   const shutdown = (signal: string) => {
     logger.info("LLM Router останавливается", { signal });
     void app.close()
+      .then(() => store.close())
       .then(() => pool.end())
       .then(() => process.exit(0))
       .catch(() => process.exit(1));

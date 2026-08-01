@@ -21,6 +21,7 @@ import {
 
 const CONTEXT_MUTATING_TOOLS = new Set([
   "update_response_mode",
+  "update_llm_quality_mode",
   "upsert_user_profile_field",
   "confirm_user_profile_field",
   "decline_user_profile_field",
@@ -35,6 +36,8 @@ const CONTEXT_MUTATING_TOOLS = new Set([
   "save_tasks_bulk_to_nocodb",
   "update_task",
   "update_task_in_nocodb",
+  "mark_task_completed",
+  "snooze_task_reminder",
   "delete_tasks",
   "delete_tasks_from_nocodb",
 ]);

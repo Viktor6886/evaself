@@ -14,6 +14,7 @@ import type {
   LlmResponse,
   ProviderProfile,
   RouteDefinition,
+  RoutingSettings,
   SwitchReason,
 } from "./types.js";
 
@@ -51,6 +52,16 @@ export interface AttemptRecord {
   cost_micro: number;
   tool_calls: number;
   streamed: boolean;
+  routing_mode: "adaptive" | "single";
+  requested_route: string;
+  effective_route: string;
+  classification_source: string | null;
+  classification_confidence: number | null;
+  classification_score: number | null;
+  classification_reason_codes: string[];
+  purpose: string | null;
+  internal_operation_type: string | null;
+  single_failover_used: boolean;
 }
 
 const CACHE_TTL_MS = 5_000;
@@ -60,6 +71,9 @@ export class RouterStore {
   private providerCache: { at: number; rows: ProviderProfile[] } | null = null;
   private routeCache: { at: number; rows: Map<string, RouteDefinition> } | null = null;
   private chainCache: { at: number; rows: Map<string, string[]> } | null = null;
+  private settingsCache: { at: number; row: RoutingSettings } | null = null;
+  private settingsListener: pg.PoolClient | null = null;
+  private settingsListenerPromise: Promise<void> | null = null;
 
   constructor(private readonly pool: pg.Pool, encryptionKey: string) {
     this.secrets = new SecretBox(encryptionKey);
@@ -69,6 +83,15 @@ export class RouterStore {
     this.providerCache = null;
     this.routeCache = null;
     this.chainCache = null;
+    this.settingsCache = null;
+  }
+
+  async close(): Promise<void> {
+    const listener = this.settingsListener;
+    this.settingsListener = null;
+    if (!listener) return;
+    await listener.query("UNLISTEN llm_routing_settings_changed").catch(() => undefined);
+    listener.release();
   }
 
   // -----------------------------------------------------------------
@@ -171,6 +194,70 @@ export class RouterStore {
     }
     this.chainCache = { at: Date.now(), rows: map };
     return map;
+  }
+
+  async routingSettings(): Promise<RoutingSettings> {
+    if (this.settingsCache && Date.now() - this.settingsCache.at < CACHE_TTL_MS) {
+      return this.settingsCache.row;
+    }
+    await this.ensureSettingsListener().catch(() => undefined);
+    let rows: RoutingSettings[];
+    try {
+      ({ rows } = await this.pool.query<RoutingSettings>(
+        `SELECT mode, single_provider_id, single_failover_enabled,
+                auto_routing_enabled, llm_classifier_enabled, fast_max_score,
+                deep_min_score, classifier_confidence_threshold,
+                classifier_timeout_ms, classifier_max_input_chars,
+                uncertain_policy, economy_score_shift, quality_score_shift
+           FROM llm_routing_settings WHERE singleton`,
+      ));
+    } catch (error) {
+      // A transient PostgreSQL failure must not change the model selection
+      // mid-conversation. The last validated snapshot remains authoritative.
+      if (this.settingsCache) return this.settingsCache.row;
+      throw error;
+    }
+    const raw = rows[0];
+    const row: RoutingSettings = raw ? {
+      ...raw,
+      fast_max_score: Number(raw.fast_max_score),
+      deep_min_score: Number(raw.deep_min_score),
+      classifier_confidence_threshold: Number(raw.classifier_confidence_threshold),
+      classifier_timeout_ms: Number(raw.classifier_timeout_ms),
+      classifier_max_input_chars: Number(raw.classifier_max_input_chars),
+      economy_score_shift: Number(raw.economy_score_shift),
+      quality_score_shift: Number(raw.quality_score_shift),
+    } : {
+      mode: "adaptive", single_provider_id: null, single_failover_enabled: false,
+      auto_routing_enabled: true, llm_classifier_enabled: true,
+      fast_max_score: 0, deep_min_score: 5, classifier_confidence_threshold: 0.75,
+      classifier_timeout_ms: 5000, classifier_max_input_chars: 4000,
+      uncertain_policy: "upgrade", economy_score_shift: -1, quality_score_shift: 1,
+    };
+    this.settingsCache = { at: Date.now(), row };
+    return row;
+  }
+
+  private async ensureSettingsListener(): Promise<void> {
+    if (this.settingsListener) return;
+    if (this.settingsListenerPromise) return await this.settingsListenerPromise;
+    this.settingsListenerPromise = (async () => {
+      const client = await this.pool.connect();
+      try {
+        await client.query("LISTEN llm_routing_settings_changed");
+        client.on("notification", (message) => {
+          if (message.channel === "llm_routing_settings_changed") this.settingsCache = null;
+        });
+        client.on("error", () => {
+          if (this.settingsListener === client) this.settingsListener = null;
+        });
+        this.settingsListener = client;
+      } catch (error) {
+        client.release(true);
+        throw error;
+      }
+    })().finally(() => { this.settingsListenerPromise = null; });
+    return await this.settingsListenerPromise;
   }
 
   // -----------------------------------------------------------------
@@ -341,8 +428,12 @@ export class RouterStore {
             actual_provider_id, model, started_at, finished_at, latency_ms,
             attempts, switches, succeeded, error_code, switch_reason,
             error_summary, http_status, tokens_in, tokens_out, cost_micro,
-            tool_calls, streamed)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now(),$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
+            tool_calls, streamed, routing_mode, requested_route, effective_route,
+            classification_source, classification_confidence, classification_score,
+            classification_reason_codes, purpose, internal_operation_type,
+            single_failover_used)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now(),$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,
+               $22,$23,$24,$25,$26,$27,$28,$29,$30,$31)`,
       [
         record.request_id,
         record.route_code,
@@ -365,6 +456,16 @@ export class RouterStore {
         record.cost_micro,
         record.tool_calls,
         record.streamed,
+        record.routing_mode,
+        record.requested_route,
+        record.effective_route,
+        record.classification_source,
+        record.classification_confidence,
+        record.classification_score,
+        record.classification_reason_codes,
+        record.purpose,
+        record.internal_operation_type,
+        record.single_failover_used,
       ],
     );
   }

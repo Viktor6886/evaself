@@ -44,6 +44,7 @@ export interface TelegramMessage {
   audio?: TelegramFile;
   document?: TelegramFile;
   photo?: TelegramFile[];
+  reply_to_message?: TelegramMessage;
 }
 
 export interface TelegramUpdate {

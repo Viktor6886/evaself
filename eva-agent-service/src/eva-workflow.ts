@@ -12,6 +12,7 @@ import type { ConversationHighlightService } from "./memory/conversation-highlig
 import type { UserProfileService } from "./profile/profile-service.js";
 import type { UserQueue } from "./queue.js";
 import type { RuntimeContextBuilder } from "./runtime/runtime-context.js";
+import { TaskEventService } from "./tasks/task-event-service.js";
 import {
   type TelegramMessage,
   type TelegramMessageDraft,
@@ -41,9 +42,11 @@ interface NormalizedUpdate {
   messageId: number;
   kind: "text" | "voice" | "image" | "document" | "unsupported";
   command: string | null;
+  replyToMessageId: number | null;
 }
 
 export class EvaWorkflow {
+  private readonly taskEvents: TaskEventService;
   constructor(
     private readonly config: Config,
     private readonly db: Database,
@@ -57,7 +60,9 @@ export class EvaWorkflow {
     private readonly crisis?: CrisisMonitor,
     private readonly graphContext?: GraphContextService,
     private readonly highlights?: ConversationHighlightService,
-  ) {}
+  ) {
+    this.taskEvents = new TaskEventService(db);
+  }
 
   /** Awaitable entry point used by tests and controlled reprocessing. */
   async handle(update: TelegramUpdate): Promise<void> {
@@ -158,6 +163,56 @@ export class EvaWorkflow {
           }
           throw error;
         }
+        if (update.replyToMessageId !== null) {
+          const linked = await this.taskEvents.findByTelegramReply(
+            user.id,
+            update.chatId,
+            update.replyToMessageId,
+          );
+          if (linked) {
+            await this.taskEvents.record({
+              userId: user.id,
+              taskId: linked.task_id,
+              eventType: "user_replied",
+              telegramChatId: update.chatId,
+              telegramMessageId: update.messageId,
+              metadata: { reply_to_message_id: update.replyToMessageId },
+            });
+            const replyText = prompt.trim().toLocaleLowerCase("ru");
+            if (/^(сделал(?:а)?|готово|выполнено|done)[!.\s]*$/u.test(replyText)) {
+              await this.taskEvents.complete(user.id, Number(linked.task_id));
+            } else if (/^(отмени|отменить|cancel)[!.\s]*$/u.test(replyText)) {
+              await this.taskEvents.cancel(user.id, Number(linked.task_id));
+            } else if (/^(завтра|tomorrow)[!.\s]*$/u.test(replyText)) {
+              await this.taskEvents.snooze(
+                user.id,
+                Number(linked.task_id),
+                new Date(Date.now() + 24 * 60 * 60_000),
+              );
+            }
+            prompt = [
+              "<REPLIED_TASK>",
+              `task_id: ${linked.task_id}`,
+              `title: ${linked.title}`,
+              `status_before_reply: ${linked.status}`,
+              "Пользователь ответил именно на сообщение-напоминание этой задачи.",
+              "</REPLIED_TASK>",
+              prompt,
+            ].join("\n");
+          }
+        } else if (/^(сделал(?:а)?|готово|выполнено|не успел(?:а)?|перенеси|завтра|отмени|done|cancel|tomorrow)[!.\s]*$/iu.test(prompt.trim())) {
+          const candidates = await this.taskEvents.recentOpenReminderTasks(user.id, 3);
+          if (candidates.length > 1) {
+            prompt = [
+              "<AMBIGUOUS_TASK_REPLY>",
+              "Сообщение не является Telegram reply, а подходят несколько недавних задач.",
+              `Кандидаты: ${candidates.map((item) => item.title).join("; ")}`,
+              "Не угадывай и не изменяй задачи. Сначала уточни, какую задачу имеет в виду пользователь.",
+              "</AMBIGUOUS_TASK_REPLY>",
+              prompt,
+            ].join("\n");
+          }
+        }
         typing.stop = this.telegram.startTyping(update.chatId, this.config.typingIntervalMs);
         await this.db.recordUserMessage(user.id);
         const conversationId = link.conversation_id;
@@ -205,7 +260,7 @@ export class EvaWorkflow {
             this.runtimeContext.wrapUserMessage(
               context,
               signal ? `${safetyDirective(signal)}\n\n${prompt}` : prompt,
-              { messageSource: update.kind },
+              { messageSource: update.kind, crisisLevel: signal?.severity ?? "none" },
             ),
           );
         } finally {
@@ -621,6 +676,9 @@ export function normalizeUpdate(update: TelegramUpdate): NormalizedUpdate | null
     messageId: message.message_id,
     kind,
     command,
+    replyToMessageId: Number.isSafeInteger(message.reply_to_message?.message_id)
+      ? message.reply_to_message!.message_id
+      : null,
   };
 }
 

@@ -40,6 +40,26 @@ export interface LlmRequestMetadata {
   route: RouteCode;
   /** Запрос содержит личные данные пользователя, а не служебные. */
   sensitive: boolean;
+  requested_route?: string;
+  effective_route?: string;
+  routing_mode?: "adaptive" | "single";
+  purpose?: string;
+  internal_operation_type?: string;
+  user_mode?: "economy" | "auto" | "quality";
+  message_source?: "text" | "voice" | "image" | "document" | "unsupported";
+  has_image?: boolean;
+  has_document?: boolean;
+  has_voice?: boolean;
+  related_goals?: number;
+  related_tasks?: number;
+  related_recent_events?: number;
+  crisis_level?: "none" | "low" | "medium" | "high" | "critical";
+  skip_auto_classification?: boolean;
+  classification_source?: string;
+  classification_confidence?: number;
+  classification_score?: number;
+  classification_reason_codes?: string[];
+  single_failover_used?: boolean;
 }
 
 export interface LlmRequest {
@@ -176,6 +196,22 @@ export interface RouteDefinition {
    * и владелец вправе предпочесть отказ.
    */
   rotation_enabled: boolean;
+}
+
+export interface RoutingSettings {
+  mode: "adaptive" | "single";
+  single_provider_id: string | null;
+  single_failover_enabled: boolean;
+  auto_routing_enabled: boolean;
+  llm_classifier_enabled: boolean;
+  fast_max_score: number;
+  deep_min_score: number;
+  classifier_confidence_threshold: number;
+  classifier_timeout_ms: number;
+  classifier_max_input_chars: number;
+  uncertain_policy: "upgrade" | "chat" | "deterministic";
+  economy_score_shift: number;
+  quality_score_shift: number;
 }
 
 /** Адаптер конкретного семейства API. */

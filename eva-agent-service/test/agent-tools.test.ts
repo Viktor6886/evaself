@@ -128,6 +128,7 @@ const CASES: Array<[string, Record<string, unknown>]> = [
   ["update_task_in_nocodb", { id: 1, status: "done" }],
   ["delete_tasks_from_nocodb", { ids: [1], confirm: "DELETE" }],
   ["update_response_mode", { mode: "voice" }],
+  ["update_llm_quality_mode", { mode: "quality" }],
   ["LIGHTRAG_INSERT", { text: "материал" }],
   ["LIGHTRAG_QUERY", { query: "что-нибудь" }],
 ];
@@ -205,7 +206,7 @@ test("a valid repeating task is written with its next run", async () => {
     cron: "0 9 * * *",
   });
   assert.equal((result.details as { ok: boolean }).ok, true);
-  assert.equal(statements.length, 1);
+  assert.equal(statements.length, 2, "задача и событие created записываются отдельно");
   const nextRun = statements[0]!.values[9];
   assert.ok(typeof nextRun === "string" && !Number.isNaN(Date.parse(nextRun)));
 });

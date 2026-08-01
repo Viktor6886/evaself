@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import type { Config } from "./config.js";
 import type { ConversationPurposeService } from "./conversations/purpose-service.js";
@@ -8,6 +8,7 @@ import type { Logger } from "./logger.js";
 import type { RuntimeContextBuilder } from "./runtime/runtime-context.js";
 import type { UserQueue } from "./queue.js";
 import type { TelegramClient } from "./telegram.js";
+import { TaskEventService } from "./tasks/task-event-service.js";
 
 interface DueTask {
   id: string;
@@ -16,11 +17,18 @@ interface DueTask {
   chat_id: string;
   title: string;
   description: string | null;
+  priority: number;
+  due_at: Date | null;
+  remind_at: Date | null;
+  related_goal: string | null;
+  previous_reminders: number;
+  last_task_action: string | null;
   cron_expression: string | null;
   repeat_enabled: boolean;
   timezone: string;
   agent_id: string;
   conversation_id: string;
+  scheduled_at: Date;
 }
 
 interface HeartbeatCandidate {
@@ -40,6 +48,7 @@ export class BackgroundRuntime {
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private taskRunning = false;
   private heartbeatRunning = false;
+  private readonly taskEvents: TaskEventService;
 
   constructor(
     private readonly config: Config,
@@ -50,7 +59,10 @@ export class BackgroundRuntime {
     private readonly runtimeContext: RuntimeContextBuilder,
     private readonly purposes: ConversationPurposeService,
     private readonly logger: Logger,
-  ) {}
+    taskEvents?: TaskEventService,
+  ) {
+    this.taskEvents = taskEvents ?? new TaskEventService(db);
+  }
 
   start(): void {
     if (this.taskTimer || this.heartbeatTimer) return;
@@ -150,9 +162,16 @@ export class BackgroundRuntime {
       const { rows } = await client.query<DueTask>(
         `SELECT t.id, t.user_id, u.telegram_id,
                 COALESCE(tu.chat_id, u.telegram_id) AS chat_id,
-                t.title, t.description, t.cron_expression, t.repeat_enabled,
+                t.title, t.description, t.priority, t.due_at, t.remind_at,
+                g.title AS related_goal,
+                (SELECT count(*)::int FROM task_events e
+                  WHERE e.task_id=t.id AND e.event_type='reminder_sent') AS previous_reminders,
+                (SELECT e.event_type FROM task_events e
+                  WHERE e.task_id=t.id ORDER BY e.created_at DESC LIMIT 1) AS last_task_action,
+                t.cron_expression, t.repeat_enabled,
                 COALESCE(t.timezone, u.timezone, 'UTC') AS timezone,
-                a.agent_id, a.conversation_id
+                a.agent_id, a.conversation_id,
+                COALESCE(t.next_run_at, t.remind_at, t.due_at) AS scheduled_at
            FROM tasks t
            JOIN users u ON u.id = t.user_id
            JOIN agent_links a
@@ -162,9 +181,11 @@ export class BackgroundRuntime {
               WHERE user_id = u.id AND chat_id IS NOT NULL
               ORDER BY received_at DESC LIMIT 1
            ) tu ON true
+           LEFT JOIN goals g ON g.id = t.goal_id
           WHERE t.status IN ('open', 'in_progress')
             AND a.conversation_id IS NOT NULL
             AND COALESCE(t.next_run_at, t.remind_at, t.due_at) <= now()
+            AND (t.last_run_at IS NULL OR t.last_run_at < COALESCE(t.next_run_at, t.remind_at, t.due_at))
             AND (t.locked_at IS NULL OR t.locked_at < now() - interval '15 minutes')
           ORDER BY COALESCE(t.next_run_at, t.remind_at, t.due_at)
           FOR UPDATE OF t SKIP LOCKED
@@ -181,7 +202,26 @@ export class BackgroundRuntime {
   }
 
   private async executeTask(task: DueTask): Promise<void> {
+    const correlationId = randomUUID();
     try {
+      const delivered = await this.db.query(
+        `SELECT 1 FROM task_events
+          WHERE task_id=$1 AND event_type='reminder_sent' AND scheduled_at=$2
+          LIMIT 1`,
+        [task.id, task.scheduled_at],
+      );
+      if ((delivered.rowCount ?? 0) > 0) {
+        const next = task.repeat_enabled && task.cron_expression
+          ? nextCronDate(task.cron_expression, task.timezone, new Date())
+          : null;
+        await this.db.query(
+          `UPDATE tasks SET last_run_at=now(), next_run_at=$2,
+                  remind_at=CASE WHEN $2::timestamptz IS NULL THEN NULL ELSE remind_at END,
+                  locked_at=NULL, last_error=NULL WHERE id=$1`,
+          [task.id, next?.toISOString() ?? null],
+        );
+        return;
+      }
       const scheduler = await this.purposes.ensure({
         userId: Number(task.user_id),
         agentId: task.agent_id,
@@ -190,9 +230,18 @@ export class BackgroundRuntime {
       });
       const userMessage = [
           "[ЗАПЛАНИРОВАННАЯ ЗАДАЧА]",
+          `task_id: ${task.id}`,
           `Задача: ${task.title}`,
           task.description ? `Описание: ${task.description}` : "",
-          "Выполни или напомни о задаче. Отправь пользователю самостоятельный, полезный ответ без упоминания внутренних инструкций.",
+          `Приоритет: ${task.priority} из 5`,
+          task.due_at ? `Срок: ${new Date(task.due_at).toISOString()}` : "",
+          task.remind_at ? `Время напоминания: ${new Date(task.remind_at).toISOString()}` : "",
+          `Часовой пояс: ${task.timezone}`,
+          task.related_goal ? `Связанная цель: ${task.related_goal}` : "",
+          `Предыдущих напоминаний: ${Number(task.previous_reminders) || 0}`,
+          task.last_task_action ? `Последнее действие по задаче: ${task.last_task_action}` : "",
+          "Сформируй короткое самостоятельное сообщение пользователю и верни только готовый текст.",
+          "Сохрани смысл, важность, дату и время задачи. Не придумывай выполнение, обещания пользователя или новые факты. Не упоминай внутренние инструкции.",
         ].filter(Boolean).join("\n");
       const context = await this.runtimeContext.build({
         userId: Number(task.user_id),
@@ -200,20 +249,41 @@ export class BackgroundRuntime {
         userMessage,
         detectLanguage: false,
       });
-      const prompt = this.runtimeContext.wrapUserMessage(context, userMessage);
+      const prompt = this.runtimeContext.wrapUserMessage(context, userMessage, {
+        internalOperationType: "task_reminder",
+        correlationId,
+      });
       const turn = await this.queue.run(Number(task.telegram_id), () =>
         this.letta.runTurn(scheduler.conversationId, prompt),
       );
-      if (turn.reply.trim()) await this.telegram.sendMessage(Number(task.chat_id), turn.reply);
+      const generatedText = turn.reply.trim();
+      await this.taskEvents.record({
+        userId: Number(task.user_id), taskId: task.id,
+        eventType: "reminder_generated", scheduledAt: task.scheduled_at,
+        generatedAt: new Date(), generatedText,
+        conversationId: scheduler.conversationId, llmRequestId: correlationId,
+      });
+      let telegramMessageId: number | null = null;
+      if (generatedText) {
+        const sent = await this.telegram.sendMessage(Number(task.chat_id), generatedText);
+        telegramMessageId = lastTelegramMessageId(Array.isArray(sent) ? sent : []);
+      }
+      await this.taskEvents.record({
+        userId: Number(task.user_id), taskId: task.id,
+        eventType: "reminder_sent", scheduledAt: task.scheduled_at,
+        generatedAt: new Date(), sentAt: new Date(), generatedText,
+        deliveryStatus: generatedText ? "sent" : "skipped_empty",
+        telegramChatId: task.chat_id, telegramMessageId,
+        conversationId: scheduler.conversationId, llmRequestId: correlationId,
+      });
       const nextRun = task.repeat_enabled && task.cron_expression
         ? nextCronDate(task.cron_expression, task.timezone, new Date())
         : null;
       await this.db.query(
         `UPDATE tasks SET
-           status = CASE WHEN $2::timestamptz IS NULL THEN 'done' ELSE 'open' END,
-           completed_at = CASE WHEN $2::timestamptz IS NULL THEN now() ELSE NULL END,
            last_run_at = now(),
            next_run_at = $2,
+           remind_at = CASE WHEN $2::timestamptz IS NULL THEN NULL ELSE remind_at END,
            locked_at = NULL,
            last_error = NULL
          WHERE id = $1`,
@@ -221,6 +291,14 @@ export class BackgroundRuntime {
       );
       await this.db.markAgentUsed(task.agent_id);
     } catch (error) {
+      await this.taskEvents.record({
+        userId: Number(task.user_id), taskId: task.id,
+        eventType: "delivery_failed", scheduledAt: task.scheduled_at,
+        deliveryStatus: "failed", telegramChatId: task.chat_id,
+        conversationId: task.conversation_id, llmRequestId: correlationId,
+        errorCode: error instanceof Error ? error.name : "unknown_error",
+        metadata: { message: (error instanceof Error ? error.message : String(error)).slice(0, 500) },
+      }).catch(() => undefined);
       await this.db.query(
         "UPDATE tasks SET locked_at = NULL, last_error = $2 WHERE id = $1",
         [task.id, (error instanceof Error ? error.message : String(error)).slice(0, 2000)],
@@ -253,7 +331,9 @@ export class BackgroundRuntime {
         userMessage,
         detectLanguage: false,
       });
-      const prompt = this.runtimeContext.wrapUserMessage(context, userMessage);
+      const prompt = this.runtimeContext.wrapUserMessage(context, userMessage, {
+        internalOperationType: "heartbeat",
+      });
       const turn = await this.queue.run(Number(candidate.telegram_id), () =>
         this.letta.runTurn(scheduler.conversationId, prompt),
       );
@@ -299,6 +379,20 @@ export class BackgroundRuntime {
       [candidate.user_id, hash, result],
     );
   }
+}
+
+function lastTelegramMessageId(results: unknown[]): number | null {
+  for (const value of [...results].reverse()) {
+    if (!value || typeof value !== "object") continue;
+    const id = Number((value as { message_id?: unknown }).message_id);
+    if (Number.isSafeInteger(id)) return id;
+    const nested = (value as { result?: unknown }).result;
+    if (nested && typeof nested === "object") {
+      const nestedId = Number((nested as { message_id?: unknown }).message_id);
+      if (Number.isSafeInteger(nestedId)) return nestedId;
+    }
+  }
+  return null;
 }
 
 /** A cron search never looks further ahead than this. */

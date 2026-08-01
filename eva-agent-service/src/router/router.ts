@@ -19,6 +19,7 @@ import { anthropicAdapter } from "./adapters/anthropic.js";
 import { openAiAdapter } from "./adapters/openai.js";
 import { buildChain } from "./chain.js";
 import type { ChainEntry } from "./chain.js";
+import { classifyDeterministically, isEvaRoute, type RouteClassificationResult } from "./classifier.js";
 import { ProviderLimits } from "./limits.js";
 import { estimateTokens, normalizeForProvider, relaxAfterBadRequest, withBackupDirective } from "./normalize.js";
 import { costOf, RouterStore, userIdOf } from "./store.js";
@@ -28,6 +29,7 @@ import type {
   LlmStreamChunk,
   ProviderAdapter,
   ProviderProfile,
+  RoutingSettings,
   SwitchReason,
 } from "./types.js";
 import { ProviderError } from "./types.js";
@@ -94,7 +96,7 @@ export class LlmRouter {
   // -----------------------------------------------------------------
   // подготовка цепочки
   // -----------------------------------------------------------------
-  private async prepare(request: LlmRequest) {
+  private async prepare(request: LlmRequest, settings: RoutingSettings) {
     const [providers, routes, chains, breakers] = await Promise.all([
       this.store.providers(),
       this.store.routes(),
@@ -102,11 +104,19 @@ export class LlmRouter {
       this.store.breakers(),
     ]);
 
-    const route = routes.get(request.metadata.route);
-    if (!route) {
+    const configuredRoute = routes.get(request.metadata.route);
+    if (!configuredRoute) {
       throw new NoProviderAvailable(`маршрут «${request.metadata.route}» не настроен`);
     }
-    const providerIds = chains.get(route.code) ?? [];
+    const route = settings.mode === "single"
+      ? { ...configuredRoute, rotation_enabled: settings.single_failover_enabled }
+      : configuredRoute;
+    const providerIds = settings.mode === "single"
+      ? [
+          settings.single_provider_id,
+          ...(settings.single_failover_enabled ? (chains.get("chat") ?? []) : []),
+        ].filter((id, index, all): id is string => Boolean(id) && all.indexOf(id) === index)
+      : (chains.get(route.code) ?? []);
     if (providerIds.length === 0) {
       throw new NoProviderAvailable(`для маршрута «${route.code}» не назначен ни один провайдер`);
     }
@@ -120,6 +130,17 @@ export class LlmRouter {
       now: new Date(),
     });
 
+    if (settings.mode === "single") {
+      const selected = settings.single_provider_id;
+      if (!selected || chain.primary?.id !== selected) {
+        throw new NoProviderAvailable("выбранный provider режима одной модели выключен или отсутствует");
+      }
+      const rejection = chain.rejected.find((item) => item.provider.id === selected);
+      if (rejection && rejection.reason !== "breaker_open") {
+        throw new NoProviderAvailable(`выбранная модель несовместима с запросом: ${rejection.detail}`);
+      }
+    }
+
     if (chain.usable.length === 0) {
       const detail = chain.rejected.length
         ? chain.rejected.map((item) => `${item.provider.name}: ${item.detail}`).join("; ")
@@ -127,6 +148,147 @@ export class LlmRouter {
       throw new NoProviderAvailable(detail);
     }
     return { route, chain, breakers };
+  }
+
+  /** Resolve a logical route without changing the persistent Letta agent/model. */
+  private async routeRequest(request: LlmRequest): Promise<{ request: LlmRequest; settings: RoutingSettings }> {
+    // Small in-memory stores used by older callers/tests predate managed
+    // routing. Treat them as the original adaptive/chat configuration.
+    const candidate = this.store as RouterStore & { routingSettings?: () => Promise<RoutingSettings> };
+    const managed = typeof candidate.routingSettings === "function";
+    const settings = managed
+      ? await candidate.routingSettings()
+      : DEFAULT_ROUTING_SETTINGS;
+    const deterministic = classifyDeterministically(managed ? request : {
+      ...request,
+      metadata: { ...request.metadata, skip_auto_classification: true },
+    }, settings);
+    let classification = deterministic.result;
+
+    if (
+      settings.mode === "adaptive" &&
+      settings.auto_routing_enabled &&
+      settings.llm_classifier_enabled &&
+      deterministic.ambiguous &&
+      !request.metadata.skip_auto_classification
+    ) {
+      classification = await this.classifyWithModel(
+        request,
+        settings,
+        deterministic.result,
+        deterministic.latestMessage,
+      );
+    }
+
+    return {
+      settings,
+      request: {
+        ...request,
+        metadata: {
+          ...request.metadata,
+          route: classification.effectiveRoute,
+          requested_route: classification.requestedRoute,
+          effective_route: classification.effectiveRoute,
+          routing_mode: settings.mode,
+          classification_source: classification.source,
+          classification_confidence: classification.confidence,
+          classification_score: classification.score,
+          classification_reason_codes: classification.reasons,
+          single_failover_used: false,
+        },
+      },
+    };
+  }
+
+  private async classifyWithModel(
+    request: LlmRequest,
+    settings: RoutingSettings,
+    deterministic: RouteClassificationResult,
+    latestMessage: string,
+  ): Promise<RouteClassificationResult> {
+    const fallback = (reason: string): RouteClassificationResult => {
+      const effectiveRoute = settings.uncertain_policy === "chat"
+        ? "chat"
+        : settings.uncertain_policy === "deterministic"
+          ? deterministic.effectiveRoute
+          : deterministic.effectiveRoute === "fast" ? "chat" : "deep";
+      return { ...deterministic, effectiveRoute, reasons: [...deterministic.reasons, reason] };
+    };
+    try {
+      const excerpt = latestMessage.slice(0, settings.classifier_max_input_chars);
+      const result = await Promise.race([
+        this.complete({
+          messages: [{
+            role: "user",
+            content: JSON.stringify({
+              latest_message: excerpt,
+              purpose: request.metadata.purpose ?? "chat",
+              preliminary_score: deterministic.score,
+              has_image: request.metadata.has_image === true,
+              has_document: request.metadata.has_document === true,
+              has_voice: request.metadata.has_voice === true,
+              sensitive: request.metadata.sensitive,
+              related_goals: request.metadata.related_goals ?? 0,
+              related_tasks: request.metadata.related_tasks ?? 0,
+              related_recent_events: request.metadata.related_recent_events ?? 0,
+            }),
+          }],
+          system_prompt: [
+            "Classify the request route. Return strict JSON only.",
+            "Allowed route values: fast, chat, deep.",
+            'Schema: {"route":"chat","confidence":0.8,"reasons":["reason_code"]}',
+          ].join("\n"),
+          tools: [], temperature: 0, max_tokens: 160, stream: false,
+          response_format: { type: "json_object" },
+          metadata: {
+            request_id: randomUUID(),
+            user_id: request.metadata.user_id,
+            agent_id: request.metadata.agent_id,
+            route: "classifier",
+            requested_route: "classifier",
+            sensitive: request.metadata.sensitive,
+            purpose: "maintenance",
+            internal_operation_type: "route_classifier",
+            skip_auto_classification: true,
+          },
+        }),
+        new Promise<never>((_resolve, reject) => {
+          const timer = setTimeout(
+            () => reject(new Error("classifier_timeout")),
+            settings.classifier_timeout_ms,
+          );
+          timer.unref();
+        }),
+      ]);
+      const parsed = JSON.parse(stripFence(result.response.content)) as {
+        route?: unknown; confidence?: unknown; reasons?: unknown;
+      };
+      const route = typeof parsed.route === "string" && isEvaRoute(parsed.route)
+        && ["fast", "chat", "deep"].includes(parsed.route)
+        ? parsed.route as "fast" | "chat" | "deep"
+        : null;
+      const confidence = Number(parsed.confidence);
+      if (!route || !Number.isFinite(confidence) || confidence < settings.classifier_confidence_threshold) {
+        return fallback("classifier_low_confidence");
+      }
+      const reasons = Array.isArray(parsed.reasons)
+        ? parsed.reasons.filter((item): item is string => typeof item === "string").slice(0, 8)
+        : [];
+      return {
+        ...deterministic,
+        effectiveRoute: route,
+        confidence: Math.min(1, Math.max(0, confidence)),
+        source: "llm",
+        reasons: [...deterministic.reasons, ...reasons],
+      };
+    } catch (error) {
+      const code = request.metadata.sensitive
+        ? "classifier_sensitive_provider_unavailable"
+        : error instanceof Error && error.message === "classifier_timeout"
+          ? "classifier_timeout"
+          : "classifier_failed";
+      return fallback(code);
+    }
   }
 
   /**
@@ -161,13 +323,19 @@ export class LlmRouter {
   // непотоковый вызов
   // -----------------------------------------------------------------
   async complete(input: LlmRequest): Promise<RoutedResult> {
-    const request = this.withRequestId(input);
-    const { route, chain } = await this.prepare(request);
+    const identified = this.withRequestId(input);
+    const routed = await this.routeRequest(identified);
+    const request = routed.request;
+    const { route, chain } = await this.prepare(request, routed.settings);
     let switches = 0;
     let lastError: ProviderError | null = null;
 
     for (const entry of chain.usable) {
-      const outcome = await this.tryProvider(entry, request, chain.primary?.id ?? null, switches);
+      const attemptRequest = routed.settings.mode === "single"
+        && entry.provider.id !== routed.settings.single_provider_id
+        ? { ...request, metadata: { ...request.metadata, single_failover_used: true } }
+        : request;
+      const outcome = await this.tryProvider(entry, attemptRequest, chain.primary?.id ?? null, switches);
       if (outcome.kind === "success") {
         return {
           response: outcome.response,
@@ -178,6 +346,10 @@ export class LlmRouter {
         };
       }
       lastError = outcome.error;
+      if (
+        routed.settings.mode === "single" &&
+        (!routed.settings.single_failover_enabled || !isTechnicalSingleFailover(outcome.error.reason))
+      ) break;
       switches += 1;
       this.logger.warn("LLM Router: переключение на следующего провайдера", {
         request_id: request.metadata.request_id,
@@ -344,15 +516,21 @@ export class LlmRouter {
    * первого отданного фрагмента — см. комментарий в шапке файла.
    */
   async *stream(input: LlmRequest): AsyncGenerator<LlmStreamChunk> {
-    const request = this.withRequestId({ ...input, stream: true });
-    const { route, chain } = await this.prepare(request);
+    const identified = this.withRequestId({ ...input, stream: true });
+    const routed = await this.routeRequest(identified);
+    const request = routed.request;
+    const { route, chain } = await this.prepare(request, routed.settings);
     let switches = 0;
     let lastError: ProviderError | null = null;
 
     for (const entry of chain.usable) {
+      const attemptRequest = routed.settings.mode === "single"
+        && entry.provider.id !== routed.settings.single_provider_id
+        ? { ...request, metadata: { ...request.metadata, single_failover_used: true } }
+        : request;
       const { provider } = entry;
       const prepared = withBackupDirective(
-        normalizeForProvider(request, provider),
+        normalizeForProvider(attemptRequest, provider),
         entry.position > 0,
       );
       const estimated = estimateTokens(prepared);
@@ -366,7 +544,7 @@ export class LlmRouter {
       if (!provider.supports_streaming) {
         // Провайдер без потока всё равно может ответить: собираем целиком и
         // отдаём одним фрагментом, вместо того чтобы терять резерв.
-        const outcome = await this.tryProvider(entry, request, chain.primary?.id ?? null, switches);
+        const outcome = await this.tryProvider(entry, attemptRequest, chain.primary?.id ?? null, switches);
         if (outcome.kind === "success") {
           if (outcome.response.content) yield { type: "text", delta: outcome.response.content };
           for (const call of outcome.response.tool_calls) yield { type: "tool_call", call };
@@ -374,6 +552,10 @@ export class LlmRouter {
           return;
         }
         lastError = outcome.error;
+        if (
+          routed.settings.mode === "single" &&
+          (!routed.settings.single_failover_enabled || !isTechnicalSingleFailover(outcome.error.reason))
+        ) break;
         switches += 1;
         continue;
       }
@@ -399,7 +581,7 @@ export class LlmRouter {
               tokens_out: chunk.response.usage.tokens_out,
               cost_micro: costOf(provider, chunk.response),
             });
-            await this.log(provider, request, chain.primary?.id ?? null, {
+            await this.log(provider, attemptRequest, chain.primary?.id ?? null, {
               started, attempts: 1, switches, response: chunk.response, streamed: true,
             });
           }
@@ -416,7 +598,7 @@ export class LlmRouter {
           this.options.breakerWindowMs,
           this.options.breakerCooldownMs,
         );
-        await this.log(provider, request, chain.primary?.id ?? null, {
+        await this.log(provider, attemptRequest, chain.primary?.id ?? null, {
           started, attempts: 1, switches, error, streamed: true,
         });
 
@@ -431,6 +613,10 @@ export class LlmRouter {
           });
           throw error;
         }
+        if (
+          routed.settings.mode === "single" &&
+          (!routed.settings.single_failover_enabled || !isTechnicalSingleFailover(error.reason))
+        ) break;
         switches += 1;
         this.logger.warn("LLM Router: переключение до начала выдачи", {
           request_id: request.metadata.request_id,
@@ -499,6 +685,16 @@ export class LlmRouter {
         cost_micro: outcome.response ? costOf(provider, outcome.response) : 0,
         tool_calls: outcome.response?.tool_calls.length ?? 0,
         streamed: outcome.streamed,
+        routing_mode: request.metadata.routing_mode ?? "adaptive",
+        requested_route: request.metadata.requested_route ?? request.metadata.route,
+        effective_route: request.metadata.effective_route ?? request.metadata.route,
+        classification_source: request.metadata.classification_source ?? null,
+        classification_confidence: request.metadata.classification_confidence ?? null,
+        classification_score: request.metadata.classification_score ?? null,
+        classification_reason_codes: request.metadata.classification_reason_codes ?? [],
+        purpose: request.metadata.purpose ?? null,
+        internal_operation_type: request.metadata.internal_operation_type ?? null,
+        single_failover_used: request.metadata.single_failover_used === true,
       });
     } catch (error) {
       // Диалог важнее журнала: сбой записи телеметрии не должен ронять ответ.
@@ -508,6 +704,29 @@ export class LlmRouter {
       });
     }
   }
+}
+
+const DEFAULT_ROUTING_SETTINGS: RoutingSettings = {
+  mode: "adaptive",
+  single_provider_id: null,
+  single_failover_enabled: false,
+  auto_routing_enabled: false,
+  llm_classifier_enabled: false,
+  fast_max_score: 0,
+  deep_min_score: 5,
+  classifier_confidence_threshold: 0.75,
+  classifier_timeout_ms: 5000,
+  classifier_max_input_chars: 4000,
+  uncertain_policy: "upgrade",
+  economy_score_shift: -1,
+  quality_score_shift: 1,
+};
+
+function isTechnicalSingleFailover(reason: SwitchReason): boolean {
+  return [
+    "rate_limited", "server_error", "connection_failed", "timeout",
+    "quota_exhausted", "breaker_open", "empty_response",
+  ].includes(reason);
 }
 
 function asProviderError(raw: unknown): ProviderError {

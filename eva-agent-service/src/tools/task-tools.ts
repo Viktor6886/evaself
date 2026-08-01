@@ -4,6 +4,7 @@ import { assertCronExpression, nextCronDate } from "../background.js";
 import type { AgentRuntimeContext, Database } from "../db.js";
 import type { GraphRepository } from "../memory/graph-repository.js";
 import { localDateTimeToUtc } from "../time/local-date-time.js";
+import { TaskEventService } from "../tasks/task-event-service.js";
 import {
   asObject,
   boolean,
@@ -18,10 +19,13 @@ import {
 } from "./tool-kit.js";
 
 export class TaskToolFactory {
+  private readonly events: TaskEventService;
   constructor(
     private readonly db: Database,
     private readonly graph?: GraphRepository,
-  ) {}
+  ) {
+    this.events = new TaskEventService(db);
+  }
 
   build(tool: ToolBuilder): AnyAgentTool[] {
     const schema = taskSchema();
@@ -65,6 +69,61 @@ export class TaskToolFactory {
         "Совместимое имя; читает задачи напрямую из PostgreSQL.",
         listSchema(),
         list,
+      ),
+      tool(
+        "get_recent_reminders",
+        "Недавние напоминания",
+        "Возвращает недавние события напоминаний текущего пользователя.",
+        objectSchema({ limit: integer("Количество, максимум 100") }),
+        async (args, runtime) => ({
+          ok: true,
+          events: await this.events.recent(
+            runtime.userId,
+            Math.min(Math.max(optionalInteger(args, "limit") ?? 20, 1), 100),
+          ),
+        }),
+      ),
+      tool(
+        "get_task_events",
+        "История задачи",
+        "Возвращает историю конкретной задачи только текущего пользователя.",
+        objectSchema({ task_id: integer("ID задачи"), limit: integer("Количество") }, ["task_id"]),
+        async (args, runtime) => ({
+          ok: true,
+          events: await this.events.forTask(
+            runtime.userId,
+            requireInteger(args, "task_id"),
+            Math.min(Math.max(optionalInteger(args, "limit") ?? 50, 1), 100),
+          ),
+        }),
+      ),
+      tool(
+        "get_task_activity",
+        "Активность задач",
+        "Возвращает компактную недавнюю активность задач текущего пользователя.",
+        objectSchema({}),
+        async (_args, runtime) => ({ ok: true, activity: await this.events.contextLines(runtime.userId) }),
+      ),
+      tool(
+        "mark_task_completed",
+        "Завершить задачу",
+        "Отмечает принадлежащую текущему пользователю задачу выполненной.",
+        objectSchema({ task_id: integer("ID задачи") }, ["task_id"]),
+        async (args, runtime) => {
+          const task = await this.events.complete(runtime.userId, requireInteger(args, "task_id"));
+          return task ? { ok: true, task } : { ok: false, error: "Задача не найдена" };
+        },
+      ),
+      tool(
+        "snooze_task_reminder",
+        "Перенести напоминание",
+        "Переносит напоминание текущего пользователя на указанное время.",
+        objectSchema({ task_id: integer("ID задачи"), remind_at: text("Дата и время ISO 8601") }, ["task_id", "remind_at"]),
+        async (args, runtime) => {
+          const until = new Date(localDateTimeToUtc(requiredString(args, "remind_at", 100), runtime.timezone));
+          const task = await this.events.snooze(runtime.userId, requireInteger(args, "task_id"), until);
+          return task ? { ok: true, task } : { ok: false, error: "Задача не найдена" };
+        },
       ),
       tool(
         "update_task",
@@ -193,6 +252,14 @@ export class TaskToolFactory {
       });
       return rows[0];
     });
+    if (task && typeof task === "object" && "id" in task) {
+      await this.events.record({
+        userId: runtime.userId,
+        taskId: String((task as { id: unknown }).id),
+        eventType: "created",
+        scheduledAt: remindAt ?? dueAt,
+      });
+    }
     return { ok: true, task };
   }
 
@@ -251,6 +318,15 @@ export class TaskToolFactory {
       }
       return rows[0];
     });
+    if (task) {
+      const status = String((task as Record<string, unknown>).status ?? "");
+      await this.events.record({
+        userId: runtime.userId,
+        taskId: String((task as Record<string, unknown>).id),
+        eventType: status === "done" ? "completed"
+          : status === "canceled" ? "cancelled" : "updated",
+      });
+    }
     return task ? { ok: true, task } : { ok: false, error: "Задача не найдена" };
   }
 
@@ -329,5 +405,11 @@ function deleteSchema(includeSingle = false): JsonObject {
 function bounded(value: number | null, name: string, min: number, max: number): number | null {
   if (value === null) return null;
   if (value < min || value > max) throw new Error(`${name} должен быть от ${min} до ${max}`);
+  return value;
+}
+
+function requireInteger(args: JsonObject, name: string): number {
+  const value = optionalInteger(args, name);
+  if (value === null) throw new Error(`${name} обязателен`);
   return value;
 }
