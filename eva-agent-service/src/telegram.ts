@@ -1,6 +1,6 @@
 import {
+  formatEvaReply,
   isValidTelegramHtml,
-  markdownToTelegramHtml,
   splitTelegramHtml,
   stripTags,
 } from "./telegram-format.js";
@@ -157,13 +157,24 @@ export class TelegramClient implements OutboxTransport {
       return results;
     }
 
-    const html = markdownToTelegramHtml(text);
-    const usable = html && isValidTelegramHtml(html);
+    const html = formatEvaReply(text);
+    const usable = html.length > 0 && isValidTelegramHtml(html);
     const chunks = usable ? splitTelegramHtml(html) : splitTelegramText(text);
     const results: unknown[] = [];
 
-    for (const chunk of chunks) {
-      const payload: Record<string, unknown> = { chat_id: chatId, text: chunk, ...options };
+    // Кнопки, ответ на сообщение и прочие вложения — свойства сообщения
+    // целиком, а не каждого куска. Приклеенные к каждой части, они
+    // повторились бы столько раз, на сколько частей разбился ответ.
+    const { reply_markup: replyMarkup, ...common } = options;
+
+    for (const [index, chunk] of chunks.entries()) {
+      const isLast = index === chunks.length - 1;
+      const payload: Record<string, unknown> = {
+        chat_id: chatId,
+        text: chunk,
+        ...common,
+        ...(isLast && replyMarkup !== undefined ? { reply_markup: replyMarkup } : {}),
+      };
       if (usable) {
         payload.parse_mode = "HTML";
         // Ссылки в ответе — источники, а не украшение: превью на
@@ -174,13 +185,19 @@ export class TelegramClient implements OutboxTransport {
         results.push(await this.dispatch("sendMessage", chatId, payload));
       } catch (error) {
         if (!usable) throw error;
-        // Telegram отверг разметку — отправляем то же самое текстом.
+        // Telegram отверг разметку. Исходный текст пишем в лог целиком:
+        // без него причину «can't parse entities» не найти, а сообщение
+        // всё равно должно дойти — пусть и без оформления.
         this.logger.warn("Telegram отклонил разметку, отправляю без неё", {
           chatId,
           message: error instanceof Error ? error.message.slice(0, 200) : String(error),
+          html: chunk.slice(0, 1_000),
         });
         results.push(await this.dispatch("sendMessage", chatId, {
-          chat_id: chatId, text: stripTags(chunk), ...options,
+          chat_id: chatId,
+          text: stripTags(chunk),
+          ...common,
+          ...(isLast && replyMarkup !== undefined ? { reply_markup: replyMarkup } : {}),
         }));
       }
     }

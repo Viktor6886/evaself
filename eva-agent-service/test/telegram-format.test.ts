@@ -170,7 +170,11 @@ describe("разбиение длинных ответов", () => {
 
     assert.ok(chunks.length > 1, "длинный текст должен разрезаться");
     for (const chunk of chunks) {
-      assert.ok(chunk.length <= 1_000, `кусок длиннее лимита: ${chunk.length}`);
+      // Предел Telegram считается по тексту после разбора entities, то
+      // есть теги в него не входят. Меряем видимую длину, иначе разметка
+      // «съедала» бы бюджет сообщения, которого она не занимает.
+      const visible = chunk.replace(/<\/?[a-z][a-z-]*[^>]*>/gi, "").length;
+      assert.ok(visible <= 1_000, `кусок длиннее лимита: ${visible}`);
       assert.ok(isValidTelegramHtml(chunk), `невалидный кусок: ${chunk.slice(0, 80)}`);
     }
   });
