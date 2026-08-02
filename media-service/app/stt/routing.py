@@ -34,10 +34,10 @@ from dataclasses import dataclass, field, replace
 
 from .errors import (
     STT_ALL_PROVIDERS_FAILED,
-    STT_AUTH_FAILED,
-    STT_RATE_LIMITED,
     STT_AUDIO_TOO_LONG,
+    STT_AUTH_FAILED,
     STT_CONFIG_INVALID,
+    STT_RATE_LIMITED,
     STT_ROUTE_NOT_CONFIGURED,
     ProviderAttempt,
     SttError,

@@ -16,7 +16,7 @@ GET /stt/provider-schemas и рисует форму по ответу. Из э�
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Literal
 
 FieldKind = Literal[

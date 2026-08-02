@@ -62,17 +62,43 @@ ALTER TABLE stt_routes
 -- ---------------------------------------------------------------------
 -- 2. Перенос назначенных провайдеров в цепочку
 -- ---------------------------------------------------------------------
-INSERT INTO stt_route_providers (use_case, config_id, position)
-SELECT use_case, primary_config_id, 0
-  FROM stt_routes
- WHERE primary_config_id IS NOT NULL
-ON CONFLICT DO NOTHING;
+-- При повторном прогоне миграции старые колонки уже удалены. Обычный
+-- INSERT всё равно разбирается PostgreSQL и падает ещё до IF, поэтому
+-- обращение к legacy-схеме выполняем динамически только пока она есть.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+          FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND table_name = 'stt_routes'
+           AND column_name = 'primary_config_id'
+    ) THEN
+        EXECUTE $sql$
+            INSERT INTO stt_route_providers (use_case, config_id, position)
+            SELECT use_case, primary_config_id, 0
+              FROM stt_routes
+             WHERE primary_config_id IS NOT NULL
+            ON CONFLICT DO NOTHING
+        $sql$;
+    END IF;
 
-INSERT INTO stt_route_providers (use_case, config_id, position)
-SELECT use_case, fallback_config_id, 1
-  FROM stt_routes
- WHERE fallback_config_id IS NOT NULL
-ON CONFLICT DO NOTHING;
+    IF EXISTS (
+        SELECT 1
+          FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND table_name = 'stt_routes'
+           AND column_name = 'fallback_config_id'
+    ) THEN
+        EXECUTE $sql$
+            INSERT INTO stt_route_providers (use_case, config_id, position)
+            SELECT use_case, fallback_config_id, 1
+              FROM stt_routes
+             WHERE fallback_config_id IS NOT NULL
+            ON CONFLICT DO NOTHING
+        $sql$;
+    END IF;
+END $$;
 
 -- Старые колонки убираются, а не остаются «для совместимости». Две
 -- копии одной правды разъезжаются при первой же правке, и разбираться

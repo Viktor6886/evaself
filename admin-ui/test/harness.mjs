@@ -167,17 +167,12 @@ export async function openPanel({ routes = {}, role = "owner", viewport = null }
     errors,
     /** Сколько запросов ушло на путь, содержащий фрагмент. */
     countTo: (fragment) => requests.filter((r) => r.path.includes(fragment)).length,
-    /** Подсмотреть, с каким scope интерфейс запросил sudo, не подтверждая его. */
+    /** Сбросить и затем прочитать реальное отложенное sudo-действие. */
     sudoWatch: async () => await page.evaluate(() => {
-      window.__sudoScope = null;
-      const original = window.askSudo;
-      window.askSudo = (options) => {
-        window.__sudoScope = options.scope;
-        return original(options);
-      };
+      state.pendingSudo = null;
       return true;
     }),
-    sudoScope: async () => await page.evaluate(() => window.__sudoScope),
+    sudoScope: async () => await page.evaluate(() => state.pendingSudo?.scope ?? null),
     /** Подтвердить отложенное sudo так же, как это делает форма диалога. */
     confirmSudo: async () => await page.evaluate(async () => {
       const pending = state.pendingSudo;

@@ -27,7 +27,6 @@ from app.stt.runtime import SttRuntime
 from app.stt.types import (
     SttAudioInput,
     SttCapabilities,
-    SttResolvedConfig,
     SttResult,
     ValidationResult,
 )
