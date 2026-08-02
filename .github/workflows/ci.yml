@@ -1284,6 +1284,11 @@ jobs:
           // Предохранитель мог остаться разомкнутым от прошлых шагов.
           await pool.query('DELETE FROM llm_breaker_state');
 
+          // /health уже прочитал провайдеров перед этой прямой вставкой.
+          // В production изменения идут через API; fixture сознательно
+          // обходит его, поэтому ждёт истечения короткого runtime-кэша.
+          await new Promise((resolve) => setTimeout(resolve, 5_500));
+
           const before = (await pool.query('SELECT count(*)::int AS n FROM llm_requests')).rows[0].n;
 
           const response = await fetch('http://127.0.0.1:8073/chat/completions', {
@@ -1601,29 +1606,31 @@ jobs:
           grep -q '"secret_hidden":true' /tmp/llm-switch
           grep -q '"standalone_updated":true' /tmp/llm-switch
 
-          # Под роутером «сделать активным» означает встать головой цепочек:
-          # модель выбирает цепочка, и провайдер, не попавший в неё, не
-          # получит ни одного запроса, каким бы активным он ни числился.
-          # Ровно так и вышло после обновления — активация меняла флаг, а
-          # цепочки оставались от миграции, и переключение ничего не меняло.
+          # Legacy-активация нужна App Server как выбор конфигурации, но не
+          # должна переписывать независимые managed-цепочки. В fixture уже
+          # настроены chat и fast; оба обязаны сохранить прежние головы.
           . scripts/lib.sh
           load_env
-          HEADS="$(docker compose --env-file versions.env --env-file .env \
+          ACTIVE_HEADS="$(docker compose --env-file versions.env --env-file .env \
             exec -T -e PGPASSWORD="$EVA_DB_PASSWORD" postgres \
             psql -v ON_ERROR_STOP=1 -At -U "$EVA_DB_USER" -d "$EVA_DB_NAME" \
-              -c "SELECT count(DISTINCT rp.route_code)
+              -c "SELECT count(*)
                     FROM llm_route_providers rp
                     JOIN llm_providers p ON p.id = rp.provider_id
                    WHERE rp.position = 0 AND p.is_active;")"
-          ROUTES="$(docker compose --env-file versions.env --env-file .env \
+          CONFIGURED_HEADS="$(docker compose --env-file versions.env --env-file .env \
             exec -T -e PGPASSWORD="$EVA_DB_PASSWORD" postgres \
             psql -v ON_ERROR_STOP=1 -At -U "$EVA_DB_USER" -d "$EVA_DB_NAME" \
-              -c "SELECT count(*) FROM llm_routes;")"
-          if [ "$HEADS" != "$ROUTES" ]; then
-            echo "::error::активный провайдер стоит головой $HEADS цепочек из $ROUTES"
+              -c "SELECT count(*) FROM llm_route_providers WHERE position = 0;")"
+          if [ "$CONFIGURED_HEADS" != "2" ]; then
+            echo "::error::активация изменила число настроенных цепочек: $CONFIGURED_HEADS"
             exit 1
           fi
-          echo "активный провайдер возглавляет все $ROUTES цепочки"
+          if [ "$ACTIVE_HEADS" != "0" ]; then
+            echo "::error::legacy-активация переписала managed-цепочки: $ACTIVE_HEADS"
+            exit 1
+          fi
+          echo "managed-цепочки остались независимыми от legacy-активации"
 
       - name: WebUI chat completes a real SDK turn through the test LLM
         run: |
