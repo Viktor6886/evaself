@@ -488,7 +488,7 @@ jobs:
             IF (SELECT count(*) FROM quotas) <> 9 THEN
               RAISE EXCEPTION 'quotas после цикла: %', (SELECT count(*) FROM quotas);
             END IF;
-            IF (SELECT count(*) FROM llm_routes) <> 4 THEN
+            IF (SELECT count(*) FROM llm_routes) <> 10 THEN
               RAISE EXCEPTION 'llm_routes после цикла: %', (SELECT count(*) FROM llm_routes);
             END IF;
           END $$;
@@ -514,7 +514,7 @@ jobs:
       - name: Install ffmpeg
         run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
 
-      - run: pip install --quiet -r requirements.txt pytest ruff
+      - run: pip install --quiet -r requirements.txt pytest pytest-asyncio ruff
 
       - name: Lint
         run: ruff check .
