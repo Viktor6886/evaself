@@ -1259,9 +1259,10 @@ jobs:
               `INSERT INTO llm_providers
                  (name, protocol, base_url, model, context_window,
                   api_key_encrypted, enabled, priority)
-               VALUES ($1, 'openai-compatible', $2, 'ci-model-b', 32768, $3, true, 1)
+               VALUES ($1, 'openai-compatible', $2, 'ci-model-b', 131072, $3, true, 1)
                ON CONFLICT (lower(name)) DO UPDATE
                  SET base_url = EXCLUDED.base_url,
+                     context_window = EXCLUDED.context_window,
                      api_key_encrypted = EXCLUDED.api_key_encrypted,
                      enabled = true
                RETURNING id`, [name, baseUrl, encrypted]);
