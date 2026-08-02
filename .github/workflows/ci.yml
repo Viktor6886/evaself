@@ -1330,7 +1330,10 @@ jobs:
           if (record.actual_provider_id !== live) {
             throw new Error('the answer did not come from the live provider');
           }
-          if (record.switches < 1 || record.attempts < 2) {
+          // attempts относится к фактически ответившему провайдеру, а не
+          // суммируется по всей цепочке. Само переключение подтверждают
+          // switches и разные primary/actual provider выше.
+          if (record.switches < 1 || record.attempts < 1) {
             throw new Error('no switch recorded: ' + JSON.stringify(record));
           }
 
