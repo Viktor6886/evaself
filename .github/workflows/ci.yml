@@ -1270,10 +1270,17 @@ jobs:
           const dead = await provider('ci-dead', 'http://127.0.0.1:9');
           const live = await provider('ci-live', 'http://evaself-llm-mock:9000');
 
-          await pool.query('DELETE FROM llm_route_providers WHERE route_code = $1', ['chat']);
+          // Managed routing отправляет короткий `ping` в fast. Fixture
+          // пишет БД напрямую (мимо admin API, который заполняет все
+          // цепочки), поэтому обязан назначить и фактически выбранный
+          // маршрут, иначе проверяется неполная конфигурация, а не failover.
+          await pool.query(
+            `DELETE FROM llm_route_providers
+              WHERE route_code IN ('chat', 'fast')`);
           await pool.query(
             `INSERT INTO llm_route_providers (route_code, provider_id, position)
-             VALUES ('chat', $1, 0), ('chat', $2, 1)`, [dead, live]);
+             VALUES ('chat', $1, 0), ('chat', $2, 1),
+                    ('fast', $1, 0), ('fast', $2, 1)`, [dead, live]);
           // Предохранитель мог остаться разомкнутым от прошлых шагов.
           await pool.query('DELETE FROM llm_breaker_state');
 
@@ -1309,7 +1316,7 @@ jobs:
             `SELECT primary_provider_id, actual_provider_id, switches,
                     switch_reason, succeeded, attempts
                FROM llm_requests
-              WHERE route_code = 'chat'
+              WHERE route_code = 'fast'
               ORDER BY started_at DESC LIMIT 1`);
           if (!record.succeeded) throw new Error('router recorded a failed request');
           if (record.primary_provider_id !== dead) {
@@ -1322,9 +1329,9 @@ jobs:
             throw new Error('no switch recorded: ' + JSON.stringify(record));
           }
 
-          // Неизвестное имя модели уходит в маршрут chat — это осознанное
-          // решение: разговор важнее строгости, и Letta, переключённая на
-          // чужое имя, не должна замолчать. Проверяем, что так и остаётся.
+          // Неизвестное имя модели остаётся разговорным запросом и проходит
+          // через adaptive routing. Letta, переключённая на чужое имя, не
+          // должна замолчать — независимо от выбранной цепочки.
           const unknown = await fetch('http://127.0.0.1:8073/chat/completions', {
             method: 'POST',
             headers: {
