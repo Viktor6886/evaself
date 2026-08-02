@@ -1695,11 +1695,14 @@ jobs:
           docker compose --env-file versions.env --env-file .env \
             restart letta-app-server eva-agent-service
           for i in $(seq 1 60); do
-            STATUS="$(docker compose --env-file versions.env --env-file .env \
-              exec -T eva-agent-service node -e "
-                fetch('http://127.0.0.1:8070/health')
-                  .then(r=>r.json()).then(b=>console.log(b.status))
-                  .catch(()=>console.log('down'))" 2>/dev/null | tr -d '\r')"
+            STATUS="$(
+              (docker compose --env-file versions.env --env-file .env \
+                exec -T eva-agent-service node -e "
+                  fetch('http://127.0.0.1:8070/health')
+                    .then(r=>r.json()).then(b=>console.log(b.status))
+                    .catch(()=>console.log('down'))" 2>/dev/null || echo down) \
+                | tr -d '\r'
+            )"
             [ "$STATUS" = "ok" ] && break
             [ "$i" = "60" ] && exit 1
             sleep 3
