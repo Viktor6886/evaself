@@ -20,9 +20,30 @@ import {
 } from "../dist/router/normalize.js";
 import { LlmRouter, NoProviderAvailable, stripFence } from "../dist/router/router.js";
 import { createRouterServer, fromOpenAi } from "../dist/router/server.js";
+import { RouterStore } from "../dist/router/store.js";
 import { ProviderError } from "../dist/router/types.js";
 
 const silentLogger = { debug() {}, info() {}, warn() {}, error() {} };
+
+test("breaker передаёт PostgreSQL непрерывно пронумерованные параметры", async () => {
+  const calls = [];
+  const pool = {
+    async query(text, values) {
+      calls.push({ text, values });
+      return { rows: [], rowCount: 1 };
+    },
+  };
+  const key = Buffer.alloc(32, 1).toString("base64");
+  const store = new RouterStore(pool, key);
+
+  await store.recordFailure("provider-1", "connection_failed", 3, 60_000, 120_000);
+
+  assert.equal(calls.length, 2);
+  assert.doesNotMatch(calls[0].text, /\$4/);
+  assert.match(calls[0].text, /\$3/);
+  assert.deepEqual(calls[0].values, ["provider-1", "connection_failed", 60_000]);
+  assert.deepEqual(calls[1].values, ["provider-1", 120_000, 3]);
+});
 
 // ---------------------------------------------------------------------
 // заглушки

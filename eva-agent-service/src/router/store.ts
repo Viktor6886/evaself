@@ -291,18 +291,18 @@ export class RouterStore {
        ON CONFLICT (provider_id) DO UPDATE SET
            consecutive_errors = CASE
                WHEN llm_breaker_state.first_error_at IS NULL
-                 OR llm_breaker_state.first_error_at < now() - ($4 || ' milliseconds')::interval
+                 OR llm_breaker_state.first_error_at < now() - ($3 || ' milliseconds')::interval
                THEN 1
                ELSE llm_breaker_state.consecutive_errors + 1
            END,
            first_error_at = CASE
                WHEN llm_breaker_state.first_error_at IS NULL
-                 OR llm_breaker_state.first_error_at < now() - ($4 || ' milliseconds')::interval
+                 OR llm_breaker_state.first_error_at < now() - ($3 || ' milliseconds')::interval
                THEN now()
                ELSE llm_breaker_state.first_error_at
            END,
            last_error_code = $2`,
-      [providerId, errorCode.slice(0, 120), threshold, windowMs],
+      [providerId, errorCode.slice(0, 120), windowMs],
     );
 
     await this.pool.query(
