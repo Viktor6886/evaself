@@ -1714,16 +1714,24 @@ jobs:
                 fetch('http://127.0.0.1:8070/v1/llm/providers',{headers:{'X-API-Key':key}}).then(r=>r.json()),
                 fetch('http://127.0.0.1:8070/v1/agents',{headers:{'X-API-Key':key}}).then(r=>r.json()),
                 fetch('http://127.0.0.1:8070/v1/sdk/settings',{headers:{'X-API-Key':key}}).then(r=>r.json()),
-              ]).then(([llm,agents,sdk]) => {
-                const active = llm.providers.find((p) => p.is_active);
-                if (llm.providers.length !== 2 || active?.model_handle !== 'lmstudio/ci-model-b') process.exit(1);
-                const agent = agents.agents.find((a) => String(a.telegram_id) === '424242');
-                if (!agent?.agent_id || !agent?.conversation_id) process.exit(1);
-                if (sdk.settings?.session_pool_size !== 17 || sdk.settings?.agent_name_prefix !== 'ci-eva') process.exit(1);
-                console.log(JSON.stringify({providers:llm.providers.length,active:active.model_handle,agent_id:agent.agent_id,conversation_id:agent.conversation_id,sdk_persisted:true}));
-              }).catch(()=>process.exit(1));
-            " | tee /tmp/restart-state
-          grep -q '"providers":2' /tmp/restart-state
+            ]).then(([llm,agents,sdk]) => {
+              const active = llm.providers.find((p) => p.is_active);
+              const expectedProviders = ['CI provider A', 'CI provider B'];
+              if (!expectedProviders.every((name) => llm.providers.some((p) => p.name === name)) ||
+                  active?.model_handle !== 'lmstudio/ci-model-b') {
+                throw new Error('LLM provider state did not persist: ' + JSON.stringify(llm));
+              }
+              const agent = agents.agents.find((a) => String(a.telegram_id) === '424242');
+              if (!agent?.agent_id || !agent?.conversation_id) {
+                throw new Error('agent mapping did not persist: ' + JSON.stringify(agents));
+              }
+              if (sdk.settings?.session_pool_size !== 17 || sdk.settings?.agent_name_prefix !== 'ci-eva') {
+                throw new Error('SDK settings did not persist: ' + JSON.stringify(sdk));
+              }
+              console.log(JSON.stringify({providers:llm.providers.length,configured_providers_persisted:true,active:active.model_handle,agent_id:agent.agent_id,conversation_id:agent.conversation_id,sdk_persisted:true}));
+            }).catch((error) => { console.error(error); process.exit(1); });
+          " | tee /tmp/restart-state
+          grep -q '"configured_providers_persisted":true' /tmp/restart-state
           grep -q '"sdk_persisted":true' /tmp/restart-state
           docker compose --env-file versions.env --env-file .env \
             exec -T postgres psql -tA -U postgres -d eva \
