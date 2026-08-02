@@ -1268,7 +1268,7 @@ jobs:
             return rows[0].id;
           }
           const dead = await provider('ci-dead', 'http://127.0.0.1:9');
-          const live = await provider('ci-live', 'http://evaself-llm-mock:9000');
+          const live = await provider('ci-live', 'http://evaself-llm-mock:9000/v1');
 
           // Managed routing отправляет короткий `ping` в fast. Fixture
           // пишет БД напрямую (мимо admin API, который заполняет все
