@@ -4,10 +4,11 @@
 - **Зависит от:** шаги 3, 7
 - **Feature flag:** EVA_OTEL, EVA_PROMETHEUS, EVA_LANGFUSE_METADATA_ONLY
 - **Объём:** 1–2 PR
-- **Ветка:** `claude/step-09-observability`
+- **Ветка:** `step/09-observability`
 
-> Перед началом прочитай `CLAUDE.md` и `PROGRESS.md` в корне репозитория.
-> Выполни только этот шаг, обнови `PROGRESS.md`, открой pull request и остановись.
+> Перед началом прочитай `CLAUDE.md` — там протокол автономной работы.
+> Выполни только этот шаг: проверки, `PROGRESS.md`, pull request, мерж по условиям
+> из протокола. Затем возьми следующий шаг блока. На границе блока остановись.
 
 ---
 

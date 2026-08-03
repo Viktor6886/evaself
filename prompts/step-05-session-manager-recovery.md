@@ -4,10 +4,11 @@
 - **Зависит от:** шаги 3–4
 - **Feature flag:** EVA_SAFE_SESSION_MANAGER, EVA_TURN_RECOVERY
 - **Объём:** 2 PR
-- **Ветка:** `claude/step-05-session-manager-recovery`
+- **Ветка:** `step/05-session-manager-recovery`
 
-> Перед началом прочитай `CLAUDE.md` и `PROGRESS.md` в корне репозитория.
-> Выполни только этот шаг, обнови `PROGRESS.md`, открой pull request и остановись.
+> Перед началом прочитай `CLAUDE.md` — там протокол автономной работы.
+> Выполни только этот шаг: проверки, `PROGRESS.md`, pull request, мерж по условиям
+> из протокола. Затем возьми следующий шаг блока. На границе блока остановись.
 
 ---
 

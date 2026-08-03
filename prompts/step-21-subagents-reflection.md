@@ -4,10 +4,11 @@
 - **Зависит от:** шаги 8, 16
 - **Feature flag:** EVA_SUBAGENTS, EVA_REFLECTION_SUBAGENT
 - **Объём:** 2 PR
-- **Ветка:** `claude/step-21-subagents-reflection`
+- **Ветка:** `step/21-subagents-reflection`
 
-> Перед началом прочитай `CLAUDE.md` и `PROGRESS.md` в корне репозитория.
-> Выполни только этот шаг, обнови `PROGRESS.md`, открой pull request и остановись.
+> Перед началом прочитай `CLAUDE.md` — там протокол автономной работы.
+> Выполни только этот шаг: проверки, `PROGRESS.md`, pull request, мерж по условиям
+> из протокола. Затем возьми следующий шаг блока. На границе блока остановись.
 
 ---
 
