@@ -4,10 +4,11 @@
 - **Зависит от:** шаг 7
 - **Feature flag:** EVA_BULLMQ_MAINTENANCE, EVA_BULLMQ_PROACTIVE, EVA_AGENT_JOBS
 - **Объём:** 2–3 PR
-- **Ветка:** `claude/step-08-jobs-agent-jobs`
+- **Ветка:** `step/08-jobs-agent-jobs`
 
-> Перед началом прочитай `CLAUDE.md` и `PROGRESS.md` в корне репозитория.
-> Выполни только этот шаг, обнови `PROGRESS.md`, открой pull request и остановись.
+> Перед началом прочитай `CLAUDE.md` — там протокол автономной работы.
+> Выполни только этот шаг: проверки, `PROGRESS.md`, pull request, мерж по условиям
+> из протокола. Затем возьми следующий шаг порции. На отметке ⏸ остановись.
 
 ---
 
