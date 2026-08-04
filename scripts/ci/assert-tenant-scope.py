@@ -81,10 +81,39 @@ def owned_tables() -> set[str]:
     return owned
 
 
+def registered_tables() -> set[str]:
+    """Таблицы, объявленные в реестре границы арендатора."""
+    source = (ROOT / "eva-agent-service/src/tenancy/tables.ts").read_text(encoding="utf-8")
+    block = re.search(r"TENANT_TABLES[^=]*=\s*\{(.*?)\n\};", source, re.S)
+    if not block:
+        return set()
+    return set(re.findall(r"^\s*([a-z_][a-z0-9_]*)\s*:", block.group(1), re.M))
+
+
+def excluded_tables() -> set[str]:
+    """Таблицы, чей user_id указывает не на пользователя Евы."""
+    source = (ROOT / "eva-agent-service/src/tenancy/tables.ts").read_text(encoding="utf-8")
+    block = re.search(r"NON_TENANT_USER_ID_TABLES\s*=\s*new Set\(\[(.*?)\]\)", source, re.S)
+    return set(re.findall(r'"(\w+)"', block.group(1))) if block else set()
+
+
 def main() -> int:
     owned = owned_tables()
     if not owned:
         print("::error::не удалось определить пользовательские таблицы", file=sys.stderr)
+        return 1
+
+    # Реестр рантайма обязан знать каждую пользовательскую таблицу схемы:
+    # таблица, которой в нём нет, не получит границы вовсе. Сверка живёт
+    # здесь, а не в тестах сервиса, потому что в образ eva-agent-service
+    # миграции не копируются.
+    missing = sorted(owned - registered_tables() - excluded_tables())
+    if missing:
+        print(
+            "::error::таблицы не объявлены в eva-agent-service/src/tenancy/tables.ts: "
+            + ", ".join(missing),
+            file=sys.stderr,
+        )
         return 1
 
     problems: list[str] = []

@@ -27,8 +27,6 @@ import {
   assertQueryAllowed,
   runInScope,
   systemScope,
-  NON_TENANT_USER_ID_TABLES,
-  TENANT_TABLES,
   TenantViolationError,
   userScope,
 } from "../dist/tenancy/index.js";
@@ -437,29 +435,15 @@ test("во всём исходном коде нет запроса к данн�
   assert.deepEqual(unexpected, []);
 });
 
-test("каждая пользовательская таблица схемы объявлена в реестре", () => {
-  const migrations = join(sourcePath(""), "..", "..", "postgres", "migrations");
-  const tables = new Set<string>();
-  for (const name of readdirSync(migrations).sort()) {
-    if (!name.endsWith(".sql")) continue;
-    const sql = readFileSync(join(migrations, name), "utf8");
-    const blocks = sql.matchAll(
-      /CREATE TABLE (?:IF NOT EXISTS )?([a-z_0-9]+)\s*\(([\s\S]*?)\n\);/g,
-    );
-    for (const block of blocks) {
-      if (/\buser_id\b/.test(block[2] ?? "")) tables.add(block[1]!);
-    }
-  }
-  const missing = [...tables].filter(
-    (table) =>
-      !Object.hasOwn(TENANT_TABLES, table) && !NON_TENANT_USER_ID_TABLES.has(table),
-  );
-  assert.deepEqual(
-    missing,
-    [],
-    "таблица со столбцом user_id не объявлена в src/tenancy/tables.ts",
-  );
-});
+/*
+ * Сверка реестра `TENANT_TABLES` со схемой живёт в
+ * `scripts/ci/assert-tenant-scope.py`, а не здесь: в образ
+ * eva-agent-service миграции не копируются, и тест, читающий
+ * `postgres/migrations`, падал бы при сборке образа. Проверка не
+ * потеряна — она выполняется в CI на полном дереве репозитория и
+ * проверена на отрицательном случае (убранная из реестра таблица
+ * даёт код 1).
+ */
 
 test("мимо границы в PostgreSQL ходить неоткуда: пулы создаются только под защитой", () => {
   const root = sourcePath("");
