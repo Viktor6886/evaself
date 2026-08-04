@@ -69,6 +69,18 @@ export interface AdminServerServices {
 
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
+/**
+ * Отчёт Security Audit за флагом.
+ *
+ * Читается на каждом запросе, а не один раз при старте: оператор
+ * включает флаг и перезапускает admin-api, но и без перезапуска
+ * поведение остаётся предсказуемым.
+ */
+function securityAuditEnabled(): boolean {
+  const raw = (process.env.EVA_SECURITY_AUDIT ?? "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes";
+}
+
 function objectBody(body: unknown): Record<string, unknown> {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     throw adminBadRequest("Ожидается JSON-объект");
@@ -291,8 +303,10 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
   app.get("/api/admin/v1/security-audit", {
     config: { roles: ["owner", "admin"] } satisfies RouteAccess,
   }, async () => {
-    if (!services.securityAudit) {
-      throw adminNotFound("Security Audit недоступен");
+    // Флаг EVA_SECURITY_AUDIT объявлен в задании шага и по умолчанию
+    // выключен: включает его человек, автономный агент — нет.
+    if (!services.securityAudit || !securityAuditEnabled()) {
+      throw adminNotFound("Security Audit выключен: EVA_SECURITY_AUDIT");
     }
     return await services.securityAudit.run();
   });

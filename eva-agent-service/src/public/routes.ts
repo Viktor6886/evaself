@@ -540,7 +540,15 @@ export function registerPublicRoutes(
   // has no initData to present. The bot's @handle is public information
   // anyway — this one route therefore sits OUTSIDE the hook below, which
   // guards everything user-specific.
-  app.get("/public/bot", async (_request, reply) => {
+  app.get("/public/bot", async (request, reply) => {
+    // Маршрут вне защищённой области, но не бесплатный: при недоступном
+    // Telegram username() не кэширует неудачу и каждый запрос уходит
+    // наружу getMe. Лимит по адресу — тот же, что у остальных публичных.
+    await enforceRateLimit(
+      limiter,
+      `public:ip:${clientAddress(request.headers as Record<string, unknown>, request.ip)}`,
+      { limit: input.config.publicRateLimitPerIp, windowSeconds: window },
+    );
     reply.header("Cache-Control", "public, max-age=300");
     return {
       username: (await input.telegram?.username()) ?? null,
@@ -581,12 +589,24 @@ export function registerPublicRoutes(
     });
 
     // Обмен проверенного initData на короткоживущую серверную сессию.
-    // Одну и ту же строку обменять дважды нельзя: перехваченная initData
-    // не даёт доступа, если приложение уже открылось.
+    //
+    // Границы защиты, чтобы не переоценивать её:
+    //   • одну и ту же строку нельзя обменять на сессию дважды — этот
+    //     путь односоставный;
+    //   • но на остальных маршрутах initData пока принимается как
+    //     запасной путь и там повторное предъявление НЕ отсекается. То
+    //     есть перехваченная строка остаётся годной до конца окна (600 с).
+    //     Окно сокращено с часа именно поэтому. Полное закрытие требует
+    //     обязательной сессии на всех маршрутах и ломает перезагрузку
+    //     Mini App внутри окна — решение вынесено человеку, см. PROGRESS.md.
+    //
+    // Заявка идёт ДО openSession: иначе повторно предъявленная строка
+    // успевала бы записать в users прежде, чем её отвергнут.
     publicApp.post("/session", async (request) => {
-      const session = await input.repository.openSession(publicUser(request));
       const initData = request.headers[INIT_DATA_HEADER];
-      if (!input.sessions || typeof initData !== "string") return { ...session };
+      if (!input.sessions || typeof initData !== "string") {
+        return { ...(await input.repository.openSession(publicUser(request))) };
+      }
 
       const claimed = await input.sessions.claimInitData(
         initDataFingerprint(initData),
@@ -595,6 +615,7 @@ export function registerPublicRoutes(
       if (!claimed) {
         throw unauthorized("Эта ссылка Mini App уже использована — откройте приложение заново");
       }
+      const session = await input.repository.openSession(publicUser(request));
       const token = await input.sessions.issue(
         publicUser(request),
         input.config.webAppSessionTtlSeconds,

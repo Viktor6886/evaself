@@ -46,6 +46,7 @@ export interface Config {
   publicRateLimitPerIp: number;
   publicRateLimitPerUser: number;
   webhookRateLimitPerIp: number;
+  healthRateLimitPerIp: number;
   telegramInboxPollMs: number;
   telegramInboxLeaseSeconds: number;
   telegramInboxMaxAttempts: number;
@@ -193,6 +194,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     // Telegram шлёт обновления пачками, поэтому лимит webhook заметно выше:
     // он защищает от постороннего потока, а не ограничивает сам Telegram.
     webhookRateLimitPerIp: int("EVA_WEBHOOK_RATE_LIMIT_PER_IP", 600),
+    // /health опрашивают docker healthcheck и make doctor, поэтому лимит
+    // выше публичного, но он есть: маршрут ходит в три бэкенда сразу.
+    healthRateLimitPerIp: int("EVA_HEALTH_RATE_LIMIT_PER_IP", 300),
     telegramInboxPollMs: int("EVA_TELEGRAM_INBOX_POLL_MS", 500),
     telegramInboxLeaseSeconds: int("EVA_TELEGRAM_INBOX_LEASE_SECONDS", 300),
     telegramInboxMaxAttempts: int("EVA_TELEGRAM_INBOX_MAX_ATTEMPTS", 5),

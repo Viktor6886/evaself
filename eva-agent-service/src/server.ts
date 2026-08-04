@@ -149,7 +149,19 @@ export function buildServer(services: Services): FastifyInstance {
   // ---------------------------------------------------------------
   // health — unauthenticated, used by Docker and `make doctor`
   // ---------------------------------------------------------------
-  app.get("/health", async (_request, reply: FastifyReply) => {
+  app.get("/health", async (request, reply: FastifyReply) => {
+    // Каждый вызов стучится в Letta, PostgreSQL и Valkey. Без лимита это
+    // бесплатный усилитель на три бэкенда: один запрос снаружи — три
+    // внутри. Лимит щедрый, потому что сюда же ходят docker healthcheck
+    // и `make doctor`, и он по адресу, а не общий.
+    await enforceRateLimit(
+      rateLimiter,
+      `health:ip:${clientAddress(request.headers as Record<string, unknown>, request.ip)}`,
+      {
+        limit: config.healthRateLimitPerIp,
+        windowSeconds: config.rateLimitWindowSeconds,
+      },
+    );
     const checks: Record<string, unknown> = {};
     let status = "ok";
 
@@ -291,6 +303,16 @@ export function buildServer(services: Services): FastifyInstance {
   });
 
   app.post("/payments/lava", async (request, reply) => {
+    // Лимит до проверки Basic-авторизации: перебор пароля webhook тоже
+    // стоит времени.
+    await enforceRateLimit(
+      rateLimiter,
+      `payments:ip:${clientAddress(request.headers as Record<string, unknown>, request.ip)}`,
+      {
+        limit: config.webhookRateLimitPerIp,
+        windowSeconds: config.rateLimitWindowSeconds,
+      },
+    );
     if (!payments.authorized(request.headers.authorization)) {
       reply.header("WWW-Authenticate", 'Basic realm="Evaself Lava webhook"');
       throw unauthorized("Неверная авторизация Lava webhook");
