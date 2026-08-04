@@ -37,7 +37,14 @@ ADD_USER_COLUMN = re.compile(
 DROPPED_TABLE = re.compile(r"DROP TABLE\s+(?:IF EXISTS\s+)?%\w+|'(\w+)'")
 
 SQL_VERB = re.compile(r"\b(SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM)\b", re.I)
-SQL_TABLE = re.compile(r"\b(?:FROM|JOIN|INTO|UPDATE)\s+(?:ONLY\s+)?([a-z_][a-z0-9_]*)", re.I)
+# Имя таблицы бывает квалифицировано схемой и закавычено:
+# `public.eva_notes`, `"eva_notes"`. Без этого запрос уходил бы
+# мимо проверки целиком.
+SQL_TABLE = re.compile(
+    r"\b(?:FROM|JOIN|INTO|UPDATE)\s+(?:ONLY\s+)?"
+    r"(?:\"?[a-z_][a-z0-9_]*\"?\s*\.\s*)?\"?([a-z_][a-z0-9_]*)\"?",
+    re.I,
+)
 TENANT_COLUMN = re.compile(r"\b(user_id|telegram_id)\b")
 MARKER = re.compile(r"--\s*tenant:\s*(system|by\s+[a-z_][a-z0-9_]*)\s*(?:—|-|:)?\s*(.*)", re.I)
 

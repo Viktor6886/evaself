@@ -151,10 +151,12 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
 
   // Audit starts before authentication/authorization and therefore before
   // any administrative state change can happen.
+  // Небезопасные методы фиксируются в аудите ДО аутентификации: попытка
+  // изменения должна остаться в журнале независимо от её исхода.
+  // Безопасные — уже после проверки роли (см. preHandler): иначе поток
+  // неаутентифицированных GET раздувал бы журнал, ничего о нём не говоря.
   app.addHook("preValidation", async (request) => {
-    if (SAFE_METHODS.has(request.method) && accessOf(request).tenantAccess !== "cross-user") {
-      return;
-    }
+    if (SAFE_METHODS.has(request.method)) return;
     const context = contexts.get(request)!;
     context.audit = await services.audit.start({
       requestId: context.requestId,
@@ -194,6 +196,21 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
     context.scope.actor = session.user.username;
     context.scope.role = session.user.role;
     context.scope.route = `${request.method} ${request.routeOptions.url ?? request.url}`;
+
+    // Чтение пользовательских данных фиксируется здесь: роль уже
+    // подтверждена, а без записи аудита граница арендатора до этих
+    // данных не пропустит.
+    if (SAFE_METHODS.has(request.method) && access.tenantAccess === "cross-user") {
+      context.audit = await services.audit.start({
+        requestId: context.requestId,
+        operation: `${request.method} ${request.routeOptions.url}`,
+        target: request.url.split("?")[0] ?? null,
+        ip: safeIp(request.ip),
+        actor: actorOf(context),
+        params: auditParams(request.url, request.body, request.params),
+      });
+      context.scope.auditId = context.audit.id;
+    }
   });
 
   app.addHook("onError", async (request, _reply, error) => {
