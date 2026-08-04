@@ -740,7 +740,7 @@ export function buildServer(services: Services): FastifyInstance {
     // An agent restored without its conversation gets a fresh one.
     if (link && !link.conversation_id) {
       const conversationId = await letta.createConversation(link.agent_id);
-      await db.setConversation(link.agent_id, conversationId);
+      await db.setConversation(link.agent_id, conversationId, user.id);
       link = { ...link, conversation_id: conversationId };
       conversationCreated = true;
     }
@@ -786,7 +786,7 @@ export function buildServer(services: Services): FastifyInstance {
     const telegramId = telegramIdOf(request);
     const link = await requireLink(db, telegramId);
     const conversationId = await letta.createConversation(link.agent_id);
-    await db.setConversation(link.agent_id, conversationId);
+    await db.setConversation(link.agent_id, conversationId, link.user_id);
     logger.info("Активный conversation переключён", { telegramId, conversationId });
     return { agent_id: link.agent_id, conversation_id: conversationId };
   });

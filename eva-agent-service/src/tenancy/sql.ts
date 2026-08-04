@@ -69,7 +69,10 @@ function normalize(sql: string): string {
     .replace(/--[^\n]*/g, (match) => " ".repeat(match.length))
     .replace(/\/\*[\s\S]*?\*\//g, (match) => " ".repeat(match.length))
     .replace(/'(?:[^']|'')*'/g, (match) => `'${" ".repeat(Math.max(0, match.length - 2))}'`)
-    .replace(/"(?:[^"]|"")*"/g, (match) => `"${" ".repeat(Math.max(0, match.length - 2))}"`)
+    // Двойные кавычки в PostgreSQL — это идентификатор, а не строка.
+    // Затирать их содержимое значило бы не увидеть `"eva_notes"` вовсе:
+    // запрос выглядел бы не касающимся пользовательских таблиц.
+    .replace(/"/g, " ")
     .replace(/\$\{[^}]*\}/g, (match) => " ".repeat(match.length));
   result = result.toLowerCase();
   return result;
@@ -113,8 +116,10 @@ interface TableRef {
 }
 
 function tableRefs(sql: string, ignore: Set<string>): TableRef[] {
+  // Имя таблицы может быть квалифицировано схемой (`public.eva_notes`).
+  // Без этого граница пропускала бы такой запрос вообще мимо разбора.
   const pattern = new RegExp(
-    `\\b(?:from|join|update|into)\\s+(?:only\\s+)?(${IDENTIFIER})` +
+    `\\b(?:from|join|update|into)\\s+(?:only\\s+)?(?:${IDENTIFIER}\\s*\\.\\s*)?(${IDENTIFIER})` +
     `(?:\\s+(?:as\\s+)?(${IDENTIFIER}))?`,
     "g",
   );
@@ -136,7 +141,9 @@ function tableRefs(sql: string, ignore: Set<string>): TableRef[] {
     const alias = candidate !== undefined && !keyword ? candidate : table;
     refs.push({ table, alias, at: match.index });
   }
-  return refs;
+  // По позиции: привязка неквалифицированного столбца ищет ближайшую
+  // таблицу слева, а перечисленные через запятую собираются отдельно.
+  return refs.sort((left, right) => left.at - right.at);
 }
 
 /**
@@ -161,7 +168,7 @@ function commaJoins(sql: string, ignore: Set<string>): TableRef[] {
     const list = rest.slice(0, end ? end.index : rest.length);
     const offset = start.index + start[0].length;
     const item = new RegExp(
-      `,\\s*(${IDENTIFIER})(?:\\s+(?:as\\s+)?(${IDENTIFIER}))?`,
+      `,\\s*(?:${IDENTIFIER}\\s*\\.\\s*)?(${IDENTIFIER})(?:\\s+(?:as\\s+)?(${IDENTIFIER}))?`,
       "g",
     );
     let found: RegExpExecArray | null;
@@ -186,7 +193,10 @@ function commaJoins(sql: string, ignore: Set<string>): TableRef[] {
  * ровно настолько, насколько ограничен его источник.
  */
 function insertBindings(sql: string, table: string, columns: readonly string[]): TenantBinding[] {
-  const header = new RegExp(`insert\\s+into\\s+${table}\\s*\\(([^)]*)\\)`, "g");
+  const header = new RegExp(
+    `insert\\s+into\\s+(?:${IDENTIFIER}\\s*\\.\\s*)?${table}\\s*\\(([^)]*)\\)`,
+    "g",
+  );
   const bindings: TenantBinding[] = [];
   let match: RegExpExecArray | null;
   while ((match = header.exec(sql)) !== null) {
@@ -270,7 +280,16 @@ export function analyzeSql(sql: string): SqlAnalysis {
   }
 
   const aliasToTable = new Map<string, string>();
-  for (const ref of refs) aliasToTable.set(ref.alias, ref.table);
+  // Алиас, использованный для двух разных таблиц (обычно в независимых
+  // подзапросах), делает привязку одной таблицы неотличимой от привязки
+  // другой. Такие алиасы исключаются из разбора целиком: ограничение
+  // одной таблицы не должно засчитываться второй.
+  const ambiguous = new Set<string>();
+  for (const ref of refs) {
+    const known = aliasToTable.get(ref.alias);
+    if (known !== undefined && known !== ref.table) ambiguous.add(ref.alias);
+    aliasToTable.set(ref.alias, ref.table);
+  }
 
   /**
    * Неквалифицированный столбец относится к ближайшей таблице слева:
@@ -354,6 +373,10 @@ export function analyzeSql(sql: string): SqlAnalysis {
   for (const ref of tenantRefs) {
     const columns = tenantColumns(ref.table)!;
     const own: TenantBinding[] = [];
+    if (ambiguous.has(ref.alias)) {
+      uses.push({ table: ref.table, alias: ref.alias, scoped: false, bindings: [] });
+      continue;
+    }
     for (const column of columns) {
       const key = `${ref.alias}.${column}`;
       own.push(...(anchored.get(key) ?? []));
