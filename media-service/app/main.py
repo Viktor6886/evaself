@@ -95,7 +95,25 @@ TELEGRAM_API = "https://api.telegram.org"
 # Caddy, but "not routed" is not "not reachable": every other container on the
 # compose network can address it, and these endpoints spend the bot token and
 # the paid ASR/TTS keys.
-SERVICE_TOKEN = os.environ.get("MEDIA_SERVICE_TOKEN", "")
+SERVICE_TOKEN = os.environ.get("MEDIA_SERVICE_TOKEN", "").strip()
+
+# Окружение. Неизвестное или незаданное значение считается production:
+# ошибиться в сторону «не запустились» дешевле, чем в сторону «подняли
+# незащищённый сервис». Установка настраивается configure.sh, который
+# генерирует MEDIA_SERVICE_TOKEN сам, а ensure-env-defaults.sh дописывает
+# ключ при обновлении, поэтому пустой токен в production — это ошибка
+# конфигурации, а не штатный случай.
+EVA_ENV = os.environ.get("EVA_ENV", "production").strip().lower()
+IS_PRODUCTION = EVA_ENV not in {"development", "dev", "local", "test"}
+
+if IS_PRODUCTION and not SERVICE_TOKEN:
+    raise RuntimeError(
+        "MEDIA_SERVICE_TOKEN пуст при EVA_ENV=%s. media-service тратит токен "
+        "бота и платные ключи ASR/TTS, и без общего секрета его может вызвать "
+        "любой контейнер сети compose. Задайте MEDIA_SERVICE_TOKEN в .env "
+        "(`make configure` генерирует его сам) или выставьте EVA_ENV=development."
+        % EVA_ENV
+    )
 
 
 def require_service_token(x_media_key: str | None = Header(default=None)) -> None:

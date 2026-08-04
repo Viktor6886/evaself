@@ -88,6 +88,19 @@ jobs:
       - name: Backup archive password selection round-trips
         run: ./scripts/ci/test-backup-password.sh
 
+      # Тот же несимметричный риск, но с другой стороны: путь к мастер-ключу
+      # restore.sh брал из .env, который читал почти на сто строк ниже
+      # расшифровки. Архив создавался и проверялся, а не открывался уже при
+      # восстановлении. Здесь restore.sh запускается по-настоящему.
+      - name: Restore finds the installation's master key
+        run: ./scripts/ci/test-restore-master-key.sh
+
+      # .env должны читать оба разборщика. Проверка ниже («Installer
+      # defaults») использует только load_env, и апостроф в списке
+      # незавершённых настроек ломал docker compose незаметно для CI.
+      - name: The generated .env is readable by compose and by load_env
+        run: ./scripts/ci/test-env-compose-parse.sh
+
       - name: The LLM Router is the only way out to a model
         run: |
           # Прямое обращение к провайдеру в обход роутера возвращает
@@ -138,8 +151,13 @@ jobs:
             || { echo "::error::ensure-env-defaults.sh is not idempotent"; exit 1; }
           echo "upgrade backfill ok"
 
+      # scripts/ci/*.sh и postgres/fixtures/*.sh раньше выпадали из проверки:
+      # исполняемый shell мог попасть в репозиторий нелинтованным.
       - name: shellcheck
-        run: shellcheck -S error -x scripts/*.sh backup-service/backup-service
+        run: |
+          shellcheck -S error -x \
+            scripts/*.sh scripts/ci/*.sh postgres/fixtures/*.sh \
+            backup-service/backup-service
 
       - name: Compose renders
         run: |

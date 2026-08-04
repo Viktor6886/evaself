@@ -2,8 +2,8 @@
 
 It is not routed by Caddy, but "not routed" is not "not reachable": any
 container on the compose network can address it. These tests pin the
-shared-secret gate, including the compatibility case where an installation
-upgraded without setting a token yet.
+shared-secret gate on both sides: в production пустой токен не даёт
+сервису стартовать, в разработке прежнее поведение сохраняется.
 """
 
 import importlib
@@ -19,9 +19,10 @@ PROTECTED = [
 ]
 
 
-def _client(monkeypatch, token: str):
+def _client(monkeypatch, token: str, env: str = "development"):
     """Reload the module so the module-level token is re-read."""
     monkeypatch.setenv("MEDIA_SERVICE_TOKEN", token)
+    monkeypatch.setenv("EVA_ENV", env)
     import app.main as main
 
     importlib.reload(main)
@@ -63,11 +64,50 @@ def test_health_stays_open_for_the_docker_healthcheck(monkeypatch):
     assert body["auth_required"] is True
 
 
-def test_an_unset_token_keeps_an_upgraded_installation_working(monkeypatch):
-    main, client = _client(monkeypatch, "")
+def test_an_unset_token_is_still_allowed_in_development(monkeypatch):
+    """В разработке поведение прежнее: пустой токен — просто нет шлюза."""
+    main, client = _client(monkeypatch, "", env="development")
     with client:
         assert client.get("/health").json()["auth_required"] is False
-        # No token configured means no gate — eva-agent-service warns at boot.
         response = client.post("/tts", json={"text": "привет"})
     assert response.status_code == 503
+    importlib.reload(main)
+
+
+# ---------------------------------------------------------------------
+# production: пустой токен — не «совместимость», а незащищённый сервис
+# ---------------------------------------------------------------------
+@pytest.mark.parametrize("env", ["production", "staging", "", "чтотоневнятное"])
+def test_production_refuses_to_start_without_a_token(monkeypatch, env):
+    """Неизвестное и незаданное окружение считаются production."""
+    monkeypatch.setenv("MEDIA_SERVICE_TOKEN", "")
+    monkeypatch.setenv("EVA_ENV", env)
+    import app.main as main
+
+    with pytest.raises(RuntimeError, match="MEDIA_SERVICE_TOKEN"):
+        importlib.reload(main)
+
+    # Прерванный reload оставляет модуль на полпути: возвращаем его в
+    # рабочее состояние, чтобы порядок тестов ни на что не влиял.
+    monkeypatch.setenv("EVA_ENV", "development")
+    importlib.reload(main)
+
+
+def test_production_starts_once_a_token_is_configured(monkeypatch):
+    main, client = _client(monkeypatch, "s3cret", env="production")
+    with client:
+        assert client.get("/health").json()["auth_required"] is True
+    importlib.reload(main)
+
+
+def test_a_whitespace_only_token_counts_as_empty(monkeypatch):
+    """Пробелы в .env — распространённая опечатка, и это не секрет."""
+    monkeypatch.setenv("MEDIA_SERVICE_TOKEN", "   ")
+    monkeypatch.setenv("EVA_ENV", "production")
+    import app.main as main
+
+    with pytest.raises(RuntimeError, match="MEDIA_SERVICE_TOKEN"):
+        importlib.reload(main)
+
+    monkeypatch.setenv("EVA_ENV", "development")
     importlib.reload(main)

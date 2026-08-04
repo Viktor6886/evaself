@@ -637,6 +637,10 @@ services:
       MEDIA_MAX_AUDIO_SECONDS: ${MEDIA_MAX_AUDIO_SECONDS}
       MEDIA_TMP_TTL_SECONDS: ${MEDIA_TMP_TTL_SECONDS}
       MEDIA_SERVICE_TOKEN: ${MEDIA_SERVICE_TOKEN}
+      # Без EVA_ENV сервис считает себя production и отказывается стартовать
+      # с пустым MEDIA_SERVICE_TOKEN: он тратит токен бота и платные ключи
+      # ASR/TTS, а в сети compose его может вызвать любой контейнер.
+      EVA_ENV: ${EVA_ENV:-production}
       EVA_TELEGRAM_BOT_TOKEN: ${EVA_TELEGRAM_BOT_TOKEN}
       TZ: ${TZ}
     volumes:
