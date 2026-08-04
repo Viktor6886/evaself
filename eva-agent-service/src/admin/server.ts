@@ -976,11 +976,17 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
    * запись в журнал делается здесь руками: кто, чью переписку и сколько
    * сообщений открыл. Самих сообщений в журнале нет — только счётчик.
    */
+  //
+  // Автоматической пометки tenantAccess здесь намеренно нет: запись
+  // аудита этот маршрут делает сам, с идентификатором пользователя в
+  // параметрах. Вторая, автоматическая запись с тем же именем операции
+  // ничего бы не добавила, зато перекрывала бы ручную при чтении
+  // журнала. Область получает идентификатор ручной записи ниже — без
+  // него граница арендатора до переписки не пропустит.
   app.get("/api/admin/v1/users/:id/conversation", {
     config: {
       roles: ["owner", "admin"],
       sudoScope: "users:messages",
-      tenantAccess: "cross-user",
     } satisfies RouteAccess,
   }, async (request) => {
     const context = contexts.get(request)!;
@@ -994,6 +1000,7 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
       actor: actorOf(context),
       params: { user_id: id, limit: limit ?? null },
     });
+    context.scope.auditId = entry.id;
     try {
       const result = await services.users.conversation(id, limit);
       await services.audit.finish(

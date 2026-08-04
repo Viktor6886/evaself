@@ -574,3 +574,54 @@ test("административный запрос без действующе�
   assert.equal(attempts, 0);
   await app.close();
 });
+
+test("чтение переписки идёт под одной записью аудита, называющей пользователя", async () => {
+  const audits: Array<{ operation: string; params: unknown }> = [];
+  const session = {
+    id: "session-1",
+    user: { id: "1", username: "owner", role: "owner" },
+  };
+  const app = buildAdminServer({
+    auth: {
+      authenticate: async () => session,
+      requireCsrf: () => undefined,
+      requireSudo: async () => undefined,
+    },
+    audit: {
+      start: async (entry: { operation: string; params: unknown }) => {
+        audits.push({ operation: entry.operation, params: entry.params });
+        return { id: `audit-${audits.length}`, startedAt: Date.now() };
+      },
+      finish: async () => undefined,
+    },
+    users: {
+      conversation: async () => {
+        // Настоящее обращение к данным пользователя: без записи аудита в
+        // области граница его не пропустит.
+        assertQueryAllowed(
+          "SELECT id FROM conversation_highlights WHERE user_id = $1 LIMIT 20",
+          [7],
+        );
+        return { messages: [], highlights: [] };
+      },
+    },
+    config: {}, secrets: {}, health: {}, operations: {}, providers: {},
+    llmRouter: {}, stt: {}, integrations: {},
+    events: { publish: async () => undefined },
+    logger: { debug() {}, info() {}, warn() {}, error() {} },
+    readiness: async () => true,
+  } as never);
+  await app.ready();
+
+  const response = await app.inject({
+    method: "GET",
+    url: "/api/admin/v1/users/7/conversation?limit=20",
+    headers: { cookie: "eva_admin=session-1" },
+  });
+  assert.equal(response.statusCode, 200, response.body);
+  // Ровно одна запись: ручная, с идентификатором пользователя. Вторая,
+  // автоматическая, перекрывала бы её при чтении журнала.
+  assert.equal(audits.length, 1);
+  assert.match(JSON.stringify(audits[0]?.params), /user_id/);
+  await app.close();
+});
