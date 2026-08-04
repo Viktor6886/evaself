@@ -53,6 +53,14 @@ export const userBusy = (message: string, retryAfterSeconds: number) =>
     details: { retry_after_seconds: retryAfterSeconds },
   });
 
+export const tooManyRequests = (message: string, retryAfterSeconds: number) =>
+  new EvaError(message, {
+    code: "rate_limited",
+    statusCode: 429,
+    retryable: true,
+    details: { retry_after_seconds: retryAfterSeconds },
+  });
+
 export const appServerUnavailable = (message: string, details?: unknown) =>
   new EvaError(message, {
     code: "app_server_unavailable",

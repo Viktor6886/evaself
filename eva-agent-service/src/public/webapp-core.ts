@@ -8,6 +8,12 @@ import {
   verifyTelegramWebAppInitData,
 } from "./telegram-webapp-auth.js";
 import {
+  clientAddress,
+  enforceRateLimit,
+  NoopRateLimiter,
+  type RateLimiter,
+} from "./rate-limit.js";
+import {
   authenticateMiniAppRequest,
   type MiniAppSessionStore,
 } from "./webapp-session.js";
@@ -43,10 +49,18 @@ export function registerWebappCoreRoutes(
     db: Database;
     sessions?: MiniAppSessionStore;
     now?: () => Date;
+    rateLimiter?: RateLimiter;
   },
 ): void {
+  const limiter = input.rateLimiter ?? new NoopRateLimiter();
+  const window = input.config.rateLimitWindowSeconds ?? 60;
   void app.register(async (webApp) => {
     webApp.addHook("onRequest", async (request) => {
+      await enforceRateLimit(
+        limiter,
+        `public:ip:${clientAddress(request.headers as Record<string, unknown>, request.ip)}`,
+        { limit: input.config.publicRateLimitPerIp, windowSeconds: window },
+      );
       // Сессия или initData — идентификатор из тела запроса не годится
       // ни в одной ветке. Общая реализация с /public/*.
       (request as WebAppRequest).telegramWebAppUser =
@@ -60,6 +74,12 @@ export function registerWebappCoreRoutes(
             verify: verifyTelegramWebAppInitData,
           },
         );
+
+      await enforceRateLimit(
+        limiter,
+        `public:user:${(request as WebAppRequest).telegramWebAppUser!.id}`,
+        { limit: input.config.publicRateLimitPerUser, windowSeconds: window },
+      );
     });
 
     webApp.get("/dashboard", async (request) => {

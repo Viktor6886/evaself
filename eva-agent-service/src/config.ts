@@ -42,6 +42,10 @@ export interface Config {
   telegramWebhookSecret: string;
   telegramWebAppMaxAgeSeconds: number;
   webAppSessionTtlSeconds: number;
+  rateLimitWindowSeconds: number;
+  publicRateLimitPerIp: number;
+  publicRateLimitPerUser: number;
+  webhookRateLimitPerIp: number;
   telegramInboxPollMs: number;
   telegramInboxLeaseSeconds: number;
   telegramInboxMaxAttempts: number;
@@ -181,6 +185,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       300,
       3_600,
     ),
+    // Лимиты публичных поверхностей. 0 отключает проверку — это
+    // осознанный аварийный рычаг, а не значение по умолчанию.
+    rateLimitWindowSeconds: clampedInt("EVA_RATE_LIMIT_WINDOW_SECONDS", 60, 1, 3_600),
+    publicRateLimitPerIp: int("EVA_PUBLIC_RATE_LIMIT_PER_IP", 120),
+    publicRateLimitPerUser: int("EVA_PUBLIC_RATE_LIMIT_PER_USER", 60),
+    // Telegram шлёт обновления пачками, поэтому лимит webhook заметно выше:
+    // он защищает от постороннего потока, а не ограничивает сам Telegram.
+    webhookRateLimitPerIp: int("EVA_WEBHOOK_RATE_LIMIT_PER_IP", 600),
     telegramInboxPollMs: int("EVA_TELEGRAM_INBOX_POLL_MS", 500),
     telegramInboxLeaseSeconds: int("EVA_TELEGRAM_INBOX_LEASE_SECONDS", 300),
     telegramInboxMaxAttempts: int("EVA_TELEGRAM_INBOX_MAX_ATTEMPTS", 5),

@@ -21,6 +21,12 @@ import type { Logger } from "./logger.js";
 import type { LavaPayments } from "./payments.js";
 import type { UserProfileService } from "./profile/profile-service.js";
 import { PublicRepository, registerPublicRoutes } from "./public/routes.js";
+import {
+  clientAddress,
+  enforceRateLimit,
+  NoopRateLimiter,
+  type RateLimiter,
+} from "./public/rate-limit.js";
 import type { MiniAppSessionStore } from "./public/webapp-session.js";
 import { registerWebappCoreRoutes } from "./public/webapp-core.js";
 import type { UserQueue } from "./queue.js";
@@ -45,6 +51,7 @@ export interface Services {
   telegram: TelegramClient;
   redisPing: () => Promise<boolean>;
   miniAppSessions?: MiniAppSessionStore;
+  rateLimiter?: RateLimiter;
 }
 
 function constantTimeEquals(a: string, b: string): boolean {
@@ -76,6 +83,10 @@ export function buildServer(services: Services): FastifyInstance {
     queue,
     telegram,
   } = services;
+
+  // Без Valkey лимитер пропускал бы всё: подставляется явный no-op, а не
+  // «случайно отключилось». Рантайм всегда передаёт настоящий.
+  const rateLimiter = services.rateLimiter ?? new NoopRateLimiter();
 
   // Fastify's own logger is off: this service logs through logger.ts so
   // every line in the stack has the same JSON shape.
@@ -122,6 +133,7 @@ export function buildServer(services: Services): FastifyInstance {
     repository: new PublicRepository(db, profile, goals),
     telegram,
     ...(services.miniAppSessions ? { sessions: services.miniAppSessions } : {}),
+    rateLimiter,
   });
 
   // Новые разделы Mini App (задачи, заметки, бюджет, решения, check-in,
@@ -131,6 +143,7 @@ export function buildServer(services: Services): FastifyInstance {
     config,
     db,
     ...(services.miniAppSessions ? { sessions: services.miniAppSessions } : {}),
+    rateLimiter,
   });
 
   // ---------------------------------------------------------------
@@ -255,6 +268,16 @@ export function buildServer(services: Services): FastifyInstance {
   // Public webhooks with provider-specific authentication
   // ---------------------------------------------------------------
   app.post("/telegram/webhook", async (request, reply) => {
+    // Лимит до сверки секрета: перебор секрета тоже стоит времени, и
+    // поток чужих запросов не должен занимать обработчик.
+    await enforceRateLimit(
+      rateLimiter,
+      `webhook:ip:${clientAddress(request.headers as Record<string, unknown>, request.ip)}`,
+      {
+        limit: config.webhookRateLimitPerIp,
+        windowSeconds: config.rateLimitWindowSeconds,
+      },
+    );
     if (
       !webhookSecretMatches(
         request.headers["x-telegram-bot-api-secret-token"],
