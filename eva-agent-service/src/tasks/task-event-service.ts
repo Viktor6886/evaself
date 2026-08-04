@@ -193,7 +193,9 @@ export class TaskEventService {
       routing_mode: string; requested_route: string; effective_route: string;
       actual_provider_id: string; model: string;
     }>(
-      `SELECT routing_mode, requested_route, effective_route, actual_provider_id, model
+      `
+        -- tenant: by request_id — запись телеметрии уже привязана к ходу одного пользователя
+        SELECT routing_mode, requested_route, effective_route, actual_provider_id, model
          FROM llm_requests WHERE request_id=$1 AND succeeded
         ORDER BY finished_at DESC LIMIT 1`,
       [requestId],

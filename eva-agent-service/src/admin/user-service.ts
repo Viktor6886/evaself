@@ -409,8 +409,10 @@ export class UserService {
     // не поднимет ошибку внешнего ключа). Различаем их явно.
     if (idempotencyKey) {
       const { rows: existing } = await this.pool.query(
-        `SELECT id, actor_name, note, created_at
-           FROM admin_user_notes WHERE idempotency_key = $1`,
+        `-- tenant: system — повтор по ключу идемпотентности в административной
+           -- операции; ключ выдаёт сам администратор, доступ ограничен RBAC
+           SELECT id, actor_name, note, created_at
+             FROM admin_user_notes WHERE idempotency_key = $1`,
         [idempotencyKey],
       );
       if (existing[0]) return existing[0];

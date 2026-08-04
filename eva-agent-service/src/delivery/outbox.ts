@@ -108,7 +108,9 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
 
   private async claimById(id: string): Promise<OutboxRow | null> {
     const { rows } = await this.db.query<OutboxRow>(
-      `UPDATE telegram_outbox
+      `
+        -- tenant: system — durable delivery: строки берутся по id и аренде воркера, а не по запросу пользователя
+        UPDATE telegram_outbox
           SET status = 'sending',
               attempts = attempts + 1,
               locked_at = now(),
@@ -126,7 +128,9 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
   private async claimNext(): Promise<OutboxRow | null> {
     return await this.db.transaction(async (client) => {
       await client.query(
-        `UPDATE telegram_outbox
+        `
+          -- tenant: system — durable delivery: строки берутся по id и аренде воркера, а не по запросу пользователя
+          UPDATE telegram_outbox
             SET status = 'dead',
                 last_error = COALESCE(last_error, 'worker lease expired after final attempt'),
                 locked_at = NULL,
@@ -140,7 +144,9 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
         ],
       );
       const { rows } = await client.query<OutboxRow>(
-        `SELECT id, telegram_method, payload, attempts
+        `
+          -- tenant: system — durable delivery: строки берутся по id и аренде воркера, а не по запросу пользователя
+          SELECT id, telegram_method, payload, attempts
            FROM telegram_outbox
           WHERE attempts < $2
             AND (
@@ -157,7 +163,9 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
       const row = rows[0];
       if (!row) return null;
       await client.query(
-        `UPDATE telegram_outbox
+        `
+          -- tenant: system — durable delivery: строки берутся по id и аренде воркера, а не по запросу пользователя
+          UPDATE telegram_outbox
             SET status = 'sending',
                 attempts = attempts + 1,
                 locked_at = now(),
@@ -180,7 +188,9 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
       onMetrics?.({ telegramSendMs });
       const messageIds = extractMessageIds(result);
       await this.db.query(
-        `UPDATE telegram_outbox
+        `
+          -- tenant: system — durable delivery: строки берутся по id и аренде воркера, а не по запросу пользователя
+          UPDATE telegram_outbox
             SET status = 'sent',
                 telegram_message_ids = $2::bigint[],
                 last_error = NULL,
@@ -200,7 +210,9 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
       const message = error instanceof Error ? error.message : String(error);
       const backoffSeconds = Math.min(300, Math.max(2, 2 ** Math.max(0, row.attempts - 1)));
       await this.db.query(
-        `UPDATE telegram_outbox
+        `
+          -- tenant: system — durable delivery: строки берутся по id и аренде воркера, а не по запросу пользователя
+          UPDATE telegram_outbox
             SET status = $2,
                 available_at = CASE
                   WHEN $2 = 'retry' THEN now() + make_interval(secs => $3)

@@ -91,7 +91,9 @@ export class BackgroundRuntime {
     this.taskRunning = true;
     try {
       await this.db.query(
-        `UPDATE subscriptions
+        `
+          -- tenant: system — периодическое истечение подписок по сроку, общесистемная развёртка, а не запрос пользователя
+          UPDATE subscriptions
             SET status = 'expired'
           WHERE status IN ('trialing', 'active', 'past_due')
             AND current_period_end IS NOT NULL
@@ -205,7 +207,9 @@ export class BackgroundRuntime {
     const correlationId = randomUUID();
     try {
       const delivered = await this.db.query(
-        `SELECT 1 FROM task_events
+        `
+          -- tenant: by task_id — задача уже принадлежит одному пользователю, проверка владения выше по стеку
+          SELECT 1 FROM task_events
           WHERE task_id=$1 AND event_type='reminder_sent' AND scheduled_at=$2
           LIMIT 1`,
         [task.id, task.scheduled_at],
@@ -215,7 +219,9 @@ export class BackgroundRuntime {
           ? nextCronDate(task.cron_expression, task.timezone, new Date())
           : null;
         await this.db.query(
-          `UPDATE tasks SET last_run_at=now(), next_run_at=$2,
+          `
+            -- tenant: by task_id — задача уже принадлежит одному пользователю, проверка владения выше по стеку
+            UPDATE tasks SET last_run_at=now(), next_run_at=$2,
                   remind_at=CASE WHEN $2::timestamptz IS NULL THEN NULL ELSE remind_at END,
                   locked_at=NULL, last_error=NULL WHERE id=$1`,
           [task.id, next?.toISOString() ?? null],
@@ -280,7 +286,9 @@ export class BackgroundRuntime {
         ? nextCronDate(task.cron_expression, task.timezone, new Date())
         : null;
       await this.db.query(
-        `UPDATE tasks SET
+        `
+          -- tenant: by task_id — задача уже принадлежит одному пользователю, проверка владения выше по стеку
+          UPDATE tasks SET
            last_run_at = now(),
            next_run_at = $2,
            remind_at = CASE WHEN $2::timestamptz IS NULL THEN NULL ELSE remind_at END,

@@ -58,7 +58,9 @@ export class PostgresTelegramInbox implements TelegramInbox {
             ? "text"
             : "unsupported";
     const { rowCount } = await this.db.query(
-      `INSERT INTO telegram_updates
+      `
+        -- tenant: system — durable ingress Telegram: строки берутся по update_id и аренде воркера, а не по запросу пользователя
+        INSERT INTO telegram_updates
          (update_id, telegram_user_id, chat_id, message_id, message_kind,
           status, billable, payload, available_at)
        VALUES ($1, $2, $3, $4, $5, 'queued', $6, $7::jsonb, now())
@@ -83,7 +85,9 @@ export class PostgresTelegramInbox implements TelegramInbox {
   ): Promise<InboxRecord | null> {
     return await this.db.transaction(async (client) => {
       await client.query(
-        `UPDATE telegram_updates
+        `
+          -- tenant: system — durable ingress Telegram: строки берутся по update_id и аренде воркера, а не по запросу пользователя
+          UPDATE telegram_updates
             SET status = 'dead',
                 completed_at = now(),
                 last_error = COALESCE(last_error, 'worker lease expired after final attempt'),
@@ -95,7 +99,9 @@ export class PostgresTelegramInbox implements TelegramInbox {
         [Math.max(30, leaseSeconds), Math.max(1, maxAttempts)],
       );
       const { rows } = await client.query<InboxRow>(
-        `SELECT update_id, payload, attempts, chat_id, telegram_user_id
+        `
+          -- tenant: system — durable ingress Telegram: строки берутся по update_id и аренде воркера, а не по запросу пользователя
+          SELECT update_id, payload, attempts, chat_id, telegram_user_id
            FROM telegram_updates
           WHERE attempts < $2
             AND payload IS NOT NULL
@@ -113,7 +119,9 @@ export class PostgresTelegramInbox implements TelegramInbox {
       const row = rows[0];
       if (!row) return null;
       await client.query(
-        `UPDATE telegram_updates
+        `
+          -- tenant: system — durable ingress Telegram: строки берутся по update_id и аренде воркера, а не по запросу пользователя
+          UPDATE telegram_updates
             SET status = 'processing',
                 attempts = attempts + 1,
                 locked_at = now(),
@@ -134,7 +142,9 @@ export class PostgresTelegramInbox implements TelegramInbox {
 
   async complete(updateId: number, result: InboxResult): Promise<void> {
     await this.db.query(
-      `UPDATE telegram_updates
+      `
+        -- tenant: system — durable ingress Telegram: строки берутся по update_id и аренде воркера, а не по запросу пользователя
+        UPDATE telegram_updates
           SET status = $2,
               usage_charged = usage_charged OR $3,
               error_code = NULL,
@@ -158,7 +168,9 @@ export class PostgresTelegramInbox implements TelegramInbox {
     const message = error instanceof Error ? error.message : String(error);
     const backoffSeconds = Math.min(300, Math.max(2, 2 ** Math.max(0, attempts - 1)));
     await this.db.query(
-      `UPDATE telegram_updates
+      `
+        -- tenant: system — durable ingress Telegram: строки берутся по update_id и аренде воркера, а не по запросу пользователя
+        UPDATE telegram_updates
           SET status = $2,
               available_at = CASE
                 WHEN $2 = 'retry' THEN now() + make_interval(secs => $3)

@@ -382,7 +382,9 @@ export class Database {
       );
       if (rows[0]) {
         await client.query(
-          `UPDATE agent_conversations
+          `
+            -- tenant: by agent_id — агент принадлежит ровно одному пользователю, agent_links_agent_id_uidx
+            UPDATE agent_conversations
               SET status = 'archived', archived_at = now()
             WHERE agent_id = $1
               AND purpose = 'chat'
@@ -409,7 +411,9 @@ export class Database {
 
   async markAgentUsed(agentId: string): Promise<void> {
     await this.require().query(
-      `UPDATE agent_links
+      `
+        -- tenant: by agent_id — агент принадлежит ровно одному пользователю, agent_links_agent_id_uidx
+        UPDATE agent_links
           SET last_message_at = now(), message_count = message_count + 1
         WHERE agent_id = $1`,
       [agentId],
@@ -434,7 +438,9 @@ export class Database {
       agent_id: string;
       conversation_ids: string[];
     }>(
-      `SELECT a.agent_id,
+      `
+        -- tenant: system — инвентарь всех агентов для сверки с App Server, строк пользователей не отдаёт
+        SELECT a.agent_id,
               array_remove(array_agg(DISTINCT c.conversation_id), NULL) AS conversation_ids
          FROM agent_links a
          LEFT JOIN agent_conversations c ON c.agent_id = a.agent_id
@@ -450,7 +456,9 @@ export class Database {
 
   async setAgentModels(model: string): Promise<void> {
     await this.require().query(
-      `UPDATE agent_links
+      `
+        -- tenant: system — смена модели применяется ко всем активным агентам сразу
+        UPDATE agent_links
           SET model = $1
         WHERE status = 'active' AND runtime = 'letta-app-server'`,
       [model],
@@ -463,13 +471,17 @@ export class Database {
     try {
       await client.query("BEGIN");
       await client.query(
-        `UPDATE agent_links
+        `
+          -- tenant: by agent_id — агент принадлежит ровно одному пользователю, agent_links_agent_id_uidx
+          UPDATE agent_links
             SET status = 'archived', conversation_id = NULL
           WHERE agent_id = $1 AND status = 'active'`,
         [agentId],
       );
       await client.query(
-        `UPDATE agent_conversations
+        `
+          -- tenant: by agent_id — агент принадлежит ровно одному пользователю, agent_links_agent_id_uidx
+          UPDATE agent_conversations
             SET status = 'archived', archived_at = COALESCE(archived_at, now())
           WHERE agent_id = $1 AND status = 'active'`,
         [agentId],
@@ -900,7 +912,9 @@ export class Database {
 
   async stats(): Promise<Record<string, unknown>> {
     const { rows } = await this.require().query(
-      `SELECT
+      `
+        -- tenant: system — агрегаты для /health и обзора: только количества, ни одной пользовательской строки
+        SELECT
          (SELECT count(*) FROM users)                                    AS users,
          (SELECT count(*) FROM agent_links WHERE status = 'active')      AS agents,
          (SELECT count(*) FROM agent_links
