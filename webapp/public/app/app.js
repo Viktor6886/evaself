@@ -62,6 +62,9 @@
   async function bootstrap() {
     try {
       state.session = await api("/public/session", { method: "POST" });
+      // Токен живёт только в памяти вкладки: ни localStorage, ни cookie,
+      // чтобы он не пережил закрытие Mini App.
+      state.sessionToken = state.session?.session_token || null;
       updateGreeting();
       const [dashboard, goals, profile, progress, bot] = await Promise.all([
         safeApi("/public/v2/dashboard", {}, null),
@@ -121,9 +124,16 @@
     if (DEMO) return demoApi(path, options);
     const headers = { ...(options.headers || {}) };
     if (requireTelegram) {
-      const initData = tg?.initData;
-      if (!initData) throw new Error("Откройте приложение из Telegram");
-      headers["X-Telegram-Init-Data"] = initData;
+      // Серверная сессия живёт минуты и предъявляется вместо initData.
+      // Сама initData уходит на сервер один раз — при открытии сессии:
+      // обменять её повторно нельзя, поэтому перехват строки бесполезен.
+      if (state.sessionToken && path !== "/public/session") {
+        headers["X-Eva-Webapp-Session"] = state.sessionToken;
+      } else {
+        const initData = tg?.initData;
+        if (!initData) throw new Error("Откройте приложение из Telegram");
+        headers["X-Telegram-Init-Data"] = initData;
+      }
     }
     if (options.body != null && !(options.body instanceof FormData)) {
       headers["Content-Type"] = headers["Content-Type"] || "application/json";

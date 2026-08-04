@@ -7,6 +7,10 @@ import {
   type TelegramWebAppUser,
   verifyTelegramWebAppInitData,
 } from "./telegram-webapp-auth.js";
+import {
+  authenticateMiniAppRequest,
+  type MiniAppSessionStore,
+} from "./webapp-session.js";
 
 interface WebAppRequest extends FastifyRequest {
   telegramWebAppUser?: TelegramWebAppUser;
@@ -34,18 +38,28 @@ interface MainFocus {
 
 export function registerWebappCoreRoutes(
   app: FastifyInstance,
-  input: { config: Config; db: Database },
+  input: {
+    config: Config;
+    db: Database;
+    sessions?: MiniAppSessionStore;
+    now?: () => Date;
+  },
 ): void {
   void app.register(async (webApp) => {
     webApp.addHook("onRequest", async (request) => {
-      const header = request.headers["x-telegram-init-data"];
-      if (typeof header !== "string") throw unauthorized("Откройте Mini App из Telegram");
-      const verified = verifyTelegramWebAppInitData(
-        header,
-        input.config.telegramBotToken,
-        { maxAgeSeconds: input.config.telegramWebAppMaxAgeSeconds },
-      );
-      (request as WebAppRequest).telegramWebAppUser = verified.user;
+      // Сессия или initData — идентификатор из тела запроса не годится
+      // ни в одной ветке. Общая реализация с /public/*.
+      (request as WebAppRequest).telegramWebAppUser =
+        await authenticateMiniAppRequest(
+          request.headers as Record<string, unknown>,
+          {
+            botToken: input.config.telegramBotToken,
+            maxAgeSeconds: input.config.telegramWebAppMaxAgeSeconds,
+            ...(input.sessions ? { sessions: input.sessions } : {}),
+            ...(input.now ? { now: input.now } : {}),
+            verify: verifyTelegramWebAppInitData,
+          },
+        );
     });
 
     webApp.get("/dashboard", async (request) => {

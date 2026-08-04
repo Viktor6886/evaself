@@ -21,6 +21,7 @@ import type { Logger } from "./logger.js";
 import type { LavaPayments } from "./payments.js";
 import type { UserProfileService } from "./profile/profile-service.js";
 import { PublicRepository, registerPublicRoutes } from "./public/routes.js";
+import type { MiniAppSessionStore } from "./public/webapp-session.js";
 import { registerWebappCoreRoutes } from "./public/webapp-core.js";
 import type { UserQueue } from "./queue.js";
 import type { SdkSettingsInput, SdkSettingsManager } from "./sdk-settings.js";
@@ -43,6 +44,7 @@ export interface Services {
   queue: UserQueue;
   telegram: TelegramClient;
   redisPing: () => Promise<boolean>;
+  miniAppSessions?: MiniAppSessionStore;
 }
 
 function constantTimeEquals(a: string, b: string): boolean {
@@ -119,6 +121,7 @@ export function buildServer(services: Services): FastifyInstance {
     config,
     repository: new PublicRepository(db, profile, goals),
     telegram,
+    ...(services.miniAppSessions ? { sessions: services.miniAppSessions } : {}),
   });
 
   // Новые разделы Mini App (задачи, заметки, бюджет, решения, check-in,
@@ -127,6 +130,7 @@ export function buildServer(services: Services): FastifyInstance {
   registerWebappCoreRoutes(app, {
     config,
     db,
+    ...(services.miniAppSessions ? { sessions: services.miniAppSessions } : {}),
   });
 
   // ---------------------------------------------------------------

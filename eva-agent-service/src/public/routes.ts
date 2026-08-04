@@ -9,6 +9,12 @@ import {
   type TelegramWebAppUser,
   verifyTelegramWebAppInitData,
 } from "./telegram-webapp-auth.js";
+import {
+  authenticateMiniAppRequest,
+  INIT_DATA_HEADER,
+  initDataFingerprint,
+  type MiniAppSessionStore,
+} from "./webapp-session.js";
 
 interface PublicRequest extends FastifyRequest {
   telegramWebAppUser?: TelegramWebAppUser;
@@ -518,6 +524,7 @@ export function registerPublicRoutes(
     repository: PublicDataSource;
     telegram?: { username(): Promise<string | null> };
     now?: () => Date;
+    sessions?: MiniAppSessionStore;
   },
 ): void {
   // The landing page is an ordinary web page, not a Mini App launch, so it
@@ -534,24 +541,44 @@ export function registerPublicRoutes(
 
   void app.register(async (publicApp) => {
     publicApp.addHook("onRequest", async (request) => {
-      const header = request.headers["x-telegram-init-data"];
-      if (typeof header !== "string") {
-        throw unauthorized("Откройте Mini App из Telegram");
-      }
-      const verified = verifyTelegramWebAppInitData(
-        header,
-        input.config.telegramBotToken,
-        {
-          maxAgeSeconds: input.config.telegramWebAppMaxAgeSeconds,
-          now: input.now?.(),
-        },
-      );
-      (request as PublicRequest).telegramWebAppUser = verified.user;
+      (request as PublicRequest).telegramWebAppUser =
+        await authenticateMiniAppRequest(
+          request.headers as Record<string, unknown>,
+          {
+            botToken: input.config.telegramBotToken,
+            maxAgeSeconds: input.config.telegramWebAppMaxAgeSeconds,
+            ...(input.sessions ? { sessions: input.sessions } : {}),
+            ...(input.now ? { now: input.now } : {}),
+            verify: verifyTelegramWebAppInitData,
+          },
+        );
     });
 
-    publicApp.post("/session", async (request) => ({
-      ...(await input.repository.openSession(publicUser(request))),
-    }));
+    // Обмен проверенного initData на короткоживущую серверную сессию.
+    // Одну и ту же строку обменять дважды нельзя: перехваченная initData
+    // не даёт доступа, если приложение уже открылось.
+    publicApp.post("/session", async (request) => {
+      const session = await input.repository.openSession(publicUser(request));
+      const initData = request.headers[INIT_DATA_HEADER];
+      if (!input.sessions || typeof initData !== "string") return { ...session };
+
+      const claimed = await input.sessions.claimInitData(
+        initDataFingerprint(initData),
+        input.config.telegramWebAppMaxAgeSeconds,
+      );
+      if (!claimed) {
+        throw unauthorized("Эта ссылка Mini App уже использована — откройте приложение заново");
+      }
+      const token = await input.sessions.issue(
+        publicUser(request),
+        input.config.webAppSessionTtlSeconds,
+      );
+      return {
+        ...session,
+        session_token: token,
+        session_expires_in: input.config.webAppSessionTtlSeconds,
+      };
+    });
 
     publicApp.get("/today", async (request) => ({
       today: await input.repository.getToday(publicUser(request).id),
