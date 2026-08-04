@@ -25,6 +25,7 @@ import {
 } from "./errors.js";
 import { auditParams, globalSecretRedactor } from "./redactor.js";
 import { SecretStore } from "./secret-store.js";
+import type { SecurityAuditService } from "./security-audit.js";
 import { HealthService } from "./health-service.js";
 import { IntegrationConfigService } from "./integration-config-service.js";
 import { LlmRouterAdminService } from "./llm-router-service.js";
@@ -60,6 +61,7 @@ export interface AdminServerServices {
   stt: SttAdminService;
   integrations: IntegrationConfigService;
   users: UserService;
+  securityAudit?: SecurityAuditService;
   events: Redis;
   logger: Logger;
   readiness: () => Promise<boolean>;
@@ -282,6 +284,18 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
   app.get("/api/admin/v1/integrations", {
     config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
   }, async () => await services.health.integrations());
+
+  // Security Audit. Читают owner и admin: список находок сам по себе —
+  // карта слабых мест установки, и operator с viewer его не получают.
+  // Значений секретов в ответе нет, только имена параметров.
+  app.get("/api/admin/v1/security-audit", {
+    config: { roles: ["owner", "admin"] } satisfies RouteAccess,
+  }, async () => {
+    if (!services.securityAudit) {
+      throw adminNotFound("Security Audit недоступен");
+    }
+    return await services.securityAudit.run();
+  });
 
   app.post("/api/admin/v1/services/:id/check", {
     config: { roles: ["owner", "admin", "operator"] } satisfies RouteAccess,
