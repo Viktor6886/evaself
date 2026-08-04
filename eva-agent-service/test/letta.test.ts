@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { extractText, LettaService, summarizeStream, telegramTag } from "../dist/letta.js";
+import {
+  extractText,
+  isReasoningTierError,
+  LettaService,
+  summarizeStream,
+  telegramTag,
+} from "../dist/letta.js";
 
 test("extractText handles plain strings", () => {
   assert.equal(extractText("hello"), "hello");
@@ -240,3 +246,159 @@ test("App Server-only settings are applied at session open, not agent creation",
   internal.runtime.reasoning_effort = "none";
   assert.equal("reasoningEffort" in internal.sessionOptions("conversation-default"), false);
 });
+
+test("отказ каталога в уровне reasoning распознаётся, прочие ошибки — нет", () => {
+  assert.equal(
+    isReasoningTierError(new Error("No medium reasoning tier found for model lmstudio/eva/chat.")),
+    true,
+  );
+  assert.equal(
+    isReasoningTierError(
+      new Error("reasoningEffort requires a model from listModels(); no catalog entry found for x."),
+    ),
+    true,
+  );
+  assert.equal(isReasoningTierError(new Error("WebSocket closed")), false);
+});
+
+test("уровень reasoning без записи в каталоге не выключает диалог", async () => {
+  const warnings: string[] = [];
+  const service = reasoningService((message) => warnings.push(message));
+  const internal = service as unknown as {
+    runtime: { reasoning_effort: string };
+    client: { resumeSession(id: string, options: Record<string, unknown>): unknown };
+    acquireSession(id: string): Promise<unknown>;
+  };
+  internal.runtime.reasoning_effort = "medium";
+  service.setDefaultModel("lmstudio/eva/chat");
+
+  const attempts: Array<Record<string, unknown>> = [];
+  let closed = 0;
+  internal.client = {
+    resumeSession: (_id, options) => {
+      attempts.push(options);
+      const failing = attempts.length === 1;
+      return {
+        initialize: async () => {
+          if (failing) {
+            throw new Error("No medium reasoning tier found for model lmstudio/eva/chat.");
+          }
+        },
+        close: () => {
+          closed += 1;
+        },
+        bootstrapState: async () => ({}),
+        recoverPendingApprovals: async () => ({ recovered: false }),
+      };
+    },
+  };
+
+  await internal.acquireSession("conversation-tier-1");
+  assert.equal(attempts.length, 2);
+  assert.equal(attempts[0]?.reasoningEffort, "medium");
+  assert.equal("reasoningEffort" in (attempts[1] ?? {}), false);
+  assert.equal(closed, 1, "неинициализированная сессия должна закрываться");
+  assert.equal(warnings.length, 1);
+
+  // Вывод запоминается: следующая сессия не тратит заведомо провальную попытку.
+  await internal.acquireSession("conversation-tier-2");
+  assert.equal(attempts.length, 3);
+  assert.equal("reasoningEffort" in (attempts[2] ?? {}), false);
+});
+
+test("прочая ошибка открытия сессии не подменяется отказом от reasoning", async () => {
+  const service = reasoningService();
+  const internal = service as unknown as {
+    runtime: { reasoning_effort: string };
+    client: { resumeSession(id: string, options: Record<string, unknown>): unknown };
+    acquireSession(id: string): Promise<unknown>;
+  };
+  internal.runtime.reasoning_effort = "medium";
+
+  let attempts = 0;
+  internal.client = {
+    resumeSession: () => {
+      attempts += 1;
+      return {
+        initialize: async () => {
+          throw new Error("WebSocket closed before the handshake");
+        },
+        close: () => {},
+      };
+    },
+  };
+
+  await assert.rejects(() => internal.acquireSession("conversation-broken"));
+  assert.equal(attempts, 1);
+});
+
+test("поддержка уровня reasoning читается из каталога App Server", async () => {
+  const service = reasoningService();
+  const internal = service as unknown as { client: { models: { list(): Promise<unknown> } } };
+  service.setDefaultModel("lmstudio/eva/chat");
+
+  internal.client = {
+    models: {
+      list: async () => ({
+        entries: [
+          { id: "eva-chat", handle: "lmstudio/eva/chat", updateArgs: { context_window: 65536 } },
+          { id: "gpt-medium", handle: "openai/gpt-5.6", updateArgs: { reasoning_effort: "medium" } },
+        ],
+      }),
+    },
+  };
+  assert.deepEqual(await service.reasoningEffortSupport("medium"), {
+    checked: true,
+    supported: false,
+    model: "lmstudio/eva/chat",
+  });
+  assert.deepEqual(await service.reasoningEffortSupport("none"), {
+    checked: true,
+    supported: true,
+    model: "lmstudio/eva/chat",
+  });
+
+  internal.client = {
+    models: {
+      list: async () => ({
+        entries: [
+          { id: "eva-chat-medium", handle: "lmstudio/eva/chat", updateArgs: { reasoning_effort: "medium" } },
+        ],
+      }),
+    },
+  };
+  assert.equal((await service.reasoningEffortSupport("medium")).supported, true);
+
+  internal.client = {
+    models: {
+      list: async () => {
+        throw new Error("App Server недоступен");
+      },
+    },
+  };
+  const unavailable = await service.reasoningEffortSupport("medium");
+  assert.equal(unavailable.checked, false, "недоступный каталог не является отказом");
+});
+
+function reasoningService(onWarn: (message: string) => void = () => {}) {
+  return new LettaService(
+    {
+      appServerUrl: "ws://example.invalid/ws",
+      appServerToken: "",
+      appServerRequestTimeoutMs: 1000,
+      model: "",
+      sessionPoolSize: 5,
+      sessionIdleMs: 1000,
+      turnTimeoutMs: 1000,
+    } as never,
+    {
+      debug() {},
+      info() {},
+      warn(message: string) {
+        onWarn(message);
+      },
+      error() {},
+    },
+    "persona",
+  );
+}

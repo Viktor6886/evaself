@@ -228,6 +228,19 @@ export function summarizeStream(messages: SDKMessage[]): Omit<TurnResult, "agent
   };
 }
 
+/**
+ * Отличить отказ применить уровень reasoning от прочих ошибок сессии.
+ *
+ * Формулировки принадлежат `@letta-ai/letta-agent-sdk`
+ * (`resolveUpdateModelPayload`): каталог не знает такого уровня, не знает
+ * модели или не смог определить текущую модель. Во всех трёх случаях сессия
+ * открывается без reasoning; любая другая ошибка остаётся ошибкой.
+ */
+export function isReasoningTierError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /reasoning tier found|reasoningEffort requires/i.test(message);
+}
+
 /** SDK content is a string, or a list of content parts. */
 export function extractText(content: unknown): string {
   if (content == null) return "";
@@ -261,6 +274,18 @@ export class LettaService {
   private defaultModel: string;
   private runtime: RuntimeSdkSettings;
   private toolFactory: ((conversationId: string) => AnyAgentTool[]) | null = null;
+  /**
+   * Уровень reasoning, который текущая модель заведомо не предлагает.
+   *
+   * Каталог моделей App Server держит уровни reasoning отдельными записями
+   * (`updateArgs.reasoning_effort`). У динамического OpenAI-совместимого
+   * провайдера, через который идёт роутер, таких записей нет вовсе, поэтому
+   * SDK бросает «No <level> reasoning tier found for model …» при открытии
+   * сессии — то есть ход не деградирует, а падает. Запомненный здесь уровень
+   * позволяет открыть следующие сессии сразу без него, не тратя на каждую
+   * заведомо провальный round trip.
+   */
+  private unsupportedReasoningEffort: ReasoningEffort | null = null;
 
   constructor(config: Config, logger: Logger, persona: string) {
     this.config = config;
@@ -312,6 +337,7 @@ export class LettaService {
   }
 
   setDefaultModel(model: string): void {
+    if (model !== this.defaultModel) this.unsupportedReasoningEffort = null;
     this.defaultModel = model;
   }
 
@@ -329,8 +355,38 @@ export class LettaService {
       settings.app_server_request_timeout_ms !== this.runtime.app_server_request_timeout_ms;
     this.runtime = settings;
     this.persona = settings.default_persona || this.persona;
+    // Администратор мог выбрать другой уровень reasoning; прежний вывод о
+    // его поддержке к новому значению не относится.
+    this.unsupportedReasoningEffort = null;
     this.closeAllSessions();
     if (reconnect) this.client = this.createClient();
+  }
+
+  /**
+   * Есть ли у активной модели запрошенный уровень reasoning.
+   *
+   * `checked: false` означает, что каталог недоступен и вывода нет — это не
+   * «не поддерживается». Настройку в таком случае блокировать нельзя:
+   * администратор не должен зависеть от того, поднят ли App Server.
+   */
+  async reasoningEffortSupport(effort: ReasoningEffort): Promise<{
+    checked: boolean;
+    supported: boolean;
+    model: string;
+  }> {
+    const model = this.defaultModel;
+    if (effort === "none") return { checked: true, supported: true, model };
+    if (!model) return { checked: false, supported: false, model };
+    let entries: Array<{ handle?: string; updateArgs?: Record<string, unknown> }>;
+    try {
+      entries = (await this.client.models.list()).entries ?? [];
+    } catch {
+      return { checked: false, supported: false, model };
+    }
+    const supported = entries.some(
+      (entry) => entry.handle === model && entry.updateArgs?.reasoning_effort === effort,
+    );
+    return { checked: true, supported, model };
   }
 
   // -----------------------------------------------------------------
@@ -556,8 +612,7 @@ export class LettaService {
 
     let session: LettaCodeSession;
     try {
-      session = this.client.resumeSession(conversationId, this.sessionOptions(conversationId));
-      await this.initialize(session);
+      session = await this.openSession(conversationId);
     } catch (error) {
       throw toEvaError(error, `resuming conversation ${conversationId}`);
     }
@@ -583,6 +638,53 @@ export class LettaService {
       recovered: true,
     });
     return session;
+  }
+
+  /**
+   * Открыть сессию, при необходимости отказавшись от уровня reasoning.
+   *
+   * SDK применяет `reasoningEffort` при инициализации сессии, а не при ходе:
+   * если у модели нет соответствующей записи в каталоге, инициализация
+   * бросает исключение и разговор становится недоступен целиком. Настройка
+   * из `sdk_settings` не должна выключать Еву, поэтому такая ошибка один раз
+   * фиксируется в журнале, а сессия переоткрывается без reasoning.
+   */
+  private async openSession(conversationId: string): Promise<LettaCodeSession> {
+    const session = this.client.resumeSession(
+      conversationId,
+      this.sessionOptions(conversationId),
+    );
+    try {
+      await this.initialize(session);
+      return session;
+    } catch (error) {
+      if (this.unsupportedReasoningEffort !== null || !this.usesReasoningEffort()) throw error;
+      if (!isReasoningTierError(error)) throw error;
+      try {
+        session.close();
+      } catch {
+        // Неинициализированная сессия могла и не открыть соединение.
+      }
+      this.unsupportedReasoningEffort = this.runtime.reasoning_effort;
+      this.logger.warn("модель не предлагает выбранный уровень reasoning, ход идёт без него", {
+        reasoning_effort: this.runtime.reasoning_effort,
+        model: this.defaultModel,
+      });
+      const retry = this.client.resumeSession(
+        conversationId,
+        this.sessionOptions(conversationId),
+      );
+      await this.initialize(retry);
+      return retry;
+    }
+  }
+
+  /** Передаётся ли уровень reasoning в опции сессии прямо сейчас. */
+  private usesReasoningEffort(): boolean {
+    return (
+      this.runtime.reasoning_effort !== "none" &&
+      this.runtime.reasoning_effort !== this.unsupportedReasoningEffort
+    );
   }
 
   /** Some session implementations expose initialize(); it is not in the public type. */
@@ -808,8 +910,9 @@ export class LettaService {
       // "none" is our explicit UI/default value. Passing it to the SDK asks
       // the model catalog for a literal "none" tier, which ordinary
       // OpenAI-compatible models do not advertise. Omitting the option keeps
-      // the provider's non-reasoning/default model unchanged.
-      ...(this.runtime.reasoning_effort !== "none"
+      // the provider's non-reasoning/default model unchanged. Уровень,
+      // отвергнутый каталогом, тоже не передаётся: см. openSession().
+      ...(this.usesReasoningEffort()
         ? { reasoningEffort: this.runtime.reasoning_effort }
         : {}),
       skillSources: this.runtime.skillSources,

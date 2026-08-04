@@ -74,6 +74,80 @@ test("public SDK settings expose only token presence, never the token", async ()
   assert.ok(!serialized.includes("appServerToken"));
 });
 
+test("reasoning_effort не сохраняется, если каталог не знает такого уровня", async () => {
+  const row = settingsRow();
+  let saved = false;
+  const manager = new SdkSettingsManager(
+    { appServerUrl: "ws://letta-app-server:4500/ws", appServerToken: "" } as never,
+    {
+      getSdkSettings: async () => row,
+      saveSdkSettings: async (input: unknown) => {
+        saved = true;
+        return input;
+      },
+    } as never,
+    {
+      currentPersona: "persona",
+      applySdkSettings() {},
+      reasoningEffortSupport: async () => ({
+        checked: true,
+        supported: false,
+        model: "lmstudio/eva/chat",
+      }),
+    } as never,
+  );
+
+  await assert.rejects(
+    () => manager.update({ reasoning_effort: "medium" }),
+    (error: unknown) => error instanceof EvaError && error.code === "bad_request",
+  );
+  assert.equal(saved, false);
+});
+
+test("недоступный каталог моделей не блокирует настройку reasoning_effort", async () => {
+  const row = settingsRow();
+  const manager = new SdkSettingsManager(
+    { appServerUrl: "ws://letta-app-server:4500/ws", appServerToken: "" } as never,
+    {
+      getSdkSettings: async () => row,
+      saveSdkSettings: async (input: Record<string, unknown>) => ({ ...row, ...input }),
+    } as never,
+    {
+      currentPersona: "persona",
+      applySdkSettings() {},
+      reasoningEffortSupport: async () => ({
+        checked: false,
+        supported: false,
+        model: "lmstudio/eva/chat",
+      }),
+    } as never,
+  );
+
+  const result = await manager.update({ reasoning_effort: "medium" });
+  assert.equal(result.reasoning_effort, "medium");
+});
+
+test("возврат к none не требует каталога моделей", async () => {
+  const row = { ...settingsRow(), reasoning_effort: "medium" as const };
+  const manager = new SdkSettingsManager(
+    { appServerUrl: "ws://letta-app-server:4500/ws", appServerToken: "" } as never,
+    {
+      getSdkSettings: async () => row,
+      saveSdkSettings: async (input: Record<string, unknown>) => ({ ...row, ...input }),
+    } as never,
+    {
+      currentPersona: "persona",
+      applySdkSettings() {},
+      reasoningEffortSupport: async () => {
+        throw new Error("каталог не должен запрашиваться для none");
+      },
+    } as never,
+  );
+
+  const result = await manager.update({ reasoning_effort: "none" });
+  assert.equal(result.reasoning_effort, "none");
+});
+
 function settingsRow() {
   const now = new Date("2026-07-28T00:00:00Z");
   return {
@@ -84,6 +158,7 @@ function settingsRow() {
     default_human_template: "Имя: {{display_name}}",
     default_tags: ["evaself"],
     permission_mode: "unrestricted" as const,
+    reasoning_effort: "none" as const,
     memfs_enabled: true,
     system_prompt: null,
     base_tools: null,
