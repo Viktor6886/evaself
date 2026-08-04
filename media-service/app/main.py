@@ -108,11 +108,11 @@ IS_PRODUCTION = EVA_ENV not in {"development", "dev", "local", "test"}
 
 if IS_PRODUCTION and not SERVICE_TOKEN:
     raise RuntimeError(
-        "MEDIA_SERVICE_TOKEN пуст при EVA_ENV=%s. media-service тратит токен "
-        "бота и платные ключи ASR/TTS, и без общего секрета его может вызвать "
-        "любой контейнер сети compose. Задайте MEDIA_SERVICE_TOKEN в .env "
-        "(`make configure` генерирует его сам) или выставьте EVA_ENV=development."
-        % EVA_ENV
+        f"MEDIA_SERVICE_TOKEN пуст при EVA_ENV={EVA_ENV}. media-service тратит "
+        "токен бота и платные ключи ASR/TTS, и без общего секрета его может "
+        "вызвать любой контейнер сети compose. Задайте MEDIA_SERVICE_TOKEN "
+        "в .env (`make configure` генерирует его сам) или выставьте "
+        "EVA_ENV=development."
     )
 
 
