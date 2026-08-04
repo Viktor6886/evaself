@@ -51,6 +51,14 @@ RUN mkdir -p /data/letta-config/providers /data/llm-control \
  && chown -R node:node /data/letta-config /data/llm-control \
  && chmod 0755 /usr/local/bin/evaself-entrypoint
 
+# Выделенная группа для Unix-сокета updater. Сокет создаёт eva-updater
+# (работает от root), а ходят в него admin-api и health-worker, которые
+# entrypoint переводит на пользователя node. Раньше сокет был 0666, то
+# есть доступен любому процессу в любом контейнере, монтирующем этот
+# volume. Группа позволяет отдать права 0660 и не сломать клиентов.
+RUN groupadd --system evaself-updater \
+ && usermod -aG evaself-updater node
+
 EXPOSE 8070
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=5 \

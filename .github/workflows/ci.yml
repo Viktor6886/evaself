@@ -564,6 +564,11 @@ jobs:
             --build-arg DOCKER_CLI_VERSION="$DOCKER_CLI_VERSION" eva-agent-service
           docker run --rm evaself/eva-updater:ci sh -c \
             'docker compose version && python3 --version'
+          # Выделенная группа сокета updater должна существовать, и node —
+          # пользователь admin-api и health-worker — должен в неё входить.
+          # Без этого сокет с правами 0660 отрезал бы своих же клиентов.
+          docker run --rm evaself/eva-updater:ci sh -c \
+            'getent group evaself-updater && id -nG node | tr " " "\n" | grep -qx evaself-updater'
           docker build -t evaself/letta-app-server:ci \
             --build-arg NODE_BASE_VERSION="$NODE_BASE_VERSION" \
             --build-arg LETTA_CODE_VERSION="$LETTA_CODE_VERSION" letta-app-server
@@ -1157,6 +1162,42 @@ jobs:
                 console.log('media auth ok');
               })().catch((e) => { console.error(e); process.exit(1); });
             " | grep -q 'media auth ok'
+
+      - name: The updater socket is 0660 and only its group can reach it
+        run: |
+          # Сокет открывает фиксированные backup/update-команды, а у самого
+          # eva-updater смонтирован Docker socket. Права 0666 давали доступ
+          # любому процессу в любом контейнере, монтирующем этот volume.
+          # Проверяются обе стороны: права сузились И клиент не потерялся.
+          docker compose --env-file versions.env --env-file .env \
+            up -d --build eva-updater
+          for i in $(seq 1 30); do
+            if docker compose --env-file versions.env --env-file .env \
+                exec -T eva-updater test -S /run/evaself-updater/updater.sock; then
+              break
+            fi
+            [ "$i" = "30" ] && {
+              docker compose --env-file versions.env --env-file .env \
+                logs --tail=50 eva-updater
+              exit 1
+            }
+            sleep 2
+          done
+
+          PERMS="$(docker compose --env-file versions.env --env-file .env \
+            exec -T eva-updater stat -c '%a %U:%G' /run/evaself-updater/updater.sock | tr -d '\r')"
+          echo "updater socket: $PERMS"
+          test "$PERMS" = "660 root:evaself-updater"
+
+          # admin-api работает от node и обязан достучаться до сокета:
+          # иначе ужесточение прав тихо сломало бы обновления.
+          docker compose --env-file versions.env --env-file .env \
+            exec -T admin-api node -e "
+              const net = require('net');
+              const s = net.connect('/run/evaself-updater/updater.sock');
+              s.on('connect', () => { console.log('updater reachable from admin-api'); s.end(); });
+              s.on('error', (e) => { console.error(e.message); process.exit(1); });
+            " | grep -q 'updater reachable from admin-api'
 
       - name: SearXNG cannot reach PostgreSQL or the Caddy admin API
         run: |

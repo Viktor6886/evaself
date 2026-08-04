@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, chown, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
@@ -14,8 +14,56 @@ const dockerSocket = process.env.DOCKER_HOST_SOCKET ?? "/var/run/docker.sock";
 const updaterSocket =
   process.env.EVA_UPDATER_SOCKET ?? "/run/evaself-updater/updater.sock";
 const projectDir = process.env.EVA_UPDATER_PROJECT_DIR ?? "/workspace";
+const updaterSocketGroup =
+  process.env.EVA_UPDATER_SOCKET_GROUP ?? "evaself-updater";
 const backupDir = process.env.BACKUP_DIR ?? "/var/backups/evaself";
 const dockerApi = "/v1.41";
+
+/**
+ * GID выделенной группы сокета по имени, из /etc/group.
+ *
+ * Node не даёт getgrnam, а тянуть зависимость ради одной строки не стоит.
+ * Возвращает null, если группы нет.
+ */
+async function resolveGroupId(name: string): Promise<number | null> {
+  let content: string;
+  try {
+    content = await readFile("/etc/group", "utf8");
+  } catch {
+    return null;
+  }
+  for (const line of content.split("\n")) {
+    const fields = line.split(":");
+    if (fields[0] !== name) continue;
+    const gid = Number.parseInt(fields[2] ?? "", 10);
+    return Number.isInteger(gid) ? gid : null;
+  }
+  return null;
+}
+
+/**
+ * Права на Unix-сокет updater.
+ *
+ * Сокет открывает путь к фиксированным backup/update-командам, а у самого
+ * eva-updater смонтирован Docker socket. Права 0666 давали доступ любому
+ * процессу в любом контейнере, который монтирует этот volume. Теперь 0660
+ * и владелец root:evaself-updater — группа заведена в образе, и в неё
+ * входит пользователь node, под которым работают admin-api и
+ * health-worker.
+ *
+ * Если группы нет, сокет остаётся недоступен клиентам, и молча работать
+ * дальше нельзя: это тихо сломало бы обновления. Поэтому — ошибка.
+ */
+async function secureUpdaterSocket(): Promise<void> {
+  const gid = await resolveGroupId(updaterSocketGroup);
+  if (gid === null) {
+    throw new Error(
+      `группа ${updaterSocketGroup} отсутствует в образе: сокет updater нельзя закрыть до 0660, не потеряв admin-api и health-worker`,
+    );
+  }
+  await chown(updaterSocket, 0, gid);
+  await chmod(updaterSocket, 0o660);
+}
 
 const CONTAINERS = new Map<string, string>([
   ["agent-runtime", "evaself-eva-agent-service"],
@@ -527,12 +575,14 @@ async function main() {
     // The listen callback is void-returning: an async body would drop a
     // rejected chmod on the floor as an unhandled rejection.
     void (async () => {
-      await chmod(updaterSocket, 0o666);
+      await secureUpdaterSocket();
       process.stdout.write(`${JSON.stringify({
         level: "info",
         service: "eva-updater",
         message: "Unix socket готов",
         socket: updaterSocket,
+        socket_mode: "0660",
+        socket_group: updaterSocketGroup,
         command_count: 10,
       })}\n`);
     })().catch((error) => {
