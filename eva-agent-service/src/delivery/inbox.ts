@@ -57,7 +57,11 @@ export class PostgresTelegramInbox implements TelegramInbox {
           : message?.text || message?.caption
             ? "text"
             : "unsupported";
-    const { rowCount } = await this.db.query(
+    // Приём апдейта — системная запись: внутренний пользователь ещё не
+    // опознан, запись хранит только проверенный Telegram-идентификатор.
+    const { rowCount } = await this.db.withSystemScope(
+      "telegram.inbox.enqueue",
+      async () => await this.db.query(
       `
         -- tenant: system — durable ingress Telegram: строки берутся по update_id и аренде воркера, а не по запросу пользователя
         INSERT INTO telegram_updates
@@ -74,6 +78,7 @@ export class PostgresTelegramInbox implements TelegramInbox {
         Boolean(message?.from && !message.from.is_bot && kind !== "unsupported" && !isCommand),
         JSON.stringify(update),
       ],
+      ),
     );
     return { accepted: true, duplicate: rowCount === 0 };
   }
@@ -83,7 +88,10 @@ export class PostgresTelegramInbox implements TelegramInbox {
     leaseSeconds: number,
     maxAttempts: number,
   ): Promise<InboxRecord | null> {
-    return await this.db.transaction(async (client) => {
+    // Аренда очереди идёт по записям всех пользователей сразу: это
+    // durable ingress сервиса, а не работа от чьего-то имени.
+    return await this.db.withSystemScope("telegram.inbox.claim", async () =>
+      await this.db.transaction(async (client) => {
       await client.query(
         `
           -- tenant: system — durable ingress Telegram: строки берутся по update_id и аренде воркера, а не по запросу пользователя
@@ -137,11 +145,14 @@ export class PostgresTelegramInbox implements TelegramInbox {
         chatId: row.chat_id === null ? null : Number(row.chat_id),
         telegramUserId: row.telegram_user_id === null ? null : Number(row.telegram_user_id),
       };
-    });
+      }),
+      { crossUser: true },
+    );
   }
 
   async complete(updateId: number, result: InboxResult): Promise<void> {
-    await this.db.query(
+    await this.db.withSystemScope("telegram.inbox.complete", async () =>
+      await this.db.query(
       `
         -- tenant: system — durable ingress Telegram: строки берутся по update_id и аренде воркера, а не по запросу пользователя
         UPDATE telegram_updates
@@ -155,6 +166,8 @@ export class PostgresTelegramInbox implements TelegramInbox {
               locked_by = NULL
         WHERE update_id = $1`,
       [updateId, result.status, result.usageCharged ?? false],
+      ),
+      { crossUser: true },
     );
   }
 
@@ -167,7 +180,8 @@ export class PostgresTelegramInbox implements TelegramInbox {
     const dead = attempts >= maxAttempts;
     const message = error instanceof Error ? error.message : String(error);
     const backoffSeconds = Math.min(300, Math.max(2, 2 ** Math.max(0, attempts - 1)));
-    await this.db.query(
+    await this.db.withSystemScope("telegram.inbox.fail", async () =>
+      await this.db.query(
       `
         -- tenant: system — durable ingress Telegram: строки берутся по update_id и аренде воркера, а не по запросу пользователя
         UPDATE telegram_updates
@@ -184,6 +198,8 @@ export class PostgresTelegramInbox implements TelegramInbox {
               locked_by = NULL
         WHERE update_id = $1`,
       [updateId, dead ? "dead" : "retry", backoffSeconds, message.slice(0, 2_000)],
+      ),
+      { crossUser: true },
     );
     return { dead };
   }

@@ -1,6 +1,7 @@
 import pg from "pg";
 
 import { createLogger } from "../logger.js";
+import { guardPool } from "../tenancy/index.js";
 import { runAdminBootstrap } from "./bootstrap.js";
 import { loadMasterKey, SecretStore } from "./secret-store.js";
 
@@ -9,11 +10,11 @@ const { Pool } = pg;
 async function main(): Promise<void> {
   const databaseUrl = (process.env.DATABASE_URL ?? "").trim();
   if (!databaseUrl) throw new Error("DATABASE_URL обязателен");
-  const pool = new Pool({
+  const pool = guardPool(new Pool({
     connectionString: databaseUrl,
     max: 2,
     application_name: "evaself-admin-bootstrap",
-  });
+  }));
   try {
     const masterKey = await loadMasterKey();
     const store = new SecretStore({ masterKey, pool });

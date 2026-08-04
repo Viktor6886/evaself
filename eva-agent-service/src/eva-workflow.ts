@@ -95,8 +95,17 @@ export class EvaWorkflow {
     };
     try {
       const measured = await this.db.withQueryMetrics(async () =>
-        await this.queue.run(update.telegramId, async (): Promise<InboxResult> => {
+        await this.queue.run(update.telegramId, async (): Promise<InboxResult> =>
+        // Ход целиком идёт в области своего пользователя: всё, что
+        // выполнится внутри — контекст, инструменты, память, доставка —
+        // ограничено этим человеком. Область открывается по проверенному
+        // Telegram-идентификатору, внутренний `users.id` добавляется
+        // после канонической выборки.
+        await this.db.withUserScope(
+          { telegramId: update.telegramId, label: "telegram.turn" },
+          async (): Promise<InboxResult> => {
         const { user, link } = await this.ensureUserAndAgent(update);
+        this.db.bindScopeUserId(user.id);
         const language = preferredResponseLanguage(user);
         await this.db.attachTelegramUpdateToUser(update.updateId, user.id);
 
@@ -266,7 +275,7 @@ export class EvaWorkflow {
         } finally {
           metrics.letta_turn_ms = elapsed(lettaStarted);
         }
-        await this.db.markAgentUsed(link.agent_id);
+        await this.db.markAgentUsed(link.agent_id, user.id);
         // Ход, где модель прислала несколько сообщений, — это агентный
         // цикл с проговариванием плана. В Telegram уходит только
         // последнее; счётчики нужны, чтобы разбирать жалобы на утёкшие
@@ -303,7 +312,8 @@ export class EvaWorkflow {
 
         await this.db.incrementUsage(update.telegramId, "messages");
         return { status: "completed", usageCharged: true };
-        }),
+          },
+        )),
       );
       metrics.db_query_count = measured.queryCount;
       return measured.result;
@@ -359,7 +369,7 @@ export class EvaWorkflow {
     }
     if (!link.conversation_id) {
       const conversationId = await this.letta.createConversation(link.agent_id);
-      await this.db.setConversation(link.agent_id, conversationId);
+      await this.db.setConversation(link.agent_id, conversationId, user.id);
       link = { ...link, conversation_id: conversationId };
     }
     return { user, link };

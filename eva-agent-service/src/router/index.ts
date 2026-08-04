@@ -8,6 +8,7 @@
 import pg from "pg";
 
 import { createLogger } from "../logger.js";
+import { guardPool } from "../tenancy/index.js";
 import { DEFAULT_OPTIONS, LlmRouter } from "./router.js";
 import { createRouterServer } from "./server.js";
 import { RouterStore } from "./store.js";
@@ -33,11 +34,14 @@ async function main(): Promise<void> {
     throw new Error("EVA_ROUTER_API_KEY обязателен и должен быть не короче 16 символов");
   }
 
-  const pool = new Pool({
+  // Router пишет телеметрию llm_requests, помеченную владельцем хода.
+  // Пул проходит ту же границу, а сам маршрут объявляет системную
+  // область: чужих данных router не читает и читать не должен.
+  const pool = guardPool(new Pool({
     connectionString: databaseUrl,
     max: 8,
     application_name: "evaself-llm-router",
-  });
+  }));
   await pool.query("SELECT 1");
 
   const store = new RouterStore(pool, encryptionKey);

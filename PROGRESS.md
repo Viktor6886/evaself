@@ -80,7 +80,7 @@
 | 00 | [Аудит репозитория и фиксация baseline](prompts/step-00-bootstrap.md) | P0 | — | выполнен | [#102](https://github.com/Viktor6886/evaself/pull/102) | 2026-08-04 |
 | ⏸ | **Конец порции 1 (P0) — остановка, сводка, запрос разрешения** | | | | | |
 | 01 | [Срочные исправления безопасности и Security Audit](prompts/step-01-security-fixes.md) | P0 | шаг 0 | выполнен | [#103](https://github.com/Viktor6886/evaself/pull/103) | 2026-08-04 |
-| 02 | [Обязательная изоляция арендаторов](prompts/step-02-tenant-isolation.md) | P0 | шаг 0 | не начат | — | — |
+| 02 | [Обязательная изоляция арендаторов](prompts/step-02-tenant-isolation.md) | P0 | шаг 0 | на ревью | — | 2026-08-04 |
 | ⏸ | **Конец порции 2 (P0) — остановка, сводка, запрос разрешения** | | | | | |
 | 03 | [Durable жизненный цикл хода в shadow-режиме и базовые метрики](prompts/step-03-turn-lifecycle.md) | P0 | шаги 0–2 | не начат | — | — |
 | 04 | [Параллельный dispatcher, объединение быстрых сообщений, UserTurnLock и семафоры](prompts/step-04-parallel-inbox.md) | P0 | шаг 3 | не начат | — | — |
@@ -196,6 +196,86 @@
 ```
 
 <!-- Записи ниже -->
+
+### Шаг 02 — Обязательная изоляция арендаторов
+- Агент: Claude Code (Claude Code on the web)
+- Ветка: step/02-tenant-isolation
+- PR: —
+- Дата: 2026-08-04
+- Статус: **на ревью** (журнал заполнен до мержа, как требует протокол)
+- Что найдено до изменения: код почти везде уже фильтровал по `user_id`,
+  но держалось это на договорённости — ни одного места, где отсутствие
+  границы приводило бы к отказу, в репозитории не было. Проверено
+  отсутствие эквивалента: модуля tenancy/scope нет, RLS в миграциях нет
+  (`ROW LEVEL SECURITY`, `current_setting`, `set_config` не встречаются).
+  Переиспользованы существующие механизмы: RBAC и аудит админки,
+  проверка подписи Mini App, канонический `getAgentRuntimeContext`,
+  durable inbox/outbox.
+- Итог: введена единая граница арендатора `src/tenancy/`. Запрос к любой
+  из 42 пользовательских таблиц и представлений выполняется только
+  внутри объявленной области: `user` (совпадение владельца проверяется по
+  значению), `system` (фоновая работа, доступ к нескольким пользователям
+  требует явного `crossUser` с причиной) или `admin` (роль плюс запись
+  аудита). Без области запрос не выполняется вовсе.
+- Где ограничения не было и что сделано:
+  1. `task_events` соединялся с `tasks` только по `task_id` — добавлено
+     `AND t.user_id = e.user_id` в пяти запросах;
+  2. `llm_requests` читался по `request_id` без владельца — добавлено
+     `AND (user_id = $1 OR user_id IS NULL)`;
+  3. планировщик обновлял `tasks` по `id` — добавлено `AND user_id`;
+  4. `claimDueTasks` присоединял `goals` только по `goal_id` — добавлено
+     `AND g.user_id = t.user_id`;
+  5. `attachTelegramUpdateToUser` переписывал владельца записи ingress —
+     добавлено `AND (user_id IS NULL OR user_id = $2)`;
+  6. `markAgentUsed` менял связку по `agent_id` — во время хода теперь
+     ограничен владельцем;
+  7. Mini App принимал `work_block_id` из тела запроса без проверки
+     владения — добавлена проверка до вставки.
+  Остальные сплошные выборки (аренда inbox и outbox, кандидаты
+  планировщика и heartbeat, обзоры установки, опознание владельца в
+  вебхуке оплаты, разделы админки) объявлены системными или
+  административными явно, с причиной в коде и в списке теста.
+- Изменённые файлы: новый модуль `src/tenancy/{tables,sql,scope,guarded-pool,index}.ts`;
+  границы в `db.ts`, `eva-workflow.ts`, `background.ts`, `delivery/inbox.ts`,
+  `delivery/outbox.ts`, `payments.ts`, `agent-tools.ts`, `public/routes.ts`,
+  `public/webapp-core.ts`, `memory/conversation-highlights.ts`,
+  `tasks/task-event-service.ts`, `router/{index,store}.ts`,
+  `admin/{server,index,bootstrap-index,health-worker-index}.ts`;
+  тесты `test/tenant-isolation.test.ts` и `test/tenant-scope-helper.ts`;
+  документ `docs/TENANT_ISOLATION.md`. Миграций нет: схема не менялась.
+- Проверки (фактический вывод — в описании pull request):
+  - `npm run build` и `npx tsc --noEmit`: чисто;
+  - `npm run lint`: без замечаний;
+  - `npm test`: **372 passed, 0 failed** (было 354; 18 новых);
+  - `python3 scripts/ci/assert-admin-route-access.py`: 77 маршрутов;
+  - `assert-env-plumbing.py`, `assert-frontend-routes.py`,
+    `assert-down-migrations.py`: пройдены;
+  - `bash scripts/validate.sh`: 4 падения на Caddyfile — окружное
+    (в песочнице нет бинарника `caddy`), воспроизводится и без изменений
+    шага; в CI этот job зелёный.
+- Что важно знать: существующие тесты сервисов теперь прогоняются через
+  `withTenantScopes` — поддельная база проходит ту же проверку границы,
+  что и настоящая. Assertions не ослаблялись, ни один тест не помечен
+  skip.
+- Ограничения:
+  - разбор SQL статический и намеренно грубый: всё, что не разобрано,
+    считается неограниченным. Динамически собранный запрос к
+    пользовательской таблице с фильтром владельца внутри `${...}` будет
+    отвергнут — фильтр обязан быть в статической части;
+  - `enterWith` не переживает `await` внутри hook Fastify, поэтому
+    область админки создаётся синхронно в `onRequest` и дозаполняется
+    ролью и аудитом по мере проверок. Это проверено тестом на настоящем
+    `buildAdminServer`;
+  - RLS в PostgreSQL не вводился: это отдельное решение с миграцией,
+    ролью и передачей идентификатора в сессию соединения;
+  - `GET /api/admin/v1/llm/state` теперь пишет запись аудита на каждый
+    просмотр (в состоянии есть последние отказы из `llm_requests`).
+- Следующему агенту:
+  - добавляешь таблицу с `user_id` — внеси её в `TENANT_TABLES`, иначе
+    тест реестра упадёт; добавляешь фоновое задание — открывай область
+    явно; добавляешь пул PostgreSQL — оборачивай в `guardPool`;
+  - полный порядок действий — в `docs/TENANT_ISOLATION.md`;
+  - **шаг 03 не начат.**
 
 ### Шаг 01 — Срочные исправления безопасности и Security Audit
 - Агент: Claude Code (Claude Code on the web)

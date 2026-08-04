@@ -90,7 +90,24 @@ export class PublicRepository implements PublicDataSource {
     private readonly goals: GoalService,
   ) {}
 
+  /**
+   * Каждый метод репозитория открывает область своего пользователя.
+   * Идентификатор приходит только из проверенной подписи Telegram; тело
+   * запроса на выбор владельца не влияет.
+   */
+  private async scoped<T>(
+    telegramId: number,
+    label: string,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    return await this.db.withUserScope(
+      { telegramId, label: `public.${label}` },
+      work,
+    );
+  }
+
   async openSession(user: TelegramWebAppUser): Promise<PublicSession> {
+    return await this.scoped(user.id, "session", async () => {
     const saved = await this.db.upsertUser({
       telegramId: user.id,
       username: user.username,
@@ -98,6 +115,7 @@ export class PublicRepository implements PublicDataSource {
       lastName: user.last_name,
       languageCode: user.language_code,
     });
+    this.db.bindScopeUserId(saved.id);
     const overview = await this.db.getUserOverview(user.id);
     return {
       user: {
@@ -111,9 +129,11 @@ export class PublicRepository implements PublicDataSource {
       plan: typeof overview?.plan === "string" ? overview.plan : "free",
       quotas: await this.db.getQuotaStatus(user.id),
     };
+    });
   }
 
   async listTasks(telegramId: number): Promise<PublicTask[]> {
+    return await this.scoped(telegramId, "tasks", async () => {
     const { rows } = await this.db.query<PublicTask>(
       `SELECT t.id::text, t.title, t.description, t.status, t.priority,
               t.due_at, t.remind_at, t.completed_at, t.updated_at
@@ -129,9 +149,11 @@ export class PublicRepository implements PublicDataSource {
       [telegramId],
     );
     return rows;
+    });
   }
 
   async getToday(telegramId: number): Promise<Record<string, unknown>> {
+    return await this.scoped(telegramId, "today", async () => {
     const { rows } = await this.db.query<{
       timezone: string;
       local_time: string;
@@ -229,9 +251,11 @@ export class PublicRepository implements PublicDataSource {
     );
     if (!rows[0]) throw unauthorized("Пользователь Telegram не найден");
     return rows[0];
+    });
   }
 
   async listGoals(telegramId: number): Promise<Record<string, unknown>[]> {
+    return await this.scoped(telegramId, "goals", async () => {
     const { rows } = await this.db.query<Record<string, unknown>>(
       `SELECT g.id::text,
               g.title,
@@ -271,12 +295,14 @@ export class PublicRepository implements PublicDataSource {
       [telegramId],
     );
     return rows;
+    });
   }
 
   async createGoal(
     telegramId: number,
     input: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
+    return await this.scoped(telegramId, "goal.create", async () => {
     const user = await this.userByTelegramId(telegramId);
     const draft = await this.goals.upsertGoal({
       userId: user.id,
@@ -291,6 +317,7 @@ export class PublicRepository implements PublicDataSource {
       string,
       unknown
     >;
+    });
   }
 
   async updateGoal(
@@ -298,6 +325,7 @@ export class PublicRepository implements PublicDataSource {
     goalId: number,
     input: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
+    return await this.scoped(telegramId, "goal.update", async () => {
     const user = await this.userByTelegramId(telegramId);
     const status = optionalEnum(
       input.status,
@@ -327,9 +355,11 @@ export class PublicRepository implements PublicDataSource {
         : {}),
       ...(status ? { status } : {}),
     }) as Record<string, unknown>;
+    });
   }
 
   async getProfile(telegramId: number): Promise<Record<string, unknown>> {
+    return await this.scoped(telegramId, "profile", async () => {
     const user = await this.userByTelegramId(telegramId);
     const profile = await this.profile.getProfile(user.id);
     return {
@@ -346,12 +376,14 @@ export class PublicRepository implements PublicDataSource {
       candidates: profile.candidates.map(publicProfileField),
       completeness: profile.completeness,
     };
+    });
   }
 
   async updateProfile(
     telegramId: number,
     input: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
+    return await this.scoped(telegramId, "profile.update", async () => {
     const user = await this.userByTelegramId(telegramId);
     const fields = input.fields && typeof input.fields === "object" && !Array.isArray(input.fields)
       ? Object.entries(input.fields as Record<string, unknown>).slice(0, 20)
@@ -380,9 +412,11 @@ export class PublicRepository implements PublicDataSource {
       await this.profile.setLanguage(user.id, language);
     }
     return await this.getProfile(telegramId);
+    });
   }
 
   async getProgress(telegramId: number): Promise<Record<string, unknown>> {
+    return await this.scoped(telegramId, "progress", async () => {
     const user = await this.userByTelegramId(telegramId);
     const [results, workBlocks, strategies, goals] = await Promise.all([
       this.db.query(
@@ -433,6 +467,7 @@ export class PublicRepository implements PublicDataSource {
       strategies: strategies.rows,
       goals: goals.rows,
     };
+    });
   }
 
   async startWorkBlock(
@@ -440,6 +475,7 @@ export class PublicRepository implements PublicDataSource {
     workBlockId: number,
     input: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
+    return await this.scoped(telegramId, "work-block.start", async () => {
     const owned = await this.ownedWorkBlock(telegramId, workBlockId);
     return await this.goals.recordWorkBlock({
       userId: owned.userId,
@@ -449,6 +485,7 @@ export class PublicRepository implements PublicDataSource {
       workBlockId,
       energyBefore: optionalInteger(input.energy_before, 1, 5),
     }) as Record<string, unknown>;
+    });
   }
 
   async completeWorkBlock(
@@ -456,6 +493,7 @@ export class PublicRepository implements PublicDataSource {
     workBlockId: number,
     input: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
+    return await this.scoped(telegramId, "work-block.complete", async () => {
     const owned = await this.ownedWorkBlock(telegramId, workBlockId);
     return await this.goals.recordWorkBlock({
       userId: owned.userId,
@@ -472,6 +510,7 @@ export class PublicRepository implements PublicDataSource {
       resultCompleted: input.result_completed === true,
       progressPercent: optionalInteger(input.progress_percent, 0, 100),
     }) as Record<string, unknown>;
+    });
   }
 
   private async userByTelegramId(telegramId: number): Promise<{
@@ -494,6 +533,7 @@ export class PublicRepository implements PublicDataSource {
       [telegramId],
     );
     if (!rows[0]) throw unauthorized("Пользователь Telegram не найден");
+    this.db.bindScopeUserId(Number(rows[0].id));
     return rows[0];
   }
 
@@ -513,6 +553,7 @@ export class PublicRepository implements PublicDataSource {
       [workBlockId, telegramId],
     );
     if (!rows[0]) throw new Error("Рабочий блок не найден");
+    this.db.bindScopeUserId(Number(rows[0].user_id));
     return {
       userId: Number(rows[0].user_id),
       goalId: Number(rows[0].goal_id),

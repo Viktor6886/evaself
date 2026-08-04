@@ -7,6 +7,7 @@ import Fastify, {
 } from "fastify";
 
 import type { Logger } from "../logger.js";
+import { adminScope, enterScope, type AdminScope } from "../tenancy/index.js";
 import {
   expiredSessionCookies,
   type AdminRole,
@@ -40,6 +41,13 @@ interface RouteAccess {
   roles?: AdminRole[];
   csrfExempt?: boolean;
   sudoScope?: string;
+  /**
+   * Маршрут читает или меняет данные пользователей Евы. Такой доступ
+   * всегда идёт под ролью И под записью аудита: для безопасных методов
+   * запись создаётся здесь же, иначе граница арендатора не пропустит
+   * запрос к пользовательским таблицам.
+   */
+  tenantAccess?: "cross-user";
 }
 
 interface RequestContext {
@@ -47,6 +55,8 @@ interface RequestContext {
   startedAt: number;
   session?: AuthenticatedSession;
   audit?: { id: string; startedAt: number };
+  /** Рамка арендатора запроса; заполняется по мере проверок. */
+  scope: AdminScope;
 }
 
 export interface AdminServerServices {
@@ -123,8 +133,18 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
   const contexts = new WeakMap<FastifyRequest, RequestContext>();
 
   app.addHook("onRequest", async (request, reply) => {
+    // Рамка ставится первым делом и синхронно: после `await` она бы не
+    // пережила переход к следующему хуку. Пока роль и запись аудита
+    // неизвестны, обращение к данным пользователей закрыто.
+    const scope = adminScope({
+      actor: "anonymous",
+      role: "none",
+      auditId: null,
+      route: `${request.method} ${request.url.split("?")[0] ?? request.url}`,
+    });
+    enterScope(scope);
     const requestId = requestIdOf(request);
-    contexts.set(request, { requestId, startedAt: Date.now() });
+    contexts.set(request, { requestId, startedAt: Date.now(), scope });
     reply.header("X-Request-Id", requestId);
     reply.header("Cache-Control", "no-store");
   });
@@ -132,7 +152,9 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
   // Audit starts before authentication/authorization and therefore before
   // any administrative state change can happen.
   app.addHook("preValidation", async (request) => {
-    if (SAFE_METHODS.has(request.method)) return;
+    if (SAFE_METHODS.has(request.method) && accessOf(request).tenantAccess !== "cross-user") {
+      return;
+    }
     const context = contexts.get(request)!;
     context.audit = await services.audit.start({
       requestId: context.requestId,
@@ -142,10 +164,13 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
       actor: actorOf(context),
       params: auditParams(request.url, request.body, request.params),
     });
+    context.scope.auditId = context.audit.id;
   });
 
   app.addHook("preHandler", async (request) => {
     const access = accessOf(request);
+    // Открытый маршрут остаётся с анонимной рамкой: доступа к данным
+    // пользователей из неё нет.
     if (access.public) return;
     const context = contexts.get(request)!;
     const session = await services.auth.authenticate(request.headers.cookie);
@@ -163,6 +188,12 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
     if (access.sudoScope) {
       await services.auth.requireSudo(session.id, access.sudoScope);
     }
+    // Роль подтверждена — рамка запроса получает действующего актора.
+    // Право на данные пользователей всё ещё требует записи аудита,
+    // которую создаёт preValidation для маршрутов с tenantAccess.
+    context.scope.actor = session.user.username;
+    context.scope.role = session.user.role;
+    context.scope.route = `${request.method} ${request.routeOptions.url ?? request.url}`;
   });
 
   app.addHook("onError", async (request, _reply, error) => {
@@ -530,8 +561,14 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
   // -------------------------------------------------------------------
   // Просмотр открыт и viewer'у: состояние моделей нужно дежурному, а
   // секретов в ответе нет. Правки — только owner и admin.
+  // В состоянии есть последние отказы из llm_requests: содержимого
+  // переписки там нет, но записи принадлежат конкретным пользователям,
+  // поэтому просмотр фиксируется в аудите.
   app.get("/api/admin/v1/llm/state", {
-    config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
+    config: {
+      roles: ["owner", "admin", "operator", "viewer"],
+      tenantAccess: "cross-user",
+    } satisfies RouteAccess,
   }, async () => await services.llmRouter.state());
 
   app.get("/api/admin/v1/llm/usage", {
@@ -909,7 +946,10 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
   // пользователи Евы
   // -------------------------------------------------------------------
   app.get("/api/admin/v1/users", {
-    config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
+    config: {
+      roles: ["owner", "admin", "operator", "viewer"],
+      tenantAccess: "cross-user",
+    } satisfies RouteAccess,
   }, async (request) => {
     const query = request.query as Record<string, string | undefined>;
     return await services.users.list({
@@ -923,7 +963,10 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
   });
 
   app.get("/api/admin/v1/users/:id", {
-    config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
+    config: {
+      roles: ["owner", "admin", "operator", "viewer"],
+      tenantAccess: "cross-user",
+    } satisfies RouteAccess,
   }, async (request) => {
     return await services.users.get((request.params as { id: string }).id);
   });
@@ -937,6 +980,7 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
     config: {
       roles: ["owner", "admin"],
       sudoScope: "users:messages",
+      tenantAccess: "cross-user",
     } satisfies RouteAccess,
   }, async (request) => {
     const context = contexts.get(request)!;
@@ -973,19 +1017,27 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
   });
 
   app.post("/api/admin/v1/users/:id/block", {
-    config: { roles: ["owner", "admin"], sudoScope: "users:write" } satisfies RouteAccess,
+    config: {
+      roles: ["owner", "admin"],
+      sudoScope: "users:write",
+      tenantAccess: "cross-user",
+    } satisfies RouteAccess,
   }, async (request) => {
     return await services.users.setBlocked((request.params as { id: string }).id, true);
   });
 
   app.post("/api/admin/v1/users/:id/unblock", {
-    config: { roles: ["owner", "admin"], sudoScope: "users:write" } satisfies RouteAccess,
+    config: {
+      roles: ["owner", "admin"],
+      sudoScope: "users:write",
+      tenantAccess: "cross-user",
+    } satisfies RouteAccess,
   }, async (request) => {
     return await services.users.setBlocked((request.params as { id: string }).id, false);
   });
 
   app.patch("/api/admin/v1/users/:id", {
-    config: { roles: ["owner", "admin"] } satisfies RouteAccess,
+    config: { roles: ["owner", "admin"], tenantAccess: "cross-user" } satisfies RouteAccess,
   }, async (request) => {
     return await services.users.update(
       (request.params as { id: string }).id,
@@ -994,7 +1046,10 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
   });
 
   app.post("/api/admin/v1/users/:id/notes", {
-    config: { roles: ["owner", "admin", "operator"] } satisfies RouteAccess,
+    config: {
+      roles: ["owner", "admin", "operator"],
+      tenantAccess: "cross-user",
+    } satisfies RouteAccess,
   }, async (request) => {
     const body = objectBody(request.body);
     const key = typeof request.headers["idempotency-key"] === "string"

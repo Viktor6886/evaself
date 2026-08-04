@@ -2,6 +2,7 @@ import { Redis } from "ioredis";
 import pg from "pg";
 
 import { createLogger } from "../logger.js";
+import { guardPool } from "../tenancy/index.js";
 import { AuthService } from "./auth-service.js";
 import { AuditService } from "./audit-service.js";
 import { ConfigService } from "./config-service.js";
@@ -27,11 +28,14 @@ async function main(): Promise<void> {
   if (!databaseUrl || !valkeyUrl) throw new Error("DATABASE_URL и VALKEY_URL обязательны");
 
   const masterKey = await loadMasterKey();
-  const pool = new Pool({
+  // Пул админки проходит ту же границу арендатора, что и пул сервиса:
+  // обращение к данным пользователей возможно только внутри запроса с
+  // проверенной ролью и записью аудита.
+  const pool = guardPool(new Pool({
     connectionString: databaseUrl,
     max: 10,
     application_name: "evaself-admin-api",
-  });
+  }));
   const redis = new Redis(valkeyUrl, {
     maxRetriesPerRequest: 2,
     enableOfflineQueue: false,

@@ -1,5 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 
+import type pg from "pg";
+
 import type { Config } from "./config.js";
 import type { Database } from "./db.js";
 import type { Logger } from "./logger.js";
@@ -76,7 +78,13 @@ export class LavaPayments {
       return { ok: true, ignored: "payment_status" };
     }
 
-    const applied = await this.db.transaction(async (client) => {
+    // Владелец опознаётся по каноническим записям, а не по тому, что
+    // прислал провайдер: telegram_id, e-mail и contract_id — только
+    // признаки поиска. Пока владелец неизвестен, работа идёт как
+    // системная; всё, что меняет доступ, выполняется уже в его области.
+    const applied = await this.db.withSystemScope(
+      "payments.lava.webhook",
+      async () => await this.db.transaction(async (client) => {
       const user = await client.query<{ id: string; telegram_id: string }>(
         `SELECT id, telegram_id FROM users
           WHERE ($1::bigint IS NOT NULL AND telegram_id = $1)
@@ -101,65 +109,17 @@ export class LavaPayments {
       const found = user.rows[0];
       if (!found) return { state: "user_not_found" as const };
 
-      const payment = await client.query<{ id: string }>(
-        `INSERT INTO payments
-           (user_id, provider, provider_payment_id, amount_minor, currency,
-            status, description, paid_at, raw)
-         VALUES ($1, 'lava', $2, $3, $4, 'succeeded', $5, now(), $6::jsonb)
-         ON CONFLICT (provider, provider_payment_id)
-           WHERE provider_payment_id IS NOT NULL
-         DO NOTHING
-         RETURNING id`,
-        [
-          found.id,
-          event.paymentId,
-          event.amountMinor,
-          event.currency,
-          `План ${plan.plan}`,
-          JSON.stringify(event.raw),
-        ],
+      return await this.db.withUserScope(
+        {
+          userId: Number(found.id),
+          telegramId: Number(found.telegram_id),
+          label: "payments.lava.apply",
+        },
+        async () => await this.applyPayment(client, found, event, plan),
       );
-      if (!payment.rows[0]) return { state: "duplicate" as const, telegramId: Number(found.telegram_id) };
-
-      const previousSubscription = await client.query<{ current_period_end: Date | null }>(
-        `SELECT current_period_end
-           FROM subscriptions
-          WHERE user_id = $1 AND status IN ('trialing', 'active', 'past_due')
-          ORDER BY current_period_end DESC NULLS LAST, created_at DESC
-          LIMIT 1
-          FOR UPDATE`,
-        [found.id],
-      );
-      await client.query(
-        `UPDATE subscriptions SET status = 'expired'
-          WHERE user_id = $1 AND status IN ('trialing', 'active', 'past_due')`,
-        [found.id],
-      );
-      await client.query(
-        `INSERT INTO subscriptions
-           (user_id, plan, status, provider, provider_subscription_id,
-            current_period_start, current_period_end)
-         VALUES (
-           $1, $2, 'active', 'lava', $3, now(),
-           GREATEST(now(), COALESCE($5::timestamptz, now())) + make_interval(days => $4)
-         )`,
-        [
-          found.id,
-          plan.plan,
-          event.contractId ?? event.paymentId,
-          plan.durationDays,
-          previousSubscription.rows[0]?.current_period_end?.toISOString() ?? null,
-        ],
-      );
-      await client.query(
-        `UPDATE payment_intents SET status = 'succeeded'
-          WHERE provider = 'lava'
-            AND (provider_contract_id = $1 OR user_id = $2)
-            AND status = 'pending'`,
-        [event.contractId, found.id],
-      );
-      return { state: "applied" as const, telegramId: Number(found.telegram_id) };
-    });
+      }),
+      { crossUser: true },
+    );
 
     if (applied.state === "applied") {
       await this.telegram.withDeliveryContext(`lava-payment:${event.paymentId}`, async () =>
@@ -174,6 +134,76 @@ export class LavaPayments {
       });
     }
     return { ok: true, result: applied.state };
+  }
+
+  /** Запись оплаты и продление подписки — уже в области владельца. */
+  private async applyPayment(
+    client: pg.PoolClient,
+    found: { id: string; telegram_id: string },
+    event: LavaEvent,
+    plan: { plan: string; amountMinor: number; durationDays: number; currency: string },
+  ): Promise<
+    | { state: "duplicate"; telegramId: number }
+    | { state: "applied"; telegramId: number }
+  > {
+    const payment = await client.query<{ id: string }>(
+      `INSERT INTO payments
+         (user_id, provider, provider_payment_id, amount_minor, currency,
+          status, description, paid_at, raw)
+       VALUES ($1, 'lava', $2, $3, $4, 'succeeded', $5, now(), $6::jsonb)
+       ON CONFLICT (provider, provider_payment_id)
+         WHERE provider_payment_id IS NOT NULL
+       DO NOTHING
+       RETURNING id`,
+      [
+        found.id,
+        event.paymentId,
+        event.amountMinor,
+        event.currency,
+        `План ${plan.plan}`,
+        JSON.stringify(event.raw),
+      ],
+    );
+    if (!payment.rows[0]) return { state: "duplicate" as const, telegramId: Number(found.telegram_id) };
+
+    const previousSubscription = await client.query<{ current_period_end: Date | null }>(
+      `SELECT current_period_end
+         FROM subscriptions
+        WHERE user_id = $1 AND status IN ('trialing', 'active', 'past_due')
+        ORDER BY current_period_end DESC NULLS LAST, created_at DESC
+        LIMIT 1
+        FOR UPDATE`,
+      [found.id],
+    );
+    await client.query(
+      `UPDATE subscriptions SET status = 'expired'
+        WHERE user_id = $1 AND status IN ('trialing', 'active', 'past_due')`,
+      [found.id],
+    );
+    await client.query(
+      `INSERT INTO subscriptions
+         (user_id, plan, status, provider, provider_subscription_id,
+          current_period_start, current_period_end)
+       VALUES (
+         $1, $2, 'active', 'lava', $3, now(),
+         GREATEST(now(), COALESCE($5::timestamptz, now())) + make_interval(days => $4)
+       )`,
+      [
+        found.id,
+        plan.plan,
+        event.contractId ?? event.paymentId,
+        plan.durationDays,
+        previousSubscription.rows[0]?.current_period_end?.toISOString() ?? null,
+      ],
+    );
+    await client.query(
+      `UPDATE payment_intents SET status = 'succeeded'
+        WHERE provider = 'lava'
+          AND (provider_contract_id = $1 OR user_id = $2)
+          AND status = 'pending'`,
+      [event.contractId, found.id],
+    );
+    return { state: "applied" as const, telegramId: Number(found.telegram_id) };
   }
 }
 
