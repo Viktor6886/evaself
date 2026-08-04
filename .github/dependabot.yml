@@ -1,0 +1,69 @@
+# =====================================================================
+# Мониторинг зависимостей (шаг 01, пункт 5).
+#
+# Обновления приходят пакетами и еженедельно, а не по одному на каждый
+# патч: шум приводит к тому, что обновления перестают читать, и это
+# опаснее, чем задержка в несколько дней.
+#
+# Обновления безопасности GitHub присылает отдельно и немедленно —
+# группировка на них не распространяется.
+# =====================================================================
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: /eva-agent-service
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      # Обновления внутри одной мажорной версии почти всегда безопасны и
+      # разбирать их по отдельности незачем.
+      minor-and-patch:
+        update-types: [minor, patch]
+    ignore:
+      # Версия SDK согласована с LETTA_CODE_VERSION в versions.env, и
+      # менять её в обход шага 11 нельзя: это второй runtime-контракт.
+      - dependency-name: "@letta-ai/letta-agent-sdk"
+        update-types: [version-update:semver-major]
+
+  - package-ecosystem: npm
+    directory: /admin-ui
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: pip
+    directory: /media-service
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+
+  # Базовые образы локальной сборки. Теги upstream-сервисов живут в
+  # versions.env и обновляются через `make update-preview`, а не здесь.
+  - package-ecosystem: docker
+    directories:
+      - /eva-agent-service
+      - /media-service
+      - /letta-app-server
+      - /backup-service
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3

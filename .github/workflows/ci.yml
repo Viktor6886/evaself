@@ -101,6 +101,14 @@ jobs:
       - name: The generated .env is readable by compose and by load_env
         run: ./scripts/ci/test-env-compose-parse.sh
 
+      # Уязвимость в зависимости не видна в обычных тестах: они зелёные
+      # ровно до инцидента. Список принятых исключений — в самом скрипте,
+      # поимённо и с причиной; новая уязвимость high вне списка валит CI.
+      - name: Dependency audit (npm and pip)
+        run: |
+          python3 -m pip install --quiet --disable-pip-version-check pip-audit
+          ./scripts/ci/audit-dependencies.sh
+
       - name: The LLM Router is the only way out to a model
         run: |
           # Прямое обращение к провайдеру в обход роутера возвращает
