@@ -136,7 +136,9 @@ export class BackgroundRuntime {
       const { rows } = await this.db.withSystemScope(
         "heartbeat.candidates",
         async () => await this.db.query<HeartbeatCandidate>(
-          `SELECT u.id AS user_id,
+          `
+            -- tenant: system — кандидаты heartbeat выбираются по всем пользователям, сообщение готовится уже в области владельца
+            SELECT u.id AS user_id,
                   u.telegram_id,
                   COALESCE(t.chat_id, u.telegram_id) AS chat_id,
                   u.timezone,
@@ -191,7 +193,9 @@ export class BackgroundRuntime {
   private async claimDueTasks(): Promise<DueTask[]> {
     return await this.db.transaction(async (client) => {
       const { rows } = await client.query<DueTask>(
-        `SELECT t.id, t.user_id, u.telegram_id,
+        `
+          -- tenant: system — планировщик забирает наступившие задачи по всем пользователям, выполнение идёт в области владельца
+          SELECT t.id, t.user_id, u.telegram_id,
                 COALESCE(tu.chat_id, u.telegram_id) AS chat_id,
                 t.title, t.description, t.priority, t.due_at, t.remind_at,
                 g.title AS related_goal,
@@ -224,7 +228,9 @@ export class BackgroundRuntime {
       );
       if (rows.length > 0) {
         await client.query(
-          "UPDATE tasks SET locked_at = now() WHERE id = ANY($1::bigint[])",
+          `
+            -- tenant: system — блокировка уже отобранных строк планировщика: список id получен выборкой выше
+            UPDATE tasks SET locked_at = now() WHERE id = ANY($1::bigint[])`,
           [rows.map((row) => row.id)],
         );
       }

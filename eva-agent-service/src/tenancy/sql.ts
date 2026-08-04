@@ -119,13 +119,59 @@ function tableRefs(sql: string, ignore: Set<string>): TableRef[] {
     "g",
   );
   const refs: TableRef[] = [];
+  refs.push(...commaJoins(sql, ignore));
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(sql)) !== null) {
     const table = match[1]!;
     if (ignore.has(table)) continue;
     const candidate = match[2];
-    const alias = candidate && !NOT_AN_ALIAS.has(candidate) ? candidate : table;
+    const keyword = candidate !== undefined && NOT_AN_ALIAS.has(candidate);
+    if (keyword) {
+      // Слово на месте алиаса оказалось ключевым — вернуть его в разбор.
+      // Иначе `FROM a JOIN b` съедало бы `JOIN` вместе с алиасом, и
+      // таблица `b` не попадала бы в анализ вовсе: запрос выглядел бы
+      // ограниченным, не будучи им.
+      pattern.lastIndex = match.index + match[0].length - candidate!.length;
+    }
+    const alias = candidate !== undefined && !keyword ? candidate : table;
     refs.push({ table, alias, at: match.index });
+  }
+  return refs;
+}
+
+/**
+ * Таблицы, перечисленные через запятую: `FROM tasks t, goals g`.
+ *
+ * Основной разбор идёт по ключевым словам FROM/JOIN, поэтому вторая и
+ * следующие таблицы списка иначе не попали бы в анализ вовсе — запрос
+ * выглядел бы ограниченным, не будучи им. Просматривается только отрезок
+ * между `FROM` и ближайшим словом, закрывающим список.
+ */
+function commaJoins(sql: string, ignore: Set<string>): TableRef[] {
+  const refs: TableRef[] = [];
+  const clause = /\bfrom\b/g;
+  const stop = new RegExp(
+    `\\b(where|group|order|limit|offset|having|window|union|except|intersect|` +
+    `returning|join|left|right|inner|outer|full|cross|natural|on|using|set|values)\\b`,
+  );
+  let start: RegExpExecArray | null;
+  while ((start = clause.exec(sql)) !== null) {
+    const rest = sql.slice(start.index + start[0].length);
+    const end = stop.exec(rest);
+    const list = rest.slice(0, end ? end.index : rest.length);
+    const offset = start.index + start[0].length;
+    const item = new RegExp(
+      `,\\s*(${IDENTIFIER})(?:\\s+(?:as\\s+)?(${IDENTIFIER}))?`,
+      "g",
+    );
+    let found: RegExpExecArray | null;
+    while ((found = item.exec(list)) !== null) {
+      const table = found[1]!;
+      if (ignore.has(table) || !isTenantTable(table)) continue;
+      const candidate = found[2];
+      const alias = candidate && !NOT_AN_ALIAS.has(candidate) ? candidate : table;
+      refs.push({ table, alias, at: offset + found.index });
+    }
   }
   return refs;
 }

@@ -86,22 +86,31 @@ export function enterScope(scope: TenantScope): void {
   storage.enterWith(scope);
 }
 
+/** Идентификатор как число: bigint приходит из драйвера строкой. */
+function numeric(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "bigint") return Number(value);
+  if (typeof value === "string" && /^-?\d+$/.test(value)) return Number(value);
+  return null;
+}
+
 export function userScope(input: {
   userId?: number | null;
   telegramId?: number | null;
   label: string;
 }): UserScope {
-  if (input.userId == null && input.telegramId == null) {
+  // Идентификаторы приводятся к числу: `users.id` и `telegram_id` —
+  // bigint, и драйвер отдаёт их строкой. Без приведения сверка значения
+  // сравнивала бы «1» с 1 и отвергала собственный запрос владельца.
+  const userId = numeric(input.userId);
+  const telegramId = numeric(input.telegramId);
+  if (userId === null && telegramId === null) {
     throw new TenantViolationError(
       `Область пользователя «${input.label}» создана без идентификатора`,
     );
   }
-  return {
-    kind: "user",
-    userId: input.userId ?? null,
-    telegramId: input.telegramId ?? null,
-    label: input.label,
-  };
+  return { kind: "user", userId, telegramId, label: input.label };
 }
 
 export function systemScope(reason: string, options: { crossUser?: boolean } = {}): SystemScope {
@@ -135,24 +144,22 @@ export function bindUserId(userId: number): void {
       "Внутренний идентификатор можно связать только с областью пользователя",
     );
   }
-  if (scope.userId !== null && scope.userId !== userId) {
+  const value = numeric(userId);
+  if (value === null) {
     throw new TenantViolationError(
-      `Область пользователя ${scope.userId} не может быть переназначена на ${userId}`,
+      `Некорректный идентификатор пользователя: ${String(userId)}`,
     );
   }
-  scope.userId = userId;
+  if (scope.userId !== null && scope.userId !== value) {
+    throw new TenantViolationError(
+      `Область пользователя ${scope.userId} не может быть переназначена на ${value}`,
+    );
+  }
+  scope.userId = value;
 }
 
 function expectedValue(scope: UserScope, binding: TenantBinding): number | null {
   return isTelegramColumn(binding.column) ? scope.telegramId : scope.userId;
-}
-
-function numeric(value: unknown): number | null {
-  if (value === null || value === undefined) return null;
-  if (typeof value === "number") return Number.isFinite(value) ? value : null;
-  if (typeof value === "bigint") return Number(value);
-  if (typeof value === "string" && /^-?\d+$/.test(value)) return Number(value);
-  return null;
 }
 
 /**
@@ -202,12 +209,24 @@ export function assertQueryAllowed(sql: string, values: readonly unknown[] = [])
 
   for (const binding of analysis.bindings) {
     const expected = expectedValue(scope, binding);
-    if (expected === null) continue;
     const actual = binding.kind === "parameter"
       ? numeric(values[binding.index - 1])
       : binding.kind === "literal"
         ? binding.value
         : null;
+    if (expected === null) {
+      // Область знает Telegram-идентификатор, но ещё не связана с
+      // внутренним `users.id`. Пропустить сверку значит принять любой
+      // `user_id`, поэтому обращение отклоняется: сначала каноническая
+      // выборка пользователя и `bindUserId`, потом его данные.
+      if (actual !== null && !isTelegramColumn(binding.column)) {
+        throw new TenantViolationError(
+          `Область «${scope.label}» не связана с внутренним идентификатором, ` +
+          `а запрос адресует ${binding.column} = ${actual}`,
+        );
+      }
+      continue;
+    }
     if (actual === null) continue;
     if (actual !== expected) {
       throw new TenantViolationError(

@@ -89,6 +89,28 @@ test("подменённый идентификатор не проходит г
   });
 });
 
+test("идентификатор-строка из драйвера не отвергает собственный запрос владельца", () => {
+  // `users.id` и `telegram_id` — bigint, и pg отдаёт их строкой. Пока
+  // область сравнивала «1» с 1, граница отвергала запрос пользователя к
+  // его же данным: ход в Telegram и создание агента падали целиком.
+  const scope = userScope({
+    userId: "41" as unknown as number,
+    telegramId: "424242" as unknown as number,
+    label: "тест",
+  });
+  runInScope(scope, async () => {
+    assertQueryAllowed(
+      "INSERT INTO agent_links (user_id, agent_id) VALUES ($1, $2)",
+      ["41", "agent-1"],
+    );
+    assertQueryAllowed("SELECT id FROM eva_notes WHERE user_id = $1", [41]);
+    assert.throws(
+      () => assertQueryAllowed("SELECT id FROM eva_notes WHERE user_id = $1", ["42"]),
+      /не совпадает с пользователем/,
+    );
+  });
+});
+
 test("системная область без объявленного crossUser не даёт сплошной выборки", () => {
   runInScope(systemScope("тест"), async () => {
     assert.throws(
@@ -401,21 +423,17 @@ test("события задач читаются только вместе с в
 // ---------------------------------------------------------------------
 
 /**
- * Запросы, которые по своей природе идут сразу по многим пользователям.
- * Каждый выполняется только внутри объявленной системной или
- * административной области — это проверяется отдельно тестами выше и
- * кодом самих модулей. Список закрытый: новая запись сюда добавляется
- * вместе с обоснованием, а не по факту падения теста.
+ * Пометка, объявляющая, почему у запроса нет границы по владельцу.
+ * Формат общий с `scripts/ci/assert-tenant-scope.py`:
+ *
+ *     -- tenant: system — почему это общесистемная операция
+ *     -- tenant: by <ключ> — через какой ключ владельца идёт ограничение
+ *
+ * Причина обязана быть причиной: `--` комментирует строку до конца, и
+ * «пометка», за которой идёт SQL, означала бы закомментированный запрос.
  */
-const CROSS_USER_STATEMENTS: Record<string, string> = {
-  "admin/llm-router-service.ts": "последние отказы маршрутизации — админ-область с аудитом",
-  "admin/user-service.ts": "раздел «Пользователи» — админ-область с ролью и аудитом",
-  "background.ts": "планировщик и heartbeat выбирают кандидатов по всем пользователям",
-  "db.ts": "служебные обзоры связок, моделей и счётчиков установки",
-  "delivery/inbox.ts": "durable ingress: аренда апдейтов по всем пользователям",
-  "delivery/outbox.ts": "durable delivery: аренда отправок по всем пользователям",
-  "payments.ts": "вебхук оплаты опознаёт владельца до открытия его области",
-};
+const TENANT_MARKER =
+  /--\s*tenant:\s*(?:system|by\s+[a-z_][a-z0-9_]*)\s*(?:—|-|:)?\s*(.{12,})/i;
 
 test("во всём исходном коде нет запроса к данным пользователя без границы", () => {
   const root = sourcePath("");
@@ -426,7 +444,14 @@ test("во всём исходном коде нет запроса к данн�
     for (const [sql, line] of sqlLiterals(source)) {
       const analysis = analyzeSql(sql);
       if (analysis.uses.length === 0 || analysis.unscoped.length === 0) continue;
-      if (Object.hasOwn(CROSS_USER_STATEMENTS, relativePath)) continue;
+      // Исключение объявляется у самого запроса, а не у файла: иначе
+      // один общесистемный SELECT выводил бы из-под проверки весь
+      // модуль вместе с будущими запросами в нём.
+      const marker = TENANT_MARKER.exec(sql);
+      const reason = marker?.[1]?.trim() ?? "";
+      if (reason && !/\b(SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM)\b/i.test(reason)) {
+        continue;
+      }
       unexpected.push(
         `${relativePath}:${line} — ${analysis.unscoped.join(", ")}`,
       );
@@ -434,16 +459,6 @@ test("во всём исходном коде нет запроса к данн�
   }
   assert.deepEqual(unexpected, []);
 });
-
-/*
- * Сверка реестра `TENANT_TABLES` со схемой живёт в
- * `scripts/ci/assert-tenant-scope.py`, а не здесь: в образ
- * eva-agent-service миграции не копируются, и тест, читающий
- * `postgres/migrations`, падал бы при сборке образа. Проверка не
- * потеряна — она выполняется в CI на полном дереве репозитория и
- * проверена на отрицательном случае (убранная из реестра таблица
- * даёт код 1).
- */
 
 test("мимо границы в PostgreSQL ходить неоткуда: пулы создаются только под защитой", () => {
   const root = sourcePath("");

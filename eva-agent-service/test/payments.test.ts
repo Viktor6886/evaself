@@ -32,19 +32,21 @@ function harness(options: FakeOptions = {}) {
   const client = {
     query(sql: string, values: unknown[] = []) {
       statements.push({ sql, values });
+      // Пометки границы арендатора стоят комментарием перед запросом,
+      // поэтому сравнение идёт по вхождению, а не по началу строки.
       const normalized = sql.replace(/\s+/g, " ").trim();
-      if (normalized.startsWith("SELECT id, telegram_id FROM users")) {
+      if (normalized.includes("SELECT id, telegram_id FROM users")) {
         const user = options.user === undefined
           ? { id: "3", telegram_id: "42" }
           : options.user;
         return Promise.resolve({ rows: user ? [user] : [] });
       }
-      if (normalized.startsWith("INSERT INTO payments")) {
+      if (normalized.includes("INSERT INTO payments")) {
         return Promise.resolve({
           rows: options.paymentInserted === false ? [] : [{ id: "9" }],
         });
       }
-      if (normalized.startsWith("SELECT current_period_end")) {
+      if (normalized.includes("SELECT current_period_end")) {
         return Promise.resolve({
           rows: options.previousPeriodEnd === undefined
             ? []

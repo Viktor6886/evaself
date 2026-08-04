@@ -115,13 +115,17 @@ export class UserService {
 
     const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
     const { rows: totalRows } = await this.pool.query(
-      `SELECT count(*)::bigint AS total FROM v_user_overview ${clause}`,
+      `
+        -- tenant: system — раздел «Пользователи» админки: список идёт по всем, доступ под ролью и записью аудита
+        SELECT count(*)::bigint AS total FROM v_user_overview ${clause}`,
       params,
     );
 
     params.push(limit, offset);
     const { rows } = await this.pool.query(
-      `SELECT id, telegram_id, username, first_name, state, is_blocked,
+      `
+        -- tenant: system — раздел «Пользователи» админки: список идёт по всем, доступ под ролью и записью аудита
+        SELECT id, telegram_id, username, first_name, state, is_blocked,
               language_code, timezone, plan, subscription_status,
               current_period_end, message_count, last_message_at,
               created_at, last_seen_at

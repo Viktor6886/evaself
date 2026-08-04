@@ -305,7 +305,9 @@ export class Database {
       response_mode: "text" | "voice" | "both";
       use_emoji: boolean;
     }>(
-      `SELECT u.id AS user_id,
+      `
+        -- tenant: system — каноническое сопоставление conversation → пользователь, отсюда берётся владелец для областей
+        SELECT u.id AS user_id,
               u.telegram_id,
               COALESCE(t.chat_id, u.telegram_id) AS chat_id,
               c.conversation_id,
@@ -438,7 +440,8 @@ export class Database {
     conversationId: string,
     userId?: number,
   ): Promise<void> {
-    const run = async () => await this.setConversationInScope(agentId, conversationId);
+    const run = async () =>
+      await this.setConversationInScope(agentId, conversationId, userId ?? null);
     await (userId === undefined
       ? this.withSystemScope("db.setConversation", run, { crossUser: true })
       : this.withUserScope(
@@ -450,15 +453,19 @@ export class Database {
   private async setConversationInScope(
     agentId: string,
     conversationId: string,
+    userId: number | null,
   ): Promise<void> {
     const client = await this.require().connect();
     try {
       await client.query("BEGIN");
       const { rows } = await client.query<{ user_id: string }>(
-        `UPDATE agent_links SET conversation_id = $2
+        `
+          -- tenant: by agent_id — агент принадлежит ровно одному пользователю, agent_links_agent_id_uidx
+          UPDATE agent_links SET conversation_id = $2
           WHERE agent_id = $1
+            AND ($3::bigint IS NULL OR user_id = $3)
         RETURNING user_id`,
-        [agentId, conversationId],
+        [agentId, conversationId, userId],
       );
       if (rows[0]) {
         await client.query(
@@ -467,10 +474,11 @@ export class Database {
             UPDATE agent_conversations
               SET status = 'archived', archived_at = now()
             WHERE agent_id = $1
+              AND ($3::bigint IS NULL OR user_id = $3)
               AND purpose = 'chat'
               AND status = 'active'
               AND conversation_id <> $2`,
-          [agentId, conversationId],
+          [agentId, conversationId, userId],
         );
         await client.query(
           `INSERT INTO agent_conversations (user_id, agent_id, conversation_id, purpose)
@@ -521,7 +529,9 @@ export class Database {
     const { rows } = await this.withSystemScope(
       "db.listAgentLinks",
       async () => await this.require().query(
-      `SELECT u.telegram_id, a.agent_id, a.conversation_id, a.kind, a.runtime,
+      `
+        -- tenant: system — инвентарь связок для сверки с App Server, строк пользователей не отдаёт
+        SELECT u.telegram_id, a.agent_id, a.conversation_id, a.kind, a.runtime,
               a.status, a.message_count, a.last_message_at
          FROM agent_links a JOIN users u ON u.id = a.user_id
         WHERE a.status = 'active'

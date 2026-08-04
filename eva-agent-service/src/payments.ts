@@ -86,7 +86,9 @@ export class LavaPayments {
       "payments.lava.webhook",
       async () => await this.db.transaction(async (client) => {
       const user = await client.query<{ id: string; telegram_id: string }>(
-        `SELECT id, telegram_id FROM users
+        `
+          -- tenant: system — вебхук оплаты опознаёт владельца по каноническим записям, его область открывается ниже
+          SELECT id, telegram_id FROM users
           WHERE ($1::bigint IS NOT NULL AND telegram_id = $1)
              OR ($2::text IS NOT NULL AND lower(meta->>'email') = lower($2))
              OR id IN (

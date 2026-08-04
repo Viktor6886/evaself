@@ -105,7 +105,6 @@ export class EvaWorkflow {
           { telegramId: update.telegramId, label: "telegram.turn" },
           async (): Promise<InboxResult> => {
         const { user, link } = await this.ensureUserAndAgent(update);
-        this.db.bindScopeUserId(user.id);
         const language = preferredResponseLanguage(user);
         await this.db.attachTelegramUpdateToUser(update.updateId, user.id);
 
@@ -343,6 +342,10 @@ export class EvaWorkflow {
       lastName: from.last_name ?? null,
       languageCode: from.language_code ?? null,
     });
+    // Область хода открыта по проверенному Telegram-идентификатору;
+    // внутренний `users.id` появляется здесь, и до этого момента данные
+    // пользователя ей недоступны.
+    this.db.bindScopeUserId(user.id);
     let link = await this.db.getAgentLink(update.telegramId);
     if (!link) {
       let agentId = await this.letta.findAgentByTelegramId(update.telegramId);
