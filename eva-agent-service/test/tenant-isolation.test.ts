@@ -111,6 +111,40 @@ test("идентификатор-строка из драйвера не отв�
   });
 });
 
+test("имя таблицы со схемой или в кавычках не проходит мимо границы", () => {
+  // Разбор шёл по голому идентификатору, поэтому `public.eva_notes` и
+  // `"eva_notes"` выглядели запросом, не касающимся пользовательских
+  // данных: они выполнялись бы вообще вне какой-либо области.
+  for (const sql of [
+    "SELECT * FROM public.eva_notes",
+    'SELECT * FROM "eva_notes"',
+    "UPDATE public.tasks SET title = $1",
+    "DELETE FROM public.budget_entries WHERE id = $1",
+  ]) {
+    assert.throws(() => assertQueryAllowed(sql, [1]), TenantViolationError, sql);
+  }
+  // Квалифицированный запрос с владельцем по-прежнему проходит.
+  runInScope(userScope({ userId: ANNA.internalId, label: "тест" }), async () => {
+    assertQueryAllowed(
+      "INSERT INTO public.eva_notes (user_id, title) VALUES ($1, $2)",
+      [ANNA.internalId, "своё"],
+    );
+  });
+});
+
+test("один алиас на две таблицы не выдаёт ограничение одной за другую", () => {
+  // Привязка закреплялась по имени алиаса, поэтому `g` из первого
+  // подзапроса «ограничивал» и `tasks` из второго — а тот читался бы
+  // целиком, по всем пользователям.
+  const sql = `SELECT (SELECT count(*) FROM goals g WHERE g.user_id = $1) AS a,
+                      (SELECT title FROM tasks g LIMIT 1) AS b`;
+  const analysis = analyzeSql(sql);
+  assert.deepEqual(analysis.unscoped.sort(), ["goals", "tasks"]);
+  runInScope(userScope({ userId: ANNA.internalId, label: "тест" }), async () => {
+    assert.throws(() => assertQueryAllowed(sql, [ANNA.internalId]), TenantViolationError);
+  });
+});
+
 test("системная область без объявленного crossUser не даёт сплошной выборки", () => {
   runInScope(systemScope("тест"), async () => {
     assert.throws(
@@ -559,7 +593,11 @@ test("административный запрос к данным пользо
   await app.close();
 });
 
-test("административный запрос без действующей сессии до данных не доходит", async () => {
+test("неаутентифицированный запрос не пишет в журнал аудита", async () => {
+  // Запись создавалась до проверки сессии, поэтому поток чужих GET
+  // раздувал бы журнал, ничего о себе не сообщая. Для небезопасных
+  // методов запись по-прежнему делается заранее — там она и нужна.
+  const audits: string[] = [];
   let attempts = 0;
   const app = buildAdminServer({
     auth: {
@@ -569,7 +607,13 @@ test("административный запрос без действующе�
       requireCsrf: () => undefined,
       requireSudo: async () => undefined,
     },
-    audit: { start: async () => ({ id: "a", startedAt: Date.now() }), finish: async () => undefined },
+    audit: {
+      start: async (entry: { operation: string }) => {
+        audits.push(entry.operation);
+        return { id: `audit-${audits.length}`, startedAt: Date.now() };
+      },
+      finish: async () => undefined,
+    },
     users: {
       list: async () => {
         attempts += 1;
@@ -587,6 +631,7 @@ test("административный запрос без действующе�
   const response = await app.inject({ method: "GET", url: "/api/admin/v1/users" });
   assert.equal(response.statusCode, 401);
   assert.equal(attempts, 0);
+  assert.deepEqual(audits, []);
   await app.close();
 });
 
