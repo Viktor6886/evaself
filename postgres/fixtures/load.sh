@@ -19,7 +19,10 @@ run_sql() {
 		# shellcheck disable=SC2086
 		$PSQL -v ON_ERROR_STOP=1 -f "$file"
 	else
-		docker compose exec -T -e PGPASSWORD="${EVA_DB_PASSWORD:?EVA_DB_PASSWORD не задан}" \
+		# PGPASSWORD экспортируется, а не передаётся значением в argv:
+		# иначе пароль виден в списке процессов хоста.
+		export PGPASSWORD="${EVA_DB_PASSWORD:?EVA_DB_PASSWORD не задан}"
+		docker compose exec -T -e PGPASSWORD \
 			postgres psql -v ON_ERROR_STOP=1 \
 			--username "${EVA_DB_USER:?EVA_DB_USER не задан}" \
 			--dbname "${EVA_DB_NAME:?EVA_DB_NAME не задан}" < "$file"

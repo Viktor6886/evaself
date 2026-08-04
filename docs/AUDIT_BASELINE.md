@@ -5,7 +5,7 @@
 проверки по коду. Каждый факт снабжён ссылкой `файл:строка` или фактическим
 выводом команды.
 
-- **Дата снятия:** 2026-08-03
+- **Дата снятия:** 2026-08-03 — 2026-08-04
 - **Ветка:** `step/00-bootstrap`
 - **Базовый commit:** `3bd9811419020a489fd183489874ac6b74cbfc7e`
   (`Merge pull request #101 from Viktor6886/claude/evaself-audit-consolidate-ft8qjf`)
@@ -16,18 +16,19 @@
 
 ## 1. Окружение снятия baseline
 
-Часть замеров снята не в целевом окружении. Это отмечено явно у каждого
-пункта, где имеет значение.
+Замеры снимались в двух средах: на хосте сессии и в контейнерах из
+`compose.yaml`. Где версия отличается от production — отмечено.
 
 | Компонент | В окружении аудита | В production (`versions.env`) |
 |---|---|---|
-| Node.js | v22.22.2 | образ `node:22.22-bookworm-slim` (`versions.env:54`) |
+| Node.js | v22.22.2 на хосте | образ `node:22.22-bookworm-slim` (`versions.env:54`) |
 | npm | 10.9.7 | — |
-| PostgreSQL | 16.13 (Ubuntu, локальный кластер) | `pgvector/pgvector:0.8.6-pg17`, major 17 (`versions.env:17-19`) |
-| pgvector | 0.6.0 | 0.8.6 |
-| Python | 3.11.15 | `python:3.12-slim-bookworm` (`versions.env:51`) |
+| PostgreSQL | 16.13 на хосте **и 17.10 в контейнере** (целевая) | `pgvector/pgvector:0.8.6-pg17`, major 17 (`versions.env:17-19`) |
+| pgvector | 0.6.0 на хосте **и 0.8.6 в контейнере** (целевая) | 0.8.6 |
+| Python | 3.11.15 на хосте | `python:3.12-slim-bookworm` (`versions.env:51`) |
 | Docker | 29.3.1, демон запущен вручную | — |
-| Реестр образов | **недоступен** (см. §9) | Docker Hub |
+| Реестр образов | доступен через `mirror.gcr.io` (§9.1) | Docker Hub |
+| Debian/PGDG apt внутри контейнеров | **заблокированы** (§9.2) | доступны |
 
 ---
 
@@ -82,7 +83,9 @@ llm-router media-service nocodb postgres searxng valkey webapp
   `v_llm_provider_health`, `v_quota_status`, `v_revenue_monthly`,
   `v_user_overview`.
 - Расширений в базе `eva`: `pg_trgm 1.6`, `plpgsql 1.0`, `uuid-ossp 1.1`,
-  `vector 0.6.0` (в production — `vector 0.8.6`). Устанавливаются в `postgres/init/00-init-databases.sh:66-70`.
+  `vector`. Устанавливаются в `postgres/init/00-init-databases.sh:66-70`.
+  На целевом PostgreSQL 17.10 — `vector 0.8.6`, на хостовом 16.13 — `0.6.0`;
+  состав таблиц и представлений на обеих версиях совпал.
 
 ### 3.1 Три базы, три роли
 
@@ -108,7 +111,7 @@ llm-router media-service nocodb postgres searxng valkey webapp
 
 | Инвариант | Реализация | Ссылка |
 |---|---|---|
-| Один активный агент на пользователя и вид | `agent_links_user_kind_uidx` UNIQUE `(user_id, kind) WHERE status='active'` | `003_agent_sdk.sql` |
+| Один активный агент на пользователя и вид | `agent_links_user_kind_uidx` UNIQUE `(user_id, kind) WHERE status='active'` | `001_init.sql:81-82` |
 | Одна активная conversation на назначение | `agent_conversations_active_purpose_uidx` UNIQUE `(agent_id, purpose) WHERE status='active'` | `013_conversation_purposes.sql` |
 | Идемпотентность доставки | `telegram_outbox_idempotency_key_key` UNIQUE | `008_telegram_delivery.sql` |
 | Одна активная подписка | `subscriptions_active_uidx` UNIQUE `(user_id) WHERE status IN ('trialing','active','past_due')` | `001_init.sql` |
@@ -310,19 +313,21 @@ real	0m5.607s
 
 ---
 
-## 9. Что в этом окружении выполнить нельзя
+## 9. Границы окружения
 
-Egress-политика сессии **запрещает выкачивание слоёв образов**. Хост
-блобов Docker Hub отвечает 403:
+Раздел переписан после того, как первая формулировка («реестр образов
+недоступен, стек поднять нельзя») оказалась **неверной**. Ниже — то, что
+проверено фактически.
+
+### 9.1 Docker Hub: заблокирован только CDN блобов, зеркало работает
+
+Прямая загрузка через Docker Hub падает на хосте блобов:
 
 ```
-$ docker compose ... build backup-service
-failed to solve: pgvector/pgvector:0.8.6-pg17: failed to resolve source metadata
-for docker.io/pgvector/pgvector:0.8.6-pg17: failed to copy: httpReadSeeker:
-failed open: failed to do request:
+$ docker pull pgvector/pgvector:0.8.6-pg17
+failed to copy: httpReadSeeker: failed open: failed to do request:
 Get "https://production.cloudfront.docker.com/registry-v2/.../data...": Forbidden
 ```
-
 ```
 $ curl -sS "$HTTPS_PROXY/__agentproxy/status"
 "recentRelayFailures": [
@@ -331,18 +336,54 @@ $ curl -sS "$HTTPS_PROXY/__agentproxy/status"
     "host": "production.cloudfront.docker.com:443" } ]
 ```
 
-Следствия — ни один из этих замеров снять нельзя:
+Но `mirror.gcr.io` политикой разрешён и отдаёт и манифест, и блобы:
 
-- полный `scripts/backup.sh` и `scripts/restore.sh` (нужны
-  контейнер `backup-service`, docker-тома, `eva-agent-service` для
-  инвентаря агентов — `backup.sh:56-62`, `backup.sh:72-95`, `backup.sh:104-120`);
+```
+$ curl -o /dev/null -w "%{http_code}" https://mirror.gcr.io/v2/pgvector/pgvector/manifests/0.8.6-pg17
+200
+$ cat /etc/docker/daemon.json
+{ "registry-mirrors": ["https://mirror.gcr.io"] }
+$ docker pull pgvector/pgvector:0.8.6-pg17
+Status: Downloaded newer image for pgvector/pgvector:0.8.6-pg17
+```
+
+Через зеркало скачаны все upstream-образы: `pgvector/pgvector`,
+`valkey/valkey`, `caddy`, `nocodb/nocodb`, `searxng/searxng`,
+`node`, `python`, `docker`. **Слой данных стека поднимается**, и
+backup/restore выполнены по-настоящему (§12).
+
+### 9.2 Что действительно заблокировано: Debian и PGDG apt
+
+Внутри контейнеров недоступны Debian-репозитории — это блокирует
+`docker build` тех образов, чьи Dockerfile ставят пакеты:
+
+```
+$ docker run --rm --network host pgvector/pgvector:0.8.6-pg17 sh -c "apt-get update"
+E: Failed to fetch http://deb.debian.org/debian/dists/bookworm-updates/InRelease  403  Forbidden
+E: Failed to fetch http://apt.postgresql.org/pub/repos/apt/dists/bookworm-pgdg/InRelease  403  Forbidden
+```
+
+Из-за этого не собирается, в частности, `media-service`
+(`media-service/Dockerfile:13-15`, ставит `ffmpeg`), а значит
+`compose up` всех 18 сервисов не проходит. Ubuntu-архив на хосте и
+GitHub Releases при этом доступны, PPA и `apt.postgresql.org` — нет.
+
+### 9.3 Итог по замерам
+
+Снято фактически:
+
+- слой данных: PostgreSQL 17.10 + pgvector 0.8.6, Valkey, backup-service;
+- полный `scripts/backup.sh` и `scripts/restore.sh` (§12);
+- сборка, тесты, статические проверки (§8).
+
+Не снято:
+
+- запуск всех 18 сервисов после restore — упирается в §9.2;
 - задержки сквозного хода и наблюдаемое поведение сессий Letta;
-- фактические размеры пулов подключений под нагрузкой;
-- проверка Caddyfile через образ Caddy — обойдена установкой бинарного
-  Caddy 2.11.4 из GitHub-релиза, после чего `validate.sh` зелёный (§8.5).
+- фактические размеры пулов подключений под нагрузкой.
 
-Ubuntu-архив и GitHub Releases доступны; PPA и `apt.postgresql.org`
-заблокированы тем же 403.
+Проверка Caddyfile через образ Caddy обойдена установкой бинарного
+Caddy 2.11.4 из GitHub-релиза, после чего `validate.sh` зелёный (§8.5).
 
 ---
 
@@ -355,12 +396,12 @@ Ubuntu-архив и GitHub Releases доступны; PPA и `apt.postgresql.or
 |---|---|---|---|
 | 1 | PostgreSQL — источник истины в том числе для **tenancy** | Колонки `tenant_id` (или эквивалента) нет ни в одной из 71 таблицы. Изоляция арендаторов пока держится только на `user_id` и внешних ключах. | поиск `tenant` по `eva-agent-service/src` и `postgres/` — 0 совпадений |
 | 8 | BullMQ — единственный слой фоновых задач | BullMQ отсутствует целиком. Фон — `setInterval` + durable-таблицы. | §4 |
-| 11 | UserTurnLock | Класс называется `UserQueue`; renewable Valkey lock и per-user FIFO есть, отдельного `UserTurnLock` нет. | `src/queue.ts:50` |
-| 14 | PostgreSQL FTS + pg_trgm + pgvector — единственный гибридный поиск | `pg_trgm` используется (`users_username_trgm`, `eva_notes_search_idx`). `to_tsvector` встречается **один раз** (`012_graph_memory.sql:53`). Колонок типа `vector(N)` в базе `eva` **нет вовсе** — расширение `vector` в `eva` установлено, но не используется; эмбеддинги живут в базе `letta`. Инструмент `LIGHTRAG_QUERY` ищет через `ILIKE`, а не через FTS/trgm. | `core-tools.ts:451-476` |
-| 17 | Модели нельзя передавать весь каталог инструментов | Для назначения `chat` политика возвращает `allowedTools: null`, а `toolAllowedForPurpose` трактует `null` как «разрешено всё». То есть в основном диалоге модель получает весь каталог. Для остальных шести назначений список явный и узкий. | `src/conversations/purpose-service.ts:161-162, 197-203` |
+| 11 | UserTurnLock | Класс называется `UserQueue`; renewable Valkey lock и per-user FIFO есть, отдельного `UserTurnLock` нет. | `src/queue.ts:51` |
+| 14 | PostgreSQL FTS + pg_trgm + pgvector — единственный гибридный поиск | `pg_trgm` используется (`users_username_trgm`, `eva_notes_search_idx`). FTS есть и в схеме (`012_graph_memory.sql:53`), и в рантайме — граф памяти ищет через `websearch_to_tsquery` и `to_tsvector` (`src/memory/graph-context.ts:63, 70, 86`). Чего нет: колонок типа `vector(N)` в базе `eva` — расширение `vector` установлено, но не используется, эмбеддинги живут в базе `letta`; и единого гибридного контура тоже нет — `LIGHTRAG_QUERY` ищет по `eva_notes` через `ILIKE`, мимо и FTS, и `pg_trgm`. | `core-tools.ts:451-476` |
+| 17 | Модели нельзя передавать весь каталог инструментов | Для назначения `chat` политика возвращает `allowedTools: null`, а `toolAllowedForPurpose` трактует `null` как «разрешено всё». То есть в основном диалоге модель получает весь каталог. Для остальных шести назначений список явный и узкий. | `src/conversations/purpose-service.ts:162-163, 204` |
 | «Запрещено»: LightRAG | LightRAG запрещён | Самого LightRAG нет, но в каталоге инструментов есть имена `LIGHTRAG_INSERT` и `LIGHTRAG_QUERY` — это псевдонимы совместимости, реализованные поверх таблицы `eva_notes` в PostgreSQL. Имя вводит в заблуждение; поведение инвариант не нарушает. | `src/tools/core-tools.ts:416-476` |
 | «Запрещено»: полное зеркало переписки в PostgreSQL | запрещено | Механизм зеркалирования в коде существует, но выключен по умолчанию (`false`). | `.env.example:117`, `src/config.ts:185` |
-| Протокол, «Обязательные гарантии перед первым мержем» | требуется включённая защита ветки `main` | Состояние защиты ветки на GitHub из окружения аудита не подтверждено. | см. отчёт шага |
+| Протокол, «Обязательные гарантии перед первым мержем» | требуется включённая защита ветки `main` | **Соответствует частично.** Ветка `main` защищена (`protected: true` по GitHub API). Перечислить отдельные настройки — обязательный PR, обязательные проверки, запрет force-push и удаления — доступными инструментами не удалось, это должен подтвердить человек. | GitHub API `list_branches` |
 | 12 | Шесть memory blocks | **Соответствует.** `persona`, `human`, `current_state`, `goals_and_commitments`, `relationships_and_patterns`, `progress_and_hypotheses`. | `src/letta.ts:1045-1075` |
 | 3, 4 | Единственный conversational runtime — Agent SDK; letta-client только как control plane | **Соответствует.** Прямых импортов `@letta-ai/letta-client` в `src` нет, пакет присутствует только транзитивно. | §7 |
 | 15 | RuntimeContextBuilder — единственный сборщик контекста | **Соответствует.** | `src/runtime/runtime-context.ts:67` |
@@ -440,65 +481,181 @@ tasks|2
 users|2
 ```
 
-### 11.2 Ограничение
+### 11.2 Проверка на целевой версии PostgreSQL
 
-Фикстура проверена на PostgreSQL 16.13 + pgvector 0.6.0, а не на
-целевых 17 + 0.8.6 (§1). Ни одна конструкция фикстуры и ни одна из 28
-миграций не использует возможностей, появившихся в PostgreSQL 17,
-но подтверждения на целевой версии у baseline нет.
+Фикстура проверена дважды: на локальном PostgreSQL 16.13 + pgvector 0.6.0
+и на **целевом** PostgreSQL 17.10 + pgvector 0.8.6 в контейнере из
+`compose.yaml`. На целевой версии загрузка выполнялась штатной командой
+`postgres/fixtures/load.sh` через `docker compose exec`:
+
+```
+$ ./postgres/fixtures/load.sh
+==> загрузка baseline-фикстуры
+==> проверка baseline-фикстуры
+(16 строк, все ok = t)
+NOTICE:  baseline-фикстура на месте: пройдено проверок 16
+==> baseline-фикстура загружена и проверена
+```
+
+Состояние базы на целевой версии: `schema_migrations` = 28, 71 таблица,
+расширения `pg_trgm 1.6 / plpgsql 1.0 / uuid-ossp 1.1 / vector 0.8.6`.
 
 ---
 
 ## 12. Backup и restore
 
-Полная процедура (`scripts/backup.sh` → `scripts/restore.sh`) в этом
-окружении не выполнялась: она требует запущенного стека (§9). Выполнена
-**частичная проверка того же механизма на уровне данных** — тем же
-способом, каким это делает `backup-service`:
+Выполнены **настоящие** `scripts/backup.sh` и `scripts/restore.sh`, без
+правок в скриптах.
 
-- дамп: `pg_dump --format=custom --compress=6` — как `backup-service/backup-service:43`;
-- восстановление: `pg_restore --clean --if-exists --no-owner --no-privileges`
-  — как `backup-service/backup-service:112`.
+### 12.1 Отличие от production, которое надо знать
+
+Образ `evaself/backup-service:0.1.0` собран **без слоя `apt-get install`**
+из `backup-service/Dockerfile:14-17`: Debian-репозитории заблокированы
+(§9.2). Слой ставит `tar gzip ca-certificates curl`; проверено, что в
+базовом образе `pgvector/pgvector:0.8.6-pg17` уже есть `tar`, `gzip`,
+`pg_dump`, `pg_restore`, `pg_dumpall`, `psql`, а `curl` в скрипте
+`backup-service/backup-service` не используется ни разу. То есть для
+пути backup/restore образ функционально эквивалентен. Сам
+`backup-service/backup-service` взят из репозитория без изменений.
+
+### 12.2 Backup — фактический вывод
 
 ```
-dump создан: 282K
-ошибок pg_restore: 0
---- проверка фикстуры в восстановленной базе ---
- (13 строк, все ok = t)
-NOTICE:  baseline-фикстура на месте
+==> PostgreSQL
+[backup-service] dumping globals (roles, grants)
+[backup-service] dumping database eva
+[backup-service] dumping database nocodb
+[backup-service] dumping database letta
+  ✔ сохранено баз: 3, включая globals
+==> Agents и conversations
+  ! eva-agent-service не запущен; инвентарь пропущен, volume сохранён
+==> Конфигурация и контент
+  ✔ skills, library и WebApp сохранены
+==> Манифест
+  ✔ манифест и checksums записаны
+==> Упаковка и шифрование
+  архив шифруется мастер-ключом Secret Store
+  ✔ 116K  /var/backups/evaself/evaself-backup-2026-08-04-07-50.tar.gz.enc
+  ✔ зашифрованный архив проверен
 ```
 
-Что осталось **непроверенным** и должно быть проверено на стенде с
-доступным реестром образов: дамп трёх баз и globals, архивация
-docker-томов, инвентарь агентов App Server, шифрование архива и
-MANIFEST, полный цикл `restore.sh` на чистой машине.
+### 12.3 Restore на чистом окружении — фактический вывод
+
+Volumes снесены полностью (`docker compose down -v`), после чего
+`docker volume ls` не показывал ни одного тома Evaself.
+
+```
+==> Восстановление из evaself-backup-2026-08-04-07-50.tar.gz.enc
+==> Содержимое backup
+  created_at   2026-08-04T07:51:00+02:00
+  git_commit   9348c203294c37209b226b88674468e2797d5645
+  базы: nocodb.dump letta.dump eva.dump
+  ✔ checksums проверены
+==> Базы данных
+(restore-all выполнен)
+```
+
+Данные после восстановления проверены той же `verify.sql`:
+
+```
+(16 строк, все ok = t)
+NOTICE:  baseline-фикстура на месте: пройдено проверок 16
+EXIT=0
+```
+
+`schema_migrations` в восстановленной базе = 28.
+
+### 12.4 Что осталось непроверенным
+
+`scripts/restore.sh:181` (`compose up -d --remove-orphans`) не отработал:
+сборка `media-service` требует `ffmpeg` из заблокированных
+Debian-репозиториев (§9.2). То есть **восстановление данных и
+конфигурации подтверждено, запуск всех 18 сервисов после restore — нет.**
+
+Также не проверены: архивация `letta_app_server_data`,
+`letta_provider_config`, `nocodb_data`, `caddy_data` (эти тома в тестовом
+стенде не создавались, `backup.sh` их корректно пропустил) и инвентарь
+агентов App Server (`eva-agent-service` не поднимался).
+
+### 12.5 Восстановление не работает «из коробки»
+
+Первый запуск `restore.sh` **упал на расшифровке архива, который сам же
+`backup.sh` только что создал и проверил**:
+
+```
+==> Восстановление из evaself-backup-2026-08-04-07-50.tar.gz.enc
+  ✖ не удалось расшифровать backup: нужен пароль архива или мастер-ключ, которым он создан
+```
+
+Причина — в порядке операций внутри `scripts/restore.sh`, разбор в §13,
+пункт 2. Приведённый выше успешный прогон получен только после явной
+передачи `EVA_BACKUP_MASTER_KEY_FILE` в окружении. Это обходной путь
+оператора, а не штатное поведение.
 
 ---
 
 ## 13. Известные проблемы, найденные в коде
 
-Только зафиксированы; в этом шаге ничего не исправлялось.
+Только зафиксированы; в этом шаге ничего не исправлялось. Первые две
+найдены при фактическом прогоне backup/restore и раньше в репозитории не
+были описаны.
 
-1. **`scripts/validate.sh` возвращает 1 без бинарного `caddy` и без
+1. **`scripts/configure.sh` порождает `.env`, который `docker compose`
+   не может разобрать.** `configure.sh:343` пишет
+   `EVASELF_INCOMPLETE_SETTINGS "'$INCOMPLETE_CSV'"`, а в CSV попадает
+   строка с апострофом — `e-mail Let's Encrypt` (`configure.sh:82` и
+   `:336`). Апостроф закрывает одинарную кавычку раньше времени:
+
+   ```
+   $ docker compose --env-file versions.env --env-file .env -f compose.yaml up -d postgres
+   failed to read /home/user/evaself/.env: line 197: unexpected character ","
+   in variable name "s Encrypt,Telegram Bot Token,Telegram ID владельца,LLM-провайдер'"
+   ```
+
+   Ломается **любая** команда compose, то есть `make start`, `make status`,
+   `make backup`, — всякий раз, когда установка настроена не до конца.
+   Проверка в CI этого не ловит: шаг «Installer defaults and skipped
+   optional settings» (`.github/workflows/ci.yml`) читает `.env` только
+   через bash-функцию `load_env`, а bash такое значение разбирает иначе,
+   чем compose. Обойдено локально очисткой переменной в неотслеживаемом
+   `.env`.
+
+2. **`scripts/restore.sh` не может расшифровать архив, созданный
+   `scripts/backup.sh`, если мастер-ключ лежит не по умолчанию.**
+   `restore.sh:33` вычисляет `MASTER_KEY_FILE` из
+   `EVA_BACKUP_MASTER_KEY_FILE` / `EVA_SECRETS_MASTER_KEY_FILE`, а
+   `:43` пробует расшифровать, — но `load_env` вызывается только на
+   строке **114**. К моменту расшифровки `.env` ещё не прочитан, поэтому
+   обе переменные пусты и путь падает на умолчание
+   `/etc/evaself/secrets-master-key`, которого при штатной установке нет:
+   `scripts/ensure-admin-master-key.sh:10` кладёт ключ в
+   `$ROOT_DIR/secrets/eva-secrets-master-key`, и именно этот путь
+   `configure.sh` пишет в `.env` (`EVA_SECRETS_MASTER_KEY_FILE`).
+   Фактический результат — §12.5. Обход: передать
+   `EVA_BACKUP_MASTER_KEY_FILE` в окружении вручную.
+   Последствие серьёзное: штатно созданный backup штатным restore не
+   восстанавливается.
+
+3. **`scripts/validate.sh` возвращает 1 без бинарного `caddy` и без
    реестра образов**, хотя сами Caddyfile валидны (§8.5). Проверка молча
    зависит от сети, тогда как остальные проверки офлайн, и отличить
    «конфигурация сломана» от «образ не скачался» по выводу нельзя.
    `validate.sh:70-86`.
-2. **`test_results`, `referrals`, `partner_analysis_links` есть в
+4. **`test_results`, `referrals`, `partner_analysis_links` есть в
    `001_init.sql`, но удаляются `016_cleanup_and_safety.sql`.** Читая
    только `001_init.sql`, легко решить, что таблицы существуют. §3.2.
-3. **Каталог инструментов целиком уходит модели в назначении `chat`**
+5. **Каталог инструментов целиком уходит модели в назначении `chat`**
    (`allowedTools: null`). §10, инвариант 17.
-4. **Имена `LIGHTRAG_INSERT` / `LIGHTRAG_QUERY`** в каталоге инструментов
+6. **Имена `LIGHTRAG_INSERT` / `LIGHTRAG_QUERY`** в каталоге инструментов
    называют компонент, который CLAUDE.md запрещает, хотя за ними стоит
    PostgreSQL. Риск: следующий агент примет их за интеграцию с LightRAG.
    `src/tools/core-tools.ts:416-476`.
-5. **`LIGHTRAG_QUERY` ищет через `ILIKE '%...%'`** по `eva_notes` —
+7. **`LIGHTRAG_QUERY` ищет через `ILIKE '%...%'`** по `eva_notes` —
    ни FTS, ни `pg_trgm`, при том что подходящий GIN-индекс
    (`eva_notes_search_idx`) на таблице есть и не используется.
    `src/tools/core-tools.ts:459-476`.
-6. **Планировщик и heartbeat живут в процессе** через `setInterval`
+8. **Планировщик и heartbeat живут в процессе** через `setInterval`
    без внешней координации: при нескольких репликах
    `eva-agent-service` они выполнятся в каждой. `src/background.ts:69-78`.
-7. **`media-service` требует `ffprobe`**, но это нигде не объявлено
+9. **`media-service` требует `ffprobe`**, но это нигде не объявлено
    как требование к окружению тестов вне образа. §8.4.
