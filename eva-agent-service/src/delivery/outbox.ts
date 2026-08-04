@@ -63,7 +63,12 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
   async send(envelope: OutboxEnvelope): Promise<unknown> {
     const insertStarted = performance.now();
     const idempotencyKey = envelope.idempotencyKey ?? `telegram:${randomUUID()}`;
-    const { rows } = await this.db.query<{ id: string; status: string }>(
+    // Постановка в outbox принадлежит тому ходу, из которого пришла:
+    // области пользователя, если сообщение — часть его диалога, и
+    // системной, если сообщение отправляет сам сервис.
+    const { rows } = await this.db.withSystemScope(
+      "telegram.outbox.enqueue",
+      async () => await this.db.query<{ id: string; status: string }>(
       `INSERT INTO telegram_outbox
          (idempotency_key, user_id, chat_id, telegram_method, payload)
        VALUES ($1, $2, $3, $4, $5::jsonb)
@@ -77,6 +82,8 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
         envelope.method,
         JSON.stringify(envelope.payload),
       ],
+      ),
+      { inherit: true },
     );
     envelope.onMetrics?.({
       outboxInsertMs: elapsed(insertStarted),
@@ -107,8 +114,12 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
   }
 
   private async claimById(id: string): Promise<OutboxRow | null> {
-    const { rows } = await this.db.query<OutboxRow>(
-      `UPDATE telegram_outbox
+    const { rows } = await this.db.withSystemScope(
+      "telegram.outbox.claim",
+      async () => await this.db.query<OutboxRow>(
+      `
+        -- tenant: system — durable delivery: строки берутся по id и аренде воркера, а не по запросу пользователя
+        UPDATE telegram_outbox
           SET status = 'sending',
               attempts = attempts + 1,
               locked_at = now(),
@@ -119,14 +130,19 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
           AND attempts < $3
       RETURNING id, telegram_method, payload, attempts`,
       [id, this.workerId, Math.max(1, this.options.maxAttempts)],
+      ),
+      { crossUser: true },
     );
     return rows[0] ?? null;
   }
 
   private async claimNext(): Promise<OutboxRow | null> {
-    return await this.db.transaction(async (client) => {
+    return await this.db.withSystemScope("telegram.outbox.worker", async () =>
+      await this.db.transaction(async (client) => {
       await client.query(
-        `UPDATE telegram_outbox
+        `
+          -- tenant: system — durable delivery: строки берутся по id и аренде воркера, а не по запросу пользователя
+          UPDATE telegram_outbox
             SET status = 'dead',
                 last_error = COALESCE(last_error, 'worker lease expired after final attempt'),
                 locked_at = NULL,
@@ -140,7 +156,9 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
         ],
       );
       const { rows } = await client.query<OutboxRow>(
-        `SELECT id, telegram_method, payload, attempts
+        `
+          -- tenant: system — durable delivery: строки берутся по id и аренде воркера, а не по запросу пользователя
+          SELECT id, telegram_method, payload, attempts
            FROM telegram_outbox
           WHERE attempts < $2
             AND (
@@ -157,7 +175,9 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
       const row = rows[0];
       if (!row) return null;
       await client.query(
-        `UPDATE telegram_outbox
+        `
+          -- tenant: system — durable delivery: строки берутся по id и аренде воркера, а не по запросу пользователя
+          UPDATE telegram_outbox
             SET status = 'sending',
                 attempts = attempts + 1,
                 locked_at = now(),
@@ -166,7 +186,9 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
         [row.id, this.workerId],
       );
       return { ...row, attempts: row.attempts + 1 };
-    });
+      }),
+      { crossUser: true },
+    );
   }
 
   private async deliver(
@@ -179,8 +201,11 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
       const telegramSendMs = elapsed(sendStarted);
       onMetrics?.({ telegramSendMs });
       const messageIds = extractMessageIds(result);
-      await this.db.query(
-        `UPDATE telegram_outbox
+      await this.db.withSystemScope("telegram.outbox.sent", async () =>
+        await this.db.query(
+        `
+          -- tenant: system — durable delivery: строки берутся по id и аренде воркера, а не по запросу пользователя
+          UPDATE telegram_outbox
             SET status = 'sent',
                 telegram_message_ids = $2::bigint[],
                 last_error = NULL,
@@ -189,7 +214,9 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
                 locked_by = NULL
           WHERE id = $1`,
         [row.id, messageIds],
-      );
+        ),
+      { crossUser: true },
+    );
       this.logger.debug("Telegram outbox доставлен", {
         outboxId: row.id,
         telegram_send_ms: telegramSendMs,
@@ -199,8 +226,11 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
       const dead = row.attempts >= this.options.maxAttempts;
       const message = error instanceof Error ? error.message : String(error);
       const backoffSeconds = Math.min(300, Math.max(2, 2 ** Math.max(0, row.attempts - 1)));
-      await this.db.query(
-        `UPDATE telegram_outbox
+      await this.db.withSystemScope("telegram.outbox.retry", async () =>
+        await this.db.query(
+        `
+          -- tenant: system — durable delivery: строки берутся по id и аренде воркера, а не по запросу пользователя
+          UPDATE telegram_outbox
             SET status = $2,
                 available_at = CASE
                   WHEN $2 = 'retry' THEN now() + make_interval(secs => $3)
@@ -211,7 +241,9 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
                 locked_by = NULL
           WHERE id = $1`,
         [row.id, dead ? "dead" : "retry", backoffSeconds, message.slice(0, 2_000)],
-      );
+        ),
+      { crossUser: true },
+    );
       this.logger.warn("Доставка Telegram отложена", {
         outboxId: row.id,
         attempt: row.attempts,

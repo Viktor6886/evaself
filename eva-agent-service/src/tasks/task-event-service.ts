@@ -26,7 +26,9 @@ export class TaskEventService {
   constructor(private readonly db: Database) {}
 
   async record(input: TaskEventInput): Promise<Record<string, unknown> | null> {
-    const routing = input.llmRequestId ? await this.routerOutcome(input.llmRequestId) : null;
+    const routing = input.llmRequestId
+      ? await this.routerOutcome(input.userId, input.llmRequestId)
+      : null;
     const { rows } = await this.db.query<Record<string, unknown>>(
       `INSERT INTO task_events (
          user_id, task_id, event_type, scheduled_at, generated_at, sent_at,
@@ -76,7 +78,7 @@ export class TaskEventService {
   ): Promise<{ task_id: string; title: string; status: string } | null> {
     const { rows } = await this.db.query<{ task_id: string; title: string; status: string }>(
       `SELECT e.task_id, t.title, t.status
-         FROM task_events e JOIN tasks t ON t.id = e.task_id
+         FROM task_events e JOIN tasks t ON t.id = e.task_id AND t.user_id = e.user_id
         WHERE e.user_id = $1 AND e.telegram_chat_id = $2
           AND e.telegram_message_id = $3 AND e.event_type = 'reminder_sent'
         ORDER BY e.created_at DESC LIMIT 1`,
@@ -88,7 +90,7 @@ export class TaskEventService {
   async recent(userId: number, limit = 20): Promise<Record<string, unknown>[]> {
     const { rows } = await this.db.query<Record<string, unknown>>(
       `SELECT e.*, t.title, t.status AS task_status
-         FROM task_events e JOIN tasks t ON t.id = e.task_id
+         FROM task_events e JOIN tasks t ON t.id = e.task_id AND t.user_id = e.user_id
         WHERE e.user_id = $1
         ORDER BY e.created_at DESC LIMIT $2`,
       [userId, Math.min(Math.max(limit, 1), 100)],
@@ -102,7 +104,7 @@ export class TaskEventService {
   ): Promise<Array<{ task_id: string; title: string }>> {
     const { rows } = await this.db.query<{ task_id: string; title: string }>(
       `SELECT DISTINCT ON (e.task_id) e.task_id, t.title
-         FROM task_events e JOIN tasks t ON t.id=e.task_id
+         FROM task_events e JOIN tasks t ON t.id=e.task_id AND t.user_id=e.user_id
         WHERE e.user_id=$1 AND e.event_type='reminder_sent'
           AND t.status IN ('open','in_progress')
         ORDER BY e.task_id, e.sent_at DESC NULLS LAST
@@ -115,7 +117,7 @@ export class TaskEventService {
   async forTask(userId: number, taskId: number, limit = 50): Promise<Record<string, unknown>[]> {
     const { rows } = await this.db.query<Record<string, unknown>>(
       `SELECT e.*, t.title, t.status AS task_status
-         FROM task_events e JOIN tasks t ON t.id = e.task_id
+         FROM task_events e JOIN tasks t ON t.id = e.task_id AND t.user_id = e.user_id
         WHERE e.user_id = $1 AND e.task_id = $2
         ORDER BY e.created_at DESC LIMIT $3`,
       [userId, taskId, Math.min(Math.max(limit, 1), 100)],
@@ -164,7 +166,7 @@ export class TaskEventService {
       title: string; event_type: string; created_at: Date; task_status: string;
     }>(
       `SELECT t.title, e.event_type, e.created_at, t.status AS task_status
-         FROM task_events e JOIN tasks t ON t.id=e.task_id
+         FROM task_events e JOIN tasks t ON t.id=e.task_id AND t.user_id=e.user_id
         WHERE e.user_id=$1 AND e.created_at >= now() - interval '14 days'
           AND e.event_type IN ('reminder_sent','user_replied','snoozed','completed','cancelled')
         ORDER BY e.created_at DESC LIMIT 5`,
@@ -185,7 +187,13 @@ export class TaskEventService {
     });
   }
 
-  private async routerOutcome(requestId: string): Promise<{
+  /**
+   * Телеметрия маршрута берётся только по собственному ходу пользователя:
+   * `request_id` приходит из кода, но границу задаёт владелец записи, а
+   * не совпадение идентификатора. Записи без владельца — служебные ходы
+   * самого сервиса.
+   */
+  private async routerOutcome(userId: number, requestId: string): Promise<{
     routing_mode: string; requested_route: string; effective_route: string;
     actual_provider_id: string; model: string;
   } | null> {
@@ -194,9 +202,11 @@ export class TaskEventService {
       actual_provider_id: string; model: string;
     }>(
       `SELECT routing_mode, requested_route, effective_route, actual_provider_id, model
-         FROM llm_requests WHERE request_id=$1 AND succeeded
+         FROM llm_requests
+        WHERE request_id=$2 AND succeeded
+          AND (user_id = $1 OR user_id IS NULL)
         ORDER BY finished_at DESC LIMIT 1`,
-      [requestId],
+      [userId, requestId],
     );
     return rows[0] ?? null;
   }

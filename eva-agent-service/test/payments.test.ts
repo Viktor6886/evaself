@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { LavaPayments } from "../dist/payments.js";
+import { withTenantScopes } from "./tenant-scope-helper.ts";
 
 const silentLogger = { debug() {}, info() {}, warn() {}, error() {} };
 
@@ -31,19 +32,21 @@ function harness(options: FakeOptions = {}) {
   const client = {
     query(sql: string, values: unknown[] = []) {
       statements.push({ sql, values });
+      // Пометки границы арендатора стоят комментарием перед запросом,
+      // поэтому сравнение идёт по вхождению, а не по началу строки.
       const normalized = sql.replace(/\s+/g, " ").trim();
-      if (normalized.startsWith("SELECT id, telegram_id FROM users")) {
+      if (normalized.includes("SELECT id, telegram_id FROM users")) {
         const user = options.user === undefined
           ? { id: "3", telegram_id: "42" }
           : options.user;
         return Promise.resolve({ rows: user ? [user] : [] });
       }
-      if (normalized.startsWith("INSERT INTO payments")) {
+      if (normalized.includes("INSERT INTO payments")) {
         return Promise.resolve({
           rows: options.paymentInserted === false ? [] : [{ id: "9" }],
         });
       }
-      if (normalized.startsWith("SELECT current_period_end")) {
+      if (normalized.includes("SELECT current_period_end")) {
         return Promise.resolve({
           rows: options.previousPeriodEnd === undefined
             ? []
@@ -54,11 +57,12 @@ function harness(options: FakeOptions = {}) {
     },
   };
 
-  const db = {
+  const db = withTenantScopes({
+    query: client.query,
     transaction<T>(work: (c: typeof client) => Promise<T>) {
       return work(client);
     },
-  };
+  });
   const telegram = {
     // The confirmation is sent inside a delivery context so the outbox can
     // deduplicate it; the fake just runs the callback.
@@ -236,7 +240,7 @@ test("a failure to confirm over Telegram does not undo the subscription", async 
   // Replace the client with one that always fails after the fact.
   const broken = new LavaPayments(
     { lavaWebhookUser: "eva", lavaWebhookPassword: "s3cret", lavaPlans: PLANS } as never,
-    { transaction: <T,>(work: (c: unknown) => Promise<T>) => work({
+    withTenantScopes({
       query(sql: string) {
         if (sql.replace(/\s+/g, " ").includes("SELECT id, telegram_id FROM users")) {
           return Promise.resolve({ rows: [{ id: "3", telegram_id: "42" }] });
@@ -244,7 +248,16 @@ test("a failure to confirm over Telegram does not undo the subscription", async 
         if (sql.includes("INSERT INTO payments")) return Promise.resolve({ rows: [{ id: "9" }] });
         return Promise.resolve({ rows: [] });
       },
-    }) } as never,
+      transaction: <T,>(work: (c: unknown) => Promise<T>) => work({
+        query(sql: string) {
+          if (sql.replace(/\s+/g, " ").includes("SELECT id, telegram_id FROM users")) {
+            return Promise.resolve({ rows: [{ id: "3", telegram_id: "42" }] });
+          }
+          if (sql.includes("INSERT INTO payments")) return Promise.resolve({ rows: [{ id: "9" }] });
+          return Promise.resolve({ rows: [] });
+        },
+      }),
+    }) as never,
     {
       withDeliveryContext: <T,>(_key: string, work: () => Promise<T>) => work(),
       sendMessage: () => Promise.reject(new Error("telegram is down")),

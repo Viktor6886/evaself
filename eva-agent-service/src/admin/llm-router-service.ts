@@ -121,7 +121,9 @@ export class LlmRouterAdminService {
       // Последние отказы — то, что администратор хочет видеть первым.
       // Текста переписки в этой таблице нет по построению.
       this.pool.query(
-        `SELECT r.request_id, r.route_code, r.started_at, r.switch_reason,
+        `
+          -- tenant: system — телеметрия роутера в административной панели, доступ ограничен RBAC на маршруте
+          SELECT r.request_id, r.route_code, r.started_at, r.switch_reason,
                 r.error_summary, r.http_status, r.attempts, p.name AS provider
            FROM llm_requests r
            LEFT JOIN llm_providers p ON p.id = r.actual_provider_id

@@ -104,6 +104,13 @@ jobs:
       # Уязвимость в зависимости не видна в обычных тестах: они зелёные
       # ровно до инцидента. Список принятых исключений — в самом скрипте,
       # поимённо и с причиной; новая уязвимость high вне списка валит CI.
+      # Утечка между пользователями не выглядит как поломка: забытый
+      # WHERE user_id даёт зелёные тесты и рабочий интерфейс. Список
+      # пользовательских таблиц берётся из миграций, поэтому новая
+      # таблица с user_id попадает под проверку автоматически.
+      - name: Every query on a user table names its tenant
+        run: python3 scripts/ci/assert-tenant-scope.py
+
       - name: Dependency audit (npm and pip)
         run: |
           python3 -m pip install --quiet --disable-pip-version-check pip-audit

@@ -2,6 +2,7 @@ import { Redis } from "ioredis";
 import pg from "pg";
 
 import { createLogger } from "../logger.js";
+import { guardPool } from "../tenancy/index.js";
 import { HealthWorker } from "./health-worker.js";
 import { UpdaterClient } from "./updater-client.js";
 
@@ -15,11 +16,11 @@ async function main() {
   const databaseUrl = (process.env.DATABASE_URL ?? "").trim();
   const valkeyUrl = (process.env.VALKEY_URL ?? "").trim();
   if (!databaseUrl || !valkeyUrl) throw new Error("DATABASE_URL и VALKEY_URL обязательны");
-  const pool = new Pool({
+  const pool = guardPool(new Pool({
     connectionString: databaseUrl,
     max: 6,
     application_name: "evaself-health-worker",
-  });
+  }));
   const redis = new Redis(valkeyUrl, {
     maxRetriesPerRequest: 2,
     enableOfflineQueue: false,

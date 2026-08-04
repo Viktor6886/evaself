@@ -90,16 +90,36 @@ export class BackgroundRuntime {
     if (this.taskRunning) return;
     this.taskRunning = true;
     try {
-      await this.db.query(
-        `UPDATE subscriptions
-            SET status = 'expired'
-          WHERE status IN ('trialing', 'active', 'past_due')
-            AND current_period_end IS NOT NULL
-            AND current_period_end <= now()`,
+      // Просроченные подписки и выборка задач идут сразу по многим
+      // пользователям — это объявленная системная работа. Сама же
+      // задача выполняется уже в области своего владельца.
+      const tasks = await this.db.withSystemScope(
+        "scheduler.claim",
+        async () => {
+          await this.db.query(
+            `
+              -- tenant: system — периодическое истечение подписок по сроку, общесистемная развёртка, а не запрос пользователя
+              UPDATE subscriptions
+                SET status = 'expired'
+              WHERE status IN ('trialing', 'active', 'past_due')
+                AND current_period_end IS NOT NULL
+                AND current_period_end <= now()`,
+          );
+          if (!this.telegram.configured) return [];
+          return await this.claimDueTasks();
+        },
+        { crossUser: true },
       );
-      if (!this.telegram.configured) return;
-      const tasks = await this.claimDueTasks();
-      for (const task of tasks) await this.executeTask(task);
+      for (const task of tasks) {
+        await this.db.withUserScope(
+          {
+            userId: Number(task.user_id),
+            telegramId: Number(task.telegram_id),
+            label: "scheduler.task",
+          },
+          async () => await this.executeTask(task),
+        );
+      }
     } catch (error) {
       this.logger.error("Ошибка планировщика задач", {
         message: error instanceof Error ? error.message : String(error),
@@ -113,40 +133,53 @@ export class BackgroundRuntime {
     if (this.heartbeatRunning || !this.telegram.configured) return;
     this.heartbeatRunning = true;
     try {
-      const { rows } = await this.db.query<HeartbeatCandidate>(
-        `SELECT u.id AS user_id,
-                u.telegram_id,
-                COALESCE(t.chat_id, u.telegram_id) AS chat_id,
-                u.timezone,
-                a.agent_id,
-                a.conversation_id,
-                h.last_user_message_at,
-                h.last_sent_at,
-                h.last_message_hash
-           FROM users u
-           JOIN agent_links a
-             ON a.user_id = u.id AND a.kind = 'eva' AND a.status = 'active'
-           LEFT JOIN user_preferences p ON p.user_id = u.id
-           LEFT JOIN heartbeat_state h ON h.user_id = u.id
-           LEFT JOIN LATERAL (
-             SELECT chat_id FROM telegram_updates
-              WHERE user_id = u.id AND chat_id IS NOT NULL
-              ORDER BY received_at DESC LIMIT 1
-           ) t ON true
-          WHERE u.state = 'active'
-            AND NOT u.is_blocked
-            AND a.conversation_id IS NOT NULL
-            AND COALESCE(p.heartbeat_enabled, true)
-            AND COALESCE(h.last_user_message_at, u.last_seen_at, u.created_at)
-                <= now() - COALESCE(p.heartbeat_min_silence, interval '6 hours')
-            AND (h.last_sent_at IS NULL OR
-                 h.last_sent_at <= now() - COALESCE(p.heartbeat_min_interval, interval '12 hours'))
-          ORDER BY COALESCE(h.last_sent_at, '-infinity'::timestamptz)
-          LIMIT 25`,
+      const { rows } = await this.db.withSystemScope(
+        "heartbeat.candidates",
+        async () => await this.db.query<HeartbeatCandidate>(
+          `
+            -- tenant: system — кандидаты heartbeat выбираются по всем пользователям, сообщение готовится уже в области владельца
+            SELECT u.id AS user_id,
+                  u.telegram_id,
+                  COALESCE(t.chat_id, u.telegram_id) AS chat_id,
+                  u.timezone,
+                  a.agent_id,
+                  a.conversation_id,
+                  h.last_user_message_at,
+                  h.last_sent_at,
+                  h.last_message_hash
+             FROM users u
+             JOIN agent_links a
+               ON a.user_id = u.id AND a.kind = 'eva' AND a.status = 'active'
+             LEFT JOIN user_preferences p ON p.user_id = u.id
+             LEFT JOIN heartbeat_state h ON h.user_id = u.id
+             LEFT JOIN LATERAL (
+               SELECT chat_id FROM telegram_updates
+                WHERE user_id = u.id AND chat_id IS NOT NULL
+                ORDER BY received_at DESC LIMIT 1
+             ) t ON true
+            WHERE u.state = 'active'
+              AND NOT u.is_blocked
+              AND a.conversation_id IS NOT NULL
+              AND COALESCE(p.heartbeat_enabled, true)
+              AND COALESCE(h.last_user_message_at, u.last_seen_at, u.created_at)
+                  <= now() - COALESCE(p.heartbeat_min_silence, interval '6 hours')
+              AND (h.last_sent_at IS NULL OR
+                   h.last_sent_at <= now() - COALESCE(p.heartbeat_min_interval, interval '12 hours'))
+            ORDER BY COALESCE(h.last_sent_at, '-infinity'::timestamptz)
+            LIMIT 25`,
+        ),
+        { crossUser: true },
       );
       for (const candidate of rows) {
         if (isQuietHours(candidate.timezone)) continue;
-        await this.executeHeartbeat(candidate);
+        await this.db.withUserScope(
+          {
+            userId: Number(candidate.user_id),
+            telegramId: Number(candidate.telegram_id),
+            label: "heartbeat",
+          },
+          async () => await this.executeHeartbeat(candidate),
+        );
       }
     } catch (error) {
       this.logger.error("Ошибка heartbeat", {
@@ -160,7 +193,9 @@ export class BackgroundRuntime {
   private async claimDueTasks(): Promise<DueTask[]> {
     return await this.db.transaction(async (client) => {
       const { rows } = await client.query<DueTask>(
-        `SELECT t.id, t.user_id, u.telegram_id,
+        `
+          -- tenant: system — планировщик забирает наступившие задачи по всем пользователям, выполнение идёт в области владельца
+          SELECT t.id, t.user_id, u.telegram_id,
                 COALESCE(tu.chat_id, u.telegram_id) AS chat_id,
                 t.title, t.description, t.priority, t.due_at, t.remind_at,
                 g.title AS related_goal,
@@ -181,7 +216,7 @@ export class BackgroundRuntime {
               WHERE user_id = u.id AND chat_id IS NOT NULL
               ORDER BY received_at DESC LIMIT 1
            ) tu ON true
-           LEFT JOIN goals g ON g.id = t.goal_id
+           LEFT JOIN goals g ON g.id = t.goal_id AND g.user_id = t.user_id
           WHERE t.status IN ('open', 'in_progress')
             AND a.conversation_id IS NOT NULL
             AND COALESCE(t.next_run_at, t.remind_at, t.due_at) <= now()
@@ -193,7 +228,9 @@ export class BackgroundRuntime {
       );
       if (rows.length > 0) {
         await client.query(
-          "UPDATE tasks SET locked_at = now() WHERE id = ANY($1::bigint[])",
+          `
+            -- tenant: system — блокировка уже отобранных строк планировщика: список id получен выборкой выше
+            UPDATE tasks SET locked_at = now() WHERE id = ANY($1::bigint[])`,
           [rows.map((row) => row.id)],
         );
       }
@@ -206,19 +243,23 @@ export class BackgroundRuntime {
     try {
       const delivered = await this.db.query(
         `SELECT 1 FROM task_events
-          WHERE task_id=$1 AND event_type='reminder_sent' AND scheduled_at=$2
+          WHERE user_id=$3 AND task_id=$1
+            AND event_type='reminder_sent' AND scheduled_at=$2
           LIMIT 1`,
-        [task.id, task.scheduled_at],
+        [task.id, task.scheduled_at, task.user_id],
       );
       if ((delivered.rowCount ?? 0) > 0) {
         const next = task.repeat_enabled && task.cron_expression
           ? nextCronDate(task.cron_expression, task.timezone, new Date())
           : null;
         await this.db.query(
-          `UPDATE tasks SET last_run_at=now(), next_run_at=$2,
+          `
+            -- tenant: by task_id — задача уже принадлежит одному пользователю, проверка владения выше по стеку
+            UPDATE tasks SET last_run_at=now(), next_run_at=$2,
                   remind_at=CASE WHEN $2::timestamptz IS NULL THEN NULL ELSE remind_at END,
-                  locked_at=NULL, last_error=NULL WHERE id=$1`,
-          [task.id, next?.toISOString() ?? null],
+                  locked_at=NULL, last_error=NULL
+            WHERE id=$1 AND user_id=$3`,
+          [task.id, next?.toISOString() ?? null, task.user_id],
         );
         return;
       }
@@ -280,16 +321,18 @@ export class BackgroundRuntime {
         ? nextCronDate(task.cron_expression, task.timezone, new Date())
         : null;
       await this.db.query(
-        `UPDATE tasks SET
+        `
+          -- tenant: by task_id — задача уже принадлежит одному пользователю, проверка владения выше по стеку
+          UPDATE tasks SET
            last_run_at = now(),
            next_run_at = $2,
            remind_at = CASE WHEN $2::timestamptz IS NULL THEN NULL ELSE remind_at END,
            locked_at = NULL,
            last_error = NULL
-         WHERE id = $1`,
-        [task.id, nextRun?.toISOString() ?? null],
+         WHERE id = $1 AND user_id = $3`,
+        [task.id, nextRun?.toISOString() ?? null, task.user_id],
       );
-      await this.db.markAgentUsed(task.agent_id);
+      await this.db.markAgentUsed(task.agent_id, Number(task.user_id));
     } catch (error) {
       await this.taskEvents.record({
         userId: Number(task.user_id), taskId: task.id,
@@ -300,8 +343,12 @@ export class BackgroundRuntime {
         metadata: { message: (error instanceof Error ? error.message : String(error)).slice(0, 500) },
       }).catch(() => undefined);
       await this.db.query(
-        "UPDATE tasks SET locked_at = NULL, last_error = $2 WHERE id = $1",
-        [task.id, (error instanceof Error ? error.message : String(error)).slice(0, 2000)],
+        "UPDATE tasks SET locked_at = NULL, last_error = $2 WHERE id = $1 AND user_id = $3",
+        [
+          task.id,
+          (error instanceof Error ? error.message : String(error)).slice(0, 2000),
+          task.user_id,
+        ],
       );
       this.logger.warn("Задача не выполнена", {
         taskId: task.id,
@@ -349,7 +396,7 @@ export class BackgroundRuntime {
       }
       await this.telegram.sendMessage(Number(candidate.chat_id), reply);
       await this.saveHeartbeat(candidate, hash, "sent");
-      await this.db.markAgentUsed(candidate.agent_id);
+      await this.db.markAgentUsed(candidate.agent_id, Number(candidate.user_id));
     } catch (error) {
       this.logger.warn("Heartbeat не отправлен", {
         userId: candidate.user_id,

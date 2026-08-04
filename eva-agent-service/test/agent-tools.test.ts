@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { AgentToolFactory } from "../dist/agent-tools.js";
+import { withTenantScopes } from "./tenant-scope-helper.ts";
 
 const silentLogger = { debug() {}, info() {}, warn() {}, error() {} };
 
@@ -58,7 +59,7 @@ function harness(options: { rows?: Record<string, unknown>[]; rowCount?: number 
       // per-user scoping of notes, budget and tasks.
       vectorGoalsEnabled: false,
     } as never,
-    db as never,
+    withTenantScopes(db) as never,
     { setReaction: () => Promise.resolve() } as never,
     silentLogger,
   );
@@ -220,7 +221,7 @@ test("web_search stops at the quota instead of spending it", async () => {
   const statements: Array<{ sql: string; values: unknown[] }> = [];
   const factory = new AgentToolFactory(
     { searxngUrl: "http://search", todoistApiUrl: "", todoistApiToken: "", todoistProjectId: "", vectorGoalsEnabled: false } as never,
-    {
+    withTenantScopes({
       getAgentRuntimeContext: () => Promise.resolve(RUNTIME),
       getQuotaStatus: () => Promise.resolve([{ metric: "web_search", remaining: 0 }]),
       incrementUsage: () => Promise.resolve(1),
@@ -228,7 +229,7 @@ test("web_search stops at the quota instead of spending it", async () => {
         statements.push({ sql, values });
         return Promise.resolve({ rows: [], rowCount: 0 });
       },
-    } as never,
+    }) as never,
     {} as never,
     silentLogger,
   );

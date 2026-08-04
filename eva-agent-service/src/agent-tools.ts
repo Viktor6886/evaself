@@ -10,6 +10,7 @@ import type { GraphRepository } from "./memory/graph-repository.js";
 import { ProfileToolFactory } from "./profile/profile-tools.js";
 import { UserProfileService } from "./profile/profile-service.js";
 import type { TelegramClient } from "./telegram.js";
+import { currentScope } from "./tenancy/index.js";
 import { CoreToolFactory } from "./tools/core-tools.js";
 import { TaskToolFactory } from "./tools/task-tools.js";
 import { TodoistToolFactory } from "./tools/todoist-tools.js";
@@ -107,7 +108,28 @@ export class AgentToolFactory {
               `Инструмент ${name} недоступен в служебном conversation purpose=${runtime.purpose}`,
             );
           }
-          const output = await execute(asObject(rawArgs), runtime);
+          // Владельцем хода инструмент считает только каноническую
+          // запись conversation. Аргументы модели на выбор пользователя
+          // не влияют, а расхождение с уже открытой областью — признак
+          // перепутанного conversation, и работа останавливается.
+          const ambient = currentScope();
+          if (
+            ambient?.kind === "user" &&
+            ambient.userId !== null &&
+            ambient.userId !== runtime.userId
+          ) {
+            throw new Error(
+              `Conversation принадлежит другому пользователю, чем текущий ход`,
+            );
+          }
+          const output = await this.db.withUserScope(
+            {
+              userId: runtime.userId,
+              telegramId: runtime.telegramId,
+              label: `tool:${name}`,
+            },
+            async () => await execute(asObject(rawArgs), runtime),
+          );
           if (CONTEXT_MUTATING_TOOLS.has(name)) {
             this.invalidate(conversationId);
           }

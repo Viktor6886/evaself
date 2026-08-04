@@ -83,469 +83,499 @@ export function registerWebappCoreRoutes(
     });
 
     webApp.get("/dashboard", async (request) => {
-      const user = await ownedUser(input.db, publicUser(request).id);
-      return await dashboard(input.db, user);
+      return await scoped(input.db, request, async (user) => {
+        return await dashboard(input.db, user);
+      });
     });
 
     webApp.post("/checkins", async (request) => {
-      const user = await ownedUser(input.db, publicUser(request).id);
-      const body = objectBody(request);
-      const mood = enumValue(body.mood, ["very_low", "low", "neutral", "good", "great"], "Настроение");
-      const energy = integer(body.energy, "Энергия", 1, 10);
-      const tension = integer(body.tension, "Напряжение", 1, 10);
-      const note = optionalText(body.note, 1_000);
-      const { rows } = await input.db.query(
-        `INSERT INTO user_checkins
-           (user_id, local_date, mood, energy, tension, note, source)
-         VALUES ($1, (now() AT TIME ZONE $2)::date, $3, $4, $5, $6, 'webapp')
-         ON CONFLICT (user_id, local_date) DO UPDATE SET
-           mood = EXCLUDED.mood,
-           energy = EXCLUDED.energy,
-           tension = EXCLUDED.tension,
-           note = EXCLUDED.note,
-           source = EXCLUDED.source,
-           updated_at = now()
-         RETURNING id::text, local_date, mood, energy, tension, note, source,
-                   created_at, updated_at`,
-        [user.id, user.timezone, mood, energy, tension, note],
-      );
-      return { checkin: rows[0] };
+      return await scoped(input.db, request, async (user) => {
+        const body = objectBody(request);
+        const mood = enumValue(body.mood, ["very_low", "low", "neutral", "good", "great"], "Настроение");
+        const energy = integer(body.energy, "Энергия", 1, 10);
+        const tension = integer(body.tension, "Напряжение", 1, 10);
+        const note = optionalText(body.note, 1_000);
+        const { rows } = await input.db.query(
+          `INSERT INTO user_checkins
+             (user_id, local_date, mood, energy, tension, note, source)
+           VALUES ($1, (now() AT TIME ZONE $2)::date, $3, $4, $5, $6, 'webapp')
+           ON CONFLICT (user_id, local_date) DO UPDATE SET
+             mood = EXCLUDED.mood,
+             energy = EXCLUDED.energy,
+             tension = EXCLUDED.tension,
+             note = EXCLUDED.note,
+             source = EXCLUDED.source,
+             updated_at = now()
+           RETURNING id::text, local_date, mood, energy, tension, note, source,
+                     created_at, updated_at`,
+          [user.id, user.timezone, mood, energy, tension, note],
+        );
+        return { checkin: rows[0] };
+      });
     });
 
     webApp.get("/checkins", async (request) => {
-      const user = await ownedUser(input.db, publicUser(request).id);
-      const days = queryInteger(request, "days", 30, 1, 365);
-      const { rows } = await input.db.query(
-        `SELECT id::text, local_date, mood, energy, tension, note, source,
-                created_at, updated_at
-           FROM user_checkins
-          WHERE user_id = $1
-            AND local_date >= (now() AT TIME ZONE $2)::date - ($3::integer - 1)
-          ORDER BY local_date DESC`,
-        [user.id, user.timezone, days],
-      );
-      return { checkins: rows };
+      return await scoped(input.db, request, async (user) => {
+        const days = queryInteger(request, "days", 30, 1, 365);
+        const { rows } = await input.db.query(
+          `SELECT id::text, local_date, mood, energy, tension, note, source,
+                  created_at, updated_at
+             FROM user_checkins
+            WHERE user_id = $1
+              AND local_date >= (now() AT TIME ZONE $2)::date - ($3::integer - 1)
+            ORDER BY local_date DESC`,
+          [user.id, user.timezone, days],
+        );
+        return { checkins: rows };
+      });
     });
 
     webApp.put("/main-result", async (request) => {
-      const user = await ownedUser(input.db, publicUser(request).id);
-      const body = objectBody(request);
-      const title = requiredText(body.title, "Главный результат", 500);
-      const sourceType = optionalText(body.source_type, 50) ?? "manual";
-      const sourceId = optionalText(body.source_id ?? body.id, 200);
-      const sourceLabel = optionalText(body.source_label, 300) ?? "Выбрано вручную";
-      const expectedResult = optionalText(body.expected_result, 2_000);
-      const { rows } = await input.db.query(
-        `INSERT INTO daily_focus_selections
-           (user_id, local_date, title, source_type, source_id, source_label,
-            expected_result, is_manual)
-         VALUES ($1, (now() AT TIME ZONE $2)::date, $3, $4, $5, $6, $7, true)
-         ON CONFLICT (user_id, local_date) DO UPDATE SET
-           title = EXCLUDED.title,
-           source_type = EXCLUDED.source_type,
-           source_id = EXCLUDED.source_id,
-           source_label = EXCLUDED.source_label,
-           expected_result = EXCLUDED.expected_result,
-           is_manual = true,
-           updated_at = now()
-         RETURNING id::text, title, source_type, source_id, source_label,
-                   expected_result, is_manual`,
-        [user.id, user.timezone, title, sourceType, sourceId, sourceLabel, expectedResult],
-      );
-      return { main_focus: selectionToFocus(rows[0] as Record<string, unknown>) };
+      return await scoped(input.db, request, async (user) => {
+        const body = objectBody(request);
+        const title = requiredText(body.title, "Главный результат", 500);
+        const sourceType = optionalText(body.source_type, 50) ?? "manual";
+        const sourceId = optionalText(body.source_id ?? body.id, 200);
+        const sourceLabel = optionalText(body.source_label, 300) ?? "Выбрано вручную";
+        const expectedResult = optionalText(body.expected_result, 2_000);
+        const { rows } = await input.db.query(
+          `INSERT INTO daily_focus_selections
+             (user_id, local_date, title, source_type, source_id, source_label,
+              expected_result, is_manual)
+           VALUES ($1, (now() AT TIME ZONE $2)::date, $3, $4, $5, $6, $7, true)
+           ON CONFLICT (user_id, local_date) DO UPDATE SET
+             title = EXCLUDED.title,
+             source_type = EXCLUDED.source_type,
+             source_id = EXCLUDED.source_id,
+             source_label = EXCLUDED.source_label,
+             expected_result = EXCLUDED.expected_result,
+             is_manual = true,
+             updated_at = now()
+           RETURNING id::text, title, source_type, source_id, source_label,
+                     expected_result, is_manual`,
+          [user.id, user.timezone, title, sourceType, sourceId, sourceLabel, expectedResult],
+        );
+        return { main_focus: selectionToFocus(rows[0] as Record<string, unknown>) };
+      });
     });
 
     webApp.delete("/main-result", async (request) => {
-      const user = await ownedUser(input.db, publicUser(request).id);
-      await input.db.query(
-        `DELETE FROM daily_focus_selections
-          WHERE user_id = $1
-            AND local_date = (now() AT TIME ZONE $2)::date`,
-        [user.id, user.timezone],
-      );
-      return { ok: true };
+      return await scoped(input.db, request, async (user) => {
+        await input.db.query(
+          `DELETE FROM daily_focus_selections
+            WHERE user_id = $1
+              AND local_date = (now() AT TIME ZONE $2)::date`,
+          [user.id, user.timezone],
+        );
+        return { ok: true };
+      });
     });
 
     webApp.get("/tasks", async (request) => {
-      const user = await ownedUser(input.db, publicUser(request).id);
-      const view = queryString(request, "view") ?? "all";
-      const { rows } = await input.db.query(
-        `SELECT id::text, title, description, status, priority, due_at, remind_at,
-                completed_at, cron_expression, repeat_enabled, timezone,
-                goal_id::text, goal_result_id::text, work_block_id::text,
-                estimated_minutes, energy_required, created_at, updated_at
-           FROM tasks
-          WHERE user_id = $1
-            AND status <> 'canceled'
-            AND ($2::text = 'all'
-              OR ($2 = 'open' AND status IN ('open', 'in_progress'))
-              OR ($2 = 'done' AND status = 'done')
-              OR ($2 = 'reminders' AND remind_at IS NOT NULL))
-          ORDER BY
-            CASE status WHEN 'in_progress' THEN 0 WHEN 'open' THEN 1 ELSE 2 END,
-            COALESCE(next_run_at, remind_at, due_at, created_at), id
-          LIMIT 200`,
-        [user.id, view],
-      );
-      return { tasks: rows };
+      return await scoped(input.db, request, async (user) => {
+        const view = queryString(request, "view") ?? "all";
+        const { rows } = await input.db.query(
+          `SELECT id::text, title, description, status, priority, due_at, remind_at,
+                  completed_at, cron_expression, repeat_enabled, timezone,
+                  goal_id::text, goal_result_id::text, work_block_id::text,
+                  estimated_minutes, energy_required, created_at, updated_at
+             FROM tasks
+            WHERE user_id = $1
+              AND status <> 'canceled'
+              AND ($2::text = 'all'
+                OR ($2 = 'open' AND status IN ('open', 'in_progress'))
+                OR ($2 = 'done' AND status = 'done')
+                OR ($2 = 'reminders' AND remind_at IS NOT NULL))
+            ORDER BY
+              CASE status WHEN 'in_progress' THEN 0 WHEN 'open' THEN 1 ELSE 2 END,
+              COALESCE(next_run_at, remind_at, due_at, created_at), id
+            LIMIT 200`,
+          [user.id, view],
+        );
+        return { tasks: rows };
+      });
     });
 
     webApp.post("/tasks", async (request, reply) => {
-      const user = await ownedUser(input.db, publicUser(request).id);
-      const body = objectBody(request);
-      const title = requiredText(body.title, "Название задачи", 500);
-      const description = optionalText(body.description, 5_000);
-      const dueAt = optionalTimestamp(body.due_at, "Срок");
-      const remindAt = optionalTimestamp(body.remind_at, "Напоминание");
-      const priority = optionalInteger(body.priority, 1, 5) ?? 3;
-      const { rows } = await input.db.query(
-        `INSERT INTO tasks
-           (user_id, title, description, status, priority, due_at, remind_at,
-            timezone, next_run_at)
-         VALUES ($1, $2, $3, 'open', $4, $5::timestamptz, $6::timestamptz,
-                 $7, COALESCE($6::timestamptz, $5::timestamptz))
-         RETURNING id::text, title, description, status, priority, due_at,
-                   remind_at, completed_at, cron_expression, repeat_enabled,
-                   timezone, created_at, updated_at`,
-        [user.id, title, description, priority, dueAt, remindAt, user.timezone],
-      );
-      return reply.status(201).send({ task: rows[0] });
+      return await scoped(input.db, request, async (user) => {
+        const body = objectBody(request);
+        const title = requiredText(body.title, "Название задачи", 500);
+        const description = optionalText(body.description, 5_000);
+        const dueAt = optionalTimestamp(body.due_at, "Срок");
+        const remindAt = optionalTimestamp(body.remind_at, "Напоминание");
+        const priority = optionalInteger(body.priority, 1, 5) ?? 3;
+        const { rows } = await input.db.query(
+          `INSERT INTO tasks
+             (user_id, title, description, status, priority, due_at, remind_at,
+              timezone, next_run_at)
+           VALUES ($1, $2, $3, 'open', $4, $5::timestamptz, $6::timestamptz,
+                   $7, COALESCE($6::timestamptz, $5::timestamptz))
+           RETURNING id::text, title, description, status, priority, due_at,
+                     remind_at, completed_at, cron_expression, repeat_enabled,
+                     timezone, created_at, updated_at`,
+          [user.id, title, description, priority, dueAt, remindAt, user.timezone],
+        );
+        return reply.status(201).send({ task: rows[0] });
+      });
     });
 
     webApp.patch("/tasks/:id", async (request) => {
-      const user = await ownedUser(input.db, publicUser(request).id);
-      const id = positiveId((request.params as { id?: string }).id, "задачи");
-      const body = objectBody(request);
-      const patch = buildTaskPatch(body);
-      if (patch.sets.length === 0) throw badRequest("Нет изменений задачи");
-      const { rows } = await input.db.query(
-        `UPDATE tasks SET ${patch.sets.join(", ")}, updated_at = now()
-          WHERE id = $1 AND user_id = $2 AND status <> 'canceled'
-          RETURNING id::text, title, description, status, priority, due_at,
-                    remind_at, completed_at, cron_expression, repeat_enabled,
-                    timezone, created_at, updated_at`,
-        [id, user.id, ...patch.values],
-      );
-      if (!rows[0]) throw notFound("Задача не найдена");
-      let task = rows[0];
-      if (Object.hasOwn(body, "due_at") || Object.hasOwn(body, "remind_at")) {
-        const normalized = await input.db.query(
-          `UPDATE tasks SET next_run_at = COALESCE(remind_at, due_at)
-            WHERE id = $1 AND user_id = $2
+      return await scoped(input.db, request, async (user) => {
+        const id = positiveId((request.params as { id?: string }).id, "задачи");
+        const body = objectBody(request);
+        const patch = buildTaskPatch(body);
+        if (patch.sets.length === 0) throw badRequest("Нет изменений задачи");
+        const { rows } = await input.db.query(
+          `UPDATE tasks SET ${patch.sets.join(", ")}, updated_at = now()
+            WHERE id = $1 AND user_id = $2 AND status <> 'canceled'
             RETURNING id::text, title, description, status, priority, due_at,
                       remind_at, completed_at, cron_expression, repeat_enabled,
                       timezone, created_at, updated_at`,
-          [id, user.id],
+          [id, user.id, ...patch.values],
         );
-        task = normalized.rows[0] ?? task;
-      }
-      return { task };
+        if (!rows[0]) throw notFound("Задача не найдена");
+        let task = rows[0];
+        if (Object.hasOwn(body, "due_at") || Object.hasOwn(body, "remind_at")) {
+          const normalized = await input.db.query(
+            `UPDATE tasks SET next_run_at = COALESCE(remind_at, due_at)
+              WHERE id = $1 AND user_id = $2
+              RETURNING id::text, title, description, status, priority, due_at,
+                        remind_at, completed_at, cron_expression, repeat_enabled,
+                        timezone, created_at, updated_at`,
+            [id, user.id],
+          );
+          task = normalized.rows[0] ?? task;
+        }
+        return { task };
+      });
     });
 
     webApp.delete("/tasks/:id", async (request) => {
-      const user = await ownedUser(input.db, publicUser(request).id);
-      const id = positiveId((request.params as { id?: string }).id, "задачи");
-      const result = await input.db.query(
-        `UPDATE tasks SET status = 'canceled', updated_at = now()
-          WHERE id = $1 AND user_id = $2 AND status <> 'canceled'`,
-        [id, user.id],
-      );
-      if (!result.rowCount) throw notFound("Задача не найдена");
-      return { ok: true };
+      return await scoped(input.db, request, async (user) => {
+        const id = positiveId((request.params as { id?: string }).id, "задачи");
+        const result = await input.db.query(
+          `UPDATE tasks SET status = 'canceled', updated_at = now()
+            WHERE id = $1 AND user_id = $2 AND status <> 'canceled'`,
+          [id, user.id],
+        );
+        if (!result.rowCount) throw notFound("Задача не найдена");
+        return { ok: true };
+      });
     });
 
     webApp.get("/notes", async (request) => {
-      const user = await ownedUser(input.db, publicUser(request).id);
-      const limit = queryInteger(request, "limit", 50, 1, 200);
-      const query = queryString(request, "query");
-      const entryType = queryString(request, "entry_type");
-      const { rows } = await input.db.query(
-        `SELECT id::text, title, content, category, tags, pinned,
-                COALESCE(entry_type, 'note') AS entry_type,
-                created_at, updated_at
-           FROM eva_notes
-          WHERE user_id = $1
-            AND ($2::text IS NULL OR title ILIKE '%' || $2 || '%'
-                 OR content ILIKE '%' || $2 || '%')
-            AND ($3::text IS NULL OR COALESCE(entry_type, 'note') = $3)
-          ORDER BY pinned DESC, updated_at DESC
-          LIMIT $4`,
-        [user.id, query, entryType, limit],
-      );
-      return { notes: rows };
+      return await scoped(input.db, request, async (user) => {
+        const limit = queryInteger(request, "limit", 50, 1, 200);
+        const query = queryString(request, "query");
+        const entryType = queryString(request, "entry_type");
+        const { rows } = await input.db.query(
+          `SELECT id::text, title, content, category, tags, pinned,
+                  COALESCE(entry_type, 'note') AS entry_type,
+                  created_at, updated_at
+             FROM eva_notes
+            WHERE user_id = $1
+              AND ($2::text IS NULL OR title ILIKE '%' || $2 || '%'
+                   OR content ILIKE '%' || $2 || '%')
+              AND ($3::text IS NULL OR COALESCE(entry_type, 'note') = $3)
+            ORDER BY pinned DESC, updated_at DESC
+            LIMIT $4`,
+          [user.id, query, entryType, limit],
+        );
+        return { notes: rows };
+      });
     });
 
     webApp.post("/notes", async (request, reply) => {
-      const user = await ownedUser(input.db, publicUser(request).id);
-      const body = objectBody(request);
-      const title = requiredText(body.title, "Заголовок", 300);
-      const content = requiredText(body.content, "Содержание", 100_000);
-      const category = optionalText(body.category, 200);
-      const entryType = enumValue(body.entry_type ?? "note", ["note", "journal", "insight", "decision"], "Тип записи");
-      const { rows } = await input.db.query(
-        `INSERT INTO eva_notes
-           (user_id, title, content, category, entry_type, tags, pinned)
-         VALUES ($1, $2, $3, $4, $5, '{}'::text[], false)
-         RETURNING id::text, title, content, category, tags, pinned,
-                   entry_type, created_at, updated_at`,
-        [user.id, title, content, category, entryType],
-      );
-      return reply.status(201).send({ note: rows[0] });
+      return await scoped(input.db, request, async (user) => {
+        const body = objectBody(request);
+        const title = requiredText(body.title, "Заголовок", 300);
+        const content = requiredText(body.content, "Содержание", 100_000);
+        const category = optionalText(body.category, 200);
+        const entryType = enumValue(body.entry_type ?? "note", ["note", "journal", "insight", "decision"], "Тип записи");
+        const { rows } = await input.db.query(
+          `INSERT INTO eva_notes
+             (user_id, title, content, category, entry_type, tags, pinned)
+           VALUES ($1, $2, $3, $4, $5, '{}'::text[], false)
+           RETURNING id::text, title, content, category, tags, pinned,
+                     entry_type, created_at, updated_at`,
+          [user.id, title, content, category, entryType],
+        );
+        return reply.status(201).send({ note: rows[0] });
+      });
     });
 
     webApp.patch("/notes/:id", async (request) => {
-      const user = await ownedUser(input.db, publicUser(request).id);
-      const id = positiveId((request.params as { id?: string }).id, "заметки");
-      const body = objectBody(request);
-      const title = Object.hasOwn(body, "title") ? requiredText(body.title, "Заголовок", 300) : null;
-      const content = Object.hasOwn(body, "content") ? requiredText(body.content, "Содержание", 100_000) : null;
-      const category = Object.hasOwn(body, "category") ? optionalText(body.category, 200) : undefined;
-      const { rows } = await input.db.query(
-        `UPDATE eva_notes SET
-           title = COALESCE($3, title),
-           content = COALESCE($4, content),
-           category = CASE WHEN $5::boolean THEN $6 ELSE category END,
-           updated_at = now()
-         WHERE id = $1 AND user_id = $2
-         RETURNING id::text, title, content, category, tags, pinned,
-                   COALESCE(entry_type, 'note') AS entry_type,
-                   created_at, updated_at`,
-        [id, user.id, title, content, category !== undefined, category ?? null],
-      );
-      if (!rows[0]) throw notFound("Заметка не найдена");
-      return { note: rows[0] };
+      return await scoped(input.db, request, async (user) => {
+        const id = positiveId((request.params as { id?: string }).id, "заметки");
+        const body = objectBody(request);
+        const title = Object.hasOwn(body, "title") ? requiredText(body.title, "Заголовок", 300) : null;
+        const content = Object.hasOwn(body, "content") ? requiredText(body.content, "Содержание", 100_000) : null;
+        const category = Object.hasOwn(body, "category") ? optionalText(body.category, 200) : undefined;
+        const { rows } = await input.db.query(
+          `UPDATE eva_notes SET
+             title = COALESCE($3, title),
+             content = COALESCE($4, content),
+             category = CASE WHEN $5::boolean THEN $6 ELSE category END,
+             updated_at = now()
+           WHERE id = $1 AND user_id = $2
+           RETURNING id::text, title, content, category, tags, pinned,
+                     COALESCE(entry_type, 'note') AS entry_type,
+                     created_at, updated_at`,
+          [id, user.id, title, content, category !== undefined, category ?? null],
+        );
+        if (!rows[0]) throw notFound("Заметка не найдена");
+        return { note: rows[0] };
+      });
     });
 
     webApp.delete("/notes/:id", async (request) => {
-      const user = await ownedUser(input.db, publicUser(request).id);
-      const id = positiveId((request.params as { id?: string }).id, "заметки");
-      const result = await input.db.query(
-        "DELETE FROM eva_notes WHERE id = $1 AND user_id = $2",
-        [id, user.id],
-      );
-      if (!result.rowCount) throw notFound("Заметка не найдена");
-      return { ok: true };
+      return await scoped(input.db, request, async (user) => {
+        const id = positiveId((request.params as { id?: string }).id, "заметки");
+        const result = await input.db.query(
+          "DELETE FROM eva_notes WHERE id = $1 AND user_id = $2",
+          [id, user.id],
+        );
+        if (!result.rowCount) throw notFound("Заметка не найдена");
+        return { ok: true };
+      });
     });
 
     webApp.get("/budget", async (request) => {
-      const user = await ownedUser(input.db, publicUser(request).id);
-      const period = queryString(request, "period") ?? "month";
-      const limit = queryInteger(request, "limit", 100, 1, 300);
-      const condition = period === "year"
-        ? "occurred_on >= date_trunc('year', now() AT TIME ZONE $2)::date"
-        : period === "all"
-          ? "true"
-          : "occurred_on >= date_trunc('month', now() AT TIME ZONE $2)::date";
-      const { rows } = await input.db.query(
-        `SELECT id::text, occurred_on, entry_type, amount_minor, currency,
-                category, store, description, payment_method, quantity, created_at
-           FROM budget_entries
-          WHERE user_id = $1 AND ${condition}
-          ORDER BY occurred_on DESC, id DESC
-          LIMIT $3`,
-        [user.id, user.timezone, limit],
-      );
-      return { records: rows, summary: budgetSummary(rows as Array<Record<string, unknown>>) };
+      return await scoped(input.db, request, async (user) => {
+        const period = queryString(request, "period") ?? "month";
+        const limit = queryInteger(request, "limit", 100, 1, 300);
+        const condition = period === "year"
+          ? "occurred_on >= date_trunc('year', now() AT TIME ZONE $2)::date"
+          : period === "all"
+            ? "true"
+            : "occurred_on >= date_trunc('month', now() AT TIME ZONE $2)::date";
+        const { rows } = await input.db.query(
+          `SELECT id::text, occurred_on, entry_type, amount_minor, currency,
+                  category, store, description, payment_method, quantity, created_at
+             FROM budget_entries
+            WHERE user_id = $1 AND ${condition}
+            ORDER BY occurred_on DESC, id DESC
+            LIMIT $3`,
+          [user.id, user.timezone, limit],
+        );
+        return { records: rows, summary: budgetSummary(rows as Array<Record<string, unknown>>) };
+      });
     });
 
     webApp.post("/budget", async (request, reply) => {
-      const user = await ownedUser(input.db, publicUser(request).id);
-      const body = objectBody(request);
-      const type = enumValue(body.type, ["income", "expense"], "Тип записи");
-      const amount = number(body.amount, "Сумма", 0, 1_000_000_000);
-      const { rows } = await input.db.query(
-        `INSERT INTO budget_entries
-           (user_id, occurred_on, entry_type, amount_minor, currency, category,
-            store, description, payment_method)
-         VALUES ($1, COALESCE($2::date, (now() AT TIME ZONE $3)::date), $4,
-                 $5, 'RUB', $6, $7, $8, $9)
-         RETURNING id::text, occurred_on, entry_type, amount_minor, currency,
-                   category, store, description, payment_method, quantity, created_at`,
-        [
-          user.id,
-          optionalDate(body.date),
-          user.timezone,
-          type,
-          Math.round(amount * 100),
-          optionalText(body.category, 200),
-          optionalText(body.store, 300),
-          optionalText(body.description, 2_000),
-          optionalText(body.payment_method, 100),
-        ],
-      );
-      return reply.status(201).send({ record: rows[0] });
+      return await scoped(input.db, request, async (user) => {
+        const body = objectBody(request);
+        const type = enumValue(body.type, ["income", "expense"], "Тип записи");
+        const amount = number(body.amount, "Сумма", 0, 1_000_000_000);
+        const { rows } = await input.db.query(
+          `INSERT INTO budget_entries
+             (user_id, occurred_on, entry_type, amount_minor, currency, category,
+              store, description, payment_method)
+           VALUES ($1, COALESCE($2::date, (now() AT TIME ZONE $3)::date), $4,
+                   $5, 'RUB', $6, $7, $8, $9)
+           RETURNING id::text, occurred_on, entry_type, amount_minor, currency,
+                     category, store, description, payment_method, quantity, created_at`,
+          [
+            user.id,
+            optionalDate(body.date),
+            user.timezone,
+            type,
+            Math.round(amount * 100),
+            optionalText(body.category, 200),
+            optionalText(body.store, 300),
+            optionalText(body.description, 2_000),
+            optionalText(body.payment_method, 100),
+          ],
+        );
+        return reply.status(201).send({ record: rows[0] });
+      });
     });
 
     webApp.patch("/budget/:id", async (request) => {
-      const user = await ownedUser(input.db, publicUser(request).id);
-      const id = positiveId((request.params as { id?: string }).id, "финансовой записи");
-      const body = objectBody(request);
-      const amountMinor = Object.hasOwn(body, "amount")
-        ? Math.round(number(body.amount, "Сумма", 0, 1_000_000_000) * 100)
-        : null;
-      const type = Object.hasOwn(body, "type")
-        ? enumValue(body.type, ["income", "expense"], "Тип записи")
-        : null;
-      const category = Object.hasOwn(body, "category") ? optionalText(body.category, 200) : undefined;
-      const store = Object.hasOwn(body, "store") ? optionalText(body.store, 300) : undefined;
-      const description = Object.hasOwn(body, "description") ? optionalText(body.description, 2_000) : undefined;
-      const date = Object.hasOwn(body, "date") ? optionalDate(body.date) : undefined;
-      const { rows } = await input.db.query(
-        `UPDATE budget_entries SET
-           entry_type = COALESCE($3, entry_type),
-           amount_minor = COALESCE($4, amount_minor),
-           category = CASE WHEN $5::boolean THEN $6 ELSE category END,
-           store = CASE WHEN $7::boolean THEN $8 ELSE store END,
-           description = CASE WHEN $9::boolean THEN $10 ELSE description END,
-           occurred_on = CASE WHEN $11::boolean THEN COALESCE($12::date, occurred_on) ELSE occurred_on END
-         WHERE id = $1 AND user_id = $2
-         RETURNING id::text, occurred_on, entry_type, amount_minor, currency,
-                   category, store, description, payment_method, quantity, created_at`,
-        [id, user.id, type, amountMinor, category !== undefined, category ?? null, store !== undefined, store ?? null, description !== undefined, description ?? null, date !== undefined, date ?? null],
-      );
-      if (!rows[0]) throw notFound("Финансовая запись не найдена");
-      return { record: rows[0] };
+      return await scoped(input.db, request, async (user) => {
+        const id = positiveId((request.params as { id?: string }).id, "финансовой записи");
+        const body = objectBody(request);
+        const amountMinor = Object.hasOwn(body, "amount")
+          ? Math.round(number(body.amount, "Сумма", 0, 1_000_000_000) * 100)
+          : null;
+        const type = Object.hasOwn(body, "type")
+          ? enumValue(body.type, ["income", "expense"], "Тип записи")
+          : null;
+        const category = Object.hasOwn(body, "category") ? optionalText(body.category, 200) : undefined;
+        const store = Object.hasOwn(body, "store") ? optionalText(body.store, 300) : undefined;
+        const description = Object.hasOwn(body, "description") ? optionalText(body.description, 2_000) : undefined;
+        const date = Object.hasOwn(body, "date") ? optionalDate(body.date) : undefined;
+        const { rows } = await input.db.query(
+          `UPDATE budget_entries SET
+             entry_type = COALESCE($3, entry_type),
+             amount_minor = COALESCE($4, amount_minor),
+             category = CASE WHEN $5::boolean THEN $6 ELSE category END,
+             store = CASE WHEN $7::boolean THEN $8 ELSE store END,
+             description = CASE WHEN $9::boolean THEN $10 ELSE description END,
+             occurred_on = CASE WHEN $11::boolean THEN COALESCE($12::date, occurred_on) ELSE occurred_on END
+           WHERE id = $1 AND user_id = $2
+           RETURNING id::text, occurred_on, entry_type, amount_minor, currency,
+                     category, store, description, payment_method, quantity, created_at`,
+          [id, user.id, type, amountMinor, category !== undefined, category ?? null, store !== undefined, store ?? null, description !== undefined, description ?? null, date !== undefined, date ?? null],
+        );
+        if (!rows[0]) throw notFound("Финансовая запись не найдена");
+        return { record: rows[0] };
+      });
     });
 
     webApp.delete("/budget/:id", async (request) => {
-      const user = await ownedUser(input.db, publicUser(request).id);
-      const id = positiveId((request.params as { id?: string }).id, "финансовой записи");
-      const result = await input.db.query(
-        "DELETE FROM budget_entries WHERE id = $1 AND user_id = $2",
-        [id, user.id],
-      );
-      if (!result.rowCount) throw notFound("Финансовая запись не найдена");
-      return { ok: true };
+      return await scoped(input.db, request, async (user) => {
+        const id = positiveId((request.params as { id?: string }).id, "финансовой записи");
+        const result = await input.db.query(
+          "DELETE FROM budget_entries WHERE id = $1 AND user_id = $2",
+          [id, user.id],
+        );
+        if (!result.rowCount) throw notFound("Финансовая запись не найдена");
+        return { ok: true };
+      });
     });
 
     webApp.get("/decisions", async (request) => {
-      const user = await ownedUser(input.db, publicUser(request).id);
-      const { rows } = await input.db.query(
-        `SELECT id::text, question, options, facts, assumptions, criteria, risks,
-                selected_option, confidence, reversible, cheap_test, review_at,
-                actual_result, status, created_at, updated_at
-           FROM eva_decisions
-          WHERE user_id = $1 AND status <> 'archived'
-          ORDER BY CASE status WHEN 'open' THEN 0 WHEN 'review' THEN 1 ELSE 2 END,
-                   COALESCE(review_at, created_at::date), updated_at DESC
-          LIMIT 100`,
-        [user.id],
-      );
-      return { decisions: rows };
+      return await scoped(input.db, request, async (user) => {
+        const { rows } = await input.db.query(
+          `SELECT id::text, question, options, facts, assumptions, criteria, risks,
+                  selected_option, confidence, reversible, cheap_test, review_at,
+                  actual_result, status, created_at, updated_at
+             FROM eva_decisions
+            WHERE user_id = $1 AND status <> 'archived'
+            ORDER BY CASE status WHEN 'open' THEN 0 WHEN 'review' THEN 1 ELSE 2 END,
+                     COALESCE(review_at, created_at::date), updated_at DESC
+            LIMIT 100`,
+          [user.id],
+        );
+        return { decisions: rows };
+      });
     });
 
     webApp.post("/decisions", async (request, reply) => {
-      const user = await ownedUser(input.db, publicUser(request).id);
-      const body = objectBody(request);
-      const { rows } = await input.db.query(
-        `INSERT INTO eva_decisions
-           (user_id, question, options, facts, assumptions, criteria, risks,
-            selected_option, review_at, status)
-         VALUES ($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, $6::jsonb,
-                 $7::jsonb, $8, $9::date, 'open')
-         RETURNING id::text, question, options, facts, assumptions, criteria,
-                   risks, selected_option, confidence, reversible, cheap_test,
-                   review_at, actual_result, status, created_at, updated_at`,
-        [
-          user.id,
-          requiredText(body.question, "Вопрос решения", 2_000),
-          JSON.stringify(stringArray(body.options, 50, 1_000)),
-          JSON.stringify(stringArray(body.facts, 50, 1_000)),
-          JSON.stringify(stringArray(body.assumptions, 50, 1_000)),
-          JSON.stringify(stringArray(body.criteria, 50, 1_000)),
-          JSON.stringify(stringArray(body.risks, 50, 1_000)),
-          optionalText(body.selected_option, 1_000),
-          optionalDate(body.review_at),
-        ],
-      );
-      return reply.status(201).send({ decision: rows[0] });
+      return await scoped(input.db, request, async (user) => {
+        const body = objectBody(request);
+        const { rows } = await input.db.query(
+          `INSERT INTO eva_decisions
+             (user_id, question, options, facts, assumptions, criteria, risks,
+              selected_option, review_at, status)
+           VALUES ($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, $6::jsonb,
+                   $7::jsonb, $8, $9::date, 'open')
+           RETURNING id::text, question, options, facts, assumptions, criteria,
+                     risks, selected_option, confidence, reversible, cheap_test,
+                     review_at, actual_result, status, created_at, updated_at`,
+          [
+            user.id,
+            requiredText(body.question, "Вопрос решения", 2_000),
+            JSON.stringify(stringArray(body.options, 50, 1_000)),
+            JSON.stringify(stringArray(body.facts, 50, 1_000)),
+            JSON.stringify(stringArray(body.assumptions, 50, 1_000)),
+            JSON.stringify(stringArray(body.criteria, 50, 1_000)),
+            JSON.stringify(stringArray(body.risks, 50, 1_000)),
+            optionalText(body.selected_option, 1_000),
+            optionalDate(body.review_at),
+          ],
+        );
+        return reply.status(201).send({ decision: rows[0] });
+      });
     });
 
     webApp.patch("/decisions/:id", async (request) => {
-      const user = await ownedUser(input.db, publicUser(request).id);
-      const id = positiveId((request.params as { id?: string }).id, "решения");
-      const body = objectBody(request);
-      const { rows } = await input.db.query(
-        `UPDATE eva_decisions SET
-           question = COALESCE($3, question),
-           options = CASE WHEN $4::boolean THEN $5::jsonb ELSE options END,
-           facts = CASE WHEN $6::boolean THEN $7::jsonb ELSE facts END,
-           assumptions = CASE WHEN $8::boolean THEN $9::jsonb ELSE assumptions END,
-           criteria = CASE WHEN $10::boolean THEN $11::jsonb ELSE criteria END,
-           risks = CASE WHEN $12::boolean THEN $13::jsonb ELSE risks END,
-           selected_option = CASE WHEN $14::boolean THEN $15 ELSE selected_option END,
-           review_at = CASE WHEN $16::boolean THEN $17::date ELSE review_at END,
-           actual_result = CASE WHEN $18::boolean THEN $19 ELSE actual_result END,
-           status = COALESCE($20, status),
-           updated_at = now()
-         WHERE id = $1 AND user_id = $2 AND status <> 'archived'
-         RETURNING id::text, question, options, facts, assumptions, criteria,
-                   risks, selected_option, confidence, reversible, cheap_test,
-                   review_at, actual_result, status, created_at, updated_at`,
-        [
-          id,
-          user.id,
-          Object.hasOwn(body, "question") ? requiredText(body.question, "Вопрос решения", 2_000) : null,
-          Object.hasOwn(body, "options"), JSON.stringify(stringArray(body.options, 50, 1_000)),
-          Object.hasOwn(body, "facts"), JSON.stringify(stringArray(body.facts, 50, 1_000)),
-          Object.hasOwn(body, "assumptions"), JSON.stringify(stringArray(body.assumptions, 50, 1_000)),
-          Object.hasOwn(body, "criteria"), JSON.stringify(stringArray(body.criteria, 50, 1_000)),
-          Object.hasOwn(body, "risks"), JSON.stringify(stringArray(body.risks, 50, 1_000)),
-          Object.hasOwn(body, "selected_option"), optionalText(body.selected_option, 1_000),
-          Object.hasOwn(body, "review_at"), optionalDate(body.review_at),
-          Object.hasOwn(body, "actual_result"), optionalText(body.actual_result, 5_000),
-          Object.hasOwn(body, "status") ? enumValue(body.status, ["open", "review", "completed", "archived"], "Статус решения") : null,
-        ],
-      );
-      if (!rows[0]) throw notFound("Решение не найдено");
-      return { decision: rows[0] };
+      return await scoped(input.db, request, async (user) => {
+        const id = positiveId((request.params as { id?: string }).id, "решения");
+        const body = objectBody(request);
+        const { rows } = await input.db.query(
+          `UPDATE eva_decisions SET
+             question = COALESCE($3, question),
+             options = CASE WHEN $4::boolean THEN $5::jsonb ELSE options END,
+             facts = CASE WHEN $6::boolean THEN $7::jsonb ELSE facts END,
+             assumptions = CASE WHEN $8::boolean THEN $9::jsonb ELSE assumptions END,
+             criteria = CASE WHEN $10::boolean THEN $11::jsonb ELSE criteria END,
+             risks = CASE WHEN $12::boolean THEN $13::jsonb ELSE risks END,
+             selected_option = CASE WHEN $14::boolean THEN $15 ELSE selected_option END,
+             review_at = CASE WHEN $16::boolean THEN $17::date ELSE review_at END,
+             actual_result = CASE WHEN $18::boolean THEN $19 ELSE actual_result END,
+             status = COALESCE($20, status),
+             updated_at = now()
+           WHERE id = $1 AND user_id = $2 AND status <> 'archived'
+           RETURNING id::text, question, options, facts, assumptions, criteria,
+                     risks, selected_option, confidence, reversible, cheap_test,
+                     review_at, actual_result, status, created_at, updated_at`,
+          [
+            id,
+            user.id,
+            Object.hasOwn(body, "question") ? requiredText(body.question, "Вопрос решения", 2_000) : null,
+            Object.hasOwn(body, "options"), JSON.stringify(stringArray(body.options, 50, 1_000)),
+            Object.hasOwn(body, "facts"), JSON.stringify(stringArray(body.facts, 50, 1_000)),
+            Object.hasOwn(body, "assumptions"), JSON.stringify(stringArray(body.assumptions, 50, 1_000)),
+            Object.hasOwn(body, "criteria"), JSON.stringify(stringArray(body.criteria, 50, 1_000)),
+            Object.hasOwn(body, "risks"), JSON.stringify(stringArray(body.risks, 50, 1_000)),
+            Object.hasOwn(body, "selected_option"), optionalText(body.selected_option, 1_000),
+            Object.hasOwn(body, "review_at"), optionalDate(body.review_at),
+            Object.hasOwn(body, "actual_result"), optionalText(body.actual_result, 5_000),
+            Object.hasOwn(body, "status") ? enumValue(body.status, ["open", "review", "completed", "archived"], "Статус решения") : null,
+          ],
+        );
+        if (!rows[0]) throw notFound("Решение не найдено");
+        return { decision: rows[0] };
+      });
     });
 
     webApp.post("/focus-sessions", async (request, reply) => {
-      const user = await ownedUser(input.db, publicUser(request).id);
-      const body = objectBody(request);
-      const { rows } = await input.db.query(
-        `INSERT INTO eva_focus_sessions
-           (user_id, title, planned_minutes, source_type, source_id,
-            work_block_id, status, started_at)
-         VALUES ($1, $2, $3, $4, $5, $6, 'active', now())
-         RETURNING id::text, title, planned_minutes, source_type, source_id,
-                   work_block_id::text, status, started_at`,
-        [
-          user.id,
-          requiredText(body.title, "Результат сессии", 500),
-          optionalInteger(body.planned_minutes, 1, 480) ?? 15,
-          optionalText(body.source_type, 50),
-          optionalText(body.source_id, 200),
+      return await scoped(input.db, request, async (user) => {
+        const body = objectBody(request);
+        // Рабочий блок приходит из браузера. Ссылка на чужой блок — это
+        // связь между данными двух людей, поэтому владение проверяется
+        // до вставки, а не подразумевается.
+        const workBlockId = await ownedWorkBlockId(
+          input.db,
+          user,
           optionalInteger(body.work_block_id, 1, Number.MAX_SAFE_INTEGER),
-        ],
-      );
-      return reply.status(201).send({ focus_session: rows[0] });
+        );
+        const { rows } = await input.db.query(
+          `INSERT INTO eva_focus_sessions
+             (user_id, title, planned_minutes, source_type, source_id,
+              work_block_id, status, started_at)
+           VALUES ($1, $2, $3, $4, $5, $6, 'active', now())
+           RETURNING id::text, title, planned_minutes, source_type, source_id,
+                     work_block_id::text, status, started_at`,
+          [
+            user.id,
+            requiredText(body.title, "Результат сессии", 500),
+            optionalInteger(body.planned_minutes, 1, 480) ?? 15,
+            optionalText(body.source_type, 50),
+            optionalText(body.source_id, 200),
+            workBlockId,
+          ],
+        );
+        return reply.status(201).send({ focus_session: rows[0] });
+      });
     });
 
     webApp.post("/focus-sessions/:id/complete", async (request) => {
-      const user = await ownedUser(input.db, publicUser(request).id);
-      const id = positiveId((request.params as { id?: string }).id, "фокус-сессии");
-      const body = objectBody(request);
-      const { rows } = await input.db.query(
-        `UPDATE eva_focus_sessions SET
-           status = 'completed',
-           actual_minutes = $3,
-           actual_result = $4,
-           completed_at = now(),
-           updated_at = now()
-         WHERE id = $1 AND user_id = $2 AND status = 'active'
-         RETURNING id::text, title, planned_minutes, actual_minutes,
-                   actual_result, status, started_at, completed_at`,
-        [
-          id,
-          user.id,
-          optionalInteger(body.actual_minutes, 0, 10_080) ?? 0,
-          optionalText(body.actual_result, 5_000),
-        ],
-      );
-      if (!rows[0]) throw notFound("Активная фокус-сессия не найдена");
-      return { focus_session: rows[0] };
+      return await scoped(input.db, request, async (user) => {
+        const id = positiveId((request.params as { id?: string }).id, "фокус-сессии");
+        const body = objectBody(request);
+        const { rows } = await input.db.query(
+          `UPDATE eva_focus_sessions SET
+             status = 'completed',
+             actual_minutes = $3,
+             actual_result = $4,
+             completed_at = now(),
+             updated_at = now()
+           WHERE id = $1 AND user_id = $2 AND status = 'active'
+           RETURNING id::text, title, planned_minutes, actual_minutes,
+                     actual_result, status, started_at, completed_at`,
+          [
+            id,
+            user.id,
+            optionalInteger(body.actual_minutes, 0, 10_080) ?? 0,
+            optionalText(body.actual_result, 5_000),
+          ],
+        );
+        if (!rows[0]) throw notFound("Активная фокус-сессия не найдена");
+        return { focus_session: rows[0] };
+      });
     });
   }, { prefix: "/public/v2" });
 }
@@ -840,6 +870,45 @@ function fallbackFocus(): MainFocus {
     work_block_status: null,
     manual: false,
   };
+}
+
+/**
+ * Владелец запроса и его область.
+ *
+ * Идентификатор берётся только из проверенной подписи Telegram, а
+ * внутренний `users.id` — из канонической строки `users`. Тело запроса
+ * на владельца не влияет ни в одной ветке: подставленный `user_id`
+ * просто не совпадёт с областью, и запрос не выполнится.
+ */
+async function scoped<T>(
+  db: Database,
+  request: FastifyRequest,
+  work: (user: OwnedUser) => Promise<T>,
+): Promise<T> {
+  const telegramId = publicUser(request).id;
+  return await db.withUserScope(
+    { telegramId, label: "miniapp" },
+    async () => {
+      const user = await ownedUser(db, telegramId);
+      db.bindScopeUserId(user.id);
+      return await work(user);
+    },
+  );
+}
+
+/** Рабочий блок принимается только тогда, когда он принадлежит владельцу области. */
+async function ownedWorkBlockId(
+  db: Database,
+  user: OwnedUser,
+  workBlockId: number | null,
+): Promise<number | null> {
+  if (workBlockId === null) return null;
+  const { rows } = await db.query<{ id: string }>(
+    "SELECT id FROM work_blocks WHERE id = $1 AND user_id = $2",
+    [workBlockId, user.id],
+  );
+  if (!rows[0]) throw notFound("Рабочий блок не найден");
+  return workBlockId;
 }
 
 async function ownedUser(db: Database, telegramId: number): Promise<OwnedUser> {

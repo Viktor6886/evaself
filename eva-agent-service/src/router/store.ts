@@ -9,6 +9,7 @@
 import type pg from "pg";
 
 import { SecretBox } from "../llm.js";
+import { runInScope, systemScope } from "../tenancy/index.js";
 import type {
   LlmRequest,
   LlmResponse,
@@ -421,7 +422,13 @@ export class RouterStore {
   // -----------------------------------------------------------------
   // журнал
   // -----------------------------------------------------------------
+  /**
+   * Телеметрия хода. `user_id` здесь — отметка принадлежности, а не
+   * ключ доступа: роутер никогда не читает по нему чужие записи, а
+   * запись идёт как объявленная системная работа сервиса.
+   */
   async recordAttempt(record: AttemptRecord): Promise<void> {
+    await runInScope(systemScope("llm-router.telemetry"), async () => {
     await this.pool.query(
       `INSERT INTO llm_requests
            (request_id, route_code, user_id, agent_id, primary_provider_id,
@@ -468,6 +475,7 @@ export class RouterStore {
         record.single_failover_used,
       ],
     );
+    });
   }
 }
 

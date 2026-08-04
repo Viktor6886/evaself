@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { withTenantScopes } from "./tenant-scope-helper.ts";
+
 import {
   ConversationHighlightService,
   extractHighlights,
@@ -30,12 +32,12 @@ test("only meaningful messages become conversation highlights", () => {
 test("highlight refresh reads Letta and never writes a full transcript table", async () => {
   const queries: string[] = [];
   const service = new ConversationHighlightService(
-    {
+    withTenantScopes({
       query: async (sql: string) => {
         queries.push(sql);
         return { rows: [], rowCount: 1 };
       },
-    } as never,
+    }) as never,
     {
       listMessages: async () => ({
         messages: [{

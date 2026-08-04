@@ -13,6 +13,18 @@
 import pg from "pg";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { databaseUnavailable } from "./errors.js";
+import {
+  adminScope,
+  assertQueryAllowed,
+  bindUserId,
+  currentScope,
+  runInScope,
+  systemScope,
+  userScope,
+  type AdminScope,
+  type SystemScope,
+  type UserScope,
+} from "./tenancy/index.js";
 
 export interface UserRow {
   id: number;
@@ -204,7 +216,9 @@ export class Database {
     lastName?: string | null;
     languageCode?: string | null;
   }): Promise<UserRow> {
-    const { rows } = await this.require().query<UserRow>(
+    const { rows } = await this.withUserScope(
+      { telegramId: input.telegramId, label: "db.upsertUser", inherit: true },
+      async () => await this.require().query<UserRow>(
       `INSERT INTO users (telegram_id, username, first_name, last_name, language_code, last_seen_at)
        VALUES ($1, $2, $3, $4, COALESCE($5, 'ru'), now())
        ON CONFLICT (telegram_id) DO UPDATE SET
@@ -221,43 +235,67 @@ export class Database {
         input.lastName ?? null,
         input.languageCode ?? null,
       ],
+      ),
     );
     return rows[0]!;
   }
 
   async setUserState(userId: number, state: "onboarding" | "active" | "paused"): Promise<void> {
-    await this.require().query(
-      "UPDATE users SET state = $2, consent_at = COALESCE(consent_at, now()) WHERE id = $1",
-      [userId, state],
+    await this.withUserScope(
+      { userId, label: "db.setUserState", inherit: true },
+      async () => await this.require().query(
+        "UPDATE users SET state = $2, consent_at = COALESCE(consent_at, now()) WHERE id = $1",
+        [userId, state],
+      ),
     );
   }
 
+  /**
+   * Апдейт связывается с пользователем один раз. Условие по `user_id`
+   * не декоративное: без него повторная обработка чужого апдейта
+   * переписала бы владельца записи ingress.
+   */
   async attachTelegramUpdateToUser(updateId: number, userId: number): Promise<void> {
-    await this.require().query(
-      "UPDATE telegram_updates SET user_id = $2 WHERE update_id = $1",
-      [updateId, userId],
+    await this.withUserScope(
+      { userId, label: "db.attachTelegramUpdate", inherit: true },
+      async () => await this.require().query(
+        `UPDATE telegram_updates SET user_id = $2
+          WHERE update_id = $1 AND (user_id IS NULL OR user_id = $2)`,
+        [updateId, userId],
+      ),
     );
   }
 
   async recordUserMessage(userId: number): Promise<void> {
-    await this.require().query(
+    await this.withUserScope(
+      { userId, label: "db.recordUserMessage", inherit: true },
+      async () => await this.require().query(
       `INSERT INTO heartbeat_state (user_id, last_user_message_at)
        VALUES ($1, now())
        ON CONFLICT (user_id) DO UPDATE SET last_user_message_at = now()`,
       [userId],
+      ),
     );
   }
 
   async getUserOverview(telegramId: number): Promise<Record<string, unknown> | null> {
-    const { rows } = await this.require().query(
-      "SELECT * FROM v_user_overview WHERE telegram_id = $1",
-      [telegramId],
+    const { rows } = await this.withUserScope(
+      { telegramId, label: "db.getUserOverview", inherit: true },
+      async () => await this.require().query(
+        "SELECT * FROM v_user_overview WHERE telegram_id = $1",
+        [telegramId],
+      ),
     );
     return rows[0] ?? null;
   }
 
   async getAgentRuntimeContext(conversationId: string): Promise<AgentRuntimeContext | null> {
-    const { rows } = await this.require().query<{
+    // Каноническое сопоставление conversation → пользователь. Именно
+    // отсюда берётся владелец для областей инструментов, поэтому сам
+    // запрос идёт как системный, а не от чьего-то имени.
+    const { rows } = await this.withSystemScope(
+      "db.getAgentRuntimeContext",
+      async () => await this.require().query<{
       user_id: string;
       telegram_id: string;
       chat_id: string | null;
@@ -267,7 +305,9 @@ export class Database {
       response_mode: "text" | "voice" | "both";
       use_emoji: boolean;
     }>(
-      `SELECT u.id AS user_id,
+      `
+        -- tenant: system — каноническое сопоставление conversation → пользователь, отсюда берётся владелец для областей
+        SELECT u.id AS user_id,
               u.telegram_id,
               COALESCE(t.chat_id, u.telegram_id) AS chat_id,
               c.conversation_id,
@@ -286,6 +326,8 @@ export class Database {
         WHERE c.conversation_id = $1
         LIMIT 1`,
       [conversationId],
+      ),
+      { crossUser: true },
     );
     const row = rows[0];
     return row
@@ -307,18 +349,35 @@ export class Database {
   // -----------------------------------------------------------------
 
   async getAgentLink(telegramId: number, kind = "eva"): Promise<AgentLinkRow | null> {
-    const { rows } = await this.require().query<AgentLinkRow>(
+    const { rows } = await this.withUserScope(
+      { telegramId, label: "db.getAgentLink", inherit: true },
+      async () => await this.require().query<AgentLinkRow>(
       `SELECT a.* FROM agent_links a
         JOIN users u ON u.id = a.user_id
        WHERE u.telegram_id = $1 AND a.kind = $2 AND a.status = 'active'
        ORDER BY a.created_at DESC
        LIMIT 1`,
       [telegramId, kind],
+      ),
     );
     return rows[0] ?? null;
   }
 
   async saveAgentLink(input: {
+    userId: number;
+    agentId: string;
+    conversationId: string | null;
+    agentName: string | null;
+    model: string | null;
+    kind?: string;
+  }): Promise<AgentLinkRow> {
+    return await this.withUserScope(
+      { userId: input.userId, label: "db.saveAgentLink", inherit: true },
+      async () => await this.saveAgentLinkInScope(input),
+    );
+  }
+
+  private async saveAgentLinkInScope(input: {
     userId: number;
     agentId: string;
     conversationId: string | null;
@@ -369,26 +428,57 @@ export class Database {
     }
   }
 
-  /** Point a user's link at a different conversation (e.g. "start over"). */
-  async setConversation(agentId: string, conversationId: string): Promise<void> {
+  /**
+   * Point a user's link at a different conversation (e.g. "start over").
+   *
+   * Владелец известен не всегда: внутренний /v1 адресует связку по
+   * `agent_id`, который уникален и сам указывает на пользователя. Когда
+   * владелец известен, он передаётся и запрос ограничивается им.
+   */
+  async setConversation(
+    agentId: string,
+    conversationId: string,
+    userId?: number,
+  ): Promise<void> {
+    const run = async () =>
+      await this.setConversationInScope(agentId, conversationId, userId ?? null);
+    await (userId === undefined
+      ? this.withSystemScope("db.setConversation", run, { crossUser: true })
+      : this.withUserScope(
+          { userId, label: "db.setConversation", inherit: true },
+          run,
+        ));
+  }
+
+  private async setConversationInScope(
+    agentId: string,
+    conversationId: string,
+    userId: number | null,
+  ): Promise<void> {
     const client = await this.require().connect();
     try {
       await client.query("BEGIN");
       const { rows } = await client.query<{ user_id: string }>(
-        `UPDATE agent_links SET conversation_id = $2
+        `
+          -- tenant: by agent_id — агент принадлежит ровно одному пользователю, agent_links_agent_id_uidx
+          UPDATE agent_links SET conversation_id = $2
           WHERE agent_id = $1
+            AND ($3::bigint IS NULL OR user_id = $3)
         RETURNING user_id`,
-        [agentId, conversationId],
+        [agentId, conversationId, userId],
       );
       if (rows[0]) {
         await client.query(
-          `UPDATE agent_conversations
+          `
+            -- tenant: by agent_id — агент принадлежит ровно одному пользователю, agent_links_agent_id_uidx
+            UPDATE agent_conversations
               SET status = 'archived', archived_at = now()
             WHERE agent_id = $1
+              AND ($3::bigint IS NULL OR user_id = $3)
               AND purpose = 'chat'
               AND status = 'active'
               AND conversation_id <> $2`,
-          [agentId, conversationId],
+          [agentId, conversationId, userId],
         );
         await client.query(
           `INSERT INTO agent_conversations (user_id, agent_id, conversation_id, purpose)
@@ -407,40 +497,71 @@ export class Database {
     }
   }
 
-  async markAgentUsed(agentId: string): Promise<void> {
-    await this.require().query(
-      `UPDATE agent_links
-          SET last_message_at = now(), message_count = message_count + 1
-        WHERE agent_id = $1`,
-      [agentId],
+  async markAgentUsed(agentId: string, userId?: number): Promise<void> {
+    if (userId === undefined) {
+      await this.withSystemScope(
+        "db.markAgentUsed",
+        async () => await this.require().query(
+          `
+            -- tenant: by agent_id — агент принадлежит ровно одному пользователю, agent_links_agent_id_uidx
+            UPDATE agent_links
+              SET last_message_at = now(), message_count = message_count + 1
+            WHERE agent_id = $1`,
+          [agentId],
+        ),
+        { crossUser: true },
+      );
+      return;
+    }
+    await this.withUserScope(
+      { userId, label: "db.markAgentUsed", inherit: true },
+      async () => await this.require().query(
+        `UPDATE agent_links
+            SET last_message_at = now(), message_count = message_count + 1
+          WHERE agent_id = $1 AND user_id = $2`,
+        [agentId, userId],
+      ),
     );
   }
 
+  /** Служебный обзор связок для внутреннего /v1 и панели. */
   async listAgentLinks(limit = 500): Promise<Array<Record<string, unknown>>> {
-    const { rows } = await this.require().query(
-      `SELECT u.telegram_id, a.agent_id, a.conversation_id, a.kind, a.runtime,
+    const { rows } = await this.withSystemScope(
+      "db.listAgentLinks",
+      async () => await this.require().query(
+      `
+        -- tenant: system — инвентарь связок для сверки с App Server, строк пользователей не отдаёт
+        SELECT u.telegram_id, a.agent_id, a.conversation_id, a.kind, a.runtime,
               a.status, a.message_count, a.last_message_at
          FROM agent_links a JOIN users u ON u.id = a.user_id
         WHERE a.status = 'active'
         ORDER BY a.created_at
         LIMIT $1`,
       [limit],
+      ),
+      { crossUser: true },
     );
     return rows;
   }
 
   async listModelMappings(): Promise<ModelMapping[]> {
-    const { rows } = await this.require().query<{
+    const { rows } = await this.withSystemScope(
+      "db.listModelMappings",
+      async () => await this.require().query<{
       agent_id: string;
       conversation_ids: string[];
     }>(
-      `SELECT a.agent_id,
+      `
+        -- tenant: system — инвентарь всех агентов для сверки с App Server, строк пользователей не отдаёт
+        SELECT a.agent_id,
               array_remove(array_agg(DISTINCT c.conversation_id), NULL) AS conversation_ids
          FROM agent_links a
          LEFT JOIN agent_conversations c ON c.agent_id = a.agent_id
         WHERE a.status = 'active' AND a.runtime = 'letta-app-server'
         GROUP BY a.agent_id
         ORDER BY a.agent_id`,
+      ),
+      { crossUser: true },
     );
     return rows.map((row) => ({
       agentId: row.agent_id,
@@ -448,28 +569,47 @@ export class Database {
     }));
   }
 
+  /** Перевод всех активных агентов на модель — обслуживание установки. */
   async setAgentModels(model: string): Promise<void> {
-    await this.require().query(
-      `UPDATE agent_links
-          SET model = $1
-        WHERE status = 'active' AND runtime = 'letta-app-server'`,
-      [model],
+    await this.withSystemScope(
+      "db.setAgentModels",
+      async () => await this.require().query(
+        `
+          -- tenant: system — смена модели применяется ко всем активным агентам сразу
+          UPDATE agent_links
+            SET model = $1
+          WHERE status = 'active' AND runtime = 'letta-app-server'`,
+        [model],
+      ),
+      { crossUser: true },
     );
   }
 
   /** Archive a PostgreSQL mapping after its Letta agent was explicitly deleted. */
   async archiveAgentLink(agentId: string): Promise<void> {
+    await this.withSystemScope(
+      "db.archiveAgentLink",
+      async () => await this.archiveAgentLinkInScope(agentId),
+      { crossUser: true },
+    );
+  }
+
+  private async archiveAgentLinkInScope(agentId: string): Promise<void> {
     const client = await this.require().connect();
     try {
       await client.query("BEGIN");
       await client.query(
-        `UPDATE agent_links
+        `
+          -- tenant: by agent_id — агент принадлежит ровно одному пользователю, agent_links_agent_id_uidx
+          UPDATE agent_links
             SET status = 'archived', conversation_id = NULL
           WHERE agent_id = $1 AND status = 'active'`,
         [agentId],
       );
       await client.query(
-        `UPDATE agent_conversations
+        `
+          -- tenant: by agent_id — агент принадлежит ровно одному пользователю, agent_links_agent_id_uidx
+          UPDATE agent_conversations
             SET status = 'archived', archived_at = COALESCE(archived_at, now())
           WHERE agent_id = $1 AND status = 'active'`,
         [agentId],
@@ -514,6 +654,7 @@ export class Database {
       get: (target, property) => {
         if (property === "query") {
           return (...args: unknown[]) => {
+            Database.guard(args);
             this.incrementQueryCount();
             return Reflect.apply(target.query, target, args);
           };
@@ -532,6 +673,7 @@ export class Database {
       get: (target, property) => {
         if (property === "query") {
           return (...args: unknown[]) => {
+            Database.guard(args);
             this.incrementQueryCount();
             return Reflect.apply(target.query, target, args);
           };
@@ -542,9 +684,90 @@ export class Database {
     });
   }
 
+  /**
+   * Единственная точка, где запрос проверяется на границу арендатора.
+   * Все обращения сервиса к PostgreSQL проходят через этот пул, поэтому
+   * обойти проверку можно только собственным подключением — на это есть
+   * отдельный тест.
+   */
+  private static guard(args: unknown[]): void {
+    const first = args[0];
+    const sql = typeof first === "string"
+      ? first
+      : first && typeof first === "object" && typeof (first as { text?: unknown }).text === "string"
+        ? (first as { text: string }).text
+        : "";
+    const values = Array.isArray(args[1])
+      ? args[1] as unknown[]
+      : first && typeof first === "object" && Array.isArray((first as { values?: unknown }).values)
+        ? (first as { values: unknown[] }).values
+        : [];
+    assertQueryAllowed(sql, values);
+  }
+
   private incrementQueryCount(): void {
     const metrics = this.queryMetrics.getStore();
     if (metrics) metrics.count += 1;
+  }
+
+  // -----------------------------------------------------------------
+  // границы арендатора
+  // -----------------------------------------------------------------
+
+  /**
+   * Работа от имени одного пользователя.
+   *
+   * `inherit` оставляет уже объявленную область: собственные методы
+   * `Database` объявляют её сами, но внутри хода пользователя рамку
+   * задаёт этот ход, и подменить её вложенным вызовом нельзя.
+   */
+  async withUserScope<T>(
+    input: {
+      userId?: number | null;
+      telegramId?: number | null;
+      label: string;
+      inherit?: boolean;
+    },
+    work: (scope: UserScope | null) => Promise<T>,
+  ): Promise<T> {
+    if (input.inherit && currentScope()) return await work(null);
+    const scope = userScope(input);
+    return await runInScope(scope, async () => await work(scope));
+  }
+
+  /**
+   * Фоновая работа сервиса. `crossUser` объявляется там, где выборка по
+   * своей природе идёт сразу по многим пользователям: аренда inbox и
+   * outbox, планировщик, вебхук оплаты до опознания владельца.
+   */
+  async withSystemScope<T>(
+    reason: string,
+    work: () => Promise<T>,
+    options: { crossUser?: boolean; inherit?: boolean } = {},
+  ): Promise<T> {
+    // `inherit` — для работы, которую начинает то пользователь, то сам
+    // сервис: доставка сообщения относится к ходу пользователя, если он
+    // есть, и к сервису, если сообщение отправляет фоновая часть.
+    if (options.inherit && currentScope()) return await work();
+    const scope: SystemScope = systemScope(reason, options);
+    return await runInScope(scope, work);
+  }
+
+  /** Административный доступ: роль и запись аудита обязательны. */
+  async withAdminScope<T>(
+    input: { actor: string; role: string; auditId?: string | null; route: string },
+    work: (scope: AdminScope) => Promise<T>,
+  ): Promise<T> {
+    const scope = adminScope(input);
+    return await runInScope(scope, async () => await work(scope));
+  }
+
+  /**
+   * Связать область с внутренним `users.id` после канонической выборки.
+   * До этого момента область знает только Telegram-идентификатор.
+   */
+  bindScopeUserId(userId: number): void {
+    bindUserId(userId);
   }
 
   // -----------------------------------------------------------------
@@ -824,13 +1047,16 @@ export class Database {
   }
 
   async incrementUsage(telegramId: number, metric: string, amount = 1, period = "day"): Promise<number> {
-    const { rows } = await this.require().query<{ used: string }>(
+    const { rows } = await this.withUserScope(
+      { telegramId, label: "db.incrementUsage", inherit: true },
+      async () => await this.require().query<{ used: string }>(
       `INSERT INTO usage_counters (user_id, metric, period, period_start, used)
        SELECT id, $2, $3, $4, $5 FROM users WHERE telegram_id = $1
        ON CONFLICT (user_id, metric, period, period_start) DO UPDATE
          SET used = usage_counters.used + EXCLUDED.used, updated_at = now()
        RETURNING used`,
       [telegramId, metric, period, Database.periodStart(period), amount],
+      ),
     );
     return Number(rows[0]?.used ?? 0);
   }
@@ -890,22 +1116,32 @@ export class Database {
   }
 
   async getQuotaStatus(telegramId: number): Promise<Array<Record<string, unknown>>> {
-    const { rows } = await this.require().query(
-      `SELECT metric, period, limit_value, used, remaining
-         FROM v_quota_status WHERE telegram_id = $1`,
-      [telegramId],
+    const { rows } = await this.withUserScope(
+      { telegramId, label: "db.getQuotaStatus", inherit: true },
+      async () => await this.require().query(
+        `SELECT metric, period, limit_value, used, remaining
+           FROM v_quota_status WHERE telegram_id = $1`,
+        [telegramId],
+      ),
     );
     return rows;
   }
 
+  /** Сводные счётчики установки: людей в них нет, только количества. */
   async stats(): Promise<Record<string, unknown>> {
-    const { rows } = await this.require().query(
-      `SELECT
+    const { rows } = await this.withSystemScope(
+      "db.stats",
+      async () => await this.require().query(
+      `
+        -- tenant: system — агрегаты для /health и обзора: только количества, ни одной пользовательской строки
+        SELECT
          (SELECT count(*) FROM users)                                    AS users,
          (SELECT count(*) FROM agent_links WHERE status = 'active')      AS agents,
          (SELECT count(*) FROM agent_links
            WHERE status = 'active' AND conversation_id IS NOT NULL)      AS conversations,
          (SELECT count(*) FROM crisis_events WHERE handled = false)      AS open_crisis_events`,
+      ),
+      { crossUser: true },
     );
     return rows[0] ?? {};
   }

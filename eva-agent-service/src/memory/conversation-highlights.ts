@@ -48,7 +48,19 @@ export class ConversationHighlightService {
     });
   }
 
+  /**
+   * Обновление важных фрагментов идёт отдельным фоновым шагом и потому
+   * объявляет область владельца сама: ход пользователя к этому моменту
+   * мог уже завершиться.
+   */
   async refresh(userId: number, conversationId: string): Promise<number> {
+    return await this.db.withUserScope(
+      { userId, label: "highlights.refresh", inherit: true },
+      async () => await this.refreshInScope(userId, conversationId),
+    );
+  }
+
+  private async refreshInScope(userId: number, conversationId: string): Promise<number> {
     const history = await this.letta.listMessages(conversationId, 40);
     const highlights = extractHighlights(history).slice(0, 10);
     let stored = 0;

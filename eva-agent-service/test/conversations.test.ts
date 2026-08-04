@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { AgentToolFactory } from "../dist/agent-tools.js";
+import { withTenantScopes } from "./tenant-scope-helper.ts";
 import { BackgroundRuntime } from "../dist/background.js";
 import {
   ConversationPurposeService,
@@ -178,7 +179,7 @@ test("tool runtime context is cached and invalidated after a preference change",
   };
   const factory = new AgentToolFactory(
     { searxngUrl: "http://search.invalid" } as never,
-    db as never,
+    withTenantScopes(db) as never,
     {} as never,
     logger,
   );
@@ -201,7 +202,7 @@ test("destructive tools require backend confirmation", async () => {
       searxngUrl: "http://search.invalid",
       todoistApiUrl: "https://api.todoist.invalid/rest/v2",
     } as never,
-    {
+    withTenantScopes({
       getAgentRuntimeContext: async () => ({
         userId: 7,
         telegramId: 77,
@@ -219,7 +220,7 @@ test("destructive tools require backend confirmation", async () => {
         }
         return { rows: [] };
       },
-    } as never,
+    }) as never,
     {} as never,
     logger,
   );
