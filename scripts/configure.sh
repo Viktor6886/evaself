@@ -340,7 +340,17 @@ if [ -z "$EVA_LLM_BASE_URL" ] || [ -z "$EVA_LLM_API_KEY" ] || [ -z "$EVA_LLM_MOD
 	mark_incomplete "LLM-провайдер"
 fi
 INCOMPLETE_CSV="$(IFS=,; printf '%s' "${INCOMPLETE[*]}")"
-set_env EVASELF_INCOMPLETE_SETTINGS "'$INCOMPLETE_CSV'"
+# Значение пишется БЕЗ кавычек. Раньше оно оборачивалось в одинарные, и
+# апостроф из "e-mail Let's Encrypt" закрывал кавычку раньше времени:
+# docker compose переставал разбирать .env целиком и падала любая команда
+# compose на недонастроенной установке. load_env этого не замечал, потому
+# что читает .env построчно, а не через `source`.
+#
+# Кавычки здесь не нужны: compose берёт значение до конца строки, а
+# load_env снимает только парные кавычки. Символы, способные сломать
+# любой из двух разборщиков, убираются.
+INCOMPLETE_CSV="${INCOMPLETE_CSV//[\'\"#]/}"
+set_env EVASELF_INCOMPLETE_SETTINGS "$INCOMPLETE_CSV"
 
 chmod 600 "$ENV_FILE"
 ok ".env записан с mode 600"

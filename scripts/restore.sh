@@ -25,6 +25,16 @@ require_root
 ARCHIVE="${1:?usage: restore.sh /path/to/evaself-backup-....tar.gz.enc}"
 [ -f "$ARCHIVE" ] || die "файл не найден: $ARCHIVE"
 
+# Конфигурация ТЕКУЩЕЙ установки нужна уже здесь: архив зашифрован её
+# мастер-ключом, а путь к нему задаёт EVA_SECRETS_MASTER_KEY_FILE в .env.
+# Без этого расшифровка уходила на умолчание /etc/evaself/secrets-master-key,
+# которого при штатной установке нет, и restore падал на архиве, только что
+# созданном backup.sh. Ниже, после распаковки, load_env вызывается ещё раз —
+# уже для .env из архива.
+if [ -f "$ENV_FILE" ]; then
+	load_env
+fi
+
 step "Восстановление из $(basename "$ARCHIVE")"
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT

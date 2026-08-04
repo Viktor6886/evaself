@@ -15,6 +15,7 @@ import { HttpMediaSttClient, SttAdminService } from "./stt-service.js";
 import { OutboundGateway } from "./outbound-gateway.js";
 import { buildAdminServer } from "./server.js";
 import { UserService } from "./user-service.js";
+import { SecurityAuditService } from "./security-audit.js";
 import { UpdaterClient } from "./updater-client.js";
 
 const { Pool } = pg;
@@ -107,6 +108,7 @@ async function main(): Promise<void> {
     stt,
     integrations,
     users,
+    securityAudit: new SecurityAuditService({ env: process.env, db: pool }),
     events: redis,
     logger,
     readiness: async () => {

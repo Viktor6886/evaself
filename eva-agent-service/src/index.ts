@@ -28,6 +28,8 @@ import { ConversationHighlightService } from "./memory/conversation-highlights.j
 import { GraphRepository } from "./memory/graph-repository.js";
 import { LavaPayments } from "./payments.js";
 import { UserProfileService } from "./profile/profile-service.js";
+import { ValkeyRateLimiter } from "./public/rate-limit.js";
+import { ValkeyMiniAppSessions } from "./public/webapp-session.js";
 import { UserQueue } from "./queue.js";
 import { RuntimeContextBuilder } from "./runtime/runtime-context.js";
 import { SdkSettingsManager } from "./sdk-settings.js";
@@ -84,6 +86,10 @@ async function main(): Promise<void> {
   });
 
   const queue = new UserQueue(redis, { ttlSeconds: config.lockTtlSeconds });
+  // Сессии Mini App живут в Valkey: состояние восстановимо, потеря Valkey
+  // означает лишь повторное открытие приложения.
+  const miniAppSessions = new ValkeyMiniAppSessions(redis);
+  const rateLimiter = new ValkeyRateLimiter(redis);
   const letta = new LettaService(config, logger, persona);
   const telegram = new TelegramClient(config, logger);
   const outbox = new PostgresTelegramOutbox(db, telegram, logger, {
@@ -211,6 +217,8 @@ async function main(): Promise<void> {
     queue,
     telegram,
     redisPing: async () => (await redis.ping()) === "PONG",
+    miniAppSessions,
+    rateLimiter,
   });
 
   await app.listen({ port: config.port, host: config.host });

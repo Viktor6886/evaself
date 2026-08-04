@@ -18,7 +18,8 @@ check_failed() { fail "$*"; FAILURES=$((FAILURES + 1)); }
 # ---------------------------------------------------------------------
 step "Shell scripts"
 # ---------------------------------------------------------------------
-for file in "$ROOT_DIR"/scripts/*.sh "$ROOT_DIR"/backup-service/backup-service; do
+for file in "$ROOT_DIR"/scripts/*.sh "$ROOT_DIR"/scripts/ci/*.sh \
+	"$ROOT_DIR"/postgres/fixtures/*.sh "$ROOT_DIR"/backup-service/backup-service; do
 	[ -e "$file" ] || continue
 	if bash -n "$file" 2>/dev/null; then
 		ok "$(basename "$file")"
@@ -30,7 +31,8 @@ done
 
 if command -v shellcheck >/dev/null 2>&1; then
 	step "shellcheck"
-	for file in "$ROOT_DIR"/scripts/*.sh; do
+	for file in "$ROOT_DIR"/scripts/*.sh "$ROOT_DIR"/scripts/ci/*.sh \
+		"$ROOT_DIR"/postgres/fixtures/*.sh; do
 		if shellcheck -S error -x "$file" >/dev/null 2>&1; then
 			ok "$(basename "$file")"
 		else

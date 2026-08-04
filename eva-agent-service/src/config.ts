@@ -41,6 +41,11 @@ export interface Config {
   telegramBotToken: string;
   telegramWebhookSecret: string;
   telegramWebAppMaxAgeSeconds: number;
+  webAppSessionTtlSeconds: number;
+  rateLimitWindowSeconds: number;
+  publicRateLimitPerIp: number;
+  publicRateLimitPerUser: number;
+  webhookRateLimitPerIp: number;
   telegramInboxPollMs: number;
   telegramInboxLeaseSeconds: number;
   telegramInboxMaxAttempts: number;
@@ -97,6 +102,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     const parsed = Number.parseInt(str(name), 10);
     return Number.isFinite(parsed) ? parsed : fallback;
   };
+  // Значение из .env, зажатое в допустимый диапазон. Для параметров
+  // безопасности «поставили побольше» — это не настройка, а ошибка:
+  // окно приёма initData в час возвращало бы ровно ту проблему, ради
+  // которой его сокращали.
+  const clampedInt = (
+    name: string,
+    fallback: number,
+    min: number,
+    max: number,
+  ): number => Math.min(max, Math.max(min, int(name, fallback)));
   const nullableInt = (name: string): number | null => {
     const value = str(name);
     if (!value) return null;
@@ -158,7 +173,26 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
     telegramBotToken: str("EVA_TELEGRAM_BOT_TOKEN"),
     telegramWebhookSecret: str("EVA_TELEGRAM_WEBHOOK_SECRET"),
-    telegramWebAppMaxAgeSeconds: int("EVA_TELEGRAM_WEBAPP_MAX_AGE_SECONDS", 3_600),
+    telegramWebAppMaxAgeSeconds: clampedInt(
+      "EVA_TELEGRAM_WEBAPP_MAX_AGE_SECONDS",
+      600,
+      300,
+      600,
+    ),
+    webAppSessionTtlSeconds: clampedInt(
+      "EVA_WEBAPP_SESSION_TTL_SECONDS",
+      900,
+      300,
+      3_600,
+    ),
+    // Лимиты публичных поверхностей. 0 отключает проверку — это
+    // осознанный аварийный рычаг, а не значение по умолчанию.
+    rateLimitWindowSeconds: clampedInt("EVA_RATE_LIMIT_WINDOW_SECONDS", 60, 1, 3_600),
+    publicRateLimitPerIp: int("EVA_PUBLIC_RATE_LIMIT_PER_IP", 120),
+    publicRateLimitPerUser: int("EVA_PUBLIC_RATE_LIMIT_PER_USER", 60),
+    // Telegram шлёт обновления пачками, поэтому лимит webhook заметно выше:
+    // он защищает от постороннего потока, а не ограничивает сам Telegram.
+    webhookRateLimitPerIp: int("EVA_WEBHOOK_RATE_LIMIT_PER_IP", 600),
     telegramInboxPollMs: int("EVA_TELEGRAM_INBOX_POLL_MS", 500),
     telegramInboxLeaseSeconds: int("EVA_TELEGRAM_INBOX_LEASE_SECONDS", 300),
     telegramInboxMaxAttempts: int("EVA_TELEGRAM_INBOX_MAX_ATTEMPTS", 5),

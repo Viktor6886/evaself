@@ -7,6 +7,16 @@ import {
   type TelegramWebAppUser,
   verifyTelegramWebAppInitData,
 } from "./telegram-webapp-auth.js";
+import {
+  clientAddress,
+  enforceRateLimit,
+  NoopRateLimiter,
+  type RateLimiter,
+} from "./rate-limit.js";
+import {
+  authenticateMiniAppRequest,
+  type MiniAppSessionStore,
+} from "./webapp-session.js";
 
 interface WebAppRequest extends FastifyRequest {
   telegramWebAppUser?: TelegramWebAppUser;
@@ -34,18 +44,42 @@ interface MainFocus {
 
 export function registerWebappCoreRoutes(
   app: FastifyInstance,
-  input: { config: Config; db: Database },
+  input: {
+    config: Config;
+    db: Database;
+    sessions?: MiniAppSessionStore;
+    now?: () => Date;
+    rateLimiter?: RateLimiter;
+  },
 ): void {
+  const limiter = input.rateLimiter ?? new NoopRateLimiter();
+  const window = input.config.rateLimitWindowSeconds ?? 60;
   void app.register(async (webApp) => {
     webApp.addHook("onRequest", async (request) => {
-      const header = request.headers["x-telegram-init-data"];
-      if (typeof header !== "string") throw unauthorized("Откройте Mini App из Telegram");
-      const verified = verifyTelegramWebAppInitData(
-        header,
-        input.config.telegramBotToken,
-        { maxAgeSeconds: input.config.telegramWebAppMaxAgeSeconds },
+      await enforceRateLimit(
+        limiter,
+        `public:ip:${clientAddress(request.headers as Record<string, unknown>, request.ip)}`,
+        { limit: input.config.publicRateLimitPerIp, windowSeconds: window },
       );
-      (request as WebAppRequest).telegramWebAppUser = verified.user;
+      // Сессия или initData — идентификатор из тела запроса не годится
+      // ни в одной ветке. Общая реализация с /public/*.
+      (request as WebAppRequest).telegramWebAppUser =
+        await authenticateMiniAppRequest(
+          request.headers as Record<string, unknown>,
+          {
+            botToken: input.config.telegramBotToken,
+            maxAgeSeconds: input.config.telegramWebAppMaxAgeSeconds,
+            ...(input.sessions ? { sessions: input.sessions } : {}),
+            ...(input.now ? { now: input.now } : {}),
+            verify: verifyTelegramWebAppInitData,
+          },
+        );
+
+      await enforceRateLimit(
+        limiter,
+        `public:user:${(request as WebAppRequest).telegramWebAppUser!.id}`,
+        { limit: input.config.publicRateLimitPerUser, windowSeconds: window },
+      );
     });
 
     webApp.get("/dashboard", async (request) => {
