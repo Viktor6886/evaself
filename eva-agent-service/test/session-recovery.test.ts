@@ -856,9 +856,10 @@ test("восстановление не сочиняет ходу прогрес
     "result_received",
   ]);
   // `outbox_committed` стоит особняком: строка outbox либо есть, либо
-  // нет, и когда она есть — это доказательство, а не догадка. Поэтому
-  // запрещено оно только при отсутствии следа outbox.
-  const provable = (outbox: string | null) => (outbox === null ? ["outbox_committed"] : []);
+  // нет, и когда она ждёт отправки — это доказательство, а не догадка.
+  // Разрешено оно ровно в том случае, в каком код его и пишет: строка
+  // outbox существует и ещё не отправлена. Шире — уже поблажка.
+  const provable = (outbox: string | null) => (outbox === "pending" ? [] : ["outbox_committed"]);
   const offences: string[] = [];
   for (const state of TURN_STATES) {
     if (TERMINAL_STATES.has(state)) continue;
