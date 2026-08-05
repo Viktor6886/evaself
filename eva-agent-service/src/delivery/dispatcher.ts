@@ -54,6 +54,8 @@ export class ParallelInboxDispatcher {
   private readonly inFlight = new Set<Promise<void>>();
   /** Люди, чей ход ведёт этот процесс прямо сейчас. */
   private readonly busy = new Set<number>();
+  /** Сколько раз запись вернулась из-за чужой блокировки. Для наблюдения. */
+  private foreignLockReleases = 0;
 
   constructor(
     private readonly inbox: ParallelTelegramInbox,
@@ -100,6 +102,11 @@ export class ParallelInboxDispatcher {
 
   get activeTurns(): number {
     return this.inFlight.size;
+  }
+
+  /** Возвраты по чужой блокировке. Растущий счётчик — признак подвисшего ключа. */
+  get foreignLockCount(): number {
+    return this.foreignLockReleases;
   }
 
   async tick(): Promise<void> {
@@ -159,18 +166,37 @@ export class ParallelInboxDispatcher {
     // экземпляры. Их владение в базе не отражено, поэтому спрашиваем
     // прямо — иначе ход упёрся бы в `user_busy` и потратил попытку.
     if (record.telegramUserId !== null && this.lock) {
-      const held = await this.lock.isLocked(record.telegramUserId).catch(() => false);
+      // `try` здесь, а не `.catch`: синхронный бросок клиента Valkey
+      // промиса не создаёт вовсе, и `.catch` его бы не поймал — запись
+      // осталась бы `processing` до истечения аренды.
+      let held = false;
+      try {
+        held = await this.lock.isLocked(record.telegramUserId);
+      } catch {
+        held = false;
+      }
       if (held) {
+        // Возврат по чужой блокировке молчаливым быть не должен: при
+        // подвисшем чужом ключе запись будет крутиться «взять — вернуть»
+        // каждую секунду, и без следа в логе это выглядит как тишина.
+        this.foreignLockReleases += 1;
+        this.logger.debug("Слот пользователя занят другим владельцем", {
+          updateId: record.updateId,
+          releases: this.foreignLockReleases,
+        });
         await this.release(record, this.options.releaseDelaySeconds ?? 1);
         return;
       }
     }
 
-    const slot = this.slots
-      ? await this.slots
-        .acquire("interactive", `${this.workerId}:${record.updateId}`)
-        .catch(() => null)
-      : null;
+    let slot = null;
+    if (this.slots) {
+      try {
+        slot = await this.slots.acquire("interactive", `${this.workerId}:${record.updateId}`);
+      } catch {
+        slot = null;
+      }
+    }
     if (this.slots && !slot) {
       // Свободного слота нет — или Valkey недоступна. Запись
       // возвращается в очередь, попытка ей не засчитывается: её ничто

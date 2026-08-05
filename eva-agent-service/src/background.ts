@@ -294,8 +294,10 @@ export class BackgroundRuntime {
         internalOperationType: "task_reminder",
         correlationId,
       });
-      const turn = await this.queue.run(Number(task.telegram_id), () =>
-        this.letta.runTurn(scheduler.conversationId, prompt),
+      const turn = await this.queue.run(
+        Number(task.telegram_id),
+        () => this.letta.runTurn(scheduler.conversationId, prompt),
+        { userId: Number(task.user_id), conversationId: scheduler.conversationId },
       );
       const generatedText = turn.reply.trim();
       await this.taskEvents.record({
@@ -381,8 +383,10 @@ export class BackgroundRuntime {
       const prompt = this.runtimeContext.wrapUserMessage(context, userMessage, {
         internalOperationType: "heartbeat",
       });
-      const turn = await this.queue.run(Number(candidate.telegram_id), () =>
-        this.letta.runTurn(scheduler.conversationId, prompt),
+      const turn = await this.queue.run(
+        Number(candidate.telegram_id),
+        () => this.letta.runTurn(scheduler.conversationId, prompt),
+        { userId: Number(candidate.user_id), conversationId: scheduler.conversationId },
       );
       const reply = turn.reply.trim().slice(0, 1200);
       if (!reply || reply === "HEARTBEAT_SKIP") {

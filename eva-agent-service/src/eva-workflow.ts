@@ -452,7 +452,13 @@ export class EvaWorkflow {
         return { status: "completed", usageCharged: true };
           },
         );
-        }),
+        },
+        // Кто держит слот: ход этого человека, с этим `run_id`.
+        // Conversation становится известна позже, после канонической
+        // выборки, и в описание владения не попадает — врать про неё
+        // хуже, чем не знать.
+        { runId: turnHandle?.runId ?? null },
+        ),
       );
       metrics.db_query_count = measured.queryCount;
       return measured.result;

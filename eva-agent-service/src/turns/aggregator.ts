@@ -136,23 +136,61 @@ export class TurnAggregator {
     }
 
     const records = [primary];
-    let characters = textOf(primary.payload).length;
+    const characters = textOf(primary.payload).length;
     const deadline = started + this.options.maxWindowMs;
     let stop: AggregationStop = "no_more_messages";
 
+    try {
+      await this.gather(records, primary, context, deadline, (value) => {
+        stop = value;
+      }, characters);
+    } catch (error) {
+      // Окно оборвалось на полпути. Отдаём то, что собрали: уже занятые
+      // записи иначе остались бы `processing` до истечения аренды, а
+      // человек ждал бы ответа всё это время.
+      this.logger.warn("Окно объединения оборвалось", {
+        telegram_id: primary.telegramUserId,
+        collected: records.length,
+        code: error instanceof Error ? error.name : "unknown_error",
+      });
+      stop = "boundary";
+    }
+    if (Date.now() >= deadline && stop === "no_more_messages") stop = "deadline";
+
+    if (records.length > 1) {
+      this.logger.info("Быстрые сообщения объединены в один ход", {
+        telegram_id: primary.telegramUserId,
+        messages: records.length,
+        window_ms: Date.now() - started,
+        stop,
+      });
+    }
+    return { records, stop, windowMs: Date.now() - started };
+  }
+
+  /** Само окно. Вынесено, чтобы собранное пережило ошибку внутри него. */
+  private async gather(
+    records: InboxRecord[],
+    primary: InboxRecord,
+    context: { workerId: string; maxAttempts: number },
+    deadline: number,
+    setStop: (stop: AggregationStop) => void,
+    initialCharacters: number,
+  ): Promise<void> {
+    let characters = initialCharacters;
     while (Date.now() < deadline) {
       const pause = Math.min(this.options.debounceMs, deadline - Date.now());
       if (pause > 0) await this.wait(pause);
 
       const followUps = await this.inbox.claimFollowUps({
         workerId: context.workerId,
-        telegramUserId: primary.telegramUserId,
+        telegramUserId: primary.telegramUserId!,
         afterUpdateId: records[records.length - 1]!.updateId,
         maxAttempts: context.maxAttempts,
         limit: Math.max(1, this.options.maxMessages - records.length),
       });
       if (followUps.length === 0) {
-        stop = Date.now() >= deadline ? "deadline" : "no_more_messages";
+        setStop(Date.now() >= deadline ? "deadline" : "no_more_messages");
         break;
       }
 
@@ -174,20 +212,9 @@ export class TurnAggregator {
         else if (characters >= this.options.maxCharacters) closed = "volume_limit";
       }
       if (closed) {
-        stop = closed;
+        setStop(closed);
         break;
       }
     }
-    if (Date.now() >= deadline && stop === "no_more_messages") stop = "deadline";
-
-    if (records.length > 1) {
-      this.logger.info("Быстрые сообщения объединены в один ход", {
-        telegram_id: primary.telegramUserId,
-        messages: records.length,
-        window_ms: Date.now() - started,
-        stop,
-      });
-    }
-    return { records, stop, windowMs: Date.now() - started };
   }
 }

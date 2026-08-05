@@ -835,3 +835,38 @@ test("остановка посреди опроса возвращает уже
     assert.equal(row.attempts, 0, "остановка потратила попытку");
   }
 });
+
+test("оборванное окно объединения отдаёт уже собранное, а не теряет его", async () => {
+  const inbox = new FakeInbox();
+  inbox.enqueueUpdate(textUpdate(171, 3_800, "первое"), 0);
+  inbox.enqueueUpdate(textUpdate(172, 3_800, "второе"), 1);
+
+  // Второй заход в базу падает: окно оборвано на полпути.
+  let calls = 0;
+  const original = inbox.claimFollowUps.bind(inbox);
+  inbox.claimFollowUps = async (input) => {
+    calls += 1;
+    if (calls === 2) throw new Error("база отказала");
+    return await original(input);
+  };
+
+  const turns: number[][] = [];
+  const dispatcher = new ParallelInboxDispatcher(
+    inbox as never,
+    async (records) => {
+      turns.push(records.map((record) => record.updateId));
+      return { status: "completed", usageCharged: true };
+    },
+    logger,
+    OPTIONS,
+    undefined,
+    new TurnAggregator(inbox as never, logger, { debounceMs: 1, maxWindowMs: 50 }, async () => {}),
+  );
+
+  await drain(dispatcher, inbox);
+
+  // Обе записи собраны первым заходом и дошли до хода: брошенная на
+  // полпути запись иначе висела бы `processing` до истечения аренды.
+  assert.deepEqual(turns, [[171, 172]]);
+  assert.deepEqual(inbox.statuses(), { completed: 2 });
+});

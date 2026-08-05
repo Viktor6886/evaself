@@ -472,6 +472,8 @@ interface WorkflowProbe {
   sent: string[];
   result: unknown;
   elapsedMs: number;
+  /** Чем ход представился блокировке пользователя. */
+  lockClaims: Array<Record<string, unknown>>;
 }
 
 async function runTelegramTurn(turns: TurnLifecycle | undefined): Promise<WorkflowProbe> {
@@ -533,8 +535,16 @@ async function runTelegramTurn(turns: TurnLifecycle | undefined): Promise<Workfl
     }),
     wrapUserMessage: (_context: unknown, prompt: string) => prompt,
   };
+  const lockClaims: Array<Record<string, unknown>> = [];
   const queue = {
-    run: async <T>(_telegramId: number, work: () => Promise<T>) => await work(),
+    run: async <T>(
+      _telegramId: number,
+      work: () => Promise<T>,
+      claim: Record<string, unknown> = {},
+    ) => {
+      lockClaims.push(claim);
+      return await work();
+    },
   };
   const workflow = new EvaWorkflow(
     { typingIntervalMs: 4000, lockTtlSeconds: 180 } as never,
@@ -562,7 +572,7 @@ async function runTelegramTurn(turns: TurnLifecycle | undefined): Promise<Workfl
       text: "мне снова тяжело собраться",
     },
   } as never);
-  return { sent, result, elapsedMs: performance.now() - started };
+  return { sent, result, elapsedMs: performance.now() - started, lockClaims };
 }
 
 test("теневая запись не меняет ответ пользователя и укладывается в бюджет", async () => {
@@ -634,4 +644,22 @@ test("сбой теневой записи не мешает пользоват�
   const probe = await runTelegramTurn(lifecycle(store));
   assert.deepEqual(probe.result, { status: "completed", usageCharged: true });
   assert.equal(probe.sent.length, 1);
+});
+
+test("ход представляется блокировке своим run_id, а не безымянной строкой", async () => {
+  const store = new TurnStore();
+  const probe = await runTelegramTurn(lifecycle(store));
+
+  assert.equal(probe.lockClaims.length, 1, "блокировка бралась не один раз");
+  const runId = [...store.rows.values()][0]!.run_id;
+  assert.equal(
+    probe.lockClaims[0]!.runId,
+    runId,
+    "владение блокировкой не связано с ходом: в Valkey ушёл null",
+  );
+
+  // Без наблюдателя ход всё равно берёт блокировку — просто без run_id.
+  const without = await runTelegramTurn(undefined);
+  assert.equal(without.lockClaims.length, 1);
+  assert.equal(without.lockClaims[0]!.runId, null);
 });
