@@ -7,6 +7,8 @@
  * allowed to reach the App Server directly.
  */
 
+import { createHash } from "node:crypto";
+
 import { LettaAgentClient } from "@letta-ai/letta-agent-sdk";
 import type {
   AnyAgentTool,
@@ -254,6 +256,8 @@ export function extractText(content: unknown): string {
 export class LettaService {
   private client: LettaAgentClient;
   private readonly sessions = new Map<string, PooledSession>();
+  /** Conversation, по которым ход выполняется прямо сейчас. */
+  private readonly runningTurns = new Set<string>();
 
   private readonly config: Config;
   private readonly logger: Logger;
@@ -630,6 +634,34 @@ export class LettaService {
     return this.sessions.size;
   }
 
+  /**
+   * Отпечаток действующего промпта: персона плюс системный промпт.
+   *
+   * Реестра версий промптов в проекте нет, и заводить его этот шаг не
+   * вправе. Отпечаток решает ту же задачу для записи хода: два хода с
+   * разным значением выполнялись с разными инструкциями. Сам текст
+   * промпта из отпечатка не восстанавливается.
+   */
+  get promptVersion(): string {
+    return createHash("sha256")
+      .update(this.persona)
+      .update(" ")
+      .update(this.runtime.system_prompt ?? "")
+      .digest("hex")
+      .slice(0, 12);
+  }
+
+  /**
+   * Сессии для /metrics: занятые ходом прямо сейчас и открытые, но
+   * простаивающие. Разделение важно операционно — пул, целиком занятый
+   * ходами, и пул, целиком простаивающий, требуют разных решений, а по
+   * одному числу они неотличимы.
+   */
+  sessionStats(): { active: number; idle: number } {
+    const active = this.runningTurns.size;
+    return { active, idle: Math.max(0, this.sessions.size - active) };
+  }
+
   // -----------------------------------------------------------------
   // turns
   // -----------------------------------------------------------------
@@ -649,6 +681,7 @@ export class LettaService {
     const startedAt = Date.now();
     const session = await this.acquireSession(conversationId);
     const collected: SDKMessage[] = [];
+    this.runningTurns.add(conversationId);
 
     try {
       await session.send(message);
@@ -686,6 +719,8 @@ export class LettaService {
       // A broken session must not stay in the pool.
       this.closeSession(conversationId);
       throw toEvaError(error, "running a turn");
+    } finally {
+      this.runningTurns.delete(conversationId);
     }
 
     const summary = summarizeStream(collected);

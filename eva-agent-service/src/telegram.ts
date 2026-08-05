@@ -79,6 +79,7 @@ export class TelegramClient implements OutboxTransport {
     prefix: string;
     sequence: number;
     metrics: DeliveryMetrics;
+    lastOutboxId: string | null;
   }>();
 
   constructor(config: Config, logger: Logger) {
@@ -121,6 +122,7 @@ export class TelegramClient implements OutboxTransport {
       prefix,
       sequence: 0,
       metrics: { outboxInsertMs: 0, telegramSendMs: 0 },
+      lastOutboxId: null,
     }, work);
   }
 
@@ -129,6 +131,11 @@ export class TelegramClient implements OutboxTransport {
     return metrics
       ? { ...metrics }
       : { outboxInsertMs: 0, telegramSendMs: 0 };
+  }
+
+  /** Последняя строка outbox, поставленная в этом контексте доставки. */
+  getDeliveryOutboxId(): string | null {
+    return this.deliveryContext.getStore()?.lastOutboxId ?? null;
   }
 
   /**
@@ -454,6 +461,10 @@ export class TelegramClient implements OutboxTransport {
       payload,
       idempotencyKey,
       onMetrics: (metrics) => this.addDeliveryMetrics(metrics),
+      onEnqueued: (outboxId) => {
+        const store = this.deliveryContext.getStore();
+        if (store) store.lastOutboxId = outboxId;
+      },
     });
   }
 

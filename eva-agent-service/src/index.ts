@@ -36,6 +36,7 @@ import { SdkSettingsManager } from "./sdk-settings.js";
 import { buildServer, VERSION } from "./server.js";
 import { TelegramClient } from "./telegram.js";
 import { TimezoneResolver } from "./time/timezone-resolver.js";
+import { TurnLifecycle } from "./turns/turn-lifecycle.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -148,6 +149,10 @@ async function main(): Promise<void> {
   );
   letta.setToolFactory((conversationId) => toolFactory.forConversation(conversationId));
   const crisis = new CrisisMonitor(db, telegram, logger, config.ownerTelegramId);
+  // Наблюдатель хода. Флаг выключен по умолчанию: с ним ход пишется в
+  // turn_runs, без него не пишется ничего, и путь обработки в обоих
+  // случаях один и тот же.
+  const turns = new TurnLifecycle(db, logger, config.turnLifecycleEnabled);
   const workflow = new EvaWorkflow(
     config,
     db,
@@ -161,6 +166,7 @@ async function main(): Promise<void> {
     crisis,
     graphContext,
     highlights,
+    turns,
   );
   const inbox = new PostgresTelegramInbox(db);
   const inboxWorker = new TelegramInboxWorker(

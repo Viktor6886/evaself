@@ -10,6 +10,12 @@ export interface OutboxEnvelope {
   idempotencyKey?: string;
   userId?: number;
   onMetrics?: (metrics: Partial<DeliveryMetrics>) => void;
+  /**
+   * Идентификатор строки outbox сразу после постановки. Нужен ходу,
+   * чтобы сослаться на свою доставку, не разыскивая её отдельным
+   * запросом по ключу идемпотентности.
+   */
+  onEnqueued?: (outboxId: string) => void;
 }
 
 export interface DeliveryMetrics {
@@ -89,6 +95,7 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
       outboxInsertMs: elapsed(insertStarted),
     });
     const row = rows[0];
+    if (row) envelope.onEnqueued?.(row.id);
     if (!row || row.status === "sent") return { queued: false, duplicate: true };
     const claimed = await this.claimById(row.id);
     if (!claimed) return { queued: true, duplicate: true };
