@@ -763,22 +763,27 @@ export class LettaService {
       pooled.closing = true;
       initial.add(pooled);
     }
+    // Сессия опознаётся объектом, а не conversation: пока идёт окно, под
+    // тем же ключом успевает появиться новая сессия. Считать её той же
+    // значило бы закрывать уже закрытую по кругу и ждать полного срока
+    // там, где ждать больше нечего.
+    const stillPooled = (pooled: PooledSession): boolean =>
+      this.sessions.get(pooled.conversationId) === pooled;
     const deadline = Date.now() + Math.max(0, timeoutMs);
     let drained = 0;
     while (Date.now() < deadline) {
       for (const pooled of initial) {
-        if (pooled.activeTurns === 0 && this.sessions.has(pooled.conversationId)) {
+        if (pooled.activeTurns === 0 && stillPooled(pooled)) {
           this.closeIfDrained(pooled);
           drained += 1;
         }
       }
-      if ([...initial].every((pooled) => !this.sessions.has(pooled.conversationId))) break;
+      if ([...initial].every((pooled) => !stillPooled(pooled))) break;
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     let forced = 0;
     for (const pooled of initial) {
-      if (!this.sessions.has(pooled.conversationId)) continue;
-      if (this.sessions.get(pooled.conversationId) !== pooled) continue;
+      if (!stillPooled(pooled)) continue;
       forced += 1;
       pooled.activeTurns = 0;
       this.closeIfDrained(pooled);
@@ -866,8 +871,10 @@ export class LettaService {
     options: {
       onDelta?: (text: string) => void;
       /**
-       * Барьер отмены. Спрашивается на каждом событии потока: отмена
-       * приходит извне, и узнать о ней можно только спросив. Ответ
+       * Барьер отмены. Спрашивается по ходу потока — не чаще раза в
+       * `cancelPollMs`: отмена приходит извне, и узнать о ней можно
+       * только спросив, но спрашивать на каждом событии значило бы
+       * добавить запрос к базе на каждый токен. Ответ
        * `true` останавливает генерацию и стриминг — поздний ответ
        * пользователю не уходит.
        */

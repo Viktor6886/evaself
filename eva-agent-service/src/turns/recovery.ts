@@ -22,7 +22,7 @@
 import type { Database } from "../db.js";
 import type { Logger } from "../logger.js";
 import type { EffectJournal } from "./effect-journal.js";
-import { isTurnState, TERMINAL_STATES, type TurnState } from "./states.js";
+import { isTurnState, pathBetween, TERMINAL_STATES, type TurnState } from "./states.js";
 import type { TurnHandle, TurnLifecycle } from "./turn-lifecycle.js";
 
 /** Что нашли про ход. Только факты, без интерпретации. */
@@ -41,6 +41,8 @@ export interface TurnEvidence {
   effects: { running: number; succeeded: number; failed: number };
   /** Сколько раз этот ход уже осматривало восстановление. */
   recoveries: number;
+  /** Отмену запросили до сбоя: ход не отказал, его остановили. */
+  cancelRequested: boolean;
 }
 
 /**
@@ -190,6 +192,7 @@ export class TurnRecoveryService {
       conversationId: row.conversation_id,
       effects: { running: 0, succeeded: 0, failed: 0 },
       recoveries: 0,
+      cancelRequested: row.cancel_requested_at !== null,
     };
 
     evidence.recoveries = await this.db.withSystemScope(
@@ -241,7 +244,7 @@ export class TurnRecoveryService {
     row: StaleRow,
     evidence: TurnEvidence,
   ): { decision: RecoveryDecision; reason: string } {
-    if (row.cancel_requested_at !== null) {
+    if (evidence.cancelRequested) {
       return { decision: "abandon", reason: "ход отменён до сбоя" };
     }
     if (evidence.state !== null && TERMINAL_STATES.has(evidence.state)) {
@@ -257,8 +260,20 @@ export class TurnRecoveryService {
       // её сам, обращаться к модели незачем.
       return { decision: "deliver", reason: "результат в outbox, доставка продолжится" };
     }
-    if (evidence.state === "result_received" || evidence.state === "outbox_committed") {
-      return { decision: "deliver", reason: "результат получен, не хватает доставки" };
+    if (evidence.state === "outbox_committed") {
+      // Состояние само по себе означает, что строка outbox
+      // зафиксирована, — даже если связать её с ходом процесс уже не
+      // успел. Доставку доведёт outbox, повтор дал бы второй ответ.
+      return { decision: "deliver", reason: "результат зафиксирован, доставка за outbox" };
+    }
+    if (evidence.state === "result_received") {
+      // Ответ модели существовал, но строки outbox у хода нет. Это
+      // ровно то окно, в котором сообщение могло уйти, а связать его с
+      // ходом процесс не успел: отправка предшествует записи ссылки.
+      // Доказательства недоставки нет, значит повтор запрещён — а
+      // пересобрать ответ восстановлению не из чего: текста ответа в
+      // PostgreSQL нет и не будет, полное зеркало переписки запрещено.
+      return { decision: "abandon", reason: "ответ мог уйти, доказательства недоставки нет" };
     }
     if (evidence.recoveries >= this.options.maxAttempts) {
       // Предел считается по попыткам ВОССТАНОВЛЕНИЯ, а не по попыткам
@@ -285,6 +300,37 @@ export class TurnRecoveryService {
   }
 
   /**
+   * Куда вести ход при принятом решении.
+   *
+   * Возвращаются опорные точки, а не готовый список переходов: сам путь
+   * между ними строит граф. Выписывать переходы руками нельзя — на
+   * входе может оказаться любое из двадцати одного состояния, и путь,
+   * годный для одного, для остальных превращается в набор отклонённых
+   * переходов.
+   */
+  private waypoints(evidence: TurnEvidence, decision: Exclude<RecoveryDecision, "wait">): TurnState[] {
+    if (decision === "retry") {
+      // Процесс упал — для графа это отказ, и путь начинается с него:
+      // `recovery_required` достижимо только из `failed_retryable`.
+      // Прыгать в него напрямую граф не даёт, и это правильно: ход,
+      // оказавшийся в восстановлении, действительно сорвался.
+      const route: TurnState[] = ["failed_retryable", "recovery_required", "recovering", "queued"];
+      // Ход, уже стоящий на этом пути, проходит его остаток, а не круг
+      // целиком: второй заход иначе вёл бы `recovering` обратно в
+      // `failed_retryable`.
+      const position = evidence.state === null ? -1 : route.indexOf(evidence.state);
+      return position === -1 ? route : route.slice(position + 1);
+    }
+    if (decision === "deliver") return ["delivering"];
+    // Отмену просили до сбоя: ход не отказал, его остановили, и в
+    // канонических состояниях для этого есть своя пара.
+    if (evidence.cancelRequested) return ["cancelling", "cancelled"];
+    // Ответ дошёл: ход честно завершён, а не отказал.
+    if (evidence.delivered) return ["completed"];
+    return ["failed_terminal"];
+  }
+
+  /**
    * Применить решение.
    *
    * Состояние меняется только через `TurnLifecycle`: он валидирует
@@ -292,9 +338,11 @@ export class TurnRecoveryService {
    * означал бы второй способ писать состояния — тот самый, который
    * `CLAUDE.md` запрещает фразой «переходы валидируются кодом».
    *
-   * Путь повтора идёт через `recovery_required → recovering → queued`:
-   * эти состояния заведены ровно для него, и прыжок сразу в `queued`
-   * оставил бы историю хода без объяснения, откуда он там взялся.
+   * Аренда снимается в любом случае, даже если путь пройти не удалось.
+   * Выборка восстановления берёт ходы по истёкшей аренде, и ход, по
+   * которому решение уже принято, обязан из неё выйти — иначе один
+   * неудачный переход осматривался бы каждые тридцать секунд вечно, а
+   * два десятка таких строк закрыли бы собой всю выборку.
    */
   private async apply(evidence: TurnEvidence, decision: RecoveryDecision): Promise<void> {
     if (decision === "wait") return;
@@ -313,31 +361,39 @@ export class TurnRecoveryService {
       owner: { column: "user_id", value: evidence.userId },
     };
 
-    const path: Record<Exclude<RecoveryDecision, "wait">, TurnState[]> = {
-      // Ответ дошёл: ход честно завершён, а не отказал.
-      deliver: evidence.delivered
-        ? ["delivered", "completed"]
-        : evidence.state === "outbox_committed"
-          ? ["delivering"]
-          : ["outbox_committed", "delivering"],
-      // Процесс упал — для графа это отказ, и путь начинается с него:
-      // `recovery_required` достижимо только из `failed_retryable`.
-      // Прыгать в него напрямую граф не даёт, и это правильно: ход,
-      // оказавшийся в восстановлении, действительно сорвался.
-      retry: ["failed_retryable", "recovery_required", "recovering", "queued"],
-      abandon: evidence.delivered
-        ? ["delivered", "completed"]
-        : ["failed_terminal"],
-    };
-
-    for (const state of path[decision]) {
-      const moved = await this.lifecycle.transition(handle, state, {
-        detail: { recovery: decision },
-        ...(state === "failed_terminal" ? { errorCode: "recovery_abandoned" } : {}),
-      });
-      // Переход отклонён графом — дальше по пути идти незачем: он
-      // строился от состояния, которого уже нет.
-      if (!moved) break;
+    try {
+      let from = evidence.state;
+      for (const target of this.waypoints(evidence, decision)) {
+        if (from === null) break;
+        const path = pathBetween(from, target);
+        if (path === null) {
+          this.logger.warn("Восстановление не нашло пути по графу состояний", {
+            runId: evidence.runId,
+            from,
+            to: target,
+            decision,
+          });
+          break;
+        }
+        let stopped = false;
+        for (const state of path) {
+          const moved = await this.lifecycle.transition(handle, state, {
+            detail: { recovery: decision },
+            ...(state === "failed_terminal" ? { errorCode: "recovery_abandoned" } : {}),
+          });
+          if (!moved) {
+            // Переход отклонён или не записан: состояние строки уже не
+            // то, от которого строился путь. Идти дальше по нему
+            // незачем.
+            stopped = true;
+            break;
+          }
+          from = state;
+        }
+        if (stopped) break;
+      }
+    } finally {
+      await this.lifecycle.releaseLease(handle);
     }
   }
 

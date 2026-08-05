@@ -323,7 +323,10 @@ export class TurnLifecycle {
     add("outbox_id", links.outboxId);
     add("llm_request_id", links.llmRequestId);
     add("letta_session_id", links.lettaSessionId);
-    add("letta_run_ids", links.lettaRunIds);
+    // Пустой массив — не значение, а его отсутствие: `COALESCE` пустой
+    // массив за `NULL` не считает и затёр бы уже записанные
+    // идентификаторы run.
+    add("letta_run_ids", links.lettaRunIds?.length ? links.lettaRunIds : undefined);
     add("trace_id", links.traceId);
     add("prompt_version", links.promptVersion);
     add("flow_version", links.flowVersion);
@@ -364,6 +367,35 @@ export class TurnLifecycle {
       ));
     } catch (error) {
       this.warn("Не удалось обновить аренду хода", error, { runId: handle.runId });
+    }
+  }
+
+  /**
+   * Снять аренду: у хода больше нет исполнителя.
+   *
+   * Это единственный способ вывести ход из выборки восстановления —
+   * она берёт строки по истёкшей аренде. Пока аренда висит, ход будут
+   * осматривать снова и снова, каким бы правильным ни было принятое по
+   * нему решение. Переход состояния аренду не трогает намеренно: ход,
+   * который сменил состояние и продолжает выполняться, своего
+   * исполнителя не терял.
+   */
+  async releaseLease(handle: TurnHandle): Promise<void> {
+    if (!this.enabled || !handle.recorded || !handle.owner) return;
+    const owner = handle.owner;
+    try {
+      await this.scoped(owner, async () => await this.db.query(
+        `-- tenant: by owner — столбец владельца хода подставляется ownerOf,
+          -- значение сверяет граница арендатора в рантайме
+          UPDATE turn_runs
+            SET lease_owner = NULL,
+                lease_expires_at = NULL,
+                updated_at = now()
+          WHERE run_id = $1 AND ${owner.column} = $2`,
+        [handle.runId, owner.value],
+      ));
+    } catch (error) {
+      this.warn("Не удалось снять аренду хода", error, { runId: handle.runId });
     }
   }
 

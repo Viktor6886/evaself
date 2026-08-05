@@ -16,6 +16,7 @@ import { EvaError } from "../dist/errors.js";
 import { LettaService } from "../dist/letta.js";
 import { EffectJournal, effectKey } from "../dist/turns/effect-journal.js";
 import { TurnRecoveryService } from "../dist/turns/recovery.js";
+import { TERMINAL_STATES, TURN_STATES } from "../dist/turns/states.js";
 import { TurnLifecycle } from "../dist/turns/turn-lifecycle.js";
 import { runInTurn } from "../dist/turns/turn-context.js";
 import { withTenantScopes } from "./tenant-scope-helper.ts";
@@ -488,6 +489,8 @@ interface RecoveryProbe {
   transitions: Array<{ to: string; from: string | null }>;
   /** Отклонённые графом переходы. Их быть не должно. */
   rejected: string[];
+  /** С каких ходов снята аренда: без этого ход не выйдет из выборки. */
+  released?: Set<string>;
 }
 
 /** Настоящий жизненный цикл: переходы обязаны проходить через его граф. */
@@ -504,7 +507,10 @@ function recoveryHarness(probe: RecoveryProbe) {
       return { rows: row ? [{ state: row.state, attempt: row.attempt }] : [] };
     }
     if (text.includes("FROM turn_runs")) {
-      return { rows: [...probe.runs.values()] };
+      // Настоящая выборка берёт ходы по истёкшей аренде
+      // (`lease_expires_at IS NOT NULL`). Поддельная обязана вести себя
+      // так же, иначе тест не заметит хода, который из выборки не вышел.
+      return { rows: [...probe.runs.values()].filter((row) => row.lease_owner != null) };
     }
     if (text.includes("FROM turn_recovery_attempts")) {
       const count = probe.attempts.filter((item) => item.run_id === values[0]).length;
@@ -533,6 +539,13 @@ function recoveryHarness(probe: RecoveryProbe) {
     if (text.startsWith("UPDATE turn_runs")) {
       // Жизненный цикл адресует строку по run_id и владельцу.
       const row = probe.runs.get(String(values[0]));
+      // Снятие аренды — тоже UPDATE, но состояния не меняет: без этого
+      // различия поддельная база записала бы состоянием `undefined`.
+      if (text.includes("lease_owner = NULL")) {
+        if (row) row.lease_owner = null;
+        probe.released?.add(String(values[0]));
+        return { rows: [] };
+      }
       if (row) row.state = values[2];
       return { rows: [] };
     }
@@ -565,7 +578,12 @@ function recoveryHarness(probe: RecoveryProbe) {
 
 /**
  * Семь точек сбоя из задания шага. Для каждой — следы, которые ход
- * успел оставить, и решение, которое обязано быть принято.
+ * успел оставить, решение, которое обязано быть принято, и состояние,
+ * в котором ход обязан оказаться.
+ *
+ * Проверять одно решение мало: решение, которое не удалось применить,
+ * выглядит в отчёте так же, как применённое, а ход при этом остаётся
+ * с истёкшей арендой и осматривается снова и снова.
  */
 const INJECTION_POINTS: Array<{
   point: string;
@@ -573,23 +591,50 @@ const INJECTION_POINTS: Array<{
   outbox: string | null;
   effects: string[];
   decision: string;
+  /** Куда обязан прийти ход после применения решения. */
+  ends: string;
 }> = [
-  { point: "до отправки в Letta", state: "context_built", outbox: null, effects: [], decision: "retry" },
-  { point: "после отправки", state: "sent_to_letta", outbox: null, effects: [], decision: "retry" },
-  { point: "во время стриминга", state: "letta_processing", outbox: null, effects: [], decision: "retry" },
   {
+    point: "до отправки в Letta",
+    state: "context_built",
+    outbox: null,
+    effects: [],
+    decision: "retry",
+    ends: "queued",
+  },
+  {
+    point: "после отправки",
+    state: "sent_to_letta",
+    outbox: null,
+    effects: [],
+    decision: "retry",
+    ends: "queued",
+  },
+  {
+    point: "во время стриминга",
+    state: "letta_processing",
+    outbox: null,
+    effects: [],
+    decision: "retry",
+    ends: "queued",
+  },
+  {
+    // Строки outbox у хода нет, а отправка предшествует записи ссылки:
+    // доказать, что ответ не ушёл, нечем — значит повтор запрещён.
     point: "после получения результата",
     state: "result_received",
     outbox: null,
     effects: [],
-    decision: "deliver",
+    decision: "abandon",
+    ends: "failed_terminal",
   },
   {
     point: "до фиксации outbox",
     state: "result_received",
     outbox: null,
     effects: ["succeeded"],
-    decision: "deliver",
+    decision: "abandon",
+    ends: "failed_terminal",
   },
   {
     point: "после фиксации outbox",
@@ -597,6 +642,7 @@ const INJECTION_POINTS: Array<{
     outbox: "pending",
     effects: [],
     decision: "deliver",
+    ends: "delivering",
   },
   {
     point: "во время доставки",
@@ -604,11 +650,12 @@ const INJECTION_POINTS: Array<{
     outbox: "sent",
     effects: [],
     decision: "abandon",
+    ends: "completed",
   },
 ];
 
 test("инъекция сбоя в семи точках: ни одна не приводит ко второму ответу", async () => {
-  const table: Array<{ point: string; decision: string }> = [];
+  const table: Array<{ point: string; decision: string; ends: string }> = [];
   for (const [index, injection] of INJECTION_POINTS.entries()) {
     const runId = `run-${index}`;
     const probe: RecoveryProbe = {
@@ -627,6 +674,7 @@ test("инъекция сбоя в семи точках: ни одна не п�
       attempts: [],
       transitions: [],
       rejected: [],
+      released: new Set(),
     };
 
     const outcomes = await recoveryHarness(probe).sweep();
@@ -636,18 +684,181 @@ test("инъекция сбоя в семи точках: ни одна не п�
       injection.decision,
       `${injection.point}: решение ${outcomes[0]!.decision} вместо ${injection.decision}`,
     );
+    // Решение обязано быть применённым, а не только объявленным.
+    assert.deepEqual(
+      probe.rejected,
+      [],
+      `${injection.point}: граф отклонил переходы ${probe.rejected.join(", ")}`,
+    );
+    assert.equal(
+      probe.runs.get(runId)!.state,
+      injection.ends,
+      `${injection.point}: ход остался в ${probe.runs.get(runId)!.state}, ожидалось ${injection.ends}`,
+    );
+    // Аренда снята — иначе тот же ход вернётся в выборку через
+    // тридцать секунд и будет возвращаться в неё вечно.
+    assert.ok(probe.released!.has(runId), `${injection.point}: аренда не снята`);
     // Каждая попытка оставила запись с причиной, найденным и решением.
     assert.equal(probe.attempts.length, 1);
     assert.equal(probe.attempts[0]!.reason, "lease_expired");
     assert.equal(probe.attempts[0]!.decision, injection.decision);
     assert.ok(String(probe.attempts[0]!.found_state).includes("state="));
-    table.push({ point: injection.point, decision: outcomes[0]!.decision });
+    table.push({
+      point: injection.point,
+      decision: outcomes[0]!.decision,
+      ends: String(probe.runs.get(runId)!.state),
+    });
   }
 
   // Ни одна точка сбоя не даёт повтора после доставленного ответа.
   const afterDelivery = table.find((row) => row.point === "во время доставки");
   assert.equal(afterDelivery?.decision, "abandon");
+  assert.equal(afterDelivery?.ends, "completed");
+  // Повтор допустим только там, где ответа заведомо не было.
+  for (const row of table.filter((item) => item.decision === "retry")) {
+    assert.equal(row.ends, "queued", `${row.point}: повтор не довёл ход до очереди`);
+  }
   console.log("таблица инъекции сбоев:", JSON.stringify(table));
+});
+
+test("повторный осмотр не гоняет ход по кругу и не копит отклонённые переходы", async () => {
+  // Ход, по которому решение уже применено, обязан выйти из выборки.
+  // Проверяется на всех семи точках сразу: заход второй раз видит
+  // только те строки, у которых аренда осталась.
+  for (const [index, injection] of INJECTION_POINTS.entries()) {
+    const runId = `run-loop-${index}`;
+    const probe: RecoveryProbe = {
+      runs: new Map([[runId, {
+        run_id: runId,
+        user_id: "42",
+        state: injection.state,
+        attempt: 1,
+        outbox_id: injection.outbox ? `outbox-${index}` : null,
+        conversation_id: "conv-1",
+        lease_owner: "умерший",
+        cancel_requested_at: null,
+      }]]),
+      outbox: new Map(injection.outbox ? [[`outbox-${index}`, injection.outbox]] : []),
+      effects: new Map([[runId, injection.effects]]),
+      attempts: [],
+      transitions: [],
+      rejected: [],
+      released: new Set(),
+    };
+    const service = recoveryHarness(probe);
+    await service.sweep();
+    assert.ok(probe.released!.has(runId), `${injection.point}: аренда не снята на первом заходе`);
+    const stateAfterFirst = probe.runs.get(runId)!.state;
+
+    for (let pass = 0; pass < 5; pass += 1) {
+      const outcomes = await service.sweep();
+      assert.deepEqual(
+        outcomes,
+        [],
+        `${injection.point}: разобранный ход вернулся в выборку на заходе ${pass + 2}`,
+      );
+    }
+    assert.deepEqual(
+      probe.rejected,
+      [],
+      `${injection.point}: повторные заходы копят отклонённые переходы ${probe.rejected.join(", ")}`,
+    );
+    assert.equal(probe.attempts.length, 1, `${injection.point}: записей попыток больше одной`);
+    assert.equal(
+      probe.runs.get(runId)!.state,
+      stateAfterFirst,
+      `${injection.point}: повторный заход увёл ход из ${String(stateAfterFirst)}`,
+    );
+  }
+});
+
+test("ни одно состояние сбоя не даёт отклонённого графом перехода", async () => {
+  // Семи точек задания мало: сбой застаёт ход в том состоянии, в каком
+  // застаёт, а не в том, которое мы предусмотрели. Здесь перебираются
+  // все незавершённые состояния во всех сочетаниях со следами outbox и
+  // отмены. Требование одно и одинаковое для всех: путь, который
+  // восстановление строит, обязан проходить по графу целиком.
+  const cases: Array<{ state: string; outbox: string | null; cancelled: boolean }> = [];
+  for (const state of TURN_STATES) {
+    if (TERMINAL_STATES.has(state)) continue;  // такие ходы выборка не берёт
+    for (const outbox of [null, "pending", "sent"]) {
+      for (const cancelled of [false, true]) cases.push({ state, outbox, cancelled });
+    }
+  }
+  assert.ok(cases.length >= 100, `перебор оказался мал: ${cases.length}`);
+
+  const stuck: string[] = [];
+  for (const [index, item] of cases.entries()) {
+    const runId = `run-all-${index}`;
+    const probe: RecoveryProbe = {
+      runs: new Map([[runId, {
+        run_id: runId,
+        user_id: "42",
+        state: item.state,
+        attempt: 1,
+        outbox_id: item.outbox ? `outbox-${index}` : null,
+        conversation_id: "conv-1",
+        lease_owner: "умерший",
+        cancel_requested_at: item.cancelled ? new Date() : null,
+      }]]),
+      outbox: new Map(item.outbox ? [[`outbox-${index}`, item.outbox]] : []),
+      effects: new Map(),
+      attempts: [],
+      transitions: [],
+      rejected: [],
+      released: new Set(),
+    };
+    const service = recoveryHarness(probe);
+    const [outcome] = await service.sweep();
+    const label = `${item.state}/outbox=${item.outbox ?? "нет"}/отмена=${item.cancelled}`;
+    assert.deepEqual(probe.rejected, [], `${label}: граф отклонил ${probe.rejected.join(", ")}`);
+    if (outcome!.decision === "wait") continue;
+    assert.ok(probe.released!.has(runId), `${label}: аренда не снята`);
+    // Второй заход этот ход уже не видит: аренды у него нет.
+    const before = probe.runs.get(runId)!.state;
+    assert.deepEqual(await service.sweep(), [], `${label}: ход вернулся в выборку`);
+    if (probe.runs.get(runId)!.state !== before) stuck.push(label);
+  }
+  assert.deepEqual(stuck, [], `состояние изменилось после выхода из выборки: ${stuck.join(", ")}`);
+});
+
+test("ожидание ограничено пределом попыток и не держит ход вечно", async () => {
+  // Единственное решение, которое аренду не снимает, — `wait`. Значит
+  // именно оно обязано упираться в предел, иначе ход с незакрытым
+  // эффектом осматривался бы бесконечно.
+  const runId = "run-wait";
+  const probe: RecoveryProbe = {
+    runs: new Map([[runId, {
+      run_id: runId,
+      user_id: "42",
+      state: "tools_pending",
+      attempt: 1,
+      outbox_id: null,
+      conversation_id: "conv-1",
+      lease_owner: "умерший",
+      cancel_requested_at: null,
+    }]]),
+    outbox: new Map(),
+    effects: new Map([[runId, ["running"]]]),
+    attempts: [],
+    transitions: [],
+    rejected: [],
+    released: new Set(),
+  };
+  const service = recoveryHarness(probe);
+  const decisions: string[] = [];
+  for (let pass = 0; pass < 6; pass += 1) {
+    const [outcome] = await service.sweep();
+    if (outcome) decisions.push(outcome.decision);
+  }
+  assert.deepEqual(
+    decisions,
+    ["wait", "wait", "wait", "abandon"],
+    `ожидание не упёрлось в предел: ${decisions.join(", ")}`,
+  );
+  assert.equal(probe.runs.get(runId)!.state, "failed_terminal");
+  assert.deepEqual(probe.rejected, []);
+  assert.ok(probe.released!.has(runId), "аренда не снята после исчерпания попыток");
 });
 
 test("незакрытый побочный эффект запрещает повтор", async () => {
@@ -691,11 +902,22 @@ test("отменённый до сбоя ход не воскрешается", 
     attempts: [],
     transitions: [],
     rejected: [],
+    released: new Set(),
   };
 
   const [outcome] = await recoveryHarness(probe).sweep();
   assert.equal(outcome!.decision, "abandon");
   assert.equal(probe.attempts[0]!.outcome, "ход отменён до сбоя");
+  // Отменённый ход не отказал — его остановили, и в канонических
+  // состояниях для этого есть своя пара. Пометить его отказом значило
+  // бы считать отменённые ходы отказами во всех метриках.
+  assert.deepEqual(
+    probe.transitions.map((item) => item.to),
+    ["cancelling", "cancelled"],
+    "отменённый ход помечен не отменой",
+  );
+  assert.equal(probe.runs.get("run-c")!.state, "cancelled");
+  assert.deepEqual(probe.rejected, []);
 });
 
 test("выключенное восстановление не трогает ничего", async () => {

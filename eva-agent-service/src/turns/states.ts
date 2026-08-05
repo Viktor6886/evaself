@@ -113,6 +113,41 @@ export function nextStates(from: TurnState): ReadonlySet<TurnState> {
   return GRAPH.get(from) ?? new Set<TurnState>();
 }
 
+/**
+ * Кратчайший путь по графу переходов, не включая исходное состояние.
+ *
+ * Нужен там, где состояние на входе заранее неизвестно: восстановление
+ * застаёт ход в любом из двадцати одного состояния, и путь, выписанный
+ * руками под одно из них, для остальных оказывается набором отклонённых
+ * переходов. Здесь путь строится по тому же графу, который его потом и
+ * проверяет, поэтому разойтись им негде.
+ *
+ * `[]` — идти некуда, уже на месте. `null` — цели не достичь.
+ */
+export function pathBetween(from: TurnState, to: TurnState): TurnState[] | null {
+  if (from === to) return [];
+  const previous = new Map<TurnState, TurnState>();
+  const seen = new Set<TurnState>([from]);
+  const queue: TurnState[] = [from];
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    for (const next of GRAPH.get(current) ?? []) {
+      if (seen.has(next)) continue;
+      seen.add(next);
+      previous.set(next, current);
+      if (next === to) {
+        const path: TurnState[] = [];
+        for (let step: TurnState = to; step !== from; step = previous.get(step)!) {
+          path.unshift(step);
+        }
+        return path;
+      }
+      queue.push(next);
+    }
+  }
+  return null;
+}
+
 export class InvalidTurnTransitionError extends Error {
   readonly code = "invalid_turn_transition";
   constructor(
