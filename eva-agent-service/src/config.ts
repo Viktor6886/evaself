@@ -73,6 +73,11 @@ export interface Config {
   profileCacheTtlSeconds: number;
   conversationMirrorEnabled: boolean;
   outboxEnabled: boolean;
+  /**
+   * Запись жизненного цикла хода в `turn_runs`. Shadow-режим: путь
+   * обработки сообщения и ответ пользователю от него не зависят.
+   */
+  turnLifecycleEnabled: boolean;
 
   lavaWebhookUser: string;
   lavaWebhookPassword: string;
@@ -222,6 +227,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     profileCacheTtlSeconds: int("EVA_PROFILE_CACHE_TTL_SECONDS", 60),
     conversationMirrorEnabled: bool("EVA_CONVERSATION_MIRROR_ENABLED", false),
     outboxEnabled: bool("EVA_OUTBOX_ENABLED", true),
+    turnLifecycleEnabled: bool("EVA_TURN_LIFECYCLE", false),
 
     lavaWebhookUser: str("LAVA_WEBHOOK_USER"),
     lavaWebhookPassword: str("LAVA_WEBHOOK_PASSWORD"),

@@ -194,6 +194,17 @@ export class Database {
     return { result, queryCount: counter.count };
   }
 
+  /**
+   * Состояние пула для /metrics. Берётся у настоящего пула, а не у
+   * его проверяющей обёртки: счётчики соединений границы арендатора не
+   * касаются, а обёртка их не считает.
+   */
+  poolStats(): { total: number; idle: number; waiting: number } {
+    const pool = this.pool;
+    if (!pool) return { total: 0, idle: 0, waiting: 0 };
+    return { total: pool.totalCount, idle: pool.idleCount, waiting: pool.waitingCount };
+  }
+
   async ping(): Promise<boolean> {
     try {
       const result = await this.require().query("SELECT 1 AS ok");

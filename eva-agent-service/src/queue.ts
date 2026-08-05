@@ -175,4 +175,9 @@ export class UserQueue {
   get queuedUsers(): number {
     return this.local.size;
   }
+
+  /** Пользователи, чей ход выполняется прямо сейчас. */
+  get activeUsers(): number {
+    return this.running.size;
+  }
 }

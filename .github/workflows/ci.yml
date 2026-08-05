@@ -639,6 +639,10 @@ jobs:
             'EVA_ADMIN_BOOTSTRAP_PASSWORD': 'Ci-Phase1-Strong-Passphrase-2026!',
             'EVA_SECRETS_MASTER_KEY_FILE': '/tmp/evaself-ci-master-key',
             'COMPOSE_PROFILES': '',
+            # Флаг остаётся выключенным в .env.example и в установке.
+            # Здесь он включён намеренно: смоук-стенд — это и есть та
+            # проверка, ради которой флаг существует.
+            'EVA_TURN_LIFECYCLE': 'true',
           }
           for key, value in values.items():
             text = re.sub(rf'^{key}=.*$', f'{key}={value}', text, flags=re.M)
@@ -1137,6 +1141,41 @@ jobs:
             [ "$i" = "20" ] && { echo "::error::durable outbox state: $OUTBOX"; exit 1; }
             sleep 1
           done
+
+      - name: /metrics отдаёт операционные метрики и закрыт внутренним ключом
+        run: |
+          docker compose --env-file versions.env --env-file .env \
+            exec -T eva-agent-service node -e "
+              (async () => {
+                const base = 'http://127.0.0.1:8070/metrics';
+                const anonymous = await fetch(base);
+                if (anonymous.status !== 401) {
+                  throw new Error('/metrics без ключа: ' + anonymous.status);
+                }
+                const response = await fetch(base, {
+                  headers: { 'X-API-Key': process.env.EVA_AGENT_API_KEY },
+                });
+                if (!response.ok) throw new Error('/metrics статус ' + response.status);
+                const body = await response.text();
+                const required = [
+                  'eva_inbox_pending', 'eva_inbox_oldest_age_seconds',
+                  'eva_outbox_pending', 'eva_outbox_oldest_age_seconds',
+                  'eva_turns_active', 'eva_turns_active_total',
+                  'eva_turn_wait_ms', 'eva_turn_duration_ms',
+                  'eva_user_locks', 'eva_letta_sessions',
+                  'eva_postgres_pool_connections', 'eva_event_loop_lag_seconds',
+                ];
+                for (const name of required) {
+                  if (!body.includes('# TYPE ' + name + ' gauge')) {
+                    throw new Error('нет метрики ' + name);
+                  }
+                }
+                if (!/^eva_turn_lifecycle_enabled 1\$/m.test(body)) {
+                  throw new Error('флаг жизненного цикла не включён на стенде');
+                }
+                console.log('metrics ok');
+              })().catch((error) => { console.error(error); process.exit(1); });
+            " | grep -q 'metrics ok'
 
       - name: The landing page's bot endpoint answers without initData
         run: |

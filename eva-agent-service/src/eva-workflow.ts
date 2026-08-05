@@ -14,6 +14,12 @@ import type { UserQueue } from "./queue.js";
 import type { RuntimeContextBuilder } from "./runtime/runtime-context.js";
 import { TaskEventService } from "./tasks/task-event-service.js";
 import {
+  TURN_FLOW_VERSION,
+  type TurnHandle,
+  type TurnLifecycle,
+  type TurnLinks,
+} from "./turns/turn-lifecycle.js";
+import {
   type TelegramMessage,
   type TelegramMessageDraft,
   type TelegramUpdate,
@@ -33,6 +39,13 @@ export class VoiceTranscriptionError extends Error {
     this.name = "VoiceTranscriptionError";
   }
 }
+
+/**
+ * Кто ведёт ход. Аренда сама по себе ничего не сериализует — она
+ * отвечает на вопрос «чей это ход был», когда процесс перезапустился и
+ * незавершённые записи надо разобрать.
+ */
+const LEASE_OWNER = `eva-agent-service:${process.pid}`;
 
 interface NormalizedUpdate {
   updateId: number;
@@ -60,8 +73,39 @@ export class EvaWorkflow {
     private readonly crisis?: CrisisMonitor,
     private readonly graphContext?: GraphContextService,
     private readonly highlights?: ConversationHighlightService,
+    /**
+     * Наблюдатель хода. Необязателен намеренно: без него путь обработки
+     * сообщения тот же самый, что и до этого шага.
+     */
+    private readonly turns?: TurnLifecycle,
   ) {
     this.taskEvents = new TaskEventService(db);
+  }
+
+  /**
+   * Ход прекращён до обращения к модели: блокировка, исчерпанная квота,
+   * неподдерживаемое сообщение, команда. Ответ пользователю при этом
+   * отправляется — прекращён именно ход модели, а не диалог.
+   */
+  private async stopTurn(handle: TurnHandle | null, reason: string): Promise<void> {
+    if (!handle || !this.turns) return;
+    await this.turns.requestCancel(handle, reason);
+    await this.turns.transition(handle, "cancelling", { detail: { reason } });
+    await this.turns.transition(handle, "cancelled");
+  }
+
+  private async linkTurn(handle: TurnHandle | null, links: TurnLinks): Promise<void> {
+    if (!handle || !this.turns) return;
+    await this.turns.link(handle, links);
+  }
+
+  private async moveTurn(
+    handle: TurnHandle | null,
+    to: Parameters<TurnLifecycle["transition"]>[1],
+    options: Parameters<TurnLifecycle["transition"]>[2] = {},
+  ): Promise<void> {
+    if (!handle || !this.turns) return;
+    await this.turns.transition(handle, to, options);
   }
 
   /** Awaitable entry point used by tests and controlled reprocessing. */
@@ -93,28 +137,60 @@ export class EvaWorkflow {
       total_turn_ms: 0,
       db_query_count: 0,
     };
+    // Ход открывается до очереди: ожидание в ней — часть хода, и без
+    // этой записи оно осталось бы невидимым. Запись теневая: ответ
+    // пользователю от неё не зависит, а её сбой ход не роняет.
+    const turnHandle = this.turns
+      ? await this.turns.start({
+        channel: "telegram",
+        eventId: update.updateId,
+        updateId: update.updateId,
+        telegramUserId: update.telegramId,
+        traceId: `telegram-update:${update.updateId}`,
+      })
+      : null;
+    await this.linkTurn(turnHandle, {
+      flowVersion: TURN_FLOW_VERSION,
+      promptVersion: this.letta.promptVersion,
+    });
+    await this.moveTurn(turnHandle, "queued");
     try {
       const measured = await this.db.withQueryMetrics(async () =>
-        await this.queue.run(update.telegramId, async (): Promise<InboxResult> =>
+        await this.queue.run(update.telegramId, async (): Promise<InboxResult> => {
+        if (this.turns && turnHandle) {
+          // Слот пользователя получен: сколько ход его ждал и кто теперь
+          // его ведёт. Аренда нужна восстановлению после перезапуска.
+          await this.turns.recordWait(turnHandle, elapsed(started));
+          await this.turns.transition(turnHandle, "claimed");
+          await this.turns.lease(turnHandle, LEASE_OWNER, this.config.lockTtlSeconds);
+        }
         // Ход целиком идёт в области своего пользователя: всё, что
         // выполнится внутри — контекст, инструменты, память, доставка —
         // ограничено этим человеком. Область открывается по проверенному
         // Telegram-идентификатору, внутренний `users.id` добавляется
         // после канонической выборки.
-        await this.db.withUserScope(
+        return await this.db.withUserScope(
           { telegramId: update.telegramId, label: "telegram.turn" },
           async (): Promise<InboxResult> => {
         const { user, link } = await this.ensureUserAndAgent(update);
         const language = preferredResponseLanguage(user);
         await this.db.attachTelegramUpdateToUser(update.updateId, user.id);
+        await this.linkTurn(turnHandle, {
+          userId: user.id,
+          agentId: link.agent_id,
+          conversationId: link.conversation_id,
+          purpose: "chat",
+        });
 
         if (user.is_blocked || user.state === "blocked") {
           await this.telegram.sendMessage(update.chatId, t(language, "accessBlocked"));
+          await this.stopTurn(turnHandle, "user_blocked");
           return { status: "ignored" };
         }
 
         if (update.command) {
           await this.handleCommand(update, user, language);
+          await this.stopTurn(turnHandle, "command");
           return { status: "completed" };
         }
 
@@ -123,6 +199,7 @@ export class EvaWorkflow {
             update.chatId,
             t(language, "unsupportedMessage"),
           );
+          await this.stopTurn(turnHandle, "unsupported_message");
           return { status: "ignored" };
         }
 
@@ -139,6 +216,7 @@ export class EvaWorkflow {
             update.chatId,
             t(language, "messageQuotaEnded"),
           );
+          await this.stopTurn(turnHandle, "quota_messages");
           return { status: "ignored" };
         }
         if (update.kind === "voice") {
@@ -154,6 +232,7 @@ export class EvaWorkflow {
               update.chatId,
               t(language, "voiceQuotaEnded"),
             );
+            await this.stopTurn(turnHandle, "quota_voice");
             return { status: "ignored" };
           }
         }
@@ -167,6 +246,7 @@ export class EvaWorkflow {
           // не попадает, он остался в логе.
           if (error instanceof VoiceTranscriptionError) {
             await this.telegram.sendMessage(update.chatId, t(language, "voiceFailed"));
+            await this.stopTurn(turnHandle, "voice_transcription_failed");
             return { status: "ignored" };
           }
           throw error;
@@ -226,6 +306,7 @@ export class EvaWorkflow {
         const conversationId = link.conversation_id;
         if (!conversationId) throw new Error("У агента отсутствует активный conversation");
 
+        await this.moveTurn(turnHandle, "context_building");
         const graph = await this.graphContext?.findRelevant(user.id, prompt);
         metrics.graph_query_ms = graph?.elapsedMs ?? 0;
         if (graph?.used) {
@@ -260,6 +341,12 @@ export class EvaWorkflow {
           text: prompt,
         });
 
+        await this.moveTurn(turnHandle, "context_built");
+        // Сообщение уходит в App Server, и до его ответа ход находится
+        // в обработке модели. Обе отметки ставятся здесь: промежуточной
+        // точки наблюдения один вызов SDK не даёт.
+        await this.moveTurn(turnHandle, "sent_to_letta");
+        await this.moveTurn(turnHandle, "letta_processing");
         const lettaStarted = performance.now();
         let answer;
         try {
@@ -274,6 +361,13 @@ export class EvaWorkflow {
         } finally {
           metrics.letta_turn_ms = elapsed(lettaStarted);
         }
+        await this.moveTurn(turnHandle, "result_received", {
+          // Только счётчики: ни аргументов инструментов, ни текста.
+          detail: { tool_calls: answer.toolCalls.length },
+        });
+        // Отдельного идентификатора сессии Agent SDK не отдаёт: сессия
+        // адресуется conversation, им и связываем.
+        await this.linkTurn(turnHandle, { lettaSessionId: answer.conversationId });
         await this.db.markAgentUsed(link.agent_id, user.id);
         // Ход, где модель прислала несколько сообщений, — это агентный
         // цикл с проговариванием плана. В Telegram уходит только
@@ -309,13 +403,33 @@ export class EvaWorkflow {
           }
         }
 
+        await this.linkTurn(turnHandle, {
+          outboxId: this.telegram.getDeliveryOutboxId(),
+        });
+        await this.moveTurn(turnHandle, "outbox_committed");
+        await this.moveTurn(turnHandle, "delivering");
+        await this.moveTurn(turnHandle, "delivered");
+
         await this.db.incrementUsage(update.telegramId, "messages");
+        await this.linkTurn(turnHandle, {
+          quotaMetric: "messages",
+          quotaCharged: true,
+        });
+        await this.moveTurn(turnHandle, "completed");
         return { status: "completed", usageCharged: true };
           },
-        )),
+        );
+        }),
       );
       metrics.db_query_count = measured.queryCount;
       return measured.result;
+    } catch (error) {
+      // Ход оборвался. В записи остаётся безопасный код, а не текст
+      // ошибки: сообщение провайдера может содержать что угодно.
+      await this.moveTurn(turnHandle, "failed_retryable", {
+        errorCode: error instanceof Error ? error.name : "unknown_error",
+      });
+      throw error;
     } finally {
       messageDraft.current?.stop();
       typing.stop?.();

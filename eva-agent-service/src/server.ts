@@ -18,6 +18,7 @@ import type { LettaService } from "./letta.js";
 import type { ManagedAgentInput } from "./letta.js";
 import type { LlmManager, LlmProviderInput } from "./llm.js";
 import type { Logger } from "./logger.js";
+import { MetricsCollector } from "./metrics.js";
 import type { LavaPayments } from "./payments.js";
 import type { UserProfileService } from "./profile/profile-service.js";
 import { PublicRepository, registerPublicRoutes } from "./public/routes.js";
@@ -99,7 +100,10 @@ export function buildServer(services: Services): FastifyInstance {
   // auth: everything under /v1 needs the internal key
   // ---------------------------------------------------------------
   app.addHook("onRequest", async (request) => {
-    if (!request.url.startsWith("/v1/")) return;
+    // /metrics живёт вне /v1, но закрывается тем же ключом: иначе
+    // операционная картина сервиса была бы открыта всякому, кто дотянулся
+    // до порта.
+    if (!request.url.startsWith("/v1/") && request.url !== "/metrics") return;
     if (!config.apiKey) throw unauthorized("EVA_AGENT_API_KEY не настроен на сервере");
     const presented = request.headers["x-api-key"];
     if (typeof presented !== "string" || !constantTimeEquals(presented, config.apiKey)) {
@@ -144,6 +148,29 @@ export function buildServer(services: Services): FastifyInstance {
     db,
     ...(services.miniAppSessions ? { sessions: services.miniAppSessions } : {}),
     rateLimiter,
+  });
+
+  // ---------------------------------------------------------------
+  // metrics — Prometheus, за тем же внутренним ключом, что и /v1
+  // ---------------------------------------------------------------
+  // Выдача операционная: очереди, ходы, пул, лаг event loop. Ключ нужен
+  // не потому, что там есть личные данные (их там нет), а потому что
+  // глубина очередей и состояние пула — подсказка тому, кто ищет, когда
+  // сервису тяжелее всего.
+  const metrics = new MetricsCollector({
+    db,
+    sessions: () => letta.sessionStats(),
+    locks: () => ({ held: queue.activeUsers, queued: queue.queuedUsers }),
+    poolStats: () => db.poolStats(),
+    version: VERSION,
+    turnLifecycleEnabled: config.turnLifecycleEnabled,
+  });
+  app.addHook("onClose", async () => metrics.stop());
+  app.get("/metrics", async (_request, reply: FastifyReply) => {
+    const body = await metrics.render();
+    return reply
+      .header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+      .send(body);
   });
 
   // ---------------------------------------------------------------
