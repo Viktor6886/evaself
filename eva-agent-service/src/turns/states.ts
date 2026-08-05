@@ -88,6 +88,13 @@ const RECOVERY_PATH: ReadonlyArray<readonly [TurnState, TurnState]> = [
  * контекст и получил ответ модели, когда он на самом деле оборвался.
  */
 const CLOSING_PATH: ReadonlyArray<readonly [TurnState, TurnState]> = [
+  // Результат получен, а строка outbox уже существует — это доказано
+  // самой строкой, а не предположено. Дописать её фиксацию значит
+  // назвать случившееся, а не сочинить его.
+  ["result_received", "outbox_committed"],
+  // Ход закончился на полученном результате: ответ ушёл, доставка
+  // отдельной строкой не отмечена. Ребро есть и в каноническом пути.
+  ["result_received", "completed"],
   ["outbox_committed", "delivering"],
   ["delivering", "delivered"],
   ["delivered", "completed"],

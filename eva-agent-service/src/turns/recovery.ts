@@ -264,16 +264,19 @@ export class TurnRecoveryService {
     row: StaleRow,
     evidence: TurnEvidence,
   ): { decision: RecoveryDecision; reason: string } {
-    if (evidence.cancelRequested) {
-      return { decision: "abandon", reason: "ход отменён до сбоя" };
-    }
     if (evidence.state !== null && TERMINAL_STATES.has(evidence.state)) {
       return { decision: "abandon", reason: "ход уже завершён" };
     }
     if (evidence.delivered) {
       // Ответ дошёл до человека. Повтор здесь — второй ответ на одно
-      // сообщение, и никакая экономия этого не оправдывает.
+      // сообщение, и никакая экономия этого не оправдывает. Проверяется
+      // раньше отмены: отменить можно ожидание ответа, а не
+      // случившееся, — и запись попытки должна называть ту же причину,
+      // по которой ход потом закрывается.
       return { decision: "abandon", reason: "ответ уже доставлен" };
+    }
+    if (evidence.cancelRequested) {
+      return { decision: "abandon", reason: "ход отменён до сбоя" };
     }
     if (evidence.outboxPending) {
       // Результат есть, доставка ещё идёт своим чередом: outbox доведёт
@@ -396,6 +399,7 @@ export class TurnRecoveryService {
         if (from === null) break;
         // Путь ищется по подграфу восстановления: вперёд ход двигает
         // он сам, а не тот, кто разбирает его следы.
+        if (TERMINAL_STATES.has(from)) break;  // из терминального идти некуда
         let path = closingPath(from, target);
         if (path === null) {
           // Цели не достичь, не сочинив прогресса. Тогда честнее
@@ -427,7 +431,10 @@ export class TurnRecoveryService {
         if (stopped) break;
       }
     } finally {
-      await this.lifecycle.releaseLease(handle);
+      // Брошенный ход закрывается: продолжения у него нет, и в числе
+      // активных ему не место. Терминальным состояние при этом не
+      // становится — см. `waypoints`.
+      await this.lifecycle.releaseLease(handle, { finished: decision === "abandon" });
     }
   }
 

@@ -273,7 +273,11 @@ export class TurnLifecycle {
               SET state = $3,
                   error_code = COALESCE($4, error_code),
                   updated_at = now(),
-                  finished_at = CASE WHEN $5::boolean THEN now() ELSE finished_at END,
+                  -- Переход в незавершённое состояние снимает отметку
+                  -- конца: ход, который снова пошёл, не закончен. Иначе
+                  -- брошенная и переобработанная запись осталась бы
+                  -- закрытой, продолжая выполняться.
+                  finished_at = CASE WHEN $5::boolean THEN now() ELSE NULL END,
                   duration_ms = CASE
                     WHEN $5::boolean
                       THEN GREATEST(0, (EXTRACT(EPOCH FROM (now() - started_at)) * 1000)::integer)
@@ -340,9 +344,18 @@ export class TurnLifecycle {
       // свидетельство первой попытки — ровно то, ради чего они и
       // сохраняются.
       if (column === "letta_run_ids") {
+        // Порядок сохраняется по первому появлению: идентификаторы run
+        // выстроены по ходу разговора, и пересортировать их по алфавиту
+        // значило бы потерять эту последовательность.
         return `${column} = (
-          SELECT array_agg(DISTINCT item)
-            FROM unnest(COALESCE(${column}, '{}'::text[]) || $${values.length}::text[]) AS item
+          SELECT array_agg(item ORDER BY position)
+            FROM (
+              SELECT item, min(ordinality) AS position
+                FROM unnest(COALESCE(${column}, '{}'::text[]) || $${values.length}::text[])
+                     WITH ORDINALITY AS source(item, ordinality)
+               WHERE item IS NOT NULL
+               GROUP BY item
+            ) AS unique_items
         )`;
       }
       return `${column} = COALESCE($${values.length}, ${column})`;
@@ -389,8 +402,14 @@ export class TurnLifecycle {
    * нему решение. Переход состояния аренду не трогает намеренно: ход,
    * который сменил состояние и продолжает выполняться, своего
    * исполнителя не терял.
+   *
+   * `finished` закрывает ход, не делая его состояние терминальным.
+   * Так помечается брошенный: продолжения у него нет, поэтому в числе
+   * активных ему не место и в выборку он больше не попадает — но и
+   * терминальным его состояние сделать нельзя, иначе законная
+   * переобработка того же события упёрлась бы в граф.
    */
-  async releaseLease(handle: TurnHandle): Promise<void> {
+  async releaseLease(handle: TurnHandle, options: { finished?: boolean } = {}): Promise<void> {
     if (!this.enabled || !handle.recorded || !handle.owner) return;
     const owner = handle.owner;
     try {
@@ -400,9 +419,10 @@ export class TurnLifecycle {
           UPDATE turn_runs
             SET lease_owner = NULL,
                 lease_expires_at = NULL,
+                finished_at = CASE WHEN $3::boolean THEN now() ELSE finished_at END,
                 updated_at = now()
           WHERE run_id = $1 AND ${owner.column} = $2`,
-        [handle.runId, owner.value],
+        [handle.runId, owner.value, options.finished === true],
       ));
     } catch (error) {
       this.warn("Не удалось снять аренду хода", error, { runId: handle.runId });

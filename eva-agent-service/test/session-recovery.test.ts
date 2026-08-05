@@ -498,7 +498,7 @@ function lifecycleFor(db: unknown): TurnLifecycle {
   return new TurnLifecycle(db as never, logger as never, true);
 }
 
-function recoveryHarness(probe: RecoveryProbe) {
+function probeDb(probe: RecoveryProbe) {
   const query = async (sql: string, values: unknown[] = []): Promise<{ rows: unknown[] }> => {
     const text = sql.replace(/--[^\n]*/g, " ").replace(/\s+/g, " ").trim();
     if (text.includes("SELECT state, attempt FROM turn_runs")) {
@@ -542,11 +542,21 @@ function recoveryHarness(probe: RecoveryProbe) {
       // Снятие аренды — тоже UPDATE, но состояния не меняет: без этого
       // различия поддельная база записала бы состоянием `undefined`.
       if (text.includes("lease_owner = NULL")) {
-        if (row) row.lease_owner = null;
+        if (row) {
+          row.lease_owner = null;
+          // Закрытие брошенного хода: состояние не терминальное, но
+          // продолжения нет, и в числе активных ему не место.
+          if (values[2] === true) row.finished = true;
+        }
         probe.released?.add(String(values[0]));
         return { rows: [] };
       }
-      if (row) row.state = values[2];
+      if (row) {
+        row.state = values[2];
+        // Настоящий запрос снимает отметку конца при переходе в
+        // незавершённое состояние и ставит её при терминальном.
+        row.finished = values[4] === true;
+      }
       return { rows: [] };
     }
     if (text.startsWith("INSERT INTO turn_recovery_attempts")) {
@@ -562,11 +572,15 @@ function recoveryHarness(probe: RecoveryProbe) {
     }
     throw new Error(`поддельная база не знает запроса: ${text.slice(0, 50)}`);
   };
-  const db = withTenantScopes({
+  return withTenantScopes({
     query,
     transaction: async <T>(work: (client: { query: typeof query }) => Promise<T>) =>
       await work({ query }),
   }) as never;
+}
+
+function recoveryHarness(probe: RecoveryProbe) {
+  const db = probeDb(probe);
   return new TurnRecoveryService(
     db,
     logger as never,
@@ -828,6 +842,9 @@ test("восстановление не сочиняет ходу прогрес
   // completed` законен по рёбрам и целиком выдуман: он утверждает, что
   // ход собрал контекст и получил ответ модели, тогда как он оборвался.
   // Восстановлению разрешено только закрывать ход, а не двигать вперёд.
+  // Состояния, которые утверждают выполненную работу модели. Их
+  // восстановление приписать не может ничем: следов такой работы у
+  // него нет.
   const forbidden = new Set([
     "claimed",
     "context_building",
@@ -837,8 +854,11 @@ test("восстановление не сочиняет ходу прогрес
     "tools_pending",
     "approval_pending",
     "result_received",
-    "outbox_committed",
   ]);
+  // `outbox_committed` стоит особняком: строка outbox либо есть, либо
+  // нет, и когда она есть — это доказательство, а не догадка. Поэтому
+  // запрещено оно только при отсутствии следа outbox.
+  const provable = (outbox: string | null) => (outbox === null ? ["outbox_committed"] : []);
   const offences: string[] = [];
   for (const state of TURN_STATES) {
     if (TERMINAL_STATES.has(state)) continue;
@@ -865,7 +885,8 @@ test("восстановление не сочиняет ходу прогрес
           released: new Set(),
         };
         await recoveryHarness(probe).sweep();
-        const invented = probe.transitions.map((item) => item.to).filter((to) => forbidden.has(to));
+        const banned = new Set([...forbidden, ...provable(outbox)]);
+        const invented = probe.transitions.map((item) => item.to).filter((to) => banned.has(to));
         if (invented.length > 0) {
           offences.push(`${state}/outbox=${outbox ?? "нет"}: ${invented.join(" -> ")}`);
         }
@@ -882,6 +903,87 @@ test("восстановление не сочиняет ходу прогрес
     }
   }
   assert.deepEqual(offences, [], `восстановление приписало ходу прогресс: ${offences.join("; ")}`);
+});
+
+test("доставленный ход закрывается завершением, а не отказом", async () => {
+  // Окно между отправкой сообщения и отметкой `outbox_committed`:
+  // ссылка на outbox уже записана, состояние ещё `result_received`.
+  // Ответ человек получил — и запись хода обязана говорить именно это.
+  const runId = "run-delivered";
+  const probe: RecoveryProbe = {
+    runs: new Map([[runId, {
+      run_id: runId,
+      user_id: "42",
+      telegram_user_id: "777",
+      state: "result_received",
+      attempt: 1,
+      outbox_id: "outbox-d",
+      conversation_id: "conv-1",
+      lease_owner: "умерший",
+      cancel_requested_at: null,
+    }]]),
+    outbox: new Map([["outbox-d", "sent"]]),
+    effects: new Map(),
+    attempts: [],
+    transitions: [],
+    rejected: [],
+    released: new Set(),
+  };
+  const [outcome] = await recoveryHarness(probe).sweep();
+  assert.equal(outcome!.decision, "abandon");
+  assert.equal(probe.attempts[0]!.outcome, "ответ уже доставлен");
+  assert.equal(
+    probe.runs.get(runId)!.state,
+    "completed",
+    "доставленный ход помечен не завершением",
+  );
+  assert.deepEqual(probe.rejected, []);
+});
+
+test("брошенный ход закрывается, не становясь терминальным", async () => {
+  // Два требования разом. Продолжения у брошенного хода нет — значит
+  // он не активный и в выборку возвращаться не должен. Но состояние
+  // терминальным быть не может: тот же update переобработает ingress,
+  // и из терминального состояния граф его бы не выпустил.
+  const runId = "run-abandoned";
+  const probe: RecoveryProbe = {
+    runs: new Map([[runId, {
+      run_id: runId,
+      user_id: "42",
+      telegram_user_id: "777",
+      state: "result_received",
+      attempt: 1,
+      outbox_id: null,
+      conversation_id: "conv-1",
+      lease_owner: "умерший",
+      cancel_requested_at: null,
+    }]]),
+    outbox: new Map(),
+    effects: new Map(),
+    attempts: [],
+    transitions: [],
+    rejected: [],
+    released: new Set(),
+  };
+  const [outcome] = await recoveryHarness(probe).sweep();
+  assert.equal(outcome!.decision, "abandon");
+  const row = probe.runs.get(runId)!;
+  assert.equal(row.state, "failed_retryable", "брошенный ход стал терминальным");
+  assert.equal(row.finished, true, "брошенный ход остался в числе активных");
+  assert.ok(!TERMINAL_STATES.has(String(row.state)), "состояние терминально — переобработка упрётся в граф");
+
+  // Переобработка того же события: ход снова идёт, значит он не закончен.
+  const lifecycle = lifecycleFor(probeDb(probe));
+  const handle = {
+    runId,
+    idempotencyKey: "",
+    duplicate: true,
+    state: "failed_retryable" as const,
+    recorded: true,
+    owner: { column: "telegram_user_id" as const, value: 777 },
+  };
+  assert.equal(await lifecycle.transition(handle, "queued"), true, "переобработка отклонена графом");
+  assert.equal(probe.runs.get(runId)!.finished, false, "возобновлённый ход остался закрытым");
 });
 
 test("ход без внутреннего user_id разбирается по telegram_user_id", async () => {
