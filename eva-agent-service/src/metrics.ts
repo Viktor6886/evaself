@@ -15,6 +15,7 @@
 import { monitorEventLoopDelay, type IntervalHistogram } from "node:perf_hooks";
 
 import type { Database } from "./db.js";
+import type { TurnClass } from "./turns/semaphores.js";
 import { TURN_STATES } from "./turns/states.js";
 
 export interface MetricsPoolStats {
@@ -30,6 +31,8 @@ export interface MetricsSources {
   /** Блокировки пользователей: удерживаемые и ожидающие в FIFO. */
   locks: () => { held: number; queued: number };
   poolStats: () => MetricsPoolStats;
+  /** Занятость глобальных слотов хода по классам. */
+  slots?: () => Promise<Record<TurnClass, { used: number; limit: number }>>;
   version: string;
   turnLifecycleEnabled: boolean;
 }
@@ -100,6 +103,7 @@ export class MetricsCollector {
     const sessions = this.sources.sessions();
     const locks = this.sources.locks();
     const pool = this.sources.poolStats();
+    const slots = await this.slotUsage();
 
     const samples: Sample[] = [
       {
@@ -209,6 +213,24 @@ export class MetricsCollector {
         ],
       },
       {
+        name: "eva_turn_slots_used",
+        help: "Занятые глобальные слоты хода по классам.",
+        type: "gauge",
+        values: Object.entries(slots).map(([turnClass, item]) => ({
+          labels: { class: turnClass },
+          value: item.used,
+        })),
+      },
+      {
+        name: "eva_turn_slots_limit",
+        help: "Предел слотов по классам. Резерв входит в интерактивный.",
+        type: "gauge",
+        values: Object.entries(slots).map(([turnClass, item]) => ({
+          labels: { class: turnClass },
+          value: item.limit,
+        })),
+      },
+      {
         name: "eva_event_loop_lag_seconds",
         help: "Задержка event loop с момента запуска процесса.",
         type: "gauge",
@@ -221,6 +243,25 @@ export class MetricsCollector {
     ];
 
     return render(samples);
+  }
+
+  /**
+   * Занятость слотов. Без семафоров (последовательный воркер) классы
+   * всё равно перечисляются нулями: пропавшая метрика читается как
+   * поломка сбора, а не как выключенная возможность.
+   */
+  private async slotUsage(): Promise<Record<string, { used: number; limit: number }>> {
+    const empty = {
+      interactive: { used: 0, limit: 0 },
+      background: { used: 0, limit: 0 },
+      research: { used: 0, limit: 0 },
+    };
+    if (!this.sources.slots) return empty;
+    try {
+      return await this.sources.slots();
+    } catch {
+      return empty;
+    }
   }
 
   /**

@@ -1,0 +1,625 @@
+/**
+ * Параллельный диспетчер durable inbox и объединение быстрых сообщений.
+ *
+ * Поддельный inbox здесь повторяет правила настоящего claim, а не
+ * подменяет их удобным поведением: одна запись на человека, строгий
+ * порядок внутри человека, аренда с истечением, возврат записи без
+ * траты попытки. Сам SQL проверяется отдельно, на настоящем PostgreSQL,
+ * шагом «Claim параллельного диспетчера» в CI.
+ */
+
+import assert from "node:assert/strict";
+import { test } from "node:test";
+
+import { ParallelInboxDispatcher } from "../dist/delivery/dispatcher.js";
+import { TelegramInboxWorker, type InboxRecord, type InboxResult } from "../dist/delivery/inbox.js";
+import { TurnAggregator, aggregatable, mediaReady } from "../dist/turns/aggregator.js";
+import type { TelegramUpdate } from "../dist/telegram.js";
+
+const logger = {
+  debug() {},
+  info() {},
+  warn() {},
+  error() {},
+};
+
+interface Row {
+  updateId: number;
+  telegramUserId: number;
+  chatId: number;
+  payload: TelegramUpdate;
+  receivedAt: number;
+  status: "queued" | "processing" | "retry" | "completed" | "ignored" | "dead";
+  attempts: number;
+  availableAt: number;
+  lockedAt: number | null;
+  lockedBy: string | null;
+  usageCharged: boolean;
+}
+
+const ACTIVE = new Set(["queued", "processing", "retry"]);
+
+/** Поддельный durable inbox с теми же правилами выборки, что и SQL. */
+class FakeInbox {
+  readonly rows = new Map<number, Row>();
+  /** Сколько раз запись отдавалась воркеру. Дубль хода виден отсюда. */
+  readonly handedOut = new Map<number, number>();
+  now = () => Date.now();
+
+  enqueueUpdate(update: TelegramUpdate, receivedAt = this.rows.size): void {
+    const message = update.message!;
+    this.rows.set(update.update_id, {
+      updateId: update.update_id,
+      telegramUserId: message.from!.id,
+      chatId: message.chat.id,
+      payload: update,
+      receivedAt,
+      status: "queued",
+      attempts: 0,
+      availableAt: 0,
+      lockedAt: null,
+      lockedBy: null,
+      usageCharged: false,
+    });
+  }
+
+  async enqueue() {
+    return { accepted: true, duplicate: false };
+  }
+
+  private ready(row: Row, leaseSeconds: number, maxAttempts: number): boolean {
+    if (row.attempts >= maxAttempts) return false;
+    if (row.status === "queued" || row.status === "retry") return row.availableAt <= this.now();
+    if (row.status === "processing") {
+      return row.lockedAt !== null && row.lockedAt < this.now() - leaseSeconds * 1_000;
+    }
+    return false;
+  }
+
+  private order(row: Row): [number, number] {
+    return [row.receivedAt, row.updateId];
+  }
+
+  private before(left: Row, right: Row): boolean {
+    const [la, lb] = this.order(left);
+    const [ra, rb] = this.order(right);
+    return la < ra || (la === ra && lb < rb);
+  }
+
+  async claimBatch(input: {
+    workerId: string;
+    leaseSeconds: number;
+    maxAttempts: number;
+    limit: number;
+    excludeTelegramUsers?: number[];
+  }): Promise<InboxRecord[]> {
+    const excluded = new Set(input.excludeTelegramUsers ?? []);
+    const candidates = [...this.rows.values()]
+      .filter((row) => this.ready(row, input.leaseSeconds, input.maxAttempts))
+      .filter((row) => !excluded.has(row.telegramUserId))
+      // Более раннее незавершённое сообщение того же человека блокирует.
+      .filter((row) => ![...this.rows.values()].some(
+        (other) => ACTIVE.has(other.status)
+          && other.telegramUserId === row.telegramUserId
+          && this.before(other, row),
+      ))
+      .sort((left, right) => (this.before(left, right) ? -1 : 1))
+      .slice(0, input.limit);
+    return candidates.map((row) => this.lock(row, input.workerId));
+  }
+
+  async claimFollowUps(input: {
+    workerId: string;
+    telegramUserId: number;
+    afterUpdateId: number;
+    maxAttempts: number;
+    limit: number;
+  }): Promise<InboxRecord[]> {
+    const candidates = [...this.rows.values()]
+      .filter((row) => row.telegramUserId === input.telegramUserId)
+      .filter((row) => row.updateId > input.afterUpdateId)
+      .filter((row) => (row.status === "queued" || row.status === "retry")
+        && row.availableAt <= this.now()
+        && row.attempts < input.maxAttempts)
+      .sort((left, right) => (this.before(left, right) ? -1 : 1))
+      .slice(0, input.limit);
+    return candidates.map((row) => this.lock(row, input.workerId));
+  }
+
+  private lock(row: Row, workerId: string): InboxRecord {
+    row.status = "processing";
+    row.attempts += 1;
+    row.lockedAt = this.now();
+    row.lockedBy = workerId;
+    this.handedOut.set(row.updateId, (this.handedOut.get(row.updateId) ?? 0) + 1);
+    return {
+      updateId: row.updateId,
+      payload: row.payload,
+      attempts: row.attempts,
+      chatId: row.chatId,
+      telegramUserId: row.telegramUserId,
+    };
+  }
+
+  async claim(workerId: string, leaseSeconds: number, maxAttempts: number) {
+    const [record] = await this.claimBatch({ workerId, leaseSeconds, maxAttempts, limit: 1 });
+    return record ?? null;
+  }
+
+  async release(updateId: number, delaySeconds: number): Promise<void> {
+    const row = this.rows.get(updateId);
+    if (!row || row.status !== "processing") return;
+    row.status = "queued";
+    row.attempts = Math.max(0, row.attempts - 1);
+    row.availableAt = this.now() + delaySeconds * 1_000;
+    row.lockedAt = null;
+    row.lockedBy = null;
+  }
+
+  async complete(updateId: number, result: InboxResult): Promise<void> {
+    const row = this.rows.get(updateId);
+    if (!row) return;
+    row.status = result.status;
+    row.usageCharged = row.usageCharged || Boolean(result.usageCharged);
+    row.lockedAt = null;
+    row.lockedBy = null;
+  }
+
+  async fail(updateId: number, _error: unknown, attempts: number, maxAttempts: number) {
+    const row = this.rows.get(updateId);
+    const dead = attempts >= maxAttempts;
+    if (row) {
+      row.status = dead ? "dead" : "retry";
+      row.availableAt = this.now();
+      row.lockedAt = null;
+      row.lockedBy = null;
+    }
+    return { dead };
+  }
+
+  statuses(): Record<string, number> {
+    const counts: Record<string, number> = {};
+    for (const row of this.rows.values()) counts[row.status] = (counts[row.status] ?? 0) + 1;
+    return counts;
+  }
+}
+
+function textUpdate(updateId: number, telegramId: number, text: string): TelegramUpdate {
+  return {
+    update_id: updateId,
+    message: {
+      message_id: updateId,
+      chat: { id: telegramId },
+      from: { id: telegramId, first_name: "Тест" },
+      text,
+    },
+  } as TelegramUpdate;
+}
+
+function voiceUpdate(updateId: number, telegramId: number, fileId: string | null): TelegramUpdate {
+  return {
+    update_id: updateId,
+    message: {
+      message_id: updateId,
+      chat: { id: telegramId },
+      from: { id: telegramId, first_name: "Тест" },
+      voice: fileId ? { file_id: fileId, file_unique_id: fileId } : {},
+    },
+  } as TelegramUpdate;
+}
+
+const OPTIONS = {
+  pollMs: 10_000,
+  leaseSeconds: 30,
+  maxAttempts: 3,
+  concurrency: 8,
+  batchSize: 16,
+};
+
+/** Прогнать диспетчер до опустошения очереди. */
+async function drain(dispatcher: ParallelInboxDispatcher, inbox: FakeInbox): Promise<void> {
+  for (let round = 0; round < 400; round += 1) {
+    await dispatcher.tick();
+    await dispatcher.drain();
+    const pending = [...inbox.rows.values()].some((row) => ACTIVE.has(row.status));
+    if (!pending) return;
+  }
+  throw new Error("очередь не опустела за отведённое число проходов");
+}
+
+// ---------------------------------------------------------------------
+// 1. Приём и отсутствие потерь
+// ---------------------------------------------------------------------
+
+test("500 сообщений принимаются и обрабатываются без потерь", async () => {
+  const inbox = new FakeInbox();
+  for (let index = 0; index < 500; index += 1) {
+    inbox.enqueueUpdate(textUpdate(1_000 + index, 100 + (index % 50), `сообщение ${index}`), index);
+  }
+  const dispatcher = new ParallelInboxDispatcher(
+    inbox as never,
+    async () => ({ status: "completed", usageCharged: true }),
+    logger,
+    { ...OPTIONS, concurrency: 16 },
+  );
+
+  const started = Date.now();
+  await drain(dispatcher, inbox);
+  const elapsed = Date.now() - started;
+
+  assert.deepEqual(inbox.statuses(), { completed: 500 });
+  assert.ok(elapsed < 10_000, `обработка заняла ${elapsed} мс`);
+  // Ни одна запись не выдавалась дважды: дубль хода — это дубль ответа.
+  for (const [updateId, times] of inbox.handedOut) {
+    assert.equal(times, 1, `запись ${updateId} выдана ${times} раза`);
+  }
+});
+
+// ---------------------------------------------------------------------
+// 2. Параллельность и порядок
+// ---------------------------------------------------------------------
+
+test("разные пользователи выполняются одновременно, а не по очереди", async () => {
+  const inbox = new FakeInbox();
+  for (let index = 0; index < 8; index += 1) {
+    inbox.enqueueUpdate(textUpdate(200 + index, 300 + index, "привет"), index);
+  }
+  let peak = 0;
+  let active = 0;
+  let release: (() => void) | null = null;
+  const barrier = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+
+  const dispatcher = new ParallelInboxDispatcher(
+    inbox as never,
+    async () => {
+      active += 1;
+      peak = Math.max(peak, active);
+      if (active === 8) release!();
+      await barrier;
+      active -= 1;
+      return { status: "completed" };
+    },
+    logger,
+    OPTIONS,
+  );
+
+  await dispatcher.tick();
+  await dispatcher.drain();
+  assert.equal(peak, 8, `одновременно выполнялось ${peak} ходов вместо восьми`);
+});
+
+test("у одного человека нет двух ходов одновременно, и порядок сообщений строгий", async () => {
+  const inbox = new FakeInbox();
+  // Три сообщения одного человека и одно чужое.
+  inbox.enqueueUpdate(textUpdate(11, 500, "первое"), 0);
+  inbox.enqueueUpdate(textUpdate(12, 500, "второе"), 1);
+  inbox.enqueueUpdate(textUpdate(13, 500, "третье"), 2);
+  inbox.enqueueUpdate(textUpdate(14, 501, "чужое"), 3);
+
+  const order: number[] = [];
+  let concurrentForUser = 0;
+  let peakForUser = 0;
+
+  const dispatcher = new ParallelInboxDispatcher(
+    inbox as never,
+    async (records) => {
+      const record = records[0]!;
+      if (record.telegramUserId === 500) {
+        concurrentForUser += 1;
+        peakForUser = Math.max(peakForUser, concurrentForUser);
+        order.push(record.updateId);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      if (record.telegramUserId === 500) concurrentForUser -= 1;
+      return { status: "completed" };
+    },
+    logger,
+    OPTIONS,
+  );
+
+  await drain(dispatcher, inbox);
+
+  assert.equal(peakForUser, 1, "у одного человека выполнялось два хода сразу");
+  assert.deepEqual(order, [11, 12, 13], "порядок сообщений внутри человека нарушен");
+  assert.deepEqual(inbox.statuses(), { completed: 4 });
+});
+
+test("сообщения разных людей не смешиваются в одном ходе", async () => {
+  const inbox = new FakeInbox();
+  inbox.enqueueUpdate(textUpdate(21, 600, "моё"), 0);
+  inbox.enqueueUpdate(textUpdate(22, 601, "чужое"), 1);
+
+  const groups: number[][] = [];
+  const dispatcher = new ParallelInboxDispatcher(
+    inbox as never,
+    async (records) => {
+      groups.push(records.map((record) => record.telegramUserId!));
+      return { status: "completed" };
+    },
+    logger,
+    OPTIONS,
+    undefined,
+    new TurnAggregator(inbox as never, logger, { debounceMs: 1, maxWindowMs: 5 }, async () => {}),
+  );
+
+  await drain(dispatcher, inbox);
+  for (const group of groups) {
+    assert.equal(new Set(group).size, 1, `в одном ходе оказались разные люди: ${group}`);
+  }
+});
+
+// ---------------------------------------------------------------------
+// 3. Перезапуск и аренда
+// ---------------------------------------------------------------------
+
+test("перезапуск воркера не теряет запись: истёкшая аренда возвращает её в работу", async () => {
+  const inbox = new FakeInbox();
+  inbox.enqueueUpdate(textUpdate(31, 700, "сообщение"), 0);
+
+  // Прежний процесс взял запись и упал, не завершив её.
+  const row = inbox.rows.get(31)!;
+  row.status = "processing";
+  row.attempts = 1;
+  row.lockedAt = Date.now() - 60_000;
+  row.lockedBy = "умерший-процесс";
+
+  const seen: number[] = [];
+  const dispatcher = new ParallelInboxDispatcher(
+    inbox as never,
+    async (records) => {
+      seen.push(records[0]!.updateId);
+      return { status: "completed", usageCharged: true };
+    },
+    logger,
+    OPTIONS,
+  );
+
+  await drain(dispatcher, inbox);
+  assert.deepEqual(seen, [31], "запись после перезапуска не подобрана");
+  assert.equal(inbox.rows.get(31)!.status, "completed");
+});
+
+test("живая аренда чужого воркера не отдаёт запись второму: дубля хода нет", async () => {
+  const inbox = new FakeInbox();
+  inbox.enqueueUpdate(voiceUpdate(41, 800, "voice-1"), 0);
+  const row = inbox.rows.get(41)!;
+  row.status = "processing";
+  row.attempts = 1;
+  // Расшифровка идёт долго, но аренда ещё наша.
+  row.lockedAt = Date.now() - 5_000;
+  row.lockedBy = "воркер-1";
+
+  const batch = await inbox.claimBatch({
+    workerId: "воркер-2",
+    leaseSeconds: 30,
+    maxAttempts: 3,
+    limit: 10,
+  });
+  assert.deepEqual(batch, [], "запись отдана второму воркеру при живой аренде");
+  assert.equal(inbox.handedOut.get(41) ?? 0, 0);
+});
+
+// ---------------------------------------------------------------------
+// 4. Ёмкость
+// ---------------------------------------------------------------------
+
+test("при нехватке слота запись остаётся durable и не тратит попытку", async () => {
+  const inbox = new FakeInbox();
+  inbox.enqueueUpdate(textUpdate(51, 900, "сообщение"), 0);
+  let processed = 0;
+
+  const noSlots = { acquire: async () => null };
+  const dispatcher = new ParallelInboxDispatcher(
+    inbox as never,
+    async () => {
+      processed += 1;
+      return { status: "completed" };
+    },
+    logger,
+    { ...OPTIONS, releaseDelaySeconds: 0 },
+    noSlots as never,
+  );
+
+  await dispatcher.tick();
+  await dispatcher.drain();
+
+  assert.equal(processed, 0, "ход выполнился без слота");
+  const row = inbox.rows.get(51)!;
+  assert.equal(row.status, "queued", "запись не осталась durable");
+  assert.equal(row.attempts, 0, "нехватка ёмкости съела попытку");
+});
+
+// ---------------------------------------------------------------------
+// 5. Объединение быстрых сообщений
+// ---------------------------------------------------------------------
+
+test("два быстрых сообщения дают один ход и одно списание квоты", async () => {
+  const inbox = new FakeInbox();
+  inbox.enqueueUpdate(textUpdate(61, 1_000, "я хотел сказать"), 0);
+  inbox.enqueueUpdate(textUpdate(62, 1_000, "что мне тяжело"), 1);
+
+  const turns: string[][] = [];
+  const aggregator = new TurnAggregator(
+    inbox as never,
+    logger,
+    { debounceMs: 5, maxWindowMs: 20 },
+    async () => {},
+  );
+  const dispatcher = new ParallelInboxDispatcher(
+    inbox as never,
+    async (records) => {
+      turns.push(records.map((record) => record.payload.message!.text!));
+      return { status: "completed", usageCharged: true };
+    },
+    logger,
+    OPTIONS,
+    undefined,
+    aggregator,
+  );
+
+  await drain(dispatcher, inbox);
+
+  assert.equal(turns.length, 1, `ходов оказалось ${turns.length}, а не один`);
+  assert.deepEqual(turns[0], ["я хотел сказать", "что мне тяжело"]);
+  // Квота снимается ровно один раз: ход один.
+  const charged = [...inbox.rows.values()].filter((row) => row.usageCharged);
+  assert.equal(charged.length, 1, "объединённый ход списал квоту дважды");
+  assert.deepEqual(inbox.statuses(), { completed: 2 });
+});
+
+test("команда не поглощается обычным текстом, а становится своим ходом", async () => {
+  const inbox = new FakeInbox();
+  inbox.enqueueUpdate(textUpdate(71, 1_100, "привет"), 0);
+  inbox.enqueueUpdate(textUpdate(72, 1_100, "/help"), 1);
+
+  const turns: string[][] = [];
+  const dispatcher = new ParallelInboxDispatcher(
+    inbox as never,
+    async (records) => {
+      turns.push(records.map((record) => record.payload.message!.text!));
+      return { status: "completed", usageCharged: true };
+    },
+    logger,
+    OPTIONS,
+    undefined,
+    new TurnAggregator(inbox as never, logger, { debounceMs: 5, maxWindowMs: 20 }, async () => {}),
+  );
+
+  await drain(dispatcher, inbox);
+
+  assert.deepEqual(turns, [["привет"], ["/help"]], "команда попала в чужой ход");
+});
+
+test("голос без готового медиа не объединяется и не создаёт дубль хода", async () => {
+  const inbox = new FakeInbox();
+  inbox.enqueueUpdate(textUpdate(81, 1_200, "смотри"), 0);
+  // Расшифровки ещё нет и файла тоже: объединять нечего.
+  inbox.enqueueUpdate(voiceUpdate(82, 1_200, null), 1);
+
+  const turns: number[][] = [];
+  const dispatcher = new ParallelInboxDispatcher(
+    inbox as never,
+    async (records) => {
+      turns.push(records.map((record) => record.updateId));
+      return { status: "completed", usageCharged: true };
+    },
+    logger,
+    OPTIONS,
+    undefined,
+    new TurnAggregator(inbox as never, logger, { debounceMs: 5, maxWindowMs: 20 }, async () => {}),
+  );
+
+  await drain(dispatcher, inbox);
+
+  assert.deepEqual(turns, [[81], [82]], "неготовое медиа было объединено");
+  // Каждое сообщение попало ровно в один ход. Голосовое окно успело
+  // подобрать запись и вернуть её как границу — но возврат не считается
+  // обработкой и не тратит попытку, иначе задержанная расшифровка
+  // съедала бы попытки и умирала на третьей.
+  const inTurns = turns.flat();
+  assert.deepEqual([...inTurns].sort(), [81, 82]);
+  assert.equal(inbox.rows.get(82)!.attempts, 1, "возврат по границе потратил попытку");
+});
+
+test("кризисное сообщение объединению не подлежит", () => {
+  assert.equal(aggregatable(textUpdate(91, 1_300, "обычная мысль")), true);
+  assert.equal(aggregatable(textUpdate(92, 1_300, "/start")), false);
+  assert.equal(aggregatable(textUpdate(93, 1_300, "я не хочу больше жить")), false);
+  assert.equal(mediaReady(voiceUpdate(94, 1_300, null)), false);
+  assert.equal(mediaReady(voiceUpdate(95, 1_300, "file-1")), true);
+});
+
+// ---------------------------------------------------------------------
+// 6. Откат по флагу
+// ---------------------------------------------------------------------
+
+test("выключение флага возвращает последовательный воркер и те же данные", async () => {
+  const scenario = () => {
+    const inbox = new FakeInbox();
+    for (let index = 0; index < 12; index += 1) {
+      inbox.enqueueUpdate(textUpdate(3_000 + index, 1_400 + (index % 4), `текст ${index}`), index);
+    }
+    return inbox;
+  };
+
+  const parallelInbox = scenario();
+  const parallelOrder: number[] = [];
+  await drain(
+    new ParallelInboxDispatcher(
+      parallelInbox as never,
+      async (records) => {
+        parallelOrder.push(records[0]!.updateId);
+        return { status: "completed", usageCharged: true };
+      },
+      logger,
+      OPTIONS,
+    ),
+    parallelInbox,
+  );
+
+  const sequentialInbox = scenario();
+  const sequentialOrder: number[] = [];
+  const worker = new TelegramInboxWorker(
+    sequentialInbox as never,
+    async (update) => {
+      sequentialOrder.push(update.update_id);
+      return { status: "completed", usageCharged: true };
+    },
+    logger,
+    { pollMs: 10_000, leaseSeconds: 30, maxAttempts: 3 },
+  );
+  for (let round = 0; round < 20; round += 1) {
+    await worker.tick();
+    if (![...sequentialInbox.rows.values()].some((row) => ACTIVE.has(row.status))) break;
+  }
+
+  // Данные после обоих путей совпадают строка в строку.
+  const shape = (inbox: FakeInbox) =>
+    [...inbox.rows.values()]
+      .map((row) => `${row.updateId}:${row.status}:${row.attempts}:${row.usageCharged}`)
+      .sort();
+  assert.deepEqual(shape(parallelInbox), shape(sequentialInbox));
+  assert.deepEqual([...parallelOrder].sort(), [...sequentialOrder].sort());
+});
+
+// ---------------------------------------------------------------------
+// 7. Бюджет ожидания
+// ---------------------------------------------------------------------
+
+test("p95 ожидания начала обработки не превышает секунды на 100 ходах", async () => {
+  const inbox = new FakeInbox();
+  const enqueuedAt = new Map<number, number>();
+  const started = new Map<number, number>();
+  for (let index = 0; index < 100; index += 1) {
+    inbox.enqueueUpdate(textUpdate(4_000 + index, 2_000 + index, `сообщение ${index}`), index);
+    enqueuedAt.set(4_000 + index, Date.now());
+  }
+
+  const dispatcher = new ParallelInboxDispatcher(
+    inbox as never,
+    async (records) => {
+      started.set(records[0]!.updateId, Date.now());
+      // Mock-LLM: ход не бесплатный, но и не бесконечный.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return { status: "completed", usageCharged: true };
+    },
+    logger,
+    { ...OPTIONS, concurrency: 32, batchSize: 32 },
+  );
+
+  await drain(dispatcher, inbox);
+
+  const waits = [...started].map(([updateId, at]) => at - enqueuedAt.get(updateId)!).sort(
+    (left, right) => left - right,
+  );
+  assert.equal(waits.length, 100, "не все ходы начались");
+  const percentile = (value: number) => waits[Math.min(waits.length - 1, Math.floor(waits.length * value))]!;
+  const p95 = percentile(0.95);
+  assert.ok(p95 <= 1_000, `p95 ожидания ${p95} мс превышает секунду`);
+  // Печатается намеренно: отчёт шага требует измеренные значения.
+  console.log(
+    `ожидание начала обработки: p50=${percentile(0.5)} мс, p95=${p95} мс, p99=${percentile(0.99)} мс`,
+  );
+});

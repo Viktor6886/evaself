@@ -477,6 +477,13 @@ jobs:
           COUNT="$(psql -tA -c 'SELECT count(*) FROM quotas')"
           [ "$COUNT" = "9" ] || { echo "::error::quotas has $COUNT rows, expected 9"; exit 1; }
 
+      # Поддельный inbox в тестах TypeScript повторяет правила выборки, но
+      # не проверяет сам SQL: ни FOR UPDATE OF t SKIP LOCKED, ни сравнение
+      # пар (received_at, update_id), ни IS NOT DISTINCT FROM. Здесь
+      # проверяется именно запрос, на настоящем PostgreSQL.
+      - name: Claim параллельного диспетчера соблюдает порядок и исключения
+        run: psql -v ON_ERROR_STOP=1 -q -f scripts/ci/test-inbox-claim.sql
+
       # Откат выполняется ровно тогда, когда что-то уже пошло не так, и
       # проверять его в этот момент поздно. Здесь он прогоняется на
       # заведомо целой базе: назад по всем down, затем снова вперёд.

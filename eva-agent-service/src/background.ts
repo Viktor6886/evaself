@@ -6,7 +6,7 @@ import type { Database } from "./db.js";
 import type { LettaService } from "./letta.js";
 import type { Logger } from "./logger.js";
 import type { RuntimeContextBuilder } from "./runtime/runtime-context.js";
-import type { UserQueue } from "./queue.js";
+import type { UserTurnLock } from "./turns/user-turn-lock.js";
 import type { TelegramClient } from "./telegram.js";
 import { TaskEventService } from "./tasks/task-event-service.js";
 
@@ -54,7 +54,7 @@ export class BackgroundRuntime {
     private readonly config: Config,
     private readonly db: Database,
     private readonly letta: LettaService,
-    private readonly queue: UserQueue,
+    private readonly queue: UserTurnLock,
     private readonly telegram: TelegramClient,
     private readonly runtimeContext: RuntimeContextBuilder,
     private readonly purposes: ConversationPurposeService,

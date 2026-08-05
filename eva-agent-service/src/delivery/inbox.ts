@@ -19,6 +19,19 @@ export interface InboxRecord {
   telegramUserId: number | null;
 }
 
+export interface ClaimBatchInput {
+  workerId: string;
+  leaseSeconds: number;
+  maxAttempts: number;
+  limit: number;
+  /**
+   * Пользователи, чей ход уже выполняется в этом процессе. Их записи в
+   * батч не попадают: распределённая блокировка всё равно не пустила бы
+   * второй ход, а занятая запись простояла бы в `processing` впустую.
+   */
+  excludeTelegramUsers?: number[];
+}
+
 export interface TelegramInbox {
   enqueue(update: TelegramUpdate): Promise<{ accepted: boolean; duplicate: boolean }>;
   claim(workerId: string, leaseSeconds: number, maxAttempts: number): Promise<InboxRecord | null>;
@@ -31,6 +44,21 @@ export interface TelegramInbox {
   ): Promise<{ dead: boolean }>;
 }
 
+/** Inbox, умеющий отдавать сразу несколько записей разных людей. */
+export interface ParallelTelegramInbox extends TelegramInbox {
+  claimBatch(input: ClaimBatchInput): Promise<InboxRecord[]>;
+  /** Забрать следующие сообщения того же человека — для объединения быстрых сообщений. */
+  claimFollowUps(input: {
+    workerId: string;
+    telegramUserId: number;
+    afterUpdateId: number;
+    maxAttempts: number;
+    limit: number;
+  }): Promise<InboxRecord[]>;
+  /** Вернуть запись в очередь, не потратив попытку: ёмкость кончилась, а не обработка. */
+  release(updateId: number, delaySeconds: number): Promise<void>;
+}
+
 interface InboxRow {
   update_id: string;
   payload: TelegramUpdate;
@@ -39,7 +67,17 @@ interface InboxRow {
   telegram_user_id: string | null;
 }
 
-export class PostgresTelegramInbox implements TelegramInbox {
+function toRecord(row: InboxRow): InboxRecord {
+  return {
+    updateId: Number(row.update_id),
+    payload: row.payload,
+    attempts: row.attempts + 1,
+    chatId: row.chat_id === null ? null : Number(row.chat_id),
+    telegramUserId: row.telegram_user_id === null ? null : Number(row.telegram_user_id),
+  };
+}
+
+export class PostgresTelegramInbox implements ParallelTelegramInbox {
   constructor(private readonly db: Database) {}
 
   async enqueue(update: TelegramUpdate): Promise<{ accepted: boolean; duplicate: boolean }> {
@@ -138,14 +176,145 @@ export class PostgresTelegramInbox implements TelegramInbox {
           WHERE update_id = $1`,
         [row.update_id, workerId],
       );
-      return {
-        updateId: Number(row.update_id),
-        payload: row.payload,
-        attempts: row.attempts + 1,
-        chatId: row.chat_id === null ? null : Number(row.chat_id),
-        telegramUserId: row.telegram_user_id === null ? null : Number(row.telegram_user_id),
-      };
+      return toRecord(row);
       }),
+      { crossUser: true },
+    );
+  }
+
+  /**
+   * Батч записей — по одной на человека.
+   *
+   * Условия исключения читаются как список причин, по которым запись
+   * брать нельзя: у человека есть более раннее незавершённое сообщение
+   * (порядок внутри человека строгий), запись завершена или мертва, срок
+   * доступности не наступил, попытки исчерпаны, ход этого человека уже
+   * идёт в этом процессе. Ограничение «одна запись на человека» здесь же
+   * даёт справедливость: один говорливый пользователь не займёт весь
+   * батч, потому что второй его записи в батче просто нет.
+   */
+  async claimBatch(input: ClaimBatchInput): Promise<InboxRecord[]> {
+    const lease = Math.max(30, input.leaseSeconds);
+    const attempts = Math.max(1, input.maxAttempts);
+    const limit = Math.max(1, Math.min(100, input.limit));
+    const excluded = input.excludeTelegramUsers ?? [];
+    return await this.db.withSystemScope("telegram.inbox.claim_batch", async () =>
+      await this.db.transaction(async (client) => {
+      const { rows } = await client.query<InboxRow>(
+        `
+          -- tenant: system — durable ingress Telegram: строки берутся по update_id и аренде воркера, а не по запросу пользователя
+          SELECT t.update_id, t.payload, t.attempts, t.chat_id, t.telegram_user_id
+            FROM telegram_updates t
+           WHERE t.attempts < $2
+             AND t.payload IS NOT NULL
+             AND (
+               (t.status IN ('queued', 'retry') AND t.available_at <= now())
+               OR (t.status = 'processing'
+                   AND t.locked_at < now() - make_interval(secs => $1))
+             )
+             AND NOT (t.telegram_user_id = ANY($4::bigint[]))
+             AND NOT EXISTS (
+               SELECT 1
+                 FROM telegram_updates earlier
+                WHERE earlier.status IN ('queued', 'processing', 'retry')
+                  AND earlier.telegram_user_id IS NOT DISTINCT FROM t.telegram_user_id
+                  AND (earlier.received_at, earlier.update_id) < (t.received_at, t.update_id)
+             )
+           ORDER BY t.received_at, t.update_id
+           FOR UPDATE OF t SKIP LOCKED
+           LIMIT $3`,
+        [lease, attempts, limit, excluded],
+      );
+      if (rows.length === 0) return [];
+      await client.query(
+        `
+          -- tenant: system — durable ingress Telegram: строки берутся по update_id и аренде воркера, а не по запросу пользователя
+          UPDATE telegram_updates
+             SET status = 'processing',
+                 attempts = attempts + 1,
+                 locked_at = now(),
+                 locked_by = $2,
+                 last_error = NULL
+           WHERE update_id = ANY($1::bigint[])`,
+        [rows.map((row) => row.update_id), input.workerId],
+      );
+      return rows.map(toRecord);
+      }),
+      { crossUser: true },
+    );
+  }
+
+  /**
+   * Следующие сообщения того же человека. Правило «более раннее
+   * незавершённое сообщение блокирует» здесь не применяется намеренно:
+   * это более раннее сообщение — наше собственное, оно и зовёт.
+   */
+  async claimFollowUps(input: {
+    workerId: string;
+    telegramUserId: number;
+    afterUpdateId: number;
+    maxAttempts: number;
+    limit: number;
+  }): Promise<InboxRecord[]> {
+    const limit = Math.max(1, Math.min(20, input.limit));
+    return await this.db.withSystemScope("telegram.inbox.claim_follow_ups", async () =>
+      await this.db.transaction(async (client) => {
+      const { rows } = await client.query<InboxRow>(
+        `
+          -- tenant: system — durable ingress Telegram: строки берутся по update_id и аренде воркера, а не по запросу пользователя
+          SELECT t.update_id, t.payload, t.attempts, t.chat_id, t.telegram_user_id
+            FROM telegram_updates t
+           WHERE t.telegram_user_id = $1
+             AND t.update_id > $2
+             AND t.attempts < $3
+             AND t.payload IS NOT NULL
+             AND t.status IN ('queued', 'retry')
+             AND t.available_at <= now()
+           ORDER BY t.received_at, t.update_id
+           FOR UPDATE OF t SKIP LOCKED
+           LIMIT $4`,
+        [input.telegramUserId, input.afterUpdateId, Math.max(1, input.maxAttempts), limit],
+      );
+      if (rows.length === 0) return [];
+      await client.query(
+        `
+          -- tenant: system — durable ingress Telegram: строки берутся по update_id и аренде воркера, а не по запросу пользователя
+          UPDATE telegram_updates
+             SET status = 'processing',
+                 attempts = attempts + 1,
+                 locked_at = now(),
+                 locked_by = $2,
+                 last_error = NULL
+           WHERE update_id = ANY($1::bigint[])`,
+        [rows.map((row) => row.update_id), input.workerId],
+      );
+      return rows.map(toRecord);
+      }),
+      { crossUser: true },
+    );
+  }
+
+  /**
+   * Вернуть запись в очередь. Попытка возвращается обратно: её потратила
+   * не обработка, а нехватка ёмкости, и наказывать за это сообщение
+   * человека нечестно — на третьем таком возврате оно оказалось бы
+   * мёртвым, ни разу не дойдя до модели.
+   */
+  async release(updateId: number, delaySeconds: number): Promise<void> {
+    await this.db.withSystemScope("telegram.inbox.release", async () =>
+      await this.db.query(
+      `
+        -- tenant: system — durable ingress Telegram: строки берутся по update_id и аренде воркера, а не по запросу пользователя
+        UPDATE telegram_updates
+           SET status = 'queued',
+               attempts = GREATEST(0, attempts - 1),
+               available_at = now() + make_interval(secs => $2),
+               locked_at = NULL,
+               locked_by = NULL
+         WHERE update_id = $1
+           AND status = 'processing'`,
+      [updateId, Math.max(0, delaySeconds)],
+      ),
       { crossUser: true },
     );
   }

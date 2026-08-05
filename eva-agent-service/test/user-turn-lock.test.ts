@@ -1,13 +1,13 @@
 /**
  * Queue and lock semantics, against a minimal in-memory Valkey stand-in that
- * implements exactly the commands UserQueue uses.
+ * implements exactly the commands UserTurnLock uses.
  */
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { EvaError } from "../dist/errors.js";
-import { UserQueue } from "../dist/queue.js";
+import { UserTurnLock } from "../dist/turns/user-turn-lock.js";
 
 class FakeRedis {
   store = new Map<string, string>();
@@ -22,7 +22,7 @@ class FakeRedis {
   async ttl(key: string) {
     return this.ttls.get(key) ?? -1;
   }
-  // UserQueue uses two Lua scripts against the same key: compare-and-delete
+  // UserTurnLock uses two Lua scripts against the same key: compare-and-delete
   // on release, compare-and-expire on renewal. Both are no-ops for a foreign
   // token, which is the property that makes the lock safe.
   async eval(script: string, _numkeys: number, key: string, token: string, seconds?: string) {
@@ -35,6 +35,9 @@ class FakeRedis {
     this.ttls.delete(key);
     return 1;
   }
+  async get(key: string) {
+    return this.store.get(key) ?? null;
+  }
   async del(key: string) {
     const existed = this.store.has(key);
     this.store.delete(key);
@@ -46,7 +49,7 @@ class FakeRedis {
 }
 
 const makeQueue = (maxQueueDepth = 3) =>
-  new UserQueue(new FakeRedis() as never, { ttlSeconds: 30, maxQueueDepth });
+  new UserTurnLock(new FakeRedis() as never, { ttlSeconds: 30, maxQueueDepth });
 
 test("a turn runs and releases the lock afterwards", async () => {
   const queue = makeQueue();
@@ -121,7 +124,7 @@ test("a lock held by another instance produces user_busy with a retry hint", asy
   const redis = new FakeRedis();
   redis.store.set("eva:lock:user:1", "someone-else");
   redis.ttls.set("eva:lock:user:1", 17);
-  const queue = new UserQueue(redis as never, { ttlSeconds: 30 });
+  const queue = new UserTurnLock(redis as never, { ttlSeconds: 30 });
 
   await assert.rejects(
     () => queue.run(1, async () => "never"),
@@ -137,14 +140,14 @@ test("a lock held by another instance produces user_busy with a retry hint", asy
 test("forceRelease clears a stuck lock", async () => {
   const redis = new FakeRedis();
   redis.store.set("eva:lock:user:5", "stuck");
-  const queue = new UserQueue(redis as never, { ttlSeconds: 30 });
+  const queue = new UserTurnLock(redis as never, { ttlSeconds: 30 });
   assert.equal(await queue.forceRelease(5), true);
   assert.equal(await queue.isLocked(5), false);
 });
 
 test("releasing with a foreign token is a no-op", async () => {
   const redis = new FakeRedis();
-  const queue = new UserQueue(redis as never, { ttlSeconds: 30 });
+  const queue = new UserTurnLock(redis as never, { ttlSeconds: 30 });
   await queue.run(9, async () => {
     // simulate the lock expiring and being taken by someone else mid-turn
     redis.store.set("eva:lock:user:9", "another-owner");
@@ -158,7 +161,7 @@ test("the lease is renewed while a long turn is still running", async () => {
   // renewal a slow answer loses its lock mid-turn and a second worker can
   // start a concurrent turn on the same Letta conversation.
   const redis = new FakeRedis();
-  const queue = new UserQueue(redis as never, { ttlSeconds: 1 });
+  const queue = new UserTurnLock(redis as never, { ttlSeconds: 1 });
 
   const renewals: number[] = [];
   const originalEval = redis.eval.bind(redis);
@@ -178,7 +181,7 @@ test("the lease is renewed while a long turn is still running", async () => {
 
 test("renewal stops once the turn ends", async () => {
   const redis = new FakeRedis();
-  const queue = new UserQueue(redis as never, { ttlSeconds: 1 });
+  const queue = new UserTurnLock(redis as never, { ttlSeconds: 1 });
   let renewals = 0;
   const originalEval = redis.eval.bind(redis);
   redis.eval = (script: string, ...rest: unknown[]) => {
@@ -190,4 +193,44 @@ test("renewal stops once the turn ends", async () => {
   const afterTurn = renewals;
   await new Promise((resolve) => setTimeout(resolve, 900));
   assert.equal(renewals, afterTurn, "the renewal timer must not outlive the turn");
+});
+
+test("владение блокировкой названо: кто, чей ход и до какого срока", async () => {
+  const redis = new FakeRedis();
+  const lock = new UserTurnLock(redis as never, { ttlSeconds: 30 });
+
+  let seen: Awaited<ReturnType<UserTurnLock["describe"]>> = null;
+  await lock.run(
+    77,
+    async () => {
+      seen = await lock.describe(77);
+    },
+    { userId: 5, conversationId: "conv-1", runId: "run-1" },
+  );
+
+  assert.ok(seen, "блокировка не описана");
+  assert.equal(seen!.telegramId, 77);
+  assert.equal(seen!.userId, 5);
+  assert.equal(seen!.conversationId, "conv-1");
+  assert.equal(seen!.runId, "run-1");
+  assert.equal(seen!.leaseSeconds, 30);
+  assert.equal(seen!.pid, process.pid);
+  assert.equal(seen!.expiresInSeconds, 30);
+  // После хода описывать нечего: блокировка снята.
+  assert.equal(await lock.describe(77), null);
+});
+
+test("значение ключа не переписывается продлением: освобождение остаётся точным", async () => {
+  const redis = new FakeRedis();
+  const lock = new UserTurnLock(redis as never, { ttlSeconds: 1 });
+  const values = new Set<string>();
+
+  await lock.run(88, async () => {
+    values.add(redis.store.get("eva:lock:user:88")!);
+    await new Promise((resolve) => setTimeout(resolve, 2_400));
+    values.add(redis.store.get("eva:lock:user:88")!);
+  }, { runId: "run-2" });
+
+  assert.equal(values.size, 1, "продление переписало владельца, токен разъехался бы");
+  assert.equal(await lock.isLocked(88), false, "блокировка не снята");
 });
