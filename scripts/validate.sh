@@ -156,7 +156,7 @@ for file in "$ROOT_DIR"/postgres/migrations/*.sql; do
 		check_failed "$name does not record itself in schema_migrations"
 	elif grep -q 'BEGIN;' "$file" && grep -q 'COMMIT;' "$file"; then
 		ok "$name (transactional, records its version)"
-	elif grep -qE '^[[:space:]]*(CREATE|DROP) INDEX CONCURRENTLY' "$file"; then
+	elif grep -qE '^[[:space:]]*(CREATE([[:space:]]+UNIQUE)?|DROP)[[:space:]]+INDEX[[:space:]]+CONCURRENTLY' "$file"; then
 		# CREATE INDEX CONCURRENTLY внутри транзакции невозможен, а
 		# CLAUDE.md требует строить большие индексы именно так. Такой
 		# файл обязан быть нетранзакционным — это не упущение автора, а

@@ -254,7 +254,8 @@ export class EvaWorkflow {
         // Расшифровываются и списывают минуты все части объединённого
         // хода, поэтому «голосовое плюс короткий текст» иначе проходило
         // бы мимо гейта и тратило минуты сверх исчерпанной квоты.
-        if ([...earlier, update].some((part) => part.kind === "voice")) {
+        let parts = [...earlier, update];
+        if (parts.some((part) => part.kind === "voice")) {
           const voiceQuota = quota.find((item) => item.metric === "voice_minutes") as
             | { remaining?: number | string | null }
             | undefined;
@@ -267,8 +268,15 @@ export class EvaWorkflow {
               update.chatId,
               t(language, "voiceQuotaEnded"),
             );
-            await this.stopTurn(turnHandle, "quota_voice");
-            return { status: "ignored" };
+            // Голосовые части выпадают, текстовые остаются. Прекратить
+            // ход целиком значило бы потерять текст, который человек
+            // написал в том же окне: последовательный воркер на него
+            // ответил бы, потому что гейтил каждое сообщение отдельно.
+            parts = parts.filter((part) => part.kind !== "voice");
+            if (parts.length === 0) {
+              await this.stopTurn(turnHandle, "quota_voice");
+              return { status: "ignored" };
+            }
           }
         }
 
@@ -276,12 +284,12 @@ export class EvaWorkflow {
         try {
           // Порядок сообщений сохраняется: человек дописывал мысль, и
           // прочитать её задом наперёд — значит прочитать другую мысль.
-          const parts: string[] = [];
-          for (const part of [...earlier, update]) {
+          const texts: string[] = [];
+          for (const part of parts) {
             const text = (await this.promptFromMessage(part)).trim();
-            if (text) parts.push(text);
+            if (text) texts.push(text);
           }
-          prompt = parts.join("\n");
+          prompt = texts.join("\n");
         } catch (error) {
           // Провал распознавания — не сбой Евы: разговор продолжается,
           // просто этим сообщением. Технический текст провайдера сюда
