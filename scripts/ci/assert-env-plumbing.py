@@ -37,7 +37,10 @@ EXEMPT = {
     "EVA_AGENT_SESSION_IDLE_MS": "время простоя сессии SDK, умолчание в коде",
 }
 
-READER = re.compile(r'\b(?:str|int|bool|nullableInt)\("([A-Z][A-Z0-9_]*)"')
+# clampedInt читает окружение так же, как остальные, но в список
+# читателей не входил: `\b` перед `Int` внутри `clampedInt` не стоит,
+# и пять переменных проходили мимо проверки, ради которой она есть.
+READER = re.compile(r'(?:\bstr|\bint|\bbool|nullableInt|clampedInt)\("([A-Z][A-Z0-9_]*)"')
 DIRECT = re.compile(r"process\.env\.([A-Z][A-Z0-9_]*)")
 
 

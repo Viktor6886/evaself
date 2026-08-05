@@ -16,6 +16,7 @@ import { configWarnings, loadConfig, readPersona } from "./config.js";
 import { CrisisMonitor } from "./crisis.js";
 import { ConversationPurposeService } from "./conversations/purpose-service.js";
 import { Database } from "./db.js";
+import { ParallelInboxDispatcher } from "./delivery/dispatcher.js";
 import { PostgresTelegramInbox, TelegramInboxWorker } from "./delivery/inbox.js";
 import { PostgresTelegramOutbox } from "./delivery/outbox.js";
 import { EvaWorkflow } from "./eva-workflow.js";
@@ -30,12 +31,14 @@ import { LavaPayments } from "./payments.js";
 import { UserProfileService } from "./profile/profile-service.js";
 import { ValkeyRateLimiter } from "./public/rate-limit.js";
 import { ValkeyMiniAppSessions } from "./public/webapp-session.js";
-import { UserQueue } from "./queue.js";
+import { UserTurnLock } from "./turns/user-turn-lock.js";
 import { RuntimeContextBuilder } from "./runtime/runtime-context.js";
 import { SdkSettingsManager } from "./sdk-settings.js";
 import { buildServer, VERSION } from "./server.js";
 import { TelegramClient } from "./telegram.js";
 import { TimezoneResolver } from "./time/timezone-resolver.js";
+import { TurnAggregator } from "./turns/aggregator.js";
+import { TurnSemaphores } from "./turns/semaphores.js";
 import { TurnLifecycle } from "./turns/turn-lifecycle.js";
 
 async function main(): Promise<void> {
@@ -86,7 +89,7 @@ async function main(): Promise<void> {
       .catch(() => logger.warn("Не удалось обновить кеш Config Service"));
   });
 
-  const queue = new UserQueue(redis, { ttlSeconds: config.lockTtlSeconds });
+  const queue = new UserTurnLock(redis, { ttlSeconds: config.lockTtlSeconds });
   // Сессии Mini App живут в Valkey: состояние восстановимо, потеря Valkey
   // означает лишь повторное открытие приложения.
   const miniAppSessions = new ValkeyMiniAppSessions(redis);
@@ -169,6 +172,29 @@ async function main(): Promise<void> {
     turns,
   );
   const inbox = new PostgresTelegramInbox(db);
+  // Уведомление о мёртвой записи одно на оба пути обработки: человек
+  // должен узнать про потерянное сообщение независимо от того, каким
+  // воркером оно обрабатывалось.
+  const notifyDeadUpdate = async (
+    record: { updateId: number; chatId: number | null; telegramUserId: number | null },
+    error: unknown,
+  ): Promise<void> => {
+    const message = error instanceof Error ? error.message : String(error);
+    await telegram.withDeliveryContext(`telegram-dead:${record.updateId}`, async () => {
+      if (record.chatId) {
+        await telegram.sendMessage(
+          record.chatId,
+          "Не получилось обработать сообщение после нескольких попыток. Ошибка сохранена; попробуйте отправить сообщение ещё раз.",
+        );
+      }
+      if (config.ownerTelegramId && config.ownerTelegramId !== record.chatId) {
+        await telegram.sendMessage(
+          config.ownerTelegramId,
+          `Ошибка Евы: update ${record.updateId}, user ${record.telegramUserId ?? "?"}: ${message.slice(0, 1200)}`,
+        );
+      }
+    });
+  };
   const inboxWorker = new TelegramInboxWorker(
     inbox,
     async (update) => await workflow.processQueued(update),
@@ -177,25 +203,40 @@ async function main(): Promise<void> {
       pollMs: config.telegramInboxPollMs,
       leaseSeconds: config.telegramInboxLeaseSeconds,
       maxAttempts: config.telegramInboxMaxAttempts,
-      onDead: async (record, error) => {
-        const message = error instanceof Error ? error.message : String(error);
-        await telegram.withDeliveryContext(`telegram-dead:${record.updateId}`, async () => {
-          if (record.chatId) {
-            await telegram.sendMessage(
-              record.chatId,
-              "Не получилось обработать сообщение после нескольких попыток. Ошибка сохранена; попробуйте отправить сообщение ещё раз.",
-            );
-          }
-          if (config.ownerTelegramId && config.ownerTelegramId !== record.chatId) {
-            await telegram.sendMessage(
-              config.ownerTelegramId,
-              `Ошибка Евы: update ${record.updateId}, user ${record.telegramUserId ?? "?"}: ${message.slice(0, 1200)}`,
-            );
-          }
-        });
-      },
+      onDead: notifyDeadUpdate,
     },
   );
+  // Параллельный диспетчер и последовательный воркер читают один и тот
+  // же durable inbox. Флаг выбирает, кто из них работает; таблица и её
+  // семантика в обоих случаях те же, поэтому откат — это перезапуск с
+  // выключенным флагом, а не миграция данных.
+  const slots = new TurnSemaphores(redis, {
+    total: config.turnSlotsTotal,
+    leaseSeconds: Math.max(config.lockTtlSeconds, 60),
+  });
+  const aggregator = config.turnAggregationEnabled
+    ? new TurnAggregator(inbox, logger, {
+      debounceMs: config.turnAggregationDebounceMs,
+      maxWindowMs: config.turnAggregationWindowMs,
+    })
+    : undefined;
+  const dispatcher = new ParallelInboxDispatcher(
+    inbox,
+    async (records) => await workflow.processAggregated(records.map((item) => item.payload)),
+    logger,
+    {
+      pollMs: config.telegramInboxPollMs,
+      leaseSeconds: config.telegramInboxLeaseSeconds,
+      maxAttempts: config.telegramInboxMaxAttempts,
+      concurrency: config.inboxConcurrency,
+      batchSize: config.inboxBatchSize,
+      onDead: notifyDeadUpdate,
+    },
+    slots,
+    aggregator,
+    queue,
+  );
+
   const payments = new LavaPayments(config, db, telegram, logger);
   const purposes = new ConversationPurposeService(db, letta, logger);
   const background = new BackgroundRuntime(
@@ -222,6 +263,8 @@ async function main(): Promise<void> {
     payments,
     queue,
     telegram,
+    slots,
+    dispatcher,
     redisPing: async () => (await redis.ping()) === "PONG",
     miniAppSessions,
     rateLimiter,
@@ -229,11 +272,15 @@ async function main(): Promise<void> {
 
   await app.listen({ port: config.port, host: config.host });
   if (config.outboxEnabled) outbox.start();
-  inboxWorker.start();
+  if (config.parallelInboxEnabled) dispatcher.start();
+  else inboxWorker.start();
   background.start();
   logger.info("eva-agent-service принимает запросы", {
     version: VERSION,
     port: config.port,
+    inbox: config.parallelInboxEnabled ? "parallel" : "sequential",
+    concurrency: config.parallelInboxEnabled ? config.inboxConcurrency : 1,
+    aggregation: config.turnAggregationEnabled,
     appServer: config.appServerUrl,
     model: config.model || "(app server default)",
   });
@@ -248,7 +295,12 @@ async function main(): Promise<void> {
     logger.info("Остановка сервиса", { signal });
     try {
       background.stop();
+      dispatcher.stop();
       inboxWorker.stop();
+      // Уже начатые ходы дописываются: аренда записи ещё наша, и
+      // бросить её посреди хода значит отдать её другому воркеру с
+      // наполовину выполненной работой.
+      await dispatcher.drain(config.shutdownDrainMs);
       if (config.outboxEnabled) outbox.stop();
       letta.shutdown();
       await app.close();

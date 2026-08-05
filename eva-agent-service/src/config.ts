@@ -78,6 +78,24 @@ export interface Config {
    * обработки сообщения и ответ пользователю от него не зависят.
    */
   turnLifecycleEnabled: boolean;
+  /**
+   * Параллельный диспетчер durable inbox вместо последовательного
+   * воркера. Выключенный флаг возвращает прежний воркер без изменения
+   * данных: таблица и её семантика те же.
+   */
+  parallelInboxEnabled: boolean;
+  /** Объединение быстрых последовательных сообщений в один ход. */
+  turnAggregationEnabled: boolean;
+  /** Сколько ходов процесс ведёт одновременно. */
+  inboxConcurrency: number;
+  /** Сколько записей диспетчер забирает за один заход в базу. */
+  inboxBatchSize: number;
+  /** Общий предел одновременных ходов на стенде, делится по классам. */
+  turnSlotsTotal: number;
+  turnAggregationDebounceMs: number;
+  turnAggregationWindowMs: number;
+  /** Сколько ждать завершения уже начатых ходов при остановке сервиса. */
+  shutdownDrainMs: number;
 
   lavaWebhookUser: string;
   lavaWebhookPassword: string;
@@ -228,6 +246,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     conversationMirrorEnabled: bool("EVA_CONVERSATION_MIRROR_ENABLED", false),
     outboxEnabled: bool("EVA_OUTBOX_ENABLED", true),
     turnLifecycleEnabled: bool("EVA_TURN_LIFECYCLE", false),
+    parallelInboxEnabled: bool("EVA_PARALLEL_INBOX", false),
+    turnAggregationEnabled: bool("EVA_TURN_AGGREGATION", false),
+    // Первая ступень rollout — 8. Дальше 16, 32, 64, каждая только при
+    // зелёных метриках базы, провайдера и сессий.
+    inboxConcurrency: clampedInt("EVA_INBOX_CONCURRENCY", 8, 1, 256),
+    inboxBatchSize: clampedInt("EVA_INBOX_BATCH_SIZE", 16, 1, 100),
+    turnSlotsTotal: clampedInt("EVA_TURN_SLOTS_TOTAL", 128, 4, 1024),
+    turnAggregationDebounceMs: clampedInt("EVA_TURN_AGGREGATION_DEBOUNCE_MS", 800, 800, 3_000),
+    // Потолок окна ограничен диапазоном из задания: меньше — объединять
+    // нечего, больше — человек ждёт ответа дольше, чем готов ждать.
+    turnAggregationWindowMs: clampedInt("EVA_TURN_AGGREGATION_WINDOW_MS", 2_500, 2_500, 3_000),
+    shutdownDrainMs: clampedInt("EVA_SHUTDOWN_DRAIN_MS", 15_000, 1_000, 120_000),
 
     lavaWebhookUser: str("LAVA_WEBHOOK_USER"),
     lavaWebhookPassword: str("LAVA_WEBHOOK_PASSWORD"),
@@ -254,6 +284,16 @@ export function configWarnings(config: Config): string[] {
       `EVA_AGENT_LOCK_TTL (${config.lockTtlSeconds} с) не больше ` +
         `EVA_AGENT_TURN_TIMEOUT_MS (${config.turnTimeoutMs} мс): лок держится только ` +
         "за счёт фонового продления. Рекомендуется TTL > таймаута хода.",
+    );
+  }
+  // Флаг, который ничего не включает, — худшая ступень rollout: он
+  // выглядит включённым и не делает ничего. Объединение живёт внутри
+  // параллельного диспетчера и без него не работает.
+  if (config.turnAggregationEnabled && !config.parallelInboxEnabled) {
+    warnings.push(
+      "EVA_TURN_AGGREGATION включён, а EVA_PARALLEL_INBOX выключен: "
+        + "объединение быстрых сообщений работает только в параллельном "
+        + "диспетчере и сейчас не действует",
     );
   }
   if (config.telegramBotToken && !config.telegramWebhookSecret) {

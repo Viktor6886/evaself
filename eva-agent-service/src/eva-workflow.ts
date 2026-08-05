@@ -10,7 +10,7 @@ import type { Logger } from "./logger.js";
 import type { GraphContextService } from "./memory/graph-context.js";
 import type { ConversationHighlightService } from "./memory/conversation-highlights.js";
 import type { UserProfileService } from "./profile/profile-service.js";
-import type { UserQueue } from "./queue.js";
+import type { UserTurnLock } from "./turns/user-turn-lock.js";
 import type { RuntimeContextBuilder } from "./runtime/runtime-context.js";
 import { TaskEventService } from "./tasks/task-event-service.js";
 import {
@@ -65,7 +65,7 @@ export class EvaWorkflow {
     private readonly db: Database,
     private readonly letta: LettaService,
     private readonly llm: LlmManager,
-    private readonly queue: UserQueue,
+    private readonly queue: UserTurnLock,
     private readonly telegram: TelegramClient,
     private readonly runtimeContext: RuntimeContextBuilder,
     private readonly profile: UserProfileService,
@@ -115,15 +115,34 @@ export class EvaWorkflow {
 
   /** The durable inbox is the only production caller of this method. */
   async processQueued(update: TelegramUpdate): Promise<InboxResult> {
-    const normalized = normalizeUpdate(update);
-    if (!normalized) return { status: "ignored" };
+    return await this.processAggregated([update]);
+  }
+
+  /**
+   * Объединённый ход: несколько быстрых сообщений одного человека
+   * отвечаются одним ходом.
+   *
+   * Отвечаем на последнее сообщение — оно и есть та реплика, которую
+   * человек дописывал; предыдущие входят в тот же промпт перед ним.
+   * Квота снимается один раз: ход один.
+   */
+  async processAggregated(updates: TelegramUpdate[]): Promise<InboxResult> {
+    const normalized = updates
+      .map((update) => normalizeUpdate(update))
+      .filter((item): item is NormalizedUpdate => item !== null);
+    if (normalized.length === 0) return { status: "ignored" };
+    const primary = normalized[normalized.length - 1]!;
+    const earlier = normalized.slice(0, -1);
     return await this.telegram.withDeliveryContext(
-      `telegram-update:${normalized.updateId}`,
-      async () => await this.process(normalized),
+      `telegram-update:${primary.updateId}`,
+      async () => await this.process(primary, earlier),
     );
   }
 
-  private async process(update: NormalizedUpdate): Promise<InboxResult> {
+  private async process(
+    update: NormalizedUpdate,
+    earlier: NormalizedUpdate[] = [],
+  ): Promise<InboxResult> {
     const typing: { stop: (() => void) | null } = { stop: null };
     const messageDraft: { current: TelegramMessageDraft | null } = { current: null };
     const started = performance.now();
@@ -153,6 +172,13 @@ export class EvaWorkflow {
       flowVersion: TURN_FLOW_VERSION,
       promptVersion: this.letta.promptVersion,
     });
+    // Объединённый ход проходит через `aggregating`: окно ожидания
+    // быстрых сообщений — это часть хода, а не пауза перед ним.
+    if (earlier.length > 0) {
+      await this.moveTurn(turnHandle, "aggregating", {
+        detail: { messages: earlier.length + 1 },
+      });
+    }
     await this.moveTurn(turnHandle, "queued");
     try {
       const measured = await this.db.withQueryMetrics(async () =>
@@ -174,7 +200,12 @@ export class EvaWorkflow {
           async (): Promise<InboxResult> => {
         const { user, link } = await this.ensureUserAndAgent(update);
         const language = preferredResponseLanguage(user);
-        await this.db.attachTelegramUpdateToUser(update.updateId, user.id);
+        // Владельца получает каждая запись окна, а не только та, на
+        // которую отвечаем: иначе присоединённые строки остались бы без
+        // `user_id` и выпали из выборок по внутреннему идентификатору.
+        for (const part of [...earlier, update]) {
+          await this.db.attachTelegramUpdateToUser(part.updateId, user.id);
+        }
         await this.linkTurn(turnHandle, {
           userId: user.id,
           agentId: link.agent_id,
@@ -219,7 +250,11 @@ export class EvaWorkflow {
           await this.stopTurn(turnHandle, "quota_messages");
           return { status: "ignored" };
         }
-        if (update.kind === "voice") {
+        // Голос проверяется по всему окну, а не по последнему сообщению.
+        // Расшифровываются и списывают минуты все части объединённого
+        // хода, поэтому «голосовое плюс короткий текст» иначе проходило
+        // бы мимо гейта и тратило минуты сверх исчерпанной квоты.
+        if ([...earlier, update].some((part) => part.kind === "voice")) {
           const voiceQuota = quota.find((item) => item.metric === "voice_minutes") as
             | { remaining?: number | string | null }
             | undefined;
@@ -239,7 +274,14 @@ export class EvaWorkflow {
 
         let prompt: string;
         try {
-          prompt = await this.promptFromMessage(update);
+          // Порядок сообщений сохраняется: человек дописывал мысль, и
+          // прочитать её задом наперёд — значит прочитать другую мысль.
+          const parts: string[] = [];
+          for (const part of [...earlier, update]) {
+            const text = (await this.promptFromMessage(part)).trim();
+            if (text) parts.push(text);
+          }
+          prompt = parts.join("\n");
         } catch (error) {
           // Провал распознавания — не сбой Евы: разговор продолжается,
           // просто этим сообщением. Технический текст провайдера сюда
@@ -419,7 +461,15 @@ export class EvaWorkflow {
         return { status: "completed", usageCharged: true };
           },
         );
-        }),
+        },
+        // Кто держит слот: ход этого человека, с этим `run_id`.
+        // `run_id` показывается только у записанного хода: при
+        // выключенном EVA_TURN_LIFECYCLE идентификатор существует, но не
+        // резолвится ни во что, и оператор искал бы несуществующую
+        // строку. Conversation становится известна позже, уже под
+        // блокировкой, — врать про неё хуже, чем не знать.
+        { runId: turnHandle?.recorded ? turnHandle.runId : null },
+        ),
       );
       metrics.db_query_count = measured.queryCount;
       return measured.result;
@@ -440,6 +490,7 @@ export class EvaWorkflow {
       this.logger.info("Telegram turn обработан", {
         update_id: update.updateId,
         telegram_id: update.telegramId,
+        aggregated_messages: earlier.length + 1,
         ...metrics,
       });
     }

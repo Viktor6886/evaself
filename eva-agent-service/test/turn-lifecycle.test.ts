@@ -472,9 +472,14 @@ interface WorkflowProbe {
   sent: string[];
   result: unknown;
   elapsedMs: number;
+  /** Чем ход представился блокировке пользователя. */
+  lockClaims: Array<Record<string, unknown>>;
 }
 
-async function runTelegramTurn(turns: TurnLifecycle | undefined): Promise<WorkflowProbe> {
+async function runTelegramTurn(
+  turns: TurnLifecycle | undefined,
+  options: { quota?: Array<Record<string, unknown>>; extraUpdates?: unknown[] } = {},
+): Promise<WorkflowProbe> {
   const sent: string[] = [];
   const user = { id: 77, telegram_id: TELEGRAM_ID, state: "active", is_blocked: false };
   const link = { agent_id: "agent-1", conversation_id: "conv-1", user_id: user.id };
@@ -488,7 +493,8 @@ async function runTelegramTurn(turns: TurnLifecycle | undefined): Promise<Workfl
     upsertUser: async () => user,
     getAgentLink: async () => link,
     attachTelegramUpdateToUser: async () => {},
-    getQuotaStatus: async () => [{ metric: "messages", remaining: 10 }],
+    getQuotaStatus: async () =>
+      options.quota ?? [{ metric: "messages", remaining: 10 }],
     recordUserMessage: async () => {},
     markAgentUsed: async () => {},
     incrementUsage: async () => {},
@@ -533,8 +539,16 @@ async function runTelegramTurn(turns: TurnLifecycle | undefined): Promise<Workfl
     }),
     wrapUserMessage: (_context: unknown, prompt: string) => prompt,
   };
+  const lockClaims: Array<Record<string, unknown>> = [];
   const queue = {
-    run: async <T>(_telegramId: number, work: () => Promise<T>) => await work(),
+    run: async <T>(
+      _telegramId: number,
+      work: () => Promise<T>,
+      claim: Record<string, unknown> = {},
+    ) => {
+      lockClaims.push(claim);
+      return await work();
+    },
   };
   const workflow = new EvaWorkflow(
     { typingIntervalMs: 4000, lockTtlSeconds: 180 } as never,
@@ -553,16 +567,20 @@ async function runTelegramTurn(turns: TurnLifecycle | undefined): Promise<Workfl
   );
 
   const started = performance.now();
-  const result = await workflow.processQueued({
-    update_id: 3001,
-    message: {
-      message_id: 5,
-      chat: { id: TELEGRAM_ID },
-      from: { id: TELEGRAM_ID, first_name: "Анна" },
-      text: "мне снова тяжело собраться",
+  const updates = [
+    ...(options.extraUpdates ?? []),
+    {
+      update_id: 3001,
+      message: {
+        message_id: 5,
+        chat: { id: TELEGRAM_ID },
+        from: { id: TELEGRAM_ID, first_name: "Анна" },
+        text: "мне снова тяжело собраться",
+      },
     },
-  } as never);
-  return { sent, result, elapsedMs: performance.now() - started };
+  ];
+  const result = await workflow.processAggregated(updates as never);
+  return { sent, result, elapsedMs: performance.now() - started, lockClaims };
 }
 
 test("теневая запись не меняет ответ пользователя и укладывается в бюджет", async () => {
@@ -634,4 +652,68 @@ test("сбой теневой записи не мешает пользоват�
   const probe = await runTelegramTurn(lifecycle(store));
   assert.deepEqual(probe.result, { status: "completed", usageCharged: true });
   assert.equal(probe.sent.length, 1);
+});
+
+test("ход представляется блокировке своим run_id, а не безымянной строкой", async () => {
+  const store = new TurnStore();
+  const probe = await runTelegramTurn(lifecycle(store));
+
+  assert.equal(probe.lockClaims.length, 1, "блокировка бралась не один раз");
+  const runId = [...store.rows.values()][0]!.run_id;
+  assert.equal(
+    probe.lockClaims[0]!.runId,
+    runId,
+    "владение блокировкой не связано с ходом: в Valkey ушёл null",
+  );
+
+  // Без наблюдателя ход всё равно берёт блокировку — просто без run_id.
+  const without = await runTelegramTurn(undefined);
+  assert.equal(without.lockClaims.length, 1);
+  assert.equal(without.lockClaims[0]!.runId, null);
+});
+
+test("при выключенной записи хода в блокировку не уходит идентификатор-призрак", async () => {
+  // Наблюдатель есть, флаг выключен — это конфигурация по умолчанию.
+  // `run_id` при этом существует в памяти, но не резолвится ни во что:
+  // оператор искал бы строку, которой нет.
+  const store = new TurnStore();
+  const probe = await runTelegramTurn(lifecycle(store, false));
+
+  assert.equal(store.rows.size, 0, "выключенный флаг всё же что-то записал");
+  assert.equal(probe.lockClaims.length, 1);
+  assert.equal(
+    probe.lockClaims[0]!.runId,
+    null,
+    "в блокировку ушёл run_id, которому не соответствует ни одна строка",
+  );
+});
+
+test("объединённый ход не проносит голос мимо исчерпанной квоты минут", async () => {
+  // Голосовое плюс быстрый текст: отвечаем на текст, но расшифровать
+  // придётся и голос. Гейт, смотрящий только на последнее сообщение,
+  // пропустил бы списание минут сверх нуля.
+  const store = new TurnStore();
+  const probe = await runTelegramTurn(lifecycle(store), {
+    quota: [
+      { metric: "messages", remaining: 10 },
+      { metric: "voice_minutes", remaining: 0 },
+    ],
+    extraUpdates: [
+      {
+        update_id: 3000,
+        message: {
+          message_id: 4,
+          chat: { id: TELEGRAM_ID },
+          from: { id: TELEGRAM_ID, first_name: "Анна" },
+          voice: { file_id: "voice-1", file_unique_id: "voice-1" },
+        },
+      },
+    ],
+  });
+
+  assert.deepEqual(probe.result, { status: "ignored" }, "ход прошёл мимо квоты на голос");
+  assert.equal(probe.sent.length, 1, "человеку не сказали про исчерпанную квоту");
+  const row = [...store.rows.values()][0]!;
+  assert.equal(row.state, "cancelled");
+  assert.equal(row.cancel_reason, "quota_voice");
 });
