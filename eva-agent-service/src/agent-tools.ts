@@ -133,6 +133,13 @@ export class AgentToolFactory {
           // Ключ детерминированный, поэтому повтор хода после сбоя
           // возвращает прежний результат, а не делает действие второй раз.
           const turn = currentTurn();
+          // Барьер отмены перед побочным эффектом. Отменённый ход не
+          // должен делать того, что потом нельзя отменить: генерацию мы
+          // остановим, а созданную задачу или отправленное сообщение —
+          // уже нет.
+          if (turn && await turn.isCancelled()) {
+            return result({ ok: false, error: "ход отменён" });
+          }
           const key = turn?.recorded
             ? effectKey(turn.runId, String(toolCallId ?? "no-call-id"), name)
             : null;

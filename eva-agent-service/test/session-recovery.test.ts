@@ -11,10 +11,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { AgentToolFactory } from "../dist/agent-tools.js";
 import { EvaError } from "../dist/errors.js";
 import { LettaService } from "../dist/letta.js";
 import { EffectJournal, effectKey } from "../dist/turns/effect-journal.js";
 import { TurnRecoveryService } from "../dist/turns/recovery.js";
+import { TurnLifecycle } from "../dist/turns/turn-lifecycle.js";
+import { runInTurn } from "../dist/turns/turn-context.js";
 import { withTenantScopes } from "./tenant-scope-helper.ts";
 
 const logger = {
@@ -251,6 +254,7 @@ test("отмена во время генерации останавливает
   let cancelled = false;
   await assert.rejects(
     () => service.runTurn("conv-1", { role: "user" } as never, {
+      cancelPollMs: 0,
       isCancelled: async () => {
         // Отмена объявляется после первого события потока.
         const now = cancelled;
@@ -274,7 +278,10 @@ test("отменённый ход не считается поломкой се�
     { type: "result", stopReason: "end_turn" },
   ]);
   await assert.rejects(() =>
-    service.runTurn("conv-1", { role: "user" } as never, { isCancelled: async () => true }));
+    service.runTurn("conv-1", { role: "user" } as never, {
+      cancelPollMs: 0,
+      isCancelled: async () => true,
+    }));
 
   const pooled = sessions.get("conv-1");
   assert.ok(pooled, "сессия закрыта из-за отмены");
@@ -304,29 +311,39 @@ class FakeEffectDb {
 
   query = async (sql: string, values: unknown[] = []): Promise<{ rows: unknown[] }> => {
     const text = sql.replace(/--[^\n]*/g, " ").replace(/\s+/g, " ").trim();
+    // Поддельная база повторяет ровно те запросы, которые шлёт журнал.
+    // Их семантика отдельно проверяется на настоящем PostgreSQL —
+    // scripts/ci/test-effect-journal.sql.
     if (text.startsWith("INSERT INTO tool_effects")) {
       const key = String(values[0]);
-      const existing = this.rows.get(key);
-      if (!existing) {
-        const row: EffectRow = {
-          effect_key: key,
-          run_id: String(values[1]),
-          user_id: values[2] === null ? null : Number(values[2]),
-          status: "running",
-          attempt: 1,
-          result: null,
-          result_hash: null,
-          error_code: null,
-          retryable: true,
-        };
-        this.rows.set(key, row);
-        return { rows: [{ ...row, inserted: true }] };
+      if (this.rows.has(key)) return { rows: [] };
+      this.rows.set(key, {
+        effect_key: key,
+        run_id: String(values[1]),
+        user_id: values[2] === null ? null : Number(values[2]),
+        status: "running",
+        attempt: 1,
+        result: null,
+        result_hash: null,
+        error_code: null,
+        retryable: true,
+      });
+      return { rows: [{ effect_key: key }] };
+    }
+    if (text.startsWith("SELECT status, attempt")) {
+      const row = this.rows.get(String(values[0]));
+      if (!row || row.user_id !== Number(values[1])) return { rows: [] };
+      return { rows: [{ ...row }] };
+    }
+    if (text.includes("SET status = 'running'")) {
+      const row = this.rows.get(String(values[0]));
+      // Право на повтор забирает только тот, кто застал строку в отказе.
+      if (!row || row.user_id !== Number(values[1]) || row.status !== "failed") {
+        return { rows: [] };
       }
-      if (existing.status === "failed" && existing.retryable) {
-        existing.status = "running";
-        existing.attempt += 1;
-      }
-      return { rows: [{ ...existing, inserted: false }] };
+      row.status = "running";
+      row.attempt += 1;
+      return { rows: [{ attempt: row.attempt }] };
     }
     if (text.startsWith("UPDATE tool_effects")) {
       const row = this.rows.get(String(values[0]));
@@ -467,13 +484,41 @@ interface RecoveryProbe {
   outbox: Map<string, string>;
   effects: Map<string, string[]>;
   attempts: Array<Record<string, unknown>>;
+  /** Переходы, записанные жизненным циклом: они и есть доказательство. */
+  transitions: Array<{ to: string; from: string | null }>;
+  /** Отклонённые графом переходы. Их быть не должно. */
+  rejected: string[];
+}
+
+/** Настоящий жизненный цикл: переходы обязаны проходить через его граф. */
+function lifecycleFor(db: unknown): TurnLifecycle {
+  return new TurnLifecycle(db as never, logger as never, true);
 }
 
 function recoveryHarness(probe: RecoveryProbe) {
   const query = async (sql: string, values: unknown[] = []): Promise<{ rows: unknown[] }> => {
     const text = sql.replace(/--[^\n]*/g, " ").replace(/\s+/g, " ").trim();
+    if (text.includes("SELECT state, attempt FROM turn_runs")) {
+      // Запрос жизненного цикла перед переходом.
+      const row = probe.runs.get(String(values[0]));
+      return { rows: row ? [{ state: row.state, attempt: row.attempt }] : [] };
+    }
     if (text.includes("FROM turn_runs")) {
       return { rows: [...probe.runs.values()] };
+    }
+    if (text.includes("FROM turn_recovery_attempts")) {
+      const count = probe.attempts.filter((item) => item.run_id === values[0]).length;
+      return { rows: [{ count: String(count) }] };
+    }
+    if (text.startsWith("INSERT INTO turn_transitions")) {
+      // Отклонённый переход тоже пишется в журнал, но переходом не
+      // является: без этого различия тест принял бы отказ за успех.
+      if (!text.includes("'invalid_transition'")) {
+        probe.transitions.push({ to: String(values[2]), from: values[1] as string | null });
+      } else {
+        probe.rejected.push(String(values[2]));
+      }
+      return { rows: [] };
     }
     if (text.includes("FROM telegram_outbox")) {
       const status = probe.outbox.get(String(values[0]));
@@ -486,8 +531,9 @@ function recoveryHarness(probe: RecoveryProbe) {
       return { rows: [...counts].map(([status, count]) => ({ status, count: String(count) })) };
     }
     if (text.startsWith("UPDATE turn_runs")) {
+      // Жизненный цикл адресует строку по run_id и владельцу.
       const row = probe.runs.get(String(values[0]));
-      if (row) row.state = values[1];
+      if (row) row.state = values[2];
       return { rows: [] };
     }
     if (text.startsWith("INSERT INTO turn_recovery_attempts")) {
@@ -503,8 +549,18 @@ function recoveryHarness(probe: RecoveryProbe) {
     }
     throw new Error(`поддельная база не знает запроса: ${text.slice(0, 50)}`);
   };
-  const db = withTenantScopes({ query }) as never;
-  return new TurnRecoveryService(db, logger as never, new EffectJournal(db, logger as never, true), true);
+  const db = withTenantScopes({
+    query,
+    transaction: async <T>(work: (client: { query: typeof query }) => Promise<T>) =>
+      await work({ query }),
+  }) as never;
+  return new TurnRecoveryService(
+    db,
+    logger as never,
+    new EffectJournal(db, logger as never, true),
+    lifecycleFor(db),
+    true,
+  );
 }
 
 /**
@@ -569,6 +625,8 @@ test("инъекция сбоя в семи точках: ни одна не п�
       outbox: new Map(injection.outbox ? [[`outbox-${index}`, injection.outbox]] : []),
       effects: new Map([[runId, injection.effects]]),
       attempts: [],
+      transitions: [],
+      rejected: [],
     };
 
     const outcomes = await recoveryHarness(probe).sweep();
@@ -607,6 +665,8 @@ test("незакрытый побочный эффект запрещает по
     outbox: new Map(),
     effects: new Map([["run-x", ["running"]]]),
     attempts: [],
+    transitions: [],
+    rejected: [],
   };
 
   const [outcome] = await recoveryHarness(probe).sweep();
@@ -629,6 +689,8 @@ test("отменённый до сбоя ход не воскрешается", 
     outbox: new Map(),
     effects: new Map(),
     attempts: [],
+    transitions: [],
+    rejected: [],
   };
 
   const [outcome] = await recoveryHarness(probe).sweep();
@@ -642,6 +704,8 @@ test("выключенное восстановление не трогает н
     outbox: new Map(),
     effects: new Map(),
     attempts: [],
+    transitions: [],
+    rejected: [],
   };
   const query = async () => {
     throw new Error("выключенное восстановление обратилось к базе");
@@ -650,8 +714,246 @@ test("выключенное восстановление не трогает н
     withTenantScopes({ query }) as never,
     logger as never,
     new EffectJournal(withTenantScopes({ query }) as never, logger as never, false),
+    new TurnLifecycle(withTenantScopes({ query }) as never, logger as never, false),
     false,
   );
   assert.deepEqual(await service.sweep(), []);
   assert.equal(probe.attempts.length, 0);
+});
+
+test("защита от одновременного выполнения переживает повторяемый отказ", async () => {
+  const db = new FakeEffectDb();
+  const effects = journal(db);
+  const key = effectKey("run-race", "call-1", "save_task");
+  const input = {
+    key, runId: "run-race", userId: 42, toolName: "save_task", toolCallId: "call-1",
+  };
+
+  await effects.begin(input);
+  await effects.fail(key, 42, "Error", true);
+
+  // Первый забирает право на повтор...
+  const retry = await effects.begin(input);
+  assert.equal(retry.action, "execute");
+  assert.equal((retry as { attempt: number }).attempt, 2);
+
+  // ...второй его уже не получает. Прежнее условие `attempt === 1`
+  // отдавало бы ему `execute`, и действие выполнилось бы дважды.
+  const concurrent = await effects.begin(input);
+  assert.equal(concurrent.action, "skip");
+  assert.equal((concurrent as { reason: string }).reason, "in_flight");
+});
+
+test("повтор идёт через recovery_required и recovering, а не прыжком в очередь", async () => {
+  const probe: RecoveryProbe = {
+    runs: new Map([["run-r", {
+      run_id: "run-r",
+      user_id: "42",
+      state: "letta_processing",
+      attempt: 1,
+      outbox_id: null,
+      conversation_id: "conv-1",
+      lease_owner: "умерший",
+      cancel_requested_at: null,
+    }]]),
+    outbox: new Map(),
+    effects: new Map(),
+    attempts: [],
+    transitions: [],
+    rejected: [],
+  };
+
+  const [outcome] = await recoveryHarness(probe).sweep();
+  assert.equal(outcome!.decision, "retry");
+  // Состояния заведены ровно под этот путь, и прыжок сразу в `queued`
+  // оставил бы историю хода без объяснения, откуда он там взялся.
+  assert.deepEqual(
+    probe.transitions.map((item) => item.to),
+    ["failed_retryable", "recovery_required", "recovering", "queued"],
+  );
+  assert.deepEqual(probe.rejected, [], "путь повтора содержит переход, отклонённый графом");
+  assert.equal(probe.runs.get("run-r")!.state, "queued");
+});
+
+test("доставленный ход завершается, а не помечается отказом", async () => {
+  const probe: RecoveryProbe = {
+    runs: new Map([["run-d", {
+      run_id: "run-d",
+      user_id: "42",
+      state: "delivering",
+      attempt: 1,
+      outbox_id: "outbox-d",
+      conversation_id: "conv-1",
+      lease_owner: "умерший",
+      cancel_requested_at: null,
+    }]]),
+    outbox: new Map([["outbox-d", "sent"]]),
+    effects: new Map(),
+    attempts: [],
+    transitions: [],
+    rejected: [],
+  };
+
+  const [outcome] = await recoveryHarness(probe).sweep();
+  assert.equal(outcome!.decision, "abandon");
+  // Ответ дошёл — ход честно завершён. Помечать его `failed_terminal`
+  // значило бы записать успешную доставку отказом.
+  assert.deepEqual(probe.transitions.map((item) => item.to), ["delivered", "completed"]);
+  assert.deepEqual(probe.rejected, [], "решение шло через переход, отклонённый графом");
+  assert.equal(probe.runs.get("run-d")!.state, "completed");
+});
+
+test("ход не осматривается бесконечно: предел считается по попыткам восстановления", async () => {
+  const probe: RecoveryProbe = {
+    runs: new Map([["run-w", {
+      run_id: "run-w",
+      user_id: "42",
+      state: "tools_pending",
+      attempt: 1,
+      outbox_id: null,
+      conversation_id: "conv-1",
+      lease_owner: "умерший",
+      cancel_requested_at: null,
+    }]]),
+    outbox: new Map(),
+    effects: new Map([["run-w", ["running"]]]),
+    attempts: [],
+    transitions: [],
+    rejected: [],
+  };
+  const service = recoveryHarness(probe);
+
+  // Первые три захода ждут — эффект так и не закрылся.
+  for (let round = 0; round < 3; round += 1) {
+    const [outcome] = await service.sweep();
+    assert.equal(outcome!.decision, "wait", `заход ${round + 1}`);
+  }
+  // Четвёртый прекращает: иначе ход и таблица попыток росли бы вечно.
+  const [last] = await service.sweep();
+  assert.equal(last!.decision, "abandon");
+  assert.equal(probe.runs.get("run-w")!.state, "failed_terminal");
+});
+
+// ---------------------------------------------------------------------
+// 5. Отмена во время выполнения инструмента
+// ---------------------------------------------------------------------
+
+test("отменённый ход не выполняет побочный эффект инструмента", async () => {
+  const db = new FakeEffectDb();
+  let executed = 0;
+  const runtime = {
+    userId: 42,
+    telegramId: 4242,
+    conversationId: "conv-1",
+    agentId: "agent-1",
+    purpose: "chat",
+  };
+  const factory = new AgentToolFactory(
+    { vectorGoalsEnabled: false, todoistApiToken: "" } as never,
+    withTenantScopes({
+      query: db.query,
+      getAgentRuntimeContext: async () => runtime,
+    }) as never,
+    {} as never,
+    logger as never,
+    undefined,
+    undefined,
+    undefined,
+    journal(db),
+  );
+  const builder = (factory as unknown as {
+    builder: (id: string) => (
+      name: string,
+      label: string,
+      description: string,
+      parameters: unknown,
+      execute: () => Promise<unknown>,
+    ) => { execute: (id: string, args: unknown) => Promise<unknown> };
+  }).builder("conv-1");
+  const tool = builder("save_task", "Задача", "", {}, async () => {
+    executed += 1;
+    return { task_id: 1 };
+  });
+
+  // Ход отменён — инструмент не должен ничего сделать.
+  const cancelled = await runInTurn(
+    { runId: "run-cancel", recorded: true, isCancelled: async () => true },
+    async () => await tool.execute("call-1", {}),
+  );
+  assert.equal(executed, 0, "отменённый ход выполнил побочный эффект");
+  assert.match(JSON.stringify(cancelled), /отмен/);
+  assert.equal(db.rows.size, 0, "отменённый вызов оставил запись эффекта");
+
+  // Живой ход выполняет как обычно.
+  await runInTurn(
+    { runId: "run-live", recorded: true, isCancelled: async () => false },
+    async () => await tool.execute("call-2", {}),
+  );
+  assert.equal(executed, 1);
+});
+
+// ---------------------------------------------------------------------
+// 6. Потеря блокировки и перезапуск при активных ходах
+// ---------------------------------------------------------------------
+
+test("потеря блокировки посреди хода не закрывает его сессию", async () => {
+  // Блокировка живёт в Valkey и может истечь; сессия к этому отношения
+  // не имеет. Проверяем, что потеря лока не превращается в закрытие
+  // сессии посреди генерации — иначе один сбой Valkey рвал бы ходы.
+  const { service, sessions } = harness();
+  const internal = service as unknown as {
+    acquirePooled: (id: string) => Promise<{ activeTurns: number; closing: boolean }>;
+  };
+  const pooled = await internal.acquirePooled("conv-1");
+  pooled.activeTurns = 1;
+
+  // Внешний владелец лока пропал — сервис об этом узнаёт только по
+  // очередному продлению. Сессия при этом не трогается ничем.
+  assert.equal(service.closeSession("conv-1"), false);
+  assert.ok(sessions.has("conv-1"), "потеря блокировки закрыла активную сессию");
+  assert.equal(pooled.activeTurns, 1);
+});
+
+test("перезапуск при активных ходах: ход дописывается, а не обрывается", async () => {
+  const { service, sessions, made } = harness();
+  const internal = service as unknown as {
+    acquirePooled: (id: string) => Promise<{ activeTurns: number }>;
+  };
+  const busy = await internal.acquirePooled("conv-busy");
+  busy.activeTurns = 1;
+  const idle = await internal.acquirePooled("conv-idle");
+  idle.activeTurns = 0;
+
+  const stopping = service.drainSessions(400);
+  await new Promise((resolve) => setTimeout(resolve, 80));
+
+  // Простаивающая уже ушла, занятая — нет.
+  assert.ok(!sessions.has("conv-idle"), "простаивающая сессия не закрыта при остановке");
+  assert.ok(sessions.has("conv-busy"), "занятая сессия закрыта посреди хода");
+
+  busy.activeTurns = 0;
+  const outcome = await stopping;
+  assert.equal(outcome.forced, 0, "ход не успел дописать");
+  assert.ok(made.every((item) => item.state.closed), "не все сессии закрыты после остановки");
+});
+
+test("ход, начатый во время остановки, не обрывается на дедлайне", async () => {
+  const { service } = harness();
+  const internal = service as unknown as {
+    acquirePooled: (id: string) => Promise<{ activeTurns: number }>;
+  };
+  const old = await internal.acquirePooled("conv-old");
+  old.activeTurns = 1;
+
+  const stopping = service.drainSessions(150);
+  // Новый ход приходит уже во время окна и получает свою сессию.
+  const fresh = await internal.acquirePooled("conv-new");
+  fresh.activeTurns = 1;
+
+  const outcome = await stopping;
+  // Силой закрыта только та сессия, что была в пуле на входе: окно
+  // ничего не обещало ходу, начавшемуся посреди него, но и убивать его
+  // раньше срока незачем.
+  assert.equal(outcome.forced, 1, "силой закрыто не то количество сессий");
+  assert.equal(fresh.activeTurns, 1, "ход, начатый во время остановки, оборван");
 });

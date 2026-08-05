@@ -244,7 +244,13 @@ async function main(): Promise<void> {
     queue,
   );
 
-  const recovery = new TurnRecoveryService(db, logger, effects, config.turnRecoveryEnabled);
+  const recovery = new TurnRecoveryService(
+    db,
+    logger,
+    effects,
+    turns,
+    config.turnRecoveryEnabled,
+  );
   let recoveryTimer: NodeJS.Timeout | null = null;
 
   const payments = new LavaPayments(config, db, telegram, logger);
@@ -312,14 +318,19 @@ async function main(): Promise<void> {
       if (recoveryTimer) clearInterval(recoveryTimer);
       dispatcher.stop();
       inboxWorker.stop();
-      // Уже начатые ходы дописываются: аренда записи ещё наша, и
-      // бросить её посреди хода значит отдать её другому воркеру с
-      // наполовину выполненной работой.
-      await dispatcher.drain(config.shutdownDrainMs);
+      // Оба ожидания идут одновременно, а не по очереди: их сумма
+      // иначе превысила бы grace period контейнера, и SIGKILL пришёл бы
+      // посреди drain — то есть ожидание не сработало бы вовсе.
+      await Promise.all([
+        // Уже начатые ходы дописываются: аренда записи ещё наша, и
+        // бросить её посреди хода значит отдать её другому воркеру с
+        // наполовину выполненной работой.
+        dispatcher.drain(config.shutdownDrainMs),
+        config.safeSessionManager
+          ? letta.drainSessions(config.sessionDrainMs)
+          : Promise.resolve(),
+      ]);
       if (config.outboxEnabled) outbox.stop();
-      // Сессии уходят через drain: ход, который сейчас отвечает, имеет
-      // право договорить, а не оборваться на полуслове.
-      if (config.safeSessionManager) await letta.drainSessions(config.sessionDrainMs);
       letta.shutdown();
       await app.close();
       configEvents.disconnect();

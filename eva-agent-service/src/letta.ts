@@ -42,6 +42,12 @@ import type { Logger } from "./logger.js";
  */
 const SHARD_ID = `shard-0:${process.pid}`;
 
+/**
+ * Как часто спрашивать барьер отмены во время потока. Компромисс между
+ * задержкой обнаружения и нагрузкой на базу: событий в ходе сотни.
+ */
+const CANCEL_POLL_MS = 400;
+
 /** Every agent Evaself creates carries these, so they are findable from Letta alone. */
 export const EVASELF_TAG = "evaself";
 export const EVA_AGENT_TAG = "eva-companion";
@@ -65,6 +71,13 @@ export interface TurnResult {
   messageCount: number;
   agentId: string;
   conversationId: string | null;
+  /**
+   * Идентификаторы run из потока SDK. Нужны восстановлению: по ним
+   * ход опознаётся на стороне Letta. Сверку по ним Agent SDK не
+   * поддерживает — у него нет read-API по идентификатору, — но сам
+   * идентификатор он отдаёт, и терять его нельзя.
+   */
+  runIds: string[];
   durationMs: number;
 }
 
@@ -176,6 +189,7 @@ export function summarizeStream(messages: SDKMessage[]): Omit<TurnResult, "agent
   const reasoning: string[] = [];
   const toolCalls: string[] = [];
   const trace: Array<Record<string, unknown>> = [];
+  const runIds = new Set<string>();
   let stopReason: string | null = null;
   let usage: Record<string, unknown> | null = null;
 
@@ -195,6 +209,12 @@ export function summarizeStream(messages: SDKMessage[]): Omit<TurnResult, "agent
 
   for (const message of messages) {
     trace.push(sanitizeTraceMessage(message));
+    // `runId` приходит на сообщениях ассистента, вызовах инструментов и
+    // reasoning, `runIds` — на итоговом сообщении. Собираем отовсюду:
+    // ход может состоять из нескольких run.
+    const withRun = message as { runId?: string; runIds?: string[] };
+    if (withRun.runId) runIds.add(withRun.runId);
+    for (const id of withRun.runIds ?? []) runIds.add(id);
     switch (message.type) {
       case "assistant": {
         const raw = message as { content?: unknown; uuid?: string; otid?: string | null };
@@ -258,6 +278,7 @@ export function summarizeStream(messages: SDKMessage[]): Omit<TurnResult, "agent
     stopReason,
     usage,
     messageCount: messages.length,
+    runIds: [...runIds],
   };
 }
 
@@ -617,8 +638,16 @@ export class LettaService {
     if (pooled?.closing) {
       // Сессия уходит: дождаться её мы не можем, а переиспользовать
       // нельзя. Новый ход получит новую сессию, старая закроется, когда
-      // её ход закончится.
+      // её ход закончится. Если её уже никто не держит — закрываем
+      // прямо здесь: иначе объект сессии утёк бы вместе с соединением.
       this.sessions.delete(conversationId);
+      if (pooled.activeTurns === 0) {
+        try {
+          pooled.session.close();
+        } catch {
+          // Закрытие уходящей сессии не должно мешать новому ходу.
+        }
+      }
     }
 
     this.evictIdleSessions();
@@ -725,23 +754,32 @@ export class LettaService {
    * сессии закрываются силой — ждать бесконечно тоже нельзя.
    */
   async drainSessions(timeoutMs: number): Promise<{ drained: number; forced: number }> {
-    for (const pooled of this.sessions.values()) pooled.closing = true;
+    // Сила применяется только к тем сессиям, которые были в пуле на
+    // входе. Ход, начавшийся во время окна, получает новую сессию — и
+    // закрывать её на дедлайне значило бы оборвать ход, которому окно
+    // ещё ничего не обещало.
+    const initial = new Set<PooledSession>();
+    for (const pooled of this.sessions.values()) {
+      pooled.closing = true;
+      initial.add(pooled);
+    }
     const deadline = Date.now() + Math.max(0, timeoutMs);
     let drained = 0;
     while (Date.now() < deadline) {
-      for (const pooled of [...this.sessions.values()]) {
-        if (pooled.activeTurns === 0) {
+      for (const pooled of initial) {
+        if (pooled.activeTurns === 0 && this.sessions.has(pooled.conversationId)) {
           this.closeIfDrained(pooled);
           drained += 1;
         }
       }
-      if (this.sessions.size === 0) break;
+      if ([...initial].every((pooled) => !this.sessions.has(pooled.conversationId))) break;
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
-    const forced = this.sessions.size;
-    for (const id of [...this.sessions.keys()]) {
-      const pooled = this.sessions.get(id);
-      if (!pooled) continue;
+    let forced = 0;
+    for (const pooled of initial) {
+      if (!this.sessions.has(pooled.conversationId)) continue;
+      if (this.sessions.get(pooled.conversationId) !== pooled) continue;
+      forced += 1;
       pooled.activeTurns = 0;
       this.closeIfDrained(pooled);
     }
@@ -834,12 +872,19 @@ export class LettaService {
        * пользователю не уходит.
        */
       isCancelled?: () => Promise<boolean>;
+      /**
+       * Как часто спрашивать барьер. Вынесено параметром, чтобы тест
+       * проверял сам барьер, а не выдержку между опросами.
+       */
+      cancelPollMs?: number;
     } = {},
   ): Promise<TurnResult> {
     const startedAt = Date.now();
     const pooled = await this.acquirePooled(conversationId);
     const session = pooled.session;
     const collected: SDKMessage[] = [];
+    let lastCancelCheck = 0;
+    let cancelled = false;
     this.runningTurns.add(conversationId);
     // Счётчик поднимается до первого обращения к сессии и опускается в
     // finally: между этими точками сессию не вытеснит ни LRU, ни смена
@@ -864,7 +909,18 @@ export class LettaService {
 
         // Барьер отмены стоит до накопления сообщения: отменённый ход
         // не должен ни дособрать ответ, ни отдать его наружу.
-        if (options.isCancelled && await options.isCancelled()) {
+        //
+        // Спрашивается не чаще раза в CANCEL_POLL_MS: событий потока
+        // сотни, и отдельный запрос к базе на каждое превратил бы
+        // барьер в основной источник нагрузки. Задержка обнаружения
+        // отмены при этом ограничена той же величиной.
+        const now = Date.now();
+        const pollMs = options.cancelPollMs ?? CANCEL_POLL_MS;
+        if (options.isCancelled && now - lastCancelCheck >= pollMs) {
+          lastCancelCheck = now;
+          cancelled = await options.isCancelled();
+        }
+        if (cancelled) {
           await session.abort().catch(() => undefined);
           throw turnCancelled(`ход в ${conversationId} отменён`);
         }

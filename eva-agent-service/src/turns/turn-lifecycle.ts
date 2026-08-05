@@ -69,6 +69,8 @@ export interface TurnLinks {
   outboxId?: number | string | null;
   llmRequestId?: string | null;
   lettaSessionId?: string | null;
+  /** Идентификаторы run из потока Agent SDK. */
+  lettaRunIds?: string[] | null;
   traceId?: string | null;
   promptVersion?: string | null;
   flowVersion?: string | null;
@@ -321,6 +323,7 @@ export class TurnLifecycle {
     add("outbox_id", links.outboxId);
     add("llm_request_id", links.llmRequestId);
     add("letta_session_id", links.lettaSessionId);
+    add("letta_run_ids", links.lettaRunIds);
     add("trace_id", links.traceId);
     add("prompt_version", links.promptVersion);
     add("flow_version", links.flowVersion);

@@ -23,6 +23,7 @@ import type { Database } from "../db.js";
 import type { Logger } from "../logger.js";
 import type { EffectJournal } from "./effect-journal.js";
 import { isTurnState, TERMINAL_STATES, type TurnState } from "./states.js";
+import type { TurnHandle, TurnLifecycle } from "./turn-lifecycle.js";
 
 /** Что нашли про ход. Только факты, без интерпретации. */
 export interface TurnEvidence {
@@ -38,6 +39,8 @@ export interface TurnEvidence {
   conversationId: string | null;
   /** Побочные эффекты хода: сколько успешных и сколько незакрытых. */
   effects: { running: number; succeeded: number; failed: number };
+  /** Сколько раз этот ход уже осматривало восстановление. */
+  recoveries: number;
 }
 
 /**
@@ -84,10 +87,19 @@ interface StaleRow {
 export class TurnRecoveryService {
   private readonly options: RecoveryOptions;
 
+  /** Заход идёт один за раз: наложение разбирало бы одни и те же строки. */
+  private sweeping = false;
+
   constructor(
     private readonly db: Database,
     private readonly logger: Logger,
     private readonly effects: EffectJournal,
+    /**
+     * Тот же жизненный цикл, что ведёт ход. Восстановление меняет
+     * состояние только через него: переходы валидируются кодом, и
+     * второго пути их писать быть не должно.
+     */
+    private readonly lifecycle: TurnLifecycle,
     private readonly enabled: boolean,
     options: Partial<RecoveryOptions> = {},
   ) {
@@ -107,7 +119,8 @@ export class TurnRecoveryService {
    * нечем.
    */
   async sweep(): Promise<RecoveryOutcome[]> {
-    if (!this.enabled) return [];
+    if (!this.enabled || this.sweeping) return [];
+    this.sweeping = true;
     try {
       const stale = await this.findStale();
       const outcomes: RecoveryOutcome[] = [];
@@ -133,6 +146,8 @@ export class TurnRecoveryService {
         message: error instanceof Error ? error.message : String(error),
       });
       return [];
+    } finally {
+      this.sweeping = false;
     }
   }
 
@@ -151,10 +166,9 @@ export class TurnRecoveryService {
                AND state NOT IN ('completed', 'cancelled', 'failed_terminal')
                AND lease_expires_at IS NOT NULL
                AND lease_expires_at < now() - make_interval(secs => $1)
-               AND attempt <= $3
              ORDER BY updated_at
              LIMIT $2`,
-          [this.options.staleAfterSeconds, this.options.batchSize, this.options.maxAttempts],
+          [this.options.staleAfterSeconds, this.options.batchSize],
         );
         return rows;
       },
@@ -175,7 +189,22 @@ export class TurnRecoveryService {
       outboxPending: false,
       conversationId: row.conversation_id,
       effects: { running: 0, succeeded: 0, failed: 0 },
+      recoveries: 0,
     };
+
+    evidence.recoveries = await this.db.withSystemScope(
+      "turns.recovery.history",
+      async () => {
+        const { rows } = await this.db.query<{ count: string }>(
+          `
+            -- tenant: system — счётчик прошлых осмотров того же брошенного хода, найденного по истёкшей аренде
+            SELECT count(*) AS count FROM turn_recovery_attempts WHERE run_id = $1`,
+          [row.run_id],
+        );
+        return Number(rows[0]?.count ?? 0);
+      },
+      { crossUser: true },
+    );
 
     if (row.outbox_id) {
       const { rows } = await this.db.withSystemScope(
@@ -231,13 +260,17 @@ export class TurnRecoveryService {
     if (evidence.state === "result_received" || evidence.state === "outbox_committed") {
       return { decision: "deliver", reason: "результат получен, не хватает доставки" };
     }
+    if (evidence.recoveries >= this.options.maxAttempts) {
+      // Предел считается по попыткам ВОССТАНОВЛЕНИЯ, а не по попыткам
+      // доставки апдейта: `turn_runs.attempt` считает передоставки, и
+      // применять к нему этот предел значило бы мерить не то.
+      return { decision: "abandon", reason: "попытки восстановления исчерпаны" };
+    }
     if (evidence.effects.running > 0) {
       // Незакрытый побочный эффект означает, что мы не знаем, случился
-      // он или нет. Повтор мог бы сделать его вторым.
+      // он или нет. Повтор мог бы сделать его вторым. Бесконечным
+      // ожидание не станет: предел попыток проверен выше.
       return { decision: "wait", reason: "есть незакрытый побочный эффект" };
-    }
-    if (evidence.attempt >= this.options.maxAttempts) {
-      return { decision: "abandon", reason: "попытки восстановления исчерпаны" };
     }
     if (evidence.effects.succeeded > 0) {
       // Побочные эффекты уже случились, но ответа не было. Повтор
@@ -251,34 +284,61 @@ export class TurnRecoveryService {
     return { decision: "retry", reason: "завершённого хода не было" };
   }
 
-  /** Применить решение к записи хода. Повтор возвращает ход в очередь. */
+  /**
+   * Применить решение.
+   *
+   * Состояние меняется только через `TurnLifecycle`: он валидирует
+   * переход по графу и записывает его в журнал. Прямой `UPDATE` здесь
+   * означал бы второй способ писать состояния — тот самый, который
+   * `CLAUDE.md` запрещает фразой «переходы валидируются кодом».
+   *
+   * Путь повтора идёт через `recovery_required → recovering → queued`:
+   * эти состояния заведены ровно для него, и прыжок сразу в `queued`
+   * оставил бы историю хода без объяснения, откуда он там взялся.
+   */
   private async apply(evidence: TurnEvidence, decision: RecoveryDecision): Promise<void> {
-    const next: Record<RecoveryDecision, TurnState | null> = {
-      wait: null,
-      deliver: "delivering",
-      retry: "queued",
-      abandon: "failed_terminal",
+    if (decision === "wait") return;
+    if (evidence.userId === null) {
+      this.logger.warn("Состояние хода не изменено: владелец неизвестен", {
+        runId: evidence.runId,
+      });
+      return;
+    }
+    const handle: TurnHandle = {
+      runId: evidence.runId,
+      idempotencyKey: "",
+      duplicate: false,
+      state: evidence.state,
+      recorded: true,
+      owner: { column: "user_id", value: evidence.userId },
     };
-    const target = next[decision];
-    if (target === null) return;
-    await this.db.withSystemScope(
-      "turns.recovery.apply",
-      async () => await this.db.query(
-        `
-          -- tenant: system — восстановление правит собственную запись брошенного хода, найденную по истёкшей аренде
-          UPDATE turn_runs
-             SET state = $2,
-                 lease_owner = NULL,
-                 lease_expires_at = NULL,
-                 updated_at = now(),
-                 finished_at = CASE WHEN $3::boolean THEN now() ELSE finished_at END,
-                 error_code = CASE WHEN $3::boolean THEN COALESCE(error_code, 'recovery_abandoned')
-                                   ELSE error_code END
-           WHERE run_id = $1`,
-        [evidence.runId, target, target === "failed_terminal"],
-      ),
-      { crossUser: true },
-    );
+
+    const path: Record<Exclude<RecoveryDecision, "wait">, TurnState[]> = {
+      // Ответ дошёл: ход честно завершён, а не отказал.
+      deliver: evidence.delivered
+        ? ["delivered", "completed"]
+        : evidence.state === "outbox_committed"
+          ? ["delivering"]
+          : ["outbox_committed", "delivering"],
+      // Процесс упал — для графа это отказ, и путь начинается с него:
+      // `recovery_required` достижимо только из `failed_retryable`.
+      // Прыгать в него напрямую граф не даёт, и это правильно: ход,
+      // оказавшийся в восстановлении, действительно сорвался.
+      retry: ["failed_retryable", "recovery_required", "recovering", "queued"],
+      abandon: evidence.delivered
+        ? ["delivered", "completed"]
+        : ["failed_terminal"],
+    };
+
+    for (const state of path[decision]) {
+      const moved = await this.lifecycle.transition(handle, state, {
+        detail: { recovery: decision },
+        ...(state === "failed_terminal" ? { errorCode: "recovery_abandoned" } : {}),
+      });
+      // Переход отклонён графом — дальше по пути идти незачем: он
+      // строился от состояния, которого уже нет.
+      if (!moved) break;
+    }
   }
 
   /** Каждая попытка — отдельная запись. Пользовательского текста в ней нет. */

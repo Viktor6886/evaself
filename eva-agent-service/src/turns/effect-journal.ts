@@ -43,12 +43,16 @@ export interface EffectOutcome {
 function safeResult(value: unknown): EffectOutcome {
   if (value === null || value === undefined) return { result: null };
   if (typeof value === "number" || typeof value === "boolean") return { result: value };
-  if (typeof value === "object") {
-    // Объект берётся целиком только если в нём нет строк: строка от
-    // инструмента — это чаще всего пересказ пользовательских данных.
-    const flat = Object.values(value as Record<string, unknown>);
-    const plain = flat.every(
-      (item) => item === null || typeof item === "number" || typeof item === "boolean",
+  if (typeof value === "object" && !Array.isArray(value)) {
+    // Объект берётся целиком, только если в нём нет строк ни в
+    // значениях, ни в ключах: и то и другое может оказаться пересказом
+    // пользовательских данных. Ключ вида `{"мне снова тяжело": 1}`
+    // выглядит счётчиком, а является цитатой.
+    const entries = Object.entries(value as Record<string, unknown>);
+    const plain = entries.every(
+      ([key, item]) =>
+        /^[a-z0-9_]+$/i.test(key)
+        && (item === null || typeof item === "number" || typeof item === "boolean"),
     );
     if (plain) return { result: value };
   }
@@ -117,48 +121,71 @@ export class EffectJournal {
     }
     const owner = input.userId;
     try {
-      const { rows } = await this.scoped(owner, async () => await this.db.query<{
-        status: string;
-        attempt: number;
-        result: unknown;
-        result_hash: string | null;
-        error_code: string | null;
-        retryable: boolean;
-        inserted: boolean;
-      }>(
-        `INSERT INTO tool_effects (effect_key, run_id, user_id, tool_name, tool_call_id)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (effect_key) DO UPDATE
-           SET attempt = CASE
-                 WHEN tool_effects.status = 'failed' AND tool_effects.retryable
-                   THEN tool_effects.attempt + 1
-                 ELSE tool_effects.attempt
-               END,
-               status = CASE
-                 WHEN tool_effects.status = 'failed' AND tool_effects.retryable
-                   THEN 'running'
-                 ELSE tool_effects.status
-               END,
-               updated_at = now()
-         RETURNING status, attempt, result, result_hash, error_code, retryable,
-                   (xmax = 0) AS inserted`,
-        [input.key, input.runId, input.userId, input.toolName, input.toolCallId],
-      ));
-      const row = rows[0];
-      if (!row) return { action: "execute", attempt: 1 };
-      if (row.inserted) return { action: "execute", attempt: 1 };
-      if (row.status === "succeeded") {
-        return { action: "replay", result: row.result ?? { ok: true, replayed: true } };
-      }
-      if (row.status === "running" && row.attempt === 1) {
-        // Тот же вызов уже идёт. Повторять нельзя: два действия там, где
-        // ожидается одно, — это ровно то, ради чего журнал и заведён.
-        return { action: "skip", reason: "in_flight", errorCode: null };
-      }
-      if (row.status === "failed") {
-        return { action: "skip", reason: "not_retryable", errorCode: row.error_code };
-      }
-      return { action: "execute", attempt: row.attempt };
+      return await this.scoped(owner, async () => {
+        // Заявка на выполнение. `DO NOTHING` означает: если строка уже
+        // есть, мы её не трогаем — решение принимается отдельно, по её
+        // настоящему состоянию, а не по состоянию после нашей же
+        // правки. Иначе «повтор после отказа» и «чужой вызов идёт
+        // прямо сейчас» становятся неразличимы.
+        const claimed = await this.db.query<{ effect_key: string }>(
+          `INSERT INTO tool_effects (effect_key, run_id, user_id, tool_name, tool_call_id)
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (effect_key) DO NOTHING
+           RETURNING effect_key`,
+          [input.key, input.runId, owner, input.toolName, input.toolCallId],
+        );
+        if (claimed.rows.length > 0) return { action: "execute", attempt: 1 } as EffectDecision;
+
+        const { rows } = await this.db.query<{
+          status: string;
+          attempt: number;
+          result: unknown;
+          error_code: string | null;
+          retryable: boolean;
+        }>(
+          `SELECT status, attempt, result, error_code, retryable
+             FROM tool_effects
+            WHERE effect_key = $1 AND user_id = $2`,
+          [input.key, owner],
+        );
+        const row = rows[0];
+        if (!row) return { action: "execute", attempt: 1 } as EffectDecision;
+
+        if (row.status === "succeeded") {
+          return {
+            action: "replay",
+            result: row.result ?? { ok: true, replayed: true },
+          } as EffectDecision;
+        }
+        if (row.status === "running") {
+          // Тот же вызов идёт прямо сейчас. Номер попытки здесь ни при
+          // чём: `running` уже означает «идёт».
+          return { action: "skip", reason: "in_flight", errorCode: null } as EffectDecision;
+        }
+        if (!row.retryable) {
+          return {
+            action: "skip",
+            reason: "not_retryable",
+            errorCode: row.error_code,
+          } as EffectDecision;
+        }
+
+        // Повторяемый отказ. Право на повтор забирается условным
+        // обновлением: если его уже забрал другой исполнитель, строка
+        // не в статусе `failed`, и мы уходим ни с чем.
+        const retry = await this.db.query<{ attempt: number }>(
+          `UPDATE tool_effects
+              SET status = 'running', attempt = attempt + 1, updated_at = now()
+            WHERE effect_key = $1 AND user_id = $2 AND status = 'failed'
+            RETURNING attempt`,
+          [input.key, owner],
+        );
+        const attempt = retry.rows[0]?.attempt;
+        if (attempt === undefined) {
+          return { action: "skip", reason: "in_flight", errorCode: null } as EffectDecision;
+        }
+        return { action: "execute", attempt } as EffectDecision;
+      });
     } catch (error) {
       this.warn("Не удалось открыть запись эффекта", error, { tool: input.toolName });
       return { action: "execute", attempt: 1 };

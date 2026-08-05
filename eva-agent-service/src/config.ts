@@ -273,7 +273,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     // нечего, больше — человек ждёт ответа дольше, чем готов ждать.
     turnAggregationWindowMs: clampedInt("EVA_TURN_AGGREGATION_WINDOW_MS", 2_500, 2_500, 3_000),
     safeSessionManager: bool("EVA_SAFE_SESSION_MANAGER", false),
-    sessionDrainMs: clampedInt("EVA_SESSION_DRAIN_MS", 10_000, 500, 120_000),
+    sessionDrainMs: clampedInt("EVA_SESSION_DRAIN_MS", 8_000, 500, 120_000),
     turnRecoveryEnabled: bool("EVA_TURN_RECOVERY", false),
     turnRecoveryIntervalMs: clampedInt("EVA_TURN_RECOVERY_INTERVAL_MS", 30_000, 5_000, 600_000),
     shutdownDrainMs: clampedInt("EVA_SHUTDOWN_DRAIN_MS", 8_000, 1_000, 120_000),

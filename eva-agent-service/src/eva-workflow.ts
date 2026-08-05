@@ -452,7 +452,13 @@ export class EvaWorkflow {
         });
         // Отдельного идентификатора сессии Agent SDK не отдаёт: сессия
         // адресуется conversation, им и связываем.
-        await this.linkTurn(turnHandle, { lettaSessionId: answer.conversationId });
+        await this.linkTurn(turnHandle, {
+          lettaSessionId: answer.conversationId,
+          // Идентификаторы run отдаёт сам SDK. Не сохранять их значит
+          // выбрасывать единственное свидетельство, по которому ход
+          // опознаётся на стороне Letta.
+          lettaRunIds: answer.runIds,
+        });
         await this.db.markAgentUsed(link.agent_id, user.id);
         // Ход, где модель прислала несколько сообщений, — это агентный
         // цикл с проговариванием плана. В Telegram уходит только
@@ -470,6 +476,18 @@ export class EvaWorkflow {
         }
         this.highlights?.schedule(user.id, conversationId);
         const turn = answer;
+
+        // Последняя проверка барьера — перед самой доставкой. Между
+        // концом генерации и отправкой успевают выполниться связи,
+        // отметка агента и планирование выжимок; отмена, пришедшая в
+        // это окно, иначе не остановила бы ответ.
+        if (turnHandle && this.turns && await this.turns.isCancelled(turnHandle)) {
+          await this.moveTurn(turnHandle, "cancelling", { detail: { reason: "cancelled" } });
+          await this.moveTurn(turnHandle, "cancelled");
+          messageDraft.current?.stop();
+          messageDraft.current = null;
+          return { status: "ignored" };
+        }
 
         const reply = turn.reply.trim() || t(language, "emptyReply");
         if (responseMode === "text" || responseMode === "both") {
