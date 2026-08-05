@@ -21,22 +21,28 @@ const logger = {
   error() {},
 };
 
-/** Метрики, перечисленные в задании шага 3. */
-const REQUIRED = [
-  "eva_inbox_pending",
-  "eva_inbox_oldest_age_seconds",
-  "eva_outbox_pending",
-  "eva_outbox_oldest_age_seconds",
-  "eva_turns_active",
-  "eva_turns_active_total",
-  "eva_turn_wait_ms",
-  "eva_turn_duration_ms",
-  "eva_user_locks",
-  "eva_letta_sessions",
-  "eva_postgres_pool_connections",
-  "eva_event_loop_lag_seconds",
-  "eva_inbox_foreign_lock_releases_total",
-];
+/**
+ * Метрики, перечисленные в заданиях шагов 3 и 4, вместе с ожидаемым
+ * типом. Тип проверяется поимённо, а не «gauge или counter»: счётчик,
+ * молча ставший датчиком, — это сломанная арифметика в панели.
+ */
+const REQUIRED: Record<string, "gauge" | "counter"> = {
+  eva_inbox_pending: "gauge",
+  eva_inbox_oldest_age_seconds: "gauge",
+  eva_outbox_pending: "gauge",
+  eva_outbox_oldest_age_seconds: "gauge",
+  eva_turns_active: "gauge",
+  eva_turns_active_total: "gauge",
+  eva_turn_wait_ms: "gauge",
+  eva_turn_duration_ms: "gauge",
+  eva_user_locks: "gauge",
+  eva_letta_sessions: "gauge",
+  eva_postgres_pool_connections: "gauge",
+  eva_event_loop_lag_seconds: "gauge",
+  eva_turn_slots_used: "gauge",
+  eva_turn_slots_limit: "gauge",
+  eva_inbox_foreign_lock_releases_total: "counter",
+};
 
 function collector(query: (sql: string) => Promise<{ rows: unknown[] }>): MetricsCollector {
   return new MetricsCollector({
@@ -44,6 +50,11 @@ function collector(query: (sql: string) => Promise<{ rows: unknown[] }>): Metric
     sessions: () => ({ active: 2, idle: 3 }),
     locks: () => ({ held: 1, queued: 4 }),
     poolStats: () => ({ total: 10, idle: 7, waiting: 0 }),
+    slots: async () => ({
+      interactive: { used: 5, limit: 108 },
+      background: { used: 1, limit: 12 },
+      research: { used: 0, limit: 8 },
+    }),
     foreignLockReleases: () => 7,
     version: "0.3.0",
     turnLifecycleEnabled: true,
@@ -93,12 +104,9 @@ function parse(body: string): Map<string, number> {
 test("/metrics отдаёт все метрики, перечисленные в задании", async () => {
   const body = await collector(CANNED).render();
 
-  for (const name of REQUIRED) {
+  for (const [name, type] of Object.entries(REQUIRED)) {
     assert.ok(body.includes(`# HELP ${name} `), `нет HELP для ${name}`);
-    assert.ok(
-      body.includes(`# TYPE ${name} gauge`) || body.includes(`# TYPE ${name} counter`),
-      `нет TYPE для ${name}`,
-    );
+    assert.ok(body.includes(`# TYPE ${name} ${type}`), `${name} объявлена не как ${type}`);
   }
 
   const values = parse(body);
@@ -128,8 +136,8 @@ test("недоступная база не роняет выдачу: метри
   }).render();
 
   const values = parse(body);
-  for (const name of REQUIRED) {
-    assert.ok(body.includes(`# TYPE ${name} `), `метрика ${name} исчезла при сбое базы`);
+  for (const [name, type] of Object.entries(REQUIRED)) {
+    assert.ok(body.includes(`# TYPE ${name} ${type}`), `метрика ${name} исчезла при сбое базы`);
   }
   assert.equal(values.get("eva_inbox_pending"), 0);
   assert.equal(values.get("eva_turns_active_total"), 0);

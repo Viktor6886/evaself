@@ -474,13 +474,23 @@ interface WorkflowProbe {
   elapsedMs: number;
   /** Чем ход представился блокировке пользователя. */
   lockClaims: Array<Record<string, unknown>>;
+  /** Каким записям проставили владельца. */
+  attached: number[];
+  /** Что ушло в модель. */
+  prompts: string[];
 }
 
 async function runTelegramTurn(
   turns: TurnLifecycle | undefined,
-  options: { quota?: Array<Record<string, unknown>>; extraUpdates?: unknown[] } = {},
+  options: {
+    quota?: Array<Record<string, unknown>>;
+    extraUpdates?: unknown[];
+    onlyVoice?: boolean;
+  } = {},
 ): Promise<WorkflowProbe> {
   const sent: string[] = [];
+  const attached: number[] = [];
+  const prompts: string[] = [];
   const user = { id: 77, telegram_id: TELEGRAM_ID, state: "active", is_blocked: false };
   const link = { agent_id: "agent-1", conversation_id: "conv-1", user_id: user.id };
   const db = {
@@ -492,7 +502,9 @@ async function runTelegramTurn(
     bindScopeUserId() {},
     upsertUser: async () => user,
     getAgentLink: async () => link,
-    attachTelegramUpdateToUser: async () => {},
+    attachTelegramUpdateToUser: async (updateId: number) => {
+      attached.push(Number(updateId));
+    },
     getQuotaStatus: async () =>
       options.quota ?? [{ metric: "messages", remaining: 10 }],
     recordUserMessage: async () => {},
@@ -515,7 +527,9 @@ async function runTelegramTurn(
   };
   const letta = {
     promptVersion: "abcdef123456",
-    runTurn: async () => ({
+    runTurn: async (_conversationId: string, message: string) => {
+      prompts.push(String(message));
+      return {
       reply: "Понимаю. Расскажи, что было дальше.",
       reasoning: [],
       assistantGroups: 1,
@@ -528,7 +542,8 @@ async function runTelegramTurn(
       agentId: "agent-1",
       conversationId: "conv-1",
       durationMs: 1,
-    }),
+      };
+    },
   };
   const runtimeContext = {
     build: async () => ({
@@ -575,12 +590,21 @@ async function runTelegramTurn(
         message_id: 5,
         chat: { id: TELEGRAM_ID },
         from: { id: TELEGRAM_ID, first_name: "Анна" },
-        text: "мне снова тяжело собраться",
+        ...(options.onlyVoice
+          ? { voice: { file_id: "voice-only", file_unique_id: "voice-only" } }
+          : { text: "мне снова тяжело собраться" }),
       },
     },
   ];
   const result = await workflow.processAggregated(updates as never);
-  return { sent, result, elapsedMs: performance.now() - started, lockClaims };
+  return {
+    sent,
+    result,
+    elapsedMs: performance.now() - started,
+    lockClaims,
+    attached,
+    prompts,
+  };
 }
 
 test("теневая запись не меняет ответ пользователя и укладывается в бюджет", async () => {
@@ -711,9 +735,57 @@ test("объединённый ход не проносит голос мимо 
     ],
   });
 
-  assert.deepEqual(probe.result, { status: "ignored" }, "ход прошёл мимо квоты на голос");
-  assert.equal(probe.sent.length, 1, "человеку не сказали про исчерпанную квоту");
+  // Про исчерпанную квоту человеку сказали...
+  assert.ok(probe.sent.length >= 1, "человеку не сказали про исчерпанную квоту");
+  // ...но текст, написанный в том же окне, ответа заслуживает: молчать
+  // про него значит потерять сообщение.
+  assert.deepEqual(probe.result, { status: "completed", usageCharged: true });
+  assert.equal(probe.prompts.length, 1, "ход к модели не пошёл");
+  assert.ok(
+    probe.prompts[0]!.includes("мне снова тяжело собраться"),
+    "текст окна не дошёл до модели",
+  );
+  const row = [...store.rows.values()][0]!;
+  assert.equal(row.state, "completed");
+});
+
+test("окно из одного голосового при исчерпанной квоте прекращается целиком", async () => {
+  const store = new TurnStore();
+  const probe = await runTelegramTurn(lifecycle(store), {
+    quota: [
+      { metric: "messages", remaining: 10 },
+      { metric: "voice_minutes", remaining: 0 },
+    ],
+    onlyVoice: true,
+  });
+
+  assert.deepEqual(probe.result, { status: "ignored" });
+  assert.equal(probe.prompts.length, 0, "ход пошёл к модели без квоты на голос");
   const row = [...store.rows.values()][0]!;
   assert.equal(row.state, "cancelled");
   assert.equal(row.cancel_reason, "quota_voice");
+});
+
+test("владельца получает каждая запись объединённого окна", async () => {
+  const store = new TurnStore();
+  const probe = await runTelegramTurn(lifecycle(store), {
+    extraUpdates: [
+      {
+        update_id: 2999,
+        message: {
+          message_id: 3,
+          chat: { id: TELEGRAM_ID },
+          from: { id: TELEGRAM_ID, first_name: "Анна" },
+          text: "я хотел сказать",
+        },
+      },
+    ],
+  });
+
+  assert.deepEqual(probe.result, { status: "completed", usageCharged: true });
+  assert.deepEqual(
+    [...probe.attached].sort((left, right) => left - right),
+    [2999, 3001],
+    "присоединённая запись осталась без владельца",
+  );
 });

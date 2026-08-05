@@ -108,10 +108,16 @@ export class ParallelInboxDispatcher {
         return;
       }
       if (this.inFlight.size > 0) {
+        // Таймер снимается явно: иначе каждая итерация оставляла бы
+        // живой `setTimeout`, и выход процесса ждал бы их все.
+        let tick: NodeJS.Timeout | null = null;
         await Promise.race([
           Promise.all([...this.inFlight]),
-          new Promise((resolve) => setTimeout(resolve, 50)),
+          new Promise((resolve) => {
+            tick = setTimeout(resolve, 50);
+          }),
         ]);
+        if (tick) clearTimeout(tick);
       }
       if (this.polling) await new Promise((resolve) => setTimeout(resolve, 5));
     }
