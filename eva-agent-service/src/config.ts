@@ -94,6 +94,8 @@ export interface Config {
   turnSlotsTotal: number;
   turnAggregationDebounceMs: number;
   turnAggregationWindowMs: number;
+  /** Сколько ждать завершения уже начатых ходов при остановке сервиса. */
+  shutdownDrainMs: number;
 
   lavaWebhookUser: string;
   lavaWebhookPassword: string;
@@ -255,6 +257,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     // Потолок окна ограничен диапазоном из задания: меньше — объединять
     // нечего, больше — человек ждёт ответа дольше, чем готов ждать.
     turnAggregationWindowMs: clampedInt("EVA_TURN_AGGREGATION_WINDOW_MS", 2_500, 2_500, 3_000),
+    shutdownDrainMs: clampedInt("EVA_SHUTDOWN_DRAIN_MS", 15_000, 1_000, 120_000),
 
     lavaWebhookUser: str("LAVA_WEBHOOK_USER"),
     lavaWebhookPassword: str("LAVA_WEBHOOK_PASSWORD"),
@@ -281,6 +284,16 @@ export function configWarnings(config: Config): string[] {
       `EVA_AGENT_LOCK_TTL (${config.lockTtlSeconds} с) не больше ` +
         `EVA_AGENT_TURN_TIMEOUT_MS (${config.turnTimeoutMs} мс): лок держится только ` +
         "за счёт фонового продления. Рекомендуется TTL > таймаута хода.",
+    );
+  }
+  // Флаг, который ничего не включает, — худшая ступень rollout: он
+  // выглядит включённым и не делает ничего. Объединение живёт внутри
+  // параллельного диспетчера и без него не работает.
+  if (config.turnAggregationEnabled && !config.parallelInboxEnabled) {
+    warnings.push(
+      "EVA_TURN_AGGREGATION включён, а EVA_PARALLEL_INBOX выключен: "
+        + "объединение быстрых сообщений работает только в параллельном "
+        + "диспетчере и сейчас не действует",
     );
   }
   if (config.telegramBotToken && !config.telegramWebhookSecret) {

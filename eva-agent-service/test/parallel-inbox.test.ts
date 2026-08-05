@@ -940,3 +940,33 @@ test("оборванное окно помечается отдельной пр
   assert.equal(collected.stop, "interrupted", "отказ базы неотличим от границы темы");
   assert.deepEqual(collected.records.map((record) => record.updateId), [191]);
 });
+
+test("остановка не ждёт зависший ход дольше отведённого срока", async () => {
+  const inbox = new FakeInbox();
+  inbox.enqueueUpdate(textUpdate(201, 4_600, "сообщение"), 0);
+
+  let unblock: (() => void) | null = null;
+  const stuck = new Promise<void>((resolve) => {
+    unblock = resolve;
+  });
+  const dispatcher = new ParallelInboxDispatcher(
+    inbox as never,
+    async () => {
+      await stuck;
+      return { status: "completed" };
+    },
+    logger,
+    OPTIONS,
+  );
+
+  await dispatcher.tick();
+  dispatcher.stop();
+
+  const started = Date.now();
+  await dispatcher.drain(120);
+  const waited = Date.now() - started;
+
+  assert.ok(waited < 1_000, `остановка ждала ${waited} мс вместо отведённых 120`);
+  unblock!();
+  await dispatcher.drain(1_000);
+});

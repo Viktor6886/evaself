@@ -300,7 +300,7 @@ async function main(): Promise<void> {
       // Уже начатые ходы дописываются: аренда записи ещё наша, и
       // бросить её посреди хода значит отдать её другому воркеру с
       // наполовину выполненной работой.
-      await dispatcher.drain();
+      await dispatcher.drain(config.shutdownDrainMs);
       if (config.outboxEnabled) outbox.stop();
       letta.shutdown();
       await app.close();

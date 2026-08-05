@@ -93,9 +93,26 @@ export class ParallelInboxDispatcher {
    * чем эти записи попадут в `inFlight`, значит бросить их до истечения
    * аренды.
    */
-  async drain(): Promise<void> {
+  async drain(timeoutMs?: number): Promise<void> {
+    const deadline = timeoutMs === undefined ? null : Date.now() + timeoutMs;
     while (this.polling || this.inFlight.size > 0) {
-      if (this.inFlight.size > 0) await Promise.all([...this.inFlight]);
+      if (deadline !== null && Date.now() >= deadline) {
+        // Ждать бесконечно нельзя: зависший ход задержал бы SIGTERM до
+        // того, как контейнер убьют силой. Аренда записей ещё наша, но
+        // она истечёт, и их подберёт следующий воркер — это дороже
+        // задержки остановки, но дешевле убийства процесса на полуслове.
+        this.logger.warn("Остановка не дождалась завершения ходов", {
+          active: this.inFlight.size,
+          polling: this.polling,
+        });
+        return;
+      }
+      if (this.inFlight.size > 0) {
+        await Promise.race([
+          Promise.all([...this.inFlight]),
+          new Promise((resolve) => setTimeout(resolve, 50)),
+        ]);
+      }
       if (this.polling) await new Promise((resolve) => setTimeout(resolve, 5));
     }
   }

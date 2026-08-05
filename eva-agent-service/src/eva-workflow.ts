@@ -200,7 +200,12 @@ export class EvaWorkflow {
           async (): Promise<InboxResult> => {
         const { user, link } = await this.ensureUserAndAgent(update);
         const language = preferredResponseLanguage(user);
-        await this.db.attachTelegramUpdateToUser(update.updateId, user.id);
+        // Владельца получает каждая запись окна, а не только та, на
+        // которую отвечаем: иначе присоединённые строки остались бы без
+        // `user_id` и выпали из выборок по внутреннему идентификатору.
+        for (const part of [...earlier, update]) {
+          await this.db.attachTelegramUpdateToUser(part.updateId, user.id);
+        }
         await this.linkTurn(turnHandle, {
           userId: user.id,
           agentId: link.agent_id,
@@ -245,7 +250,11 @@ export class EvaWorkflow {
           await this.stopTurn(turnHandle, "quota_messages");
           return { status: "ignored" };
         }
-        if (update.kind === "voice") {
+        // Голос проверяется по всему окну, а не по последнему сообщению.
+        // Расшифровываются и списывают минуты все части объединённого
+        // хода, поэтому «голосовое плюс короткий текст» иначе проходило
+        // бы мимо гейта и тратило минуты сверх исчерпанной квоты.
+        if ([...earlier, update].some((part) => part.kind === "voice")) {
           const voiceQuota = quota.find((item) => item.metric === "voice_minutes") as
             | { remaining?: number | string | null }
             | undefined;

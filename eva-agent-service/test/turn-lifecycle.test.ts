@@ -476,7 +476,10 @@ interface WorkflowProbe {
   lockClaims: Array<Record<string, unknown>>;
 }
 
-async function runTelegramTurn(turns: TurnLifecycle | undefined): Promise<WorkflowProbe> {
+async function runTelegramTurn(
+  turns: TurnLifecycle | undefined,
+  options: { quota?: Array<Record<string, unknown>>; extraUpdates?: unknown[] } = {},
+): Promise<WorkflowProbe> {
   const sent: string[] = [];
   const user = { id: 77, telegram_id: TELEGRAM_ID, state: "active", is_blocked: false };
   const link = { agent_id: "agent-1", conversation_id: "conv-1", user_id: user.id };
@@ -490,7 +493,8 @@ async function runTelegramTurn(turns: TurnLifecycle | undefined): Promise<Workfl
     upsertUser: async () => user,
     getAgentLink: async () => link,
     attachTelegramUpdateToUser: async () => {},
-    getQuotaStatus: async () => [{ metric: "messages", remaining: 10 }],
+    getQuotaStatus: async () =>
+      options.quota ?? [{ metric: "messages", remaining: 10 }],
     recordUserMessage: async () => {},
     markAgentUsed: async () => {},
     incrementUsage: async () => {},
@@ -563,15 +567,19 @@ async function runTelegramTurn(turns: TurnLifecycle | undefined): Promise<Workfl
   );
 
   const started = performance.now();
-  const result = await workflow.processQueued({
-    update_id: 3001,
-    message: {
-      message_id: 5,
-      chat: { id: TELEGRAM_ID },
-      from: { id: TELEGRAM_ID, first_name: "Анна" },
-      text: "мне снова тяжело собраться",
+  const updates = [
+    ...(options.extraUpdates ?? []),
+    {
+      update_id: 3001,
+      message: {
+        message_id: 5,
+        chat: { id: TELEGRAM_ID },
+        from: { id: TELEGRAM_ID, first_name: "Анна" },
+        text: "мне снова тяжело собраться",
+      },
     },
-  } as never);
+  ];
+  const result = await workflow.processAggregated(updates as never);
   return { sent, result, elapsedMs: performance.now() - started, lockClaims };
 }
 
@@ -678,4 +686,34 @@ test("при выключенной записи хода в блокировк�
     null,
     "в блокировку ушёл run_id, которому не соответствует ни одна строка",
   );
+});
+
+test("объединённый ход не проносит голос мимо исчерпанной квоты минут", async () => {
+  // Голосовое плюс быстрый текст: отвечаем на текст, но расшифровать
+  // придётся и голос. Гейт, смотрящий только на последнее сообщение,
+  // пропустил бы списание минут сверх нуля.
+  const store = new TurnStore();
+  const probe = await runTelegramTurn(lifecycle(store), {
+    quota: [
+      { metric: "messages", remaining: 10 },
+      { metric: "voice_minutes", remaining: 0 },
+    ],
+    extraUpdates: [
+      {
+        update_id: 3000,
+        message: {
+          message_id: 4,
+          chat: { id: TELEGRAM_ID },
+          from: { id: TELEGRAM_ID, first_name: "Анна" },
+          voice: { file_id: "voice-1", file_unique_id: "voice-1" },
+        },
+      },
+    ],
+  });
+
+  assert.deepEqual(probe.result, { status: "ignored" }, "ход прошёл мимо квоты на голос");
+  assert.equal(probe.sent.length, 1, "человеку не сказали про исчерпанную квоту");
+  const row = [...store.rows.values()][0]!;
+  assert.equal(row.state, "cancelled");
+  assert.equal(row.cancel_reason, "quota_voice");
 });

@@ -156,13 +156,14 @@ for file in "$ROOT_DIR"/postgres/migrations/*.sql; do
 		check_failed "$name does not record itself in schema_migrations"
 	elif grep -q 'BEGIN;' "$file" && grep -q 'COMMIT;' "$file"; then
 		ok "$name (transactional, records its version)"
-	elif grep -q 'CREATE INDEX CONCURRENTLY' "$file"; then
+	elif grep -qE '^[[:space:]]*(CREATE|DROP) INDEX CONCURRENTLY' "$file"; then
 		# CREATE INDEX CONCURRENTLY внутри транзакции невозможен, а
 		# CLAUDE.md требует строить большие индексы именно так. Такой
 		# файл обязан быть нетранзакционным — это не упущение автора, а
 		# единственный способ выполнить правило. Условие узкое
 		# намеренно: без CONCURRENTLY отсутствие транзакции по-прежнему
-		# ошибка.
+		# ошибка, и ищется настоящая команда в начале строки, а не
+		# упоминание в комментарии.
 		ok "$name (non-transactional: CREATE INDEX CONCURRENTLY)"
 	else
 		check_failed "$name is not wrapped in a transaction"
