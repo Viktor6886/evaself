@@ -315,6 +315,16 @@ export function configWarnings(config: Config): string[] {
         + "диспетчере и сейчас не действует",
     );
   }
+  // Восстановление меняет состояние только через жизненный цикл, а он
+  // при выключенном флаге не пишет ничего: решения принимались бы,
+  // не применялись и оставляли по строке в журнале попыток каждый заход.
+  if (config.turnRecoveryEnabled && !config.turnLifecycleEnabled) {
+    warnings.push(
+      "EVA_TURN_RECOVERY включён, а EVA_TURN_LIFECYCLE выключен: "
+        + "восстановление меняет состояние только через жизненный цикл "
+        + "и без него не запускается",
+    );
+  }
   if (config.telegramBotToken && !config.telegramWebhookSecret) {
     warnings.push("EVA_TELEGRAM_WEBHOOK_SECRET пуст — webhook Telegram будет отклонять все запросы");
   }

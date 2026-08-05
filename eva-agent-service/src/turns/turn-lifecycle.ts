@@ -335,6 +335,16 @@ export class TurnLifecycle {
     const values: unknown[] = [handle.runId, owner.value];
     const assignments = fields.map(([column, value]) => {
       values.push(value);
+      // Идентификаторы run накапливаются, а не заменяются: у повторной
+      // обработки того же события свои run, и замена стёрла бы
+      // свидетельство первой попытки — ровно то, ради чего они и
+      // сохраняются.
+      if (column === "letta_run_ids") {
+        return `${column} = (
+          SELECT array_agg(DISTINCT item)
+            FROM unnest(COALESCE(${column}, '{}'::text[]) || $${values.length}::text[]) AS item
+        )`;
+      }
       return `${column} = COALESCE($${values.length}, ${column})`;
     });
     try {

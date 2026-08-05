@@ -22,8 +22,8 @@
 import type { Database } from "../db.js";
 import type { Logger } from "../logger.js";
 import type { EffectJournal } from "./effect-journal.js";
-import { isTurnState, pathBetween, TERMINAL_STATES, type TurnState } from "./states.js";
-import type { TurnHandle, TurnLifecycle } from "./turn-lifecycle.js";
+import { closingPath, isTurnState, TERMINAL_STATES, type TurnState } from "./states.js";
+import type { TurnHandle, TurnLifecycle, TurnOwner } from "./turn-lifecycle.js";
 
 /** Что нашли про ход. Только факты, без интерпретации. */
 export interface TurnEvidence {
@@ -43,6 +43,15 @@ export interface TurnEvidence {
   recoveries: number;
   /** Отмену запросили до сбоя: ход не отказал, его остановили. */
   cancelRequested: boolean;
+  /**
+   * Владелец записи — тот же, что у самого хода.
+   *
+   * Внутренний `user_id` появляется только после канонической выборки
+   * пользователя, а аренда ставится раньше. Ход, оборвавшийся в это
+   * окно, владельца в `user_id` не имеет — но имеет проверенный
+   * `telegram_user_id`, и по нему его запись доступна.
+   */
+  owner: TurnOwner | null;
 }
 
 /**
@@ -78,6 +87,7 @@ export const RECOVERY_DEFAULTS: RecoveryOptions = {
 interface StaleRow {
   run_id: string;
   user_id: string | null;
+  telegram_user_id: string | null;
   state: string;
   attempt: number;
   outbox_id: string | null;
@@ -161,8 +171,8 @@ export class TurnRecoveryService {
         const { rows } = await this.db.query<StaleRow>(
           `
             -- tenant: system — восстановление разбирает брошенные ходы всех пользователей: строки берутся по истёкшей аренде, а не по запросу человека
-            SELECT run_id, user_id, state, attempt, outbox_id, conversation_id,
-                   lease_owner, cancel_requested_at
+            SELECT run_id, user_id, telegram_user_id, state, attempt, outbox_id,
+                   conversation_id, lease_owner, cancel_requested_at
               FROM turn_runs
              WHERE finished_at IS NULL
                AND state NOT IN ('completed', 'cancelled', 'failed_terminal')
@@ -181,6 +191,15 @@ export class TurnRecoveryService {
   /** Собрать следы хода. Ничего не решает — только смотрит. */
   private async collect(row: StaleRow): Promise<TurnEvidence> {
     const userId = row.user_id === null ? null : Number(row.user_id);
+    const telegramId = row.telegram_user_id === null ? null : Number(row.telegram_user_id);
+    // Тот же порядок, что у `ownerOf` в жизненном цикле: сначала
+    // проверенный Telegram-идентификатор, затем внутренний.
+    const owner: TurnOwner | null =
+      telegramId !== null && Number.isFinite(telegramId)
+        ? { column: "telegram_user_id", value: telegramId }
+        : userId !== null && Number.isFinite(userId)
+          ? { column: "user_id", value: userId }
+          : null;
     const evidence: TurnEvidence = {
       runId: row.run_id,
       userId,
@@ -193,6 +212,7 @@ export class TurnRecoveryService {
       effects: { running: 0, succeeded: 0, failed: 0 },
       recoveries: 0,
       cancelRequested: row.cancel_requested_at !== null,
+      owner,
     };
 
     evidence.recoveries = await this.db.withSystemScope(
@@ -322,12 +342,18 @@ export class TurnRecoveryService {
       return position === -1 ? route : route.slice(position + 1);
     }
     if (decision === "deliver") return ["delivering"];
+    // Ответ дошёл — ход честно завершён, и это сильнее отмены: отменить
+    // можно ожидание ответа, а не случившееся.
+    if (evidence.delivered) return ["completed"];
     // Отмену просили до сбоя: ход не отказал, его остановили, и в
     // канонических состояниях для этого есть своя пара.
     if (evidence.cancelRequested) return ["cancelling", "cancelled"];
-    // Ответ дошёл: ход честно завершён, а не отказал.
-    if (evidence.delivered) return ["completed"];
-    return ["failed_terminal"];
+    // Оборванный ход помечается отказом, но **не терминальным**.
+    // Durable ingress переобработает тот же update независимо от этого
+    // решения (второй ответ не даёт ключ идемпотентности outbox), а из
+    // терминального состояния граф не выпускает: каждый переход
+    // законной переобработки оказался бы отклонён.
+    return ["failed_retryable"];
   }
 
   /**
@@ -346,7 +372,10 @@ export class TurnRecoveryService {
    */
   private async apply(evidence: TurnEvidence, decision: RecoveryDecision): Promise<void> {
     if (decision === "wait") return;
-    if (evidence.userId === null) {
+    if (evidence.owner === null) {
+      // Без владельца строка недоступна: адресовать её одним `run_id`
+      // граница арендатора не даст. Ни состояние, ни аренду тронуть
+      // нечем — остаётся сказать об этом вслух.
       this.logger.warn("Состояние хода не изменено: владелец неизвестен", {
         runId: evidence.runId,
       });
@@ -358,22 +387,27 @@ export class TurnRecoveryService {
       duplicate: false,
       state: evidence.state,
       recorded: true,
-      owner: { column: "user_id", value: evidence.userId },
+      owner: evidence.owner,
     };
 
     try {
       let from = evidence.state;
       for (const target of this.waypoints(evidence, decision)) {
         if (from === null) break;
-        const path = pathBetween(from, target);
+        // Путь ищется по подграфу восстановления: вперёд ход двигает
+        // он сам, а не тот, кто разбирает его следы.
+        let path = closingPath(from, target);
         if (path === null) {
-          this.logger.warn("Восстановление не нашло пути по графу состояний", {
+          // Цели не достичь, не сочинив прогресса. Тогда честнее
+          // отметить обрыв: это ребро есть из любого незавершённого
+          // состояния, и оно ничего не выдумывает.
+          this.logger.warn("Восстановление не нашло пути, ход помечен обрывом", {
             runId: evidence.runId,
             from,
             to: target,
             decision,
           });
-          break;
+          path = from === "failed_retryable" ? [] : ["failed_retryable"];
         }
         let stopped = false;
         for (const state of path) {

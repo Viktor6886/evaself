@@ -626,7 +626,7 @@ const INJECTION_POINTS: Array<{
     outbox: null,
     effects: [],
     decision: "abandon",
-    ends: "failed_terminal",
+    ends: "failed_retryable",
   },
   {
     point: "до фиксации outbox",
@@ -634,7 +634,7 @@ const INJECTION_POINTS: Array<{
     outbox: null,
     effects: ["succeeded"],
     decision: "abandon",
-    ends: "failed_terminal",
+    ends: "failed_retryable",
   },
   {
     point: "после фиксации outbox",
@@ -822,6 +822,103 @@ test("ни одно состояние сбоя не даёт отклонённ
   assert.deepEqual(stuck, [], `состояние изменилось после выхода из выборки: ${stuck.join(", ")}`);
 });
 
+test("восстановление не сочиняет ходу прогресса, которого не было", async () => {
+  // Законность перехода — не то же самое, что его правдивость. Путь
+  // `failed_retryable → queued → claimed → … → result_received →
+  // completed` законен по рёбрам и целиком выдуман: он утверждает, что
+  // ход собрал контекст и получил ответ модели, тогда как он оборвался.
+  // Восстановлению разрешено только закрывать ход, а не двигать вперёд.
+  const forbidden = new Set([
+    "claimed",
+    "context_building",
+    "context_built",
+    "sent_to_letta",
+    "letta_processing",
+    "tools_pending",
+    "approval_pending",
+    "result_received",
+    "outbox_committed",
+  ]);
+  const offences: string[] = [];
+  for (const state of TURN_STATES) {
+    if (TERMINAL_STATES.has(state)) continue;
+    for (const outbox of [null, "pending", "sent"]) {
+      for (const cancelled of [false, true]) {
+        const runId = "run-truth";
+        const probe: RecoveryProbe = {
+          runs: new Map([[runId, {
+            run_id: runId,
+            user_id: "42",
+            telegram_user_id: "777",
+            state,
+            attempt: 1,
+            outbox_id: outbox ? "outbox-truth" : null,
+            conversation_id: "conv-1",
+            lease_owner: "умерший",
+            cancel_requested_at: cancelled ? new Date() : null,
+          }]]),
+          outbox: new Map(outbox ? [["outbox-truth", outbox]] : []),
+          effects: new Map(),
+          attempts: [],
+          transitions: [],
+          rejected: [],
+          released: new Set(),
+        };
+        await recoveryHarness(probe).sweep();
+        const invented = probe.transitions.map((item) => item.to).filter((to) => forbidden.has(to));
+        if (invented.length > 0) {
+          offences.push(`${state}/outbox=${outbox ?? "нет"}: ${invented.join(" -> ")}`);
+        }
+        // Длина пути тоже под присмотром. Самый длинный законный путь —
+        // возврат в очередь: `failed_retryable → recovery_required →
+        // recovering → queued`, четыре перехода. Всё, что длиннее, —
+        // прогулка по жизненному циклу.
+        if (probe.transitions.length > 4) {
+          offences.push(
+            `${state}/outbox=${outbox ?? "нет"}: путь из ${probe.transitions.length} переходов`,
+          );
+        }
+      }
+    }
+  }
+  assert.deepEqual(offences, [], `восстановление приписало ходу прогресс: ${offences.join("; ")}`);
+});
+
+test("ход без внутреннего user_id разбирается по telegram_user_id", async () => {
+  // Аренда ставится раньше, чем становится известен `users.id`: ход,
+  // оборвавшийся в это окно, владельца в `user_id` не имеет. Если его
+  // не опознать по Telegram-идентификатору, аренду снять нечем — и он
+  // будет осматриваться вечно, стоя в начале выборки.
+  const runId = "run-no-user";
+  const probe: RecoveryProbe = {
+    runs: new Map([[runId, {
+      run_id: runId,
+      user_id: null,
+      telegram_user_id: "777",
+      state: "claimed",
+      attempt: 1,
+      outbox_id: null,
+      conversation_id: null,
+      lease_owner: "умерший",
+      cancel_requested_at: null,
+    }]]),
+    outbox: new Map(),
+    effects: new Map(),
+    attempts: [],
+    transitions: [],
+    rejected: [],
+    released: new Set(),
+  };
+  const service = recoveryHarness(probe);
+  const [outcome] = await service.sweep();
+  assert.equal(outcome!.decision, "retry");
+  assert.equal(probe.runs.get(runId)!.state, "queued", "ход без user_id не сдвинулся");
+  assert.ok(probe.released!.has(runId), "аренда не снята у хода без user_id");
+  assert.deepEqual(probe.rejected, []);
+  // И он выходит из выборки, а не осматривается вечно.
+  assert.deepEqual(await service.sweep(), [], "ход без user_id вернулся в выборку");
+});
+
 test("ожидание ограничено пределом попыток и не держит ход вечно", async () => {
   // Единственное решение, которое аренду не снимает, — `wait`. Значит
   // именно оно обязано упираться в предел, иначе ход с незакрытым
@@ -856,7 +953,9 @@ test("ожидание ограничено пределом попыток и �
     ["wait", "wait", "wait", "abandon"],
     `ожидание не упёрлось в предел: ${decisions.join(", ")}`,
   );
-  assert.equal(probe.runs.get(runId)!.state, "failed_terminal");
+  // Обрыв, но не терминальное состояние: тот же update ingress
+  // переобработает, и из терминального графа его бы не выпустил.
+  assert.equal(probe.runs.get(runId)!.state, "failed_retryable");
   assert.deepEqual(probe.rejected, []);
   assert.ok(probe.released!.has(runId), "аренда не снята после исчерпания попыток");
 });
@@ -1053,7 +1152,7 @@ test("ход не осматривается бесконечно: предел 
   // Четвёртый прекращает: иначе ход и таблица попыток росли бы вечно.
   const [last] = await service.sweep();
   assert.equal(last!.decision, "abandon");
-  assert.equal(probe.runs.get("run-w")!.state, "failed_terminal");
+  assert.equal(probe.runs.get("run-w")!.state, "failed_retryable");
 });
 
 // ---------------------------------------------------------------------

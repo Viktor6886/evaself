@@ -290,13 +290,10 @@ async function main(): Promise<void> {
   if (config.outboxEnabled) outbox.start();
   if (config.parallelInboxEnabled) dispatcher.start();
   else inboxWorker.start();
-  if (config.turnRecoveryEnabled && !turns.active) {
-    // Восстановление меняет состояние только через жизненный цикл, а он
-    // при выключенном флаге не пишет ничего. Заход в этом сочетании
-    // решения принимал бы, применить не мог и оставлял бы по строке в
-    // журнале попыток каждые тридцать секунд.
-    logger.warn("Восстановление ходов не запущено: EVA_TURN_LIFECYCLE выключен");
-  } else if (config.turnRecoveryEnabled) {
+  // Сочетание флагов проверяет `configWarnings`: заход без жизненного
+  // цикла принимал бы решения, применить их не мог и оставлял бы по
+  // строке в журнале попыток каждые тридцать секунд.
+  if (config.turnRecoveryEnabled && turns.active) {
     recoveryTimer = setInterval(() => void recovery.sweep(), config.turnRecoveryIntervalMs);
     recoveryTimer.unref();
   }

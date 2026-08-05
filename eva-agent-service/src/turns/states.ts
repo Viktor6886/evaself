@@ -79,12 +79,26 @@ const RECOVERY_PATH: ReadonlyArray<readonly [TurnState, TurnState]> = [
   ["cancelling", "cancelled"],
 ];
 
-function buildGraph(): Map<TurnState, ReadonlySet<TurnState>> {
+/**
+ * Рёбра, которыми ход можно **закрывать**, но нельзя двигать вперёд.
+ *
+ * Разница принципиальная. Довести до конца уже полученный результат —
+ * это дописать то, что случилось. Пройти `claimed → context_building →
+ * … → result_received` задним числом — это сочинить, будто ход собрал
+ * контекст и получил ответ модели, когда он на самом деле оборвался.
+ */
+const CLOSING_PATH: ReadonlyArray<readonly [TurnState, TurnState]> = [
+  ["outbox_committed", "delivering"],
+  ["delivering", "delivered"],
+  ["delivered", "completed"],
+];
+
+function buildGraph(
+  edges: ReadonlyArray<readonly [TurnState, TurnState]>,
+): Map<TurnState, ReadonlySet<TurnState>> {
   const graph = new Map<TurnState, Set<TurnState>>();
   for (const state of TURN_STATES) graph.set(state, new Set());
-  for (const [from, to] of [...HAPPY_PATH, ...RECOVERY_PATH]) {
-    graph.get(from)!.add(to);
-  }
+  for (const [from, to] of edges) graph.get(from)!.add(to);
   // Отмена и отказ достижимы из любого незавершённого состояния: ход
   // может оборваться снаружи в любой момент.
   for (const state of TURN_STATES) {
@@ -96,7 +110,14 @@ function buildGraph(): Map<TurnState, ReadonlySet<TurnState>> {
   return graph as Map<TurnState, ReadonlySet<TurnState>>;
 }
 
-const GRAPH = buildGraph();
+const GRAPH = buildGraph([...HAPPY_PATH, ...RECOVERY_PATH]);
+
+/**
+ * Подграф, которым разрешено ходить восстановлению: возврат в работу,
+ * обрыв, отмена и закрытие уже полученного результата. Движения вперёд
+ * в нём нет — их совершает сам ход, а не тот, кто разбирает его следы.
+ */
+const CLOSING_GRAPH = buildGraph([...RECOVERY_PATH, ...CLOSING_PATH]);
 
 export function isTurnState(value: string): value is TurnState {
   return (TURN_STATES as readonly string[]).includes(value);
@@ -114,7 +135,7 @@ export function nextStates(from: TurnState): ReadonlySet<TurnState> {
 }
 
 /**
- * Кратчайший путь по графу переходов, не включая исходное состояние.
+ * Кратчайший путь, не включая исходное состояние.
  *
  * Нужен там, где состояние на входе заранее неизвестно: восстановление
  * застаёт ход в любом из двадцати одного состояния, и путь, выписанный
@@ -124,14 +145,18 @@ export function nextStates(from: TurnState): ReadonlySet<TurnState> {
  *
  * `[]` — идти некуда, уже на месте. `null` — цели не достичь.
  */
-export function pathBetween(from: TurnState, to: TurnState): TurnState[] | null {
+function searchPath(
+  graph: Map<TurnState, ReadonlySet<TurnState>>,
+  from: TurnState,
+  to: TurnState,
+): TurnState[] | null {
   if (from === to) return [];
   const previous = new Map<TurnState, TurnState>();
   const seen = new Set<TurnState>([from]);
   const queue: TurnState[] = [from];
   while (queue.length > 0) {
     const current = queue.shift()!;
-    for (const next of GRAPH.get(current) ?? []) {
+    for (const next of graph.get(current) ?? []) {
       if (seen.has(next)) continue;
       seen.add(next);
       previous.set(next, current);
@@ -146,6 +171,24 @@ export function pathBetween(from: TurnState, to: TurnState): TurnState[] | null 
     }
   }
   return null;
+}
+
+/** Путь по полному графу хода. */
+export function pathBetween(from: TurnState, to: TurnState): TurnState[] | null {
+  return searchPath(GRAPH, from, to);
+}
+
+/**
+ * Путь, которым разрешено ходить восстановлению.
+ *
+ * Отличается от `pathBetween` тем, что не умеет двигать ход вперёд.
+ * Кратчайший путь по полному графу из `failed_retryable` в `completed`
+ * проходит через `claimed → context_building → … → result_received` —
+ * законный по рёбрам и полностью выдуманный по смыслу. Здесь такого
+ * пути просто нет, и `null` честнее восьми сочинённых переходов.
+ */
+export function closingPath(from: TurnState, to: TurnState): TurnState[] | null {
+  return searchPath(CLOSING_GRAPH, from, to);
 }
 
 export class InvalidTurnTransitionError extends Error {
