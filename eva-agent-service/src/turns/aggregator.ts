@@ -46,7 +46,9 @@ export type AggregationStop =
   | "no_more_messages"
   | "message_limit"
   | "volume_limit"
-  | "boundary";
+  | "boundary"
+  /** Окно оборвалось ошибкой. Отдельно от границы: отказ базы — не тема разговора. */
+  | "interrupted";
 
 export interface AggregatedTurn {
   records: InboxRecord[];
@@ -153,7 +155,7 @@ export class TurnAggregator {
         collected: records.length,
         code: error instanceof Error ? error.name : "unknown_error",
       });
-      stop = "boundary";
+      stop = "interrupted";
     }
     if (Date.now() >= deadline && stop === "no_more_messages") stop = "deadline";
 
@@ -202,7 +204,15 @@ export class TurnAggregator {
           // Граница темы или уже закрытое окно: запись возвращается в
           // очередь и станет собственным ходом. Попытка ей возвращается —
           // её ничто не обрабатывало.
-          await this.inbox.release(record.updateId, 0, context.workerId);
+          // Возврат не должен ронять окно: иначе записи этого же батча,
+          // до которых цикл не дошёл, остались бы занятыми до истечения
+          // аренды — их уже перевели в `processing`.
+          await this.inbox.release(record.updateId, 0, context.workerId).catch((error: unknown) => {
+            this.logger.warn("Не удалось вернуть сообщение-границу в очередь", {
+              updateId: record.updateId,
+              code: error instanceof Error ? error.name : "unknown_error",
+            });
+          });
           if (!closed) closed = "boundary";
           continue;
         }

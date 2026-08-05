@@ -208,6 +208,12 @@ jobs:
         run: |
           sudo mv /usr/local/bin/caddy /usr/local/bin/caddy.disabled
           trap 'sudo mv /usr/local/bin/caddy.disabled /usr/local/bin/caddy' EXIT
+          # Код возврата validate.sh здесь терялся: статус конвейера
+          # равнялся статусу последнего `echo`, и красный валидатор
+          # выглядел зелёным. Проверка stdin осталась, но отказ самого
+          # валидатора теперь виден.
+          set -o pipefail
+          ./scripts/validate.sh
           output="$(printf '%s\n' './scripts/validate.sh' 'echo stdin-preserved' | bash)"
           printf '%s\n' "$output"
           grep -q '^stdin-preserved$' <<<"$output"

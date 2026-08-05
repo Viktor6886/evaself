@@ -264,6 +264,7 @@ async function main(): Promise<void> {
     queue,
     telegram,
     slots,
+    dispatcher,
     redisPing: async () => (await redis.ping()) === "PONG",
     miniAppSessions,
     rateLimiter,

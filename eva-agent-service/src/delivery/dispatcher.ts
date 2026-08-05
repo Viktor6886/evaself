@@ -166,9 +166,11 @@ export class ParallelInboxDispatcher {
     // экземпляры. Их владение в базе не отражено, поэтому спрашиваем
     // прямо — иначе ход упёрся бы в `user_busy` и потратил попытку.
     if (record.telegramUserId !== null && this.lock) {
-      // `try` здесь, а не `.catch`: синхронный бросок клиента Valkey
-      // промиса не создаёт вовсе, и `.catch` его бы не поймал — запись
-      // осталась бы `processing` до истечения аренды.
+      // `try` здесь, а не `.catch`: он ловит и отклонённый промис, и
+      // синхронный бросок. Сегодня `isLocked` объявлен `async` и
+      // синхронно бросить не может, но зависеть от этого не стоит —
+      // цена ошибки здесь: запись висит `processing` до истечения
+      // аренды.
       let held = false;
       try {
         held = await this.lock.isLocked(record.telegramUserId);

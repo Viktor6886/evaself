@@ -54,6 +54,8 @@ export interface Services {
   redisPing: () => Promise<boolean>;
   /** Глобальные слоты хода. Нужны только выдаче метрик. */
   slots?: TurnSemaphores;
+  /** Параллельный диспетчер. Нужен только выдаче метрик. */
+  dispatcher?: { foreignLockCount: number };
   miniAppSessions?: MiniAppSessionStore;
   rateLimiter?: RateLimiter;
 }
@@ -166,6 +168,9 @@ export function buildServer(services: Services): FastifyInstance {
     locks: () => ({ held: queue.activeUsers, queued: queue.queuedUsers }),
     poolStats: () => db.poolStats(),
     ...(services.slots ? { slots: () => services.slots!.usage() } : {}),
+    ...(services.dispatcher
+      ? { foreignLockReleases: () => services.dispatcher!.foreignLockCount }
+      : {}),
     version: VERSION,
     turnLifecycleEnabled: config.turnLifecycleEnabled,
   });
@@ -626,7 +631,7 @@ export function buildServer(services: Services): FastifyInstance {
         },
       });
       return result;
-    });
+    }, { conversationId: id });
   });
 
   app.post("/v1/sdk/conversations/:conversationId/messages/stream", async (request, reply) => {
@@ -657,10 +662,13 @@ export function buildServer(services: Services): FastifyInstance {
     });
 
     try {
-      const result = await queue.run(adminQueueId(id), async () =>
-        await letta.runTurn(id, text, {
-          onDelta: (delta) => event("delta", { text: delta }),
-        }),
+      const result = await queue.run(
+        adminQueueId(id),
+        async () =>
+          await letta.runTurn(id, text, {
+            onDelta: (delta) => event("delta", { text: delta }),
+          }),
+        { conversationId: id },
       );
       if (conversation.agent_id) await db.markAgentUsed(conversation.agent_id);
       await audit({
@@ -854,7 +862,7 @@ export function buildServer(services: Services): FastifyInstance {
           ? null
           : await db.incrementUsage(telegramId, body.metric ?? "messages");
       return { ...result, usage_after: usageAfter };
-    });
+    }, { userId: Number(link.user_id), conversationId });
   });
 
   /**
@@ -882,10 +890,13 @@ export function buildServer(services: Services): FastifyInstance {
     };
 
     try {
-      const result = await queue.run(telegramId, async () =>
-        letta.runTurn(conversationId, body.text!.trim(), {
-          onDelta: (text) => send("delta", { text }),
-        }),
+      const result = await queue.run(
+        telegramId,
+        async () =>
+          letta.runTurn(conversationId, body.text!.trim(), {
+            onDelta: (text) => send("delta", { text }),
+          }),
+        { userId: Number(link.user_id), conversationId },
       );
       await db.markAgentUsed(link.agent_id);
       send("done", result);

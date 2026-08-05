@@ -33,6 +33,8 @@ export interface MetricsSources {
   poolStats: () => MetricsPoolStats;
   /** Занятость глобальных слотов хода по классам. */
   slots?: () => Promise<Record<TurnClass, { used: number; limit: number }>>;
+  /** Возвраты записи из-за блокировки, занятой другим владельцем. */
+  foreignLockReleases?: () => number;
   version: string;
   turnLifecycleEnabled: boolean;
 }
@@ -229,6 +231,12 @@ export class MetricsCollector {
           labels: { class: turnClass },
           value: item.limit,
         })),
+      },
+      {
+        name: "eva_inbox_foreign_lock_releases_total",
+        help: "Возвраты записи из-за блокировки, занятой другим владельцем.",
+        type: "counter",
+        values: [{ value: this.sources.foreignLockReleases?.() ?? 0 }],
       },
       {
         name: "eva_event_loop_lag_seconds",

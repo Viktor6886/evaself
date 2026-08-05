@@ -35,6 +35,7 @@ const REQUIRED = [
   "eva_letta_sessions",
   "eva_postgres_pool_connections",
   "eva_event_loop_lag_seconds",
+  "eva_inbox_foreign_lock_releases_total",
 ];
 
 function collector(query: (sql: string) => Promise<{ rows: unknown[] }>): MetricsCollector {
@@ -43,6 +44,7 @@ function collector(query: (sql: string) => Promise<{ rows: unknown[] }>): Metric
     sessions: () => ({ active: 2, idle: 3 }),
     locks: () => ({ held: 1, queued: 4 }),
     poolStats: () => ({ total: 10, idle: 7, waiting: 0 }),
+    foreignLockReleases: () => 7,
     version: "0.3.0",
     turnLifecycleEnabled: true,
   });
@@ -93,7 +95,10 @@ test("/metrics отдаёт все метрики, перечисленные в
 
   for (const name of REQUIRED) {
     assert.ok(body.includes(`# HELP ${name} `), `нет HELP для ${name}`);
-    assert.ok(body.includes(`# TYPE ${name} gauge`), `нет TYPE для ${name}`);
+    assert.ok(
+      body.includes(`# TYPE ${name} gauge`) || body.includes(`# TYPE ${name} counter`),
+      `нет TYPE для ${name}`,
+    );
   }
 
   const values = parse(body);
@@ -114,6 +119,7 @@ test("/metrics отдаёт все метрики, перечисленные в
   assert.equal(values.get("eva_postgres_pool_connections{state=\"idle\"}"), 7);
   assert.ok(values.has("eva_event_loop_lag_seconds{quantile=\"0.99\"}"));
   assert.equal(values.get("eva_turn_lifecycle_enabled"), 1);
+  assert.equal(values.get("eva_inbox_foreign_lock_releases_total"), 7);
 });
 
 test("недоступная база не роняет выдачу: метрики остаются, значения нулевые", async () => {

@@ -870,3 +870,73 @@ test("оборванное окно объединения отдаёт уже �
   assert.deepEqual(turns, [[171, 172]]);
   assert.deepEqual(inbox.statuses(), { completed: 2 });
 });
+
+test("отказ базы в окне отличим от границы темы и не оставляет записей занятыми", async () => {
+  const inbox = new FakeInbox();
+  inbox.enqueueUpdate(textUpdate(181, 3_900, "первое"), 0);
+  inbox.enqueueUpdate(textUpdate(182, 3_900, "/help"), 1);
+  inbox.enqueueUpdate(textUpdate(183, 3_900, "третье"), 2);
+
+  // Возврат сообщения-границы падает: записи батча, до которых цикл не
+  // дошёл, иначе остались бы занятыми до истечения аренды.
+  const original = inbox.release.bind(inbox);
+  let failed = false;
+  inbox.release = async (updateId, delaySeconds, workerId) => {
+    if (updateId === 182 && !failed) {
+      failed = true;
+      throw new Error("база отказала");
+    }
+    return await original(updateId, delaySeconds, workerId);
+  };
+
+  const aggregator = new TurnAggregator(
+    inbox as never,
+    logger,
+    { debounceMs: 1, maxWindowMs: 30 },
+    async () => {},
+  );
+  const [primary] = await inbox.claimBatch({
+    workerId: "воркер-1",
+    leaseSeconds: 30,
+    maxAttempts: 3,
+    limit: 1,
+  });
+  const collected = await aggregator.collect(primary!, {
+    workerId: "воркер-1",
+    maxAttempts: 3,
+  });
+
+  // Окно закрылось границей, а не обрывом: упал только возврат.
+  assert.deepEqual(collected.records.map((record) => record.updateId), [181]);
+  assert.equal(collected.stop, "boundary");
+  // 183 не осталось занятым из-за чужой неудачи.
+  assert.notEqual(inbox.rows.get(183)!.status, "processing");
+});
+
+test("оборванное окно помечается отдельной причиной, а не границей темы", async () => {
+  const inbox = new FakeInbox();
+  inbox.enqueueUpdate(textUpdate(191, 4_500, "первое"), 0);
+  inbox.claimFollowUps = async () => {
+    throw new Error("база отказала");
+  };
+
+  const aggregator = new TurnAggregator(
+    inbox as never,
+    logger,
+    { debounceMs: 1, maxWindowMs: 20 },
+    async () => {},
+  );
+  const [primary] = await inbox.claimBatch({
+    workerId: "воркер-1",
+    leaseSeconds: 30,
+    maxAttempts: 3,
+    limit: 1,
+  });
+  const collected = await aggregator.collect(primary!, {
+    workerId: "воркер-1",
+    maxAttempts: 3,
+  });
+
+  assert.equal(collected.stop, "interrupted", "отказ базы неотличим от границы темы");
+  assert.deepEqual(collected.records.map((record) => record.updateId), [191]);
+});

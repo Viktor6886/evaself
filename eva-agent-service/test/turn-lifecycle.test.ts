@@ -663,3 +663,19 @@ test("ход представляется блокировке своим run_id
   assert.equal(without.lockClaims.length, 1);
   assert.equal(without.lockClaims[0]!.runId, null);
 });
+
+test("при выключенной записи хода в блокировку не уходит идентификатор-призрак", async () => {
+  // Наблюдатель есть, флаг выключен — это конфигурация по умолчанию.
+  // `run_id` при этом существует в памяти, но не резолвится ни во что:
+  // оператор искал бы строку, которой нет.
+  const store = new TurnStore();
+  const probe = await runTelegramTurn(lifecycle(store, false));
+
+  assert.equal(store.rows.size, 0, "выключенный флаг всё же что-то записал");
+  assert.equal(probe.lockClaims.length, 1);
+  assert.equal(
+    probe.lockClaims[0]!.runId,
+    null,
+    "в блокировку ушёл run_id, которому не соответствует ни одна строка",
+  );
+});
