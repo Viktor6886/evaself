@@ -12,6 +12,8 @@ import { UserProfileService } from "./profile/profile-service.js";
 import type { TelegramClient } from "./telegram.js";
 import { currentScope } from "./tenancy/index.js";
 import { CoreToolFactory } from "./tools/core-tools.js";
+import { EffectJournal, effectKey } from "./turns/effect-journal.js";
+import { currentTurn } from "./turns/turn-context.js";
 import { TaskToolFactory } from "./tools/task-tools.js";
 import { TodoistToolFactory } from "./tools/todoist-tools.js";
 import {
@@ -63,6 +65,11 @@ export class AgentToolFactory {
     profile?: UserProfileService,
     goals?: GoalService,
     graph?: GraphRepository,
+    /**
+     * Журнал побочных эффектов. Необязателен: без него инструменты
+     * работают ровно как раньше.
+     */
+    private readonly effects?: EffectJournal,
   ) {
     this.vectorGoalsEnabled = config.vectorGoalsEnabled !== false;
     this.core = new CoreToolFactory(config, db, telegram);
@@ -100,7 +107,7 @@ export class AgentToolFactory {
       label,
       description,
       parameters,
-      execute: async (_toolCallId, rawArgs) => {
+      execute: async (toolCallId, rawArgs) => {
         try {
           const runtime = await this.context(conversationId);
           if (!toolAllowedForPurpose(runtime.purpose, name)) {
@@ -122,14 +129,57 @@ export class AgentToolFactory {
               `Conversation принадлежит другому пользователю, чем текущий ход`,
             );
           }
-          const output = await this.db.withUserScope(
-            {
+          // Побочный эффект выполняется не более одного раза на вызов.
+          // Ключ детерминированный, поэтому повтор хода после сбоя
+          // возвращает прежний результат, а не делает действие второй раз.
+          const turn = currentTurn();
+          const key = turn?.recorded
+            ? effectKey(turn.runId, String(toolCallId ?? "no-call-id"), name)
+            : null;
+          if (key && this.effects) {
+            const decision = await this.effects.begin({
+              key,
+              runId: turn!.runId,
               userId: runtime.userId,
-              telegramId: runtime.telegramId,
-              label: `tool:${name}`,
-            },
-            async () => await execute(asObject(rawArgs), runtime),
-          );
+              toolName: name,
+              toolCallId: String(toolCallId ?? "no-call-id"),
+            });
+            if (decision.action === "replay") return result(decision.result);
+            if (decision.action === "skip") {
+              return result({
+                ok: false,
+                error: decision.reason === "in_flight"
+                  ? "этот вызов уже выполняется"
+                  : `предыдущая попытка отказала: ${decision.errorCode ?? "неизвестно"}`,
+              });
+            }
+          }
+
+          let output: unknown;
+          try {
+            output = await this.db.withUserScope(
+              {
+                userId: runtime.userId,
+                telegramId: runtime.telegramId,
+                label: `tool:${name}`,
+              },
+              async () => await execute(asObject(rawArgs), runtime),
+            );
+          } catch (error) {
+            if (key && this.effects) {
+              await this.effects.fail(
+                key,
+                runtime.userId,
+                error instanceof Error ? error.name : "unknown_error",
+                // Индивидуальная политика: повторять можно то, что
+                // сорвалось по дороге, а не то, что модель попросила
+                // неправильно.
+                !(error instanceof Error && error.name === "TypeError"),
+              );
+            }
+            throw error;
+          }
+          if (key && this.effects) await this.effects.succeed(key, runtime.userId, output);
           if (CONTEXT_MUTATING_TOOLS.has(name)) {
             this.invalidate(conversationId);
           }

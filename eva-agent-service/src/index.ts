@@ -38,6 +38,8 @@ import { buildServer, VERSION } from "./server.js";
 import { TelegramClient } from "./telegram.js";
 import { TimezoneResolver } from "./time/timezone-resolver.js";
 import { TurnAggregator } from "./turns/aggregator.js";
+import { EffectJournal } from "./turns/effect-journal.js";
+import { TurnRecoveryService } from "./turns/recovery.js";
 import { TurnSemaphores } from "./turns/semaphores.js";
 import { TurnLifecycle } from "./turns/turn-lifecycle.js";
 
@@ -141,6 +143,10 @@ async function main(): Promise<void> {
     graph,
   );
   const goals = new GoalService(db, runtimeContext, graph);
+  // Журнал побочных эффектов включается тем же флагом, что и
+  // восстановление: без журнала повтор хода не защищён, и включать одно
+  // без другого — значит получить повторные действия.
+  const effects = new EffectJournal(db, logger, config.turnRecoveryEnabled);
   const toolFactory = new AgentToolFactory(
     config,
     db,
@@ -149,6 +155,7 @@ async function main(): Promise<void> {
     profile,
     goals,
     graph,
+    effects,
   );
   letta.setToolFactory((conversationId) => toolFactory.forConversation(conversationId));
   const crisis = new CrisisMonitor(db, telegram, logger, config.ownerTelegramId);
@@ -237,6 +244,9 @@ async function main(): Promise<void> {
     queue,
   );
 
+  const recovery = new TurnRecoveryService(db, logger, effects, config.turnRecoveryEnabled);
+  let recoveryTimer: NodeJS.Timeout | null = null;
+
   const payments = new LavaPayments(config, db, telegram, logger);
   const purposes = new ConversationPurposeService(db, letta, logger);
   const background = new BackgroundRuntime(
@@ -274,6 +284,10 @@ async function main(): Promise<void> {
   if (config.outboxEnabled) outbox.start();
   if (config.parallelInboxEnabled) dispatcher.start();
   else inboxWorker.start();
+  if (config.turnRecoveryEnabled) {
+    recoveryTimer = setInterval(() => void recovery.sweep(), config.turnRecoveryIntervalMs);
+    recoveryTimer.unref();
+  }
   background.start();
   logger.info("eva-agent-service принимает запросы", {
     version: VERSION,
@@ -295,6 +309,7 @@ async function main(): Promise<void> {
     logger.info("Остановка сервиса", { signal });
     try {
       background.stop();
+      if (recoveryTimer) clearInterval(recoveryTimer);
       dispatcher.stop();
       inboxWorker.stop();
       // Уже начатые ходы дописываются: аренда записи ещё наша, и
@@ -302,6 +317,9 @@ async function main(): Promise<void> {
       // наполовину выполненной работой.
       await dispatcher.drain(config.shutdownDrainMs);
       if (config.outboxEnabled) outbox.stop();
+      // Сессии уходят через drain: ход, который сейчас отвечает, имеет
+      // право договорить, а не оборваться на полуслове.
+      if (config.safeSessionManager) await letta.drainSessions(config.sessionDrainMs);
       letta.shutdown();
       await app.close();
       configEvents.disconnect();

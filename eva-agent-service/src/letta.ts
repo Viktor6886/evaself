@@ -25,8 +25,22 @@ import type {
 } from "@letta-ai/letta-agent-sdk";
 
 import type { Config } from "./config.js";
-import { appServerUnavailable, notFound, toEvaError, turnTimeout } from "./errors.js";
+import {
+  appServerUnavailable,
+  EvaError,
+  notFound,
+  toEvaError,
+  turnCancelled,
+  turnTimeout,
+} from "./errors.js";
 import type { Logger } from "./logger.js";
+
+/**
+ * Идентификатор shard этого процесса. Шардирования шаг не вводит, но
+ * сессия обязана знать, чья она: без этого поля будущее шардирование
+ * пришлось бы вводить переписыванием структуры сессии.
+ */
+const SHARD_ID = `shard-0:${process.pid}`;
 
 /** Every agent Evaself creates carries these, so they are findable from Letta alone. */
 export const EVASELF_TAG = "evaself";
@@ -60,6 +74,23 @@ interface PooledSession {
   lastUsedAt: number;
   /** Set once bootstrapState() has reconciled a session resumed after a restart. */
   recovered: boolean;
+  /**
+   * Сколько ходов выполняется в этой сессии прямо сейчас. Пока счётчик
+   * не ноль, сессию нельзя ни вытеснить, ни закрыть: закрытие посреди
+   * хода означает оборванную генерацию и потерянный ответ.
+   */
+  activeTurns: number;
+  /**
+   * Сессию попросили закрыть, но ход ещё идёт. Она закроется сама, как
+   * только счётчик дойдёт до нуля, и новых ходов больше не примет.
+   */
+  closing: boolean;
+  /**
+   * Идентификатор shard. Шардирования этот шаг не вводит намеренно —
+   * поле заведено, чтобы шаг, который его введёт, не переписывал
+   * структуру сессии.
+   */
+  shardId: string;
 }
 
 export interface EvaMemoryBlock {
@@ -256,6 +287,14 @@ export function extractText(content: unknown): string {
 export class LettaService {
   private client: LettaAgentClient;
   private readonly sessions = new Map<string, PooledSession>();
+  /**
+   * Безопасный менеджер сессий: активная сессия не вытесняется и не
+   * закрывается. Выключенный флаг возвращает прежнее поведение —
+   * закрытие в любой момент.
+   */
+  private readonly safeSessions: boolean;
+  /** Сколько ждать освобождения сессий при смене настроек и остановке. */
+  private readonly drainTimeoutMs: number;
   /** Conversation, по которым ход выполняется прямо сейчас. */
   private readonly runningTurns = new Set<string>();
 
@@ -271,6 +310,8 @@ export class LettaService {
     this.logger = logger;
     this.persona = persona;
     this.defaultModel = config.model;
+    this.safeSessions = config.safeSessionManager;
+    this.drainTimeoutMs = config.sessionDrainMs;
     this.runtime = {
       agent_name_prefix: "eva",
       default_description: "Агент Evaself",
@@ -328,12 +369,19 @@ export class LettaService {
     return this.persona;
   }
 
-  applySdkSettings(settings: RuntimeSdkSettings): void {
+  /**
+   * Новые настройки применяются к следующему ходу, а текущие имеют право
+   * договорить: сессии уходят через graceful drain, а не закрываются
+   * посреди генерации. При выключенном безопасном менеджере поведение
+   * прежнее — немедленное закрытие.
+   */
+  async applySdkSettings(settings: RuntimeSdkSettings): Promise<void> {
     const reconnect =
       settings.app_server_request_timeout_ms !== this.runtime.app_server_request_timeout_ms;
     this.runtime = settings;
     this.persona = settings.default_persona || this.persona;
-    this.closeAllSessions();
+    if (this.safeSessions) await this.drainSessions(this.drainTimeoutMs);
+    else this.closeAllSessions();
     if (reconnect) this.client = this.createClient();
   }
 
@@ -550,10 +598,27 @@ export class LettaService {
    * hang forever.
    */
   private async acquireSession(conversationId: string): Promise<LettaCodeSession> {
+    return (await this.acquirePooled(conversationId)).session;
+  }
+
+  /**
+   * Сессия вместе с её учётной записью в пуле.
+   *
+   * Ход берёт именно её, а не голую сессию: счётчик активных ходов
+   * живёт здесь, и без него закрытие не отличает занятую сессию от
+   * простаивающей.
+   */
+  private async acquirePooled(conversationId: string): Promise<PooledSession> {
     const pooled = this.sessions.get(conversationId);
-    if (pooled) {
+    if (pooled && !pooled.closing) {
       pooled.lastUsedAt = Date.now();
-      return pooled.session;
+      return pooled;
+    }
+    if (pooled?.closing) {
+      // Сессия уходит: дождаться её мы не можем, а переиспользовать
+      // нельзя. Новый ход получит новую сессию, старая закроется, когда
+      // её ход закончится.
+      this.sessions.delete(conversationId);
     }
 
     this.evictIdleSessions();
@@ -580,13 +645,17 @@ export class LettaService {
       });
     }
 
-    this.sessions.set(conversationId, {
+    const entry: PooledSession = {
       session,
       conversationId,
       lastUsedAt: Date.now(),
       recovered: true,
-    });
-    return session;
+      activeTurns: 0,
+      closing: false,
+      shardId: SHARD_ID,
+    };
+    this.sessions.set(conversationId, entry);
+    return entry;
   }
 
   /** Some session implementations expose initialize(); it is not in the public type. */
@@ -595,9 +664,19 @@ export class LettaService {
     if (typeof candidate.initialize === "function") await candidate.initialize();
   }
 
+  /**
+   * Вытеснение простаивающих сессий.
+   *
+   * Активная сессия не вытесняется ни по времени простоя, ни по LRU: с
+   * включённым безопасным менеджером счётчик активных ходов — это
+   * запрет, а не подсказка. Если свободных сессий нет вовсе, пул
+   * временно перерастает свой размер: пережить лишнюю сессию дешевле,
+   * чем оборвать чужой ход.
+   */
   private evictIdleSessions(): void {
     const now = Date.now();
     for (const [id, pooled] of this.sessions) {
+      if (this.safeSessions && pooled.activeTurns > 0) continue;
       if (now - pooled.lastUsedAt > this.runtime.session_idle_ms) {
         this.closeSession(id);
       }
@@ -606,6 +685,7 @@ export class LettaService {
       let oldestId: string | null = null;
       let oldestAt = Number.POSITIVE_INFINITY;
       for (const [id, pooled] of this.sessions) {
+        if (this.safeSessions && pooled.activeTurns > 0) continue;
         if (pooled.lastUsedAt < oldestAt) {
           oldestAt = pooled.lastUsedAt;
           oldestId = id;
@@ -616,9 +696,77 @@ export class LettaService {
     }
   }
 
-  closeSession(conversationId: string): void {
+  /**
+   * Закрыть сессию, которую уже попросили уйти и которая освободилась.
+   * Вызывается из `finally` хода: именно здесь отложенное закрытие
+   * наконец происходит.
+   */
+  private closeIfDrained(pooled: PooledSession): void {
+    if (!pooled.closing || pooled.activeTurns > 0) return;
+    const current = this.sessions.get(pooled.conversationId);
+    // Сессию могли уже подменить новой: закрываем свою, а не чужую.
+    if (current === pooled) this.sessions.delete(pooled.conversationId);
+    try {
+      pooled.session.close();
+    } catch (error) {
+      this.logger.debug("closing a drained session failed", {
+        conversationId: pooled.conversationId,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  /**
+   * Дождаться, пока сессии освободятся, и закрыть их.
+   *
+   * Смена настроек SDK и остановка сервиса пользуются этим, а не
+   * немедленным закрытием: настройки применяются к следующему ходу, а
+   * текущий имеет право договорить. По истечении срока оставшиеся
+   * сессии закрываются силой — ждать бесконечно тоже нельзя.
+   */
+  async drainSessions(timeoutMs: number): Promise<{ drained: number; forced: number }> {
+    for (const pooled of this.sessions.values()) pooled.closing = true;
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    let drained = 0;
+    while (Date.now() < deadline) {
+      for (const pooled of [...this.sessions.values()]) {
+        if (pooled.activeTurns === 0) {
+          this.closeIfDrained(pooled);
+          drained += 1;
+        }
+      }
+      if (this.sessions.size === 0) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    const forced = this.sessions.size;
+    for (const id of [...this.sessions.keys()]) {
+      const pooled = this.sessions.get(id);
+      if (!pooled) continue;
+      pooled.activeTurns = 0;
+      this.closeIfDrained(pooled);
+    }
+    if (forced > 0) {
+      this.logger.warn("Сессии закрыты по истечении срока ожидания", { forced });
+    }
+    return { drained, forced };
+  }
+
+  /**
+   * Закрыть сессию. Занятая ходом сессия помечается уходящей и
+   * закрывается сама, когда ход закончится: `false` означает «просьба
+   * принята, но не выполнена прямо сейчас».
+   */
+  closeSession(conversationId: string): boolean {
     const pooled = this.sessions.get(conversationId);
-    if (!pooled) return;
+    if (!pooled) return true;
+    if (this.safeSessions && pooled.activeTurns > 0) {
+      pooled.closing = true;
+      this.logger.debug("Закрытие сессии отложено до конца хода", {
+        conversationId,
+        activeTurns: pooled.activeTurns,
+      });
+      return false;
+    }
     this.sessions.delete(conversationId);
     try {
       pooled.session.close();
@@ -628,6 +776,7 @@ export class LettaService {
         reason: error instanceof Error ? error.message : String(error),
       });
     }
+    return true;
   }
 
   get openSessions(): number {
@@ -676,12 +825,26 @@ export class LettaService {
   async runTurn(
     conversationId: string,
     message: SendMessage,
-    options: { onDelta?: (text: string) => void } = {},
+    options: {
+      onDelta?: (text: string) => void;
+      /**
+       * Барьер отмены. Спрашивается на каждом событии потока: отмена
+       * приходит извне, и узнать о ней можно только спросив. Ответ
+       * `true` останавливает генерацию и стриминг — поздний ответ
+       * пользователю не уходит.
+       */
+      isCancelled?: () => Promise<boolean>;
+    } = {},
   ): Promise<TurnResult> {
     const startedAt = Date.now();
-    const session = await this.acquireSession(conversationId);
+    const pooled = await this.acquirePooled(conversationId);
+    const session = pooled.session;
     const collected: SDKMessage[] = [];
     this.runningTurns.add(conversationId);
+    // Счётчик поднимается до первого обращения к сессии и опускается в
+    // finally: между этими точками сессию не вытеснит ни LRU, ни смена
+    // настроек SDK.
+    pooled.activeTurns += 1;
 
     try {
       await session.send(message);
@@ -698,6 +861,13 @@ export class LettaService {
 
         const next = await withTimeout(stream.next(), remaining);
         if (next.done) break;
+
+        // Барьер отмены стоит до накопления сообщения: отменённый ход
+        // не должен ни дособрать ответ, ни отдать его наружу.
+        if (options.isCancelled && await options.isCancelled()) {
+          await session.abort().catch(() => undefined);
+          throw turnCancelled(`ход в ${conversationId} отменён`);
+        }
 
         const sdkMessage = next.value as SDKMessage;
         collected.push(sdkMessage);
@@ -716,11 +886,18 @@ export class LettaService {
         if (sdkMessage.type === "result") break;
       }
     } catch (error) {
-      // A broken session must not stay in the pool.
-      this.closeSession(conversationId);
+      // Отмена — не поломка: сессия здорова, её просто попросили
+      // остановиться. Закрывать её значило бы платить за отмену
+      // переподключением на следующем ходе того же человека.
+      if (error instanceof EvaError && error.code === "turn_cancelled") throw error;
+      // Повреждённая сессия не остаётся в пуле — но закрывается только
+      // она одна и только после того, как её ход отпустит счётчик.
+      pooled.closing = true;
       throw toEvaError(error, "running a turn");
     } finally {
       this.runningTurns.delete(conversationId);
+      pooled.activeTurns = Math.max(0, pooled.activeTurns - 1);
+      this.closeIfDrained(pooled);
     }
 
     const summary = summarizeStream(collected);
