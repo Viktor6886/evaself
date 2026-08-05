@@ -234,6 +234,7 @@ async function main(): Promise<void> {
     },
     slots,
     aggregator,
+    queue,
   );
 
   const payments = new LavaPayments(config, db, telegram, logger);

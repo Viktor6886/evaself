@@ -13,6 +13,7 @@ import { test } from "node:test";
 
 import { ParallelInboxDispatcher } from "../dist/delivery/dispatcher.js";
 import { TelegramInboxWorker, type InboxRecord, type InboxResult } from "../dist/delivery/inbox.js";
+import { userBusy } from "../dist/errors.js";
 import { TurnAggregator, aggregatable, mediaReady } from "../dist/turns/aggregator.js";
 import type { TelegramUpdate } from "../dist/telegram.js";
 
@@ -93,6 +94,21 @@ class FakeInbox {
     limit: number;
     excludeTelegramUsers?: number[];
   }): Promise<InboxRecord[]> {
+    // Тот же sweeper, что и в SQL: запись с исчерпанными попытками и
+    // истёкшей арендой уходит в dead, иначе она навсегда закрывает
+    // очередь своего человека.
+    for (const row of this.rows.values()) {
+      if (
+        row.status === "processing"
+        && row.attempts >= input.maxAttempts
+        && row.lockedAt !== null
+        && row.lockedAt < this.now() - input.leaseSeconds * 1_000
+      ) {
+        row.status = "dead";
+        row.lockedAt = null;
+        row.lockedBy = null;
+      }
+    }
     const excluded = new Set(input.excludeTelegramUsers ?? []);
     const candidates = [...this.rows.values()]
       .filter((row) => this.ready(row, input.leaseSeconds, input.maxAttempts))
@@ -146,9 +162,11 @@ class FakeInbox {
     return record ?? null;
   }
 
-  async release(updateId: number, delaySeconds: number): Promise<void> {
+  async release(updateId: number, delaySeconds: number, workerId?: string): Promise<void> {
     const row = this.rows.get(updateId);
     if (!row || row.status !== "processing") return;
+    // Возвращаем только свою аренду: чужую запись трогать нельзя.
+    if (workerId !== undefined && row.lockedBy !== workerId) return;
     row.status = "queued";
     row.attempts = Math.max(0, row.attempts - 1);
     row.availableAt = this.now() + delaySeconds * 1_000;
@@ -622,4 +640,198 @@ test("p95 ожидания начала обработки не превышае
   console.log(
     `ожидание начала обработки: p50=${percentile(0.5)} мс, p95=${p95} мс, p99=${percentile(0.99)} мс`,
   );
+});
+
+// ---------------------------------------------------------------------
+// 8. Найдено независимой проверкой
+// ---------------------------------------------------------------------
+
+test("запись с исчерпанными попытками не блокирует очередь человека навсегда", async () => {
+  const inbox = new FakeInbox();
+  inbox.enqueueUpdate(textUpdate(101, 3_100, "застрявшее"), 0);
+  inbox.enqueueUpdate(textUpdate(102, 3_100, "следующее"), 1);
+
+  // Прежний воркер брал запись трижды и каждый раз падал, а последняя
+  // аренда истекла: попытки кончились, статус остался processing.
+  const stuck = inbox.rows.get(101)!;
+  stuck.status = "processing";
+  stuck.attempts = 3;
+  stuck.lockedAt = Date.now() - 600_000;
+  stuck.lockedBy = "умерший-процесс";
+
+  const seen: number[] = [];
+  const dispatcher = new ParallelInboxDispatcher(
+    inbox as never,
+    async (records) => {
+      seen.push(records[0]!.updateId);
+      return { status: "completed", usageCharged: true };
+    },
+    logger,
+    OPTIONS,
+  );
+
+  await drain(dispatcher, inbox);
+
+  assert.equal(inbox.rows.get(101)!.status, "dead", "застрявшая запись не похоронена");
+  assert.deepEqual(seen, [102], "следующее сообщение человека не дошло до обработки");
+});
+
+test("занятая чужим процессом блокировка возвращает запись, а не тратит попытку", async () => {
+  const inbox = new FakeInbox();
+  inbox.enqueueUpdate(textUpdate(111, 3_200, "сообщение"), 0);
+  let processed = 0;
+
+  // Тот же ключ Valkey держит фоновая часть сервиса: из базы это не видно.
+  const heldLock = { isLocked: async () => true };
+  const dispatcher = new ParallelInboxDispatcher(
+    inbox as never,
+    async () => {
+      processed += 1;
+      return { status: "completed" };
+    },
+    logger,
+    { ...OPTIONS, releaseDelaySeconds: 0 },
+    undefined,
+    undefined,
+    heldLock as never,
+  );
+
+  await dispatcher.tick();
+  await dispatcher.drain();
+
+  assert.equal(processed, 0, "ход пошёл поверх чужой блокировки");
+  const row = inbox.rows.get(111)!;
+  assert.equal(row.status, "queued", "запись не осталась durable");
+  assert.equal(row.attempts, 0, "чужая занятость съела попытку");
+});
+
+test("user_busy не убивает сообщение: запись возвращается, а не идёт к отказу", async () => {
+  const inbox = new FakeInbox();
+  inbox.enqueueUpdate(textUpdate(121, 3_300, "сообщение"), 0);
+  let calls = 0;
+
+  const dispatcher = new ParallelInboxDispatcher(
+    inbox as never,
+    async () => {
+      calls += 1;
+      if (calls === 1) throw userBusy("слот занят", 1);
+      return { status: "completed", usageCharged: true };
+    },
+    logger,
+    { ...OPTIONS, releaseDelaySeconds: 0 },
+  );
+
+  await dispatcher.tick();
+  await dispatcher.drain();
+  assert.equal(inbox.rows.get(121)!.status, "queued");
+  assert.equal(inbox.rows.get(121)!.attempts, 0, "занятость слота потратила попытку");
+
+  await drain(dispatcher, inbox);
+  assert.equal(inbox.rows.get(121)!.status, "completed");
+});
+
+test("недоступная Valkey не роняет процесс и не теряет запись", async () => {
+  const inbox = new FakeInbox();
+  inbox.enqueueUpdate(textUpdate(131, 3_400, "сообщение"), 0);
+  let processed = 0;
+
+  const brokenSlots = {
+    acquire: async () => {
+      throw new Error("Valkey недоступна");
+    },
+  };
+  const dispatcher = new ParallelInboxDispatcher(
+    inbox as never,
+    async () => {
+      processed += 1;
+      return { status: "completed" };
+    },
+    logger,
+    { ...OPTIONS, releaseDelaySeconds: 0 },
+    brokenSlots as never,
+  );
+
+  // Падения быть не должно: unhandled rejection здесь означал бы
+  // остановленный сервис, а не пропущенное сообщение.
+  await dispatcher.tick();
+  await dispatcher.drain();
+
+  assert.equal(processed, 0);
+  const row = inbox.rows.get(131)!;
+  assert.equal(row.status, "queued", "запись потеряна при отказе Valkey");
+  assert.equal(row.attempts, 0);
+});
+
+test("чужую аренду возврат не трогает", async () => {
+  const inbox = new FakeInbox();
+  inbox.enqueueUpdate(textUpdate(141, 3_500, "сообщение"), 0);
+  const [record] = await inbox.claimBatch({
+    workerId: "воркер-1",
+    leaseSeconds: 30,
+    maxAttempts: 3,
+    limit: 1,
+  });
+  assert.ok(record);
+
+  await inbox.release(141, 0, "воркер-2");
+  assert.equal(inbox.rows.get(141)!.status, "processing", "чужой возврат сбросил аренду");
+  assert.equal(inbox.rows.get(141)!.lockedBy, "воркер-1");
+
+  await inbox.release(141, 0, "воркер-1");
+  assert.equal(inbox.rows.get(141)!.status, "queued");
+});
+
+test("списание квоты помечает то сообщение, на которое ход отвечает", async () => {
+  const inbox = new FakeInbox();
+  inbox.enqueueUpdate(textUpdate(151, 3_600, "я хотел"), 0);
+  inbox.enqueueUpdate(textUpdate(152, 3_600, "сказать вот что"), 1);
+
+  const dispatcher = new ParallelInboxDispatcher(
+    inbox as never,
+    async () => ({ status: "completed", usageCharged: true }),
+    logger,
+    OPTIONS,
+    undefined,
+    new TurnAggregator(inbox as never, logger, { debounceMs: 5, maxWindowMs: 20 }, async () => {}),
+  );
+
+  await drain(dispatcher, inbox);
+
+  const charged = [...inbox.rows.values()].filter((row) => row.usageCharged);
+  assert.equal(charged.length, 1);
+  assert.equal(charged[0]!.updateId, 152, "квота списана не с того сообщения, на которое отвечали");
+});
+
+test("остановка посреди опроса возвращает уже взятый батч в очередь", async () => {
+  const inbox = new FakeInbox();
+  for (let index = 0; index < 4; index += 1) {
+    inbox.enqueueUpdate(textUpdate(161 + index, 3_700 + index, "сообщение"), index);
+  }
+  let processed = 0;
+  const dispatcher = new ParallelInboxDispatcher(
+    inbox as never,
+    async () => {
+      processed += 1;
+      return { status: "completed" };
+    },
+    logger,
+    OPTIONS,
+  );
+
+  // Остановка приходит между claim и запуском ходов.
+  const original = inbox.claimBatch.bind(inbox);
+  inbox.claimBatch = async (input) => {
+    const batch = await original(input);
+    dispatcher.stop();
+    return batch;
+  };
+
+  await dispatcher.tick();
+  await dispatcher.drain();
+
+  assert.equal(processed, 0, "остановленный диспетчер всё равно начал ходы");
+  assert.deepEqual(inbox.statuses(), { queued: 4 }, "взятый батч не вернулся в очередь");
+  for (const row of inbox.rows.values()) {
+    assert.equal(row.attempts, 0, "остановка потратила попытку");
+  }
 });

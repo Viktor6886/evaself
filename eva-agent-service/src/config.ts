@@ -251,7 +251,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     inboxConcurrency: clampedInt("EVA_INBOX_CONCURRENCY", 8, 1, 256),
     inboxBatchSize: clampedInt("EVA_INBOX_BATCH_SIZE", 16, 1, 100),
     turnSlotsTotal: clampedInt("EVA_TURN_SLOTS_TOTAL", 128, 4, 1024),
-    turnAggregationDebounceMs: clampedInt("EVA_TURN_AGGREGATION_DEBOUNCE_MS", 800, 200, 3_000),
+    turnAggregationDebounceMs: clampedInt("EVA_TURN_AGGREGATION_DEBOUNCE_MS", 800, 800, 3_000),
     // Потолок окна ограничен диапазоном из задания: меньше — объединять
     // нечего, больше — человек ждёт ответа дольше, чем готов ждать.
     turnAggregationWindowMs: clampedInt("EVA_TURN_AGGREGATION_WINDOW_MS", 2_500, 2_500, 3_000),

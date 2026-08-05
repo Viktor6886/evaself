@@ -55,8 +55,11 @@ export interface ParallelTelegramInbox extends TelegramInbox {
     maxAttempts: number;
     limit: number;
   }): Promise<InboxRecord[]>;
-  /** Вернуть запись в очередь, не потратив попытку: ёмкость кончилась, а не обработка. */
-  release(updateId: number, delaySeconds: number): Promise<void>;
+  /**
+   * Вернуть запись в очередь, не потратив попытку: ёмкость кончилась, а
+   * не обработка. `workerId` сверяет аренду: чужую запись не возвращаем.
+   */
+  release(updateId: number, delaySeconds: number, workerId?: string): Promise<void>;
 }
 
 interface InboxRow {
@@ -200,6 +203,24 @@ export class PostgresTelegramInbox implements ParallelTelegramInbox {
     const excluded = input.excludeTelegramUsers ?? [];
     return await this.db.withSystemScope("telegram.inbox.claim_batch", async () =>
       await this.db.transaction(async (client) => {
+      // Тот же sweeper, что и у последовательного claim. Без него
+      // запись, у которой кончились попытки, остаётся `processing`
+      // навсегда — и по правилу «более раннее незавершённое блокирует»
+      // закрывает этому человеку всю очередь до конца времён.
+      await client.query(
+        `
+          -- tenant: system — durable ingress Telegram: строки берутся по update_id и аренде воркера, а не по запросу пользователя
+          UPDATE telegram_updates
+             SET status = 'dead',
+                 completed_at = now(),
+                 last_error = COALESCE(last_error, 'worker lease expired after final attempt'),
+                 locked_at = NULL,
+                 locked_by = NULL
+           WHERE status = 'processing'
+             AND attempts >= $2
+             AND locked_at < now() - make_interval(secs => $1)`,
+        [lease, attempts],
+      );
       const { rows } = await client.query<InboxRow>(
         `
           -- tenant: system — durable ingress Telegram: строки берутся по update_id и аренде воркера, а не по запросу пользователя
@@ -212,7 +233,11 @@ export class PostgresTelegramInbox implements ParallelTelegramInbox {
                OR (t.status = 'processing'
                    AND t.locked_at < now() - make_interval(secs => $1))
              )
-             AND NOT (t.telegram_user_id = ANY($4::bigint[]))
+             -- NULL здесь не «не входит в список», а «неизвестно»:
+             -- без явной ветки запись без опознанного отправителя
+             -- выпадала бы из батча, стоило кому-то оказаться занятым.
+             AND (t.telegram_user_id IS NULL
+                  OR NOT (t.telegram_user_id = ANY($4::bigint[])))
              AND NOT EXISTS (
                SELECT 1
                  FROM telegram_updates earlier
@@ -300,7 +325,7 @@ export class PostgresTelegramInbox implements ParallelTelegramInbox {
    * человека нечестно — на третьем таком возврате оно оказалось бы
    * мёртвым, ни разу не дойдя до модели.
    */
-  async release(updateId: number, delaySeconds: number): Promise<void> {
+  async release(updateId: number, delaySeconds: number, workerId?: string): Promise<void> {
     await this.db.withSystemScope("telegram.inbox.release", async () =>
       await this.db.query(
       `
@@ -312,8 +337,12 @@ export class PostgresTelegramInbox implements ParallelTelegramInbox {
                locked_at = NULL,
                locked_by = NULL
          WHERE update_id = $1
-           AND status = 'processing'`,
-      [updateId, Math.max(0, delaySeconds)],
+           AND status = 'processing'
+           -- Возвращаем только свою аренду. Если она истекла и запись
+           -- перехватил другой воркер, наш возврат сбросил бы её из-под
+           -- чужой обработки — и ход выполнился бы дважды.
+           AND ($3::text IS NULL OR locked_by = $3)`,
+      [updateId, Math.max(0, delaySeconds), workerId ?? null],
       ),
       { crossUser: true },
     );

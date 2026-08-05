@@ -164,7 +164,7 @@ export class TurnAggregator {
           // Граница темы или уже закрытое окно: запись возвращается в
           // очередь и станет собственным ходом. Попытка ей возвращается —
           // её ничто не обрабатывало.
-          await this.inbox.release(record.updateId, 0);
+          await this.inbox.release(record.updateId, 0, context.workerId);
           if (!closed) closed = "boundary";
           continue;
         }

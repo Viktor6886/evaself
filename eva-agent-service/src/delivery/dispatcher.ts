@@ -23,9 +23,11 @@
 
 import { randomUUID } from "node:crypto";
 
+import { EvaError } from "../errors.js";
 import type { Logger } from "../logger.js";
 import type { TurnAggregator } from "../turns/aggregator.js";
 import type { TurnSemaphores } from "../turns/semaphores.js";
+import type { UserTurnLock } from "../turns/user-turn-lock.js";
 import type { InboxRecord, InboxResult, ParallelTelegramInbox } from "./inbox.js";
 
 export interface DispatcherOptions {
@@ -60,6 +62,12 @@ export class ParallelInboxDispatcher {
     private readonly options: DispatcherOptions,
     private readonly slots?: TurnSemaphores,
     private readonly aggregator?: TurnAggregator,
+    /**
+     * Слот пользователя. Диспетчеру он нужен не чтобы брать, а чтобы
+     * видеть: этот же ключ держит фоновая часть сервиса и другие
+     * экземпляры, и их владение из базы не видно.
+     */
+    private readonly lock?: UserTurnLock,
   ) {}
 
   start(): void {
@@ -76,10 +84,17 @@ export class ParallelInboxDispatcher {
     this.timer = null;
   }
 
-  /** Дождаться уже начатых ходов. Нужно остановке и тестам. */
+  /**
+   * Дождаться уже начатых ходов и текущего опроса.
+   *
+   * Опрос ждём тоже: заход в базу мог уже забрать батч, и уйти раньше,
+   * чем эти записи попадут в `inFlight`, значит бросить их до истечения
+   * аренды.
+   */
   async drain(): Promise<void> {
-    while (this.inFlight.size > 0) {
-      await Promise.all([...this.inFlight]);
+    while (this.polling || this.inFlight.size > 0) {
+      if (this.inFlight.size > 0) await Promise.all([...this.inFlight]);
+      if (this.polling) await new Promise((resolve) => setTimeout(resolve, 5));
     }
   }
 
@@ -102,6 +117,14 @@ export class ParallelInboxDispatcher {
           excludeTelegramUsers: [...this.busy],
         });
         if (batch.length === 0) break;
+        if (this.stopped) {
+          // Сервис останавливают. Записи возвращаются в очередь сразу, а
+          // не ждут истечения аренды: их никто не начинал.
+          for (const record of batch) {
+            await this.inbox.release(record.updateId, 0, this.workerId).catch(() => undefined);
+          }
+          break;
+        }
         for (const record of batch) this.launch(record);
       }
     } catch (error) {
@@ -115,7 +138,15 @@ export class ParallelInboxDispatcher {
 
   private launch(record: InboxRecord): void {
     if (record.telegramUserId !== null) this.busy.add(record.telegramUserId);
-    const work = this.runTurn(record).finally(() => {
+    // `catch` здесь обязателен, а не «на всякий случай»: без него любая
+    // ошибка вне внутреннего try — недоступная Valkey, отказавшая база —
+    // становится unhandled rejection и роняет процесс целиком.
+    const work = this.runTurn(record).catch((error: unknown) => {
+      this.logger.error("Ход завершился ошибкой вне обработки", {
+        updateId: record.updateId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }).finally(() => {
       if (record.telegramUserId !== null) this.busy.delete(record.telegramUserId);
       this.inFlight.delete(work);
     });
@@ -123,13 +154,28 @@ export class ParallelInboxDispatcher {
   }
 
   private async runTurn(record: InboxRecord): Promise<void> {
+    // Распределённая блокировка этого человека может быть занята не
+    // нами: тот же ключ держат фоновая часть сервиса и другие
+    // экземпляры. Их владение в базе не отражено, поэтому спрашиваем
+    // прямо — иначе ход упёрся бы в `user_busy` и потратил попытку.
+    if (record.telegramUserId !== null && this.lock) {
+      const held = await this.lock.isLocked(record.telegramUserId).catch(() => false);
+      if (held) {
+        await this.release(record, this.options.releaseDelaySeconds ?? 1);
+        return;
+      }
+    }
+
     const slot = this.slots
-      ? await this.slots.acquire("interactive", `${this.workerId}:${record.updateId}`)
+      ? await this.slots
+        .acquire("interactive", `${this.workerId}:${record.updateId}`)
+        .catch(() => null)
       : null;
     if (this.slots && !slot) {
-      // Свободного слота нет. Запись возвращается в очередь, попытка ей
-      // не засчитывается: её ничто не обрабатывало.
-      await this.inbox.release(record.updateId, this.options.releaseDelaySeconds ?? 1);
+      // Свободного слота нет — или Valkey недоступна. Запись
+      // возвращается в очередь, попытка ей не засчитывается: её ничто
+      // не обрабатывало.
+      await this.release(record, this.options.releaseDelaySeconds ?? 1);
       return;
     }
 
@@ -143,33 +189,60 @@ export class ParallelInboxDispatcher {
         records = aggregated.records;
       }
       const result = await this.processor(records);
-      // Квота у объединённого хода снимается один раз, поэтому флаг
-      // списания достаётся первой записи, а остальные закрываются как
-      // часть того же хода.
-      await this.inbox.complete(records[0]!.updateId, result);
-      for (const extra of records.slice(1)) {
+      // Квота у объединённого хода снимается один раз, и флаг списания
+      // достаётся той записи, на которую ход отвечает, — последней.
+      // Иначе аналитика по строкам указывала бы не на то сообщение.
+      const answered = records[records.length - 1]!;
+      await this.inbox.complete(answered.updateId, result);
+      for (const extra of records) {
+        if (extra.updateId === answered.updateId) continue;
         await this.inbox.complete(extra.updateId, { status: result.status, usageCharged: false });
       }
     } catch (error) {
       await this.failTurn(records, error);
     } finally {
-      await slot?.release();
+      await slot?.release().catch(() => undefined);
     }
+  }
+
+  /** Вернуть запись в очередь, не потратив попытку. */
+  private async release(record: InboxRecord, delaySeconds: number): Promise<void> {
+    await this.inbox
+      .release(record.updateId, delaySeconds, this.workerId)
+      .catch((error: unknown) => {
+        this.logger.warn("Не удалось вернуть запись в очередь", {
+          updateId: record.updateId,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      });
   }
 
   private async failTurn(records: InboxRecord[], error: unknown): Promise<void> {
     const primary = records[0]!;
+    // `user_busy` — это «слот занят», а не «ход не удался». Тратить на
+    // него попытку значит убивать сообщение за чужую занятость: пять
+    // попыток с их backoff укладываются в секунды, а чужой ход может
+    // идти минуты.
+    if (error instanceof EvaError && error.code === "user_busy") {
+      for (const record of records) {
+        await this.release(record, this.options.releaseDelaySeconds ?? 1);
+      }
+      return;
+    }
     // Присоединённые сообщения возвращаются в очередь целыми: ход не
     // состоялся, и терять их из-за чужой неудачной попытки нельзя.
     for (const extra of records.slice(1)) {
-      await this.inbox.release(extra.updateId, 0).catch(() => undefined);
+      await this.release(extra, 0);
     }
-    const outcome = await this.inbox.fail(
-      primary.updateId,
-      error,
-      primary.attempts,
-      this.options.maxAttempts,
-    );
+    const outcome = await this.inbox
+      .fail(primary.updateId, error, primary.attempts, this.options.maxAttempts)
+      .catch((failure: unknown) => {
+        this.logger.error("Не удалось записать отказ хода", {
+          updateId: primary.updateId,
+          message: failure instanceof Error ? failure.message : String(failure),
+        });
+        return { dead: false };
+      });
     this.logger.error("Ошибка обработки Telegram update", {
       updateId: primary.updateId,
       attempt: primary.attempts,

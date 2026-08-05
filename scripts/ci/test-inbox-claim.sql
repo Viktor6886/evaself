@@ -34,12 +34,22 @@ VALUES
   -- Живая аренда чужого воркера.
   (8, 600, 600, 1, 'text', 'processing','{"update_id":8}'::jsonb, now() - interval '1 s', now()),
   -- Аренда истекла: запись возвращается в работу.
-  (9, 700, 700, 1, 'text', 'processing','{"update_id":9}'::jsonb, now() - interval '1 s', now());
+  (9, 700, 700, 1, 'text', 'processing','{"update_id":9}'::jsonb, now() - interval '1 s', now()),
+  -- Отправитель не опознан: NULL — это «неизвестно», а не «не в списке».
+  -- Без явной ветки такая запись выпадала бы из батча, стоило кому-то
+  -- оказаться занятым.
+  (10, NULL, 800, 1, 'text', 'queued',   '{"update_id":10}'::jsonb, now() - interval '1 s', now()),
+  -- Попытки исчерпаны, аренда истекла: запись обязана уйти в dead,
+  -- иначе она навсегда закроет очередь своего человека.
+  (11, 900, 900, 1, 'text', 'processing','{"update_id":11}'::jsonb, now() - interval '8 s', now()),
+  (12, 900, 900, 2, 'text', 'queued',    '{"update_id":12}'::jsonb, now() - interval '7 s', now());
 
 UPDATE claim_probe SET attempts = 3 WHERE update_id = 7;
 UPDATE claim_probe SET locked_at = now(), locked_by = 'живой' WHERE update_id = 8;
 UPDATE claim_probe SET locked_at = now() - interval '10 min', locked_by = 'умерший'
  WHERE update_id = 9;
+UPDATE claim_probe SET attempts = 3, locked_at = now() - interval '10 min', locked_by = 'умерший'
+ WHERE update_id = 11;
 
 DO $$
 DECLARE
@@ -56,7 +66,8 @@ BEGIN
              OR (t.status = 'processing'
                  AND t.locked_at < now() - make_interval(secs => 30))
            )
-           AND NOT (t.telegram_user_id = ANY(ARRAY[]::bigint[]))
+           AND (t.telegram_user_id IS NULL
+                OR NOT (t.telegram_user_id = ANY(ARRAY[]::bigint[])))
            AND NOT EXISTS (
              SELECT 1
                FROM claim_probe earlier
@@ -75,8 +86,11 @@ BEGIN
     -- 9 — запись с истёкшей арендой.
     -- Не взяты: 2 (есть более раннее), 6 (не наступил срок),
     -- 7 (исчерпаны попытки), 8 (живая аренда).
-    IF claimed IS DISTINCT FROM ARRAY[1, 3, 5, 9]::bigint[] THEN
-        RAISE EXCEPTION 'claim вернул % вместо {1,3,5,9}', claimed;
+    -- 10 — запись без опознанного отправителя.
+    -- 11 не берётся: попытки исчерпаны (её хоронит sweeper ниже),
+    -- и 12 из-за неё пока заблокировано.
+    IF claimed IS DISTINCT FROM ARRAY[1, 3, 5, 9, 10]::bigint[] THEN
+        RAISE EXCEPTION 'claim вернул % вместо {1,3,5,9,10}', claimed;
     END IF;
 END $$;
 
@@ -92,7 +106,8 @@ BEGIN
          WHERE t.attempts < 3
            AND t.payload IS NOT NULL
            AND (t.status IN ('queued', 'retry') AND t.available_at <= now())
-           AND NOT (t.telegram_user_id = ANY(ARRAY[100, 200]::bigint[]))
+           AND (t.telegram_user_id IS NULL
+                OR NOT (t.telegram_user_id = ANY(ARRAY[100, 200]::bigint[])))
            AND NOT EXISTS (
              SELECT 1
                FROM claim_probe earlier
@@ -104,8 +119,10 @@ BEGIN
          LIMIT 10
       ) picked;
 
-    IF claimed IS DISTINCT FROM ARRAY[5]::bigint[] THEN
-        RAISE EXCEPTION 'исключение занятых людей вернуло % вместо {5}', claimed;
+    -- 10 остаётся: у неё нет отправителя, и «занят» про неё ничего не
+    -- говорит. Именно здесь NULL = ANY(...) без явной ветки терял бы её.
+    IF claimed IS DISTINCT FROM ARRAY[5, 10]::bigint[] THEN
+        RAISE EXCEPTION 'исключение занятых людей вернуло % вместо {5,10}', claimed;
     END IF;
 END $$;
 
@@ -130,6 +147,51 @@ BEGIN
 
     IF followed IS DISTINCT FROM ARRAY[2]::bigint[] THEN
         RAISE EXCEPTION 'follow-up вернул % вместо {2}', followed;
+    END IF;
+END $$;
+
+-- Sweeper: запись с исчерпанными попытками и истёкшей арендой уходит в
+-- dead и перестаёт закрывать очередь своего человека.
+DO $$
+DECLARE
+    stuck text;
+    claimed bigint[];
+BEGIN
+    UPDATE claim_probe
+       SET status = 'dead',
+           completed_at = now(),
+           last_error = COALESCE(last_error, 'worker lease expired after final attempt'),
+           locked_at = NULL,
+           locked_by = NULL
+     WHERE status = 'processing'
+       AND attempts >= 3
+       AND locked_at < now() - make_interval(secs => 30);
+
+    SELECT status INTO stuck FROM claim_probe WHERE update_id = 11;
+    IF stuck <> 'dead' THEN
+        RAISE EXCEPTION 'застрявшая запись осталась в статусе %', stuck;
+    END IF;
+
+    SELECT array_agg(update_id ORDER BY update_id) INTO claimed
+      FROM (
+        SELECT t.update_id
+          FROM claim_probe t
+         WHERE t.telegram_user_id = 900
+           AND t.attempts < 3
+           AND t.payload IS NOT NULL
+           AND (t.status IN ('queued', 'retry') AND t.available_at <= now())
+           AND NOT EXISTS (
+             SELECT 1
+               FROM claim_probe earlier
+              WHERE earlier.status IN ('queued', 'processing', 'retry')
+                AND earlier.telegram_user_id IS NOT DISTINCT FROM t.telegram_user_id
+                AND (earlier.received_at, earlier.update_id) < (t.received_at, t.update_id)
+           )
+      ) picked;
+
+    IF claimed IS DISTINCT FROM ARRAY[12]::bigint[] THEN
+        RAISE EXCEPTION 'после похорон застрявшей записи очередь человека вернула % вместо {12}',
+            claimed;
     END IF;
 END $$;
 
