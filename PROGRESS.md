@@ -82,8 +82,8 @@
 | 01 | [Срочные исправления безопасности и Security Audit](prompts/step-01-security-fixes.md) | P0 | шаг 0 | выполнен | [#103](https://github.com/Viktor6886/evaself/pull/103) | 2026-08-04 |
 | 02 | [Обязательная изоляция арендаторов](prompts/step-02-tenant-isolation.md) | P0 | шаг 0 | выполнен | [#124](https://github.com/Viktor6886/evaself/pull/124) | 2026-08-04 |
 | ⏸ | **Конец порции 2 (P0) — остановка, сводка, запрос разрешения** | | | | | |
-| 03 | [Durable жизненный цикл хода в shadow-режиме и базовые метрики](prompts/step-03-turn-lifecycle.md) | P0 | шаги 0–2 | на ревью | — | 2026-08-05 |
-| 04 | [Параллельный dispatcher, объединение быстрых сообщений, UserTurnLock и семафоры](prompts/step-04-parallel-inbox.md) | P0 | шаг 3 | на ревью | — | 2026-08-05 |
+| 03 | [Durable жизненный цикл хода в shadow-режиме и базовые метрики](prompts/step-03-turn-lifecycle.md) | P0 | шаги 0–2 | выполнен | [#128](https://github.com/Viktor6886/evaself/pull/128) | 2026-08-05 |
+| 04 | [Параллельный dispatcher, объединение быстрых сообщений, UserTurnLock и семафоры](prompts/step-04-parallel-inbox.md) | P0 | шаг 3 | на ревью | [#130](https://github.com/Viktor6886/evaself/pull/130) | 2026-08-05 |
 | ⏸ | **Конец порции 3 (P0) — остановка, сводка, запрос разрешения** | | | | | |
 | 05 | [Безопасный SessionManager, барьер отмены, восстановление хода и журнал побочных эффектов](prompts/step-05-session-manager-recovery.md) | P1 | шаги 3–4 | не начат | — | — |
 | ⏸ | **Конец порции 4 (P1) — остановка, сводка, запрос разрешения** | | | | | |
@@ -231,7 +231,7 @@
 ### Шаг 04 — Параллельный dispatcher, объединение быстрых сообщений, UserTurnLock и семафоры
 - Агент: Claude Code (Claude Code on the web)
 - Ветка: step/04-parallel-inbox
-- PR: —
+- PR: https://github.com/Viktor6886/evaself/pull/130
 - Дата: 2026-08-05
 - Статус: **на ревью**
 - Что найдено до изменения (раздел «СНАЧАЛА ПРОВЕРЬ»): последовательный
@@ -447,10 +447,10 @@
 
 ### Шаг 03 — Durable жизненный цикл хода в shadow-режиме и базовые метрики
 - Агент: Claude Code (Claude Code on the web)
-- Ветка: step/03-turn-lifecycle
-- PR: —
+- Ветка: step/03-turn-lifecycle (удалить после мержа)
+- PR: https://github.com/Viktor6886/evaself/pull/128 (смержен человеком 2026-08-05)
 - Дата: 2026-08-05
-- Статус: **на ревью**
+- Статус: **выполнен**
 - Что найдено до изменения (раздел «СНАЧАЛА ПРОВЕРЬ»): совместимой
   машины состояний хода в репозитории нет. Проверено: `run_id`,
   `turn_run`, `lifecycle` в схеме и в коде не встречаются;
