@@ -84,6 +84,10 @@ export interface Config {
    * данных: таблица и её семантика те же.
    */
   parallelInboxEnabled: boolean;
+  parallelOutboxEnabled: boolean;
+  outboxConcurrency: number;
+  telegramGlobalPerSecond: number;
+  telegramChatPerSecond: number;
   /** Объединение быстрых последовательных сообщений в один ход. */
   turnAggregationEnabled: boolean;
   /** Сколько ходов процесс ведёт одновременно. */
@@ -262,6 +266,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     outboxEnabled: bool("EVA_OUTBOX_ENABLED", true),
     turnLifecycleEnabled: bool("EVA_TURN_LIFECYCLE", false),
     parallelInboxEnabled: bool("EVA_PARALLEL_INBOX", false),
+    parallelOutboxEnabled: bool("EVA_PARALLEL_OUTBOX", false),
+    outboxConcurrency: clampedInt("EVA_OUTBOX_CONCURRENCY", 8, 1, 64),
+    telegramGlobalPerSecond: clampedInt("EVA_TELEGRAM_GLOBAL_RPS", 25, 1, 30),
+    telegramChatPerSecond: clampedInt("EVA_TELEGRAM_CHAT_RPS", 1, 1, 10),
     turnAggregationEnabled: bool("EVA_TURN_AGGREGATION", false),
     // Первая ступень rollout — 8. Дальше 16, 32, 64, каждая только при
     // зелёных метриках базы, провайдера и сессий.

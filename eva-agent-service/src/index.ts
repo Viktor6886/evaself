@@ -19,6 +19,7 @@ import { Database } from "./db.js";
 import { ParallelInboxDispatcher } from "./delivery/dispatcher.js";
 import { PostgresTelegramInbox, TelegramInboxWorker } from "./delivery/inbox.js";
 import { PostgresTelegramOutbox } from "./delivery/outbox.js";
+import { TelegramRateLimits } from "./delivery/telegram-limits.js";
 import { EvaWorkflow } from "./eva-workflow.js";
 import { GoalService } from "./goals/goal-service.js";
 import { LettaService } from "./letta.js";
@@ -98,10 +99,20 @@ async function main(): Promise<void> {
   const rateLimiter = new ValkeyRateLimiter(redis);
   const letta = new LettaService(config, logger, persona);
   const telegram = new TelegramClient(config, logger);
+  // Лимиты Telegram общие для реплик и живут в Valkey. Без них
+  // параллельная доставка превратилась бы в согласованный залп: каждая
+  // реплика в своём праве, а 429 приходит на всех сразу.
+  const telegramLimits = new TelegramRateLimits(redis, logger, {
+    globalPerSecond: config.telegramGlobalPerSecond,
+    chatPerSecond: config.telegramChatPerSecond,
+  });
   const outbox = new PostgresTelegramOutbox(db, telegram, logger, {
     pollMs: config.telegramOutboxPollMs,
     leaseSeconds: config.telegramOutboxLeaseSeconds,
     maxAttempts: config.telegramOutboxMaxAttempts,
+    parallel: config.parallelOutboxEnabled
+      ? { concurrency: config.outboxConcurrency, limits: telegramLimits }
+      : null,
   });
   if (config.outboxEnabled) telegram.setOutbox(outbox);
   const sdk = new SdkSettingsManager(config, db, letta);

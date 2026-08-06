@@ -13,6 +13,7 @@ import type {
   OutboxDelivery,
   OutboxTransport,
 } from "./delivery/outbox.js";
+import type { DeliveryPriority } from "./delivery/priority.js";
 import type { Logger } from "./logger.js";
 
 export interface TelegramUser {
@@ -81,6 +82,21 @@ export class TelegramClient implements OutboxTransport {
     metrics: DeliveryMetrics;
     lastOutboxId: string | null;
   }>();
+
+  /**
+   * Ступень очереди для всего, что отправляется внутри.
+   *
+   * Отдельным контекстом, а не параметром: приоритет — свойство
+   * происходящего, а не одного вызова. Кризисный монитор объявляет его
+   * один раз, и всё, что он отправит, включая вложенные вызовы,
+   * попадает в очередь на своей ступени.
+   */
+  private readonly priorityContext = new AsyncLocalStorage<DeliveryPriority>();
+
+  /** Выполнить работу, объявив ступень очереди для её отправок. */
+  async withPriority<T>(priority: DeliveryPriority, work: () => Promise<T>): Promise<T> {
+    return await this.priorityContext.run(priority, work);
+  }
 
   constructor(config: Config, logger: Logger) {
     this.token = config.telegramBotToken;
@@ -460,6 +476,7 @@ export class TelegramClient implements OutboxTransport {
       chatId,
       payload,
       idempotencyKey,
+      priority: this.priorityContext.getStore(),
       onMetrics: (metrics) => this.addDeliveryMetrics(metrics),
       onEnqueued: (outboxId) => {
         const store = this.deliveryContext.getStore();
