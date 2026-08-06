@@ -29,6 +29,31 @@ test("включённая агрегация без параллельного 
   );
 });
 
+test("восстановление без жизненного цикла не молчит", () => {
+  const config = loadConfig({
+    ...base,
+    EVA_TURN_RECOVERY: "true",
+    EVA_TURN_LIFECYCLE: "false",
+  });
+  const warnings = configWarnings(config);
+  assert.ok(
+    warnings.some((warning) => warning.includes("EVA_TURN_RECOVERY")),
+    `предупреждения нет: ${JSON.stringify(warnings)}`,
+  );
+});
+
+test("восстановление с жизненным циклом предупреждения не даёт", () => {
+  const config = loadConfig({
+    ...base,
+    EVA_TURN_RECOVERY: "true",
+    EVA_TURN_LIFECYCLE: "true",
+  });
+  assert.ok(
+    !configWarnings(config).some((warning) => warning.includes("EVA_TURN_RECOVERY")),
+    "предупреждение выдано при обоих включённых флагах",
+  );
+});
+
 test("оба флага включены — предупреждения нет", () => {
   const config = loadConfig({
     ...base,

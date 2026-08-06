@@ -59,7 +59,7 @@ export class SdkSettingsManager {
       row.default_persona = this.letta.currentPersona;
       await this.db.saveSdkSettings(row);
     }
-    this.letta.applySdkSettings(runtimeFromRow(row));
+    await this.letta.applySdkSettings(runtimeFromRow(row));
     return this.public(row);
   }
 
@@ -71,7 +71,7 @@ export class SdkSettingsManager {
     const current = await this.db.getSdkSettings();
     const merged = validateSettings({ ...rowToInput(current), ...input });
     const saved = await this.db.saveSdkSettings({ ...current, ...merged });
-    this.letta.applySdkSettings(runtimeFromRow(saved));
+    await this.letta.applySdkSettings(runtimeFromRow(saved));
     return this.public(saved);
   }
 

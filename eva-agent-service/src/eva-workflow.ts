@@ -2,6 +2,7 @@ import type { Config } from "./config.js";
 import { type CrisisMonitor, safetyDirective } from "./crisis.js";
 import type { AgentLinkRow, Database, SttUsageAttempt, UserRow } from "./db.js";
 import type { InboxResult } from "./delivery/inbox.js";
+import { EvaError } from "./errors.js";
 import { preferredResponseLanguage, t } from "./i18n/index.js";
 import type { SupportedLanguage } from "./i18n/language-resolver.js";
 import type { LettaService } from "./letta.js";
@@ -13,6 +14,7 @@ import type { UserProfileService } from "./profile/profile-service.js";
 import type { UserTurnLock } from "./turns/user-turn-lock.js";
 import type { RuntimeContextBuilder } from "./runtime/runtime-context.js";
 import { TaskEventService } from "./tasks/task-event-service.js";
+import { runInTurn } from "./turns/turn-context.js";
 import {
   TURN_FLOW_VERSION,
   type TurnHandle,
@@ -392,6 +394,13 @@ export class EvaWorkflow {
         });
 
         await this.moveTurn(turnHandle, "context_built");
+        // Барьер отмены до обращения к модели: отменённый ход не платит
+        // за генерацию, которую всё равно не покажет.
+        if (turnHandle && this.turns && await this.turns.isCancelled(turnHandle)) {
+          await this.moveTurn(turnHandle, "cancelling", { detail: { reason: "cancelled" } });
+          await this.moveTurn(turnHandle, "cancelled");
+          return { status: "ignored" };
+        }
         // Сообщение уходит в App Server, и до его ответа ход находится
         // в обработке модели. Обе отметки ставятся здесь: промежуточной
         // точки наблюдения один вызов SDK не даёт.
@@ -400,14 +409,40 @@ export class EvaWorkflow {
         const lettaStarted = performance.now();
         let answer;
         try {
-          answer = await this.letta.runTurn(
-            conversationId,
-            this.runtimeContext.wrapUserMessage(
-              context,
-              signal ? `${safetyDirective(signal)}\n\n${prompt}` : prompt,
-              { messageSource: update.kind, crisisLevel: signal?.severity ?? "none" },
+          // Ход выполняется внутри своего контекста: инструменты узнают
+          // из него `run_id` и барьер отмены, не получая их параметром
+          // через чужой код Agent SDK.
+          answer = await runInTurn(
+            {
+              runId: turnHandle?.runId ?? "",
+              recorded: turnHandle?.recorded === true,
+              isCancelled: async () =>
+                turnHandle && this.turns ? await this.turns.isCancelled(turnHandle) : false,
+            },
+            async () => await this.letta.runTurn(
+              conversationId,
+              this.runtimeContext.wrapUserMessage(
+                context,
+                signal ? `${safetyDirective(signal)}\n\n${prompt}` : prompt,
+                { messageSource: update.kind, crisisLevel: signal?.severity ?? "none" },
+              ),
+              {
+                isCancelled: async () =>
+                  turnHandle && this.turns ? await this.turns.isCancelled(turnHandle) : false,
+              },
             ),
           );
+        } catch (error) {
+          // Отменённый ход не доставляет поздний ответ и не идёт в
+          // повтор: он закончился по просьбе, а не по ошибке.
+          if (error instanceof EvaError && error.code === "turn_cancelled") {
+            await this.moveTurn(turnHandle, "cancelling", { detail: { reason: "cancelled" } });
+            await this.moveTurn(turnHandle, "cancelled");
+            messageDraft.current?.stop();
+            messageDraft.current = null;
+            return { status: "ignored" };
+          }
+          throw error;
         } finally {
           metrics.letta_turn_ms = elapsed(lettaStarted);
         }
@@ -417,7 +452,13 @@ export class EvaWorkflow {
         });
         // Отдельного идентификатора сессии Agent SDK не отдаёт: сессия
         // адресуется conversation, им и связываем.
-        await this.linkTurn(turnHandle, { lettaSessionId: answer.conversationId });
+        await this.linkTurn(turnHandle, {
+          lettaSessionId: answer.conversationId,
+          // Идентификаторы run отдаёт сам SDK. Не сохранять их значит
+          // выбрасывать единственное свидетельство, по которому ход
+          // опознаётся на стороне Letta.
+          lettaRunIds: answer.runIds,
+        });
         await this.db.markAgentUsed(link.agent_id, user.id);
         // Ход, где модель прислала несколько сообщений, — это агентный
         // цикл с проговариванием плана. В Telegram уходит только
@@ -435,6 +476,18 @@ export class EvaWorkflow {
         }
         this.highlights?.schedule(user.id, conversationId);
         const turn = answer;
+
+        // Последняя проверка барьера — перед самой доставкой. Между
+        // концом генерации и отправкой успевают выполниться связи,
+        // отметка агента и планирование выжимок; отмена, пришедшая в
+        // это окно, иначе не остановила бы ответ.
+        if (turnHandle && this.turns && await this.turns.isCancelled(turnHandle)) {
+          await this.moveTurn(turnHandle, "cancelling", { detail: { reason: "cancelled" } });
+          await this.moveTurn(turnHandle, "cancelled");
+          messageDraft.current?.stop();
+          messageDraft.current = null;
+          return { status: "ignored" };
+        }
 
         const reply = turn.reply.trim() || t(language, "emptyReply");
         if (responseMode === "text" || responseMode === "both") {

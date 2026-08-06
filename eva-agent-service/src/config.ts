@@ -95,6 +95,17 @@ export interface Config {
   turnAggregationDebounceMs: number;
   turnAggregationWindowMs: number;
   /**
+   * Безопасный менеджер сессий: активная сессия не вытесняется и не
+   * закрывается, смена настроек SDK идёт через graceful drain.
+   */
+  safeSessionManager: boolean;
+  /** Сколько ждать освобождения сессий при смене настроек и остановке. */
+  sessionDrainMs: number;
+  /** Восстановление незавершённых ходов после сбоя. */
+  turnRecoveryEnabled: boolean;
+  /** Как часто искать ходы с истёкшей арендой. */
+  turnRecoveryIntervalMs: number;
+  /**
    * Сколько ждать завершения уже начатых ходов при остановке сервиса.
    * Значение обязано укладываться в grace period контейнера (умолчание
    * Docker — 10 с), иначе ожидание кончится уже после SIGKILL.
@@ -261,6 +272,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     // Потолок окна ограничен диапазоном из задания: меньше — объединять
     // нечего, больше — человек ждёт ответа дольше, чем готов ждать.
     turnAggregationWindowMs: clampedInt("EVA_TURN_AGGREGATION_WINDOW_MS", 2_500, 2_500, 3_000),
+    safeSessionManager: bool("EVA_SAFE_SESSION_MANAGER", false),
+    sessionDrainMs: clampedInt("EVA_SESSION_DRAIN_MS", 8_000, 500, 120_000),
+    turnRecoveryEnabled: bool("EVA_TURN_RECOVERY", false),
+    turnRecoveryIntervalMs: clampedInt("EVA_TURN_RECOVERY_INTERVAL_MS", 30_000, 5_000, 600_000),
     shutdownDrainMs: clampedInt("EVA_SHUTDOWN_DRAIN_MS", 8_000, 1_000, 120_000),
 
     lavaWebhookUser: str("LAVA_WEBHOOK_USER"),
@@ -298,6 +313,16 @@ export function configWarnings(config: Config): string[] {
       "EVA_TURN_AGGREGATION включён, а EVA_PARALLEL_INBOX выключен: "
         + "объединение быстрых сообщений работает только в параллельном "
         + "диспетчере и сейчас не действует",
+    );
+  }
+  // Восстановление меняет состояние только через жизненный цикл, а он
+  // при выключенном флаге не пишет ничего: решения принимались бы,
+  // не применялись и оставляли по строке в журнале попыток каждый заход.
+  if (config.turnRecoveryEnabled && !config.turnLifecycleEnabled) {
+    warnings.push(
+      "EVA_TURN_RECOVERY включён, а EVA_TURN_LIFECYCLE выключен: "
+        + "восстановление меняет состояние только через жизненный цикл "
+        + "и без него не запускается",
     );
   }
   if (config.telegramBotToken && !config.telegramWebhookSecret) {

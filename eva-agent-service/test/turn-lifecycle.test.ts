@@ -189,6 +189,11 @@ class TurnStore {
       if (values[4] === true) {
         row.finished_at = new Date().toISOString();
         row.duration_ms = 1;
+      } else {
+        // Настоящий запрос снимает отметку конца при переходе в
+        // незавершённое состояние: ход, который снова пошёл, не
+        // закончен. Поддельная база обязана вести себя так же.
+        row.finished_at = null;
       }
       return [];
     }

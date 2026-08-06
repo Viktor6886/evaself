@@ -38,6 +38,8 @@ import { buildServer, VERSION } from "./server.js";
 import { TelegramClient } from "./telegram.js";
 import { TimezoneResolver } from "./time/timezone-resolver.js";
 import { TurnAggregator } from "./turns/aggregator.js";
+import { EffectJournal } from "./turns/effect-journal.js";
+import { TurnRecoveryService } from "./turns/recovery.js";
 import { TurnSemaphores } from "./turns/semaphores.js";
 import { TurnLifecycle } from "./turns/turn-lifecycle.js";
 
@@ -141,6 +143,10 @@ async function main(): Promise<void> {
     graph,
   );
   const goals = new GoalService(db, runtimeContext, graph);
+  // Журнал побочных эффектов включается тем же флагом, что и
+  // восстановление: без журнала повтор хода не защищён, и включать одно
+  // без другого — значит получить повторные действия.
+  const effects = new EffectJournal(db, logger, config.turnRecoveryEnabled);
   const toolFactory = new AgentToolFactory(
     config,
     db,
@@ -149,6 +155,7 @@ async function main(): Promise<void> {
     profile,
     goals,
     graph,
+    effects,
   );
   letta.setToolFactory((conversationId) => toolFactory.forConversation(conversationId));
   const crisis = new CrisisMonitor(db, telegram, logger, config.ownerTelegramId);
@@ -237,6 +244,15 @@ async function main(): Promise<void> {
     queue,
   );
 
+  const recovery = new TurnRecoveryService(
+    db,
+    logger,
+    effects,
+    turns,
+    config.turnRecoveryEnabled,
+  );
+  let recoveryTimer: NodeJS.Timeout | null = null;
+
   const payments = new LavaPayments(config, db, telegram, logger);
   const purposes = new ConversationPurposeService(db, letta, logger);
   const background = new BackgroundRuntime(
@@ -274,6 +290,13 @@ async function main(): Promise<void> {
   if (config.outboxEnabled) outbox.start();
   if (config.parallelInboxEnabled) dispatcher.start();
   else inboxWorker.start();
+  // Сочетание флагов проверяет `configWarnings`: заход без жизненного
+  // цикла принимал бы решения, применить их не мог и оставлял бы по
+  // строке в журнале попыток каждые тридцать секунд.
+  if (config.turnRecoveryEnabled && turns.active) {
+    recoveryTimer = setInterval(() => void recovery.sweep(), config.turnRecoveryIntervalMs);
+    recoveryTimer.unref();
+  }
   background.start();
   logger.info("eva-agent-service принимает запросы", {
     version: VERSION,
@@ -295,12 +318,21 @@ async function main(): Promise<void> {
     logger.info("Остановка сервиса", { signal });
     try {
       background.stop();
+      if (recoveryTimer) clearInterval(recoveryTimer);
       dispatcher.stop();
       inboxWorker.stop();
-      // Уже начатые ходы дописываются: аренда записи ещё наша, и
-      // бросить её посреди хода значит отдать её другому воркеру с
-      // наполовину выполненной работой.
-      await dispatcher.drain(config.shutdownDrainMs);
+      // Оба ожидания идут одновременно, а не по очереди: их сумма
+      // иначе превысила бы grace period контейнера, и SIGKILL пришёл бы
+      // посреди drain — то есть ожидание не сработало бы вовсе.
+      await Promise.all([
+        // Уже начатые ходы дописываются: аренда записи ещё наша, и
+        // бросить её посреди хода значит отдать её другому воркеру с
+        // наполовину выполненной работой.
+        dispatcher.drain(config.shutdownDrainMs),
+        config.safeSessionManager
+          ? letta.drainSessions(config.sessionDrainMs)
+          : Promise.resolve(),
+      ]);
       if (config.outboxEnabled) outbox.stop();
       letta.shutdown();
       await app.close();

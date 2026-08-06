@@ -72,6 +72,14 @@ export const appServerUnavailable = (message: string, details?: unknown) =>
 export const turnTimeout = (message: string) =>
   new EvaError(message, { code: "turn_timeout", statusCode: 504, retryable: true });
 
+/**
+ * Ход отменён. Не ошибка исполнения: генерация остановлена намеренно, и
+ * поздний ответ доставлять нельзя. Отдельный код нужен, чтобы путь
+ * отмены не смешивался с отказом и не уходил в повтор.
+ */
+export const turnCancelled = (message: string) =>
+  new EvaError(message, { code: "turn_cancelled", statusCode: 409, retryable: false });
+
 export const turnFailed = (message: string, details?: unknown) =>
   new EvaError(message, { code: "turn_failed", statusCode: 502, details });
 
