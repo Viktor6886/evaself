@@ -708,7 +708,7 @@ export class LlmRouter {
               cost_micro: costOf(provider, chunk.response),
             });
             await this.log(provider, attemptRequest, chain.primary?.id ?? null, {
-              started, attempts: 1, switches, response: chunk.response, streamed: true,
+              started, attempts: attempt, switches, response: chunk.response, streamed: true,
             });
           }
           yield chunk;
