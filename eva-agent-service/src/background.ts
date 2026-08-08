@@ -308,7 +308,12 @@ export class BackgroundRuntime {
       });
       let telegramMessageId: number | null = null;
       if (generatedText) {
-        const sent = await this.telegram.sendMessage(Number(task.chat_id), generatedText);
+        // Напоминание пропускает вперёд ответ на живой вопрос: человек,
+        // который сейчас разговаривает, ждёт именно ответ.
+        const sent = await this.telegram.withPriority(
+          "reminder",
+          async () => await this.telegram.sendMessage(Number(task.chat_id), generatedText),
+        );
         telegramMessageId = lastTelegramMessageId(Array.isArray(sent) ? sent : []);
       }
       await this.taskEvents.record({
@@ -398,7 +403,10 @@ export class BackgroundRuntime {
         await this.saveHeartbeat(candidate, null, "duplicate");
         return;
       }
-      await this.telegram.sendMessage(Number(candidate.chat_id), reply);
+      await this.telegram.withPriority(
+        "reminder",
+        async () => await this.telegram.sendMessage(Number(candidate.chat_id), reply),
+      );
       await this.saveHeartbeat(candidate, hash, "sent");
       await this.db.markAgentUsed(candidate.agent_id, Number(candidate.user_id));
     } catch (error) {

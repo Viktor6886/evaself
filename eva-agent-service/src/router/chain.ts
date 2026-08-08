@@ -10,6 +10,7 @@
 
 import { estimateTokens } from "./normalize.js";
 import type { BreakerRow } from "./store.js";
+import { breakerKey } from "./types.js";
 import type { LlmRequest, ProviderProfile, RouteDefinition, SwitchReason } from "./types.js";
 
 export interface ChainEntry {
@@ -59,7 +60,7 @@ export function buildChain(input: ChainInput): BuiltChain {
       return;
     }
 
-    const breaker = input.breakers.get(provider.id);
+    const breaker = input.breakers.get(breakerKey(provider.id, provider.model));
     if (breaker?.pinned_out) {
       rejected.push({
         provider,
@@ -76,6 +77,14 @@ export function buildChain(input: ChainInput): BuiltChain {
       }
       // Время выдержки вышло: провайдер остаётся в цепочке, роутер
       // попробует занять пробный запрос через claimProbe().
+    }
+    if (breaker?.state === "half_open") {
+      rejected.push({
+        provider,
+        reason: "breaker_open",
+        detail: "circuit breaker уже выполняет единственный пробный запрос",
+      });
+      return;
     }
 
     usable.push({ provider, position });

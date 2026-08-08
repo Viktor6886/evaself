@@ -87,7 +87,7 @@
 | ⏸ | **Конец порции 3 (P0) — остановка, сводка, запрос разрешения** | | | | | |
 | 05 | [Безопасный SessionManager, барьер отмены, восстановление хода и журнал побочных эффектов](prompts/step-05-session-manager-recovery.md) | P1 | шаги 3–4 | выполнен | [#132](https://github.com/Viktor6886/evaself/pull/132) | 2026-08-05 |
 | ⏸ | **Конец порции 4 (P1) — остановка, сводка, запрос разрешения** | | | | | |
-| 06 | [Параллельная доставка Telegram и распределённые лимиты LLM Router](prompts/step-06-outbox-distributed-limits.md) | P1 | шаг 4 | не начат | — | — |
+| 06 | [Параллельная доставка Telegram и распределённые лимиты LLM Router](prompts/step-06-outbox-distributed-limits.md) | P1 | шаг 4 | выполнен | [#135](https://github.com/Viktor6886/evaself/pull/135) | 2026-08-08 |
 | ⏸ | **Конец порции 5 (P1) — остановка, сводка, запрос разрешения** | | | | | |
 | 07 | [Единый слой фоновых задач: QueueRegistry, транзакционный job outbox и общие правила](prompts/step-07-bullmq-foundation.md) | P1 | шаги 3–5 | не начат | — | — |
 | ⏸ | **Конец порции 6 (P1) — остановка, сводка, запрос разрешения** | | | | | |
@@ -227,6 +227,216 @@
 ```
 
 <!-- Записи ниже -->
+
+### Шаг 06 — Параллельная доставка Telegram и распределённые лимиты LLM Router
+- Агент: Codex
+- Ветка: `step/06-outbox-distributed-limits`
+- PR: [#135](https://github.com/Viktor6886/evaself/pull/135)
+- Дата: 2026-08-08
+- Статус: **выполнен**
+- Что найдено до изменения (раздел «СНАЧАЛА ПРОВЕРЬ»):
+  - `telegram_outbox` уже был единственной durable-очередью, но воркер
+    выбирал и отправлял записи строго по одной, без класса приоритета;
+  - RPM, TPM и inflight в `src/router/limits.ts` считались в памяти
+    одного процесса, поэтому сумма реплик могла превысить лимит;
+  - общий circuit breaker уже существовал в PostgreSQL
+    (`llm_breaker_state`): атомарный `claimProbe`, автоматическое
+    восстановление и ручной `pinned_out`. Он сохранён единственным
+    каноническим breaker вместо второго состояния в Valkey;
+  - ordered chains уже хранились в `llm_route_providers`, а миграция
+    028 распространяла управляемые цепочки на `fast`, `classifier` и
+    `research`. Этот реестр переиспользован для primary/fallback;
+  - Telegram и provider adapters не сохраняли `retry_after`, а
+    PostgreSQL outbox считал 429 обычной неудачной попыткой.
+- Итог: outbox за feature flag получает ограниченный параллельный
+  claim с пятью приоритетами и общими global/per-chat Telegram buckets.
+  Router за отдельным feature flag атомарно резервирует в Valkey
+  inflight/RPM/TPM по provider, provider/model и route, учитывает TTL
+  погибшего процесса и `Retry-After`, а длинное ожидание переводит на
+  следующий совместимый provider. Существующие PostgreSQL breaker и
+  ordered route chains не дублируются.
+- Изменённые файлы и к какому пункту шага относятся:
+  - `postgres/migrations/034_outbox_priority.sql` и одноимённая `down/` —
+    пункты 1–2, 5–6: additive priority, concurrent claim index,
+    model-scoped breaker с provider-only compatibility projection и заполнение
+    пустых production route chains без подмены операторской конфигурации;
+  - `src/delivery/outbox.ts`, `src/delivery/priority.ts`,
+    `src/delivery/telegram-limits.ts`, `src/delivery/retry-after.ts` —
+    пункты 1–3: bounded batch, `SKIP LOCKED`, порядок приоритетов,
+    shared token buckets, 429 без расхода попытки;
+  - `src/telegram.ts`, `src/crisis.ts`, `src/background.ts`, `src/payments.ts`,
+    `src/eva-workflow.ts` — пункты
+    2–3: классы доставки и оба формата `Retry-After`; повторный LLM-ход
+    при ошибке Telegram не запускается;
+  - `src/router/limits.ts`, `src/router/router.ts`, `src/router/chain.ts`,
+    `src/router/store.ts`
+    — пункты 4–7: атомарная reservation, TTL, единственная half-open
+    probe, failover и privacy-safe причина;
+  - `src/router/adapters/{shared,openai,anthropic}.ts`,
+    `src/router/types.ts` — пункт 7: перенос provider `Retry-After`;
+  - `src/config.ts`, `src/index.ts`, `src/router/index.ts`,
+    `.env.example`, `compose.yaml` — независимые выключенные по
+    умолчанию feature flags и параметры rollout/rollback;
+  - `.github/workflows/ci.yml`, `scripts/ci/test-outbox-claim.sql`,
+    `scripts/ci/test-distributed-limits.mjs` — реальные PostgreSQL и
+    Valkey проверки, а не только mock;
+  - `test/step06-distributed-delivery.test.ts`, `test/parallel-outbox.test.ts`,
+    `test/delivery.test.ts`, `test/crisis.test.ts`, `test/payments.test.ts`,
+    `test/llm-router.test.ts`, `test/managed-routing.test.ts`,
+    `test/config-warnings.test.ts` — раздел
+    «ТЕСТЫ» задания;
+  - `docs/PARALLEL_OUTBOX_DISTRIBUTED_LIMITS.md` — аудит существующих
+    компонентов, rollout, точный rollback и границы конфигурации;
+  - `PROGRESS.md` — статус, доказательства проверок, файловая карта и
+    эксплуатационные ограничения шага.
+- Проверки перед обновлением PR:
+  - `npm run build`, `npm run lint`: код 0;
+  - `npm test`: **496 passed, 0 failed**. Один предыдущий полный
+    прогон поймал timing-failure старого SessionManager-теста; он
+    отдельно прошёл 3/3 раз, после чего полный набор прошёл 496/496;
+  - `assert-tenant-scope.py`: 37 пользовательских таблиц, 197
+    запросов, каждый имеет границу арендатора;
+  - `assert-env-plumbing.py`: 83 переменных читает конфигурация, 80
+    доходят до compose, три имеют явный default в коде;
+  - `assert-down-migrations.py`: 20 обратимых миграций начиная с 014;
+  - workflow YAML разбирается, `git diff --check` и `node --check`
+    проходят;
+  - `scripts/validate.sh` принял TypeScript и миграцию 034, но
+    локальный итог не зелёный: в среде нет Docker/Caddy (пять
+    инфраструктурных проверок). Реальные Compose/PostgreSQL/Valkey и
+    полный required CI должны пройти в pull request;
+  - dependency audit подтвердил отсутствие новых high/critical для
+    обоих npm-проектов; локальная media-проверка не стартовала, потому
+    что в среде нет модуля `pip_audit`, и остаётся required CI gate.
+- Безопасность и приватность: Valkey хранит только timestamps,
+  reservation ids, счётчики токенов и cooldown keys. Тексты сообщений,
+  prompts, ответы, Telegram token, API keys и профиль пользователя в
+  новые ключи и телеметрию не попадают. При недоступном лимитере
+  доставка закрывается безопасно и остаётся durable.
+- Откат: `EVA_PARALLEL_OUTBOX=false` и
+  `EVA_DISTRIBUTED_LIMITS=false`, затем перезапуск `eva-agent-service`
+  и `llm-router`. Down 034 снимает индексы и сохраняет additive колонку
+  priority, чтобы откат не уничтожал метаданные.
+- Ограничения: реальный fallback требует минимум двух включённых
+  совместимых provider profiles с настоящими credentials в уже
+  существующей цепочке. Миграция намеренно не создаёт фиктивного
+  провайдера. Оба новых пути выключены до операторского rollout.
+- Следующему агенту: не заводить второй breaker или provider registry;
+  PostgreSQL остаётся каноническим для обоих. Перед merge нужны все
+  required checks и независимые три «да» по протоколу.
+- Первая независимая проверка остановила merge и нашла ранний выход
+  parallel outbox при rejection, недостаточное доказательство RPM/TPM и
+  provider/model breaker, дубль поля в payment-test и снятую health-зависимость
+  Valkey. Исправлено: rejection поглощается внутри tracked promise до общего
+  settle; добавлены unit и real-Valkey RPM/TPM проверки, реальный PostgreSQL
+  `FOR UPDATE SKIP LOCKED`, составной breaker key и atomic probe-тест двух
+  реплик; дубль удалён, зависимость Valkey восстановлена. После исправлений
+  полный набор прошёл 494/494; требуется повторная независимая проверка.
+- Вторая независимая проверка также остановила merge: typing/status обходил
+  outbox, route dimension наследовал разные provider caps, а замена breaker PK
+  требовала lockstep rollout. Исправлено: `sendChatAction` и reactions идут через
+  status outbox; route получает стабильные отдельные concurrency/RPM/TPM caps;
+  model-state breaker добавлен без изменения старого PK, а двусторонние triggers
+  синхронизируют старые и новые реплики, включая смену модели. Production chains
+  `fast/chat/deep/classifier/research` сохраняют полную ordered source chain и не
+  создают фиктивных credentials. Требуется новый полный CI и независимый ревью.
+- Финальная независимая проверка: findings отсутствуют; ответы на три обязательных
+  вопроса — **ДА / ДА / НЕТ** (нерелевантных изменений нет). Перед этим устранены
+  два последних блокера: streaming-путь соблюдает короткий `Retry-After` с jitter
+  и retry, длинный сразу переводит на fallback; Telegram 429 больше не считается
+  ошибкой HTML-разметки и не вызывает немедленную повторную отправку. Дополнительная
+  проверка телеметрии исправила счётчик успешной streaming-попытки.
+
+<!-- Сохранён исходный частичный отчёт ранее открытого PR #135. -->
+
+Консолидация: ранее открытый частичный PR #135 объединён с полной реализацией
+шага 06; отдельный второй PR не создаётся, чтобы сохранить правило «один шаг —
+одна ветка — один PR».
+
+### Шаг 06 — Параллельная доставка Telegram и распределённые лимиты LLM Router
+- Агент: Claude Code (Claude Code on the web)
+- Ветка: step/06-outbox-distributed-limits
+- PR: 1 из 2 (доставка). PR 2 — лимиты роутера, breaker по модели, резервные провайдеры
+- Дата: 2026-08-06
+- Статус: **в работе, PR 1 на ревью**
+- Почему два PR: задание прямо допускает «1–2 PR». Граница проведена по
+  предмету, а не по объёму: доставка Telegram и лимиты LLM Router — два
+  независимых контура с двумя разными флагами, и проверять их вместе
+  значит проверять оба хуже. PR 1 закрывает пункты 1–3 и пункт 7 в
+  части Telegram; PR 2 — пункты 4–6 и пункт 7 в части провайдеров.
+- Что найдено до изменения (раздел «СНАЧАЛА ПРОВЕРЬ»):
+  - outbox worker строго последователен: `claimNext()` → `await
+    deliver()` по одной строке, остальные ждут;
+  - приоритета в схеме нет вовсе, порядок — `created_at, id`;
+  - `retry_after` от Telegram **не обрабатывался**: 429 попадал в общий
+    catch и получал экспоненциальный backoff вместо названного срока, а
+    попытка при этом расходовалась;
+  - лимиты роутера — `ProviderLimits`, `Map` в памяти процесса; в
+    комментарии прямо сказано «это не распределённый лимитер»;
+  - circuit breaker уже в PostgreSQL (`llm_breaker_state`) и уже общий
+    для реплик, с атомарным `claimProbe` — то есть пункт 5 выполнен
+    наполовину до начала шага; недостаёт разреза по модели.
+  Переиспользованы: `telegram_outbox` и её аренда, `withDeliveryContext`
+  и ключ идемпотентности доставки, приём ZSET-резервирования с TTL из
+  семафоров шага 04, граница арендатора.
+- Изменённые файлы и к какому пункту шага относятся:
+  - `postgres/migrations/034_outbox_priority.sql` и `down/` — пункт 2
+    (колонка `priority`, индексы выборки);
+  - `src/delivery/priority.ts` — пункт 2 (ступени и вывод по методу);
+  - `src/delivery/telegram-limits.ts` — пункт 3 (общие token bucket);
+  - `src/delivery/retry-after.ts` — пункты 3 и 7 (разбор `retry_after`,
+    HTTP-date, jitter, предел ожидания);
+  - `src/delivery/outbox.ts` — пункты 1–3 и 7 (параллельный заход,
+    выборка по приоритету, обработка 429);
+  - `src/telegram.ts` — пункт 2 (контекст ступени);
+  - `src/crisis.ts`, `src/payments.ts`, `src/background.ts` — пункт 2
+    (кто на какой ступени);
+  - `src/config.ts`, `src/index.ts`, `compose.yaml`, `.env.example` — флаг;
+  - `test/parallel-outbox.test.ts`, `scripts/ci/test-outbox-claim.sql`,
+    `.github/workflows/ci.yml` — раздел «ТЕСТЫ»;
+  - `test/crisis.test.ts`, `test/payments.test.ts` — подделки Telegram
+    приведены к настоящему клиенту, который объявляет ступень очереди;
+  - `docs/PARALLEL_OUTBOX.md` — раздел «ОТЧЁТ».
+- Проверки:
+  - `npm run build`, `npm run lint`: чисто;
+  - `npm test`: **481 passed, 0 failed** (было 470; 11 новых);
+  - миграция 034 на настоящем PostgreSQL 16: forward, повторный
+    forward, down, снова forward — все зелёные;
+  - `scripts/ci/test-outbox-claim.sql` на живой базе — код 0; негативная
+    проверка (убрать сравнение кортежей) роняет её с сообщением
+    «выборка вернула не то»;
+  - Lua-скрипты token bucket проверены на настоящем Redis: чат 1/с
+    отдаёт первый токен и задерживает второй, `cooldown` перебивает
+    оба, отказ Valkey доставку не запрещает;
+  - `assert-env-plumbing.py`: 80 переменных, 77 доходят до сервиса;
+    `assert-tenant-scope.py` — 196 запросов, код 0;
+    `assert-down-migrations.py` — 20 обратимых down;
+  - `bash scripts/validate.sh`: 034 принята как транзакционная; 4
+    падения на Caddyfile — окружные.
+- Дефект, найденный собственным тестом до ревью: параллельный заход
+  прекращался, пока в полёте оставалась работа, разблокирующая
+  следующие сообщения того же чата. Снимок занятых чатов устаревал за
+  время запроса, и «пусто» читалось как «больше нечего». Итог — одно
+  сообщение на чат за такт опроса, то есть ответ из трёх частей шёл бы
+  три такта. Исправлено: решение о выходе принимается по числу доставок
+  **на момент вопроса**, а не после ответа.
+- Безопасность и приватность: в очередь и в логи доставки не попадает
+  текст сообщений — только идентификатор строки, чат, ступень и код
+  причины. Ключи Valkey содержат `chat_id`, который и так есть в
+  `telegram_outbox`.
+- Rollout: `EVA_PARALLEL_OUTBOX` выключен. При выключенном флаге
+  работает прежний последовательный путь — тот же код и та же таблица.
+- Rollback: `EVA_PARALLEL_OUTBOX=false` и перезапуск сервиса. Откат
+  схемы: `psql -U eva -d eva -v ON_ERROR_STOP=1 -f
+  postgres/migrations/down/034_outbox_priority.sql`.
+- Что важно знать следующему агенту: PR 2 берёт `/var/tmp` только как
+  черновик — модуль распределённых лимитов написан и проверен на
+  настоящем Redis (параллелизм, RPM, TPM, истечение резерва по TTL), но
+  в этот PR не входит и в ветке отсутствует. Его придётся написать
+  заново по описанию в задании; заодно понадобится миграция для разреза
+  `llm_breaker_state` по модели — составной первичный ключ
+  `(provider_id, model)` с пустой строкой для состояния провайдера
+  целиком.
 
 ### Шаг 05 — Безопасный SessionManager, барьер отмены, восстановление хода и журнал побочных эффектов
 - Агент: Claude Code (Claude Code on the web)

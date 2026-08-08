@@ -13,6 +13,7 @@ import type {
   OutboxDelivery,
   OutboxTransport,
 } from "./delivery/outbox.js";
+import type { DeliveryPriority } from "./delivery/priority.js";
 import type { Logger } from "./logger.js";
 
 export interface TelegramUser {
@@ -57,6 +58,14 @@ interface TelegramResponse<T> {
   ok: boolean;
   result?: T;
   description?: string;
+  parameters?: { retry_after?: number };
+}
+
+export class TelegramApiError extends Error {
+  constructor(message: string, readonly retryAfterMs: number | null = null) {
+    super(message);
+    this.name = "TelegramApiError";
+  }
 }
 
 export interface TelegramMessageDraft {
@@ -80,7 +89,23 @@ export class TelegramClient implements OutboxTransport {
     sequence: number;
     metrics: DeliveryMetrics;
     lastOutboxId: string | null;
+    priority: DeliveryPriority;
   }>();
+
+  /**
+   * Ступень очереди для всего, что отправляется внутри.
+   *
+   * Отдельным контекстом, а не параметром: приоритет — свойство
+   * происходящего, а не одного вызова. Кризисный монитор объявляет его
+   * один раз, и всё, что он отправит, включая вложенные вызовы,
+   * попадает в очередь на своей ступени.
+   */
+  private readonly priorityContext = new AsyncLocalStorage<DeliveryPriority>();
+
+  /** Выполнить работу, объявив ступень очереди для её отправок. */
+  async withPriority<T>(priority: DeliveryPriority, work: () => Promise<T>): Promise<T> {
+    return await this.priorityContext.run(priority, work);
+  }
 
   constructor(config: Config, logger: Logger) {
     this.token = config.telegramBotToken;
@@ -117,12 +142,17 @@ export class TelegramClient implements OutboxTransport {
     this.outbox = outbox;
   }
 
-  async withDeliveryContext<T>(prefix: string, work: () => Promise<T>): Promise<T> {
+  async withDeliveryContext<T>(
+    prefix: string,
+    work: () => Promise<T>,
+    priority: DeliveryPriority = priorityForContext(prefix),
+  ): Promise<T> {
     return await this.deliveryContext.run({
       prefix,
       sequence: 0,
       metrics: { outboxInsertMs: 0, telegramSendMs: 0 },
       lastOutboxId: null,
+      priority,
     }, work);
   }
 
@@ -153,6 +183,7 @@ export class TelegramClient implements OutboxTransport {
     chatId: number,
     text: string,
     options: Record<string, unknown> = {},
+    priority?: DeliveryPriority,
   ): Promise<unknown[]> {
     // Служебные тексты передают parse_mode явно — их не трогаем.
     if (options.parse_mode !== undefined) {
@@ -160,7 +191,7 @@ export class TelegramClient implements OutboxTransport {
       for (const chunk of splitTelegramText(text)) {
         results.push(await this.dispatch("sendMessage", chatId, {
           chat_id: chatId, text: chunk, ...options,
-        }));
+        }, priority));
       }
       return results;
     }
@@ -190,9 +221,9 @@ export class TelegramClient implements OutboxTransport {
         payload.link_preview_options = { is_disabled: true };
       }
       try {
-        results.push(await this.dispatch("sendMessage", chatId, payload));
+        results.push(await this.dispatch("sendMessage", chatId, payload, priority));
       } catch (error) {
-        if (!usable) throw error;
+        if (!usable || !isTelegramMarkupError(error)) throw error;
         // Telegram отверг разметку. Исходный текст пишем в лог целиком:
         // без него причину «can't parse entities» не найти, а сообщение
         // всё равно должно дойти — пусть и без оформления.
@@ -206,7 +237,7 @@ export class TelegramClient implements OutboxTransport {
           text: stripTags(chunk),
           ...common,
           ...(isLast && replyMarkup !== undefined ? { reply_markup: replyMarkup } : {}),
-        }));
+        }, priority));
       }
     }
     return results;
@@ -240,7 +271,7 @@ export class TelegramClient implements OutboxTransport {
   }
 
   async sendChatAction(chatId: number, action = "typing"): Promise<void> {
-    await this.call("sendChatAction", { chat_id: chatId, action });
+    await this.dispatch("sendChatAction", chatId, { chat_id: chatId, action }, "status");
   }
 
   /**
@@ -339,12 +370,12 @@ export class TelegramClient implements OutboxTransport {
   }
 
   async setReaction(chatId: number, messageId: number, emoji: string): Promise<void> {
-    await this.call("setMessageReaction", {
+    await this.dispatch("setMessageReaction", chatId, {
       chat_id: chatId,
       message_id: messageId,
       reaction: [{ type: "emoji", emoji }],
       is_big: false,
-    });
+    }, "status");
   }
 
   async sendVoice(chatId: number, audio: Uint8Array, filename = "eva.ogg"): Promise<void> {
@@ -442,6 +473,7 @@ export class TelegramClient implements OutboxTransport {
     method: string,
     chatId: number,
     payload: Record<string, unknown>,
+    priority?: DeliveryPriority,
   ): Promise<unknown> {
     if (!this.outbox) {
       const started = performance.now();
@@ -460,6 +492,7 @@ export class TelegramClient implements OutboxTransport {
       chatId,
       payload,
       idempotencyKey,
+      priority: priority ?? this.priorityContext.getStore() ?? context?.priority,
       onMetrics: (metrics) => this.addDeliveryMetrics(metrics),
       onEnqueued: (outboxId) => {
         const store = this.deliveryContext.getStore();
@@ -488,12 +521,41 @@ export class TelegramClient implements OutboxTransport {
       throw new Error(`Telegram ${method}: HTTP ${response.status}, невалидный JSON`);
     }
     if (!response.ok || !body.ok) {
-      throw new Error(
+      const jsonRetry = Number(body.parameters?.retry_after);
+      const headerRetry = parseRetryAfter(response.headers.get("retry-after"));
+      const retryAfterMs = Math.max(
+        Number.isFinite(jsonRetry) && jsonRetry > 0 ? jsonRetry * 1_000 : 0,
+        headerRetry ?? 0,
+      );
+      throw new TelegramApiError(
         `Telegram ${method}: ${body.description ?? `HTTP ${response.status}`}`.slice(0, 1000),
+        retryAfterMs > 0 ? retryAfterMs : null,
       );
     }
     return body.result as T;
   }
+}
+
+export function parseRetryAfter(value: string | null, now = Date.now()): number | null {
+  if (!value?.trim()) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.ceil(seconds * 1_000);
+  const at = Date.parse(value);
+  return Number.isFinite(at) ? Math.max(0, at - now) : null;
+}
+
+function priorityForContext(prefix: string): DeliveryPriority {
+  if (prefix.startsWith("lava-payment:")) return "command";
+  if (prefix.startsWith("telegram-command:")) return "command";
+  if (prefix.startsWith("telegram-dead:")) return "status";
+  return "reply";
+}
+
+function isTelegramMarkupError(error: unknown): boolean {
+  if (!(error instanceof TelegramApiError) || error.retryAfterMs !== null) return false;
+  return /can't parse entities|can't find end|unsupported start tag|entity byte offset/iu.test(
+    error.message,
+  );
 }
 
 export function webhookSecretMatches(presented: unknown, expected: string): boolean {

@@ -300,6 +300,15 @@ jobs:
   agent-service:
     name: eva-agent-service (TypeScript)
     runs-on: ubuntu-24.04
+    services:
+      valkey:
+        image: valkey/valkey:9.1.1-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     env:
       EVA_PROFILE_COMPLETION_ENABLED: "true"
       EVA_VECTOR_GOALS_ENABLED: "true"
@@ -334,6 +343,9 @@ jobs:
 
       - name: Unit tests
         run: node --test --experimental-strip-types test/*.test.ts
+
+      - name: Distributed limits execute atomically on Valkey
+        run: node ../scripts/ci/test-distributed-limits.mjs
 
       - name: The SDK is the official one, and it is actually used
         run: node ../scripts/verify-agent-sdk.mjs .
@@ -495,6 +507,12 @@ jobs:
       # Поддельная база в тестах TypeScript их не проверяет.
       - name: Журнал эффектов выполняет побочное действие один раз
         run: psql -v ON_ERROR_STOP=1 -q -f scripts/ci/test-effect-journal.sql
+
+      # Приоритет обгоняет очередь, но не переставляет части одного
+      # ответа. Держится это на сравнении кортежей и частичных индексах,
+      # которых поддельная база в тестах не воспроизводит.
+      - name: Выборка доставки соблюдает приоритет и порядок внутри чата
+        run: psql -v ON_ERROR_STOP=1 -q -f scripts/ci/test-outbox-claim.sql
 
       # Откат выполняется ровно тогда, когда что-то уже пошло не так, и
       # проверять его в этот момент поздно. Здесь он прогоняется на

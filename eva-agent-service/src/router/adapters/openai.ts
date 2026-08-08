@@ -114,7 +114,12 @@ async function post(
   }
   if (!response.ok) {
     const raw = await response.text().catch(() => "");
-    throw classifyHttp(response.status, extractMessage(raw), raw);
+    throw classifyHttp(
+      response.status,
+      extractMessage(raw),
+      raw,
+      response.headers.get("retry-after"),
+    );
   }
   return response;
 }

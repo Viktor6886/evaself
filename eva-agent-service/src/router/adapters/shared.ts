@@ -6,13 +6,20 @@ import { ProviderError } from "../types.js";
  * Классификация ответа провайдера. От неё зависит, повторять ли запрос тому
  * же провайдеру или сразу идти к резерву, поэтому она одна на все адаптеры.
  */
-export function classifyHttp(status: number, message: string, raw: string): ProviderError {
+export function classifyHttp(
+  status: number,
+  message: string,
+  raw: string,
+  retryAfter?: string | null,
+  now = Date.now(),
+): ProviderError {
   const detail = (message || raw).slice(0, 300);
 
   if (status === 429) {
     return new ProviderError(`лимит запросов провайдера: ${detail}`, "rate_limited", {
       retryable: true,
       httpStatus: status,
+      retryAfterMs: parseRetryAfter(retryAfter, now) ?? undefined,
     });
   }
   if (status === 401 || status === 403) {
@@ -52,6 +59,14 @@ export function classifyHttp(status: number, message: string, raw: string): Prov
     retryable: false,
     httpStatus: status,
   });
+}
+
+export function parseRetryAfter(value: string | null | undefined, now = Date.now()): number | null {
+  if (!value?.trim()) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.ceil(seconds * 1_000);
+  const at = Date.parse(value);
+  return Number.isFinite(at) ? Math.max(0, at - now) : null;
 }
 
 /**

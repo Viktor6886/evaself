@@ -18,9 +18,11 @@ import type {
   RoutingSettings,
   SwitchReason,
 } from "./types.js";
+import { breakerKey } from "./types.js";
 
 export interface BreakerRow {
   provider_id: string;
+  model: string;
   state: "closed" | "open" | "half_open";
   consecutive_errors: number;
   first_error_at: Date | null;
@@ -266,11 +268,11 @@ export class RouterStore {
   // -----------------------------------------------------------------
   async breakers(): Promise<Map<string, BreakerRow>> {
     const { rows } = await this.pool.query<BreakerRow>(
-      `SELECT provider_id, state, consecutive_errors, first_error_at, opened_at,
+      `SELECT provider_id, model, state, consecutive_errors, first_error_at, opened_at,
               probe_after, last_error_code, last_success_at, pinned_out
-         FROM llm_breaker_state`,
+         FROM llm_breaker_model_state`,
     );
-    return new Map(rows.map((row) => [row.provider_id, row]));
+    return new Map(rows.map((row) => [breakerKey(row.provider_id, row.model), row]));
   }
 
   /**
@@ -280,58 +282,59 @@ export class RouterStore {
    */
   async recordFailure(
     providerId: string,
+    model: string,
     errorCode: string,
     threshold: number,
     windowMs: number,
     cooldownMs: number,
   ): Promise<void> {
     await this.pool.query(
-      `INSERT INTO llm_breaker_state
-           (provider_id, state, consecutive_errors, first_error_at, last_error_code)
-       VALUES ($1, 'closed', 1, now(), $2)
-       ON CONFLICT (provider_id) DO UPDATE SET
+      `INSERT INTO llm_breaker_model_state
+           (provider_id, model, state, consecutive_errors, first_error_at, last_error_code)
+       VALUES ($1, $2, 'closed', 1, now(), $3)
+       ON CONFLICT (provider_id, model) DO UPDATE SET
            consecutive_errors = CASE
-               WHEN llm_breaker_state.first_error_at IS NULL
-                 OR llm_breaker_state.first_error_at < now() - ($3 || ' milliseconds')::interval
+               WHEN llm_breaker_model_state.first_error_at IS NULL
+                 OR llm_breaker_model_state.first_error_at < now() - ($4 || ' milliseconds')::interval
                THEN 1
-               ELSE llm_breaker_state.consecutive_errors + 1
+               ELSE llm_breaker_model_state.consecutive_errors + 1
            END,
            first_error_at = CASE
-               WHEN llm_breaker_state.first_error_at IS NULL
-                 OR llm_breaker_state.first_error_at < now() - ($3 || ' milliseconds')::interval
+               WHEN llm_breaker_model_state.first_error_at IS NULL
+                 OR llm_breaker_model_state.first_error_at < now() - ($4 || ' milliseconds')::interval
                THEN now()
-               ELSE llm_breaker_state.first_error_at
+               ELSE llm_breaker_model_state.first_error_at
            END,
-           last_error_code = $2`,
-      [providerId, errorCode.slice(0, 120), windowMs],
+           last_error_code = $3`,
+      [providerId, model, errorCode.slice(0, 120), windowMs],
     );
 
     await this.pool.query(
-      `UPDATE llm_breaker_state
+      `UPDATE llm_breaker_model_state
           SET state = 'open',
               opened_at = now(),
-              probe_after = now() + ($2 || ' milliseconds')::interval
-        WHERE provider_id = $1
+              probe_after = now() + ($3 || ' milliseconds')::interval
+        WHERE provider_id = $1 AND model = $2
           AND state <> 'open'
-          AND consecutive_errors >= $3`,
-      [providerId, cooldownMs, threshold],
+          AND consecutive_errors >= $4`,
+      [providerId, model, cooldownMs, threshold],
     );
   }
 
   /** Успех закрывает breaker и обнуляет счётчик. */
-  async recordSuccess(providerId: string): Promise<void> {
+  async recordSuccess(providerId: string, model: string): Promise<void> {
     await this.pool.query(
-      `INSERT INTO llm_breaker_state
-           (provider_id, state, consecutive_errors, last_success_at)
-       VALUES ($1, 'closed', 0, now())
-       ON CONFLICT (provider_id) DO UPDATE SET
-           state = CASE WHEN llm_breaker_state.pinned_out THEN llm_breaker_state.state ELSE 'closed' END,
+      `INSERT INTO llm_breaker_model_state
+           (provider_id, model, state, consecutive_errors, last_success_at)
+       VALUES ($1, $2, 'closed', 0, now())
+       ON CONFLICT (provider_id, model) DO UPDATE SET
+           state = CASE WHEN llm_breaker_model_state.pinned_out THEN llm_breaker_model_state.state ELSE 'closed' END,
            consecutive_errors = 0,
            first_error_at = NULL,
            opened_at = NULL,
            probe_after = NULL,
            last_success_at = now()`,
-      [providerId],
+      [providerId, model],
     );
   }
 
@@ -340,25 +343,32 @@ export class RouterStore {
    * UPDATE ... RETURNING делает переход атомарным: две реплики роутера не
    * отправят два пробных запроса одновременно.
    */
-  async claimProbe(providerId: string): Promise<boolean> {
+  async claimProbe(providerId: string, model: string): Promise<boolean> {
     const { rowCount } = await this.pool.query(
-      `UPDATE llm_breaker_state
+      `UPDATE llm_breaker_model_state
           SET state = 'half_open'
-        WHERE provider_id = $1
+        WHERE provider_id = $1 AND model = $2
           AND state = 'open'
           AND NOT pinned_out
           AND probe_after IS NOT NULL
           AND probe_after <= now()`,
-      [providerId],
+      [providerId, model],
     );
     return (rowCount ?? 0) > 0;
   }
 
   async resetBreaker(providerId: string): Promise<void> {
     await this.pool.query(
-      `INSERT INTO llm_breaker_state (provider_id, state, consecutive_errors)
-       VALUES ($1, 'closed', 0)
-       ON CONFLICT (provider_id) DO UPDATE SET
+      `UPDATE llm_breaker_model_state
+          SET state = 'closed', consecutive_errors = 0, first_error_at = NULL,
+              opened_at = NULL, probe_after = NULL
+        WHERE provider_id = $1`,
+      [providerId],
+    );
+    await this.pool.query(
+      `INSERT INTO llm_breaker_model_state (provider_id, model, state, consecutive_errors)
+       SELECT id, model, 'closed', 0 FROM llm_providers WHERE id = $1
+       ON CONFLICT (provider_id, model) DO UPDATE SET
            state = 'closed', consecutive_errors = 0, first_error_at = NULL,
            opened_at = NULL, probe_after = NULL`,
       [providerId],
@@ -367,9 +377,13 @@ export class RouterStore {
 
   async setPinnedOut(providerId: string, pinned: boolean): Promise<void> {
     await this.pool.query(
-      `INSERT INTO llm_breaker_state (provider_id, pinned_out)
-       VALUES ($1, $2)
-       ON CONFLICT (provider_id) DO UPDATE SET pinned_out = $2`,
+      `UPDATE llm_breaker_model_state SET pinned_out = $2 WHERE provider_id = $1`,
+      [providerId, pinned],
+    );
+    await this.pool.query(
+      `INSERT INTO llm_breaker_model_state (provider_id, model, pinned_out)
+       SELECT id, model, $2 FROM llm_providers WHERE id = $1
+       ON CONFLICT (provider_id, model) DO UPDATE SET pinned_out = $2`,
       [providerId, pinned],
     );
   }

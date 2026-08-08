@@ -6,10 +6,12 @@
  */
 
 import pg from "pg";
+import { Redis } from "ioredis";
 
 import { createLogger } from "../logger.js";
 import { guardPool } from "../tenancy/index.js";
 import { DEFAULT_OPTIONS, LlmRouter } from "./router.js";
+import { ValkeyRouterLimits } from "./limits.js";
 import { createRouterServer } from "./server.js";
 import { RouterStore } from "./store.js";
 
@@ -18,6 +20,10 @@ const { Pool } = pg;
 function intFromEnv(name: string, fallback: number): number {
   const raw = Number(process.env[name]);
   return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : fallback;
+}
+
+function enabled(name: string): boolean {
+  return ["1", "true", "yes", "on"].includes((process.env[name] ?? "").trim().toLowerCase());
 }
 
 async function main(): Promise<void> {
@@ -45,11 +51,34 @@ async function main(): Promise<void> {
   await pool.query("SELECT 1");
 
   const store = new RouterStore(pool, encryptionKey);
+  const distributedLimits = enabled("EVA_DISTRIBUTED_LIMITS");
+  const valkeyUrl = (process.env.VALKEY_URL ?? "").trim();
+  if (distributedLimits && !valkeyUrl) {
+    throw new Error("VALKEY_URL обязателен при EVA_DISTRIBUTED_LIMITS=true");
+  }
+  const redis = distributedLimits
+    ? new Redis(valkeyUrl, {
+        maxRetriesPerRequest: 3,
+        lazyConnect: false,
+        enableOfflineQueue: true,
+      })
+    : null;
+  redis?.on("error", (error) => logger.warn("LLM Router: ошибка Valkey", {
+    code: error.name,
+  }));
   const router = new LlmRouter(store, logger, {
     ...DEFAULT_OPTIONS,
     breakerThreshold: intFromEnv("EVA_ROUTER_BREAKER_THRESHOLD", DEFAULT_OPTIONS.breakerThreshold),
     breakerWindowMs: intFromEnv("EVA_ROUTER_BREAKER_WINDOW_MS", DEFAULT_OPTIONS.breakerWindowMs),
     breakerCooldownMs: intFromEnv("EVA_ROUTER_BREAKER_COOLDOWN_MS", DEFAULT_OPTIONS.breakerCooldownMs),
+    maxRetryAfterMs: intFromEnv("EVA_ROUTER_MAX_RETRY_AFTER_MS", 5_000),
+    retryAfterJitterMs: intFromEnv("EVA_ROUTER_RETRY_AFTER_JITTER_MS", 250),
+    reservationTtlMs: intFromEnv("EVA_ROUTER_LIMIT_RESERVATION_TTL_MS", 300_000),
+    limits: redis ? new ValkeyRouterLimits(redis, {
+      max_rpm: intFromEnv("EVA_ROUTER_ROUTE_MAX_RPM", 600),
+      max_tpm: intFromEnv("EVA_ROUTER_ROUTE_MAX_TPM", 2_000_000),
+      max_concurrency: intFromEnv("EVA_ROUTER_ROUTE_MAX_CONCURRENCY", 64),
+    }) : undefined,
   });
 
   const app = createRouterServer({ router, store, logger, apiKey });
@@ -62,6 +91,7 @@ async function main(): Promise<void> {
     void app.close()
       .then(() => store.close())
       .then(() => pool.end())
+      .then(() => redis?.quit())
       .then(() => process.exit(0))
       .catch(() => process.exit(1));
   };

@@ -19,6 +19,7 @@ import { Database } from "./db.js";
 import { ParallelInboxDispatcher } from "./delivery/dispatcher.js";
 import { PostgresTelegramInbox, TelegramInboxWorker } from "./delivery/inbox.js";
 import { PostgresTelegramOutbox } from "./delivery/outbox.js";
+import { TelegramDeliveryLimiter } from "./delivery/telegram-limits.js";
 import { EvaWorkflow } from "./eva-workflow.js";
 import { GoalService } from "./goals/goal-service.js";
 import { LettaService } from "./letta.js";
@@ -98,10 +99,23 @@ async function main(): Promise<void> {
   const rateLimiter = new ValkeyRateLimiter(redis);
   const letta = new LettaService(config, logger, persona);
   const telegram = new TelegramClient(config, logger);
+  const telegramLimiter = new TelegramDeliveryLimiter(redis, {
+    globalPerSecond: config.telegramGlobalRate,
+    globalBurst: config.telegramGlobalBurst,
+    chatPerSecond: config.telegramChatRate,
+    chatBurst: config.telegramChatBurst,
+  });
   const outbox = new PostgresTelegramOutbox(db, telegram, logger, {
     pollMs: config.telegramOutboxPollMs,
     leaseSeconds: config.telegramOutboxLeaseSeconds,
     maxAttempts: config.telegramOutboxMaxAttempts,
+    parallel: config.parallelOutboxEnabled
+      ? {
+          concurrency: config.outboxConcurrency,
+          batchSize: config.outboxBatchSize,
+          limits: telegramLimiter,
+        }
+      : null,
   });
   if (config.outboxEnabled) telegram.setOutbox(outbox);
   const sdk = new SdkSettingsManager(config, db, letta);
@@ -302,6 +316,7 @@ async function main(): Promise<void> {
     version: VERSION,
     port: config.port,
     inbox: config.parallelInboxEnabled ? "parallel" : "sequential",
+    outbox: config.parallelOutboxEnabled ? "parallel" : "sequential",
     concurrency: config.parallelInboxEnabled ? config.inboxConcurrency : 1,
     aggregation: config.turnAggregationEnabled,
     appServer: config.appServerUrl,
@@ -321,6 +336,7 @@ async function main(): Promise<void> {
       if (recoveryTimer) clearInterval(recoveryTimer);
       dispatcher.stop();
       inboxWorker.stop();
+      if (config.outboxEnabled) outbox.stop();
       // Оба ожидания идут одновременно, а не по очереди: их сумма
       // иначе превысила бы grace period контейнера, и SIGKILL пришёл бы
       // посреди drain — то есть ожидание не сработало бы вовсе.
@@ -329,11 +345,13 @@ async function main(): Promise<void> {
         // бросить её посреди хода значит отдать её другому воркеру с
         // наполовину выполненной работой.
         dispatcher.drain(config.shutdownDrainMs),
+        config.parallelOutboxEnabled
+          ? outbox.drain(config.shutdownDrainMs)
+          : Promise.resolve(),
         config.safeSessionManager
           ? letta.drainSessions(config.sessionDrainMs)
           : Promise.resolve(),
       ]);
-      if (config.outboxEnabled) outbox.stop();
       letta.shutdown();
       await app.close();
       configEvents.disconnect();

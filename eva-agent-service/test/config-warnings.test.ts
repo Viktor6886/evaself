@@ -42,6 +42,17 @@ test("восстановление без жизненного цикла не �
   );
 });
 
+test("параллельная доставка без durable outbox не молчит", () => {
+  const config = loadConfig({
+    ...base,
+    EVA_PARALLEL_OUTBOX: "true",
+    EVA_OUTBOX_ENABLED: "false",
+  });
+  assert.ok(
+    configWarnings(config).some((warning) => warning.includes("EVA_PARALLEL_OUTBOX")),
+  );
+});
+
 test("восстановление с жизненным циклом предупреждения не даёт", () => {
   const config = loadConfig({
     ...base,

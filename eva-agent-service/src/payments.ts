@@ -125,10 +125,13 @@ export class LavaPayments {
 
     if (applied.state === "applied") {
       await this.telegram.withDeliveryContext(`lava-payment:${event.paymentId}`, async () =>
-        await this.telegram.sendMessage(
-          applied.telegramId,
-          `Оплата получена. Доступ по плану «${plan.plan}» активирован на ${plan.durationDays} дней.`,
-        )).catch((error) => {
+        // Подтверждение оплаты — не ответ в диалоге и не фоновая
+        // мелочь: человек ждёт его сразу после платежа.
+        await this.telegram.withPriority("command", async () =>
+          await this.telegram.sendMessage(
+            applied.telegramId,
+            `Оплата получена. Доступ по плану «${plan.plan}» активирован на ${plan.durationDays} дней.`,
+          ))).catch((error) => {
         this.logger.warn("Не удалось отправить подтверждение оплаты", {
           paymentId: event.paymentId,
           message: error instanceof Error ? error.message : String(error),

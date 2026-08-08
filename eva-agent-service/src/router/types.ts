@@ -9,6 +9,11 @@
 
 export type RouteCode = string;
 
+/** Shared breaker identity: one state per provider/model pair. */
+export function breakerKey(providerId: string, model: string): string {
+  return `${providerId}\u0000${model}`;
+}
+
 export interface LlmToolCall {
   id: string;
   name: string;
@@ -122,6 +127,8 @@ export class ProviderError extends Error {
       /** Имеет ли смысл повторить тот же запрос тому же провайдеру. */
       retryable: boolean;
       httpStatus?: number;
+      /** Provider-requested delay parsed from Retry-After. */
+      retryAfterMs?: number;
       /**
        * Запрос не понравился провайдеру (HTTP 400). Такой запрос нельзя
        * гонять по всей цепочке — сначала нормализация параметров.
@@ -135,6 +142,10 @@ export class ProviderError extends Error {
 
   get httpStatus(): number | null {
     return this.options.httpStatus ?? null;
+  }
+
+  get retryAfterMs(): number | null {
+    return this.options.retryAfterMs ?? null;
   }
 
   /** Короткое описание для журнала: без тела запроса и без переписки. */

@@ -266,7 +266,15 @@ export class CrisisMonitor {
     ].join("\n");
 
     try {
-      await this.telegram.sendMessage(this.ownerTelegramId, text);
+      // Кризисное сообщение идёт вперёд очереди: опоздав, оно теряет
+      // смысл, а очередь доставки бывает длинной.
+      // Владелец берётся в локальную переменную: внутри замыкания
+      // сужение типа изменяемого поля класса не сохраняется.
+      const owner = this.ownerTelegramId;
+      await this.telegram.withPriority(
+        "crisis",
+        async () => await this.telegram.sendMessage(owner, text),
+      );
     } catch (error) {
       this.logger.error("Не удалось уведомить владельца о сигнале риска", {
         severity: signal.severity,

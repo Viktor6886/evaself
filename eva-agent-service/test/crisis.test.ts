@@ -81,6 +81,10 @@ function harness(options: { insertFails?: boolean; ownerTelegramId?: number | nu
     },
   };
   const telegram = {
+    // Настоящий клиент объявляет ступень очереди и выполняет работу
+    // внутри неё; подделка обязана делать то же, иначе тест проверял бы
+    // не тот путь, по которому идёт кризисное сообщение.
+    withPriority: <T,>(_priority: string, work: () => Promise<T>) => work(),
     sendMessage(chatId: number, text: string) {
       sent.push({ chatId, text });
       return Promise.resolve([]);
