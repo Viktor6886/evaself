@@ -133,10 +133,11 @@ DECLARE
     first_claim integer;
     second_claim integer;
 BEGIN
-    SELECT id, model INTO provider, current_model FROM llm_providers LIMIT 1;
-    IF provider IS NULL THEN
-        RAISE EXCEPTION 'breaker probe needs a provider fixture';
-    END IF;
+    INSERT INTO llm_providers
+        (name, base_url, model, context_window, api_key_encrypted)
+    VALUES
+        ('step06-breaker-probe', 'http://example.test/v1', 'model-a', 32768, 'v1:a:b:c')
+    RETURNING id, model INTO provider, current_model;
 
     INSERT INTO llm_breaker_state
         (provider_id, model, state, consecutive_errors, probe_after)
