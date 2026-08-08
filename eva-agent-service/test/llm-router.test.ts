@@ -746,6 +746,45 @@ test("streaming: переключение до первого фрагмента
   assert.equal(chunks.filter((c) => c.type === "done").length, 1, "ровно один финальный ответ");
 });
 
+test("streaming honors short Retry-After and falls back immediately for a long one", async () => {
+  const primary = provider({ id: "a", name: "primary", max_retries: 1 });
+  const backup = provider({ id: "b", name: "backup" });
+  let attempts = 0;
+  const short = harness([primary, backup], {
+    primary: {
+      complete: () => Promise.reject(new Error("unused")),
+      stream: async function* () {
+        attempts += 1;
+        if (attempts === 1) {
+          throw new ProviderError("429", "rate_limited", {
+            retryable: true, httpStatus: 429, retryAfterMs: 2_000,
+          });
+        }
+        const response = ok("primary recovered");
+        yield { type: "text", delta: response.content };
+        yield { type: "done", response };
+      },
+    },
+    backup: always(() => Promise.resolve(ok("backup"))),
+  }, undefined, { maxRetryAfterMs: 5_000 });
+  const shortChunks = [];
+  for await (const chunk of short.router.stream(request({ stream: true }))) shortChunks.push(chunk);
+  assert.deepEqual(short.delays, [2_000]);
+  assert.deepEqual(short.calls.map((call) => call.provider), ["primary", "primary"]);
+
+  const long = harness([primary, backup], {
+    primary: fails(new ProviderError("429", "rate_limited", {
+      retryable: true, httpStatus: 429, retryAfterMs: 10_000,
+    })),
+    backup: always(() => Promise.resolve(ok("backup"))),
+  }, undefined, { maxRetryAfterMs: 5_000 });
+  for await (const _chunk of long.router.stream(request({ stream: true }))) {
+    // consume
+  }
+  assert.deepEqual(long.delays, []);
+  assert.deepEqual(long.calls.map((call) => call.provider), ["primary", "backup"]);
+});
+
 test("streaming: обрыв после первого фрагмента не порождает второй ответ", async () => {
   const { router } = harness(
     [provider({ id: "a", name: "primary" }), provider({ id: "b", name: "backup" })],

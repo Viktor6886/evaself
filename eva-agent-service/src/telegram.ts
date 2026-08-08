@@ -223,7 +223,7 @@ export class TelegramClient implements OutboxTransport {
       try {
         results.push(await this.dispatch("sendMessage", chatId, payload, priority));
       } catch (error) {
-        if (!usable) throw error;
+        if (!usable || !isTelegramMarkupError(error)) throw error;
         // Telegram отверг разметку. Исходный текст пишем в лог целиком:
         // без него причину «can't parse entities» не найти, а сообщение
         // всё равно должно дойти — пусть и без оформления.
@@ -549,6 +549,13 @@ function priorityForContext(prefix: string): DeliveryPriority {
   if (prefix.startsWith("telegram-command:")) return "command";
   if (prefix.startsWith("telegram-dead:")) return "status";
   return "reply";
+}
+
+function isTelegramMarkupError(error: unknown): boolean {
+  if (!(error instanceof TelegramApiError) || error.retryAfterMs !== null) return false;
+  return /can't parse entities|can't find end|unsupported start tag|entity byte offset/iu.test(
+    error.message,
+  );
 }
 
 export function webhookSecretMatches(presented: unknown, expected: string): boolean {

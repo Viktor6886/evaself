@@ -592,7 +592,9 @@ export class LlmRouter {
     let switches = 0;
     let lastError: ProviderError | null = null;
 
-    for (const entry of chain.usable) {
+    const streamEntries = chain.usable.map((entry) => ({ entry, attempt: 1 }));
+    providerLoop: for (let entryIndex = 0; entryIndex < streamEntries.length; entryIndex += 1) {
+      const { entry, attempt } = streamEntries[entryIndex]!;
       const attemptRequest = routed.settings.mode === "single"
         && entry.provider.id !== routed.settings.single_provider_id
         ? { ...request, metadata: { ...request.metadata, single_failover_used: true } }
@@ -715,19 +717,19 @@ export class LlmRouter {
       } catch (raw) {
         const error = asProviderError(raw);
         lastError = error;
-        await this.store.recordFailure(
-          provider.id,
-          provider.model,
-          error.reason,
-          this.options.breakerThreshold,
-          this.options.breakerWindowMs,
-          this.options.breakerCooldownMs,
-        );
         await this.log(provider, attemptRequest, chain.primary?.id ?? null, {
-          started, attempts: 1, switches, error, streamed: true,
+          started, attempts: attempt, switches, error, streamed: true,
         });
 
         if (emitted) {
+          await this.store.recordFailure(
+            provider.id,
+            provider.model,
+            error.reason,
+            this.options.breakerThreshold,
+            this.options.breakerWindowMs,
+            this.options.breakerCooldownMs,
+          );
           // Часть ответа уже у пользователя. Второй ответ от резерва был бы
           // именно тем «двойным ответом», который запрещён требованием
           // 1.5.7, поэтому здесь только обрыв.
@@ -739,9 +741,31 @@ export class LlmRouter {
           throw error;
         }
         if (
+          error.reason === "rate_limited" &&
+          error.retryAfterMs !== null &&
+          error.retryAfterMs <= (this.options.maxRetryAfterMs ?? DEFAULT_OPTIONS.maxRetryAfterMs!) &&
+          attempt <= provider.max_retries
+        ) {
+          const delay = error.retryAfterMs + Math.floor(Math.random() * Math.max(
+            0,
+            this.options.retryAfterJitterMs ?? DEFAULT_OPTIONS.retryAfterJitterMs!,
+          ));
+          await this.sleep(delay);
+          streamEntries.splice(entryIndex + 1, 0, { entry, attempt: attempt + 1 });
+          continue providerLoop;
+        }
+        await this.store.recordFailure(
+          provider.id,
+          provider.model,
+          error.reason,
+          this.options.breakerThreshold,
+          this.options.breakerWindowMs,
+          this.options.breakerCooldownMs,
+        );
+        if (
           routed.settings.mode === "single" &&
           (!routed.settings.single_failover_enabled || !isTechnicalSingleFailover(error.reason))
-        ) break;
+        ) break providerLoop;
         switches += 1;
         this.logger.warn("LLM Router: переключение до начала выдачи", {
           request_id: request.metadata.request_id,

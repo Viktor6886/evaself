@@ -8,7 +8,7 @@ import {
   type TelegramInbox,
 } from "../dist/delivery/inbox.js";
 import type { OutboxEnvelope } from "../dist/delivery/outbox.js";
-import { TelegramClient, type TelegramUpdate } from "../dist/telegram.js";
+import { TelegramApiError, TelegramClient, type TelegramUpdate } from "../dist/telegram.js";
 
 const logger = {
   debug() {},
@@ -207,4 +207,24 @@ test("typing and service reactions use the status outbox path", async () => {
     ["sendChatAction", "status"],
     ["setMessageReaction", "status"],
   ]);
+});
+
+test("Telegram Retry-After is not mistaken for an HTML parse failure", async () => {
+  const telegram = new TelegramClient({
+    telegramBotToken: "fake",
+    telegramApiBaseUrl: "https://api.telegram.invalid",
+  } as never, logger);
+  const envelopes: OutboxEnvelope[] = [];
+  telegram.setOutbox({
+    send: async (envelope) => {
+      envelopes.push(envelope);
+      throw new TelegramApiError("Telegram sendMessage: Too Many Requests", 2_000);
+    },
+  });
+
+  await assert.rejects(
+    () => telegram.sendMessage(7, "**formatted**"),
+    (error: unknown) => error instanceof TelegramApiError && error.retryAfterMs === 2_000,
+  );
+  assert.equal(envelopes.length, 1, "429 must not trigger an immediate plain-text retry");
 });
