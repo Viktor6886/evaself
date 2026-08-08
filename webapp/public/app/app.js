@@ -4,7 +4,7 @@
   const tg = window.Telegram?.WebApp;
   const DEMO = new URLSearchParams(location.search).get("demo") === "1";
   const API = "/api";
-  const BUILD = "20260730-v3";
+  const BUILD = "20260808-v1";
 
   const state = {
     screen: "today",
@@ -47,9 +47,9 @@
   if (tg) {
     tg.ready();
     tg.expand();
-    tg.setHeaderColor?.("#fbfaf6");
-    tg.setBackgroundColor?.("#fbfaf6");
-    tg.setBottomBarColor?.("#fffefa");
+    tg.setHeaderColor?.("#212121");
+    tg.setBackgroundColor?.("#212121");
+    tg.setBottomBarColor?.("#1a1a1a");
   }
 
   injectIcons(document);
