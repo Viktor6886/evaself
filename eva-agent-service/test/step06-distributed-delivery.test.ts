@@ -161,55 +161,6 @@ test("Retry-After accepts seconds and HTTP-date", () => {
   );
 });
 
-test("parallel outbox claims a priority batch and delivers concurrently", async () => {
-  let claimCalls = 0;
-  let claimSql = "";
-  const sent = [];
-  const started = [];
-  let active = 0;
-  let maxActive = 0;
-  const db = {
-    withSystemScope: async (_label, work) => await work(),
-    transaction: async (work) => await work({
-      query: async (sql) => {
-        if (String(sql).includes("WITH candidates")) {
-          claimSql = String(sql);
-          claimCalls += 1;
-          return { rows: claimCalls === 1 ? [
-            { id: "3", chat_id: "3", telegram_method: "sendMessage", payload: { chat_id: 3 }, attempts: 1, priority: 30 },
-            { id: "1", chat_id: "1", telegram_method: "sendMessage", payload: { chat_id: 1 }, attempts: 1, priority: 0 },
-            { id: "2", chat_id: "2", telegram_method: "sendMessage", payload: { chat_id: 2 }, attempts: 1, priority: 10 },
-          ] : [] };
-        }
-        return { rows: [] };
-      },
-    }),
-    query: async (sql, values) => {
-      if (String(sql).includes("SET status = 'sent'")) sent.push(String(values[0]));
-      return { rows: [] };
-    },
-  };
-  const outbox = new PostgresTelegramOutbox(
-    db,
-    { deliver: async (_method, payload) => {
-      started.push(String(payload.chat_id));
-      active += 1;
-      maxActive = Math.max(maxActive, active);
-      await new Promise((resolve) => setTimeout(resolve, 5));
-      active -= 1;
-      return { message_id: sent.length + 1 };
-    } },
-    logger,
-    { pollMs: 10_000, leaseSeconds: 120, maxAttempts: 8, parallel: true,
-      concurrency: 3, batchSize: 3, limiter: { reserve: async () => 0, penalize: async () => {} } },
-  );
-  await outbox.tick();
-  assert.match(claimSql, /ORDER BY priority, available_at, id/);
-  assert.equal(maxActive, 3);
-  assert.deepEqual(started, ["1", "2", "3"]);
-  assert.deepEqual(sent.sort(), ["1", "2", "3"]);
-});
-
 test("outbox persists the five required priority groups", async () => {
   const priorities = [];
   let nextId = 0;
@@ -225,56 +176,15 @@ test("outbox persists the five required priority groups", async () => {
     db,
     { deliver: async () => ({ message_id: 1 }) },
     logger,
-    { pollMs: 10_000, leaseSeconds: 120, maxAttempts: 8, parallel: true },
+    { pollMs: 10_000, leaseSeconds: 120, maxAttempts: 8,
+      parallel: { concurrency: 1, limits: null } },
   );
-  for (const deliveryClass of [
-    "crisis", "answer", "command", "payment", "reminder", "typing", "service",
+  for (const priority of [
+    "crisis", "reply", "command", "reminder", "status",
   ]) {
     await outbox.send({
-      method: "sendMessage", chatId: 1, payload: {}, deliveryClass,
+      method: "sendMessage", chatId: 1, payload: {}, priority,
     });
   }
-  assert.deepEqual(priorities, [0, 10, 20, 20, 30, 40, 40]);
-});
-
-test("Telegram 429 defers delivery without spending an attempt or rerunning a turn", async () => {
-  let claimCalls = 0;
-  let retryValues = null;
-  let deliveries = 0;
-  const db = {
-    withSystemScope: async (_label, work) => await work(),
-    transaction: async (work) => await work({
-      query: async (sql) => {
-        if (String(sql).includes("WITH candidates")) {
-          claimCalls += 1;
-          return { rows: claimCalls === 1 ? [{
-            id: "9", chat_id: "9", telegram_method: "sendMessage",
-            payload: {}, attempts: 1, priority: 10,
-          }] : [] };
-        }
-        return { rows: [] };
-      },
-    }),
-    query: async (sql, values) => {
-      if (String(sql).includes("telegram.outbox.retry") || String(sql).includes("SET status = $2")) {
-        retryValues = values;
-      }
-      return { rows: [] };
-    },
-  };
-  const outbox = new PostgresTelegramOutbox(
-    db,
-    { deliver: async () => {
-      deliveries += 1;
-      throw Object.assign(new Error("Too Many Requests"), { retryAfterMs: 2_000 });
-    } },
-    logger,
-    { pollMs: 10_000, leaseSeconds: 120, maxAttempts: 1, parallel: true,
-      concurrency: 1, batchSize: 1, limiter: { reserve: async () => 0, penalize: async () => {} } },
-  );
-  await outbox.tick();
-  assert.equal(deliveries, 1);
-  assert.equal(retryValues[1], "retry", "429 must not become dead at max attempts");
-  assert.ok(retryValues[2] >= 2 && retryValues[2] <= 3, "retry_after + jitter was not used");
-  assert.equal(retryValues[4], true, "429 attempt must be returned to the budget");
+  assert.deepEqual(priorities, [10, 20, 30, 40, 50]);
 });

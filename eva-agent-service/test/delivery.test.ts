@@ -185,7 +185,7 @@ test("delivery contexts assign command, payment and crisis priority classes", as
   });
   await telegram.sendMessage(3, "crisis page", {}, "crisis");
 
-  assert.deepEqual(envelopes.map((item) => item.deliveryClass), [
-    "command", "payment", "crisis",
+  assert.deepEqual(envelopes.map((item) => item.priority), [
+    "command", "command", "crisis",
   ]);
 });

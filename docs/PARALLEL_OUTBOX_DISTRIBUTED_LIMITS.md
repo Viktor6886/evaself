@@ -55,7 +55,7 @@ the admin API; this change deliberately does not create placeholder providers.
 
 ## Rollout
 
-1. Apply migrations 034 and 035 while both feature flags remain `false`.
+1. Apply migration 034 while both feature flags remain `false`.
 2. Configure at least two providers for routes that require fallback and verify
    their credentials.
 3. Enable `EVA_DISTRIBUTED_LIMITS=true` on all Router replicas and watch limiter,
@@ -74,10 +74,9 @@ Set `EVA_PARALLEL_OUTBOX=false` and `EVA_DISTRIBUTED_LIMITS=false`, then restart
 outbox worker and process-local Router limits. Durable outbox rows and canonical
 breaker/route state remain compatible.
 
-Schema rollback is optional. Run down migration 035 before 034. Migration 035
-removes only the concurrent claim index. Migration 034 removes its constraint and
-schema-version marker but intentionally retains the additive `priority` column so
-rollback cannot destroy delivery metadata.
+Schema rollback is optional. Down migration 034 removes the concurrent claim
+indexes, priority constraint, and schema-version marker, but intentionally retains
+the additive `priority` column so rollback cannot destroy delivery metadata.
 
 ## Verification
 

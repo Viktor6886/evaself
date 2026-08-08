@@ -109,10 +109,13 @@ async function main(): Promise<void> {
     pollMs: config.telegramOutboxPollMs,
     leaseSeconds: config.telegramOutboxLeaseSeconds,
     maxAttempts: config.telegramOutboxMaxAttempts,
-    parallel: config.parallelOutboxEnabled,
-    concurrency: config.outboxConcurrency,
-    batchSize: config.outboxBatchSize,
-    limiter: config.parallelOutboxEnabled ? telegramLimiter : undefined,
+    parallel: config.parallelOutboxEnabled
+      ? {
+          concurrency: config.outboxConcurrency,
+          batchSize: config.outboxBatchSize,
+          limits: telegramLimiter,
+        }
+      : null,
   });
   if (config.outboxEnabled) telegram.setOutbox(outbox);
   const sdk = new SdkSettingsManager(config, db, letta);

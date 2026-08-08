@@ -9,11 +9,11 @@ import { AsyncLocalStorage } from "node:async_hooks";
 
 import type { Config } from "./config.js";
 import type {
-  DeliveryClass,
   DeliveryMetrics,
   OutboxDelivery,
   OutboxTransport,
 } from "./delivery/outbox.js";
+import type { DeliveryPriority } from "./delivery/priority.js";
 import type { Logger } from "./logger.js";
 
 export interface TelegramUser {
@@ -89,8 +89,23 @@ export class TelegramClient implements OutboxTransport {
     sequence: number;
     metrics: DeliveryMetrics;
     lastOutboxId: string | null;
-    deliveryClass: DeliveryClass;
+    priority: DeliveryPriority;
   }>();
+
+  /**
+   * Ступень очереди для всего, что отправляется внутри.
+   *
+   * Отдельным контекстом, а не параметром: приоритет — свойство
+   * происходящего, а не одного вызова. Кризисный монитор объявляет его
+   * один раз, и всё, что он отправит, включая вложенные вызовы,
+   * попадает в очередь на своей ступени.
+   */
+  private readonly priorityContext = new AsyncLocalStorage<DeliveryPriority>();
+
+  /** Выполнить работу, объявив ступень очереди для её отправок. */
+  async withPriority<T>(priority: DeliveryPriority, work: () => Promise<T>): Promise<T> {
+    return await this.priorityContext.run(priority, work);
+  }
 
   constructor(config: Config, logger: Logger) {
     this.token = config.telegramBotToken;
@@ -130,14 +145,14 @@ export class TelegramClient implements OutboxTransport {
   async withDeliveryContext<T>(
     prefix: string,
     work: () => Promise<T>,
-    deliveryClass: DeliveryClass = deliveryClassForContext(prefix),
+    priority: DeliveryPriority = priorityForContext(prefix),
   ): Promise<T> {
     return await this.deliveryContext.run({
       prefix,
       sequence: 0,
       metrics: { outboxInsertMs: 0, telegramSendMs: 0 },
       lastOutboxId: null,
-      deliveryClass,
+      priority,
     }, work);
   }
 
@@ -168,7 +183,7 @@ export class TelegramClient implements OutboxTransport {
     chatId: number,
     text: string,
     options: Record<string, unknown> = {},
-    deliveryClass?: DeliveryClass,
+    priority?: DeliveryPriority,
   ): Promise<unknown[]> {
     // Служебные тексты передают parse_mode явно — их не трогаем.
     if (options.parse_mode !== undefined) {
@@ -176,7 +191,7 @@ export class TelegramClient implements OutboxTransport {
       for (const chunk of splitTelegramText(text)) {
         results.push(await this.dispatch("sendMessage", chatId, {
           chat_id: chatId, text: chunk, ...options,
-        }, deliveryClass));
+        }, priority));
       }
       return results;
     }
@@ -206,7 +221,7 @@ export class TelegramClient implements OutboxTransport {
         payload.link_preview_options = { is_disabled: true };
       }
       try {
-        results.push(await this.dispatch("sendMessage", chatId, payload, deliveryClass));
+        results.push(await this.dispatch("sendMessage", chatId, payload, priority));
       } catch (error) {
         if (!usable) throw error;
         // Telegram отверг разметку. Исходный текст пишем в лог целиком:
@@ -222,7 +237,7 @@ export class TelegramClient implements OutboxTransport {
           text: stripTags(chunk),
           ...common,
           ...(isLast && replyMarkup !== undefined ? { reply_markup: replyMarkup } : {}),
-        }, deliveryClass));
+        }, priority));
       }
     }
     return results;
@@ -458,7 +473,7 @@ export class TelegramClient implements OutboxTransport {
     method: string,
     chatId: number,
     payload: Record<string, unknown>,
-    deliveryClass?: DeliveryClass,
+    priority?: DeliveryPriority,
   ): Promise<unknown> {
     if (!this.outbox) {
       const started = performance.now();
@@ -477,7 +492,7 @@ export class TelegramClient implements OutboxTransport {
       chatId,
       payload,
       idempotencyKey,
-      deliveryClass: deliveryClass ?? context?.deliveryClass ?? defaultDeliveryClass(method),
+      priority: priority ?? this.priorityContext.getStore() ?? context?.priority,
       onMetrics: (metrics) => this.addDeliveryMetrics(metrics),
       onEnqueued: (outboxId) => {
         const store = this.deliveryContext.getStore();
@@ -529,18 +544,11 @@ export function parseRetryAfter(value: string | null, now = Date.now()): number 
   return Number.isFinite(at) ? Math.max(0, at - now) : null;
 }
 
-function deliveryClassForContext(prefix: string): DeliveryClass {
-  if (prefix.startsWith("lava-payment:")) return "payment";
+function priorityForContext(prefix: string): DeliveryPriority {
+  if (prefix.startsWith("lava-payment:")) return "command";
   if (prefix.startsWith("telegram-command:")) return "command";
-  if (prefix.startsWith("telegram-dead:")) return "service";
-  return "answer";
-}
-
-function defaultDeliveryClass(method: string): DeliveryClass {
-  if (method === "sendChatAction" || method === "sendMessageDraft") return "typing";
-  // Messages without a user-turn delivery context are scheduler reminders.
-  // Crisis and payment callers mark their class explicitly.
-  return "reminder";
+  if (prefix.startsWith("telegram-dead:")) return "status";
+  return "reply";
 }
 
 export function webhookSecretMatches(presented: unknown, expected: string): boolean {

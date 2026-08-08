@@ -1,9 +1,8 @@
 /**
  * Distributed Telegram Bot API token buckets.
  *
- * The state is deliberately operational and recoverable: PostgreSQL keeps
- * the durable outbox, while Valkey only coordinates send capacity between
- * replicas. Losing Valkey never loses a message; the outbox retries it.
+ * PostgreSQL keeps the durable outbox; Valkey coordinates only recoverable
+ * send capacity. No message body or credential enters these keys.
  */
 
 import type { Redis } from "ioredis";
@@ -23,9 +22,7 @@ if cooldown > 0 then return cooldown end
 local function refill(key, rate, burst)
   local tokens = tonumber(redis.call('HGET', key, 'tokens'))
   local updated = tonumber(redis.call('HGET', key, 'updated'))
-  if tokens == nil or updated == nil then
-    return burst
-  end
+  if tokens == nil or updated == nil then return burst end
   local elapsed = math.max(0, now - updated) / 1000
   return math.min(burst, tokens + elapsed * rate)
 end
@@ -76,7 +73,7 @@ export class TelegramDeliveryLimiter {
     return Number.isFinite(waitMs) ? Math.max(0, Math.ceil(waitMs)) : 1_000;
   }
 
-  /** Telegram's retry_after is bot-wide; keep the chat key as a second guard. */
+  /** Telegram retry_after is bot-wide; the chat key is a second guard. */
   async penalize(chatId: number, retryAfterMs: number): Promise<void> {
     const ttl = Math.max(1, Math.ceil(retryAfterMs));
     await Promise.all([

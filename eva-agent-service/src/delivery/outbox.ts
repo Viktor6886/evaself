@@ -3,25 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { Database } from "../db.js";
 import type { Logger } from "../logger.js";
 import type { TelegramDeliveryLimiter } from "./telegram-limits.js";
-
-export type DeliveryClass =
-  | "crisis"
-  | "answer"
-  | "command"
-  | "payment"
-  | "reminder"
-  | "typing"
-  | "service";
-
-const DELIVERY_PRIORITY: Record<DeliveryClass, number> = {
-  crisis: 0,
-  answer: 10,
-  command: 20,
-  payment: 20,
-  reminder: 30,
-  typing: 40,
-  service: 40,
-};
+import { type DeliveryPriority, priorityValue } from "./priority.js";
 
 export interface OutboxEnvelope {
   method: string;
@@ -29,7 +11,8 @@ export interface OutboxEnvelope {
   payload: Record<string, unknown>;
   idempotencyKey?: string;
   userId?: number;
-  deliveryClass?: DeliveryClass;
+  /** Ступень очереди. Не указана — выводится из метода. */
+  priority?: DeliveryPriority;
   onMetrics?: (metrics: Partial<DeliveryMetrics>) => void;
   /**
    * Идентификатор строки outbox сразу после постановки. Нужен ходу,
@@ -61,10 +44,21 @@ interface OutboxRow {
   priority: number;
 }
 
+export interface ParallelOutboxOptions {
+  /** Сколько доставок идёт одновременно. */
+  concurrency: number;
+  /** Верхняя граница одной SQL-выборки. */
+  batchSize?: number;
+  /** Лимиты Telegram, общие для реплик. Без них параллельность запрещена. */
+  limits: TelegramDeliveryLimiter | null;
+}
+
 export class PostgresTelegramOutbox implements OutboxDelivery {
   private timer: NodeJS.Timeout | null = null;
   private running = false;
   private readonly workerId = `${process.pid}-${randomUUID()}`;
+  /** Чаты, доставка в которые идёт прямо сейчас. */
+  private readonly busy = new Set<string>();
 
   constructor(
     private readonly db: Database,
@@ -74,10 +68,8 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
       pollMs: number;
       leaseSeconds: number;
       maxAttempts: number;
-      parallel?: boolean;
-      concurrency?: number;
-      batchSize?: number;
-      limiter?: TelegramDeliveryLimiter;
+      /** Параллельная доставка. `null` — прежний последовательный путь. */
+      parallel?: ParallelOutboxOptions | null;
     },
   ) {}
 
@@ -114,7 +106,7 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
         envelope.chatId,
         envelope.method,
         JSON.stringify(envelope.payload),
-        DELIVERY_PRIORITY[envelope.deliveryClass ?? "answer"],
+        priorityValue(envelope.priority, envelope.method),
       ],
       ),
       { inherit: true },
@@ -136,8 +128,7 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
     this.running = true;
     try {
       if (this.options.parallel) {
-        const rows = await this.claimBatch();
-        await Promise.allSettled(rows.map(async (row) => await this.deliver(row)));
+        await this.tickParallel(this.options.parallel);
         return;
       }
       for (let processed = 0; processed < 50; processed += 1) {
@@ -152,6 +143,192 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
     } finally {
       this.running = false;
     }
+  }
+
+  /**
+   * Параллельный заход.
+   *
+   * Одновременно доставляются сообщения **разных** чатов. Внутри одного
+   * чата порядок сохраняется буквально: чат, доставка в который идёт,
+   * из выборки исключается, а строка не берётся, пока у того же чата
+   * есть более раннее незавершённое сообщение. Иначе три части одного
+   * ответа пришли бы человеку вперемешку — а это хуже, чем медленно.
+   */
+  private async tickParallel(parallel: ParallelOutboxOptions): Promise<void> {
+    const limit = Math.max(1, parallel.concurrency);
+    const inFlight = new Set<Promise<void>>();
+    for (let round = 0; round < 50; round += 1) {
+      while (inFlight.size >= limit) await Promise.race(inFlight);
+      // Сколько доставок шло в момент вопроса. Именно этот счёт, а не
+      // счёт после ответа: пока запрос выполнялся, доставки могли
+      // закончиться, и «пусто» превратилось бы в «больше нечего» — при
+      // том что пусто было ровно из-за них.
+      const pending = inFlight.size;
+      const rows = await this.claimBatch(Math.min(
+        limit - pending,
+        Math.max(1, parallel.batchSize ?? limit),
+      ));
+      if (rows.length === 0) {
+        // Следующие сообщения занятых чатов ждут, пока доставится
+        // текущее, и станут доступны, когда оно закончится. Выйти
+        // сейчас значило бы отдавать по одному сообщению на чат за
+        // такт опроса — для ответа из трёх частей это три такта.
+        if (pending === 0) break;
+        if (inFlight.size > 0) await Promise.race(inFlight);
+        continue;
+      }
+      for (const row of rows) {
+        this.busy.add(row.chat_id);
+        const work = (async () => {
+          try {
+            await this.deliverGuarded(row, parallel);
+          } finally {
+            this.busy.delete(row.chat_id);
+          }
+        })();
+        const tracked = work.finally(() => inFlight.delete(tracked));
+        inFlight.add(tracked);
+      }
+    }
+    await Promise.allSettled(inFlight);
+  }
+
+  /**
+   * Доставка с оглядкой на лимиты.
+   *
+   * Занятый лимит — не отказ доставки: строка возвращается в очередь и
+   * **не тратит попытку**. Попытка — это разговор с Telegram, а его не
+   * было. Считать иначе значит убивать сообщение за то, что бот был
+   * занят.
+   */
+  private async deliverGuarded(row: OutboxRow, parallel: ParallelOutboxOptions): Promise<void> {
+    const chatId = Number(row.chat_id);
+    let waitMs = 0;
+    try {
+      waitMs = await parallel.limits?.reserve(chatId) ?? 0;
+    } catch (error) {
+      // Durable data remains in PostgreSQL. Failing closed avoids every
+      // replica independently flooding Telegram while Valkey is unavailable.
+      waitMs = 1_000;
+      this.logger.warn("Telegram limiter недоступен, доставка отложена", {
+        outboxId: row.id,
+        code: error instanceof Error ? error.name : "unknown_error",
+      });
+    }
+    if (waitMs > 0) {
+      await this.returnToQueue(row, waitMs);
+      this.logger.debug("Доставка отложена лимитом", {
+        outboxId: row.id,
+        wait_ms: waitMs,
+      });
+      return;
+    }
+    await this.deliver(row);
+  }
+
+  /** Вернуть строку в очередь, не израсходовав попытку. */
+  private async returnToQueue(row: OutboxRow, delayMs: number): Promise<void> {
+    try {
+      await this.db.withSystemScope("telegram.outbox.defer", async () => await this.db.query(
+        `
+          -- tenant: system — durable delivery: строки берутся по id и аренде воркера, а не по запросу пользователя
+          UPDATE telegram_outbox
+            SET status = 'retry',
+                attempts = GREATEST(0, attempts - 1),
+                available_at = now() + make_interval(secs => $2),
+                locked_at = NULL,
+                locked_by = NULL
+          WHERE id = $1 AND locked_by = $3`,
+        [row.id, Math.max(0.05, delayMs / 1000), this.workerId],
+      ), { crossUser: true });
+    } catch (error) {
+      // Строка останется в `sending` и вернётся по истечении аренды.
+      // Это медленнее, но не теряет сообщение.
+      this.logger.warn("Не удалось вернуть доставку в очередь", {
+        outboxId: row.id,
+        code: error instanceof Error ? error.name : "unknown_error",
+      });
+    }
+  }
+
+  /**
+   * Выборка пачкой: приоритет, затем готовность, затем возраст.
+   *
+   * Два исключения не дают переставить сообщения одного чата: чат, уже
+   * занятый этим процессом, и чат, у которого есть более раннее
+   * незавершённое сообщение. Второе шире первого — оно защищает и от
+   * соседней реплики, потому что смотрит в таблицу, а не в память.
+   */
+  private async claimBatch(limit: number): Promise<OutboxRow[]> {
+    if (limit <= 0) return [];
+    const busy = [...this.busy];
+    return await this.db.withSystemScope("telegram.outbox.claim.batch", async () =>
+      await this.db.transaction(async (client) => {
+        await client.query(
+          `
+            -- tenant: system — durable delivery: строки берутся по id и аренде воркера, а не по запросу пользователя
+            UPDATE telegram_outbox
+              SET status = 'dead',
+                  last_error = COALESCE(last_error, 'worker lease expired after final attempt'),
+                  locked_at = NULL,
+                  locked_by = NULL
+            WHERE status = 'sending'
+              AND attempts >= $2
+              AND locked_at < now() - make_interval(secs => $1)`,
+          [Math.max(30, this.options.leaseSeconds), Math.max(1, this.options.maxAttempts)],
+        );
+        const { rows } = await client.query<OutboxRow & { priority: number }>(
+          `
+            -- tenant: system — durable delivery: строки берутся по id и аренде воркера, а не по запросу пользователя
+            SELECT t.id, t.telegram_method, t.payload, t.attempts, t.chat_id, t.priority
+              FROM telegram_outbox t
+             WHERE t.attempts < $2
+               AND (
+                 (t.status IN ('pending', 'retry') AND t.available_at <= now())
+                 OR (t.status = 'sending' AND t.locked_at < now() - make_interval(secs => $1))
+               )
+               AND NOT (t.chat_id = ANY($4::bigint[]))
+               AND NOT EXISTS (
+                 SELECT 1 FROM telegram_outbox earlier
+                  WHERE earlier.chat_id = t.chat_id
+                    AND earlier.status IN ('pending', 'sending', 'retry')
+                    AND (earlier.priority, earlier.id) < (t.priority, t.id)
+               )
+             ORDER BY t.priority, t.available_at, t.id
+             FOR UPDATE OF t SKIP LOCKED
+             LIMIT $3`,
+          [
+            Math.max(30, this.options.leaseSeconds),
+            Math.max(1, this.options.maxAttempts),
+            limit,
+            busy,
+          ],
+        );
+        // Один чат — одна строка за заход: остальные его сообщения
+        // подождут, иначе порядок внутри чата снова стал бы случайным.
+        const picked: OutboxRow[] = [];
+        const seen = new Set<string>();
+        for (const row of rows) {
+          if (seen.has(row.chat_id)) continue;
+          seen.add(row.chat_id);
+          picked.push(row);
+        }
+        if (picked.length === 0) return [];
+        await client.query(
+          `
+            -- tenant: system — durable delivery: строки берутся по id и аренде воркера, а не по запросу пользователя
+            UPDATE telegram_outbox
+              SET status = 'sending',
+                  attempts = attempts + 1,
+                  locked_at = now(),
+                  locked_by = $2
+            WHERE id = ANY($1::bigint[])`,
+          [picked.map((row) => row.id), this.workerId],
+        );
+        return picked.map((row) => ({ ...row, attempts: row.attempts + 1 }));
+      }),
+      { crossUser: true },
+    );
   }
 
   private async claimById(id: string): Promise<OutboxRow | null> {
@@ -182,57 +359,6 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
     while (this.running && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
-  }
-
-  private async claimBatch(): Promise<OutboxRow[]> {
-    const leaseSeconds = Math.max(30, this.options.leaseSeconds);
-    const maxAttempts = Math.max(1, this.options.maxAttempts);
-    const concurrency = Math.max(1, this.options.concurrency ?? 8);
-    const batchSize = Math.max(1, Math.min(this.options.batchSize ?? concurrency, concurrency));
-    return await this.db.withSystemScope("telegram.outbox.worker_batch", async () =>
-      await this.db.transaction(async (client) => {
-        await client.query(
-          `
-            -- tenant: system — sweeper общей durable delivery, не запрос пользователя
-            UPDATE telegram_outbox
-               SET status = 'dead',
-                   last_error = COALESCE(last_error, 'worker lease expired after final attempt'),
-                   locked_at = NULL,
-                   locked_by = NULL
-             WHERE status = 'sending'
-               AND attempts >= $2
-               AND locked_at < now() - make_interval(secs => $1)`,
-          [leaseSeconds, maxAttempts],
-        );
-        const { rows } = await client.query<OutboxRow>(
-          `-- tenant: system — атомарный claim durable outbox между репликами, не запрос пользователя
-           WITH candidates AS (
-             SELECT id
-               FROM telegram_outbox
-              WHERE attempts < $2
-                AND (
-                  (status IN ('pending', 'retry') AND available_at <= now())
-                  OR (status = 'sending'
-                      AND locked_at < now() - make_interval(secs => $1))
-                )
-              ORDER BY priority, available_at, id
-              FOR UPDATE SKIP LOCKED
-              LIMIT $4
-           )
-           UPDATE telegram_outbox o
-              SET status = 'sending', attempts = o.attempts + 1,
-                  locked_at = now(), locked_by = $3
-             FROM candidates c
-            WHERE o.id = c.id
-        RETURNING o.id, o.chat_id, o.telegram_method, o.payload,
-                  o.attempts, o.priority`,
-          [leaseSeconds, maxAttempts, this.workerId, batchSize],
-        );
-        return rows.sort((left, right) =>
-          left.priority - right.priority || Number(left.id) - Number(right.id));
-      }),
-      { crossUser: true },
-    );
   }
 
   private async claimNext(): Promise<OutboxRow | null> {
@@ -295,25 +421,6 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
     onMetrics?: OutboxEnvelope["onMetrics"],
   ): Promise<unknown> {
     const chatId = Number(row.chat_id);
-    if (this.options.limiter && Number.isSafeInteger(chatId)) {
-      try {
-        const waitMs = await this.options.limiter.reserve(chatId);
-        if (waitMs > 0) {
-          await this.deferWithoutAttempt(row.id, waitMs);
-          return { queued: true, rateLimited: true };
-        }
-      } catch (error) {
-        // Valkey coordinates capacity, PostgreSQL keeps the message. If the
-        // limiter is unavailable, fail closed and retry instead of exceeding
-        // Telegram's bot-wide limit from every replica independently.
-        await this.deferWithoutAttempt(row.id, 1_000);
-        this.logger.warn("Telegram limiter недоступен, доставка отложена", {
-          outboxId: row.id,
-          code: error instanceof Error ? error.name : "unknown_error",
-        });
-        return { queued: true, rateLimited: true };
-      }
-    }
     try {
       const sendStarted = performance.now();
       const result = await this.transport.deliver(row.telegram_method, row.payload);
@@ -342,15 +449,16 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
       });
       return result;
     } catch (error) {
-      const dead = row.attempts >= this.options.maxAttempts;
       const message = error instanceof Error ? error.message : String(error);
+      const dead = row.attempts >= this.options.maxAttempts;
       const retryAfterMs = telegramRetryAfterMs(error);
       const jitterMs = retryAfterMs === null ? 0 : Math.floor(Math.random() * 250);
       const backoffSeconds = retryAfterMs === null
         ? Math.min(300, Math.max(2, 2 ** Math.max(0, row.attempts - 1)))
         : Math.max(1, Math.ceil((retryAfterMs + jitterMs) / 1_000));
-      if (retryAfterMs !== null && this.options.limiter && Number.isSafeInteger(chatId)) {
-        await this.options.limiter.penalize(chatId, retryAfterMs + jitterMs).catch(() => undefined);
+      const limiter = this.options.parallel?.limits;
+      if (retryAfterMs !== null && limiter && Number.isSafeInteger(chatId)) {
+        await limiter.penalize(chatId, retryAfterMs + jitterMs).catch(() => undefined);
       }
       await this.db.withSystemScope("telegram.outbox.retry", async () =>
         await this.db.query(
