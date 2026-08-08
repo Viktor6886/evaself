@@ -85,7 +85,7 @@
 | 03 | [Durable жизненный цикл хода в shadow-режиме и базовые метрики](prompts/step-03-turn-lifecycle.md) | P0 | шаги 0–2 | выполнен | [#128](https://github.com/Viktor6886/evaself/pull/128) | 2026-08-05 |
 | 04 | [Параллельный dispatcher, объединение быстрых сообщений, UserTurnLock и семафоры](prompts/step-04-parallel-inbox.md) | P0 | шаг 3 | выполнен | [#130](https://github.com/Viktor6886/evaself/pull/130) | 2026-08-05 |
 | ⏸ | **Конец порции 3 (P0) — остановка, сводка, запрос разрешения** | | | | | |
-| 05 | [Безопасный SessionManager, барьер отмены, восстановление хода и журнал побочных эффектов](prompts/step-05-session-manager-recovery.md) | P1 | шаги 3–4 | на ревью | [#132](https://github.com/Viktor6886/evaself/pull/132) | 2026-08-05 |
+| 05 | [Безопасный SessionManager, барьер отмены, восстановление хода и журнал побочных эффектов](prompts/step-05-session-manager-recovery.md) | P1 | шаги 3–4 | выполнен | [#132](https://github.com/Viktor6886/evaself/pull/132) | 2026-08-05 |
 | ⏸ | **Конец порции 4 (P1) — остановка, сводка, запрос разрешения** | | | | | |
 | 06 | [Параллельная доставка Telegram и распределённые лимиты LLM Router](prompts/step-06-outbox-distributed-limits.md) | P1 | шаг 4 | не начат | — | — |
 | ⏸ | **Конец порции 5 (P1) — остановка, сводка, запрос разрешения** | | | | | |
@@ -233,7 +233,7 @@
 - Ветка: step/05-session-manager-recovery
 - PR: [#132](https://github.com/Viktor6886/evaself/pull/132)
 - Дата: 2026-08-05
-- Статус: **на ревью**
+- Статус: **выполнен**
 - Что найдено до изменения (раздел «СНАЧАЛА ПРОВЕРЬ»):
   - пул сессий — `Map<conversationId, PooledSession>` с полями
     `session`, `conversationId`, `lastUsedAt`, `recovered`. Счётчика
