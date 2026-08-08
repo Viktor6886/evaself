@@ -74,7 +74,11 @@ async function main(): Promise<void> {
     maxRetryAfterMs: intFromEnv("EVA_ROUTER_MAX_RETRY_AFTER_MS", 5_000),
     retryAfterJitterMs: intFromEnv("EVA_ROUTER_RETRY_AFTER_JITTER_MS", 250),
     reservationTtlMs: intFromEnv("EVA_ROUTER_LIMIT_RESERVATION_TTL_MS", 300_000),
-    limits: redis ? new ValkeyRouterLimits(redis) : undefined,
+    limits: redis ? new ValkeyRouterLimits(redis, {
+      max_rpm: intFromEnv("EVA_ROUTER_ROUTE_MAX_RPM", 600),
+      max_tpm: intFromEnv("EVA_ROUTER_ROUTE_MAX_TPM", 2_000_000),
+      max_concurrency: intFromEnv("EVA_ROUTER_ROUTE_MAX_CONCURRENCY", 64),
+    }) : undefined,
   });
 
   const app = createRouterServer({ router, store, logger, apiKey });

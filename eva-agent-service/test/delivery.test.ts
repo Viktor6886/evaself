@@ -189,3 +189,22 @@ test("delivery contexts assign command, payment and crisis priority classes", as
     "command", "command", "crisis",
   ]);
 });
+
+test("typing and service reactions use the status outbox path", async () => {
+  const telegram = new TelegramClient({
+    telegramBotToken: "fake",
+    telegramApiBaseUrl: "https://api.telegram.invalid",
+  } as never, logger);
+  const envelopes: OutboxEnvelope[] = [];
+  telegram.setOutbox({
+    send: async (envelope) => { envelopes.push(envelope); return { queued: true }; },
+  });
+
+  await telegram.sendChatAction(7);
+  await telegram.setReaction(7, 11, "👍");
+
+  assert.deepEqual(envelopes.map((item) => [item.method, item.priority]), [
+    ["sendChatAction", "status"],
+    ["setMessageReaction", "status"],
+  ]);
+});

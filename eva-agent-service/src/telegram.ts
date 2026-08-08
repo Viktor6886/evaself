@@ -271,7 +271,7 @@ export class TelegramClient implements OutboxTransport {
   }
 
   async sendChatAction(chatId: number, action = "typing"): Promise<void> {
-    await this.call("sendChatAction", { chat_id: chatId, action });
+    await this.dispatch("sendChatAction", chatId, { chat_id: chatId, action }, "status");
   }
 
   /**
@@ -370,12 +370,12 @@ export class TelegramClient implements OutboxTransport {
   }
 
   async setReaction(chatId: number, messageId: number, emoji: string): Promise<void> {
-    await this.call("setMessageReaction", {
+    await this.dispatch("setMessageReaction", chatId, {
       chat_id: chatId,
       message_id: messageId,
       reaction: [{ type: "emoji", emoji }],
       is_big: false,
-    });
+    }, "status");
   }
 
   async sendVoice(chatId: number, audio: Uint8Array, filename = "eva.ogg"): Promise<void> {

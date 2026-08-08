@@ -139,18 +139,20 @@ BEGIN
         ('step06-breaker-probe', 'http://example.test/v1', 'model-a', 32768, 'v1:a:b:c')
     RETURNING id, model INTO provider, current_model;
 
+    -- Simulate an old replica. Its provider-only write must be projected to
+    -- the current model row for a concurrently running new replica.
     INSERT INTO llm_breaker_state
-        (provider_id, model, state, consecutive_errors, probe_after)
-    VALUES (provider, current_model, 'open', 3, now() - interval '1 second')
-    ON CONFLICT (provider_id, model) DO UPDATE SET
+        (provider_id, state, consecutive_errors, probe_after)
+    VALUES (provider, 'open', 3, now() - interval '1 second')
+    ON CONFLICT (provider_id) DO UPDATE SET
         state = 'open', pinned_out = false, probe_after = EXCLUDED.probe_after;
 
-    UPDATE llm_breaker_state SET state = 'half_open'
+    UPDATE llm_breaker_model_state SET state = 'half_open'
      WHERE provider_id = provider AND model = current_model
        AND state = 'open' AND probe_after <= now();
     GET DIAGNOSTICS first_claim = ROW_COUNT;
 
-    UPDATE llm_breaker_state SET state = 'half_open'
+    UPDATE llm_breaker_model_state SET state = 'half_open'
      WHERE provider_id = provider AND model = current_model
        AND state = 'open' AND probe_after <= now();
     GET DIAGNOSTICS second_claim = ROW_COUNT;
@@ -159,10 +161,24 @@ BEGIN
         RAISE EXCEPTION 'half-open claims were %, %', first_claim, second_claim;
     END IF;
 
-    INSERT INTO llm_breaker_state (provider_id, model, state)
+    INSERT INTO llm_breaker_model_state (provider_id, model, state)
     VALUES (provider, current_model || ':independent', 'closed');
-    IF (SELECT count(*) FROM llm_breaker_state WHERE provider_id = provider) < 2 THEN
+    IF (SELECT count(*) FROM llm_breaker_model_state WHERE provider_id = provider) < 2 THEN
         RAISE EXCEPTION 'breaker models are not independent';
+    END IF;
+
+    UPDATE llm_providers SET model = current_model || ':independent' WHERE id = provider;
+    IF (SELECT state FROM llm_breaker_state WHERE provider_id = provider) <> 'closed' THEN
+        RAISE EXCEPTION 'old replica projection did not follow provider model change';
+    END IF;
+    UPDATE llm_providers SET model = current_model WHERE id = provider;
+
+    -- Simulate a new replica recovering the current model. The old projection
+    -- must follow so an old replica does not keep rejecting requests.
+    UPDATE llm_breaker_model_state SET state = 'closed'
+     WHERE provider_id = provider AND model = current_model;
+    IF (SELECT state FROM llm_breaker_state WHERE provider_id = provider) <> 'closed' THEN
+        RAISE EXCEPTION 'model breaker recovery was not projected to old replicas';
     END IF;
 END $$;
 

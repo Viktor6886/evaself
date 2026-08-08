@@ -15,10 +15,12 @@ default and can be rolled back independently.
   `fast`, `chat`, `deep`, `classifier`, and `research`. A chain can contain a
   primary and one or more fallbacks; no provider or credential is invented by the
   migration.
-- PostgreSQL `llm_breaker_state` remains the canonical shared circuit breaker.
-  Migration 034 makes its key explicitly `(provider_id, model)`; the existing
-  atomic half-open probe, automatic recovery, and `pinned_out` manual disable are
-  reused instead of duplicated in Valkey.
+- PostgreSQL remains the canonical shared circuit breaker. Migration 034 adds
+  model-scoped `llm_breaker_model_state`; the original provider-only
+  `llm_breaker_state` remains a trigger-synchronized compatibility projection so
+  old and new Router replicas may overlap during rolling deployment. Atomic
+  half-open probes, automatic recovery, model switches, and `pinned_out` manual
+  disable remain consistent in both directions.
 
 ## Telegram delivery
 
@@ -40,7 +42,11 @@ consuming a delivery attempt.
 ## Router limits and failover
 
 With `EVA_DISTRIBUTED_LIMITS=true`, a single Lua reservation checks inflight, RPM,
-and TPM at provider, provider/model, and route dimensions. A reservation has a TTL,
+and TPM at provider, provider/model, and route dimensions. Provider/model caps
+come from the provider profile; stable route-wide caps come from
+`EVA_ROUTER_ROUTE_MAX_CONCURRENCY`, `EVA_ROUTER_ROUTE_MAX_RPM`, and
+`EVA_ROUTER_ROUTE_MAX_TPM`, so a primary provider's cap cannot leak into a
+fallback. A reservation has a TTL,
 so a crashed process cannot hold capacity forever. Completion atomically settles
 the token estimate to actual usage; pre-provider failure releases it.
 
@@ -75,11 +81,10 @@ outbox worker and process-local Router limits. Durable outbox rows and canonical
 breaker/route state remain compatible.
 
 Schema rollback is optional. Down migration 034 removes the concurrent claim
-indexes and priority constraint, restores the provider-only breaker key, and
-removes the schema-version marker. It intentionally retains the additive
-`priority` column so rollback cannot destroy delivery metadata. When reverting
-the breaker key, only the provider profile's current-model operational row is
-kept; stale-model breaker rows are ephemeral health state, not user data.
+indexes, priority constraint, and schema-version marker. It intentionally retains
+the additive `priority` column and the breaker compatibility layer: deleting
+either would lose delivery/health state or break a still-running new Router
+replica. Old Router versions continue to use the unchanged provider-only table.
 
 ## Verification
 

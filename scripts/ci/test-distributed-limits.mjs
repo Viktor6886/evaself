@@ -74,6 +74,36 @@ try {
     { allowed: false, reason: "tpm" },
   );
 
+  const routeA = new ValkeyRouterLimits(redis, {
+    max_rpm: 100, max_tpm: 100_000, max_concurrency: 2,
+  });
+  const routeB = new ValkeyRouterLimits(redis, {
+    max_rpm: 100, max_tpm: 100_000, max_concurrency: 2,
+  });
+  const routeBase = {
+    model: "ci-shared-model",
+    route: "ci-route-consistency",
+    limits: { max_rpm: 1, max_tpm: 100, max_concurrency: 1 },
+    estimatedTokens: 10,
+    reservationTtlMs: 5_000,
+  };
+  const routePrimary = await routeA.reserve({
+    ...routeBase, providerId: "ci-route-primary", reservationId: "route-primary",
+  });
+  const routeFallback = await routeB.reserve({
+    ...routeBase, providerId: "ci-route-fallback", reservationId: "route-fallback",
+  });
+  assert.equal(routePrimary.allowed, true);
+  assert.equal(routeFallback.allowed, true);
+  assert.deepEqual(
+    await routeB.reserve({
+      ...routeBase, providerId: "ci-route-third", reservationId: "route-third",
+    }),
+    { allowed: false, reason: "concurrency" },
+  );
+  if (routePrimary.allowed) await routePrimary.reservation.release();
+  if (routeFallback.allowed) await routeFallback.reservation.release();
+
   const telegramA = new TelegramDeliveryLimiter(redis, {
     globalPerSecond: 2, globalBurst: 2, chatPerSecond: 1, chatBurst: 1,
   });

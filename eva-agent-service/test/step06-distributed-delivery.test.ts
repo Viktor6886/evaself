@@ -18,13 +18,16 @@ class FakeRouterRedis {
     const argv = args.slice(numberOfKeys);
     this.keys.push(...keys);
     if (numberOfKeys === 9) {
-      const [nowRaw, estimatedRaw, rpmRaw, tpmRaw, concurrencyRaw, reservation, ttlRaw] = argv;
+      const [nowRaw, estimatedRaw] = argv;
       const now = Number(nowRaw);
       const estimated = Number(estimatedRaw);
-      const rpm = Number(rpmRaw);
-      const tpm = Number(tpmRaw);
-      const concurrency = Number(concurrencyRaw);
-      const ttl = Number(ttlRaw);
+      const dimensionLimits = [0, 1, 2].map((dimension) => ({
+        rpm: Number(argv[2 + dimension * 3]),
+        tpm: Number(argv[3 + dimension * 3]),
+        concurrency: Number(argv[4 + dimension * 3]),
+      }));
+      const reservation = argv[11];
+      const ttl = Number(argv[12]);
       const states = [0, 3, 6].map((offset) => {
         const key = keys[offset];
         let state = this.dimensions.get(key);
@@ -40,11 +43,12 @@ class FakeRouterRedis {
         }
         return state;
       });
-      for (const state of states) {
-        if (state.inflight.size >= concurrency) return "concurrency";
-        if (rpm >= 0 && state.requests.size >= rpm) return "rpm";
+      for (const [index, state] of states.entries()) {
+        const limits = dimensionLimits[index];
+        if (state.inflight.size >= limits.concurrency) return "concurrency";
+        if (limits.rpm >= 0 && state.requests.size >= limits.rpm) return "rpm";
         const used = [...state.requests.values()].reduce((sum, row) => sum + row.tokens, 0);
-        if (tpm >= 0 && used + estimated > tpm) return "tpm";
+        if (limits.tpm >= 0 && used + estimated > limits.tpm) return "tpm";
       }
       for (const state of states) {
         state.requests.set(String(reservation), { at: now, tokens: estimated });
@@ -144,6 +148,37 @@ test("two Router replicas share RPM and settled TPM across every dimension", asy
     await second.reserve({ ...tpmInput, reservationId: "tpm-2", estimatedTokens: 40 }),
     { allowed: false, reason: "tpm" },
   );
+});
+
+test("route thresholds stay stable when primary and fallback provider limits differ", async () => {
+  const redis = new FakeRouterRedis();
+  const first = new ValkeyRouterLimits(redis, {
+    max_rpm: 100,
+    max_tpm: 100_000,
+    max_concurrency: 2,
+  });
+  const second = new ValkeyRouterLimits(redis, {
+    max_rpm: 100,
+    max_tpm: 100_000,
+    max_concurrency: 2,
+  });
+  const base = {
+    model: "shared-model",
+    route: "route-consistency",
+    limits: { max_rpm: 1, max_tpm: 100, max_concurrency: 1 },
+    estimatedTokens: 10,
+    reservationTtlMs: 5_000,
+  };
+  const primary = await first.reserve({ ...base, providerId: "primary", reservationId: "primary" });
+  const fallback = await second.reserve({ ...base, providerId: "fallback", reservationId: "fallback" });
+  assert.equal(primary.allowed, true);
+  assert.equal(fallback.allowed, true, "primary provider cap leaked into the shared route");
+  assert.deepEqual(
+    await second.reserve({ ...base, providerId: "third", reservationId: "third" }),
+    { allowed: false, reason: "concurrency" },
+  );
+  if (primary.allowed) await primary.reservation.release();
+  if (fallback.allowed) await fallback.reservation.release();
 });
 
 class FakeTelegramRedis {

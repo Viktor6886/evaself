@@ -94,11 +94,17 @@ export class ProviderLimits {
   }
 }
 
+export interface LimitConfig {
+  max_rpm: number | null;
+  max_tpm: number | null;
+  max_concurrency: number;
+}
+
 export interface RouterLimitInput {
   providerId: string;
   model: string;
   route: string;
-  limits: { max_rpm: number | null; max_tpm: number | null; max_concurrency: number };
+  limits: LimitConfig;
   estimatedTokens: number;
   reservationTtlMs: number;
   reservationId: string;
@@ -154,14 +160,14 @@ const RESERVE_SCRIPT = `
 local now = tonumber(ARGV[1])
 local cutoff = now - 60000
 local estimated = tonumber(ARGV[2])
-local max_rpm = tonumber(ARGV[3])
-local max_tpm = tonumber(ARGV[4])
-local max_concurrency = tonumber(ARGV[5])
-local reservation = ARGV[6]
-local reservation_ttl = tonumber(ARGV[7])
+local reservation = ARGV[12]
+local reservation_ttl = tonumber(ARGV[13])
 
 for dimension = 0, 2 do
   local offset = dimension * 3
+  local max_rpm = tonumber(ARGV[3 + offset])
+  local max_tpm = tonumber(ARGV[4 + offset])
+  local max_concurrency = tonumber(ARGV[5 + offset])
   local requests = KEYS[offset + 1]
   local tokens = KEYS[offset + 2]
   local inflight = KEYS[offset + 3]
@@ -215,7 +221,14 @@ return 1
  * entries live only for the sliding minute.
  */
 export class ValkeyRouterLimits implements RouterLimits {
-  constructor(private readonly redis: RedisLike) {}
+  constructor(
+    private readonly redis: RedisLike,
+    private readonly routeLimits: LimitConfig = {
+      max_rpm: 600,
+      max_tpm: 2_000_000,
+      max_concurrency: 64,
+    },
+  ) {}
 
   async reserve(input: RouterLimitInput): Promise<RouterLimitResult> {
     const prefixes = [
@@ -235,6 +248,12 @@ export class ValkeyRouterLimits implements RouterLimits {
       input.limits.max_rpm ?? -1,
       input.limits.max_tpm ?? -1,
       Math.max(1, input.limits.max_concurrency),
+      input.limits.max_rpm ?? -1,
+      input.limits.max_tpm ?? -1,
+      Math.max(1, input.limits.max_concurrency),
+      this.routeLimits.max_rpm ?? -1,
+      this.routeLimits.max_tpm ?? -1,
+      Math.max(1, this.routeLimits.max_concurrency),
       input.reservationId,
       Math.max(1_000, input.reservationTtlMs),
     ));

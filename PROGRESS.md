@@ -257,8 +257,9 @@
   ordered route chains не дублируются.
 - Изменённые файлы и к какому пункту шага относятся:
   - `postgres/migrations/034_outbox_priority.sql` и одноимённая `down/` —
-    пункты 1–2 и 5: additive priority, concurrent claim index и составной
-    ключ breaker `(provider_id, model)`;
+    пункты 1–2, 5–6: additive priority, concurrent claim index,
+    model-scoped breaker с provider-only compatibility projection и заполнение
+    пустых production route chains без подмены операторской конфигурации;
   - `src/delivery/outbox.ts`, `src/delivery/priority.ts`,
     `src/delivery/telegram-limits.ts`, `src/delivery/retry-after.ts` —
     пункты 1–3: bounded batch, `SKIP LOCKED`, порядок приоритетов,
@@ -267,7 +268,8 @@
     `src/eva-workflow.ts` — пункты
     2–3: классы доставки и оба формата `Retry-After`; повторный LLM-ход
     при ошибке Telegram не запускается;
-  - `src/router/limits.ts`, `src/router/router.ts`, `src/router/chain.ts`
+  - `src/router/limits.ts`, `src/router/router.ts`, `src/router/chain.ts`,
+    `src/router/store.ts`
     — пункты 4–7: атомарная reservation, TTL, единственная half-open
     probe, failover и privacy-safe причина;
   - `src/router/adapters/{shared,openai,anthropic}.ts`,
@@ -289,9 +291,9 @@
     эксплуатационные ограничения шага.
 - Проверки перед обновлением PR:
   - `npm run build`, `npm run lint`: код 0;
-  - `npm test`: **494 passed, 0 failed**. Один предыдущий полный
+  - `npm test`: **496 passed, 0 failed**. Один предыдущий полный
     прогон поймал timing-failure старого SessionManager-теста; он
-    отдельно прошёл 3/3 раз, после чего полный набор прошёл 494/494;
+    отдельно прошёл 3/3 раз, после чего полный набор прошёл 496/496;
   - `assert-tenant-scope.py`: 37 пользовательских таблиц, 197
     запросов, каждый имеет границу арендатора;
   - `assert-env-plumbing.py`: 83 переменных читает конфигурация, 80
@@ -330,6 +332,14 @@
   `FOR UPDATE SKIP LOCKED`, составной breaker key и atomic probe-тест двух
   реплик; дубль удалён, зависимость Valkey восстановлена. После исправлений
   полный набор прошёл 494/494; требуется повторная независимая проверка.
+- Вторая независимая проверка также остановила merge: typing/status обходил
+  outbox, route dimension наследовал разные provider caps, а замена breaker PK
+  требовала lockstep rollout. Исправлено: `sendChatAction` и reactions идут через
+  status outbox; route получает стабильные отдельные concurrency/RPM/TPM caps;
+  model-state breaker добавлен без изменения старого PK, а двусторонние triggers
+  синхронизируют старые и новые реплики, включая смену модели. Production chains
+  `fast/chat/deep/classifier/research` сохраняют полную ordered source chain и не
+  создают фиктивных credentials. Требуется новый полный CI и независимый ревью.
 
 <!-- Сохранён исходный частичный отчёт ранее открытого PR #135. -->
 
