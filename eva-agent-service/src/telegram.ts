@@ -9,6 +9,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 
 import type { Config } from "./config.js";
 import type {
+  DeliveryClass,
   DeliveryMetrics,
   OutboxDelivery,
   OutboxTransport,
@@ -57,6 +58,14 @@ interface TelegramResponse<T> {
   ok: boolean;
   result?: T;
   description?: string;
+  parameters?: { retry_after?: number };
+}
+
+export class TelegramApiError extends Error {
+  constructor(message: string, readonly retryAfterMs: number | null = null) {
+    super(message);
+    this.name = "TelegramApiError";
+  }
 }
 
 export interface TelegramMessageDraft {
@@ -80,6 +89,7 @@ export class TelegramClient implements OutboxTransport {
     sequence: number;
     metrics: DeliveryMetrics;
     lastOutboxId: string | null;
+    deliveryClass: DeliveryClass;
   }>();
 
   constructor(config: Config, logger: Logger) {
@@ -117,12 +127,17 @@ export class TelegramClient implements OutboxTransport {
     this.outbox = outbox;
   }
 
-  async withDeliveryContext<T>(prefix: string, work: () => Promise<T>): Promise<T> {
+  async withDeliveryContext<T>(
+    prefix: string,
+    work: () => Promise<T>,
+    deliveryClass: DeliveryClass = deliveryClassForContext(prefix),
+  ): Promise<T> {
     return await this.deliveryContext.run({
       prefix,
       sequence: 0,
       metrics: { outboxInsertMs: 0, telegramSendMs: 0 },
       lastOutboxId: null,
+      deliveryClass,
     }, work);
   }
 
@@ -153,6 +168,7 @@ export class TelegramClient implements OutboxTransport {
     chatId: number,
     text: string,
     options: Record<string, unknown> = {},
+    deliveryClass?: DeliveryClass,
   ): Promise<unknown[]> {
     // Служебные тексты передают parse_mode явно — их не трогаем.
     if (options.parse_mode !== undefined) {
@@ -160,7 +176,7 @@ export class TelegramClient implements OutboxTransport {
       for (const chunk of splitTelegramText(text)) {
         results.push(await this.dispatch("sendMessage", chatId, {
           chat_id: chatId, text: chunk, ...options,
-        }));
+        }, deliveryClass));
       }
       return results;
     }
@@ -190,7 +206,7 @@ export class TelegramClient implements OutboxTransport {
         payload.link_preview_options = { is_disabled: true };
       }
       try {
-        results.push(await this.dispatch("sendMessage", chatId, payload));
+        results.push(await this.dispatch("sendMessage", chatId, payload, deliveryClass));
       } catch (error) {
         if (!usable) throw error;
         // Telegram отверг разметку. Исходный текст пишем в лог целиком:
@@ -206,7 +222,7 @@ export class TelegramClient implements OutboxTransport {
           text: stripTags(chunk),
           ...common,
           ...(isLast && replyMarkup !== undefined ? { reply_markup: replyMarkup } : {}),
-        }));
+        }, deliveryClass));
       }
     }
     return results;
@@ -442,6 +458,7 @@ export class TelegramClient implements OutboxTransport {
     method: string,
     chatId: number,
     payload: Record<string, unknown>,
+    deliveryClass?: DeliveryClass,
   ): Promise<unknown> {
     if (!this.outbox) {
       const started = performance.now();
@@ -460,6 +477,7 @@ export class TelegramClient implements OutboxTransport {
       chatId,
       payload,
       idempotencyKey,
+      deliveryClass: deliveryClass ?? context?.deliveryClass ?? defaultDeliveryClass(method),
       onMetrics: (metrics) => this.addDeliveryMetrics(metrics),
       onEnqueued: (outboxId) => {
         const store = this.deliveryContext.getStore();
@@ -488,12 +506,41 @@ export class TelegramClient implements OutboxTransport {
       throw new Error(`Telegram ${method}: HTTP ${response.status}, невалидный JSON`);
     }
     if (!response.ok || !body.ok) {
-      throw new Error(
+      const jsonRetry = Number(body.parameters?.retry_after);
+      const headerRetry = parseRetryAfter(response.headers.get("retry-after"));
+      const retryAfterMs = Math.max(
+        Number.isFinite(jsonRetry) && jsonRetry > 0 ? jsonRetry * 1_000 : 0,
+        headerRetry ?? 0,
+      );
+      throw new TelegramApiError(
         `Telegram ${method}: ${body.description ?? `HTTP ${response.status}`}`.slice(0, 1000),
+        retryAfterMs > 0 ? retryAfterMs : null,
       );
     }
     return body.result as T;
   }
+}
+
+export function parseRetryAfter(value: string | null, now = Date.now()): number | null {
+  if (!value?.trim()) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.ceil(seconds * 1_000);
+  const at = Date.parse(value);
+  return Number.isFinite(at) ? Math.max(0, at - now) : null;
+}
+
+function deliveryClassForContext(prefix: string): DeliveryClass {
+  if (prefix.startsWith("lava-payment:")) return "payment";
+  if (prefix.startsWith("telegram-command:")) return "command";
+  if (prefix.startsWith("telegram-dead:")) return "service";
+  return "answer";
+}
+
+function defaultDeliveryClass(method: string): DeliveryClass {
+  if (method === "sendChatAction" || method === "sendMessageDraft") return "typing";
+  // Messages without a user-turn delivery context are scheduler reminders.
+  // Crisis and payment callers mark their class explicitly.
+  return "reminder";
 }
 
 export function webhookSecretMatches(presented: unknown, expected: string): boolean {

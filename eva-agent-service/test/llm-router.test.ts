@@ -412,10 +412,11 @@ test("JSON в markdown-обёртке распознаётся", () => {
  * Роутер с подставленными адаптерами. `script[имя провайдера]` — функция,
  * получающая номер попытки и возвращающая либо ответ, либо ошибку.
  */
-function harness(providers, script, chain) {
+function harness(providers, script, chain, optionOverrides = {}) {
   const store = new FakeStore(providers, chain);
   const calls = [];
   const attemptsByProvider = new Map();
+  const delays = [];
 
   const adapterFor = (p) => ({
     protocol: p.protocol,
@@ -436,11 +437,12 @@ function harness(providers, script, chain) {
   const router = new LlmRouter(
     store,
     silentLogger,
-    { breakerThreshold: 3, breakerWindowMs: 300_000, breakerCooldownMs: 60_000, retryBackoffMs: [0, 0, 0] },
-    () => Promise.resolve(),
+    { breakerThreshold: 3, breakerWindowMs: 300_000, breakerCooldownMs: 60_000,
+      retryBackoffMs: [0, 0, 0], retryAfterJitterMs: 0, ...optionOverrides },
+    (ms) => { delays.push(ms); return Promise.resolve(); },
     adapterFor,
   );
-  return { router, store, calls };
+  return { router, store, calls, delays };
 }
 
 function ok(text = "готово", usage = { tokens_in: 10, tokens_out: 5 }) {
@@ -487,6 +489,52 @@ test("HTTP 429 у основного уводит на резерв после �
   // 3 попытки основному (1 + 2 повтора), затем одна резерву.
   assert.deepEqual(calls.map((c) => c.provider), ["primary", "primary", "primary", "backup"]);
   assert.equal(store.attempts.filter((a) => a.succeeded).length, 1, "успех записан ровно один раз");
+});
+
+test("half-open breaker не пропускает второй пробный запрос", () => {
+  const p = provider({ id: "a", name: "primary" });
+  const chain = buildChain({
+    route: ROUTE,
+    request: request(),
+    providerIds: ["a"],
+    providers: new Map([["a", p]]),
+    breakers: new Map([["a", {
+      state: "half_open", probe_after: null, pinned_out: false,
+    }]]),
+    now: new Date(),
+  });
+  assert.equal(chain.usable.length, 0);
+  assert.equal(chain.rejected[0]?.reason, "breaker_open");
+  assert.match(chain.rejected[0]?.detail ?? "", /единственный пробный запрос/);
+});
+
+test("long Retry-After switches immediately; short value is waited with configured jitter", async () => {
+  const primary = provider({ id: "a", name: "primary", max_retries: 2 });
+  const backup = provider({ id: "b", name: "backup" });
+  const long = harness([primary, backup], {
+    primary: fails(new ProviderError("429", "rate_limited", {
+      retryable: true, httpStatus: 429, retryAfterMs: 10_000,
+    })),
+    backup: always(() => Promise.resolve(ok("backup"))),
+  }, undefined, { maxRetryAfterMs: 5_000 });
+  const switched = await long.router.complete(request());
+  assert.equal(switched.provider_name, "backup");
+  assert.deepEqual(long.calls.map((call) => call.provider), ["primary", "backup"]);
+  assert.deepEqual(long.delays, []);
+
+  let attempts = 0;
+  const short = harness([primary], {
+    primary: always(() => {
+      attempts += 1;
+      return attempts === 1
+        ? Promise.reject(new ProviderError("429", "rate_limited", {
+            retryable: true, httpStatus: 429, retryAfterMs: 2_000,
+          }))
+        : Promise.resolve(ok());
+    }),
+  }, undefined, { maxRetryAfterMs: 5_000 });
+  await short.router.complete(request());
+  assert.deepEqual(short.delays, [2_000]);
 });
 
 test("HTTP 500, таймаут и обрыв соединения — тоже причины переключения", async () => {

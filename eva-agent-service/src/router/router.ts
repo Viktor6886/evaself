@@ -20,7 +20,7 @@ import { openAiAdapter } from "./adapters/openai.js";
 import { buildChain } from "./chain.js";
 import type { ChainEntry } from "./chain.js";
 import { classifyDeterministically, isEvaRoute, type RouteClassificationResult } from "./classifier.js";
-import { ProviderLimits } from "./limits.js";
+import { LocalRouterLimits, type RouterLimits } from "./limits.js";
 import { estimateTokens, normalizeForProvider, relaxAfterBadRequest, withBackupDirective } from "./normalize.js";
 import { costOf, RouterStore, userIdOf } from "./store.js";
 import type {
@@ -43,6 +43,12 @@ export interface RouterOptions {
   breakerCooldownMs: number;
   /** Задержки повторов одному провайдеру: сразу, 2 с, 5 с. */
   retryBackoffMs: number[];
+  /** Retry-After longer than this switches to the next provider. */
+  maxRetryAfterMs?: number;
+  retryAfterJitterMs?: number;
+  reservationTtlMs?: number;
+  /** Optional distributed limiter, injected only behind the feature flag. */
+  limits?: RouterLimits;
 }
 
 export const DEFAULT_OPTIONS: RouterOptions = {
@@ -50,6 +56,9 @@ export const DEFAULT_OPTIONS: RouterOptions = {
   breakerWindowMs: 5 * 60_000,
   breakerCooldownMs: 7 * 60_000,
   retryBackoffMs: [0, 2_000, 5_000],
+  maxRetryAfterMs: 5_000,
+  retryAfterJitterMs: 250,
+  reservationTtlMs: 300_000,
 };
 
 /** Итог маршрутизации, который сервер отдаёт клиенту. */
@@ -82,7 +91,7 @@ export type AdapterResolver = (provider: ProviderProfile) => ProviderAdapter;
 const defaultResolver: AdapterResolver = (provider) => ADAPTERS[provider.protocol];
 
 export class LlmRouter {
-  private readonly limits = new ProviderLimits();
+  private readonly limits: RouterLimits;
 
   constructor(
     private readonly store: RouterStore,
@@ -91,7 +100,9 @@ export class LlmRouter {
     private readonly sleep: (ms: number) => Promise<void> =
       (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     private readonly adapterFor: AdapterResolver = defaultResolver,
-  ) {}
+  ) {
+    this.limits = options.limits ?? new LocalRouterLimits();
+  }
 
   // -----------------------------------------------------------------
   // подготовка цепочки
@@ -297,7 +308,6 @@ export class LlmRouter {
    */
   private async gate(
     provider: ProviderProfile,
-    estimated: number,
   ): Promise<{ ok: true } | { ok: false; reason: SwitchReason; detail: string }> {
     if (provider.daily_budget_micro !== null || provider.monthly_budget_micro !== null) {
       const spent = await this.store.spend(provider.id);
@@ -307,14 +317,6 @@ export class LlmRouter {
       if (provider.monthly_budget_micro !== null && spent.month >= provider.monthly_budget_micro) {
         return { ok: false, reason: "budget_exceeded", detail: "исчерпан месячный бюджет" };
       }
-    }
-    const verdict = this.limits.check(provider.id, provider, estimated);
-    if (!verdict.allowed) {
-      return {
-        ok: false,
-        reason: verdict.reason === "concurrency" ? "rate_limited" : "rate_limited",
-        detail: `локальный лимит ${verdict.reason}`,
-      };
     }
     return { ok: true };
   }
@@ -383,7 +385,7 @@ export class LlmRouter {
     );
     const estimated = estimateTokens(request);
 
-    const gate = await this.gate(provider, estimated);
+    const gate = await this.gate(provider);
     if (!gate.ok) {
       const error = new ProviderError(gate.detail, gate.reason, { retryable: false });
       await this.log(provider, original, primaryId, {
@@ -392,37 +394,93 @@ export class LlmRouter {
       return { kind: "failure", error };
     }
 
-    // Открытый breaker пропускает ровно один пробный запрос.
+    // Открытый breaker пропускает ровно один пробный запрос. Claim делаем
+    // после лимитера: иначе отказ Valkey оставил бы breaker в half_open,
+    // хотя до провайдера не ушло ни одного запроса.
     const breakers = await this.store.breakers();
-    if (breakers.get(provider.id)?.state === "open" && !(await this.store.claimProbe(provider.id))) {
-      const error = new ProviderError("circuit breaker открыт", "breaker_open", { retryable: false });
-      return { kind: "failure", error };
+    const breakerState = breakers.get(provider.id)?.state;
+    if (breakerState === "half_open") {
+      return {
+        kind: "failure",
+        error: new ProviderError("circuit breaker уже выполняет пробный запрос", "breaker_open", {
+          retryable: false,
+        }),
+      };
     }
+    const needsProbe = breakerState === "open";
 
     const adapter = this.adapterFor(provider);
-    const maxAttempts = provider.max_retries + 1;
+    const maxAttempts = needsProbe ? 1 : provider.max_retries + 1;
     let attempt = 0;
+    let retryAfterDelay: number | null = null;
+    let providerAttempted = false;
     let lastError = new ProviderError("не выполнено ни одной попытки", "model_error", {
       retryable: false,
     });
 
     while (attempt < maxAttempts) {
-      const backoff = this.options.retryBackoffMs[Math.min(attempt, this.options.retryBackoffMs.length - 1)]!;
+      const backoff = retryAfterDelay
+        ?? this.options.retryBackoffMs[Math.min(attempt, this.options.retryBackoffMs.length - 1)]!;
+      retryAfterDelay = null;
       if (backoff > 0) await this.sleep(backoff);
       attempt += 1;
 
       const started = new Date();
-      const release = this.limits.acquire(provider.id, estimated);
+      let limited;
+      try {
+        limited = await this.limits.reserve({
+          providerId: provider.id,
+          model: provider.model,
+          route: original.metadata.route,
+          limits: provider,
+          estimatedTokens: estimated,
+          reservationTtlMs: Math.max(
+            provider.request_timeout_ms,
+            this.options.reservationTtlMs ?? DEFAULT_OPTIONS.reservationTtlMs!,
+          ),
+          reservationId: `${original.metadata.request_id}:${provider.id}:${attempt}:${randomUUID()}`,
+        });
+      } catch (error) {
+        this.logger.warn("LLM Router: распределённый лимитер недоступен", {
+          request_id: original.metadata.request_id,
+          code: error instanceof Error ? error.name : "unknown_error",
+        });
+        lastError = new ProviderError(
+          "распределённый лимитер недоступен",
+          "rate_limited",
+          { retryable: false },
+        );
+        break;
+      }
+      if (!limited.allowed) {
+        lastError = new ProviderError(`лимит ${limited.reason}`, "rate_limited", {
+          retryable: false,
+        });
+        break;
+      }
+      const reservation = limited.reservation;
+      if (needsProbe && attempt === 1 && !(await this.store.claimProbe(provider.id))) {
+        await this.releaseLimit(reservation, original.metadata.request_id);
+        lastError = new ProviderError("circuit breaker открыт", "breaker_open", {
+          retryable: false,
+        });
+        break;
+      }
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), provider.request_timeout_ms);
       try {
+        providerAttempted = true;
         const response = await adapter.complete(provider, request, controller.signal);
         const latency = Date.now() - started.getTime();
 
         const contract = this.checkContract(request, response, latency, provider);
         if (contract) throw contract;
 
-        this.limits.settle(provider.id, response.usage.tokens_in + response.usage.tokens_out);
+        await this.settleLimit(
+          reservation,
+          response.usage.tokens_in + response.usage.tokens_out,
+          original.metadata.request_id,
+        );
         await this.store.recordSuccess(provider.id);
         await this.store.addSpend(provider.id, {
           tokens_in: response.usage.tokens_in,
@@ -452,20 +510,30 @@ export class LlmRouter {
           }
           break;
         }
+        if (error.reason === "rate_limited" && error.retryAfterMs !== null) {
+          if (error.retryAfterMs > (this.options.maxRetryAfterMs ?? DEFAULT_OPTIONS.maxRetryAfterMs!)) break;
+          retryAfterDelay = error.retryAfterMs
+            + Math.floor(Math.random() * Math.max(
+              0,
+              this.options.retryAfterJitterMs ?? DEFAULT_OPTIONS.retryAfterJitterMs!,
+            ));
+        }
         if (!error.options.retryable || attempt >= maxAttempts) break;
       } finally {
         clearTimeout(timer);
-        release();
+        await this.releaseLimit(reservation, original.metadata.request_id);
       }
     }
 
-    await this.store.recordFailure(
-      provider.id,
-      lastError.reason,
-      this.options.breakerThreshold,
-      this.options.breakerWindowMs,
-      this.options.breakerCooldownMs,
-    );
+    if (providerAttempted) {
+      await this.store.recordFailure(
+        provider.id,
+        lastError.reason,
+        this.options.breakerThreshold,
+        this.options.breakerWindowMs,
+        this.options.breakerCooldownMs,
+      );
+    }
     await this.log(provider, original, primaryId, {
       started: new Date(), attempts: attempt, switches: switchesSoFar, error: lastError, streamed: false,
     });
@@ -535,7 +603,7 @@ export class LlmRouter {
       );
       const estimated = estimateTokens(prepared);
 
-      const gate = await this.gate(provider, estimated);
+      const gate = await this.gate(provider);
       if (!gate.ok) {
         lastError = new ProviderError(gate.detail, gate.reason, { retryable: false });
         switches += 1;
@@ -562,7 +630,61 @@ export class LlmRouter {
 
       const adapter = this.adapterFor(provider);
       const started = new Date();
-      const release = this.limits.acquire(provider.id, estimated);
+      const breakers = await this.store.breakers();
+      const breakerState = breakers.get(provider.id)?.state;
+      if (breakerState === "half_open") {
+        lastError = new ProviderError(
+          "circuit breaker уже выполняет пробный запрос",
+          "breaker_open",
+          { retryable: false },
+        );
+        switches += 1;
+        continue;
+      }
+      const needsProbe = breakerState === "open";
+      let limited;
+      try {
+        limited = await this.limits.reserve({
+          providerId: provider.id,
+          model: provider.model,
+          route: attemptRequest.metadata.route,
+          limits: provider,
+          estimatedTokens: estimated,
+          reservationTtlMs: Math.max(
+            provider.request_timeout_ms,
+            this.options.reservationTtlMs ?? DEFAULT_OPTIONS.reservationTtlMs!,
+          ),
+          reservationId: `${request.metadata.request_id}:${provider.id}:stream:${randomUUID()}`,
+        });
+      } catch (error) {
+        this.logger.warn("LLM Router: распределённый лимитер недоступен", {
+          request_id: request.metadata.request_id,
+          code: error instanceof Error ? error.name : "unknown_error",
+        });
+        lastError = new ProviderError(
+          "распределённый лимитер недоступен",
+          "rate_limited",
+          { retryable: false },
+        );
+        switches += 1;
+        continue;
+      }
+      if (!limited.allowed) {
+        lastError = new ProviderError(`лимит ${limited.reason}`, "rate_limited", {
+          retryable: false,
+        });
+        switches += 1;
+        continue;
+      }
+      const reservation = limited.reservation;
+      if (needsProbe && !(await this.store.claimProbe(provider.id))) {
+        await this.releaseLimit(reservation, request.metadata.request_id);
+        lastError = new ProviderError("circuit breaker открыт", "breaker_open", {
+          retryable: false,
+        });
+        switches += 1;
+        continue;
+      }
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), provider.request_timeout_ms);
       let emitted = false;
@@ -571,9 +693,10 @@ export class LlmRouter {
         for await (const chunk of adapter.stream(provider, prepared, controller.signal)) {
           if (chunk.type === "text" || chunk.type === "tool_call") emitted = true;
           if (chunk.type === "done") {
-            this.limits.settle(
-              provider.id,
+            await this.settleLimit(
+              reservation,
               chunk.response.usage.tokens_in + chunk.response.usage.tokens_out,
+              request.metadata.request_id,
             );
             await this.store.recordSuccess(provider.id);
             await this.store.addSpend(provider.id, {
@@ -626,7 +749,7 @@ export class LlmRouter {
         });
       } finally {
         clearTimeout(timer);
-        release();
+        await this.releaseLimit(reservation, request.metadata.request_id);
       }
     }
 
@@ -646,6 +769,39 @@ export class LlmRouter {
       ...request,
       metadata: { ...request.metadata, request_id: randomUUID() },
     };
+  }
+
+  private async settleLimit(
+    reservation: { settle(actualTokens: number): Promise<void> },
+    actualTokens: number,
+    requestId: string,
+  ): Promise<void> {
+    try {
+      await reservation.settle(actualTokens);
+    } catch (error) {
+      // The provider has already completed. Losing operational accounting must
+      // not discard its valid answer or cause a duplicate provider request.
+      this.logger.warn("LLM Router: не удалось уточнить распределённый лимит", {
+        request_id: requestId,
+        code: error instanceof Error ? error.name : "unknown_error",
+      });
+    }
+  }
+
+  private async releaseLimit(
+    reservation: { release(): Promise<void> },
+    requestId: string,
+  ): Promise<void> {
+    try {
+      await reservation.release();
+    } catch (error) {
+      // Reservation TTL is the crash-safe fallback; never override the real
+      // provider outcome with a cleanup error.
+      this.logger.warn("LLM Router: не удалось освободить распределённый лимит", {
+        request_id: requestId,
+        code: error instanceof Error ? error.name : "unknown_error",
+      });
+    }
   }
 
   /** Телеметрия без единой строки переписки — только счётчики и коды. */

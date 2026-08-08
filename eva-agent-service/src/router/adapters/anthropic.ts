@@ -159,7 +159,7 @@ async function post(
     } catch {
       detail = "";
     }
-    throw classifyHttp(response.status, detail, raw);
+    throw classifyHttp(response.status, detail, raw, response.headers.get("retry-after"));
   }
   return response;
 }

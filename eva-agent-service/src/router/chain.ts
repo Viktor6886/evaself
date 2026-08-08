@@ -77,6 +77,14 @@ export function buildChain(input: ChainInput): BuiltChain {
       // Время выдержки вышло: провайдер остаётся в цепочке, роутер
       // попробует занять пробный запрос через claimProbe().
     }
+    if (breaker?.state === "half_open") {
+      rejected.push({
+        provider,
+        reason: "breaker_open",
+        detail: "circuit breaker уже выполняет единственный пробный запрос",
+      });
+      return;
+    }
 
     usable.push({ provider, position });
   });

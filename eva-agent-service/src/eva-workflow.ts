@@ -136,7 +136,7 @@ export class EvaWorkflow {
     const primary = normalized[normalized.length - 1]!;
     const earlier = normalized.slice(0, -1);
     return await this.telegram.withDeliveryContext(
-      `telegram-update:${primary.updateId}`,
+      `${primary.command ? "telegram-command" : "telegram-update"}:${primary.updateId}`,
       async () => await this.process(primary, earlier),
     );
   }

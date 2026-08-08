@@ -87,7 +87,7 @@
 | ⏸ | **Конец порции 3 (P0) — остановка, сводка, запрос разрешения** | | | | | |
 | 05 | [Безопасный SessionManager, барьер отмены, восстановление хода и журнал побочных эффектов](prompts/step-05-session-manager-recovery.md) | P1 | шаги 3–4 | на ревью | [#132](https://github.com/Viktor6886/evaself/pull/132) | 2026-08-05 |
 | ⏸ | **Конец порции 4 (P1) — остановка, сводка, запрос разрешения** | | | | | |
-| 06 | [Параллельная доставка Telegram и распределённые лимиты LLM Router](prompts/step-06-outbox-distributed-limits.md) | P1 | шаг 4 | не начат | — | — |
+| 06 | [Параллельная доставка Telegram и распределённые лимиты LLM Router](prompts/step-06-outbox-distributed-limits.md) | P1 | шаг 4 | на ревью | — | 2026-08-08 |
 | ⏸ | **Конец порции 5 (P1) — остановка, сводка, запрос разрешения** | | | | | |
 | 07 | [Единый слой фоновых задач: QueueRegistry, транзакционный job outbox и общие правила](prompts/step-07-bullmq-foundation.md) | P1 | шаги 3–5 | не начат | — | — |
 | ⏸ | **Конец порции 6 (P1) — остановка, сводка, запрос разрешения** | | | | | |
@@ -227,6 +227,94 @@
 ```
 
 <!-- Записи ниже -->
+
+### Шаг 06 — Параллельная доставка Telegram и распределённые лимиты LLM Router
+- Агент: Codex
+- Ветка: `step/06-outbox-distributed-limits`
+- PR: ожидает открытия
+- Дата: 2026-08-08
+- Статус: **на ревью**
+- Что найдено до изменения (раздел «СНАЧАЛА ПРОВЕРЬ»):
+  - `telegram_outbox` уже был единственной durable-очередью, но воркер
+    выбирал и отправлял записи строго по одной, без класса приоритета;
+  - RPM, TPM и inflight в `src/router/limits.ts` считались в памяти
+    одного процесса, поэтому сумма реплик могла превысить лимит;
+  - общий circuit breaker уже существовал в PostgreSQL
+    (`llm_breaker_state`): атомарный `claimProbe`, автоматическое
+    восстановление и ручной `pinned_out`. Он сохранён единственным
+    каноническим breaker вместо второго состояния в Valkey;
+  - ordered chains уже хранились в `llm_route_providers`, а миграция
+    028 распространяла управляемые цепочки на `fast`, `classifier` и
+    `research`. Этот реестр переиспользован для primary/fallback;
+  - Telegram и provider adapters не сохраняли `retry_after`, а
+    PostgreSQL outbox считал 429 обычной неудачной попыткой.
+- Итог: outbox за feature flag получает ограниченный параллельный
+  claim с пятью приоритетами и общими global/per-chat Telegram buckets.
+  Router за отдельным feature flag атомарно резервирует в Valkey
+  inflight/RPM/TPM по provider, provider/model и route, учитывает TTL
+  погибшего процесса и `Retry-After`, а длинное ожидание переводит на
+  следующий совместимый provider. Существующие PostgreSQL breaker и
+  ordered route chains не дублируются.
+- Изменённые файлы и к какому пункту шага относятся:
+  - `postgres/migrations/034_parallel_outbox.sql`, `035_*` и `down/` —
+    пункты 1–2: additive priority и concurrent claim index;
+  - `src/delivery/outbox.ts`, `src/delivery/telegram-limits.ts` —
+    пункты 1–3: bounded batch, `SKIP LOCKED`, порядок приоритетов,
+    shared token buckets, 429 без расхода попытки;
+  - `src/telegram.ts`, `src/crisis.ts`, `src/eva-workflow.ts` — пункты
+    2–3: классы доставки и оба формата `Retry-After`; повторный LLM-ход
+    при ошибке Telegram не запускается;
+  - `src/router/limits.ts`, `src/router/router.ts`, `src/router/chain.ts`
+    — пункты 4–7: атомарная reservation, TTL, единственная half-open
+    probe, failover и privacy-safe причина;
+  - `src/router/adapters/{shared,openai,anthropic}.ts`,
+    `src/router/types.ts` — пункт 7: перенос provider `Retry-After`;
+  - `src/config.ts`, `src/index.ts`, `src/router/index.ts`,
+    `.env.example`, `compose.yaml` — независимые выключенные по
+    умолчанию feature flags и параметры rollout/rollback;
+  - `.github/workflows/ci.yml`, `scripts/ci/test-outbox-claim.sql`,
+    `scripts/ci/test-distributed-limits.mjs` — реальные PostgreSQL и
+    Valkey проверки, а не только mock;
+  - `test/step06-distributed-delivery.test.ts`, `test/delivery.test.ts`,
+    `test/llm-router.test.ts`, `test/config-warnings.test.ts` — раздел
+    «ТЕСТЫ» задания;
+  - `docs/PARALLEL_OUTBOX_DISTRIBUTED_LIMITS.md` — аудит существующих
+    компонентов, rollout, точный rollback и границы конфигурации.
+- Проверки до открытия PR:
+  - `npm run build`, `npm run lint`: код 0;
+  - `npm test`: **480 passed, 0 failed**. Один предыдущий полный
+    прогон поймал timing-failure старого SessionManager-теста; он
+    отдельно прошёл 3/3 раз, после чего полный набор прошёл 480/480;
+  - `assert-tenant-scope.py`: 37 пользовательских таблиц, 195
+    запросов, каждый имеет границу арендатора;
+  - `assert-env-plumbing.py`: 83 переменных читает конфигурация, 80
+    доходят до compose, три имеют явный default в коде;
+  - `assert-down-migrations.py`: 21 обратимая миграция начиная с 014;
+  - workflow YAML разбирается, `git diff --check` и `node --check`
+    проходят;
+  - `scripts/validate.sh` принял TypeScript и миграции 034/035, но
+    локальный итог не зелёный: в среде нет Docker/Caddy (пять
+    инфраструктурных проверок). Реальные Compose/PostgreSQL/Valkey и
+    полный required CI должны пройти в pull request;
+  - dependency audit подтвердил отсутствие новых high/critical для
+    обоих npm-проектов; локальная media-проверка не стартовала, потому
+    что в среде нет модуля `pip_audit`, и остаётся required CI gate.
+- Безопасность и приватность: Valkey хранит только timestamps,
+  reservation ids, счётчики токенов и cooldown keys. Тексты сообщений,
+  prompts, ответы, Telegram token, API keys и профиль пользователя в
+  новые ключи и телеметрию не попадают. При недоступном лимитере
+  доставка закрывается безопасно и остаётся durable.
+- Откат: `EVA_PARALLEL_OUTBOX=false` и
+  `EVA_DISTRIBUTED_LIMITS=false`, затем перезапуск `eva-agent-service`
+  и `llm-router`. Down 035 снимает индекс; down 034 сохраняет additive
+  колонку priority, чтобы откат не уничтожал метаданные.
+- Ограничения: реальный fallback требует минимум двух включённых
+  совместимых provider profiles с настоящими credentials в уже
+  существующей цепочке. Миграция намеренно не создаёт фиктивного
+  провайдера. Оба новых пути выключены до операторского rollout.
+- Следующему агенту: не заводить второй breaker или provider registry;
+  PostgreSQL остаётся каноническим для обоих. Перед merge нужны все
+  required checks и независимые три «да» по протоколу.
 
 ### Шаг 05 — Безопасный SessionManager, барьер отмены, восстановление хода и журнал побочных эффектов
 - Агент: Claude Code (Claude Code on the web)

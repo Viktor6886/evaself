@@ -53,6 +53,13 @@ export interface Config {
   telegramOutboxPollMs: number;
   telegramOutboxLeaseSeconds: number;
   telegramOutboxMaxAttempts: number;
+  parallelOutboxEnabled: boolean;
+  outboxConcurrency: number;
+  outboxBatchSize: number;
+  telegramGlobalRate: number;
+  telegramGlobalBurst: number;
+  telegramChatRate: number;
+  telegramChatBurst: number;
   ownerTelegramId: number | null;
   telegramApiBaseUrl: string;
   mediaServiceUrl: string;
@@ -241,6 +248,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     telegramOutboxPollMs: int("EVA_TELEGRAM_OUTBOX_POLL_MS", 500),
     telegramOutboxLeaseSeconds: int("EVA_TELEGRAM_OUTBOX_LEASE_SECONDS", 120),
     telegramOutboxMaxAttempts: int("EVA_TELEGRAM_OUTBOX_MAX_ATTEMPTS", 8),
+    parallelOutboxEnabled: bool("EVA_PARALLEL_OUTBOX", false),
+    outboxConcurrency: clampedInt("EVA_OUTBOX_CONCURRENCY", 8, 1, 64),
+    outboxBatchSize: clampedInt("EVA_OUTBOX_BATCH_SIZE", 16, 1, 100),
+    telegramGlobalRate: clampedInt("EVA_TELEGRAM_GLOBAL_RATE", 25, 1, 30),
+    telegramGlobalBurst: clampedInt("EVA_TELEGRAM_GLOBAL_BURST", 25, 1, 30),
+    telegramChatRate: clampedInt("EVA_TELEGRAM_CHAT_RATE", 1, 1, 20),
+    telegramChatBurst: clampedInt("EVA_TELEGRAM_CHAT_BURST", 1, 1, 20),
     ownerTelegramId: nullableInt("OWNER_TELEGRAM_ID"),
     telegramApiBaseUrl: str("EVA_TELEGRAM_API_BASE_URL", "https://api.telegram.org"),
     mediaServiceUrl: str("EVA_MEDIA_SERVICE_URL", "http://media-service:8090"),
@@ -313,6 +327,12 @@ export function configWarnings(config: Config): string[] {
       "EVA_TURN_AGGREGATION включён, а EVA_PARALLEL_INBOX выключен: "
         + "объединение быстрых сообщений работает только в параллельном "
         + "диспетчере и сейчас не действует",
+    );
+  }
+  if (config.parallelOutboxEnabled && !config.outboxEnabled) {
+    warnings.push(
+      "EVA_PARALLEL_OUTBOX включён, а EVA_OUTBOX_ENABLED выключен: "
+        + "параллельная доставка работает только через durable outbox",
     );
   }
   // Восстановление меняет состояние только через жизненный цикл, а он

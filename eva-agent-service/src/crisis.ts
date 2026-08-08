@@ -266,7 +266,7 @@ export class CrisisMonitor {
     ].join("\n");
 
     try {
-      await this.telegram.sendMessage(this.ownerTelegramId, text);
+      await this.telegram.sendMessage(this.ownerTelegramId, text, {}, "crisis");
     } catch (error) {
       this.logger.error("Не удалось уведомить владельца о сигнале риска", {
         severity: signal.severity,
