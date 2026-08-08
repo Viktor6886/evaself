@@ -32,7 +32,7 @@ import type {
   RoutingSettings,
   SwitchReason,
 } from "./types.js";
-import { ProviderError } from "./types.js";
+import { breakerKey, ProviderError } from "./types.js";
 
 export interface RouterOptions {
   /** Сколько подряд ошибок открывает breaker. */
@@ -398,7 +398,7 @@ export class LlmRouter {
     // после лимитера: иначе отказ Valkey оставил бы breaker в half_open,
     // хотя до провайдера не ушло ни одного запроса.
     const breakers = await this.store.breakers();
-    const breakerState = breakers.get(provider.id)?.state;
+    const breakerState = breakers.get(breakerKey(provider.id, provider.model))?.state;
     if (breakerState === "half_open") {
       return {
         kind: "failure",
@@ -459,7 +459,7 @@ export class LlmRouter {
         break;
       }
       const reservation = limited.reservation;
-      if (needsProbe && attempt === 1 && !(await this.store.claimProbe(provider.id))) {
+      if (needsProbe && attempt === 1 && !(await this.store.claimProbe(provider.id, provider.model))) {
         await this.releaseLimit(reservation, original.metadata.request_id);
         lastError = new ProviderError("circuit breaker открыт", "breaker_open", {
           retryable: false,
@@ -481,7 +481,7 @@ export class LlmRouter {
           response.usage.tokens_in + response.usage.tokens_out,
           original.metadata.request_id,
         );
-        await this.store.recordSuccess(provider.id);
+        await this.store.recordSuccess(provider.id, provider.model);
         await this.store.addSpend(provider.id, {
           tokens_in: response.usage.tokens_in,
           tokens_out: response.usage.tokens_out,
@@ -528,6 +528,7 @@ export class LlmRouter {
     if (providerAttempted) {
       await this.store.recordFailure(
         provider.id,
+        provider.model,
         lastError.reason,
         this.options.breakerThreshold,
         this.options.breakerWindowMs,
@@ -631,7 +632,7 @@ export class LlmRouter {
       const adapter = this.adapterFor(provider);
       const started = new Date();
       const breakers = await this.store.breakers();
-      const breakerState = breakers.get(provider.id)?.state;
+      const breakerState = breakers.get(breakerKey(provider.id, provider.model))?.state;
       if (breakerState === "half_open") {
         lastError = new ProviderError(
           "circuit breaker уже выполняет пробный запрос",
@@ -677,7 +678,7 @@ export class LlmRouter {
         continue;
       }
       const reservation = limited.reservation;
-      if (needsProbe && !(await this.store.claimProbe(provider.id))) {
+      if (needsProbe && !(await this.store.claimProbe(provider.id, provider.model))) {
         await this.releaseLimit(reservation, request.metadata.request_id);
         lastError = new ProviderError("circuit breaker открыт", "breaker_open", {
           retryable: false,
@@ -698,7 +699,7 @@ export class LlmRouter {
               chunk.response.usage.tokens_in + chunk.response.usage.tokens_out,
               request.metadata.request_id,
             );
-            await this.store.recordSuccess(provider.id);
+            await this.store.recordSuccess(provider.id, provider.model);
             await this.store.addSpend(provider.id, {
               tokens_in: chunk.response.usage.tokens_in,
               tokens_out: chunk.response.usage.tokens_out,
@@ -716,6 +717,7 @@ export class LlmRouter {
         lastError = error;
         await this.store.recordFailure(
           provider.id,
+          provider.model,
           error.reason,
           this.options.breakerThreshold,
           this.options.breakerWindowMs,

@@ -9,6 +9,11 @@
 
 export type RouteCode = string;
 
+/** Shared breaker identity: one state per provider/model pair. */
+export function breakerKey(providerId: string, model: string): string {
+  return `${providerId}\u0000${model}`;
+}
+
 export interface LlmToolCall {
   id: string;
   name: string;

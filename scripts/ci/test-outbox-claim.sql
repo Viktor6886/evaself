@@ -17,6 +17,44 @@ ON CONFLICT (idempotency_key) DO UPDATE SET
     status = 'pending', attempts = 0, available_at = now(),
     locked_at = NULL, locked_by = NULL, priority = EXCLUDED.priority;
 
+-- Execute the production locking shape, not just its predicate. The UPDATE
+-- proves rows returned by FOR UPDATE SKIP LOCKED can be atomically leased as
+-- a bounded batch. Roll back to the savepoint so ordering checks start clean.
+SAVEPOINT actual_claim;
+CREATE TEMP TABLE actual_claimed ON COMMIT DROP AS
+WITH candidates AS (
+    SELECT t.id
+      FROM telegram_outbox t
+     WHERE t.attempts < 5
+       AND t.status IN ('pending', 'retry')
+       AND t.available_at <= now()
+       AND NOT EXISTS (
+         SELECT 1 FROM telegram_outbox earlier
+          WHERE earlier.chat_id = t.chat_id
+            AND earlier.status IN ('pending', 'sending', 'retry')
+            AND (earlier.priority, earlier.id) < (t.priority, t.id)
+       )
+     ORDER BY t.priority, t.available_at, t.id
+     FOR UPDATE SKIP LOCKED
+     LIMIT 2
+)
+UPDATE telegram_outbox t
+   SET status = 'sending', locked_by = 'step06-ci', locked_at = now()
+  FROM candidates c
+ WHERE t.id = c.id
+RETURNING t.idempotency_key;
+
+DO $$
+DECLARE picked text[];
+BEGIN
+    SELECT array_agg(idempotency_key ORDER BY idempotency_key)
+      INTO picked FROM actual_claimed;
+    IF picked <> ARRAY['step06:100:k', 'step06:200:1'] THEN
+        RAISE EXCEPTION 'actual SKIP LOCKED claim returned %', picked;
+    END IF;
+END $$;
+ROLLBACK TO SAVEPOINT actual_claim;
+
 CREATE TEMP VIEW claimable AS
 SELECT t.id, t.chat_id, t.priority, t.idempotency_key
   FROM telegram_outbox t
@@ -79,6 +117,48 @@ BEGIN
         WHERE c.relname = 'telegram_outbox_priority_idx' AND i.indisvalid
     ) THEN
         RAISE EXCEPTION 'telegram_outbox_priority_idx is absent or invalid';
+    END IF;
+END $$;
+
+-- The shared breaker key is provider/model. Two replica-like claims against
+-- one ready row yield exactly one half-open probe; another model remains
+-- independent for the same provider profile.
+DO $$
+DECLARE
+    provider uuid;
+    current_model text;
+    first_claim integer;
+    second_claim integer;
+BEGIN
+    SELECT id, model INTO provider, current_model FROM llm_providers LIMIT 1;
+    IF provider IS NULL THEN
+        RAISE EXCEPTION 'breaker probe needs a provider fixture';
+    END IF;
+
+    INSERT INTO llm_breaker_state
+        (provider_id, model, state, consecutive_errors, probe_after)
+    VALUES (provider, current_model, 'open', 3, now() - interval '1 second')
+    ON CONFLICT (provider_id, model) DO UPDATE SET
+        state = 'open', pinned_out = false, probe_after = EXCLUDED.probe_after;
+
+    UPDATE llm_breaker_state SET state = 'half_open'
+     WHERE provider_id = provider AND model = current_model
+       AND state = 'open' AND probe_after <= now();
+    GET DIAGNOSTICS first_claim = ROW_COUNT;
+
+    UPDATE llm_breaker_state SET state = 'half_open'
+     WHERE provider_id = provider AND model = current_model
+       AND state = 'open' AND probe_after <= now();
+    GET DIAGNOSTICS second_claim = ROW_COUNT;
+
+    IF first_claim <> 1 OR second_claim <> 0 THEN
+        RAISE EXCEPTION 'half-open claims were %, %', first_claim, second_claim;
+    END IF;
+
+    INSERT INTO llm_breaker_state (provider_id, model, state)
+    VALUES (provider, current_model || ':independent', 'closed');
+    IF (SELECT count(*) FROM llm_breaker_state WHERE provider_id = provider) < 2 THEN
+        RAISE EXCEPTION 'breaker models are not independent';
     END IF;
 END $$;
 

@@ -239,6 +239,42 @@ test("сообщения разных чатов доставляются, по�
   assert.ok(probe.rows.every((item) => item.status === "sent"));
 });
 
+test("ошибка одной delivery не снимает concurrency guard, пока работают соседние", async () => {
+  const probe: Probe = {
+    now: 1000,
+    sent: [],
+    rows: [
+      row({ id: "1", chat_id: "100" }),
+      row({ id: "2", chat_id: "200" }),
+      row({ id: "3", chat_id: "300" }),
+    ],
+  };
+  const outbox = outboxHarness(probe, { parallel: { concurrency: 2, limits: null } });
+  let active = 0;
+  let maximum = 0;
+  let started = 0;
+  const internal = outbox as unknown as {
+    deliverGuarded: (record: OutboxRecord) => Promise<void>;
+  };
+  internal.deliverGuarded = async (record) => {
+    active += 1;
+    started += 1;
+    maximum = Math.max(maximum, active);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, record.id === "1" ? 5 : 25));
+      if (record.id === "1") throw new Error("database delivery failure");
+    } finally {
+      active -= 1;
+      record.status = "sent";
+    }
+  };
+
+  await outbox.tick();
+  assert.equal(started, 3, "ошибка остановила разбор оставшейся очереди");
+  assert.ok(maximum <= 2, `concurrency превышена: ${maximum}`);
+  assert.equal(active, 0, "tick завершился раньше соседней delivery");
+});
+
 test("кризисное сообщение обгоняет очередь, служебное пропускает всех", async () => {
   const probe: Probe = {
     now: 1000,

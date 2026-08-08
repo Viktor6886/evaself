@@ -261,7 +261,6 @@ test("a failure to confirm over Telegram does not undo the subscription", async 
     }) as never,
     {
       withDeliveryContext: <T,>(_key: string, work: () => Promise<T>) => work(),
-    withPriority: <T,>(_priority: string, work: () => Promise<T>) => work(),
       withPriority: <T,>(_priority: string, work: () => Promise<T>) => work(),
       sendMessage: () => Promise.reject(new Error("telegram is down")),
     } as never,

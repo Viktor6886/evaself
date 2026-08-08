@@ -106,6 +106,46 @@ test("two Router replicas share atomic concurrency and crash TTL", async () => {
   }
 });
 
+test("two Router replicas share RPM and settled TPM across every dimension", async () => {
+  const redis = new FakeRouterRedis();
+  const first = new ValkeyRouterLimits(redis);
+  const second = new ValkeyRouterLimits(redis);
+  const rpmInput = {
+    providerId: "provider-rpm",
+    model: "model-rpm",
+    route: "fast",
+    limits: { max_rpm: 1, max_tpm: null, max_concurrency: 10 },
+    estimatedTokens: 10,
+    reservationTtlMs: 5_000,
+  };
+  const rpmHeld = await first.reserve({ ...rpmInput, reservationId: "rpm-1" });
+  assert.equal(rpmHeld.allowed, true);
+  if (rpmHeld.allowed) await rpmHeld.reservation.release();
+  assert.deepEqual(
+    await second.reserve({ ...rpmInput, reservationId: "rpm-2" }),
+    { allowed: false, reason: "rpm" },
+  );
+
+  const tpmInput = {
+    providerId: "provider-tpm",
+    model: "model-tpm",
+    route: "deep",
+    limits: { max_rpm: null, max_tpm: 150, max_concurrency: 10 },
+    estimatedTokens: 100,
+    reservationTtlMs: 5_000,
+  };
+  const tpmHeld = await first.reserve({ ...tpmInput, reservationId: "tpm-1" });
+  assert.equal(tpmHeld.allowed, true);
+  if (tpmHeld.allowed) {
+    await tpmHeld.reservation.settle(120);
+    await tpmHeld.reservation.release();
+  }
+  assert.deepEqual(
+    await second.reserve({ ...tpmInput, reservationId: "tpm-2", estimatedTokens: 40 }),
+    { allowed: false, reason: "tpm" },
+  );
+});
+
 class FakeTelegramRedis {
   buckets = new Map();
   cooldowns = new Map();

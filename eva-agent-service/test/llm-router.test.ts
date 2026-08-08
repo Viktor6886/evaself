@@ -21,11 +21,11 @@ import {
 import { LlmRouter, NoProviderAvailable, stripFence } from "../dist/router/router.js";
 import { createRouterServer, fromOpenAi } from "../dist/router/server.js";
 import { RouterStore } from "../dist/router/store.js";
-import { ProviderError } from "../dist/router/types.js";
+import { breakerKey, ProviderError } from "../dist/router/types.js";
 
 const silentLogger = { debug() {}, info() {}, warn() {}, error() {} };
 
-test("breaker передаёт PostgreSQL непрерывно пронумерованные параметры", async () => {
+test("breaker передаёт PostgreSQL provider/model и непрерывные параметры", async () => {
   const calls = [];
   const pool = {
     async query(text, values) {
@@ -36,13 +36,34 @@ test("breaker передаёт PostgreSQL непрерывно пронумер�
   const key = Buffer.alloc(32, 1).toString("base64");
   const store = new RouterStore(pool, key);
 
-  await store.recordFailure("provider-1", "connection_failed", 3, 60_000, 120_000);
+  await store.recordFailure("provider-1", "model-a", "connection_failed", 3, 60_000, 120_000);
 
   assert.equal(calls.length, 2);
-  assert.doesNotMatch(calls[0].text, /\$4/);
-  assert.match(calls[0].text, /\$3/);
-  assert.deepEqual(calls[0].values, ["provider-1", "connection_failed", 60_000]);
-  assert.deepEqual(calls[1].values, ["provider-1", 120_000, 3]);
+  assert.doesNotMatch(calls[0].text, /\$5/);
+  assert.match(calls[0].text, /\$4/);
+  assert.deepEqual(calls[0].values, ["provider-1", "model-a", "connection_failed", 60_000]);
+  assert.deepEqual(calls[1].values, ["provider-1", "model-a", 120_000, 3]);
+});
+
+test("две реплики занимают только один общий half-open probe", async () => {
+  let state = "open";
+  const pool = {
+    async query(text) {
+      if (!text.includes("SET state = 'half_open'")) return { rows: [], rowCount: 0 };
+      if (state !== "open") return { rows: [], rowCount: 0 };
+      state = "half_open";
+      return { rows: [], rowCount: 1 };
+    },
+  };
+  const key = Buffer.alloc(32, 2).toString("base64");
+  const replicaA = new RouterStore(pool, key);
+  const replicaB = new RouterStore(pool, key);
+
+  const claims = await Promise.all([
+    replicaA.claimProbe("provider-1", "model-a"),
+    replicaB.claimProbe("provider-1", "model-a"),
+  ]);
+  assert.deepEqual(claims.sort(), [false, true]);
 });
 
 // ---------------------------------------------------------------------
@@ -140,9 +161,10 @@ class FakeStore {
     });
     return Promise.resolve();
   }
-  recordFailure(id, code, threshold) {
-    const row = this.breakerRows.get(id)
-      ?? { provider_id: id, state: "closed", consecutive_errors: 0, pinned_out: false,
+  recordFailure(id, model, code, threshold) {
+    const key = breakerKey(id, model);
+    const row = this.breakerRows.get(key)
+      ?? { provider_id: id, model, state: "closed", consecutive_errors: 0, pinned_out: false,
            first_error_at: null, opened_at: null, probe_after: null,
            last_error_code: null, last_success_at: null };
     row.consecutive_errors += 1;
@@ -152,19 +174,19 @@ class FakeStore {
       row.opened_at = new Date();
       row.probe_after = new Date(Date.now() + 60_000);
     }
-    this.breakerRows.set(id, row);
+    this.breakerRows.set(key, row);
     return Promise.resolve();
   }
-  recordSuccess(id) {
-    this.breakerRows.set(id, {
-      provider_id: id, state: "closed", consecutive_errors: 0, pinned_out: false,
+  recordSuccess(id, model) {
+    this.breakerRows.set(breakerKey(id, model), {
+      provider_id: id, model, state: "closed", consecutive_errors: 0, pinned_out: false,
       first_error_at: null, opened_at: null, probe_after: null,
       last_error_code: null, last_success_at: new Date(),
     });
     return Promise.resolve();
   }
-  claimProbe(id) {
-    const row = this.breakerRows.get(id);
+  claimProbe(id, model) {
+    const row = this.breakerRows.get(breakerKey(id, model));
     if (!row || row.state !== "open" || row.pinned_out) return Promise.resolve(false);
     if (row.probe_after && row.probe_after > new Date()) return Promise.resolve(false);
     row.state = "half_open";
@@ -266,7 +288,7 @@ test("открытый breaker исключает провайдера, пока
   const closedOut = buildChain({
     route: ROUTE, request: request(), providerIds: ["a"],
     providers: new Map([["a", p]]),
-    breakers: new Map([["a", { state: "open", probe_after: future, pinned_out: false }]]),
+    breakers: new Map([[breakerKey("a", "model-a"), { state: "open", probe_after: future, pinned_out: false }]]),
     now: new Date(),
   });
   assert.equal(closedOut.usable.length, 0);
@@ -276,7 +298,7 @@ test("открытый breaker исключает провайдера, пока
   const ready = buildChain({
     route: ROUTE, request: request(), providerIds: ["a"],
     providers: new Map([["a", p]]),
-    breakers: new Map([["a", { state: "open", probe_after: past, pinned_out: false }]]),
+    breakers: new Map([[breakerKey("a", "model-a"), { state: "open", probe_after: past, pinned_out: false }]]),
     now: new Date(),
   });
   assert.equal(ready.usable.length, 1, "после выдержки провайдер снова в цепочке");
@@ -304,6 +326,26 @@ test("выключенная ротация оставляет в цепочке
   assert.match(pinned.rejected[0].detail, /ротация/);
 });
 
+test("fast/chat/deep/classifier/research сохраняют ordered primary и fallback", () => {
+  const primary = provider({ id: "a", name: "primary" });
+  const fallback = provider({ id: "b", name: "fallback" });
+  for (const code of ["fast", "chat", "deep", "classifier", "research"]) {
+    const chain = buildChain({
+      route: { ...ROUTE, code },
+      request: request({ metadata: { route: code } }),
+      providerIds: ["a", "b"],
+      providers: new Map([["a", primary], ["b", fallback]]),
+      breakers: new Map(),
+      now: new Date(),
+    });
+    assert.deepEqual(
+      chain.usable.map((entry) => entry.provider.name),
+      ["primary", "fallback"],
+      `route ${code} потерял резервную цепочку`,
+    );
+  }
+});
+
 test("выключенная ротация не мешает основному быть отвергнутым по существу", () => {
   // Несовместимость важнее выключателя: подставлять модель без
   // инструментов в маршрут, который их требует, нельзя ни при каких
@@ -326,7 +368,7 @@ test("снятый администратором провайдер не воз
   const chain = buildChain({
     route: ROUTE, request: request(), providerIds: ["a"],
     providers: new Map([["a", p]]),
-    breakers: new Map([["a", { state: "closed", probe_after: null, pinned_out: true }]]),
+    breakers: new Map([[breakerKey("a", "model-a"), { state: "closed", probe_after: null, pinned_out: true }]]),
     now: new Date(),
   });
   assert.equal(chain.usable.length, 0);
@@ -491,6 +533,19 @@ test("HTTP 429 у основного уводит на резерв после �
   assert.equal(store.attempts.filter((a) => a.succeeded).length, 1, "успех записан ровно один раз");
 });
 
+test("breaker одной модели не блокирует другую модель того же provider profile", () => {
+  const p = provider({ id: "a", name: "primary", model: "model-b" });
+  const chain = buildChain({
+    route: ROUTE, request: request(), providerIds: ["a"],
+    providers: new Map([["a", p]]),
+    breakers: new Map([[breakerKey("a", "model-a"), {
+      state: "open", probe_after: new Date(Date.now() + 60_000), pinned_out: false,
+    }]]),
+    now: new Date(),
+  });
+  assert.equal(chain.usable.length, 1);
+});
+
 test("half-open breaker не пропускает второй пробный запрос", () => {
   const p = provider({ id: "a", name: "primary" });
   const chain = buildChain({
@@ -498,7 +553,7 @@ test("half-open breaker не пропускает второй пробный з
     request: request(),
     providerIds: ["a"],
     providers: new Map([["a", p]]),
-    breakers: new Map([["a", {
+    breakers: new Map([[breakerKey("a", "model-a"), {
       state: "half_open", probe_after: null, pinned_out: false,
     }]]),
     now: new Date(),
@@ -635,7 +690,7 @@ test("три подряд ошибки открывают breaker и исклю�
     backup: always(() => Promise.resolve(ok())),
   });
   for (let i = 0; i < 3; i += 1) await router.complete(request());
-  assert.equal(store.breakerRows.get("a").state, "open");
+  assert.equal(store.breakerRows.get(breakerKey("a", "model-a")).state, "open");
 
   const before = calls.filter((c) => c.provider === "primary").length;
   await router.complete(request());
@@ -660,10 +715,10 @@ test("после выдержки уходит ровно один пробны�
     backup: always(() => Promise.resolve(ok("резерв"))),
   });
   for (let i = 0; i < 3; i += 1) await router.complete(request());
-  assert.equal(store.breakerRows.get("a").state, "open");
+  assert.equal(store.breakerRows.get(breakerKey("a", "model-a")).state, "open");
 
   // Выдержка вышла, основной восстановился.
-  store.breakerRows.get("a").probe_after = new Date(Date.now() - 1_000);
+  store.breakerRows.get(breakerKey("a", "model-a")).probe_after = new Date(Date.now() - 1_000);
   primaryHealthy = true;
   const primaryCallsBefore = calls.filter((c) => c.provider === "primary").length;
   const result = await router.complete(request());
@@ -671,7 +726,7 @@ test("после выдержки уходит ровно один пробны�
   assert.equal(result.provider_name, "primary", "основной возвращается автоматически");
   assert.equal(store.probeClaims, 1, "пробный запрос занят ровно один раз");
   assert.equal(calls.filter((c) => c.provider === "primary").length, primaryCallsBefore + 1);
-  assert.equal(store.breakerRows.get("a").state, "closed");
+  assert.equal(store.breakerRows.get(breakerKey("a", "model-a")).state, "closed");
 });
 
 test("streaming: переключение до первого фрагмента незаметно", async () => {

@@ -39,6 +39,41 @@ try {
     await recovered.reservation.release();
   }
 
+  const rpmBase = {
+    providerId: "ci-provider-rpm",
+    model: "ci-model-rpm",
+    route: "fast",
+    limits: { max_rpm: 1, max_tpm: null, max_concurrency: 10 },
+    estimatedTokens: 10,
+    reservationTtlMs: 5_000,
+  };
+  const rpmHeld = await first.reserve({ ...rpmBase, reservationId: "rpm-held" });
+  assert.equal(rpmHeld.allowed, true);
+  if (rpmHeld.allowed) await rpmHeld.reservation.release();
+  assert.deepEqual(
+    await second.reserve({ ...rpmBase, reservationId: "rpm-blocked" }),
+    { allowed: false, reason: "rpm" },
+  );
+
+  const tpmBase = {
+    providerId: "ci-provider-tpm",
+    model: "ci-model-tpm",
+    route: "deep",
+    limits: { max_rpm: null, max_tpm: 150, max_concurrency: 10 },
+    estimatedTokens: 100,
+    reservationTtlMs: 5_000,
+  };
+  const tpmHeld = await first.reserve({ ...tpmBase, reservationId: "tpm-held" });
+  assert.equal(tpmHeld.allowed, true);
+  if (tpmHeld.allowed) {
+    await tpmHeld.reservation.settle(120);
+    await tpmHeld.reservation.release();
+  }
+  assert.deepEqual(
+    await second.reserve({ ...tpmBase, reservationId: "tpm-blocked", estimatedTokens: 40 }),
+    { allowed: false, reason: "tpm" },
+  );
+
   const telegramA = new TelegramDeliveryLimiter(redis, {
     globalPerSecond: 2, globalBurst: 2, chatPerSecond: 1, chatBurst: 1,
   });

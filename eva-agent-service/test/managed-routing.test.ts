@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { classifyDeterministically } from "../dist/router/classifier.js";
 import { appendRoutingMarker, extractRoutingMarker } from "../dist/router/routing-marker.js";
 import { LlmRouter, NoProviderAvailable } from "../dist/router/router.js";
-import { ProviderError } from "../dist/router/types.js";
+import { breakerKey, ProviderError } from "../dist/router/types.js";
 import { fromOpenAi } from "../dist/router/server.js";
 import { RouterStore } from "../dist/router/store.js";
 import { TaskEventService } from "../dist/tasks/task-event-service.js";
@@ -155,8 +155,8 @@ function singleHarness(failover: boolean, selectedBreakerOpen = false) {
     providers: async () => [p1, p2],
     routes: async () => new Map([["chat", route("chat", true)], ["single", route("single", false)]]),
     chains: async () => new Map([["chat", [p1.id]]]),
-    breakers: async () => selectedBreakerOpen ? new Map([[p2.id, {
-      provider_id: p2.id, state: "open", consecutive_errors: 3,
+    breakers: async () => selectedBreakerOpen ? new Map([[breakerKey(p2.id, p2.model), {
+      provider_id: p2.id, model: p2.model, state: "open", consecutive_errors: 3,
       first_error_at: new Date(), opened_at: new Date(), probe_after: new Date(Date.now() + 60_000),
       last_error_code: "timeout", last_success_at: null, pinned_out: false,
     }]]) : new Map(), spend: async () => ({ day: 0, month: 0 }),

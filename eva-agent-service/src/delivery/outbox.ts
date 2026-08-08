@@ -186,7 +186,18 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
             this.busy.delete(row.chat_id);
           }
         })();
-        const tracked = work.finally(() => inFlight.delete(tracked));
+        // A database/transport failure in one delivery must not tear down the
+        // whole tick while sibling promises are still running. Otherwise the
+        // outer `running` guard is released early and the next poll can add a
+        // fresh batch on top of the configured concurrency.
+        const tracked = work
+          .catch((error) => {
+            this.logger.error("Ошибка параллельной доставки Telegram", {
+              outboxId: row.id,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          })
+          .finally(() => inFlight.delete(tracked));
         inFlight.add(tracked);
       }
     }

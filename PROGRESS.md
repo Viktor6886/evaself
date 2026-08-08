@@ -257,7 +257,8 @@
   ordered route chains не дублируются.
 - Изменённые файлы и к какому пункту шага относятся:
   - `postgres/migrations/034_outbox_priority.sql` и одноимённая `down/` —
-    пункты 1–2: additive priority и concurrent claim index;
+    пункты 1–2 и 5: additive priority, concurrent claim index и составной
+    ключ breaker `(provider_id, model)`;
   - `src/delivery/outbox.ts`, `src/delivery/priority.ts`,
     `src/delivery/telegram-limits.ts`, `src/delivery/retry-after.ts` —
     пункты 1–3: bounded batch, `SKIP LOCKED`, порядок приоритетов,
@@ -279,7 +280,8 @@
     Valkey проверки, а не только mock;
   - `test/step06-distributed-delivery.test.ts`, `test/parallel-outbox.test.ts`,
     `test/delivery.test.ts`, `test/crisis.test.ts`, `test/payments.test.ts`,
-    `test/llm-router.test.ts`, `test/config-warnings.test.ts` — раздел
+    `test/llm-router.test.ts`, `test/managed-routing.test.ts`,
+    `test/config-warnings.test.ts` — раздел
     «ТЕСТЫ» задания;
   - `docs/PARALLEL_OUTBOX_DISTRIBUTED_LIMITS.md` — аудит существующих
     компонентов, rollout, точный rollback и границы конфигурации;
@@ -287,9 +289,9 @@
     эксплуатационные ограничения шага.
 - Проверки перед обновлением PR:
   - `npm run build`, `npm run lint`: код 0;
-  - `npm test`: **489 passed, 0 failed**. Один предыдущий полный
+  - `npm test`: **494 passed, 0 failed**. Один предыдущий полный
     прогон поймал timing-failure старого SessionManager-теста; он
-    отдельно прошёл 3/3 раз, после чего полный набор прошёл 489/489;
+    отдельно прошёл 3/3 раз, после чего полный набор прошёл 494/494;
   - `assert-tenant-scope.py`: 37 пользовательских таблиц, 197
     запросов, каждый имеет границу арендатора;
   - `assert-env-plumbing.py`: 83 переменных читает конфигурация, 80
@@ -320,6 +322,14 @@
 - Следующему агенту: не заводить второй breaker или provider registry;
   PostgreSQL остаётся каноническим для обоих. Перед merge нужны все
   required checks и независимые три «да» по протоколу.
+- Первая независимая проверка остановила merge и нашла ранний выход
+  parallel outbox при rejection, недостаточное доказательство RPM/TPM и
+  provider/model breaker, дубль поля в payment-test и снятую health-зависимость
+  Valkey. Исправлено: rejection поглощается внутри tracked promise до общего
+  settle; добавлены unit и real-Valkey RPM/TPM проверки, реальный PostgreSQL
+  `FOR UPDATE SKIP LOCKED`, составной breaker key и atomic probe-тест двух
+  реплик; дубль удалён, зависимость Valkey восстановлена. После исправлений
+  полный набор прошёл 494/494; требуется повторная независимая проверка.
 
 <!-- Сохранён исходный частичный отчёт ранее открытого PR #135. -->
 

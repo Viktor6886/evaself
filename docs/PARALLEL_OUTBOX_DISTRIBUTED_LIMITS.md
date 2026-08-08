@@ -15,10 +15,10 @@ default and can be rolled back independently.
   `fast`, `chat`, `deep`, `classifier`, and `research`. A chain can contain a
   primary and one or more fallbacks; no provider or credential is invented by the
   migration.
-- PostgreSQL `llm_breaker_state` remains the canonical shared circuit breaker. Its
-  existing atomic half-open probe, provider/model profile binding, automatic
-  recovery, and `pinned_out` manual disable are reused instead of duplicated in
-  Valkey.
+- PostgreSQL `llm_breaker_state` remains the canonical shared circuit breaker.
+  Migration 034 makes its key explicitly `(provider_id, model)`; the existing
+  atomic half-open probe, automatic recovery, and `pinned_out` manual disable are
+  reused instead of duplicated in Valkey.
 
 ## Telegram delivery
 
@@ -75,8 +75,11 @@ outbox worker and process-local Router limits. Durable outbox rows and canonical
 breaker/route state remain compatible.
 
 Schema rollback is optional. Down migration 034 removes the concurrent claim
-indexes, priority constraint, and schema-version marker, but intentionally retains
-the additive `priority` column so rollback cannot destroy delivery metadata.
+indexes and priority constraint, restores the provider-only breaker key, and
+removes the schema-version marker. It intentionally retains the additive
+`priority` column so rollback cannot destroy delivery metadata. When reverting
+the breaker key, only the provider profile's current-model operational row is
+kept; stale-model breaker rows are ephemeral health state, not user data.
 
 ## Verification
 
