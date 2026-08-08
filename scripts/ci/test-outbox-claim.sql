@@ -21,7 +21,7 @@ ON CONFLICT (idempotency_key) DO UPDATE SET
 -- proves rows returned by FOR UPDATE SKIP LOCKED can be atomically leased as
 -- a bounded batch. Roll back to the savepoint so ordering checks start clean.
 SAVEPOINT actual_claim;
-CREATE TEMP TABLE actual_claimed ON COMMIT DROP AS
+CREATE TEMP TABLE actual_claimed (idempotency_key text) ON COMMIT DROP;
 WITH candidates AS (
     SELECT t.id
       FROM telegram_outbox t
@@ -37,12 +37,15 @@ WITH candidates AS (
      ORDER BY t.priority, t.available_at, t.id
      FOR UPDATE SKIP LOCKED
      LIMIT 2
+), leased AS (
+    UPDATE telegram_outbox t
+       SET status = 'sending', locked_by = 'step06-ci', locked_at = now()
+      FROM candidates c
+     WHERE t.id = c.id
+    RETURNING t.idempotency_key
 )
-UPDATE telegram_outbox t
-   SET status = 'sending', locked_by = 'step06-ci', locked_at = now()
-  FROM candidates c
- WHERE t.id = c.id
-RETURNING t.idempotency_key;
+INSERT INTO actual_claimed (idempotency_key)
+SELECT idempotency_key FROM leased;
 
 DO $$
 DECLARE picked text[];
