@@ -1,4 +1,11 @@
 * text=auto
+
+# Lock-файлы генерируются инструментом и читаются только им. GitHub
+# сворачивает их в diff, а ревьюер — человек или агент — не тратит на них
+# внимание и контекст. Один PR с обновлением зависимостей — это полторы
+# тысячи строк, из которых не следует ни одного вывода.
+package-lock.json linguist-generated=true
+*.lock linguist-generated=true
 *.sh text eol=lf
 Makefile text eol=lf
 Dockerfile text eol=lf

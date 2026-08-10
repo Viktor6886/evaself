@@ -1,9 +1,15 @@
 name: CI
 
+# Полный прогон стоит около получаса машинного времени и десятки минут
+# ожидания агента. Раньше он запускался на каждый пуш в любую ветку, то есть
+# на каждый checkpoint внутри batch — а решение принимается всё равно по
+# прогону на pull request. Здесь остались три случая, когда результат
+# действительно нужен: pull request, состояние `main` и ручной запуск.
+# Checkpoint-пуш в рабочую ветку batch CI не запускает.
 on:
-  push:
-    branches: ["**"]
   pull_request:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
@@ -14,6 +20,37 @@ permissions:
   contents: read
 
 jobs:
+  # ===================================================================
+  # Область изменений: что дорогим проверкам вообще есть смысл проверять
+  # ===================================================================
+  # Результат используется как условие ШАГОВ, а не job. Job, пропущенная
+  # через `if:` на своём уровне, репортится `skipped`, и обязательная
+  # проверка в защите ветки `main` такой результат не засчитывает — pull
+  # request перестал бы мержиться вовсе. Здесь все job запускаются всегда
+  # и отдают success, но пустая job стоит секунды вместо минут.
+  #
+  # Разбор границ и причины осторожности — в самом скрипте.
+  changes:
+    name: Область изменений
+    runs-on: ubuntu-24.04
+    outputs:
+      docs_only: ${{ steps.detect.outputs.docs_only }}
+      media: ${{ steps.detect.outputs.media }}
+      adminui: ${{ steps.detect.outputs.adminui }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # База пуста для push в main и для ручного запуска — скрипт в этом
+      # случае включает все проверки.
+      - id: detect
+        run: |
+          ./scripts/ci/changed-scope.sh \
+            "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}" \
+            "${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          cat "$GITHUB_OUTPUT"
+
   # ===================================================================
   # Shell, compose, Caddy, migrations, secret scan
   # ===================================================================
@@ -359,9 +396,13 @@ jobs:
   # карточки, мутации — уходить до подтверждения sudo, а пустая форма
   # пароля архива — снимать пароль. Ни одно из этих правил не держится
   # сервером: он честно ответит на любой корректный запрос.
+  #
+  # Тесты читают только admin-ui/, поэтому при нетронутом каталоге они
+  # пропускаются: одна установка Chromium стоит двадцати секунд.
   admin-ui:
     name: admin-ui (браузерные тесты)
     runs-on: ubuntu-24.04
+    needs: changes
     defaults:
       run:
         working-directory: admin-ui
@@ -369,18 +410,26 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
+        if: needs.changes.outputs.adminui == 'true'
         with:
           node-version: "22.22"
           cache: npm
           cache-dependency-path: admin-ui/package-lock.json
 
-      - run: npm ci --no-audit --no-fund
+      - if: needs.changes.outputs.adminui == 'true'
+        run: npm ci --no-audit --no-fund
 
       - name: Install Chromium
+        if: needs.changes.outputs.adminui == 'true'
         run: npx playwright install --with-deps chromium
 
       - name: Behaviour tests
+        if: needs.changes.outputs.adminui == 'true'
         run: npm test
+
+      - name: admin-ui не затронут
+        if: needs.changes.outputs.adminui != 'true'
+        run: echo "admin-ui/ не изменялся — проверять нечего"
 
   # ===================================================================
   # PostgreSQL schema: applied for real, three times, to prove idempotency
@@ -568,9 +617,13 @@ jobs:
   # ===================================================================
   # media-service
   # ===================================================================
+  # media-service — самодостаточный Python-сервис: его ruff и pytest не
+  # читают ничего за пределами media-service/. Когда каталог не тронут,
+  # проверять нечего, а установка ffmpeg занимает двадцать секунд.
   media-service:
     name: media-service (Python + ffmpeg)
     runs-on: ubuntu-24.04
+    needs: changes
     defaults:
       run:
         working-directory: media-service
@@ -578,21 +631,30 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
+        if: needs.changes.outputs.media == 'true'
         with:
           python-version: "3.12"
 
       - name: Install ffmpeg
+        if: needs.changes.outputs.media == 'true'
         run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
 
-      - run: pip install --quiet -r requirements.txt pytest pytest-asyncio ruff
+      - if: needs.changes.outputs.media == 'true'
+        run: pip install --quiet -r requirements.txt pytest pytest-asyncio ruff
 
       - name: Lint
+        if: needs.changes.outputs.media == 'true'
         run: ruff check .
 
       - name: Tests (real ffmpeg round-trips)
+        if: needs.changes.outputs.media == 'true'
         env:
           MEDIA_WORK_DIR: /tmp/media
         run: python -m pytest -q
+
+      - name: media-service не затронут
+        if: needs.changes.outputs.media != 'true'
+        run: echo "media-service/ не изменялся — проверять нечего"
 
   # ===================================================================
   # Images build (and, for the agent service, its tests run in-build)
@@ -600,17 +662,37 @@ jobs:
   images:
     name: Docker images build
     runs-on: ubuntu-24.04
+    needs: changes
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
+        if: needs.changes.outputs.docs_only != 'true'
 
+      # Три образа на Node собираются с нуля каждый прогон, и внутри них
+      # `npm ci` и выкачивание Letta — это и есть почти всё время job.
+      # Кэш слоёв GitHub Actions переиспользует их между прогонами: слой
+      # зависимостей меняется, только когда меняется package-lock.
+      #
+      # Остальные образы кэшировать нечего — это копирование статики
+      # поверх готового Caddy, они собираются за секунды.
+      #
+      # scope на образ обязателен: общий scope означает один ключ кэша на
+      # всех, и образы вытесняли бы кэш друг друга каждый прогон.
       - name: Build every locally built image
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           set -e
           . ./versions.env
-          docker build -t evaself/eva-agent-service:ci \
+          cached() {
+            local name="$1"; shift
+            docker buildx build --load \
+              --cache-from "type=gha,scope=$name" \
+              --cache-to "type=gha,mode=max,scope=$name" \
+              "$@"
+          }
+          cached agent -t evaself/eva-agent-service:ci \
             --build-arg NODE_BASE_VERSION="$NODE_BASE_VERSION" eva-agent-service
-          docker build -t evaself/eva-updater:ci --target updater \
+          cached updater -t evaself/eva-updater:ci --target updater \
             --build-arg NODE_BASE_VERSION="$NODE_BASE_VERSION" \
             --build-arg DOCKER_CLI_IMAGE="$DOCKER_CLI_IMAGE" \
             --build-arg DOCKER_CLI_VERSION="$DOCKER_CLI_VERSION" eva-agent-service
@@ -621,7 +703,7 @@ jobs:
           # Без этого сокет с правами 0660 отрезал бы своих же клиентов.
           docker run --rm evaself/eva-updater:ci sh -c \
             'getent group evaself-updater && id -nG node | tr " " "\n" | grep -qx evaself-updater'
-          docker build -t evaself/letta-app-server:ci \
+          cached letta -t evaself/letta-app-server:ci \
             --build-arg NODE_BASE_VERSION="$NODE_BASE_VERSION" \
             --build-arg LETTA_CODE_VERSION="$LETTA_CODE_VERSION" letta-app-server
           docker build -t evaself/media-service:ci \
@@ -636,22 +718,38 @@ jobs:
             --build-arg POSTGRES_IMAGE="$POSTGRES_IMAGE" --build-arg POSTGRES_VERSION="$POSTGRES_VERSION" backup-service
 
       - name: The App Server image really serves the App Server
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           docker run --rm evaself/letta-app-server:ci \
             sh -c 'letta server --help' | tee /tmp/help
           grep -q -- '--listen' /tmp/help
 
+      - name: Изменена только документация
+        if: needs.changes.outputs.docs_only == 'true'
+        run: |
+          echo "образы не пересобираются: изменены только markdown-файлы"
+
   # ===================================================================
   # The whole stack, started for real
   # ===================================================================
+  # Условие на каждом шаге, а не на job: пропущенная job репортится
+  # `skipped`, и обязательная проверка в защите ветки `main` такой
+  # результат не засчитывает — pull request перестал бы мержиться.
   stack:
     name: Stack smoke test
     runs-on: ubuntu-24.04
-    needs: [agent-service, images]
+    needs: [changes, agent-service, images]
     steps:
+      - name: Изменена только документация
+        if: needs.changes.outputs.docs_only == 'true'
+        run: |
+          echo "стенд не поднимается: изменены только markdown-файлы"
+
       - uses: actions/checkout@v4
+        if: needs.changes.outputs.docs_only != 'true'
 
       - name: Generate a throwaway .env
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           # Заглушка длиннее 16 символов: сервисы проверяют минимальную
           # длину ключей, и короткое значение роняло бы их в crash loop —
@@ -697,6 +795,7 @@ jobs:
           chmod 600 .env
 
       - name: Start the data layer and apply migrations
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           docker compose --env-file versions.env --env-file .env \
             up -d postgres valkey
@@ -712,6 +811,7 @@ jobs:
           ./scripts/db-migrate.sh
 
       - name: NocoDB automatically imports every Eva table
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           docker compose --env-file versions.env --env-file .env up -d nocodb
           for i in $(seq 1 90); do
@@ -752,6 +852,7 @@ jobs:
             "$BASE_COUNT" "$SOURCE_COUNT" "$MODEL_COUNT"
 
       - name: Start the App Server and the agent service
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           # media-service and searxng are needed by the auth and network
           # isolation checks further down.
@@ -759,6 +860,7 @@ jobs:
             up -d --build letta-app-server eva-agent-service media-service searxng
 
       - name: Wait for the agent service to report healthy
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           for i in $(seq 1 60); do
             STATUS="$(docker compose --env-file versions.env --env-file .env \
@@ -775,6 +877,7 @@ jobs:
           exit 1
 
       - name: Admin phase 1 — auth, RBAC, sudo, audit and no secret leaks
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           if ! docker compose --env-file versions.env --env-file .env \
               up -d --build admin-api admin-ui; then
@@ -937,6 +1040,7 @@ jobs:
       # блокировка действительно легла в оба поля, что operator не получил
       # переписку и что её чтение осталось в журнале.
       - name: Admin users section — RBAC, blocking and conversation privacy
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           docker compose --env-file versions.env --env-file .env \
             exec -T admin-api node --input-type=module - <<'NODE'
@@ -1094,12 +1198,14 @@ jobs:
           NODE
 
       - name: VECTOR project skill is mounted where the Agent SDK session expects it
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           docker compose --env-file versions.env --env-file .env \
             exec -T letta-app-server sh -c \
             'test -s /data/letta/.skills/vector-action/SKILL.md'
 
       - name: Public webhooks reject forged requests
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           docker compose --env-file versions.env --env-file .env \
             exec -T eva-agent-service node -e "
@@ -1132,6 +1238,7 @@ jobs:
             "
 
       - name: Telegram inbox and outbox are durable
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           set -e
           docker compose --env-file versions.env --env-file .env \
@@ -1180,6 +1287,7 @@ jobs:
           done
 
       - name: /metrics отдаёт операционные метрики и закрыт внутренним ключом
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           docker compose --env-file versions.env --env-file .env \
             exec -T eva-agent-service node -e "
@@ -1215,6 +1323,7 @@ jobs:
             " | grep -q 'metrics ok'
 
       - name: The landing page's bot endpoint answers without initData
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           docker compose --env-file versions.env --env-file .env \
             exec -T eva-agent-service node -e "
@@ -1236,6 +1345,7 @@ jobs:
             " | grep -q 'public bot endpoint ok'
 
       - name: media-service refuses callers without the shared secret
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           docker compose --env-file versions.env --env-file .env \
             exec -T eva-agent-service node -e "
@@ -1255,6 +1365,7 @@ jobs:
             " | grep -q 'media auth ok'
 
       - name: The updater socket is 0660 and only its group can reach it
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           # Сокет открывает фиксированные backup/update-команды, а у самого
           # eva-updater смонтирован Docker socket. Права 0666 давали доступ
@@ -1291,6 +1402,7 @@ jobs:
             " | grep -q 'updater reachable from admin-api'
 
       - name: SearXNG cannot reach PostgreSQL or the Caddy admin API
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           # Network segmentation, asserted rather than assumed: a container
           # that fetches untrusted external content must not see the data
@@ -1315,6 +1427,7 @@ jobs:
           grep -q 'isolated from: postgres, valkey, caddy' /tmp/isolation
 
       - name: Start an isolated OpenAI-compatible test provider
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           docker run -d --name evaself-llm-mock --network evaself-agent \
             node:22.22-bookworm-slim node -e "
@@ -1376,6 +1489,7 @@ jobs:
       # модульных тестах с подставными адаптерами. Здесь он работает
       # по-настоящему — с базой, живым провайдером и мёртвым портом.
       - name: LLM router fails over from a dead provider to a live one
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           docker compose --env-file versions.env --env-file .env up -d --build llm-router
           for i in $(seq 1 60); do
@@ -1520,6 +1634,7 @@ jobs:
           NODE
 
       - name: An agent and a conversation are created through the Agent SDK
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           set -e
           KEY="$(grep '^EVA_AGENT_API_KEY=' .env | cut -d= -f2)"
@@ -1537,6 +1652,7 @@ jobs:
           echo "$RESULT" | grep -q '"conversation_id"'
 
       - name: WebUI API manages SDK settings, agents and conversations
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           docker compose --env-file versions.env --env-file .env \
             exec -T eva-agent-service node -e "
@@ -1660,6 +1776,7 @@ jobs:
           grep -q '"agent_deleted":true' /tmp/sdk-admin
 
       - name: The mapping is persisted in PostgreSQL
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           docker compose --env-file versions.env --env-file .env \
             exec -T postgres psql -tA -U postgres -d eva \
@@ -1676,6 +1793,7 @@ jobs:
             ' > /tmp/memory-before-llm
 
       - name: Two LLM configurations can be tested and switched
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           docker compose --env-file versions.env --env-file .env \
             exec -T eva-agent-service node -e "
@@ -1787,6 +1905,7 @@ jobs:
           echo "managed-цепочки остались независимыми от legacy-активации"
 
       - name: WebUI chat completes a real SDK turn through the test LLM
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           CONVERSATION_ID="$(cut -d'|' -f3 /tmp/mapping-before-llm)"
           docker compose --env-file versions.env --env-file .env \
@@ -1827,6 +1946,7 @@ jobs:
           grep -q '"streamed":true' /tmp/sdk-chat
 
       - name: Agent, conversation and memory survive model switching
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           docker compose --env-file versions.env --env-file .env \
             exec -T postgres psql -tA -U postgres -d eva \
@@ -1841,6 +1961,7 @@ jobs:
           diff -u /tmp/memory-before-llm /tmp/memory-after-llm
 
       - name: LLM settings and mappings survive service restarts
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           docker compose --env-file versions.env --env-file .env \
             restart letta-app-server eva-agent-service

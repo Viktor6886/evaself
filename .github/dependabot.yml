@@ -63,11 +63,15 @@ updates:
       - dependency-name: "*"
         update-types: [version-update:semver-major]
 
+  # Экшены и базовые образы обновляются раз в месяц. Каждый их pull
+  # request стоит полного прогона CI (около четырнадцати биллинговых
+  # минут), а версии здесь меняются медленно: еженедельный опрос платит
+  # за проверку того, что почти всегда не изменилось. Обновления
+  # БЕЗОПАСНОСТИ приходят вне расписания и этой правкой не задержаны.
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
-      day: monday
+      interval: monthly
     open-pull-requests-limit: 3
     groups:
       actions:
@@ -85,8 +89,7 @@ updates:
       - /letta-app-server
       - /backup-service
     schedule:
-      interval: weekly
-      day: monday
+      interval: monthly
     open-pull-requests-limit: 3
     groups:
       base-images:
