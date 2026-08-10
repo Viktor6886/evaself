@@ -28,12 +28,7 @@ import {
   buildJobEnvelope,
   parseJobEnvelope,
 } from "./envelope.js";
-import {
-  type DedupMode,
-  classifyJobError,
-  replacesPending,
-  timingFor,
-} from "./policy.js";
+import { classifyJobError, replacesPending, timingFor } from "./policy.js";
 import type { QueueRegistry } from "./queue-registry.js";
 
 /** Минимальный контракт клиента транзакции: тот же, что у `Database.transaction`. */
@@ -45,9 +40,6 @@ export interface JobOutboxClient {
 }
 
 export interface JobIntent extends JobEnvelopeInput {
-  /** Ключ дедупликации; считается вызывающим через `dedupKey()`. */
-  dedupKey?: string | null;
-  dedupMode?: DedupMode;
   /** Отложенный старт: задание не публикуется раньше этого момента. */
   availableAt?: Date;
 }
@@ -172,7 +164,7 @@ export class JobOutbox {
         envelope.schemaVersion,
         envelope.userId,
         JSON.stringify(envelope),
-        intent.dedupKey ?? null,
+        envelope.dedupKey,
         envelope.traceId,
         intent.availableAt ? intent.availableAt.toISOString() : null,
       ],
@@ -218,7 +210,7 @@ export class JobOutbox {
           jobId: envelope.idempotencyKey,
           attempts: timing.maxAttempts,
           backoffMs: timing.backoffMs,
-          replacePending: replacesPending(this.dedupModeOf(row)),
+          replacePending: replacesPending(envelope.dedupMode),
         });
         await this.markPublished(row);
         summary.published += 1;
@@ -237,12 +229,6 @@ export class JobOutbox {
       }
     }
     return summary;
-  }
-
-  private dedupModeOf(row: OutboxRow): DedupMode {
-    // Режим восстанавливается из ключа только в части «заменять ли
-    // ожидающее»: сам ключ уже посчитан на стороне вызывающего.
-    return row.dedup_key ? "keep_last_if_active" : "simple";
   }
 
   /**

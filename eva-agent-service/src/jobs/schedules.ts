@@ -17,7 +17,7 @@
 import type { Logger } from "../logger.js";
 import type { Database } from "../db.js";
 import { type JobScalar, assertSafePayload } from "./envelope.js";
-import type { DedupMode } from "./policy.js";
+import { DEDUP_MODES, type DedupMode } from "./policy.js";
 import { type JobQueueName, type QueueRegistry, isJobQueueName } from "./queue-registry.js";
 
 export interface JobSchedule {
@@ -56,13 +56,6 @@ interface ScheduleRow {
   payload: unknown;
   payload_ref: string | null;
 }
-
-const DEDUP_MODES: ReadonlySet<string> = new Set([
-  "simple",
-  "throttle",
-  "debounce",
-  "keep_last_if_active",
-]);
 
 export class JobScheduleRegistry {
   constructor(

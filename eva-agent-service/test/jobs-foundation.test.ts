@@ -221,6 +221,7 @@ class FakeJobsDatabase {
         status: "running",
         lease_owner: values[9],
         cancel_requested: false,
+        dedup_key: values[14] ?? null,
       });
       return { rows: [] as never };
     }
@@ -640,6 +641,46 @@ test("потеря аренды прекращает локальную рабо
   assert.equal(outcome.status, "cancelled");
   assert.equal(outcome.status === "cancelled" && outcome.reason, "cancelled");
   assert.equal(fake.runs[0]?.status, "cancelled");
+});
+
+test("ключ дедупликации доезжает от намерения до журнала запусков", async () => {
+  const layer = buildRuntime();
+  const key = dedupKey({
+    mode: "keep_last_if_active",
+    queue: "memory",
+    type: "memory_compaction",
+    userId: 42,
+  });
+  await layer.db.withUserScope({ userId: 42, label: "test.intent" }, async () =>
+    await layer.db.transaction(async (client: never) =>
+      await layer.outbox.record(
+        client,
+        { ...intent(), dedupKey: key, dedupMode: "keep_last_if_active" } as never,
+      )));
+
+  // Ключ лежит и в строке outbox, и в самом конверте: публикатор решает
+  // по нему, снимать ли ранее поставленное задание.
+  assert.equal(layer.fake.outbox[0]?.dedup_key, key);
+  await layer.outbox.publishPending();
+  const job = layer.driver.queues.get("memory")!.jobs.get(intent().idempotencyKey)!;
+  assert.equal((job.data as { dedupKey: string }).dedupKey, key);
+  assert.equal((job.data as { dedupMode: string }).dedupMode, "keep_last_if_active");
+
+  // И доезжает до журнала запусков: без него два запуска одного задания
+  // выглядят просто двумя разными.
+  layer.runtime.register("memory_compaction", async () => {});
+  await layer.runtime.execute(job.data);
+  assert.equal(layer.fake.runs[0]?.dedup_key, key);
+});
+
+test("конверт с незнакомым режимом дедупликации отклоняется", () => {
+  const envelope = buildJobEnvelope(intent() as never);
+  assert.equal(envelope.dedupMode, "simple", "умолчание — повтор считается тем же заданием");
+
+  const broken = parseJobEnvelope({ ...envelope, dedupMode: "whenever" });
+  assert.equal(broken.ok, false);
+  assert.equal(broken.ok === false && broken.code, "job_dedup_mode_unknown");
+  assert.equal(broken.ok === false && broken.retryable, false);
 });
 
 test("неизвестный тип задания не повторяется", async () => {

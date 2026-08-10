@@ -91,11 +91,11 @@ export class JobRunJournal {
         `INSERT INTO job_runs (
            run_id, job_id, queue, job_type, schema_version, user_id,
            payload_checksum, status, attempt, lease_until, lease_owner,
-           schedule_code, timezone, trace_id, parent_trace_id
+           schedule_code, timezone, trace_id, parent_trace_id, dedup_key
          ) VALUES (
            $1, $2, $3, $4, $5, $6,
            $7, 'running', $8, now() + make_interval(secs => $9), $10,
-           $11, $12, $13, $14
+           $11, $12, $13, $14, $15
          )
          ON CONFLICT (run_id) DO NOTHING`,
         [
@@ -113,6 +113,10 @@ export class JobRunJournal {
           envelope.timezone,
           envelope.traceId,
           envelope.causationId,
+          // Ключ дедупликации в журнале отвечает на вопрос «почему одно и
+          // то же задание выполнялось дважды»: без него два запуска
+          // выглядят просто двумя разными.
+          envelope.dedupKey,
         ],
       ));
       handle.recorded = true;

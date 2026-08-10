@@ -21,6 +21,7 @@
 
 import { createHash } from "node:crypto";
 
+import { DEDUP_MODES, type DedupMode } from "./policy.js";
 import type { JobQueueName } from "./queue-registry.js";
 
 /** Версия конверта, которую пишет текущий код. */
@@ -57,6 +58,17 @@ export interface JobEnvelope {
   payloadRef: string | null;
   /** Минимальный безопасный payload: только идентификаторы и флаги. */
   payload: Record<string, JobScalar>;
+  /**
+   * Ключ дедупликации и его режим.
+   *
+   * Едут в конверте, а не остаются в строке outbox, потому что нужны на
+   * обеих сторонах: публикатор решает по режиму, снимать ли ранее
+   * поставленное задание, а журнал запусков записывает ключ — без него
+   * нельзя ответить, почему выполнение «того же самого» задания
+   * произошло дважды.
+   */
+  dedupKey: string | null;
+  dedupMode: DedupMode;
   createdAt: string;
   /** Жёсткий дедлайн: после него задание выполнять нельзя. */
   deadlineAt: string;
@@ -197,6 +209,9 @@ export interface JobEnvelopeInput {
   agentId?: string | null;
   payloadRef?: string | null;
   payload?: Record<string, JobScalar>;
+  /** Ключ дедупликации; считается вызывающим через `dedupKey()` из `policy.ts`. */
+  dedupKey?: string | null;
+  dedupMode?: DedupMode;
   /** Сколько задание имеет право прожить от постановки до конца. */
   deadlineMs: number;
   timezone?: string;
@@ -231,6 +246,8 @@ export function buildJobEnvelope(input: JobEnvelopeInput): JobEnvelope {
     idempotencyKey: input.idempotencyKey,
     payloadRef: input.payloadRef ?? null,
     payload,
+    dedupKey: input.dedupKey ?? null,
+    dedupMode: input.dedupMode ?? "simple",
     createdAt: now.toISOString(),
     deadlineAt: new Date(now.getTime() + input.deadlineMs).toISOString(),
     timezone: input.timezone ?? "Europe/Moscow",
@@ -285,6 +302,12 @@ export function parseJobEnvelope(raw: unknown): JobEnvelopeParse {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     return { ok: false, code: "job_envelope_incomplete", retryable: false };
   }
+  // Незнакомый режим дедупликации — это не «как-нибудь»: он решает,
+  // снимать ли ранее поставленное задание, и ошибка здесь тихо теряет
+  // работу. Такой конверт отклоняется.
+  if (candidate.dedupMode !== undefined && !DEDUP_MODES.has(candidate.dedupMode)) {
+    return { ok: false, code: "job_dedup_mode_unknown", retryable: false };
+  }
   try {
     assertSafePayload(payload as Record<string, unknown>);
   } catch (error) {
@@ -294,7 +317,17 @@ export function parseJobEnvelope(raw: unknown): JobEnvelopeParse {
       retryable: false,
     };
   }
-  return { ok: true, envelope: candidate as JobEnvelope };
+  return {
+    ok: true,
+    // Умолчания подставляются здесь, а не у каждого читателя: конверт
+    // без режима дедупликации — это «повтор считается тем же заданием»,
+    // и это решение принимается один раз.
+    envelope: {
+      ...(candidate as JobEnvelope),
+      dedupKey: candidate.dedupKey ?? null,
+      dedupMode: candidate.dedupMode ?? "simple",
+    },
+  };
 }
 
 /**

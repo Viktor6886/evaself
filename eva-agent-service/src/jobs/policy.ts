@@ -209,6 +209,14 @@ export function timingFor(
 
 export type DedupMode = "simple" | "throttle" | "debounce" | "keep_last_if_active";
 
+/** Закрытый список режимов. Один на весь слой: конверт, расписание и публикатор сверяются с ним. */
+export const DEDUP_MODES: ReadonlySet<string> = new Set<DedupMode>([
+  "simple",
+  "throttle",
+  "debounce",
+  "keep_last_if_active",
+]);
+
 export interface DedupInput {
   mode: DedupMode;
   queue: JobQueueName;
