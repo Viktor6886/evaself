@@ -9,13 +9,13 @@
 ## Состояние
 
 ```
-CURRENT_BATCH: 6
-CURRENT_STEP:  07
-BRANCH:        claude/roadmap-batch-execution-fclhwf
-STATUS:        в работе
-LAST_COMMIT:   68a57ef
+CURRENT_BATCH: 7
+CURRENT_STEP:  08
+BRANCH:        —
+STATUS:        не начат
+LAST_COMMIT:   —
 BLOCKER:       —
-NEXT:          открыть pull request на batch 6, дождаться зелёного CI, независимое ревью
+NEXT:          прочитать prompts/step-08-jobs-agent-jobs.md, создать ветку batch/07-jobs-agent-jobs от main, выполнить шаг 08
 ```
 
 Значения полей:
@@ -47,7 +47,7 @@ Batch — единица работы: одна ветка, один pull reques
 | 3 | 03–04 | P0 | выполнен | [#128](https://github.com/Viktor6886/evaself/pull/128), [#130](https://github.com/Viktor6886/evaself/pull/130) |
 | 4 | 05 | P1 | выполнен | [#132](https://github.com/Viktor6886/evaself/pull/132) |
 | 5 | 06 | P1 | выполнен | [#135](https://github.com/Viktor6886/evaself/pull/135) |
-| 6 | 07 | P1 | в работе | — |
+| 6 | 07 | P1 | выполнен | [#143](https://github.com/Viktor6886/evaself/pull/143) |
 | 7 | 08 | P1 | не начат | — |
 | 8 | 09–10 | P1 | не начат | — |
 | 9 | 11 | P1 | не начат | — |
