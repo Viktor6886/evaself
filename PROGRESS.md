@@ -13,7 +13,7 @@ CURRENT_BATCH: 6
 CURRENT_STEP:  07
 BRANCH:        claude/roadmap-batch-execution-fclhwf
 STATUS:        в работе
-LAST_COMMIT:   —
+LAST_COMMIT:   68a57ef
 BLOCKER:       —
 NEXT:          открыть pull request на batch 6, дождаться зелёного CI, независимое ревью
 ```
