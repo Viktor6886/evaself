@@ -34,6 +34,7 @@ node --test --experimental-strip-types test/*.test.ts        # full regression
 | `src/turns/recovery.ts`, `effect-journal.ts` | `session-recovery.test.ts` |
 | `src/delivery/inbox.ts`, `dispatcher.ts`, `aggregator.ts` | `parallel-inbox.test.ts`, `delivery.test.ts` |
 | `src/delivery/outbox.ts`, `priority.ts`, `telegram-limits.ts`, `retry-after.ts` | `parallel-outbox.test.ts`, `step06-distributed-delivery.test.ts` |
+| `src/jobs/` | `jobs-foundation.test.ts` |
 | `src/router/` | `llm-router.test.ts`, `managed-routing.test.ts`, `llm.test.ts`, `llm-reasoning.test.ts` |
 | `src/letta.ts` | `letta.test.ts` |
 | `src/runtime/runtime-context.ts` | `runtime.test.ts` |

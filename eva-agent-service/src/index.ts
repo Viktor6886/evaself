@@ -22,6 +22,7 @@ import { PostgresTelegramOutbox } from "./delivery/outbox.js";
 import { TelegramDeliveryLimiter } from "./delivery/telegram-limits.js";
 import { EvaWorkflow } from "./eva-workflow.js";
 import { GoalService } from "./goals/goal-service.js";
+import { buildJobLayer } from "./jobs/index.js";
 import { LettaService } from "./letta.js";
 import { LlmManager } from "./llm.js";
 import { createLogger } from "./logger.js";
@@ -312,6 +313,20 @@ async function main(): Promise<void> {
     recoveryTimer.unref();
   }
   background.start();
+  // Слой фоновых заданий. Продуктовых задач на нём ещё нет: включённый
+  // флаг сверяет расписания и запускает публикатор, но переносить сюда
+  // существующие интервальные циклы будет отдельный шаг.
+  const jobs = config.bullmqJobsEnabled ? buildJobLayer(config, db, redis, logger) : null;
+  if (jobs) {
+    await jobs.start().catch((error: unknown) => {
+      // Недоступный Valkey не должен мешать сервису отвечать людям:
+      // намерения продолжают копиться в PostgreSQL, публикатор поднимет
+      // их после восстановления брокера.
+      logger.warn("Слой фоновых заданий не стартовал", {
+        code: error instanceof Error ? error.name : "unknown_error",
+      });
+    });
+  }
   logger.info("eva-agent-service принимает запросы", {
     version: VERSION,
     port: config.port,
@@ -341,6 +356,9 @@ async function main(): Promise<void> {
       // иначе превысила бы grace period контейнера, и SIGKILL пришёл бы
       // посреди drain — то есть ожидание не сработало бы вовсе.
       await Promise.all([
+        // Слой заданий останавливается вместе с ходами и доставкой:
+        // ждать его после них значило бы выйти за grace period.
+        jobs ? jobs.stop(config.shutdownDrainMs) : Promise.resolve(),
         // Уже начатые ходы дописываются: аренда записи ещё наша, и
         // бросить её посреди хода значит отдать её другому воркеру с
         // наполовину выполненной работой.

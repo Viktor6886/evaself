@@ -118,6 +118,16 @@ export interface Config {
    * Docker — 10 с), иначе ожидание кончится уже после SIGKILL.
    */
   shutdownDrainMs: number;
+  /**
+   * Слой фоновых заданий на BullMQ. Выключенный флаг означает, что
+   * очереди не открываются и публикатор не работает: намерения копятся
+   * в `job_outbox` и будут опубликованы после включения.
+   */
+  bullmqJobsEnabled: boolean;
+  /** Как часто публикатор переносит намерения из PostgreSQL в очередь. */
+  jobOutboxPollMs: number;
+  /** Сколько намерений публикатор забирает за один заход. */
+  jobOutboxBatchSize: number;
 
   lavaWebhookUser: string;
   lavaWebhookPassword: string;
@@ -291,6 +301,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     turnRecoveryEnabled: bool("EVA_TURN_RECOVERY", false),
     turnRecoveryIntervalMs: clampedInt("EVA_TURN_RECOVERY_INTERVAL_MS", 30_000, 5_000, 600_000),
     shutdownDrainMs: clampedInt("EVA_SHUTDOWN_DRAIN_MS", 8_000, 1_000, 120_000),
+    bullmqJobsEnabled: bool("EVA_BULLMQ_JOBS", false),
+    jobOutboxPollMs: clampedInt("EVA_JOBS_OUTBOX_POLL_MS", 1_000, 200, 60_000),
+    jobOutboxBatchSize: clampedInt("EVA_JOBS_OUTBOX_BATCH", 32, 1, 200),
 
     lavaWebhookUser: str("LAVA_WEBHOOK_USER"),
     lavaWebhookPassword: str("LAVA_WEBHOOK_PASSWORD"),
