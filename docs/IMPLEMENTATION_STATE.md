@@ -53,6 +53,24 @@
 Интерактивный ingress и agent runs в BullMQ не переносятся (инвариант 7).
 Разбор — `docs/PARALLEL_INBOX.md`, `docs/PARALLEL_OUTBOX_DISTRIBUTED_LIMITS.md`.
 
+## Фоновые задания
+
+| Компонент | Назначение | Путь | Контракт | Переисп. |
+|---|---|---|---|---|
+| QueueRegistry | Единственное место создания очередей | `src/jobs/queue-registry.ts` | шесть классов; `telegram-ingress`, `agent-runs` запрещены; префикс `evaself:bullmq` | обяз. |
+| Драйвер BullMQ | Единственное место импорта `bullmq` | `src/jobs/bullmq-driver.ts` | `JobQueueDriver`; тесты подставляют свой | обяз. |
+| Конверт задания | Версия схемы, трассы, безопасный payload | `src/jobs/envelope.ts` | `buildJobEnvelope()`, `assertSafePayload()`, незнакомая версия — неповторяемый отказ | обяз. |
+| Job outbox | Намерение в той же транзакции, идемпотентная публикация | `src/jobs/job-outbox.ts`, таблица `job_outbox` | `record(client, intent)`, `publishPending()`; `jobId = idempotency_key` | обяз. |
+| Журнал запусков | Канонический факт запуска, аренда, отмена | `src/jobs/job-runs.ts`, таблица `job_runs` | `open/renew/succeed/fail/requestCancel/sweepLost` | обяз. |
+| Расписания | Каноническая копия в PostgreSQL + сверка с очередью | `src/jobs/schedules.ts`, таблица `job_schedules` | `reconcile()` при старте | обяз. |
+| Правила заданий | Классы отказов, сроки, дедупликация | `src/jobs/policy.ts` | `classifyJobError()`, `timingFor()`, `dedupKey()` | обяз. |
+| Исполнение | Сроки, AbortController, DLQ, graceful shutdown | `src/jobs/runtime.ts`, таблица `job_dead_letters` | `register(type, handler, timing?)`, `execute()`, `stop()` без `process.exit` | обяз. |
+| Вынос CPU | Тяжёлая работа вне основного event loop | `src/jobs/cpu-offload.ts` | `runCpuTask(modulePath, payload, {signal, timeoutMs})` | расш. |
+
+Флаг `EVA_BULLMQ_JOBS`, по умолчанию выключен. Продуктовые задачи ещё не
+перенесены: существующие интервалы работают как прежде (шаг 08).
+Разбор — `docs/BACKGROUND_JOBS.md`.
+
 ## Модели и роутинг
 
 | Компонент | Назначение | Путь | Контракт | Переисп. |
@@ -120,8 +138,9 @@
 
 Проверено; не считать существующим:
 
-- **BullMQ** — нет ни зависимости, ни очередей. Фоновая работа — `setInterval`
-  в процессе плюс durable-таблицы. Вводится шагами 07–08.
+- **Продуктовые задачи на BullMQ** — слой очередей есть (шаг 07), но ни одна
+  существующая задача на него не перенесена: фоновая работа по-прежнему
+  `setInterval` в процессе плюс durable-таблицы. Перенос — шаг 08.
 - **Колонка `tenant_id`** — изоляция держится на `user_id` и области арендатора.
 - **Второй RAG, Qdrant, LightRAG, LangGraph runtime, LangSmith** — запрещены.
 - **Полное зеркало переписки** — механизм есть, выключен

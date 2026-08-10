@@ -3,7 +3,7 @@
   "version": "0.3.0",
   "private": true,
   "type": "module",
-  "description": "Eva's agent service \u2014 the only component that talks to the Letta App Server, through the official Letta Agent SDK.",
+  "description": "Eva's agent service — the only component that talks to the Letta App Server, through the official Letta Agent SDK.",
   "engines": {
     "node": ">=22.19.0"
   },
@@ -18,6 +18,7 @@
   "dependencies": {
     "@letta-ai/letta-agent-sdk": "0.6.2",
     "argon2": "^0.45.1",
+    "bullmq": "6.0.10",
     "fastify": "5.11.2",
     "ioredis": "5.11.1",
     "luxon": "3.7.2",
