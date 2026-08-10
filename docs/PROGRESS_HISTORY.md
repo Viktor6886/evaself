@@ -24,6 +24,66 @@
 
 <!-- Записи ниже -->
 
+## Batch 6 — шаг 07
+- Ветка: `claude/roadmap-batch-execution-fclhwf` (ветка назначена оркестратором
+  сессии вместо `batch/06-bullmq-foundation`) · PR:
+  [#143](https://github.com/Viktor6886/evaself/pull/143) · Дата: 2026-08-10 ·
+  Агент: Claude Code
+
+### Шаг 07 — Единый слой фоновых задач: QueueRegistry, транзакционный job outbox и общие правила
+- Итог: введён слой фоновых, отложенных и периодических заданий на BullMQ
+  поверх существующего Valkey (префикс `evaself:bullmq`, второй Redis не
+  разворачивается). Каталог `src/jobs/`: реестр очередей, драйвер BullMQ,
+  версионированный конверт с проверкой приватности payload, транзакционный
+  job outbox с идемпотентным публикатором, канонический журнал запусков,
+  расписания со сверкой при старте, общие правила исполнения и вынос
+  CPU-тяжёлой работы в рабочий поток. Миграция 035 добавляет `job_outbox`,
+  `job_runs`, `job_schedules`, `job_dead_letters`. Ни одна продуктовая задача
+  не перенесена, существующие интервалы не тронуты. Флаг `EVA_BULLMQ_JOBS`
+  выключен по умолчанию.
+- Переиспользовано: `Database.transaction` и области арендатора
+  (`src/tenancy/`) — job outbox пишет намерение в транзакции вызывающего;
+  схема аренды и `FOR UPDATE SKIP LOCKED` повторяет durable inbox/outbox
+  доставки; идемпотентность построена на том же принципе, что
+  `EffectJournal` (ключ решает, а не флаг); общий клиент Valkey из
+  `src/index.ts` (дубли соединений создаёт драйвер BullMQ, как требует
+  библиотека). Впервые созданы: сам каталог `src/jobs/`, четыре таблицы
+  миграции 035, зависимость `bullmq@6.0.10`. Проверка по
+  `docs/IMPLEMENTATION_STATE.md`: эквивалента фоновой очереди с расписанием
+  и арендой исполнения в репозитории не было — `telegram_outbox` описывает
+  доставку в один канал, `turn_runs` — интерактивный ход, `tasks`/
+  `task_events` — продуктовые напоминания.
+- Проверки:
+  - `npm run build` → PASS
+  - `npm run lint` → PASS
+  - `npm run typecheck` → PASS
+  - `node --test test/jobs-foundation.test.ts` → PASS (15 тестов)
+  - `node --test test/*.test.ts` → PASS (513 тестов)
+  - `python3 scripts/ci/assert-tenant-scope.py` → PASS
+  - `python3 scripts/ci/assert-env-plumbing.py` → PASS
+  - `python3 scripts/ci/assert-down-migrations.py` → PASS
+  - `python3 scripts/ci/assert-admin-route-access.py` → PASS
+- Ограничения:
+  - миграция 035 и её откат прогоняются только в CI: локальной PostgreSQL нет;
+  - поведение BullMQ на живом Valkey не проверялось — в тестах драйвер
+    подменён, проверяются правила слоя, а не библиотека;
+  - `scripts/ci/audit-dependencies.sh` локально падает на `pip-audit`
+    (модуль отсутствует в окружении), npm-часть по обоим пакетам — PASS;
+  - воркеры BullMQ не создаются: слой умеет публиковать и исполнять
+    (`JobRuntime.execute`), но подписка на очередь появится вместе с первой
+    перенесённой задачей.
+- Следующему агенту (шаг 08):
+  - переносить существующие циклы `src/background.ts` по одному, снимая
+    старый `setInterval` в том же изменении: два планировщика на одно
+    назначение запрещены инвариантом 9;
+  - обработчик регистрируется через `JobRuntime.register(type, handler,
+    timing?)`; сроки типа проверяются `timingFor` при первом выполнении, а
+    не при регистрации — класс очереди известен только из конверта;
+  - payload задания обязан пройти `assertSafePayload`: строка допускается
+    только в форме идентификатора, всё остальное — через `payloadRef` и
+    строку в PostgreSQL;
+  - разбор слоя — `docs/BACKGROUND_JOBS.md`.
+
 ### Шаг 06 — Параллельная доставка Telegram и распределённые лимиты LLM Router
 - Агент: Codex
 - Ветка: `step/06-outbox-distributed-limits`
