@@ -205,6 +205,8 @@ conversation отключено по умолчанию.
 - [Безопасность](docs/SECURITY.md)
 - [Проверки](docs/VERIFICATION.md)
 - [Статус реализации WebUI](docs/IMPLEMENTATION_STATUS.md)
+- [Как запускать доработку](docs/HOW_TO_RUN.md)
+- [Состояние реализации — snapshot](docs/IMPLEMENTATION_STATE.md)
 
 Ева — инструмент поддержки и саморефлексии, а не врач или психотерапевт;
 она не ставит диагнозы.
