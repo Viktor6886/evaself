@@ -25,7 +25,11 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-SERVER = ROOT / "eva-agent-service" / "src" / "admin" / "server.ts"
+# Раньше проверялся один server.ts. Маршруты с тех пор появились и в
+# соседних модулях каталога — регистрация вынесена из файла, который и без
+# того за тысячу строк. Проверка обязана видеть их все: маршрут, уехавший в
+# другой файл, не перестаёт быть административным.
+ADMIN_DIR = ROOT / "eva-agent-service" / "src" / "admin"
 
 METHODS = ("get", "post", "put", "patch", "delete")
 MUTATING = {"post", "put", "patch", "delete"}
@@ -76,19 +80,24 @@ def options_after(source: str, start: int) -> str:
 
 
 def main() -> int:
-    source = SERVER.read_text("utf-8")
     problems: list[str] = []
     routes = 0
     public = 0
+    files = sorted(ADMIN_DIR.glob("*.ts"))
+    if not files:
+        print(f"каталог {ADMIN_DIR} пуст — проверка потеряла цель", file=sys.stderr)
+        return 1
 
-    for match in CALL.finditer(source):
+    for source_file in files:
+      source = source_file.read_text("utf-8")
+      for match in CALL.finditer(source):
         method, path = match.group(1), match.group(2)
         # /health и /healthz объявляются без конфигурации и живут вне
         # административного контура.
         if not path.startswith("/api/admin/"):
             continue
         routes += 1
-        label = f"{method.upper()} {path}"
+        label = f"{source_file.name}: {method.upper()} {path}"
         options = options_after(source, match.end())
 
         if "public: true" in options:

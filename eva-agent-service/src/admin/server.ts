@@ -16,6 +16,8 @@ import {
   roleAllowed,
   sessionCookies,
 } from "./auth-service.js";
+import type { ArtifactRegistry } from "../artifacts/registry.js";
+import { registerArtifactRoutes } from "./artifact-routes.js";
 import { AuditService, type AuditActor } from "./audit-service.js";
 import { ConfigService } from "./config-service.js";
 import {
@@ -74,6 +76,8 @@ export interface AdminServerServices {
   securityAudit?: SecurityAuditService;
   /** Предпросмотр политик хранения. Удаление выполняет задание очереди. */
   retention?: { preview(settings: Record<string, unknown>): Promise<unknown> };
+  /** Единый реестр артефактов. Отсутствует — раздел просто не появляется. */
+  artifacts?: ArtifactRegistry;
   events: Redis;
   logger: Logger;
   readiness: () => Promise<boolean>;
@@ -368,6 +372,21 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
     );
     return await services.retention.preview(values);
   });
+
+  // Единый реестр артефактов. Регистрируется отдельным модулем: этот файл
+  // уже за тысячу строк и перечитывается целиком каждой сессией, которая
+  // его касается. Права и аудит остаются здесь — модуль их не изобретает.
+  if (services.artifacts) {
+    registerArtifactRoutes(app, {
+      registry: services.artifacts,
+      actorId: (request) => contexts.get(request as FastifyRequest)?.session?.user.id ?? null,
+      audit: async (request, details) => {
+        const context = contexts.get(request as FastifyRequest);
+        if (!context?.audit) return;
+        await services.audit.annotate(context.audit.id, details);
+      },
+    });
+  }
 
   app.get("/api/admin/v1/security-audit", {
     config: { roles: ["owner", "admin"] } satisfies RouteAccess,

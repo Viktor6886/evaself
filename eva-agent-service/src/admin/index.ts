@@ -16,6 +16,7 @@ import { HttpMediaSttClient, SttAdminService } from "./stt-service.js";
 import { OutboundGateway } from "./outbound-gateway.js";
 import { buildAdminServer } from "./server.js";
 import { UserService } from "./user-service.js";
+import { ArtifactRegistry } from "../artifacts/registry.js";
 import { SecurityAuditService } from "./security-audit.js";
 import { RetentionService } from "../retention/service.js";
 import { UpdaterClient } from "./updater-client.js";
@@ -114,6 +115,16 @@ async function main(): Promise<void> {
     integrations,
     users,
     securityAudit: new SecurityAuditService({ env: process.env, db: pool }),
+    // Единый реестр артефактов. Артефакты общесистемные: владельца среди
+    // пользователей Евы у них нет, поэтому граница арендатора к ним не
+    // применяется, а доступ ограничен ролью маршрута и записан в аудит.
+    artifacts: new ArtifactRegistry({
+      query: async (sql: string, values: unknown[] = []) =>
+        await pool.query(sql, values) as unknown as {
+          rows: Record<string, unknown>[];
+          rowCount: number | null;
+        },
+    }),
     // Предпросмотр всегда доступен и всегда безопасен: сам сервис
     // создаётся выключенным (`enabled = false`), удалять из админки
     // нечем — удаление выполняет задание очереди обслуживания.
