@@ -12,10 +12,23 @@
 CURRENT_BATCH: 13
 CURRENT_STEP:  17
 BRANCH:        —
-STATUS:        не начат
+STATUS:        заблокирован
 LAST_COMMIT:   5f86522
-BLOCKER:       —
-NEXT:          дождаться разрешения человека на batch 13 (шаги 17–18)
+BLOCKER:       красный CI на main (5f86522): job «Stack smoke test» падает на
+               сборке образа, где внутри Dockerfile гоняется весь набор тестов.
+               Валится один тест из 735 — `heartbeat keeps abort-ignoring work
+               contained beyond multiple initial lease TTLs and stops after
+               settlement` (`test/jobs-foundation.test.ts`), проверяющий сроки
+               аренды. Тот же тест на том же коммите зелёный и в job
+               «eva-agent-service (TypeScript)», и в job «Docker images build»;
+               на PR (тот же tree 0662a9ba) «Stack smoke test» был зелёным.
+               Прогон 321 упал так же — на другом образе и тоже на одном тесте
+               из набора. Это плавающий тест на таймингах под нехваткой CPU в
+               сборке образа, а не следствие batch 12. Перезапустить job у
+               агента нет прав (403).
+NEXT:          решение человека: перезапустить «Stack smoke test» на 5f86522
+               (ожидается зелёный) либо снять плавающий тест с таймингов
+               отдельным изменением. Batch 13 не начинать.
 ```
 
 Значения полей:
