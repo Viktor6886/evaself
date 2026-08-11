@@ -125,6 +125,23 @@ function adminCrudEnabled(): boolean {
   return flagEnabled(process.env.EVA_ADMIN_CRUD);
 }
 
+/**
+ * Реестр версий артефактов за флагом `EVA_ARTIFACT_VERSIONS`.
+ *
+ * Флаг объявлен заданием шага 13, и без него маршруты реестра были бы
+ * единственным значимым изменением batch без выключателя. Значение это
+ * имеет ровно потому, что публикация версии меняет то, на чём работают
+ * живые ходы: инвариант 22 требует, чтобы такое можно было выключить, не
+ * откатывая схему.
+ *
+ * Раздел шага 12 остаётся под своим флагом: применение шаблона memory
+ * block читает версии из тех же таблиц, но выключаются эти два раздела
+ * независимо — у них разные последствия и разная цена ошибки.
+ */
+function artifactVersionsEnabled(): boolean {
+  return flagEnabled(process.env.EVA_ARTIFACT_VERSIONS);
+}
+
 function flagEnabled(raw: string | undefined): boolean {
   const value = (raw ?? "").trim().toLowerCase();
   return value === "1" || value === "true" || value === "yes";
@@ -448,10 +465,11 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
     return await services.retention.preview(values);
   });
 
-  // Единый реестр артефактов. Регистрируется отдельным модулем: этот файл
-  // уже за тысячу строк и перечитывается целиком каждой сессией, которая
-  // его касается. Права и аудит остаются здесь — модуль их не изобретает.
-  if (services.artifacts) {
+  // Единый реестр артефактов за флагом `EVA_ARTIFACT_VERSIONS`.
+  // Регистрируется отдельным модулем: этот файл уже за тысячу строк и
+  // перечитывается целиком каждой сессией, которая его касается. Права и
+  // аудит остаются здесь — модуль их не изобретает.
+  if (services.artifacts && artifactVersionsEnabled()) {
     registerArtifactRoutes(app, {
       registry: services.artifacts,
       actorId: (request) => contexts.get(request as FastifyRequest)?.session?.user.id ?? null,

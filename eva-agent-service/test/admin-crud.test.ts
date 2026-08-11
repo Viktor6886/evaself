@@ -496,10 +496,13 @@ test("разделы отсутствующих подсистем не выда
 interface HarnessOptions {
   role?: string;
   flag?: string;
+  /** Флаг реестра артефактов: у шага 13 он свой и выключается отдельно. */
+  artifactsFlag?: string;
 }
 
 function harness(db: FakeDb, options: HarnessOptions = {}) {
   process.env.EVA_ADMIN_CRUD = options.flag ?? "1";
+  process.env.EVA_ARTIFACT_VERSIONS = options.artifactsFlag ?? "0";
   const audits: Array<{ operation: string; details: unknown }> = [];
   const guards: string[] = [];
   const session = {
@@ -526,6 +529,7 @@ function harness(db: FakeDb, options: HarnessOptions = {}) {
       },
       list: async () => [],
     },
+    artifacts: fakeRegistry({ 1: APPROVED_V1, 2: APPROVED_V2 }),
     crud: {
       directory: directory(db),
       templates: templateService(db),
@@ -549,6 +553,32 @@ test("выключенный флаг не оставляет ни одного 
   });
   assert.equal(response.statusCode, 404);
   await app.close();
+});
+
+test("реестр артефактов выключается своим флагом, независимо от раздела CRUD", async () => {
+  // Публикация версии меняет то, на чём работают живые ходы, и обязана
+  // выключаться (инвариант 22). Флаг у шага 13 свой: разделы двух шагов
+  // включаются независимо, потому что цена ошибки у них разная.
+  const off = harness(new FakeDb(), { flag: "1", artifactsFlag: "0" });
+  await off.app.ready();
+  const closed = await off.app.inject({
+    method: "GET", url: "/api/admin/v1/artifacts", headers: { cookie: "eva_admin=session-1" },
+  });
+  assert.equal(closed.statusCode, 404, closed.body);
+  // Раздел шага 12 при этом на месте: флаги независимы.
+  const crud = await off.app.inject({
+    method: "GET", url: "/api/admin/v1/agents", headers: { cookie: "eva_admin=session-1" },
+  });
+  assert.equal(crud.statusCode, 200, crud.body);
+  await off.app.close();
+
+  const on = harness(new FakeDb(), { flag: "0", artifactsFlag: "1" });
+  await on.app.ready();
+  const open = await on.app.inject({
+    method: "GET", url: "/api/admin/v1/artifacts", headers: { cookie: "eva_admin=session-1" },
+  });
+  assert.equal(open.statusCode, 200, open.body);
+  await on.app.close();
 });
 
 test("viewer читает каталог, но не меняет состояние", async () => {
