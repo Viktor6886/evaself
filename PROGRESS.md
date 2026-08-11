@@ -11,11 +11,11 @@
 ```
 CURRENT_BATCH: 9
 CURRENT_STEP:  11
-BRANCH:        —
-STATUS:        не начат
-LAST_COMMIT:   —
+BRANCH:        claude/roadmap-batch-execution-fclhwf
+STATUS:        в работе
+LAST_COMMIT:   046d71f
 BLOCKER:       —
-NEXT:          прочитать prompts/step-11-letta-sdk-060.md, создать ветку batch/09-letta-sdk-060 от main, выполнить шаг 11
+NEXT:          обновить документацию, прогнать full regression и открыть pull request на batch 9
 ```
 
 Значения полей:
@@ -50,7 +50,7 @@ Batch — единица работы: одна ветка, один pull reques
 | 6 | 07 | P1 | выполнен | [#143](https://github.com/Viktor6886/evaself/pull/143) |
 | 7 | 08 | P1 | выполнен | [#144](https://github.com/Viktor6886/evaself/pull/144) |
 | 8 | 09–10 | P1 | выполнен | [#145](https://github.com/Viktor6886/evaself/pull/145) |
-| 9 | 11 | P1 | не начат | — |
+| 9 | 11 | P1 | в работе | — |
 | 10 | 12–13 | P1 | не начат | — |
 | 11 | 14 | P2 | не начат | — |
 | 12 | 15–16 | P2 | не начат | — |

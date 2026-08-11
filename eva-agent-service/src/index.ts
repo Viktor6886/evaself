@@ -105,6 +105,22 @@ async function main(): Promise<void> {
   const miniAppSessions = new ValkeyMiniAppSessions(redis);
   const rateLimiter = new ValkeyRateLimiter(redis);
   const letta = new LettaService(config, logger, persona);
+  {
+    // Сверка установленного пакета Letta с проверенной матрицей.
+    // Расхождение попадает в журнал всегда — молча ехать на непроверенной
+    // версии нельзя; останавливает старт только включённый флаг, потому
+    // что это решение canary, а не умолчание.
+    const contract = letta.verifyContract();
+    if (!contract.ok) {
+      const detail = { missing: contract.missing };
+      if (config.lettaSdk060Verify) {
+        throw new Error(
+          `Контракт Letta не выполняется установленным пакетом: ${contract.missing.join(", ")}`,
+        );
+      }
+      logger.warn("установленный пакет Letta не покрывает проверенную матрицу", detail);
+    }
+  }
   const telegram = new TelegramClient(config, logger);
   const telegramLimiter = new TelegramDeliveryLimiter(redis, {
     globalPerSecond: config.telegramGlobalRate,

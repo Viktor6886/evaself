@@ -42,6 +42,7 @@ export const TENANT_TABLES: Readonly<Record<string, readonly string[]>> = {
   job_outbox: ["user_id"],
   job_runs: ["user_id"],
   learning_attempts: ["user_id"],
+  letta_memory_block_sync: ["user_id"],
   llm_requests: ["user_id"],
   memory_edges: ["user_id"],
   memory_nodes: ["user_id"],

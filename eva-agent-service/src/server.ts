@@ -16,6 +16,7 @@ import { EvaError, appServerUnavailable, badRequest, notFound, unauthorized } fr
 import type { GoalService } from "./goals/goal-service.js";
 import type { LettaService } from "./letta.js";
 import type { ManagedAgentInput } from "./letta.js";
+import { DeleteGuard } from "./letta/delete-guard.js";
 import type { LlmManager, LlmProviderInput } from "./llm.js";
 import type { Logger } from "./logger.js";
 import { MetricsCollector } from "./metrics.js";
@@ -101,6 +102,11 @@ export function buildServer(services: Services): FastifyInstance {
   // Без Valkey лимитер пропускал бы всё: подставляется явный no-op, а не
   // «случайно отключилось». Рантайм всегда передаёт настоящий.
   const rateLimiter = services.rateLimiter ?? new NoopRateLimiter();
+
+  // Страж удаления спрашивает канонический факт «ход идёт» у `turn_runs`,
+  // а не у пула сессий этого процесса: пул не знает о ходах соседа и о
+  // ходах, переживших перезапуск.
+  const deleteGuard = new DeleteGuard(db);
 
   // Fastify's own logger is off: this service logs through logger.ts so
   // every line in the stack has the same JSON shape.
@@ -591,6 +597,11 @@ export function buildServer(services: Services): FastifyInstance {
     if (confirmation !== id) {
       throw badRequest("Удаление требует query-параметр confirm, равный agent_id");
     }
+    // Удаление агента необратимо: вместе с ним уходят conversation, их
+    // история и блоки. Незакончившийся ход или ожидающее подтверждение
+    // означают, что человек прямо сейчас ждёт ответа, — такое удаление
+    // отклоняется, а не выполняется «на всякий случай».
+    await deleteGuard.assertAgentDeletable(id);
     const before = await letta.getAgent(id);
     await letta.deleteAgent(id);
     await db.archiveAgentLink(id);
@@ -639,6 +650,10 @@ export function buildServer(services: Services): FastifyInstance {
     const { conversationId } = request.params as { conversationId: string };
     const input = conversationPatch(request.body);
     const id = requireId(conversationId, "conversation_id");
+    // Архивирование — то же удаление с точки зрения идущего хода:
+    // продолжить архивированный диалог нельзя, и ответ, который вот-вот
+    // придёт, деться будет некуда.
+    if (input.archived === true) await deleteGuard.assertConversationDeletable(id);
     const before = await letta.getConversation(id);
     const conversation = await letta.updateConversation(id, input);
     await audit({

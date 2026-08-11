@@ -33,6 +33,12 @@ import {
   turnCancelled,
   turnTimeout,
 } from "./errors.js";
+import { missingCapabilities } from "./letta/capabilities.js";
+import {
+  type EvaMemoryBlock,
+  ensureCoreMemoryBlocks,
+  evaMemoryBlocks,
+} from "./letta/memory-blocks.js";
 import type { Logger } from "./logger.js";
 
 /**
@@ -47,6 +53,14 @@ const SHARD_ID = `shard-0:${process.pid}`;
  * задержкой обнаружения и нагрузкой на базу: событий в ходе сотни.
  */
 const CANCEL_POLL_MS = 400;
+
+/**
+ * Состав memory blocks живёт в `./letta/memory-blocks.js`: у него появился
+ * второй потребитель — синхронизация блоков через control plane. Реэкспорт
+ * сохранён, чтобы шаг не переписывал импорты потребителей заодно с делом.
+ */
+export { evaMemoryBlocks };
+export type { EvaMemoryBlock };
 
 /** Every agent Evaself creates carries these, so they are findable from Letta alone. */
 export const EVASELF_TAG = "evaself";
@@ -104,15 +118,6 @@ interface PooledSession {
    * структуру сессии.
    */
   shardId: string;
-}
-
-export interface EvaMemoryBlock {
-  label: string;
-  value: string;
-  description?: string | null;
-  read_only?: boolean;
-  hidden?: boolean | null;
-  limit?: number;
 }
 
 export type EvaSystemPromptPreset =
@@ -361,6 +366,44 @@ export class LettaService {
       app_server_request_timeout_ms: config.appServerRequestTimeoutMs,
     };
     this.client = this.createClient();
+  }
+
+  /**
+   * Сверить установленный пакет с проверенной матрицей возможностей.
+   *
+   * Та же проверка, что делает contract-тест, но на живом развёртывании:
+   * тест доказывает контракт на сборке, а здесь canary убеждается, что
+   * рядом с ним лежит именно проверенный пакет. Различие важно — версия
+   * SDK один раз уже уехала групповым обновлением зависимостей, и на
+   * сборке это никого не разбудило.
+   *
+   * Сессия для проверки открывается на несуществующем conversation:
+   * конструктор соединения не устанавливает, а нужны только имена
+   * методов. Обращения к App Server здесь нет.
+   */
+  verifyContract(): { ok: boolean; missing: string[] } {
+    const resolve = (root: unknown) => (path: string): unknown => {
+      let current: unknown = root;
+      for (const part of path.split(".")) {
+        if (current === null || current === undefined) return undefined;
+        current = (current as Record<string, unknown>)[part];
+      }
+      return current;
+    };
+    const probeSession = this.client.resumeSession("contract-probe", {
+      cwd: "/data/letta",
+    });
+    const missing = [
+      ...missingCapabilities("agent-sdk", resolve(this.client)),
+      ...missingCapabilities("session", resolve(probeSession)),
+    ];
+    try {
+      probeSession.close();
+    } catch {
+      // Пробная сессия ничего не открывала: закрытие — гигиена, а не
+      // обязательство, и его отказ не должен ломать проверку.
+    }
+    return { ok: missing.length === 0, missing: missing.map((entry) => entry.id) };
   }
 
   private createClient(): LettaAgentClient {
@@ -1309,75 +1352,6 @@ function sanitizeTraceValue(value: unknown, depth: number): unknown {
     return result;
   }
   return value;
-}
-
-export function evaMemoryBlocks(
-  persona = "Персона Евы загружается из системной конфигурации.",
-  human = "Проверенные сведения о пользователе пока не заполнены.",
-): EvaMemoryBlock[] {
-  return [
-    {
-      label: "persona",
-      value: persona,
-      description: "Устойчивая персона и правила поведения Евы",
-      limit: 15_000,
-    },
-    {
-      label: "human",
-      value: human,
-      description: "Только проверенные сведения о текущем пользователе",
-      limit: 10_000,
-    },
-    {
-      label: "current_state",
-      value: "Актуальное состояние пока не описано.",
-      description: "Краткий текущий контекст, эмоции и жизненная ситуация",
-      limit: 8_000,
-    },
-    {
-      label: "goals_and_commitments",
-      value: "Подтверждённых целей и обязательств пока нет.",
-      description: "Цели и обязательства пользователя, сформулированные его словами",
-      limit: 12_000,
-    },
-    {
-      label: "relationships_and_patterns",
-      value: "Карта значимых людей, тем и связей пока пуста.",
-      description: "Подтверждённые связи людей, событий, ценностей и повторяющихся тем",
-      limit: 12_000,
-    },
-    {
-      label: "progress_and_hypotheses",
-      value: "Наблюдений о прогрессе и проверяемых гипотез пока нет.",
-      description: "Прогресс и осторожные гипотезы, которые нужно сверять с пользователем",
-      limit: 12_000,
-    },
-  ];
-}
-
-function ensureCoreMemoryBlocks(
-  memory: EvaMemoryBlock[],
-  persona: string,
-  human: string,
-): EvaMemoryBlock[] {
-  const result = memory.map((block) => ({ ...block }));
-  if (!result.some((block) => block.label === "persona")) {
-    result.unshift({
-      label: "persona",
-      value: persona,
-      description: "Устойчивая персона и правила поведения Евы",
-      limit: 15_000,
-    });
-  }
-  if (!result.some((block) => block.label === "human")) {
-    result.splice(1, 0, {
-      label: "human",
-      value: human,
-      description: "Проверенные сведения о текущем пользователе",
-      limit: 10_000,
-    });
-  }
-  return result;
 }
 
 async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {

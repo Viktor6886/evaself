@@ -141,6 +141,20 @@ export interface Config {
   jobsMirrorMode: boolean;
   /** Универсальный фоновый ход агента (рефлексия, отчёты, исследования). */
   agentJobsEnabled: boolean;
+  /**
+   * Проверка контракта Letta на живом развёртывании.
+   *
+   * Contract-тесты доказывают контракт на сборке. Флаг включает ту же
+   * проверку при старте: canary обязан убедиться, что рядом с ним лежит
+   * проверенная версия пакета, а не та, что приехала с обновлением
+   * образа. Выключенный флаг оставляет прежнее поведение — расхождение
+   * попадает в журнал и не мешает старту.
+   */
+  lettaSdk060Verify: boolean;
+  /** Административный control plane Letta (`@letta-ai/letta-client`). */
+  lettaAdminClientEnabled: boolean;
+  /** HTTP-адрес App Server для control plane. Пустой — путь недоступен. */
+  lettaAdminBaseUrl: string;
   /** Локальный час утреннего и вечернего check-in. */
   checkinMorningHour: number;
   checkinEveningHour: number;
@@ -347,6 +361,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     // писать людям параллельно со старым интервалом.
     jobsMirrorMode: bool("EVA_JOBS_MIRROR", true),
     agentJobsEnabled: bool("EVA_AGENT_JOBS", false),
+    lettaSdk060Verify: bool("EVA_LETTA_SDK_060", false),
+    lettaAdminClientEnabled: bool("EVA_LETTA_ADMIN_CLIENT", false),
+    lettaAdminBaseUrl: str("EVA_LETTA_ADMIN_BASE_URL"),
     checkinMorningHour: clampedInt("EVA_CHECKIN_MORNING_HOUR", 9, 5, 12),
     checkinEveningHour: clampedInt("EVA_CHECKIN_EVENING_HOUR", 21, 17, 23),
     otelEnabled: bool("EVA_OTEL", false),
