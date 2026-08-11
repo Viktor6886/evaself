@@ -441,6 +441,20 @@ export class RouterStore {
    * ключ доступа: роутер никогда не читает по нему чужие записи, а
    * запись идёт как объявленная системная работа сервиса.
    */
+  /**
+   * Наблюдатель метаданных генерации.
+   *
+   * Ставится снаружи и вызывается ПОСЛЕ записи в `llm_requests`:
+   * телеметрия не имеет права ни задержать запись, ни отменить её.
+   * Внутрь уходят только числа и идентификаторы модели — ни промпта, ни
+   * ответа роутер наблюдателю не показывает.
+   */
+  setObserver(observer: (record: AttemptRecord) => void): void {
+    this.observer = observer;
+  }
+
+  private observer: ((record: AttemptRecord) => void) | null = null;
+
   async recordAttempt(record: AttemptRecord): Promise<void> {
     await runInScope(systemScope("llm-router.telemetry"), async () => {
     await this.pool.query(
@@ -490,6 +504,13 @@ export class RouterStore {
       ],
     );
     });
+    // Наблюдатель зовётся после записи и в try: телеметрия не имеет
+    // права отменить уже зафиксированный факт обращения к модели.
+    try {
+      this.observer?.(record);
+    } catch {
+      // Молча: отказ наблюдателя — это потеря телеметрии, не более.
+    }
   }
 }
 

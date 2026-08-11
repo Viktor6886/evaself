@@ -134,7 +134,12 @@
 
 | Компонент | Назначение | Путь | Контракт | Переисп. |
 |---|---|---|---|---|
-| Метрики | Prometheus-экспорт | `src/metrics.ts` | `MetricsCollector`, `MetricsSources` | расш. |
+| Метрики | Prometheus-экспорт | `src/metrics.ts`, `src/metrics-queries.ts` | `MetricsCollector`, `MetricsSources`; метки только из закрытых словарей | расш. |
+| Наблюдаемость | Единственный выход телеметрии наружу | `src/observability/gateway.ts` | `ObservabilityGateway`: Noop, Recording, Langfuse; буфер ограничен | обяз. |
+| Приватность телеметрии | Что разрешено вынести наружу | `src/observability/privacy.ts` | `PrivacyProcessor`: закрытый список ключей, HMAC-псевдоним | обяз. |
+| Трассировка | OTel-контекст и сквозной correlation id | `src/observability/tracing.ts` | `initTracing()` до инструментируемых модулей, `traceHeaders()`, `withSpan()` | обяз. |
+| Политики хранения | Классы данных, сроки и границы | `src/retention/policy.ts` | `RETENTION_CLASSES`, `effectivePolicies()`; хранятся в Config Service | обяз. |
+| Применение политик | Предпросмотр и пакетное удаление | `src/retention/service.ts`, таблицы `retention_holds`, `retention_runs` | `preview()`, `enforce()`; задержка останавливает класс целиком | обяз. |
 | Rate limit | Публичные поверхности | `src/public/rate-limit.ts` | `ValkeyRateLimiter`, `clientAddress()` | обяз. |
 | Mini App auth | Проверка подписи Telegram initData | `src/public/telegram-webapp-auth.ts`, `webapp-session.ts` | окно 300–600 с, защита от повтора | обяз. |
 | Миграции | Схема PostgreSQL | `postgres/migrations/`, `down/` | идемпотентны, у каждой есть down | обяз. |
@@ -154,5 +159,11 @@
   ещё нет (шаги 27 и 54), выборка пуста.
 - **Колонка `tenant_id`** — изоляция держится на `user_id` и области арендатора.
 - **Второй RAG, Qdrant, LightRAG, LangGraph runtime, LangSmith** — запрещены.
+- **Экспорт трасс в OTLP** — провайдер трасс есть, экспортёра нет намеренно:
+  наружу телеметрия уходит только через `ObservabilityGateway`, чтобы
+  граница приватности была одна.
+- **Удаление логов и временных медиафайлов кодом сервиса** — политика для них
+  объявлена и показывается, но исполняется вне PostgreSQL (драйвер логов
+  Docker и media-service).
 - **Полное зеркало переписки** — механизм есть, выключен
   (`EVA_CONVERSATION_MIRROR_ENABLED=false`).

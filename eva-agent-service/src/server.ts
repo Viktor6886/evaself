@@ -19,6 +19,7 @@ import type { ManagedAgentInput } from "./letta.js";
 import type { LlmManager, LlmProviderInput } from "./llm.js";
 import type { Logger } from "./logger.js";
 import { MetricsCollector } from "./metrics.js";
+import { newCorrelationId, parseTraceparent } from "./observability/tracing.js";
 import type { LavaPayments } from "./payments.js";
 import type { UserProfileService } from "./profile/profile-service.js";
 import { PublicRepository, registerPublicRoutes } from "./public/routes.js";
@@ -58,6 +59,13 @@ export interface Services {
   dispatcher?: { foreignLockCount: number };
   miniAppSessions?: MiniAppSessionStore;
   rateLimiter?: RateLimiter;
+  /**
+   * Контур наблюдаемости. Нужен выдаче метрик (состояние буфера
+   * телеметрии) и ingress — там начинается трасса хода.
+   */
+  observability?: {
+    bufferStats(): { buffered: number; dropped: number };
+  };
 }
 
 function constantTimeEquals(a: string, b: string): boolean {
@@ -99,6 +107,35 @@ export function buildServer(services: Services): FastifyInstance {
   const app = Fastify({
     logger: false,
     bodyLimit: 2 * 1024 * 1024,
+  });
+
+  // ---------------------------------------------------------------
+  // трасса хода: начинается здесь и живёт до доставки
+  // ---------------------------------------------------------------
+  // Correlation id либо приходит от вызывающего, либо рождается тут.
+  // Он не то же самое, что trace id: трасса живёт внутри процесса и
+  // рвётся на каждой границе, а correlation id едет в конверте задания,
+  // в строке outbox и в ответе — и связывает их между собой.
+  app.addHook("onRequest", async (request, reply) => {
+    const incoming = request.headers["x-correlation-id"];
+    const correlationId = typeof incoming === "string" && /^[a-zA-Z0-9-]{8,64}$/.test(incoming)
+      ? incoming
+      : newCorrelationId();
+    // Заголовок ответа возвращается всегда: по нему человек, читающий
+    // журнал, находит ход, не спрашивая идентификатор пользователя.
+    reply.header("x-correlation-id", correlationId);
+    // Дальше по коду этот идентификатор не передаётся, и это не
+    // недосмотр: ход Telegram не создаётся внутри HTTP-обработчика —
+    // между ними durable inbox, а ход может выполниться в другом
+    // процессе и позже. Идентификатор хода выводится из идентификатора
+    // апдейта (`turn.telegram` в `eva-workflow.ts`), а этот заголовок
+    // отвечает на другой вопрос: по нему вызывающий находит СВОЙ запрос
+    // в журнале.
+    if (typeof request.headers.traceparent === "string") {
+      // Некорректный `traceparent` не повод отказать в обслуживании:
+      // он просто не принимается, и запрос обрабатывается как обычно.
+      parseTraceparent(request.headers.traceparent);
+    }
   });
 
   // ---------------------------------------------------------------
@@ -167,15 +204,33 @@ export function buildServer(services: Services): FastifyInstance {
     sessions: () => letta.sessionStats(),
     locks: () => ({ held: queue.activeUsers, queued: queue.queuedUsers }),
     poolStats: () => db.poolStats(),
+    // Замер задержки есть у настоящей базы; поддельная в тестах и
+    // внешние вызовы `buildServer` его не обязаны предоставлять, и
+    // отсутствие метода не должно ронять всю выдачу.
+    ...(typeof db.queryLatency === "function"
+      ? { queryLatency: () => db.queryLatency() }
+      : {}),
     ...(services.slots ? { slots: () => services.slots!.usage() } : {}),
     ...(services.dispatcher
       ? { foreignLockReleases: () => services.dispatcher!.foreignLockCount }
       : {}),
     version: VERSION,
     turnLifecycleEnabled: config.turnLifecycleEnabled,
+    ...(services.observability
+      ? { telemetryBuffer: () => services.observability!.bufferStats() }
+      : {}),
   });
   app.addHook("onClose", async () => metrics.stop());
   app.get("/metrics", async (_request, reply: FastifyReply) => {
+    // Выключенный флаг отдаёт 404, а не пустую страницу: пустая выдача
+    // читается сборщиком как «сервис жив, метрик нет», и тревога о
+    // пропавших метриках не срабатывает.
+    // Сравнение именно с `false`: конфигурация, собранная без этого поля
+    // (а так делают тесты и внешние вызовы `buildServer`), означает
+    // «как раньше», а не «метрики выключены».
+    if (config.prometheusEnabled === false) {
+      return reply.code(404).send({ error: "metrics_disabled" });
+    }
     const body = await metrics.render();
     return reply
       .header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")

@@ -25,6 +25,7 @@ import type { UserTurnLock } from "../turns/user-turn-lock.js";
 import { AgentJobRunner } from "./agent-job.js";
 import { BullMqJobDriver } from "./bullmq-driver.js";
 import { ReconcileService } from "./maintenance.js";
+import { RetentionService } from "../retention/service.js";
 import { MirrorRecorder } from "./mirror.js";
 import { LettaProactiveComposer } from "./proactive/composer.js";
 import { proactiveStage, legacySchedulerActive } from "./proactive/cutover.js";
@@ -47,6 +48,8 @@ export interface JobLayer {
   schedules: JobScheduleRegistry;
   /** Универсальный фоновый ход агента. Продуктовых заданий пока не несёт. */
   agentJobs: AgentJobRunner;
+  /** Политики хранения: предпросмотр доступен и при выключенном удалении. */
+  retention: RetentionService;
   /** Запускать ли старые интервалы планировщика. */
   legacySchedulerActive: boolean;
   /** Сверка расписаний и запуск публикатора. */
@@ -70,6 +73,8 @@ export interface JobLayerDeps {
   outbox: OutboxDelivery;
   /** Выборка старого интервала для режима зеркала. */
   legacySelector?: (kind: ProactiveKind) => Promise<string[]> | null;
+  /** Действующие значения настроек: сроки хранения приходят оттуда. */
+  settings?: () => Record<string, unknown>;
 }
 
 export function buildJobLayer(
@@ -99,6 +104,8 @@ export function buildJobLayer(
 
   // Сверки обслуживания переносятся первыми: они ничего не отправляют
   // человеку, и ошибка в них видна в журнале, а не в его переписке.
+  const retention = new RetentionService(db, logger, config.retentionEnforcementEnabled);
+
   if (config.bullmqMaintenanceEnabled) {
     const reconcile = new ReconcileService(db, logger);
     runtime.register("maintenance_reconcile", async (context) => {
@@ -106,6 +113,17 @@ export function buildJobLayer(
       logger.info("Сверка обслуживания выполнена", {
         total: report.total,
         degraded: report.degraded,
+      });
+    });
+    // Применение политик хранения — тоже задача обслуживания: она
+    // никому не пишет и работает маленькими пакетами. Выключенный
+    // EVA_RETENTION_ENFORCEMENT оставляет её предпросмотром.
+    runtime.register("retention_enforce", async (context) => {
+      const report = await retention.enforce(deps.settings?.() ?? {}, context.signal);
+      logger.info("Политики хранения применены", {
+        dryRun: report.dryRun,
+        classes: report.classes.length,
+        affected: report.classes.reduce((sum, item) => sum + item.affected, 0),
       });
     });
   }
@@ -159,6 +177,7 @@ export function buildJobLayer(
     runtime,
     schedules,
     agentJobs,
+    retention,
     legacySchedulerActive: legacySchedulerActive(stage),
     async start(): Promise<void> {
       // Сверка идёт до публикатора: расписание, потерянное вместе с

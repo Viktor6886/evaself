@@ -23,6 +23,7 @@ import { TelegramDeliveryLimiter } from "./delivery/telegram-limits.js";
 import { EvaWorkflow } from "./eva-workflow.js";
 import { GoalService } from "./goals/goal-service.js";
 import { buildJobLayer } from "./jobs/index.js";
+import { buildObservability } from "./observability/index.js";
 import { LettaService } from "./letta.js";
 import { LlmManager } from "./llm.js";
 import { createLogger } from "./logger.js";
@@ -54,6 +55,11 @@ async function main(): Promise<void> {
   if (!config.apiKey) {
     logger.error("EVA_AGENT_API_KEY пуст — все запросы /v1 будут отклонены");
   }
+
+  // Наблюдаемость собирается до всего остального: провайдер трасс обязан
+  // существовать раньше модулей, которые инструментируются при загрузке,
+  // иначе трассы окажутся пустыми (требование 2 шага 09).
+  const observability = buildObservability(config, VERSION, logger);
 
   const persona = await readPersona(config);
   const db = new Database(config.databaseUrl);
@@ -297,6 +303,7 @@ async function main(): Promise<void> {
     slots,
     dispatcher,
     redisPing: async () => (await redis.ping()) === "PONG",
+    observability,
     miniAppSessions,
     rateLimiter,
   });
@@ -386,6 +393,10 @@ async function main(): Promise<void> {
           : Promise.resolve(),
       ]);
       letta.shutdown();
+      // Телеметрия сбрасывается последней и уже после остановки приёма:
+      // терять её не хочется, но задерживать из-за неё остановку — тем
+      // более.
+      await observability.shutdown();
       await app.close();
       configEvents.disconnect();
       redis.disconnect();

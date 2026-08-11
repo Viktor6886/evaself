@@ -72,6 +72,8 @@ export interface AdminServerServices {
   integrations: IntegrationConfigService;
   users: UserService;
   securityAudit?: SecurityAuditService;
+  /** Предпросмотр политик хранения. Удаление выполняет задание очереди. */
+  retention?: { preview(settings: Record<string, unknown>): Promise<unknown> };
   events: Redis;
   logger: Logger;
   readiness: () => Promise<boolean>;
@@ -348,6 +350,25 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
   // Security Audit. Читают owner и admin: список находок сам по себе —
   // карта слабых мест установки, и operator с viewer его не получают.
   // Значений секретов в ответе нет, только имена параметров.
+  // Предпросмотр политик хранения. Читают owner и admin: отчёт называет
+  // объёмы данных установки и сроки их жизни — это не операционная
+  // сводка, а карта того, что и как долго хранится.
+  //
+  // Ответ не содержит ни строки пользовательских данных: только классы,
+  // сроки, счётчики и срок ротации резервных копий.
+  app.get("/api/admin/v1/retention/preview", {
+    config: { roles: ["owner", "admin"] } satisfies RouteAccess,
+  }, async () => {
+    if (!services.retention) {
+      throw adminNotFound("Предпросмотр политик хранения недоступен");
+    }
+    const settings = await services.config.getAll();
+    const values = Object.fromEntries(
+      settings.settings.map((item) => [item.key, item.value]),
+    );
+    return await services.retention.preview(values);
+  });
+
   app.get("/api/admin/v1/security-audit", {
     config: { roles: ["owner", "admin"] } satisfies RouteAccess,
   }, async () => {

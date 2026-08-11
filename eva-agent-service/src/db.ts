@@ -667,7 +667,7 @@ export class Database {
           return (...args: unknown[]) => {
             Database.guard(args);
             this.incrementQueryCount();
-            return Reflect.apply(target.query, target, args);
+            return this.timed(() => Reflect.apply(target.query, target, args));
           };
         }
         if (property === "connect") {
@@ -686,7 +686,7 @@ export class Database {
           return (...args: unknown[]) => {
             Database.guard(args);
             this.incrementQueryCount();
-            return Reflect.apply(target.query, target, args);
+            return this.timed(() => Reflect.apply(target.query, target, args));
           };
         }
         const value = Reflect.get(target, property, target) as unknown;
@@ -714,6 +714,55 @@ export class Database {
         ? (first as { values: unknown[] }).values
         : [];
     assertQueryAllowed(sql, values);
+  }
+
+  /**
+   * Задержка запроса к базе.
+   *
+   * Скользящее окно фиксированного размера, а не гистограмма и не
+   * счётчик за всё время: наблюдателю нужно «как сейчас», а сумма с
+   * момента запуска отвечает на другой вопрос и тем медленнее реагирует,
+   * чем дольше живёт процесс. Память ограничена размером окна.
+   */
+  private readonly latencies: number[] = [];
+
+  private timed<T>(work: () => T): T {
+    const startedAt = performance.now();
+    const finish = (): void => {
+      const elapsed = performance.now() - startedAt;
+      this.latencies.push(elapsed);
+      if (this.latencies.length > Database.LATENCY_WINDOW) this.latencies.shift();
+    };
+    const result = work() as unknown;
+    if (result && typeof (result as { then?: unknown }).then === "function") {
+      // Замер закрывается и на отказе: медленный запрос, кончившийся
+      // ошибкой, — это тоже задержка базы, и терять её нельзя.
+      return (result as Promise<unknown>).then(
+        (value) => {
+          finish();
+          return value;
+        },
+        (error: unknown) => {
+          finish();
+          throw error;
+        },
+      ) as T;
+    }
+    finish();
+    return result as T;
+  }
+
+  private static readonly LATENCY_WINDOW = 200;
+
+  /** Задержка последних запросов в миллисекундах: среднее и максимум. */
+  queryLatency(): { avg: number; max: number; samples: number } {
+    if (this.latencies.length === 0) return { avg: 0, max: 0, samples: 0 };
+    const sum = this.latencies.reduce((total, item) => total + item, 0);
+    return {
+      avg: sum / this.latencies.length,
+      max: Math.max(...this.latencies),
+      samples: this.latencies.length,
+    };
   }
 
   private incrementQueryCount(): void {

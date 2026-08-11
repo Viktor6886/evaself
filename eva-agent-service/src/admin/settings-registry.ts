@@ -289,7 +289,137 @@ export const SETTINGS_REGISTRY: readonly SettingDefinition[] = [
   },
 ] as const;
 
-export const SETTING_BY_KEY = new Map(SETTINGS_REGISTRY.map((item) => [item.key, item]));
+/**
+ * Сроки хранения по классам данных (шаг 10).
+ *
+ * Живут здесь, а не в отдельной системе политик: Config Service уже
+ * даёт типы, границы, версию, аудит и откат — ровно то, чего требует
+ * шаг. Границы `min`/`max` и есть «допустимые границы» из задания:
+ * сократить срок логов до нуля или растянуть его на год через админку
+ * нельзя.
+ *
+ * Классов данных больше, чем настроек: у канонической памяти и
+ * сохранённых документов срока нет по существу, и настройка «сколько
+ * дней хранить память» была бы обещанием, которого код не выполняет.
+ */
+const RETENTION_SETTINGS: readonly SettingDefinition[] = [
+  {
+    key: "retention.app_logs_days",
+    env: "EVA_RETENTION_APP_LOGS_DAYS",
+    title: "Логи и debug-трассы",
+    group: "retention",
+    type: "integer",
+    default: 7,
+    min: 1,
+    max: 30,
+    required: false,
+    requires_restart: false,
+    description: "Сколько дней хранятся логи приложения и отладочные трассы",
+    affects: ["agent-runtime"],
+    recommended: "7 дней. Дольше — дороже хранение и шире окно, в котором отладочные данные вообще существуют.",
+  },
+  {
+    key: "retention.telegram_payload_days",
+    env: "EVA_RETENTION_TELEGRAM_PAYLOAD_DAYS",
+    title: "Сырой payload Telegram",
+    group: "retention",
+    type: "integer",
+    default: 7,
+    min: 1,
+    max: 30,
+    required: false,
+    requires_restart: false,
+    description: "Через сколько дней содержание входящих и исходящих сообщений вычищается из очередей",
+    affects: ["agent-runtime"],
+    recommended: "7 дней. Строка остаётся — вычищается только содержание, поэтому защита от дублей не ломается.",
+  },
+  {
+    key: "retention.media_temp_days",
+    env: "EVA_RETENTION_MEDIA_TEMP_DAYS",
+    title: "Временные медиафайлы",
+    group: "retention",
+    type: "integer",
+    default: 7,
+    min: 1,
+    max: 30,
+    required: false,
+    requires_restart: false,
+    description: "Сколько дней живут временные голосовые, изображения, документы и производные",
+    affects: ["media-service"],
+    recommended: "7 дней. Сохранённые пользователем документы под это правило не подпадают.",
+  },
+  {
+    key: "retention.telegram_idempotency_days",
+    env: "EVA_RETENTION_TELEGRAM_IDEMPOTENCY_DAYS",
+    title: "Метаданные идемпотентности",
+    group: "retention",
+    type: "integer",
+    default: 30,
+    min: 7,
+    max: 180,
+    required: false,
+    requires_restart: false,
+    description: "Сколько дней хранятся строки очередей без содержания — защита от повторной доставки",
+    affects: ["agent-runtime"],
+    recommended: "30 дней. Короче — растёт риск обработать один и тот же апдейт дважды.",
+    advanced: true,
+  },
+  {
+    key: "retention.langfuse_metadata_days",
+    env: "EVA_RETENTION_LANGFUSE_DAYS",
+    title: "Метаданные наблюдаемости",
+    group: "retention",
+    type: "integer",
+    default: 30,
+    min: 1,
+    max: 90,
+    required: false,
+    requires_restart: false,
+    description: "Заявленный срок хранения метаданных в Langfuse; удаление выполняется на его стороне",
+    affects: ["observability"],
+    recommended: "30 дней. Это объявление политики, а не удаление: чужой системой управляет её администратор.",
+    advanced: true,
+  },
+  {
+    key: "retention.dead_letters_days",
+    env: "EVA_RETENTION_DEAD_LETTERS_DAYS",
+    title: "Мёртвые задания",
+    group: "retention",
+    type: "integer",
+    default: 90,
+    min: 30,
+    max: 365,
+    required: false,
+    requires_restart: false,
+    description: "Сколько дней хранятся безопасные метаданные dead-letter",
+    affects: ["agent-runtime"],
+    recommended: "90 дней: срок разбора редких отказов, а не срок жизни данных.",
+    advanced: true,
+  },
+  {
+    key: "retention.metrics_days",
+    env: "EVA_RETENTION_METRICS_DAYS",
+    title: "Агрегированные метрики",
+    group: "retention",
+    type: "integer",
+    default: 365,
+    min: 365,
+    max: 1095,
+    required: false,
+    requires_restart: false,
+    description: "Сколько дней хранятся агрегаты без содержания",
+    affects: ["observability"],
+    recommended: "Не меньше года: сравнивать нагрузку год к году иначе не с чем.",
+    advanced: true,
+  },
+];
+
+export const ALL_SETTINGS: readonly SettingDefinition[] = [
+  ...SETTINGS_REGISTRY,
+  ...RETENTION_SETTINGS,
+];
+
+export const SETTING_BY_KEY = new Map(ALL_SETTINGS.map((item) => [item.key, item]));
 
 export function parseBootstrapSetting(definition: SettingDefinition, raw: string): unknown {
   if (definition.key === "runtime.scheduler_interval_seconds" ||

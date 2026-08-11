@@ -2,7 +2,7 @@ import { Redis } from "ioredis";
 import pg from "pg";
 
 import { createLogger } from "../logger.js";
-import { guardPool } from "../tenancy/index.js";
+import { guardPool, runInScope, systemScope } from "../tenancy/index.js";
 import { AuthService } from "./auth-service.js";
 import { AuditService } from "./audit-service.js";
 import { ConfigService } from "./config-service.js";
@@ -17,6 +17,7 @@ import { OutboundGateway } from "./outbound-gateway.js";
 import { buildAdminServer } from "./server.js";
 import { UserService } from "./user-service.js";
 import { SecurityAuditService } from "./security-audit.js";
+import { RetentionService } from "../retention/service.js";
 import { UpdaterClient } from "./updater-client.js";
 
 const { Pool } = pg;
@@ -113,6 +114,24 @@ async function main(): Promise<void> {
     integrations,
     users,
     securityAudit: new SecurityAuditService({ env: process.env, db: pool }),
+    // Предпросмотр всегда доступен и всегда безопасен: сам сервис
+    // создаётся выключенным (`enabled = false`), удалять из админки
+    // нечем — удаление выполняет задание очереди обслуживания.
+    retention: new RetentionService(
+      {
+        // Приведение к узкому контракту: `pg` типизирует строку как
+        // `QueryResultRow`, сервису достаточно объекта с полями.
+        query: async <T>(sql: string, values: unknown[] = []) =>
+          await pool.query(sql, values) as unknown as { rows: T[]; rowCount: number | null },
+        // Область объявляется настоящая: запросы предпросмотра идут по
+        // всем пользователям сразу, и граница арендатора обязана это
+        // видеть, а не обходиться заглушкой.
+        withSystemScope: async (reason, work, options) =>
+          await runInScope(systemScope(reason, options ?? {}), work),
+      },
+      logger,
+      false,
+    ),
     events: redis,
     logger,
     readiness: async () => {

@@ -14,6 +14,7 @@ import type { UserProfileService } from "./profile/profile-service.js";
 import type { UserTurnLock } from "./turns/user-turn-lock.js";
 import type { RuntimeContextBuilder } from "./runtime/runtime-context.js";
 import { TaskEventService } from "./tasks/task-event-service.js";
+import { withSpan } from "./observability/tracing.js";
 import { runInTurn } from "./turns/turn-context.js";
 import {
   TURN_FLOW_VERSION,
@@ -135,9 +136,35 @@ export class EvaWorkflow {
     if (normalized.length === 0) return { status: "ignored" };
     const primary = normalized[normalized.length - 1]!;
     const earlier = normalized.slice(0, -1);
-    return await this.telegram.withDeliveryContext(
-      `${primary.command ? "telegram-command" : "telegram-update"}:${primary.updateId}`,
-      async () => await this.process(primary, earlier),
+    // Спан хода открывается здесь и накрывает всё, что ход делает
+    // дальше: обращение к Letta, обращения к модели через Router,
+    // постановку заданий и доставку. Контекст OpenTelemetry живёт в
+    // AsyncLocalStorage и переживает вложенные await, поэтому один
+    // идентификатор трассы связывает участки без ручной передачи через
+    // каждый вызов.
+    //
+    // Correlation id выводится из идентификатора апдейта, а не из
+    // HTTP-запроса: между вебхуком и этим кодом стоит durable inbox, и
+    // ход может выполняться в другом процессе и позже. Идентификатор
+    // апдейта переживает и то, и другое.
+    const correlationId = `telegram-update:${primary.updateId}`;
+    return await withSpan(
+      "turn.telegram",
+      async () => await this.telegram.withDeliveryContext(
+        `${primary.command ? "telegram-command" : "telegram-update"}:${primary.updateId}`,
+        async () => await this.process(primary, earlier),
+      ),
+      {
+        // Атрибуты спана здесь заведомо безопасны: идентификатор
+        // апдейта и вид источника. Процессор приватности не
+        // подключается, чтобы не тащить его в конструктор всех
+        // вызывающих ради двух полей, которые и так не содержат
+        // пользовательского текста.
+        attributes: {
+          correlation_id: correlationId,
+          source: primary.command ? "command" : "message",
+        },
+      },
     );
   }
 

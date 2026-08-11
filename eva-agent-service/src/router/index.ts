@@ -14,6 +14,7 @@ import { DEFAULT_OPTIONS, LlmRouter } from "./router.js";
 import { ValkeyRouterLimits } from "./limits.js";
 import { createRouterServer } from "./server.js";
 import { RouterStore } from "./store.js";
+import { buildObservabilityFrom } from "../observability/index.js";
 
 const { Pool } = pg;
 
@@ -51,6 +52,46 @@ async function main(): Promise<void> {
   await pool.query("SELECT 1");
 
   const store = new RouterStore(pool, encryptionKey);
+
+  // Метаданные генерации — единственное, что этот процесс отдаёт
+  // наблюдаемости, и ровно то, что разрешено Langfuse (требование 6
+  // шага 09): модель, токены, стоимость, факт переключения провайдера.
+  // Ни промпта, ни ответа, ни аргументов инструментов здесь нет.
+  const observability = buildObservabilityFrom(
+    {
+      otelEnabled: enabled("EVA_OTEL"),
+      langfuseMetadataOnly: enabled("EVA_LANGFUSE_METADATA_ONLY"),
+      langfuseBaseUrl: (process.env.LANGFUSE_BASE_URL ?? "").trim(),
+      langfusePublicKey: (process.env.LANGFUSE_PUBLIC_KEY ?? "").trim(),
+      langfuseSecretKey: (process.env.LANGFUSE_SECRET_KEY ?? "").trim(),
+      telemetryPseudonymSecret: (process.env.EVA_TELEMETRY_PSEUDONYM_SECRET ?? "").trim(),
+      serviceName: "evaself-llm-router",
+    },
+    process.env.EVA_ROUTER_VERSION ?? "0",
+    logger,
+  );
+  store.setObserver((record) => {
+    observability.gateway.observe({
+      kind: "generation",
+      name: "llm.request",
+      // `user_id` роутера — строка: наружу он всё равно уходит
+      // псевдонимом, но тип шлюза требует числа или null.
+      userId: Number(record.user_id) || null,
+      correlationId: record.request_id,
+      durationMs: record.latency_ms,
+      attributes: {
+        model: record.model ?? null,
+        route: record.route_code,
+        tokens_input: record.tokens_in,
+        tokens_output: record.tokens_out,
+        cost_micros: record.cost_micro,
+        attempts: record.attempts,
+        provider_switched: record.switches > 0,
+        status: record.succeeded ? "succeeded" : "failed",
+        error_code: record.error_code ?? null,
+      },
+    });
+  });
   const distributedLimits = enabled("EVA_DISTRIBUTED_LIMITS");
   const valkeyUrl = (process.env.VALKEY_URL ?? "").trim();
   if (distributedLimits && !valkeyUrl) {

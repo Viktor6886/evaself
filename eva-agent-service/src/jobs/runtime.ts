@@ -31,6 +31,7 @@ import {
   classifyJobError,
   timingFor,
 } from "./policy.js";
+import { withSpan } from "../observability/tracing.js";
 import type { QueueRegistry } from "./queue-registry.js";
 
 export interface JobContext {
@@ -209,14 +210,32 @@ export class JobRuntime {
     renewal.unref();
 
     try {
-      await handler({
-        envelope,
-        runId,
-        attempt,
-        signal: controller.signal,
-        timing,
-        logger: this.logger,
-      });
+      // Трасса продолжается через очередь: идентификаторы приехали в
+      // конверте, потому что стек вызовов между постановкой задания и
+      // его выполнением не сохраняется — между ними транзакция,
+      // публикатор и, возможно, другой процесс.
+      await withSpan(
+        `job.${envelope.type}`,
+        async () => await handler({
+          envelope,
+          runId,
+          attempt,
+          signal: controller.signal,
+          timing,
+          logger: this.logger,
+        }),
+        {
+          attributes: {
+            job_type: envelope.type,
+            queue: envelope.queue,
+            run_id: runId,
+            correlation_id: envelope.correlationId,
+            causation_id: envelope.causationId,
+            attempt,
+            schema_version: envelope.schemaVersion,
+          },
+        },
+      );
       await this.runs.succeed(handle);
       return { status: "succeeded", runId };
     } catch (error) {
