@@ -197,7 +197,7 @@ Batch 21–23 и 33 выполняются только по отдельной 
 изменениями.
 
 Сегодня за границей: `admin-ui/public/ui.js` (3350), `src/admin/stt-service.ts`
-(1879), `src/server.ts` (1498), `src/letta.ts` (1369), `src/db.ts` (1159),
+(1879), `src/server.ts` (1498), `src/letta.ts` (1471), `src/db.ts` (1159),
 `src/admin/server.ts` (1092), `src/public/webapp-core.ts` (1070),
 `src/eva-workflow.ts` (973), `src/router/router.ts` (928).
 

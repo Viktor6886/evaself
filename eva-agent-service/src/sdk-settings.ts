@@ -70,9 +70,37 @@ export class SdkSettingsManager {
   async update(input: SdkSettingsInput): Promise<PublicSdkSettings> {
     const current = await this.db.getSdkSettings();
     const merged = validateSettings({ ...rowToInput(current), ...input });
+    // Выключение reasoning не проверяется никогда: это же действие
+    // восстанавливает диалоги, и оно не должно зависеть от App Server.
+    if (
+      merged.reasoning_effort !== "none" &&
+      merged.reasoning_effort !== current.reasoning_effort
+    ) {
+      await this.assertReasoningEffortSupported(merged.reasoning_effort);
+    }
     const saved = await this.db.saveSdkSettings({ ...current, ...merged });
     await this.letta.applySdkSettings(runtimeFromRow(saved));
     return this.public(saved);
+  }
+
+  /**
+   * Уровень reasoning принимается, только если каталог App Server знает
+   * такую запись для активной модели.
+   *
+   * Проверка живёт здесь, а не в `validateSettings`: чистая валидация
+   * вызывается ещё и при чтении уже сохранённой строки, и запрет там ломал
+   * бы старт сервиса на установке, где уровень уже выставлен. Недоступный
+   * каталог настройку не блокирует — вывода о поддержке в этом случае
+   * просто нет.
+   */
+  private async assertReasoningEffortSupported(effort: ReasoningEffort): Promise<void> {
+    const support = await this.letta.reasoningEffortSupport(effort);
+    if (!support.checked || support.supported) return;
+    throw badRequest(
+      `Модель ${support.model} не предлагает уровень reasoning «${effort}». `
+        + "App Server применяет уровень при открытии сессии, поэтому такое "
+        + "значение остановило бы диалоги. Допустимо «none».",
+    );
   }
 
   private public(row: SdkSettingsRow): PublicSdkSettings {
