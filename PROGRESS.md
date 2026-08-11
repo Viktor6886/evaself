@@ -10,12 +10,12 @@
 
 ```
 CURRENT_BATCH: 8
-CURRENT_STEP:  09
-BRANCH:        —
-STATUS:        не начат
-LAST_COMMIT:   —
+CURRENT_STEP:  10
+BRANCH:        claude/roadmap-batch-execution-fclhwf
+STATUS:        в работе
+LAST_COMMIT:   fd574fc
 BLOCKER:       —
-NEXT:          прочитать prompts/step-09-observability.md и prompts/step-10-retention.md, создать ветку batch/08-observability от main, выполнить шаг 09
+NEXT:          открыть pull request на batch 8, дождаться зелёного CI, независимое ревью
 ```
 
 Значения полей:
@@ -49,7 +49,7 @@ Batch — единица работы: одна ветка, один pull reques
 | 5 | 06 | P1 | выполнен | [#135](https://github.com/Viktor6886/evaself/pull/135) |
 | 6 | 07 | P1 | выполнен | [#143](https://github.com/Viktor6886/evaself/pull/143) |
 | 7 | 08 | P1 | выполнен | [#144](https://github.com/Viktor6886/evaself/pull/144) |
-| 8 | 09–10 | P1 | не начат | — |
+| 8 | 09–10 | P1 | в работе | — |
 | 9 | 11 | P1 | не начат | — |
 | 10 | 12–13 | P1 | не начат | — |
 | 11 | 14 | P2 | не начат | — |
