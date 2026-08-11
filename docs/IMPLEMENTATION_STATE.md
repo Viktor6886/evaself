@@ -96,7 +96,12 @@
 
 | Компонент | Назначение | Путь | Контракт | Переисп. |
 |---|---|---|---|---|
-| Letta-интеграция | Единственный conversational runtime | `src/letta.ts` | `@letta-ai/letta-agent-sdk`; ровно шесть memory blocks | обяз. |
+| Letta-интеграция | Единственный conversational runtime | `src/letta.ts` | `@letta-ai/letta-agent-sdk` 0.6.2; ровно шесть memory blocks | обяз. |
+| Реестр возможностей Letta | Операция → кем поддержана → в какой версии | `src/letta/capabilities.ts` | `assertSupported()`, `missingCapabilities()`; неподдержанная — `unsupported_operation` | обяз. |
+| Состав memory blocks | Шесть блоков, их границы и порядок | `src/letta/memory-blocks.ts` | `evaMemoryBlocks()`; реэкспорт из `letta.ts` | обяз. |
+| Административный control plane | `@letta-ai/letta-client` 1.12.1 только как управляющий путь | `src/letta/admin-client.ts` | `LettaAdminPlane`; методов отправки сообщения нет | обяз. |
+| Синхронизация блоков | Честный исход записи в memory block | `src/letta/memory-block-sync.ts`, таблица `letta_memory_block_sync` | `pending` · `synced` · `runtime_override` · `failed`; предпросмотр отпечатками | обяз. |
+| Страж удаления | Запрет удаления при незакончившемся ходе | `src/letta/delete-guard.ts` | выборка по `turn_runs`, код `deletion_blocked` | обяз. |
 | RuntimeContextBuilder | Единственный финальный сборщик контекста | `src/runtime/runtime-context.ts` | `RuntimeContext`, бюджеты из `CLAUDE.md` | обяз. |
 | ConversationPurposeService | Назначения conversation и политика инструментов | `src/conversations/purpose-service.ts` | `purposePolicy()`, `toolAllowedForPurpose()` | обяз. |
 | Граф памяти | Узлы, связи, поиск через FTS | `src/memory/graph-repository.ts`, `graph-context.ts`, таблицы `memory_nodes`, `memory_edges` | `websearch_to_tsquery`, глубина ≤ 3 | расш. |
