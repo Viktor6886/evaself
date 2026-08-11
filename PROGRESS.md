@@ -13,7 +13,7 @@ CURRENT_BATCH: 12
 CURRENT_STEP:  16
 BRANCH:        batch/12-temporal-memory-curator
 STATUS:        на ревью
-LAST_COMMIT:   4466495
+LAST_COMMIT:   6431c33
 BLOCKER:       —
 NEXT:          дождаться зелёного CI в PR #150 и смержить
 ```
