@@ -124,15 +124,17 @@ export function buildServer(services: Services): FastifyInstance {
     // Заголовок ответа возвращается всегда: по нему человек, читающий
     // журнал, находит ход, не спрашивая идентификатор пользователя.
     reply.header("x-correlation-id", correlationId);
-    (request as { correlationId?: string }).correlationId = correlationId;
-    const inbound = parseTraceparent(
-      typeof request.headers.traceparent === "string" ? request.headers.traceparent : null,
-    );
-    if (inbound) {
-      // Входящая трасса не отбрасывается: ход продолжает чужую, а не
-      // начинает свою — иначе сквозной путь запроса рвался бы на нашей
-      // границе.
-      (request as { inboundTraceId?: string }).inboundTraceId = inbound.traceId;
+    // Дальше по коду этот идентификатор не передаётся, и это не
+    // недосмотр: ход Telegram не создаётся внутри HTTP-обработчика —
+    // между ними durable inbox, а ход может выполниться в другом
+    // процессе и позже. Идентификатор хода выводится из идентификатора
+    // апдейта (`turn.telegram` в `eva-workflow.ts`), а этот заголовок
+    // отвечает на другой вопрос: по нему вызывающий находит СВОЙ запрос
+    // в журнале.
+    if (typeof request.headers.traceparent === "string") {
+      // Некорректный `traceparent` не повод отказать в обслуживании:
+      // он просто не принимается, и запрос обрабатывается как обычно.
+      parseTraceparent(request.headers.traceparent);
     }
   });
 
