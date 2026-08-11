@@ -1074,13 +1074,103 @@
   }
 
   function openSetting(code) {
-    if (code === "memory") {
-      const confirmed = state.profile?.confirmed || [];
-      const candidates = state.profile?.candidates || [];
-      return openSheet({ title: "Память Евы", subtitle: "Показываются только структурированные поля профиля, а не вся история Letta.", html: `<div class="section-stack"><article class="section-card"><h3>Подтверждено: ${confirmed.length}</h3>${confirmed.slice(0,8).map((item) => `<p><strong>${escapeHtml(item.field_key)}</strong>: ${escapeHtml(formatValue(item.value))}</p>`).join("") || "<p>Подтверждённых полей пока нет.</p>"}</article><article class="section-card"><h3>Нужно проверить: ${candidates.length}</h3><p>Подтверждение и отклонение кандидатов будет подключено к отдельному экрану памяти.</p></article></div>` });
-    }
+    if (code === "memory") return void openMemorySheet();
     if (code === "pulse") return openSheet({ title: "Диагностика", subtitle: "Технические детали скрыты от обычных экранов.", html: `<div class="section-stack"><article class="section-card"><p><strong>Frontend:</strong> ${BUILD}</p><p><strong>API v2:</strong> ${state.dashboard ? "доступен" : "не подключён"}</p><p><strong>Telegram initData:</strong> ${tg?.initData ? "получена" : "отсутствует"}</p><p><strong>Тариф:</strong> ${escapeHtml(state.session?.plan || "неизвестно")}</p></article></div>` });
     openSheet({ title: "Настройки", subtitle: "Раздел не дублирует инструменты Пульта.", html: `<article class="section-card"><p>Эта настройка будет подключена к серверному профилю и административной конфигурации. Сейчас интерфейс не имитирует сохранение.</p></article>` });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Память: просмотр, подтверждение, исправление и удаление (шаг 16)
+  // ---------------------------------------------------------------------------
+  // Все четыре операции идут по /public/memory/*. Идентификатор владельца
+  // на клиенте не хранится и не отправляется: сервер берёт его из
+  // подписанной initData, поэтому подменить его отсюда нечем.
+
+  async function openMemorySheet() {
+    openSheet({
+      title: "Память Евы",
+      subtitle: "Что Ева помнит. Кандидатов она не считает фактами, пока вы не подтвердите.",
+      html: `<div class="section-stack" id="memory-host"><article class="section-card"><p>Загружаю…</p></article></div>`,
+      onMount() { void refreshMemory(); },
+    });
+  }
+
+  async function refreshMemory() {
+    const host = document.getElementById("memory-host");
+    if (!host) return;
+    let items = [];
+    try {
+      const result = await api("/public/memory");
+      items = Array.isArray(result?.items) ? result.items : [];
+    } catch (error) {
+      host.innerHTML = `<article class="section-card"><p>${escapeHtml(friendlyError(error))}</p></article>`;
+      return;
+    }
+    const candidates = items.filter((item) => item.status === "candidate");
+    const facts = items.filter((item) => item.status !== "candidate");
+    host.innerHTML = `
+      <article class="section-card"><h3>Нужно проверить: ${candidates.length}</h3>
+        ${candidates.length === 0 ? "<p>Непроверенных записей нет.</p>" : candidates.map(memoryRow).join("")}</article>
+      <article class="section-card"><h3>Подтверждено: ${facts.length}</h3>
+        ${facts.length === 0 ? "<p>Подтверждённых записей пока нет.</p>" : facts.map(memoryRow).join("")}</article>`;
+    host.querySelectorAll("[data-memory-action]").forEach((button) => {
+      button.addEventListener("click", () => void memoryAction(
+        button.dataset.memoryAction,
+        button.dataset.memoryId,
+        button.dataset.memoryValue || "",
+      ));
+    });
+  }
+
+  function memoryRow(item) {
+    const id = escapeAttr(String(item.id));
+    const value = item.value ? `: ${escapeHtml(item.value)}` : "";
+    const period = item.validFrom ? `<small>с ${escapeHtml(String(item.validFrom).slice(0, 10))}</small>` : "";
+    return `<div class="memory-row"><p><strong>${escapeHtml(item.title)}</strong>${value} ${period}</p>
+      <div class="action-row">
+        ${item.status === "candidate" ? `<button class="primary-action" type="button" data-memory-action="confirm" data-memory-id="${id}">Подтвердить</button>
+        <button class="secondary-action" type="button" data-memory-action="reject" data-memory-id="${id}">Не так</button>` : ""}
+        <button class="secondary-action" type="button" data-memory-action="correct" data-memory-id="${id}" data-memory-value="${escapeAttr(item.value || item.title)}">Исправить</button>
+        <button class="secondary-action" type="button" data-memory-action="history" data-memory-id="${id}">История</button>
+        <button class="danger-action" type="button" data-memory-action="delete" data-memory-id="${id}">Удалить</button>
+      </div></div>`;
+  }
+
+  async function memoryAction(action, id, currentValue) {
+    const key = encodeURIComponent(id || "0");
+    try {
+      if (action === "confirm" || action === "reject") {
+        await api(`/public/memory/${key}/confirm`, { method: "POST", body: JSON.stringify({ decision: action }) });
+        toast(action === "confirm" ? "Запомнила" : "Убрала из фактов");
+        return void refreshMemory();
+      }
+      if (action === "correct") {
+        // Исправление создаёт НОВУЮ версию: прежнее значение остаётся в
+        // истории, и это видно на соседней кнопке.
+        const next = window.prompt("Как правильно?", currentValue);
+        if (next === null || !next.trim()) return;
+        await api(`/public/memory/${key}`, { method: "PATCH", body: JSON.stringify({ value: next.trim() }) });
+        toast("Исправила, прежняя версия осталась в истории");
+        return void refreshMemory();
+      }
+      if (action === "delete") {
+        if (!window.confirm("Удалить факт вместе со всеми версиями и источниками?")) return;
+        await api(`/public/memory/${key}`, { method: "DELETE" });
+        toast("Удалила");
+        return void refreshMemory();
+      }
+      if (action === "history") {
+        const result = await api(`/public/memory/${key}/history`);
+        const history = Array.isArray(result?.history) ? result.history : [];
+        return openSheet({
+          title: "История факта",
+          subtitle: "Прежние версии не удаляются — их видно целиком.",
+          html: `<div class="section-stack">${history.length === 0 ? "<article class=\"section-card\"><p>История пуста.</p></article>" : history.map((version) => `<article class="section-card"><p><strong>Версия ${escapeHtml(String(version.version))}</strong> · ${escapeHtml(String(version.status))}</p><p>${escapeHtml(version.value || version.title || "")}</p><small>${escapeHtml(String(version.valid_from || "").slice(0, 10))} — ${escapeHtml(version.valid_to ? String(version.valid_to).slice(0, 10) : "сейчас")} · ${escapeHtml(String(version.change_reason || ""))}</small></article>`).join("")}</div>`,
+        });
+      }
+    } catch (error) {
+      toast(friendlyError(error), true);
+    }
   }
 
   // ---------------------------------------------------------------------------

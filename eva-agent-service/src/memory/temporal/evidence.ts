@@ -1,0 +1,125 @@
+/**
+ * Доказательства фактов.
+ *
+ * Главное свойство здесь — повторное извлечение одного и того же
+ * сообщения не считается новым независимым доказательством. Без него
+ * уверенность растёт от одного лишь перезапуска Curator: тот же текст
+ * прочитан второй раз — и факт «подтверждён дважды». Поэтому у каждого
+ * доказательства есть хэш содержания, он входит в уникальный ключ, и
+ * повторная запись возвращается как `deduplicated`, а не как вставка.
+ *
+ * Уверенность узла считает серверный код по набору РАЗЛИЧНЫХ
+ * доказательств (инвариант 18 и 25): модель предлагает, арифметику
+ * делает код.
+ */
+
+import { createHash } from "node:crypto";
+
+import { sourceTrust } from "./status.js";
+
+export type EvidenceSupport = "supports" | "refutes" | "mentions";
+
+export interface EvidenceInput {
+  sourceType: string;
+  sourceId?: string | null;
+  messageId?: string | null;
+  episodeId?: number | null;
+  /** Дата сообщения: когда это было сказано. */
+  sourceAt?: Date | null;
+  /** Дата события: когда это произошло в жизни пользователя. */
+  eventAt?: Date | null;
+  support?: EvidenceSupport;
+  confidence?: number;
+  /** Фрагмент, на котором держится вывод. В хэш входит нормализованным. */
+  excerpt?: string | null;
+}
+
+export interface EvidenceRecord extends EvidenceInput {
+  support: EvidenceSupport;
+  confidence: number;
+  contentHash: string;
+}
+
+/**
+ * Отпечаток доказательства.
+ *
+ * В него входит то, что делает доказательство ЭТИМ доказательством:
+ * источник, его идентификатор, сообщение и нормализованный фрагмент.
+ * Дата не входит: повторный разбор того же сообщения происходит в
+ * другое время, и время в ключе сломало бы всю защиту от повтора.
+ */
+export function evidenceHash(input: EvidenceInput): string {
+  const parts = [
+    input.sourceType.trim().toLowerCase(),
+    (input.sourceId ?? "").trim(),
+    (input.messageId ?? "").trim(),
+    normalizeExcerpt(input.excerpt ?? ""),
+  ];
+  // Разделитель — символ, которого не бывает в источнике: со склейкой
+  // через пробел «msg 1» + «» и «msg» + «1» дали бы один отпечаток, а
+  // это два разных доказательства.
+  return createHash("sha256").update(parts.join("\u0000"), "utf8").digest("hex");
+}
+
+function normalizeExcerpt(value: string): string {
+  return value.normalize("NFKC").replace(/\s+/gu, " ").trim().toLocaleLowerCase("ru");
+}
+
+export function buildEvidence(input: EvidenceInput): EvidenceRecord {
+  const support = input.support ?? "supports";
+  // Уверенность самого доказательства ограничена доверием к источнику:
+  // вывод модели с confidence 0.99 остаётся выводом модели.
+  const declared = clamp01(input.confidence ?? 0.7);
+  return {
+    ...input,
+    support,
+    confidence: Math.min(declared, sourceTrust(input.sourceType)),
+    contentHash: evidenceHash(input),
+  };
+}
+
+/**
+ * Совокупная уверенность факта по набору доказательств.
+ *
+ * Правила, за которые отвечает именно эта функция:
+ *
+ *   1. Дубликат по хэшу учитывается один раз — сколько бы раз он ни
+ *      пришёл.
+ *   2. Первое доказательство задаёт уровень; каждое следующее РАЗНОЕ
+ *      добавляет убывающую долю недостающего до единицы. Пять пересказов
+ *      одного разговора не превращаются в уверенность 1.
+ *   3. Опровергающее доказательство вычитает по тому же правилу, а не
+ *      обнуляет: одно «нет» не отменяет пять «да», но и пять «да» не
+ *      делают «нет» незаметным.
+ *   4. `mentions` не влияет на уверенность вовсе: упоминание — это не
+ *      утверждение.
+ */
+export function aggregateConfidence(evidence: readonly EvidenceRecord[]): number {
+  const seen = new Set<string>();
+  let supports = 0;
+  let refutes = 0;
+  for (const item of evidence) {
+    if (item.support === "mentions") continue;
+    if (seen.has(item.contentHash)) continue;
+    seen.add(item.contentHash);
+    const weight = clamp01(item.confidence);
+    if (item.support === "refutes") {
+      refutes = refutes + (1 - refutes) * weight;
+    } else {
+      supports = supports + (1 - supports) * weight;
+    }
+  }
+  return clamp01(supports * (1 - refutes));
+}
+
+/** Есть ли среди доказательств хотя бы одно прямое утверждение человека. */
+export function hasDirectStatement(evidence: readonly EvidenceRecord[]): boolean {
+  return evidence.some(
+    (item) => item.support !== "refutes" && sourceTrust(item.sourceType) >= 0.9,
+  );
+}
+
+function clamp01(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(Math.max(value, 0), 1);
+}

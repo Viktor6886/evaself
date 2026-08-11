@@ -182,6 +182,17 @@ export interface Config {
   toolGatewayEnabled: boolean;
   /** Durable PostgreSQL-backed SDK tool approvals. */
   toolApprovalsEnabled: boolean;
+  /**
+   * Temporal-память: версии фактов, evidence и разрешение сущностей.
+   * Выключенный флаг оставляет граф памяти прежним — новые таблицы
+   * существуют, но никто в них не пишет.
+   */
+  temporalMemoryEnabled: boolean;
+  /**
+   * Детектор эпизодов и Memory Curator. Зависит от temporal-памяти:
+   * Curator пишет только через неё, и включать его отдельно нечем.
+   */
+  memoryCuratorEnabled: boolean;
 
   lavaWebhookUser: string;
   lavaWebhookPassword: string;
@@ -380,6 +391,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     retentionEnforcementEnabled: bool("EVA_RETENTION_ENFORCEMENT", false),
     toolGatewayEnabled: bool("EVA_TOOL_GATEWAY", false),
     toolApprovalsEnabled: bool("EVA_TOOL_APPROVALS", false),
+    temporalMemoryEnabled: bool("EVA_TEMPORAL_MEMORY", false),
+    memoryCuratorEnabled: bool("EVA_MEMORY_CURATOR", false),
 
     lavaWebhookUser: str("LAVA_WEBHOOK_USER"),
     lavaWebhookPassword: str("LAVA_WEBHOOK_PASSWORD"),
@@ -430,6 +443,21 @@ export function configWarnings(config: Config): string[] {
   // Проактивные задания без самого слоя заданий — флаг, который ничего
   // не включает: очередей нет, публикатор не работает, сверка зеркала
   // не выполняется ни разу.
+  // Curator существует только как задание очереди и пишет только через
+  // temporal-память. Каждое из этих условий по отдельности выглядит
+  // включённым флагом, который не делает ничего.
+  if (config.memoryCuratorEnabled && !config.temporalMemoryEnabled) {
+    warnings.push(
+      "EVA_MEMORY_CURATOR включён, а EVA_TEMPORAL_MEMORY выключен: "
+        + "кандидатов некуда записывать, Curator не собирается",
+    );
+  }
+  if (config.memoryCuratorEnabled && !(config.bullmqJobsEnabled && config.agentJobsEnabled)) {
+    warnings.push(
+      "EVA_MEMORY_CURATOR включён, а EVA_BULLMQ_JOBS или EVA_AGENT_JOBS выключен: "
+        + "Curator выполняется только как фоновое задание и сейчас не запускается",
+    );
+  }
   if ((config.bullmqProactiveEnabled || config.bullmqMaintenanceEnabled)
       && !config.bullmqJobsEnabled) {
     warnings.push(

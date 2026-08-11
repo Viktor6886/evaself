@@ -22,6 +22,7 @@ import type { OutboxDelivery } from "../delivery/outbox.js";
 import type { LettaService } from "../letta.js";
 import type { RuntimeContextBuilder } from "../runtime/runtime-context.js";
 import type { UserTurnLock } from "../turns/user-turn-lock.js";
+import { TemporalBackfill } from "../memory/temporal/backfill.js";
 import { AgentJobRunner } from "./agent-job.js";
 import { BullMqJobDriver } from "./bullmq-driver.js";
 import { ReconcileService } from "./maintenance.js";
@@ -124,6 +125,26 @@ export function buildJobLayer(
         dryRun: report.dryRun,
         classes: report.classes.length,
         affected: report.classes.reduce((sum, item) => sum + item.affected, 0),
+      });
+    });
+  }
+
+  // Перенос памяти на temporal-путь — тоже обслуживание: он никому не
+  // пишет и идёт партиями. Одна партия на запуск задания: прогресс
+  // хранится в PostgreSQL, поэтому прерванный перенос продолжается со
+  // следующего запуска, а не начинается заново.
+  if (config.bullmqMaintenanceEnabled && config.temporalMemoryEnabled) {
+    const backfill = new TemporalBackfill();
+    runtime.register("memory_temporal_backfill", async () => {
+      const result = await db.withSystemScope(
+        "memory.temporal.backfill",
+        async () => await backfill.runBatch(db, { batchSize: 200 }),
+        { crossUser: true },
+      );
+      logger.info("Партия переноса temporal-памяти выполнена", {
+        migrated: result.migrated,
+        skipped: result.skipped,
+        done: result.done,
       });
     });
   }

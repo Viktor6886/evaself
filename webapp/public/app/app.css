@@ -234,6 +234,12 @@ svg { width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width:
 .danger-action { color: var(--red); border: 1px solid rgba(229,91,91,.28); }
 .primary-action:disabled, .secondary-action:disabled { opacity: .45; cursor: not-allowed; }
 
+/* MEMORY — просмотр и правка того, что Ева помнит */
+.memory-row { padding: 9px 0; border-top: 1px solid var(--line); }
+.memory-row:first-of-type { border-top: none; }
+.memory-row p { margin: 0; }
+.memory-row small { color: var(--muted); font-size: 10px; }
+
 /* ORGANIZER */
 .organizer-content { display: grid; align-content: start; gap: 7px; }
 .task-group-title { margin: 8px 2px 2px; color: var(--muted); font-size: 10px; font-weight: 800; letter-spacing: .07em; text-transform: uppercase; }

@@ -571,6 +571,28 @@ jobs:
       - name: Версия артефакта неизменяема, а откат не переписывает историю
         run: psql -v ON_ERROR_STOP=1 -q -f scripts/ci/test-artifact-immutability.sql
 
+      # «ГОТОВО, КОГДА» шага 15 требует ВЫПОЛНЕННОГО переноса, а не только
+      # его кода. Идемпотентность переноса держится на уникальных индексах
+      # и `ON CONFLICT DO NOTHING`, которых поддельная база в тестах
+      # TypeScript не воспроизводит, — поэтому он прогоняется здесь, на
+      # настоящей схеме, дважды и на собственных пользователях.
+      - name: Node для проверки переноса памяти
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.22"
+          cache: npm
+          cache-dependency-path: eva-agent-service/package-lock.json
+
+      - name: Сборка сервиса для проверки переноса
+        working-directory: eva-agent-service
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Перенос памяти идемпотентен и сохраняет владельца
+        working-directory: eva-agent-service
+        run: node ../scripts/ci/test-memory-backfill.mjs
+
       # Откат выполняется ровно тогда, когда что-то уже пошло не так, и
       # проверять его в этот момент поздно. Здесь он прогоняется на
       # заведомо целой базе: назад по всем down, затем снова вперёд.

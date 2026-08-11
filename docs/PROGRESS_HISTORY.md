@@ -24,9 +24,79 @@
 
 <!-- Записи ниже -->
 
+## Batch 12 — шаги 15–16
+- Ветка: `batch/12-temporal-memory-curator` · PR: [#150](https://github.com/Viktor6886/evaself/pull/150) ·
+  Дата: 2026-08-11 · Статус: выполнен
+
+### Шаг 15 — Temporal-память: версии, evidence и разрешение сущностей
+- Итог: существующие `memory_nodes`/`memory_edges` расширены temporal-полями,
+  история вынесена в `memory_node_versions` и `memory_edge_versions`. Снимок
+  остался в `memory_nodes` — уникальный индекс `(user_id, node_type,
+  canonical_key)`, на котором держится весь существующий upsert графа, не
+  тронут. Новая версия закрывает прежнюю по времени действительности и
+  ссылается на неё; снимок, версия и доказательство пишутся одной транзакцией.
+  Доказательства несут тип источника, дату сообщения, дату события, тип
+  поддержки и хэш содержания: повторный разбор того же сообщения отбрасывается
+  уникальным индексом и уверенность не повышает. Конфликты не разрешаются
+  автоматически. Разрешение сущностей не объединяет тёзок и разные типы, а
+  каждое объединение имеет снимок и откат.
+- Переиспользовано: `memory_nodes`, `memory_edges`, FTS/pg_trgm, tenant scope,
+  `GraphQueryable`, слой заданий шага 8 (перенос — задание обслуживания).
+  Впервые: `memory_node_versions`, `memory_edge_versions`, `memory_evidence`,
+  `memory_entity_aliases`, `memory_entity_merges`, `memory_conflicts`,
+  `memory_backfill_state` в обратимой миграции 042.
+- Проверки: `npm run build` → PASS; `npm run lint` → PASS;
+  `npm run typecheck` → PASS; `node --test test/temporal-memory.test.ts` →
+  PASS (18); `assert-tenant-scope.py` → PASS.
+  Перенос проверяется на настоящей базе в CI: `scripts/ci/test-memory-backfill.mjs`
+  прогоняет его дважды и сверяет идемпотентность, число версий, число
+  доказательств и совпадение владельца версии с владельцем узла.
+- Ограничения: индексы по непустым `memory_nodes`/`memory_edges` вынесены в
+  нетранзакционную миграцию 044 (`CREATE INDEX CONCURRENTLY`) — на живой
+  установке её нельзя прогонять внутри транзакции. Embeddings не подключались
+  (шаг 18).
+
+### Шаг 16 — Детектор эпизодов, Memory Curator и контроль памяти
+- Итог: детерминированный детектор эпизодов закрывает границу по смене темы,
+  завершению хода, бездействию, явной важности и перед сжатием контекста;
+  короткий обмен репликами фонового хода не запускает. Curator собран как
+  спецификация agent job шага 8 со своим строгим разбором результата:
+  свободный текст и кандидат без ссылки на сообщение отвергаются целиком.
+  Кандидаты приходят в память только статусом `candidate`; фактом их делает
+  человек. Предпросмотр не пишет ничего. Дедупликация заданий —
+  `keep_last_if_active` по пользователю. В Mini App появились просмотр,
+  подтверждение, исправление (новой версией) и полное удаление с чисткой
+  производных.
+- Переиспользовано: `AgentJobRunner`, `JobOutbox`, `JobRuntime`, `dedupKey`,
+  `purposePolicy`, temporal-запись шага 15, tenant scope, Mini App auth и
+  существующий экран «Память Евы». Впервые: `memory_episodes`,
+  `memory_curator_runs` в обратимой миграции 043; маршруты `/public/memory*`.
+  `AgentJobSpec` расширен необязательными `parseResult` и `responseContract` —
+  без второго runtime.
+- Проверки: `npm run build` → PASS; `npm run lint` → PASS;
+  `npm run typecheck` → PASS; `node --test test/*.test.ts` → PASS (735);
+  `assert-tenant-scope.py` → PASS; `assert-env-plumbing.py` → PASS;
+  `assert-admin-route-access.py` → PASS; `assert-down-migrations.py` → PASS;
+  `assert-frontend-routes.py` → PASS.
+- Rollout: `EVA_TEMPORAL_MEMORY=false`, `EVA_MEMORY_CURATOR=false`.
+  Rollback runtime — выключить оба флага и перезапустить сервис. Rollback
+  схемы — `postgres/migrations/down/043_memory_curator.sql`, затем
+  `down/042_temporal_memory.sql`.
+- Ограничения: PostgreSQL up×3/down/reapply, перенос памяти на настоящей базе,
+  сборка образов и stack smoke выполняет CI — Docker в окружении сессии
+  недоступен. Четыре проверки Caddyfile в `scripts/validate.sh` падают и на
+  чистом `main`: в окружении нет `caddy`.
+- Независимое ревью: три блокера и замечания устранены до мержа — литеральный
+  NUL в `fact-value.ts` (из-за него дифф файла читался как бинарный),
+  невыполненный пункт «перенос выполнен и проверен» (закрыт проверкой в CI),
+  индексы без `CONCURRENTLY` (вынесены в миграцию 044), незаполняемый
+  `summary` эпизода и непереиспользованные `conversation_highlights`.
+- Следующему агенту: batch 13 (шаги 17–18) начинать только по отдельному
+  разрешению; флаги памяти в production не включать.
+
 ## Batch 11 — шаг 14
 - Ветка: `batch/11-tool-gateway` · PR: [#149](https://github.com/Viktor6886/evaself/pull/149) · Дата: 2026-08-11 ·
-  Статус: на ревью
+  Статус: выполнен
 
 ### Шаг 14 — Tool Gateway, durable approvals и политика MCP
 - Итог: существующие доменные инструменты обёрнуты единым расширяемым

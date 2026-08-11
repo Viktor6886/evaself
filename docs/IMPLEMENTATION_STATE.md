@@ -105,6 +105,16 @@
 | RuntimeContextBuilder | Единственный финальный сборщик контекста | `src/runtime/runtime-context.ts` | `RuntimeContext`, бюджеты из `CLAUDE.md` | обяз. |
 | ConversationPurposeService | Назначения conversation и политика инструментов | `src/conversations/purpose-service.ts` | `purposePolicy()`, `toolAllowedForPurpose()` | обяз. |
 | Граф памяти | Узлы, связи, поиск через FTS | `src/memory/graph-repository.ts`, `graph-context.ts`, таблицы `memory_nodes`, `memory_edges` | `websearch_to_tsquery`, глубина ≤ 3 | расш. |
+| Temporal-память | Версии фактов без потери истории; снимок в `memory_nodes`, версии в `memory_node_versions` | `src/memory/temporal/versions.ts`, таблицы `memory_node_versions`, `memory_edge_versions` | `recordFact()` в одной транзакции: закрыть прежнюю версию → новая со ссылкой → доказательство → снимок; `EVA_TEMPORAL_MEMORY` | обяз. |
+| Доказательства | Источник, время, тип поддержки, хэш содержания | `src/memory/temporal/evidence.ts`, таблица `memory_evidence` | `evidenceHash()`, `aggregateConfidence()`; повтор того же сообщения уверенность не повышает | обяз. |
+| Запросы к истории | Текущий факт, факт на дату, история, изменения за период, состояние сущности | `src/memory/temporal/queries.ts` | valid time для «на дату», recorded time для «за период» | расш. |
+| Разрешение сущностей | Нормализация, точное совпадение, синонимы, FTS, контекстное сравнение | `src/memory/temporal/entity-resolution.ts`, таблицы `memory_entity_aliases`, `memory_entity_merges` | тёзки и разные типы автоматически не объединяются; у объединения снимок и `rollbackMerge()` | обяз. |
+| Дедупликация памяти | Узел — точный поиск/синоним/FTS; связь — пересечение периодов | `src/memory/temporal/dedup.ts` | без embeddings (они — шаг 18); совпадение даёт доказательство, а не дубль | обяз. |
+| Конфликты | Смена значения и опровержение попадают в отчёт | таблица `memory_conflicts` | автоматически не разрешаются; значимые — `awaiting_user` | расш. |
+| Перенос памяти | Начальная версия и источник у накопленных узлов | `src/memory/temporal/backfill.ts`, таблица `memory_backfill_state` | идемпотентен по данным, возобновляем по курсору; задание `memory_temporal_backfill`; проверяется на настоящей базе в CI (`scripts/ci/test-memory-backfill.mjs`) | расш. |
+| Детектор эпизодов | Границы разговора без вызова модели | `src/memory/episodes.ts`, таблица `memory_episodes` | пять границ, `EpisodeTracker` не задерживает ответ; краткое содержание и ссылки берутся из `conversation_highlights`, второго разбора переписки нет; `EVA_MEMORY_CURATOR` | обяз. |
+| Memory Curator | Извлечение долговременных фактов из эпизода | `src/memory/curator/service.ts`, `schema.ts`, таблица `memory_curator_runs` | спецификация agent job шага 8, строгая схема, дедуп `keep_last_if_active`, режим `preview`; кандидатов пишет код | обяз. |
+| Контроль памяти | Просмотр, подтверждение, исправление, удаление в Mini App | `src/memory/curator/user-control.ts`, маршруты `/public/memory*` | исправление — новая версия; удаление чистит версии, evidence, конфликты, синонимы, связи | обяз. |
 | Highlights | Компактные выжимки диалога | `src/memory/conversation-highlights.ts`, таблица `conversation_highlights` | не смешивается с памятью и KB | расш. |
 | Заметки | Хранилище заметок в PostgreSQL | таблица `eva_notes`, `src/tools/core-tools.ts` | инструменты названы `LIGHTRAG_*` — псевдонимы совместимости, LightRAG нет | расш. |
 | Каталог инструментов | Сборка tool-схем | `src/tools/tool-kit.ts`, `core-tools.ts`, `task-tools.ts` | `ToolBuilder`, `objectSchema()` | обяз. |
@@ -179,6 +189,19 @@
   артефакт не начнёт браться из реестра.
 - **Реестр инструментов, уровни риска и durable approvals** — шаг 14. Разделы
   административного API существуют и честно read-only.
+- **Наполнение temporal-памяти на работающей установке** — код шага 15 есть,
+  `EVA_TEMPORAL_MEMORY` выключен, и до его включения ни `memory_node_versions`,
+  ни `memory_evidence` не пополняются. Сам перенос выполняется и проверяется
+  на настоящей схеме в CI (`scripts/ci/test-memory-backfill.mjs`: два прогона,
+  идемпотентность, сохранение владельца), но на данных конкретной установки
+  его запускает человек — заданием `memory_temporal_backfill`.
+- **Векторный поиск по памяти** — его нет намеренно: дедупликация и разрешение
+  сущностей шага 15 работают на точном поиске, синонимах и FTS. Embeddings —
+  шаг 18.
+- **Прогоны Curator в production** — механизм шага 16 собран, но требует трёх
+  включённых флагов сразу (`EVA_BULLMQ_JOBS`, `EVA_AGENT_JOBS`,
+  `EVA_MEMORY_CURATOR`) и `EVA_TEMPORAL_MEMORY`. Сочетание проверяется
+  `configWarnings`.
 - **Экраны новых разделов в `admin-ui`** — их нет: шаг 12 остановился на
   контракте admin-api.
 - **Колонка `tenant_id`** — изоляция держится на `user_id` и области арендатора.
