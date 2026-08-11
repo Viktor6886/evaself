@@ -111,8 +111,8 @@
 | Разрешение сущностей | Нормализация, точное совпадение, синонимы, FTS, контекстное сравнение | `src/memory/temporal/entity-resolution.ts`, таблицы `memory_entity_aliases`, `memory_entity_merges` | тёзки и разные типы автоматически не объединяются; у объединения снимок и `rollbackMerge()` | обяз. |
 | Дедупликация памяти | Узел — точный поиск/синоним/FTS; связь — пересечение периодов | `src/memory/temporal/dedup.ts` | без embeddings (они — шаг 18); совпадение даёт доказательство, а не дубль | обяз. |
 | Конфликты | Смена значения и опровержение попадают в отчёт | таблица `memory_conflicts` | автоматически не разрешаются; значимые — `awaiting_user` | расш. |
-| Перенос памяти | Начальная версия и источник у накопленных узлов | `src/memory/temporal/backfill.ts`, таблица `memory_backfill_state` | идемпотентен по данным, возобновляем по курсору; задание `memory_temporal_backfill` | расш. |
-| Детектор эпизодов | Границы разговора без вызова модели | `src/memory/episodes.ts`, таблица `memory_episodes` | пять границ, `EpisodeTracker` не задерживает ответ; `EVA_MEMORY_CURATOR` | обяз. |
+| Перенос памяти | Начальная версия и источник у накопленных узлов | `src/memory/temporal/backfill.ts`, таблица `memory_backfill_state` | идемпотентен по данным, возобновляем по курсору; задание `memory_temporal_backfill`; проверяется на настоящей базе в CI (`scripts/ci/test-memory-backfill.mjs`) | расш. |
+| Детектор эпизодов | Границы разговора без вызова модели | `src/memory/episodes.ts`, таблица `memory_episodes` | пять границ, `EpisodeTracker` не задерживает ответ; краткое содержание и ссылки берутся из `conversation_highlights`, второго разбора переписки нет; `EVA_MEMORY_CURATOR` | обяз. |
 | Memory Curator | Извлечение долговременных фактов из эпизода | `src/memory/curator/service.ts`, `schema.ts`, таблица `memory_curator_runs` | спецификация agent job шага 8, строгая схема, дедуп `keep_last_if_active`, режим `preview`; кандидатов пишет код | обяз. |
 | Контроль памяти | Просмотр, подтверждение, исправление, удаление в Mini App | `src/memory/curator/user-control.ts`, маршруты `/public/memory*` | исправление — новая версия; удаление чистит версии, evidence, конфликты, синонимы, связи | обяз. |
 | Highlights | Компактные выжимки диалога | `src/memory/conversation-highlights.ts`, таблица `conversation_highlights` | не смешивается с памятью и KB | расш. |
@@ -191,8 +191,10 @@
   административного API существуют и честно read-only.
 - **Наполнение temporal-памяти на работающей установке** — код шага 15 есть,
   `EVA_TEMPORAL_MEMORY` выключен, и до его включения ни `memory_node_versions`,
-  ни `memory_evidence` не пополняются. Перенос накопленных узлов существует
-  заданием `memory_temporal_backfill` и на реальных данных ещё не выполнялся.
+  ни `memory_evidence` не пополняются. Сам перенос выполняется и проверяется
+  на настоящей схеме в CI (`scripts/ci/test-memory-backfill.mjs`: два прогона,
+  идемпотентность, сохранение владельца), но на данных конкретной установки
+  его запускает человек — заданием `memory_temporal_backfill`.
 - **Векторный поиск по памяти** — его нет намеренно: дедупликация и разрешение
   сущностей шага 15 работают на точном поиске, синонимах и FTS. Embeddings —
   шаг 18.

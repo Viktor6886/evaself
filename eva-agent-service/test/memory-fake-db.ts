@@ -115,6 +115,12 @@ export class MemoryFakeDb {
     if (sql.startsWith("UPDATE memory_episodes")) return this.updateEpisode(sql, values);
     if (sql.includes("FROM memory_episodes")) return this.selectEpisode(values);
     if (sql.startsWith("INSERT INTO memory_curator_runs")) return this.insertCuratorRun(values);
+    if (sql.includes("FROM conversation_highlights")) {
+      return this.rowsOf("conversation_highlights")
+        .filter((row) => row.user_id === values[0] && row.conversation_id === values[1])
+        .sort((left, right) => Number(right.importance) - Number(left.importance))
+        .slice(0, 10);
+    }
     if (sql.includes("FROM users WHERE telegram_id")) {
       return this.rowsOf("users").filter((row) => row.telegram_id === values[0]);
     }
@@ -587,10 +593,11 @@ export class MemoryFakeDb {
       boundary_reason: values[4],
       summary: values[5],
       message_ids: values[6],
-      privacy_mode: values[7],
-      message_count: values[8],
-      started_at: values[9],
-      ended_at: values[10],
+      highlight_ids: values[7],
+      privacy_mode: values[8],
+      message_count: values[9],
+      started_at: values[10],
+      ended_at: values[11],
     };
     table.rows.push(row);
     return [row];

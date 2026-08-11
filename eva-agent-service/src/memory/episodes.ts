@@ -156,6 +156,8 @@ export interface EpisodeRow {
   boundaryReason: EpisodeBoundary;
   privacyMode: EpisodePrivacy;
   messageIds: string[];
+  /** Ссылки на выжимки разговора — вход Curator, а не их копия. */
+  highlightIds: number[];
   summary: string | null;
   messageCount: number;
 }
@@ -193,35 +195,88 @@ export class EpisodeService {
     endedAt?: Date;
   }): Promise<EpisodeRow | null> {
     if (!this.enabled) return null;
+    const startedAt = input.startedAt ?? new Date();
+    const endedAt = input.endedAt ?? new Date();
     return await this.db.withUserScope(
       { userId: input.userId, label: "memory.episode.close", inherit: true },
       async () => {
+        // Краткое содержание и ссылки берутся из УЖЕ существующего
+        // асинхронного разбора разговора — `conversation_highlights`.
+        // Второго механизма извлечения шаг не заводит: выжимки уже
+        // посчитаны, и пересчитывать их значило бы держать две версии
+        // «что здесь было важного».
+        const highlights = await this.highlightsFor(
+          input.userId, input.conversationId, startedAt, endedAt,
+        );
         const { rows } = await this.db.query<EpisodeDbRow>(
           `INSERT INTO memory_episodes (
              user_id, conversation_id, episode_key, purpose, status,
-             boundary_reason, summary, message_ids, privacy_mode,
+             boundary_reason, summary, message_ids, highlight_ids, privacy_mode,
              message_count, started_at, ended_at
-           ) VALUES ($1, $2, $3, $4, 'closed', $5, $6, $7::text[], $8, $9, $10, $11)
+           ) VALUES ($1, $2, $3, $4, 'closed', $5, $6, $7::text[], $8::bigint[],
+                     $9, $10, $11, $12)
            ON CONFLICT (user_id, episode_key) DO NOTHING
            RETURNING id, conversation_id, episode_key, status, boundary_reason,
-                     privacy_mode, message_ids, summary, message_count`,
+                     privacy_mode, message_ids, highlight_ids, summary, message_count`,
           [
             input.userId,
             input.conversationId,
             input.episodeKey,
             input.purpose ?? "chat",
             input.boundaryReason,
-            input.summary ?? null,
+            input.summary ?? highlights.summary,
             [...input.messageIds].slice(0, 200),
+            highlights.ids,
             input.privacyMode ?? "normal",
             input.messageIds.length,
-            input.startedAt ?? new Date(),
-            input.endedAt ?? new Date(),
+            startedAt,
+            endedAt,
           ],
         );
         return rows[0] ? toEpisode(rows[0]) : null;
       },
     );
+  }
+
+  /**
+   * Выжимки разговора, попавшие в границы эпизода.
+   *
+   * Возвращает и ссылки, и склеенное краткое содержание. Содержание
+   * собирается из ЗАГОЛОВКОВ выжимок, а не из их текста: заголовок уже
+   * ограничен по длине и не является пересказом переписки — полное
+   * зеркало разговора в PostgreSQL запрещено.
+   *
+   * Отсутствие выжимок — не отказ: эпизод закрывается и без них, просто
+   * без краткого содержания.
+   */
+  private async highlightsFor(
+    userId: number,
+    conversationId: string,
+    startedAt: Date,
+    endedAt: Date,
+  ): Promise<{ ids: number[]; summary: string | null }> {
+    try {
+      const { rows } = await this.db.query<{ id: string; title: string }>(
+        `SELECT id, title
+           FROM conversation_highlights
+          WHERE user_id = $1 AND conversation_id = $2
+            AND created_at >= $3 AND created_at <= $4
+          ORDER BY importance DESC, id DESC
+          LIMIT 10`,
+        [userId, conversationId, startedAt, endedAt],
+      );
+      const summary = rows
+        .map((row) => row.title.replace(/\s+/gu, " ").trim())
+        .filter(Boolean)
+        .join("; ")
+        .slice(0, 1_000);
+      return { ids: rows.map((row) => Number(row.id)), summary: summary || null };
+    } catch {
+      // Выжимки — вспомогательный вход. Их недоступность не должна
+      // отменять эпизод: без них Curator получит только ссылки на
+      // сообщения, и это рабочий, хотя и более бедный, случай.
+      return { ids: [], summary: null };
+    }
   }
 
   /** Забрать закрытый эпизод под обработку. Повторный вызов вернёт null. */
@@ -234,7 +289,7 @@ export class EpisodeService {
               SET status = 'curating'
             WHERE user_id = $1 AND id = $2 AND status = 'closed'
             RETURNING id, conversation_id, episode_key, status, boundary_reason,
-                      privacy_mode, message_ids, summary, message_count`,
+                      privacy_mode, message_ids, highlight_ids, summary, message_count`,
           [userId, episodeId],
         );
         return rows[0] ? toEpisode(rows[0]) : null;
@@ -267,7 +322,7 @@ export class EpisodeService {
       async () => {
         const { rows } = await this.db.query<EpisodeDbRow>(
           `SELECT id, conversation_id, episode_key, status, boundary_reason,
-                  privacy_mode, message_ids, summary, message_count
+                  privacy_mode, message_ids, highlight_ids, summary, message_count
              FROM memory_episodes
             WHERE user_id = $1 AND id = $2`,
           [userId, episodeId],
@@ -369,6 +424,7 @@ interface EpisodeDbRow {
   boundary_reason: string;
   privacy_mode: string;
   message_ids: string[] | null;
+  highlight_ids: Array<string | number> | null;
   summary: string | null;
   message_count: number | string;
 }
@@ -382,6 +438,7 @@ function toEpisode(row: EpisodeDbRow): EpisodeRow {
     boundaryReason: row.boundary_reason as EpisodeBoundary,
     privacyMode: row.privacy_mode as EpisodePrivacy,
     messageIds: row.message_ids ?? [],
+    highlightIds: (row.highlight_ids ?? []).map(Number),
     summary: row.summary,
     messageCount: Number(row.message_count),
   };

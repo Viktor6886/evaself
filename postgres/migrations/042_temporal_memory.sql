@@ -42,12 +42,10 @@ ALTER TABLE memory_nodes ADD CONSTRAINT memory_nodes_status_check CHECK (status 
     'candidate', 'refuted', 'rejected', 'forgotten', 'deleted', 'quarantined'
 ));
 
-CREATE INDEX IF NOT EXISTS memory_nodes_fact_key_idx
-    ON memory_nodes (user_id, fact_key) WHERE fact_key IS NOT NULL;
-CREATE INDEX IF NOT EXISTS memory_nodes_entity_idx
-    ON memory_nodes (user_id, entity_id) WHERE entity_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS memory_nodes_valid_idx
-    ON memory_nodes (user_id, valid_from, valid_to);
+-- Индексы по НЕПУСТЫМ memory_nodes и memory_edges вынесены в отдельную
+-- нетранзакционную миграцию 044 и строятся CONCURRENTLY: правило
+-- CLAUDE.md про большие индексы относится ровно к этому случаю. Здесь
+-- остаются только столбцы и ограничения.
 
 ALTER TABLE memory_edges
     ADD COLUMN IF NOT EXISTS version            integer NOT NULL DEFAULT 1,
@@ -62,9 +60,6 @@ ALTER TABLE memory_edges ADD CONSTRAINT memory_edges_status_check CHECK (status 
     'active', 'disputed', 'archived',
     'candidate', 'superseded', 'refuted', 'rejected', 'forgotten', 'deleted', 'quarantined'
 ));
-
-CREATE INDEX IF NOT EXISTS memory_edges_valid_idx
-    ON memory_edges (user_id, valid_from, valid_to);
 
 -- ---------------------------------------------------------------------
 -- Версии узлов. Прежняя версия не изменяется и не удаляется: у неё

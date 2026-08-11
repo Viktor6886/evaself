@@ -113,6 +113,39 @@ test("детектор ничего не ждёт и не роняет отве�
   assert.equal(closed.length, 1);
 });
 
+test("эпизод переиспользует выжимки разговора как вход, а не второй разбор", async () => {
+  const db = new MemoryFakeDb();
+  db.seed("conversation_highlights", {
+    user_id: USER, conversation_id: "conv-1", highlight_type: "decision",
+    title: "Решение о смене работы", importance: 0.9,
+  });
+  db.seed("conversation_highlights", {
+    user_id: USER, conversation_id: "conv-1", highlight_type: "commitment",
+    title: "Написать письмо до пятницы", importance: 0.85,
+  });
+  // Чужая выжимка того же типа во входе эпизода появиться не должна.
+  db.seed("conversation_highlights", {
+    user_id: OTHER_USER, conversation_id: "conv-1", highlight_type: "decision",
+    title: "Чужое решение", importance: 0.99,
+  });
+
+  const episodes = new EpisodeService(db as never, true);
+  const episode = await episodes.close({
+    userId: USER,
+    conversationId: "conv-1",
+    episodeKey: "key-highlights",
+    boundaryReason: "turn_completed",
+    messageIds: ["m1", "m2"],
+    startedAt: new Date(Date.now() - 60_000),
+    endedAt: new Date(),
+  });
+
+  assert.ok(episode);
+  assert.equal(episode!.highlightIds.length, 2);
+  assert.equal(episode!.summary, "Решение о смене работы; Написать письмо до пятницы");
+  assert.ok(!String(episode!.summary).includes("Чужое"));
+});
+
 // ---------------------------------------------------------------------
 // Схема результата
 // ---------------------------------------------------------------------

@@ -48,8 +48,13 @@
 - Проверки: `npm run build` → PASS; `npm run lint` → PASS;
   `npm run typecheck` → PASS; `node --test test/temporal-memory.test.ts` →
   PASS (18); `assert-tenant-scope.py` → PASS.
-- Ограничения: перенос на реальных данных не выполнялся — Docker в окружении
-  недоступен; embeddings не подключались (шаг 18).
+  Перенос проверяется на настоящей базе в CI: `scripts/ci/test-memory-backfill.mjs`
+  прогоняет его дважды и сверяет идемпотентность, число версий, число
+  доказательств и совпадение владельца версии с владельцем узла.
+- Ограничения: индексы по непустым `memory_nodes`/`memory_edges` вынесены в
+  нетранзакционную миграцию 044 (`CREATE INDEX CONCURRENTLY`) — на живой
+  установке её нельзя прогонять внутри транзакции. Embeddings не подключались
+  (шаг 18).
 
 ### Шаг 16 — Детектор эпизодов, Memory Curator и контроль памяти
 - Итог: детерминированный детектор эпизодов закрывает границу по смене темы,
@@ -69,7 +74,7 @@
   `AgentJobSpec` расширен необязательными `parseResult` и `responseContract` —
   без второго runtime.
 - Проверки: `npm run build` → PASS; `npm run lint` → PASS;
-  `npm run typecheck` → PASS; `node --test test/*.test.ts` → PASS (734);
+  `npm run typecheck` → PASS; `node --test test/*.test.ts` → PASS (735);
   `assert-tenant-scope.py` → PASS; `assert-env-plumbing.py` → PASS;
   `assert-admin-route-access.py` → PASS; `assert-down-migrations.py` → PASS;
   `assert-frontend-routes.py` → PASS.
@@ -77,10 +82,15 @@
   Rollback runtime — выключить оба флага и перезапустить сервис. Rollback
   схемы — `postgres/migrations/down/043_memory_curator.sql`, затем
   `down/042_temporal_memory.sql`.
-- Ограничения: PostgreSQL up×3/down/reapply, сборка образов и stack smoke
-  выполняет CI — Docker в окружении сессии недоступен. Четыре проверки
-  Caddyfile в `scripts/validate.sh` падают и на чистом `main`: в окружении
-  нет `caddy`.
+- Ограничения: PostgreSQL up×3/down/reapply, перенос памяти на настоящей базе,
+  сборка образов и stack smoke выполняет CI — Docker в окружении сессии
+  недоступен. Четыре проверки Caddyfile в `scripts/validate.sh` падают и на
+  чистом `main`: в окружении нет `caddy`.
+- Независимое ревью: три блокера и замечания устранены до мержа — литеральный
+  NUL в `fact-value.ts` (из-за него дифф файла читался как бинарный),
+  невыполненный пункт «перенос выполнен и проверен» (закрыт проверкой в CI),
+  индексы без `CONCURRENTLY` (вынесены в миграцию 044), незаполняемый
+  `summary` эпизода и непереиспользованные `conversation_highlights`.
 - Следующему агенту: batch 13 (шаги 17–18) начинать только по отдельному
   разрешению; флаги памяти в production не включать.
 

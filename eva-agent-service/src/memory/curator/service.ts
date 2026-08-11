@@ -224,6 +224,10 @@ export class MemoryCuratorService {
         boundary: episode.boundaryReason,
         privacy_mode: episode.privacyMode,
         message_ids: episode.messageIds.slice(0, 40).join(","),
+        // Вход — уже посчитанные выжимки разговора, а не второй разбор
+        // переписки: их заголовки и есть краткое содержание эпизода.
+        highlights: episode.summary ?? "",
+        highlight_count: episode.highlightIds.length,
       },
     });
 
