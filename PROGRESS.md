@@ -9,13 +9,13 @@
 ## Состояние
 
 ```
-CURRENT_BATCH: 11
-CURRENT_STEP:  14
-BRANCH:        batch/11-tool-gateway
-STATUS:        на ревью
-LAST_COMMIT:   5c50f19
+CURRENT_BATCH: 12
+CURRENT_STEP:  15
+BRANCH:        batch/12-temporal-memory-curator
+STATUS:        в работе
+LAST_COMMIT:   792c3c0
 BLOCKER:       —
-NEXT:          дождаться зелёного CI в PR #149
+NEXT:          шаг 15 — temporal-версии, evidence и разрешение сущностей
 ```
 
 Значения полей:
@@ -52,8 +52,8 @@ Batch — единица работы: одна ветка, один pull reques
 | 8 | 09–10 | P1 | выполнен | [#145](https://github.com/Viktor6886/evaself/pull/145) |
 | 9 | 11 | P1 | выполнен | [#146](https://github.com/Viktor6886/evaself/pull/146) |
 | 10 | 12–13 | P1 | выполнен | [#148](https://github.com/Viktor6886/evaself/pull/148) |
-| 11 | 14 | P2 | на ревью | [#149](https://github.com/Viktor6886/evaself/pull/149) |
-| 12 | 15–16 | P2 | не начат | — |
+| 11 | 14 | P2 | выполнен | [#149](https://github.com/Viktor6886/evaself/pull/149) |
+| 12 | 15–16 | P2 | в работе | — |
 | 13 | 17–18 | P2 | не начат | — |
 | 14 | 19–20 | P2 | не начат | — |
 | 15 | 21–22 | P2 | не начат | — |
