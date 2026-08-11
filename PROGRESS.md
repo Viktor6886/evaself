@@ -11,11 +11,11 @@
 ```
 CURRENT_BATCH: 10
 CURRENT_STEP:  12
-BRANCH:        —
-STATUS:        не начат
-LAST_COMMIT:   —
+BRANCH:        claude/roadmap-batch-execution-fclhwf
+STATUS:        в работе
+LAST_COMMIT:   PENDING
 BLOCKER:       —
-NEXT:          прочитать prompts/step-12-admin-crud.md и prompts/step-13-artifact-versions.md, создать ветку batch/10-admin-crud от main, выполнить шаг 12
+NEXT:          административные области шага 12: агенты, memory blocks, инструменты, approvals, восстановление
 ```
 
 Значения полей:
@@ -51,7 +51,7 @@ Batch — единица работы: одна ветка, один pull reques
 | 7 | 08 | P1 | выполнен | [#144](https://github.com/Viktor6886/evaself/pull/144) |
 | 8 | 09–10 | P1 | выполнен | [#145](https://github.com/Viktor6886/evaself/pull/145) |
 | 9 | 11 | P1 | выполнен | [#146](https://github.com/Viktor6886/evaself/pull/146) |
-| 10 | 12–13 | P1 | не начат | — |
+| 10 | 12–13 | P1 | в работе | — |
 | 11 | 14 | P2 | не начат | — |
 | 12 | 15–16 | P2 | не начат | — |
 | 13 | 17–18 | P2 | не начат | — |
