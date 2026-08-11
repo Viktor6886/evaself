@@ -17,8 +17,11 @@ import { test } from "node:test";
 
 import { buildAdminServer } from "../dist/admin/server.js";
 import { AgentDirectoryService } from "../dist/admin/agent-directory.js";
+import { ConversationToolSelectorService } from "../dist/admin/conversation-tool-selectors.js";
 import { MemoryTemplateService } from "../dist/admin/memory-template-service.js";
 import { ToolApprovalService } from "../dist/admin/tool-approvals.js";
+import { ToolGatewayStateStore, ToolManifestRegistry } from "../dist/tools/gateway.js";
+import { AgentToolFactory, createCanonicalToolManifestRegistry } from "../dist/agent-tools.js";
 import { TurnOperationsService } from "../dist/admin/turn-operations.js";
 import { SUBSYSTEM_SECTIONS, subsystemPayload } from "../dist/admin/subsystem-status.js";
 import { DeleteGuard } from "../dist/letta/delete-guard.js";
@@ -161,6 +164,13 @@ class FakeDb {
       const rows = this.conversations.map((row) => ({ ...row, total: this.conversations.length }));
       return { rows, rowCount: rows.length };
     }
+    if (text.includes("SET current_task_tools = $2")) {
+      const row = this.conversations.find((item) => item.conversation_id === values[0]);
+      if (!row) return { rows: [], rowCount: 0 };
+      row.current_task_tools = values[1];
+      row.selected_skill_tools = values[2];
+      return { rows: [row], rowCount: 1 };
+    }
     if (text.startsWith("UPDATE agent_conversations")) {
       const row = this.conversations.find((item) => item.conversation_id === values[0]);
       if (!row) return { rows: [], rowCount: 0 };
@@ -261,6 +271,18 @@ function directory(db: FakeDb) {
     } as never),
   );
 }
+
+test("conversation tool selectors accept only exact canonical names and preserve null versus empty", async () => {
+  const db = new FakeDb();
+  const service = new ConversationToolSelectorService(db as never, createCanonicalToolManifestRegistry());
+  await assert.rejects(() => service.set("conv-1", ["*"], null), /canonical|зарегистрирован/i);
+  await assert.rejects(() => service.set("conv-1", ["get_notes ignored"], null), /canonical|зарегистрирован/i);
+  const written = await service.set("conv-1", [], null);
+  assert.deepEqual(written.currentTaskTools, []);
+  assert.equal(written.selectedSkillTools, null);
+  assert.deepEqual(db.conversations[0]!.current_task_tools, []);
+  assert.equal(db.conversations[0]!.selected_skill_tools, null);
+});
 
 // ---------------------------------------------------------------------
 // 2. Шаблоны memory block: предпросмотр, применение, откат
@@ -463,15 +485,24 @@ test("отмена ставит барьер, а не переписывает �
 // 3–7, 9. Инструменты, approvals и разделы подсистем
 // ---------------------------------------------------------------------
 
-test("обзор инструментов честно называет отсутствие реестра и перечисляет все назначения", async () => {
+test("обзор инструментов публикует реализованный реестр и durable gateway state", async () => {
   const db = new FakeDb();
-  const overview = await new ToolApprovalService(db as never).tools(7);
-  const status = (overview as { status: { implemented: boolean; planned_step: string } }).status;
-  assert.equal(status.implemented, false);
-  assert.match(status.planned_step, /14/);
-  const purposes = (overview as { purposes: Array<{ purpose: string }> }).purposes;
-  assert.equal(purposes.length, 7);
-  assert.ok(purposes.some((row) => row.purpose === "chat"));
+  const registry = new ToolManifestRegistry();
+  registry.register({ name: "save_task", version: "1", inputSchema: {}, outputSchema: {}, owner: "core", purposes: ["chat"], risk: "low_risk_write", approvalRequired: false, idempotent: true, timeoutMs: 1000, limits: { maxResultBytes: 1000 }, sideEffect: true });
+  const overview = await new ToolApprovalService(db as never, registry, new ToolGatewayStateStore(db as never)).tools(7);
+  const status = (overview as { status: { implemented: boolean } }).status;
+  assert.equal(status.implemented, true);
+  assert.equal((overview as { manifests: unknown[] }).manifests.length, 1);
+  assert.ok(Array.isArray((overview as { gateway_state: unknown[] }).gateway_state));
+});
+
+test("admin approvals are read from durable approvals and rules tables", async () => {
+  const db = new FakeDb();
+  const result = await new ToolApprovalService(db as never, new ToolManifestRegistry(), new ToolGatewayStateStore(db as never)).approvals(20);
+  assert.equal((result as { status: { implemented: boolean } }).status.implemented, true);
+  assert.ok(Array.isArray((result as { pending: unknown[] }).pending));
+  assert.ok(Array.isArray((result as { resolved: unknown[] }).resolved));
+  assert.ok(Array.isArray((result as { standing_rules: unknown[] }).standing_rules));
 });
 
 test("разделы отсутствующих подсистем не выдают пустоту за данные", () => {
@@ -496,6 +527,7 @@ test("разделы отсутствующих подсистем не выда
 interface HarnessOptions {
   role?: string;
   flag?: string;
+  gatewayFlag?: string;
   /** Флаг реестра артефактов: у шага 13 он свой и выключается отдельно. */
   artifactsFlag?: string;
 }
@@ -532,8 +564,11 @@ function harness(db: FakeDb, options: HarnessOptions = {}) {
     artifacts: fakeRegistry({ 1: APPROVED_V1, 2: APPROVED_V2 }),
     crud: {
       directory: directory(db),
+      selectors: (options.gatewayFlag ?? "1") === "1"
+        ? new ConversationToolSelectorService(db as never, createCanonicalToolManifestRegistry())
+        : undefined,
       templates: templateService(db),
-      tools: new ToolApprovalService(db as never),
+      tools: new ToolApprovalService(db as never, new ToolManifestRegistry(), new ToolGatewayStateStore(db as never)),
       turns: new TurnOperationsService(db as never),
     },
     config: {}, secrets: {}, health: {}, operations: {}, providers: {},
@@ -544,6 +579,41 @@ function harness(db: FakeDb, options: HarnessOptions = {}) {
   } as never);
   return { app, audits, guards };
 }
+
+test("tool selector writer is flag-gated, owner/admin-only, confirmed, sudo-protected and audited", async () => {
+  const off = harness(new FakeDb(), { gatewayFlag: "0" });
+  await off.app.ready();
+  assert.equal((await off.app.inject({ method: "POST", url: "/api/admin/v1/conversations/conv-1/tool-selectors", headers: { cookie: "eva_admin=session-1" }, payload: {} })).statusCode, 404);
+  await off.app.close();
+
+  const db = new FakeDb();
+  const { app, audits, guards } = harness(db);
+  await app.ready();
+  const missing = await app.inject({ method: "POST", url: "/api/admin/v1/conversations/conv-1/tool-selectors", headers: { cookie: "eva_admin=session-1" }, payload: { current_task_tools: ["get_notes"], selected_skill_tools: [] } });
+  assert.equal(missing.statusCode, 400);
+  const response = await app.inject({ method: "POST", url: "/api/admin/v1/conversations/conv-1/tool-selectors", headers: { cookie: "eva_admin=session-1", "x-csrf-token": "t" }, payload: { confirm: "conv-1", current_task_tools: ["get_notes"], selected_skill_tools: ["get_notes"] } });
+  assert.equal(response.statusCode, 200, response.body);
+  assert.deepEqual(guards.slice(-2), ["csrf", "sudo:users:write"]);
+  assert.deepEqual(db.conversations[0]!.current_task_tools, ["get_notes"]);
+  assert.deepEqual(db.conversations[0]!.selected_skill_tools, ["get_notes"]);
+  assert.deepEqual(audits.findLast((entry) => entry.operation.includes("tool-selectors"))?.details, { conversation_id: "conv-1", user_id: 11, current_task_tools: ["get_notes"], selected_skill_tools: ["get_notes"] });
+
+  const runtimeDb = {
+    getAgentRuntimeContext: async () => ({ userId: 11, telegramId: 42, chatId: 42, conversationId: "conv-1", purpose: "chat", timezone: "UTC", responseMode: "text", useEmoji: true,
+      currentTaskTools: db.conversations[0]!.current_task_tools, selectedSkillTools: db.conversations[0]!.selected_skill_tools }),
+    query: db.query,
+    withUserScope: async (_scope: unknown, work: () => Promise<unknown>) => await work(),
+  };
+  const factory = new AgentToolFactory({ vectorGoalsEnabled: false } as never, runtimeDb as never, {} as never,
+    { debug() {}, info() {}, warn() {}, error() {} });
+  assert.deepEqual((await factory.sessionPolicy("conv-1")).visibleTools, ["get_notes"]);
+  await app.close();
+
+  const viewer = harness(new FakeDb(), { role: "viewer" });
+  await viewer.app.ready();
+  assert.equal((await viewer.app.inject({ method: "POST", url: "/api/admin/v1/conversations/conv-1/tool-selectors", headers: { cookie: "eva_admin=session-1" }, payload: { confirm: "conv-1", current_task_tools: null, selected_skill_tools: null } })).statusCode, 403);
+  await viewer.app.close();
+});
 
 test("выключенный флаг не оставляет ни одного маршрута раздела", async () => {
   const { app } = harness(new FakeDb(), { flag: "0" });

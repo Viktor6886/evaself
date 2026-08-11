@@ -131,6 +131,8 @@ export interface AgentRuntimeContext {
   timezone: string;
   responseMode: "text" | "voice" | "both";
   useEmoji: boolean;
+  currentTaskTools: string[] | null;
+  selectedSkillTools: string[] | null;
 }
 
 export interface AdminAuditInput {
@@ -315,6 +317,8 @@ export class Database {
       timezone: string;
       response_mode: "text" | "voice" | "both";
       use_emoji: boolean;
+      current_task_tools: string[] | null;
+      selected_skill_tools: string[] | null;
     }>(
       `
         -- tenant: system — каноническое сопоставление conversation → пользователь, отсюда берётся владелец для областей
@@ -325,7 +329,9 @@ export class Database {
               c.purpose,
               u.timezone,
               COALESCE(p.response_mode, 'text') AS response_mode,
-              COALESCE(p.use_emoji, true) AS use_emoji
+              COALESCE(p.use_emoji, true) AS use_emoji,
+              c.current_task_tools,
+              c.selected_skill_tools
          FROM agent_conversations c
          JOIN users u ON u.id = c.user_id
          LEFT JOIN user_preferences p ON p.user_id = u.id
@@ -351,6 +357,8 @@ export class Database {
           timezone: row.timezone,
           responseMode: row.response_mode,
           useEmoji: row.use_emoji,
+          currentTaskTools: row.current_task_tools,
+          selectedSkillTools: row.selected_skill_tools,
         }
       : null;
   }

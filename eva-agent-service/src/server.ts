@@ -60,6 +60,7 @@ export interface Services {
   dispatcher?: { foreignLockCount: number };
   miniAppSessions?: MiniAppSessionStore;
   rateLimiter?: RateLimiter;
+  approvals?: { decideByTelegram(input: { telegramId: number; sdkRequestId: string; decision: "allow" | "deny" }): Promise<unknown> };
   /**
    * Контур наблюдаемости. Нужен выдаче метрик (состояние буфера
    * телеметрии) и ingress — там начинается трасса хода.
@@ -186,6 +187,7 @@ export function buildServer(services: Services): FastifyInstance {
     telegram,
     ...(services.miniAppSessions ? { sessions: services.miniAppSessions } : {}),
     rateLimiter,
+    ...(services.approvals ? { approvals: { decide: async (input) => await services.approvals!.decideByTelegram(input) } } : {}),
   });
 
   // Новые разделы Mini App (задачи, заметки, бюджет, решения, check-in,

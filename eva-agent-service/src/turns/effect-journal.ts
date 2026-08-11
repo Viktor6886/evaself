@@ -75,10 +75,15 @@ export class EffectJournal {
     private readonly db: Database,
     private readonly logger: Logger,
     private readonly enabled: boolean,
+    private readonly failClosed = false,
   ) {}
 
   get active(): boolean {
     return this.enabled;
+  }
+
+  get strict(): boolean {
+    return this.enabled && this.failClosed;
   }
 
   /**
@@ -116,6 +121,7 @@ export class EffectJournal {
       // Без владельца строку некуда положить: она осталась бы вне
       // границы арендатора. Инструмент при этом выполняется — отказать
       // в действии из-за журнала хуже, чем потерять защиту от повтора.
+      if (this.failClosed) throw new Error("Effect journal requires a canonical owner");
       this.logger.warn("Эффект не записан: владелец неизвестен", { tool: input.toolName });
       return { action: "execute", attempt: 1 };
     }
@@ -188,6 +194,7 @@ export class EffectJournal {
       });
     } catch (error) {
       this.warn("Не удалось открыть запись эффекта", error, { tool: input.toolName });
+      if (this.failClosed) throw error;
       return { action: "execute", attempt: 1 };
     }
   }
