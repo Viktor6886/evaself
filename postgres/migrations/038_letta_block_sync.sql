@@ -11,6 +11,8 @@
 -- App Server, а не в этой базе. `agent_id` — текстовый идентификатор
 -- оттуда, и его отсутствие в Letta не должно ломать строку здесь.
 
+BEGIN;
+
 CREATE TABLE IF NOT EXISTS letta_memory_block_sync (
     id                bigserial   PRIMARY KEY,
 
@@ -76,3 +78,9 @@ CREATE INDEX IF NOT EXISTS letta_memory_block_sync_user_idx
 CREATE INDEX IF NOT EXISTS letta_memory_block_sync_retry_idx
     ON letta_memory_block_sync (last_attempt_at NULLS FIRST)
     WHERE status <> 'synced';
+
+INSERT INTO schema_migrations (version)
+VALUES ('038_letta_block_sync')
+ON CONFLICT (version) DO NOTHING;
+
+COMMIT;
