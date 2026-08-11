@@ -81,12 +81,19 @@ export interface RetentionReport {
   generatedAt: string;
 }
 
-/** Что удаляет или чистит класс. Пусто — класс не удаляется кодом. */
+/**
+ * Что удаляет или чистит класс.
+ *
+ * Списками, а не одиночными запросами: один класс данных живёт в
+ * нескольких таблицах. «Сырой payload Telegram» — это и входящие, и
+ * исходящие сообщения, и вычистить только половину значит объявить
+ * политику выполненной, оставив вторую половину на диске.
+ */
 interface ClassQueries {
-  /** Сколько строк подпадает. */
-  count: string;
+  /** Сколько строк подпадает. Суммируется по всем источникам. */
+  count: string[];
   /** Что сделать с пакетом. Возвращает число затронутых строк. */
-  apply?: string;
+  apply?: string[];
 }
 
 /**
@@ -96,76 +103,122 @@ interface ClassQueries {
  * подзапросом с `LIMIT`: пакет обязан быть маленьким, даже если
  * накопилось много.
  */
-const QUERIES: Record<string, ClassQueries> = {
+export const RETENTION_QUERIES: Record<string, ClassQueries> = {
   telegram_payload: {
-    count: `-- tenant: system — общесистемное применение политики хранения
-            SELECT count(*)::int AS value FROM telegram_updates
-             WHERE received_at < now() - make_interval(days => $1)
-               AND payload <> '{}'::jsonb`,
+    count: [
+      `-- tenant: system — общесистемное применение политики хранения
+       SELECT count(*)::int AS value FROM telegram_updates
+        WHERE received_at < now() - make_interval(days => $1)
+          AND payload <> '{}'::jsonb`,
+      `-- tenant: system — общесистемное применение политики хранения
+       SELECT count(*)::int AS value FROM telegram_outbox
+        WHERE created_at < now() - make_interval(days => $1)
+          AND status IN ('sent', 'dead')
+          AND payload <> '{}'::jsonb`,
+    ],
     // Редактирование, а не удаление: строка остаётся, и ключ
     // идемпотентности вместе с ней — иначе повторная доставка того же
     // апдейта Telegram создала бы второй ход.
-    apply: `-- tenant: system — общесистемное применение политики хранения
-            UPDATE telegram_updates
-               SET payload = '{}'::jsonb
-             WHERE id IN (
-               SELECT id FROM telegram_updates
-                WHERE received_at < now() - make_interval(days => $1)
-                  AND payload <> '{}'::jsonb
-                ORDER BY received_at
-                LIMIT $2
-             )`,
+    //
+    // У исходящих вычищаются только завершённые строки: у ожидающей
+    // доставки payload — это само сообщение, и без него отправлять
+    // будет нечего.
+    apply: [
+      `-- tenant: system — общесистемное применение политики хранения
+       UPDATE telegram_updates
+          SET payload = '{}'::jsonb
+        WHERE id IN (
+          SELECT id FROM telegram_updates
+           WHERE received_at < now() - make_interval(days => $1)
+             AND payload <> '{}'::jsonb
+           ORDER BY received_at
+           LIMIT $2
+        )`,
+      `-- tenant: system — общесистемное применение политики хранения
+       UPDATE telegram_outbox
+          SET payload = '{}'::jsonb
+        WHERE id IN (
+          SELECT id FROM telegram_outbox
+           WHERE created_at < now() - make_interval(days => $1)
+             AND status IN ('sent', 'dead')
+             AND payload <> '{}'::jsonb
+           ORDER BY created_at
+           LIMIT $2
+        )`,
+    ],
   },
   telegram_idempotency: {
-    count: `-- tenant: system — общесистемное применение политики хранения
-            SELECT count(*)::int AS value FROM telegram_updates
-             WHERE received_at < now() - make_interval(days => $1)
-               AND status IN ('done', 'dead')`,
-    apply: `-- tenant: system — общесистемное применение политики хранения
-            DELETE FROM telegram_updates
-             WHERE id IN (
-               SELECT id FROM telegram_updates
-                WHERE received_at < now() - make_interval(days => $1)
-                  AND status IN ('done', 'dead')
-                ORDER BY received_at
-                LIMIT $2
-             )`,
+    // Статусы — те, что действительно существуют в схеме
+    // (`telegram_updates_status_check`): обработанный апдейт получает
+    // `completed`, а не `done`. Несуществующее значение в фильтре не
+    // ошибка синтаксиса — оно просто никогда не совпадает, и политика
+    // молча не работает.
+    count: [
+      `-- tenant: system — общесистемное применение политики хранения
+       SELECT count(*)::int AS value FROM telegram_updates
+        WHERE received_at < now() - make_interval(days => $1)
+          AND status IN ('completed', 'ignored', 'dead')`,
+      `-- tenant: system — общесистемное применение политики хранения
+       SELECT count(*)::int AS value FROM telegram_outbox
+        WHERE created_at < now() - make_interval(days => $1)
+          AND status IN ('sent', 'dead')`,
+    ],
+    apply: [
+      `-- tenant: system — общесистемное применение политики хранения
+       DELETE FROM telegram_updates
+        WHERE id IN (
+          SELECT id FROM telegram_updates
+           WHERE received_at < now() - make_interval(days => $1)
+             AND status IN ('completed', 'ignored', 'dead')
+           ORDER BY received_at
+           LIMIT $2
+        )`,
+      `-- tenant: system — общесистемное применение политики хранения
+       DELETE FROM telegram_outbox
+        WHERE id IN (
+          SELECT id FROM telegram_outbox
+           WHERE created_at < now() - make_interval(days => $1)
+             AND status IN ('sent', 'dead')
+           ORDER BY created_at
+           LIMIT $2
+        )`,
+    ],
   },
   dead_letters: {
-    count: `-- tenant: system — общесистемное применение политики хранения
+    count: [`-- tenant: system — общесистемное применение политики хранения
             SELECT count(*)::int AS value FROM job_dead_letters
-             WHERE created_at < now() - make_interval(days => $1)`,
-    apply: `-- tenant: system — общесистемное применение политики хранения
+             WHERE created_at < now() - make_interval(days => $1)`],
+    apply: [`-- tenant: system — общесистемное применение политики хранения
             DELETE FROM job_dead_letters
              WHERE id IN (
                SELECT id FROM job_dead_letters
                 WHERE created_at < now() - make_interval(days => $1)
                 ORDER BY created_at
                 LIMIT $2
-             )`,
+             )`],
   },
   metrics_aggregated: {
-    count: `-- tenant: system — общесистемное применение политики хранения
+    count: [`-- tenant: system — общесистемное применение политики хранения
             SELECT count(*)::int AS value FROM job_mirror_samples
-             WHERE created_at < now() - make_interval(days => $1)`,
-    apply: `-- tenant: system — общесистемное применение политики хранения
+             WHERE created_at < now() - make_interval(days => $1)`],
+    apply: [`-- tenant: system — общесистемное применение политики хранения
             DELETE FROM job_mirror_samples
              WHERE id IN (
                SELECT id FROM job_mirror_samples
                 WHERE created_at < now() - make_interval(days => $1)
                 ORDER BY created_at
                 LIMIT $2
-             )`,
+             )`],
   },
   // app_logs и media_temp живут вне PostgreSQL: журналы — в драйвере
   // логов Docker, временные файлы — в media-service. Политика для них
   // объявлена и показывается, но исполняет её не этот код, и делать
   // вид, что исполняет, нельзя.
   app_logs: {
-    count: `SELECT 0::int AS value`,
+    count: [`SELECT 0::int AS value`],
   },
   media_temp: {
-    count: `SELECT 0::int AS value`,
+    count: [`SELECT 0::int AS value`],
   },
 };
 
@@ -247,14 +300,18 @@ export class RetentionService {
         continue;
       }
 
-      const queries = QUERIES[item.code];
+      const queries = RETENTION_QUERIES[item.code];
       if (!queries || days === null) {
         report.note = "Исполняется вне этого сервиса";
         classes.push(report);
         continue;
       }
 
-      report.eligible = await this.count(queries.count, days);
+      // Счётчик суммируется по всем источникам класса: «сырой payload
+      // Telegram» — это и входящие, и исходящие.
+      for (const sql of queries.count) {
+        report.eligible += await this.count(sql, days);
+      }
       if (!queries.apply) {
         report.note = "Исполняется вне этого сервиса";
         classes.push(report);
@@ -270,7 +327,9 @@ export class RetentionService {
         continue;
       }
       if (!options.dryRun && report.eligible > 0) {
-        report.affected = await this.applyBatches(item, queries.apply, days, options.signal);
+        for (const sql of queries.apply) {
+          report.affected += await this.applyBatches(item, sql, days, options.signal);
+        }
       }
       await this.record(item, report, options.dryRun, "succeeded");
       classes.push(report);

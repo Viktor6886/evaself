@@ -16,9 +16,12 @@ import {
 } from "../dist/observability/gateway.js";
 import { PrivacyProcessor, allowedTelemetryKeys } from "../dist/observability/privacy.js";
 import {
+  currentTraceContext,
+  initTracing,
   newCorrelationId,
   parseTraceparent,
   traceHeaders,
+  withSpan,
 } from "../dist/observability/tracing.js";
 import { MetricsCollector } from "../dist/metrics.js";
 import { withTenantScopes } from "./tenant-scope-helper.ts";
@@ -212,6 +215,45 @@ test("traceparent разбирается, а мусор не выдаётся з
   }
 });
 
+test("один ход прослеживается сквозь вложенные участки одной трассой", async () => {
+  initTracing({ enabled: true, version: "test" });
+
+  const seen: Array<{ where: string; traceId: string }> = [];
+  let outerTraceId = "";
+
+  // Спан хода накрывает всё, что ход делает дальше: обращение к Letta,
+  // Router, постановку задания и доставку. Контекст живёт в
+  // AsyncLocalStorage, поэтому вложенные участки не получают
+  // идентификатор параметром — они его наследуют.
+  await withSpan("turn.telegram", async () => {
+    outerTraceId = currentTraceContext()?.traceId ?? "";
+    await withSpan("letta.turn", async () => {
+      seen.push({ where: "letta", traceId: currentTraceContext()!.traceId });
+      await withSpan("llm.request", async () => {
+        seen.push({ where: "router", traceId: currentTraceContext()!.traceId });
+      });
+    });
+    await withSpan("job.memory_compaction", async () => {
+      seen.push({ where: "job", traceId: currentTraceContext()!.traceId });
+    });
+    await withSpan("delivery.outbox", async () => {
+      seen.push({ where: "delivery", traceId: currentTraceContext()!.traceId });
+    });
+  });
+
+  assert.match(outerTraceId, /^[0-9a-f]{32}$/);
+  assert.equal(seen.length, 4);
+  for (const item of seen) {
+    assert.equal(item.traceId, outerTraceId, `участок ${item.where} потерял трассу`);
+  }
+  // Заголовки исходящего запроса несут ту же трассу наружу.
+  await withSpan("outbound", async () => {
+    const headers = traceHeaders(currentTraceContext("corr-1"));
+    assert.match(headers.traceparent!, new RegExp(`^00-`));
+    assert.equal(headers["x-correlation-id"], "corr-1");
+  });
+});
+
 test("трасса продолжается через очередь: конверт несёт correlation id", async () => {
   const { buildJobEnvelope } = await import("../dist/jobs/envelope.js");
   const correlationId = newCorrelationId();
@@ -264,6 +306,7 @@ test("аудит кардинальности: в метках нет значе
     turnLifecycleEnabled: true,
     telemetryBuffer: () => ({ buffered: 3, dropped: 1 }),
     retentionPolicies: () => ({ app_logs: 604800 }),
+    queryLatency: () => ({ avg: 4.2, max: 31, samples: 120 }),
   } as never);
 
   const body = await collector.render();
@@ -306,6 +349,7 @@ test("аудит кардинальности: в метках нет значе
     "eva_telemetry_buffer",
     "eva_retention_policy_seconds",
     "eva_process_memory_bytes",
+    "eva_postgres_query_latency_ms",
   ]) {
     assert.match(body, new RegExp(`^# TYPE ${name} `, "m"), name);
   }

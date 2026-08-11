@@ -14,7 +14,7 @@ import {
   RETENTION_CLASSES,
   effectivePolicies,
 } from "../dist/retention/policy.js";
-import { RetentionService } from "../dist/retention/service.js";
+import { RETENTION_QUERIES, RetentionService } from "../dist/retention/service.js";
 import { ALL_SETTINGS } from "../dist/admin/settings-registry.js";
 
 const logger = { debug() {}, info() {}, warn() {}, error() {} };
@@ -29,6 +29,8 @@ class FakeRetentionDatabase {
   runs: Record<string, unknown>[] = [];
   failHolds = false;
   batches = 0;
+  /** Какие таблицы задело применение политики. */
+  touched = new Set<string>();
 
   query = async (sql: string, values: unknown[] = []): Promise<{ rows: unknown[]; rowCount: number }> => {
     const text = sql.replace(/--[^\n]*\n/g, " ").replace(/\s+/g, " ").trim();
@@ -50,15 +52,29 @@ class FakeRetentionDatabase {
     }
     if (text.startsWith("SELECT 0::int AS value")) return { rows: [{ value: 0 }], rowCount: 1 };
 
-    const target = text.includes("telegram_updates") && text.includes("payload <> ")
-      ? "telegram_payload"
-      : text.includes("telegram_updates")
-        ? "telegram_idempotency"
+    // Ключ считает и класс, и таблицу: политика «сырой payload
+    // Telegram» обязана дойти и до входящих, и до исходящих, и общий
+    // счётчик это скрыл бы.
+    const table = text.includes("telegram_updates")
+      ? "telegram_updates"
+      : text.includes("telegram_outbox")
+        ? "telegram_outbox"
         : text.includes("job_dead_letters")
-          ? "dead_letters"
+          ? "job_dead_letters"
           : text.includes("job_mirror_samples")
+            ? "job_mirror_samples"
+            : null;
+    const redacting = text.includes("payload <> ");
+    const target = table === "telegram_updates"
+      ? (redacting ? "telegram_payload" : "telegram_idempotency")
+      : table === "telegram_outbox"
+        ? (redacting ? "telegram_payload_outbox" : "telegram_idempotency_outbox")
+        : table === "job_dead_letters"
+          ? "dead_letters"
+          : table === "job_mirror_samples"
             ? "metrics_aggregated"
             : null;
+    if (table) this.touched.add(table);
     if (!target) throw new Error(`Неожиданный запрос: ${text.slice(0, 60)}`);
 
     if (text.startsWith("SELECT count(")) {
@@ -159,14 +175,24 @@ test("предпросмотр считает и ничего не удаляе�
 
 test("искусственно состаренные данные удаляются пакетами по классу", async () => {
   const { db, service } = build({ enabled: true, batchSize: 100 });
-  db.aged = { telegram_payload: 250, dead_letters: 30, metrics_aggregated: 0 };
+  db.aged = {
+    telegram_payload: 250,
+    telegram_payload_outbox: 40,
+    dead_letters: 30,
+    metrics_aggregated: 0,
+  };
 
   const report = await service.enforce();
 
   assert.equal(report.dryRun, false);
   const payload = report.classes.find((item) => item.code === "telegram_payload")!;
-  assert.equal(payload.affected, 250, "все состаренные строки обработаны");
+  assert.equal(payload.affected, 290, "обработаны и входящие, и исходящие");
   assert.equal(db.aged.telegram_payload, 0);
+  assert.equal(db.aged.telegram_payload_outbox, 0);
+  assert.ok(
+    db.touched.has("telegram_updates") && db.touched.has("telegram_outbox"),
+    "класс заявлен для inbox и outbox — значит обязан дойти до обоих",
+  );
   assert.equal(db.aged.dead_letters, 0);
   // Пакеты маленькие: 250 строк — это три захода по сто, а не один
   // запрос на четверть тысячи.
@@ -258,6 +284,42 @@ test("редактирование payload сохраняет строку и е
     (idempotencyClass.defaultDays ?? 0) > (payloadClass.defaultDays ?? 0),
     "метаданные идемпотентности живут дольше содержания",
   );
+});
+
+test("фильтры статусов совпадают со схемой, а не с выдуманными значениями", () => {
+  // Значения из `telegram_updates_status_check` и
+  // `telegram_outbox_status_check`. Несуществующее значение в фильтре —
+  // не синтаксическая ошибка: запрос выполняется, ничего не совпадает,
+  // и политика молча не работает.
+  const updateStatuses = new Set(["queued", "processing", "completed", "ignored", "retry", "dead"]);
+  const outboxStatuses = new Set(["pending", "sending", "retry", "sent", "dead"]);
+
+  const statements = Object.values(RETENTION_QUERIES)
+    .flatMap((queries) => [...queries.count, ...(queries.apply ?? [])]);
+  assert.ok(statements.length > 0);
+
+  for (const sql of statements) {
+    const used = [...sql.matchAll(/'([a-z_]+)'/g)].map((match) => match[1]!);
+    const allowed = sql.includes("telegram_outbox") ? outboxStatuses : updateStatuses;
+    for (const value of used) {
+      // В запросах встречаются только статусы и пустой jsonb.
+      if (value === "{}" || !/^[a-z_]+$/.test(value)) continue;
+      if (!sql.includes("telegram_")) continue;
+      assert.ok(allowed.has(value), `${value}: такого статуса в схеме нет`);
+    }
+  }
+
+  // Точечно: обработанный апдейт получает `completed`, и именно он
+  // должен попадать под удаление метаданных идемпотентности.
+  const idempotency = RETENTION_QUERIES.telegram_idempotency!;
+  assert.ok(idempotency.apply!.some((sql) => sql.includes("'completed'")));
+  assert.ok(!idempotency.apply!.some((sql) => sql.includes("'done'")));
+
+  // Payload исходящих вычищается только у завершённых строк: у
+  // ожидающей доставки payload — это само сообщение.
+  const payload = RETENTION_QUERIES.telegram_payload!;
+  const outbox = payload.apply!.find((sql) => sql.includes("telegram_outbox"))!;
+  assert.ok(outbox.includes("status IN ('sent', 'dead')"));
 });
 
 test("отчёт не раскрывает пользовательских данных", async () => {

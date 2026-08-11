@@ -32,6 +32,8 @@ export interface MetricsSources {
   /** Блокировки пользователей: удерживаемые и ожидающие в FIFO. */
   locks: () => { held: number; queued: number };
   poolStats: () => MetricsPoolStats;
+  /** Задержка последних запросов к PostgreSQL. */
+  queryLatency?: () => { avg: number; max: number; samples: number };
   /** Занятость глобальных слотов хода по классам. */
   slots?: () => Promise<Record<TurnClass, { used: number; limit: number }>>;
   /** Возвраты записи из-за блокировки, занятой другим владельцем. */
@@ -115,6 +117,7 @@ export class MetricsCollector {
     const providers = await providerStats(this.sources.db);
     const delivery = await deliveryStats(this.sources.db);
     const telemetry = this.sources.telemetryBuffer?.() ?? { buffered: 0, dropped: 0 };
+    const latency = this.sources.queryLatency?.() ?? { avg: 0, max: 0, samples: 0 };
 
     const samples: Sample[] = [
       {
@@ -246,6 +249,16 @@ export class MetricsCollector {
         help: "Возвраты записи из-за блокировки, занятой другим владельцем.",
         type: "counter",
         values: [{ value: this.sources.foreignLockReleases?.() ?? 0 }],
+      },
+      {
+        name: "eva_postgres_query_latency_ms",
+        help: "Задержка последних запросов к PostgreSQL: скользящее окно.",
+        type: "gauge",
+        values: [
+          { labels: { stat: "avg" }, value: latency.avg },
+          { labels: { stat: "max" }, value: latency.max },
+          { labels: { stat: "samples" }, value: latency.samples },
+        ],
       },
       {
         name: "eva_jobs_outbox_pending",

@@ -202,6 +202,12 @@ export function buildServer(services: Services): FastifyInstance {
     sessions: () => letta.sessionStats(),
     locks: () => ({ held: queue.activeUsers, queued: queue.queuedUsers }),
     poolStats: () => db.poolStats(),
+    // Замер задержки есть у настоящей базы; поддельная в тестах и
+    // внешние вызовы `buildServer` его не обязаны предоставлять, и
+    // отсутствие метода не должно ронять всю выдачу.
+    ...(typeof db.queryLatency === "function"
+      ? { queryLatency: () => db.queryLatency() }
+      : {}),
     ...(services.slots ? { slots: () => services.slots!.usage() } : {}),
     ...(services.dispatcher
       ? { foreignLockReleases: () => services.dispatcher!.foreignLockCount }
