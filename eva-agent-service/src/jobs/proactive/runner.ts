@@ -29,6 +29,11 @@ export interface ProactiveTickResult {
   failed: number;
   /** Совпала ли выборка со старым механизмом. `null` — сравнение не проводилось. */
   matched: boolean | null;
+  /**
+   * Можно ли снимать зеркало: серия последних сверок совпала целиком.
+   * `null` — вопрос не задавался (сравнения не было или зеркало уже снято).
+   */
+  readyToCutOver: boolean | null;
 }
 
 /** Выборка старого интервала для сравнения. `null` — старого механизма нет. */
@@ -40,12 +45,15 @@ export interface ProactiveRunnerOptions {
   eveningHour?: number;
   /** Сколько кандидатов обрабатывается за заход. */
   batchSize?: number;
+  /** Сколько совпавших сверок подряд считать доказательством. */
+  cutoverRuns?: number;
 }
 
 export class ProactiveRunner {
   private readonly morningHour: number;
   private readonly eveningHour: number;
   private readonly batchSize: number;
+  private readonly cutoverRuns: number;
 
   constructor(
     private readonly selection: ProactiveSelection,
@@ -59,6 +67,7 @@ export class ProactiveRunner {
     this.morningHour = options.morningHour ?? 9;
     this.eveningHour = options.eveningHour ?? 21;
     this.batchSize = options.batchSize ?? 25;
+    this.cutoverRuns = options.cutoverRuns ?? 20;
   }
 
   async tick(
@@ -75,6 +84,7 @@ export class ProactiveRunner {
       skipped: 0,
       failed: 0,
       matched: null,
+      readyToCutOver: null,
     };
 
     const legacy = await this.legacySelector(kind);
@@ -82,6 +92,18 @@ export class ProactiveRunner {
       const comparison = compareSelections(kind, legacy, selectionKeys(candidates));
       await this.mirror.record(comparison);
       result.matched = comparison.matched;
+      // Готовность к снятию зеркала спрашивается здесь и попадает в
+      // журнал: иначе «доказанное совпадение» осталось бы функцией,
+      // которую некому вызвать, и решение принималось бы на глаз.
+      const readiness = await this.mirror.readyToCutOver(kind, this.cutoverRuns);
+      result.readyToCutOver = readiness.ready;
+      this.logger.info("Готовность к снятию зеркала", {
+        kind,
+        ready: readiness.ready,
+        runs: readiness.runs,
+        mismatches: readiness.mismatches,
+        required: this.cutoverRuns,
+      });
     }
 
     if (!queueMayDispatch(this.stage)) {

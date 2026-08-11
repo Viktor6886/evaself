@@ -26,7 +26,7 @@ import {
 } from "../dist/jobs/proactive/cutover.js";
 import { compareSelections } from "../dist/jobs/mirror.js";
 import { ReconcileService } from "../dist/jobs/maintenance.js";
-import { parseProposal } from "../dist/jobs/agent-job.js";
+import { AgentJobRunner, parseProposal } from "../dist/jobs/agent-job.js";
 import { withTenantScopes } from "./tenant-scope-helper.ts";
 
 const logger = { debug() {}, info() {}, warn() {}, error() {} };
@@ -504,6 +504,8 @@ test("зеркало сравнивает множества, а не счётч
   const result = await runner.tick("heartbeat", { now: new Date("2026-08-10T09:00:00Z") });
   assert.equal(result.selected, 1);
   assert.equal(result.matched, true);
+  // Одно совпадение доказательством не считается: снимать зеркало рано.
+  assert.equal(result.readyToCutOver, false);
   assert.equal(result.sent, 0, "в режиме зеркала очередь не отправляет");
   assert.equal(layer.delivered.length, 0);
   assert.equal(layer.fake.mirror.length, 1);
@@ -537,6 +539,43 @@ test("после снятия зеркала отправляет очередь
   assert.equal(layer.delivered.length, 1);
 });
 
+test("готовность к снятию зеркала требует серии совпадений подряд", async () => {
+  const layer = buildService();
+  const mirror = new (await import("../dist/jobs/mirror.js")).MirrorRecorder(
+    layer.db,
+    logger as never,
+  );
+  const runner = new ProactiveRunner(
+    { heartbeat: async () => [candidate()], reminders: async () => [], checkin: async () => [] } as never,
+    layer.service,
+    mirror,
+    "mirror",
+    logger as never,
+    () => Promise.resolve(["user:42"]),
+    { cutoverRuns: 3 },
+  );
+  const now = new Date("2026-08-10T09:00:00Z");
+
+  assert.equal((await runner.tick("heartbeat", { now })).readyToCutOver, false);
+  assert.equal((await runner.tick("heartbeat", { now })).readyToCutOver, false);
+  const third = await runner.tick("heartbeat", { now });
+  assert.equal(third.readyToCutOver, true, "три совпадения подряд — доказательство");
+
+  // Одно расхождение обнуляет готовность: серия должна быть чистой.
+  const diverging = new ProactiveRunner(
+    { heartbeat: async () => [candidate()], reminders: async () => [], checkin: async () => [] } as never,
+    layer.service,
+    mirror,
+    "mirror",
+    logger as never,
+    () => Promise.resolve(["user:99"]),
+    { cutoverRuns: 3 },
+  );
+  const mismatch = await diverging.tick("heartbeat", { now });
+  assert.equal(mismatch.matched, false);
+  assert.equal(mismatch.readyToCutOver, false);
+});
+
 // ---------------------------------------------------------------------
 // Сверки обслуживания
 // ---------------------------------------------------------------------
@@ -567,6 +606,143 @@ const spec = {
   resultKinds: ["reflection"],
   maxItems: 3,
 };
+
+/**
+ * Поддельное окружение фонового хода: conversation по назначению,
+ * ответ модели с заданным usage и таблица результатов в памяти.
+ */
+function buildAgentJob(options: {
+  reply?: string;
+  usage?: Record<string, number> | null;
+  enabled?: boolean;
+} = {}) {
+  const results: Record<string, unknown>[] = [];
+  const db = withTenantScopes({
+    query: async (sql: string, values: unknown[] = []) => {
+      if (!sql.includes("INSERT INTO agent_job_results")) {
+        throw new Error(`Неожиданный запрос: ${sql.slice(0, 60)}`);
+      }
+      results.push({
+        run_id: values[0],
+        user_id: values[1],
+        job_type: values[2],
+        purpose: values[4],
+        status: values[5],
+        result: JSON.parse(String(values[6])),
+        tokens_used: values[7],
+        budget_exceeded: values[10],
+        error_code: values[11],
+      });
+      return { rows: [] };
+    },
+  } as never) as never;
+
+  const conversations: string[] = [];
+  const runner = new AgentJobRunner(
+    db,
+    {
+      runTurn: async () => ({
+        reply: options.reply ?? '{"kind":"reflection","empty":false,"confidence":0.6,'
+          + '"items":[{"kind":"reflection","ref":"node-9","summary":"Неделя вышла плотной"}]}',
+        reasoning: [],
+        assistantGroups: 1,
+        assistantHadIds: true,
+        toolCalls: [],
+        trace: [],
+        stopReason: null,
+        usage: options.usage === undefined ? { total_tokens: 100 } : options.usage,
+        messageCount: 1,
+      }),
+    } as never,
+    {
+      ensure: async (input: { purpose: string }) => {
+        conversations.push(input.purpose);
+        return { conversationId: "conv-service", purpose: input.purpose, created: false };
+      },
+    } as never,
+    {
+      build: async () => ({}),
+      wrapUserMessage: (_context: unknown, message: string) => message,
+    } as never,
+    logger as never,
+    options.enabled ?? true,
+  );
+  return { runner, results, conversations };
+}
+
+function agentInput(overrides = {}) {
+  return {
+    runId: "run-1",
+    userId: 42,
+    agentId: "agent-1",
+    parentConversationId: "conv-1",
+    spec,
+    signal: new AbortController().signal,
+    ...overrides,
+  };
+}
+
+test("agent job соблюдает бюджет: превышение отменяет результат", async () => {
+  // Токенов израсходовано больше объявленного — предложение не
+  // принимается, даже если оно корректное.
+  const overspent = buildAgentJob({ usage: { total_tokens: 5_000 } });
+  const outcome = await overspent.runner.run(agentInput() as never);
+  assert.equal(outcome.status, "budget_exceeded");
+  assert.equal(outcome.status === "budget_exceeded" && outcome.limit, "maxTokens");
+  assert.equal(overspent.results[0]?.status, "budget_exceeded");
+  assert.equal(overspent.results[0]?.budget_exceeded, true);
+  assert.deepEqual(overspent.results[0]?.result, {}, "результат при превышении не сохраняется");
+
+  // В пределах бюджета тот же ответ принимается и записывается.
+  const within = buildAgentJob();
+  const ok = await within.runner.run(agentInput() as never);
+  assert.equal(ok.status, "succeeded");
+  assert.equal(ok.status === "succeeded" && ok.proposal.items[0]?.ref, "node-9");
+  assert.equal(ok.status === "succeeded" && ok.usage.tokens, 100);
+  assert.equal(within.results[0]?.status, "succeeded");
+  assert.equal(within.results[0]?.job_type, "reflection");
+  assert.equal(within.results[0]?.purpose, "maintenance");
+});
+
+test("agent job не выполняется в назначении, из которого можно писать человеку", async () => {
+  const layer = buildAgentJob();
+  const outcome = await layer.runner.run(
+    agentInput({ spec: { ...spec, purpose: "scheduler" } }) as never,
+  );
+  assert.equal(outcome.status, "failed");
+  assert.equal(outcome.status === "failed" && outcome.code, "agent_job_purpose_forbidden");
+  assert.equal(layer.conversations.length, 0, "conversation даже не открывается");
+  assert.equal(layer.results.length, 0);
+});
+
+test("agent job при выключенном флаге и при отмене ничего не делает", async () => {
+  const disabled = buildAgentJob({ enabled: false });
+  const off = await disabled.runner.run(agentInput() as never);
+  assert.equal(off.status === "failed" && off.code, "agent_jobs_disabled");
+  assert.equal(disabled.conversations.length, 0);
+
+  const aborted = new AbortController();
+  aborted.abort();
+  const layer = buildAgentJob();
+  const cancelled = await layer.runner.run(agentInput({ signal: aborted.signal }) as never);
+  assert.equal(cancelled.status === "failed" && cancelled.code, "aborted");
+  assert.equal(layer.conversations.length, 0);
+});
+
+test("agent job признаёт пустое предложение успехом, а мусор — невалидным результатом", async () => {
+  const empty = buildAgentJob({
+    reply: '{"kind":"reflection","empty":true,"confidence":0.9,"items":[]}',
+  });
+  const outcome = await empty.runner.run(agentInput() as never);
+  assert.equal(outcome.status, "empty");
+  assert.equal(empty.results[0]?.status, "empty");
+
+  const garbage = buildAgentJob({ reply: "Мне кажется, всё неплохо" });
+  const invalid = await garbage.runner.run(agentInput() as never);
+  assert.equal(invalid.status, "invalid_result");
+  assert.equal(garbage.results[0]?.status, "invalid_result");
+  assert.equal(garbage.results[0]?.error_code, "agent_result_not_json");
+});
 
 test("agent job возвращает структурированный результат и отвергает мусор", () => {
   const good = parseProposal(
