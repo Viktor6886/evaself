@@ -13,9 +13,9 @@ CURRENT_BATCH: 11
 CURRENT_STEP:  14
 BRANCH:        batch/11-tool-gateway
 STATUS:        на ревью
-LAST_COMMIT:   58aeb75
+LAST_COMMIT:   5c50f19
 BLOCKER:       —
-NEXT:          пройти финальное независимое ревью, затем открыть PR и дождаться CI
+NEXT:          открыть PR и дождаться зелёного CI
 ```
 
 Значения полей:
