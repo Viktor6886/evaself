@@ -9,13 +9,13 @@
 ## Состояние
 
 ```
-CURRENT_BATCH: 12
-CURRENT_STEP:  16
-BRANCH:        batch/12-temporal-memory-curator
-STATUS:        на ревью
-LAST_COMMIT:   6431c33
+CURRENT_BATCH: 13
+CURRENT_STEP:  17
+BRANCH:        —
+STATUS:        не начат
+LAST_COMMIT:   5f86522
 BLOCKER:       —
-NEXT:          дождаться зелёного CI в PR #150 и смержить
+NEXT:          дождаться разрешения человека на batch 13 (шаги 17–18)
 ```
 
 Значения полей:
@@ -53,7 +53,7 @@ Batch — единица работы: одна ветка, один pull reques
 | 9 | 11 | P1 | выполнен | [#146](https://github.com/Viktor6886/evaself/pull/146) |
 | 10 | 12–13 | P1 | выполнен | [#148](https://github.com/Viktor6886/evaself/pull/148) |
 | 11 | 14 | P2 | выполнен | [#149](https://github.com/Viktor6886/evaself/pull/149) |
-| 12 | 15–16 | P2 | в работе | — |
+| 12 | 15–16 | P2 | выполнен | [#150](https://github.com/Viktor6886/evaself/pull/150) |
 | 13 | 17–18 | P2 | не начат | — |
 | 14 | 19–20 | P2 | не начат | — |
 | 15 | 21–22 | P2 | не начат | — |
