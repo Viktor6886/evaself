@@ -25,7 +25,7 @@
 <!-- Записи ниже -->
 
 ## Batch 11 — шаг 14
-- Ветка: `batch/11-tool-gateway` · PR: ожидается · Дата: 2026-08-11 ·
+- Ветка: `batch/11-tool-gateway` · PR: [#149](https://github.com/Viktor6886/evaself/pull/149) · Дата: 2026-08-11 ·
   Статус: на ревью
 
 ### Шаг 14 — Tool Gateway, durable approvals и политика MCP

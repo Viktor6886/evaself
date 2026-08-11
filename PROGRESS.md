@@ -15,7 +15,7 @@ BRANCH:        batch/11-tool-gateway
 STATUS:        на ревью
 LAST_COMMIT:   5c50f19
 BLOCKER:       —
-NEXT:          открыть PR и дождаться зелёного CI
+NEXT:          дождаться зелёного CI в PR #149
 ```
 
 Значения полей:
@@ -52,7 +52,7 @@ Batch — единица работы: одна ветка, один pull reques
 | 8 | 09–10 | P1 | выполнен | [#145](https://github.com/Viktor6886/evaself/pull/145) |
 | 9 | 11 | P1 | выполнен | [#146](https://github.com/Viktor6886/evaself/pull/146) |
 | 10 | 12–13 | P1 | выполнен | [#148](https://github.com/Viktor6886/evaself/pull/148) |
-| 11 | 14 | P2 | на ревью | — |
+| 11 | 14 | P2 | на ревью | [#149](https://github.com/Viktor6886/evaself/pull/149) |
 | 12 | 15–16 | P2 | не начат | — |
 | 13 | 17–18 | P2 | не начат | — |
 | 14 | 19–20 | P2 | не начат | — |
