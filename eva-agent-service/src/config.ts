@@ -128,6 +128,22 @@ export interface Config {
   jobOutboxPollMs: number;
   /** Сколько намерений публикатор забирает за один заход. */
   jobOutboxBatchSize: number;
+  /** Сверки обслуживания на очередях. Сообщений пользователю не шлют. */
+  bullmqMaintenanceEnabled: boolean;
+  /** Проактивные сообщения на очередях: напоминания, heartbeat, check-in. */
+  bullmqProactiveEnabled: boolean;
+  /**
+   * Режим зеркала. Включён — очередь только выбирает и сравнивает
+   * выборку со старым интервалом, отправляет по-прежнему старый путь.
+   * Выключать его можно лишь после доказанного совпадения выборок:
+   * доказательство лежит в `job_mirror_samples`.
+   */
+  jobsMirrorMode: boolean;
+  /** Универсальный фоновый ход агента (рефлексия, отчёты, исследования). */
+  agentJobsEnabled: boolean;
+  /** Локальный час утреннего и вечернего check-in. */
+  checkinMorningHour: number;
+  checkinEveningHour: number;
 
   lavaWebhookUser: string;
   lavaWebhookPassword: string;
@@ -304,6 +320,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     bullmqJobsEnabled: bool("EVA_BULLMQ_JOBS", false),
     jobOutboxPollMs: clampedInt("EVA_JOBS_OUTBOX_POLL_MS", 1_000, 200, 60_000),
     jobOutboxBatchSize: clampedInt("EVA_JOBS_OUTBOX_BATCH", 32, 1, 200),
+    bullmqMaintenanceEnabled: bool("EVA_BULLMQ_MAINTENANCE", false),
+    bullmqProactiveEnabled: bool("EVA_BULLMQ_PROACTIVE", false),
+    // Умолчание — зеркало: включённая проактивность без доказанного
+    // совпадения выборок обязана сначала понаблюдать, а не начать
+    // писать людям параллельно со старым интервалом.
+    jobsMirrorMode: bool("EVA_JOBS_MIRROR", true),
+    agentJobsEnabled: bool("EVA_AGENT_JOBS", false),
+    checkinMorningHour: clampedInt("EVA_CHECKIN_MORNING_HOUR", 9, 5, 12),
+    checkinEveningHour: clampedInt("EVA_CHECKIN_EVENING_HOUR", 21, 17, 23),
 
     lavaWebhookUser: str("LAVA_WEBHOOK_USER"),
     lavaWebhookPassword: str("LAVA_WEBHOOK_PASSWORD"),
@@ -351,6 +376,32 @@ export function configWarnings(config: Config): string[] {
   // Восстановление меняет состояние только через жизненный цикл, а он
   // при выключенном флаге не пишет ничего: решения принимались бы,
   // не применялись и оставляли по строке в журнале попыток каждый заход.
+  // Проактивные задания без самого слоя заданий — флаг, который ничего
+  // не включает: очередей нет, публикатор не работает, сверка зеркала
+  // не выполняется ни разу.
+  if ((config.bullmqProactiveEnabled || config.bullmqMaintenanceEnabled)
+      && !config.bullmqJobsEnabled) {
+    warnings.push(
+      "EVA_BULLMQ_PROACTIVE или EVA_BULLMQ_MAINTENANCE включён, а EVA_BULLMQ_JOBS "
+        + "выключен: очереди не открываются и задания не выполняются",
+    );
+  }
+  // Снятое зеркало — это переключение владения задачей. Оно допустимо
+  // только осознанно и после сверки, поэтому о нём предупреждаем всегда.
+  if (config.bullmqProactiveEnabled && !config.jobsMirrorMode) {
+    warnings.push(
+      "EVA_JOBS_MIRROR выключен: напоминания и heartbeat ведёт очередь, "
+        + "старые интервалы не запускаются. Убедитесь, что сверка в "
+        + "job_mirror_samples показала совпадение выборок",
+    );
+  }
+  if (config.checkinEveningHour <= config.checkinMorningHour) {
+    warnings.push(
+      `EVA_CHECKIN_EVENING_HOUR (${config.checkinEveningHour}) не позже `
+        + `EVA_CHECKIN_MORNING_HOUR (${config.checkinMorningHour}): вечерний `
+        + "check-in не сможет опереться на утреннее намерение",
+    );
+  }
   if (config.turnRecoveryEnabled && !config.turnLifecycleEnabled) {
     warnings.push(
       "EVA_TURN_RECOVERY включён, а EVA_TURN_LIFECYCLE выключен: "

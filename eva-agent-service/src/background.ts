@@ -9,6 +9,11 @@ import type { RuntimeContextBuilder } from "./runtime/runtime-context.js";
 import type { UserTurnLock } from "./turns/user-turn-lock.js";
 import type { TelegramClient } from "./telegram.js";
 import { TaskEventService } from "./tasks/task-event-service.js";
+import { isQuietHours, nextCronDate } from "./time/cron.js";
+
+// Cron-утилиты переехали в `src/time/cron.ts` (шаг 08): их считает уже не
+// только планировщик. Реэкспорт сохраняет прежние точки импорта.
+export { assertCronExpression, cronFieldMatches, nextCronDate } from "./time/cron.js";
 
 interface DueTask {
   id: string;
@@ -64,8 +69,20 @@ export class BackgroundRuntime {
     this.taskEvents = taskEvents ?? new TaskEventService(db);
   }
 
-  start(): void {
+  /**
+   * Запустить интервалы.
+   *
+   * `enabled = false` означает, что задачи забрала очередь (шаг 08): в
+   * этом случае таймеры не заводятся вовсе. Ровно здесь и держится
+   * правило «одна задача не исполняется двумя механизмами» — не
+   * договорённостью, а тем, что второй механизм не стартует.
+   */
+  start(enabled = true): void {
     if (this.taskTimer || this.heartbeatTimer) return;
+    if (!enabled) {
+      this.logger.info("Интервалы планировщика не запущены: задачи ведёт очередь");
+      return;
+    }
     this.taskTimer = setInterval(
       () => void this.runTasks(),
       Math.max(this.config.schedulerIntervalMs, 10_000),
@@ -77,6 +94,70 @@ export class BackgroundRuntime {
     this.taskTimer.unref();
     this.heartbeatTimer.unref();
     void this.runTasks();
+  }
+
+  /** Работают ли сейчас старые интервалы. Нужно наблюдению и тестам переноса. */
+  get schedulerActive(): boolean {
+    return this.taskTimer !== null || this.heartbeatTimer !== null;
+  }
+
+  /**
+   * Что выбрал бы старый механизм прямо сейчас — без блокировок и без
+   * побочных действий.
+   *
+   * Нужно режиму зеркала: сравнить выборки можно, только получив обе, а
+   * `claimDueTasks` берёт строки под блокировку и увёл бы задачи у
+   * самого себя. Поэтому предпросмотр повторяет условие отбора и ничего
+   * не меняет.
+   */
+  async previewSelection(kind: "reminder" | "heartbeat"): Promise<string[]> {
+    if (kind === "heartbeat") {
+      const { rows } = await this.db.withSystemScope(
+        "scheduler.preview.heartbeat",
+        async () => await this.db.query<{ user_id: string }>(
+          `-- tenant: system — предпросмотр общесистемной выборки, ничего не меняет
+           SELECT u.id AS user_id
+             FROM users u
+             JOIN agent_links a
+               ON a.user_id = u.id AND a.kind = 'eva' AND a.status = 'active'
+             LEFT JOIN user_preferences p ON p.user_id = u.id
+             LEFT JOIN heartbeat_state h ON h.user_id = u.id
+            WHERE u.state = 'active'
+              AND NOT u.is_blocked
+              AND a.conversation_id IS NOT NULL
+              AND COALESCE(p.heartbeat_enabled, true)
+              AND COALESCE(h.last_user_message_at, u.last_seen_at, u.created_at)
+                  <= now() - COALESCE(p.heartbeat_min_silence, interval '6 hours')
+              AND (h.last_sent_at IS NULL OR
+                   h.last_sent_at <= now() - COALESCE(p.heartbeat_min_interval, interval '12 hours'))
+            ORDER BY COALESCE(h.last_sent_at, '-infinity'::timestamptz)
+            LIMIT 25`,
+        ),
+        { crossUser: true },
+      );
+      return rows.map((row) => `user:${Number(row.user_id)}`);
+    }
+    const { rows } = await this.db.withSystemScope(
+      "scheduler.preview.reminder",
+      async () => await this.db.query<{ id: string }>(
+        `-- tenant: system — предпросмотр общесистемной выборки, ничего не меняет
+         SELECT t.id
+           FROM tasks t
+           JOIN users u ON u.id = t.user_id
+           JOIN agent_links a
+             ON a.user_id = t.user_id AND a.kind = 'eva' AND a.status = 'active'
+          WHERE t.status IN ('open', 'in_progress')
+            AND a.conversation_id IS NOT NULL
+            AND COALESCE(t.next_run_at, t.remind_at, t.due_at) <= now()
+            AND (t.last_run_at IS NULL
+                 OR t.last_run_at < COALESCE(t.next_run_at, t.remind_at, t.due_at))
+            AND (t.locked_at IS NULL OR t.locked_at < now() - interval '15 minutes')
+          ORDER BY COALESCE(t.next_run_at, t.remind_at, t.due_at)
+          LIMIT 25`,
+      ),
+      { crossUser: true },
+    );
+    return rows.map((row) => `task:${row.id}`);
   }
 
   stop(): void {
@@ -452,182 +533,4 @@ function lastTelegramMessageId(results: unknown[]): number | null {
     }
   }
   return null;
-}
-
-/** A cron search never looks further ahead than this. */
-const CRON_HORIZON_MS = 366 * 24 * 60 * 60_000;
-
-/**
- * Reject a cron expression before it is ever stored.
- *
- * Every field must parse, and the whole expression must actually fire within
- * the horizon — so `0 0 30 2 *` is refused at creation time instead of
- * failing later inside the scheduler.
- */
-export function assertCronExpression(expression: string, timezone: string): void {
-  const fields = expression.trim().split(/\s+/);
-  if (fields.length !== 5) throw new Error("Cron должен содержать пять полей");
-  const bounds: Array<[number, number, boolean]> = [
-    [0, 59, false],
-    [0, 23, false],
-    [1, 31, false],
-    [1, 12, false],
-    [0, 7, true],
-  ];
-  fields.forEach((field, index) => {
-    const [min, max, sundayAlias] = bounds[index]!;
-    // A field that matches nothing in its own range can never fire.
-    let satisfiable = false;
-    for (let value = min; value <= max; value += 1) {
-      if (cronFieldMatches(field, value, min, max, sundayAlias)) {
-        satisfiable = true;
-        break;
-      }
-    }
-    if (!satisfiable) throw new Error(`Cron: поле «${field}» не соответствует ни одному значению`);
-  });
-  // Proves the combination is reachable (and that the timezone is valid).
-  nextCronDate(expression, timezone, new Date());
-}
-
-/**
- * The next moment a cron expression fires, in the given IANA timezone.
- *
- * The search skips whole days and hours instead of walking minute by minute:
- * a naive scan is up to 527 040 iterations, and — because a fresh
- * `Intl.DateTimeFormat` per iteration costs ~90 µs — used to block the event
- * loop for the better part of a minute on an expression as ordinary as
- * `0 0 1 1 *`. With coarse stepping and a cached formatter the same lookup is
- * a few hundred formatter calls.
- */
-export function nextCronDate(expression: string, timezone: string, after: Date): Date {
-  const fields = expression.trim().split(/\s+/);
-  if (fields.length !== 5) throw new Error("Cron должен содержать пять полей");
-  const [minute, hour, day, month, weekday] = fields as [string, string, string, string, string];
-
-  const start = new Date(after.getTime());
-  start.setUTCSeconds(0, 0);
-  start.setUTCMinutes(start.getUTCMinutes() + 1);
-  const deadline = start.getTime() + CRON_HORIZON_MS;
-
-  let candidate = start.getTime();
-  while (candidate <= deadline) {
-    const parts = zonedParts(new Date(candidate), timezone);
-    const dateMatches =
-      cronFieldMatches(month, parts.month, 1, 12) &&
-      cronFieldMatches(day, parts.day, 1, 31) &&
-      cronFieldMatches(weekday, parts.weekday, 0, 7, true);
-
-    if (!dateMatches) {
-      // Jump to the start of the next local day. Always at least one minute,
-      // so the loop cannot stall even across a DST transition.
-      candidate += ((24 - parts.hour) * 60 - parts.minute) * 60_000;
-      continue;
-    }
-    if (!cronFieldMatches(hour, parts.hour, 0, 23)) {
-      candidate += (60 - parts.minute) * 60_000;
-      continue;
-    }
-    if (!cronFieldMatches(minute, parts.minute, 0, 59)) {
-      candidate += 60_000;
-      continue;
-    }
-    return new Date(candidate);
-  }
-  throw new Error("Не удалось найти следующий запуск cron в пределах года");
-}
-
-export function cronFieldMatches(
-  expression: string,
-  value: number,
-  min: number,
-  max: number,
-  sundayAlias = false,
-): boolean {
-  const normalizedValue = sundayAlias && value === 0 ? 0 : value;
-  return expression.split(",").some((part) => {
-    const [rangeRaw, stepRaw] = part.split("/");
-    const step = stepRaw ? Number(stepRaw) : 1;
-    if (!Number.isSafeInteger(step) || step < 1) return false;
-    const range = rangeRaw ?? "*";
-    let start: number;
-    let end: number;
-    if (range === "*") {
-      start = min;
-      end = max;
-    } else if (range.includes("-")) {
-      const [left, right] = range.split("-").map(Number);
-      if (left === undefined || right === undefined) return false;
-      start = left;
-      end = right;
-    } else {
-      start = Number(range);
-      end = start;
-    }
-    if (
-      !Number.isSafeInteger(start) ||
-      !Number.isSafeInteger(end) ||
-      start < min ||
-      end > max ||
-      start > end
-    ) {
-      return false;
-    }
-    const candidate = sundayAlias && normalizedValue === 0 && start === 7 ? 7 : normalizedValue;
-    return candidate >= start && candidate <= end && (candidate - start) % step === 0;
-  });
-}
-
-/**
- * Constructing an `Intl.DateTimeFormat` dominates the cost of a cron search,
- * so one is built per timezone and reused. Formatters are immutable and
- * thread-safe for our purposes; the map is bounded by the number of distinct
- * user timezones.
- */
-const FORMATTERS = new Map<string, Intl.DateTimeFormat>();
-
-function zonedFormatter(timezone: string): Intl.DateTimeFormat {
-  const cached = FORMATTERS.get(timezone);
-  if (cached) return cached;
-  // Throws RangeError for an unknown zone — surfaced to the caller as an
-  // invalid task rather than silently falling back to UTC.
-  const formatter = new Intl.DateTimeFormat("en-US", {
-    timeZone: timezone,
-    minute: "2-digit",
-    hour: "2-digit",
-    hourCycle: "h23",
-    day: "2-digit",
-    month: "2-digit",
-    weekday: "short",
-  });
-  if (FORMATTERS.size < 500) FORMATTERS.set(timezone, formatter);
-  return formatter;
-}
-
-function zonedParts(date: Date, timezone: string): {
-  minute: number;
-  hour: number;
-  day: number;
-  month: number;
-  weekday: number;
-} {
-  const formatter = zonedFormatter(timezone);
-  const values = Object.fromEntries(
-    formatter.formatToParts(date).map((part) => [part.type, part.value]),
-  );
-  const weekdays: Record<string, number> = {
-    Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6,
-  };
-  return {
-    minute: Number(values.minute),
-    hour: Number(values.hour),
-    day: Number(values.day),
-    month: Number(values.month),
-    weekday: weekdays[values.weekday ?? ""] ?? 0,
-  };
-}
-
-function isQuietHours(timezone: string): boolean {
-  const hour = zonedParts(new Date(), timezone).hour;
-  return hour >= 22 || hour < 9;
 }

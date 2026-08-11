@@ -17,7 +17,22 @@ import type { Redis } from "ioredis";
 import type { Config } from "../config.js";
 import type { Database } from "../db.js";
 import type { Logger } from "../logger.js";
+import type { ConversationPurposeService } from "../conversations/purpose-service.js";
+import type { OutboxDelivery } from "../delivery/outbox.js";
+import type { LettaService } from "../letta.js";
+import type { RuntimeContextBuilder } from "../runtime/runtime-context.js";
+import type { UserTurnLock } from "../turns/user-turn-lock.js";
+import { AgentJobRunner } from "./agent-job.js";
 import { BullMqJobDriver } from "./bullmq-driver.js";
+import { ReconcileService } from "./maintenance.js";
+import { MirrorRecorder } from "./mirror.js";
+import { LettaProactiveComposer } from "./proactive/composer.js";
+import { proactiveStage, legacySchedulerActive } from "./proactive/cutover.js";
+import { OutboxProactiveDelivery } from "./proactive/delivery.js";
+import type { ProactiveKind } from "./proactive/policy.js";
+import { ProactiveRunner } from "./proactive/runner.js";
+import { ProactiveSelection } from "./proactive/selection.js";
+import { ProactiveService } from "./proactive/service.js";
 import { JobOutbox } from "./job-outbox.js";
 import { JobRunJournal } from "./job-runs.js";
 import { QueueRegistry } from "./queue-registry.js";
@@ -30,10 +45,31 @@ export interface JobLayer {
   runs: JobRunJournal;
   runtime: JobRuntime;
   schedules: JobScheduleRegistry;
+  /** Универсальный фоновый ход агента. Продуктовых заданий пока не несёт. */
+  agentJobs: AgentJobRunner;
+  /** Запускать ли старые интервалы планировщика. */
+  legacySchedulerActive: boolean;
   /** Сверка расписаний и запуск публикатора. */
   start(): Promise<void>;
   /** Остановка без `process.exit`: сначала drain, потом закрытие соединений. */
   stop(drainMs: number): Promise<void>;
+}
+
+/**
+ * Чем слой заданий пользуется из остального сервиса.
+ *
+ * Клиента Telegram здесь нет намеренно: доставка проактивных сообщений
+ * идёт только через durable outbox, и отправить напрямую воркеру нечем
+ * (требование 9 шага 8).
+ */
+export interface JobLayerDeps {
+  letta: LettaService;
+  purposes: ConversationPurposeService;
+  runtimeContext: RuntimeContextBuilder;
+  lock: UserTurnLock;
+  outbox: OutboxDelivery;
+  /** Выборка старого интервала для режима зеркала. */
+  legacySelector?: (kind: ProactiveKind) => Promise<string[]> | null;
 }
 
 export function buildJobLayer(
@@ -41,6 +77,7 @@ export function buildJobLayer(
   db: Database,
   redis: Redis,
   logger: Logger,
+  deps: JobLayerDeps,
 ): JobLayer {
   const driver = new BullMqJobDriver(redis);
   const registry = new QueueRegistry(driver, logger);
@@ -51,6 +88,69 @@ export function buildJobLayer(
     batchSize: config.jobOutboxBatchSize,
     pollMs: config.jobOutboxPollMs,
   });
+  const agentJobs = new AgentJobRunner(
+    db,
+    deps.letta,
+    deps.purposes,
+    deps.runtimeContext,
+    logger,
+    config.agentJobsEnabled,
+  );
+
+  // Сверки обслуживания переносятся первыми: они ничего не отправляют
+  // человеку, и ошибка в них видна в журнале, а не в его переписке.
+  if (config.bullmqMaintenanceEnabled) {
+    const reconcile = new ReconcileService(db, logger);
+    runtime.register("maintenance_reconcile", async (context) => {
+      const report = await reconcile.run(context.signal);
+      logger.info("Сверка обслуживания выполнена", {
+        total: report.total,
+        degraded: report.degraded,
+      });
+    });
+  }
+
+  const stage = proactiveStage({
+    proactiveEnabled: config.bullmqProactiveEnabled,
+    mirrorMode: config.jobsMirrorMode,
+  });
+
+  if (config.bullmqProactiveEnabled) {
+    const runner = new ProactiveRunner(
+      new ProactiveSelection(db),
+      new ProactiveService(
+        db,
+        new LettaProactiveComposer(
+          deps.letta,
+          deps.purposes,
+          deps.runtimeContext,
+          deps.lock,
+          logger,
+        ),
+        new OutboxProactiveDelivery(deps.outbox),
+        logger,
+      ),
+      new MirrorRecorder(db, logger),
+      stage,
+      logger,
+      deps.legacySelector ?? (() => null),
+      {
+        morningHour: config.checkinMorningHour,
+        eveningHour: config.checkinEveningHour,
+      },
+    );
+    const kinds: Array<[string, ProactiveKind]> = [
+      ["proactive_reminder", "reminder"],
+      ["proactive_heartbeat", "heartbeat"],
+      ["checkin_morning", "checkin_morning"],
+      ["checkin_evening", "checkin_evening"],
+    ];
+    for (const [jobType, kind] of kinds) {
+      runtime.register(jobType, async (context) => {
+        await runner.tick(kind, { runId: context.runId, signal: context.signal });
+      });
+    }
+  }
 
   return {
     registry,
@@ -58,11 +158,18 @@ export function buildJobLayer(
     runs,
     runtime,
     schedules,
+    agentJobs,
+    legacySchedulerActive: legacySchedulerActive(stage),
     async start(): Promise<void> {
       // Сверка идёт до публикатора: расписание, потерянное вместе с
       // томом Valkey, должно вернуться раньше, чем слой начнёт работу.
       const summary = await schedules.reconcile();
       logger.info("Расписания заданий сверены", { ...summary });
+      logger.info("Ступень переноса проактивных задач", {
+        stage,
+        legacyScheduler: legacySchedulerActive(stage),
+        handlers: runtime.registeredTypes,
+      });
       outbox.start();
     },
     async stop(drainMs: number): Promise<void> {
@@ -76,4 +183,12 @@ export function buildJobLayer(
   };
 }
 
-export { JobOutbox, JobRunJournal, JobRuntime, JobScheduleRegistry, QueueRegistry };
+export {
+  AgentJobRunner,
+  JobOutbox,
+  JobRunJournal,
+  JobRuntime,
+  JobScheduleRegistry,
+  QueueRegistry,
+  ReconcileService,
+};

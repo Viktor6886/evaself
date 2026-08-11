@@ -66,10 +66,17 @@
 | Правила заданий | Классы отказов, сроки, дедупликация | `src/jobs/policy.ts` | `classifyJobError()`, `timingFor()`, `dedupKey()` | обяз. |
 | Исполнение | Сроки, AbortController, DLQ, graceful shutdown | `src/jobs/runtime.ts`, таблица `job_dead_letters` | `register(type, handler, timing?)`, `execute()`, `stop()` без `process.exit` | обяз. |
 | Вынос CPU | Тяжёлая работа вне основного event loop | `src/jobs/cpu-offload.ts` | `runCpuTask(modulePath, payload, {signal, timeoutMs})` | расш. |
+| Agent job | Единственный механизм фонового хода агента: рефлексия, отчёты, исследования | `src/jobs/agent-job.ts`, таблица `agent_job_results` | `AgentJobRunner.run()`, бюджет и структурированное предложение; памяти не пишет | обяз. |
+| Сверки обслуживания | Семь сверок «что застряло»; ничего не чинит | `src/jobs/maintenance.ts` | `ReconcileService.run()`, статусы `checked`/`failed`/`not_applicable` | расш. |
+| Зеркало переноса | Сравнение выборок старого и нового механизмов | `src/jobs/mirror.ts`, таблица `job_mirror_samples` | `compareSelections()`, `readyToCutOver()` | обяз. |
+| Проактивность | Напоминания, heartbeat, check-in на очередях | `src/jobs/proactive/`, таблицы `proactive_messages`, `checkin_episodes` | слот на местную дату, доставка только через outbox | обяз. |
+| Ступень переноса | Кто владеет задачей: интервал или очередь | `src/jobs/proactive/cutover.ts` | `legacy` · `mirror` · `queue`; на `queue` интервалы не стартуют | обяз. |
+| Cron в зоне пользователя | Разбор и вычисление cron | `src/time/cron.ts` | `nextCronDate()`, `assertCronExpression()`, `isQuietHours()`; реэкспорт из `background.ts` | расш. |
 
-Флаг `EVA_BULLMQ_JOBS`, по умолчанию выключен. Продуктовые задачи ещё не
-перенесены: существующие интервалы работают как прежде (шаг 08).
-Разбор — `docs/BACKGROUND_JOBS.md`.
+Флаги: `EVA_BULLMQ_JOBS`, `EVA_BULLMQ_MAINTENANCE`, `EVA_BULLMQ_PROACTIVE`,
+`EVA_AGENT_JOBS` — выключены; `EVA_JOBS_MIRROR` — включён. Пока зеркало не
+снято, напоминания и heartbeat по-прежнему ведёт `BackgroundRuntime`, а
+очередь только сравнивает выборки. Разбор — `docs/BACKGROUND_JOBS.md`.
 
 ## Модели и роутинг
 
@@ -138,9 +145,13 @@
 
 Проверено; не считать существующим:
 
-- **Продуктовые задачи на BullMQ** — слой очередей есть (шаг 07), но ни одна
-  существующая задача на него не перенесена: фоновая работа по-прежнему
-  `setInterval` в процессе плюс durable-таблицы. Перенос — шаг 08.
+- **Продуктовая проактивность на очередях в production** — код есть (шаг 08),
+  но по умолчанию работает режим зеркала: отправляют по-прежнему интервалы
+  `BackgroundRuntime`. Снятие зеркала — решение человека после сверки.
+- **Рефлексия, отчёты и исследования** — механизм agent job есть, конкретных
+  заданий на нём нет: они относятся к шагам 21 и 24.
+- **Ежедневный инсайт и недельный обзор** — виды объявлены, источников данных
+  ещё нет (шаги 27 и 54), выборка пуста.
 - **Колонка `tenant_id`** — изоляция держится на `user_id` и области арендатора.
 - **Второй RAG, Qdrant, LightRAG, LangGraph runtime, LangSmith** — запрещены.
 - **Полное зеркало переписки** — механизм есть, выключен
