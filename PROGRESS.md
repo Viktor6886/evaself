@@ -13,7 +13,7 @@ CURRENT_BATCH: 9
 CURRENT_STEP:  11
 BRANCH:        claude/roadmap-batch-execution-fclhwf
 STATUS:        в работе
-LAST_COMMIT:   046d71f
+LAST_COMMIT:   414b54b
 BLOCKER:       —
 NEXT:          обновить документацию, прогнать full regression и открыть pull request на batch 9
 ```
