@@ -46,6 +46,7 @@ export const TENANT_TABLES: Readonly<Record<string, readonly string[]>> = {
   llm_requests: ["user_id"],
   memory_edges: ["user_id"],
   memory_nodes: ["user_id"],
+  memory_template_application_items: ["user_id"],
   notifications: ["user_id"],
   onboarding_fields: ["user_id"],
   partner_analysis_links: ["owner_user_id", "partner_user_id"],

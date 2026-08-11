@@ -427,6 +427,10 @@ services:
       EVA_ADMIN_LOG_LEVEL: ${EVA_AGENT_LOG_LEVEL:-info}
       # Отчёт Security Audit. Выключен по умолчанию: включает человек.
       EVA_SECURITY_AUDIT: ${EVA_SECURITY_AUDIT:-0}
+      # Реестр версий артефактов и полный административный CRUD.
+      # Оба выключены по умолчанию: включает человек.
+      EVA_ARTIFACT_VERSIONS: ${EVA_ARTIFACT_VERSIONS:-0}
+      EVA_ADMIN_CRUD: ${EVA_ADMIN_CRUD:-0}
       EVA_ENV: ${EVA_ENV:-production}
       EVA_UPDATER_SOCKET: /run/evaself-updater/updater.sock
       EVA_INTERNAL_AGENT_URL: http://eva-agent-service:${EVA_AGENT_PORT}

@@ -2,14 +2,26 @@ import type { Database } from "../db.js";
 import type { LettaService } from "../letta.js";
 import type { Logger } from "../logger.js";
 
-export type ConversationPurpose =
-  | "chat"
-  | "scheduler"
-  | "maintenance"
-  | "profile"
-  | "goal_review"
-  | "partner_analysis"
-  | "research";
+/**
+ * Закрытый список назначений. Совпадает с ограничением
+ * `agent_conversations_purpose_check`.
+ *
+ * Список именно значением, а не только типом: административный обзор
+ * политик обязан перечислить все назначения, а тип во время выполнения не
+ * существует. Второй такой список рядом означал бы, что назначение можно
+ * добавить в одном месте и потерять в другом.
+ */
+export const CONVERSATION_PURPOSES = [
+  "chat",
+  "scheduler",
+  "maintenance",
+  "profile",
+  "goal_review",
+  "partner_analysis",
+  "research",
+] as const;
+
+export type ConversationPurpose = (typeof CONVERSATION_PURPOSES)[number];
 
 export interface PurposeConversation {
   conversationId: string;
