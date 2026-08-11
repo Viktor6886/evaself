@@ -46,9 +46,14 @@ CREATE TABLE IF NOT EXISTS proactive_messages (
     -- Почему промолчали. Код, а не текст: причина уходит в метрики.
     reason       text,
     -- Строка durable outbox, если сообщение отправлено. Доставку делает
-    -- outbox, а не воркер (требование 9 шага 8).
-    outbox_id    uuid        REFERENCES telegram_outbox (id) ON DELETE SET NULL,
+    -- outbox, а не воркер (требование 9 шага 8). Тип — `bigint`, потому
+    -- что `telegram_outbox.id` это `bigserial`: ключ доставки счётный, а
+    -- не uuid, и ссылка обязана совпадать с ним по типу.
+    outbox_id    bigint      REFERENCES telegram_outbox (id) ON DELETE SET NULL,
     run_id       uuid,
+    -- Ссылка на суточный эпизод без внешнего ключа: `checkin_episodes`
+    -- ссылается на эту таблицу и создаётся ниже, поэтому объявить FK в
+    -- обе стороны нельзя без отложенного ограничения.
     episode_id   uuid,
     created_at   timestamptz NOT NULL DEFAULT now(),
     updated_at   timestamptz NOT NULL DEFAULT now(),
