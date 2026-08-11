@@ -10,6 +10,7 @@ import type { LlmManager } from "./llm.js";
 import type { Logger } from "./logger.js";
 import type { GraphContextService } from "./memory/graph-context.js";
 import type { ConversationHighlightService } from "./memory/conversation-highlights.js";
+import type { EpisodeTracker } from "./memory/episodes.js";
 import type { UserProfileService } from "./profile/profile-service.js";
 import type { UserTurnLock } from "./turns/user-turn-lock.js";
 import type { RuntimeContextBuilder } from "./runtime/runtime-context.js";
@@ -81,6 +82,13 @@ export class EvaWorkflow {
      * сообщения тот же самый, что и до этого шага.
      */
     private readonly turns?: TurnLifecycle,
+    /**
+     * Детектор эпизодов. Наблюдает границы разговора и ничего не ждёт:
+     * сигнал принимается синхронно, запись закрытого эпизода уходит в
+     * фон. Ответ человеку от этого не замедляется — то же свойство, что
+     * у выжимок разговора рядом.
+     */
+    private readonly episodes?: EpisodeTracker,
   ) {
     this.taskEvents = new TaskEventService(db);
   }
@@ -502,6 +510,18 @@ export class EvaWorkflow {
           });
         }
         this.highlights?.schedule(user.id, conversationId);
+        // Граница эпизода: ход завершён. Детектор решает сам, закрывать
+        // ли эпизод, — короткий обмен репликами его не закрывает.
+        this.episodes?.observe({
+          userId: user.id,
+          conversationId,
+          signal: {
+            kind: "turn_completed",
+            text: answer.reply,
+            messageId: answer.conversationId,
+            at: new Date(),
+          },
+        });
         const turn = answer;
 
         // Последняя проверка барьера — перед самой доставкой. Между

@@ -23,7 +23,7 @@ import { MetricsCollector } from "./metrics.js";
 import { newCorrelationId, parseTraceparent } from "./observability/tracing.js";
 import type { LavaPayments } from "./payments.js";
 import type { UserProfileService } from "./profile/profile-service.js";
-import { PublicRepository, registerPublicRoutes } from "./public/routes.js";
+import { PublicRepository, registerPublicRoutes, type MiniAppMemoryControl } from "./public/routes.js";
 import {
   clientAddress,
   enforceRateLimit,
@@ -61,6 +61,8 @@ export interface Services {
   miniAppSessions?: MiniAppSessionStore;
   rateLimiter?: RateLimiter;
   approvals?: { decideByTelegram(input: { telegramId: number; sdkRequestId: string; decision: "allow" | "deny" }): Promise<unknown> };
+  /** Просмотр, подтверждение, исправление и удаление памяти из Mini App. */
+  memory?: MiniAppMemoryControl;
   /**
    * Контур наблюдаемости. Нужен выдаче метрик (состояние буфера
    * телеметрии) и ingress — там начинается трасса хода.
@@ -188,6 +190,7 @@ export function buildServer(services: Services): FastifyInstance {
     ...(services.miniAppSessions ? { sessions: services.miniAppSessions } : {}),
     rateLimiter,
     ...(services.approvals ? { approvals: { decide: async (input) => await services.approvals!.decideByTelegram(input) } } : {}),
+    ...(services.memory ? { memory: services.memory } : {}),
   });
 
   // Новые разделы Mini App (задачи, заметки, бюджет, решения, check-in,

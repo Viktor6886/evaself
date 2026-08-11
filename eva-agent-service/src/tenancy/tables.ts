@@ -45,6 +45,7 @@ export const TENANT_TABLES: Readonly<Record<string, readonly string[]>> = {
   letta_memory_block_sync: ["user_id"],
   llm_requests: ["user_id"],
   memory_conflicts: ["user_id"],
+  memory_curator_runs: ["user_id"],
   memory_edge_versions: ["user_id"],
   memory_edges: ["user_id"],
   memory_entity_aliases: ["user_id"],

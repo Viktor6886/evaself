@@ -443,6 +443,21 @@ export function configWarnings(config: Config): string[] {
   // Проактивные задания без самого слоя заданий — флаг, который ничего
   // не включает: очередей нет, публикатор не работает, сверка зеркала
   // не выполняется ни разу.
+  // Curator существует только как задание очереди и пишет только через
+  // temporal-память. Каждое из этих условий по отдельности выглядит
+  // включённым флагом, который не делает ничего.
+  if (config.memoryCuratorEnabled && !config.temporalMemoryEnabled) {
+    warnings.push(
+      "EVA_MEMORY_CURATOR включён, а EVA_TEMPORAL_MEMORY выключен: "
+        + "кандидатов некуда записывать, Curator не собирается",
+    );
+  }
+  if (config.memoryCuratorEnabled && !(config.bullmqJobsEnabled && config.agentJobsEnabled)) {
+    warnings.push(
+      "EVA_MEMORY_CURATOR включён, а EVA_BULLMQ_JOBS или EVA_AGENT_JOBS выключен: "
+        + "Curator выполняется только как фоновое задание и сейчас не запускается",
+    );
+  }
   if ((config.bullmqProactiveEnabled || config.bullmqMaintenanceEnabled)
       && !config.bullmqJobsEnabled) {
     warnings.push(

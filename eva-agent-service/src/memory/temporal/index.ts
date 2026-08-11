@@ -47,7 +47,8 @@ export {
 export type { TemporalStatus } from "./status.js";
 export { TemporalBackfill } from "./backfill.js";
 export type { BackfillProgress, BackfillResult } from "./backfill.js";
-export { TemporalMemoryRepository, valueFingerprint } from "./versions.js";
+export { defaultStatus, normalizeStatus, valueFingerprint } from "./fact-value.js";
+export { TemporalMemoryRepository } from "./versions.js";
 export type { FactInput, FactOutcome, FactResult, MemoryActor } from "./versions.js";
 
 import { MemoryDeduplicator } from "./dedup.js";

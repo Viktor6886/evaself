@@ -85,11 +85,19 @@ export class MemoryFakeDb {
   }
 
   private dispatch(sql: string, values: unknown[]): FakeRow[] {
+    // DELETE разбирается ПЕРВЫМ: «DELETE FROM memory_evidence» содержит
+    // «FROM memory_evidence», и любая проверка по подстроке ниже увела
+    // бы удаление в выборку — молча и без единой удалённой строки.
+    if (sql.startsWith("DELETE FROM")) return this.deleteRows(sql, values);
     if (sql.startsWith("SELECT") && sql.includes("FROM memory_nodes")) return this.selectNodes(sql, values);
     if (sql.startsWith("INSERT INTO memory_nodes")) return this.insertNode(values);
     if (sql.startsWith("UPDATE memory_nodes")) return this.updateNode(sql, values);
     if (sql.startsWith("INSERT INTO memory_node_versions")) return this.insertVersion(values);
-    if (sql.startsWith("UPDATE memory_node_versions")) return this.closeVersion(values);
+    if (sql.startsWith("UPDATE memory_node_versions")) {
+      return sql.includes("SET valid_to")
+        ? this.closeVersion(values)
+        : this.setVersionStatus(sql, values);
+    }
     if (sql.startsWith("SELECT") && sql.includes("FROM memory_node_versions")) return this.selectVersions(sql, values);
     if (sql.startsWith("SELECT DISTINCT ON (v.node_id)")) return this.selectVersions(sql, values);
     if (sql.startsWith("INSERT INTO memory_evidence")) return this.insertEvidence(values);
@@ -103,6 +111,13 @@ export class MemoryFakeDb {
     if (sql.startsWith("INSERT INTO memory_backfill_state")) return this.claimBackfill(values);
     if (sql.startsWith("UPDATE memory_backfill_state")) return this.updateBackfill(values);
     if (sql.startsWith("SELECT") && sql.includes("FROM memory_edges")) return this.selectEdges(values);
+    if (sql.startsWith("INSERT INTO memory_episodes")) return this.insertEpisode(values);
+    if (sql.startsWith("UPDATE memory_episodes")) return this.updateEpisode(sql, values);
+    if (sql.includes("FROM memory_episodes")) return this.selectEpisode(values);
+    if (sql.startsWith("INSERT INTO memory_curator_runs")) return this.insertCuratorRun(values);
+    if (sql.includes("FROM users WHERE telegram_id")) {
+      return this.rowsOf("users").filter((row) => row.telegram_id === values[0]);
+    }
     return [];
   }
 
@@ -224,6 +239,21 @@ export class MemoryFakeDb {
         observed_at: values[13],
         event_at: values[14],
       });
+    } else if (sql.includes("SET status = 'active'")) {
+      if (!["candidate", "quarantined", "refuted"].includes(String(row.status))) return [];
+      row.status = "active";
+      return [{ id: row.id, current_version_id: row.current_version_id }];
+    } else if (sql.includes("SET status = 'rejected'")) {
+      if (!["candidate", "quarantined"].includes(String(row.status))) return [];
+      row.status = "rejected";
+    } else if (sql.includes("SET current_version_id = NULL")) {
+      row.current_version_id = null;
+    } else if (sql.includes("SET status = 'deleted'")) {
+      Object.assign(row, {
+        status: "deleted", text_content: null, content_json: {}, confidence: 0,
+      });
+    } else if (sql.includes("SET confidence = $3 WHERE")) {
+      row.confidence = values[2];
     } else if (sql.includes("SET status = $3")) {
       row.status = values[2];
     }
@@ -287,6 +317,17 @@ export class MemoryFakeDb {
       };
     table.rows.push(row);
     return [{ id: row.id }];
+  }
+
+  private setVersionStatus(sql: string, values: unknown[]): FakeRow[] {
+    const status = sql.includes("'active'") ? "active" : "rejected";
+    const rows = this.rowsOf("memory_node_versions").filter(
+      (row) => row.user_id === values[0]
+        && String(row.node_id) === String(values[1])
+        && row.valid_to == null,
+    );
+    for (const row of rows) row.status = status;
+    return rows;
   }
 
   private closeVersion(values: unknown[]): FakeRow[] {
@@ -524,6 +565,100 @@ export class MemoryFakeDb {
     row.processed_nodes = String(Number(row.processed_nodes) + Number(values[2]));
     row.status = values[3];
     return [row];
+  }
+
+  // ---- эпизоды и прогоны Curator ---------------------------------------
+
+  private insertEpisode(values: unknown[]): FakeRow[] {
+    const table = this.table("memory_episodes");
+    const duplicate = table.rows.find(
+      (row) => row.user_id === values[0] && row.episode_key === values[2],
+    );
+    // ON CONFLICT (user_id, episode_key) DO NOTHING.
+    if (duplicate) return [];
+    table.sequence += 1;
+    const row: FakeRow = {
+      id: String(table.sequence),
+      user_id: values[0],
+      conversation_id: values[1],
+      episode_key: values[2],
+      purpose: values[3],
+      status: "closed",
+      boundary_reason: values[4],
+      summary: values[5],
+      message_ids: values[6],
+      privacy_mode: values[7],
+      message_count: values[8],
+      started_at: values[9],
+      ended_at: values[10],
+    };
+    table.rows.push(row);
+    return [row];
+  }
+
+  private updateEpisode(sql: string, values: unknown[]): FakeRow[] {
+    const row = this.rowsOf("memory_episodes").find(
+      (candidate) => candidate.user_id === values[0] && String(candidate.id) === String(values[1]),
+    );
+    if (!row) return [];
+    if (sql.includes("SET status = 'curating'")) {
+      if (row.status !== "closed") return [];
+      row.status = "curating";
+      return [row];
+    }
+    row.status = values[2];
+    return [row];
+  }
+
+  private selectEpisode(values: unknown[]): FakeRow[] {
+    return this.rowsOf("memory_episodes").filter(
+      (row) => row.user_id === values[0] && String(row.id) === String(values[1]),
+    );
+  }
+
+  private insertCuratorRun(values: unknown[]): FakeRow[] {
+    const table = this.table("memory_curator_runs");
+    const duplicate = table.rows.find(
+      (row) => row.user_id === values[0] && row.run_id === values[2],
+    );
+    if (duplicate) return [];
+    table.sequence += 1;
+    table.rows.push({
+      id: String(table.sequence),
+      user_id: values[0],
+      episode_id: values[1],
+      run_id: values[2],
+      mode: values[3],
+      status: values[4],
+      proposal: JSON.parse(String(values[5])),
+      applied: JSON.parse(String(values[6])),
+      error_code: values[7],
+    });
+    return [];
+  }
+
+  /**
+   * Удаление производных. Условия здесь простые по устройству: каждое
+   * из них ограничено владельцем и одним узлом — ровно то, что делает
+   * полная чистка факта.
+   */
+  private deleteRows(sql: string, values: unknown[]): FakeRow[] {
+    const match = /DELETE FROM ([a-z_]+)/.exec(sql);
+    if (!match) return [];
+    const table = this.table(match[1]!);
+    const nodeId = String(values[1]);
+    const before = table.rows.length;
+    table.rows = table.rows.filter((row) => {
+      if (row.user_id !== values[0]) return true;
+      if (sql.includes("source_node_id = $2 OR target_node_id = $2")) {
+        return String(row.source_node_id) !== nodeId && String(row.target_node_id) !== nodeId;
+      }
+      if (sql.includes("from_node_id = $2 OR to_node_id = $2")) {
+        return String(row.from_node_id) !== nodeId && String(row.to_node_id) !== nodeId;
+      }
+      return String(row.node_id) !== nodeId;
+    });
+    return new Array(before - table.rows.length).fill({}) as FakeRow[];
   }
 
   private selectEdges(values: unknown[]): FakeRow[] {

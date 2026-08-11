@@ -19,6 +19,12 @@ import { normalizeName, normalizedNameSql } from "./entity-resolution.js";
 export interface NodeDuplicate {
   nodeId: number;
   title: string;
+  /**
+   * Ключ снимка найденного узла. Возвращается затем, чтобы вызывающий
+   * писал новую версию В НЕГО, а не создавал близнеца под собственным
+   * ключом: иначе дедупликация нашла бы дубль и тут же его породила.
+   */
+  canonicalKey: string;
   matchedBy: "canonical" | "exact_title" | "alias" | "fulltext";
 }
 
@@ -44,40 +50,28 @@ export class MemoryDeduplicator {
       title: string;
     },
   ): Promise<NodeDuplicate | null> {
-    const canonical = await client.query<{ id: string; title: string }>(
-      `SELECT id, title FROM memory_nodes
+    const canonical = await client.query<DuplicateRow>(
+      `SELECT id, title, canonical_key FROM memory_nodes
         WHERE user_id = $1 AND node_type = $2 AND canonical_key = $3`,
       [input.userId, input.nodeType, input.canonicalKey],
     );
-    if (canonical.rows[0]) {
-      return {
-        nodeId: Number(canonical.rows[0].id),
-        title: canonical.rows[0].title,
-        matchedBy: "canonical",
-      };
-    }
+    if (canonical.rows[0]) return duplicate(canonical.rows[0], "canonical");
 
     const normalized = normalizeName(input.title);
     if (!normalized) return null;
 
-    const exact = await client.query<{ id: string; title: string }>(
-      `SELECT id, title FROM memory_nodes
+    const exact = await client.query<DuplicateRow>(
+      `SELECT id, title, canonical_key FROM memory_nodes
         WHERE user_id = $1 AND node_type = $2
           AND status = ANY(ARRAY['active', 'candidate'])
           AND ${normalizedNameSql("title")} = $3
         LIMIT 1`,
       [input.userId, input.nodeType, normalized],
     );
-    if (exact.rows[0]) {
-      return {
-        nodeId: Number(exact.rows[0].id),
-        title: exact.rows[0].title,
-        matchedBy: "exact_title",
-      };
-    }
+    if (exact.rows[0]) return duplicate(exact.rows[0], "exact_title");
 
-    const alias = await client.query<{ id: string; title: string }>(
-      `SELECT n.id, n.title
+    const alias = await client.query<DuplicateRow>(
+      `SELECT n.id, n.title, n.canonical_key
          FROM memory_entity_aliases a
          JOIN memory_nodes n ON n.user_id = a.user_id AND n.id = a.node_id
         WHERE a.user_id = $1 AND n.user_id = $1
@@ -85,16 +79,10 @@ export class MemoryDeduplicator {
         LIMIT 1`,
       [input.userId, input.nodeType, normalized],
     );
-    if (alias.rows[0]) {
-      return {
-        nodeId: Number(alias.rows[0].id),
-        title: alias.rows[0].title,
-        matchedBy: "alias",
-      };
-    }
+    if (alias.rows[0]) return duplicate(alias.rows[0], "alias");
 
-    const fts = await client.query<{ id: string; title: string }>(
-      `SELECT id, title FROM memory_nodes
+    const fts = await client.query<DuplicateRow>(
+      `SELECT id, title, canonical_key FROM memory_nodes
         WHERE user_id = $1 AND node_type = $2
           AND status = ANY(ARRAY['active', 'candidate'])
           AND to_tsvector('simple', COALESCE(title, '') || ' ' || COALESCE(text_content, ''))
@@ -102,13 +90,7 @@ export class MemoryDeduplicator {
         LIMIT 1`,
       [input.userId, input.nodeType, normalized],
     );
-    if (fts.rows[0]) {
-      return {
-        nodeId: Number(fts.rows[0].id),
-        title: fts.rows[0].title,
-        matchedBy: "fulltext",
-      };
-    }
+    if (fts.rows[0]) return duplicate(fts.rows[0], "fulltext");
     return null;
   }
 
@@ -159,6 +141,21 @@ export class MemoryDeduplicator {
       ? { edgeId: Number(row.id), validFrom: row.valid_from, validTo: row.valid_to }
       : null;
   }
+}
+
+interface DuplicateRow {
+  id: string;
+  title: string;
+  canonical_key: string;
+}
+
+function duplicate(row: DuplicateRow, matchedBy: NodeDuplicate["matchedBy"]): NodeDuplicate {
+  return {
+    nodeId: Number(row.id),
+    title: row.title,
+    canonicalKey: row.canonical_key,
+    matchedBy,
+  };
 }
 
 /**

@@ -10,12 +10,12 @@
 
 ```
 CURRENT_BATCH: 12
-CURRENT_STEP:  15
+CURRENT_STEP:  16
 BRANCH:        batch/12-temporal-memory-curator
 STATUS:        в работе
-LAST_COMMIT:   792c3c0
+LAST_COMMIT:   314c40d
 BLOCKER:       —
-NEXT:          шаг 15 — temporal-версии, evidence и разрешение сущностей
+NEXT:          шаг 16 — детектор эпизодов, Curator и контроль памяти в Mini App
 ```
 
 Значения полей:

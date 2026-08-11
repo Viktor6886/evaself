@@ -18,9 +18,8 @@
  * значимые — со статусом `awaiting_user`.
  */
 
-import { createHash } from "node:crypto";
-
 import type { GraphNodeType, GraphQueryable } from "../graph-repository.js";
+import { defaultStatus, normalizeStatus, valueFingerprint } from "./fact-value.js";
 import {
   aggregateConfidence,
   buildEvidence,
@@ -29,7 +28,9 @@ import {
 } from "./evidence.js";
 import {
   assertTransition,
-  isInference,
+  canTransition,
+  isTerminal,
+  MemoryStatusError,
   type TemporalStatus,
 } from "./status.js";
 
@@ -118,8 +119,18 @@ export class TemporalMemoryRepository {
     }
 
     const nodeId = Number(snapshot.id);
-    const stored = await this.storeEvidence(client, input.userId, nodeId, null, evidence);
     const previousStatus = normalizeStatus(snapshot.status);
+    // Проверка ДО записи доказательства, а не после. Факт, который
+    // человек удалил или отклонил, не должен копить доказательства на
+    // своём надгробии: иначе повторное извлечение того же сообщения
+    // тихо восстанавливало бы вес удалённого.
+    if (isTerminal(previousStatus) && !canTransition(previousStatus, status)) {
+      throw new MemoryStatusError(
+        "memory_status_transition_forbidden",
+        `${previousStatus} → ${status}`,
+      );
+    }
+    const stored = await this.storeEvidence(client, input.userId, nodeId, null, evidence);
     const sameValue = valueFingerprint(snapshot) === valueFingerprint({
       title: input.title,
       text_content: input.textContent ?? null,
@@ -525,69 +536,5 @@ export class TemporalMemoryRepository {
       ],
     );
     return Number(rows[0]!.id);
-  }
-}
-
-/**
- * Отпечаток значения факта.
- *
- * Сравнивать версии по «похожести» нельзя: тогда исправление опечатки
- * станет новой версией, а смена работы — нет. Здесь сравнивается ровно
- * то, что видит пользователь: заголовок, текст и структурированное
- * содержимое.
- */
-export function valueFingerprint(value: {
-  title: string;
-  text_content: string | null;
-  content_json: Record<string, unknown>;
-}): string {
-  const payload = [
-    value.title.replace(/\s+/gu, " ").trim(),
-    (value.text_content ?? "").replace(/\s+/gu, " ").trim(),
-    stableJson(value.content_json ?? {}),
-  ].join(" ");
-  return createHash("sha256").update(payload, "utf8").digest("hex");
-}
-
-function stableJson(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  const entries = Object.entries(value as Record<string, unknown>)
-    .filter(([, item]) => item !== undefined)
-    .sort(([left], [right]) => left.localeCompare(right));
-  return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`).join(",")}}`;
-}
-
-/**
- * Статус по умолчанию.
- *
- * Вывод модели сам по себе фактом не становится: без прямого
- * утверждения человека новый факт рождается кандидатом. Это то же
- * правило, что требование 6 шага 16, но применённое на уровень ниже —
- * чтобы оно действовало и для писателей, которые Curator не проходят.
- */
-function defaultStatus(input: FactInput): TemporalStatus {
-  const inferred = input.evidence.every((item) => isInference(item.sourceType));
-  if (inferred) return "candidate";
-  return input.sensitivity && input.sensitivity !== "normal" ? "candidate" : "active";
-}
-
-function normalizeStatus(value: string): TemporalStatus {
-  switch (value) {
-    // Прежний словарь графа отображается в temporal-словарь: снимок мог
-    // быть создан старым кодом до переноса.
-    case "unconfirmed": return "candidate";
-    case "disputed": return "refuted";
-    case "archived": return "forgotten";
-    case "active":
-    case "candidate":
-    case "superseded":
-    case "refuted":
-    case "rejected":
-    case "forgotten":
-    case "deleted":
-    case "quarantined":
-      return value;
-    default: return "candidate";
   }
 }

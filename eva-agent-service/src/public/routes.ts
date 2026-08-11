@@ -564,6 +564,29 @@ export class PublicRepository implements PublicDataSource {
   }
 }
 
+/**
+ * Что Mini App умеет делать с памятью. Интерфейс объявлен здесь, а
+ * реализация приходит снаружи: маршруты не должны знать ни о temporal-
+ * версиях, ни о доказательствах — они переводят Telegram-личность в
+ * идентификатор владельца и передают дальше.
+ */
+export interface MiniAppMemoryControl {
+  list(telegramId: number): Promise<unknown[]>;
+  history(telegramId: number, nodeId: number): Promise<unknown[]>;
+  decide(telegramId: number, nodeId: number, decision: "confirm" | "reject"): Promise<boolean>;
+  correct(
+    telegramId: number,
+    nodeId: number,
+    patch: { title?: string; value?: string | null },
+  ): Promise<{ version: number } | null>;
+  remove(telegramId: number, nodeId: number): Promise<Record<string, number> | null>;
+}
+
+function requireMemory(memory: MiniAppMemoryControl | undefined): MiniAppMemoryControl {
+  if (!memory) throw badRequest("Управление памятью отключено");
+  return memory;
+}
+
 export function registerPublicRoutes(
   app: FastifyInstance,
   input: {
@@ -574,6 +597,13 @@ export function registerPublicRoutes(
     sessions?: MiniAppSessionStore;
     rateLimiter?: RateLimiter;
     approvals?: { decide(input: { telegramId: number; sdkRequestId: string; decision: "allow" | "deny" }): Promise<unknown> };
+    /**
+     * Контроль памяти из Mini App. Владелец берётся из проверенной
+     * подписи Telegram и приводится к внутреннему идентификатору здесь
+     * же: принимать `user_id` из тела запроса значило бы отдать чужую
+     * память тому, кто угадает число.
+     */
+    memory?: MiniAppMemoryControl;
   },
 ): void {
   const limiter = input.rateLimiter ?? new NoopRateLimiter();
@@ -730,6 +760,70 @@ export function registerPublicRoutes(
     publicApp.get("/progress", async (request) => ({
       progress: await input.repository.getProgress(publicUser(request).id),
     }));
+
+    // ---- Контроль памяти (шаг 16) ---------------------------------
+    //
+    // Пять маршрутов: посмотреть, историю, подтвердить, исправить,
+    // удалить. Отсутствующая сборка памяти — честный отказ, а не пустой
+    // список: пустой список означал бы «Ева ничего не помнит», и человек
+    // сделал бы неверный вывод о выключенной функции.
+    publicApp.get("/memory", async (request) => {
+      const memory = requireMemory(input.memory);
+      return { items: await memory.list(publicUser(request).id) };
+    });
+
+    publicApp.get("/memory/:id/history", async (request) => {
+      const memory = requireMemory(input.memory);
+      return {
+        history: await memory.history(
+          publicUser(request).id,
+          positiveId((request.params as { id?: string }).id, "факта"),
+        ),
+      };
+    });
+
+    publicApp.post("/memory/:id/confirm", async (request) => {
+      const memory = requireMemory(input.memory);
+      const decision = requestBody(request).decision;
+      if (decision !== "confirm" && decision !== "reject") {
+        throw badRequest("Некорректное решение");
+      }
+      const ok = await memory.decide(
+        publicUser(request).id,
+        positiveId((request.params as { id?: string }).id, "факта"),
+        decision,
+      );
+      if (!ok) throw badRequest("Этот факт нельзя подтвердить или отклонить");
+      return { ok: true };
+    });
+
+    publicApp.patch("/memory/:id", async (request) => {
+      const memory = requireMemory(input.memory);
+      const body = requestBody(request);
+      const result = await memory.correct(
+        publicUser(request).id,
+        positiveId((request.params as { id?: string }).id, "факта"),
+        {
+          ...(typeof body.title === "string" ? { title: body.title } : {}),
+          ...(body.value === null || typeof body.value === "string"
+            ? { value: body.value as string | null }
+            : {}),
+        },
+      );
+      if (!result) throw badRequest("Факт не найден");
+      // Исправление — это новая версия, а не правка на месте.
+      return { version: result.version };
+    });
+
+    publicApp.delete("/memory/:id", async (request) => {
+      const memory = requireMemory(input.memory);
+      const removed = await memory.remove(
+        publicUser(request).id,
+        positiveId((request.params as { id?: string }).id, "факта"),
+      );
+      if (!removed) throw badRequest("Факт не найден");
+      return { deleted: removed };
+    });
 
     publicApp.post("/tool-approvals/:requestId/decision", async (request) => {
       if (!input.approvals) throw badRequest("Подтверждения инструментов отключены");

@@ -23,6 +23,7 @@ import { TelegramDeliveryLimiter } from "./delivery/telegram-limits.js";
 import { EvaWorkflow } from "./eva-workflow.js";
 import { GoalService } from "./goals/goal-service.js";
 import { buildJobLayer } from "./jobs/index.js";
+import { PermanentJobFailure } from "./jobs/policy.js";
 import { buildObservability } from "./observability/index.js";
 import { LettaService } from "./letta.js";
 import { LlmManager } from "./llm.js";
@@ -30,6 +31,10 @@ import { createLogger } from "./logger.js";
 import { GraphContextService } from "./memory/graph-context.js";
 import { ConversationHighlightService } from "./memory/conversation-highlights.js";
 import { GraphRepository } from "./memory/graph-repository.js";
+import { EpisodeService, EpisodeTracker, type EpisodeRow } from "./memory/episodes.js";
+import { CURATOR_JOB_TYPE, MemoryCuratorService } from "./memory/curator/service.js";
+import { MemoryUserControl, MiniAppMemoryGateway } from "./memory/curator/user-control.js";
+import { buildTemporalMemory } from "./memory/temporal/index.js";
 import { LavaPayments } from "./payments.js";
 import { UserProfileService } from "./profile/profile-service.js";
 import { ValkeyRateLimiter } from "./public/rate-limit.js";
@@ -176,6 +181,24 @@ async function main(): Promise<void> {
     logger,
   );
   const highlights = new ConversationHighlightService(db, letta, logger);
+  // Temporal-память. Флаг выключен — сборка создаётся, но `enabled`
+  // ложен, и ни один писатель в неё не заходит: так контроль памяти в
+  // Mini App честно отвечает «выключено» вместо пустого списка.
+  const temporalMemory = buildTemporalMemory(config.temporalMemoryEnabled);
+  const episodes = new EpisodeService(db, config.memoryCuratorEnabled);
+  const memoryControl = config.temporalMemoryEnabled
+    ? new MiniAppMemoryGateway(db, new MemoryUserControl(db, temporalMemory))
+    : undefined;
+  // Постановка задания Curator появляется позже — вместе со слоем
+  // заданий, который создаётся после воркфлоу. До тех пор закрытый
+  // эпизод просто записывается: задание без очереди поставить некуда, и
+  // притворяться, что оно поставлено, нельзя.
+  let enqueueCuration: ((episode: EpisodeRow, userId: number) => Promise<void>) | null = null;
+  const episodeTracker = new EpisodeTracker(
+    episodes,
+    async (episode, userId) => { await enqueueCuration?.(episode, userId); },
+    logger,
+  );
   const timezoneResolver = new TimezoneResolver(db);
   const profile = new UserProfileService(
     db,
@@ -258,6 +281,7 @@ async function main(): Promise<void> {
     graphContext,
     highlights,
     turns,
+    episodeTracker,
   );
   const inbox = new PostgresTelegramInbox(db);
   // Уведомление о мёртвой записи одно на оба пути обработки: человек
@@ -367,6 +391,7 @@ async function main(): Promise<void> {
     miniAppSessions,
     rateLimiter,
     approvals,
+    ...(memoryControl ? { memory: memoryControl } : {}),
   });
 
   await app.listen({ port: config.port, host: config.host });
@@ -399,6 +424,56 @@ async function main(): Promise<void> {
           : null,
     })
     : null;
+
+  // Memory Curator существует только как задание очереди. Без слоя
+  // заданий его не собирают вовсе: иначе появился бы второй путь
+  // запуска, и требование «не в пути ответа человеку» держалось бы на
+  // дисциплине вызывающего, а не на устройстве.
+  if (jobs && config.memoryCuratorEnabled && config.temporalMemoryEnabled) {
+    const curator = new MemoryCuratorService(
+      db, episodes, temporalMemory, jobs.agentJobs, logger, true,
+    );
+    // Намерение пишется в job_outbox, а не публикуется прямо в очередь:
+    // недоступный Valkey не должен терять эпизод, и публикатор поднимет
+    // намерение сам.
+    enqueueCuration = async (episode, userId) => {
+      await db.withUserScope(
+        { userId, label: "memory.curator.enqueue", inherit: true },
+        async () => await db.transaction(async (client) => {
+          await jobs.outbox.record(client, curator.intent({
+            userId,
+            episodeId: episode.id,
+            conversationId: episode.conversationId,
+            traceId: crypto.randomUUID(),
+          }));
+        }),
+      );
+    };
+    jobs.runtime.register(CURATOR_JOB_TYPE, async (context) => {
+      const userId = context.envelope.userId;
+      const episodeId = Number(context.envelope.payload.episode_id);
+      if (!userId || !Number.isFinite(episodeId)) {
+        throw new PermanentJobFailure("memory_curator_payload_invalid");
+      }
+      const outcome = await curator.run({
+        runId: context.runId,
+        userId,
+        agentId: context.envelope.agentId ?? "",
+        episodeId,
+        parentConversationId: context.envelope.conversationId ?? "",
+        signal: context.signal,
+      });
+      // В журнал уходят только счётчики: содержимое кандидатов — это
+      // пересказ разговора, и в логах ему места нет.
+      logger.info("Curator обработал эпизод", {
+        status: outcome.status,
+        candidates: outcome.candidates.length,
+        created: outcome.applied.created,
+        versioned: outcome.applied.versioned,
+      });
+    });
+  }
+
   background.start(jobs ? jobs.legacySchedulerActive : true);
   if (jobs) {
     await jobs.start().catch((error: unknown) => {

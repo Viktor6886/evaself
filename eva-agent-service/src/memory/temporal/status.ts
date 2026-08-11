@@ -42,7 +42,10 @@ const TERMINAL: ReadonlySet<TemporalStatus> = new Set<TemporalStatus>([
 ]);
 
 const TRANSITIONS: Readonly<Record<TemporalStatus, readonly TemporalStatus[]>> = {
-  candidate: ["active", "rejected", "quarantined", "deleted", "refuted"],
+  // Кандидат тоже замещается: человек, исправивший непроверенный факт,
+  // не должен натыкаться на запрет перехода — прежняя догадка обязана
+  // остаться в истории ровно так же, как замещённый факт.
+  candidate: ["active", "rejected", "quarantined", "deleted", "refuted", "superseded"],
   active: ["superseded", "refuted", "forgotten", "deleted", "quarantined"],
   superseded: ["deleted", "forgotten"],
   refuted: ["active", "deleted", "forgotten"],

@@ -60,6 +60,19 @@ export interface AgentJobSpec {
   resultKinds: readonly string[];
   /** Сколько предложений имеет смысл принять за один ход. */
   maxItems?: number;
+  /**
+   * Собственный разбор ответа.
+   *
+   * Общий формат предложения — «вид, ссылка, выжимка» — годится для
+   * рефлексии и отчётов, но не для заданий с собственной строгой
+   * схемой: Curator обязан вернуть периоды действительности, ссылки на
+   * сообщения и режим приватности, и уложить их в `summary` значило бы
+   * снова разбирать свободный текст. Спецификация приносит свой
+   * разборщик, а механизм фонового хода остаётся один (инвариант 3).
+   */
+  parseResult?: (reply: string) => ProposalParse;
+  /** Инструкция про формат ответа задаётся спецификацией целиком. */
+  responseContract?: readonly string[];
 }
 
 export interface AgentProposalItem {
@@ -76,6 +89,12 @@ export interface AgentProposal {
   empty: boolean;
   items: AgentProposalItem[];
   confidence: number;
+  /**
+   * Проверенная схемой полезная нагрузка задания со своим форматом.
+   * Заполняется только собственным разборщиком спецификации; общий
+   * разбор её не создаёт.
+   */
+  payload?: Record<string, unknown>;
 }
 
 export interface AgentJobUsage {
@@ -186,7 +205,9 @@ export class AgentJobRunner {
         return { status: "budget_exceeded", usage, limit: overspent };
       }
 
-      const parsed = parseProposal(turn.reply, input.spec);
+      const parsed = input.spec.parseResult
+        ? input.spec.parseResult(turn.reply)
+        : parseProposal(turn.reply, input.spec);
       if (!parsed.ok) {
         await this.persist(input, conversation.conversationId, "invalid_result", null, usage, false, parsed.code);
         return { status: "invalid_result", usage, code: parsed.code };
@@ -220,6 +241,14 @@ export class AgentJobRunner {
     const facts = Object.entries(input.facts ?? {})
       .map(([key, value]) => `${key}: ${String(value)}`)
       .join("\n");
+    if (input.spec.responseContract) {
+      return [
+        input.spec.instruction,
+        facts ? `\nДанные запроса:\n${facts}` : "",
+        "",
+        ...input.spec.responseContract,
+      ].filter(Boolean).join("\n");
+    }
     return [
       input.spec.instruction,
       facts ? `\nДанные запроса:\n${facts}` : "",
@@ -309,7 +338,7 @@ export class AgentJobRunner {
   }
 }
 
-type ProposalParse =
+export type ProposalParse =
   | { ok: true; proposal: AgentProposal }
   | { ok: false; code: string };
 
