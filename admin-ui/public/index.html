@@ -419,6 +419,20 @@
             <span id="advanced-count" class="muted"></span>
           </div>
           <form id="settings-form-advanced" class="settings-grid" hidden></form>
+
+          <!-- Предпросмотр политик хранения: что и когда будет удалено.
+               Показывается рядом со сроками, потому что читать их
+               осмысленно только вместе с последствиями. -->
+          <section class="card router-card" id="retention-card">
+            <div class="section-heading">
+              <div>
+                <h3>Что удаляется по срокам хранения</h3>
+                <p class="block-caption">Предпросмотр ничего не удаляет. Автоматическое удаление включается отдельно (EVA_RETENTION_ENFORCEMENT) и выполняется заданием обслуживания небольшими пакетами.</p>
+              </div>
+              <button id="reload-retention" class="button ghost" type="button">Показать</button>
+            </div>
+            <div id="retention-preview" class="muted">Нажмите «Показать», чтобы посчитать.</div>
+          </section>
         </section>
 
         <section id="page-security" class="page">

@@ -2,8 +2,8 @@ import type pg from "pg";
 
 import { adminBadRequest, adminConflict, adminNotFound, preconditionRequired } from "./errors.js";
 import {
+  ALL_SETTINGS,
   SETTING_PROFILES,
-  SETTINGS_REGISTRY,
   SETTING_BY_KEY,
   type SettingDefinition,
   type SettingProfile,
@@ -81,12 +81,12 @@ export class ConfigService {
         `SELECT key, value_json, version, updated_at
            FROM system_settings
           WHERE key = ANY($1::text[])`,
-        [SETTINGS_REGISTRY.map((item) => item.key)],
+        [ALL_SETTINGS.map((item) => item.key)],
       ),
       this.currentVersion(),
     ]);
     const byKey = new Map(rows.map((row) => [row.key, row]));
-    const settings = SETTINGS_REGISTRY.map((definition) => {
+    const settings = ALL_SETTINGS.map((definition) => {
       const row = byKey.get(definition.key);
       return {
         ...definition,

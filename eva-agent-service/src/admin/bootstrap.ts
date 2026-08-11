@@ -5,7 +5,7 @@ import type pg from "pg";
 import { assertPasswordPolicy, hashPassword } from "./password-policy.js";
 import { globalSecretRedactor } from "./redactor.js";
 import { SecretStore } from "./secret-store.js";
-import { SETTINGS_REGISTRY, parseBootstrapSetting } from "./settings-registry.js";
+import { ALL_SETTINGS, parseBootstrapSetting } from "./settings-registry.js";
 
 const SECRET_NAME =
   /(_API_KEY|_TOKEN|_PASSWORD|_SECRET|_CREDENTIALS?|_AUTH|_HASH|ENCRYPTION_KEY)$/i;
@@ -171,7 +171,7 @@ async function bootstrapTransaction(
 
     let settingsImported = 0;
     let secretsImported = 0;
-    const registryEnv = new Map(SETTINGS_REGISTRY.map((definition) => [definition.env, definition]));
+    const registryEnv = new Map(ALL_SETTINGS.map((definition) => [definition.env, definition]));
     for (const [name, rawValue] of Object.entries(env).sort(([a], [b]) => a.localeCompare(b))) {
       const value = rawValue?.trim() ?? "";
       if (!value || EXCLUDED.has(name)) continue;

@@ -52,7 +52,9 @@ node --test --experimental-strip-types test/*.test.ts        # full regression
 | `src/public/webapp-session.ts`, `telegram-webapp-auth.ts` | `webapp-session.test.ts` |
 | `src/public/routes.ts`, `webapp-core.ts` | `public-api.test.ts` |
 | `src/admin/` | `admin-operations.test.ts`, `admin-security.test.ts`, `security-audit.test.ts`, `user-service.test.ts`, `settings-presets.test.ts`, `stt-admin.test.ts` |
-| `src/metrics.ts` | `metrics.test.ts` |
+| `src/metrics.ts`, `src/metrics-queries.ts` | `metrics.test.ts`, `observability.test.ts` |
+| `src/observability/` | `observability.test.ts` |
+| `src/retention/`, `src/admin/settings-registry.ts` | `retention.test.ts`, `settings-presets.test.ts` |
 | `src/config.ts` | `config-warnings.test.ts` |
 | `src/server.ts` | `server.test.ts` |
 | `src/telegram-format.ts`, `telegram.ts` | `telegram-format.test.ts`, `telegram-layout.test.ts` |

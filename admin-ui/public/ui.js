@@ -1292,6 +1292,44 @@ async function loadSettings() {
 }
 
 /**
+ * Предпросмотр политик хранения.
+ *
+ * Считается по требованию, а не при каждом открытии страницы: запрос
+ * пересчитывает объёмы по всем классам, и делать это на фоне каждого
+ * входа в настройки незачем.
+ *
+ * В ответе нет ни одной строки пользовательских данных — только классы,
+ * сроки и счётчики.
+ */
+async function loadRetentionPreview() {
+  const box = $("#retention-preview");
+  box.textContent = "Считаем…";
+  try {
+    const { payload } = await request("/retention/preview");
+    const rows = (payload.classes || []).map((item) => {
+      const term = item.days === null ? "по решению пользователя" : `${item.days} дн.`;
+      const note = item.held
+        ? "удаление приостановлено задержкой"
+        : item.note || "";
+      return `<tr>
+        <td>${escapeHtml(item.title)}</td>
+        <td>${escapeHtml(term)}</td>
+        <td>${item.eligible}</td>
+        <td class="muted">${escapeHtml(note)}</td>
+      </tr>`;
+    }).join("");
+    box.innerHTML = `
+      <table class="data-table">
+        <thead><tr><th>Класс данных</th><th>Срок</th><th>Подпадает сейчас</th><th></th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <p class="block-caption">Уже созданные резервные копии продолжают хранить удалённое ещё ${payload.backupRotationDays} дней: мгновенное физическое удаление из них не обещается.</p>`;
+  } catch (error) {
+    box.textContent = `Не удалось получить предпросмотр: ${error.message}`;
+  }
+}
+
+/**
  * Карточка параметра. Рекомендация стоит НАД полем ввода: администратор
  * читает её раньше, чем смотрит на текущее значение, и не гадает, что
  * туда положить.
@@ -2055,6 +2093,7 @@ $("#settings-form").addEventListener("click", (event) => {
   input.value = String(item.default);
 });
 $("#reload-secrets").addEventListener("click", () => loadSecrets().catch(handleError));
+$("#reload-retention").addEventListener("click", () => loadRetentionPreview().catch(handleError));
 $("#toggle-all-secrets").addEventListener("click", () => {
   state.showAllSecrets = !state.showAllSecrets;
   renderSecrets();

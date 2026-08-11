@@ -159,6 +159,11 @@ export interface Config {
   langfuseSecretKey: string;
   /** Секрет псевдонимов телеметрии. Пуст — псевдонимы не выдаются вовсе. */
   telemetryPseudonymSecret: string;
+  /**
+   * Автоматическое применение политик хранения. Выключенный флаг не
+   * удаляет ничего: предпросмотр работает, удаление — нет.
+   */
+  retentionEnforcementEnabled: boolean;
 
   lavaWebhookUser: string;
   lavaWebhookPassword: string;
@@ -351,6 +356,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     langfusePublicKey: str("LANGFUSE_PUBLIC_KEY"),
     langfuseSecretKey: str("LANGFUSE_SECRET_KEY"),
     telemetryPseudonymSecret: str("EVA_TELEMETRY_PSEUDONYM_SECRET"),
+    retentionEnforcementEnabled: bool("EVA_RETENTION_ENFORCEMENT", false),
 
     lavaWebhookUser: str("LAVA_WEBHOOK_USER"),
     lavaWebhookPassword: str("LAVA_WEBHOOK_PASSWORD"),
@@ -437,6 +443,15 @@ export function configWarnings(config: Config): string[] {
     warnings.push(
       "EVA_LANGFUSE_METADATA_ONLY включён, а LANGFUSE_BASE_URL пуст: "
         + "телеметрия никуда не отправляется",
+    );
+  }
+  // Удаление исполняется заданием очереди обслуживания: без слоя
+  // заданий флаг включён, а удалять некому.
+  if (config.retentionEnforcementEnabled
+      && !(config.bullmqJobsEnabled && config.bullmqMaintenanceEnabled)) {
+    warnings.push(
+      "EVA_RETENTION_ENFORCEMENT включён, а слой заданий обслуживания выключен: "
+        + "политики хранения не применяются автоматически",
     );
   }
   if (config.turnRecoveryEnabled && !config.turnLifecycleEnabled) {
