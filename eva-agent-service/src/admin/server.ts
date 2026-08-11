@@ -18,11 +18,13 @@ import {
 } from "./auth-service.js";
 import type { ArtifactRegistry } from "../artifacts/registry.js";
 import type { AgentDirectoryService } from "./agent-directory.js";
+import type { ConversationToolSelectorService } from "./conversation-tool-selectors.js";
 import { registerArtifactRoutes } from "./artifact-routes.js";
 import { registerCrudRoutes } from "./crud-routes.js";
 import type { MemoryTemplateService } from "./memory-template-service.js";
 import type { ToolApprovalService } from "./tool-approvals.js";
 import type { TurnOperationsService } from "./turn-operations.js";
+import type { McpServerPolicyRepository } from "../tools/gateway.js";
 import { EvaError } from "../errors.js";
 import { AuditService, type AuditActor } from "./audit-service.js";
 import { ConfigService } from "./config-service.js";
@@ -92,8 +94,10 @@ export interface AdminServerServices {
    */
   crud?: {
     directory: AgentDirectoryService;
+    selectors?: ConversationToolSelectorService;
     templates: MemoryTemplateService;
     tools: ToolApprovalService;
+    mcp?: McpServerPolicyRepository;
     turns: TurnOperationsService;
   };
   events: Redis;

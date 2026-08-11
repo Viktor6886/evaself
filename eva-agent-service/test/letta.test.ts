@@ -187,9 +187,9 @@ test("App Server-only settings are applied at session open, not agent creation",
       resumeSession(id: string, options: Record<string, unknown>): unknown;
     };
     acquireSession(id: string): Promise<unknown>;
-    sessionOptions(id: string): Record<string, unknown>;
+    sessionOptions(id: string): Promise<Record<string, unknown>>;
   };
-  internal.runtime.allowed_tools = ["Read", "WebSearch"];
+  internal.runtime.allowed_tools = ["safe_tool", "Read", "WebSearch"];
   internal.runtime.disallowed_tools = ["Bash"];
   internal.runtime.system_info_reminder = true;
   internal.runtime.reasoning_effort = "high";
@@ -197,6 +197,8 @@ test("App Server-only settings are applied at session open, not agent creation",
     { name: "safe_tool" },
     { name: "Bash" },
   ] as never);
+  const approval = async () => ({ behavior: "deny" as const, message: "test" });
+  service.setSessionToolPolicyResolver(async () => ({ visibleTools: ["safe_tool"], canUseTool: approval }));
 
   let createOptions: Record<string, unknown> = {};
   let sessionOptions: Record<string, unknown> = {};
@@ -233,7 +235,8 @@ test("App Server-only settings are applied at session open, not agent creation",
       "progress_and_hypotheses",
     ],
   );
-  assert.deepEqual(sessionOptions.allowedTools, ["Read", "WebSearch"]);
+  assert.deepEqual(sessionOptions.allowedTools, ["safe_tool"]);
+  assert.equal(sessionOptions.canUseTool, approval);
   assert.deepEqual(
     (sessionOptions.tools as Array<{ name: string }>).map((tool) => tool.name),
     ["safe_tool"],
@@ -244,7 +247,46 @@ test("App Server-only settings are applied at session open, not agent creation",
   assert.deepEqual(sessionOptions.skillSources, ["bundled", "global", "agent", "project"]);
 
   internal.runtime.reasoning_effort = "none";
-  assert.equal("reasoningEffort" in internal.sessionOptions("conversation-default"), false);
+  assert.equal("reasoningEffort" in await internal.sessionOptions("conversation-default"), false);
+});
+
+test("session opening awaits live policy and recovery uses the same request-id callback", async () => {
+  const service = new LettaService({
+    appServerUrl: "ws://example.invalid/ws", appServerToken: "", appServerRequestTimeoutMs: 1000,
+    model: "", sessionPoolSize: 5, sessionIdleMs: 1000, turnTimeoutMs: 1000,
+  } as never, { debug() {}, info() {}, warn() {}, error() {} }, "persona");
+  service.setToolFactory(() => [{ name: "chat_write" }, { name: "research_read" }] as never);
+  const seen: Array<{ name: string; requestId?: string }> = [];
+  const canUseTool = async (name: string, _args: unknown, context: { requestId?: string }) => {
+    seen.push({ name, requestId: context.requestId });
+    return { behavior: "allow" as const, message: "ok" };
+  };
+  let resolved = false;
+  service.setSessionToolPolicyResolver(async (conversationId) => {
+    await Promise.resolve();
+    resolved = true;
+    assert.equal(conversationId, "conversation-research");
+    return { visibleTools: ["research_read"], canUseTool };
+  });
+  let opened: Record<string, unknown> = {};
+  (service as unknown as { client: { resumeSession(id: string, options: Record<string, unknown>): unknown } }).client = {
+    resumeSession: (_id, options) => {
+      opened = options;
+      return {
+        initialize: async () => {}, bootstrapState: async () => ({}),
+        recoverPendingApprovals: async () => {
+          await (options.canUseTool as typeof canUseTool)("research_read", {}, { requestId: "sdk-request-restart" });
+          return { recovered: true };
+        }, close() {},
+      };
+    },
+  };
+  await (service as unknown as { acquireSession(id: string): Promise<unknown> }).acquireSession("conversation-research");
+  assert.equal(resolved, true);
+  assert.deepEqual((opened.tools as Array<{ name: string }>).map((tool) => tool.name), ["research_read"]);
+  assert.deepEqual(opened.allowedTools, ["research_read"]);
+  assert.equal(opened.canUseTool, canUseTool);
+  assert.deepEqual(seen, [{ name: "research_read", requestId: "sdk-request-restart" }]);
 });
 
 // --------------------------------------------------------------------
@@ -346,16 +388,16 @@ test("смена модели снимает запомненный отказ �
   const internal = service as unknown as {
     runtime: { reasoning_effort: string };
     unsupportedReasoningEffort: string | null;
-    sessionOptions(id: string): Record<string, unknown>;
+    sessionOptions(id: string): Promise<Record<string, unknown>>;
   };
   internal.runtime.reasoning_effort = "medium";
   service.setDefaultModel("lmstudio/eva/chat");
   internal.unsupportedReasoningEffort = "medium";
-  assert.equal("reasoningEffort" in internal.sessionOptions("c1"), false);
+  assert.equal("reasoningEffort" in await internal.sessionOptions("c1"), false);
 
   // У другой модели каталог может знать этот уровень — вывод не переносится.
   service.setDefaultModel("openai/gpt-5.6");
-  assert.equal(internal.sessionOptions("c1").reasoningEffort, "medium");
+  assert.equal((await internal.sessionOptions("c1")).reasoningEffort, "medium");
 });
 
 test("поддержка уровня reasoning читается из каталога App Server", async () => {

@@ -45,6 +45,10 @@ import { EffectJournal } from "./turns/effect-journal.js";
 import { TurnRecoveryService } from "./turns/recovery.js";
 import { TurnSemaphores } from "./turns/semaphores.js";
 import { TurnLifecycle } from "./turns/turn-lifecycle.js";
+import { currentTurn } from "./turns/turn-context.js";
+import { ApprovalService, type MandatoryApprovalCategory } from "./tools/approvals.js";
+import { loadMasterKey, SecretStore } from "./admin/secret-store.js";
+import { McpHttpInvoker, McpServerPolicyRepository } from "./tools/gateway.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -180,10 +184,23 @@ async function main(): Promise<void> {
     graph,
   );
   const goals = new GoalService(db, runtimeContext, graph);
+  const turns = new TurnLifecycle(db, logger, config.turnLifecycleEnabled);
+  const approvals = new ApprovalService(db, config.toolApprovalsEnabled, { outbox, lifecycle: turns });
   // Журнал побочных эффектов включается тем же флагом, что и
   // восстановление: без журнала повтор хода не защищён, и включать одно
   // без другого — значит получить повторные действия.
-  const effects = new EffectJournal(db, logger, config.turnRecoveryEnabled);
+  const effects = new EffectJournal(
+    db,
+    logger,
+    config.turnRecoveryEnabled || config.toolGatewayEnabled,
+    config.toolGatewayEnabled,
+  );
+  const mcpPolicies = config.toolGatewayEnabled ? new McpServerPolicyRepository(db) : undefined;
+  const mcpInvoker = mcpPolicies ? new McpHttpInvoker({
+    policies: mcpPolicies,
+    secrets: new SecretStore({ masterKey: await loadMasterKey(), pool: db as never }),
+    audit: { record: async (entry) => { await db.query(`INSERT INTO audit_log (actor, operation, target, params_redacted_json, result, request_id, duration_ms) VALUES ('eva-agent-service',$1,$2,$3::jsonb,$4,$5,$6)`, [String(entry.operation), String(entry.server ?? "mcp"), JSON.stringify({ tool: entry.tool, stage: entry.stage }), entry.ok ? "success" : "failure", crypto.randomUUID(), Number(entry.duration_ms ?? 0)]); } },
+  }) : undefined;
   const toolFactory = new AgentToolFactory(
     config,
     db,
@@ -193,13 +210,40 @@ async function main(): Promise<void> {
     goals,
     graph,
     effects,
+    mcpPolicies && mcpInvoker ? { policies: mcpPolicies, invoker: mcpInvoker } : undefined,
   );
+  toolFactory.setApprovalCompletionCallback(async (execution) => await approvals.completeApprovedExecution(execution));
   letta.setToolFactory((conversationId) => toolFactory.forConversation(conversationId));
+  letta.setSessionToolPolicyResolver(async (conversationId) => {
+    const policy = await toolFactory.sessionPolicy(conversationId);
+    return {
+      visibleTools: policy.visibleTools,
+      canUseTool: async (name, args, context) => {
+        const manifest = toolFactory.manifests.get(name);
+        if (!manifest || !policy.visibleTools.includes(name)) {
+          return { behavior: "deny", message: "Tool is outside the live conversation policy", interrupt: false };
+        }
+        return await approvals.canUseTool({
+          userId: policy.runtime.userId,
+          chatId: policy.runtime.chatId,
+          conversationId,
+          turn: currentTurn(),
+          riskFor: () => manifest.risk,
+          categoryFor: () => (manifest as typeof manifest & {
+            mandatoryApprovalCategory?: MandatoryApprovalCategory;
+          }).mandatoryApprovalCategory,
+        })(name, args, context);
+      },
+    };
+  });
+  void approvals.recoverPendingApprovals(async (conversationId) => {
+    await letta.recoverConversationApprovals(conversationId);
+  }).catch((error) => logger.error("pending approval recovery failed", {
+    message: error instanceof Error ? error.message : String(error),
+  }));
   const crisis = new CrisisMonitor(db, telegram, logger, config.ownerTelegramId);
-  // Наблюдатель хода. Флаг выключен по умолчанию: с ним ход пишется в
-  // turn_runs, без него не пишется ничего, и путь обработки в обоих
-  // случаях один и тот же.
-  const turns = new TurnLifecycle(db, logger, config.turnLifecycleEnabled);
+  // Наблюдатель хода создаётся до approval callback, чтобы пауза и resume
+  // использовали тот же канонический lifecycle.
   const workflow = new EvaWorkflow(
     config,
     db,
@@ -322,6 +366,7 @@ async function main(): Promise<void> {
     observability,
     miniAppSessions,
     rateLimiter,
+    approvals,
   });
 
   await app.listen({ port: config.port, host: config.host });

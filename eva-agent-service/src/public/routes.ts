@@ -573,6 +573,7 @@ export function registerPublicRoutes(
     now?: () => Date;
     sessions?: MiniAppSessionStore;
     rateLimiter?: RateLimiter;
+    approvals?: { decide(input: { telegramId: number; sdkRequestId: string; decision: "allow" | "deny" }): Promise<unknown> };
   },
 ): void {
   const limiter = input.rateLimiter ?? new NoopRateLimiter();
@@ -729,6 +730,15 @@ export function registerPublicRoutes(
     publicApp.get("/progress", async (request) => ({
       progress: await input.repository.getProgress(publicUser(request).id),
     }));
+
+    publicApp.post("/tool-approvals/:requestId/decision", async (request) => {
+      if (!input.approvals) throw badRequest("Подтверждения инструментов отключены");
+      const sdkRequestId = String((request.params as { requestId?: string }).requestId ?? "").trim();
+      const decision = requestBody(request).decision;
+      if (!sdkRequestId || (decision !== "allow" && decision !== "deny")) throw badRequest("Некорректное решение");
+      await input.approvals.decide({ telegramId: publicUser(request).id, sdkRequestId, decision });
+      return { ok: true };
+    });
 
     publicApp.post("/work-blocks/:id/start", async (request) => {
       try {

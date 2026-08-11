@@ -12,6 +12,7 @@ import { createHash } from "node:crypto";
 import { LettaAgentClient } from "@letta-ai/letta-agent-sdk";
 import type {
   AnyAgentTool,
+  CanUseToolCallback,
   CreateAgentOptions,
   DreamingOptions,
   LettaCodeSession,
@@ -25,6 +26,7 @@ import type {
 } from "@letta-ai/letta-agent-sdk";
 
 import type { Config } from "./config.js";
+import { minimalPermissionMode } from "./tools/gateway.js";
 import {
   appServerUnavailable,
   EvaError,
@@ -342,6 +344,10 @@ export class LettaService {
   private defaultModel: string;
   private runtime: RuntimeSdkSettings;
   private toolFactory: ((conversationId: string) => AnyAgentTool[]) | null = null;
+  private sessionToolPolicyResolver: ((conversationId: string) => Promise<{
+    visibleTools: readonly string[];
+    canUseTool?: CanUseToolCallback;
+  }>) | null = null;
   /**
    * Уровень reasoning, который текущая модель заведомо не предлагает.
    *
@@ -364,7 +370,7 @@ export class LettaService {
       default_persona: persona,
       default_human_template: "Имя: {{display_name}}\nTelegram ID: {{telegram_id}}",
       default_tags: [EVASELF_TAG],
-      permissionMode: "unrestricted",
+      permissionMode: config.toolGatewayEnabled ? "strict" : "unrestricted",
       reasoning_effort: "none",
       memfs_enabled: true,
       system_prompt: null,
@@ -449,6 +455,14 @@ export class LettaService {
 
   setToolFactory(factory: (conversationId: string) => AnyAgentTool[]): void {
     this.toolFactory = factory;
+    this.closeAllSessions();
+  }
+
+  setSessionToolPolicyResolver(resolver: (conversationId: string) => Promise<{
+    visibleTools: readonly string[];
+    canUseTool?: CanUseToolCallback;
+  }>): void {
+    this.sessionToolPolicyResolver = resolver;
     this.closeAllSessions();
   }
 
@@ -715,6 +729,10 @@ export class LettaService {
     return (await this.acquirePooled(conversationId)).session;
   }
 
+  async recoverConversationApprovals(conversationId: string): Promise<void> {
+    await this.acquireSession(conversationId);
+  }
+
   /**
    * Сессия вместе с её учётной записью в пуле.
    *
@@ -794,7 +812,7 @@ export class LettaService {
   private async openSession(conversationId: string): Promise<LettaCodeSession> {
     const session = this.client.resumeSession(
       conversationId,
-      this.sessionOptions(conversationId),
+      await this.sessionOptions(conversationId),
     );
     try {
       await this.initialize(session);
@@ -816,7 +834,7 @@ export class LettaService {
       });
       const retry = this.client.resumeSession(
         conversationId,
-        this.sessionOptions(conversationId),
+        await this.sessionOptions(conversationId),
       );
       await this.initialize(retry);
       return retry;
@@ -1211,19 +1229,30 @@ export class LettaService {
    * created. Keeping that distinction here prevents unsupported create-agent
    * fields from being silently saved but never enforced.
    */
-  private sessionOptions(conversationId: string): LettaCodeClientSessionOptions {
-    const tools = (this.toolFactory?.(conversationId) ?? []).filter(
-      (tool) => !this.runtime.disallowed_tools.includes(tool.name),
-    );
-    const allowed = this.runtime.allowed_tools?.filter(
-      (name) => !this.runtime.disallowed_tools.includes(name),
-    ) ?? null;
+  private async sessionOptions(conversationId: string): Promise<LettaCodeClientSessionOptions> {
+    // Policy resolution may extend the canonical registry with DB-backed MCP
+    // tools for this conversation, so it must run before the SDK factory snapshot.
+    const policy = this.sessionToolPolicyResolver
+      ? await this.sessionToolPolicyResolver(conversationId)
+      : null;
+    const allTools = this.toolFactory?.(conversationId) ?? [];
+    const visible = policy ? new Set(policy.visibleTools) : null;
+    const tools = allTools.filter((tool) =>
+      !this.runtime.disallowed_tools.includes(tool.name) && (!visible || visible.has(tool.name)));
+    const allowed = (this.runtime.allowed_tools ?? tools.map((tool) => tool.name)).filter((name) =>
+      !this.runtime.disallowed_tools.includes(name) && (!visible || visible.has(name)));
     return {
       // The remote path belongs to the self-hosted App Server container.
       // compose mounts versioned project skills at /data/letta/.skills,
       // which is the directory Letta Code discovers for source "project".
       cwd: "/data/letta",
-      permissionMode: this.runtime.permissionMode,
+      permissionMode: this.config.toolGatewayEnabled
+        ? minimalPermissionMode({
+            requested: this.runtime.permissionMode,
+            administrative: false,
+            isolated: false,
+          })
+        : this.runtime.permissionMode,
       // "none" is our explicit UI/default value. Passing it to the SDK asks
       // the model catalog for a literal "none" tier, which ordinary
       // OpenAI-compatible models do not advertise. Omitting the option keeps
@@ -1238,6 +1267,7 @@ export class LettaService {
       ...(allowed !== null
         ? { allowedTools: allowed }
         : {}),
+      ...(policy?.canUseTool ? { canUseTool: policy.canUseTool } : {}),
     };
   }
 

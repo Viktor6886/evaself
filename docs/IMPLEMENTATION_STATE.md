@@ -139,6 +139,9 @@
 | Операции над ходами | Ходы, эффекты, сверка, отмена, безопасный повтор доставки | `src/admin/turn-operations.ts` | отмена ставит барьер, повтор только `dead`/`retry` без `sent_at` | расш. |
 | Статусы подсистем | Навыки, исследования, evals, расширения — чего ещё нет | `src/admin/subsystem-status.ts` | статус, номер шага, пустые коллекции названы своими именами | read |
 | Маршруты CRUD | Регистрация разделов шага 12 | `src/admin/crud-routes.ts` | флаг `EVA_ADMIN_CRUD`, подтверждение — идентификатор цели | расш. |
+| Tool Gateway | Манифесты, live-видимость, risk policy, kill switch и tool breaker | `src/tools/gateway.ts`, `src/agent-tools.ts` | `ToolManifestRegistry`, purpose/allowedTools intersection; `EVA_TOOL_GATEWAY` | обяз. |
+| Durable approvals | Подтверждение опасных tool calls по SDK request id | `src/tools/approvals.ts`, таблица `tool_approvals` | `canUseTool`, PostgreSQL outbox, Mini App decision route, recovery по request id; `EVA_TOOL_APPROVALS` | обяз. |
+| MCP policy | Только admin-added HTTP/SSE с SSRF, allowlist, Secret Store и аудитом | `src/tools/gateway.ts`, таблица `mcp_server_policies` | `McpHttpInvoker`; stdio, команды, `npx -y`, wildcard запрещены | обяз. |
 
 Матрица возможностей SDK — `docs/IMPLEMENTATION_STATUS.md`.
 Контракты API — `docs/ADMIN_PHASE1_CONTRACT.md`, `docs/ADMIN_PHASES_2_6_CONTRACT.md`.

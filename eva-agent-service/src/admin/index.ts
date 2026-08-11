@@ -18,8 +18,11 @@ import { buildAdminServer } from "./server.js";
 import { UserService } from "./user-service.js";
 import { ArtifactRegistry } from "../artifacts/registry.js";
 import { AgentDirectoryService } from "./agent-directory.js";
+import { ConversationToolSelectorService } from "./conversation-tool-selectors.js";
 import { MemoryTemplateService } from "./memory-template-service.js";
 import { ToolApprovalService } from "./tool-approvals.js";
+import { McpServerPolicyRepository, ToolGatewayStateStore } from "../tools/gateway.js";
+import { createCanonicalToolManifestRegistry } from "../agent-tools.js";
 import { TurnOperationsService } from "./turn-operations.js";
 import { DeleteGuard } from "../letta/delete-guard.js";
 import { DisabledAdminPlane } from "../letta/admin-client.js";
@@ -119,6 +122,7 @@ async function main(): Promise<void> {
       },
   };
   const artifacts = new ArtifactRegistry(registryDb);
+  const canonicalTools = createCanonicalToolManifestRegistry();
 
   const app = buildAdminServer({
     auth,
@@ -151,6 +155,9 @@ async function main(): Promise<void> {
         // строкам — и потерять связь запроса с записью аудита.
         withSystemScope: async (_reason, work) => await work(),
       })),
+      selectors: /^(1|true|yes|on)$/i.test(process.env.EVA_TOOL_GATEWAY ?? "")
+        ? new ConversationToolSelectorService(registryDb, canonicalTools)
+        : undefined,
       templates: new MemoryTemplateService(
         registryDb,
         artifacts,
@@ -165,7 +172,8 @@ async function main(): Promise<void> {
           new DisabledAdminPlane("admin-api не обращается к Letta App Server"),
         ),
       ),
-      tools: new ToolApprovalService(registryDb),
+      tools: new ToolApprovalService(registryDb, canonicalTools, new ToolGatewayStateStore(registryDb as never)),
+      mcp: /^(1|true|yes|on)$/i.test(process.env.EVA_TOOL_GATEWAY ?? "") ? new McpServerPolicyRepository(registryDb as never) : undefined,
       turns: new TurnOperationsService(registryDb),
     },
     // Предпросмотр всегда доступен и всегда безопасен: сам сервис

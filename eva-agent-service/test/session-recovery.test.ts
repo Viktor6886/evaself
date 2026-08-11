@@ -476,6 +476,19 @@ test("выключенный журнал не выполняет запросо
   assert.equal(db.rows.size, 0);
 });
 
+test("gateway strict mode не выполняет side effect при отказе журнала", async () => {
+  const db = withTenantScopes({
+    query: async () => { throw new Error("postgres unavailable"); },
+  });
+  const effects = new EffectJournal(db as never, logger as never, true, true);
+  await assert.rejects(
+    () => effects.begin({
+      key: "strict", runId: "run", userId: 7, toolName: "save_task", toolCallId: "call",
+    }),
+    /postgres unavailable/,
+  );
+});
+
 // ---------------------------------------------------------------------
 // 4. Восстановление: таблица инъекции сбоев
 // ---------------------------------------------------------------------

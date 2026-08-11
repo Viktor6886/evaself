@@ -178,6 +178,10 @@ export interface Config {
    * удаляет ничего: предпросмотр работает, удаление — нет.
    */
   retentionEnforcementEnabled: boolean;
+  /** Least-privilege manifest gateway for SDK tools. */
+  toolGatewayEnabled: boolean;
+  /** Durable PostgreSQL-backed SDK tool approvals. */
+  toolApprovalsEnabled: boolean;
 
   lavaWebhookUser: string;
   lavaWebhookPassword: string;
@@ -374,6 +378,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     langfuseSecretKey: str("LANGFUSE_SECRET_KEY"),
     telemetryPseudonymSecret: str("EVA_TELEMETRY_PSEUDONYM_SECRET"),
     retentionEnforcementEnabled: bool("EVA_RETENTION_ENFORCEMENT", false),
+    toolGatewayEnabled: bool("EVA_TOOL_GATEWAY", false),
+    toolApprovalsEnabled: bool("EVA_TOOL_APPROVALS", false),
 
     lavaWebhookUser: str("LAVA_WEBHOOK_USER"),
     lavaWebhookPassword: str("LAVA_WEBHOOK_PASSWORD"),

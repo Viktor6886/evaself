@@ -32,12 +32,16 @@ import { SUBSYSTEM_SECTIONS, subsystemPayload, subsystemSection } from "./subsys
 import type { ToolApprovalService } from "./tool-approvals.js";
 import type { TurnOperationsService } from "./turn-operations.js";
 import { badRequest, notFound } from "../errors.js";
+import type { McpServerPolicyRepository } from "../tools/gateway.js";
+import type { ConversationToolSelectorService } from "./conversation-tool-selectors.js";
 
 export interface CrudRouteContext {
   directory: AgentDirectoryService;
+  selectors?: ConversationToolSelectorService;
   templates: MemoryTemplateService;
   tools: ToolApprovalService;
   turns: TurnOperationsService;
+  mcp?: McpServerPolicyRepository;
   /** Кто выполняет действие. Идентификатор администратора либо null. */
   actorId(request: unknown): string | null;
   /** Дописать подробности в уже открытую запись аудита. */
@@ -83,6 +87,16 @@ function reasonOf(input: Record<string, unknown>): string {
 
 function stringList(value: unknown): string[] {
   return Array.isArray(value) ? value.map((item) => String(item ?? "")) : [];
+}
+
+function selectorList(input: Record<string, unknown>, field: string): string[] | null {
+  if (!Object.prototype.hasOwnProperty.call(input, field)) throw badRequest(`${field} обязателен`);
+  const value = input[field];
+  if (value === null) return null;
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    throw badRequest(`${field} — массив exact canonical имён или null`);
+  }
+  return value as string[];
 }
 
 export function registerCrudRoutes(app: FastifyInstance, ctx: CrudRouteContext): void {
@@ -195,6 +209,21 @@ export function registerCrudRoutes(app: FastifyInstance, ctx: CrudRouteContext):
     await ctx.audit(request, { conversation_id: id, status: "active" });
     return { conversation };
   });
+
+  if (ctx.selectors) {
+    app.post("/api/admin/v1/conversations/:conversationId/tool-selectors", {
+      config: { roles: ["owner", "admin"], sudoScope: "users:write", tenantAccess: "cross-user" },
+    }, async (request) => {
+      const id = String((request.params as { conversationId?: string }).conversationId ?? "");
+      const input = body(request.body);
+      confirmed(input, id);
+      const selectors = await ctx.selectors!.set(id, selectorList(input, "current_task_tools"), selectorList(input, "selected_skill_tools"));
+      const details = { conversation_id: selectors.conversationId, user_id: selectors.userId,
+        current_task_tools: selectors.currentTaskTools, selected_skill_tools: selectors.selectedSkillTools };
+      await ctx.audit(request, details);
+      return { selectors: details };
+    });
+  }
 
   // -------------------------------------------------------------------
   // 2. Шаблоны memory block
@@ -310,7 +339,7 @@ export function registerCrudRoutes(app: FastifyInstance, ctx: CrudRouteContext):
   });
 
   // -------------------------------------------------------------------
-  // 3–4. Инструменты и approvals — read-only до шага 14
+  // 3–4. Инструменты и approvals
   // -------------------------------------------------------------------
   app.get("/api/admin/v1/tools", {
     config: {
@@ -330,6 +359,81 @@ export function registerCrudRoutes(app: FastifyInstance, ctx: CrudRouteContext):
   }, async (request) => {
     const limit = optionalInt((request.query as { limit?: string }).limit);
     return await ctx.tools.approvals(limit ?? 50);
+  });
+
+  app.post("/api/admin/v1/tools/:toolName/state", {
+    config: { roles: ["owner", "admin"], sudoScope: "services:restart" },
+  }, async (request) => {
+    const toolName = String((request.params as { toolName?: string }).toolName ?? "");
+    const input = body(request.body);
+    confirmed(input, toolName);
+    if (typeof input.enabled !== "boolean") throw badRequest("enabled — boolean");
+    await ctx.tools.setToolEnabled(toolName, input.enabled);
+    await ctx.audit(request, { tool_name: toolName, enabled: input.enabled });
+    return { tool_name: toolName, enabled: input.enabled };
+  });
+
+  if (ctx.mcp) {
+    app.post("/api/admin/v1/mcp/policies", {
+      config: { roles: ["owner", "admin"], sudoScope: "services:restart" },
+    }, async (request) => {
+      const input = body(request.body); const name = String(input.name ?? ""); confirmed(input, name);
+      const policy = await ctx.mcp!.create({ name, url: String(input.url ?? ""), transport: String(input.transport ?? "") as "http" | "sse",
+        allowedTools: stringList(input.allowed_tools), secretIds: stringList(input.secret_record_ids), timeoutMs: intParam(input.timeout_ms, "timeout_ms"),
+        maxResultBytes: intParam(input.max_result_bytes, "max_result_bytes"), createdBy: ctx.actorId(request) ?? "" });
+      await ctx.audit(request, { mcp_server: name, action: "created" }); return { policy };
+    });
+    app.put("/api/admin/v1/mcp/policies/:name", {
+      config: { roles: ["owner", "admin"], sudoScope: "services:restart" },
+    }, async (request) => {
+      const name = String((request.params as { name?: string }).name ?? ""); const input = body(request.body); confirmed(input, name);
+      const policy = await ctx.mcp!.update(name, { url: String(input.url ?? ""), transport: String(input.transport ?? "") as "http" | "sse",
+        allowedTools: stringList(input.allowed_tools), secretIds: stringList(input.secret_record_ids), timeoutMs: intParam(input.timeout_ms, "timeout_ms"), maxResultBytes: intParam(input.max_result_bytes, "max_result_bytes") });
+      await ctx.audit(request, { mcp_server: name, action: "updated" }); return { policy };
+    });
+    app.post("/api/admin/v1/mcp/policies/:name/state", {
+      config: { roles: ["owner", "admin"], sudoScope: "services:restart" },
+    }, async (request) => {
+      const name = String((request.params as { name?: string }).name ?? ""); const input = body(request.body); confirmed(input, name);
+      if (typeof input.enabled !== "boolean") throw badRequest("enabled — boolean"); const policy = await ctx.mcp!.setEnabled(name, input.enabled);
+      await ctx.audit(request, { mcp_server: name, enabled: input.enabled }); return { policy };
+    });
+    app.delete("/api/admin/v1/mcp/policies/:name", {
+      config: { roles: ["owner", "admin"], sudoScope: "services:restart" },
+    }, async (request) => {
+      const name = String((request.params as { name?: string }).name ?? ""); confirmed(body(request.body), name); await ctx.mcp!.delete(name);
+      await ctx.audit(request, { mcp_server: name, action: "deleted" }); return { deleted: true };
+    });
+  }
+
+  app.post("/api/admin/v1/approval-rules", {
+    config: { roles: ["owner", "admin"], sudoScope: "users:write", tenantAccess: "cross-user" },
+  }, async (request) => {
+    const input = body(request.body);
+    const userId = intParam(input.user_id, "user_id");
+    const toolName = String(input.tool_name ?? "");
+    confirmed(input, `${userId}:${toolName}`);
+    if (input.decision !== "allow" && input.decision !== "deny") throw badRequest("decision — allow или deny");
+    if (input.scope !== "standing" && input.scope !== "session") throw badRequest("scope — standing или session");
+    const rule = await ctx.tools.createRule({
+      userId, toolName, decision: input.decision, scope: input.scope,
+      sessionId: input.session_id == null ? null : String(input.session_id),
+      maxRisk: String(input.max_risk) as never,
+      expiresAt: input.expires_at == null ? null : String(input.expires_at),
+      actorId: ctx.actorId(request) ?? "unknown",
+    });
+    await ctx.audit(request, { rule_id: rule.id, user_id: userId, tool_name: toolName, decision: input.decision });
+    return { rule };
+  });
+
+  app.post("/api/admin/v1/approval-rules/:id/revoke", {
+    config: { roles: ["owner", "admin"], sudoScope: "users:write", tenantAccess: "cross-user" },
+  }, async (request) => {
+    const id = intParam((request.params as { id?: string }).id, "id");
+    confirmed(body(request.body), String(id));
+    const rule = await ctx.tools.revokeRule(id, ctx.actorId(request) ?? "unknown");
+    await ctx.audit(request, { rule_id: id, user_id: rule.user_id, action: "revoked" });
+    return { rule };
   });
 
   // -------------------------------------------------------------------

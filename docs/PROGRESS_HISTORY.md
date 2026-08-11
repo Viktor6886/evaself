@@ -24,6 +24,36 @@
 
 <!-- Записи ниже -->
 
+## Batch 11 — шаг 14
+- Ветка: `batch/11-tool-gateway` · PR: ожидается · Дата: 2026-08-11 ·
+  Статус: на ревью
+
+### Шаг 14 — Tool Gateway, durable approvals и политика MCP
+- Итог: существующие доменные инструменты обёрнуты единым расширяемым
+  реестром манифестов и Tool Gateway без изменения их доменной логики.
+  Live SDK-сессия получает только инструменты канонического purpose и
+  `allowedTools`; обычный `unrestricted` сужается до `strict`. Опасные вызовы
+  проходят durable approval по точному SDK request id, PostgreSQL outbox,
+  Mini App decision route и EffectJournal; kill switch и breaker durable.
+- Переиспользовано: `purposePolicy`, `EffectJournal`, `TurnLifecycle`,
+  PostgreSQL Telegram outbox, tenant scope, `OutboundGateway`, Secret Store,
+  административные RBAC/sudo/audit и существующий provider breaker. Впервые:
+  таблицы `tool_approvals`, `tool_approval_rules`, `tool_gateway_state`,
+  `mcp_server_policies` в обратимой миграции 041.
+- Проверки: `npm run build` → PASS; `npm run lint` → PASS;
+  `npm run typecheck` → PASS; `node --test test/*.test.ts` → PASS (698);
+  `assert-tenant-scope.py` → PASS; `assert-env-plumbing.py` → PASS;
+  `assert-admin-route-access.py` → PASS; `assert-down-migrations.py` → PASS;
+  `scripts/validate.sh` → PASS.
+- Rollout: `EVA_TOOL_GATEWAY=0`, `EVA_TOOL_APPROVALS=0` по умолчанию.
+  Rollback runtime — выключить оба флага и перезапустить сервис; rollback
+  схемы — `postgres/migrations/down/041_tool_gateway.sql` после остановки
+  функций шага.
+- Ограничения: реальный PostgreSQL up/down и полный stack smoke выполняет CI;
+  rollout-флаги по умолчанию выключены.
+- Следующему агенту: batch 12 начинается только после merge и зелёного CI на
+  `main`; feature flags самостоятельно не включать.
+
 ## Batch 10 — шаги 12–13
 - Ветка: `claude/roadmap-batch-execution-fclhwf` · PR: (см. `PROGRESS.md`) ·
   Дата: 2026-08-11 · Статус: выполнен
