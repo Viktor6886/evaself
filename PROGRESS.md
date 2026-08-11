@@ -13,9 +13,9 @@ CURRENT_BATCH: 10
 CURRENT_STEP:  12
 BRANCH:        claude/roadmap-batch-execution-fclhwf
 STATUS:        в работе
-LAST_COMMIT:   9dded7c
+LAST_COMMIT:   d465001
 BLOCKER:       —
-NEXT:          административные области шага 12: агенты, memory blocks, инструменты, approvals, восстановление
+NEXT:          шаг 12: memory blocks, инструменты, approvals, восстановление и честные read-only разделы
 ```
 
 Значения полей:
