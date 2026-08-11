@@ -87,6 +87,38 @@ export const databaseUnavailable = (message: string) =>
   new EvaError(message, { code: "database_unavailable", statusCode: 503, retryable: true });
 
 /**
+ * Операции нет в установленной версии пакета Letta.
+ *
+ * Отдельный код, а не `not_found` и не молчаливый успех: вызывающий
+ * обязан отличить «сервер не нашёл объект» от «этот путь никогда не
+ * выполнялся». Повтор бессмысленен — поддержка появляется обновлением
+ * пакета, а не следующей попыткой.
+ */
+export const unsupportedOperation = (message: string, details?: unknown) =>
+  new EvaError(message, {
+    code: "unsupported_operation",
+    statusCode: 501,
+    retryable: false,
+    details,
+  });
+
+/**
+ * Удаление запрещено, пока ход не закончился.
+ *
+ * Не ошибка исполнения и не отказ доступа: объект существует, право
+ * есть, мешает только незавершённый ход. Повторить имеет смысл — но
+ * позже, поэтому `retryable` здесь не ставится: повтор решает человек,
+ * а не механизм повторов.
+ */
+export const deletionBlocked = (message: string, details?: unknown) =>
+  new EvaError(message, {
+    code: "deletion_blocked",
+    statusCode: 409,
+    retryable: false,
+    details,
+  });
+
+/**
  * Map anything thrown by the SDK or a driver onto an EvaError.
  * Connection-shaped failures are retryable; protocol-shaped ones are not.
  */
