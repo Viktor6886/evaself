@@ -144,6 +144,21 @@ export interface Config {
   /** Локальный час утреннего и вечернего check-in. */
   checkinMorningHour: number;
   checkinEveningHour: number;
+  /** Трассировка OpenTelemetry. Экспортёра нет: наружу — только через шлюз. */
+  otelEnabled: boolean;
+  /** Выдача /metrics. Выключенный флаг отдаёт 404, а не пустую страницу. */
+  prometheusEnabled: boolean;
+  /**
+   * Langfuse принимает ТОЛЬКО метаданные генерации. Флаг назван так,
+   * чтобы включение «полной трассы» нельзя было сделать по невнимательности:
+   * другого режима у этого контура нет.
+   */
+  langfuseMetadataOnly: boolean;
+  langfuseBaseUrl: string;
+  langfusePublicKey: string;
+  langfuseSecretKey: string;
+  /** Секрет псевдонимов телеметрии. Пуст — псевдонимы не выдаются вовсе. */
+  telemetryPseudonymSecret: string;
 
   lavaWebhookUser: string;
   lavaWebhookPassword: string;
@@ -329,6 +344,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     agentJobsEnabled: bool("EVA_AGENT_JOBS", false),
     checkinMorningHour: clampedInt("EVA_CHECKIN_MORNING_HOUR", 9, 5, 12),
     checkinEveningHour: clampedInt("EVA_CHECKIN_EVENING_HOUR", 21, 17, 23),
+    otelEnabled: bool("EVA_OTEL", false),
+    prometheusEnabled: bool("EVA_PROMETHEUS", true),
+    langfuseMetadataOnly: bool("EVA_LANGFUSE_METADATA_ONLY", false),
+    langfuseBaseUrl: str("LANGFUSE_BASE_URL"),
+    langfusePublicKey: str("LANGFUSE_PUBLIC_KEY"),
+    langfuseSecretKey: str("LANGFUSE_SECRET_KEY"),
+    telemetryPseudonymSecret: str("EVA_TELEMETRY_PSEUDONYM_SECRET"),
 
     lavaWebhookUser: str("LAVA_WEBHOOK_USER"),
     lavaWebhookPassword: str("LAVA_WEBHOOK_PASSWORD"),
@@ -400,6 +422,21 @@ export function configWarnings(config: Config): string[] {
       `EVA_CHECKIN_EVENING_HOUR (${config.checkinEveningHour}) не позже `
         + `EVA_CHECKIN_MORNING_HOUR (${config.checkinMorningHour}): вечерний `
         + "check-in не сможет опереться на утреннее намерение",
+    );
+  }
+  // Псевдоним без секрета — это отсутствие псевдонима: телеметрия
+  // уйдёт без владельца вовсе, и связать события одного человека при
+  // разборе инцидента будет нечем.
+  if (config.langfuseMetadataOnly && !config.telemetryPseudonymSecret) {
+    warnings.push(
+      "EVA_LANGFUSE_METADATA_ONLY включён, а EVA_TELEMETRY_PSEUDONYM_SECRET пуст: "
+        + "телеметрия уйдёт без псевдонима владельца",
+    );
+  }
+  if (config.langfuseMetadataOnly && !config.langfuseBaseUrl) {
+    warnings.push(
+      "EVA_LANGFUSE_METADATA_ONLY включён, а LANGFUSE_BASE_URL пуст: "
+        + "телеметрия никуда не отправляется",
     );
   }
   if (config.turnRecoveryEnabled && !config.turnLifecycleEnabled) {

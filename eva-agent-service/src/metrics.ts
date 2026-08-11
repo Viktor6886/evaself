@@ -15,6 +15,7 @@
 import { monitorEventLoopDelay, type IntervalHistogram } from "node:perf_hooks";
 
 import type { Database } from "./db.js";
+import { deliveryStats, jobStats, providerStats } from "./metrics-queries.js";
 import type { TurnClass } from "./turns/semaphores.js";
 import { TURN_STATES } from "./turns/states.js";
 
@@ -37,6 +38,10 @@ export interface MetricsSources {
   foreignLockReleases?: () => number;
   version: string;
   turnLifecycleEnabled: boolean;
+  /** Буфер экспортёра телеметрии: сколько ждёт отправки и сколько потеряно. */
+  telemetryBuffer?: () => { buffered: number; dropped: number };
+  /** Сроки хранения по классам данных: секунды. Заполняет шаг 10. */
+  retentionPolicies?: () => Record<string, number>;
 }
 
 interface Sample {
@@ -106,6 +111,10 @@ export class MetricsCollector {
     const locks = this.sources.locks();
     const pool = this.sources.poolStats();
     const slots = await this.slotUsage();
+    const jobs = await jobStats(this.sources.db);
+    const providers = await providerStats(this.sources.db);
+    const delivery = await deliveryStats(this.sources.db);
+    const telemetry = this.sources.telemetryBuffer?.() ?? { buffered: 0, dropped: 0 };
 
     const samples: Sample[] = [
       {
@@ -237,6 +246,111 @@ export class MetricsCollector {
         help: "Возвраты записи из-за блокировки, занятой другим владельцем.",
         type: "counter",
         values: [{ value: this.sources.foreignLockReleases?.() ?? 0 }],
+      },
+      {
+        name: "eva_jobs_outbox_pending",
+        help: "Намерения фоновых заданий, ещё не опубликованные в очередь.",
+        type: "gauge",
+        values: [{ value: jobs.outboxPending }],
+      },
+      {
+        name: "eva_jobs_outbox_oldest_age_seconds",
+        help: "Возраст самого старого неопубликованного намерения.",
+        type: "gauge",
+        values: [{ value: jobs.outboxOldestSeconds }],
+      },
+      {
+        name: "eva_jobs_running",
+        help: "Запуски заданий, которые сейчас выполняются.",
+        type: "gauge",
+        values: [{ value: jobs.running }],
+      },
+      {
+        name: "eva_jobs_stuck",
+        help: "Запуски с истёкшей арендой: исполнитель пропал, а работа числится идущей.",
+        type: "gauge",
+        values: [{ value: jobs.stuck }],
+      },
+      {
+        name: "eva_jobs_dead_letters",
+        help: "Мёртвые задания за последние сутки.",
+        type: "gauge",
+        values: [{ value: jobs.deadLetters }],
+      },
+      {
+        name: "eva_provider_requests_total",
+        help: "Запросы к провайдерам за последнюю минуту: основа RPM.",
+        type: "gauge",
+        values: providers.rpm,
+      },
+      {
+        name: "eva_provider_tokens_total",
+        help: "Токены провайдеров за последнюю минуту: основа TPM.",
+        type: "gauge",
+        values: providers.tpm,
+      },
+      {
+        name: "eva_provider_inflight",
+        help: "Незавершённые запросы к провайдерам прямо сейчас.",
+        type: "gauge",
+        values: providers.inflight,
+      },
+      {
+        name: "eva_provider_breaker_state",
+        help: "Состояние circuit breaker: 0 closed, 1 half_open, 2 open.",
+        type: "gauge",
+        values: providers.breaker,
+      },
+      {
+        name: "eva_delivery_rate_limited_total",
+        help: "Доставки, отложенные каналом по 429, за последний час.",
+        type: "gauge",
+        values: [{ value: delivery.rateLimited }],
+      },
+      {
+        name: "eva_delivery_latency_ms",
+        help: "Задержка доставки от постановки в outbox до отправки за последний час.",
+        type: "gauge",
+        values: [
+          { labels: { stat: "avg" }, value: delivery.latencyAvg },
+          { labels: { stat: "max" }, value: delivery.latencyMax },
+        ],
+      },
+      {
+        name: "eva_telemetry_buffer",
+        help: "Буфер экспортёра телеметрии: ожидает отправки и отброшено по переполнению.",
+        type: "gauge",
+        values: [
+          { labels: { state: "buffered" }, value: telemetry.buffered },
+          { labels: { state: "dropped" }, value: telemetry.dropped },
+        ],
+      },
+      {
+        name: "eva_retention_policy_seconds",
+        help: "Действующий срок хранения по классу данных.",
+        type: "gauge",
+        values: Object.entries(this.sources.retentionPolicies?.() ?? {}).map(
+          ([dataClass, seconds]) => ({ labels: { class: dataClass }, value: seconds }),
+        ),
+      },
+      {
+        name: "eva_process_cpu_seconds_total",
+        help: "Процессорное время процесса.",
+        type: "counter",
+        values: [
+          { labels: { mode: "user" }, value: process.cpuUsage().user / 1e6 },
+          { labels: { mode: "system" }, value: process.cpuUsage().system / 1e6 },
+        ],
+      },
+      {
+        name: "eva_process_memory_bytes",
+        help: "Память процесса.",
+        type: "gauge",
+        values: [
+          { labels: { kind: "rss" }, value: process.memoryUsage().rss },
+          { labels: { kind: "heap_used" }, value: process.memoryUsage().heapUsed },
+          { labels: { kind: "external" }, value: process.memoryUsage().external },
+        ],
       },
       {
         name: "eva_event_loop_lag_seconds",

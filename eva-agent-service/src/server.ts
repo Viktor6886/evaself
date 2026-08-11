@@ -19,6 +19,7 @@ import type { ManagedAgentInput } from "./letta.js";
 import type { LlmManager, LlmProviderInput } from "./llm.js";
 import type { Logger } from "./logger.js";
 import { MetricsCollector } from "./metrics.js";
+import { newCorrelationId, parseTraceparent } from "./observability/tracing.js";
 import type { LavaPayments } from "./payments.js";
 import type { UserProfileService } from "./profile/profile-service.js";
 import { PublicRepository, registerPublicRoutes } from "./public/routes.js";
@@ -58,6 +59,13 @@ export interface Services {
   dispatcher?: { foreignLockCount: number };
   miniAppSessions?: MiniAppSessionStore;
   rateLimiter?: RateLimiter;
+  /**
+   * Контур наблюдаемости. Нужен выдаче метрик (состояние буфера
+   * телеметрии) и ingress — там начинается трасса хода.
+   */
+  observability?: {
+    bufferStats(): { buffered: number; dropped: number };
+  };
 }
 
 function constantTimeEquals(a: string, b: string): boolean {
@@ -99,6 +107,33 @@ export function buildServer(services: Services): FastifyInstance {
   const app = Fastify({
     logger: false,
     bodyLimit: 2 * 1024 * 1024,
+  });
+
+  // ---------------------------------------------------------------
+  // трасса хода: начинается здесь и живёт до доставки
+  // ---------------------------------------------------------------
+  // Correlation id либо приходит от вызывающего, либо рождается тут.
+  // Он не то же самое, что trace id: трасса живёт внутри процесса и
+  // рвётся на каждой границе, а correlation id едет в конверте задания,
+  // в строке outbox и в ответе — и связывает их между собой.
+  app.addHook("onRequest", async (request, reply) => {
+    const incoming = request.headers["x-correlation-id"];
+    const correlationId = typeof incoming === "string" && /^[a-zA-Z0-9-]{8,64}$/.test(incoming)
+      ? incoming
+      : newCorrelationId();
+    // Заголовок ответа возвращается всегда: по нему человек, читающий
+    // журнал, находит ход, не спрашивая идентификатор пользователя.
+    reply.header("x-correlation-id", correlationId);
+    (request as { correlationId?: string }).correlationId = correlationId;
+    const inbound = parseTraceparent(
+      typeof request.headers.traceparent === "string" ? request.headers.traceparent : null,
+    );
+    if (inbound) {
+      // Входящая трасса не отбрасывается: ход продолжает чужую, а не
+      // начинает свою — иначе сквозной путь запроса рвался бы на нашей
+      // границе.
+      (request as { inboundTraceId?: string }).inboundTraceId = inbound.traceId;
+    }
   });
 
   // ---------------------------------------------------------------
@@ -173,9 +208,21 @@ export function buildServer(services: Services): FastifyInstance {
       : {}),
     version: VERSION,
     turnLifecycleEnabled: config.turnLifecycleEnabled,
+    ...(services.observability
+      ? { telemetryBuffer: () => services.observability!.bufferStats() }
+      : {}),
   });
   app.addHook("onClose", async () => metrics.stop());
   app.get("/metrics", async (_request, reply: FastifyReply) => {
+    // Выключенный флаг отдаёт 404, а не пустую страницу: пустая выдача
+    // читается сборщиком как «сервис жив, метрик нет», и тревога о
+    // пропавших метриках не срабатывает.
+    // Сравнение именно с `false`: конфигурация, собранная без этого поля
+    // (а так делают тесты и внешние вызовы `buildServer`), означает
+    // «как раньше», а не «метрики выключены».
+    if (config.prometheusEnabled === false) {
+      return reply.code(404).send({ error: "metrics_disabled" });
+    }
     const body = await metrics.render();
     return reply
       .header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
