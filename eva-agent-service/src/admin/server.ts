@@ -17,7 +17,13 @@ import {
   sessionCookies,
 } from "./auth-service.js";
 import type { ArtifactRegistry } from "../artifacts/registry.js";
+import type { AgentDirectoryService } from "./agent-directory.js";
 import { registerArtifactRoutes } from "./artifact-routes.js";
+import { registerCrudRoutes } from "./crud-routes.js";
+import type { MemoryTemplateService } from "./memory-template-service.js";
+import type { ToolApprovalService } from "./tool-approvals.js";
+import type { TurnOperationsService } from "./turn-operations.js";
+import { EvaError } from "../errors.js";
 import { AuditService, type AuditActor } from "./audit-service.js";
 import { ConfigService } from "./config-service.js";
 import {
@@ -78,6 +84,18 @@ export interface AdminServerServices {
   retention?: { preview(settings: Record<string, unknown>): Promise<unknown> };
   /** Единый реестр артефактов. Отсутствует — раздел просто не появляется. */
   artifacts?: ArtifactRegistry;
+  /**
+   * Полный административный CRUD (шаг 12). Регистрируется целиком или не
+   * регистрируется вовсе: половина разделов хуже, чем ни одного, — по
+   * отсутствию маршрута видно, что подсистема выключена, а по половине
+   * разделов не видно ничего.
+   */
+  crud?: {
+    directory: AgentDirectoryService;
+    templates: MemoryTemplateService;
+    tools: ToolApprovalService;
+    turns: TurnOperationsService;
+  };
   events: Redis;
   logger: Logger;
   readiness: () => Promise<boolean>;
@@ -93,8 +111,69 @@ const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
  * поведение остаётся предсказуемым.
  */
 function securityAuditEnabled(): boolean {
-  const raw = (process.env.EVA_SECURITY_AUDIT ?? "").trim().toLowerCase();
-  return raw === "1" || raw === "true" || raw === "yes";
+  return flagEnabled(process.env.EVA_SECURITY_AUDIT);
+}
+
+/**
+ * Полный административный CRUD за флагом `EVA_ADMIN_CRUD`.
+ *
+ * Читается при сборке сервера, а не на каждом запросе: раздел либо есть
+ * целиком, либо его нет, и половина маршрутов при переключении флага на
+ * живом процессе была бы хуже обоих состояний.
+ */
+function adminCrudEnabled(): boolean {
+  return flagEnabled(process.env.EVA_ADMIN_CRUD);
+}
+
+function flagEnabled(raw: string | undefined): boolean {
+  const value = (raw ?? "").trim().toLowerCase();
+  return value === "1" || value === "true" || value === "yes";
+}
+
+/**
+ * Отказ доменного слоя — административным ответом.
+ *
+ * Раньше всё, что не `AdminApiError`, становилось `internal_error`: и
+ * «версия не утверждена», и «удаление запрещено, пока идёт ход», и
+ * «операции нет в установленной версии пакета». Администратор видел
+ * «внутренняя ошибка» там, где на самом деле система работала правильно и
+ * могла объяснить, что не так.
+ *
+ * Переносится только код, статус и сообщение — то, что мы сами написали.
+ * Причина отказа драйвера, стек и текст провайдера остаются
+ * `internal_error`: их содержимое нам неизвестно, а значит, показывать его
+ * нельзя.
+ */
+function toAdminError(error: unknown): AdminApiError {
+  if (error instanceof AdminApiError) return error;
+  if (error instanceof EvaError) {
+    // Отдельно названы два исхода, которые легче всего принять за поломку:
+    // `unsupported_operation` — честное «этот путь никогда не выполнялся»
+    // (501, повторять бессмысленно), а retryable-отказ — «сейчас нельзя,
+    // позже можно» (503). Всё, что сервис объявил кодом ниже 500, уходит
+    // как есть: это наши собственные сообщения, а не текст провайдера.
+    if (error.code === "unsupported_operation") {
+      return new AdminApiError(error.code, error.message, 501, safeDetails(error.details));
+    }
+    if (error.statusCode < 500) {
+      return new AdminApiError(error.code, error.message, error.statusCode, safeDetails(error.details));
+    }
+    if (error.retryable) {
+      return new AdminApiError(error.code, error.message, 503, safeDetails(error.details));
+    }
+  }
+  return new AdminApiError(
+    "internal_error",
+    "Внутренняя ошибка административного API",
+    (error as { statusCode?: number })?.statusCode === 400 ? 400 : 500,
+  );
+}
+
+/** Подробности отказа как объект: массив и скаляр в ответе не нужны. */
+function safeDetails(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
 }
 
 function objectBody(body: unknown): Record<string, unknown> {
@@ -222,7 +301,9 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
   app.addHook("onError", async (request, _reply, error) => {
     const context = contexts.get(request);
     if (!context?.audit) return;
-    const code = error instanceof AdminApiError ? error.code : "internal_error";
+    // Код в журнале — тот же, что увидел администратор: иначе разбор
+    // отказа по журналу расходится с тем, что показал интерфейс.
+    const code = toAdminError(error).code;
     await services.audit.finish(
       context.audit.id,
       context.audit.startedAt,
@@ -246,13 +327,7 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
 
   app.setErrorHandler((error: unknown, request, reply) => {
     const context = contexts.get(request);
-    const apiError = error instanceof AdminApiError
-      ? error
-      : new AdminApiError(
-          "internal_error",
-          "Внутренняя ошибка административного API",
-          (error as { statusCode?: number })?.statusCode === 400 ? 400 : 500,
-        );
+    const apiError = toAdminError(error);
     services.logger.error("Ошибка admin-api", {
       request_id: context?.requestId,
       url: request.url,
@@ -379,6 +454,20 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
   if (services.artifacts) {
     registerArtifactRoutes(app, {
       registry: services.artifacts,
+      actorId: (request) => contexts.get(request as FastifyRequest)?.session?.user.id ?? null,
+      audit: async (request, details) => {
+        const context = contexts.get(request as FastifyRequest);
+        if (!context?.audit) return;
+        await services.audit.annotate(context.audit.id, details);
+      },
+    });
+  }
+
+  // Полный административный CRUD (шаг 12). Флаг по умолчанию выключен:
+  // включает его человек, автономный агент — нет.
+  if (services.crud && adminCrudEnabled()) {
+    registerCrudRoutes(app, {
+      ...services.crud,
       actorId: (request) => contexts.get(request as FastifyRequest)?.session?.user.id ?? null,
       audit: async (request, details) => {
         const context = contexts.get(request as FastifyRequest);

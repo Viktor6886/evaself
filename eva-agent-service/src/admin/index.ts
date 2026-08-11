@@ -17,6 +17,13 @@ import { OutboundGateway } from "./outbound-gateway.js";
 import { buildAdminServer } from "./server.js";
 import { UserService } from "./user-service.js";
 import { ArtifactRegistry } from "../artifacts/registry.js";
+import { AgentDirectoryService } from "./agent-directory.js";
+import { MemoryTemplateService } from "./memory-template-service.js";
+import { ToolApprovalService } from "./tool-approvals.js";
+import { TurnOperationsService } from "./turn-operations.js";
+import { DeleteGuard } from "../letta/delete-guard.js";
+import { DisabledAdminPlane } from "../letta/admin-client.js";
+import { MemoryBlockSync } from "../letta/memory-block-sync.js";
 import { SecurityAuditService } from "./security-audit.js";
 import { RetentionService } from "../retention/service.js";
 import { UpdaterClient } from "./updater-client.js";
@@ -102,6 +109,17 @@ async function main(): Promise<void> {
   }, 60_000);
   snapshotRetry.unref();
 
+  // Один узкий адаптер пула на все реестровые сервисы: `pg` типизирует
+  // строку как `QueryResultRow`, а сервисам достаточно объекта с полями.
+  const registryDb = {
+    query: async (sql: string, values: unknown[] = []) =>
+      await pool.query(sql, values) as unknown as {
+        rows: Record<string, unknown>[];
+        rowCount: number | null;
+      },
+  };
+  const artifacts = new ArtifactRegistry(registryDb);
+
   const app = buildAdminServer({
     auth,
     audit,
@@ -118,13 +136,38 @@ async function main(): Promise<void> {
     // Единый реестр артефактов. Артефакты общесистемные: владельца среди
     // пользователей Евы у них нет, поэтому граница арендатора к ним не
     // применяется, а доступ ограничен ролью маршрута и записан в аудит.
-    artifacts: new ArtifactRegistry({
-      query: async (sql: string, values: unknown[] = []) =>
-        await pool.query(sql, values) as unknown as {
-          rows: Record<string, unknown>[];
-          rowCount: number | null;
-        },
-    }),
+    artifacts: artifacts,
+    // Полный административный CRUD (шаг 12). Собирается всегда, но
+    // регистрируется только при включённом EVA_ADMIN_CRUD: собранный, но
+    // незарегистрированный сервис ничего не стоит и ни к чему не
+    // обращается.
+    crud: {
+      directory: new AgentDirectoryService(registryDb, new DeleteGuard({
+        query: registryDb.query,
+        // Область у административного запроса уже своя: роль подтверждена,
+        // запись аудита открыта, и именно она разрешает границе арендатора
+        // видеть данные всех пользователей. Заводить поверх неё системную
+        // область значило бы объявить второе основание доступа к тем же
+        // строкам — и потерять связь запроса с записью аудита.
+        withSystemScope: async (_reason, work) => await work(),
+      })),
+      templates: new MemoryTemplateService(
+        registryDb,
+        artifacts,
+        // Плоскость Letta выключена намеренно: admin-api в Letta не ходит.
+        // Применение шаблона кладёт намерение в letta_memory_block_sync, а
+        // записывает его eva-agent-service — второго писателя блоков нет.
+        new MemoryBlockSync(
+          {
+            query: registryDb.query,
+            withUserScope: async (_input, work) => await work(),
+          },
+          new DisabledAdminPlane("admin-api не обращается к Letta App Server"),
+        ),
+      ),
+      tools: new ToolApprovalService(registryDb),
+      turns: new TurnOperationsService(registryDb),
+    },
     // Предпросмотр всегда доступен и всегда безопасен: сам сервис
     // создаётся выключенным (`enabled = false`), удалять из админки
     // нечем — удаление выполняет задание очереди обслуживания.
