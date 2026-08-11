@@ -312,11 +312,26 @@ async function main(): Promise<void> {
     recoveryTimer = setInterval(() => void recovery.sweep(), config.turnRecoveryIntervalMs);
     recoveryTimer.unref();
   }
-  background.start();
-  // Слой фоновых заданий. Продуктовых задач на нём ещё нет: включённый
-  // флаг сверяет расписания и запускает публикатор, но переносить сюда
-  // существующие интервальные циклы будет отдельный шаг.
-  const jobs = config.bullmqJobsEnabled ? buildJobLayer(config, db, redis, logger) : null;
+  // Слой фоновых заданий. Ступень переноса решает, кто ведёт напоминания
+  // и heartbeat: пока идёт зеркало — старые интервалы, после снятия
+  // зеркала — очередь, и тогда интервалы не запускаются вовсе.
+  const jobs = config.bullmqJobsEnabled
+    ? buildJobLayer(config, db, redis, logger, {
+      letta,
+      purposes,
+      runtimeContext,
+      lock: queue,
+      outbox,
+      // Выборка старого интервала для режима зеркала. Сравнивать есть с
+      // чем только у тех видов, у которых старый механизм существует:
+      // check-in до этого шага не было вовсе.
+      legacySelector: (kind) =>
+        kind === "reminder" || kind === "heartbeat"
+          ? background.previewSelection(kind)
+          : null,
+    })
+    : null;
+  background.start(jobs ? jobs.legacySchedulerActive : true);
   if (jobs) {
     await jobs.start().catch((error: unknown) => {
       // Недоступный Valkey не должен мешать сервису отвечать людям:

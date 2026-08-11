@@ -22,8 +22,10 @@ export const TELEGRAM_COLUMNS = new Set(["telegram_id", "telegram_user_id"]);
 export const TENANT_TABLES: Readonly<Record<string, readonly string[]>> = {
   admin_user_notes: ["user_id"],
   agent_conversations: ["user_id"],
+  agent_job_results: ["user_id"],
   agent_links: ["user_id"],
   budget_entries: ["user_id"],
+  checkin_episodes: ["user_id"],
   conversation_highlights: ["user_id"],
   crisis_events: ["user_id"],
   daily_focus_selections: ["user_id"],
@@ -48,6 +50,7 @@ export const TENANT_TABLES: Readonly<Record<string, readonly string[]>> = {
   partner_analysis_links: ["owner_user_id", "partner_user_id"],
   payment_intents: ["user_id"],
   payments: ["user_id"],
+  proactive_messages: ["user_id"],
   referrals: ["referrer_user_id", "referred_user_id"],
   subscriptions: ["user_id"],
   task_events: ["user_id"],
