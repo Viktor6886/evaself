@@ -131,6 +131,14 @@
 | health-worker | Фоновые снимки состояния без внешних запросов из UI | `src/admin/health-worker.ts`, таблицы `health_checks`, `service_statuses` | — | расш. |
 | eva-updater | Ограниченный перезапуск контейнеров | `src/admin/updater-index.ts` | сокет 0660, группа `evaself-updater`; admin-api без Docker socket | обяз. |
 | SecurityAudit | Проверка конфигурации установки | `src/admin/security-audit.ts` | — | расш. |
+| Реестр артефактов | Единый реестр версий: prompt, flow, skill, policy, шаблон memory block | `src/artifacts/registry.ts`, `validation.ts`, таблицы `artifacts`, `artifact_versions`, `artifact_publications`, `artifact_usages` | `createVersion()`, `publish()`, `rollback()`, `resolve()` с процентной раскаткой, `recordUsage()`; неизменяемость версии держит триггер схемы | обяз. |
+| Маршруты реестра | Административная поверхность реестра | `src/admin/artifact-routes.ts` | публикация требует `confirm`, откат — причины | расш. |
+| Каталог агентов | Агенты, conversations, архив, экспорт, предпросмотр удаления | `src/admin/agent-directory.ts` | читает PostgreSQL, в Letta не ходит; удаление только предпросмотром | расш. |
+| Применение шаблонов памяти | Предпросмотр, массовое применение, откат шаблона memory block | `src/admin/memory-template-service.ts`, таблицы `memory_template_applications`, `memory_template_application_items` | пишет намерения только через `MemoryBlockSync`; откат — родительская версия шаблона | обяз. |
+| Инструменты и approvals | Честный read-only обзор до шага 14 | `src/admin/tool-approvals.ts` | политика назначения, вызовы из `tool_effects`, ходы в `approval_pending` | read |
+| Операции над ходами | Ходы, эффекты, сверка, отмена, безопасный повтор доставки | `src/admin/turn-operations.ts` | отмена ставит барьер, повтор только `dead`/`retry` без `sent_at` | расш. |
+| Статусы подсистем | Навыки, исследования, evals, расширения — чего ещё нет | `src/admin/subsystem-status.ts` | статус, номер шага, пустые коллекции названы своими именами | read |
+| Маршруты CRUD | Регистрация разделов шага 12 | `src/admin/crud-routes.ts` | флаг `EVA_ADMIN_CRUD`, подтверждение — идентификатор цели | расш. |
 
 Матрица возможностей SDK — `docs/IMPLEMENTATION_STATUS.md`.
 Контракты API — `docs/ADMIN_PHASE1_CONTRACT.md`, `docs/ADMIN_PHASES_2_6_CONTRACT.md`.
@@ -162,6 +170,14 @@
   заданий на нём нет: они относятся к шагам 21 и 24.
 - **Ежедневный инсайт и недельный обзор** — виды объявлены, источников данных
   ещё нет (шаги 27 и 54), выборка пуста.
+- **Потребитель реестра артефактов во время выполнения** — реестр, публикация,
+  раскатка и фиксация версий есть; ни один промпт, flow, навык или policy через
+  него пока не разрешается. `artifact_usages` останется пустой, пока первый
+  артефакт не начнёт браться из реестра.
+- **Реестр инструментов, уровни риска и durable approvals** — шаг 14. Разделы
+  административного API существуют и честно read-only.
+- **Экраны новых разделов в `admin-ui`** — их нет: шаг 12 остановился на
+  контракте admin-api.
 - **Колонка `tenant_id`** — изоляция держится на `user_id` и области арендатора.
 - **Второй RAG, Qdrant, LightRAG, LangGraph runtime, LangSmith** — запрещены.
 - **Экспорт трасс в OTLP** — провайдер трасс есть, экспортёра нет намеренно:

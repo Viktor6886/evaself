@@ -21,6 +21,8 @@
  * административного маршрута и записывается в аудит.
  */
 
+import { createHash } from "node:crypto";
+
 import { badRequest, notFound } from "../errors.js";
 
 import {
@@ -353,6 +355,58 @@ export class ArtifactRegistry {
     return { ...toPublication(rows[0]!), version: target.version };
   }
 
+  /**
+   * Что действует для конкретного субъекта прямо сейчас.
+   *
+   * Единственный способ узнать версию во время выполнения. Отдельно от
+   * `active()` потому, что публикация — это не только «какая версия», но и
+   * «какой доле»: при `rollout_percent < 100` версия действует не для всех.
+   *
+   * Доля считается детерминированно от субъекта, а не случайно. Случайный
+   * бросок означал бы, что один и тот же человек в соседних ходах работает
+   * то со старым промптом, то с новым, — а это не раскатка, а мерцание.
+   * Тот же субъект при том же проценте всегда получает тот же ответ.
+   */
+  async resolve(input: {
+    kind: ArtifactKind;
+    slug: string;
+    environment: string;
+    /** Кто спрашивает: идентификатор пользователя, агента или хода. */
+    subject: string;
+  }): Promise<{
+    versionId: number;
+    version: number;
+    checksum: string;
+    body: unknown;
+    rolloutPercent: number;
+  } | null> {
+    const { rows } = await this.db.query(
+      `SELECT p.version_id, p.rollout_percent, v.version, v.checksum, v.body
+         FROM artifact_publications p
+         JOIN artifact_versions v ON v.id = p.version_id
+         JOIN artifacts a ON a.id = p.artifact_id
+        WHERE a.kind = $1 AND a.slug = $2 AND a.archived_at IS NULL
+          AND p.environment = $3 AND p.retired_at IS NULL`,
+      [input.kind, input.slug, input.environment],
+    );
+    if (rows.length === 0) return null;
+
+    const row = rows[0]!;
+    const rollout = Number(row.rollout_percent ?? 0);
+    // 0 % — «объявлено, но никому не выдаётся»: публикация видна в
+    // истории, а действующей версии для субъекта нет.
+    if (rollout <= 0) return null;
+    if (rollout < 100 && bucketOf(`${input.slug}:${input.subject}`) >= rollout) return null;
+
+    return {
+      versionId: Number(row.version_id ?? 0),
+      version: Number(row.version ?? 0),
+      checksum: String(row.checksum ?? ""),
+      body: row.body ?? null,
+      rolloutPercent: rollout,
+    };
+  }
+
   /** Семантический diff двух версий — путями и размерами, без содержимого. */
   async diff(fromVersionId: number, toVersionId: number) {
     const [from, to] = await Promise.all([
@@ -423,6 +477,20 @@ export class ArtifactRegistry {
     if (rows.length === 0) throw notFound(`артефакт ${artifactId} не найден`);
     return toArtifact(rows[0]!);
   }
+}
+
+/**
+ * Корзина субъекта: число 0–99, устойчивое между процессами и перезапусками.
+ *
+ * Именно поэтому здесь хэш, а не `Math.random()` и не остаток от числового
+ * идентификатора: случайное значение меняло бы версию у одного человека от
+ * хода к ходу, а остаток от идентификатора выдавал бы новых пользователей
+ * в одну и ту же корзину — раскатка на 10 % досталась бы не десятой части
+ * людей, а десятой части диапазона идентификаторов.
+ */
+function bucketOf(subject: string): number {
+  const digest = createHash("sha256").update(subject).digest();
+  return digest.readUInt32BE(0) % 100;
 }
 
 function toArtifact(row: Record<string, unknown>): ArtifactRow {

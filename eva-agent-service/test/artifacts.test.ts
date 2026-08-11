@@ -235,6 +235,24 @@ class FakeArtifactDatabase {
       this.publications.push(row);
       return { rows: [row] as unknown as Record<string, unknown>[], rowCount: 1 };
     }
+    if (text.startsWith("SELECT p.version_id, p.rollout_percent")) {
+      const [kind, slug, environment] = values as [string, string, string];
+      const artifact = this.artifacts.find((row) => row.kind === kind && row.slug === slug);
+      const found = this.publications
+        .filter((row) => row.artifact_id === artifact?.id
+          && row.environment === environment && row.retired_at === null)
+        .map((row) => {
+          const version = this.versions.find((item) => item.id === row.version_id);
+          return {
+            version_id: row.version_id,
+            rollout_percent: row.rollout_percent,
+            version: version?.version ?? 0,
+            checksum: version?.checksum ?? "",
+            body: version?.body ?? null,
+          };
+        });
+      return { rows: found as unknown as Record<string, unknown>[], rowCount: found.length };
+    }
     if (text.startsWith("UPDATE artifact_publications SET retired_at")) {
       const row = this.publications.find((item) => item.id === Number(values[0]));
       if (row && row.retired_at === null) row.retired_at = new Date().toISOString();
@@ -410,4 +428,71 @@ test("версия чужого артефакта не публикуется",
     () => registry.publish({ artifactId: other.id, environment: "production", versionId: v1.id }),
     /другому артефакту/,
   );
+});
+
+// --------------------------------------------------------------------
+// разрешение версии во время выполнения
+// --------------------------------------------------------------------
+
+test("разрешение версии отдаёт содержимое действующей публикации", async () => {
+  const { registry, artifact } = await seeded();
+  const v1 = (await registry.createVersion({ artifactId: artifact.id, body: { text: "v1" } })).version;
+  await registry.setStatus(v1.id, "approved");
+  await registry.publish({ artifactId: artifact.id, environment: "production", versionId: v1.id });
+
+  const resolved = await registry.resolve({
+    kind: "prompt", slug: "eva.persona", environment: "production", subject: "user-1",
+  });
+  assert.equal(resolved?.versionId, v1.id);
+  assert.deepEqual(resolved?.body, { text: "v1" });
+
+  // Другого окружения публикация не касается.
+  assert.equal(
+    await registry.resolve({
+      kind: "prompt", slug: "eva.persona", environment: "canary", subject: "user-1",
+    }),
+    null,
+  );
+});
+
+test("нулевая раскатка объявлена, но никому не выдаётся", async () => {
+  const { registry, artifact } = await seeded();
+  const v1 = (await registry.createVersion({ artifactId: artifact.id, body: { text: "v1" } })).version;
+  await registry.setStatus(v1.id, "approved");
+  await registry.publish({
+    artifactId: artifact.id, environment: "production", versionId: v1.id, rolloutPercent: 0,
+  });
+  assert.equal(await registry.active(artifact.id, "production") === null, false);
+  assert.equal(
+    await registry.resolve({
+      kind: "prompt", slug: "eva.persona", environment: "production", subject: "user-1",
+    }),
+    null,
+  );
+});
+
+test("частичная раскатка устойчива для субъекта и делит выборку по проценту", async () => {
+  const { registry, artifact } = await seeded();
+  const v1 = (await registry.createVersion({ artifactId: artifact.id, body: { text: "v1" } })).version;
+  await registry.setStatus(v1.id, "approved");
+  await registry.publish({
+    artifactId: artifact.id, environment: "production", versionId: v1.id, rolloutPercent: 25,
+  });
+
+  const ask = async (subject: string) => await registry.resolve({
+    kind: "prompt", slug: "eva.persona", environment: "production", subject,
+  });
+
+  // Тот же субъект — тот же ответ: раскатка не должна мерцать между ходами.
+  const first = await ask("user-42");
+  const second = await ask("user-42");
+  assert.equal(first === null, second === null);
+
+  let included = 0;
+  for (let i = 0; i < 400; i += 1) {
+    if (await ask(`user-${i}`) !== null) included += 1;
+  }
+  // Ровно 25 % ждать не приходится: важно, что раскатка действительно
+  // делит выборку, а не выдаёт версию всем или никому.
+  assert.ok(included > 60 && included < 140, `в раскатку попало ${included} из 400`);
 });

@@ -257,7 +257,7 @@ export class MemoryTemplateService {
     for (const agent of agents) {
       for (const block of blocks) {
         const nextChecksum = blockChecksum(block.value);
-        const previousChecksum = current.get(`${agent.agentId} ${block.label}`) ?? null;
+        const previousChecksum = current.get(`${agent.agentId}|${block.label}`) ?? null;
         const base = {
           agentId: agent.agentId,
           userId: agent.userId,
@@ -360,7 +360,7 @@ export class MemoryTemplateService {
     );
     const map = new Map<string, string>();
     for (const row of rows) {
-      map.set(`${String(row.agent_id ?? "")} ${String(row.label ?? "")}`, String(row.checksum ?? ""));
+      map.set(`${String(row.agent_id ?? "")}|${String(row.label ?? "")}`, String(row.checksum ?? ""));
     }
     return map;
   }
