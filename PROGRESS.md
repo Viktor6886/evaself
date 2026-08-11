@@ -10,12 +10,12 @@
 
 ```
 CURRENT_BATCH: 10
-CURRENT_STEP:  12
+CURRENT_STEP:  13
 BRANCH:        claude/roadmap-batch-execution-fclhwf
-STATUS:        в работе
-LAST_COMMIT:   7d20599
+STATUS:        на ревью
+LAST_COMMIT:   e9e8263
 BLOCKER:       —
-NEXT:          закрытие batch 10: full regression, документация, pull request и ревью
+NEXT:          дождаться зелёного CI на pull request batch 10 и независимого ревью
 ```
 
 Значения полей:
