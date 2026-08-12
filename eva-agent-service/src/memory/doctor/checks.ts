@@ -491,7 +491,7 @@ export const DOCTOR_CHECKS: readonly DoctorCheck[] = [
          AND m.subject_kind = 'node'
          AND NOT EXISTS (
            SELECT 1 FROM memory_nodes n
-            WHERE n.user_id = m.user_id AND n.id = m.subject_id
+            WHERE n.user_id = $1 AND n.id = m.subject_id
               AND n.status IN ('active', 'candidate')
          )
        ORDER BY m.id

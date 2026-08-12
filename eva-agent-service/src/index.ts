@@ -35,6 +35,8 @@ import { EpisodeService, EpisodeTracker, type EpisodeRow } from "./memory/episod
 import { CURATOR_JOB_TYPE, MemoryCuratorService } from "./memory/curator/service.js";
 import { MemoryUserControl, MiniAppMemoryGateway } from "./memory/curator/user-control.js";
 import { MEMORY_DOCTOR_JOB_TYPE, MemoryDoctorService } from "./memory/doctor/service.js";
+import { HybridRetrieval } from "./memory/retrieval/hybrid.js";
+import { DeepRecall } from "./memory/retrieval/deep-recall.js";
 import { MiniAppDoctorGateway, type DoctorEnqueue } from "./memory/doctor/gateway.js";
 import { buildTemporalMemory } from "./memory/temporal/index.js";
 import { LavaPayments } from "./payments.js";
@@ -195,6 +197,14 @@ async function main(): Promise<void> {
   // заданий, который создаётся после воркфлоу. До тех пор закрытый
   // эпизод просто записывается: задание без очереди поставить некуда, и
   // притворяться, что оно поставлено, нельзя.
+  // Гибридный поиск и Deep Recall. Выключенные флаги оставляют прежний
+  // путь: контекст собирается графовым сервисом, как и до этого шага.
+  const hybridRetrieval = new HybridRetrieval(db, {
+    enabled: config.hybridRetrievalEnabled,
+  });
+  const deepRecall = config.deepRecallEnabled
+    ? new DeepRecall(hybridRetrieval, true)
+    : undefined;
   let enqueueCuration: ((episode: EpisodeRow, userId: number) => Promise<void>) | null = null;
   // Диагностика памяти собирается здесь, а ставится заданием — поэтому
   // публикация задания появляется вместе со слоем заданий ниже. Пока
@@ -297,6 +307,7 @@ async function main(): Promise<void> {
     highlights,
     turns,
     episodeTracker,
+    deepRecall,
   );
   const inbox = new PostgresTelegramInbox(db);
   // Уведомление о мёртвой записи одно на оба пути обработки: человек

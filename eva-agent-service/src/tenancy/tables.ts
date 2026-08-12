@@ -47,6 +47,7 @@ export const TENANT_TABLES: Readonly<Record<string, readonly string[]>> = {
   memory_conflicts: ["user_id"],
   memory_curator_runs: ["user_id"],
   memory_doctor_actions: ["user_id"],
+  memory_embeddings: ["user_id"],
   memory_doctor_reports: ["user_id"],
   memory_edge_versions: ["user_id"],
   memory_edges: ["user_id"],
