@@ -56,6 +56,7 @@ export class AgentToolFactory {
   private readonly dynamicTools = new Map<string, AnyAgentTool[]>();
   private readonly vectorGoalsEnabled: boolean;
   private approvalCompletion?: (input: { userId: number; conversationId: string; toolName: string; args: unknown; outcome: "executed" | "failed" }) => Promise<unknown>;
+  private verifiedOutcome?: (input: { userId:number; conversationId:string; toolName:string; toolCallId:string; runId?:string; outcome:"executed"|"failed" }) => Promise<unknown>;
   private readonly runtimeContexts = new Map<
     string,
     { expiresAt: number; value: Promise<AgentRuntimeContext> }
@@ -90,6 +91,10 @@ export class AgentToolFactory {
     this.approvalCompletion = callback;
   }
 
+  setVerifiedOutcomeCallback(callback: (input: { userId:number; conversationId:string; toolName:string; toolCallId:string; runId?:string; outcome:"executed"|"failed" }) => Promise<unknown>):void {
+    this.verifiedOutcome=callback;
+  }
+
   forConversation(conversationId: string): AnyAgentTool[] {
     const tool = this.builder(conversationId);
     return [
@@ -97,6 +102,7 @@ export class AgentToolFactory {
       ...this.profile.build(tool),
       ...(this.vectorGoalsEnabled ? this.goals.build(tool) : []),
       ...this.tasks.build(tool),
+      ...(this.config.toolGatewayEnabled ? [tool("skill_scenario_complete", "Complete skill scenario", "Mark the active server-owned skill scenario complete", { type:"object", additionalProperties:false }, async()=>({ok:true}))] : []),
       // Registering Todoist tools without a token only teaches the model
       // about nine actions that always fail on the first call.
       ...(this.config.todoistApiToken ? this.todoist.build(tool) : []),
@@ -269,6 +275,7 @@ export class AgentToolFactory {
           if (executionUserId !== undefined) {
             approvalCompletionAttempted = true;
             await this.approvalCompletion?.({ userId: executionUserId, conversationId, toolName: name, args: rawArgs, outcome: "executed" });
+            await this.verifiedOutcome?.({userId:executionUserId,conversationId,toolName:name,toolCallId:String(toolCallId),runId:currentTurn()?.runId,outcome:"executed"});
           }
           return gatewayResult;
         } catch (error) {
@@ -388,5 +395,12 @@ export function createCanonicalToolManifestRegistry(): ToolManifestRegistry {
     TODOIST_GET_ALL_TASKS: policy("read"), TODOIST_GET_ACTIVE_TASK: policy("read"), TODOIST_GET_TASK: policy("read"),
     TODOIST_DELETE_TASK: policy("destructive"), TODOIST_DELETE_ALL_TASKS: policy("destructive"),
   }, policy("external_side_effect")));
+  registry.register({
+    name: "skill_scenario_complete", version: "1.0.0",
+    inputSchema: { type: "object", additionalProperties: false }, outputSchema: { type: "object" },
+    owner: "eva-agent-service", purposes: ["chat"], risk: "low_risk_write",
+    approvalRequired: false, idempotent: true, timeoutMs: 30_000,
+    limits: { maxResultBytes: 1024 }, sideEffect: true,
+  });
   return registry;
 }

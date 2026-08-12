@@ -5,6 +5,12 @@ set -eu
 # container runtime directory, make it read-only for the node group, then
 # permanently drop privileges before starting Node.js.
 if [ "$(id -u)" -eq 0 ]; then
+	# Named volumes are initially root-owned. Both the one-shot initializer and
+	# long-running writer drop to node only after making the mounted filesystem writable.
+	if [ -d /data/letta/.skills ]; then
+		chown node:node /data/letta/.skills
+		chmod 0750 /data/letta/.skills
+	fi
 	if [ -n "${EVA_SECRETS_MASTER_KEY_FILE:-}" ] &&
 		[ -f "$EVA_SECRETS_MASTER_KEY_FILE" ]; then
 		runtime_dir="/run/evaself"

@@ -23,6 +23,27 @@ x-logging: &logging
       max-file: "3"
 
 services:
+  # Validates the tracked catalog and atomically stages only accepted files.
+  # Letta cannot start until this one-shot owner has populated the shared SDK cwd.
+  skill-indexer:
+    <<: *logging
+    build:
+      context: ./eva-agent-service
+      args:
+        NODE_BASE_VERSION: ${NODE_BASE_VERSION}
+    image: evaself/eva-agent-service:0.3.0
+    restart: "no"
+    working_dir: /app
+    command: ["node", "dist/skills/indexer-cli.js"]
+    environment:
+      DATABASE_URL: postgresql://${EVA_DB_USER}:${EVA_DB_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${EVA_DB_NAME}
+    volumes:
+      - validated_skills:/data/letta/.skills
+    networks: [data]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   # ===================================================================
   # EDGE
   # ===================================================================
@@ -175,10 +196,13 @@ services:
       # Letta CLI из eva-agent-service и читается локальным App Server.
       - letta_provider_config:/data/letta/lc-local-backend/providers
       - letta_llm_control:/data/llm-control
-      # Letta project skills are discovered in .skills under App Server cwd.
-      - ./skills:/data/letta/.skills:ro
+      # Exact Agent SDK project cwd, populated only by the validating indexer.
+      - validated_skills:/data/letta/.skills:ro
       - ./library:/library:ro
     networks: [agent]
+    depends_on:
+      skill-indexer:
+        condition: service_completed_successfully
     healthcheck:
       # The listener is a WebSocket upgrade endpoint; a TCP connect is the
       # honest liveness signal. eva-agent-service /health proves the
@@ -351,6 +375,8 @@ services:
       EVA_MEMORY_DOCTOR: ${EVA_MEMORY_DOCTOR:-false}
       EVA_HYBRID_RETRIEVAL: ${EVA_HYBRID_RETRIEVAL:-false}
       EVA_DEEP_RECALL: ${EVA_DEEP_RECALL:-false}
+      EVA_CORE_SKILLS: ${EVA_CORE_SKILLS:-false}
+      EVA_SKILL_ROUTER: ${EVA_SKILL_ROUTER:-false}
       EVA_LETTA_ADMIN_CLIENT: ${EVA_LETTA_ADMIN_CLIENT:-false}
       EVA_LETTA_ADMIN_BASE_URL: ${EVA_LETTA_ADMIN_BASE_URL:-}
       EVA_CHECKIN_MORNING_HOUR: ${EVA_CHECKIN_MORNING_HOUR:-9}
@@ -370,6 +396,8 @@ services:
     volumes:
       - ./library:/app/library:ro
       - ./skills:/app/skills:ro
+      # The long-running config subscriber is the single update writer.
+      - validated_skills:/data/letta/.skills
       - letta_provider_config:/data/letta-config/providers
       - letta_llm_control:/data/llm-control
     networks: [edge, data, agent, tools]
@@ -840,6 +868,8 @@ networks:
     driver: bridge
 
 volumes:
+  validated_skills:
+    name: evaself_validated_skills
   postgres_data:
     name: evaself_postgres_data
   valkey_data:

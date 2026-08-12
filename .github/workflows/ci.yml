@@ -612,12 +612,16 @@ jobs:
         working-directory: eva-agent-service
         run: node ../scripts/ci/test-hybrid-retrieval.mjs
 
+      - name: Навыки проходят production semantics на PostgreSQL после 047
+        run: node scripts/ci/test-skills-postgres.mjs
+
       # Откат выполняется ровно тогда, когда что-то уже пошло не так, и
       # проверять его в этот момент поздно. Здесь он прогоняется на
       # заведомо целой базе: назад по всем down, затем снова вперёд.
       - name: Rollback and re-apply (down migrations must actually work)
         run: |
           BEFORE="$(psql -tA -c 'SELECT count(*) FROM schema_migrations')"
+          psql -tAc "SELECT 1 FROM schema_migrations WHERE version='047_skills'" | grep -qx 1 || { echo "::error::047_skills не применена до rollback"; exit 1; }
 
           for f in $(ls -r postgres/migrations/down/*.sql); do
             echo "== down $f"
@@ -625,6 +629,7 @@ jobs:
           done
 
           AFTER="$(psql -tA -c 'SELECT count(*) FROM schema_migrations')"
+          [ "$(psql -tAc "SELECT count(*) FROM schema_migrations WHERE version='047_skills'")" = "0" ] || { echo "::error::down/047_skills.sql не снял версию"; exit 1; }
           COUNT="$(ls postgres/migrations/down/*.sql | wc -l)"
           EXPECTED=$((BEFORE - COUNT))
           if [ "$AFTER" != "$EXPECTED" ]; then
@@ -638,6 +643,7 @@ jobs:
           done
 
           FINAL="$(psql -tA -c 'SELECT count(*) FROM schema_migrations')"
+          psql -tAc "SELECT 1 FROM schema_migrations WHERE version='047_skills'" | grep -qx 1 || { echo "::error::047_skills не восстановлена"; exit 1; }
           if [ "$FINAL" != "$BEFORE" ]; then
             echo "::error::после повторного наката ожидалось $BEFORE записей, получено $FINAL"
             exit 1
@@ -650,7 +656,10 @@ jobs:
           BEGIN
             IF to_regclass('public.admin_users') IS NULL
                OR to_regclass('public.llm_routes') IS NULL
-               OR to_regclass('public.admin_user_notes') IS NULL THEN
+               OR to_regclass('public.admin_user_notes') IS NULL
+               OR to_regclass('public.skill_search_index') IS NULL
+               OR to_regclass('public.skill_routing_state') IS NULL
+               OR to_regclass('public.skill_routing_events') IS NULL THEN
               RAISE EXCEPTION 'после отката и наката схема восстановилась не полностью';
             END IF;
             IF (SELECT count(*) FROM quotas) <> 9 THEN
@@ -765,6 +774,12 @@ jobs:
             --build-arg CADDY_IMAGE="$CADDY_IMAGE" --build-arg CADDY_VERSION="$CADDY_VERSION" admin-ui
           docker build -t evaself/backup-service:ci \
             --build-arg POSTGRES_IMAGE="$POSTGRES_IMAGE" --build-arg POSTGRES_VERSION="$POSTGRES_VERSION" backup-service
+
+      - name: validated_skills isolated volume lifecycle
+        if: needs.changes.outputs.docs_only != 'true'
+        env:
+          VALIDATED_SKILLS_IMAGE: evaself/eva-agent-service:ci
+        run: ./scripts/ci/test-validated-skills-volume.sh
 
       - name: The App Server image really serves the App Server
         if: needs.changes.outputs.docs_only != 'true'

@@ -188,6 +188,11 @@ export class Database {
     return this.poolView;
   }
 
+  /** Dedicated connection for a caller-owned SQL transaction. */
+  async transactionClient(): Promise<pg.PoolClient> {
+    return this.require().connect();
+  }
+
   async withQueryMetrics<T>(
     work: () => Promise<T>,
   ): Promise<{ result: T; queryCount: number }> {

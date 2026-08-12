@@ -27,6 +27,7 @@ export interface RouterServerInput {
   store: RouterStore;
   logger: Logger;
   apiKey: string;
+  embed?: (texts: string[]) => Promise<number[][]>;
 }
 
 export function createRouterServer(input: RouterServerInput): FastifyInstance {
@@ -52,6 +53,15 @@ export function createRouterServer(input: RouterServerInput): FastifyInstance {
       providers: providers.length,
       breakers_open: open,
     };
+  });
+
+  app.post("/embeddings", async (request, reply) => {
+    if (!input.embed) return reply.code(503).send({ error: { message: "embeddings route is not configured", type: "service_unavailable" } });
+    const body = request.body as { input?: unknown };
+    const texts = typeof body?.input === "string" ? [body.input] : Array.isArray(body?.input) && body.input.every(x => typeof x === "string") ? body.input as string[] : null;
+    if (!texts || texts.length > 64) return reply.code(400).send({ error: { message: "input must be a string or up to 64 strings", type: "invalid_request_error" } });
+    const vectors = await input.embed(texts);
+    return { object:"list", data:vectors.map((embedding,index)=>({object:"embedding",index,embedding})) };
   });
 
   /**
