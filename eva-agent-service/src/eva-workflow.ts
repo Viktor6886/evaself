@@ -10,6 +10,7 @@ import type { LlmManager } from "./llm.js";
 import type { Logger } from "./logger.js";
 import type { GraphContextService } from "./memory/graph-context.js";
 import type { ConversationHighlightService } from "./memory/conversation-highlights.js";
+import { decideDeepRecall, type DeepRecall } from "./memory/retrieval/deep-recall.js";
 import type { EpisodeTracker } from "./memory/episodes.js";
 import type { UserProfileService } from "./profile/profile-service.js";
 import type { UserTurnLock } from "./turns/user-turn-lock.js";
@@ -89,6 +90,14 @@ export class EvaWorkflow {
      * у выжимок разговора рядом.
      */
     private readonly episodes?: EpisodeTracker,
+    /**
+     * Deep Recall. Необязателен: без него ход идёт как прежде, на
+     * актуальных данных. Вызывается не на каждом сообщении — решение
+     * принимает детерминированный код, а не модель. Параметр стоит
+     * последним намеренно: вставка в середину списка сдвинула бы все
+     * позиционные аргументы у существующих вызывающих.
+     */
+    private readonly deepRecall?: DeepRecall,
   ) {
     this.taskEvents = new TaskEventService(db);
   }
@@ -187,6 +196,8 @@ export class EvaWorkflow {
       runtime_context_ms: 0,
       profile_check_ms: 0,
       graph_query_ms: 0,
+      // Измеренный размер контекста: сумма фактических размеров уровней.
+      context_characters: 0,
       letta_turn_ms: 0,
       outbox_insert_ms: 0,
       telegram_send_ms: 0,
@@ -404,6 +415,27 @@ export class EvaWorkflow {
             graph_timeout: graph.timedOut,
           });
         }
+        // Обращение к истории — отдельный инструмент со своим бюджетом.
+        // На обычном сообщении решение отрицательное, и поиск не идёт.
+        const recallDecision = this.deepRecall?.active
+          ? decideDeepRecall({
+            message: prompt,
+            contextCandidates: graph?.relevantMemory.length ?? 0,
+          })
+          : null;
+        const recalled = recallDecision?.needed
+          ? await this.deepRecall!.recall({
+            userId: user.id, message: prompt, decision: recallDecision,
+          }).catch(() => null)
+          : null;
+        if (recallDecision?.needed) {
+          this.logger.debug("Deep Recall вызван", {
+            userId: user.id,
+            reason: recallDecision.reason,
+            lines: recalled?.lines.length ?? 0,
+            degraded: recalled?.degraded ?? false,
+          });
+        }
         const context = await this.runtimeContext.build({
           userId: user.id,
           conversationId,
@@ -459,7 +491,17 @@ export class EvaWorkflow {
               this.runtimeContext.wrapUserMessage(
                 context,
                 signal ? `${safetyDirective(signal)}\n\n${prompt}` : prompt,
-                { messageSource: update.kind, crisisLevel: signal?.severity ?? "none" },
+                {
+                  messageSource: update.kind,
+                  crisisLevel: signal?.severity ?? "none",
+                  knowledge: recalled?.lines ?? [],
+                  measure: (levels) => {
+                    // Фактический размер каждого уровня, а не обещание
+                    // уложиться: без измерения бюджет — это намерение.
+                    metrics.context_characters = levels
+                      .reduce((sum, level) => sum + level.characters, 0);
+                  },
+                },
               ),
               {
                 isCancelled: async () =>

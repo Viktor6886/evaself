@@ -193,6 +193,9 @@ export interface Config {
    * Curator пишет только через неё, и включать его отдельно нечем.
    */
   memoryCuratorEnabled: boolean;
+  memoryDoctorEnabled: boolean;
+  hybridRetrievalEnabled: boolean;
+  deepRecallEnabled: boolean;
 
   lavaWebhookUser: string;
   lavaWebhookPassword: string;
@@ -393,6 +396,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     toolApprovalsEnabled: bool("EVA_TOOL_APPROVALS", false),
     temporalMemoryEnabled: bool("EVA_TEMPORAL_MEMORY", false),
     memoryCuratorEnabled: bool("EVA_MEMORY_CURATOR", false),
+    memoryDoctorEnabled: bool("EVA_MEMORY_DOCTOR", false),
+    hybridRetrievalEnabled: bool("EVA_HYBRID_RETRIEVAL", false),
+    deepRecallEnabled: bool("EVA_DEEP_RECALL", false),
 
     lavaWebhookUser: str("LAVA_WEBHOOK_USER"),
     lavaWebhookPassword: str("LAVA_WEBHOOK_PASSWORD"),
@@ -450,6 +456,34 @@ export function configWarnings(config: Config): string[] {
     warnings.push(
       "EVA_MEMORY_CURATOR включён, а EVA_TEMPORAL_MEMORY выключен: "
         + "кандидатов некуда записывать, Curator не собирается",
+    );
+  }
+  // Diagnostics without the temporal layer has nothing to diagnose: the
+  // versions, evidence and conflicts it reads on are not written at all.
+  if (config.memoryDoctorEnabled && !config.temporalMemoryEnabled) {
+    warnings.push(
+      "EVA_MEMORY_DOCTOR включён, а EVA_TEMPORAL_MEMORY выключен: "
+        + "версий, доказательств и конфликтов ещё нет, диагностировать нечего",
+    );
+  }
+  if (config.memoryDoctorEnabled && !config.bullmqJobsEnabled) {
+    warnings.push(
+      "EVA_MEMORY_DOCTOR включён, а EVA_BULLMQ_JOBS выключен: "
+        + "диагностика выполняется только как фоновое задание и сейчас не запускается",
+    );
+  }
+  // Deep Recall — это обращение к истории через тот же гибридный поиск.
+  // Без него инструмент объявлен, но искать ему нечем.
+  if (config.deepRecallEnabled && !config.hybridRetrievalEnabled) {
+    warnings.push(
+      "EVA_DEEP_RECALL включён, а EVA_HYBRID_RETRIEVAL выключен: "
+        + "инструменту нечем искать, обращение к истории не работает",
+    );
+  }
+  if (config.hybridRetrievalEnabled && !config.temporalMemoryEnabled) {
+    warnings.push(
+      "EVA_HYBRID_RETRIEVAL включён, а EVA_TEMPORAL_MEMORY выключен: "
+        + "поиск «на дату» работает по снимку, а версий фактов ещё нет",
     );
   }
   if (config.memoryCuratorEnabled && !(config.bullmqJobsEnabled && config.agentJobsEnabled)) {

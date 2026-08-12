@@ -10,13 +10,12 @@
 
 ```
 CURRENT_BATCH: 13
-CURRENT_STEP:  17
-BRANCH:        claude/evaself-protocols-flaky-ci-lduycg
-STATUS:        в работе
-LAST_COMMIT:   —
+CURRENT_STEP:  18
+BRANCH:        batch/13-memory-doctor-hybrid-retrieval
+STATUS:        на ревью
+LAST_COMMIT:   e323f55
 BLOCKER:       —
-NEXT:          смержить исправление протоколов и плавающего теста, затем
-               начать batch 13 (шаги 17–18)
+NEXT:          дождаться обязательных проверок в PR batch 13 и смержить
 ```
 
 Значения полей:
@@ -55,7 +54,7 @@ Batch — единица работы: одна ветка, один pull reques
 | 10 | 12–13 | P1 | выполнен | [#148](https://github.com/Viktor6886/evaself/pull/148) |
 | 11 | 14 | P2 | выполнен | [#149](https://github.com/Viktor6886/evaself/pull/149) |
 | 12 | 15–16 | P2 | выполнен | [#150](https://github.com/Viktor6886/evaself/pull/150) |
-| 13 | 17–18 | P2 | не начат | — |
+| 13 | 17–18 | P2 | в работе (шаг 17 выполнен) | — |
 | 14 | 19–20 | P2 | не начат | — |
 | 15 | 21–22 | P2 | не начат | — |
 | 16 | 23–24 | P3 | не начат | — |

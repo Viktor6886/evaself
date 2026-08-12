@@ -7,6 +7,11 @@ import { shouldSuppressProfileQuestion } from "../profile/profile-completeness.j
 import { localNow } from "../time/local-date-time.js";
 import { appendRoutingMarker, type RoutingMarkerClaims } from "../router/routing-marker.js";
 import { TaskEventService } from "../tasks/task-event-service.js";
+import {
+  fitLevel,
+  LEVEL_BUDGETS,
+  type LevelMeasurement,
+} from "./context-levels.js";
 
 export interface RuntimeContext {
   userId: number;
@@ -34,6 +39,11 @@ export interface RuntimeContext {
     profileCheckMs: number;
     cacheHit: boolean;
   };
+  /**
+   * Фактический размер каждого уровня контекста. Заполняется при
+   * сборке сообщения: до неё измерять нечего.
+   */
+  levels?: LevelMeasurement[];
 }
 
 export type MessageSource = "text" | "voice" | "image" | "document" | "unsupported";
@@ -165,6 +175,12 @@ export class RuntimeContextBuilder {
       crisisLevel?: "none" | "low" | "medium" | "high" | "critical";
       internalOperationType?: string;
       correlationId?: string;
+      /** Строки уровня знаний: их поставляет гибридный поиск. */
+      knowledge?: readonly string[];
+      /** Строки активных навыков: их поставит роутер навыков шага 20. */
+      skills?: readonly string[];
+      /** Куда сложить измеренные размеры уровней. */
+      measure?: (levels: LevelMeasurement[]) => void;
     } = {},
   ): string {
     const fields: Array<[string, string | null]> = [
@@ -197,19 +213,49 @@ export class RuntimeContextBuilder {
         "vector_protocol: черновик цели активируется только после явного подтверждения; действие должно иметь артефакт, первый физический шаг, время, длительность, if-then и критерий завершения; после действия спроси о факте, а при отклонении меняй один элемент и один следующий малый шаг без обвинений",
       );
     }
-    if (context.relevantMemory.length > 0) {
-      lines.push(
-        "relevant_memory:",
-        ...context.relevantMemory.map((item) => `  - ${escapeContextValue(item)}`),
-      );
-    }
-    if (context.taskActivity?.length) {
-      lines.push(
-        "recent_task_events:",
-        ...context.taskActivity.slice(0, 5).map((item) => `  - ${escapeContextValue(item)}`),
-      );
-    }
+    // Уровни собираются каждый под своим бюджетом. Общий предел ниже
+    // остаётся страховкой, но первым режет не он: иначе длинная память
+    // выдавливала бы знания, а знания — события задач.
+    const measurements: LevelMeasurement[] = [];
+    // Навыки собирает роутер навыков шага 20, и сегодня их набор пуст.
+    // Уровень всё равно измеряется: ноль — это измерение, а пропущенный
+    // уровень означал бы «не считали», и превышение бюджета навыков
+    // всплыло бы только на живом ходу.
+    const skills = fitLevel("skills", options.skills ?? []);
+    measurements.push(skills.measurement);
+    if (skills.lines.length > 0) lines.push("active_skills:", ...skills.lines);
+
+    const memory = fitLevel(
+      "memory",
+      context.relevantMemory.map((item) => `  - ${escapeContextValue(item)}`),
+    );
+    measurements.push(memory.measurement);
+    if (memory.lines.length > 0) lines.push("relevant_memory:", ...memory.lines);
+
+    const knowledge = fitLevel(
+      "knowledge",
+      (options.knowledge ?? []).map((item) => `  - ${escapeContextValue(item)}`),
+    );
+    measurements.push(knowledge.measurement);
+    if (knowledge.lines.length > 0) lines.push("recalled_knowledge:", ...knowledge.lines);
+
+    const conversation = fitLevel(
+      "conversation",
+      (context.taskActivity ?? []).slice(0, 5).map((item) => `  - ${escapeContextValue(item)}`),
+    );
+    measurements.push(conversation.measurement);
+    if (conversation.lines.length > 0) lines.push("recent_task_events:", ...conversation.lines);
     const limit = Math.max(1_000, this.options.maxContextCharacters ?? 6_000);
+    measurements.unshift({
+      level: "always_on",
+      characters: lines.join("\n").length - skills.measurement.characters
+        - memory.measurement.characters - knowledge.measurement.characters
+        - conversation.measurement.characters,
+      budget: LEVEL_BUDGETS.always_on,
+      dropped: 0,
+    });
+    context.levels = measurements;
+    options.measure?.(measurements);
     // Лимит режет переменную часть: память и подсказки бывают длинными.
     // Указания о форме ответа ниже — фиксированные и обрезке не подлежат:
     // потеряв их, Ева снова начнёт проговаривать план и слать сырые

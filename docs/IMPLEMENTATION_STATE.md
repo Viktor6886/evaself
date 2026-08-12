@@ -115,6 +115,11 @@
 | Детектор эпизодов | Границы разговора без вызова модели | `src/memory/episodes.ts`, таблица `memory_episodes` | пять границ, `EpisodeTracker` не задерживает ответ; краткое содержание и ссылки берутся из `conversation_highlights`, второго разбора переписки нет; `EVA_MEMORY_CURATOR` | обяз. |
 | Memory Curator | Извлечение долговременных фактов из эпизода | `src/memory/curator/service.ts`, `schema.ts`, таблица `memory_curator_runs` | спецификация agent job шага 8, строгая схема, дедуп `keep_last_if_active`, режим `preview`; кандидатов пишет код | обяз. |
 | Контроль памяти | Просмотр, подтверждение, исправление, удаление в Mini App | `src/memory/curator/user-control.ts`, маршруты `/public/memory*` | исправление — новая версия; удаление чистит версии, evidence, конфликты, синонимы, связи | обяз. |
+| Memory Doctor | Диагностика памяти без права записи: 13 проверок, отчёт по разделам, предложения | `src/memory/doctor/checks.ts`, `service.ts`, `gateway.ts`, таблицы `memory_doctor_reports`, `memory_doctor_actions` | `run()` только заданием очереди; применяет предложение человек — через temporal-версию или объединение сущностей, со снимком и откатом; `EVA_MEMORY_DOCTOR` | обяз. |
+| Векторы памяти | Embeddings узлов, фактов и эпизодов; переиндексация при смене модели | `src/memory/retrieval/embeddings.ts`, таблицы `memory_embeddings`, `memory_embedding_reindex` | вектор считает LLM Router (`src/router/embeddings.ts`); отпечаток содержания не даёт пересчитывать неизменившееся; смена модели — фоновая переиндексация, старые векторы живут до её конца | обяз. |
+| Гибридный поиск | Единственный контур: FTS + триграммы + вектор + граф | `src/memory/retrieval/hybrid.ts` | владелец — первым условием в каждом источнике; глубина ≤ 3, ≤ 50 узлов и 100 связей; таймаут = деградация, а не отказ; `EVA_HYBRID_RETRIEVAL` | обяз. |
+| Deep Recall | Отдельный инструмент обращения к истории | `src/memory/retrieval/deep-recall.ts` | решение детерминированное: явный вопрос о прошлом, ссылка на время, нехватка контекста; свой бюджет; `EVA_DEEP_RECALL` | обяз. |
+| Уровни контекста | Пять уровней с отдельными бюджетами и измерением | `src/runtime/context-levels.ts` | `fitLevel()` режет по границе строки и считает выброшенное; размеры уходят в метрики хода | обяз. |
 | Highlights | Компактные выжимки диалога | `src/memory/conversation-highlights.ts`, таблица `conversation_highlights` | не смешивается с памятью и KB | расш. |
 | Заметки | Хранилище заметок в PostgreSQL | таблица `eva_notes`, `src/tools/core-tools.ts` | инструменты названы `LIGHTRAG_*` — псевдонимы совместимости, LightRAG нет | расш. |
 | Каталог инструментов | Сборка tool-схем | `src/tools/tool-kit.ts`, `core-tools.ts`, `task-tools.ts` | `ToolBuilder`, `objectSchema()` | обяз. |
@@ -195,9 +200,10 @@
   на настоящей схеме в CI (`scripts/ci/test-memory-backfill.mjs`: два прогона,
   идемпотентность, сохранение владельца), но на данных конкретной установки
   его запускает человек — заданием `memory_temporal_backfill`.
-- **Векторный поиск по памяти** — его нет намеренно: дедупликация и разрешение
-  сущностей шага 15 работают на точном поиске, синонимах и FTS. Embeddings —
-  шаг 18.
+- **Наполнение векторного поиска на работающей установке** — код шага 18 есть,
+  `EVA_HYBRID_RETRIEVAL` и `EVA_DEEP_RECALL` выключены, и до их включения
+  `memory_embeddings` не пополняется. Дедупликация и разрешение сущностей
+  шага 15 продолжают работать на точном поиске, синонимах и FTS.
 - **Прогоны Curator в production** — механизм шага 16 собран, но требует трёх
   включённых флагов сразу (`EVA_BULLMQ_JOBS`, `EVA_AGENT_JOBS`,
   `EVA_MEMORY_CURATOR`) и `EVA_TEMPORAL_MEMORY`. Сочетание проверяется
