@@ -37,11 +37,11 @@ export const SUBSYSTEM_SECTIONS: readonly SubsystemSection[] = [
   {
     id: "skills",
     title: "Навыки",
-    implemented: false,
+    implemented: true,
     plannedStep: "19 — ядро навыков, 20 — маршрутизатор навыков",
-    today: "Каталога навыков нет. Тип артефакта `skill` в реестре версий заведён "
-      + "заранее (шаг 13), но ни один навык через него не публикуется и в ход не "
-      + "попадает: сборкой контекста навыки пока не запрашиваются.",
+    today: "Ядро загружается штатным project source Letta из `.skills`; маршрутизируемые "
+      + "версии синхронизируются с ArtifactRegistry в tenant-scoped PostgreSQL hybrid index. "
+      + "Решения, sticky state, latency и вызовы reranker сохраняются без сырого текста.",
     willShow: [
       "каталог: имя, версия, статус, хэш содержимого",
       "ошибки индексации и статистика выбора",

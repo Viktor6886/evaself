@@ -220,3 +220,11 @@
   Docker и media-service).
 - **Полное зеркало переписки** — механизм есть, выключен
   (`EVA_CONVERSATION_MIRROR_ENABLED=false`).
+
+
+## Навыки (Batch 14, на ревью)
+
+- `ArtifactRegistry.publishedSkills()` и `syncIndexedSkill()` — каноническая публикация и атомарная проекция в `skill_search_index`; invalid версии получают durable disabled/error status.
+- `src/skills/index.ts` — CoreSkillCatalog, tenant/environment-safe hybrid PostgresSkillRepository и SkillRouter; RuntimeContextBuilder остаётся единственным финальным сборщиком, canonical runId фиксирует core+routed usages.
+- `src/admin/skill-operations.ts`, `/api/admin/v1/skills/operations` — защищённые, аудитируемые агрегаты latency/reranker/reason/selected version+score/sticky/fallback без сырого текста и conversation IDs; Admin UI показывает durable данные.
+- Флаги `EVA_CORE_SKILLS`, `EVA_SKILL_ROUTER` выключены по умолчанию; sticky/events/search schema — migration 047; `scripts/ci/test-skills-postgres.mjs` проверяет production semantics на настоящем PostgreSQL и общий down/up явно проверяет 047.

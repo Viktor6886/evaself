@@ -26,6 +26,7 @@ import { MemoryTemplateService } from "./memory-template-service.js";
 import { ToolApprovalService } from "./tool-approvals.js";
 import { McpServerPolicyRepository, ToolGatewayStateStore } from "../tools/gateway.js";
 import { createCanonicalToolManifestRegistry } from "../agent-tools.js";
+import { SkillOperationsService } from "./skill-operations.js";
 import { TurnOperationsService } from "./turn-operations.js";
 import { DeleteGuard } from "../letta/delete-guard.js";
 import { DisabledAdminPlane } from "../letta/admin-client.js";
@@ -177,6 +178,7 @@ async function main(): Promise<void> {
     integrations,
     users,
     securityAudit: new SecurityAuditService({ env: process.env, db: pool }),
+    skillOperations: new SkillOperationsService(registryDb),
     // Единый реестр артефактов. Артефакты общесистемные: владельца среди
     // пользователей Евы у них нет, поэтому граница арендатора к ним не
     // применяется, а доступ ограничен ролью маршрута и записан в аудит.
