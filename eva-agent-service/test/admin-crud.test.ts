@@ -23,6 +23,7 @@ import { ToolApprovalService } from "../dist/admin/tool-approvals.js";
 import { ToolGatewayStateStore, ToolManifestRegistry } from "../dist/tools/gateway.js";
 import { AgentToolFactory, createCanonicalToolManifestRegistry } from "../dist/agent-tools.js";
 import { TurnOperationsService } from "../dist/admin/turn-operations.js";
+import { SkillOperationsService } from "../dist/admin/skill-operations.js";
 import { SUBSYSTEM_SECTIONS, subsystemPayload } from "../dist/admin/subsystem-status.js";
 import { DeleteGuard } from "../dist/letta/delete-guard.js";
 import { DisabledAdminPlane } from "../dist/letta/admin-client.js";
@@ -511,7 +512,7 @@ test("разделы отсутствующих подсистем не выда
     ["skills", "research", "evals", "extensions"],
   );
   for (const section of SUBSYSTEM_SECTIONS) {
-    assert.equal(section.implemented, false);
+    assert.equal(section.implemented, section.id === "skills");
     // Номер шага обязателен: «когда-нибудь» невозможно проверить.
     assert.match(section.plannedStep, /\d+/);
     const payload = subsystemPayload(section) as { items: unknown[]; status: { detail: string } };
@@ -573,12 +574,33 @@ function harness(db: FakeDb, options: HarnessOptions = {}) {
     },
     config: {}, secrets: {}, health: {}, operations: {}, providers: {},
     llmRouter: {}, stt: {}, integrations: {}, users: {},
+    skillOperations: new SkillOperationsService({ query: async (sql: string, values: unknown[] = []) => {
+      assert.match(sql, /FROM skill_routing_events/);
+      assert.deepEqual(values, [24, null]);
+      assert.doesNotMatch(sql, /message|source|conversation_id\s+AS/);
+      return { rows: [{ events: 4, latency_avg_ms: 30, latency_p50_ms: 20, latency_p95_ms: 80, latency_p99_ms: 90, latency_lt_25: 2, latency_25_99: 2, latency_100_499: 0, latency_gte_500: 0, reranker_count: 1, reranker_ratio: .25, sticky_count: 2, fallback_count: 1, reasons: { active: 2, hybrid: 2 }, selected: [{ id: "focus", version_id: 7, version: 2, selections: 3, avg_score: .8 }] }] };
+    } }),
     events: { publish: async () => undefined },
     logger: { debug() {}, info() {}, warn() {}, error() {} },
     readiness: async () => true,
   } as never);
   return { app, audits, guards };
 }
+
+test("protected skills operations endpoint returns only aggregate durable routing data", async () => {
+  const { app, audits } = harness(new FakeDb(), { role: "viewer" });
+  await app.ready();
+  const response = await app.inject({ method: "GET", url: "/api/admin/v1/skills/operations?hours=24", headers: { cookie: "eva_admin=session-1" } });
+  assert.equal(response.statusCode, 200, response.body);
+  const payload = JSON.parse(response.body);
+  assert.equal(payload.latency_ms.p95, 80);
+  assert.equal(payload.reranker.ratio, .25);
+  assert.equal(payload.selected[0].version_id, 7);
+  assert.equal(payload.fallback_count, 1);
+  assert.equal("message" in payload, false);
+  assert.ok(audits.some((entry) => entry.operation.includes("skills/operations")));
+  await app.close();
+});
 
 test("tool selector writer is flag-gated, owner/admin-only, confirmed, sudo-protected and audited", async () => {
   const off = harness(new FakeDb(), { gatewayFlag: "0" });

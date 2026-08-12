@@ -32,6 +32,7 @@ export interface RuntimeContext {
   nextResult: string | null;
   nextStep: string | null;
   relevantMemory: string[];
+  skillLines?: string[];
   llmQualityMode?: "economy" | "auto" | "quality";
   taskActivity?: string[];
   metrics?: {
@@ -89,6 +90,7 @@ export class RuntimeContextBuilder {
       vectorGoalsEnabled?: boolean;
       now?: () => Date;
       routingMarkerSecret?: string;
+      skillContext?: (input: { userId: number; conversationId: string; purpose: string; message: string; turnId?: string; scenarioComplete?: boolean }) => Promise<string[]>;
     },
   ) {
     this.languageResolver = new LanguageResolver(db);
@@ -102,6 +104,8 @@ export class RuntimeContextBuilder {
     languageMessage?: string;
     relevantMemory?: string[];
     detectLanguage?: boolean;
+    /** Canonical TurnLifecycle run_id; never synthesize one in context code. */
+    turnId?: string;
   }): Promise<RuntimeContext> {
     const started = performance.now();
     const loaded = await this.load(input.userId, input.conversationId);
@@ -132,6 +136,7 @@ export class RuntimeContextBuilder {
       : profileHintFrom(row);
     const profileCheckMs = elapsed(profileStarted);
     const taskActivity = await this.taskEvents.contextLines(input.userId).catch(() => []);
+    const skillLines = await this.options.skillContext?.({ userId: input.userId, conversationId: input.conversationId, purpose: row.purpose, message: input.userMessage, turnId: input.turnId }).catch(() => []);
     return {
       userId: Number(row.user_id),
       telegramId: Number(row.telegram_id),
@@ -159,12 +164,20 @@ export class RuntimeContextBuilder {
       relevantMemory: (input.relevantMemory ?? []).slice(0, 5),
       llmQualityMode: row.llm_quality_mode,
       taskActivity,
+      skillLines,
       metrics: {
         runtimeContextMs: elapsed(started),
         profileCheckMs,
         cacheHit: loaded.cacheHit,
       },
     };
+  }
+
+  /** Canonical lifecycle event; callers invoke it only after an explicit workflow/tool outcome. */
+  async completeSkillScenario(input: {
+    userId: number; conversationId: string; purpose: string; turnId?: string;
+  }): Promise<void> {
+    await this.options.skillContext?.({ ...input, message: "", scenarioComplete: true });
   }
 
   wrapUserMessage(
@@ -221,7 +234,7 @@ export class RuntimeContextBuilder {
     // Уровень всё равно измеряется: ноль — это измерение, а пропущенный
     // уровень означал бы «не считали», и превышение бюджета навыков
     // всплыло бы только на живом ходу.
-    const skills = fitLevel("skills", options.skills ?? []);
+    const skills = fitLevel("skills", [...(context.skillLines ?? []), ...(options.skills ?? [])]);
     measurements.push(skills.measurement);
     if (skills.lines.length > 0) lines.push("active_skills:", ...skills.lines);
 

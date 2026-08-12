@@ -111,6 +111,8 @@ export function validateArtifactBody(kind: ArtifactKind, body: unknown): Validat
       if (typeof record.source !== "string" || !record.source) {
         fail("skill.source", "нужна строка `source`");
       }
+      if (typeof record.purpose !== "string" || typeof record.applicability !== "string" || !Number.isInteger(record.order)) fail("skill.metadata", "нужны purpose, applicability и целый order");
+      if ("tools" in record || "code" in record || "executable" in record) fail("skill.declarative", "навык не может содержать код или расширять инструменты");
       checks.push({ name: "skill.name", ok: true });
       break;
     }
