@@ -220,7 +220,20 @@ test("timeout aborts work but retains its lease until abort-ignoring work actual
   settle(); await killing; assert.equal(leases.size, 0);
 });
 
-test("heartbeat keeps abort-ignoring work contained beyond multiple initial lease TTLs and stops after settlement", async () => {
+// Часы здесь виртуальные: и таймер heartbeat внутри шлюза, и срок аренды в
+// поддельном хранилище читают одно время, которое двигает только тест. На
+// настоящих таймерах проверка мерила загрузку машины, а не поведение
+// heartbeat: под нехваткой CPU в сборке образа планировщик задерживал тик
+// на 10 мс дольше, чем весь TTL в 30 мс, аренда «истекала», и kill законно
+// проходил сквозь незавершённую работу — CI на `main` падал на этом одном
+// тесте из 735. Удлинять TTL нельзя: тогда и проверялась бы не выдержка
+// heartbeat, а величина паузы.
+test("heartbeat keeps abort-ignoring work contained beyond multiple initial lease TTLs and stops after settlement", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  // setImmediate остаётся настоящим: он даёт микрозадачам обещаний шлюза
+  // выполниться между тиками виртуальных часов.
+  const drain = () => new Promise((resolve) => setImmediate(resolve));
+  const advance = async (ms: number) => { t.mock.timers.tick(ms); await drain(); };
   let enabled = true; let expiresAt = 0; let released = false; let renewals = 0;
   const ownerId = "00000000-0000-4000-8000-000000000020";
   const store = {
@@ -242,13 +255,25 @@ test("heartbeat keeps abort-ignoring work contained beyond multiple initial leas
   const { ToolGateway } = await import("../dist/tools/gateway.js");
   const gateway = new ToolGateway(registry, { stateStore: store as never, leaseTtlMs: 30 });
   let settle!: () => void;
-  await assert.rejects(gateway.execute("write", async () => { await new Promise<void>((resolve) => { settle = resolve; }); }), /timed out/i);
+  const execution = assert.rejects(
+    gateway.execute("write", async () => { await new Promise<void>((resolve) => { settle = resolve; }); }),
+    /timed out/i,
+  );
+  await drain();            // аренда взята, heartbeat поставлен
+  await advance(5);         // истёк timeoutMs, работа продолжает игнорировать abort
+  await execution;
   let killed = false; const killing = gateway.kill("write").then(() => { killed = true; });
-  await new Promise((resolve) => setTimeout(resolve, 100));
+  await drain();
+  for (let tick = 0; tick < 10; tick += 1) await advance(10);
+  // 105 мс виртуального времени — три с половиной начальных TTL: без продления
+  // аренда истекла бы на 30 мс и kill прошёл бы насквозь.
+  assert.ok(Date.now() > 3 * 30, `expected to outlive multiple TTLs, virtual clock is ${Date.now()}`);
   assert.equal(killed, false); assert.ok(renewals >= 3, `expected multiple renewals, got ${renewals}`);
-  settle(); await killing;
+  settle();
+  for (let tick = 0; tick < 50 && !killed; tick += 1) await advance(1);
+  await killing; assert.equal(killed, true);
   const renewalsAtSettlement = renewals;
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  await advance(200);
   assert.equal(renewals, renewalsAtSettlement, "heartbeat timer leaked after work settled");
 });
 
