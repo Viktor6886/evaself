@@ -167,6 +167,8 @@ test("каждая проверка объявлена в списке, назы
 
 test("отчёт содержит раздел на каждый тип проблемы, включая пустые и неприменимые", async () => {
   const db = new DoctorFakeDb();
+  // Таблица векторов в этом наборе не заведена: проверка обязана назвать
+  // себя неприменимой, а не отчитаться нулём находок.
   db.responses.set("contradictions", [
     { conflict_id: 5, node_id: 12, fact_key: "city", kind: "contradiction", significance: "high" },
   ]);
@@ -177,7 +179,8 @@ test("отчёт содержит раздел на каждый тип проб
   // Пустая проверка — это `checked` с нулём находок, а не отсутствие раздела.
   const empty = report.sections.find((section) => section.check === "duplicate_nodes");
   assert.deepEqual([empty?.status, empty?.findings], ["checked", 0]);
-  // Осиротевшие embeddings до шага 18 неприменимы, а не «ничего не нашли».
+  // Проверка, чьей таблицы нет, объявляется неприменимой, а не пустой:
+  // «ничего не нашли» и «нечем искать» — разные утверждения.
   const orphan = report.sections.find((section) => section.check === "orphan_embeddings");
   assert.equal(orphan?.status, "not_applicable");
   assert.match(String(orphan?.reason), /memory_embeddings/);

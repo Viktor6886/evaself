@@ -14,7 +14,11 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/../lib.sh"
 
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+# Уборка не решает исход проверки. `git` мог оставить в `.git` фоновую
+# работу (`gc --auto`), и тогда `rm -rf` спотыкается о «Directory not
+# empty» уже ПОСЛЕ того, как все сценарии прошли, — упавший каталог
+# превращался в упавший CI на ровном месте.
+trap 'rm -rf "$WORK" 2>/dev/null || true' EXIT
 failures=0
 
 check() {

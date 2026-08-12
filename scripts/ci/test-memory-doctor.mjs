@@ -177,7 +177,17 @@ async function main() {
        VALUES ($1, 'CI-цель', 'active', current_date - 30, true)`,
       [dirty],
     );
-    // 11 и 12. Расхождение с Letta и раздутая проекция блока.
+    // 11. Осиротевший вектор: узел снят, вектор остался.
+    await client.query(
+      `INSERT INTO memory_embeddings (
+         user_id, subject_kind, subject_id, model, dimension, embedding_version,
+         content_hash, embedding
+       ) VALUES ($1, 'node', $2, 'ci-embedding', 3, 1, $3, '[0.1,0.2,0.3]'::vector)
+       ON CONFLICT DO NOTHING`,
+      [dirty, archived, createHash("sha256").update("ci-orphan").digest("hex")],
+    );
+
+    // 12 и 13. Расхождение с Letta и раздутая проекция блока.
     await client.query(
       `INSERT INTO letta_memory_block_sync (user_id, agent_id, label, desired_value, status, updated_at)
        VALUES ($1, 'ci-agent', 'current_state', $2, 'failed', now() - interval '2 hours')
@@ -200,17 +210,15 @@ async function main() {
       "duplicate_nodes", "semantic_duplicates", "contradictions", "stale_facts",
       "wrong_version_for_time", "low_confidence", "missing_evidence", "stale_goals",
       "oversized_core_memory", "privacy_mismatch", "lost_graph_links", "letta_divergence",
+      // Таблица векторов появилась шагом 18, и тринадцатая проверка стала
+      // применимой: осиротевший вектор здесь заведён намеренно.
+      "orphan_embeddings",
     ];
     for (const check of expected) {
       const section = byCheck.get(check);
       assert(section?.status === "checked", `проверка ${check} выполнена (${section?.status})`);
       assert(section.findings > 0, `проверка ${check} нашла внесённый дефект`);
     }
-    // Единственная проверка, чья таблица появится шагом 18.
-    assert(
-      byCheck.get("orphan_embeddings")?.status === "not_applicable",
-      "orphan_embeddings без таблицы embeddings объявлена неприменимой",
-    );
     assert(report.reportId !== null, "отчёт сохранён");
 
     // Каждая находка ссылается на конкретные записи.
