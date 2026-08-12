@@ -26,7 +26,7 @@
 
 ## Batch 12 — шаги 15–16
 - Ветка: `batch/12-temporal-memory-curator` · PR: [#150](https://github.com/Viktor6886/evaself/pull/150) ·
-  Дата: 2026-08-11 · Статус: выполнен
+  Дата: 2026-08-11 · Статус: выполнен (merge `5f86522`)
 
 ### Шаг 15 — Temporal-память: версии, evidence и разрешение сущностей
 - Итог: существующие `memory_nodes`/`memory_edges` расширены temporal-полями,
