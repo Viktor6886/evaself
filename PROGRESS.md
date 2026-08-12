@@ -1,4 +1,4 @@
-# PROGRESS
+﻿# PROGRESS
 
 Оперативное состояние roadmap. Единственный источник истины о том, где работа
 остановилась. Агент читает этот файл первым и обновляет его после каждого шага.
@@ -9,13 +9,13 @@
 ## Состояние
 
 ```
-CURRENT_BATCH: 14
-CURRENT_STEP:  19
-BRANCH:        batch/14-skill-core-router
-STATUS:        на ревью
-LAST_COMMIT:   c0de97a
+CURRENT_BATCH: 15
+CURRENT_STEP:  21
+BRANCH:        —
+STATUS:        не начат
+LAST_COMMIT:   3007144
 BLOCKER:       —
-NEXT:          Провести независимый review durable completion через Tool Gateway/EffectJournal
+NEXT:          начать batch 15 (шаги 21–22) от актуального main
 ```
 
 Значения полей:
