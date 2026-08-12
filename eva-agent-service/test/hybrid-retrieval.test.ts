@@ -161,6 +161,14 @@ test("уровни контекста имеют свои бюджеты и из
   assert.ok(fitted.measurement.dropped > 0, "выброшенные строки посчитаны, а не потеряны молча");
   assert.equal(fitted.lines.length + fitted.measurement.dropped, long.length);
 
+  // Пустой уровень тоже измеряется: ноль — это измерение, а пропущенный
+  // уровень означал бы «не считали».
+  const empty = fitLevel("skills", []);
+  assert.deepEqual(
+    [empty.measurement.level, empty.measurement.characters, empty.measurement.budget],
+    ["skills", 0, LEVEL_BUDGETS.skills],
+  );
+
   const measurements = [fitted.measurement, fitLevel("knowledge", ["короткая"]).measurement];
   assert.equal(totalCharacters(measurements), measurements[0]!.characters + measurements[1]!.characters);
   assert.deepEqual(overBudget(measurements), [], "уложившиеся уровни не объявляются превышенными");

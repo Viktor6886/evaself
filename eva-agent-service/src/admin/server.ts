@@ -20,6 +20,10 @@ import type { ArtifactRegistry } from "../artifacts/registry.js";
 import type { AgentDirectoryService } from "./agent-directory.js";
 import type { ConversationToolSelectorService } from "./conversation-tool-selectors.js";
 import { registerArtifactRoutes } from "./artifact-routes.js";
+import {
+  registerMemoryDoctorRoutes,
+  type MemoryDoctorRouteContext,
+} from "./memory-doctor-routes.js";
 import { registerCrudRoutes } from "./crud-routes.js";
 import type { MemoryTemplateService } from "./memory-template-service.js";
 import type { ToolApprovalService } from "./tool-approvals.js";
@@ -86,6 +90,7 @@ export interface AdminServerServices {
   retention?: { preview(settings: Record<string, unknown>): Promise<unknown> };
   /** Единый реестр артефактов. Отсутствует — раздел просто не появляется. */
   artifacts?: ArtifactRegistry;
+  memoryDoctor?: MemoryDoctorRouteContext;
   /**
    * Полный административный CRUD (шаг 12). Регистрируется целиком или не
    * регистрируется вовсе: половина разделов хуже, чем ни одного, — по
@@ -483,6 +488,13 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
         await services.audit.annotate(context.audit.id, details);
       },
     });
+  }
+
+  // Memory Doctor (шаг 17). Маршруты появляются только вместе с самой
+  // диагностикой: без слоя заданий её нечем запустить, и объявлять
+  // маршрут, который гарантированно откажет, незачем.
+  if (services.memoryDoctor) {
+    registerMemoryDoctorRoutes(app, services.memoryDoctor);
   }
 
   // Полный административный CRUD (шаг 12). Флаг по умолчанию выключен:

@@ -5,6 +5,8 @@
 
 BEGIN;
 
+DELETE FROM job_schedules WHERE code = 'memory_doctor_sweep';
+
 DROP TABLE IF EXISTS memory_doctor_actions;
 DROP TABLE IF EXISTS memory_doctor_reports;
 

@@ -26,6 +26,7 @@ class DoctorFakeDb {
   readonly blocks = new Map<string, Record<string, unknown>>();
   readonly recorded: Array<Record<string, unknown>> = [];
   present = new Set<string>();
+  sweepRows: Rows = [];
   responses = new Map<string, Rows>();
   failing = new Set<string>();
 
@@ -36,6 +37,7 @@ class DoctorFakeDb {
       if (this.failing.has(check)) throw new Error("check failed");
       return this.result(this.responses.get(check) ?? []);
     }
+    if (sql.includes("WITH last_report AS")) return this.result(this.sweepRows);
     if (sql.includes("to_regclass")) {
       const table = String(values[0]).replace("public.", "");
       return this.result([{ present: this.present.has(table) }]);
@@ -108,6 +110,10 @@ class DoctorFakeDb {
   }
 
   async withUserScope<T>(_scope: unknown, work: () => Promise<T>): Promise<T> {
+    return await work();
+  }
+
+  async withSystemScope<T>(_label: string, work: () => Promise<T>): Promise<T> {
     return await work();
   }
 
@@ -314,6 +320,29 @@ test("выключенный флаг даёт честный отказ, а н�
   assert.equal(report.reportId, null);
   assert.ok(report.sections.every((section) => section.reason === "memory_doctor_disabled"));
   assert.equal(db.calls.length, 0);
+});
+
+test("плановый обход выбирает повод по состоянию памяти, а не по вызывающему", async () => {
+  const db = new DoctorFakeDb();
+  db.sweepRows = [
+    { user_id: "1", trigger: "conflict_detected" },
+    { user_id: "2", trigger: "memory_growth" },
+    { user_id: "3", trigger: "scheduled" },
+  ];
+  const due = await service(db).sweep();
+
+  assert.deepEqual(due, [
+    { userId: 1, trigger: "conflict_detected" },
+    { userId: 2, trigger: "memory_growth" },
+    { userId: 3, trigger: "scheduled" },
+  ]);
+  const call = db.calls.at(-1)!;
+  // Обход идёт поперёк пользователей и объявляет это, а не обходит молча.
+  assert.ok(call.sql.includes("-- tenant: system"));
+  // Повод выбирается в самом запросе: противоречие важнее роста объёма,
+  // рост — важнее смены версии набора.
+  assert.ok(call.sql.indexOf("conflict_detected") < call.sql.indexOf("memory_growth"));
+  assert.ok(call.sql.indexOf("memory_growth") < call.sql.indexOf("schema_version_changed"));
 });
 
 test("намерение ставится на очередь памяти и не даёт двух диагностик одного человека", () => {

@@ -42,6 +42,12 @@ import {
 
 export const MEMORY_DOCTOR_JOB_TYPE = "memory_doctor";
 
+/** Плановый обход: выбирает, кому и по какому поводу нужна диагностика. */
+export const MEMORY_DOCTOR_SWEEP_JOB_TYPE = "memory_doctor_sweep";
+
+/** Насколько должна вырасти память, чтобы рост сам стал поводом. */
+export const MEMORY_GROWTH_NODES = 50;
+
 /**
  * Откуда пришёл запуск. Список закрыт и совпадает с ограничением схемы:
  * «после каждого сообщения» здесь нет намеренно.
@@ -305,6 +311,58 @@ export class MemoryDoctorService {
         return reportId;
       }),
     );
+  }
+
+  /**
+   * Кого и почему пора продиагностировать.
+   *
+   * Один обход вместо восьми независимых крючков по всему сервису.
+   * Повод выбирается по фактическому состоянию памяти, а не по тому,
+   * кто первым вызвал: противоречие важнее роста объёма, рост — важнее
+   * смены версии набора, и только если ничего из этого нет, повод
+   * плановый. Диагностика после каждого сообщения не запускается ни при
+   * одном из них: обход идёт заданием и по своему расписанию.
+   */
+  async sweep(limit = 20): Promise<Array<{ userId: number; trigger: DoctorTrigger }>> {
+    // Обход по определению идёт поперёк пользователей: он выбирает, КОМУ
+    // нужна диагностика. Это объявляется явно, а не обходится молча, и
+    // единственное, что он читает, — счётчики и время, без содержания.
+    const { rows } = await this.db.withSystemScope(
+      "memory.doctor.sweep",
+      async () => await this.db.query<{ user_id: string; trigger: DoctorTrigger }>(
+      `-- tenant: system — обход выбирает, КОМУ нужна диагностика, и потому
+       -- идёт поперёк пользователей; читает только счётчики и время
+       WITH last_report AS (
+         SELECT user_id, max(created_at) AS created_at, max(checks_version) AS checks_version
+           FROM memory_doctor_reports
+          GROUP BY user_id
+       )
+       SELECT n.user_id,
+              CASE
+                WHEN EXISTS (
+                  SELECT 1 FROM memory_conflicts c
+                   WHERE c.user_id = n.user_id
+                     AND c.status IN ('open', 'awaiting_user')
+                     AND c.created_at > COALESCE(r.created_at, '-infinity'::timestamptz)
+                ) THEN 'conflict_detected'
+                WHEN count(*) FILTER (
+                  WHERE n.created_at > COALESCE(r.created_at, '-infinity'::timestamptz)
+                ) >= $2 THEN 'memory_growth'
+                WHEN COALESCE(r.checks_version, 0) < $3 THEN 'schema_version_changed'
+                ELSE 'scheduled'
+              END AS trigger
+         FROM memory_nodes n
+         LEFT JOIN last_report r ON r.user_id = n.user_id
+        WHERE n.status IN ('active', 'candidate')
+          AND COALESCE(r.created_at, '-infinity'::timestamptz) < now() - interval '7 days'
+        GROUP BY n.user_id, r.created_at, r.checks_version
+        ORDER BY r.created_at NULLS FIRST
+        LIMIT $1`,
+        [limit, MEMORY_GROWTH_NODES, DOCTOR_CHECKS_VERSION],
+      ),
+      { crossUser: true },
+    );
+    return rows.map((row) => ({ userId: Number(row.user_id), trigger: row.trigger }));
   }
 
   async latestReport(userId: number): Promise<DoctorReport | null> {

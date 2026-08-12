@@ -76,6 +76,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS memory_doctor_actions_finding_uidx
 CREATE INDEX IF NOT EXISTS memory_doctor_actions_open_idx
     ON memory_doctor_actions (user_id, created_at DESC) WHERE status = 'proposed';
 
+-- Плановый низкоприоритетный запуск. Выключен, как и остальные
+-- расписания: включает его человек вместе с флагом EVA_MEMORY_DOCTOR.
+-- Обход сам выбирает повод по состоянию памяти — противоречие, рост
+-- объёма, смена версии набора проверок или просто плановый черёд.
+INSERT INTO job_schedules (code, queue, job_type, schema_version, cron, timezone, enabled, dedup_mode, payload)
+VALUES ('memory_doctor_sweep', 'memory', 'memory_doctor_sweep', 1,
+        '15 4 * * *', 'Europe/Moscow', false, 'keep_last_if_active', '{}'::jsonb)
+ON CONFLICT (code) DO NOTHING;
+
 INSERT INTO schema_migrations (version) VALUES ('045_memory_doctor')
 ON CONFLICT (version) DO NOTHING;
 

@@ -34,7 +34,11 @@ import { GraphRepository } from "./memory/graph-repository.js";
 import { EpisodeService, EpisodeTracker, type EpisodeRow } from "./memory/episodes.js";
 import { CURATOR_JOB_TYPE, MemoryCuratorService } from "./memory/curator/service.js";
 import { MemoryUserControl, MiniAppMemoryGateway } from "./memory/curator/user-control.js";
-import { MEMORY_DOCTOR_JOB_TYPE, MemoryDoctorService } from "./memory/doctor/service.js";
+import {
+  MEMORY_DOCTOR_JOB_TYPE,
+  MEMORY_DOCTOR_SWEEP_JOB_TYPE,
+  MemoryDoctorService,
+} from "./memory/doctor/service.js";
 import { HybridRetrieval } from "./memory/retrieval/hybrid.js";
 import { DeepRecall } from "./memory/retrieval/deep-recall.js";
 import { MiniAppDoctorGateway, type DoctorEnqueue } from "./memory/doctor/gateway.js";
@@ -513,6 +517,22 @@ async function main(): Promise<void> {
         }),
       );
     };
+    // Плановый обход. Он не диагностирует сам — он выбирает, кому и по
+    // какому поводу поставить диагностику, и ставит её обычным заданием.
+    // Так восемь триггеров задания не превращаются в восемь крючков,
+    // разбросанных по сервису.
+    jobs.runtime.register(MEMORY_DOCTOR_SWEEP_JOB_TYPE, async () => {
+      const due = await doctor.sweep();
+      for (const candidate of due) {
+        await enqueueDoctorRun!(candidate.userId, doctor.intent({
+          userId: candidate.userId,
+          trigger: candidate.trigger,
+          reportKey: crypto.randomUUID(),
+          traceId: crypto.randomUUID(),
+        }));
+      }
+      logger.info("Memory Doctor: плановый обход", { queued: due.length });
+    });
     jobs.runtime.register(MEMORY_DOCTOR_JOB_TYPE, async (context) => {
       const userId = context.envelope.userId;
       const reportKey = String(context.envelope.payload.report_key ?? "");

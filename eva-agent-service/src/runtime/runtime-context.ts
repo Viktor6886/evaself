@@ -177,6 +177,8 @@ export class RuntimeContextBuilder {
       correlationId?: string;
       /** Строки уровня знаний: их поставляет гибридный поиск. */
       knowledge?: readonly string[];
+      /** Строки активных навыков: их поставит роутер навыков шага 20. */
+      skills?: readonly string[];
       /** Куда сложить измеренные размеры уровней. */
       measure?: (levels: LevelMeasurement[]) => void;
     } = {},
@@ -215,6 +217,14 @@ export class RuntimeContextBuilder {
     // остаётся страховкой, но первым режет не он: иначе длинная память
     // выдавливала бы знания, а знания — события задач.
     const measurements: LevelMeasurement[] = [];
+    // Навыки собирает роутер навыков шага 20, и сегодня их набор пуст.
+    // Уровень всё равно измеряется: ноль — это измерение, а пропущенный
+    // уровень означал бы «не считали», и превышение бюджета навыков
+    // всплыло бы только на живом ходу.
+    const skills = fitLevel("skills", options.skills ?? []);
+    measurements.push(skills.measurement);
+    if (skills.lines.length > 0) lines.push("active_skills:", ...skills.lines);
+
     const memory = fitLevel(
       "memory",
       context.relevantMemory.map((item) => `  - ${escapeContextValue(item)}`),
@@ -238,8 +248,9 @@ export class RuntimeContextBuilder {
     const limit = Math.max(1_000, this.options.maxContextCharacters ?? 6_000);
     measurements.unshift({
       level: "always_on",
-      characters: lines.join("\n").length - memory.measurement.characters
-        - knowledge.measurement.characters - conversation.measurement.characters,
+      characters: lines.join("\n").length - skills.measurement.characters
+        - memory.measurement.characters - knowledge.measurement.characters
+        - conversation.measurement.characters,
       budget: LEVEL_BUDGETS.always_on,
       dropped: 0,
     });
