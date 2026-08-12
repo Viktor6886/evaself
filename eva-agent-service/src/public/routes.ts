@@ -587,6 +587,25 @@ function requireMemory(memory: MiniAppMemoryControl | undefined): MiniAppMemoryC
   return memory;
 }
 
+/**
+ * Диагностика памяти из Mini App. Владелец — из подписи, как и в
+ * контроле памяти; применение предложения остаётся явным действием
+ * человека, а не следствием просмотра отчёта.
+ */
+export interface MiniAppMemoryDoctor {
+  report(telegramId: number): Promise<unknown>;
+  request(telegramId: number): Promise<{ reportKey: string }>;
+  preview(telegramId: number, actionId: number): Promise<unknown>;
+  apply(telegramId: number, actionId: number): Promise<{ ok: boolean; code?: string }>;
+  reject(telegramId: number, actionId: number): Promise<boolean>;
+  rollback(telegramId: number, actionId: number): Promise<boolean>;
+}
+
+function requireDoctor(doctor: MiniAppMemoryDoctor | undefined): MiniAppMemoryDoctor {
+  if (!doctor) throw badRequest("Диагностика памяти отключена");
+  return doctor;
+}
+
 export function registerPublicRoutes(
   app: FastifyInstance,
   input: {
@@ -604,6 +623,7 @@ export function registerPublicRoutes(
      * память тому, кто угадает число.
      */
     memory?: MiniAppMemoryControl;
+    memoryDoctor?: MiniAppMemoryDoctor;
   },
 ): void {
   const limiter = input.rateLimiter ?? new NoopRateLimiter();
@@ -823,6 +843,60 @@ export function registerPublicRoutes(
       );
       if (!removed) throw badRequest("Факт не найден");
       return { deleted: removed };
+    });
+
+    // Memory Doctor: отчёт, запрос диагностики и по одному маршруту на
+    // каждое решение человека. Ни один из них ничего не исправляет сам —
+    // применение и откат вызываются явно и по одному предложению.
+    publicApp.get("/memory/doctor", async (request) => {
+      const doctor = requireDoctor(input.memoryDoctor);
+      return await doctor.report(publicUser(request).id);
+    });
+
+    publicApp.post("/memory/doctor", async (request) => {
+      const doctor = requireDoctor(input.memoryDoctor);
+      // Диагностика ставится заданием: ответ человеку не ждёт её.
+      return await doctor.request(publicUser(request).id);
+    });
+
+    publicApp.get("/memory/doctor/actions/:id/preview", async (request) => {
+      const doctor = requireDoctor(input.memoryDoctor);
+      const preview = await doctor.preview(
+        publicUser(request).id,
+        positiveId((request.params as { id?: string }).id, "предложения"),
+      );
+      if (!preview) throw badRequest("Предложение не найдено");
+      return preview;
+    });
+
+    publicApp.post("/memory/doctor/actions/:id/apply", async (request) => {
+      const doctor = requireDoctor(input.memoryDoctor);
+      const result = await doctor.apply(
+        publicUser(request).id,
+        positiveId((request.params as { id?: string }).id, "предложения"),
+      );
+      if (!result.ok) throw badRequest("Предложение нельзя применить");
+      return { ok: true };
+    });
+
+    publicApp.post("/memory/doctor/actions/:id/reject", async (request) => {
+      const doctor = requireDoctor(input.memoryDoctor);
+      const ok = await doctor.reject(
+        publicUser(request).id,
+        positiveId((request.params as { id?: string }).id, "предложения"),
+      );
+      if (!ok) throw badRequest("Предложение нельзя отклонить");
+      return { ok: true };
+    });
+
+    publicApp.post("/memory/doctor/actions/:id/rollback", async (request) => {
+      const doctor = requireDoctor(input.memoryDoctor);
+      const ok = await doctor.rollback(
+        publicUser(request).id,
+        positiveId((request.params as { id?: string }).id, "предложения"),
+      );
+      if (!ok) throw badRequest("Откат невозможен");
+      return { ok: true };
     });
 
     publicApp.post("/tool-approvals/:requestId/decision", async (request) => {

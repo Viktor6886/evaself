@@ -11,12 +11,11 @@
 ```
 CURRENT_BATCH: 13
 CURRENT_STEP:  17
-BRANCH:        claude/evaself-protocols-flaky-ci-lduycg
+BRANCH:        batch/13-memory-doctor-hybrid-retrieval
 STATUS:        в работе
 LAST_COMMIT:   —
 BLOCKER:       —
-NEXT:          смержить исправление протоколов и плавающего теста, затем
-               начать batch 13 (шаги 17–18)
+NEXT:          шаг 17 — Memory Doctor поверх конвейера кандидатов Curator
 ```
 
 Значения полей:

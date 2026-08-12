@@ -34,6 +34,8 @@ import { GraphRepository } from "./memory/graph-repository.js";
 import { EpisodeService, EpisodeTracker, type EpisodeRow } from "./memory/episodes.js";
 import { CURATOR_JOB_TYPE, MemoryCuratorService } from "./memory/curator/service.js";
 import { MemoryUserControl, MiniAppMemoryGateway } from "./memory/curator/user-control.js";
+import { MEMORY_DOCTOR_JOB_TYPE, MemoryDoctorService } from "./memory/doctor/service.js";
+import { MiniAppDoctorGateway, type DoctorEnqueue } from "./memory/doctor/gateway.js";
 import { buildTemporalMemory } from "./memory/temporal/index.js";
 import { LavaPayments } from "./payments.js";
 import { UserProfileService } from "./profile/profile-service.js";
@@ -194,6 +196,19 @@ async function main(): Promise<void> {
   // эпизод просто записывается: задание без очереди поставить некуда, и
   // притворяться, что оно поставлено, нельзя.
   let enqueueCuration: ((episode: EpisodeRow, userId: number) => Promise<void>) | null = null;
+  // Диагностика памяти собирается здесь, а ставится заданием — поэтому
+  // публикация задания появляется вместе со слоем заданий ниже. Пока
+  // его нет, Mini App честно отвечает отказом, а не молча теряет запрос.
+  const doctor = config.memoryDoctorEnabled && config.temporalMemoryEnabled
+    ? new MemoryDoctorService(db, temporalMemory, logger, true)
+    : null;
+  let enqueueDoctorRun: DoctorEnqueue | null = null;
+  const memoryDoctorGateway = doctor
+    ? new MiniAppDoctorGateway(db, doctor, async (userId, intent) => {
+      if (!enqueueDoctorRun) throw new Error("Слой заданий не запущен");
+      await enqueueDoctorRun(userId, intent);
+    })
+    : undefined;
   const episodeTracker = new EpisodeTracker(
     episodes,
     async (episode, userId) => { await enqueueCuration?.(episode, userId); },
@@ -392,6 +407,7 @@ async function main(): Promise<void> {
     rateLimiter,
     approvals,
     ...(memoryControl ? { memory: memoryControl } : {}),
+    ...(memoryDoctorGateway ? { memoryDoctor: memoryDoctorGateway } : {}),
   });
 
   await app.listen({ port: config.port, host: config.host });
@@ -470,6 +486,41 @@ async function main(): Promise<void> {
         candidates: outcome.candidates.length,
         created: outcome.applied.created,
         versioned: outcome.applied.versioned,
+      });
+    });
+  }
+
+  // Memory Doctor — тоже только задание очереди. Причина та же, что у
+  // Curator: единственная точка запуска не даёт диагностике попасть в
+  // путь ответа человеку ни через Mini App, ни через админку.
+  if (jobs && doctor) {
+    enqueueDoctorRun = async (userId, intent) => {
+      await db.withUserScope(
+        { userId, label: "memory.doctor.enqueue", inherit: true },
+        async () => await db.transaction(async (client) => {
+          await jobs.outbox.record(client, intent);
+        }),
+      );
+    };
+    jobs.runtime.register(MEMORY_DOCTOR_JOB_TYPE, async (context) => {
+      const userId = context.envelope.userId;
+      const reportKey = String(context.envelope.payload.report_key ?? "");
+      const trigger = String(context.envelope.payload.trigger ?? "scheduled");
+      if (!userId || !reportKey) {
+        throw new PermanentJobFailure("memory_doctor_payload_invalid");
+      }
+      const report = await doctor.run({
+        userId,
+        reportKey,
+        trigger: trigger as Parameters<MemoryDoctorService["run"]>[0]["trigger"],
+        signal: context.signal,
+      });
+      // В журнал уходят только счётчики: находки ссылаются на личные
+      // записи, и в логах им места нет.
+      logger.info("Memory Doctor завершил прогон", {
+        status: report.status,
+        findings: report.findings.length,
+        sections: report.sections.length,
       });
     });
   }
