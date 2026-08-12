@@ -11,11 +11,11 @@
 ```
 CURRENT_BATCH: 14
 CURRENT_STEP:  19
-BRANCH:        —
-STATUS:        не начат
+BRANCH:        batch/14-skill-core-router
+STATUS:        на ревью
 LAST_COMMIT:   c0de97a
 BLOCKER:       —
-NEXT:          начать batch 14 (шаги 19–20) от актуального main
+NEXT:          Провести независимый review durable completion через Tool Gateway/EffectJournal
 ```
 
 Значения полей:
@@ -55,7 +55,7 @@ Batch — единица работы: одна ветка, один pull reques
 | 11 | 14 | P2 | выполнен | [#149](https://github.com/Viktor6886/evaself/pull/149) |
 | 12 | 15–16 | P2 | выполнен | [#150](https://github.com/Viktor6886/evaself/pull/150) |
 | 13 | 17–18 | P2 | выполнен | [#153](https://github.com/Viktor6886/evaself/pull/153) |
-| 14 | 19–20 | P2 | не начат | — |
+| 14 | 19–20 | P2 | на ревью | локальная реализация staged, без merge |
 | 15 | 21–22 | P2 | не начат | — |
 | 16 | 23–24 | P3 | не начат | — |
 | 17 | 25–26 | P3 | не начат | — |

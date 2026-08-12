@@ -20,6 +20,7 @@ import { DeleteGuard } from "./letta/delete-guard.js";
 import type { LlmManager, LlmProviderInput } from "./llm.js";
 import type { Logger } from "./logger.js";
 import { MetricsCollector } from "./metrics.js";
+import { skillRuntimeMetrics } from "./skills/runtime.js";
 import { newCorrelationId, parseTraceparent } from "./observability/tracing.js";
 import type { LavaPayments } from "./payments.js";
 import type { UserProfileService } from "./profile/profile-service.js";
@@ -249,7 +250,7 @@ export function buildServer(services: Services): FastifyInstance {
     if (config.prometheusEnabled === false) {
       return reply.code(404).send({ error: "metrics_disabled" });
     }
-    const body = await metrics.render();
+    const body = `${await metrics.render()}${skillRuntimeMetrics.render()}`;
     return reply
       .header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
       .send(body);
