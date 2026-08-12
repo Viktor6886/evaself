@@ -24,6 +24,13 @@
 
 <!-- Записи ниже -->
 
+## Batch 14 — шаги 19–20 (production blockers закрыты, на ревью)
+- Ветка: `batch/14-skill-core-router` · PR: — · Дата: 2026-08-12 · Статус: на ревью
+- Итог: каноническая filesystem publication теперь атомарно проецируется в tenant/environment-safe hybrid index, invalid skill сохраняет disabled/error, sticky и usages durable. Защищённый Admin endpoint и UI показывают только агрегаты routing events: latency, reranker, reasons, selected IDs/versions/scores, sticky/fallback — без текста и PII.
+- PostgreSQL evidence: `scripts/ci/test-skills-postgres.mjs` проверяет FTS/trigram, vector/no-vector, изоляцию, restart state, privacy, canonical runId и concurrent idempotency; migrations job вызывает скрипт после 047 и явно проверяет 047 в down/up цикле.
+- Проверки: `npm test` → 774/774; Admin browser/API → 51/51 и targeted 40/40; real PostgreSQL integration → PASS; lint/typecheck/validate/tenant/admin/static → PASS.
+- Ограничения: GitHub-hosted migrations job ещё не запускался; локально тот же PostgreSQL 17/pgvector 0.8.5 integration script прошёл. Commit/push/PR намеренно не выполнялись.
+
 ## Batch 13 — шаги 17–18
 - Ветка: `batch/13-memory-doctor-hybrid-retrieval` · PR: [#153](https://github.com/Viktor6886/evaself/pull/153) ·
   Дата: 2026-08-12 · Статус: выполнен (merge `c0de97a`)
@@ -1916,3 +1923,7 @@
     `/etc/docker/daemon.json` с `{"registry-mirrors":["https://mirror.gcr.io"]}`;
   - фикстура ставится командой `postgres/fixtures/load.sh`, повторный
     запуск безопасен.
+
+
+## Batch 14 — шаги 19–20 (на ревью)
+Реализованы core skills и SkillRouter поверх ArtifactRegistry/RuntimeContextBuilder, миграция 047 и rollback, feature flags и production wiring. Наблюдаемый RED: `ERR_MODULE_NOT_FOUND dist/skills/index.js`; затем targeted green 40/40. Commit/PR/merge не выполнялись.

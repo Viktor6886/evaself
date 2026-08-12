@@ -445,6 +445,7 @@ export class EvaWorkflow {
             update.message.caption?.trim() ||
             (update.kind === "voice" ? prompt : ""),
           relevantMemory: graph?.relevantMemory,
+          turnId: turnHandle?.runId,
         });
         metrics.runtime_context_ms = context.metrics?.runtimeContextMs ?? 0;
         metrics.profile_check_ms = context.metrics?.profileCheckMs ?? 0;

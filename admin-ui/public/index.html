@@ -38,6 +38,7 @@
         <button data-page="overview" class="nav-item active"><span>◉</span>Обзор</button>
         <button data-page="services" class="nav-item"><span>▦</span>Сервисы и интеграции</button>
         <button data-page="ai" class="nav-item"><span>✦</span>Искусственный интеллект</button>
+        <button data-page="skills" class="nav-item"><span>◆</span>Навыки</button>
         <button data-page="stt" class="nav-item"><span>◎</span>Распознавание речи</button>
         <button data-page="operations" class="nav-item"><span>↻</span>Backup и обновления</button>
         <div class="nav-caption">Управление</div>
@@ -228,6 +229,11 @@
              отдаёт media-service: панель не знает ни одного параметра
              Deepgram или Google, поэтому новая модель провайдера не
              требует правки этого файла. -->
+        <section id="page-skills" class="page">
+          <div class="page-heading"><div><p class="eyebrow">RUNTIME</p><h2>Навыки</h2></div><button id="reload-skills" class="button ghost">Обновить</button></div>
+          <section class="card router-card"><div class="section-heading"><h3>Production routing</h3></div><div id="skills-status" class="settings-grid" aria-live="polite">Загрузка…</div></section>
+        </section>
+
         <section id="page-stt" class="page">
           <div class="page-heading">
             <div>

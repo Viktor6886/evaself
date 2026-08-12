@@ -49,6 +49,9 @@ import { ValkeyRateLimiter } from "./public/rate-limit.js";
 import { ValkeyMiniAppSessions } from "./public/webapp-session.js";
 import { UserTurnLock } from "./turns/user-turn-lock.js";
 import { RuntimeContextBuilder } from "./runtime/runtime-context.js";
+import { ArtifactRegistry } from "./artifacts/registry.js";
+import { CoreSkillCatalog, FilesystemSkillIndexer, PostgresSkillRepository, SkillRouter } from "./skills/index.js";
+import { createRouterLlmAdapters, skillRuntimeMetrics } from "./skills/runtime.js";
 import { SdkSettingsManager } from "./sdk-settings.js";
 import { buildServer, VERSION } from "./server.js";
 import { TelegramClient } from "./telegram.js";
@@ -99,10 +102,12 @@ async function main(): Promise<void> {
   });
   redis.on("error", (error) => logger.warn("Ошибка Valkey", { message: error.message }));
   const configEvents = redis.duplicate();
+  let syncSkills: () => Promise<void> = async () => undefined;
   configEvents.on("error", () => logger.warn("Канал Config Service временно недоступен"));
   await configEvents.subscribe("eva.config.changed");
   configEvents.on("message", (_channel, message) => {
     void applyManagedRuntimeConfig(config, db)
+      .then(async () => { await syncSkills(); })
       .then(() => logger.info("Кеш Config Service обновлён", {
         event: (() => {
           try {
@@ -172,12 +177,44 @@ async function main(): Promise<void> {
   // упасть здесь нечему: прежняя обёртка ловила ошибку чтения реестра LLM,
   // которого больше нет.
   await llm.initializeDefaultModel();
+  const skillsEnabled = config.coreSkillsEnabled || config.skillRouterEnabled;
+  const artifactRegistry = skillsEnabled ? new ArtifactRegistry(db) : null;
+  const indexerRoots = [".skills", "/app/skills"];
+  const syncOnce = async (root: string, writeRuntime: boolean) => {
+    if (!artifactRegistry) return;
+    const idx = new FilesystemSkillIndexer(artifactRegistry, { root, runtimeRoot: writeRuntime ? "/data/letta/.skills" : undefined, environment: "production" });
+    const r = await idx.sync();
+    logger.info("Project skills synchronized", { root, ...r });
+  };
+  syncSkills = async () => { for (let i = 0; i < indexerRoots.length; i++) await syncOnce(indexerRoots[i]!, i === 0); };
+  if (artifactRegistry) await syncSkills();
+  const coreSkills = new CoreSkillCatalog(artifactRegistry ?? { publishedSkills: async () => [] }, {
+    enabled: config.coreSkillsEnabled,
+    onError: (error) => logger.warn("Core skill disabled", { code: error.code, skill: error.skill }),
+  });
+  const skillRepository = new PostgresSkillRepository(db);
+  const skillLlm = createRouterLlmAdapters({ baseUrl: config.routerUrl, apiKey: config.routerApiKey });
+  const skillRouter = new SkillRouter(skillRepository, {
+    enabled: config.skillRouterEnabled,
+    embed: skillLlm.embed,
+    rerank: skillLlm.rerank,
+    observe: (value) => skillRuntimeMetrics.observe(value),
+  });
   const runtimeContext = new RuntimeContextBuilder(db, {
     defaultTimezone: config.defaultTimezone,
     cacheTtlMs: Math.max(1, config.profileCacheTtlSeconds) * 1_000,
     profileCompletionEnabled: config.profileCompletionEnabled,
     vectorGoalsEnabled: config.vectorGoalsEnabled,
     routingMarkerSecret: config.routerApiKey,
+    skillContext: async ({ userId, conversationId, purpose, message, turnId, scenarioComplete }) => {
+      // Letta SDK loads project core from .skills. Runtime injects only routed skills,
+      // while recording both canonical core and routed versions against the run id.
+      const core = await coreSkills.load("production", String(userId));
+      const routed = await skillRouter.route({ tenantId: userId, conversationId, purpose, message,
+        runId: turnId, scenarioComplete });
+      if (turnId) try { await skillRepository.recordUsage(turnId, [...core.versionIds, ...routed.selected.map(skill=>skill.versionId)]); } catch { /* usage is best-effort */ }
+      return ["core_index:", ...core.index.split("\n"), ...routed.selected.map((skill) => skill.text)];
+    },
   });
   const graph = config.graphMemoryEnabled ? new GraphRepository(db) : undefined;
   const graphContext = new GraphContextService(
@@ -265,6 +302,16 @@ async function main(): Promise<void> {
     mcpPolicies && mcpInvoker ? { policies: mcpPolicies, invoker: mcpInvoker } : undefined,
   );
   toolFactory.setApprovalCompletionCallback(async (execution) => await approvals.completeApprovedExecution(execution));
+  toolFactory.setVerifiedOutcomeCallback(async outcome => {
+    if (outcome.outcome==="executed" && outcome.toolName==="skill_scenario_complete" && outcome.runId) {
+      await effects.consumeSuccessfulCompletion({runId:outcome.runId,userId:outcome.userId,conversationId:outcome.conversationId,toolCallId:outcome.toolCallId});
+    }
+  });
+  if (config.toolGatewayEnabled) {
+    void effects.pendingSuccessfulCompletions().then(async rows => {
+      for (const row of rows) await effects.consumeSuccessfulCompletion(row);
+    }).catch(error=>logger.warn("Не удалось восстановить completion effects",{code:error instanceof Error?error.name:"unknown_error"}));
+  }
   letta.setToolFactory((conversationId) => toolFactory.forConversation(conversationId));
   letta.setSessionToolPolicyResolver(async (conversationId) => {
     const policy = await toolFactory.sessionPolicy(conversationId);
