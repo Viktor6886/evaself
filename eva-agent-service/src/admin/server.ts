@@ -49,6 +49,7 @@ import { ProviderService } from "./provider-service.js";
 import { SttAdminService } from "./stt-service.js";
 import { UserService } from "./user-service.js";
 import type { Redis } from "ioredis";
+import type { SkillOperationsService } from "./skill-operations.js";
 
 interface RouteAccess {
   public?: boolean;
@@ -86,6 +87,7 @@ export interface AdminServerServices {
   integrations: IntegrationConfigService;
   users: UserService;
   securityAudit?: SecurityAuditService;
+  skillOperations?: SkillOperationsService;
   /** Предпросмотр политик хранения. Удаление выполняет задание очереди. */
   retention?: { preview(settings: Record<string, unknown>): Promise<unknown> };
   /** Единый реестр артефактов. Отсутствует — раздел просто не появляется. */
@@ -447,6 +449,25 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
   app.get("/api/admin/v1/services", {
     config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
   }, async () => await services.health.services());
+
+  app.get("/api/admin/v1/skills/operations", {
+    config: {
+      roles: ["owner", "admin", "operator", "viewer"],
+      tenantAccess: "cross-user",
+    } satisfies RouteAccess,
+  }, async (request) => {
+    if (!services.skillOperations) throw adminNotFound("Операционная статистика навыков недоступна");
+    const query = request.query as { tenant_id?: string; hours?: string };
+    const tenantId = query.tenant_id === undefined ? undefined : Number(query.tenant_id);
+    const hours = query.hours === undefined ? undefined : Number(query.hours);
+    if (tenantId !== undefined && (!Number.isSafeInteger(tenantId) || tenantId <= 0)) {
+      throw adminBadRequest("tenant_id должен быть положительным целым");
+    }
+    if (hours !== undefined && (!Number.isSafeInteger(hours) || hours <= 0)) {
+      throw adminBadRequest("hours должен быть положительным целым");
+    }
+    return await services.skillOperations.summary({ tenantId, hours });
+  });
 
   app.get("/api/admin/v1/integrations", {
     config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,

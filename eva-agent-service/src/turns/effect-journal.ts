@@ -277,6 +277,50 @@ export class EffectJournal {
     }
   }
 
+  /** Atomically consumes a successful completion only when every canonical id correlates. */
+  async consumeSuccessfulCompletion(input: {
+    runId: string; userId: number; conversationId: string; toolCallId: string;
+  }): Promise<boolean> {
+    if (!this.enabled) return false;
+    const key = effectKey(input.runId, input.toolCallId, "skill_scenario_complete");
+    const { rows } = await this.scoped(input.userId, async () => await this.db.query<{ consumed: boolean }>(
+      `WITH correlated AS (
+         SELECT e.effect_key
+           FROM tool_effects e JOIN turn_runs r ON r.run_id=e.run_id AND r.user_id=e.user_id
+          WHERE e.effect_key=$1 AND e.user_id=$2 AND e.run_id=$3::uuid AND e.tool_call_id=$4
+            AND e.tool_name='skill_scenario_complete' AND e.status='succeeded'
+            AND COALESCE((e.result->>'completion_consumed')::boolean,false)=false
+            AND r.conversation_id=$5
+       ), cleared AS (
+         DELETE FROM skill_routing_state s USING correlated
+          WHERE s.user_id=$2 AND s.conversation_id=$5 RETURNING 1
+       )
+       UPDATE tool_effects e
+          SET result = COALESCE(e.result, '{}'::jsonb) || '{"completion_consumed":true}'::jsonb,
+              updated_at = now()
+         FROM correlated c WHERE e.effect_key=c.effect_key
+        RETURNING true AS consumed`,
+      [key, input.userId, input.runId, input.toolCallId, input.conversationId],
+    ));
+    return rows[0]?.consumed === true;
+  }
+
+  /** Durable restart scan; ownership/correlation is rechecked again by consume. */
+  async pendingSuccessfulCompletions(): Promise<Array<{runId:string;userId:number;conversationId:string;toolCallId:string}>> {
+    if (!this.enabled) return [];
+    const { rows } = await this.db.withSystemScope(
+      "skill-completion-recovery",
+      async () => await this.db.query<{run_id:string;user_id:number;conversation_id:string;tool_call_id:string}>(
+        `-- tenant: system — startup recovery of successful, not-yet-consumed lifecycle effects
+         SELECT e.run_id::text, e.user_id, r.conversation_id, e.tool_call_id
+           FROM tool_effects e JOIN turn_runs r ON r.run_id=e.run_id AND r.user_id=e.user_id
+          WHERE e.tool_name='skill_scenario_complete' AND e.status='succeeded'
+            AND COALESCE((e.result->>'completion_consumed')::boolean,false)=false`,
+      ),
+    );
+    return rows.map(r=>({runId:r.run_id,userId:Number(r.user_id),conversationId:r.conversation_id,toolCallId:r.tool_call_id}));
+  }
+
   private warn(message: string, error: unknown, context: Record<string, unknown>): void {
     this.logger.warn(message, {
       ...context,

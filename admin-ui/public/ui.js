@@ -154,6 +154,7 @@ const LOADERS = {
   overview: loadOverview,
   services: loadServicesAndIntegrations,
   ai: loadProviders,
+  skills: loadSkills,
   stt: loadStt,
   operations: loadOperations,
   users: loadUsers,
@@ -161,6 +162,15 @@ const LOADERS = {
   security: loadSecrets,
   audit: loadAudit,
 };
+
+async function loadSkills() {
+  const { payload } = await request("/skills/operations?hours=24");
+  const latency = payload.latency_ms || {};
+  const reranker = payload.reranker || {};
+  const reasons = Object.entries(payload.reasons || {}).map(([reason, count]) => `${escapeHtml(reason)}: ${Number(count)}`).join(", ") || "нет";
+  const selected = (payload.selected || []).map((skill) => `${escapeHtml(skill.id)} v${Number(skill.version || 0)} (${Number(skill.selections || 0)}, score ${skill.avg_score == null ? "—" : Number(skill.avg_score).toFixed(3)})`).join("<br>") || "нет";
+  $("#skills-status").innerHTML = `<div class="setting-row"><strong>Маршрутизация за ${Number(payload.window_hours || 24)} ч</strong><span>${Number(payload.events || 0)} решений</span></div><div class="setting-row"><strong>Latency p50 / p95 / p99</strong><span>${Number(latency.p50 || 0).toFixed(1)} / ${Number(latency.p95 || 0).toFixed(1)} / ${Number(latency.p99 || 0).toFixed(1)} ms</span></div><div class="setting-row"><strong>Reranker</strong><span>${(Number(reranker.ratio || 0) * 100).toFixed(1)}% (${Number(reranker.count || 0)})</span></div><div class="setting-row"><strong>Sticky / fallback</strong><span>${Number(payload.sticky_count || 0)} / ${Number(payload.fallback_count || 0)}</span></div><div class="setting-row"><strong>Причины</strong><span>${reasons}</span></div><div class="setting-row"><strong>Выбранные навыки</strong><span>${selected}</span></div>`;
+}
 
 function openPage(name) {
   state.page = name;

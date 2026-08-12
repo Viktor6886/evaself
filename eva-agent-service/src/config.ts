@@ -196,6 +196,8 @@ export interface Config {
   memoryDoctorEnabled: boolean;
   hybridRetrievalEnabled: boolean;
   deepRecallEnabled: boolean;
+  coreSkillsEnabled: boolean;
+  skillRouterEnabled: boolean;
 
   lavaWebhookUser: string;
   lavaWebhookPassword: string;
@@ -399,6 +401,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     memoryDoctorEnabled: bool("EVA_MEMORY_DOCTOR", false),
     hybridRetrievalEnabled: bool("EVA_HYBRID_RETRIEVAL", false),
     deepRecallEnabled: bool("EVA_DEEP_RECALL", false),
+    coreSkillsEnabled: bool("EVA_CORE_SKILLS", false),
+    skillRouterEnabled: bool("EVA_SKILL_ROUTER", false),
 
     lavaWebhookUser: str("LAVA_WEBHOOK_USER"),
     lavaWebhookPassword: str("LAVA_WEBHOOK_PASSWORD"),

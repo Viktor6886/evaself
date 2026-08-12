@@ -66,6 +66,8 @@ export const TENANT_TABLES: Readonly<Record<string, readonly string[]>> = {
   proactive_messages: ["user_id"],
   referrals: ["referrer_user_id", "referred_user_id"],
   retention_holds: ["user_id"],
+  skill_routing_events: ["user_id"],
+  skill_routing_state: ["user_id"],
   subscriptions: ["user_id"],
   task_events: ["user_id"],
   tasks: ["user_id"],
