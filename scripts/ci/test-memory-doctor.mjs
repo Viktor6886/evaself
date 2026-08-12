@@ -14,6 +14,8 @@
  * скрипт убирает.
  */
 
+import { createHash } from "node:crypto";
+
 import pg from "../../eva-agent-service/node_modules/pg/lib/index.js";
 import { MemoryDoctorService } from "../../eva-agent-service/dist/memory/doctor/service.js";
 
@@ -85,12 +87,15 @@ async function node(userId, overrides) {
 }
 
 async function evidenceFor(userId, nodeId, tag) {
+  // Отпечаток обязан быть настоящим sha256: схема шага 15 проверяет его
+  // формат, и «понятная» метка вместо хэша роняет вставку.
+  const hash = createHash("sha256").update(`${userId}:${nodeId}:${tag}`).digest("hex");
   await client.query(
     `INSERT INTO memory_evidence (
        user_id, subject_kind, node_id, source_type, source_id, support, confidence, content_hash
-     ) VALUES ($1, 'node', $2, 'conversation', $3, 'supports', 0.9, $3)
+     ) VALUES ($1, 'node', $2, 'conversation', $3, 'supports', 0.9, $4)
      ON CONFLICT DO NOTHING`,
-    [userId, nodeId, tag],
+    [userId, nodeId, tag, hash],
   );
 }
 
