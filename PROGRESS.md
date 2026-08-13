@@ -9,13 +9,13 @@
 ## Состояние
 
 ```
-CURRENT_BATCH: 15
-CURRENT_STEP:  21
-BRANCH:        batch/15-subagents-evals
-STATUS:        на ревью
-LAST_COMMIT:   c85ebc6
+CURRENT_BATCH: 16
+CURRENT_STEP:  23
+BRANCH:        —
+STATUS:        не начат
+LAST_COMMIT:   7764d1d
 BLOCKER:       —
-NEXT:          независимое ревью staged diff Batch 15
+NEXT:          начать batch 16 (шаги 23–24) от актуального main
 ```
 
 Значения полей:
@@ -55,8 +55,8 @@ Batch — единица работы: одна ветка, один pull reques
 | 11 | 14 | P2 | выполнен | [#149](https://github.com/Viktor6886/evaself/pull/149) |
 | 12 | 15–16 | P2 | выполнен | [#150](https://github.com/Viktor6886/evaself/pull/150) |
 | 13 | 17–18 | P2 | выполнен | [#153](https://github.com/Viktor6886/evaself/pull/153) |
-| 14 | 19–20 | P2 | на ревью | локальная реализация staged, без merge |
-| 15 | 21–22 | P2 | на ревью | локальная реализация staged, без PR |
+| 14 | 19–20 | P2 | выполнен | [#161](https://github.com/Viktor6886/evaself/pull/161) |
+| 15 | 21–22 | P2 | выполнен | [#168](https://github.com/Viktor6886/evaself/pull/168) |
 | 16 | 23–24 | P3 | не начат | — |
 | 17 | 25–26 | P3 | не начат | — |
 | 18 | 27 | P3 | не начат | — |
