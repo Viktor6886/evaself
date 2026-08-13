@@ -9,13 +9,13 @@
 ## Состояние
 
 ```
-CURRENT_BATCH: 16
-CURRENT_STEP:  24
+CURRENT_BATCH: 17
+CURRENT_STEP:  25
 BRANCH:        batch/16-knowledge-research
-STATUS:        на ревью
+STATUS:        выполнен
 LAST_COMMIT:   22620e4
 BLOCKER:       —
-NEXT:          независимое ревью и PR
+NEXT:          начать batch 17 (шаги 25–26)
 ```
 
 Значения полей:
@@ -57,7 +57,7 @@ Batch — единица работы: одна ветка, один pull reques
 | 13 | 17–18 | P2 | выполнен | [#153](https://github.com/Viktor6886/evaself/pull/153) |
 | 14 | 19–20 | P2 | выполнен | [#161](https://github.com/Viktor6886/evaself/pull/161) |
 | 15 | 21–22 | P2 | выполнен | [#168](https://github.com/Viktor6886/evaself/pull/168) |
-| 16 | 23–24 | P3 | в работе | — |
+| 16 | 23–24 | P3 | выполнен | [#170](https://github.com/Viktor6886/evaself/pull/170) |
 | 17 | 25–26 | P3 | не начат | — |
 | 18 | 27 | P3 | не начат | — |
 | 19 | 28–29 | P3 | не начат | — |
