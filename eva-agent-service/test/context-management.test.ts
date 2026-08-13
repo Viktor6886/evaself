@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { ConversationContextManager } from "../dist/conversations/context-management.js";
+
+test("контекстный inventory выполняется в явной системной области", async () => {
+  const source = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
+  assert.match(source, /db\.withSystemScope\(\s*["']context-management\.inventory["']/);
+  assert.match(source, /\{\s*crossUser:\s*true\s*\}/);
+});
 
 test("automatic context manager rotates an oversized active conversation", async () => {
   const calls: string[] = [];

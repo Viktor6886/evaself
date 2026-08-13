@@ -334,12 +334,16 @@ export function buildServer(services: Services): FastifyInstance {
   }));
 
   app.get("/v1/context-management", async () => {
-    const { rows } = await db.query(
-      `-- tenant: system — operational inventory for protected administrator endpoint
-       SELECT agent_id, conversation_id, message_count
-         FROM agent_links
-        WHERE status = 'active' AND conversation_id IS NOT NULL
-        ORDER BY message_count DESC`,
+    const { rows } = await db.withSystemScope(
+      "context-management.inventory",
+      async () => await db.query(
+        `-- tenant: system — operational inventory for protected administrator endpoint
+         SELECT agent_id, conversation_id, message_count
+           FROM agent_links
+          WHERE status = 'active' AND conversation_id IS NOT NULL
+          ORDER BY message_count DESC`,
+      ),
+      { crossUser: true },
     );
     const conversations = [];
     for (const row of rows) {
