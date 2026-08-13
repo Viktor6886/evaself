@@ -53,7 +53,9 @@ export class ConversationService {
     const normalizedTitle = title.trim();
     if (!normalizedTitle || normalizedTitle.length > 120) throw badRequest("Название диалога должно содержать от 1 до 120 символов");
     let createdId = "";
+    let canonicalLink: LinkRow | undefined;
     const result = await this.transaction(telegramId, async (client, link) => {
+      canonicalLink = link;
       const record = await this.letta.createConversationRecord(link.agent_id, { summary: normalizedTitle }) as { id?: string };
       createdId = this.validId(record.id ?? "", "Letta вернула некорректный ID диалога");
       await client.query(
@@ -65,6 +67,9 @@ export class ConversationService {
     }, true, async (error) => {
       if (createdId) await this.compensateArchive(createdId, error);
       throw error;
+    }, async (error): Promise<true> => {
+      if (await this.reconcileStatus(canonicalLink!, createdId, error) === "active") return true;
+      return await this.compensateArchive(createdId, error);
     });
     await this.audit({ action: "conversation.create", telegramId, conversationId: createdId });
     return result;
@@ -89,7 +94,9 @@ export class ConversationService {
   async archive(telegramId: number, conversationId: string): Promise<Record<string, unknown>> {
     const id = this.validId(conversationId);
     let archivedInLetta = false;
+    let canonicalLink: LinkRow | undefined;
     const result = await this.transaction(telegramId, async (client, link) => {
+      canonicalLink = link;
       await this.ownedSelectable(client, link, id);
       if (link.active_conversation_id === id) {
         throw deletionBlocked("Сначала переключитесь на другой диалог, затем архивируйте этот", { target: id });
@@ -113,6 +120,13 @@ export class ConversationService {
         }
       }
       throw error;
+    }, async (error) => {
+      if (await this.reconcileStatus(canonicalLink!, id, error) === "archived") return true;
+      if (archivedInLetta) {
+        try { await this.letta.updateConversation(id, { archived: false }); }
+        catch (compensationError) { throw new AggregateError([error, compensationError], "Не удалось подтвердить архивирование и восстановить диалог в Letta"); }
+      }
+      throw error;
     });
     await this.audit({ action: "conversation.archive", telegramId, conversationId: id });
     return result;
@@ -131,10 +145,12 @@ export class ConversationService {
     return rows[0];
   }
 
-  private async transaction<T>(telegramId: number, work: (client: TransactionClient, link: LinkRow) => Promise<T>, lock = true, onFailure?: (error: unknown) => Promise<never>): Promise<T> {
+  private async transaction<T>(telegramId: number, work: (client: TransactionClient, link: LinkRow) => Promise<T>, lock = true, onFailure?: (error: unknown) => Promise<never>, onCommitUnknown?: (error: unknown) => Promise<true | never>): Promise<T> {
     if (!Number.isSafeInteger(telegramId) || telegramId <= 0) throw badRequest("Некорректный Telegram ID");
     const client = await this.db.transactionClient();
     let committed = false;
+    let committing = false;
+    let result!: T;
     try {
       await client.query("BEGIN");
       if (lock) await client.query("SELECT pg_advisory_xact_lock($1::bigint)", [telegramId]);
@@ -148,24 +164,44 @@ export class ConversationService {
         [telegramId],
       );
       if (!rows[0]) throw notFound("Агент Евы ещё не создан");
-      const result = await work(client, rows[0]);
+      result = await work(client, rows[0]);
+      committing = true;
       await client.query("COMMIT");
       committed = true;
       return result;
     } catch (error) {
+      if (committing && onCommitUnknown && await onCommitUnknown(error)) return result;
       let transactionError = error;
-      if (!committed) {
+      if (!committed && !committing) {
         try {
           await client.query("ROLLBACK");
         } catch (rollbackError) {
           transactionError = new AggregateError([error, rollbackError], "Транзакция и откат завершились ошибкой");
         }
       }
-      if (!committed && onFailure) await onFailure(transactionError);
+      if (!committed && !committing && onFailure) await onFailure(transactionError);
       throw transactionError;
     } finally {
       client.release();
     }
+  }
+
+  private async reconcileStatus(link: LinkRow, id: string, commitError: unknown): Promise<string | undefined> {
+    let client: TransactionClient | undefined;
+    try {
+      client = await this.db.transactionClient();
+      await client.query("BEGIN");
+      const { rows } = await client.query<{ status: string }>(
+        `-- canonical conversation status after ambiguous COMMIT
+         SELECT status FROM agent_conversations
+          WHERE user_id = $1 AND agent_id = $2 AND conversation_id = $3 AND purpose = 'chat'`,
+        [link.user_id, link.agent_id, id],
+      );
+      await client.query("COMMIT");
+      return rows[0]?.status;
+    } catch (verificationError) {
+      throw new AggregateError([commitError, verificationError], "COMMIT outcome unknown; recovery required");
+    } finally { client?.release(); }
   }
 
   private validId(value: string, message = "Некорректный ID диалога"): string {

@@ -5,12 +5,19 @@ import { ConversationService } from "../dist/public/conversation-service.js";
 
 class FakeClient {
   released = false;
+  snapshot?: Map<string, any>;
   readonly db: FakeDb;
   constructor(db: FakeDb) { this.db = db; }
   async query(sql: string, values: unknown[] = []) {
     this.db.sql.push(sql);
-    if (sql === "COMMIT" && this.db.failCommit) throw new Error("commit failed");
-    if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK" || sql.includes("pg_advisory_xact_lock")) return { rows: [] };
+    if (sql === "BEGIN") { this.snapshot = new Map([...this.db.rows].map(([id, row]) => [id, { ...row }])); return { rows: [] }; }
+    if (sql === "COMMIT" && this.db.failCommit && !this.db.commitFailed) {
+      this.db.commitFailed = true;
+      if (!this.db.persistBeforeCommitError) this.db.rows = this.snapshot!;
+      throw new Error("commit failed");
+    }
+    if (sql === "ROLLBACK") { if (this.snapshot) this.db.rows = this.snapshot; return { rows: [] }; }
+    if (sql === "COMMIT" || sql.includes("pg_advisory_xact_lock")) return { rows: [] };
     if (sql.includes("FROM users u") && sql.includes("FOR UPDATE OF a")) {
       return { rows: this.db.link ? [{ user_id: 7, agent_id: "agent-1", active_conversation_id: this.db.active }] : [] };
     }
@@ -18,6 +25,11 @@ class FakeClient {
       const id = String(values[2]);
       const row = this.db.rows.get(id);
       return { rows: row && row.user_id === values[0] && row.agent_id === values[1] && row.status === "active" ? [{ ...row, id }] : [] };
+    }
+    if (sql.includes("canonical conversation status")) {
+      if (this.db.failReconciliation) throw new Error("verification failed");
+      const row = this.db.rows.get(String(values[2]));
+      return { rows: row && row.user_id === values[0] && row.agent_id === values[1] ? [{ status: row.status }] : [] };
     }
     if (sql.includes("INSERT INTO agent_conversations")) {
       if (this.db.failInsert) throw new Error("insert failed");
@@ -37,9 +49,13 @@ class FakeDb {
   link = true;
   failInsert = false;
   failCommit = false;
+  commitFailed = false;
+  persistBeforeCommitError = false;
+  failReconciliation = false;
+  clients = 0;
   sql: string[] = [];
   rows = new Map<string, any>([["conv-active", { user_id: 7, agent_id: "agent-1", title: "Active", status: "active" }], ["conv-other", { user_id: 7, agent_id: "agent-1", title: "Other", status: "active" }], ["conv-foreign", { user_id: 8, agent_id: "agent-2", title: "Foreign", status: "active" }], ["conv-archived", { user_id: 7, agent_id: "agent-1", title: "Old", status: "archived" }]]);
-  async transactionClient() { return new FakeClient(this); }
+  async transactionClient() { this.clients += 1; return new FakeClient(this); }
 }
 function fixture(failAudit = false) {
   const db = new FakeDb();
@@ -81,16 +97,37 @@ test("creation stays inactive and archives Letta object when DB insert fails", a
   assert.equal(db.active, "conv-active");
 });
 
-test("creation archives the Letta object when COMMIT fails", async () => {
+test("creation compensates a rejected COMMIT with no persistence", async () => {
   const { service, db, calls } = fixture(); db.failCommit = true;
   await assert.rejects(() => service.create(101, "Project"), /commit failed/);
   assert.deepEqual(calls, ["create", 'conv-new:{"archived":true}']);
+  assert.equal(db.clients, 2);
 });
 
-test("archive restores the Letta object when COMMIT fails", async () => {
+test("creation proceeds to audit when fresh reconciliation finds active row", async () => {
+  const { service, db, calls, audits } = fixture(); db.failCommit = true; db.persistBeforeCommitError = true;
+  assert.equal((await service.create(101, "Project")).id, "conv-new");
+  assert.deepEqual(calls, ["create"]);
+  assert.deepEqual(audits.map((x) => x.action), ["conversation.create"]);
+});
+
+test("archive compensates a rejected COMMIT with no persistence", async () => {
   const { service, db, calls } = fixture(); db.failCommit = true;
   await assert.rejects(() => service.archive(101, "conv-other"), /commit failed/);
   assert.deepEqual(calls, ["guard:conv-other", 'conv-other:{"archived":true}', 'conv-other:{"archived":false}']);
+});
+
+test("archive proceeds to audit when fresh reconciliation finds archived row", async () => {
+  const { service, db, calls, audits } = fixture(); db.failCommit = true; db.persistBeforeCommitError = true;
+  assert.deepEqual(await service.archive(101, "conv-other"), { id: "conv-other", archived: true });
+  assert.deepEqual(calls, ["guard:conv-other", 'conv-other:{"archived":true}']);
+  assert.deepEqual(audits.map((x) => x.action), ["conversation.archive"]);
+});
+
+test("failed fresh reconciliation fails closed without compensation", async () => {
+  const { service, db, calls } = fixture(); db.failCommit = true; db.failReconciliation = true;
+  await assert.rejects(() => service.create(101, "Project"), (e: any) => e instanceof AggregateError && /recovery/i.test(e.message));
+  assert.deepEqual(calls, ["create"]);
 });
 
 test("audit failure rejects after commit without compensating committed Letta mutation", async () => {
