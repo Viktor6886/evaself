@@ -56,16 +56,15 @@ export class ConversationService {
     const result = await this.transaction(telegramId, async (client, link) => {
       const record = await this.letta.createConversationRecord(link.agent_id, { summary: normalizedTitle }) as { id?: string };
       createdId = this.validId(record.id ?? "", "Letta вернула некорректный ID диалога");
-      try {
-        await client.query(
-          `INSERT INTO agent_conversations (user_id, agent_id, conversation_id, purpose, title, status)
-           VALUES ($1, $2, $3, 'chat', $4, 'active')`,
-          [link.user_id, link.agent_id, createdId, normalizedTitle],
-        );
-      } catch (error) {
-        await this.compensateArchive(createdId, error);
-      }
+      await client.query(
+        `INSERT INTO agent_conversations (user_id, agent_id, conversation_id, purpose, title, status)
+         VALUES ($1, $2, $3, 'chat', $4, 'active')`,
+        [link.user_id, link.agent_id, createdId, normalizedTitle],
+      );
       return { id: createdId, title: normalizedTitle, active: false };
+    }, true, async (error) => {
+      if (createdId) await this.compensateArchive(createdId, error);
+      throw error;
     });
     await this.audit({ action: "conversation.create", telegramId, conversationId: createdId });
     return result;
@@ -89,6 +88,7 @@ export class ConversationService {
 
   async archive(telegramId: number, conversationId: string): Promise<Record<string, unknown>> {
     const id = this.validId(conversationId);
+    let archivedInLetta = false;
     const result = await this.transaction(telegramId, async (client, link) => {
       await this.ownedSelectable(client, link, id);
       if (link.active_conversation_id === id) {
@@ -96,22 +96,23 @@ export class ConversationService {
       }
       await this.deleteGuard.assertConversationDeletable(id);
       await this.letta.updateConversation(id, { archived: true });
-      try {
-        await client.query(
-          `UPDATE agent_conversations
-              SET status = 'archived', archived_at = now(), meta = meta || '{"webapp_archived":true}'::jsonb
-            WHERE user_id = $1 AND agent_id = $2 AND conversation_id = $3 AND status = 'active'`,
-          [link.user_id, link.agent_id, id],
-        );
-      } catch (error) {
+      archivedInLetta = true;
+      await client.query(
+        `UPDATE agent_conversations
+            SET status = 'archived', archived_at = now(), meta = meta || '{"webapp_archived":true}'::jsonb
+          WHERE user_id = $1 AND agent_id = $2 AND conversation_id = $3 AND status = 'active'`,
+        [link.user_id, link.agent_id, id],
+      );
+      return { id, archived: true };
+    }, true, async (error) => {
+      if (archivedInLetta) {
         try {
           await this.letta.updateConversation(id, { archived: false });
         } catch (compensationError) {
           throw new AggregateError([error, compensationError], "Не удалось сохранить архивирование и восстановить диалог в Letta");
         }
-        throw error;
       }
-      return { id, archived: true };
+      throw error;
     });
     await this.audit({ action: "conversation.archive", telegramId, conversationId: id });
     return result;
@@ -130,9 +131,10 @@ export class ConversationService {
     return rows[0];
   }
 
-  private async transaction<T>(telegramId: number, work: (client: TransactionClient, link: LinkRow) => Promise<T>, lock = true): Promise<T> {
+  private async transaction<T>(telegramId: number, work: (client: TransactionClient, link: LinkRow) => Promise<T>, lock = true, onFailure?: (error: unknown) => Promise<never>): Promise<T> {
     if (!Number.isSafeInteger(telegramId) || telegramId <= 0) throw badRequest("Некорректный Telegram ID");
     const client = await this.db.transactionClient();
+    let committed = false;
     try {
       await client.query("BEGIN");
       if (lock) await client.query("SELECT pg_advisory_xact_lock($1::bigint)", [telegramId]);
@@ -148,10 +150,19 @@ export class ConversationService {
       if (!rows[0]) throw notFound("Агент Евы ещё не создан");
       const result = await work(client, rows[0]);
       await client.query("COMMIT");
+      committed = true;
       return result;
     } catch (error) {
-      await client.query("ROLLBACK");
-      throw error;
+      let transactionError = error;
+      if (!committed) {
+        try {
+          await client.query("ROLLBACK");
+        } catch (rollbackError) {
+          transactionError = new AggregateError([error, rollbackError], "Транзакция и откат завершились ошибкой");
+        }
+      }
+      if (!committed && onFailure) await onFailure(transactionError);
+      throw transactionError;
     } finally {
       client.release();
     }

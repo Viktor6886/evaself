@@ -9,6 +9,7 @@ class FakeClient {
   constructor(db: FakeDb) { this.db = db; }
   async query(sql: string, values: unknown[] = []) {
     this.db.sql.push(sql);
+    if (sql === "COMMIT" && this.db.failCommit) throw new Error("commit failed");
     if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK" || sql.includes("pg_advisory_xact_lock")) return { rows: [] };
     if (sql.includes("FROM users u") && sql.includes("FOR UPDATE OF a")) {
       return { rows: this.db.link ? [{ user_id: 7, agent_id: "agent-1", active_conversation_id: this.db.active }] : [] };
@@ -35,11 +36,12 @@ class FakeDb {
   active = "conv-active";
   link = true;
   failInsert = false;
+  failCommit = false;
   sql: string[] = [];
   rows = new Map<string, any>([["conv-active", { user_id: 7, agent_id: "agent-1", title: "Active", status: "active" }], ["conv-other", { user_id: 7, agent_id: "agent-1", title: "Other", status: "active" }], ["conv-foreign", { user_id: 8, agent_id: "agent-2", title: "Foreign", status: "active" }], ["conv-archived", { user_id: 7, agent_id: "agent-1", title: "Old", status: "archived" }]]);
   async transactionClient() { return new FakeClient(this); }
 }
-function fixture() {
+function fixture(failAudit = false) {
   const db = new FakeDb();
   const calls: string[] = [];
   const letta = {
@@ -48,7 +50,10 @@ function fixture() {
   };
   const guard = { async assertConversationDeletable(id: string) { calls.push(`guard:${id}`); } };
   const audits: any[] = [];
-  return { db, calls, audits, service: new ConversationService(db as never, letta as never, guard as never, async (event) => { audits.push(event); }) };
+  return { db, calls, audits, service: new ConversationService(db as never, letta as never, guard as never, async (event: any) => {
+    if (failAudit) throw new Error("audit failed");
+    audits.push(event);
+  }) };
 }
 
 test("tenant ownership is checked before Letta mutation", async () => {
@@ -74,6 +79,25 @@ test("creation stays inactive and archives Letta object when DB insert fails", a
   await assert.rejects(() => service.create(101, "Project"), /insert failed/);
   assert.deepEqual(calls, ["create", 'conv-new:{"archived":true}']);
   assert.equal(db.active, "conv-active");
+});
+
+test("creation archives the Letta object when COMMIT fails", async () => {
+  const { service, db, calls } = fixture(); db.failCommit = true;
+  await assert.rejects(() => service.create(101, "Project"), /commit failed/);
+  assert.deepEqual(calls, ["create", 'conv-new:{"archived":true}']);
+});
+
+test("archive restores the Letta object when COMMIT fails", async () => {
+  const { service, db, calls } = fixture(); db.failCommit = true;
+  await assert.rejects(() => service.archive(101, "conv-other"), /commit failed/);
+  assert.deepEqual(calls, ["guard:conv-other", 'conv-other:{"archived":true}', 'conv-other:{"archived":false}']);
+});
+
+test("audit failure rejects after commit without compensating committed Letta mutation", async () => {
+  const { service, calls, db } = fixture(true);
+  await assert.rejects(() => service.create(101, "Project"), /audit failed/);
+  assert.deepEqual(calls, ["create"]);
+  assert.equal(db.sql.filter((sql) => sql === "COMMIT").length, 1);
 });
 
 test("archive failure leaves DB unchanged", async () => {

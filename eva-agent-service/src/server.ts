@@ -198,20 +198,12 @@ export function buildServer(services: Services): FastifyInstance {
       services.letta,
       deleteGuard,
       async (event) => {
-        try {
-          await db.recordAdminAudit({
-            action: event.action,
-            targetType: "conversation",
-            targetId: event.conversationId,
-            details: { telegram_id: event.telegramId },
-          });
-        } catch (error) {
-          logger.warn("Не удалось записать аудит диалога", {
-            action: event.action,
-            targetId: event.conversationId,
-            message: error instanceof Error ? error.message : String(error),
-          });
-        }
+        await db.recordAdminAudit({
+          action: event.action,
+          targetType: "conversation",
+          targetId: event.conversationId,
+          details: { telegram_id: event.telegramId },
+        });
       },
     )),
     telegram,
