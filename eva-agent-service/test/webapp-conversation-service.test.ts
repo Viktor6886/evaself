@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import { ConversationService } from "../dist/public/conversation-service.js";
 
-test("migration 049 adds inactive status and its down migration restores the old domain", () => {
-  const up = readFileSync("../postgres/migrations/049_inactive_conversations.sql", "utf8");
-  const down = readFileSync("../postgres/migrations/down/049_inactive_conversations.sql", "utf8");
+const migrationRoot = existsSync("../postgres/migrations") ? "../postgres/migrations" : null;
+test("migration 049 adds inactive status and its down migration restores the old domain", { skip: migrationRoot ? false : "repository migrations are outside the service Docker build context" }, () => {
+  const up = readFileSync(`${migrationRoot!}/049_inactive_conversations.sql`, "utf8");
+  const down = readFileSync(`${migrationRoot!}/down/049_inactive_conversations.sql`, "utf8");
   assert.match(up, /CHECK \(status IN \('active', 'inactive', 'archived'\)\)/);
   assert.match(up, /VALUES \('049_inactive_conversations'\)/);
   assert.match(down, /WHERE status = 'inactive'/);
