@@ -39,7 +39,7 @@ ENV NODE_ENV=production \
     EVA_AGENT_PORT=8070
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git gosu openssl tini \
+ && apt-get install -y --no-install-recommends git gosu openssl ca-certificates tini clamav clamav-freshclam \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

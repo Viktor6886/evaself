@@ -20,6 +20,20 @@ permissions:
   contents: read
 
 jobs:
+  batch16-runtime:
+    name: Batch 16 production runtime
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.22"
+          cache: npm
+          cache-dependency-path: eva-agent-service/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: eva-agent-service
+      - run: ./scripts/ci/test-batch16-runtime.sh
+
   evals-fast:
     name: Fast release evals
     runs-on: ubuntu-24.04

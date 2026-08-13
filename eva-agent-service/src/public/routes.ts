@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
+import multipart from "@fastify/multipart";
 
 import type { Config } from "../config.js";
 import type { Database } from "../db.js";
@@ -627,6 +628,15 @@ export interface MiniAppMemoryDoctor {
   rollback(telegramId: number, actionId: number): Promise<boolean>;
 }
 
+export interface KnowledgeResearchPublic {
+  upload(telegramId:number,input:{name:string;mime:string;stream:import("node:stream").Readable;truncated:()=>boolean}):Promise<unknown>;
+  uploadStatus(telegramId:number,id:string):Promise<unknown>;
+  researchCreate(telegramId:number,input:Record<string,unknown>):Promise<unknown>;
+  researchStatus(telegramId:number,id:string):Promise<unknown>;
+  researchReport(telegramId:number,id:string):Promise<unknown>;
+  researchCancel(telegramId:number,id:string):Promise<unknown>;
+}
+
 function requireDoctor(doctor: MiniAppMemoryDoctor | undefined): MiniAppMemoryDoctor {
   if (!doctor) throw badRequest("Диагностика памяти отключена");
   return doctor;
@@ -650,6 +660,7 @@ export function registerPublicRoutes(
      */
     memory?: MiniAppMemoryControl;
     memoryDoctor?: MiniAppMemoryDoctor;
+    knowledgeResearch?: KnowledgeResearchPublic;
   },
 ): void {
   const limiter = input.rateLimiter ?? new NoopRateLimiter();
@@ -675,6 +686,9 @@ export function registerPublicRoutes(
   });
 
   void app.register(async (publicApp) => {
+    await publicApp.register(multipart, {
+      limits: { files: 1, fields: 0, fileSize: 10 * 1024 * 1024, parts: 1 },
+    });
     publicApp.addHook("onRequest", async (request) => {
       // Лимит по адресу — ДО проверки подписи: сама проверка стоит
       // процессорного времени, и поток неподписанных запросов не должен
@@ -811,6 +825,21 @@ export function registerPublicRoutes(
     publicApp.get("/progress", async (request) => ({
       progress: await input.repository.getProgress(publicUser(request).id),
     }));
+
+    publicApp.post("/knowledge/uploads", { bodyLimit: 10 * 1024 * 1024 + 64 * 1024 }, async(request)=>{
+      if(!input.knowledgeResearch)throw badRequest("Загрузка знаний отключена");
+      let part;
+      try { part=await request.file({limits:{files:1,fields:0,parts:1,fileSize:10*1024*1024}}); }
+      catch { throw badRequest("Некорректный multipart документ"); }
+      if(!part||part.fieldname!=="file"||!part.filename||!part.mimetype)throw badRequest("Ожидается единственный файл в поле file");
+      try{return await input.knowledgeResearch.upload(publicUser(request).id,{name:part.filename,mime:part.mimetype,stream:part.file,truncated:()=>part.file.truncated});}
+      catch(error){throw badRequest(error instanceof Error?error.message:"Некорректный документ");}
+    });
+    publicApp.get("/knowledge/uploads/:id",async(request)=>{if(!input.knowledgeResearch)throw badRequest("Загрузка знаний отключена");return await input.knowledgeResearch.uploadStatus(publicUser(request).id,String((request.params as {id?:string}).id??""));});
+    publicApp.post("/research",async(request)=>{if(!input.knowledgeResearch)throw badRequest("Исследования отключены");return await input.knowledgeResearch.researchCreate(publicUser(request).id,requestBody(request));});
+    publicApp.get("/research/:id",async(request)=>{if(!input.knowledgeResearch)throw badRequest("Исследования отключены");return await input.knowledgeResearch.researchStatus(publicUser(request).id,String((request.params as {id?:string}).id??""));});
+    publicApp.get("/research/:id/report",async(request)=>{if(!input.knowledgeResearch)throw badRequest("Исследования отключены");return await input.knowledgeResearch.researchReport(publicUser(request).id,String((request.params as {id?:string}).id??""));});
+    publicApp.post("/research/:id/cancel",async(request)=>{if(!input.knowledgeResearch)throw badRequest("Исследования отключены");return await input.knowledgeResearch.researchCancel(publicUser(request).id,String((request.params as {id?:string}).id??""));});
 
     // ---- Контроль памяти (шаг 16) ---------------------------------
     //

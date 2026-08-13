@@ -14,9 +14,13 @@
     "dev": "tsc -p tsconfig.json && node --watch dist/index.js",
     "test": "npm run build && node --test --experimental-strip-types test/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "eslint src test"
+    "lint": "eslint src test",
+    "test:batch16-runtime": "../scripts/ci/test-batch16-runtime.sh"
   },
   "dependencies": {
+    "@fastify/multipart": "9.4.0",
+    "@langchain/core": "1.0.6",
+    "@langchain/textsplitters": "1.0.1",
     "@letta-ai/letta-agent-sdk": "0.6.2",
     "@letta-ai/letta-client": "1.12.1",
     "@opentelemetry/api": "1.9.1",
@@ -26,16 +30,21 @@
     "argon2": "^0.45.1",
     "bullmq": "6.0.10",
     "fastify": "5.11.2",
+    "file-type": "^21.0.0",
     "ioredis": "5.11.1",
     "luxon": "3.7.2",
+    "mammoth": "^1.11.0",
     "node-pty": "1.1.0",
-    "pg": "8.22.0"
+    "pdf-parse": "^2.4.5",
+    "pg": "8.22.0",
+    "yauzl": "^3.4.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",
     "@types/luxon": "3.7.4",
     "@types/node": "22.20.1",
     "@types/pg": "8.20.4",
+    "@types/yauzl": "^3.4.0",
     "eslint": "^9.39.5",
     "typescript": "5.9.3",
     "typescript-eslint": "^8.66.0"

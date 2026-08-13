@@ -79,6 +79,7 @@ export const CURATOR_JOB_TYPE = "memory_curator";
  */
 export function curatorSpec(): AgentJobSpec {
   return {
+    repairInvalidResult: true,
     jobType: CURATOR_JOB_TYPE,
     // Назначение из существующего списка: `maintenance` — единственное,
     // из которого нельзя писать человеку и которому не разрешён ни один
