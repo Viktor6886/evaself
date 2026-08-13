@@ -41,3 +41,6 @@ npm-debug.log*
 # --- typescript build output ---
 dist/
 *.tsbuildinfo
+
+/evals/reports/
+/evals/.cache/

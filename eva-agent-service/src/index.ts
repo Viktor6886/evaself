@@ -33,6 +33,7 @@ import { ConversationHighlightService } from "./memory/conversation-highlights.j
 import { GraphRepository } from "./memory/graph-repository.js";
 import { EpisodeService, EpisodeTracker, type EpisodeRow } from "./memory/episodes.js";
 import { CURATOR_JOB_TYPE, MemoryCuratorService } from "./memory/curator/service.js";
+import { SUBAGENT_JOB_TYPE, SUBAGENTS, SubagentCoordinator, reflectionIntent } from "./subagents/index.js";
 import { MemoryUserControl, MiniAppMemoryGateway } from "./memory/curator/user-control.js";
 import {
   MEMORY_DOCTOR_JOB_TYPE,
@@ -527,6 +528,14 @@ async function main(): Promise<void> {
             conversationId: episode.conversationId,
             traceId: crypto.randomUUID(),
           }));
+          if (config.subagentsEnabled && config.reflectionSubagentEnabled) {
+            await jobs.outbox.record(client, reflectionIntent({
+              userId,
+              episodeId: episode.id,
+              conversationId: episode.conversationId,
+              traceId: crypto.randomUUID(),
+            }));
+          }
         }),
       );
     };
@@ -553,6 +562,36 @@ async function main(): Promise<void> {
         versioned: outcome.applied.versioned,
       });
     });
+    if (config.subagentsEnabled && config.reflectionSubagentEnabled) {
+      const subagents = new SubagentCoordinator(jobs.agentJobs, async (ref, subject) => {
+        const resolved = await new ArtifactRegistry(db).resolve({ kind: "prompt", slug: ref, environment: "production", subject });
+        if (!resolved) throw new PermanentJobFailure("subagent_prompt_missing");
+        const body = resolved.body as Record<string, unknown>;
+        const prompt = typeof body.prompt === "string" ? body.prompt : typeof body.content === "string" ? body.content : "";
+        if (!prompt.trim()) throw new PermanentJobFailure("subagent_prompt_invalid");
+        return prompt;
+      });
+      jobs.runtime.register(SUBAGENT_JOB_TYPE, async (context) => {
+        const userId = context.envelope.userId;
+        const episodeId = Number(context.envelope.payload.episode_id);
+        if (!userId || !Number.isFinite(episodeId)) throw new PermanentJobFailure("subagent_payload_invalid");
+        const episode = await episodes.byId(userId, episodeId);
+        if (!episode) throw new PermanentJobFailure("subagent_episode_missing");
+        const result = await subagents.run("memory_reflection", {
+          userId,
+          agentId: context.envelope.agentId ?? "",
+          parentConversationId: context.envelope.conversationId ?? "",
+          messageRefs: episode.messageIds,
+          memoryScopes: ["highlights", "evidence"],
+          context: { kind: "job_runtime", parentKind: "interactive", tenantUserId: userId, attempt: context.attempt },
+        }, context.signal);
+        if (result.status === "succeeded" && result.result) await curator.applyValidatedProposal({
+          runId: `${context.runId}:curator`, userId,
+          agentId: context.envelope.agentId ?? "", episodeId,
+          parentConversationId: context.envelope.conversationId ?? "", signal: context.signal,
+        }, (result.result.payload ?? result.result));
+      }, { softTimeoutMs: SUBAGENTS.memory_reflection.timeoutMs, hardDeadlineMs: 120_000, maxAttempts: SUBAGENTS.memory_reflection.retries + 1 });
+    }
   }
 
   // Memory Doctor — тоже только задание очереди. Причина та же, что у

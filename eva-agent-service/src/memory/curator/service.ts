@@ -85,7 +85,7 @@ export function curatorSpec(): AgentJobSpec {
     // инструмент. Curator и не должен ничего вызывать: он читает эпизод
     // и возвращает структуру.
     purpose: "maintenance",
-    budget: { maxTokens: 6_000, maxDurationMs: 90_000, maxCostMicros: 40_000 },
+    budget: { maxInputTokens: 5_000, maxOutputTokens: 1_000, maxDurationMs: 90_000, maxCostMicros: 40_000 },
     instruction: [
       "Ты извлекаешь долговременные факты из завершённого эпизода разговора.",
       "Бери только то, что человек сказал сам или что прямо следует из его слов.",
@@ -265,6 +265,23 @@ export class MemoryCuratorService {
     await this.recordRun(input, mode, "succeeded", result ?? null, applied, null);
     await this.episodes.finish(input.userId, episode.id, "curated");
     return { status: "succeeded", mode, candidates, applied };
+  }
+
+  /** Reuses the server candidate path for a proposal produced by the subagent. */
+  async applyValidatedProposal(input: CuratorRunInput, value: unknown): Promise<CuratorOutcome> {
+    const mode = input.mode ?? "apply";
+    const parsed = parseCuratorResult(JSON.stringify(value));
+    if (!parsed.ok) return { status: "invalid_result", mode, candidates: [], applied: { ...EMPTY_APPLIED }, code: parsed.code };
+    const episode = mode === "apply"
+      ? await this.episodes.claimForCuration(input.userId, input.episodeId)
+      : await this.episodes.byId(input.userId, input.episodeId);
+    if (!episode) return { status: "skipped", mode, candidates: [], applied: { ...EMPTY_APPLIED } };
+    const candidates = parsed.result.candidates;
+    if (mode === "preview") return { status: candidates.length ? "succeeded" : "empty", mode, candidates, applied: { ...EMPTY_APPLIED } };
+    const applied = candidates.length ? await this.applyCandidates(input.userId, episode, candidates) : { ...EMPTY_APPLIED };
+    await this.recordRun(input, mode, candidates.length ? "succeeded" : "empty", parsed.result, applied, null);
+    await this.episodes.finish(input.userId, episode.id, "curated");
+    return { status: candidates.length ? "succeeded" : "empty", mode, candidates, applied };
   }
 
   /**

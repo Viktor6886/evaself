@@ -20,6 +20,24 @@ permissions:
   contents: read
 
 jobs:
+  evals-fast:
+    name: Fast release evals
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.22"
+          cache: npm
+          cache-dependency-path: eva-agent-service/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: eva-agent-service
+      - run: npm run build
+        working-directory: eva-agent-service
+      - run: node --test evals/framework.test.mjs
+      - run: node evals/run.mjs fast --target internal-api --cache "$RUNNER_TEMP/eval-cache"
+      - run: node evals/run.mjs fast --target telegram-simulator --cache "$RUNNER_TEMP/eval-cache-telegram"
+
   # ===================================================================
   # Область изменений: что дорогим проверкам вообще есть смысл проверять
   # ===================================================================

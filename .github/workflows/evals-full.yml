@@ -1,0 +1,32 @@
+name: Full release evals
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+  pull_request:
+    paths: ['eva-agent-service/src/router/**','eva-agent-service/.env.example','.env.example','compose.yaml','install.sh','scripts/**','evals/**','prompts/**','.skills/**','eva-agent-service/package.json','eva-agent-service/package-lock.json','eva-agent-service/src/tools/**','eva-agent-service/src/agent-tools.ts','eva-agent-service/tools/**','tools/**','versions.env','.github/workflows/evals-full.yml']
+permissions:
+  contents: read
+jobs:
+  full-evals:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22'
+          cache: npm
+          cache-dependency-path: eva-agent-service/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: eva-agent-service
+      - run: npm run build
+        working-directory: eva-agent-service
+      - run: node --test evals/framework.test.mjs
+      - run: node evals/run.mjs full --target internal-api --cache "$RUNNER_TEMP/eval-cache" ${{ github.event_name == 'release' && '--release' || '' }}
+        env: &eval-secrets
+          EVA_EVAL_LIVE_URL: ${{ secrets.EVA_EVAL_LIVE_URL }}
+          EVA_EVAL_LIVE_TOKEN: ${{ secrets.EVA_EVAL_LIVE_TOKEN }}
+          EVA_EVAL_LIVE_TENANT: ${{ secrets.EVA_EVAL_LIVE_TENANT }}
+          EVA_EVAL_JUDGE_KEY: ${{ secrets.EVA_EVAL_JUDGE_KEY }}
+      - run: node evals/run.mjs full --target telegram-simulator --cache "$RUNNER_TEMP/eval-cache-telegram" ${{ github.event_name == 'release' && '--release --delivery-only' || '' }}
+        env: *eval-secrets

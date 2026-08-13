@@ -228,3 +228,8 @@
 - `src/skills/index.ts` — CoreSkillCatalog, tenant/environment-safe hybrid PostgresSkillRepository и SkillRouter; RuntimeContextBuilder остаётся единственным финальным сборщиком, canonical runId фиксирует core+routed usages.
 - `src/admin/skill-operations.ts`, `/api/admin/v1/skills/operations` — защищённые, аудитируемые агрегаты latency/reranker/reason/selected version+score/sticky/fallback без сырого текста и conversation IDs; Admin UI показывает durable данные.
 - Флаги `EVA_CORE_SKILLS`, `EVA_SKILL_ROUTER` выключены по умолчанию; sticky/events/search schema — migration 047; `scripts/ci/test-skills-postgres.mjs` проверяет production semantics на настоящем PostgreSQL и общий down/up явно проверяет 047.
+
+## Субагенты и evals (Batch 15, на ревью)
+
+- `src/subagents/index.ts` — закрытый декларативный реестр семи ограниченных субагентов и coordinator поверх канонического `AgentJobRunner`; tenant/tool/memory guards, per-user exclusion, no recursion; флаги выключены.
+- `evals/` — изолированный от production runtime воспроизводимый framework, synthetic datasets, раздельные lane reports, internal API и Telegram simulator targets; fast release gate в CI.

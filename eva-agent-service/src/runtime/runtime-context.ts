@@ -106,6 +106,9 @@ export class RuntimeContextBuilder {
     detectLanguage?: boolean;
     /** Canonical TurnLifecycle run_id; never synthesize one in context code. */
     turnId?: string;
+    memoryScopes?: readonly string[];
+    allowedSkills?: readonly string[];
+    modelPolicy?: "economy" | "auto" | "quality";
   }): Promise<RuntimeContext> {
     const started = performance.now();
     const loaded = await this.load(input.userId, input.conversationId);
@@ -135,7 +138,9 @@ export class RuntimeContextBuilder {
       ? null
       : profileHintFrom(row);
     const profileCheckMs = elapsed(profileStarted);
-    const taskActivity = await this.taskEvents.contextLines(input.userId).catch(() => []);
+    const scoped = input.memoryScopes === undefined ? null : new Set(input.memoryScopes);
+    const permits = (scope: string) => scoped === null || scoped.has(scope);
+    const taskActivity = permits("tasks") ? await this.taskEvents.contextLines(input.userId).catch(() => []) : [];
     const skillLines = await this.options.skillContext?.({ userId: input.userId, conversationId: input.conversationId, purpose: row.purpose, message: input.userMessage, turnId: input.turnId }).catch(() => []);
     return {
       userId: Number(row.user_id),
@@ -145,26 +150,26 @@ export class RuntimeContextBuilder {
       purpose: row.purpose,
       localTime: local.toISO({ suppressMilliseconds: true }) ?? local.toUTC().toISO()!,
       timezone,
-      city: row.city,
+      city: permits("profile") ? row.city : null,
       countryCode: row.country_code,
       responseLanguage: language.language,
       responseMode: row.response_mode,
       useEmoji: row.use_emoji,
-      communicationStyle: row.communication_style,
-      profileHint,
-      activeGoal: this.options.vectorGoalsEnabled === false
+      communicationStyle: permits("profile") ? row.communication_style : null,
+      profileHint: permits("profile") ? profileHint : null,
+      activeGoal: !permits("goals") || this.options.vectorGoalsEnabled === false
         ? null
         : row.active_goal_title ?? null,
-      nextResult: this.options.vectorGoalsEnabled === false
+      nextResult: !permits("goals") || this.options.vectorGoalsEnabled === false
         ? null
         : row.next_result_title ?? null,
-      nextStep: this.options.vectorGoalsEnabled === false
+      nextStep: !permits("goals") || this.options.vectorGoalsEnabled === false
         ? null
         : row.next_action ?? null,
-      relevantMemory: (input.relevantMemory ?? []).slice(0, 5),
-      llmQualityMode: row.llm_quality_mode,
+      relevantMemory: (input.relevantMemory ?? []).filter((line) => scoped === null || [...scoped].some((scope) => line.startsWith(`${scope}:`) || line.startsWith(`${scope.replace(/s$/, "")}:`))).slice(0, 5),
+      llmQualityMode: input.modelPolicy ?? row.llm_quality_mode,
       taskActivity,
-      skillLines,
+      skillLines: input.allowedSkills === undefined ? skillLines : input.allowedSkills.length === 0 ? [] : (skillLines ?? []).filter((line) => input.allowedSkills!.some((slug) => line.includes(slug))),
       metrics: {
         runtimeContextMs: elapsed(started),
         profileCheckMs,

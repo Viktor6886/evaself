@@ -40,7 +40,10 @@ import type { RuntimeContextBuilder } from "../runtime/runtime-context.js";
 export type AgentJobPurpose = Exclude<ConversationPurpose, "chat">;
 
 export interface AgentJobBudget {
-  maxTokens: number;
+  /** Legacy combined cap retained for existing job specifications. */
+  maxTokens?: number;
+  maxInputTokens?: number;
+  maxOutputTokens?: number;
   maxDurationMs: number;
   /** Микроединицы валюты: доли копейки складываются, целые — теряются. */
   maxCostMicros: number;
@@ -73,6 +76,10 @@ export interface AgentJobSpec {
   parseResult?: (reply: string) => ProposalParse;
   /** Инструкция про формат ответа задаётся спецификацией целиком. */
   responseContract?: readonly string[];
+  modelPolicy?: "economy" | "auto" | "quality";
+  allowedTools?: readonly string[];
+  allowedSkills?: readonly string[];
+  memoryScopes?: readonly string[];
 }
 
 export interface AgentProposalItem {
@@ -98,7 +105,10 @@ export interface AgentProposal {
 }
 
 export interface AgentJobUsage {
+  /** Combined projection retained for persisted consumers. */
   tokens: number;
+  inputTokens: number;
+  outputTokens: number;
   durationMs: number;
   costMicros: number;
 }
@@ -155,7 +165,7 @@ export class AgentJobRunner {
    */
   async run(input: AgentJobInput): Promise<AgentJobOutcome> {
     const startedAt = Date.now();
-    const empty: AgentJobUsage = { tokens: 0, durationMs: 0, costMicros: 0 };
+    const empty: AgentJobUsage = { tokens: 0, inputTokens: 0, outputTokens: 0, durationMs: 0, costMicros: 0 };
     if (!this.enabled) {
       return { status: "failed", usage: empty, code: "agent_jobs_disabled" };
     }
@@ -183,17 +193,35 @@ export class AgentJobRunner {
         conversationId: conversation.conversationId,
         userMessage: instruction,
         detectLanguage: false,
+        memoryScopes: input.spec.memoryScopes,
+        allowedSkills: input.spec.allowedSkills,
+        modelPolicy: input.spec.modelPolicy,
       });
       const prompt = this.runtimeContext.wrapUserMessage(context, instruction, {
         internalOperationType: input.spec.jobType,
         correlationId: input.runId,
       });
 
-      const turn = await this.letta.runTurn(conversation.conversationId, prompt, {
-        // Барьер отмены общий с заданием: истёкший дедлайн, потерянная
-        // аренда и явная отмена одинаково прекращают генерацию.
-        isCancelled: async () => input.signal.aborted,
-        cancelPollMs: 500,
+      const deadline = new AbortController();
+      const abortFromParent = () => deadline.abort(input.signal.reason);
+      input.signal.addEventListener("abort", abortFromParent, { once: true });
+      const timeout = setTimeout(() => deadline.abort(new AgentJobError("agent_job_timeout")), Math.max(1, input.spec.budget.maxDurationMs));
+      const turnPromise = this.letta.runTurn(conversation.conversationId, prompt, {
+        isCancelled: async () => deadline.signal.aborted,
+        cancelPollMs: 50,
+        allowedTools: input.spec.allowedTools,
+        canUseTool: async (toolName) => input.spec.allowedTools?.includes(toolName)
+          ? { behavior: "allow", updatedInput: {} }
+          : { behavior: "deny", message: `Tool ${toolName} is outside the job allowlist` },
+      });
+      const aborted = new Promise<never>((_resolve, reject) => deadline.signal.addEventListener("abort", () => {
+        void this.letta.abortTurn(conversation.conversationId).catch(() => undefined).finally(() => {
+          reject(deadline.signal.reason instanceof Error ? deadline.signal.reason : new AgentJobError("aborted"));
+        });
+      }, { once: true }));
+      const turn = await Promise.race([turnPromise, aborted]).finally(() => {
+        clearTimeout(timeout);
+        input.signal.removeEventListener("abort", abortFromParent);
       });
 
       const usage = this.usageOf(turn.usage, startedAt);
@@ -219,8 +247,9 @@ export class AgentJobRunner {
       await this.persist(input, conversation.conversationId, "succeeded", parsed.proposal, usage, false);
       return { status: "succeeded", proposal: parsed.proposal, usage };
     } catch (error) {
-      const usage = { tokens: 0, durationMs: Date.now() - startedAt, costMicros: 0 };
+      const usage = { tokens: 0, inputTokens: 0, outputTokens: 0, durationMs: Date.now() - startedAt, costMicros: 0 };
       const code = error instanceof Error ? (error.name === "AgentJobError" ? (error as AgentJobError).code : error.name) : "unknown_error";
+      await this.persist(input, input.parentConversationId, "failed", null, usage, false, code);
       this.logger.warn("Фоновый ход агента не выполнен", {
         jobType: input.spec.jobType,
         code,
@@ -269,20 +298,20 @@ export class AgentJobRunner {
       const parsed = Number(value);
       return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
     };
-    const total = usage
-      ? number(usage.total_tokens)
-        || number(usage.input_tokens) + number(usage.output_tokens)
-        || number(usage.prompt_tokens) + number(usage.completion_tokens)
-      : 0;
+    const inputTokens = usage ? number(usage.input_tokens) || number(usage.prompt_tokens) : 0;
+    const outputTokens = usage ? number(usage.output_tokens) || number(usage.completion_tokens) : 0;
+    const tokens = usage ? number(usage.total_tokens) || inputTokens + outputTokens : 0;
     return {
-      tokens: total,
+      tokens, inputTokens, outputTokens,
       durationMs: Date.now() - startedAt,
       costMicros: usage ? number(usage.cost_micros) : 0,
     };
   }
 
   private overBudget(usage: AgentJobUsage, budget: AgentJobBudget): keyof AgentJobBudget | null {
-    if (budget.maxTokens > 0 && usage.tokens > budget.maxTokens) return "maxTokens";
+    if ((budget.maxInputTokens ?? 0) > 0 && usage.inputTokens > budget.maxInputTokens!) return "maxInputTokens";
+    if ((budget.maxOutputTokens ?? 0) > 0 && usage.outputTokens > budget.maxOutputTokens!) return "maxOutputTokens";
+    if (budget.maxTokens && usage.tokens > budget.maxTokens) return "maxTokens";
     if (budget.maxDurationMs > 0 && usage.durationMs > budget.maxDurationMs) return "maxDurationMs";
     if (budget.maxCostMicros > 0 && usage.costMicros > budget.maxCostMicros) return "maxCostMicros";
     return null;
@@ -321,7 +350,7 @@ export class AgentJobRunner {
             input.spec.purpose,
             status,
             JSON.stringify(proposal ?? {}),
-            usage.tokens,
+            usage.inputTokens + usage.outputTokens,
             usage.durationMs,
             usage.costMicros,
             budgetExceeded,
