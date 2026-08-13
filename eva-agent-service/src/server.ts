@@ -192,7 +192,7 @@ export function buildServer(services: Services): FastifyInstance {
 
   registerPublicRoutes(app, {
     config,
-    repository: new PublicRepository(db, profile, goals),
+    repository: new PublicRepository(db, profile, goals, services.letta),
     telegram,
     ...(services.miniAppSessions ? { sessions: services.miniAppSessions } : {}),
     rateLimiter,

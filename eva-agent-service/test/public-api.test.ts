@@ -118,6 +118,10 @@ test("/public/session and /public/tasks derive identity only from initData", asy
       protectedCalls.push({ operation: "complete", telegramId, id: workBlockId });
       return { id: String(workBlockId), status: "completed" };
     },
+    listConversations: async (telegramId) => [{ id: "conv-1", title: "Основной чат", active: true, telegram_id: telegramId }],
+    createConversation: async (telegramId, input) => ({ id: "conv-2", title: input.title, active: true, telegram_id: telegramId }),
+    activateConversation: async (telegramId, conversationId) => ({ id: conversationId, active: true, telegram_id: telegramId }),
+    archiveConversation: async (telegramId, conversationId) => ({ id: conversationId, archived: true, replacement_id: "conv-2", telegram_id: telegramId }),
   };
   const app = Fastify();
   registerPublicRoutes(app, {
@@ -158,6 +162,18 @@ test("/public/session and /public/tasks derive identity only from initData", asy
   assert.equal(profile.statusCode, 200);
   assert.equal(profile.json().profile.telegram_id, USER.id);
   assert.equal(profile.json().profile.input.user_id, 999999);
+
+  const conversationRequests = [
+    { method: "GET", url: "/public/conversations" },
+    { method: "POST", url: "/public/conversations", payload: { title: "Новый чат", user_id: 999999 } },
+    { method: "POST", url: "/public/conversations/conv-1/activate", payload: { user_id: 999999 } },
+    { method: "DELETE", url: "/public/conversations/conv-1", payload: { user_id: 999999 } },
+  ] as const;
+  for (const request of conversationRequests) {
+    const response = await app.inject({ ...request, headers: { "x-telegram-init-data": initData } });
+    assert.equal(response.statusCode, 200, `${request.method} ${request.url}: ${response.body}`);
+    assert.equal(response.json().conversation?.telegram_id ?? response.json().conversations?.[0]?.telegram_id, USER.id);
+  }
 
   const protectedRequests = [
     { method: "GET", url: "/public/today" },
