@@ -1,7 +1,18 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import { ConversationService } from "../dist/public/conversation-service.js";
+
+test("migration 049 adds inactive status and its down migration restores the old domain", () => {
+  const up = readFileSync("../postgres/migrations/049_inactive_conversations.sql", "utf8");
+  const down = readFileSync("../postgres/migrations/down/049_inactive_conversations.sql", "utf8");
+  assert.match(up, /CHECK \(status IN \('active', 'inactive', 'archived'\)\)/);
+  assert.match(up, /VALUES \('049_inactive_conversations'\)/);
+  assert.match(down, /WHERE status = 'inactive'/);
+  assert.match(down, /CHECK \(status IN \('active', 'archived'\)\)/);
+  assert.match(down, /DELETE FROM schema_migrations WHERE version = '049_inactive_conversations'/);
+});
 
 class FakeClient {
   released = false;
@@ -25,7 +36,7 @@ class FakeClient {
     if (sql.includes("FROM agent_conversations") && sql.includes("FOR UPDATE")) {
       const id = String(values[2]);
       const row = this.db.rows.get(id);
-      return { rows: row && row.user_id === values[0] && row.agent_id === values[1] && row.status === "active" ? [{ ...row, id }] : [] };
+      return { rows: row && row.user_id === values[0] && row.agent_id === values[1] && ["active", "inactive"].includes(row.status) ? [{ ...row, id }] : [] };
     }
     if (sql.includes("canonical conversation status")) {
       if (this.db.failReconciliation) throw new Error("verification failed");
@@ -35,17 +46,23 @@ class FakeClient {
     if (sql.includes("canonical active conversation after ambiguous COMMIT")) {
       if (this.db.failReconciliation) throw new Error("verification failed");
       if (this.db.missingReconciliationLink) return { rows: [] };
-      return { rows: [{ active_conversation_id: this.db.active }] };
+      const activeRows = [...this.db.rows].filter(([, row]) => row.user_id === values[0] && row.agent_id === values[1] && row.status === "active");
+      return { rows: [{ active_conversation_id: this.db.active, active_status: activeRows.find(([id]) => id === this.db.active)?.[1].status ?? null, target_status: this.db.rows.get(String(values[2]))?.status ?? null }] };
     }
     if (sql.includes("INSERT INTO agent_conversations")) {
       if (this.db.failInsert) throw new Error("insert failed");
       const id = String(values[2]);
-      this.db.rows.set(id, { user_id: values[0], agent_id: values[1], title: values[3], status: "active" });
+      this.db.rows.set(id, { user_id: values[0], agent_id: values[1], title: values[3], status: "inactive" });
       return { rows: [] };
+    }
+    if (sql.includes("SET status = 'inactive'")) { this.db.rows.get(String(values[2]))!.status = "inactive"; return { rows: [] }; }
+    if (sql.includes("SET status = 'active'")) {
+      if ([...this.db.rows].some(([id, row]) => id !== String(values[2]) && row.agent_id === values[1] && row.status === "active")) throw new Error("duplicate active purpose");
+      this.db.rows.get(String(values[2]))!.status = "active"; return { rows: [] };
     }
     if (sql.includes("UPDATE agent_links")) { this.db.active = String(values[2]); return { rows: [] }; }
     if (sql.includes("SET status = 'archived'")) { this.db.rows.get(String(values[2]))!.status = "archived"; return { rows: [] }; }
-    if (sql.includes("SELECT conversation_id AS id")) return { rows: [...this.db.rows].filter(([, r]) => r.user_id === values[0] && r.agent_id === values[1] && r.status === "active").map(([id, r]) => ({ id, title: r.title, active: id === this.db.active })) };
+    if (sql.includes("SELECT conversation_id AS id")) return { rows: [...this.db.rows].filter(([, r]) => r.user_id === values[0] && r.agent_id === values[1] && ["active", "inactive"].includes(r.status)).map(([id, r]) => ({ id, title: r.title, active: id === this.db.active })) };
     throw new Error(`unexpected SQL: ${sql}`);
   }
   release() { this.released = true; }
@@ -61,7 +78,7 @@ class FakeDb {
   missingReconciliationLink = false;
   clients = 0;
   sql: string[] = [];
-  rows = new Map<string, any>([["conv-active", { user_id: 7, agent_id: "agent-1", title: "Active", status: "active" }], ["conv-other", { user_id: 7, agent_id: "agent-1", title: "Other", status: "active" }], ["conv-foreign", { user_id: 8, agent_id: "agent-2", title: "Foreign", status: "active" }], ["conv-archived", { user_id: 7, agent_id: "agent-1", title: "Old", status: "archived" }]]);
+  rows = new Map<string, any>([["conv-active", { user_id: 7, agent_id: "agent-1", title: "Active", status: "active" }], ["conv-other", { user_id: 7, agent_id: "agent-1", title: "Other", status: "inactive" }], ["conv-foreign", { user_id: 8, agent_id: "agent-2", title: "Foreign", status: "inactive" }], ["conv-archived", { user_id: 7, agent_id: "agent-1", title: "Old", status: "archived" }]]);
   async transactionClient() { this.clients += 1; return new FakeClient(this); }
 }
 function fixture(failAudit = false) {
@@ -174,7 +191,7 @@ test("archive failure leaves DB unchanged", async () => {
   const { db, service, calls } = fixture();
   (service as any).letta.updateConversation = async () => { calls.push("archive-fail"); throw new Error("Letta down"); };
   await assert.rejects(() => service.archive(101, "conv-other"), /Letta down/);
-  assert.equal(db.rows.get("conv-other").status, "active");
+  assert.equal(db.rows.get("conv-other").status, "inactive");
 });
 
 test("lifecycle uses advisory transaction lock, preserves inactive rows and audits", async () => {
@@ -184,7 +201,8 @@ test("lifecycle uses advisory transaction lock, preserves inactive rows and audi
   await service.activate(101, "conv-other");
   await service.archive(101, "conv-active");
   assert.ok(db.sql.some((sql) => sql.includes("pg_advisory_xact_lock")));
-  assert.equal(db.rows.get("conv-new").status, "active");
+  assert.equal(db.rows.get("conv-new").status, "inactive");
+  assert.equal(db.rows.get("conv-other").status, "active");
   assert.equal(db.rows.get("conv-active").status, "archived");
   assert.deepEqual(calls.slice(-2), ["guard:conv-active", 'conv-active:{"archived":true}']);
   assert.deepEqual(audits.map((x) => x.action), ["conversation.create", "conversation.activate", "conversation.archive"]);
