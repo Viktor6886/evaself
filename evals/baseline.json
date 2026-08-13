@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "thresholds": {
+    "deterministic": 1,
+    "mock": 1,
+    "controlled_live": 0.95,
+    "model_judge": 0.9
+  },
+  "note": "Any deterministic safety or release-gate failure blocks release."
+}

@@ -563,6 +563,18 @@ export class EvaWorkflow {
           });
         }
         this.highlights?.schedule(user.id, conversationId);
+        // The bounded reflection counter observes canonical user ingress.
+        // Assistant output must neither advance it nor replace its reference.
+        this.episodes?.observe({
+          userId: user.id,
+          conversationId,
+          signal: {
+            kind: "message",
+            text: prompt,
+            messageId: `telegram:${update.updateId}`,
+            at: new Date(),
+          },
+        });
         // Граница эпизода: ход завершён. Детектор решает сам, закрывать
         // ли эпизод, — короткий обмен репликами его не закрывает.
         this.episodes?.observe({
@@ -570,8 +582,6 @@ export class EvaWorkflow {
           conversationId,
           signal: {
             kind: "turn_completed",
-            text: answer.reply,
-            messageId: answer.conversationId,
             at: new Date(),
           },
         });

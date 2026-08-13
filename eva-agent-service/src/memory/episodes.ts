@@ -50,6 +50,7 @@ export interface EpisodeState {
   vocabulary: Set<string>;
   contentLength: number;
   privacy: EpisodePrivacy;
+  substantiveMessages: number;
 }
 
 export interface BoundaryDecision {
@@ -76,6 +77,7 @@ export function newEpisodeState(at: Date, privacy: EpisodePrivacy = "normal"): E
     vocabulary: new Set(),
     contentLength: 0,
     privacy,
+    substantiveMessages: 0,
   };
 }
 
@@ -371,15 +373,28 @@ export class EpisodeTracker {
     if (!this.episodes.active) return;
     const key = `${input.userId}:${input.conversationId}`;
     const state = this.open.get(key) ?? newEpisodeState(input.signal.at, input.privacy ?? "normal");
-    const decision = detectBoundary(state, input.signal);
+    let decision = detectBoundary(state, input.signal);
     if (!decision.closed) {
-      this.open.set(key, absorb(state, input.signal));
-      return;
+      const next = absorb(state, input.signal);
+      // Eight substantive user messages are a bounded production reflection
+      // boundary. Short acknowledgements do not advance it; closing through
+      // the canonical episode path preserves the existing completion trigger,
+      // durable transaction and idempotent episode key.
+      const substantive = input.signal.kind === "message"
+        && (input.signal.text?.trim().length ?? 0) >= 40
+        && significantWords(input.signal.text ?? "").length >= 3;
+      if (substantive) next.substantiveMessages += 1;
+      const boundedCount = next.substantiveMessages;
+      if (boundedCount < 8 || boundedCount > 15) {
+        this.open.set(key, next);
+        return;
+      }
+      decision = { closed: true, reason: "turn_completed", worthCurating: true };
     }
 
-    // Сообщение, СМЕНИВШЕЕ тему, принадлежит уже следующему эпизоду:
-    // включив его в закрываемый, детектор отдал бы Curator кусок чужого
-    // разговора.
+    // The count boundary is evaluated after absorb(), therefore the current
+    // (eighth) message is already in state and must remain in the closing
+    // episode. Topic shift is the only case assigned to the next episode.
     const closing = state;
     const next = newEpisodeState(input.signal.at, input.privacy ?? "normal");
     this.open.set(key, decision.reason === "topic_shift" ? absorb(next, input.signal) : next);

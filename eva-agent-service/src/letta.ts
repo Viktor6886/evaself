@@ -761,7 +761,8 @@ export class LettaService {
    * живёт здесь, и без него закрытие не отличает занятую сессию от
    * простаивающей.
    */
-  private async acquirePooled(conversationId: string): Promise<PooledSession> {
+  private async acquirePooled(conversationId: string, turnPolicy?: { allowedTools: readonly string[]; canUseTool: CanUseToolCallback }): Promise<PooledSession> {
+    if (turnPolicy && this.sessions.has(conversationId)) this.closeSession(conversationId);
     const pooled = this.sessions.get(conversationId);
     if (pooled && !pooled.closing) {
       pooled.lastUsedAt = Date.now();
@@ -786,7 +787,7 @@ export class LettaService {
 
     let session: LettaCodeSession;
     try {
-      session = await this.openSession(conversationId);
+      session = await this.openSession(conversationId, turnPolicy);
     } catch (error) {
       throw toEvaError(error, `resuming conversation ${conversationId}`);
     }
@@ -830,10 +831,10 @@ export class LettaService {
    * Повторная попытка делается ровно один раз и только на этот отказ: если
    * переоткрытие тоже не удалось, ошибка уходит наверх как есть.
    */
-  private async openSession(conversationId: string): Promise<LettaCodeSession> {
+  private async openSession(conversationId: string, turnPolicy?: { allowedTools: readonly string[]; canUseTool: CanUseToolCallback }): Promise<LettaCodeSession> {
     const session = this.client.resumeSession(
       conversationId,
-      await this.sessionOptions(conversationId),
+      await this.sessionOptions(conversationId, turnPolicy),
     );
     try {
       await this.initialize(session);
@@ -855,7 +856,7 @@ export class LettaService {
       });
       const retry = this.client.resumeSession(
         conversationId,
-        await this.sessionOptions(conversationId),
+        await this.sessionOptions(conversationId, turnPolicy),
       );
       await this.initialize(retry);
       return retry;
@@ -1067,10 +1068,17 @@ export class LettaService {
        * проверял сам барьер, а не выдержку между опросами.
        */
       cancelPollMs?: number;
+      allowedTools?: readonly string[];
+      canUseTool?: CanUseToolCallback;
     } = {},
   ): Promise<TurnResult> {
     const startedAt = Date.now();
-    const pooled = await this.acquirePooled(conversationId);
+    const pooled = await this.acquirePooled(conversationId, options.allowedTools === undefined ? undefined : {
+      allowedTools: options.allowedTools,
+      canUseTool: options.canUseTool ?? ((toolName) => options.allowedTools!.includes(toolName)
+        ? { behavior: "allow", updatedInput: {} }
+        : { behavior: "deny", message: `Tool ${toolName} is outside the job allowlist` }),
+    });
     const session = pooled.session;
     const collected: SDKMessage[] = [];
     let lastCancelCheck = 0;
@@ -1250,7 +1258,7 @@ export class LettaService {
    * created. Keeping that distinction here prevents unsupported create-agent
    * fields from being silently saved but never enforced.
    */
-  private async sessionOptions(conversationId: string): Promise<LettaCodeClientSessionOptions> {
+  private async sessionOptions(conversationId: string, turnPolicy?: { allowedTools: readonly string[]; canUseTool: CanUseToolCallback }): Promise<LettaCodeClientSessionOptions> {
     // Policy resolution may extend the canonical registry with DB-backed MCP
     // tools for this conversation, so it must run before the SDK factory snapshot.
     const policy = this.sessionToolPolicyResolver
@@ -1260,7 +1268,7 @@ export class LettaService {
     const visible = policy ? new Set(policy.visibleTools) : null;
     const tools = allTools.filter((tool) =>
       !this.runtime.disallowed_tools.includes(tool.name) && (!visible || visible.has(tool.name)));
-    const allowed = (this.runtime.allowed_tools ?? tools.map((tool) => tool.name)).filter((name) =>
+    const allowed = (turnPolicy?.allowedTools ?? this.runtime.allowed_tools ?? tools.map((tool) => tool.name)).filter((name) =>
       !this.runtime.disallowed_tools.includes(name) && (!visible || visible.has(name)));
     return {
       // The remote path belongs to the self-hosted App Server container.
@@ -1288,7 +1296,7 @@ export class LettaService {
       ...(allowed !== null
         ? { allowedTools: allowed }
         : {}),
-      ...(policy?.canUseTool ? { canUseTool: policy.canUseTool } : {}),
+      ...(turnPolicy?.canUseTool ? { canUseTool: turnPolicy.canUseTool } : policy?.canUseTool ? { canUseTool: policy.canUseTool } : {}),
     };
   }
 

@@ -141,6 +141,8 @@ export interface Config {
   jobsMirrorMode: boolean;
   /** Универсальный фоновый ход агента (рефлексия, отчёты, исследования). */
   agentJobsEnabled: boolean;
+  subagentsEnabled: boolean;
+  reflectionSubagentEnabled: boolean;
   /**
    * Проверка контракта Letta на живом развёртывании.
    *
@@ -381,6 +383,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     // писать людям параллельно со старым интервалом.
     jobsMirrorMode: bool("EVA_JOBS_MIRROR", true),
     agentJobsEnabled: bool("EVA_AGENT_JOBS", false),
+    subagentsEnabled: bool("EVA_SUBAGENTS", false),
+    reflectionSubagentEnabled: bool("EVA_REFLECTION_SUBAGENT", false),
     lettaSdk060Verify: bool("EVA_LETTA_SDK_060", false),
     lettaAdminClientEnabled: bool("EVA_LETTA_ADMIN_CLIENT", false),
     lettaAdminBaseUrl: str("EVA_LETTA_ADMIN_BASE_URL"),
