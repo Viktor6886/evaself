@@ -12,6 +12,7 @@ import { OperationService } from "./operation-service.js";
 import { IntegrationConfigService } from "./integration-config-service.js";
 import { LlmRouterAdminService } from "./llm-router-service.js";
 import { InternalAgentClient, ProviderService } from "./provider-service.js";
+import { ContextManagementAdminService } from "./context-management-service.js";
 import { HttpMediaSttClient, SttAdminService } from "./stt-service.js";
 import { OutboundGateway } from "./outbound-gateway.js";
 import { buildAdminServer } from "./server.js";
@@ -177,6 +178,7 @@ async function main(): Promise<void> {
     stt,
     integrations,
     users,
+    contextManagement: new ContextManagementAdminService(agentClient),
     securityAudit: new SecurityAuditService({ env: process.env, db: pool }),
     skillOperations: new SkillOperationsService(registryDb),
     // Единый реестр артефактов. Артефакты общесистемные: владельца среди

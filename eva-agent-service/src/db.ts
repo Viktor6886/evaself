@@ -111,6 +111,13 @@ export interface SdkSettingsRow {
   session_idle_ms: number;
   turn_timeout_ms: number;
   app_server_request_timeout_ms: number;
+  automatic_context_management: {
+    enabled: boolean;
+    compaction_message_threshold: number;
+    rotation_message_threshold: number;
+    compaction_mode: "sliding_window" | "all" | "self_compact_sliding_window" | "self_compact_all";
+    sliding_window_percentage: number;
+  };
   created_at: Date;
   updated_at: Date;
 }
@@ -485,7 +492,7 @@ export class Database {
       const { rows } = await client.query<{ user_id: string }>(
         `
           -- tenant: by agent_id — агент принадлежит ровно одному пользователю, agent_links_agent_id_uidx
-          UPDATE agent_links SET conversation_id = $2
+          UPDATE agent_links SET conversation_id = $2, message_count = 0
           WHERE agent_id = $1
             AND ($3::bigint IS NULL OR user_id = $3)
         RETURNING user_id`,
@@ -922,7 +929,8 @@ export class Database {
          session_pool_size = $22,
          session_idle_ms = $23,
          turn_timeout_ms = $24,
-         app_server_request_timeout_ms = $25
+         app_server_request_timeout_ms = $25,
+         automatic_context_management = $26::jsonb
        WHERE id = 1
        RETURNING *`,
       [
@@ -951,6 +959,7 @@ export class Database {
         input.session_idle_ms,
         input.turn_timeout_ms,
         input.app_server_request_timeout_ms,
+        JSON.stringify(input.automatic_context_management),
       ],
     );
     return rows[0]!;

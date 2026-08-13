@@ -8,7 +8,8 @@
     "node": ">=22.19.0"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "node scripts/patch-letta-agent-sdk.mjs && tsc -p tsconfig.json",
+    "postinstall": "node scripts/patch-letta-agent-sdk.mjs",
     "start": "node dist/index.js",
     "dev": "tsc -p tsconfig.json && node --watch dist/index.js",
     "test": "npm run build && node --test --experimental-strip-types test/*.test.ts",

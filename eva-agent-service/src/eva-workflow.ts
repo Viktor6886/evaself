@@ -11,6 +11,7 @@ import type { Logger } from "./logger.js";
 import type { GraphContextService } from "./memory/graph-context.js";
 import type { ConversationHighlightService } from "./memory/conversation-highlights.js";
 import { decideDeepRecall, type DeepRecall } from "./memory/retrieval/deep-recall.js";
+import type { ConversationContextManager } from "./conversations/context-management.js";
 import type { EpisodeTracker } from "./memory/episodes.js";
 import type { UserProfileService } from "./profile/profile-service.js";
 import type { UserTurnLock } from "./turns/user-turn-lock.js";
@@ -98,6 +99,7 @@ export class EvaWorkflow {
      * позиционные аргументы у существующих вызывающих.
      */
     private readonly deepRecall?: DeepRecall,
+    private readonly contextManager?: ConversationContextManager,
   ) {
     this.taskEvents = new TaskEventService(db);
   }
@@ -401,8 +403,16 @@ export class EvaWorkflow {
         }
         typing.stop = this.telegram.startTyping(update.chatId, this.config.typingIntervalMs);
         await this.db.recordUserMessage(user.id);
-        const conversationId = link.conversation_id;
+        let conversationId = link.conversation_id;
         if (!conversationId) throw new Error("У агента отсутствует активный conversation");
+        if (this.contextManager) {
+          conversationId = await this.contextManager.beforeTurn({
+            agentId: link.agent_id,
+            conversationId,
+            userId: user.id,
+            messageCount: Number(link.message_count ?? 0),
+          });
+        }
 
         await this.moveTurn(turnHandle, "context_building");
         const graph = await this.graphContext?.findRelevant(user.id, prompt);

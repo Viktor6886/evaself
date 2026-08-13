@@ -86,6 +86,11 @@ export interface AdminServerServices {
   stt: SttAdminService;
   integrations: IntegrationConfigService;
   users: UserService;
+  contextManagement?: {
+    get(): Promise<unknown>;
+    update(body: Record<string, unknown>): Promise<unknown>;
+    updateConversation(id: string, contextWindowLimit: number): Promise<unknown>;
+  };
   securityAudit?: SecurityAuditService;
   skillOperations?: SkillOperationsService;
   /** Предпросмотр политик хранения. Удаление выполняет задание очереди. */
@@ -1079,6 +1084,32 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
       scope,
     );
     return reply.status(201).send({ scope, expires_at: expiresAt.toISOString() });
+  });
+
+  app.get("/api/admin/v1/context-management", {
+    config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
+  }, async () => {
+    if (!services.contextManagement) throw adminNotFound("Управление контекстом недоступно");
+    return await services.contextManagement.get();
+  });
+
+  app.put("/api/admin/v1/context-management", {
+    config: { roles: ["owner", "admin"] } satisfies RouteAccess,
+  }, async (request) => {
+    if (!services.contextManagement) throw adminNotFound("Управление контекстом недоступно");
+    return await services.contextManagement.update(objectBody(request.body));
+  });
+
+  app.patch("/api/admin/v1/context-management/conversations/:conversationId", {
+    config: { roles: ["owner", "admin"] } satisfies RouteAccess,
+  }, async (request) => {
+    if (!services.contextManagement) throw adminNotFound("Управление контекстом недоступно");
+    const id = (request.params as { conversationId: string }).conversationId;
+    const value = Number(objectBody(request.body).context_window_limit);
+    if (!Number.isInteger(value) || value < 1024 || value > 10_000_000) {
+      throw adminBadRequest("context_window_limit должен быть целым числом 1024–10000000");
+    }
+    return await services.contextManagement.updateConversation(id, value);
   });
 
   app.get("/api/admin/v1/settings", {

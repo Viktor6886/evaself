@@ -320,6 +320,52 @@ export function buildServer(services: Services): FastifyInstance {
     settings: await sdk.update(requireObject(request.body, "Настройки SDK") as SdkSettingsInput),
   }));
 
+  app.get("/v1/context-management", async () => {
+    const { rows } = await db.query(
+      `-- tenant: system — operational inventory for protected administrator endpoint
+       SELECT agent_id, conversation_id, message_count
+         FROM agent_links
+        WHERE status = 'active' AND conversation_id IS NOT NULL
+        ORDER BY message_count DESC`,
+    );
+    const conversations = [];
+    for (const row of rows) {
+      const conversation = await letta.getConversation(String(row.conversation_id)) as {
+        context_window_limit?: number; contextWindowLimit?: number;
+      };
+      conversations.push({
+        agent_id: String(row.agent_id),
+        conversation_id: String(row.conversation_id),
+        message_count: Number(row.message_count ?? 0),
+        context_window_limit: Number(
+          conversation.context_window_limit ?? conversation.contextWindowLimit ?? 0,
+        ),
+      });
+    }
+    return { settings: await sdk.get(), conversations };
+  });
+
+  app.put("/v1/context-management", async (request) => ({
+    settings: await sdk.update(requireObject(request.body, "Управление контекстом") as SdkSettingsInput),
+  }));
+
+  app.patch("/v1/context-management/conversations/:conversationId", async (request) => {
+    const { conversationId } = request.params as { conversationId: string };
+    const body = requireObject(request.body, "Лимит conversation");
+    const contextWindow = optionalInteger(
+      body.context_window_limit,
+      "context_window_limit",
+      1024,
+      10_000_000,
+    );
+    if (contextWindow === undefined) throw badRequest("context_window_limit обязателен");
+    return {
+      conversation: await letta.updateConversation(requireId(conversationId, "conversation_id"), {
+        context_window: contextWindow,
+      }),
+    };
+  });
+
   app.post("/v1/sdk/test", async () => {
     const result = await letta.ping();
     if (!result.ok) throw appServerUnavailable(result.error);

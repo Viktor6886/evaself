@@ -700,6 +700,25 @@ export class LettaService {
     }
   }
 
+  async configureCompaction(
+    agentId: string,
+    settings: {
+      mode: "sliding_window" | "all" | "self_compact_sliding_window" | "self_compact_all";
+      sliding_window_percentage: number;
+    },
+  ): Promise<void> {
+    try {
+      await this.client.agents.update(agentId, {
+        compactionSettings: {
+          mode: settings.mode,
+          sliding_window_percentage: settings.sliding_window_percentage,
+        },
+      });
+    } catch (error) {
+      throw toEvaError(error, `configuring compaction for ${agentId}`);
+    }
+  }
+
   /** Open a brand new conversation and return its id. */
   async createConversation(agentId: string): Promise<string> {
     try {
