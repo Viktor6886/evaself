@@ -38,6 +38,7 @@ import {
 } from "./public/rate-limit.js";
 import type { MiniAppSessionStore } from "./public/webapp-session.js";
 import { registerWebappCoreRoutes } from "./public/webapp-core.js";
+import { ConversationService } from "./public/conversation-service.js";
 import type { UserTurnLock } from "./turns/user-turn-lock.js";
 import type { SdkSettingsInput, SdkSettingsManager } from "./sdk-settings.js";
 import type { TelegramClient, TelegramUpdate } from "./telegram.js";
@@ -192,7 +193,19 @@ export function buildServer(services: Services): FastifyInstance {
 
   registerPublicRoutes(app, {
     config,
-    repository: new PublicRepository(db, profile, goals),
+    repository: new PublicRepository(db, profile, goals, new ConversationService(
+      db,
+      services.letta,
+      deleteGuard,
+      async (event) => {
+        await db.recordAdminAudit({
+          action: event.action,
+          targetType: "conversation",
+          targetId: event.conversationId,
+          details: { telegram_id: event.telegramId },
+        });
+      },
+    )),
     telegram,
     ...(services.miniAppSessions ? { sessions: services.miniAppSessions } : {}),
     rateLimiter,

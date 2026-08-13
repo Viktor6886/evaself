@@ -5,6 +5,7 @@ import type { Database } from "../db.js";
 import { badRequest, unauthorized } from "../errors.js";
 import type { GoalService } from "../goals/goal-service.js";
 import type { UserProfileService } from "../profile/profile-service.js";
+import type { ConversationService } from "./conversation-service.js";
 import {
   type TelegramWebAppUser,
   verifyTelegramWebAppInitData,
@@ -81,6 +82,10 @@ export interface PublicDataSource {
     workBlockId: number,
     input: Record<string, unknown>,
   ): Promise<Record<string, unknown>>;
+  listConversations(telegramId: number): Promise<Record<string, unknown>[]>;
+  createConversation(telegramId: number, input: Record<string, unknown>): Promise<Record<string, unknown>>;
+  activateConversation(telegramId: number, conversationId: string): Promise<Record<string, unknown>>;
+  archiveConversation(telegramId: number, conversationId: string): Promise<Record<string, unknown>>;
 }
 
 export class PublicRepository implements PublicDataSource {
@@ -88,7 +93,24 @@ export class PublicRepository implements PublicDataSource {
     private readonly db: Database,
     private readonly profile: UserProfileService,
     private readonly goals: GoalService,
+    private readonly conversations: ConversationService,
   ) {}
+
+  async listConversations(telegramId: number): Promise<Record<string, unknown>[]> {
+    return await this.conversations.list(telegramId);
+  }
+
+  async createConversation(telegramId: number, input: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return await this.conversations.create(telegramId, requiredText(input.title, "Название диалога", 120));
+  }
+
+  async activateConversation(telegramId: number, conversationId: string): Promise<Record<string, unknown>> {
+    return await this.conversations.activate(telegramId, conversationId);
+  }
+
+  async archiveConversation(telegramId: number, conversationId: string): Promise<Record<string, unknown>> {
+    return await this.conversations.archive(telegramId, conversationId);
+  }
 
   /**
    * Каждый метод репозитория открывает область своего пользователя.
@@ -761,6 +783,11 @@ export function registerPublicRoutes(
     publicApp.get("/profile", async (request) => ({
       profile: await input.repository.getProfile(publicUser(request).id),
     }));
+
+    publicApp.get("/conversations", async (request) => ({ conversations: await input.repository.listConversations(publicUser(request).id) }));
+    publicApp.post("/conversations", async (request) => ({ conversation: await input.repository.createConversation(publicUser(request).id, requestBody(request)) }));
+    publicApp.post("/conversations/:id/activate", async (request) => ({ conversation: await input.repository.activateConversation(publicUser(request).id, String((request.params as { id?: string }).id ?? "")) }));
+    publicApp.delete("/conversations/:id", async (request) => ({ conversation: await input.repository.archiveConversation(publicUser(request).id, String((request.params as { id?: string }).id ?? "")) }));
 
     publicApp.patch("/profile", async (request) => {
       try {

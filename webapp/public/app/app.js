@@ -1037,6 +1037,7 @@
       <article class="section-card"><span class="eyebrow">ПРОФИЛЬ ЗАПОЛНЕН</span><h2>${completeness}%</h2><p>Ева уточняет данные постепенно и не должна задавать больше одного уместного вопроса за сообщение.</p><div class="action-row"><button class="primary-action" id="edit-profile" type="button">Изменить данные</button></div></article>
       <div class="settings-list">
         ${settingsRow("memory", "Память Евы", "Подтверждённые факты и кандидаты", `${state.profile?.confirmed?.length || 0} записей`)}
+        ${settingsRow("conversations", "Диалоги с Евой", "Создать, выбрать или архивировать диалог", "Открыть")}
         ${settingsRow("card", "Подписка и квоты", "Тариф, бесплатные сообщения и гранты", state.session?.plan || "free")}
         ${settingsRow("bell", "Уведомления", "Время, частота и тихие часы", "Настроить")}
         ${settingsRow("voice", "Голос и портрет", "Режим ответа, ASR, TTS и анимация", "Настроить")}
@@ -1051,7 +1052,7 @@
   }
 
   function settingsRow(code, title, note, status) {
-    const icons = { memory: "brain", card: "card", bell: "bell", voice: "voice", link: "link", shield: "shield", pulse: "pulse" };
+    const icons = { memory: "brain", conversations: "chat", card: "card", bell: "bell", voice: "voice", link: "link", shield: "shield", pulse: "pulse" };
     return `<button class="settings-row" type="button" data-setting="${code}"><span data-icon="${icons[code]}"></span><span><strong>${title}</strong><small>${note}</small></span><em>${escapeHtml(status)}</em></button>`;
   }
 
@@ -1075,8 +1076,30 @@
 
   function openSetting(code) {
     if (code === "memory") return void openMemorySheet();
+    if (code === "conversations") return void openConversationsSheet();
     if (code === "pulse") return openSheet({ title: "Диагностика", subtitle: "Технические детали скрыты от обычных экранов.", html: `<div class="section-stack"><article class="section-card"><p><strong>Frontend:</strong> ${BUILD}</p><p><strong>API v2:</strong> ${state.dashboard ? "доступен" : "не подключён"}</p><p><strong>Telegram initData:</strong> ${tg?.initData ? "получена" : "отсутствует"}</p><p><strong>Тариф:</strong> ${escapeHtml(state.session?.plan || "неизвестно")}</p></article></div>` });
     openSheet({ title: "Настройки", subtitle: "Раздел не дублирует инструменты Пульта.", html: `<article class="section-card"><p>Эта настройка будет подключена к серверному профилю и административной конфигурации. Сейчас интерфейс не имитирует сохранение.</p></article>` });
+  }
+
+  async function openConversationsSheet() {
+    openSheet({ title: "Диалоги с Евой", subtitle: "Активный диалог используется в Telegram. Архив сохраняет историю.", html: '<div class="section-stack" id="conversations-host"><article class="section-card"><p>Загружаю…</p></article></div>', onMount() { void refreshConversations(); } });
+  }
+
+  async function refreshConversations() {
+    const host = document.getElementById("conversations-host");
+    try {
+      const conversations = (await api("/public/conversations")).conversations || [];
+      host.innerHTML = `<article class="section-card"><label class="field"><span>Название нового диалога</span><input id="new-conversation-title" maxlength="120" value="Новый диалог"></label><button class="primary-action" id="new-conversation" type="button">Создать диалог</button></article>${conversations.map((item) => `<article class="section-card"><h3>${escapeHtml(item.title || "Диалог с Евой")}${item.active ? " · активный" : ""}</h3><div class="action-row">${item.active ? "<small>Чтобы архивировать, сначала выберите другой диалог.</small>" : `<button class="secondary-action" data-activate-conversation="${escapeAttr(item.id)}" type="button">Сделать активным</button><button class="danger-action" data-archive-conversation="${escapeAttr(item.id)}" type="button">Архивировать диалог</button>`}</div></article>`).join("") || emptyState("Диалогов пока нет", "Создайте первый диалог с Евой.")}`;
+      host.querySelector("#new-conversation").addEventListener("click", createConversation);
+      host.querySelectorAll("[data-activate-conversation]").forEach((button) => button.addEventListener("click", async () => { try { await api(`/public/conversations/${encodeURIComponent(button.dataset.activateConversation)}/activate`, { method: "POST", body: "{}" }); await refreshConversations(); toast("Диалог активирован"); } catch (error) { toast(friendlyError(error), true); } }));
+      host.querySelectorAll("[data-archive-conversation]").forEach((button) => button.addEventListener("click", async () => { try { await api(`/public/conversations/${encodeURIComponent(button.dataset.archiveConversation)}`, { method: "DELETE" }); await refreshConversations(); toast("Диалог перемещён в архив; история сохранена"); } catch (error) { toast(friendlyError(error), true); } }));
+    } catch (error) { host.innerHTML = `<article class="section-card"><p>${escapeHtml(friendlyError(error))}</p></article>`; }
+  }
+
+  async function createConversation() {
+    const title = document.getElementById("new-conversation-title")?.value.trim();
+    if (!title) return;
+    try { await api("/public/conversations", { method: "POST", body: JSON.stringify({ title }) }); await refreshConversations(); toast("Новый диалог создан. Выберите его, чтобы переключиться"); } catch (error) { toast(friendlyError(error), true); }
   }
 
   // ---------------------------------------------------------------------------
