@@ -27,7 +27,7 @@ const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 export class ConversationService {
   constructor(
-    private readonly db: Pick<Database, "transactionClient">,
+    private readonly db: Pick<Database, "transactionClient" | "bindScopeUserId">,
     private readonly letta: Pick<LettaService, "createConversationRecord" | "updateConversation">,
     private readonly deleteGuard: Pick<DeleteGuard, "assertConversationDeletable">,
     private readonly audit: AuditConversation,
@@ -171,14 +171,21 @@ export class ConversationService {
     try {
       await client.query("BEGIN");
       if (lock) await client.query("SELECT pg_advisory_xact_lock($1::bigint)", [telegramId]);
-      const { rows } = await client.query<LinkRow>(
-        `-- tenant: by verified telegram_id and owned user_id/agent_id link
-         SELECT a.user_id, a.agent_id, a.conversation_id AS active_conversation_id
-           FROM users u JOIN agent_links a ON a.user_id = u.id
-          WHERE u.telegram_id = $1 AND a.kind = 'eva' AND a.status = 'active'
-          ORDER BY a.created_at DESC LIMIT 1
-          FOR UPDATE OF a`,
+      const userResult = await client.query<{ user_id: string }>(
+        `-- tenant: by verified telegram_id
+         SELECT id AS user_id FROM users WHERE telegram_id = $1`,
         [telegramId],
+      );
+      if (!userResult.rows[0]) throw notFound("Пользователь ещё не создан");
+      this.db.bindScopeUserId(Number(userResult.rows[0].user_id));
+      const { rows } = await client.query<LinkRow>(
+        `-- tenant: by canonical user_id resolved from verified telegram_id
+         SELECT user_id, agent_id, conversation_id AS active_conversation_id
+           FROM agent_links
+          WHERE user_id = $1 AND kind = 'eva' AND status = 'active'
+          ORDER BY created_at DESC LIMIT 1
+          FOR UPDATE`,
+        [userResult.rows[0].user_id],
       );
       if (!rows[0]) throw notFound("Агент Евы ещё не создан");
       result = await work(client, rows[0]);

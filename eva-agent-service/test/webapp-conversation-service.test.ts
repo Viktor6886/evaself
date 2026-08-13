@@ -31,23 +31,26 @@ class FakeClient {
     }
     if (sql === "ROLLBACK") { if (this.snapshot) this.db.rows = this.snapshot; return { rows: [] }; }
     if (sql === "COMMIT" || sql.includes("pg_advisory_xact_lock")) return { rows: [] };
-    if (sql.includes("FROM users u") && sql.includes("FOR UPDATE OF a")) {
-      return { rows: this.db.link ? [{ user_id: 7, agent_id: "agent-1", active_conversation_id: this.db.active }] : [] };
+    if (sql.includes("FROM users WHERE telegram_id")) {
+      return { rows: this.db.link ? [{ user_id: "7" }] : [] };
+    }
+    if (sql.includes("FROM agent_links") && sql.includes("FOR UPDATE")) {
+      return { rows: this.db.link && String(values[0]) === "7" ? [{ user_id: "7", agent_id: "agent-1", active_conversation_id: this.db.active }] : [] };
     }
     if (sql.includes("FROM agent_conversations") && sql.includes("FOR UPDATE")) {
       const id = String(values[2]);
       const row = this.db.rows.get(id);
-      return { rows: row && row.user_id === values[0] && row.agent_id === values[1] && ["active", "inactive"].includes(row.status) ? [{ ...row, id }] : [] };
+      return { rows: row && String(row.user_id) === String(values[0]) && row.agent_id === values[1] && ["active", "inactive"].includes(row.status) ? [{ ...row, id }] : [] };
     }
     if (sql.includes("canonical conversation status")) {
       if (this.db.failReconciliation) throw new Error("verification failed");
       const row = this.db.rows.get(String(values[2]));
-      return { rows: row && row.user_id === values[0] && row.agent_id === values[1] ? [{ status: row.status }] : [] };
+      return { rows: row && String(row.user_id) === String(values[0]) && row.agent_id === values[1] ? [{ status: row.status }] : [] };
     }
     if (sql.includes("canonical active conversation after ambiguous COMMIT")) {
       if (this.db.failReconciliation) throw new Error("verification failed");
       if (this.db.missingReconciliationLink) return { rows: [] };
-      const activeRows = [...this.db.rows].filter(([, row]) => row.user_id === values[0] && row.agent_id === values[1] && row.status === "active");
+      const activeRows = [...this.db.rows].filter(([, row]) => String(row.user_id) === String(values[0]) && row.agent_id === values[1] && row.status === "active");
       return { rows: [{ active_conversation_id: this.db.active, active_status: activeRows.find(([id]) => id === this.db.active)?.[1].status ?? null, target_status: this.db.rows.get(String(values[2]))?.status ?? null }] };
     }
     if (sql.includes("INSERT INTO agent_conversations")) {
@@ -81,6 +84,7 @@ class FakeDb {
   sql: string[] = [];
   rows = new Map<string, any>([["conv-active", { user_id: 7, agent_id: "agent-1", title: "Active", status: "active" }], ["conv-other", { user_id: 7, agent_id: "agent-1", title: "Other", status: "inactive" }], ["conv-foreign", { user_id: 8, agent_id: "agent-2", title: "Foreign", status: "inactive" }], ["conv-archived", { user_id: 7, agent_id: "agent-1", title: "Old", status: "archived" }]]);
   async transactionClient() { this.clients += 1; return new FakeClient(this); }
+  bindScopeUserId(userId: number) { assert.equal(userId, 7); }
 }
 function fixture(failAudit = false) {
   const db = new FakeDb();
