@@ -6,14 +6,15 @@ import { ConversationService } from "../dist/public/conversation-service.js";
 class FakeClient {
   released = false;
   snapshot?: Map<string, any>;
+  activeSnapshot?: string;
   readonly db: FakeDb;
   constructor(db: FakeDb) { this.db = db; }
   async query(sql: string, values: unknown[] = []) {
     this.db.sql.push(sql);
-    if (sql === "BEGIN") { this.snapshot = new Map([...this.db.rows].map(([id, row]) => [id, { ...row }])); return { rows: [] }; }
+    if (sql === "BEGIN") { this.snapshot = new Map([...this.db.rows].map(([id, row]) => [id, { ...row }])); this.activeSnapshot = this.db.active; return { rows: [] }; }
     if (sql === "COMMIT" && this.db.failCommit && !this.db.commitFailed) {
       this.db.commitFailed = true;
-      if (!this.db.persistBeforeCommitError) this.db.rows = this.snapshot!;
+      if (!this.db.persistBeforeCommitError) { this.db.rows = this.snapshot!; this.db.active = this.activeSnapshot!; }
       throw new Error("commit failed");
     }
     if (sql === "ROLLBACK") { if (this.snapshot) this.db.rows = this.snapshot; return { rows: [] }; }
@@ -30,6 +31,11 @@ class FakeClient {
       if (this.db.failReconciliation) throw new Error("verification failed");
       const row = this.db.rows.get(String(values[2]));
       return { rows: row && row.user_id === values[0] && row.agent_id === values[1] ? [{ status: row.status }] : [] };
+    }
+    if (sql.includes("canonical active conversation after ambiguous COMMIT")) {
+      if (this.db.failReconciliation) throw new Error("verification failed");
+      if (this.db.missingReconciliationLink) return { rows: [] };
+      return { rows: [{ active_conversation_id: this.db.active }] };
     }
     if (sql.includes("INSERT INTO agent_conversations")) {
       if (this.db.failInsert) throw new Error("insert failed");
@@ -52,6 +58,7 @@ class FakeDb {
   commitFailed = false;
   persistBeforeCommitError = false;
   failReconciliation = false;
+  missingReconciliationLink = false;
   clients = 0;
   sql: string[] = [];
   rows = new Map<string, any>([["conv-active", { user_id: 7, agent_id: "agent-1", title: "Active", status: "active" }], ["conv-other", { user_id: 7, agent_id: "agent-1", title: "Other", status: "active" }], ["conv-foreign", { user_id: 8, agent_id: "agent-2", title: "Foreign", status: "active" }], ["conv-archived", { user_id: 7, agent_id: "agent-1", title: "Old", status: "archived" }]]);
@@ -122,6 +129,32 @@ test("archive proceeds to audit when fresh reconciliation finds archived row", a
   assert.deepEqual(await service.archive(101, "conv-other"), { id: "conv-other", archived: true });
   assert.deepEqual(calls, ["guard:conv-other", 'conv-other:{"archived":true}']);
   assert.deepEqual(audits.map((x) => x.action), ["conversation.archive"]);
+});
+
+test("activation proceeds to audit when fresh reconciliation finds target active", async () => {
+  const { service, db, audits } = fixture(); db.failCommit = true; db.persistBeforeCommitError = true;
+  assert.equal((await service.activate(101, "conv-other")).active, true);
+  assert.equal(db.active, "conv-other");
+  assert.deepEqual(audits.map((x) => x.action), ["conversation.activate"]);
+});
+
+test("activation rejects original COMMIT error when fresh reconciliation finds previous active", async () => {
+  const { service, db, audits } = fixture(); db.failCommit = true;
+  await assert.rejects(() => service.activate(101, "conv-other"), /commit failed/);
+  assert.equal(db.active, "conv-active");
+  assert.deepEqual(audits, []);
+});
+
+test("activation fails closed when fresh reconciliation query fails", async () => {
+  const { service, db, audits } = fixture(); db.failCommit = true; db.failReconciliation = true;
+  await assert.rejects(() => service.activate(101, "conv-other"), (e: any) => e instanceof AggregateError && /recovery/i.test(e.message));
+  assert.deepEqual(audits, []);
+});
+
+test("activation fails closed when fresh reconciliation cannot establish canonical link", async () => {
+  const { service, db, audits } = fixture(); db.failCommit = true; db.missingReconciliationLink = true;
+  await assert.rejects(() => service.activate(101, "conv-other"), (e: any) => e instanceof AggregateError && /recovery/i.test(e.message));
+  assert.deepEqual(audits, []);
 });
 
 test("failed fresh reconciliation fails closed without compensation", async () => {

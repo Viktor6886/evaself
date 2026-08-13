@@ -77,7 +77,9 @@ export class ConversationService {
 
   async activate(telegramId: number, conversationId: string): Promise<Record<string, unknown>> {
     const id = this.validId(conversationId);
+    let canonicalLink: LinkRow | undefined;
     const result = await this.transaction(telegramId, async (client, link) => {
+      canonicalLink = link;
       const row = await this.ownedSelectable(client, link, id);
       if (link.active_conversation_id === id) throw badRequest("Диалог уже активен");
       await client.query(
@@ -86,6 +88,9 @@ export class ConversationService {
         [link.user_id, link.agent_id, id],
       );
       return { ...row, id, active: true };
+    }, true, undefined, async (error) => {
+      if (await this.reconcileActivation(canonicalLink!, id, error)) return true;
+      throw error;
     });
     await this.audit({ action: "conversation.activate", telegramId, conversationId: id });
     return result;
@@ -199,6 +204,29 @@ export class ConversationService {
       );
       await client.query("COMMIT");
       return rows[0]?.status;
+    } catch (verificationError) {
+      throw new AggregateError([commitError, verificationError], "COMMIT outcome unknown; recovery required");
+    } finally { client?.release(); }
+  }
+
+  private async reconcileActivation(link: LinkRow, id: string, commitError: unknown): Promise<boolean> {
+    let client: TransactionClient | undefined;
+    try {
+      client = await this.db.transactionClient();
+      await client.query("BEGIN");
+      const { rows } = await client.query<{ active_conversation_id: string | null }>(
+        `-- canonical active conversation after ambiguous COMMIT
+         SELECT conversation_id AS active_conversation_id
+           FROM agent_links
+          WHERE user_id = $1 AND agent_id = $2 AND kind = 'eva' AND status = 'active'`,
+        [link.user_id, link.agent_id],
+      );
+      await client.query("COMMIT");
+      if (rows.length !== 1) throw new Error("Canonical agent link is missing or ambiguous");
+      const activeId = rows[0]!.active_conversation_id;
+      if (activeId === id) return true;
+      if (activeId === link.active_conversation_id) return false;
+      throw new Error("Canonical agent link has an unexpected active conversation");
     } catch (verificationError) {
       throw new AggregateError([commitError, verificationError], "COMMIT outcome unknown; recovery required");
     } finally { client?.release(); }
