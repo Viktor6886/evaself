@@ -97,19 +97,23 @@ export class PublicRepository implements PublicDataSource {
   ) {}
 
   async listConversations(telegramId: number): Promise<Record<string, unknown>[]> {
-    return await this.conversations.list(telegramId);
+    return await this.scoped(telegramId, "conversations.list", async () =>
+      await this.conversations.list(telegramId));
   }
 
   async createConversation(telegramId: number, input: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return await this.conversations.create(telegramId, requiredText(input.title, "Название диалога", 120));
+    return await this.scoped(telegramId, "conversations.create", async () =>
+      await this.conversations.create(telegramId, requiredText(input.title, "Название диалога", 120)));
   }
 
   async activateConversation(telegramId: number, conversationId: string): Promise<Record<string, unknown>> {
-    return await this.conversations.activate(telegramId, conversationId);
+    return await this.scoped(telegramId, "conversations.activate", async () =>
+      await this.conversations.activate(telegramId, conversationId));
   }
 
   async archiveConversation(telegramId: number, conversationId: string): Promise<Record<string, unknown>> {
-    return await this.conversations.archive(telegramId, conversationId);
+    return await this.scoped(telegramId, "conversations.archive", async () =>
+      await this.conversations.archive(telegramId, conversationId));
   }
 
   /**
