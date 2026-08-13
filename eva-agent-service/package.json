@@ -19,7 +19,7 @@
   },
   "dependencies": {
     "@fastify/multipart": "9.4.0",
-    "@langchain/core": "1.0.6",
+    "@langchain/core": "^1.2.7",
     "@langchain/textsplitters": "1.0.1",
     "@letta-ai/letta-agent-sdk": "0.6.2",
     "@letta-ai/letta-client": "1.12.1",
