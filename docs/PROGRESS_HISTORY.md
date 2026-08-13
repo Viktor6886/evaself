@@ -1932,3 +1932,7 @@
 ## Batch 15 — шаги 21–22 (локально, на ревью)
 
 Переиспользованы AgentJobRunner, RuntimeContextBuilder и evaluation queue policy. Добавлены закрытые bounded subagents и offline evals/release gate. Фактическая тестовая рефлексия: 100 tokens, 0 cost micros (fake-backed contract); production usage сохраняется `agent_job_results`. Feature flags остаются выключены. Rollback: отключить `EVA_SUBAGENTS`, `EVA_REFLECTION_SUBAGENT`; evals не входят в runtime.
+
+
+### Batch 16 remediation
+Closed production boot, authenticated ingress, canonical router, tenant cancellation/status, upload compensation, worker registration, rollback migration, and structured reranker gaps. Flags remain fail-closed.

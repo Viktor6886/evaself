@@ -23,6 +23,8 @@ import { TelegramDeliveryLimiter } from "./delivery/telegram-limits.js";
 import { EvaWorkflow } from "./eva-workflow.js";
 import { GoalService } from "./goals/goal-service.js";
 import { buildJobLayer } from "./jobs/index.js";
+import { KnowledgeUploadService } from "./knowledge/lifecycle.js";
+import { ResearchEnqueuer } from "./research/enqueue.js";
 import { PermanentJobFailure } from "./jobs/policy.js";
 import { buildObservability } from "./observability/index.js";
 import { LettaService } from "./letta.js";
@@ -452,6 +454,41 @@ async function main(): Promise<void> {
     logger,
   );
 
+  // Слой фоновых заданий. Ступень переноса решает, кто ведёт напоминания
+  // и heartbeat: пока идёт зеркало — старые интервалы, после снятия
+  // зеркала — очередь, и тогда интервалы не запускаются вовсе.
+  const jobs = config.bullmqJobsEnabled
+    ? buildJobLayer(config, db, redis, logger, {
+      letta,
+      purposes,
+      runtimeContext,
+      lock: queue,
+      outbox,
+      // Выборка старого интервала для режима зеркала. Сравнивать есть с
+      // чем только у тех видов, у которых старый механизм существует:
+      // check-in до этого шага не было вовсе.
+      legacySelector: (kind) =>
+        kind === "reminder" || kind === "heartbeat"
+          ? background.previewSelection(kind)
+          : null,
+    })
+    : null;
+
+  const knowledgeUploads = jobs && config.langchainEnabled ? new KnowledgeUploadService(db,jobs.outbox,"/data/knowledge-uploads") : null;
+  const research = jobs && config.researchOrchestratorEnabled ? new ResearchEnqueuer(db,jobs.outbox,jobs.runs) : null;
+  // Telegram id is a verified identity key. Resolution is the only cross-user
+  // lookup and therefore runs in an explicitly named system scope; every
+  // subsequent user-table operation binds the resolved owner.
+  const internalUser = async(telegramId:number)=>await db.withSystemScope("verified-identity.resolve",async()=>{const{rows}=await db.query<{id:string}>("SELECT id FROM users WHERE telegram_id=$1",[telegramId]);if(!rows[0])throw new Error("user_missing");return Number(rows[0].id);},{inherit:true});
+  const knowledgeResearch = knowledgeUploads || research ? {
+    upload:async(t:number,x:{name:string;mime:string;stream:import("node:stream").Readable;truncated:()=>boolean})=>{if(!knowledgeUploads)throw new Error("knowledge_disabled");return await knowledgeUploads.createFromStream(t,x);},
+    uploadStatus:async(t:number,id:string)=>await knowledgeUploads?.status(t,id),
+    researchCreate:async(t:number,x:Record<string,unknown>)=>{if(!research)throw new Error("research_disabled");const userId=await internalUser(t);return {id:await research.enqueue({userId,conversationId:String(x.conversation_id??""),agentId:String(x.agent_id??""),query:String(x.query??""),...(typeof x.request_id==="string"?{requestId:x.request_id}:{})})};},
+    researchStatus:async(t:number,id:string)=>await research?.status(await internalUser(t),id),
+    researchReport:async(t:number,id:string)=>await research?.report(await internalUser(t),id),
+    researchCancel:async(t:number,id:string)=>({cancelled:await research?.cancel(await internalUser(t),id)??false}),
+  } : undefined;
+
   const app = buildServer({
     config,
     logger,
@@ -474,6 +511,7 @@ async function main(): Promise<void> {
     approvals,
     ...(memoryControl ? { memory: memoryControl } : {}),
     ...(memoryDoctorGateway ? { memoryDoctor: memoryDoctorGateway } : {}),
+    ...(knowledgeResearch ? { knowledgeResearch } : {}),
   });
 
   await app.listen({ port: config.port, host: config.host });
@@ -487,25 +525,7 @@ async function main(): Promise<void> {
     recoveryTimer = setInterval(() => void recovery.sweep(), config.turnRecoveryIntervalMs);
     recoveryTimer.unref();
   }
-  // Слой фоновых заданий. Ступень переноса решает, кто ведёт напоминания
-  // и heartbeat: пока идёт зеркало — старые интервалы, после снятия
-  // зеркала — очередь, и тогда интервалы не запускаются вовсе.
-  const jobs = config.bullmqJobsEnabled
-    ? buildJobLayer(config, db, redis, logger, {
-      letta,
-      purposes,
-      runtimeContext,
-      lock: queue,
-      outbox,
-      // Выборка старого интервала для режима зеркала. Сравнивать есть с
-      // чем только у тех видов, у которых старый механизм существует:
-      // check-in до этого шага не было вовсе.
-      legacySelector: (kind) =>
-        kind === "reminder" || kind === "heartbeat"
-          ? background.previewSelection(kind)
-          : null,
-    })
-    : null;
+
 
   // Memory Curator существует только как задание очереди. Без слоя
   // заданий его не собирают вовсе: иначе появился бы второй путь

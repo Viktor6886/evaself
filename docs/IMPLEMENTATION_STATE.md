@@ -233,3 +233,13 @@
 
 - `src/subagents/index.ts` — закрытый декларативный реестр семи ограниченных субагентов и coordinator поверх канонического `AgentJobRunner`; tenant/tool/memory guards, per-user exclusion, no recursion; флаги выключены.
 - `evals/` — изолированный от production runtime воспроизводимый framework, synthetic datasets, раздельные lane reports, internal API и Telegram simulator targets; fast release gate в CI.
+
+
+## Batch 16 — knowledge and research production wiring
+Authenticated Mini App ingress derives identity only from verified Telegram initData. Upload storage precedes the outbox transaction and compensates failures; the registered knowledge worker uses fail-closed ClamAV and canonical LLM Router embeddings. Research uses OutboundGateway and the canonical router, with tenant-scoped status/cancel/report. Shared structured repair/degradation is active in research and SkillRouter reranking. Memory Doctor is deterministic (model parsing N/A); no separate insights model call exists in this batch.
+# Batch 16 operational rollback
+
+Before applying `postgres/migrations/down/051_knowledge_research.sql`, run
+`DATABASE_URL=... EVA_KNOWLEDGE_UPLOAD_ROOT=/data/knowledge-uploads scripts/rollback-knowledge-research.sh`.
+The wrapper deletes owned uploads, verifies the root is empty, and only then
+executes the down migration; any remaining file or cleanup failure aborts rollback.

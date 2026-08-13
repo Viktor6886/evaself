@@ -79,6 +79,12 @@
       state.progress = progress?.progress || null;
       state.bot = bot;
 
+      const reportMatch = location.pathname.match(/^\/app\/research\/([0-9a-f-]+)$/i);
+      if (reportMatch) {
+        await renderResearchReport(reportMatch[1]);
+        return;
+      }
+
       if (!state.dashboard) {
         const [today, tasks] = await Promise.all([
           safeApi("/public/today", {}, { today: {} }),
@@ -96,6 +102,24 @@
       renderAll();
       showFriendlyFailure(error);
     }
+  }
+
+  async function renderResearchReport(id) {
+    const report = await api(`/public/research/${encodeURIComponent(id)}/report`);
+    const claims = Array.isArray(report?.claims) ? report.claims : [];
+    const sources = Array.isArray(report?.sources) ? report.sources : [];
+    const sourceById = new Map(sources.map((source) => [source.id, source]));
+    document.getElementById("screens").innerHTML = `
+      <section class="screen screen-today is-active research-report">
+        <header class="inner-header"><div><span class="eyebrow">ПРОВЕРЕННОЕ ИССЛЕДОВАНИЕ</span><h1>Отчёт</h1></div></header>
+        <article class="card"><h2>Кратко</h2><p>${escapeHtml(report?.summary || "Выводов пока нет")}</p></article>
+        <section class="research-claims">${claims.map((claim) => {
+          const source = sourceById.get(claim.sourceId);
+          return `<article class="card"><h2>${escapeHtml(claim.claim)}</h2><blockquote>${escapeHtml(claim.evidenceQuote)}</blockquote>${source ? `<a href="${escapeHtml(source.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(source.title || source.domain)}</a>` : ""}</article>`;
+        }).join("")}</section>
+        <p class="muted">Проверено: ${escapeHtml(report?.checkedAt || "—")} · Уверенность: ${Math.round(Number(report?.confidence || 0) * 100)}%</p>
+      </section>`;
+    document.querySelector(".bottom-nav")?.setAttribute("hidden", "");
   }
 
   function setLoadingState() {

@@ -29,6 +29,7 @@ import {
   registerPublicRoutes,
   type MiniAppMemoryControl,
   type MiniAppMemoryDoctor,
+  type KnowledgeResearchPublic,
 } from "./public/routes.js";
 import {
   clientAddress,
@@ -71,6 +72,7 @@ export interface Services {
   /** Просмотр, подтверждение, исправление и удаление памяти из Mini App. */
   memory?: MiniAppMemoryControl;
   memoryDoctor?: MiniAppMemoryDoctor;
+  knowledgeResearch?: KnowledgeResearchPublic;
   /**
    * Контур наблюдаемости. Нужен выдаче метрик (состояние буфера
    * телеметрии) и ingress — там начинается трасса хода.
@@ -212,6 +214,7 @@ export function buildServer(services: Services): FastifyInstance {
     ...(services.approvals ? { approvals: { decide: async (input) => await services.approvals!.decideByTelegram(input) } } : {}),
     ...(services.memory ? { memory: services.memory } : {}),
     ...(services.memoryDoctor ? { memoryDoctor: services.memoryDoctor } : {}),
+    ...(services.knowledgeResearch ? { knowledgeResearch: services.knowledgeResearch } : {}),
   });
 
   // Новые разделы Mini App (задачи, заметки, бюджет, решения, check-in,

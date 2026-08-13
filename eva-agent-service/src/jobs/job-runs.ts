@@ -248,6 +248,22 @@ export class JobRunJournal {
     }
   }
 
+  /** Cancel the active run identified by its durable ingress correlation id. */
+  async requestCancelByCorrelation(correlationId: string, userId: number, token: string): Promise<boolean> {
+    try {
+      return await this.scoped(userId, "jobs.run.cancel-correlation", async () => {
+        const { rows } = await this.db.query<{ run_id: string }>(
+          `-- tenant: by user_id — cancellation is bound to the verified owner
+           UPDATE job_runs SET cancel_requested=true,cancel_token=$3
+            WHERE run_id=(SELECT run_id FROM job_runs WHERE user_id=$1 AND correlation_id=$2 AND status='running' ORDER BY started_at DESC LIMIT 1)
+              AND user_id=$1 AND status='running' RETURNING run_id`,
+          [userId, correlationId, token],
+        );
+        return rows.length > 0;
+      });
+    } catch (error) { this.warn("Отмена запуска по correlation id не записана", error, { correlationId }); return false; }
+  }
+
   /**
    * Закрыть запуски с истёкшей арендой.
    *

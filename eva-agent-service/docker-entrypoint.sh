@@ -1,6 +1,14 @@
 #!/bin/sh
 set -eu
 
+# Signature refresh is a build/maintenance concern: service boot must work
+# offline with the image's existing database. Ingestion alone fails closed.
+if [ "${EVA_LANGCHAIN:-false}" = "true" ]; then
+	command -v clamscan >/dev/null 2>&1 || { echo "ClamAV scanner missing" >&2; exit 1; }
+	set -- $(find /var/lib/clamav -maxdepth 1 -type f \( -name '*.cvd' -o -name '*.cld' \) | wc -l)
+	[ "$1" -gt 0 ] || { echo "ClamAV signatures missing" >&2; exit 1; }
+fi
+
 # Host key stays root-only. When an admin process needs it, copy it into the
 # container runtime directory, make it read-only for the node group, then
 # permanently drop privileges before starting Node.js.

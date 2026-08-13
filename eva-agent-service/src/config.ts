@@ -66,6 +66,7 @@ export interface Config {
   /** Shared secret presented to media-service as X-Media-Key. */
   mediaServiceToken: string;
   searxngUrl: string;
+  crawl4aiUrl: string;
   todoistApiUrl: string;
   todoistApiToken: string;
   todoistProjectId: string;
@@ -143,6 +144,8 @@ export interface Config {
   agentJobsEnabled: boolean;
   subagentsEnabled: boolean;
   reflectionSubagentEnabled: boolean;
+  langchainEnabled: boolean;
+  researchOrchestratorEnabled: boolean;
   /**
    * Проверка контракта Letta на живом развёртывании.
    *
@@ -342,6 +345,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     mediaServiceUrl: str("EVA_MEDIA_SERVICE_URL", "http://media-service:8090"),
     mediaServiceToken: str("MEDIA_SERVICE_TOKEN"),
     searxngUrl: str("SEARXNG_BASE_URL", "http://searxng:8080/"),
+    crawl4aiUrl: str("CRAWL4AI_BASE_URL", "http://crawl4ai:11235/"),
     todoistApiUrl: str("TODOIST_API_URL", "https://api.todoist.com/api/v1"),
     todoistApiToken: str("TODOIST_API_TOKEN"),
     todoistProjectId: str("TODOIST_PROJECT_ID"),
@@ -385,6 +389,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     agentJobsEnabled: bool("EVA_AGENT_JOBS", false),
     subagentsEnabled: bool("EVA_SUBAGENTS", false),
     reflectionSubagentEnabled: bool("EVA_REFLECTION_SUBAGENT", false),
+    langchainEnabled: bool("EVA_LANGCHAIN", false),
+    researchOrchestratorEnabled: bool("EVA_RESEARCH_ORCHESTRATOR", false),
     lettaSdk060Verify: bool("EVA_LETTA_SDK_060", false),
     lettaAdminClientEnabled: bool("EVA_LETTA_ADMIN_CLIENT", false),
     lettaAdminBaseUrl: str("EVA_LETTA_ADMIN_BASE_URL"),

@@ -40,6 +40,10 @@ import { JobRunJournal } from "./job-runs.js";
 import { QueueRegistry } from "./queue-registry.js";
 import { JobRuntime } from "./runtime.js";
 import { JobScheduleRegistry } from "./schedules.js";
+import { ResearchJobWorker } from "../research/worker.js";
+import { KnowledgeIngestWorker, KNOWLEDGE_INGEST_JOB } from "../knowledge/lifecycle.js";
+import { LlmRouterClient } from "../router/client.js";
+import { execFile } from "node:child_process";
 
 export interface JobLayer {
   registry: QueueRegistry;
@@ -102,6 +106,23 @@ export function buildJobLayer(
     logger,
     config.agentJobsEnabled,
   );
+
+  if (config.langchainEnabled) {
+    const router = new LlmRouterClient(config.routerUrl, config.routerApiKey);
+    const knowledge = new KnowledgeIngestWorker(db,{tempRoot:"/tmp",embed:(text,signal)=>router.embed(text,signal),scan:async(path)=>await new Promise<"clean"|"infected"|"unavailable">(resolve=>execFile("clamscan",["--no-summary",path],error=>{const code=(error as unknown as {code?:number})?.code;resolve(!error?"clean":code===1?"infected":"unavailable");}))});
+    registry.queue("memory");
+    runtime.register(KNOWLEDGE_INGEST_JOB,async(context)=>await knowledge.run(context));
+  }
+
+  if (config.researchOrchestratorEnabled) {
+    const research = new ResearchJobWorker(db, deps.outbox, {
+      searxUrl: config.searxngUrl,
+      crawlUrl: config.crawl4aiUrl,
+      router: new LlmRouterClient(config.routerUrl, config.routerApiKey),
+    });
+    registry.queue("research");
+    runtime.register("research_run", async (context) => await research.run(context));
+  }
 
   // Сверки обслуживания переносятся первыми: они ничего не отправляют
   // человеку, и ошибка в них видна в журнале, а не в его переписке.

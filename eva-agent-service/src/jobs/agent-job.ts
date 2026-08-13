@@ -76,6 +76,8 @@ export interface AgentJobSpec {
   parseResult?: (reply: string) => ProposalParse;
   /** Инструкция про формат ответа задаётся спецификацией целиком. */
   responseContract?: readonly string[];
+  /** Retry one malformed structured response with a schema-only repair instruction. */
+  repairInvalidResult?: boolean;
   modelPolicy?: "economy" | "auto" | "quality";
   allowedTools?: readonly string[];
   allowedSkills?: readonly string[];
@@ -224,7 +226,7 @@ export class AgentJobRunner {
         input.signal.removeEventListener("abort", abortFromParent);
       });
 
-      const usage = this.usageOf(turn.usage, startedAt);
+      let usage = this.usageOf(turn.usage, startedAt);
       const overspent = this.overBudget(usage, input.spec.budget);
       if (overspent) {
         // Результат при превышении не принимается: принять его значило бы
@@ -233,9 +235,29 @@ export class AgentJobRunner {
         return { status: "budget_exceeded", usage, limit: overspent };
       }
 
-      const parsed = input.spec.parseResult
+      let parsed = input.spec.parseResult
         ? input.spec.parseResult(turn.reply)
         : parseProposal(turn.reply, input.spec);
+      if (!parsed.ok && input.spec.repairInvalidResult) {
+        const repairInstruction = `${instruction}\n\nПредыдущий ответ отклонён валидатором (${parsed.code}). Исправь только формат: верни ОДИН JSON по контракту, не цитируя предыдущий ответ.`;
+        const repairContext = await this.runtimeContext.build({ userId: input.userId, conversationId: conversation.conversationId, userMessage: repairInstruction, detectLanguage: false, memoryScopes: input.spec.memoryScopes, allowedSkills: input.spec.allowedSkills, modelPolicy: input.spec.modelPolicy });
+        const repairPrompt = this.runtimeContext.wrapUserMessage(repairContext, repairInstruction, { internalOperationType: input.spec.jobType, correlationId: input.runId });
+        const repairedTurn = await this.letta.runTurn(conversation.conversationId, repairPrompt, { isCancelled: async () => deadline.signal.aborted, cancelPollMs: 50, allowedTools: input.spec.allowedTools, canUseTool: async (toolName) => input.spec.allowedTools?.includes(toolName) ? { behavior: "allow", updatedInput: {} } : { behavior: "deny", message: `Tool ${toolName} is outside the job allowlist` } });
+        const repairedUsage = this.usageOf(repairedTurn.usage, startedAt);
+        usage = {
+          tokens: usage.tokens + repairedUsage.tokens,
+          inputTokens: usage.inputTokens + repairedUsage.inputTokens,
+          outputTokens: usage.outputTokens + repairedUsage.outputTokens,
+          durationMs: repairedUsage.durationMs,
+          costMicros: usage.costMicros + repairedUsage.costMicros,
+        };
+        const repairOverspent = this.overBudget(usage, input.spec.budget);
+        if (repairOverspent) {
+          await this.persist(input, conversation.conversationId, "budget_exceeded", null, usage, true);
+          return { status: "budget_exceeded", usage, limit: repairOverspent };
+        }
+        parsed = input.spec.parseResult ? input.spec.parseResult(repairedTurn.reply) : parseProposal(repairedTurn.reply, input.spec);
+      }
       if (!parsed.ok) {
         await this.persist(input, conversation.conversationId, "invalid_result", null, usage, false, parsed.code);
         return { status: "invalid_result", usage, code: parsed.code };
