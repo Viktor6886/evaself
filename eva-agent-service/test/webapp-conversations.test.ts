@@ -10,4 +10,7 @@ test("mobile profile exposes complete conversation management", () => {
   assert.match(app, /\/activate/);
   assert.match(app, /method:\s*"DELETE"/);
   assert.match(app, /Новый диалог/);
+  assert.doesNotMatch(app, /prompt\("Название нового диалога"/);
+  assert.doesNotMatch(app, /confirm\("Архивировать диалог/);
+  assert.match(app, /сначала выберите другой диалог/);
 });

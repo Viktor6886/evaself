@@ -4,8 +4,8 @@ import type { Config } from "../config.js";
 import type { Database } from "../db.js";
 import { badRequest, unauthorized } from "../errors.js";
 import type { GoalService } from "../goals/goal-service.js";
-import type { LettaService } from "../letta.js";
 import type { UserProfileService } from "../profile/profile-service.js";
+import type { ConversationService } from "./conversation-service.js";
 import {
   type TelegramWebAppUser,
   verifyTelegramWebAppInitData,
@@ -93,80 +93,23 @@ export class PublicRepository implements PublicDataSource {
     private readonly db: Database,
     private readonly profile: UserProfileService,
     private readonly goals: GoalService,
-    private readonly letta: LettaService,
+    private readonly conversations: ConversationService,
   ) {}
 
   async listConversations(telegramId: number): Promise<Record<string, unknown>[]> {
-    return await this.scoped(telegramId, "conversations", async () => {
-      const user = await this.userByTelegramId(telegramId);
-      const link = await this.db.getAgentLink(telegramId);
-      if (!link) return [];
-      const { rows } = await this.db.query<Record<string, unknown>>(
-        `SELECT conversation_id AS id, COALESCE(NULLIF(title, ''), 'Диалог с Евой') AS title,
-                conversation_id = $3 AS active, created_at, updated_at
-           FROM agent_conversations
-          WHERE user_id = $1 AND agent_id = $2 AND purpose = 'chat'
-            AND COALESCE((meta->>'webapp_archived')::boolean, false) = false
-          ORDER BY (conversation_id = $3) DESC, updated_at DESC`,
-        [user.id, link.agent_id, link.conversation_id],
-      );
-      return rows;
-    });
+    return await this.conversations.list(telegramId);
   }
 
   async createConversation(telegramId: number, input: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return await this.scoped(telegramId, "conversation.create", async () => {
-      const user = await this.userByTelegramId(telegramId);
-      const link = await this.db.getAgentLink(telegramId);
-      if (!link) throw new Error("Агент Евы ещё не создан");
-      const title = requiredText(input.title, "Название диалога", 120);
-      const record = await this.letta.createConversationRecord(link.agent_id, { summary: title }) as { id?: string };
-      if (!record.id) throw new Error("Letta не вернула ID диалога");
-      await this.db.setConversation(link.agent_id, record.id, user.id);
-      await this.db.query(`UPDATE agent_conversations SET title = $3 WHERE user_id = $1 AND conversation_id = $2`, [user.id, record.id, title]);
-      return { id: record.id, title, active: true };
-    });
+    return await this.conversations.create(telegramId, requiredText(input.title, "Название диалога", 120));
   }
 
   async activateConversation(telegramId: number, conversationId: string): Promise<Record<string, unknown>> {
-    return await this.scoped(telegramId, "conversation.activate", async () => {
-      const user = await this.userByTelegramId(telegramId);
-      const link = await this.db.getAgentLink(telegramId);
-      if (!link) throw new Error("Агент Евы ещё не создан");
-      const owned = await this.ownedConversation(user.id, link.agent_id, conversationId);
-      await this.letta.updateConversation(conversationId, { archived: false });
-      await this.db.query(`UPDATE agent_conversations SET meta = meta - 'webapp_archived' WHERE user_id = $1 AND conversation_id = $2`, [user.id, conversationId]);
-      await this.db.setConversation(link.agent_id, conversationId, user.id);
-      return { ...owned, id: conversationId, active: true };
-    });
+    return await this.conversations.activate(telegramId, conversationId);
   }
 
   async archiveConversation(telegramId: number, conversationId: string): Promise<Record<string, unknown>> {
-    return await this.scoped(telegramId, "conversation.archive", async () => {
-      const user = await this.userByTelegramId(telegramId);
-      const link = await this.db.getAgentLink(telegramId);
-      if (!link) throw new Error("Агент Евы ещё не создан");
-      await this.ownedConversation(user.id, link.agent_id, conversationId);
-      let replacementId: string | null = null;
-      if (link.conversation_id === conversationId) {
-        const replacement = await this.letta.createConversationRecord(link.agent_id, { summary: "Новый диалог" }) as { id?: string };
-        if (!replacement.id) throw new Error("Не удалось создать новый активный диалог");
-        replacementId = replacement.id;
-        await this.db.setConversation(link.agent_id, replacementId, user.id);
-      }
-      await this.letta.updateConversation(conversationId, { archived: true });
-      await this.db.query(`UPDATE agent_conversations SET status = 'archived', archived_at = now(), meta = meta || '{"webapp_archived":true}'::jsonb WHERE user_id = $1 AND agent_id = $2 AND conversation_id = $3`, [user.id, link.agent_id, conversationId]);
-      return { id: conversationId, archived: true, replacement_id: replacementId };
-    });
-  }
-
-  private async ownedConversation(userId: number, agentId: string, conversationId: string): Promise<Record<string, unknown>> {
-    const { rows } = await this.db.query<Record<string, unknown>>(
-      `SELECT conversation_id AS id, title, created_at, updated_at FROM agent_conversations WHERE user_id = $1 AND agent_id = $2 AND conversation_id = $3 AND purpose = 'chat'`,
-      [userId, agentId, conversationId],
-    );
-    if (!rows[0]) throw new Error("Диалог не найден");
-    return rows[0];
+    return await this.conversations.archive(telegramId, conversationId);
   }
 
   /**

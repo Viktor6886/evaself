@@ -1089,17 +1089,17 @@
     const host = document.getElementById("conversations-host");
     try {
       const conversations = (await api("/public/conversations")).conversations || [];
-      host.innerHTML = `<button class="primary-action" id="new-conversation" type="button">Новый диалог</button>${conversations.map((item) => `<article class="section-card"><h3>${escapeHtml(item.title || "Диалог с Евой")}${item.active ? " · активный" : ""}</h3><div class="action-row">${item.active ? "" : `<button class="secondary-action" data-activate-conversation="${escapeAttr(item.id)}" type="button">Сделать активным</button>`}<button class="danger-action" data-archive-conversation="${escapeAttr(item.id)}" type="button">Архивировать</button></div></article>`).join("") || emptyState("Диалогов пока нет", "Создайте первый диалог с Евой.")}`;
+      host.innerHTML = `<article class="section-card"><label class="field"><span>Название нового диалога</span><input id="new-conversation-title" maxlength="120" value="Новый диалог"></label><button class="primary-action" id="new-conversation" type="button">Создать диалог</button></article>${conversations.map((item) => `<article class="section-card"><h3>${escapeHtml(item.title || "Диалог с Евой")}${item.active ? " · активный" : ""}</h3><div class="action-row">${item.active ? "<small>Чтобы архивировать, сначала выберите другой диалог.</small>" : `<button class="secondary-action" data-activate-conversation="${escapeAttr(item.id)}" type="button">Сделать активным</button><button class="danger-action" data-archive-conversation="${escapeAttr(item.id)}" type="button">Архивировать диалог</button>`}</div></article>`).join("") || emptyState("Диалогов пока нет", "Создайте первый диалог с Евой.")}`;
       host.querySelector("#new-conversation").addEventListener("click", createConversation);
       host.querySelectorAll("[data-activate-conversation]").forEach((button) => button.addEventListener("click", async () => { try { await api(`/public/conversations/${encodeURIComponent(button.dataset.activateConversation)}/activate`, { method: "POST", body: "{}" }); await refreshConversations(); toast("Диалог активирован"); } catch (error) { toast(friendlyError(error), true); } }));
-      host.querySelectorAll("[data-archive-conversation]").forEach((button) => button.addEventListener("click", async () => { if (!confirm("Архивировать диалог? История сохранится.")) return; try { await api(`/public/conversations/${encodeURIComponent(button.dataset.archiveConversation)}`, { method: "DELETE" }); await refreshConversations(); toast("Диалог архивирован"); } catch (error) { toast(friendlyError(error), true); } }));
+      host.querySelectorAll("[data-archive-conversation]").forEach((button) => button.addEventListener("click", async () => { try { await api(`/public/conversations/${encodeURIComponent(button.dataset.archiveConversation)}`, { method: "DELETE" }); await refreshConversations(); toast("Диалог перемещён в архив; история сохранена"); } catch (error) { toast(friendlyError(error), true); } }));
     } catch (error) { host.innerHTML = `<article class="section-card"><p>${escapeHtml(friendlyError(error))}</p></article>`; }
   }
 
   async function createConversation() {
-    const title = prompt("Название нового диалога", "Новый диалог")?.trim();
+    const title = document.getElementById("new-conversation-title")?.value.trim();
     if (!title) return;
-    try { await api("/public/conversations", { method: "POST", body: JSON.stringify({ title }) }); await refreshConversations(); toast("Новый диалог создан и активирован"); } catch (error) { toast(friendlyError(error), true); }
+    try { await api("/public/conversations", { method: "POST", body: JSON.stringify({ title }) }); await refreshConversations(); toast("Новый диалог создан. Выберите его, чтобы переключиться"); } catch (error) { toast(friendlyError(error), true); }
   }
 
   // ---------------------------------------------------------------------------
