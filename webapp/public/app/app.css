@@ -374,6 +374,37 @@ fieldset { border: 0; padding: 0; margin: 0; }
 .sheet-close { width: 38px; height: 38px; border-radius: 12px; background: var(--paper-2); color: var(--ink); font-size: 25px; }
 .sheet-close:active { background: var(--line); }
 .sheet-content { padding-top: 12px; }
+
+/* CONVERSATIONS — compact mobile list inside the sheet */
+.conversation-manager { display: grid; min-height: 0; gap: 10px; }
+.conversation-create { display: grid; gap: 6px; padding: 10px; border: 1px solid var(--line); border-radius: 13px; background: var(--paper-2); }
+.conversation-create > label { color: var(--muted); font-size: 10px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
+.conversation-create__row { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 7px; }
+.conversation-create__row input { width: 100%; min-height: 42px; padding: 9px 11px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--paper); color: var(--ink); font-size: 13px; }
+.conversation-create__row button, .conversation-action { min-height: 42px; padding: 9px 12px; border-radius: 10px; font-size: 11px; font-weight: 800; white-space: nowrap; transition: background .15s ease, transform .1s ease; }
+.conversation-create__row button { background: var(--green); color: #fff; }
+.conversation-create__row button:active, .conversation-action:active { transform: scale(.97); }
+.conversation-list { display: grid; gap: 7px; max-height: min(52dvh,460px); min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 1px 2px 4px 0; scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+.conversation-row { display: grid; gap: 8px; padding: 11px 12px; border: 1px solid var(--line); border-radius: 13px; background: var(--paper); }
+.conversation-row.is-active { border-color: rgba(16,163,127,.42); background: linear-gradient(135deg,rgba(16,163,127,.08),var(--paper) 72%); }
+.conversation-row__heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.conversation-row__heading h3 { min-width: 0; margin: 0; overflow: hidden; color: var(--ink); font-size: 14px; font-weight: 750; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
+.conversation-badge { flex: 0 0 auto; padding: 4px 7px; border-radius: 999px; background: rgba(16,163,127,.14); color: var(--green); font-size: 9px; font-weight: 800; letter-spacing: .02em; }
+.conversation-note { margin: -1px 0 0; color: var(--muted); font-size: 10px; line-height: 1.35; }
+.conversation-actions { display: grid; grid-template-columns: minmax(0,1.35fr) minmax(0,1fr); gap: 7px; }
+.conversation-action { border: 1px solid var(--line-strong); background: var(--paper-2); color: var(--ink); }
+.conversation-action.is-primary { border-color: rgba(16,163,127,.3); color: var(--green); }
+.conversation-action.is-danger { border-color: rgba(229,91,91,.24); color: var(--red); }
+.conversation-loading, .conversation-error, .conversation-empty { padding: 18px 12px; border: 1px solid var(--line); border-radius: 13px; color: var(--muted); font-size: 12px; text-align: center; }
+.conversation-empty { display: grid; gap: 3px; }
+.conversation-empty strong { color: var(--ink); font-size: 13px; }
+.conversation-empty span { font-size: 10px; }
+@media (max-width: 350px) {
+  .conversation-actions { grid-template-columns: 1fr; }
+  .conversation-create__row { grid-template-columns: 1fr; }
+  .conversation-create__row button { width: 100%; }
+}
+
 .sheet-options { display: grid; gap: 7px; }
 .sheet-option { min-height: 60px; display: grid; grid-template-columns: 34px minmax(0,1fr); gap: 10px; align-items: center; padding: 9px 11px; border: 1px solid var(--line); border-radius: 13px; background: var(--paper); text-align: left; transition: background .15s ease; }
 .sheet-option:active { background: var(--paper-2); }

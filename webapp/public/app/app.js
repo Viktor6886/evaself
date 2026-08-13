@@ -1082,18 +1082,29 @@
   }
 
   async function openConversationsSheet() {
-    openSheet({ title: "Диалоги с Евой", subtitle: "Активный диалог используется в Telegram. Архив сохраняет историю.", html: '<div class="section-stack" id="conversations-host"><article class="section-card"><p>Загружаю…</p></article></div>', onMount() { void refreshConversations(); } });
+    openSheet({ title: "Диалоги с Евой", subtitle: "Активный диалог используется в Telegram. Архив сохраняет историю.", html: '<div class="conversation-manager" id="conversations-host"><div class="conversation-loading">Загружаю…</div></div>', onMount() { void refreshConversations(); } });
+  }
+
+  function conversationRow(item) {
+    const id = escapeAttr(item.id);
+    const title = escapeHtml(item.title || "Диалог с Евой");
+    return `<article class="conversation-row${item.active ? " is-active" : ""}">
+      <div class="conversation-row__heading"><h3>${title}</h3>${item.active ? '<span class="conversation-badge">Активный</span>' : ""}</div>
+      ${item.active
+        ? '<p class="conversation-note">Сначала выберите другой диалог, чтобы архивировать этот.</p>'
+        : `<div class="conversation-actions"><button class="conversation-action is-primary" data-activate-conversation="${id}" type="button">Сделать активным</button><button class="conversation-action is-danger" data-archive-conversation="${id}" type="button">Архивировать</button></div>`}
+    </article>`;
   }
 
   async function refreshConversations() {
     const host = document.getElementById("conversations-host");
     try {
       const conversations = (await api("/public/conversations")).conversations || [];
-      host.innerHTML = `<article class="section-card"><label class="field"><span>Название нового диалога</span><input id="new-conversation-title" maxlength="120" value="Новый диалог"></label><button class="primary-action" id="new-conversation" type="button">Создать диалог</button></article>${conversations.map((item) => `<article class="section-card"><h3>${escapeHtml(item.title || "Диалог с Евой")}${item.active ? " · активный" : ""}</h3><div class="action-row">${item.active ? "<small>Чтобы архивировать, сначала выберите другой диалог.</small>" : `<button class="secondary-action" data-activate-conversation="${escapeAttr(item.id)}" type="button">Сделать активным</button><button class="danger-action" data-archive-conversation="${escapeAttr(item.id)}" type="button">Архивировать диалог</button>`}</div></article>`).join("") || emptyState("Диалогов пока нет", "Создайте первый диалог с Евой.")}`;
-      host.querySelector("#new-conversation").addEventListener("click", createConversation);
+      host.innerHTML = `<form class="conversation-create" id="conversation-create-form"><label for="new-conversation-title">Новый диалог</label><div class="conversation-create__row"><input id="new-conversation-title" maxlength="120" value="Новый диалог" aria-label="Название нового диалога"><button type="submit">Создать</button></div></form><div class="conversation-list">${conversations.map(conversationRow).join("") || '<div class="conversation-empty"><strong>Диалогов пока нет</strong><span>Создайте первый диалог с Евой.</span></div>'}</div>`;
+      host.querySelector("#conversation-create-form").addEventListener("submit", (event) => { event.preventDefault(); void createConversation(); });
       host.querySelectorAll("[data-activate-conversation]").forEach((button) => button.addEventListener("click", async () => { try { await api(`/public/conversations/${encodeURIComponent(button.dataset.activateConversation)}/activate`, { method: "POST", body: "{}" }); await refreshConversations(); toast("Диалог активирован"); } catch (error) { toast(friendlyError(error), true); } }));
       host.querySelectorAll("[data-archive-conversation]").forEach((button) => button.addEventListener("click", async () => { try { await api(`/public/conversations/${encodeURIComponent(button.dataset.archiveConversation)}`, { method: "DELETE" }); await refreshConversations(); toast("Диалог перемещён в архив; история сохранена"); } catch (error) { toast(friendlyError(error), true); } }));
-    } catch (error) { host.innerHTML = `<article class="section-card"><p>${escapeHtml(friendlyError(error))}</p></article>`; }
+    } catch (error) { host.innerHTML = `<div class="conversation-error">${escapeHtml(friendlyError(error))}</div>`; }
   }
 
   async function createConversation() {
