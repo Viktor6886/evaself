@@ -426,6 +426,23 @@
           </div>
           <form id="settings-form-advanced" class="settings-grid" hidden></form>
 
+          <section class="card router-card" id="context-management-card">
+            <div class="section-heading">
+              <div><h3>Контекст разговоров</h3><p class="block-caption">Лимиты Letta, dreaming и автоматическая ротация до переполнения fallback-моделей.</p></div>
+            </div>
+            <form id="context-management-form" class="provider-form" hidden>
+              <label>Контекст новых диалогов<input name="default_context_window" type="number" min="1024" max="10000000" required></label>
+              <label>Dreaming trigger<select name="dreaming_trigger"><option value="off">off</option><option value="step-count">step-count</option><option value="compaction-event">compaction-event</option></select></label>
+              <label class="flag"><input name="automatic_enabled" type="checkbox"> Автоматическая rotation</label>
+              <label>Порог compaction, сообщений<input name="compaction_message_threshold" type="number" min="10" max="100000" required></label>
+              <label>Порог rotation, сообщений<input name="rotation_message_threshold" type="number" min="20" max="100000" required></label>
+              <label>Режим compaction<select name="compaction_mode"><option value="sliding_window">sliding_window</option><option value="all">all</option><option value="self_compact_sliding_window">self_compact_sliding_window</option><option value="self_compact_all">self_compact_all</option></select></label>
+              <label>Оставить долю окна<input name="sliding_window_percentage" type="number" min="0.1" max="0.9" step="0.1" required></label>
+              <div class="form-actions span-2"><button id="save-context-management" class="button primary" type="submit">Сохранить управление контекстом</button></div>
+            </form>
+            <div id="conversation-limits" class="compact-list"></div>
+          </section>
+
           <!-- Предпросмотр политик хранения: что и когда будет удалено.
                Показывается рядом со сроками, потому что читать их
                осмысленно только вместе с последствиями. -->

@@ -31,6 +31,13 @@ export interface SdkSettingsInput {
   session_idle_ms?: number;
   turn_timeout_ms?: number;
   app_server_request_timeout_ms?: number;
+  automatic_context_management?: {
+    enabled: boolean;
+    compaction_message_threshold: number;
+    rotation_message_threshold: number;
+    compaction_mode: "sliding_window" | "all" | "self_compact_sliding_window" | "self_compact_all";
+    sliding_window_percentage: number;
+  };
 }
 
 export interface PublicSdkSettings extends SdkSettingsInput {
@@ -147,6 +154,33 @@ export function validateSettings(input: SdkSettingsInput): Required<SdkSettingsI
       "system_info_reminder пока не поддерживается официальным SDK для self-hosted App Server",
     );
   }
+  const automaticInput = plainObject(
+    input.automatic_context_management ?? {},
+    "automatic_context_management",
+  );
+  const compactionThreshold = integer(
+    automaticInput.compaction_message_threshold ?? 300,
+    "automatic_context_management.compaction_message_threshold",
+    10,
+    100000,
+  );
+  const rotationThreshold = integer(
+    automaticInput.rotation_message_threshold ?? 600,
+    "automatic_context_management.rotation_message_threshold",
+    20,
+    100000,
+  );
+  if (rotationThreshold <= compactionThreshold) {
+    throw badRequest("rotation_message_threshold должен быть больше compaction_message_threshold");
+  }
+  const compactionMode = String(automaticInput.compaction_mode ?? "sliding_window");
+  if (!new Set(["sliding_window", "all", "self_compact_sliding_window", "self_compact_all"]).has(compactionMode)) {
+    throw badRequest("Некорректный automatic_context_management.compaction_mode");
+  }
+  const slidingWindowPercentage = Number(automaticInput.sliding_window_percentage ?? 0.5);
+  if (!Number.isFinite(slidingWindowPercentage) || slidingWindowPercentage <= 0 || slidingWindowPercentage >= 1) {
+    throw badRequest("sliding_window_percentage должен быть больше 0 и меньше 1");
+  }
 
   return {
     agent_name_prefix: text(input.agent_name_prefix ?? "eva", "agent_name_prefix", 1, 80),
@@ -187,6 +221,13 @@ export function validateSettings(input: SdkSettingsInput): Required<SdkSettingsI
       1000,
       3600000,
     ),
+    automatic_context_management: {
+      enabled: boolean(automaticInput.enabled, false),
+      compaction_message_threshold: compactionThreshold,
+      rotation_message_threshold: rotationThreshold,
+      compaction_mode: compactionMode as "sliding_window" | "all" | "self_compact_sliding_window" | "self_compact_all",
+      sliding_window_percentage: slidingWindowPercentage,
+    },
   };
 }
 
@@ -226,6 +267,7 @@ function rowToInput(row: SdkSettingsRow): Required<SdkSettingsInput> {
     session_idle_ms: row.session_idle_ms,
     turn_timeout_ms: row.turn_timeout_ms,
     app_server_request_timeout_ms: row.app_server_request_timeout_ms,
+    automatic_context_management: row.automatic_context_management,
   };
 }
 

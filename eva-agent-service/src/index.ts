@@ -53,6 +53,7 @@ import { ArtifactRegistry } from "./artifacts/registry.js";
 import { CoreSkillCatalog, FilesystemSkillIndexer, PostgresSkillRepository, SkillRouter } from "./skills/index.js";
 import { createRouterLlmAdapters, skillRuntimeMetrics } from "./skills/runtime.js";
 import { SdkSettingsManager } from "./sdk-settings.js";
+import { ConversationContextManager } from "./conversations/context-management.js";
 import { buildServer, VERSION } from "./server.js";
 import { TelegramClient } from "./telegram.js";
 import { TimezoneResolver } from "./time/timezone-resolver.js";
@@ -164,6 +165,7 @@ async function main(): Promise<void> {
   });
   if (config.outboxEnabled) telegram.setOutbox(outbox);
   const sdk = new SdkSettingsManager(config, db, letta);
+  const contextManager = new ConversationContextManager(db, letta, db);
   try {
     await sdk.initialize();
   } catch (error) {
@@ -359,6 +361,7 @@ async function main(): Promise<void> {
     turns,
     episodeTracker,
     deepRecall,
+    contextManager,
   );
   const inbox = new PostgresTelegramInbox(db);
   // Уведомление о мёртвой записи одно на оба пути обработки: человек
