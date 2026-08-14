@@ -203,6 +203,18 @@ export interface Config {
   deepRecallEnabled: boolean;
   coreSkillsEnabled: boolean;
   skillRouterEnabled: boolean;
+  /**
+   * Дневник Mini App: запись дня, карточки людей, недельный обзор и
+   * «Спросить Еву» с разделением источников. Выключено — маршрутов
+   * дневника нет вовсе, и Mini App работает прежним набором разделов.
+   */
+  miniAppJournalEnabled: boolean;
+  /**
+   * Сколько живёт голосовая заметка дневника. Файл удаляется по сроку,
+   * расшифровка остаётся в записи: иначе человек терял бы саму запись
+   * вместе с истечением аудио.
+   */
+  journalVoiceRetentionDays: number;
 
   lavaWebhookUser: string;
   lavaWebhookPassword: string;
@@ -413,6 +425,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     deepRecallEnabled: bool("EVA_DEEP_RECALL", false),
     coreSkillsEnabled: bool("EVA_CORE_SKILLS", false),
     skillRouterEnabled: bool("EVA_SKILL_ROUTER", false),
+    miniAppJournalEnabled: bool("EVA_MINIAPP_JOURNAL_V2", false),
+    journalVoiceRetentionDays: clampedInt(
+      "EVA_JOURNAL_VOICE_RETENTION_DAYS",
+      30,
+      1,
+      365,
+    ),
 
     lavaWebhookUser: str("LAVA_WEBHOOK_USER"),
     lavaWebhookPassword: str("LAVA_WEBHOOK_PASSWORD"),

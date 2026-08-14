@@ -346,6 +346,33 @@ fieldset { border: 0; padding: 0; margin: 0; }
 .practice-button strong { font-size: 12px; }
 .practice-button small { margin-top: 3px; color: var(--muted); font-size: 9px; }
 
+/* JOURNAL — записи дня, люди и разделённые источники ответа */
+.journal-entry { display: grid; gap: 4px; text-align: left; width: 100%; }
+.journal-entry p { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.journal-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; color: var(--muted); font-size: 9px; }
+.journal-meta span { padding: 3px 7px; border: 1px solid var(--line); border-radius: 999px; }
+/* Доказательство набрано мельче утверждения, но остаётся читаемым:
+   ниже 11px текст на телефоне перестаёт читаться вовсе. */
+.evidence-note { display: block; margin-top: 4px; color: var(--muted); font-size: 11px; line-height: 1.35; }
+.chip-row { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }
+.chip { min-height: 44px; display: inline-flex; align-items: center; gap: 6px; padding: 8px 13px; border: 1px solid var(--line-strong); border-radius: 999px; background: var(--paper-2); color: var(--ink); font-size: 12px; font-weight: 700; }
+.chip small { color: var(--muted); font-size: 10px; }
+.chip:active { background: var(--line); }
+.section-card.is-priority { border-color: rgba(229,91,91,.4); background: linear-gradient(135deg,rgba(229,91,91,.1),var(--paper) 70%); }
+.section-card.is-priority p { color: var(--ink); }
+
+/* CONFIRM — подтверждение опасного действия */
+.confirm { width: min(100%,420px); max-width: 100%; margin: auto; padding: 0; border: 0; background: transparent; }
+.confirm::backdrop { background: rgba(0,0,0,.68); }
+.confirm-card { margin: 0 var(--side); padding: 18px; border: 1px solid var(--line-strong); border-radius: 18px; background: var(--paper); box-shadow: 0 12px 40px rgba(0,0,0,.5); }
+.confirm-card h2 { margin: 0; font-family: var(--display); font-size: 19px; font-weight: 600; }
+.confirm-card p { margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
+/* Опасная кнопка стоит второй и не касается безопасной: на телефоне
+   промах в семь пикселей — это выполненное удаление. */
+.confirm-actions { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 10px; margin-top: 16px; }
+.confirm-actions button { min-height: 48px; }
+.confirm-actions .danger-action { background: rgba(229,91,91,.12); }
+
 /* BOTTOM NAV */
 .bottom-nav {
   min-height: var(--nav-h);

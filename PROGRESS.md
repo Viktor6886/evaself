@@ -10,12 +10,12 @@
 
 ```
 CURRENT_BATCH: 17
-CURRENT_STEP:  25
-BRANCH:        batch/16-knowledge-research
-STATUS:        выполнен
-LAST_COMMIT:   22620e4
+CURRENT_STEP:  26
+BRANCH:        batch/17-telegram-miniapp
+STATUS:        в работе
+LAST_COMMIT:   —
 BLOCKER:       —
-NEXT:          начать batch 17 (шаги 25–26)
+NEXT:          шаг 26 — адаптация Mini App и Admin UI под device-матрицу
 ```
 
 Значения полей:
@@ -58,7 +58,7 @@ Batch — единица работы: одна ветка, один pull reques
 | 14 | 19–20 | P2 | выполнен | [#161](https://github.com/Viktor6886/evaself/pull/161) |
 | 15 | 21–22 | P2 | выполнен | [#168](https://github.com/Viktor6886/evaself/pull/168) |
 | 16 | 23–24 | P3 | выполнен | [#170](https://github.com/Viktor6886/evaself/pull/170) |
-| 17 | 25–26 | P3 | не начат | — |
+| 17 | 25–26 | P3 | в работе | — |
 | 18 | 27 | P3 | не начат | — |
 | 19 | 28–29 | P3 | не начат | — |
 | 20 | 30 | P3 | не начат | — |

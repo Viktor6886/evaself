@@ -4,7 +4,7 @@
   const tg = window.Telegram?.WebApp;
   const DEMO = new URLSearchParams(location.search).get("demo") === "1";
   const API = "/api";
-  const BUILD = "20260808-v1";
+  const BUILD = "20260814-v2";
 
   const state = {
     screen: "today",
@@ -35,6 +35,10 @@
     great: "Отличное",
   };
 
+  // Дневник добавляется в этот список ТОЛЬКО после ответа сервера: при
+  // выключенном флаге его маршруты отвечают 404, и карточка модуля,
+  // которая никуда не ведёт, была бы ровно тем «мёртвым элементом»,
+  // который запрещает шаг 26.
   const hubModules = [
     { code: "tests", title: "Тесты", note: "Профиль личности и самопознание", icon: "clipboard", badge: "Скоро" },
     { code: "compatibility", title: "Совместимость", note: "Люди, приглашения и отчёты", icon: "hearts", badge: "Скоро" },
@@ -97,10 +101,32 @@
       }
       state.notes = state.dashboard?.notes || [];
       state.budgets = state.dashboard?.budget?.recent || [];
+      await enableJournalIfServed();
       renderAll();
     } catch (error) {
       renderAll();
       showFriendlyFailure(error);
+    }
+  }
+
+  /**
+   * Дневник появляется в Пульте только тогда, когда сервер его отдаёт.
+   * Проверка — один запрос: 404 означает выключенный флаг, и раздела
+   * не будет вовсе.
+   */
+  async function enableJournalIfServed() {
+    if (!window.EvaJournal) return;
+    const available = await window.EvaJournal.probe();
+    if (!available) return;
+    state.journalEnabled = true;
+    if (!hubModules.some((item) => item.code === "journal")) {
+      hubModules.unshift({
+        code: "journal",
+        title: "Дневник",
+        note: "Записи дня, люди и недельный обзор",
+        icon: "note",
+        badge: "Работает",
+      });
     }
   }
 
@@ -318,7 +344,19 @@
     renderCheckin(dashboard.checkin || null);
     renderMainFocus(dashboard.main_focus || dashboard.mainFocus || null);
     renderTodayCards(dashboard);
-    document.getElementById("insight-text").textContent = dashboard.insight?.text || dashboard.insight || "После нескольких отметок здесь появится полезное наблюдение без лишней психодиагностики.";
+    // Наблюдение показывается вместе с тем, на чём оно построено:
+    // без числа наблюдений фраза выглядит утверждением о человеке, а
+    // не выводом из его же отметок.
+    const insight = dashboard.insight;
+    const insightText = insight?.text || (typeof insight === "string" ? insight : "")
+      || "После нескольких отметок здесь появится полезное наблюдение без лишней психодиагностики.";
+    const observations = Number(insight?.observations || 0);
+    document.getElementById("insight-text").textContent = insightText;
+    const evidence = document.getElementById("insight-evidence");
+    evidence.hidden = observations < 5;
+    evidence.textContent = observations >= 5
+      ? `Основано на ${observations} ${plural(observations, "отметке", "отметках", "отметках")} состояния`
+      : "";
     document.getElementById("today-caption").textContent = dashboard.local_time ? `Местное время ${dashboard.local_time}` : "Твой день — твои решения";
   }
 
@@ -512,7 +550,12 @@
   function handleQuick(action, button) {
     button.classList.add("is-selected");
     setTimeout(() => button.classList.remove("is-selected"), 350);
-    if (action === "write") openComposeSheet();
+    // «Записать» ведёт в дневник, когда он подключён: две ленты записей
+    // в одном приложении человек различать не обязан.
+    if (action === "write") {
+      if (state.journalEnabled && window.EvaJournal) window.EvaJournal.open();
+      else openComposeSheet();
+    }
     else if (action === "eva") openEvaHandoff(screenContext());
     else if (action === "reset") openPractices();
     else openAddSheet();
@@ -694,7 +737,12 @@
   }
 
   async function deleteTask(task) {
-    if (!task || !confirm("Удалить задачу?")) return;
+    if (!task) return;
+    if (!await confirmDanger({
+      title: "Удалить задачу?",
+      detail: `«${task.title}» исчезнет из списка вместе с напоминанием. Отменить это нельзя.`,
+      confirmLabel: "Удалить задачу",
+    })) return;
     try {
       await api(`/public/v2/tasks/${encodeURIComponent(task.id)}`, { method: "DELETE" });
       state.tasks = state.tasks.filter((item) => item.id !== task.id);
@@ -735,7 +783,12 @@
   }
 
   async function deleteNote(note) {
-    if (!note || !confirm("Удалить заметку?")) return;
+    if (!note) return;
+    if (!await confirmDanger({
+      title: "Удалить заметку?",
+      detail: `«${note.title || "Без названия"}» будет удалена без возможности восстановления.`,
+      confirmLabel: "Удалить заметку",
+    })) return;
     try {
       await api(`/public/v2/notes/${encodeURIComponent(note.id)}`, { method: "DELETE" });
       state.notes = state.notes.filter((item) => item.id !== note.id);
@@ -879,6 +932,7 @@
   }
 
   function hubSummary(code, summaries) {
+    if (code === "journal") return "Запись сохраняется без участия ИИ";
     if (code === "budget") return summaries.budget || budgetSummaryText();
     if (code === "reports") return summaries.reports || `${state.progress?.completed_results?.length || 0} готовых результатов`;
     if (code === "practices") return "5 коротких способов перезагрузки";
@@ -888,6 +942,7 @@
   }
 
   function openHubModule(code) {
+    if (code === "journal") return window.EvaJournal?.open();
     if (code === "budget") return openBudgetModule();
     if (code === "practices") return openPractices();
     if (code === "reports") return openReportsModule();
@@ -965,7 +1020,11 @@
           } catch (error) { toast(friendlyError(error), true); }
         });
         host.querySelector("#delete-budget")?.addEventListener("click", async () => {
-          if (!confirm("Удалить финансовую запись?")) return;
+          if (!await confirmDanger({
+            title: "Удалить запись?",
+            detail: "Финансовая запись исчезнет из отчётов за период.",
+            confirmLabel: "Удалить запись",
+          })) return;
           try { await api(`/public/v2/budget/${encodeURIComponent(entry.id)}`, { method: "DELETE" }); state.budgets = state.budgets.filter((item) => item.id !== entry.id); closeSheet(); await refreshDashboard(); openBudgetModule(); }
           catch (error) { toast(friendlyError(error), true); }
         });
@@ -1212,7 +1271,11 @@
         return void refreshMemory();
       }
       if (action === "delete") {
-        if (!window.confirm("Удалить факт вместе со всеми версиями и источниками?")) return;
+        if (!await confirmDanger({
+          title: "Удалить факт?",
+          detail: "Исчезнут все версии факта, его источники и связи. Историю восстановить будет нельзя.",
+          confirmLabel: "Удалить факт",
+        })) return;
         await api(`/public/memory/${key}`, { method: "DELETE" });
         toast("Удалила");
         return void refreshMemory();
@@ -1287,6 +1350,49 @@
   function closeSheet() {
     const sheet = document.getElementById("sheet");
     if (sheet.open) sheet.close();
+  }
+
+  /**
+   * Подтверждение опасного действия.
+   *
+   * Заменяет `window.confirm` по двум причинам. Системное окно в
+   * Telegram на Android появляется у верхнего края, где палец уже
+   * находится после нажатия «Удалить», — промах превращается в
+   * подтверждение. И оно не объясняет, что именно исчезнет.
+   *
+   * Здесь опасная кнопка стоит второй и отделена от безопасной, а
+   * действие по умолчанию — отмена: закрытие свайпом, Escape и тычок
+   * мимо диалога возвращают `false`.
+   */
+  function confirmDanger({ title, detail, confirmLabel = "Удалить" }) {
+    const dialog = document.getElementById("confirm-dialog");
+    dialog.querySelector("#confirm-title").textContent = title;
+    dialog.querySelector("#confirm-detail").textContent = detail;
+    const accept = dialog.querySelector("#confirm-accept");
+    accept.textContent = confirmLabel;
+    return new Promise((resolve) => {
+      let decided = false;
+      const finish = (value) => {
+        if (decided) return;
+        decided = true;
+        accept.removeEventListener("click", onAccept);
+        dialog.removeEventListener("close", onClose);
+        dialog.removeEventListener("click", onBackdrop);
+        if (dialog.open) dialog.close();
+        resolve(value);
+      };
+      const onAccept = () => finish(true);
+      const onClose = () => finish(false);
+      const onBackdrop = (event) => { if (event.target === dialog) finish(false); };
+      accept.addEventListener("click", onAccept);
+      dialog.addEventListener("close", onClose);
+      dialog.addEventListener("click", onBackdrop);
+      dialog.querySelector("#confirm-cancel").onclick = () => finish(false);
+      dialog.showModal();
+      // Фокус на безопасной кнопке: случайное нажатие Enter отменяет,
+      // а не удаляет.
+      dialog.querySelector("#confirm-cancel").focus();
+    });
   }
 
   let toastTimer;
@@ -1407,6 +1513,31 @@
   async function copyText(value) { try { await navigator.clipboard.writeText(value || ""); } catch {} }
   function escapeHtml(value) { return String(value ?? "").replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[char]); }
   function escapeAttr(value) { return escapeHtml(value).replace(/`/g, "&#96;"); }
+
+  /**
+   * Мост для отдельных модулей интерфейса (`journal.js`).
+   *
+   * Наружу отдаётся ровно то, без чего модуль не обойдётся: доступ к
+   * API с сессией, лист, тост, подтверждение и экранирование. Ни
+   * состояние сессии, ни токен через мост не проходят.
+   */
+  window.EvaApp = {
+    state,
+    api,
+    safeApi,
+    friendlyError,
+    openSheet,
+    closeSheet,
+    openModule,
+    openEvaHandoff,
+    confirmDanger,
+    toast,
+    emptyState,
+    icon,
+    escapeHtml,
+    escapeAttr,
+    formatDate,
+  };
 
   function legacyDashboard(today, tasks) {
     const main = today?.main_action ? { title: today.main_action, source_label: today.goal_title || "Активная цель", expected_result: today.expected_result, work_block_id: today.work_block_id, work_block_status: today.work_block_status } : null;
