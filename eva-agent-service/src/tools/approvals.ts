@@ -142,10 +142,17 @@ export class ApprovalService {
   }
 
   async completeApprovedExecution(input: { userId: number; conversationId: string; toolName: string; args: unknown; outcome: "executed" | "failed" }): Promise<boolean> {
+    // Выключенная подсистема учёта не ведёт: строк подтверждения нет, а
+    // обращение к таблице шло бы после каждого вызова инструмента.
+    if (!this.enabled) return false;
     return await this.scoped(input.userId, async () => {
       const result = await this.db.query(
-        `-- tenant: by user_id — completion runs inside canonical user scope
-         WITH matching_approval AS (
+        // Владелец назван в обеих частях запроса. Границе арендатора видна
+        // только сама цель UPDATE: связь `approval.user_id =
+        // claimed.user_id` уводит ограничение в CTE, и запрос считается
+        // неограниченным — в области пользователя он отвергается целиком,
+        // а вместе с ним отказывает и уже выполненный инструмент.
+        `WITH matching_approval AS (
            SELECT user_id, sdk_request_id
              FROM tool_approvals
             WHERE user_id = $2 AND conversation_id = $3 AND tool_name = $4
@@ -157,7 +164,9 @@ export class ApprovalService {
          )
          UPDATE tool_approvals AS approval SET status = $1
           FROM matching_approval AS claimed
-         WHERE approval.user_id = claimed.user_id AND approval.sdk_request_id = claimed.sdk_request_id
+         WHERE approval.user_id = $2
+           AND approval.user_id = claimed.user_id
+           AND approval.sdk_request_id = claimed.sdk_request_id
          RETURNING approval.sdk_request_id`,
         [input.outcome, input.userId, input.conversationId, input.toolName, fingerprintApprovalArguments(input.args)],
       );

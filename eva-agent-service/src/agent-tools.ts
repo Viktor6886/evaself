@@ -274,14 +274,13 @@ export class AgentToolFactory {
           });
           if (executionUserId !== undefined) {
             approvalCompletionAttempted = true;
-            await this.approvalCompletion?.({ userId: executionUserId, conversationId, toolName: name, args: rawArgs, outcome: "executed" });
-            await this.verifiedOutcome?.({userId:executionUserId,conversationId,toolName:name,toolCallId:String(toolCallId),runId:currentTurn()?.runId,outcome:"executed"});
+            await this.recordOutcome({ userId: executionUserId, conversationId, toolName: name, args: rawArgs, toolCallId: String(toolCallId), outcome: "executed" });
           }
           return gatewayResult;
         } catch (error) {
           if (executionUserId !== undefined && !approvalCompletionAttempted) {
             approvalCompletionAttempted = true;
-            await this.approvalCompletion?.({ userId: executionUserId, conversationId, toolName: name, args: rawArgs, outcome: "failed" });
+            await this.recordOutcome({ userId: executionUserId, conversationId, toolName: name, args: rawArgs, toolCallId: String(toolCallId), outcome: "failed" });
           }
           const message = error instanceof Error ? error.message : String(error);
           this.logger.warn("Инструмент Agent SDK завершился ошибкой", {
@@ -294,6 +293,47 @@ export class AgentToolFactory {
       },
     });
     };
+  }
+
+  /**
+   * Учёт исхода вызова: закрытие подтверждения и проверенный исход.
+   *
+   * Учёт идёт после того, как побочный эффект уже случился, поэтому его
+   * отказ не становится отказом инструмента: модель получила бы ошибку на
+   * выполненном действии и позвала бы инструмент второй раз. По той же
+   * причине отказ учёта не подменяет собой исходную ошибку инструмента —
+   * иначе настоящая причина отказа не доходит ни до модели, ни в журнал.
+   * Каждая часть учёта выполняется отдельно: отказ одной не отменяет второй.
+   */
+  private async recordOutcome(input: {
+    userId: number;
+    conversationId: string;
+    toolName: string;
+    args: unknown;
+    toolCallId: string;
+    outcome: "executed" | "failed";
+  }): Promise<void> {
+    const record = async (stage: string, work: () => Promise<unknown>): Promise<void> => {
+      try {
+        await work();
+      } catch (error) {
+        this.logger.warn("Учёт исхода инструмента не выполнен", {
+          tool: input.toolName,
+          conversationId: input.conversationId,
+          stage,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    };
+    await record("approval", async () => await this.approvalCompletion?.({
+      userId: input.userId, conversationId: input.conversationId,
+      toolName: input.toolName, args: input.args, outcome: input.outcome,
+    }));
+    if (input.outcome !== "executed") return;
+    await record("verified_outcome", async () => await this.verifiedOutcome?.({
+      userId: input.userId, conversationId: input.conversationId, toolName: input.toolName,
+      toolCallId: input.toolCallId, runId: currentTurn()?.runId, outcome: "executed",
+    }));
   }
 
   private async loadMcpTools(conversationId: string): Promise<void> {

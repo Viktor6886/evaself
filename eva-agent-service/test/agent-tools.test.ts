@@ -416,3 +416,37 @@ test("admin-created enabled MCP policy becomes a live allowlisted SDK tool and i
   assert.deepEqual(calls, [["knowledge", "search", { q: "safe" }]]);
   assert.equal(factory.manifests.get("mcp__knowledge__search")?.limits.maxResultBytes, 4096);
 });
+
+test("отказ учёта исхода не отменяет уже выполненный инструмент", async () => {
+  const { factory, tools, statements } = harness();
+  // Учёт подтверждений живёт за границей арендатора: один его отказ
+  // раньше превращал каждый инструмент в ошибку, хотя чтение и запись
+  // уже прошли. Инструмент отвечает моделью своим результатом, отказ
+  // учёта остаётся в журнале.
+  const attempted: string[] = [];
+  factory.setApprovalCompletionCallback(async (input) => {
+    attempted.push(`approval:${input.outcome}`);
+    throw new Error("Запрос без ограничения по пользователю: tool_approvals");
+  });
+  factory.setVerifiedOutcomeCallback(async (input) => {
+    attempted.push(`verified:${input.outcome}`);
+    throw new Error("журнал эффектов недоступен");
+  });
+  const result = await tools.get("get_notes")!.execute("call-1", { query: "что-нибудь" });
+  assert.equal((result.details as { ok: boolean }).ok, true);
+  assert.deepEqual((result.details as { notes?: unknown[] }).notes, [{ id: 1, title: "x" }]);
+  // Обе части учёта выполняются независимо: отказ первой не отменяет вторую.
+  assert.deepEqual(attempted, ["approval:executed", "verified:executed"]);
+  assertUserScoped(statements, "get_notes");
+});
+
+test("отказ инструмента доходит до модели своей причиной, а не ошибкой учёта", async () => {
+  const { factory, tools } = harness();
+  factory.setApprovalCompletionCallback(async () => {
+    throw new Error("Запрос без ограничения по пользователю: tool_approvals");
+  });
+  const result = await tools.get("save_note")!.execute("call-1", { title: "только заголовок" });
+  const payload = result.details as { ok: boolean; error?: string };
+  assert.equal(payload.ok, false);
+  assert.doesNotMatch(String(payload.error), /tool_approvals/);
+});
