@@ -122,24 +122,35 @@ export class ChannelLinkService {
    */
   async activity(userId: number, limit = 20): Promise<ChannelActivityItem[]> {
     const bounded = Math.min(100, Math.max(1, Math.trunc(limit)));
-    const { rows } = await this.db.query<ChannelActivityItem>(
-      `(SELECT source_channel AS channel, 'journal_entry' AS kind,
-               'journal_entries:' || id::text AS reference,
-               coalesce(title, 'Запись дневника') AS title,
-               created_at::text AS at
-          FROM journal_entries
-         WHERE user_id = $1)
-       UNION ALL
-       (SELECT channel, 'message' AS kind,
-               'channel_message_links:' || id::text AS reference,
-               'Сообщение канала' AS title,
-               created_at::text AS at
-          FROM channel_message_links
-         WHERE user_id = $1)
-       ORDER BY at DESC
-       LIMIT $2`,
+    // Порядок берётся по timestamptz, а не по его текстовой записи:
+    // текст несёт смещение зоны ('+03' против '+02' при переходе на
+    // зимнее время), и лексикографическая сортировка перепутала бы
+    // события по разные стороны перевода часов.
+    const { rows } = await this.db.query<ChannelActivityItem & { ordered_at: Date }>(
+      `SELECT channel, kind, reference, title, at, ordered_at
+         FROM (
+           (SELECT source_channel AS channel, 'journal_entry' AS kind,
+                   'journal_entries:' || id::text AS reference,
+                   coalesce(title, 'Запись дневника') AS title,
+                   created_at::text AS at,
+                   created_at AS ordered_at
+              FROM journal_entries
+             WHERE user_id = $1)
+           UNION ALL
+           (SELECT channel, 'message' AS kind,
+                   'channel_message_links:' || id::text AS reference,
+                   'Сообщение канала' AS title,
+                   created_at::text AS at,
+                   created_at AS ordered_at
+              FROM channel_message_links
+             WHERE user_id = $1)
+         ) feed
+        ORDER BY ordered_at DESC
+        LIMIT $2`,
       [userId, bounded],
     );
-    return rows;
+    return rows.map(({ channel, kind, reference, title, at }) => ({
+      channel, kind, reference, title, at,
+    }));
   }
 }

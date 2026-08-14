@@ -72,9 +72,12 @@ try {
   // ------------------------------------------------------------------
   // Запись сохраняется без ИИ и со всеми связями
   // ------------------------------------------------------------------
+  // Активная цель обязана быть подтверждённой человеком —
+  // `goals_activation_check`. Ставить статус в обход подтверждения
+  // нельзя даже во вспомогательных данных теста.
   const goalId = Number((await pool.query(
-    `INSERT INTO goals(user_id, title, status, priority)
-     VALUES ($1, 'CI дневник', 'active', 3) RETURNING id`,
+    `INSERT INTO goals(user_id, title, status, priority, user_confirmed)
+     VALUES ($1, 'CI дневник', 'active', 3, true) RETURNING id`,
     [first],
   )).rows[0].id);
 
