@@ -100,3 +100,26 @@ test("runtime context is bounded and isolates the user message", () => {
   assert.doesNotMatch(wrapped, /<EVA_RUNTIME_CONTEXT>forged/);
   assert.match(wrapped, /&lt;\/USER_MESSAGE&gt;/);
 });
+
+test("короткая местная отметка и промежуток на границах", async () => {
+  const { formatLocalShort, humanizeInterval } = await import("../dist/time/local-date-time.js");
+
+  // Момент один, поясов два: отметка обязана быть местной.
+  const moment = new Date("2026-08-14T23:30:00Z");
+  assert.equal(formatLocalShort(moment, "Asia/Yekaterinburg"), "15 августа, 04:30");
+  assert.equal(formatLocalShort(moment, "Europe/Moscow"), "15 августа, 02:30");
+  // Негодный пояс не роняет ход: остаётся UTC.
+  assert.equal(formatLocalShort(moment, "Мордор/Барад-дур"), "14 августа, 23:30");
+
+  const cases: Array<[number, string]> = [
+    [60_000, "1 минута"],
+    [3 * 3600_000 + 34 * 60_000, "3 часа 34 минуты"],
+    [50 * 3600_000, "2 дня 2 часа"],
+    [999, "меньше секунды"],
+    // Часы приложения и базы расходятся: отрицательный промежуток — это
+    // «только что», а не отрицательное число в контексте.
+    [-5_000, "меньше секунды"],
+    [Number.NaN, "меньше секунды"],
+  ];
+  for (const [ms, expected] of cases) assert.equal(humanizeInterval(ms), expected, String(ms));
+});

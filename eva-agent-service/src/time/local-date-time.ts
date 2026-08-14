@@ -21,6 +21,27 @@ export function localDateWithWeekday(value: DateTime, locale = "ru"): string {
 }
 
 /**
+ * Короткая местная отметка: «15 августа, 04:30».
+ *
+ * Без года и секунд: в контексте хода она стоит рядом с местным временем
+ * пользователя и служит для сверки «когда», а не для протокола.
+ */
+export function formatLocalShort(
+  value: Date | string,
+  timezone: string,
+  locale = "ru",
+): string {
+  const source = value instanceof Date
+    ? DateTime.fromJSDate(value)
+    : DateTime.fromISO(value, { setZone: true });
+  if (!source.isValid) throw new Error("Некорректная дата");
+  return source
+    .setZone(isValidIanaTimezone(timezone) ? timezone : "UTC")
+    .setLocale(locale)
+    .toFormat("d MMMM, HH:mm");
+}
+
+/**
  * Промежуток словами: «9 секунд», «1 час 15 минут», «3 дня 2 часа».
  *
  * Две старшие ненулевые единицы: «2 часа 15 минут» человеку понятно, а

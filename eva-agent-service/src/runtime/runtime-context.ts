@@ -46,6 +46,8 @@ export interface RuntimeContext {
   skillLines?: string[];
   llmQualityMode?: "economy" | "auto" | "quality";
   taskActivity?: string[];
+  /** Ближайшие напоминания: когда сработают и через сколько. */
+  upcomingReminders?: string[];
   metrics?: {
     runtimeContextMs: number;
     profileCheckMs: number;
@@ -157,7 +159,16 @@ export class RuntimeContextBuilder {
     const profileCheckMs = elapsed(profileStarted);
     const scoped = input.memoryScopes === undefined ? null : new Set(input.memoryScopes);
     const permits = (scope: string) => scoped === null || scoped.has(scope);
-    const taskActivity = permits("tasks") ? await this.taskEvents.contextLines(input.userId).catch(() => []) : [];
+    // Оба запроса задач независимы, поэтому идут одним заходом: путь
+    // ответа человеку не должен ждать два round-trip подряд.
+    // Момент напоминания и остаток до него считает серверный код: модель
+    // берёт такой остаток из головы и ошибается на часы.
+    const [taskActivity, upcomingReminders] = permits("tasks")
+      ? await Promise.all([
+        this.taskEvents.contextLines(input.userId, timezone).catch(() => []),
+        this.taskEvents.upcomingLines(input.userId, timezone, local.toJSDate()).catch(() => []),
+      ])
+      : [[], []];
     const skillLines = await this.options.skillContext?.({ userId: input.userId, conversationId: input.conversationId, purpose: row.purpose, message: input.userMessage, turnId: input.turnId }).catch(() => []);
     return {
       userId: Number(row.user_id),
@@ -188,6 +199,7 @@ export class RuntimeContextBuilder {
       relevantMemory: (input.relevantMemory ?? []).filter((line) => scoped === null || [...scoped].some((scope) => line.startsWith(`${scope}:`) || line.startsWith(`${scope.replace(/s$/, "")}:`))).slice(0, 5),
       llmQualityMode: input.modelPolicy ?? row.llm_quality_mode,
       taskActivity,
+      upcomingReminders,
       skillLines: input.allowedSkills === undefined ? skillLines : input.allowedSkills.length === 0 ? [] : (skillLines ?? []).filter((line) => input.allowedSkills!.some((slug) => line.includes(slug))),
       metrics: {
         runtimeContextMs: elapsed(started),
@@ -232,9 +244,13 @@ export class RuntimeContextBuilder {
         context.sincePreviousMessage === null
           ? null
           : "Столько прошло между прошлым сообщением человека и этим. Считай этот"
-            + " промежуток фактом: за секунды и минуты дело, поездка, встреча или сон"
-            + " не могли состояться, и спрашивать об их результате как о прошедшем"
-            + " нельзя. Не выдумывай промежуток по смыслу слов.",
+            + " промежуток фактом и не выдумывай его по смыслу слов. Если человек"
+            + " сообщает о сделанном, сверься с промежутком: дело, на которое нужны"
+            + " десятки минут или часы, за секунды и минуты не делается. В таком"
+            + " случае не подтверждай выполнение и не хвали, а спокойно уточни —"
+            + " возможно, он имел в виду другое, оговорился или пишет из середины"
+            + " дела. Спрашивать о результате того, что заведомо не могло"
+            + " состояться, тоже нельзя.",
       ],
       ["timezone", context.timezone],
       ["city", context.city],
@@ -296,6 +312,19 @@ export class RuntimeContextBuilder {
     );
     measurements.push(conversation.measurement);
     if (conversation.lines.length > 0) lines.push("recent_task_events:", ...conversation.lines);
+
+    // Ближайшие напоминания стоят рядом с местным временем и приходят с
+    // уже посчитанным остатком: «через сколько» — это арифметика, а её
+    // модель делает неверно и уверенно.
+    const upcoming = (context.upcomingReminders ?? []).slice(0, 3);
+    if (upcoming.length > 0) {
+      lines.push(
+        "upcoming_reminders:",
+        ...upcoming.map((item) => `  - ${escapeContextValue(item)}`),
+        "upcoming_reminders_note: время и остаток посчитаны сервером — называй их как есть"
+        + " и не пересчитывай в уме",
+      );
+    }
     const limit = Math.max(1_000, this.options.maxContextCharacters ?? 6_000);
     measurements.unshift({
       level: "always_on",
