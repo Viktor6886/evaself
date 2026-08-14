@@ -13,7 +13,7 @@ CURRENT_BATCH: 17
 CURRENT_STEP:  26
 BRANCH:        batch/17-telegram-miniapp
 STATUS:        на ревью
-LAST_COMMIT:   —
+LAST_COMMIT:   2f23f11
 BLOCKER:       —
 NEXT:          открыть pull request на batch 17 и дождаться проверок
 ```
