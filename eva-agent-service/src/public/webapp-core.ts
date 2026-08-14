@@ -17,6 +17,8 @@ import {
   authenticateMiniAppRequest,
   type MiniAppSessionStore,
 } from "./webapp-session.js";
+import type { AskModelConclusion } from "./journal/ask.js";
+import { registerJournalRoutes } from "./journal/routes.js";
 
 interface WebAppRequest extends FastifyRequest {
   telegramWebAppUser?: TelegramWebAppUser;
@@ -50,6 +52,12 @@ export function registerWebappCoreRoutes(
     sessions?: MiniAppSessionStore;
     now?: () => Date;
     rateLimiter?: RateLimiter;
+    /**
+     * Вывод модели для «Спросить Еву» (шаг 25). Отсутствует — раздел
+     * вывода честно объявляет себя неподключённым, остальные три
+     * источника работают.
+     */
+    askModel?: AskModelConclusion;
   },
 ): void {
   const limiter = input.rateLimiter ?? new NoopRateLimiter();
@@ -81,6 +89,18 @@ export function registerWebappCoreRoutes(
         { limit: input.config.publicRateLimitPerUser, windowSeconds: window },
       );
     });
+
+    // Дневник живёт внутри той же защищённой области: подпись уже
+    // проверена хуком выше, и второго входа в Mini App не появляется.
+    // Выключенный флаг убирает маршруты целиком — «пусто» и «выключено»
+    // не должны выглядеть одинаково.
+    if (input.config.miniAppJournalEnabled) {
+      registerJournalRoutes(webApp, {
+        config: input.config,
+        db: input.db,
+        ...(input.askModel ? { askModel: input.askModel } : {}),
+      });
+    }
 
     webApp.get("/dashboard", async (request) => {
       return await scoped(input.db, request, async (user) => {

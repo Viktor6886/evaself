@@ -11,6 +11,7 @@ import type { Logger } from "./logger.js";
 import type { GraphContextService } from "./memory/graph-context.js";
 import type { ConversationHighlightService } from "./memory/conversation-highlights.js";
 import { decideDeepRecall, type DeepRecall } from "./memory/retrieval/deep-recall.js";
+import type { ChannelLinkService } from "./channels/channel-links.js";
 import type { ConversationContextManager } from "./conversations/context-management.js";
 import type { EpisodeTracker } from "./memory/episodes.js";
 import type { UserProfileService } from "./profile/profile-service.js";
@@ -100,6 +101,12 @@ export class EvaWorkflow {
      */
     private readonly deepRecall?: DeepRecall,
     private readonly contextManager?: ConversationContextManager,
+    /**
+     * Связь сообщения канала с ходом и conversation (шаг 25, пункт 2).
+     * Отсутствие сервиса допустимо: связь — вспомогательная запись, и
+     * ход без неё выполняется как прежде.
+     */
+    private readonly channelLinks?: ChannelLinkService,
   ) {
     this.taskEvents = new TaskEventService(db);
   }
@@ -412,6 +419,26 @@ export class EvaWorkflow {
             userId: user.id,
             messageCount: Number(link.message_count ?? 0),
           });
+        }
+
+        // Сообщение Telegram связывается с тем же ходом и той же
+        // conversation, что и действие из Mini App. Ключ — пара
+        // «чат:сообщение»: идентификатор сообщения уникален внутри
+        // чата, а не глобально.
+        //
+        // Отказ здесь не срывает ход: связь нужна, чтобы показать
+        // человеку его же действие в другом канале, и потеря одной
+        // строки не стоит потерянного ответа.
+        if (this.channelLinks) {
+          await this.channelLinks.link(user.id, {
+            channel: "telegram",
+            channelMessageId: `${update.chatId}:${update.messageId}`,
+            turnId: turnHandle?.runId ?? null,
+            conversationId,
+          }).catch((error) => this.logger.debug("Связь канала не записана", {
+            userId: user.id,
+            reason: error instanceof Error ? error.message : "unknown",
+          }));
         }
 
         await this.moveTurn(turnHandle, "context_building");

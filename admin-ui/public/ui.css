@@ -105,7 +105,11 @@ nav { display: grid; gap: 4px; }
 .setting-card p { min-height: 40px; margin: 4px 0 0; color: var(--muted); font-size: 12px; }
 .tag { align-self: start; padding: 3px 7px; border-radius: 6px; color: var(--warning); background: rgba(245,199,104,.08); font-size: 10px; white-space: nowrap; }
 .setting-actions { margin-top: 8px; display: flex; justify-content: space-between; align-items: center; }
-.reset { padding: 0; border: 0; color: #7f9a8d; background: none; cursor: pointer; font-size: 12px; }
+/* Текстовая кнопка выглядит ссылкой, но остаётся кнопкой: область
+   нажатия у неё такая же, как у остальных, иначе на телефоне в неё не
+   попасть. Отрицательный отступ не даёт увеличенной области сдвинуть
+   соседний текст. */
+.reset { min-height: 44px; padding: 0 8px; margin: -13px -8px; border: 0; color: #7f9a8d; background: none; cursor: pointer; font-size: 12px; }
 .technical { color: #526b60; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; }
 .security-note span { width: 34px; height: 34px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 50%; color: #07110d; background: var(--green); font-weight: 900; }
 .security-note p { margin: 2px 0 0; }
@@ -739,24 +743,31 @@ dialog .eyebrow { margin-top: 0; }
   /* Ни один блок не имеет права растянуть страницу вширь. */
   html, body { overflow-x: hidden; }
 
-  .content { padding: 20px 14px 60px; }
+  .content {
+    padding:
+      20px
+      calc(14px + env(safe-area-inset-right))
+      calc(60px + env(safe-area-inset-bottom))
+      calc(14px + env(safe-area-inset-left));
+  }
   .page-heading h2 { font-size: 20px; }
   .page-heading > div > p { font-size: 13px; }
 
   /* Вкладки переносятся вместо того, чтобы уезжать за экран. */
   .tabs { flex-wrap: wrap; gap: 8px; }
-  .tab { min-height: 40px; padding: 9px 14px; font-size: 13px; }
+  .tab { min-height: 44px; padding: 11px 14px; font-size: 13px; }
 
-  /* Палец — не мышь. 40px это нижняя граница, ниже начинаются промахи. */
-  .button, .tab, .icon-button { min-height: 42px; }
-  .button.tiny { min-height: 38px; padding: 8px 12px; }
+  /* Палец — не мышь: 44×44 — минимальная область нажатия, и мелкая
+     кнопка исключения не получает. */
+  .button, .tab, .icon-button { min-height: 44px; min-width: 44px; }
+  .button.tiny { min-height: 44px; padding: 10px 12px; }
   .form-actions .button,
   .heading-actions .button { flex: 1 1 auto; justify-content: center; }
   /* Кнопки карточки не растягиваются: шесть штук по половине ширины —
      это три ряда одинаковых прямоугольников, среди которых не видно
      главного. Пусть занимают столько, сколько нужно тексту. */
   .card-actions .button { flex: 0 0 auto; }
-  #page-stt .card-actions .button { min-height: 36px; }
+  #page-stt .card-actions .button { min-height: 44px; }
 
   /* Поля ввода: 16px обязательны — при меньшем размере iOS и часть
      андроидных браузеров зумят страницу на фокусе и уже не отпускают. */
@@ -781,23 +792,49 @@ dialog .eyebrow { margin-top: 0; }
      от которой читать не легче. Переносится только значение. */
   .status-meta > div { grid-template-columns: minmax(0, 1fr) minmax(0, auto); }
 
-  /* Таблицы остаются таблицами, но прокрутка внутри своей рамки —
-     с инерцией и видимым краем, иначе непонятно, что там ещё что-то
-     есть. */
-  .table-wrap {
-    -webkit-overflow-scrolling: touch;
-    scrollbar-width: thin;
-    /* Тень у правого края: единственный честный намёк, что таблица
-       шире экрана. */
-    background:
-      linear-gradient(to right, var(--panel, #161a22) 30%, transparent),
-      linear-gradient(to left, var(--panel, #161a22) 30%, transparent) 100% 0;
-    background-size: 28px 100%, 28px 100%;
-    background-repeat: no-repeat;
-    background-attachment: local, local;
+  /* Таблица превращается в карточки.
+     Прокрутка вбок внутри рамки читать позволяла, а сравнивать строки —
+     нет: заголовок уезжает вместе с содержимым, и через два столбца уже
+     непонятно, что это за число. Каждая строка становится карточкой
+     «подпись — значение»; подписи проставляет labelTableCells(). */
+  .table-wrap { overflow: visible; }
+  table, thead, tbody, tr, th, td { display: block; }
+  table { min-width: 0; width: 100%; }
+  /* Заголовок таблицы уходит с экрана, но не из разметки: он остаётся
+     для чтения с экрана и остаётся источником подписей. */
+  thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  tbody tr {
+    margin-bottom: 10px;
+    padding: 4px 0;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--panel, #161a22);
   }
-  table { min-width: 620px; }
-  th, td { padding: 10px 11px; }
+  tbody td {
+    display: grid;
+    grid-template-columns: minmax(0, 40%) minmax(0, 1fr);
+    gap: 10px;
+    align-items: baseline;
+    padding: 9px 12px;
+    border-bottom: 1px solid var(--line);
+    font-size: 13px;
+    overflow-wrap: anywhere;
+  }
+  tbody tr td:last-child { border-bottom: 0; }
+  tbody td[data-label]::before {
+    content: attr(data-label);
+    color: var(--muted, #8b93a7);
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+  }
+  /* Ячейка без подписи (сообщение «данных нет», колонка с кнопками)
+     занимает карточку целиком. */
+  tbody td:not([data-label]) { grid-template-columns: minmax(0, 1fr); }
+  /* Ключевое поле — первое: карточка читается сверху вниз, и по первой
+     строке видно, о чём она, без раскрытия подробностей. */
+  tbody td:first-child { font-weight: 700; }
 
   /* Диалог как нижний лист — то, чего ждёт рука на телефоне: он
      появляется снизу, у большого пальца, а не в центре экрана. */
@@ -814,7 +851,7 @@ dialog .eyebrow { margin-top: 0; }
   dialog form { padding: 20px 16px 26px; }
   .sheet-dialog { padding: 16px 16px 26px; }
   .sheet-head { top: -16px; margin: -16px -16px 12px; padding: 12px 16px 10px; }
-  .sheet-back { min-height: 40px; }
+  .sheet-back { min-height: 44px; }
   .dialog-actions { flex-direction: column-reverse; }
   .dialog-actions .button { width: 100%; justify-content: center; }
 

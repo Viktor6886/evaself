@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#212121">
   <meta name="color-scheme" content="dark">
   <title>Ева</title>
-  <link rel="stylesheet" href="/app/app.css?v=20260808-v1">
+  <link rel="stylesheet" href="/app/app.css?v=20260814-v2">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -58,7 +58,7 @@
 
         <section class="insight-card card" id="insight-card">
           <span class="insight-avatar" id="eva-mini"></span>
-          <div><span class="eyebrow">ЕВА ЗАМЕТИЛА</span><p id="insight-text">После нескольких отметок здесь появится полезное наблюдение без лишней психодиагностики.</p></div>
+          <div><span class="eyebrow">ЕВА ЗАМЕТИЛА</span><p id="insight-text">После нескольких отметок здесь появится полезное наблюдение без лишней психодиагностики.</p><small class="evidence-note" id="insight-evidence" hidden></small></div>
         </section>
 
         <section class="quick-row" aria-label="Быстрые действия">
@@ -128,8 +128,23 @@
       </div>
     </dialog>
 
+    <!-- Опасное действие подтверждается здесь, а не системным окном:
+         системное появляется у верхнего края, где палец уже стоит после
+         нажатия «Удалить». Кнопка отмены идёт первой и получает фокус. -->
+    <dialog class="confirm" id="confirm-dialog" aria-labelledby="confirm-title">
+      <div class="confirm-card">
+        <h2 id="confirm-title">Подтвердите действие</h2>
+        <p id="confirm-detail"></p>
+        <div class="confirm-actions">
+          <button class="secondary-action" id="confirm-cancel" type="button">Отмена</button>
+          <button class="danger-action" id="confirm-accept" type="button">Удалить</button>
+        </div>
+      </div>
+    </dialog>
+
     <div class="toast" id="toast" hidden></div>
   </div>
-  <script src="/app/app.js?v=20260808-v1"></script>
+  <script src="/app/app.js?v=20260814-v2"></script>
+  <script src="/app/journal.js?v=20260814-v2"></script>
 </body>
 </html>

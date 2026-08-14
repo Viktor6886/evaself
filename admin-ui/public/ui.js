@@ -172,6 +172,67 @@ async function loadSkills() {
   $("#skills-status").innerHTML = `<div class="setting-row"><strong>Маршрутизация за ${Number(payload.window_hours || 24)} ч</strong><span>${Number(payload.events || 0)} решений</span></div><div class="setting-row"><strong>Latency p50 / p95 / p99</strong><span>${Number(latency.p50 || 0).toFixed(1)} / ${Number(latency.p95 || 0).toFixed(1)} / ${Number(latency.p99 || 0).toFixed(1)} ms</span></div><div class="setting-row"><strong>Reranker</strong><span>${(Number(reranker.ratio || 0) * 100).toFixed(1)}% (${Number(reranker.count || 0)})</span></div><div class="setting-row"><strong>Sticky / fallback</strong><span>${Number(payload.sticky_count || 0)} / ${Number(payload.fallback_count || 0)}</span></div><div class="setting-row"><strong>Причины</strong><span>${reasons}</span></div><div class="setting-row"><strong>Выбранные навыки</strong><span>${selected}</span></div>`;
 }
 
+/**
+ * Таблицы на узком экране.
+ *
+ * Ни одна таблица панели не помещается в 360 пикселей: восемьсот
+ * восемьдесят — её минимальная ширина. Раньше она прокручивалась вбок
+ * внутри своей рамки; читать так можно, но сравнивать строки — нет:
+ * заголовок уезжает вместе с содержимым.
+ *
+ * Поэтому каждая ячейка получает подпись своего столбца, и CSS ниже 720
+ * пикселей раскладывает строку карточкой «подпись — значение». Разметка
+ * остаётся таблицей: ни один из тридцати с лишним мест, где панель
+ * строит таблицы, переписывать не нужно, и новая таблица получит
+ * подписи сама.
+ *
+ * Наблюдатель, а не вызов после каждой отрисовки: `innerHTML =` в этом
+ * файле встречается в трёх десятках мест, и забытый вызов означал бы
+ * одну таблицу без подписей — ровно ту, которую не проверили.
+ */
+function labelTable(table) {
+  const headings = [...table.querySelectorAll("thead th")].map(
+    (cell) => cell.textContent.trim(),
+  );
+  if (headings.length === 0) return;
+  for (const row of table.querySelectorAll("tbody tr")) {
+    [...row.children].forEach((cell, index) => {
+      const label = headings[index];
+      // Ячейка на всю ширину («Пока нет данных») подписи не получает:
+      // подпись столбца к ней не относится.
+      if (label && !cell.hasAttribute("colspan")) cell.dataset.label = label;
+      else delete cell.dataset.label;
+    });
+  }
+}
+
+function labelTableCells(root) {
+  if (root.matches?.("table")) labelTable(root);
+  for (const table of root.querySelectorAll?.("table") ?? []) labelTable(table);
+}
+
+function watchTables() {
+  const root = document.querySelector("#app");
+  if (!root) return;
+  labelTableCells(root);
+  new MutationObserver((records) => {
+    const tables = new Set();
+    for (const record of records) {
+      // Строки чаще всего появляются присвоением innerHTML прямо в
+      // tbody: сам tbody при этом не добавляется, и искать таблицу надо
+      // от цели изменения, а не только внутри добавленных узлов.
+      const nearest = record.target?.closest?.("table");
+      if (nearest) tables.add(nearest);
+      for (const node of record.addedNodes) {
+        if (node.nodeType !== Node.ELEMENT_NODE) continue;
+        if (node.matches("table")) tables.add(node);
+        for (const table of node.querySelectorAll("table")) tables.add(table);
+      }
+    }
+    for (const table of tables) labelTable(table);
+  }).observe(root, { childList: true, subtree: true });
+}
+
 function openPage(name) {
   state.page = name;
   document.querySelectorAll(".page").forEach((item) => {
@@ -764,8 +825,14 @@ async function changeRoutingMode(mode) {
   const message = mode === "single"
     ? `Автоматический выбор будет отключён. Все сообщения, напоминания, инструменты и анализ пойдут через ${selected?.name || "выбранную модель"} / ${selected?.model || "provider"}. Настроенные цепочки сохранятся.`
     : "Снова будут использованы сохранённые цепочки основной, мощной, экономичной и классифицирующей моделей.";
-  if (!window.confirm(message)) return;
-  await saveRoutingSettings({ mode, ...(mode === "single" ? { single_provider_id: providerId } : {}) });
+  askConfirm({
+    title: mode === "single" ? "Перевести всё на одну модель?" : "Вернуть автоматический выбор?",
+    description: message,
+    action: async () => await saveRoutingSettings({
+      mode,
+      ...(mode === "single" ? { single_provider_id: providerId } : {}),
+    }),
+  });
 }
 
 /**
@@ -1164,12 +1231,27 @@ async function providerAction(action, id) {
   }
 }
 
-function askConfirm({ title, description, expected, action }) {
+/**
+ * Подтверждение опасной операции.
+ *
+ * `expected` задаёт контрольное слово: его вводят там, где ошибка
+ * необратима. Без него окно остаётся тем же — с описанием последствий и
+ * разнесёнными кнопками, — но набирать ничего не нужно. Это заменило
+ * `window.confirm`: системное окно на телефоне появляется у верхнего
+ * края, где палец уже стоит после нажатия, и последствий не объясняет.
+ */
+function askConfirm({ title, description, expected = null, action }) {
   state.pendingConfirm = { expected, action };
   $("#confirm-title").textContent = title;
-  $("#confirm-description").textContent = `${description} Введите ${expected}.`;
+  $("#confirm-description").textContent = expected
+    ? `${description} Введите ${expected}.`
+    : description;
   $("#confirm-form").reset();
+  $("#confirm-input-label").hidden = !expected;
+  $("#confirm-form").elements.confirmation.required = Boolean(expected);
   $("#confirm-dialog").showModal();
+  // Фокус на отмене: случайный Enter отменяет, а не выполняет.
+  $("#confirm-form").querySelector('button[value="cancel"]').focus();
 }
 
 async function loadOperations() {
@@ -2229,7 +2311,7 @@ $("#confirm-form").addEventListener("submit", (event) => {
   const form = event.currentTarget;
   const pending = state.pendingConfirm;
   if (!pending) return;
-  if (form.elements.confirmation.value !== pending.expected) {
+  if (pending.expected && form.elements.confirmation.value !== pending.expected) {
     toast(`Введите ${pending.expected} без изменений`, true);
     return;
   }
@@ -2260,6 +2342,7 @@ $("#reload-audit").addEventListener("click", () => loadAudit().catch(handleError
 
 request("/me").then(({ payload }) => {
   showApp(payload.user);
+  watchTables();
   openPage("overview");
 }).catch(() => showLogin());
 
@@ -3426,11 +3509,17 @@ async function sttKeyAction(action, keyId) {
     });
     toast(enable ? "Ключ снова в очереди" : "Ключ выключен");
   } else if (action === "remove") {
-    if (!confirm(`Удалить ключ «${key?.label ?? ""}»? Значение будет стёрто из Secret Store.`)) {
-      return;
-    }
-    await request(`/stt/configs/${config.id}/keys/${keyId}`, { method: "DELETE" });
-    toast("Ключ удалён");
+    askConfirm({
+      title: `Удалить ключ «${key?.label ?? ""}»?`,
+      description: "Значение будет стёрто из Secret Store и восстановить его будет нечем.",
+      action: async () => {
+        await request(`/stt/configs/${config.id}/keys/${keyId}`, { method: "DELETE" });
+        toast("Ключ удалён");
+        await refreshSttKeys(config.id);
+        await loadStt();
+      },
+    });
+    return;
   } else {
     return;
   }

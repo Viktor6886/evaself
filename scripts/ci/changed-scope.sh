@@ -11,9 +11,9 @@
 #
 # Границы намеренно осторожные. Пропускается только то, что физически не
 # может сломаться от изменения: сборка образов и смоук-стенд — при правке
-# одной документации; браузерные тесты admin-ui и тесты media-service —
-# когда их каталог не тронут. Любая правка кода, схемы, compose или
-# самого CI прогоняет всё.
+# одной документации; браузерные тесты admin-ui и webapp и тесты
+# media-service — когда их каталог не тронут. Любая правка кода, схемы,
+# compose или самого CI прогоняет всё.
 #
 # На push в main и на ручном запуске фильтр не применяется: там нужна
 # полная картина.
@@ -31,6 +31,7 @@ everything() {
 	emit docs_only false
 	emit media true
 	emit adminui true
+	emit webapp true
 }
 
 # Без доступной базы сравнивать не с чем — выполняется всё.
@@ -83,4 +84,10 @@ if printf '%s\n' "$FILES" | grep -qE '^admin-ui/'; then
 	emit adminui true
 else
 	emit adminui false
+fi
+
+if printf '%s\n' "$FILES" | grep -qE '^webapp/'; then
+	emit webapp true
+else
+	emit webapp false
 fi

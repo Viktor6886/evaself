@@ -103,6 +103,49 @@ async function launch() {
  */
 export const PHONE = { width: 360, height: 740 };
 
+/**
+ * Матрица разрешений шага 26. Ниже 320 телефонов нет, выше 430
+ * начинается планшет, а десктоп нужен, чтобы мобильные правила не
+ * протекли на широкий экран.
+ */
+export const DEVICES = [
+  { name: "320×568", width: 320, height: 568 },
+  { name: "360×640", width: 360, height: 640 },
+  { name: "375×667", width: 375, height: 667 },
+  { name: "390×844", width: 390, height: 844 },
+  { name: "412×915", width: 412, height: 915 },
+  { name: "430×932", width: 430, height: 932 },
+  { name: "768×1024", width: 768, height: 1024 },
+  { name: "desktop", width: 1440, height: 900 },
+];
+
+/**
+ * Интерактивные элементы мельче области нажатия.
+ *
+ * Меряются только видимые: скрытая страница отдаёт нулевые рамки, и без
+ * фильтра тест ловил бы не промахи, а невидимые кнопки.
+ */
+export const smallTapTargets = (page, minimum = 44) => page.evaluate((min) => {
+  const small = [];
+  const selector = ".page.active button, .page.active a[href], .page.active input,"
+    + " .page.active select, .page.active textarea";
+  for (const node of document.querySelectorAll(selector)) {
+    if (node.type === "hidden" || node.type === "checkbox" || node.type === "range") continue;
+    const box = node.getBoundingClientRect();
+    if (box.width === 0 || box.height === 0) continue;
+    if (box.width < min - 0.5 || box.height < min - 0.5) {
+      small.push({
+        tag: node.tagName.toLowerCase(),
+        className: String(node.className || ""),
+        text: (node.textContent || "").trim().slice(0, 30),
+        width: Math.round(box.width),
+        height: Math.round(box.height),
+      });
+    }
+  }
+  return small;
+}, minimum);
+
 export async function openPanel({ routes = {}, role = "owner", viewport = null } = {}) {
   const server = await servePublic();
   const browser = await launch();

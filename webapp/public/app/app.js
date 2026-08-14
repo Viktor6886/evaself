@@ -4,7 +4,7 @@
   const tg = window.Telegram?.WebApp;
   const DEMO = new URLSearchParams(location.search).get("demo") === "1";
   const API = "/api";
-  const BUILD = "20260808-v1";
+  const BUILD = "20260814-v2";
 
   const state = {
     screen: "today",
@@ -24,6 +24,10 @@
     developmentTab: "overview",
     module: null,
     astroTab: "horoscope",
+    // Загрузка, готово и отказ — три разных экрана. Пока данные едут,
+    // «Целей пока нет» — неправда: их ещё не спрашивали.
+    phase: "loading",
+    failed: new Set(),
     busy: new Set(),
   };
 
@@ -35,6 +39,10 @@
     great: "Отличное",
   };
 
+  // Дневник добавляется в этот список ТОЛЬКО после ответа сервера: при
+  // выключенном флаге его маршруты отвечают 404, и карточка модуля,
+  // которая никуда не ведёт, была бы ровно тем «мёртвым элементом»,
+  // который запрещает шаг 26.
   const hubModules = [
     { code: "tests", title: "Тесты", note: "Профиль личности и самопознание", icon: "clipboard", badge: "Скоро" },
     { code: "compatibility", title: "Совместимость", note: "Люди, приглашения и отчёты", icon: "hearts", badge: "Скоро" },
@@ -97,10 +105,35 @@
       }
       state.notes = state.dashboard?.notes || [];
       state.budgets = state.dashboard?.budget?.recent || [];
+      await enableJournalIfServed();
+      state.phase = "ready";
       renderAll();
     } catch (error) {
+      state.phase = "error";
+      state.lastError = friendlyError(error);
       renderAll();
       showFriendlyFailure(error);
+    }
+  }
+
+  /**
+   * Дневник появляется в Пульте только тогда, когда сервер его отдаёт.
+   * Проверка — один запрос: 404 означает выключенный флаг, и раздела
+   * не будет вовсе.
+   */
+  async function enableJournalIfServed() {
+    if (!window.EvaJournal) return;
+    const available = await window.EvaJournal.probe();
+    if (!available) return;
+    state.journalEnabled = true;
+    if (!hubModules.some((item) => item.code === "journal")) {
+      hubModules.unshift({
+        code: "journal",
+        title: "Дневник",
+        note: "Записи дня, люди и недельный обзор",
+        icon: "note",
+        badge: "Работает",
+      });
     }
   }
 
@@ -178,13 +211,29 @@
     return payload || {};
   }
 
+  /**
+   * Запрос, который не должен ронять всё приложение.
+   *
+   * Отказ запоминается: экран, которому эти данные нужны, обязан
+   * показать состояние ошибки. Молчаливый возврат пустого значения
+   * превращал отказ сервера в «у вас ничего нет» — и человек делал
+   * неверный вывод о собственных данных.
+   */
   async function safeApi(path, options, fallback, requireTelegram = true) {
-    try { return await api(path, options, requireTelegram); }
-    catch (error) {
+    try {
+      const result = await api(path, options, requireTelegram);
+      state.failed.delete(sourceKey(path));
+      return result;
+    } catch (error) {
       console.warn(`[Eva WebApp] ${path}`, error);
+      state.failed.add(sourceKey(path));
+      state.lastError = friendlyError(error);
       return fallback;
     }
   }
+
+  /** Ключ источника — путь без параметров запроса. */
+  function sourceKey(path) { return String(path).split("?")[0]; }
 
   function friendlyError(error) {
     if (!error) return "Не удалось выполнить действие";
@@ -263,9 +312,52 @@
       if (state.organizerTab === "notes") openNoteSheet();
       else openTaskSheet(null, state.organizerTab === "reminders");
     });
-    tg?.BackButton?.onClick(() => {
-      if (state.screen === "module") openScreen(state.previousScreen || "hub");
-      else openScreen("today");
+    // Аппаратная «Назад» в Android приходит сюда же, что и кнопка
+    // Telegram. Порядок обязателен: сначала закрывается то, что лежит
+    // сверху, иначе первое нажатие уводит с экрана, оставив открытый
+    // лист поверх нового раздела.
+    tg?.BackButton?.onClick(handleBack);
+    bindKeyboardHandling();
+  }
+
+  function handleBack() {
+    const confirmDialog = document.getElementById("confirm-dialog");
+    if (confirmDialog?.open) return void confirmDialog.close();
+    const sheet = document.getElementById("sheet");
+    if (sheet?.open) return closeSheet();
+    if (state.screen === "module") return openScreen(state.previousScreen || "hub");
+    if (state.screen !== "today") return openScreen("today");
+    // На «Сегодня» назад идти некуда: приложение закрывается само —
+    // Telegram делает это, когда обработчик ничего не сделал.
+    tg?.close?.();
+  }
+
+  /**
+   * Экранная клавиатура.
+   *
+   * Она не уменьшает окно, а накрывает его снизу: поле в нижней части
+   * листа оказывается ПОД клавиатурой, и человек печатает вслепую.
+   * visualViewport даёт настоящую видимую высоту — по ней лист и
+   * поджимается, а активное поле подтягивается в неё.
+   */
+  function bindKeyboardHandling() {
+    const viewport = window.visualViewport;
+    if (viewport) {
+      const apply = () => {
+        const hidden = Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop);
+        document.documentElement.style.setProperty("--keyboard", `${Math.round(hidden)}px`);
+      };
+      viewport.addEventListener("resize", apply);
+      viewport.addEventListener("scroll", apply);
+      apply();
+    }
+    document.addEventListener("focusin", (event) => {
+      const field = event.target;
+      if (!(field instanceof HTMLElement)) return;
+      if (!field.matches("input, textarea, select")) return;
+      // Прокрутка откладывается на кадр: до появления клавиатуры
+      // положение поля ещё старое.
+      setTimeout(() => field.scrollIntoView({ block: "center", behavior: "smooth" }), 220);
     });
   }
 
@@ -279,6 +371,9 @@
 
   function openScreen(screen) {
     if (!document.querySelector(`[data-screen="${screen}"]`)) return;
+    // Поле, оставшееся в фокусе, держит клавиатуру открытой поверх
+    // нового экрана.
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     if (screen !== "module") state.previousScreen = state.screen;
     state.screen = screen;
     document.querySelectorAll(".screen").forEach((node) => {
@@ -318,7 +413,19 @@
     renderCheckin(dashboard.checkin || null);
     renderMainFocus(dashboard.main_focus || dashboard.mainFocus || null);
     renderTodayCards(dashboard);
-    document.getElementById("insight-text").textContent = dashboard.insight?.text || dashboard.insight || "После нескольких отметок здесь появится полезное наблюдение без лишней психодиагностики.";
+    // Наблюдение показывается вместе с тем, на чём оно построено:
+    // без числа наблюдений фраза выглядит утверждением о человеке, а
+    // не выводом из его же отметок.
+    const insight = dashboard.insight;
+    const insightText = insight?.text || (typeof insight === "string" ? insight : "")
+      || "После нескольких отметок здесь появится полезное наблюдение без лишней психодиагностики.";
+    const observations = Number(insight?.observations || 0);
+    document.getElementById("insight-text").textContent = insightText;
+    const evidence = document.getElementById("insight-evidence");
+    evidence.hidden = observations < 5;
+    evidence.textContent = observations >= 5
+      ? `Основано на ${observations} ${plural(observations, "отметке", "отметках", "отметках")} состояния`
+      : "";
     document.getElementById("today-caption").textContent = dashboard.local_time ? `Местное время ${dashboard.local_time}` : "Твой день — твои решения";
   }
 
@@ -512,7 +619,12 @@
   function handleQuick(action, button) {
     button.classList.add("is-selected");
     setTimeout(() => button.classList.remove("is-selected"), 350);
-    if (action === "write") openComposeSheet();
+    // «Записать» ведёт в дневник, когда он подключён: две ленты записей
+    // в одном приложении человек различать не обязан.
+    if (action === "write") {
+      if (state.journalEnabled && window.EvaJournal) window.EvaJournal.open();
+      else openComposeSheet();
+    }
     else if (action === "eva") openEvaHandoff(screenContext());
     else if (action === "reset") openPractices();
     else openAddSheet();
@@ -583,6 +695,8 @@
   }
 
   function renderOrganizer() {
+    const organizerHost = document.getElementById("organizer-content");
+    if (organizerHost && renderPhase(organizerHost, ["/public/v2/dashboard", "/public/v2/tasks", "/public/v2/notes"])) return;
     const active = state.tasks.filter((task) => !isDone(task) && task.status !== "canceled");
     const reminders = state.tasks.filter((task) => task.remind_at && task.status !== "canceled");
     document.getElementById("task-count").textContent = active.length;
@@ -694,7 +808,12 @@
   }
 
   async function deleteTask(task) {
-    if (!task || !confirm("Удалить задачу?")) return;
+    if (!task) return;
+    if (!await confirmDanger({
+      title: "Удалить задачу?",
+      detail: `«${task.title}» исчезнет из списка вместе с напоминанием. Отменить это нельзя.`,
+      confirmLabel: "Удалить задачу",
+    })) return;
     try {
       await api(`/public/v2/tasks/${encodeURIComponent(task.id)}`, { method: "DELETE" });
       state.tasks = state.tasks.filter((item) => item.id !== task.id);
@@ -735,7 +854,12 @@
   }
 
   async function deleteNote(note) {
-    if (!note || !confirm("Удалить заметку?")) return;
+    if (!note) return;
+    if (!await confirmDanger({
+      title: "Удалить заметку?",
+      detail: `«${note.title || "Без названия"}» будет удалена без возможности восстановления.`,
+      confirmLabel: "Удалить заметку",
+    })) return;
     try {
       await api(`/public/v2/notes/${encodeURIComponent(note.id)}`, { method: "DELETE" });
       state.notes = state.notes.filter((item) => item.id !== note.id);
@@ -747,9 +871,35 @@
   // Development
   // ---------------------------------------------------------------------------
 
+  /**
+   * Состояние экрана до данных.
+   *
+   * Возвращает `true`, если экран уже занят загрузкой или отказом: в
+   * этом случае рисовать поверх нечего. Отказ обязательно даёт кнопку
+   * повтора — иначе экран становится тупиком.
+   */
+  function renderPhase(host, sources = []) {
+    if (state.phase === "loading") {
+      host.innerHTML = '<div class="section-stack"><div class="loading-skeleton"></div><div class="loading-skeleton"></div><div class="loading-skeleton"></div></div>';
+      return true;
+    }
+    if (state.phase === "error" || sources.some((source) => state.failed.has(source))) {
+      host.innerHTML = `${emptyState("Данные не загрузились", escapeHtml(state.lastError || "Сервис временно недоступен"))}<div class="action-row"><button class="primary-action" data-retry type="button">Повторить</button></div>`;
+      host.querySelector("[data-retry]").addEventListener("click", () => {
+        state.phase = "loading";
+        state.failed.clear();
+        renderAll();
+        void bootstrap();
+      });
+      return true;
+    }
+    return false;
+  }
+
   function renderDevelopment() {
     const host = document.getElementById("development-content");
     if (!host) return;
+    if (renderPhase(host, ["/public/goals", "/public/progress"])) return;
     const tab = state.developmentTab;
     if (tab === "goals") return renderGoals(host);
     if (tab === "decisions") return void renderDecisions(host);
@@ -879,6 +1029,7 @@
   }
 
   function hubSummary(code, summaries) {
+    if (code === "journal") return "Запись сохраняется без участия ИИ";
     if (code === "budget") return summaries.budget || budgetSummaryText();
     if (code === "reports") return summaries.reports || `${state.progress?.completed_results?.length || 0} готовых результатов`;
     if (code === "practices") return "5 коротких способов перезагрузки";
@@ -888,6 +1039,7 @@
   }
 
   function openHubModule(code) {
+    if (code === "journal") return window.EvaJournal?.open();
     if (code === "budget") return openBudgetModule();
     if (code === "practices") return openPractices();
     if (code === "reports") return openReportsModule();
@@ -965,7 +1117,11 @@
           } catch (error) { toast(friendlyError(error), true); }
         });
         host.querySelector("#delete-budget")?.addEventListener("click", async () => {
-          if (!confirm("Удалить финансовую запись?")) return;
+          if (!await confirmDanger({
+            title: "Удалить запись?",
+            detail: "Финансовая запись исчезнет из отчётов за период.",
+            confirmLabel: "Удалить запись",
+          })) return;
           try { await api(`/public/v2/budget/${encodeURIComponent(entry.id)}`, { method: "DELETE" }); state.budgets = state.budgets.filter((item) => item.id !== entry.id); closeSheet(); await refreshDashboard(); openBudgetModule(); }
           catch (error) { toast(friendlyError(error), true); }
         });
@@ -1054,6 +1210,7 @@
 
   function renderProfile() {
     const host = document.getElementById("profile-content");
+    if (renderPhase(host, ["/public/profile"])) return;
     const user = state.profile?.user || state.session?.user || {};
     const completeness = Number(state.profile?.completeness || 0);
     host.innerHTML = `<div class="profile-stack">
@@ -1212,7 +1369,11 @@
         return void refreshMemory();
       }
       if (action === "delete") {
-        if (!window.confirm("Удалить факт вместе со всеми версиями и источниками?")) return;
+        if (!await confirmDanger({
+          title: "Удалить факт?",
+          detail: "Исчезнут все версии факта, его источники и связи. Историю восстановить будет нельзя.",
+          confirmLabel: "Удалить факт",
+        })) return;
         await api(`/public/memory/${key}`, { method: "DELETE" });
         toast("Удалила");
         return void refreshMemory();
@@ -1287,6 +1448,49 @@
   function closeSheet() {
     const sheet = document.getElementById("sheet");
     if (sheet.open) sheet.close();
+  }
+
+  /**
+   * Подтверждение опасного действия.
+   *
+   * Заменяет `window.confirm` по двум причинам. Системное окно в
+   * Telegram на Android появляется у верхнего края, где палец уже
+   * находится после нажатия «Удалить», — промах превращается в
+   * подтверждение. И оно не объясняет, что именно исчезнет.
+   *
+   * Здесь опасная кнопка стоит второй и отделена от безопасной, а
+   * действие по умолчанию — отмена: закрытие свайпом, Escape и тычок
+   * мимо диалога возвращают `false`.
+   */
+  function confirmDanger({ title, detail, confirmLabel = "Удалить" }) {
+    const dialog = document.getElementById("confirm-dialog");
+    dialog.querySelector("#confirm-title").textContent = title;
+    dialog.querySelector("#confirm-detail").textContent = detail;
+    const accept = dialog.querySelector("#confirm-accept");
+    accept.textContent = confirmLabel;
+    return new Promise((resolve) => {
+      let decided = false;
+      const finish = (value) => {
+        if (decided) return;
+        decided = true;
+        accept.removeEventListener("click", onAccept);
+        dialog.removeEventListener("close", onClose);
+        dialog.removeEventListener("click", onBackdrop);
+        if (dialog.open) dialog.close();
+        resolve(value);
+      };
+      const onAccept = () => finish(true);
+      const onClose = () => finish(false);
+      const onBackdrop = (event) => { if (event.target === dialog) finish(false); };
+      accept.addEventListener("click", onAccept);
+      dialog.addEventListener("close", onClose);
+      dialog.addEventListener("click", onBackdrop);
+      dialog.querySelector("#confirm-cancel").onclick = () => finish(false);
+      dialog.showModal();
+      // Фокус на безопасной кнопке: случайное нажатие Enter отменяет,
+      // а не удаляет.
+      dialog.querySelector("#confirm-cancel").focus();
+    });
   }
 
   let toastTimer;
@@ -1407,6 +1611,31 @@
   async function copyText(value) { try { await navigator.clipboard.writeText(value || ""); } catch {} }
   function escapeHtml(value) { return String(value ?? "").replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[char]); }
   function escapeAttr(value) { return escapeHtml(value).replace(/`/g, "&#96;"); }
+
+  /**
+   * Мост для отдельных модулей интерфейса (`journal.js`).
+   *
+   * Наружу отдаётся ровно то, без чего модуль не обойдётся: доступ к
+   * API с сессией, лист, тост, подтверждение и экранирование. Ни
+   * состояние сессии, ни токен через мост не проходят.
+   */
+  window.EvaApp = {
+    state,
+    api,
+    safeApi,
+    friendlyError,
+    openSheet,
+    closeSheet,
+    openModule,
+    openEvaHandoff,
+    confirmDanger,
+    toast,
+    emptyState,
+    icon,
+    escapeHtml,
+    escapeAttr,
+    formatDate,
+  };
 
   function legacyDashboard(today, tasks) {
     const main = today?.main_action ? { title: today.main_action, source_label: today.goal_title || "Активная цель", expected_result: today.expected_result, work_block_id: today.work_block_id, work_block_status: today.work_block_status } : null;

@@ -27,6 +27,10 @@ test("mobile profile exposes complete conversation management", { skip: app ? fa
   assert.match(app, /conversation-badge[^>]*>Активный/);
   assert.doesNotMatch(app, /\$\{item\.active \? " · активный"/);
   assert.match(css, /\.conversation-list\s*\{[^}]*overflow-y:\s*auto/s);
-  assert.match(css, /\.conversation-action[^{}]*\{[^}]*min-height:\s*42px/s);
+  // Область нажатия задаётся одной переменной на весь интерфейс: шаг 26
+  // поднял её до 44 пикселей, и отдельное значение здесь снова
+  // разъехалось бы с остальными кнопками.
+  assert.match(css, /--tap:\s*44px/);
+  assert.match(css, /\.conversation-action[^{}]*\{[^}]*min-height:\s*var\(--tap\)/s);
   assert.match(css, /@media\s*\(max-width:\s*350px\)/);
 });

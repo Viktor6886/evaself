@@ -26,6 +26,7 @@ SENTINEL = "\x00"
 # опечатка в маршруте админки доезжала до продакшена молча.
 SOURCES = [
     ("webapp/public/app/app.js", ""),
+    ("webapp/public/app/journal.js", ""),
     ("webapp/public/assets/bot-link.js", ""),
     ("letta-ui/public/ui.js", ""),
     ("admin-ui/public/ui.js", "/api/admin/v1"),
@@ -37,6 +38,8 @@ ROUTE_FILES = [
     ("eva-agent-service/src/server.ts", ""),
     ("eva-agent-service/src/public/routes.ts", "/public"),
     ("eva-agent-service/src/public/webapp-core.ts", "/public/v2"),
+    # Маршруты дневника регистрируются внутри той же группы /public/v2.
+    ("eva-agent-service/src/public/journal/routes.ts", "/public/v2"),
     ("eva-agent-service/src/admin/server.ts", "/api/admin/v1"),
 ]
 

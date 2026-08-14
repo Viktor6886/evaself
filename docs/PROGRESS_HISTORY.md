@@ -1936,3 +1936,23 @@
 
 ### Batch 16 remediation
 Closed production boot, authenticated ingress, canonical router, tenant cancellation/status, upload compensation, worker registration, rollback migration, and structured reranker gaps. Flags remain fail-closed.
+
+
+## Batch 17 — шаги 25–26
+
+Переиспользованы: группа `/public/v2` с её проверкой подписи,
+`CrisisMonitor`, область арендатора `withUserScope`, `ArtifactRegistry`
+не понадобился. Впервые созданы: `src/public/journal/` (запись, обзор,
+обсуждение, разделение источников), `src/channels/channel-links.ts`,
+миграция 052, `webapp/test/` с device-матрицей.
+
+Наблюдаемые отказы и их причины: постоянное `transform: scale(.98)` у
+выбранной метрики уменьшало её область нажатия до 43 пикселей —
+трансформация перенесена на `:active`; наблюдатель за таблицами искал
+таблицу только среди добавленных узлов, а строки появляются присвоением
+`innerHTML` прямо в `tbody` — поиск ведётся и от цели изменения.
+Текстовая кнопка `.reset` имела высоту 18 пикселей.
+
+Дублирующая версия публичного API оставлена намеренно: условия пункта 13
+шага 25 (перевод потребителей, паритет телеметрии, период совместимости)
+не выполнены.
