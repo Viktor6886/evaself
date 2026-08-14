@@ -22,7 +22,7 @@ import { adminBadRequest, adminNotFound } from "./errors.js";
 import type { SecretStore } from "./secret-store.js";
 import { INTEGRATION_BY_ID } from "./service-catalog.js";
 
-export type FieldKind = "text" | "url" | "secret" | "select";
+export type FieldKind = "text" | "url" | "secret" | "select" | "textarea";
 
 export interface IntegrationField {
   /** Имя поля в запросе на запись. */
@@ -43,6 +43,32 @@ interface IntegrationForm {
   restartService: string | null;
   note?: string;
 }
+
+/**
+ * Готовые голоса Gemini TTS.
+ *
+ * Список взят из репозитория примеров Google (`GoogleCloudPlatform/
+ * generative-ai`, notebook `get_started_with_gemini_tts_voices`) —
+ * тридцать голосов, одинаковых у `gemini-3.1-flash-tts-preview` и
+ * предыдущих TTS-моделей. OpenRouter передаёт значение провайдеру как
+ * есть, поэтому имена совпадают с гугловскими побуквенно.
+ */
+export const GEMINI_TTS_VOICES = [
+  "Achernar", "Achird", "Algenib", "Algieba", "Alnilam", "Aoede",
+  "Autonoe", "Callirrhoe", "Charon", "Despina", "Enceladus", "Erinome",
+  "Fenrir", "Gacrux", "Iapetus", "Kore", "Laomedeia", "Leda",
+  "Orus", "Puck", "Pulcherrima", "Rasalgethi", "Sadachbia", "Sadaltager",
+  "Schedar", "Sulafat", "Umbriel", "Vindemiatrix", "Zephyr", "Zubenelgenubi",
+] as const;
+
+/** Текущая TTS-модель Gemini в каталоге OpenRouter. */
+export const TTS_DEFAULT_MODEL = "google/gemini-3.1-flash-tts-preview";
+
+/** Что подставляет выбор провайдера синтеза. */
+export const TTS_PROVIDER_PRESETS: Record<string, { base_url: string; model: string }> = {
+  openrouter: { base_url: "https://openrouter.ai/api/v1", model: TTS_DEFAULT_MODEL },
+  openai: { base_url: "https://api.openai.com/v1", model: "gpt-4o-mini-tts" },
+};
 
 const setting = (
   name: string,
@@ -91,26 +117,38 @@ const FORMS: Record<string, IntegrationForm> = {
   },
   tts: {
     restartService: "media-service",
+    note: "OpenRouter принимает тот же OpenAI-совместимый /audio/speech, поэтому "
+      + "смена провайдера — это Base URL, модель и голос, а не отдельный код.",
     fields: [
       setting("provider", "bootstrap.env.media.tts.provider", "Провайдер",
         "Подставляет Base URL и модель; «Свой» оставляет поля как есть", {
           kind: "select",
           options: [
+            { value: "openrouter", title: "OpenRouter (Gemini TTS)" },
             { value: "openai", title: "OpenAI TTS" },
             { value: "custom", title: "Свой endpoint" },
           ],
         }),
       setting("base_url", "bootstrap.env.media.tts.base.url", "Base URL",
         "Адрес OpenAI-совместимого API синтеза", {
-          kind: "url", required: true, placeholder: "https://api.openai.com/v1",
+          kind: "url", required: true, placeholder: "https://openrouter.ai/api/v1",
         }),
-      secret("api_key", "sec_media_tts_api_key", "API Key", "Показывается только признак «настроен»"),
-      setting("model", "bootstrap.env.media.tts.model", "Модель", "Например, tts-1", {
-        placeholder: "tts-1",
-      }),
-      setting("voice", "bootstrap.env.media.tts.voice", "Голос", "Идентификатор голоса провайдера", {
-        placeholder: "nova",
-      }),
+      secret("api_key", "sec_media_tts_api_key", "API Token",
+        "Токен OpenRouter. Показывается только признак «настроен»"),
+      setting("model", "bootstrap.env.media.tts.model", "Модель",
+        "Идентификатор модели синтеза у провайдера", {
+          placeholder: TTS_DEFAULT_MODEL,
+        }),
+      setting("voice", "bootstrap.env.media.tts.voice", "Голос",
+        "Список голосов Gemini TTS; у другого провайдера впишите его собственный идентификатор", {
+          kind: "select",
+          options: GEMINI_TTS_VOICES.map((name) => ({ value: name, title: name })),
+        }),
+      setting("voice_prompt", "bootstrap.env.media.tts.voice.prompt", "Voice Prompt",
+        "Характер голоса, манера речи, темп и интонация. Уходит провайдеру полем instructions", {
+          kind: "textarea",
+          placeholder: "Тёплый женский голос, спокойный темп, живая интонация без театральности",
+        }),
     ],
   },
   todoist: {

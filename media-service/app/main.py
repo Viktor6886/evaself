@@ -209,6 +209,9 @@ class TtsRequest(BaseModel):
     text: str = Field(min_length=1, max_length=8000)
     voice: str | None = None
     model: str | None = None
+    # Описание манеры речи: темп, интонация, характер. Пусто — берётся
+    # значение из конфигурации, заданной в панели.
+    voice_prompt: str | None = Field(default=None, max_length=2000)
     # "voice" => OGG/Opus for a Telegram voice note, "mp3" => plain file
     format: str = "voice"
 
@@ -728,12 +731,12 @@ async def test_tts(payload: dict | None = None) -> dict:
         response = await app.state.http.post(
             f"{tts['base_url']}/audio/speech",
             headers={"Authorization": f"Bearer {tts['api_key']}"},
-            json={
-                "model": tts["model"],
-                "voice": tts["voice"],
-                "input": phrase,
-                "response_format": "mp3",
-            },
+            json=_speech_request(
+                model=tts["model"],
+                voice=tts["voice"],
+                text=phrase,
+                voice_prompt=tts.get("voice_prompt"),
+            ),
         )
     except httpx.TimeoutException:
         return _error("tts_timeout", "провайдер не ответил вовремя", 504)
@@ -825,6 +828,29 @@ async def test_asr() -> dict:
 # =====================================================================
 # speech synthesis
 # =====================================================================
+def _speech_request(
+    *, model: str, voice: str, text: str, voice_prompt: str | None
+) -> dict[str, object]:
+    """Тело запроса синтеза для OpenAI-совместимого /audio/speech.
+
+    Формат один и тот же у OpenAI и у OpenRouter: последний принимает
+    те же поля и пропускает провайдерские дальше — так Gemini TTS
+    получает и голос, и описание манеры речи. `instructions`
+    добавляется только когда описание задано: пустое поле часть
+    провайдеров отвергает как неизвестный параметр.
+    """
+    body: dict[str, object] = {
+        "model": model,
+        "voice": voice,
+        "input": text,
+        "response_format": "mp3",
+    }
+    prompt = (voice_prompt or "").strip()
+    if prompt:
+        body["instructions"] = prompt
+    return body
+
+
 @app.post("/tts", dependencies=[Depends(require_service_token)])
 async def synthesize(payload: TtsRequest):
     tts = RUNTIME.tts()
@@ -842,12 +868,12 @@ async def synthesize(payload: TtsRequest):
         response = await app.state.http.post(
             f"{tts['base_url']}/audio/speech",
             headers={"Authorization": f"Bearer {tts['api_key']}"},
-            json={
-                "model": payload.model or tts["model"],
-                "voice": payload.voice or tts["voice"],
-                "input": payload.text,
-                "response_format": "mp3",
-            },
+            json=_speech_request(
+                model=payload.model or tts["model"],
+                voice=payload.voice or tts["voice"],
+                text=payload.text,
+                voice_prompt=payload.voice_prompt or tts.get("voice_prompt"),
+            ),
         )
     except httpx.TimeoutException:
         shutil.rmtree(work, ignore_errors=True)
@@ -864,6 +890,10 @@ async def synthesize(payload: TtsRequest):
             502,
             details=response.text[:500],
         )
+
+    if not response.content:
+        shutil.rmtree(work, ignore_errors=True)
+        return _error("tts_empty", "провайдер вернул пустой аудиоответ", 502)
 
     raw = work / "speech.mp3"
     raw.write_bytes(response.content)

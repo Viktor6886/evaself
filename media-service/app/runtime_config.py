@@ -27,7 +27,10 @@ from pathlib import Path
 # Поля, которые можно переопределить. Всё остальное игнорируется, чтобы
 # запрос не мог подменить, например, рабочую директорию.
 ASR_FIELDS = ("base_url", "api_key", "model", "language")
-TTS_FIELDS = ("base_url", "api_key", "model", "voice")
+# `voice_prompt` — описание манеры речи. У OpenAI-совместимых моделей оно
+# уходит в поле `instructions`, у Gemini TTS через OpenRouter — туда же:
+# провайдерские поля endpoint пропускает без изменений.
+TTS_FIELDS = ("base_url", "api_key", "model", "voice", "voice_prompt")
 
 _LOCK = threading.Lock()
 

@@ -40,6 +40,7 @@
         <button data-page="ai" class="nav-item"><span>✦</span>Искусственный интеллект</button>
         <button data-page="skills" class="nav-item"><span>◆</span>Навыки</button>
         <button data-page="stt" class="nav-item"><span>◎</span>Распознавание речи</button>
+        <button data-page="tts" class="nav-item"><span>◍</span>Синтез речи</button>
         <button data-page="operations" class="nav-item"><span>↻</span>Backup и обновления</button>
         <div class="nav-caption">Управление</div>
         <button data-page="users" class="nav-item"><span>◍</span>Пользователи</button>
@@ -232,6 +233,21 @@
         <section id="page-skills" class="page">
           <div class="page-heading"><div><p class="eyebrow">RUNTIME</p><h2>Навыки</h2></div><button id="reload-skills" class="button ghost">Обновить</button></div>
           <section class="card router-card"><div class="section-heading"><h3>Production routing</h3></div><div id="skills-status" class="settings-grid" aria-live="polite">Загрузка…</div></section>
+        </section>
+
+        <!-- Синтез речи. Настройки живут там же, где остальные
+             интеграции media-service, поэтому раздел открывает тот же
+             редактор: дублировать форму и путь сохранения незачем. -->
+        <section id="page-tts" class="page">
+          <div class="page-heading">
+            <div>
+              <p class="eyebrow">СИНТЕЗ РЕЧИ</p>
+              <h2>Голос Евы</h2>
+              <p>Провайдер, модель, голос и описание манеры речи. Значения применяются без пересоздания контейнеров; ключ хранится в Secret Store и не показывается обратно.</p>
+            </div>
+            <button id="configure-tts" class="button primary" data-configure="tts">Настроить синтез</button>
+          </div>
+          <div id="tts-summary" class="status-grid">Загрузка…</div>
         </section>
 
         <section id="page-stt" class="page">
