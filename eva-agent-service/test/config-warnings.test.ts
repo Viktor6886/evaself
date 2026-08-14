@@ -89,17 +89,27 @@ test("срок ожидания остановки укладывается в g
   );
 });
 
-test("значения по умолчанию из .env.example не противоречат друг другу", async () => {
+test("значения по умолчанию из .env.example не противоречат друг другу", async (context) => {
   // Включённый флаг, который ничего не делает без соседнего, — худшая
   // ступень rollout, и на новой установке её не должно быть с самого
   // начала: `.env.example` — это и есть конфигурация первого запуска.
   const { readFileSync } = await import("node:fs");
+  const { access } = await import("node:fs/promises");
   const { dirname, join } = await import("node:path");
   const { fileURLToPath } = await import("node:url");
-  const example = readFileSync(
-    join(dirname(fileURLToPath(import.meta.url)), "..", "..", ".env.example"),
-    "utf8",
+  const examplePath = join(
+    dirname(fileURLToPath(import.meta.url)), "..", "..", ".env.example",
   );
+  try {
+    await access(examplePath);
+  } catch {
+    // В образ сервиса копируются только `src` и `test`, файла установки
+    // там нет. Проверка выполняется на полном дереве — в job
+    // `eva-agent-service (TypeScript)` и локально.
+    context.skip("service-only image excludes the repository-level .env.example");
+    return;
+  }
+  const example = readFileSync(examplePath, "utf8");
   const env: Record<string, string> = { ...base };
   for (const line of example.split("\n")) {
     const match = /^([A-Z][A-Z0-9_]*)=(.*)$/.exec(line.trim());
