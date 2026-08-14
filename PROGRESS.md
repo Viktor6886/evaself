@@ -13,7 +13,7 @@ CURRENT_BATCH: 17
 CURRENT_STEP:  26
 BRANCH:        batch/17-telegram-miniapp
 STATUS:        в работе
-LAST_COMMIT:   —
+LAST_COMMIT:   809ba0f
 BLOCKER:       —
 NEXT:          шаг 26 — адаптация Mini App и Admin UI под device-матрицу
 ```
