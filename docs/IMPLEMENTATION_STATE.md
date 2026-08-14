@@ -73,10 +73,13 @@
 | Ступень переноса | Кто владеет задачей: интервал или очередь | `src/jobs/proactive/cutover.ts` | `legacy` · `mirror` · `queue`; на `queue` интервалы не стартуют | обяз. |
 | Cron в зоне пользователя | Разбор и вычисление cron | `src/time/cron.ts` | `nextCronDate()`, `assertCronExpression()`, `isQuietHours()`; реэкспорт из `background.ts` | расш. |
 
-Флаги: `EVA_BULLMQ_JOBS`, `EVA_BULLMQ_MAINTENANCE`, `EVA_BULLMQ_PROACTIVE`,
-`EVA_AGENT_JOBS` — выключены; `EVA_JOBS_MIRROR` — включён. Пока зеркало не
-снято, напоминания и heartbeat по-прежнему ведёт `BackgroundRuntime`, а
-очередь только сравнивает выборки. Разбор — `docs/BACKGROUND_JOBS.md`.
+Флаги в `.env.example`, то есть на новой установке: `EVA_BULLMQ_JOBS`,
+`EVA_BULLMQ_MAINTENANCE`, `EVA_AGENT_JOBS` — включены (без них не работает
+Memory Curator, а сверки обслуживания никому не пишут); `EVA_BULLMQ_PROACTIVE`
+— выключен, `EVA_JOBS_MIRROR` — включён. Пока зеркало не снято, напоминания и
+heartbeat по-прежнему ведёт `BackgroundRuntime`, а очередь только сравнивает
+выборки. На уже настроенной установке значения берутся из её `.env` и
+обновлением не меняются. Разбор — `docs/BACKGROUND_JOBS.md`.
 
 ## Модели и роутинг
 
@@ -206,13 +209,16 @@
   идемпотентность, сохранение владельца), но на данных конкретной установки
   его запускает человек — заданием `memory_temporal_backfill`.
 - **Наполнение векторного поиска на работающей установке** — код шага 18 есть,
-  `EVA_HYBRID_RETRIEVAL` и `EVA_DEEP_RECALL` выключены, и до их включения
-  `memory_embeddings` не пополняется. Дедупликация и разрешение сущностей
-  шага 15 продолжают работать на точном поиске, синонимах и FTS.
-- **Прогоны Curator в production** — механизм шага 16 собран, но требует трёх
-  включённых флагов сразу (`EVA_BULLMQ_JOBS`, `EVA_AGENT_JOBS`,
-  `EVA_MEMORY_CURATOR`) и `EVA_TEMPORAL_MEMORY`. Сочетание проверяется
-  `configWarnings`.
+  `EVA_HYBRID_RETRIEVAL` и `EVA_DEEP_RECALL` включены в `.env.example`, то есть
+  на новой установке, но на уже настроенной остаются в том значении, которое
+  стоит в её `.env`: `ensure-env-defaults.sh` существующий ключ не трогает. До
+  включения `memory_embeddings` не пополняется, а дедупликация и разрешение
+  сущностей шага 15 работают на точном поиске, синонимах и FTS.
+- **Прогоны Curator в production** — механизм шага 16 требует четырёх флагов
+  сразу (`EVA_TEMPORAL_MEMORY`, `EVA_BULLMQ_JOBS`, `EVA_AGENT_JOBS`,
+  `EVA_MEMORY_CURATOR`); в `.env.example` включены все четыре, и согласованность
+  значений примера закреплена тестом `config-warnings.test.ts`. На уже
+  настроенной установке флаги остаются прежними, пока их не изменит человек.
 - **Экраны новых разделов в `admin-ui`** — их нет: шаг 12 остановился на
   контракте admin-api.
 - **Колонка `tenant_id`** — изоляция держится на `user_id` и области арендатора.
