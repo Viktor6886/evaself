@@ -6,6 +6,8 @@ import { ApprovalService, approvalDecision, approvalRequiredFor, fingerprintAppr
 import { createCanonicalToolManifestRegistry } from "../dist/agent-tools.js";
 import { ToolApprovalService } from "../dist/admin/tool-approvals.js";
 import { ToolGatewayStateStore } from "../dist/tools/gateway.js";
+import { runInScope, userScope } from "../dist/tenancy/index.js";
+import { withTenantScopes } from "./tenant-scope-helper.ts";
 
 class ApprovalDb {
   rows = new Map<string, Record<string, unknown>>();
@@ -287,4 +289,41 @@ test("gateway-first rollout keeps legacy behavior when approvals are disabled", 
   const service = new ApprovalService(new ApprovalDb() as never, false);
   const callback = service.canUseTool({ userId: 7, chatId: 77, turn: {}, riskFor: () => "destructive", categoryFor: () => "data_deletion" });
   assert.deepEqual(await callback("delete_tasks", {}, { requestId: "gateway-only" }), { behavior: "allow", message: "Tool approvals disabled; legacy gateway policy applies" });
+});
+
+test("каждый запрос подтверждений проходит границу арендатора внутри хода пользователя", async () => {
+  // Поддельная база тестов границу не применяет, поэтому запрос,
+  // ограниченный только через CTE, выглядел здесь исправным и отказывал
+  // уже в production — после каждого вызова инструмента.
+  const db = new ApprovalDb();
+  const service = new ApprovalService(withTenantScopes(db as never) as never, true, { pollIntervalMs: 2, waitTimeoutMs: 10 });
+  const args = { taskIds: [12] };
+  await runInScope(userScope({ userId: 7, telegramId: 100_007, label: "telegram.turn" }), async () => {
+    assert.equal(await service.evaluatePolicy({ userId: 7, toolName: "get_notes", risk: "read", sessionId: null, actorAllowed: true, toolAllowed: true }), "allow");
+    await service.request({ userId: 7, conversationId: "conversation-1", sdkRequestId: "sdk-scoped", toolName: "delete_tasks", risk: "destructive", description: "safe", argumentFingerprint: fingerprintApprovalArguments(args) });
+    await service.decide({ userId: 7, sdkRequestId: "sdk-scoped", status: "approved_once", actorDecision: "allow" });
+    assert.equal(await service.completeApprovedExecution({ userId: 7, conversationId: "conversation-1", toolName: "delete_tasks", args, outcome: "executed" }), true);
+    assert.equal((await service.lookup(7, "sdk-scoped"))?.status, "executed");
+  });
+});
+
+test("завершение чужого подтверждения не проходит границу арендатора", async () => {
+  const db = new ApprovalDb();
+  const service = new ApprovalService(withTenantScopes(db as never) as never, true);
+  await runInScope(userScope({ userId: 7, telegramId: 100_007, label: "telegram.turn" }), async () => {
+    await assert.rejects(
+      service.completeApprovedExecution({ userId: 8, conversationId: "conversation-1", toolName: "delete_tasks", args: {}, outcome: "executed" }),
+      /не совпадает с пользователем области|не может быть переназначена/,
+    );
+  });
+});
+
+test("выключенная подсистема не обращается к подтверждениям после вызова инструмента", async () => {
+  const db = new ApprovalDb();
+  const statements: string[] = [];
+  const original = db.query.bind(db);
+  db.query = async <T>(sql: string, values: unknown[] = []) => { statements.push(sql); return await original<T>(sql, values); };
+  const service = new ApprovalService(db as never, false);
+  assert.equal(await service.completeApprovedExecution({ userId: 7, conversationId: "conversation-1", toolName: "delete_tasks", args: {}, outcome: "executed" }), false);
+  assert.deepEqual(statements, []);
 });
