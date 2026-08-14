@@ -1,4 +1,5 @@
 import type { Database } from "../db.js";
+import { formatLocalShort, humanizeInterval } from "../time/local-date-time.js";
 
 export type TaskEventType =
   | "created" | "updated" | "reminder_generated" | "reminder_sent"
@@ -161,7 +162,43 @@ export class TaskEventService {
     return rows[0] ?? null;
   }
 
-  async contextLines(userId: number): Promise<string[]> {
+  /**
+   * Ближайшие напоминания: когда сработают и через сколько.
+   *
+   * Промежуток считает серверный код, а не модель. Без этого она берёт
+   * его из головы и ошибается на часы: «до будильника пять с половиной
+   * часов», когда до него три с половиной. Момент срабатывания берётся
+   * тем же выражением, что и у планировщика напоминаний
+   * (`COALESCE(next_run_at, remind_at, due_at)`), — двух представлений
+   * о времени задачи быть не должно.
+   */
+  async upcomingLines(
+    userId: number,
+    timezone: string,
+    now: Date = new Date(),
+  ): Promise<string[]> {
+    const { rows } = await this.db.query<{ title: string; scheduled_at: Date }>(
+      `SELECT t.title, COALESCE(t.next_run_at, t.remind_at, t.due_at) AS scheduled_at
+         FROM tasks t
+        WHERE t.user_id = $1
+          -- Тот же положительный отбор, что у планировщика напоминаний:
+          -- перечислять исключения значит разойтись с ним на первом же
+          -- новом статусе (в схеме, к слову, «canceled» с одной «l»).
+          AND t.status IN ('open', 'in_progress')
+          AND COALESCE(t.next_run_at, t.remind_at, t.due_at) > now()
+        ORDER BY COALESCE(t.next_run_at, t.remind_at, t.due_at)
+        LIMIT 3`,
+      [userId],
+    );
+    return rows.map((row) => {
+      const at = new Date(row.scheduled_at);
+      return `${formatLocalShort(at, timezone)} (через ${
+        humanizeInterval(at.getTime() - now.getTime())
+      }): «${row.title}»`.slice(0, 300);
+    });
+  }
+
+  async contextLines(userId: number, timezone = "UTC"): Promise<string[]> {
     const { rows } = await this.db.query<{
       title: string; event_type: string; created_at: Date; task_status: string;
     }>(
@@ -173,7 +210,10 @@ export class TaskEventService {
       [userId],
     );
     return rows.map((row) => {
-      const at = new Date(row.created_at).toISOString().slice(0, 16).replace("T", " ");
+      // Местное время, а не UTC: рядом в контексте стоит local_time
+      // пользователя, и две шкалы в одном блоке модель сводит неверно —
+      // «напоминание было три часа назад» превращается во «вчера».
+      const at = formatLocalShort(row.created_at, timezone);
       const action: Record<string, string> = {
         reminder_sent: "отправлено напоминание",
         user_replied: "получен ответ на напоминание",

@@ -421,7 +421,7 @@ test("ход знает день недели и промежуток с про�
   const prompt = builder.wrapUserMessage(context, "сделал");
   assert.match(prompt, /local_date: пятница, 14 августа 2026/);
   assert.match(prompt, /since_previous_user_message: 9 секунд/);
-  assert.match(prompt, /since_previous_user_message_note:.*не могли состояться/s);
+  assert.match(prompt, /since_previous_user_message_note:.*не выдумывай его по смыслу слов/s);
 });
 
 test("первое сообщение промежутка не выдумывает", async () => {
@@ -459,4 +459,37 @@ test("о себе Ева говорит в женском роде, и напо�
   // В языке без рода строка не нужна и место в бюджете не занимает.
   const english = builder.wrapUserMessage({ ...russian, responseLanguage: "en" }, "hi");
   assert.doesNotMatch(english, /self_reference/);
+});
+
+test("остаток до напоминания считает сервер, а не модель", async () => {
+  // Ева говорила «до будильника пять с половиной часов», когда до него
+  // оставалось три с половиной: остаток она считала в уме. Теперь и
+  // момент, и остаток приходят готовыми.
+  const now = new Date("2026-08-15T00:56:00+05:00");
+  const builder = new RuntimeContextBuilder(
+    {
+      query: async (sql: string) => sql.includes("FROM tasks")
+        ? { rows: [{ title: "Выехать в Пермь", scheduled_at: new Date("2026-08-15T04:30:00+05:00") }] }
+        : { rows: [{ ...CONTEXT_ROW }] },
+    } as never,
+    { defaultTimezone: "UTC", profileCompletionEnabled: false, vectorGoalsEnabled: false, now: () => now },
+  );
+  const context = await builder.build({ userId: 1, conversationId: "c", userMessage: "убрался в гараже" });
+
+  assert.deepEqual(context.upcomingReminders, ["15 августа, 04:30 (через 3 часа 34 минуты): «Выехать в Пермь»"]);
+  const prompt = builder.wrapUserMessage(context, "убрался в гараже");
+  assert.match(prompt, /upcoming_reminders:/);
+  assert.match(prompt, /через 3 часа 34 минуты/);
+  assert.match(prompt, /не пересчитывай в уме/);
+});
+
+test("сообщение о сделанном сверяется с промежутком, а не принимается на веру", async () => {
+  const builder = contextBuilder(new Date("2026-08-15T00:20:40+05:00"));
+  const context = await builder.build({
+    userId: 1, conversationId: "c", userMessage: "все помыл",
+    previousUserMessageAt: new Date("2026-08-15T00:20:10+05:00"),
+  });
+  assert.equal(context.sincePreviousMessage, "30 секунд");
+  const prompt = builder.wrapUserMessage(context, "все помыл");
+  assert.match(prompt, /не подтверждай выполнение и не хвали/);
 });
