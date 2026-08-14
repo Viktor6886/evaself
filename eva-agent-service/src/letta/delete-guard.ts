@@ -39,7 +39,7 @@ export interface DeleteGuardDatabase {
   withSystemScope<T>(
     reason: string,
     work: () => Promise<T>,
-    options?: { crossUser?: boolean; inherit?: boolean },
+    options?: { crossUser?: boolean },
   ): Promise<T>;
 }
 
@@ -123,7 +123,7 @@ export class DeleteGuard {
           LIMIT 50`,
         [value, [...TERMINAL_STATES]],
       ),
-      { crossUser: true, inherit: true },
+      { crossUser: true },
     );
     return rows.map((row) => ({
       runId: String(row.run_id ?? ""),
