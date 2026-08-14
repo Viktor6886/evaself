@@ -69,6 +69,7 @@ jobs:
       docs_only: ${{ steps.detect.outputs.docs_only }}
       media: ${{ steps.detect.outputs.media }}
       adminui: ${{ steps.detect.outputs.adminui }}
+      webapp: ${{ steps.detect.outputs.webapp }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -330,6 +331,7 @@ jobs:
           node --check letta-ui/public/ui.js
           node --check admin-ui/public/ui.js
           node --check webapp/public/app/app.js
+          node --check webapp/public/app/journal.js
           node --check webapp/public/assets/bot-link.js
 
       - name: Every API path the front-ends call exists in the service
@@ -463,6 +465,46 @@ jobs:
       - name: admin-ui не затронут
         if: needs.changes.outputs.adminui != 'true'
         run: echo "admin-ui/ не изменялся — проверять нечего"
+
+  # ===================================================================
+  # webapp: Mini App на device-матрице
+  # ===================================================================
+  # Вёрстка — единственное, о чём `node --check` не говорит ничего.
+  # Боковая прокрутка, область нажатия меньше пальца, поле под
+  # клавиатурой и удаление с одного касания видны только в настоящем
+  # браузере на настоящем разрешении, и появляются они от одной строки
+  # CSS. Проверяются восемь разрешений из задания шага 26.
+  webapp:
+    name: webapp (device-матрица Mini App)
+    runs-on: ubuntu-24.04
+    needs: changes
+    defaults:
+      run:
+        working-directory: webapp
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        if: needs.changes.outputs.webapp == 'true'
+        with:
+          node-version: "22.22"
+          cache: npm
+          cache-dependency-path: webapp/package-lock.json
+
+      - if: needs.changes.outputs.webapp == 'true'
+        run: npm ci --no-audit --no-fund
+
+      - name: Install Chromium
+        if: needs.changes.outputs.webapp == 'true'
+        run: npx playwright install --with-deps chromium
+
+      - name: Device matrix
+        if: needs.changes.outputs.webapp == 'true'
+        run: npm test
+
+      - name: webapp не затронут
+        if: needs.changes.outputs.webapp != 'true'
+        run: echo "webapp/ не изменялся — проверять нечего"
 
   # ===================================================================
   # PostgreSQL schema: applied for real, three times, to prove idempotency

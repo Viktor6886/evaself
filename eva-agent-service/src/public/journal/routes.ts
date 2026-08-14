@@ -20,7 +20,8 @@ import { ChannelLinkService } from "../../channels/channel-links.js";
 import type { TelegramWebAppUser } from "../telegram-webapp-auth.js";
 import { askEva, type AskModelConclusion } from "./ask.js";
 import { buildDiscussionRequest } from "./discussion.js";
-import { JournalService, positiveId } from "./service.js";
+import { positiveId } from "./input.js";
+import { JournalService } from "./service.js";
 import { weeklyReview } from "./weekly-review.js";
 
 interface JournalRequest extends FastifyRequest {

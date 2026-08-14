@@ -173,6 +173,11 @@
 | Применение политик | Предпросмотр и пакетное удаление | `src/retention/service.ts`, таблицы `retention_holds`, `retention_runs` | `preview()`, `enforce()`; задержка останавливает класс целиком | обяз. |
 | Rate limit | Публичные поверхности | `src/public/rate-limit.ts` | `ValkeyRateLimiter`, `clientAddress()` | обяз. |
 | Mini App auth | Проверка подписи Telegram initData | `src/public/telegram-webapp-auth.ts`, `webapp-session.ts` | окно 300–600 с, защита от повтора | обяз. |
+| Дневник Mini App | Запись дня, люди, голосовая заметка; сохранение без ИИ | `src/public/journal/service.ts`, таблицы `journal_entries`, `journal_entry_links`, `journal_people`, `journal_entry_people`, `journal_voice_notes` | создание и правка не обращаются к модели; удаление снимает связи, упоминания, заметку и осиротевшую карточку человека; `EVA_MINIAPP_JOURNAL_V2` | обяз. |
+| Недельный обзор | Детерминированный обзор по дневнику, отметкам, задачам и целям | `src/public/journal/weekly-review.ts` | считает код, не модель; меньше 5 наблюдений — вывода нет | обяз. |
+| Обсуждение записи | Директива и правило одного вопроса | `src/public/journal/discussion.ts` | `buildDiscussionRequest()` вызывает `detectCrisis` до выбора модели; `limitQuestions()` срезает лишние вопросы детерминированно | обяз. |
+| Разделение источников | «Спросить Еву»: память, записи, внешние источники, вывод модели | `src/public/journal/ask.ts` | у каждого пункта доказательство; уверенность считает код, вывод модели ≤ 0.7; выключенная подсистема объявляется выключенной | обяз. |
+| Связь каналов | Одно сообщение канала — один ход и одна conversation | `src/channels/channel-links.ts`, таблица `channel_message_links` | ключ объединения только внутренний `user_id`; имя и username ключом не являются | обяз. |
 | Миграции | Схема PostgreSQL | `postgres/migrations/`, `down/` | идемпотентны, у каждой есть down | обяз. |
 | Фикстуры | Данные для локальной проверки | `postgres/fixtures/` | `load.sh` безопасен при повторе | расш. |
 | Backup / restore | Зашифрованный архив | `scripts/backup.sh`, `restore.sh`, `backup-service/` | мастер-ключ хранится отдельно | обяз. |
@@ -237,6 +242,30 @@
 
 ## Batch 16 — knowledge and research production wiring
 Authenticated Mini App ingress derives identity only from verified Telegram initData. Upload storage precedes the outbox transaction and compensates failures; the registered knowledge worker uses fail-closed ClamAV and canonical LLM Router embeddings. Research uses OutboundGateway and the canonical router, with tenant-scoped status/cancel/report. Shared structured repair/degradation is active in research and SkillRouter reranking. Memory Doctor is deterministic (model parsing N/A); no separate insights model call exists in this batch.
+## Batch 17 — Mini App: дневник и адаптация под смартфоны
+
+Дневник живёт отдельно от `eva_notes`: заметка — рабочая информация, у
+неё нет ни настроения, ни даты события, ни голосовой версии, ни
+разделения «сохранено без ИИ» и «отдано Еве». Маршруты дневника
+регистрируются внутри уже защищённой группы `/public/v2` и при
+выключенном `EVA_MINIAPP_JOURNAL_V2` отсутствуют целиком: пустой список
+означал бы «дневник есть, но он пуст».
+
+**Дублирующая версия публичного API не удалена.** `/public/tasks` и
+`/public/v2/tasks` сосуществуют: пункт 13 шага 25 разрешает удаление
+только после перевода всех потребителей, паритета телеметрии, периода
+совместимости и проверенного отката. Mini App пока читает оба (`app.js`
+падает на `/public/today` и `/public/tasks`, когда `/public/v2/dashboard`
+недоступен), паритет телеметрии не измерялся. Удаление — отдельная
+работа, не часть этого batch.
+
+Вёрстка Mini App и Admin UI проверяется восемью разрешениями из шага 26
+в настоящем браузере: `webapp/test/mobile.test.mjs`,
+`admin-ui/test/mobile.test.mjs`. Область нажатия задана одной
+переменной `--tap` (44px); таблицы Admin UI ниже 720 пикселей
+раскладываются карточками — подписи столбцов проставляет
+`labelTableCells()` наблюдателем, а не тридцать мест сборки таблиц.
+
 # Batch 16 operational rollback
 
 Before applying `postgres/migrations/down/051_knowledge_research.sql`, run

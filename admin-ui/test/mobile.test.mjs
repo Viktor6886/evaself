@@ -13,7 +13,7 @@
 import assert from "node:assert/strict";
 import { after, describe, test } from "node:test";
 
-import { openPanel, PHONE } from "./harness.mjs";
+import { DEVICES, openPanel, PHONE, smallTapTargets } from "./harness.mjs";
 
 const svc = (name, color) => ({
   name, title: name,
@@ -53,6 +53,21 @@ const ROUTES = {
         position: 0, config_id: CONFIG.id, name: "Deepgram production",
         provider: "deepgram", model: "nova-3", status: "healthy",
       }],
+    }],
+  },
+  // Раздел «Операции» строит две таблицы: без этих ответов проверять
+  // карточный режим не на чем.
+  "/backups": {
+    backups: [{
+      id: "b1", created_at: "2026-08-01T03:00:00Z", size_bytes: 1024 * 1024 * 12,
+      status: "ok", encrypted: true, location: "s3",
+    }],
+  },
+  "/updates": {
+    current: { version: "0.4.2", channel: "stable", updated_at: "2026-08-01T03:00:00Z" },
+    history: [{
+      started_at: "2026-08-01T03:00:00Z", component: "eva-agent-service",
+      from_version: "0.4.1", to_version: "0.4.2", status: "success", rolled_back: false,
     }],
   },
   [`/stt/configs/${CONFIG.id}/keys`]: {
@@ -188,6 +203,93 @@ describe("панель на телефоне", () => {
     await panel.page.keyboard.press("Escape");
     await panel.page.waitForTimeout(150);
     assert.equal((await state()).open, false, "Escape тоже должен закрывать меню");
+  });
+
+  // -------------------------------------------------------------------
+  // Матрица разрешений шага 26
+  // -------------------------------------------------------------------
+
+  for (const device of DEVICES) {
+    test(`${device.name}: ни один раздел не уезжает вбок`, async () => {
+      const panel = await openPanel({
+        routes: ROUTES,
+        viewport: { width: device.width, height: device.height },
+      });
+      panels.push(panel);
+      const pages = await panel.page.evaluate(() =>
+        [...document.querySelectorAll("#nav .nav-item")].map((item) => item.dataset.page));
+      for (const name of pages) {
+        await panel.page.evaluate((page) => openPage(page), name);
+        await panel.page.waitForTimeout(80);
+        const width = await panel.page.evaluate(() => ({
+          document: document.documentElement.scrollWidth,
+          screen: window.innerWidth,
+        }));
+        assert.equal(
+          width.document, width.screen,
+          `раздел «${name}» на ${device.name} растягивает страницу до ${width.document}`,
+        );
+      }
+    });
+  }
+
+  test("на телефоне таблица становится карточками с подписями полей", async () => {
+    const panel = await open({ routes: ROUTES });
+    await panel.page.evaluate(() => openPage("operations"));
+    // `#update-history` — это сам tbody: строки лежат прямо в нём.
+    await panel.page.waitForFunction(
+      () => document.querySelectorAll("#update-history tr").length > 0);
+
+    const layout = await panel.page.evaluate(() => {
+      const cell = document.querySelector("#update-history td");
+      const table = document.querySelector("#update-history").closest("table");
+      return {
+        display: getComputedStyle(cell).display,
+        label: cell.dataset.label ?? null,
+        headHidden: getComputedStyle(table.querySelector("thead")).position === "absolute",
+        rowWidth: document.querySelector("#update-history tr").getBoundingClientRect().width,
+      };
+    });
+    // Подпись столбца стоит у самой ячейки: заголовок таблицы на узком
+    // экране не виден, и без неё число ни о чём не говорит.
+    assert.ok(layout.label, "ячейка обязана нести подпись своего столбца");
+    assert.equal(layout.display, "grid", "строка должна раскладываться карточкой");
+    assert.equal(layout.headHidden, true, "заголовок таблицы уходит с экрана");
+    assert.ok(layout.rowWidth <= PHONE.width, "карточка не шире экрана");
+  });
+
+  test("на телефоне до каждой кнопки раздела можно дотянуться", async () => {
+    const panel = await open({ routes: ROUTES });
+    for (const name of ["overview", "operations", "stt"]) {
+      await panel.page.evaluate((page) => openPage(page), name);
+      await panel.page.waitForTimeout(120);
+      const small = await smallTapTargets(panel.page);
+      assert.deepEqual(
+        small, [],
+        `в разделе «${name}» есть области нажатия меньше 44×44: ${JSON.stringify(small)}`,
+      );
+    }
+  });
+
+  test("опасное действие требует подтверждения и не срабатывает от касания", async () => {
+    const panel = await open({ routes: ROUTES });
+    await panel.page.evaluate(() => openPage("stt"));
+    await panel.page.waitForFunction(
+      () => document.querySelectorAll("#stt-configs .status-card").length > 0);
+    await panel.page.click('[data-stt-action="key"]');
+    await panel.page.waitForFunction(
+      () => document.querySelectorAll("#stt-key-list .key-row").length === 6);
+
+    const before = panel.requests.filter((item) => item.method === "DELETE").length;
+    await panel.page.click('[data-key-action="remove"]');
+    await panel.page.waitForFunction(() => document.querySelector("#confirm-dialog").open);
+    assert.equal(
+      panel.requests.filter((item) => item.method === "DELETE").length, before,
+      "удаление ключа ушло на сервер до подтверждения",
+    );
+    // Фокус на отмене: случайный Enter не должен стирать секрет.
+    const focused = await panel.page.evaluate(() => document.activeElement?.value);
+    assert.equal(focused, "cancel");
   });
 
   test("на широком экране вёрстка остаётся прежней", async () => {

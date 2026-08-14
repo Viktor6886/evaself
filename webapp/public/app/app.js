@@ -24,6 +24,10 @@
     developmentTab: "overview",
     module: null,
     astroTab: "horoscope",
+    // Загрузка, готово и отказ — три разных экрана. Пока данные едут,
+    // «Целей пока нет» — неправда: их ещё не спрашивали.
+    phase: "loading",
+    failed: new Set(),
     busy: new Set(),
   };
 
@@ -102,8 +106,11 @@
       state.notes = state.dashboard?.notes || [];
       state.budgets = state.dashboard?.budget?.recent || [];
       await enableJournalIfServed();
+      state.phase = "ready";
       renderAll();
     } catch (error) {
+      state.phase = "error";
+      state.lastError = friendlyError(error);
       renderAll();
       showFriendlyFailure(error);
     }
@@ -204,13 +211,29 @@
     return payload || {};
   }
 
+  /**
+   * Запрос, который не должен ронять всё приложение.
+   *
+   * Отказ запоминается: экран, которому эти данные нужны, обязан
+   * показать состояние ошибки. Молчаливый возврат пустого значения
+   * превращал отказ сервера в «у вас ничего нет» — и человек делал
+   * неверный вывод о собственных данных.
+   */
   async function safeApi(path, options, fallback, requireTelegram = true) {
-    try { return await api(path, options, requireTelegram); }
-    catch (error) {
+    try {
+      const result = await api(path, options, requireTelegram);
+      state.failed.delete(sourceKey(path));
+      return result;
+    } catch (error) {
       console.warn(`[Eva WebApp] ${path}`, error);
+      state.failed.add(sourceKey(path));
+      state.lastError = friendlyError(error);
       return fallback;
     }
   }
+
+  /** Ключ источника — путь без параметров запроса. */
+  function sourceKey(path) { return String(path).split("?")[0]; }
 
   function friendlyError(error) {
     if (!error) return "Не удалось выполнить действие";
@@ -289,9 +312,52 @@
       if (state.organizerTab === "notes") openNoteSheet();
       else openTaskSheet(null, state.organizerTab === "reminders");
     });
-    tg?.BackButton?.onClick(() => {
-      if (state.screen === "module") openScreen(state.previousScreen || "hub");
-      else openScreen("today");
+    // Аппаратная «Назад» в Android приходит сюда же, что и кнопка
+    // Telegram. Порядок обязателен: сначала закрывается то, что лежит
+    // сверху, иначе первое нажатие уводит с экрана, оставив открытый
+    // лист поверх нового раздела.
+    tg?.BackButton?.onClick(handleBack);
+    bindKeyboardHandling();
+  }
+
+  function handleBack() {
+    const confirmDialog = document.getElementById("confirm-dialog");
+    if (confirmDialog?.open) return void confirmDialog.close();
+    const sheet = document.getElementById("sheet");
+    if (sheet?.open) return closeSheet();
+    if (state.screen === "module") return openScreen(state.previousScreen || "hub");
+    if (state.screen !== "today") return openScreen("today");
+    // На «Сегодня» назад идти некуда: приложение закрывается само —
+    // Telegram делает это, когда обработчик ничего не сделал.
+    tg?.close?.();
+  }
+
+  /**
+   * Экранная клавиатура.
+   *
+   * Она не уменьшает окно, а накрывает его снизу: поле в нижней части
+   * листа оказывается ПОД клавиатурой, и человек печатает вслепую.
+   * visualViewport даёт настоящую видимую высоту — по ней лист и
+   * поджимается, а активное поле подтягивается в неё.
+   */
+  function bindKeyboardHandling() {
+    const viewport = window.visualViewport;
+    if (viewport) {
+      const apply = () => {
+        const hidden = Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop);
+        document.documentElement.style.setProperty("--keyboard", `${Math.round(hidden)}px`);
+      };
+      viewport.addEventListener("resize", apply);
+      viewport.addEventListener("scroll", apply);
+      apply();
+    }
+    document.addEventListener("focusin", (event) => {
+      const field = event.target;
+      if (!(field instanceof HTMLElement)) return;
+      if (!field.matches("input, textarea, select")) return;
+      // Прокрутка откладывается на кадр: до появления клавиатуры
+      // положение поля ещё старое.
+      setTimeout(() => field.scrollIntoView({ block: "center", behavior: "smooth" }), 220);
     });
   }
 
@@ -305,6 +371,9 @@
 
   function openScreen(screen) {
     if (!document.querySelector(`[data-screen="${screen}"]`)) return;
+    // Поле, оставшееся в фокусе, держит клавиатуру открытой поверх
+    // нового экрана.
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     if (screen !== "module") state.previousScreen = state.screen;
     state.screen = screen;
     document.querySelectorAll(".screen").forEach((node) => {
@@ -626,6 +695,8 @@
   }
 
   function renderOrganizer() {
+    const organizerHost = document.getElementById("organizer-content");
+    if (organizerHost && renderPhase(organizerHost, ["/public/v2/dashboard", "/public/v2/tasks", "/public/v2/notes"])) return;
     const active = state.tasks.filter((task) => !isDone(task) && task.status !== "canceled");
     const reminders = state.tasks.filter((task) => task.remind_at && task.status !== "canceled");
     document.getElementById("task-count").textContent = active.length;
@@ -800,9 +871,35 @@
   // Development
   // ---------------------------------------------------------------------------
 
+  /**
+   * Состояние экрана до данных.
+   *
+   * Возвращает `true`, если экран уже занят загрузкой или отказом: в
+   * этом случае рисовать поверх нечего. Отказ обязательно даёт кнопку
+   * повтора — иначе экран становится тупиком.
+   */
+  function renderPhase(host, sources = []) {
+    if (state.phase === "loading") {
+      host.innerHTML = '<div class="section-stack"><div class="loading-skeleton"></div><div class="loading-skeleton"></div><div class="loading-skeleton"></div></div>';
+      return true;
+    }
+    if (state.phase === "error" || sources.some((source) => state.failed.has(source))) {
+      host.innerHTML = `${emptyState("Данные не загрузились", escapeHtml(state.lastError || "Сервис временно недоступен"))}<div class="action-row"><button class="primary-action" data-retry type="button">Повторить</button></div>`;
+      host.querySelector("[data-retry]").addEventListener("click", () => {
+        state.phase = "loading";
+        state.failed.clear();
+        renderAll();
+        void bootstrap();
+      });
+      return true;
+    }
+    return false;
+  }
+
   function renderDevelopment() {
     const host = document.getElementById("development-content");
     if (!host) return;
+    if (renderPhase(host, ["/public/goals", "/public/progress"])) return;
     const tab = state.developmentTab;
     if (tab === "goals") return renderGoals(host);
     if (tab === "decisions") return void renderDecisions(host);
@@ -1113,6 +1210,7 @@
 
   function renderProfile() {
     const host = document.getElementById("profile-content");
+    if (renderPhase(host, ["/public/profile"])) return;
     const user = state.profile?.user || state.session?.user || {};
     const completeness = Number(state.profile?.completeness || 0);
     host.innerHTML = `<div class="profile-stack">
