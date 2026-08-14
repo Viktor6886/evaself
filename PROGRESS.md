@@ -9,13 +9,13 @@
 ## Состояние
 
 ```
-CURRENT_BATCH: 17
-CURRENT_STEP:  26
-BRANCH:        batch/17-telegram-miniapp
-STATUS:        на ревью
-LAST_COMMIT:   2f23f11
+CURRENT_BATCH: 18
+CURRENT_STEP:  27
+BRANCH:        —
+STATUS:        не начат
+LAST_COMMIT:   a2ea144
 BLOCKER:       —
-NEXT:          открыть pull request на batch 17 и дождаться проверок
+NEXT:          начать batch 18 (шаг 27)
 ```
 
 Значения полей:
@@ -58,7 +58,7 @@ Batch — единица работы: одна ветка, один pull reques
 | 14 | 19–20 | P2 | выполнен | [#161](https://github.com/Viktor6886/evaself/pull/161) |
 | 15 | 21–22 | P2 | выполнен | [#168](https://github.com/Viktor6886/evaself/pull/168) |
 | 16 | 23–24 | P3 | выполнен | [#170](https://github.com/Viktor6886/evaself/pull/170) |
-| 17 | 25–26 | P3 | на ревью | — |
+| 17 | 25–26 | P3 | выполнен | [#175](https://github.com/Viktor6886/evaself/pull/175) |
 | 18 | 27 | P3 | не начат | — |
 | 19 | 28–29 | P3 | не начат | — |
 | 20 | 30 | P3 | не начат | — |
