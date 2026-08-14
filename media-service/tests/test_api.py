@@ -179,3 +179,69 @@ def test_stt_test_rejects_a_recording_without_audio(client, monkeypatch):
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "stt_audio_invalid"
+
+
+def test_speech_request_carries_the_voice_prompt_only_when_it_is_set():
+    """Описание манеры речи уходит провайдеру полем `instructions`.
+
+    Пустое поле часть провайдеров отвергает как неизвестный параметр,
+    поэтому оно не должно появляться в теле «на всякий случай».
+    """
+    from app.main import _speech_request
+
+    plain = _speech_request(
+        model="google/gemini-3.1-flash-tts-preview", voice="Kore",
+        text="привет", voice_prompt=None,
+    )
+    assert plain == {
+        "model": "google/gemini-3.1-flash-tts-preview",
+        "voice": "Kore",
+        "input": "привет",
+        "response_format": "mp3",
+    }
+
+    described = _speech_request(
+        model="google/gemini-3.1-flash-tts-preview", voice="Kore",
+        text="привет", voice_prompt="  Тёплый голос, спокойный темп  ",
+    )
+    assert described["instructions"] == "Тёплый голос, спокойный темп"
+    # Пробелы вместо описания — это отсутствие описания.
+    assert "instructions" not in _speech_request(
+        model="m", voice="v", text="t", voice_prompt="   ",
+    )
+
+
+def test_tts_reports_an_empty_answer_instead_of_sending_silence(client, monkeypatch):
+    """Пустой ответ провайдера — отказ, а не голосовое сообщение из нуля байт."""
+    from app import main as media_main
+
+    monkeypatch.setattr(
+        media_main.RUNTIME, "tts",
+        lambda: {
+            "base_url": "https://openrouter.ai/api/v1", "api_key": "k",
+            "model": "google/gemini-3.1-flash-tts-preview", "voice": "Kore",
+            "voice_prompt": "спокойный темп",
+        },
+    )
+
+    sent = {}
+
+    class EmptyResponse:
+        status_code = 200
+        content = b""
+        text = ""
+
+    async def fake_post(url, **kwargs):
+        sent["url"] = url
+        sent["json"] = kwargs.get("json")
+        return EmptyResponse()
+
+    monkeypatch.setattr(media_main.app.state.http, "post", fake_post)
+
+    response = client.post("/tts", json={"text": "привет"})
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "tts_empty"
+    # Настройка панели доходит до провайдера без участия вызывающего.
+    assert sent["url"].endswith("/audio/speech")
+    assert sent["json"]["instructions"] == "спокойный темп"
+    assert sent["json"]["voice"] == "Kore"

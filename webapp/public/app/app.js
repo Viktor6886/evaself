@@ -1221,7 +1221,7 @@
         ${settingsRow("conversations", "Диалоги с Евой", "Создать, выбрать или архивировать диалог", "Открыть")}
         ${settingsRow("card", "Подписка и квоты", "Тариф, бесплатные сообщения и гранты", state.session?.plan || "free")}
         ${settingsRow("bell", "Уведомления", "Время, частота и тихие часы", "Настроить")}
-        ${settingsRow("voice", "Голос и портрет", "Режим ответа, ASR, TTS и анимация", "Настроить")}
+        ${settingsRow("voice", "Настройки", "Формат ответов Евы: текст, голос или оба", responseModeTitle(state.profile?.user?.response_mode))}
         ${settingsRow("link", "Интеграции", "Todoist, поиск и внешние сервисы", "Проверить")}
         ${settingsRow("shield", "Приватность", "Экспорт, память и удаление данных", "Открыть")}
         ${settingsRow("pulse", "Диагностика", "Версия интерфейса и подключение к API", BUILD)}
@@ -1255,8 +1255,52 @@
     });
   }
 
+  const RESPONSE_MODES = [
+    { value: "text", title: "Текст", note: "Ева отвечает только текстом." },
+    { value: "both", title: "Голос + текст", note: "Ева присылает текст и голосовое сообщение к нему." },
+    { value: "voice", title: "Только голос", note: "Ева присылает голосовое сообщение без текста." },
+  ];
+
+  function responseModeTitle(value) {
+    return (RESPONSE_MODES.find((mode) => mode.value === value) || RESPONSE_MODES[0]).title;
+  }
+
+  function openResponseModeSheet() {
+    const current = state.profile?.user?.response_mode || "text";
+    openSheet({
+      title: "Настройки",
+      subtitle: "Формат ответов Евы. Действует и в Telegram, и здесь.",
+      html: `<div class="section-stack"><article class="section-card"><div class="settings-list">${
+        RESPONSE_MODES.map((mode) => `<button class="settings-row" type="button" data-response-mode="${mode.value}">
+          <span data-icon="voice"></span>
+          <span><strong>${mode.title}</strong><small>${mode.note}</small></span>
+          <em>${mode.value === current ? "Выбрано" : ""}</em>
+        </button>`).join("")
+      }</div></article>
+      <article class="section-card"><p>Если голос не удастся синтезировать, Ева пришлёт текст — ответ не теряется.</p></article></div>`,
+      onMount() {
+        document.querySelectorAll("[data-response-mode]").forEach((button) => {
+          button.addEventListener("click", () => void saveResponseMode(button.dataset.responseMode));
+        });
+      },
+    });
+  }
+
+  async function saveResponseMode(mode) {
+    try {
+      const result = await api("/public/profile", { method: "PATCH", body: JSON.stringify({ response_mode: mode }) });
+      state.profile = result.profile;
+      closeSheet();
+      renderProfile();
+      toast(`Формат ответов: ${responseModeTitle(mode).toLowerCase()}`);
+    } catch (error) {
+      toast(error?.message || "Не удалось сохранить настройку");
+    }
+  }
+
   function openSetting(code) {
     if (code === "memory") return void openMemorySheet();
+    if (code === "voice") return void openResponseModeSheet();
     if (code === "conversations") return void openConversationsSheet();
     if (code === "pulse") return openSheet({ title: "Диагностика", subtitle: "Технические детали скрыты от обычных экранов.", html: `<div class="section-stack"><article class="section-card"><p><strong>Frontend:</strong> ${BUILD}</p><p><strong>API v2:</strong> ${state.dashboard ? "доступен" : "не подключён"}</p><p><strong>Telegram initData:</strong> ${tg?.initData ? "получена" : "отсутствует"}</p><p><strong>Тариф:</strong> ${escapeHtml(state.session?.plan || "неизвестно")}</p></article></div>` });
     openSheet({ title: "Настройки", subtitle: "Раздел не дублирует инструменты Пульта.", html: `<article class="section-card"><p>Эта настройка будет подключена к серверному профилю и административной конфигурации. Сейчас интерфейс не имитирует сохранение.</p></article>` });

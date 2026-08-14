@@ -156,12 +156,45 @@ const LOADERS = {
   ai: loadProviders,
   skills: loadSkills,
   stt: loadStt,
+  tts: loadTts,
   operations: loadOperations,
   users: loadUsers,
   settings: loadSettings,
   security: loadSecrets,
   audit: loadAudit,
 };
+
+/**
+ * Раздел синтеза речи.
+ *
+ * Значения читаются тем же маршрутом интеграций, что и в «Сервисах»:
+ * второй источник тех же настроек означал бы расхождение между двумя
+ * экранами. Раздел отвечает за место в меню и сводку, редактирование —
+ * общий редактор интеграции.
+ */
+async function loadTts() {
+  const { payload } = await request("/integrations/tts/config");
+  const value = (name) => (payload.fields || []).find((field) => field.name === name) || {};
+  const check = payload.last_check;
+  const rows = [
+    ["Провайдер", value("provider").value || "не выбран"],
+    ["Base URL", value("base_url").value || "не задан"],
+    ["API Token", value("api_key").configured ? "настроен" : "не задан"],
+    ["Модель", value("model").value || "по умолчанию провайдера"],
+    ["Голос", value("voice").value || "не выбран"],
+    ["Voice Prompt", value("voice_prompt").value || "не задан"],
+  ];
+  $("#tts-summary").innerHTML = `<article class="card">
+    <div class="section-heading"><h3>Текущая конфигурация</h3></div>
+    <div class="settings-grid">${rows.map(([title, text]) =>
+      `<div><span class="muted">${escapeHtml(title)}</span><div>${escapeHtml(String(text))}</div></div>`).join("")}</div>
+    <p class="integration-status color-${check ? check.color : "gray"}">${
+      check
+        ? `Последняя проверка: ${FIELD_STATE_LABELS[check.color] || check.state}${check.message ? ` · ${escapeHtml(check.message)}` : ""}`
+        : "Проверок ещё не было"
+    }</p>
+  </article>`;
+}
 
 async function loadSkills() {
   const { payload } = await request("/skills/operations?hours=24");
@@ -567,6 +600,14 @@ function integrationField(field) {
       .join("");
     return `<label><span>${escapeHtml(field.title)} ${mark}</span>
       <select name="${escapeHtml(field.name)}"><option value="">—</option>${options}</select>
+      <small>${escapeHtml(field.hint)}</small></label>`;
+  }
+  if (field.kind === "textarea") {
+    // Описание манеры речи — абзац, а не строка: в однострочном поле
+    // его не прочитать и не отредактировать.
+    return `<label><span>${escapeHtml(field.title)} ${mark}</span>
+      <textarea name="${escapeHtml(field.name)}" rows="4"
+        placeholder="${escapeHtml(field.placeholder || "")}">${escapeHtml(field.value || "")}</textarea>
       <small>${escapeHtml(field.hint)}</small></label>`;
   }
   // У секрета поле всегда пустое: текущее значение не показывается, а

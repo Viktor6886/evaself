@@ -389,9 +389,17 @@ export class PublicRepository implements PublicDataSource {
     return await this.scoped(telegramId, "profile", async () => {
     const user = await this.userByTelegramId(telegramId);
     const profile = await this.profile.getProfile(user.id);
+    // Формат ответа читается там же, где остальной профиль: отдельный
+    // запрос из WebApp означал бы второй источник той же настройки.
+    const { rows: preference } = await this.db.query<{ response_mode: string }>(
+      `SELECT COALESCE(response_mode, 'text') AS response_mode
+         FROM user_preferences WHERE user_id = $1`,
+      [user.id],
+    );
     return {
       user: {
         preferred_name: profileValue(profile.confirmed, "preferred_name"),
+        response_mode: preference[0]?.response_mode ?? "text",
         city: user.city,
         timezone: user.timezone,
         language_mode: user.language_mode,
@@ -430,6 +438,21 @@ export class PublicRepository implements PublicDataSource {
     }
     for (const fieldKey of stringList(input.decline, 20)) {
       await this.profile.decline(user.id, fieldKey);
+    }
+    if (Object.hasOwn(input, "response_mode")) {
+      // Значения те же, что у инструмента `update_response_mode` и у
+      // колонки `user_preferences.response_mode`: четвёртого варианта
+      // формата ответа в системе нет.
+      const mode = input.response_mode;
+      if (mode !== "text" && mode !== "voice" && mode !== "both") {
+        throw new Error("response_mode должен быть text, voice или both");
+      }
+      await this.db.query(
+        `INSERT INTO user_preferences (user_id, response_mode)
+         VALUES ($1, $2)
+         ON CONFLICT (user_id) DO UPDATE SET response_mode = EXCLUDED.response_mode`,
+        [user.id, mode],
+      );
     }
     if (Object.hasOwn(input, "preferred_language")) {
       const language = input.preferred_language;
