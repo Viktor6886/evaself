@@ -512,3 +512,57 @@ test("память пользователя A не видна пользоват
   assert.notEqual(mine[0]!.id, theirs[0]!.id);
   assert.deepEqual(db.unscoped, []);
 });
+
+// ---------------------------------------------------------------------
+// Слова человека и вывод модели
+// ---------------------------------------------------------------------
+
+test("сказанное человеком о себе становится фактом сразу, без подтверждения", async () => {
+  const db = new MemoryFakeDb();
+  const episode = await seedEpisode(db);
+  // Пока кандидатом становилось всё подряд, человеку приходилось
+  // подтверждать в Mini App собственные слова, а до подтверждения Ева
+  // говорила о них неуверенно.
+  const reply = JSON.stringify({
+    candidates: [validCandidate({ statedByUser: true, confidence: 0.9 })],
+  });
+  const { service } = curatorFor(db, reply);
+
+  const outcome = await service.run({
+    runId: "run-stated", userId: USER, agentId: "agent-1",
+    episodeId: Number(episode.id), parentConversationId: "conv-1",
+    signal: new AbortController().signal,
+  });
+
+  assert.equal(outcome.status, "succeeded");
+  assert.equal(db.rowsOf("memory_nodes")[0]!.status, "active");
+  assert.equal(outcome.applied.pendingConfirmation, 0);
+  // Доказательством служат слова человека, а не вывод: от источника
+  // зависит и статус, и вес факта при разборе противоречий.
+  assert.ok(db.rowsOf("memory_evidence").every((row) => row.source_type === "user_statement"));
+});
+
+test("признака statedByUser одного мало: чувствительное и догадка остаются кандидатом", async () => {
+  const cases: Array<[string, Record<string, unknown>]> = [
+    ["догадка модели", { statedByUser: false, confidence: 0.95 }],
+    ["чувствительное", { statedByUser: true, privacyMode: "sensitive" }],
+    ["помечено на подтверждение", { statedByUser: true, needsConfirmation: true }],
+    ["модель сама не уверена", { statedByUser: true, confidence: 0.5 }],
+    ["интерпретирующий тип", { statedByUser: true, type: "value", title: "Ценность" }],
+  ];
+  for (const [label, overrides] of cases) {
+    const db = new MemoryFakeDb();
+    const episode = await seedEpisode(db);
+    const { service } = curatorFor(db, JSON.stringify({
+      candidates: [validCandidate(overrides)],
+    }));
+    const outcome = await service.run({
+      runId: `run-${label}`, userId: USER, agentId: "agent-1",
+      episodeId: Number(episode.id), parentConversationId: "conv-1",
+      signal: new AbortController().signal,
+    });
+    assert.equal(outcome.status, "succeeded", label);
+    assert.equal(db.rowsOf("memory_nodes")[0]!.status, "candidate", label);
+    assert.equal(outcome.applied.pendingConfirmation, 1, label);
+  }
+});

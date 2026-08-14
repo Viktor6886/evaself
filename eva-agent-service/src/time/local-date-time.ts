@@ -1,4 +1,4 @@
-import { DateTime, IANAZone } from "luxon";
+import { DateTime, Duration, IANAZone } from "luxon";
 
 export function isValidIanaTimezone(value: string): boolean {
   return IANAZone.isValidZone(value.trim());
@@ -7,6 +7,39 @@ export function isValidIanaTimezone(value: string): boolean {
 export function localNow(timezone: string, now = new Date()): DateTime {
   const zone = isValidIanaTimezone(timezone) ? timezone : "UTC";
   return DateTime.fromJSDate(now, { zone });
+}
+
+/**
+ * Локальная дата словами: «пятница, 14 августа 2026».
+ *
+ * День недели пишется явно, а не оставляется на вычисление по ISO:
+ * модель считает его из даты неохотно и ошибается, а «сегодня среда»
+ * в ответе — это ошибка, которую человек замечает сразу.
+ */
+export function localDateWithWeekday(value: DateTime, locale = "ru"): string {
+  return value.setLocale(locale).toFormat("cccc, d MMMM yyyy");
+}
+
+/**
+ * Промежуток словами: «9 секунд», «1 час 15 минут», «3 дня 2 часа».
+ *
+ * Две старшие ненулевые единицы: «2 часа 15 минут» человеку понятно, а
+ * «2 часа 15 минут 3 секунды» — уже отчёт. Мельче секунды промежутка не
+ * бывает: сообщения не приходят в одну миллисекунду, а «0» читалось бы
+ * как «времени не прошло вовсе».
+ */
+export function humanizeInterval(milliseconds: number, locale = "ru"): string {
+  if (!Number.isFinite(milliseconds) || milliseconds < 1000) return "меньше секунды";
+  const parts = Object.entries(
+    Duration.fromMillis(milliseconds).shiftTo("days", "hours", "minutes", "seconds").toObject(),
+  )
+    .filter(([, amount]) => Math.floor(amount ?? 0) > 0)
+    .slice(0, 2)
+    .map(([unit, amount]) => Duration
+      .fromObject({ [unit]: Math.floor(amount ?? 0) })
+      .reconfigure({ locale })
+      .toHuman());
+  return parts.length > 0 ? parts.join(" ") : "меньше секунды";
 }
 
 export function formatLocalDateTime(

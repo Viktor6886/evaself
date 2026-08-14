@@ -28,6 +28,7 @@ import { dedupKey } from "../../jobs/policy.js";
 import type { GraphNodeType } from "../graph-repository.js";
 import type { EpisodeRow, EpisodeService } from "../episodes.js";
 import { isInference, MemoryStatusError } from "../temporal/status.js";
+import { defaultStatus } from "../temporal/fact-value.js";
 import type { TemporalMemoryLayer } from "../temporal/index.js";
 import { parseCuratorResult, type CuratorCandidate, type CuratorResult } from "./schema.js";
 
@@ -68,6 +69,44 @@ const EMPTY_APPLIED = {
   created: 0, versioned: 0, deduplicated: 0, pendingConfirmation: 0, skipped: 0,
 };
 
+/**
+ * Типы, которые человек называет о себе прямо: имя, город, работа,
+ * увлечение, близкий человек, случившееся событие, принятое решение.
+ * `value`, `obstacle` и `strategy` сюда не входят — ценность и причину
+ * своего поведения обычно формулирует не человек, а модель за него.
+ */
+const DIRECTLY_STATED_TYPES: ReadonlySet<string> = new Set<GraphNodeType>([
+  "profile_fact", "interest", "person", "relationship", "event", "decision",
+]);
+
+/** Ниже этого модель сама не уверена, что расслышала человека верно. */
+const DIRECT_STATEMENT_CONFIDENCE = 0.75;
+
+/**
+ * Чем считать кандидата: словами человека или выводом модели.
+ *
+ * Разница не косметическая: `user_statement` — прямое утверждение, и
+ * `defaultStatus` записывает такой факт активным; `curator` — вывод
+ * (доверие 0.5), и факт рождается кандидатом до подтверждения человеком.
+ *
+ * Раньше Curator помечал выводом всё подряд, и человеку приходилось
+ * подтверждать в Mini App даже собственные слова: «меня зовут…», «живу
+ * в…». Требование 6 шага 16 и инвариант 26 говорят о ЧУВСТВИТЕЛЬНОМ
+ * выводе и психологической гипотезе, а не о том, что человек сказал сам.
+ *
+ * Решение принимает серверный код по закрытому правилу; модель лишь
+ * сообщает, звучало ли это словами человека (инвариант 18).
+ */
+export function candidateSourceType(candidate: CuratorCandidate): "user_statement" | "curator" {
+  const directlyStated = candidate.statedByUser
+    && !candidate.needsConfirmation
+    && candidate.privacyMode === "normal"
+    && candidate.confidence >= DIRECT_STATEMENT_CONFIDENCE
+    && candidate.messageIds.length > 0
+    && DIRECTLY_STATED_TYPES.has(candidate.type);
+  return directlyStated ? "user_statement" : "curator";
+}
+
 export const CURATOR_JOB_TYPE = "memory_curator";
 
 /**
@@ -90,6 +129,9 @@ export function curatorSpec(): AgentJobSpec {
     instruction: [
       "Ты извлекаешь долговременные факты из завершённого эпизода разговора.",
       "Бери только то, что человек сказал сам или что прямо следует из его слов.",
+      "Сказанное человеком о себе своими словами помечай statedByUser=true:",
+      "имя, город, работа, увлечение, близкий человек, случившееся событие,",
+      "принятое решение. Собственную догадку помечай statedByUser=false.",
       "Догадку о состоянии, диагнозе или чувствах помечай needsConfirmation=true",
       "и privacyMode=sensitive. Диагнозов не ставь, лечения не назначай.",
       "Если ничего долговременного не прозвучало — верни пустой список.",
@@ -124,7 +166,8 @@ export function curatorSpec(): AgentJobSpec {
       '  "from": "<для связи>", "to": "<для связи>", "confidence": <0..1>,',
       '  "validFrom": "<ISO или null>", "validTo": "<ISO или null>",',
       '  "eventAt": "<ISO или null>", "messageIds": ["<id>"],',
-      '  "privacyMode": "normal|sensitive|private", "needsConfirmation": <bool>}],',
+      '  "privacyMode": "normal|sensitive|private", "needsConfirmation": <bool>,',
+      '  "statedByUser": <bool>}],',
       ' "uncertain": [{"note": "<что осталось неясным>", "confidence": <0..1>}]}',
       "messageIds обязателен: кандидат без ссылки на сообщение отбрасывается.",
       "Ничего не сохраняй и не отправляй — это предложение, а не действие.",
@@ -317,11 +360,12 @@ export class MemoryCuratorService {
               userId, nodeType, canonicalKey, title: candidate.title,
             });
 
+            const sourceType = candidateSourceType(candidate);
             const sensitive = candidate.privacyMode !== "normal"
               || candidate.needsConfirmation
-              || isInference("curator");
+              || isInference(sourceType);
             const evidence = candidate.messageIds.map((messageId) => ({
-              sourceType: "curator",
+              sourceType,
               sourceId: `episode:${episode.id}`,
               messageId,
               episodeId: episode.id,
@@ -346,11 +390,16 @@ export class MemoryCuratorService {
               title: candidate.title,
               textContent: candidate.value,
               contentJson: { episode_id: episode.id, curator: true, sensitive },
-              // Вывод Curator — это вывод модели, а не слова человека.
-              // Он приходит в память кандидатом всегда, независимо от
-              // чувствительности: фактом его делает только человек в
-              // Mini App (требования 6 и 9 шага).
-              status: "candidate",
+              // Статус выводится из доказательств одним общим правилом
+              // (`defaultStatus`), а не назначается здесь: вывод модели и
+              // чувствительное остаются кандидатом до подтверждения в
+              // Mini App (требования 6 и 9 шага), а сказанное человеком
+              // прямо становится фактом сразу — переспрашивать человека о
+              // его же словах значит не помнить их.
+              status: defaultStatus({
+                evidence,
+                sensitivity: candidate.privacyMode === "normal" ? "normal" : "sensitive",
+              }),
               sensitivity: candidate.privacyMode === "normal" ? "normal" : "sensitive",
               validFrom: candidate.validFrom ? new Date(candidate.validFrom) : undefined,
               validTo: candidate.validTo ? new Date(candidate.validTo) : null,
@@ -367,7 +416,10 @@ export class MemoryCuratorService {
             if (outcome.outcome === "created") applied.created += 1;
             else if (outcome.outcome === "versioned") applied.versioned += 1;
             else applied.deduplicated += 1;
-            applied.pendingConfirmation += 1;
+            // Счётчик считает то, что действительно ждёт человека. Пока
+            // кандидатом становилось всё подряд, он совпадал с числом
+            // записей и потому ничего не измерял.
+            if (sourceType === "curator") applied.pendingConfirmation += 1;
           }
         });
       },

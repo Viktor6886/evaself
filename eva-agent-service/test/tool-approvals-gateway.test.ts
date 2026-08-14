@@ -13,6 +13,8 @@ class ApprovalDb {
   rows = new Map<string, Record<string, unknown>>();
   rules: Record<string, unknown>[] = [];
   scopes: unknown[] = [];
+  /** Часы базы: тест сдвигает их, а не спит настоящие минуты. */
+  now: () => number = () => Date.now();
   withUserScope<T>(scope: unknown, work: () => Promise<T>) { this.scopes.push(scope); return work(); }
   withSystemScope<T>(label: string, work: () => Promise<T>) { this.scopes.push({ system: label }); return work(); }
   async query<T>(sql: string, values: unknown[] = []): Promise<{ rows: T[]; rowCount: number }> {
@@ -25,11 +27,28 @@ class ApprovalDb {
     }
     if (sql.includes("INSERT INTO tool_approvals")) {
       const key = `${values[0]}:${values[2]}`;
-      if (!this.rows.has(key)) this.rows.set(key, { user_id: values[0], conversation_id: values[1], sdk_request_id: values[2], tool_name: values[3], risk: values[4], argument_fingerprint: values[5], status: "pending", decision: null, action_description: values[6], affected_data: values[7], created_at: this.rows.size });
+      if (!this.rows.has(key)) this.rows.set(key, { user_id: values[0], conversation_id: values[1], sdk_request_id: values[2], tool_name: values[3], risk: values[4], argument_fingerprint: values[5], status: "pending", decision: null, action_description: values[6], affected_data: values[7], created_at: this.rows.size, created_at_ms: this.now(), decided_at_ms: null });
       return { rows: [this.rows.get(key) as T], rowCount: 1 };
     }
+    // Примирение: разовое разрешение и незакрытое ожидание не живут
+    // дольше срока. Порядок веток важен — запрос тоже начинается с
+    // `UPDATE tool_approvals`, и ветка решения забрала бы его себе.
+    if (sql.includes("UPDATE tool_approvals") && sql.includes("'expired'")) {
+      const staleBefore = this.now() - Number(values[0]) * 1000;
+      let affected = 0;
+      for (const row of this.rows.values()) {
+        if (!["pending", "approved_once", "approved_session"].includes(String(row.status))) continue;
+        if (Number(row.decided_at_ms ?? row.created_at_ms) >= staleBefore) continue;
+        Object.assign(row, { status: "expired", decision: "deny", decided_at_ms: row.decided_at_ms ?? this.now() });
+        affected += 1;
+      }
+      return { rows: [], rowCount: affected };
+    }
     if (sql.includes("WHERE status IN") && sql.includes("conversation_id")) {
-      const rows = [...this.rows.values()].filter((row) => ["pending", "approved_once", "approved_session", "denied"].includes(String(row.status)) && row.conversation_id);
+      const freshAfter = this.now() - Number(values[0]) * 1000;
+      const rows = [...this.rows.values()].filter((row) => ["pending", "approved_once", "approved_session", "denied"].includes(String(row.status))
+        && row.conversation_id
+        && Number(row.decided_at_ms ?? row.created_at_ms) >= freshAfter);
       return { rows: rows as T[], rowCount: rows.length };
     }
     if (sql.includes("WITH matching_approval")) {
@@ -46,7 +65,7 @@ class ApprovalDb {
       const key = `${values[2]}:${values[3]}`;
       const row = this.rows.get(key);
       if (!row || row.status !== "pending") return { rows: [], rowCount: 0 };
-      Object.assign(row, { status: values[0], decision: values[1] });
+      Object.assign(row, { status: values[0], decision: values[1], decided_at_ms: this.now() });
       return { rows: [row as T], rowCount: 1 };
     }
     const row = this.rows.get(`${values[0]}:${values[1]}`);
@@ -325,5 +344,61 @@ test("выключенная подсистема не обращается к �
   db.query = async <T>(sql: string, values: unknown[] = []) => { statements.push(sql); return await original<T>(sql, values); };
   const service = new ApprovalService(db as never, false);
   assert.equal(await service.completeApprovedExecution({ userId: 7, conversationId: "conversation-1", toolName: "delete_tasks", args: {}, outcome: "executed" }), false);
+  assert.deepEqual(statements, []);
+});
+
+test("незакрытое подтверждение не открывает conversation вечно и не остаётся выданным", async () => {
+  // Закрытие подтверждения идёт после самого действия и может отказать
+  // (или не состояться вовсе, если процесс умер). Без примирения строка
+  // остаётся `approved_once` навсегда: восстановление открывает её
+  // conversation при каждом старте, а разовое «да» висит выданным.
+  const db = new ApprovalDb();
+  const service = new ApprovalService(db as never, true, { waitTimeoutMs: 15 * 60_000 });
+  await service.request({ userId: 7, conversationId: "conversation-1", sdkRequestId: "stranded", toolName: "delete_tasks", risk: "destructive", description: "safe" });
+  await service.decide({ userId: 7, sdkRequestId: "stranded", status: "approved_once", actorDecision: "allow" });
+  await service.request({ userId: 7, conversationId: "conversation-1", sdkRequestId: "unanswered", toolName: "delete_tasks", risk: "destructive", description: "safe" });
+
+  const base = Date.now();
+  db.now = () => base + 61 * 60_000;
+  const reopened: string[] = [];
+  assert.equal(await service.recoverPendingApprovals(async (id) => { reopened.push(id); }), 0);
+
+  assert.deepEqual(reopened, []);
+  assert.equal((await service.lookup(7, "stranded"))?.status, "expired");
+  assert.equal((await service.lookup(7, "stranded"))?.decision, "deny");
+  assert.equal((await service.lookup(7, "unanswered"))?.status, "expired");
+});
+
+test("свежее решение восстановление по-прежнему доигрывает", async () => {
+  const db = new ApprovalDb();
+  const service = new ApprovalService(db as never, true);
+  await service.request({ userId: 7, conversationId: "conversation-live", sdkRequestId: "fresh", toolName: "delete_tasks", risk: "destructive", description: "safe" });
+  await service.decide({ userId: 7, sdkRequestId: "fresh", status: "approved_once", actorDecision: "allow" });
+
+  const reopened: string[] = [];
+  assert.equal(await service.recoverPendingApprovals(async (id) => { reopened.push(id); }), 1);
+  assert.deepEqual(reopened, ["conversation-live"]);
+  assert.equal((await service.lookup(7, "fresh"))?.status, "approved_once");
+  assert.equal(await service.sdkDecision(7, "fresh"), "allow");
+});
+
+test("отказ человека примирение не переписывает", async () => {
+  const db = new ApprovalDb();
+  const service = new ApprovalService(db as never, true);
+  await service.request({ userId: 7, conversationId: "conversation-1", sdkRequestId: "refused", toolName: "delete_tasks", risk: "destructive", description: "safe" });
+  await service.decide({ userId: 7, sdkRequestId: "refused", status: "denied", actorDecision: "deny" });
+
+  const base = Date.now();
+  db.now = () => base + 61 * 60_000;
+  assert.equal(await service.reconcileStaleApprovals(), 0);
+  assert.equal((await service.lookup(7, "refused"))?.status, "denied");
+});
+
+test("выключенная подсистема ничего не примиряет", async () => {
+  const db = new ApprovalDb();
+  const statements: string[] = [];
+  const original = db.query.bind(db);
+  db.query = async <T>(sql: string, values: unknown[] = []) => { statements.push(sql); return await original<T>(sql, values); };
+  assert.equal(await new ApprovalService(db as never, false).reconcileStaleApprovals(), 0);
   assert.deepEqual(statements, []);
 });

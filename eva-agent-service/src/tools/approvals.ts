@@ -125,15 +125,70 @@ export class ApprovalService {
     });
   }
 
+  /**
+   * Сколько живёт незакрытая строка подтверждения.
+   *
+   * Ожидание решения ограничено `waitTimeoutMs` (по умолчанию пятнадцать
+   * минут), поэтому всё, что старше часа, к живому ходу отношения уже не
+   * имеет: либо процесс умер между решением и его исполнением, либо
+   * закрытие подтверждения отказало и было записано только в журнал.
+   */
+  private get staleAfterMs(): number {
+    return Math.max(this.dependencies.waitTimeoutMs ?? 15 * 60_000, 1) * 4;
+  }
+
+  /**
+   * Примирение незакрытых подтверждений.
+   *
+   * Без него строка, чьё закрытие не состоялось, остаётся `approved_once`
+   * навсегда: восстановление открывает её conversation при каждом старте,
+   * а разовое разрешение продолжает висеть выданным. Разрешение снимается
+   * в сторону отказа — не выполненным считать нельзя, зато повторный
+   * вызов спросит человека заново, а не воспользуется старым «да».
+   *
+   * Отказ человека (`denied`) не трогаем: это его решение и оно остаётся
+   * в истории; из восстановления такие строки уходят по сроку.
+   */
+  async reconcileStaleApprovals(): Promise<number> {
+    if (!this.enabled) return 0;
+    const result = await this.db.withSystemScope(
+      "tool.approvals.reconcile",
+      async () => await this.db.query(
+        `-- tenant: system — общесистемная сверка незакрытых подтверждений,
+         -- владелец каждой строки остаётся её собственным
+         UPDATE tool_approvals
+            SET status = 'expired', decision = 'deny',
+                decided_at = COALESCE(decided_at, now())
+          WHERE status IN ('pending', 'approved_once', 'approved_session')
+            AND COALESCE(decided_at, created_at) < now() - make_interval(secs => $1)`,
+        [Math.ceil(this.staleAfterMs / 1000)],
+      ),
+      { crossUser: true },
+    );
+    return result.rowCount ?? 0;
+  }
+
+  /**
+   * Восстановление после перезапуска: conversation открывается заново,
+   * чтобы SDK получил уже принятое решение, а не спрашивал второй раз.
+   *
+   * Сначала примирение, потом выборка — иначе застрявшая строка открывала
+   * бы свою conversation при каждом старте до конца жизни установки. По
+   * той же причине выборка ограничена сроком: решение, которому больше
+   * часа, живому ходу уже не принадлежит.
+   */
   async recoverPendingApprovals(reacquire: (conversationId: string) => Promise<void>): Promise<number> {
     if (!this.enabled) return 0;
+    await this.reconcileStaleApprovals();
     const { rows } = await this.db.withSystemScope(
       "tool.approvals.recovery",
       async () => await this.db.query<{ user_id: number; conversation_id: string }>(
         `-- tenant: system — enumerate canonical owners before reopening exact conversations
          SELECT DISTINCT user_id, conversation_id FROM tool_approvals
           WHERE status IN ('pending', 'approved_once', 'approved_session', 'denied')
-            AND conversation_id IS NOT NULL`,
+            AND conversation_id IS NOT NULL
+            AND COALESCE(decided_at, created_at) >= now() - make_interval(secs => $1)`,
+        [Math.ceil(this.staleAfterMs / 1000)],
       ),
       { crossUser: true },
     );
