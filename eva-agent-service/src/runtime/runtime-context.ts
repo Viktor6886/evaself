@@ -159,14 +159,16 @@ export class RuntimeContextBuilder {
     const profileCheckMs = elapsed(profileStarted);
     const scoped = input.memoryScopes === undefined ? null : new Set(input.memoryScopes);
     const permits = (scope: string) => scoped === null || scoped.has(scope);
-    const taskActivity = permits("tasks")
-      ? await this.taskEvents.contextLines(input.userId, timezone).catch(() => [])
-      : [];
+    // Оба запроса задач независимы, поэтому идут одним заходом: путь
+    // ответа человеку не должен ждать два round-trip подряд.
     // Момент напоминания и остаток до него считает серверный код: модель
     // берёт такой остаток из головы и ошибается на часы.
-    const upcomingReminders = permits("tasks")
-      ? await this.taskEvents.upcomingLines(input.userId, timezone, local.toJSDate()).catch(() => [])
-      : [];
+    const [taskActivity, upcomingReminders] = permits("tasks")
+      ? await Promise.all([
+        this.taskEvents.contextLines(input.userId, timezone).catch(() => []),
+        this.taskEvents.upcomingLines(input.userId, timezone, local.toJSDate()).catch(() => []),
+      ])
+      : [[], []];
     const skillLines = await this.options.skillContext?.({ userId: input.userId, conversationId: input.conversationId, purpose: row.purpose, message: input.userMessage, turnId: input.turnId }).catch(() => []);
     return {
       userId: Number(row.user_id),

@@ -198,7 +198,12 @@ export class TaskEventService {
     });
   }
 
-  async contextLines(userId: number, timezone = "UTC"): Promise<string[]> {
+  /**
+   * Недавние события задач. Часовой пояс обязателен: с умолчанием любой
+   * новый потребитель молча получал бы UTC в виде, неотличимом от
+   * местного времени, — ровно ту путаницу, ради которой перевод и делался.
+   */
+  async contextLines(userId: number, timezone: string): Promise<string[]> {
     const { rows } = await this.db.query<{
       title: string; event_type: string; created_at: Date; task_status: string;
     }>(

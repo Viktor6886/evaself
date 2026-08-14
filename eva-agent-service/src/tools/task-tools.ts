@@ -102,7 +102,7 @@ export class TaskToolFactory {
         "Активность задач",
         "Возвращает компактную недавнюю активность задач текущего пользователя.",
         objectSchema({}),
-        async (_args, runtime) => ({ ok: true, activity: await this.events.contextLines(runtime.userId) }),
+        async (_args, runtime) => ({ ok: true, activity: await this.events.contextLines(runtime.userId, runtime.timezone) }),
       ),
       tool(
         "mark_task_completed",
