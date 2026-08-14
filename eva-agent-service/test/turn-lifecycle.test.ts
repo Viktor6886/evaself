@@ -483,6 +483,8 @@ interface WorkflowProbe {
   attached: number[];
   /** Что ушло в модель. */
   prompts: string[];
+  /** Связи сообщения канала с ходом и conversation. */
+  channelLinks: Array<Record<string, unknown>>;
 }
 
 async function runTelegramTurn(
@@ -491,6 +493,7 @@ async function runTelegramTurn(
     quota?: Array<Record<string, unknown>>;
     extraUpdates?: unknown[];
     onlyVoice?: boolean;
+    failChannelLink?: boolean;
   } = {},
 ): Promise<WorkflowProbe> {
   const sent: string[] = [];
@@ -570,6 +573,7 @@ async function runTelegramTurn(
       return await work();
     },
   };
+  const channelLinks: Array<Record<string, unknown>> = [];
   const workflow = new EvaWorkflow(
     { typingIntervalMs: 4000, lockTtlSeconds: 180 } as never,
     db as never,
@@ -584,6 +588,16 @@ async function runTelegramTurn(
     undefined,
     undefined,
     turns as never,
+    undefined,
+    undefined,
+    undefined,
+    {
+      link: async (userId: number, input: Record<string, unknown>) => {
+        if (options.failChannelLink) throw new Error("канал недоступен");
+        channelLinks.push({ userId, ...input });
+        return {} as never;
+      },
+    } as never,
   );
 
   const started = performance.now();
@@ -609,8 +623,38 @@ async function runTelegramTurn(
     lockClaims,
     attached,
     prompts,
+    channelLinks,
   };
 }
+
+test("сообщение Telegram связано с тем же ходом и conversation, что и Mini App", async () => {
+  // Пункт 2 шага 25: идентификаторы сообщений канала связываются с одним
+  // ходом и одной conversation. Со стороны Mini App это проверяет
+  // journal.test.ts; здесь — сторона Telegram, иначе «общий аккаунт»
+  // доказан только наполовину.
+  const store = new TurnStore();
+  const probe = await runTelegramTurn(lifecycle(store));
+
+  assert.equal(probe.channelLinks.length, 1, "связь канала не записана");
+  const link = probe.channelLinks[0]!;
+  assert.equal(link.userId, 77);
+  assert.equal(link.channel, "telegram");
+  // Ключ — пара «чат:сообщение»: идентификатор сообщения уникален
+  // внутри чата, а не глобально, и один message_id из разных чатов
+  // затирал бы чужую связь.
+  assert.equal(link.channelMessageId, `${TELEGRAM_ID}:5`);
+  assert.equal(link.conversationId, "conv-1");
+  const row = [...store.rows.values()][0]!;
+  assert.equal(link.turnId, row.run_id ?? row.id, "связь указывает на другой ход");
+});
+
+test("отказ записи связи канала не срывает ход", async () => {
+  // Связь — вспомогательная запись. Потеря одной строки не стоит
+  // потерянного ответа человеку.
+  const probe = await runTelegramTurn(undefined, { failChannelLink: true });
+  assert.deepEqual(probe.result, { status: "completed", usageCharged: true });
+  assert.ok(probe.sent.length > 0, "ответ пользователю должен уйти");
+});
 
 test("теневая запись не меняет ответ пользователя и укладывается в бюджет", async () => {
   const without = await runTelegramTurn(undefined);

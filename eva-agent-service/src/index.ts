@@ -56,6 +56,7 @@ import { ArtifactRegistry } from "./artifacts/registry.js";
 import { CoreSkillCatalog, FilesystemSkillIndexer, PostgresSkillRepository, SkillRouter } from "./skills/index.js";
 import { createRouterLlmAdapters, skillRuntimeMetrics } from "./skills/runtime.js";
 import { SdkSettingsManager } from "./sdk-settings.js";
+import { ChannelLinkService } from "./channels/channel-links.js";
 import { ConversationContextManager } from "./conversations/context-management.js";
 import { buildServer, VERSION } from "./server.js";
 import { TelegramClient } from "./telegram.js";
@@ -365,6 +366,10 @@ async function main(): Promise<void> {
     episodeTracker,
     deepRecall,
     contextManager,
+    // Связь «сообщение канала → ход → conversation» ведётся всегда:
+    // она не зависит от флага дневника, потому что отвечает за общий
+    // аккаунт, а не за дневник.
+    new ChannelLinkService(db),
   );
   const inbox = new PostgresTelegramInbox(db);
   // Уведомление о мёртвой записи одно на оба пути обработки: человек
