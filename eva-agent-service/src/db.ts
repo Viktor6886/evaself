@@ -291,16 +291,33 @@ export class Database {
     );
   }
 
-  async recordUserMessage(userId: number): Promise<void> {
-    await this.withUserScope(
+  /**
+   * Отметить сообщение человека и вернуть отметку ПРЕДЫДУЩЕГО.
+   *
+   * Прежнее значение нужно контексту хода: по нему считается промежуток
+   * между сообщениями. Читается оно тем же запросом, что и обновление, —
+   * CTE видит строку до записи, поэтому второго обращения к базе не нужно
+   * и гонки между чтением и обновлением тоже не остаётся.
+   *
+   * `null` означает «предыдущего сообщения нет»: человек пишет впервые.
+   */
+  async recordUserMessage(userId: number): Promise<Date | null> {
+    const { rows } = await this.withUserScope(
       { userId, label: "db.recordUserMessage", inherit: true },
-      async () => await this.require().query(
-      `INSERT INTO heartbeat_state (user_id, last_user_message_at)
-       VALUES ($1, now())
-       ON CONFLICT (user_id) DO UPDATE SET last_user_message_at = now()`,
+      async () => await this.require().query<{ last_user_message_at: Date | null }>(
+      `WITH previous AS (
+         SELECT last_user_message_at FROM heartbeat_state WHERE user_id = $1
+       ), touched AS (
+         INSERT INTO heartbeat_state (user_id, last_user_message_at)
+         VALUES ($1, now())
+         ON CONFLICT (user_id) DO UPDATE SET last_user_message_at = now()
+         RETURNING user_id
+       )
+       SELECT previous.last_user_message_at FROM previous`,
       [userId],
       ),
     );
+    return rows[0]?.last_user_message_at ?? null;
   }
 
   async getUserOverview(telegramId: number): Promise<Record<string, unknown> | null> {

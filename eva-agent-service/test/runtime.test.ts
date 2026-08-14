@@ -388,3 +388,75 @@ test("cron results are stable across a DST transition", () => {
   assert.equal(before.getUTCHours(), 8);
   assert.equal(after.getUTCHours(), 7);
 });
+
+const CONTEXT_ROW = {
+  user_id: "1", telegram_id: "2", language_code: "ru", language_mode: "fixed",
+  preferred_language: "ru", last_message_language: "ru", timezone: "Asia/Yekaterinburg",
+  city: null, country_code: null, agent_id: "a", conversation_id: "c", purpose: "chat",
+  response_mode: "text", use_emoji: false, communication_style: null,
+  profile_field_key: null, profile_title: null, profile_prompt_hint: null, profile_status: null,
+  active_goal_title: null, next_result_title: null, next_action: null, llm_quality_mode: "auto",
+};
+
+function contextBuilder(now: Date) {
+  return new RuntimeContextBuilder(
+    { query: async () => ({ rows: [{ ...CONTEXT_ROW }] }) } as never,
+    { defaultTimezone: "UTC", profileCompletionEnabled: false, vectorGoalsEnabled: false, now: () => now },
+  );
+}
+
+test("ход знает день недели и промежуток с прошлого сообщения человека", async () => {
+  // Человек написал «пошёл делать» и через девять секунд «сделал». Без
+  // промежутка модель достраивает время по смыслу слов и спрашивает,
+  // как всё прошло, будто прошёл вечер.
+  const now = new Date("2026-08-14T12:00:09Z");
+  const builder = contextBuilder(now);
+  const context = await builder.build({
+    userId: 1, conversationId: "c", userMessage: "сделал",
+    previousUserMessageAt: new Date("2026-08-14T12:00:00Z"),
+  });
+
+  assert.equal(context.localDate, "пятница, 14 августа 2026");
+  assert.equal(context.sincePreviousMessage, "9 секунд");
+  const prompt = builder.wrapUserMessage(context, "сделал");
+  assert.match(prompt, /local_date: пятница, 14 августа 2026/);
+  assert.match(prompt, /since_previous_user_message: 9 секунд/);
+  assert.match(prompt, /since_previous_user_message_note:.*не могли состояться/s);
+});
+
+test("первое сообщение промежутка не выдумывает", async () => {
+  const builder = contextBuilder(new Date("2026-08-14T12:00:00Z"));
+  const context = await builder.build({
+    userId: 1, conversationId: "c", userMessage: "привет", previousUserMessageAt: null,
+  });
+  assert.equal(context.sincePreviousMessage, null);
+  const prompt = builder.wrapUserMessage(context, "привет");
+  assert.doesNotMatch(prompt, /since_previous_user_message/);
+});
+
+test("длинные промежутки называются старшими единицами", async () => {
+  const now = new Date("2026-08-14T12:00:00Z");
+  const cases: Array<[string, string]> = [
+    ["2026-08-14T10:45:00Z", "1 час 15 минут"],
+    ["2026-08-11T10:00:00Z", "3 дня 2 часа"],
+    ["2026-08-14T11:59:59.5Z", "меньше секунды"],
+  ];
+  for (const [previous, expected] of cases) {
+    const context = await contextBuilder(now).build({
+      userId: 1, conversationId: "c", userMessage: "я вернулся",
+      previousUserMessageAt: new Date(previous),
+    });
+    assert.equal(context.sincePreviousMessage, expected, previous);
+  }
+});
+
+test("о себе Ева говорит в женском роде, и напоминание приходит с каждым сообщением", async () => {
+  const builder = contextBuilder(new Date("2026-08-14T12:00:00Z"));
+  const russian = await builder.build({ userId: 1, conversationId: "c", userMessage: "привет" });
+  const prompt = builder.wrapUserMessage(russian, "привет");
+  assert.match(prompt, /self_reference:.*женском роде/);
+  assert.match(prompt, /«поняла»/);
+  // В языке без рода строка не нужна и место в бюджете не занимает.
+  const english = builder.wrapUserMessage({ ...russian, responseLanguage: "en" }, "hi");
+  assert.doesNotMatch(english, /self_reference/);
+});

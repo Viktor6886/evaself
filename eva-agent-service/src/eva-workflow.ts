@@ -409,7 +409,10 @@ export class EvaWorkflow {
           }
         }
         typing.stop = this.telegram.startTyping(update.chatId, this.config.typingIntervalMs);
-        await this.db.recordUserMessage(user.id);
+        // Отметка предыдущего сообщения нужна контексту: по ней считается
+        // промежуток между сообщениями. Читается она здесь, потому что
+        // этот же запрос её и перезаписывает.
+        const previousUserMessageAt = await this.db.recordUserMessage(user.id);
         let conversationId = link.conversation_id;
         if (!conversationId) throw new Error("У агента отсутствует активный conversation");
         if (this.contextManager) {
@@ -483,6 +486,7 @@ export class EvaWorkflow {
             (update.kind === "voice" ? prompt : ""),
           relevantMemory: graph?.relevantMemory,
           turnId: turnHandle?.runId,
+          previousUserMessageAt,
         });
         metrics.runtime_context_ms = context.metrics?.runtimeContextMs ?? 0;
         metrics.profile_check_ms = context.metrics?.profileCheckMs ?? 0;

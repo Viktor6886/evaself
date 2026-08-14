@@ -34,6 +34,13 @@ export interface CuratorCandidate {
   privacyMode: "normal" | "sensitive" | "private";
   /** Модель считает, что это требует подтверждения человеком. */
   needsConfirmation: boolean;
+  /**
+   * Человек сказал это сам, своими словами, а не модель вывела из
+   * разговора. Признак предложенный: решение о статусе принимает
+   * серверный код (инвариант 18), но отличить цитату от догадки без
+   * самой модели нельзя — в эпизоде она видит и слова, и контекст.
+   */
+  statedByUser: boolean;
 }
 
 export interface CuratorResult {
@@ -178,6 +185,7 @@ function parseCandidate(entry: unknown): CandidateParse {
       messageIds,
       privacyMode: privacyMode as CuratorCandidate["privacyMode"],
       needsConfirmation: entry.needsConfirmation === true || entry.needs_confirmation === true,
+      statedByUser: entry.statedByUser === true || entry.stated_by_user === true,
     },
   };
 }

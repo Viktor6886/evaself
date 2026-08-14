@@ -4,7 +4,11 @@ import {
   type SupportedLanguage,
 } from "../i18n/language-resolver.js";
 import { shouldSuppressProfileQuestion } from "../profile/profile-completeness.js";
-import { localNow } from "../time/local-date-time.js";
+import {
+  humanizeInterval,
+  localDateWithWeekday,
+  localNow,
+} from "../time/local-date-time.js";
 import { appendRoutingMarker, type RoutingMarkerClaims } from "../router/routing-marker.js";
 import { TaskEventService } from "../tasks/task-event-service.js";
 import {
@@ -20,6 +24,13 @@ export interface RuntimeContext {
   conversationId: string;
   purpose: string;
   localTime: string;
+  /** Локальная дата словами вместе с днём недели. */
+  localDate: string;
+  /**
+   * Сколько прошло с предыдущего сообщения человека. `null` — предыдущего
+   * сообщения нет: разговор начинается.
+   */
+  sincePreviousMessage: string | null;
   timezone: string;
   city: string | null;
   countryCode: string | null;
@@ -109,6 +120,12 @@ export class RuntimeContextBuilder {
     memoryScopes?: readonly string[];
     allowedSkills?: readonly string[];
     modelPolicy?: "economy" | "auto" | "quality";
+    /**
+     * Когда человек писал в прошлый раз. Значение приходит снаружи и не
+     * кэшируется вместе со строкой контекста: промежуток меняется каждым
+     * сообщением, а строка живёт до конца TTL.
+     */
+    previousUserMessageAt?: Date | null;
   }): Promise<RuntimeContext> {
     const started = performance.now();
     const loaded = await this.load(input.userId, input.conversationId);
@@ -149,6 +166,8 @@ export class RuntimeContextBuilder {
       conversationId: row.conversation_id,
       purpose: row.purpose,
       localTime: local.toISO({ suppressMilliseconds: true }) ?? local.toUTC().toISO()!,
+      localDate: localDateWithWeekday(local),
+      sincePreviousMessage: sincePrevious(local.toJSDate(), input.previousUserMessageAt ?? null),
       timezone,
       city: permits("profile") ? row.city : null,
       countryCode: row.country_code,
@@ -203,6 +222,20 @@ export class RuntimeContextBuilder {
   ): string {
     const fields: Array<[string, string | null]> = [
       ["local_time", context.localTime],
+      ["local_date", context.localDate],
+      // Промежуток и его следствие стоят рядом: голое число модель
+      // читает, но не применяет — и поздравляет с делом, на которое
+      // прошло девять секунд.
+      ["since_previous_user_message", context.sincePreviousMessage],
+      [
+        "since_previous_user_message_note",
+        context.sincePreviousMessage === null
+          ? null
+          : "Столько прошло между прошлым сообщением человека и этим. Считай этот"
+            + " промежуток фактом: за секунды и минуты дело, поездка, встреча или сон"
+            + " не могли состояться, и спрашивать об их результате как о прошедшем"
+            + " нельзя. Не выдумывай промежуток по смыслу слов.",
+      ],
       ["timezone", context.timezone],
       ["city", context.city],
       ["response_language", context.responseLanguage],
@@ -286,6 +319,16 @@ export class RuntimeContextBuilder {
       "output_protocol: не проговаривай план и ход рассуждений — отправляй только готовый ответ; "
       + "не пересказывай, какими инструментами пользовалась, если об этом не спросили; "
       + "отвечай на языке из response_language",
+      // Род держится системным промптом, но на длинном ходу модель
+      // соскальзывает в мужской: «понял», «сделал». Напоминание стоит
+      // здесь, потому что оно приходит с каждым сообщением, а системный
+      // промпт — один раз в начале сессии. Для языков без рода строки нет:
+      // платить за неё в каждом ходу незачем.
+      ...(context.responseLanguage === "ru"
+        ? ["self_reference: Ева — женщина и говорит о себе только в женском роде: "
+          + "«поняла», «сделала», «посмотрела», «нашла», «записала», «рада», «готова»; "
+          + "формы «понял», «сделал», «посмотрел», «нашёл», «записал», «рад», «готов» о себе запрещены"]
+        : []),
       // Telegram принимает подмножество markdown. Раньше parse_mode не
       // ставился вовсе и звёздочки были видны как есть; теперь ответ
       // переводится в HTML, и разметкой можно пользоваться.
@@ -519,4 +562,19 @@ function escapeUserMessage(value: string): string {
 
 function elapsed(started: number): number {
   return Math.round((performance.now() - started) * 10) / 10;
+}
+
+/**
+ * Сколько прошло с предыдущего сообщения человека.
+ *
+ * Без этой строки модель видит только текущее время и достраивает
+ * промежуток из смысла слов: человек написал «пошёл делать» и через
+ * секунду «сделал» — и она спрашивает, как всё прошло, будто прошёл
+ * вечер. Часы идут вперёд не всегда монотонно (перевод времени, правка
+ * системных часов), поэтому отрицательный промежуток — это «только что»,
+ * а не отрицательное число в контексте.
+ */
+function sincePrevious(now: Date, previous: Date | null): string | null {
+  if (!previous || Number.isNaN(previous.getTime())) return null;
+  return humanizeInterval(Math.max(0, now.getTime() - previous.getTime()));
 }
