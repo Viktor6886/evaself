@@ -485,6 +485,12 @@ interface WorkflowProbe {
   prompts: string[];
   /** Связи сообщения канала с ходом и conversation. */
   channelLinks: Array<Record<string, unknown>>;
+  /**
+   * Что и в каком порядке ушло в чат. У текста записано, был ли к тому
+   * моменту готов звук: именно это отличает ожидание от прежнего
+   * порядка «текст сразу, голос через секунды синтеза».
+   */
+  order: string[];
 }
 
 async function runTelegramTurn(
@@ -494,9 +500,18 @@ async function runTelegramTurn(
     extraUpdates?: unknown[];
     onlyVoice?: boolean;
     failChannelLink?: boolean;
+    /** Формат ответа пользователя: text, voice или both. */
+    responseMode?: "text" | "voice" | "both";
+    /** Сколько «занимает» синтез в поддельном media-service. */
+    synthesisMs?: number;
+    /** Синтез отказывает. */
+    synthesisFails?: boolean;
   } = {},
 ): Promise<WorkflowProbe> {
   const sent: string[] = [];
+  const order: string[] = [];
+  /** Успел ли завершиться синтез к моменту очередной отправки. */
+  const synthesis = { done: false };
   const attached: number[] = [];
   const prompts: string[] = [];
   const user = { id: 77, telegram_id: TELEGRAM_ID, state: "active", is_blocked: false };
@@ -526,9 +541,14 @@ async function runTelegramTurn(
     startMessageDraft: async () => null,
     sendProgressiveMessage: async (_chatId: number, text: string) => {
       sent.push(text);
+      order.push(synthesis.done ? "text-after-speech" : "text");
     },
     sendMessage: async (_chatId: number, text: string) => {
       sent.push(text);
+      order.push(synthesis.done ? "text-after-speech" : "text");
+    },
+    sendVoice: async () => {
+      order.push("voice");
     },
     getDeliveryMetrics: () => ({ outboxInsertMs: 0, telegramSendMs: 0 }),
     getDeliveryOutboxId: () => "555",
@@ -557,7 +577,7 @@ async function runTelegramTurn(
     build: async () => ({
       userId: user.id,
       conversationId: "conv-1",
-      responseMode: "text",
+      responseMode: options.responseMode ?? "text",
       metrics: { runtimeContextMs: 0, profileCheckMs: 0, cacheHit: false },
     }),
     wrapUserMessage: (_context: unknown, prompt: string) => prompt,
@@ -575,7 +595,11 @@ async function runTelegramTurn(
   };
   const channelLinks: Array<Record<string, unknown>> = [];
   const workflow = new EvaWorkflow(
-    { typingIntervalMs: 4000, lockTtlSeconds: 180 } as never,
+    {
+      typingIntervalMs: 4000,
+      lockTtlSeconds: 180,
+      mediaServiceUrl: "http://media-service:8090",
+    } as never,
     db as never,
     letta as never,
     {} as never,
@@ -600,6 +624,19 @@ async function runTelegramTurn(
     } as never,
   );
 
+  // Поддельный media-service: синтез занимает время, как настоящий.
+  const originalFetch = globalThis.fetch;
+  if (options.responseMode === "voice" || options.responseMode === "both") {
+    globalThis.fetch = (async (input: unknown) => {
+      if (!String(input).includes("/tts")) return await originalFetch(input as never);
+      await new Promise((resolve) => setTimeout(resolve, options.synthesisMs ?? 20));
+      synthesis.done = true;
+      return options.synthesisFails
+        ? new Response("нет модели", { status: 502 })
+        : new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+    }) as typeof fetch;
+  }
+
   const started = performance.now();
   const updates = [
     ...(options.extraUpdates ?? []),
@@ -615,9 +652,15 @@ async function runTelegramTurn(
       },
     },
   ];
-  const result = await workflow.processAggregated(updates as never);
+  let result;
+  try {
+    result = await workflow.processAggregated(updates as never);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
   return {
     sent,
+    order,
     result,
     elapsedMs: performance.now() - started,
     lockClaims,
@@ -837,4 +880,28 @@ test("владельца получает каждая запись объеди
     [2999, 3001],
     "присоединённая запись осталась без владельца",
   );
+});
+
+test("в режиме «голос и текст» голос уходит сразу за текстом", async () => {
+  // Раньше текст уходил первым, а синтез занимал секунды: человек
+  // успевал ответить, и голосовое приходило после его реплики. Здесь
+  // сторожится порядок и то, что текст ждёт готовности звука.
+  const probe = await runTelegramTurn(undefined, { responseMode: "both", synthesisMs: 40 });
+  // Текст ушёл уже после того, как звук был готов, — значит между двумя
+  // частями ответа нет секунд синтеза.
+  assert.deepEqual(probe.order, ["text-after-speech", "voice"]);
+  assert.deepEqual(probe.result, { status: "completed", usageCharged: true });
+});
+
+test("отказ синтеза не отменяет текст и не дублирует его", async () => {
+  const both = await runTelegramTurn(undefined, {
+    responseMode: "both", synthesisFails: true,
+  });
+  assert.deepEqual(both.order, ["text-after-speech"], "текст должен уйти ровно один раз");
+
+  // Голосовой режим без голоса — молчание, поэтому текст заменяет звук.
+  const voice = await runTelegramTurn(undefined, {
+    responseMode: "voice", synthesisFails: true,
+  });
+  assert.deepEqual(voice.order, ["text-after-speech"]);
 });

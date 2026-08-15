@@ -48,6 +48,35 @@ export class VoiceTranscriptionError extends Error {
 }
 
 /**
+ * Сколько текст ждёт голос в режиме «голос и текст».
+ *
+ * Синтез длинного ответа занимает секунды, и пока он идёт, человеку
+ * виден обновляющийся черновик. Срок — потолок, а не расчёт: за ним
+ * молчание перестаёт читаться как «Ева печатает», и текст уходит без
+ * голоса, который догоняет его отдельным сообщением.
+ */
+const VOICE_SYNC_BUDGET_MS = 45_000;
+
+/**
+ * Ждёт результат не дольше срока. `null` означает «ещё не готово», а не
+ * «не будет»: работа продолжается, и вызывающий может дождаться её
+ * позже. Таймер снимается в любом исходе — иначе процесс держал бы
+ * событие до конца срока на каждом ходе.
+ */
+async function withDeadline<T>(work: Promise<T>, ms: number): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), ms);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([work, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * Кто ведёт ход. Аренда сама по себе ничего не сериализует — она
  * отвечает на вопрос «чей это ход был», когда процесс перезапустился и
  * незавершённые записи надо разобрать.
@@ -631,19 +660,41 @@ export class EvaWorkflow {
         }
 
         const reply = turn.reply.trim() || t(language, "emptyReply");
-        if (responseMode === "text" || responseMode === "both") {
-          await this.telegram.sendProgressiveMessage(update.chatId, reply, messageDraft.current);
-          messageDraft.current = null;
-        }
-        if (responseMode === "voice" || responseMode === "both") {
-          try {
-            await this.sendVoice(update.chatId, reply, context.userId);
-          } catch (error) {
-            this.logger.warn("Голосовой ответ недоступен, отправлен текст", {
+        const wantsText = responseMode === "text" || responseMode === "both";
+        const wantsVoice = responseMode === "voice" || responseMode === "both";
+
+        // Синтез запускается до отправки текста, и текст ждёт готовности
+        // звука. Раньше порядок был обратным: текст уходил сразу, а
+        // синтез занимал секунды — человек успевал ответить, и голосовое
+        // приходило уже после его реплики, будто Ева отвечает на другое
+        // сообщение. Пока идёт синтез, черновик ответа продолжает
+        // обновляться, поэтому пауза не выглядит молчанием.
+        const speech = wantsVoice
+          ? this.synthesizeVoice(reply).catch((error) => {
+            this.logger.warn("Голосовой ответ недоступен", {
               updateId: update.updateId,
               message: error instanceof Error ? error.message : String(error),
             });
-            if (responseMode === "voice") await this.telegram.sendMessage(update.chatId, reply);
+            return null;
+          })
+          : null;
+        // Ожидание ограничено: затянувшийся синтез не держит текст, а
+        // догоняет его — это хуже одновременности, но лучше молчания.
+        const voice = speech ? await withDeadline(speech, VOICE_SYNC_BUDGET_MS) : null;
+
+        if (wantsText) {
+          await this.telegram.sendProgressiveMessage(update.chatId, reply, messageDraft.current);
+          messageDraft.current = null;
+        }
+        if (speech) {
+          const audio = voice ?? await speech;
+          if (audio) {
+            await this.telegram.sendVoice(update.chatId, audio);
+            await this.touchVoiceUsage(context.userId);
+          } else if (!wantsText) {
+            // Голосовой режим без голоса — это молчание. Текст здесь не
+            // дублирует отправленное, а заменяет несостоявшийся звук.
+            await this.telegram.sendMessage(update.chatId, reply);
           }
         }
 
@@ -1012,7 +1063,12 @@ export class EvaWorkflow {
     throw new Error("Неподдерживаемый тип сообщения");
   }
 
-  private async sendVoice(chatId: number, text: string, userId?: number): Promise<void> {
+  /**
+   * Синтез без отправки. Разделение нужно затем, чтобы вызывающий сам
+   * решал, когда отправлять звук: в режиме «голос и текст» он уходит
+   * сразу за текстом, а не через секунды синтеза после него.
+   */
+  private async synthesizeVoice(text: string): Promise<Uint8Array> {
     const response = await fetch(`${this.config.mediaServiceUrl.replace(/\/+$/, "")}/tts`, {
       method: "POST",
       headers: { "content-type": "application/json", ...this.mediaHeaders() },
@@ -1023,13 +1079,15 @@ export class EvaWorkflow {
       const message = await response.text();
       throw new Error(`TTS вернул HTTP ${response.status}: ${message.slice(0, 500)}`);
     }
-    await this.telegram.sendVoice(chatId, new Uint8Array(await response.arrayBuffer()));
-    if (userId) {
-      await this.db.query(
-        "UPDATE user_preferences SET updated_at = now() WHERE user_id = $1",
-        [userId],
-      );
-    }
+    return new Uint8Array(await response.arrayBuffer());
+  }
+
+  private async touchVoiceUsage(userId?: number): Promise<void> {
+    if (!userId) return;
+    await this.db.query(
+      "UPDATE user_preferences SET updated_at = now() WHERE user_id = $1",
+      [userId],
+    );
   }
 }
 
