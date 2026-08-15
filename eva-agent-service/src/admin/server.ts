@@ -570,11 +570,14 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
     return await services.integrations.get(id);
   });
 
+  // Подтверждения паролем здесь нет — решение владельца, то же самое,
+  // что уже принято для распознавания речи: там пароль не спрашивается
+  // даже при замене ключа провайдера. Защита осталась прежней там, где
+  // она не мешает настройке: роль owner/admin, CSRF и запись в аудит.
+  // Область `secrets:write` продолжает охранять прямую запись в Secret
+  // Store и пароль архива — это другие маршруты.
   app.put("/api/admin/v1/integrations/:id/config", {
-    config: {
-      roles: ["owner", "admin"],
-      sudoScope: "secrets:write",
-    } satisfies RouteAccess,
+    config: { roles: ["owner", "admin"] } satisfies RouteAccess,
   }, async (request) => {
     const id = (request.params as { id?: string }).id ?? "";
     return await services.integrations.put(

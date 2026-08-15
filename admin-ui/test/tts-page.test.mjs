@@ -82,17 +82,17 @@ describe("раздел синтеза речи", () => {
     );
 
     await page.click("#tts-save");
-    // Запись идёт под подтверждением sudo — как у любой записи секретов.
-    // До подтверждения запроса быть не должно: это и проверяем.
-    assert.equal(await panel.sudoScope(), "secrets:write");
-    assert.equal(
-      requests.filter((item) => item.method === "PUT").length, 0,
-      "значения ушли до подтверждения sudo",
-    );
-    await panel.confirmSudo();
+    // Пароль при сохранении не спрашивается — решение владельца, то же
+    // самое, что в разделе распознавания речи. Тест сторожит именно это:
+    // окно пароля не должно появиться, а значения обязаны уйти сразу.
     await page.waitForFunction(
       () => document.querySelector("#tts-form select[name=provider]") !== null,
       { timeout: 10_000 },
+    );
+    assert.equal(
+      await page.evaluate(() => !!document.querySelector("#sudo-dialog[open]")),
+      false,
+      "появилось окно пароля",
     );
 
     const saved = requests.find((item) => item.method === "PUT" && item.path === "/integrations/tts/config");

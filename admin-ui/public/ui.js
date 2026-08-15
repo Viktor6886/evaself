@@ -690,28 +690,23 @@ async function saveIntegration() {
  * подтверждении sudo, в разборе ответа или в тексте уведомления.
  */
 async function applyIntegrationConfig(id, body, afterSave) {
-  askSudo({
-    scope: "secrets:write",
-    title: "Сохранить настройки интеграции",
-    description: "Значения без секретов попадут в настройки установки, ключи — в Secret Store.",
-    action: async () => {
-      const { payload } = await request(`/integrations/${encodeURIComponent(id)}/config`, {
-        method: "PUT",
-        body: JSON.stringify(body),
-      });
-      // Для ASR/TTS значения применяются на лету; если не доехали —
-      // сказать прямо, а не оставить администратора в уверенности, что
-      // всё работает.
-      if (payload.applied_live === false && payload.apply_error) {
-        toast(`Сохранено, но сервис не принял значения: ${payload.apply_error}`, true);
-      } else if (payload.applied_live) {
-        toast("Настройки сохранены и применены без перезапуска");
-      } else {
-        toast("Настройки сохранены");
-      }
-      await afterSave();
-    },
+  // Пароль при сохранении не спрашивается — решение владельца, такое же,
+  // как в разделе распознавания речи. Права проверяет сервер по роли, а
+  // запись остаётся в журнале аудита.
+  const { payload } = await request(`/integrations/${encodeURIComponent(id)}/config`, {
+    method: "PUT",
+    body: JSON.stringify(body),
   });
+  // Для ASR/TTS значения применяются на лету; если не доехали — сказать
+  // прямо, а не оставить администратора в уверенности, что всё работает.
+  if (payload.applied_live === false && payload.apply_error) {
+    toast(`Сохранено, но сервис не принял значения: ${payload.apply_error}`, true);
+  } else if (payload.applied_live) {
+    toast("Настройки сохранены и применены без перезапуска");
+  } else {
+    toast("Настройки сохранены");
+  }
+  await afterSave();
 }
 
 
