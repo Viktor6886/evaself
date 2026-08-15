@@ -629,12 +629,19 @@ function integrationField(field) {
     <small>${escapeHtml(field.hint)}</small></label>`;
 }
 
-async function runIntegrationTest(id) {
-  const button = $("#integration-check");
+/**
+ * Проверка интеграции у провайдера.
+ *
+ * Одна на модальный редактор и на раздел синтеза: различаются только
+ * узлы, куда писать. Две копии разбора ответа разъехались бы на первом
+ * же новом поле в ответе `/test`.
+ */
+async function runIntegrationTest(id, nodes = {}) {
+  const button = $(nodes.button ?? "#integration-check");
   const label = button.textContent;
   button.disabled = true;
   button.textContent = id === "tts" ? "Синтезирую…" : "Распознаю…";
-  const box = $("#integration-test-result");
+  const box = $(nodes.result ?? "#integration-test-result");
   box.hidden = false;
   box.className = "integration-test";
   box.textContent = "Идёт проверка у провайдера, это занимает несколько секунд…";
@@ -707,35 +714,6 @@ async function applyIntegrationConfig(id, body, afterSave) {
   });
 }
 
-/** Проверка синтеза из раздела: тот же маршрут, что и в редакторе. */
-async function runTtsTest() {
-  const button = $("#tts-test");
-  const label = button.textContent;
-  button.disabled = true;
-  button.textContent = "Синтезирую…";
-  const box = $("#tts-test-result");
-  box.hidden = false;
-  box.className = "integration-test";
-  box.textContent = "Идёт проверка у провайдера, это занимает несколько секунд…";
-  try {
-    const { payload } = await request("/integrations/tts/test", { method: "POST" });
-    box.className = `integration-test ${payload.ok ? "is-ok" : "is-fail"}`;
-    box.textContent = payload.ok
-      ? [
-        payload.message,
-        payload.latency_ms != null ? `${payload.latency_ms} мс` : "",
-        payload.model ? `модель ${payload.model}` : "",
-        payload.voice ? `голос ${payload.voice}` : "",
-      ].filter(Boolean).join(" · ")
-      : `Не прошло: ${payload.message || "провайдер не ответил"}`;
-  } catch (error) {
-    box.className = "integration-test is-fail";
-    box.textContent = `Не прошло: ${error.message}`;
-  } finally {
-    button.disabled = false;
-    button.textContent = label;
-  }
-}
 
 async function startCheck(targetType, id) {
   const plural = targetType === "service" ? "services" : "integrations";
@@ -2119,7 +2097,9 @@ $("#tts-save")?.addEventListener("click", () => {
   for (const [key, value] of new FormData($("#tts-form")).entries()) body[key] = String(value);
   applyIntegrationConfig("tts", body, async () => { await loadTts(); }).catch(handleError);
 });
-$("#tts-test")?.addEventListener("click", () => runTtsTest().catch(handleError));
+$("#tts-test")?.addEventListener("click", () => runIntegrationTest("tts", {
+  button: "#tts-test", result: "#tts-test-result",
+}).catch(handleError));
 $("#close-integration").addEventListener("click", () => $("#integration-dialog").close());
 $("#integration-dialog").addEventListener("click", (event) => {
   if (event.target === $("#integration-dialog")) $("#integration-dialog").close();
