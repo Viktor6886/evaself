@@ -407,6 +407,52 @@ def test_tts_transcodes_raw_pcm_for_both_voice_and_file(client, monkeypatch):
     assert calls == [("voice", ".pcm", True), ("convert", ".pcm", True)]
 
 
+@pytest.mark.parametrize("fmt", ["wav", "opus"])
+def test_tts_transcodes_container_formats_to_mp3(client, monkeypatch, fmt):
+    """Формат с контейнером тоже перекодируется, и без признака сырого PCM.
+
+    Ветка «не mp3» одна на wav, opus и pcm: если её отключить, наружу
+    ушёл бы wav под именем и типом mp3 — вызывающий получил бы файл, о
+    котором ему солгали.
+    """
+    from app import main as media_main
+
+    monkeypatch.setattr(
+        media_main.RUNTIME, "tts",
+        lambda: {
+            "base_url": "https://openrouter.ai/api/v1", "api_key": "k",
+            "model": "google/gemini-3.1-flash-tts-preview", "voice": "Kore",
+            "voice_prompt": "", "response_format": fmt,
+        },
+    )
+
+    class Response:
+        status_code = 200
+        content = b"container-bytes"
+        text = ""
+
+    async def fake_post(url, **kwargs):
+        return Response()
+
+    calls = []
+
+    async def fake_convert(source, destination, *, codec=None, raw_pcm=False):
+        calls.append((source.suffix, raw_pcm))
+        destination.write_bytes(b"ID3-fake")
+        return destination
+
+    monkeypatch.setattr(media_main.app.state.http, "post", fake_post)
+    monkeypatch.setattr(media_main, "convert", fake_convert)
+
+    plain = client.post("/tts", json={"text": "привет", "format": "mp3"})
+    assert plain.status_code == 200, plain.text
+    assert plain.headers["content-type"].startswith("audio/mpeg")
+    assert plain.content == b"ID3-fake"
+    # Признак сырого PCM у контейнерных форматов не выставляется: он
+    # заставил бы ffmpeg читать заголовок как звук.
+    assert calls == [(f".{fmt}", False)]
+
+
 def test_tts_keeps_mp3_untouched(client, monkeypatch):
     """Установка без нового поля работает как раньше: mp3 не перекодируется."""
     from app import main as media_main
