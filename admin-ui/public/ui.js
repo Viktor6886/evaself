@@ -174,26 +174,32 @@ const LOADERS = {
  */
 async function loadTts() {
   const { payload } = await request("/integrations/tts/config");
-  const value = (name) => (payload.fields || []).find((field) => field.name === name) || {};
+  state.integration = payload;
+  const note = $("#tts-note");
+  const parts = [];
+  if (payload.note) parts.push(payload.note);
+  if (payload.restart_required) {
+    parts.push(`Изменения вступят в силу после перезапуска «${payload.restart_required}».`);
+  }
+  note.textContent = parts.join(" ");
+  note.hidden = parts.length === 0;
+
+  $("#tts-form").innerHTML = payload.editable
+    ? payload.fields.map(integrationField).join("")
+    : '<p class="muted">Настройки синтеза недоступны для этой роли.</p>';
+  $("#tts-save").hidden = !payload.editable;
+
   const check = payload.last_check;
-  const rows = [
-    ["Провайдер", value("provider").value || "не выбран"],
-    ["Base URL", value("base_url").value || "не задан"],
-    ["API Token", value("api_key").configured ? "настроен" : "не задан"],
-    ["Модель", value("model").value || "по умолчанию провайдера"],
-    ["Голос", value("voice").value || "не выбран"],
-    ["Voice Prompt", value("voice_prompt").value || "не задан"],
-  ];
-  $("#tts-summary").innerHTML = `<article class="card">
-    <div class="section-heading"><h3>Текущая конфигурация</h3></div>
-    <div class="settings-grid">${rows.map(([title, text]) =>
-      `<div><span class="muted">${escapeHtml(title)}</span><div>${escapeHtml(String(text))}</div></div>`).join("")}</div>
-    <p class="integration-status color-${check ? check.color : "gray"}">${
-      check
-        ? `Последняя проверка: ${FIELD_STATE_LABELS[check.color] || check.state}${check.message ? ` · ${escapeHtml(check.message)}` : ""}`
-        : "Проверок ещё не было"
-    }</p>
-  </article>`;
+  const status = $("#tts-status");
+  status.className = `integration-status color-${check ? check.color : "gray"}`;
+  status.textContent = check
+    ? `Последняя проверка: ${FIELD_STATE_LABELS[check.color] || check.state}`
+      + `${check.checked_at ? ` · ${localDate(check.checked_at)}` : ""}`
+      + `${check.message ? ` · ${check.message}` : ""}`
+    : "Проверок ещё не было";
+  const box = $("#tts-test-result");
+  box.hidden = true;
+  box.textContent = "";
 }
 
 async function loadSkills() {
@@ -623,12 +629,19 @@ function integrationField(field) {
     <small>${escapeHtml(field.hint)}</small></label>`;
 }
 
-async function runIntegrationTest(id) {
-  const button = $("#integration-check");
+/**
+ * Проверка интеграции у провайдера.
+ *
+ * Одна на модальный редактор и на раздел синтеза: различаются только
+ * узлы, куда писать. Две копии разбора ответа разъехались бы на первом
+ * же новом поле в ответе `/test`.
+ */
+async function runIntegrationTest(id, nodes = {}) {
+  const button = $(nodes.button ?? "#integration-check");
   const label = button.textContent;
   button.disabled = true;
   button.textContent = id === "tts" ? "Синтезирую…" : "Распознаю…";
-  const box = $("#integration-test-result");
+  const box = $(nodes.result ?? "#integration-test-result");
   box.hidden = false;
   box.className = "integration-test";
   box.textContent = "Идёт проверка у провайдера, это занимает несколько секунд…";
@@ -663,6 +676,20 @@ async function saveIntegration() {
   const form = $("#integration-form");
   const body = {};
   for (const [key, value] of new FormData(form).entries()) body[key] = String(value);
+  await applyIntegrationConfig(id, body, async () => {
+    await openIntegration(id);
+    await loadServicesAndIntegrations();
+  });
+}
+
+/**
+ * Запись настроек интеграции.
+ *
+ * Общая и для модального редактора, и для раздела синтеза: два пути
+ * записи одних и тех же значений разошлись бы на первой правке — в
+ * подтверждении sudo, в разборе ответа или в тексте уведомления.
+ */
+async function applyIntegrationConfig(id, body, afterSave) {
   askSudo({
     scope: "secrets:write",
     title: "Сохранить настройки интеграции",
@@ -682,11 +709,11 @@ async function saveIntegration() {
       } else {
         toast("Настройки сохранены");
       }
-      await openIntegration(id);
-      await loadServicesAndIntegrations();
+      await afterSave();
     },
   });
 }
+
 
 async function startCheck(targetType, id) {
   const plural = targetType === "service" ? "services" : "integrations";
@@ -2063,6 +2090,16 @@ $("#page-services").addEventListener("click", (event) => {
     });
   }
 });
+// Раздел синтеза редактируется на месте: форма и кнопки живут на самой
+// странице, а не в модальном окне сервисов.
+$("#tts-save")?.addEventListener("click", () => {
+  const body = {};
+  for (const [key, value] of new FormData($("#tts-form")).entries()) body[key] = String(value);
+  applyIntegrationConfig("tts", body, async () => { await loadTts(); }).catch(handleError);
+});
+$("#tts-test")?.addEventListener("click", () => runIntegrationTest("tts", {
+  button: "#tts-test", result: "#tts-test-result",
+}).catch(handleError));
 $("#close-integration").addEventListener("click", () => $("#integration-dialog").close());
 $("#integration-dialog").addEventListener("click", (event) => {
   if (event.target === $("#integration-dialog")) $("#integration-dialog").close();

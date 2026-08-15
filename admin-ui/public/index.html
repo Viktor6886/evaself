@@ -245,9 +245,18 @@
               <h2>Голос Евы</h2>
               <p>Провайдер, модель, голос и описание манеры речи. Значения применяются без пересоздания контейнеров; ключ хранится в Secret Store и не показывается обратно.</p>
             </div>
-            <button id="configure-tts" class="button primary" data-configure="tts">Настроить синтез</button>
           </div>
-          <div id="tts-summary" class="status-grid">Загрузка…</div>
+          <section class="card">
+            <div class="section-heading"><h3>Настройки синтеза</h3></div>
+            <p id="tts-note" class="muted" hidden></p>
+            <form id="tts-form" class="settings-grid">Загрузка…</form>
+            <div class="form-actions">
+              <button id="tts-save" class="button primary" type="button">Сохранить</button>
+              <button id="tts-test" class="button ghost" type="button">Проверить синтез</button>
+            </div>
+            <p id="tts-status" class="integration-status color-gray">Проверок ещё не было</p>
+            <div id="tts-test-result" class="integration-test" hidden></div>
+          </section>
         </section>
 
         <section id="page-stt" class="page">
