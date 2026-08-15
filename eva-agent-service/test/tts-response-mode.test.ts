@@ -14,6 +14,7 @@ import {
   GEMINI_TTS_VOICES,
   TTS_DEFAULT_MODEL,
   TTS_PROVIDER_PRESETS,
+  TTS_RESPONSE_FORMATS,
 } from "../dist/admin/integration-config-service.js";
 import { PublicRepository } from "../dist/public/routes.js";
 
@@ -39,6 +40,13 @@ test("форма синтеза предлагает OpenRouter, модель Ge
 
   // Описание манеры речи — отдельное многострочное поле.
   assert.equal(field("voice_prompt")?.kind, "textarea");
+
+  // Формат ответа провайдера — настройка: Gemini TTS отдаёт PCM, и
+  // зашитый mp3 давал 400, в котором администратору нечего менять.
+  const formats = (field("response_format")?.options as Array<{ value: string }>)
+    .map((item) => item.value);
+  assert.deepEqual(formats, [...TTS_RESPONSE_FORMATS]);
+  assert.ok(formats.includes("wav") && formats.includes("pcm"));
   assert.equal(field("model")?.placeholder, TTS_DEFAULT_MODEL);
   assert.equal(TTS_PROVIDER_PRESETS.openrouter?.base_url, "https://openrouter.ai/api/v1");
   assert.equal(TTS_PROVIDER_PRESETS.openrouter?.model, "google/gemini-3.1-flash-tts-preview");

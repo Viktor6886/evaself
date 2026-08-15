@@ -30,7 +30,7 @@ ASR_FIELDS = ("base_url", "api_key", "model", "language")
 # `voice_prompt` — описание манеры речи. У OpenAI-совместимых моделей оно
 # уходит в поле `instructions`, у Gemini TTS через OpenRouter — туда же:
 # провайдерские поля endpoint пропускает без изменений.
-TTS_FIELDS = ("base_url", "api_key", "model", "voice", "voice_prompt")
+TTS_FIELDS = ("base_url", "api_key", "model", "voice", "voice_prompt", "response_format")
 
 _LOCK = threading.Lock()
 

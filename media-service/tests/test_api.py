@@ -245,3 +245,103 @@ def test_tts_reports_an_empty_answer_instead_of_sending_silence(client, monkeypa
     assert sent["url"].endswith("/audio/speech")
     assert sent["json"]["instructions"] == "спокойный темп"
     assert sent["json"]["voice"] == "Kore"
+
+
+def test_speech_request_uses_the_configured_response_format():
+    """Формат — настройка, а не зашитое «mp3».
+
+    Gemini TTS отдаёт PCM 24 кГц, и зашитый mp3 давал у провайдера 400,
+    в котором администратору нечего было менять.
+    """
+    from app.main import _speech_request
+
+    assert _speech_request(
+        model="m", voice="v", text="t", voice_prompt=None, response_format="wav",
+    )["response_format"] == "wav"
+    # Неизвестное значение не уходит провайдеру: его 400 объяснить труднее.
+    assert _speech_request(
+        model="m", voice="v", text="t", voice_prompt=None, response_format="ogg-opus",
+    )["response_format"] == "mp3"
+
+
+def test_tts_test_names_the_combination_the_provider_accepts(client, monkeypatch):
+    """Проверка синтеза подбирает сочетание и называет его.
+
+    «Провайдер вернул 400» администратору бесполезно: по такому
+    сообщению нечего менять. Отказавшее сочетание сменяется следующим,
+    а в ответе написано, что именно принято.
+    """
+    from app import main as media_main
+
+    monkeypatch.setattr(
+        media_main.RUNTIME, "tts",
+        lambda: {
+            "base_url": "https://openrouter.ai/api/v1", "api_key": "k",
+            "model": "google/gemini-3.1-flash-tts-preview", "voice": "Kore",
+            "voice_prompt": "тёплый голос", "response_format": "mp3",
+        },
+    )
+
+    attempts = []
+
+    class Response:
+        def __init__(self, status_code, content=b"", text=""):
+            self.status_code = status_code
+            self.content = content
+            self.text = text
+
+    async def fake_post(url, **kwargs):
+        body = kwargs.get("json")
+        attempts.append((body["response_format"], "instructions" in body))
+        if body["response_format"] == "wav" and "instructions" not in body:
+            return Response(200, b"RIFFfake-audio")
+        return Response(400, text='{"error":{"message":"unsupported response_format"}}')
+
+    monkeypatch.setattr(media_main.app.state.http, "post", fake_post)
+
+    payload = client.post("/tts/test").json()
+    assert payload["ok"] is True, payload
+    assert payload["response_format"] == "wav"
+    assert payload["instructions_sent"] is False
+    assert "wav" in payload["message"] and "Voice Prompt" in payload["message"]
+    # Первым пробуется именно то, что задано в панели.
+    assert attempts[0] == ("mp3", True)
+
+
+def test_tts_test_relays_what_the_provider_said(client, monkeypatch):
+    """Ответ провайдера доходит до администратора целиком.
+
+    Он единственное место, где написано, что именно не понравилось.
+    """
+    from app import main as media_main
+
+    monkeypatch.setattr(
+        media_main.RUNTIME, "tts",
+        lambda: {
+            "base_url": "https://openrouter.ai/api/v1", "api_key": "k",
+            "model": "нет-такой-модели", "voice": "Kore",
+            "voice_prompt": "", "response_format": "mp3",
+        },
+    )
+
+    calls = []
+
+    class Response:
+        status_code = 404
+        content = b""
+        text = '{"error":{"message":"model not found"}}'
+
+    async def fake_post(url, **kwargs):
+        calls.append(kwargs.get("json"))
+        return Response()
+
+    monkeypatch.setattr(media_main.app.state.http, "post", fake_post)
+
+    response = client.post("/tts/test")
+    assert response.status_code == 502
+    error = response.json()["error"]
+    assert error["code"] == "tts_error"
+    assert "404" in error["message"]
+    assert "model not found" in error["details"]
+    # Имя модели от формата не зависит — перебирать нечего.
+    assert len(calls) == 1
