@@ -34,7 +34,16 @@ export interface IntegrationField {
   ref: string;
   required: boolean;
   placeholder?: string;
-  options?: Array<{ value: string; title: string }>;
+  options?: Array<{
+    value: string;
+    title: string;
+    /**
+     * Что подставить в остальные поля при выборе. Возит сам вариант, а
+     * не отдельная таблица в панели: пара «провайдер → его адрес и
+     * модель» задана в одном месте и в панель попадает вместе с формой.
+     */
+     preset?: Record<string, string>;
+  }>;
 }
 
 interface IntegrationForm {
@@ -71,10 +80,28 @@ export const TTS_RESPONSE_FORMATS = ["mp3", "wav", "pcm", "opus"] as const;
 /** Текущая TTS-модель Gemini в каталоге OpenRouter. */
 export const TTS_DEFAULT_MODEL = "google/gemini-3.1-flash-tts-preview";
 
-/** Что подставляет выбор провайдера синтеза. */
-export const TTS_PROVIDER_PRESETS: Record<string, { base_url: string; model: string }> = {
-  openrouter: { base_url: "https://openrouter.ai/api/v1", model: TTS_DEFAULT_MODEL },
-  openai: { base_url: "https://api.openai.com/v1", model: "gpt-4o-mini-tts" },
+/**
+ * Что подставляет выбор провайдера синтеза.
+ *
+ * Формат ответа входит в набор наравне с адресом и моделью: Gemini TTS
+ * через OpenRouter отвечает на mp3 четырёхсотой и принимает pcm —
+ * проверено кругом до провайдера, а не выведено из документации. Без
+ * этого значения новая установка повторяла бы ту же настройку вслепую.
+ */
+export const TTS_PROVIDER_PRESETS: Record<
+  string,
+  { base_url: string; model: string; response_format: string }
+> = {
+  openrouter: {
+    base_url: "https://openrouter.ai/api/v1",
+    model: TTS_DEFAULT_MODEL,
+    response_format: "pcm",
+  },
+  openai: {
+    base_url: "https://api.openai.com/v1",
+    model: "gpt-4o-mini-tts",
+    response_format: "mp3",
+  },
 };
 
 const setting = (
@@ -102,10 +129,16 @@ const FORMS: Record<string, IntegrationForm> = {
     note: "Провайдер задаётся адресом OpenAI-совместимого endpoint и моделью.",
     fields: [
       setting("provider", "bootstrap.env.media.asr.provider", "Провайдер",
-        "Подставляет Base URL и модель; «Свой» оставляет поля как есть", {
+        "У OpenAI подставляет Base URL и модель; остальные варианты оставляют поля как есть", {
           kind: "select",
           options: [
-            { value: "openai", title: "OpenAI Whisper" },
+            {
+              value: "openai", title: "OpenAI Whisper",
+              preset: { base_url: "https://api.openai.com/v1", model: "whisper-1" },
+            },
+            // У Deepgram набора нет намеренно: его адрес и имя модели не
+            // проверены кругом до провайдера, а подставленное наугад
+            // значение выглядит как проверенное.
             { value: "deepgram", title: "Deepgram" },
             { value: "custom", title: "Свой endpoint" },
           ],
@@ -128,11 +161,14 @@ const FORMS: Record<string, IntegrationForm> = {
       + "смена провайдера — это Base URL, модель и голос, а не отдельный код.",
     fields: [
       setting("provider", "bootstrap.env.media.tts.provider", "Провайдер",
-        "Подставляет Base URL и модель; «Свой» оставляет поля как есть", {
+        "Подставляет Base URL, модель и формат ответа; «Свой» оставляет поля как есть", {
           kind: "select",
           options: [
-            { value: "openrouter", title: "OpenRouter (Gemini TTS)" },
-            { value: "openai", title: "OpenAI TTS" },
+            {
+              value: "openrouter", title: "OpenRouter (Gemini TTS)",
+              preset: TTS_PROVIDER_PRESETS.openrouter,
+            },
+            { value: "openai", title: "OpenAI TTS", preset: TTS_PROVIDER_PRESETS.openai },
             { value: "custom", title: "Свой endpoint" },
           ],
         }),

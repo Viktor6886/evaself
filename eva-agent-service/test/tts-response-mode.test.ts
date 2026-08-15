@@ -50,6 +50,14 @@ test("форма синтеза предлагает OpenRouter, модель Ge
   assert.equal(field("model")?.placeholder, TTS_DEFAULT_MODEL);
   assert.equal(TTS_PROVIDER_PRESETS.openrouter?.base_url, "https://openrouter.ai/api/v1");
   assert.equal(TTS_PROVIDER_PRESETS.openrouter?.model, "google/gemini-3.1-flash-tts-preview");
+  // Формат проверен кругом до провайдера: на mp3 Gemini TTS отвечает
+  // четырёхсотой, pcm принимает. Набор возит его вместе с адресом, иначе
+  // новая установка повторит ту же настройку вслепую.
+  assert.equal(TTS_PROVIDER_PRESETS.openrouter?.response_format, "pcm");
+  assert.equal(TTS_PROVIDER_PRESETS.openai?.response_format, "mp3");
+  const openrouter = (field("provider")?.options as Array<{ value: string; preset?: unknown }>)
+    .find((item) => item.value === "openrouter");
+  assert.deepEqual(openrouter?.preset, TTS_PROVIDER_PRESETS.openrouter);
 });
 
 /** Поддельная база: хранит единственную строку настроек пользователя. */
