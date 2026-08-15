@@ -29,7 +29,14 @@ from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadF
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
-from .audio import MediaError, make_test_tone, probe, to_asr_wav, to_telegram_voice
+from .audio import (
+    MediaError,
+    convert,
+    make_test_tone,
+    probe,
+    to_asr_wav,
+    to_telegram_voice,
+)
 from .runtime_config import RuntimeConfig
 from .stt import (
     SttAudioInput,
@@ -77,6 +84,7 @@ RUNTIME = RuntimeConfig(
             "api_key": TTS_API_KEY,
             "model": TTS_MODEL,
             "voice": TTS_VOICE,
+            "response_format": "mp3",
         },
     },
 )
@@ -203,6 +211,17 @@ class TelegramTranscribeRequest(BaseModel):
     file_id: str = Field(min_length=1)
     language: str | None = None
     prompt: str | None = None
+
+
+# Форматы ответа синтеза и расширение файла для каждого. Список
+# закрытый: значение уходит провайдеру как есть, а произвольная строка
+# из панели превратилась бы в его 400 вместо нашей понятной ошибки.
+TTS_FORMATS = {"mp3": ".mp3", "wav": ".wav", "pcm": ".pcm", "opus": ".opus"}
+
+
+def _tts_format(value: str | None) -> str:
+    name = (value or "").strip().lower()
+    return name if name in TTS_FORMATS else "mp3"
 
 
 class TtsRequest(BaseModel):
@@ -726,42 +745,91 @@ async def test_tts(payload: dict | None = None) -> dict:
         return _error("tts_not_configured", "TTS не настроен", 503)
     phrase = (payload or {}).get("text") or "Проверка синтеза речи."
 
+    configured_format = _tts_format(tts.get("response_format"))
+    prompt = (tts.get("voice_prompt") or "").strip()
     started = time.monotonic()
-    try:
-        response = await app.state.http.post(
-            f"{tts['base_url']}/audio/speech",
-            headers={"Authorization": f"Bearer {tts['api_key']}"},
-            json=_speech_request(
-                model=tts["model"],
-                voice=tts["voice"],
-                text=phrase,
-                voice_prompt=tts.get("voice_prompt"),
-            ),
-        )
-    except httpx.TimeoutException:
-        return _error("tts_timeout", "провайдер не ответил вовремя", 504)
-    except httpx.TransportError as exc:
-        return _error("tts_unavailable", f"не удалось соединиться: {exc}", 503)
 
-    if response.status_code >= 400:
-        return _error(
-            "tts_error",
-            f"провайдер вернул {response.status_code}",
-            502,
-            details=response.text[:300],
-        )
-    if not response.content:
+    # Сочетания, которые пробуются по очереди. Первое — то, что задано в
+    # панели; остальные включаются, только когда провайдер отверг
+    # заданное. Без этого администратор видел «провайдер вернул 400» и
+    # не мог узнать, какое поле ему не нравится: у Gemini TTS это либо
+    # формат (модель отдаёт PCM), либо `instructions`, документированное
+    # у моделей OpenAI. Проверка стоит несколько центов и запускается
+    # руками, поэтому перебор здесь уместен, а в рабочем пути — нет.
+    formats = list(dict.fromkeys([configured_format, "wav", "pcm", "mp3"]))
+    variants = [
+        (fmt, use_prompt)
+        for fmt in formats
+        for use_prompt in ([True, False] if prompt else [False])
+    ]
+
+    first_failure: httpx.Response | None = None
+    for index, (fmt, use_prompt) in enumerate(variants):
+        try:
+            response = await app.state.http.post(
+                f"{tts['base_url']}/audio/speech",
+                headers={"Authorization": f"Bearer {tts['api_key']}"},
+                json=_speech_request(
+                    model=tts["model"],
+                    voice=tts["voice"],
+                    text=phrase,
+                    voice_prompt=prompt if use_prompt else None,
+                    response_format=fmt,
+                ),
+            )
+        except httpx.TimeoutException:
+            return _error("tts_timeout", "провайдер не ответил вовремя", 504)
+        except httpx.TransportError as exc:
+            return _error("tts_unavailable", f"не удалось соединиться: {exc}", 503)
+
+        if response.status_code >= 400:
+            if first_failure is None:
+                first_failure = response
+            # 401, 402 и 404 перебором не лечатся: ключ, оплата и имя
+            # модели от формата не зависят, а лишние запросы только
+            # задержат ответ.
+            if response.status_code in (401, 402, 403, 404) or response.status_code >= 500:
+                break
+            continue
+        if not response.content:
+            if first_failure is None:
+                first_failure = response
+            continue
+
+        hint = ""
+        if index > 0:
+            parts = [f"формат «{fmt}»"]
+            if prompt and not use_prompt:
+                parts.append("без Voice Prompt")
+            hint = (
+                f"; заданное сочетание провайдер отверг, принято: {', '.join(parts)}"
+                " — сохраните это в настройках"
+            )
+        return {
+            "ok": True,
+            "provider": tts["base_url"],
+            "model": tts["model"],
+            "voice": tts["voice"],
+            "response_format": fmt,
+            "instructions_sent": use_prompt,
+            "bytes": len(response.content),
+            "latency_ms": int((time.monotonic() - started) * 1000),
+            "message": f"синтез выполнен, получено {len(response.content)} байт аудио{hint}",
+        }
+
+    if first_failure is None:
         return _error("tts_empty", "провайдер вернул пустой ответ", 502)
-
-    return {
-        "ok": True,
-        "provider": tts["base_url"],
-        "model": tts["model"],
-        "voice": tts["voice"],
-        "bytes": len(response.content),
-        "latency_ms": int((time.monotonic() - started) * 1000),
-        "message": f"синтез выполнен, получено {len(response.content)} байт аудио",
-    }
+    if not first_failure.content and first_failure.status_code < 400:
+        return _error("tts_empty", "провайдер вернул пустой ответ", 502)
+    return _error(
+        "tts_error",
+        f"провайдер вернул {first_failure.status_code}",
+        502,
+        # Ответ провайдера — единственное место, где написано, что
+        # именно ему не понравилось. Без него администратору остаётся
+        # только гадать.
+        details=first_failure.text[:500],
+    )
 
 
 @app.post("/asr/test", dependencies=[Depends(require_service_token)])
@@ -829,21 +897,28 @@ async def test_asr() -> dict:
 # speech synthesis
 # =====================================================================
 def _speech_request(
-    *, model: str, voice: str, text: str, voice_prompt: str | None
+    *,
+    model: str,
+    voice: str,
+    text: str,
+    voice_prompt: str | None,
+    response_format: str = "mp3",
 ) -> dict[str, object]:
     """Тело запроса синтеза для OpenAI-совместимого /audio/speech.
 
-    Формат один и тот же у OpenAI и у OpenRouter: последний принимает
-    те же поля и пропускает провайдерские дальше — так Gemini TTS
-    получает и голос, и описание манеры речи. `instructions`
-    добавляется только когда описание задано: пустое поле часть
-    провайдеров отвергает как неизвестный параметр.
+    Формат один и тот же у OpenAI и у OpenRouter, но принимаемые
+    значения — разные: `response_format` и `instructions` каждый
+    провайдер объявляет сам. Gemini TTS отдаёт PCM 24 кГц и mp3
+    поддерживает не везде, а `instructions` документирован у моделей
+    OpenAI — поэтому оба поля здесь параметры, а не зашитые значения:
+    зашитое «mp3 плюс instructions» давало у провайдера 400, в котором
+    администратору нечего было менять.
     """
     body: dict[str, object] = {
         "model": model,
         "voice": voice,
         "input": text,
-        "response_format": "mp3",
+        "response_format": _tts_format(response_format),
     }
     prompt = (voice_prompt or "").strip()
     if prompt:
@@ -861,6 +936,11 @@ async def synthesize(payload: TtsRequest):
             503,
         )
 
+    # Формат, в котором провайдер отдаёт звук, задаётся в панели: у
+    # Gemini TTS это не mp3. Наружу контракт не меняется — голосовое
+    # сообщение всегда OGG/Opus, файл всегда mp3, — перекодирует ffmpeg.
+    source_format = _tts_format(tts.get("response_format"))
+
     work = WORK_DIR / f"job-{uuid.uuid4().hex}"
     work.mkdir(parents=True, exist_ok=True)
 
@@ -873,6 +953,7 @@ async def synthesize(payload: TtsRequest):
                 voice=payload.voice or tts["voice"],
                 text=payload.text,
                 voice_prompt=payload.voice_prompt or tts.get("voice_prompt"),
+                response_format=source_format,
             ),
         )
     except httpx.TimeoutException:
@@ -895,19 +976,30 @@ async def synthesize(payload: TtsRequest):
         shutil.rmtree(work, ignore_errors=True)
         return _error("tts_empty", "провайдер вернул пустой аудиоответ", 502)
 
-    raw = work / "speech.mp3"
+    raw = work / f"speech{TTS_FORMATS[source_format]}"
     raw.write_bytes(response.content)
+    raw_pcm = source_format == "pcm"
 
     if payload.format == "voice":
         out = work / "speech.ogg"
         try:
-            await to_telegram_voice(raw, out)
+            await to_telegram_voice(raw, out, raw_pcm=raw_pcm)
         except MediaError as exc:
             shutil.rmtree(work, ignore_errors=True)
             return _error("voice_encoding_failed", exc.message, 422, details=exc.details)
         media_type, filename = "audio/ogg", "speech.ogg"
-    else:
+    elif source_format == "mp3":
         out, media_type, filename = raw, "audio/mpeg", "speech.mp3"
+    else:
+        # Файл наружу — всегда mp3: у вызывающего один контракт
+        # независимо от того, в чём отдаёт звук провайдер.
+        out = work / "speech.mp3"
+        try:
+            await convert(raw, out, raw_pcm=raw_pcm)
+        except MediaError as exc:
+            shutil.rmtree(work, ignore_errors=True)
+            return _error("tts_transcode_failed", exc.message, 422, details=exc.details)
+        media_type, filename = "audio/mpeg", "speech.mp3"
 
     # The workspace is deleted after the response has been streamed.
     return FileResponse(

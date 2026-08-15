@@ -118,12 +118,22 @@ async def make_test_tone(destination: Path, seconds: float = 1.0) -> Path:
     return destination
 
 
-async def to_telegram_voice(source: Path, destination: Path) -> Path:
+# Сырой PCM у синтеза: контейнера нет, и ffmpeg не может угадать ни
+# частоту, ни разрядность — их приходится называть. Gemini TTS отдаёт
+# 24 кГц, моно, signed 16-bit little-endian; это же значение принято у
+# OpenAI-совместимого `response_format: pcm`.
+RAW_PCM_INPUT = ("-f", "s16le", "-ar", "24000", "-ac", "1")
+
+
+async def to_telegram_voice(
+    source: Path, destination: Path, *, raw_pcm: bool = False
+) -> Path:
     """Encode to OGG/Opus so Telegram shows it as a real voice message."""
     code, _stdout, stderr = await _run(
         FFMPEG,
         "-hide_banner", "-loglevel", "error",
         "-y",
+        *(RAW_PCM_INPUT if raw_pcm else ()),
         "-i", str(source),
         "-vn",
         "-ac", "1",
@@ -138,9 +148,14 @@ async def to_telegram_voice(source: Path, destination: Path) -> Path:
     return destination
 
 
-async def convert(source: Path, destination: Path, *, codec: str | None = None) -> Path:
+async def convert(
+    source: Path, destination: Path, *, codec: str | None = None, raw_pcm: bool = False
+) -> Path:
     """Generic conversion; the container format comes from the extension."""
-    args = [FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-i", str(source)]
+    args = [FFMPEG, "-hide_banner", "-loglevel", "error", "-y"]
+    if raw_pcm:
+        args += list(RAW_PCM_INPUT)
+    args += ["-i", str(source)]
     if codec:
         args += ["-c:a", codec]
     args.append(str(destination))

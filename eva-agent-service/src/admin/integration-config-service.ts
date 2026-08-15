@@ -61,6 +61,13 @@ export const GEMINI_TTS_VOICES = [
   "Schedar", "Sulafat", "Umbriel", "Vindemiatrix", "Zephyr", "Zubenelgenubi",
 ] as const;
 
+/**
+ * Форматы ответа синтеза. Тот же закрытый список, что у media-service:
+ * значение уходит провайдеру как есть, и произвольная строка вернулась
+ * бы его четырёхсотой вместо понятной ошибки панели.
+ */
+export const TTS_RESPONSE_FORMATS = ["mp3", "wav", "pcm", "opus"] as const;
+
 /** Текущая TTS-модель Gemini в каталоге OpenRouter. */
 export const TTS_DEFAULT_MODEL = "google/gemini-3.1-flash-tts-preview";
 
@@ -148,6 +155,12 @@ const FORMS: Record<string, IntegrationForm> = {
         "Характер голоса, манера речи, темп и интонация. Уходит провайдеру полем instructions", {
           kind: "textarea",
           placeholder: "Тёплый женский голос, спокойный темп, живая интонация без театральности",
+        }),
+      setting("response_format", "bootstrap.env.media.tts.response.format", "Формат аудио",
+        "В чём провайдер отдаёт звук. Gemini TTS отдаёт PCM 24 кГц и mp3 принимает не всегда; "
+        + "наружу Ева всё равно отдаёт голосовое сообщение OGG/Opus", {
+          kind: "select",
+          options: TTS_RESPONSE_FORMATS.map((value) => ({ value, title: value })),
         }),
     ],
   },
@@ -296,14 +309,22 @@ export class IntegrationConfigService {
         method: "POST",
         headers: { "content-type": "application/json", "X-Media-Key": token },
         body: "{}",
-        // Синтез и распознавание идут к внешнему провайдеру — минута
-        // тут реальный потолок, а не запас.
-        signal: AbortSignal.timeout(60_000),
+        // Синтез идёт к внешнему провайдеру, и при отказе media-service
+        // перебирает сочетания формата и Voice Prompt — до восьми
+        // запросов подряд. С прежней минутой ожидание обрывалось на
+        // середине перебора, и вместо подсказки администратор получал
+        // «media-service недоступен».
+        signal: AbortSignal.timeout(180_000),
       });
       const body = await response.json().catch(() => ({})) as Record<string, unknown>;
       if (!response.ok) {
-        const detail = (body.error as { message?: string } | undefined)?.message;
-        return { ok: false, message: detail ?? `media-service вернул HTTP ${response.status}` };
+        // Вместе с сообщением отдаётся и ответ провайдера: «провайдер
+        // вернул 400» без его объяснения администратору бесполезно —
+        // менять по такому сообщению нечего.
+        const error = body.error as { message?: string; details?: string } | undefined;
+        const message = error?.message ?? `media-service вернул HTTP ${response.status}`;
+        const details = (error?.details ?? "").trim();
+        return { ok: false, message: details ? `${message}: ${details}` : message };
       }
       return { ok: true, ...body };
     } catch (error) {
