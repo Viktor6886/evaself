@@ -309,9 +309,12 @@ export class IntegrationConfigService {
         method: "POST",
         headers: { "content-type": "application/json", "X-Media-Key": token },
         body: "{}",
-        // Синтез и распознавание идут к внешнему провайдеру — минута
-        // тут реальный потолок, а не запас.
-        signal: AbortSignal.timeout(60_000),
+        // Синтез идёт к внешнему провайдеру, и при отказе media-service
+        // перебирает сочетания формата и Voice Prompt — до восьми
+        // запросов подряд. С прежней минутой ожидание обрывалось на
+        // середине перебора, и вместо подсказки администратор получал
+        // «media-service недоступен».
+        signal: AbortSignal.timeout(180_000),
       });
       const body = await response.json().catch(() => ({})) as Record<string, unknown>;
       if (!response.ok) {

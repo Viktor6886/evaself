@@ -222,3 +222,39 @@ test("пароль при записи интеграции спрашивает
   assert.deepEqual(saved, ["tts", "asr", "telegram", "todoist", "searxng", "crawl4ai"]);
   await app.close();
 });
+
+test("ответ провайдера доходит до администратора, а не теряется по дороге", async () => {
+  // Регрессия: media-service кладёт объяснение провайдера в
+  // `error.details`, а панель показывала только `message` — «провайдер
+  // вернул 400», по которому нечего менять.
+  const { IntegrationConfigService } = await import("../dist/admin/integration-config-service.js");
+  const previousToken = process.env.MEDIA_SERVICE_TOKEN;
+  process.env.MEDIA_SERVICE_TOKEN = "media-token";
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(
+    JSON.stringify({
+      error: {
+        code: "tts_error",
+        message: "провайдер вернул 400",
+        details: '{"error":{"message":"unsupported response_format"}}',
+      },
+    }),
+    { status: 502, headers: { "content-type": "application/json" } },
+  )) as typeof fetch;
+
+  try {
+    const service = new IntegrationConfigService(
+      { query: async () => ({ rows: [] }) } as never,
+      { get: async () => null } as never,
+      "http://media-service:8090",
+    );
+    const result = await service.test("tts");
+    assert.equal(result.ok, false);
+    assert.match(String(result.message), /провайдер вернул 400/);
+    assert.match(String(result.message), /unsupported response_format/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previousToken === undefined) delete process.env.MEDIA_SERVICE_TOKEN;
+    else process.env.MEDIA_SERVICE_TOKEN = previousToken;
+  }
+});

@@ -345,3 +345,99 @@ def test_tts_test_relays_what_the_provider_said(client, monkeypatch):
     assert "model not found" in error["details"]
     # Имя модели от формата не зависит — перебирать нечего.
     assert len(calls) == 1
+
+
+def test_tts_transcodes_raw_pcm_for_both_voice_and_file(client, monkeypatch):
+    """Рабочий синтез умеет формат, отличный от mp3.
+
+    Gemini TTS отдаёт сырой PCM: у него нет контейнера, и ffmpeg должен
+    получить частоту и разрядность явно. Раньше ответ провайдера
+    сохранялся как `speech.mp3` и уходил в ffmpeg без этих аргументов —
+    голосовое сообщение получалось из шума или не получалось вовсе.
+    """
+    from app import main as media_main
+
+    monkeypatch.setattr(
+        media_main.RUNTIME, "tts",
+        lambda: {
+            "base_url": "https://openrouter.ai/api/v1", "api_key": "k",
+            "model": "google/gemini-3.1-flash-tts-preview", "voice": "Kore",
+            "voice_prompt": "", "response_format": "pcm",
+        },
+    )
+
+    class Response:
+        status_code = 200
+        content = b"\x00\x01" * 64
+        text = ""
+
+    sent = {}
+
+    async def fake_post(url, **kwargs):
+        sent["json"] = kwargs.get("json")
+        return Response()
+
+    calls = []
+
+    async def fake_voice(source, destination, *, raw_pcm=False):
+        calls.append(("voice", source.suffix, raw_pcm))
+        destination.write_bytes(b"OggS-fake")
+        return destination
+
+    async def fake_convert(source, destination, *, codec=None, raw_pcm=False):
+        calls.append(("convert", source.suffix, raw_pcm))
+        destination.write_bytes(b"ID3-fake")
+        return destination
+
+    monkeypatch.setattr(media_main.app.state.http, "post", fake_post)
+    monkeypatch.setattr(media_main, "to_telegram_voice", fake_voice)
+    monkeypatch.setattr(media_main, "convert", fake_convert)
+
+    voice = client.post("/tts", json={"text": "привет"})
+    assert voice.status_code == 200, voice.text
+    assert voice.headers["content-type"].startswith("audio/ogg")
+
+    plain = client.post("/tts", json={"text": "привет", "format": "mp3"})
+    assert plain.status_code == 200, plain.text
+    # Наружу контракт прежний: файл — mp3, даже когда провайдер отдал PCM.
+    assert plain.headers["content-type"].startswith("audio/mpeg")
+
+    # Формат из настроек уходит провайдеру, а ffmpeg узнаёт о сыром PCM.
+    assert sent["json"]["response_format"] == "pcm"
+    assert calls == [("voice", ".pcm", True), ("convert", ".pcm", True)]
+
+
+def test_tts_keeps_mp3_untouched(client, monkeypatch):
+    """Установка без нового поля работает как раньше: mp3 не перекодируется."""
+    from app import main as media_main
+
+    monkeypatch.setattr(
+        media_main.RUNTIME, "tts",
+        lambda: {
+            "base_url": "https://openrouter.ai/api/v1", "api_key": "k",
+            "model": "openai/gpt-4o-mini-tts", "voice": "nova", "voice_prompt": "",
+        },
+    )
+
+    class Response:
+        status_code = 200
+        content = b"ID3-provider-bytes"
+        text = ""
+
+    async def fake_post(url, **kwargs):
+        return Response()
+
+    touched = []
+
+    async def fake_convert(source, destination, *, codec=None, raw_pcm=False):
+        touched.append(source.suffix)
+        destination.write_bytes(b"ID3-fake")
+        return destination
+
+    monkeypatch.setattr(media_main.app.state.http, "post", fake_post)
+    monkeypatch.setattr(media_main, "convert", fake_convert)
+
+    plain = client.post("/tts", json={"text": "привет", "format": "mp3"})
+    assert plain.status_code == 200, plain.text
+    assert plain.content == b"ID3-provider-bytes"
+    assert touched == [], "mp3 от провайдера перекодировать незачем"
