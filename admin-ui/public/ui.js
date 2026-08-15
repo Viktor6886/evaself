@@ -601,8 +601,13 @@ function integrationField(field) {
     ? '<span class="field-ok">настроен</span>'
     : (field.required ? '<span class="field-missing">не задан</span>' : "");
   if (field.kind === "select") {
+    // Набор значений варианта едет в data-атрибуте: он приходит вместе с
+    // формой, и панель не хранит собственную копию таблицы «провайдер →
+    // его адрес и модель», которая разошлась бы с сервером.
     const options = (field.options || [])
-      .map((option) => `<option value="${escapeHtml(option.value)}"${option.value === field.value ? " selected" : ""}>${escapeHtml(option.title)}</option>`)
+      .map((option) => `<option value="${escapeHtml(option.value)}"${option.value === field.value ? " selected" : ""}${
+        option.preset ? ` data-preset="${escapeHtml(JSON.stringify(option.preset))}"` : ""
+      }>${escapeHtml(option.title)}</option>`)
       .join("");
     return `<label><span>${escapeHtml(field.title)} ${mark}</span>
       <select name="${escapeHtml(field.name)}"><option value="">—</option>${options}</select>
@@ -667,6 +672,28 @@ async function runIntegrationTest(id, nodes = {}) {
   } finally {
     button.disabled = false;
     button.textContent = label;
+  }
+}
+
+/**
+ * Выбор провайдера подставляет остальные поля.
+ *
+ * Подсказка обещала это с самого начала, а подставлял значения человек:
+ * набор существовал только в коде сервиса и никуда не применялся. Из-за
+ * этого настройка синтеза собиралась вручную — включая формат ответа, на
+ * котором она и ломалась.
+ */
+function applyFieldPreset(select) {
+  const option = select.selectedOptions[0];
+  const preset = option?.dataset.preset;
+  if (!preset) return;
+  const form = select.closest("form");
+  if (!form) return;
+  for (const [name, value] of Object.entries(JSON.parse(preset))) {
+    const field = form.elements[name];
+    // Заполняется только то, что в форме действительно есть: набор
+    // общий для всех интеграций, а поля у них разные.
+    if (field && field !== select) field.value = value;
   }
 }
 
@@ -2310,6 +2337,12 @@ $("#user-card-body").addEventListener("submit", (event) => {
 // Пресет поля подставляет значение в сам инпут: сохраняется всегда то,
 // что в поле, поэтому выпадающий список не может разойтись с ним.
 document.addEventListener("change", (event) => {
+  // Выбор с готовым набором значений: провайдер синтеза и распознавания.
+  // Обработчик общий, потому что форма интеграции живёт и на странице
+  // синтеза, и в модальном редакторе.
+  if (event.target.matches("#tts-form select, #integration-form select")) {
+    applyFieldPreset(event.target);
+  }
   const preset = event.target.closest("[data-preset-for]");
   if (!preset || !preset.value) return;
   const input = document.querySelector(`[data-key="${CSS.escape(preset.dataset.presetFor)}"]`);

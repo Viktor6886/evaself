@@ -28,7 +28,14 @@ const CONFIG = {
       name: "provider", kind: "select", title: "Провайдер", hint: "", value: "",
       required: false, configured: false,
       options: [
-        { value: "openrouter", title: "OpenRouter (Gemini TTS)" },
+        {
+          value: "openrouter", title: "OpenRouter (Gemini TTS)",
+          preset: {
+            base_url: "https://openrouter.ai/api/v1",
+            model: "google/gemini-3.1-flash-tts-preview",
+            response_format: "pcm",
+          },
+        },
         { value: "openai", title: "OpenAI TTS" },
       ],
     },
@@ -41,6 +48,11 @@ const CONFIG = {
     },
     { name: "language", kind: "text", title: "Язык", hint: "", value: "", required: false, configured: false },
     { name: "voice_prompt", kind: "textarea", title: "Voice Prompt", hint: "", value: "", required: false, configured: false },
+    {
+      name: "response_format", kind: "select", title: "Формат аудио", hint: "", value: "",
+      required: false, configured: false,
+      options: ["mp3", "wav", "pcm", "opus"].map((value) => ({ value, title: value })),
+    },
   ],
 };
 
@@ -105,6 +117,29 @@ describe("раздел синтеза речи", () => {
     assert.equal(saved.body.voice, "Kore");
     assert.equal(saved.body.language, "ru");
     assert.equal(saved.body.voice_prompt, "Тёплый голос, спокойный темп");
+  });
+
+  test("выбор провайдера подставляет адрес, модель и формат ответа", async () => {
+    // Подсказка обещала подстановку с самого начала, а значения вводил
+    // человек — включая формат ответа, на котором синтез и ломался.
+    const { page } = panel;
+    await page.selectOption("#tts-form select[name=provider]", "openai");
+    await page.fill("#tts-form input[name=base_url]", "");
+    await page.selectOption("#tts-form select[name=provider]", "openrouter");
+
+    assert.equal(
+      await page.locator("#tts-form input[name=base_url]").inputValue(),
+      "https://openrouter.ai/api/v1",
+    );
+    assert.equal(
+      await page.locator("#tts-form input[name=model]").inputValue(),
+      "google/gemini-3.1-flash-tts-preview",
+    );
+    assert.equal(
+      await page.locator("#tts-form select[name=response_format]").inputValue(),
+      "pcm",
+      "формат ответа обязан подставиться: на нём и ломался синтез",
+    );
   });
 
   test("проверка синтеза вызывает свой маршрут и показывает исход", async () => {
