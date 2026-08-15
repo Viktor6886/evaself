@@ -81,19 +81,22 @@ describe("раздел синтеза речи", () => {
       "google/gemini-3.1-flash-tts-preview",
     );
 
+    // Ждём сам PUT, а не перерисовку формы: форма на месте и до клика,
+    // и такое ожидание истинно сразу — оно ничего не синхронизирует.
+    const sent = page.waitForRequest((request) =>
+      request.method() === "PUT" && request.url().includes("/integrations/tts/config"));
     await page.click("#tts-save");
-    // Запись идёт под подтверждением sudo — как у любой записи секретов.
-    // До подтверждения запроса быть не должно: это и проверяем.
-    assert.equal(await panel.sudoScope(), "secrets:write");
+    await sent;
+
+    // Пароль при сохранении речи не спрашивается — решение владельца.
+    // Тест сторожит именно это: окно пароля не появляется, значения
+    // уходят сразу.
     assert.equal(
-      requests.filter((item) => item.method === "PUT").length, 0,
-      "значения ушли до подтверждения sudo",
+      await page.evaluate(() => !!document.querySelector("#sudo-dialog[open]")),
+      false,
+      "появилось окно пароля",
     );
-    await panel.confirmSudo();
-    await page.waitForFunction(
-      () => document.querySelector("#tts-form select[name=provider]") !== null,
-      { timeout: 10_000 },
-    );
+    assert.equal(await panel.sudoScope(), null, "запись речи запросила sudo");
 
     const saved = requests.find((item) => item.method === "PUT" && item.path === "/integrations/tts/config");
     assert.ok(saved, `запрос сохранения не ушёл: ${JSON.stringify(requests.map((r) => `${r.method} ${r.path}`))}`);

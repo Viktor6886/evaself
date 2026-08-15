@@ -19,7 +19,7 @@
 import type pg from "pg";
 
 import { adminBadRequest, adminNotFound } from "./errors.js";
-import type { SecretStore } from "./secret-store.js";
+import { declaredUsedBy, type SecretStore } from "./secret-store.js";
 import { INTEGRATION_BY_ID } from "./service-catalog.js";
 
 export type FieldKind = "text" | "url" | "secret" | "select" | "textarea";
@@ -219,6 +219,13 @@ export interface IntegrationConfig {
  */
 const MEDIA_SECTIONS: Record<string, "asr" | "tts"> = { asr: "asr", tts: "tts" };
 
+/**
+ * Интеграции речи. Отдельный список не заводится: это те же ключи
+ * MEDIA_SECTIONS, и разойтись им нельзя — маршрут записи спрашивает у
+ * него, требовать ли подтверждение паролем.
+ */
+export const MEDIA_INTEGRATIONS: ReadonlySet<string> = new Set(Object.keys(MEDIA_SECTIONS));
+
 export class IntegrationConfigService {
   constructor(
     private readonly pool: pg.Pool,
@@ -406,7 +413,12 @@ export class IntegrationConfigService {
     }
 
     for (const [ref, value] of secretUpdates) {
-      await this.secrets.put(ref, value, undefined, actorId);
+      // Потребители берутся из каталога Secret Store. `undefined` здесь
+      // означал бы отказ: `put` требует массив, и сохранение любой
+      // интеграции с секретом падало с «used_by должен быть массивом
+      // строк» — уже после коммита обычных настроек, то есть Base URL
+      // и модель сохранялись, а токен нет.
+      await this.secrets.put(ref, value, declaredUsedBy(ref), actorId);
     }
 
     const result = await this.get(id);

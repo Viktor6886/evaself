@@ -104,3 +104,113 @@ test("без настройки действует текстовый режим
     /response_mode должен быть text, voice или both/,
   );
 });
+
+test("токен провайдера сохраняется вместе с остальными полями формы", async () => {
+  // Регрессия: `put` записывал настройки транзакцией, а секрет отдавал
+  // Secret Store без списка потребителей. Тот требует массив, поэтому
+  // сохранение падало с «used_by должен быть массивом строк» уже после
+  // коммита — Base URL и модель сохранялись, токен нет, и проверка
+  // синтеза честно отвечала «TTS не настроен».
+  const { IntegrationConfigService } = await import("../dist/admin/integration-config-service.js");
+  const { SecretStore } = await import("../dist/admin/secret-store.js");
+
+  // Без токена media-service раздача значений живому сервису не
+  // начинается: тест проверяет запись, а не сеть.
+  const previousToken = process.env.MEDIA_SERVICE_TOKEN;
+  delete process.env.MEDIA_SERVICE_TOKEN;
+  const settings = new Map<string, string>();
+  const secretWrites: Array<{ ref: string; usedBy: unknown }> = [];
+  const query = async (sql: string, values: unknown[] = []) => {
+    if (sql.includes("INSERT INTO system_settings")) {
+      settings.set(String(values[0]), String(values[1]));
+      return { rows: [], rowCount: 1 };
+    }
+    if (sql.includes("INSERT INTO secret_records")) {
+      secretWrites.push({ ref: String(values[0]), usedBy: JSON.parse(String(values[5])) });
+      return {
+        rows: [{
+          secret_ref: values[0], created_at: new Date(),
+          last_rotated_at: new Date(), used_by_json: JSON.parse(String(values[5])),
+        }],
+        rowCount: 1,
+      };
+    }
+    return { rows: [], rowCount: 0 };
+  };
+  const pool = {
+    query,
+    connect: async () => ({ query, release: () => undefined }),
+  };
+  const secrets = new SecretStore({ masterKey: Buffer.alloc(32, 7), pool: pool as never });
+  const service = new IntegrationConfigService(pool as never, secrets, "http://media-service:8090");
+
+  const result = await service.put("tts", {
+    provider: "openrouter",
+    base_url: "https://openrouter.ai/api/v1",
+    api_key: "test-token-value",
+    model: TTS_DEFAULT_MODEL,
+    voice: "Charon",
+    voice_prompt: "Тёплый женский голос",
+  }, "admin");
+
+  assert.deepEqual(secretWrites, [
+    { ref: "sec_media_tts_api_key", usedBy: ["media-service"] },
+  ]);
+  assert.equal(settings.get("bootstrap.env.media.tts.model"), TTS_DEFAULT_MODEL);
+  assert.equal(settings.get("bootstrap.env.media.tts.voice"), "Charon");
+  assert.equal(result.id, "tts");
+  if (previousToken !== undefined) process.env.MEDIA_SERVICE_TOKEN = previousToken;
+});
+
+test("пароль при записи интеграции спрашивается по интеграции, а не по маршруту", async () => {
+  // Маршрут один на все интеграции. Владелец решил не спрашивать пароль
+  // при настройке речи — но тем же запросом меняются Telegram bot_token
+  // и токен Todoist, поэтому послабление ограничено asr и tts.
+  const { buildAdminServer } = await import("../dist/admin/server.js");
+  const sudo: string[] = [];
+  const saved: string[] = [];
+  const app = buildAdminServer({
+    auth: {
+      authenticate: async () => ({
+        id: "session-1",
+        user: { id: "00000000-0000-0000-0000-000000000001", username: "владелец", role: "owner" },
+      }),
+      requireCsrf: () => undefined,
+      requireSudo: async (_id: string, scope: string) => { sudo.push(scope); },
+    },
+    audit: {
+      start: async () => ({ id: "audit-1", startedAt: Date.now() }),
+      finish: async () => undefined,
+      annotate: async () => undefined,
+      list: async () => [],
+    },
+    integrations: {
+      put: async (id: string) => { saved.push(id); return { id }; },
+    },
+    config: {}, secrets: {}, health: {}, operations: {}, providers: {},
+    llmRouter: {}, stt: {}, users: {}, crud: {}, artifacts: {},
+    events: { publish: async () => undefined },
+    logger: { debug() {}, info() {}, warn() {}, error() {} },
+    readiness: async () => true,
+  } as never);
+  await app.ready();
+
+  const put = (id: string) => app.inject({
+    method: "PUT",
+    url: `/api/admin/v1/integrations/${id}/config`,
+    headers: { cookie: "eva_admin=session-1", "x-csrf-token": "t" },
+    payload: { base_url: "https://openrouter.ai/api/v1" },
+  });
+
+  for (const id of ["tts", "asr"]) {
+    assert.equal((await put(id)).statusCode, 200, id);
+  }
+  assert.deepEqual(sudo, [], "речь не должна требовать пароль");
+
+  for (const id of ["telegram", "todoist", "searxng", "crawl4ai"]) {
+    assert.equal((await put(id)).statusCode, 200, id);
+  }
+  assert.deepEqual(sudo, ["secrets:write", "secrets:write", "secrets:write", "secrets:write"]);
+  assert.deepEqual(saved, ["tts", "asr", "telegram", "todoist", "searxng", "crawl4ai"]);
+  await app.close();
+});

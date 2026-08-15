@@ -42,7 +42,7 @@ import { auditParams, globalSecretRedactor } from "./redactor.js";
 import { SecretStore } from "./secret-store.js";
 import type { SecurityAuditService } from "./security-audit.js";
 import { HealthService } from "./health-service.js";
-import { IntegrationConfigService } from "./integration-config-service.js";
+import { IntegrationConfigService, MEDIA_INTEGRATIONS } from "./integration-config-service.js";
 import { LlmRouterAdminService } from "./llm-router-service.js";
 import { OperationService } from "./operation-service.js";
 import { ProviderService } from "./provider-service.js";
@@ -561,8 +561,8 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
   });
 
   // Значения без секрета читают и operator с viewer: там нет ключей,
-  // только адреса и модели. Правка — owner и admin, и через sudo, потому
-  // что тем же запросом меняется секрет в Secret Store.
+  // только адреса и модели. Правка — owner и admin; подтверждение
+  // паролем зависит от интеграции (см. MEDIA_INTEGRATIONS ниже).
   app.get("/api/admin/v1/integrations/:id/config", {
     config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
   }, async (request) => {
@@ -570,17 +570,27 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
     return await services.integrations.get(id);
   });
 
+  // Решение владельца — «не спрашивать пароль при настройке синтеза» —
+  // ограничено медиа-ключами и проверяется по интеграции, а не по
+  // маршруту: маршрут один на все интеграции, и снятое с него
+  // подтверждение сняло бы его заодно с Telegram bot_token, токена
+  // Todoist, секрета SearXNG и ключа Crawl4AI. Ключи ASR и TTS вводят,
+  // меняют и проверяют десяток раз за настройку, и стоит их утечка
+  // счёта у провайдера речи; bot_token — всего канала Евы. Поэтому
+  // asr и tts сохраняются без пароля, остальные — под `secrets:write`,
+  // как раньше.
   app.put("/api/admin/v1/integrations/:id/config", {
-    config: {
-      roles: ["owner", "admin"],
-      sudoScope: "secrets:write",
-    } satisfies RouteAccess,
+    config: { roles: ["owner", "admin"] } satisfies RouteAccess,
   }, async (request) => {
     const id = (request.params as { id?: string }).id ?? "";
+    const context = contexts.get(request)!;
+    if (!MEDIA_INTEGRATIONS.has(id)) {
+      await services.auth.requireSudo(context.session!.id, "secrets:write");
+    }
     return await services.integrations.put(
       id,
       objectBody(request.body),
-      contexts.get(request)!.session!.user.id,
+      context.session!.user.id,
     );
   });
 

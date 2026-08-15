@@ -682,6 +682,9 @@ async function saveIntegration() {
   });
 }
 
+/** Интеграции речи. Тот же список, что у сервера. */
+const MEDIA_INTEGRATIONS = new Set(["asr", "tts"]);
+
 /**
  * Запись настроек интеграции.
  *
@@ -690,28 +693,38 @@ async function saveIntegration() {
  * подтверждении sudo, в разборе ответа или в тексте уведомления.
  */
 async function applyIntegrationConfig(id, body, afterSave) {
-  askSudo({
-    scope: "secrets:write",
-    title: "Сохранить настройки интеграции",
-    description: "Значения без секретов попадут в настройки установки, ключи — в Secret Store.",
-    action: async () => {
-      const { payload } = await request(`/integrations/${encodeURIComponent(id)}/config`, {
-        method: "PUT",
-        body: JSON.stringify(body),
-      });
-      // Для ASR/TTS значения применяются на лету; если не доехали —
-      // сказать прямо, а не оставить администратора в уверенности, что
-      // всё работает.
-      if (payload.applied_live === false && payload.apply_error) {
-        toast(`Сохранено, но сервис не принял значения: ${payload.apply_error}`, true);
-      } else if (payload.applied_live) {
-        toast("Настройки сохранены и применены без перезапуска");
-      } else {
-        toast("Настройки сохранены");
-      }
-      await afterSave();
-    },
+  // У речи пароль не спрашивается — решение владельца: ключи ASR и TTS
+  // вводят и проверяют десяток раз за настройку. У остальных интеграций
+  // тем же запросом меняется Telegram bot_token или токен Todoist,
+  // поэтому подтверждение остаётся — и его требует сервер, а не только
+  // эта форма.
+  if (!MEDIA_INTEGRATIONS.has(id)) {
+    askSudo({
+      scope: "secrets:write",
+      title: "Сохранить настройки интеграции",
+      description: "Запрос меняет учётные данные интеграции. Подтвердите паролем.",
+      action: () => sendIntegrationConfig(id, body, afterSave),
+    });
+    return;
+  }
+  await sendIntegrationConfig(id, body, afterSave);
+}
+
+async function sendIntegrationConfig(id, body, afterSave) {
+  const { payload } = await request(`/integrations/${encodeURIComponent(id)}/config`, {
+    method: "PUT",
+    body: JSON.stringify(body),
   });
+  // Для ASR/TTS значения применяются на лету; если не доехали — сказать
+  // прямо, а не оставить администратора в уверенности, что всё работает.
+  if (payload.applied_live === false && payload.apply_error) {
+    toast(`Сохранено, но сервис не принял значения: ${payload.apply_error}`, true);
+  } else if (payload.applied_live) {
+    toast("Настройки сохранены и применены без перезапуска");
+  } else {
+    toast("Настройки сохранены");
+  }
+  await afterSave();
 }
 
 
