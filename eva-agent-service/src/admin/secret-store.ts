@@ -55,6 +55,19 @@ const KNOWN_SECRETS: Readonly<Record<string, string[]>> = {
   sec_valkey_password: ["valkey", "agent-runtime", "admin-api"],
 };
 
+/**
+ * Кто читает этот секрет по объявлению каталога.
+ *
+ * Список потребителей уже задан в `KNOWN_SECRETS` и показывается в
+ * панели; служебному вызову (не HTTP-маршруту) незачем повторять его
+ * своей копией — разойдясь, две копии дают запись, у которой в панели
+ * «Используют: не указано». Неизвестная ссылка даёт пустой список, а не
+ * отказ: секрет всё равно должен сохраниться.
+ */
+export function declaredUsedBy(secretRef: string): string[] {
+  return [...(KNOWN_SECRETS[secretRef] ?? [])];
+}
+
 export function parseMasterKey(value: string): Buffer {
   const trimmed = value.trim();
   if (/^[a-f0-9]{64}$/i.test(trimmed)) {

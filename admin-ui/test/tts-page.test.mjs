@@ -81,19 +81,22 @@ describe("раздел синтеза речи", () => {
       "google/gemini-3.1-flash-tts-preview",
     );
 
+    // Ждём сам PUT, а не перерисовку формы: форма на месте и до клика,
+    // и такое ожидание истинно сразу — оно ничего не синхронизирует.
+    const sent = page.waitForRequest((request) =>
+      request.method() === "PUT" && request.url().includes("/integrations/tts/config"));
     await page.click("#tts-save");
-    // Пароль при сохранении не спрашивается — решение владельца, то же
-    // самое, что в разделе распознавания речи. Тест сторожит именно это:
-    // окно пароля не должно появиться, а значения обязаны уйти сразу.
-    await page.waitForFunction(
-      () => document.querySelector("#tts-form select[name=provider]") !== null,
-      { timeout: 10_000 },
-    );
+    await sent;
+
+    // Пароль при сохранении речи не спрашивается — решение владельца.
+    // Тест сторожит именно это: окно пароля не появляется, значения
+    // уходят сразу.
     assert.equal(
       await page.evaluate(() => !!document.querySelector("#sudo-dialog[open]")),
       false,
       "появилось окно пароля",
     );
+    assert.equal(await panel.sudoScope(), null, "запись речи запросила sudo");
 
     const saved = requests.find((item) => item.method === "PUT" && item.path === "/integrations/tts/config");
     assert.ok(saved, `запрос сохранения не ушёл: ${JSON.stringify(requests.map((r) => `${r.method} ${r.path}`))}`);

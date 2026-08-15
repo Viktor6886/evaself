@@ -682,6 +682,9 @@ async function saveIntegration() {
   });
 }
 
+/** Интеграции речи. Тот же список, что у сервера. */
+const MEDIA_INTEGRATIONS = new Set(["asr", "tts"]);
+
 /**
  * Запись настроек интеграции.
  *
@@ -690,9 +693,24 @@ async function saveIntegration() {
  * подтверждении sudo, в разборе ответа или в тексте уведомления.
  */
 async function applyIntegrationConfig(id, body, afterSave) {
-  // Пароль при сохранении не спрашивается — решение владельца, такое же,
-  // как в разделе распознавания речи. Права проверяет сервер по роли, а
-  // запись остаётся в журнале аудита.
+  // У речи пароль не спрашивается — решение владельца: ключи ASR и TTS
+  // вводят и проверяют десяток раз за настройку. У остальных интеграций
+  // тем же запросом меняется Telegram bot_token или токен Todoist,
+  // поэтому подтверждение остаётся — и его требует сервер, а не только
+  // эта форма.
+  if (!MEDIA_INTEGRATIONS.has(id)) {
+    askSudo({
+      scope: "secrets:write",
+      title: "Сохранить настройки интеграции",
+      description: "Запрос меняет учётные данные интеграции. Подтвердите паролем.",
+      action: () => sendIntegrationConfig(id, body, afterSave),
+    });
+    return;
+  }
+  await sendIntegrationConfig(id, body, afterSave);
+}
+
+async function sendIntegrationConfig(id, body, afterSave) {
   const { payload } = await request(`/integrations/${encodeURIComponent(id)}/config`, {
     method: "PUT",
     body: JSON.stringify(body),
