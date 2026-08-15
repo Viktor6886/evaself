@@ -42,7 +42,7 @@ export interface IntegrationField {
      * не отдельная таблица в панели: пара «провайдер → его адрес и
      * модель» задана в одном месте и в панель попадает вместе с формой.
      */
-     preset?: Record<string, string>;
+    preset?: Record<string, string>;
   }>;
 }
 
