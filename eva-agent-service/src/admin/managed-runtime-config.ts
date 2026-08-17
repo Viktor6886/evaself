@@ -49,9 +49,6 @@ export async function applyManagedRuntimeConfig(
       case "runtime.profile_cache_ttl_seconds":
         config.profileCacheTtlSeconds = integer(value, config.profileCacheTtlSeconds);
         break;
-      case "runtime.conversation_mirror_enabled":
-        config.conversationMirrorEnabled = boolean(value, config.conversationMirrorEnabled);
-        break;
       case "runtime.outbox_enabled":
         config.outboxEnabled = boolean(value, config.outboxEnabled);
         break;

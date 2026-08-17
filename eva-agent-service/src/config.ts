@@ -77,7 +77,6 @@ export interface Config {
   profileCompletionEnabled: boolean;
   vectorGoalsEnabled: boolean;
   profileCacheTtlSeconds: number;
-  conversationMirrorEnabled: boolean;
   outboxEnabled: boolean;
   /**
    * Запись жизненного цикла хода в `turn_runs`. Shadow-режим: путь
@@ -139,7 +138,7 @@ export interface Config {
    */
   jobsMirrorMode: boolean;
   /** Универсальный фоновый ход агента (рефлексия, отчёты, исследования). */
-  langchainEnabled: boolean;
+  knowledgeUploadsEnabled: boolean;
   researchOrchestratorEnabled: boolean;
   /**
    * Проверка контракта Letta на живом развёртывании.
@@ -355,7 +354,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     profileCompletionEnabled: bool("EVA_PROFILE_COMPLETION_ENABLED", true),
     vectorGoalsEnabled: bool("EVA_VECTOR_GOALS_ENABLED", true),
     profileCacheTtlSeconds: int("EVA_PROFILE_CACHE_TTL_SECONDS", 60),
-    conversationMirrorEnabled: bool("EVA_CONVERSATION_MIRROR_ENABLED", false),
     outboxEnabled: bool("EVA_OUTBOX_ENABLED", true),
     turnLifecycleEnabled: bool("EVA_TURN_LIFECYCLE", false),
     parallelInboxEnabled: bool("EVA_PARALLEL_INBOX", false),
@@ -383,7 +381,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     // совпадения выборок обязана сначала понаблюдать, а не начать
     // писать людям параллельно со старым интервалом.
     jobsMirrorMode: bool("EVA_JOBS_MIRROR", true),
-    langchainEnabled: bool("EVA_LANGCHAIN", false),
+    knowledgeUploadsEnabled: bool("EVA_KNOWLEDGE_UPLOADS", false),
     researchOrchestratorEnabled: bool("EVA_RESEARCH_ORCHESTRATOR", false),
     lettaContractVerify: bool("EVA_LETTA_CONTRACT_VERIFY", false),
     lettaAdminClientEnabled: bool("EVA_LETTA_ADMIN_CLIENT", false),

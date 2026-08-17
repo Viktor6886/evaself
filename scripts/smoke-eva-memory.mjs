@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 /**
- * Три проверки памяти и работы Евы на живом App Server.
+ * Финальный smoke: память, штатные возможности и работа Евы на живом
+ * App Server.
  *
  * Проверяется не конфигурация, а поведение: конфигурацию видно и так, а
  * вопрос «помнит ли Ева имя брата через несколько сообщений» на неё не
@@ -63,6 +64,21 @@ try {
     "runtime: MemFS включён",
     facts?.memfsEnabled === true,
     `memfs=${facts?.memfsEnabled}, skills=${facts?.skillSources?.join(",") ?? "?"}`,
+  );
+
+  // Штатные возможности Letta и продуктовый инструмент Evaself приходят
+  // одним списком: если Evaself сузил набор, здесь пропадёт половина.
+  const tools = facts?.tools ?? [];
+  const has = (pattern) => tools.some((name) => pattern.test(name));
+  check(
+    "runtime: память, Skill и субагенты доступны",
+    has(/memory|memfs/i) && has(/skill/i) && has(/task|agent|subagent/i),
+    tools.join(", ").slice(0, 200),
+  );
+  check(
+    "runtime: продуктовый инструмент Evaself зарегистрирован",
+    tools.includes("get_user_time_context"),
+    `инструментов ${tools.length}`,
   );
 
   // 1. Простой факт переживает несколько посторонних сообщений.

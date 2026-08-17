@@ -94,7 +94,7 @@ export function buildJobLayer(
     batchSize: config.jobOutboxBatchSize,
     pollMs: config.jobOutboxPollMs,
   });
-  if (config.langchainEnabled) {
+  if (config.knowledgeUploadsEnabled) {
     const router = new LlmRouterClient(config.routerUrl, config.routerApiKey);
     const knowledge = new KnowledgeIngestWorker(db,{tempRoot:"/tmp",embed:(text,signal)=>router.embed(text,signal),scan:async(path)=>await new Promise<"clean"|"infected"|"unavailable">(resolve=>execFile("clamscan",["--no-summary",path],error=>{const code=(error as unknown as {code?:number})?.code;resolve(!error?"clean":code===1?"infected":"unavailable");}))});
     registry.queue("memory");
