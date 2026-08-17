@@ -1284,7 +1284,7 @@ jobs:
           const conversation = await call(owner, '/users/' + userId + '/conversation?limit=20');
           if (!conversation.ok) throw new Error('conversation failed: ' + conversation.status);
           const payload = await conversation.json();
-          if (!Array.isArray(payload.messages) || !Array.isArray(payload.highlights)) {
+          if (!Array.isArray(payload.messages) || !Array.isArray(payload.conversations)) {
             throw new Error('conversation payload is malformed');
           }
 
