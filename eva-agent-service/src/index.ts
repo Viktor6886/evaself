@@ -117,7 +117,7 @@ async function main(): Promise<void> {
     const contract = letta.verifyContract();
     if (!contract.ok) {
       const detail = { missing: contract.missing };
-      if (config.lettaSdk060Verify) {
+      if (config.lettaContractVerify) {
         throw new Error(
           `Контракт Letta не выполняется установленным пакетом: ${contract.missing.join(", ")}`,
         );

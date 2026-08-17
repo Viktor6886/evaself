@@ -1,4 +1,4 @@
-import type { PermissionMode, ReasoningEffort, SkillSource } from "@letta-ai/letta-agent-sdk";
+import type { PermissionMode, ReasoningEffort } from "@letta-ai/letta-agent-sdk";
 
 import type { Config } from "./config.js";
 import type { Database, SdkSettingsRow } from "./db.js";
@@ -14,12 +14,7 @@ export interface SdkSettingsInput {
   permission_mode?: PermissionMode;
   reasoning_effort?: ReasoningEffort;
   memfs_enabled?: boolean;
-  system_prompt?: string | null;
   base_tools?: string[] | null;
-  allowed_tools?: string[] | null;
-  disallowed_tools?: string[];
-  skill_sources?: SkillSource[];
-  system_info_reminder?: boolean;
   dreaming?: Record<string, unknown>;
   model_settings?: Record<string, unknown>;
   default_context_window?: number | null;
@@ -43,7 +38,6 @@ export interface PublicSdkSettings extends SdkSettingsInput {
 
 const PERMISSION_MODES = new Set(["standard", "acceptEdits", "unrestricted", "strict"]);
 const REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
-const SKILL_SOURCES = new Set(["bundled", "global", "agent", "project"]);
 const DREAMING_TRIGGERS = new Set(["off", "step-count", "compaction-event"]);
 
 export class SdkSettingsManager {
@@ -124,12 +118,8 @@ export function validateSettings(input: SdkSettingsInput): Required<SdkSettingsI
   if (!REASONING_EFFORTS.has(reasoningEffort)) {
     throw badRequest("reasoning_effort должен быть none, minimal, low, medium, high или xhigh");
   }
-  const skillSources = stringArray(input.skill_sources ?? [], "skill_sources", 4) as SkillSource[];
-  if (skillSources.some((source) => !SKILL_SOURCES.has(source))) {
-    throw badRequest("skill_sources содержит неизвестный источник");
-  }
-  const dreaming = plainObject(input.dreaming ?? { trigger: "off" }, "dreaming");
-  const trigger = String(dreaming.trigger ?? "off");
+  const dreaming = plainObject(input.dreaming ?? { trigger: "compaction-event" }, "dreaming");
+  const trigger = String(dreaming.trigger ?? "compaction-event");
   if (!DREAMING_TRIGGERS.has(trigger)) throw badRequest("Некорректный dreaming.trigger");
   if (dreaming.behavior !== undefined) {
     throw badRequest(
@@ -137,16 +127,6 @@ export function validateSettings(input: SdkSettingsInput): Required<SdkSettingsI
     );
   }
   if (dreaming.stepCount !== undefined) integer(dreaming.stepCount, "dreaming.stepCount", 1, 100000);
-  if ((input.disallowed_tools?.length ?? 0) > 0) {
-    throw badRequest(
-      "disallowed_tools пока не поддерживается официальным SDK для self-hosted App Server; используйте allowed_tools",
-    );
-  }
-  if (input.system_info_reminder === true) {
-    throw badRequest(
-      "system_info_reminder пока не поддерживается официальным SDK для self-hosted App Server",
-    );
-  }
   return {
     agent_name_prefix: text(input.agent_name_prefix ?? "eva", "agent_name_prefix", 1, 80),
     default_description: text(input.default_description ?? "", "default_description", 0, 1000),
@@ -156,12 +136,7 @@ export function validateSettings(input: SdkSettingsInput): Required<SdkSettingsI
     permission_mode: permission,
     reasoning_effort: reasoningEffort,
     memfs_enabled: boolean(input.memfs_enabled, true),
-    system_prompt: nullableText(input.system_prompt, "system_prompt", 100000),
     base_tools: nullableStringArray(input.base_tools, "base_tools", 128),
-    allowed_tools: nullableStringArray(input.allowed_tools, "allowed_tools", 128),
-    disallowed_tools: stringArray(input.disallowed_tools ?? [], "disallowed_tools", 128),
-    skill_sources: skillSources,
-    system_info_reminder: boolean(input.system_info_reminder, false),
     dreaming,
     model_settings: plainObject(input.model_settings ?? {}, "model_settings"),
     default_context_window:
@@ -194,7 +169,6 @@ function runtimeFromRow(row: SdkSettingsRow): RuntimeSdkSettings {
   return {
     ...settings,
     permissionMode: settings.permission_mode,
-    skillSources: settings.skill_sources,
   };
 }
 
@@ -208,12 +182,7 @@ function rowToInput(row: SdkSettingsRow): Required<SdkSettingsInput> {
     permission_mode: row.permission_mode,
     reasoning_effort: row.reasoning_effort,
     memfs_enabled: row.memfs_enabled,
-    system_prompt: row.system_prompt,
     base_tools: row.base_tools,
-    allowed_tools: row.allowed_tools,
-    disallowed_tools: row.disallowed_tools,
-    skill_sources: row.skill_sources,
-    system_info_reminder: row.system_info_reminder,
     dreaming: row.dreaming,
     model_settings: row.model_settings,
     default_context_window: row.default_context_window,
@@ -237,10 +206,6 @@ function text(value: unknown, field: string, min: number, max: number): string {
   return trimmed;
 }
 
-function nullableText(value: unknown, field: string, max: number): string | null {
-  if (value == null || value === "") return null;
-  return text(value, field, 0, max);
-}
 
 function stringArray(value: unknown, field: string, maxItems: number): string[] {
   if (!Array.isArray(value) || value.length > maxItems) {

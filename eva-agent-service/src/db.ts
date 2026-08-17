@@ -94,12 +94,7 @@ export interface SdkSettingsRow {
   permission_mode: "standard" | "acceptEdits" | "unrestricted" | "strict";
   reasoning_effort: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
   memfs_enabled: boolean;
-  system_prompt: string | null;
   base_tools: string[] | null;
-  allowed_tools: string[] | null;
-  disallowed_tools: string[];
-  skill_sources: Array<"bundled" | "global" | "agent" | "project">;
-  system_info_reminder: boolean;
   dreaming: Record<string, unknown>;
   model_settings: Record<string, unknown>;
   default_context_window: number | null;
@@ -923,23 +918,18 @@ export class Database {
          permission_mode = $6,
          reasoning_effort = $7,
          memfs_enabled = $8,
-         system_prompt = $9,
-         base_tools = $10,
-         allowed_tools = $11,
-         disallowed_tools = $12,
-         skill_sources = $13,
-         system_info_reminder = $14,
-         dreaming = $15::jsonb,
-         model_settings = $16::jsonb,
-         default_context_window = $17,
-         conversation_summary = $18,
-         conversation_description = $19,
-         conversation_hidden = $20,
-         create_conversation = $21,
-         session_pool_size = $22,
-         session_idle_ms = $23,
-         turn_timeout_ms = $24,
-         app_server_request_timeout_ms = $25
+         base_tools = $9,
+         dreaming = $10::jsonb,
+         model_settings = $11::jsonb,
+         default_context_window = $12,
+         conversation_summary = $13,
+         conversation_description = $14,
+         conversation_hidden = $15,
+         create_conversation = $16,
+         session_pool_size = $17,
+         session_idle_ms = $18,
+         turn_timeout_ms = $19,
+         app_server_request_timeout_ms = $20
        WHERE id = 1
        RETURNING *`,
       [
@@ -951,12 +941,7 @@ export class Database {
         input.permission_mode,
         input.reasoning_effort,
         input.memfs_enabled,
-        input.system_prompt,
         input.base_tools,
-        input.allowed_tools,
-        input.disallowed_tools,
-        input.skill_sources,
-        input.system_info_reminder,
         JSON.stringify(input.dreaming),
         JSON.stringify(input.model_settings),
         input.default_context_window,

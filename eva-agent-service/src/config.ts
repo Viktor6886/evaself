@@ -150,7 +150,7 @@ export interface Config {
    * образа. Выключенный флаг оставляет прежнее поведение — расхождение
    * попадает в журнал и не мешает старту.
    */
-  lettaSdk060Verify: boolean;
+  lettaContractVerify: boolean;
   /** Административный control plane Letta (`@letta-ai/letta-client`). */
   lettaAdminClientEnabled: boolean;
   /** HTTP-адрес App Server для control plane. Пустой — путь недоступен. */
@@ -385,7 +385,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     jobsMirrorMode: bool("EVA_JOBS_MIRROR", true),
     langchainEnabled: bool("EVA_LANGCHAIN", false),
     researchOrchestratorEnabled: bool("EVA_RESEARCH_ORCHESTRATOR", false),
-    lettaSdk060Verify: bool("EVA_LETTA_SDK_060", false),
+    lettaContractVerify: bool("EVA_LETTA_CONTRACT_VERIFY", false),
     lettaAdminClientEnabled: bool("EVA_LETTA_ADMIN_CLIENT", false),
     lettaAdminBaseUrl: str("EVA_LETTA_ADMIN_BASE_URL"),
     checkinMorningHour: clampedInt("EVA_CHECKIN_MORNING_HOUR", 9, 5, 12),

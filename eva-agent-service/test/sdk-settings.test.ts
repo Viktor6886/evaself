@@ -35,9 +35,8 @@ test("SDK settings reject unsafe enum values and invalid timeouts", () => {
     (error: unknown) => error instanceof EvaError && error.code === "bad_request",
   );
   for (const unsupported of [
-    { disallowed_tools: ["Bash"] },
-    { system_info_reminder: true },
     { dreaming: { trigger: "step-count", behavior: "reminder", stepCount: 20 } },
+    { dreaming: { trigger: "never" } },
   ]) {
     assert.throws(
       () => validateSettings(unsupported),

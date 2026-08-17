@@ -175,12 +175,7 @@ test("App Server-only settings are applied at session open, not agent creation",
     "persona",
   );
   const internal = service as unknown as {
-    runtime: {
-      allowed_tools: string[] | null;
-      disallowed_tools: string[];
-      system_info_reminder: boolean;
-      reasoning_effort: "none" | "high";
-    };
+    runtime: { reasoning_effort: "none" | "high" };
     client: {
       createAgent(options: Record<string, unknown>): Promise<string>;
       agents: { update(): Promise<void> };
@@ -189,9 +184,6 @@ test("App Server-only settings are applied at session open, not agent creation",
     acquireSession(id: string): Promise<unknown>;
     sessionOptions(id: string): Promise<Record<string, unknown>>;
   };
-  internal.runtime.allowed_tools = ["safe_tool", "Read", "WebSearch"];
-  internal.runtime.disallowed_tools = ["Bash"];
-  internal.runtime.system_info_reminder = true;
   internal.runtime.reasoning_effort = "high";
   service.setToolFactory(() => [
     { name: "safe_tool" },
@@ -221,9 +213,15 @@ test("App Server-only settings are applied at session open, not agent creation",
   await service.createAgent({ telegramId: 123, displayName: "CI" });
   await internal.acquireSession("conversation-sdk-options");
 
+  // Штатный harness Letta: Evaself не подменяет системный промпт и не
+  // сужает ни серверные, ни клиентские инструменты агента.
+  assert.equal("systemPrompt" in createOptions, false);
   assert.equal("allowedTools" in createOptions, false);
   assert.equal("disallowedTools" in createOptions, false);
   assert.equal("systemInfoReminder" in createOptions, false);
+  assert.equal("skillSources" in createOptions, false);
+  assert.equal(createOptions.memfs, true);
+  assert.deepEqual(createOptions.dreaming, { trigger: "compaction-event" });
   assert.deepEqual(
     (createOptions.memory as Array<{ label: string }>).map((block) => block.label),
     [
@@ -235,17 +233,21 @@ test("App Server-only settings are applied at session open, not agent creation",
       "progress_and_hypotheses",
     ],
   );
-  // disallowed_tools по-прежнему режет и объявленный список, и живой набор.
-  assert.deepEqual(sessionOptions.allowedTools, ["safe_tool", "Read", "WebSearch"]);
+  // Обычная сессия не передаёт ни allowedTools, ни skillSources: набор
+  // клиентских инструментов и источники навыков остаются штатными.
+  assert.equal("allowedTools" in sessionOptions, false);
+  assert.equal("skillSources" in sessionOptions, false);
+  assert.equal("stateless" in sessionOptions, false);
   assert.equal(sessionOptions.canUseTool, approval);
   assert.deepEqual(
     (sessionOptions.tools as Array<{ name: string }>).map((tool) => tool.name),
-    ["safe_tool"],
+    ["safe_tool", "Bash"],
   );
   assert.equal(sessionOptions.permissionMode, "unrestricted");
   assert.equal(sessionOptions.reasoningEffort, "high");
+  // cwd — рабочий каталог App Server: из него Letta Code открывает
+  // `.skills`, поэтому проектные навыки видны без объявления источников.
   assert.equal(sessionOptions.cwd, "/data/letta");
-  assert.deepEqual(sessionOptions.skillSources, ["project"]);
 
   internal.runtime.reasoning_effort = "none";
   assert.equal("reasoningEffort" in await internal.sessionOptions("conversation-default"), false);
@@ -285,7 +287,7 @@ test("session opening awaits the approval resolver and recovery uses the same re
   await (service as unknown as { acquireSession(id: string): Promise<unknown> }).acquireSession("conversation-research");
   assert.equal(resolved, true);
   assert.deepEqual((opened.tools as Array<{ name: string }>).map((tool) => tool.name), ["chat_write", "research_read"]);
-  assert.deepEqual(opened.allowedTools, ["chat_write", "research_read"]);
+  assert.equal("allowedTools" in opened, false);
   assert.equal(opened.canUseTool, canUseTool);
   assert.deepEqual(seen, [{ name: "research_read", requestId: "sdk-request-restart" }]);
 });
@@ -476,3 +478,76 @@ function reasoningService(onWarn: (message: string) => void = () => {}) {
     "persona",
   );
 }
+
+/**
+ * Единственный cognitive runtime — Letta.
+ *
+ * Проверяется не намерение, а фактический набор полей, который Evaself
+ * отправляет в SDK: подмена системного промпта, точный список
+ * инструментов или суженные источники навыков видны здесь сразу, чем бы
+ * они ни были мотивированы.
+ */
+test("обычный ход не подменяет harness и не сужает штатные возможности Letta", async () => {
+  const service = new LettaService({
+    appServerUrl: "ws://example.invalid/ws", appServerToken: "", appServerRequestTimeoutMs: 1000,
+    model: "", sessionPoolSize: 5, sessionIdleMs: 1000, turnTimeoutMs: 1000,
+  } as never, { debug() {}, info() {}, warn() {}, error() {} }, "persona");
+  service.setToolFactory(() => [{ name: "eva_get_reminders" }] as never);
+  const internal = service as unknown as {
+    client: { createAgent(options: Record<string, unknown>): Promise<string> };
+    sessionOptions(id: string): Promise<Record<string, unknown>>;
+  };
+
+  let created: Record<string, unknown> = {};
+  internal.client.createAgent = async (options) => { created = options; return "agent-1"; };
+  await service.createAgent({ telegramId: 1, displayName: "CI" });
+
+  // Агент: штатный harness, включённый MemFS, рефлексия на сжатии.
+  for (const forbidden of ["systemPrompt", "allowedTools", "disallowedTools", "skillSources"]) {
+    assert.equal(forbidden in created, false, `createAgent передал ${forbidden}`);
+  }
+  assert.equal(created.memfs, true);
+  assert.deepEqual(created.dreaming, { trigger: "compaction-event" });
+
+  // Сессия: только продуктовые инструменты Evaself, всё остальное — Letta.
+  const session = await internal.sessionOptions("conversation-1");
+  for (const forbidden of ["allowedTools", "skillSources", "stateless", "systemPrompt"]) {
+    assert.equal(forbidden in session, false, `сессия передала ${forbidden}`);
+  }
+  assert.deepEqual(
+    (session.tools as Array<{ name: string }>).map((tool) => tool.name),
+    ["eva_get_reminders"],
+  );
+});
+
+/** Факты runtime берутся из init-сообщения сессии, а не из настроек. */
+test("состояние MemFS, навыков и инструментов читается из init-сообщения", () => {
+  const warnings: string[] = [];
+  const service = new LettaService({
+    appServerUrl: "ws://example.invalid/ws", appServerToken: "", appServerRequestTimeoutMs: 1000,
+    model: "", sessionPoolSize: 5, sessionIdleMs: 1000, turnTimeoutMs: 1000,
+  } as never, {
+    debug() {}, info() {}, warn: (message: string) => warnings.push(message), error() {},
+  }, "persona");
+  const internal = service as unknown as {
+    recordRuntimeFacts(message: Record<string, unknown>): void;
+  };
+
+  assert.equal(service.runtimeFacts, null, "до первой сессии фактов нет");
+  internal.recordRuntimeFacts({
+    type: "init", model: "eva/chat", memfsEnabled: true,
+    skillSources: ["bundled", "global", "agent", "project"],
+    tools: ["memory", "Skill", "Task", "eva_get_reminders"],
+    dreaming: { trigger: "compaction-event", behavior: "reminder", stepCount: 20 },
+  });
+  const facts = service.runtimeFacts!;
+  assert.equal(facts.memfsEnabled, true);
+  assert.deepEqual(facts.skillSources, ["bundled", "global", "agent", "project"]);
+  assert.ok(facts.tools!.includes("eva_get_reminders"), "продуктовый инструмент виден runtime");
+  assert.equal(facts.dreaming?.trigger, "compaction-event");
+  assert.deepEqual(warnings, []);
+
+  internal.recordRuntimeFacts({ type: "init", model: "eva/chat", memfsEnabled: false });
+  assert.equal(service.runtimeFacts?.memfsEnabled, false);
+  assert.equal(warnings.length, 1, "выключенный MemFS не проходит молча");
+});

@@ -289,6 +289,10 @@ export function buildServer(services: Services): FastifyInstance {
       ? { ok: true, models: appServer.models, url: config.appServerUrl }
       : { ok: false, error: appServer.error, url: config.appServerUrl };
     if (!appServer.ok) status = "degraded";
+    // Что runtime подтвердил сам: MemFS, источники навыков, состав
+    // инструментов и рефлексия. До первого хода снимка ещё нет — это не
+    // деградация, а «пока не наблюдали».
+    checks.letta_runtime = letta.runtimeFacts ?? { observed: false };
 
     try {
       await db.ping();
@@ -1261,14 +1265,6 @@ function managedAgentInput(value: unknown, requireName: boolean): ManagedAgentIn
     "permission_mode",
     ["standard", "acceptEdits", "unrestricted", "strict"],
   ) as ManagedAgentInput["permission_mode"];
-  const skillSources = optionalStringArray(body.skill_sources, "skill_sources", 4);
-  if (
-    skillSources?.some(
-      (source) => !["bundled", "global", "agent", "project"].includes(source),
-    )
-  ) {
-    throw badRequest("skill_sources содержит неизвестный источник");
-  }
   return compact({
     name,
     description: optionalText(body.description, "description", 0, 1000),
@@ -1284,7 +1280,6 @@ function managedAgentInput(value: unknown, requireName: boolean): ManagedAgentIn
     context_window: optionalInteger(body.context_window, "context_window", 1024, 10_000_000),
     permission_mode: permission,
     memfs_enabled: optionalBoolean(body.memfs_enabled, "memfs_enabled"),
-    system_prompt: optionalNullableText(body.system_prompt, "system_prompt", 100000),
     system_prompt_preset: optionalEnum(
       body.system_prompt_preset,
       "system_prompt_preset",
@@ -1297,13 +1292,6 @@ function managedAgentInput(value: unknown, requireName: boolean): ManagedAgentIn
       100000,
     ),
     base_tools: optionalNullableStringArray(body.base_tools, "base_tools", 128),
-    allowed_tools: optionalNullableStringArray(body.allowed_tools, "allowed_tools", 128),
-    disallowed_tools: optionalStringArray(body.disallowed_tools, "disallowed_tools", 128),
-    skill_sources: skillSources as ManagedAgentInput["skill_sources"],
-    system_info_reminder: optionalBoolean(
-      body.system_info_reminder,
-      "system_info_reminder",
-    ),
     dreaming: optionalObject(body.dreaming, "dreaming"),
     create_conversation: optionalBoolean(body.create_conversation, "create_conversation"),
   }) as ManagedAgentInput;

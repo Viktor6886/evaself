@@ -1330,7 +1330,7 @@ jobs:
         run: |
           docker compose --env-file versions.env --env-file .env \
             exec -T letta-app-server sh -c \
-            'test -s /data/letta/.skills/eva-core-safety/SKILL.md'
+            'test -s /data/letta/.skills/memory-hygiene/SKILL.md'
 
       - name: Public webhooks reject forged requests
         if: needs.changes.outputs.docs_only != 'true'
