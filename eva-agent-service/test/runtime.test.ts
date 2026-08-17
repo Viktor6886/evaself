@@ -546,13 +546,20 @@ test("продуктовые инструменты зарегистрирова
 });
 
 /** Навыки лежат там, где их находит нативный механизм Letta. */
-test("психологические навыки доступны нативному механизму Letta", async () => {
+test("психологические навыки доступны нативному механизму Letta", async (context) => {
   const { readdir, readFile } = await import("node:fs/promises");
   const root = new URL("../../skills/", import.meta.url);
-  const entries = (await readdir(root, { withFileTypes: true }))
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => entry.name);
-
+  // Образ сервиса каталога навыков не несёт: он монтируется в App Server
+  // отдельно. Проверять там нечего, и выдавать это за проверку нельзя.
+  let entries: string[];
+  try {
+    entries = (await readdir(root, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+  } catch {
+    context.skip("каталог навыков вне образа сервиса; проверяется на репозитории");
+    return;
+  }
   for (const required of [
     "therapeutic-conversation", "cbt", "act", "motivational-interviewing",
     "schema-therapy", "emotion-regulation", "behavioral-activation",

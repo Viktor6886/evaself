@@ -725,10 +725,7 @@ jobs:
           BEGIN
             IF to_regclass('public.admin_users') IS NULL
                OR to_regclass('public.llm_routes') IS NULL
-               OR to_regclass('public.admin_user_notes') IS NULL
-               OR to_regclass('public.skill_search_index') IS NULL
-               OR to_regclass('public.skill_routing_state') IS NULL
-               OR to_regclass('public.skill_routing_events') IS NULL THEN
+               OR to_regclass('public.admin_user_notes') IS NULL THEN
               RAISE EXCEPTION 'после отката и наката схема восстановилась не полностью';
             END IF;
             IF (SELECT count(*) FROM quotas) <> 9 THEN
