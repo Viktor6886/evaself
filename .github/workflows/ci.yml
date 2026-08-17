@@ -569,7 +569,6 @@ jobs:
               'payment_intents','admin_audit_log','user_north','goals',
               'goal_results','goal_dependencies','work_blocks','goal_reviews',
               'goal_recommendations','user_strategies','learning_attempts',
-              'memory_nodes','memory_edges','conversation_highlights',
               'admin_users','admin_sessions','sudo_grants','system_settings',
               'config_versions','secret_records','audit_log',
               'integration_configs','provider_configs','provider_models',

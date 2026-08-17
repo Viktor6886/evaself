@@ -120,7 +120,7 @@ describe("приватность переписки", () => {
     );
   });
 
-  test("после подтверждения приходят сообщения и выдержки", async () => {
+  test("после подтверждения приходит переписка", async () => {
     await panel.confirmSudo();
     await panel.page.waitForFunction(
       () => document.querySelector("#user-conversation").textContent.includes("Переписка"),
@@ -131,7 +131,6 @@ describe("приватность переписки", () => {
     assert.equal(rendered, 2);
     const text = await panel.page.textContent("#user-conversation");
     assert.match(text, /привет, Ева/);
-    assert.match(text, /Выдержки/);
   });
 });
 
