@@ -3,6 +3,7 @@ import type { AnyAgentTool } from "@letta-ai/letta-agent-sdk";
 import type { Config } from "../config.js";
 import type { AgentRuntimeContext, Database } from "../db.js";
 import { ALLOWED_REACTIONS, type TelegramClient } from "../telegram.js";
+import { localDateWithWeekday, localNow } from "../time/local-date-time.js";
 import {
   boolean,
   integer,
@@ -67,6 +68,36 @@ export class CoreToolFactory {
           );
           return { ok: true, llm_quality_mode: mode };
         },
+      ),
+      tool(
+        "get_user_time_context",
+        "Местное время пользователя",
+        "Возвращает часовой пояс пользователя, его текущие местные дату и время. "
+        + "Часовой пояс — продуктовые данные Evaself, и считать его по своим "
+        + "представлениям нельзя.",
+        objectSchema({}),
+        async (_args, runtime) => {
+          const local = localNow(runtime.timezone);
+          return {
+            ok: true,
+            timezone: runtime.timezone,
+            local_datetime: local.toISO({ suppressMilliseconds: true }),
+            local_date: local.toISODate(),
+            local_date_human: localDateWithWeekday(local),
+          };
+        },
+      ),
+      tool(
+        "get_psychological_test_results",
+        "Результаты психологических тестов",
+        "Возвращает результаты пройденных пользователем психометрических методик. "
+        + "Методики пока не подключены: инструмент честно отвечает, что результатов "
+        + "нет, и придумывать их нельзя.",
+        objectSchema({}),
+        // Заглушка намеренно не считает баллы и не знает ни одной методики:
+        // право коммерческого использования методик не подтверждено, а
+        // выдуманный результат теста хуже отсутствующего.
+        async () => ({ status: "not_implemented", results: [] }),
       ),
       tool(
         "get_current_state",
