@@ -111,12 +111,12 @@ node --test --experimental-strip-types test/*.test.ts        # full regression
 | Файл | Строк |
 |---|---|
 | `src/admin/stt-service.ts` | 1879 |
-| `src/server.ts` | 1498 |
-| `src/letta.ts` | 1471 |
-| `src/db.ts` | 1159 |
-| `src/admin/server.ts` | 1092 |
-| `src/public/webapp-core.ts` | 1070 |
-| `src/eva-workflow.ts` | 973 |
+| `src/server.ts` | 1558 |
+| `src/letta.ts` | 1541 |
+| `src/admin/server.ts` | 1280 |
+| `src/db.ts` | 1215 |
+| `src/public/webapp-core.ts` | 1090 |
+| `src/eva-workflow.ts` | 1023 |
 | `src/router/router.ts` | 928 |
 
 Шаг, который такой файл и так переписывает, оставляет после себя модули

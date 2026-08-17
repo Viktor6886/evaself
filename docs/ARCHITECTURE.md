@@ -61,8 +61,8 @@ conversations — в `agent_conversations`. Перезапуск сервисо�
 Backend определяет язык только по содержательному сообщению (явный выбор имеет
 приоритет), валидирует IANA timezone и добавляет компактный доверенный блок
 `EVA_RUNTIME_CONTEXT`. Текст пользователя экранируется и помещается отдельно в
-`USER_MESSAGE`; SDK 0.5.5 не имеет отдельного типа системного context message,
-поэтому используется поддерживаемый SDK строковый `SendMessage`.
+`USER_MESSAGE`; отдельного типа системного context message в SDK нет,
+поэтому используется поддерживаемый строковый `SendMessage`.
 
 Синхронный путь ограничен: claim inbox, агрегированный runtime SQL,
 необязательный ограниченный graph query, один Letta turn, outbox и
@@ -82,19 +82,17 @@ DST. Неоднозначный город не угадывается: `Timezon
 одну естественную подсказку, учитывает cooldown/отказ и полностью подавляет
 дополнительные вопросы в кризисной или срочной теме.
 
-## Цели и граф
+## Цели
 
 Система «ВЕКТОР — Действие» хранится в `user_north`, `goals`,
 `goal_results`, `goal_dependencies`, `work_blocks`, `goal_reviews`,
 `goal_recommendations`, `user_strategies` и `learning_attempts`. Цель
-остаётся черновиком до явного подтверждения. Основная запись и её узлы/связи
-графа обновляются одной транзакцией application-layer сервисом.
+остаётся черновиком до явного подтверждения. Запись делает
+application-layer сервис одной транзакцией.
 
-`memory_nodes` и `memory_edges` изолированы по `user_id`. Первый выпуск
-использует FTS, trigram и графовые связи; embeddings необязательны.
-`GraphContextService` пропускает приветствия и простые команды, читает только
-активные нечувствительные узлы, ограничивает глубину двумя переходами,
-12 узлами, 18 связями и `statement_timeout`.
+Это продуктовые данные, а не память агента: Ева видит их через продуктовые
+инструменты. Графовой памяти в репозитории нет — она удалена вместе с
+остальным cognitive middleware.
 
 ## Conversations и память Letta
 
@@ -103,22 +101,18 @@ DST. Неоднозначный город не угадывается: `Timezon
 conversations создаются лениво официальным SDK и имеют собственные политики
 инструментов. Планировщик не пишет prompts в основной чат.
 
-Новые agents получают блоки `persona`, `human`, `current_state`,
-`goals_and_commitments`, `relationships_and_patterns`,
-`progress_and_hypotheses`. Отдельного блока `tools` нет. Из-за отсутствия
-CRUD memory blocks в SDK 0.5.5 существующие agents не пересоздаются:
-актуальные данные приходят через runtime context.
+Новые agents получают четыре блока: `persona`, `human`, `current_state`,
+`therapeutic_framework`. Подробности сверх блоков Ева ведёт в MemFS
+нативными инструментами памяти.
 
-Полная история хранится Letta. `conversation_highlights` содержит только
-значимые решения, обязательства, артефакты, источники и наблюдения.
-`EVA_CONVERSATION_MIRROR_ENABLED=false` фиксирует запрет полного зеркала по
-умолчанию.
+История, контекст и его сжатие принадлежат Letta. PostgreSQL переписку не
+зеркалирует и памятью агента не управляет: теневых значений блоков и выжимок
+разговора в схеме нет. Граница — `docs/letta-native.md`.
 
 ## Метрики
 
 Каждый Telegram turn пишет один структурированный лог с
-`runtime_context_ms`, `profile_check_ms`, `graph_query_ms`,
-`letta_turn_ms`, `outbox_insert_ms`, `telegram_send_ms`, `total_turn_ms` и
+`runtime_context_ms`, `profile_check_ms`, `letta_turn_ms`, `outbox_insert_ms`, `telegram_send_ms`, `total_turn_ms` и
 `db_query_count`. Это позволяет отдельно увидеть служебную задержку, LLM и
 доставку.
 
@@ -127,7 +121,7 @@ CRUD memory blocks в SDK 0.5.5 существующие agents не перес�
 Браузер обращается к `/api/v1/sdk/*`; внутренний Caddy добавляет
 `X-API-Key`. `eva-agent-service` выполняет list/retrieve/create/update/delete
 agents и list/retrieve/create/update conversations через management API
-официального SDK. Физическое удаление conversation в SDK 0.5.5 отсутствует,
+официального SDK. Физического удаления conversation в SDK нет,
 поэтому WebUI архивирует его. Чат возобновляет выбранную conversation через
 SDK-сессию.
 
@@ -147,7 +141,7 @@ Letta, не имеет Docker socket и работает только с общ�
 socket и принимает лишь фиксированный набор команд с проверкой имени
 сервиса. Пользовательские Base URL проходят через `OutboundGateway`.
 
-SDK 0.5.5 не содержит management-операций для изменения уже существующих
+Agent SDK не содержит management-операций для изменения уже существующих
 memory blocks, custom tools, MCP servers, skills и knowledge folders.
 Evaself не обходит это ограничение прямыми REST-запросами: такие секции
 read-only до появления соответствующих методов в официальном SDK.

@@ -91,8 +91,8 @@ Capability token Letta App Server также не возвращается: ра
 
 `admin-api` не обращается к Letta напрямую: сообщения он запрашивает у
 `eva-agent-service`, единственного компонента, которому разрешено говорить с
-App Server. Выдержки (`conversation_highlights`) читаются из PostgreSQL и
-остаются доступны, даже когда App Server недоступен.
+App Server. Пока App Server недоступен, переписка не читается: копии её в
+PostgreSQL нет.
 
 ## Блокировка пользователя
 

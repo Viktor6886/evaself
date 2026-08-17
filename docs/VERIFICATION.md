@@ -24,11 +24,11 @@ GitHub Actions выполняет:
     LLM, SDK-настроек и идентификаторов.
 18. HMAC, срок `auth_date` и запрет подмены Telegram ID во всех public
     WebApp-маршрутах;
-19. профиль, IANA timezone/DST, цели, граф, purpose conversations,
-    шесть memory blocks и backend-подтверждение удаления;
+19. профиль, IANA timezone/DST, цели, purpose conversations,
+    четыре memory blocks и backend-подтверждение удаления;
 20. durable inbox/outbox и разделение метрик PostgreSQL enqueue и Telegram
     delivery;
-21. выборочное `conversation_highlights` без таблицы полного transcript.
+21. отсутствие зеркала переписки в PostgreSQL: история живёт в Letta.
 
 ## Локальные команды
 
