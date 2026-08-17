@@ -184,27 +184,12 @@ test("обзор воспроизводим: те же данные — тот �
 function askDb(tables: Record<string, unknown[]>) {
   return withTenantScopes({
     query: async (sql: string) => {
-      const table = sql.includes("memory_nodes")
-        ? "memory_nodes"
-        : sql.includes("research_claim_sources")
-          ? "research"
-          : "records";
+      const table = sql.includes("research_claim_sources") ? "research" : "records";
       const rows = tables[table] ?? [];
       return { rows, rowCount: rows.length };
     },
   }) as never;
 }
-
-const MEMORY_ROW = {
-  id: "7",
-  title: "Любит бег по утрам",
-  text_content: null,
-  source_type: "conversation",
-  source_quote: "бегаю каждое утро",
-  confidence: "0.900",
-  updated_at: "2026-08-01T10:00:00.000Z",
-  rank: "0.5",
-};
 
 const RECORD_ROW = {
   kind: "journal_entries",
@@ -214,9 +199,9 @@ const RECORD_ROW = {
   recorded_at: "2026-08-13T06:00:00.000Z",
 };
 
-test("четыре источника остаются четырьмя разделами с доказательствами", async () => {
+test("три источника остаются тремя разделами с доказательствами", async () => {
   const answer = await asOwner(async () => await askEva(
-    askDb({ memory_nodes: [MEMORY_ROW], records: [RECORD_ROW], research: [] }),
+    askDb({ records: [RECORD_ROW], research: [] }),
     { id: ANNA.internalId, timezone: "Europe/Moscow" },
     { question: "бег" },
     {
@@ -227,13 +212,11 @@ test("четыре источника остаются четырьмя разд
   ));
   assert.deepEqual(
     answer.sections.map((section) => section.kind),
-    ["personal_memory", "structured_records", "external_sources", "model_conclusion"],
+    ["structured_records", "external_sources", "model_conclusion"],
   );
-  const memory = answer.sections[0]!;
-  assert.equal(memory.items[0]!.evidence[0]!.reference, "memory_nodes:7");
-  assert.equal(answer.sections[1]!.items[0]!.evidence[0]!.reference, "journal_entries:11");
+  assert.equal(answer.sections[0]!.items[0]!.evidence[0]!.reference, "journal_entries:11");
   // Вывод модели не может быть увереннее данных, из которых собран.
-  const conclusion = answer.sections[3]!.items[0]!;
+  const conclusion = answer.sections[2]!.items[0]!;
   assert.ok(conclusion.confidence <= 0.7, `уверенность вывода ${conclusion.confidence}`);
   assert.ok(conclusion.evidence.length > 0, "вывод без указания, из чего он сделан");
 });
@@ -243,11 +226,11 @@ test("выключенная подсистема объявляется вык�
     askDb({ records: [RECORD_ROW] }),
     { id: ANNA.internalId, timezone: "Europe/Moscow" },
     { question: "бег" },
-    { memoryEnabled: false, externalEnabled: false },
+    { externalEnabled: false },
   ));
-  const memory = answer.sections.find((section) => section.kind === "personal_memory")!;
-  assert.equal(memory.available, false);
-  assert.match(memory.unavailable_reason!, /выключена/);
+  const external = answer.sections.find((section) => section.kind === "external_sources")!;
+  assert.equal(external.available, false);
+  assert.match(external.unavailable_reason!, /выключен/);
   const model = answer.sections.find((section) => section.kind === "model_conclusion")!;
   assert.equal(model.available, false, "не подключённый вывод не должен выглядеть пустым");
 });

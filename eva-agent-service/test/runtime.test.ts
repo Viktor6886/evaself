@@ -268,13 +268,16 @@ test("new Eva agents receive the structured memory blueprint", () => {
       "persona",
       "human",
       "current_state",
-      "goals_and_commitments",
-      "relationships_and_patterns",
-      "progress_and_hypotheses",
+      "therapeutic_framework",
     ],
   );
-  assert.equal(blocks.length, 6);
+  assert.equal(blocks.length, 4);
   assert.equal(blocks.some((block) => block.label === "tools"), false);
+  // Рамка работы всегда в контексте: она нужна раньше, чем Ева решит,
+  // какой Skill открыть.
+  const framework = blocks.find((block) => block.label === "therapeutic_framework")!;
+  assert.match(framework.value, /AUTO/);
+  assert.match(framework.value, /гипотез|Skill/i);
 });
 
 function toolFactory(todoistApiToken = "") {
@@ -302,13 +305,10 @@ test("Agent SDK registers every migrated external tool", () => {
     "save_budget_record",
     "get_budget_records",
     "save_task",
-    "save_task_to_nocodb",
-    "get_tasks_from_nocodb",
+    "get_tasks",
     "set_reaction",
     "web_search",
     "PERPLEXITY_SEARCH",
-    "LIGHTRAG_INSERT",
-    "LIGHTRAG_QUERY",
     "TODOIST_CREATE_TASK",
     "TODOIST_UPDATE_TASK",
     "TODOIST_CLOSE_TASK",
@@ -492,4 +492,90 @@ test("сообщение о сделанном сверяется с проме�
   assert.equal(context.sincePreviousMessage, "30 секунд");
   const prompt = builder.wrapUserMessage(context, "все помыл");
   assert.match(prompt, /не подтверждай выполнение и не хвали/);
+});
+
+/**
+ * Что продуктовый слой отдаёт Letta.
+ *
+ * Регистрация инструментов — единственное, чем Evaself участвует в их
+ * наборе: выбирает и вызывает их Letta. Поэтому проверяется наличие
+ * инструмента и его ответ, а не то, когда он будет вызван.
+ */
+test("продуктовые инструменты зарегистрированы и отвечают", async () => {
+  const runtime = {
+    userId: 7, telegramId: 42, chatId: 42, conversationId: "conv-1",
+    purpose: "chat" as const, timezone: "Europe/Amsterdam",
+    responseMode: "text" as const, useEmoji: true,
+  };
+  const db = {
+    getAgentRuntimeContext: async () => runtime,
+    getQuotaStatus: async () => [],
+    incrementUsage: async () => 0,
+    query: async () => ({ rows: [], rowCount: 0 }),
+    withUserScope: async <T>(_scope: unknown, work: () => Promise<T>) => await work(),
+    transaction: async <T>(work: (client: unknown) => Promise<T>) =>
+      await work({ query: async () => ({ rows: [], rowCount: 0 }) }),
+  };
+  const factory = new AgentToolFactory(
+    { searxngUrl: "http://search", todoistApiToken: "", vectorGoalsEnabled: true } as never,
+    db as never, { setReaction: async () => {} } as never,
+    { debug() {}, info() {}, warn() {}, error() {} },
+  );
+  const tools = new Map(factory.forConversation("conv-1").map((tool) => [tool.name, tool]));
+
+  // Продуктовые области, которые Ева обслуживает своими инструментами.
+  for (const name of [
+    "save_task", "get_tasks", "upsert_goal", "confirm_goal",
+    "upsert_user_profile_field", "get_user_time_context",
+    "get_psychological_test_results", "update_response_mode",
+  ]) {
+    assert.ok(tools.has(name), `инструмент ${name} не зарегистрирован`);
+  }
+
+  // Часовой пояс — продуктовые данные, и Ева берёт их отсюда, а не из
+  // собственных представлений о времени.
+  const time = await tools.get("get_user_time_context")!.execute("call-1", {});
+  const timeDetails = time.details as { timezone: string; local_date: string };
+  assert.equal(timeDetails.timezone, "Europe/Amsterdam");
+  assert.match(timeDetails.local_date, /^\d{4}-\d{2}-\d{2}$/);
+
+  // Психометрия ещё не подключена: заглушка честно говорит об этом и не
+  // придумывает результатов.
+  const tests = await tools.get("get_psychological_test_results")!.execute("call-2", {});
+  assert.deepEqual(tests.details, { status: "not_implemented", results: [] });
+});
+
+/** Навыки лежат там, где их находит нативный механизм Letta. */
+test("психологические навыки доступны нативному механизму Letta", async (context) => {
+  const { readdir, readFile } = await import("node:fs/promises");
+  const root = new URL("../../skills/", import.meta.url);
+  // Образ сервиса каталога навыков не несёт: он монтируется в App Server
+  // отдельно. Проверять там нечего, и выдавать это за проверку нельзя.
+  let entries: string[];
+  try {
+    entries = (await readdir(root, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+  } catch {
+    context.skip("каталог навыков вне образа сервиса; проверяется на репозитории");
+    return;
+  }
+  for (const required of [
+    "therapeutic-conversation", "cbt", "act", "motivational-interviewing",
+    "schema-therapy", "emotion-regulation", "behavioral-activation",
+    "relationships-boundaries", "goals-values", "journaling-reflection",
+    "memory-hygiene", "crisis-response",
+  ]) {
+    assert.ok(entries.includes(required), `навык ${required} отсутствует`);
+  }
+
+  // Нативный механизм читает frontmatter: без `name` и `description`
+  // навык не будет ни найден, ни открыт.
+  for (const name of entries) {
+    const body = await readFile(new URL(`${name}/SKILL.md`, root), "utf8");
+    const frontmatter = /^---\n([\s\S]*?)\n---\n/u.exec(body);
+    assert.ok(frontmatter, `${name}: нет frontmatter`);
+    assert.match(frontmatter[1]!, /^name: .+$/mu, `${name}: нет name`);
+    assert.match(frontmatter[1]!, /^description: .+$/mu, `${name}: нет description`);
+  }
 });

@@ -156,18 +156,6 @@ fi
 
 load_env
 
-# Batch 14 flags are installer-owned and deliberately default off. Re-runs preserve an
-# operator's explicit value; rollback is simply setting either flag to false.
-ensure_feature_flag() {
-	local name="$1"
-	if ! grep -q "^${name}=" "$ENV_FILE"; then
-		printf '\n%s=false\n' "$name" >> "$ENV_FILE"
-	fi
-}
-ensure_feature_flag EVA_CORE_SKILLS
-ensure_feature_flag EVA_SKILL_ROUTER
-load_env
-
 [ -n "${DOMAIN:-}" ] || die "в .env нет DOMAIN — выполните make configure"
 "$SCRIPT_DIR/ensure-admin-master-key.sh"
 load_env

@@ -8,12 +8,7 @@ import type { SupportedLanguage } from "./i18n/language-resolver.js";
 import type { LettaService } from "./letta.js";
 import type { LlmManager } from "./llm.js";
 import type { Logger } from "./logger.js";
-import type { GraphContextService } from "./memory/graph-context.js";
-import type { ConversationHighlightService } from "./memory/conversation-highlights.js";
-import { decideDeepRecall, type DeepRecall } from "./memory/retrieval/deep-recall.js";
 import type { ChannelLinkService } from "./channels/channel-links.js";
-import type { ConversationContextManager } from "./conversations/context-management.js";
-import type { EpisodeTracker } from "./memory/episodes.js";
 import type { UserProfileService } from "./profile/profile-service.js";
 import type { UserTurnLock } from "./turns/user-turn-lock.js";
 import type { RuntimeContextBuilder } from "./runtime/runtime-context.js";
@@ -78,29 +73,11 @@ export class EvaWorkflow {
     private readonly profile: UserProfileService,
     private readonly logger: Logger,
     private readonly crisis?: CrisisMonitor,
-    private readonly graphContext?: GraphContextService,
-    private readonly highlights?: ConversationHighlightService,
     /**
      * Наблюдатель хода. Необязателен намеренно: без него путь обработки
      * сообщения тот же самый, что и до этого шага.
      */
     private readonly turns?: TurnLifecycle,
-    /**
-     * Детектор эпизодов. Наблюдает границы разговора и ничего не ждёт:
-     * сигнал принимается синхронно, запись закрытого эпизода уходит в
-     * фон. Ответ человеку от этого не замедляется — то же свойство, что
-     * у выжимок разговора рядом.
-     */
-    private readonly episodes?: EpisodeTracker,
-    /**
-     * Deep Recall. Необязателен: без него ход идёт как прежде, на
-     * актуальных данных. Вызывается не на каждом сообщении — решение
-     * принимает детерминированный код, а не модель. Параметр стоит
-     * последним намеренно: вставка в середину списка сдвинула бы все
-     * позиционные аргументы у существующих вызывающих.
-     */
-    private readonly deepRecall?: DeepRecall,
-    private readonly contextManager?: ConversationContextManager,
     /**
      * Связь сообщения канала с ходом и conversation (шаг 25, пункт 2).
      * Отсутствие сервиса допустимо: связь — вспомогательная запись, и
@@ -204,7 +181,6 @@ export class EvaWorkflow {
     const metrics = {
       runtime_context_ms: 0,
       profile_check_ms: 0,
-      graph_query_ms: 0,
       // Измеренный размер контекста: сумма фактических размеров уровней.
       context_characters: 0,
       letta_turn_ms: 0,
@@ -413,17 +389,8 @@ export class EvaWorkflow {
         // промежуток между сообщениями. Читается она здесь, потому что
         // этот же запрос её и перезаписывает.
         const previousUserMessageAt = await this.db.recordUserMessage(user.id);
-        let conversationId = link.conversation_id;
+        const conversationId = link.conversation_id;
         if (!conversationId) throw new Error("У агента отсутствует активный conversation");
-        if (this.contextManager) {
-          conversationId = await this.contextManager.beforeTurn({
-            agentId: link.agent_id,
-            conversationId,
-            userId: user.id,
-            messageCount: Number(link.message_count ?? 0),
-          });
-        }
-
         // Сообщение Telegram связывается с тем же ходом и той же
         // conversation, что и действие из Mini App. Ключ — пара
         // «чат:сообщение»: идентификатор сообщения уникален внутри
@@ -445,37 +412,6 @@ export class EvaWorkflow {
         }
 
         await this.moveTurn(turnHandle, "context_building");
-        const graph = await this.graphContext?.findRelevant(user.id, prompt);
-        metrics.graph_query_ms = graph?.elapsedMs ?? 0;
-        if (graph?.used) {
-          this.logger.debug("Графовый контекст обработан", {
-            userId: user.id,
-            graph_query_ms: graph.elapsedMs,
-            graph_nodes: graph.relevantMemory.length,
-            graph_timeout: graph.timedOut,
-          });
-        }
-        // Обращение к истории — отдельный инструмент со своим бюджетом.
-        // На обычном сообщении решение отрицательное, и поиск не идёт.
-        const recallDecision = this.deepRecall?.active
-          ? decideDeepRecall({
-            message: prompt,
-            contextCandidates: graph?.relevantMemory.length ?? 0,
-          })
-          : null;
-        const recalled = recallDecision?.needed
-          ? await this.deepRecall!.recall({
-            userId: user.id, message: prompt, decision: recallDecision,
-          }).catch(() => null)
-          : null;
-        if (recallDecision?.needed) {
-          this.logger.debug("Deep Recall вызван", {
-            userId: user.id,
-            reason: recallDecision.reason,
-            lines: recalled?.lines.length ?? 0,
-            degraded: recalled?.degraded ?? false,
-          });
-        }
         const context = await this.runtimeContext.build({
           userId: user.id,
           conversationId,
@@ -484,7 +420,6 @@ export class EvaWorkflow {
             update.message.text?.trim() ||
             update.message.caption?.trim() ||
             (update.kind === "voice" ? prompt : ""),
-          relevantMemory: graph?.relevantMemory,
           turnId: turnHandle?.runId,
           previousUserMessageAt,
         });
@@ -536,13 +471,10 @@ export class EvaWorkflow {
                 {
                   messageSource: update.kind,
                   crisisLevel: signal?.severity ?? "none",
-                  knowledge: recalled?.lines ?? [],
-                  measure: (levels) => {
-                    // Фактический размер каждого уровня, а не обещание
-                    // уложиться: без измерения бюджет — это намерение.
-                    metrics.context_characters = levels
-                      .reduce((sum, level) => sum + level.characters, 0);
-                  },
+                  // Фактический размер собранного контекста, а не
+                  // обещание уложиться: без измерения бюджет — это
+                  // намерение.
+                  measure: (characters) => { metrics.context_characters = characters; },
                 },
               ),
               {
@@ -593,35 +525,12 @@ export class EvaWorkflow {
             reasoning_items: answer.reasoning.length,
           });
         }
-        this.highlights?.schedule(user.id, conversationId);
-        // The bounded reflection counter observes canonical user ingress.
-        // Assistant output must neither advance it nor replace its reference.
-        this.episodes?.observe({
-          userId: user.id,
-          conversationId,
-          signal: {
-            kind: "message",
-            text: prompt,
-            messageId: `telegram:${update.updateId}`,
-            at: new Date(),
-          },
-        });
-        // Граница эпизода: ход завершён. Детектор решает сам, закрывать
-        // ли эпизод, — короткий обмен репликами его не закрывает.
-        this.episodes?.observe({
-          userId: user.id,
-          conversationId,
-          signal: {
-            kind: "turn_completed",
-            at: new Date(),
-          },
-        });
         const turn = answer;
 
         // Последняя проверка барьера — перед самой доставкой. Между
-        // концом генерации и отправкой успевают выполниться связи,
-        // отметка агента и планирование выжимок; отмена, пришедшая в
-        // это окно, иначе не остановила бы ответ.
+        // концом генерации и отправкой успевают выполниться связи и
+        // отметка агента; отмена, пришедшая в это окно, иначе не
+        // остановила бы ответ.
         if (turnHandle && this.turns && await this.turns.isCancelled(turnHandle)) {
           await this.moveTurn(turnHandle, "cancelling", { detail: { reason: "cancelled" } });
           await this.moveTurn(turnHandle, "cancelled");

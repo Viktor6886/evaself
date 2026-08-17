@@ -76,10 +76,7 @@ export interface Config {
   defaultTimezone: string;
   profileCompletionEnabled: boolean;
   vectorGoalsEnabled: boolean;
-  graphMemoryEnabled: boolean;
-  graphContextTimeoutMs: number;
   profileCacheTtlSeconds: number;
-  conversationMirrorEnabled: boolean;
   outboxEnabled: boolean;
   /**
    * Запись жизненного цикла хода в `turn_runs`. Shadow-режим: путь
@@ -141,10 +138,7 @@ export interface Config {
    */
   jobsMirrorMode: boolean;
   /** Универсальный фоновый ход агента (рефлексия, отчёты, исследования). */
-  agentJobsEnabled: boolean;
-  subagentsEnabled: boolean;
-  reflectionSubagentEnabled: boolean;
-  langchainEnabled: boolean;
+  knowledgeUploadsEnabled: boolean;
   researchOrchestratorEnabled: boolean;
   /**
    * Проверка контракта Letta на живом развёртывании.
@@ -155,7 +149,7 @@ export interface Config {
    * образа. Выключенный флаг оставляет прежнее поведение — расхождение
    * попадает в журнал и не мешает старту.
    */
-  lettaSdk060Verify: boolean;
+  lettaContractVerify: boolean;
   /** Административный control plane Letta (`@letta-ai/letta-client`). */
   lettaAdminClientEnabled: boolean;
   /** HTTP-адрес App Server для control plane. Пустой — путь недоступен. */
@@ -184,7 +178,6 @@ export interface Config {
    */
   retentionEnforcementEnabled: boolean;
   /** Least-privilege manifest gateway for SDK tools. */
-  toolGatewayEnabled: boolean;
   /** Durable PostgreSQL-backed SDK tool approvals. */
   toolApprovalsEnabled: boolean;
   /**
@@ -192,17 +185,10 @@ export interface Config {
    * Выключенный флаг оставляет граф памяти прежним — новые таблицы
    * существуют, но никто в них не пишет.
    */
-  temporalMemoryEnabled: boolean;
   /**
    * Детектор эпизодов и Memory Curator. Зависит от temporal-памяти:
    * Curator пишет только через неё, и включать его отдельно нечем.
    */
-  memoryCuratorEnabled: boolean;
-  memoryDoctorEnabled: boolean;
-  hybridRetrievalEnabled: boolean;
-  deepRecallEnabled: boolean;
-  coreSkillsEnabled: boolean;
-  skillRouterEnabled: boolean;
   /**
    * Дневник Mini App: запись дня, карточки людей, недельный обзор и
    * «Спросить Еву» с разделением источников. Выключено — маршрутов
@@ -367,10 +353,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     defaultTimezone: str("TZ", "UTC"),
     profileCompletionEnabled: bool("EVA_PROFILE_COMPLETION_ENABLED", true),
     vectorGoalsEnabled: bool("EVA_VECTOR_GOALS_ENABLED", true),
-    graphMemoryEnabled: bool("EVA_GRAPH_MEMORY_ENABLED", true),
-    graphContextTimeoutMs: int("EVA_GRAPH_CONTEXT_TIMEOUT_MS", 75),
     profileCacheTtlSeconds: int("EVA_PROFILE_CACHE_TTL_SECONDS", 60),
-    conversationMirrorEnabled: bool("EVA_CONVERSATION_MIRROR_ENABLED", false),
     outboxEnabled: bool("EVA_OUTBOX_ENABLED", true),
     turnLifecycleEnabled: bool("EVA_TURN_LIFECYCLE", false),
     parallelInboxEnabled: bool("EVA_PARALLEL_INBOX", false),
@@ -398,12 +381,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     // совпадения выборок обязана сначала понаблюдать, а не начать
     // писать людям параллельно со старым интервалом.
     jobsMirrorMode: bool("EVA_JOBS_MIRROR", true),
-    agentJobsEnabled: bool("EVA_AGENT_JOBS", false),
-    subagentsEnabled: bool("EVA_SUBAGENTS", false),
-    reflectionSubagentEnabled: bool("EVA_REFLECTION_SUBAGENT", false),
-    langchainEnabled: bool("EVA_LANGCHAIN", false),
+    knowledgeUploadsEnabled: bool("EVA_KNOWLEDGE_UPLOADS", false),
     researchOrchestratorEnabled: bool("EVA_RESEARCH_ORCHESTRATOR", false),
-    lettaSdk060Verify: bool("EVA_LETTA_SDK_060", false),
+    lettaContractVerify: bool("EVA_LETTA_CONTRACT_VERIFY", false),
     lettaAdminClientEnabled: bool("EVA_LETTA_ADMIN_CLIENT", false),
     lettaAdminBaseUrl: str("EVA_LETTA_ADMIN_BASE_URL"),
     checkinMorningHour: clampedInt("EVA_CHECKIN_MORNING_HOUR", 9, 5, 12),
@@ -416,15 +396,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     langfuseSecretKey: str("LANGFUSE_SECRET_KEY"),
     telemetryPseudonymSecret: str("EVA_TELEMETRY_PSEUDONYM_SECRET"),
     retentionEnforcementEnabled: bool("EVA_RETENTION_ENFORCEMENT", false),
-    toolGatewayEnabled: bool("EVA_TOOL_GATEWAY", false),
     toolApprovalsEnabled: bool("EVA_TOOL_APPROVALS", false),
-    temporalMemoryEnabled: bool("EVA_TEMPORAL_MEMORY", false),
-    memoryCuratorEnabled: bool("EVA_MEMORY_CURATOR", false),
-    memoryDoctorEnabled: bool("EVA_MEMORY_DOCTOR", false),
-    hybridRetrievalEnabled: bool("EVA_HYBRID_RETRIEVAL", false),
-    deepRecallEnabled: bool("EVA_DEEP_RECALL", false),
-    coreSkillsEnabled: bool("EVA_CORE_SKILLS", false),
-    skillRouterEnabled: bool("EVA_SKILL_ROUTER", false),
     miniAppJournalEnabled: bool("EVA_MINIAPP_JOURNAL_V2", false),
     journalVoiceRetentionDays: clampedInt(
       "EVA_JOURNAL_VOICE_RETENTION_DAYS",
@@ -482,49 +454,6 @@ export function configWarnings(config: Config): string[] {
   // Проактивные задания без самого слоя заданий — флаг, который ничего
   // не включает: очередей нет, публикатор не работает, сверка зеркала
   // не выполняется ни разу.
-  // Curator существует только как задание очереди и пишет только через
-  // temporal-память. Каждое из этих условий по отдельности выглядит
-  // включённым флагом, который не делает ничего.
-  if (config.memoryCuratorEnabled && !config.temporalMemoryEnabled) {
-    warnings.push(
-      "EVA_MEMORY_CURATOR включён, а EVA_TEMPORAL_MEMORY выключен: "
-        + "кандидатов некуда записывать, Curator не собирается",
-    );
-  }
-  // Diagnostics without the temporal layer has nothing to diagnose: the
-  // versions, evidence and conflicts it reads on are not written at all.
-  if (config.memoryDoctorEnabled && !config.temporalMemoryEnabled) {
-    warnings.push(
-      "EVA_MEMORY_DOCTOR включён, а EVA_TEMPORAL_MEMORY выключен: "
-        + "версий, доказательств и конфликтов ещё нет, диагностировать нечего",
-    );
-  }
-  if (config.memoryDoctorEnabled && !config.bullmqJobsEnabled) {
-    warnings.push(
-      "EVA_MEMORY_DOCTOR включён, а EVA_BULLMQ_JOBS выключен: "
-        + "диагностика выполняется только как фоновое задание и сейчас не запускается",
-    );
-  }
-  // Deep Recall — это обращение к истории через тот же гибридный поиск.
-  // Без него инструмент объявлен, но искать ему нечем.
-  if (config.deepRecallEnabled && !config.hybridRetrievalEnabled) {
-    warnings.push(
-      "EVA_DEEP_RECALL включён, а EVA_HYBRID_RETRIEVAL выключен: "
-        + "инструменту нечем искать, обращение к истории не работает",
-    );
-  }
-  if (config.hybridRetrievalEnabled && !config.temporalMemoryEnabled) {
-    warnings.push(
-      "EVA_HYBRID_RETRIEVAL включён, а EVA_TEMPORAL_MEMORY выключен: "
-        + "поиск «на дату» работает по снимку, а версий фактов ещё нет",
-    );
-  }
-  if (config.memoryCuratorEnabled && !(config.bullmqJobsEnabled && config.agentJobsEnabled)) {
-    warnings.push(
-      "EVA_MEMORY_CURATOR включён, а EVA_BULLMQ_JOBS или EVA_AGENT_JOBS выключен: "
-        + "Curator выполняется только как фоновое задание и сейчас не запускается",
-    );
-  }
   if ((config.bullmqProactiveEnabled || config.bullmqMaintenanceEnabled)
       && !config.bullmqJobsEnabled) {
     warnings.push(

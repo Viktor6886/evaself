@@ -122,7 +122,7 @@ export const RETENTION_CLASSES: readonly RetentionClass[] = [
     action: "manual",
     settingKey: null,
     defaultDays: null,
-    targets: "memory_nodes, goals, tasks — удаляются по решению человека",
+    targets: "goals, tasks, записи дневника — удаляются по решению человека",
   },
   {
     code: "user_documents",

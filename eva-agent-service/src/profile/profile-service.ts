@@ -1,5 +1,4 @@
 import type { Database } from "../db.js";
-import type { GraphRepository } from "../memory/graph-repository.js";
 import type { RuntimeContextBuilder } from "../runtime/runtime-context.js";
 import type { TimezoneResolver } from "../time/timezone-resolver.js";
 
@@ -50,7 +49,6 @@ export class UserProfileService {
     private readonly db: Database,
     private readonly timezoneResolver?: TimezoneResolver,
     private readonly runtimeContext?: RuntimeContextBuilder,
-    private readonly graph?: GraphRepository,
   ) {}
 
   async upsert(input: {
@@ -110,12 +108,9 @@ export class UserProfileService {
         ],
       );
       const saved = rows[0]!;
-      await this.graph?.syncProfile(queryable, input.userId, saved);
       return saved;
     };
-    const saved = this.graph
-      ? await this.db.transaction(async (client) => await persist(client as never))
-      : await persist(this.db);
+    const saved = await persist(this.db);
     if (status === "confirmed") await this.syncConfirmed(input.userId, saved);
     this.runtimeContext?.invalidate(input.userId);
     return saved;
@@ -147,12 +142,9 @@ export class UserProfileService {
       );
       const saved = rows[0];
       if (!saved) throw new Error("Сведение для подтверждения не найдено");
-      await this.graph?.syncProfile(queryable, userId, saved);
       return saved;
     };
-    const saved = this.graph
-      ? await this.db.transaction(async (client) => await save(client as never))
-      : await save(this.db);
+    const saved = await save(this.db);
     this.runtimeContext?.invalidate(userId);
     return saved;
   }
@@ -177,12 +169,9 @@ export class UserProfileService {
         [userId, fieldKey],
       );
       if (!rows[0]) throw new Error("Неизвестное поле профиля");
-      await this.graph?.syncProfile(queryable, userId, rows[0]);
       return rows[0];
     };
-    const saved = this.graph
-      ? await this.db.transaction(async (client) => await save(client as never))
-      : await save(this.db);
+    const saved = await save(this.db);
     this.runtimeContext?.invalidate(userId);
     return saved;
   }

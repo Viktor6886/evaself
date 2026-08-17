@@ -232,16 +232,15 @@ test("без ключа отсутствие строки означает от�
 // ---------------------------------------------------------------------
 // переписка
 // ---------------------------------------------------------------------
-test("недоступная Letta не рушит запрос: выдержки всё равно приходят", async () => {
+test("недоступная Letta не рушит запрос: список диалогов всё равно приходит", async () => {
   const pool = fakePool([
     [{ telegram_id: "555", username: "u", first_name: "И" }],
-    [{ id: 1, title: "выдержка" }],
     [{ conversation_id: "c1" }],
   ]);
   const result = await build(pool, fakeAgent(null, true)).conversation("1", "50");
   assert.deepEqual(result.messages, []);
   assert.match(result.messages_error, /недоступен/);
-  assert.equal(result.highlights.length, 1, "выдержки читаются из PostgreSQL");
+  assert.equal(result.conversations.length, 1, "диалоги читаются из PostgreSQL");
 });
 
 test("сообщения достаются из ответа рантайма", async () => {

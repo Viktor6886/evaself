@@ -585,12 +585,7 @@ async function runTelegramTurn(
     {} as never,
     logger as never,
     undefined,
-    undefined,
-    undefined,
     turns as never,
-    undefined,
-    undefined,
-    undefined,
     {
       link: async (userId: number, input: Record<string, unknown>) => {
         if (options.failChannelLink) throw new Error("канал недоступен");

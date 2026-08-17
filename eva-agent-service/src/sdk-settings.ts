@@ -1,4 +1,4 @@
-import type { PermissionMode, ReasoningEffort, SkillSource } from "@letta-ai/letta-agent-sdk";
+import type { PermissionMode, ReasoningEffort } from "@letta-ai/letta-agent-sdk";
 
 import type { Config } from "./config.js";
 import type { Database, SdkSettingsRow } from "./db.js";
@@ -14,12 +14,7 @@ export interface SdkSettingsInput {
   permission_mode?: PermissionMode;
   reasoning_effort?: ReasoningEffort;
   memfs_enabled?: boolean;
-  system_prompt?: string | null;
   base_tools?: string[] | null;
-  allowed_tools?: string[] | null;
-  disallowed_tools?: string[];
-  skill_sources?: SkillSource[];
-  system_info_reminder?: boolean;
   dreaming?: Record<string, unknown>;
   model_settings?: Record<string, unknown>;
   default_context_window?: number | null;
@@ -31,13 +26,6 @@ export interface SdkSettingsInput {
   session_idle_ms?: number;
   turn_timeout_ms?: number;
   app_server_request_timeout_ms?: number;
-  automatic_context_management?: {
-    enabled: boolean;
-    compaction_message_threshold: number;
-    rotation_message_threshold: number;
-    compaction_mode: "sliding_window" | "all" | "self_compact_sliding_window" | "self_compact_all";
-    sliding_window_percentage: number;
-  };
 }
 
 export interface PublicSdkSettings extends SdkSettingsInput {
@@ -50,8 +38,8 @@ export interface PublicSdkSettings extends SdkSettingsInput {
 
 const PERMISSION_MODES = new Set(["standard", "acceptEdits", "unrestricted", "strict"]);
 const REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
-const SKILL_SOURCES = new Set(["bundled", "global", "agent", "project"]);
 const DREAMING_TRIGGERS = new Set(["off", "step-count", "compaction-event"]);
+const DREAMING_BEHAVIORS = new Set(["reminder", "auto-launch"]);
 
 export class SdkSettingsManager {
   constructor(
@@ -131,57 +119,15 @@ export function validateSettings(input: SdkSettingsInput): Required<SdkSettingsI
   if (!REASONING_EFFORTS.has(reasoningEffort)) {
     throw badRequest("reasoning_effort должен быть none, minimal, low, medium, high или xhigh");
   }
-  const skillSources = stringArray(input.skill_sources ?? [], "skill_sources", 4) as SkillSource[];
-  if (skillSources.some((source) => !SKILL_SOURCES.has(source))) {
-    throw badRequest("skill_sources содержит неизвестный источник");
-  }
-  const dreaming = plainObject(input.dreaming ?? { trigger: "off" }, "dreaming");
-  const trigger = String(dreaming.trigger ?? "off");
+  const dreaming = plainObject(input.dreaming ?? { trigger: "compaction-event" }, "dreaming");
+  const trigger = String(dreaming.trigger ?? "compaction-event");
   if (!DREAMING_TRIGGERS.has(trigger)) throw badRequest("Некорректный dreaming.trigger");
-  if (dreaming.behavior !== undefined) {
-    throw badRequest(
-      "dreaming.behavior пока не поддерживается официальным SDK для self-hosted App Server",
-    );
+  // `behavior` — часть публичного API создания агента в SDK 0.7.1.
+  // Не передан — остаётся умолчание harness, а не наше предположение.
+  if (dreaming.behavior !== undefined && !DREAMING_BEHAVIORS.has(String(dreaming.behavior))) {
+    throw badRequest("dreaming.behavior должен быть reminder или auto-launch");
   }
   if (dreaming.stepCount !== undefined) integer(dreaming.stepCount, "dreaming.stepCount", 1, 100000);
-  if ((input.disallowed_tools?.length ?? 0) > 0) {
-    throw badRequest(
-      "disallowed_tools пока не поддерживается официальным SDK для self-hosted App Server; используйте allowed_tools",
-    );
-  }
-  if (input.system_info_reminder === true) {
-    throw badRequest(
-      "system_info_reminder пока не поддерживается официальным SDK для self-hosted App Server",
-    );
-  }
-  const automaticInput = plainObject(
-    input.automatic_context_management ?? {},
-    "automatic_context_management",
-  );
-  const compactionThreshold = integer(
-    automaticInput.compaction_message_threshold ?? 300,
-    "automatic_context_management.compaction_message_threshold",
-    10,
-    100000,
-  );
-  const rotationThreshold = integer(
-    automaticInput.rotation_message_threshold ?? 600,
-    "automatic_context_management.rotation_message_threshold",
-    20,
-    100000,
-  );
-  if (rotationThreshold <= compactionThreshold) {
-    throw badRequest("rotation_message_threshold должен быть больше compaction_message_threshold");
-  }
-  const compactionMode = String(automaticInput.compaction_mode ?? "sliding_window");
-  if (!new Set(["sliding_window", "all", "self_compact_sliding_window", "self_compact_all"]).has(compactionMode)) {
-    throw badRequest("Некорректный automatic_context_management.compaction_mode");
-  }
-  const slidingWindowPercentage = Number(automaticInput.sliding_window_percentage ?? 0.5);
-  if (!Number.isFinite(slidingWindowPercentage) || slidingWindowPercentage <= 0 || slidingWindowPercentage >= 1) {
-    throw badRequest("sliding_window_percentage должен быть больше 0 и меньше 1");
-  }
-
   return {
     agent_name_prefix: text(input.agent_name_prefix ?? "eva", "agent_name_prefix", 1, 80),
     default_description: text(input.default_description ?? "", "default_description", 0, 1000),
@@ -191,12 +137,7 @@ export function validateSettings(input: SdkSettingsInput): Required<SdkSettingsI
     permission_mode: permission,
     reasoning_effort: reasoningEffort,
     memfs_enabled: boolean(input.memfs_enabled, true),
-    system_prompt: nullableText(input.system_prompt, "system_prompt", 100000),
     base_tools: nullableStringArray(input.base_tools, "base_tools", 128),
-    allowed_tools: nullableStringArray(input.allowed_tools, "allowed_tools", 128),
-    disallowed_tools: stringArray(input.disallowed_tools ?? [], "disallowed_tools", 128),
-    skill_sources: skillSources,
-    system_info_reminder: boolean(input.system_info_reminder, false),
     dreaming,
     model_settings: plainObject(input.model_settings ?? {}, "model_settings"),
     default_context_window:
@@ -221,13 +162,6 @@ export function validateSettings(input: SdkSettingsInput): Required<SdkSettingsI
       1000,
       3600000,
     ),
-    automatic_context_management: {
-      enabled: boolean(automaticInput.enabled, false),
-      compaction_message_threshold: compactionThreshold,
-      rotation_message_threshold: rotationThreshold,
-      compaction_mode: compactionMode as "sliding_window" | "all" | "self_compact_sliding_window" | "self_compact_all",
-      sliding_window_percentage: slidingWindowPercentage,
-    },
   };
 }
 
@@ -236,7 +170,6 @@ function runtimeFromRow(row: SdkSettingsRow): RuntimeSdkSettings {
   return {
     ...settings,
     permissionMode: settings.permission_mode,
-    skillSources: settings.skill_sources,
   };
 }
 
@@ -250,12 +183,7 @@ function rowToInput(row: SdkSettingsRow): Required<SdkSettingsInput> {
     permission_mode: row.permission_mode,
     reasoning_effort: row.reasoning_effort,
     memfs_enabled: row.memfs_enabled,
-    system_prompt: row.system_prompt,
     base_tools: row.base_tools,
-    allowed_tools: row.allowed_tools,
-    disallowed_tools: row.disallowed_tools,
-    skill_sources: row.skill_sources,
-    system_info_reminder: row.system_info_reminder,
     dreaming: row.dreaming,
     model_settings: row.model_settings,
     default_context_window: row.default_context_window,
@@ -267,7 +195,6 @@ function rowToInput(row: SdkSettingsRow): Required<SdkSettingsInput> {
     session_idle_ms: row.session_idle_ms,
     turn_timeout_ms: row.turn_timeout_ms,
     app_server_request_timeout_ms: row.app_server_request_timeout_ms,
-    automatic_context_management: row.automatic_context_management,
   };
 }
 
@@ -280,10 +207,6 @@ function text(value: unknown, field: string, min: number, max: number): string {
   return trimmed;
 }
 
-function nullableText(value: unknown, field: string, max: number): string | null {
-  if (value == null || value === "") return null;
-  return text(value, field, 0, max);
-}
 
 function stringArray(value: unknown, field: string, maxItems: number): string[] {
   if (!Array.isArray(value) || value.length > maxItems) {

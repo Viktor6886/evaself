@@ -1,20 +1,28 @@
 # skills
 
-Версионируемые skills Letta: один каталог и `SKILL.md` на каждый навык.
+Навыки Letta в стандартном виде: один каталог и `SKILL.md` на навык.
+Каталог монтируется в App Server как `/data/letta/.skills`, и Letta
+открывает нужный навык сама по его `description` — отдельного роутера
+навыков в Evaself нет и быть не должно.
 
 ```text
 skills/
-├── Cognitive Toolkit/SKILL.md          — CBT/DBT-упражнения для самопомощи
-├── Define Goal/SKILL.md                — определение целей из намерений
-├── Elicitation/SKILL.md                — профилирование через разговор
-├── memory-hygiene/SKILL.md             — гигиена memory block
-├── Motivational Interviewing/SKILL.md  — работа с амбивалентностью
-├── reflection-session/SKILL.md         — структура саморефлексии
-├── Socratic Method/SKILL.md            — самопознание через вопросы
-├── Sustained Presence/SKILL.md         — эмоциональное присутствие
-└── vector-action/SKILL.md              — система целей VECTOR-Action
+├── therapeutic-conversation/   — базовый разговор о трудном
+├── cbt/                        — разбор автоматической мысли
+├── act/                        — принятие, разделение с мыслью, ценности
+├── motivational-interviewing/  — амбивалентность и застревание
+├── schema-therapy/             — повторяющиеся жизненные паттерны
+├── emotion-regulation/         — сильный аффект здесь и сейчас
+├── behavioral-activation/      — апатия и возвращение к действию
+├── relationships-boundaries/   — конфликты, границы, трудные разговоры
+├── goals-values/               — цель, результат, действие, отклонение
+├── journaling-reflection/      — направляемая рефлексия и дневник
+├── memory-hygiene/             — как вести память и что в ней не хранить
+└── crisis-response/            — явная непосредственная опасность
 ```
 
-Каталог монтируется read-only, входит в Git и backup. Технические инструкции
-внутри `SKILL.md` могут оставаться на английском, если этого требует
-agent runtime; административные описания проекта ведутся на русском.
+Каждый навык короткий и практичный: когда использовать, когда не
+использовать, шаги, полезные вопросы или техники, типичные ошибки и
+границы. Длинный навык загружается дороже и читается моделью хуже.
+
+Каталог входит в Git и backup, монтируется read-only.

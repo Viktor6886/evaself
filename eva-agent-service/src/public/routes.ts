@@ -614,43 +614,6 @@ export class PublicRepository implements PublicDataSource {
   }
 }
 
-/**
- * Что Mini App умеет делать с памятью. Интерфейс объявлен здесь, а
- * реализация приходит снаружи: маршруты не должны знать ни о temporal-
- * версиях, ни о доказательствах — они переводят Telegram-личность в
- * идентификатор владельца и передают дальше.
- */
-export interface MiniAppMemoryControl {
-  list(telegramId: number): Promise<unknown[]>;
-  history(telegramId: number, nodeId: number): Promise<unknown[]>;
-  decide(telegramId: number, nodeId: number, decision: "confirm" | "reject"): Promise<boolean>;
-  correct(
-    telegramId: number,
-    nodeId: number,
-    patch: { title?: string; value?: string | null },
-  ): Promise<{ version: number } | null>;
-  remove(telegramId: number, nodeId: number): Promise<Record<string, number> | null>;
-}
-
-function requireMemory(memory: MiniAppMemoryControl | undefined): MiniAppMemoryControl {
-  if (!memory) throw badRequest("Управление памятью отключено");
-  return memory;
-}
-
-/**
- * Диагностика памяти из Mini App. Владелец — из подписи, как и в
- * контроле памяти; применение предложения остаётся явным действием
- * человека, а не следствием просмотра отчёта.
- */
-export interface MiniAppMemoryDoctor {
-  report(telegramId: number): Promise<unknown>;
-  request(telegramId: number): Promise<{ reportKey: string }>;
-  preview(telegramId: number, actionId: number): Promise<unknown>;
-  apply(telegramId: number, actionId: number): Promise<{ ok: boolean; code?: string }>;
-  reject(telegramId: number, actionId: number): Promise<boolean>;
-  rollback(telegramId: number, actionId: number): Promise<boolean>;
-}
-
 export interface KnowledgeResearchPublic {
   upload(telegramId:number,input:{name:string;mime:string;stream:import("node:stream").Readable;truncated:()=>boolean}):Promise<unknown>;
   uploadStatus(telegramId:number,id:string):Promise<unknown>;
@@ -658,11 +621,6 @@ export interface KnowledgeResearchPublic {
   researchStatus(telegramId:number,id:string):Promise<unknown>;
   researchReport(telegramId:number,id:string):Promise<unknown>;
   researchCancel(telegramId:number,id:string):Promise<unknown>;
-}
-
-function requireDoctor(doctor: MiniAppMemoryDoctor | undefined): MiniAppMemoryDoctor {
-  if (!doctor) throw badRequest("Диагностика памяти отключена");
-  return doctor;
 }
 
 export function registerPublicRoutes(
@@ -675,14 +633,6 @@ export function registerPublicRoutes(
     sessions?: MiniAppSessionStore;
     rateLimiter?: RateLimiter;
     approvals?: { decide(input: { telegramId: number; sdkRequestId: string; decision: "allow" | "deny" }): Promise<unknown> };
-    /**
-     * Контроль памяти из Mini App. Владелец берётся из проверенной
-     * подписи Telegram и приводится к внутреннему идентификатору здесь
-     * же: принимать `user_id` из тела запроса значило бы отдать чужую
-     * память тому, кто угадает число.
-     */
-    memory?: MiniAppMemoryControl;
-    memoryDoctor?: MiniAppMemoryDoctor;
     knowledgeResearch?: KnowledgeResearchPublic;
   },
 ): void {
@@ -870,118 +820,6 @@ export function registerPublicRoutes(
     // удалить. Отсутствующая сборка памяти — честный отказ, а не пустой
     // список: пустой список означал бы «Ева ничего не помнит», и человек
     // сделал бы неверный вывод о выключенной функции.
-    publicApp.get("/memory", async (request) => {
-      const memory = requireMemory(input.memory);
-      return { items: await memory.list(publicUser(request).id) };
-    });
-
-    publicApp.get("/memory/:id/history", async (request) => {
-      const memory = requireMemory(input.memory);
-      return {
-        history: await memory.history(
-          publicUser(request).id,
-          positiveId((request.params as { id?: string }).id, "факта"),
-        ),
-      };
-    });
-
-    publicApp.post("/memory/:id/confirm", async (request) => {
-      const memory = requireMemory(input.memory);
-      const decision = requestBody(request).decision;
-      if (decision !== "confirm" && decision !== "reject") {
-        throw badRequest("Некорректное решение");
-      }
-      const ok = await memory.decide(
-        publicUser(request).id,
-        positiveId((request.params as { id?: string }).id, "факта"),
-        decision,
-      );
-      if (!ok) throw badRequest("Этот факт нельзя подтвердить или отклонить");
-      return { ok: true };
-    });
-
-    publicApp.patch("/memory/:id", async (request) => {
-      const memory = requireMemory(input.memory);
-      const body = requestBody(request);
-      const result = await memory.correct(
-        publicUser(request).id,
-        positiveId((request.params as { id?: string }).id, "факта"),
-        {
-          ...(typeof body.title === "string" ? { title: body.title } : {}),
-          ...(body.value === null || typeof body.value === "string"
-            ? { value: body.value as string | null }
-            : {}),
-        },
-      );
-      if (!result) throw badRequest("Факт не найден");
-      // Исправление — это новая версия, а не правка на месте.
-      return { version: result.version };
-    });
-
-    publicApp.delete("/memory/:id", async (request) => {
-      const memory = requireMemory(input.memory);
-      const removed = await memory.remove(
-        publicUser(request).id,
-        positiveId((request.params as { id?: string }).id, "факта"),
-      );
-      if (!removed) throw badRequest("Факт не найден");
-      return { deleted: removed };
-    });
-
-    // Memory Doctor: отчёт, запрос диагностики и по одному маршруту на
-    // каждое решение человека. Ни один из них ничего не исправляет сам —
-    // применение и откат вызываются явно и по одному предложению.
-    publicApp.get("/memory/doctor", async (request) => {
-      const doctor = requireDoctor(input.memoryDoctor);
-      return await doctor.report(publicUser(request).id);
-    });
-
-    publicApp.post("/memory/doctor", async (request) => {
-      const doctor = requireDoctor(input.memoryDoctor);
-      // Диагностика ставится заданием: ответ человеку не ждёт её.
-      return await doctor.request(publicUser(request).id);
-    });
-
-    publicApp.get("/memory/doctor/actions/:id/preview", async (request) => {
-      const doctor = requireDoctor(input.memoryDoctor);
-      const preview = await doctor.preview(
-        publicUser(request).id,
-        positiveId((request.params as { id?: string }).id, "предложения"),
-      );
-      if (!preview) throw badRequest("Предложение не найдено");
-      return preview;
-    });
-
-    publicApp.post("/memory/doctor/actions/:id/apply", async (request) => {
-      const doctor = requireDoctor(input.memoryDoctor);
-      const result = await doctor.apply(
-        publicUser(request).id,
-        positiveId((request.params as { id?: string }).id, "предложения"),
-      );
-      if (!result.ok) throw badRequest("Предложение нельзя применить");
-      return { ok: true };
-    });
-
-    publicApp.post("/memory/doctor/actions/:id/reject", async (request) => {
-      const doctor = requireDoctor(input.memoryDoctor);
-      const ok = await doctor.reject(
-        publicUser(request).id,
-        positiveId((request.params as { id?: string }).id, "предложения"),
-      );
-      if (!ok) throw badRequest("Предложение нельзя отклонить");
-      return { ok: true };
-    });
-
-    publicApp.post("/memory/doctor/actions/:id/rollback", async (request) => {
-      const doctor = requireDoctor(input.memoryDoctor);
-      const ok = await doctor.rollback(
-        publicUser(request).id,
-        positiveId((request.params as { id?: string }).id, "предложения"),
-      );
-      if (!ok) throw badRequest("Откат невозможен");
-      return { ok: true };
-    });
-
     publicApp.post("/tool-approvals/:requestId/decision", async (request) => {
       if (!input.approvals) throw badRequest("Подтверждения инструментов отключены");
       const sdkRequestId = String((request.params as { requestId?: string }).requestId ?? "").trim();

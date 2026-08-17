@@ -97,48 +97,6 @@ export class ArtifactRegistry {
     this.db = db;
   }
 
-  /** Atomic, idempotent filesystem publication and searchable projection. */
-  async syncIndexedSkill(input: Record<string, unknown>): Promise<void> {
-    const slug=String(input.slug), environment=String(input.environment??"production");
-    if (this.db.transactionClient && input.__transactionLocked !== true) {
-      const client=await this.db.transactionClient();
-      try {
-        await client.query("BEGIN");
-        await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1||':'||$2,0))",[slug,environment]);
-        await new ArtifactRegistry(client).syncIndexedSkill({...input,__transactionLocked:true});
-        await client.query("COMMIT");
-      } catch(error) { await client.query("ROLLBACK").catch(()=>{}); throw error; }
-      finally { client.release(); }
-      return;
-    }
-    const body=input.body, checksum=body===undefined?null:artifactChecksum(body);
-    if(input.status!=="active") {
-      await this.db.query(`WITH locked AS (SELECT pg_advisory_xact_lock(hashtextextended($1||':'||$2,0)))
-        UPDATE skill_search_index SET status='disabled',error_code=$3,indexed_at=now()
-        FROM locked WHERE slug=$1 AND environment=$2`,[slug,environment,String(input.error??"skill_invalid")]);
-      return;
-    }
-    await this.db.query(`WITH locked AS (SELECT pg_advisory_xact_lock(hashtextextended($1||':'||$2,0))),
-      art AS (INSERT INTO artifacts(kind,slug,title,description) SELECT 'skill',$1,$1,'Filesystem project skill' FROM locked ON CONFLICT(kind,slug) DO UPDATE SET title=EXCLUDED.title RETURNING id),
-      latest AS (SELECT v.* FROM artifact_versions v JOIN art a ON a.id=v.artifact_id WHERE v.checksum=$3 ORDER BY version DESC LIMIT 1),
-      ver AS (INSERT INTO artifact_versions(artifact_id,version,body,checksum,status,validation,approved_at)
-        SELECT a.id,COALESCE((SELECT max(version)+1 FROM artifact_versions WHERE artifact_id=a.id),1),$4::jsonb,$3,'approved','{"filesystem":true}'::jsonb,now() FROM art a WHERE NOT EXISTS(SELECT 1 FROM latest)
-        ON CONFLICT(artifact_id,checksum) DO NOTHING RETURNING *),
-      chosen AS (SELECT id,artifact_id,version,body,checksum FROM ver UNION ALL SELECT id,artifact_id,version,body,checksum FROM latest LIMIT 1),
-      retired AS (UPDATE artifact_publications p SET retired_at=now() FROM chosen c WHERE p.artifact_id=c.artifact_id AND p.environment=$2 AND p.retired_at IS NULL AND p.version_id<>c.id RETURNING p.version_id),
-      pub AS (INSERT INTO artifact_publications(artifact_id,environment,version_id,reason) SELECT artifact_id,$2,id,'filesystem startup/update sync' FROM chosen
-        ON CONFLICT(artifact_id,environment) WHERE retired_at IS NULL DO UPDATE SET version_id=EXCLUDED.version_id,reason=EXCLUDED.reason RETURNING version_id),
-      stale_projection AS (DELETE FROM skill_search_index i USING chosen c WHERE i.slug=$1 AND i.environment=$2 AND i.version_id<>c.id RETURNING i.version_id)
-      INSERT INTO skill_search_index(version_id,slug,environment,owner_user_id,category,role,status,checksum,body,search_text,search_document,version,error_code)
-      SELECT c.id,$1,$2,NULL,c.body->>'category',c.body->>'role','active',c.checksum,c.body,concat_ws(' ',c.body->>'name',c.body->>'purpose',c.body->>'applicability',c.body->>'source'),to_tsvector('simple',concat_ws(' ',c.body->>'name',c.body->>'purpose',c.body->>'applicability',c.body->>'source')),c.version,NULL FROM chosen c,pub
-      ON CONFLICT(version_id) DO UPDATE SET status='active',error_code=NULL,indexed_at=now()`,[slug,environment,checksum,JSON.stringify(body)]);
-  }
-
-  /** Published skills are resolved only through this canonical registry. */
-  async publishedSkills(environment: string, subject: string): Promise<Array<{ slug: string; versionId: number; version: number; checksum: string; body: unknown }>> {
-    const { rows } = await this.db.query(`SELECT a.slug, p.version_id, v.version, v.checksum, v.body, p.rollout_percent FROM artifacts a JOIN artifact_publications p ON p.artifact_id=a.id JOIN artifact_versions v ON v.id=p.version_id WHERE a.kind='skill' AND a.archived_at IS NULL AND p.environment=$1 AND p.retired_at IS NULL ORDER BY a.slug`, [environment]);
-    return rows.filter((r) => { const n=Number(r.rollout_percent??0); return n>=100 || (n>0 && bucketOf(`${String(r.slug)}:${subject}`)<n); }).map((r)=>({slug:String(r.slug),versionId:Number(r.version_id),version:Number(r.version),checksum:String(r.checksum),body:r.body}));
-  }
 
   async list(kind?: ArtifactKind): Promise<ArtifactRow[]> {
     const { rows } = await this.db.query(

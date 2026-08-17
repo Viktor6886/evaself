@@ -1,11 +1,11 @@
 import type { AnyAgentTool } from "@letta-ai/letta-agent-sdk";
 
 import type { Config } from "./config.js";
+import { purposePolicy, type ConversationPurpose } from "./conversations/purpose-service.js";
 import type { AgentRuntimeContext, Database } from "./db.js";
 import { GoalToolFactory } from "./goals/goal-tools.js";
 import { GoalService } from "./goals/goal-service.js";
 import type { Logger } from "./logger.js";
-import type { GraphRepository } from "./memory/graph-repository.js";
 import { ProfileToolFactory } from "./profile/profile-tools.js";
 import { UserProfileService } from "./profile/profile-service.js";
 import type { TelegramClient } from "./telegram.js";
@@ -15,7 +15,8 @@ import { EffectJournal, effectKey } from "./turns/effect-journal.js";
 import { currentTurn } from "./turns/turn-context.js";
 import { TaskToolFactory } from "./tools/task-tools.js";
 import { TodoistToolFactory } from "./tools/todoist-tools.js";
-import { McpHttpInvoker, McpServerPolicyRepository, selectVisibleTools, ToolGateway, ToolGatewayStateStore, ToolManifestRegistry, type ToolManifest, type ToolRisk } from "./tools/gateway.js";
+import type { McpHttpInvoker, McpServerPolicyRepository } from "./tools/mcp.js";
+import type { MandatoryApprovalCategory, ToolRisk } from "./tools/approvals.js";
 import {
   asObject,
   type JsonObject,
@@ -35,19 +36,14 @@ const CONTEXT_MUTATING_TOOLS = new Set([
   "record_work_block",
   "record_goal_review",
   "save_task",
-  "save_task_to_nocodb",
-  "save_tasks_bulk_to_nocodb",
+  "save_tasks_bulk",
   "update_task",
-  "update_task_in_nocodb",
   "mark_task_completed",
   "snooze_task_reminder",
   "delete_tasks",
-  "delete_tasks_from_nocodb",
 ]);
 
 export class AgentToolFactory {
-  readonly manifests: ToolManifestRegistry;
-  private readonly gateway: ToolGateway;
   private readonly core: CoreToolFactory;
   private readonly profile: ProfileToolFactory;
   private readonly goals: GoalToolFactory;
@@ -56,7 +52,6 @@ export class AgentToolFactory {
   private readonly dynamicTools = new Map<string, AnyAgentTool[]>();
   private readonly vectorGoalsEnabled: boolean;
   private approvalCompletion?: (input: { userId: number; conversationId: string; toolName: string; args: unknown; outcome: "executed" | "failed" }) => Promise<unknown>;
-  private verifiedOutcome?: (input: { userId:number; conversationId:string; toolName:string; toolCallId:string; runId?:string; outcome:"executed"|"failed" }) => Promise<unknown>;
   private readonly runtimeContexts = new Map<
     string,
     { expiresAt: number; value: Promise<AgentRuntimeContext> }
@@ -69,7 +64,6 @@ export class AgentToolFactory {
     private readonly logger: Logger,
     profile?: UserProfileService,
     goals?: GoalService,
-    graph?: GraphRepository,
     /**
      * Журнал побочных эффектов. Необязателен: без него инструменты
      * работают ровно как раньше.
@@ -81,18 +75,12 @@ export class AgentToolFactory {
     this.core = new CoreToolFactory(config, db, telegram);
     this.profile = new ProfileToolFactory(profile ?? new UserProfileService(db));
     this.goals = new GoalToolFactory(goals ?? new GoalService(db));
-    this.tasks = new TaskToolFactory(db, graph);
+    this.tasks = new TaskToolFactory(db);
     this.todoist = new TodoistToolFactory(config);
-    this.manifests = createCanonicalToolManifestRegistry();
-    this.gateway = new ToolGateway(this.manifests, { stateStore: config.toolGatewayEnabled ? new ToolGatewayStateStore(db) : undefined });
   }
 
   setApprovalCompletionCallback(callback: (input: { userId: number; conversationId: string; toolName: string; args: unknown; outcome: "executed" | "failed" }) => Promise<unknown>): void {
     this.approvalCompletion = callback;
-  }
-
-  setVerifiedOutcomeCallback(callback: (input: { userId:number; conversationId:string; toolName:string; toolCallId:string; runId?:string; outcome:"executed"|"failed" }) => Promise<unknown>):void {
-    this.verifiedOutcome=callback;
   }
 
   forConversation(conversationId: string): AnyAgentTool[] {
@@ -102,7 +90,6 @@ export class AgentToolFactory {
       ...this.profile.build(tool),
       ...(this.vectorGoalsEnabled ? this.goals.build(tool) : []),
       ...this.tasks.build(tool),
-      ...(this.config.toolGatewayEnabled ? [tool("skill_scenario_complete", "Complete skill scenario", "Mark the active server-owned skill scenario complete", { type:"object", additionalProperties:false }, async()=>({ok:true}))] : []),
       // Registering Todoist tools without a token only teaches the model
       // about nine actions that always fail on the first call.
       ...(this.config.todoistApiToken ? this.todoist.build(tool) : []),
@@ -110,54 +97,17 @@ export class AgentToolFactory {
     ];
   }
 
-  /** Resolve canonical ownership and purpose before a live SDK session opens. */
-  async sessionPolicy(conversationId: string): Promise<{
-    runtime: AgentRuntimeContext;
-    visibleTools: string[];
-  }> {
-    // A fresh conversation has no task/skill decision yet. Persist the
-    // deployment's canonical purpose boundary once, rather than treating NULL
-    // as an implicit grant on every session.
+  /**
+   * Подготовка сессии SDK: какие инструменты у неё будут и кому она
+   * принадлежит.
+   *
+   * Отбор инструментов здесь не делается — их набор решает Letta. Отсюда
+   * приходит только каноническая принадлежность conversation, без которой
+   * подтверждение действия не знает, у кого спрашивать.
+   */
+  async sessionRuntime(conversationId: string): Promise<AgentRuntimeContext> {
     await this.loadMcpTools(conversationId);
-    const available = new Set(this.forConversation(conversationId).map((tool) => tool.name));
-    let runtime = await this.context(conversationId);
-    const allowedTools = [...available].filter((name) => this.manifests.get(name)?.purposes.includes(runtime.purpose));
-    if (this.config.toolGatewayEnabled
-        && (runtime.currentTaskTools == null || runtime.selectedSkillTools == null)) {
-      const { rows } = await this.db.withUserScope(
-        { userId: runtime.userId, telegramId: runtime.telegramId, label: "tools.materializeConversationSelectors" },
-        async () => await this.db.query<{ current_task_tools: string[]; selected_skill_tools: string[] }>(
-          `UPDATE agent_conversations
-              SET current_task_tools = COALESCE(current_task_tools, $3::text[]),
-                  selected_skill_tools = COALESCE(selected_skill_tools, $3::text[]),
-                  updated_at = now()
-            WHERE conversation_id = $1 AND user_id = $2
-            RETURNING current_task_tools, selected_skill_tools`,
-          [conversationId, runtime.userId, allowedTools],
-        ),
-      );
-      const persisted = rows[0];
-      if (!persisted || !Array.isArray(persisted.current_task_tools) || !Array.isArray(persisted.selected_skill_tools)) {
-        throw new Error("Conversation tool selectors could not be materialized");
-      }
-      runtime = {
-        ...runtime,
-        currentTaskTools: persisted.current_task_tools,
-        selectedSkillTools: persisted.selected_skill_tools,
-      };
-      this.runtimeContexts.set(conversationId, { expiresAt: Date.now() + 45_000, value: Promise.resolve(runtime) });
-    }
-    const fallbackTools = this.config.toolGatewayEnabled ? [] : allowedTools;
-    return {
-      runtime,
-      visibleTools: selectVisibleTools(this.manifests, {
-        purpose: runtime.purpose,
-        taskTools: runtime.currentTaskTools ?? fallbackTools,
-        skillTools: runtime.selectedSkillTools ?? fallbackTools,
-        allowedTools,
-        trusted: true,
-      }).map((manifest) => manifest.name),
-    };
+    return await this.context(conversationId);
   }
 
   private builder(conversationId: string): ToolBuilder {
@@ -179,17 +129,18 @@ export class AgentToolFactory {
       execute: async (toolCallId, rawArgs) => {
         let executionUserId: number | undefined;
         let approvalCompletionAttempted = false;
-        try {
-          const gatewayResult = await this.gateway.execute(name, async (signal) => {
-          signal.throwIfAborted();
+        // Вызов вынесен в отдельную функцию, чтобы ранний выход —
+        // отменённый ход, повтор из журнала — проходил через тот же учёт
+        // исхода, что и обычное выполнение.
+        const call = async (): Promise<ReturnType<typeof result>> => {
           const runtime = await this.context(conversationId);
           executionUserId = runtime.userId;
-          const manifest = this.manifests.get(name)!;
-          if (this.config.toolGatewayEnabled && manifest.sideEffect
-              && (!this.effects?.strict || !currentTurn()?.recorded || !String(toolCallId ?? "").trim())) {
-            throw new Error(`Effect journal strict mode requires canonical owner, run and call key for ${name}`);
-          }
-          if (!manifest.purposes.includes(runtime.purpose)) {
+          // Служебная conversation — не разговор с человеком. Её
+          // назначение перечисляет, что в ней вообще позволено; список
+          // объявлен один раз в purpose-service и записан вместе с самой
+          // conversation, поэтому проверка идёт по нему, а не по имени.
+          const allowed = purposePolicy(runtime.purpose as ConversationPurpose).allowedTools;
+          if (allowed !== null && !allowed.includes(name)) {
             throw new Error(
               `Инструмент ${name} недоступен в служебном conversation purpose=${runtime.purpose}`,
             );
@@ -219,7 +170,6 @@ export class AgentToolFactory {
           if (turn && await turn.isCancelled()) {
             return result({ ok: false, error: "ход отменён" });
           }
-          signal.throwIfAborted();
           const key = turn?.recorded && String(toolCallId ?? "").trim()
             ? effectKey(turn.runId, String(toolCallId), name)
             : null;
@@ -250,7 +200,7 @@ export class AgentToolFactory {
                 telegramId: runtime.telegramId,
                 label: `tool:${name}`,
               },
-              async () => { signal.throwIfAborted(); return await execute(asObject(rawArgs), runtime); },
+              async () => await execute(asObject(rawArgs), runtime),
             );
           } catch (error) {
             if (key && this.effects) {
@@ -271,16 +221,18 @@ export class AgentToolFactory {
             this.invalidate(conversationId);
           }
           return result(output);
-          });
+        };
+        try {
+          const called = await call();
           if (executionUserId !== undefined) {
             approvalCompletionAttempted = true;
-            await this.recordOutcome({ userId: executionUserId, conversationId, toolName: name, args: rawArgs, toolCallId: String(toolCallId), outcome: "executed" });
+            await this.recordOutcome({ userId: executionUserId, conversationId, toolName: name, args: rawArgs, outcome: "executed" });
           }
-          return gatewayResult;
+          return called;
         } catch (error) {
           if (executionUserId !== undefined && !approvalCompletionAttempted) {
             approvalCompletionAttempted = true;
-            await this.recordOutcome({ userId: executionUserId, conversationId, toolName: name, args: rawArgs, toolCallId: String(toolCallId), outcome: "failed" });
+            await this.recordOutcome({ userId: executionUserId, conversationId, toolName: name, args: rawArgs, outcome: "failed" });
           }
           const message = error instanceof Error ? error.message : String(error);
           this.logger.warn("Инструмент Agent SDK завершился ошибкой", {
@@ -296,21 +248,19 @@ export class AgentToolFactory {
   }
 
   /**
-   * Учёт исхода вызова: закрытие подтверждения и проверенный исход.
+   * Учёт исхода вызова: закрытие выданного подтверждения.
    *
    * Учёт идёт после того, как побочный эффект уже случился, поэтому его
    * отказ не становится отказом инструмента: модель получила бы ошибку на
    * выполненном действии и позвала бы инструмент второй раз. По той же
    * причине отказ учёта не подменяет собой исходную ошибку инструмента —
    * иначе настоящая причина отказа не доходит ни до модели, ни в журнал.
-   * Каждая часть учёта выполняется отдельно: отказ одной не отменяет второй.
    */
   private async recordOutcome(input: {
     userId: number;
     conversationId: string;
     toolName: string;
     args: unknown;
-    toolCallId: string;
     outcome: "executed" | "failed";
   }): Promise<void> {
     const record = async (stage: string, work: () => Promise<unknown>): Promise<void> => {
@@ -329,26 +279,16 @@ export class AgentToolFactory {
       userId: input.userId, conversationId: input.conversationId,
       toolName: input.toolName, args: input.args, outcome: input.outcome,
     }));
-    if (input.outcome !== "executed") return;
-    await record("verified_outcome", async () => await this.verifiedOutcome?.({
-      userId: input.userId, conversationId: input.conversationId, toolName: input.toolName,
-      toolCallId: input.toolCallId, runId: currentTurn()?.runId, outcome: "executed",
-    }));
   }
 
   private async loadMcpTools(conversationId: string): Promise<void> {
-    if (!this.config.toolGatewayEnabled || !this.mcp) { this.dynamicTools.delete(conversationId); return; }
+    if (!this.mcp) { this.dynamicTools.delete(conversationId); return; }
     const builder = this.builder(conversationId);
     const tools: AnyAgentTool[] = [];
     for (const { name: serverName, policy } of await this.mcp.policies.listEnabled()) {
       for (const remoteName of policy.allowedTools) {
-        const name = `mcp__${serverName}__${remoteName}`;
-        if (!this.manifests.get(name)) this.manifests.register({
-          name, version: "1.0.0", inputSchema: { type: "object", additionalProperties: true }, outputSchema: { type: "object" },
-          owner: `mcp:${serverName}`, purposes: ["chat", "research"], risk: "external_side_effect", approvalRequired: true,
-          idempotent: false, timeoutMs: policy.timeoutMs, limits: { maxResultBytes: policy.maxResultBytes }, sideEffect: true,
-        });
-        tools.push(builder(name, remoteName, `Allowlisted MCP tool ${remoteName} on ${serverName}`, { type: "object", additionalProperties: true },
+        tools.push(builder(`mcp__${serverName}__${remoteName}`, remoteName,
+          `Allowlisted MCP tool ${remoteName} on ${serverName}`, { type: "object", additionalProperties: true },
           async (args) => await this.mcp!.invoker.invokeServer(serverName, remoteName, args)));
       }
     }
@@ -392,55 +332,44 @@ function result(value: unknown) {
 }
 
 
-type ManifestPolicy = Pick<ToolManifest, "purposes" | "risk" | "approvalRequired" | "idempotent" | "sideEffect"> & {
-  mandatoryApprovalCategory?: string;
-};
-
-const policy = (risk: ToolRisk, purposes: string[] = ["chat"]): ManifestPolicy => ({
-  purposes, risk, approvalRequired: risk === "sensitive_write" || risk === "external_side_effect" || risk === "destructive",
-  idempotent: risk === "read", sideEffect: risk !== "read",
-  ...(risk === "destructive" ? { mandatoryApprovalCategory: "data_deletion" } : {}),
+/**
+ * Последствие вызова — для подтверждения действия человеком.
+ *
+ * Это не выбор инструментов и не их видимость: набор инструментов сессии
+ * решает Letta. Здесь названы только те, чьё последствие серьёзнее
+ * обычной записи, — по ним подтверждение спрашивается, по остальным нет.
+ * Имя, которого в таблице нет, считается обычной записью.
+ */
+const TOOL_RISK: Readonly<Record<string, ToolRisk>> = Object.freeze({
+  delete_notes: "destructive",
+  delete_budget_records: "destructive",
+  delete_tasks: "destructive",
+  set_reaction: "external_side_effect",
+  upsert_user_profile_field: "sensitive_write",
+  confirm_user_profile_field: "sensitive_write",
+  decline_user_profile_field: "sensitive_write",
+  upsert_goal: "sensitive_write",
+  confirm_goal: "sensitive_write",
+  upsert_goal_result: "sensitive_write",
+  TODOIST_DELETE_TASK: "destructive",
+  TODOIST_DELETE_ALL_TASKS: "destructive",
 });
 
-/**
- * Canonical inventory is obtained from the same factory registrations that
- * build live SDK tools. Factory-local exact declarations avoid both a second
- * central name list and security policy inferred from naming conventions.
- */
-export function createCanonicalToolManifestRegistry(): ToolManifestRegistry {
-  const registry = new ToolManifestRegistry();
-  const register = (declarations: Record<string, ManifestPolicy>, fallback: ManifestPolicy): ToolBuilder =>
-    (name, _label, _description, parameters) => {
-      const declaration = declarations[name] ?? fallback;
-      const manifest = { name, version: "1.0.0", inputSchema: parameters, outputSchema: { type: "object" },
-        owner: "eva-agent-service", timeoutMs: 30_000, limits: { maxResultBytes: 1_048_576 }, ...declaration };
-      registry.register(manifest);
-      return { name } as AnyAgentTool;
-    };
-  const noop = {} as never;
-  new CoreToolFactory({ searxngUrl: "" } as Config, noop, noop).build(register({
-    get_notes: policy("read"), get_budget_records: policy("read"), web_search: policy("read", ["chat", "research"]),
-    PERPLEXITY_SEARCH: policy("read", ["chat", "research"]), brave_search: policy("read", ["chat", "research"]),
-    LIGHTRAG_QUERY: policy("read", ["chat", "research"]), LIGHTRAG_INSERT: policy("external_side_effect"),
-    delete_notes: policy("destructive"), delete_budget_records: policy("destructive"), set_reaction: policy("external_side_effect"),
-  }, policy("low_risk_write")));
-  new ProfileToolFactory(noop).build(register({}, policy("sensitive_write", ["chat", "profile"])));
-  new GoalToolFactory(noop).build(register({ get_goals: policy("read", ["chat", "goal_review"]) }, policy("sensitive_write", ["chat", "goal_review"])));
-  new TaskToolFactory(noop).build(register({
-    get_tasks: policy("read"), get_tasks_from_nocodb: policy("read"), get_recent_reminders: policy("read"),
-    get_task_events: policy("read"), get_task_activity: policy("read"), delete_tasks: policy("destructive"),
-    delete_tasks_from_nocodb: policy("destructive"), save_tasks_bulk_to_nocodb: { ...policy("sensitive_write"), mandatoryApprovalCategory: "bulk_task_change" },
-  }, policy("low_risk_write")));
-  new TodoistToolFactory({ todoistApiUrl: "", todoistApiToken: "catalog", todoistProjectId: "" } as Config).build(register({
-    TODOIST_GET_ALL_TASKS: policy("read"), TODOIST_GET_ACTIVE_TASK: policy("read"), TODOIST_GET_TASK: policy("read"),
-    TODOIST_DELETE_TASK: policy("destructive"), TODOIST_DELETE_ALL_TASKS: policy("destructive"),
-  }, policy("external_side_effect")));
-  registry.register({
-    name: "skill_scenario_complete", version: "1.0.0",
-    inputSchema: { type: "object", additionalProperties: false }, outputSchema: { type: "object" },
-    owner: "eva-agent-service", purposes: ["chat"], risk: "low_risk_write",
-    approvalRequired: false, idempotent: true, timeoutMs: 30_000,
-    limits: { maxResultBytes: 1024 }, sideEffect: true,
-  });
-  return registry;
+const TOOL_APPROVAL_CATEGORY: Readonly<Record<string, MandatoryApprovalCategory>> = Object.freeze({
+  delete_notes: "data_deletion",
+  delete_budget_records: "data_deletion",
+  delete_tasks: "data_deletion",
+  TODOIST_DELETE_TASK: "data_deletion",
+  TODOIST_DELETE_ALL_TASKS: "data_deletion",
+});
+
+export function toolRisk(name: string): ToolRisk {
+  // Инструмент MCP-сервера обращается к чужой системе, и её последствие
+  // отсюда не видно: он всегда идёт через подтверждение.
+  if (name.startsWith("mcp__")) return "external_side_effect";
+  return TOOL_RISK[name] ?? "low_risk_write";
+}
+
+export function toolApprovalCategory(name: string): MandatoryApprovalCategory | undefined {
+  return TOOL_APPROVAL_CATEGORY[name];
 }

@@ -14,7 +14,7 @@
 import { createHash } from "node:crypto";
 
 import { badRequest } from "../errors.js";
-import { SYNCED_BLOCK_LABELS } from "../letta/memory-block-sync.js";
+import { SYNCED_BLOCK_LABELS } from "../letta/memory-blocks.js";
 
 export const ARTIFACT_KINDS = [
   "prompt",
