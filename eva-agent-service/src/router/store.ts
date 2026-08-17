@@ -207,11 +207,7 @@ export class RouterStore {
     let rows: RoutingSettings[];
     try {
       ({ rows } = await this.pool.query<RoutingSettings>(
-        `SELECT mode, single_provider_id, single_failover_enabled,
-                auto_routing_enabled, llm_classifier_enabled, fast_max_score,
-                deep_min_score, classifier_confidence_threshold,
-                classifier_timeout_ms, classifier_max_input_chars,
-                uncertain_policy, economy_score_shift, quality_score_shift
+        `SELECT mode, single_provider_id, single_failover_enabled
            FROM llm_routing_settings WHERE singleton`,
       ));
     } catch (error) {
@@ -221,21 +217,8 @@ export class RouterStore {
       throw error;
     }
     const raw = rows[0];
-    const row: RoutingSettings = raw ? {
-      ...raw,
-      fast_max_score: Number(raw.fast_max_score),
-      deep_min_score: Number(raw.deep_min_score),
-      classifier_confidence_threshold: Number(raw.classifier_confidence_threshold),
-      classifier_timeout_ms: Number(raw.classifier_timeout_ms),
-      classifier_max_input_chars: Number(raw.classifier_max_input_chars),
-      economy_score_shift: Number(raw.economy_score_shift),
-      quality_score_shift: Number(raw.quality_score_shift),
-    } : {
+    const row: RoutingSettings = raw ?? {
       mode: "adaptive", single_provider_id: null, single_failover_enabled: false,
-      auto_routing_enabled: true, llm_classifier_enabled: true,
-      fast_max_score: 0, deep_min_score: 5, classifier_confidence_threshold: 0.75,
-      classifier_timeout_ms: 5000, classifier_max_input_chars: 4000,
-      uncertain_policy: "upgrade", economy_score_shift: -1, quality_score_shift: 1,
     };
     this.settingsCache = { at: Date.now(), row };
     return row;

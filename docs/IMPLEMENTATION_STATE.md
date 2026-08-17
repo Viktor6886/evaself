@@ -88,7 +88,7 @@ heartbeat по-прежнему ведёт `BackgroundRuntime`, а очеред�
 | Цепочки failover | Независимые цепочки по маршруту | `src/router/chain.ts`, таблицы `llm_routes`, `llm_route_providers` | смена без рестарта | расш. |
 | Лимиты роутера | RPM, TPM, inflight | `src/router/limits.ts` | `ValkeyRouterLimits` (распределённые), `LocalRouterLimits` | обяз. |
 | Адаптеры | OpenAI-совместимый и Anthropic | `src/router/adapters/` | общий нормализатор в `shared.ts` | расш. |
-| Классификатор | Чувствительность запроса | `src/router/classifier.ts`, `routing-marker.ts` | по умолчанию — чувствительный | расш. |
+| Выбор маршрута | Техническая цепочка провайдеров | `src/router/routes.ts`, `routing-marker.ts` | детерминированно: режим, явный запрос, изображение/JSON, назначение conversation, выбор человека; содержание сообщения не разбирается | обяз. |
 | Учёт | Запросы и расход | таблицы `llm_requests`, `llm_spend_ledger`, `llm_breaker_state` | — | read |
 
 Своя fallback-цепочка в обход роутера запрещена (инвариант 16).

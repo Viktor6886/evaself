@@ -185,7 +185,6 @@ export class RuntimeContextBuilder {
     userMessage: string,
     options: {
       messageSource?: MessageSource;
-      crisisLevel?: "none" | "low" | "medium" | "high" | "critical";
       internalOperationType?: string;
       correlationId?: string;
       /** Куда сложить измеренный размер собранного контекста. */
@@ -311,13 +310,9 @@ export class RuntimeContextBuilder {
     return appendRoutingMarker(wrapped, {
       purpose: context.purpose as RoutingMarkerClaims["purpose"],
       message_source: options.messageSource,
-      crisis_level: options.crisisLevel ?? "none",
       user_mode: context.llmQualityMode ?? "auto",
       internal_operation_type: options.internalOperationType,
       correlation_id: options.correlationId,
-      related_goals: context.activeGoal ? 1 : 0,
-      related_tasks: context.taskActivity?.length ? 1 : 0,
-      related_recent_events: context.taskActivity?.length ?? 0,
     }, this.options.routingMarkerSecret ?? "");
   }
 

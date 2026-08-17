@@ -470,7 +470,6 @@ export class EvaWorkflow {
                 signal ? `${safetyDirective(signal)}\n\n${prompt}` : prompt,
                 {
                   messageSource: update.kind,
-                  crisisLevel: signal?.severity ?? "none",
                   // Фактический размер собранного контекста, а не
                   // обещание уложиться: без измерения бюджет — это
                   // намерение.

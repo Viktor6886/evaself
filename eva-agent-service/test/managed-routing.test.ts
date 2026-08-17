@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { classifyDeterministically } from "../dist/router/classifier.js";
+import { resolveRoute } from "../dist/router/routes.js";
 import { appendRoutingMarker, extractRoutingMarker } from "../dist/router/routing-marker.js";
 import { LlmRouter, NoProviderAvailable } from "../dist/router/router.js";
 import { breakerKey, ProviderError } from "../dist/router/types.js";
@@ -13,16 +13,6 @@ const settings = {
   mode: "adaptive" as const,
   single_provider_id: null,
   single_failover_enabled: false,
-  auto_routing_enabled: true,
-  llm_classifier_enabled: true,
-  fast_max_score: 0,
-  deep_min_score: 5,
-  classifier_confidence_threshold: 0.75,
-  classifier_timeout_ms: 5000,
-  classifier_max_input_chars: 4000,
-  uncertain_policy: "upgrade" as const,
-  economy_score_shift: -1,
-  quality_score_shift: 1,
 };
 
 function request(text: string, metadata = {}) {
@@ -37,48 +27,52 @@ function request(text: string, metadata = {}) {
   };
 }
 
-test("single mode bypasses score and classifier", () => {
-  const result = classifyDeterministically(
+test("режим одной модели ведёт всё в техническую цепочку single", () => {
+  const result = resolveRoute(
     request("Проведи очень глубокий анализ сложного решения"),
     { ...settings, mode: "single", single_provider_id: "provider" },
   );
-  assert.equal(result.result.effectiveRoute, "single");
-  assert.equal(result.result.source, "disabled_single_mode");
-  assert.equal(result.ambiguous, false);
+  assert.equal(result.effectiveRoute, "single");
+  assert.equal(result.source, "single_mode");
 });
 
-test("scheduler and high-risk requests use hard routes", () => {
+test("назначение conversation выбирает цепочку, а не смысл сообщения", () => {
+  assert.equal(resolveRoute(request("напомни", { purpose: "scheduler" }), settings).effectiveRoute, "fast");
+  assert.equal(resolveRoute(request("что там", { purpose: "goal_review" }), settings).effectiveRoute, "deep");
+  assert.equal(resolveRoute(request("посмотри", { purpose: "research" }), settings).effectiveRoute, "research");
+});
+
+test("технические требования запроса: изображение и строгий JSON", () => {
+  assert.equal(resolveRoute(request("Что на картинке?", { has_image: true }), settings).effectiveRoute, "vision");
   assert.equal(
-    classifyDeterministically(request("напомни", { purpose: "scheduler" }), settings).result.effectiveRoute,
-    "fast",
-  );
-  assert.equal(
-    classifyDeterministically(request("привет", { crisis_level: "critical" }), settings).result.effectiveRoute,
-    "safety",
+    resolveRoute({ ...request("Верни объект"), response_format: { type: "json_object" as const } }, settings).effectiveRoute,
+    "json",
   );
 });
 
-test("tools, JSON and vision hard rules bypass scoring", () => {
-  assert.equal(classifyDeterministically(request("Напомни завтра позвонить"), settings).result.effectiveRoute, "tools");
-  assert.equal(classifyDeterministically({ ...request("Верни объект"), response_format: { type: "json_object" as const } }, settings).result.effectiveRoute, "json");
-  assert.equal(classifyDeterministically(request("Что на картинке?", { has_image: true }), settings).result.effectiveRoute, "vision");
+test("явно запрошенный маршрут продуктовой операции сохраняется", () => {
+  const result = resolveRoute(request("описание изображения", { route: "deep", requested_route: "deep" }), settings);
+  assert.equal(result.effectiveRoute, "deep");
+  assert.equal(result.source, "requested");
 });
 
-test("user quality modes shift only adaptive scoring", () => {
-  const text = "Проведи глубокий анализ";
-  const economy = classifyDeterministically(request(text, { user_mode: "economy" }), settings).result;
-  const quality = classifyDeterministically(request(text, { user_mode: "quality" }), settings).result;
-  assert.ok(economy.score < quality.score);
-  const single = classifyDeterministically(request(text, { user_mode: "quality" }), {
-    ...settings, mode: "single", single_provider_id: "provider",
-  }).result;
-  assert.equal(single.score, 0);
-  assert.equal(single.effectiveRoute, "single");
+test("содержание сообщения на выбор модели больше не влияет", () => {
+  // Раньше это были разные маршруты: «увольняться» набирало балл на
+  // deep, приветствие уходило в fast. Глубину разбора решает Letta.
+  const heavy = resolveRoute(request("Стоит ли мне увольняться? Мы снова поругались с женой."), settings);
+  const light = resolveRoute(request("Привет!"), settings);
+  assert.equal(heavy.effectiveRoute, "chat");
+  assert.equal(light.effectiveRoute, "chat");
+  assert.equal(heavy.source, "default");
 });
 
-test("important short decisions are deep while greetings are fast", () => {
-  assert.equal(classifyDeterministically(request("Стоит ли мне увольняться?"), settings).result.effectiveRoute, "deep");
-  assert.equal(classifyDeterministically(request("Привет!"), settings).result.effectiveRoute, "fast");
+test("личный выбор качества — единственное, что меняет цепочку разговора", () => {
+  // Это явный выбор человека через update_llm_quality_mode, а не вывод
+  // о его сообщении.
+  const text = "Что мне делать дальше?";
+  assert.equal(resolveRoute(request(text, { user_mode: "economy" }), settings).effectiveRoute, "fast");
+  assert.equal(resolveRoute(request(text, { user_mode: "quality" }), settings).effectiveRoute, "deep");
+  assert.equal(resolveRoute(request(text, { user_mode: "auto" }), settings).effectiveRoute, "chat");
 });
 
 test("routing marker is signed, verified and stripped", () => {
@@ -231,31 +225,23 @@ test("routing settings cache invalidates by notification and survives a transien
   await store.close();
 });
 
-function adaptiveClassifierHarness(classifierReply: string | null, options: {
-  timeout?: boolean; sensitiveAllowed?: boolean; confidenceThreshold?: number;
-} = {}) {
+test("обычный ход не делает второго вызова модели ради выбора маршрута", async () => {
+  // Отдельного LLM-классификатора больше нет: один ход — один вызов
+  // выбранной conversational-модели, каким бы «сложным» ни выглядело
+  // сообщение.
   const calls: string[] = [];
-  const classifier = { ...provider("classifier"), sensitive_data_allowed: options.sensitiveAllowed !== false };
   const chat = provider("chat");
   const deep = provider("deep");
-  const route = (code: string, json = false) => ({
-    code, title: code, requires_tools: false, requires_json: json,
+  const route = (code: string) => ({
+    code, title: code, requires_tools: false, requires_json: false,
     requires_vision: false, requires_streaming: false, min_context_window: 1024,
     max_quality_tier: 5, allows_sensitive: true, rotation_enabled: true,
   });
   const store = {
-    routingSettings: async () => ({
-      ...settings,
-      classifier_timeout_ms: options.timeout ? 5 : 5000,
-      classifier_confidence_threshold: options.confidenceThreshold ?? 0.75,
-    }),
-    providers: async () => [classifier, chat, deep],
-    routes: async () => new Map([
-      ["classifier", route("classifier", true)], ["chat", route("chat")], ["deep", route("deep")],
-    ]),
-    chains: async () => new Map([
-      ["classifier", [classifier.id]], ["chat", [chat.id]], ["deep", [deep.id]],
-    ]),
+    routingSettings: async () => settings,
+    providers: async () => [chat, deep],
+    routes: async () => new Map([["chat", route("chat")], ["deep", route("deep")]]),
+    chains: async () => new Map([["chat", [chat.id]], ["deep", [deep.id]]]),
     breakers: async () => new Map(), spend: async () => ({ day: 0, month: 0 }),
     claimProbe: async () => false, recordSuccess: async () => {}, recordFailure: async () => {},
     addSpend: async () => {}, recordAttempt: async () => {},
@@ -264,41 +250,17 @@ function adaptiveClassifierHarness(classifierReply: string | null, options: {
     protocol: "openai-compatible" as const,
     complete: async () => {
       calls.push(p.id);
-      if (p.id === classifier.id && options.timeout) return await new Promise<never>(() => {});
-      return { content: p.id === classifier.id ? classifierReply ?? "" : "ok", tool_calls: [],
-        finish_reason: "stop" as const, usage: { tokens_in: 1, tokens_out: 1 }, model: p.model };
+      return { content: "ok", tool_calls: [], finish_reason: "stop" as const,
+        usage: { tokens_in: 1, tokens_out: 1 }, model: p.model };
     },
     async *stream() { throw new Error("unused"); },
   });
-  return {
-    calls,
-    router: new LlmRouter(store as never, { debug() {}, info() {}, warn() {}, error() {} }, undefined, async () => {}, adapters as never),
-  };
-}
+  const router = new LlmRouter(
+    store as never, { debug() {}, info() {}, warn() {}, error() {} },
+    undefined, async () => {}, adapters as never,
+  );
 
-test("classifier runs only for ambiguity and cannot recurse", async () => {
-  const { router, calls } = adaptiveClassifierHarness('{"route":"chat","confidence":0.9,"reasons":["ambiguous_context"]}');
-  const result = await router.complete(request("Проанализируй глубоко"));
+  const result = await router.complete(request("Стоит ли мне увольняться? Мы снова поругались."));
   assert.equal(result.provider_id, "chat");
-  assert.deepEqual(calls, ["classifier", "chat"]);
-});
-
-test("invalid, slow and low-confidence classifier results safely upgrade", async () => {
-  for (const [reply, options] of [
-    ["not-json", {}],
-    ['{"route":"fast","confidence":0.2}', {}],
-    [null, { timeout: true }],
-  ] as const) {
-    const { router, calls } = adaptiveClassifierHarness(reply, options);
-    const result = await router.complete(request("Проанализируй глубоко"));
-    assert.equal(result.provider_id, "deep");
-    assert.equal(calls.at(-1), "deep");
-  }
-});
-
-test("sensitive text never reaches a classifier provider without permission", async () => {
-  const { router, calls } = adaptiveClassifierHarness('{"route":"chat","confidence":0.9}', { sensitiveAllowed: false });
-  const result = await router.complete(request("Проанализируй глубоко"));
-  assert.equal(result.provider_id, "deep");
-  assert.deepEqual(calls, ["deep"]);
+  assert.deepEqual(calls, ["chat"]);
 });

@@ -4,16 +4,21 @@ export type RoutingPurpose =
   | "chat" | "scheduler" | "maintenance" | "profile"
   | "goal_review" | "partner_analysis" | "research";
 
+/**
+ * Что Evaself сообщает роутеру о ходе.
+ *
+ * Только техническое и явно выбранное: назначение conversation, вид
+ * входящего сообщения, выбранный человеком баланс качества и стоимости.
+ * Признаков содержания — уровня кризиса, числа связанных целей, задач и
+ * недавних событий — здесь больше нет: они существовали, чтобы роутер
+ * оценивал сложность сообщения и менял модель, а это работа Letta.
+ */
 export interface RoutingMarkerClaims {
   purpose: RoutingPurpose;
   message_source?: "text" | "voice" | "image" | "document" | "unsupported";
-  crisis_level?: "none" | "low" | "medium" | "high" | "critical";
   user_mode?: "economy" | "auto" | "quality";
   internal_operation_type?: string;
   correlation_id?: string;
-  related_goals?: number;
-  related_tasks?: number;
-  related_recent_events?: number;
 }
 
 const MARKER = /\[EVA_ROUTING_V1:([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)\]/g;
