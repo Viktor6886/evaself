@@ -23,28 +23,6 @@ x-logging: &logging
       max-file: "3"
 
 services:
-  # Validates the tracked catalog and atomically stages only accepted files.
-  # Letta cannot start until this one-shot owner has populated the shared SDK cwd.
-  skill-indexer:
-    <<: *logging
-    build:
-      context: ./eva-agent-service
-      args:
-        NODE_BASE_VERSION: ${NODE_BASE_VERSION}
-    image: evaself/eva-agent-service:0.3.0
-    restart: "no"
-    working_dir: /app
-    command: ["node", "dist/skills/indexer-cli.js"]
-    environment:
-      DATABASE_URL: postgresql://${EVA_DB_USER}:${EVA_DB_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${EVA_DB_NAME}
-    volumes:
-      - ./skills:/app/skills:ro
-      - validated_skills:/data/letta/.skills
-    networks: [data]
-    depends_on:
-      postgres:
-        condition: service_healthy
-
   # ===================================================================
   # EDGE
   # ===================================================================
@@ -197,13 +175,10 @@ services:
       # Letta CLI из eva-agent-service и читается локальным App Server.
       - letta_provider_config:/data/letta/lc-local-backend/providers
       - letta_llm_control:/data/llm-control
-      # Exact Agent SDK project cwd, populated only by the validating indexer.
-      - validated_skills:/data/letta/.skills:ro
+      # Exact Agent SDK project cwd: Letta Code discovers project skills here.
+      - ./skills:/data/letta/.skills:ro
       - ./library:/library:ro
     networks: [agent]
-    depends_on:
-      skill-indexer:
-        condition: service_completed_successfully
     healthcheck:
       # The listener is a WebSocket upgrade endpoint; a TCP connect is the
       # honest liveness signal. eva-agent-service /health proves the
@@ -344,8 +319,6 @@ services:
       EVA_TELEGRAM_TYPING_INTERVAL_MS: ${EVA_TELEGRAM_TYPING_INTERVAL_MS:-4000}
       EVA_PROFILE_COMPLETION_ENABLED: ${EVA_PROFILE_COMPLETION_ENABLED:-true}
       EVA_VECTOR_GOALS_ENABLED: ${EVA_VECTOR_GOALS_ENABLED:-true}
-      EVA_GRAPH_MEMORY_ENABLED: ${EVA_GRAPH_MEMORY_ENABLED:-true}
-      EVA_GRAPH_CONTEXT_TIMEOUT_MS: ${EVA_GRAPH_CONTEXT_TIMEOUT_MS:-75}
       EVA_PROFILE_CACHE_TTL_SECONDS: ${EVA_PROFILE_CACHE_TTL_SECONDS:-60}
       EVA_CONVERSATION_MIRROR_ENABLED: ${EVA_CONVERSATION_MIRROR_ENABLED:-false}
       EVA_OUTBOX_ENABLED: ${EVA_OUTBOX_ENABLED:-true}
@@ -368,21 +341,10 @@ services:
       EVA_BULLMQ_MAINTENANCE: ${EVA_BULLMQ_MAINTENANCE:-false}
       EVA_BULLMQ_PROACTIVE: ${EVA_BULLMQ_PROACTIVE:-false}
       EVA_JOBS_MIRROR: ${EVA_JOBS_MIRROR:-true}
-      EVA_AGENT_JOBS: ${EVA_AGENT_JOBS:-false}
-      EVA_SUBAGENTS: ${EVA_SUBAGENTS:-false}
-      EVA_REFLECTION_SUBAGENT: ${EVA_REFLECTION_SUBAGENT:-false}
       EVA_LANGCHAIN: ${EVA_LANGCHAIN:-false}
       EVA_RESEARCH_ORCHESTRATOR: ${EVA_RESEARCH_ORCHESTRATOR:-false}
       EVA_LETTA_SDK_060: ${EVA_LETTA_SDK_060:-false}
-      EVA_TOOL_GATEWAY: ${EVA_TOOL_GATEWAY:-false}
       EVA_TOOL_APPROVALS: ${EVA_TOOL_APPROVALS:-false}
-      EVA_TEMPORAL_MEMORY: ${EVA_TEMPORAL_MEMORY:-false}
-      EVA_MEMORY_CURATOR: ${EVA_MEMORY_CURATOR:-false}
-      EVA_MEMORY_DOCTOR: ${EVA_MEMORY_DOCTOR:-false}
-      EVA_HYBRID_RETRIEVAL: ${EVA_HYBRID_RETRIEVAL:-false}
-      EVA_DEEP_RECALL: ${EVA_DEEP_RECALL:-false}
-      EVA_CORE_SKILLS: ${EVA_CORE_SKILLS:-false}
-      EVA_SKILL_ROUTER: ${EVA_SKILL_ROUTER:-false}
       EVA_MINIAPP_JOURNAL_V2: ${EVA_MINIAPP_JOURNAL_V2:-false}
       EVA_JOURNAL_VOICE_RETENTION_DAYS: ${EVA_JOURNAL_VOICE_RETENTION_DAYS:-30}
       EVA_LETTA_ADMIN_CLIENT: ${EVA_LETTA_ADMIN_CLIENT:-false}
@@ -404,8 +366,6 @@ services:
     volumes:
       - ./library:/app/library:ro
       - ./skills:/app/skills:ro
-      # The long-running config subscriber is the single update writer.
-      - validated_skills:/data/letta/.skills
       - letta_provider_config:/data/letta-config/providers
       - letta_llm_control:/data/llm-control
     networks: [edge, data, agent, tools]
@@ -876,8 +836,6 @@ networks:
     driver: bridge
 
 volumes:
-  validated_skills:
-    name: evaself_validated_skills
   postgres_data:
     name: evaself_postgres_data
   valkey_data:

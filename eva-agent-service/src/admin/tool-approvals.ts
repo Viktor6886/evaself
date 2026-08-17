@@ -1,4 +1,4 @@
-import { TOOL_RISKS, type ToolManifestRegistry, type ToolGatewayStateStore, type ToolRisk } from "../tools/gateway.js";
+import { TOOL_RISKS, type ToolRisk } from "../tools/approvals.js";
 
 export interface ToolInventoryDatabase {
   query(sql: string, values?: unknown[]): Promise<{ rows: Record<string, unknown>[]; rowCount?: number | null }>;
@@ -6,31 +6,23 @@ export interface ToolInventoryDatabase {
 
 const STATUS = {
   implemented: true,
-  planned_step: "14 — Tool Gateway, durable approvals и политика MCP",
-  detail: "Tool Gateway и durable tenant-scoped approvals активны; данные читаются из канонических таблиц.",
+  detail: "Durable tenant-scoped approvals активны; данные читаются из канонических таблиц.",
 };
 
 export class ToolApprovalService {
-  constructor(
-    private readonly db: ToolInventoryDatabase,
-    private readonly registry: ToolManifestRegistry,
-    private readonly state: ToolGatewayStateStore,
-  ) {}
+  constructor(private readonly db: ToolInventoryDatabase) {}
 
   async tools(days = 7): Promise<Record<string, unknown>> {
     const window = Math.min(Math.max(Math.trunc(days) || 7, 1), 90);
-    const [{ rows: observed }, gatewayState] = await Promise.all([
-      this.db.query(
+    const { rows: observed } = await this.db.query(
         `-- tenant: system — aggregate admin inventory
          SELECT tool_name, count(*) AS calls,
                 count(*) FILTER (WHERE status = 'failed') AS failed,
                 count(*) FILTER (WHERE status = 'running') AS running,
                 max(created_at) AS last_call_at
            FROM tool_effects WHERE created_at > now() - make_interval(days => $1::int)
-          GROUP BY tool_name ORDER BY calls DESC, tool_name LIMIT 200`, [window]),
-      this.state.list(),
-    ]);
-    return { status: STATUS, window_days: window, manifests: this.registry.list(), gateway_state: gatewayState, observed_tools: observed };
+          GROUP BY tool_name ORDER BY calls DESC, tool_name LIMIT 200`, [window]);
+    return { status: STATUS, window_days: window, observed_tools: observed };
   }
 
   async approvals(limit = 50): Promise<Record<string, unknown>> {
@@ -51,15 +43,10 @@ export class ToolApprovalService {
     return { status: STATUS, pending: pending.rows, resolved: resolved.rows, standing_rules: rules.rows };
   }
 
-  async setToolEnabled(toolName: string, enabled: boolean): Promise<void> {
-    this.requireCanonicalTool(toolName);
-    await this.state.setEnabled(toolName, enabled);
-  }
-
   async createRule(input: { userId: number; toolName: string; decision: "allow" | "deny";
     scope: "standing" | "session"; sessionId?: string | null; maxRisk: ToolRisk;
     expiresAt?: string | null; actorId: string; actorMetadata?: Record<string, unknown> }): Promise<Record<string, unknown>> {
-    this.requireCanonicalTool(input.toolName);
+    this.requireToolName(input.toolName);
     if (!TOOL_RISKS.includes(input.maxRisk)) throw new Error("Invalid max risk");
     if (input.scope === "session" && !input.sessionId) throw new Error("Session rule requires session_id");
     if (input.scope === "standing" && input.sessionId) throw new Error("Standing rule cannot have session_id");
@@ -81,7 +68,12 @@ export class ToolApprovalService {
     return rows[0];
   }
 
-  private requireCanonicalTool(toolName: string): void {
-    if (!toolName || toolName.includes("*") || !this.registry.get(toolName)) throw new Error("Unknown canonical tool");
+  /**
+   * Правило подтверждения адресует ровно один инструмент. Набор
+   * инструментов сессии определяет Letta, поэтому сверять имя не с чем —
+   * но правило по маске выдало бы разрешение и тому, кого админ не видел.
+   */
+  private requireToolName(toolName: string): void {
+    if (!toolName.trim() || toolName.includes("*")) throw new Error("Invalid tool name");
   }
 }

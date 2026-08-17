@@ -22,8 +22,6 @@ import type { OutboxDelivery } from "../delivery/outbox.js";
 import type { LettaService } from "../letta.js";
 import type { RuntimeContextBuilder } from "../runtime/runtime-context.js";
 import type { UserTurnLock } from "../turns/user-turn-lock.js";
-import { TemporalBackfill } from "../memory/temporal/backfill.js";
-import { AgentJobRunner } from "./agent-job.js";
 import { BullMqJobDriver } from "./bullmq-driver.js";
 import { ReconcileService } from "./maintenance.js";
 import { RetentionService } from "../retention/service.js";
@@ -51,8 +49,6 @@ export interface JobLayer {
   runs: JobRunJournal;
   runtime: JobRuntime;
   schedules: JobScheduleRegistry;
-  /** Универсальный фоновый ход агента. Продуктовых заданий пока не несёт. */
-  agentJobs: AgentJobRunner;
   /** Политики хранения: предпросмотр доступен и при выключенном удалении. */
   retention: RetentionService;
   /** Запускать ли старые интервалы планировщика. */
@@ -98,15 +94,6 @@ export function buildJobLayer(
     batchSize: config.jobOutboxBatchSize,
     pollMs: config.jobOutboxPollMs,
   });
-  const agentJobs = new AgentJobRunner(
-    db,
-    deps.letta,
-    deps.purposes,
-    deps.runtimeContext,
-    logger,
-    config.agentJobsEnabled,
-  );
-
   if (config.langchainEnabled) {
     const router = new LlmRouterClient(config.routerUrl, config.routerApiKey);
     const knowledge = new KnowledgeIngestWorker(db,{tempRoot:"/tmp",embed:(text,signal)=>router.embed(text,signal),scan:async(path)=>await new Promise<"clean"|"infected"|"unavailable">(resolve=>execFile("clamscan",["--no-summary",path],error=>{const code=(error as unknown as {code?:number})?.code;resolve(!error?"clean":code===1?"infected":"unavailable");}))});
@@ -146,26 +133,6 @@ export function buildJobLayer(
         dryRun: report.dryRun,
         classes: report.classes.length,
         affected: report.classes.reduce((sum, item) => sum + item.affected, 0),
-      });
-    });
-  }
-
-  // Перенос памяти на temporal-путь — тоже обслуживание: он никому не
-  // пишет и идёт партиями. Одна партия на запуск задания: прогресс
-  // хранится в PostgreSQL, поэтому прерванный перенос продолжается со
-  // следующего запуска, а не начинается заново.
-  if (config.bullmqMaintenanceEnabled && config.temporalMemoryEnabled) {
-    const backfill = new TemporalBackfill();
-    runtime.register("memory_temporal_backfill", async () => {
-      const result = await db.withSystemScope(
-        "memory.temporal.backfill",
-        async () => await backfill.runBatch(db, { batchSize: 200 }),
-        { crossUser: true },
-      );
-      logger.info("Партия переноса temporal-памяти выполнена", {
-        migrated: result.migrated,
-        skipped: result.skipped,
-        done: result.done,
       });
     });
   }
@@ -218,7 +185,6 @@ export function buildJobLayer(
     runs,
     runtime,
     schedules,
-    agentJobs,
     retention,
     legacySchedulerActive: legacySchedulerActive(stage),
     async start(): Promise<void> {
@@ -245,7 +211,6 @@ export function buildJobLayer(
 }
 
 export {
-  AgentJobRunner,
   JobOutbox,
   JobRunJournal,
   JobRuntime,

@@ -198,7 +198,7 @@ test("App Server-only settings are applied at session open, not agent creation",
     { name: "Bash" },
   ] as never);
   const approval = async () => ({ behavior: "deny" as const, message: "test" });
-  service.setSessionToolPolicyResolver(async () => ({ visibleTools: ["safe_tool"], canUseTool: approval }));
+  service.setSessionApprovalResolver(async () => approval);
 
   let createOptions: Record<string, unknown> = {};
   let sessionOptions: Record<string, unknown> = {};
@@ -235,7 +235,8 @@ test("App Server-only settings are applied at session open, not agent creation",
       "progress_and_hypotheses",
     ],
   );
-  assert.deepEqual(sessionOptions.allowedTools, ["safe_tool"]);
+  // disallowed_tools по-прежнему режет и объявленный список, и живой набор.
+  assert.deepEqual(sessionOptions.allowedTools, ["safe_tool", "Read", "WebSearch"]);
   assert.equal(sessionOptions.canUseTool, approval);
   assert.deepEqual(
     (sessionOptions.tools as Array<{ name: string }>).map((tool) => tool.name),
@@ -250,7 +251,7 @@ test("App Server-only settings are applied at session open, not agent creation",
   assert.equal("reasoningEffort" in await internal.sessionOptions("conversation-default"), false);
 });
 
-test("session opening awaits live policy and recovery uses the same request-id callback", async () => {
+test("session opening awaits the approval resolver and recovery uses the same request-id callback", async () => {
   const service = new LettaService({
     appServerUrl: "ws://example.invalid/ws", appServerToken: "", appServerRequestTimeoutMs: 1000,
     model: "", sessionPoolSize: 5, sessionIdleMs: 1000, turnTimeoutMs: 1000,
@@ -262,11 +263,11 @@ test("session opening awaits live policy and recovery uses the same request-id c
     return { behavior: "allow" as const, message: "ok" };
   };
   let resolved = false;
-  service.setSessionToolPolicyResolver(async (conversationId) => {
+  service.setSessionApprovalResolver(async (conversationId) => {
     await Promise.resolve();
     resolved = true;
     assert.equal(conversationId, "conversation-research");
-    return { visibleTools: ["research_read"], canUseTool };
+    return canUseTool;
   });
   let opened: Record<string, unknown> = {};
   (service as unknown as { client: { resumeSession(id: string, options: Record<string, unknown>): unknown } }).client = {
@@ -283,8 +284,8 @@ test("session opening awaits live policy and recovery uses the same request-id c
   };
   await (service as unknown as { acquireSession(id: string): Promise<unknown> }).acquireSession("conversation-research");
   assert.equal(resolved, true);
-  assert.deepEqual((opened.tools as Array<{ name: string }>).map((tool) => tool.name), ["research_read"]);
-  assert.deepEqual(opened.allowedTools, ["research_read"]);
+  assert.deepEqual((opened.tools as Array<{ name: string }>).map((tool) => tool.name), ["chat_write", "research_read"]);
+  assert.deepEqual(opened.allowedTools, ["chat_write", "research_read"]);
   assert.equal(opened.canUseTool, canUseTool);
   assert.deepEqual(seen, [{ name: "research_read", requestId: "sdk-request-restart" }]);
 });

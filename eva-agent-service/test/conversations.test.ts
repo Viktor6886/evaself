@@ -152,7 +152,6 @@ test("purpose policy denies destructive chat tools in research conversations", a
     "web_search",
     "PERPLEXITY_SEARCH",
     "brave_search",
-    "LIGHTRAG_QUERY",
   ]);
 });
 

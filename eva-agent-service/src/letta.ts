@@ -26,7 +26,6 @@ import type {
 } from "@letta-ai/letta-agent-sdk";
 
 import type { Config } from "./config.js";
-import { minimalPermissionMode } from "./tools/gateway.js";
 import {
   appServerUnavailable,
   EvaError,
@@ -346,10 +345,7 @@ export class LettaService {
   private defaultModel: string;
   private runtime: RuntimeSdkSettings;
   private toolFactory: ((conversationId: string) => AnyAgentTool[]) | null = null;
-  private sessionToolPolicyResolver: ((conversationId: string) => Promise<{
-    visibleTools: readonly string[];
-    canUseTool?: CanUseToolCallback;
-  }>) | null = null;
+  private sessionApprovalResolver: ((conversationId: string) => Promise<CanUseToolCallback>) | null = null;
   /**
    * Уровень reasoning, который текущая модель заведомо не предлагает.
    *
@@ -372,7 +368,7 @@ export class LettaService {
       default_persona: persona,
       default_human_template: "Имя: {{display_name}}\nTelegram ID: {{telegram_id}}",
       default_tags: [EVASELF_TAG],
-      permissionMode: config.toolGatewayEnabled ? "strict" : "unrestricted",
+      permissionMode: "unrestricted",
       reasoning_effort: "none",
       memfs_enabled: true,
       system_prompt: null,
@@ -460,11 +456,14 @@ export class LettaService {
     this.closeAllSessions();
   }
 
-  setSessionToolPolicyResolver(resolver: (conversationId: string) => Promise<{
-    visibleTools: readonly string[];
-    canUseTool?: CanUseToolCallback;
-  }>): void {
-    this.sessionToolPolicyResolver = resolver;
+  /**
+   * Подтверждение действия человеком для живой сессии.
+   *
+   * Набор инструментов сессии сюда не приходит: его определяет Letta.
+   * Здесь остаётся только вопрос «спросить ли владельца перед вызовом».
+   */
+  setSessionApprovalResolver(resolver: (conversationId: string) => Promise<CanUseToolCallback>): void {
+    this.sessionApprovalResolver = resolver;
     this.closeAllSessions();
   }
 
@@ -697,25 +696,6 @@ export class LettaService {
       } as never);
     } catch (error) {
       throw toEvaError(error, `updating conversation ${conversationId}`);
-    }
-  }
-
-  async configureCompaction(
-    agentId: string,
-    settings: {
-      mode: "sliding_window" | "all" | "self_compact_sliding_window" | "self_compact_all";
-      sliding_window_percentage: number;
-    },
-  ): Promise<void> {
-    try {
-      await this.client.agents.update(agentId, {
-        compactionSettings: {
-          mode: settings.mode,
-          sliding_window_percentage: settings.sliding_window_percentage,
-        },
-      });
-    } catch (error) {
-      throw toEvaError(error, `configuring compaction for ${agentId}`);
     }
   }
 
@@ -1259,29 +1239,21 @@ export class LettaService {
    * fields from being silently saved but never enforced.
    */
   private async sessionOptions(conversationId: string, turnPolicy?: { allowedTools: readonly string[]; canUseTool: CanUseToolCallback }): Promise<LettaCodeClientSessionOptions> {
-    // Policy resolution may extend the canonical registry with DB-backed MCP
-    // tools for this conversation, so it must run before the SDK factory snapshot.
-    const policy = this.sessionToolPolicyResolver
-      ? await this.sessionToolPolicyResolver(conversationId)
+    // Разрешение сессии загружает MCP-инструменты этой conversation, и
+    // потому выполняется до снимка фабрики инструментов SDK.
+    const approval = this.sessionApprovalResolver
+      ? await this.sessionApprovalResolver(conversationId)
       : null;
     const allTools = this.toolFactory?.(conversationId) ?? [];
-    const visible = policy ? new Set(policy.visibleTools) : null;
-    const tools = allTools.filter((tool) =>
-      !this.runtime.disallowed_tools.includes(tool.name) && (!visible || visible.has(tool.name)));
-    const allowed = (turnPolicy?.allowedTools ?? this.runtime.allowed_tools ?? tools.map((tool) => tool.name)).filter((name) =>
-      !this.runtime.disallowed_tools.includes(name) && (!visible || visible.has(name)));
+    const tools = allTools.filter((tool) => !this.runtime.disallowed_tools.includes(tool.name));
+    const allowed = (turnPolicy?.allowedTools ?? this.runtime.allowed_tools ?? tools.map((tool) => tool.name))
+      .filter((name) => !this.runtime.disallowed_tools.includes(name));
     return {
       // The remote path belongs to the self-hosted App Server container.
       // compose mounts versioned project skills at /data/letta/.skills,
       // which is the directory Letta Code discovers for source "project".
       cwd: "/data/letta",
-      permissionMode: this.config.toolGatewayEnabled
-        ? minimalPermissionMode({
-            requested: this.runtime.permissionMode,
-            administrative: false,
-            isolated: false,
-          })
-        : this.runtime.permissionMode,
+      permissionMode: this.runtime.permissionMode,
       // "none" is our explicit UI/default value. Passing it to the SDK asks
       // the model catalog for a literal "none" tier, which ordinary
       // OpenAI-compatible models do not advertise. Omitting the option keeps
@@ -1296,7 +1268,7 @@ export class LettaService {
       ...(allowed !== null
         ? { allowedTools: allowed }
         : {}),
-      ...(turnPolicy?.canUseTool ? { canUseTool: turnPolicy.canUseTool } : policy?.canUseTool ? { canUseTool: policy.canUseTool } : {}),
+      ...(turnPolicy?.canUseTool ? { canUseTool: turnPolicy.canUseTool } : approval ? { canUseTool: approval } : {}),
     };
   }
 

@@ -10,7 +10,7 @@
 import { Redis } from "ioredis";
 
 import { applyManagedRuntimeConfig } from "./admin/managed-runtime-config.js";
-import { AgentToolFactory } from "./agent-tools.js";
+import { AgentToolFactory, toolApprovalCategory, toolRisk } from "./agent-tools.js";
 import { BackgroundRuntime } from "./background.js";
 import { configWarnings, loadConfig, readPersona } from "./config.js";
 import { CrisisMonitor } from "./crisis.js";
@@ -25,39 +25,18 @@ import { GoalService } from "./goals/goal-service.js";
 import { buildJobLayer } from "./jobs/index.js";
 import { KnowledgeUploadService } from "./knowledge/lifecycle.js";
 import { ResearchEnqueuer } from "./research/enqueue.js";
-import { PermanentJobFailure } from "./jobs/policy.js";
 import { buildObservability } from "./observability/index.js";
 import { LettaService } from "./letta.js";
 import { LlmManager } from "./llm.js";
 import { createLogger } from "./logger.js";
-import { GraphContextService } from "./memory/graph-context.js";
-import { ConversationHighlightService } from "./memory/conversation-highlights.js";
-import { GraphRepository } from "./memory/graph-repository.js";
-import { EpisodeService, EpisodeTracker, type EpisodeRow } from "./memory/episodes.js";
-import { CURATOR_JOB_TYPE, MemoryCuratorService } from "./memory/curator/service.js";
-import { SUBAGENT_JOB_TYPE, SUBAGENTS, SubagentCoordinator, reflectionIntent } from "./subagents/index.js";
-import { MemoryUserControl, MiniAppMemoryGateway } from "./memory/curator/user-control.js";
-import {
-  MEMORY_DOCTOR_JOB_TYPE,
-  MEMORY_DOCTOR_SWEEP_JOB_TYPE,
-  MemoryDoctorService,
-} from "./memory/doctor/service.js";
-import { HybridRetrieval } from "./memory/retrieval/hybrid.js";
-import { DeepRecall } from "./memory/retrieval/deep-recall.js";
-import { MiniAppDoctorGateway, type DoctorEnqueue } from "./memory/doctor/gateway.js";
-import { buildTemporalMemory } from "./memory/temporal/index.js";
 import { LavaPayments } from "./payments.js";
 import { UserProfileService } from "./profile/profile-service.js";
 import { ValkeyRateLimiter } from "./public/rate-limit.js";
 import { ValkeyMiniAppSessions } from "./public/webapp-session.js";
 import { UserTurnLock } from "./turns/user-turn-lock.js";
 import { RuntimeContextBuilder } from "./runtime/runtime-context.js";
-import { ArtifactRegistry } from "./artifacts/registry.js";
-import { CoreSkillCatalog, FilesystemSkillIndexer, PostgresSkillRepository, SkillRouter } from "./skills/index.js";
-import { createRouterLlmAdapters, skillRuntimeMetrics } from "./skills/runtime.js";
 import { SdkSettingsManager } from "./sdk-settings.js";
 import { ChannelLinkService } from "./channels/channel-links.js";
-import { ConversationContextManager } from "./conversations/context-management.js";
 import { buildServer, VERSION } from "./server.js";
 import { TelegramClient } from "./telegram.js";
 import { TimezoneResolver } from "./time/timezone-resolver.js";
@@ -67,9 +46,9 @@ import { TurnRecoveryService } from "./turns/recovery.js";
 import { TurnSemaphores } from "./turns/semaphores.js";
 import { TurnLifecycle } from "./turns/turn-lifecycle.js";
 import { currentTurn } from "./turns/turn-context.js";
-import { ApprovalService, type MandatoryApprovalCategory } from "./tools/approvals.js";
+import { ApprovalService } from "./tools/approvals.js";
 import { loadMasterKey, SecretStore } from "./admin/secret-store.js";
-import { McpHttpInvoker, McpServerPolicyRepository } from "./tools/gateway.js";
+import { McpHttpInvoker, McpServerPolicyRepository } from "./tools/mcp.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -107,12 +86,10 @@ async function main(): Promise<void> {
   });
   redis.on("error", (error) => logger.warn("Ошибка Valkey", { message: error.message }));
   const configEvents = redis.duplicate();
-  let syncSkills: () => Promise<void> = async () => undefined;
   configEvents.on("error", () => logger.warn("Канал Config Service временно недоступен"));
   await configEvents.subscribe("eva.config.changed");
   configEvents.on("message", (_channel, message) => {
     void applyManagedRuntimeConfig(config, db)
-      .then(async () => { await syncSkills(); })
       .then(() => logger.info("Кеш Config Service обновлён", {
         event: (() => {
           try {
@@ -169,7 +146,6 @@ async function main(): Promise<void> {
   });
   if (config.outboxEnabled) telegram.setOutbox(outbox);
   const sdk = new SdkSettingsManager(config, db, letta);
-  const contextManager = new ConversationContextManager(db, letta, db);
   try {
     await sdk.initialize();
   } catch (error) {
@@ -183,119 +159,28 @@ async function main(): Promise<void> {
   // упасть здесь нечему: прежняя обёртка ловила ошибку чтения реестра LLM,
   // которого больше нет.
   await llm.initializeDefaultModel();
-  const skillsEnabled = config.coreSkillsEnabled || config.skillRouterEnabled;
-  const artifactRegistry = skillsEnabled ? new ArtifactRegistry(db) : null;
-  const indexerRoots = [".skills", "/app/skills"];
-  const syncOnce = async (root: string, writeRuntime: boolean) => {
-    if (!artifactRegistry) return;
-    const idx = new FilesystemSkillIndexer(artifactRegistry, { root, runtimeRoot: writeRuntime ? "/data/letta/.skills" : undefined, environment: "production" });
-    const r = await idx.sync();
-    logger.info("Project skills synchronized", { root, ...r });
-  };
-  syncSkills = async () => { for (let i = 0; i < indexerRoots.length; i++) await syncOnce(indexerRoots[i]!, i === 0); };
-  if (artifactRegistry) await syncSkills();
-  const coreSkills = new CoreSkillCatalog(artifactRegistry ?? { publishedSkills: async () => [] }, {
-    enabled: config.coreSkillsEnabled,
-    onError: (error) => logger.warn("Core skill disabled", { code: error.code, skill: error.skill }),
-  });
-  const skillRepository = new PostgresSkillRepository(db);
-  const skillLlm = createRouterLlmAdapters({ baseUrl: config.routerUrl, apiKey: config.routerApiKey });
-  const skillRouter = new SkillRouter(skillRepository, {
-    enabled: config.skillRouterEnabled,
-    embed: skillLlm.embed,
-    rerank: skillLlm.rerank,
-    observe: (value) => skillRuntimeMetrics.observe(value),
-  });
   const runtimeContext = new RuntimeContextBuilder(db, {
     defaultTimezone: config.defaultTimezone,
     cacheTtlMs: Math.max(1, config.profileCacheTtlSeconds) * 1_000,
     profileCompletionEnabled: config.profileCompletionEnabled,
     vectorGoalsEnabled: config.vectorGoalsEnabled,
     routingMarkerSecret: config.routerApiKey,
-    skillContext: async ({ userId, conversationId, purpose, message, turnId, scenarioComplete }) => {
-      // Letta SDK loads project core from .skills. Runtime injects only routed skills,
-      // while recording both canonical core and routed versions against the run id.
-      const core = await coreSkills.load("production", String(userId));
-      const routed = await skillRouter.route({ tenantId: userId, conversationId, purpose, message,
-        runId: turnId, scenarioComplete });
-      if (turnId) try { await skillRepository.recordUsage(turnId, [...core.versionIds, ...routed.selected.map(skill=>skill.versionId)]); } catch { /* usage is best-effort */ }
-      return ["core_index:", ...core.index.split("\n"), ...routed.selected.map((skill) => skill.text)];
-    },
   });
-  const graph = config.graphMemoryEnabled ? new GraphRepository(db) : undefined;
-  const graphContext = new GraphContextService(
-    db,
-    {
-      enabled: config.graphMemoryEnabled,
-      timeoutMs: config.graphContextTimeoutMs,
-    },
-    logger,
-  );
-  const highlights = new ConversationHighlightService(db, letta, logger);
-  // Temporal-память. Флаг выключен — сборка создаётся, но `enabled`
-  // ложен, и ни один писатель в неё не заходит: так контроль памяти в
-  // Mini App честно отвечает «выключено» вместо пустого списка.
-  const temporalMemory = buildTemporalMemory(config.temporalMemoryEnabled);
-  const episodes = new EpisodeService(db, config.memoryCuratorEnabled);
-  const memoryControl = config.temporalMemoryEnabled
-    ? new MiniAppMemoryGateway(db, new MemoryUserControl(db, temporalMemory))
-    : undefined;
-  // Постановка задания Curator появляется позже — вместе со слоем
-  // заданий, который создаётся после воркфлоу. До тех пор закрытый
-  // эпизод просто записывается: задание без очереди поставить некуда, и
-  // притворяться, что оно поставлено, нельзя.
-  // Гибридный поиск и Deep Recall. Выключенные флаги оставляют прежний
-  // путь: контекст собирается графовым сервисом, как и до этого шага.
-  const hybridRetrieval = new HybridRetrieval(db, {
-    enabled: config.hybridRetrievalEnabled,
-  });
-  const deepRecall = config.deepRecallEnabled
-    ? new DeepRecall(hybridRetrieval, true)
-    : undefined;
-  let enqueueCuration: ((episode: EpisodeRow, userId: number) => Promise<void>) | null = null;
-  // Диагностика памяти собирается здесь, а ставится заданием — поэтому
-  // публикация задания появляется вместе со слоем заданий ниже. Пока
-  // его нет, Mini App честно отвечает отказом, а не молча теряет запрос.
-  const doctor = config.memoryDoctorEnabled && config.temporalMemoryEnabled
-    ? new MemoryDoctorService(db, temporalMemory, logger, true)
-    : null;
-  let enqueueDoctorRun: DoctorEnqueue | null = null;
-  const memoryDoctorGateway = doctor
-    ? new MiniAppDoctorGateway(db, doctor, async (userId, intent) => {
-      if (!enqueueDoctorRun) throw new Error("Слой заданий не запущен");
-      await enqueueDoctorRun(userId, intent);
-    })
-    : undefined;
-  const episodeTracker = new EpisodeTracker(
-    episodes,
-    async (episode, userId) => { await enqueueCuration?.(episode, userId); },
-    logger,
-  );
   const timezoneResolver = new TimezoneResolver(db);
-  const profile = new UserProfileService(
-    db,
-    timezoneResolver,
-    runtimeContext,
-    graph,
-  );
-  const goals = new GoalService(db, runtimeContext, graph);
+  const profile = new UserProfileService(db, timezoneResolver, runtimeContext);
+  const goals = new GoalService(db, runtimeContext);
   const turns = new TurnLifecycle(db, logger, config.turnLifecycleEnabled);
   const approvals = new ApprovalService(db, config.toolApprovalsEnabled, { outbox, lifecycle: turns });
   // Журнал побочных эффектов включается тем же флагом, что и
   // восстановление: без журнала повтор хода не защищён, и включать одно
   // без другого — значит получить повторные действия.
-  const effects = new EffectJournal(
-    db,
-    logger,
-    config.turnRecoveryEnabled || config.toolGatewayEnabled,
-    config.toolGatewayEnabled,
-  );
-  const mcpPolicies = config.toolGatewayEnabled ? new McpServerPolicyRepository(db) : undefined;
-  const mcpInvoker = mcpPolicies ? new McpHttpInvoker({
+  const effects = new EffectJournal(db, logger, config.turnRecoveryEnabled);
+  const mcpPolicies = new McpServerPolicyRepository(db);
+  const mcpInvoker = new McpHttpInvoker({
     policies: mcpPolicies,
     secrets: new SecretStore({ masterKey: await loadMasterKey(), pool: db as never }),
     audit: { record: async (entry) => { await db.query(`INSERT INTO audit_log (actor, operation, target, params_redacted_json, result, request_id, duration_ms) VALUES ('eva-agent-service',$1,$2,$3::jsonb,$4,$5,$6)`, [String(entry.operation), String(entry.server ?? "mcp"), JSON.stringify({ tool: entry.tool, stage: entry.stage }), entry.ok ? "success" : "failure", crypto.randomUUID(), Number(entry.duration_ms ?? 0)]); } },
-  }) : undefined;
+  });
   const toolFactory = new AgentToolFactory(
     config,
     db,
@@ -303,43 +188,23 @@ async function main(): Promise<void> {
     logger,
     profile,
     goals,
-    graph,
     effects,
-    mcpPolicies && mcpInvoker ? { policies: mcpPolicies, invoker: mcpInvoker } : undefined,
+    { policies: mcpPolicies, invoker: mcpInvoker },
   );
   toolFactory.setApprovalCompletionCallback(async (execution) => await approvals.completeApprovedExecution(execution));
-  toolFactory.setVerifiedOutcomeCallback(async outcome => {
-    if (outcome.outcome==="executed" && outcome.toolName==="skill_scenario_complete" && outcome.runId) {
-      await effects.consumeSuccessfulCompletion({runId:outcome.runId,userId:outcome.userId,conversationId:outcome.conversationId,toolCallId:outcome.toolCallId});
-    }
-  });
-  if (config.toolGatewayEnabled) {
-    void effects.pendingSuccessfulCompletions().then(async rows => {
-      for (const row of rows) await effects.consumeSuccessfulCompletion(row);
-    }).catch(error=>logger.warn("Не удалось восстановить completion effects",{code:error instanceof Error?error.name:"unknown_error"}));
-  }
   letta.setToolFactory((conversationId) => toolFactory.forConversation(conversationId));
-  letta.setSessionToolPolicyResolver(async (conversationId) => {
-    const policy = await toolFactory.sessionPolicy(conversationId);
-    return {
-      visibleTools: policy.visibleTools,
-      canUseTool: async (name, args, context) => {
-        const manifest = toolFactory.manifests.get(name);
-        if (!manifest || !policy.visibleTools.includes(name)) {
-          return { behavior: "deny", message: "Tool is outside the live conversation policy", interrupt: false };
-        }
-        return await approvals.canUseTool({
-          userId: policy.runtime.userId,
-          chatId: policy.runtime.chatId,
-          conversationId,
-          turn: currentTurn(),
-          riskFor: () => manifest.risk,
-          categoryFor: () => (manifest as typeof manifest & {
-            mandatoryApprovalCategory?: MandatoryApprovalCategory;
-          }).mandatoryApprovalCategory,
-        })(name, args, context);
-      },
-    };
+  // Что увидит модель, решает Letta. Отсюда приходит только подтверждение
+  // действия человеком: у него есть владелец и чат, которых SDK не знает.
+  letta.setSessionApprovalResolver(async (conversationId) => {
+    const runtime = await toolFactory.sessionRuntime(conversationId);
+    return approvals.canUseTool({
+      userId: runtime.userId,
+      chatId: runtime.chatId,
+      conversationId,
+      turn: currentTurn(),
+      riskFor: toolRisk,
+      categoryFor: toolApprovalCategory,
+    });
   });
   void approvals.recoverPendingApprovals(async (conversationId) => {
     await letta.recoverConversationApprovals(conversationId);
@@ -360,12 +225,7 @@ async function main(): Promise<void> {
     profile,
     logger,
     crisis,
-    graphContext,
-    highlights,
     turns,
-    episodeTracker,
-    deepRecall,
-    contextManager,
     // Связь «сообщение канала → ход → conversation» ведётся всегда:
     // она не зависит от флага дневника, потому что отвечает за общий
     // аккаунт, а не за дневник.
@@ -514,8 +374,6 @@ async function main(): Promise<void> {
     miniAppSessions,
     rateLimiter,
     approvals,
-    ...(memoryControl ? { memory: memoryControl } : {}),
-    ...(memoryDoctorGateway ? { memoryDoctor: memoryDoctorGateway } : {}),
     ...(knowledgeResearch ? { knowledgeResearch } : {}),
   });
 
@@ -531,144 +389,6 @@ async function main(): Promise<void> {
     recoveryTimer.unref();
   }
 
-
-  // Memory Curator существует только как задание очереди. Без слоя
-  // заданий его не собирают вовсе: иначе появился бы второй путь
-  // запуска, и требование «не в пути ответа человеку» держалось бы на
-  // дисциплине вызывающего, а не на устройстве.
-  if (jobs && config.memoryCuratorEnabled && config.temporalMemoryEnabled) {
-    const curator = new MemoryCuratorService(
-      db, episodes, temporalMemory, jobs.agentJobs, logger, true,
-    );
-    // Намерение пишется в job_outbox, а не публикуется прямо в очередь:
-    // недоступный Valkey не должен терять эпизод, и публикатор поднимет
-    // намерение сам.
-    enqueueCuration = async (episode, userId) => {
-      await db.withUserScope(
-        { userId, label: "memory.curator.enqueue", inherit: true },
-        async () => await db.transaction(async (client) => {
-          await jobs.outbox.record(client, curator.intent({
-            userId,
-            episodeId: episode.id,
-            conversationId: episode.conversationId,
-            traceId: crypto.randomUUID(),
-          }));
-          if (config.subagentsEnabled && config.reflectionSubagentEnabled) {
-            await jobs.outbox.record(client, reflectionIntent({
-              userId,
-              episodeId: episode.id,
-              conversationId: episode.conversationId,
-              traceId: crypto.randomUUID(),
-            }));
-          }
-        }),
-      );
-    };
-    jobs.runtime.register(CURATOR_JOB_TYPE, async (context) => {
-      const userId = context.envelope.userId;
-      const episodeId = Number(context.envelope.payload.episode_id);
-      if (!userId || !Number.isFinite(episodeId)) {
-        throw new PermanentJobFailure("memory_curator_payload_invalid");
-      }
-      const outcome = await curator.run({
-        runId: context.runId,
-        userId,
-        agentId: context.envelope.agentId ?? "",
-        episodeId,
-        parentConversationId: context.envelope.conversationId ?? "",
-        signal: context.signal,
-      });
-      // В журнал уходят только счётчики: содержимое кандидатов — это
-      // пересказ разговора, и в логах ему места нет.
-      logger.info("Curator обработал эпизод", {
-        status: outcome.status,
-        candidates: outcome.candidates.length,
-        created: outcome.applied.created,
-        versioned: outcome.applied.versioned,
-      });
-    });
-    if (config.subagentsEnabled && config.reflectionSubagentEnabled) {
-      const subagents = new SubagentCoordinator(jobs.agentJobs, async (ref, subject) => {
-        const resolved = await new ArtifactRegistry(db).resolve({ kind: "prompt", slug: ref, environment: "production", subject });
-        if (!resolved) throw new PermanentJobFailure("subagent_prompt_missing");
-        const body = resolved.body as Record<string, unknown>;
-        const prompt = typeof body.prompt === "string" ? body.prompt : typeof body.content === "string" ? body.content : "";
-        if (!prompt.trim()) throw new PermanentJobFailure("subagent_prompt_invalid");
-        return prompt;
-      });
-      jobs.runtime.register(SUBAGENT_JOB_TYPE, async (context) => {
-        const userId = context.envelope.userId;
-        const episodeId = Number(context.envelope.payload.episode_id);
-        if (!userId || !Number.isFinite(episodeId)) throw new PermanentJobFailure("subagent_payload_invalid");
-        const episode = await episodes.byId(userId, episodeId);
-        if (!episode) throw new PermanentJobFailure("subagent_episode_missing");
-        const result = await subagents.run("memory_reflection", {
-          userId,
-          agentId: context.envelope.agentId ?? "",
-          parentConversationId: context.envelope.conversationId ?? "",
-          messageRefs: episode.messageIds,
-          memoryScopes: ["highlights", "evidence"],
-          context: { kind: "job_runtime", parentKind: "interactive", tenantUserId: userId, attempt: context.attempt },
-        }, context.signal);
-        if (result.status === "succeeded" && result.result) await curator.applyValidatedProposal({
-          runId: `${context.runId}:curator`, userId,
-          agentId: context.envelope.agentId ?? "", episodeId,
-          parentConversationId: context.envelope.conversationId ?? "", signal: context.signal,
-        }, (result.result.payload ?? result.result));
-      }, { softTimeoutMs: SUBAGENTS.memory_reflection.timeoutMs, hardDeadlineMs: 120_000, maxAttempts: SUBAGENTS.memory_reflection.retries + 1 });
-    }
-  }
-
-  // Memory Doctor — тоже только задание очереди. Причина та же, что у
-  // Curator: единственная точка запуска не даёт диагностике попасть в
-  // путь ответа человеку ни через Mini App, ни через админку.
-  if (jobs && doctor) {
-    enqueueDoctorRun = async (userId, intent) => {
-      await db.withUserScope(
-        { userId, label: "memory.doctor.enqueue", inherit: true },
-        async () => await db.transaction(async (client) => {
-          await jobs.outbox.record(client, intent);
-        }),
-      );
-    };
-    // Плановый обход. Он не диагностирует сам — он выбирает, кому и по
-    // какому поводу поставить диагностику, и ставит её обычным заданием.
-    // Так восемь триггеров задания не превращаются в восемь крючков,
-    // разбросанных по сервису.
-    jobs.runtime.register(MEMORY_DOCTOR_SWEEP_JOB_TYPE, async () => {
-      const due = await doctor.sweep();
-      for (const candidate of due) {
-        await enqueueDoctorRun!(candidate.userId, doctor.intent({
-          userId: candidate.userId,
-          trigger: candidate.trigger,
-          reportKey: crypto.randomUUID(),
-          traceId: crypto.randomUUID(),
-        }));
-      }
-      logger.info("Memory Doctor: плановый обход", { queued: due.length });
-    });
-    jobs.runtime.register(MEMORY_DOCTOR_JOB_TYPE, async (context) => {
-      const userId = context.envelope.userId;
-      const reportKey = String(context.envelope.payload.report_key ?? "");
-      const trigger = String(context.envelope.payload.trigger ?? "scheduled");
-      if (!userId || !reportKey) {
-        throw new PermanentJobFailure("memory_doctor_payload_invalid");
-      }
-      const report = await doctor.run({
-        userId,
-        reportKey,
-        trigger: trigger as Parameters<MemoryDoctorService["run"]>[0]["trigger"],
-        signal: context.signal,
-      });
-      // В журнал уходят только счётчики: находки ссылаются на личные
-      // записи, и в логах им места нет.
-      logger.info("Memory Doctor завершил прогон", {
-        status: report.status,
-        findings: report.findings.length,
-        sections: report.sections.length,
-      });
-    });
-  }
 
   background.start(jobs ? jobs.legacySchedulerActive : true);
   if (jobs) {

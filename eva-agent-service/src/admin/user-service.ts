@@ -232,17 +232,8 @@ export class UserService {
     const user = rows[0];
     if (!user) throw adminNotFound("Пользователь не найден");
 
-    const [messages, highlights, conversations] = await Promise.all([
+    const [messages, conversations] = await Promise.all([
       this.fetchMessages(String(user.telegram_id), limit),
-      this.pool.query(
-        `SELECT id, highlight_type, title, content, source_quote,
-                importance, occurred_at, created_at
-           FROM conversation_highlights
-          WHERE user_id = $1 AND status = 'active'
-          ORDER BY COALESCE(occurred_at, created_at) DESC
-          LIMIT 50`,
-        [id],
-      ),
       this.pool.query(
         `SELECT conversation_id, title, status, message_count,
                 started_at, last_message_at
@@ -261,7 +252,6 @@ export class UserService {
         first_name: user.first_name,
       },
       conversations: conversations.rows,
-      highlights: highlights.rows,
       ...messages,
     };
   }

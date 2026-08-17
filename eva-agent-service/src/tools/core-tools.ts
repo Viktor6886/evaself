@@ -426,52 +426,6 @@ export class CoreToolFactory {
     return [
       searchAlias("PERPLEXITY_SEARCH"),
       searchAlias("brave_search"),
-      tool(
-        "LIGHTRAG_INSERT",
-        "Сохранить в архивную память",
-        "Сохраняет материал в приватные заметки пользователя.",
-        objectSchema(
-          { text: text("Материал"), title: text("Заголовок") },
-          ["text"],
-        ),
-        async (args, runtime) => {
-          const { rows } = await this.db.query(
-            `INSERT INTO eva_notes (user_id, title, content, category, tags)
-             VALUES ($1, $2, $3, 'archive', ARRAY['memory'])
-             RETURNING id, title`,
-            [
-              runtime.userId,
-              optionalString(args, "title", 300) ?? "Архивная память",
-              requiredString(args, "text", 100_000),
-            ],
-          );
-          return { ok: true, note: rows[0] };
-        },
-      ),
-      tool(
-        "LIGHTRAG_QUERY",
-        "Поиск в архивной памяти",
-        "Ищет по приватным заметкам и архивной памяти текущего пользователя.",
-        objectSchema(
-          { query: text("Что найти"), limit: integer("Количество") },
-          ["query"],
-        ),
-        async (args, runtime) => {
-          const { rows } = await this.db.query(
-            `SELECT id, title, content, category, updated_at
-               FROM eva_notes
-              WHERE user_id = $1
-                AND (title ILIKE '%' || $2 || '%' OR content ILIKE '%' || $2 || '%')
-              ORDER BY pinned DESC, updated_at DESC LIMIT $3`,
-            [
-              runtime.userId,
-              requiredString(args, "query", 1_000),
-              Math.min(optionalInteger(args, "limit") ?? 10, 30),
-            ],
-          );
-          return { ok: true, results: rows };
-        },
-      ),
     ];
   }
 

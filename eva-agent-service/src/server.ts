@@ -20,15 +20,12 @@ import { DeleteGuard } from "./letta/delete-guard.js";
 import type { LlmManager, LlmProviderInput } from "./llm.js";
 import type { Logger } from "./logger.js";
 import { MetricsCollector } from "./metrics.js";
-import { skillRuntimeMetrics } from "./skills/runtime.js";
 import { newCorrelationId, parseTraceparent } from "./observability/tracing.js";
 import type { LavaPayments } from "./payments.js";
 import type { UserProfileService } from "./profile/profile-service.js";
 import {
   PublicRepository,
   registerPublicRoutes,
-  type MiniAppMemoryControl,
-  type MiniAppMemoryDoctor,
   type KnowledgeResearchPublic,
 } from "./public/routes.js";
 import {
@@ -70,8 +67,6 @@ export interface Services {
   rateLimiter?: RateLimiter;
   approvals?: { decideByTelegram(input: { telegramId: number; sdkRequestId: string; decision: "allow" | "deny" }): Promise<unknown> };
   /** Просмотр, подтверждение, исправление и удаление памяти из Mini App. */
-  memory?: MiniAppMemoryControl;
-  memoryDoctor?: MiniAppMemoryDoctor;
   knowledgeResearch?: KnowledgeResearchPublic;
   /**
    * Контур наблюдаемости. Нужен выдаче метрик (состояние буфера
@@ -212,8 +207,6 @@ export function buildServer(services: Services): FastifyInstance {
     ...(services.miniAppSessions ? { sessions: services.miniAppSessions } : {}),
     rateLimiter,
     ...(services.approvals ? { approvals: { decide: async (input) => await services.approvals!.decideByTelegram(input) } } : {}),
-    ...(services.memory ? { memory: services.memory } : {}),
-    ...(services.memoryDoctor ? { memoryDoctor: services.memoryDoctor } : {}),
     ...(services.knowledgeResearch ? { knowledgeResearch: services.knowledgeResearch } : {}),
   });
 
@@ -266,7 +259,7 @@ export function buildServer(services: Services): FastifyInstance {
     if (config.prometheusEnabled === false) {
       return reply.code(404).send({ error: "metrics_disabled" });
     }
-    const body = `${await metrics.render()}${skillRuntimeMetrics.render()}`;
+    const body = await metrics.render();
     return reply
       .header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
       .send(body);

@@ -154,7 +154,6 @@ const LOADERS = {
   overview: loadOverview,
   services: loadServicesAndIntegrations,
   ai: loadProviders,
-  skills: loadSkills,
   stt: loadStt,
   tts: loadTts,
   operations: loadOperations,
@@ -200,15 +199,6 @@ async function loadTts() {
   const box = $("#tts-test-result");
   box.hidden = true;
   box.textContent = "";
-}
-
-async function loadSkills() {
-  const { payload } = await request("/skills/operations?hours=24");
-  const latency = payload.latency_ms || {};
-  const reranker = payload.reranker || {};
-  const reasons = Object.entries(payload.reasons || {}).map(([reason, count]) => `${escapeHtml(reason)}: ${Number(count)}`).join(", ") || "нет";
-  const selected = (payload.selected || []).map((skill) => `${escapeHtml(skill.id)} v${Number(skill.version || 0)} (${Number(skill.selections || 0)}, score ${skill.avg_score == null ? "—" : Number(skill.avg_score).toFixed(3)})`).join("<br>") || "нет";
-  $("#skills-status").innerHTML = `<div class="setting-row"><strong>Маршрутизация за ${Number(payload.window_hours || 24)} ч</strong><span>${Number(payload.events || 0)} решений</span></div><div class="setting-row"><strong>Latency p50 / p95 / p99</strong><span>${Number(latency.p50 || 0).toFixed(1)} / ${Number(latency.p95 || 0).toFixed(1)} / ${Number(latency.p99 || 0).toFixed(1)} ms</span></div><div class="setting-row"><strong>Reranker</strong><span>${(Number(reranker.ratio || 0) * 100).toFixed(1)}% (${Number(reranker.count || 0)})</span></div><div class="setting-row"><strong>Sticky / fallback</strong><span>${Number(payload.sticky_count || 0)} / ${Number(payload.fallback_count || 0)}</span></div><div class="setting-row"><strong>Причины</strong><span>${reasons}</span></div><div class="setting-row"><strong>Выбранные навыки</strong><span>${selected}</span></div>`;
 }
 
 /**
@@ -1489,57 +1479,6 @@ async function loadSettings() {
     ? `${advanced.length} параметра тонкой настройки`
     : "";
   $("#toggle-advanced").hidden = advanced.length === 0;
-  await loadContextManagement();
-}
-
-async function loadContextManagement() {
-  const { payload } = await request("/context-management");
-  const form = $("#context-management-form");
-  const settings = payload.settings || {};
-  const automatic = settings.automatic_context_management || {};
-  form.elements.default_context_window.value = settings.default_context_window ?? 180000;
-  form.elements.dreaming_trigger.value = settings.dreaming?.trigger || "off";
-  form.elements.automatic_enabled.checked = automatic.enabled === true;
-  form.elements.compaction_message_threshold.value = automatic.compaction_message_threshold ?? 300;
-  form.elements.rotation_message_threshold.value = automatic.rotation_message_threshold ?? 600;
-  form.elements.compaction_mode.value = automatic.compaction_mode || "sliding_window";
-  form.elements.sliding_window_percentage.value = automatic.sliding_window_percentage ?? 0.5;
-  form.hidden = false;
-  $("#conversation-limits").innerHTML = (payload.conversations || []).map((item) => `
-    <div class="compact-item">
-      <div><strong>${escapeHtml(item.conversation_id)}</strong><span>${Number(item.message_count).toLocaleString("ru-RU")} сообщений · ${escapeHtml(item.agent_id)}</span></div>
-      <div class="form-actions"><input data-conversation-limit="${escapeHtml(item.conversation_id)}" type="number" min="1024" max="10000000" value="${Number(item.context_window_limit) || ""}"><button class="button tiny ghost" data-save-conversation-limit="${escapeHtml(item.conversation_id)}" type="button">Применить</button></div>
-    </div>`).join("") || '<p class="muted">Активных conversations нет.</p>';
-}
-
-async function saveContextManagement(event) {
-  event.preventDefault();
-  if (!["owner", "admin"].includes(state.me.role)) return toast("Эта роль может только просматривать настройки", true);
-  const form = event.currentTarget;
-  await request("/context-management", { method: "PUT", body: JSON.stringify({
-    default_context_window: Number(form.elements.default_context_window.value),
-    dreaming: { trigger: form.elements.dreaming_trigger.value },
-    automatic_context_management: {
-      enabled: form.elements.automatic_enabled.checked,
-      compaction_message_threshold: Number(form.elements.compaction_message_threshold.value),
-      rotation_message_threshold: Number(form.elements.rotation_message_threshold.value),
-      compaction_mode: form.elements.compaction_mode.value,
-      sliding_window_percentage: Number(form.elements.sliding_window_percentage.value),
-    },
-  }) });
-  toast("Управление контекстом сохранено");
-  await loadContextManagement();
-}
-
-async function saveConversationLimit(button) {
-  if (!["owner", "admin"].includes(state.me.role)) return toast("Эта роль может только просматривать настройки", true);
-  const id = button.dataset.saveConversationLimit;
-  const input = document.querySelector(`[data-conversation-limit="${CSS.escape(id)}"]`);
-  await request(`/context-management/conversations/${encodeURIComponent(id)}`, {
-    method: "PATCH", body: JSON.stringify({ context_window_limit: Number(input.value) }),
-  });
-  window.__contextSaved = true;
-  toast("Диалог обновлён");
 }
 
 /**
@@ -1833,12 +1772,9 @@ function showConversation(id) {
       target.innerHTML = `
         <h4>Переписка</h4>
         ${payload.messages_error
-          ? `<p class="warn-value">Сообщения недоступны: ${escapeHtml(payload.messages_error)}. Выдержки ниже читаются из базы и не зависят от Letta.</p>`
+          ? `<p class="warn-value">Сообщения недоступны: ${escapeHtml(payload.messages_error)}.</p>`
           : ""}
-        ${messages ? `<ul class="msg-list">${messages}</ul>` : '<p class="muted">Сообщений нет.</p>'}
-        ${payload.highlights.length ? `<h4>Выдержки</h4><ul class="note-list">${
-          payload.highlights.map((h) => `<li><span class="muted">${escapeHtml(h.highlight_type)} · ${escapeHtml(localDate(h.occurred_at || h.created_at))}</span><p><strong>${escapeHtml(h.title)}</strong> ${escapeHtml(h.content)}</p></li>`).join("")
-        }</ul>` : ""}`;
+        ${messages ? `<ul class="msg-list">${messages}</ul>` : '<p class="muted">Сообщений нет.</p>'}`;
       target.scrollIntoView({ behavior: "smooth", block: "nearest" });
     },
   });
@@ -2352,11 +2288,6 @@ document.addEventListener("change", (event) => {
 });
 $("#save-settings").addEventListener("click", () => saveSettings(false).catch(handleError));
 $("#save-restart").addEventListener("click", () => saveSettings(true).catch(handleError));
-$("#context-management-form").addEventListener("submit", (event) => saveContextManagement(event).catch(handleError));
-$("#conversation-limits").addEventListener("click", (event) => {
-  const button = event.target.closest("[data-save-conversation-limit]");
-  if (button) saveConversationLimit(button).catch(handleError);
-});
 $("#settings-form").addEventListener("click", (event) => {
   const button = event.target.closest("[data-reset]");
   if (!button) return;

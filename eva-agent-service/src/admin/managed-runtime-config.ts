@@ -46,12 +46,6 @@ export async function applyManagedRuntimeConfig(
       case "runtime.vector_goals_enabled":
         config.vectorGoalsEnabled = boolean(value, config.vectorGoalsEnabled);
         break;
-      case "runtime.graph_memory_enabled":
-        config.graphMemoryEnabled = boolean(value, config.graphMemoryEnabled);
-        break;
-      case "runtime.graph_context_timeout_ms":
-        config.graphContextTimeoutMs = integer(value, config.graphContextTimeoutMs);
-        break;
       case "runtime.profile_cache_ttl_seconds":
         config.profileCacheTtlSeconds = integer(value, config.profileCacheTtlSeconds);
         break;

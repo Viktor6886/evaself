@@ -29,10 +29,9 @@
  *   изменение      — `agent_links.model`, `embedding_model` и `agent_name`
  *                    в PostgreSQL зеркалят конфигурацию агента в Letta.
  *                    Правка их отсюда не дошла бы до Letta и создала бы
- *                    ровно ту скрытую расхождённость, против которой
- *                    заведён `letta_memory_block_sync`: в базе одно, в
- *                    Letta другое, и никто не знает, где правда. Менять
- *                    их будет шаг, у которого есть путь записи в Letta;
+ *                    скрытое расхождение: в базе одно, в Letta другое, и
+ *                    никто не знает, где правда. Менять их будет шаг,
+ *                    у которого есть путь записи в Letta;
  *   удаление       — только предпросмотр: удаление необратимо и требует
  *                    отдельного разрешения человека;
  *   mapping        — уже есть и не дублируется: связь Telegram ↔ учётная
@@ -163,27 +162,19 @@ export class AgentDirectoryService {
     };
   }
 
-  /** Карточка агента: связи, conversations, ходы и состояние блоков. */
+  /** Карточка агента: связи, conversations и активные ходы. */
   async agent(agentId: string): Promise<{
     agent: AgentSummary;
     conversations: ConversationSummary[];
     activeTurns: Array<{ runId: string; state: string; conversationId: string | null }>;
-    memoryBlocks: Array<{
-      label: string;
-      status: string;
-      attempts: number;
-      lastError: string | null;
-      checksum: string | null;
-    }>;
   }> {
     const id = objectId(agentId, "идентификатор агента");
     const found = await this.agents({ query: id, limit: MAX_LIMIT });
     const agent = found.agents.find((row) => row.agentId === id);
     if (!agent) throw notFound(`агент ${id} не найден`);
 
-    const [conversations, blocks, blocking] = await Promise.all([
+    const [conversations, blocking] = await Promise.all([
       this.conversations({ agentId: id, limit: MAX_LIMIT }),
-      this.memoryBlocks(id),
       this.guard.blockingTurnsForAgent(id),
     ]);
 
@@ -195,7 +186,6 @@ export class AgentDirectoryService {
         state: turn.state,
         conversationId: turn.conversationId,
       })),
-      memoryBlocks: blocks,
     };
   }
 
@@ -323,11 +313,6 @@ export class AgentDirectoryService {
         status: row.status,
         message_count: row.messageCount,
       })),
-      memory_blocks: card.memoryBlocks.map((row) => ({
-        label: row.label,
-        status: row.status,
-        checksum: row.checksum,
-      })),
     };
   }
 
@@ -392,32 +377,6 @@ export class AgentDirectoryService {
   }
 
   /** Состояние шести блоков агента: статусы и отпечатки, без значений. */
-  private async memoryBlocks(agentId: string): Promise<Array<{
-    label: string;
-    status: string;
-    attempts: number;
-    lastError: string | null;
-    checksum: string | null;
-  }>> {
-    const { rows } = await this.db.query(
-      `-- tenant: system — состояние блоков чужого агента в административной карточке; область администратора объявлена маршрутом и записана в аудит
-       SELECT label, status, attempts, last_error,
-              left(encode(sha256(convert_to(desired_value, 'UTF8')), 'hex'), 16) AS checksum
-         FROM letta_memory_block_sync
-        WHERE agent_id = $1
-        ORDER BY label`,
-      [objectId(agentId, "идентификатор агента")],
-    );
-    return rows.map((row) => ({
-      label: String(row.label ?? ""),
-      status: String(row.status ?? ""),
-      attempts: Number(row.attempts ?? 0),
-      lastError: row.last_error === null || row.last_error === undefined
-        ? null
-        : String(row.last_error),
-      checksum: row.checksum === null || row.checksum === undefined ? null : String(row.checksum),
-    }));
-  }
 }
 
 function toAgent(row: Record<string, unknown>): AgentSummary {

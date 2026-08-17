@@ -1,8 +1,15 @@
 import type { Database } from "../db.js";
 import type { CanUseToolCallback } from "@letta-ai/letta-agent-sdk";
 import type { OutboxDelivery } from "../delivery/outbox.js";
-import type { ToolRisk } from "./gateway.js";
 import { createHash } from "node:crypto";
+
+/**
+ * Уровень последствия вызова. Он нужен единственному потребителю —
+ * подтверждению действия человеком: столбцы `tool_approvals.risk` и
+ * `tool_approval_rules.max_risk` хранят те же значения.
+ */
+export const TOOL_RISKS = ["read", "low_risk_write", "sensitive_write", "external_side_effect", "destructive"] as const;
+export type ToolRisk = typeof TOOL_RISKS[number];
 
 export const APPROVAL_STATUSES = ["pending", "approved_once", "approved_session", "denied", "expired", "cancelled", "executed", "failed"] as const;
 export type ApprovalStatus = typeof APPROVAL_STATUSES[number];

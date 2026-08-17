@@ -197,7 +197,7 @@ export function purposePolicy(purpose: ConversationPurpose): {
       return {
         canSendToUser: false,
         canChangeProfile: false,
-        allowedTools: ["web_search", "PERPLEXITY_SEARCH", "brave_search", "LIGHTRAG_QUERY"],
+        allowedTools: ["web_search", "PERPLEXITY_SEARCH", "brave_search"],
       };
     case "partner_analysis":
       return {

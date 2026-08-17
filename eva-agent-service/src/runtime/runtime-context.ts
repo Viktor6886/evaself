@@ -11,11 +11,6 @@ import {
 } from "../time/local-date-time.js";
 import { appendRoutingMarker, type RoutingMarkerClaims } from "../router/routing-marker.js";
 import { TaskEventService } from "../tasks/task-event-service.js";
-import {
-  fitLevel,
-  LEVEL_BUDGETS,
-  type LevelMeasurement,
-} from "./context-levels.js";
 
 export interface RuntimeContext {
   userId: number;
@@ -42,8 +37,6 @@ export interface RuntimeContext {
   activeGoal: string | null;
   nextResult: string | null;
   nextStep: string | null;
-  relevantMemory: string[];
-  skillLines?: string[];
   llmQualityMode?: "economy" | "auto" | "quality";
   taskActivity?: string[];
   /** Ближайшие напоминания: когда сработают и через сколько. */
@@ -53,11 +46,6 @@ export interface RuntimeContext {
     profileCheckMs: number;
     cacheHit: boolean;
   };
-  /**
-   * Фактический размер каждого уровня контекста. Заполняется при
-   * сборке сообщения: до неё измерять нечего.
-   */
-  levels?: LevelMeasurement[];
 }
 
 export type MessageSource = "text" | "voice" | "image" | "document" | "unsupported";
@@ -103,7 +91,6 @@ export class RuntimeContextBuilder {
       vectorGoalsEnabled?: boolean;
       now?: () => Date;
       routingMarkerSecret?: string;
-      skillContext?: (input: { userId: number; conversationId: string; purpose: string; message: string; turnId?: string; scenarioComplete?: boolean }) => Promise<string[]>;
     },
   ) {
     this.languageResolver = new LanguageResolver(db);
@@ -115,12 +102,9 @@ export class RuntimeContextBuilder {
     conversationId: string;
     userMessage: string;
     languageMessage?: string;
-    relevantMemory?: string[];
     detectLanguage?: boolean;
     /** Canonical TurnLifecycle run_id; never synthesize one in context code. */
     turnId?: string;
-    memoryScopes?: readonly string[];
-    allowedSkills?: readonly string[];
     modelPolicy?: "economy" | "auto" | "quality";
     /**
      * Когда человек писал в прошлый раз. Значение приходит снаружи и не
@@ -157,19 +141,14 @@ export class RuntimeContextBuilder {
       ? null
       : profileHintFrom(row);
     const profileCheckMs = elapsed(profileStarted);
-    const scoped = input.memoryScopes === undefined ? null : new Set(input.memoryScopes);
-    const permits = (scope: string) => scoped === null || scoped.has(scope);
     // Оба запроса задач независимы, поэтому идут одним заходом: путь
     // ответа человеку не должен ждать два round-trip подряд.
     // Момент напоминания и остаток до него считает серверный код: модель
     // берёт такой остаток из головы и ошибается на часы.
-    const [taskActivity, upcomingReminders] = permits("tasks")
-      ? await Promise.all([
-        this.taskEvents.contextLines(input.userId, timezone).catch(() => []),
-        this.taskEvents.upcomingLines(input.userId, timezone, local.toJSDate()).catch(() => []),
-      ])
-      : [[], []];
-    const skillLines = await this.options.skillContext?.({ userId: input.userId, conversationId: input.conversationId, purpose: row.purpose, message: input.userMessage, turnId: input.turnId }).catch(() => []);
+    const [taskActivity, upcomingReminders] = await Promise.all([
+      this.taskEvents.contextLines(input.userId, timezone).catch(() => []),
+      this.taskEvents.upcomingLines(input.userId, timezone, local.toJSDate()).catch(() => []),
+    ]);
     return {
       userId: Number(row.user_id),
       telegramId: Number(row.telegram_id),
@@ -180,40 +159,25 @@ export class RuntimeContextBuilder {
       localDate: localDateWithWeekday(local),
       sincePreviousMessage: sincePrevious(local.toJSDate(), input.previousUserMessageAt ?? null),
       timezone,
-      city: permits("profile") ? row.city : null,
+      city: row.city,
       countryCode: row.country_code,
       responseLanguage: language.language,
       responseMode: row.response_mode,
       useEmoji: row.use_emoji,
-      communicationStyle: permits("profile") ? row.communication_style : null,
-      profileHint: permits("profile") ? profileHint : null,
-      activeGoal: !permits("goals") || this.options.vectorGoalsEnabled === false
-        ? null
-        : row.active_goal_title ?? null,
-      nextResult: !permits("goals") || this.options.vectorGoalsEnabled === false
-        ? null
-        : row.next_result_title ?? null,
-      nextStep: !permits("goals") || this.options.vectorGoalsEnabled === false
-        ? null
-        : row.next_action ?? null,
-      relevantMemory: (input.relevantMemory ?? []).filter((line) => scoped === null || [...scoped].some((scope) => line.startsWith(`${scope}:`) || line.startsWith(`${scope.replace(/s$/, "")}:`))).slice(0, 5),
+      communicationStyle: row.communication_style,
+      profileHint,
+      activeGoal: this.options.vectorGoalsEnabled === false ? null : row.active_goal_title ?? null,
+      nextResult: this.options.vectorGoalsEnabled === false ? null : row.next_result_title ?? null,
+      nextStep: this.options.vectorGoalsEnabled === false ? null : row.next_action ?? null,
       llmQualityMode: input.modelPolicy ?? row.llm_quality_mode,
       taskActivity,
       upcomingReminders,
-      skillLines: input.allowedSkills === undefined ? skillLines : input.allowedSkills.length === 0 ? [] : (skillLines ?? []).filter((line) => input.allowedSkills!.some((slug) => line.includes(slug))),
       metrics: {
         runtimeContextMs: elapsed(started),
         profileCheckMs,
         cacheHit: loaded.cacheHit,
       },
     };
-  }
-
-  /** Canonical lifecycle event; callers invoke it only after an explicit workflow/tool outcome. */
-  async completeSkillScenario(input: {
-    userId: number; conversationId: string; purpose: string; turnId?: string;
-  }): Promise<void> {
-    await this.options.skillContext?.({ ...input, message: "", scenarioComplete: true });
   }
 
   wrapUserMessage(
@@ -224,12 +188,8 @@ export class RuntimeContextBuilder {
       crisisLevel?: "none" | "low" | "medium" | "high" | "critical";
       internalOperationType?: string;
       correlationId?: string;
-      /** Строки уровня знаний: их поставляет гибридный поиск. */
-      knowledge?: readonly string[];
-      /** Строки активных навыков: их поставит роутер навыков шага 20. */
-      skills?: readonly string[];
-      /** Куда сложить измеренные размеры уровней. */
-      measure?: (levels: LevelMeasurement[]) => void;
+      /** Куда сложить измеренный размер собранного контекста. */
+      measure?: (characters: number) => void;
     } = {},
   ): string {
     const fields: Array<[string, string | null]> = [
@@ -280,38 +240,9 @@ export class RuntimeContextBuilder {
         "vector_protocol: черновик цели активируется только после явного подтверждения; действие должно иметь артефакт, первый физический шаг, время, длительность, if-then и критерий завершения; после действия спроси о факте, а при отклонении меняй один элемент и один следующий малый шаг без обвинений",
       );
     }
-    // Уровни собираются каждый под своим бюджетом. Общий предел ниже
-    // остаётся страховкой, но первым режет не он: иначе длинная память
-    // выдавливала бы знания, а знания — события задач.
-    const measurements: LevelMeasurement[] = [];
-    // Навыки собирает роутер навыков шага 20, и сегодня их набор пуст.
-    // Уровень всё равно измеряется: ноль — это измерение, а пропущенный
-    // уровень означал бы «не считали», и превышение бюджета навыков
-    // всплыло бы только на живом ходу.
-    const skills = fitLevel("skills", [...(context.skillLines ?? []), ...(options.skills ?? [])]);
-    measurements.push(skills.measurement);
-    if (skills.lines.length > 0) lines.push("active_skills:", ...skills.lines);
-
-    const memory = fitLevel(
-      "memory",
-      context.relevantMemory.map((item) => `  - ${escapeContextValue(item)}`),
-    );
-    measurements.push(memory.measurement);
-    if (memory.lines.length > 0) lines.push("relevant_memory:", ...memory.lines);
-
-    const knowledge = fitLevel(
-      "knowledge",
-      (options.knowledge ?? []).map((item) => `  - ${escapeContextValue(item)}`),
-    );
-    measurements.push(knowledge.measurement);
-    if (knowledge.lines.length > 0) lines.push("recalled_knowledge:", ...knowledge.lines);
-
-    const conversation = fitLevel(
-      "conversation",
-      (context.taskActivity ?? []).slice(0, 5).map((item) => `  - ${escapeContextValue(item)}`),
-    );
-    measurements.push(conversation.measurement);
-    if (conversation.lines.length > 0) lines.push("recent_task_events:", ...conversation.lines);
+    const events = (context.taskActivity ?? []).slice(0, 5)
+      .map((item) => `  - ${escapeContextValue(item)}`);
+    if (events.length > 0) lines.push("recent_task_events:", ...events);
 
     // Ближайшие напоминания стоят рядом с местным временем и приходят с
     // уже посчитанным остатком: «через сколько» — это арифметика, а её
@@ -326,17 +257,8 @@ export class RuntimeContextBuilder {
       );
     }
     const limit = Math.max(1_000, this.options.maxContextCharacters ?? 6_000);
-    measurements.unshift({
-      level: "always_on",
-      characters: lines.join("\n").length - skills.measurement.characters
-        - memory.measurement.characters - knowledge.measurement.characters
-        - conversation.measurement.characters,
-      budget: LEVEL_BUDGETS.always_on,
-      dropped: 0,
-    });
-    context.levels = measurements;
-    options.measure?.(measurements);
-    // Лимит режет переменную часть: память и подсказки бывают длинными.
+    options.measure?.(lines.join("\n").length);
+    // Лимит режет переменную часть: подсказки бывают длинными.
     // Указания о форме ответа ниже — фиксированные и обрезке не подлежат:
     // потеряв их, Ева снова начнёт проговаривать план и слать сырые
     // звёздочки, а урезанная память всего лишь чуть беднее.

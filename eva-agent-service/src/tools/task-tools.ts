@@ -2,7 +2,6 @@ import type { AnyAgentTool } from "@letta-ai/letta-agent-sdk";
 
 import { assertCronExpression, nextCronDate } from "../background.js";
 import type { AgentRuntimeContext, Database } from "../db.js";
-import type { GraphRepository } from "../memory/graph-repository.js";
 import { localDateTimeToUtc } from "../time/local-date-time.js";
 import { TaskEventService } from "../tasks/task-event-service.js";
 import {
@@ -22,7 +21,6 @@ export class TaskToolFactory {
   private readonly events: TaskEventService;
   constructor(
     private readonly db: Database,
-    private readonly graph?: GraphRepository,
   ) {
     this.events = new TaskEventService(db);
   }
@@ -36,14 +34,7 @@ export class TaskToolFactory {
     return [
       tool("save_task", "Сохранить задачу", "Создаёт задачу или напоминание.", schema, save),
       tool(
-        "save_task_to_nocodb",
-        "Сохранить задачу",
-        "Совместимое имя; сохраняет задачу напрямую в PostgreSQL.",
-        schema,
-        save,
-      ),
-      tool(
-        "save_tasks_bulk_to_nocodb",
+        "save_tasks_bulk",
         "Сохранить несколько задач",
         "Создаёт несколько задач последовательно с проверкой владельца связей.",
         objectSchema({ tasks: { type: "array", items: schema, minItems: 1, maxItems: 50 } }, ["tasks"]),
@@ -60,13 +51,6 @@ export class TaskToolFactory {
         "get_tasks",
         "Получить задачи",
         "Возвращает задачи текущего пользователя.",
-        listSchema(),
-        list,
-      ),
-      tool(
-        "get_tasks_from_nocodb",
-        "Получить задачи",
-        "Совместимое имя; читает задачи напрямую из PostgreSQL.",
         listSchema(),
         list,
       ),
@@ -133,24 +117,10 @@ export class TaskToolFactory {
         async (args, runtime) => await this.update(args, runtime, false),
       ),
       tool(
-        "update_task_in_nocodb",
-        "Изменить задачу",
-        "Совместимое имя; изменяет задачу в PostgreSQL.",
-        updateSchema("task", "description", "due_date"),
-        async (args, runtime) => await this.update(args, runtime, true),
-      ),
-      tool(
         "delete_tasks",
         "Удалить задачи",
         "Удаляет выбранные задачи только после confirm=DELETE.",
         deleteSchema(),
-        async (args, runtime) => await this.remove(args, runtime),
-      ),
-      tool(
-        "delete_tasks_from_nocodb",
-        "Удалить задачи",
-        "Совместимое имя; удаляет выбранные задачи только после confirm=DELETE.",
-        deleteSchema(true),
         async (args, runtime) => await this.remove(args, runtime),
       ),
     ];
@@ -245,11 +215,6 @@ export class TaskToolFactory {
           energy,
         ],
       );
-      await this.graph?.syncTask(client, {
-        userId: runtime.userId,
-        task: rows[0] as Record<string, unknown>,
-        goalResultId: resultId,
-      });
       return rows[0];
     });
     if (task && typeof task === "object" && "id" in task) {
@@ -309,13 +274,6 @@ export class TaskToolFactory {
           dueInput ? localDateTimeToUtc(dueInput, runtime.timezone) : null,
         ],
       );
-      if (rows[0]) {
-        await this.graph?.syncTask(client, {
-          userId: runtime.userId,
-          task: rows[0] as Record<string, unknown>,
-          goalResultId: Number(rows[0].goal_result_id) || null,
-        });
-      }
       return rows[0];
     });
     if (task) {
@@ -341,14 +299,6 @@ export class TaskToolFactory {
         : [];
     const deleted = await this.db.transaction(async (client) => {
       if (ids.length === 0) return 0;
-      await client.query(
-        `UPDATE memory_nodes
-            SET status = 'archived', valid_to = now()
-          WHERE user_id = $1
-            AND node_type = 'task'
-            AND canonical_key = ANY($2::text[])`,
-        [runtime.userId, ids.map((id) => `task:${id}`)],
-      );
       const result = await client.query(
         "DELETE FROM tasks WHERE user_id = $1 AND id = ANY($2::bigint[])",
         [runtime.userId, ids],
