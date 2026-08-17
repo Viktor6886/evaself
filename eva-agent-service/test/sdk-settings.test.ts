@@ -35,8 +35,8 @@ test("SDK settings reject unsafe enum values and invalid timeouts", () => {
     (error: unknown) => error instanceof EvaError && error.code === "bad_request",
   );
   for (const unsupported of [
-    { dreaming: { trigger: "step-count", behavior: "reminder", stepCount: 20 } },
     { dreaming: { trigger: "never" } },
+    { dreaming: { trigger: "compaction-event", behavior: "always" } },
   ]) {
     assert.throws(
       () => validateSettings(unsupported),

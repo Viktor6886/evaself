@@ -268,13 +268,16 @@ test("new Eva agents receive the structured memory blueprint", () => {
       "persona",
       "human",
       "current_state",
-      "goals_and_commitments",
-      "relationships_and_patterns",
-      "progress_and_hypotheses",
+      "therapeutic_framework",
     ],
   );
-  assert.equal(blocks.length, 6);
+  assert.equal(blocks.length, 4);
   assert.equal(blocks.some((block) => block.label === "tools"), false);
+  // Рамка работы всегда в контексте: она нужна раньше, чем Ева решит,
+  // какой Skill открыть.
+  const framework = blocks.find((block) => block.label === "therapeutic_framework")!;
+  assert.match(framework.value, /AUTO/);
+  assert.match(framework.value, /гипотез|Skill/i);
 });
 
 function toolFactory(todoistApiToken = "") {

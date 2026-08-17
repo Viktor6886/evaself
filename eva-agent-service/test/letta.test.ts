@@ -228,9 +228,7 @@ test("App Server-only settings are applied at session open, not agent creation",
       "persona",
       "human",
       "current_state",
-      "goals_and_commitments",
-      "relationships_and_patterns",
-      "progress_and_hypotheses",
+      "therapeutic_framework",
     ],
   );
   // Обычная сессия не передаёт ни allowedTools, ни skillSources: набор

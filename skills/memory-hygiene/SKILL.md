@@ -1,40 +1,77 @@
 ---
 name: memory-hygiene
-description: How to keep the `human` memory block accurate, compact and current instead of letting it grow into a diary.
+description: Как вести долговременную память — блоки ядра и файлы MemFS — так, чтобы она оставалась точной и актуальной, а не превращалась в дневник. Нужен при записи, обновлении и разборе памяти, а также во время рефлексии.
 ---
 
-# Memory hygiene
+# Гигиена памяти
 
-Your `human` memory block is not a log. It is a working model of the
-person, and it has a size limit. Treat it like notes you would actually
-re-read.
+У памяти два уровня, и путать их дорого.
 
-## Write
+**Ядро (memory blocks)** — то, что в контексте всегда. Оно маленькое:
+`persona`, `human`, `current_state`, `therapeutic_framework`. Это рабочая
+модель, а не база данных.
 
-- Stable facts: name, city, timezone, work, close people, health
-  constraints that matter for advice.
-- Preferences about *you*: how they want to be talked to, what they hate.
-- Live threads: what they are working on or struggling with right now, and
-  what they said they would try.
+- `human` — устойчивое: кто человек, что для него важно, что влияет на
+  разговор. Не хроника.
+- `current_state` — только сейчас: текущая трудность, состояние, значимые
+  изменения, незакрытые темы. Прошедшее отсюда уходит.
 
-## Do not write
+**MemFS** — файловая память, которую ты ведёшь сама. Стартовая раскладка:
 
-- Whole conversations. Write the conclusion, not the transcript.
-- Anything you inferred but they never confirmed. Mark guesses as guesses,
-  or leave them out.
-- Transient moods. "Was tired on Tuesday" is noise by Friday.
+```
+memory/
+  user/         biography.md, preferences.md, relationships.md, important-events.md
+  psychology/   observations.md, patterns.md, hypotheses.md, progress.md
+  goals/        active.md
+  context/      themes.md
+```
 
-## Maintain
+Раскладка стартовая, а не обязательная: заводи файл, когда есть что в него
+записать, и заводи свои, если материал не ложится в эти. Подробности живут
+здесь, а не в блоках ядра.
 
-When you add something, look for what it replaces. A thread that closed
-should be deleted or compressed into one line, not left next to its
-update. If the block is nearly full, compress the oldest entries first;
-never drop a stable fact to make room for a recent detail.
+## Правила
 
-Move anything worth keeping but not worth carrying in every prompt into
-archival memory instead.
+- **ФАКТ ≠ ГИПОТЕЗА.** Сказанное человеком — факт. Твоя догадка о причинах,
+  чувствах, мотивах и характере — гипотеза. Гипотезы живут в
+  `psychology/hypotheses.md` и помечены как гипотезы. В подтверждённые
+  сведения они переходят только после явного согласия человека.
+- **Гипотеза не становится диагнозом.** Ни в одном файле не появляется
+  диагноз, ярлык или клиническая категория.
+- **Временное состояние не становится чертой личности.** «Устал во вторник»
+  — не «тревожный человек».
+- **Твой совет — не предпочтение человека.** Записывается то, что выбрал он,
+  а не то, что предложила ты.
+- **Новое явное сообщение важнее старой записи.** Человек сказал, что
+  уволился и работает в другом месте — старая запись о работе исправляется
+  сразу, а не остаётся рядом с новой.
+- **Устаревшее обновляется, а не копится.** Добавляя запись, посмотри, что
+  она заменяет. Закрытая тема сжимается в одну строку или удаляется.
+- **Никаких стенограмм.** Записывай вывод, а не переписку.
+- **Без дублей.** Один факт — одно место. Второе упоминание нужно, только
+  если оно правда добавляет смысл.
+- **Учитывай время.** У записи есть дата и срок годности: «ищет работу» год
+  спустя — это вопрос, а не факт.
+- **Не гиперфиксируйся.** Старая тема поднимается тогда, когда она уместна
+  сейчас, а не каждый раз потому, что она записана.
+- **Не выдумывай событий.** Если чего-то не было в разговоре и нет в
+  памяти — этого не было.
 
-## Ask before you assume
+## Что спросить, а не додумывать
 
-If a fact would change how you talk to someone and you are not sure of it,
-ask a direct question rather than storing a guess.
+Если факт изменил бы то, как ты разговариваешь с человеком, и ты в нём не
+уверена — задай прямой вопрос вместо того, чтобы хранить догадку.
+
+## Во время рефлексии
+
+Рефлексия — это уборка, а не сочинение. Что делать:
+
+- свести дубликаты в одну запись;
+- обновить устаревшее и убрать закрытое;
+- заметить прогресс и записать его в `psychology/progress.md`;
+- вынести из ядра в MemFS то, что больше не нужно в каждом ходу;
+- сохранить continuity: чем разговор жил и на чём остановился.
+
+Чего не делать: превращать гипотезы в факты. Неподтверждённое остаётся
+неподтверждённым, сколько бы раз оно ни встретилось. Новых событий,
+выводов о людях и оценок рефлексия не создаёт.

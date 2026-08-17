@@ -39,6 +39,7 @@ export interface PublicSdkSettings extends SdkSettingsInput {
 const PERMISSION_MODES = new Set(["standard", "acceptEdits", "unrestricted", "strict"]);
 const REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
 const DREAMING_TRIGGERS = new Set(["off", "step-count", "compaction-event"]);
+const DREAMING_BEHAVIORS = new Set(["reminder", "auto-launch"]);
 
 export class SdkSettingsManager {
   constructor(
@@ -121,10 +122,10 @@ export function validateSettings(input: SdkSettingsInput): Required<SdkSettingsI
   const dreaming = plainObject(input.dreaming ?? { trigger: "compaction-event" }, "dreaming");
   const trigger = String(dreaming.trigger ?? "compaction-event");
   if (!DREAMING_TRIGGERS.has(trigger)) throw badRequest("Некорректный dreaming.trigger");
-  if (dreaming.behavior !== undefined) {
-    throw badRequest(
-      "dreaming.behavior пока не поддерживается официальным SDK для self-hosted App Server",
-    );
+  // `behavior` — часть публичного API создания агента в SDK 0.7.1.
+  // Не передан — остаётся умолчание harness, а не наше предположение.
+  if (dreaming.behavior !== undefined && !DREAMING_BEHAVIORS.has(String(dreaming.behavior))) {
+    throw badRequest("dreaming.behavior должен быть reminder или auto-launch");
   }
   if (dreaming.stepCount !== undefined) integer(dreaming.stepCount, "dreaming.stepCount", 1, 100000);
   return {
