@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { AgentToolFactory } from "../dist/agent-tools.js";
@@ -158,7 +159,8 @@ test("time context uses the configured timezone", () => {
   assert.match(prompt, /Привет/);
   assert.match(prompt, /<EVA_RUNTIME_CONTEXT>/);
   assert.match(prompt, /<USER_MESSAGE>/);
-  assert.match(prompt, /vector_protocol/);
+  // Постоянные правила в блок не попадают: они в персоне и навыках.
+  assert.doesNotMatch(prompt, /vector_protocol|self_reference|formatting:|layout:/);
 });
 
 test("runtime context marks a transcript as voice without changing its words", () => {
@@ -189,33 +191,30 @@ test("runtime context marks a transcript as voice without changing its words", (
   assert.match(prompt, /<USER_MESSAGE>\nЭто расшифровка\n<\/USER_MESSAGE>/);
 });
 
-test("VECTOR and profile hints are removed when their feature flags are off", () => {
-  const builder = new RuntimeContextBuilder({} as never, {
-    defaultTimezone: "UTC",
-    profileCompletionEnabled: false,
-    vectorGoalsEnabled: false,
-  });
-  const prompt = builder.wrapUserMessage({
-    userId: 1,
-    telegramId: 1,
-    agentId: "agent",
-    conversationId: "conversation",
-    purpose: "chat",
-    localTime: "2026-07-29T12:00:00Z",
-    timezone: "UTC",
-    city: null,
-    countryCode: null,
-    responseLanguage: "ru",
-    responseMode: "text",
-    useEmoji: true,
-    communicationStyle: null,
-    profileHint: "Скрытая подсказка",
-    activeGoal: "Цель",
-    nextResult: "Результат",
-    nextStep: "Шаг",
-    relevantMemory: [],
-  }, "Привет");
-  assert.doesNotMatch(prompt, /vector_protocol/);
+test("goal state and profile hints are removed when their feature flags are off", async () => {
+  // Флаги режут состояние целей и подсказку профиля при сборке, а не при
+  // упаковке: в блок не попадает то, чего в контексте нет.
+  const builder = new RuntimeContextBuilder(
+    {
+      query: async () => ({
+        rows: [{
+          ...CONTEXT_ROW,
+          active_goal_title: "Цель", next_result_title: "Результат", next_action: "Шаг",
+          profile_field_key: "city", profile_title: "Город",
+          profile_prompt_hint: "Скрытая подсказка", profile_status: "unknown",
+        }],
+      }),
+    } as never,
+    {
+      defaultTimezone: "UTC",
+      profileCompletionEnabled: false,
+      vectorGoalsEnabled: false,
+      now: () => new Date("2026-07-29T12:00:00Z"),
+    },
+  );
+  const context = await builder.build({ userId: 1, conversationId: "c", userMessage: "Привет" });
+  const prompt = builder.wrapUserMessage(context, "Привет");
+  assert.doesNotMatch(prompt, /active_goal|next_result|next_step/);
   assert.doesNotMatch(prompt, /Скрытая подсказка/);
 });
 
@@ -421,7 +420,8 @@ test("ход знает день недели и промежуток с про�
   const prompt = builder.wrapUserMessage(context, "сделал");
   assert.match(prompt, /local_date: пятница, 14 августа 2026/);
   assert.match(prompt, /since_previous_user_message: 9 секунд/);
-  assert.match(prompt, /since_previous_user_message_note:.*не выдумывай его по смыслу слов/s);
+  // Что делать с промежутком, Ева знает из персоны — в ходе только факт.
+  assert.doesNotMatch(prompt, /since_previous_user_message_note/);
 });
 
 test("первое сообщение промежутка не выдумывает", async () => {
@@ -450,15 +450,34 @@ test("длинные промежутки называются старшими 
   }
 });
 
-test("о себе Ева говорит в женском роде, и напоминание приходит с каждым сообщением", async () => {
+test("постоянные правила не приходят с каждым сообщением", async () => {
+  // Женский род, форма ответа, разметка Telegram и протокол целей — это
+  // то, кто Ева и как она пишет. Оно живёт в персоне и попадает в
+  // контекст один раз, а не с каждым ходом.
   const builder = contextBuilder(new Date("2026-08-14T12:00:00Z"));
   const russian = await builder.build({ userId: 1, conversationId: "c", userMessage: "привет" });
   const prompt = builder.wrapUserMessage(russian, "привет");
-  assert.match(prompt, /self_reference:.*женском роде/);
-  assert.match(prompt, /«поняла»/);
-  // В языке без рода строка не нужна и место в бюджете не занимает.
-  const english = builder.wrapUserMessage({ ...russian, responseLanguage: "en" }, "hi");
-  assert.doesNotMatch(english, /self_reference/);
+  for (const standing of [
+    /self_reference/, /output_protocol/, /formatting:/, /layout:/, /reactions:/,
+    /vector_protocol/, /«поняла»/,
+  ]) {
+    assert.doesNotMatch(prompt, standing, String(standing));
+  }
+  const block = /<EVA_RUNTIME_CONTEXT>\n([\s\S]*?)\n<\/EVA_RUNTIME_CONTEXT>/.exec(prompt)?.[1] ?? "";
+  assert.ok(block.length <= 1_500, `служебный блок разросся до ${block.length} символов`);
+});
+
+test("персона несёт то, что ушло из хода", async () => {
+  const persona = await readFile(
+    new URL("../../library/persona/eva.md", import.meta.url),
+    "utf8",
+  );
+  for (const carried of [
+    "женском роде", "set_reaction", "Telegram", "промежуток с прошлого сообщения",
+    "goals-values",
+  ]) {
+    assert.ok(persona.includes(carried), `персона потеряла «${carried}»`);
+  }
 });
 
 test("остаток до напоминания считает сервер, а не модель", async () => {
@@ -480,7 +499,8 @@ test("остаток до напоминания считает сервер, а
   const prompt = builder.wrapUserMessage(context, "убрался в гараже");
   assert.match(prompt, /upcoming_reminders:/);
   assert.match(prompt, /через 3 часа 34 минуты/);
-  assert.match(prompt, /не пересчитывай в уме/);
+  // Само правило «не пересчитывай» постоянное и живёт в персоне.
+  assert.doesNotMatch(prompt, /upcoming_reminders_note/);
 });
 
 test("сообщение о сделанном сверяется с промежутком, а не принимается на веру", async () => {
@@ -491,7 +511,10 @@ test("сообщение о сделанном сверяется с проме�
   });
   assert.equal(context.sincePreviousMessage, "30 секунд");
   const prompt = builder.wrapUserMessage(context, "все помыл");
-  assert.match(prompt, /не подтверждай выполнение и не хвали/);
+  // В ход приходит факт; правило сверки — постоянное, оно в персоне.
+  assert.match(prompt, /since_previous_user_message: 30 секунд/);
+  const persona = await readFile(new URL("../../library/persona/eva.md", import.meta.url), "utf8");
+  assert.ok(persona.includes("не подтверждай выполнение и не хвали"));
 });
 
 /**
