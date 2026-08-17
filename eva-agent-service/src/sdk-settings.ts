@@ -111,7 +111,10 @@ export class SdkSettingsManager {
 }
 
 export function validateSettings(input: SdkSettingsInput): Required<SdkSettingsInput> {
-  const permission = input.permission_mode ?? "unrestricted";
+  // Умолчание безопасное: `unrestricted` снимает проверку разрешений
+  // целиком, и подтверждения действий человеком в этом режиме не
+  // спрашиваются вовсе. Ева работает в мессенджере, а не в терминале.
+  const permission = input.permission_mode ?? "standard";
   if (!PERMISSION_MODES.has(permission)) {
     throw badRequest("permission_mode должен быть standard, acceptEdits, unrestricted или strict");
   }

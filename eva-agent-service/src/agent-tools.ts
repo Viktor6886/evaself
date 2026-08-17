@@ -373,3 +373,37 @@ export function toolRisk(name: string): ToolRisk {
 export function toolApprovalCategory(name: string): MandatoryApprovalCategory | undefined {
   return TOOL_APPROVAL_CATEGORY[name];
 }
+
+/**
+ * Инструменты, выполняющие произвольный код и произвольную запись в
+ * файловую систему хоста.
+ *
+ * Ева — компаньон в мессенджере. Ни один продуктовый сценарий не просит
+ * запустить команду оболочки или переписать файл рядом с состоянием
+ * runtime, а последствие такого вызова человек в чате оценить не может:
+ * подтверждать «выполнить Bash» бессмысленно. Поэтому граница здесь
+ * детерминированная и не зависит от флага подтверждений.
+ *
+ * Это не выбор инструментов и не их видимость: набор инструментов сессии
+ * по-прежнему решает Letta, а память, MemFS, навыки, субагенты, чтение и
+ * поиск остаются доступны — они в этот список не входят.
+ */
+const HOST_EXECUTION_TOOLS: ReadonlySet<string> = new Set([
+  "Bash", "BashOutput", "KillShell", "KillBash",
+  "EnterWorktree", "ExitWorktree",
+  "Write", "Edit", "MultiEdit", "NotebookEdit",
+  "apply_patch", "ApplyPatch", "replace", "Replace",
+  "write_file", "WriteFile", "write_file_gemini", "WriteFileGemini",
+]);
+
+/**
+ * Инструмент памяти узнаётся по префиксу, а не по точному имени: состав
+ * зависит от toolset и модели, и закреплять одно имя значило бы отключить
+ * память на следующей версии harness.
+ */
+const MEMORY_TOOL = /^(memory|memfs)/i;
+
+export function isHostExecutionTool(name: string): boolean {
+  if (MEMORY_TOOL.test(name)) return false;
+  return HOST_EXECUTION_TOOLS.has(name);
+}

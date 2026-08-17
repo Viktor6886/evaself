@@ -522,7 +522,7 @@ export class EvaWorkflow {
             assistant_groups: answer.assistantGroups,
             slice_ids_present: answer.assistantHadIds,
             tool_calls: answer.toolCalls.length,
-            reasoning_items: answer.reasoning.length,
+            reasoning_events: answer.reasoningEvents,
           });
         }
         const turn = answer;

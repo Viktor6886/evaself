@@ -10,7 +10,7 @@
 import { Redis } from "ioredis";
 
 import { applyManagedRuntimeConfig } from "./admin/managed-runtime-config.js";
-import { AgentToolFactory, toolApprovalCategory, toolRisk } from "./agent-tools.js";
+import { AgentToolFactory, isHostExecutionTool, toolApprovalCategory, toolRisk } from "./agent-tools.js";
 import { BackgroundRuntime } from "./background.js";
 import { configWarnings, loadConfig, readPersona } from "./config.js";
 import { CrisisMonitor } from "./crisis.js";
@@ -204,7 +204,7 @@ async function main(): Promise<void> {
   // действия человеком: у него есть владелец и чат, которых SDK не знает.
   letta.setSessionApprovalResolver(async (conversationId) => {
     const runtime = await toolFactory.sessionRuntime(conversationId);
-    return approvals.canUseTool({
+    const approve = approvals.canUseTool({
       userId: runtime.userId,
       chatId: runtime.chatId,
       conversationId,
@@ -212,6 +212,19 @@ async function main(): Promise<void> {
       riskFor: toolRisk,
       categoryFor: toolApprovalCategory,
     });
+    return async (toolName, toolInput, context) => {
+      // Оболочка и произвольная запись в файловую систему хоста —
+      // граница детерминированная, а не предмет подтверждения: за
+      // пределами продуктовых сценариев подтверждать такой вызов
+      // человеку в чате нечем. Проверка стоит до подтверждений
+      // намеренно: при выключенном флаге подтверждений граница обязана
+      // остаться.
+      if (isHostExecutionTool(toolName)) {
+        logger.warn("вызов инструмента выполнения отклонён", { tool: toolName, conversationId });
+        return { behavior: "deny", message: "Инструмент недоступен агенту Евы", interrupt: false };
+      }
+      return await approve(toolName, toolInput, context);
+    };
   });
   void approvals.recoverPendingApprovals(async (conversationId) => {
     await letta.recoverConversationApprovals(conversationId);

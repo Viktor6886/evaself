@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { AgentToolFactory, toolApprovalCategory, toolRisk } from "../dist/agent-tools.js";
+import { AgentToolFactory, isHostExecutionTool, toolApprovalCategory, toolRisk } from "../dist/agent-tools.js";
 import { McpServerPolicyRepository } from "../dist/tools/mcp.js";
 import { withTenantScopes } from "./tenant-scope-helper.ts";
 import { runInTurn } from "../dist/turns/turn-context.js";
@@ -301,4 +301,20 @@ test("отказ инструмента доходит до модели сво�
   const payload = result.details as { ok: boolean; error?: string };
   assert.equal(payload.ok, false);
   assert.doesNotMatch(String(payload.error), /tool_approvals/);
+});
+
+test("оболочка и запись в файловую систему хоста агенту недоступны", () => {
+  // Произвольное выполнение кода не входит ни в один продуктовый
+  // сценарий, и подтверждать такой вызов человеку в чате нечем.
+  for (const name of ["Bash", "BashOutput", "KillShell", "Write", "Edit", "apply_patch"]) {
+    assert.equal(isHostExecutionTool(name), true, name);
+  }
+  // Мышление Евы при этом остаётся целым: память, MemFS, навыки,
+  // субагенты, чтение и поиск через эту границу не проходят.
+  for (const name of [
+    "memory", "memory_apply_patch", "memfs_read", "Skill", "Task",
+    "TaskOutput", "Read", "Grep", "Glob", "web_search", "save_note",
+  ]) {
+    assert.equal(isHostExecutionTool(name), false, name);
+  }
 });

@@ -32,7 +32,7 @@ test("extractText of null is empty", () => {
   assert.equal(extractText(undefined), "");
 });
 
-test("summarizeStream picks the assistant text and separates reasoning", () => {
+test("summarizeStream picks the assistant text and counts reasoning events", () => {
   const summary = summarizeStream([
     { type: "init", agentId: "agent-1", sessionId: "s", conversationId: "c" },
     { type: "reasoning", reasoning: "thinking" },
@@ -46,7 +46,9 @@ test("summarizeStream picks the assistant text and separates reasoning", () => {
   ] as never);
 
   assert.equal(summary.reply, "Привет!");
-  assert.deepEqual(summary.reasoning, ["thinking"]);
+  // От рассуждения остаётся счётчик: сам текст не собирается нигде.
+  assert.equal(summary.reasoningEvents, 1);
+  assert.equal("reasoning" in summary, false);
   assert.deepEqual(summary.toolCalls, ["memory_write"]);
   assert.equal(summary.stopReason, "end_turn");
   assert.equal(summary.usage?.total_tokens, 120);
@@ -60,29 +62,54 @@ test("summarizeStream picks the assistant text and separates reasoning", () => {
   ]);
 });
 
-test("administrative trace keeps tool details but redacts secrets", () => {
+test("административная трасса — только метаданные хода", () => {
   const summary = summarizeStream([
+    { type: "user", content: "Меня зовут Сергей, телефон +7 900 000-00-00" },
+    { type: "reasoning", reasoning: "пользователь тревожится из-за развода" },
     {
       type: "tool_call",
       toolName: "external_request",
+      runId: "run-7",
       toolInput: {
-        query: "safe",
+        query: "истории болезни",
         api_key: "must-not-leak",
         nested: { Authorization: "Bearer secret" },
       },
     },
+    { type: "tool_result", toolName: "external_request", content: "диагноз пациента" },
+    { type: "assistant", content: "Понимаю, это тяжело." },
+    {
+      type: "result",
+      stopReason: "end_turn",
+      durationMs: 1200,
+      usage: { total_tokens: 120, request_id: "provider-request-1" },
+    },
   ] as never);
-  assert.equal(summary.trace[0]?.toolName, "external_request");
-  assert.equal(
-    (summary.trace[0]?.toolInput as Record<string, unknown>).api_key,
-    "[скрыто]",
-  );
-  assert.equal(
-    ((summary.trace[0]?.toolInput as Record<string, unknown>).nested as Record<string, unknown>)
-      .Authorization,
-    "[скрыто]",
-  );
-  assert.doesNotMatch(JSON.stringify(summary.trace), /must-not-leak|Bearer secret/);
+
+  const serialized = JSON.stringify(summary.trace);
+  // Ничего из сказанного, подуманного, запрошенного и полученного.
+  for (const leak of [
+    "Сергей", "900-00-00", "тревожится", "развода", "истории болезни",
+    "must-not-leak", "Bearer secret", "диагноз", "Понимаю",
+  ]) {
+    assert.equal(serialized.includes(leak), false, `в трассе не должно быть «${leak}»`);
+  }
+
+  // Метаданные при этом на месте: по ним ход разбирается.
+  const call = summary.trace.find((entry) => entry.type === "tool_call");
+  assert.equal(call?.toolName, "external_request");
+  assert.equal(call?.runId, "run-7");
+  assert.equal(call?.argumentCount, 3);
+  assert.equal(call?.contentChars, undefined);
+
+  const result = summary.trace.find((entry) => entry.type === "result");
+  assert.equal(result?.stopReason, "end_turn");
+  assert.equal(result?.durationMs, 1200);
+  assert.deepEqual(result?.usage, { total_tokens: 120 });
+
+  // Размер сказанного виден, само сказанное — нет.
+  const assistant = summary.trace.find((entry) => entry.type === "assistant");
+  assert.equal(assistant?.contentChars, "Понимаю, это тяжело.".length);
 });
 
 test("summarizeStream concatenates assistant deltas without breaking words", () => {
@@ -203,7 +230,6 @@ test("App Server-only settings are applied at session open, not agent creation",
     resumeSession: (_id, options) => {
       sessionOptions = options;
       return {
-        initialize: async () => {},
         bootstrapState: async () => ({}),
         recoverPendingApprovals: async () => ({ recovered: false }),
       };
@@ -241,7 +267,7 @@ test("App Server-only settings are applied at session open, not agent creation",
     (sessionOptions.tools as Array<{ name: string }>).map((tool) => tool.name),
     ["safe_tool", "Bash"],
   );
-  assert.equal(sessionOptions.permissionMode, "unrestricted");
+  assert.equal(sessionOptions.permissionMode, "standard");
   assert.equal(sessionOptions.reasoningEffort, "high");
   // cwd — рабочий каталог App Server: из него Letta Code открывает
   // `.skills`, поэтому проектные навыки видны без объявления источников.
@@ -274,7 +300,7 @@ test("session opening awaits the approval resolver and recovery uses the same re
     resumeSession: (_id, options) => {
       opened = options;
       return {
-        initialize: async () => {}, bootstrapState: async () => ({}),
+        bootstrapState: async () => ({}),
         recoverPendingApprovals: async () => {
           await (options.canUseTool as typeof canUseTool)("research_read", {}, { requestId: "sdk-request-restart" });
           return { recovered: true };
@@ -331,15 +357,15 @@ test("уровень reasoning без записи в каталоге не вы
       attempts.push(options);
       const failing = attempts.length === 1;
       return {
-        initialize: async () => {
+        bootstrapState: async () => {
           if (failing) {
             throw new Error("No medium reasoning tier found for model lmstudio/eva/chat.");
           }
+          return {};
         },
         close: () => {
           closed += 1;
         },
-        bootstrapState: async () => ({}),
         recoverPendingApprovals: async () => ({ recovered: false }),
       };
     },
@@ -372,7 +398,7 @@ test("прочая ошибка открытия сессии не подмен�
     resumeSession: () => {
       attempts += 1;
       return {
-        initialize: async () => {
+        bootstrapState: async () => {
           throw new Error("WebSocket closed before the handshake");
         },
         close: () => {},
