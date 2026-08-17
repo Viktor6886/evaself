@@ -175,12 +175,19 @@ async function main(): Promise<void> {
   // восстановление: без журнала повтор хода не защищён, и включать одно
   // без другого — значит получить повторные действия.
   const effects = new EffectJournal(db, logger, config.turnRecoveryEnabled);
-  const mcpPolicies = new McpServerPolicyRepository(db);
-  const mcpInvoker = new McpHttpInvoker({
+  // Мастер-ключ секретов монтируется только административным контейнерам:
+  // у eva-agent-service его нет, и раньше эта ветка не поднималась вовсе —
+  // MCP жил под флагом gateway. Ключа нет — нет и удалённых MCP-серверов,
+  // но это не повод не поднять сервис: продуктовые инструменты, память и
+  // диалог от него не зависят.
+  const masterKey = await loadMasterKey().catch(() => null);
+  if (!masterKey) logger.info("Мастер-ключ секретов не настроен: MCP-серверы недоступны");
+  const mcpPolicies = masterKey ? new McpServerPolicyRepository(db) : undefined;
+  const mcpInvoker = masterKey && mcpPolicies ? new McpHttpInvoker({
     policies: mcpPolicies,
-    secrets: new SecretStore({ masterKey: await loadMasterKey(), pool: db as never }),
+    secrets: new SecretStore({ masterKey, pool: db as never }),
     audit: { record: async (entry) => { await db.query(`INSERT INTO audit_log (actor, operation, target, params_redacted_json, result, request_id, duration_ms) VALUES ('eva-agent-service',$1,$2,$3::jsonb,$4,$5,$6)`, [String(entry.operation), String(entry.server ?? "mcp"), JSON.stringify({ tool: entry.tool, stage: entry.stage }), entry.ok ? "success" : "failure", crypto.randomUUID(), Number(entry.duration_ms ?? 0)]); } },
-  });
+  }) : undefined;
   const toolFactory = new AgentToolFactory(
     config,
     db,
@@ -189,7 +196,7 @@ async function main(): Promise<void> {
     profile,
     goals,
     effects,
-    { policies: mcpPolicies, invoker: mcpInvoker },
+    mcpPolicies && mcpInvoker ? { policies: mcpPolicies, invoker: mcpInvoker } : undefined,
   );
   toolFactory.setApprovalCompletionCallback(async (execution) => await approvals.completeApprovedExecution(execution));
   letta.setToolFactory((conversationId) => toolFactory.forConversation(conversationId));
