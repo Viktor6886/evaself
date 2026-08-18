@@ -43,6 +43,15 @@ export interface Crawl4aiOptions {
   gateway?: Pick<OutboundGateway, "request">;
   /** Шлюз проверки чужого адреса: без списка, с полной защитой от SSRF. */
   guard?: Pick<OutboundGateway, "validate">;
+  /**
+   * Заворачивать ли текст в конверт недоверенного содержимого.
+   *
+   * Инструменту Евы — обязательно: прочитанное уходит прямо в ход.
+   * Разбору темы — нет: он сам заворачивает текст перед извлечением
+   * фактов и сверяет цитаты с завёрнутым, а двойной конверт эту сверку
+   * ломает.
+   */
+  sanitize?: boolean;
 }
 
 interface Crawl4aiResult {
@@ -134,7 +143,7 @@ export class Crawl4aiReader {
       title: item.metadata?.title?.slice(0, 300) ?? target.hostname,
       // Содержимое страницы — данные. Скрытые инструкции нейтрализуются
       // здесь же, а не «когда-нибудь у вызывающего».
-      content: sanitizeUntrustedContent(limited),
+      content: this.options.sanitize === false ? limited : sanitizeUntrustedContent(limited),
       truncated: raw.length > limited.length,
       language: item.metadata?.language ?? null,
     };

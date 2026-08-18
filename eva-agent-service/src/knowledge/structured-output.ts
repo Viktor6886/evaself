@@ -21,6 +21,35 @@ export async function structuredRetry<T>(
   return structuredClone(degraded);
 }
 
+/**
+ * То же самое, но без тихой деградации.
+ *
+ * `structuredRetry` возвращает заранее заданное значение, когда схема не
+ * сошлась, и это верно там, где пустой результат — законный ответ. Там,
+ * где он неотличим от «проверили и ничего не нашли», молчание опаснее
+ * отказа: разбор выглядит выполненным, хотя модель ни разу не ответила
+ * по схеме.
+ */
+export async function structuredStrict<T>(
+  operation: StructuredAttempt<T>,
+  options: { attempts?: number; signal?: AbortSignal; code?: string } = {},
+): Promise<T> {
+  const attempts = Math.max(1, Math.min(3, options.attempts ?? 2));
+  let last: unknown;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    options.signal?.throwIfAborted();
+    try {
+      return operation.parse(await operation.complete({ attempt, repair: attempt > 0, signal: options.signal }));
+    } catch (error) {
+      // Сырой ответ модели наружу не уходит: наверх идёт код отказа.
+      last = error;
+    }
+  }
+  const error = new Error(options.code ?? "structured_output_schema_invalid");
+  error.cause = last;
+  throw error;
+}
+
 export class StructuredOutput<T> {
   constructor(
     private readonly complete: (repair: boolean) => Promise<string>,

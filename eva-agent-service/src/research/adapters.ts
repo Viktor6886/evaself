@@ -1,6 +1,7 @@
 import type { Database } from "../db.js";
 import type { PoolClient } from "pg";
 import { OutboundGateway } from "../admin/outbound-gateway.js";
+import { Crawl4aiReader } from "../tools/web-read.js";
 import type { ResearchReport } from "./orchestrator.js";
 
 export class ResearchRepository {
@@ -18,25 +19,69 @@ export class ResearchRepository {
   }
 }
 
+/**
+ * Поиск и чтение для разбора темы.
+ *
+ * Поиск идёт в локальный SearXNG, чтение — в локальный Crawl4AI тем же
+ * читателем, что и продуктовый инструмент `web_read`: с токеном,
+ * проверкой чужого адреса и лимитом размера. Раньше здесь был свой
+ * запрос без заголовка `Authorization`, и Crawl4AI отвечал отказом на
+ * каждое чтение.
+ *
+ * Текст возвращается неупакованным: конверт недоверенного содержимого
+ * ставит оркестратор — он же сверяет цитаты с завёрнутым текстом.
+ */
 export class SearxCrawlAdapters {
   private readonly gateway: Pick<OutboundGateway, "request">;
-  constructor(private readonly searxUrl: string, private readonly crawlUrl: string, gateway?: Pick<OutboundGateway, "request">) {
-    this.gateway = gateway ?? new OutboundGateway({ allowlist: [new URL(searxUrl).hostname, new URL(crawlUrl).hostname], maxBodyBytes: 4 * 1024 * 1024 });
+  private readonly reader: Crawl4aiReader;
+
+  constructor(
+    private readonly searxUrl: string,
+    crawlUrl: string,
+    options: {
+      crawlToken?: string;
+      gateway?: Pick<OutboundGateway, "request">;
+      reader?: Crawl4aiReader;
+    } = {},
+  ) {
+    this.gateway = options.gateway ?? new OutboundGateway({
+      allowlist: [new URL(searxUrl).hostname, new URL(crawlUrl).hostname],
+      maxBodyBytes: 4 * 1024 * 1024,
+    });
+    this.reader = options.reader ?? new Crawl4aiReader({
+      baseUrl: crawlUrl,
+      token: options.crawlToken ?? "",
+      sanitize: false,
+      maxCharacters: 200_000,
+    });
   }
-  async search(query: string, signal: AbortSignal) {
+
+  async search(query: string, signal: AbortSignal): Promise<Array<{ url: string; title: string }>> {
     signal.throwIfAborted();
-    const url = new URL("search", this.searxUrl); url.searchParams.set("q", query); url.searchParams.set("format", "json");
+    const url = new URL("search", this.searxUrl);
+    url.searchParams.set("q", query);
+    url.searchParams.set("format", "json");
     const response = await this.gateway.request(url.toString(), { signal });
     if (!response.ok) throw new Error("searx_search_failed");
-    const body = response.json<{ results?: Array<{url?:string;title?:string}> }>();
-    return (body.results ?? []).flatMap(x => x.url ? [{url:x.url,title:x.title ?? x.url}] : []);
+    const body = response.json<{ results?: Array<{ url?: string; title?: string }> }>();
+    return (body.results ?? []).flatMap((item) =>
+      item.url ? [{ url: item.url, title: item.title ?? item.url }] : []);
   }
-  async read(url: string, signal: AbortSignal, maxBytes: number) {
+
+  async read(url: string, signal: AbortSignal, maxBytes: number): Promise<{
+    url: string;
+    content: string;
+    title: string;
+    language?: string;
+  }> {
     signal.throwIfAborted();
-    await new OutboundGateway().validate(url);
-    const response = await this.gateway.request(new URL("crawl", this.crawlUrl).toString(), { method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({urls:[url]}), signal });
-    if (!response.ok) throw new Error("crawl4ai_read_failed");
-    const payload=response.json<{results?:Array<{url?:string;markdown?:string|{raw_markdown?:string};html?:string;metadata?:{title?:string;author?:string;language?:string}}>}>();const item=payload.results?.[0];if(!item)throw new Error("crawl4ai_schema_invalid");const content=typeof item.markdown==="string"?item.markdown:item.markdown?.raw_markdown??item.html;if(typeof content!=="string")throw new Error("crawl4ai_schema_invalid");if(Buffer.byteLength(content)>maxBytes)throw new Error("crawl4ai_page_too_large");
-    return {url:item.url??url,content,title:item.metadata?.title??url,author:item.metadata?.author,language:item.metadata?.language};
+    const page = await this.reader.read(url, signal);
+    if (Buffer.byteLength(page.content) > maxBytes) throw new Error("crawl4ai_page_too_large");
+    return {
+      url: page.url,
+      content: page.content,
+      title: page.title,
+      ...(page.language ? { language: page.language } : {}),
+    };
   }
 }
