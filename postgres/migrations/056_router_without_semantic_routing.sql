@@ -39,6 +39,15 @@ ON CONFLICT (route_code, provider_id) DO NOTHING;
 DELETE FROM llm_route_providers WHERE route_code = 'classifier';
 DELETE FROM llm_routes WHERE code = 'classifier';
 
+-- Маршрут «безопасность» выбирался тем же разбором: роутер смотрел на
+-- уровень кризиса в сообщении и переключал модель. Кризисный монитор
+-- остаётся детерминированным и приоритетным — он по-прежнему добавляет
+-- директиву безопасности в ход, — но выбор модели по смыслу сообщения
+-- за роутером не остаётся. Без кода маршрут стал бы конфигурацией,
+-- которая ничего не делает, и админ настраивал бы её вслепую.
+-- Цепочка провайдеров уходит каскадом по внешнему ключу.
+DELETE FROM llm_routes WHERE code = 'safety';
+
 INSERT INTO schema_migrations (version) VALUES ('056_router_without_semantic_routing')
 ON CONFLICT (version) DO NOTHING;
 

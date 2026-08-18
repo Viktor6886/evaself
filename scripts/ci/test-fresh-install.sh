@@ -43,11 +43,52 @@ apply_chain() {
 	done
 }
 
-# `\restrict` несёт случайный токен в каждом дампе: он к схеме не относится.
-dump_schema() {
-	pg_dump -d "$1" --schema-only --no-owner --no-acl \
-		| grep -vE '^(--|\\restrict|\\unrestrict|$)' | sort
+WORK_DIR="$(mktemp -d)"
+trap 'rm -rf "$WORK_DIR"' EXIT
+
+# pg_dump обязан быть не старше сервера: клиент 16 против сервера 17
+# отказывается работать вовсе. Раньше это было незаметно — дамп шёл
+# через process substitution, где `set -e` отказа не видит, и два
+# несостоявшихся дампа сравнивались как две одинаковые пустые схемы.
+select_pg_dump() {
+	local server_major client_major candidate
+	server_major="$(psql -tAq -d postgres -c 'SHOW server_version_num')"
+	server_major=$((server_major / 10000))
+	candidate="/usr/lib/postgresql/$server_major/bin/pg_dump"
+	if [ -x "$candidate" ]; then
+		PG_DUMP="$candidate"
+	else
+		PG_DUMP="pg_dump"
+	fi
+	client_major="$("$PG_DUMP" --version | sed -E 's/.* ([0-9]+).*/\1/')"
+	if [ "$client_major" -lt "$server_major" ]; then
+		echo "::error::pg_dump $client_major старше сервера $server_major: дамп схемы недостоверен"
+		exit 1
+	fi
+	echo "==> pg_dump $client_major, сервер $server_major"
 }
+
+# `\restrict` несёт случайный токен в каждом дампе: он к схеме не относится.
+# Дамп пишется в файл, а не в поток: неудача обязана валить проверку, а
+# не превращаться в пустую «одинаковую» схему.
+dump_schema() {
+	local db="$1" out="$2" raw="$WORK_DIR/$2.raw"
+	if ! "$PG_DUMP" -d "$db" --schema-only --no-owner --no-acl > "$raw"; then
+		echo "::error::pg_dump базы $db завершился с ошибкой"
+		exit 1
+	fi
+	if [ ! -s "$raw" ]; then
+		echo "::error::pg_dump базы $db вернул пустой дамп"
+		exit 1
+	fi
+	if ! grep -q '^CREATE TABLE' "$raw"; then
+		echo "::error::в дампе базы $db нет ни одной таблицы"
+		exit 1
+	fi
+	grep -vE '^(--|\\restrict|\\unrestrict|$)' "$raw" | sort > "$WORK_DIR/$out"
+}
+
+select_pg_dump
 
 echo "==> полная цепочка → $FULL_DB"
 prepare "$FULL_DB"
@@ -58,16 +99,26 @@ prepare "$FRESH_DB"
 apply_chain "$FRESH_DB" yes
 
 echo "==> сравнение схем"
-if ! diff <(dump_schema "$FULL_DB") <(dump_schema "$FRESH_DB") > /tmp/fresh-install-schema.diff; then
+dump_schema "$FULL_DB" full.sql
+dump_schema "$FRESH_DB" fresh.sql
+if ! diff -u "$WORK_DIR/full.sql" "$WORK_DIR/fresh.sql" > /tmp/fresh-install-schema.diff; then
 	echo "::error::схема чистой установки отличается от схемы полной цепочки"
 	head -40 /tmp/fresh-install-schema.diff
 	exit 1
 fi
 
 echo "==> сравнение списка применённых миграций"
-diff \
-	<(psql -tAq -d "$FULL_DB" -c "SELECT version FROM schema_migrations ORDER BY version") \
-	<(psql -tAq -d "$FRESH_DB" -c "SELECT version FROM schema_migrations ORDER BY version") \
+list_migrations() {
+	if ! psql -v ON_ERROR_STOP=1 -tAq -d "$1" \
+		-c "SELECT version FROM schema_migrations ORDER BY version" > "$WORK_DIR/$2"; then
+		echo "::error::не удалось прочитать schema_migrations базы $1"
+		exit 1
+	fi
+	[ -s "$WORK_DIR/$2" ] || { echo "::error::schema_migrations базы $1 пуста"; exit 1; }
+}
+list_migrations "$FULL_DB" full-versions.txt
+list_migrations "$FRESH_DB" fresh-versions.txt
+diff -u "$WORK_DIR/full-versions.txt" "$WORK_DIR/fresh-versions.txt" \
 	|| { echo "::error::пропущенные миграции не отмечены применёнными"; exit 1; }
 
 # Пропуск обязан быть выигрышем, а не украшением: если он ничего не

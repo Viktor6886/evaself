@@ -20,6 +20,7 @@ import { ParallelInboxDispatcher } from "./delivery/dispatcher.js";
 import { PostgresTelegramInbox, TelegramInboxWorker } from "./delivery/inbox.js";
 import { PostgresTelegramOutbox } from "./delivery/outbox.js";
 import { TelegramDeliveryLimiter } from "./delivery/telegram-limits.js";
+import { badRequest, notFound } from "./errors.js";
 import { EvaWorkflow } from "./eva-workflow.js";
 import { GoalService } from "./goals/goal-service.js";
 import { buildJobLayer } from "./jobs/index.js";
@@ -368,7 +369,32 @@ async function main(): Promise<void> {
   const knowledgeResearch = knowledgeUploads || research ? {
     upload:async(t:number,x:{name:string;mime:string;stream:import("node:stream").Readable;truncated:()=>boolean})=>{if(!knowledgeUploads)throw new Error("knowledge_disabled");return await knowledgeUploads.createFromStream(t,x);},
     uploadStatus:async(t:number,id:string)=>await knowledgeUploads?.status(t,id),
-    researchCreate:async(t:number,x:Record<string,unknown>)=>{if(!research)throw new Error("research_disabled");const userId=await internalUser(t);return {id:await research.enqueue({userId,conversationId:String(x.conversation_id??""),agentId:String(x.agent_id??""),query:String(x.query??""),...(typeof x.request_id==="string"?{requestId:x.request_id}:{})})};},
+    // Диалог исследования открывает сервер, а не браузер.
+    //
+    // Раньше `conversation_id` и `agent_id` приходили из тела запроса, а
+    // `ResearchEnqueuer` требовал уже существующий активный conversation
+    // назначения `research`. Открывать его было некому: ни один путь
+    // такой conversation не создавал, и любое исследование кончалось
+    // `research_conversation_unauthorized` — пятисоткой, в которой
+    // вызывающему нечего понять. Назначение здесь — техническое имя
+    // продуктовой операции и её политики инструментов, а не разбор
+    // смысла запроса.
+    researchCreate:async(t:number,x:Record<string,unknown>)=>{
+      if(!research)throw badRequest("Исследования отключены");
+      const query=String(x.query??"").trim();
+      if(!query||query.length>4_000)throw badRequest("Запрос исследования пуст или длиннее 4000 знаков");
+      const link=await db.getAgentLink(t);
+      if(!link)throw notFound("Агент ещё не создан: начните диалог с Евой");
+      const userId=await internalUser(t);
+      const conversation=await purposes.ensure({userId,agentId:link.agent_id,purpose:"research"});
+      return {id:await research.enqueue({
+        userId,
+        conversationId:conversation.conversationId,
+        agentId:link.agent_id,
+        query,
+        ...(typeof x.request_id==="string"?{requestId:x.request_id}:{}),
+      })};
+    },
     researchStatus:async(t:number,id:string)=>await research?.status(await internalUser(t),id),
     researchReport:async(t:number,id:string)=>await research?.report(await internalUser(t),id),
     researchCancel:async(t:number,id:string)=>({cancelled:await research?.cancel(await internalUser(t),id)??false}),

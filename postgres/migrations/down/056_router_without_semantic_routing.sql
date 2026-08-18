@@ -12,7 +12,9 @@ INSERT INTO llm_routes (
     rotation_enabled
 ) VALUES
     ('classifier', 'Классификатор', 'Классификация неоднозначных запросов',
-     false, true, false, false, 4096, 5, true, true)
+     false, true, false, false, 4096, 5, true, true),
+    ('safety', 'Безопасность', 'Кризисные и высокорисковые обращения',
+     false, false, false, false, 8192, 2, true, true)
 ON CONFLICT (code) DO NOTHING;
 
 DELETE FROM schema_migrations WHERE version='056_router_without_semantic_routing';

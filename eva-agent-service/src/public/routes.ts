@@ -3,7 +3,7 @@ import multipart from "@fastify/multipart";
 
 import type { Config } from "../config.js";
 import type { Database } from "../db.js";
-import { badRequest, unauthorized } from "../errors.js";
+import { badRequest, EvaError, unauthorized } from "../errors.js";
 import type { GoalService } from "../goals/goal-service.js";
 import type { UserProfileService } from "../profile/profile-service.js";
 import type { ConversationService } from "./conversation-service.js";
@@ -661,6 +661,21 @@ export function registerPublicRoutes(
   void app.register(async (publicApp) => {
     await publicApp.register(multipart, {
       limits: { files: 1, fields: 0, fileSize: 10 * 1024 * 1024, parts: 1 },
+    });
+    // Mini App разбирает ответ как JSON. Голая пятисотка текстом ломает
+    // разбор, и вызывающий видит ошибку `JSON.parse` вместо причины
+    // отказа. Обработчик объявлен здесь, а не только на сервере в целом,
+    // чтобы контракт держался всюду, где эти маршруты подключают.
+    publicApp.setErrorHandler((error: unknown, _request, reply) => {
+      const evaError = error instanceof EvaError
+        ? error
+        : new EvaError(
+            error instanceof Error ? error.message : "unexpected error",
+            { statusCode: (error as { statusCode?: number })?.statusCode ?? 500 },
+          );
+      void reply.status(evaError.statusCode)
+        .type("application/json; charset=utf-8")
+        .send(evaError.toPayload());
     });
     publicApp.addHook("onRequest", async (request) => {
       // Лимит по адресу — ДО проверки подписи: сама проверка стоит

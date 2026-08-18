@@ -191,14 +191,30 @@ jobs:
           # Прямое обращение к провайдеру в обход роутера возвращает
           # прежнюю проблему: смена провайдера снова потребует правки кода
           # и перезапуска App Server.
+          #
+          # Ровно одно исключение — `src/llm/capability-probe.ts`. Он
+          # проверяет провайдера, которого ещё нет в реестре: маршрута к
+          # нему не существует, и вести такую проверку через роутер
+          # значило бы регистрировать непроверенную модель, чтобы её
+          # проверить. Пользовательских данных probe не получает.
           if grep -rn "chat/completions" eva-agent-service/src \
                --include="*.ts" \
                | grep -v "^eva-agent-service/src/router/" \
+               | grep -v "^eva-agent-service/src/llm/capability-probe.ts:" \
                | grep -v "routerUrl"; then
             echo "::error::обращение к /chat/completions в обход LLM Router"
             exit 1
           fi
-          echo "все вызовы моделей идут через роутер"
+
+          # Исключение обязано остаться на пути активации провайдера и не
+          # попасть в обычный ход. Единственный потребитель probe —
+          # `src/llm.ts`, который вызывает его из `activate()`.
+          importers="$(grep -rln "llm/capability-probe.js" eva-agent-service/src --include="*.ts" || true)"
+          if [ "$importers" != "eva-agent-service/src/llm.ts" ]; then
+            echo "::error::capability probe вызывается не только из пути активации: $importers"
+            exit 1
+          fi
+          echo "все вызовы моделей идут через роутер, кроме probe активации"
 
       - name: An upgrade backfills settings added since installation
         run: |
@@ -696,6 +712,12 @@ jobs:
       - name: Rollback and re-apply (down migrations must actually work)
         run: |
           BEFORE="$(psql -tA -c 'SELECT count(*) FROM schema_migrations')"
+          # Снимок сеяного состояния до отката. Сравнивается он же, а не
+          # записанное когда-то число: маршрут, снятый миграцией, менял
+          # это число и валил проверку, ничего не сказав о том, цел ли
+          # цикл down -> up.
+          psql -tA -c 'SELECT code FROM llm_routes ORDER BY 1' > /tmp/routes-before.txt
+          psql -tA -c 'SELECT metric FROM quotas ORDER BY 1' > /tmp/quotas-before.txt
           psql -tAc "SELECT 1 FROM schema_migrations WHERE version='053_remove_cognitive_middleware'" | grep -qx 1 || { echo "::error::053_remove_cognitive_middleware не применена до rollback"; exit 1; }
 
           for f in $(ls -r postgres/migrations/down/*.sql); do
@@ -725,7 +747,15 @@ jobs:
           fi
 
           # Схема должна вернуться целиком, а не «почти», и сеяные строки
-          # после цикла не должны ни пропасть, ни удвоиться.
+          # после цикла не должны ни пропасть, ни удвоиться. Сравнивается
+          # снимок, снятый до отката, — числа в проверке не зашиты.
+          psql -tA -c 'SELECT code FROM llm_routes ORDER BY 1' > /tmp/routes-after.txt
+          psql -tA -c 'SELECT metric FROM quotas ORDER BY 1' > /tmp/quotas-after.txt
+          diff -u /tmp/routes-before.txt /tmp/routes-after.txt \
+            || { echo "::error::цикл down -> up изменил набор маршрутов"; exit 1; }
+          diff -u /tmp/quotas-before.txt /tmp/quotas-after.txt \
+            || { echo "::error::цикл down -> up изменил сеяные квоты"; exit 1; }
+
           psql -v ON_ERROR_STOP=1 -tA <<'SQL'
           DO $$
           BEGIN
@@ -734,11 +764,19 @@ jobs:
                OR to_regclass('public.admin_user_notes') IS NULL THEN
               RAISE EXCEPTION 'после отката и наката схема восстановилась не полностью';
             END IF;
-            IF (SELECT count(*) FROM quotas) <> 9 THEN
-              RAISE EXCEPTION 'quotas после цикла: %', (SELECT count(*) FROM quotas);
+            -- Маршрут классификатора снят миграцией 056 намеренно: он
+            -- существовал ради отдельного LLM-вызова, решавшего за Letta,
+            -- насколько глубоко думать. Вернуться он может только откатом.
+            IF EXISTS (SELECT 1 FROM llm_routes WHERE code IN ('classifier', 'safety')) THEN
+              RAISE EXCEPTION 'семантический маршрут вернулся в llm_routes';
             END IF;
-            IF (SELECT count(*) FROM llm_routes) <> 10 THEN
-              RAISE EXCEPTION 'llm_routes после цикла: %', (SELECT count(*) FROM llm_routes);
+            -- Рабочие маршруты обязаны быть на месте: без них смена
+            -- провайдера в панели не на что опереться.
+            IF EXISTS (
+              SELECT code FROM unnest(ARRAY['chat','deep','fast','json','research','vision','tools','single']) AS code
+               EXCEPT SELECT code FROM llm_routes
+            ) THEN
+              RAISE EXCEPTION 'после цикла пропал рабочий маршрут';
             END IF;
           END $$;
           SQL
