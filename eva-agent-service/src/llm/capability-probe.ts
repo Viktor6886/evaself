@@ -24,7 +24,7 @@
 
 export type CapabilityName =
   | "completion" | "streaming" | "tool_call" | "tool_result_loop"
-  | "json_object" | "json_schema" | "vision";
+  | "tool_loop_without_reasoning" | "json_object" | "json_schema" | "vision";
 
 export interface CapabilityCheck {
   name: CapabilityName;
@@ -329,6 +329,12 @@ export async function probeModelCapabilities(
   if (!input.claims.tools) {
     checks.push({ name: "tool_call", status: "skipped", detail: "инструменты не заявлены", blocking: false });
     checks.push({ name: "tool_result_loop", status: "skipped", detail: "инструменты не заявлены", blocking: false });
+    checks.push({
+      name: "tool_loop_without_reasoning",
+      status: "skipped",
+      detail: "инструменты не заявлены",
+      blocking: false,
+    });
   } else {
     const toolMessages = [{
       role: "user",
@@ -389,6 +395,12 @@ export async function probeModelCapabilities(
     // --- 4. Результат инструмента и завершение цикла -----------------
     if (!toolCall) {
       checks.push(failure("tool_result_loop", "цикл не проверялся: вызова инструмента не было", true));
+      checks.push({
+        name: "tool_loop_without_reasoning",
+        status: "skipped",
+        detail: "цикл не проверялся: вызова инструмента не было",
+        blocking: false,
+      });
     } else {
       const accepted = toolCall;
       try {
@@ -402,46 +414,108 @@ export async function probeModelCapabilities(
           max_tokens: 64,
           stream: false,
         });
+        const attempt = async (assistant: unknown): Promise<{
+          ok: boolean; status: number; detail: string;
+        }> => {
+          const response = await call(loop(assistant));
+          if (!response.ok) {
+            return { ok: false, status: response.status, detail: await httpDetail(response) };
+          }
+          const body = await response.json() as ChatResponse;
+          const message = body.choices?.[0]?.message;
+          const text = textOf(message?.content).trim();
+          if (text) return { ok: true, status: response.status, detail: "результат принят, цикл завершён" };
+          // Модель, которая после результата снова просит инструмент и
+          // не отвечает, зациклит ход: цикл не завершён.
+          return {
+            ok: false,
+            status: response.status,
+            detail: (message?.tool_calls?.length ?? 0) > 0
+              ? "после результата модель снова требует инструмент и не отвечает"
+              : "после результата инструмента модель не ответила",
+          };
+        };
+
         const echoedFields = REASONING_FIELDS.filter((field) => field in accepted.message);
-        let response = await call(loop(echoedAssistant(accepted.message, accepted.id)));
+        let outcome = await attempt(echoedAssistant(accepted.message, accepted.id));
         let trimmed = false;
-        if (response.status >= 400 && response.status < 500) {
+        if (!outcome.ok && outcome.status >= 400 && outcome.status < 500) {
           // Строгий провайдер может не принять поля собственного ответа.
           // Тогда цикл проверяется в минимальной форме — но проверяется,
           // а не объявляется сломанным.
           trimmed = true;
-          response = await call(loop(minimalAssistant(accepted.message, accepted.id)));
+          outcome = await attempt(minimalAssistant(accepted.message, accepted.id));
         }
-        if (!response.ok) {
-          checks.push(failure("tool_result_loop", await httpDetail(response), true));
+        const note = trimmed
+          ? " (без служебных полей: провайдер их не принял)"
+          : echoedFields.length > 0
+            ? ` (провайдеру возвращены поля: ${echoedFields.join(", ")})`
+            : "";
+        checks.push(outcome.ok
+          ? {
+              name: "tool_result_loop",
+              status: "ok",
+              detail: `${outcome.detail}${note}`,
+              blocking: true,
+            }
+          : failure("tool_result_loop", `${outcome.detail}${note}`, true));
+
+        // Настоящий разговор идёт не отсюда, а через LLM Router, и он
+        // служебные поля размышления сегодня не переносит: во внутреннем
+        // формате (`src/router/types.ts`) их просто нет. Значит, модель,
+        // которая завершает цикл только с ними, в проде замолчит — а
+        // проба, проверившая цикл лишь в полной форме, объявит её
+        // совместимой. Отдельная проверка называет эту разницу вслух.
+        //
+        // Не блокирующая: сама модель исправна и заработает, как только
+        // роутер научится переносить поля. Блокировать активацию из-за
+        // ограничения своего же кода — не то же самое, что признать его.
+        if (echoedFields.length === 0) {
+          checks.push({
+            name: "tool_loop_without_reasoning",
+            status: "skipped",
+            detail: "модель не присылает служебных полей размышления — форма роутера ничем не отличается",
+            blocking: false,
+          });
+        } else if (!outcome.ok) {
+          checks.push({
+            name: "tool_loop_without_reasoning",
+            status: "skipped",
+            detail: "цикл не завершился — сравнивать форму запроса не с чем",
+            blocking: false,
+          });
+        } else if (trimmed) {
+          // Цикл уже проверен ровно в той форме, какую шлёт роутер.
+          checks.push({
+            name: "tool_loop_without_reasoning",
+            status: "ok",
+            detail: "цикл завершён в форме роутера: служебные поля провайдер не принял и не потребовал",
+            blocking: false,
+          });
         } else {
-          const body = await response.json() as ChatResponse;
-          const message = body.choices?.[0]?.message;
-          const text = textOf(message?.content).trim();
-          const echoedNote = trimmed
-            ? " (без служебных полей: провайдер их не принял)"
-            : echoedFields.length > 0
-              ? ` (провайдеру возвращены поля: ${echoedFields.join(", ")})`
-              : "";
-          // Модель, которая после результата снова просит инструмент и
-          // не отвечает, зациклит ход: цикл не завершён.
-          checks.push(text
+          const plain = await attempt(minimalAssistant(accepted.message, accepted.id));
+          checks.push(plain.ok
             ? {
-                name: "tool_result_loop",
+                name: "tool_loop_without_reasoning",
                 status: "ok",
-                detail: `результат принят, цикл завершён${echoedNote}`,
-                blocking: true,
+                detail: "цикл завершается и без служебных полей",
+                blocking: false,
               }
             : failure(
-                "tool_result_loop",
-                ((message?.tool_calls?.length ?? 0) > 0
-                  ? "после результата модель снова требует инструмент и не отвечает"
-                  : "после результата инструмента модель не ответила") + echoedNote,
-                true,
+                "tool_loop_without_reasoning",
+                `${plain.detail}, когда служебные поля не возвращены — LLM Router их сегодня не переносит,`
+                  + " и в настоящем ходе модель может замолчать",
+                false,
               ));
         }
       } catch (error) {
         checks.push(failure("tool_result_loop", reason(error), true));
+        checks.push({
+          name: "tool_loop_without_reasoning",
+          status: "skipped",
+          detail: "цикл не завершился — сравнивать форму запроса не с чем",
+          blocking: false,
+        });
       }
     }
   }

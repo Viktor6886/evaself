@@ -91,6 +91,9 @@ test("совместимая модель проходит все заявлен
   }
   // Не заявлено — не проверяется: лишних запросов к провайдеру нет.
   assert.equal(statusOf(result, "vision"), "skipped");
+  // Модель без служебных полей размышления шлёт роутеру ровно то же, что
+  // и проба: сравнивать нечего.
+  assert.equal(statusOf(result, "tool_loop_without_reasoning"), "skipped");
 
   // Проба дешёвая и без данных пользователя.
   assert.ok(seen.length <= 6, `запросов к провайдеру: ${seen.length}`);
@@ -195,6 +198,24 @@ test("reasoning-модель: служебные поля возвращаютс
   // Содержимое размышлений остаётся между пробой и провайдером: в
   // результат, а значит и в базу с журналом, оно не попадает.
   assert.doesNotMatch(JSON.stringify(result), /opaque-blob/);
+
+  // Настоящий ход идёт через LLM Router, а он служебных полей не
+  // переносит. Зелёная проба не должна выдавать это за рабочий ход:
+  // разница названа отдельной непроходящей проверкой.
+  assert.equal(statusOf(result, "tool_loop_without_reasoning"), "failed");
+  assert.match(result.warnings, /LLM Router их сегодня не переносит/);
+});
+
+test("модель, которой служебные поля не нужны, не получает предупреждения", async () => {
+  // Та же reasoning-модель, но провайдер завершает цикл в любой форме:
+  // ограничения роутера её не касаются, и выдумывать его не нужно.
+  const { fetcher } = provider({ toolCall: REASONING_TOOL_CALL });
+  const result = await probeModelCapabilities(INPUT, fetcher);
+
+  assert.equal(result.ok, true, result.message);
+  assert.equal(statusOf(result, "tool_result_loop"), "ok");
+  assert.equal(statusOf(result, "tool_loop_without_reasoning"), "ok");
+  assert.equal(result.warnings, "");
 });
 
 test("reasoning-модель без завершения цикла всё равно отказ", async () => {
@@ -225,6 +246,8 @@ test("провайдер, не принявший свои же служебны
   const minimal = echoedAssistant(bodies[1] ?? {});
   const call0 = (minimal.tool_calls as Array<{ function: { arguments: string } }>)[0];
   assert.equal(call0.function.arguments, '{"value":"ok"}', "аргументы берутся у модели");
+  // Повтор и есть форма роутера: лишней проверки не нужно.
+  assert.equal(statusOf(result, "tool_loop_without_reasoning"), "ok");
 });
 
 test("проба идёт в конфигурации провайдера, но без секретов и маршрутизации", async () => {
@@ -321,7 +344,10 @@ test("незаявленные возможности не проверяютс�
   );
   assert.equal(result.ok, true);
   assert.equal(seen.length, 1, "остаётся только обычный ответ");
-  for (const name of ["streaming", "tool_call", "tool_result_loop", "json_object", "json_schema", "vision"]) {
+  for (const name of [
+    "streaming", "tool_call", "tool_result_loop", "tool_loop_without_reasoning",
+    "json_object", "json_schema", "vision",
+  ]) {
     assert.equal(statusOf(result, name), "skipped", name);
   }
 });
