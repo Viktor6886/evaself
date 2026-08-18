@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { AgentToolFactory } from "../dist/agent-tools.js";
@@ -7,6 +8,21 @@ import { formatVoiceTranscriptEcho, normalizeUpdate } from "../dist/eva-workflow
 import { evaMemoryBlocks } from "../dist/letta.js";
 import { normalizeLavaEvent } from "../dist/payments.js";
 import { RuntimeContextBuilder } from "../dist/runtime/runtime-context.js";
+
+/**
+ * Текст персоны или `null`, если каталог `library` вне образа сервиса.
+ *
+ * Персона монтируется в контейнер отдельно, а сборка образа её не
+ * копирует: внутри сборки файла нет. Отсутствие файла — это «здесь
+ * нечего проверять», а не провал проверки.
+ */
+async function personaText(): Promise<string | null> {
+  try {
+    return await readFile(new URL("../../library/persona/eva.md", import.meta.url), "utf8");
+  } catch {
+    return null;
+  }
+}
 import {
   progressiveTelegramDrafts,
   splitTelegramText,
@@ -158,7 +174,8 @@ test("time context uses the configured timezone", () => {
   assert.match(prompt, /Привет/);
   assert.match(prompt, /<EVA_RUNTIME_CONTEXT>/);
   assert.match(prompt, /<USER_MESSAGE>/);
-  assert.match(prompt, /vector_protocol/);
+  // Постоянные правила в блок не попадают: они в персоне и навыках.
+  assert.doesNotMatch(prompt, /vector_protocol|self_reference|formatting:|layout:/);
 });
 
 test("runtime context marks a transcript as voice without changing its words", () => {
@@ -189,33 +206,30 @@ test("runtime context marks a transcript as voice without changing its words", (
   assert.match(prompt, /<USER_MESSAGE>\nЭто расшифровка\n<\/USER_MESSAGE>/);
 });
 
-test("VECTOR and profile hints are removed when their feature flags are off", () => {
-  const builder = new RuntimeContextBuilder({} as never, {
-    defaultTimezone: "UTC",
-    profileCompletionEnabled: false,
-    vectorGoalsEnabled: false,
-  });
-  const prompt = builder.wrapUserMessage({
-    userId: 1,
-    telegramId: 1,
-    agentId: "agent",
-    conversationId: "conversation",
-    purpose: "chat",
-    localTime: "2026-07-29T12:00:00Z",
-    timezone: "UTC",
-    city: null,
-    countryCode: null,
-    responseLanguage: "ru",
-    responseMode: "text",
-    useEmoji: true,
-    communicationStyle: null,
-    profileHint: "Скрытая подсказка",
-    activeGoal: "Цель",
-    nextResult: "Результат",
-    nextStep: "Шаг",
-    relevantMemory: [],
-  }, "Привет");
-  assert.doesNotMatch(prompt, /vector_protocol/);
+test("goal state and profile hints are removed when their feature flags are off", async () => {
+  // Флаги режут состояние целей и подсказку профиля при сборке, а не при
+  // упаковке: в блок не попадает то, чего в контексте нет.
+  const builder = new RuntimeContextBuilder(
+    {
+      query: async () => ({
+        rows: [{
+          ...CONTEXT_ROW,
+          active_goal_title: "Цель", next_result_title: "Результат", next_action: "Шаг",
+          profile_field_key: "city", profile_title: "Город",
+          profile_prompt_hint: "Скрытая подсказка", profile_status: "unknown",
+        }],
+      }),
+    } as never,
+    {
+      defaultTimezone: "UTC",
+      profileCompletionEnabled: false,
+      vectorGoalsEnabled: false,
+      now: () => new Date("2026-07-29T12:00:00Z"),
+    },
+  );
+  const context = await builder.build({ userId: 1, conversationId: "c", userMessage: "Привет" });
+  const prompt = builder.wrapUserMessage(context, "Привет");
+  assert.doesNotMatch(prompt, /active_goal|next_result|next_step/);
   assert.doesNotMatch(prompt, /Скрытая подсказка/);
 });
 
@@ -280,14 +294,9 @@ test("new Eva agents receive the structured memory blueprint", () => {
   assert.match(framework.value, /гипотез|Skill/i);
 });
 
-function toolFactory(todoistApiToken = "") {
+function toolFactory() {
   return new AgentToolFactory(
-    {
-      searxngUrl: "http://search",
-      todoistApiUrl: "https://api.todoist.test",
-      todoistApiToken,
-      todoistProjectId: "",
-    } as never,
+    { searxngUrl: "http://search" } as never,
     {} as never,
     {} as never,
     { debug() {}, info() {}, warn() {}, error() {} },
@@ -295,9 +304,8 @@ function toolFactory(todoistApiToken = "") {
 }
 
 test("Agent SDK registers every migrated external tool", () => {
-  // Todoist tools are covered separately: they appear only with a token.
   const names = new Set(
-    toolFactory("todoist-token").forConversation("conversation-1").map((tool) => tool.name),
+    toolFactory().forConversation("conversation-1").map((tool) => tool.name),
   );
   for (const expected of [
     "save_note",
@@ -309,10 +317,6 @@ test("Agent SDK registers every migrated external tool", () => {
     "set_reaction",
     "web_search",
     "PERPLEXITY_SEARCH",
-    "TODOIST_CREATE_TASK",
-    "TODOIST_UPDATE_TASK",
-    "TODOIST_CLOSE_TASK",
-    "TODOIST_DELETE_TASK",
     "get_goal_context",
     "upsert_goal",
     "confirm_goal",
@@ -324,22 +328,15 @@ test("Agent SDK registers every migrated external tool", () => {
   }
 });
 
-test("Todoist tools appear only once a token is configured", () => {
-  const without = new Set(toolFactory().forConversation("c").map((tool) => tool.name));
-  const withToken = new Set(
-    toolFactory("todoist-token").forConversation("c").map((tool) => tool.name),
-  );
-  for (const name of [
-    "TODOIST_CREATE_TASK",
-    "TODOIST_UPDATE_TASK",
-    "TODOIST_CLOSE_TASK",
-    "TODOIST_DELETE_TASK",
-  ]) {
-    // Advertising a tool that always fails on the first call only teaches
-    // the model a dead end.
-    assert.equal(without.has(name), false, `${name} must not be offered without a token`);
-    assert.equal(withToken.has(name), true, `${name} must be offered with a token`);
+test("задачи и напоминания Евы — единственная система задач", () => {
+  // Todoist был вторым списком задач поверх собственного: выключен по
+  // умолчанию, дублировал save_task/get_tasks и приносил девять
+  // инструментов, включая удаление всех задач разом.
+  const names = new Set(toolFactory().forConversation("c").map((tool) => tool.name));
+  for (const own of ["save_task", "get_tasks", "update_task", "delete_tasks"]) {
+    assert.equal(names.has(own), true, own);
   }
+  assert.equal([...names].some((name) => name.startsWith("TODOIST_")), false);
 });
 
 test("cron lookups stay fast for sparse expressions", () => {
@@ -421,7 +418,8 @@ test("ход знает день недели и промежуток с про�
   const prompt = builder.wrapUserMessage(context, "сделал");
   assert.match(prompt, /local_date: пятница, 14 августа 2026/);
   assert.match(prompt, /since_previous_user_message: 9 секунд/);
-  assert.match(prompt, /since_previous_user_message_note:.*не выдумывай его по смыслу слов/s);
+  // Что делать с промежутком, Ева знает из персоны — в ходе только факт.
+  assert.doesNotMatch(prompt, /since_previous_user_message_note/);
 });
 
 test("первое сообщение промежутка не выдумывает", async () => {
@@ -450,15 +448,37 @@ test("длинные промежутки называются старшими 
   }
 });
 
-test("о себе Ева говорит в женском роде, и напоминание приходит с каждым сообщением", async () => {
+test("постоянные правила не приходят с каждым сообщением", async () => {
+  // Женский род, форма ответа, разметка Telegram и протокол целей — это
+  // то, кто Ева и как она пишет. Оно живёт в персоне и попадает в
+  // контекст один раз, а не с каждым ходом.
   const builder = contextBuilder(new Date("2026-08-14T12:00:00Z"));
   const russian = await builder.build({ userId: 1, conversationId: "c", userMessage: "привет" });
   const prompt = builder.wrapUserMessage(russian, "привет");
-  assert.match(prompt, /self_reference:.*женском роде/);
-  assert.match(prompt, /«поняла»/);
-  // В языке без рода строка не нужна и место в бюджете не занимает.
-  const english = builder.wrapUserMessage({ ...russian, responseLanguage: "en" }, "hi");
-  assert.doesNotMatch(english, /self_reference/);
+  for (const standing of [
+    /self_reference/, /output_protocol/, /formatting:/, /layout:/, /reactions:/,
+    /vector_protocol/, /«поняла»/,
+  ]) {
+    assert.doesNotMatch(prompt, standing, String(standing));
+  }
+  const block = /<EVA_RUNTIME_CONTEXT>\n([\s\S]*?)\n<\/EVA_RUNTIME_CONTEXT>/.exec(prompt)?.[1] ?? "";
+  assert.ok(block.length <= 1_500, `служебный блок разросся до ${block.length} символов`);
+});
+
+test("персона несёт то, что ушло из хода", async (context) => {
+  // Образ сервиса каталога `library` не несёт: он монтируется отдельно.
+  // Внутри сборки читать нечего, и выдавать это за проверку нельзя.
+  const persona = await personaText();
+  if (persona === null) {
+    context.skip("персона вне образа сервиса; проверяется на репозитории");
+    return;
+  }
+  for (const carried of [
+    "женском роде", "set_reaction", "Telegram", "промежуток с прошлого сообщения",
+    "goals-values",
+  ]) {
+    assert.ok(persona.includes(carried), `персона потеряла «${carried}»`);
+  }
 });
 
 test("остаток до напоминания считает сервер, а не модель", async () => {
@@ -480,7 +500,8 @@ test("остаток до напоминания считает сервер, а
   const prompt = builder.wrapUserMessage(context, "убрался в гараже");
   assert.match(prompt, /upcoming_reminders:/);
   assert.match(prompt, /через 3 часа 34 минуты/);
-  assert.match(prompt, /не пересчитывай в уме/);
+  // Само правило «не пересчитывай» постоянное и живёт в персоне.
+  assert.doesNotMatch(prompt, /upcoming_reminders_note/);
 });
 
 test("сообщение о сделанном сверяется с промежутком, а не принимается на веру", async () => {
@@ -491,7 +512,10 @@ test("сообщение о сделанном сверяется с проме�
   });
   assert.equal(context.sincePreviousMessage, "30 секунд");
   const prompt = builder.wrapUserMessage(context, "все помыл");
-  assert.match(prompt, /не подтверждай выполнение и не хвали/);
+  // В ход приходит факт; правило сверки — постоянное, оно в персоне.
+  assert.match(prompt, /since_previous_user_message: 30 секунд/);
+  const persona = await personaText();
+  if (persona !== null) assert.ok(persona.includes("не подтверждай выполнение и не хвали"));
 });
 
 /**
@@ -517,7 +541,7 @@ test("продуктовые инструменты зарегистрирова
       await work({ query: async () => ({ rows: [], rowCount: 0 }) }),
   };
   const factory = new AgentToolFactory(
-    { searxngUrl: "http://search", todoistApiToken: "", vectorGoalsEnabled: true } as never,
+    { searxngUrl: "http://search", vectorGoalsEnabled: true } as never,
     db as never, { setReaction: async () => {} } as never,
     { debug() {}, info() {}, warn() {}, error() {} },
   );
@@ -578,4 +602,36 @@ test("психологические навыки доступны нативн�
     assert.match(frontmatter[1]!, /^name: .+$/mu, `${name}: нет name`);
     assert.match(frontmatter[1]!, /^description: .+$/mu, `${name}: нет description`);
   }
+});
+
+/**
+ * Размер служебного блока — наблюдаемая величина, а не обещание.
+ *
+ * Возврат prompt middleware выглядит одинаково с любой формулировкой в
+ * документации: постоянные правила снова оказываются в каждом ходе.
+ * Число видно сразу — p95 и счётчик ходов, подошедших к потолку.
+ */
+test("размер служебного блока измеряется и виден в метриках", async () => {
+  const {
+    RUNTIME_CONTEXT_CEILING, recordRuntimeContextSize, runtimeContextSizeStats,
+  } = await import("../dist/runtime/runtime-context.js");
+
+  assert.ok(RUNTIME_CONTEXT_CEILING >= 1_500 && RUNTIME_CONTEXT_CEILING <= 2_000,
+    `потолок ${RUNTIME_CONTEXT_CEILING} вне 1500–2000`);
+
+  const before = runtimeContextSizeStats();
+  for (const size of [400, 450, 500, 460, 470]) recordRuntimeContextSize(size);
+  const after = runtimeContextSizeStats();
+  assert.equal(after.samples, before.samples + 5);
+  // Окно общее на процесс: в нём уже лежат размеры блоков, собранных
+  // выше по файлу. Проверяется поведение окна, а не конкретные числа.
+  assert.ok(after.p50 > 0, `p50 ${after.p50}`);
+  assert.ok(after.p95 >= after.p50, `p95 ${after.p95} < p50 ${after.p50}`);
+  assert.ok(after.max >= 500, `max ${after.max}`);
+  assert.equal(after.nearCeilingTotal, before.nearCeilingTotal);
+
+  // Ход, подошедший к потолку, обязан быть посчитан: это сигнал, что в
+  // контекст снова тащат постоянные правила.
+  recordRuntimeContextSize(RUNTIME_CONTEXT_CEILING);
+  assert.equal(runtimeContextSizeStats().nearCeilingTotal, before.nearCeilingTotal + 1);
 });

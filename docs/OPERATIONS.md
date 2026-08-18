@@ -60,17 +60,14 @@ chat-completions на указанный Base URL. После переключе
 ```dotenv
 EVA_PROFILE_COMPLETION_ENABLED=true
 EVA_VECTOR_GOALS_ENABLED=true
-EVA_GRAPH_MEMORY_ENABLED=true
-EVA_GRAPH_CONTEXT_TIMEOUT_MS=75
 EVA_PROFILE_CACHE_TTL_SECONDS=60
-EVA_CONVERSATION_MIRROR_ENABLED=false
 EVA_OUTBOX_ENABLED=true
 ```
 
 После изменения выполните `docker compose up -d eva-agent-service`.
 `EVA_OUTBOX_ENABLED=false` допустим только для диагностики: при прямой
-доставке теряется гарантия повтора только Telegram-отправки. Полное зеркало
-conversation не реализовано в обычном режиме и должно оставаться выключено.
+доставке теряется гарантия повтора только Telegram-отправки. Памятью агента
+ни один из этих ключей не распоряжается: она принадлежит Letta.
 
 ## Метрики turn
 

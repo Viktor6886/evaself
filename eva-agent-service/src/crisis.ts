@@ -4,8 +4,14 @@
  *
  * The persona already tells the model how to answer. This module is the part
  * that must not depend on a model deciding to cooperate: it records the event
- * in `crisis_events` so an operator can see it in NocoDB, and it pages the
- * installation owner over Telegram.
+ * in `crisis_events` so an operator can see it in the administrative panel,
+ * and it pages the installation owner over Telegram.
+ *
+ * The event is metadata only — severity, which patterns fired, when, and
+ * whose it is. The message itself is the most sensitive sentence a person
+ * ever writes to Eva, and triage does not need it: the markers say what kind
+ * of signal fired, and the person who must read the words is the person the
+ * operator is about to talk to.
  *
  * The detector is deliberately conservative and deterministic. It is a
  * triage signal for a human, not a diagnosis, and it never blocks the reply —
@@ -209,16 +215,23 @@ export class CrisisMonitor {
 
     let eventId: string | null = null;
     try {
+      // `trigger_text` намеренно не заполняется: сырое кризисное
+      // сообщение не хранится вовсе. В событие идут только маркеры,
+      // тяжесть и технические признаки — по ним видно, что сработало,
+      // и не видно, что человек написал.
       const { rows } = await this.db.query<{ id: string }>(
-        `INSERT INTO crisis_events (user_id, severity, detected_by, trigger_text, meta)
-         VALUES ($1, $2, $3, $4, $5::jsonb)
+        `INSERT INTO crisis_events (user_id, severity, detected_by, meta)
+         VALUES ($1, $2, $3, $4::jsonb)
          RETURNING id`,
         [
           input.userId,
           signal.severity,
           input.detectedBy ?? "eva-runtime",
-          input.text.slice(0, 4_000),
-          JSON.stringify({ markers: signal.markers, telegram_id: input.telegramId }),
+          JSON.stringify({
+            markers: signal.markers,
+            telegram_id: input.telegramId,
+            text_length: input.text.length,
+          }),
         ],
       );
       eventId = rows[0]?.id ?? null;
@@ -255,14 +268,15 @@ export class CrisisMonitor {
     if (ORDER[signal.severity] < ORDER.high) return;
     if (this.ownerTelegramId === telegramId) return;
 
-    // The message body itself is never forwarded: the owner gets a pointer,
-    // and reads the context in NocoDB if that is the right thing to do.
+    // The message body itself is never forwarded, and it is not stored
+    // either: the owner gets severity, markers and an event id, and talks
+    // to the person if that is the right thing to do.
     const text = [
       `⚠️ Сигнал риска (${signal.severity}).`,
       `Пользователь: ${telegramId}`,
       eventId ? `crisis_events.id: ${eventId}` : "событие не записано в БД — проверьте логи",
       `Маркеры: ${signal.markers.join(", ")}`,
-      "Текст сообщения не пересылается; он в crisis_events.trigger_text.",
+      "Текст сообщения не пересылается и не сохраняется: в событии только маркеры.",
     ].join("\n");
 
     try {

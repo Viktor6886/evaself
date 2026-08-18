@@ -69,14 +69,17 @@ export const SERVICES: readonly ServiceDefinition[] = [
     restartable: true,
   },
   {
+    // Ручной табличный интерфейс к базе. Не запущен — это нормальное
+    // состояние установки, а не отказ: сервисы к нему не обращаются.
     id: "nocodb",
     title: "NocoDB",
-    purpose: "Табличный интерфейс базы Eva",
+    purpose: "Табличный интерфейс базы Eva (профиль `nocodb`)",
     group: "storage",
     container: "nocodb",
     healthUrl: "http://nocodb:8080/api/v1/health",
     publicSetting: "bootstrap.env.domain.nocodb",
     restartable: true,
+    optional: true,
   },
   {
     id: "media-service",
@@ -171,16 +174,6 @@ export const INTEGRATIONS: readonly IntegrationDefinition[] = [
     serviceId: "agent-runtime",
     requiredSecrets: ["sec_eva_telegram_bot_token", "sec_eva_telegram_webhook_secret"],
     requiredSettings: ["bootstrap.env.owner.telegram.id"],
-  },
-  {
-    id: "todoist",
-    title: "Todoist",
-    purpose: "Проекты и задачи пользователя",
-    group: "external",
-    serviceId: "agent-runtime",
-    requiredSecrets: ["sec_todoist_api_token"],
-    requiredSettings: ["bootstrap.env.todoist.project.id"],
-    optional: true,
   },
   {
     id: "searxng",

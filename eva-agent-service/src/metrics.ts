@@ -16,6 +16,7 @@ import { monitorEventLoopDelay, type IntervalHistogram } from "node:perf_hooks";
 
 import type { Database } from "./db.js";
 import { deliveryStats, jobStats, providerStats } from "./metrics-queries.js";
+import { runtimeContextSizeStats } from "./runtime/runtime-context.js";
 import type { TurnClass } from "./turns/semaphores.js";
 import { TURN_STATES } from "./turns/states.js";
 
@@ -117,6 +118,7 @@ export class MetricsCollector {
     const providers = await providerStats(this.sources.db);
     const delivery = await deliveryStats(this.sources.db);
     const telemetry = this.sources.telemetryBuffer?.() ?? { buffered: 0, dropped: 0 };
+    const contextSize = runtimeContextSizeStats();
     const latency = this.sources.queryLatency?.() ?? { avg: 0, max: 0, samples: 0 };
 
     const samples: Sample[] = [
@@ -337,6 +339,38 @@ export class MetricsCollector {
           { labels: { state: "buffered" }, value: telemetry.buffered },
           { labels: { state: "dropped" }, value: telemetry.dropped },
         ],
+      },
+      // Размер служебного блока хода. Метрика существует ровно затем,
+      // чтобы возврат prompt middleware был виден числом, а не спором:
+      // постоянные правила, снова подмешанные в каждый ход, немедленно
+      // поднимут p95 и счётчик подошедших к потолку.
+      {
+        name: "eva_runtime_context_characters",
+        help: "Размер служебного блока хода в знаках: p50, p95 и максимум окна.",
+        type: "gauge",
+        values: [
+          { labels: { quantile: "0.5" }, value: contextSize.p50 },
+          { labels: { quantile: "0.95" }, value: contextSize.p95 },
+          { labels: { quantile: "max" }, value: contextSize.max },
+        ],
+      },
+      {
+        name: "eva_runtime_context_samples",
+        help: "Сколько ходов в окне измерения размера служебного блока.",
+        type: "gauge",
+        values: [{ value: contextSize.samples }],
+      },
+      {
+        name: "eva_runtime_context_ceiling_characters",
+        help: "Потолок служебного блока хода в знаках.",
+        type: "gauge",
+        values: [{ value: contextSize.ceiling }],
+      },
+      {
+        name: "eva_runtime_context_near_ceiling_total",
+        help: "Ходы, чей служебный блок подошёл к потолку (от 90% и выше).",
+        type: "counter",
+        values: [{ value: contextSize.nearCeilingTotal }],
       },
       {
         name: "eva_retention_policy_seconds",

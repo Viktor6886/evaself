@@ -67,16 +67,15 @@
 | Исполнение | Сроки, AbortController, DLQ, graceful shutdown | `src/jobs/runtime.ts`, таблица `job_dead_letters` | `register(type, handler, timing?)`, `execute()`, `stop()` без `process.exit` | обяз. |
 | Вынос CPU | Тяжёлая работа вне основного event loop | `src/jobs/cpu-offload.ts` | `runCpuTask(modulePath, payload, {signal, timeoutMs})` | расш. |
 | Agent job | Единственный механизм фонового хода агента: рефлексия, отчёты, исследования | `src/jobs/agent-job.ts`, таблица `agent_job_results` | `AgentJobRunner.run()`, бюджет и структурированное предложение; памяти не пишет | обяз. |
-| Сверки обслуживания | Семь сверок «что застряло»; ничего не чинит | `src/jobs/maintenance.ts` | `ReconcileService.run()`, статусы `checked`/`failed`/`not_applicable` | расш. |
+| Сверки обслуживания | Шесть сверок «что застряло»; ничего не чинит | `src/jobs/maintenance.ts` | `ReconcileService.run()`, статусы `checked`/`failed` | расш. |
 | Зеркало переноса | Сравнение выборок старого и нового механизмов | `src/jobs/mirror.ts`, таблица `job_mirror_samples` | `compareSelections()`, `readyToCutOver()` | обяз. |
 | Проактивность | Напоминания, heartbeat, check-in на очередях | `src/jobs/proactive/`, таблицы `proactive_messages`, `checkin_episodes` | слот на местную дату, доставка только через outbox | обяз. |
 | Ступень переноса | Кто владеет задачей: интервал или очередь | `src/jobs/proactive/cutover.ts` | `legacy` · `mirror` · `queue`; на `queue` интервалы не стартуют | обяз. |
 | Cron в зоне пользователя | Разбор и вычисление cron | `src/time/cron.ts` | `nextCronDate()`, `assertCronExpression()`, `isQuietHours()`; реэкспорт из `background.ts` | расш. |
 
-Флаги в `.env.example`, то есть на новой установке: `EVA_BULLMQ_JOBS`,
-`EVA_BULLMQ_MAINTENANCE`, `EVA_AGENT_JOBS` — включены (без них не работает
-Memory Curator, а сверки обслуживания никому не пишут); `EVA_BULLMQ_PROACTIVE`
-— выключен, `EVA_JOBS_MIRROR` — включён. Пока зеркало не снято, напоминания и
+Флаги в `.env.example`, то есть на новой установке: `EVA_BULLMQ_JOBS` и
+`EVA_BULLMQ_MAINTENANCE` — включены, `EVA_BULLMQ_PROACTIVE` — выключен,
+`EVA_JOBS_MIRROR` — включён. Пока зеркало не снято, напоминания и
 heartbeat по-прежнему ведёт `BackgroundRuntime`, а очередь только сравнивает
 выборки. На уже настроенной установке значения берутся из её `.env` и
 обновлением не меняются. Разбор — `docs/BACKGROUND_JOBS.md`.
@@ -89,7 +88,8 @@ heartbeat по-прежнему ведёт `BackgroundRuntime`, а очеред�
 | Цепочки failover | Независимые цепочки по маршруту | `src/router/chain.ts`, таблицы `llm_routes`, `llm_route_providers` | смена без рестарта | расш. |
 | Лимиты роутера | RPM, TPM, inflight | `src/router/limits.ts` | `ValkeyRouterLimits` (распределённые), `LocalRouterLimits` | обяз. |
 | Адаптеры | OpenAI-совместимый и Anthropic | `src/router/adapters/` | общий нормализатор в `shared.ts` | расш. |
-| Классификатор | Чувствительность запроса | `src/router/classifier.ts`, `routing-marker.ts` | по умолчанию — чувствительный | расш. |
+| Выбор маршрута | Техническая цепочка провайдеров | `src/router/routes.ts`, `routing-marker.ts` | детерминированно: режим, явный запрос, изображение/JSON, назначение conversation, выбор человека; содержание сообщения не разбирается | обяз. |
+| Проверка совместимости модели | Технический probe перед активацией | `src/llm/capability-probe.ts` | `probeModelCapabilities()`: ответ, streaming, вызов инструмента, JSON-аргументы, приём результата; единственное разрешённое обращение к `/chat/completions` мимо роутера | обяз. |
 | Учёт | Запросы и расход | таблицы `llm_requests`, `llm_spend_ledger`, `llm_breaker_state` | — | read |
 
 Своя fallback-цепочка в обход роутера запрещена (инвариант 16).
@@ -97,41 +97,29 @@ heartbeat по-прежнему ведёт `BackgroundRuntime`, а очеред�
 
 ## Агент, контекст и память
 
+Память и мышление принадлежат Letta. Здесь только то, чем Evaself владеет на
+своей стороне границы; сама граница — `docs/letta-native.md`.
+
 | Компонент | Назначение | Путь | Контракт | Переисп. |
 |---|---|---|---|---|
-| Letta-интеграция | Единственный conversational runtime | `src/letta.ts` | `@letta-ai/letta-agent-sdk` 0.6.2; ровно шесть memory blocks | обяз. |
+| Letta-интеграция | Единственный когнитивный runtime | `src/letta.ts` | `@letta-ai/letta-agent-sdk` 0.7.1; сессия без `systemPrompt`, `skillSources` и внешнего сужения инструментов | обяз. |
+| Факты runtime | Что подтвердил сам runtime: MemFS, источники навыков, состав инструментов, dreaming | `src/letta.ts`, `LettaRuntimeFacts` | снимок из `init`-сообщения SDK; виден в `/health` как `letta_runtime` | обяз. |
 | Реестр возможностей Letta | Операция → кем поддержана → в какой версии | `src/letta/capabilities.ts` | `assertSupported()`, `missingCapabilities()`; неподдержанная — `unsupported_operation` | обяз. |
-| Состав memory blocks | Шесть блоков, их границы и порядок | `src/letta/memory-blocks.ts` | `evaMemoryBlocks()`; реэкспорт из `letta.ts` | обяз. |
+| Состав memory blocks | Четыре блока и их границы | `src/letta/memory-blocks.ts` | `evaMemoryBlocks()`: `persona`, `human`, `current_state`, `therapeutic_framework` | обяз. |
 | Административный control plane | `@letta-ai/letta-client` 1.12.1 только как управляющий путь | `src/letta/admin-client.ts` | `LettaAdminPlane`; методов отправки сообщения нет | обяз. |
-| Синхронизация блоков | Честный исход записи в memory block | `src/letta/memory-block-sync.ts`, таблица `letta_memory_block_sync` | `pending` · `synced` · `runtime_override` · `failed`; предпросмотр отпечатками | обяз. |
 | Страж удаления | Запрет удаления при незакончившемся ходе | `src/letta/delete-guard.ts` | выборка по `turn_runs`, код `deletion_blocked` | обяз. |
-| RuntimeContextBuilder | Единственный финальный сборщик контекста | `src/runtime/runtime-context.ts` | `RuntimeContext`, бюджеты из `CLAUDE.md`; `local_date` с днём недели и `since_previous_user_message` (прежняя отметка приходит из `db.recordUserMessage`, вне кэша строки); напоминание о женском роде — только для русского | обяз. |
-| ConversationPurposeService | Назначения conversation и политика инструментов | `src/conversations/purpose-service.ts` | `purposePolicy()`, `toolAllowedForPurpose()` | обяз. |
-| Граф памяти | Узлы, связи, поиск через FTS | `src/memory/graph-repository.ts`, `graph-context.ts`, таблицы `memory_nodes`, `memory_edges` | `websearch_to_tsquery`, глубина ≤ 3 | расш. |
-| Temporal-память | Версии фактов без потери истории; снимок в `memory_nodes`, версии в `memory_node_versions` | `src/memory/temporal/versions.ts`, таблицы `memory_node_versions`, `memory_edge_versions` | `recordFact()` в одной транзакции: закрыть прежнюю версию → новая со ссылкой → доказательство → снимок; `EVA_TEMPORAL_MEMORY` | обяз. |
-| Доказательства | Источник, время, тип поддержки, хэш содержания | `src/memory/temporal/evidence.ts`, таблица `memory_evidence` | `evidenceHash()`, `aggregateConfidence()`; повтор того же сообщения уверенность не повышает | обяз. |
-| Запросы к истории | Текущий факт, факт на дату, история, изменения за период, состояние сущности | `src/memory/temporal/queries.ts` | valid time для «на дату», recorded time для «за период» | расш. |
-| Разрешение сущностей | Нормализация, точное совпадение, синонимы, FTS, контекстное сравнение | `src/memory/temporal/entity-resolution.ts`, таблицы `memory_entity_aliases`, `memory_entity_merges` | тёзки и разные типы автоматически не объединяются; у объединения снимок и `rollbackMerge()` | обяз. |
-| Дедупликация памяти | Узел — точный поиск/синоним/FTS; связь — пересечение периодов | `src/memory/temporal/dedup.ts` | без embeddings (они — шаг 18); совпадение даёт доказательство, а не дубль | обяз. |
-| Конфликты | Смена значения и опровержение попадают в отчёт | таблица `memory_conflicts` | автоматически не разрешаются; значимые — `awaiting_user` | расш. |
-| Перенос памяти | Начальная версия и источник у накопленных узлов | `src/memory/temporal/backfill.ts`, таблица `memory_backfill_state` | идемпотентен по данным, возобновляем по курсору; задание `memory_temporal_backfill`; проверяется на настоящей базе в CI (`scripts/ci/test-memory-backfill.mjs`) | расш. |
-| Детектор эпизодов | Границы разговора без вызова модели | `src/memory/episodes.ts`, таблица `memory_episodes` | пять границ, `EpisodeTracker` не задерживает ответ; краткое содержание и ссылки берутся из `conversation_highlights`, второго разбора переписки нет; `EVA_MEMORY_CURATOR` | обяз. |
-| Memory Curator | Извлечение долговременных фактов из эпизода | `src/memory/curator/service.ts`, `schema.ts`, таблица `memory_curator_runs` | спецификация agent job шага 8, строгая схема, дедуп `keep_last_if_active`, режим `preview`; кандидатов пишет код; статус даёт `defaultStatus` по источнику: сказанное человеком прямо (`statedByUser` + закрытое правило `candidateSourceType`) — факт сразу, вывод и чувствительное — кандидат до подтверждения | обяз. |
-| Контроль памяти | Просмотр, подтверждение, исправление, удаление в Mini App | `src/memory/curator/user-control.ts`, маршруты `/public/memory*` | исправление — новая версия; удаление чистит версии, evidence, конфликты, синонимы, связи | обяз. |
-| Memory Doctor | Диагностика памяти без права записи: 13 проверок, отчёт по разделам, предложения | `src/memory/doctor/checks.ts`, `service.ts`, `gateway.ts`, таблицы `memory_doctor_reports`, `memory_doctor_actions` | `run()` только заданием очереди; применяет предложение человек — через temporal-версию или объединение сущностей, со снимком и откатом; `EVA_MEMORY_DOCTOR` | обяз. |
-| Векторы памяти | Embeddings узлов, фактов и эпизодов; переиндексация при смене модели | `src/memory/retrieval/embeddings.ts`, таблицы `memory_embeddings`, `memory_embedding_reindex` | вектор считает LLM Router (`src/router/embeddings.ts`); отпечаток содержания не даёт пересчитывать неизменившееся; смена модели — фоновая переиндексация, старые векторы живут до её конца | обяз. |
-| Гибридный поиск | Единственный контур: FTS + триграммы + вектор + граф | `src/memory/retrieval/hybrid.ts` | владелец — первым условием в каждом источнике; глубина ≤ 3, ≤ 50 узлов и 100 связей; таймаут = деградация, а не отказ; `EVA_HYBRID_RETRIEVAL` | обяз. |
-| Deep Recall | Отдельный инструмент обращения к истории | `src/memory/retrieval/deep-recall.ts` | решение детерминированное: явный вопрос о прошлом, ссылка на время, нехватка контекста; свой бюджет; `EVA_DEEP_RECALL` | обяз. |
-| Уровни контекста | Пять уровней с отдельными бюджетами и измерением | `src/runtime/context-levels.ts` | `fitLevel()` режет по границе строки и считает выброшенное; размеры уходят в метрики хода | обяз. |
-| Highlights | Компактные выжимки диалога | `src/memory/conversation-highlights.ts`, таблица `conversation_highlights` | не смешивается с памятью и KB | расш. |
-| Заметки | Хранилище заметок в PostgreSQL | таблица `eva_notes`, `src/tools/core-tools.ts` | инструменты названы `LIGHTRAG_*` — псевдонимы совместимости, LightRAG нет | расш. |
-| Каталог инструментов | Сборка tool-схем | `src/tools/tool-kit.ts`, `core-tools.ts`, `task-tools.ts` | `ToolBuilder`, `objectSchema()` | обяз. |
+| Готовность | Может ли Ева работать | `src/letta/readiness.ts` | `evaluateReadiness()`: `state` — `ready`/`degraded`/`not_ready`, срок годности снимка фактов, `observed_at`; маршрут `/ready` | обяз. |
+| RuntimeContextBuilder | Сборщик продуктового контекста | `src/runtime/runtime-context.ts` | `RuntimeContext`: часовой пояс, профиль, подписка, состояние целей; системный промпт не подменяет; потолок 2000 знаков, размер виден в `/metrics` | обяз. |
+| ConversationPurposeService | Назначения conversation | `src/conversations/purpose-service.ts` | `purposePolicy()`, `toolAllowedForPurpose()` — область продуктовых инструментов по назначению, не выбор навыка | обяз. |
+| Заметки | Хранилище заметок в PostgreSQL | таблица `eva_notes` | продуктовые данные; когнитивной памятью не является | расш. |
+| Каталог инструментов | Сборка tool-схем продуктовых инструментов | `src/tools/tool-kit.ts`, `core-tools.ts`, `task-tools.ts` | `ToolBuilder`, `objectSchema()` | обяз. |
+| Навыки | Двенадцать навыков в `skills/<name>/SKILL.md` | каталог `skills/`, монтируется как `/data/letta/.skills` | открывает Letta по `description`; роутера навыков нет | обяз. |
 
 ## Продуктовые сервисы
 
 | Компонент | Назначение | Путь | Контракт | Переисп. |
 |---|---|---|---|---|
-| CrisisMonitor | Детерминированный кризисный контур | `src/crisis.ts` | `detectCrisis()`, `safetyDirective()`; приоритетный, неблокирующий | обяз. |
+| CrisisMonitor | Детерминированный кризисный контур | `src/crisis.ts` | `detectCrisis()`, `safetyDirective()`; приоритетный, неблокирующий; событие пишется метаданными, сам текст не хранится | обяз. |
 | UserProfileService | Профиль и подтверждение полей | `src/profile/profile-service.ts` | таблицы `onboarding_fields`, `profile_field_definitions` | расш. |
 | GoalService | Цели, результаты, рабочие блоки | `src/goals/goal-service.ts` | таблицы `goals`, `goal_results`, `work_blocks` | расш. |
 | Задачи и события | Напоминания и их история | `src/tasks/task-event-service.ts`, таблицы `tasks`, `task_events` | `reminder_sent` отделён от `done` | расш. |
@@ -149,17 +137,15 @@ heartbeat по-прежнему ведёт `BackgroundRuntime`, а очеред�
 | health-worker | Фоновые снимки состояния без внешних запросов из UI | `src/admin/health-worker.ts`, таблицы `health_checks`, `service_statuses` | — | расш. |
 | eva-updater | Ограниченный перезапуск контейнеров | `src/admin/updater-index.ts` | сокет 0660, группа `evaself-updater`; admin-api без Docker socket | обяз. |
 | SecurityAudit | Проверка конфигурации установки | `src/admin/security-audit.ts` | — | расш. |
-| Реестр артефактов | Единый реестр версий: prompt, flow, skill, policy, шаблон memory block | `src/artifacts/registry.ts`, `validation.ts`, таблицы `artifacts`, `artifact_versions`, `artifact_publications`, `artifact_usages` | `createVersion()`, `publish()`, `rollback()`, `resolve()` с процентной раскаткой, `recordUsage()`; неизменяемость версии держит триггер схемы | обяз. |
+| Реестр артефактов | Единый реестр версий: prompt, flow, skill, policy | `src/artifacts/registry.ts`, `validation.ts`, таблицы `artifacts`, `artifact_versions`, `artifact_publications`, `artifact_usages` | `createVersion()`, `publish()`, `rollback()`, `resolve()` с процентной раскаткой, `recordUsage()`; неизменяемость версии держит триггер схемы | обяз. |
 | Маршруты реестра | Административная поверхность реестра | `src/admin/artifact-routes.ts` | публикация требует `confirm`, откат — причины | расш. |
 | Каталог агентов | Агенты, conversations, архив, экспорт, предпросмотр удаления | `src/admin/agent-directory.ts` | читает PostgreSQL, в Letta не ходит; удаление только предпросмотром | расш. |
-| Применение шаблонов памяти | Предпросмотр, массовое применение, откат шаблона memory block | `src/admin/memory-template-service.ts`, таблицы `memory_template_applications`, `memory_template_application_items` | пишет намерения только через `MemoryBlockSync`; откат — родительская версия шаблона | обяз. |
-| Инструменты и approvals | Честный read-only обзор до шага 14 | `src/admin/tool-approvals.ts` | политика назначения, вызовы из `tool_effects`, ходы в `approval_pending` | read |
+| Инструменты и approvals | Обзор политики и вызовов | `src/admin/tool-approvals.ts` | политика назначения, вызовы из `tool_effects`, ходы в `approval_pending` | read |
 | Операции над ходами | Ходы, эффекты, сверка, отмена, безопасный повтор доставки | `src/admin/turn-operations.ts` | отмена ставит барьер, повтор только `dead`/`retry` без `sent_at` | расш. |
 | Статусы подсистем | Навыки, исследования, evals, расширения — чего ещё нет | `src/admin/subsystem-status.ts` | статус, номер шага, пустые коллекции названы своими именами | read |
 | Маршруты CRUD | Регистрация разделов шага 12 | `src/admin/crud-routes.ts` | флаг `EVA_ADMIN_CRUD`, подтверждение — идентификатор цели | расш. |
-| Tool Gateway | Манифесты, live-видимость, risk policy, kill switch и tool breaker | `src/tools/gateway.ts`, `src/agent-tools.ts` | `ToolManifestRegistry`, purpose/allowedTools intersection; `EVA_TOOL_GATEWAY` | обяз. |
 | Durable approvals | Подтверждение опасных tool calls по SDK request id | `src/tools/approvals.ts`, таблица `tool_approvals` | `canUseTool`, PostgreSQL outbox, Mini App decision route, recovery по request id; `reconcileStaleApprovals()` перед восстановлением снимает незакрытое разрешение и незавершённое ожидание старше срока (отказ человека не трогает); `EVA_TOOL_APPROVALS` | обяз. |
-| MCP policy | Только admin-added HTTP/SSE с SSRF, allowlist, Secret Store и аудитом | `src/tools/gateway.ts`, таблица `mcp_server_policies` | `McpHttpInvoker`; stdio, команды, `npx -y`, wildcard запрещены | обяз. |
+| MCP policy | Только admin-added HTTP/SSE с SSRF, allowlist, Secret Store и аудитом | `src/tools/mcp.ts`, таблица `mcp_server_policies` | `McpHttpInvoker`; stdio, команды, `npx -y`, wildcard запрещены | обяз. |
 
 Матрица возможностей SDK — `docs/IMPLEMENTATION_STATUS.md`.
 Контракты API — `docs/ADMIN_PHASE1_CONTRACT.md`, `docs/ADMIN_PHASES_2_6_CONTRACT.md`.
@@ -185,13 +171,6 @@ heartbeat по-прежнему ведёт `BackgroundRuntime`, а очеред�
 | Фикстуры | Данные для локальной проверки | `postgres/fixtures/` | `load.sh` безопасен при повторе | расш. |
 | Backup / restore | Зашифрованный архив | `scripts/backup.sh`, `restore.sh`, `backup-service/` | мастер-ключ хранится отдельно | обяз. |
 
-Состояние Curator в production: механизм шага 16 требует четырёх флагов сразу
-(`EVA_TEMPORAL_MEMORY`, `EVA_BULLMQ_JOBS`, `EVA_AGENT_JOBS`, `EVA_MEMORY_CURATOR`).
-В `.env.example` включены все четыре, поэтому на новой установке Curator
-запускается с первого дня; согласованность значений примера закреплена тестом
-`config-warnings.test.ts`. На уже настроенной установке флаги остаются такими,
-какие стоят в её `.env`, пока их не изменит человек.
-
 ## Чего в репозитории нет
 
 Проверено; не считать существующим:
@@ -199,31 +178,23 @@ heartbeat по-прежнему ведёт `BackgroundRuntime`, а очеред�
 - **Продуктовая проактивность на очередях в production** — код есть (шаг 08),
   но по умолчанию работает режим зеркала: отправляют по-прежнему интервалы
   `BackgroundRuntime`. Снятие зеркала — решение человека после сверки.
-- **Рефлексия, отчёты и исследования** — механизм agent job есть, конкретных
-  заданий на нём нет: они относятся к шагам 21 и 24.
 - **Ежедневный инсайт и недельный обзор** — виды объявлены, источников данных
-  ещё нет (шаги 27 и 54), выборка пуста.
+  ещё нет, выборка пуста.
 - **Потребитель реестра артефактов во время выполнения** — реестр, публикация,
-  раскатка и фиксация версий есть; ни один промпт, flow, навык или policy через
-  него пока не разрешается. `artifact_usages` останется пустой, пока первый
-  артефакт не начнёт браться из реестра.
-- **Реестр инструментов, уровни риска и durable approvals** — шаг 14. Разделы
-  административного API существуют и честно read-only.
-- **Наполнение temporal-памяти на работающей установке** — код шага 15 есть,
-  `EVA_TEMPORAL_MEMORY` выключен, и до его включения ни `memory_node_versions`,
-  ни `memory_evidence` не пополняются. Сам перенос выполняется и проверяется
-  на настоящей схеме в CI (`scripts/ci/test-memory-backfill.mjs`: два прогона,
-  идемпотентность, сохранение владельца), но на данных конкретной установки
-  его запускает человек — заданием `memory_temporal_backfill`.
-- **Наполнение векторного поиска на работающей установке** — код шага 18 есть,
-  `EVA_HYBRID_RETRIEVAL` и `EVA_DEEP_RECALL` включены в `.env.example`, то есть
-  на новой установке, но на уже настроенной остаются в том значении, которое
-  стоит в её `.env`: `ensure-env-defaults.sh` существующий ключ не трогает. До
-  включения `memory_embeddings` не пополняется, а дедупликация и разрешение
-  сущностей шага 15 работают на точном поиске, синонимах и FTS.
+  раскатка и фиксация версий есть; ни один артефакт через него не разрешается.
+  Системный промпт теперь штатный и собирается Letta, шаблоны memory block
+  удалены. `artifact_usages` останется пустой, пока первый артефакт не начнёт
+  браться из реестра.
 - **Экраны новых разделов в `admin-ui`** — их нет: шаг 12 остановился на
   контракте admin-api.
 - **Колонка `tenant_id`** — изоляция держится на `user_id` и области арендатора.
+- **Поиск по базе знаний** — `knowledge_chunks` заполняется приёмом
+  документов, читающего пути нет: по базе знаний сегодня никто не ищет.
+- **Самописный cognitive middleware** — удалён целиком (PR #188): ToolGateway,
+  SkillRouter, Memory Curator, Memory Doctor, графовая и temporal память,
+  Hybrid Retrieval, Deep Recall, выжимки разговора, MemoryBlockSync,
+  субагенты Evaself, своя ротация conversation. Восстанавливать нельзя —
+  инвариант 3.
 - **Второй RAG, Qdrant, LightRAG, LangGraph runtime, LangSmith** — запрещены.
 - **Экспорт трасс в OTLP** — провайдер трасс есть, экспортёра нет намеренно:
   наружу телеметрия уходит только через `ObservabilityGateway`, чтобы
@@ -231,8 +202,6 @@ heartbeat по-прежнему ведёт `BackgroundRuntime`, а очеред�
 - **Удаление логов и временных медиафайлов кодом сервиса** — политика для них
   объявлена и показывается, но исполняется вне PostgreSQL (драйвер логов
   Docker и media-service).
-- **Полное зеркало переписки** — механизм есть, выключен
-  (`EVA_CONVERSATION_MIRROR_ENABLED=false`).
 - **Автоматическая сверка срока голосовых заметок дневника** — срок
   ставится при записи (`journal_voice_notes.expires_at`), сверка
   `expireVoiceNotes()` реализована и вызывается маршрутом
@@ -244,21 +213,28 @@ heartbeat по-прежнему ведёт `BackgroundRuntime`, а очеред�
   media-service, а не этим кодом.
 
 
-## Навыки (Batch 14, на ревью)
+## Навыки
 
-- `ArtifactRegistry.publishedSkills()` и `syncIndexedSkill()` — каноническая публикация и атомарная проекция в `skill_search_index`; invalid версии получают durable disabled/error status.
-- `src/skills/index.ts` — CoreSkillCatalog, tenant/environment-safe hybrid PostgresSkillRepository и SkillRouter; RuntimeContextBuilder остаётся единственным финальным сборщиком, canonical runId фиксирует core+routed usages.
-- `src/admin/skill-operations.ts`, `/api/admin/v1/skills/operations` — защищённые, аудитируемые агрегаты latency/reranker/reason/selected version+score/sticky/fallback без сырого текста и conversation IDs; Admin UI показывает durable данные.
-- Флаги `EVA_CORE_SKILLS`, `EVA_SKILL_ROUTER` выключены по умолчанию; sticky/events/search schema — migration 047; `scripts/ci/test-skills-postgres.mjs` проверяет production semantics на настоящем PostgreSQL и общий down/up явно проверяет 047.
+Двенадцать навыков в стандартном `skills/<name>/SKILL.md`, каталог
+монтируется в App Server как `/data/letta/.skills`. Открывает их Letta по
+`description`. Роутера навыков, скоринга триггеров, sticky-состояния,
+индекса навыков в PostgreSQL и отдельного LLM-вызова для выбора навыка нет
+и быть не должно.
 
-## Субагенты и evals (Batch 15, на ревью)
+## Evals
 
-- `src/subagents/index.ts` — закрытый декларативный реестр семи ограниченных субагентов и coordinator поверх канонического `AgentJobRunner`; tenant/tool/memory guards, per-user exclusion, no recursion; флаги выключены.
-- `evals/` — изолированный от production runtime воспроизводимый framework, synthetic datasets, раздельные lane reports, internal API и Telegram simulator targets; fast release gate в CI.
-
+`evals/` — изолированный от production runtime воспроизводимый framework,
+synthetic datasets, раздельные lane reports, internal API и Telegram
+simulator targets; fast release gate в CI.
 
 ## Batch 16 — knowledge and research production wiring
-Authenticated Mini App ingress derives identity only from verified Telegram initData. Upload storage precedes the outbox transaction and compensates failures; the registered knowledge worker uses fail-closed ClamAV and canonical LLM Router embeddings. Research uses OutboundGateway and the canonical router, with tenant-scoped status/cancel/report. Shared structured repair/degradation is active in research and SkillRouter reranking. Memory Doctor is deterministic (model parsing N/A); no separate insights model call exists in this batch.
+
+Authenticated Mini App ingress derives identity only from verified Telegram
+initData. Upload storage precedes the outbox transaction and compensates
+failures; the registered knowledge worker uses fail-closed ClamAV and
+canonical LLM Router embeddings. Research uses OutboundGateway and the
+canonical router, with tenant-scoped status/cancel/report.
+
 ## Batch 17 — Mini App: дневник и адаптация под смартфоны
 
 Дневник живёт отдельно от `eva_notes`: заметка — рабочая информация, у

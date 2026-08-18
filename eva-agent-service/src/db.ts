@@ -77,6 +77,14 @@ export interface LlmProviderRow {
   last_models: unknown[] | null;
   created_at: Date;
   updated_at: Date;
+  /**
+   * Заявленный профиль возможностей (миграция 017). Заявление — это
+   * намерение администратора; проверяет его capability probe.
+   */
+  supports_tools?: boolean;
+  supports_json?: boolean;
+  supports_vision?: boolean;
+  supports_streaming?: boolean;
 }
 
 export interface ModelMapping {
@@ -118,7 +126,6 @@ export interface AgentRuntimeContext {
   purpose:
     | "chat"
     | "scheduler"
-    | "maintenance"
     | "profile"
     | "goal_review"
     | "partner_analysis"

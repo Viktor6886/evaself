@@ -291,7 +291,7 @@ test("обязательная категория операции требуе�
 test("выключенная подсистема подтверждений разрешает вызов", async () => {
   const service = new ApprovalService(new ApprovalDb() as never, false);
   const callback = service.canUseTool({ userId: 7, chatId: 77, turn: {}, riskFor: () => "destructive", categoryFor: () => "data_deletion" });
-  assert.deepEqual(await callback("delete_tasks", {}, { requestId: "gateway-only" }), { behavior: "allow", message: "Tool approvals disabled; legacy gateway policy applies" });
+  assert.deepEqual(await callback("delete_tasks", {}, { requestId: "gateway-only" }), { behavior: "allow", message: "Tool approvals disabled" });
 });
 
 test("каждый запрос подтверждений проходит границу арендатора внутри хода пользователя", async () => {

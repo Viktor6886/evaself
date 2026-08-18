@@ -199,7 +199,6 @@ test("destructive tools require backend confirmation", async () => {
   const factory = new AgentToolFactory(
     {
       searxngUrl: "http://search.invalid",
-      todoistApiUrl: "https://api.todoist.invalid/rest/v2",
     } as never,
     withTenantScopes({
       getAgentRuntimeContext: async () => ({

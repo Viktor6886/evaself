@@ -14,7 +14,6 @@ import { CoreToolFactory } from "./tools/core-tools.js";
 import { EffectJournal, effectKey } from "./turns/effect-journal.js";
 import { currentTurn } from "./turns/turn-context.js";
 import { TaskToolFactory } from "./tools/task-tools.js";
-import { TodoistToolFactory } from "./tools/todoist-tools.js";
 import type { McpHttpInvoker, McpServerPolicyRepository } from "./tools/mcp.js";
 import type { MandatoryApprovalCategory, ToolRisk } from "./tools/approvals.js";
 import {
@@ -48,7 +47,6 @@ export class AgentToolFactory {
   private readonly profile: ProfileToolFactory;
   private readonly goals: GoalToolFactory;
   private readonly tasks: TaskToolFactory;
-  private readonly todoist: TodoistToolFactory;
   private readonly dynamicTools = new Map<string, AnyAgentTool[]>();
   private readonly vectorGoalsEnabled: boolean;
   private approvalCompletion?: (input: { userId: number; conversationId: string; toolName: string; args: unknown; outcome: "executed" | "failed" }) => Promise<unknown>;
@@ -76,7 +74,6 @@ export class AgentToolFactory {
     this.profile = new ProfileToolFactory(profile ?? new UserProfileService(db));
     this.goals = new GoalToolFactory(goals ?? new GoalService(db));
     this.tasks = new TaskToolFactory(db);
-    this.todoist = new TodoistToolFactory(config);
   }
 
   setApprovalCompletionCallback(callback: (input: { userId: number; conversationId: string; toolName: string; args: unknown; outcome: "executed" | "failed" }) => Promise<unknown>): void {
@@ -90,9 +87,6 @@ export class AgentToolFactory {
       ...this.profile.build(tool),
       ...(this.vectorGoalsEnabled ? this.goals.build(tool) : []),
       ...this.tasks.build(tool),
-      // Registering Todoist tools without a token only teaches the model
-      // about nine actions that always fail on the first call.
-      ...(this.config.todoistApiToken ? this.todoist.build(tool) : []),
       ...(this.dynamicTools.get(conversationId) ?? []),
     ];
   }
@@ -351,16 +345,12 @@ const TOOL_RISK: Readonly<Record<string, ToolRisk>> = Object.freeze({
   upsert_goal: "sensitive_write",
   confirm_goal: "sensitive_write",
   upsert_goal_result: "sensitive_write",
-  TODOIST_DELETE_TASK: "destructive",
-  TODOIST_DELETE_ALL_TASKS: "destructive",
 });
 
 const TOOL_APPROVAL_CATEGORY: Readonly<Record<string, MandatoryApprovalCategory>> = Object.freeze({
   delete_notes: "data_deletion",
   delete_budget_records: "data_deletion",
   delete_tasks: "data_deletion",
-  TODOIST_DELETE_TASK: "data_deletion",
-  TODOIST_DELETE_ALL_TASKS: "data_deletion",
 });
 
 export function toolRisk(name: string): ToolRisk {
@@ -372,4 +362,38 @@ export function toolRisk(name: string): ToolRisk {
 
 export function toolApprovalCategory(name: string): MandatoryApprovalCategory | undefined {
   return TOOL_APPROVAL_CATEGORY[name];
+}
+
+/**
+ * Инструменты, выполняющие произвольный код и произвольную запись в
+ * файловую систему хоста.
+ *
+ * Ева — компаньон в мессенджере. Ни один продуктовый сценарий не просит
+ * запустить команду оболочки или переписать файл рядом с состоянием
+ * runtime, а последствие такого вызова человек в чате оценить не может:
+ * подтверждать «выполнить Bash» бессмысленно. Поэтому граница здесь
+ * детерминированная и не зависит от флага подтверждений.
+ *
+ * Это не выбор инструментов и не их видимость: набор инструментов сессии
+ * по-прежнему решает Letta, а память, MemFS, навыки, субагенты, чтение и
+ * поиск остаются доступны — они в этот список не входят.
+ */
+const HOST_EXECUTION_TOOLS: ReadonlySet<string> = new Set([
+  "Bash", "BashOutput", "KillShell", "KillBash",
+  "EnterWorktree", "ExitWorktree",
+  "Write", "Edit", "MultiEdit", "NotebookEdit",
+  "apply_patch", "ApplyPatch", "replace", "Replace",
+  "write_file", "WriteFile", "write_file_gemini", "WriteFileGemini",
+]);
+
+/**
+ * Инструмент памяти узнаётся по префиксу, а не по точному имени: состав
+ * зависит от toolset и модели, и закреплять одно имя значило бы отключить
+ * память на следующей версии harness.
+ */
+const MEMORY_TOOL = /^(memory|memfs)/i;
+
+export function isHostExecutionTool(name: string): boolean {
+  if (MEMORY_TOOL.test(name)) return false;
+  return HOST_EXECUTION_TOOLS.has(name);
 }

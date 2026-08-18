@@ -200,17 +200,6 @@ const FORMS: Record<string, IntegrationForm> = {
         }),
     ],
   },
-  todoist: {
-    restartService: "eva-agent-service",
-    fields: [
-      setting("api_url", "bootstrap.env.todoist.api.url", "Base URL", "Адрес API Todoist", {
-        kind: "url", placeholder: "https://api.todoist.com/api/v1",
-      }),
-      secret("api_token", "sec_todoist_api_token", "API Token", "Персональный токен Todoist"),
-      setting("project_id", "bootstrap.env.todoist.project.id", "ID проекта",
-        "Проект, куда попадают задачи Евы"),
-    ],
-  },
   searxng: {
     restartService: "searxng",
     fields: [

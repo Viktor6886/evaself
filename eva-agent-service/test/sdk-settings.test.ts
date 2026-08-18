@@ -25,6 +25,12 @@ test("SDK settings validate all persisted runtime limits", () => {
   assert.equal(settings.default_context_window, 65536);
 });
 
+test("умолчание режима разрешений безопасное", () => {
+  // `unrestricted` разрешает любой вызов не спрашивая: подтверждения
+  // действий человеком в нём не срабатывают вовсе.
+  assert.equal(validateSettings({}).permission_mode, "standard");
+});
+
 test("SDK settings reject unsafe enum values and invalid timeouts", () => {
   assert.throws(
     () => validateSettings({ permission_mode: "always-allow" as never }),

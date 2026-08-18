@@ -59,7 +59,6 @@ services:
       - eva-agent-service
       - admin-api
       - admin-ui
-      - nocodb
       - letta-ui
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:2019/config/"]
@@ -311,9 +310,6 @@ services:
       MEDIA_SERVICE_TOKEN: ${MEDIA_SERVICE_TOKEN}
       SEARXNG_BASE_URL: http://searxng:8080/
       CRAWL4AI_BASE_URL: ${CRAWL4AI_BASE_URL:-http://crawl4ai:11235/}
-      TODOIST_API_URL: ${TODOIST_API_URL:-https://api.todoist.com/api/v1}
-      TODOIST_API_TOKEN: ${TODOIST_API_TOKEN:-}
-      TODOIST_PROJECT_ID: ${TODOIST_PROJECT_ID:-}
       EVA_SCHEDULER_INTERVAL_MS: ${EVA_SCHEDULER_INTERVAL_MS:-30000}
       EVA_HEARTBEAT_INTERVAL_MS: ${EVA_HEARTBEAT_INTERVAL_MS:-600000}
       EVA_TELEGRAM_TYPING_INTERVAL_MS: ${EVA_TELEGRAM_TYPING_INTERVAL_MS:-4000}
@@ -609,8 +605,15 @@ services:
   # ===================================================================
   # ADMIN / DATA GUI
   # ===================================================================
+  # Табличный интерфейс к базе `eva` — ручной инструмент администратора,
+  # а не часть работы Евы: ни один сервис к нему не обращается, а
+  # разделы данных есть в admin-ui. Поэтому он включается профилем и в
+  # обязательный production stack не входит:
+  #
+  #   COMPOSE_PROFILES=nocodb docker compose up -d nocodb
   nocodb:
     <<: [*restart, *logging]
+    profiles: ["nocodb"]
     image: ${NOCODB_IMAGE}:${NOCODB_VERSION}
     container_name: evaself-nocodb
     environment:

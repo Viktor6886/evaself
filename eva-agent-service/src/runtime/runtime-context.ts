@@ -76,6 +76,65 @@ interface RuntimeContextRow {
   llm_quality_mode: "economy" | "auto" | "quality";
 }
 
+/**
+ * Потолок служебного блока хода.
+ *
+ * В блоке остаются только факты этого хода, и типичный размер — около
+ * 450 знаков. Потолок нужен не для экономии, а как сигнал: ход, который
+ * к нему подошёл, почти наверняка тащит в контекст то, чему место в
+ * персоне или навыке. Прежние шесть тысяч знаков такой сигнал не давали
+ * вовсе — под ними умещался целый свод правил.
+ */
+export const RUNTIME_CONTEXT_CEILING = 2_000;
+
+/**
+ * Размеры последних собранных блоков.
+ *
+ * Хранится не текст, а длина: по ней видно, растёт ли служебный блок,
+ * и не видно, о чём был разговор. Кольцо на пятьсот значений — это
+ * несколько часов обычной нагрузки и несколько килобайт памяти.
+ */
+const SIZE_WINDOW = 500;
+const sizes: number[] = [];
+let nearCeilingTotal = 0;
+
+export function recordRuntimeContextSize(
+  characters: number,
+  ceiling = RUNTIME_CONTEXT_CEILING,
+): void {
+  sizes.push(characters);
+  if (sizes.length > SIZE_WINDOW) sizes.shift();
+  // «Подошёл к потолку» — девять десятых от него: к моменту, когда блок
+  // упрётся, разбираться будет уже поздно.
+  if (characters >= ceiling * 0.9) nearCeilingTotal += 1;
+}
+
+export interface RuntimeContextSizeStats {
+  samples: number;
+  p50: number;
+  p95: number;
+  max: number;
+  nearCeilingTotal: number;
+  ceiling: number;
+}
+
+export function runtimeContextSizeStats(): RuntimeContextSizeStats {
+  if (sizes.length === 0) {
+    return { samples: 0, p50: 0, p95: 0, max: 0, nearCeilingTotal, ceiling: RUNTIME_CONTEXT_CEILING };
+  }
+  const sorted = [...sizes].sort((left, right) => left - right);
+  const at = (quantile: number) =>
+    sorted[Math.min(sorted.length - 1, Math.floor(quantile * (sorted.length - 1) + 0.5))] ?? 0;
+  return {
+    samples: sorted.length,
+    p50: at(0.5),
+    p95: at(0.95),
+    max: sorted[sorted.length - 1] ?? 0,
+    nearCeilingTotal,
+    ceiling: RUNTIME_CONTEXT_CEILING,
+  };
+}
+
 export class RuntimeContextBuilder {
   private readonly languageResolver: LanguageResolver;
   private readonly taskEvents: TaskEventService;
@@ -185,7 +244,6 @@ export class RuntimeContextBuilder {
     userMessage: string,
     options: {
       messageSource?: MessageSource;
-      crisisLevel?: "none" | "low" | "medium" | "high" | "critical";
       internalOperationType?: string;
       correlationId?: string;
       /** Куда сложить измеренный размер собранного контекста. */
@@ -195,23 +253,10 @@ export class RuntimeContextBuilder {
     const fields: Array<[string, string | null]> = [
       ["local_time", context.localTime],
       ["local_date", context.localDate],
-      // Промежуток и его следствие стоят рядом: голое число модель
-      // читает, но не применяет — и поздравляет с делом, на которое
-      // прошло девять секунд.
+      // Промежуток между сообщениями — факт хода. Что с ним делать,
+      // Ева знает из персоны: правило постоянное, и платить за него в
+      // каждом сообщении незачем.
       ["since_previous_user_message", context.sincePreviousMessage],
-      [
-        "since_previous_user_message_note",
-        context.sincePreviousMessage === null
-          ? null
-          : "Столько прошло между прошлым сообщением человека и этим. Считай этот"
-            + " промежуток фактом и не выдумывай его по смыслу слов. Если человек"
-            + " сообщает о сделанном, сверься с промежутком: дело, на которое нужны"
-            + " десятки минут или часы, за секунды и минуты не делается. В таком"
-            + " случае не подтверждай выполнение и не хвали, а спокойно уточни —"
-            + " возможно, он имел в виду другое, оговорился или пишет из середины"
-            + " дела. Спрашивать о результате того, что заведомо не могло"
-            + " состояться, тоже нельзя.",
-      ],
       ["timezone", context.timezone],
       ["city", context.city],
       ["response_language", context.responseLanguage],
@@ -235,11 +280,6 @@ export class RuntimeContextBuilder {
     const lines = fields
       .filter((entry): entry is [string, string] => Boolean(entry[1]))
       .map(([key, value]) => `${key}: ${escapeContextValue(value)}`);
-    if (this.options.vectorGoalsEnabled !== false) {
-      lines.push(
-        "vector_protocol: черновик цели активируется только после явного подтверждения; действие должно иметь артефакт, первый физический шаг, время, длительность, if-then и критерий завершения; после действия спроси о факте, а при отклонении меняй один элемент и один следующий малый шаг без обвинений",
-      );
-    }
     const events = (context.taskActivity ?? []).slice(0, 5)
       .map((item) => `  - ${escapeContextValue(item)}`);
     if (events.length > 0) lines.push("recent_task_events:", ...events);
@@ -252,53 +292,17 @@ export class RuntimeContextBuilder {
       lines.push(
         "upcoming_reminders:",
         ...upcoming.map((item) => `  - ${escapeContextValue(item)}`),
-        "upcoming_reminders_note: время и остаток посчитаны сервером — называй их как есть"
-        + " и не пересчитывай в уме",
       );
     }
-    const limit = Math.max(1_000, this.options.maxContextCharacters ?? 6_000);
-    options.measure?.(lines.join("\n").length);
-    // Лимит режет переменную часть: подсказки бывают длинными.
-    // Указания о форме ответа ниже — фиксированные и обрезке не подлежат:
-    // потеряв их, Ева снова начнёт проговаривать план и слать сырые
-    // звёздочки, а урезанная память всего лишь чуть беднее.
-    const contextBlock = [
-      lines.join("\n").slice(0, limit),
-      // Модель в агентном цикле склонна проговаривать план вслух
-      // («Let me search for both.»), и это уходило пользователю вместе с
-      // ответом. Код такое отсекает, но дешевле не порождать.
-      "output_protocol: не проговаривай план и ход рассуждений — отправляй только готовый ответ; "
-      + "не пересказывай, какими инструментами пользовалась, если об этом не спросили; "
-      + "отвечай на языке из response_language",
-      // Род держится системным промптом, но на длинном ходу модель
-      // соскальзывает в мужской: «понял», «сделал». Напоминание стоит
-      // здесь, потому что оно приходит с каждым сообщением, а системный
-      // промпт — один раз в начале сессии. Для языков без рода строки нет:
-      // платить за неё в каждом ходу незачем.
-      ...(context.responseLanguage === "ru"
-        ? ["self_reference: Ева — женщина и говорит о себе только в женском роде: "
-          + "«поняла», «сделала», «посмотрела», «нашла», «записала», «рада», «готова»; "
-          + "формы «понял», «сделал», «посмотрел», «нашёл», «записал», «рад», «готов» о себе запрещены"]
-        : []),
-      // Telegram принимает подмножество markdown. Раньше parse_mode не
-      // ставился вовсе и звёздочки были видны как есть; теперь ответ
-      // переводится в HTML, и разметкой можно пользоваться.
-      "formatting: доступны **жирный**, *курсив*, `код`, блоки ```кода```, списки через «-», "
-      + "нумерованные списки и ссылки вида [текст](url); заголовок «#» станет жирной строкой; "
-      + "«> текст» — цитата для главного вывода, «>> текст» — сворачиваемая для длинных "
-      + "пояснений, «||текст||» — скрытый текст, открывается нажатием; "
-      + "таблицы и вложенные списки Telegram не поддерживает — не используй их",
-      "layout: в цитату «>» помещай только один главный вывод на сообщение; в «||скрытый||» — "
-      + "второстепенные подробности и осторожные интерпретации, но никогда предупреждения, "
-      + "кризисные рекомендации, сроки, стоимость и обязательные действия; в «>>» — длинные "
-      + "объяснения вместо перегруженного сообщения; абзацы по 1–3 предложения; эмодзи 1–3 "
-      + "на сообщение; короткий ответ в одну-две фразы оформлением не перегружай; "
-      + "вопрос к пользователю ставь последним отдельным абзацем",
-      // Инструмент есть давно, но модель о нём не вспоминала.
-      "reactions: есть инструмент set_reaction — ставь эмодзи-реакцию на сообщение пользователя, "
-      + "когда она уместна по контексту (согласие, поддержка, шутка, важная новость); "
-      + "не ставь её на каждое сообщение и не заменяй ей ответ",
-    ].join("\n");
+    const limit = Math.max(1_000, this.options.maxContextCharacters ?? RUNTIME_CONTEXT_CEILING);
+    const characters = lines.join("\n").length;
+    options.measure?.(characters);
+    recordRuntimeContextSize(characters, limit);
+    // В блоке остаются только факты этого хода. Кто такая Ева, как она
+    // пишет в Telegram, что делает с промежутком времени и как ведёт
+    // цели — постоянные правила: они живут в персоне и в навыках, то
+    // есть попадают в контекст один раз, а не с каждым сообщением.
+    const contextBlock = lines.join("\n").slice(0, limit);
     const wrapped = [
       "<EVA_RUNTIME_CONTEXT>",
       contextBlock,
@@ -311,13 +315,9 @@ export class RuntimeContextBuilder {
     return appendRoutingMarker(wrapped, {
       purpose: context.purpose as RoutingMarkerClaims["purpose"],
       message_source: options.messageSource,
-      crisis_level: options.crisisLevel ?? "none",
       user_mode: context.llmQualityMode ?? "auto",
       internal_operation_type: options.internalOperationType,
       correlation_id: options.correlationId,
-      related_goals: context.activeGoal ? 1 : 0,
-      related_tasks: context.taskActivity?.length ? 1 : 0,
-      related_recent_events: context.taskActivity?.length ?? 0,
     }, this.options.routingMarkerSecret ?? "");
   }
 

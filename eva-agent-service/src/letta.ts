@@ -7,7 +7,7 @@
  * allowed to reach the App Server directly.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { LettaAgentClient } from "@letta-ai/letta-agent-sdk";
 import type {
@@ -34,6 +34,11 @@ import {
   turnTimeout,
 } from "./errors.js";
 import { missingCapabilities } from "./letta/capabilities.js";
+import {
+  evaluateReadiness,
+  type ObservedRuntime,
+  type ReadinessReport,
+} from "./letta/readiness.js";
 import {
   catalogSupportsEffort,
   isReasoningTierError,
@@ -81,7 +86,12 @@ export const telegramTag = (telegramId: number | string) => `tg:${telegramId}`;
 
 export interface TurnResult {
   reply: string;
-  reasoning: string[];
+  /**
+   * Сколько событий reasoning пришло за ход. Только число: сырые
+   * рассуждения не сохраняются, не трассируются и не показываются
+   * (инвариант 19).
+   */
+  reasoningEvents: number;
   /**
    * Сколько отдельных сообщений ассистента пришло за ход и были ли у них
    * идентификаторы срезов. Только счётчики, без текста: содержимое
@@ -154,6 +164,26 @@ export interface LettaRuntimeFacts {
   observedAt: string;
 }
 
+/**
+ * Что сессия сообщила о себе при открытии.
+ *
+ * `bootstrapState()` называет состав инструментов, `getDeviceStatus()` —
+ * рабочий каталог памяти агента, режим разрешений и связь с устройством.
+ * Оба вызова публичные и не требуют хода модели, поэтому готовность
+ * считается по ним, а не по догадкам о конфигурации.
+ */
+export interface LettaSessionFacts {
+  tools: string[] | null;
+  /** Клиентские инструменты, переданные этой сессии. */
+  clientTools: string[];
+  model: string | null;
+  memoryDirectory: string | null;
+  workingDirectory: string | null;
+  permissionMode: string | null;
+  isOnline: boolean | null;
+  observedAt: string;
+}
+
 export interface RuntimeSdkSettings {
   agent_name_prefix: string;
   default_description: string;
@@ -206,7 +236,7 @@ export interface ManagedAgentInput {
  * returning for logging and debugging.
  */
 export function summarizeStream(messages: SDKMessage[]): Omit<TurnResult, "agentId" | "conversationId" | "durationMs"> {
-  const reasoning: string[] = [];
+  let reasoningEvents = 0;
   const toolCalls: string[] = [];
   const trace: Array<Record<string, unknown>> = [];
   const runIds = new Set<string>();
@@ -252,9 +282,9 @@ export function summarizeStream(messages: SDKMessage[]): Omit<TurnResult, "agent
         break;
       }
       case "reasoning": {
-        const raw = (message as { reasoning?: unknown; content?: unknown });
-        const text = extractText(raw.reasoning ?? raw.content);
-        if (text) reasoning.push(text);
+        // Событие считается, содержимое не читается: сырое рассуждение
+        // не должно существовать нигде за пределами runtime Letta.
+        reasoningEvents += 1;
         break;
       }
       case "tool_call": {
@@ -283,14 +313,13 @@ export function summarizeStream(messages: SDKMessage[]): Omit<TurnResult, "agent
   // событиями, и любой разделитель здесь разорвал бы слово.
   const rendered = groups.map((group) => group.parts.join("").trim()).filter(Boolean);
   // Ответ — последнее сообщение. Всё, что модель сказала до него, это
-  // рассуждение вслух: пользователю оно не нужно, администратору в
-  // трассе — да.
+  // рассуждение вслух: оно не уходит ни пользователю, ни в трассу —
+  // от него остаётся только счётчик сообщений.
   const reply = rendered.at(-1) ?? "";
-  const narration = rendered.slice(0, -1);
 
   return {
     reply: reply.trim(),
-    reasoning: [...reasoning, ...narration],
+    reasoningEvents,
     assistantGroups: rendered.length,
     assistantHadIds: sawSliceIds,
     toolCalls,
@@ -341,6 +370,8 @@ export class LettaService {
 
   /** Последний снимок фактических возможностей сессии (init-сообщение SDK). */
   private lastRuntimeFacts: LettaRuntimeFacts | null = null;
+  private lastSessionFacts: LettaSessionFacts | null = null;
+  private lastClientTools: string[] = [];
 
   private readonly config: Config;
   private readonly logger: Logger;
@@ -371,7 +402,7 @@ export class LettaService {
       default_persona: persona,
       default_human_template: "Имя: {{display_name}}\nTelegram ID: {{telegram_id}}",
       default_tags: [EVASELF_TAG],
-      permissionMode: "unrestricted",
+      permissionMode: "standard",
       reasoning_effort: "none",
       memfs_enabled: true,
       base_tools: null,
@@ -554,11 +585,11 @@ export class LettaService {
    */
   async findAgentByTelegramId(telegramId: number): Promise<string | null> {
     try {
-      const agents = (await this.client.agents.list({
+      const agents = await this.client.agents.list({
         tags: [EVASELF_TAG, telegramTag(telegramId)],
         matchAllTags: true,
         limit: 1,
-      } as never)) as Array<{ id?: string }>;
+      });
       return agents?.[0]?.id ?? null;
     } catch (error) {
       throw toEvaError(error, "finding an agent by telegram id");
@@ -779,20 +810,6 @@ export class LettaService {
       throw toEvaError(error, `resuming conversation ${conversationId}`);
     }
 
-    try {
-      await session.bootstrapState();
-      const recovery = await session.recoverPendingApprovals();
-      if (recovery?.recovered) {
-        this.logger.warn("recovered a pending approval after a restart", { conversationId });
-      }
-    } catch (error) {
-      // Recovery is best effort: a fresh conversation has nothing to recover.
-      this.logger.debug("bootstrap/recovery skipped", {
-        conversationId,
-        reason: error instanceof Error ? error.message : String(error),
-      });
-    }
-
     const entry: PooledSession = {
       session,
       conversationId,
@@ -819,12 +836,14 @@ export class LettaService {
    * переоткрытие тоже не удалось, ошибка уходит наверх как есть.
    */
   private async openSession(conversationId: string, turnPolicy?: { allowedTools: readonly string[]; canUseTool: CanUseToolCallback }): Promise<LettaCodeSession> {
-    const session = this.client.resumeSession(
-      conversationId,
-      await this.sessionOptions(conversationId, turnPolicy),
-    );
+    const options = await this.sessionOptions(conversationId, turnPolicy);
+    // Продуктовые инструменты выполняются в процессе SDK, и обратно их
+    // называет не всякий транспорт. Что именно передано этой сессии —
+    // факт о ней, и готовность вправе на него опереться.
+    this.lastClientTools = (options.tools ?? []).map((tool) => tool.name);
+    const session = this.client.resumeSession(conversationId, options);
     try {
-      await this.initialize(session);
+      await this.hydrate(session, conversationId);
       return session;
     } catch (error) {
       // Уровень уже отвергнут и потому не передавался — значит дело не в
@@ -845,7 +864,7 @@ export class LettaService {
         conversationId,
         await this.sessionOptions(conversationId, turnPolicy),
       );
-      await this.initialize(retry);
+      await this.hydrate(retry, conversationId);
       return retry;
     }
   }
@@ -858,10 +877,36 @@ export class LettaService {
     );
   }
 
-  /** Some session implementations expose initialize(); it is not in the public type. */
-  private async initialize(session: LettaCodeSession): Promise<void> {
-    const candidate = session as unknown as { initialize?: () => Promise<unknown> };
-    if (typeof candidate.initialize === "function") await candidate.initialize();
+  /**
+   * Привести сессию в рабочее состояние документированным путём.
+   *
+   * `bootstrapState()` — публичная гидратация сессии: она поднимает
+   * соединение и применяет опции, поэтому её отказ означает, что сессия
+   * непригодна, и уходит наверх. На ней же виден отказ каталога в
+   * уровне reasoning — его разбирает `openSession()`.
+   *
+   * Восстановление подтверждений — иное дело: у нового разговора
+   * восстанавливать нечего, и его отказ ход не отменяет.
+   */
+  private async hydrate(session: LettaCodeSession, conversationId: string): Promise<void> {
+    const state = await session.bootstrapState();
+    // Открытие сессии — самый дешёвый момент, когда runtime говорит о
+    // себе правду: состав инструментов приходит с гидратацией, а
+    // рабочий каталог памяти, режим разрешений и связь с устройством —
+    // одним запросом состояния. Готовность считается по ним, и на ходу
+    // за это платить уже не нужно.
+    this.recordSessionFacts(state, session);
+    try {
+      const recovery = await session.recoverPendingApprovals();
+      if (recovery?.recovered) {
+        this.logger.warn("recovered a pending approval after a restart", { conversationId });
+      }
+    } catch (error) {
+      this.logger.debug("approval recovery skipped", {
+        conversationId,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   /**
@@ -1015,6 +1060,94 @@ export class LettaService {
    */
   get runtimeFacts(): LettaRuntimeFacts | null {
     return this.lastRuntimeFacts;
+  }
+
+  get sessionFacts(): LettaSessionFacts | null {
+    return this.lastSessionFacts;
+  }
+
+  /**
+   * Всё, что runtime сообщил о себе: и на открытии сессии, и в
+   * init-сообщении хода. Пустое поле означает «не наблюдали», а не
+   * «выключено» — разница существенная, и додумывать её нельзя.
+   */
+  get observedRuntime(): ObservedRuntime {
+    const init = this.lastRuntimeFacts;
+    const session = this.lastSessionFacts;
+    return {
+      tools: session?.tools ?? init?.tools ?? null,
+      clientTools: session?.clientTools ?? [],
+      memoryDirectory: session?.memoryDirectory ?? null,
+      isOnline: session?.isOnline ?? null,
+      permissionMode: session?.permissionMode ?? null,
+      dreaming: init?.dreaming ? { trigger: init.dreaming.trigger } : null,
+      skillSources: init?.skillSources ?? null,
+      model: session?.model ?? init?.model ?? null,
+      observedAt: session?.observedAt ?? init?.observedAt ?? null,
+    };
+  }
+
+  /**
+   * Готова ли Ева работать.
+   *
+   * Не то же самое, что «App Server отвечает»: с выключенным MemFS или
+   * без нативных инструментов памяти он отвечает так же. Проверка идёт
+   * по наблюдённым фактам и по каталогу моделей; сессию она не открывает
+   * и хода модели не тратит.
+   */
+  async readiness(productTools: string[]): Promise<ReadinessReport> {
+    const ping = await this.ping();
+    return evaluateReadiness(this.observedRuntime, {
+      productTools,
+      dreamingTrigger: typeof this.runtime.dreaming.trigger === "string"
+        ? this.runtime.dreaming.trigger
+        : null,
+      permissionMode: this.runtime.permissionMode,
+      modelCatalogSize: ping.ok ? ping.models : null,
+    });
+  }
+
+  private recordSessionFacts(
+    state: { tools?: string[]; model?: string } | undefined,
+    session: LettaCodeSession,
+  ): void {
+    const facts: LettaSessionFacts = {
+      tools: state?.tools ? [...state.tools] : null,
+      clientTools: [...this.lastClientTools],
+      model: state?.model ?? null,
+      memoryDirectory: null,
+      workingDirectory: null,
+      permissionMode: null,
+      isOnline: null,
+      observedAt: new Date().toISOString(),
+    };
+    this.lastSessionFacts = facts;
+    // Состояние устройства — отдельный вызов протокола, и не всякий
+    // транспорт его предлагает. Нет метода — факты просто остаются
+    // ненаблюдёнными, и готовность честно об этом скажет.
+    if (typeof session.getDeviceStatus !== "function") return;
+    // Состояние устройства спрашивается отдельно и не задерживает ход:
+    // сессия уже пригодна, а отказ этого запроса означает лишь, что
+    // готовность останется ненаблюдённой.
+    void session.getDeviceStatus()
+      .then((status) => {
+        this.lastSessionFacts = {
+          ...facts,
+          memoryDirectory: status.memoryDirectory ?? null,
+          workingDirectory: status.workingDirectory ?? null,
+          permissionMode: status.permissionMode ?? null,
+          isOnline: status.isOnline ?? null,
+          observedAt: new Date().toISOString(),
+        };
+        if (!status.memoryDirectory) {
+          this.logger.warn("runtime не сообщил каталог памяти агента: MemFS может быть выключен");
+        }
+      })
+      .catch((error: unknown) => {
+        this.logger.debug("состояние устройства недоступно", {
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      });
   }
 
   private recordRuntimeFacts(message: SDKMessage & { type: "init" }): void {
@@ -1189,10 +1322,41 @@ export class LettaService {
     };
   }
 
+  /**
+   * Попросить Letta сжать историю conversation её собственной командой.
+   *
+   * Это не свой compaction: Evaself не решает, когда сжимать, и в
+   * обычном ходу этот метод не вызывается. Он существует ради проверки
+   * — доказать, что память переживает настоящее сжатие, можно только
+   * если сжатие действительно произошло, — и ради явного действия
+   * человека в административной панели.
+   */
+  async requestCompaction(conversationId: string): Promise<{ ok: boolean; detail: unknown }> {
+    const session = await this.acquireSession(conversationId);
+    try {
+      const response = await session.sendCommand<{
+        type: string; success?: boolean; compaction?: unknown; error?: string;
+      }>(
+        {
+          type: "conversation_compact",
+          request_id: randomUUID(),
+          conversation_id: conversationId,
+        },
+        { responseType: "conversation_compact_response" },
+      );
+      return {
+        ok: response.success === true,
+        detail: response.success === true ? response.compaction : response.error ?? null,
+      };
+    } catch (error) {
+      throw toEvaError(error, `compacting conversation ${conversationId}`);
+    }
+  }
+
   async listMessages(conversationId: string, limit = 50): Promise<ListMessagesResult> {
     const session = await this.acquireSession(conversationId);
     try {
-      return await session.listMessages({ limit, order: "desc" } as never);
+      return await session.listMessages({ limit, order: "desc" });
     } catch (error) {
       throw toEvaError(error, "listing messages");
     }
@@ -1494,36 +1658,95 @@ export class LettaService {
   }
 }
 
-const SECRET_TRACE_KEY =
-  /(api[_-]?key|authorization|password|secret|access[_-]?token|refresh[_-]?token|auth[_-]?token|(^|[_-])token$|cookie|credential)/i;
-
 /**
- * Keep the raw shape useful for debugging while preventing accidental secret
- * disclosure in the browser. Long values are bounded so one tool cannot make
- * an administrative response unbounded.
+ * Трасса хода для административного просмотра — только метаданные.
+ *
+ * Раньше сюда попадало сообщение SDK целиком: текст пользователя,
+ * рассуждение модели, аргументы и результаты инструментов. Скрывались
+ * только ключи, похожие на секреты, — то есть переписка и рассуждения
+ * оседали в ответе браузеру и в любом месте, куда трассу скопируют.
+ * Инвариант 19 и правила приватности этого не допускают.
+ *
+ * Поэтому проекция белого списка: что за событие, к какому ходу и
+ * сессии относится, сколько заняло, сколько стоило, чем закончилось.
+ * Содержимое не переносится ни на одном уровне вложенности — от него
+ * остаются размеры и количества.
  */
-function sanitizeTraceMessage(message: SDKMessage): Record<string, unknown> {
-  return sanitizeTraceValue(message, 0) as Record<string, unknown>;
+
+/** Скалярные поля события: тип, статус, модель, время, признак ошибки. */
+const TRACE_SCALARS = [
+  "type", "subtype", "stopReason", "stop_reason", "model", "provider",
+  "permissionMode", "behavior", "isError", "is_error", "status", "code",
+  "errorCode", "error_code", "durationMs", "duration_ms", "durationApiMs",
+  "numTurns", "num_turns", "totalCostUsd",
+] as const;
+
+/** Идентификаторы: по ним ход находится в Letta, содержимого в них нет. */
+const TRACE_IDENTIFIERS = [
+  "uuid", "otid", "runId", "sessionId", "conversationId", "agentId",
+  "requestId", "toolCallId", "tool_call_id", "messageId", "parentToolUseId",
+] as const;
+
+function traceScalar(value: unknown): string | number | boolean | undefined {
+  if (typeof value === "number" || typeof value === "boolean") return value;
+  // Код статуса — короткая строка. Длинная строка на месте кода почти
+  // наверняка сообщение с содержанием, и в трассу она не идёт.
+  if (typeof value === "string" && value.length <= 200) return value;
+  return undefined;
 }
 
-function sanitizeTraceValue(value: unknown, depth: number): unknown {
-  if (depth > 8) return "[глубина ограничена]";
-  if (typeof value === "string") {
-    return value.length > 100_000 ? `${value.slice(0, 100_000)}…` : value;
-  }
+/** Размер содержимого без самого содержимого. */
+function traceSize(value: unknown): number | undefined {
+  if (typeof value === "string") return value.length;
   if (Array.isArray(value)) {
-    return value.slice(0, 500).map((item) => sanitizeTraceValue(item, depth + 1));
+    return value.reduce<number>((total, item) => total + (traceSize(item) ?? 0), 0);
   }
   if (value && typeof value === "object") {
-    const result: Record<string, unknown> = {};
-    for (const [key, item] of Object.entries(value)) {
-      result[key] = SECRET_TRACE_KEY.test(key)
-        ? "[скрыто]"
-        : sanitizeTraceValue(item, depth + 1);
-    }
-    return result;
+    const text = (value as { text?: unknown }).text;
+    if (typeof text === "string") return text.length;
+    return undefined;
   }
-  return value;
+  return undefined;
+}
+
+function sanitizeTraceMessage(message: SDKMessage): Record<string, unknown> {
+  const raw = message as unknown as Record<string, unknown>;
+  const entry: Record<string, unknown> = {};
+
+  for (const key of TRACE_SCALARS) {
+    const value = traceScalar(raw[key]);
+    if (value !== undefined) entry[key] = value;
+  }
+  for (const key of TRACE_IDENTIFIERS) {
+    if (typeof raw[key] === "string") entry[key] = raw[key];
+  }
+  if (Array.isArray(raw.runIds)) {
+    entry.runIds = raw.runIds.filter((id): id is string => typeof id === "string");
+  }
+
+  const toolName = raw.toolName ?? raw.name;
+  if (typeof toolName === "string") entry.toolName = toolName;
+
+  // Расход токенов — числа, и только они: у usage бывают вложенные
+  // объекты с идентификаторами запросов провайдера.
+  if (raw.usage && typeof raw.usage === "object") {
+    const usage: Record<string, number> = {};
+    for (const [key, value] of Object.entries(raw.usage as Record<string, unknown>)) {
+      if (typeof value === "number") usage[key] = value;
+    }
+    if (Object.keys(usage).length > 0) entry.usage = usage;
+  }
+
+  // Счётчики вместо содержимого: по ним видно, что ход шёл и насколько
+  // он был велик, но восстановить сказанное нельзя.
+  const contentChars = traceSize(raw.content ?? raw.text ?? raw.result);
+  if (contentChars !== undefined) entry.contentChars = contentChars;
+  const input = raw.toolInput ?? raw.input ?? raw.arguments;
+  if (input && typeof input === "object") {
+    entry.argumentCount = Object.keys(input as Record<string, unknown>).length;
+  }
+
+  return entry;
 }
 
 async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {

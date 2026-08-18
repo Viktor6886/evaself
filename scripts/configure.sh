@@ -200,6 +200,17 @@ PROFILES="$(current COMPOSE_PROFILES || true)"
 PROFILES="$(printf '%s' "$PROFILES" | sed 's/crawl4ai//; s/,,/,/g; s/^,//; s/,$//')"
 info "Crawl4AI устанавливается всегда (до 1–1,5 ГБ RAM во время обработки)"
 
+# NocoDB — ручной табличный интерфейс к базе. Ева от него не зависит:
+# ни один сервис к нему не обращается, а разделы данных есть в admin-ui.
+# Поэтому он предлагается, а не ставится по умолчанию.
+if confirm "Установить NocoDB — табличный интерфейс к базе (нужен не всем)?" n; then
+	case ",$PROFILES," in *,nocodb,*) : ;; *) PROFILES="${PROFILES:+$PROFILES,}nocodb" ;; esac
+	ok "NocoDB включён: https://$DOMAIN_NOCODB"
+else
+	PROFILES="$(printf '%s' "$PROFILES" | sed 's/nocodb//; s/,,/,/g; s/^,//; s/,$//')"
+	info "NocoDB не устанавливается; включить позже — COMPOSE_PROFILES=nocodb"
+fi
+
 if confirm "Установить Uptime Kuma для страницы статуса?" n; then
 	case ",$PROFILES," in *,monitoring,*) : ;; *) PROFILES="${PROFILES:+$PROFILES,}monitoring" ;; esac
 	ok "страница статуса включена: https://$DOMAIN_STATUS"
