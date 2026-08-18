@@ -6,12 +6,12 @@
 ## Состояние
 
 ```
-BASELINE:      d551c81 — все установки пакетов в CI ждут блокировку apt (PR #195)
-BRANCH:        claude/evaself-remove-cognitive-middleware-9zeg9t
-STATUS:        на ревью
-LAST_COMMIT:   4f874eb — разбор темы переживает отказ источника
+BASELINE:      9e02667 — время хода, свободное поле ввода, путь в интернет (PR #196)
+BRANCH:        —
+STATUS:        нет активной работы
+LAST_COMMIT:   —
 BLOCKER:       —
-NEXT:          дождаться проверок pull request и смержить
+NEXT:          ждать задания человека
 ```
 
 Значения полей:
