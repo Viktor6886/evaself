@@ -76,6 +76,65 @@ interface RuntimeContextRow {
   llm_quality_mode: "economy" | "auto" | "quality";
 }
 
+/**
+ * Потолок служебного блока хода.
+ *
+ * В блоке остаются только факты этого хода, и типичный размер — около
+ * 450 знаков. Потолок нужен не для экономии, а как сигнал: ход, который
+ * к нему подошёл, почти наверняка тащит в контекст то, чему место в
+ * персоне или навыке. Прежние шесть тысяч знаков такой сигнал не давали
+ * вовсе — под ними умещался целый свод правил.
+ */
+export const RUNTIME_CONTEXT_CEILING = 2_000;
+
+/**
+ * Размеры последних собранных блоков.
+ *
+ * Хранится не текст, а длина: по ней видно, растёт ли служебный блок,
+ * и не видно, о чём был разговор. Кольцо на пятьсот значений — это
+ * несколько часов обычной нагрузки и несколько килобайт памяти.
+ */
+const SIZE_WINDOW = 500;
+const sizes: number[] = [];
+let nearCeilingTotal = 0;
+
+export function recordRuntimeContextSize(
+  characters: number,
+  ceiling = RUNTIME_CONTEXT_CEILING,
+): void {
+  sizes.push(characters);
+  if (sizes.length > SIZE_WINDOW) sizes.shift();
+  // «Подошёл к потолку» — девять десятых от него: к моменту, когда блок
+  // упрётся, разбираться будет уже поздно.
+  if (characters >= ceiling * 0.9) nearCeilingTotal += 1;
+}
+
+export interface RuntimeContextSizeStats {
+  samples: number;
+  p50: number;
+  p95: number;
+  max: number;
+  nearCeilingTotal: number;
+  ceiling: number;
+}
+
+export function runtimeContextSizeStats(): RuntimeContextSizeStats {
+  if (sizes.length === 0) {
+    return { samples: 0, p50: 0, p95: 0, max: 0, nearCeilingTotal, ceiling: RUNTIME_CONTEXT_CEILING };
+  }
+  const sorted = [...sizes].sort((left, right) => left - right);
+  const at = (quantile: number) =>
+    sorted[Math.min(sorted.length - 1, Math.floor(quantile * (sorted.length - 1) + 0.5))] ?? 0;
+  return {
+    samples: sorted.length,
+    p50: at(0.5),
+    p95: at(0.95),
+    max: sorted[sorted.length - 1] ?? 0,
+    nearCeilingTotal,
+    ceiling: RUNTIME_CONTEXT_CEILING,
+  };
+}
+
 export class RuntimeContextBuilder {
   private readonly languageResolver: LanguageResolver;
   private readonly taskEvents: TaskEventService;
@@ -235,8 +294,10 @@ export class RuntimeContextBuilder {
         ...upcoming.map((item) => `  - ${escapeContextValue(item)}`),
       );
     }
-    const limit = Math.max(1_000, this.options.maxContextCharacters ?? 6_000);
-    options.measure?.(lines.join("\n").length);
+    const limit = Math.max(1_000, this.options.maxContextCharacters ?? RUNTIME_CONTEXT_CEILING);
+    const characters = lines.join("\n").length;
+    options.measure?.(characters);
+    recordRuntimeContextSize(characters, limit);
     // В блоке остаются только факты этого хода. Кто такая Ева, как она
     // пишет в Telegram, что делает с промежутком времени и как ведёт
     // цели — постоянные правила: они живут в персоне и в навыках, то

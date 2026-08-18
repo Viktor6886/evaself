@@ -48,6 +48,14 @@ DELETE FROM llm_routes WHERE code = 'classifier';
 -- Цепочка провайдеров уходит каскадом по внешнему ключу.
 DELETE FROM llm_routes WHERE code = 'safety';
 
+-- Описание маршрута инструментов называло NocoDB и Todoist. Первый стал
+-- необязательным ручным интерфейсом, второго в проекте нет вовсе, а
+-- текст этот админ читает в панели, выбирая провайдера.
+UPDATE llm_routes
+   SET description = 'Вызов продуктовых инструментов: задачи, заметки, поиск, память. Без tool calling запрещён.'
+ WHERE code = 'tools'
+   AND description LIKE '%NocoDB%';
+
 INSERT INTO schema_migrations (version) VALUES ('056_router_without_semantic_routing')
 ON CONFLICT (version) DO NOTHING;
 

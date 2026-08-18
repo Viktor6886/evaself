@@ -30,6 +30,12 @@ export interface Config {
   model: string;
   personaFile: string;
   llmEncryptionKey: string;
+  /**
+   * Ключ взят из `EVA_AGENT_API_KEY`, потому что своего нет. Устаревший
+   * путь совместимости: он существует ради установок, обновившихся с
+   * версии без отдельного ключа.
+   */
+  llmEncryptionKeyIsLegacyFallback: boolean;
   llmProviderConfigDir: string;
   llmControlFile: string;
   lettaCliPath: string;
@@ -276,9 +282,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
     model: str("EVA_LLM_MODEL"),
     personaFile: str("EVA_AGENT_PERSONA_FILE", "/app/library/persona/eva.md"),
-    // Для обновляемых установок EVA_AGENT_API_KEY служит безопасным fallback;
-    // новые установки всегда получают отдельный ключ из configure.sh.
+    // Ключ шифрования конфигураций провайдеров — отдельный секрет, и
+    // новая установка получает его из `configure.sh`. Подстановка
+    // `EVA_AGENT_API_KEY` осталась только как путь совместимости для
+    // установок, которые обновились с версии, где ключа ещё не было:
+    // там этим значением уже зашифрованы существующие строки, и убрать
+    // подстановку значило бы сделать их нечитаемыми. Для новой
+    // установки отсутствие ключа — ошибка конфигурации, а не повод
+    // молча взять ключ другого назначения (см. `configWarnings`).
     llmEncryptionKey: str("LLM_CONFIG_ENCRYPTION_KEY", str("EVA_AGENT_API_KEY")),
+    llmEncryptionKeyIsLegacyFallback:
+      str("LLM_CONFIG_ENCRYPTION_KEY") === "" && str("EVA_AGENT_API_KEY") !== "",
     llmProviderConfigDir: str("LETTA_PROVIDER_CONFIG_DIR", "/data/letta-config"),
     llmControlFile: str("LETTA_LLM_RESTART_FILE", "/data/llm-control/restart.request"),
     lettaCliPath: str("LETTA_CODE_CLI", "/app/node_modules/.bin/letta"),
@@ -407,6 +421,25 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
  */
 export function configWarnings(config: Config): string[] {
   const warnings: string[] = [];
+  // Ключ шифрования конфигураций провайдеров и ключ доступа к API — это
+  // разные назначения. Совпадение допустимо ровно в одном случае: на
+  // установке, обновившейся с версии, где отдельного ключа не было, —
+  // там этим значением уже зашифрованы строки. Новая установка получает
+  // ключ от установщика, и его отсутствие — ошибка конфигурации.
+  if (config.llmEncryptionKeyIsLegacyFallback) {
+    warnings.push(
+      "LLM_CONFIG_ENCRYPTION_KEY не задан, и используется EVA_AGENT_API_KEY — "
+        + "устаревший путь совместимости для обновлённых установок. "
+        + "Выполните `make configure`, чтобы получить отдельный ключ.",
+    );
+  }
+  if (!config.llmEncryptionKey) {
+    warnings.push(
+      "LLM_CONFIG_ENCRYPTION_KEY не задан: конфигурации провайдеров "
+        + "шифровать нечем. Это ошибка конфигурации, а не настройка по "
+        + "умолчанию — ключ создаёт `make configure`.",
+    );
+  }
   // The lease is renewed while a turn runs, so a shorter TTL is survivable —
   // but it means every long turn depends on the renewal timer never missing.
   if (config.lockTtlSeconds * 1000 <= config.turnTimeoutMs) {

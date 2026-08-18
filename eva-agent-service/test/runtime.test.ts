@@ -603,3 +603,35 @@ test("психологические навыки доступны нативн�
     assert.match(frontmatter[1]!, /^description: .+$/mu, `${name}: нет description`);
   }
 });
+
+/**
+ * Размер служебного блока — наблюдаемая величина, а не обещание.
+ *
+ * Возврат prompt middleware выглядит одинаково с любой формулировкой в
+ * документации: постоянные правила снова оказываются в каждом ходе.
+ * Число видно сразу — p95 и счётчик ходов, подошедших к потолку.
+ */
+test("размер служебного блока измеряется и виден в метриках", async () => {
+  const {
+    RUNTIME_CONTEXT_CEILING, recordRuntimeContextSize, runtimeContextSizeStats,
+  } = await import("../dist/runtime/runtime-context.js");
+
+  assert.ok(RUNTIME_CONTEXT_CEILING >= 1_500 && RUNTIME_CONTEXT_CEILING <= 2_000,
+    `потолок ${RUNTIME_CONTEXT_CEILING} вне 1500–2000`);
+
+  const before = runtimeContextSizeStats();
+  for (const size of [400, 450, 500, 460, 470]) recordRuntimeContextSize(size);
+  const after = runtimeContextSizeStats();
+  assert.equal(after.samples, before.samples + 5);
+  // Окно общее на процесс: в нём уже лежат размеры блоков, собранных
+  // выше по файлу. Проверяется поведение окна, а не конкретные числа.
+  assert.ok(after.p50 > 0, `p50 ${after.p50}`);
+  assert.ok(after.p95 >= after.p50, `p95 ${after.p95} < p50 ${after.p50}`);
+  assert.ok(after.max >= 500, `max ${after.max}`);
+  assert.equal(after.nearCeilingTotal, before.nearCeilingTotal);
+
+  // Ход, подошедший к потолку, обязан быть посчитан: это сигнал, что в
+  // контекст снова тащат постоянные правила.
+  recordRuntimeContextSize(RUNTIME_CONTEXT_CEILING);
+  assert.equal(runtimeContextSizeStats().nearCeilingTotal, before.nearCeilingTotal + 1);
+});

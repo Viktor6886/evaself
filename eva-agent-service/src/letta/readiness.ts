@@ -58,6 +58,30 @@ export interface ReadinessExpectation {
 
 export type CheckStatus = "ok" | "failed" | "not_reported";
 
+/**
+ * Состояние готовности одним словом.
+ *
+ * `ready` — всё подтверждено фактами. `degraded` — отказов нет, но
+ * что-то не подтверждено: возможность ненаблюдаема этой версией SDK
+ * либо снимок фактов устарел. `not_ready` — отказ ключевой возможности.
+ *
+ * Разделение нужно, потому что «не подтверждено» и «сломано» требуют
+ * разных действий: первое — повод посмотреть, второе — не пускать
+ * трафик.
+ */
+export type ReadinessState = "ready" | "degraded" | "not_ready";
+
+/**
+ * Сколько живёт снимок фактов.
+ *
+ * Факты снимаются при открытии сессии. После перезапуска App Server или
+ * смены провайдера прежний снимок описывает уже не тот runtime, и
+ * считать его бессрочным доказательством готовности нельзя. Пятнадцать
+ * минут — заметно больше обычного простоя между ходами и заметно меньше
+ * времени, за которое стенд успевает смениться незаметно.
+ */
+export const FACTS_STALE_AFTER_MS = 15 * 60_000;
+
 export interface ReadinessCheck {
   name: string;
   status: CheckStatus;
@@ -65,9 +89,15 @@ export interface ReadinessCheck {
 }
 
 export interface ReadinessReport {
+  /** Пускать ли трафик: отказов нет. `degraded` тоже готов. */
   ready: boolean;
+  state: ReadinessState;
   checks: ReadinessCheck[];
   observedAt: string | null;
+  /** Возраст снимка фактов в секундах. `null` — фактов ещё нет. */
+  observedAgeSeconds: number | null;
+  /** Снимок старше срока: готовность подтверждена не сейчас. */
+  stale: boolean;
 }
 
 /**
@@ -91,6 +121,7 @@ function check(name: string, status: CheckStatus, detail: string): ReadinessChec
 export function evaluateReadiness(
   observed: ObservedRuntime,
   expected: ReadinessExpectation,
+  options: { now?: Date; staleAfterMs?: number } = {},
 ): ReadinessReport {
   const checks: ReadinessCheck[] = [];
   const tools = observed.tools;
@@ -185,12 +216,34 @@ export function evaluateReadiness(
       ? check("skill_sources", "ok", observed.skillSources.join(", "))
       : check("skill_sources", "failed", "источники навыков пусты — навыки не обнаружены"));
 
+  // Свежесть снимка — такой же факт, как и остальные. Устаревший снимок
+  // не объявляется отказом: сессия могла просто долго не открываться. Но
+  // и доказательством готовности он больше не считается.
+  const now = options.now ?? new Date();
+  const staleAfterMs = options.staleAfterMs ?? FACTS_STALE_AFTER_MS;
+  const observedMs = observed.observedAt ? Date.parse(observed.observedAt) : Number.NaN;
+  const ageSeconds = Number.isFinite(observedMs)
+    ? Math.max(0, Math.round((now.getTime() - observedMs) / 1000))
+    : null;
+  const stale = ageSeconds !== null && ageSeconds * 1000 > staleAfterMs;
+  checks.push(ageSeconds === null
+    ? check("facts_fresh", "failed", "фактов о runtime ещё нет")
+    : stale
+      ? check("facts_fresh", "not_reported", `снимок фактов старше ${Math.round(staleAfterMs / 60_000)} мин: ${ageSeconds} с`)
+      : check("facts_fresh", "ok", `снимку фактов ${ageSeconds} с`));
+
+  const failed = checks.some((entry) => entry.status === "failed");
+  const unconfirmed = checks.some((entry) => entry.status === "not_reported");
   return {
     // Отсутствие ключевой возможности — это неготовность, без запасных
     // путей и снисхождения. Ненаблюдаемое (`not_reported`) готовность не
-    // отменяет: его нельзя ни подтвердить, ни опровергнуть.
-    ready: checks.every((entry) => entry.status !== "failed"),
+    // отменяет: его нельзя ни подтвердить, ни опровергнуть, — но и за
+    // подтверждённое оно не выдаётся: об этом говорит `degraded`.
+    ready: !failed,
+    state: failed ? "not_ready" : unconfirmed ? "degraded" : "ready",
     checks,
     observedAt: observed.observedAt,
+    observedAgeSeconds: ageSeconds,
+    stale,
   };
 }

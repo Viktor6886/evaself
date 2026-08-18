@@ -52,6 +52,42 @@ function check(name, passed, detail) {
 const telegramId = 900_000 + Math.floor(Math.random() * 90_000);
 let agentId = null;
 
+/**
+ * Продуктовые инструменты сессии.
+ *
+ * Без них проверка «продуктовый инструмент доступен» проверяла бы
+ * пустоту: набор инструментов сессии складывается из нативных и тех,
+ * что передал продукт. Здесь они настоящие по форме и безопасные по
+ * содержанию — ни базы, ни сети, — и заодно дают увидеть, что Letta
+ * действительно зовёт их сама.
+ */
+const toolCalls = [];
+const smokeTool = (name, label, description, payload) => ({
+  name,
+  label,
+  description,
+  parameters: { type: "object", properties: {}, required: [], additionalProperties: false },
+  execute: async () => {
+    toolCalls.push(name);
+    const text = JSON.stringify(payload);
+    return { content: [{ type: "text", text }], details: payload };
+  },
+});
+service.setToolFactory(() => [
+  smokeTool(
+    "get_user_time_context",
+    "Время пользователя",
+    "Текущие дата, время и часовой пояс пользователя. Вызывай, когда нужен ответ о времени.",
+    { local_time: "2026-08-18T12:00:00+05:00", timezone: "Asia/Yekaterinburg" },
+  ),
+  smokeTool(
+    "get_psychological_test_results",
+    "Результаты тестов",
+    "Результаты психологических тестов пользователя.",
+    { status: "not_implemented", results: [] },
+  ),
+]);
+
 try {
   agentId = await service.createAgent({ telegramId, displayName: "Smoke" });
   const first = await service.createConversation(agentId);
@@ -75,6 +111,18 @@ try {
     check(`возможности: ${entry.name}`, entry.status === "ok", entry.detail);
   }
 
+  // --- Продуктовый инструмент зовёт сама Letta ----------------------
+  // Регистрация инструмента — это намерение. Факт — вызов: маршрут
+  // готовности видит инструмент в наборе сессии, а здесь видно, что
+  // модель к нему обратилась, когда он понадобился.
+  toolCalls.length = 0;
+  const timeAnswer = await say(first, "Который сейчас час у меня?");
+  check(
+    "инструменты: продуктовый инструмент вызван самой моделью",
+    toolCalls.includes("get_user_time_context"),
+    `вызовы: ${toolCalls.join(", ") || "нет"}; ответ: ${timeAnswer.slice(0, 80)}`,
+  );
+
   // --- A. Факт переживает настоящее сжатие истории ------------------
   await say(first, "Моего брата зовут Сергей.");
   await say(first, "Кстати, сегодня был долгий день на работе.");
@@ -83,12 +131,20 @@ try {
   const before = (await service.listMessages(first, 200)).messages?.length ?? 0;
   const compaction = await service.requestCompaction(first);
   const after = (await service.listMessages(first, 200)).messages?.length ?? 0;
-  // Сжатие подтверждается ответом самого runtime, а не тем, что вызов
-  // не бросил исключение.
+  // Сжатие подтверждается изменением состояния, а не тем, что вызов
+  // вернул «ок» с непустым полем. Пустой ответ, отказ и «сжали ноль
+  // сообщений» — это не сжатие: проверка, засчитывающая их, зелёная
+  // всегда и не доказывает, что факт пережил именно сжатие.
+  const detail = compaction.detail ?? {};
+  const summarized = Number(
+    detail.messagesSummarized ?? detail.messages_summarized ?? detail.summarized ?? Number.NaN,
+  );
+  const historyShrank = after < before;
+  const runtimeReportedWork = Number.isFinite(summarized) ? summarized > 0 : historyShrank;
   check(
     "compaction: сжатие действительно произошло",
-    compaction.ok && Boolean(compaction.detail),
-    `сообщений было ${before}, стало ${after}`,
+    compaction.ok === true && runtimeReportedWork,
+    `сообщений было ${before}, стало ${after}; runtime: ${JSON.stringify(detail).slice(0, 200)}`,
   );
 
   const brother = await say(first, "Напомни, как зовут моего брата?");

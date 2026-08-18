@@ -111,7 +111,11 @@ ORDER BY 1 DESC;
 -- ---------------------------------------------------------------------
 -- v_crisis_open — unhandled safety events, newest first.
 -- ---------------------------------------------------------------------
-CREATE OR REPLACE VIEW v_crisis_open AS
+-- Пересоздание, а не замена: состав колонок представления меняет
+-- миграция 058, а `CREATE OR REPLACE` менять набор колонок не умеет и
+-- уронил бы повторный прогон всей цепочки.
+DROP VIEW IF EXISTS v_crisis_open;
+CREATE VIEW v_crisis_open AS
 SELECT
     e.id, e.created_at, e.severity, e.detected_by,
     u.telegram_id, u.username, e.trigger_text, e.notes

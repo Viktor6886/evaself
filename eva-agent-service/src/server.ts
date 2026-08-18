@@ -337,9 +337,10 @@ export function buildServer(services: Services): FastifyInstance {
    * сообщил о себе сам.
    *
    * Проверка не открывает сессию и не тратит ход: факты снимаются при
-   * открытии сессии, а здесь только сверяются. Свежесть снимка видна в
-   * `observed_at` — по нему отличают «проверено сейчас» от «наблюдали
-   * час назад».
+   * открытии сессии, а здесь только сверяются. Свежесть снимка — такой
+   * же факт: `observed_at`, `observed_age_seconds` и `stale` отличают
+   * «проверено сейчас» от «наблюдали час назад», а `state` — готовность
+   * подтверждённую от неподтверждённой.
    */
   app.get("/ready", async (request, reply: FastifyReply) => {
     await enforceRateLimit(
@@ -352,7 +353,14 @@ export function buildServer(services: Services): FastifyInstance {
       service: "eva-agent-service",
       version: VERSION,
       ready: report.ready,
+      // `state` отличает подтверждённую готовность от неподтверждённой:
+      // `degraded` — отказов нет, но какая-то возможность ненаблюдаема
+      // или снимок фактов устарел. Трафик при этом идёт: «не смогли
+      // проверить» — не то же самое, что «сломано».
+      state: report.state,
       observed_at: report.observedAt,
+      observed_age_seconds: report.observedAgeSeconds,
+      stale: report.stale,
       checks: report.checks,
     });
   });

@@ -116,3 +116,47 @@ test("продуктовый инструмент засчитывается и 
   assert.equal(statusOf(report, "product_tools"), "ok");
   assert.equal(report.ready, true, JSON.stringify(report.checks));
 });
+
+/**
+ * Свежесть снимка — часть ответа, а не подразумеваемое условие.
+ *
+ * Факты снимаются при открытии сессии. После перезапуска App Server
+ * прежний снимок описывает уже не тот runtime, и выдавать его за
+ * доказательство готовности нельзя: «проверено час назад» и «проверено
+ * сейчас» — разные ответы.
+ */
+test("состояние отличает подтверждённую готовность от неподтверждённой", () => {
+  const now = new Date("2026-08-17T18:00:30.000Z");
+
+  const fresh = evaluateReadiness(READY, EXPECTED, { now });
+  assert.equal(fresh.state, "ready");
+  assert.equal(fresh.stale, false);
+  assert.equal(fresh.observedAgeSeconds, 30);
+
+  // Ненаблюдаемая возможность готовность не отменяет, но и за
+  // подтверждённую не выдаётся.
+  const unreported = evaluateReadiness({ ...READY, dreaming: null }, EXPECTED, { now });
+  assert.equal(unreported.ready, true);
+  assert.equal(unreported.state, "degraded");
+  assert.equal(statusOf(unreported, "dreaming"), "not_reported");
+
+  // Старый снимок: отказа нет, но готовность больше не подтверждена.
+  const stale = evaluateReadiness(READY, EXPECTED, {
+    now: new Date("2026-08-17T18:20:00.000Z"),
+  });
+  assert.equal(stale.ready, true);
+  assert.equal(stale.state, "degraded");
+  assert.equal(stale.stale, true);
+  assert.equal(statusOf(stale, "facts_fresh"), "not_reported");
+
+  // Фактов нет вовсе — проверять нечего, и это неготовность.
+  const never = evaluateReadiness({ ...READY, observedAt: null }, EXPECTED, { now });
+  assert.equal(never.ready, false);
+  assert.equal(never.state, "not_ready");
+  assert.equal(never.observedAgeSeconds, null);
+  assert.equal(statusOf(never, "facts_fresh"), "failed");
+
+  // Отказ ключевой возможности сильнее любого «не подтверждено».
+  const broken = evaluateReadiness({ ...READY, memoryDirectory: null, dreaming: null }, EXPECTED, { now });
+  assert.equal(broken.state, "not_ready");
+});
