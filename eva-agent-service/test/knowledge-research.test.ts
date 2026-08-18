@@ -49,3 +49,61 @@ test("research enforces domain limit, citations and cancellation without report"
   await assert.rejects(orchestrator.run({ userId: 1, conversationId: "c", query: "q", signal: cancelled.signal }));
   assert.equal(saved.length, 1);
 });
+
+/**
+ * Отказ исследования — часть контракта, а не поломка сервиса.
+ *
+ * Регрессия: `ResearchEnqueuer` требовал уже открытый conversation
+ * назначения `research`, а открывать его было некому — ни один путь его
+ * не создавал. Любое исследование кончалось голой пятисоткой, и Mini App
+ * падал на `JSON.parse` раньше, чем показывал причину. Проверка идёт в
+ * том же порядке, в каком её делает клиент: сначала статус и тип, и
+ * только потом разбор тела.
+ */
+test("отказ исследования приходит структурированным JSON, а не пятисоткой текстом", async () => {
+  const Fastify = (await import("fastify")).default;
+  const { registerPublicRoutes } = await import("../dist/public/routes.js");
+  const { EvaError } = await import("../dist/errors.js");
+  const { createHmac } = await import("node:crypto");
+
+  const token = "123456789:abcdefghijklmnopqrstuvwxyzABCDEFG";
+  const user = { id: 424242, first_name: "Виктор" };
+  const params = new URLSearchParams({
+    auth_date: String(Math.floor(Date.now() / 1000)),
+    user: JSON.stringify(user),
+  });
+  const check = [...params.entries()].map(([k, v]) => `${k}=${v}`).sort().join("\n");
+  const secret = createHmac("sha256", "WebAppData").update(token).digest();
+  params.set("hash", createHmac("sha256", secret).update(check).digest("hex"));
+
+  const app = Fastify();
+  registerPublicRoutes(app as never, {
+    config: { telegramBotToken: token, telegramWebAppMaxAgeSeconds: 3_600 },
+    repository: { getToday: async () => ({}) },
+    knowledgeResearch: {
+      researchCreate: async () => {
+        throw new EvaError("Запрос исследования пуст или длиннее 4000 знаков", {
+          code: "research_query_invalid", statusCode: 400,
+        });
+      },
+      researchStatus: async () => null,
+      researchReport: async () => null,
+      researchCancel: async () => ({ cancelled: false }),
+      upload: async () => ({}),
+      uploadStatus: async () => null,
+    },
+  } as never);
+
+  const response = await app.inject({
+    method: "POST",
+    url: "/public/research",
+    headers: { "x-telegram-init-data": params.toString() },
+    payload: { query: "" },
+  });
+
+  assert.equal(response.statusCode, 400);
+  assert.match(String(response.headers["content-type"]), /application\/json/);
+  const body: { error?: { code?: string } } = JSON.parse(response.body);
+  assert.equal(body.error?.code, "research_query_invalid");
+  await app.close();
+});

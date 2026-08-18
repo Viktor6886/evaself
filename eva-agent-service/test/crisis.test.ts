@@ -114,8 +114,15 @@ test("a critical signal is persisted and pages the owner", async () => {
   assert.equal(sent[0]?.chatId, 555);
   assert.match(sent[0]!.text, /critical/);
   assert.match(sent[0]!.text, /42/);
-  // The person's own words stay in the database, not in a Telegram push.
+  // Слова человека не уходят ни в Telegram, ни в базу: в событии только
+  // тяжесть, маркеры, владелец и длина сообщения. Кризисная фраза —
+  // самое чувствительное, что человек пишет Еве, а разбору она не нужна.
   assert.doesNotMatch(sent[0]!.text, /покончить/);
+  const stored = JSON.stringify(inserted[0]);
+  assert.doesNotMatch(stored, /покончить/, stored);
+  const meta: { markers?: string[]; text_length?: number } = JSON.parse(String(inserted[0]?.[3]));
+  assert.ok((meta.markers ?? []).length > 0, stored);
+  assert.equal(meta.text_length, "я хочу покончить с собой".length);
 });
 
 test("a medium signal is recorded but does not wake the owner", async () => {

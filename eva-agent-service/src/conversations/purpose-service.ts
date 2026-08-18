@@ -14,7 +14,6 @@ import type { Logger } from "../logger.js";
 export const CONVERSATION_PURPOSES = [
   "chat",
   "scheduler",
-  "maintenance",
   "profile",
   "goal_review",
   "partner_analysis",
@@ -37,10 +36,6 @@ const PURPOSE_TEXT: Record<ConversationPurpose, { summary: string; description: 
   scheduler: {
     summary: "Планировщик",
     description: "Напоминания и уместные запланированные сообщения без изменения профиля",
-  },
-  maintenance: {
-    summary: "Обслуживание памяти",
-    description: "Служебная обработка без отправки сообщений пользователю",
   },
   profile: {
     summary: "Дополнение профиля",
@@ -175,8 +170,6 @@ export function purposePolicy(purpose: ConversationPurpose): {
       return { canSendToUser: true, canChangeProfile: true, allowedTools: null };
     case "scheduler":
       return { canSendToUser: true, canChangeProfile: false, allowedTools: [] };
-    case "maintenance":
-      return { canSendToUser: false, canChangeProfile: false, allowedTools: [] };
     case "profile":
       return {
         canSendToUser: false,
