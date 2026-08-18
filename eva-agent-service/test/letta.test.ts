@@ -575,3 +575,85 @@ test("состояние MemFS, навыков и инструментов чи�
   assert.equal(service.runtimeFacts?.memfsEnabled, false);
   assert.equal(warnings.length, 1, "выключенный MemFS не проходит молча");
 });
+
+// --------------------------------------------------------------------
+// Готовность: факты сессии, а не конфигурация
+// --------------------------------------------------------------------
+
+test("готовность собирается из фактов открытой сессии", async () => {
+  const service = new LettaService({
+    appServerUrl: "ws://example.invalid/ws", appServerToken: "", appServerRequestTimeoutMs: 1000,
+    model: "", sessionPoolSize: 5, sessionIdleMs: 1000, turnTimeoutMs: 1000,
+  } as never, { debug() {}, info() {}, warn() {}, error() {} }, "persona");
+  service.setToolFactory(() => [{ name: "get_user_time_context" }] as never);
+
+  const internal = service as unknown as {
+    client: Record<string, unknown>;
+    acquireSession(id: string): Promise<unknown>;
+  };
+  internal.client = {
+    agents: { list: async () => [] },
+    models: { list: async () => ({ entries: [{ id: "test/model" }] }) },
+    resumeSession: () => ({
+      // Гидратация называет серверные инструменты, состояние устройства —
+      // каталог памяти и режим разрешений. Ход модели не тратится.
+      bootstrapState: async () => ({ tools: ["memory", "Skill", "Task"], model: "test/model" }),
+      recoverPendingApprovals: async () => ({ recovered: false }),
+      getDeviceStatus: async () => ({
+        isOnline: true,
+        permissionMode: "standard",
+        workingDirectory: "/data/letta",
+        memoryDirectory: "/data/letta/.memory/agent-1",
+        pendingControlRequests: [],
+        raw: {},
+      }),
+      close() {},
+    }),
+  };
+
+  await internal.acquireSession("conversation-readiness");
+  // Состояние устройства спрашивается вне хода: даём микрозадаче дойти.
+  await new Promise((resolve) => setTimeout(resolve, 5));
+
+  const report = await service.readiness(["get_user_time_context"]);
+  assert.equal(report.ready, true, JSON.stringify(report.checks));
+  const status = (name: string) => report.checks.find((entry) => entry.name === name)?.status;
+  assert.equal(status("memfs"), "ok");
+  assert.equal(status("native_memory"), "ok");
+  assert.equal(status("native_subagents"), "ok");
+  assert.equal(status("product_tools"), "ok");
+  assert.equal(status("permission_mode"), "ok");
+  service.shutdown();
+});
+
+test("неготовность видна, когда runtime не подтвердил MemFS", async () => {
+  const service = new LettaService({
+    appServerUrl: "ws://example.invalid/ws", appServerToken: "", appServerRequestTimeoutMs: 1000,
+    model: "", sessionPoolSize: 5, sessionIdleMs: 1000, turnTimeoutMs: 1000,
+  } as never, { debug() {}, info() {}, warn() {}, error() {} }, "persona");
+  service.setToolFactory(() => [{ name: "get_user_time_context" }] as never);
+  const internal = service as unknown as {
+    client: Record<string, unknown>;
+    acquireSession(id: string): Promise<unknown>;
+  };
+  internal.client = {
+    agents: { list: async () => [] },
+    models: { list: async () => ({ entries: [{ id: "test/model" }] }) },
+    resumeSession: () => ({
+      bootstrapState: async () => ({ tools: ["memory", "Skill", "Task"], model: "test/model" }),
+      recoverPendingApprovals: async () => ({ recovered: false }),
+      getDeviceStatus: async () => ({
+        isOnline: true, permissionMode: "standard", workingDirectory: "/data/letta",
+        memoryDirectory: null, pendingControlRequests: [], raw: {},
+      }),
+      close() {},
+    }),
+  };
+  await internal.acquireSession("conversation-no-memfs");
+  await new Promise((resolve) => setTimeout(resolve, 5));
+
+  const report = await service.readiness(["get_user_time_context"]);
+  assert.equal(report.ready, false);
+  assert.equal(report.checks.find((entry) => entry.name === "memfs")?.status, "failed");
+  service.shutdown();
+});

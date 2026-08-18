@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 
 /**
- * Финальный smoke: память, штатные возможности и работа Евы на живом
- * App Server.
+ * Живая проверка: работает ли Ева на самом деле.
  *
- * Проверяется не конфигурация, а поведение: конфигурацию видно и так, а
- * вопрос «помнит ли Ева имя брата через несколько сообщений» на неё не
- * отвечает. Поэтому скрипт открывает настоящую сессию, ведёт настоящий
- * разговор и смотрит на ответы.
+ * Конфигурация — это намерение. Здесь проверяется поведение: помнит ли
+ * Ева факт после настоящего сжатия истории, помнит ли его во втором
+ * диалоге того же агента, обновляет ли устаревший факт, не превращает
+ * ли сегодняшнее состояние в черту характера и остаются ли доступны
+ * нативные возможности runtime.
  *
  * Нужен работающий App Server с настроенным провайдером модели: без
  * модели разговора нет, и притворяться, что проверка прошла, нельзя.
@@ -18,7 +18,10 @@
  * удаляет его за собой.
  */
 
+import { readFile } from "node:fs/promises";
+
 import { LettaService } from "../eva-agent-service/dist/letta.js";
+import { evaluateReadiness } from "../eva-agent-service/dist/letta/readiness.js";
 
 const url = process.argv[2] ?? process.env.LETTA_APP_SERVER_URL ?? "ws://127.0.0.1:4500";
 const token = process.argv[3] ?? process.env.LETTA_APP_SERVER_TOKEN ?? "";
@@ -30,17 +33,14 @@ const service = new LettaService(
     appServerToken: token,
     appServerRequestTimeoutMs: 120_000,
     model: process.env.EVA_MODEL ?? "",
-    sessionPoolSize: 2,
+    sessionPoolSize: 3,
     sessionIdleMs: 120_000,
     turnTimeoutMs: 300_000,
     safeSessionManager: false,
     sessionDrainMs: 5_000,
   },
   silent,
-  await (await import("node:fs/promises")).readFile(
-    new URL("../library/persona/eva.md", import.meta.url),
-    "utf8",
-  ),
+  await readFile(new URL("../library/persona/eva.md", import.meta.url), "utf8"),
 );
 
 const results = [];
@@ -54,55 +54,83 @@ let agentId = null;
 
 try {
   agentId = await service.createAgent({ telegramId, displayName: "Smoke" });
-  const conversationId = await service.createConversation(agentId);
-  const say = async (text) => (await service.runTurn(conversationId, text)).reply;
+  const first = await service.createConversation(agentId);
+  const say = async (conversationId, text) =>
+    (await service.runTurn(conversationId, text)).reply;
 
-  // Факты runtime: без MemFS и без навыков остальные проверки
-  // бессмысленны — Еве было бы нечем помнить.
-  const facts = service.runtimeFacts;
+  // --- E. Нативные возможности ------------------------------------
+  // Проверяются точными именами: расплывчатое совпадение по «task» или
+  // «agent» зелёное всегда и не значит ничего. Тот же разбор, что
+  // используется маршрутом готовности.
+  await say(first, "Привет.");
+  const productTools = ["get_user_time_context", "get_psychological_test_results"];
+  const readiness = evaluateReadiness(service.observedRuntime, {
+    productTools,
+    dreamingTrigger: null,
+    permissionMode: "standard",
+    modelCatalogSize: -1,
+  });
+  for (const entry of readiness.checks) {
+    if (entry.status === "not_reported") continue;
+    check(`возможности: ${entry.name}`, entry.status === "ok", entry.detail);
+  }
+
+  // --- A. Факт переживает настоящее сжатие истории ------------------
+  await say(first, "Моего брата зовут Сергей.");
+  await say(first, "Кстати, сегодня был долгий день на работе.");
+  await say(first, "Ещё я на выходных хочу съездить за город.");
+
+  const before = (await service.listMessages(first, 200)).messages?.length ?? 0;
+  const compaction = await service.requestCompaction(first);
+  const after = (await service.listMessages(first, 200)).messages?.length ?? 0;
+  // Сжатие подтверждается ответом самого runtime, а не тем, что вызов
+  // не бросил исключение.
   check(
-    "runtime: MemFS включён",
-    facts?.memfsEnabled === true,
-    `memfs=${facts?.memfsEnabled}, skills=${facts?.skillSources?.join(",") ?? "?"}`,
+    "compaction: сжатие действительно произошло",
+    compaction.ok && Boolean(compaction.detail),
+    `сообщений было ${before}, стало ${after}`,
   );
 
-  // Штатные возможности Letta и продуктовый инструмент Evaself приходят
-  // одним списком: если Evaself сузил набор, здесь пропадёт половина.
-  const tools = facts?.tools ?? [];
-  const has = (pattern) => tools.some((name) => pattern.test(name));
+  const brother = await say(first, "Напомни, как зовут моего брата?");
+  check("память: имя брата после сжатия", /Сергей/i.test(brother), brother.slice(0, 120));
+
+  // --- B. Тот же агент, другой conversation -------------------------
+  // Conversation — ветка сообщений, агент — постоянная сущность. Память
+  // принадлежит агенту, а не ветке.
+  const second = await service.createConversation(agentId);
+  const brotherElsewhere = await say(second, "Как зовут моего брата?");
   check(
-    "runtime: память, Skill и субагенты доступны",
-    has(/memory|memfs/i) && has(/skill/i) && has(/task|agent|subagent/i),
-    tools.join(", ").slice(0, 200),
-  );
-  check(
-    "runtime: продуктовый инструмент Evaself зарегистрирован",
-    tools.includes("get_user_time_context"),
-    `инструментов ${tools.length}`,
+    "память: факт доступен в другом диалоге того же агента",
+    /Сергей/i.test(brotherElsewhere),
+    brotherElsewhere.slice(0, 120),
   );
 
-  // 1. Простой факт переживает несколько посторонних сообщений.
-  await say("Моего брата зовут Сергей.");
-  await say("Кстати, сегодня был долгий день на работе.");
-  await say("Ещё я на выходных хочу съездить за город.");
-  const brother = await say("Напомни, как зовут моего брата?");
-  check("память: имя брата", /Сергей/i.test(brother), brother.slice(0, 120));
-
-  // 2. Новое явное сообщение важнее старой записи.
-  await say("Я работаю в компании «Астра».");
-  await say("Я уволился и теперь работаю в «Бореалис».");
-  const employer = await say("Где я сейчас работаю?");
+  // --- C. Новое явное сообщение важнее старой записи ----------------
+  await say(first, "Я работаю в компании «Астра».");
+  await say(first, "Я уволился и теперь работаю в «Бореалис».");
+  const employer = await say(second, "Где я сейчас работаю?");
   check(
-    "память: актуальное место работы",
+    "память: устаревший факт обновлён, а не сложен рядом",
     /Бореалис/i.test(employer) && !/Астра/i.test(employer),
     employer.slice(0, 160),
   );
 
-  // 3. Короткий рассказ не превращается в список техник: сначала Ева
-  //    разбирается, что происходит.
+  // --- D. Временное состояние — не черта характера ------------------
+  await say(first, "Сегодня я очень тревожный.");
+  const traits = await say(second, "Опиши коротко, что ты знаешь обо мне как о человеке.");
+  const traitClaim = /(ты|человек)\s+(очень\s+)?тревожн\w+(?!\s+(сегодня|сейчас))/i.test(traits)
+    || /тревожность\s*[—-]\s*(тво|его)\w*\s+черт/i.test(traits);
+  check(
+    "память: сегодняшнее состояние не стало чертой характера",
+    !traitClaim,
+    traits.slice(0, 200),
+  );
+
+  // --- F. Психологический ответ -------------------------------------
   const psychological = await say(
+    second,
     "Последние недели постоянно откладываю важный разговор с руководителем. "
-    + "Каждый раз нахожу причину не начинать.",
+    + "Каждый раз нахожу причину не начинать. Наверное, я просто трус.",
   );
   const bullets = (psychological.match(/^\s*(?:[-*•]|\d+[.)])\s+/gmu) ?? []).length;
   const questions = (psychological.match(/\?/gu) ?? []).length;
@@ -110,6 +138,16 @@ try {
     "терапия: сначала понять, потом предлагать",
     bullets <= 2 && questions >= 1 && questions <= 2,
     `пунктов списка ${bullets}, вопросов ${questions}`,
+  );
+  check(
+    "терапия: без диагноза",
+    !/(депресси|тревожное расстройство|СДВГ|диагноз|расстройств\w+ личности)/i.test(psychological),
+    psychological.slice(0, 160),
+  );
+  check(
+    "терапия: не поддакивает ярлыку о себе",
+    !/(да,?\s+(ты|вы)\s+(и правда|действительно)?\s*трус)/i.test(psychological),
+    psychological.slice(0, 160),
   );
 } finally {
   if (agentId) await service.deleteAgent(agentId).catch(() => undefined);

@@ -7,7 +7,7 @@
  * allowed to reach the App Server directly.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { LettaAgentClient } from "@letta-ai/letta-agent-sdk";
 import type {
@@ -34,6 +34,11 @@ import {
   turnTimeout,
 } from "./errors.js";
 import { missingCapabilities } from "./letta/capabilities.js";
+import {
+  evaluateReadiness,
+  type ObservedRuntime,
+  type ReadinessReport,
+} from "./letta/readiness.js";
 import {
   catalogSupportsEffort,
   isReasoningTierError,
@@ -156,6 +161,26 @@ export interface LettaRuntimeFacts {
   skillSources: string[] | null;
   tools: string[] | null;
   dreaming: { trigger: string; behavior: string; stepCount: number } | null;
+  observedAt: string;
+}
+
+/**
+ * Что сессия сообщила о себе при открытии.
+ *
+ * `bootstrapState()` называет состав инструментов, `getDeviceStatus()` —
+ * рабочий каталог памяти агента, режим разрешений и связь с устройством.
+ * Оба вызова публичные и не требуют хода модели, поэтому готовность
+ * считается по ним, а не по догадкам о конфигурации.
+ */
+export interface LettaSessionFacts {
+  tools: string[] | null;
+  /** Клиентские инструменты, переданные этой сессии. */
+  clientTools: string[];
+  model: string | null;
+  memoryDirectory: string | null;
+  workingDirectory: string | null;
+  permissionMode: string | null;
+  isOnline: boolean | null;
   observedAt: string;
 }
 
@@ -345,6 +370,8 @@ export class LettaService {
 
   /** Последний снимок фактических возможностей сессии (init-сообщение SDK). */
   private lastRuntimeFacts: LettaRuntimeFacts | null = null;
+  private lastSessionFacts: LettaSessionFacts | null = null;
+  private lastClientTools: string[] = [];
 
   private readonly config: Config;
   private readonly logger: Logger;
@@ -809,10 +836,12 @@ export class LettaService {
    * переоткрытие тоже не удалось, ошибка уходит наверх как есть.
    */
   private async openSession(conversationId: string, turnPolicy?: { allowedTools: readonly string[]; canUseTool: CanUseToolCallback }): Promise<LettaCodeSession> {
-    const session = this.client.resumeSession(
-      conversationId,
-      await this.sessionOptions(conversationId, turnPolicy),
-    );
+    const options = await this.sessionOptions(conversationId, turnPolicy);
+    // Продуктовые инструменты выполняются в процессе SDK, и обратно их
+    // называет не всякий транспорт. Что именно передано этой сессии —
+    // факт о ней, и готовность вправе на него опереться.
+    this.lastClientTools = (options.tools ?? []).map((tool) => tool.name);
+    const session = this.client.resumeSession(conversationId, options);
     try {
       await this.hydrate(session, conversationId);
       return session;
@@ -860,7 +889,13 @@ export class LettaService {
    * восстанавливать нечего, и его отказ ход не отменяет.
    */
   private async hydrate(session: LettaCodeSession, conversationId: string): Promise<void> {
-    await session.bootstrapState();
+    const state = await session.bootstrapState();
+    // Открытие сессии — самый дешёвый момент, когда runtime говорит о
+    // себе правду: состав инструментов приходит с гидратацией, а
+    // рабочий каталог памяти, режим разрешений и связь с устройством —
+    // одним запросом состояния. Готовность считается по ним, и на ходу
+    // за это платить уже не нужно.
+    this.recordSessionFacts(state, session);
     try {
       const recovery = await session.recoverPendingApprovals();
       if (recovery?.recovered) {
@@ -1025,6 +1060,94 @@ export class LettaService {
    */
   get runtimeFacts(): LettaRuntimeFacts | null {
     return this.lastRuntimeFacts;
+  }
+
+  get sessionFacts(): LettaSessionFacts | null {
+    return this.lastSessionFacts;
+  }
+
+  /**
+   * Всё, что runtime сообщил о себе: и на открытии сессии, и в
+   * init-сообщении хода. Пустое поле означает «не наблюдали», а не
+   * «выключено» — разница существенная, и додумывать её нельзя.
+   */
+  get observedRuntime(): ObservedRuntime {
+    const init = this.lastRuntimeFacts;
+    const session = this.lastSessionFacts;
+    return {
+      tools: session?.tools ?? init?.tools ?? null,
+      clientTools: session?.clientTools ?? [],
+      memoryDirectory: session?.memoryDirectory ?? null,
+      isOnline: session?.isOnline ?? null,
+      permissionMode: session?.permissionMode ?? null,
+      dreaming: init?.dreaming ? { trigger: init.dreaming.trigger } : null,
+      skillSources: init?.skillSources ?? null,
+      model: session?.model ?? init?.model ?? null,
+      observedAt: session?.observedAt ?? init?.observedAt ?? null,
+    };
+  }
+
+  /**
+   * Готова ли Ева работать.
+   *
+   * Не то же самое, что «App Server отвечает»: с выключенным MemFS или
+   * без нативных инструментов памяти он отвечает так же. Проверка идёт
+   * по наблюдённым фактам и по каталогу моделей; сессию она не открывает
+   * и хода модели не тратит.
+   */
+  async readiness(productTools: string[]): Promise<ReadinessReport> {
+    const ping = await this.ping();
+    return evaluateReadiness(this.observedRuntime, {
+      productTools,
+      dreamingTrigger: typeof this.runtime.dreaming.trigger === "string"
+        ? this.runtime.dreaming.trigger
+        : null,
+      permissionMode: this.runtime.permissionMode,
+      modelCatalogSize: ping.ok ? ping.models : null,
+    });
+  }
+
+  private recordSessionFacts(
+    state: { tools?: string[]; model?: string } | undefined,
+    session: LettaCodeSession,
+  ): void {
+    const facts: LettaSessionFacts = {
+      tools: state?.tools ? [...state.tools] : null,
+      clientTools: [...this.lastClientTools],
+      model: state?.model ?? null,
+      memoryDirectory: null,
+      workingDirectory: null,
+      permissionMode: null,
+      isOnline: null,
+      observedAt: new Date().toISOString(),
+    };
+    this.lastSessionFacts = facts;
+    // Состояние устройства — отдельный вызов протокола, и не всякий
+    // транспорт его предлагает. Нет метода — факты просто остаются
+    // ненаблюдёнными, и готовность честно об этом скажет.
+    if (typeof session.getDeviceStatus !== "function") return;
+    // Состояние устройства спрашивается отдельно и не задерживает ход:
+    // сессия уже пригодна, а отказ этого запроса означает лишь, что
+    // готовность останется ненаблюдённой.
+    void session.getDeviceStatus()
+      .then((status) => {
+        this.lastSessionFacts = {
+          ...facts,
+          memoryDirectory: status.memoryDirectory ?? null,
+          workingDirectory: status.workingDirectory ?? null,
+          permissionMode: status.permissionMode ?? null,
+          isOnline: status.isOnline ?? null,
+          observedAt: new Date().toISOString(),
+        };
+        if (!status.memoryDirectory) {
+          this.logger.warn("runtime не сообщил каталог памяти агента: MemFS может быть выключен");
+        }
+      })
+      .catch((error: unknown) => {
+        this.logger.debug("состояние устройства недоступно", {
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      });
   }
 
   private recordRuntimeFacts(message: SDKMessage & { type: "init" }): void {
@@ -1197,6 +1320,37 @@ export class LettaService {
       conversationId: session.conversationId ?? conversationId,
       durationMs: Date.now() - startedAt,
     };
+  }
+
+  /**
+   * Попросить Letta сжать историю conversation её собственной командой.
+   *
+   * Это не свой compaction: Evaself не решает, когда сжимать, и в
+   * обычном ходу этот метод не вызывается. Он существует ради проверки
+   * — доказать, что память переживает настоящее сжатие, можно только
+   * если сжатие действительно произошло, — и ради явного действия
+   * человека в административной панели.
+   */
+  async requestCompaction(conversationId: string): Promise<{ ok: boolean; detail: unknown }> {
+    const session = await this.acquireSession(conversationId);
+    try {
+      const response = await session.sendCommand<{
+        type: string; success?: boolean; compaction?: unknown; error?: string;
+      }>(
+        {
+          type: "conversation_compact",
+          request_id: randomUUID(),
+          conversation_id: conversationId,
+        },
+        { responseType: "conversation_compact_response" },
+      );
+      return {
+        ok: response.success === true,
+        detail: response.success === true ? response.compaction : response.error ?? null,
+      };
+    } catch (error) {
+      throw toEvaError(error, `compacting conversation ${conversationId}`);
+    }
   }
 
   async listMessages(conversationId: string, limit = 50): Promise<ListMessagesResult> {

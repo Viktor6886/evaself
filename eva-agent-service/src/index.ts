@@ -394,6 +394,10 @@ async function main(): Promise<void> {
     miniAppSessions,
     rateLimiter,
     approvals,
+    // Готовность спрашивает у runtime, доступны ли продуктовые
+    // инструменты на самом деле. Имена берутся из той же фабрики,
+    // которая их регистрирует, — второго списка не заводим.
+    productToolNames: () => toolFactory.forConversation("readiness-probe").map((tool) => tool.name),
     ...(knowledgeResearch ? { knowledgeResearch } : {}),
   });
 

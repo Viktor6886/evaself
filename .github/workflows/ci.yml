@@ -2028,6 +2028,29 @@ jobs:
           fi
           echo "managed-цепочки остались независимыми от legacy-активации"
 
+      - name: Готовность подтверждается фактами runtime, а не конфигурацией
+        if: needs.changes.outputs.docs_only != 'true'
+        run: |
+          # Ход уже прошёл, значит сессия открывалась и runtime успел
+          # рассказать о себе. /ready отвечает 200 только когда MemFS,
+          # нативная память, навыки, субагенты, продуктовые инструменты
+          # и сессия на месте.
+          RESULT="$(docker compose --env-file versions.env --env-file .env \
+            exec -T eva-agent-service node -e "
+              fetch('http://127.0.0.1:8070/ready')
+                .then(async (response) => {
+                  const body = await response.json();
+                  console.log(JSON.stringify({ status: response.status, ready: body.ready, checks: body.checks }));
+                })
+                .catch((error) => { console.error(error); process.exit(1); });
+            " | tr -d '\r')"
+          echo "$RESULT"
+          echo "$RESULT" | grep -q '"ready":true'
+          for check in native_memory native_skills native_subagents product_tools memfs session model; do
+            echo "$RESULT" | grep -q "{\"name\":\"$check\",\"status\":\"ok\"" \
+              || { echo "::error::проверка готовности $check не зелёная"; exit 1; }
+          done
+
       - name: WebUI chat completes a real SDK turn through the test LLM
         if: needs.changes.outputs.docs_only != 'true'
         run: |
