@@ -6,12 +6,12 @@
 ## Состояние
 
 ```
-BASELINE:      e90e378 — приёмка Letta-native границы (PR #191)
-BRANCH:        —
-STATUS:        нет активной работы
-LAST_COMMIT:   —
+BASELINE:      d551c81 — все установки пакетов в CI ждут блокировку apt (PR #195)
+BRANCH:        claude/evaself-remove-cognitive-middleware-9zeg9t
+STATUS:        на ревью
+LAST_COMMIT:   4f874eb — разбор темы переживает отказ источника
 BLOCKER:       —
-NEXT:          ждать задания человека
+NEXT:          дождаться проверок pull request и смержить
 ```
 
 Значения полей:
