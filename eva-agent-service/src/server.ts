@@ -855,7 +855,11 @@ export function buildServer(services: Services): FastifyInstance {
         adminQueueId(id),
         async () =>
           await letta.runTurn(id, text, {
-            onDelta: (delta) => event("delta", { text: delta }),
+            // Срез несёт номер сообщения: подписчик отличает ответ от
+            // проговаривания плана перед вызовом инструмента.
+            onDelta: (delta) => event("delta", {
+              text: delta.text, group: delta.group, starts_group: delta.startsGroup,
+            }),
           }),
         { conversationId: id },
       );
@@ -1083,7 +1087,9 @@ export function buildServer(services: Services): FastifyInstance {
         telegramId,
         async () =>
           letta.runTurn(conversationId, body.text!.trim(), {
-            onDelta: (text) => send("delta", { text }),
+            onDelta: (delta) => send("delta", {
+              text: delta.text, group: delta.group, starts_group: delta.startsGroup,
+            }),
           }),
         { userId: Number(link.user_id), conversationId },
       );

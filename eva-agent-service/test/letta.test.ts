@@ -316,6 +316,77 @@ test("session opening awaits the approval resolver and recovery uses the same re
   assert.deepEqual(seen, [{ name: "research_read", requestId: "sdk-request-restart" }]);
 });
 
+/**
+ * Срезы ответа наружу.
+ *
+ * Поток отдаёт ответ кусками, и куски принадлежат разным сообщениям: в
+ * агентном ходе модель сперва проговаривает, что собирается сделать, и
+ * только последнее сообщение — ответ. Подписчик обязан уметь их
+ * различить, иначе показанный текст склеится с проговариванием.
+ */
+test("срезы ответа несут номер сообщения и время до первого текста", async () => {
+  const service = new LettaService({
+    appServerUrl: "ws://example.invalid/ws", appServerToken: "", appServerRequestTimeoutMs: 1000,
+    model: "", sessionPoolSize: 5, sessionIdleMs: 1000, turnTimeoutMs: 5000,
+  } as never, { debug() {}, info() {}, warn() {}, error() {} }, "persona");
+
+  const events = [
+    { type: "assistant", content: "Сейчас посмотрю", otid: "a" },
+    { type: "assistant", content: " расписание.", otid: "a" },
+    { type: "tool_call", name: "get_goal_context" },
+    { type: "assistant", content: "Занятие в 19:00.", otid: "b" },
+    { type: "assistant", content: " Успеешь?", otid: "b" },
+    { type: "result", stopReason: "end_turn" },
+  ];
+  (service as unknown as { client: { resumeSession(id: string, options: unknown): unknown } }).client = {
+    resumeSession: () => ({
+      bootstrapState: async () => ({}),
+      recoverPendingApprovals: async () => ({ recovered: false }),
+      send: async () => undefined,
+      stream: () => events[Symbol.iterator](),
+      close() {},
+      agentId: "agent-1",
+      conversationId: "conv-1",
+    }),
+  };
+
+  const deltas: Array<{ text: string; group: number; startsGroup: boolean }> = [];
+  const result = await service.runTurn("conv-1", "привет", {
+    onDelta: (delta) => deltas.push(delta),
+  });
+
+  // Проговаривание и ответ — разные сообщения, и это видно подписчику.
+  assert.deepEqual(deltas.map((delta) => [delta.group, delta.startsGroup]), [
+    [0, true], [0, false], [1, true], [1, false],
+  ]);
+  assert.equal(deltas.map((delta) => delta.text).join(""), "Сейчас посмотрю расписание.Занятие в 19:00. Успеешь?");
+  // Ответ — последнее сообщение, проговаривание в него не попало.
+  assert.equal(result.reply, "Занятие в 19:00. Успеешь?");
+  assert.equal(typeof result.sessionAcquireMs, "number");
+  assert.equal(typeof result.firstDeltaMs, "number");
+});
+
+test("ход без текста не выдумывает время первого среза", async () => {
+  const service = new LettaService({
+    appServerUrl: "ws://example.invalid/ws", appServerToken: "", appServerRequestTimeoutMs: 1000,
+    model: "", sessionPoolSize: 5, sessionIdleMs: 1000, turnTimeoutMs: 5000,
+  } as never, { debug() {}, info() {}, warn() {}, error() {} }, "persona");
+  (service as unknown as { client: { resumeSession(id: string, options: unknown): unknown } }).client = {
+    resumeSession: () => ({
+      bootstrapState: async () => ({}),
+      recoverPendingApprovals: async () => ({ recovered: false }),
+      send: async () => undefined,
+      stream: () => [{ type: "result", stopReason: "end_turn" }][Symbol.iterator](),
+      close() {},
+      agentId: "agent-1",
+      conversationId: "conv-1",
+    }),
+  };
+
+  const result = await service.runTurn("conv-1", "привет");
+  assert.equal(result.firstDeltaMs, null, "времени первого среза взяться неоткуда");
+});
+
 // --------------------------------------------------------------------
 // Уровень reasoning и каталог моделей App Server
 //
