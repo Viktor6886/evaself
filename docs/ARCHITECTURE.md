@@ -180,7 +180,7 @@ App Server остаются инфраструктурными: URL показы
   настройки SDK, реестр LLM и административный API;
 - Letta App Server — self-hosted runtime агентов;
 - PostgreSQL/Valkey — постоянное состояние и блокировки;
-- NocoDB — административный просмотр данных;
+- NocoDB — ручной табличный просмотр данных, профиль `nocodb`, в обязательный stack не входит;
 - Letta UI — Dashboard, agents, conversations, чат/trace, массовые операции,
   импорт/экспорт, audit, настройки SDK и LLM;
 - Media Service — ASR/TTS и ffmpeg;

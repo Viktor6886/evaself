@@ -31,7 +31,7 @@ Telegram
 для каждого Telegram-пользователя и хранит их идентификаторы в PostgreSQL.
 Telegram и браузер не подключаются к App Server напрямую.
 
-В состав также входят PostgreSQL, Valkey, Caddy, NocoDB, WebApp,
+В состав также входят PostgreSQL, Valkey, Caddy, WebApp,
 Media Service, SearXNG и механизмы backup, restore, update и
 rollback. Telegram webhook, идемпотентность, команды, квоты, фоновые задачи,
 heartbeat и webhook Lava реализованы кодом внутри TypeScript runtime.
@@ -115,7 +115,7 @@ PostgreSQL, API Key зашифрован AES-256-GCM и никогда не во
 WebUI. Первая конфигурация импортируется из значений мастера установки.
 
 Административная панель поддерживает два режима: `adaptive` выбирает
-независимые цепочки `fast/chat/deep/classifier` и специализированные
+независимые цепочки `fast/chat/deep` и специализированные
 маршруты, а `single` направляет все обращения одному выбранному provider.
 Переключение не пересоздаёт агента и не стирает цепочки. Напоминания также
 проходят через Letta и LLM; факт отправки хранится отдельно от выполнения

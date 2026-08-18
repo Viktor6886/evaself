@@ -279,14 +279,9 @@ test("new Eva agents receive the structured memory blueprint", () => {
   assert.match(framework.value, /гипотез|Skill/i);
 });
 
-function toolFactory(todoistApiToken = "") {
+function toolFactory() {
   return new AgentToolFactory(
-    {
-      searxngUrl: "http://search",
-      todoistApiUrl: "https://api.todoist.test",
-      todoistApiToken,
-      todoistProjectId: "",
-    } as never,
+    { searxngUrl: "http://search" } as never,
     {} as never,
     {} as never,
     { debug() {}, info() {}, warn() {}, error() {} },
@@ -294,9 +289,8 @@ function toolFactory(todoistApiToken = "") {
 }
 
 test("Agent SDK registers every migrated external tool", () => {
-  // Todoist tools are covered separately: they appear only with a token.
   const names = new Set(
-    toolFactory("todoist-token").forConversation("conversation-1").map((tool) => tool.name),
+    toolFactory().forConversation("conversation-1").map((tool) => tool.name),
   );
   for (const expected of [
     "save_note",
@@ -308,10 +302,6 @@ test("Agent SDK registers every migrated external tool", () => {
     "set_reaction",
     "web_search",
     "PERPLEXITY_SEARCH",
-    "TODOIST_CREATE_TASK",
-    "TODOIST_UPDATE_TASK",
-    "TODOIST_CLOSE_TASK",
-    "TODOIST_DELETE_TASK",
     "get_goal_context",
     "upsert_goal",
     "confirm_goal",
@@ -323,22 +313,15 @@ test("Agent SDK registers every migrated external tool", () => {
   }
 });
 
-test("Todoist tools appear only once a token is configured", () => {
-  const without = new Set(toolFactory().forConversation("c").map((tool) => tool.name));
-  const withToken = new Set(
-    toolFactory("todoist-token").forConversation("c").map((tool) => tool.name),
-  );
-  for (const name of [
-    "TODOIST_CREATE_TASK",
-    "TODOIST_UPDATE_TASK",
-    "TODOIST_CLOSE_TASK",
-    "TODOIST_DELETE_TASK",
-  ]) {
-    // Advertising a tool that always fails on the first call only teaches
-    // the model a dead end.
-    assert.equal(without.has(name), false, `${name} must not be offered without a token`);
-    assert.equal(withToken.has(name), true, `${name} must be offered with a token`);
+test("задачи и напоминания Евы — единственная система задач", () => {
+  // Todoist был вторым списком задач поверх собственного: выключен по
+  // умолчанию, дублировал save_task/get_tasks и приносил девять
+  // инструментов, включая удаление всех задач разом.
+  const names = new Set(toolFactory().forConversation("c").map((tool) => tool.name));
+  for (const own of ["save_task", "get_tasks", "update_task", "delete_tasks"]) {
+    assert.equal(names.has(own), true, own);
   }
+  assert.equal([...names].some((name) => name.startsWith("TODOIST_")), false);
 });
 
 test("cron lookups stay fast for sparse expressions", () => {
@@ -540,7 +523,7 @@ test("продуктовые инструменты зарегистрирова
       await work({ query: async () => ({ rows: [], rowCount: 0 }) }),
   };
   const factory = new AgentToolFactory(
-    { searxngUrl: "http://search", todoistApiToken: "", vectorGoalsEnabled: true } as never,
+    { searxngUrl: "http://search", vectorGoalsEnabled: true } as never,
     db as never, { setReaction: async () => {} } as never,
     { debug() {}, info() {}, warn() {}, error() {} },
   );

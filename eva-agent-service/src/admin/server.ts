@@ -537,7 +537,7 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
   // ограничено медиа-ключами и проверяется по интеграции, а не по
   // маршруту: маршрут один на все интеграции, и снятое с него
   // подтверждение сняло бы его заодно с Telegram bot_token, токена
-  // Todoist, секрета SearXNG и ключа Crawl4AI. Ключи ASR и TTS вводят,
+  // секрета SearXNG и ключа Crawl4AI. Ключи ASR и TTS вводят,
   // меняют и проверяют десяток раз за настройку, и стоит их утечка
   // счёта у провайдера речи; bot_token — всего канала Евы. Поэтому
   // asr и tts сохраняются без пароля, остальные — под `secrets:write`,

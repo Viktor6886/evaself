@@ -37,7 +37,7 @@ cooldown ключей.
 
 ## Фаза 4 — интеграции
 
-Единый реестр содержит Telegram, Google AI, ASR, TTS, Todoist, SearXNG,
+Единый реестр содержит Telegram, Google AI, ASR, TTS, SearXNG,
 Crawl4AI и monitoring. В JSON-конфигурациях разрешены только ссылки
 `secret_ref`; сами значения находятся в Secret Store.
 

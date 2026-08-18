@@ -180,8 +180,9 @@ test("токен провайдера сохраняется вместе с о�
 
 test("пароль при записи интеграции спрашивается по интеграции, а не по маршруту", async () => {
   // Маршрут один на все интеграции. Владелец решил не спрашивать пароль
-  // при настройке речи — но тем же запросом меняются Telegram bot_token
-  // и токен Todoist, поэтому послабление ограничено asr и tts.
+  // при настройке речи — но тем же запросом меняются Telegram bot_token,
+  // секрет SearXNG и ключ Crawl4AI, поэтому послабление ограничено
+  // asr и tts.
   const { buildAdminServer } = await import("../dist/admin/server.js");
   const sudo: string[] = [];
   const saved: string[] = [];
@@ -223,11 +224,11 @@ test("пароль при записи интеграции спрашивает
   }
   assert.deepEqual(sudo, [], "речь не должна требовать пароль");
 
-  for (const id of ["telegram", "todoist", "searxng", "crawl4ai"]) {
+  for (const id of ["telegram", "searxng", "crawl4ai"]) {
     assert.equal((await put(id)).statusCode, 200, id);
   }
-  assert.deepEqual(sudo, ["secrets:write", "secrets:write", "secrets:write", "secrets:write"]);
-  assert.deepEqual(saved, ["tts", "asr", "telegram", "todoist", "searxng", "crawl4ai"]);
+  assert.deepEqual(sudo, ["secrets:write", "secrets:write", "secrets:write"]);
+  assert.deepEqual(saved, ["tts", "asr", "telegram", "searxng", "crawl4ai"]);
   await app.close();
 });
 

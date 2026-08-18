@@ -684,6 +684,12 @@ jobs:
       - name: "Дневник Mini App: удаление доходит до производных данных"
         run: node scripts/ci/test-journal-postgres.mjs
 
+      # Чистая установка пропускает миграции, чей результат отменяет 053.
+      # Допустимо это ровно тогда, когда обе схемы совпадают, и проверить
+      # это можно только построив обе по-настоящему.
+      - name: Чистая установка даёт ту же схему, что и полная цепочка
+        run: ./scripts/ci/test-fresh-install.sh
+
       # Откат выполняется ровно тогда, когда что-то уже пошло не так, и
       # проверять его в этот момент поздно. Здесь он прогоняется на
       # заведомо целой базе: назад по всем down, затем снова вперёд.
@@ -934,10 +940,15 @@ jobs:
           done
           ./scripts/db-migrate.sh
 
-      - name: NocoDB automatically imports every Eva table
+      # NocoDB не входит в обязательный stack: он поднимается профилем и
+      # только здесь. То, что все предыдущие и последующие шаги работают
+      # без него, и есть доказательство, что ядро от него не зависит.
+      - name: NocoDB поднимается профилем и импортирует таблицы Eva
         if: needs.changes.outputs.docs_only != 'true'
         run: |
-          docker compose --env-file versions.env --env-file .env up -d nocodb
+          docker compose --env-file versions.env --env-file .env config --services \
+            | grep -qx nocodb && { echo "::error::NocoDB не должен входить в обязательный stack"; exit 1; }
+          COMPOSE_PROFILES=nocodb docker compose --env-file versions.env --env-file .env up -d nocodb
           for i in $(seq 1 90); do
             STATUS="$(docker inspect -f \
               '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' \

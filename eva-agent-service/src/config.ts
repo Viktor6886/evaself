@@ -67,9 +67,6 @@ export interface Config {
   mediaServiceToken: string;
   searxngUrl: string;
   crawl4aiUrl: string;
-  todoistApiUrl: string;
-  todoistApiToken: string;
-  todoistProjectId: string;
   schedulerIntervalMs: number;
   heartbeatIntervalMs: number;
   typingIntervalMs: number;
@@ -344,9 +341,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     mediaServiceToken: str("MEDIA_SERVICE_TOKEN"),
     searxngUrl: str("SEARXNG_BASE_URL", "http://searxng:8080/"),
     crawl4aiUrl: str("CRAWL4AI_BASE_URL", "http://crawl4ai:11235/"),
-    todoistApiUrl: str("TODOIST_API_URL", "https://api.todoist.com/api/v1"),
-    todoistApiToken: str("TODOIST_API_TOKEN"),
-    todoistProjectId: str("TODOIST_PROJECT_ID"),
     schedulerIntervalMs: int("EVA_SCHEDULER_INTERVAL_MS", 30_000),
     heartbeatIntervalMs: int("EVA_HEARTBEAT_INTERVAL_MS", 10 * 60_000),
     typingIntervalMs: int("EVA_TELEGRAM_TYPING_INTERVAL_MS", 4_000),

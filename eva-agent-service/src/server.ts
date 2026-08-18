@@ -438,7 +438,6 @@ export function buildServer(services: Services): FastifyInstance {
       integrations: {
         telegram: Boolean(config.telegramBotToken),
         telegram_owner: config.ownerTelegramId !== null,
-        todoist: Boolean(config.todoistApiToken),
         lava: Boolean(config.lavaWebhookUser && config.lavaWebhookPassword),
         llm: active !== null,
       },

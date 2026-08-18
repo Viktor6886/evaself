@@ -54,9 +54,6 @@ function harness(options: { rows?: Record<string, unknown>[]; rowCount?: number;
   const factory = new AgentToolFactory(
     {
       searxngUrl: "http://search",
-      todoistApiUrl: "https://api.todoist.test",
-      todoistApiToken: "",
-      todoistProjectId: "",
       // VECTOR goal tools have their own suite; keep this one focused on the
       // per-user scoping of notes, budget and tasks.
       vectorGoalsEnabled: false,
@@ -227,7 +224,7 @@ test("set_reaction refuses an emoji Telegram does not support", async () => {
 test("web_search stops at the quota instead of spending it", async () => {
   const statements: Array<{ sql: string; values: unknown[] }> = [];
   const factory = new AgentToolFactory(
-    { searxngUrl: "http://search", todoistApiUrl: "", todoistApiToken: "", todoistProjectId: "", vectorGoalsEnabled: false } as never,
+    { searxngUrl: "http://search", vectorGoalsEnabled: false } as never,
     withTenantScopes({
       getAgentRuntimeContext: () => Promise.resolve(RUNTIME),
       getQuotaStatus: () => Promise.resolve([{ metric: "web_search", remaining: 0 }]),

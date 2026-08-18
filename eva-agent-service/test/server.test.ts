@@ -11,7 +11,7 @@ test("administrative agent projection masks environment values and keys", () => 
       api_key: "model-secret",
     },
     secrets: [
-      { key: "TODOIST_API_TOKEN", value: "agent-secret", description: "configured" },
+      { key: "EVA_TELEGRAM_BOT_TOKEN", value: "agent-secret", description: "configured" },
     ],
     tool_exec_environment_variables: {
       CUSTOM_ENDPOINT: "https://private.example/secret-path",

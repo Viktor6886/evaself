@@ -712,7 +712,7 @@ const MEDIA_INTEGRATIONS = new Set(["asr", "tts"]);
 async function applyIntegrationConfig(id, body, afterSave) {
   // У речи пароль не спрашивается — решение владельца: ключи ASR и TTS
   // вводят и проверяют десяток раз за настройку. У остальных интеграций
-  // тем же запросом меняется Telegram bot_token или токен Todoist,
+  // тем же запросом меняется Telegram bot_token или ключ Crawl4AI,
   // поэтому подтверждение остаётся — и его требует сервер, а не только
   // эта форма.
   if (!MEDIA_INTEGRATIONS.has(id)) {
@@ -1830,7 +1830,6 @@ async function loadSecrets() {
  */
 const ADMIN_FACING_SECRETS = new Set([
   "sec_eva_telegram_bot_token",
-  "sec_todoist_api_token",
   "sec_media_asr_api_key",
   "sec_media_tts_api_key",
   "sec_lava_webhook_password",

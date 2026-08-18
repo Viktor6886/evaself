@@ -47,7 +47,9 @@ done
 # =====================================================================
 step "Containers"
 # =====================================================================
-EXPECTED=(caddy postgres valkey eva-agent-service llm-router admin-api admin-ui letta-app-server letta-ui nocodb webapp searxng crawl4ai media-service backup-service)
+EXPECTED=(caddy postgres valkey eva-agent-service llm-router admin-api admin-ui letta-app-server letta-ui webapp searxng crawl4ai media-service backup-service)
+# NocoDB — необязательный профиль: его отсутствие не отказ установки.
+case ",${COMPOSE_PROFILES:-}," in *,nocodb,*) EXPECTED+=(nocodb) ;; esac
 for svc in "${EXPECTED[@]}"; do
 	cid="$(compose ps -q "$svc" 2>/dev/null)"
 	if [ -z "$cid" ]; then
@@ -187,7 +189,9 @@ step "Public HTTPS"
 if [[ "$DOMAIN" == *.localhost ]]; then
 	info "локальный режим: DNS и публичные сертификаты не проверяются"
 else
-	for pair in "site:$DOMAIN" "admin:$DOMAIN/admin/" "webapp:$DOMAIN_APP" "api:$DOMAIN_API/health" "nocodb:$DOMAIN_NOCODB" "letta:$DOMAIN_LETTA"; do
+	PUBLIC=("site:$DOMAIN" "admin:$DOMAIN/admin/" "webapp:$DOMAIN_APP" "api:$DOMAIN_API/health" "letta:$DOMAIN_LETTA")
+	case ",${COMPOSE_PROFILES:-}," in *,nocodb,*) PUBLIC+=("nocodb:$DOMAIN_NOCODB") ;; esac
+	for pair in "${PUBLIC[@]}"; do
 		label="${pair%%:*}"; host="${pair#*:}"
 		code="$(http_status "https://$host" 12)"
 		if [ "$label" = "admin" ]; then
