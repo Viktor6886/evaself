@@ -1083,4 +1083,12 @@ test("ход измеряется по этапам, а не одним числ
   assert.equal(probe.metrics.session_acquire_ms, 3);
   assert.equal(probe.metrics.time_to_first_delta_ms, 7);
   assert.ok(probe.metrics.total_turn_ms >= probe.metrics.letta_generation_ms);
+  // Синтез не приплюсован к доставке: иначе оператор пойдёт искать
+  // проблему в Telegram, а она в media-service. Здесь синтез занимает
+  // десятки миллисекунд, а доставка — поддельная и мгновенная.
+  assert.ok(probe.metrics.tts_ms >= 20, `синтез не измерен: ${probe.metrics.tts_ms}`);
+  assert.ok(
+    probe.metrics.telegram_delivery_ms < probe.metrics.tts_ms,
+    `ожидание синтеза попало в доставку: ${probe.metrics.telegram_delivery_ms}`,
+  );
 });

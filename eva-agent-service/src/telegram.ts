@@ -376,7 +376,7 @@ export class TelegramClient implements OutboxTransport {
   startStreamingDraft(
     chatId: number,
     draft: TelegramMessageDraft | null | Promise<TelegramMessageDraft | null>,
-    options: { intervalMs?: number; now?: () => number } = {},
+    options: { intervalMs?: number; now?: () => number; keepAliveMs?: number } = {},
   ): TelegramStreamingDraft {
     const intervalMs = Math.max(0, options.intervalMs ?? DRAFT_STREAM_INTERVAL_MS);
     const now = options.now ?? (() => Date.now());
@@ -394,12 +394,45 @@ export class TelegramClient implements OutboxTransport {
     const write = async (text: string): Promise<void> => {
       const target = await resolveDraft;
       const draftId = target?.draftId;
-      if (draftId === undefined) return;
+      // `stopped` проверяется после ожидания, а не только до него: между
+      // решением отправить и самой отправкой ход успевает отмениться, и
+      // недописанный ответ не должен догонять человека.
+      if (draftId === undefined || stopped) return;
+      // Пустой черновик держится собственным таймером и раз в двадцать
+      // секунд пишет в тот же `draft_id` пустой текст. Пока показывать
+      // было нечего, это и был весь его смысл; теперь он стирал бы
+      // показанное — и ровно на тех ходах, ради которых поток и сделан,
+      // потому что короче двадцати секунд они не бывают. Дальше черновик
+      // держим мы сами: тем же текстом, который уже показан.
+      target?.stop();
       await this.call("sendMessageDraft", { chat_id: chatId, draft_id: draftId, text });
       shown = text;
       updates += 1;
       lastSentAt = now();
+      keepAlive();
     };
+
+    // Свой keepalive: Telegram гасит черновик, если его не трогать, а
+    // модель между срезами молчит десятки секунд. Повторяется последнее
+    // показанное состояние — не пустая строка.
+    let keepAliveTimer: ReturnType<typeof setInterval> | null = null;
+    const keepAlive = (): void => {
+      if (keepAliveTimer || options.keepAliveMs === 0) return;
+      keepAliveTimer = setInterval(() => {
+        if (stopped || !shown) return;
+        void this.call("sendMessageDraft", { chat_id: chatId, draft_id: draftIdOf(), text: shown })
+          .catch((error: unknown) => {
+            this.logger.debug("Не удалось продлить потоковый черновик", {
+              chatId,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          });
+      }, options.keepAliveMs ?? DRAFT_KEEPALIVE_MS);
+      keepAliveTimer.unref?.();
+    };
+    let resolvedDraftId = 0;
+    const draftIdOf = (): number => resolvedDraftId;
+    void resolveDraft.then((target) => { resolvedDraftId = target?.draftId ?? 0; });
 
     const flush = async (): Promise<void> => {
       while (!stopped && pending !== null) {
@@ -445,10 +478,14 @@ export class TelegramClient implements OutboxTransport {
           await flushing;
         }
         stopped = true;
+        if (keepAliveTimer) clearInterval(keepAliveTimer);
+        keepAliveTimer = null;
       },
       stop(): void {
         stopped = true;
         pending = null;
+        if (keepAliveTimer) clearInterval(keepAliveTimer);
+        keepAliveTimer = null;
       },
       get updates(): number { return updates; },
       get shown(): string { return shown; },

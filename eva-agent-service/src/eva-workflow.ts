@@ -210,6 +210,10 @@ export class EvaWorkflow {
     // Показ ответа по мере генерации. Держится рядом с черновиком: их
     // общий конец — один и тот же `finally`, каким бы ни был исход хода.
     const streaming: { current: TelegramStreamingDraft | null } = { current: null };
+    // Черновик открывается асинхронно, а ход может закончиться раньше
+    // ответа Telegram. Признак нужен, чтобы опоздавший черновик всё равно
+    // был остановлен.
+    let draftClosed = false;
     const started = performance.now();
     // Разложение задержки по этапам. Пока ход мерился одним числом,
     // «Ева долго отвечает» нечем было разобрать: очередь, сборка
@@ -487,6 +491,10 @@ export class EvaWorkflow {
           const opening = this.telegram.startMessageDraft(update.chatId)
             .then((draft) => {
               messageDraft.current = draft;
+              // Ход мог закончиться раньше, чем Telegram ответил: тогда
+              // останавливать было нечего, и таймер черновика остался бы
+              // жить до перезапуска процесса, пустыми обновлениями в чат.
+              if (draftClosed) draft?.stop();
               return draft;
             })
             .catch(() => null);
@@ -641,6 +649,10 @@ export class EvaWorkflow {
             })
           : null;
 
+        // Доставка меряется по самим отправкам, а не по всему участку:
+        // между ними стоит ожидание синтеза, и приплюсовать его к
+        // доставке значит послать оператора искать проблему в Telegram.
+        let deliveryMs = 0;
         const deliveryStarted = performance.now();
         if (wantsText) {
           // Черновик уже показал ответ целиком — значит показывать его
@@ -651,6 +663,7 @@ export class EvaWorkflow {
           if (revealed) await this.telegram.sendMessage(update.chatId, reply);
           else await this.telegram.sendProgressiveMessage(update.chatId, reply, messageDraft.current);
           messageDraft.current = null;
+          deliveryMs += elapsed(deliveryStarted);
         }
         if (speech) {
           // Голос догоняет текст. В голосовом режиме ждать по-прежнему
@@ -658,6 +671,7 @@ export class EvaWorkflow {
           const audio = wantsText
             ? await speech
             : (await withDeadline(speech, VOICE_SYNC_BUDGET_MS)) ?? await speech;
+          const voiceStarted = performance.now();
           if (audio) {
             await this.telegram.sendVoice(update.chatId, audio);
             await this.touchVoiceUsage(context.userId);
@@ -666,8 +680,9 @@ export class EvaWorkflow {
             // дублирует отправленное, а заменяет несостоявшийся звук.
             await this.telegram.sendMessage(update.chatId, reply);
           }
+          deliveryMs += elapsed(voiceStarted);
         }
-        metrics.telegram_delivery_ms = elapsed(deliveryStarted);
+        metrics.telegram_delivery_ms = deliveryMs;
 
         await this.linkTurn(turnHandle, {
           outboxId: this.telegram.getDeliveryOutboxId(),
@@ -705,6 +720,7 @@ export class EvaWorkflow {
       });
       throw error;
     } finally {
+      draftClosed = true;
       streaming.current?.stop();
       messageDraft.current?.stop();
       typing.stop?.();
