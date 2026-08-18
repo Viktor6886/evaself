@@ -510,6 +510,10 @@ interface WorkflowProbe {
   typingStopped: boolean;
   /** Метрики хода из строки журнала. */
   metrics: Record<string, number>;
+  /** С чем позвали сборку контекста хода. */
+  contextInputs: Array<Record<string, unknown>>;
+  /** Какие отметки последнего сообщения человека записаны. */
+  recordedMessageAt: Array<Date | null>;
 }
 
 async function runTelegramTurn(
@@ -537,6 +541,8 @@ async function runTelegramTurn(
     liveIntervalMs?: number;
     /** Команда вместо обычного сообщения. */
     command?: string;
+    /** Отметка отправки последнего сообщения, секунды epoch. */
+    messageDate?: number;
   } = {},
 ): Promise<WorkflowProbe> {
   const sent: string[] = [];
@@ -545,6 +551,7 @@ async function runTelegramTurn(
   const synthesis = { done: false };
   const attached: number[] = [];
   const prompts: string[] = [];
+  const recordedMessageAt: Array<Date | null> = [];
   const user = { id: 77, telegram_id: TELEGRAM_ID, state: "active", is_blocked: false };
   const link = { agent_id: "agent-1", conversation_id: "conv-1", user_id: user.id };
   const db = {
@@ -561,7 +568,10 @@ async function runTelegramTurn(
     },
     getQuotaStatus: async () =>
       options.quota ?? [{ metric: "messages", remaining: 10 }],
-    recordUserMessage: async () => {},
+    recordUserMessage: async (_userId: number, at?: Date) => {
+      recordedMessageAt.push(at ?? null);
+      return null;
+    },
     markAgentUsed: async () => {},
     incrementUsage: async () => {},
     query: async () => ({ rows: [] }),
@@ -679,13 +689,17 @@ async function runTelegramTurn(
       };
     },
   };
+  const contextInputs: Array<Record<string, unknown>> = [];
   const runtimeContext = {
-    build: async () => ({
+    build: async (input: Record<string, unknown>) => {
+      contextInputs.push(input);
+      return {
       userId: user.id,
       conversationId: "conv-1",
       responseMode: options.responseMode ?? "text",
       metrics: { runtimeContextMs: 0, profileCheckMs: 0, cacheHit: false },
-    }),
+      };
+    },
     wrapUserMessage: (_context: unknown, prompt: string) => prompt,
   };
   const lockClaims: Array<Record<string, unknown>> = [];
@@ -745,6 +759,9 @@ async function runTelegramTurn(
       update_id: 3001,
       message: {
         message_id: 5,
+        // Отметка отправки Telegram: по ней считается промежуток, а не
+        // по моменту, когда до сообщения дошла очередь.
+        date: options.messageDate ?? undefined,
         chat: { id: TELEGRAM_ID },
         from: { id: TELEGRAM_ID, first_name: "Анна" },
         ...(options.command
@@ -772,6 +789,8 @@ async function runTelegramTurn(
     channelLinks,
     shown,
     typingStopped,
+    contextInputs,
+    recordedMessageAt,
     metrics: turnMetrics,
   };
 }
@@ -1107,6 +1126,50 @@ test("сообщение не правится чаще, чем позволяе
  * просьба остановиться обязана идти мимо очереди — слот пользователя
  * занят как раз тем ходом, который надо прервать.
  */
+/**
+ * Промежуток считается от отправки, а не от обработки.
+ *
+ * Между отправкой и ходом стоит durable inbox: если считать от момента
+ * обработки, промежуток растёт вместе с очередью, и человек, написавший
+ * «сделал» через девять секунд, получает ответ так, будто прошёл вечер.
+ */
+test("ход берёт время сообщений у Telegram, а не у момента обработки", async () => {
+  const first = Math.floor(Date.parse("2026-08-18T09:00:00Z") / 1_000);
+  const last = Math.floor(Date.parse("2026-08-18T09:00:01Z") / 1_000);
+  const probe = await runTelegramTurn(undefined, {
+    messageDate: last,
+    extraUpdates: [
+      {
+        update_id: 3000,
+        message: {
+          message_id: 4,
+          date: first,
+          chat: { id: TELEGRAM_ID },
+          from: { id: TELEGRAM_ID, first_name: "Анна" },
+          text: "пошли кушать",
+        },
+      },
+    ],
+  });
+
+  const input = probe.contextInputs[0] as {
+    currentMessageAt?: Date;
+    messageBatch?: { spanMs: number; messages: Array<{ messageId: number; elapsedFromPreviousMs: number | null }> };
+  };
+  assert.equal(input.currentMessageAt?.toISOString(), "2026-08-18T09:00:00.000Z");
+  // Окно целиком: оба сообщения, их идентификаторы и секунда между ними.
+  assert.deepEqual(
+    input.messageBatch?.messages.map((message) => [message.messageId, message.elapsedFromPreviousMs]),
+    [[4, null], [5, 1_000]],
+  );
+  assert.equal(input.messageBatch?.spanMs, 1_000);
+  // Следующий ход отсчитывается от отправки последнего сообщения.
+  assert.deepEqual(
+    probe.recordedMessageAt.map((at) => at?.toISOString() ?? null),
+    ["2026-08-18T09:00:01.000Z"],
+  );
+});
+
 test("останов прерывает ход и не встаёт за ним в очередь", async () => {
   const store = new TurnStore();
   const turns = lifecycle(store);
