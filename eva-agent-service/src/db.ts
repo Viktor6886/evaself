@@ -588,6 +588,56 @@ export class Database {
     return rows;
   }
 
+  /**
+   * Агенты, которым может понадобиться канонический текст персоны.
+   *
+   * Версия персоны хранится в `meta` связки — это отметка развёртывания,
+   * а не копия блока: значение блока живёт только в Letta (инвариант 12).
+   * По отметке видно, кому канонический текст уже доставлен, и повторная
+   * синхронизация не трогает их снова.
+   */
+  async listAgentsForPersonaSync(
+    limit = 500,
+  ): Promise<Array<{ agentId: string; userId: number; personaVersion: string | null }>> {
+    const { rows } = await this.withSystemScope(
+      "db.listAgentsForPersonaSync",
+      async () => await this.require().query<{
+        agent_id: string;
+        user_id: string;
+        persona_version: string | null;
+      }>(
+      `
+        -- tenant: system — инвентарь агентов для доставки канонической персоны, пользовательских строк не отдаёт
+        SELECT a.agent_id, a.user_id, a.meta ->> 'persona_version' AS persona_version
+          FROM agent_links a
+         WHERE a.kind = 'eva' AND a.status = 'active'
+         ORDER BY a.created_at
+         LIMIT $1`,
+      [limit],
+      ),
+      { crossUser: true },
+    );
+    return rows.map((row) => ({
+      agentId: row.agent_id,
+      userId: Number(row.user_id),
+      personaVersion: row.persona_version,
+    }));
+  }
+
+  /** Отметить, что агенту доставлена эта версия персоны. */
+  async recordPersonaVersion(agentId: string, userId: number, version: string): Promise<void> {
+    await this.withUserScope(
+      { userId, label: "db.recordPersonaVersion", inherit: true },
+      async () => await this.require().query(
+        `UPDATE agent_links
+            SET meta = meta || jsonb_build_object('persona_version', $3::text),
+                updated_at = now()
+          WHERE agent_id = $1 AND user_id = $2`,
+        [agentId, userId, version],
+      ),
+    );
+  }
+
   async listModelMappings(): Promise<ModelMapping[]> {
     const { rows } = await this.withSystemScope(
       "db.listModelMappings",

@@ -62,6 +62,39 @@ test("summarizeStream picks the assistant text and counts reasoning events", () 
   ]);
 });
 
+/**
+ * Служебные события Letta человеку не показываются.
+ *
+ * Сжатие контекста, выжимка разговора, рефлексия и системные уведомления
+ * — внутренняя работа runtime. Ответ собирается только из сообщений
+ * ассистента, поэтому в чат из этого не уходит ничего.
+ */
+test("сжатие, выжимка и рефлексия не попадают в ответ пользователю", () => {
+  const summary = summarizeStream([
+    { type: "init", agentId: "agent-1", sessionId: "s", conversationId: "c" },
+    { type: "compaction", content: "Сжал историю: 42 сообщения в выжимку" },
+    { type: "summary", content: "Выжимка разговора: человек говорил о работе" },
+    { type: "system", content: "SYSTEM ALERT: context window at 90%" },
+    { type: "dreaming", content: "Рефлексия: перечитала заметки о человеке" },
+    { type: "queue_update", position: 3 },
+    { type: "loop_status", status: "thinking" },
+    { type: "retry", attempt: 2 },
+    { type: "reasoning", reasoning: "сначала посмотрю память" },
+    { type: "tool_call", name: "memory_read" },
+    { type: "tool_result", content: "заметка из памяти" },
+    { type: "assistant", content: "Расскажи, что было дальше.", uuid: "m-1" },
+    { type: "result", stopReason: "end_turn" },
+  ] as never);
+
+  assert.equal(summary.reply, "Расскажи, что было дальше.");
+  assert.equal(summary.assistantGroups, 1);
+  for (const leak of ["Сжал историю", "Выжимка", "SYSTEM ALERT", "Рефлексия", "заметка из памяти"]) {
+    assert.ok(!summary.reply.includes(leak), `в ответ утекло служебное событие: ${leak}`);
+  }
+  // И в трассе от них остаются только тип и размер, а не содержимое.
+  assert.doesNotMatch(JSON.stringify(summary.trace), /Сжал историю|Выжимка|SYSTEM ALERT|Рефлексия/);
+});
+
 test("административная трасса — только метаданные хода", () => {
   const summary = summarizeStream([
     { type: "user", content: "Меня зовут Сергей, телефон +7 900 000-00-00" },
@@ -364,6 +397,41 @@ test("срезы ответа несут номер сообщения и вре
   assert.equal(result.reply, "Занятие в 19:00. Успеешь?");
   assert.equal(typeof result.sessionAcquireMs, "number");
   assert.equal(typeof result.firstDeltaMs, "number");
+});
+
+test("служебные события потока не показываются человеку", async () => {
+  // Сжатие контекста происходит прямо посреди хода: событие приходит в
+  // тот же поток, что и ответ. Показывается только ответ.
+  const service = new LettaService({
+    appServerUrl: "ws://example.invalid/ws", appServerToken: "", appServerRequestTimeoutMs: 1000,
+    model: "", sessionPoolSize: 5, sessionIdleMs: 1000, turnTimeoutMs: 5000,
+  } as never, { debug() {}, info() {}, warn() {}, error() {} }, "persona");
+  const events = [
+    { type: "compaction", content: "Сжала историю до выжимки" },
+    { type: "system", content: "SYSTEM: context window at 90%" },
+    { type: "assistant", content: "Я рядом.", otid: "a" },
+    { type: "dreaming", content: "Рефлексия после сжатия" },
+    { type: "result", stopReason: "end_turn" },
+  ];
+  (service as unknown as { client: { resumeSession(id: string, options: unknown): unknown } }).client = {
+    resumeSession: () => ({
+      bootstrapState: async () => ({}),
+      recoverPendingApprovals: async () => ({ recovered: false }),
+      send: async () => undefined,
+      stream: () => events[Symbol.iterator](),
+      close() {},
+      agentId: "agent-1",
+      conversationId: "conv-1",
+    }),
+  };
+
+  const deltas: string[] = [];
+  const result = await service.runTurn("conv-1", "привет", {
+    onDelta: (delta) => deltas.push(delta.text),
+  });
+
+  assert.deepEqual(deltas, ["Я рядом."], `служебное событие показано человеку: ${deltas.join("|")}`);
+  assert.equal(result.reply, "Я рядом.");
 });
 
 test("ход без текста не выдумывает время первого среза", async () => {

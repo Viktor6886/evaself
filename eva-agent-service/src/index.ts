@@ -35,6 +35,8 @@ import { UserProfileService } from "./profile/profile-service.js";
 import { ValkeyRateLimiter } from "./public/rate-limit.js";
 import { ValkeyMiniAppSessions } from "./public/webapp-session.js";
 import { UserTurnLock } from "./turns/user-turn-lock.js";
+import { buildAdminPlane } from "./letta/admin-client.js";
+import { PersonaSync } from "./letta/persona-sync.js";
 import { RuntimeContextBuilder } from "./runtime/runtime-context.js";
 import { SdkSettingsManager } from "./sdk-settings.js";
 import { ChannelLinkService } from "./channels/channel-links.js";
@@ -124,6 +126,29 @@ async function main(): Promise<void> {
         );
       }
       logger.warn("установленный пакет Letta не покрывает проверенную матрицу", detail);
+    }
+  }
+  // Канонический текст персоны — существующим агентам. Новый агент
+  // получает его при создании, созданный раньше остаётся с текстом того
+  // дня: так часть агентов и говорила о себе в мужском роде, хотя файл
+  // персоны давно поправлен.
+  //
+  // Работа идёт в фоне и за тем же флагом, что и весь control plane:
+  // старт сервиса её не ждёт, а без `EVA_LETTA_ADMIN_CLIENT` записывать
+  // блоки нечем и синхронизация честно сообщает, что пропущена.
+  {
+    const plane = buildAdminPlane({
+      enabled: config.lettaAdminClientEnabled,
+      baseUrl: config.lettaAdminBaseUrl,
+      token: config.appServerToken || null,
+      logger,
+    });
+    if (plane.available) {
+      void new PersonaSync(db, plane, logger).sync(persona).catch((error: unknown) => {
+        logger.warn("Синхронизация персоны не выполнена", {
+          code: error instanceof Error ? error.name : "unknown_error",
+        });
+      });
     }
   }
   const telegram = new TelegramClient(config, logger);
