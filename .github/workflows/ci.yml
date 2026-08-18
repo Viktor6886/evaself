@@ -545,8 +545,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Клиент из репозитория Ubuntu — шестнадцатой версии, а сервер здесь
+      # семнадцатой: `pg_dump` при таком расхождении отказывается снимать
+      # дамп вовсе. Раньше это было незаметно, потому что сравнение схем
+      # шло через process substitution и два несостоявшихся дампа
+      # выглядели как две одинаковые схемы.
       - name: Install psql
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq curl ca-certificates
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
+            https://apt.postgresql.org/pub/repos/apt noble-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-17
+          psql --version
+          /usr/lib/postgresql/17/bin/pg_dump --version
 
       - name: Extensions
         run: |
@@ -1736,10 +1753,13 @@ jobs:
           const dead = await provider('ci-dead', 'http://127.0.0.1:9');
           const live = await provider('ci-live', 'http://evaself-llm-mock:9000/v1');
 
-          // Managed routing отправляет короткий `ping` в fast. Fixture
-          // пишет БД напрямую (мимо admin API, который заполняет все
-          // цепочки), поэтому обязан назначить и фактически выбранный
-          // маршрут, иначе проверяется неполная конфигурация, а не failover.
+          // Маршрут выводится детерминированно: `model: 'eva/chat'` — это
+          // `chat`, и содержание сообщения на выбор не влияет. Прежде
+          // короткий `ping` уходил в `fast`, потому что роутер разбирал
+          // текст и решал, насколько глубоко думать; этого разбора больше
+          // нет. Fixture пишет БД напрямую, мимо admin API, который
+          // заполняет все цепочки, поэтому назначает обе — иначе
+          // проверялась бы неполная конфигурация, а не отработка отказа.
           await pool.query(
             `DELETE FROM llm_route_providers
               WHERE route_code IN ('chat', 'fast')`);
@@ -1787,8 +1807,9 @@ jobs:
             `SELECT primary_provider_id, actual_provider_id, switches,
                     switch_reason, succeeded, attempts
                FROM llm_requests
-              WHERE route_code = 'fast'
+              WHERE route_code = 'chat'
               ORDER BY started_at DESC LIMIT 1`);
+          if (!record) throw new Error('router wrote no telemetry for the chat route');
           if (!record.succeeded) throw new Error('router recorded a failed request');
           if (record.primary_provider_id !== dead) {
             throw new Error('the dead provider was not the head of the chain');
