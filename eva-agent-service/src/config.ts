@@ -73,6 +73,8 @@ export interface Config {
   mediaServiceToken: string;
   searxngUrl: string;
   crawl4aiUrl: string;
+  /** Токен Crawl4AI: без него сервис отвечает отказом на каждое чтение. */
+  crawl4aiToken: string;
   schedulerIntervalMs: number;
   heartbeatIntervalMs: number;
   typingIntervalMs: number;
@@ -345,6 +347,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     mediaServiceToken: str("MEDIA_SERVICE_TOKEN"),
     searxngUrl: str("SEARXNG_BASE_URL", "http://searxng:8080/"),
     crawl4aiUrl: str("CRAWL4AI_BASE_URL", "http://crawl4ai:11235/"),
+    crawl4aiToken: str("CRAWL4AI_API_TOKEN"),
     schedulerIntervalMs: int("EVA_SCHEDULER_INTERVAL_MS", 30_000),
     heartbeatIntervalMs: int("EVA_HEARTBEAT_INTERVAL_MS", 10 * 60_000),
     typingIntervalMs: int("EVA_TELEGRAM_TYPING_INTERVAL_MS", 4_000),

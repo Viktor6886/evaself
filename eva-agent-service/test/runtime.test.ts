@@ -697,6 +697,8 @@ test("продуктовые инструменты зарегистрирова
     "save_task", "get_tasks", "upsert_goal", "confirm_goal",
     "upsert_user_profile_field", "get_user_time_context",
     "get_psychological_test_results", "update_response_mode",
+    // Путь в интернет целиком: найти адреса и прочитать страницу.
+    "web_search", "web_read",
   ]) {
     assert.ok(tools.has(name), `инструмент ${name} не зарегистрирован`);
   }
