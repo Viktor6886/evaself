@@ -137,9 +137,15 @@ printf 'shared-secret-value-ignored-tail' > "$WORK/full-value"
 openssl enc -aes-256-cbc -salt -pbkdf2 -iter 200000 \
 	-pass "file:$WORK/no-newline" -in "$WORK/plain.tgz" -out "$WORK/nn.enc"
 
+# Успех расшифровки — это восстановленный архив, а не нулевой код возврата.
+# В CBC без имитовставки чужой пароль примерно раз в двести пятьдесят шесть
+# попыток даёт правдоподобное дополнение, openssl выходит с нулём, и проверка
+# «другой пароль не открывает архив» падает на ровном месте. Поэтому здесь
+# сверяется содержимое — тем же способом, что и в try_decrypt выше.
 opens_with() {
 	if openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 \
-		-pass "file:$1" -in "$WORK/nn.enc" -out /dev/null 2>/dev/null; then
+		-pass "file:$1" -in "$WORK/nn.enc" -out "$WORK/opened.tgz" 2>/dev/null &&
+		tar tzf "$WORK/opened.tgz" >/dev/null 2>&1; then
 		echo yes
 	else
 		echo no
