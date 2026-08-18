@@ -50,13 +50,45 @@ test("отсутствие ключевой возможности делает 
     ["memfs", { memoryDirectory: null }],
     ["session", { isOnline: false }],
     ["model", { model: null }],
-    ["runtime_facts", { tools: [] }],
   ];
   for (const [failing, patch] of cases) {
     const report = evaluateReadiness({ ...READY, ...patch } as never, EXPECTED);
     assert.equal(report.ready, false, failing);
     assert.equal(statusOf(report, failing), "failed", failing);
   }
+});
+
+/**
+ * Состав серверных инструментов транспорт называет не всегда:
+ * `BootstrapStateResult.tools` заполняется, только когда бэкенд отдаёт
+ * авторитетный список. Молчание транспорта — это «не проверено», а не
+ * «нативной памяти нет»: объявить по нему отказ значило бы выдать
+ * ненаблюдаемое за наблюдённое, ровно наоборот.
+ */
+test("молчание транспорта о наборе инструментов не выдаётся за отказ", () => {
+  const now = new Date("2026-08-17T18:00:10.000Z");
+  for (const patch of [{ tools: null }, { tools: [] }]) {
+    const report = evaluateReadiness({ ...READY, ...patch } as never, EXPECTED, { now });
+    assert.equal(report.ready, true, JSON.stringify(patch));
+    assert.equal(report.state, "degraded", JSON.stringify(patch));
+    for (const name of ["runtime_facts", "native_memory", "native_skills", "native_subagents"]) {
+      assert.equal(statusOf(report, name), "not_reported", name);
+    }
+    // Наблюдаемое остаётся строгим: MemFS, сессия, модель и продуктовые
+    // инструменты проверяются по-прежнему.
+    for (const name of ["memfs", "session", "model", "product_tools"]) {
+      assert.equal(statusOf(report, name), "ok", name);
+    }
+  }
+
+  // Список назван, но нативной памяти в нём нет — это отказ.
+  const broken = evaluateReadiness(
+    { ...READY, tools: READY.tools.filter((name) => !name.startsWith("memory")) } as never,
+    EXPECTED,
+    { now },
+  );
+  assert.equal(broken.ready, false);
+  assert.equal(statusOf(broken, "native_memory"), "failed");
 });
 
 test("расплывчатого совпадения по имени инструмента недостаточно", () => {

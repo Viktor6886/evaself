@@ -125,28 +125,42 @@ export function evaluateReadiness(
 ): ReadinessReport {
   const checks: ReadinessCheck[] = [];
   const tools = observed.tools;
+  // Состав серверных инструментов приходит, только если транспорт его
+  // называет: в `BootstrapStateResult.tools` это поле необязательное и
+  // заполняется, «when the transport exposes an authoritative list».
+  // Установленная связка его не отдаёт, и объявлять на этом основании
+  // отсутствие нативной памяти нельзя — это ровно та подмена, ради
+  // отказа от которой готовность и переписывалась: ненаблюдаемое не
+  // выдаётся ни за подтверждённое, ни за сломанное. Отсюда `degraded`:
+  // трафик идёт, но проверка честно говорит, что не подтверждена.
+  const toolsReported = Boolean(tools && tools.length > 0);
+  const unreported = "транспорт не называет состав инструментов сессии";
 
-  if (!tools || tools.length === 0) {
-    checks.push(check("runtime_facts", "failed", "runtime ещё не назвал ни одного инструмента"));
-  } else {
-    checks.push(check("runtime_facts", "ok", `инструментов: ${tools.length}`));
-  }
+  checks.push(toolsReported
+    ? check("runtime_facts", "ok", `инструментов: ${tools!.length}`)
+    : check("runtime_facts", "not_reported", unreported));
 
   const has = (name: string) => (tools ?? []).includes(name);
   const memory = (tools ?? []).filter((name) => MEMORY_TOOL.test(name));
-  checks.push(memory.length > 0
-    ? check("native_memory", "ok", memory.join(", "))
-    : check("native_memory", "failed", "нативных инструментов памяти нет в наборе сессии"));
+  checks.push(!toolsReported
+    ? check("native_memory", "not_reported", unreported)
+    : memory.length > 0
+      ? check("native_memory", "ok", memory.join(", "))
+      : check("native_memory", "failed", "нативных инструментов памяти нет в наборе сессии"));
 
   const skills = SKILL_TOOLS.filter(has);
-  checks.push(skills.length > 0
-    ? check("native_skills", "ok", skills.join(", "))
-    : check("native_skills", "failed", `нет инструмента ${SKILL_TOOLS.join(" или ")}`));
+  checks.push(!toolsReported
+    ? check("native_skills", "not_reported", unreported)
+    : skills.length > 0
+      ? check("native_skills", "ok", skills.join(", "))
+      : check("native_skills", "failed", `нет инструмента ${SKILL_TOOLS.join(" или ")}`));
 
   const subagents = SUBAGENT_TOOLS.filter(has);
-  checks.push(subagents.length > 0
-    ? check("native_subagents", "ok", subagents.join(", "))
-    : check("native_subagents", "failed", `нет инструмента ${SUBAGENT_TOOLS.join(" или ")}`));
+  checks.push(!toolsReported
+    ? check("native_subagents", "not_reported", unreported)
+    : subagents.length > 0
+      ? check("native_subagents", "ok", subagents.join(", "))
+      : check("native_subagents", "failed", `нет инструмента ${SUBAGENT_TOOLS.join(" или ")}`));
 
   // Продуктовый инструмент доступен, если его назвал runtime либо он
   // передан живой сессии: и то и другое — факт о сессии, а не о

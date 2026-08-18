@@ -2191,13 +2191,27 @@ jobs:
             " | tr -d '\r')"
           echo "$RESULT"
           echo "$RESULT" | grep -q '"ready":true'
-          for check in native_memory native_skills native_subagents product_tools memfs session model facts_fresh; do
+          # Наблюдаемое проверяется строго: рабочий каталог памяти агента,
+          # живая сессия, модель, продуктовые инструменты, режим
+          # разрешений и свежесть снимка.
+          for check in product_tools memfs session model permission_mode facts_fresh; do
             echo "$RESULT" | grep -q "{\"name\":\"$check\",\"status\":\"ok\"" \
               || { echo "::error::проверка готовности $check не зелёная"; exit 1; }
           done
-          # Ход только что прошёл: снимок фактов обязан быть свежим, а
-          # состояние — подтверждённым. `degraded` здесь означало бы, что
-          # стенд отвечает по устаревшим фактам.
+          # Состав серверных инструментов установленный транспорт не
+          # называет, поэтому нативные возможности допускаются как
+          # `not_reported`. Чего допускать нельзя — так это `failed`:
+          # названный список без памяти, навыков или субагентов означает
+          # урезанный runtime.
+          # `if`, а не `&&`: под `set -e` неудачный grep в конце тела цикла
+          # оборвал бы шаг сам по себе, и проверка молча не выполнилась бы.
+          for check in native_memory native_skills native_subagents; do
+            if echo "$RESULT" | grep -q "{\"name\":\"$check\",\"status\":\"failed\""; then
+              echo "::error::нативная возможность $check отсутствует"
+              exit 1
+            fi
+          done
+          # Ход только что прошёл: снимок фактов обязан быть свежим.
           echo "$RESULT" | grep -q '"stale":false' \
             || { echo "::error::готовность отвечает по устаревшему снимку фактов"; exit 1; }
 
