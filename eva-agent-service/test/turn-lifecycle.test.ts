@@ -181,6 +181,20 @@ class TurnStore {
   }
 
   private updateRun(text: string, values: unknown[]): unknown[] {
+    if (text.includes("WHERE telegram_user_id = $1")) {
+      // Останов ищет ходы по владельцу: своего run_id у него нет.
+      const terminal = new Set((values[2] as string[]) ?? []);
+      const cancelled: Array<{ run_id: string }> = [];
+      for (const candidate of this.rows.values()) {
+        if (candidate.telegram_user_id !== Number(values[0])) continue;
+        if (candidate.cancel_requested_at !== null) continue;
+        if (terminal.has(candidate.state)) continue;
+        candidate.cancel_requested_at = new Date().toISOString();
+        candidate.cancel_reason = String(values[1]);
+        cancelled.push({ run_id: candidate.run_id });
+      }
+      return cancelled;
+    }
     const row = this.owned(values);
     if (!row) return [];
     if (text.includes("SET state = $3")) {
@@ -492,9 +506,14 @@ interface WorkflowProbe {
    */
   order: string[];
   /** Состояния черновика, показанные человеку по ходу генерации. */
-  drafts: string[];
+  shown: string[];
+  typingStopped: boolean;
   /** Метрики хода из строки журнала. */
   metrics: Record<string, number>;
+  /** С чем позвали сборку контекста хода. */
+  contextInputs: Array<Record<string, unknown>>;
+  /** Какие отметки последнего сообщения человека записаны. */
+  recordedMessageAt: Array<Date | null>;
 }
 
 async function runTelegramTurn(
@@ -518,13 +537,12 @@ async function runTelegramTurn(
     deltas?: Array<[string, boolean]>;
     /** Пауза между срезами: проверка троттлинга без настоящего ожидания. */
     deltaGapMs?: number;
-    /** Минимальный промежуток между обновлениями черновика. */
-    draftIntervalMs?: number;
-    /**
-     * Черновик открывается не сразу, а когда тест этого захочет: так
-     * воспроизводится ход, закончившийся раньше ответа Telegram.
-     */
-    deferDraft?: { release: () => void; stopped: () => boolean };
+    /** Минимальный промежуток между правками показанного сообщения. */
+    liveIntervalMs?: number;
+    /** Команда вместо обычного сообщения. */
+    command?: string;
+    /** Отметка отправки последнего сообщения, секунды epoch. */
+    messageDate?: number;
   } = {},
 ): Promise<WorkflowProbe> {
   const sent: string[] = [];
@@ -533,6 +551,7 @@ async function runTelegramTurn(
   const synthesis = { done: false };
   const attached: number[] = [];
   const prompts: string[] = [];
+  const recordedMessageAt: Array<Date | null> = [];
   const user = { id: 77, telegram_id: TELEGRAM_ID, state: "active", is_blocked: false };
   const link = { agent_id: "agent-1", conversation_id: "conv-1", user_id: user.id };
   const db = {
@@ -549,16 +568,17 @@ async function runTelegramTurn(
     },
     getQuotaStatus: async () =>
       options.quota ?? [{ metric: "messages", remaining: 10 }],
-    recordUserMessage: async () => {},
+    recordUserMessage: async (_userId: number, at?: Date) => {
+      recordedMessageAt.push(at ?? null);
+      return null;
+    },
     markAgentUsed: async () => {},
     incrementUsage: async () => {},
     query: async () => ({ rows: [] }),
   };
-  const drafts: string[] = [];
-  // Опоздавший черновик: ход может закончиться раньше, чем Telegram
-  // ответит, и тогда останавливать нечего — а таймер уже живёт.
-  let deferredResolve: (() => void) | null = null;
-  let draftStopped = false;
+  const shown: string[] = [];
+  // «Печатает» снимается, как только у ответа появилось сообщение.
+  let typingStopped = false;
   // Метрики хода читаются оттуда же, откуда их читает оператор, — из
   // строки журнала: проверяется опубликованное, а не внутреннее поле.
   const turnMetrics: Record<string, number> = {};
@@ -575,29 +595,30 @@ async function runTelegramTurn(
   };
   const telegram = {
     withDeliveryContext: async <T>(_prefix: string, work: () => Promise<T>) => await work(),
-    startTyping: () => () => {},
-    startMessageDraft: options.deferDraft
-      ? () => new Promise((resolve) => {
-        deferredResolve = () => resolve({ chatId: TELEGRAM_ID, draftId: 1, stop() { draftStopped = true; } });
-      })
-      : async () => ({ chatId: TELEGRAM_ID, draftId: 1, stop() { draftStopped = true; } }),
-    // Поддельный показ повторяет договор настоящего: промежуточные
-    // состояния схлопываются, наружу уходит последнее, и чаще, чем раз в
-    // `draftIntervalMs`, черновик не обновляется.
-    startStreamingDraft: (_chatId: number, _draft: unknown) => {
-      const interval = options.draftIntervalMs ?? 0;
-      let shown = "";
+    startTyping: () => () => { typingStopped = true; },
+    // Поддельный показ повторяет договор настоящего: первое состояние —
+    // отправка сообщения, следующие — правки того же сообщения,
+    // промежуточные схлопываются, и чаще, чем раз в `liveIntervalMs`,
+    // Telegram не трогается.
+    startLiveMessage: (_chatId: number, live: { onSent?: (id: number) => void } = {}) => {
+      const interval = options.liveIntervalMs ?? 0;
+      let shownText = "";
       let pending: string | null = null;
       let lastAt = -Infinity;
       let stopped = false;
+      let messageId: number | null = null;
       const write = () => {
-        if (stopped || pending === null || pending === shown) return;
+        if (stopped || pending === null || pending === shownText) return;
         const now = Date.now();
         if (now - lastAt < interval) return;
-        shown = pending;
+        shownText = pending;
         pending = null;
         lastAt = now;
-        drafts.push(shown);
+        if (messageId === null) {
+          messageId = 4_242;
+          live.onSent?.(messageId);
+        }
+        shown.push(shownText);
       };
       return {
         push(text: string) {
@@ -605,19 +626,21 @@ async function runTelegramTurn(
           pending = text.trimEnd();
           write();
         },
-        async finish() {
-          lastAt = -Infinity;
-          write();
+        async finish(text: string) {
           stopped = true;
+          pending = null;
+          if (messageId === null) return { delivered: false, messageId: null };
+          shownText = text;
+          shown.push(text);
+          sent.push(text);
+          order.push(synthesis.done ? "text-after-speech" : "text");
+          return { delivered: true, messageId };
         },
         stop() { stopped = true; pending = null; },
-        get updates() { return drafts.length; },
-        get shown() { return shown; },
+        get messageId() { return messageId; },
+        get updates() { return shown.length; },
+        get shown() { return shownText; },
       };
-    },
-    sendProgressiveMessage: async (_chatId: number, text: string) => {
-      sent.push(text);
-      order.push(synthesis.done ? "text-after-speech" : "text");
     },
     sendMessage: async (_chatId: number, text: string) => {
       sent.push(text);
@@ -666,13 +689,17 @@ async function runTelegramTurn(
       };
     },
   };
+  const contextInputs: Array<Record<string, unknown>> = [];
   const runtimeContext = {
-    build: async () => ({
+    build: async (input: Record<string, unknown>) => {
+      contextInputs.push(input);
+      return {
       userId: user.id,
       conversationId: "conv-1",
       responseMode: options.responseMode ?? "text",
       metrics: { runtimeContextMs: 0, profileCheckMs: 0, cacheHit: false },
-    }),
+      };
+    },
     wrapUserMessage: (_context: unknown, prompt: string) => prompt,
   };
   const lockClaims: Array<Record<string, unknown>> = [];
@@ -732,11 +759,16 @@ async function runTelegramTurn(
       update_id: 3001,
       message: {
         message_id: 5,
+        // Отметка отправки Telegram: по ней считается промежуток, а не
+        // по моменту, когда до сообщения дошла очередь.
+        date: options.messageDate ?? undefined,
         chat: { id: TELEGRAM_ID },
         from: { id: TELEGRAM_ID, first_name: "Анна" },
-        ...(options.onlyVoice
-          ? { voice: { file_id: "voice-only", file_unique_id: "voice-only" } }
-          : { text: "мне снова тяжело собраться" }),
+        ...(options.command
+          ? { text: options.command }
+          : options.onlyVoice
+            ? { voice: { file_id: "voice-only", file_unique_id: "voice-only" } }
+            : { text: "мне снова тяжело собраться" }),
       },
     },
   ];
@@ -745,11 +777,6 @@ async function runTelegramTurn(
     result = await workflow.processAggregated(updates as never);
   } finally {
     globalThis.fetch = originalFetch;
-  }
-  if (options.deferDraft) {
-    // Telegram отвечает уже после конца хода.
-    options.deferDraft.release = () => deferredResolve?.();
-    options.deferDraft.stopped = () => draftStopped;
   }
   return {
     sent,
@@ -760,7 +787,10 @@ async function runTelegramTurn(
     attached,
     prompts,
     channelLinks,
-    drafts,
+    shown,
+    typingStopped,
+    contextInputs,
+    recordedMessageAt,
     metrics: turnMetrics,
   };
 }
@@ -1018,17 +1048,20 @@ test("ответ виден по мере генерации, а доставк�
   });
 
   // Человек увидел текст до того, как ход закончился.
-  assert.ok(probe.drafts.length > 0, "черновик не обновлялся ни разу");
-  assert.equal(probe.drafts.at(-1), "Понимаю. Расскажи, что было дальше.");
+  assert.ok(probe.shown.length > 0, "ответ не показывался ни разу");
+  assert.equal(probe.shown.at(-1), "Понимаю. Расскажи, что было дальше.");
   // Каждое следующее состояние — продолжение предыдущего, а не новый текст.
-  for (let index = 1; index < probe.drafts.length; index += 1) {
+  for (let index = 1; index < probe.shown.length; index += 1) {
     assert.ok(
-      probe.drafts[index]!.startsWith(probe.drafts[index - 1]!),
-      `состояние ${index} не продолжает предыдущее: ${probe.drafts[index]}`,
+      probe.shown[index]!.startsWith(probe.shown[index - 1]!),
+      `состояние ${index} не продолжает предыдущее: ${probe.shown[index]}`,
     );
   }
-  // Доставка одна: показ черновика durable-сообщением не является.
+  // Ответ один и тот же: итог доводит уже отправленное сообщение, а не
+  // создаёт второе.
   assert.deepEqual(probe.sent, ["Понимаю. Расскажи, что было дальше."]);
+  // «Печатает» снимается, как только появилось само сообщение.
+  assert.equal(probe.typingStopped, true, "«печатает» осталось висеть рядом с ответом");
   assert.deepEqual(probe.result, { status: "completed", usageCharged: true });
   assert.ok(probe.metrics.time_to_first_delta_ms > 0, "задержка первого среза не измерена");
 });
@@ -1048,23 +1081,23 @@ test("проговаривание плана перед инструменто�
   assert.deepEqual(probe.sent, ["Занятие в 19:00. Успеешь доехать?"]);
   // Ответ не склеен с проговариванием: новое сообщение стирает показанное,
   // а не дописывается к нему.
-  assert.equal(probe.drafts.at(-1), "Занятие в 19:00. Успеешь доехать?");
+  assert.equal(probe.shown.at(-1), "Занятие в 19:00. Успеешь доехать?");
   assert.ok(
-    !probe.drafts.at(-1)!.includes("Сейчас посмотрю"),
-    `ответ склеен с проговариванием: ${probe.drafts.at(-1)}`,
+    !probe.shown.at(-1)!.includes("Сейчас посмотрю"),
+    `ответ склеен с проговариванием: ${probe.shown.at(-1)}`,
   );
   // Пока модель не начала отвечать, показанное — её собственная реплика
   // «сейчас посмотрю»: узнать, что она промежуточная, можно только когда
   // началась следующая. Держать экран пустым до конца хода — это ровно
   // та задержка, ради которой поток и подключён, поэтому показ живёт, но
   // сменяется целиком.
-  const withNarration = probe.drafts.filter((shown) => shown.includes("Сейчас посмотрю"));
-  for (const shown of withNarration) {
-    assert.equal(shown, "Сейчас посмотрю расписание.", "проговаривание показано с чужим текстом");
+  const withNarration = probe.shown.filter((state) => state.includes("Сейчас посмотрю"));
+  for (const state of withNarration) {
+    assert.equal(state, "Сейчас посмотрю расписание.", "проговаривание показано с чужим текстом");
   }
 });
 
-test("черновик не обновляется чаще, чем позволяет промежуток", async () => {
+test("сообщение не правится чаще, чем позволяет промежуток", async () => {
   // Токены приходят десятками в секунду, а Telegram считает обращения к
   // чату: обновление на каждый срез выбрало бы лимит на первых секундах
   // ответа и вернуло 429 на самой доставке.
@@ -1072,18 +1105,93 @@ test("черновик не обновляется чаще, чем позвол
   for (let index = 0; index < 40; index += 1) many.push([` слово${index}`, false]);
 
   const throttled = await runTelegramTurn(undefined, {
-    deltas: many, deltaGapMs: 1, draftIntervalMs: 10_000,
+    deltas: many, deltaGapMs: 1, liveIntervalMs: 10_000,
   });
-  // Первое состояние и досылка последнего: сорок один срез уложился в два
+  // Первое состояние и доведение до итога: сорок один срез уложился в два
   // обращения к Telegram.
-  assert.equal(throttled.drafts.length, 2, `лишние обновления: ${throttled.drafts.length}`);
-  // Досылается последнее состояние, а не то, на котором сработал лимит.
-  assert.equal(throttled.drafts.at(-1), throttled.sent[0]);
+  assert.equal(throttled.shown.length, 2, `лишние обновления: ${throttled.shown.length}`);
+  // Доводится последнее состояние, а не то, на котором сработал лимит.
+  assert.equal(throttled.shown.at(-1), throttled.sent[0]);
 
   // Без ограничения промежутка тот же ход показывает больше состояний —
   // значит проверка сторожит троттлинг, а не отсутствие срезов.
   const free = await runTelegramTurn(undefined, { deltas: many });
-  assert.ok(free.drafts.length > 1, "без ограничения черновик обязан обновляться чаще");
+  assert.ok(free.shown.length > 1, "без ограничения сообщение обязано правиться чаще");
+});
+
+/**
+ * Останов — единственное, что прерывает уже идущий ход.
+ *
+ * Новые сообщения ход не прерывают: они становятся следующим. Поэтому
+ * просьба остановиться обязана идти мимо очереди — слот пользователя
+ * занят как раз тем ходом, который надо прервать.
+ */
+/**
+ * Промежуток считается от отправки, а не от обработки.
+ *
+ * Между отправкой и ходом стоит durable inbox: если считать от момента
+ * обработки, промежуток растёт вместе с очередью, и человек, написавший
+ * «сделал» через девять секунд, получает ответ так, будто прошёл вечер.
+ */
+test("ход берёт время сообщений у Telegram, а не у момента обработки", async () => {
+  const first = Math.floor(Date.parse("2026-08-18T09:00:00Z") / 1_000);
+  const last = Math.floor(Date.parse("2026-08-18T09:00:01Z") / 1_000);
+  const probe = await runTelegramTurn(undefined, {
+    messageDate: last,
+    extraUpdates: [
+      {
+        update_id: 3000,
+        message: {
+          message_id: 4,
+          date: first,
+          chat: { id: TELEGRAM_ID },
+          from: { id: TELEGRAM_ID, first_name: "Анна" },
+          text: "пошли кушать",
+        },
+      },
+    ],
+  });
+
+  const input = probe.contextInputs[0] as {
+    currentMessageAt?: Date;
+    messageBatch?: { spanMs: number; messages: Array<{ messageId: number; elapsedFromPreviousMs: number | null }> };
+  };
+  assert.equal(input.currentMessageAt?.toISOString(), "2026-08-18T09:00:00.000Z");
+  // Окно целиком: оба сообщения, их идентификаторы и секунда между ними.
+  assert.deepEqual(
+    input.messageBatch?.messages.map((message) => [message.messageId, message.elapsedFromPreviousMs]),
+    [[4, null], [5, 1_000]],
+  );
+  assert.equal(input.messageBatch?.spanMs, 1_000);
+  // Следующий ход отсчитывается от отправки последнего сообщения.
+  assert.deepEqual(
+    probe.recordedMessageAt.map((at) => at?.toISOString() ?? null),
+    ["2026-08-18T09:00:01.000Z"],
+  );
+});
+
+test("останов прерывает ход и не встаёт за ним в очередь", async () => {
+  const store = new TurnStore();
+  const turns = lifecycle(store);
+  // Ход, который уже идёт: его и надо прервать.
+  const running = await turns.start(startInput(9_001));
+  await turns.transition(running, "queued");
+  await turns.transition(running, "claimed");
+
+  const probe = await runTelegramTurn(turns, { command: "/stop" });
+
+  assert.deepEqual(probe.sent, ["Остановила. Можно писать дальше."]);
+  assert.equal(probe.lockClaims.length, 0, "останов встал в очередь за ходом, который прерывает");
+  assert.equal(await turns.isCancelled(running), true, "идущий ход не получил барьер отмены");
+  // Модель при этом не звали: останов — не разговор.
+  assert.deepEqual(probe.prompts, []);
+});
+
+test("останавливать нечего — так и сказано", async () => {
+  const store = new TurnStore();
+  const turns = lifecycle(store);
+  const probe = await runTelegramTurn(turns, { command: "/stop" });
+  assert.deepEqual(probe.sent, ["Сейчас нечего останавливать."]);
 });
 
 test("ход измеряется по этапам, а не одним числом", async () => {
@@ -1114,16 +1222,3 @@ test("ход измеряется по этапам, а не одним числ
   );
 });
 
-test("опоздавший черновик всё равно останавливается", async () => {
-  // Черновик открывается параллельно ходу — ради этого и убрано ожидание
-  // перед первым обращением к модели. Но ход может закончиться раньше,
-  // чем Telegram ответит: тогда останавливать нечего, а таймер черновика
-  // уже живёт и до перезапуска процесса шлёт в чат пустые обновления.
-  const deferred = { release: () => {}, stopped: () => false };
-  await runTelegramTurn(undefined, { deferDraft: deferred });
-
-  assert.equal(deferred.stopped(), false, "черновик не мог остановиться до открытия");
-  deferred.release();
-  await new Promise((resolve) => setTimeout(resolve, 10));
-  assert.equal(deferred.stopped(), true, "опоздавший черновик остался с живым таймером");
-});

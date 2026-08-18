@@ -24,8 +24,8 @@ async function personaText(): Promise<string | null> {
   }
 }
 import {
-  progressiveTelegramDrafts,
   splitTelegramText,
+  TelegramApiError,
   TelegramClient,
   webhookSecretMatches,
 } from "../dist/telegram.js";
@@ -38,203 +38,220 @@ test("Telegram text is split without losing content", () => {
   assert.equal(chunks.join(" ").replace(/\s+/g, " "), source.replace(/\s+/g, " "));
 });
 
-test("Telegram progressive drafts reveal only complete words", () => {
-  assert.deepEqual(
-    progressiveTelegramDrafts("Тут, Виктор. Была пауза, но я на месте. Что нужно?", 4),
-    [
-      "Тут, Виктор. Была пауза,",
-      "Тут, Виктор. Была пауза, но я на месте.",
-    ],
-  );
-  assert.deepEqual(progressiveTelegramDrafts("Короткий ответ", 4), ["Короткий ответ"]);
-});
-
-test("Telegram starts an empty draft before an answer", async () => {
+/** Клиент с подменённым `call`: наружу ничего не уходит, всё видно тесту. */
+function liveClient() {
   const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
   const telegram = new TelegramClient(
-    {
-      telegramBotToken: "test-token",
-      telegramApiBaseUrl: "https://api.telegram.invalid",
-    } as never,
+    { telegramBotToken: "test-token", telegramApiBaseUrl: "https://api.telegram.invalid" } as never,
     { debug() {}, info() {}, warn() {}, error() {} },
   );
+  let nextMessageId = 500;
   telegram.call = async (method, body) => {
     calls.push({ method, body });
-    return true as never;
+    return (method === "sendMessage" ? { message_id: nextMessageId++ } : true) as never;
   };
-
-  const draft = await telegram.startMessageDraft(123);
-  draft?.stop();
-
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0]?.method, "sendMessageDraft");
-  assert.equal(calls[0]?.body.chat_id, 123);
-  assert.equal(calls[0]?.body.text, "");
-  assert.equal(typeof calls[0]?.body.draft_id, "number");
-});
+  return { telegram, calls };
+}
 
 /**
- * Черновик, догоняющий поток модели.
+ * Показ ответа больше не занимает поле ввода.
  *
- * Промежуточные состояния схлопываются, наружу уходит последнее, и чаще
- * заданного промежутка Telegram не трогается: обновление на каждый срез
- * выбрало бы лимит чата на первых секундах ответа и вернуло 429 уже на
- * доставке. Часы здесь виртуальные — проверяется правило, а не выдержка.
+ * `sendMessageDraft` показывал черновик бота, но подменял кнопку отправки
+ * на «•••»: пока Ева отвечала, человек не мог написать следующее
+ * сообщение. Теперь первый содержательный срез уходит обычным
+ * сообщением, а следующие правят его же.
  */
-test("потоковый черновик схлопывает срезы и держит промежуток", async () => {
-  const calls: Array<Record<string, unknown>> = [];
-  const telegram = new TelegramClient(
-    { telegramBotToken: "test-token", telegramApiBaseUrl: "https://api.telegram.invalid" } as never,
-    { debug() {}, info() {}, warn() {}, error() {} },
-  );
-  telegram.call = async (_method, body) => {
-    calls.push(body);
-    return true as never;
-  };
+test("первый срез уходит одним сообщением, дальше правится оно же", async () => {
+  const { telegram, calls } = liveClient();
+  let sentMessageId: number | null = null;
+  const live = telegram.startLiveMessage(123, {
+    intervalMs: 0,
+    onSent: (id) => { sentMessageId = id; },
+  });
 
-  const clock = 1_000;
-  const stream = telegram.startStreamingDraft(
-    123,
-    { chatId: 123, draftId: 7, stop() {} },
-    { intervalMs: 1_000, now: () => clock },
-  );
+  live.push("Понимаю");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  // Три состояния подряд между правками: наружу уходит только последнее.
+  live.push("Понимаю.");
+  live.push("Понимаю. Рас");
+  live.push("Понимаю. Расскажи");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await live.finish("Понимаю. Расскажи, что было дальше.");
 
-  stream.push("Понимаю");
-  stream.push("Понимаю.");
-  stream.push("Понимаю. Расскажи");
-  await stream.finish();
-
-  // Первый срез уходит сразу — ради него всё и затевалось: человек
-  // видит начало ответа, не дожидаясь конца хода. Остальные схлопнулись
-  // в одно состояние, и оно последнее.
-  assert.deepEqual(calls.map((body) => body.text), ["Понимаю", "Понимаю. Расскажи"]);
-  assert.equal(calls[0]?.draft_id, 7);
-  assert.equal(stream.shown, "Понимаю. Расскажи");
-  assert.equal(stream.updates, 2);
+  assert.deepEqual(calls.map((call) => call.method), [
+    "sendMessage",
+    "editMessageText",
+    "editMessageText",
+    "editMessageText",
+  ]);
+  // Состояния, пришедшие пока шла правка, схлопнулись в последнее:
+  // «Понимаю. Рас» наружу не уходило, очередь правок не копится.
+  assert.deepEqual(calls.map((call) => call.body.text), [
+    "Понимаю",
+    "Понимаю.",
+    "Понимаю. Расскажи",
+    "Понимаю. Расскажи, что было дальше.",
+  ]);
+  // Тот же message_id до самого конца: второго ответа в чате нет.
+  const messageId = calls[0]?.body.chat_id === 123 ? sentMessageId : null;
+  assert.equal(typeof messageId, "number");
+  for (const call of calls.slice(1)) assert.equal(call.body.message_id, messageId);
+  assert.equal(live.messageId, messageId);
+  assert.equal(calls.filter((call) => call.method === "sendMessage").length, 1);
 });
 
-test("потоковый черновик досылает последнее состояние, не дожидаясь промежутка", async () => {
-  const calls: Array<Record<string, unknown>> = [];
-  const telegram = new TelegramClient(
-    { telegramBotToken: "test-token", telegramApiBaseUrl: "https://api.telegram.invalid" } as never,
-    { debug() {}, info() {}, warn() {}, error() {} },
-  );
-  telegram.call = async (_method, body) => {
-    calls.push(body);
+test("правки не чаще заданного промежутка", async () => {
+  const { telegram, calls } = liveClient();
+  const live = telegram.startLiveMessage(123, { intervalMs: 60_000 });
+
+  live.push("Первое состояние");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  live.push("Второе состояние");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  // Минута промежутка ещё не прошла: второе состояние ждёт, а не летит
+  // следом. Иначе лимит чата выбирается на первых секундах ответа.
+  assert.deepEqual(calls.map((call) => call.body.text), ["Первое состояние"]);
+  live.stop();
+});
+
+test("пауза после 429 не задерживает доставку ответа", async () => {
+  // Telegram попросил подождать полминуты. Это касается показа —
+  // украшения; готовый ответ ждать его не должен, иначе однократный
+  // рейт-лимит превращается в задержку доставки на весь retry_after.
+  const { telegram, calls } = liveClient();
+  let finalizing = false;
+  telegram.call = async (method, body) => {
+    calls.push({ method, body });
+    if (method === "sendMessage") return { message_id: 777 } as never;
+    // Промежуточная правка упирается в лимит чата; итоговую доставку
+    // Telegram принимает.
+    if (!finalizing) throw new TelegramApiError("Telegram editMessageText: Too Many Requests", 30_000);
     return true as never;
   };
+  const live = telegram.startLiveMessage(123, { intervalMs: 0 });
+
+  live.push("первое состояние");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  live.push("второе состояние");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  // Третье состояние приходит уже в паузе: показ засыпает на все
+  // тридцать секунд, названные Telegram.
+  live.push("третье состояние");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(live.shown, "первое состояние", "показ не встал в паузу");
 
   const started = Date.now();
-  const stream = telegram.startStreamingDraft(
-    123,
-    { chatId: 123, draftId: 9, stop() {} },
-    { intervalMs: 60_000 },
-  );
-  stream.push("Первое состояние");
-  await stream.finish();
-  stream.push("после конца");
-  await stream.finish();
+  finalizing = true;
+  const finished = await live.finish("итоговый ответ");
+  const waited = Date.now() - started;
 
-  // Минута промежутка не задержала доставку: `finish` досылает сразу.
-  assert.ok(Date.now() - started < 5_000, "досылка ждала промежутка");
-  assert.deepEqual(calls.map((body) => body.text), ["Первое состояние"]);
+  assert.ok(waited < 1_000, `доставка ждала паузу показа: ${waited} мс`);
+  assert.equal(finished.delivered, true);
+  assert.equal(finished.messageId, 777);
 });
 
-/**
- * Пустой черновик держится собственным таймером и раз в двадцать секунд
- * пишет в тот же `draft_id` пустой текст. Пока показывать было нечего,
- * в этом и был весь смысл; с потоком он стирал бы показанное — и ровно
- * на длинных ходах, ради которых поток и сделан.
- */
-test("потоковый черновик снимает пустой keepalive и держит показанный текст", async () => {
-  const calls: Array<Record<string, unknown>> = [];
-  const telegram = new TelegramClient(
-    { telegramBotToken: "test-token", telegramApiBaseUrl: "https://api.telegram.invalid" } as never,
-    { debug() {}, info() {}, warn() {}, error() {} },
-  );
-  telegram.call = async (_method, body) => {
-    calls.push(body);
-    return true as never;
+test("отказ Telegram на показе не роняет ход и не создаёт шторма повторов", async () => {
+  const { telegram, calls } = liveClient();
+  telegram.call = async (method, body) => {
+    calls.push({ method, body });
+    throw new TelegramApiError("Telegram sendMessage: Too Many Requests", 30_000);
   };
+  const live = telegram.startLiveMessage(123, { intervalMs: 0 });
 
-  // Настоящий черновик со своим таймером — та самая пара, которая и
-  // сталкивалась в чате. Его `stop()` виден тесту: 20 секунд ждать
-  // нечестно, а проверить нужно именно то, что таймер снят.
-  const real = await telegram.startMessageDraft(555);
-  assert.ok(real, "черновик не открылся");
+  live.push("первое");
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  live.push("второе");
+  live.push("третье");
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  // Telegram попросил подождать тридцать секунд — значит ждём, а не
+  // повторяем каждое состояние. Одна попытка, и ход продолжается.
   assert.equal(calls.length, 1);
-  assert.equal(calls[0]?.text, "", "первый черновик обязан быть пустым");
-  let keepAliveStopped = false;
-  const draft = {
-    chatId: real!.chatId,
-    draftId: real!.draftId,
-    stop() { keepAliveStopped = true; real!.stop(); },
+  assert.equal(live.shown, "");
+  const finished = await live.finish("итог");
+  assert.equal(finished.delivered, false, "несостоявшийся показ не выдаёт себя за доставку");
+});
+
+test("отменённый ход не правит сообщение после остановки", async () => {
+  const { telegram, calls } = liveClient();
+  const live = telegram.startLiveMessage(123, { intervalMs: 0 });
+
+  live.push("начало ответа");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  live.stop();
+  live.push("недописанный хвост");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.deepEqual(calls.map((call) => call.body.text), ["начало ответа"]);
+});
+
+test("если показывать было нечего, ответ уходит обычной отправкой", async () => {
+  const { telegram, calls } = liveClient();
+  const live = telegram.startLiveMessage(123, { intervalMs: 0 });
+
+  const finished = await live.finish("готовый ответ");
+  assert.equal(finished.delivered, false);
+  assert.deepEqual(calls, []);
+});
+
+test("итоговый текст доводится durable-правкой, а не вторым сообщением", async () => {
+  const { telegram, calls } = liveClient();
+  const enqueued: Array<{ method: string; payload: Record<string, unknown> }> = [];
+  telegram.setOutbox({
+    send: async (envelope: {
+      method: string;
+      payload: Record<string, unknown>;
+      onMetrics?: (metrics: { outboxInsertMs: number; telegramSendMs: number }) => void;
+    }) => {
+      enqueued.push({ method: envelope.method, payload: envelope.payload });
+      envelope.onMetrics?.({ outboxInsertMs: 0, telegramSendMs: 0 });
+      return { queued: true };
+    },
+  } as never);
+  const live = telegram.startLiveMessage(123, { intervalMs: 0 });
+
+  live.push("Начало");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const finished = await live.finish("Начало и конец ответа.");
+
+  assert.equal(finished.delivered, true);
+  // Промежуточный показ идёт мимо outbox: повторять его после
+  // перезапуска незачем, он уже неактуален.
+  assert.deepEqual(calls.map((call) => call.method), ["sendMessage"]);
+  // Итог — durable, и это правка того же сообщения.
+  assert.equal(enqueued.length, 1);
+  assert.equal(enqueued[0]?.method, "editMessageText");
+  assert.equal(enqueued[0]?.payload.message_id, live.messageId);
+  assert.match(String(enqueued[0]?.payload.text), /Начало и конец ответа\./);
+});
+
+test("«текст не изменился» — это доставленный ответ, а не отказ", async () => {
+  const { telegram } = liveClient();
+  telegram.call = async () => {
+    throw new TelegramApiError("Telegram editMessageText: Bad Request: message is not modified");
   };
+  // Итоговый текст уже показан целиком: править нечего. Для Telegram это
+  // ошибка, для доставки — доставленный ответ.
+  const result = await telegram.deliver("editMessageText", {
+    chat_id: 1,
+    message_id: 2,
+    text: "тот же текст",
+  });
+  assert.deepEqual(result, {});
+});
 
-  const stream = telegram.startStreamingDraft(555, draft, { intervalMs: 0, keepAliveMs: 15 });
-  stream.push("Первые слова ответа");
-  // Пауза внутри генерации: модель молчит между срезами, ход ещё идёт.
-  await new Promise((resolve) => setTimeout(resolve, 60));
-
-  // Первый же показ снимает пустой keepalive: иначе он раз в двадцать
-  // секунд стирал бы показанное — и ровно на длинных ходах.
-  assert.equal(keepAliveStopped, true, "пустой keepalive остался жив рядом с показом");
-
-  await stream.finish();
-  stream.stop();
-  const afterFirstShow = calls.slice(2);
-  assert.ok(
-    afterFirstShow.length > 0,
-    "показанный черновик никто не продлевает: Telegram погасит его в молчании модели",
+test("черновик Telegram больше не используется в обычном ходе", async () => {
+  // Отдельная проверка на состав кода: пока метод существует хоть
+  // где-то, он вернётся в первый же ход, а вместе с ним и «•••» вместо
+  // кнопки отправки.
+  const sources = await Promise.all(
+    ["../dist/telegram.js", "../dist/eva-workflow.js"].map(async (file) =>
+      await readFile(new URL(file, import.meta.url), "utf8")),
   );
-  for (const body of afterFirstShow) {
-    assert.equal(body.text, "Первые слова ответа", `черновик продлён чужим текстом: ${body.text}`);
+  for (const source of sources) {
+    assert.doesNotMatch(source, /"sendMessageDraft"|'sendMessageDraft'/);
   }
-  const empties = calls.slice(1).filter((body) => body.text === "");
-  assert.deepEqual(empties, [], `пустой черновик стёр показанный текст: ${JSON.stringify(calls)}`);
-});
-
-test("остановленный показ не досылает срез после отмены хода", async () => {
-  const calls: Array<Record<string, unknown>> = [];
-  let release: (() => void) | null = null;
-  const telegram = new TelegramClient(
-    { telegramBotToken: "test-token", telegramApiBaseUrl: "https://api.telegram.invalid" } as never,
-    { debug() {}, info() {}, warn() {}, error() {} },
-  );
-  telegram.call = async (_method, body) => {
-    calls.push(body);
-    return true as never;
-  };
-
-  // Черновик резолвится не сразу: между решением отправить и самой
-  // отправкой ход успевает отмениться.
-  const opening = new Promise<{ chatId: number; draftId: number; stop(): void }>((resolve) => {
-    release = () => resolve({ chatId: 555, draftId: 4, stop() {} });
-  });
-  const stream = telegram.startStreamingDraft(555, opening, { intervalMs: 0 });
-  stream.push("недописанный ответ");
-  stream.stop();
-  release!();
-  await new Promise((resolve) => setTimeout(resolve, 10));
-
-  assert.deepEqual(calls, [], `отменённый ход дописал черновик: ${JSON.stringify(calls)}`);
-});
-
-test("отказ Telegram на черновике не роняет ход", async () => {
-  const telegram = new TelegramClient(
-    { telegramBotToken: "test-token", telegramApiBaseUrl: "https://api.telegram.invalid" } as never,
-    { debug() {}, info() {}, warn() {}, error() {} },
-  );
-  telegram.call = async () => { throw new Error("429 Too Many Requests"); };
-
-  const stream = telegram.startStreamingDraft(123, { chatId: 123, draftId: 3, stop() {} }, {
-    intervalMs: 0,
-  });
-  stream.push("текст");
-  // Показ — украшение: его отказ не должен прерывать ход, ответ уйдёт
-  // обычным durable-сообщением.
-  await stream.finish();
-  assert.equal(stream.shown, "");
 });
 
 test("voice transcript echo matches Hermes and is sent without parse mode", async () => {
@@ -716,6 +733,8 @@ test("продуктовые инструменты зарегистрирова
     "save_task", "get_tasks", "upsert_goal", "confirm_goal",
     "upsert_user_profile_field", "get_user_time_context",
     "get_psychological_test_results", "update_response_mode",
+    // Путь в интернет целиком: найти адреса и прочитать страницу.
+    "web_search", "web_read",
   ]) {
     assert.ok(tools.has(name), `инструмент ${name} не зарегистрирован`);
   }

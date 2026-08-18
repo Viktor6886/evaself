@@ -4,7 +4,7 @@ import {
   splitTelegramHtml,
   stripTags,
 } from "./telegram-format.js";
-import { randomInt, timingSafeEqual } from "node:crypto";
+import { timingSafeEqual } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 
 import type { Config } from "./config.js";
@@ -68,46 +68,51 @@ export class TelegramApiError extends Error {
   }
 }
 
-export interface TelegramMessageDraft {
-  readonly chatId: number;
-  readonly draftId: number;
-  stop(): void;
-}
-
-const DRAFT_WORDS_PER_UPDATE = 4;
-const DRAFT_UPDATE_DELAY_MS = 500;
-const DRAFT_KEEPALIVE_MS = 20_000;
 /**
- * Как часто черновик догоняет поток модели.
+ * Ответ, который растёт на глазах.
  *
- * Токены приходят десятками в секунду, а Telegram считает частоту
- * обращений к чату: обновлять черновик на каждый срез значит выбрать
- * лимит на первых секундах ответа и получить 429 на самой доставке.
- * Промежуточные срезы поэтому не отправляются вовсе — уходит только
- * последнее состояние текста, и человек всё равно видит, как ответ
- * растёт.
- */
-const DRAFT_STREAM_INTERVAL_MS = 900;
-
-/**
- * Черновик, который догоняет поток модели.
+ * Раньше это делал `sendMessageDraft`: Telegram показывал черновик бота,
+ * но пока черновик открыт, кнопка отправки в чате подменяется на «•••» —
+ * человек не может написать следующее сообщение, пока Ева отвечает.
+ * Цена оказалась выше выигрыша, и Bot API отдать её обратно не может:
+ * поведением ввода управляет клиент Telegram, а не бот.
  *
- * `push` вызывается из потока и ничего не ждёт: он лишь запоминает
- * текст. Отправкой занимается таймер, поэтому генерация не платит за
- * сеть Telegram, а частота обращений остаётся под контролем.
+ * Поэтому поток показывается обычным сообщением: первый содержательный
+ * срез уходит `sendMessage`, все следующие правят то же самое сообщение
+ * через `editMessageText`. Поле ввода при этом свободно.
  */
-export interface TelegramStreamingDraft {
-  /** Показать этот текст целиком. Промежуточные состояния схлопываются. */
+export interface TelegramLiveMessage {
+  /** Показать это состояние целиком. Промежуточные схлопываются в последнее. */
   push(text: string): void;
-  /** Дождаться отправки последнего состояния и остановить таймер. */
-  finish(): Promise<void>;
-  /** Остановить, ничего не досылая: ход отменён или оборвался. */
+  /**
+   * Довести сообщение до итогового текста.
+   *
+   * `delivered: false` означает, что показывать было нечего и сообщения
+   * не существует: ответ должен уйти обычной отправкой.
+   */
+  finish(text: string): Promise<{ delivered: boolean; messageId: number | null }>;
+  /** Прекратить всё: ход отменён или оборвался. Поздние правки не уйдут. */
   stop(): void;
-  /** Сколько раз черновик реально обновлялся: для проверок и разбора. */
+  /** Идентификатор сообщения, которое растёт. `null` — его ещё нет. */
+  readonly messageId: number | null;
+  /** Сколько обращений к Telegram сделал показ: отправка и правки. */
   readonly updates: number;
-  /** Что показано человеку сейчас. */
+  /** Что человек видит сейчас. */
   readonly shown: string;
 }
+
+/**
+ * Как часто правится растущее сообщение.
+ *
+ * Токены приходят десятками в секунду, а Telegram считает частоту
+ * обращений к чату: править на каждый срез — значит выбрать лимит на
+ * первых секундах ответа и получить 429 на самой доставке. Промежуточные
+ * состояния поэтому не отправляются вовсе, уходит только последнее.
+ */
+const LIVE_UPDATE_INTERVAL_MS = 800;
+
+/** Предел одного сообщения Telegram с запасом на разметку. */
+const LIVE_MESSAGE_LIMIT = 3_900;
 
 export class TelegramClient implements OutboxTransport {
   private readonly token: string;
@@ -306,138 +311,92 @@ export class TelegramClient implements OutboxTransport {
   }
 
   /**
-   * Reserve space for the answer before the model finishes. Bot API 10.0
-   * explicitly allows an empty draft and renders it as a “Thinking…”
-   * placeholder. It is refreshed because Telegram drafts are ephemeral.
-   */
-  async startMessageDraft(chatId: number): Promise<TelegramMessageDraft | null> {
-    if (!Number.isSafeInteger(chatId) || chatId <= 0) return null;
-    const draftId = randomInt(1, 2_147_483_647);
-    let stopped = false;
-    let refreshing = false;
-    const refresh = async () => {
-      if (stopped || refreshing) return;
-      refreshing = true;
-      try {
-        await this.call("sendMessageDraft", {
-          chat_id: chatId,
-          draft_id: draftId,
-          text: "",
-        });
-      } finally {
-        refreshing = false;
-      }
-    };
-
-    try {
-      await refresh();
-    } catch (error) {
-      stopped = true;
-      this.logger.debug("Telegram не поддержал пустой черновик", {
-        chatId,
-        message: error instanceof Error ? error.message : String(error),
-      });
-      return null;
-    }
-
-    const timer = setInterval(() => {
-      void refresh().catch((error) => {
-        this.logger.debug("Не удалось обновить пустой Telegram-черновик", {
-          chatId,
-          message: error instanceof Error ? error.message : String(error),
-        });
-      });
-    }, DRAFT_KEEPALIVE_MS);
-    timer.unref();
-
-    return {
-      chatId,
-      draftId,
-      stop() {
-        if (stopped) return;
-        stopped = true;
-        clearInterval(timer);
-      },
-    };
-  }
-
-  /**
-   * Черновик, который показывает ответ, пока модель его пишет.
+   * Показать ответ, пока модель его пишет.
    *
-   * Раньше человек видел пустой черновик всё время генерации, а текст
-   * появлялся разом в конце: обычный ход не пользовался потоком вовсе.
-   * Здесь тот же черновик обновляется по ходу, но не чаще, чем раз в
-   * `DRAFT_STREAM_INTERVAL_MS`, и всегда последним состоянием — очередь
-   * промежуточных состояний не копится.
+   * `push` вызывается из потока и ничего не ждёт: он запоминает текст.
+   * Отправкой занимается таймер, поэтому генерация не платит за сеть
+   * Telegram, а частота обращений остаётся под контролем.
    *
-   * Отказ Telegram черновик не роняет ход: показ — украшение, ответ
-   * доставляется отдельным durable-сообщением.
+   * Показ — не доставка. Промежуточные состояния идут прямым вызовом
+   * мимо outbox: повторять их после перезапуска незачем, они уже
+   * неактуальны. Итоговый текст `finish` проводит через outbox — он и
+   * есть ответ.
    */
-  startStreamingDraft(
+  startLiveMessage(
     chatId: number,
-    draft: TelegramMessageDraft | null | Promise<TelegramMessageDraft | null>,
-    options: { intervalMs?: number; now?: () => number; keepAliveMs?: number } = {},
-  ): TelegramStreamingDraft {
-    const intervalMs = Math.max(0, options.intervalMs ?? DRAFT_STREAM_INTERVAL_MS);
+    options: {
+      intervalMs?: number;
+      now?: () => number;
+      /** Первое сообщение отправлено: печатать «typing» больше незачем. */
+      onSent?: (messageId: number) => void;
+    } = {},
+  ): TelegramLiveMessage {
+    const intervalMs = Math.max(0, options.intervalMs ?? LIVE_UPDATE_INTERVAL_MS);
     const now = options.now ?? (() => Date.now());
-    const resolveDraft = Promise.resolve(draft).catch(() => null);
     let pending: string | null = null;
     let shown = "";
+    let messageId: number | null = null;
     let updates = 0;
     let lastSentAt = -Infinity;
+    /** До этого момента Telegram просил не приходить: 429 с retry_after. */
+    let pausedUntil = 0;
     let flushing: Promise<void> | null = null;
     let stopped = false;
-    // Досылка последнего состояния не ждёт промежутка: ход уже кончился,
-    // и держать доставку ради выдержки между черновиками незачем.
-    let forced = false;
+    /**
+     * Прервать текущее ожидание.
+     *
+     * Пауза после 429 длится столько, сколько попросил Telegram, — до
+     * получаса. Обычным `setTimeout` конец хода эту паузу не будит, и
+     * готовый ответ ждал бы её целиком: рейт-лимит промежуточной правки
+     * превращался в задержку доставки. Показ — украшение, а доставка
+     * ждать его не должна.
+     */
+    let wake: (() => void) | null = null;
+    const sleep = async (ms: number): Promise<void> => {
+      if (ms <= 0) return;
+      await new Promise<void>((resolve) => {
+        const done = (): void => {
+          clearTimeout(timer);
+          wake = null;
+          resolve();
+        };
+        const timer = setTimeout(done, ms);
+        timer.unref?.();
+        wake = done;
+      });
+    };
+    const interrupt = (): void => wake?.();
 
     const write = async (text: string): Promise<void> => {
-      const target = await resolveDraft;
-      const draftId = target?.draftId;
-      // `stopped` проверяется после ожидания, а не только до него: между
-      // решением отправить и самой отправкой ход успевает отмениться, и
-      // недописанный ответ не должен догонять человека.
-      if (draftId === undefined || stopped) return;
-      // Пустой черновик держится собственным таймером и раз в двадцать
-      // секунд пишет в тот же `draft_id` пустой текст. Пока показывать
-      // было нечего, это и был весь его смысл; теперь он стирал бы
-      // показанное — и ровно на тех ходах, ради которых поток и сделан,
-      // потому что короче двадцати секунд они не бывают. Дальше черновик
-      // держим мы сами: тем же текстом, который уже показан.
-      target?.stop();
-      await this.call("sendMessageDraft", { chat_id: chatId, draft_id: draftId, text });
+      const payload = renderTelegramText(text);
+      if (messageId === null) {
+        const sent = await this.call<{ message_id?: number }>("sendMessage", {
+          chat_id: chatId,
+          ...payload,
+        });
+        const id = Number(sent?.message_id);
+        if (!Number.isSafeInteger(id)) throw new TelegramApiError("Telegram не вернул message_id");
+        messageId = id;
+        options.onSent?.(id);
+      } else {
+        await this.call("editMessageText", {
+          chat_id: chatId,
+          message_id: messageId,
+          ...payload,
+        });
+      }
       shown = text;
       updates += 1;
       lastSentAt = now();
-      keepAlive();
     };
-
-    // Свой keepalive: Telegram гасит черновик, если его не трогать, а
-    // модель между срезами молчит десятки секунд. Повторяется последнее
-    // показанное состояние — не пустая строка.
-    let keepAliveTimer: ReturnType<typeof setInterval> | null = null;
-    const keepAlive = (): void => {
-      if (keepAliveTimer || options.keepAliveMs === 0) return;
-      keepAliveTimer = setInterval(() => {
-        if (stopped || !shown) return;
-        void this.call("sendMessageDraft", { chat_id: chatId, draft_id: draftIdOf(), text: shown })
-          .catch((error: unknown) => {
-            this.logger.debug("Не удалось продлить потоковый черновик", {
-              chatId,
-              message: error instanceof Error ? error.message : String(error),
-            });
-          });
-      }, options.keepAliveMs ?? DRAFT_KEEPALIVE_MS);
-      keepAliveTimer.unref?.();
-    };
-    let resolvedDraftId = 0;
-    const draftIdOf = (): number => resolvedDraftId;
-    void resolveDraft.then((target) => { resolvedDraftId = target?.draftId ?? 0; });
 
     const flush = async (): Promise<void> => {
       while (!stopped && pending !== null) {
-        const wait = forced ? 0 : intervalMs - (now() - lastSentAt);
-        if (wait > 0) await delay(wait);
+        // Один сон на оба ожидания: и выдержка между правками, и пауза,
+        // о которой попросил Telegram. Накопленные состояния при этом
+        // схлопываются — уходит только последнее.
+        const wait = Math.max(intervalMs - (now() - lastSentAt), pausedUntil - now());
+        if (wait > 0) await sleep(wait);
         if (stopped) return;
         const text = pending;
         pending = null;
@@ -445,9 +404,15 @@ export class TelegramClient implements OutboxTransport {
         try {
           await write(text);
         } catch (error) {
-          // Черновик — не доставка. Его отказ не должен ни ронять ход,
-          // ни превращаться в повтор: ответ уйдёт обычным сообщением.
-          this.logger.debug("Telegram не принял потоковый черновик", {
+          // Показ — украшение. Его отказ не роняет ход и не превращается
+          // в повтор: ответ всё равно уйдёт итоговой отправкой.
+          if (error instanceof TelegramApiError && error.retryAfterMs !== null) {
+            // 429: следующая попытка не раньше названного срока, и без
+            // очереди накопленных правок — только последнее состояние.
+            pausedUntil = now() + error.retryAfterMs;
+            continue;
+          }
+          this.logger.debug("Telegram не принял промежуточное состояние ответа", {
             chatId,
             message: error instanceof Error ? error.message : String(error),
           });
@@ -465,70 +430,61 @@ export class TelegramClient implements OutboxTransport {
       push(text: string): void {
         if (stopped) return;
         const clean = text.trimEnd();
-        if (!clean || clean === shown) return;
+        // Слишком длинный ответ одним сообщением не показывается: он всё
+        // равно уйдёт частями, и показывать обрезок значило бы показать
+        // не тот текст.
+        if (!clean || clean === shown || clean.length > LIVE_MESSAGE_LIMIT) return;
         pending = clean;
         schedule();
       },
-      async finish(): Promise<void> {
-        forced = true;
-        await flushing;
-        // Последнее состояние могло прийти позже последней отправки.
-        if (!stopped && pending !== null && pending !== shown) {
-          schedule();
-          await flushing;
-        }
+      finish: async (text: string): Promise<{ delivered: boolean; messageId: number | null }> => {
         stopped = true;
-        if (keepAliveTimer) clearInterval(keepAliveTimer);
-        keepAliveTimer = null;
+        pending = null;
+        // Ожидание прерывается до `await`: иначе конец хода встал бы в
+        // очередь за паузой, которая касалась только показа.
+        interrupt();
+        await flushing?.catch(() => undefined);
+        if (messageId === null) return { delivered: false, messageId: null };
+        await this.finalizeLiveMessage(chatId, messageId, text);
+        return { delivered: true, messageId };
       },
       stop(): void {
         stopped = true;
         pending = null;
-        if (keepAliveTimer) clearInterval(keepAliveTimer);
-        keepAliveTimer = null;
+        interrupt();
       },
+      get messageId(): number | null { return messageId; },
       get updates(): number { return updates; },
       get shown(): string { return shown; },
     };
   }
 
   /**
-   * Reveals a completed answer by whole words in the same animated Telegram
-   * draft. Only the final sendMessage is durable and stored in the outbox.
+   * Довести растущее сообщение до итогового текста.
+   *
+   * Правка идёт через outbox: она и есть доставка ответа, а значит
+   * переживает перезапуск и повторяется идемпотентно. Хвост, не
+   * поместившийся в одно сообщение Telegram, уходит следующими
+   * сообщениями — второго ответа при этом не появляется, продолжается
+   * тот же.
    */
-  async sendProgressiveMessage(
+  private async finalizeLiveMessage(
     chatId: number,
+    messageId: number,
     text: string,
-    draft?: TelegramMessageDraft | null,
-  ): Promise<unknown[]> {
-    const clean = text.trim();
-    draft?.stop();
-    if (chatId <= 0 || clean.length === 0 || clean.length > 4_096) {
-      return await this.sendMessage(chatId, clean);
-    }
-
-    const activeDraft = draft === undefined
-      ? await this.startMessageDraft(chatId)
-      : draft;
-    activeDraft?.stop();
-    const draftId = activeDraft?.draftId ?? randomInt(1, 2_147_483_647);
-
-    try {
-      for (const draftText of progressiveTelegramDrafts(clean)) {
-        await this.call("sendMessageDraft", {
-          chat_id: chatId,
-          draft_id: draftId,
-          text: draftText,
-        });
-        await delay(DRAFT_UPDATE_DELAY_MS);
-      }
-    } catch (error) {
-      this.logger.debug("Telegram не поддержал пословный черновик", {
-        chatId,
-        message: error instanceof Error ? error.message : String(error),
+  ): Promise<void> {
+    const chunks = splitTelegramText(text, LIVE_MESSAGE_LIMIT);
+    const head = chunks[0] ?? text.trim();
+    if (head) {
+      await this.dispatch("editMessageText", chatId, {
+        chat_id: chatId,
+        message_id: messageId,
+        ...renderTelegramText(head),
       });
     }
-    return await this.sendMessage(chatId, clean);
+    for (const rest of chunks.slice(1)) {
+      await this.sendMessage(chatId, rest);
+    }
   }
 
   async setReaction(chatId: number, messageId: number, emoji: string): Promise<void> {
@@ -558,6 +514,31 @@ export class TelegramClient implements OutboxTransport {
   }
 
   async deliver(method: string, payload: Record<string, unknown>): Promise<unknown> {
+    if (method === "editMessageText") {
+      try {
+        return await this.call(method, payload);
+      } catch (error) {
+        // Итоговый текст уже показан целиком: править нечего. Для
+        // Telegram это ошибка, для доставки — доставленный ответ.
+        if (isTelegramNotModified(error)) return {};
+        if (!isTelegramMarkupError(error)) throw error;
+        // Разметку Telegram не принял: ответ уходит без оформления, но
+        // уходит. Текст в лог не пишется — он пользовательский.
+        this.logger.warn("Telegram отклонил разметку правки, отправляю без неё", {
+          chatId: Number(payload.chat_id) || null,
+          message: error instanceof Error ? error.message.slice(0, 200) : String(error),
+        });
+        const plain = { ...payload };
+        delete plain.parse_mode;
+        plain.text = stripTags(String(payload.text ?? ""));
+        try {
+          return await this.call(method, plain);
+        } catch (retryError) {
+          if (isTelegramNotModified(retryError)) return {};
+          throw retryError;
+        }
+      }
+    }
     if (method === "sendVoice") {
       const encoded = typeof payload.audio_base64 === "string" ? payload.audio_base64 : "";
       if (!encoded) throw new Error("Telegram outbox: отсутствуют данные голосового сообщения");
@@ -713,6 +694,31 @@ function priorityForContext(prefix: string): DeliveryPriority {
   return "reply";
 }
 
+/**
+ * Разметка ответа для одного сообщения.
+ *
+ * Модель пишет markdown, Telegram понимает своё подмножество HTML.
+ * Негодная разметка не стоит потерянного ответа: тогда текст уходит как
+ * есть. Незавершённая разметка — обычное дело в середине генерации,
+ * поэтому проверка идёт на каждом состоянии, а не один раз.
+ */
+export function renderTelegramText(text: string): Record<string, unknown> {
+  const html = formatEvaReply(text);
+  if (!html || !isValidTelegramHtml(html)) return { text };
+  return {
+    text: html,
+    parse_mode: "HTML",
+    // Ссылки в ответе — источники, а не украшение: превью на половину
+    // экрана мешает читать сам ответ.
+    link_preview_options: { is_disabled: true },
+  };
+}
+
+function isTelegramNotModified(error: unknown): boolean {
+  return error instanceof TelegramApiError
+    && /message is not modified/iu.test(error.message);
+}
+
 function isTelegramMarkupError(error: unknown): boolean {
   if (!(error instanceof TelegramApiError) || error.retryAfterMs !== null) return false;
   return /can't parse entities|can't find end|unsupported start tag|entity byte offset/iu.test(
@@ -747,26 +753,6 @@ export function splitTelegramText(text: string, maxLength = 4_000): string[] {
   return chunks;
 }
 
-/**
- * Build cumulative draft snapshots without ever cutting a word or changing
- * the whitespace inside the generated answer.
- */
-export function progressiveTelegramDrafts(
-  text: string,
-  wordsPerUpdate = DRAFT_WORDS_PER_UPDATE,
-): string[] {
-  const clean = text.trim();
-  if (!clean) return [];
-  const tokens = clean.match(/\S+\s*/gu) ?? [];
-  const step = Math.max(1, Math.floor(wordsPerUpdate));
-  const snapshots: string[] = [];
-  for (let end = step; end < tokens.length; end += step) {
-    snapshots.push(tokens.slice(0, end).join("").trimEnd());
-  }
-  if (snapshots.length === 0) snapshots.push(clean);
-  return snapshots;
-}
-
 export const ALLOWED_REACTIONS = new Set([
   "👍", "👎", "❤", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱",
   "🤬", "😢", "🎉", "🤩", "🤮", "💩", "🙏", "👌", "🕊", "🤡",
@@ -777,10 +763,6 @@ export const ALLOWED_REACTIONS = new Set([
   "🆒", "💘", "🙉", "🦄", "😘", "💊", "🙊", "😎", "👾", "🤷",
   "🤷‍♂", "🤷‍♀", "😡",
 ]);
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 function elapsed(started: number): number {
   return Math.round((performance.now() - started) * 10) / 10;

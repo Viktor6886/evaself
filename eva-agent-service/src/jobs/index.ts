@@ -105,6 +105,7 @@ export function buildJobLayer(
     const research = new ResearchJobWorker(db, deps.outbox, {
       searxUrl: config.searxngUrl,
       crawlUrl: config.crawl4aiUrl,
+      crawlToken: config.crawl4aiToken,
       router: new LlmRouterClient(config.routerUrl, config.routerApiKey),
     });
     registry.queue("research");

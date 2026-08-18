@@ -449,6 +449,41 @@ export class TurnLifecycle {
     }
   }
 
+  /**
+   * Прервать всё, что этот человек сейчас выполняет.
+   *
+   * Единственный способ остановить ход по просьбе человека: новые
+   * сообщения текущий ход не прерывают — они становятся следующим.
+   * Поэтому команда останова ищет ходы по владельцу, а не по handle:
+   * своего handle у неё нет, а тот, что надо остановить, ведёт другой
+   * участок кода и, возможно, другой процесс.
+   *
+   * Возвращает, сколько ходов помечено: ноль означает «останавливать
+   * нечего», и человеку надо сказать именно это.
+   */
+  async cancelActiveForUser(telegramUserId: number, reason: string): Promise<number> {
+    if (!this.enabled) return 0;
+    const owner: TurnOwner = { column: "telegram_user_id", value: telegramUserId };
+    try {
+      const { rows } = await this.scoped(owner, async () => await this.db.query<{ run_id: string }>(
+        `-- tenant: by owner — ход ищется по владельцу, границу сверяет рантайм
+          UPDATE turn_runs
+            SET cancel_requested_at = now(),
+                cancel_reason = $2,
+                updated_at = now()
+          WHERE telegram_user_id = $1
+            AND cancel_requested_at IS NULL
+            AND state <> ALL($3::text[])
+          RETURNING run_id`,
+        [telegramUserId, reason.slice(0, 200), [...TERMINAL_STATES]],
+      ));
+      return rows.length;
+    } catch (error) {
+      this.warn("Не удалось прервать ходы человека", error, { telegramUserId });
+      return 0;
+    }
+  }
+
   async isCancelled(handle: TurnHandle): Promise<boolean> {
     if (!this.enabled || !handle.recorded || !handle.owner) return false;
     const owner = handle.owner;

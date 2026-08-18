@@ -37,6 +37,8 @@
 | EffectJournal | Побочное действие выполняется один раз | `src/turns/effect-journal.ts` | `effectKey()`, `EffectDecision` | обяз. |
 | Recovery | Восстановление прерванного хода | `src/turns/recovery.ts` | `recovery_required` → `recovering` | расш. |
 | Aggregator | Объединение быстрых сообщений в один ход | `src/turns/aggregator.ts` | окно агрегации | расш. |
+| Отметки окна | Время каждого сообщения окна и промежутки между ними | `src/turns/message-timeline.ts` | `messageBatchTiming()`, `timelineLines()`, `timelineDetail()`; отметки берутся у Telegram, в журнал уходят метаданные без текста | обяз. |
+| Останов | Прерывание идущего хода по просьбе человека | `TurnLifecycle.cancelActiveForUser()`, команда `/stop` | идёт мимо очереди пользователя; новые сообщения ход не прерывают | обяз. |
 
 Разбор — `docs/TURN_LIFECYCLE.md`, `docs/TURN_RECOVERY.md`.
 
@@ -49,6 +51,7 @@
 | Durable outbox | Доставка ответов | `src/delivery/outbox.ts`, таблица `telegram_outbox` | `OutboxDelivery`, `OutboxTransport`, `OutboxEnvelope` | обяз. |
 | Приоритет доставки | Класс приоритета без перестановки частей ответа | `src/delivery/priority.ts` | сравнение кортежей | расш. |
 | Лимиты Telegram | Учёт `retry_after` и лимитов чата | `src/delivery/telegram-limits.ts`, `retry-after.ts` | `telegramRetryAfterMs()` | обяз. |
+| Растущее сообщение | Показ ответа по мере генерации | `TelegramClient.startLiveMessage()` | первый срез — `sendMessage`, дальше `editMessageText` того же сообщения не чаще 800 мс; итог доводится durable-правкой через outbox; `sendMessageDraft` не используется — он занимает поле ввода | обяз. |
 
 Интерактивный ingress и agent runs в BullMQ не переносятся (инвариант 7).
 Разбор — `docs/PARALLEL_INBOX.md`, `docs/PARALLEL_OUTBOX_DISTRIBUTED_LIMITS.md`.
@@ -107,12 +110,14 @@ heartbeat по-прежнему ведёт `BackgroundRuntime`, а очеред�
 | Реестр возможностей Letta | Операция → кем поддержана → в какой версии | `src/letta/capabilities.ts` | `assertSupported()`, `missingCapabilities()`; неподдержанная — `unsupported_operation` | обяз. |
 | Состав memory blocks | Четыре блока и их границы | `src/letta/memory-blocks.ts` | `evaMemoryBlocks()`: `persona`, `human`, `current_state`, `therapeutic_framework` | обяз. |
 | Административный control plane | `@letta-ai/letta-client` 1.12.1 только как управляющий путь | `src/letta/admin-client.ts` | `LettaAdminPlane`; методов отправки сообщения нет | обяз. |
+| Синхронизация персоны | Канонический текст персоны существующим агентам | `src/letta/persona-sync.ts` | `PersonaSync.sync()`: одно направление файл → агент, за флагом `EVA_LETTA_ADMIN_CLIENT`; в PostgreSQL остаётся отметка версии, не значение блока | расш. |
 | Страж удаления | Запрет удаления при незакончившемся ходе | `src/letta/delete-guard.ts` | выборка по `turn_runs`, код `deletion_blocked` | обяз. |
 | Готовность | Может ли Ева работать | `src/letta/readiness.ts` | `evaluateReadiness()`: `state` — `ready`/`degraded`/`not_ready`, срок годности снимка фактов, `observed_at`; маршрут `/ready` | обяз. |
-| RuntimeContextBuilder | Сборщик продуктового контекста | `src/runtime/runtime-context.ts` | `RuntimeContext`: часовой пояс, профиль, подписка, состояние целей; системный промпт не подменяет; потолок 2000 знаков, размер виден в `/metrics` | обяз. |
+| RuntimeContextBuilder | Сборщик продуктового контекста | `src/runtime/runtime-context.ts` | `RuntimeContext`: местное и UTC время, день недели, месяц, год, часовой пояс, промежуток с прошлого сообщения, окно быстрых сообщений, профиль, подписка, состояние целей; системный промпт не подменяет; потолок 2000 знаков, размер виден в `/metrics` | обяз. |
 | ConversationPurposeService | Назначения conversation | `src/conversations/purpose-service.ts` | `purposePolicy()`, `toolAllowedForPurpose()` — область продуктовых инструментов по назначению, не выбор навыка | обяз. |
 | Заметки | Хранилище заметок в PostgreSQL | таблица `eva_notes` | продуктовые данные; когнитивной памятью не является | расш. |
 | Каталог инструментов | Сборка tool-схем продуктовых инструментов | `src/tools/tool-kit.ts`, `core-tools.ts`, `task-tools.ts` | `ToolBuilder`, `objectSchema()` | обяз. |
+| Чтение страниц | `web_read` через локальный Crawl4AI | `src/tools/web-read.ts` | `Crawl4aiReader`: заголовок `Authorization`, защита от SSRF, лимит размера, конверт недоверенного содержимого | обяз. |
 | Навыки | Двенадцать навыков в `skills/<name>/SKILL.md` | каталог `skills/`, монтируется как `/data/letta/.skills` | открывает Letta по `description`; роутера навыков нет | обяз. |
 
 ## Продуктовые сервисы
@@ -234,6 +239,15 @@ initData. Upload storage precedes the outbox transaction and compensates
 failures; the registered knowledge worker uses fail-closed ClamAV and
 canonical LLM Router embeddings. Research uses OutboundGateway and the
 canonical router, with tenant-scoped status/cancel/report.
+
+### Разбор темы после правки пути в интернет
+
+Поиск и чтение переживают отказ отдельного источника: пачки выполняются
+через `Promise.allSettled`, число отказов уходит в отчёт (`ResearchIssues`).
+Источники канонизируются и дедуплицируются до `maxSources`, а не после, и
+ранжируются по совпадению с запросом. Схема фактов одна на запрос и на
+разбор — `src/research/schema.ts`; несошедшаяся схема отказывает вслух
+(`structuredStrict`), а не превращается в успешные ноль фактов.
 
 ## Batch 17 — Mini App: дневник и адаптация под смартфоны
 

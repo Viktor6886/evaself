@@ -16,15 +16,19 @@ import { TaskEventService } from "./tasks/task-event-service.js";
 import { withSpan } from "./observability/tracing.js";
 import { runInTurn } from "./turns/turn-context.js";
 import {
+  messageBatchTiming,
+  timelineDetail,
+  type MessageBatchTiming,
+} from "./turns/message-timeline.js";
+import {
   TURN_FLOW_VERSION,
   type TurnHandle,
   type TurnLifecycle,
   type TurnLinks,
 } from "./turns/turn-lifecycle.js";
 import {
+  type TelegramLiveMessage,
   type TelegramMessage,
-  type TelegramMessageDraft,
-  type TelegramStreamingDraft,
   type TelegramUpdate,
   TelegramClient,
 } from "./telegram.js";
@@ -205,15 +209,16 @@ export class EvaWorkflow {
     update: NormalizedUpdate,
     earlier: NormalizedUpdate[] = [],
   ): Promise<InboxResult> {
+    // Останов — единственное, что прерывает уже идущий ход. Он не встаёт
+    // в очередь за ним: слот пользователя занят как раз тем ходом,
+    // который надо прервать, и просьба остановиться дождалась бы его
+    // конца — то есть не остановила бы ничего.
+    if (update.command === "/stop") return await this.stopRunningTurn(update);
     const typing: { stop: (() => void) | null } = { stop: null };
-    const messageDraft: { current: TelegramMessageDraft | null } = { current: null };
-    // Показ ответа по мере генерации. Держится рядом с черновиком: их
-    // общий конец — один и тот же `finally`, каким бы ни был исход хода.
-    const streaming: { current: TelegramStreamingDraft | null } = { current: null };
-    // Черновик открывается асинхронно, а ход может закончиться раньше
-    // ответа Telegram. Признак нужен, чтобы опоздавший черновик всё равно
-    // был остановлен.
-    let draftClosed = false;
+    // Ответ, который растёт на глазах: одно сообщение, которое правится
+    // по мере генерации. Его конец — общий `finally`, каким бы ни был
+    // исход хода.
+    const live: { current: TelegramLiveMessage | null } = { current: null };
     const started = performance.now();
     // Разложение задержки по этапам. Пока ход мерился одним числом,
     // «Ева долго отвечает» нечем было разобрать: очередь, сборка
@@ -260,9 +265,21 @@ export class EvaWorkflow {
     });
     // Объединённый ход проходит через `aggregating`: окно ожидания
     // быстрых сообщений — это часть хода, а не пауза перед ним.
+    //
+    // Отметки сообщений записываются здесь целиком: идентификаторы,
+    // время отправки и промежутки. Раньше от окна оставалось одно число
+    // — сколько сообщений в нём было, — и разобрать «эти два пришли с
+    // разницей в секунду» было уже нечем. Текста в записи нет.
+    const windowTiming = messageBatchTiming(
+      [...earlier, update].map((part) => ({
+        messageId: part.messageId,
+        date: part.message.date,
+      })),
+      new Date(),
+    );
     if (earlier.length > 0) {
       await this.moveTurn(turnHandle, "aggregating", {
-        detail: { messages: earlier.length + 1 },
+        detail: timelineDetail(windowTiming),
       });
     }
     await this.moveTurn(turnHandle, "queued");
@@ -439,10 +456,23 @@ export class EvaWorkflow {
           }
         }
         typing.stop = this.telegram.startTyping(update.chatId, this.config.typingIntervalMs);
+        // Окно этого хода после гейтов: голосовая часть могла выпасть по
+        // квоте, и рассказывать про неё в контексте больше нечего.
+        const promptTiming: MessageBatchTiming = messageBatchTiming(
+          parts.map((part) => ({ messageId: part.messageId, date: part.message.date })),
+          new Date(),
+        );
         // Отметка предыдущего сообщения нужна контексту: по ней считается
         // промежуток между сообщениями. Читается она здесь, потому что
         // этот же запрос её и перезаписывает.
-        const previousUserMessageAt = await this.db.recordUserMessage(user.id);
+        //
+        // Записывается время последнего сообщения человека, а не момент
+        // обработки: между отправкой и ходом стоит durable inbox, и
+        // очередь добавляла к промежутку следующего хода своё ожидание.
+        const previousUserMessageAt = await this.db.recordUserMessage(
+          user.id,
+          promptTiming.lastAt,
+        );
         const conversationId = link.conversation_id;
         if (!conversationId) throw new Error("У агента отсутствует активный conversation");
         // Сообщение Telegram связывается с тем же ходом и той же
@@ -476,31 +506,28 @@ export class EvaWorkflow {
             (update.kind === "voice" ? prompt : ""),
           turnId: turnHandle?.runId,
           previousUserMessageAt,
+          currentMessageAt: promptTiming.firstAt,
+          messageBatch: promptTiming,
         });
         metrics.context_build_ms = context.metrics?.runtimeContextMs ?? 0;
         metrics.profile_check_ms = context.metrics?.profileCheckMs ?? 0;
         const responseMode = context.responseMode;
-        // Черновик открывается параллельно с ходом, а не перед ним: его
-        // создание — обращение к Telegram, и ждать его, пока модель ещё
-        // не начала думать, значит добавить лишний круг к задержке,
-        // которую человек и ощущает.
         // Текст, показанный человеку прямо сейчас: он же сверяется с
         // итоговым ответом перед отправкой.
         let streamed = "";
         if (responseMode === "text" || responseMode === "both") {
-          const opening = this.telegram.startMessageDraft(update.chatId)
-            .then((draft) => {
-              messageDraft.current = draft;
-              // Ход мог закончиться раньше, чем Telegram ответил: тогда
-              // останавливать было нечего, и таймер черновика остался бы
-              // жить до перезапуска процесса, пустыми обновлениями в чат.
-              if (draftClosed) draft?.stop();
-              return draft;
-            })
-            .catch(() => null);
-          streaming.current = this.telegram.startStreamingDraft(update.chatId, opening);
+          // Ничего не отправляется, пока модель не прислала первый
+          // содержательный срез: до этого момента человек видит «Ева
+          // печатает», а поле ввода остаётся свободным.
+          live.current = this.telegram.startLiveMessage(update.chatId, {
+            onSent: () => {
+              // Сообщение появилось — «печатает» становится враньём.
+              typing.stop?.();
+              typing.stop = null;
+            },
+          });
         }
-        const stream = streaming.current;
+        const stream = live.current;
         // Recorded and escalated before the turn runs, so a disclosure
         // survives even if the model's answer is slow, truncated or unhelpful.
         const signal = await this.crisis?.inspect({
@@ -557,6 +584,9 @@ export class EvaWorkflow {
                 // проговаривание ответом не является.
                 onDelta: stream
                   ? (delta) => {
+                    // Новая группа — новое сообщение модели: то, что она
+                    // проговаривала до вызова инструмента, ответом не
+                    // является и к нему не приклеивается.
                     if (delta.startsGroup) streamed = "";
                     streamed += delta.text;
                     stream?.push(streamed);
@@ -571,9 +601,8 @@ export class EvaWorkflow {
           if (error instanceof EvaError && error.code === "turn_cancelled") {
             await this.moveTurn(turnHandle, "cancelling", { detail: { reason: "cancelled" } });
             await this.moveTurn(turnHandle, "cancelled");
-            streaming.current?.stop();
-            messageDraft.current?.stop();
-            messageDraft.current = null;
+            live.current?.stop();
+            live.current = null;
             return { status: "ignored" };
           }
           throw error;
@@ -619,8 +648,8 @@ export class EvaWorkflow {
         if (turnHandle && this.turns && await this.turns.isCancelled(turnHandle)) {
           await this.moveTurn(turnHandle, "cancelling", { detail: { reason: "cancelled" } });
           await this.moveTurn(turnHandle, "cancelled");
-          messageDraft.current?.stop();
-          messageDraft.current = null;
+          live.current?.stop();
+          live.current = null;
           return { status: "ignored" };
         }
 
@@ -655,14 +684,15 @@ export class EvaWorkflow {
         let deliveryMs = 0;
         const deliveryStarted = performance.now();
         if (wantsText) {
-          // Черновик уже показал ответ целиком — значит показывать его
-          // заново по словам незачем: это выглядело бы как начатый
-          // сначала ответ. Доставка при этом одна и та же durable-отправка.
-          const revealed = stream ? await stream.finish().then(() => stream!.shown) : "";
-          messageDraft.current?.stop();
-          if (revealed) await this.telegram.sendMessage(update.chatId, reply);
-          else await this.telegram.sendProgressiveMessage(update.chatId, reply, messageDraft.current);
-          messageDraft.current = null;
+          // Растущее сообщение доводится до итогового текста: тот же
+          // `message_id`, второго ответа в чате не появляется. Если
+          // показывать было нечего — модель ответила одним куском или
+          // Telegram не принял показ, — ответ уходит обычной отправкой.
+          const finished = stream
+            ? await stream.finish(reply)
+            : { delivered: false, messageId: null };
+          if (!finished.delivered) await this.telegram.sendMessage(update.chatId, reply);
+          live.current = null;
           deliveryMs += elapsed(deliveryStarted);
         }
         if (speech) {
@@ -720,9 +750,7 @@ export class EvaWorkflow {
       });
       throw error;
     } finally {
-      draftClosed = true;
-      streaming.current?.stop();
-      messageDraft.current?.stop();
+      live.current?.stop();
       typing.stop?.();
       const delivery = this.telegram.getDeliveryMetrics();
       metrics.outbox_insert_ms = delivery.outboxInsertMs;
@@ -735,6 +763,43 @@ export class EvaWorkflow {
         ...metrics,
       });
     }
+  }
+
+  /**
+   * Прервать ход по просьбе человека.
+   *
+   * Мимо очереди и мимо агента: ни модель, ни conversation здесь не
+   * нужны, нужен только барьер отмены. Ход, который его увидит,
+   * закончится сам и ничего не доставит.
+   */
+  private async stopRunningTurn(update: NormalizedUpdate): Promise<InboxResult> {
+    return await this.db.withUserScope(
+      { telegramId: update.telegramId, label: "telegram.stop" },
+      async (): Promise<InboxResult> => {
+        const from = update.message.from!;
+        const user = await this.db.upsertUser({
+          telegramId: update.telegramId,
+          username: from.username ?? null,
+          firstName: from.first_name ?? null,
+          lastName: from.last_name ?? null,
+          languageCode: from.language_code ?? null,
+        });
+        this.db.bindScopeUserId(user.id);
+        const language = preferredResponseLanguage(user);
+        const cancelled = this.turns
+          ? await this.turns.cancelActiveForUser(update.telegramId, "user_stop")
+          : 0;
+        await this.telegram.sendMessage(
+          update.chatId,
+          t(language, cancelled > 0 ? "stopped" : "nothingToStop"),
+        );
+        this.logger.info("Ход прерван по просьбе человека", {
+          telegram_id: update.telegramId,
+          cancelled,
+        });
+        return { status: "completed" };
+      },
+    );
   }
 
   private async ensureUserAndAgent(
@@ -793,7 +858,7 @@ export class EvaWorkflow {
       case "/start": {
         const firstStart = user.state === "onboarding";
         await this.db.setUserState(user.id, "active");
-        await this.telegram.sendProgressiveMessage(
+        await this.telegram.sendMessage(
           update.chatId,
           t(language, firstStart ? "startFirst" : "start"),
         );
@@ -839,6 +904,12 @@ export class EvaWorkflow {
         );
         break;
       }
+      case "/stop":
+        // Сюда команда доходит, только если ход уже начался мимо раннего
+        // пути: останавливать в этот момент нечего — этот ход и есть
+        // текущий.
+        await this.telegram.sendMessage(update.chatId, t(language, "nothingToStop"));
+        break;
       case "/privacy":
         await this.telegram.sendMessage(
           update.chatId,

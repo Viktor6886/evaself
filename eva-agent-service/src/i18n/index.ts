@@ -17,7 +17,7 @@ const ru = {
   startFirst:
     "Привет! Я Ева — собеседник и помощник в самопознании. Давай знакомиться без длинной анкеты: как мне лучше к тебе обращаться? Этот вопрос можно пропустить.",
   help:
-    "Можно писать текстом или отправлять голосовые сообщения и изображения.\n\n/balance — текущие лимиты\n/subscription — варианты доступа\n/privacy — как хранятся данные",
+    "Можно писать текстом или отправлять голосовые сообщения и изображения.\n\n/stop — прервать текущий ответ\n/balance — текущие лимиты\n/subscription — варианты доступа\n/privacy — как хранятся данные",
   limitsTitle: "Текущие лимиты:",
   limitsMissing: "Лимиты пока не настроены.",
   remaining: "осталось {value}",
@@ -27,6 +27,8 @@ const ru = {
   privacy:
     "Связь с агентом, заметки и задачи хранятся в PostgreSQL и Letta на сервере владельца Evaself. API-ключи зашифрованы и не выдаются в WebUI. Администратор может удалить агента и его данные.",
   unknownCommand: "Неизвестная команда. Список: /help",
+  stopped: "Остановила. Можно писать дальше.",
+  nothingToStop: "Сейчас нечего останавливать.",
   transcript: "Распознала: {text}",
   // Один текст на все технические причины отказа. Пользователю
   // нечего делать с «провайдер вернул 429», а «попробуй ещё раз» —
@@ -49,7 +51,7 @@ const en: Record<keyof typeof ru, string> = {
   startFirst:
     "Hi! I’m Eva, a companion and self-discovery assistant. Let’s get acquainted without a long form: what should I call you? You can skip this question.",
   help:
-    "You can send text, voice messages, or images.\n\n/balance — current limits\n/subscription — access options\n/privacy — how data is stored",
+    "You can send text, voice messages, or images.\n\n/stop — interrupt the current answer\n/balance — current limits\n/subscription — access options\n/privacy — how data is stored",
   limitsTitle: "Current limits:",
   limitsMissing: "Limits have not been configured yet.",
   remaining: "{value} remaining",
@@ -59,6 +61,8 @@ const en: Record<keyof typeof ru, string> = {
   privacy:
     "Your agent link, notes, and tasks are stored in PostgreSQL and Letta on the Evaself owner’s server. API keys are encrypted and never returned to WebUI. An administrator can delete the agent and its data.",
   unknownCommand: "Unknown command. See /help",
+  stopped: "Stopped. You can keep writing.",
+  nothingToStop: "There is nothing to stop right now.",
   transcript: "Transcribed: {text}",
   voiceFailed:
     "I could not transcribe that voice message. Please send it again or write to me instead.",
