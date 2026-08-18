@@ -75,9 +75,7 @@ export function resolveRoute(request: LlmRequest, settings: RoutingSettings): Ro
   }
 
   const purpose = request.metadata.purpose ?? "chat";
-  const purposeRoute = purpose === "maintenance"
-    ? (request.response_format ? "json" : "fast")
-    : PURPOSE_ROUTE[purpose];
+  const purposeRoute = PURPOSE_ROUTE[purpose];
   if (purposeRoute) {
     return fixed(requestedRoute, purposeRoute, "purpose", [`purpose_${purpose}`]);
   }

@@ -67,7 +67,7 @@
 | Исполнение | Сроки, AbortController, DLQ, graceful shutdown | `src/jobs/runtime.ts`, таблица `job_dead_letters` | `register(type, handler, timing?)`, `execute()`, `stop()` без `process.exit` | обяз. |
 | Вынос CPU | Тяжёлая работа вне основного event loop | `src/jobs/cpu-offload.ts` | `runCpuTask(modulePath, payload, {signal, timeoutMs})` | расш. |
 | Agent job | Единственный механизм фонового хода агента: рефлексия, отчёты, исследования | `src/jobs/agent-job.ts`, таблица `agent_job_results` | `AgentJobRunner.run()`, бюджет и структурированное предложение; памяти не пишет | обяз. |
-| Сверки обслуживания | Семь сверок «что застряло»; ничего не чинит | `src/jobs/maintenance.ts` | `ReconcileService.run()`, статусы `checked`/`failed`/`not_applicable` | расш. |
+| Сверки обслуживания | Шесть сверок «что застряло»; ничего не чинит | `src/jobs/maintenance.ts` | `ReconcileService.run()`, статусы `checked`/`failed` | расш. |
 | Зеркало переноса | Сравнение выборок старого и нового механизмов | `src/jobs/mirror.ts`, таблица `job_mirror_samples` | `compareSelections()`, `readyToCutOver()` | обяз. |
 | Проактивность | Напоминания, heartbeat, check-in на очередях | `src/jobs/proactive/`, таблицы `proactive_messages`, `checkin_episodes` | слот на местную дату, доставка только через outbox | обяз. |
 | Ступень переноса | Кто владеет задачей: интервал или очередь | `src/jobs/proactive/cutover.ts` | `legacy` · `mirror` · `queue`; на `queue` интервалы не стартуют | обяз. |

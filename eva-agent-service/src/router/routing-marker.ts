@@ -1,7 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 
 export type RoutingPurpose =
-  | "chat" | "scheduler" | "maintenance" | "profile"
+  | "chat" | "scheduler" | "profile"
   | "goal_review" | "partner_analysis" | "research";
 
 /**
@@ -64,7 +64,7 @@ export function extractRoutingMarker(
 
 function validClaims(value: RoutingMarkerClaims): boolean {
   return Boolean(value && [
-    "chat", "scheduler", "maintenance", "profile", "goal_review",
+    "chat", "scheduler", "profile", "goal_review",
     "partner_analysis", "research",
   ].includes(value.purpose));
 }

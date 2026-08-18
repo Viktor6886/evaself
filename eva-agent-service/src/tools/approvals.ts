@@ -359,7 +359,7 @@ export class ApprovalService {
     categoryFor?(toolName: string): MandatoryApprovalCategory | undefined; signal?: AbortSignal;
     conversationId?: string | null; sessionId?: string | null; actorAllowed?: boolean; toolAllowed?: boolean; riskThreshold?: ToolRisk }): CanUseToolCallback {
     return async (toolName, toolInput, context) => {
-      if (!this.enabled) return { behavior: "allow", message: "Tool approvals disabled; legacy gateway policy applies" };
+      if (!this.enabled) return { behavior: "allow", message: "Tool approvals disabled" };
       const requestId = context?.requestId;
       if (!requestId) return { behavior: "deny", message: "SDK approval request id is required", interrupt: false };
       const risk = input.riskFor(toolName);

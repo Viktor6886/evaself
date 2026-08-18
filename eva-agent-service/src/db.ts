@@ -126,7 +126,6 @@ export interface AgentRuntimeContext {
   purpose:
     | "chat"
     | "scheduler"
-    | "maintenance"
     | "profile"
     | "goal_review"
     | "partner_analysis"

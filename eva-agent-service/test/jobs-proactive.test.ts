@@ -579,13 +579,16 @@ test("готовность к снятию зеркала требует сер�
 // Сверки обслуживания
 // ---------------------------------------------------------------------
 
-test("сверка отличает «нечего проверять» от «проблем нет»", async () => {
+test("сверка отличает отказ от «проблем нет»", async () => {
   const layer = buildService();
   const report = await new ReconcileService(layer.db, logger as never).run();
 
-  const embeddings = report.findings.find((item) => item.check === "embeddings_missing");
-  assert.equal(embeddings?.status, "not_applicable");
-  assert.equal(embeddings?.reason, "vector_column_absent_until_step_18");
+  // Каждая объявленная сверка обязана выполниться: сверка, которой нечего
+  // читать, — это удалённая подсистема, а не здоровое состояние.
+  assert.deepEqual(
+    report.findings.filter((item) => item.status !== "checked"),
+    [],
+  );
 
   const outbox = report.findings.find((item) => item.check === "job_outbox_unpublished");
   assert.equal(outbox?.status, "checked");

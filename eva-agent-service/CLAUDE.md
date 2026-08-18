@@ -40,14 +40,14 @@ node --test --experimental-strip-types test/*.test.ts        # full regression
 | `src/router/` | `llm-router.test.ts`, `managed-routing.test.ts`, `llm.test.ts`, `llm-reasoning.test.ts` |
 | `src/letta.ts` | `letta.test.ts`, `letta-contract.test.ts` |
 | `src/letta/capabilities.ts` | `letta-contract.test.ts` |
+| `src/letta/readiness.ts` | `readiness.test.ts` |
+| `src/letta/admin-client.ts`, `delete-guard.ts` | `letta-admin-plane.test.ts` |
+| `src/llm.ts`, `src/llm/capability-probe.ts` | `capability-probe.test.ts`, `llm.test.ts` |
 | `src/letta/reasoning-tier.ts` | `letta.test.ts`, `sdk-settings.test.ts` |
-| `src/letta/admin-client.ts`, `memory-block-sync.ts`, `delete-guard.ts` | `letta-admin-plane.test.ts` |
 | `src/letta/memory-blocks.ts` | `runtime.test.ts`, `letta.test.ts` |
 | `package.json` (версии `@letta-ai/*`) | `letta-contract.test.ts` |
 | `src/runtime/runtime-context.ts` | `runtime.test.ts` |
 | `src/conversations/purpose-service.ts` | `conversations.test.ts` |
-| `src/memory/graph-*.ts` | `graph.test.ts` |
-| `src/memory/conversation-highlights.ts` | `highlights.test.ts` |
 | `src/tools/`, `src/agent-tools.ts` | `agent-tools.test.ts` |
 | `src/crisis.ts` | `crisis.test.ts` |
 | `src/payments.ts` | `payments.test.ts` |
@@ -105,19 +105,18 @@ node --test --experimental-strip-types test/*.test.ts        # full regression
 
 ## Размер файла
 
-Шесть файлов сервиса перешагнули 900 строк и стоят десятков тысяч токенов при
+Семь файлов сервиса перешагнули 1000 строк и стоят десятков тысяч токенов при
 каждом полном чтении:
 
 | Файл | Строк |
 |---|---|
 | `src/admin/stt-service.ts` | 1879 |
-| `src/server.ts` | 1558 |
-| `src/letta.ts` | 1541 |
+| `src/letta.ts` | 1764 |
+| `src/server.ts` | 1593 |
 | `src/admin/server.ts` | 1280 |
-| `src/db.ts` | 1215 |
+| `src/db.ts` | 1222 |
 | `src/public/webapp-core.ts` | 1090 |
-| `src/eva-workflow.ts` | 1023 |
-| `src/router/router.ts` | 928 |
+| `src/eva-workflow.ts` | 1022 |
 
 Шаг, который такой файл и так переписывает, оставляет после себя модули
 поменьше. Отдельным рефакторингом — нельзя.

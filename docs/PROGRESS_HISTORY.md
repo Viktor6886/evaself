@@ -24,6 +24,62 @@
 
 <!-- Записи ниже -->
 
+## Приёмка Letta-native — шаги 1–8
+- Ветка: `claude/evaself-remove-cognitive-middleware-9zeg9t` · PR: — · Дата: 2026-08-18 · Статус: на ревью
+- Порция задана человеком по шагам, а не файлами `prompts/`: восемь шагов
+  приёмки поверх `f104d90`, по коммиту на шаг.
+
+### Шаг 1 — источник истины архитектуры
+- `CLAUDE.md`, `PROGRESS.md`, `docs/letta-native.md`, `docs/INVARIANT_DIVERGENCES.md`
+  и `README.md` перестали требовать удалённый cognitive middleware. Прежний
+  roadmap перенесён в `docs/ROADMAP_ARCHIVE.md` как история. Runtime не менялся.
+
+### Шаг 2 — разрешения, публичный SDK, приватность трассы
+- Сессия открывается в штатном `standard` вместо `unrestricted`; состав
+  инструментов по-прежнему за Letta, но подтверждения человеком снова
+  срабатывают. Инструменты выполнения на хосте (`Bash`, `Write`, `Edit`)
+  отклоняются детерминированной границей. Приватный `session.initialize()`
+  заменён на `resumeSession` + `bootstrapState()` + `recoverPendingApprovals()`
+  без `as any`. Трасса стала metadata-only.
+
+### Шаг 3 — роутер без семантической классификации
+- `src/router/classifier.ts` удалён, вместо него `src/router/routes.ts`:
+  маршрут выводится из режима, явного запроса вызывающего, технических
+  признаков (изображение, JSON), назначения conversation и явного выбора
+  человека. Содержание сообщения на выбор модели не влияет.
+
+### Шаг 4 — контекст хода без prompt middleware
+- Постоянные правила ушли в персону и навыки; в ход подаются только факты
+  этого хода. Служебный блок: 2873 → 451 знака, минимальный ход 1961 → 161.
+
+### Шаг 5 — готовность по фактам runtime и smoke памяти
+- `/ready` отвечает `200` только когда runtime подтвердил MemFS, нативные
+  инструменты памяти, `Skill`, `Task`, продуктовый инструмент, сессию, модель
+  и режим разрешений; ненаблюдаемое помечено `not_reported`.
+  `scripts/smoke-eva-memory.mjs` переписан, добавлен canary
+  `scripts/smoke-eva-restart.mjs`.
+
+### Шаг 6 — capability probe модели
+- Перед активацией разговорной модели выполняется дешёвый технический probe:
+  completion, streaming, tool call, JSON-аргументы по схеме, приём результата
+  инструмента. Заявленный `supports_tools=true` без прохождения probe не даёт
+  сделать модель основной.
+
+### Шаг 7 — необязательная инфраструктура вне обязательного пути
+- Todoist удалён (потребителей не было), NocoDB переведён в профиль `nocodb`,
+  чистая установка перестала создавать подсистемы, которые сносит миграция 053.
+
+### Шаг 8 — финальная приёмка
+- Сверка ссылок на снятые подсистемы, удаление мёртвого кода
+  (`eva-agent-service/.skills/eva-core-safety`, назначение conversation
+  `maintenance`, сверка `embeddings_missing`, осиротевшие комментарии флагов)
+  и правка устаревшей документации.
+- Проверки: `npm run build|lint|typecheck` → PASS; `node --test test/*.test.ts`
+  → PASS (725); пять guard-скриптов → PASS; `docker compose config` → PASS;
+  `scripts/ci/test-fresh-install.sh` → PASS.
+- Ограничения: живой стенд (Telegram, речь, память после сжатия) проверяется
+  в CI и smoke-скриптами, локально не выполнялся.
+
 ## Batch 14 — шаги 19–20 (production blockers закрыты, на ревью)
 - Ветка: `batch/14-skill-core-router` · PR: — · Дата: 2026-08-12 · Статус: на ревью
 - Итог: каноническая filesystem publication теперь атомарно проецируется в tenant/environment-safe hybrid index, invalid skill сохраняет disabled/error, sticky и usages durable. Защищённый Admin endpoint и UI показывают только агрегаты routing events: latency, reranker, reasons, selected IDs/versions/scores, sticky/fallback — без текста и PII.

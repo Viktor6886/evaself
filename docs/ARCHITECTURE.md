@@ -97,10 +97,12 @@ application-layer сервис одной транзакцией.
 
 ## Conversations и память Letta
 
-`agent_conversations.purpose` разделяет `chat`, `scheduler`, `maintenance`,
-`profile`, `goal_review`, `partner_analysis` и `research`. Служебные
-conversations создаются лениво официальным SDK и имеют собственные политики
-инструментов. Планировщик не пишет prompts в основной чат.
+`agent_conversations.purpose` разделяет `chat`, `scheduler`, `profile`,
+`goal_review`, `partner_analysis` и `research`. Служебные conversations
+создаются лениво официальным SDK и имеют собственные политики инструментов.
+Планировщик не пишет prompts в основной чат. Назначения `maintenance` —
+служебной обработки памяти — нет: обслуживание памяти принадлежит Letta,
+и conversation под него Evaself не открывает.
 
 Новые agents получают четыре блока: `persona`, `human`, `current_state`,
 `therapeutic_framework`. Подробности сверх блоков Ева ведёт в MemFS

@@ -174,18 +174,8 @@ export interface Config {
    * удаляет ничего: предпросмотр работает, удаление — нет.
    */
   retentionEnforcementEnabled: boolean;
-  /** Least-privilege manifest gateway for SDK tools. */
   /** Durable PostgreSQL-backed SDK tool approvals. */
   toolApprovalsEnabled: boolean;
-  /**
-   * Temporal-память: версии фактов, evidence и разрешение сущностей.
-   * Выключенный флаг оставляет граф памяти прежним — новые таблицы
-   * существуют, но никто в них не пишет.
-   */
-  /**
-   * Детектор эпизодов и Memory Curator. Зависит от temporal-памяти:
-   * Curator пишет только через неё, и включать его отдельно нечем.
-   */
   /**
    * Дневник Mini App: запись дня, карточки людей, недельный обзор и
    * «Спросить Еву» с разделением источников. Выключено — маршрутов

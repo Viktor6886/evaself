@@ -179,8 +179,8 @@ make test
 
 Функции можно включать поэтапно через переменные
 `EVA_PROFILE_COMPLETION_ENABLED`, `EVA_VECTOR_GOALS_ENABLED`,
-`EVA_OUTBOX_ENABLED`. Полное зеркалирование conversation отключено
-по умолчанию.
+`EVA_OUTBOX_ENABLED`. Переписка в PostgreSQL не зеркалируется: история
+диалога принадлежит Letta.
 
 Команды, удаляющей volumes, намеренно нет: ошибочная команда не должна
 стереть память, conversations или настройки.
