@@ -99,6 +99,11 @@ jobs:
 
       - name: Install shellcheck and Caddy
         run: |
+          # На раннере параллельно работает свой apt. По умолчанию наша
+          # установка не ждёт освобождения, а падает с «Could not get lock»
+          # — либо стоит в очереди молча, пока job не снимут по времени.
+          printf 'DPkg::Lock::Timeout "600";\nAcquire::Retries "3";\n' \
+            | sudo tee /etc/apt/apt.conf.d/99evaself-ci >/dev/null
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck
           CADDY_VERSION="$(grep '^CADDY_VERSION=' versions.env | cut -d= -f2 | cut -d- -f1)"
@@ -602,6 +607,11 @@ jobs:
       # выглядели как две одинаковые схемы.
       - name: Install psql
         run: |
+          # На раннере параллельно работает свой apt. По умолчанию наша
+          # установка не ждёт освобождения, а падает с «Could not get lock»
+          # — либо стоит в очереди молча, пока job не снимут по времени.
+          printf 'DPkg::Lock::Timeout "600";\nAcquire::Retries "3";\n' \
+            | sudo tee /etc/apt/apt.conf.d/99evaself-ci >/dev/null
           sudo apt-get update -qq
           sudo apt-get install -y -qq curl ca-certificates
           sudo install -d /usr/share/postgresql-common/pgdg
@@ -870,7 +880,14 @@ jobs:
 
       - name: Install ffmpeg
         if: needs.changes.outputs.media == 'true'
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+        run: |
+          # На раннере параллельно работает свой apt. По умолчанию наша
+          # установка не ждёт освобождения, а падает с «Could not get lock»
+          # — либо стоит в очереди молча, пока job не снимут по времени.
+          printf 'DPkg::Lock::Timeout "600";\nAcquire::Retries "3";\n' \
+            | sudo tee /etc/apt/apt.conf.d/99evaself-ci >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
 
       - if: needs.changes.outputs.media == 'true'
         run: pip install --quiet -r requirements.txt pytest pytest-asyncio ruff
