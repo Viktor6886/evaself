@@ -38,15 +38,14 @@ export const SUBSYSTEM_SECTIONS: readonly SubsystemSection[] = [
     id: "skills",
     title: "Навыки",
     implemented: true,
-    plannedStep: "19 — ядро навыков, 20 — маршрутизатор навыков",
-    today: "Ядро загружается штатным project source Letta из `.skills`; маршрутизируемые "
-      + "версии синхронизируются с ArtifactRegistry в tenant-scoped PostgreSQL hybrid index. "
-      + "Решения, sticky state, latency и вызовы reranker сохраняются без сырого текста.",
+    plannedStep: "19 — ядро навыков",
+    today: "Навыки лежат в каталоге `skills/`, который монтируется в App Server "
+      + "как `/data/letta/.skills`, и загружаются штатным project source Letta. "
+      + "Какой навык открыть, решает Letta по `description`: своего маршрутизатора, "
+      + "индекса и статистики выбора у Evaself нет и не будет.",
     willShow: [
       "каталог: имя, версия, статус, хэш содержимого",
-      "ошибки индексации и статистика выбора",
-      "включение, отключение, переиндексация",
-      "тестовый прогон маршрутизации по запросу",
+      "какие навыки видит App Server",
     ],
   },
   {

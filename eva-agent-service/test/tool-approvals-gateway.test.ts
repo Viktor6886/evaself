@@ -3,9 +3,6 @@ import { test } from "node:test";
 import { access, readFile } from "node:fs/promises";
 
 import { ApprovalService, approvalDecision, approvalRequiredFor, fingerprintApprovalArguments } from "../dist/tools/approvals.js";
-import { createCanonicalToolManifestRegistry } from "../dist/agent-tools.js";
-import { ToolApprovalService } from "../dist/admin/tool-approvals.js";
-import { ToolGatewayStateStore } from "../dist/tools/gateway.js";
 import { runInScope, userScope } from "../dist/tenancy/index.js";
 import { withTenantScopes } from "./tenant-scope-helper.ts";
 
@@ -88,7 +85,7 @@ test("persistent policy is tenant isolated, exact-tool, deny-first and ignores e
   assert.equal(await service.evaluatePolicy({ userId: 9, toolName: "delete_tasks", risk: "destructive", sessionId: "s-1", actorAllowed: true, toolAllowed: true }), "approval_required");
 });
 
-test("actor and manifest restrictions precede grants and rule max risk is enforced", async () => {
+test("ограничения актора и инструмента идут раньше грантов, max_risk правила соблюдается", async () => {
   const db = new ApprovalDb();
   db.rules.push({ id: 1, user_id: 7, tool_name: "save_task", decision: "allow", scope: "standing", max_risk: "low_risk_write", session_id: null, expires_at: null, revoked_at: null });
   const service = new ApprovalService(db as never, true);
@@ -124,14 +121,6 @@ test("mandatory approval categories and risks cannot be bypassed", () => {
   assert.equal(approvalRequiredFor("read"), false);
 });
 
-
-test("admin inventory consumes the same populated canonical registry", async () => {
-  const db = { query: async () => ({ rows: [] }) };
-  const registry = createCanonicalToolManifestRegistry();
-  const inventory = await new ToolApprovalService(db, registry, new ToolGatewayStateStore(db as never)).tools();
-  assert.equal((inventory.manifests as unknown[]).length, registry.list().length);
-  assert.ok((inventory.manifests as unknown[]).length > 20);
-});
 
 test("SDK canUseTool uses exact requestId, pauses turn, durable-prompts Telegram and resumes decision", async () => {
   const db = new ApprovalDb(); const sent: unknown[] = []; const states: string[] = [];
@@ -270,14 +259,9 @@ test("migration and rollback persist approval conversation plus nullable canonic
     return;
   }
   const up = await readFile(upPath, "utf8");
-  const down = await readFile(downPath, "utf8");
   assert.match(up, /conversation_id text REFERENCES agent_conversations\(conversation_id\)/);
   assert.match(up, /argument_fingerprint text NOT NULL/);
   assert.match(up, /idx_tool_approvals_execution_match/);
-  assert.match(up, /current_task_tools text\[\] NULL/);
-  assert.match(up, /selected_skill_tools text\[\] NULL/);
-  assert.match(down, /DROP COLUMN IF EXISTS selected_skill_tools/);
-  assert.match(down, /DROP COLUMN IF EXISTS current_task_tools/);
 });
 
 test("approval waiting is bounded and cancellation denies without an infinite promise", async () => {
@@ -296,7 +280,7 @@ test("approval waiting is bounded and cancellation denies without an infinite pr
   assert.equal((await cancelled.lookup(7, "cancelled"))?.status, "cancelled");
 });
 
-test("mandatory manifest operation category requires approval even for read risk", async () => {
+test("обязательная категория операции требует подтверждения даже при риске read", async () => {
   const db = new ApprovalDb();
   const service = new ApprovalService(db as never, true, { pollIntervalMs: 2, waitTimeoutMs: 10 });
   const callback = service.canUseTool({ userId: 7, chatId: 77, turn: {}, riskFor: () => "read", categoryFor: () => "memory_export" });
@@ -304,10 +288,10 @@ test("mandatory manifest operation category requires approval even for read risk
   assert.equal((await service.lookup(7, "mandatory-category"))?.status, "expired");
 });
 
-test("gateway-first rollout keeps legacy behavior when approvals are disabled", async () => {
+test("выключенная подсистема подтверждений разрешает вызов", async () => {
   const service = new ApprovalService(new ApprovalDb() as never, false);
   const callback = service.canUseTool({ userId: 7, chatId: 77, turn: {}, riskFor: () => "destructive", categoryFor: () => "data_deletion" });
-  assert.deepEqual(await callback("delete_tasks", {}, { requestId: "gateway-only" }), { behavior: "allow", message: "Tool approvals disabled; legacy gateway policy applies" });
+  assert.deepEqual(await callback("delete_tasks", {}, { requestId: "gateway-only" }), { behavior: "allow", message: "Tool approvals disabled" });
 });
 
 test("каждый запрос подтверждений проходит границу арендатора внутри хода пользователя", async () => {

@@ -1,0 +1,79 @@
+# Живая проверка Евы на настоящем стенде.
+#
+# Общий CI её не запускает намеренно: она открывает разговор с реальной
+# моделью, а значит стоит денег и зависит от чужой доступности. Место
+# такой проверки — отдельный запуск: вручную перед выпуском и ночью по
+# расписанию, на дешёвой тестовой модели.
+#
+# Секретов нет — проверка не выполняется и честно об этом сообщает.
+# Молчаливого «прошло» здесь быть не должно: непроверенное не равно
+# исправному.
+name: Live smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      restart_canary:
+        description: "Также проверить память после перезапуска App Server"
+        type: boolean
+        default: false
+  schedule:
+    # Ночью по UTC: стенд свободен, а результат виден к утру.
+    - cron: "17 2 * * *"
+
+concurrency:
+  group: live-smoke
+  cancel-in-progress: false
+
+jobs:
+  memory:
+    name: Память, возможности и форма ответа
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      LETTA_APP_SERVER_URL: ${{ secrets.LIVE_SMOKE_APP_SERVER_URL }}
+      LETTA_APP_SERVER_TOKEN: ${{ secrets.LIVE_SMOKE_APP_SERVER_TOKEN }}
+      EVA_MODEL: ${{ secrets.LIVE_SMOKE_MODEL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.22"
+          cache: npm
+          cache-dependency-path: eva-agent-service/package-lock.json
+
+      - name: Стенд объявлен
+        id: stand
+        run: |
+          if [ -z "$LETTA_APP_SERVER_URL" ]; then
+            echo "::warning::LIVE_SMOKE_APP_SERVER_URL не задан: живая проверка не выполнялась"
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Сборка сервиса
+        if: steps.stand.outputs.configured == 'true'
+        working-directory: eva-agent-service
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      # Скрипт создаёт временного агента с пометкой `evaself-smoke` и
+      # удаляет его за собой в любом исходе.
+      - name: Память, нативные возможности и форма психологического ответа
+        if: steps.stand.outputs.configured == 'true'
+        run: node scripts/smoke-eva-memory.mjs
+
+      # Перезапуск роняет все сессии и стоит минуты, поэтому он идёт
+      # только по явной просьбе.
+      - name: Факт переживает перезапуск App Server
+        if: steps.stand.outputs.configured == 'true' && inputs.restart_canary
+        run: node scripts/smoke-eva-restart.mjs
+
+      - name: Проверка не выполнялась
+        if: steps.stand.outputs.configured != 'true'
+        run: |
+          echo "Живая проверка пропущена: стенд не объявлен в секретах."
+          echo "Это не результат PASS — проверка просто не выполнялась."

@@ -77,6 +77,14 @@ export interface LlmProviderRow {
   last_models: unknown[] | null;
   created_at: Date;
   updated_at: Date;
+  /**
+   * Заявленный профиль возможностей (миграция 017). Заявление — это
+   * намерение администратора; проверяет его capability probe.
+   */
+  supports_tools?: boolean;
+  supports_json?: boolean;
+  supports_vision?: boolean;
+  supports_streaming?: boolean;
 }
 
 export interface ModelMapping {
@@ -94,12 +102,7 @@ export interface SdkSettingsRow {
   permission_mode: "standard" | "acceptEdits" | "unrestricted" | "strict";
   reasoning_effort: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
   memfs_enabled: boolean;
-  system_prompt: string | null;
   base_tools: string[] | null;
-  allowed_tools: string[] | null;
-  disallowed_tools: string[];
-  skill_sources: Array<"bundled" | "global" | "agent" | "project">;
-  system_info_reminder: boolean;
   dreaming: Record<string, unknown>;
   model_settings: Record<string, unknown>;
   default_context_window: number | null;
@@ -111,13 +114,6 @@ export interface SdkSettingsRow {
   session_idle_ms: number;
   turn_timeout_ms: number;
   app_server_request_timeout_ms: number;
-  automatic_context_management: {
-    enabled: boolean;
-    compaction_message_threshold: number;
-    rotation_message_threshold: number;
-    compaction_mode: "sliding_window" | "all" | "self_compact_sliding_window" | "self_compact_all";
-    sliding_window_percentage: number;
-  };
   created_at: Date;
   updated_at: Date;
 }
@@ -130,7 +126,6 @@ export interface AgentRuntimeContext {
   purpose:
     | "chat"
     | "scheduler"
-    | "maintenance"
     | "profile"
     | "goal_review"
     | "partner_analysis"
@@ -138,8 +133,6 @@ export interface AgentRuntimeContext {
   timezone: string;
   responseMode: "text" | "voice" | "both";
   useEmoji: boolean;
-  currentTaskTools: string[] | null;
-  selectedSkillTools: string[] | null;
 }
 
 export interface AdminAuditInput {
@@ -346,8 +339,6 @@ export class Database {
       timezone: string;
       response_mode: "text" | "voice" | "both";
       use_emoji: boolean;
-      current_task_tools: string[] | null;
-      selected_skill_tools: string[] | null;
     }>(
       `
         -- tenant: system — каноническое сопоставление conversation → пользователь, отсюда берётся владелец для областей
@@ -358,9 +349,7 @@ export class Database {
               c.purpose,
               u.timezone,
               COALESCE(p.response_mode, 'text') AS response_mode,
-              COALESCE(p.use_emoji, true) AS use_emoji,
-              c.current_task_tools,
-              c.selected_skill_tools
+              COALESCE(p.use_emoji, true) AS use_emoji
          FROM agent_conversations c
          JOIN users u ON u.id = c.user_id
          LEFT JOIN user_preferences p ON p.user_id = u.id
@@ -386,8 +375,6 @@ export class Database {
           timezone: row.timezone,
           responseMode: row.response_mode,
           useEmoji: row.use_emoji,
-          currentTaskTools: row.current_task_tools,
-          selectedSkillTools: row.selected_skill_tools,
         }
       : null;
   }
@@ -930,24 +917,18 @@ export class Database {
          permission_mode = $6,
          reasoning_effort = $7,
          memfs_enabled = $8,
-         system_prompt = $9,
-         base_tools = $10,
-         allowed_tools = $11,
-         disallowed_tools = $12,
-         skill_sources = $13,
-         system_info_reminder = $14,
-         dreaming = $15::jsonb,
-         model_settings = $16::jsonb,
-         default_context_window = $17,
-         conversation_summary = $18,
-         conversation_description = $19,
-         conversation_hidden = $20,
-         create_conversation = $21,
-         session_pool_size = $22,
-         session_idle_ms = $23,
-         turn_timeout_ms = $24,
-         app_server_request_timeout_ms = $25,
-         automatic_context_management = $26::jsonb
+         base_tools = $9,
+         dreaming = $10::jsonb,
+         model_settings = $11::jsonb,
+         default_context_window = $12,
+         conversation_summary = $13,
+         conversation_description = $14,
+         conversation_hidden = $15,
+         create_conversation = $16,
+         session_pool_size = $17,
+         session_idle_ms = $18,
+         turn_timeout_ms = $19,
+         app_server_request_timeout_ms = $20
        WHERE id = 1
        RETURNING *`,
       [
@@ -959,12 +940,7 @@ export class Database {
         input.permission_mode,
         input.reasoning_effort,
         input.memfs_enabled,
-        input.system_prompt,
         input.base_tools,
-        input.allowed_tools,
-        input.disallowed_tools,
-        input.skill_sources,
-        input.system_info_reminder,
         JSON.stringify(input.dreaming),
         JSON.stringify(input.model_settings),
         input.default_context_window,
@@ -976,7 +952,6 @@ export class Database {
         input.session_idle_ms,
         input.turn_timeout_ms,
         input.app_server_request_timeout_ms,
-        JSON.stringify(input.automatic_context_management),
       ],
     );
     return rows[0]!;

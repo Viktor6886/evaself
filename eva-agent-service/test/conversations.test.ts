@@ -152,7 +152,6 @@ test("purpose policy denies destructive chat tools in research conversations", a
     "web_search",
     "PERPLEXITY_SEARCH",
     "brave_search",
-    "LIGHTRAG_QUERY",
   ]);
 });
 
@@ -200,7 +199,6 @@ test("destructive tools require backend confirmation", async () => {
   const factory = new AgentToolFactory(
     {
       searxngUrl: "http://search.invalid",
-      todoistApiUrl: "https://api.todoist.invalid/rest/v2",
     } as never,
     withTenantScopes({
       getAgentRuntimeContext: async () => ({

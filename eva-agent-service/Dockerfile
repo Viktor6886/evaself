@@ -17,7 +17,6 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 COPY package.json package-lock.json* ./
-COPY scripts ./scripts
 RUN npm ci --no-audit --no-fund
 
 COPY tsconfig.json ./
@@ -46,7 +45,6 @@ WORKDIR /app
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/package.json ./package.json
-COPY .skills ./.skills
 COPY docker-entrypoint.sh /usr/local/bin/evaself-entrypoint
 
 RUN mkdir -p /data/letta-config/providers /data/llm-control \

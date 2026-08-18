@@ -17,37 +17,18 @@ test("SDK settings validate all persisted runtime limits", () => {
     session_idle_ms: 120000,
     turn_timeout_ms: 180000,
     app_server_request_timeout_ms: 90000,
-    automatic_context_management: {
-      enabled: true,
-      compaction_message_threshold: 300,
-      rotation_message_threshold: 600,
-      compaction_mode: "sliding_window",
-      sliding_window_percentage: 0.5,
-    },
   });
 
   assert.equal(settings.agent_name_prefix, "eva-test");
   assert.deepEqual(settings.default_tags, ["evaself", "test"]);
   assert.equal(settings.permission_mode, "standard");
   assert.equal(settings.default_context_window, 65536);
-  assert.deepEqual(settings.automatic_context_management, {
-    enabled: true,
-    compaction_message_threshold: 300,
-    rotation_message_threshold: 600,
-    compaction_mode: "sliding_window",
-    sliding_window_percentage: 0.5,
-  });
 });
 
-test("SDK settings reject rotation before compaction", () => {
-  assert.throws(
-    () => validateSettings({ automatic_context_management: {
-      enabled: true,
-      compaction_message_threshold: 600,
-      rotation_message_threshold: 300,
-    } }),
-    (error: unknown) => error instanceof EvaError && error.code === "bad_request",
-  );
+test("умолчание режима разрешений безопасное", () => {
+  // `unrestricted` разрешает любой вызов не спрашивая: подтверждения
+  // действий человеком в нём не срабатывают вовсе.
+  assert.equal(validateSettings({}).permission_mode, "standard");
 });
 
 test("SDK settings reject unsafe enum values and invalid timeouts", () => {
@@ -60,9 +41,8 @@ test("SDK settings reject unsafe enum values and invalid timeouts", () => {
     (error: unknown) => error instanceof EvaError && error.code === "bad_request",
   );
   for (const unsupported of [
-    { disallowed_tools: ["Bash"] },
-    { system_info_reminder: true },
-    { dreaming: { trigger: "step-count", behavior: "reminder", stepCount: 20 } },
+    { dreaming: { trigger: "never" } },
+    { dreaming: { trigger: "compaction-event", behavior: "always" } },
   ]) {
     assert.throws(
       () => validateSettings(unsupported),
@@ -204,13 +184,6 @@ function settingsRow() {
     session_idle_ms: 600000,
     turn_timeout_ms: 240000,
     app_server_request_timeout_ms: 180000,
-    automatic_context_management: {
-      enabled: false,
-      compaction_message_threshold: 300,
-      rotation_message_threshold: 600,
-      compaction_mode: "sliding_window",
-      sliding_window_percentage: 0.5,
-    },
     created_at: now,
     updated_at: now,
   };

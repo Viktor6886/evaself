@@ -12,7 +12,7 @@ default and can be rolled back independently.
   buckets and Router reservations. These are operational data and contain no
   message text, prompts, answers, Telegram tokens, or personal profile data.
 - PostgreSQL `llm_route_providers` remains the ordered provider-chain registry for
-  `fast`, `chat`, `deep`, `classifier`, and `research`. A chain can contain a
+  `fast`, `chat`, `deep`, `json`, and `research`. A chain can contain a
   primary and one or more fallbacks; no provider or credential is invented by the
   migration.
 - PostgreSQL remains the canonical shared circuit breaker. Migration 034 adds

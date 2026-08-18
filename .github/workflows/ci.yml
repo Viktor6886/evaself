@@ -191,15 +191,30 @@ jobs:
           # Прямое обращение к провайдеру в обход роутера возвращает
           # прежнюю проблему: смена провайдера снова потребует правки кода
           # и перезапуска App Server.
+          #
+          # Ровно одно исключение — `src/llm/capability-probe.ts`. Он
+          # проверяет провайдера, которого ещё нет в реестре: маршрута к
+          # нему не существует, и вести такую проверку через роутер
+          # значило бы регистрировать непроверенную модель, чтобы её
+          # проверить. Пользовательских данных probe не получает.
           if grep -rn "chat/completions" eva-agent-service/src \
                --include="*.ts" \
                | grep -v "^eva-agent-service/src/router/" \
-               | grep -v "^eva-agent-service/src/skills/" \
+               | grep -v "^eva-agent-service/src/llm/capability-probe.ts:" \
                | grep -v "routerUrl"; then
             echo "::error::обращение к /chat/completions в обход LLM Router"
             exit 1
           fi
-          echo "все вызовы моделей идут через роутер"
+
+          # Исключение обязано остаться на пути активации провайдера и не
+          # попасть в обычный ход. Единственный потребитель probe —
+          # `src/llm.ts`, который вызывает его из `activate()`.
+          importers="$(grep -rln "llm/capability-probe.js" eva-agent-service/src --include="*.ts" || true)"
+          if [ "$importers" != "eva-agent-service/src/llm.ts" ]; then
+            echo "::error::capability probe вызывается не только из пути активации: $importers"
+            exit 1
+          fi
+          echo "все вызовы моделей идут через роутер, кроме probe активации"
 
       - name: An upgrade backfills settings added since installation
         run: |
@@ -384,10 +399,7 @@ jobs:
     env:
       EVA_PROFILE_COMPLETION_ENABLED: "true"
       EVA_VECTOR_GOALS_ENABLED: "true"
-      EVA_GRAPH_MEMORY_ENABLED: "true"
-      EVA_GRAPH_CONTEXT_TIMEOUT_MS: "75"
       EVA_PROFILE_CACHE_TTL_SECONDS: "60"
-      EVA_CONVERSATION_MIRROR_ENABLED: "false"
       EVA_OUTBOX_ENABLED: "true"
     defaults:
       run:
@@ -533,8 +545,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Клиент из репозитория Ubuntu — шестнадцатой версии, а сервер здесь
+      # семнадцатой: `pg_dump` при таком расхождении отказывается снимать
+      # дамп вовсе. Раньше это было незаметно, потому что сравнение схем
+      # шло через process substitution и два несостоявшихся дампа
+      # выглядели как две одинаковые схемы.
       - name: Install psql
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq curl ca-certificates
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
+            https://apt.postgresql.org/pub/repos/apt noble-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-17
+          psql --version
+          /usr/lib/postgresql/17/bin/pg_dump --version
 
       - name: Extensions
         run: |
@@ -570,7 +599,6 @@ jobs:
               'payment_intents','admin_audit_log','user_north','goals',
               'goal_results','goal_dependencies','work_blocks','goal_reviews',
               'goal_recommendations','user_strategies','learning_attempts',
-              'memory_nodes','memory_edges','conversation_highlights',
               'admin_users','admin_sessions','sudo_grants','system_settings',
               'config_versions','secret_records','audit_log',
               'integration_configs','provider_configs','provider_models',
@@ -678,32 +706,6 @@ jobs:
           npm ci --no-audit --no-fund
           npm run build
 
-      - name: Перенос памяти идемпотентен и сохраняет владельца
-        working-directory: eva-agent-service
-        run: node ../scripts/ci/test-memory-backfill.mjs
-
-      # «ГОТОВО, КОГДА» шага 17 требует воспроизводимого отчёта: все
-      # внесённые дефекты найдены и ни одного выдуманного. Поддельная
-      # база в тестах сервиса этого не покажет — она не считает
-      # similarity(), не знает пересечения периодов действительности и
-      # не выполняет NOT EXISTS по чужой таблице. Поэтому проверки
-      # диагностики гоняются здесь, на настоящей схеме, на двух
-      # пользователях: с дефектами и заведомо чистом.
-      - name: Диагностика памяти находит внесённые дефекты и не выдумывает чужих
-        working-directory: eva-agent-service
-        run: node ../scripts/ci/test-memory-doctor.mjs
-
-      # Забытый предикат владельца в векторном поиске даёт зелёные тесты
-      # и чужую память в ответе: поддельная база не выполняет ни `<=>`,
-      # ни рекурсивный обход графа. Здесь запрос идёт вектором, СОВПАДАЮЩИМ
-      # с чужим фрагментом, — утечка была бы видна сразу.
-      - name: Гибридный поиск изолирует пользователей и отвечает «на дату»
-        working-directory: eva-agent-service
-        run: node ../scripts/ci/test-hybrid-retrieval.mjs
-
-      - name: Навыки проходят production semantics на PostgreSQL после 047
-        run: node scripts/ci/test-skills-postgres.mjs
-
       # «ГОТОВО, КОГДА» шага 25 требует, чтобы правка и удаление
       # доходили до производных данных. Каскады, `ON CONFLICT` по
       # нормализованному имени и удаление осиротевшей карточки человека
@@ -712,13 +714,25 @@ jobs:
       - name: "Дневник Mini App: удаление доходит до производных данных"
         run: node scripts/ci/test-journal-postgres.mjs
 
+      # Чистая установка пропускает миграции, чей результат отменяет 053.
+      # Допустимо это ровно тогда, когда обе схемы совпадают, и проверить
+      # это можно только построив обе по-настоящему.
+      - name: Чистая установка даёт ту же схему, что и полная цепочка
+        run: ./scripts/ci/test-fresh-install.sh
+
       # Откат выполняется ровно тогда, когда что-то уже пошло не так, и
       # проверять его в этот момент поздно. Здесь он прогоняется на
       # заведомо целой базе: назад по всем down, затем снова вперёд.
       - name: Rollback and re-apply (down migrations must actually work)
         run: |
           BEFORE="$(psql -tA -c 'SELECT count(*) FROM schema_migrations')"
-          psql -tAc "SELECT 1 FROM schema_migrations WHERE version='047_skills'" | grep -qx 1 || { echo "::error::047_skills не применена до rollback"; exit 1; }
+          # Снимок сеяного состояния до отката. Сравнивается он же, а не
+          # записанное когда-то число: маршрут, снятый миграцией, менял
+          # это число и валил проверку, ничего не сказав о том, цел ли
+          # цикл down -> up.
+          psql -tA -c 'SELECT code FROM llm_routes ORDER BY 1' > /tmp/routes-before.txt
+          psql -tA -c 'SELECT metric FROM quotas ORDER BY 1' > /tmp/quotas-before.txt
+          psql -tAc "SELECT 1 FROM schema_migrations WHERE version='053_remove_cognitive_middleware'" | grep -qx 1 || { echo "::error::053_remove_cognitive_middleware не применена до rollback"; exit 1; }
 
           for f in $(ls -r postgres/migrations/down/*.sql); do
             echo "== down $f"
@@ -726,7 +740,7 @@ jobs:
           done
 
           AFTER="$(psql -tA -c 'SELECT count(*) FROM schema_migrations')"
-          [ "$(psql -tAc "SELECT count(*) FROM schema_migrations WHERE version='047_skills'")" = "0" ] || { echo "::error::down/047_skills.sql не снял версию"; exit 1; }
+          [ "$(psql -tAc "SELECT count(*) FROM schema_migrations WHERE version='053_remove_cognitive_middleware'")" = "0" ] || { echo "::error::down/053_remove_cognitive_middleware.sql не снял версию"; exit 1; }
           COUNT="$(ls postgres/migrations/down/*.sql | wc -l)"
           EXPECTED=$((BEFORE - COUNT))
           if [ "$AFTER" != "$EXPECTED" ]; then
@@ -740,30 +754,43 @@ jobs:
           done
 
           FINAL="$(psql -tA -c 'SELECT count(*) FROM schema_migrations')"
-          psql -tAc "SELECT 1 FROM schema_migrations WHERE version='047_skills'" | grep -qx 1 || { echo "::error::047_skills не восстановлена"; exit 1; }
+          psql -tAc "SELECT 1 FROM schema_migrations WHERE version='053_remove_cognitive_middleware'" | grep -qx 1 || { echo "::error::053_remove_cognitive_middleware не восстановлена"; exit 1; }
           if [ "$FINAL" != "$BEFORE" ]; then
             echo "::error::после повторного наката ожидалось $BEFORE записей, получено $FINAL"
             exit 1
           fi
 
           # Схема должна вернуться целиком, а не «почти», и сеяные строки
-          # после цикла не должны ни пропасть, ни удвоиться.
+          # после цикла не должны ни пропасть, ни удвоиться. Сравнивается
+          # снимок, снятый до отката, — числа в проверке не зашиты.
+          psql -tA -c 'SELECT code FROM llm_routes ORDER BY 1' > /tmp/routes-after.txt
+          psql -tA -c 'SELECT metric FROM quotas ORDER BY 1' > /tmp/quotas-after.txt
+          diff -u /tmp/routes-before.txt /tmp/routes-after.txt \
+            || { echo "::error::цикл down -> up изменил набор маршрутов"; exit 1; }
+          diff -u /tmp/quotas-before.txt /tmp/quotas-after.txt \
+            || { echo "::error::цикл down -> up изменил сеяные квоты"; exit 1; }
+
           psql -v ON_ERROR_STOP=1 -tA <<'SQL'
           DO $$
           BEGIN
             IF to_regclass('public.admin_users') IS NULL
                OR to_regclass('public.llm_routes') IS NULL
-               OR to_regclass('public.admin_user_notes') IS NULL
-               OR to_regclass('public.skill_search_index') IS NULL
-               OR to_regclass('public.skill_routing_state') IS NULL
-               OR to_regclass('public.skill_routing_events') IS NULL THEN
+               OR to_regclass('public.admin_user_notes') IS NULL THEN
               RAISE EXCEPTION 'после отката и наката схема восстановилась не полностью';
             END IF;
-            IF (SELECT count(*) FROM quotas) <> 9 THEN
-              RAISE EXCEPTION 'quotas после цикла: %', (SELECT count(*) FROM quotas);
+            -- Маршрут классификатора снят миграцией 056 намеренно: он
+            -- существовал ради отдельного LLM-вызова, решавшего за Letta,
+            -- насколько глубоко думать. Вернуться он может только откатом.
+            IF EXISTS (SELECT 1 FROM llm_routes WHERE code IN ('classifier', 'safety')) THEN
+              RAISE EXCEPTION 'семантический маршрут вернулся в llm_routes';
             END IF;
-            IF (SELECT count(*) FROM llm_routes) <> 10 THEN
-              RAISE EXCEPTION 'llm_routes после цикла: %', (SELECT count(*) FROM llm_routes);
+            -- Рабочие маршруты обязаны быть на месте: без них смена
+            -- провайдера в панели не на что опереться.
+            IF EXISTS (
+              SELECT code FROM unnest(ARRAY['chat','deep','fast','json','research','vision','tools','single']) AS code
+               EXCEPT SELECT code FROM llm_routes
+            ) THEN
+              RAISE EXCEPTION 'после цикла пропал рабочий маршрут';
             END IF;
           END $$;
           SQL
@@ -872,12 +899,6 @@ jobs:
           docker build -t evaself/backup-service:ci \
             --build-arg POSTGRES_IMAGE="$POSTGRES_IMAGE" --build-arg POSTGRES_VERSION="$POSTGRES_VERSION" backup-service
 
-      - name: validated_skills isolated volume lifecycle
-        if: needs.changes.outputs.docs_only != 'true'
-        env:
-          VALIDATED_SKILLS_IMAGE: evaself/eva-agent-service:ci
-        run: ./scripts/ci/test-validated-skills-volume.sh
-
       - name: The App Server image really serves the App Server
         if: needs.changes.outputs.docs_only != 'true'
         run: |
@@ -971,10 +992,15 @@ jobs:
           done
           ./scripts/db-migrate.sh
 
-      - name: NocoDB automatically imports every Eva table
+      # NocoDB не входит в обязательный stack: он поднимается профилем и
+      # только здесь. То, что все предыдущие и последующие шаги работают
+      # без него, и есть доказательство, что ядро от него не зависит.
+      - name: NocoDB поднимается профилем и импортирует таблицы Eva
         if: needs.changes.outputs.docs_only != 'true'
         run: |
-          docker compose --env-file versions.env --env-file .env up -d nocodb
+          docker compose --env-file versions.env --env-file .env config --services \
+            | grep -qx nocodb && { echo "::error::NocoDB не должен входить в обязательный stack"; exit 1; }
+          COMPOSE_PROFILES=nocodb docker compose --env-file versions.env --env-file .env up -d nocodb
           for i in $(seq 1 90); do
             STATUS="$(docker inspect -f \
               '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' \
@@ -1321,7 +1347,7 @@ jobs:
           const conversation = await call(owner, '/users/' + userId + '/conversation?limit=20');
           if (!conversation.ok) throw new Error('conversation failed: ' + conversation.status);
           const payload = await conversation.json();
-          if (!Array.isArray(payload.messages) || !Array.isArray(payload.highlights)) {
+          if (!Array.isArray(payload.messages) || !Array.isArray(payload.conversations)) {
             throw new Error('conversation payload is malformed');
           }
 
@@ -1358,12 +1384,12 @@ jobs:
           console.log(JSON.stringify({users:'ok', user_id:userId}));
           NODE
 
-      - name: Validated project skill is mounted where the Agent SDK session expects it
+      - name: Project skills are mounted where the Agent SDK session expects them
         if: needs.changes.outputs.docs_only != 'true'
         run: |
           docker compose --env-file versions.env --env-file .env \
             exec -T letta-app-server sh -c \
-            'test -s /data/letta/.skills/eva-core-safety/SKILL.md'
+            'test -s /data/letta/.skills/memory-hygiene/SKILL.md'
 
       - name: Public webhooks reject forged requests
         if: needs.changes.outputs.docs_only != 'true'
@@ -1606,6 +1632,37 @@ jobs:
                   req.on('end', () => {
                     const body = JSON.parse(raw || '{}');
                     const id = 'chatcmpl-evaself-ci';
+                    const messages = body.messages || [];
+                    // Проба совместимости: настоящая разговорная модель
+                    // обязана вызвать инструмент с аргументами по схеме,
+                    // принять его результат и завершить цикл ответом.
+                    // Отвечаем вызовом только на саму пробу, иначе
+                    // обычный ход Евы получил бы вызов несуществующего
+                    // инструмента.
+                    const probing = (body.tools || []).some(
+                      tool => (tool.function || {}).name === 'evaself_capability_probe');
+                    const returning = messages.some(message => message.role === 'tool');
+                    if (probing && !returning) {
+                      res.end(JSON.stringify({
+                        id, object:'chat.completion', created:Math.floor(Date.now()/1000),
+                        model:body.model || 'ci-model-b',
+                        choices:[{index:0,message:{role:'assistant',content:null,tool_calls:[{
+                          id:'call-ci-1', type:'function',
+                          function:{name:'evaself_capability_probe', arguments:'{\"value\":\"ok\"}'},
+                        }]},finish_reason:'tool_calls'}],
+                        usage:{prompt_tokens:10,completion_tokens:3,total_tokens:13},
+                      }));
+                      return;
+                    }
+                    if ((body.response_format || {}).type === 'json_object') {
+                      res.end(JSON.stringify({
+                        id, object:'chat.completion', created:Math.floor(Date.now()/1000),
+                        model:body.model || 'ci-model-b',
+                        choices:[{index:0,message:{role:'assistant',content:'{\"ok\":true}'},finish_reason:'stop'}],
+                        usage:{prompt_tokens:10,completion_tokens:3,total_tokens:13},
+                      }));
+                      return;
+                    }
                     if (body.stream) {
                       res.writeHead(200, {'Content-Type':'text/event-stream'});
                       res.write('data: ' + JSON.stringify({
@@ -1696,10 +1753,13 @@ jobs:
           const dead = await provider('ci-dead', 'http://127.0.0.1:9');
           const live = await provider('ci-live', 'http://evaself-llm-mock:9000/v1');
 
-          // Managed routing отправляет короткий `ping` в fast. Fixture
-          // пишет БД напрямую (мимо admin API, который заполняет все
-          // цепочки), поэтому обязан назначить и фактически выбранный
-          // маршрут, иначе проверяется неполная конфигурация, а не failover.
+          // Маршрут выводится детерминированно: `model: 'eva/chat'` — это
+          // `chat`, и содержание сообщения на выбор не влияет. Прежде
+          // короткий `ping` уходил в `fast`, потому что роутер разбирал
+          // текст и решал, насколько глубоко думать; этого разбора больше
+          // нет. Fixture пишет БД напрямую, мимо admin API, который
+          // заполняет все цепочки, поэтому назначает обе — иначе
+          // проверялась бы неполная конфигурация, а не отработка отказа.
           await pool.query(
             `DELETE FROM llm_route_providers
               WHERE route_code IN ('chat', 'fast')`);
@@ -1747,8 +1807,9 @@ jobs:
             `SELECT primary_provider_id, actual_provider_id, switches,
                     switch_reason, succeeded, attempts
                FROM llm_requests
-              WHERE route_code = 'fast'
+              WHERE route_code = 'chat'
               ORDER BY started_at DESC LIMIT 1`);
+          if (!record) throw new Error('router wrote no telemetry for the chat route');
           if (!record.succeeded) throw new Error('router recorded a failed request');
           if (record.primary_provider_id !== dead) {
             throw new Error('the dead provider was not the head of the chain');
@@ -2105,6 +2166,54 @@ jobs:
             " | tee /tmp/sdk-chat
           grep -q '"reply":"CI chat ok"' /tmp/sdk-chat
           grep -q '"streamed":true' /tmp/sdk-chat
+
+      - name: Готовность подтверждается фактами runtime, а не конфигурацией
+        if: needs.changes.outputs.docs_only != 'true'
+        run: |
+          # Проверка идёт сразу после настоящего хода — и только после
+          # него: факты снимаются при открытии сессии, а создание агента
+          # и conversation идёт управляющим путём и сессии не открывает.
+          # До хода готовность честно отвечает «фактов ещё нет».
+          # /ready отдаёт 200, когда MemFS, нативная память, навыки,
+          # субагенты, продуктовые инструменты и сессия на месте.
+          RESULT="$(docker compose --env-file versions.env --env-file .env \
+            exec -T eva-agent-service node -e "
+              fetch('http://127.0.0.1:8070/ready')
+                .then(async (response) => {
+                  const body = await response.json();
+                  console.log(JSON.stringify({
+                    status: response.status, ready: body.ready, state: body.state,
+                    observed_age_seconds: body.observed_age_seconds, stale: body.stale,
+                    checks: body.checks,
+                  }));
+                })
+                .catch((error) => { console.error(error); process.exit(1); });
+            " | tr -d '\r')"
+          echo "$RESULT"
+          echo "$RESULT" | grep -q '"ready":true'
+          # Наблюдаемое проверяется строго: рабочий каталог памяти агента,
+          # живая сессия, модель, продуктовые инструменты, режим
+          # разрешений и свежесть снимка.
+          for check in product_tools memfs session model permission_mode facts_fresh; do
+            echo "$RESULT" | grep -q "{\"name\":\"$check\",\"status\":\"ok\"" \
+              || { echo "::error::проверка готовности $check не зелёная"; exit 1; }
+          done
+          # Состав серверных инструментов установленный транспорт не
+          # называет, поэтому нативные возможности допускаются как
+          # `not_reported`. Чего допускать нельзя — так это `failed`:
+          # названный список без памяти, навыков или субагентов означает
+          # урезанный runtime.
+          # `if`, а не `&&`: под `set -e` неудачный grep в конце тела цикла
+          # оборвал бы шаг сам по себе, и проверка молча не выполнилась бы.
+          for check in native_memory native_skills native_subagents; do
+            if echo "$RESULT" | grep -q "{\"name\":\"$check\",\"status\":\"failed\""; then
+              echo "::error::нативная возможность $check отсутствует"
+              exit 1
+            fi
+          done
+          # Ход только что прошёл: снимок фактов обязан быть свежим.
+          echo "$RESULT" | grep -q '"stale":false' \
+            || { echo "::error::готовность отвечает по устаревшему снимку фактов"; exit 1; }
 
       - name: Agent, conversation and memory survive model switching
         if: needs.changes.outputs.docs_only != 'true'

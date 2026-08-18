@@ -152,10 +152,9 @@ export function registerJournalRoutes(
   app.post("/journal/ask", async (request) => await scoped(input.db, request, async (user) => (
     await askEva(input.db, user, body(request), {
       ...(input.askModel ? { model: input.askModel } : {}),
-      // Личная память и внешние источники читаются из своих таблиц. Если
-      // подсистема выключена, таблицы пусты — но «пусто» и «выключено»
-      // человек различать не обязан, поэтому состояние передаётся явно.
-      memoryEnabled: input.config.temporalMemoryEnabled || input.config.hybridRetrievalEnabled,
+      // Внешние источники читаются из своих таблиц. Если подсистема
+      // выключена, таблицы пусты — но «пусто» и «выключено» человек
+      // различать не обязан, поэтому состояние передаётся явно.
       externalEnabled: input.config.researchOrchestratorEnabled,
     })
   )));

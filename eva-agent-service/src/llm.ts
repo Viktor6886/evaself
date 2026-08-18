@@ -14,6 +14,10 @@ import type { Database, LlmProviderRow, ModelMapping } from "./db.js";
 import { EvaError, badRequest, notFound } from "./errors.js";
 import type { LettaService } from "./letta.js";
 import type { Logger } from "./logger.js";
+import {
+  probeModelCapabilities,
+  type CapabilityProbeResult,
+} from "./llm/capability-probe.js";
 
 export interface LlmProviderInput {
   name: string;
@@ -50,6 +54,11 @@ export interface ProviderProbe {
   models: Array<{ id: string; [key: string]: unknown }>;
   message: string;
   status_code: number | null;
+  /**
+   * Что модель умеет на самом деле. Отсутствует, когда до проверки
+   * возможностей дело не дошло: провайдер не ответил вовсе.
+   */
+  capabilities?: CapabilityProbeResult;
 }
 
 /**
@@ -181,6 +190,7 @@ interface LlmManagerOverrides {
   configureProvider?: (provider: LlmProviderRow, apiKey: string) => Promise<void>;
   restartAppServer?: () => Promise<void>;
   probeProvider?: (provider: LlmProviderRow, apiKey: string) => Promise<ProviderProbe>;
+  probeCapabilities?: (provider: LlmProviderRow, apiKey: string) => Promise<CapabilityProbeResult>;
 }
 
 export class LlmManager {
@@ -188,6 +198,10 @@ export class LlmManager {
   private readonly configureProvider: (provider: LlmProviderRow, apiKey: string) => Promise<void>;
   private readonly restartAppServer: () => Promise<void>;
   private readonly probeProvider: (provider: LlmProviderRow, apiKey: string) => Promise<ProviderProbe>;
+  private readonly probeCapabilities: (
+    provider: LlmProviderRow,
+    apiKey: string,
+  ) => Promise<CapabilityProbeResult>;
 
   constructor(
     private readonly config: Config,
@@ -206,6 +220,21 @@ export class LlmManager {
         baseUrl: provider.base_url,
         apiKey,
         timeoutMs: this.config.llmProbeTimeoutMs,
+      }));
+    this.probeCapabilities = overrides.probeCapabilities
+      ?? ((provider, apiKey) => probeModelCapabilities({
+        baseUrl: provider.base_url,
+        apiKey,
+        model: provider.model,
+        timeoutMs: this.config.llmProbeTimeoutMs,
+        // Проверяется только заявленное: не заявлено — не проверяем и
+        // не отказываем. Умолчания те же, что в схеме (миграция 017).
+        claims: {
+          tools: provider.supports_tools !== false,
+          json: provider.supports_json !== false,
+          streaming: provider.supports_streaming !== false,
+          vision: provider.supports_vision === true,
+        },
       }));
   }
 
@@ -526,8 +555,30 @@ export class LlmManager {
     }
   }
 
+  /**
+   * Доступен ли провайдер и совместима ли модель.
+   *
+   * Две разные вещи, и раньше проверялась только первая: рабочий
+   * `/models` считался достаточным основанием сделать модель основной.
+   * Модель без вызова инструментов проходила активацию и ломалась в
+   * первом же разговоре.
+   */
   private async probe(provider: LlmProviderRow): Promise<ProviderProbe> {
-    return this.probeProvider(provider, this.secretBox.decrypt(provider.api_key_encrypted));
+    const apiKey = this.secretBox.decrypt(provider.api_key_encrypted);
+    const connectivity = await this.probeProvider(provider, apiKey);
+    // Модель не спрашиваем, пока провайдер не ответил: смысла нет, а
+    // причина отказа была бы менее понятной.
+    if (!connectivity.ok) return connectivity;
+
+    const capabilities = await this.probeCapabilities(provider, apiKey);
+    return {
+      ...connectivity,
+      ok: capabilities.ok,
+      capabilities,
+      message: capabilities.ok
+        ? `${connectivity.message} Модель совместима с агентным ходом.`
+        : `Модель несовместима с агентным ходом — ${capabilities.message}`,
+    };
   }
 
   /**

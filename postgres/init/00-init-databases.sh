@@ -94,8 +94,22 @@ SQL
 # ---------------------------------------------------------------------
 if [ -d /migrations ]; then
 	echo "==> applying Eva schema migrations"
+	# Чистая установка не строит подсистемы, которые тут же удаляет
+	# миграция 053. Список — /migrations/fresh-install-skip.txt;
+	# пропущенная миграция сразу отмечается применённой, иначе следующий
+	# `make update` попытался бы создать её заново.
+	SKIP_LIST=/migrations/fresh-install-skip.txt
 	for f in $(ls -1 /migrations/*.sql 2>/dev/null | sort); do
-		echo "    - $(basename "$f")"
+		name="$(basename "$f")"
+		if [ -f "$SKIP_LIST" ] && grep -qx "$name" "$SKIP_LIST"; then
+			echo "    - $name — пропущена на чистой установке"
+			PGPASSWORD="$EVA_DB_PASSWORD" psql -v ON_ERROR_STOP=1 -q \
+				--username "$EVA_DB_USER" --dbname "$EVA_DB_NAME" \
+				-c "INSERT INTO schema_migrations (version) VALUES ('${name%.sql}')
+				    ON CONFLICT (version) DO NOTHING"
+			continue
+		fi
+		echo "    - $name"
 		PGPASSWORD="$EVA_DB_PASSWORD" psql -v ON_ERROR_STOP=1 \
 			--username "$EVA_DB_USER" --dbname "$EVA_DB_NAME" \
 			--file "$f"

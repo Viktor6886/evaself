@@ -32,7 +32,7 @@ test("extractText of null is empty", () => {
   assert.equal(extractText(undefined), "");
 });
 
-test("summarizeStream picks the assistant text and separates reasoning", () => {
+test("summarizeStream picks the assistant text and counts reasoning events", () => {
   const summary = summarizeStream([
     { type: "init", agentId: "agent-1", sessionId: "s", conversationId: "c" },
     { type: "reasoning", reasoning: "thinking" },
@@ -46,7 +46,9 @@ test("summarizeStream picks the assistant text and separates reasoning", () => {
   ] as never);
 
   assert.equal(summary.reply, "Привет!");
-  assert.deepEqual(summary.reasoning, ["thinking"]);
+  // От рассуждения остаётся счётчик: сам текст не собирается нигде.
+  assert.equal(summary.reasoningEvents, 1);
+  assert.equal("reasoning" in summary, false);
   assert.deepEqual(summary.toolCalls, ["memory_write"]);
   assert.equal(summary.stopReason, "end_turn");
   assert.equal(summary.usage?.total_tokens, 120);
@@ -60,29 +62,54 @@ test("summarizeStream picks the assistant text and separates reasoning", () => {
   ]);
 });
 
-test("administrative trace keeps tool details but redacts secrets", () => {
+test("административная трасса — только метаданные хода", () => {
   const summary = summarizeStream([
+    { type: "user", content: "Меня зовут Сергей, телефон +7 900 000-00-00" },
+    { type: "reasoning", reasoning: "пользователь тревожится из-за развода" },
     {
       type: "tool_call",
       toolName: "external_request",
+      runId: "run-7",
       toolInput: {
-        query: "safe",
+        query: "истории болезни",
         api_key: "must-not-leak",
         nested: { Authorization: "Bearer secret" },
       },
     },
+    { type: "tool_result", toolName: "external_request", content: "диагноз пациента" },
+    { type: "assistant", content: "Понимаю, это тяжело." },
+    {
+      type: "result",
+      stopReason: "end_turn",
+      durationMs: 1200,
+      usage: { total_tokens: 120, request_id: "provider-request-1" },
+    },
   ] as never);
-  assert.equal(summary.trace[0]?.toolName, "external_request");
-  assert.equal(
-    (summary.trace[0]?.toolInput as Record<string, unknown>).api_key,
-    "[скрыто]",
-  );
-  assert.equal(
-    ((summary.trace[0]?.toolInput as Record<string, unknown>).nested as Record<string, unknown>)
-      .Authorization,
-    "[скрыто]",
-  );
-  assert.doesNotMatch(JSON.stringify(summary.trace), /must-not-leak|Bearer secret/);
+
+  const serialized = JSON.stringify(summary.trace);
+  // Ничего из сказанного, подуманного, запрошенного и полученного.
+  for (const leak of [
+    "Сергей", "900-00-00", "тревожится", "развода", "истории болезни",
+    "must-not-leak", "Bearer secret", "диагноз", "Понимаю",
+  ]) {
+    assert.equal(serialized.includes(leak), false, `в трассе не должно быть «${leak}»`);
+  }
+
+  // Метаданные при этом на месте: по ним ход разбирается.
+  const call = summary.trace.find((entry) => entry.type === "tool_call");
+  assert.equal(call?.toolName, "external_request");
+  assert.equal(call?.runId, "run-7");
+  assert.equal(call?.argumentCount, 3);
+  assert.equal(call?.contentChars, undefined);
+
+  const result = summary.trace.find((entry) => entry.type === "result");
+  assert.equal(result?.stopReason, "end_turn");
+  assert.equal(result?.durationMs, 1200);
+  assert.deepEqual(result?.usage, { total_tokens: 120 });
+
+  // Размер сказанного виден, само сказанное — нет.
+  const assistant = summary.trace.find((entry) => entry.type === "assistant");
+  assert.equal(assistant?.contentChars, "Понимаю, это тяжело.".length);
 });
 
 test("summarizeStream concatenates assistant deltas without breaking words", () => {
@@ -175,12 +202,7 @@ test("App Server-only settings are applied at session open, not agent creation",
     "persona",
   );
   const internal = service as unknown as {
-    runtime: {
-      allowed_tools: string[] | null;
-      disallowed_tools: string[];
-      system_info_reminder: boolean;
-      reasoning_effort: "none" | "high";
-    };
+    runtime: { reasoning_effort: "none" | "high" };
     client: {
       createAgent(options: Record<string, unknown>): Promise<string>;
       agents: { update(): Promise<void> };
@@ -189,16 +211,13 @@ test("App Server-only settings are applied at session open, not agent creation",
     acquireSession(id: string): Promise<unknown>;
     sessionOptions(id: string): Promise<Record<string, unknown>>;
   };
-  internal.runtime.allowed_tools = ["safe_tool", "Read", "WebSearch"];
-  internal.runtime.disallowed_tools = ["Bash"];
-  internal.runtime.system_info_reminder = true;
   internal.runtime.reasoning_effort = "high";
   service.setToolFactory(() => [
     { name: "safe_tool" },
     { name: "Bash" },
   ] as never);
   const approval = async () => ({ behavior: "deny" as const, message: "test" });
-  service.setSessionToolPolicyResolver(async () => ({ visibleTools: ["safe_tool"], canUseTool: approval }));
+  service.setSessionApprovalResolver(async () => approval);
 
   let createOptions: Record<string, unknown> = {};
   let sessionOptions: Record<string, unknown> = {};
@@ -211,7 +230,6 @@ test("App Server-only settings are applied at session open, not agent creation",
     resumeSession: (_id, options) => {
       sessionOptions = options;
       return {
-        initialize: async () => {},
         bootstrapState: async () => ({}),
         recoverPendingApprovals: async () => ({ recovered: false }),
       };
@@ -221,36 +239,45 @@ test("App Server-only settings are applied at session open, not agent creation",
   await service.createAgent({ telegramId: 123, displayName: "CI" });
   await internal.acquireSession("conversation-sdk-options");
 
+  // Штатный harness Letta: Evaself не подменяет системный промпт и не
+  // сужает ни серверные, ни клиентские инструменты агента.
+  assert.equal("systemPrompt" in createOptions, false);
   assert.equal("allowedTools" in createOptions, false);
   assert.equal("disallowedTools" in createOptions, false);
   assert.equal("systemInfoReminder" in createOptions, false);
+  assert.equal("skillSources" in createOptions, false);
+  assert.equal(createOptions.memfs, true);
+  assert.deepEqual(createOptions.dreaming, { trigger: "compaction-event" });
   assert.deepEqual(
     (createOptions.memory as Array<{ label: string }>).map((block) => block.label),
     [
       "persona",
       "human",
       "current_state",
-      "goals_and_commitments",
-      "relationships_and_patterns",
-      "progress_and_hypotheses",
+      "therapeutic_framework",
     ],
   );
-  assert.deepEqual(sessionOptions.allowedTools, ["safe_tool"]);
+  // Обычная сессия не передаёт ни allowedTools, ни skillSources: набор
+  // клиентских инструментов и источники навыков остаются штатными.
+  assert.equal("allowedTools" in sessionOptions, false);
+  assert.equal("skillSources" in sessionOptions, false);
+  assert.equal("stateless" in sessionOptions, false);
   assert.equal(sessionOptions.canUseTool, approval);
   assert.deepEqual(
     (sessionOptions.tools as Array<{ name: string }>).map((tool) => tool.name),
-    ["safe_tool"],
+    ["safe_tool", "Bash"],
   );
-  assert.equal(sessionOptions.permissionMode, "unrestricted");
+  assert.equal(sessionOptions.permissionMode, "standard");
   assert.equal(sessionOptions.reasoningEffort, "high");
+  // cwd — рабочий каталог App Server: из него Letta Code открывает
+  // `.skills`, поэтому проектные навыки видны без объявления источников.
   assert.equal(sessionOptions.cwd, "/data/letta");
-  assert.deepEqual(sessionOptions.skillSources, ["project"]);
 
   internal.runtime.reasoning_effort = "none";
   assert.equal("reasoningEffort" in await internal.sessionOptions("conversation-default"), false);
 });
 
-test("session opening awaits live policy and recovery uses the same request-id callback", async () => {
+test("session opening awaits the approval resolver and recovery uses the same request-id callback", async () => {
   const service = new LettaService({
     appServerUrl: "ws://example.invalid/ws", appServerToken: "", appServerRequestTimeoutMs: 1000,
     model: "", sessionPoolSize: 5, sessionIdleMs: 1000, turnTimeoutMs: 1000,
@@ -262,18 +289,18 @@ test("session opening awaits live policy and recovery uses the same request-id c
     return { behavior: "allow" as const, message: "ok" };
   };
   let resolved = false;
-  service.setSessionToolPolicyResolver(async (conversationId) => {
+  service.setSessionApprovalResolver(async (conversationId) => {
     await Promise.resolve();
     resolved = true;
     assert.equal(conversationId, "conversation-research");
-    return { visibleTools: ["research_read"], canUseTool };
+    return canUseTool;
   });
   let opened: Record<string, unknown> = {};
   (service as unknown as { client: { resumeSession(id: string, options: Record<string, unknown>): unknown } }).client = {
     resumeSession: (_id, options) => {
       opened = options;
       return {
-        initialize: async () => {}, bootstrapState: async () => ({}),
+        bootstrapState: async () => ({}),
         recoverPendingApprovals: async () => {
           await (options.canUseTool as typeof canUseTool)("research_read", {}, { requestId: "sdk-request-restart" });
           return { recovered: true };
@@ -283,8 +310,8 @@ test("session opening awaits live policy and recovery uses the same request-id c
   };
   await (service as unknown as { acquireSession(id: string): Promise<unknown> }).acquireSession("conversation-research");
   assert.equal(resolved, true);
-  assert.deepEqual((opened.tools as Array<{ name: string }>).map((tool) => tool.name), ["research_read"]);
-  assert.deepEqual(opened.allowedTools, ["research_read"]);
+  assert.deepEqual((opened.tools as Array<{ name: string }>).map((tool) => tool.name), ["chat_write", "research_read"]);
+  assert.equal("allowedTools" in opened, false);
   assert.equal(opened.canUseTool, canUseTool);
   assert.deepEqual(seen, [{ name: "research_read", requestId: "sdk-request-restart" }]);
 });
@@ -330,15 +357,15 @@ test("уровень reasoning без записи в каталоге не вы
       attempts.push(options);
       const failing = attempts.length === 1;
       return {
-        initialize: async () => {
+        bootstrapState: async () => {
           if (failing) {
             throw new Error("No medium reasoning tier found for model lmstudio/eva/chat.");
           }
+          return {};
         },
         close: () => {
           closed += 1;
         },
-        bootstrapState: async () => ({}),
         recoverPendingApprovals: async () => ({ recovered: false }),
       };
     },
@@ -371,7 +398,7 @@ test("прочая ошибка открытия сессии не подмен�
     resumeSession: () => {
       attempts += 1;
       return {
-        initialize: async () => {
+        bootstrapState: async () => {
           throw new Error("WebSocket closed before the handshake");
         },
         close: () => {},
@@ -475,3 +502,158 @@ function reasoningService(onWarn: (message: string) => void = () => {}) {
     "persona",
   );
 }
+
+/**
+ * Единственный cognitive runtime — Letta.
+ *
+ * Проверяется не намерение, а фактический набор полей, который Evaself
+ * отправляет в SDK: подмена системного промпта, точный список
+ * инструментов или суженные источники навыков видны здесь сразу, чем бы
+ * они ни были мотивированы.
+ */
+test("обычный ход не подменяет harness и не сужает штатные возможности Letta", async () => {
+  const service = new LettaService({
+    appServerUrl: "ws://example.invalid/ws", appServerToken: "", appServerRequestTimeoutMs: 1000,
+    model: "", sessionPoolSize: 5, sessionIdleMs: 1000, turnTimeoutMs: 1000,
+  } as never, { debug() {}, info() {}, warn() {}, error() {} }, "persona");
+  service.setToolFactory(() => [{ name: "eva_get_reminders" }] as never);
+  const internal = service as unknown as {
+    client: { createAgent(options: Record<string, unknown>): Promise<string> };
+    sessionOptions(id: string): Promise<Record<string, unknown>>;
+  };
+
+  let created: Record<string, unknown> = {};
+  internal.client.createAgent = async (options) => { created = options; return "agent-1"; };
+  await service.createAgent({ telegramId: 1, displayName: "CI" });
+
+  // Агент: штатный harness, включённый MemFS, рефлексия на сжатии.
+  for (const forbidden of ["systemPrompt", "allowedTools", "disallowedTools", "skillSources"]) {
+    assert.equal(forbidden in created, false, `createAgent передал ${forbidden}`);
+  }
+  assert.equal(created.memfs, true);
+  assert.deepEqual(created.dreaming, { trigger: "compaction-event" });
+
+  // Сессия: только продуктовые инструменты Evaself, всё остальное — Letta.
+  const session = await internal.sessionOptions("conversation-1");
+  for (const forbidden of ["allowedTools", "skillSources", "stateless", "systemPrompt"]) {
+    assert.equal(forbidden in session, false, `сессия передала ${forbidden}`);
+  }
+  assert.deepEqual(
+    (session.tools as Array<{ name: string }>).map((tool) => tool.name),
+    ["eva_get_reminders"],
+  );
+});
+
+/** Факты runtime берутся из init-сообщения сессии, а не из настроек. */
+test("состояние MemFS, навыков и инструментов читается из init-сообщения", () => {
+  const warnings: string[] = [];
+  const service = new LettaService({
+    appServerUrl: "ws://example.invalid/ws", appServerToken: "", appServerRequestTimeoutMs: 1000,
+    model: "", sessionPoolSize: 5, sessionIdleMs: 1000, turnTimeoutMs: 1000,
+  } as never, {
+    debug() {}, info() {}, warn: (message: string) => warnings.push(message), error() {},
+  }, "persona");
+  const internal = service as unknown as {
+    recordRuntimeFacts(message: Record<string, unknown>): void;
+  };
+
+  assert.equal(service.runtimeFacts, null, "до первой сессии фактов нет");
+  internal.recordRuntimeFacts({
+    type: "init", model: "eva/chat", memfsEnabled: true,
+    skillSources: ["bundled", "global", "agent", "project"],
+    tools: ["memory", "Skill", "Task", "eva_get_reminders"],
+    dreaming: { trigger: "compaction-event", behavior: "reminder", stepCount: 20 },
+  });
+  const facts = service.runtimeFacts!;
+  assert.equal(facts.memfsEnabled, true);
+  assert.deepEqual(facts.skillSources, ["bundled", "global", "agent", "project"]);
+  assert.ok(facts.tools!.includes("eva_get_reminders"), "продуктовый инструмент виден runtime");
+  assert.equal(facts.dreaming?.trigger, "compaction-event");
+  assert.deepEqual(warnings, []);
+
+  internal.recordRuntimeFacts({ type: "init", model: "eva/chat", memfsEnabled: false });
+  assert.equal(service.runtimeFacts?.memfsEnabled, false);
+  assert.equal(warnings.length, 1, "выключенный MemFS не проходит молча");
+});
+
+// --------------------------------------------------------------------
+// Готовность: факты сессии, а не конфигурация
+// --------------------------------------------------------------------
+
+test("готовность собирается из фактов открытой сессии", async () => {
+  const service = new LettaService({
+    appServerUrl: "ws://example.invalid/ws", appServerToken: "", appServerRequestTimeoutMs: 1000,
+    model: "", sessionPoolSize: 5, sessionIdleMs: 1000, turnTimeoutMs: 1000,
+  } as never, { debug() {}, info() {}, warn() {}, error() {} }, "persona");
+  service.setToolFactory(() => [{ name: "get_user_time_context" }] as never);
+
+  const internal = service as unknown as {
+    client: Record<string, unknown>;
+    acquireSession(id: string): Promise<unknown>;
+  };
+  internal.client = {
+    agents: { list: async () => [] },
+    models: { list: async () => ({ entries: [{ id: "test/model" }] }) },
+    resumeSession: () => ({
+      // Гидратация называет серверные инструменты, состояние устройства —
+      // каталог памяти и режим разрешений. Ход модели не тратится.
+      bootstrapState: async () => ({ tools: ["memory", "Skill", "Task"], model: "test/model" }),
+      recoverPendingApprovals: async () => ({ recovered: false }),
+      getDeviceStatus: async () => ({
+        isOnline: true,
+        permissionMode: "standard",
+        workingDirectory: "/data/letta",
+        memoryDirectory: "/data/letta/.memory/agent-1",
+        pendingControlRequests: [],
+        raw: {},
+      }),
+      close() {},
+    }),
+  };
+
+  await internal.acquireSession("conversation-readiness");
+  // Состояние устройства спрашивается вне хода: даём микрозадаче дойти.
+  await new Promise((resolve) => setTimeout(resolve, 5));
+
+  const report = await service.readiness(["get_user_time_context"]);
+  assert.equal(report.ready, true, JSON.stringify(report.checks));
+  const status = (name: string) => report.checks.find((entry) => entry.name === name)?.status;
+  assert.equal(status("memfs"), "ok");
+  assert.equal(status("native_memory"), "ok");
+  assert.equal(status("native_subagents"), "ok");
+  assert.equal(status("product_tools"), "ok");
+  assert.equal(status("permission_mode"), "ok");
+  service.shutdown();
+});
+
+test("неготовность видна, когда runtime не подтвердил MemFS", async () => {
+  const service = new LettaService({
+    appServerUrl: "ws://example.invalid/ws", appServerToken: "", appServerRequestTimeoutMs: 1000,
+    model: "", sessionPoolSize: 5, sessionIdleMs: 1000, turnTimeoutMs: 1000,
+  } as never, { debug() {}, info() {}, warn() {}, error() {} }, "persona");
+  service.setToolFactory(() => [{ name: "get_user_time_context" }] as never);
+  const internal = service as unknown as {
+    client: Record<string, unknown>;
+    acquireSession(id: string): Promise<unknown>;
+  };
+  internal.client = {
+    agents: { list: async () => [] },
+    models: { list: async () => ({ entries: [{ id: "test/model" }] }) },
+    resumeSession: () => ({
+      bootstrapState: async () => ({ tools: ["memory", "Skill", "Task"], model: "test/model" }),
+      recoverPendingApprovals: async () => ({ recovered: false }),
+      getDeviceStatus: async () => ({
+        isOnline: true, permissionMode: "standard", workingDirectory: "/data/letta",
+        memoryDirectory: null, pendingControlRequests: [], raw: {},
+      }),
+      close() {},
+    }),
+  };
+  await internal.acquireSession("conversation-no-memfs");
+  await new Promise((resolve) => setTimeout(resolve, 5));
+
+  const report = await service.readiness(["get_user_time_context"]);
+  assert.equal(report.ready, false);
+  assert.equal(report.checks.find((entry) => entry.name === "memfs")?.status, "failed");
+  service.shutdown();
+});

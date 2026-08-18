@@ -29,7 +29,7 @@ export const ADMIN_CLIENT_PACKAGE = "@letta-ai/letta-client";
  * и тест начнёт соглашаться с любым обновлением.
  */
 export const VERIFIED_VERSIONS = {
-  agentSdk: "0.6.2",
+  agentSdk: "0.7.1",
   adminClient: "1.12.1",
 } as const;
 
@@ -346,10 +346,31 @@ const CAPABILITIES = [
     path: null,
     check: "option",
     note:
-      "Передаётся полем `skillSources` при создании агента и при открытии " +
-      "сессии. Методом не проверяется: в runtime от типа опции ничего не " +
-      "остаётся, и любая «проверка» здесь была бы проверкой нашего же " +
-      "литерала.",
+      "Evaself не передаёт `skillSources` вовсе: умолчание Letta Code — все " +
+      "источники (bundled, global, agent, project), и сузить их значит " +
+      "выключить часть механизма навыков. Фактический состав приходит в " +
+      "init-сообщении сессии и проверяется на живом runtime, а не по типу.",
+  },
+  {
+    id: "session.memfs",
+    title: "MemFS агента",
+    surface: "agent-sdk",
+    path: null,
+    check: "option",
+    note:
+      "Включается полем `memfs` при создании агента и не выключается " +
+      "сессией: `stateless` Evaself не передаёт. Фактическое состояние " +
+      "приходит в init-сообщении (`memfsEnabled`) — по нему и проверяется.",
+  },
+  {
+    id: "session.dreaming",
+    title: "Рефлексия (dreaming)",
+    surface: "agent-sdk",
+    path: null,
+    check: "option",
+    note:
+      "`dreaming.trigger = compaction-event`: рефлексия идёт на событии " +
+      "сжатия контекста. Итоговые настройки приходят в init-сообщении.",
   },
   {
     id: "conversation.purpose",
@@ -372,7 +393,7 @@ const CAPABILITIES = [
     path: null,
     check: "option",
     note:
-      "Ни Agent SDK 0.6.2, ни клиент 1.12.1 не дают управления группами. " +
+      "Ни Agent SDK 0.7.1, ни клиент 1.12.1 не дают управления группами. " +
       "Эмулировать прямыми HTTP-запросами к App Server запрещено.",
   },
   {
@@ -429,7 +450,7 @@ export function assertSupported(id: LettaCapabilityId): LettaCapability {
  * Найти операции, которых на живом объекте нет.
  *
  * Та же проверка, что делает contract-тест, — и это главное её свойство.
- * Тест доказывает контракт на сборке, а `EVA_LETTA_SDK_060` включает ту же
+ * Тест доказывает контракт на сборке, а `EVA_LETTA_CONTRACT_VERIFY` включает ту же
  * проверку на живом развёртывании: canary обязан убедиться, что рядом с
  * ним лежит именно проверенный пакет, а не тот, который приехал вместе с
  * обновлением базового образа.

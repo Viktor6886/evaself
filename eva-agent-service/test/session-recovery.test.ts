@@ -1286,7 +1286,7 @@ test("отменённый ход не выполняет побочный эф�
     purpose: "chat",
   };
   const factory = new AgentToolFactory(
-    { vectorGoalsEnabled: false, todoistApiToken: "" } as never,
+    { vectorGoalsEnabled: false } as never,
     withTenantScopes({
       query: db.query,
       getAgentRuntimeContext: async () => runtime,

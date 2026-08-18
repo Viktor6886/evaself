@@ -35,6 +35,7 @@ ADD_USER_COLUMN = re.compile(
     r"ALTER TABLE (\w+)[^;]*ADD COLUMN[^;]*\buser_id\b", re.S
 )
 DROPPED_TABLE = re.compile(r"DROP TABLE\s+(?:IF EXISTS\s+)?%\w+|'(\w+)'")
+DROP_TABLE = re.compile(r"^\s*DROP TABLE\s+(?:IF EXISTS\s+)?([a-z_][a-z0-9_]*)", re.M | re.I)
 
 SQL_VERB = re.compile(r"\b(SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM)\b", re.I)
 # Имя таблицы бывает квалифицировано схемой и закавычено:
@@ -66,7 +67,13 @@ def _references_users(body: str) -> bool:
 
 
 def owned_tables() -> set[str]:
-    """Таблицы, чей user_id ссылается на users, по фактическим миграциям."""
+    """Таблицы, чей user_id ссылается на users, по фактическим миграциям.
+
+    Миграции разбираются по порядку: таблица, которую более поздняя
+    миграция удалила, в схеме не существует, и ограничивать обращения к
+    ней не по чему. Порядок важен — иначе удалённая и заново созданная
+    таблица выпала бы из проверки.
+    """
     owned: set[str] = set()
     for path in sorted(glob.glob(str(ROOT / "postgres/migrations/*.sql"))):
         text = Path(path).read_text(encoding="utf-8")
@@ -76,6 +83,8 @@ def owned_tables() -> set[str]:
                 owned.add(match.group(1))
         for match in ADD_USER_COLUMN.finditer(text):
             owned.add(match.group(1))
+        for match in DROP_TABLE.finditer(text):
+            owned.discard(match.group(1))
     # Таблицы, которые миграция 016 удаляет как незаполненные, в схеме
     # не существуют — проверять обращения к ним не по чему.
     cleanup = ROOT / "postgres/migrations/016_cleanup_and_safety.sql"

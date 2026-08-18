@@ -18,17 +18,11 @@ import {
 } from "./auth-service.js";
 import type { ArtifactRegistry } from "../artifacts/registry.js";
 import type { AgentDirectoryService } from "./agent-directory.js";
-import type { ConversationToolSelectorService } from "./conversation-tool-selectors.js";
 import { registerArtifactRoutes } from "./artifact-routes.js";
-import {
-  registerMemoryDoctorRoutes,
-  type MemoryDoctorRouteContext,
-} from "./memory-doctor-routes.js";
 import { registerCrudRoutes } from "./crud-routes.js";
-import type { MemoryTemplateService } from "./memory-template-service.js";
 import type { ToolApprovalService } from "./tool-approvals.js";
 import type { TurnOperationsService } from "./turn-operations.js";
-import type { McpServerPolicyRepository } from "../tools/gateway.js";
+import type { McpServerPolicyRepository } from "../tools/mcp.js";
 import { EvaError } from "../errors.js";
 import { AuditService, type AuditActor } from "./audit-service.js";
 import { ConfigService } from "./config-service.js";
@@ -49,7 +43,6 @@ import { ProviderService } from "./provider-service.js";
 import { SttAdminService } from "./stt-service.js";
 import { UserService } from "./user-service.js";
 import type { Redis } from "ioredis";
-import type { SkillOperationsService } from "./skill-operations.js";
 
 interface RouteAccess {
   public?: boolean;
@@ -92,12 +85,10 @@ export interface AdminServerServices {
     updateConversation(id: string, contextWindowLimit: number): Promise<unknown>;
   };
   securityAudit?: SecurityAuditService;
-  skillOperations?: SkillOperationsService;
   /** Предпросмотр политик хранения. Удаление выполняет задание очереди. */
   retention?: { preview(settings: Record<string, unknown>): Promise<unknown> };
   /** Единый реестр артефактов. Отсутствует — раздел просто не появляется. */
   artifacts?: ArtifactRegistry;
-  memoryDoctor?: MemoryDoctorRouteContext;
   /**
    * Полный административный CRUD (шаг 12). Регистрируется целиком или не
    * регистрируется вовсе: половина разделов хуже, чем ни одного, — по
@@ -106,8 +97,6 @@ export interface AdminServerServices {
    */
   crud?: {
     directory: AgentDirectoryService;
-    selectors?: ConversationToolSelectorService;
-    templates: MemoryTemplateService;
     tools: ToolApprovalService;
     mcp?: McpServerPolicyRepository;
     turns: TurnOperationsService;
@@ -455,25 +444,6 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
     config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
   }, async () => await services.health.services());
 
-  app.get("/api/admin/v1/skills/operations", {
-    config: {
-      roles: ["owner", "admin", "operator", "viewer"],
-      tenantAccess: "cross-user",
-    } satisfies RouteAccess,
-  }, async (request) => {
-    if (!services.skillOperations) throw adminNotFound("Операционная статистика навыков недоступна");
-    const query = request.query as { tenant_id?: string; hours?: string };
-    const tenantId = query.tenant_id === undefined ? undefined : Number(query.tenant_id);
-    const hours = query.hours === undefined ? undefined : Number(query.hours);
-    if (tenantId !== undefined && (!Number.isSafeInteger(tenantId) || tenantId <= 0)) {
-      throw adminBadRequest("tenant_id должен быть положительным целым");
-    }
-    if (hours !== undefined && (!Number.isSafeInteger(hours) || hours <= 0)) {
-      throw adminBadRequest("hours должен быть положительным целым");
-    }
-    return await services.skillOperations.summary({ tenantId, hours });
-  });
-
   app.get("/api/admin/v1/integrations", {
     config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
   }, async () => await services.health.integrations());
@@ -514,13 +484,6 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
         await services.audit.annotate(context.audit.id, details);
       },
     });
-  }
-
-  // Memory Doctor (шаг 17). Маршруты появляются только вместе с самой
-  // диагностикой: без слоя заданий её нечем запустить, и объявлять
-  // маршрут, который гарантированно откажет, незачем.
-  if (services.memoryDoctor) {
-    registerMemoryDoctorRoutes(app, services.memoryDoctor);
   }
 
   // Полный административный CRUD (шаг 12). Флаг по умолчанию выключен:
@@ -574,7 +537,7 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
   // ограничено медиа-ключами и проверяется по интеграции, а не по
   // маршруту: маршрут один на все интеграции, и снятое с него
   // подтверждение сняло бы его заодно с Telegram bot_token, токена
-  // Todoist, секрета SearXNG и ключа Crawl4AI. Ключи ASR и TTS вводят,
+  // секрета SearXNG и ключа Crawl4AI. Ключи ASR и TTS вводят,
   // меняют и проверяют десяток раз за настройку, и стоит их утечка
   // счёта у провайдера речи; bot_token — всего канала Евы. Поэтому
   // asr и tts сохраняются без пароля, остальные — под `secrets:write`,
@@ -1249,7 +1212,7 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
         entry.id,
         entry.startedAt,
         "success",
-        `сообщений: ${result.messages.length}, выдержек: ${result.highlights.length}`,
+        `сообщений: ${result.messages.length}`,
         actorOf(context),
       );
       return result;

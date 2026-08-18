@@ -154,7 +154,6 @@ const LOADERS = {
   overview: loadOverview,
   services: loadServicesAndIntegrations,
   ai: loadProviders,
-  skills: loadSkills,
   stt: loadStt,
   tts: loadTts,
   operations: loadOperations,
@@ -200,15 +199,6 @@ async function loadTts() {
   const box = $("#tts-test-result");
   box.hidden = true;
   box.textContent = "";
-}
-
-async function loadSkills() {
-  const { payload } = await request("/skills/operations?hours=24");
-  const latency = payload.latency_ms || {};
-  const reranker = payload.reranker || {};
-  const reasons = Object.entries(payload.reasons || {}).map(([reason, count]) => `${escapeHtml(reason)}: ${Number(count)}`).join(", ") || "нет";
-  const selected = (payload.selected || []).map((skill) => `${escapeHtml(skill.id)} v${Number(skill.version || 0)} (${Number(skill.selections || 0)}, score ${skill.avg_score == null ? "—" : Number(skill.avg_score).toFixed(3)})`).join("<br>") || "нет";
-  $("#skills-status").innerHTML = `<div class="setting-row"><strong>Маршрутизация за ${Number(payload.window_hours || 24)} ч</strong><span>${Number(payload.events || 0)} решений</span></div><div class="setting-row"><strong>Latency p50 / p95 / p99</strong><span>${Number(latency.p50 || 0).toFixed(1)} / ${Number(latency.p95 || 0).toFixed(1)} / ${Number(latency.p99 || 0).toFixed(1)} ms</span></div><div class="setting-row"><strong>Reranker</strong><span>${(Number(reranker.ratio || 0) * 100).toFixed(1)}% (${Number(reranker.count || 0)})</span></div><div class="setting-row"><strong>Sticky / fallback</strong><span>${Number(payload.sticky_count || 0)} / ${Number(payload.fallback_count || 0)}</span></div><div class="setting-row"><strong>Причины</strong><span>${reasons}</span></div><div class="setting-row"><strong>Выбранные навыки</strong><span>${selected}</span></div>`;
 }
 
 /**
@@ -363,7 +353,7 @@ function renderRoutingOverview() {
   const settings = state.router?.routing_settings || {};
   const mode = settings.mode || "adaptive";
   const editable = ["owner", "admin"].includes(state.me.role);
-  const roles = ["chat", "deep", "fast", "classifier"];
+  const roles = ["chat", "deep", "fast", "json"];
   const selected = mode === "single"
     ? (state.router?.providers || []).find((provider) => provider.id === settings.single_provider_id)
     : null;
@@ -722,7 +712,7 @@ const MEDIA_INTEGRATIONS = new Set(["asr", "tts"]);
 async function applyIntegrationConfig(id, body, afterSave) {
   // У речи пароль не спрашивается — решение владельца: ключи ASR и TTS
   // вводят и проверяют десяток раз за настройку. У остальных интеграций
-  // тем же запросом меняется Telegram bot_token или токен Todoist,
+  // тем же запросом меняется Telegram bot_token или ключ Crawl4AI,
   // поэтому подтверждение остаётся — и его требует сервер, а не только
   // эта форма.
   if (!MEDIA_INTEGRATIONS.has(id)) {
@@ -847,8 +837,8 @@ async function loadProviders() {
 const ROUTE_TITLES = {
   chat: "Основная модель", deep: "Мощная модель",
   tools: "Инструменты", json: "Структурированные данные",
-  fast: "Экономичная модель", classifier: "Классификатор",
-  research: "Исследования", safety: "Безопасность",
+  fast: "Экономичная модель",
+  research: "Исследования",
   vision: "Изображения", single: "Одна модель",
 };
 
@@ -874,23 +864,14 @@ function renderRoutingSettings() {
         ${singleProviderWarnings(providers.find((item) => item.id === settings.single_provider_id))}
         ${editable ? '<button class="button primary" data-save-routing>Сохранить</button>' : ""}
       </div>` : `
-      <div class="routing-role-grid">${["chat", "deep", "fast", "classifier"].map((code) => {
+      <div class="routing-role-grid">${["chat", "deep", "fast", "json"].map((code) => {
         const route = (state.router?.routes || []).find((item) => item.code === code);
         const head = route?.chain?.[0];
         return `<article><span>${escapeHtml(ROUTE_TITLES[code])}</span><strong>${escapeHtml(head?.name || "не настроена")}</strong><small>${escapeHtml(head?.model || "Выберите основную модель в цепочке ниже")}</small></article>`;
       }).join("")}</div>
-      <details class="routing-advanced"><summary>Пороги и классификатор</summary>
+      <details class="routing-advanced"><summary>Резервная модель</summary>
         <div class="router-grid">
-          <label class="switch"><input id="routing-auto" type="checkbox" ${settings.auto_routing_enabled !== false ? "checked" : ""}${editable ? "" : " disabled"}><span>Автоматическая маршрутизация</span></label>
-          <label>Fast до score<input id="routing-fast-score" type="number" value="${Number(settings.fast_max_score ?? 0)}"${editable ? "" : " disabled"}></label>
-          <label>Deep от score<input id="routing-deep-score" type="number" value="${Number(settings.deep_min_score ?? 5)}"${editable ? "" : " disabled"}></label>
-          <label class="switch"><input id="routing-classifier" type="checkbox" ${settings.llm_classifier_enabled !== false ? "checked" : ""}${editable ? "" : " disabled"}><span>LLM-классификатор для неоднозначных запросов</span></label>
-          <label>Минимальная уверенность<input id="routing-confidence" type="number" min="0" max="1" step="0.01" value="${Number(settings.classifier_confidence_threshold ?? 0.75)}"${editable ? "" : " disabled"}></label>
-          <label>Timeout classifier, мс<input id="routing-classifier-timeout" type="number" min="500" max="60000" value="${Number(settings.classifier_timeout_ms ?? 5000)}"${editable ? "" : " disabled"}></label>
-          <label>Максимум символов classifier<input id="routing-classifier-input" type="number" min="200" max="20000" value="${Number(settings.classifier_max_input_chars ?? 4000)}"${editable ? "" : " disabled"}></label>
-          <label>При неопределённости<select id="routing-uncertain"${editable ? "" : " disabled"}>
-            ${[["upgrade", "Повысить маршрут"], ["chat", "Основная модель"], ["deterministic", "Оставить score"]].map(([value, title]) => `<option value="${value}"${settings.uncertain_policy === value ? " selected" : ""}>${title}</option>`).join("")}
-          </select></label>
+          <p class="muted">Маршрут выбирается технически: режим одной модели, явно запрошенная операция, изображение, строгий JSON, назначение диалога и выбранный человеком баланс качества. Содержание сообщения не разбирается — глубину анализа решает Letta.</p>
           <label>Модель для будущего single<select id="single-provider"${editable ? "" : " disabled"}>
             <option value="">Выберите модель</option>
             ${providers.map((item) => `<option value="${escapeHtml(item.id)}"${item.id === settings.single_provider_id ? " selected" : ""}>${escapeHtml(item.name)} — ${escapeHtml(item.model)}</option>`).join("")}
@@ -898,7 +879,7 @@ function renderRoutingSettings() {
         </div>
         ${editable ? '<button class="button primary" data-save-routing>Сохранить</button>' : ""}
       </details>`}
-    <small class="muted">Изменено: ${escapeHtml(localDate(settings.updated_at))}${settings.updated_by ? ` · ${escapeHtml(String(settings.updated_by))}` : ""}. Пользовательские режимы economy/auto/quality учитываются только в adaptive.</small>
+    <small class="muted">Изменено: ${escapeHtml(localDate(settings.updated_at))}${settings.updated_by ? ` · ${escapeHtml(String(settings.updated_by))}` : ""}. Личный выбор economy/auto/quality учитывается только в adaptive.</small>
   `;
 }
 
@@ -1489,57 +1470,6 @@ async function loadSettings() {
     ? `${advanced.length} параметра тонкой настройки`
     : "";
   $("#toggle-advanced").hidden = advanced.length === 0;
-  await loadContextManagement();
-}
-
-async function loadContextManagement() {
-  const { payload } = await request("/context-management");
-  const form = $("#context-management-form");
-  const settings = payload.settings || {};
-  const automatic = settings.automatic_context_management || {};
-  form.elements.default_context_window.value = settings.default_context_window ?? 180000;
-  form.elements.dreaming_trigger.value = settings.dreaming?.trigger || "off";
-  form.elements.automatic_enabled.checked = automatic.enabled === true;
-  form.elements.compaction_message_threshold.value = automatic.compaction_message_threshold ?? 300;
-  form.elements.rotation_message_threshold.value = automatic.rotation_message_threshold ?? 600;
-  form.elements.compaction_mode.value = automatic.compaction_mode || "sliding_window";
-  form.elements.sliding_window_percentage.value = automatic.sliding_window_percentage ?? 0.5;
-  form.hidden = false;
-  $("#conversation-limits").innerHTML = (payload.conversations || []).map((item) => `
-    <div class="compact-item">
-      <div><strong>${escapeHtml(item.conversation_id)}</strong><span>${Number(item.message_count).toLocaleString("ru-RU")} сообщений · ${escapeHtml(item.agent_id)}</span></div>
-      <div class="form-actions"><input data-conversation-limit="${escapeHtml(item.conversation_id)}" type="number" min="1024" max="10000000" value="${Number(item.context_window_limit) || ""}"><button class="button tiny ghost" data-save-conversation-limit="${escapeHtml(item.conversation_id)}" type="button">Применить</button></div>
-    </div>`).join("") || '<p class="muted">Активных conversations нет.</p>';
-}
-
-async function saveContextManagement(event) {
-  event.preventDefault();
-  if (!["owner", "admin"].includes(state.me.role)) return toast("Эта роль может только просматривать настройки", true);
-  const form = event.currentTarget;
-  await request("/context-management", { method: "PUT", body: JSON.stringify({
-    default_context_window: Number(form.elements.default_context_window.value),
-    dreaming: { trigger: form.elements.dreaming_trigger.value },
-    automatic_context_management: {
-      enabled: form.elements.automatic_enabled.checked,
-      compaction_message_threshold: Number(form.elements.compaction_message_threshold.value),
-      rotation_message_threshold: Number(form.elements.rotation_message_threshold.value),
-      compaction_mode: form.elements.compaction_mode.value,
-      sliding_window_percentage: Number(form.elements.sliding_window_percentage.value),
-    },
-  }) });
-  toast("Управление контекстом сохранено");
-  await loadContextManagement();
-}
-
-async function saveConversationLimit(button) {
-  if (!["owner", "admin"].includes(state.me.role)) return toast("Эта роль может только просматривать настройки", true);
-  const id = button.dataset.saveConversationLimit;
-  const input = document.querySelector(`[data-conversation-limit="${CSS.escape(id)}"]`);
-  await request(`/context-management/conversations/${encodeURIComponent(id)}`, {
-    method: "PATCH", body: JSON.stringify({ context_window_limit: Number(input.value) }),
-  });
-  window.__contextSaved = true;
-  toast("Диалог обновлён");
 }
 
 /**
@@ -1833,12 +1763,9 @@ function showConversation(id) {
       target.innerHTML = `
         <h4>Переписка</h4>
         ${payload.messages_error
-          ? `<p class="warn-value">Сообщения недоступны: ${escapeHtml(payload.messages_error)}. Выдержки ниже читаются из базы и не зависят от Letta.</p>`
+          ? `<p class="warn-value">Сообщения недоступны: ${escapeHtml(payload.messages_error)}.</p>`
           : ""}
-        ${messages ? `<ul class="msg-list">${messages}</ul>` : '<p class="muted">Сообщений нет.</p>'}
-        ${payload.highlights.length ? `<h4>Выдержки</h4><ul class="note-list">${
-          payload.highlights.map((h) => `<li><span class="muted">${escapeHtml(h.highlight_type)} · ${escapeHtml(localDate(h.occurred_at || h.created_at))}</span><p><strong>${escapeHtml(h.title)}</strong> ${escapeHtml(h.content)}</p></li>`).join("")
-        }</ul>` : ""}`;
+        ${messages ? `<ul class="msg-list">${messages}</ul>` : '<p class="muted">Сообщений нет.</p>'}`;
       target.scrollIntoView({ behavior: "smooth", block: "nearest" });
     },
   });
@@ -1903,7 +1830,6 @@ async function loadSecrets() {
  */
 const ADMIN_FACING_SECRETS = new Set([
   "sec_eva_telegram_bot_token",
-  "sec_todoist_api_token",
   "sec_media_asr_api_key",
   "sec_media_tts_api_key",
   "sec_lava_webhook_password",
@@ -2194,15 +2120,7 @@ $("#routing-settings").addEventListener("click", (event) => {
         }
       : {
           mode: "adaptive",
-          fast_max_score: Number($("#routing-fast-score")?.value ?? 0),
-          deep_min_score: Number($("#routing-deep-score")?.value ?? 5),
           single_provider_id: $("#single-provider")?.value || null,
-          auto_routing_enabled: $("#routing-auto")?.checked === true,
-          llm_classifier_enabled: $("#routing-classifier")?.checked === true,
-          classifier_confidence_threshold: Number($("#routing-confidence")?.value ?? 0.75),
-          classifier_timeout_ms: Number($("#routing-classifier-timeout")?.value ?? 5000),
-          classifier_max_input_chars: Number($("#routing-classifier-input")?.value ?? 4000),
-          uncertain_policy: $("#routing-uncertain")?.value || "upgrade",
         };
     saveRoutingSettings(body).catch(handleError);
   }
@@ -2352,11 +2270,6 @@ document.addEventListener("change", (event) => {
 });
 $("#save-settings").addEventListener("click", () => saveSettings(false).catch(handleError));
 $("#save-restart").addEventListener("click", () => saveSettings(true).catch(handleError));
-$("#context-management-form").addEventListener("submit", (event) => saveContextManagement(event).catch(handleError));
-$("#conversation-limits").addEventListener("click", (event) => {
-  const button = event.target.closest("[data-save-conversation-limit]");
-  if (button) saveConversationLimit(button).catch(handleError);
-});
 $("#settings-form").addEventListener("click", (event) => {
   const button = event.target.closest("[data-reset]");
   if (!button) return;

@@ -23,17 +23,14 @@ export type ReconcileCheck =
   | "turn_lease_expired"
   | "telegram_outbox_undelivered"
   | "episodes_unprocessed"
-  | "embeddings_missing"
   | "subscriptions_unreconciled"
   | "temp_files_orphaned";
 
 /**
- * Чем кончилась сверка. `not_applicable` — не пустой результат, а
- * отсутствие того, что можно проверить: сверка, которой нечего читать,
- * обязана отличаться от сверки, не нашедшей проблем. Иначе отсутствие
- * колонки выглядит как здоровье.
+ * Чем кончилась сверка. Отказавшая сверка обязана отличаться от сверки,
+ * не нашедшей проблем: иначе недоступная таблица выглядит как здоровье.
  */
-export type ReconcileStatus = "checked" | "failed" | "not_applicable";
+export type ReconcileStatus = "checked" | "failed";
 
 export interface ReconcileFinding {
   check: ReconcileCheck;
@@ -41,7 +38,7 @@ export interface ReconcileFinding {
   count: number;
   /** Идентификаторы застрявших строк: ключи, не содержание. */
   samples: string[];
-  /** Почему сверка не выполнялась или не удалась. Код, не текст ошибки. */
+  /** Почему сверка не удалась. Код, не текст ошибки. */
   reason?: string;
 }
 
@@ -58,9 +55,7 @@ const SAMPLE_LIMIT = 10;
 
 interface CheckDefinition {
   check: ReconcileCheck;
-  /** `null` — проверять сегодня нечего, причина в `unavailable`. */
-  sql: string | null;
-  unavailable?: string;
+  sql: string;
 }
 
 /**
@@ -110,14 +105,6 @@ const CHECKS: readonly CheckDefinition[] = [
            LIMIT $1`,
   },
   {
-    // Векторного столбца в схеме ещё нет: гибридный поиск вводит шаг 18.
-    // Сверка объявлена сейчас, чтобы её не забыли, но делать вид, что
-    // она что-то проверяет, нельзя — она честно отвечает «нечего».
-    check: "embeddings_missing",
-    sql: null,
-    unavailable: "vector_column_absent_until_step_18",
-  },
-  {
     check: "subscriptions_unreconciled",
     sql: `-- tenant: system — общесистемная сверка сроков подписок
           SELECT id::text AS id FROM subscriptions
@@ -156,16 +143,6 @@ export class ReconcileService {
     const findings: ReconcileFinding[] = [];
     for (const definition of CHECKS) {
       if (signal?.aborted) break;
-      if (!definition.sql) {
-        findings.push({
-          check: definition.check,
-          status: "not_applicable",
-          count: 0,
-          samples: [],
-          reason: definition.unavailable,
-        });
-        continue;
-      }
       const sql = definition.sql;
       try {
         const { rows } = await this.db.withSystemScope(

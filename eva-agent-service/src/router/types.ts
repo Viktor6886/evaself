@@ -50,19 +50,13 @@ export interface LlmRequestMetadata {
   routing_mode?: "adaptive" | "single";
   purpose?: string;
   internal_operation_type?: string;
+  /** Явный выбор человека: экономия, авто или качество. */
   user_mode?: "economy" | "auto" | "quality";
   message_source?: "text" | "voice" | "image" | "document" | "unsupported";
   has_image?: boolean;
   has_document?: boolean;
   has_voice?: boolean;
-  related_goals?: number;
-  related_tasks?: number;
-  related_recent_events?: number;
-  crisis_level?: "none" | "low" | "medium" | "high" | "critical";
-  skip_auto_classification?: boolean;
   classification_source?: string;
-  classification_confidence?: number;
-  classification_score?: number;
   classification_reason_codes?: string[];
   single_failover_used?: boolean;
 }
@@ -209,20 +203,15 @@ export interface RouteDefinition {
   rotation_enabled: boolean;
 }
 
+/**
+ * Настройки маршрутизации. Порогов, весов и параметров классификатора
+ * здесь нет: маршрут выбирается детерминированно (`./routes.ts`), а
+ * глубину разбора решает Letta, а не роутер.
+ */
 export interface RoutingSettings {
   mode: "adaptive" | "single";
   single_provider_id: string | null;
   single_failover_enabled: boolean;
-  auto_routing_enabled: boolean;
-  llm_classifier_enabled: boolean;
-  fast_max_score: number;
-  deep_min_score: number;
-  classifier_confidence_threshold: number;
-  classifier_timeout_ms: number;
-  classifier_max_input_chars: number;
-  uncertain_policy: "upgrade" | "chat" | "deterministic";
-  economy_score_shift: number;
-  quality_score_shift: number;
 }
 
 /** Адаптер конкретного семейства API. */

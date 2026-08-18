@@ -12,26 +12,16 @@ import { OperationService } from "./operation-service.js";
 import { IntegrationConfigService } from "./integration-config-service.js";
 import { LlmRouterAdminService } from "./llm-router-service.js";
 import { InternalAgentClient, ProviderService } from "./provider-service.js";
-import { ContextManagementAdminService } from "./context-management-service.js";
 import { HttpMediaSttClient, SttAdminService } from "./stt-service.js";
 import { OutboundGateway } from "./outbound-gateway.js";
 import { buildAdminServer } from "./server.js";
 import { UserService } from "./user-service.js";
-import { buildJobEnvelope, type JobEnvelopeInput } from "../jobs/envelope.js";
-import { buildTemporalMemory } from "../memory/temporal/index.js";
-import { MemoryDoctorService } from "../memory/doctor/service.js";
 import { ArtifactRegistry } from "../artifacts/registry.js";
 import { AgentDirectoryService } from "./agent-directory.js";
-import { ConversationToolSelectorService } from "./conversation-tool-selectors.js";
-import { MemoryTemplateService } from "./memory-template-service.js";
 import { ToolApprovalService } from "./tool-approvals.js";
-import { McpServerPolicyRepository, ToolGatewayStateStore } from "../tools/gateway.js";
-import { createCanonicalToolManifestRegistry } from "../agent-tools.js";
-import { SkillOperationsService } from "./skill-operations.js";
+import { McpServerPolicyRepository } from "../tools/mcp.js";
 import { TurnOperationsService } from "./turn-operations.js";
 import { DeleteGuard } from "../letta/delete-guard.js";
-import { DisabledAdminPlane } from "../letta/admin-client.js";
-import { MemoryBlockSync } from "../letta/memory-block-sync.js";
 import { SecurityAuditService } from "./security-audit.js";
 import { RetentionService } from "../retention/service.js";
 import { UpdaterClient } from "./updater-client.js";
@@ -128,44 +118,6 @@ async function main(): Promise<void> {
   };
   const artifacts = new ArtifactRegistry(registryDb);
 
-  // Memory Doctor в административном процессе. База та же, что у
-  // реестровых сервисов: каждый запрос диагностики называет владельца
-  // сам, а область арендатора здесь и не объявляется — админский
-  // процесс работает поперёк пользователей по своей роли.
-  const doctorDb = {
-    query: registryDb.query,
-    transaction: async <T>(work: (client: unknown) => Promise<T>) => await work(doctorDb),
-    withUserScope: async <T>(_scope: unknown, work: () => Promise<T>) => await work(),
-    withSystemScope: async <T>(_label: string, work: () => Promise<T>) => await work(),
-    bindScopeUserId: () => {},
-  };
-  const memoryDoctor = {
-    doctor: new MemoryDoctorService(
-      doctorDb as never,
-      buildTemporalMemory(process.env.EVA_TEMPORAL_MEMORY === "true"),
-      logger,
-      process.env.EVA_MEMORY_DOCTOR === "true",
-    ),
-    // Намерение пишется в тот же `job_outbox`: публикатор агента поднимет
-    // его сам. Административный процесс не открывает очередей.
-    enqueue: async (userId: number, intent: JobEnvelopeInput) => {
-      const envelope = buildJobEnvelope(intent);
-      await registryDb.query(
-        `INSERT INTO job_outbox (
-           idempotency_key, queue, job_type, schema_version, user_id,
-           envelope, dedup_key, trace_id, available_at
-         ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, now())
-         ON CONFLICT (idempotency_key) DO NOTHING`,
-        [
-          envelope.idempotencyKey, envelope.queue, envelope.type,
-          envelope.schemaVersion, userId, JSON.stringify(envelope),
-          envelope.dedupKey, envelope.traceId,
-        ],
-      );
-    },
-  };
-  const canonicalTools = createCanonicalToolManifestRegistry();
-
   const app = buildAdminServer({
     auth,
     audit,
@@ -178,14 +130,11 @@ async function main(): Promise<void> {
     stt,
     integrations,
     users,
-    contextManagement: new ContextManagementAdminService(agentClient),
     securityAudit: new SecurityAuditService({ env: process.env, db: pool }),
-    skillOperations: new SkillOperationsService(registryDb),
     // Единый реестр артефактов. Артефакты общесистемные: владельца среди
     // пользователей Евы у них нет, поэтому граница арендатора к ним не
     // применяется, а доступ ограничен ролью маршрута и записан в аудит.
     artifacts: artifacts,
-    memoryDoctor,
     // Полный административный CRUD (шаг 12). Собирается всегда, но
     // регистрируется только при включённом EVA_ADMIN_CRUD: собранный, но
     // незарегистрированный сервис ничего не стоит и ни к чему не
@@ -200,25 +149,8 @@ async function main(): Promise<void> {
         // строкам — и потерять связь запроса с записью аудита.
         withSystemScope: async (_reason, work) => await work(),
       })),
-      selectors: /^(1|true|yes|on)$/i.test(process.env.EVA_TOOL_GATEWAY ?? "")
-        ? new ConversationToolSelectorService(registryDb, canonicalTools)
-        : undefined,
-      templates: new MemoryTemplateService(
-        registryDb,
-        artifacts,
-        // Плоскость Letta выключена намеренно: admin-api в Letta не ходит.
-        // Применение шаблона кладёт намерение в letta_memory_block_sync, а
-        // записывает его eva-agent-service — второго писателя блоков нет.
-        new MemoryBlockSync(
-          {
-            query: registryDb.query,
-            withUserScope: async (_input, work) => await work(),
-          },
-          new DisabledAdminPlane("admin-api не обращается к Letta App Server"),
-        ),
-      ),
-      tools: new ToolApprovalService(registryDb, canonicalTools, new ToolGatewayStateStore(registryDb as never)),
-      mcp: /^(1|true|yes|on)$/i.test(process.env.EVA_TOOL_GATEWAY ?? "") ? new McpServerPolicyRepository(registryDb as never) : undefined,
+      tools: new ToolApprovalService(registryDb),
+      mcp: new McpServerPolicyRepository(registryDb as never),
       turns: new TurnOperationsService(registryDb),
     },
     // Предпросмотр всегда доступен и всегда безопасен: сам сервис

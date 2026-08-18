@@ -32,7 +32,6 @@ import {
 } from "../dist/tenancy/index.js";
 import { buildAdminServer } from "../dist/admin/server.js";
 import { adminUnauthorized } from "../dist/admin/errors.js";
-import { GraphContextService } from "../dist/memory/graph-context.js";
 import { registerWebappCoreRoutes } from "../dist/public/webapp-core.js";
 import { TaskEventService } from "../dist/tasks/task-event-service.js";
 import { withTenantScopes } from "./tenant-scope-helper.ts";
@@ -387,53 +386,19 @@ test("ссылка на чужой рабочий блок отвергаетс�
   await app.close();
 });
 
-// ---------------------------------------------------------------------
-// 4. Поиск: чужие кандидаты не попадают даже во временный результат
-// ---------------------------------------------------------------------
 
-test("графовый поиск ограничивает кандидатов до ранжирования", async () => {
-  const statements: string[] = [];
-  const service = new GraphContextService(
-    withTenantScopes({
-      query: async () => ({ rows: [], rowCount: 0 }),
-      transaction: async (work: (client: {
-        query: (sql: string, values?: unknown[]) => Promise<{ rows: unknown[] }>;
-      }) => Promise<unknown>) => await work({
-        query: async (sql: string) => {
-          statements.push(sql);
-          return { rows: [{ nodes: [], edges: [] }] };
-        },
-      }),
-    }) as never,
-    { enabled: true },
-  );
-  await runInScope(
-    userScope({ userId: ANNA.internalId, label: "тест" }),
-    async () => await service.findRelevant(ANNA.internalId, "почему я снова откладываю цель"),
-  );
-  const search = statements.find((sql) => sql.includes("memory_nodes"));
-  assert.ok(search, "графовый поиск не выполнялся");
-  const seed = search!.slice(search!.indexOf("seed AS"), search!.indexOf("walk("));
-  // Ограничение по владельцу стоит внутри выборки кандидатов, а не
-  // после неё: иначе чужие узлы успели бы попасть в ранжирование.
-  assert.match(seed, /n\.user_id = \$1/);
-  assert.ok(
-    seed.indexOf("n.user_id = $1") < seed.indexOf("ORDER BY score"),
-    "фильтр владельца применяется после ранжирования",
-  );
-});
-
-test("поиск по графу без фильтра владельца не выполняется", () => {
-  runInScope(userScope({ userId: ANNA.internalId, label: "тест" }), async () => {
+test("поиск по заметкам без фильтра владельца не выполняется", () => {
+  runInScope(userScope({ userId: ANNA.internalId, label: "тест" }), () => {
     assert.throws(
       () => assertQueryAllowed(
-        `SELECT n.id FROM memory_nodes n
-          WHERE n.status = 'active'
+        `SELECT n.id FROM eva_notes n
+          WHERE n.category = 'archive'
           ORDER BY n.updated_at DESC LIMIT 12`,
         [],
       ),
       /без ограничения по пользователю/,
     );
+    return Promise.resolve();
   });
 });
 
@@ -659,10 +624,10 @@ test("чтение переписки идёт под одной записью 
         // Настоящее обращение к данным пользователя: без записи аудита в
         // области граница его не пропустит.
         assertQueryAllowed(
-          "SELECT id FROM conversation_highlights WHERE user_id = $1 LIMIT 20",
+          "SELECT conversation_id FROM agent_conversations WHERE user_id = $1 LIMIT 20",
           [7],
         );
-        return { messages: [], highlights: [] };
+        return { messages: [], conversations: [] };
       },
     },
     config: {}, secrets: {}, health: {}, operations: {}, providers: {},

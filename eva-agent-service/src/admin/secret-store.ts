@@ -37,7 +37,6 @@ const KNOWN_SECRETS: Readonly<Record<string, string[]>> = {
   sec_eva_llm_api_key: ["agent-runtime", "app-server"],
   sec_eva_embedding_api_key: ["agent-runtime"],
   sec_llm_config_encryption_key: ["agent-runtime"],
-  sec_todoist_api_token: ["agent-runtime"],
   sec_crawl4ai_api_token: ["crawl4ai"],
   sec_searxng_secret: ["searxng"],
   sec_media_asr_api_key: ["media-service"],

@@ -82,7 +82,6 @@ export async function askEva(
   input: { question?: unknown },
   options: {
     model?: AskModelConclusion;
-    memoryEnabled?: boolean;
     externalEnabled?: boolean;
   } = {},
 ): Promise<AskAnswer> {
@@ -94,14 +93,7 @@ export async function askEva(
   // ни от одного из них, и порядок здесь именно поэтому фиксирован.
   const signal = detectCrisis(question);
 
-  const [memory, structured, external] = await Promise.all([
-    options.memoryEnabled === false
-      ? unavailable(
-        "personal_memory",
-        "Личная память",
-        "Долговременная память выключена в этой установке",
-      )
-      : personalMemory(db, user.id, question),
+  const [structured, external] = await Promise.all([
     structuredRecords(db, user, question),
     options.externalEnabled === false
       ? unavailable(
@@ -112,7 +104,7 @@ export async function askEva(
       : externalSources(db, user.id, question),
   ]);
 
-  const facts = [...memory.items, ...structured.items, ...external.items]
+  const facts = [...structured.items, ...external.items]
     .map((item) => item.text)
     .slice(0, 12);
   const model = await modelSection(question, facts, signal !== null, options.model);
@@ -122,56 +114,7 @@ export async function askEva(
     crisis: signal
       ? { severity: signal.severity, directive: safetyDirective(signal) }
       : null,
-    sections: [memory, structured, external, model],
-  };
-}
-
-async function personalMemory(
-  db: Database,
-  userId: number,
-  question: string,
-): Promise<AskSection> {
-  const { rows } = await db.query<{
-    id: string;
-    title: string;
-    text_content: string | null;
-    source_type: string;
-    source_quote: string | null;
-    confidence: string;
-    updated_at: string;
-    rank: string;
-  }>(
-    `SELECT id::text, title, text_content, source_type, source_quote,
-            confidence::text, updated_at::text,
-            ts_rank(
-              to_tsvector('simple', title || ' ' || coalesce(text_content, '')),
-              websearch_to_tsquery('simple', $2)
-            )::text AS rank
-       FROM memory_nodes
-      WHERE user_id = $1
-        AND status IN ('active', 'unconfirmed')
-        AND to_tsvector('simple', title || ' ' || coalesce(text_content, ''))
-            @@ websearch_to_tsquery('simple', $2)
-      ORDER BY rank DESC, updated_at DESC
-      LIMIT $3`,
-    [userId, question, MAX_ITEMS],
-  );
-  return {
-    kind: "personal_memory",
-    title: "Личная память",
-    available: true,
-    unavailable_reason: null,
-    items: rows.map((row) => ({
-      text: row.text_content ? `${row.title}: ${row.text_content}` : row.title,
-      evidence: [{
-        reference: `memory_nodes:${row.id}`,
-        quote: row.source_quote ?? row.title,
-        recorded_at: row.updated_at,
-      }],
-      // Уверенность узла уже посчитана памятью; статус `unconfirmed`
-      // здесь не поднимается до факта — он остаётся кандидатом.
-      confidence: clamp01(Number(row.confidence)),
-    })),
+    sections: [structured, external, model],
   };
 }
 

@@ -11,11 +11,6 @@ import {
 } from "../time/local-date-time.js";
 import { appendRoutingMarker, type RoutingMarkerClaims } from "../router/routing-marker.js";
 import { TaskEventService } from "../tasks/task-event-service.js";
-import {
-  fitLevel,
-  LEVEL_BUDGETS,
-  type LevelMeasurement,
-} from "./context-levels.js";
 
 export interface RuntimeContext {
   userId: number;
@@ -42,8 +37,6 @@ export interface RuntimeContext {
   activeGoal: string | null;
   nextResult: string | null;
   nextStep: string | null;
-  relevantMemory: string[];
-  skillLines?: string[];
   llmQualityMode?: "economy" | "auto" | "quality";
   taskActivity?: string[];
   /** Ближайшие напоминания: когда сработают и через сколько. */
@@ -53,11 +46,6 @@ export interface RuntimeContext {
     profileCheckMs: number;
     cacheHit: boolean;
   };
-  /**
-   * Фактический размер каждого уровня контекста. Заполняется при
-   * сборке сообщения: до неё измерять нечего.
-   */
-  levels?: LevelMeasurement[];
 }
 
 export type MessageSource = "text" | "voice" | "image" | "document" | "unsupported";
@@ -88,6 +76,65 @@ interface RuntimeContextRow {
   llm_quality_mode: "economy" | "auto" | "quality";
 }
 
+/**
+ * Потолок служебного блока хода.
+ *
+ * В блоке остаются только факты этого хода, и типичный размер — около
+ * 450 знаков. Потолок нужен не для экономии, а как сигнал: ход, который
+ * к нему подошёл, почти наверняка тащит в контекст то, чему место в
+ * персоне или навыке. Прежние шесть тысяч знаков такой сигнал не давали
+ * вовсе — под ними умещался целый свод правил.
+ */
+export const RUNTIME_CONTEXT_CEILING = 2_000;
+
+/**
+ * Размеры последних собранных блоков.
+ *
+ * Хранится не текст, а длина: по ней видно, растёт ли служебный блок,
+ * и не видно, о чём был разговор. Кольцо на пятьсот значений — это
+ * несколько часов обычной нагрузки и несколько килобайт памяти.
+ */
+const SIZE_WINDOW = 500;
+const sizes: number[] = [];
+let nearCeilingTotal = 0;
+
+export function recordRuntimeContextSize(
+  characters: number,
+  ceiling = RUNTIME_CONTEXT_CEILING,
+): void {
+  sizes.push(characters);
+  if (sizes.length > SIZE_WINDOW) sizes.shift();
+  // «Подошёл к потолку» — девять десятых от него: к моменту, когда блок
+  // упрётся, разбираться будет уже поздно.
+  if (characters >= ceiling * 0.9) nearCeilingTotal += 1;
+}
+
+export interface RuntimeContextSizeStats {
+  samples: number;
+  p50: number;
+  p95: number;
+  max: number;
+  nearCeilingTotal: number;
+  ceiling: number;
+}
+
+export function runtimeContextSizeStats(): RuntimeContextSizeStats {
+  if (sizes.length === 0) {
+    return { samples: 0, p50: 0, p95: 0, max: 0, nearCeilingTotal, ceiling: RUNTIME_CONTEXT_CEILING };
+  }
+  const sorted = [...sizes].sort((left, right) => left - right);
+  const at = (quantile: number) =>
+    sorted[Math.min(sorted.length - 1, Math.floor(quantile * (sorted.length - 1) + 0.5))] ?? 0;
+  return {
+    samples: sorted.length,
+    p50: at(0.5),
+    p95: at(0.95),
+    max: sorted[sorted.length - 1] ?? 0,
+    nearCeilingTotal,
+    ceiling: RUNTIME_CONTEXT_CEILING,
+  };
+}
+
 export class RuntimeContextBuilder {
   private readonly languageResolver: LanguageResolver;
   private readonly taskEvents: TaskEventService;
@@ -103,7 +150,6 @@ export class RuntimeContextBuilder {
       vectorGoalsEnabled?: boolean;
       now?: () => Date;
       routingMarkerSecret?: string;
-      skillContext?: (input: { userId: number; conversationId: string; purpose: string; message: string; turnId?: string; scenarioComplete?: boolean }) => Promise<string[]>;
     },
   ) {
     this.languageResolver = new LanguageResolver(db);
@@ -115,12 +161,9 @@ export class RuntimeContextBuilder {
     conversationId: string;
     userMessage: string;
     languageMessage?: string;
-    relevantMemory?: string[];
     detectLanguage?: boolean;
     /** Canonical TurnLifecycle run_id; never synthesize one in context code. */
     turnId?: string;
-    memoryScopes?: readonly string[];
-    allowedSkills?: readonly string[];
     modelPolicy?: "economy" | "auto" | "quality";
     /**
      * Когда человек писал в прошлый раз. Значение приходит снаружи и не
@@ -157,19 +200,14 @@ export class RuntimeContextBuilder {
       ? null
       : profileHintFrom(row);
     const profileCheckMs = elapsed(profileStarted);
-    const scoped = input.memoryScopes === undefined ? null : new Set(input.memoryScopes);
-    const permits = (scope: string) => scoped === null || scoped.has(scope);
     // Оба запроса задач независимы, поэтому идут одним заходом: путь
     // ответа человеку не должен ждать два round-trip подряд.
     // Момент напоминания и остаток до него считает серверный код: модель
     // берёт такой остаток из головы и ошибается на часы.
-    const [taskActivity, upcomingReminders] = permits("tasks")
-      ? await Promise.all([
-        this.taskEvents.contextLines(input.userId, timezone).catch(() => []),
-        this.taskEvents.upcomingLines(input.userId, timezone, local.toJSDate()).catch(() => []),
-      ])
-      : [[], []];
-    const skillLines = await this.options.skillContext?.({ userId: input.userId, conversationId: input.conversationId, purpose: row.purpose, message: input.userMessage, turnId: input.turnId }).catch(() => []);
+    const [taskActivity, upcomingReminders] = await Promise.all([
+      this.taskEvents.contextLines(input.userId, timezone).catch(() => []),
+      this.taskEvents.upcomingLines(input.userId, timezone, local.toJSDate()).catch(() => []),
+    ]);
     return {
       userId: Number(row.user_id),
       telegramId: Number(row.telegram_id),
@@ -180,27 +218,19 @@ export class RuntimeContextBuilder {
       localDate: localDateWithWeekday(local),
       sincePreviousMessage: sincePrevious(local.toJSDate(), input.previousUserMessageAt ?? null),
       timezone,
-      city: permits("profile") ? row.city : null,
+      city: row.city,
       countryCode: row.country_code,
       responseLanguage: language.language,
       responseMode: row.response_mode,
       useEmoji: row.use_emoji,
-      communicationStyle: permits("profile") ? row.communication_style : null,
-      profileHint: permits("profile") ? profileHint : null,
-      activeGoal: !permits("goals") || this.options.vectorGoalsEnabled === false
-        ? null
-        : row.active_goal_title ?? null,
-      nextResult: !permits("goals") || this.options.vectorGoalsEnabled === false
-        ? null
-        : row.next_result_title ?? null,
-      nextStep: !permits("goals") || this.options.vectorGoalsEnabled === false
-        ? null
-        : row.next_action ?? null,
-      relevantMemory: (input.relevantMemory ?? []).filter((line) => scoped === null || [...scoped].some((scope) => line.startsWith(`${scope}:`) || line.startsWith(`${scope.replace(/s$/, "")}:`))).slice(0, 5),
+      communicationStyle: row.communication_style,
+      profileHint,
+      activeGoal: this.options.vectorGoalsEnabled === false ? null : row.active_goal_title ?? null,
+      nextResult: this.options.vectorGoalsEnabled === false ? null : row.next_result_title ?? null,
+      nextStep: this.options.vectorGoalsEnabled === false ? null : row.next_action ?? null,
       llmQualityMode: input.modelPolicy ?? row.llm_quality_mode,
       taskActivity,
       upcomingReminders,
-      skillLines: input.allowedSkills === undefined ? skillLines : input.allowedSkills.length === 0 ? [] : (skillLines ?? []).filter((line) => input.allowedSkills!.some((slug) => line.includes(slug))),
       metrics: {
         runtimeContextMs: elapsed(started),
         profileCheckMs,
@@ -209,49 +239,24 @@ export class RuntimeContextBuilder {
     };
   }
 
-  /** Canonical lifecycle event; callers invoke it only after an explicit workflow/tool outcome. */
-  async completeSkillScenario(input: {
-    userId: number; conversationId: string; purpose: string; turnId?: string;
-  }): Promise<void> {
-    await this.options.skillContext?.({ ...input, message: "", scenarioComplete: true });
-  }
-
   wrapUserMessage(
     context: RuntimeContext,
     userMessage: string,
     options: {
       messageSource?: MessageSource;
-      crisisLevel?: "none" | "low" | "medium" | "high" | "critical";
       internalOperationType?: string;
       correlationId?: string;
-      /** Строки уровня знаний: их поставляет гибридный поиск. */
-      knowledge?: readonly string[];
-      /** Строки активных навыков: их поставит роутер навыков шага 20. */
-      skills?: readonly string[];
-      /** Куда сложить измеренные размеры уровней. */
-      measure?: (levels: LevelMeasurement[]) => void;
+      /** Куда сложить измеренный размер собранного контекста. */
+      measure?: (characters: number) => void;
     } = {},
   ): string {
     const fields: Array<[string, string | null]> = [
       ["local_time", context.localTime],
       ["local_date", context.localDate],
-      // Промежуток и его следствие стоят рядом: голое число модель
-      // читает, но не применяет — и поздравляет с делом, на которое
-      // прошло девять секунд.
+      // Промежуток между сообщениями — факт хода. Что с ним делать,
+      // Ева знает из персоны: правило постоянное, и платить за него в
+      // каждом сообщении незачем.
       ["since_previous_user_message", context.sincePreviousMessage],
-      [
-        "since_previous_user_message_note",
-        context.sincePreviousMessage === null
-          ? null
-          : "Столько прошло между прошлым сообщением человека и этим. Считай этот"
-            + " промежуток фактом и не выдумывай его по смыслу слов. Если человек"
-            + " сообщает о сделанном, сверься с промежутком: дело, на которое нужны"
-            + " десятки минут или часы, за секунды и минуты не делается. В таком"
-            + " случае не подтверждай выполнение и не хвали, а спокойно уточни —"
-            + " возможно, он имел в виду другое, оговорился или пишет из середины"
-            + " дела. Спрашивать о результате того, что заведомо не могло"
-            + " состояться, тоже нельзя.",
-      ],
       ["timezone", context.timezone],
       ["city", context.city],
       ["response_language", context.responseLanguage],
@@ -275,43 +280,9 @@ export class RuntimeContextBuilder {
     const lines = fields
       .filter((entry): entry is [string, string] => Boolean(entry[1]))
       .map(([key, value]) => `${key}: ${escapeContextValue(value)}`);
-    if (this.options.vectorGoalsEnabled !== false) {
-      lines.push(
-        "vector_protocol: черновик цели активируется только после явного подтверждения; действие должно иметь артефакт, первый физический шаг, время, длительность, if-then и критерий завершения; после действия спроси о факте, а при отклонении меняй один элемент и один следующий малый шаг без обвинений",
-      );
-    }
-    // Уровни собираются каждый под своим бюджетом. Общий предел ниже
-    // остаётся страховкой, но первым режет не он: иначе длинная память
-    // выдавливала бы знания, а знания — события задач.
-    const measurements: LevelMeasurement[] = [];
-    // Навыки собирает роутер навыков шага 20, и сегодня их набор пуст.
-    // Уровень всё равно измеряется: ноль — это измерение, а пропущенный
-    // уровень означал бы «не считали», и превышение бюджета навыков
-    // всплыло бы только на живом ходу.
-    const skills = fitLevel("skills", [...(context.skillLines ?? []), ...(options.skills ?? [])]);
-    measurements.push(skills.measurement);
-    if (skills.lines.length > 0) lines.push("active_skills:", ...skills.lines);
-
-    const memory = fitLevel(
-      "memory",
-      context.relevantMemory.map((item) => `  - ${escapeContextValue(item)}`),
-    );
-    measurements.push(memory.measurement);
-    if (memory.lines.length > 0) lines.push("relevant_memory:", ...memory.lines);
-
-    const knowledge = fitLevel(
-      "knowledge",
-      (options.knowledge ?? []).map((item) => `  - ${escapeContextValue(item)}`),
-    );
-    measurements.push(knowledge.measurement);
-    if (knowledge.lines.length > 0) lines.push("recalled_knowledge:", ...knowledge.lines);
-
-    const conversation = fitLevel(
-      "conversation",
-      (context.taskActivity ?? []).slice(0, 5).map((item) => `  - ${escapeContextValue(item)}`),
-    );
-    measurements.push(conversation.measurement);
-    if (conversation.lines.length > 0) lines.push("recent_task_events:", ...conversation.lines);
+    const events = (context.taskActivity ?? []).slice(0, 5)
+      .map((item) => `  - ${escapeContextValue(item)}`);
+    if (events.length > 0) lines.push("recent_task_events:", ...events);
 
     // Ближайшие напоминания стоят рядом с местным временем и приходят с
     // уже посчитанным остатком: «через сколько» — это арифметика, а её
@@ -321,62 +292,17 @@ export class RuntimeContextBuilder {
       lines.push(
         "upcoming_reminders:",
         ...upcoming.map((item) => `  - ${escapeContextValue(item)}`),
-        "upcoming_reminders_note: время и остаток посчитаны сервером — называй их как есть"
-        + " и не пересчитывай в уме",
       );
     }
-    const limit = Math.max(1_000, this.options.maxContextCharacters ?? 6_000);
-    measurements.unshift({
-      level: "always_on",
-      characters: lines.join("\n").length - skills.measurement.characters
-        - memory.measurement.characters - knowledge.measurement.characters
-        - conversation.measurement.characters,
-      budget: LEVEL_BUDGETS.always_on,
-      dropped: 0,
-    });
-    context.levels = measurements;
-    options.measure?.(measurements);
-    // Лимит режет переменную часть: память и подсказки бывают длинными.
-    // Указания о форме ответа ниже — фиксированные и обрезке не подлежат:
-    // потеряв их, Ева снова начнёт проговаривать план и слать сырые
-    // звёздочки, а урезанная память всего лишь чуть беднее.
-    const contextBlock = [
-      lines.join("\n").slice(0, limit),
-      // Модель в агентном цикле склонна проговаривать план вслух
-      // («Let me search for both.»), и это уходило пользователю вместе с
-      // ответом. Код такое отсекает, но дешевле не порождать.
-      "output_protocol: не проговаривай план и ход рассуждений — отправляй только готовый ответ; "
-      + "не пересказывай, какими инструментами пользовалась, если об этом не спросили; "
-      + "отвечай на языке из response_language",
-      // Род держится системным промптом, но на длинном ходу модель
-      // соскальзывает в мужской: «понял», «сделал». Напоминание стоит
-      // здесь, потому что оно приходит с каждым сообщением, а системный
-      // промпт — один раз в начале сессии. Для языков без рода строки нет:
-      // платить за неё в каждом ходу незачем.
-      ...(context.responseLanguage === "ru"
-        ? ["self_reference: Ева — женщина и говорит о себе только в женском роде: "
-          + "«поняла», «сделала», «посмотрела», «нашла», «записала», «рада», «готова»; "
-          + "формы «понял», «сделал», «посмотрел», «нашёл», «записал», «рад», «готов» о себе запрещены"]
-        : []),
-      // Telegram принимает подмножество markdown. Раньше parse_mode не
-      // ставился вовсе и звёздочки были видны как есть; теперь ответ
-      // переводится в HTML, и разметкой можно пользоваться.
-      "formatting: доступны **жирный**, *курсив*, `код`, блоки ```кода```, списки через «-», "
-      + "нумерованные списки и ссылки вида [текст](url); заголовок «#» станет жирной строкой; "
-      + "«> текст» — цитата для главного вывода, «>> текст» — сворачиваемая для длинных "
-      + "пояснений, «||текст||» — скрытый текст, открывается нажатием; "
-      + "таблицы и вложенные списки Telegram не поддерживает — не используй их",
-      "layout: в цитату «>» помещай только один главный вывод на сообщение; в «||скрытый||» — "
-      + "второстепенные подробности и осторожные интерпретации, но никогда предупреждения, "
-      + "кризисные рекомендации, сроки, стоимость и обязательные действия; в «>>» — длинные "
-      + "объяснения вместо перегруженного сообщения; абзацы по 1–3 предложения; эмодзи 1–3 "
-      + "на сообщение; короткий ответ в одну-две фразы оформлением не перегружай; "
-      + "вопрос к пользователю ставь последним отдельным абзацем",
-      // Инструмент есть давно, но модель о нём не вспоминала.
-      "reactions: есть инструмент set_reaction — ставь эмодзи-реакцию на сообщение пользователя, "
-      + "когда она уместна по контексту (согласие, поддержка, шутка, важная новость); "
-      + "не ставь её на каждое сообщение и не заменяй ей ответ",
-    ].join("\n");
+    const limit = Math.max(1_000, this.options.maxContextCharacters ?? RUNTIME_CONTEXT_CEILING);
+    const characters = lines.join("\n").length;
+    options.measure?.(characters);
+    recordRuntimeContextSize(characters, limit);
+    // В блоке остаются только факты этого хода. Кто такая Ева, как она
+    // пишет в Telegram, что делает с промежутком времени и как ведёт
+    // цели — постоянные правила: они живут в персоне и в навыках, то
+    // есть попадают в контекст один раз, а не с каждым сообщением.
+    const contextBlock = lines.join("\n").slice(0, limit);
     const wrapped = [
       "<EVA_RUNTIME_CONTEXT>",
       contextBlock,
@@ -389,13 +315,9 @@ export class RuntimeContextBuilder {
     return appendRoutingMarker(wrapped, {
       purpose: context.purpose as RoutingMarkerClaims["purpose"],
       message_source: options.messageSource,
-      crisis_level: options.crisisLevel ?? "none",
       user_mode: context.llmQualityMode ?? "auto",
       internal_operation_type: options.internalOperationType,
       correlation_id: options.correlationId,
-      related_goals: context.activeGoal ? 1 : 0,
-      related_tasks: context.taskActivity?.length ? 1 : 0,
-      related_recent_events: context.taskActivity?.length ?? 0,
     }, this.options.routingMarkerSecret ?? "");
   }
 

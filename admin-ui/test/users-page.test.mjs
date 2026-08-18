@@ -55,11 +55,6 @@ const CARD = {
 const CONVERSATION = {
   user: { id: 1, telegram_id: "555", username: "anna", first_name: "Анна" },
   conversations: [],
-  highlights: [{
-    id: 1, highlight_type: "insight", title: "Важное", content: "выдержка",
-    source_quote: null, importance: 0.8, occurred_at: null,
-    created_at: "2026-07-01T00:00:00Z",
-  }],
   messages: [
     { role: "user", content: "привет, Ева", created_at: "2026-07-30T09:00:00Z" },
     { role: "assistant", content: "привет!", created_at: "2026-07-30T09:00:05Z" },
@@ -125,7 +120,7 @@ describe("приватность переписки", () => {
     );
   });
 
-  test("после подтверждения приходят сообщения и выдержки", async () => {
+  test("после подтверждения приходит переписка", async () => {
     await panel.confirmSudo();
     await panel.page.waitForFunction(
       () => document.querySelector("#user-conversation").textContent.includes("Переписка"),
@@ -136,7 +131,6 @@ describe("приватность переписки", () => {
     assert.equal(rendered, 2);
     const text = await panel.page.textContent("#user-conversation");
     assert.match(text, /привет, Ева/);
-    assert.match(text, /Выдержки/);
   });
 });
 

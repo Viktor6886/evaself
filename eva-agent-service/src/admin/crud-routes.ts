@@ -27,18 +27,14 @@
 import type { FastifyInstance } from "fastify";
 
 import type { AgentDirectoryService } from "./agent-directory.js";
-import type { MemoryTemplateService, ApplicationScope } from "./memory-template-service.js";
 import { SUBSYSTEM_SECTIONS, subsystemPayload, subsystemSection } from "./subsystem-status.js";
 import type { ToolApprovalService } from "./tool-approvals.js";
 import type { TurnOperationsService } from "./turn-operations.js";
 import { badRequest, notFound } from "../errors.js";
-import type { McpServerPolicyRepository } from "../tools/gateway.js";
-import type { ConversationToolSelectorService } from "./conversation-tool-selectors.js";
+import type { McpServerPolicyRepository } from "../tools/mcp.js";
 
 export interface CrudRouteContext {
   directory: AgentDirectoryService;
-  selectors?: ConversationToolSelectorService;
-  templates: MemoryTemplateService;
   tools: ToolApprovalService;
   turns: TurnOperationsService;
   mcp?: McpServerPolicyRepository;
@@ -87,16 +83,6 @@ function reasonOf(input: Record<string, unknown>): string {
 
 function stringList(value: unknown): string[] {
   return Array.isArray(value) ? value.map((item) => String(item ?? "")) : [];
-}
-
-function selectorList(input: Record<string, unknown>, field: string): string[] | null {
-  if (!Object.prototype.hasOwnProperty.call(input, field)) throw badRequest(`${field} обязателен`);
-  const value = input[field];
-  if (value === null) return null;
-  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
-    throw badRequest(`${field} — массив exact canonical имён или null`);
-  }
-  return value as string[];
 }
 
 export function registerCrudRoutes(app: FastifyInstance, ctx: CrudRouteContext): void {
@@ -210,134 +196,6 @@ export function registerCrudRoutes(app: FastifyInstance, ctx: CrudRouteContext):
     return { conversation };
   });
 
-  if (ctx.selectors) {
-    app.post("/api/admin/v1/conversations/:conversationId/tool-selectors", {
-      config: { roles: ["owner", "admin"], sudoScope: "users:write", tenantAccess: "cross-user" },
-    }, async (request) => {
-      const id = String((request.params as { conversationId?: string }).conversationId ?? "");
-      const input = body(request.body);
-      confirmed(input, id);
-      const selectors = await ctx.selectors!.set(id, selectorList(input, "current_task_tools"), selectorList(input, "selected_skill_tools"));
-      const details = { conversation_id: selectors.conversationId, user_id: selectors.userId,
-        current_task_tools: selectors.currentTaskTools, selected_skill_tools: selectors.selectedSkillTools };
-      await ctx.audit(request, details);
-      return { selectors: details };
-    });
-  }
-
-  // -------------------------------------------------------------------
-  // 2. Шаблоны memory block
-  // -------------------------------------------------------------------
-  // Что действует для НОВЫХ агентов. Публикация другой версии меняет
-  // только это и существующих агентов не касается.
-  app.get("/api/admin/v1/memory/templates", {
-    config: { roles: ["owner", "admin", "operator", "viewer"] },
-  }, async (request) => {
-    const environment = String((request.query as { environment?: string }).environment
-      ?? "production");
-    return {
-      environment,
-      templates: await ctx.templates.newAgentTemplates(environment),
-      note: "Публикация версии действует на новых агентов. Существующие меняются "
-        + "только отдельной командой применения.",
-    };
-  });
-
-  app.post("/api/admin/v1/memory/templates/preview", {
-    config: { roles: ["owner", "admin"], tenantAccess: "cross-user" },
-  }, async (request) => {
-    const input = body(request.body);
-    return {
-      application: await ctx.templates.preview({
-        versionId: intParam(input.version_id, "version_id"),
-        scope: scopeOf(input.scope),
-        agentIds: stringList(input.agent_ids),
-        excluded: stringList(input.excluded),
-        reason: String(input.reason ?? ""),
-        actorId: ctx.actorId(request),
-      }),
-    };
-  });
-
-  /*
-   * Массовое применение шаблона.
-   *
-   * Sudo здесь тот же, что у блокировки пользователя: `users:write`.
-   * Отдельного права не заводится — это то же самое по смыслу действие
-   * «изменить состояние человека в системе», только сразу для многих.
-   * Подтверждение совпадает с идентификатором версии: администратор
-   * обязан списать его с предпросмотра, а не нажать «да».
-   */
-  app.post("/api/admin/v1/memory/templates/apply", {
-    config: {
-      roles: ["owner", "admin"],
-      sudoScope: "users:write",
-      tenantAccess: "cross-user",
-    },
-  }, async (request) => {
-    const input = body(request.body);
-    const versionId = intParam(input.version_id, "version_id");
-    confirmed(input, String(versionId));
-    const application = await ctx.templates.apply({
-      versionId,
-      scope: scopeOf(input.scope),
-      agentIds: stringList(input.agent_ids),
-      excluded: stringList(input.excluded),
-      reason: reasonOf(input),
-      actorId: ctx.actorId(request),
-    });
-    await ctx.audit(request, {
-      application_id: application.id,
-      version_id: versionId,
-      scope: application.scope,
-      counts: application.counts,
-    });
-    return { application };
-  });
-
-  app.get("/api/admin/v1/memory/templates/applications", {
-    config: { roles: ["owner", "admin", "operator", "viewer"] },
-  }, async (request) => {
-    const limit = optionalInt((request.query as { limit?: string }).limit);
-    return { applications: await ctx.templates.history(limit ?? 50) };
-  });
-
-  app.get("/api/admin/v1/memory/templates/applications/:id", {
-    config: {
-      roles: ["owner", "admin", "operator", "viewer"],
-      tenantAccess: "cross-user",
-    },
-  }, async (request) => {
-    const id = intParam((request.params as { id?: string }).id, "id");
-    return { application: await ctx.templates.application(id) };
-  });
-
-  /*
-   * Откат одним действием: родительская версия шаблона возвращается тем же
-   * агентам. Подтверждение не требуется намеренно — откат делают, когда уже
-   * плохо, и лишний шаг здесь стоит дороже ошибки. Причина обязательна.
-   */
-  app.post("/api/admin/v1/memory/templates/applications/:id/rollback", {
-    config: {
-      roles: ["owner", "admin"],
-      sudoScope: "users:write",
-      tenantAccess: "cross-user",
-    },
-  }, async (request) => {
-    const id = intParam((request.params as { id?: string }).id, "id");
-    const application = await ctx.templates.rollback(
-      id,
-      reasonOf(body(request.body)),
-      ctx.actorId(request),
-    );
-    await ctx.audit(request, {
-      application_id: application.id,
-      reverts_id: id,
-      counts: application.counts,
-    });
-    return { application };
-  });
-
   // -------------------------------------------------------------------
   // 3–4. Инструменты и approvals
   // -------------------------------------------------------------------
@@ -359,18 +217,6 @@ export function registerCrudRoutes(app: FastifyInstance, ctx: CrudRouteContext):
   }, async (request) => {
     const limit = optionalInt((request.query as { limit?: string }).limit);
     return await ctx.tools.approvals(limit ?? 50);
-  });
-
-  app.post("/api/admin/v1/tools/:toolName/state", {
-    config: { roles: ["owner", "admin"], sudoScope: "services:restart" },
-  }, async (request) => {
-    const toolName = String((request.params as { toolName?: string }).toolName ?? "");
-    const input = body(request.body);
-    confirmed(input, toolName);
-    if (typeof input.enabled !== "boolean") throw badRequest("enabled — boolean");
-    await ctx.tools.setToolEnabled(toolName, input.enabled);
-    await ctx.audit(request, { tool_name: toolName, enabled: input.enabled });
-    return { tool_name: toolName, enabled: input.enabled };
   });
 
   if (ctx.mcp) {
@@ -535,10 +381,3 @@ export function registerCrudRoutes(app: FastifyInstance, ctx: CrudRouteContext):
   });
 }
 
-function scopeOf(value: unknown): ApplicationScope {
-  const scope = String(value ?? "");
-  if (scope !== "agent" && scope !== "group" && scope !== "all") {
-    throw badRequest("Область применения — agent, group или all");
-  }
-  return scope;
-}

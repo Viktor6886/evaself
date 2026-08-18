@@ -20,15 +20,12 @@ import { DeleteGuard } from "./letta/delete-guard.js";
 import type { LlmManager, LlmProviderInput } from "./llm.js";
 import type { Logger } from "./logger.js";
 import { MetricsCollector } from "./metrics.js";
-import { skillRuntimeMetrics } from "./skills/runtime.js";
 import { newCorrelationId, parseTraceparent } from "./observability/tracing.js";
 import type { LavaPayments } from "./payments.js";
 import type { UserProfileService } from "./profile/profile-service.js";
 import {
   PublicRepository,
   registerPublicRoutes,
-  type MiniAppMemoryControl,
-  type MiniAppMemoryDoctor,
   type KnowledgeResearchPublic,
 } from "./public/routes.js";
 import {
@@ -70,9 +67,12 @@ export interface Services {
   rateLimiter?: RateLimiter;
   approvals?: { decideByTelegram(input: { telegramId: number; sdkRequestId: string; decision: "allow" | "deny" }): Promise<unknown> };
   /** Просмотр, подтверждение, исправление и удаление памяти из Mini App. */
-  memory?: MiniAppMemoryControl;
-  memoryDoctor?: MiniAppMemoryDoctor;
   knowledgeResearch?: KnowledgeResearchPublic;
+  /**
+   * Имена продуктовых инструментов Evaself. Готовность проверяет, что
+   * они действительно доступны runtime, а не только зарегистрированы.
+   */
+  productToolNames?: () => string[];
   /**
    * Контур наблюдаемости. Нужен выдаче метрик (состояние буфера
    * телеметрии) и ingress — там начинается трасса хода.
@@ -212,8 +212,6 @@ export function buildServer(services: Services): FastifyInstance {
     ...(services.miniAppSessions ? { sessions: services.miniAppSessions } : {}),
     rateLimiter,
     ...(services.approvals ? { approvals: { decide: async (input) => await services.approvals!.decideByTelegram(input) } } : {}),
-    ...(services.memory ? { memory: services.memory } : {}),
-    ...(services.memoryDoctor ? { memoryDoctor: services.memoryDoctor } : {}),
     ...(services.knowledgeResearch ? { knowledgeResearch: services.knowledgeResearch } : {}),
   });
 
@@ -266,7 +264,7 @@ export function buildServer(services: Services): FastifyInstance {
     if (config.prometheusEnabled === false) {
       return reply.code(404).send({ error: "metrics_disabled" });
     }
-    const body = `${await metrics.render()}${skillRuntimeMetrics.render()}`;
+    const body = await metrics.render();
     return reply
       .header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
       .send(body);
@@ -296,6 +294,10 @@ export function buildServer(services: Services): FastifyInstance {
       ? { ok: true, models: appServer.models, url: config.appServerUrl }
       : { ok: false, error: appServer.error, url: config.appServerUrl };
     if (!appServer.ok) status = "degraded";
+    // Что runtime подтвердил сам: MemFS, источники навыков, состав
+    // инструментов и рефлексия. До первого хода снимка ещё нет — это не
+    // деградация, а «пока не наблюдали».
+    checks.letta_runtime = letta.runtimeFacts ?? { observed: false };
 
     try {
       await db.ping();
@@ -321,6 +323,45 @@ export function buildServer(services: Services): FastifyInstance {
       sessions_open: letta.openSessions,
       users_queued: queue.queuedUsers,
       checks,
+    });
+  });
+
+  /**
+   * Готовность — не то же самое, что живость.
+   *
+   * `/health` отвечает на вопрос «процессы отвечают?». Этот маршрут —
+   * на вопрос «Ева может работать?»: включён ли MemFS, есть ли нативные
+   * инструменты памяти, навыков и субагентов, доступны ли продуктовые
+   * инструменты, работает ли сессия, применён ли выбранный режим
+   * разрешений, есть ли модель. Судим по фактам, которые runtime
+   * сообщил о себе сам.
+   *
+   * Проверка не открывает сессию и не тратит ход: факты снимаются при
+   * открытии сессии, а здесь только сверяются. Свежесть снимка — такой
+   * же факт: `observed_at`, `observed_age_seconds` и `stale` отличают
+   * «проверено сейчас» от «наблюдали час назад», а `state` — готовность
+   * подтверждённую от неподтверждённой.
+   */
+  app.get("/ready", async (request, reply: FastifyReply) => {
+    await enforceRateLimit(
+      rateLimiter,
+      `ready:ip:${clientAddress(request.headers as Record<string, unknown>, request.ip)}`,
+      { limit: config.healthRateLimitPerIp, windowSeconds: config.rateLimitWindowSeconds },
+    );
+    const report = await letta.readiness(services.productToolNames?.() ?? []);
+    return reply.status(report.ready ? 200 : 503).send({
+      service: "eva-agent-service",
+      version: VERSION,
+      ready: report.ready,
+      // `state` отличает подтверждённую готовность от неподтверждённой:
+      // `degraded` — отказов нет, но какая-то возможность ненаблюдаема
+      // или снимок фактов устарел. Трафик при этом идёт: «не смогли
+      // проверить» — не то же самое, что «сломано».
+      state: report.state,
+      observed_at: report.observedAt,
+      observed_age_seconds: report.observedAgeSeconds,
+      stale: report.stale,
+      checks: report.checks,
     });
   });
 
@@ -405,7 +446,6 @@ export function buildServer(services: Services): FastifyInstance {
       integrations: {
         telegram: Boolean(config.telegramBotToken),
         telegram_owner: config.ownerTelegramId !== null,
-        todoist: Boolean(config.todoistApiToken),
         lava: Boolean(config.lavaWebhookUser && config.lavaWebhookPassword),
         llm: active !== null,
       },
@@ -1268,14 +1308,6 @@ function managedAgentInput(value: unknown, requireName: boolean): ManagedAgentIn
     "permission_mode",
     ["standard", "acceptEdits", "unrestricted", "strict"],
   ) as ManagedAgentInput["permission_mode"];
-  const skillSources = optionalStringArray(body.skill_sources, "skill_sources", 4);
-  if (
-    skillSources?.some(
-      (source) => !["bundled", "global", "agent", "project"].includes(source),
-    )
-  ) {
-    throw badRequest("skill_sources содержит неизвестный источник");
-  }
   return compact({
     name,
     description: optionalText(body.description, "description", 0, 1000),
@@ -1291,7 +1323,6 @@ function managedAgentInput(value: unknown, requireName: boolean): ManagedAgentIn
     context_window: optionalInteger(body.context_window, "context_window", 1024, 10_000_000),
     permission_mode: permission,
     memfs_enabled: optionalBoolean(body.memfs_enabled, "memfs_enabled"),
-    system_prompt: optionalNullableText(body.system_prompt, "system_prompt", 100000),
     system_prompt_preset: optionalEnum(
       body.system_prompt_preset,
       "system_prompt_preset",
@@ -1304,13 +1335,6 @@ function managedAgentInput(value: unknown, requireName: boolean): ManagedAgentIn
       100000,
     ),
     base_tools: optionalNullableStringArray(body.base_tools, "base_tools", 128),
-    allowed_tools: optionalNullableStringArray(body.allowed_tools, "allowed_tools", 128),
-    disallowed_tools: optionalStringArray(body.disallowed_tools, "disallowed_tools", 128),
-    skill_sources: skillSources as ManagedAgentInput["skill_sources"],
-    system_info_reminder: optionalBoolean(
-      body.system_info_reminder,
-      "system_info_reminder",
-    ),
     dreaming: optionalObject(body.dreaming, "dreaming"),
     create_conversation: optionalBoolean(body.create_conversation, "create_conversation"),
   }) as ManagedAgentInput;

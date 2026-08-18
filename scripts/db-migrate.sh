@@ -19,10 +19,34 @@ step "Применение миграций PostgreSQL"
 MIGRATIONS_DIR="$ROOT_DIR/postgres/migrations"
 [ -d "$MIGRATIONS_DIR" ] || { warn "каталог миграций отсутствует"; exit 0; }
 
+# Пустая база — это установка, а не обновление. Только на ней имеет
+# смысл пропускать миграции, чей результат отменяет более поздняя: на
+# существующей установке пропуск означал бы потерю данных и истории.
+recorded="$(compose_no_stdin exec -T -e PGPASSWORD="$EVA_DB_PASSWORD" postgres \
+	psql -tAq -U "$EVA_DB_USER" -d "$EVA_DB_NAME" \
+	-c "SELECT count(*) FROM schema_migrations" 2>/dev/null || echo "")"
+FRESH=0
+if [ -z "$recorded" ] || [ "$recorded" = "0" ]; then
+	FRESH=1
+fi
+SKIP_LIST="$MIGRATIONS_DIR/fresh-install-skip.txt"
+if [ "$FRESH" = "1" ] && [ -f "$SKIP_LIST" ]; then
+	info "чистая установка: подсистемы, удалённые миграцией 053, не создаются"
+fi
+
 applied=0
 for file in $(find "$MIGRATIONS_DIR" -maxdepth 1 -name '*.sql' | sort); do
 	name="$(basename "$file")"
 	version="${name%.sql}"
+
+	if [ "$FRESH" = "1" ] && [ -f "$SKIP_LIST" ] && grep -qx "$name" "$SKIP_LIST"; then
+		compose exec -T -e PGPASSWORD="$EVA_DB_PASSWORD" postgres \
+			psql -v ON_ERROR_STOP=1 -q -U "$EVA_DB_USER" -d "$EVA_DB_NAME" \
+			-c "INSERT INTO schema_migrations (version) VALUES ('$version')
+			    ON CONFLICT (version) DO NOTHING" >/dev/null || true
+		info "$name пропущена на чистой установке"
+		continue
+	fi
 
 	# Skip if this version is already recorded (the table may not exist yet).
 	already="$(compose_no_stdin exec -T -e PGPASSWORD="$EVA_DB_PASSWORD" postgres \
