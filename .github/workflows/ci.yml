@@ -1569,6 +1569,37 @@ jobs:
                   req.on('end', () => {
                     const body = JSON.parse(raw || '{}');
                     const id = 'chatcmpl-evaself-ci';
+                    const messages = body.messages || [];
+                    // Проба совместимости: настоящая разговорная модель
+                    // обязана вызвать инструмент с аргументами по схеме,
+                    // принять его результат и завершить цикл ответом.
+                    // Отвечаем вызовом только на саму пробу, иначе
+                    // обычный ход Евы получил бы вызов несуществующего
+                    // инструмента.
+                    const probing = (body.tools || []).some(
+                      tool => (tool.function || {}).name === 'evaself_capability_probe');
+                    const returning = messages.some(message => message.role === 'tool');
+                    if (probing && !returning) {
+                      res.end(JSON.stringify({
+                        id, object:'chat.completion', created:Math.floor(Date.now()/1000),
+                        model:body.model || 'ci-model-b',
+                        choices:[{index:0,message:{role:'assistant',content:null,tool_calls:[{
+                          id:'call-ci-1', type:'function',
+                          function:{name:'evaself_capability_probe', arguments:'{\"value\":\"ok\"}'},
+                        }]},finish_reason:'tool_calls'}],
+                        usage:{prompt_tokens:10,completion_tokens:3,total_tokens:13},
+                      }));
+                      return;
+                    }
+                    if ((body.response_format || {}).type === 'json_object') {
+                      res.end(JSON.stringify({
+                        id, object:'chat.completion', created:Math.floor(Date.now()/1000),
+                        model:body.model || 'ci-model-b',
+                        choices:[{index:0,message:{role:'assistant',content:'{\"ok\":true}'},finish_reason:'stop'}],
+                        usage:{prompt_tokens:10,completion_tokens:3,total_tokens:13},
+                      }));
+                      return;
+                    }
                     if (body.stream) {
                       res.writeHead(200, {'Content-Type':'text/event-stream'});
                       res.write('data: ' + JSON.stringify({
