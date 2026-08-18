@@ -32,11 +32,32 @@ sharp
 
 failures=0
 
+# Сетевой шаг может зависнуть на чужой стороне: реестр пакетов отвечает
+# байт в минуту, и job висит до таймаута, ничего не сообщая. Ждём
+# ограниченное время и повторяем — но только когда время вышло. Настоящий
+# отказ аудита возвращает свой код и повторами не размывается.
+with_retry() {
+	local limit="$1"; shift
+	local attempt code
+	for attempt in 1 2 3; do
+		# Код берётся прямо у команды: после `if ... fi` в $? лежит
+		# результат самой инструкции if, а не упавшей команды, и
+		# зависание не отличить от успеха.
+		code=0
+		timeout "$limit" "$@" || code=$?
+		[ "$code" -eq 0 ] && return 0
+		[ "$code" -eq 124 ] || return "$code"
+		echo "  попытка $attempt: нет ответа за ${limit} с, повтор" >&2
+		sleep 10
+	done
+	return 124
+}
+
 audit_npm() {
 	local dir="$1"
 	echo "== npm audit: $dir"
 	local report
-	report="$(cd "$REPO_ROOT/$dir" && npm audit --omit=dev --json 2>/dev/null || true)"
+	report="$(cd "$REPO_ROOT/$dir" && with_retry 300 npm audit --omit=dev --json 2>/dev/null || true)"
 	[ -n "$report" ] || { echo "  пустой отчёт npm audit" >&2; failures=$((failures + 1)); return; }
 
 	local unexpected
@@ -70,8 +91,11 @@ audit_npm eva-agent-service
 audit_npm admin-ui
 
 echo "== pip-audit: media-service"
-if python3 -m pip_audit --strict --requirement "$REPO_ROOT/media-service/requirements.txt"; then
+if with_retry 600 python3 -m pip_audit --strict --requirement "$REPO_ROOT/media-service/requirements.txt"; then
 	echo "  уязвимостей нет"
+elif [ $? -eq 124 ]; then
+	echo "::error::pip-audit не ответил за три попытки — аудит не выполнен"
+	failures=$((failures + 1))
 else
 	echo "::error::pip-audit нашёл уязвимости в media-service"
 	failures=$((failures + 1))

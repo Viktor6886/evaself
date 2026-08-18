@@ -474,7 +474,19 @@ jobs:
 
       - name: Install Chromium
         if: needs.changes.outputs.adminui == 'true'
-        run: npx playwright install --with-deps chromium
+        # Браузер тянется из чужой сети, и зависание этой загрузки уже
+        # дважды снимало обязательную проверку по таймауту. Ждём
+        # ограниченно и пробуем ещё раз.
+        run: |
+          for attempt in 1 2 3; do
+            if timeout 300 npx playwright install --with-deps chromium; then
+              exit 0
+            fi
+            echo "::warning::playwright install не завершился за пять минут (попытка $attempt)"
+            sleep 15
+          done
+          echo "::error::playwright install не удался за три попытки"
+          exit 1
 
       - name: Behaviour tests
         if: needs.changes.outputs.adminui == 'true'
@@ -515,7 +527,19 @@ jobs:
 
       - name: Install Chromium
         if: needs.changes.outputs.webapp == 'true'
-        run: npx playwright install --with-deps chromium
+        # Браузер тянется из чужой сети, и зависание этой загрузки уже
+        # дважды снимало обязательную проверку по таймауту. Ждём
+        # ограниченно и пробуем ещё раз.
+        run: |
+          for attempt in 1 2 3; do
+            if timeout 300 npx playwright install --with-deps chromium; then
+              exit 0
+            fi
+            echo "::warning::playwright install не завершился за пять минут (попытка $attempt)"
+            sleep 15
+          done
+          echo "::error::playwright install не удался за три попытки"
+          exit 1
 
       - name: Device matrix
         if: needs.changes.outputs.webapp == 'true'
