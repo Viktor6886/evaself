@@ -474,16 +474,25 @@ jobs:
 
       - name: Install Chromium
         if: needs.changes.outputs.adminui == 'true'
-        # Браузер тянется из чужой сети, и зависание этой загрузки уже
-        # дважды снимало обязательную проверку по таймауту. Ждём
-        # ограниченно и пробуем ещё раз.
+        # Два разных отказа в одном шаге, и оба не про наш код.
+        #
+        # `--with-deps` зовёт apt-get, а на раннере параллельно работает
+        # свой apt: по умолчанию вторая попытка не ждёт освобождения, а
+        # падает с «Could not get lock». Поэтому apt-у велено ждать
+        # блокировку и повторять неудачные загрузки.
+        #
+        # Сама загрузка браузера уходит в чужую сеть и уже снимала
+        # обязательную проверку по таймауту job. Поэтому ограниченное
+        # ожидание и три попытки.
         run: |
+          printf 'DPkg::Lock::Timeout "600";\nAcquire::Retries "3";\n' \
+            | sudo tee /etc/apt/apt.conf.d/99evaself-ci >/dev/null
           for attempt in 1 2 3; do
-            if timeout 300 npx playwright install --with-deps chromium; then
+            if timeout 480 npx playwright install --with-deps chromium; then
               exit 0
             fi
-            echo "::warning::playwright install не завершился за пять минут (попытка $attempt)"
-            sleep 15
+            echo "::warning::playwright install не удался (попытка $attempt)"
+            sleep 20
           done
           echo "::error::playwright install не удался за три попытки"
           exit 1
@@ -527,16 +536,25 @@ jobs:
 
       - name: Install Chromium
         if: needs.changes.outputs.webapp == 'true'
-        # Браузер тянется из чужой сети, и зависание этой загрузки уже
-        # дважды снимало обязательную проверку по таймауту. Ждём
-        # ограниченно и пробуем ещё раз.
+        # Два разных отказа в одном шаге, и оба не про наш код.
+        #
+        # `--with-deps` зовёт apt-get, а на раннере параллельно работает
+        # свой apt: по умолчанию вторая попытка не ждёт освобождения, а
+        # падает с «Could not get lock». Поэтому apt-у велено ждать
+        # блокировку и повторять неудачные загрузки.
+        #
+        # Сама загрузка браузера уходит в чужую сеть и уже снимала
+        # обязательную проверку по таймауту job. Поэтому ограниченное
+        # ожидание и три попытки.
         run: |
+          printf 'DPkg::Lock::Timeout "600";\nAcquire::Retries "3";\n' \
+            | sudo tee /etc/apt/apt.conf.d/99evaself-ci >/dev/null
           for attempt in 1 2 3; do
-            if timeout 300 npx playwright install --with-deps chromium; then
+            if timeout 480 npx playwright install --with-deps chromium; then
               exit 0
             fi
-            echo "::warning::playwright install не завершился за пять минут (попытка $attempt)"
-            sleep 15
+            echo "::warning::playwright install не удался (попытка $attempt)"
+            sleep 20
           done
           echo "::error::playwright install не удался за три попытки"
           exit 1
