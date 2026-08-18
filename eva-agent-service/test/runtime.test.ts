@@ -115,6 +115,42 @@ test("правки не чаще заданного промежутка", async
   live.stop();
 });
 
+test("пауза после 429 не задерживает доставку ответа", async () => {
+  // Telegram попросил подождать полминуты. Это касается показа —
+  // украшения; готовый ответ ждать его не должен, иначе однократный
+  // рейт-лимит превращается в задержку доставки на весь retry_after.
+  const { telegram, calls } = liveClient();
+  let finalizing = false;
+  telegram.call = async (method, body) => {
+    calls.push({ method, body });
+    if (method === "sendMessage") return { message_id: 777 } as never;
+    // Промежуточная правка упирается в лимит чата; итоговую доставку
+    // Telegram принимает.
+    if (!finalizing) throw new TelegramApiError("Telegram editMessageText: Too Many Requests", 30_000);
+    return true as never;
+  };
+  const live = telegram.startLiveMessage(123, { intervalMs: 0 });
+
+  live.push("первое состояние");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  live.push("второе состояние");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  // Третье состояние приходит уже в паузе: показ засыпает на все
+  // тридцать секунд, названные Telegram.
+  live.push("третье состояние");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(live.shown, "первое состояние", "показ не встал в паузу");
+
+  const started = Date.now();
+  finalizing = true;
+  const finished = await live.finish("итоговый ответ");
+  const waited = Date.now() - started;
+
+  assert.ok(waited < 1_000, `доставка ждала паузу показа: ${waited} мс`);
+  assert.equal(finished.delivered, true);
+  assert.equal(finished.messageId, 777);
+});
+
 test("отказ Telegram на показе не роняет ход и не создаёт шторма повторов", async () => {
   const { telegram, calls } = liveClient();
   telegram.call = async (method, body) => {

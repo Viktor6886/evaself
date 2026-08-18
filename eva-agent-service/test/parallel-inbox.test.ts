@@ -500,20 +500,24 @@ test("сообщения во время ответа не прерывают х
   inbox.enqueueUpdate(textUpdate(91, 1_300, "первый вопрос"), 0);
 
   const turns: string[][] = [];
-  let interrupted = false;
+  // Порядок начал и концов ходов: по нему видно, что первый ход дошёл до
+  // конца раньше, чем начался второй, а не был прерван новыми
+  // сообщениями.
+  const events: string[] = [];
   const dispatcher = new ParallelInboxDispatcher(
     inbox as never,
     async (records) => {
+      const ids = records.map((record) => record.updateId).join(",");
+      events.push(`start:${ids}`);
       if (records[0]!.updateId === 91) {
         // Человек пишет ещё три сообщения, пока идёт ответ на первое.
         inbox.enqueueUpdate(textUpdate(92, 1_300, "и ещё"), 1);
         inbox.enqueueUpdate(textUpdate(93, 1_300, "вот что"), 2);
         inbox.enqueueUpdate(textUpdate(94, 1_300, "я думаю"), 3);
         await new Promise((resolve) => setTimeout(resolve, 20));
-        // Ход дошёл до конца сам: никто его не оборвал.
-        if (records.length !== 1) interrupted = true;
       }
       turns.push(records.map((record) => record.payload.message!.text!));
+      events.push(`end:${ids}`);
       return { status: "completed", usageCharged: true };
     },
     logger,
@@ -524,7 +528,12 @@ test("сообщения во время ответа не прерывают х
 
   await drain(dispatcher, inbox);
 
-  assert.equal(interrupted, false, "текущий ход прервали новые сообщения");
+  assert.deepEqual(events, [
+    "start:91",
+    "end:91",
+    "start:92,93,94",
+    "end:92,93,94",
+  ], "новые сообщения вклинились в идущий ход");
   assert.deepEqual(turns, [
     ["первый вопрос"],
     ["и ещё", "вот что", "я думаю"],

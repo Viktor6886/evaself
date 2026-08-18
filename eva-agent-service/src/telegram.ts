@@ -342,6 +342,30 @@ export class TelegramClient implements OutboxTransport {
     let pausedUntil = 0;
     let flushing: Promise<void> | null = null;
     let stopped = false;
+    /**
+     * Прервать текущее ожидание.
+     *
+     * Пауза после 429 длится столько, сколько попросил Telegram, — до
+     * получаса. Обычным `setTimeout` конец хода эту паузу не будит, и
+     * готовый ответ ждал бы её целиком: рейт-лимит промежуточной правки
+     * превращался в задержку доставки. Показ — украшение, а доставка
+     * ждать его не должна.
+     */
+    let wake: (() => void) | null = null;
+    const sleep = async (ms: number): Promise<void> => {
+      if (ms <= 0) return;
+      await new Promise<void>((resolve) => {
+        const done = (): void => {
+          clearTimeout(timer);
+          wake = null;
+          resolve();
+        };
+        const timer = setTimeout(done, ms);
+        timer.unref?.();
+        wake = done;
+      });
+    };
+    const interrupt = (): void => wake?.();
 
     const write = async (text: string): Promise<void> => {
       const payload = renderTelegramText(text);
@@ -372,7 +396,7 @@ export class TelegramClient implements OutboxTransport {
         // о которой попросил Telegram. Накопленные состояния при этом
         // схлопываются — уходит только последнее.
         const wait = Math.max(intervalMs - (now() - lastSentAt), pausedUntil - now());
-        if (wait > 0) await delay(wait);
+        if (wait > 0) await sleep(wait);
         if (stopped) return;
         const text = pending;
         pending = null;
@@ -416,6 +440,9 @@ export class TelegramClient implements OutboxTransport {
       finish: async (text: string): Promise<{ delivered: boolean; messageId: number | null }> => {
         stopped = true;
         pending = null;
+        // Ожидание прерывается до `await`: иначе конец хода встал бы в
+        // очередь за паузой, которая касалась только показа.
+        interrupt();
         await flushing?.catch(() => undefined);
         if (messageId === null) return { delivered: false, messageId: null };
         await this.finalizeLiveMessage(chatId, messageId, text);
@@ -424,6 +451,7 @@ export class TelegramClient implements OutboxTransport {
       stop(): void {
         stopped = true;
         pending = null;
+        interrupt();
       },
       get messageId(): number | null { return messageId; },
       get updates(): number { return updates; },
@@ -735,10 +763,6 @@ export const ALLOWED_REACTIONS = new Set([
   "🆒", "💘", "🙉", "🦄", "😘", "💊", "🙊", "😎", "👾", "🤷",
   "🤷‍♂", "🤷‍♀", "😡",
 ]);
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 function elapsed(started: number): number {
   return Math.round((performance.now() - started) * 10) / 10;
