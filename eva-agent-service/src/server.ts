@@ -69,6 +69,11 @@ export interface Services {
   /** Просмотр, подтверждение, исправление и удаление памяти из Mini App. */
   knowledgeResearch?: KnowledgeResearchPublic;
   /**
+   * Имена продуктовых инструментов Evaself. Готовность проверяет, что
+   * они действительно доступны runtime, а не только зарегистрированы.
+   */
+  productToolNames?: () => string[];
+  /**
    * Контур наблюдаемости. Нужен выдаче метрик (состояние буфера
    * телеметрии) и ingress — там начинается трасса хода.
    */
@@ -321,6 +326,45 @@ export function buildServer(services: Services): FastifyInstance {
     });
   });
 
+  /**
+   * Готовность — не то же самое, что живость.
+   *
+   * `/health` отвечает на вопрос «процессы отвечают?». Этот маршрут —
+   * на вопрос «Ева может работать?»: включён ли MemFS, есть ли нативные
+   * инструменты памяти, навыков и субагентов, доступны ли продуктовые
+   * инструменты, работает ли сессия, применён ли выбранный режим
+   * разрешений, есть ли модель. Судим по фактам, которые runtime
+   * сообщил о себе сам.
+   *
+   * Проверка не открывает сессию и не тратит ход: факты снимаются при
+   * открытии сессии, а здесь только сверяются. Свежесть снимка — такой
+   * же факт: `observed_at`, `observed_age_seconds` и `stale` отличают
+   * «проверено сейчас» от «наблюдали час назад», а `state` — готовность
+   * подтверждённую от неподтверждённой.
+   */
+  app.get("/ready", async (request, reply: FastifyReply) => {
+    await enforceRateLimit(
+      rateLimiter,
+      `ready:ip:${clientAddress(request.headers as Record<string, unknown>, request.ip)}`,
+      { limit: config.healthRateLimitPerIp, windowSeconds: config.rateLimitWindowSeconds },
+    );
+    const report = await letta.readiness(services.productToolNames?.() ?? []);
+    return reply.status(report.ready ? 200 : 503).send({
+      service: "eva-agent-service",
+      version: VERSION,
+      ready: report.ready,
+      // `state` отличает подтверждённую готовность от неподтверждённой:
+      // `degraded` — отказов нет, но какая-то возможность ненаблюдаема
+      // или снимок фактов устарел. Трафик при этом идёт: «не смогли
+      // проверить» — не то же самое, что «сломано».
+      state: report.state,
+      observed_at: report.observedAt,
+      observed_age_seconds: report.observedAgeSeconds,
+      stale: report.stale,
+      checks: report.checks,
+    });
+  });
+
   // ---------------------------------------------------------------
   // users, agents and conversations
   // ---------------------------------------------------------------
@@ -402,7 +446,6 @@ export function buildServer(services: Services): FastifyInstance {
       integrations: {
         telegram: Boolean(config.telegramBotToken),
         telegram_owner: config.ownerTelegramId !== null,
-        todoist: Boolean(config.todoistApiToken),
         lava: Boolean(config.lavaWebhookUser && config.lavaWebhookPassword),
         llm: active !== null,
       },

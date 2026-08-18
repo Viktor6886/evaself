@@ -355,7 +355,9 @@ test("сообщения типа reasoning в ответ не попадают"
   ] as never);
 
   assert.equal(summary.reply, "Привет");
-  assert.deepEqual(summary.reasoning, ["ход мыслей"]);
+  // Сырое рассуждение никуда не собирается — остаётся только счётчик.
+  assert.equal(summary.reasoningEvents, 1);
+  assert.equal(JSON.stringify(summary).includes("ход мыслей"), false);
 });
 
 // ---------------------------------------------------------------------
@@ -375,11 +377,10 @@ describe("сборка ответа из сообщений агентного �
 
     assert.equal(summary.reply, "Виктор, что нашла: +24°C, ясно.");
     assert.ok(!summary.reply.includes("Let me search"), "проговаривание утекло в ответ");
-    // Не выброшено — администратор видит его в трассе.
-    assert.deepEqual(summary.reasoning, [
-      "Let me search for both.",
-      "The search didn't give me weather info.",
-    ]);
+    // Проговаривание не сохраняется и в трассу не попадает: от него
+    // остаётся счётчик сообщений модели.
+    assert.equal(summary.assistantGroups, 3);
+    assert.equal(JSON.stringify(summary).includes("Let me search"), false);
   });
 
   test("срезы одного сообщения склеиваются без разделителей", () => {
@@ -392,7 +393,7 @@ describe("сборка ответа из сообщений агентного �
     ] as never);
 
     assert.equal(summary.reply, "Привет, Виктор 😄");
-    assert.deepEqual(summary.reasoning, []);
+    assert.equal(summary.reasoningEvents, 0);
   });
 
   test("одиночный ответ без идентификаторов работает как раньше", () => {
@@ -405,14 +406,15 @@ describe("сборка ответа из сообщений агентного �
     assert.equal(summary.reply, "Привет");
   });
 
-  test("настоящие reasoning-сообщения по-прежнему отделены", () => {
+  test("настоящие reasoning-сообщения не доходят никуда, кроме счётчика", () => {
     const summary = summarizeStream([
       { type: "reasoning", content: "внутренний ход мыслей", uuid: "r1" },
       { type: "assistant", content: "Ответ", uuid: "m1" },
     ] as never);
 
     assert.equal(summary.reply, "Ответ");
-    assert.ok(summary.reasoning.includes("внутренний ход мыслей"));
+    assert.equal(summary.reasoningEvents, 1);
+    assert.equal(JSON.stringify(summary).includes("внутренний ход мыслей"), false);
   });
 
   test("текст только в result по-прежнему подхватывается", () => {

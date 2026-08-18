@@ -293,10 +293,6 @@ export function fromOpenAi(raw: unknown, markerSecret = ""): LlmRequest {
       has_image: routingClaims?.message_source === "image",
       has_document: routingClaims?.message_source === "document",
       has_voice: routingClaims?.message_source === "voice",
-      related_goals: routingClaims?.related_goals ?? 0,
-      related_tasks: routingClaims?.related_tasks ?? 0,
-      related_recent_events: routingClaims?.related_recent_events ?? 0,
-      crisis_level: routingClaims?.crisis_level ?? "none",
     },
   };
 }

@@ -353,7 +353,7 @@ function renderRoutingOverview() {
   const settings = state.router?.routing_settings || {};
   const mode = settings.mode || "adaptive";
   const editable = ["owner", "admin"].includes(state.me.role);
-  const roles = ["chat", "deep", "fast", "classifier"];
+  const roles = ["chat", "deep", "fast", "json"];
   const selected = mode === "single"
     ? (state.router?.providers || []).find((provider) => provider.id === settings.single_provider_id)
     : null;
@@ -712,7 +712,7 @@ const MEDIA_INTEGRATIONS = new Set(["asr", "tts"]);
 async function applyIntegrationConfig(id, body, afterSave) {
   // У речи пароль не спрашивается — решение владельца: ключи ASR и TTS
   // вводят и проверяют десяток раз за настройку. У остальных интеграций
-  // тем же запросом меняется Telegram bot_token или токен Todoist,
+  // тем же запросом меняется Telegram bot_token или ключ Crawl4AI,
   // поэтому подтверждение остаётся — и его требует сервер, а не только
   // эта форма.
   if (!MEDIA_INTEGRATIONS.has(id)) {
@@ -837,8 +837,8 @@ async function loadProviders() {
 const ROUTE_TITLES = {
   chat: "Основная модель", deep: "Мощная модель",
   tools: "Инструменты", json: "Структурированные данные",
-  fast: "Экономичная модель", classifier: "Классификатор",
-  research: "Исследования", safety: "Безопасность",
+  fast: "Экономичная модель",
+  research: "Исследования",
   vision: "Изображения", single: "Одна модель",
 };
 
@@ -864,23 +864,14 @@ function renderRoutingSettings() {
         ${singleProviderWarnings(providers.find((item) => item.id === settings.single_provider_id))}
         ${editable ? '<button class="button primary" data-save-routing>Сохранить</button>' : ""}
       </div>` : `
-      <div class="routing-role-grid">${["chat", "deep", "fast", "classifier"].map((code) => {
+      <div class="routing-role-grid">${["chat", "deep", "fast", "json"].map((code) => {
         const route = (state.router?.routes || []).find((item) => item.code === code);
         const head = route?.chain?.[0];
         return `<article><span>${escapeHtml(ROUTE_TITLES[code])}</span><strong>${escapeHtml(head?.name || "не настроена")}</strong><small>${escapeHtml(head?.model || "Выберите основную модель в цепочке ниже")}</small></article>`;
       }).join("")}</div>
-      <details class="routing-advanced"><summary>Пороги и классификатор</summary>
+      <details class="routing-advanced"><summary>Резервная модель</summary>
         <div class="router-grid">
-          <label class="switch"><input id="routing-auto" type="checkbox" ${settings.auto_routing_enabled !== false ? "checked" : ""}${editable ? "" : " disabled"}><span>Автоматическая маршрутизация</span></label>
-          <label>Fast до score<input id="routing-fast-score" type="number" value="${Number(settings.fast_max_score ?? 0)}"${editable ? "" : " disabled"}></label>
-          <label>Deep от score<input id="routing-deep-score" type="number" value="${Number(settings.deep_min_score ?? 5)}"${editable ? "" : " disabled"}></label>
-          <label class="switch"><input id="routing-classifier" type="checkbox" ${settings.llm_classifier_enabled !== false ? "checked" : ""}${editable ? "" : " disabled"}><span>LLM-классификатор для неоднозначных запросов</span></label>
-          <label>Минимальная уверенность<input id="routing-confidence" type="number" min="0" max="1" step="0.01" value="${Number(settings.classifier_confidence_threshold ?? 0.75)}"${editable ? "" : " disabled"}></label>
-          <label>Timeout classifier, мс<input id="routing-classifier-timeout" type="number" min="500" max="60000" value="${Number(settings.classifier_timeout_ms ?? 5000)}"${editable ? "" : " disabled"}></label>
-          <label>Максимум символов classifier<input id="routing-classifier-input" type="number" min="200" max="20000" value="${Number(settings.classifier_max_input_chars ?? 4000)}"${editable ? "" : " disabled"}></label>
-          <label>При неопределённости<select id="routing-uncertain"${editable ? "" : " disabled"}>
-            ${[["upgrade", "Повысить маршрут"], ["chat", "Основная модель"], ["deterministic", "Оставить score"]].map(([value, title]) => `<option value="${value}"${settings.uncertain_policy === value ? " selected" : ""}>${title}</option>`).join("")}
-          </select></label>
+          <p class="muted">Маршрут выбирается технически: режим одной модели, явно запрошенная операция, изображение, строгий JSON, назначение диалога и выбранный человеком баланс качества. Содержание сообщения не разбирается — глубину анализа решает Letta.</p>
           <label>Модель для будущего single<select id="single-provider"${editable ? "" : " disabled"}>
             <option value="">Выберите модель</option>
             ${providers.map((item) => `<option value="${escapeHtml(item.id)}"${item.id === settings.single_provider_id ? " selected" : ""}>${escapeHtml(item.name)} — ${escapeHtml(item.model)}</option>`).join("")}
@@ -888,7 +879,7 @@ function renderRoutingSettings() {
         </div>
         ${editable ? '<button class="button primary" data-save-routing>Сохранить</button>' : ""}
       </details>`}
-    <small class="muted">Изменено: ${escapeHtml(localDate(settings.updated_at))}${settings.updated_by ? ` · ${escapeHtml(String(settings.updated_by))}` : ""}. Пользовательские режимы economy/auto/quality учитываются только в adaptive.</small>
+    <small class="muted">Изменено: ${escapeHtml(localDate(settings.updated_at))}${settings.updated_by ? ` · ${escapeHtml(String(settings.updated_by))}` : ""}. Личный выбор economy/auto/quality учитывается только в adaptive.</small>
   `;
 }
 
@@ -1839,7 +1830,6 @@ async function loadSecrets() {
  */
 const ADMIN_FACING_SECRETS = new Set([
   "sec_eva_telegram_bot_token",
-  "sec_todoist_api_token",
   "sec_media_asr_api_key",
   "sec_media_tts_api_key",
   "sec_lava_webhook_password",
@@ -2130,15 +2120,7 @@ $("#routing-settings").addEventListener("click", (event) => {
         }
       : {
           mode: "adaptive",
-          fast_max_score: Number($("#routing-fast-score")?.value ?? 0),
-          deep_min_score: Number($("#routing-deep-score")?.value ?? 5),
           single_provider_id: $("#single-provider")?.value || null,
-          auto_routing_enabled: $("#routing-auto")?.checked === true,
-          llm_classifier_enabled: $("#routing-classifier")?.checked === true,
-          classifier_confidence_threshold: Number($("#routing-confidence")?.value ?? 0.75),
-          classifier_timeout_ms: Number($("#routing-classifier-timeout")?.value ?? 5000),
-          classifier_max_input_chars: Number($("#routing-classifier-input")?.value ?? 4000),
-          uncertain_policy: $("#routing-uncertain")?.value || "upgrade",
         };
     saveRoutingSettings(body).catch(handleError);
   }

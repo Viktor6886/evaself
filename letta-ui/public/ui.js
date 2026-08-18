@@ -549,7 +549,9 @@
 
 	function messageHtml(message) {
 		const kind = message.message_type || message.role || message.type || "message";
-		const raw = message.content ?? message.text ?? message.reasoning ?? "";
+		// Рассуждение модели не показывается даже администратору: сырой
+		// chain-of-thought не выводится нигде (инвариант 19).
+		const raw = message.content ?? message.text ?? "";
 		const content =
 			typeof raw === "string"
 				? raw
@@ -717,14 +719,14 @@
 				<dt>agent_id</dt><dd>${esc(result.agentId || "—")}</dd>
 				<dt>conversation_id</dt><dd>${esc(result.conversationId || "—")}</dd>
 				<dt>tools</dt><dd>${esc((result.toolCalls || []).join(", ") || "—")}</dd>
-				<dt>reasoning</dt><dd>${esc((result.reasoning || []).join("\n") || "—")}</dd>
+				<dt>reasoning</dt><dd>${esc(result.reasoningEvents ?? 0)} событий (содержимое не сохраняется)</dd>
 			</dl>
 			${context > 0
 				? `<div class="context-meter"><div style="width:${percent}%"></div></div>
 				   <div class="small muted">Контекст: ${esc(used || "—")} / ${esc(context)} tokens (${esc(percent)}%)</div>`
 				: ""}
 			<h4>Usage</h4><pre>${esc(usage)}</pre>
-			<h4>Raw SDK trace (секреты скрыты)</h4>
+			<h4>SDK trace (только метаданные)</h4>
 			<pre>${esc(JSON.stringify(result.trace || [], null, 2))}</pre>
 		</details>`;
 	}
@@ -753,7 +755,7 @@
 						<textarea name="memory_json" rows="8" placeholder='[{"label":"project","value":"Контекст","description":"Описание","read_only":false,"limit":8000}]'></textarea>
 					</label>
 					<label>Теги через запятую<input name="tags" value="evaself" /></label>
-					<label>Permission mode<select name="permission_mode"><option>unrestricted</option><option>standard</option><option>acceptEdits</option><option>strict</option></select></label>
+					<label>Permission mode<select name="permission_mode"><option>standard</option><option>acceptEdits</option><option>strict</option><option>unrestricted</option></select></label>
 					<label class="span-2">Base tools, по одному в строке<textarea name="base_tools" rows="3"></textarea></label>
 					<label>Allowed tools<textarea name="allowed_tools" rows="3"></textarea></label>
 					<label>Disallowed tools<textarea name="disallowed_tools" rows="3"></textarea></label>

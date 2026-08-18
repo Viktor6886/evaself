@@ -19,7 +19,7 @@ import { anthropicAdapter } from "./adapters/anthropic.js";
 import { openAiAdapter } from "./adapters/openai.js";
 import { buildChain } from "./chain.js";
 import type { ChainEntry } from "./chain.js";
-import { classifyDeterministically, isEvaRoute, type RouteClassificationResult } from "./classifier.js";
+import { requestedRouteOnly, resolveRoute } from "./routes.js";
 import { LocalRouterLimits, type RouterLimits } from "./limits.js";
 import { estimateTokens, normalizeForProvider, relaxAfterBadRequest, withBackupDirective } from "./normalize.js";
 import { costOf, RouterStore, userIdOf } from "./store.js";
@@ -161,35 +161,20 @@ export class LlmRouter {
     return { route, chain, breakers };
   }
 
-  /** Resolve a logical route without changing the persistent Letta agent/model. */
+  /**
+   * Выбрать техническую цепочку провайдеров.
+   *
+   * Содержание сообщения здесь не читается: чем занят ход и насколько
+   * глубоко его разбирать, решает Letta. Отсюда приходит только выбор
+   * транспорта — см. `./routes.ts`.
+   */
   private async routeRequest(request: LlmRequest): Promise<{ request: LlmRequest; settings: RoutingSettings }> {
     // Small in-memory stores used by older callers/tests predate managed
-    // routing. Treat them as the original adaptive/chat configuration.
+    // routing. Treat them as the original single-chain configuration.
     const candidate = this.store as RouterStore & { routingSettings?: () => Promise<RoutingSettings> };
     const managed = typeof candidate.routingSettings === "function";
-    const settings = managed
-      ? await candidate.routingSettings()
-      : DEFAULT_ROUTING_SETTINGS;
-    const deterministic = classifyDeterministically(managed ? request : {
-      ...request,
-      metadata: { ...request.metadata, skip_auto_classification: true },
-    }, settings);
-    let classification = deterministic.result;
-
-    if (
-      settings.mode === "adaptive" &&
-      settings.auto_routing_enabled &&
-      settings.llm_classifier_enabled &&
-      deterministic.ambiguous &&
-      !request.metadata.skip_auto_classification
-    ) {
-      classification = await this.classifyWithModel(
-        request,
-        settings,
-        deterministic.result,
-        deterministic.latestMessage,
-      );
-    }
+    const settings = managed ? await candidate.routingSettings() : DEFAULT_ROUTING_SETTINGS;
+    const resolution = managed ? resolveRoute(request, settings) : requestedRouteOnly(request);
 
     return {
       settings,
@@ -197,109 +182,16 @@ export class LlmRouter {
         ...request,
         metadata: {
           ...request.metadata,
-          route: classification.effectiveRoute,
-          requested_route: classification.requestedRoute,
-          effective_route: classification.effectiveRoute,
+          route: resolution.effectiveRoute,
+          requested_route: resolution.requestedRoute,
+          effective_route: resolution.effectiveRoute,
           routing_mode: settings.mode,
-          classification_source: classification.source,
-          classification_confidence: classification.confidence,
-          classification_score: classification.score,
-          classification_reason_codes: classification.reasons,
+          classification_source: resolution.source,
+          classification_reason_codes: resolution.reasons,
           single_failover_used: false,
         },
       },
     };
-  }
-
-  private async classifyWithModel(
-    request: LlmRequest,
-    settings: RoutingSettings,
-    deterministic: RouteClassificationResult,
-    latestMessage: string,
-  ): Promise<RouteClassificationResult> {
-    const fallback = (reason: string): RouteClassificationResult => {
-      const effectiveRoute = settings.uncertain_policy === "chat"
-        ? "chat"
-        : settings.uncertain_policy === "deterministic"
-          ? deterministic.effectiveRoute
-          : deterministic.effectiveRoute === "fast" ? "chat" : "deep";
-      return { ...deterministic, effectiveRoute, reasons: [...deterministic.reasons, reason] };
-    };
-    try {
-      const excerpt = latestMessage.slice(0, settings.classifier_max_input_chars);
-      const result = await Promise.race([
-        this.complete({
-          messages: [{
-            role: "user",
-            content: JSON.stringify({
-              latest_message: excerpt,
-              purpose: request.metadata.purpose ?? "chat",
-              preliminary_score: deterministic.score,
-              has_image: request.metadata.has_image === true,
-              has_document: request.metadata.has_document === true,
-              has_voice: request.metadata.has_voice === true,
-              sensitive: request.metadata.sensitive,
-              related_goals: request.metadata.related_goals ?? 0,
-              related_tasks: request.metadata.related_tasks ?? 0,
-              related_recent_events: request.metadata.related_recent_events ?? 0,
-            }),
-          }],
-          system_prompt: [
-            "Classify the request route. Return strict JSON only.",
-            "Allowed route values: fast, chat, deep.",
-            'Schema: {"route":"chat","confidence":0.8,"reasons":["reason_code"]}',
-          ].join("\n"),
-          tools: [], temperature: 0, max_tokens: 160, stream: false,
-          response_format: { type: "json_object" },
-          metadata: {
-            request_id: randomUUID(),
-            user_id: request.metadata.user_id,
-            agent_id: request.metadata.agent_id,
-            route: "classifier",
-            requested_route: "classifier",
-            sensitive: request.metadata.sensitive,
-            purpose: "maintenance",
-            internal_operation_type: "route_classifier",
-            skip_auto_classification: true,
-          },
-        }),
-        new Promise<never>((_resolve, reject) => {
-          const timer = setTimeout(
-            () => reject(new Error("classifier_timeout")),
-            settings.classifier_timeout_ms,
-          );
-          timer.unref();
-        }),
-      ]);
-      const parsed = JSON.parse(stripFence(result.response.content)) as {
-        route?: unknown; confidence?: unknown; reasons?: unknown;
-      };
-      const route = typeof parsed.route === "string" && isEvaRoute(parsed.route)
-        && ["fast", "chat", "deep"].includes(parsed.route)
-        ? parsed.route as "fast" | "chat" | "deep"
-        : null;
-      const confidence = Number(parsed.confidence);
-      if (!route || !Number.isFinite(confidence) || confidence < settings.classifier_confidence_threshold) {
-        return fallback("classifier_low_confidence");
-      }
-      const reasons = Array.isArray(parsed.reasons)
-        ? parsed.reasons.filter((item): item is string => typeof item === "string").slice(0, 8)
-        : [];
-      return {
-        ...deterministic,
-        effectiveRoute: route,
-        confidence: Math.min(1, Math.max(0, confidence)),
-        source: "llm",
-        reasons: [...deterministic.reasons, ...reasons],
-      };
-    } catch (error) {
-      const code = request.metadata.sensitive
-        ? "classifier_sensitive_provider_unavailable"
-        : error instanceof Error && error.message === "classifier_timeout"
-          ? "classifier_timeout"
-          : "classifier_failed";
-      return fallback(code);
-    }
   }
 
   /**
@@ -871,8 +763,10 @@ export class LlmRouter {
         requested_route: request.metadata.requested_route ?? request.metadata.route,
         effective_route: request.metadata.effective_route ?? request.metadata.route,
         classification_source: request.metadata.classification_source ?? null,
-        classification_confidence: request.metadata.classification_confidence ?? null,
-        classification_score: request.metadata.classification_score ?? null,
+        // Уверенности и балла больше нет: маршрут выбирается
+        // детерминированно, оценивать нечего.
+        classification_confidence: null,
+        classification_score: null,
         classification_reason_codes: request.metadata.classification_reason_codes ?? [],
         purpose: request.metadata.purpose ?? null,
         internal_operation_type: request.metadata.internal_operation_type ?? null,
@@ -892,16 +786,6 @@ const DEFAULT_ROUTING_SETTINGS: RoutingSettings = {
   mode: "adaptive",
   single_provider_id: null,
   single_failover_enabled: false,
-  auto_routing_enabled: false,
-  llm_classifier_enabled: false,
-  fast_max_score: 0,
-  deep_min_score: 5,
-  classifier_confidence_threshold: 0.75,
-  classifier_timeout_ms: 5000,
-  classifier_max_input_chars: 4000,
-  uncertain_policy: "upgrade",
-  economy_score_shift: -1,
-  quality_score_shift: 1,
 };
 
 function isTechnicalSingleFailover(reason: SwitchReason): boolean {

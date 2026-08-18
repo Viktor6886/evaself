@@ -1221,7 +1221,7 @@
         ${settingsRow("card", "Подписка и квоты", "Тариф, бесплатные сообщения и гранты", state.session?.plan || "free")}
         ${settingsRow("bell", "Уведомления", "Время, частота и тихие часы", "Настроить")}
         ${settingsRow("voice", "Настройки", "Формат ответов Евы: текст, голос или оба", responseModeTitle(state.profile?.user?.response_mode))}
-        ${settingsRow("link", "Интеграции", "Todoist, поиск и внешние сервисы", "Проверить")}
+        ${settingsRow("link", "Интеграции", "Поиск и внешние сервисы", "Проверить")}
         ${settingsRow("shield", "Приватность", "Экспорт, память и удаление данных", "Открыть")}
         ${settingsRow("pulse", "Диагностика", "Версия интерфейса и подключение к API", BUILD)}
       </div>

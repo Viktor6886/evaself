@@ -124,3 +124,35 @@ test("значения по умолчанию из .env.example не проти
   );
   assert.deepEqual(warnings, []);
 });
+
+/**
+ * Ключ шифрования конфигураций провайдеров и ключ доступа к API — разные
+ * назначения. Подстановка второго вместо первого осталась только ради
+ * установок, обновившихся с версии без отдельного ключа: там этим
+ * значением уже зашифрованы строки. Молча она происходить не должна.
+ */
+test("подстановка ключа API вместо ключа шифрования названа устаревшей", () => {
+  const legacy = loadConfig({ ...base });
+  assert.equal(legacy.llmEncryptionKey, base.EVA_AGENT_API_KEY);
+  assert.equal(legacy.llmEncryptionKeyIsLegacyFallback, true);
+  assert.ok(
+    configWarnings(legacy).some((warning) =>
+      warning.includes("LLM_CONFIG_ENCRYPTION_KEY") && warning.includes("устаревший")),
+    JSON.stringify(configWarnings(legacy)),
+  );
+
+  const proper = loadConfig({ ...base, LLM_CONFIG_ENCRYPTION_KEY: "k".repeat(32) });
+  assert.equal(proper.llmEncryptionKeyIsLegacyFallback, false);
+  assert.ok(
+    !configWarnings(proper).some((warning) => warning.includes("LLM_CONFIG_ENCRYPTION_KEY")),
+    JSON.stringify(configWarnings(proper)),
+  );
+
+  // Ни одного ключа нет вовсе: шифровать нечем, и это ошибка настройки.
+  const missing = loadConfig({ DATABASE_URL: base.DATABASE_URL });
+  assert.equal(missing.llmEncryptionKey, "");
+  assert.ok(
+    configWarnings(missing).some((warning) => warning.includes("шифровать нечем")),
+    JSON.stringify(configWarnings(missing)),
+  );
+});

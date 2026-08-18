@@ -134,8 +134,13 @@ test("knowledge upload returns 400 when feature disabled", async () => {
   const app = buildTestApp(); // no knowledgeResearch
   const initData = signInitData(USER, Math.floor(NOW.getTime() / 1000));
   const r = await app.inject({ method: "POST", url: "/public/knowledge/uploads", headers: { "x-telegram-init-data": initData, "content-type": "multipart/form-data; boundary=x" }, payload: "--x--" });
+  // Контракт отказа один на все публичные маршруты: статус, тип и тело
+  // вида `{error:{code,message}}`. Прежняя проверка читала `message`
+  // верхнего уровня — форму, которую Fastify отдавал сам, пока у
+  // публичных маршрутов не было своего обработчика ошибок.
   assert.equal(r.statusCode, 400);
-  assert.match(r.json().message, /отключена/);
+  assert.match(String(r.headers["content-type"]), /application\/json/);
+  assert.match(r.json().error.message, /отключена/);
   await app.close();
 });
 
@@ -173,7 +178,8 @@ test("research routes return 400 when feature disabled", async () => {
   for (const [method, url] of [["POST", "/public/research"], ["GET", "/public/research/r1"], ["GET", "/public/research/r1/report"], ["POST", "/public/research/r1/cancel"]] as const) {
     const r = await app.inject({ method, url, headers: { "x-telegram-init-data": initData }, ...(method === "POST" && url === "/public/research" ? { payload: { query: "test" } } : {}) });
     assert.equal(r.statusCode, 400, `${method} ${url}`);
-    assert.match(r.json().message, /отключен/i);
+    assert.match(String(r.headers["content-type"]), /application\/json/, `${method} ${url}`);
+    assert.match(r.json().error.message, /отключен/i);
   }
   await app.close();
 });

@@ -470,7 +470,6 @@ export class EvaWorkflow {
                 signal ? `${safetyDirective(signal)}\n\n${prompt}` : prompt,
                 {
                   messageSource: update.kind,
-                  crisisLevel: signal?.severity ?? "none",
                   // Фактический размер собранного контекста, а не
                   // обещание уложиться: без измерения бюджет — это
                   // намерение.
@@ -522,7 +521,7 @@ export class EvaWorkflow {
             assistant_groups: answer.assistantGroups,
             slice_ids_present: answer.assistantHadIds,
             tool_calls: answer.toolCalls.length,
-            reasoning_items: answer.reasoning.length,
+            reasoning_events: answer.reasoningEvents,
           });
         }
         const turn = answer;

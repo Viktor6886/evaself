@@ -64,7 +64,7 @@ fi
 CODE="$(printf '%s\n' "$FILES" \
 	| grep -vE '^[^/]+\.md$' \
 	| grep -vE '^docs/[^/]+\.md$' \
-	| grep -vE '^prompts/[^/]+\.md$' \
+	| grep -vE '^prompts/(archive/)?[^/]+\.md$' \
 	|| true)"
 
 if [ -z "$CODE" ]; then

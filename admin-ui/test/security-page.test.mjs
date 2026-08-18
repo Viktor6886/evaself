@@ -15,7 +15,6 @@ import { openPanel } from "./harness.mjs";
 
 const ADMIN_FACING = [
   "sec_eva_telegram_bot_token",
-  "sec_todoist_api_token",
   "sec_media_asr_api_key",
   "sec_media_tts_api_key",
   "sec_lava_webhook_password",
