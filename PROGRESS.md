@@ -6,12 +6,12 @@
 ## Состояние
 
 ```
-BASELINE:      f104d90 — Letta-native runtime (PR #188)
-BRANCH:        claude/evaself-remove-cognitive-middleware-9zeg9t
-STATUS:        на ревью
-LAST_COMMIT:   доработки после аудита: CI зелёный (HEAD ветки)
+BASELINE:      e90e378 — приёмка Letta-native границы (PR #191)
+BRANCH:        —
+STATUS:        нет активной работы
+LAST_COMMIT:   —
 BLOCKER:       —
-NEXT:          открыть pull request на ветку по команде человека
+NEXT:          ждать задания человека
 ```
 
 Значения полей:
@@ -44,7 +44,7 @@ Retrieval, SkillRouter, ToolGateway. Возобновлять его как ес
 Архив прежнего roadmap со статусами выполненных batch — `docs/ROADMAP_ARCHIVE.md`.
 Он читается только как история: что уже сделано и зачем. Заданием он не является.
 
-## Что лежит в ветке
+## Что вошло в базовую точку
 
 Восемь шагов приёмки поверх `f104d90`, по одному коммиту на шаг:
 источник истины архитектуры (1), разрешения, публичный SDK и приватность
