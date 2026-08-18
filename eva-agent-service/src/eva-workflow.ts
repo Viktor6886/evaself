@@ -24,6 +24,7 @@ import {
 import {
   type TelegramMessage,
   type TelegramMessageDraft,
+  type TelegramStreamingDraft,
   type TelegramUpdate,
   TelegramClient,
 } from "./telegram.js";
@@ -206,13 +207,32 @@ export class EvaWorkflow {
   ): Promise<InboxResult> {
     const typing: { stop: (() => void) | null } = { stop: null };
     const messageDraft: { current: TelegramMessageDraft | null } = { current: null };
+    // Показ ответа по мере генерации. Держится рядом с черновиком: их
+    // общий конец — один и тот же `finally`, каким бы ни был исход хода.
+    const streaming: { current: TelegramStreamingDraft | null } = { current: null };
     const started = performance.now();
+    // Разложение задержки по этапам. Пока ход мерился одним числом,
+    // «Ева долго отвечает» нечем было разобрать: очередь, сборка
+    // контекста, ожидание сессии, генерация, синтез речи и доставка
+    // лечатся разным, а сумма их не различает.
     const metrics = {
-      runtime_context_ms: 0,
+      /** Сколько ход ждал слот пользователя. */
+      queue_wait_ms: 0,
+      /** Сборка продуктового контекста хода. */
+      context_build_ms: 0,
       profile_check_ms: 0,
       // Измеренный размер контекста: сумма фактических размеров уровней.
       context_characters: 0,
-      letta_turn_ms: 0,
+      /** Ожидание свободной сессии Letta внутри хода. */
+      session_acquire_ms: 0,
+      /** Через сколько после отправки пришёл первый текст: то, что человек ощущает. */
+      time_to_first_delta_ms: 0,
+      /** Генерация целиком, включая вызовы инструментов. */
+      letta_generation_ms: 0,
+      /** Синтез речи. Идёт параллельно доставке текста и её не задерживает. */
+      tts_ms: 0,
+      /** Доставка ответа в Telegram: от готового текста до отправленного сообщения. */
+      telegram_delivery_ms: 0,
       outbox_insert_ms: 0,
       telegram_send_ms: 0,
       total_turn_ms: 0,
@@ -245,10 +265,11 @@ export class EvaWorkflow {
     try {
       const measured = await this.db.withQueryMetrics(async () =>
         await this.queue.run(update.telegramId, async (): Promise<InboxResult> => {
+        metrics.queue_wait_ms = elapsed(started);
         if (this.turns && turnHandle) {
           // Слот пользователя получен: сколько ход его ждал и кто теперь
           // его ведёт. Аренда нужна восстановлению после перезапуска.
-          await this.turns.recordWait(turnHandle, elapsed(started));
+          await this.turns.recordWait(turnHandle, metrics.queue_wait_ms);
           await this.turns.transition(turnHandle, "claimed");
           await this.turns.lease(turnHandle, LEASE_OWNER, this.config.lockTtlSeconds);
         }
@@ -452,12 +473,26 @@ export class EvaWorkflow {
           turnId: turnHandle?.runId,
           previousUserMessageAt,
         });
-        metrics.runtime_context_ms = context.metrics?.runtimeContextMs ?? 0;
+        metrics.context_build_ms = context.metrics?.runtimeContextMs ?? 0;
         metrics.profile_check_ms = context.metrics?.profileCheckMs ?? 0;
         const responseMode = context.responseMode;
+        // Черновик открывается параллельно с ходом, а не перед ним: его
+        // создание — обращение к Telegram, и ждать его, пока модель ещё
+        // не начала думать, значит добавить лишний круг к задержке,
+        // которую человек и ощущает.
+        // Текст, показанный человеку прямо сейчас: он же сверяется с
+        // итоговым ответом перед отправкой.
+        let streamed = "";
         if (responseMode === "text" || responseMode === "both") {
-          messageDraft.current = await this.telegram.startMessageDraft(update.chatId);
+          const opening = this.telegram.startMessageDraft(update.chatId)
+            .then((draft) => {
+              messageDraft.current = draft;
+              return draft;
+            })
+            .catch(() => null);
+          streaming.current = this.telegram.startStreamingDraft(update.chatId, opening);
         }
+        const stream = streaming.current;
         // Recorded and escalated before the turn runs, so a disclosure
         // survives even if the model's answer is slow, truncated or unhelpful.
         const signal = await this.crisis?.inspect({
@@ -508,6 +543,17 @@ export class EvaWorkflow {
               {
                 isCancelled: async () =>
                   turnHandle && this.turns ? await this.turns.isCancelled(turnHandle) : false,
+                // Ответ показывается по мере генерации. Срез, открывающий
+                // новое сообщение, стирает показанное: до ответа человеку
+                // модель проговаривает, что собирается сделать, и это
+                // проговаривание ответом не является.
+                onDelta: stream
+                  ? (delta) => {
+                    if (delta.startsGroup) streamed = "";
+                    streamed += delta.text;
+                    stream?.push(streamed);
+                  }
+                  : undefined,
               },
             ),
           );
@@ -517,14 +563,17 @@ export class EvaWorkflow {
           if (error instanceof EvaError && error.code === "turn_cancelled") {
             await this.moveTurn(turnHandle, "cancelling", { detail: { reason: "cancelled" } });
             await this.moveTurn(turnHandle, "cancelled");
+            streaming.current?.stop();
             messageDraft.current?.stop();
             messageDraft.current = null;
             return { status: "ignored" };
           }
           throw error;
         } finally {
-          metrics.letta_turn_ms = elapsed(lettaStarted);
+          metrics.letta_generation_ms = elapsed(lettaStarted);
         }
+        metrics.session_acquire_ms = answer.sessionAcquireMs;
+        metrics.time_to_first_delta_ms = answer.firstDeltaMs ?? 0;
         await this.moveTurn(turnHandle, "result_received", {
           // Только счётчики: ни аргументов инструментов, ни текста.
           detail: { tool_calls: answer.toolCalls.length },
@@ -571,31 +620,44 @@ export class EvaWorkflow {
         const wantsText = responseMode === "text" || responseMode === "both";
         const wantsVoice = responseMode === "voice" || responseMode === "both";
 
-        // Синтез запускается до отправки текста, и текст ждёт готовности
-        // звука. Раньше порядок был обратным: текст уходил сразу, а
-        // синтез занимал секунды — человек успевал ответить, и голосовое
-        // приходило уже после его реплики, будто Ева отвечает на другое
-        // сообщение. Пока идёт синтез, черновик ответа продолжает
-        // обновляться, поэтому пауза не выглядит молчанием.
+        // Синтез начинается сразу, как только текст готов, и идёт
+        // параллельно доставке. Текст его больше не ждёт: раньше в
+        // режиме «оба» он стоял в очереди за синтезом до сорока пяти
+        // секунд, и весь выигрыш от потока пропадал на последнем шаге.
+        const ttsStarted = performance.now();
         const speech = wantsVoice
-          ? this.synthesizeVoice(reply).catch((error) => {
-            this.logger.warn("Голосовой ответ недоступен", {
-              updateId: update.updateId,
-              message: error instanceof Error ? error.message : String(error),
-            });
-            return null;
-          })
+          ? this.synthesizeVoice(reply)
+            .then((audio) => {
+              metrics.tts_ms = elapsed(ttsStarted);
+              return audio;
+            })
+            .catch((error) => {
+              metrics.tts_ms = elapsed(ttsStarted);
+              this.logger.warn("Голосовой ответ недоступен", {
+                updateId: update.updateId,
+                message: error instanceof Error ? error.message : String(error),
+              });
+              return null;
+            })
           : null;
-        // Ожидание ограничено: затянувшийся синтез не держит текст, а
-        // догоняет его — это хуже одновременности, но лучше молчания.
-        const voice = speech ? await withDeadline(speech, VOICE_SYNC_BUDGET_MS) : null;
 
+        const deliveryStarted = performance.now();
         if (wantsText) {
-          await this.telegram.sendProgressiveMessage(update.chatId, reply, messageDraft.current);
+          // Черновик уже показал ответ целиком — значит показывать его
+          // заново по словам незачем: это выглядело бы как начатый
+          // сначала ответ. Доставка при этом одна и та же durable-отправка.
+          const revealed = stream ? await stream.finish().then(() => stream!.shown) : "";
+          messageDraft.current?.stop();
+          if (revealed) await this.telegram.sendMessage(update.chatId, reply);
+          else await this.telegram.sendProgressiveMessage(update.chatId, reply, messageDraft.current);
           messageDraft.current = null;
         }
         if (speech) {
-          const audio = voice ?? await speech;
+          // Голос догоняет текст. В голосовом режиме ждать по-прежнему
+          // приходится: без звука там ответа нет вовсе.
+          const audio = wantsText
+            ? await speech
+            : (await withDeadline(speech, VOICE_SYNC_BUDGET_MS)) ?? await speech;
           if (audio) {
             await this.telegram.sendVoice(update.chatId, audio);
             await this.touchVoiceUsage(context.userId);
@@ -605,6 +667,7 @@ export class EvaWorkflow {
             await this.telegram.sendMessage(update.chatId, reply);
           }
         }
+        metrics.telegram_delivery_ms = elapsed(deliveryStarted);
 
         await this.linkTurn(turnHandle, {
           outboxId: this.telegram.getDeliveryOutboxId(),
@@ -642,6 +705,7 @@ export class EvaWorkflow {
       });
       throw error;
     } finally {
+      streaming.current?.stop();
       messageDraft.current?.stop();
       typing.stop?.();
       const delivery = this.telegram.getDeliveryMetrics();

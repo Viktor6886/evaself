@@ -73,6 +73,90 @@ test("Telegram starts an empty draft before an answer", async () => {
   assert.equal(typeof calls[0]?.body.draft_id, "number");
 });
 
+/**
+ * Черновик, догоняющий поток модели.
+ *
+ * Промежуточные состояния схлопываются, наружу уходит последнее, и чаще
+ * заданного промежутка Telegram не трогается: обновление на каждый срез
+ * выбрало бы лимит чата на первых секундах ответа и вернуло 429 уже на
+ * доставке. Часы здесь виртуальные — проверяется правило, а не выдержка.
+ */
+test("потоковый черновик схлопывает срезы и держит промежуток", async () => {
+  const calls: Array<Record<string, unknown>> = [];
+  const telegram = new TelegramClient(
+    { telegramBotToken: "test-token", telegramApiBaseUrl: "https://api.telegram.invalid" } as never,
+    { debug() {}, info() {}, warn() {}, error() {} },
+  );
+  telegram.call = async (_method, body) => {
+    calls.push(body);
+    return true as never;
+  };
+
+  const clock = 1_000;
+  const stream = telegram.startStreamingDraft(
+    123,
+    { chatId: 123, draftId: 7, stop() {} },
+    { intervalMs: 1_000, now: () => clock },
+  );
+
+  stream.push("Понимаю");
+  stream.push("Понимаю.");
+  stream.push("Понимаю. Расскажи");
+  await stream.finish();
+
+  // Первый срез уходит сразу — ради него всё и затевалось: человек
+  // видит начало ответа, не дожидаясь конца хода. Остальные схлопнулись
+  // в одно состояние, и оно последнее.
+  assert.deepEqual(calls.map((body) => body.text), ["Понимаю", "Понимаю. Расскажи"]);
+  assert.equal(calls[0]?.draft_id, 7);
+  assert.equal(stream.shown, "Понимаю. Расскажи");
+  assert.equal(stream.updates, 2);
+});
+
+test("потоковый черновик досылает последнее состояние, не дожидаясь промежутка", async () => {
+  const calls: Array<Record<string, unknown>> = [];
+  const telegram = new TelegramClient(
+    { telegramBotToken: "test-token", telegramApiBaseUrl: "https://api.telegram.invalid" } as never,
+    { debug() {}, info() {}, warn() {}, error() {} },
+  );
+  telegram.call = async (_method, body) => {
+    calls.push(body);
+    return true as never;
+  };
+
+  const started = Date.now();
+  const stream = telegram.startStreamingDraft(
+    123,
+    { chatId: 123, draftId: 9, stop() {} },
+    { intervalMs: 60_000 },
+  );
+  stream.push("Первое состояние");
+  await stream.finish();
+  stream.push("после конца");
+  await stream.finish();
+
+  // Минута промежутка не задержала доставку: `finish` досылает сразу.
+  assert.ok(Date.now() - started < 5_000, "досылка ждала промежутка");
+  assert.deepEqual(calls.map((body) => body.text), ["Первое состояние"]);
+});
+
+test("отказ Telegram на черновике не роняет ход", async () => {
+  const telegram = new TelegramClient(
+    { telegramBotToken: "test-token", telegramApiBaseUrl: "https://api.telegram.invalid" } as never,
+    { debug() {}, info() {}, warn() {}, error() {} },
+  );
+  telegram.call = async () => { throw new Error("429 Too Many Requests"); };
+
+  const stream = telegram.startStreamingDraft(123, { chatId: 123, draftId: 3, stop() {} }, {
+    intervalMs: 0,
+  });
+  stream.push("текст");
+  // Показ — украшение: его отказ не должен прерывать ход, ответ уйдёт
+  // обычным durable-сообщением.
+  await stream.finish();
+  assert.equal(stream.shown, "");
+});
+
 test("voice transcript echo matches Hermes and is sent without parse mode", async () => {
   assert.equal(
     formatVoiceTranscriptEcho("  проверь _точный_ текст  "),

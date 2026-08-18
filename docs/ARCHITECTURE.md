@@ -114,10 +114,19 @@ application-layer сервис одной транзакцией.
 
 ## Метрики
 
-Каждый Telegram turn пишет один структурированный лог с
-`runtime_context_ms`, `profile_check_ms`, `letta_turn_ms`, `outbox_insert_ms`, `telegram_send_ms`, `total_turn_ms` и
-`db_query_count`. Это позволяет отдельно увидеть служебную задержку, LLM и
-доставку.
+Каждый Telegram turn пишет один структурированный лог, разложенный по
+этапам: `queue_wait_ms` — ожидание слота пользователя, `context_build_ms` и
+`profile_check_ms` — сборка продуктового контекста, `session_acquire_ms` —
+ожидание свободной сессии Letta, `time_to_first_delta_ms` — через сколько
+после отправки пришёл первый текст, `letta_generation_ms` — генерация
+целиком, `tts_ms` — синтез речи, `telegram_delivery_ms`, `outbox_insert_ms`
+и `telegram_send_ms` — доставка, `total_turn_ms` и `db_query_count`.
+
+Разложение нужно потому, что «Ева долго отвечает» одним числом не
+разбирается: очередь, контекст, ожидание сессии, генерация, синтез и
+доставка лечатся разным. Ключевая величина для человека —
+`time_to_first_delta_ms`: с потоковым показом ответа именно она, а не
+`total_turn_ms`, определяет, насколько долгим ход кажется.
 
 ## Административное управление SDK
 

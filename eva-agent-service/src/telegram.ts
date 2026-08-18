@@ -77,6 +77,37 @@ export interface TelegramMessageDraft {
 const DRAFT_WORDS_PER_UPDATE = 4;
 const DRAFT_UPDATE_DELAY_MS = 500;
 const DRAFT_KEEPALIVE_MS = 20_000;
+/**
+ * Как часто черновик догоняет поток модели.
+ *
+ * Токены приходят десятками в секунду, а Telegram считает частоту
+ * обращений к чату: обновлять черновик на каждый срез значит выбрать
+ * лимит на первых секундах ответа и получить 429 на самой доставке.
+ * Промежуточные срезы поэтому не отправляются вовсе — уходит только
+ * последнее состояние текста, и человек всё равно видит, как ответ
+ * растёт.
+ */
+const DRAFT_STREAM_INTERVAL_MS = 900;
+
+/**
+ * Черновик, который догоняет поток модели.
+ *
+ * `push` вызывается из потока и ничего не ждёт: он лишь запоминает
+ * текст. Отправкой занимается таймер, поэтому генерация не платит за
+ * сеть Telegram, а частота обращений остаётся под контролем.
+ */
+export interface TelegramStreamingDraft {
+  /** Показать этот текст целиком. Промежуточные состояния схлопываются. */
+  push(text: string): void;
+  /** Дождаться отправки последнего состояния и остановить таймер. */
+  finish(): Promise<void>;
+  /** Остановить, ничего не досылая: ход отменён или оборвался. */
+  stop(): void;
+  /** Сколько раз черновик реально обновлялся: для проверок и разбора. */
+  readonly updates: number;
+  /** Что показано человеку сейчас. */
+  readonly shown: string;
+}
 
 export class TelegramClient implements OutboxTransport {
   private readonly token: string;
@@ -327,6 +358,100 @@ export class TelegramClient implements OutboxTransport {
         stopped = true;
         clearInterval(timer);
       },
+    };
+  }
+
+  /**
+   * Черновик, который показывает ответ, пока модель его пишет.
+   *
+   * Раньше человек видел пустой черновик всё время генерации, а текст
+   * появлялся разом в конце: обычный ход не пользовался потоком вовсе.
+   * Здесь тот же черновик обновляется по ходу, но не чаще, чем раз в
+   * `DRAFT_STREAM_INTERVAL_MS`, и всегда последним состоянием — очередь
+   * промежуточных состояний не копится.
+   *
+   * Отказ Telegram черновик не роняет ход: показ — украшение, ответ
+   * доставляется отдельным durable-сообщением.
+   */
+  startStreamingDraft(
+    chatId: number,
+    draft: TelegramMessageDraft | null | Promise<TelegramMessageDraft | null>,
+    options: { intervalMs?: number; now?: () => number } = {},
+  ): TelegramStreamingDraft {
+    const intervalMs = Math.max(0, options.intervalMs ?? DRAFT_STREAM_INTERVAL_MS);
+    const now = options.now ?? (() => Date.now());
+    const resolveDraft = Promise.resolve(draft).catch(() => null);
+    let pending: string | null = null;
+    let shown = "";
+    let updates = 0;
+    let lastSentAt = -Infinity;
+    let flushing: Promise<void> | null = null;
+    let stopped = false;
+    // Досылка последнего состояния не ждёт промежутка: ход уже кончился,
+    // и держать доставку ради выдержки между черновиками незачем.
+    let forced = false;
+
+    const write = async (text: string): Promise<void> => {
+      const target = await resolveDraft;
+      const draftId = target?.draftId;
+      if (draftId === undefined) return;
+      await this.call("sendMessageDraft", { chat_id: chatId, draft_id: draftId, text });
+      shown = text;
+      updates += 1;
+      lastSentAt = now();
+    };
+
+    const flush = async (): Promise<void> => {
+      while (!stopped && pending !== null) {
+        const wait = forced ? 0 : intervalMs - (now() - lastSentAt);
+        if (wait > 0) await delay(wait);
+        if (stopped) return;
+        const text = pending;
+        pending = null;
+        if (text === null || text === shown) continue;
+        try {
+          await write(text);
+        } catch (error) {
+          // Черновик — не доставка. Его отказ не должен ни ронять ход,
+          // ни превращаться в повтор: ответ уйдёт обычным сообщением.
+          this.logger.debug("Telegram не принял потоковый черновик", {
+            chatId,
+            message: error instanceof Error ? error.message : String(error),
+          });
+          return;
+        }
+      }
+    };
+
+    const schedule = (): void => {
+      if (flushing) return;
+      flushing = flush().finally(() => { flushing = null; });
+    };
+
+    return {
+      push(text: string): void {
+        if (stopped) return;
+        const clean = text.trimEnd();
+        if (!clean || clean === shown) return;
+        pending = clean;
+        schedule();
+      },
+      async finish(): Promise<void> {
+        forced = true;
+        await flushing;
+        // Последнее состояние могло прийти позже последней отправки.
+        if (!stopped && pending !== null && pending !== shown) {
+          schedule();
+          await flushing;
+        }
+        stopped = true;
+      },
+      stop(): void {
+        stopped = true;
+        pending = null;
+      },
+      get updates(): number { return updates; },
+      get shown(): string { return shown; },
     };
   }
 

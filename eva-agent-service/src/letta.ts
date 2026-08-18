@@ -115,6 +115,39 @@ export interface TurnResult {
    */
   runIds: string[];
   durationMs: number;
+  /**
+   * Сколько ход ждал свободную сессию из пула. Отдельно от генерации:
+   * ожидание сессии и работа модели лечатся разным, и общая длительность
+   * их не различает.
+   */
+  sessionAcquireMs: number;
+  /**
+   * Через сколько после отправки сообщения пришёл первый срез текста.
+   * `null` — текста в ходе не было вовсе (только инструменты). Это и есть
+   * задержка, которую человек ощущает как «Ева думает».
+   */
+  firstDeltaMs: number | null;
+}
+
+/**
+ * Срез ответа модели.
+ *
+ * Поток отдаёт ответ кусками, и куски принадлежат разным сообщениям: в
+ * агентном ходе модель сперва проговаривает, что собирается сделать
+ * («сейчас посмотрю»), вызывает инструмент и только потом отвечает
+ * человеку. Ответ — последнее сообщение, всё до него показывать нельзя.
+ *
+ * Поэтому срез несёт не только текст: `startsGroup` означает, что
+ * началось новое сообщение и показанное до сих пор нужно убрать, а не
+ * дописать.
+ */
+export interface AssistantDelta {
+  /** Текст среза как пришёл, без обрезки: провайдер рвёт слова между событиями. */
+  text: string;
+  /** Номер логического сообщения в ходе, с нуля. */
+  group: number;
+  /** Срез открывает новое сообщение: показанное раньше к ответу не относится. */
+  startsGroup: boolean;
 }
 
 interface PooledSession {
@@ -235,7 +268,9 @@ export interface ManagedAgentInput {
  * `result`; a Telegram reply only wants the text, but the rest is worth
  * returning for logging and debugging.
  */
-export function summarizeStream(messages: SDKMessage[]): Omit<TurnResult, "agentId" | "conversationId" | "durationMs"> {
+export function summarizeStream(
+  messages: SDKMessage[],
+): Omit<TurnResult, "agentId" | "conversationId" | "durationMs" | "sessionAcquireMs" | "firstDeltaMs"> {
   let reasoningEvents = 0;
   const toolCalls: string[] = [];
   const trace: Array<Record<string, unknown>> = [];
@@ -1211,7 +1246,12 @@ export class LettaService {
     conversationId: string,
     message: SendMessage,
     options: {
-      onDelta?: (text: string) => void;
+      /**
+       * Срезы ответа по мере генерации. Вызывается синхронно из потока:
+       * обработчик не должен ждать сети — иначе он тормозит саму
+       * генерацию. Доставка наружу разбирается с этим сама.
+       */
+      onDelta?: (delta: AssistantDelta) => void;
       /**
        * Барьер отмены. Спрашивается по ходу потока — не чаще раза в
        * `cancelPollMs`: отмена приходит извне, и узнать о ней можно
@@ -1237,10 +1277,18 @@ export class LettaService {
         ? { behavior: "allow", updatedInput: {} }
         : { behavior: "deny", message: `Tool ${toolName} is outside the job allowlist` }),
     });
+    const sessionAcquireMs = Date.now() - startedAt;
     const session = pooled.session;
     const collected: SDKMessage[] = [];
     let lastCancelCheck = 0;
     let cancelled = false;
+    // Ключ последнего сообщения ассистента и его номер — тем же способом,
+    // каким поток разбирает `summarizeStream`: `otid` — идентификатор
+    // среза, `uuid` — сообщения, и смена ключа означает новое сообщение.
+    let deltaKey: string | null = null;
+    let deltaGroup = -1;
+    let firstDeltaAt: number | null = null;
+    let sentAt = startedAt;
     this.runningTurns.add(conversationId);
     // Счётчик поднимается до первого обращения к сессии и опускается в
     // finally: между этими точками сессию не вытеснит ни LRU, ни смена
@@ -1249,6 +1297,7 @@ export class LettaService {
 
     try {
       await session.send(message);
+      sentAt = Date.now();
 
       const stream = session.stream();
       const deadline = startedAt + this.runtime.turn_timeout_ms;
@@ -1284,9 +1333,17 @@ export class LettaService {
         const sdkMessage = next.value as SDKMessage;
         collected.push(sdkMessage);
 
-        if (options.onDelta && sdkMessage.type === "assistant") {
-          const text = extractText((sdkMessage as { content?: unknown }).content);
-          if (text) options.onDelta(text);
+        if (sdkMessage.type === "assistant") {
+          const raw = sdkMessage as { content?: unknown; uuid?: string; otid?: string | null };
+          const text = extractText(raw.content);
+          if (text) {
+            if (firstDeltaAt === null) firstDeltaAt = Date.now();
+            const key: string = raw.otid ?? raw.uuid ?? deltaKey ?? "single";
+            const startsGroup = deltaGroup < 0 || key !== deltaKey;
+            if (startsGroup) deltaGroup += 1;
+            deltaKey = key;
+            options.onDelta?.({ text, group: deltaGroup, startsGroup });
+          }
         }
         if (sdkMessage.type === "init") this.recordRuntimeFacts(sdkMessage);
         if (sdkMessage.type === "error") {
@@ -1319,6 +1376,8 @@ export class LettaService {
       agentId: session.agentId ?? "",
       conversationId: session.conversationId ?? conversationId,
       durationMs: Date.now() - startedAt,
+      sessionAcquireMs,
+      firstDeltaMs: firstDeltaAt === null ? null : firstDeltaAt - sentAt,
     };
   }
 

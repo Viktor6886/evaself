@@ -491,6 +491,10 @@ interface WorkflowProbe {
    * порядка «текст сразу, голос через секунды синтеза».
    */
   order: string[];
+  /** Состояния черновика, показанные человеку по ходу генерации. */
+  drafts: string[];
+  /** Метрики хода из строки журнала. */
+  metrics: Record<string, number>;
 }
 
 async function runTelegramTurn(
@@ -506,6 +510,16 @@ async function runTelegramTurn(
     synthesisMs?: number;
     /** Синтез отказывает. */
     synthesisFails?: boolean;
+    /**
+     * Срезы ответа, которые «модель» отдаёт по ходу генерации. Каждый —
+     * `[текст, начинает ли новое сообщение]`: агентный ход проговаривает
+     * план перед вызовом инструмента, и это проговаривание не ответ.
+     */
+    deltas?: Array<[string, boolean]>;
+    /** Пауза между срезами: проверка троттлинга без настоящего ожидания. */
+    deltaGapMs?: number;
+    /** Минимальный промежуток между обновлениями черновика. */
+    draftIntervalMs?: number;
   } = {},
 ): Promise<WorkflowProbe> {
   const sent: string[] = [];
@@ -535,10 +549,59 @@ async function runTelegramTurn(
     incrementUsage: async () => {},
     query: async () => ({ rows: [] }),
   };
+  const drafts: string[] = [];
+  // Метрики хода читаются оттуда же, откуда их читает оператор, — из
+  // строки журнала: проверяется опубликованное, а не внутреннее поле.
+  const turnMetrics: Record<string, number> = {};
+  const turnLogger = {
+    debug() {},
+    info(message: string, fields: Record<string, unknown> = {}) {
+      if (message !== "Telegram turn обработан") return;
+      for (const [key, value] of Object.entries(fields)) {
+        if (typeof value === "number") turnMetrics[key] = value;
+      }
+    },
+    warn() {},
+    error() {},
+  };
   const telegram = {
     withDeliveryContext: async <T>(_prefix: string, work: () => Promise<T>) => await work(),
     startTyping: () => () => {},
-    startMessageDraft: async () => null,
+    startMessageDraft: async () => ({ chatId: TELEGRAM_ID, draftId: 1, stop() {} }),
+    // Поддельный показ повторяет договор настоящего: промежуточные
+    // состояния схлопываются, наружу уходит последнее, и чаще, чем раз в
+    // `draftIntervalMs`, черновик не обновляется.
+    startStreamingDraft: (_chatId: number, _draft: unknown) => {
+      const interval = options.draftIntervalMs ?? 0;
+      let shown = "";
+      let pending: string | null = null;
+      let lastAt = -Infinity;
+      let stopped = false;
+      const write = () => {
+        if (stopped || pending === null || pending === shown) return;
+        const now = Date.now();
+        if (now - lastAt < interval) return;
+        shown = pending;
+        pending = null;
+        lastAt = now;
+        drafts.push(shown);
+      };
+      return {
+        push(text: string) {
+          if (stopped) return;
+          pending = text.trimEnd();
+          write();
+        },
+        async finish() {
+          lastAt = -Infinity;
+          write();
+          stopped = true;
+        },
+        stop() { stopped = true; pending = null; },
+        get updates() { return drafts.length; },
+        get shown() { return shown; },
+      };
+    },
     sendProgressiveMessage: async (_chatId: number, text: string) => {
       sent.push(text);
       order.push(synthesis.done ? "text-after-speech" : "text");
@@ -555,10 +618,25 @@ async function runTelegramTurn(
   };
   const letta = {
     promptVersion: "abcdef123456",
-    runTurn: async (_conversationId: string, message: string) => {
+    runTurn: async (
+      _conversationId: string,
+      message: string,
+      turnOptions: { onDelta?: (delta: { text: string; group: number; startsGroup: boolean }) => void } = {},
+    ) => {
       prompts.push(String(message));
+      const deltas = options.deltas;
+      let streamedReply = "";
+      if (deltas) {
+        let group = -1;
+        for (const [text, startsGroup] of deltas) {
+          if (startsGroup) { group += 1; streamedReply = ""; }
+          streamedReply += text;
+          turnOptions.onDelta?.({ text, group: Math.max(0, group), startsGroup });
+          if (options.deltaGapMs) await new Promise((resolve) => setTimeout(resolve, options.deltaGapMs));
+        }
+      }
       return {
-      reply: "Понимаю. Расскажи, что было дальше.",
+      reply: deltas ? streamedReply.trim() : "Понимаю. Расскажи, что было дальше.",
       reasoning: [],
       assistantGroups: 1,
       assistantHadIds: true,
@@ -570,6 +648,8 @@ async function runTelegramTurn(
       agentId: "agent-1",
       conversationId: "conv-1",
       durationMs: 1,
+      sessionAcquireMs: 3,
+      firstDeltaMs: deltas ? 7 : null,
       };
     },
   };
@@ -607,7 +687,7 @@ async function runTelegramTurn(
     telegram as never,
     runtimeContext as never,
     {} as never,
-    logger as never,
+    turnLogger as never,
     undefined,
     turns as never,
     {
@@ -662,6 +742,8 @@ async function runTelegramTurn(
     attached,
     prompts,
     channelLinks,
+    drafts,
+    metrics: turnMetrics,
   };
 }
 
@@ -877,26 +959,128 @@ test("владельца получает каждая запись объеди
   );
 });
 
-test("в режиме «голос и текст» голос уходит сразу за текстом", async () => {
-  // Раньше текст уходил первым, а синтез занимал секунды: человек
-  // успевал ответить, и голосовое приходило после его реплики. Здесь
-  // сторожится порядок и то, что текст ждёт готовности звука.
-  const probe = await runTelegramTurn(undefined, { responseMode: "both", synthesisMs: 40 });
-  // Текст ушёл уже после того, как звук был готов, — значит между двумя
-  // частями ответа нет секунд синтеза.
-  assert.deepEqual(probe.order, ["text-after-speech", "voice"]);
+test("в режиме «голос и текст» текст не ждёт синтеза, а голос догоняет", async () => {
+  // Здесь был обратный порядок: текст ждал готовности звука, чтобы части
+  // ответа не расходились. Ожидание стоило человеку секунд молчания на
+  // каждом ходе — и съедало весь выигрыш от показа ответа по мере
+  // генерации. Теперь текст уходит сразу, а голос приходит следом.
+  const probe = await runTelegramTurn(undefined, { responseMode: "both", synthesisMs: 60 });
+  assert.deepEqual(probe.order, ["text", "voice"]);
   assert.deepEqual(probe.result, { status: "completed", usageCharged: true });
+  // Синтез шёл параллельно доставке: он измерен и не приплюсован к ней.
+  assert.ok(probe.metrics.tts_ms >= 50, `синтез не измерен: ${probe.metrics.tts_ms}`);
 });
 
 test("отказ синтеза не отменяет текст и не дублирует его", async () => {
   const both = await runTelegramTurn(undefined, {
     responseMode: "both", synthesisFails: true,
   });
-  assert.deepEqual(both.order, ["text-after-speech"], "текст должен уйти ровно один раз");
+  assert.deepEqual(both.order, ["text"], "текст должен уйти ровно один раз");
 
   // Голосовой режим без голоса — молчание, поэтому текст заменяет звук.
   const voice = await runTelegramTurn(undefined, {
     responseMode: "voice", synthesisFails: true,
   });
   assert.deepEqual(voice.order, ["text-after-speech"]);
+});
+
+// ---------------------------------------------------------------------
+// Показ ответа по мере генерации
+// ---------------------------------------------------------------------
+//
+// Обычный ход не пользовался потоком вовсе: `onDelta` существовал, но
+// Telegram-путь его не передавал, и человек видел пустой черновик всё
+// время генерации, а текст появлялся разом в конце. Здесь сторожится
+// то, что делает ожидание переносимым: текст виден до конца хода, ответ
+// не дублируется, и черновик не молотит Telegram на каждый токен.
+
+test("ответ виден по мере генерации, а доставка остаётся одной", async () => {
+  const probe = await runTelegramTurn(undefined, {
+    deltas: [["Понимаю.", true], [" Расскажи,", false], [" что было дальше.", false]],
+  });
+
+  // Человек увидел текст до того, как ход закончился.
+  assert.ok(probe.drafts.length > 0, "черновик не обновлялся ни разу");
+  assert.equal(probe.drafts.at(-1), "Понимаю. Расскажи, что было дальше.");
+  // Каждое следующее состояние — продолжение предыдущего, а не новый текст.
+  for (let index = 1; index < probe.drafts.length; index += 1) {
+    assert.ok(
+      probe.drafts[index]!.startsWith(probe.drafts[index - 1]!),
+      `состояние ${index} не продолжает предыдущее: ${probe.drafts[index]}`,
+    );
+  }
+  // Доставка одна: показ черновика durable-сообщением не является.
+  assert.deepEqual(probe.sent, ["Понимаю. Расскажи, что было дальше."]);
+  assert.deepEqual(probe.result, { status: "completed", usageCharged: true });
+  assert.ok(probe.metrics.time_to_first_delta_ms > 0, "задержка первого среза не измерена");
+});
+
+test("проговаривание плана перед инструментом не остаётся в ответе", async () => {
+  // В агентном ходе модель сперва говорит, что собирается сделать, зовёт
+  // инструмент и только потом отвечает. Ответ — последнее сообщение;
+  // всё до него показывать нельзя, и склеивать с ответом тем более.
+  const probe = await runTelegramTurn(undefined, {
+    deltas: [
+      ["Сейчас посмотрю расписание.", true],
+      ["Занятие в 19:00.", true],
+      [" Успеешь доехать?", false],
+    ],
+  });
+
+  assert.deepEqual(probe.sent, ["Занятие в 19:00. Успеешь доехать?"]);
+  // Ответ не склеен с проговариванием: новое сообщение стирает показанное,
+  // а не дописывается к нему.
+  assert.equal(probe.drafts.at(-1), "Занятие в 19:00. Успеешь доехать?");
+  assert.ok(
+    !probe.drafts.at(-1)!.includes("Сейчас посмотрю"),
+    `ответ склеен с проговариванием: ${probe.drafts.at(-1)}`,
+  );
+  // Пока модель не начала отвечать, показанное — её собственная реплика
+  // «сейчас посмотрю»: узнать, что она промежуточная, можно только когда
+  // началась следующая. Держать экран пустым до конца хода — это ровно
+  // та задержка, ради которой поток и подключён, поэтому показ живёт, но
+  // сменяется целиком.
+  const withNarration = probe.drafts.filter((shown) => shown.includes("Сейчас посмотрю"));
+  for (const shown of withNarration) {
+    assert.equal(shown, "Сейчас посмотрю расписание.", "проговаривание показано с чужим текстом");
+  }
+});
+
+test("черновик не обновляется чаще, чем позволяет промежуток", async () => {
+  // Токены приходят десятками в секунду, а Telegram считает обращения к
+  // чату: обновление на каждый срез выбрало бы лимит на первых секундах
+  // ответа и вернуло 429 на самой доставке.
+  const many: Array<[string, boolean]> = [["Раз", true]];
+  for (let index = 0; index < 40; index += 1) many.push([` слово${index}`, false]);
+
+  const throttled = await runTelegramTurn(undefined, {
+    deltas: many, deltaGapMs: 1, draftIntervalMs: 10_000,
+  });
+  // Первое состояние и досылка последнего: сорок один срез уложился в два
+  // обращения к Telegram.
+  assert.equal(throttled.drafts.length, 2, `лишние обновления: ${throttled.drafts.length}`);
+  // Досылается последнее состояние, а не то, на котором сработал лимит.
+  assert.equal(throttled.drafts.at(-1), throttled.sent[0]);
+
+  // Без ограничения промежутка тот же ход показывает больше состояний —
+  // значит проверка сторожит троттлинг, а не отсутствие срезов.
+  const free = await runTelegramTurn(undefined, { deltas: many });
+  assert.ok(free.drafts.length > 1, "без ограничения черновик обязан обновляться чаще");
+});
+
+test("ход измеряется по этапам, а не одним числом", async () => {
+  const probe = await runTelegramTurn(undefined, {
+    responseMode: "both", synthesisMs: 30,
+    deltas: [["Готово.", true]],
+  });
+  for (const name of [
+    "queue_wait_ms", "context_build_ms", "session_acquire_ms",
+    "time_to_first_delta_ms", "letta_generation_ms", "tts_ms",
+    "telegram_delivery_ms", "total_turn_ms",
+  ]) {
+    assert.equal(typeof probe.metrics[name], "number", `нет метрики ${name}`);
+  }
+  assert.equal(probe.metrics.session_acquire_ms, 3);
+  assert.equal(probe.metrics.time_to_first_delta_ms, 7);
+  assert.ok(probe.metrics.total_turn_ms >= probe.metrics.letta_generation_ms);
 });
