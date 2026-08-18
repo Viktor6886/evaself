@@ -89,6 +89,7 @@ heartbeat по-прежнему ведёт `BackgroundRuntime`, а очеред�
 | Лимиты роутера | RPM, TPM, inflight | `src/router/limits.ts` | `ValkeyRouterLimits` (распределённые), `LocalRouterLimits` | обяз. |
 | Адаптеры | OpenAI-совместимый и Anthropic | `src/router/adapters/` | общий нормализатор в `shared.ts` | расш. |
 | Выбор маршрута | Техническая цепочка провайдеров | `src/router/routes.ts`, `routing-marker.ts` | детерминированно: режим, явный запрос, изображение/JSON, назначение conversation, выбор человека; содержание сообщения не разбирается | обяз. |
+| Проверка совместимости модели | Технический probe перед активацией | `src/llm/capability-probe.ts` | `probeModelCapabilities()`: ответ, streaming, вызов инструмента, JSON-аргументы, приём результата; единственное разрешённое обращение к `/chat/completions` мимо роутера | обяз. |
 | Учёт | Запросы и расход | таблицы `llm_requests`, `llm_spend_ledger`, `llm_breaker_state` | — | read |
 
 Своя fallback-цепочка в обход роутера запрещена (инвариант 16).
@@ -107,7 +108,8 @@ heartbeat по-прежнему ведёт `BackgroundRuntime`, а очеред�
 | Состав memory blocks | Четыре блока и их границы | `src/letta/memory-blocks.ts` | `evaMemoryBlocks()`: `persona`, `human`, `current_state`, `therapeutic_framework` | обяз. |
 | Административный control plane | `@letta-ai/letta-client` 1.12.1 только как управляющий путь | `src/letta/admin-client.ts` | `LettaAdminPlane`; методов отправки сообщения нет | обяз. |
 | Страж удаления | Запрет удаления при незакончившемся ходе | `src/letta/delete-guard.ts` | выборка по `turn_runs`, код `deletion_blocked` | обяз. |
-| RuntimeContextBuilder | Сборщик продуктового контекста | `src/runtime/runtime-context.ts` | `RuntimeContext`: часовой пояс, профиль, подписка, состояние целей; системный промпт не подменяет | обяз. |
+| Готовность | Может ли Ева работать | `src/letta/readiness.ts` | `evaluateReadiness()`: `state` — `ready`/`degraded`/`not_ready`, срок годности снимка фактов, `observed_at`; маршрут `/ready` | обяз. |
+| RuntimeContextBuilder | Сборщик продуктового контекста | `src/runtime/runtime-context.ts` | `RuntimeContext`: часовой пояс, профиль, подписка, состояние целей; системный промпт не подменяет; потолок 2000 знаков, размер виден в `/metrics` | обяз. |
 | ConversationPurposeService | Назначения conversation | `src/conversations/purpose-service.ts` | `purposePolicy()`, `toolAllowedForPurpose()` — область продуктовых инструментов по назначению, не выбор навыка | обяз. |
 | Заметки | Хранилище заметок в PostgreSQL | таблица `eva_notes` | продуктовые данные; когнитивной памятью не является | расш. |
 | Каталог инструментов | Сборка tool-схем продуктовых инструментов | `src/tools/tool-kit.ts`, `core-tools.ts`, `task-tools.ts` | `ToolBuilder`, `objectSchema()` | обяз. |
@@ -117,7 +119,7 @@ heartbeat по-прежнему ведёт `BackgroundRuntime`, а очеред�
 
 | Компонент | Назначение | Путь | Контракт | Переисп. |
 |---|---|---|---|---|
-| CrisisMonitor | Детерминированный кризисный контур | `src/crisis.ts` | `detectCrisis()`, `safetyDirective()`; приоритетный, неблокирующий | обяз. |
+| CrisisMonitor | Детерминированный кризисный контур | `src/crisis.ts` | `detectCrisis()`, `safetyDirective()`; приоритетный, неблокирующий; событие пишется метаданными, сам текст не хранится | обяз. |
 | UserProfileService | Профиль и подтверждение полей | `src/profile/profile-service.ts` | таблицы `onboarding_fields`, `profile_field_definitions` | расш. |
 | GoalService | Цели, результаты, рабочие блоки | `src/goals/goal-service.ts` | таблицы `goals`, `goal_results`, `work_blocks` | расш. |
 | Задачи и события | Напоминания и их история | `src/tasks/task-event-service.ts`, таблицы `tasks`, `task_events` | `reminder_sent` отделён от `done` | расш. |
