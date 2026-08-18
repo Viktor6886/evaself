@@ -16,6 +16,11 @@ import { TaskEventService } from "./tasks/task-event-service.js";
 import { withSpan } from "./observability/tracing.js";
 import { runInTurn } from "./turns/turn-context.js";
 import {
+  messageBatchTiming,
+  timelineDetail,
+  type MessageBatchTiming,
+} from "./turns/message-timeline.js";
+import {
   TURN_FLOW_VERSION,
   type TurnHandle,
   type TurnLifecycle,
@@ -260,9 +265,21 @@ export class EvaWorkflow {
     });
     // Объединённый ход проходит через `aggregating`: окно ожидания
     // быстрых сообщений — это часть хода, а не пауза перед ним.
+    //
+    // Отметки сообщений записываются здесь целиком: идентификаторы,
+    // время отправки и промежутки. Раньше от окна оставалось одно число
+    // — сколько сообщений в нём было, — и разобрать «эти два пришли с
+    // разницей в секунду» было уже нечем. Текста в записи нет.
+    const windowTiming = messageBatchTiming(
+      [...earlier, update].map((part) => ({
+        messageId: part.messageId,
+        date: part.message.date,
+      })),
+      new Date(),
+    );
     if (earlier.length > 0) {
       await this.moveTurn(turnHandle, "aggregating", {
-        detail: { messages: earlier.length + 1 },
+        detail: timelineDetail(windowTiming),
       });
     }
     await this.moveTurn(turnHandle, "queued");
@@ -439,10 +456,23 @@ export class EvaWorkflow {
           }
         }
         typing.stop = this.telegram.startTyping(update.chatId, this.config.typingIntervalMs);
+        // Окно этого хода после гейтов: голосовая часть могла выпасть по
+        // квоте, и рассказывать про неё в контексте больше нечего.
+        const promptTiming: MessageBatchTiming = messageBatchTiming(
+          parts.map((part) => ({ messageId: part.messageId, date: part.message.date })),
+          new Date(),
+        );
         // Отметка предыдущего сообщения нужна контексту: по ней считается
         // промежуток между сообщениями. Читается она здесь, потому что
         // этот же запрос её и перезаписывает.
-        const previousUserMessageAt = await this.db.recordUserMessage(user.id);
+        //
+        // Записывается время последнего сообщения человека, а не момент
+        // обработки: между отправкой и ходом стоит durable inbox, и
+        // очередь добавляла к промежутку следующего хода своё ожидание.
+        const previousUserMessageAt = await this.db.recordUserMessage(
+          user.id,
+          promptTiming.lastAt,
+        );
         const conversationId = link.conversation_id;
         if (!conversationId) throw new Error("У агента отсутствует активный conversation");
         // Сообщение Telegram связывается с тем же ходом и той же
@@ -476,6 +506,8 @@ export class EvaWorkflow {
             (update.kind === "voice" ? prompt : ""),
           turnId: turnHandle?.runId,
           previousUserMessageAt,
+          currentMessageAt: promptTiming.firstAt,
+          messageBatch: promptTiming,
         });
         metrics.context_build_ms = context.metrics?.runtimeContextMs ?? 0;
         metrics.profile_check_ms = context.metrics?.profileCheckMs ?? 0;

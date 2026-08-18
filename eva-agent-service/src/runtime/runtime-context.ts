@@ -10,6 +10,11 @@ import {
   localNow,
 } from "../time/local-date-time.js";
 import { appendRoutingMarker, type RoutingMarkerClaims } from "../router/routing-marker.js";
+import {
+  batchSummary,
+  timelineLines,
+  type MessageBatchTiming,
+} from "../turns/message-timeline.js";
 import { TaskEventService } from "../tasks/task-event-service.js";
 
 export interface RuntimeContext {
@@ -21,6 +26,19 @@ export interface RuntimeContext {
   localTime: string;
   /** Локальная дата словами вместе с днём недели. */
   localDate: string;
+  /**
+   * То же мгновение в UTC.
+   *
+   * Местное время без UTC неоднозначно ровно там, где ошибка заметнее
+   * всего: в час перевода стрелок одна и та же настенная отметка
+   * встречается дважды, а «через сколько» и «какой это был день»
+   * считаются уже по мгновению, а не по циферблату.
+   */
+  utcTime: string;
+  /** День недели, месяц и год отдельными полями: их называют вслух. */
+  weekday: string;
+  month: string;
+  year: number;
   /**
    * Сколько прошло с предыдущего сообщения человека. `null` — предыдущего
    * сообщения нет: разговор начинается.
@@ -41,6 +59,10 @@ export interface RuntimeContext {
   taskActivity?: string[];
   /** Ближайшие напоминания: когда сработают и через сколько. */
   upcomingReminders?: string[];
+  /** Окно быстрых сообщений: сколько их и за какое время. `null` — одно. */
+  messageBatch?: string | null;
+  /** По строке на сообщение окна: порядок, время и промежуток. */
+  messageTimeline?: string[];
   metrics?: {
     runtimeContextMs: number;
     profileCheckMs: number;
@@ -171,6 +193,17 @@ export class RuntimeContextBuilder {
      * сообщением, а строка живёт до конца TTL.
      */
     previousUserMessageAt?: Date | null;
+    /**
+     * Когда отправлено первое сообщение этого хода. Промежуток считается
+     * от него, а не от момента обработки: между отправкой и ходом стоит
+     * durable inbox, и очередь добавляет к промежутку своё время.
+     */
+    currentMessageAt?: Date | null;
+    /**
+     * Окно быстрых сообщений. Строки собираются здесь, а не у
+     * вызывающего: часовой пояс человека известен только после выборки.
+     */
+    messageBatch?: MessageBatchTiming;
   }): Promise<RuntimeContext> {
     const started = performance.now();
     const loaded = await this.load(input.userId, input.conversationId);
@@ -216,7 +249,14 @@ export class RuntimeContextBuilder {
       purpose: row.purpose,
       localTime: local.toISO({ suppressMilliseconds: true }) ?? local.toUTC().toISO()!,
       localDate: localDateWithWeekday(local),
-      sincePreviousMessage: sincePrevious(local.toJSDate(), input.previousUserMessageAt ?? null),
+      utcTime: local.toUTC().toISO({ suppressMilliseconds: true })!,
+      weekday: local.setLocale("ru").toFormat("cccc"),
+      month: local.setLocale("ru").toFormat("LLLL"),
+      year: local.year,
+      sincePreviousMessage: sincePrevious(
+        input.currentMessageAt ?? local.toJSDate(),
+        input.previousUserMessageAt ?? null,
+      ),
       timezone,
       city: row.city,
       countryCode: row.country_code,
@@ -231,6 +271,8 @@ export class RuntimeContextBuilder {
       llmQualityMode: input.modelPolicy ?? row.llm_quality_mode,
       taskActivity,
       upcomingReminders,
+      messageBatch: input.messageBatch ? batchSummary(input.messageBatch) : null,
+      messageTimeline: input.messageBatch ? timelineLines(input.messageBatch, timezone) : [],
       metrics: {
         runtimeContextMs: elapsed(started),
         profileCheckMs,
@@ -253,6 +295,10 @@ export class RuntimeContextBuilder {
     const fields: Array<[string, string | null]> = [
       ["local_time", context.localTime],
       ["local_date", context.localDate],
+      ["weekday", context.weekday],
+      ["month", context.month],
+      ["year", String(context.year)],
+      ["utc_time", context.utcTime],
       // Промежуток между сообщениями — факт хода. Что с ним делать,
       // Ева знает из персоны: правило постоянное, и платить за него в
       // каждом сообщении незачем.
@@ -280,6 +326,14 @@ export class RuntimeContextBuilder {
     const lines = fields
       .filter((entry): entry is [string, string] => Boolean(entry[1]))
       .map(([key, value]) => `${key}: ${escapeContextValue(value)}`);
+    // Окно быстрых сообщений стоит рядом с промежутком: без него «пошли
+    // кушать» и «покушали» через секунду читаются как рассказ о
+    // состоявшемся обеде, а не как две реплики одной мысли.
+    const timeline = (context.messageTimeline ?? []).slice(0, 5);
+    if (context.messageBatch) lines.push(`message_batch: ${escapeContextValue(context.messageBatch)}`);
+    if (timeline.length > 0) {
+      lines.push("message_times:", ...timeline.map((item) => `  - ${escapeContextValue(item)}`));
+    }
     const events = (context.taskActivity ?? []).slice(0, 5)
       .map((item) => `  - ${escapeContextValue(item)}`);
     if (events.length > 0) lines.push("recent_task_events:", ...events);

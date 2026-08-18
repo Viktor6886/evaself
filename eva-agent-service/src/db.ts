@@ -294,7 +294,15 @@ export class Database {
    *
    * `null` означает «предыдущего сообщения нет»: человек пишет впервые.
    */
-  async recordUserMessage(userId: number): Promise<Date | null> {
+  /**
+   * Отметить последнее сообщение человека и вернуть предыдущее.
+   *
+   * Время передаётся вызывающим: у Telegram есть собственная отметка
+   * отправки, а `now()` здесь — момент обработки, то есть отправка плюс
+   * очередь. Промежуток «сколько прошло с прошлого сообщения» считается
+   * по первой, иначе он растёт вместе с задержкой сервиса.
+   */
+  async recordUserMessage(userId: number, at?: Date): Promise<Date | null> {
     const { rows } = await this.withUserScope(
       { userId, label: "db.recordUserMessage", inherit: true },
       async () => await this.require().query<{ last_user_message_at: Date | null }>(
@@ -302,12 +310,13 @@ export class Database {
          SELECT last_user_message_at FROM heartbeat_state WHERE user_id = $1
        ), touched AS (
          INSERT INTO heartbeat_state (user_id, last_user_message_at)
-         VALUES ($1, now())
-         ON CONFLICT (user_id) DO UPDATE SET last_user_message_at = now()
+         VALUES ($1, COALESCE($2::timestamptz, now()))
+         ON CONFLICT (user_id) DO UPDATE
+           SET last_user_message_at = COALESCE($2::timestamptz, now())
          RETURNING user_id
        )
        SELECT previous.last_user_message_at FROM previous`,
-      [userId],
+      [userId, at ?? null],
       ),
     );
     return rows[0]?.last_user_message_at ?? null;
