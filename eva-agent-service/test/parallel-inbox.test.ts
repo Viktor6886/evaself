@@ -487,6 +487,52 @@ test("два быстрых сообщения дают один ход и од�
   assert.deepEqual(inbox.statuses(), { completed: 2 });
 });
 
+/**
+ * Пока Ева отвечает, человек продолжает писать.
+ *
+ * Поле ввода теперь свободно всё время ответа, поэтому это не редкий
+ * случай, а обычный. Такие сообщения обязаны приниматься сразу, лежать
+ * durable, не прерывать текущий ход и стать следующим — одним, а не
+ * тремя.
+ */
+test("сообщения во время ответа не прерывают ход и становятся следующим", async () => {
+  const inbox = new FakeInbox();
+  inbox.enqueueUpdate(textUpdate(91, 1_300, "первый вопрос"), 0);
+
+  const turns: string[][] = [];
+  let interrupted = false;
+  const dispatcher = new ParallelInboxDispatcher(
+    inbox as never,
+    async (records) => {
+      if (records[0]!.updateId === 91) {
+        // Человек пишет ещё три сообщения, пока идёт ответ на первое.
+        inbox.enqueueUpdate(textUpdate(92, 1_300, "и ещё"), 1);
+        inbox.enqueueUpdate(textUpdate(93, 1_300, "вот что"), 2);
+        inbox.enqueueUpdate(textUpdate(94, 1_300, "я думаю"), 3);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        // Ход дошёл до конца сам: никто его не оборвал.
+        if (records.length !== 1) interrupted = true;
+      }
+      turns.push(records.map((record) => record.payload.message!.text!));
+      return { status: "completed", usageCharged: true };
+    },
+    logger,
+    OPTIONS,
+    undefined,
+    new TurnAggregator(inbox as never, logger, { debounceMs: 5, maxWindowMs: 20 }, async () => {}),
+  );
+
+  await drain(dispatcher, inbox);
+
+  assert.equal(interrupted, false, "текущий ход прервали новые сообщения");
+  assert.deepEqual(turns, [
+    ["первый вопрос"],
+    ["и ещё", "вот что", "я думаю"],
+  ]);
+  // Ничего не потеряно и порядок сохранён.
+  assert.deepEqual(inbox.statuses(), { completed: 4 });
+});
+
 test("команда не поглощается обычным текстом, а становится своим ходом", async () => {
   const inbox = new FakeInbox();
   inbox.enqueueUpdate(textUpdate(71, 1_100, "привет"), 0);

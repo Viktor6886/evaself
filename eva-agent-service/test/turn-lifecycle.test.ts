@@ -181,6 +181,20 @@ class TurnStore {
   }
 
   private updateRun(text: string, values: unknown[]): unknown[] {
+    if (text.includes("WHERE telegram_user_id = $1")) {
+      // Останов ищет ходы по владельцу: своего run_id у него нет.
+      const terminal = new Set((values[2] as string[]) ?? []);
+      const cancelled: Array<{ run_id: string }> = [];
+      for (const candidate of this.rows.values()) {
+        if (candidate.telegram_user_id !== Number(values[0])) continue;
+        if (candidate.cancel_requested_at !== null) continue;
+        if (terminal.has(candidate.state)) continue;
+        candidate.cancel_requested_at = new Date().toISOString();
+        candidate.cancel_reason = String(values[1]);
+        cancelled.push({ run_id: candidate.run_id });
+      }
+      return cancelled;
+    }
     const row = this.owned(values);
     if (!row) return [];
     if (text.includes("SET state = $3")) {
@@ -519,12 +533,10 @@ async function runTelegramTurn(
     deltas?: Array<[string, boolean]>;
     /** Пауза между срезами: проверка троттлинга без настоящего ожидания. */
     deltaGapMs?: number;
-    /** Минимальный промежуток между обновлениями черновика. */
+    /** Минимальный промежуток между правками показанного сообщения. */
     liveIntervalMs?: number;
-    /**
-     * Черновик открывается не сразу, а когда тест этого захочет: так
-     * воспроизводится ход, закончившийся раньше ответа Telegram.
-     */
+    /** Команда вместо обычного сообщения. */
+    command?: string;
   } = {},
 ): Promise<WorkflowProbe> {
   const sent: string[] = [];
@@ -555,8 +567,7 @@ async function runTelegramTurn(
     query: async () => ({ rows: [] }),
   };
   const shown: string[] = [];
-  // Опоздавший черновик: ход может закончиться раньше, чем Telegram
-  // ответит, и тогда останавливать нечего — а таймер уже живёт.
+  // «Печатает» снимается, как только у ответа появилось сообщение.
   let typingStopped = false;
   // Метрики хода читаются оттуда же, откуда их читает оператор, — из
   // строки журнала: проверяется опубликованное, а не внутреннее поле.
@@ -736,9 +747,11 @@ async function runTelegramTurn(
         message_id: 5,
         chat: { id: TELEGRAM_ID },
         from: { id: TELEGRAM_ID, first_name: "Анна" },
-        ...(options.onlyVoice
-          ? { voice: { file_id: "voice-only", file_unique_id: "voice-only" } }
-          : { text: "мне снова тяжело собраться" }),
+        ...(options.command
+          ? { text: options.command }
+          : options.onlyVoice
+            ? { voice: { file_id: "voice-only", file_unique_id: "voice-only" } }
+            : { text: "мне снова тяжело собраться" }),
       },
     },
   ];
@@ -1085,6 +1098,37 @@ test("сообщение не правится чаще, чем позволяе
   // значит проверка сторожит троттлинг, а не отсутствие срезов.
   const free = await runTelegramTurn(undefined, { deltas: many });
   assert.ok(free.shown.length > 1, "без ограничения сообщение обязано правиться чаще");
+});
+
+/**
+ * Останов — единственное, что прерывает уже идущий ход.
+ *
+ * Новые сообщения ход не прерывают: они становятся следующим. Поэтому
+ * просьба остановиться обязана идти мимо очереди — слот пользователя
+ * занят как раз тем ходом, который надо прервать.
+ */
+test("останов прерывает ход и не встаёт за ним в очередь", async () => {
+  const store = new TurnStore();
+  const turns = lifecycle(store);
+  // Ход, который уже идёт: его и надо прервать.
+  const running = await turns.start(startInput(9_001));
+  await turns.transition(running, "queued");
+  await turns.transition(running, "claimed");
+
+  const probe = await runTelegramTurn(turns, { command: "/stop" });
+
+  assert.deepEqual(probe.sent, ["Остановила. Можно писать дальше."]);
+  assert.equal(probe.lockClaims.length, 0, "останов встал в очередь за ходом, который прерывает");
+  assert.equal(await turns.isCancelled(running), true, "идущий ход не получил барьер отмены");
+  // Модель при этом не звали: останов — не разговор.
+  assert.deepEqual(probe.prompts, []);
+});
+
+test("останавливать нечего — так и сказано", async () => {
+  const store = new TurnStore();
+  const turns = lifecycle(store);
+  const probe = await runTelegramTurn(turns, { command: "/stop" });
+  assert.deepEqual(probe.sent, ["Сейчас нечего останавливать."]);
 });
 
 test("ход измеряется по этапам, а не одним числом", async () => {

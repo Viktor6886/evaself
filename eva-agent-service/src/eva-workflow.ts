@@ -209,6 +209,11 @@ export class EvaWorkflow {
     update: NormalizedUpdate,
     earlier: NormalizedUpdate[] = [],
   ): Promise<InboxResult> {
+    // Останов — единственное, что прерывает уже идущий ход. Он не встаёт
+    // в очередь за ним: слот пользователя занят как раз тем ходом,
+    // который надо прервать, и просьба остановиться дождалась бы его
+    // конца — то есть не остановила бы ничего.
+    if (update.command === "/stop") return await this.stopRunningTurn(update);
     const typing: { stop: (() => void) | null } = { stop: null };
     // Ответ, который растёт на глазах: одно сообщение, которое правится
     // по мере генерации. Его конец — общий `finally`, каким бы ни был
@@ -760,6 +765,43 @@ export class EvaWorkflow {
     }
   }
 
+  /**
+   * Прервать ход по просьбе человека.
+   *
+   * Мимо очереди и мимо агента: ни модель, ни conversation здесь не
+   * нужны, нужен только барьер отмены. Ход, который его увидит,
+   * закончится сам и ничего не доставит.
+   */
+  private async stopRunningTurn(update: NormalizedUpdate): Promise<InboxResult> {
+    return await this.db.withUserScope(
+      { telegramId: update.telegramId, label: "telegram.stop" },
+      async (): Promise<InboxResult> => {
+        const from = update.message.from!;
+        const user = await this.db.upsertUser({
+          telegramId: update.telegramId,
+          username: from.username ?? null,
+          firstName: from.first_name ?? null,
+          lastName: from.last_name ?? null,
+          languageCode: from.language_code ?? null,
+        });
+        this.db.bindScopeUserId(user.id);
+        const language = preferredResponseLanguage(user);
+        const cancelled = this.turns
+          ? await this.turns.cancelActiveForUser(update.telegramId, "user_stop")
+          : 0;
+        await this.telegram.sendMessage(
+          update.chatId,
+          t(language, cancelled > 0 ? "stopped" : "nothingToStop"),
+        );
+        this.logger.info("Ход прерван по просьбе человека", {
+          telegram_id: update.telegramId,
+          cancelled,
+        });
+        return { status: "completed" };
+      },
+    );
+  }
+
   private async ensureUserAndAgent(
     update: NormalizedUpdate,
   ): Promise<{ user: UserRow; link: AgentLinkRow }> {
@@ -862,6 +904,12 @@ export class EvaWorkflow {
         );
         break;
       }
+      case "/stop":
+        // Сюда команда доходит, только если ход уже начался мимо раннего
+        // пути: останавливать в этот момент нечего — этот ход и есть
+        // текущий.
+        await this.telegram.sendMessage(update.chatId, t(language, "nothingToStop"));
+        break;
       case "/privacy":
         await this.telegram.sendMessage(
           update.chatId,
