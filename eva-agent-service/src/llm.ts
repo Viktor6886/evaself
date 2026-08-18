@@ -235,6 +235,10 @@ export class LlmManager {
           streaming: provider.supports_streaming !== false,
           vision: provider.supports_vision === true,
         },
+        // В той же конфигурации, в какой модель будет работать: роутер
+        // подставляет эти параметры в каждый настоящий запрос, и у
+        // reasoning-моделей от них зависит форма ответа.
+        additionalParameters: provider.additional_parameters,
       }));
   }
 
@@ -576,7 +580,11 @@ export class LlmManager {
       ok: capabilities.ok,
       capabilities,
       message: capabilities.ok
-        ? `${connectivity.message} Модель совместима с агентным ходом.`
+        // Непроходящая, но не блокирующая возможность не запрещает
+        // активацию и потому должна быть названа: иначе оператор узнает
+        // об отсутствии строгого JSON на первом же продуктовом маршруте.
+        ? `${connectivity.message} Модель совместима с агентным ходом.${
+          capabilities.warnings ? ` Ограничения: ${capabilities.warnings}.` : ""}`
         : `Модель несовместима с агентным ходом — ${capabilities.message}`,
     };
   }

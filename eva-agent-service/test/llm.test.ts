@@ -131,7 +131,7 @@ test("failed model switch restores the previous provider and mappings", async ()
       }),
       // Совместимость модели — отдельная проверка; здесь проверяется
       // переключение, поэтому она подменена заведомо успешной.
-      probeCapabilities: async () => ({ ok: true, checks: [], message: "" }),
+      probeCapabilities: async () => ({ ok: true, checks: [], message: "", warnings: "" }),
     },
   );
 

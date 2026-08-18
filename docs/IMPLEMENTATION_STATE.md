@@ -89,7 +89,7 @@ heartbeat по-прежнему ведёт `BackgroundRuntime`, а очеред�
 | Лимиты роутера | RPM, TPM, inflight | `src/router/limits.ts` | `ValkeyRouterLimits` (распределённые), `LocalRouterLimits` | обяз. |
 | Адаптеры | OpenAI-совместимый и Anthropic | `src/router/adapters/` | общий нормализатор в `shared.ts` | расш. |
 | Выбор маршрута | Техническая цепочка провайдеров | `src/router/routes.ts`, `routing-marker.ts` | детерминированно: режим, явный запрос, изображение/JSON, назначение conversation, выбор человека; содержание сообщения не разбирается | обяз. |
-| Проверка совместимости модели | Технический probe перед активацией | `src/llm/capability-probe.ts` | `probeModelCapabilities()`: ответ, streaming, вызов инструмента, JSON-аргументы, приём результата; единственное разрешённое обращение к `/chat/completions` мимо роутера | обяз. |
+| Проверка совместимости модели | Технический probe перед активацией | `src/llm/capability-probe.ts` | `probeModelCapabilities()`: ответ, streaming, вызов инструмента, JSON-аргументы, приём результата (assistant-сообщение с `reasoning_details` возвращается провайдеру без изменений), строгий JSON и Structured Outputs — отдельными неблокирующими проверками; идёт с `additional_parameters` провайдера без секретов и маршрутизации; единственное разрешённое обращение к `/chat/completions` мимо роутера | обяз. |
 | Учёт | Запросы и расход | таблицы `llm_requests`, `llm_spend_ledger`, `llm_breaker_state` | — | read |
 
 Своя fallback-цепочка в обход роутера запрещена (инвариант 16).
