@@ -520,6 +520,11 @@ async function runTelegramTurn(
     deltaGapMs?: number;
     /** Минимальный промежуток между обновлениями черновика. */
     draftIntervalMs?: number;
+    /**
+     * Черновик открывается не сразу, а когда тест этого захочет: так
+     * воспроизводится ход, закончившийся раньше ответа Telegram.
+     */
+    deferDraft?: { release: () => void; stopped: () => boolean };
   } = {},
 ): Promise<WorkflowProbe> {
   const sent: string[] = [];
@@ -550,6 +555,10 @@ async function runTelegramTurn(
     query: async () => ({ rows: [] }),
   };
   const drafts: string[] = [];
+  // Опоздавший черновик: ход может закончиться раньше, чем Telegram
+  // ответит, и тогда останавливать нечего — а таймер уже живёт.
+  let deferredResolve: (() => void) | null = null;
+  let draftStopped = false;
   // Метрики хода читаются оттуда же, откуда их читает оператор, — из
   // строки журнала: проверяется опубликованное, а не внутреннее поле.
   const turnMetrics: Record<string, number> = {};
@@ -567,7 +576,11 @@ async function runTelegramTurn(
   const telegram = {
     withDeliveryContext: async <T>(_prefix: string, work: () => Promise<T>) => await work(),
     startTyping: () => () => {},
-    startMessageDraft: async () => ({ chatId: TELEGRAM_ID, draftId: 1, stop() {} }),
+    startMessageDraft: options.deferDraft
+      ? () => new Promise((resolve) => {
+        deferredResolve = () => resolve({ chatId: TELEGRAM_ID, draftId: 1, stop() { draftStopped = true; } });
+      })
+      : async () => ({ chatId: TELEGRAM_ID, draftId: 1, stop() { draftStopped = true; } }),
     // Поддельный показ повторяет договор настоящего: промежуточные
     // состояния схлопываются, наружу уходит последнее, и чаще, чем раз в
     // `draftIntervalMs`, черновик не обновляется.
@@ -732,6 +745,11 @@ async function runTelegramTurn(
     result = await workflow.processAggregated(updates as never);
   } finally {
     globalThis.fetch = originalFetch;
+  }
+  if (options.deferDraft) {
+    // Telegram отвечает уже после конца хода.
+    options.deferDraft.release = () => deferredResolve?.();
+    options.deferDraft.stopped = () => draftStopped;
   }
   return {
     sent,
@@ -1087,8 +1105,25 @@ test("ход измеряется по этапам, а не одним числ
   // проблему в Telegram, а она в media-service. Здесь синтез занимает
   // десятки миллисекунд, а доставка — поддельная и мгновенная.
   assert.ok(probe.metrics.tts_ms >= 20, `синтез не измерен: ${probe.metrics.tts_ms}`);
+  // Порог с запасом, а не строгое «меньше»: доставка здесь поддельная и
+  // занимает доли миллисекунды, поэтому «чуть меньше синтеза» означало бы
+  // именно то, что проверка должна поймать, — синтез внутри доставки.
   assert.ok(
-    probe.metrics.telegram_delivery_ms < probe.metrics.tts_ms,
-    `ожидание синтеза попало в доставку: ${probe.metrics.telegram_delivery_ms}`,
+    probe.metrics.telegram_delivery_ms < probe.metrics.tts_ms / 4,
+    `ожидание синтеза попало в доставку: ${probe.metrics.telegram_delivery_ms} при синтезе ${probe.metrics.tts_ms}`,
   );
+});
+
+test("опоздавший черновик всё равно останавливается", async () => {
+  // Черновик открывается параллельно ходу — ради этого и убрано ожидание
+  // перед первым обращением к модели. Но ход может закончиться раньше,
+  // чем Telegram ответит: тогда останавливать нечего, а таймер черновика
+  // уже живёт и до перезапуска процесса шлёт в чат пустые обновления.
+  const deferred = { release: () => {}, stopped: () => false };
+  await runTelegramTurn(undefined, { deferDraft: deferred });
+
+  assert.equal(deferred.stopped(), false, "черновик не мог остановиться до открытия");
+  deferred.release();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(deferred.stopped(), true, "опоздавший черновик остался с живым таймером");
 });

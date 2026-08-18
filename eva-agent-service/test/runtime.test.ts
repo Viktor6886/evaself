@@ -158,22 +158,40 @@ test("потоковый черновик снимает пустой keepalive 
   };
 
   // Настоящий черновик со своим таймером — та самая пара, которая и
-  // сталкивалась в чате.
-  const draft = await telegram.startMessageDraft(555);
-  assert.ok(draft, "черновик не открылся");
+  // сталкивалась в чате. Его `stop()` виден тесту: 20 секунд ждать
+  // нечестно, а проверить нужно именно то, что таймер снят.
+  const real = await telegram.startMessageDraft(555);
+  assert.ok(real, "черновик не открылся");
   assert.equal(calls.length, 1);
   assert.equal(calls[0]?.text, "", "первый черновик обязан быть пустым");
+  let keepAliveStopped = false;
+  const draft = {
+    chatId: real!.chatId,
+    draftId: real!.draftId,
+    stop() { keepAliveStopped = true; real!.stop(); },
+  };
 
   const stream = telegram.startStreamingDraft(555, draft, { intervalMs: 0, keepAliveMs: 15 });
   stream.push("Первые слова ответа");
-  await stream.finish();
-
-  // Дальше keepalive повторяет показанное, а не пустоту.
+  // Пауза внутри генерации: модель молчит между срезами, ход ещё идёт.
   await new Promise((resolve) => setTimeout(resolve, 60));
+
+  // Первый же показ снимает пустой keepalive: иначе он раз в двадцать
+  // секунд стирал бы показанное — и ровно на длинных ходах.
+  assert.equal(keepAliveStopped, true, "пустой keepalive остался жив рядом с показом");
+
+  await stream.finish();
   stream.stop();
+  const afterFirstShow = calls.slice(2);
+  assert.ok(
+    afterFirstShow.length > 0,
+    "показанный черновик никто не продлевает: Telegram погасит его в молчании модели",
+  );
+  for (const body of afterFirstShow) {
+    assert.equal(body.text, "Первые слова ответа", `черновик продлён чужим текстом: ${body.text}`);
+  }
   const empties = calls.slice(1).filter((body) => body.text === "");
   assert.deepEqual(empties, [], `пустой черновик стёр показанный текст: ${JSON.stringify(calls)}`);
-  assert.equal(calls.at(-1)?.text, "Первые слова ответа");
 });
 
 test("остановленный показ не досылает срез после отмены хода", async () => {
