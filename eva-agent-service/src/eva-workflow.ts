@@ -633,6 +633,11 @@ export class EvaWorkflow {
               recorded: turnHandle?.recorded === true,
               isCancelled: async () =>
                 turnHandle && this.turns ? await this.turns.isCancelled(turnHandle) : false,
+              // Сообщение этого хода: на него ставится реакция. У
+              // объединённого хода — последнее сообщение окна, то самое,
+              // на которое Ева и отвечает.
+              chatId: update.chatId,
+              messageId: parts[parts.length - 1]?.messageId ?? update.messageId,
             },
             async () => await this.letta.runTurn(
               conversationId,

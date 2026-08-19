@@ -5,6 +5,8 @@ import type { AgentRuntimeContext, Database } from "../db.js";
 import { ALLOWED_REACTIONS, type TelegramClient } from "../telegram.js";
 import { Crawl4aiReader, WebReadError } from "./web-read.js";
 import { KnowledgeSearch } from "../knowledge/search.js";
+import { currentTurn } from "../turns/turn-context.js";
+import { recordReaction } from "../metrics.js";
 import { LlmRouterClient } from "../router/client.js";
 import { localDateWithWeekday, localNow } from "../time/local-date-time.js";
 import {
@@ -410,27 +412,40 @@ export class CoreToolFactory {
       tool(
         "set_reaction",
         "Реакция Telegram",
-        "Ставит допустимую emoji-реакцию на последнее сообщение пользователя.",
+        "Ставит emoji-реакцию на сообщение человека, на которое ты сейчас отвечаешь. "
+          + "Обратимое и безопасное действие: подтверждения не требует. "
+          + "Уместна часто — благодарность, поддержка, хорошая новость, шутка, согласие, "
+          + "короткая эмоционально важная реплика. Не на каждое сообщение и не вместо ответа.",
         objectSchema({ emoji: text("Одна поддерживаемая Telegram emoji") }, ["emoji"]),
         async (args, runtime) => {
           const emoji = requiredString(args, "emoji", 16);
           if (!runtime.useEmoji) {
+            recordReaction("skipped");
             return { ok: false, skipped: "Пользователь отключил emoji" };
           }
           if (!ALLOWED_REACTIONS.has(emoji)) {
+            recordReaction("failed");
             throw new Error("Telegram не поддерживает эту реакцию");
           }
-          const { rows } = await this.db.query<{ message_id: string }>(
-            `SELECT message_id FROM telegram_updates
-              WHERE user_id = $1 AND message_id IS NOT NULL
-              ORDER BY received_at DESC LIMIT 1`,
-            [runtime.userId],
-          );
-          const messageId = Number(rows[0]?.message_id);
+          // Сообщение берётся из хода, а не из базы. Выборка «последнее
+          // сообщение человека» была верной, пока поле ввода блокировалось
+          // на время ответа: теперь человек успевает написать следующее, и
+          // реакция уезжала на другой ход.
+          const turn = currentTurn();
+          const messageId = turn?.messageId;
+          const chatId = turn?.chatId ?? runtime.chatId;
           if (!Number.isSafeInteger(messageId)) {
-            throw new Error("Нет сообщения для реакции");
+            recordReaction("failed");
+            throw new Error("Нет сообщения этого хода для реакции");
           }
-          await this.telegram.setReaction(runtime.chatId, messageId, emoji);
+          recordReaction("attempted");
+          try {
+            await this.telegram.setReaction(chatId, messageId!, emoji);
+          } catch (error) {
+            recordReaction("failed");
+            throw error;
+          }
+          recordReaction("succeeded");
           return { ok: true, emoji };
         },
       ),

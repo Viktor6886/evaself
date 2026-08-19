@@ -20,6 +20,23 @@ import { runtimeContextSizeStats } from "./runtime/runtime-context.js";
 import type { TurnClass } from "./turns/semaphores.js";
 import { TURN_STATES } from "./turns/states.js";
 
+/**
+ * Реакции Telegram: попытки, успехи и отказы.
+ *
+ * Счётчики живут в модуле, а не в сборщике: реакцию ставит инструмент,
+ * которому до сборщика метрик дела нет. Ни текста сообщения, ни emoji
+ * здесь не появляется — только числа.
+ */
+const reactions = { attempted: 0, succeeded: 0, failed: 0, skipped: 0 };
+
+export function recordReaction(outcome: "attempted" | "succeeded" | "failed" | "skipped"): void {
+  reactions[outcome] += 1;
+}
+
+export function reactionStats(): Readonly<typeof reactions> {
+  return { ...reactions };
+}
+
 export interface MetricsPoolStats {
   total: number;
   idle: number;
@@ -371,6 +388,18 @@ export class MetricsCollector {
         help: "Ходы, чей служебный блок подошёл к потолку (от 90% и выше).",
         type: "counter",
         values: [{ value: contextSize.nearCeilingTotal }],
+      },
+      // Имя семейства не называет транспорт: аудит приватности
+      // запрещает `telegram_` в именах метрик — так в имя метрики
+      // попадает идентификатор человека.
+      {
+        name: "eva_reactions_total",
+        help: "Реакции на сообщения: попытки, успехи и отказы. Без текста и без emoji.",
+        type: "counter",
+        values: Object.entries(reactionStats()).map(([outcome, value]) => ({
+          labels: { outcome },
+          value,
+        })),
       },
       {
         name: "eva_retention_policy_seconds",
