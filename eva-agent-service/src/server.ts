@@ -19,6 +19,7 @@ import type { ManagedAgentInput } from "./letta.js";
 import { DeleteGuard } from "./letta/delete-guard.js";
 import { personaSyncState } from "./letta/persona-sync.js";
 import type { LlmManager, LlmProviderInput } from "./llm.js";
+import { runVisionCheck } from "./llm/vision-check.js";
 import type { Logger } from "./logger.js";
 import { MetricsCollector } from "./metrics.js";
 import { newCorrelationId, parseTraceparent } from "./observability/tracing.js";
@@ -1151,6 +1152,17 @@ export function buildServer(services: Services): FastifyInstance {
     const { id } = request.params as { id: string };
     return { result: await llm.test(id) };
   });
+
+  // Проверка распознавания медиа. Прогоняет настоящее изображение через
+  // production Router: проба возможностей провайдера ходит к нему
+  // напрямую и потерю картинки в маршрутизации не видит.
+  app.post("/v1/llm/vision-check", async () => ({
+    result: await runVisionCheck({
+      routerUrl: config.routerUrl,
+      routerApiKey: config.routerApiKey,
+      timeoutMs: config.llmProbeTimeoutMs,
+    }),
+  }));
 
   app.get("/v1/llm/providers/:id/models", async (request) => {
     const { id } = request.params as { id: string };

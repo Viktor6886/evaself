@@ -29,7 +29,14 @@ SOURCES = [
     ("webapp/public/app/journal.js", ""),
     ("webapp/public/assets/bot-link.js", ""),
     ("letta-ui/public/ui.js", ""),
-    ("admin-ui/public/ui.js", "/api/admin/v1"),
+]
+
+# Административная панель разрезана на страницы, и каждая ходит в API
+# своим request(). Перечислять их поимённо значило бы забыть новую при
+# следующем разделении — берём каталог целиком.
+SOURCES += [
+    (str(path), "/api/admin/v1")
+    for path in sorted(pathlib.Path("admin-ui/public").glob("*.js"))
 ]
 
 # Fastify registers the public group under a prefix, and the admin API is

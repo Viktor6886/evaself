@@ -321,7 +321,7 @@ function toOpenAi(
     model: string;
     provider_state?: Record<string, unknown>;
   },
-  result: { request_id: string; provider_name: string; switches: number },
+  result: { request_id: string; provider_name: string; switches: number; route: string },
 ) {
   return {
     id: `chatcmpl-${result.request_id}`,
@@ -360,6 +360,10 @@ function toOpenAi(
       provider: result.provider_name,
       switches: result.switches,
       request_id: result.request_id,
+      // Фактическая цепочка. Проверка распознавания медиа сверяет её с
+      // `vision`: ответ обычной модели на запрос с картинкой означает,
+      // что картинка до провайдера не доехала.
+      route: result.route,
     },
   };
 }

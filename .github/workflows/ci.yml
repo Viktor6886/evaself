@@ -323,7 +323,8 @@ jobs:
       - name: Administrative WebUI JavaScript is valid
         run: |
           node --check letta-ui/public/ui.js
-          node --check admin-ui/public/ui.js
+          # Панель разрезана на страницы: проверяется каждая, а не одна.
+          for file in admin-ui/public/*.js; do node --check "$file"; done
 
       - name: The /v1 deny really precedes the proxy in the adapted config
         env:
@@ -353,7 +354,7 @@ jobs:
       - name: Front-end JavaScript is valid
         run: |
           node --check letta-ui/public/ui.js
-          node --check admin-ui/public/ui.js
+          for file in admin-ui/public/*.js; do node --check "$file"; done
           node --check webapp/public/app/app.js
           node --check webapp/public/app/journal.js
           node --check webapp/public/assets/bot-link.js

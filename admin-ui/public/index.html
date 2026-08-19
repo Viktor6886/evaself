@@ -39,6 +39,7 @@
         <button data-page="services" class="nav-item"><span>▦</span>Сервисы и интеграции</button>
         <button data-page="ai" class="nav-item"><span>✦</span>Искусственный интеллект</button>
         <button data-page="stt" class="nav-item"><span>◎</span>Распознавание речи</button>
+        <button data-page="media" class="nav-item"><span>◈</span>Распознавание медиа</button>
         <button data-page="tts" class="nav-item"><span>◍</span>Синтез речи</button>
         <button data-page="operations" class="nav-item"><span>↻</span>Backup и обновления</button>
         <div class="nav-caption">Управление</div>
@@ -368,6 +369,53 @@
           </dialog>
         </section>
 
+        <!-- Распознавание медиа.
+             Своего реестра провайдеров у раздела нет: он показывает и
+             правит тот же маршрут `vision` LLM Router, что и раздел
+             «Искусственный интеллект». Второй реестр означал бы вторую
+             правду о том, какая модель смотрит на картинку. -->
+        <section id="page-media" class="page">
+          <div class="page-heading">
+            <div>
+              <p class="eyebrow">РАСПОЗНАВАНИЕ МЕДИА</p>
+              <h2>Модели зрения</h2>
+              <p>Фотографии и картинки-документы из Telegram уходят маршрутом <code>vision</code> LLM Router. Здесь видно, кто на них смотрит, и здесь же это меняется.</p>
+            </div>
+            <button id="reload-media" class="button ghost">Обновить</button>
+          </div>
+
+          <section class="card router-card">
+            <div class="section-heading">
+              <div>
+                <h3>Цепочка маршрута vision</h3>
+                <p class="block-caption">Основной провайдер и резервы по порядку. В цепочку попадают только модели с признаком «понимает изображения»: остальных роутер пропустит, и запрос уйдёт дальше по списку.</p>
+              </div>
+            </div>
+            <div id="media-chain" class="router-routes"></div>
+          </section>
+
+          <section class="card router-card">
+            <div class="section-heading">
+              <div>
+                <h3>Кто умеет смотреть</h3>
+                <p class="block-caption">Признак снимается пробой возможностей провайдера. Модель без него в цепочку vision ставить бессмысленно.</p>
+              </div>
+            </div>
+            <div id="media-providers" class="router-health"></div>
+          </section>
+
+          <section class="card">
+            <div class="section-heading">
+              <div>
+                <h3>Проверка распознавания</h3>
+                <p class="block-caption">Уходит настоящее изображение и настоящим путём — через production Router, как фотография из Telegram. Проверка подтверждает не только доступность провайдера, но и то, что картинка доехала до него целой.</p>
+              </div>
+              <button id="media-check" class="button primary" type="button">Проверить</button>
+            </div>
+            <div id="media-check-result" class="integration-test" hidden></div>
+          </section>
+        </section>
+
         <section id="page-operations" class="page">
           <div class="page-heading">
             <div><p class="eyebrow">ЭКСПЛУАТАЦИЯ</p><h2>Backup и обновления</h2></div>
@@ -585,6 +633,22 @@
     </form>
   </dialog>
 
+  <!-- Панель разрезана по разделам: один файл на 3581 строку перечитывался
+       целиком ради любой правки. Скрипты обычные, а не модули, и делят одну
+       глобальную область — порядок здесь тот же, каким он был в одном файле.
+       `ui-core.js` первым: он объявляет state и request. `ui.js` последним:
+       его LOADERS перечисляет функции загрузки всех разделов. -->
+  <script src="./ui-core.js" defer></script>
+  <script src="./ui-overview.js" defer></script>
+  <script src="./ui-services.js" defer></script>
+  <script src="./ui-ai.js" defer></script>
+  <script src="./ui-ai-providers.js" defer></script>
+  <script src="./ui-operations.js" defer></script>
+  <script src="./ui-users.js" defer></script>
+  <script src="./ui-media.js" defer></script>
+  <script src="./ui-stt.js" defer></script>
+  <script src="./ui-stt-editor.js" defer></script>
+  <script src="./ui-stt-keys.js" defer></script>
   <script src="./ui.js" defer></script>
 </body>
 </html>

@@ -112,6 +112,17 @@ export class ProviderService {
     return await this.agent.request(`/v1/llm/providers/${encodeURIComponent(id)}/models`);
   }
 
+  /**
+   * Проверка распознавания медиа.
+   *
+   * Отдельный маршрут, а не `check(id)`: проверяется не провайдер, а
+   * тракт целиком — картинка уходит через production Router, и какой
+   * провайдер на неё посмотрит, решает цепочка маршрута `vision`.
+   */
+  async visionCheck() {
+    return await this.agent.request("/v1/llm/vision-check", { method: "POST" });
+  }
+
   async activate(id: string) {
     this.assertId(id);
     return await this.agent.request(`/v1/llm/providers/${encodeURIComponent(id)}/activate`, {

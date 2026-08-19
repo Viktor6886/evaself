@@ -251,3 +251,73 @@ test("служебные поля провайдера не подмешиваю
     capture.restore();
   }
 });
+
+/**
+ * Отказ основной модели зрения не теряет картинку.
+ *
+ * Резерв получает тот же запрос, и в нём то же изображение: если бы
+ * роутер собирал тело запроса один раз и правил его на месте, вторая
+ * попытка ушла бы без картинки — и «не вижу изображения» пришло бы уже
+ * от резерва, при исправном основном пути.
+ */
+test("резерв маршрута зрения получает изображение целиком", async () => {
+  const { LlmRouter } = await import("../dist/router/router.js");
+  const { ProviderError, breakerKey } = await import("../dist/router/types.js");
+
+  const primary = { ...PROVIDER, id: "p-blind", name: "primary-vision" };
+  const backup = { ...PROVIDER, id: "p-backup", name: "backup-vision" };
+  const bodies: Array<{ provider: string; content: unknown }> = [];
+  const store = {
+    routingSettings: async () => ({
+      mode: "adaptive" as const, single_provider_id: null, single_failover_enabled: false,
+    }),
+    providers: async () => [primary, backup],
+    routes: async () => new Map([["vision", {
+      code: "vision", title: "vision", requires_tools: false, requires_json: false,
+      requires_vision: true, requires_streaming: false, min_context_window: 1024,
+      max_quality_tier: 5, allows_sensitive: true, rotation_enabled: true,
+    }]]),
+    chains: async () => new Map([["vision", [primary.id, backup.id]]]),
+    breakers: async () => new Map(),
+    spend: async () => ({ day: 0, month: 0 }),
+    claimProbe: async () => false,
+    recordSuccess: async () => {}, recordFailure: async () => {},
+    addSpend: async () => {}, recordAttempt: async () => {},
+  };
+  const adapters = (provider: { id: string; model: string }) => ({
+    protocol: "openai-compatible" as const,
+    complete: async (_p: unknown, request: { messages: Array<{ parts?: unknown }> }) => {
+      bodies.push({ provider: provider.id, content: request.messages[0]?.parts });
+      if (provider.id === primary.id) {
+        throw new ProviderError("timeout", "timeout", { retryable: true });
+      }
+      return {
+        content: "зелёный", tool_calls: [], finish_reason: "stop" as const,
+        usage: { tokens_in: 1, tokens_out: 1 }, model: provider.model,
+      };
+    },
+    async *stream() { throw new Error("не используется"); },
+  });
+
+  const router = new LlmRouter(
+    store as never,
+    { debug() {}, info() {}, warn() {}, error() {} },
+    undefined,
+    async () => {},
+    adapters as never,
+  );
+  const result = await router.complete(fromOpenAi(IMAGE_REQUEST) as never);
+
+  assert.equal(result.provider_name, "backup-vision");
+  assert.equal(result.route, "vision");
+  assert.equal(result.switches, 1);
+  assert.deepEqual(bodies.map((item) => item.provider), [primary.id, backup.id]);
+  // Главное: у резерва картинка та же, а не потерянная по дороге.
+  for (const body of bodies) {
+    assert.deepEqual(body.content, [
+      { type: "text", text: "что на фотографии?" },
+      { type: "image_url", url: DATA_URI },
+    ]);
+  }
+  assert.ok(breakerKey(primary.id, primary.model));
+});

@@ -43,6 +43,10 @@ node --test --experimental-strip-types test/*.test.ts        # full regression
 | `src/letta/readiness.ts` | `readiness.test.ts` |
 | `src/letta/admin-client.ts`, `delete-guard.ts` | `letta-admin-plane.test.ts` |
 | `src/llm.ts`, `src/llm/capability-probe.ts` | `capability-probe.test.ts`, `llm.test.ts` |
+| `src/llm/vision-check.ts` | `vision-check.test.ts`, `media-page.test.mjs` в `admin-ui` |
+| `src/knowledge/search.ts`, `document-text.ts` | `knowledge-search.test.ts`, `attachments.test.ts` |
+| `src/attachments/` | `attachments.test.ts`, `turn-lifecycle.test.ts` |
+| `src/letta/persona-sync.ts` | `persona-sync.test.ts` |
 | `src/letta/reasoning-tier.ts` | `letta.test.ts`, `sdk-settings.test.ts` |
 | `src/letta/memory-blocks.ts` | `runtime.test.ts`, `letta.test.ts` |
 | `package.json` (версии `@letta-ai/*`) | `letta-contract.test.ts` |
@@ -111,12 +115,12 @@ node --test --experimental-strip-types test/*.test.ts        # full regression
 | Файл | Строк |
 |---|---|
 | `src/admin/stt-service.ts` | 1879 |
-| `src/letta.ts` | 1764 |
-| `src/server.ts` | 1593 |
-| `src/admin/server.ts` | 1280 |
-| `src/db.ts` | 1222 |
+| `src/letta.ts` | 1823 |
+| `src/server.ts` | 1629 |
+| `src/eva-workflow.ts` | 1319 |
+| `src/db.ts` | 1287 |
+| `src/admin/server.ts` | 1286 |
 | `src/public/webapp-core.ts` | 1090 |
-| `src/eva-workflow.ts` | 1022 |
 
 Шаг, который такой файл и так переписывает, оставляет после себя модули
 поменьше. Отдельным рефакторингом — нельзя.
