@@ -150,7 +150,7 @@ test("зрение без объявления в каталоге не засч
   assert.equal(result.catalog_vision, false);
   assert.equal(result.ok, true, "ответ модели получен");
   assert.equal(result.recognized, false, "проверка не должна быть зелёной");
-  assert.match(String(result.error), /каталог/);
+  assert.match(String(result.error), /не объявляет зрение/);
 });
 
 test("недоступный каталог виден как «не могу подтвердить»", async () => {
@@ -158,4 +158,9 @@ test("недоступный каталог виден как «не могу п
   const result = await runVisionCheck({ ...OPTIONS, fetcher: stub.fetcher });
   assert.equal(result.catalog_vision, null);
   assert.equal(result.recognized, false);
+  // «Не ответил» и «ответил нет» — разные ответы: категоричная
+  // формулировка на неотвеченный каталог отправила бы оператора чинить
+  // то, что, возможно, исправно.
+  assert.match(String(result.error), /не ответил/);
+  assert.doesNotMatch(String(result.error), /не объявляет зрение/);
 });
