@@ -288,6 +288,12 @@ export class RuntimeContextBuilder {
       messageSource?: MessageSource;
       internalOperationType?: string;
       correlationId?: string;
+      /**
+       * Содержимое файлов, присланных вместе с сообщением. Стоит после
+       * реплики человека и отдельно от неё: подпись — его слова, файл —
+       * данные, и указания внутри файла выполнять нельзя.
+       */
+      attachments?: string[];
       /** Куда сложить измеренный размер собранного контекста. */
       measure?: (characters: number) => void;
     } = {},
@@ -365,6 +371,14 @@ export class RuntimeContextBuilder {
       "<USER_MESSAGE>",
       escapeUserMessage(userMessage),
       "</USER_MESSAGE>",
+      ...(options.attachments?.length
+        ? [
+          "",
+          "<ATTACHMENTS>",
+          ...options.attachments.map((item) => escapeUserMessage(item)),
+          "</ATTACHMENTS>",
+        ]
+        : []),
     ].join("\n");
     return appendRoutingMarker(wrapped, {
       purpose: context.purpose as RoutingMarkerClaims["purpose"],
