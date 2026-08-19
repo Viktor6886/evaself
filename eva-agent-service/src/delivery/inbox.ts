@@ -89,15 +89,30 @@ export class PostgresTelegramInbox implements ParallelTelegramInbox {
     }
     const message = update.message ?? update.edited_message;
     const isCommand = /^\/[a-z_]+(?:@\w+)?(?:\s|$)/i.test(message?.text?.trim() ?? "");
-    const kind = message?.voice || message?.audio
-      ? "voice"
-      : message?.photo?.length
-        ? "image"
-        : message?.document
-          ? "document"
-          : message?.text || message?.caption
-            ? "text"
-            : "unsupported";
+    // Нажатие кнопки и ответ в опросе — такой же вход, как сообщение:
+    // они становятся следующим обычным ходом и потому идут через тот же
+    // durable ingress. Обходить его значило бы вызывать Letta прямо из
+    // webhook и терять и порядок, и восстановление после перезапуска.
+    const callback = update.callback_query;
+    const pollAnswer = update.poll_answer;
+    const kind = callback
+      ? "callback"
+      : pollAnswer
+        ? "poll_answer"
+        : message?.voice || message?.audio
+          ? "voice"
+          : message?.photo?.length
+            ? "image"
+            : message?.document
+              ? "document"
+              : message?.text || message?.caption
+                ? "text"
+                : "unsupported";
+    // Кто прислал и куда отвечать. У опроса чата в апдейте нет вовсе —
+    // он берётся из серверного соответствия при обработке.
+    const fromId = message?.from?.id ?? callback?.from?.id ?? pollAnswer?.user?.id ?? null;
+    const chatId = message?.chat.id ?? callback?.message?.chat?.id ?? null;
+    const sourceMessageId = message?.message_id ?? callback?.message?.message_id ?? null;
     // Приём апдейта — системная запись: внутренний пользователь ещё не
     // опознан, запись хранит только проверенный Telegram-идентификатор.
     const { rowCount } = await this.db.withSystemScope(
@@ -112,10 +127,13 @@ export class PostgresTelegramInbox implements ParallelTelegramInbox {
        ON CONFLICT (update_id) DO NOTHING`,
       [
         update.update_id,
-        message?.from?.id ?? null,
-        message?.chat.id ?? null,
-        message?.message_id ?? null,
+        fromId,
+        chatId,
+        sourceMessageId,
         kind,
+        // Выбор кнопкой и голос в опросе — продолжение того же
+        // разговора, за который уже заплачено ходом: второй раз квоту за
+        // них не списываем.
         Boolean(message?.from && !message.from.is_bot && kind !== "unsupported" && !isCommand),
         JSON.stringify(update),
       ],

@@ -7,6 +7,11 @@ import { Crawl4aiReader, WebReadError } from "./web-read.js";
 import { KnowledgeSearch } from "../knowledge/search.js";
 import { inspectRuntime, type InspectionInput } from "../letta/runtime-inspection.js";
 import { currentTurn } from "../turns/turn-context.js";
+import {
+  InlineChoiceError,
+  MAX_CHOICES,
+  normalizeChoices,
+} from "../telegram/inline-choices.js";
 import { recordReaction } from "../metrics.js";
 import { LlmRouterClient } from "../router/client.js";
 import { localDateWithWeekday, localNow } from "../time/local-date-time.js";
@@ -495,6 +500,58 @@ export class CoreToolFactory {
               content: hit.content,
             })),
           };
+        },
+      ),
+      tool(
+        "present_inline_choices",
+        "Показать варианты кнопками",
+        "Добавляет к твоему ответу кнопки с вариантами выбора. Отдельного сообщения "
+          + "не появляется: кнопки встают под тем ответом, который ты сейчас пишешь. "
+          + "Уместно, когда вариантов немного и они действительно разные — выбрать "
+          + "фокус разговора, согласиться или отложить, назначить время. Не заменяет "
+          + "ответ: сначала скажи словами, кнопки только упрощают выбор. Обычный "
+          + "открытый вопрос кнопками не оформляют.",
+        objectSchema(
+          {
+            choices: {
+              type: "array",
+              description: `Варианты выбора, не больше ${MAX_CHOICES}`,
+              items: objectSchema(
+                {
+                  label: text("Короткая подпись на кнопке"),
+                  value: text("Что этот выбор означает; по умолчанию — сама подпись"),
+                },
+                ["label"],
+              ),
+            },
+            one_shot: boolean("Убрать кнопки после первого выбора; по умолчанию да"),
+          },
+          ["choices"],
+        ),
+        async (args, _runtime) => {
+          const turn = currentTurn();
+          if (!turn) {
+            // Вне хода приклеивать кнопки не к чему: ответ уже ушёл.
+            return { ok: false, reason: "no_active_turn" };
+          }
+          try {
+            const choices = normalizeChoices((args as { choices?: unknown }).choices);
+            turn.ui = {
+              ...(turn.ui ?? {}),
+              inlineChoices: {
+                choices,
+                oneShot: (args as { one_shot?: unknown }).one_shot !== false,
+              },
+            };
+            // Кнопки появятся при доставке ответа, а не сейчас: пока идёт
+            // поток, у сообщения ещё нет окончательного вида.
+            return { ok: true, choices: choices.length, attached_to: "final_message" };
+          } catch (error) {
+            if (error instanceof InlineChoiceError) {
+              return { ok: false, reason: error.code, note: error.message };
+            }
+            throw error;
+          }
         },
       ),
       tool(

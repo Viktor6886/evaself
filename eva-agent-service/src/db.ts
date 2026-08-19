@@ -421,6 +421,24 @@ export class Database {
    * путь к агенту незачем, но и подменять один идентификатор другим
    * нельзя — это разные ключи.
    */
+  /**
+   * Найти человека по Telegram-идентификатору, ничего не создавая.
+   *
+   * `upsertUser` завёл бы запись — нажатию кнопки это не нужно: кнопку
+   * видит только тот, кому уже отвечали, и незнакомый идентификатор
+   * здесь означает подделку, а не нового человека.
+   */
+  async findUserByTelegramId(telegramId: number): Promise<{ id: number } | null> {
+    const { rows } = await this.withUserScope(
+      { telegramId, label: "db.findUserByTelegramId", inherit: true },
+      async () => await this.require().query<{ id: string }>(
+        "SELECT id FROM users WHERE telegram_id = $1",
+        [telegramId],
+      ),
+    );
+    return rows[0] ? { id: Number(rows[0].id) } : null;
+  }
+
   async agentIdOfUser(userId: number, kind = "eva"): Promise<string | null> {
     const { rows } = await this.withUserScope(
       { userId, label: "db.agentIdOfUser", inherit: true },
@@ -433,6 +451,115 @@ export class Database {
       ),
     );
     return rows[0]?.agent_id ?? null;
+  }
+
+  /**
+   * Выдать токены кнопок под уже отправленное сообщение.
+   *
+   * Токены создаются на доставке, а не в инструменте: до отправки
+   * неизвестен `message_id`, а без него нельзя ни снять клавиатуру после
+   * выбора, ни отличить кнопку этого ответа от кнопки прошлого.
+   */
+  async issueCallbackTokens(input: {
+    userId: number;
+    chatId: number;
+    conversationId: string;
+    messageId: number | null;
+    oneShot: boolean;
+    ttlSeconds: number;
+    choices: Array<{ label: string; value: string; token: string }>;
+  }): Promise<void> {
+    if (input.choices.length === 0) return;
+    await this.withUserScope(
+      { userId: input.userId, label: "db.issueCallbackTokens", inherit: true },
+      async () => {
+        for (const choice of input.choices) {
+          await this.require().query(
+            `INSERT INTO telegram_callback_tokens
+               (token, user_id, chat_id, conversation_id, message_id,
+                choice_label, choice_value, one_shot, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now() + make_interval(secs => $9))
+             ON CONFLICT (token) DO NOTHING`,
+            [
+              choice.token, input.userId, input.chatId, input.conversationId,
+              input.messageId, choice.label, choice.value, input.oneShot,
+              input.ttlSeconds,
+            ],
+          );
+        }
+      },
+    );
+  }
+
+  /**
+   * Забрать выбор по токену — ровно один раз.
+   *
+   * Проверка владельца, срока и повторного нажатия сделана одним
+   * запросом: между «прочитали» и «отметили использованным» не должно
+   * быть окна, в котором двойной клик заводит два хода.
+   */
+  async claimCallbackToken(input: { token: string; userId: number }): Promise<
+    | { status: "claimed"; chatId: number; conversationId: string; messageId: number | null; label: string; value: string; oneShot: boolean }
+    | { status: "already_used" | "expired" | "unknown" }
+  > {
+    const { rows } = await this.withUserScope(
+      { userId: input.userId, label: "db.claimCallbackToken", inherit: true },
+      async () => await this.require().query<{
+        chat_id: string; conversation_id: string; message_id: string | null;
+        choice_label: string; choice_value: string; one_shot: boolean;
+        was_used: boolean; expired: boolean;
+      }>(
+        `WITH candidate AS (
+           SELECT token, used_at IS NOT NULL AS was_used, expires_at <= now() AS expired
+             FROM telegram_callback_tokens
+            WHERE token = $1 AND user_id = $2
+         ),
+         taken AS (
+           UPDATE telegram_callback_tokens t
+              SET used_at = now()
+             FROM candidate c
+            -- Владелец назван и здесь, а не только в выборке кандидата:
+            -- граница арендатора должна стоять на самой записи.
+            WHERE t.token = c.token AND t.user_id = $2
+              AND NOT c.was_used AND NOT c.expired
+        RETURNING t.chat_id, t.conversation_id, t.message_id,
+                  t.choice_label, t.choice_value, t.one_shot
+         )
+         SELECT taken.chat_id, taken.conversation_id, taken.message_id,
+                taken.choice_label, taken.choice_value, taken.one_shot,
+                candidate.was_used, candidate.expired
+           FROM candidate LEFT JOIN taken ON true`,
+        [input.token, input.userId],
+      ),
+    );
+    const row = rows[0];
+    if (!row) return { status: "unknown" };
+    if (row.was_used) return { status: "already_used" };
+    if (row.expired) return { status: "expired" };
+    return {
+      status: "claimed",
+      chatId: Number(row.chat_id),
+      conversationId: row.conversation_id,
+      messageId: row.message_id === null ? null : Number(row.message_id),
+      label: row.choice_label,
+      value: row.choice_value,
+      oneShot: row.one_shot,
+    };
+  }
+
+  /** Погасить остальные кнопки того же сообщения после сделанного выбора. */
+  async expireCallbackTokensOfMessage(input: {
+    userId: number; chatId: number; messageId: number;
+  }): Promise<void> {
+    await this.withUserScope(
+      { userId: input.userId, label: "db.expireCallbackTokensOfMessage", inherit: true },
+      async () => await this.require().query(
+        `UPDATE telegram_callback_tokens
+            SET used_at = COALESCE(used_at, now())
+          WHERE user_id = $1 AND chat_id = $2 AND message_id = $3`,
+        [input.userId, input.chatId, input.messageId],
+      ),
+    );
   }
 
   async saveAgentLink(input: {

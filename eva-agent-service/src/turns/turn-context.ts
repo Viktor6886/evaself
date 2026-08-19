@@ -14,6 +14,8 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 
+import type { InlineChoiceIntent } from "../telegram/inline-choices.js";
+
 export interface ActiveTurn {
   runId: string;
   /** Записан ли ход в `turn_runs`. Без записи ключ эффекта не на что вешать. */
@@ -31,6 +33,15 @@ export interface ActiveTurn {
    */
   chatId?: number;
   messageId?: number;
+  /**
+   * Оформление, которое Ева попросила добавить к своему ответу.
+   *
+   * Живёт ровно до конца хода: кнопки относятся к тому ответу, который
+   * сейчас пишется, и переносить их на следующий нельзя. Отменённый ход
+   * уносит намерение с собой — недописанный ответ не должен оставить
+   * висящую клавиатуру.
+   */
+  ui?: { inlineChoices?: InlineChoiceIntent };
 }
 
 const storage = new AsyncLocalStorage<ActiveTurn>();

@@ -67,6 +67,7 @@ export const TENANT_TABLES: Readonly<Record<string, readonly string[]>> = {
   subscriptions: ["user_id"],
   task_events: ["user_id"],
   tasks: ["user_id"],
+  telegram_callback_tokens: ["user_id"],
   telegram_outbox: ["user_id"],
   telegram_updates: ["user_id", "telegram_user_id"],
   test_results: ["user_id"],

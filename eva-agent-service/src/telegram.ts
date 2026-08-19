@@ -48,10 +48,27 @@ export interface TelegramMessage {
   reply_to_message?: TelegramMessage;
 }
 
+/** Нажатие inline-кнопки. `data` — наш непрозрачный токен, не команда. */
+export interface TelegramCallbackQuery {
+  id: string;
+  from?: { id?: number };
+  message?: { message_id?: number; chat?: { id?: number } };
+  data?: string;
+}
+
+/** Ответ человека в опросе. Приходит только у неанонимного опроса. */
+export interface TelegramPollAnswer {
+  poll_id: string;
+  user?: { id?: number };
+  option_ids?: number[];
+}
+
 export interface TelegramUpdate {
   update_id: number;
   message?: TelegramMessage;
   edited_message?: TelegramMessage;
+  callback_query?: TelegramCallbackQuery;
+  poll_answer?: TelegramPollAnswer;
 }
 
 interface TelegramResponse<T> {
@@ -106,7 +123,15 @@ export interface TelegramLiveMessage {
    * `delivered: false` означает, что показывать было нечего и сообщения
    * не существует: ответ должен уйти обычной отправкой.
    */
-  finish(text: string): Promise<{ delivered: boolean; messageId: number | null }>;
+  /**
+   * Довести ответ до итогового вида. `replyMarkup` — кнопки, которые
+   * встают под последней частью ответа; `keyboardMessageId` называет то
+   * сообщение, к которому они фактически прикреплены.
+   */
+  finish(
+    text: string,
+    replyMarkup?: unknown,
+  ): Promise<{ delivered: boolean; messageId: number | null; keyboardMessageId: number | null }>;
   /** Прекратить всё: ход отменён или оборвался. Поздние правки не уйдут. */
   stop(): void;
   /** Идентификатор сообщения, которое растёт. `null` — его ещё нет. */
@@ -453,16 +478,31 @@ export class TelegramClient implements OutboxTransport {
         pending = clean;
         schedule();
       },
-      finish: async (text: string): Promise<{ delivered: boolean; messageId: number | null }> => {
+      /**
+       * Довести ответ до итогового вида и, если Ева просила, приклеить
+       * кнопки.
+       *
+       * Клавиатура появляется только здесь: промежуточные правки её не
+       * несут, иначе человек нажимал бы на кнопки под недописанным
+       * ответом. Возвращается идентификатор сообщения, к которому она
+       * фактически прикреплена, — у длинного ответа это последняя часть,
+       * а не то сообщение, с которого поток начался.
+       */
+      finish: async (
+        text: string,
+        replyMarkup?: unknown,
+      ): Promise<{ delivered: boolean; messageId: number | null; keyboardMessageId: number | null }> => {
         stopped = true;
         pending = null;
         // Ожидание прерывается до `await`: иначе конец хода встал бы в
         // очередь за паузой, которая касалась только показа.
         interrupt();
         await flushing?.catch(() => undefined);
-        if (messageId === null) return { delivered: false, messageId: null };
-        await this.finalizeLiveMessage(chatId, messageId, text);
-        return { delivered: true, messageId };
+        if (messageId === null) return { delivered: false, messageId: null, keyboardMessageId: null };
+        const keyboardMessageId = await this.finalizeLiveMessage(
+          chatId, messageId, text, replyMarkup,
+        );
+        return { delivered: true, messageId, keyboardMessageId };
       },
       stop(): void {
         stopped = true;
@@ -488,19 +528,58 @@ export class TelegramClient implements OutboxTransport {
     chatId: number,
     messageId: number,
     text: string,
-  ): Promise<void> {
+    replyMarkup?: unknown,
+  ): Promise<number | null> {
     const chunks = splitTelegramText(text, LIVE_MESSAGE_LIMIT);
     const head = chunks[0] ?? text.trim();
+    const tail = chunks.slice(1);
+    // Кнопки относятся к ответу целиком, а значит встают под его концом:
+    // клавиатура посреди разбитого ответа выглядит как конец разговора.
+    const headKeyboard = tail.length === 0 ? replyMarkup : undefined;
+    let keyboardMessageId: number | null = null;
     if (head) {
       await this.dispatch("editMessageText", chatId, {
         chat_id: chatId,
         message_id: messageId,
         ...renderTelegramText(head),
+        ...(headKeyboard === undefined ? {} : { reply_markup: headKeyboard }),
       });
+      if (headKeyboard !== undefined) keyboardMessageId = messageId;
     }
-    for (const rest of chunks.slice(1)) {
-      await this.sendMessage(chatId, rest);
+    for (const [index, rest] of tail.entries()) {
+      const last = index === tail.length - 1;
+      const sent = await this.sendMessage(
+        chatId, rest,
+        last && replyMarkup !== undefined ? { reply_markup: replyMarkup } : {},
+      );
+      if (last && replyMarkup !== undefined) {
+        keyboardMessageId = telegramMessageIdOf(sent[sent.length - 1]) ?? null;
+      }
     }
+    return keyboardMessageId;
+  }
+
+  /**
+   * Ответить Telegram на нажатие кнопки.
+   *
+   * Вызывается первым делом: пока ответа нет, у человека крутится
+   * ожидание на самой кнопке, и это единственное, что он видит. Отказ
+   * здесь не должен ронять обработку выбора — сам выбор уже сделан.
+   */
+  async answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void> {
+    await this.dispatch("answerCallbackQuery", 0, {
+      callback_query_id: callbackQueryId,
+      ...(text ? { text, show_alert: false } : {}),
+    });
+  }
+
+  /** Снять клавиатуру: выбор сделан, и второй раз его делать не нужно. */
+  async clearInlineKeyboard(chatId: number, messageId: number): Promise<void> {
+    await this.dispatch("editMessageReplyMarkup", chatId, {
+      chat_id: chatId,
+      message_id: messageId,
+      reply_markup: { inline_keyboard: [] },
+    });
   }
 
   async setReaction(chatId: number, messageId: number, emoji: string): Promise<void> {
@@ -825,4 +904,17 @@ export const ALLOWED_REACTIONS = new Set([
 
 function elapsed(started: number): number {
   return Math.round((performance.now() - started) * 10) / 10;
+}
+
+/**
+ * Идентификатор отправленного сообщения из ответа Telegram.
+ *
+ * Отправка идёт через outbox, и её результат — то, что вернул API, либо
+ * запись очереди. Кнопки нужно повесить именно на сообщение, поэтому
+ * отсутствие идентификатора здесь означает «повесить не на что», а не
+ * «повесим на предыдущее».
+ */
+export function telegramMessageIdOf(result: unknown): number | null {
+  const id = Number((result as { message_id?: unknown } | null)?.message_id);
+  return Number.isSafeInteger(id) ? id : null;
 }
