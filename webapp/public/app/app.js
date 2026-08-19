@@ -1372,13 +1372,15 @@
         <label><span>Новый диалог</span><input id="new-conversation-title" maxlength="120" value="Новый диалог"></label>
         <button class="primary-action" type="submit">Создать</button>
       </form>
-      <div class="section-stack" style="margin-top:12px">
+      <div class="conversation-list" style="margin-top:12px">
         ${conversations.length ? conversations.map((item) => `<article class="section-card">
           <h3>${escapeHtml(item.title || "Диалог с Евой")}</h3>
-          <p>${item.active ? "Активный диалог" : "Можно сделать активным или архивировать."}</p>
+          <p>${item.active
+            ? `<span class="conversation-badge">Активный</span> Сначала выберите другой диалог, чтобы этот можно было архивировать.`
+            : "Можно сделать активным или архивировать."}</p>
           ${item.active ? "" : `<div class="action-row">
-            <button class="primary-action" data-activate-conversation="${escapeAttr(item.id)}" type="button">Активировать</button>
-            <button class="danger-action" data-archive-conversation="${escapeAttr(item.id)}" type="button">Архивировать</button>
+            <button class="primary-action conversation-action" data-activate-conversation="${escapeAttr(item.id)}" type="button">Активировать</button>
+            <button class="danger-action conversation-action" data-archive-conversation="${escapeAttr(item.id)}" type="button">Архивировать</button>
           </div>`}
         </article>`).join("") : emptyState("Диалогов пока нет", "Создай первый диалог с Евой.")}
       </div>`;

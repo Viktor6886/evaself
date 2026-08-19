@@ -15,6 +15,9 @@
   --shadow: 0 14px 38px rgba(33,56,49,.07), 0 2px 8px rgba(33,56,49,.035);
   --glass-shadow: 0 18px 44px rgba(25,40,36,.16), inset 0 1px 0 rgba(255,255,255,.78), inset 0 -1px 0 rgba(15,24,21,.06);
   --keyboard: 0px;
+  /* Область нажатия одна на весь интерфейс: отдельные значения по
+     кнопкам разъезжаются и на узких экранах промахиваются мимо. */
+  --tap: 44px;
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Segoe UI", sans-serif;
 }
 * { box-sizing: border-box; }
@@ -22,7 +25,7 @@
 html, body { width:100%; height:100%; margin:0; overflow:hidden; background:#0f1312; color:var(--text); }
 button, input, textarea, select { font:inherit; }
 button { color:inherit; -webkit-tap-highlight-color:transparent; }
-button, [role="button"] { min-height:44px; }
+button, [role="button"] { min-height:var(--tap); }
 button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
   outline:3px solid color-mix(in srgb,var(--accent) 32%,transparent);
   outline-offset:2px;
@@ -442,6 +445,11 @@ svg { fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; stro
 .section-card h2,.section-card h3 { margin:0; letter-spacing:-.025em; }
 .section-card p { margin:7px 0 0; color:var(--muted); line-height:1.43; }
 .eyebrow { display:block; margin:0 0 5px; color:var(--muted); font-size:10px; font-weight:760; letter-spacing:.1em; }
+/* Список диалогов прокручивается внутри листа: их бывает много, и
+   вместе с формой создания они иначе выталкивают друг друга за экран. */
+.conversation-list { display:grid; gap:10px; max-height:52vh; overflow-y:auto; -webkit-overflow-scrolling:touch; }
+.conversation-badge { display:inline-block; margin-left:8px; padding:2px 8px; border-radius:999px; font-size:12px; font-weight:640; color:var(--accent-2); background:var(--accent-soft); }
+.conversation-action { min-height:var(--tap); }
 .action-row { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
 .action-row > * { flex:1 1 140px; }
 .primary-action,.secondary-action,.danger-action {
