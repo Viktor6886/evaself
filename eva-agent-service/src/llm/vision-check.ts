@@ -38,6 +38,16 @@ export interface VisionCheckResult {
   latency_ms: number;
   /** Что ответила модель. Показывается человеку целиком. */
   answer: string;
+  /**
+   * Объявляет ли нативный каталог роутера зрение у `eva/chat`.
+   *
+   * Именно по этому полю App Server решает, передавать ли изображение
+   * провайдеру. Пока каталога не было, он считал модель текстовой и
+   * заменял картинку строкой-заглушкой: роутер при этом отвечал верно,
+   * а до модели картинка не доходила — проверка была зелёной, а Ева
+   * не видела ничего. `null` — каталог не ответил.
+   */
+  catalog_vision: boolean | null;
   error: string | null;
 }
 
@@ -51,7 +61,7 @@ export interface VisionCheckOptions {
 export async function runVisionCheck(options: VisionCheckOptions): Promise<VisionCheckResult> {
   const result: VisionCheckResult = {
     ok: false, recognized: false, provider: null, model: null, route: null,
-    switches: 0, latency_ms: 0, answer: "", error: null,
+    switches: 0, latency_ms: 0, answer: "", catalog_vision: null, error: null,
   };
   if (!options.routerApiKey) {
     result.error = "EVA_ROUTER_API_KEY не задан — LLM Router недоступен";
@@ -59,6 +69,7 @@ export async function runVisionCheck(options: VisionCheckOptions): Promise<Visio
   }
 
   const image = `data:image/png;base64,${solidPng(SIDE, SIDE, FILL).toString("base64")}`;
+  result.catalog_vision = await catalogVision(options);
   const started = Date.now();
   try {
     const response = await (options.fetcher ?? fetch)(
@@ -113,12 +124,57 @@ export async function runVisionCheck(options: VisionCheckOptions): Promise<Visio
       && FILL_WORDS.test(result.answer);
     if (result.ok && result.route !== "vision") {
       result.error = `запрос ушёл маршрутом ${result.route ?? "неизвестно"}, а не vision`;
+    } else if (result.recognized && result.catalog_vision !== true) {
+      // Роутер картинку видит, а до модели она может не дойти: App
+      // Server передаёт изображение, только если каталог объявил зрение.
+      // Молчать об этом нельзя — именно так проверка была зелёной, пока
+      // Ева отвечала, что картинок не видит.
+      //
+      // «Нет» и «не проверено» здесь разные ответы: категоричная
+      // формулировка на неотвеченный каталог отправила бы оператора
+      // чинить то, что, возможно, исправно.
+      result.recognized = false;
+      result.error = result.catalog_vision === false
+        ? "каталог роутера не объявляет зрение у eva/chat: "
+          + "App Server заменит изображение заглушкой"
+        : "каталог роутера не ответил: объявлено ли зрение у eva/chat, подтвердить нечем";
     }
     return result;
   } catch (error) {
     result.latency_ms = Date.now() - started;
     result.error = error instanceof Error ? error.message : String(error);
     return result;
+  }
+}
+
+/**
+ * Что нативный каталог говорит о зрении у `eva/chat`.
+ *
+ * Спрашиваем ровно тем же путём, каким спрашивает коннектор LM Studio в
+ * App Server: тот же адрес, тот же ключ, те же правила чтения ответа.
+ */
+async function catalogVision(options: VisionCheckOptions): Promise<boolean | null> {
+  try {
+    const response = await (options.fetcher ?? fetch)(
+      `${options.routerUrl.replace(/\/+$/u, "")}/api/v0/models`,
+      {
+        headers: {
+          accept: "application/json",
+          authorization: `Bearer ${options.routerApiKey}`,
+        },
+        signal: AbortSignal.timeout(Math.max(1_000, options.timeoutMs ?? 60_000)),
+      },
+    );
+    if (!response.ok) return null;
+    const body = JSON.parse(await response.text()) as {
+      data?: Array<{ id?: unknown; type?: unknown; capabilities?: unknown }>;
+    };
+    const entry = (body.data ?? []).find((item) => item.id === "eva/chat");
+    if (!entry) return null;
+    const capabilities = Array.isArray(entry.capabilities) ? entry.capabilities : [];
+    return entry.type === "vlm" || capabilities.includes("vision");
+  } catch {
+    return null;
   }
 }
 
