@@ -99,11 +99,7 @@ jobs:
 
       - name: Install shellcheck and Caddy
         run: |
-          # На раннере параллельно работает свой apt. По умолчанию наша
-          # установка не ждёт освобождения, а падает с «Could not get lock»
-          # — либо стоит в очереди молча, пока job не снимут по времени.
-          printf 'DPkg::Lock::Timeout "600";\nAcquire::Retries "3";\n' \
-            | sudo tee /etc/apt/apt.conf.d/99evaself-ci >/dev/null
+          ./scripts/ci/apt-wait.sh
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck
           CADDY_VERSION="$(grep '^CADDY_VERSION=' versions.env | cut -d= -f2 | cut -d- -f1)"
@@ -513,16 +509,7 @@ jobs:
           fi
 
           echo "::warning::Chromium не запустился — доставляем системные библиотеки"
-          sudo systemctl stop unattended-upgrades apt-daily.service \
-            apt-daily-upgrade.service apt-daily.timer apt-daily-upgrade.timer \
-            2>/dev/null || true
-          for _ in $(seq 1 120); do
-            sudo fuser /var/lib/apt/lists/lock /var/lib/dpkg/lock-frontend \
-              >/dev/null 2>&1 || break
-            sleep 5
-          done
-          printf 'DPkg::Lock::Timeout "600";\nAcquire::Retries "3";\n' \
-            | sudo tee /etc/apt/apt.conf.d/99evaself-ci >/dev/null
+          "$GITHUB_WORKSPACE/scripts/ci/apt-wait.sh"
           sudo npx playwright install-deps chromium
           if launches; then
             exit 0
@@ -602,16 +589,7 @@ jobs:
           fi
 
           echo "::warning::Chromium не запустился — доставляем системные библиотеки"
-          sudo systemctl stop unattended-upgrades apt-daily.service \
-            apt-daily-upgrade.service apt-daily.timer apt-daily-upgrade.timer \
-            2>/dev/null || true
-          for _ in $(seq 1 120); do
-            sudo fuser /var/lib/apt/lists/lock /var/lib/dpkg/lock-frontend \
-              >/dev/null 2>&1 || break
-            sleep 5
-          done
-          printf 'DPkg::Lock::Timeout "600";\nAcquire::Retries "3";\n' \
-            | sudo tee /etc/apt/apt.conf.d/99evaself-ci >/dev/null
+          "$GITHUB_WORKSPACE/scripts/ci/apt-wait.sh"
           sudo npx playwright install-deps chromium
           if launches; then
             exit 0
@@ -662,25 +640,9 @@ jobs:
       # выглядели как две одинаковые схемы.
       - name: Install psql
         run: |
-          # На раннере параллельно работает свой apt. По умолчанию наша
-          # установка не ждёт освобождения, а падает с «Could not get lock»
-          # — либо стоит в очереди молча, пока job не снимут по времени.
-          # Именно так job и снимался по двадцатиминутному пределу: шаг
-          # двадцать минут стоял в очереди за чужим apt.
-          #
-          # Поэтому сначала останавливаем фоновое обновление раннера, а
-          # затем ждём обе блокировки явно: `DPkg::Lock::Timeout` ждёт
-          # только dpkg, а `apt-get update` держит свою — на списки.
-          sudo systemctl stop unattended-upgrades apt-daily.service \
-            apt-daily-upgrade.service apt-daily.timer apt-daily-upgrade.timer \
-            2>/dev/null || true
-          wait_for_apt() {
-            sudo flock -w 600 /var/lib/apt/lists/lock true || true
-            sudo flock -w 600 /var/lib/dpkg/lock-frontend true || true
-          }
-          printf 'DPkg::Lock::Timeout "600";\nAcquire::Retries "3";\n' \
-            | sudo tee /etc/apt/apt.conf.d/99evaself-ci >/dev/null
-          wait_for_apt
+          # Шаг уже снимался по двадцатиминутному пределу: он всё это
+          # время простоял в очереди за фоновым обновлением раннера.
+          ./scripts/ci/apt-wait.sh
           sudo apt-get update -qq
           sudo apt-get install -y -qq curl ca-certificates
           sudo install -d /usr/share/postgresql-common/pgdg
@@ -689,7 +651,7 @@ jobs:
           echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
             https://apt.postgresql.org/pub/repos/apt noble-pgdg main" \
             | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
-          wait_for_apt
+          ./scripts/ci/apt-wait.sh
           sudo apt-get update -qq
           sudo apt-get install -y -qq postgresql-client-17
           psql --version
@@ -957,11 +919,7 @@ jobs:
       - name: Install ffmpeg
         if: needs.changes.outputs.media == 'true'
         run: |
-          # На раннере параллельно работает свой apt. По умолчанию наша
-          # установка не ждёт освобождения, а падает с «Could not get lock»
-          # — либо стоит в очереди молча, пока job не снимут по времени.
-          printf 'DPkg::Lock::Timeout "600";\nAcquire::Retries "3";\n' \
-            | sudo tee /etc/apt/apt.conf.d/99evaself-ci >/dev/null
+          "$GITHUB_WORKSPACE/scripts/ci/apt-wait.sh"
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg
 
