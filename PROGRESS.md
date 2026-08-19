@@ -6,12 +6,12 @@
 ## Состояние
 
 ```
-BASELINE:      45fa2e3 — мультимодальность, Router, идентичность, панель (PR #198)
-BRANCH:        —
-STATUS:        выполнен
-LAST_COMMIT:   —
+BASELINE:      cc87c7a — блок состояния после PR #198 и #199
+BRANCH:        claude/evaself-remove-cognitive-middleware-9zeg9t
+STATUS:        в работе
+LAST_COMMIT:   3e3df20 — фотография доходит до зрячей модели, реакция — до своего сообщения
 BLOCKER:       —
-NEXT:          ждать задания человека
+NEXT:          влить первые пять шагов, затем опросы Telegram и общая проверка
 ```
 
 Значения полей:
