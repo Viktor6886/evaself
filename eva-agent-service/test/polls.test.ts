@@ -255,6 +255,56 @@ test("голос в опросе становится сообщением че�
   );
 });
 
+test("анонимный опрос не приписывается человеку даже с автором в апдейте", async () => {
+  const db = pollDb();
+  db.polls.push({
+    id: "p1", userId: 1, chatId: 42, conversationId: "c", toolCallId: "call-1",
+    pollId: "tg-anon", messageId: 555, question: "Как ты?",
+    options: ["Хорошо", "Устал"], isAnonymous: true,
+  });
+  const workflow = workflowWith(db) as unknown as {
+    resolvePollAnswer(answer: unknown): Promise<unknown | null>;
+  };
+  // Telegram сегодня автора анонимного опроса не называет, но правило
+  // держится нашей записью, а не поведением чужой стороны.
+  assert.equal(
+    await workflow.resolvePollAnswer({ poll_id: "tg-anon", user: { id: 42 }, option_ids: [0] }),
+    null,
+  );
+  assert.equal(db.answers.size, 0, "анонимный голос не записывается на человека");
+});
+
+test("запасной ключ повтора привязан к ходу, а не к тексту вопроса", async () => {
+  const db = pollDb();
+  const sent: unknown[] = [];
+  const telegram = {
+    sendPoll: async () => {
+      sent.push(1);
+      return { message_id: 1, poll: { id: `tg-${sent.length}` } };
+    },
+  };
+  const tools = new Map(new CoreToolFactory(
+    { routerUrl: "", routerApiKey: "" } as never, db as never, telegram as never,
+  ).build(tool as never).map((entry) => [entry.name, entry]));
+  const args = { question: "Как неделя?", options: ["Хорошо", "Тяжело"] };
+
+  // SDK не назвал вызов. Тот же вопрос на следующей неделе — новый ход и
+  // новый опрос, а не молчаливый отказ.
+  for (const runId of ["r1", "r2"]) {
+    const turn = { runId, recorded: true, isCancelled: async () => false, chatId: 42 } as never;
+    await runInTurn(turn, async () =>
+      await tools.get("send_poll")!.execute("", args, runtime as never));
+  }
+  assert.equal(sent.length, 2, "второй ход отправляет свой опрос");
+
+  // Повтор в том же ходе — это тот же вызов после обрыва.
+  const turn = { runId: "r2", recorded: true, isCancelled: async () => false, chatId: 42 } as never;
+  const repeat = await runInTurn(turn, async () =>
+    await tools.get("send_poll")!.execute("", args, runtime as never));
+  assert.deepEqual(repeat.details, { ok: true, repeated: true, answers_linked: true });
+  assert.equal(sent.length, 2);
+});
+
 test("чужой опрос и чужой голос ходом не становятся", async () => {
   const db = pollDb();
   db.polls.push({

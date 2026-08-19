@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import type { AnyAgentTool } from "@letta-ai/letta-agent-sdk";
 
 import type { Config } from "../config.js";
@@ -604,7 +606,12 @@ export class CoreToolFactory {
           }
           // Запись заводится до отправки: только так повтор вызова после
           // обрыва находит уже созданный опрос, а не шлёт второй.
-          const call = toolCallId.trim() || `${runtime.conversationId}:${poll.question}`;
+          // Ключ повтора — идентификатор вызова от SDK. Запасной вариант
+          // привязан к ходу, а не к тексту вопроса: еженедельный опрос с
+          // тем же вопросом — это новый опрос, и молча не отправить его
+          // хуже, чем отправить второй после обрыва.
+          const call = toolCallId.trim()
+            || (turn?.runId ? `${turn.runId}:${poll.question}` : randomUUID());
           const record = await this.db.createPoll({
             userId: runtime.userId,
             chatId,

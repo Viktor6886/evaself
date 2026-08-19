@@ -566,35 +566,38 @@ export class Database {
     isAnonymous: boolean;
     allowsMultiple: boolean;
   }): Promise<{ id: string; pollId: string | null; created: boolean }> {
-    const { rows } = await this.withUserScope(
+    return await this.withUserScope(
       { userId: input.userId, label: "db.createPoll", inherit: true },
-      async () => await this.require().query<{
-        id: string; poll_id: string | null; created: boolean;
-      }>(
-        `WITH inserted AS (
-           INSERT INTO telegram_polls
+      async () => {
+        const inserted = await this.require().query<{ id: string; poll_id: string | null }>(
+          `INSERT INTO telegram_polls
              (user_id, chat_id, conversation_id, tool_call_id, run_id,
               question, options, is_anonymous, allows_multiple)
            VALUES ($1, $2, $3, $4, $5, $6, $7::text[], $8, $9)
            ON CONFLICT (user_id, tool_call_id) DO NOTHING
-           RETURNING id, poll_id, true AS created
-         )
-         SELECT id, poll_id, created FROM inserted
-         UNION ALL
-         SELECT id, poll_id, false AS created
-           FROM telegram_polls
-          WHERE user_id = $1 AND tool_call_id = $4
-            AND NOT EXISTS (SELECT 1 FROM inserted)`,
-        [
-          input.userId, input.chatId, input.conversationId, input.toolCallId,
-          input.runId, input.question, input.options, input.isAnonymous,
-          input.allowsMultiple,
-        ],
-      ),
+           RETURNING id, poll_id`,
+          [
+            input.userId, input.chatId, input.conversationId, input.toolCallId,
+            input.runId, input.question, input.options, input.isAnonymous,
+            input.allowsMultiple,
+          ],
+        );
+        const fresh = inserted.rows[0];
+        if (fresh) return { id: fresh.id, pollId: fresh.poll_id, created: true };
+        // Строка уже есть. Чтение идёт отдельным оператором намеренно:
+        // внутри одного оператора выборка работает со снимком, снятым до
+        // ожидания на уникальном индексе, и строку победителя гонки могла
+        // бы не увидеть вовсе — вызов упал бы там, где опрос уже создан.
+        const { rows } = await this.require().query<{ id: string; poll_id: string | null }>(
+          `SELECT id, poll_id FROM telegram_polls
+            WHERE user_id = $1 AND tool_call_id = $2`,
+          [input.userId, input.toolCallId],
+        );
+        const existing = rows[0];
+        if (!existing) throw new Error("Опрос не сохранён");
+        return { id: existing.id, pollId: existing.poll_id, created: false };
+      },
     );
-    const row = rows[0];
-    if (!row) throw new Error("Опрос не сохранён");
-    return { id: row.id, pollId: row.poll_id, created: row.created };
   }
 
   /** Связать запись с опросом Telegram после успешной отправки. */

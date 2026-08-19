@@ -254,6 +254,11 @@ export class EvaWorkflow {
 
     const poll = await this.db.findPollByTelegramId(pollId);
     if (!poll) return null;
+    // Опрос, заведённый анонимным, не приписывается человеку, даже если
+    // автор в апдейте всё-таки назван. Сегодня Telegram его не называет,
+    // но правило «анонимный ответ ни с кем не связан» держится нашей
+    // записью, а не поведением чужой стороны.
+    if (poll.isAnonymous) return null;
     const user = await this.db.findUserByTelegramId(telegramId!);
     if (!user || user.id !== poll.userId) return null;
 

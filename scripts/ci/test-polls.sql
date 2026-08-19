@@ -15,24 +15,32 @@ BEGIN;
 CREATE TEMP TABLE probe_polls (LIKE telegram_polls INCLUDING ALL) ON COMMIT DROP;
 CREATE TEMP TABLE probe_answers (LIKE telegram_poll_answers INCLUDING ALL) ON COMMIT DROP;
 
--- Тот же запрос, что в db.createPoll.
+-- Те же два оператора, что в db.createPoll. Чтение вынесено из вставки
+-- намеренно: внутри одного оператора выборка работает со снимком,
+-- снятым до ожидания на уникальном индексе, и строку победителя гонки
+-- могла бы не увидеть.
 CREATE OR REPLACE FUNCTION pg_temp.create_poll(p_user bigint, p_call text)
 RETURNS TABLE (id uuid, poll_id text, created boolean) AS $fn$
-WITH inserted AS (
+DECLARE fresh_id uuid; fresh_poll text;
+BEGIN
   INSERT INTO probe_polls
     (user_id, chat_id, conversation_id, tool_call_id, run_id,
      question, options, is_anonymous, allows_multiple)
   VALUES (p_user, 42, 'c1', p_call, 'r1', 'Как ты?', ARRAY['Хорошо','Устал'], false, false)
   ON CONFLICT (user_id, tool_call_id) DO NOTHING
-  RETURNING probe_polls.id, probe_polls.poll_id, true AS created
-)
-SELECT inserted.id, inserted.poll_id, inserted.created FROM inserted
-UNION ALL
-SELECT p.id, p.poll_id, false AS created
-  FROM probe_polls p
- WHERE p.user_id = p_user AND p.tool_call_id = p_call
-   AND NOT EXISTS (SELECT 1 FROM inserted);
-$fn$ LANGUAGE sql;
+  RETURNING probe_polls.id, probe_polls.poll_id INTO fresh_id, fresh_poll;
+
+  IF fresh_id IS NOT NULL THEN
+    RETURN QUERY SELECT fresh_id, fresh_poll, true;
+    RETURN;
+  END IF;
+
+  RETURN QUERY
+  SELECT p.id, p.poll_id, false
+    FROM probe_polls p
+   WHERE p.user_id = p_user AND p.tool_call_id = p_call;
+END;
+$fn$ LANGUAGE plpgsql;
 
 -- Тот же запрос, что в db.recordPollAnswer.
 CREATE OR REPLACE FUNCTION pg_temp.record_answer(p_poll text, p_user bigint, p_options int[])
