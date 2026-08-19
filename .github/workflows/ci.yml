@@ -99,9 +99,15 @@ jobs:
 
       - name: Install shellcheck and Caddy
         run: |
-          ./scripts/ci/apt-wait.sh
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq shellcheck
+          # shellcheck входит в образ раннера. Проверка дешевле похода в
+          # apt, который сегодня показал, что умеет молча висеть на
+          # недоступном зеркале до снятия job по времени.
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            ./scripts/ci/apt-wait.sh
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq shellcheck
+          fi
+          shellcheck --version | head -2
           CADDY_VERSION="$(grep '^CADDY_VERSION=' versions.env | cut -d= -f2 | cut -d- -f1)"
           curl -fsSL -o /tmp/caddy.tgz \
             "https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}/caddy_${CADDY_VERSION}_linux_amd64.tar.gz"

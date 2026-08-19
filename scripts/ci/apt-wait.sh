@@ -36,5 +36,16 @@ if [ "$waited" -gt 0 ]; then
 fi
 
 # На случай, если блокировку взяли прямо сейчас: apt подождёт сам.
-printf 'DPkg::Lock::Timeout "600";\nAcquire::Retries "3";\n' \
-  | sudo tee /etc/apt/apt.conf.d/99evaself-ci >/dev/null
+#
+# И главное — таймауты загрузки. По умолчанию apt ждёт зависшее
+# соединение практически бесконечно: шаг «установить shellcheck»
+# двадцать минут молчал на `apt-get update`, пока job не сняли по
+# времени, и в журнале не было ни строки. Пятнадцать секунд на
+# соединение и три попытки превращают недоступное зеркало в быстрый
+# отказ, который видно.
+sudo tee /etc/apt/apt.conf.d/99evaself-ci >/dev/null <<'CONF'
+DPkg::Lock::Timeout "600";
+Acquire::Retries "3";
+Acquire::http::Timeout "15";
+Acquire::https::Timeout "15";
+CONF
