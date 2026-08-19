@@ -15,11 +15,13 @@ BEGIN;
 CREATE TEMP TABLE search_documents (LIKE knowledge_documents INCLUDING ALL) ON COMMIT DROP;
 CREATE TEMP TABLE search_chunks (LIKE knowledge_chunks INCLUDING ALL) ON COMMIT DROP;
 
-INSERT INTO search_documents (id, user_id, name, mime, content_hash, status)
+-- Документ либо принадлежит человеку, либо входит в общую базу знаний:
+-- схема требует этого ограничением `(user_id IS NOT NULL) <> product_verified`.
+INSERT INTO search_documents (id, user_id, product_verified, name, mime, content_hash, status)
 VALUES
-  ('11111111-1111-1111-1111-111111111111', NULL, 'Мой договор.pdf', 'application/pdf', 'h1', 'ready'),
-  ('22222222-2222-2222-2222-222222222222', NULL, 'Чужой договор.pdf', 'application/pdf', 'h2', 'ready'),
-  ('33333333-3333-3333-3333-333333333333', NULL, 'Справочник Евы.md', 'text/markdown', 'h3', 'ready');
+  ('11111111-1111-1111-1111-111111111111', 100, false, 'Мой договор.pdf', 'application/pdf', 'h1', 'ready'),
+  ('22222222-2222-2222-2222-222222222222', 200, false, 'Чужой договор.pdf', 'application/pdf', 'h2', 'ready'),
+  ('33333333-3333-3333-3333-333333333333', NULL, true, 'Справочник Евы.md', 'text/markdown', 'h3', 'ready');
 
 -- Векторы простые и различимые: важна не близость сама по себе, а то,
 -- что она вообще участвует в отборе.
