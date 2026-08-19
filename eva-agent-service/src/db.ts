@@ -547,6 +547,149 @@ export class Database {
     };
   }
 
+  /**
+   * Завести опрос до его отправки.
+   *
+   * Запись появляется раньше самого опроса, и ключом служит вызов
+   * инструмента: повтор того же вызова после сбоя находит уже созданную
+   * строку и второго опроса в чате не появляется. Идентификатор
+   * Telegram проставляется отдельно — до отправки его не знает никто.
+   */
+  async createPoll(input: {
+    userId: number;
+    chatId: number;
+    conversationId: string;
+    toolCallId: string;
+    runId: string | null;
+    question: string;
+    options: string[];
+    isAnonymous: boolean;
+    allowsMultiple: boolean;
+  }): Promise<{ id: string; pollId: string | null; created: boolean }> {
+    const { rows } = await this.withUserScope(
+      { userId: input.userId, label: "db.createPoll", inherit: true },
+      async () => await this.require().query<{
+        id: string; poll_id: string | null; created: boolean;
+      }>(
+        `WITH inserted AS (
+           INSERT INTO telegram_polls
+             (user_id, chat_id, conversation_id, tool_call_id, run_id,
+              question, options, is_anonymous, allows_multiple)
+           VALUES ($1, $2, $3, $4, $5, $6, $7::text[], $8, $9)
+           ON CONFLICT (user_id, tool_call_id) DO NOTHING
+           RETURNING id, poll_id, true AS created
+         )
+         SELECT id, poll_id, created FROM inserted
+         UNION ALL
+         SELECT id, poll_id, false AS created
+           FROM telegram_polls
+          WHERE user_id = $1 AND tool_call_id = $4
+            AND NOT EXISTS (SELECT 1 FROM inserted)`,
+        [
+          input.userId, input.chatId, input.conversationId, input.toolCallId,
+          input.runId, input.question, input.options, input.isAnonymous,
+          input.allowsMultiple,
+        ],
+      ),
+    );
+    const row = rows[0];
+    if (!row) throw new Error("Опрос не сохранён");
+    return { id: row.id, pollId: row.poll_id, created: row.created };
+  }
+
+  /** Связать запись с опросом Telegram после успешной отправки. */
+  async bindPoll(input: {
+    userId: number;
+    id: string;
+    pollId: string;
+    messageId: number | null;
+  }): Promise<void> {
+    await this.withUserScope(
+      { userId: input.userId, label: "db.bindPoll", inherit: true },
+      async () => await this.require().query(
+        `UPDATE telegram_polls
+            SET poll_id = $3, message_id = $4, sent_at = now()
+          WHERE id = $2 AND user_id = $1 AND poll_id IS NULL`,
+        [input.userId, input.id, input.pollId, input.messageId],
+      ),
+    );
+  }
+
+  /**
+   * Найти опрос по идентификатору Telegram.
+   *
+   * Апдейт с голосом не приносит ни чата, ни разговора, ни владельца
+   * внутренней учётной записи — только идентификатор опроса. Поиск идёт
+   * по нему как по внешнему ключу приёма, поэтому область системная: чей
+   * это опрос, выясняется как раз здесь, а дальше работа идёт уже в
+   * области владельца.
+   */
+  async findPollByTelegramId(pollId: string): Promise<
+    | {
+      id: string; userId: number; chatId: number; conversationId: string;
+      question: string; options: string[]; isAnonymous: boolean; messageId: number | null;
+    }
+    | null
+  > {
+    const { rows } = await this.withSystemScope(
+      "telegram.poll.lookup",
+      async () => await this.query<{
+        id: string; user_id: string; chat_id: string; conversation_id: string;
+        question: string; options: string[]; is_anonymous: boolean; message_id: string | null;
+      }>(
+        `
+          -- tenant: system — приём голоса Telegram: строка ищется по идентификатору опроса, владелец определяется из неё
+          SELECT id, user_id, chat_id, conversation_id, question, options,
+                 is_anonymous, message_id
+            FROM telegram_polls
+           WHERE poll_id = $1`,
+        [pollId],
+      ),
+      { crossUser: true },
+    );
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      id: row.id,
+      userId: Number(row.user_id),
+      chatId: Number(row.chat_id),
+      conversationId: row.conversation_id,
+      question: row.question,
+      options: row.options,
+      isAnonymous: row.is_anonymous,
+      messageId: row.message_id === null ? null : Number(row.message_id),
+    };
+  }
+
+  /**
+   * Записать голос человека в опросе.
+   *
+   * Telegram присылает изменение голоса тем же апдейтом, что и первый
+   * выбор, а один и тот же апдейт может прийти повторно. Поэтому строка
+   * одна на человека и опрос, а результат говорит, стал ли этот голос
+   * новостью: повтор того же выбора ходом не становится.
+   */
+  async recordPollAnswer(input: {
+    userId: number;
+    pollId: string;
+    optionIds: number[];
+  }): Promise<{ status: "recorded" | "duplicate" }> {
+    const { rows } = await this.withUserScope(
+      { userId: input.userId, label: "db.recordPollAnswer", inherit: true },
+      async () => await this.require().query<{ recorded: boolean }>(
+        `INSERT INTO telegram_poll_answers (poll_id, user_id, option_ids)
+         VALUES ($1, $2, $3::int[])
+         ON CONFLICT (poll_id, user_id) DO UPDATE
+            SET option_ids = EXCLUDED.option_ids,
+                answered_at = now()
+          WHERE telegram_poll_answers.option_ids IS DISTINCT FROM EXCLUDED.option_ids
+         RETURNING true AS recorded`,
+        [input.pollId, input.userId, input.optionIds],
+      ),
+    );
+    return { status: rows[0]?.recorded ? "recorded" : "duplicate" };
+  }
+
   /** Погасить остальные кнопки того же сообщения после сделанного выбора. */
   async expireCallbackTokensOfMessage(input: {
     userId: number; chatId: number; messageId: number;

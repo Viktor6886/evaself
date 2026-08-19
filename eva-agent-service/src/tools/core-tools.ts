@@ -2,7 +2,7 @@ import type { AnyAgentTool } from "@letta-ai/letta-agent-sdk";
 
 import type { Config } from "../config.js";
 import type { AgentRuntimeContext, Database } from "../db.js";
-import { ALLOWED_REACTIONS, type TelegramClient } from "../telegram.js";
+import { ALLOWED_REACTIONS, telegramPollOf, type TelegramClient } from "../telegram.js";
 import { Crawl4aiReader, WebReadError } from "./web-read.js";
 import { KnowledgeSearch } from "../knowledge/search.js";
 import { inspectRuntime, type InspectionInput } from "../letta/runtime-inspection.js";
@@ -12,6 +12,12 @@ import {
   MAX_CHOICES,
   normalizeChoices,
 } from "../telegram/inline-choices.js";
+import {
+  MAX_OPTIONS,
+  MIN_OPTIONS,
+  PollError,
+  normalizePoll,
+} from "../telegram/polls.js";
 import { recordReaction } from "../metrics.js";
 import { LlmRouterClient } from "../router/client.js";
 import { localDateWithWeekday, localNow } from "../time/local-date-time.js";
@@ -555,6 +561,84 @@ export class CoreToolFactory {
             }
             throw error;
           }
+        },
+      ),
+      tool(
+        "send_poll",
+        "Опрос Telegram",
+        "Задаёт вопрос нативным опросом Telegram: человек отвечает нажатием, а его "
+          + "выбор приходит тебе следующим сообщением. Уместен, когда вариантов "
+          + "несколько и важен именно выбор — приоритет на неделю, самочувствие по "
+          + "шкале, что разобрать первым. Не для открытых вопросов и не вместо "
+          + "разговора. По умолчанию опрос неанонимный: анонимный ответ ни с кем не "
+          + "связан и в разговор не вернётся.",
+        objectSchema(
+          {
+            question: text("Вопрос опроса"),
+            options: {
+              type: "array",
+              description: `Варианты ответа, от ${MIN_OPTIONS} до ${MAX_OPTIONS}`,
+              items: { type: "string" },
+            },
+            allows_multiple_answers: boolean("Можно выбрать несколько вариантов"),
+            is_anonymous: boolean(
+              "Скрыть автора ответа. Тогда ответ не вернётся в разговор; по умолчанию нет",
+            ),
+          },
+          ["question", "options"],
+        ),
+        async (args, runtime, toolCallId) => {
+          const turn = turnOf(runtime.conversationId);
+          const chatId = turn?.chatId ?? runtime.chatId;
+          if (!Number.isSafeInteger(chatId)) {
+            return { ok: false, reason: "no_chat" };
+          }
+          let poll;
+          try {
+            poll = normalizePoll(args);
+          } catch (error) {
+            if (error instanceof PollError) {
+              return { ok: false, reason: error.code, note: error.message };
+            }
+            throw error;
+          }
+          // Запись заводится до отправки: только так повтор вызова после
+          // обрыва находит уже созданный опрос, а не шлёт второй.
+          const call = toolCallId.trim() || `${runtime.conversationId}:${poll.question}`;
+          const record = await this.db.createPoll({
+            userId: runtime.userId,
+            chatId,
+            conversationId: runtime.conversationId,
+            toolCallId: call,
+            runId: turn?.runId ?? null,
+            question: poll.question,
+            options: poll.options,
+            isAnonymous: poll.isAnonymous,
+            allowsMultiple: poll.allowsMultiple,
+          });
+          if (!record.created && record.pollId) {
+            // Тот же вызов уже отправил этот опрос. Второго в чате не будет.
+            return { ok: true, repeated: true, answers_linked: true };
+          }
+          const sent = telegramPollOf(await this.telegram.sendPoll(chatId, poll));
+          if (!sent) {
+            // Доставка отложена очередью, и идентификатора опроса ещё
+            // нет. Опрос человек увидит, но связать будущий голос с ним
+            // будет нечем — об этом честнее сказать сразу.
+            return { ok: true, answers_linked: false };
+          }
+          await this.db.bindPoll({
+            userId: runtime.userId,
+            id: record.id,
+            pollId: sent.pollId,
+            messageId: sent.messageId,
+          });
+          return {
+            ok: true,
+            options: poll.options.length,
+            anonymous: poll.isAnonymous,
+            answers_linked: !poll.isAnonymous,
+          };
         },
       ),
       tool(
