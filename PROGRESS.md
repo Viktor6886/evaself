@@ -6,12 +6,12 @@
 ## Состояние
 
 ```
-BASELINE:      cc87c7a — блок состояния после PR #198 и #199
-BRANCH:        claude/evaself-remove-cognitive-middleware-9zeg9t
-STATUS:        в работе
-LAST_COMMIT:   8d565cc — нативные опросы Telegram: вопрос виджетом, ответ обычным ходом
+BASELINE:      3994511 — main после PR #198, #199, #200 и #201
+BRANCH:        —
+STATUS:        нет активной работы
+LAST_COMMIT:   3994511 — нативные опросы Telegram влиты (PR #201)
 BLOCKER:       —
-NEXT:          общая проверка шестого шага и pull request на опросы
+NEXT:          ждать команду человека на следующую порцию
 ```
 
 Значения полей:
