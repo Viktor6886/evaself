@@ -15,6 +15,7 @@ import type { FastifyInstance, FastifyPluginAsync, FastifyReply } from "fastify"
 
 import type { Logger } from "../logger.js";
 import { LlmRouter, NoProviderAvailable } from "./router.js";
+import { containsImage, parseContent, pickProviderState } from "./content.js";
 import { extractRoutingMarker, type RoutingMarkerClaims } from "./routing-marker.js";
 import type { RouterStore } from "./store.js";
 import type { LlmMessage, LlmRequest, LlmTool } from "./types.js";
@@ -214,7 +215,8 @@ export function fromOpenAi(raw: unknown, markerSecret = ""): LlmRequest {
   let routingClaims: RoutingMarkerClaims | null = null;
   for (const item of body.messages as Array<Record<string, unknown>>) {
     const role = String(item.role ?? "user");
-    const extracted = extractRoutingMarker(contentToText(item.content), markerSecret);
+    const parsed = parseContent(item.content);
+    const extracted = extractRoutingMarker(parsed.text, markerSecret);
     const content = extracted.text;
     if (extracted.claims) routingClaims = extracted.claims;
     if (role === "system" && messages.length === 0) {
@@ -227,6 +229,17 @@ export function fromOpenAi(raw: unknown, markerSecret = ""): LlmRequest {
       role: role === "system" || role === "assistant" || role === "tool" ? role : "user",
       content,
     };
+    if (parsed.parts) {
+      // Маркер маршрутизации вырезан из текстовой выжимки — вырезаем его и
+      // из текстовых частей, иначе он уедет к провайдеру.
+      message.parts = parsed.parts.map((part) => part.type === "text"
+        ? { type: "text" as const, text: extractRoutingMarker(part.text, markerSecret).text }
+        : part);
+    }
+    // Служебные поля reasoning-моделей переносятся как есть: их читает
+    // провайдер, а не роутер.
+    const state = pickProviderState(item);
+    if (state) message.provider_state = state;
     if (typeof item.tool_call_id === "string") message.tool_call_id = item.tool_call_id;
     if (Array.isArray(item.tool_calls)) {
       message.tool_calls = (item.tool_calls as Array<Record<string, unknown>>)
@@ -290,30 +303,24 @@ export function fromOpenAi(raw: unknown, markerSecret = ""): LlmRequest {
       internal_operation_type: routingClaims?.internal_operation_type,
       user_mode: routingClaims?.user_mode ?? "auto",
       message_source: routingClaims?.message_source,
-      has_image: routingClaims?.message_source === "image",
+      // Изображение объявляет само содержимое: маркер приходит от
+      // вызывающего, а картинка — это факт запроса.
+      has_image: containsImage(messages) || routingClaims?.message_source === "image",
       has_document: routingClaims?.message_source === "document",
       has_voice: routingClaims?.message_source === "voice",
     },
   };
 }
 
-function contentToText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => {
-        if (typeof part === "string") return part;
-        const record = part as Record<string, unknown>;
-        return typeof record.text === "string" ? record.text : "";
-      })
-      .filter(Boolean)
-      .join("\n");
-  }
-  return "";
-}
-
 function toOpenAi(
-  response: { content: string; tool_calls: Array<{ id: string; name: string; arguments: string }>; finish_reason: string; usage: { tokens_in: number; tokens_out: number }; model: string },
+  response: {
+    content: string;
+    tool_calls: Array<{ id: string; name: string; arguments: string }>;
+    finish_reason: string;
+    usage: { tokens_in: number; tokens_out: number };
+    model: string;
+    provider_state?: Record<string, unknown>;
+  },
   result: { request_id: string; provider_name: string; switches: number },
 ) {
   return {
@@ -326,6 +333,10 @@ function toOpenAi(
       message: {
         role: "assistant",
         content: response.content,
+        // Служебные поля провайдера возвращаются вызывающему как есть:
+        // на следующем ходе он обязан прислать их обратно вместе с
+        // результатом инструмента, иначе reasoning-модель замолчит.
+        ...(response.provider_state ?? {}),
         ...(response.tool_calls.length
           ? {
             tool_calls: response.tool_calls.map((call) => ({
