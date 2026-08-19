@@ -12,6 +12,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { CoreToolFactory } from "../dist/tools/core-tools.js";
 import { EvaWorkflow } from "../dist/eva-workflow.js";
 import { canTransition, TURN_STATES } from "../dist/turns/states.js";
 import {
@@ -535,6 +536,12 @@ async function runTelegramTurn(
     responseMode?: "text" | "voice" | "both";
     /** Сколько «занимает» синтез в поддельном media-service. */
     synthesisMs?: number;
+    /**
+     * Что происходит внутри хода: настоящий инструмент вызывается отсюда,
+     * потому что SDK в прогоне нет, а договор «инструмент оставил
+     * намерение — доставка приклеила клавиатуру» проверять нужно.
+     */
+    duringTurn?: (conversationId: string) => Promise<void> | void;
     /** Синтез отказывает. */
     synthesisFails?: boolean;
     /**
@@ -593,9 +600,15 @@ async function runTelegramTurn(
     markAgentUsed: async () => {},
     recordSttUsage: async () => {},
     incrementUsage: async () => {},
+    issueCallbackTokens: async (input: Record<string, unknown>) => {
+      issuedTokens.push(input);
+    },
     query: async () => ({ rows: [] }),
   };
   const shown: string[] = [];
+  /** Клавиатуры, ушедшие в Telegram, и выданные под них токены. */
+  const markups: unknown[] = [];
+  const issuedTokens: Array<Record<string, unknown>> = [];
   // «Печатает» снимается, как только у ответа появилось сообщение.
   let typingStopped = false;
   // Метрики хода читаются оттуда же, откуда их читает оператор, — из
@@ -645,15 +658,25 @@ async function runTelegramTurn(
           pending = text.trimEnd();
           write();
         },
-        async finish(text: string) {
+        async finish(text: string, replyMarkup?: unknown) {
           stopped = true;
           pending = null;
-          if (messageId === null) return { delivered: false, messageId: null };
+          if (messageId === null) {
+            // Показывать было нечего: правка не уходит, и клавиатура
+            // вместе с ней. Ответ уйдёт обычной отправкой — с ней же
+            // уедет и клавиатура.
+            return { delivered: false, messageId: null, keyboardMessageId: null };
+          }
+          if (replyMarkup !== undefined) markups.push(replyMarkup);
           shownText = text;
           shown.push(text);
           sent.push(text);
           order.push(synthesis.done ? "text-after-speech" : "text");
-          return { delivered: true, messageId };
+          return {
+            delivered: true,
+            messageId,
+            keyboardMessageId: replyMarkup === undefined ? null : messageId,
+          };
         },
         stop() { stopped = true; pending = null; },
         get messageId() { return messageId; },
@@ -661,9 +684,13 @@ async function runTelegramTurn(
         get shown() { return shownText; },
       };
     },
-    sendMessage: async (_chatId: number, text: string) => {
+    sendMessage: async (
+      _chatId: number, text: string, sendOptions: Record<string, unknown> = {},
+    ) => {
       sent.push(text);
+      if (sendOptions.reply_markup !== undefined) markups.push(sendOptions.reply_markup);
       order.push(synthesis.done ? "text-after-speech" : "text");
+      return [{ message_id: 4_243 }];
     },
     sendVoice: async () => {
       order.push("voice");
@@ -688,6 +715,8 @@ async function runTelegramTurn(
       turnOptions: { onDelta?: (delta: { text: string; group: number; startsGroup: boolean }) => void } = {},
     ) => {
       lettaMessages.push(message);
+      // Инструмент вызывается изнутри хода — так же, как его зовёт SDK.
+      await options.duringTurn?.(_conversationId);
       prompts.push(typeof message === "string"
         ? message
         : (message as Array<{ type: string; text?: string }>)
@@ -857,6 +886,8 @@ async function runTelegramTurn(
     downloadLimits,
     transcribed,
     wrapped,
+    markups,
+    issuedTokens,
     metrics: turnMetrics,
   };
 }
@@ -1395,3 +1426,114 @@ test("ход измеряется по этапам, а не одним числ
   );
 });
 
+
+/**
+ * Кнопки: инструмент оставил намерение — доставка приклеила клавиатуру.
+ *
+ * Между инструментом и клавиатурой лежит весь ход: намерение живёт в
+ * области хода, а сообщение появляется уже после того, как модель
+ * замолчала. Инструмент здесь настоящий — тот же, что регистрируется в
+ * сессии, — и вызывается изнутри хода, как его зовёт SDK.
+ */
+test("кнопки, о которых попросил инструмент, доезжают до сообщения", async () => {
+  const tool = (
+    name: string,
+    label: string,
+    description: string,
+    parameters: unknown,
+    execute: (args: Record<string, unknown>, runtime: unknown) => Promise<unknown>,
+  ) => ({
+    name, label, description, parameters,
+    execute: async (_callId: string, args: Record<string, unknown>, runtime: unknown) =>
+      ({ details: await execute(args, runtime) }),
+  });
+  const tools = new Map(new CoreToolFactory(
+    { routerUrl: "", routerApiKey: "" } as never,
+    { withUserScope: async <T>(_s: unknown, work: () => Promise<T>) => await work() } as never,
+    {} as never,
+  ).build(tool as never).map((entry) => [entry.name, entry]));
+
+  let toolResult: unknown;
+  const harness = await runTelegramTurn(undefined, {
+    // Ответ показывается по мере генерации — обычный путь Telegram:
+    // клавиатура должна встать на то же сообщение, а не на новое.
+    deltas: [["Понимаю. Расскажи, что было дальше.", true]],
+    duringTurn: async (conversationId: string) => {
+      const result = await tools.get("present_inline_choices")!.execute(
+        "call-1",
+        { choices: [{ label: "Поговорить" }, { label: "Позже", value: "later" }] },
+        { userId: 1, telegramId: 42, chatId: 42, conversationId, purpose: "chat" } as never,
+      );
+      toolResult = result.details;
+    },
+  });
+
+  assert.deepEqual(toolResult, { ok: true, choices: 2, attached_to: "final_message" });
+  assert.equal(harness.markups.length, 1, "клавиатура ушла ровно один раз");
+  const keyboard = harness.markups[0] as { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> };
+  assert.deepEqual(keyboard.inline_keyboard.map((row) => row[0]!.text), ["Поговорить", "Позже"]);
+  for (const row of keyboard.inline_keyboard) {
+    // В `callback_data` уходит непрозрачный токен, а не подпись и не команда.
+    assert.match(row[0]!.callback_data, /^[A-Za-z0-9_-]+$/);
+    assert.ok(!row[0]!.callback_data.includes("later"));
+  }
+
+  // Токены сохранены под тем сообщением, к которому клавиатура
+  // приклеилась: иначе снять её после выбора будет не у чего.
+  assert.equal(harness.issuedTokens.length, 1);
+  const issued = harness.issuedTokens[0] as {
+    messageId: number | null;
+    choices: Array<{ label: string; value: string; token: string }>;
+  };
+  assert.equal(issued.messageId, 4_242, "токены сохранены под растущим сообщением");
+  assert.deepEqual(issued.choices.map((choice) => choice.value), ["Поговорить", "later"]);
+  assert.deepEqual(
+    issued.choices.map((choice) => choice.token),
+    keyboard.inline_keyboard.map((row) => row[0]!.callback_data),
+  );
+});
+
+test("без потока клавиатура уезжает с обычной отправкой, и токены — под ней", async () => {
+  const tool = (
+    name: string,
+    label: string,
+    description: string,
+    parameters: unknown,
+    execute: (args: Record<string, unknown>, runtime: unknown) => Promise<unknown>,
+  ) => ({
+    name, label, description, parameters,
+    execute: async (_callId: string, args: Record<string, unknown>, runtime: unknown) =>
+      ({ details: await execute(args, runtime) }),
+  });
+  const tools = new Map(new CoreToolFactory(
+    { routerUrl: "", routerApiKey: "" } as never,
+    { withUserScope: async <T>(_s: unknown, work: () => Promise<T>) => await work() } as never,
+    {} as never,
+  ).build(tool as never).map((entry) => [entry.name, entry]));
+
+  // Показывать было нечего — модель ответила одним куском. Клавиатура
+  // уходит с самим ответом, и второго сообщения при этом не появляется.
+  const harness = await runTelegramTurn(undefined, {
+    duringTurn: async (conversationId: string) => {
+      await tools.get("present_inline_choices")!.execute(
+        "call-1",
+        { choices: [{ label: "Да" }, { label: "Нет" }] },
+        { userId: 1, telegramId: 42, chatId: 42, conversationId, purpose: "chat" } as never,
+      );
+    },
+  });
+
+  assert.equal(harness.markups.length, 1);
+  assert.equal(harness.sent.length, 1, "второго сообщения ради кнопок не появляется");
+  assert.equal(
+    (harness.issuedTokens[0] as { messageId: number }).messageId,
+    4_243,
+    "токены сохранены под тем сообщением, которое фактически несёт клавиатуру",
+  );
+});
+
+test("без просьбы инструмента клавиатуры не появляется", async () => {
+  const harness = await runTelegramTurn(undefined, {});
+  assert.equal(harness.markups.length, 0);
+  assert.equal(harness.issuedTokens.length, 0);
+});

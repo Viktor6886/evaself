@@ -15,10 +15,27 @@ import { runVisionCheck, solidPng } from "../dist/llm/vision-check.js";
 
 const OPTIONS = { routerUrl: "http://router.invalid", routerApiKey: "router-key", timeoutMs: 2_000 };
 
-/** Подменённый fetch: тело запроса остаётся тесту, ответ задаёт тест. */
-function stubFetch(payload: unknown, status = 200) {
+/** Каталог, объявляющий зрение: без него App Server заменит картинку заглушкой. */
+const SEEING_CATALOG = { data: [{ id: "eva/chat", type: "vlm", capabilities: ["vision"] }] };
+
+/**
+ * Подменённый fetch: тело запроса остаётся тесту, ответ задаёт тест.
+ *
+ * Проверка спрашивает роутер дважды — сначала нативный каталог, потом
+ * сам ход с картинкой. В `sent` попадает только второй: он и есть путь
+ * фотографии из Telegram.
+ */
+function stubFetch(payload: unknown, status = 200, catalog: unknown = SEEING_CATALOG) {
   const sent: Array<{ url: string; body: Record<string, unknown>; headers: Record<string, string> }> = [];
+  const catalogUrls: string[] = [];
   const fetcher = (async (url: unknown, init: RequestInit = {}) => {
+    if (String(url).endsWith("/api/v0/models")) {
+      catalogUrls.push(String(url));
+      if (catalog === null) throw new Error("каталог недоступен");
+      return new Response(JSON.stringify(catalog), {
+        status: 200, headers: { "content-type": "application/json" },
+      });
+    }
     sent.push({
       url: String(url),
       body: JSON.parse(String(init.body ?? "{}")) as Record<string, unknown>,
@@ -29,7 +46,7 @@ function stubFetch(payload: unknown, status = 200) {
       headers: { "content-type": "application/json" },
     });
   }) as typeof fetch;
-  return { sent, fetcher };
+  return { sent, catalogUrls, fetcher };
 }
 
 function answer(content: string, router: Record<string, unknown> = { provider: "vision-1", route: "vision", switches: 0 }) {
@@ -118,4 +135,27 @@ test("без ключа роутера проверка не ходит в се�
   assert.equal(stub.sent.length, 0);
   assert.equal(result.ok, false);
   assert.match(String(result.error), /EVA_ROUTER_API_KEY/);
+});
+
+test("зрение без объявления в каталоге не засчитывается", async () => {
+  // Ровно то состояние, в котором Ева отвечала, что картинок не видит:
+  // роутер картинку принимает и цвет называет, а App Server считает
+  // модель текстовой и заменяет изображение заглушкой.
+  const stub = stubFetch(answer("зелёный"), 200, {
+    data: [{ id: "eva/chat", type: "llm", capabilities: [] }],
+  });
+  const result = await runVisionCheck({ ...OPTIONS, fetcher: stub.fetcher });
+
+  assert.equal(stub.catalogUrls[0], "http://router.invalid/api/v0/models");
+  assert.equal(result.catalog_vision, false);
+  assert.equal(result.ok, true, "ответ модели получен");
+  assert.equal(result.recognized, false, "проверка не должна быть зелёной");
+  assert.match(String(result.error), /каталог/);
+});
+
+test("недоступный каталог виден как «не могу подтвердить»", async () => {
+  const stub = stubFetch(answer("зелёный"), 200, null);
+  const result = await runVisionCheck({ ...OPTIONS, fetcher: stub.fetcher });
+  assert.equal(result.catalog_vision, null);
+  assert.equal(result.recognized, false);
 });

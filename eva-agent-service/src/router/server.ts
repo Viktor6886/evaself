@@ -22,6 +22,8 @@ import type { LlmMessage, LlmRequest, LlmTool } from "./types.js";
 
 const MODEL_PREFIX = "eva/";
 const DEFAULT_ROUTE = "chat";
+/** Маршрут, на который уходит ход с изображением. */
+const VISION_ROUTE = "vision";
 
 export interface RouterServerInput {
   router: LlmRouter;
@@ -53,6 +55,62 @@ export function createRouterServer(input: RouterServerInput): FastifyInstance {
       status: providers.length > 0 ? "ok" : "degraded",
       providers: providers.length,
       breakers_open: open,
+    };
+  });
+
+  /**
+   * Каталог в формате LM Studio — тот, по которому App Server узнаёт о
+   * зрении.
+   *
+   * Letta ходит к роутеру коннектором LM Studio, а он спрашивает модели
+   * дважды: сначала нативный `/api/v0/models`, и только если тот не
+   * ответил — обычный `/v1/models`. У второго в ответе есть лишь
+   * идентификаторы, поэтому каждая найденная так модель считается
+   * текстовой: `input` у неё `["text"]`. А дальше App Server, собирая
+   * запрос к провайдеру, заменяет каждое изображение строкой «image
+   * omitted: model does not support images» — картинка не доезжает даже
+   * до роутера, и модель честно отвечает, что ничего не видела.
+   *
+   * Поэтому нативный каталог отвечает здесь, и зрение в нём — не
+   * обещание: маршрут объявляется зрячим, только если в его цепочке или
+   * в цепочке `vision` действительно есть включённый провайдер, который
+   * умеет изображения.
+   */
+  app.get("/api/v0/models", async () => {
+    const [routes, chains, providers] = await Promise.all([
+      input.store.routes(),
+      input.store.chains(),
+      input.store.providers(),
+    ]);
+    const enabled = new Map(providers.map((provider) => [provider.id, provider]));
+    const chainOf = (code: string): Array<{ supports_vision: boolean; context_window: number }> =>
+      (chains.get(code) ?? [])
+        .map((id) => enabled.get(id))
+        .filter((provider): provider is NonNullable<typeof provider> => provider !== undefined);
+
+    return {
+      data: [...routes.values()].map((route) => {
+        // Изображение уводится на маршрут зрения самим содержимым хода,
+        // какую бы модель ни назвал вызывающий. Значит, зрячей моделью
+        // маршрут делает не только его собственная цепочка.
+        const own = chainOf(route.code);
+        const vision = [...own, ...chainOf(VISION_ROUTE)]
+          .some((provider) => provider.supports_vision);
+        const context = Math.max(0, ...own.map((provider) => provider.context_window));
+        return {
+          id: `${MODEL_PREFIX}${route.code}`,
+          object: "model",
+          type: vision ? "vlm" : "llm",
+          publisher: "evaself",
+          // Список читается по именам возможностей: `vision` включает
+          // передачу изображений на стороне App Server.
+          capabilities: vision ? ["vision"] : [],
+          state: "loaded",
+          ...(context > 0
+            ? { max_context_length: context, loaded_context_length: context }
+            : {}),
+        };
+      }),
     };
   });
 
