@@ -15,7 +15,12 @@ import type { RuntimeContextBuilder } from "./runtime/runtime-context.js";
 import type { SendMessage } from "@letta-ai/letta-agent-sdk";
 import { TaskEventService } from "./tasks/task-event-service.js";
 import { withSpan } from "./observability/tracing.js";
-import { runInTurn, type ActiveTurn } from "./turns/turn-context.js";
+import {
+  closeTurnScope,
+  openTurnScope,
+  runInTurn,
+  type ActiveTurn,
+} from "./turns/turn-context.js";
 import {
   messageBatchTiming,
   timelineDetail,
@@ -724,6 +729,9 @@ export class EvaWorkflow {
             chatId: update.chatId,
             messageId: parts[parts.length - 1]?.messageId ?? update.messageId,
           };
+          // Второй адрес того же хода: инструменты вызываются из
+          // обработчика сокета SDK, куда контекст не доезжает.
+          openTurnScope(conversationId, activeTurn);
           answer = await runInTurn(
             activeTurn,
             async () => await this.letta.runTurn(
@@ -779,6 +787,10 @@ export class EvaWorkflow {
           throw error;
         } finally {
           metrics.letta_generation_ms = elapsed(lettaStarted);
+          // Ход закончился любым исходом — адрес по conversation
+          // снимается здесь. Отменённый или упавший ход не должен
+          // оставить после себя запись, в которую попадёт следующий.
+          closeTurnScope(conversationId);
         }
         metrics.session_acquire_ms = answer.sessionAcquireMs;
         metrics.time_to_first_delta_ms = answer.firstDeltaMs ?? 0;

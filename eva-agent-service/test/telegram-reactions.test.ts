@@ -139,3 +139,80 @@ test("цитата, спойлер и жирный выглядят одинак
   assert.equal(calls[0]?.parse_mode, "HTML");
   assert.equal(calls[0]?.text, live.text, "поток и доставка рисуют по-разному");
 });
+
+/**
+ * Инструмент, вызванный вне асинхронного контекста хода.
+ *
+ * Так это и происходит в production: инструменты регистрируются при
+ * ОТКРЫТИИ сессии, а вызывает их SDK позже — из обработчика сокета, куда
+ * AsyncLocalStorage не дотягивается. Ева отвечала «нет сообщения этого
+ * хода для реакции» на любую просьбу поставить реакцию, хотя сообщение
+ * было.
+ */
+test("реакция находит свой ход, даже когда контекст не доехал до инструмента", async () => {
+  const { openTurnScope, closeTurnScope } = await import("../dist/turns/turn-context.js");
+  const reactions: Array<{ chatId: number; messageId: number; emoji: string }> = [];
+  const telegram = {
+    setReaction: async (chatId: number, messageId: number, emoji: string) => {
+      reactions.push({ chatId, messageId, emoji });
+    },
+  };
+  const factory = new CoreToolFactory(
+    { routerUrl: "", routerApiKey: "" } as never,
+    { withUserScope: async <T>(_s: unknown, w: () => Promise<T>) => await w() } as never,
+    telegram as never,
+  );
+  const tools = new Map(factory.build(tool as never).map((entry) => [entry.name, entry]));
+  const runtime = {
+    userId: 1, telegramId: 42, chatId: 42, conversationId: "conv-1",
+    purpose: "chat", useEmoji: true,
+  };
+
+  const turn = {
+    runId: "r1", recorded: true, isCancelled: async () => false,
+    chatId: 42, messageId: 555,
+  };
+  openTurnScope("conv-1", turn as never);
+  try {
+    // Ни одного `runInTurn` вокруг: ровно как у SDK.
+    const result = await tools.get("set_reaction")!.execute(
+      { emoji: "👍" }, runtime as never,
+    ) as { ok: boolean };
+    assert.equal(result.ok, true);
+    assert.deepEqual(reactions, [{ chatId: 42, messageId: 555, emoji: "👍" }]);
+  } finally {
+    closeTurnScope("conv-1");
+  }
+
+  // Ход закончился — адрес снят, и следующий вызов уже не найдёт чужое
+  // сообщение.
+  await assert.rejects(
+    () => tools.get("set_reaction")!.execute({ emoji: "👍" }, runtime as never),
+    /сообщения этого хода/i,
+  );
+  assert.equal(reactions.length, 1);
+});
+
+test("ход одного разговора не виден инструменту другого", async () => {
+  const { openTurnScope, closeTurnScope } = await import("../dist/turns/turn-context.js");
+  const factory = new CoreToolFactory(
+    { routerUrl: "", routerApiKey: "" } as never,
+    { withUserScope: async <T>(_s: unknown, w: () => Promise<T>) => await w() } as never,
+    { setReaction: async () => {} } as never,
+  );
+  const tools = new Map(factory.build(tool as never).map((entry) => [entry.name, entry]));
+  openTurnScope("conv-A", {
+    runId: "r1", recorded: true, isCancelled: async () => false, chatId: 1, messageId: 10,
+  } as never);
+  try {
+    await assert.rejects(
+      () => tools.get("set_reaction")!.execute({ emoji: "👍" }, {
+        userId: 2, telegramId: 2, chatId: 2, conversationId: "conv-B",
+        purpose: "chat", useEmoji: true,
+      } as never),
+      /сообщения этого хода/i,
+    );
+  } finally {
+    closeTurnScope("conv-A");
+  }
+});

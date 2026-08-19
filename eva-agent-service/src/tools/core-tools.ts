@@ -6,7 +6,7 @@ import { ALLOWED_REACTIONS, type TelegramClient } from "../telegram.js";
 import { Crawl4aiReader, WebReadError } from "./web-read.js";
 import { KnowledgeSearch } from "../knowledge/search.js";
 import { inspectRuntime, type InspectionInput } from "../letta/runtime-inspection.js";
-import { currentTurn } from "../turns/turn-context.js";
+import { turnOf } from "../turns/turn-context.js";
 import {
   InlineChoiceError,
   MAX_CHOICES,
@@ -453,7 +453,10 @@ export class CoreToolFactory {
           // сообщение человека» была верной, пока поле ввода блокировалось
           // на время ответа: теперь человек успевает написать следующее, и
           // реакция уезжала на другой ход.
-          const turn = currentTurn();
+          // Ход берётся и по контексту, и по conversation: инструменты
+          // регистрируются при открытии сессии, и до их вызова из
+          // обработчика сокета SDK AsyncLocalStorage не дотягивается.
+          const turn = turnOf(runtime.conversationId);
           const messageId = turn?.messageId;
           const chatId = turn?.chatId ?? runtime.chatId;
           if (!Number.isSafeInteger(messageId)) {
@@ -528,8 +531,8 @@ export class CoreToolFactory {
           },
           ["choices"],
         ),
-        async (args, _runtime) => {
-          const turn = currentTurn();
+        async (args, runtime) => {
+          const turn = turnOf(runtime.conversationId);
           if (!turn) {
             // Вне хода приклеивать кнопки не к чему: ответ уже ушёл.
             return { ok: false, reason: "no_active_turn" };

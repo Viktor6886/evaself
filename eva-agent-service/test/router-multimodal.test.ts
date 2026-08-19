@@ -321,3 +321,66 @@ test("резерв маршрута зрения получает изображ
   }
   assert.ok(breakerKey(primary.id, primary.model));
 });
+
+/**
+ * Маршрут зрения без своей цепочки не роняет фотографию.
+ *
+ * Так и было в production: провайдер, добавленный через панель, попадает
+ * только в ту цепочку, куда его поставили руками. Маршрут `vision`
+ * выбирается самим содержимым хода, назначить ему цепочку никто не
+ * догадался — и каждая фотография упиралась в «для маршрута vision не
+ * назначен ни один провайдер», хотя зрячая модель в установке была. PDF
+ * при этом читался: документ превращается в текст.
+ */
+test("технический маршрут без цепочки идёт общей, но зрение всё так же обязательно", async () => {
+  const { LlmRouter, NoProviderAvailable } = await import("../dist/router/router.js");
+
+  const seeing = { ...PROVIDER, id: "p-see", name: "seeing", supports_vision: true };
+  const blind = { ...PROVIDER, id: "p-blind", name: "blind", supports_vision: false };
+  const route = (code: string, requiresVision: boolean) => ({
+    code, title: code, requires_tools: false, requires_json: false,
+    requires_vision: requiresVision, requires_streaming: false, min_context_window: 1024,
+    max_quality_tier: 5, allows_sensitive: true, rotation_enabled: true,
+  });
+  const store = (chatChain: string[]) => ({
+    routingSettings: async () => ({
+      mode: "adaptive" as const, single_provider_id: null, single_failover_enabled: false,
+    }),
+    providers: async () => [seeing, blind],
+    routes: async () => new Map([["chat", route("chat", false)], ["vision", route("vision", true)]]),
+    // Цепочка есть только у чата: ровно та конфигурация, что в production.
+    chains: async () => new Map([["chat", chatChain]]),
+    breakers: async () => new Map(),
+    spend: async () => ({ day: 0, month: 0 }),
+    claimProbe: async () => false,
+    recordSuccess: async () => {}, recordFailure: async () => {},
+    addSpend: async () => {}, recordAttempt: async () => {},
+  });
+  const adapters = (provider: { id: string; model: string }) => ({
+    protocol: "openai-compatible" as const,
+    complete: async () => ({
+      content: "на фотографии кот", tool_calls: [], finish_reason: "stop" as const,
+      usage: { tokens_in: 1, tokens_out: 1 }, model: provider.model,
+    }),
+    async *stream() { throw new Error("не используется"); },
+  });
+  const logger = { debug() {}, info() {}, warn() {}, error() {} };
+
+  // Зрячая модель стоит только в цепочке чата — фотография доходит.
+  const router = new LlmRouter(
+    store([blind.id, seeing.id]) as never, logger, undefined, async () => {}, adapters as never,
+  );
+  const result = await router.complete(fromOpenAi(IMAGE_REQUEST) as never);
+  assert.equal(result.route, "vision", "ход обязан остаться на маршруте зрения");
+  assert.equal(result.provider_name, "seeing", "слепая модель не должна получить картинку");
+
+  // Зрячей модели нет вовсе — отказ остаётся, и он про возможности.
+  const blindOnly = new LlmRouter(
+    store([blind.id]) as never, logger, undefined, async () => {}, adapters as never,
+  );
+  await assert.rejects(
+    () => blindOnly.complete(fromOpenAi(IMAGE_REQUEST) as never),
+    (error: unknown) => error instanceof NoProviderAvailable
+      && /зображени|vision/i.test(String((error as Error).message)),
+  );
+});
