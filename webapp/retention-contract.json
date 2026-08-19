@@ -1,0 +1,116 @@
+{
+  "version": "retention-v17",
+  "activation_event": {
+    "name": "activation_completed",
+    "definition": [
+      "core action completed",
+      "reward viewed",
+      "at least one investment completed"
+    ],
+    "first_value_target_seconds": 60
+  },
+  "core_loop": {
+    "target_duration_minutes": [
+      2,
+      6
+    ],
+    "daily_minimum": "1 meaningful action",
+    "weekly_goal": 5,
+    "meaningful_streak_actions": [
+      "daily_step",
+      "journal_entry",
+      "emotion",
+      "profile_update"
+    ],
+    "does_not_count": [
+      "app_open"
+    ]
+  },
+  "reward_rotation": [
+    "small_win",
+    "new_insight",
+    "eva_noticed",
+    "question_of_day",
+    "strength",
+    "curiosity_pattern",
+    "evening_ritual",
+    "weekly_snapshot",
+    "milestone"
+  ],
+  "streak": {
+    "milestones_days": [
+      3,
+      7,
+      14,
+      30
+    ],
+    "shield_earned_after_days": 7,
+    "recovery_window_hours": 24,
+    "client_fallback_extended_window_with_shield_hours": 48,
+    "perfect_streak": "7 days without missed day or protection"
+  },
+  "reactivation": {
+    "24h": "Остался 1 шаг до цели недели / Сегодня готов короткий фокус",
+    "48h": "Ева собрала короткий инсайт",
+    "72h": "Можно быстро вернуться в ритм за 2 минуты",
+    "7d": "Собран новый фокус, чтобы начать заново"
+  },
+  "notifications": {
+    "active_user_baseline_per_week": {
+      "min": 1,
+      "max": 3
+    },
+    "generic_broadcast": false,
+    "request_opt_in_before_first_value": false,
+    "delivery_owner": "backend/CRM/outbox"
+  },
+  "analytics_events": [
+    "session_ready",
+    "first_value_ready",
+    "onboarding_started",
+    "onboarding_need_selected",
+    "onboarding_first_action_ready",
+    "core_action_started",
+    "core_action_completed",
+    "reward_impression",
+    "reward_viewed",
+    "investment_completed",
+    "meaningful_action",
+    "activation_action_completed",
+    "activation_reward_viewed",
+    "activation_investment_completed",
+    "activation_completed",
+    "reactivation_offer_seen",
+    "reactivation_recovered",
+    "profile_investment_opened",
+    "streak_shield_earned",
+    "streak_recovery_started",
+    "streak_shield_used",
+    "api_slow",
+    "client_error",
+    "session_closed"
+  ],
+  "cohort_metrics_backend": [
+    "time_to_first_value",
+    "activation_rate",
+    "D1_retention",
+    "D3_retention",
+    "D7_retention",
+    "D30_retention",
+    "streak_3_plus_rate",
+    "first_full_loop_rate",
+    "reward_ctr",
+    "post_reward_investment_rate",
+    "reactivation_recovery_rate"
+  ],
+  "performance_targets": {
+    "crash_free_sessions_percent": 99.95,
+    "cold_start_ms": 2000,
+    "api_p95_ms": 500
+  },
+  "backend_contract_notes": [
+    "Frontend queues analytics locally and can flush to a backend-provided analytics_endpoint.",
+    "CRM/push sending is not performed by the WebApp bundle.",
+    "Server should persist meaningful streak, shields, recovery usage, activation and cohort events."
+  ]
+}
