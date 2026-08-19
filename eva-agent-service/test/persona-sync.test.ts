@@ -220,3 +220,85 @@ test("резервный провайдер получает личность в
     assert.ok(BACKUP_PERSONA_DIRECTIVE.includes(form), `в резервной персоне нет формы «${form}»`);
   }
 });
+
+/**
+ * Отказ массового прохода не остаётся навсегда.
+ *
+ * Массовый проход идёт при старте сервиса, и control plane в этот момент
+ * может ещё подниматься. Пока состояние было «отказ» до следующего
+ * перезапуска, `doctor` показывал поломку там, где её уже нет: каждый
+ * такой агент получает персону в своём же ходе.
+ */
+test("удачный проход перед ходом снимает отказ массового прохода", async () => {
+  const db = fakeDb([{ agentId: "agent-1", userId: 1, personaVersion: null }]);
+  const broken = fakePlane({ failOn: "agent-1" });
+  await new PersonaSync(db as never, broken as never, logger).sync(PERSONA);
+  assert.equal(personaSyncState().status, "failed");
+  assert.equal(personaSyncState().failed, 1);
+
+  const working = fakePlane({ blocks: { "agent-1": "Я Ева. Понял, сделал." } });
+  const outcome = await new PersonaSync(db as never, working as never, logger)
+    .syncAgent({ agentId: "agent-1", userId: 1, storedVersion: null }, PERSONA);
+
+  assert.equal(outcome, "updated");
+  assert.equal(personaSyncState().status, "ok", "прошлый отказ остался текущим состоянием");
+  // Счётчик отказа остаётся: он про то, что было, а не про то, что есть.
+  assert.equal(personaSyncState().failed, 1);
+});
+
+/**
+ * Состояние синхронизации видно в `/health`, и оно не роняет сервис.
+ *
+ * Первая версия роняла: `status` уходил в `degraded` от любого отказа
+ * персоны, и один неудачный проход на старте означал «сервис нездоров»
+ * навсегда — стенд не дожидался здорового сервиса вовсе.
+ */
+test("/health показывает синхронизацию персоны и не падает из-за неё", async () => {
+  const { buildServer } = await import("../dist/server.js");
+  const { withTenantScopes } = await import("./tenant-scope-helper.ts");
+
+  const db = fakeDb([{ agentId: "agent-1", userId: 1, personaVersion: null }]);
+  await new PersonaSync(db as never, fakePlane({ failOn: "agent-1" }) as never, logger).sync(PERSONA);
+  assert.equal(personaSyncState().status, "failed");
+
+  const app = buildServer({
+    config: {
+      apiKey: "test-internal-key-32-characters!!", port: 0, host: "127.0.0.1",
+      domains: { root: "", app: "", api: "", nocodb: "", letta: "", status: "" },
+      turnLifecycleEnabled: false, healthRateLimitPerIp: 100, rateLimitWindowSeconds: 60,
+      publicRateLimitPerIp: 100, publicRateLimitPerUser: 100, webhookRateLimitPerIp: 100,
+      appServerUrl: "ws://letta:4500/ws",
+    } as never,
+    logger: logger as never,
+    db: withTenantScopes({
+      query: async () => ({ rows: [] }),
+      poolStats: () => ({ total: 0, idle: 0, waiting: 0 }),
+      ping: async () => true,
+    }) as never,
+    letta: {
+      sessionStats: () => ({ active: 0, idle: 0 }),
+      ping: async () => ({ ok: true, models: 1 }),
+      openSessions: 0,
+      runtimeFacts: null,
+    } as never,
+    sdk: {} as never, llm: {} as never, inbox: {} as never, profile: {} as never,
+    goals: {} as never, payments: {} as never,
+    queue: { activeUsers: 0, queuedUsers: 0 } as never,
+    telegram: {} as never,
+    redisPing: async () => true,
+  } as never);
+
+  try {
+    const response = await app.inject({ method: "GET", url: "/health" });
+    const body = JSON.parse(response.body) as {
+      status: string;
+      checks: { persona_sync?: { status: string; failed: number } };
+    };
+    assert.equal(body.checks.persona_sync?.status, "failed", "состояние синхронизации не видно");
+    assert.equal(body.checks.persona_sync?.failed, 1);
+    assert.equal(body.status, "ok", "отказ синхронизации персоны уронил весь сервис");
+    assert.equal(response.statusCode, 200);
+  } finally {
+    await app.close();
+  }
+});

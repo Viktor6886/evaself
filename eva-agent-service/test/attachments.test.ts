@@ -191,3 +191,70 @@ test("неподдерживаемый файл называет, что под�
       && /PDF, DOCX/.test(error.message),
   );
 });
+
+/**
+ * DOCX-бомба: `word/document.xml` из полумегабайта пробелов ужимается в
+ * килобайт. Отношение больше сотни — распаковывать такое нельзя, и
+ * отказ приходит до распаковки, по метаданным архива.
+ *
+ * Собрано zip-писателем один раз и записано сюда: тест обязан нести
+ * настоящий архив, а не подделку под него.
+ */
+const DOCX_ZIP_BOMB_BASE64 =
+"UEsDBBQAAAAIAAQ/E12axphxygAAADoBAAATAAAAW0NvbnRlbnRfVHlwZXNdLnhtbH1QzU7DMAx+lShX1LrjgBBquwODI3AYD2Al"
+  + "bhfR2FGSjfH2uAztwIGj/f3a/fYcF3OiXILwYDdtZw2xEx94Huz7/rm5t9ux338lKkapXAZ7qDU9ABR3oIillUSsyCQ5YtUxz5DQ"
+  + "feBMcNt1d+CEK3Ft6uphx35HEx6Xap7Our7EqtyaxwtvjRosprQEh1VhWFEY+1dtmYMn84a5vmBUFnxK9uDFHaMq2/9tTuz/dG1k"
+  + "moKjq351S1kclaLnx6W9IhED3/z2gJ9njN9QSwMEFAAAAAgABD8TXfgvcOEZAgAACwAIABEAAAB3b3JkL2RvY3VtZW50LnhtbO3B"
+  + "QQkAQAgAsCo28C9iKsH6F+EKbOurnQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  + "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  + "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  + "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  + "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  + "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  + "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  + "AAAAAAD46LzaeVBLAQIUAxQAAAAIAAQ/E12axphxygAAADoBAAATAAAAAAAAAAAAAACAAQAAAABbQ29udGVudF9UeXBlc10ueG1s"
+  + "UEsBAhQDFAAAAAgABD8TXfgvcOEZAgAACwAIABEAAAAAAAAAAAAAAIAB+wAAAHdvcmQvZG9jdW1lbnQueG1sUEsFBgAAAAACAAIA"
+  + "gAAAAEMDAAAAAA==";
+
+test("битый PDF отвергается, а не выдаётся за пустой документ", async () => {
+  // Подпись настоящая — MIME-проверку такой файл проходит. Дальше
+  // разбор упирается в мусор, и это обязано быть отказом: «документ без
+  // текста» и «документ, который не читается» — разные вещи.
+  const broken = Buffer.concat([
+    Buffer.from("%PDF-1.4\n"),
+    Buffer.from("это не pdf, а мусор с правильной подписью ".repeat(20)),
+  ]);
+  await assert.rejects(
+    () => extractDocumentText(broken, "application/pdf"),
+    /document_pdf_malformed_or_encrypted/,
+  );
+});
+
+test("обрезанный DOCX отвергается: без центрального каталога это не архив", async () => {
+  const whole = buffer(DOCX_BASE64);
+  const truncated = whole.subarray(0, whole.length - 220);
+  await assert.rejects(
+    () => extractDocumentText(truncated, documentMimeOf("д.docx")!),
+    /document_docx_malformed/,
+  );
+});
+
+test("DOCX-бомба отвергается по метаданным, до распаковки", async () => {
+  await assert.rejects(
+    () => extractDocumentText(buffer(DOCX_ZIP_BOMB_BASE64), documentMimeOf("д.docx")!),
+    /document_docx_zip_bomb/,
+  );
+});
+
+test("вложением битый файл до Евы не доходит", async () => {
+  // Тот же отказ, но на границе Telegram: человек получает ответ, а
+  // модель — ничего. Молча пустое вложение хуже отказа: Ева ответила бы
+  // по подписи, будто прочитала файл.
+  const reader = new TelegramAttachmentReader(
+    downloader(buffer(DOCX_ZIP_BOMB_BASE64)) as never,
+  );
+  await assert.rejects(
+    () => reader.document({ file_id: "f", file_name: "бомба.docx", mime_type: documentMimeOf("д.docx")! } as never),
+    (error: unknown) => error instanceof AttachmentError || error instanceof Error,
+  );
+});

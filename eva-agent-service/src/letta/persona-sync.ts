@@ -28,6 +28,12 @@ import type { LettaAdminPlane } from "./admin-client.js";
 export interface PersonaSyncState {
   /** Доступен ли control plane. Выключенный — это `disabled`, а не «ок». */
   enabled: boolean;
+  /**
+   * Исход последней попытки синхронизации, а не вечная отметка о былом
+   * отказе: агент, которого не удалось обновить массовым проходом,
+   * получает персону в своём же ходе, и держать после этого `failed`
+   * значило бы показывать человеку несуществующую поломку.
+   */
   status: "ok" | "disabled" | "failed" | "stale" | "never";
   version: string;
   lastRunAt: string | null;
@@ -192,9 +198,12 @@ export class PersonaSync {
     if (outcome === "failed") {
       state.staleAgents += 1;
       state.status = "stale";
-    } else if (outcome === "updated") {
-      state.updated += 1;
-      if (state.status !== "failed") state.status = "ok";
+    } else {
+      // Проход удался — значит, control plane отвечает. Отказ прошлого
+      // массового прохода остаётся в счётчике `failed`, но текущим
+      // состоянием быть перестаёт.
+      if (outcome === "updated") state.updated += 1;
+      state.status = "ok";
     }
     return outcome;
   }

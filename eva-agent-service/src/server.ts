@@ -304,11 +304,13 @@ export function buildServer(services: Services): FastifyInstance {
     // Синхронизация персоны: выключенная или сорвавшаяся видна здесь, а
     // не только в журнале. Молча пропущенная ничем не отличалась от
     // выполненной — ровно так мужской род и держался месяцами.
-    const persona = personaSyncState();
-    checks.persona_sync = persona;
-    if (persona.status === "disabled" || persona.status === "failed" || persona.status === "stale") {
-      status = "degraded";
-    }
+    //
+    // Общий статус сервиса она при этом не роняет. Массовый проход идёт
+    // при старте, и control plane в этот момент может ещё подниматься:
+    // один отказ на старте означал бы «сервис нездоров» навсегда, при
+    // том что каждый такой агент получает персону в своём же ходе.
+    // Состояние читают `doctor` и человек, а не healthcheck контейнера.
+    checks.persona_sync = personaSyncState();
 
     try {
       await db.ping();
