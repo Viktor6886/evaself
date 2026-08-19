@@ -1,53 +1,88 @@
-# WebApp
+# Eva WebApp — retention-oriented v17
 
-Статический landing page и Telegram Mini App, обслуживаемые Caddy.
-Build step и Node runtime не требуются — это три файла без сборки.
+Главный экран строится вокруг одного core loop:
 
-```text
-/      → публичная страница
-/app/  → Telegram Mini App
+`Trigger → Action → Variable Reward → Investment`
+
+## Что реализовано во frontend
+
+- Dynamic trigger bar по weekly close-to-finish, inactivity/reactivation, reward, milestone и time-of-day ritual.
+- Единственный primary CTA в hero.
+- First-value onboarding из 2 шагов для нового пользователя: выбор текущей потребности → первый персональный фокус на 2 минуты.
+- Variable reward: маленькая победа, инсайт, наблюдение, вопрос дня, сильная сторона, curiosity pattern, вечерний итог, weekly snapshot и milestone reward.
+- Post-reward investment: сохранить инсайт, отметить эмоцию, добавить мысль, продолжить профиль.
+- Meaningful streak: простое открытие приложения не засчитывается.
+- Daily minimum: 1 meaningful action.
+- Weekly goal: 5 meaningful steps.
+- Milestones 3 / 7 / 14 / 30 дней.
+- Earned streak shield после 7 дней и мягкий recovery flow.
+- Perfect week без пропуска/защиты.
+- Profile-as-asset: пояснение, почему накопленный контекст повышает полезность Евы.
+- Reactivation state: 24h / 48h / 72h / 7d.
+- Soft accountability через ежедневное намерение для себя.
+- Shareable milestone через Web Share API с fallback в clipboard.
+
+## Activation
+
+Activation считается только после полного цикла:
+
+1. core action completed;
+2. reward viewed;
+3. investment completed.
+
+Событие: `activation_completed`.
+
+Time to first value измеряется событием `first_value_ready`.
+
+## Analytics
+
+Frontend содержит встроенную событийную схему `eva-retention-v1` и локальную очередь до 250 событий. Если backend передаёт `analytics_endpoint` в session response или задаёт `window.EVA_ANALYTICS_ENDPOINT`, очередь может отправляться туда автоматически.
+
+Также поддержан внешний адаптер:
+
+```js
+window.EvaAnalytics = {
+  track(name, properties) {}
+}
 ```
 
-## Главный экран
+И browser event:
 
-`/app/` открывается на экране «Сегодня», который целиком помещается в один
-экран телефона: вертикальной прокрутки на нём нет ни на 320×568, ни на
-430×932. Раскладка — CSS Grid из пяти полос (приветствие, состояние,
-главный результат дня, четыре быстрых действия, сетка 4×4 из 14 модулей)
-плюс нижняя навигация, закреплённая последней строкой оболочки.
-
-Внешний вид — рисованный doodle-стиль: молочно-белый фон, тонкие серые
-рамки, чёрные линии, оранжевые акценты. Референс намеренно **не**
-используется как фоновая картинка: каждая иконка — это inline `<svg>` в
-`app.js`/`index.html`, текст остаётся настоящим текстом, кнопки —
-настоящими `<button>`. Emoji и иконочные шрифты не применяются.
-
-Разделы «Развитие», «Органайзер», «Пульт», «Отчёты» и «Профиль» — обычные
-прокручиваемые экраны. Модули, у которых на сервере ещё нет данных, честно
-говорят об этом и предлагают продолжить в чате, а не показывают выдуманные
-цифры.
-
-## Данные
-
-Каждый запрос к `/api/public/*` несёт Telegram `initData`; Caddy передаёт
-его в `eva-agent-service`, где проверяются HMAC и срок подписи. Статические
-файлы не содержат bot token или пользовательский ID.
-
-Отметка состояния (настроение / энергия / фокус) и черновики записей
-хранятся в `localStorage` этого устройства — соответствующих серверных
-маршрутов пока нет, и интерфейс об этом прямо пишет.
-
-## Локальная проверка
-
-```bash
-python3 -m http.server 8000 -d public
+```js
+window.addEventListener("eva:retention", (event) => {
+  console.log(event.detail);
+});
 ```
 
-Затем откройте <http://localhost:8000/app/index.html?demo=1>: параметр
-`demo=1` подменяет API набором примеров, поэтому экран можно смотреть без
-Telegram. Без `?demo=1` приложение требует настоящий `initData` и при его
-отсутствии показывает ошибку, а не демонстрационные данные.
+Доступ к диагностике:
 
-Шрифты не загружаются извне: CSP Mini App разрешает только
-`font-src 'self'`, поэтому рукописные заголовки используют системные
-начертания.
+```js
+window.EvaRetention.metrics()
+window.EvaRetention.activation()
+window.EvaRetention.reactivation()
+window.EvaRetention.streak()
+window.EvaRetention.performance()
+```
+
+## Backend / CRM required
+
+WebApp не должен сам рассылать Telegram/push-уведомления. Backend/CRM/outbox должен:
+
+- хранить канонический meaningful streak;
+- хранить/списывать streak shield;
+- строить cohort metrics D1 / D3 / D7 / D30;
+- выполнять reactivation 24h / 48h / 72h / 7d;
+- соблюдать cadence 1–3 персонализированных уведомления в неделю;
+- принимать retention events;
+- вычислять production API p95 и crash-free sessions.
+
+Машиночитаемый контракт находится в `webapp/retention-contract.json`.
+
+## Performance targets
+
+Цели:
+- crash-free sessions ≥ 99.95%;
+- cold start < 2s;
+- API p95 < 500ms.
+
+Frontend измеряет cold-start, клиентские ошибки и API latency. Выполнение production SLO должно подтверждаться серверной телеметрией, а не локальным smoke-test.
