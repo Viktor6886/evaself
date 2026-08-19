@@ -637,8 +637,22 @@ jobs:
           # На раннере параллельно работает свой apt. По умолчанию наша
           # установка не ждёт освобождения, а падает с «Could not get lock»
           # — либо стоит в очереди молча, пока job не снимут по времени.
+          # Именно так job и снимался по двадцатиминутному пределу: шаг
+          # двадцать минут стоял в очереди за чужим apt.
+          #
+          # Поэтому сначала останавливаем фоновое обновление раннера, а
+          # затем ждём обе блокировки явно: `DPkg::Lock::Timeout` ждёт
+          # только dpkg, а `apt-get update` держит свою — на списки.
+          sudo systemctl stop unattended-upgrades apt-daily.service \
+            apt-daily-upgrade.service apt-daily.timer apt-daily-upgrade.timer \
+            2>/dev/null || true
+          wait_for_apt() {
+            sudo flock -w 600 /var/lib/apt/lists/lock true || true
+            sudo flock -w 600 /var/lib/dpkg/lock-frontend true || true
+          }
           printf 'DPkg::Lock::Timeout "600";\nAcquire::Retries "3";\n' \
             | sudo tee /etc/apt/apt.conf.d/99evaself-ci >/dev/null
+          wait_for_apt
           sudo apt-get update -qq
           sudo apt-get install -y -qq curl ca-certificates
           sudo install -d /usr/share/postgresql-common/pgdg
@@ -647,6 +661,7 @@ jobs:
           echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
             https://apt.postgresql.org/pub/repos/apt noble-pgdg main" \
             | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          wait_for_apt
           sudo apt-get update -qq
           sudo apt-get install -y -qq postgresql-client-17
           psql --version
