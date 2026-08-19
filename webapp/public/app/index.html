@@ -3,136 +3,164 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-  <meta name="theme-color" content="#212121">
-  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#f3f6f5">
+  <meta name="color-scheme" content="light dark">
   <title>Ева</title>
-  <link rel="stylesheet" href="/app/app.css?v=20260814-v2">
+  <link rel="stylesheet" href="/app/app.css?v=20260819-hook-v17">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
   <div class="app-shell" id="app-shell">
+    <div class="ambient ambient-one" aria-hidden="true"></div>
+    <div class="ambient ambient-two" aria-hidden="true"></div>
+
     <main class="screens" id="screens">
       <section class="screen screen-today is-active" data-screen="today">
-        <header class="home-header">
-          <div class="greeting-block">
-            <h1 id="greeting">Добрый день</h1>
-            <p id="today-caption">Собираю твой день</p>
+        <header class="utility-bar">
+          <div class="utility-avatar" id="eva-status-avatar" aria-hidden="true">
+            <span data-icon="spark"></span>
           </div>
-          <button class="icon-button" id="notifications-button" type="button" aria-label="Уведомления">
-            <span data-icon="bell"></span><span class="status-dot" id="notification-dot" hidden></span>
+          <div class="utility-copy">
+            <strong id="today-summary">1 шаг и 1 инсайт</strong>
+          </div>
+          <button class="streak-pill" id="streak-button" type="button" aria-label="Серия дней">
+            <span data-icon="flame"></span>
+            <strong id="streak-days">0</strong>
           </button>
         </header>
 
-        <section class="checkin-card card" id="checkin-card">
-          <div class="checkin-head">
-            <div><span class="eyebrow">СОСТОЯНИЕ СЕГОДНЯ</span><h2>Как ты сейчас?</h2></div>
-            <button class="text-button" id="checkin-edit" type="button">Отметить</button>
+        <section class="hero-card" id="main-focus-card">
+          <div class="hero-meta">
+            <span class="hero-badge">Сегодня</span>
+            <span class="hero-duration" id="hero-duration">6 мин</span>
           </div>
-          <div class="checkin-body">
-            <div class="checkin-metrics" id="checkin-metrics"></div>
-            <div class="balloon" aria-hidden="true" id="balloon"></div>
-          </div>
-        </section>
 
-        <section class="main-focus card" id="main-focus-card">
-          <div class="focus-accent"></div>
-          <div class="focus-copy">
-            <span class="eyebrow">ГЛАВНОЕ НА СЕГОДНЯ</span>
-            <h2 id="main-focus-title">Подбираю по контексту…</h2>
-            <p id="main-focus-source">Цели, задачи и продолжение работы</p>
-            <div class="focus-result" id="main-focus-result" hidden></div>
+          <div class="hero-copy">
+            <h2 id="main-focus-title">Продолжить путь</h2>
+            <p id="main-focus-source">Остался один короткий шаг</p>
           </div>
-          <button class="primary-compact" id="main-focus-action" type="button">Открыть</button>
-        </section>
 
-        <section class="today-grid" id="today-grid">
-          <button class="info-card card" id="today-tasks-card" type="button">
-            <span class="info-icon" data-icon="checklist"></span>
-            <span class="info-copy"><small>Сегодня</small><strong id="today-tasks-title">Нет срочных задач</strong><em id="today-tasks-note">Можно выбрать следующий шаг</em></span>
+          <button class="hero-cta" id="main-focus-action" type="button">
+            <span>Продолжить</span>
+            <span aria-hidden="true">›</span>
           </button>
-          <button class="info-card card" id="continue-card" type="button">
-            <span class="info-icon" data-icon="route"></span>
-            <span class="info-copy"><small>Продолжить</small><strong id="continue-title">Активная цель</strong><em id="continue-note">Открыть развитие</em></span>
-          </button>
+
+          <div class="week-progress">
+            <div class="week-progress-copy">
+              <span id="week-progress-label">Неделя: 0 из 5 шагов</span>
+            </div>
+            <div class="progress-track" aria-hidden="true">
+              <span id="week-progress-bar" style="width:0%"></span>
+            </div>
+          </div>
         </section>
 
-        <section class="insight-card card" id="insight-card">
-          <span class="insight-avatar" id="eva-mini"></span>
-          <div><span class="eyebrow">ЕВА ЗАМЕТИЛА</span><p id="insight-text">После нескольких отметок здесь появится полезное наблюдение без лишней психодиагностики.</p><small class="evidence-note" id="insight-evidence" hidden></small></div>
-        </section>
+        <article class="reward-card" id="reward-card">
+          <div class="reward-icon" id="reward-icon"><span data-icon="award"></span></div>
+          <div class="reward-copy">
+            <span class="reward-type" id="reward-type">Сильная сторона</span>
+            <h3 id="reward-title">Ты умеешь быстро убирать лишнее</h3>
+            <p id="reward-text">Это помогает быстрее переходить к действию.</p>
+          </div>
+          <button class="reward-action" id="reward-action" type="button">Посмотреть</button>
+        </article>
 
-        <section class="quick-row" aria-label="Быстрые действия">
-          <button class="quick-button" type="button" data-quick="write"><span data-icon="pencil"></span><b>Записать</b></button>
-          <button class="quick-button" type="button" data-quick="eva"><span data-icon="chat"></span><b>Спросить Еву</b></button>
-          <button class="quick-button" type="button" data-quick="reset"><span data-icon="wave"></span><b>Перезагрузка</b></button>
-          <button class="quick-button" type="button" data-quick="add"><span data-icon="plus"></span><b>Добавить</b></button>
-        </section>
+        <button class="profile-investment" id="profile-investment" type="button">
+          <div class="profile-investment-top">
+            <div>
+              <span>Профиль самопонимания</span>
+              <strong id="profile-progress-label">0%</strong>
+            </div>
+          </div>
+          <div class="progress-track profile-track" aria-hidden="true">
+            <span id="profile-progress-bar" style="width:0%"></span>
+          </div>
+          <div class="profile-dimensions" id="profile-dimensions">
+            <span>Эмоции <b id="profile-emotions">0%</b></span>
+            <span>Отношения <b id="profile-relationships">0%</b></span>
+            <span>Цели <b id="profile-goals">0%</b></span>
+          </div>
+          <p class="profile-value-note" id="profile-value-note">Больше контекста — точнее инсайты</p>
+          <div class="profile-next-row">
+            <span id="profile-next">Дальше: отношения</span>
+            <strong>Продолжить <b aria-hidden="true">›</b></strong>
+          </div>
+        </button>
+      </section>
+
+      <section class="screen inner-screen" data-screen="journal" hidden>
+        <header class="screen-header">
+          <div>
+            <span class="screen-kicker">Наблюдения и эмоции</span>
+            <h1>Дневник</h1>
+            <p>Сохраняй важное. Ева увидит запись только по твоей команде.</p>
+          </div>
+          <button class="glass-control header-add" id="journal-add-top" type="button" aria-label="Новая запись">+</button>
+        </header>
+        <div class="scroll-content" id="journal-content"></div>
       </section>
 
       <section class="screen inner-screen" data-screen="development" hidden>
-        <header class="inner-header"><div><span class="eyebrow">ДОЛГОСРОЧНЫЕ ИЗМЕНЕНИЯ</span><h1>Развитие</h1></div></header>
-        <nav class="segmented" id="development-tabs" aria-label="Разделы развития">
-          <button class="is-active" data-development="overview" type="button">Обзор</button>
-          <button data-development="goals" type="button">Цели</button>
-          <button data-development="programs" type="button">Программы</button>
-          <button data-development="habits" type="button">Привычки</button>
-          <button data-development="decisions" type="button">Решения</button>
+        <header class="screen-header">
+          <div>
+            <span class="screen-kicker">Накопленная ценность</span>
+            <h1>Рост</h1>
+            <p>Цели, реальные изменения и профиль самопонимания.</p>
+          </div>
+        </header>
+
+        <nav class="glass-segmented" id="development-tabs" aria-label="Разделы роста">
+          <button class="is-active" data-development="goals" type="button">Цели</button>
+          <button data-development="progress" type="button">Прогресс</button>
+          <button data-development="tests" type="button">Тесты</button>
         </nav>
+
         <div class="scroll-content" id="development-content"></div>
       </section>
 
-      <section class="screen inner-screen" data-screen="organizer" hidden>
-        <header class="inner-header split-header"><div><span class="eyebrow">ДЕЙСТВИЯ И ЗАПИСИ</span><h1>Органайзер</h1></div><button class="round-add" id="organizer-add" type="button" aria-label="Добавить">+</button></header>
-        <nav class="segmented organizer-tabs" id="organizer-tabs">
-          <button class="is-active" data-organizer="tasks" type="button">Задачи <span id="task-count">0</span></button>
-          <button data-organizer="reminders" type="button">Напоминания <span id="reminder-count">0</span></button>
-          <button data-organizer="notes" type="button">Заметки <span id="note-count">0</span></button>
-        </nav>
-        <div class="filter-row" id="task-filters">
-          <button class="is-active" data-filter="open" type="button">Текущие</button>
-          <button data-filter="today" type="button">Сегодня</button>
-          <button data-filter="done" type="button">Готово</button>
-        </div>
-        <div class="scroll-content organizer-content" id="organizer-content"></div>
-      </section>
-
-      <section class="screen inner-screen" data-screen="hub" hidden>
-        <header class="inner-header"><div><span class="eyebrow">ИНСТРУМЕНТЫ EVASELF</span><h1>Пульт</h1></div></header>
-        <div class="scroll-content hub-grid" id="hub-content"></div>
-      </section>
-
       <section class="screen inner-screen" data-screen="profile" hidden>
-        <header class="inner-header"><div><span class="eyebrow">ДАННЫЕ И НАСТРОЙКИ</span><h1>Профиль</h1></div></header>
+        <header class="screen-header">
+          <div>
+            <span class="screen-kicker">Персонализация</span>
+            <h1>Профиль</h1>
+            <p>Что Ева знает о тебе и как должна отвечать.</p>
+          </div>
+        </header>
         <div class="scroll-content" id="profile-content"></div>
-      </section>
-
-      <section class="screen inner-screen" data-screen="module" hidden>
-        <header class="inner-header module-header"><button class="back-button" id="module-back" type="button" aria-label="Назад"><span data-icon="back"></span></button><div><span class="eyebrow" id="module-kicker">МОДУЛЬ</span><h1 id="module-title">Раздел</h1></div></header>
-        <div class="scroll-content" id="module-content"></div>
       </section>
     </main>
 
-    <nav class="bottom-nav" aria-label="Основная навигация">
-      <button class="nav-item is-active" data-target="today" type="button"><span data-icon="home"></span><b>Сегодня</b></button>
-      <button class="nav-item" data-target="development" type="button"><span data-icon="sprout"></span><b>Развитие</b></button>
-      <button class="nav-item" data-target="organizer" type="button"><span data-icon="calendar"></span><b>Органайзер</b></button>
-      <button class="nav-item" data-target="hub" type="button"><span data-icon="sliders"></span><b>Пульт</b></button>
-      <button class="nav-item" data-target="profile" type="button"><span data-icon="user"></span><b>Профиль</b></button>
+    <nav class="bottom-nav liquid-glass" aria-label="Основная навигация">
+      <button class="nav-item is-active" data-target="today" type="button">
+        <span data-icon="home"></span><b>Сегодня</b>
+      </button>
+      <button class="nav-item dialog-nav" id="dialog-nav" type="button">
+        <span data-icon="chat"></span><b>Диалог</b>
+      </button>
+      <button class="nav-item" id="journal-nav" data-target="journal" type="button">
+        <span data-icon="note"></span><b>Дневник</b>
+      </button>
+      <button class="nav-item" data-target="development" type="button">
+        <span data-icon="sprout"></span><b>Рост</b>
+      </button>
+      <button class="nav-item" data-target="profile" type="button">
+        <span data-icon="user"></span><b>Профиль</b>
+      </button>
     </nav>
 
     <dialog class="sheet" id="sheet">
-      <div class="sheet-card">
+      <div class="sheet-card liquid-glass">
         <div class="grabber"></div>
-        <header class="sheet-header"><div><h2 id="sheet-title">Действие</h2><p id="sheet-subtitle"></p></div><button class="sheet-close" id="sheet-close" type="button" aria-label="Закрыть">×</button></header>
+        <header class="sheet-header">
+          <div><h2 id="sheet-title">Действие</h2><p id="sheet-subtitle"></p></div>
+          <button class="glass-control sheet-close" id="sheet-close" type="button" aria-label="Закрыть">×</button>
+        </header>
         <div class="sheet-content" id="sheet-content"></div>
       </div>
     </dialog>
 
-    <!-- Опасное действие подтверждается здесь, а не системным окном:
-         системное появляется у верхнего края, где палец уже стоит после
-         нажатия «Удалить». Кнопка отмены идёт первой и получает фокус. -->
     <dialog class="confirm" id="confirm-dialog" aria-labelledby="confirm-title">
-      <div class="confirm-card">
+      <div class="confirm-card liquid-glass">
         <h2 id="confirm-title">Подтвердите действие</h2>
         <p id="confirm-detail"></p>
         <div class="confirm-actions">
@@ -142,9 +170,10 @@
       </div>
     </dialog>
 
-    <div class="toast" id="toast" hidden></div>
+    <div class="toast liquid-glass" id="toast" hidden></div>
   </div>
-  <script src="/app/app.js?v=20260814-v2"></script>
-  <script src="/app/journal.js?v=20260814-v2"></script>
+
+  <script src="/app/journal.js?v=20260819-hook-v17"></script>
+  <script src="/app/app.js?v=20260819-hook-v17"></script>
 </body>
 </html>
