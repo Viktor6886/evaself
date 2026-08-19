@@ -754,6 +754,24 @@ test("продуктовые инструменты зарегистрирова
 
 /** Навыки лежат там, где их находит нативный механизм Letta. */
 test("психологические навыки доступны нативному механизму Letta", async (context) => {
+  const { EVA_PROJECT_SKILLS, readProjectSkills } = await import("../dist/letta/skills-audit.js");
+  // Образ сервиса каталога навыков не несёт: он монтируется отдельно.
+  // Проверять там нечего, и выдавать это за проверку нельзя.
+  const found = await readProjectSkills(new URL("../../skills/", import.meta.url).pathname);
+  if (!found.available) {
+    context.skip("каталог навыков вне образа сервиса; проверяется на репозитории");
+    return;
+  }
+  // Тот же разбор, что использует самопроверка рантайма: второй сканер
+  // каталога разошёлся бы с первым на первом же изменении.
+  assert.deepEqual(found.problems, [], "навык без name или description нативный механизм не откроет");
+  const names = new Set(found.skills.map((entry) => entry.name));
+  for (const required of EVA_PROJECT_SKILLS) {
+    assert.ok(names.has(required), `навык ${required} отсутствует`);
+  }
+});
+
+test("психологические навыки доступны нативному механизму Letta", async (context) => {
   const { readdir, readFile } = await import("node:fs/promises");
   const root = new URL("../../skills/", import.meta.url);
   // Образ сервиса каталога навыков не несёт: он монтируется в App Server

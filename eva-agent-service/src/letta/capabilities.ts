@@ -397,6 +397,21 @@ const CAPABILITIES = [
       "Эмулировать прямыми HTTP-запросами к App Server запрещено.",
   },
   {
+    id: "memory-block.export-to-memfs",
+    title: "Перенос содержимого блока во внешнюю память MemFS",
+    surface: null,
+    path: null,
+    check: "option",
+    note:
+      "Клиент 1.12.1 не даёт файловой системы агента: среди ресурсов есть " +
+      "`agents.passages`, `agents.folders` и `agents.files`, но не MemFS, а " +
+      "Agent SDK 0.7.1 работает с ней только изнутри хода, нативными " +
+      "инструментами памяти. Официального пути «блок → MemFS» через control " +
+      "plane на этих версиях нет, поэтому legacy-блок остаётся " +
+      "присоединённым с отметкой legacy_pending_migration. Данные важнее " +
+      "схемы: снять блок, не сохранив содержимое, значит потерять память.",
+  },
+  {
     id: "agent.export-archive",
     title: "Экспорт в YAML, ZIP или .af",
     surface: null,

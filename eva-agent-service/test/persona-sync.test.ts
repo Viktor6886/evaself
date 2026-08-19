@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { PersonaSync, personaSyncState, personaVersion } from "../dist/letta/persona-sync.js";
+import { PersonaSync, personaSyncState, canonicalMemoryVersion } from "../dist/letta/persona-sync.js";
 import { evaMemoryBlocks } from "../dist/letta.js";
 
 const logger = { debug() {}, info() {}, warn() {}, error() {} };
@@ -27,35 +27,89 @@ function fakeDb(agents: Array<{ agentId: string; userId: number; personaVersion:
   return {
     recorded,
     listAgentsForPersonaSync: async () => agents,
-    recordPersonaVersion: async (agentId: string, _userId: number, version: string) => {
-      recorded.push({ agentId, version });
+    recordMemoryReconciled: async (
+      agentId: string,
+      _userId: number,
+      state: { version: string; legacy: string[] },
+    ) => {
+      recorded.push({ agentId, version: state.version });
     },
   };
 }
 
+/**
+ * Поддельный control plane.
+ *
+ * `blocks` задаёт текст персоны агента, `extra` — блоки прежней схемы.
+ * По умолчанию у агента есть только персона: ровно та ситуация, ради
+ * которой сверка и написана — три канонических блока отсутствуют.
+ */
 function fakePlane(options: {
   blocks?: Record<string, string>;
+  extra?: Array<{ id: string; label: string; value: string; description?: string | null }>;
+  present?: string[];
   failOn?: string;
   available?: boolean;
 } = {}) {
   const updates: Array<{ agentId: string; label: string; value: string }> = [];
+  const created: Array<{ agentId: string; label: string; value: string }> = [];
+  const detached: Array<{ agentId: string; blockId: string }> = [];
+  const store = new Map<string, Map<string, { id: string; value: string; description: string | null }>>();
   return {
     updates,
+    created,
+    detached,
     available: options.available ?? true,
     listMemoryBlocks: async (agentId: string) => {
       if (options.failOn === agentId) throw new Error("control plane недоступен");
-      const value = options.blocks?.[agentId] ?? "старый текст персоны";
-      return [{ label: "persona", value, description: null, limit: null, readOnly: false }];
+      const own = store.get(agentId) ?? new Map();
+      if (!store.has(agentId)) {
+        own.set("persona", {
+          id: "block-persona",
+          value: options.blocks?.[agentId] ?? "старый текст персоны",
+          description: null,
+        });
+        for (const label of options.present ?? []) {
+          own.set(label, { id: `block-${label}`, value: `накопленное про ${label}`, description: null });
+        }
+        for (const block of options.extra ?? []) {
+          own.set(block.label, {
+            id: block.id, value: block.value, description: block.description ?? null,
+          });
+        }
+        store.set(agentId, own);
+      }
+      return [...own.entries()].map(([label, block]) => ({
+        id: block.id, label, value: block.value,
+        description: block.description, limit: null, readOnly: false,
+      }));
     },
     updateMemoryBlock: async (agentId: string, label: string, value: string) => {
       updates.push({ agentId, label, value });
-      return { label, value, description: null, limit: null, readOnly: false };
+      store.get(agentId)?.set(label, { id: `block-${label}`, value, description: null });
+      return { id: `block-${label}`, label, value, description: null, limit: null, readOnly: false };
+    },
+    createMemoryBlock: async (
+      agentId: string,
+      block: { label: string; value: string; description?: string | null },
+    ) => {
+      created.push({ agentId, label: block.label, value: block.value });
+      store.get(agentId)?.set(block.label, {
+        id: `block-${block.label}`, value: block.value, description: block.description ?? null,
+      });
+      return {
+        id: `block-${block.label}`, label: block.label, value: block.value,
+        description: block.description ?? null, limit: null, readOnly: false,
+      };
+    },
+    detachMemoryBlock: async (agentId: string, blockId: string) => {
+      detached.push({ agentId, blockId });
     },
   };
 }
 
 test("существующий агент получает канонический текст персоны", async () => {
-  const version = personaVersion(PERSONA);
+  const version = canonicalMemoryVersion(PERSONA);
   const db = fakeDb([
     { agentId: "agent-old", userId: 1, personaVersion: null },
     { agentId: "agent-fresh", userId: 2, personaVersion: version },
@@ -64,7 +118,9 @@ test("существующий агент получает каноническ�
 
   const result = await new PersonaSync(db as never, plane as never, logger).sync(PERSONA);
 
-  assert.deepEqual(result, { checked: 2, updated: 1, upToDate: 1, failed: 0, version });
+  assert.deepEqual(result, {
+    checked: 2, updated: 1, upToDate: 1, failed: 0, legacyAgents: 0, version,
+  });
   assert.deepEqual(plane.updates, [{ agentId: "agent-old", label: "persona", value: PERSONA }]);
   // Отметка версии — не копия блока: в базе остаётся отпечаток, а не текст.
   assert.deepEqual(db.recorded, [{ agentId: "agent-old", version }]);
@@ -77,9 +133,13 @@ test("агент с тем же текстом не переписывается
 
   const result = await new PersonaSync(db as never, plane as never, logger).sync(PERSONA);
 
-  assert.equal(result.updated, 0);
-  assert.equal(result.upToDate, 1);
-  assert.deepEqual(plane.updates, [], "лишняя запись в память агента");
+  assert.equal(result.updated, 1, "три недостающих блока — это работа, а не «нечего делать»");
+  assert.deepEqual(plane.updates, [], "лишняя запись в существующий блок");
+  // Персона совпала и не переписана, а недостающие блоки заведены.
+  assert.deepEqual(
+    plane.created.map((entry) => entry.label).sort(),
+    ["current_state", "human", "therapeutic_framework"],
+  );
   // Но отметка версии всё равно ставится: иначе агент проверялся бы каждый раз.
   assert.equal(db.recorded.length, 1);
 });
@@ -106,7 +166,8 @@ test("выключенный control plane ничего не пишет и го�
   const result = await new PersonaSync(db as never, plane as never, logger).sync(PERSONA);
 
   assert.deepEqual(result, {
-    checked: 0, updated: 0, upToDate: 0, failed: 0, version: personaVersion(PERSONA),
+    checked: 0, updated: 0, upToDate: 0, failed: 0, legacyAgents: 0,
+    version: canonicalMemoryVersion(PERSONA),
   });
   assert.deepEqual(plane.updates, []);
 });
@@ -161,7 +222,7 @@ test("устаревший агент получает каноническую 
     assert.ok(written.includes(form), `в блок агента не попала форма «${form}»`);
   }
   assert.doesNotMatch(written, /\bПонял, сделал\b/);
-  assert.deepEqual(db.recorded, [{ agentId: "agent-old", version: personaVersion(canonical) }]);
+  assert.deepEqual(db.recorded, [{ agentId: "agent-old", version: canonicalMemoryVersion(canonical) }]);
 });
 
 test("агент с актуальной версией не тревожится перед ходом", async () => {
@@ -169,7 +230,7 @@ test("агент с актуальной версией не тревожитс�
   const plane = fakePlane();
   const sync = new PersonaSync(db as never, plane as never, logger);
   const outcome = await sync.syncAgent(
-    { agentId: "agent-1", userId: 1, storedVersion: personaVersion(PERSONA) },
+    { agentId: "agent-1", userId: 1, storedVersion: canonicalMemoryVersion(PERSONA) },
     PERSONA,
   );
   assert.equal(outcome, "up_to_date");
@@ -301,4 +362,96 @@ test("/health показывает синхронизацию персоны и 
   } finally {
     await app.close();
   }
+});
+
+/**
+ * Сверка ядра памяти существующих агентов.
+ *
+ * Продакшен-агент, созданный до текущей схемы, приходит с прежним
+ * набором блоков: часть канонических отсутствует, часть меток вообще из
+ * старой схемы. Проверяется главное — недостающее появляется, чужое не
+ * переписывается, а прежние блоки остаются на месте вместе с данными.
+ */
+test("устаревший агент получает недостающие канонические блоки", async () => {
+  const db = fakeDb([]);
+  const plane = fakePlane();
+  const report = await new PersonaSync(db as never, plane as never, logger)
+    .reconcileAgent({ agentId: "agent-old", userId: 1 }, PERSONA);
+
+  assert.equal(report.canonical, 4, "канонических блоков должно стать четыре");
+  assert.deepEqual(report.created.sort(), ["current_state", "human", "therapeutic_framework"]);
+  assert.deepEqual(report.updated, ["persona"]);
+  assert.deepEqual(report.legacy, []);
+});
+
+test("накопленное в human и current_state не затирается стартовым значением", async () => {
+  const db = fakeDb([]);
+  const plane = fakePlane({ present: ["human", "current_state"] });
+  const report = await new PersonaSync(db as never, plane as never, logger)
+    .reconcileAgent({ agentId: "agent-old", userId: 1 }, PERSONA);
+
+  assert.deepEqual(report.created, ["therapeutic_framework"]);
+  assert.ok(report.kept.includes("human"), "human обязан остаться нетронутым");
+  assert.ok(report.kept.includes("current_state"));
+  // Ни одной записи в блоки человека: их ведёт Ева, а не сверка схемы.
+  assert.deepEqual(
+    plane.updates.map((entry) => entry.label),
+    ["persona"],
+    "сверка полезла в блок человека",
+  );
+});
+
+test("повторная сверка ничего не создаёт и не переписывает", async () => {
+  const db = fakeDb([]);
+  const plane = fakePlane();
+  const sync = new PersonaSync(db as never, plane as never, logger);
+
+  await sync.reconcileAgent({ agentId: "agent-old", userId: 1 }, PERSONA);
+  const before = { created: plane.created.length, updated: plane.updates.length };
+  const second = await sync.reconcileAgent({ agentId: "agent-old", userId: 1 }, PERSONA);
+
+  assert.deepEqual(second.created, []);
+  assert.deepEqual(second.updated, []);
+  assert.equal(second.kept.length, 4);
+  assert.equal(plane.created.length, before.created, "второй проход завёл блок заново");
+  assert.equal(plane.updates.length, before.updated, "второй проход переписал блок заново");
+});
+
+/**
+ * Блок прежней схемы остаётся у агента.
+ *
+ * Официального пути перенести его содержимое во внешнюю память на
+ * установленных версиях нет, и это записано в реестре возможностей.
+ * Снять блок, не сохранив содержимое, значило бы потерять память
+ * человека ради красивой схемы «4 из 4».
+ */
+test("блок прежней схемы не отсоединяется, а ждёт переноса", async () => {
+  const db = fakeDb([]);
+  const plane = fakePlane({
+    extra: [
+      { id: "block-goals", label: "goals_and_commitments", value: "цели человека" },
+      { id: "block-progress", label: "progress_and_hypotheses", value: "гипотезы" },
+    ],
+  });
+  const report = await new PersonaSync(db as never, plane as never, logger)
+    .reconcileAgent({ agentId: "agent-old", userId: 1 }, PERSONA);
+
+  assert.deepEqual(
+    report.legacy.map((block) => block.label).sort(),
+    ["goals_and_commitments", "progress_and_hypotheses"],
+  );
+  for (const block of report.legacy) {
+    assert.equal(block.status, "legacy_pending_migration");
+    assert.ok(block.size > 0, "размер блока обязан быть виден");
+  }
+  assert.deepEqual(plane.detached, [], "блок прежней схемы отсоединён без переноса данных");
+  // В инвентаре только метаданные: содержимое блока никуда не уходит.
+  assert.doesNotMatch(JSON.stringify(report.legacy), /цели человека|гипотезы/);
+});
+
+test("перенос блока во внешнюю память объявлен неподдержанным, а не забыт", async () => {
+  const { capability } = await import("../dist/letta/capabilities.js");
+  const entry = capability("memory-block.export-to-memfs");
+  assert.equal(entry.surface, null, "путь объявлен поддержанным, но кода переноса нет");
+  assert.match(String(entry.note), /MemFS/);
 });

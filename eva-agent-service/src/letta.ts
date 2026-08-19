@@ -34,6 +34,7 @@ import {
   turnTimeout,
 } from "./errors.js";
 import { missingCapabilities } from "./letta/capabilities.js";
+import { type AgentToolCall, collectToolCalls } from "./letta/tool-calls.js";
 import {
   evaluateReadiness,
   type ObservedRuntime,
@@ -100,6 +101,12 @@ export interface TurnResult {
   assistantGroups: number;
   assistantHadIds: boolean;
   toolCalls: string[];
+  /**
+   * Метаданные фактических вызовов инструментов: имя, идентификатор
+   * вызова, run и исход. По ним видно, открывала ли Ева навык на самом
+   * деле, — в отличие от её собственных слов об этом.
+   */
+  toolCallRecords: AgentToolCall[];
   /** Sanitized SDK events for the protected administrative trace viewer. */
   trace: Array<Record<string, unknown>>;
   stopReason: string | null;
@@ -358,6 +365,7 @@ export function summarizeStream(
     assistantGroups: rendered.length,
     assistantHadIds: sawSliceIds,
     toolCalls,
+    toolCallRecords: collectToolCalls(messages),
     trace,
     stopReason,
     usage,

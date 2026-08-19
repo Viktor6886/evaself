@@ -173,6 +173,57 @@ persona_state() {
 }
 persona_state
 
+# Память и навыки — по фактам рантайма, а не по самоотчёту Евы.
+#
+# `/ready` уже собирает и то и другое, поэтому здесь только пересказ: 4/4
+# канонических блока, блоки прежней схемы, MemFS, источники навыков и
+# сколько из двенадцати навыков проекта видно. Содержимого блоков и
+# навыков не выводится — только метки и счётчики.
+runtime_state() {
+	local body
+	body="$(docker compose exec -T eva-agent-service sh -lc \
+		"wget -qO- http://127.0.0.1:\${EVA_AGENT_PORT:-8080}/ready || curl -sS http://127.0.0.1:\${EVA_AGENT_PORT:-8080}/ready" \
+		2>/dev/null || true)"
+	[ -n "$body" ] || { warn "рантайм: состояние недоступно (сервис не ответил)"; return; }
+	local summary
+	summary="$(printf '%s' "$body" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+memory = d.get("memory") or {}
+skills = d.get("skills") or {}
+project = skills.get("project") or []
+missing = skills.get("missing") or []
+collisions = skills.get("collisions") or []
+sources = skills.get("sources")
+native = skills.get("nativeSkillTool")
+print("legacy=%d" % memory.get("legacyAgents", 0))
+print("skills=%d/12" % len(project))
+print("missing=%d" % len(missing))
+print("collisions=%d" % len(collisions))
+print("sources=%s" % (",".join(sources) if sources else "не сообщены"))
+print("native=%s" % ("да" if native is True else "нет" if native is False else "не наблюдаем"))
+' 2>/dev/null || true)"
+	[ -n "$summary" ] || { warn "рантайм: ответ не разобран"; return; }
+	local legacy skills_seen missing collisions sources native
+	legacy="$(printf '%s\n' "$summary" | sed -n 's/^legacy=//p')"
+	skills_seen="$(printf '%s\n' "$summary" | sed -n 's/^skills=//p')"
+	missing="$(printf '%s\n' "$summary" | sed -n 's/^missing=//p')"
+	collisions="$(printf '%s\n' "$summary" | sed -n 's/^collisions=//p')"
+	sources="$(printf '%s\n' "$summary" | sed -n 's/^sources=//p')"
+	native="$(printf '%s\n' "$summary" | sed -n 's/^native=//p')"
+
+	[ "${legacy:-0}" = "0" ] \
+		&& ok "память: агентов с блоками прежней схемы нет" \
+		|| warn "память: у ${legacy} агентов блоки прежней схемы ждут переноса"
+	[ "${missing:-0}" = "0" ] \
+		&& ok "навыки проекта: ${skills_seen}" \
+		|| critical "навыки проекта: ${skills_seen}, не найдено ${missing}"
+	[ "${collisions:-0}" = "0" ] \
+		|| critical "навыки: совпадающих имён — ${collisions}"
+	ok "источники навыков: ${sources}; нативный Skill: ${native}"
+}
+runtime_state
+
 # The active LLM lives in the `llm_providers` registry, not in .env: a key
 # rotated through the WebUI never touches the file.
 LLM_STATE="$(compose exec -T eva-agent-service node -e "

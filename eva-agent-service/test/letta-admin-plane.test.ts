@@ -81,6 +81,9 @@ test("адаптер нормализует блок и не пишет его �
 
   const blocks = await client.listMemoryBlocks("agent-1");
   assert.deepEqual(blocks[0], {
+    // Без `id` блок нельзя ни присоединить, ни отсоединить: обе операции
+    // адресуют его именно так, а не по метке.
+    id: "",
     label: "persona",
     value: "a",
     description: null,
@@ -189,4 +192,61 @@ test("новое состояние хода по умолчанию счита�
   assert.equal(BLOCKING_TURN_STATES.includes("recovery_required"), true);
   assert.equal(BLOCKING_TURN_STATES.includes("completed"), false);
   assert.equal(BLOCKING_TURN_STATES.length, 18);
+});
+
+/**
+ * Создание и отсоединение блока идут официальными операциями клиента.
+ *
+ * Проверяется именно то, чем сверка ядра памяти пользуется: `blocks.create`
+ * заводит блок, `agents.blocks.attach` вешает его на агента, а значение
+ * блока в журнал не попадает — только метка и длина.
+ */
+test("недостающий блок заводится и присоединяется официальными вызовами", async () => {
+  const calls: Array<{ op: string; args: unknown[] }> = [];
+  const lines: Array<Record<string, unknown>> = [];
+  const recording = { ...logger, info: (_m: string, meta?: Record<string, unknown>) => {
+    lines.push(meta ?? {});
+  } };
+  const secret = "текст терапевтической рамки";
+  const client = new LettaAdminClient(
+    { enabled: true, baseUrl: "http://letta:8283", token: null, logger: recording },
+    async () => ({
+      agents: {
+        blocks: {
+          list: async () => [],
+          update: async () => ({}),
+          attach: async (...args: unknown[]) => { calls.push({ op: "attach", args }); return {}; },
+          detach: async (...args: unknown[]) => { calls.push({ op: "detach", args }); return {}; },
+        },
+      },
+      blocks: {
+        create: async (params: Record<string, unknown>) => {
+          calls.push({ op: "create", args: [params] });
+          return { id: "block-new", label: params.label, value: params.value, description: null };
+        },
+      },
+    }) as never,
+  );
+
+  const created = await client.createMemoryBlock("agent-1", {
+    label: "therapeutic_framework", value: secret, description: "рамка", limit: 6_000,
+  });
+
+  assert.equal(created.id, "block-new");
+  assert.deepEqual(calls.map((call) => call.op), ["create", "attach"]);
+  assert.deepEqual(calls[1]?.args, ["block-new", { agent_id: "agent-1" }]);
+  assert.doesNotMatch(JSON.stringify(lines), new RegExp(secret));
+  assert.equal(lines[0]?.valueLength, secret.length);
+
+  await client.detachMemoryBlock("agent-1", "block-old");
+  assert.deepEqual(calls.at(-1), { op: "detach", args: ["block-old", { agent_id: "agent-1" }] });
+});
+
+test("выключенный путь отказывает и созданию блока, и отсоединению", async () => {
+  const plane = new DisabledAdminPlane("флаг выключен");
+  await assert.rejects(
+    () => plane.createMemoryBlock("agent-1", { label: "human", value: "x" }),
+    /недоступен/,
+  );
+  await assert.rejects(() => plane.detachMemoryBlock("agent-1", "block-1"), /недоступен/);
 });

@@ -5,7 +5,13 @@ import type { AgentRuntimeContext, Database } from "../db.js";
 import { ALLOWED_REACTIONS, type TelegramClient } from "../telegram.js";
 import { Crawl4aiReader, WebReadError } from "./web-read.js";
 import { KnowledgeSearch } from "../knowledge/search.js";
-import { currentTurn } from "../turns/turn-context.js";
+import { inspectRuntime, type InspectionInput } from "../letta/runtime-inspection.js";
+import { turnOf } from "../turns/turn-context.js";
+import {
+  InlineChoiceError,
+  MAX_CHOICES,
+  normalizeChoices,
+} from "../telegram/inline-choices.js";
 import { recordReaction } from "../metrics.js";
 import { LlmRouterClient } from "../router/client.js";
 import { localDateWithWeekday, localNow } from "../time/local-date-time.js";
@@ -21,6 +27,21 @@ import {
   type ToolBuilder,
 } from "./tool-kit.js";
 
+/**
+ * Наблюдатель рантайма для самопроверки.
+ *
+ * Узкий намеренно: инструменту нужны факты, а не доступ к сессии Letta и
+ * не право что-нибудь в ней поменять. Оба поставщика могут вернуть
+ * `null` — это «не наблюдаем», и отчёт скажет об этом прямо.
+ */
+export interface RuntimeObserver {
+  facts(): Pick<InspectionInput, "runtime" | "session">;
+  /** Состав блоков агента без единой записи. `null` — путь недоступен. */
+  memory(agentId: string): Promise<InspectionInput["memory"]>;
+  /** Каким агентом Ева отвечает этому человеку. */
+  agentOf(userId: number): Promise<string | null>;
+}
+
 export class CoreToolFactory {
   private readonly knowledge: KnowledgeSearch;
 
@@ -29,6 +50,7 @@ export class CoreToolFactory {
     private readonly db: Database,
     private readonly telegram: TelegramClient,
     knowledge?: KnowledgeSearch,
+    private readonly observer?: RuntimeObserver,
   ) {
     // Вектор запроса считает тот же роутер, что и при приёме документа:
     // второго пути к моделям эмбеддингов не заводится.
@@ -431,7 +453,10 @@ export class CoreToolFactory {
           // сообщение человека» была верной, пока поле ввода блокировалось
           // на время ответа: теперь человек успевает написать следующее, и
           // реакция уезжала на другой ход.
-          const turn = currentTurn();
+          // Ход берётся и по контексту, и по conversation: инструменты
+          // регистрируются при открытии сессии, и до их вызова из
+          // обработчика сокета SDK AsyncLocalStorage не дотягивается.
+          const turn = turnOf(runtime.conversationId);
           const messageId = turn?.messageId;
           const chatId = turn?.chatId ?? runtime.chatId;
           if (!Number.isSafeInteger(messageId)) {
@@ -478,6 +503,89 @@ export class CoreToolFactory {
               content: hit.content,
             })),
           };
+        },
+      ),
+      tool(
+        "present_inline_choices",
+        "Показать варианты кнопками",
+        "Добавляет к твоему ответу кнопки с вариантами выбора. Отдельного сообщения "
+          + "не появляется: кнопки встают под тем ответом, который ты сейчас пишешь. "
+          + "Уместно, когда вариантов немного и они действительно разные — выбрать "
+          + "фокус разговора, согласиться или отложить, назначить время. Не заменяет "
+          + "ответ: сначала скажи словами, кнопки только упрощают выбор. Обычный "
+          + "открытый вопрос кнопками не оформляют.",
+        objectSchema(
+          {
+            choices: {
+              type: "array",
+              description: `Варианты выбора, не больше ${MAX_CHOICES}`,
+              items: objectSchema(
+                {
+                  label: text("Короткая подпись на кнопке"),
+                  value: text("Что этот выбор означает; по умолчанию — сама подпись"),
+                },
+                ["label"],
+              ),
+            },
+            one_shot: boolean("Убрать кнопки после первого выбора; по умолчанию да"),
+          },
+          ["choices"],
+        ),
+        async (args, runtime) => {
+          const turn = turnOf(runtime.conversationId);
+          if (!turn) {
+            // Вне хода приклеивать кнопки не к чему: ответ уже ушёл.
+            return { ok: false, reason: "no_active_turn" };
+          }
+          try {
+            const choices = normalizeChoices((args as { choices?: unknown }).choices);
+            turn.ui = {
+              ...(turn.ui ?? {}),
+              inlineChoices: {
+                choices,
+                oneShot: (args as { one_shot?: unknown }).one_shot !== false,
+              },
+            };
+            // Кнопки появятся при доставке ответа, а не сейчас: пока идёт
+            // поток, у сообщения ещё нет окончательного вида.
+            return { ok: true, choices: choices.length, attached_to: "final_message" };
+          } catch (error) {
+            if (error instanceof InlineChoiceError) {
+              return { ok: false, reason: error.code, note: error.message };
+            }
+            throw error;
+          }
+        },
+      ),
+      tool(
+        "inspect_eva_runtime",
+        "Проверить собственный рантайм",
+        "Показывает, что фактически наблюдается о собственной памяти, навыках и "
+          + "вызовах: метки блоков памяти, MemFS, источники навыков, доступные навыки, "
+          + "совпадения имён и число фактических открытий навыка. Ничего не меняет. "
+          + "Вызывать, когда человек спрашивает про память, навыки, рантайм или про то, "
+          + "открывала ли ты навык. Отвечать по этому ответу, а не по впечатлению: "
+          + "`null` означает «не могу подтвердить», а не «нет».",
+        objectSchema({}, []),
+        async (_args, runtime) => {
+          if (!this.observer) {
+            return {
+              ok: false,
+              reason: "runtime_observer_unavailable",
+              note: "Проверить рантайм нечем: наблюдатель не подключён.",
+            };
+          }
+          const agentId = await this.observer.agentOf(runtime.userId);
+          const report = await inspectRuntime({
+            ...this.observer.facts(),
+            memory: agentId ? await this.observer.memory(agentId) : null,
+            skillsRoot: this.config.skillsDir,
+            calls: await (async () => {
+              const stats = await this.db.skillCallStats(runtime.userId);
+              return { skillCalls: stats.total, last: stats.last };
+            })(),
+          });
+          return { ok: true, ...report };
         },
       ),
       tool(

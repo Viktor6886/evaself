@@ -128,12 +128,33 @@ export class LlmRouter {
     const route = settings.mode === "single"
       ? { ...configuredRoute, rotation_enabled: settings.single_failover_enabled }
       : configuredRoute;
-    const providerIds = settings.mode === "single"
+    let providerIds = settings.mode === "single"
       ? [
           settings.single_provider_id,
           ...(settings.single_failover_enabled ? (chains.get("chat") ?? []) : []),
         ].filter((id, index, all): id is string => Boolean(id) && all.indexOf(id) === index)
       : (chains.get(route.code) ?? []);
+    if (providerIds.length === 0 && request.metadata.classification_source === "technical") {
+      // Технический маршрут выбран содержимым запроса, а не человеком:
+      // картинка сама уводит ход на `vision`. Цепочку такому маршруту
+      // никто не назначал — провайдер, добавленный через панель,
+      // попадает только в ту цепочку, куда его поставили руками, — и
+      // фотография упиралась в «для маршрута vision не назначен ни один
+      // провайдер», хотя зрячая модель в установке есть.
+      //
+      // Берём общую цепочку. Пригодность при этом не ослабляется:
+      // `buildChain` всё так же отсеет провайдера без зрения, и если
+      // зрячего нет вовсе, отказ останется — но честный, про
+      // возможности, а не про ненастроенный маршрут.
+      const fallback = chains.get("chat") ?? [];
+      if (fallback.length > 0) {
+        this.logger.info("LLM Router: технический маршрут без цепочки идёт общей", {
+          route: route.code,
+          request_id: request.metadata.request_id,
+        });
+        providerIds = fallback;
+      }
+    }
     if (providerIds.length === 0) {
       throw new NoProviderAvailable(`для маршрута «${route.code}» не назначен ни один провайдер`);
     }

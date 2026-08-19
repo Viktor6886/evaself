@@ -15,7 +15,12 @@ import type { RuntimeContextBuilder } from "./runtime/runtime-context.js";
 import type { SendMessage } from "@letta-ai/letta-agent-sdk";
 import { TaskEventService } from "./tasks/task-event-service.js";
 import { withSpan } from "./observability/tracing.js";
-import { runInTurn } from "./turns/turn-context.js";
+import {
+  closeTurnScope,
+  openTurnScope,
+  runInTurn,
+  type ActiveTurn,
+} from "./turns/turn-context.js";
 import {
   messageBatchTiming,
   timelineDetail,
@@ -32,6 +37,7 @@ import {
   type TelegramMessage,
   type TelegramUpdate,
   TelegramClient,
+  telegramMessageIdOf,
   TelegramFileTooLarge,
 } from "./telegram.js";
 import {
@@ -101,6 +107,22 @@ const LEASE_OWNER = `eva-agent-service:${process.pid}`;
  * сам разговор.
  */
 const MAX_IMAGES_PER_TURN = 4;
+
+import {
+  inlineKeyboard,
+  newCallbackToken,
+  type InlineChoiceIntent,
+} from "./telegram/inline-choices.js";
+
+/**
+ * Сколько живёт кнопка под ответом.
+ *
+ * Сутки: разговор возвращается к вчерашнему вопросу, и кнопка, умершая
+ * через час, выглядит поломкой. Дольше держать незачем — выбор из
+ * позавчерашнего ответа уже не про текущий разговор.
+ */
+const CALLBACK_TOKEN_TTL_SECONDS = 24 * 60 * 60;
+
 
 interface NormalizedUpdate {
   updateId: number;
@@ -190,7 +212,69 @@ export class EvaWorkflow {
 
   /** The durable inbox is the only production caller of this method. */
   async processQueued(update: TelegramUpdate): Promise<InboxResult> {
+    // Нажатие кнопки приходит тем же durable ingress и здесь становится
+    // обычным сообщением: дальше идёт тот же ход, тот же замок
+    // пользователя, те же квоты и тот же порядок.
+    if (update.callback_query) {
+      const chosen = await this.resolveCallback(update.callback_query);
+      if (!chosen) return { status: "ignored" };
+      return await this.processAggregated([chosen]);
+    }
     return await this.processAggregated([update]);
+  }
+
+  /**
+   * Превратить нажатие кнопки в сообщение человека.
+   *
+   * Ни строки из `callback_data` в разговор не попадает: это токен, и
+   * значение выбора берётся из серверной записи, сделанной при отправке
+   * кнопок. Иначе нажатие было бы способом продиктовать Еве произвольный
+   * текст от имени человека.
+   *
+   * Telegram отвечаем первым делом: пока ответа нет, на кнопке крутится
+   * ожидание, и это единственное, что человек видит.
+   */
+  private async resolveCallback(
+    callback: NonNullable<TelegramUpdate["callback_query"]>,
+  ): Promise<TelegramUpdate | null> {
+    await this.telegram.answerCallbackQuery(callback.id).catch(() => undefined);
+    const telegramId = callback.from?.id;
+    const token = callback.data;
+    if (!Number.isSafeInteger(telegramId) || !token) return null;
+
+    const user = await this.db.findUserByTelegramId(telegramId!);
+    if (!user) return null;
+    const claim = await this.db.claimCallbackToken({ token, userId: user.id });
+    if (claim.status !== "claimed") {
+      // Повторный клик, чужая или просроченная кнопка — молча ничего.
+      // Второго хода не заводим: выбор уже сделан либо не наш.
+      this.logger.info("Нажатие кнопки не стало ходом", {
+        telegramId, outcome: claim.status,
+      });
+      return null;
+    }
+
+    if (claim.oneShot && claim.messageId !== null) {
+      // Кнопки одноразовые: снимаем их, чтобы под ответом не осталось
+      // выбора, который уже сделан.
+      await this.db.expireCallbackTokensOfMessage({
+        userId: user.id, chatId: claim.chatId, messageId: claim.messageId,
+      });
+      await this.telegram
+        .clearInlineKeyboard(claim.chatId, claim.messageId)
+        .catch(() => undefined);
+    }
+
+    return {
+      update_id: -1,
+      message: {
+        message_id: claim.messageId ?? 0,
+        date: Math.floor(Date.now() / 1000),
+        chat: { id: claim.chatId, type: "private" },
+        from: { id: telegramId!, is_bot: false },
+        text: claim.value,
+      } as TelegramMessage,
+    };
   }
 
   /**
@@ -623,22 +707,33 @@ export class EvaWorkflow {
         await this.moveTurn(turnHandle, "letta_processing");
         const lettaStarted = performance.now();
         let answer;
+        // Оформление, о котором Ева попросила инструментом. Снимается
+        // изнутри хода: контекст хода живёт только пока идёт обращение к
+        // Letta, а кнопки приклеиваются позже, на доставке.
+        let uiIntent: InlineChoiceIntent | null = null;
         try {
           // Ход выполняется внутри своего контекста: инструменты узнают
           // из него `run_id` и барьер отмены, не получая их параметром
           // через чужой код Agent SDK.
+          // Объект хода создаётся отдельно: оформление, о котором Ева
+          // попросит инструментом, останется в нём, и прочитать его надо
+          // уже после хода — на доставке контекста хода больше нет.
+          const activeTurn: ActiveTurn = {
+            runId: turnHandle?.runId ?? "",
+            recorded: turnHandle?.recorded === true,
+            isCancelled: async () =>
+              turnHandle && this.turns ? await this.turns.isCancelled(turnHandle) : false,
+            // Сообщение этого хода: на него ставится реакция. У
+            // объединённого хода — последнее сообщение окна, то самое,
+            // на которое Ева и отвечает.
+            chatId: update.chatId,
+            messageId: parts[parts.length - 1]?.messageId ?? update.messageId,
+          };
+          // Второй адрес того же хода: инструменты вызываются из
+          // обработчика сокета SDK, куда контекст не доезжает.
+          openTurnScope(conversationId, activeTurn);
           answer = await runInTurn(
-            {
-              runId: turnHandle?.runId ?? "",
-              recorded: turnHandle?.recorded === true,
-              isCancelled: async () =>
-                turnHandle && this.turns ? await this.turns.isCancelled(turnHandle) : false,
-              // Сообщение этого хода: на него ставится реакция. У
-              // объединённого хода — последнее сообщение окна, то самое,
-              // на которое Ева и отвечает.
-              chatId: update.chatId,
-              messageId: parts[parts.length - 1]?.messageId ?? update.messageId,
-            },
+            activeTurn,
             async () => await this.letta.runTurn(
               conversationId,
               this.messageForLetta(
@@ -676,6 +771,9 @@ export class EvaWorkflow {
               },
             ),
           );
+          // Что попросил инструмент внутри хода — забираем сразу:
+          // дальше контекст хода уже закрыт.
+          uiIntent = activeTurn.ui?.inlineChoices ?? null;
         } catch (error) {
           // Отменённый ход не доставляет поздний ответ и не идёт в
           // повтор: он закончился по просьбе, а не по ошибке.
@@ -689,6 +787,10 @@ export class EvaWorkflow {
           throw error;
         } finally {
           metrics.letta_generation_ms = elapsed(lettaStarted);
+          // Ход закончился любым исходом — адрес по conversation
+          // снимается здесь. Отменённый или упавший ход не должен
+          // оставить после себя запись, в которую попадёт следующий.
+          closeTurnScope(conversationId);
         }
         metrics.session_acquire_ms = answer.sessionAcquireMs;
         metrics.time_to_first_delta_ms = answer.firstDeltaMs ?? 0;
@@ -696,6 +798,22 @@ export class EvaWorkflow {
           // Только счётчики: ни аргументов инструментов, ни текста.
           detail: { tool_calls: answer.toolCalls.length },
         });
+        // Факт вызова инструмента — единственное, чем можно подтвердить,
+        // что Ева открывала навык. Её собственные слова об этом такой же
+        // текст, как любой другой. Запись метаданных не должна ронять
+        // ход: телеметрия важна, но не важнее ответа человеку.
+        try {
+          await this.db.recordAgentToolCalls(
+            user.id,
+            answer.conversationId,
+            answer.toolCallRecords,
+          );
+        } catch (error) {
+          this.logger.warn("Вызовы инструментов не записаны", {
+            userId: user.id,
+            code: error instanceof Error ? error.name : "unknown_error",
+          });
+        }
         // Отдельного идентификатора сессии Agent SDK не отдаёт: сессия
         // адресуется conversation, им и связываем.
         await this.linkTurn(turnHandle, {
@@ -765,14 +883,48 @@ export class EvaWorkflow {
         let deliveryMs = 0;
         const deliveryStarted = performance.now();
         if (wantsText) {
+          // Кнопки, о которых Ева попросила инструментом, готовятся здесь
+          // и только здесь: токены случайны и от текста не зависят, а
+          // сохраняются уже с идентификатором того сообщения, под которым
+          // фактически встали, — иначе снять клавиатуру после выбора
+          // будет не у чего.
+          // Намерение оставил инструмент внутри хода — читаем из
+          // контекста хода, а не из ответа модели: в тексте ответа его
+          // нет и быть не должно.
+          const intent = uiIntent;
+          const buttons = intent
+            ? intent.choices.map((choice: { label: string; value: string }) =>
+              ({ ...choice, token: newCallbackToken() }))
+            : null;
+          const markup = buttons ? inlineKeyboard(buttons) : undefined;
+
           // Растущее сообщение доводится до итогового текста: тот же
           // `message_id`, второго ответа в чате не появляется. Если
           // показывать было нечего — модель ответила одним куском или
           // Telegram не принял показ, — ответ уходит обычной отправкой.
           const finished = stream
-            ? await stream.finish(reply)
-            : { delivered: false, messageId: null };
-          if (!finished.delivered) await this.telegram.sendMessage(update.chatId, reply);
+            ? await stream.finish(reply, markup)
+            : { delivered: false, messageId: null, keyboardMessageId: null };
+          let keyboardMessageId = finished.keyboardMessageId;
+          if (!finished.delivered) {
+            const sent = await this.telegram.sendMessage(
+              update.chatId, reply, markup === undefined ? {} : { reply_markup: markup },
+            );
+            keyboardMessageId = markup === undefined
+              ? null
+              : telegramMessageIdOf(sent[sent.length - 1]);
+          }
+          if (buttons && intent) {
+            await this.db.issueCallbackTokens({
+              userId: context.userId,
+              chatId: update.chatId,
+              conversationId,
+              messageId: keyboardMessageId,
+              oneShot: intent.oneShot,
+              ttlSeconds: CALLBACK_TOKEN_TTL_SECONDS,
+              choices: buttons,
+            });
+          }
           live.current = null;
           deliveryMs += elapsed(deliveryStarted);
         }

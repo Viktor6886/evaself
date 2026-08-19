@@ -10,7 +10,7 @@ import { ProfileToolFactory } from "./profile/profile-tools.js";
 import { UserProfileService } from "./profile/profile-service.js";
 import type { TelegramClient } from "./telegram.js";
 import { currentScope } from "./tenancy/index.js";
-import { CoreToolFactory } from "./tools/core-tools.js";
+import { CoreToolFactory, type RuntimeObserver } from "./tools/core-tools.js";
 import { EffectJournal, effectKey } from "./turns/effect-journal.js";
 import { currentTurn } from "./turns/turn-context.js";
 import { TaskToolFactory } from "./tools/task-tools.js";
@@ -68,9 +68,11 @@ export class AgentToolFactory {
      */
     private readonly effects?: EffectJournal,
     private readonly mcp?: { policies: McpServerPolicyRepository; invoker: Pick<McpHttpInvoker, "invokeServer"> },
+    /** Наблюдатель рантайма для самопроверки. Без него инструмент честно откажет. */
+    observer?: RuntimeObserver,
   ) {
     this.vectorGoalsEnabled = config.vectorGoalsEnabled !== false;
-    this.core = new CoreToolFactory(config, db, telegram);
+    this.core = new CoreToolFactory(config, db, telegram, undefined, observer);
     this.profile = new ProfileToolFactory(profile ?? new UserProfileService(db));
     this.goals = new GoalToolFactory(goals ?? new GoalService(db));
     this.tasks = new TaskToolFactory(db);
@@ -343,6 +345,11 @@ const TOOL_RISK: Readonly<Record<string, ToolRisk>> = Object.freeze({
   // внешним последствием, каждая просьба поддержать сообщение эмодзи
   // требовала подтверждения человека — и Ева перестала их ставить вовсе.
   set_reaction: "low_risk_write",
+  // Самопроверка рантайма ничего не меняет: она только складывает уже
+  // наблюдаемые факты. Спрашивать за неё подтверждение значило бы
+  // требовать разрешения на вопрос «что у меня с памятью».
+  inspect_eva_runtime: "read",
+  knowledge_search: "read",
   upsert_user_profile_field: "sensitive_write",
   confirm_user_profile_field: "sensitive_write",
   decline_user_profile_field: "sensitive_write",
