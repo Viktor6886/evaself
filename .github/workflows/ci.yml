@@ -946,7 +946,8 @@ jobs:
       # берётся из образа.
       - name: Install ffmpeg
         if: needs.changes.outputs.media == 'true'
-        run: ./scripts/ci/install-ffmpeg.sh
+        # Рабочий каталог job — media-service, поэтому путь от корня.
+        run: "$GITHUB_WORKSPACE/scripts/ci/install-ffmpeg.sh"
 
       - if: needs.changes.outputs.media == 'true'
         run: pip install --quiet -r requirements.txt pytest pytest-asyncio ruff
