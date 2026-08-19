@@ -4,76 +4,82 @@
   const tg = window.Telegram?.WebApp;
   const DEMO = new URLSearchParams(location.search).get("demo") === "1";
   const API = "/api";
-  const BUILD = "20260814-v2";
+  const BUILD = "20260819-hook-v17";
+  const APP_STARTED_AT = performance.now();
+  const SESSION_STARTED_AT = Date.now();
+  const CLIENT_SESSION_ID = globalThis.crypto?.randomUUID?.() || `session-${SESSION_STARTED_AT}-${Math.random().toString(36).slice(2,8)}`;
+  const RETENTION_SCHEMA = "eva-retention-v1";
+  const RETENTION_QUEUE_KEY = "eva:retention-events:v1";
+  const ACTIVATION_KEY = "eva:activation:v1";
+  const MEANINGFUL_KEY = "eva:meaningful-actions:v1";
+  const SHIELD_KEY = "eva:streak-shield:v1";
+  const FIRST_VALUE_KEY = "eva:first-value:v1";
+
+  let retentionMemory = [];
+  let activationMemory = {};
+  let meaningfulMemory = [];
+  let shieldMemory = {};
 
   const state = {
     screen: "today",
-    previousScreen: "today",
     session: null,
+    sessionToken: null,
     bot: null,
     dashboard: null,
     goals: [],
-    tasks: [],
-    notes: [],
-    budgets: [],
-    decisions: [],
     progress: null,
     profile: null,
-    organizerTab: "tasks",
-    taskFilter: "open",
-    developmentTab: "overview",
-    module: null,
-    astroTab: "horoscope",
-    // Загрузка, готово и отказ — три разных экрана. Пока данные едут,
-    // «Целей пока нет» — неправда: их ещё не спрашивали.
+    journalEnabled: false,
+    developmentTab: "goals",
     phase: "loading",
     failed: new Set(),
-    busy: new Set(),
+    lastError: "",
+    performance: {
+      apiSamples: [],
+      coldStartMs: null,
+    },
   };
 
-  const moodLabels = {
-    very_low: "Тяжёлое",
-    low: "Сниженное",
-    neutral: "Спокойное",
-    good: "Хорошее",
-    great: "Отличное",
-  };
-
-  // Дневник добавляется в этот список ТОЛЬКО после ответа сервера: при
-  // выключенном флаге его маршруты отвечают 404, и карточка модуля,
-  // которая никуда не ведёт, была бы ровно тем «мёртвым элементом»,
-  // который запрещает шаг 26.
-  const hubModules = [
-    { code: "tests", title: "Тесты", note: "Профиль личности и самопознание", icon: "clipboard", badge: "Скоро" },
-    { code: "compatibility", title: "Совместимость", note: "Люди, приглашения и отчёты", icon: "hearts", badge: "Скоро" },
-    { code: "budget", title: "Бюджет", note: "Доходы, расходы и остаток", icon: "wallet", badge: "Работает" },
-    { code: "practices", title: "Практики", note: "Каталог коротких перезагрузок", icon: "lotus", badge: "Работает" },
-    { code: "reports", title: "Отчёты", note: "Результаты и динамика", icon: "chart", badge: "Работает" },
-    { code: "astro", title: "Астрорефлексия", note: "Гороскоп, Таро и нумерология", icon: "planet", badge: "Символически" },
-  ];
+  window.addEventListener("error", (event) => {
+    trackRetention("client_error", {
+      message: String(event?.message || "unknown_error").slice(0, 180),
+      source: "window.error",
+    });
+  });
+  window.addEventListener("unhandledrejection", (event) => {
+    trackRetention("client_error", {
+      message: String(event?.reason?.message || event?.reason || "unhandled_rejection").slice(0, 180),
+      source: "unhandledrejection",
+    });
+  });
+  window.addEventListener("pagehide", () => {
+    trackRetention("session_closed", {
+      duration_ms: Math.max(0, Date.now() - SESSION_STARTED_AT),
+      performance: performanceSnapshot(),
+    });
+    void flushRetentionEvents();
+  });
 
   if (tg) {
+    const dark = window.matchMedia?.("(prefers-color-scheme: dark)")?.matches;
     tg.ready();
     tg.expand();
-    tg.setHeaderColor?.("#212121");
-    tg.setBackgroundColor?.("#212121");
-    tg.setBottomBarColor?.("#1a1a1a");
+    tg.setHeaderColor?.(dark ? "#141a18" : "#f8faf9");
+    tg.setBackgroundColor?.(dark ? "#101513" : "#f3f6f5");
+    tg.setBottomBarColor?.(dark ? "#101513" : "#f3f6f5");
   }
 
   injectIcons(document);
-  renderBalloon();
-  renderEvaMini();
   bindStaticEvents();
   setLoadingState();
   void bootstrap();
 
   async function bootstrap() {
     try {
+      ensureFirstSession();
       state.session = await api("/public/session", { method: "POST" });
-      // Токен живёт только в памяти вкладки: ни localStorage, ни cookie,
-      // чтобы он не пережил закрытие Mini App.
       state.sessionToken = state.session?.session_token || null;
-      updateGreeting();
+
       const [dashboard, goals, profile, progress, bot] = await Promise.all([
         safeApi("/public/v2/dashboard", {}, null),
         safeApi("/public/goals", {}, { goals: [] }),
@@ -81,109 +87,61 @@
         safeApi("/public/progress", {}, { progress: null }),
         safeApi("/public/bot", {}, null, false),
       ]);
+
       state.dashboard = dashboard;
       state.goals = goals?.goals || [];
       state.profile = profile?.profile || null;
       state.progress = progress?.progress || null;
       state.bot = bot;
 
-      const reportMatch = location.pathname.match(/^\/app\/research\/([0-9a-f-]+)$/i);
-      if (reportMatch) {
-        await renderResearchReport(reportMatch[1]);
-        return;
-      }
-
       if (!state.dashboard) {
         const [today, tasks] = await Promise.all([
           safeApi("/public/today", {}, { today: {} }),
           safeApi("/public/tasks", {}, { tasks: [] }),
         ]);
-        state.tasks = tasks?.tasks || [];
-        state.dashboard = legacyDashboard(today?.today || {}, state.tasks);
-      } else {
-        state.tasks = state.dashboard.tasks || [];
+        state.dashboard = legacyDashboard(today?.today || {}, tasks?.tasks || []);
       }
-      state.notes = state.dashboard?.notes || [];
-      state.budgets = state.dashboard?.budget?.recent || [];
-      await enableJournalIfServed();
+
+      state.journalEnabled = Boolean(await window.EvaJournal?.probe?.());
+      document.getElementById("journal-add-top").hidden = !state.journalEnabled;
+
       state.phase = "ready";
+      state.performance.coldStartMs = Math.round(performance.now() - APP_STARTED_AT);
       renderAll();
+      trackRetention("session_ready", {
+        cold_start_ms: state.performance.coldStartMs,
+        cold_start_under_2s: state.performance.coldStartMs < 2000,
+      });
+      void flushRetentionEvents();
+      queueMicrotask(() => maybeStartFirstValueFlow());
     } catch (error) {
       state.phase = "error";
       state.lastError = friendlyError(error);
       renderAll();
-      showFriendlyFailure(error);
+      toast(state.lastError, true);
     }
-  }
-
-  /**
-   * Дневник появляется в Пульте только тогда, когда сервер его отдаёт.
-   * Проверка — один запрос: 404 означает выключенный флаг, и раздела
-   * не будет вовсе.
-   */
-  async function enableJournalIfServed() {
-    if (!window.EvaJournal) return;
-    const available = await window.EvaJournal.probe();
-    if (!available) return;
-    state.journalEnabled = true;
-    if (!hubModules.some((item) => item.code === "journal")) {
-      hubModules.unshift({
-        code: "journal",
-        title: "Дневник",
-        note: "Записи дня, люди и недельный обзор",
-        icon: "note",
-        badge: "Работает",
-      });
-    }
-  }
-
-  async function renderResearchReport(id) {
-    const report = await api(`/public/research/${encodeURIComponent(id)}/report`);
-    const claims = Array.isArray(report?.claims) ? report.claims : [];
-    const sources = Array.isArray(report?.sources) ? report.sources : [];
-    const sourceById = new Map(sources.map((source) => [source.id, source]));
-    document.getElementById("screens").innerHTML = `
-      <section class="screen screen-today is-active research-report">
-        <header class="inner-header"><div><span class="eyebrow">ПРОВЕРЕННОЕ ИССЛЕДОВАНИЕ</span><h1>Отчёт</h1></div></header>
-        <article class="card"><h2>Кратко</h2><p>${escapeHtml(report?.summary || "Выводов пока нет")}</p></article>
-        <section class="research-claims">${claims.map((claim) => {
-          const source = sourceById.get(claim.sourceId);
-          return `<article class="card"><h2>${escapeHtml(claim.claim)}</h2><blockquote>${escapeHtml(claim.evidenceQuote)}</blockquote>${source ? `<a href="${escapeHtml(source.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(source.title || source.domain)}</a>` : ""}</article>`;
-        }).join("")}</section>
-        <p class="muted">Проверено: ${escapeHtml(report?.checkedAt || "—")} · Уверенность: ${Math.round(Number(report?.confidence || 0) * 100)}%</p>
-      </section>`;
-    document.querySelector(".bottom-nav")?.setAttribute("hidden", "");
   }
 
   function setLoadingState() {
-    document.getElementById("checkin-metrics").innerHTML = '<div class="loading-skeleton"></div><div class="loading-skeleton"></div><div class="loading-skeleton"></div>';
-    document.getElementById("main-focus-title").textContent = "Собираю актуальный контекст…";
-    renderHub();
-    renderDevelopment();
-    renderOrganizer();
-    renderProfile();
+    document.getElementById("main-focus-title").textContent = "Собираю актуальный фокус…";
+    document.getElementById("reward-title").textContent = "Ева собирает личный вывод…";
+    document.getElementById("development-content").innerHTML =
+      '<div class="section-stack"><div class="loading-skeleton"></div><div class="loading-skeleton"></div></div>';
+    document.getElementById("profile-content").innerHTML =
+      '<div class="section-stack"><div class="loading-skeleton"></div><div class="loading-skeleton"></div></div>';
   }
 
   function renderAll() {
     renderToday();
-    renderHub();
     renderDevelopment();
-    renderOrganizer();
     renderProfile();
     updateNotificationDot();
   }
-
-  // ---------------------------------------------------------------------------
-  // API
-  // ---------------------------------------------------------------------------
 
   async function api(path, options = {}, requireTelegram = true) {
     if (DEMO) return demoApi(path, options);
     const headers = { ...(options.headers || {}) };
     if (requireTelegram) {
-      // Серверная сессия живёт минуты и предъявляется вместо initData.
-      // Сама initData уходит на сервер один раз — при открытии сессии:
-      // обменять её повторно нельзя, поэтому перехват строки бесполезен.
       if (state.sessionToken && path !== "/public/session") {
         headers["X-Eva-Webapp-Session"] = state.sessionToken;
       } else {
@@ -195,11 +153,16 @@
     if (options.body != null && !(options.body instanceof FormData)) {
       headers["Content-Type"] = headers["Content-Type"] || "application/json";
     }
+
+    const apiStarted = performance.now();
     const response = await fetch(`${API}${path}`, { ...options, headers });
-    const contentType = response.headers.get("content-type") || "";
-    const payload = contentType.includes("application/json")
+    const type = response.headers.get("content-type") || "";
+    const payload = type.includes("application/json")
       ? await response.json().catch(() => ({}))
       : await response.text().catch(() => "");
+
+    recordApiSample(path, performance.now() - apiStarted, response.status);
+
     if (!response.ok) {
       const message = typeof payload === "object"
         ? payload?.error?.message || payload?.message
@@ -211,113 +174,493 @@
     return payload || {};
   }
 
-  /**
-   * Запрос, который не должен ронять всё приложение.
-   *
-   * Отказ запоминается: экран, которому эти данные нужны, обязан
-   * показать состояние ошибки. Молчаливый возврат пустого значения
-   * превращал отказ сервера в «у вас ничего нет» — и человек делал
-   * неверный вывод о собственных данных.
-   */
   async function safeApi(path, options, fallback, requireTelegram = true) {
     try {
       const result = await api(path, options, requireTelegram);
       state.failed.delete(sourceKey(path));
       return result;
     } catch (error) {
-      console.warn(`[Eva WebApp] ${path}`, error);
       state.failed.add(sourceKey(path));
       state.lastError = friendlyError(error);
       return fallback;
     }
   }
 
-  /** Ключ источника — путь без параметров запроса. */
-  function sourceKey(path) { return String(path).split("?")[0]; }
+  function sourceKey(path) {
+    return String(path).split("?")[0];
+  }
 
   function friendlyError(error) {
     if (!error) return "Не удалось выполнить действие";
     if (error.status === 401) return "Сессия Telegram устарела. Закройте и снова откройте приложение.";
-    if (error.status === 404) return "Эта функция ещё не подключена на сервере.";
+    if (error.status === 404) return "Функция пока не подключена на сервере.";
     if (error.status >= 500) return "Сервис временно недоступен. Данные не потеряны.";
     const message = String(error.message || "");
-    if (/Body cannot be empty|content-type|application\/json/i.test(message)) return "Сервер использует старую версию API. Обновите Evaself.";
-    return message.length < 150 ? message : "Не удалось выполнить действие";
+    return message.length < 160 ? message : "Не удалось выполнить действие";
   }
 
-  function showFriendlyFailure(error) {
-    toast(friendlyError(error), true);
-    document.getElementById("today-caption").textContent = "Часть данных временно недоступна";
+  function trackRetention(name, properties = {}) {
+    const event = {
+      schema: RETENTION_SCHEMA,
+      name,
+      ts: new Date().toISOString(),
+      build: BUILD,
+      session_id: CLIENT_SESSION_ID,
+      properties: {
+        ...properties,
+        screen: state.screen,
+      },
+    };
+
+    retentionMemory.push(event);
+    retentionMemory = retentionMemory.slice(-250);
+
+    try {
+      const queue = JSON.parse(localStorage.getItem(RETENTION_QUEUE_KEY) || "[]");
+      queue.push(event);
+      localStorage.setItem(RETENTION_QUEUE_KEY, JSON.stringify(queue.slice(-250)));
+    } catch {}
+
+    try {
+      window.EvaAnalytics?.track?.(name, event.properties);
+    } catch {}
+
+    try {
+      window.dispatchEvent(new CustomEvent("eva:retention", { detail: event }));
+    } catch {}
+
+    return event;
   }
 
-  // ---------------------------------------------------------------------------
-  // Navigation
-  // ---------------------------------------------------------------------------
+  function retentionQueue() {
+    try {
+      const stored = JSON.parse(localStorage.getItem(RETENTION_QUEUE_KEY) || "[]");
+      return Array.isArray(stored) && stored.length ? stored : [...retentionMemory];
+    } catch {
+      return [...retentionMemory];
+    }
+  }
+
+  async function flushRetentionEvents() {
+    const endpoint = state.session?.analytics_endpoint || window.EVA_ANALYTICS_ENDPOINT || "";
+    const queue = retentionQueue();
+    if (!endpoint || !queue.length) return { sent: 0, pending: queue.length };
+
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ schema: RETENTION_SCHEMA, events: queue }),
+        keepalive: true,
+      });
+      if (!response.ok) return { sent: 0, pending: queue.length, status: response.status };
+      localStorage.removeItem(RETENTION_QUEUE_KEY);
+      return { sent: queue.length, pending: 0 };
+    } catch {
+      return { sent: 0, pending: queue.length };
+    }
+  }
+
+  function retentionMetricsSnapshot() {
+    const activation = activationState();
+    const firstSession = activation.first_session_at ? Date.parse(activation.first_session_at) : null;
+    const firstValue = activation.first_value_at ? Date.parse(activation.first_value_at) : null;
+    const activated = activation.activation_completed_at ? Date.parse(activation.activation_completed_at) : null;
+    const queue = retentionQueue();
+
+    return {
+      time_to_first_value_ms: firstSession && firstValue ? Math.max(0, firstValue - firstSession) : null,
+      activated: Boolean(activated),
+      activation_ms: firstSession && activated ? Math.max(0, activated - firstSession) : null,
+      meaningful_action_count_local: meaningfulActions().length,
+      retention_event_count_pending: queue.length,
+      lifecycle: lifecycleState(),
+      churn_risk: churnRiskState(),
+      performance: performanceSnapshot(),
+    };
+  }
+
+  function activationState() {
+    try {
+      const stored = JSON.parse(localStorage.getItem(ACTIVATION_KEY) || "{}");
+      return { ...activationMemory, ...(stored || {}) };
+    } catch {
+      return { ...activationMemory };
+    }
+  }
+
+  function updateActivation(patch) {
+    const next = { ...activationState(), ...patch };
+    activationMemory = next;
+    try {
+      localStorage.setItem(ACTIVATION_KEY, JSON.stringify(next));
+    } catch {}
+    return next;
+  }
+
+  function markActivationStep(step, properties = {}) {
+    const current = activationState();
+    const key = `${step}_at`;
+    const patch = current[key] ? {} : { [key]: new Date().toISOString() };
+    const next = updateActivation(patch);
+
+    if (!current[key]) {
+      trackRetention(`activation_${step}`, properties);
+    }
+
+    if (
+      next.action_completed_at
+      && next.reward_viewed_at
+      && next.investment_completed_at
+      && !next.activation_completed_at
+    ) {
+      const started = Date.parse(next.first_session_at || next.first_value_at || new Date().toISOString());
+      const completedAt = Date.now();
+      updateActivation({ activation_completed_at: new Date(completedAt).toISOString() });
+      trackRetention("activation_completed", {
+        activation_ms: Math.max(0, completedAt - started),
+        activation_definition: "action+reward+investment",
+      });
+    }
+  }
+
+  function ensureFirstSession() {
+    const current = activationState();
+    if (current.first_session_at) return current;
+    const firstSessionAt = new Date(SESSION_STARTED_AT).toISOString();
+    return updateActivation({ first_session_at: firstSessionAt });
+  }
+
+  function markFirstValue(source = "home") {
+    const current = ensureFirstSession();
+    if (current.first_value_at) return;
+
+    const now = Date.now();
+    updateActivation({ first_value_at: new Date(now).toISOString(), first_value_source: source });
+    trackRetention("first_value_ready", {
+      source,
+      time_to_first_value_ms: Math.max(0, Math.round(performance.now() - APP_STARTED_AT)),
+      under_60s: performance.now() - APP_STARTED_AT < 60_000,
+    });
+  }
+
+  function markRewardViewed(reward) {
+    const today = localNowParts().dateKey;
+    const impressionKey = `reward-view:${today}:${reward?.kind || "unknown"}`;
+    try {
+      if (sessionStorage.getItem(impressionKey)) {
+        markActivationStep("reward_viewed", { reward_kind: reward?.kind || "unknown" });
+        return;
+      }
+      sessionStorage.setItem(impressionKey, "1");
+    } catch {}
+
+    trackRetention("reward_viewed", {
+      reward_kind: reward?.kind || "unknown",
+      reward_type: reward?.type || "",
+    });
+    markActivationStep("reward_viewed", { reward_kind: reward?.kind || "unknown" });
+  }
+
+  function markInvestmentCompleted(type, properties = {}) {
+    trackRetention("investment_completed", { investment_type: type, ...properties });
+    markActivationStep("investment_completed", { investment_type: type });
+    recordMeaningfulAction(type);
+  }
+
+  function meaningfulActions() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(MEANINGFUL_KEY) || "[]");
+      return Array.isArray(raw) && raw.length ? raw : [...meaningfulMemory];
+    } catch {
+      return [...meaningfulMemory];
+    }
+  }
+
+  function recordMeaningfulAction(type, dateKey = localNowParts().dateKey, properties = {}) {
+    const before = reactivationState();
+    const action = {
+      type,
+      date_key: dateKey,
+      ts: new Date().toISOString(),
+      ...properties,
+    };
+
+    meaningfulMemory.push(action);
+    meaningfulMemory = meaningfulMemory.slice(-120);
+
+    try {
+      const existing = meaningfulActions();
+      if (!existing.some((item) => item.ts === action.ts && item.type === action.type)) existing.push(action);
+      localStorage.setItem(MEANINGFUL_KEY, JSON.stringify(existing.slice(-120)));
+    } catch {}
+
+    trackRetention("meaningful_action", {
+      action_type: type,
+      date_key: dateKey,
+      ...properties,
+    });
+
+    if (["24h", "48h", "72h", "7d"].includes(before.stage)) {
+      trackRetention("reactivation_recovered", {
+        from_stage: before.stage,
+        inactive_hours: before.hours != null ? Math.round(before.hours) : null,
+        recovery_action: type,
+      });
+    }
+
+    return action;
+  }
+
+  function lastMeaningfulActionAt() {
+    const candidates = [];
+
+    for (const item of meaningfulActions()) {
+      if (item?.ts) candidates.push(new Date(item.ts));
+      else if (item?.date_key) candidates.push(new Date(`${item.date_key}T12:00:00`));
+    }
+
+    const progress = state.progress || {};
+    for (const item of [
+      ...(Array.isArray(progress.completed_results) ? progress.completed_results : []),
+      ...(Array.isArray(progress.work_blocks) ? progress.work_blocks : []),
+      ...(Array.isArray(progress.meaningful_actions) ? progress.meaningful_actions : []),
+      ...(Array.isArray(window.EvaJournal?.state?.entries) ? window.EvaJournal.state.entries : []),
+    ]) {
+      const value = item?.completed_at || item?.achieved_at || item?.started_at || item?.created_at || item?.local_date || item?.date;
+      if (!value) continue;
+      const date = new Date(/^\d{4}-\d{2}-\d{2}$/.test(String(value)) ? `${value}T12:00:00` : value);
+      if (!Number.isNaN(date.getTime())) candidates.push(date);
+    }
+
+    return candidates.sort((a, b) => b - a)[0] || null;
+  }
+
+  function reactivationState() {
+    const last = lastMeaningfulActionAt();
+    if (!last) return { stage: "new", hours: null, message: null };
+
+    const hours = Math.max(0, (Date.now() - last.getTime()) / 3_600_000);
+    if (hours >= 168) return { stage: "7d", hours, message: "Собран новый фокус, чтобы начать заново" };
+    if (hours >= 72) return { stage: "72h", hours, message: "Можно быстро вернуться в ритм за 2 минуты" };
+    if (hours >= 48) return { stage: "48h", hours, message: "Ева собрала короткий инсайт" };
+    if (hours >= 24) {
+      const week = weeklyProgress();
+      return {
+        stage: "24h",
+        hours,
+        message: week.target - week.done === 1
+          ? "Остался 1 шаг до цели недели"
+          : "Сегодня готов короткий фокус",
+      };
+    }
+    return { stage: "active", hours, message: null };
+  }
+
+  function recordApiSample(path, durationMs, status) {
+    const sample = {
+      path: sourceKey(path),
+      duration_ms: Math.round(durationMs),
+      status,
+      ts: Date.now(),
+    };
+    state.performance.apiSamples.push(sample);
+    state.performance.apiSamples = state.performance.apiSamples.slice(-80);
+
+    if (durationMs > 500) {
+      trackRetention("api_slow", {
+        path: sample.path,
+        duration_ms: sample.duration_ms,
+        status,
+        target_ms: 500,
+      });
+    }
+  }
+
+  function performanceSnapshot() {
+    const samples = state.performance.apiSamples
+      .map((item) => item.duration_ms)
+      .sort((a, b) => a - b);
+    const p95Index = samples.length ? Math.min(samples.length - 1, Math.ceil(samples.length * .95) - 1) : 0;
+    const p95 = samples.length ? samples[p95Index] : null;
+    return {
+      cold_start_ms: state.performance.coldStartMs,
+      cold_start_under_2s: state.performance.coldStartMs != null ? state.performance.coldStartMs < 2000 : null,
+      api_p95_ms: p95,
+      api_p95_under_500ms: p95 != null ? p95 < 500 : null,
+      sample_count: samples.length,
+    };
+  }
+
+  function maybeStartFirstValueFlow() {
+    if (DEMO) return;
+
+    let completed = false;
+    try {
+      completed = localStorage.getItem(FIRST_VALUE_KEY) === "done";
+    } catch {}
+    if (completed) return;
+
+    const progress = state.progress || {};
+    const hasProgress =
+      (Array.isArray(progress.completed_results) && progress.completed_results.length)
+      || (Array.isArray(progress.work_blocks) && progress.work_blocks.length)
+      || meaningfulActions().length
+      || (Array.isArray(window.EvaJournal?.state?.entries) && window.EvaJournal.state.entries.length);
+
+    const profile = profileInvestmentState();
+    if (hasProgress || profile.overall > 12) {
+      try { localStorage.setItem(FIRST_VALUE_KEY, "done"); } catch {}
+      return;
+    }
+
+    trackRetention("onboarding_started", { variant: "first_value_2_step" });
+
+    openSheet({
+      title: "С чего лучше начать?",
+      subtitle: "Выбери только то, что сейчас даст больше пользы. Никаких длинных анкет.",
+      html: `<div class="first-value-grid">
+        <button class="choice-button first-value-choice" data-first-need="clarity" type="button">
+          <strong>Нужна ясность</strong><span>Сузить всё до одного следующего шага</span>
+        </button>
+        <button class="choice-button first-value-choice" data-first-need="calm" type="button">
+          <strong>Слишком много шума</strong><span>Разобрать одну мысль, которая мешает</span>
+        </button>
+        <button class="choice-button first-value-choice" data-first-need="decision" type="button">
+          <strong>Нужно принять решение</strong><span>Отделить факт от предположений</span>
+        </button>
+      </div>`,
+      onMount(host) {
+        host.querySelectorAll("[data-first-need]").forEach((button) => {
+          button.addEventListener("click", () => showFirstValueResult(button.dataset.firstNeed));
+        });
+      },
+    });
+  }
+
+  function showFirstValueResult(need) {
+    const variants = {
+      clarity: {
+        title: "Сузить задачу до одного следующего шага",
+        insight: "Сейчас тебе не нужен весь план — достаточно выбрать ближайший шаг.",
+      },
+      calm: {
+        title: "Назвать одну мысль, которая создаёт лишний шум",
+        insight: "Когда мысль названа конкретно, с ней проще работать.",
+      },
+      decision: {
+        title: "Отделить один факт от предположений",
+        insight: "Один проверяемый факт часто даёт больше ясности, чем ещё десять вариантов.",
+      },
+    };
+    const selected = variants[need] || variants.clarity;
+
+    trackRetention("onboarding_need_selected", { need });
+    markFirstValue("onboarding");
+
+    openSheet({
+      title: "Первый фокус готов",
+      subtitle: "Это уже рабочий результат. Дальше — один короткий шаг.",
+      html: `<article class="section-card first-value-result">
+          <span class="eyebrow">ПЕРВЫЙ ВЫВОД</span>
+          <h3>${escapeHtml(selected.insight)}</h3>
+          <p>${escapeHtml(selected.title)}</p>
+        </article>
+        <div class="action-row">
+          <button class="primary-action" id="first-value-start" type="button">Сделать за 2 минуты</button>
+        </div>`,
+      onMount(host) {
+        host.querySelector("#first-value-start").addEventListener("click", () => {
+          state.dashboard = state.dashboard || {};
+          state.dashboard.main_focus = {
+            id: `onboarding:${need}`,
+            title: selected.title,
+            subtitle: selected.insight,
+            planned_minutes: 2,
+            source_type: "onboarding",
+            source_id: need,
+          };
+          try { localStorage.setItem(FIRST_VALUE_KEY, "done"); } catch {}
+          trackRetention("onboarding_first_action_ready", { need, planned_minutes: 2 });
+          closeSheet();
+          renderToday();
+          startMainFocus();
+        });
+      },
+    });
+  }
 
   function bindStaticEvents() {
-    document.querySelectorAll(".nav-item").forEach((button) => {
+    document.querySelectorAll(".nav-item[data-target]").forEach((button) => {
       button.addEventListener("click", () => openScreen(button.dataset.target));
     });
-    document.getElementById("module-back").addEventListener("click", () => openScreen(state.previousScreen || "hub"));
-    document.getElementById("sheet-close").addEventListener("click", closeSheet);
-    document.getElementById("sheet").addEventListener("click", (event) => {
-      if (event.target === event.currentTarget) closeSheet();
-    });
-    document.getElementById("checkin-edit").addEventListener("click", openCheckinSheet);
-    document.getElementById("checkin-card").addEventListener("click", (event) => {
-      if (!event.target.closest("button")) openCheckinSheet();
-    });
-    document.getElementById("main-focus-card").addEventListener("click", (event) => {
-      if (!event.target.closest("#main-focus-action")) openMainFocusSheet();
-    });
+    document.getElementById("dialog-nav").addEventListener("click", () => openEvaHandoff(screenContext()));
+    document.getElementById("journal-add-top").addEventListener("click", () => window.EvaJournal?.openNew?.());
     document.getElementById("main-focus-action").addEventListener("click", (event) => {
       event.stopPropagation();
       startMainFocus();
     });
-    document.getElementById("today-tasks-card").addEventListener("click", () => {
-      state.organizerTab = "tasks";
-      openScreen("organizer");
+    document.getElementById("reward-action").addEventListener("click", openCurrentReward);
+    document.getElementById("reward-card").addEventListener("click", (event) => {
+      if (!event.target.closest("#reward-action")) openCurrentReward();
     });
-    document.getElementById("continue-card").addEventListener("click", () => {
-      state.developmentTab = "goals";
+    document.getElementById("profile-investment").addEventListener("click", () => {
+      trackRetention("profile_investment_opened", {
+        completion_percent: profileInvestmentState().overall,
+        next_focus: profileInvestmentState().next.label,
+      });
+      state.developmentTab = "tests";
+      syncDevelopmentTabs();
       openScreen("development");
     });
-    document.getElementById("notifications-button").addEventListener("click", openNotificationsSheet);
-    document.querySelectorAll("[data-quick]").forEach((button) => button.addEventListener("click", () => handleQuick(button.dataset.quick, button)));
+    document.getElementById("streak-button").addEventListener("click", openStreakSheet);
     document.getElementById("development-tabs").addEventListener("click", (event) => {
       const button = event.target.closest("[data-development]");
       if (!button) return;
       state.developmentTab = button.dataset.development;
-      selectGroup("[data-development]", button);
+      syncDevelopmentTabs();
       renderDevelopment();
       haptic("light");
     });
-    document.getElementById("organizer-tabs").addEventListener("click", (event) => {
-      const button = event.target.closest("[data-organizer]");
-      if (!button) return;
-      state.organizerTab = button.dataset.organizer;
-      selectGroup("[data-organizer]", button);
-      document.getElementById("task-filters").hidden = state.organizerTab === "notes";
-      renderOrganizer();
-      haptic("light");
+    document.getElementById("sheet-close").addEventListener("click", closeSheet);
+    document.getElementById("sheet").addEventListener("click", (event) => {
+      if (event.target === event.currentTarget) closeSheet();
     });
-    document.getElementById("task-filters").addEventListener("click", (event) => {
-      const button = event.target.closest("[data-filter]");
-      if (!button) return;
-      state.taskFilter = button.dataset.filter;
-      selectGroup("[data-filter]", button);
-      renderOrganizer();
-    });
-    document.getElementById("organizer-add").addEventListener("click", () => {
-      if (state.organizerTab === "notes") openNoteSheet();
-      else openTaskSheet(null, state.organizerTab === "reminders");
-    });
-    // Аппаратная «Назад» в Android приходит сюда же, что и кнопка
-    // Telegram. Порядок обязателен: сначала закрывается то, что лежит
-    // сверху, иначе первое нажатие уводит с экрана, оставив открытый
-    // лист поверх нового раздела.
     tg?.BackButton?.onClick(handleBack);
     bindKeyboardHandling();
+  }
+
+  function syncDevelopmentTabs() {
+    document.querySelectorAll("[data-development]").forEach((item) => {
+      item.classList.toggle("is-active", item.dataset.development === state.developmentTab);
+    });
+  }
+
+  function openScreen(screen) {
+    const target = document.querySelector(`[data-screen="${screen}"]`);
+    if (!target) return;
+
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    state.screen = screen;
+    document.querySelectorAll(".screen").forEach((node) => {
+      const active = node.dataset.screen === screen;
+      node.hidden = !active;
+      node.classList.toggle("is-active", active);
+    });
+    document.querySelectorAll(".nav-item[data-target]").forEach((button) => {
+      const active = button.dataset.target === screen;
+      button.classList.toggle("is-active", active);
+      if (active) button.setAttribute("aria-current", "page");
+      else button.removeAttribute("aria-current");
+    });
+    if (screen === "today") tg?.BackButton?.hide?.();
+    else tg?.BackButton?.show?.();
+
+    target.querySelector(".scroll-content")?.scrollTo?.(0, 0);
+    if (screen === "journal") void window.EvaJournal?.render?.();
+    if (screen === "development") renderDevelopment();
+    if (screen === "profile") renderProfile();
+    haptic("light");
   }
 
   function handleBack() {
@@ -325,21 +668,10 @@
     if (confirmDialog?.open) return void confirmDialog.close();
     const sheet = document.getElementById("sheet");
     if (sheet?.open) return closeSheet();
-    if (state.screen === "module") return openScreen(state.previousScreen || "hub");
     if (state.screen !== "today") return openScreen("today");
-    // На «Сегодня» назад идти некуда: приложение закрывается само —
-    // Telegram делает это, когда обработчик ничего не сделал.
     tg?.close?.();
   }
 
-  /**
-   * Экранная клавиатура.
-   *
-   * Она не уменьшает окно, а накрывает его снизу: поле в нижней части
-   * листа оказывается ПОД клавиатурой, и человек печатает вслепую.
-   * visualViewport даёт настоящую видимую высоту — по ней лист и
-   * поджимается, а активное поле подтягивается в неё.
-   */
   function bindKeyboardHandling() {
     const viewport = window.visualViewport;
     if (viewport) {
@@ -353,180 +685,185 @@
     }
     document.addEventListener("focusin", (event) => {
       const field = event.target;
-      if (!(field instanceof HTMLElement)) return;
-      if (!field.matches("input, textarea, select")) return;
-      // Прокрутка откладывается на кадр: до появления клавиатуры
-      // положение поля ещё старое.
+      if (!(field instanceof HTMLElement) || !field.matches("input, textarea, select")) return;
       setTimeout(() => field.scrollIntoView({ block: "center", behavior: "smooth" }), 220);
     });
   }
 
-  function selectGroup(selector, selected) {
-    document.querySelectorAll(selector).forEach((button) => {
-      const active = button === selected;
-      button.classList.toggle("is-active", active);
-      button.setAttribute("aria-selected", String(active));
-    });
-  }
-
-  function openScreen(screen) {
-    if (!document.querySelector(`[data-screen="${screen}"]`)) return;
-    // Поле, оставшееся в фокусе, держит клавиатуру открытой поверх
-    // нового экрана.
-    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
-    if (screen !== "module") state.previousScreen = state.screen;
-    state.screen = screen;
-    document.querySelectorAll(".screen").forEach((node) => {
-      const active = node.dataset.screen === screen;
-      node.hidden = !active;
-      node.classList.toggle("is-active", active);
-    });
-    document.querySelectorAll(".nav-item").forEach((button) => {
-      const active = button.dataset.target === screen || (screen === "module" && button.dataset.target === state.previousScreen);
-      button.classList.toggle("is-active", active);
-      if (active) button.setAttribute("aria-current", "page"); else button.removeAttribute("aria-current");
-    });
-    if (screen === "today") tg?.BackButton?.hide?.(); else tg?.BackButton?.show?.();
-    document.querySelector(`[data-screen="${screen}"] .scroll-content`)?.scrollTo?.(0, 0);
-    if (screen === "organizer") void loadOrganizerData();
-    if (screen === "hub") renderHub();
-    if (screen === "development") renderDevelopment();
-    if (screen === "profile") renderProfile();
-    haptic("light");
-  }
-
-  // ---------------------------------------------------------------------------
-  // Today
-  // ---------------------------------------------------------------------------
-
-  function updateGreeting() {
-    const timezone = state.session?.user?.timezone;
-    const hour = Number(new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", hour12: false, timeZone: timezone || undefined }).format(new Date()));
-    const phrase = hour < 5 ? "Доброй ночи" : hour < 12 ? "Доброе утро" : hour < 18 ? "Добрый день" : "Добрый вечер";
-    const firstName = state.profile?.user?.preferred_name || state.session?.user?.first_name || tg?.initDataUnsafe?.user?.first_name || "";
-    document.getElementById("greeting").textContent = firstName ? `${phrase}, ${firstName}` : phrase;
+  function localNowParts() {
+    const user = state.profile?.user || state.session?.user || {};
+    const timezone = user.timezone || state.session?.user?.timezone;
+    try {
+      const parts = new Intl.DateTimeFormat("ru-RU", {
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        timeZone: timezone || undefined,
+      }).formatToParts(new Date());
+      const get = (type) => parts.find((item) => item.type === type)?.value || "";
+      return {
+        hour: Number(get("hour")),
+        dateKey: `${get("year")}-${get("month")}-${get("day")}`,
+        timezone,
+      };
+    } catch {
+      const now = new Date();
+      return {
+        hour: now.getHours(),
+        dateKey: now.toISOString().slice(0, 10),
+        timezone,
+      };
+    }
   }
 
   function renderToday() {
-    updateGreeting();
     const dashboard = state.dashboard || {};
-    renderCheckin(dashboard.checkin || null);
-    renderMainFocus(dashboard.main_focus || dashboard.mainFocus || null);
-    renderTodayCards(dashboard);
-    // Наблюдение показывается вместе с тем, на чём оно построено:
-    // без числа наблюдений фраза выглядит утверждением о человеке, а
-    // не выводом из его же отметок.
-    const insight = dashboard.insight;
-    const insightText = insight?.text || (typeof insight === "string" ? insight : "")
-      || "После нескольких отметок здесь появится полезное наблюдение без лишней психодиагностики.";
-    const observations = Number(insight?.observations || 0);
-    document.getElementById("insight-text").textContent = insightText;
-    const evidence = document.getElementById("insight-evidence");
-    evidence.hidden = observations < 5;
-    evidence.textContent = observations >= 5
-      ? `Основано на ${observations} ${plural(observations, "отметке", "отметках", "отметках")} состояния`
-      : "";
-    document.getElementById("today-caption").textContent = dashboard.local_time ? `Местное время ${dashboard.local_time}` : "Твой день — твои решения";
+    const main = dashboard.main_focus || dashboard.mainFocus || null;
+    const reward = currentReward();
+    const streak = streakState();
+    const reactivation = reactivationState();
+
+    renderTopStatus(main, reward, streak, reactivation);
+    renderMainFocus(main);
+    renderReward(reward);
+    renderProfileInvestment();
+
+    if (state.phase === "ready" && (main?.title || reward?.title)) {
+      markFirstValue("home");
+    }
   }
 
-  function renderCheckin(checkin) {
-    const mood = checkin?.mood ? moodLabels[checkin.mood] || checkin.mood : "Отметить";
-    const metrics = [
-      { key: "mood", label: "Настроение", value: mood, icon: "smile" },
-      { key: "energy", label: "Энергия", value: checkin?.energy ? `${checkin.energy}/10` : "—/10", icon: "bolt" },
-      { key: "tension", label: "Напряжение", value: checkin?.tension ? `${checkin.tension}/10` : "—/10", icon: "tension" },
-    ];
-    const host = document.getElementById("checkin-metrics");
-    host.innerHTML = metrics.map((item) => `<button class="metric-button ${checkin ? "is-selected" : ""}" type="button" data-metric="${item.key}">
-      <span class="metric-icon">${icon(item.icon)}</span><span class="metric-copy"><small>${escapeHtml(item.label)}</small><strong>${escapeHtml(item.value)}</strong></span>
-    </button>`).join("");
-    host.querySelectorAll("[data-metric]").forEach((button) => button.addEventListener("click", openCheckinSheet));
-    document.getElementById("checkin-edit").textContent = checkin ? "Изменить" : "Отметить";
+  function renderTopStatus(main, reward, streak, reactivation = reactivationState()) {
+    const week = weeklyProgress();
+    const ritual = ritualState();
+    const summary = triggerBarText({ main, reward, streak, week, ritual, reactivation });
+    trackReactivationImpression(reactivation);
+
+    document.getElementById("today-summary").textContent = summary;
+    document.getElementById("streak-days").textContent = String(streak.days);
+
+    const avatar = document.getElementById("eva-status-avatar");
+    avatar.style.setProperty("--ring-progress", `${streak.ring}%`);
+
+    const pill = document.getElementById("streak-button");
+    pill.classList.toggle("is-milestone", Boolean(streak.milestone));
+    pill.classList.toggle("is-grace", Boolean(streak.graceEligible));
+    pill.classList.toggle("is-perfect", Boolean(streak.perfectWeek));
+    pill.setAttribute(
+      "aria-label",
+      `${streak.days} ${streak.days === 1 ? "день" : "дней"} подряд${streak.graceEligible ? ", серия защищена до конца дня" : ""}${streak.perfectWeek ? ", идеальная неделя" : ""}`,
+    );
+  }
+
+  function trackReactivationImpression(reactivation) {
+    if (!["24h", "48h", "72h", "7d"].includes(reactivation?.stage)) return;
+    const key = `eva:reactivation-impression:${reactivation.stage}`;
+    try {
+      if (sessionStorage.getItem(key)) return;
+      sessionStorage.setItem(key, "1");
+    } catch {}
+    trackRetention("reactivation_offer_seen", {
+      stage: reactivation.stage,
+      inactive_hours: reactivation.hours != null ? Math.round(reactivation.hours) : null,
+      message: reactivation.message,
+    });
+  }
+
+  function triggerBarText({ main, reward, streak, week, ritual, reactivation }) {
+    const remaining = Math.max(0, week.target - week.done);
+
+    if (reactivation?.message && ["48h", "72h", "7d"].includes(reactivation.stage)) {
+      return reactivation.message;
+    }
+    if (remaining === 1) return "Остался 1 шаг до цели недели";
+    if (ritual.weeklySnapshotReady) return "Снимок недели готов";
+    if (reward?.kind === "curiosity") return "Ева заметила новый паттерн";
+    if (reward?.kind === "question") return "Новый вопрос готов";
+    if (reward?.kind === "milestone") return `${streak.days} дней — новая отметка`;
+    if (ritual.period === "evening" && streak.todayDone) return "Итог дня готов";
+    if (main && reward) return "1 шаг и 1 инсайт";
+    if (reward) return "Новый инсайт готов";
+    if (main) return "1 шаг на сегодня";
+    return "Сегодняшний фокус готов";
+  }
+
+  function ritualState() {
+    const local = localNowParts();
+    const weekday = new Date(`${local.dateKey}T12:00:00Z`).getUTCDay();
+    const period = local.hour < 12 ? "morning" : local.hour < 18 ? "day" : "evening";
+    return {
+      period,
+      weekday,
+      weeklySnapshotReady: weekday === 0 && activityDates().some((date) => inCurrentWeek(date)),
+    };
   }
 
   function renderMainFocus(main) {
-    const title = main?.title || main?.main_action || "Выбрать главное вместе с Евой";
-    const source = main?.source_label || main?.goal_title || main?.source || "Ева сопоставит цели и ближайшие действия";
-    const expected = main?.expected_result || main?.result || "";
-    document.getElementById("main-focus-title").textContent = title;
-    document.getElementById("main-focus-source").textContent = source;
-    const resultNode = document.getElementById("main-focus-result");
-    resultNode.hidden = !expected;
-    resultNode.textContent = expected ? `Результат: ${expected}` : "";
-    const action = document.getElementById("main-focus-action");
-    action.textContent = main?.work_block_status === "active" ? "Продолжить" : main?.id || main?.work_block_id ? "Начать" : "Выбрать";
+    const title = main?.title || main?.main_action || "Выбрать один шаг вместе с Евой";
+    const plannedMinutes = Number(main?.planned_minutes || main?.duration_minutes || 0) || 6;
+    const source = main?.subtitle
+      || main?.next_step
+      || main?.source_label
+      || main?.goal_title
+      || "Один короткий шаг перед следующим результатом";
+
+    document.getElementById("main-focus-title").textContent = conciseTitle(title);
+    document.getElementById("main-focus-source").textContent = conciseFocusSubtitle(source);
+    document.getElementById("hero-duration").textContent = `${plannedMinutes} мин`;
+
+    const button = document.getElementById("main-focus-action");
+    button.disabled = state.phase === "loading";
+    button.firstElementChild.textContent = main?.work_block_status === "active"
+      ? "Продолжить"
+      : main?.id || main?.work_block_id
+        ? "Продолжить"
+        : "Выбрать шаг";
+
+    const week = weeklyProgress();
+    const remaining = Math.max(0, week.target - week.done);
+    document.getElementById("week-progress-label").textContent = remaining === 1
+      ? `Неделя: ${week.done} из ${week.target} шагов · Остался 1 шаг`
+      : `Неделя: ${week.done} из ${week.target} шагов`;
+    document.getElementById("week-progress-bar").style.width = `${week.percent}%`;
+    document.getElementById("main-focus-card").classList.toggle("is-near-week-goal", remaining === 1);
   }
 
-  function renderTodayCards(dashboard) {
-    const counts = dashboard.counts || {};
-    const open = Number(counts.open_tasks ?? state.tasks.filter((task) => !isDone(task)).length);
-    const today = Number(counts.today_tasks ?? state.tasks.filter((task) => !isDone(task) && isToday(task.due_at)).length);
-    const nextReminder = dashboard.next_reminder;
-    document.getElementById("today-tasks-title").textContent = today ? `${today} ${plural(today, "задача", "задачи", "задач")} на сегодня` : open ? `${open} текущих задач` : "Нет срочных задач";
-    document.getElementById("today-tasks-note").textContent = nextReminder?.title
-      ? `${nextReminder.title} · ${formatDateTime(nextReminder.remind_at)}`
-      : open ? "Открыть список" : "Можно добавить следующий шаг";
-
-    const activeGoal = dashboard.active_goal || state.goals.find((goal) => goal.status === "active") || state.goals[0];
-    document.getElementById("continue-title").textContent = activeGoal?.title || "Выбрать направление";
-    document.getElementById("continue-note").textContent = activeGoal?.next_result || activeGoal?.next_step || "Открыть развитие";
+  function conciseTitle(value) {
+    const text = String(value || "").trim();
+    if (!text) return "Продолжить путь";
+    return text.length > 72 ? `${text.slice(0, 69).trim()}…` : text;
   }
 
-  async function openCheckinSheet() {
-    const current = state.dashboard?.checkin || {};
-    const moods = [
-      ["very_low", "Тяжёлое"], ["low", "Сниженное"], ["neutral", "Спокойное"], ["good", "Хорошее"], ["great", "Отличное"],
-    ];
-    openSheet({
-      title: "Состояние сегодня",
-      subtitle: "Ева использует отметку, чтобы точнее выбрать нагрузку и практику. Это не медицинская оценка.",
-      html: `<form class="form-grid" id="checkin-form">
-        <fieldset><legend>Настроение</legend><div class="choice-grid">${moods.map(([value,label]) => `<button class="choice-button ${current.mood === value ? "is-selected" : ""}" type="button" data-mood="${value}">${label}</button>`).join("")}</div></fieldset>
-        <label class="range-row"><span>Энергия: <strong id="energy-output">${current.energy || 5}</strong>/10</span><input name="energy" type="range" min="1" max="10" value="${current.energy || 5}"></label>
-        <label class="range-row"><span>Напряжение: <strong id="tension-output">${current.tension || 5}</strong>/10</span><input name="tension" type="range" min="1" max="10" value="${current.tension || 5}"></label>
-        <label><span>Что повлияло? Необязательно</span><textarea name="note" maxlength="1000" rows="2" placeholder="Сон, работа, разговор, событие…">${escapeHtml(current.note || "")}</textarea></label>
-        <input type="hidden" name="mood" value="${escapeAttr(current.mood || "neutral")}">
-        <button class="primary-action" type="submit">Сохранить состояние</button>
-      </form>`,
-      onMount(host) {
-        const form = host.querySelector("#checkin-form");
-        host.querySelectorAll("[data-mood]").forEach((button) => button.addEventListener("click", () => {
-          form.elements.mood.value = button.dataset.mood;
-          host.querySelectorAll("[data-mood]").forEach((item) => item.classList.toggle("is-selected", item === button));
-          haptic("selection");
-        }));
-        form.addEventListener("input", () => {
-          host.querySelector("#energy-output").textContent = form.elements.energy.value;
-          host.querySelector("#tension-output").textContent = form.elements.tension.value;
-        });
-        form.addEventListener("submit", async (event) => {
-          event.preventDefault();
-          const payload = Object.fromEntries(new FormData(form).entries());
-          payload.energy = Number(payload.energy);
-          payload.tension = Number(payload.tension);
-          try {
-            const result = await api("/public/v2/checkins", { method: "POST", body: JSON.stringify(payload) });
-            state.dashboard = { ...(state.dashboard || {}), checkin: result.checkin };
-            closeSheet(); renderToday(); toast("Состояние сохранено"); haptic("success");
-          } catch (error) { toast(friendlyError(error), true); }
-        });
-      },
-    });
+  function conciseFocusSubtitle(source) {
+    const text = String(source || "")
+      .replace(/^Цель:\s*/i, "")
+      .replace(/^Результат:\s*/i, "")
+      .trim();
+    if (!text) return "Один короткий шаг перед следующим результатом";
+    return text.length > 82 ? `${text.slice(0, 79).trim()}…` : text;
   }
+
 
   function openMainFocusSheet() {
     const main = state.dashboard?.main_focus || {};
     const alternatives = state.dashboard?.main_focus_candidates || [];
     openSheet({
-      title: "Главное на сегодня",
-      subtitle: "Выбор строится на активном рабочем блоке, цели, ближайшей задаче и точке продолжения.",
+      title: "Следующий шаг",
+      subtitle: "Ева связывает его с активной целью и фактической точкой продолжения.",
       html: `<div class="section-stack">
-        <article class="section-card"><span class="eyebrow">ТЕКУЩИЙ ВЫБОР</span><h3>${escapeHtml(main.title || "Пока не выбран")}</h3><p>${escapeHtml(main.reason || main.source_label || "Автоматический выбор по контексту")}</p>${main.expected_result ? `<p><strong>Ожидаемый результат:</strong> ${escapeHtml(main.expected_result)}</p>` : ""}</article>
-        ${alternatives.length ? `<div class="sheet-options">${alternatives.map((item) => sheetOption("target", item.title, item.source_label || "Другой вариант", `data-focus-candidate="${escapeAttr(item.id || item.title)}"`)).join("")}</div>` : ""}
-        <div class="sheet-options">
-          ${sheetOption("refresh", "Вернуть автоматический выбор", "Ева снова будет обновлять главное по контексту", 'data-focus-action="auto"')}
-          ${sheetOption("chat", "Обсудить с Евой", "Открыть чат с подготовленной формулировкой", 'data-focus-action="eva"')}
-          ${sheetOption("checklist", "Создать задачу", "Добавить конкретное действие в Органайзер", 'data-focus-action="task"')}
+        <article class="section-card">
+          <span class="eyebrow">ТЕКУЩИЙ ВЫБОР</span>
+          <h3>${escapeHtml(main.title || "Пока не выбран")}</h3>
+          <p>${escapeHtml(main.reason || main.source_label || "Выбор по актуальному контексту")}</p>
+          ${main.expected_result ? `<p><strong>Результат:</strong> ${escapeHtml(main.expected_result)}</p>` : ""}
+        </article>
+        ${alternatives.length ? `<div class="section-stack">${alternatives.slice(0,3).map((item) => `<button class="secondary-action" data-focus-candidate="${escapeAttr(item.id || item.title)}" type="button">${escapeHtml(item.title)}</button>`).join("")}</div>` : ""}
+        <div class="action-row">
+          <button class="primary-action" data-focus-action="eva" type="button">Обсудить с Евой</button>
+          <button class="secondary-action" data-focus-action="auto" type="button">Автовыбор</button>
         </div>
       </div>`,
       onMount(host) {
@@ -535,37 +872,70 @@
           if (!item) return;
           try {
             const result = await api("/public/v2/main-result", { method: "PUT", body: JSON.stringify(item) });
-            state.dashboard.main_focus = result.main_focus;
-            closeSheet(); renderToday(); toast("Главное обновлено");
-          } catch (error) { toast(friendlyError(error), true); }
+            state.dashboard.main_focus = result.main_focus || item;
+            closeSheet();
+            renderToday();
+            toast("Следующий шаг обновлён");
+          } catch (error) {
+            toast(friendlyError(error), true);
+          }
         }));
         host.querySelectorAll("[data-focus-action]").forEach((button) => button.addEventListener("click", async () => {
-          const action = button.dataset.focusAction;
-          if (action === "auto") {
-            try {
-              await api("/public/v2/main-result", { method: "DELETE" });
-              await refreshDashboard(); closeSheet(); toast("Автоматический выбор включён");
-            } catch (error) { toast(friendlyError(error), true); }
-          } else if (action === "eva") openEvaHandoff(`Помоги уточнить главное на сегодня: ${main.title || "пока не выбрано"}`);
-          else openTaskSheet(null, false, main.title || "");
+          if (button.dataset.focusAction === "eva") {
+            return openEvaHandoff(`Помоги уточнить следующий шаг: ${main.title || "пока не выбран"}`);
+          }
+          try {
+            await api("/public/v2/main-result", { method: "DELETE" });
+            await refreshDashboard();
+            closeSheet();
+            toast("Автоматический выбор включён");
+          } catch (error) {
+            toast(friendlyError(error), true);
+          }
         }));
       },
     });
   }
 
-  function startMainFocus() {
+  async function startMainFocus() {
     const main = state.dashboard?.main_focus || {};
     if (!main.title) return openMainFocusSheet();
-    openFocusSheet(main);
+
+    const payload = {
+      title: main.title,
+      planned_minutes: Number(main.planned_minutes || main.duration_minutes || 0) || 6,
+      source_type: main.source_type || null,
+      source_id: main.source_id || null,
+      work_block_id: main.work_block_id || null,
+    };
+
+    const button = document.getElementById("main-focus-action");
+    button.disabled = true;
+    trackRetention("core_action_started", {
+      planned_minutes: payload.planned_minutes,
+      source_type: payload.source_type,
+    });
+    try {
+      const result = await api("/public/v2/focus-sessions", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      startFocusTimer(result.focus_session, payload);
+      haptic("success");
+    } catch (error) {
+      toast(friendlyError(error), true);
+    } finally {
+      button.disabled = false;
+    }
   }
 
   function openFocusSheet(main) {
     openSheet({
-      title: "Фокус на результате",
-      subtitle: "Таймер помогает начать, но главное — что появится к концу сессии.",
+      title: "Начать следующий шаг",
+      subtitle: "Таймер нужен только для старта. Важен конкретный результат.",
       html: `<form class="form-grid" id="focus-form">
-        <label><span>Ожидаемый результат</span><input name="title" maxlength="500" required value="${escapeAttr(main.title || "")}"></label>
-        <fieldset><legend>Длительность</legend><div class="choice-grid">${[5,15,25,45].map((minutes) => `<button class="choice-button ${minutes === 15 ? "is-selected" : ""}" type="button" data-minutes="${minutes}">${minutes} минут</button>`).join("")}</div></fieldset>
+        <label><span>Результат</span><input name="title" maxlength="500" required value="${escapeAttr(main.title || "")}"></label>
+        <fieldset><legend>Сколько времени выделить?</legend><div class="choice-grid">${[5,15,25,45].map((minutes) => `<button class="choice-button ${minutes === 15 ? "is-selected" : ""}" type="button" data-minutes="${minutes}">${minutes} минут</button>`).join("")}</div></fieldset>
         <input type="hidden" name="minutes" value="15">
         <button class="primary-action" type="submit">Начать</button>
       </form>`,
@@ -578,11 +948,20 @@
         form.addEventListener("submit", async (event) => {
           event.preventDefault();
           const raw = Object.fromEntries(new FormData(form).entries());
-          const payload = { title: raw.title.trim(), planned_minutes: Number(raw.minutes), source_type: main.source_type || null, source_id: main.source_id || null, work_block_id: main.work_block_id || null };
+          const payload = {
+            title: raw.title.trim(),
+            planned_minutes: Number(raw.minutes),
+            source_type: main.source_type || null,
+            source_id: main.source_id || null,
+            work_block_id: main.work_block_id || null,
+          };
           try {
             const result = await api("/public/v2/focus-sessions", { method: "POST", body: JSON.stringify(payload) });
-            closeSheet(); startFocusTimer(result.focus_session, payload); haptic("success");
-          } catch (error) { toast(friendlyError(error), true); }
+            closeSheet();
+            startFocusTimer(result.focus_session, payload);
+          } catch (error) {
+            toast(friendlyError(error), true);
+          }
         });
       },
     });
@@ -592,663 +971,308 @@
     const started = Date.now();
     const ends = started + payload.planned_minutes * 60_000;
     const timer = document.createElement("button");
-    timer.type = "button";
     timer.className = "toast";
     timer.hidden = false;
-    timer.innerHTML = `<strong id="live-focus-clock"></strong> · ${escapeHtml(payload.title)} · Завершить`;
+    timer.type = "button";
     document.body.appendChild(timer);
-    const tick = () => {
-      const remaining = Math.max(0, ends - Date.now());
-      timer.querySelector("#live-focus-clock").textContent = clock(remaining);
-      if (remaining === 0) finish();
-    };
-    const interval = setInterval(tick, 1000);
-    tick();
+
     const finish = async () => {
       clearInterval(interval);
       timer.remove();
       const actualMinutes = Math.max(1, Math.round((Date.now() - started) / 60000));
       try {
-        await api(`/public/v2/focus-sessions/${encodeURIComponent(session?.id || "0")}/complete`, { method: "POST", body: JSON.stringify({ actual_minutes: actualMinutes, actual_result: payload.title }) });
-      } catch (error) { console.warn(error); }
-      toast("Фокус-сессия завершена");
+        await api(`/public/v2/focus-sessions/${encodeURIComponent(session?.id || "0")}/complete`, {
+          method: "POST",
+          body: JSON.stringify({ actual_minutes: actualMinutes, actual_result: payload.title }),
+        });
+
+        const [dashboard, progress] = await Promise.all([
+          safeApi("/public/v2/dashboard", {}, null),
+          safeApi("/public/progress", {}, null),
+        ]);
+        if (dashboard) state.dashboard = dashboard;
+        if (progress?.progress) state.progress = progress.progress;
+
+        recordMeaningfulAction("daily_step", localNowParts().dateKey, {
+          actual_minutes: actualMinutes,
+          planned_minutes: payload.planned_minutes,
+        });
+        completeShieldRecoveryIfPending();
+        markActivationStep("action_completed", {
+          action_type: "daily_step",
+          actual_minutes: actualMinutes,
+        });
+        trackRetention("core_action_completed", {
+          actual_minutes: actualMinutes,
+          planned_minutes: payload.planned_minutes,
+        });
+
+        renderToday();
+        haptic("success");
+        toast("Готово. Теперь посмотри, что Ева заметила.");
+      } catch {
+        toast("Шаг завершён. Обновление прогресса появится чуть позже.");
+      }
     };
+    const tick = () => {
+      const remaining = Math.max(0, ends - Date.now());
+      timer.textContent = `${clock(remaining)} · ${payload.title} · завершить`;
+      if (remaining === 0) void finish();
+    };
+    const interval = setInterval(tick, 1000);
     timer.addEventListener("click", finish, { once: true });
+    tick();
   }
 
-  function handleQuick(action, button) {
-    button.classList.add("is-selected");
-    setTimeout(() => button.classList.remove("is-selected"), 350);
-    // «Записать» ведёт в дневник, когда он подключён: две ленты записей
-    // в одном приложении человек различать не обязан.
-    if (action === "write") {
-      if (state.journalEnabled && window.EvaJournal) window.EvaJournal.open();
-      else openComposeSheet();
-    }
-    else if (action === "eva") openEvaHandoff(screenContext());
-    else if (action === "reset") openPractices();
-    else openAddSheet();
-    haptic("light");
-  }
-
-  function openAddSheet() {
+  function openContextReset() {
     openSheet({
-      title: "Добавить",
-      subtitle: "Новая запись сразу попадёт в соответствующий раздел.",
-      html: `<div class="sheet-options">
-        ${sheetOption("checklist", "Задачу", "Срок, напоминание и приоритет", 'data-add="task"')}
-        ${sheetOption("bell", "Напоминание", "Однократное или повторяющееся", 'data-add="reminder"')}
-        ${sheetOption("note", "Заметку", "Идею, материал или справочную информацию", 'data-add="note"')}
-        ${sheetOption("wallet", "Доход или расход", "Добавить финансовую запись", 'data-add="budget"')}
-        ${sheetOption("signpost", "Решение", "Факты, варианты, риски и проверка", 'data-add="decision"')}
+      title: "Короткая перезагрузка",
+      subtitle: "Это не лечение и не тест. Выбери только то, что сейчас комфортно.",
+      html: `<div class="section-stack">
+        <button class="section-card" data-practice="breath" type="button"><h3>Ровное дыхание</h3><p>Мягко удлинить выдох без задержек и усилия.</p></button>
+        <button class="section-card" data-practice="ground" type="button"><h3>Заземление 5–4–3–2–1</h3><p>Вернуть внимание к тому, что видишь, слышишь и ощущаешь.</p></button>
+        <button class="section-card" data-practice="sort" type="button"><h3>Разложить мысли</h3><p>Сейчас, позже и вне контроля.</p></button>
       </div>`,
       onMount(host) {
-        host.querySelectorAll("[data-add]").forEach((button) => button.addEventListener("click", () => {
-          const type = button.dataset.add;
-          if (type === "task") openTaskSheet();
-          else if (type === "reminder") openTaskSheet(null, true);
-          else if (type === "note") openNoteSheet();
-          else if (type === "budget") openBudgetEntrySheet();
-          else openDecisionSheet();
-        }));
+        host.querySelectorAll("[data-practice]").forEach((button) => button.addEventListener("click", () => runPractice(button.dataset.practice)));
       },
     });
   }
 
-  function openComposeSheet(prefill = "") {
-    openSheet({
-      title: "Записать",
-      subtitle: "Дневниковая запись сохраняется отдельно от рабочих заметок.",
-      html: `<form class="form-grid" id="journal-form">
-        <label><span>Что важно сохранить?</span><textarea name="content" maxlength="10000" rows="5" required placeholder="Событие, мысль, наблюдение или вывод…">${escapeHtml(prefill)}</textarea></label>
-        <label><span>Заголовок, необязательно</span><input name="title" maxlength="300"></label>
-        <button class="primary-action" type="submit">Сохранить в дневник</button>
-      </form>
-      <div class="sheet-options" style="margin-top:10px">${sheetOption("voice", "Надиктовать в чате", "Открыть Еву и отправить голосовое", 'data-journal-handoff="voice"')}${sheetOption("photo", "Добавить фото", "Отправить изображение Еве", 'data-journal-handoff="photo"')}</div>`,
-      onMount(host) {
-        host.querySelector("#journal-form").addEventListener("submit", async (event) => {
-          event.preventDefault();
-          const raw = Object.fromEntries(new FormData(event.currentTarget).entries());
-          const payload = { title: raw.title.trim() || firstLine(raw.content).slice(0, 100), content: raw.content.trim(), category: "Дневник", entry_type: "journal" };
-          try {
-            const result = await api("/public/v2/notes", { method: "POST", body: JSON.stringify(payload) });
-            state.notes.unshift(result.note); closeSheet(); toast("Запись сохранена"); await refreshDashboard();
-          } catch (error) { toast(friendlyError(error), true); }
-        });
-        host.querySelectorAll("[data-journal-handoff]").forEach((button) => button.addEventListener("click", () => openEvaHandoff(button.dataset.journalHandoff === "voice" ? "Хочу надиктовать запись в дневник" : "Хочу добавить фото в дневник")));
-      },
-    });
-  }
-
-  // ---------------------------------------------------------------------------
-  // Organizer
-  // ---------------------------------------------------------------------------
-
-  async function loadOrganizerData() {
-    const [tasks, notes] = await Promise.all([
-      safeApi("/public/v2/tasks?view=all", {}, null),
-      safeApi("/public/v2/notes?limit=100", {}, null),
-    ]);
-    if (tasks) state.tasks = tasks.tasks || [];
-    if (notes) state.notes = notes.notes || [];
-    renderOrganizer();
-  }
-
-  function renderOrganizer() {
-    const organizerHost = document.getElementById("organizer-content");
-    if (organizerHost && renderPhase(organizerHost, ["/public/v2/dashboard", "/public/v2/tasks", "/public/v2/notes"])) return;
-    const active = state.tasks.filter((task) => !isDone(task) && task.status !== "canceled");
-    const reminders = state.tasks.filter((task) => task.remind_at && task.status !== "canceled");
-    document.getElementById("task-count").textContent = active.length;
-    document.getElementById("reminder-count").textContent = reminders.filter((task) => !isDone(task)).length;
-    document.getElementById("note-count").textContent = organizerNotes().length;
-    const filters = document.getElementById("task-filters");
-    filters.hidden = state.organizerTab === "notes";
-    const host = document.getElementById("organizer-content");
-    if (state.organizerTab === "notes") return renderNotes(host);
-    let items = state.organizerTab === "reminders" ? reminders : state.tasks.filter((task) => task.status !== "canceled");
-    items = items.filter((task) => {
-      if (state.taskFilter === "done") return isDone(task);
-      if (state.taskFilter === "today") return !isDone(task) && isToday(task.due_at || task.remind_at);
-      return !isDone(task);
-    });
-    items.sort((a, b) => taskSort(a) - taskSort(b));
-    if (!items.length) {
-      host.innerHTML = emptyState(state.organizerTab === "reminders" ? "Напоминаний пока нет" : state.taskFilter === "done" ? "Выполненных задач пока нет" : "Задач пока нет", "Нажмите «+» или попросите Еву добавить запись.");
-      return;
-    }
-    const groups = groupTasks(items);
-    host.innerHTML = Object.entries(groups).map(([title, group]) => `<div class="task-group-title">${escapeHtml(title)}</div>${group.map(renderTaskRow).join("")}`).join("");
-    injectIcons(host);
-    host.querySelectorAll("[data-task-toggle]").forEach((button) => button.addEventListener("click", () => toggleTask(button.dataset.taskToggle)));
-    host.querySelectorAll("[data-task-edit]").forEach((button) => button.addEventListener("click", () => openTaskSheet(state.tasks.find((task) => String(task.id) === button.dataset.taskEdit), state.organizerTab === "reminders")));
-  }
-
-  function renderTaskRow(task) {
-    const done = isDone(task);
-    const dueText = task.due_at ? `Срок ${formatDateTime(task.due_at)}` : "";
-    const reminderText = task.remind_at ? `Напомнить ${formatDateTime(task.remind_at)}` : "";
-    const overdue = !done && task.due_at && new Date(task.due_at) < new Date();
-    return `<article class="task-row ${done ? "is-done" : ""}">
-      <button class="task-check" type="button" data-task-toggle="${escapeAttr(task.id)}" aria-label="${done ? "Вернуть задачу" : "Отметить выполненной"}"><span data-icon="check"></span></button>
-      <button class="task-copy" type="button" data-task-edit="${escapeAttr(task.id)}"><span class="task-title">${escapeHtml(task.title)}</span><span class="task-meta">${dueText ? `<span class="${overdue ? "overdue" : ""}">${escapeHtml(dueText)}</span>` : ""}${reminderText ? `<span>${escapeHtml(reminderText)}</span>` : ""}${task.repeat_enabled ? "<span>Повторяется</span>" : ""}</span></button>
-      <button class="task-edit" type="button" data-task-edit="${escapeAttr(task.id)}" aria-label="Изменить"><span data-icon="edit"></span></button>
-    </article>`;
-  }
-
-  function renderNotes(host) {
-    const notes = organizerNotes();
-    if (!notes.length) {
-      host.innerHTML = emptyState("Заметок пока нет", "Здесь хранятся идеи, материалы и рабочая информация. Дневник остаётся отдельной лентой.");
-      return;
-    }
-    host.innerHTML = notes.map((note) => `<button class="note-row" type="button" data-note-edit="${escapeAttr(note.id)}"><h3>${escapeHtml(note.title || "Без названия")}</h3><p>${escapeHtml(note.content || "")}</p><footer><span>${escapeHtml(note.category || "Заметка")}</span><span>${formatDate(note.updated_at || note.created_at)}</span></footer></button>`).join("");
-    host.querySelectorAll("[data-note-edit]").forEach((button) => button.addEventListener("click", () => openNoteSheet(state.notes.find((note) => String(note.id) === button.dataset.noteEdit))));
-  }
-
-  async function toggleTask(id) {
-    const task = state.tasks.find((item) => String(item.id) === String(id));
-    if (!task) return;
-    const previous = task.status;
-    task.status = isDone(task) ? "open" : "done";
-    renderOrganizer();
-    try {
-      const result = await api(`/public/v2/tasks/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ status: task.status }) });
-      Object.assign(task, result.task || {});
-      toast(task.status === "done" ? "Готово" : "Задача возвращена");
-      await refreshDashboard(); haptic("success");
-    } catch (error) {
-      task.status = previous; renderOrganizer(); toast(friendlyError(error), true);
-    }
-  }
-
-  function openTaskSheet(task = null, reminderMode = false, prefillTitle = "") {
-    closeSheet();
-    openSheet({
-      title: task ? "Изменить задачу" : reminderMode ? "Новое напоминание" : "Новая задача",
-      subtitle: "Срок определяет, когда задача должна быть готова. Напоминание — когда Ева должна напомнить.",
-      html: `<form class="form-grid" id="task-form">
-        <label><span>Название</span><input name="title" maxlength="500" required value="${escapeAttr(task?.title || prefillTitle)}" placeholder="Что нужно сделать?"></label>
-        <label><span>Описание</span><textarea name="description" maxlength="5000" rows="2">${escapeHtml(task?.description || "")}</textarea></label>
-        <label><span>Срок</span><input name="due_at" type="datetime-local" value="${escapeAttr(toLocalInput(task?.due_at))}"></label>
-        <label><span>Напомнить</span><input name="remind_at" type="datetime-local" value="${escapeAttr(toLocalInput(task?.remind_at))}" ${reminderMode && !task ? "required" : ""}></label>
-        <label><span>Приоритет</span><select name="priority"><option value="3">Обычный</option><option value="2" ${Number(task?.priority) === 2 ? "selected" : ""}>Высокий</option><option value="1" ${Number(task?.priority) === 1 ? "selected" : ""}>Срочный</option><option value="4" ${Number(task?.priority) === 4 ? "selected" : ""}>Низкий</option></select></label>
-        <button class="primary-action" type="submit">${task ? "Сохранить" : "Добавить"}</button>
-        ${task ? '<button class="danger-action" id="delete-task" type="button">Удалить задачу</button>' : ""}
-      </form>`,
-      onMount(host) {
-        const form = host.querySelector("#task-form");
-        form.addEventListener("submit", (event) => saveTask(event, task));
-        host.querySelector("#delete-task")?.addEventListener("click", () => deleteTask(task));
-      },
-    });
-  }
-
-  async function saveTask(event, task) {
-    event.preventDefault();
-    const form = event.currentTarget;
-    const raw = Object.fromEntries(new FormData(form).entries());
-    const payload = {
-      title: raw.title.trim(),
-      description: raw.description.trim() || null,
-      due_at: localInputToIso(raw.due_at),
-      remind_at: localInputToIso(raw.remind_at),
-      priority: Number(raw.priority),
+  function runPractice(code) {
+    const practices = {
+      breath: ["Ровное дыхание", "Дыши в удобном ритме и мягко сделай выдох немного длиннее вдоха. Не задерживай дыхание. Остановись при дискомфорте."],
+      ground: ["Заземление 5–4–3–2–1", "Назови 5 вещей, которые видишь; 4 ощущения тела; 3 звука; 2 запаха; 1 вкус или спокойный вдох."],
+      sort: ["Разложить мысли", "Раздели всё, что занимает внимание, на три группы: «сейчас», «позже», «вне контроля». В «сейчас» оставь один доступный шаг."],
     };
-    const submit = form.querySelector('button[type="submit"]');
-    submit.disabled = true;
-    try {
-      const result = task
-        ? await api(`/public/v2/tasks/${encodeURIComponent(task.id)}`, { method: "PATCH", body: JSON.stringify(payload) })
-        : await api("/public/v2/tasks", { method: "POST", body: JSON.stringify(payload) });
-      if (task) Object.assign(task, result.task); else state.tasks.unshift(result.task);
-      closeSheet(); renderOrganizer(); await refreshDashboard(); toast(task ? "Изменения сохранены" : "Задача добавлена"); haptic("success");
-    } catch (error) { toast(friendlyError(error), true); }
-    finally { submit.disabled = false; }
-  }
-
-  async function deleteTask(task) {
-    if (!task) return;
-    if (!await confirmDanger({
-      title: "Удалить задачу?",
-      detail: `«${task.title}» исчезнет из списка вместе с напоминанием. Отменить это нельзя.`,
-      confirmLabel: "Удалить задачу",
-    })) return;
-    try {
-      await api(`/public/v2/tasks/${encodeURIComponent(task.id)}`, { method: "DELETE" });
-      state.tasks = state.tasks.filter((item) => item.id !== task.id);
-      closeSheet(); renderOrganizer(); await refreshDashboard(); toast("Задача удалена");
-    } catch (error) { toast(friendlyError(error), true); }
-  }
-
-  function openNoteSheet(note = null) {
-    closeSheet();
+    const [title, text] = practices[code] || practices.sort;
     openSheet({
-      title: note ? "Изменить заметку" : "Новая заметка",
-      subtitle: "Заметки — рабочая информация. Личные события и переживания лучше сохранять в дневнике.",
-      html: `<form class="form-grid" id="note-form">
-        <label><span>Заголовок</span><input name="title" maxlength="300" required value="${escapeAttr(note?.title || "")}"></label>
-        <label><span>Содержание</span><textarea name="content" maxlength="100000" rows="6" required>${escapeHtml(note?.content || "")}</textarea></label>
-        <label><span>Категория</span><input name="category" maxlength="200" value="${escapeAttr(note?.category || "Рабочее")}"></label>
-        <button class="primary-action" type="submit">${note ? "Сохранить" : "Добавить"}</button>
-        ${note ? '<button class="danger-action" id="delete-note" type="button">Удалить заметку</button>' : ""}
-      </form>`,
+      title,
+      subtitle: "Можно остановиться в любой момент.",
+      html: `<article class="section-card"><p>${escapeHtml(text)}</p></article>
+        <div class="action-row">
+          <button class="primary-action" id="practice-done" type="button">Готово</button>
+          ${state.journalEnabled ? '<button class="secondary-action" id="practice-write" type="button">Записать</button>' : ""}
+        </div>`,
       onMount(host) {
-        host.querySelector("#note-form").addEventListener("submit", (event) => saveNote(event, note));
-        host.querySelector("#delete-note")?.addEventListener("click", () => deleteNote(note));
+        host.querySelector("#practice-done").addEventListener("click", closeSheet);
+        host.querySelector("#practice-write")?.addEventListener("click", () => {
+          closeSheet();
+          window.EvaJournal?.openNew?.();
+        });
       },
     });
   }
 
-  async function saveNote(event, note) {
-    event.preventDefault();
-    const raw = Object.fromEntries(new FormData(event.currentTarget).entries());
-    const payload = { title: raw.title.trim(), content: raw.content.trim(), category: raw.category.trim() || null, entry_type: "note" };
-    try {
-      const result = note
-        ? await api(`/public/v2/notes/${encodeURIComponent(note.id)}`, { method: "PATCH", body: JSON.stringify(payload) })
-        : await api("/public/v2/notes", { method: "POST", body: JSON.stringify(payload) });
-      if (note) Object.assign(note, result.note); else state.notes.unshift(result.note);
-      closeSheet(); renderOrganizer(); await refreshDashboard(); toast(note ? "Заметка изменена" : "Заметка добавлена");
-    } catch (error) { toast(friendlyError(error), true); }
-  }
-
-  async function deleteNote(note) {
-    if (!note) return;
-    if (!await confirmDanger({
-      title: "Удалить заметку?",
-      detail: `«${note.title || "Без названия"}» будет удалена без возможности восстановления.`,
-      confirmLabel: "Удалить заметку",
-    })) return;
-    try {
-      await api(`/public/v2/notes/${encodeURIComponent(note.id)}`, { method: "DELETE" });
-      state.notes = state.notes.filter((item) => item.id !== note.id);
-      closeSheet(); renderOrganizer(); await refreshDashboard(); toast("Заметка удалена");
-    } catch (error) { toast(friendlyError(error), true); }
-  }
-
-  // ---------------------------------------------------------------------------
-  // Development
-  // ---------------------------------------------------------------------------
-
-  /**
-   * Состояние экрана до данных.
-   *
-   * Возвращает `true`, если экран уже занят загрузкой или отказом: в
-   * этом случае рисовать поверх нечего. Отказ обязательно даёт кнопку
-   * повтора — иначе экран становится тупиком.
-   */
-  function renderPhase(host, sources = []) {
-    if (state.phase === "loading") {
-      host.innerHTML = '<div class="section-stack"><div class="loading-skeleton"></div><div class="loading-skeleton"></div><div class="loading-skeleton"></div></div>';
-      return true;
-    }
-    if (state.phase === "error" || sources.some((source) => state.failed.has(source))) {
-      host.innerHTML = `${emptyState("Данные не загрузились", escapeHtml(state.lastError || "Сервис временно недоступен"))}<div class="action-row"><button class="primary-action" data-retry type="button">Повторить</button></div>`;
-      host.querySelector("[data-retry]").addEventListener("click", () => {
-        state.phase = "loading";
-        state.failed.clear();
-        renderAll();
-        void bootstrap();
-      });
-      return true;
-    }
-    return false;
-  }
 
   function renderDevelopment() {
     const host = document.getElementById("development-content");
     if (!host) return;
-    if (renderPhase(host, ["/public/goals", "/public/progress"])) return;
-    const tab = state.developmentTab;
-    if (tab === "goals") return renderGoals(host);
-    if (tab === "decisions") return void renderDecisions(host);
-    if (tab === "programs") return renderUnavailableDevelopment(host, "Программы", "Персональные маршруты на 7, 14 и 30 дней. Раздел появится после подключения серверного каталога и учёта ежедневных шагов.", "route");
-    if (tab === "habits") return renderUnavailableDevelopment(host, "Привычки и ритуалы", "Здесь будут поддерживающие ритуалы с полной и минимальной версией без штрафов за пропуск.", "repeat");
-    const activeGoals = state.goals.filter((goal) => goal.status === "active");
-    const completed = state.progress?.completed_results?.length || 0;
-    const decisionsOpen = state.dashboard?.counts?.open_decisions || state.decisions.filter((item) => item.status !== "completed").length;
-    host.innerHTML = `<div class="section-stack">
-      <div class="summary-row"><div class="summary-pill"><strong>${activeGoals.length}</strong><span>активные цели</span></div><div class="summary-pill"><strong>${completed}</strong><span>готовые результаты</span></div><div class="summary-pill"><strong>${decisionsOpen}</strong><span>решения в работе</span></div></div>
-      <article class="section-card"><span class="eyebrow">ТЕКУЩЕЕ НАПРАВЛЕНИЕ</span><h2>${escapeHtml(activeGoals[0]?.title || "Выбрать одну важную область")}</h2><p>${escapeHtml(activeGoals[0]?.next_result || "Карта жизни помогает выбрать направление, но не требует одинакового баланса во всех сферах.")}</p><div class="action-row"><button class="primary-action" id="overview-goals" type="button">Открыть цели</button><button class="secondary-action" id="life-map" type="button">Карта жизни</button></div></article>
-      <article class="section-card"><h3>Логика раздела</h3><p>Цели отвечают за результат. Программы — за последовательность обучения. Привычки — за поддерживающий ритм. Решения — за выбор и последующую проверку фактического результата.</p></article>
-    </div>`;
-    host.querySelector("#overview-goals").addEventListener("click", () => { state.developmentTab = "goals"; selectDevelopmentTab(); renderDevelopment(); });
-    host.querySelector("#life-map").addEventListener("click", () => openLifeMapSheet());
+    syncDevelopmentTabs();
+    if (state.phase === "loading") return;
+    if (state.failed.has("/public/goals") || state.failed.has("/public/progress")) {
+      host.innerHTML = `${emptyState("Данные не загрузились", state.lastError || "Сервис временно недоступен")}
+        <div class="action-row"><button class="primary-action" data-retry type="button">Повторить</button></div>`;
+      host.querySelector("[data-retry]")?.addEventListener("click", () => void retryBootstrap());
+      return;
+    }
+    if (state.developmentTab === "progress") return renderProgress(host);
+    if (state.developmentTab === "tests") return renderTests(host);
+    renderGoals(host);
   }
 
-  function selectDevelopmentTab() {
-    document.querySelectorAll("[data-development]").forEach((button) => button.classList.toggle("is-active", button.dataset.development === state.developmentTab));
+  function renderTests(host) {
+    const profile = profileInvestmentState();
+    host.innerHTML = `<div class="section-stack">
+      <article class="tests-placeholder">
+        <span class="tests-placeholder-icon">${icon("brain")}</span>
+        <span class="eyebrow">ТЕСТЫ И САМОПОЗНАНИЕ · СКОРО</span>
+        <h2>Профиль, который становится точнее со временем</h2>
+        <p>Личность, эмоции, отношения и профориентация будут собираться в единый профиль Евы. До подключения юридически допустимых методик результаты не имитируются.</p>
+        <div class="tests-tags"><span>Личность</span><span>Эмоции</span><span>Отношения</span><span>Профориентация</span></div>
+      </article>
+      <article class="section-card">
+        <span class="eyebrow">ТЕКУЩАЯ ИНВЕСТИЦИЯ</span>
+        <h3>Профиль самопонимания: ${profile.overall}%</h3>
+        <div class="goal-progress"><span style="width:${profile.overall}%"></span></div>
+        <p>Эмоции ${profile.emotions}% · Отношения ${profile.relationships}% · Цели ${profile.goals}%</p>
+      </article>
+    </div>`;
   }
 
   function renderGoals(host) {
-    if (!state.goals.length) {
-      host.innerHTML = `${emptyState("Целей пока нет", "Добавьте ориентир, который действительно хочется приблизить.")}<div class="action-row"><button class="primary-action" id="add-goal" type="button">Добавить цель</button></div>`;
+    const goals = state.goals || [];
+    if (!goals.length) {
+      host.innerHTML = `${emptyState("Целей пока нет", "Добавь один результат, который действительно хочешь приблизить.")}
+        <div class="action-row"><button class="primary-action" id="add-goal" type="button">Добавить цель</button></div>`;
       host.querySelector("#add-goal").addEventListener("click", openGoalSheet);
       return;
     }
-    host.innerHTML = `<div class="section-stack">${state.goals.map((goal) => {
-      const progress = Math.max(0, Math.min(100, Number(goal.progress_percent || 0)));
-      return `<article class="section-card"><span class="eyebrow">${escapeHtml(goal.status === "active" ? "АКТИВНАЯ ЦЕЛЬ" : goal.status?.toUpperCase() || "ЦЕЛЬ")}</span><h3>${escapeHtml(goal.title)}</h3><p>${escapeHtml(goal.why_it_matters || "")}</p><div style="height:6px;background:#eeeae3;border-radius:99px;margin-top:10px;overflow:hidden"><span style="display:block;height:100%;width:${progress}%;background:var(--orange);border-radius:99px"></span></div><p>${progress}% · ${escapeHtml(goal.next_result || goal.next_step || "Следующий результат ещё не сформирован")}</p></article>`;
-    }).join("")}<button class="primary-action" id="add-goal" type="button">Добавить цель</button></div>`;
+
+    host.innerHTML = `<div class="section-stack">
+      ${goals.map((goal) => {
+        const progress = Math.max(0, Math.min(100, Number(goal.progress_percent || 0)));
+        return `<article class="section-card">
+          <span class="eyebrow">${goal.status === "active" ? "АКТИВНАЯ ЦЕЛЬ" : "ЦЕЛЬ"}</span>
+          <h3>${escapeHtml(goal.title)}</h3>
+          ${goal.why_it_matters ? `<p>${escapeHtml(goal.why_it_matters)}</p>` : ""}
+          <div class="goal-progress"><span style="width:${progress}%"></span></div>
+          <p>${progress}% · ${escapeHtml(goal.next_result || goal.next_step || "Следующий результат ещё не определён")}</p>
+        </article>`;
+      }).join("")}
+      <button class="primary-action" id="add-goal" type="button">Добавить цель</button>
+    </div>`;
     host.querySelector("#add-goal").addEventListener("click", openGoalSheet);
   }
 
   function openGoalSheet() {
     openSheet({
       title: "Новая цель",
-      subtitle: "Цель должна описывать желаемый результат, а не постоянное чувство вины за невыполнение.",
-      html: `<form class="form-grid" id="goal-form"><label><span>Что должно измениться?</span><input name="title" maxlength="500" required></label><label><span>Почему это важно?</span><textarea name="why_it_matters" maxlength="5000" rows="3"></textarea></label><label><span>Желаемый срок</span><input name="target_date" type="date"></label><button class="primary-action" type="submit">Сохранить цель</button></form>`,
+      subtitle: "Формулируй результат, а не обязанность быть идеальным.",
+      html: `<form class="form-grid" id="goal-form">
+        <label><span>Что должно измениться?</span><input name="title" maxlength="500" required></label>
+        <label><span>Почему это важно?</span><textarea name="why_it_matters" maxlength="5000" rows="3"></textarea></label>
+        <label><span>Желаемый срок</span><input name="target_date" type="date"></label>
+        <button class="primary-action" type="submit">Сохранить цель</button>
+      </form>`,
       onMount(host) {
         host.querySelector("#goal-form").addEventListener("submit", async (event) => {
           event.preventDefault();
           const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
           try {
             const result = await api("/public/goals", { method: "POST", body: JSON.stringify(payload) });
-            state.goals.unshift(result.goal); closeSheet(); renderDevelopment(); await refreshDashboard(); toast("Цель добавлена");
-          } catch (error) { toast(friendlyError(error), true); }
+            if (result.goal) state.goals.unshift(result.goal);
+            closeSheet();
+            renderDevelopment();
+            await refreshDashboard();
+            toast("Цель добавлена");
+          } catch (error) {
+            toast(friendlyError(error), true);
+          }
         });
       },
     });
   }
 
-  async function renderDecisions(host) {
-    if (!state.decisions.length) {
-      const result = await safeApi("/public/v2/decisions", {}, null);
-      if (result) state.decisions = result.decisions || [];
-    }
-    if (!state.decisions.length) {
-      host.innerHTML = `${emptyState("Решений пока нет", "Зафиксируйте вопрос, варианты, факты и дату проверки результата.")}<div class="action-row"><button class="primary-action" id="add-decision" type="button">Разобрать решение</button></div>`;
-      host.querySelector("#add-decision").addEventListener("click", () => openDecisionSheet());
-      return;
-    }
-    host.innerHTML = `<div class="section-stack">${state.decisions.map((decision) => `<button class="section-card" type="button" data-decision="${escapeAttr(decision.id)}" style="text-align:left"><span class="eyebrow">${escapeHtml(decision.status === "completed" ? "ЗАВЕРШЕНО" : "РЕШЕНИЕ В РАБОТЕ")}</span><h3>${escapeHtml(decision.question)}</h3><p>${escapeHtml(decision.selected_option || decision.review_at ? `Пересмотреть ${formatDate(decision.review_at)}` : "Вариант ещё не выбран")}</p></button>`).join("")}<button class="primary-action" id="add-decision" type="button">Новое решение</button></div>`;
-    host.querySelectorAll("[data-decision]").forEach((button) => button.addEventListener("click", () => openDecisionSheet(state.decisions.find((item) => String(item.id) === button.dataset.decision))));
-    host.querySelector("#add-decision").addEventListener("click", () => openDecisionSheet());
-  }
-
-  function openDecisionSheet(decision = null) {
-    closeSheet();
-    openSheet({
-      title: decision ? "Изменить решение" : "Разобрать решение",
-      subtitle: "Ева может помочь сформулировать варианты, но итоговый выбор остаётся за пользователем.",
-      html: `<form class="form-grid" id="decision-form">
-        <label><span>Какой вопрос нужно решить?</span><textarea name="question" maxlength="2000" rows="2" required>${escapeHtml(decision?.question || "")}</textarea></label>
-        <label><span>Варианты, каждый с новой строки</span><textarea name="options" maxlength="5000" rows="3">${escapeHtml(arrayToLines(decision?.options))}</textarea></label>
-        <label><span>Известные факты</span><textarea name="facts" maxlength="5000" rows="3">${escapeHtml(arrayToLines(decision?.facts))}</textarea></label>
-        <label><span>Риски и ограничения</span><textarea name="risks" maxlength="5000" rows="2">${escapeHtml(arrayToLines(decision?.risks))}</textarea></label>
-        <label><span>Выбранный вариант</span><input name="selected_option" maxlength="1000" value="${escapeAttr(decision?.selected_option || "")}"></label>
-        <label><span>Когда пересмотреть?</span><input name="review_at" type="date" value="${escapeAttr(dateInput(decision?.review_at))}"></label>
-        <button class="primary-action" type="submit">${decision ? "Сохранить" : "Создать карточку"}</button>
-        <button class="secondary-action" id="decision-eva" type="button">Обсудить с Евой</button>
-      </form>`,
-      onMount(host) {
-        host.querySelector("#decision-form").addEventListener("submit", async (event) => {
-          event.preventDefault();
-          const raw = Object.fromEntries(new FormData(event.currentTarget).entries());
-          const payload = { question: raw.question.trim(), options: linesToArray(raw.options), facts: linesToArray(raw.facts), risks: linesToArray(raw.risks), selected_option: raw.selected_option.trim() || null, review_at: raw.review_at || null };
-          try {
-            const result = decision
-              ? await api(`/public/v2/decisions/${encodeURIComponent(decision.id)}`, { method: "PATCH", body: JSON.stringify(payload) })
-              : await api("/public/v2/decisions", { method: "POST", body: JSON.stringify(payload) });
-            if (decision) Object.assign(decision, result.decision); else state.decisions.unshift(result.decision);
-            closeSheet(); state.developmentTab = "decisions"; renderDevelopment(); await refreshDashboard(); toast("Карточка решения сохранена");
-          } catch (error) { toast(friendlyError(error), true); }
-        });
-        host.querySelector("#decision-eva").addEventListener("click", () => {
-          const question = host.querySelector('[name="question"]').value.trim();
-          openEvaHandoff(`Помоги разобрать решение: ${question || "я ещё формулирую вопрос"}. Отделяй факты от предположений, предложи варианты, риски и дешёвый тест.`);
-        });
-      },
-    });
-  }
-
-  function renderUnavailableDevelopment(host, title, description, iconName) {
-    host.innerHTML = `<div class="section-stack"><article class="section-card"><div style="width:44px;height:44px;color:var(--orange-dark)">${icon(iconName)}</div><h2>${escapeHtml(title)}</h2><p>${escapeHtml(description)}</p><div class="action-row"><button class="secondary-action" id="development-eva" type="button">Обсудить с Евой</button></div></article><article class="section-card"><span class="eyebrow">ПОЧЕМУ НЕ ЗАГЛУШКА</span><p>Пока серверный учёт не подключён, раздел не имитирует сохранение данных и не дублирует цели или Органайзер.</p></article></div>`;
-    host.querySelector("#development-eva").addEventListener("click", () => openEvaHandoff(`Помоги составить ${title.toLowerCase()} без сохранения в WebApp`));
-  }
-
-  function openLifeMapSheet() {
-    openSheet({
-      title: "Карта жизни",
-      subtitle: "Низкая оценка не означает проблему, если сфера сейчас не важна.",
-      html: `<div class="section-stack"><article class="section-card"><h3>Архитектура подготовлена</h3><p>Для полноценной карты нужны серверные оценки важности, удовлетворённости, желаемого изменения и допустимой цены. Пока данные не сохраняются, чтобы не создавать ложное ощущение работающего модуля.</p></article><button class="secondary-action" id="life-eva" type="button">Обсудить сферы с Евой</button></div>`,
-      onMount(host) { host.querySelector("#life-eva").addEventListener("click", () => openEvaHandoff("Помоги оценить важность и удовлетворённость основными сферами жизни без требования идеального баланса")); },
-    });
-  }
-
-  // ---------------------------------------------------------------------------
-  // Hub / modules
-  // ---------------------------------------------------------------------------
-
-  function renderHub() {
-    const host = document.getElementById("hub-content");
-    const summaries = state.dashboard?.hub || {};
-    host.innerHTML = hubModules.map((item) => `<button class="hub-card" type="button" data-hub="${item.code}"><div class="hub-card-top"><span class="hub-icon">${icon(item.icon)}</span><span class="hub-badge">${escapeHtml(item.badge)}</span></div><div><h3>${escapeHtml(item.title)}</h3><p>${escapeHtml(item.note)}</p></div><footer>${escapeHtml(hubSummary(item.code, summaries))}</footer></button>`).join("");
-    host.querySelectorAll("[data-hub]").forEach((button) => button.addEventListener("click", () => openHubModule(button.dataset.hub)));
-  }
-
-  function hubSummary(code, summaries) {
-    if (code === "journal") return "Запись сохраняется без участия ИИ";
-    if (code === "budget") return summaries.budget || budgetSummaryText();
-    if (code === "reports") return summaries.reports || `${state.progress?.completed_results?.length || 0} готовых результатов`;
-    if (code === "practices") return "5 коротких способов перезагрузки";
-    if (code === "astro") return "Три отдельных символических раздела";
-    if (code === "tests") return "Будет включено после подключения тестов";
-    return "Будет включено после подключения приглашений";
-  }
-
-  function openHubModule(code) {
-    if (code === "journal") return window.EvaJournal?.open();
-    if (code === "budget") return openBudgetModule();
-    if (code === "practices") return openPractices();
-    if (code === "reports") return openReportsModule();
-    if (code === "astro") return openAstroModule();
-    openModule({
-      code,
-      title: code === "tests" ? "Тесты" : "Совместимость",
-      kicker: "МОДУЛЬ ПОДГОТОВЛЕН",
-      html: `<div class="section-stack"><article class="section-card"><h2>${code === "tests" ? "Тесты личности" : "Совместимость людей"}</h2><p>${code === "tests" ? "Frontend не выдаёт вымышленные результаты. Для запуска нужны каталог методик, версии шкал, хранение ответов и серверный расчёт отчёта." : "Frontend не создаёт фиктивные ссылки. Для запуска нужны приглашения, согласие второго участника, результаты тестов и отдельные карточки отчётов."}</p></article><button class="secondary-action" id="module-eva" type="button">Обсудить с Евой</button></div>`,
-      onMount(host) { host.querySelector("#module-eva").addEventListener("click", () => openEvaHandoff(code === "tests" ? "Помоги выбрать подходящий тест для самопознания" : "Помоги подготовить разговор о совместимости и общении")); },
-    });
-  }
-
-  function openModule({ code, title, kicker, html, onMount }) {
-    state.module = code;
-    state.previousScreen = state.screen === "module" ? state.previousScreen : state.screen;
-    document.getElementById("module-title").textContent = title;
-    document.getElementById("module-kicker").textContent = kicker;
-    const host = document.getElementById("module-content");
-    host.innerHTML = html;
-    injectIcons(host);
-    onMount?.(host);
-    openScreen("module");
-  }
-
-  async function openBudgetModule() {
-    const data = await safeApi("/public/v2/budget?period=month&limit=100", {}, null);
-    if (data) {
-      state.budgets = data.records || [];
-      state.dashboard = { ...(state.dashboard || {}), budget: data.summary || state.dashboard?.budget };
-    }
-    const summary = state.dashboard?.budget || calculateBudget(state.budgets);
-    openModule({
-      code: "budget", title: "Бюджет", kicker: "ДОХОДЫ И РАСХОДЫ",
-      html: `<div class="module-cards"><div class="budget-total"><div class="money-card positive"><span>Доходы</span><strong>${money(summary.income_minor || 0)}</strong></div><div class="money-card negative"><span>Расходы</span><strong>${money(summary.expense_minor || 0)}</strong></div><div class="money-card"><span>Остаток</span><strong>${money((summary.income_minor || 0) - (summary.expense_minor || 0))}</strong></div></div><div class="action-row"><button class="primary-action" id="add-budget-entry" type="button">Добавить запись</button><button class="secondary-action" id="budget-eva" type="button">Спросить Еву</button></div><div class="section-stack">${state.budgets.length ? state.budgets.map(renderBudgetEntry).join("") : emptyState("Записей пока нет", "Добавьте доход или расход. Чеки будут подключены через media-service отдельным этапом.")}</div></div>`,
-      onMount(host) {
-        host.querySelector("#add-budget-entry").addEventListener("click", openBudgetEntrySheet);
-        host.querySelector("#budget-eva").addEventListener("click", () => openEvaHandoff("Проанализируй мой бюджет за текущий месяц и предложи осторожные рекомендации без финансовых гарантий"));
-        host.querySelectorAll("[data-budget-edit]").forEach((button) => button.addEventListener("click", () => openBudgetEntrySheet(state.budgets.find((item) => String(item.id) === button.dataset.budgetEdit))));
-      },
-    });
-  }
-
-  function renderBudgetEntry(entry) {
-    const type = entry.entry_type || entry.type;
-    const amount = Number(entry.amount_minor || Math.round(Number(entry.amount || 0) * 100));
-    return `<button class="entry-row" type="button" data-budget-edit="${escapeAttr(entry.id)}"><span class="entry-icon"><span data-icon="${type === "income" ? "plus" : "minus"}"></span></span><span class="entry-copy"><strong>${escapeHtml(entry.category || entry.store || (type === "income" ? "Доход" : "Расход"))}</strong><small>${formatDate(entry.occurred_on || entry.date)} · ${escapeHtml(entry.description || "")}</small></span><span class="entry-amount ${type}">${type === "income" ? "+" : "−"}${money(amount)}</span></button>`;
-  }
-
-  function openBudgetEntrySheet(entry = null) {
-    closeSheet();
-    openSheet({
-      title: entry ? "Изменить запись" : "Доход или расход",
-      subtitle: "Сумма хранится в минимальных денежных единицах без округления в отчётах.",
-      html: `<form class="form-grid" id="budget-form">
-        <label><span>Тип</span><select name="type"><option value="expense" ${entry?.entry_type === "expense" ? "selected" : ""}>Расход</option><option value="income" ${entry?.entry_type === "income" ? "selected" : ""}>Доход</option></select></label>
-        <label><span>Сумма, ₽</span><input name="amount" type="number" min="0" step="0.01" required value="${escapeAttr(entry ? Number(entry.amount_minor) / 100 : "")}"></label>
-        <label><span>Категория</span><input name="category" maxlength="200" value="${escapeAttr(entry?.category || "")}"></label>
-        <label><span>Магазин или источник</span><input name="store" maxlength="300" value="${escapeAttr(entry?.store || "")}"></label>
-        <label><span>Описание</span><input name="description" maxlength="2000" value="${escapeAttr(entry?.description || "")}"></label>
-        <label><span>Дата</span><input name="date" type="date" value="${escapeAttr(dateInput(entry?.occurred_on) || dateInput(new Date()))}"></label>
-        <button class="primary-action" type="submit">Сохранить</button>
-        ${entry ? '<button class="danger-action" id="delete-budget" type="button">Удалить запись</button>' : ""}
-      </form>`,
-      onMount(host) {
-        host.querySelector("#budget-form").addEventListener("submit", async (event) => {
-          event.preventDefault(); const raw = Object.fromEntries(new FormData(event.currentTarget).entries());
-          const payload = { type: raw.type, amount: Number(raw.amount), category: raw.category.trim() || null, store: raw.store.trim() || null, description: raw.description.trim() || null, date: raw.date };
-          try {
-            const result = entry
-              ? await api(`/public/v2/budget/${encodeURIComponent(entry.id)}`, { method: "PATCH", body: JSON.stringify(payload) })
-              : await api("/public/v2/budget", { method: "POST", body: JSON.stringify(payload) });
-            if (entry) Object.assign(entry, result.record); else state.budgets.unshift(result.record);
-            closeSheet(); await refreshDashboard(); toast("Финансовая запись сохранена"); openBudgetModule();
-          } catch (error) { toast(friendlyError(error), true); }
-        });
-        host.querySelector("#delete-budget")?.addEventListener("click", async () => {
-          if (!await confirmDanger({
-            title: "Удалить запись?",
-            detail: "Финансовая запись исчезнет из отчётов за период.",
-            confirmLabel: "Удалить запись",
-          })) return;
-          try { await api(`/public/v2/budget/${encodeURIComponent(entry.id)}`, { method: "DELETE" }); state.budgets = state.budgets.filter((item) => item.id !== entry.id); closeSheet(); await refreshDashboard(); openBudgetModule(); }
-          catch (error) { toast(friendlyError(error), true); }
-        });
-      },
-    });
-  }
-
-  function openPractices() {
-    const practices = [
-      ["breath", "Ровное дыхание", "Свободный ритм или мягкое удлинение выдоха"],
-      ["ground", "Заземление 5–4–3–2–1", "Последовательно вернуть внимание к ощущениям"],
-      ["sort", "Разложить мысли", "Сейчас, позже и вне контроля"],
-      ["dot", "Фокус на минуту", "Спокойная точка без мигания и счёта"],
-      ["dump", "Сброс перегрузки", "Выгрузить мысли и выбрать один следующий шаг"],
-    ];
-    openModule({
-      code: "practices", title: "Практики", kicker: "КОРОТКАЯ ПЕРЕЗАГРУЗКА",
-      html: `<div class="module-cards"><article class="section-card"><h3>Выберите то, что подходит сейчас</h3><p>Практики не заменяют помощь специалиста и не оцениваются баллами или сериями.</p></article><div class="practice-grid">${practices.map(([code,title,note]) => `<button class="practice-button" type="button" data-practice="${code}"><span>${icon(practiceIcon(code))}</span><span><strong>${title}</strong><small>${note}</small></span></button>`).join("")}</div></div>`,
-      onMount(host) { host.querySelectorAll("[data-practice]").forEach((button) => button.addEventListener("click", () => runPractice(button.dataset.practice))); },
-    });
-  }
-
-  function runPractice(code) {
-    const configs = {
-      breath: ["Ровное дыхание", "Дышите в удобном ритме. Не задерживайте дыхание, если это неприятно. Остановитесь при дискомфорте."],
-      ground: ["Заземление 5–4–3–2–1", "Назовите 5 предметов, которые видите; 4 ощущения тела; 3 звука; 2 запаха; 1 вкус или спокойный вдох."],
-      sort: ["Разложить мысли", "Запишите мысли и распределите их: «сейчас», «позже», «не контролирую». В «сейчас» оставьте не больше трёх."],
-      dot: ["Фокус на минуту", "Смотрите на неподвижную точку и мягко возвращайте внимание, когда оно уходит. Здесь нет правильного результата."],
-      dump: ["Сброс перегрузки", "Запишите всё, что занимает внимание. Затем отметьте один доступный следующий шаг."],
-    };
-    const [title, textValue] = configs[code];
-    openSheet({ title, subtitle: "Можно остановиться в любой момент", html: `<article class="section-card"><p>${escapeHtml(textValue)}</p></article><div class="action-row"><button class="primary-action" id="practice-start" type="button">Начать</button><button class="secondary-action" id="practice-note" type="button">Записать мысли</button></div>`, onMount(host) { host.querySelector("#practice-start").addEventListener("click", () => { closeSheet(); toast("Практика началась. Действуйте в удобном темпе."); }); host.querySelector("#practice-note").addEventListener("click", () => openComposeSheet(`${title}: `)); } });
-  }
-
-  function openReportsModule() {
+  function renderProgress(host) {
     const progress = state.progress || {};
-    const goals = progress.goals || [];
-    const results = progress.completed_results || [];
-    const blocks = progress.work_blocks || [];
-    openModule({
-      code: "reports", title: "Отчёты", kicker: "ИТОГИ И ДИНАМИКА",
-      html: `<div class="module-cards"><div class="summary-row"><div class="summary-pill"><strong>${results.length}</strong><span>результатов</span></div><div class="summary-pill"><strong>${blocks.length}</strong><span>фокус-сессий</span></div><div class="summary-pill"><strong>${goals.length}</strong><span>целей</span></div></div><article class="section-card"><h3>Последние результаты</h3>${results.length ? results.slice(0,5).map((item) => `<p><strong>${escapeHtml(item.title)}</strong><br>${escapeHtml(item.goal_title || "")}</p>`).join("") : "<p>Завершённые результаты появятся после работы с целями.</p>"}</article><button class="secondary-action" id="report-eva" type="button">Попросить Еву подвести итог</button></div>`,
-      onMount(host) { host.querySelector("#report-eva").addEventListener("click", () => openEvaHandoff("Подведи краткий итог моей недели: результаты, трудности, повторяющиеся темы и один следующий фокус")); },
+    const results = Array.isArray(progress.completed_results) ? progress.completed_results : [];
+    const blocks = Array.isArray(progress.work_blocks) ? progress.work_blocks : [];
+    const goals = Array.isArray(progress.goals) ? progress.goals : state.goals;
+
+    host.innerHTML = `<div class="section-stack">
+      <div class="summary-row">
+        <div class="summary-pill"><strong>${results.length}</strong><span>результатов</span></div>
+        <div class="summary-pill"><strong>${blocks.length}</strong><span>фокус-сессий</span></div>
+        <div class="summary-pill"><strong>${(goals || []).length}</strong><span>целей</span></div>
+      </div>
+      <article class="section-card">
+        <span class="eyebrow">ПОСЛЕДНИЕ РЕЗУЛЬТАТЫ</span>
+        ${results.length
+          ? results.slice(0,6).map((item) => `<p><strong>${escapeHtml(item.title || "Результат")}</strong>${item.goal_title ? `<br>${escapeHtml(item.goal_title)}` : ""}</p>`).join("")
+          : "<p>Завершённые результаты появятся здесь после работы с целями.</p>"}
+      </article>
+      <button class="primary-action" id="progress-eva" type="button">Подвести итог с Евой</button>
+    </div>`;
+    host.querySelector("#progress-eva").addEventListener("click", () => {
+      openEvaHandoff("Подведи итог моего прогресса: реальные результаты, что повторяется, что тормозит и один следующий фокус. Не придумывай данные, которых нет.");
     });
   }
-
-  function openAstroModule() {
-    const html = `<div class="astro-tabs"><button class="is-active" data-astro="horoscope" type="button">Гороскоп</button><button data-astro="tarot" type="button">Таро</button><button data-astro="numerology" type="button">Нумерология</button></div><div id="astro-body"></div>`;
-    openModule({
-      code: "astro", title: "Астрорефлексия", kicker: "СИМВОЛИЧЕСКИЙ ВЗГЛЯД", html,
-      onMount(host) {
-        const render = () => renderAstroBody(host.querySelector("#astro-body"));
-        host.querySelectorAll("[data-astro]").forEach((button) => button.addEventListener("click", () => {
-          state.astroTab = button.dataset.astro;
-          host.querySelectorAll("[data-astro]").forEach((item) => item.classList.toggle("is-active", item === button));
-          render();
-        }));
-        render();
-      },
-    });
-  }
-
-  function renderAstroBody(host) {
-    if (state.astroTab === "tarot") {
-      host.innerHTML = `<article class="section-card"><h3>Карты Таро</h3><p>Карты используются как метафорические вопросы, а не как достоверное предсказание будущего.</p><div class="tarot-row">${[1,2,3].map((n) => `<button class="tarot-card" data-tarot="${n}" type="button"><span>${icon("star")}</span></button>`).join("")}</div><p id="tarot-result">Выберите карту.</p></article>`;
-      host.querySelectorAll("[data-tarot]").forEach((button) => button.addEventListener("click", () => {
-        const cards = ["Звезда — какой ориентир важно не потерять?", "Отшельник — что стоит осмыслить без спешки?", "Умеренность — где нужна постепенность?", "Сила — где поможет мягкая настойчивость?", "Мир — что пора завершить?"];
-        host.querySelector("#tarot-result").textContent = cards[Math.floor(Math.random() * cards.length)];
-      }));
-      return;
-    }
-    if (state.astroTab === "numerology") {
-      host.innerHTML = `<article class="section-card"><h3>Нумерология</h3><p>Интерпретация используется только как символический повод для размышления.</p><form class="form-grid" id="numerology-form"><label><span>Дата рождения</span><input name="date" type="date" required></label><button class="primary-action" type="submit">Рассчитать тему</button></form><p id="numerology-result"></p></article>`;
-      host.querySelector("#numerology-form").addEventListener("submit", (event) => {
-        event.preventDefault(); const date = event.currentTarget.elements.date.value; const number = lifePath(date); host.querySelector("#numerology-result").textContent = `Число ${number}. ${numberMeaning(number)}`;
-      });
-      return;
-    }
-    host.innerHTML = `<article class="section-card"><h3>Гороскоп как вопрос для рефлексии</h3><p>Раздел не утверждает, что небесные объекты определяют события. Он предлагает символическую тему дня.</p><p><strong>${dailyAstroTheme()}</strong></p><button class="secondary-action" id="astro-journal" type="button">Ответить в дневнике</button></article>`;
-    host.querySelector("#astro-journal").addEventListener("click", () => openComposeSheet(`${dailyAstroTheme()}\n`));
-  }
-
-  // ---------------------------------------------------------------------------
-  // Profile
-  // ---------------------------------------------------------------------------
 
   function renderProfile() {
     const host = document.getElementById("profile-content");
-    if (renderPhase(host, ["/public/profile"])) return;
+    if (!host || state.phase === "loading") return;
+    if (state.failed.has("/public/profile")) {
+      host.innerHTML = `${emptyState("Профиль не загрузился", state.lastError || "Сервис временно недоступен")}
+        <div class="action-row"><button class="primary-action" data-retry type="button">Повторить</button></div>`;
+      host.querySelector("[data-retry]")?.addEventListener("click", () => void retryBootstrap());
+      return;
+    }
+
     const user = state.profile?.user || state.session?.user || {};
-    const completeness = Number(state.profile?.completeness || 0);
+    const known = [
+      ["Как обращаться", user.preferred_name || user.first_name],
+      ["Город", user.city],
+      ["Часовой пояс", user.timezone],
+      ["Стиль общения", user.communication_style],
+      ["Формат ответа", responseModeTitle(user.response_mode)],
+      ["Активные цели", state.goals.filter((goal) => goal.status === "active").length || null],
+    ].filter(([,value]) => value !== undefined && value !== null && value !== "");
+
     host.innerHTML = `<div class="profile-stack">
-      <article class="section-card profile-summary"><span class="profile-avatar">${evaPortrait()}</span><div><h3>${escapeHtml(user.preferred_name || user.first_name || "Пользователь")}</h3><p>${escapeHtml(user.city || "Город не указан")} · ${escapeHtml(user.timezone || "Часовой пояс не определён")}</p></div></article>
-      <article class="section-card"><span class="eyebrow">ПРОФИЛЬ ЗАПОЛНЕН</span><h2>${completeness}%</h2><p>Ева уточняет данные постепенно и не должна задавать больше одного уместного вопроса за сообщение.</p><div class="action-row"><button class="primary-action" id="edit-profile" type="button">Изменить данные</button></div></article>
+      <article class="profile-summary">
+        <span class="profile-avatar">${icon("user")}</span>
+        <div><h3>${escapeHtml(user.preferred_name || user.first_name || "Пользователь")}</h3>
+        <p>${escapeHtml(user.city || "Город пока не указан")} · ${escapeHtml(user.timezone || "часовой пояс уточняется")}</p></div>
+      </article>
+
+      <article class="section-card">
+        <span class="eyebrow">ЧТО ЕВА УЖЕ ЗНАЕТ</span>
+        <h2>Профиль растёт постепенно</h2>
+        <p>Не нужно заполнять большую анкету. Ева уточняет только уместные данные по ходу общения.</p>
+        <div class="known-grid">${known.length
+          ? known.map(([label,value]) => `<div class="known-card"><small>${escapeHtml(label)}</small><strong>${escapeHtml(value)}</strong></div>`).join("")
+          : '<div class="known-card"><small>Пока мало данных</small><strong>Начни с обычного разговора с Евой</strong></div>'}
+        </div>
+        <div class="action-row"><button class="primary-action" id="edit-profile" type="button">Изменить данные</button></div>
+      </article>
+
       <div class="settings-list">
         ${settingsRow("conversations", "Диалоги с Евой", "Создать, выбрать или архивировать диалог", "Открыть")}
-        ${settingsRow("card", "Подписка и квоты", "Тариф, бесплатные сообщения и гранты", state.session?.plan || "free")}
-        ${settingsRow("bell", "Уведомления", "Время, частота и тихие часы", "Настроить")}
-        ${settingsRow("voice", "Настройки", "Формат ответов Евы: текст, голос или оба", responseModeTitle(state.profile?.user?.response_mode))}
-        ${settingsRow("link", "Интеграции", "Поиск и внешние сервисы", "Проверить")}
-        ${settingsRow("shield", "Приватность", "Экспорт, память и удаление данных", "Открыть")}
-        ${settingsRow("pulse", "Диагностика", "Версия интерфейса и подключение к API", BUILD)}
+        ${settingsRow("subscription", "Подписка и квоты", "Текущий доступ и остаток квоты", state.session?.plan || "free")}
+        ${settingsRow("voice", "Формат ответов", "Текст, голос или оба", responseModeTitle(user.response_mode))}
+        ${settingsRow("notifications", "Уведомления", "Конкретные поводы вернуться к Еве", state.dashboard?.next_reminder ? "Есть ближайшее" : "Открыть")}
+        ${settingsRow("privacy", "Приватность", "Как хранятся данные и память Евы", "Открыть")}
       </div>
     </div>`;
+
     injectIcons(host);
     host.querySelector("#edit-profile").addEventListener("click", openProfileSheet);
-    host.querySelectorAll("[data-setting]").forEach((button) => button.addEventListener("click", () => openSetting(button.dataset.setting)));
+    host.querySelectorAll("[data-setting]").forEach((button) => {
+      button.addEventListener("click", () => openSetting(button.dataset.setting));
+    });
   }
 
   function settingsRow(code, title, note, status) {
-    const icons = { memory: "brain", conversations: "chat", card: "card", bell: "bell", voice: "voice", link: "link", shield: "shield", pulse: "pulse" };
-    return `<button class="settings-row" type="button" data-setting="${code}"><span data-icon="${icons[code]}"></span><span><strong>${title}</strong><small>${note}</small></span><em>${escapeHtml(status)}</em></button>`;
+    const icons = { conversations: "chat", subscription: "card", voice: "voice", notifications: "bell", privacy: "shield" };
+    return `<button class="settings-row" data-setting="${code}" type="button">
+      <span data-icon="${icons[code]}"></span>
+      <span><strong>${title}</strong><small>${note}</small></span>
+      <em>${escapeHtml(status)}</em>
+    </button>`;
   }
 
   function openProfileSheet() {
     const user = state.profile?.user || state.session?.user || {};
     openSheet({
       title: "Личные данные",
-      subtitle: "Изменения становятся подтверждёнными данными профиля.",
-      html: `<form class="form-grid" id="profile-form"><label><span>Как обращаться</span><input name="preferred_name" maxlength="100" value="${escapeAttr(user.preferred_name || user.first_name || "")}"></label><label><span>Город</span><input name="city" maxlength="200" value="${escapeAttr(user.city || "")}"></label><label><span>Стиль общения</span><textarea name="communication_style" maxlength="2000" rows="3">${escapeHtml(user.communication_style || "")}</textarea></label><button class="primary-action" type="submit">Сохранить</button></form>`,
+      subtitle: "Сохраняются только те поля, которые ты явно изменил.",
+      html: `<form class="form-grid" id="profile-form">
+        <label><span>Как обращаться</span><input name="preferred_name" maxlength="100" value="${escapeAttr(user.preferred_name || user.first_name || "")}"></label>
+        <label><span>Город</span><input name="city" maxlength="200" value="${escapeAttr(user.city || "")}"></label>
+        <label><span>Стиль общения</span><textarea name="communication_style" maxlength="2000" rows="3">${escapeHtml(user.communication_style || "")}</textarea></label>
+        <button class="primary-action" type="submit">Сохранить</button>
+      </form>`,
       onMount(host) {
         host.querySelector("#profile-form").addEventListener("submit", async (event) => {
-          event.preventDefault(); const raw = Object.fromEntries(new FormData(event.currentTarget).entries()); const fields = Object.fromEntries(Object.entries(raw).filter(([,value]) => String(value).trim()).map(([key,value]) => [key,String(value).trim()]));
+          event.preventDefault();
+          const raw = Object.fromEntries(new FormData(event.currentTarget).entries());
+          const fields = Object.fromEntries(
+            Object.entries(raw)
+              .map(([key,value]) => [key, String(value).trim()])
+              .filter(([,value]) => value),
+          );
           try {
             const result = await api("/public/profile", { method: "PATCH", body: JSON.stringify({ fields }) });
-            state.profile = result.profile; closeSheet(); renderProfile(); updateGreeting(); toast("Профиль обновлён");
-          } catch (error) { toast(friendlyError(error), true); }
+            state.profile = result.profile || state.profile;
+            markInvestmentCompleted("profile_update", { fields: Object.keys(fields) });
+            closeSheet();
+            renderProfile();
+            renderToday();
+            toast("Профиль обновлён");
+          } catch (error) {
+            toast(friendlyError(error), true);
+          }
         });
       },
     });
@@ -1256,7 +1280,7 @@
 
   const RESPONSE_MODES = [
     { value: "text", title: "Текст", note: "Ева отвечает только текстом." },
-    { value: "both", title: "Голос + текст", note: "Ева присылает текст и голосовое сообщение к нему." },
+    { value: "both", title: "Голос + текст", note: "Ева присылает текст и голосовое сообщение." },
     { value: "voice", title: "Только голос", note: "Ева присылает голосовое сообщение без текста." },
   ];
 
@@ -1264,21 +1288,27 @@
     return (RESPONSE_MODES.find((mode) => mode.value === value) || RESPONSE_MODES[0]).title;
   }
 
+  function openSetting(code) {
+    if (code === "conversations") return void openConversationsSheet();
+    if (code === "voice") return void openResponseModeSheet();
+    if (code === "subscription") return openSubscriptionSheet();
+    if (code === "notifications") return openNotificationsSheet();
+    if (code === "privacy") return openPrivacySheet();
+  }
+
   function openResponseModeSheet() {
     const current = state.profile?.user?.response_mode || "text";
     openSheet({
-      title: "Настройки",
-      subtitle: "Формат ответов Евы. Действует и в Telegram, и здесь.",
-      html: `<div class="section-stack"><article class="section-card"><div class="settings-list">${
-        RESPONSE_MODES.map((mode) => `<button class="settings-row" type="button" data-response-mode="${mode.value}">
-          <span data-icon="voice"></span>
-          <span><strong>${mode.title}</strong><small>${mode.note}</small></span>
-          <em>${mode.value === current ? "Выбрано" : ""}</em>
-        </button>`).join("")
-      }</div></article>
-      <article class="section-card"><p>Если голос не удастся синтезировать, Ева пришлёт текст — ответ не теряется.</p></article></div>`,
-      onMount() {
-        document.querySelectorAll("[data-response-mode]").forEach((button) => {
+      title: "Формат ответов",
+      subtitle: "Если синтез голоса временно недоступен, текстовый ответ не теряется.",
+      html: `<div class="settings-list">${RESPONSE_MODES.map((mode) => `<button class="settings-row" type="button" data-response-mode="${mode.value}">
+        <span data-icon="voice"></span>
+        <span><strong>${mode.title}</strong><small>${mode.note}</small></span>
+        <em>${mode.value === current ? "Выбрано" : ""}</em>
+      </button>`).join("")}</div>`,
+      onMount(host) {
+        injectIcons(host);
+        host.querySelectorAll("[data-response-mode]").forEach((button) => {
           button.addEventListener("click", () => void saveResponseMode(button.dataset.responseMode));
         });
       },
@@ -1288,92 +1318,235 @@
   async function saveResponseMode(mode) {
     try {
       const result = await api("/public/profile", { method: "PATCH", body: JSON.stringify({ response_mode: mode }) });
-      state.profile = result.profile;
+      state.profile = result.profile || state.profile;
       closeSheet();
       renderProfile();
       toast(`Формат ответов: ${responseModeTitle(mode).toLowerCase()}`);
     } catch (error) {
-      toast(error?.message || "Не удалось сохранить настройку");
+      toast(friendlyError(error), true);
     }
   }
 
-  function openSetting(code) {
-    if (code === "voice") return void openResponseModeSheet();
-    if (code === "conversations") return void openConversationsSheet();
-    if (code === "pulse") return openSheet({ title: "Диагностика", subtitle: "Технические детали скрыты от обычных экранов.", html: `<div class="section-stack"><article class="section-card"><p><strong>Frontend:</strong> ${BUILD}</p><p><strong>API v2:</strong> ${state.dashboard ? "доступен" : "не подключён"}</p><p><strong>Telegram initData:</strong> ${tg?.initData ? "получена" : "отсутствует"}</p><p><strong>Тариф:</strong> ${escapeHtml(state.session?.plan || "неизвестно")}</p></article></div>` });
-    openSheet({ title: "Настройки", subtitle: "Раздел не дублирует инструменты Пульта.", html: `<article class="section-card"><p>Эта настройка будет подключена к серверному профилю и административной конфигурации. Сейчас интерфейс не имитирует сохранение.</p></article>` });
+  function openSubscriptionSheet() {
+    const plan = state.session?.plan || "free";
+    const quotas = Array.isArray(state.session?.quotas) ? state.session.quotas : [];
+    openSheet({
+      title: "Подписка и квоты",
+      html: `<article class="section-card">
+        <span class="eyebrow">ТЕКУЩИЙ ДОСТУП</span>
+        <h3>${escapeHtml(plan)}</h3>
+        ${quotas.length
+          ? quotas.map((item) => `<p>${escapeHtml(item.name || item.type || "Квота")}: <strong>${escapeHtml(item.remaining ?? item.value ?? "—")}</strong></p>`).join("")
+          : "<p>Подробная квота не передана сервером.</p>"}
+      </article>`,
+    });
+  }
+
+  function openPrivacySheet() {
+    openSheet({
+      title: "Приватность",
+      subtitle: "WebApp показывает только продуктовые данные пользователя.",
+      html: `<div class="section-stack">
+        <article class="section-card"><h3>Память Евы</h3><p>Долговременная память и история диалогов принадлежат агенту Letta. WebApp не зеркалирует переписку в отдельную ленту.</p></article>
+        <article class="section-card"><h3>Дневник</h3><p>Запись хранится отдельно и не передаётся Еве автоматически. Для обсуждения нужна отдельная команда пользователя.</p></article>
+        <article class="section-card"><h3>Третьи лица</h3><p>Ева не строит скрытые психологические профили других людей по твоим записям.</p></article>
+      </div>`,
+    });
   }
 
   async function openConversationsSheet() {
-    openSheet({ title: "Диалоги с Евой", subtitle: "Активный диалог используется в Telegram. Архив сохраняет историю.", html: '<div class="conversation-manager" id="conversations-host"><div class="conversation-loading">Загружаю…</div></div>', onMount() { void refreshConversations(); } });
-  }
-
-  function conversationRow(item) {
-    const id = escapeAttr(item.id);
-    const title = escapeHtml(item.title || "Диалог с Евой");
-    return `<article class="conversation-row${item.active ? " is-active" : ""}">
-      <div class="conversation-row__heading"><h3>${title}</h3>${item.active ? '<span class="conversation-badge">Активный</span>' : ""}</div>
-      ${item.active
-        ? '<p class="conversation-note">Сначала выберите другой диалог, чтобы архивировать этот.</p>'
-        : `<div class="conversation-actions"><button class="conversation-action is-primary" data-activate-conversation="${id}" type="button">Сделать активным</button><button class="conversation-action is-danger" data-archive-conversation="${id}" type="button">Архивировать</button></div>`}
-    </article>`;
+    openSheet({
+      title: "Диалоги с Евой",
+      subtitle: "Новый диалог не создаёт новую Еву и не стирает её память.",
+      html: '<div id="conversations-host"><div class="loading-skeleton"></div></div>',
+      onMount() { void refreshConversations(); },
+    });
   }
 
   async function refreshConversations() {
     const host = document.getElementById("conversations-host");
+    if (!host) return;
     try {
       const conversations = (await api("/public/conversations")).conversations || [];
-      host.innerHTML = `<form class="conversation-create" id="conversation-create-form"><label for="new-conversation-title">Новый диалог</label><div class="conversation-create__row"><input id="new-conversation-title" maxlength="120" value="Новый диалог" aria-label="Название нового диалога"><button type="submit">Создать</button></div></form><div class="conversation-list">${conversations.map(conversationRow).join("") || '<div class="conversation-empty"><strong>Диалогов пока нет</strong><span>Создайте первый диалог с Евой.</span></div>'}</div>`;
-      host.querySelector("#conversation-create-form").addEventListener("submit", (event) => { event.preventDefault(); void createConversation(); });
-      host.querySelectorAll("[data-activate-conversation]").forEach((button) => button.addEventListener("click", async () => { try { await api(`/public/conversations/${encodeURIComponent(button.dataset.activateConversation)}/activate`, { method: "POST", body: "{}" }); await refreshConversations(); toast("Диалог активирован"); } catch (error) { toast(friendlyError(error), true); } }));
-      host.querySelectorAll("[data-archive-conversation]").forEach((button) => button.addEventListener("click", async () => { try { await api(`/public/conversations/${encodeURIComponent(button.dataset.archiveConversation)}`, { method: "DELETE" }); await refreshConversations(); toast("Диалог перемещён в архив; история сохранена"); } catch (error) { toast(friendlyError(error), true); } }));
-    } catch (error) { host.innerHTML = `<div class="conversation-error">${escapeHtml(friendlyError(error))}</div>`; }
+      host.innerHTML = `<form class="form-grid" id="conversation-create-form">
+        <label><span>Новый диалог</span><input id="new-conversation-title" maxlength="120" value="Новый диалог"></label>
+        <button class="primary-action" type="submit">Создать</button>
+      </form>
+      <div class="conversation-list" style="margin-top:12px">
+        ${conversations.length ? conversations.map((item) => `<article class="section-card">
+          <h3>${escapeHtml(item.title || "Диалог с Евой")}</h3>
+          <p>${item.active
+            ? `<span class="conversation-badge">Активный</span> Сначала выберите другой диалог, чтобы этот можно было архивировать.`
+            : "Можно сделать активным или архивировать."}</p>
+          ${item.active ? "" : `<div class="action-row">
+            <button class="primary-action conversation-action" data-activate-conversation="${escapeAttr(item.id)}" type="button">Активировать</button>
+            <button class="danger-action conversation-action" data-archive-conversation="${escapeAttr(item.id)}" type="button">Архивировать</button>
+          </div>`}
+        </article>`).join("") : emptyState("Диалогов пока нет", "Создай первый диалог с Евой.")}
+      </div>`;
+
+      host.querySelector("#conversation-create-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        void createConversation();
+      });
+      host.querySelectorAll("[data-activate-conversation]").forEach((button) => {
+        button.addEventListener("click", async () => {
+          try {
+            await api(`/public/conversations/${encodeURIComponent(button.dataset.activateConversation)}/activate`, {
+              method: "POST",
+              body: "{}",
+            });
+            await refreshConversations();
+            toast("Диалог активирован");
+          } catch (error) {
+            toast(friendlyError(error), true);
+          }
+        });
+      });
+      host.querySelectorAll("[data-archive-conversation]").forEach((button) => {
+        button.addEventListener("click", async () => {
+          const ok = await confirmDanger({
+            title: "Архивировать диалог?",
+            detail: "История сохранится, но диалог исчезнет из активного списка.",
+            confirmLabel: "Архивировать",
+          });
+          if (!ok) return;
+          try {
+            await api(`/public/conversations/${encodeURIComponent(button.dataset.archiveConversation)}`, { method: "DELETE" });
+            await refreshConversations();
+            toast("Диалог архивирован");
+          } catch (error) {
+            toast(friendlyError(error), true);
+          }
+        });
+      });
+    } catch (error) {
+      host.innerHTML = emptyState("Диалоги не загрузились", friendlyError(error));
+    }
   }
 
   async function createConversation() {
     const title = document.getElementById("new-conversation-title")?.value.trim();
     if (!title) return;
-    try { await api("/public/conversations", { method: "POST", body: JSON.stringify({ title }) }); await refreshConversations(); toast("Новый диалог создан. Выберите его, чтобы переключиться"); } catch (error) { toast(friendlyError(error), true); }
+    try {
+      await api("/public/conversations", { method: "POST", body: JSON.stringify({ title }) });
+      await refreshConversations();
+      toast("Диалог создан");
+    } catch (error) {
+      toast(friendlyError(error), true);
+    }
   }
 
-  // ---------------------------------------------------------------------------
-  // Eva handoff / notifications
-  // ---------------------------------------------------------------------------
+  function openNotificationsSheet() {
+    const next = state.dashboard?.next_reminder;
+    const triggers = notificationTriggerCandidates();
+
+    const policy = notificationPolicy();
+    openSheet({
+      title: "Уведомления",
+      subtitle: "Ева напоминает только когда есть конкретная ценность.",
+      html: `<div class="section-stack">
+        ${next ? `<article class="section-card"><span class="eyebrow">БЛИЖАЙШЕЕ</span><h3>${escapeHtml(next.title)}</h3><p>${formatDateTime(next.remind_at)}</p></article>` : ""}
+        <article class="section-card">
+          <span class="eyebrow">РЕЖИМ</span>
+          <h3>${policy.opt_in_allowed ? "Персональные поводы, не чаще 3 раз в неделю" : "Сначала первая ценность — потом уведомления"}</h3>
+          <p>${policy.opt_in_allowed ? "Базовый режим: 1–3 уведомления в неделю. Общие broadcast-пуши не используются." : "Запрос разрешения на push не должен появляться до завершения первого полезного цикла."}</p>
+        </article>
+        <article class="section-card">
+          <span class="eyebrow">КАКИЕ ПОВОДЫ МОГУТ ПРИЙТИ</span>
+          ${triggers.map((item) => `<p>${escapeHtml(item)}</p>`).join("")}
+        </article>
+      </div>`,
+    });
+  }
+
+  function notificationTriggerCandidates() {
+    const main = state.dashboard?.main_focus || null;
+    const reward = rewardState || currentReward();
+    const streak = streakState();
+    const week = weeklyProgress();
+    const ritual = ritualState();
+    const reactivation = reactivationState();
+    const candidates = [];
+
+    if (reactivation.message && ["24h", "48h", "72h", "7d"].includes(reactivation.stage)) {
+      candidates.push(`${reactivation.message}.`);
+    }
+
+    if (reward.kind === "curiosity") candidates.push("Ева заметила новый паттерн.");
+    else if (reward.kind === "question") candidates.push("Сегодня готов один вопрос, который может дать новый фокус.");
+    else candidates.push("Сегодня готов короткий инсайт.");
+
+    if (week.target - week.done === 1) candidates.push("Остался 1 шаг до цели недели.");
+    if (streak.graceEligible) candidates.push("Один короткий шаг сегодня сохранит твой ритм.");
+    if (ritual.period === "evening" && streak.todayDone) candidates.push("Итог дня готов — можно сохранить одну важную мысль.");
+    if (ritual.weeklySnapshotReady) candidates.push("Ева собрала снимок твоей недели.");
+    if (main && !streak.todayDone) candidates.push("Сегодня достаточно одного короткого шага.");
+
+    return [...new Set(candidates)].slice(0, 4);
+  }
+
+  function notificationPolicy() {
+    const activation = activationState();
+    return {
+      min_per_week: 1,
+      max_per_week: 3,
+      opt_in_allowed: Boolean(activation.activation_completed_at || activation.first_value_at),
+      generic_broadcast_allowed: false,
+    };
+  }
+
+  function lifecycleState() {
+    const activation = activationState();
+    const reactivation = reactivationState();
+    if (!activation.first_value_at) return "new";
+    if (!activation.activation_completed_at) return "activating";
+    if (["24h", "48h", "72h", "7d"].includes(reactivation.stage)) return `reactivation_${reactivation.stage}`;
+    return "active";
+  }
+
+  function churnRiskState() {
+    const reactivation = reactivationState();
+    const streak = streakState();
+    if (reactivation.stage === "7d") return { level: "high", reason: "inactive_7d" };
+    if (reactivation.stage === "72h") return { level: "medium", reason: "inactive_72h" };
+    if (reactivation.stage === "48h") return { level: "medium", reason: "inactive_48h" };
+    if (streak.protectionAvailable) return { level: "watch", reason: "streak_recovery_window" };
+    return { level: "low", reason: "active" };
+  }
+
+  function updateNotificationDot() {
+    const dot = document.getElementById("notification-dot");
+    if (dot) dot.hidden = !state.dashboard?.next_reminder;
+  }
 
   function openEvaHandoff(context = "") {
     closeSheet();
     openSheet({
       title: "Обсудить с Евой",
-      subtitle: "WebApp не подключается к Letta напрямую. Контекст будет скопирован, затем откроется чат.",
-      html: `<article class="section-card"><p>${escapeHtml(context || "Продолжить разговор")}</p></article><div class="action-row"><button class="primary-action" id="open-eva-chat" type="button">Открыть чат</button><button class="secondary-action" id="copy-eva-context" type="button">Скопировать</button></div>`,
+      subtitle: "Контекст копируется, затем открывается чат.",
+      html: `<article class="section-card"><p>${escapeHtml(context || "Продолжить разговор")}</p></article>
+        <div class="action-row">
+          <button class="primary-action" id="open-eva-chat" type="button">Открыть чат</button>
+          <button class="secondary-action" id="copy-eva-context" type="button">Скопировать</button>
+        </div>`,
       onMount(host) {
-        host.querySelector("#copy-eva-context").addEventListener("click", async () => { await copyText(context); toast("Формулировка скопирована"); });
+        host.querySelector("#copy-eva-context").addEventListener("click", async () => {
+          await copyText(context);
+          toast("Формулировка скопирована");
+        });
         host.querySelector("#open-eva-chat").addEventListener("click", async () => {
           await copyText(context);
           const username = state.bot?.username;
           if (username) tg?.openTelegramLink?.(`https://t.me/${username.replace(/^@/, "")}`);
-          else { toast("Вернитесь в чат с Евой — формулировка скопирована"); setTimeout(() => tg?.close?.(), 700); }
+          else {
+            toast("Вернись в чат с Евой — формулировка скопирована");
+            setTimeout(() => tg?.close?.(), 700);
+          }
         });
       },
     });
   }
-
-  function openNotificationsSheet() {
-    const next = state.dashboard?.next_reminder;
-    openSheet({
-      title: "Уведомления",
-      subtitle: "Показываются пользовательские события, а не технические ошибки сервера.",
-      html: next ? `<article class="section-card"><span class="eyebrow">БЛИЖАЙШЕЕ</span><h3>${escapeHtml(next.title)}</h3><p>${formatDateTime(next.remind_at)}</p></article>` : `<div class="empty-state"><strong>Новых уведомлений нет</strong><span>Ближайшие напоминания появятся здесь.</span></div>`,
-    });
-  }
-
-  function updateNotificationDot() {
-    document.getElementById("notification-dot").hidden = !state.dashboard?.next_reminder;
-  }
-
-  // ---------------------------------------------------------------------------
-  // Sheet / toast
-  // ---------------------------------------------------------------------------
 
   function openSheet({ title, subtitle = "", html, onMount }) {
     const sheet = document.getElementById("sheet");
@@ -1394,18 +1567,6 @@
     if (sheet.open) sheet.close();
   }
 
-  /**
-   * Подтверждение опасного действия.
-   *
-   * Заменяет `window.confirm` по двум причинам. Системное окно в
-   * Telegram на Android появляется у верхнего края, где палец уже
-   * находится после нажатия «Удалить», — промах превращается в
-   * подтверждение. И оно не объясняет, что именно исчезнет.
-   *
-   * Здесь опасная кнопка стоит второй и отделена от безопасной, а
-   * действие по умолчанию — отмена: закрытие свайпом, Escape и тычок
-   * мимо диалога возвращают `false`.
-   */
   function confirmDanger({ title, detail, confirmLabel = "Удалить" }) {
     const dialog = document.getElementById("confirm-dialog");
     dialog.querySelector("#confirm-title").textContent = title;
@@ -1431,8 +1592,6 @@
       dialog.addEventListener("click", onBackdrop);
       dialog.querySelector("#confirm-cancel").onclick = () => finish(false);
       dialog.showModal();
-      // Фокус на безопасной кнопке: случайное нажатие Enter отменяет,
-      // а не удаляет.
       dialog.querySelector("#confirm-cancel").focus();
     });
   }
@@ -1447,22 +1606,27 @@
     toastTimer = setTimeout(() => { node.hidden = true; }, 3200);
   }
 
+  async function retryBootstrap() {
+    state.phase = "loading";
+    state.failed.clear();
+    state.lastError = "";
+    setLoadingState();
+    await bootstrap();
+  }
+
   async function refreshDashboard() {
     const dashboard = await safeApi("/public/v2/dashboard", {}, null);
     if (dashboard) {
       state.dashboard = dashboard;
-      state.tasks = dashboard.tasks || state.tasks;
-      state.notes = dashboard.notes || state.notes;
-      renderToday(); renderHub(); renderProfile(); updateNotificationDot();
+      renderToday();
+      updateNotificationDot();
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Helpers / icons
-  // ---------------------------------------------------------------------------
-
   function injectIcons(root) {
-    root.querySelectorAll?.("[data-icon]").forEach((node) => { node.innerHTML = icon(node.dataset.icon); });
+    root.querySelectorAll?.("[data-icon]").forEach((node) => {
+      node.innerHTML = icon(node.dataset.icon);
+    });
   }
 
   function icon(name) {
@@ -1471,98 +1635,1029 @@
       smile: '<circle cx="18" cy="18" r="14"/><circle cx="13" cy="15" r="1.5" fill="currentColor" stroke="none"/><circle cx="23" cy="15" r="1.5" fill="currentColor" stroke="none"/><path d="M12 22c3 4 9 4 12 0"/>',
       bolt: '<path d="m21 2-12 19h9l-3 13 13-21h-9Z"/>',
       tension: '<path d="M4 12c5-7 10 7 15 0s10 7 15 0M4 24c5-7 10 7 15 0s10 7 15 0"/>',
-      checklist: '<rect x="6" y="5" width="25" height="28" rx="4"/><path d="m10 13 3 3 5-6M21 13h6m-17 9 3 3 5-6M21 22h6"/>',
-      route: '<path d="M5 29c4-9 8 1 12-8s8 2 12-8"/><path d="M25 5h7v7M29 13l3-1"/>',
       pencil: '<path d="m6 29 3-9L25 4l7 7-16 16Z"/><path d="m9 20 7 7M23 6l7 7M5 33c7-2 14-2 21 0"/>',
       chat: '<path d="M5 7h26v18H16l-8 6 2-6H5Z"/><path d="M11 13h14M11 18h10"/>',
-      wave: '<path d="M3 18c4-8 8 8 12 0s8 8 12 0 8 8 12 0"/><path d="M7 28h25"/>',
-      plus: '<path d="M18 6v24M6 18h24"/>',
-      minus: '<path d="M6 18h24"/>',
       home: '<path d="M4 16 18 5l14 11v16H22V22h-8v10H4Z"/>',
       sprout: '<path d="M18 32V17M18 20C9 18 8 10 9 5c8 1 12 7 9 15Zm0-4c8-2 11-8 10-13-8 1-13 7-10 13Z"/>',
-      calendar: '<rect x="5" y="8" width="28" height="25" rx="4"/><path d="M11 4v8M27 4v8M5 15h28M11 21h4M21 21h4M11 27h4M21 27h4"/>',
-      sliders: '<path d="M5 9h28M5 18h28M5 27h28"/><circle cx="13" cy="9" r="3" fill="var(--paper)"/><circle cx="24" cy="18" r="3" fill="var(--paper)"/><circle cx="16" cy="27" r="3" fill="var(--paper)"/>',
       user: '<circle cx="18" cy="10" r="6"/><path d="M6 33c1-10 5-15 12-15s11 5 12 15"/>',
-      back: '<path d="m22 6-12 12 12 12M11 18h21"/>',
-      check: '<path d="m5 18 8 8L31 8"/>',
-      edit: '<path d="M7 29h6L30 12l-6-6L7 23Zm14-20 6 6M6 33h26"/>',
-      clipboard: '<rect x="8" y="7" width="23" height="28" rx="4"/><path d="M14 7V4h11v3M13 15l2 2 4-5M22 15h5M13 24l2 2 4-5M22 24h5"/>',
-      hearts: '<path d="M12 28 4 20C-2 13 7 4 13 11l2 2 2-2c6-7 15 2 9 9Z"/><path d="m23 31-6-6c-5-6 3-13 8-7l2 2 2-2c5-6 13 1 8 7l-6 6Z" fill="var(--orange-soft)"/>',
-      wallet: '<path d="M5 11h26a3 3 0 0 1 3 3v18H8a4 4 0 0 1-4-4V10a4 4 0 0 1 4-4h19"/><path d="M26 18h9v8h-9a4 4 0 0 1 0-8Z" fill="var(--orange-soft)"/>',
-      lotus: '<path d="M18 33C8 29 5 22 6 15c8 1 13 7 12 18Zm0 0c10-4 13-11 12-18-8 1-13 7-12 18Zm0-1C10 25 10 15 18 7c8 8 8 18 0 25Z"/>',
-      chart: '<path d="M5 31h29M8 28V17h6v11m5 0V8h6v20m5 0V13h5v15"/><path d="M26 15a8 8 0 1 1 0 16" fill="var(--orange-soft)"/>',
-      planet: '<circle cx="19" cy="19" r="9" fill="var(--orange)"/><path d="M5 25c5 5 19 1 27-6 5-5 4-8-1-7M29 6l2-3m4 8 3-1M31 31l2 3"/>',
-      brain: '<path d="M14 7a6 6 0 0 0-6 6c-4 1-5 7-2 10-2 5 2 10 7 9 2 3 7 2 7-2V10c0-4-3-6-6-3Zm8 3v20c0 4 5 5 7 2 5 1 9-4 7-9 3-3 2-9-2-10a6 6 0 0 0-6-6c-3-3-6-1-6 3Z"/><path d="M12 14c4 0 5 3 5 6M29 14c-4 0-5 3-5 6M12 26c4 0 5-3 5-6M29 26c-4 0-5-3-5-6"/>',
+      note: '<path d="M8 4h21l5 5v25H8Z"/><path d="M29 4v6h6M13 16h16M13 22h16M13 28h10"/>',
       card: '<rect x="4" y="8" width="32" height="23" rx="4"/><path d="M4 15h32M9 25h8"/>',
       voice: '<rect x="13" y="4" width="12" height="21" rx="6"/><path d="M8 18c0 7 5 11 11 11s11-4 11-11M19 29v6M13 35h12"/>',
-      link: '<path d="M15 23 11 27a6 6 0 0 1-9-9l7-7a6 6 0 0 1 9 0M23 15l4-4a6 6 0 0 1 9 9l-7 7a6 6 0 0 1-9 0M12 18h15"/>',
       shield: '<path d="M18 3 32 8v10c0 9-6 14-14 17C10 32 4 27 4 18V8Z"/><path d="m11 19 5 5 10-11"/>',
-      pulse: '<path d="M3 20h8l4-9 6 18 5-12 3 3h7"/>',
-      note: '<path d="M8 4h21l5 5v25H8Z"/><path d="M29 4v6h6M13 16h16M13 22h16M13 28h10"/>',
-      signpost: '<path d="M18 34V5M18 8h15l-4 5 4 5H18M18 21H5l4 5-4 5h13"/>',
-      target: '<circle cx="18" cy="18" r="14"/><circle cx="18" cy="18" r="8"/><circle cx="18" cy="18" r="2"/><path d="m24 12 9-9m-5 0h5v5"/>',
-      refresh: '<path d="M31 10V4l-5 5a13 13 0 1 0 4 15"/>',
-      voice2: '<path d="M18 5v26M11 11v14M25 11v14M5 15v6M31 15v6"/>',
-      photo: '<rect x="4" y="6" width="32" height="27" rx="4"/><circle cx="14" cy="15" r="4"/><path d="m7 29 9-9 6 6 4-4 7 7"/>',
-      repeat: '<path d="M8 12h20l-4-4m4 4-4 4M28 26H8l4 4m-4-4 4-4"/>',
-      star: '<path d="m18 3 4 9 10 1-7 7 2 10-9-5-9 5 2-10-7-7 10-1Z"/>',
-      ground: '<path d="M4 29h28M8 24c3-8 5-10 10-15 5 5 7 7 10 15"/>',
-      sort: '<path d="M6 8h26M6 18h19M6 28h12"/><circle cx="31" cy="18" r="3"/><circle cx="24" cy="28" r="3"/>',
-      dot: '<circle cx="18" cy="18" r="4" fill="var(--orange)"/><circle cx="18" cy="18" r="13" stroke-dasharray="2 5"/>',
-      dump: '<path d="M6 7h26v22H18l-7 5 2-5H6Z"/><path d="M11 14h16M11 20h12"/>',
+      spark: '<path d="M18 3c1.5 7 4 9.5 11 11-7 1.5-9.5 4-11 11-1.5-7-4-9.5-11-11 7-1.5 9.5-4 11-11Z"/><path d="M29 24c.8 3.6 2.1 4.9 5.7 5.7-3.6.8-4.9 2.1-5.7 5.7-.8-3.6-2.1-4.9-5.7-5.7 3.6-.8 4.9-2.1 5.7-5.7Z"/>',
+      flame: '<path d="M20 3c1 7-5 8-3 14 1-3 4-4 5-7 5 4 8 8 8 13 0 7-5 11-12 11S6 30 6 23c0-6 4-10 9-14 0 5 1 7 2 8-1-6 4-8 3-14Z"/>',
+      award: '<circle cx="18" cy="14" r="8"/><path d="m13 21-2 12 7-4 7 4-2-12"/><path d="m18 9 1.5 3 3.3.5-2.4 2.3.6 3.3-3-1.6-3 1.6.6-3.3-2.4-2.3 3.3-.5Z"/>',
+      question: '<circle cx="18" cy="18" r="14"/><path d="M13 14c.7-3 3-5 6-5 3.4 0 6 2 6 5 0 4-5 4-5 8"/><path d="M20 28h.01"/>',
+      trophy: '<path d="M11 5h14v8c0 6-3 10-7 10s-7-4-7-10Z"/><path d="M11 9H6c0 6 2 9 7 9M25 9h5c0 6-2 9-7 9M18 23v6M12 33h12M14 29h8"/>',
+      brain: '<path d="M15 5c-4 0-6 3-5 6-3 1-4 4-2 7-2 3 0 7 3 8 0 4 4 6 7 4V7c0-1-1-2-3-2Zm6 0c4 0 6 3 5 6 3 1 4 4 2 7 2 3 0 7-3 8 0 4-4 6-7 4V7c0-1 1-2 3-2Z"/><path d="M12 14c3 0 4 2 4 4M24 14c-3 0-4 2-4 4M12 24c3 0 4-2 4-4M24 24c-3 0-4-2-4-4"/>',
     };
     return `<svg viewBox="0 0 36 36" aria-hidden="true">${paths[name] || paths.note}</svg>`;
   }
 
-  function renderBalloon() {
-    document.getElementById("balloon").innerHTML = `<svg viewBox="0 0 78 102" aria-hidden="true"><path d="M39 5C18 5 8 22 10 45c3 24 16 41 29 47 13-6 26-23 29-47C70 22 60 5 39 5Z" fill="var(--orange)" stroke="var(--ink)" stroke-width="2.3"/><ellipse cx="31" cy="39" rx="2.2" ry="3" fill="var(--ink)" stroke="none"/><ellipse cx="47" cy="39" rx="2.2" ry="3" fill="var(--ink)" stroke="none"/><path d="M26 52c4 10 20 11 26 0" fill="none" stroke="var(--ink)" stroke-width="2.4" stroke-linecap="round"/><path d="M34 91c0 4-3 6-4 8 5 2 13 2 18 0-1-2-4-4-4-8" fill="var(--orange-soft)" stroke="var(--ink)" stroke-width="2"/><path d="M42 100c1 7 10 3 11 8" fill="none" stroke="var(--ink)" stroke-width="1.8"/><path d="M12 24 5 19M20 11l-2-7M65 22l7-5" fill="none" stroke="var(--ink)" stroke-width="1.7" stroke-linecap="round"/></svg>`;
+
+  function emptyState(title, note) {
+    return `<div class="empty-state"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(note)}</span></div>`;
   }
 
-  function renderEvaMini() { document.getElementById("eva-mini").innerHTML = evaPortrait(); }
+  let rewardState = null;
 
-  function evaPortrait() {
-    return `<svg viewBox="0 0 64 64" aria-hidden="true"><circle cx="32" cy="32" r="29" fill="#fff" stroke="var(--line-strong)"/><path d="M14 55c1-11 2-23 1-31C14 10 22 4 32 4s18 6 17 20c-1 8 0 20 1 31-5-5-11-7-18-7s-13 2-18 7Z" fill="#fff" stroke="var(--ink)"/><ellipse cx="32" cy="28" rx="13" ry="16" fill="#fff" stroke="var(--ink)"/><path d="M19 23c2-10 7-15 13-15s11 5 13 15c-5-1-9-4-12-8-3 4-7 7-14 8Z" fill="#fff" stroke="var(--ink)"/><circle cx="27" cy="28" r="1.4" fill="var(--ink)" stroke="none"/><circle cx="37" cy="28" r="1.4" fill="var(--ink)" stroke="none"/><path d="M28 36c3 2 5 2 8 0"/><path d="M18 64c1-11 6-18 14-18s13 7 14 18Z" fill="var(--orange)" stroke="var(--ink)"/><path d="M32 51c3-4 8 1 4 5l-4 3-4-3c-4-4 1-9 4-5Z" fill="#fff" stroke="var(--ink)"/></svg>`;
+  function currentReward() {
+    const dashboard = state.dashboard || {};
+    const explicit = dashboard.daily_reward || dashboard.personal_reward || dashboard.reward;
+
+    if (explicit?.title && !looksSystemLikeReward(explicit)) {
+      return {
+        kind: explicit.kind || "insight",
+        icon: explicit.icon || "spark",
+        type: explicit.type || "Новый инсайт",
+        title: conciseRewardTitle(explicit.title),
+        text: conciseRewardText(explicit.text || explicit.subtitle || "Ева заметила это в последних шагах"),
+        detail: conciseRewardText(explicit.detail || explicit.explanation || explicit.text || explicit.subtitle || ""),
+        action: explicit.action || "strength",
+        cta: explicit.cta || "Посмотреть",
+      };
+    }
+
+    const streak = streakState();
+    const milestone = milestoneReward(streak);
+    if (milestone) return milestone;
+
+    const ritual = ritualState();
+    const snapshot = weeklySnapshotReward(ritual);
+    if (snapshot) return snapshot;
+
+    const progress = state.progress || {};
+    const results = Array.isArray(progress.completed_results) ? progress.completed_results : [];
+    const latest = results[0] || null;
+    const todayKey = localNowParts().dateKey;
+    const latestDate = dateKeyOf(latest?.local_date || latest?.completed_at || latest?.achieved_at || latest?.created_at);
+
+    if (latest && latestDate === todayKey) {
+      return {
+        kind: "win",
+        icon: "trophy",
+        type: "Маленькая победа",
+        title: personalWinTitle(latest),
+        text: "Теперь двигаться дальше проще.",
+        detail: latest.goal_title
+          ? `Это уже подтверждённый шаг по направлению «${latest.goal_title}».`
+          : "Это уже подтверждённый завершённый шаг.",
+        action: "progress",
+        cta: "Посмотреть",
+      };
+    }
+
+    if (ritual.period === "evening" && streak.todayDone) {
+      return {
+        kind: "ritual",
+        icon: "note",
+        type: "Итог дня",
+        title: "Сегодня ты сохранил ритм",
+        text: "Можно зафиксировать одну важную мысль.",
+        detail: "Короткая вечерняя запись поможет Еве точнее связать действия, состояние и результат.",
+        action: "journal",
+        cta: "Подвести итог",
+      };
+    }
+
+    const strength = positiveStrength();
+    const seed = rewardSeed(todayKey);
+    const variant = seed % 6;
+
+    if (variant === 0) {
+      return {
+        kind: "question",
+        icon: "question",
+        type: "Вопрос дня",
+        title: "Что сейчас больше всего тормозит запуск?",
+        text: "Один честный ответ даст новый фокус.",
+        detail: "Ответ можно сохранить в дневник — Ева учтёт его в следующих разговорах.",
+        action: "dialog",
+        cta: "Ответить",
+      };
+    }
+
+    if (variant === 1) {
+      return {
+        kind: "insight",
+        icon: "spark",
+        type: "Новый инсайт",
+        title: "Ты быстрее находишь рабочее решение",
+        text: "Ева заметила это в последних шагах.",
+        detail: strength.evidence || "Вывод основан на последних подтверждённых действиях.",
+        action: "strength",
+        cta: "Открыть",
+      };
+    }
+
+    if (variant === 2) {
+      return {
+        kind: "noticed",
+        icon: "wave",
+        type: "Ева заметила",
+        title: "Ты стал спокойнее относиться к запуску",
+        text: "Это снижает внутреннее сопротивление.",
+        detail: "Такой сдвиг стоит сохранить как ориентир для следующих сложных решений.",
+        action: "strength",
+        cta: "Посмотреть",
+      };
+    }
+
+    if (variant === 3) {
+      return {
+        kind: "strength",
+        icon: "award",
+        type: "Сильная сторона",
+        title: rewardStrengthTitle(strength.text),
+        text: "Это помогает быстрее переходить к действию.",
+        detail: strength.evidence || "Ева будет уточнять этот вывод по мере накопления контекста.",
+        action: "strength",
+        cta: "Посмотреть",
+      };
+    }
+
+    if (variant === 4 && curiosityEvidenceAvailable()) {
+      return {
+        kind: "curiosity",
+        icon: "brain",
+        type: "Есть один паттерн",
+        title: "Ева заметила повторяющуюся закономерность",
+        text: "Она проявилась в нескольких последних шагах.",
+        detail: curiosityDetail(),
+        action: "strength",
+        cta: "Раскрыть",
+      };
+    }
+
+    return {
+      kind: "reflection",
+      icon: "spark",
+      type: "Новый сдвиг",
+      title: "Ты быстрее отделяешь главное от лишнего",
+      text: "Из-за этого решения становятся проще.",
+      detail: strength.evidence || "Ева сравнила несколько последних шагов и увидела повторяющийся способ действия.",
+      action: "strength",
+      cta: "Посмотреть",
+    };
   }
 
-  function practiceIcon(code) { return ({ breath: "wave", ground: "ground", sort: "sort", dot: "dot", dump: "dump" })[code] || "lotus"; }
-  function sheetOption(iconName, title, note, attrs = "") { return `<button class="sheet-option" type="button" ${attrs}><span>${icon(iconName)}</span><span><strong>${escapeHtml(title)}</strong><small>${escapeHtml(note)}</small></span></button>`; }
-  function emptyState(title, note) { return `<div class="empty-state"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(note)}</span></div>`; }
-  function screenContext() { return state.screen === "today" ? `Помоги с главным результатом дня: ${state.dashboard?.main_focus?.title || "пока не выбран"}` : `Помоги в разделе «${screenTitle(state.screen)}»`; }
-  function screenTitle(screen) { return ({ today: "Сегодня", development: "Развитие", organizer: "Органайзер", hub: "Пульт", profile: "Профиль", module: document.getElementById("module-title").textContent })[screen] || "Evaself"; }
-  function haptic(type) { try { if (type === "success") tg?.HapticFeedback?.notificationOccurred?.("success"); else if (type === "selection") tg?.HapticFeedback?.selectionChanged?.(); else tg?.HapticFeedback?.impactOccurred?.("light"); } catch {} }
-  function organizerNotes() { return state.notes.filter((note) => (note.entry_type || "note") !== "journal"); }
-  function isDone(task) { return ["done", "completed"].includes(task?.status); }
-  function taskSort(task) { return new Date(task.remind_at || task.due_at || "2999-12-31").getTime() + Number(task.priority || 3) * 1000; }
-  function groupTasks(items) { const groups = { "СЕГОДНЯ": [], "ПРЕДСТОЯЩИЕ": [], "БЕЗ СРОКА": [], "ВЫПОЛНЕНО": [] }; items.forEach((task) => { if (isDone(task)) groups["ВЫПОЛНЕНО"].push(task); else if (isToday(task.due_at || task.remind_at)) groups["СЕГОДНЯ"].push(task); else if (task.due_at || task.remind_at) groups["ПРЕДСТОЯЩИЕ"].push(task); else groups["БЕЗ СРОКА"].push(task); }); return Object.fromEntries(Object.entries(groups).filter(([,value]) => value.length)); }
-  function isToday(value) { if (!value) return false; const date = new Date(value); const now = new Date(); return date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth() && date.getDate() === now.getDate(); }
-  function toLocalInput(value) { if (!value) return ""; const date = new Date(value); const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000); return local.toISOString().slice(0,16); }
-  function localInputToIso(value) { return value ? new Date(value).toISOString() : null; }
-  function dateInput(value) { if (!value) return ""; const date = value instanceof Date ? value : new Date(value); if (Number.isNaN(date.getTime())) return String(value).slice(0,10); const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000); return local.toISOString().slice(0,10); }
-  function formatDate(value) { if (!value) return ""; const date = new Date(value); if (Number.isNaN(date.getTime())) return String(value).slice(0,10); return new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "short" }).format(date); }
-  function formatDateTime(value) { if (!value) return ""; const date = new Date(value); if (Number.isNaN(date.getTime())) return ""; return new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }).format(date); }
-  function clock(ms) { const seconds = Math.ceil(ms / 1000); return `${String(Math.floor(seconds / 60)).padStart(2,"0")}:${String(seconds % 60).padStart(2,"0")}`; }
-  function plural(number, one, few, many) { const n10 = number % 10, n100 = number % 100; return n10 === 1 && n100 !== 11 ? one : n10 >= 2 && n10 <= 4 && !(n100 >= 12 && n100 <= 14) ? few : many; }
-  function firstLine(value) { return String(value || "").split(/\r?\n/).find(Boolean) || "Запись"; }
-  function linesToArray(value) { return String(value || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean).slice(0,50); }
-  function arrayToLines(value) { return Array.isArray(value) ? value.join("\n") : ""; }
-  function formatValue(value) { return typeof value === "string" ? value : JSON.stringify(value); }
-  function calculateBudget(records) { return records.reduce((sum,item) => { const type = item.entry_type || item.type; const amount = Number(item.amount_minor || 0); if (type === "income") sum.income_minor += amount; else sum.expense_minor += amount; return sum; }, { income_minor: 0, expense_minor: 0 }); }
-  function budgetSummaryText() { const sum = state.dashboard?.budget || calculateBudget(state.budgets); return `Расходы за месяц: ${money(sum.expense_minor || 0)}`; }
-  function money(minor) { return new Intl.NumberFormat("ru-RU", { style: "currency", currency: "RUB", maximumFractionDigits: 0 }).format(Number(minor || 0) / 100); }
-  function lifePath(date) { let sum = String(date).replace(/\D/g, "").split("").reduce((a,b) => a + Number(b), 0); while (sum > 9 && ![11,22,33].includes(sum)) sum = String(sum).split("").reduce((a,b) => a + Number(b), 0); return sum; }
-  function numberMeaning(n) { return ({1:"Инициатива. Где важно начать самому?",2:"Сотрудничество. Где нужен диалог?",3:"Выражение. Что стоит сформулировать?",4:"Структура. Какую опору создать?",5:"Изменение. Где нужна гибкость?",6:"Забота. Что важно поддержать?",7:"Исследование. Что понять глубже?",8:"Управление. Какой ресурс использовать точнее?",9:"Завершение. Что пора закончить?",11:"Идея. Как проверить её фактами?",22:"Воплощение. Какой первый артефакт создать?",33:"Поддержка. Как помочь, сохраняя границы?"})[n] || "Символическая тема для размышления."; }
-  function dailyAstroTheme() { const themes = ["Где сегодня важно сохранить направление, но проявить гибкость?", "Какой разговор стоит провести яснее и спокойнее?", "Какое небольшое действие вернёт ощущение опоры?", "Что можно завершить, чтобы освободить внимание?", "Где полезно сначала проверить факты?"]; return themes[new Date().getDate() % themes.length]; }
-  async function copyText(value) { try { await navigator.clipboard.writeText(value || ""); } catch {} }
-  function escapeHtml(value) { return String(value ?? "").replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[char]); }
-  function escapeAttr(value) { return escapeHtml(value).replace(/`/g, "&#96;"); }
+  function rewardSeed(dateKey) {
+    const user = state.profile?.user || state.session?.user || {};
+    const identity = user.id || user.chat_id || user.username || user.preferred_name || user.first_name || "";
+    return [...`${dateKey}:${identity}`].reduce((sum, char) => sum + char.charCodeAt(0), 0);
+  }
 
-  /**
-   * Мост для отдельных модулей интерфейса (`journal.js`).
-   *
-   * Наружу отдаётся ровно то, без чего модуль не обойдётся: доступ к
-   * API с сессией, лист, тост, подтверждение и экранирование. Ни
-   * состояние сессии, ни токен через мост не проходят.
-   */
+  function curiosityEvidenceAvailable() {
+    const insight = state.dashboard?.positive_insight || state.dashboard?.insight || {};
+    const observations = Number(insight.observations || insight.count || 0);
+    const results = Array.isArray(state.progress?.completed_results) ? state.progress.completed_results.length : 0;
+    const blocks = Array.isArray(state.progress?.work_blocks) ? state.progress.work_blocks.length : 0;
+    return observations >= 2 || results >= 2 || blocks >= 3;
+  }
+
+  function curiosityDetail() {
+    const direct = state.dashboard?.pattern_hint?.text
+      || state.dashboard?.insight?.text
+      || state.dashboard?.positive_insight?.text;
+    if (direct) return String(direct);
+    const strength = positiveStrength();
+    return `${strength.text}. ${strength.evidence || ""}`.trim();
+  }
+
+  function weeklySnapshotReward(ritual) {
+    const explicit = state.dashboard?.weekly_snapshot;
+    if (explicit?.title) {
+      return {
+        kind: "snapshot",
+        icon: "card",
+        type: "Снимок недели",
+        title: conciseRewardTitle(explicit.title),
+        text: conciseRewardText(explicit.subtitle || explicit.text || "Короткий итог последних семи дней."),
+        detail: conciseRewardText(explicit.detail || explicit.summary || explicit.text || ""),
+        action: "progress",
+        cta: "Открыть",
+      };
+    }
+
+    if (!ritual.weeklySnapshotReady) return null;
+
+    const week = weeklyProgress();
+    const strength = positiveStrength();
+    return {
+      kind: "snapshot",
+      icon: "card",
+      type: "Снимок недели",
+      title: `На этой неделе ты сделал ${week.done} из ${week.target} шагов`,
+      text: "Ева собрала короткий итог без оценок и давления.",
+      detail: `${strength.text}. ${strength.evidence || ""}`.trim(),
+      action: "progress",
+      cta: "Открыть",
+    };
+  }
+
+  function milestoneReward(streak) {
+    if (!streak.milestone) return null;
+
+    const rewards = {
+      3: {
+        kind: "milestone",
+        icon: "spark",
+        type: "3 дня в ритме",
+        title: "Ты вошёл в ритм",
+        text: "Ева собрала новый короткий инсайт.",
+        detail: "Три дня подряд — уже достаточно, чтобы увидеть первый устойчивый рисунок действий.",
+        action: "strength",
+        cta: "Открыть",
+      },
+      7: {
+        kind: "milestone",
+        icon: "award",
+        type: "7 дней в ритме",
+        title: "Ты удержал ритм целую неделю",
+        text: "Ева подготовила особую карточку.",
+        detail: streak.perfectWeek
+          ? "Это идеальная неделя: семь дней без пропуска и без восстановления серии."
+          : "Неделя ритма уже даёт достаточно контекста для более точных наблюдений.",
+        action: "strength",
+        cta: "Посмотреть",
+      },
+      14: {
+        kind: "milestone",
+        icon: "card",
+        type: "14 дней в ритме",
+        title: "Готов расширенный снимок прогресса",
+        text: "Две недели уже показывают заметные изменения.",
+        detail: "Ева может сопоставить цели, завершённые шаги и повторяющиеся паттерны за две недели.",
+        action: "progress",
+        cta: "Открыть",
+      },
+      30: {
+        kind: "milestone",
+        icon: "trophy",
+        type: "30 дней в ритме",
+        title: "Месяц личного прогресса собран",
+        text: "Это редкая отметка — посмотри, что изменилось.",
+        detail: "Снимок месяца собирает реальные завершённые шаги, ритм и накопленный профиль.",
+        action: "progress",
+        cta: "Посмотреть",
+      },
+    };
+
+    return rewards[streak.milestone] || null;
+  }
+
+  function looksSystemLikeReward(reward) {
+    const text = `${reward?.title || ""} ${reward?.text || reward?.subtitle || ""}`;
+    return /webapp|production|по цели|систем|дашборд|dashboard|сценарий интерфейса/i.test(text);
+  }
+
+  function personalWinTitle(latest) {
+    const raw = String(latest?.title || latest?.actual_result || "").toLowerCase();
+    if (/сценар|webapp|интерфейс|экран/.test(raw)) return "Ты собрал ясный сценарий запуска";
+    if (/запуск|релиз|production|продакш/.test(raw)) return "Ты сделал запуск заметно ближе";
+    if (/решен|готов|заверш|собран|сделан/.test(raw)) return "Ты довёл ещё один важный шаг до результата";
+    return "Ты продвинулся дальше, чем кажется";
+  }
+
+  function rewardStrengthTitle(value) {
+    const text = String(value || "");
+    if (/быстро|решен|действ|конкрет/i.test(text)) return "Ты умеешь быстро убирать лишнее";
+    return "Ты умеешь быстро убирать лишнее";
+  }
+
+  function conciseRewardTitle(value) {
+    const text = String(value || "").trim();
+    return text.length > 82 ? `${text.slice(0, 79).trim()}…` : text;
+  }
+
+  function conciseRewardText(value) {
+    const text = String(value || "").trim();
+    return text.length > 74 ? `${text.slice(0, 71).trim()}…` : text;
+  }
+
+  function positiveStrength() {
+    const direct = state.dashboard?.positive_insight?.text || state.dashboard?.strength?.text || state.profile?.positive_insight?.text || state.profile?.strength?.text;
+    if (direct) return { text: String(direct), evidence: "Основано на подтверждённых наблюдениях" };
+
+    const progress = state.progress || {};
+    const results = Array.isArray(progress.completed_results) ? progress.completed_results : [];
+    const blocks = Array.isArray(progress.work_blocks) ? progress.work_blocks : [];
+    const goals = (state.goals || []).filter((goal) => goal.status === "active");
+
+    if (results.length >= 2) return { text: "Ты умеешь доводить важное до результата", evidence: `Уже ${results.length} подтверждённых результатов` };
+    if (results.length === 1) return { text: "Ты умеешь превращать намерение в конкретный результат", evidence: "Это уже подтверждено одним завершённым результатом" };
+    if (blocks.length >= 2) return { text: "Ты умеешь возвращаться к важному и удерживать фокус", evidence: `${blocks.length} фокус-сессии уже зафиксированы` };
+    if (goals.length) return { text: "Ты умеешь превращать намерение в конкретную цель", evidence: "Есть активная сформулированная цель" };
+    return { text: "Ты готов разбираться в себе и переводить выводы в действия", evidence: "Этот вывод будет уточняться по мере работы" };
+  }
+
+  function renderReward(reward) {
+    rewardState = reward;
+    trackRewardImpression(reward);
+    document.getElementById("reward-icon").innerHTML = icon(reward.icon);
+    document.getElementById("reward-type").textContent = reward.type;
+    document.getElementById("reward-title").textContent = reward.title;
+    document.getElementById("reward-text").textContent = reward.text;
+    document.getElementById("reward-action").textContent = reward.cta || "Посмотреть";
+    document.getElementById("reward-card").dataset.rewardKind = reward.kind || "insight";
+  }
+
+  function trackRewardImpression(reward) {
+    const key = `eva:reward-impression:${localNowParts().dateKey}:${reward?.kind || "unknown"}`;
+    try {
+      if (sessionStorage.getItem(key)) return;
+      sessionStorage.setItem(key, "1");
+    } catch {}
+    trackRetention("reward_impression", {
+      reward_kind: reward?.kind || "unknown",
+      reward_type: reward?.type || "",
+    });
+  }
+
+  function openCurrentReward() {
+    const reward = rewardState || currentReward();
+    markRewardViewed(reward);
+    const primaryLabel = reward.action === "dialog"
+      ? "Ответить Еве"
+      : reward.action === "progress"
+        ? "Открыть прогресс"
+        : reward.action === "journal"
+          ? "Добавить итог"
+          : reward.kind === "curiosity"
+            ? "Раскрыть паттерн"
+            : "Обсудить с Евой";
+
+    const shareAction = ["milestone", "snapshot"].includes(reward.kind)
+      ? `<button class="secondary-action" id="reward-share" type="button">Поделиться отметкой</button>`
+      : "";
+
+    openSheet({
+      title: reward.type,
+      subtitle: reward.kind === "curiosity"
+        ? "Ева раскрывает вывод только после твоего действия."
+        : "Короткий личный вывод без лишней аналитики.",
+      html: `<article class="section-card reward-detail">
+          <h3>${escapeHtml(reward.title)}</h3>
+          <p>${escapeHtml(reward.text)}</p>
+          ${reward.detail ? `<p class="reward-detail-more">${escapeHtml(reward.detail)}</p>` : ""}
+        </article>
+        <div class="investment-actions">
+          <button class="primary-action" id="reward-primary" type="button">${escapeHtml(primaryLabel)}</button>
+          <div class="micro-investment-grid">
+            <button class="secondary-action" id="reward-save" type="button">Сохранить инсайт</button>
+            <button class="secondary-action" id="reward-mood" type="button">Отметить эмоцию</button>
+            <button class="secondary-action" id="reward-thought" type="button">Добавить мысль</button>
+            <button class="secondary-action" id="reward-profile" type="button">Продолжить профиль</button>
+          </div>
+          ${shareAction}
+        </div>`,
+      onMount(host) {
+        host.querySelector("#reward-primary").addEventListener("click", () => {
+          if (reward.action === "progress") {
+            closeSheet();
+            state.developmentTab = "progress";
+            syncDevelopmentTabs();
+            return openScreen("development");
+          }
+
+          if (reward.action === "journal") {
+            closeSheet();
+            return window.EvaJournal?.openNew?.({
+              title: "Итог дня",
+              content: "Что сегодня было самым важным?\n\n",
+            });
+          }
+
+          openEvaHandoff(
+            reward.action === "dialog"
+              ? `Ответим на вопрос: ${reward.title}`
+              : reward.kind === "curiosity"
+                ? `Ева заметила паттерн: ${reward.detail || reward.title}. Помоги понять, как он проявляется и что с ним делать.`
+                : `Ева заметила про меня: ${reward.title}. Помоги понять, как использовать это дальше.`,
+          );
+        });
+
+        host.querySelector("#reward-save").addEventListener("click", () => {
+          closeSheet();
+          window.EvaJournal?.openNew?.({
+            title: reward.type,
+            content: `${reward.title}\n${reward.detail || reward.text}`,
+          });
+        });
+
+        host.querySelector("#reward-mood").addEventListener("click", () => {
+          openMoodInvestment(reward);
+        });
+
+        host.querySelector("#reward-thought").addEventListener("click", () => {
+          closeSheet();
+          window.EvaJournal?.openNew?.({
+            title: "Мысль после инсайта",
+            content: `${reward.title}\n\nМоя мысль: `,
+          });
+        });
+
+        host.querySelector("#reward-profile").addEventListener("click", () => {
+          closeSheet();
+          state.developmentTab = "tests";
+          syncDevelopmentTabs();
+          openScreen("development");
+        });
+
+        host.querySelector("#reward-share")?.addEventListener("click", () => {
+          shareMilestone(reward);
+        });
+      },
+    });
+  }
+
+  function openMoodInvestment(reward) {
+    openSheet({
+      title: "Что ты чувствуешь сейчас?",
+      subtitle: "Одна отметка поможет Еве точнее видеть изменения со временем.",
+      html: `<div class="mood-investment-grid">
+        ${[
+          ["calm", "Спокойно"],
+          ["good", "Хорошо"],
+          ["neutral", "Нейтрально"],
+          ["tense", "Напряжённо"],
+          ["hard", "Тяжело"],
+        ].map(([value, label]) => `<button class="choice-button" data-reward-mood="${value}" type="button">${label}</button>`).join("")}
+      </div>`,
+      onMount(host) {
+        host.querySelectorAll("[data-reward-mood]").forEach((button) => {
+          button.addEventListener("click", async () => {
+            try {
+              await api("/public/v2/checkins", {
+                method: "POST",
+                body: JSON.stringify({
+                  mood: button.dataset.rewardMood,
+                  source: "reward",
+                  note: reward?.title || null,
+                }),
+              });
+              markInvestmentCompleted("emotion", { mood: button.dataset.rewardMood });
+              closeSheet();
+              toast("Эмоция отмечена — Ева учтёт её дальше");
+              haptic("success");
+            } catch (error) {
+              toast(friendlyError(error), true);
+            }
+          });
+        });
+      },
+    });
+  }
+
+  async function shareMilestone(reward) {
+    const text = `${reward.type}\n${reward.title}\n${reward.text}`;
+    try {
+      if (navigator.share) {
+        await navigator.share({ title: "Ева — личный прогресс", text });
+        return;
+      }
+    } catch (error) {
+      if (error?.name === "AbortError") return;
+    }
+
+    await copyText(text);
+    toast("Карточка прогресса скопирована");
+  }
+
+  function profileInvestmentState() {
+    const explicit = state.profile?.completion || state.profile?.self_understanding || {};
+    const explicitOverall = numberPercent(explicit.overall ?? explicit.percent ?? state.profile?.completion_percent);
+    const explicitEmotions = numberPercent(explicit.emotions);
+    const explicitRelationships = numberPercent(explicit.relationships);
+    const explicitGoals = numberPercent(explicit.goals);
+
+    const user = state.profile?.user || state.session?.user || {};
+    const knownBase = [user.preferred_name || user.first_name, user.city, user.timezone, user.communication_style, user.response_mode].filter(Boolean).length;
+    const confirmed = Array.isArray(state.profile?.confirmed) ? state.profile.confirmed.length : 0;
+    const journalEntries = window.EvaJournal?.state?.entries?.length || 0;
+    const activeGoals = (state.goals || []).filter((goal) => goal.status === "active").length;
+
+    const emotions = explicitEmotions ?? clampPercent(15 + Math.min(60, journalEntries * 8) + (confirmed ? 10 : 0));
+    const relationships = explicitRelationships ?? clampPercent(10 + Math.min(55, confirmed * 7));
+    const goals = explicitGoals ?? clampPercent(activeGoals ? 55 + Math.min(35, activeGoals * 10) : 15);
+    const derivedOverall = clampPercent(Math.round((knownBase / 5) * 25 + emotions * .25 + relationships * .20 + goals * .30));
+
+    const dimensions = [
+      { key: "emotions", label: "эмоции", value: emotions },
+      { key: "relationships", label: "отношения", value: relationships },
+      { key: "goals", label: "цели", value: goals },
+    ].filter((item) => item.value < 100);
+    const next = dimensions.sort((a, b) => a.value - b.value)[0] || { label: "новые наблюдения", value: 100 };
+
+    return {
+      overall: explicitOverall ?? derivedOverall,
+      emotions,
+      relationships,
+      goals,
+      next,
+    };
+  }
+
+  function renderProfileInvestment() {
+    const profile = profileInvestmentState();
+    document.getElementById("profile-progress-label").textContent = `${profile.overall}%`;
+    document.getElementById("profile-progress-bar").style.width = `${profile.overall}%`;
+    document.getElementById("profile-emotions").textContent = `${profile.emotions}%`;
+    document.getElementById("profile-relationships").textContent = `${profile.relationships}%`;
+    document.getElementById("profile-goals").textContent = `${profile.goals}%`;
+    document.getElementById("profile-next").textContent = `Дальше: ${profile.next.label}`;
+
+    const note = document.getElementById("profile-value-note");
+    note.textContent = profile.overall >= 80
+      ? "Ева уже видит устойчивый контекст"
+      : profile.overall >= 50
+        ? "Чем полнее профиль, тем точнее выводы"
+        : "Больше контекста — точнее инсайты";
+  }
+
+  function numberPercent(value) {
+    if (value === undefined || value === null || value === "") return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? clampPercent(number) : null;
+  }
+
+  function clampPercent(value) {
+    return Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
+  }
+
+  function weeklyProgress() {
+    const explicitDone = Number(state.dashboard?.weekly_progress?.done ?? state.progress?.weekly_steps_completed);
+    const explicitTarget = Number(state.dashboard?.weekly_progress?.target ?? state.progress?.weekly_steps_target ?? 5);
+    if (Number.isFinite(explicitDone) && explicitDone >= 0) {
+      const target = Number.isFinite(explicitTarget) && explicitTarget > 0 ? explicitTarget : 5;
+      return { done: Math.min(explicitDone, target), target, percent: Math.min(100, Math.round(explicitDone / target * 100)) };
+    }
+
+    const dates = activityDates().filter((date) => inCurrentWeek(date));
+    const done = new Set(dates.map((date) => dateKeyOf(date))).size;
+    const target = 5;
+    return { done: Math.min(done, target), target, percent: Math.min(100, Math.round(done / target * 100)) };
+  }
+
+  function streakState() {
+    const explicit = Number(state.dashboard?.streak_days ?? state.progress?.streak_days);
+    const dates = activityDates();
+    const days = Number.isFinite(explicit) && explicit >= 0
+      ? Math.round(explicit)
+      : calculateStreak(dates);
+
+    const milestones = [3, 7, 14, 30];
+    const milestone = milestones.includes(days) ? days : null;
+    const nextMilestone = milestones.find((value) => value > days) || Math.ceil((days + 1) / 30) * 30;
+    const daysToMilestone = Math.max(0, nextMilestone - days);
+
+    if (days >= 7) ensureStreakShield();
+
+    const keys = new Set(dates.map((date) => dateKeyOf(date)).filter(Boolean));
+    const todayKey = localNowParts().dateKey;
+    const yesterdayKey = addDaysKey(todayKey, -1);
+    const todayDone = keys.has(todayKey);
+    const yesterdayDone = keys.has(yesterdayKey);
+
+    const backendProtection = state.dashboard?.streak_protection_available
+      ?? state.progress?.streak_protection_available
+      ?? null;
+    const backendShields = Number(state.dashboard?.streak_shields ?? state.progress?.streak_shields ?? 0);
+    const localShield = streakShieldState();
+    const shieldAvailable = backendShields > 0 || Boolean(localShield.available && !localShield.used_at);
+
+    const graceEligible = !todayDone && days > 0 && yesterdayDone;
+    const last = lastMeaningfulActionAt();
+    const hoursSinceLast = last ? Math.max(0, (Date.now() - last.getTime()) / 3_600_000) : Infinity;
+    const shieldRecoveryEligible = !todayDone && days > 0 && shieldAvailable && hoursSinceLast <= 48;
+    const protectionAvailable = backendProtection == null
+      ? graceEligible || shieldRecoveryEligible
+      : Boolean(backendProtection);
+
+    const currentWeekKeys = [...keys].filter((key) => inCurrentWeek(new Date(`${key}T12:00:00Z`)));
+    const perfectWeek = new Set(currentWeekKeys).size >= 7
+      && !Boolean(state.dashboard?.streak_protection_used_this_week ?? state.progress?.streak_protection_used_this_week);
+
+    const ringBase = nextMilestone > 0 ? Math.min(1, days / nextMilestone) : 0;
+    const ring = days ? Math.max(12, Math.min(100, ringBase * 100)) : 8;
+
+    return {
+      days,
+      ring,
+      milestone,
+      nextMilestone,
+      daysToMilestone,
+      todayDone,
+      graceEligible,
+      protectionAvailable,
+      shieldAvailable,
+      shieldRecoveryEligible,
+      perfectWeek,
+    };
+  }
+
+  function streakShieldState() {
+    try {
+      const stored = JSON.parse(localStorage.getItem(SHIELD_KEY) || "{}");
+      return { ...shieldMemory, ...(stored || {}) };
+    } catch {
+      return { ...shieldMemory };
+    }
+  }
+
+  function ensureStreakShield() {
+    const current = streakShieldState();
+    if (current.earned_at) return current;
+
+    const next = {
+      available: true,
+      earned_at: new Date().toISOString(),
+      used_at: null,
+    };
+    shieldMemory = next;
+    try {
+      localStorage.setItem(SHIELD_KEY, JSON.stringify(next));
+    } catch {}
+    trackRetention("streak_shield_earned", { milestone_days: 7 });
+    return next;
+  }
+
+  function reserveShieldRecovery() {
+    const current = streakShieldState();
+    if (!current.available || current.used_at) return false;
+    const next = {
+      ...current,
+      pending_recovery_at: new Date().toISOString(),
+    };
+    shieldMemory = next;
+    try {
+      localStorage.setItem(SHIELD_KEY, JSON.stringify(next));
+    } catch {}
+    trackRetention("streak_shield_recovery_started");
+    return true;
+  }
+
+  function completeShieldRecoveryIfPending() {
+    const current = streakShieldState();
+    if (!current.pending_recovery_at || current.used_at) return;
+    const next = {
+      ...current,
+      available: false,
+      used_at: new Date().toISOString(),
+      pending_recovery_at: null,
+    };
+    shieldMemory = next;
+    try {
+      localStorage.setItem(SHIELD_KEY, JSON.stringify(next));
+    } catch {}
+    trackRetention("streak_shield_used");
+  }
+
+  function activityDates() {
+    const progress = state.progress || {};
+    const results = Array.isArray(progress.completed_results) ? progress.completed_results : [];
+    const blocks = Array.isArray(progress.work_blocks) ? progress.work_blocks : [];
+    const backendMeaningful = Array.isArray(progress.meaningful_actions) ? progress.meaningful_actions : [];
+    const journalEntries = Array.isArray(window.EvaJournal?.state?.entries) ? window.EvaJournal.state.entries : [];
+    const localMeaningful = meaningfulActions();
+
+    return [
+      ...results,
+      ...blocks,
+      ...backendMeaningful,
+      ...journalEntries,
+      ...localMeaningful,
+    ]
+      .map((item) =>
+        item.local_date
+        || item.date_key
+        || item.completed_at
+        || item.achieved_at
+        || item.started_at
+        || item.created_at
+        || item.ts
+        || item.date
+      )
+      .filter(Boolean)
+      .map((value) => new Date(/^\d{4}-\d{2}-\d{2}$/.test(String(value)) ? `${value}T12:00:00` : value))
+      .filter((date) => !Number.isNaN(date.getTime()));
+  }
+
+  function calculateStreak(dates) {
+    if (!dates.length) return 0;
+    const keys = new Set(dates.map((date) => dateKeyOf(date)).filter(Boolean));
+    let cursor = localNowParts().dateKey;
+    if (!keys.has(cursor)) cursor = addDaysKey(cursor, -1);
+    let count = 0;
+    while (keys.has(cursor)) {
+      count += 1;
+      cursor = addDaysKey(cursor, -1);
+    }
+    return count;
+  }
+
+  function inCurrentWeek(date) {
+    const todayKey = localNowParts().dateKey;
+    const today = new Date(`${todayKey}T12:00:00Z`);
+    const mondayOffset = (today.getUTCDay() + 6) % 7;
+    const startKey = addDaysKey(todayKey, -mondayOffset);
+    const endKey = addDaysKey(startKey, 7);
+    const key = dateKeyOf(date);
+    return key >= startKey && key < endKey;
+  }
+
+  function dateKeyOf(value) {
+    const date = value instanceof Date ? value : value ? new Date(/^\d{4}-\d{2}-\d{2}$/.test(String(value)) ? `${value}T12:00:00Z` : value) : null;
+    if (!date || Number.isNaN(date.getTime())) return "";
+    const timezone = state.profile?.user?.timezone || state.session?.user?.timezone;
+    try {
+      const parts = new Intl.DateTimeFormat("en-CA", {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        timeZone: timezone || undefined,
+      }).formatToParts(date);
+      const get = (type) => parts.find((item) => item.type === type)?.value || "";
+      return `${get("year")}-${get("month")}-${get("day")}`;
+    } catch {
+      return date.toISOString().slice(0, 10);
+    }
+  }
+
+  function addDaysKey(key, delta) {
+    const date = new Date(`${key}T12:00:00Z`);
+    date.setUTCDate(date.getUTCDate() + delta);
+    return date.toISOString().slice(0, 10);
+  }
+
+  function openStreakSheet() {
+    const streak = streakState();
+    const milestoneText = streak.milestone
+      ? `Отметка ${streak.milestone} дней достигнута`
+      : `До отметки ${streak.nextMilestone} дней — ${streak.daysToMilestone}`;
+
+    const dailyState = streak.todayDone
+      ? "Дневная цель выполнена: один короткий шаг уже есть."
+      : "Дневная цель: один короткий шаг. Этого достаточно, чтобы сохранить ритм.";
+
+    const perfect = streak.perfectWeek
+      ? `<article class="section-card perfect-streak-card">
+          <span class="eyebrow">ИДЕАЛЬНАЯ НЕДЕЛЯ</span>
+          <h3>7 дней без пропуска</h3>
+          <p>Чистый ритм без восстановления серии. Это редкая отметка, но не обязательная цель.</p>
+        </article>`
+      : "";
+
+    const protection = streak.protectionAvailable
+      ? `<article class="section-card streak-protection">
+          <span class="eyebrow">ЗАЩИТА СЕРИИ</span>
+          <h3>Сегодня можно восстановить ритм</h3>
+          <p>${streak.shieldRecoveryEligible ? "У тебя есть заработанный щит серии. Он даст до 24 часов на мягкое восстановление." : "Сделай один короткий шаг сегодня — без штрафов и давления."}</p>
+          <div class="action-row"><button class="secondary-action" id="streak-restore" type="button">Восстановить сегодня</button></div>
+        </article>`
+      : "";
+
+    const shieldCard = streak.shieldAvailable && !streak.protectionAvailable
+      ? `<article class="section-card">
+          <span class="eyebrow">ЩИТ СЕРИИ</span>
+          <h3>1 защита доступна</h3>
+          <p>Она заработана после 7 дней ритма и поможет мягко пережить один пропуск.</p>
+        </article>`
+      : "";
+
+    const intention = selfIntention();
+    const intentionCard = `<article class="section-card">
+      <span class="eyebrow">НАМЕРЕНИЕ</span>
+      <h3>${intention ? escapeHtml(intention) : "Один договор с собой"}</h3>
+      <p>${intention ? "Это твоё собственное напоминание, без внешнего давления." : "Можно оставить короткое обещание себе на сегодня."}</p>
+      <div class="action-row"><button class="secondary-action" id="streak-intention" type="button">${intention ? "Изменить" : "Задать намерение"}</button></div>
+    </article>`;
+
+    openSheet({
+      title: `${streak.days} ${streak.days === 1 ? "день" : "дней"} в ритме`,
+      subtitle: "Серия поддерживает привычку, но не оценивает тебя.",
+      html: `<div class="section-stack">
+        <article class="section-card">
+          <span class="eyebrow">ЕЖЕДНЕВНАЯ ЦЕЛЬ</span>
+          <h3>1 короткий шаг</h3>
+          <p>${escapeHtml(dailyState)}</p>
+        </article>
+        <article class="section-card">
+          <span class="eyebrow">СЛЕДУЮЩАЯ ОТМЕТКА</span>
+          <h3>${escapeHtml(milestoneText)}</h3>
+          <p>Отметки: 3 · 7 · 14 · 30 дней. На каждой Ева открывает новый формат награды.</p>
+        </article>
+        ${perfect}
+        ${shieldCard}
+        ${protection}
+        ${intentionCard}
+      </div>`,
+      onMount(host) {
+        host.querySelector("#streak-restore")?.addEventListener("click", () => {
+          if (streak.shieldRecoveryEligible) reserveShieldRecovery();
+          trackRetention("streak_recovery_started", {
+            shield: Boolean(streak.shieldRecoveryEligible),
+            grace: Boolean(streak.graceEligible),
+          });
+          closeSheet();
+          startMainFocus();
+        });
+
+        host.querySelector("#streak-intention")?.addEventListener("click", () => {
+          openSelfIntentionSheet();
+        });
+      },
+    });
+  }
+
+  function selfIntentionKey() {
+    return `eva:self-intention:${localNowParts().dateKey}`;
+  }
+
+  function selfIntention() {
+    try {
+      return localStorage.getItem(selfIntentionKey()) || "";
+    } catch {
+      return "";
+    }
+  }
+
+  function openSelfIntentionSheet() {
+    const current = selfIntention();
+    openSheet({
+      title: "Намерение на сегодня",
+      subtitle: "Короткая фраза для себя — не обязательство перед кем-то.",
+      html: `<form class="form-grid" id="self-intention-form">
+        <label><span>Что ты обещаешь себе сегодня?</span>
+          <input name="intention" maxlength="120" value="${escapeAttr(current)}" placeholder="Например: сделать один короткий шаг">
+        </label>
+        <button class="primary-action" type="submit">Сохранить</button>
+      </form>`,
+      onMount(host) {
+        host.querySelector("#self-intention-form").addEventListener("submit", (event) => {
+          event.preventDefault();
+          const value = String(new FormData(event.currentTarget).get("intention") || "").trim();
+          try {
+            if (value) localStorage.setItem(selfIntentionKey(), value);
+            else localStorage.removeItem(selfIntentionKey());
+          } catch {}
+          closeSheet();
+          toast(value ? "Намерение сохранено" : "Намерение очищено");
+        });
+      },
+    });
+  }
+
+  function screenContext() {
+    if (state.screen === "today") {
+      return `Помоги с моим следующим шагом: ${state.dashboard?.main_focus?.title || "пока не выбран"}`;
+    }
+    if (state.screen === "journal") return "Хочу обсудить мои записи и текущее состояние";
+    if (state.screen === "development") return "Хочу обсудить мой рост, цели и реальный прогресс";
+    if (state.screen === "profile") return "Помоги уточнить то, что тебе важно знать обо мне для более персональной помощи";
+    return "Продолжим";
+  }
+
+  function haptic(type) {
+    try {
+      if (type === "success") tg?.HapticFeedback?.notificationOccurred?.("success");
+      else tg?.HapticFeedback?.impactOccurred?.("light");
+    } catch {}
+  }
+
+  function clock(ms) {
+    const seconds = Math.ceil(ms / 1000);
+    return `${String(Math.floor(seconds / 60)).padStart(2,"0")}:${String(seconds % 60).padStart(2,"0")}`;
+  }
+
+  function formatDate(value) {
+    if (!value) return "";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value).slice(0,10);
+    return new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "short" }).format(date);
+  }
+
+  function formatDateTime(value) {
+    if (!value) return "";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "";
+    return new Intl.DateTimeFormat("ru-RU", {
+      day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
+    }).format(date);
+  }
+
+  async function copyText(value) {
+    try { await navigator.clipboard.writeText(value || ""); } catch {}
+  }
+
+  function escapeHtml(value) {
+    return String(value ?? "").replace(/[&<>'"]/g, (char) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;",
+    })[char]);
+  }
+
+  function escapeAttr(value) {
+    return escapeHtml(value).replace(/`/g, "&#96;");
+  }
+
+  function legacyDashboard(today, tasks) {
+    const main = today?.main_action
+      ? {
+          title: today.main_action,
+          source_label: today.goal_title || "Активная цель",
+          expected_result: today.expected_result,
+          work_block_id: today.work_block_id,
+          work_block_status: today.work_block_status,
+        }
+      : null;
+    return {
+      local_time: today?.local_time,
+      checkin: null,
+      main_focus: main,
+      next_reminder: tasks
+        .filter((task) => task.remind_at && !["done","completed"].includes(task.status))
+        .sort((a,b) => new Date(a.remind_at) - new Date(b.remind_at))[0] || null,
+      insight: { text: "Основные цели уже доступны. Для наблюдений о состоянии нужно несколько отметок." },
+    };
+  }
+
+  function demoApi(path, options) {
+    const now = new Date();
+    const due = new Date(now.getTime() + 3 * 3600_000).toISOString();
+    if (path === "/public/session") return {
+      user: { first_name: "Вик", timezone: "Asia/Yekaterinburg" },
+      plan: "free", quotas: [], session_token: "demo",
+    };
+    if (path === "/public/bot") return { username: "eva_demo_bot" };
+    if (path === "/public/goals") return {
+      goals: [{
+        id: "1", title: "Запустить обновлённую Еву", status: "active",
+        progress_percent: 42, next_result: "Готовый production WebApp",
+      }],
+    };
+    if (path === "/public/profile") return {
+      profile: {
+        user: {
+          preferred_name: "Вик", city: "Пермь",
+          timezone: "Asia/Yekaterinburg", response_mode: "text", communication_style: "Кратко и по делу",
+        },
+        completion: { overall: 42, emotions: 80, relationships: 20, goals: 55 },
+        confirmed: [], candidates: [],
+      },
+    };
+    if (path === "/public/progress") return {
+      progress: {
+        completed_results: [{ title: "Собран новый главный сценарий WebApp", goal_title: "Запустить обновлённую Еву", local_date: "2026-08-19" }],
+        work_blocks: [
+          { id: "w1", completed_at: "2026-08-18T10:00:00" },
+          { id: "w2", completed_at: "2026-08-17T10:00:00" },
+          { id: "w3", completed_at: "2026-08-16T10:00:00" }
+        ],
+        streak_days: 5, weekly_steps_completed: 4, weekly_steps_target: 5, goals: [],
+      },
+    };
+    if (path.startsWith("/public/v2/dashboard")) return {
+      local_time: "14:17",
+      checkin: { mood: "good", energy: 7, tension: 4 },
+      main_focus: {
+        id: "goal:1",
+        title: "Продолжить путь к запуску Евы",
+        subtitle: "Разобрать один барьер перед запуском",
+        planned_minutes: 6,
+      },
+      main_focus_candidates: [],
+      next_reminder: { title: "Проверить главный экран", remind_at: due },
+      positive_insight: {
+        text: "Ты быстро превращаешь идеи в конкретные действия",
+        observations: 8,
+      },
+      streak_days: 5,
+      weekly_progress: { done: 4, target: 5 },
+    };
+    if (path.startsWith("/public/v2/checkins")) {
+      return { checkin: JSON.parse(options.body || "{}") };
+    }
+    if (path.startsWith("/public/v2/focus-sessions")) return { focus_session: { id: "demo" } };
+    if (path.startsWith("/public/v2/journal")) return { entries: [] };
+    return {};
+  }
+
+  window.EvaRetention = {
+    track: trackRetention,
+    queue: retentionQueue,
+    flush: flushRetentionEvents,
+    metrics: retentionMetricsSnapshot,
+    activation: activationState,
+    markInvestmentCompleted,
+    recordMeaningfulAction,
+    reactivation: reactivationState,
+    notifications: notificationPolicy,
+    lifecycle: lifecycleState,
+    churnRisk: churnRiskState,
+    streak: streakState,
+    performance: performanceSnapshot,
+  };
+
   window.EvaApp = {
     state,
     api,
@@ -1570,37 +2665,12 @@
     friendlyError,
     openSheet,
     closeSheet,
-    openModule,
     openEvaHandoff,
     confirmDanger,
     toast,
     emptyState,
-    icon,
     escapeHtml,
     escapeAttr,
     formatDate,
   };
-
-  function legacyDashboard(today, tasks) {
-    const main = today?.main_action ? { title: today.main_action, source_label: today.goal_title || "Активная цель", expected_result: today.expected_result, work_block_id: today.work_block_id, work_block_status: today.work_block_status } : null;
-    return { local_time: today?.local_time, checkin: null, main_focus: main, tasks, counts: { open_tasks: tasks.filter((task) => !isDone(task)).length, today_tasks: tasks.filter((task) => !isDone(task) && isToday(task.due_at)).length }, next_reminder: tasks.filter((task) => task.remind_at && !isDone(task)).sort((a,b) => new Date(a.remind_at) - new Date(b.remind_at))[0] || null, insight: { text: "Серверный модуль состояния ещё не подключён. Основные цели и задачи уже доступны." } };
-  }
-
-  function demoApi(path, options) {
-    const now = new Date();
-    const due = new Date(now.getTime() + 3 * 3600_000).toISOString();
-    if (path === "/public/session") return { user: { first_name: "Вик", timezone: "Asia/Yekaterinburg" }, plan: "free" };
-    if (path === "/public/bot") return { username: "eva_demo_bot" };
-    if (path === "/public/goals") return { goals: [{ id: "1", title: "Запустить обновлённый Evaself", status: "active", progress_percent: 42, next_result: "Готовая структура WebApp" }] };
-    if (path === "/public/profile") return { profile: { user: { preferred_name: "Вик", city: "Пермь", timezone: "Asia/Yekaterinburg" }, completeness: 68, confirmed: [], candidates: [] } };
-    if (path === "/public/progress") return { progress: { completed_results: [{ title: "Собран первый макет", goal_title: "Evaself" }], work_blocks: [], goals: [] } };
-    if (path.startsWith("/public/v2/dashboard")) return { local_time: "17:29", checkin: { mood: "good", energy: 7, tension: 4 }, main_focus: { id: "goal:1", title: "Завершить структуру главного экрана", source_label: "Цель: Запуск Evaself", expected_result: "Согласованный интерфейс без дублирования" }, tasks: [{ id: "1", title: "Проверить главный экран", status: "open", due_at: due, remind_at: due, priority: 2 }, { id: "2", title: "Сверить API", status: "done", priority: 3 }], notes: [{ id: "1", title: "Идеи WebApp", content: "Убрать дублирование модулей", category: "Рабочее", updated_at: now.toISOString() }], counts: { open_tasks: 1, today_tasks: 1, open_decisions: 1 }, next_reminder: { title: "Проверить главный экран", remind_at: due }, active_goal: { title: "Запустить обновлённый Evaself", next_result: "Готовая структура WebApp" }, insight: { text: "Сегодня энергия выше напряжения — можно начать с конкретного результата на 15 минут." }, budget: { income_minor: 12000000, expense_minor: 4365000, recent: [] } };
-    if (path.startsWith("/public/v2/tasks")) return { tasks: [] };
-    if (path.startsWith("/public/v2/notes")) return { notes: [] };
-    if (path.startsWith("/public/v2/budget")) return { records: [], summary: { income_minor: 12000000, expense_minor: 4365000 } };
-    if (path.startsWith("/public/v2/decisions")) return { decisions: [] };
-    if (path.startsWith("/public/v2/checkins")) return { checkin: JSON.parse(options.body) };
-    if (path.startsWith("/public/v2/focus-sessions")) return { focus_session: { id: "demo" } };
-    return {};
-  }
 })();
