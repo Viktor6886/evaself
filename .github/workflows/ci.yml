@@ -493,12 +493,25 @@ jobs:
         run: |
           printf 'DPkg::Lock::Timeout "600";\nAcquire::Retries "3";\n' \
             | sudo tee /etc/apt/apt.conf.d/99evaself-ci >/dev/null
+          # `DPkg::Lock::Timeout` ждёт только блокировку dpkg, а
+          # `apt-get update` держит свою — на списки. Именно на ней шаг и
+          # падал. Здесь мы ждём обе явно: flock возвращается, когда
+          # блокировка свободна, и сразу её отпускает.
+          #
+          # Ждать нужно и перед первой попыткой, и перед каждой
+          # следующей: `timeout` снимает только сам npx, а запущенный им
+          # под sudo apt-get продолжает работать — без ожидания вторая и
+          # третья попытки гарантированно натыкались на него же.
+          wait_for_apt() {
+            sudo flock -w 600 /var/lib/apt/lists/lock true || true
+            sudo flock -w 600 /var/lib/dpkg/lock-frontend true || true
+          }
           for attempt in 1 2 3; do
-            if timeout 480 npx playwright install --with-deps chromium; then
+            wait_for_apt
+            if timeout -k 30 480 npx playwright install --with-deps chromium; then
               exit 0
             fi
             echo "::warning::playwright install не удался (попытка $attempt)"
-            sleep 20
           done
           echo "::error::playwright install не удался за три попытки"
           exit 1
@@ -555,12 +568,25 @@ jobs:
         run: |
           printf 'DPkg::Lock::Timeout "600";\nAcquire::Retries "3";\n' \
             | sudo tee /etc/apt/apt.conf.d/99evaself-ci >/dev/null
+          # `DPkg::Lock::Timeout` ждёт только блокировку dpkg, а
+          # `apt-get update` держит свою — на списки. Именно на ней шаг и
+          # падал. Здесь мы ждём обе явно: flock возвращается, когда
+          # блокировка свободна, и сразу её отпускает.
+          #
+          # Ждать нужно и перед первой попыткой, и перед каждой
+          # следующей: `timeout` снимает только сам npx, а запущенный им
+          # под sudo apt-get продолжает работать — без ожидания вторая и
+          # третья попытки гарантированно натыкались на него же.
+          wait_for_apt() {
+            sudo flock -w 600 /var/lib/apt/lists/lock true || true
+            sudo flock -w 600 /var/lib/dpkg/lock-frontend true || true
+          }
           for attempt in 1 2 3; do
-            if timeout 480 npx playwright install --with-deps chromium; then
+            wait_for_apt
+            if timeout -k 30 480 npx playwright install --with-deps chromium; then
               exit 0
             fi
             echo "::warning::playwright install не удался (попытка $attempt)"
-            sleep 20
           done
           echo "::error::playwright install не удался за три попытки"
           exit 1
