@@ -29,6 +29,8 @@ export interface Config {
 
   model: string;
   personaFile: string;
+  /** Каталог навыков проекта, только для чтения. */
+  skillsDir: string;
   llmEncryptionKey: string;
   /**
    * Ключ взят из `EVA_AGENT_API_KEY`, потому что своего нет. Устаревший
@@ -308,6 +310,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
     model: str("EVA_LLM_MODEL"),
     personaFile: str("EVA_AGENT_PERSONA_FILE", "/app/library/persona/eva.md"),
+    // Каталог навыков проекта. Тот же, что монтируется в App Server как
+    // `/data/letta/.skills`; сервису он нужен только на чтение — чтобы
+    // перечислить навыки в самопроверке, а не чтобы их выбирать.
+    skillsDir: str("EVA_SKILLS_DIR", "/app/skills"),
     // Ключ шифрования конфигураций провайдеров — отдельный секрет, и
     // новая установка получает его из `configure.sh`. Подстановка
     // `EVA_AGENT_API_KEY` осталась только как путь совместимости для
