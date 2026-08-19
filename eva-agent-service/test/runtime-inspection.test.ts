@@ -162,3 +162,28 @@ test("инструмент самопроверки ничего не меняе
   const refused = await blind.get("inspect_eva_runtime")!.execute("call-2", {}, runtime as never);
   assert.equal((refused.details as { ok: boolean }).ok, false);
 });
+
+test("телеграмные умения берутся из состава сессии, а не из впечатления", async () => {
+  const seen = await inspectRuntime({
+    runtime: null,
+    session: {
+      tools: ["set_reaction", "present_inline_choices", "knowledge_search"],
+      memoryDirectory: null,
+      observedAt: "2026-08-19T12:00:00.000Z",
+    },
+    memory: null,
+    skillsRoot: "/nonexistent",
+    calls: { skillCalls: 0, last: null },
+  });
+  assert.deepEqual(seen.telegram, { reactions: true, buttons: true, polls: false });
+
+  // Состав сессии не наблюдается — это «не могу подтвердить», а не «нет».
+  const blind = await inspectRuntime({
+    runtime: null,
+    session: null,
+    memory: null,
+    skillsRoot: "/nonexistent",
+    calls: { skillCalls: 0, last: null },
+  });
+  assert.deepEqual(blind.telegram, { reactions: null, buttons: null, polls: null });
+});

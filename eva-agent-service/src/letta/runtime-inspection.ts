@@ -41,6 +41,17 @@ export interface MemoryObservation {
 }
 
 export interface RuntimeInspection {
+  /**
+   * Что зарегистрировано в этой сессии из телеграмных умений.
+   *
+   * `null` — состав инструментов сессии не наблюдается, а не «умения
+   * нет»: разница здесь та же, что и во всём остальном отчёте.
+   */
+  telegram: {
+    reactions: boolean | null;
+    buttons: boolean | null;
+    polls: boolean | null;
+  };
   memory: {
     canonical: string[];
     present: string[] | null;
@@ -83,7 +94,21 @@ export async function inspectRuntime(input: InspectionInput): Promise<RuntimeIns
     sessionTools: input.session?.tools ?? input.runtime?.tools ?? null,
   });
 
+  // Что Ева умеет в Telegram — это факт состава сессии, а не
+  // впечатление. Ответ «я не умею ставить кнопки» при
+  // зарегистрированном инструменте — такая же выдумка, как рассказ про
+  // собственную память: у человека он выглядит как отказ, хотя отказа
+  // нет. `null` означает «состав сессии не наблюдаю».
+  const tools = input.session?.tools ?? input.runtime?.tools ?? null;
+  const registered = (name: string): boolean | null =>
+    tools === null ? null : tools.includes(name);
+
   return {
+    telegram: {
+      reactions: registered("set_reaction"),
+      buttons: registered("present_inline_choices"),
+      polls: registered("send_poll"),
+    },
     memory: {
       canonical,
       present,
