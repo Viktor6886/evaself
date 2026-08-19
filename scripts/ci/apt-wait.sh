@@ -19,11 +19,21 @@ sudo systemctl stop unattended-upgrades apt-daily.service \
 # Десять минут — верхняя оценка фонового обновления раннера. Если оно не
 # закончилось и за это время, ждать дальше бессмысленно: пусть apt сам
 # скажет, что занято.
+waited=0
 for _ in $(seq 1 120); do
   sudo fuser /var/lib/apt/lists/lock /var/lib/dpkg/lock-frontend \
     /var/lib/dpkg/lock >/dev/null 2>&1 || break
+  # Молчаливое ожидание неотличимо от зависшего шага: именно так
+  # десятиминутная очередь и выглядела в журнале — пустотой.
+  if [ "$((waited % 60))" -eq 0 ]; then
+    echo "apt занят другим процессом; ждём ($waited с)"
+  fi
   sleep 5
+  waited=$((waited + 5))
 done
+if [ "$waited" -gt 0 ]; then
+  echo "ожидание apt заняло $waited с"
+fi
 
 # На случай, если блокировку взяли прямо сейчас: apt подождёт сам.
 printf 'DPkg::Lock::Timeout "600";\nAcquire::Retries "3";\n' \

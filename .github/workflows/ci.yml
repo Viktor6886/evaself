@@ -611,7 +611,9 @@ jobs:
   migrations:
     name: PostgreSQL migrations
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # Клиент PostgreSQL ставится из pgdg, то есть через apt, и ожидание
+    # чужой блокировки съедало весь предел до начала самих миграций.
+    timeout-minutes: 30
     services:
       postgres:
         image: pgvector/pgvector:0.8.5-pg17
@@ -903,7 +905,9 @@ jobs:
   media-service:
     name: media-service (Python + ffmpeg)
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # Ожидание чужого apt на раннере доходит до десяти минут: пятнадцати
+    # на весь job не хватало, даже когда сами проверки идут полминуты.
+    timeout-minutes: 20
     needs: changes
     defaults:
       run:
@@ -919,6 +923,13 @@ jobs:
       - name: Install ffmpeg
         if: needs.changes.outputs.media == 'true'
         run: |
+          # Сначала смотрим, есть ли ffmpeg уже: заход в apt на этом
+          # раннере стоит до пятнадцати минут ожидания чужой блокировки,
+          # и job снимался по времени, так и не начав проверок.
+          if command -v ffmpeg >/dev/null 2>&1; then
+            ffmpeg -version | head -1
+            exit 0
+          fi
           "$GITHUB_WORKSPACE/scripts/ci/apt-wait.sh"
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg
