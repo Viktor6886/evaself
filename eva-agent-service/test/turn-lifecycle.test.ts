@@ -544,6 +544,8 @@ async function runTelegramTurn(
     duringTurn?: (conversationId: string) => Promise<void> | void;
     /** Синтез отказывает. */
     synthesisFails?: boolean;
+    /** Telegram не принимает голосовое сообщение. */
+    voiceSendFails?: boolean;
     /**
      * Срезы ответа, которые «модель» отдаёт по ходу генерации. Каждый —
      * `[текст, начинает ли новое сообщение]`: агентный ход проговаривает
@@ -693,6 +695,7 @@ async function runTelegramTurn(
       return [{ message_id: 4_243 }];
     },
     sendVoice: async () => {
+      if (options.voiceSendFails) throw new Error("Telegram отклонил голосовое сообщение");
       order.push("voice");
     },
     sendPlainMessage: async (_chatId: number, text: string) => { sent.push(text); },
@@ -1114,6 +1117,23 @@ test("в режиме «голос и текст» текст не ждёт си
   assert.deepEqual(probe.result, { status: "completed", usageCharged: true });
   // Синтез шёл параллельно доставке: он измерен и не приплюсован к ней.
   assert.ok(probe.metrics.tts_ms >= 50, `синтез не измерен: ${probe.metrics.tts_ms}`);
+});
+
+test("отказ доставки голоса не заваливает ход и не отменяет ответ", async () => {
+  // Ход к этому моменту сделан, а в режиме «оба» текст уже отправлен.
+  // Падение здесь означало бы повтор всего хода: второй вызов модели,
+  // второй текст в чате и «не получилось обработать сообщение» человеку,
+  // который ответ уже видит.
+  const both = await runTelegramTurn(undefined, {
+    responseMode: "both", voiceSendFails: true,
+  });
+  assert.deepEqual(both.order, ["text"], "текст остаётся доставленным");
+
+  // Голосовой режим без звука — молчание, поэтому текст заменяет его.
+  const voice = await runTelegramTurn(undefined, {
+    responseMode: "voice", voiceSendFails: true,
+  });
+  assert.deepEqual(voice.order, ["text-after-speech"]);
 });
 
 test("отказ синтеза не отменяет текст и не дублирует его", async () => {

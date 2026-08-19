@@ -5,6 +5,7 @@ import { anthropicAdapter } from "../dist/router/adapters/anthropic.js";
 import { openAiAdapter } from "../dist/router/adapters/openai.js";
 import { containsImage, parseContent } from "../dist/router/content.js";
 import { resolveRoute } from "../dist/router/routes.js";
+import { NoProviderAvailable } from "../dist/router/router.js";
 import { createRouterServer, fromOpenAi } from "../dist/router/server.js";
 import { buildChain } from "../dist/router/chain.js";
 
@@ -383,4 +384,124 @@ test("технический маршрут без цепочки идёт об�
     (error: unknown) => error instanceof NoProviderAvailable
       && /зображени|vision/i.test(String((error as Error).message)),
   );
+});
+
+/**
+ * Ход с картинкой не должен умирать оттого, что посмотреть её некому.
+ *
+ * Пока изображение терялось по дороге, отказ был незаметен: модель
+ * отвечала вслепую. Как только картинка стала доезжать, ненастроенный
+ * маршрут зрения начал ронять ход целиком — человек присылал фотографию
+ * с вопросом и получал «не получилось обработать сообщение» после
+ * нескольких попыток вместо ответа.
+ */
+test("нечем посмотреть картинку — ход отвечает без неё и говорит об этом", async () => {
+  const seen: Array<Record<string, unknown>> = [];
+  const app = createRouterServer({
+    apiKey: "test-key",
+    logger: { info() {}, error() {}, warn() {}, debug() {} },
+    store: {
+      routes: async () => new Map([["chat", { code: "chat" }]]),
+      providers: async () => [{ id: "p1" }],
+      breakers: async () => new Map(),
+      chains: async () => new Map(),
+    } as never,
+    router: {
+      complete: async (request: { messages: Array<Record<string, unknown>>; metadata: { has_image?: boolean } }) => {
+        seen.push(request as never);
+        // Маршрут выбирается по содержимому: пока в ходе есть картинка,
+        // он уходит на зрение, а обслужить его некому. Повтор помогает
+        // ровно потому, что изображения в нём больше нет.
+        if (request.metadata.has_image) {
+          throw new NoProviderAvailable("для маршрута «vision» не назначен ни один провайдер");
+        }
+        return {
+          response: {
+            content: "Картинку посмотреть не смогла.",
+            tool_calls: [], finish_reason: "stop",
+            usage: { tokens_in: 3, tokens_out: 3 }, model: "eva/chat",
+          },
+          request_id: "r1", provider_name: "backup", switches: 0,
+        };
+      },
+      stream: async function* () { throw new Error("не используется"); },
+    } as never,
+  });
+  await app.ready();
+
+  try {
+    const response = await app.inject({
+      method: "POST", url: "/chat/completions",
+      headers: { authorization: "Bearer test-key", "content-type": "application/json" },
+      payload: {
+        model: "eva/chat",
+        messages: [{
+          role: "user",
+          content: [
+            { type: "text", text: "что на фото?" },
+            { type: "image_url", image_url: { url: DATA_URI } },
+          ],
+        }],
+      },
+    });
+
+    assert.equal(response.statusCode, 200, "ход не должен падать из-за картинки");
+    assert.equal(seen.length, 2, "второй заход идёт без изображения");
+    assert.equal((seen[0] as { metadata: { has_image?: boolean } }).metadata.has_image, true);
+    assert.equal((seen[1] as { metadata: { has_image?: boolean } }).metadata.has_image, false,
+      "иначе повтор снова уйдёт на маршрут зрения");
+    const retry = seen[1] as { messages: Array<{ content: string; parts?: Array<{ type: string }> }> };
+    const message = retry.messages[retry.messages.length - 1]!;
+    // Картинки в повторе нет вовсе, а модели прямо сказано, что она была
+    // и посмотреть её не удалось: иначе Ева опишет то, чего не видела.
+    assert.ok(!(message.parts ?? []).some((part) => part.type === "image_url"));
+    assert.match(message.content, /изображение приложено/);
+    assert.match(message.content, /что на фото\?/);
+  } finally {
+    await app.close();
+  }
+});
+
+test("обычный отказ картинкой не прикрывается", async () => {
+  let calls = 0;
+  const app = createRouterServer({
+    apiKey: "test-key",
+    logger: { info() {}, error() {}, warn() {}, debug() {} },
+    store: {
+      routes: async () => new Map([["chat", { code: "chat" }]]),
+      providers: async () => [{ id: "p1" }],
+      breakers: async () => new Map(),
+      chains: async () => new Map(),
+    } as never,
+    router: {
+      complete: async () => {
+        calls += 1;
+        // Не исчерпание маршрута, а поломка: повтор её не лечит и
+        // прятать её за «отвечу без картинки» нельзя.
+        throw new Error("провайдер вернул мусор");
+      },
+      stream: async function* () { throw new Error("не используется"); },
+    } as never,
+  });
+  await app.ready();
+  try {
+    const response = await app.inject({
+      method: "POST", url: "/chat/completions",
+      headers: { authorization: "Bearer test-key", "content-type": "application/json" },
+      payload: {
+        model: "eva/chat",
+        messages: [{
+          role: "user",
+          content: [
+            { type: "text", text: "что на фото?" },
+            { type: "image_url", image_url: { url: DATA_URI } },
+          ],
+        }],
+      },
+    });
+    assert.equal(calls, 1, "повтора без картинки быть не должно");
+    assert.equal(response.statusCode, 500);
+  } finally {
+    await app.close();
+  }
 });

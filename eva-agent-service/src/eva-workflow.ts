@@ -1010,10 +1010,25 @@ export class EvaWorkflow {
             ? await speech
             : (await withDeadline(speech, VOICE_SYNC_BUDGET_MS)) ?? await speech;
           const voiceStarted = performance.now();
-          if (audio) {
-            await this.telegram.sendVoice(update.chatId, audio);
-            await this.touchVoiceUsage(context.userId);
-          } else if (!wantsText) {
+          // Отказ голоса не отменяет ответ. Ход к этому времени уже
+          // сделан, а в режиме «оба» текст и вовсе отправлен: падение
+          // здесь означало бы повтор всего хода — второй вызов модели,
+          // второй текст в чате и «не получилось обработать сообщение»
+          // человеку, который ответ уже видит.
+          let voiced = false;
+          if (audio && audio.length > 0) {
+            try {
+              await this.telegram.sendVoice(update.chatId, audio);
+              voiced = true;
+              await this.touchVoiceUsage(context.userId);
+            } catch (error) {
+              this.logger.warn("Голосовое сообщение не доставлено", {
+                updateId: update.updateId,
+                code: error instanceof Error ? error.name : "unknown_error",
+              });
+            }
+          }
+          if (!voiced && !wantsText) {
             // Голосовой режим без голоса — это молчание. Текст здесь не
             // дублирует отправленное, а заменяет несостоявшийся звук.
             await this.telegram.sendMessage(update.chatId, reply);
