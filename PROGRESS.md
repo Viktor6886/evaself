@@ -9,7 +9,7 @@
 BASELINE:      9e02667 — время хода, свободное поле ввода, путь в интернет (PR #196)
 BRANCH:        claude/evaself-remove-cognitive-middleware-9zeg9t
 STATUS:        в работе
-LAST_COMMIT:   06d10f8 — проверки чинятся: запасная персона и документ с владельцем
+LAST_COMMIT:   b4307d0 — отказ синхронизации персоны не делает сервис нездоровым
 BLOCKER:       —
 NEXT:          открыть pull request, дождаться проверок, независимое ревью
 ```
