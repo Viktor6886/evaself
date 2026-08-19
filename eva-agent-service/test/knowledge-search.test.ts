@@ -98,3 +98,69 @@ test("инструмент поиска зарегистрирован и отд
   assert.equal(details.results[0]?.document, "Договор.pdf");
   assert.match(details.results[0]?.content ?? "", /Аренда продлена/);
 });
+
+/**
+ * Загруженный документ находится инструментом.
+ *
+ * Отдельные звенья проверены выше и в `scripts/ci/test-knowledge-search.sql`
+ * на настоящем PostgreSQL. Здесь проверяется, что они соединены: приём
+ * документа кладёт фрагменты с владельцем и признаком общей базы, а
+ * инструмент отдаёт Летте текст того самого фрагмента. База подменена
+ * маленьким хранилищем, которое умеет ровно то, что настоящий запрос
+ * решает про видимость: свои фрагменты и общие продуктовые.
+ */
+test("документ, принятый в базу знаний, находится инструментом поиска", async () => {
+  const { DocumentIngestor } = await import("../dist/knowledge/ingestion.js");
+  const os = await import("node:os");
+
+  const stored: Array<Record<string, any>> = [];
+  const ingestor = new DocumentIngestor({
+    tempRoot: os.tmpdir(),
+    scan: async () => "clean",
+    embed: async () => new Array(1_536).fill(0.1),
+    persist: async (chunks: Array<Record<string, unknown>>) => { stored.push(...chunks); },
+  } as never);
+
+  const mine = await ingestor.ingest({
+    userId: 77, name: "Договор.md", mime: "text/markdown",
+    bytes: Buffer.from("# Аренда\n\nАренда квартиры продлена до марта 2027 года.\n"),
+  } as never);
+  await ingestor.ingest({
+    userId: 200, name: "Чужой договор.md", mime: "text/markdown",
+    bytes: Buffer.from("Аренда чужого склада продлена до апреля.\n"),
+  } as never);
+  assert.equal(mine.chunks, 1);
+  assert.equal(stored.length, 2);
+  assert.equal(stored[0]!.userId, 77);
+  assert.equal(stored[0]!.productVerified, false);
+
+  const db = {
+    withUserScope: async <T>(_scope: unknown, work: () => Promise<T>) => await work(),
+    query: async (_sql: string, values: unknown[]) => {
+      const [userId, query, limit] = values as [number, string, number];
+      const words = String(query).toLowerCase().split(/\s+/u).filter(Boolean);
+      const rows = stored
+        .filter((chunk) => chunk.userId === userId || chunk.productVerified)
+        .filter((chunk) => words.some((word) => String(chunk.content).toLowerCase().includes(word)))
+        .slice(0, limit)
+        .map((chunk) => ({
+          document_id: chunk.documentId ?? "doc", document_name: "Договор.md",
+          ordinal: chunk.ordinal, content: chunk.content, score: "0.03", matched: "both",
+        }));
+      return { rows };
+    },
+  };
+  const factory = new CoreToolFactory(
+    { routerUrl: "", routerApiKey: "" } as never,
+    db as never,
+    {} as never,
+    new KnowledgeSearch(db as never, async () => new Array(1_536).fill(0.1)),
+  );
+  const tools = new Map(factory.build(tool as never).map((entry) => [entry.name, entry]));
+  const runtime = { userId: 77, telegramId: 42, chatId: 42, conversationId: "c", purpose: "chat" };
+  const result = await tools.get("knowledge_search")!.execute("call-1", { query: "аренда квартиры" }, runtime as never);
+
+  const details = result.details as { results: Array<{ content: string }> };
+  assert.equal(details.results.length, 1, "чужой документ не должен находиться");
+  assert.match(details.results[0]!.content, /Аренда квартиры продлена до марта 2027/);
+});
