@@ -3,12 +3,21 @@ import type { AnyAgentTool } from "@letta-ai/letta-agent-sdk";
 import type { AgentRuntimeContext } from "../db.js";
 
 export type JsonObject = Record<string, unknown>;
+/**
+ * `toolCallId` — идентификатор конкретного вызова, который дал SDK. Он
+ * нужен инструментам с внешним последствием: по нему повтор вызова после
+ * сбоя узнаёт уже сделанную работу и не делает её второй раз.
+ */
 export type ToolBuilder = (
   name: string,
   label: string,
   description: string,
   parameters: JsonObject,
-  execute: (args: JsonObject, runtime: AgentRuntimeContext) => Promise<unknown>,
+  execute: (
+    args: JsonObject,
+    runtime: AgentRuntimeContext,
+    toolCallId: string,
+  ) => Promise<unknown>,
 ) => AnyAgentTool;
 
 export const objectSchema = (

@@ -113,6 +113,7 @@ import {
   newCallbackToken,
   type InlineChoiceIntent,
 } from "./telegram/inline-choices.js";
+import { namedOptions } from "./telegram/polls.js";
 
 /**
  * Сколько живёт кнопка под ответом.
@@ -212,15 +213,81 @@ export class EvaWorkflow {
 
   /** The durable inbox is the only production caller of this method. */
   async processQueued(update: TelegramUpdate): Promise<InboxResult> {
-    // Нажатие кнопки приходит тем же durable ingress и здесь становится
-    // обычным сообщением: дальше идёт тот же ход, тот же замок
-    // пользователя, те же квоты и тот же порядок.
-    if (update.callback_query) {
-      const chosen = await this.resolveCallback(update.callback_query);
-      if (!chosen) return { status: "ignored" };
-      return await this.processAggregated([chosen]);
-    }
     return await this.processAggregated([update]);
+  }
+
+  /**
+   * Превратить нажатие кнопки и голос в опросе в обычное сообщение.
+   *
+   * Разбор стоит здесь, а не в `processQueued`: последовательный воркер
+   * и параллельный диспетчер входят в ход разными дверями, и разбор
+   * только в одной из них означал бы, что при включённом параллельном
+   * приёме кнопки и опросы молча перестают работать.
+   *
+   * Апдейт, который разобрать не удалось, ходом не становится: чужая
+   * кнопка, повторный голос и просроченный токен — это не сообщение.
+   */
+  private async resolveSpecial(update: TelegramUpdate): Promise<TelegramUpdate | null> {
+    if (update.callback_query) return await this.resolveCallback(update.callback_query);
+    if (update.poll_answer) return await this.resolvePollAnswer(update.poll_answer);
+    return update;
+  }
+
+  /**
+   * Превратить голос в опросе в сообщение человека.
+   *
+   * Тексты вариантов берутся из серверной записи опроса, а из апдейта —
+   * только их номера: Telegram присылает индексы, и подставлять вместо
+   * них что-то другое значило бы отдать выбор смысла клиенту.
+   *
+   * Владелец сверяется дважды: опрос должен быть заведён Евой, а
+   * отвечающий — быть тем же человеком, которому он отправлен. Чужой
+   * голос в разговор не попадает.
+   */
+  private async resolvePollAnswer(
+    answer: NonNullable<TelegramUpdate["poll_answer"]>,
+  ): Promise<TelegramUpdate | null> {
+    const telegramId = answer.user?.id;
+    const pollId = typeof answer.poll_id === "string" ? answer.poll_id.trim() : "";
+    // Анонимный опрос автора не называет вовсе — связывать нечего.
+    if (!Number.isSafeInteger(telegramId) || !pollId) return null;
+
+    const poll = await this.db.findPollByTelegramId(pollId);
+    if (!poll) return null;
+    // Опрос, заведённый анонимным, не приписывается человеку, даже если
+    // автор в апдейте всё-таки назван. Сегодня Telegram его не называет,
+    // но правило «анонимный ответ ни с кем не связан» держится нашей
+    // записью, а не поведением чужой стороны.
+    if (poll.isAnonymous) return null;
+    const user = await this.db.findUserByTelegramId(telegramId!);
+    if (!user || user.id !== poll.userId) return null;
+
+    const optionIds = [...new Set(
+      (answer.option_ids ?? []).filter((id) => Number.isSafeInteger(id)),
+    )].sort((left, right) => left - right);
+    const recorded = await this.db.recordPollAnswer({
+      userId: user.id, pollId, optionIds,
+    });
+    if (recorded.status === "duplicate") {
+      // Тот же апдейт пришёл повторно или человек нажал тот же вариант:
+      // второго хода за один и тот же выбор не заводим.
+      return null;
+    }
+    const chosen = namedOptions(poll.options, optionIds);
+    // Голос отозван: сказать разговору нечего, а «ничего не выбрано»
+    // ходом не является.
+    if (chosen.length === 0) return null;
+
+    return {
+      update_id: -1,
+      message: {
+        message_id: poll.messageId ?? 0,
+        date: Math.floor(Date.now() / 1000),
+        chat: { id: poll.chatId, type: "private" },
+        from: { id: telegramId!, is_bot: false },
+        text: `Ответ в опросе «${poll.question}»: ${chosen.join(", ")}`,
+      } as TelegramMessage,
+    };
   }
 
   /**
@@ -286,7 +353,15 @@ export class EvaWorkflow {
    * Квота снимается один раз: ход один.
    */
   async processAggregated(updates: TelegramUpdate[]): Promise<InboxResult> {
-    const normalized = updates
+    // Кнопка и опрос становятся обычным сообщением здесь: дальше идёт
+    // тот же ход, тот же замок пользователя, те же квоты и тот же
+    // порядок, что и у написанного текста.
+    const incoming: TelegramUpdate[] = [];
+    for (const update of updates) {
+      const resolved = await this.resolveSpecial(update);
+      if (resolved) incoming.push(resolved);
+    }
+    const normalized = incoming
       .map((update) => normalizeUpdate(update))
       .filter((item): item is NormalizedUpdate => item !== null);
     if (normalized.length === 0) return { status: "ignored" };

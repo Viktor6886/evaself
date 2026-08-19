@@ -12,7 +12,7 @@ import type { TelegramClient } from "./telegram.js";
 import { currentScope } from "./tenancy/index.js";
 import { CoreToolFactory, type RuntimeObserver } from "./tools/core-tools.js";
 import { EffectJournal, effectKey } from "./turns/effect-journal.js";
-import { currentTurn } from "./turns/turn-context.js";
+import { turnOf } from "./turns/turn-context.js";
 import { TaskToolFactory } from "./tools/task-tools.js";
 import type { McpHttpInvoker, McpServerPolicyRepository } from "./tools/mcp.js";
 import type { MandatoryApprovalCategory, ToolRisk } from "./tools/approvals.js";
@@ -115,6 +115,7 @@ export class AgentToolFactory {
       execute: (
         args: JsonObject,
         runtime: AgentRuntimeContext,
+        toolCallId: string,
       ) => Promise<unknown>,
     ): AnyAgentTool => {
       return ({
@@ -158,7 +159,12 @@ export class AgentToolFactory {
           // Побочный эффект выполняется не более одного раза на вызов.
           // Ключ детерминированный, поэтому повтор хода после сбоя
           // возвращает прежний результат, а не делает действие второй раз.
-          const turn = currentTurn();
+          // Ход берётся и по контексту, и по conversation: инструменты
+          // регистрируются при открытии сессии, и до их вызова из
+          // обработчика сокета SDK AsyncLocalStorage не дотягивается.
+          // Без этого журнал побочных эффектов оставался бы выключенным:
+          // без хода нет ни ключа, ни барьера отмены.
+          const turn = turnOf(conversationId);
           // Барьер отмены перед побочным эффектом. Отменённый ход не
           // должен делать того, что потом нельзя отменить: генерацию мы
           // остановим, а созданную задачу или отправленное сообщение —
@@ -196,7 +202,9 @@ export class AgentToolFactory {
                 telegramId: runtime.telegramId,
                 label: `tool:${name}`,
               },
-              async () => await execute(asObject(rawArgs), runtime),
+              async () => await execute(
+                asObject(rawArgs), runtime, String(toolCallId ?? ""),
+              ),
             );
           } catch (error) {
             if (key && this.effects) {

@@ -51,6 +51,8 @@
 | Durable outbox | Доставка ответов | `src/delivery/outbox.ts`, таблица `telegram_outbox` | `OutboxDelivery`, `OutboxTransport`, `OutboxEnvelope` | обяз. |
 | Приоритет доставки | Класс приоритета без перестановки частей ответа | `src/delivery/priority.ts` | сравнение кортежей | расш. |
 | Лимиты Telegram | Учёт `retry_after` и лимитов чата | `src/delivery/telegram-limits.ts`, `retry-after.ts` | `telegramRetryAfterMs()` | обяз. |
+| Кнопки выбора | Варианты под ответом Евы | `src/telegram/inline-choices.ts`, `present_inline_choices`, таблица `telegram_callback_tokens` | `callback_data` — непрозрачный серверный токен; клавиатура встаёт на последнее сообщение ответа; выбор возвращается значением из записи | обяз. |
+| Опросы | Нативный опрос Telegram | `src/telegram/polls.ts`, `send_poll`, `TelegramClient.sendPoll()`, таблицы `telegram_polls`, `telegram_poll_answers` | неанонимный по умолчанию; запись заводится до отправки по `tool_call_id`; `poll_answer` разбирается по серверному соответствию и становится обычным ходом | обяз. |
 | Растущее сообщение | Показ ответа по мере генерации | `TelegramClient.startLiveMessage()` | первый срез — `sendMessage`, дальше `editMessageText` того же сообщения не чаще 800 мс; итог доводится durable-правкой через outbox; `sendMessageDraft` не используется — он занимает поле ввода | обяз. |
 
 Интерактивный ingress и agent runs в BullMQ не переносятся (инвариант 7).

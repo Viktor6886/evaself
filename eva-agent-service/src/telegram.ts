@@ -591,6 +591,33 @@ export class TelegramClient implements OutboxTransport {
     }, "status");
   }
 
+  /**
+   * Отправить нативный опрос.
+   *
+   * Идёт тем же путём доставки, что и обычный ответ: очередь, повторы,
+   * лимиты Telegram. Возвращается то, что вернул API, — из него берётся
+   * идентификатор опроса, без которого ответ человека не с чем связать.
+   */
+  async sendPoll(
+    chatId: number,
+    poll: {
+      question: string;
+      options: string[];
+      isAnonymous: boolean;
+      allowsMultiple: boolean;
+    },
+  ): Promise<unknown> {
+    return await this.dispatch("sendPoll", chatId, {
+      chat_id: chatId,
+      question: poll.question,
+      // Bot API принимает варианты объектами `InputPollOption`.
+      options: poll.options.map((text) => ({ text })),
+      is_anonymous: poll.isAnonymous,
+      allows_multiple_answers: poll.allowsMultiple,
+      type: "regular",
+    });
+  }
+
   async sendVoice(chatId: number, audio: Uint8Array, filename = "eva.ogg"): Promise<void> {
     if (this.outbox) {
       await this.dispatch("sendVoice", chatId, {
@@ -917,4 +944,21 @@ function elapsed(started: number): number {
 export function telegramMessageIdOf(result: unknown): number | null {
   const id = Number((result as { message_id?: unknown } | null)?.message_id);
   return Number.isSafeInteger(id) ? id : null;
+}
+
+/**
+ * Опрос из ответа Telegram.
+ *
+ * Идентификатор опроса выдаёт сам Telegram при отправке, и другого
+ * способа узнать его нет. Если ответ его не принёс — доставка отложена,
+ * и связать будущий голос с этим опросом будет нечем; отсюда `null`, а
+ * не догадка.
+ */
+export function telegramPollOf(
+  result: unknown,
+): { pollId: string; messageId: number | null } | null {
+  const poll = (result as { poll?: { id?: unknown } } | null)?.poll;
+  const id = typeof poll?.id === "string" ? poll.id.trim() : "";
+  if (!id) return null;
+  return { pollId: id, messageId: telegramMessageIdOf(result) };
 }

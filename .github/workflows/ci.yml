@@ -617,8 +617,8 @@ jobs:
   migrations:
     name: PostgreSQL migrations
     runs-on: ubuntu-24.04
-    # Клиент PostgreSQL ставится из pgdg, то есть через apt, и ожидание
-    # чужой блокировки съедало весь предел до начала самих миграций.
+    # Клиент больше не ставится через apt, но сами миграции применяются
+    # трижды и прогоняют цикл down/up: предел оставлен с запасом.
     timeout-minutes: 30
     services:
       postgres:
@@ -641,29 +641,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Клиент из репозитория Ubuntu — шестнадцатой версии, а сервер здесь
-      # семнадцатой: `pg_dump` при таком расхождении отказывается снимать
-      # дамп вовсе. Раньше это было незаметно, потому что сравнение схем
-      # шло через process substitution и два несостоявшихся дампа
-      # выглядели как две одинаковые схемы.
-      - name: Install psql
+      # Клиент должен быть не старше сервера: `pg_dump` 16 против сервера
+      # 17 отказывается снимать дамп вовсе. Раньше клиент ставился из
+      # pgdg — то есть через apt и через `curl` за ключом репозитория, — и
+      # оба шага зависали молча: apt ждал чужую блокировку, а у `curl`
+      # таймаута не было вовсе. Job снимался по тридцатиминутному пределу,
+      # ни разу не дойдя до самих миграций.
+      #
+      # Клиент нужной версии уже есть на раннере — внутри образа, которым
+      # поднят сам сервис. Обёртки зовут его оттуда: ни сети, ни apt, ни
+      # ожидания чужих блокировок. Образ обязан совпадать с образом
+      # сервиса выше.
+      - name: Клиент PostgreSQL из образа сервиса, без apt
         run: |
-          # Шаг уже снимался по двадцатиминутному пределу: он всё это
-          # время простоял в очереди за фоновым обновлением раннера.
-          ./scripts/ci/apt-wait.sh
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq curl ca-certificates
-          sudo install -d /usr/share/postgresql-common/pgdg
-          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
-            https://www.postgresql.org/media/keys/ACCC4CF8.asc
-          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
-            https://apt.postgresql.org/pub/repos/apt noble-pgdg main" \
-            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
-          ./scripts/ci/apt-wait.sh
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq postgresql-client-17
+          ./scripts/ci/pg-client.sh pgvector/pgvector:0.8.5-pg17
+          command -v psql
           psql --version
-          /usr/lib/postgresql/17/bin/pg_dump --version
+          pg_dump --version
 
       - name: Extensions
         run: |
@@ -772,6 +766,13 @@ jobs:
       # правило повторяет, но не проверяет.
       - name: Кнопка срабатывает один раз, у своего человека и в свой срок
         run: psql -v ON_ERROR_STOP=1 -q -f scripts/ci/test-callback-tokens.sql
+
+      # Опрос держится на двух правилах SQL: повторная вставка по ключу
+      # вызова обязана вернуть уже созданную строку, а не пустоту, и
+      # условное обновление голоса обязано отличать изменённый выбор от
+      # повторно доставленного апдейта.
+      - name: Опрос создаётся один раз, голос считается один раз
+        run: psql -v ON_ERROR_STOP=1 -q -f scripts/ci/test-polls.sql
 
       # Журнал побочных эффектов держится на семантике ON CONFLICT и на
       # условном обновлении, которым забирается право на повтор.
@@ -939,19 +940,14 @@ jobs:
         with:
           python-version: "3.12"
 
+      # apt на раннере — лотерея: тот же шаг то занимает восемь минут, то
+      # не заканчивается вовсе и снимает job по пределу, не начав
+      # проверок. Поэтому у apt здесь жёсткий срок, а за ним ffmpeg
+      # берётся из образа.
       - name: Install ffmpeg
         if: needs.changes.outputs.media == 'true'
-        run: |
-          # Сначала смотрим, есть ли ffmpeg уже: заход в apt на этом
-          # раннере стоит до пятнадцати минут ожидания чужой блокировки,
-          # и job снимался по времени, так и не начав проверок.
-          if command -v ffmpeg >/dev/null 2>&1; then
-            ffmpeg -version | head -1
-            exit 0
-          fi
-          "$GITHUB_WORKSPACE/scripts/ci/apt-wait.sh"
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg
+        # Рабочий каталог job — media-service, поэтому путь от корня.
+        run: "$GITHUB_WORKSPACE/scripts/ci/install-ffmpeg.sh"
 
       - if: needs.changes.outputs.media == 'true'
         run: pip install --quiet -r requirements.txt pytest pytest-asyncio ruff
