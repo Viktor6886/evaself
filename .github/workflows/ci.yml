@@ -480,40 +480,54 @@ jobs:
 
       - name: Install Chromium
         if: needs.changes.outputs.adminui == 'true'
-        # Два разных отказа в одном шаге, и оба не про наш код.
+        # Отказ здесь ни разу не был про наш код — он был про apt.
         #
         # `--with-deps` зовёт apt-get, а на раннере параллельно работает
-        # свой apt: по умолчанию вторая попытка не ждёт освобождения, а
-        # падает с «Could not get lock». Поэтому apt-у велено ждать
-        # блокировку и повторять неудачные загрузки.
+        # своё фоновое обновление. Первая попытка вставала в очередь и
+        # снималась по таймауту, но убитым оказывался только `npx`:
+        # запущенный им под sudo apt-get продолжал держать блокировку, и
+        # следующие попытки падали уже на нём.
         #
-        # Сама загрузка браузера уходит в чужую сеть и уже снимала
-        # обязательную проверку по таймауту job. Поэтому ограниченное
-        # ожидание и три попытки.
+        # Поэтому apt убран с основного пути. Образ ubuntu-24.04 несёт
+        # библиотеки Chromium — в нём уже стоят Chrome и Edge, — и
+        # браузеру достаточно самой загрузки. Если библиотек всё-таки не
+        # хватит, браузер не запустится, и тогда — и только тогда — идём
+        # в apt, честно дождавшись чужой блокировки.
+        #
+        # Ожидание проверяется через `fuser`, а не `flock`: apt держит
+        # POSIX-блокировку (fcntl), и `flock` на том же файле берётся
+        # мгновенно, ничего не дожидаясь.
         run: |
-          printf 'DPkg::Lock::Timeout "600";\nAcquire::Retries "3";\n' \
-            | sudo tee /etc/apt/apt.conf.d/99evaself-ci >/dev/null
-          # `DPkg::Lock::Timeout` ждёт только блокировку dpkg, а
-          # `apt-get update` держит свою — на списки. Именно на ней шаг и
-          # падал. Здесь мы ждём обе явно: flock возвращается, когда
-          # блокировка свободна, и сразу её отпускает.
-          #
-          # Ждать нужно и перед первой попыткой, и перед каждой
-          # следующей: `timeout` снимает только сам npx, а запущенный им
-          # под sudo apt-get продолжает работать — без ожидания вторая и
-          # третья попытки гарантированно натыкались на него же.
-          wait_for_apt() {
-            sudo flock -w 600 /var/lib/apt/lists/lock true || true
-            sudo flock -w 600 /var/lib/dpkg/lock-frontend true || true
+          launches() {
+            node -e "require('playwright').chromium.launch({timeout:60000}).then((b)=>b.close())"
           }
           for attempt in 1 2 3; do
-            wait_for_apt
-            if timeout -k 30 480 npx playwright install --with-deps chromium; then
-              exit 0
+            if timeout -k 30 300 npx playwright install chromium; then
+              break
             fi
-            echo "::warning::playwright install не удался (попытка $attempt)"
+            echo "::warning::загрузка Chromium не удалась (попытка $attempt)"
+            sleep 15
           done
-          echo "::error::playwright install не удался за три попытки"
+          if launches; then
+            exit 0
+          fi
+
+          echo "::warning::Chromium не запустился — доставляем системные библиотеки"
+          sudo systemctl stop unattended-upgrades apt-daily.service \
+            apt-daily-upgrade.service apt-daily.timer apt-daily-upgrade.timer \
+            2>/dev/null || true
+          for _ in $(seq 1 120); do
+            sudo fuser /var/lib/apt/lists/lock /var/lib/dpkg/lock-frontend \
+              >/dev/null 2>&1 || break
+            sleep 5
+          done
+          printf 'DPkg::Lock::Timeout "600";\nAcquire::Retries "3";\n' \
+            | sudo tee /etc/apt/apt.conf.d/99evaself-ci >/dev/null
+          sudo npx playwright install-deps chromium
+          if launches; then
+            exit 0
+          fi
+          echo "::error::Chromium не запускается даже после установки библиотек"
           exit 1
 
       - name: Behaviour tests
@@ -555,40 +569,54 @@ jobs:
 
       - name: Install Chromium
         if: needs.changes.outputs.webapp == 'true'
-        # Два разных отказа в одном шаге, и оба не про наш код.
+        # Отказ здесь ни разу не был про наш код — он был про apt.
         #
         # `--with-deps` зовёт apt-get, а на раннере параллельно работает
-        # свой apt: по умолчанию вторая попытка не ждёт освобождения, а
-        # падает с «Could not get lock». Поэтому apt-у велено ждать
-        # блокировку и повторять неудачные загрузки.
+        # своё фоновое обновление. Первая попытка вставала в очередь и
+        # снималась по таймауту, но убитым оказывался только `npx`:
+        # запущенный им под sudo apt-get продолжал держать блокировку, и
+        # следующие попытки падали уже на нём.
         #
-        # Сама загрузка браузера уходит в чужую сеть и уже снимала
-        # обязательную проверку по таймауту job. Поэтому ограниченное
-        # ожидание и три попытки.
+        # Поэтому apt убран с основного пути. Образ ubuntu-24.04 несёт
+        # библиотеки Chromium — в нём уже стоят Chrome и Edge, — и
+        # браузеру достаточно самой загрузки. Если библиотек всё-таки не
+        # хватит, браузер не запустится, и тогда — и только тогда — идём
+        # в apt, честно дождавшись чужой блокировки.
+        #
+        # Ожидание проверяется через `fuser`, а не `flock`: apt держит
+        # POSIX-блокировку (fcntl), и `flock` на том же файле берётся
+        # мгновенно, ничего не дожидаясь.
         run: |
-          printf 'DPkg::Lock::Timeout "600";\nAcquire::Retries "3";\n' \
-            | sudo tee /etc/apt/apt.conf.d/99evaself-ci >/dev/null
-          # `DPkg::Lock::Timeout` ждёт только блокировку dpkg, а
-          # `apt-get update` держит свою — на списки. Именно на ней шаг и
-          # падал. Здесь мы ждём обе явно: flock возвращается, когда
-          # блокировка свободна, и сразу её отпускает.
-          #
-          # Ждать нужно и перед первой попыткой, и перед каждой
-          # следующей: `timeout` снимает только сам npx, а запущенный им
-          # под sudo apt-get продолжает работать — без ожидания вторая и
-          # третья попытки гарантированно натыкались на него же.
-          wait_for_apt() {
-            sudo flock -w 600 /var/lib/apt/lists/lock true || true
-            sudo flock -w 600 /var/lib/dpkg/lock-frontend true || true
+          launches() {
+            node -e "require('playwright').chromium.launch({timeout:60000}).then((b)=>b.close())"
           }
           for attempt in 1 2 3; do
-            wait_for_apt
-            if timeout -k 30 480 npx playwright install --with-deps chromium; then
-              exit 0
+            if timeout -k 30 300 npx playwright install chromium; then
+              break
             fi
-            echo "::warning::playwright install не удался (попытка $attempt)"
+            echo "::warning::загрузка Chromium не удалась (попытка $attempt)"
+            sleep 15
           done
-          echo "::error::playwright install не удался за три попытки"
+          if launches; then
+            exit 0
+          fi
+
+          echo "::warning::Chromium не запустился — доставляем системные библиотеки"
+          sudo systemctl stop unattended-upgrades apt-daily.service \
+            apt-daily-upgrade.service apt-daily.timer apt-daily-upgrade.timer \
+            2>/dev/null || true
+          for _ in $(seq 1 120); do
+            sudo fuser /var/lib/apt/lists/lock /var/lib/dpkg/lock-frontend \
+              >/dev/null 2>&1 || break
+            sleep 5
+          done
+          printf 'DPkg::Lock::Timeout "600";\nAcquire::Retries "3";\n' \
+            | sudo tee /etc/apt/apt.conf.d/99evaself-ci >/dev/null
+          sudo npx playwright install-deps chromium
+          if launches; then
+            exit 0
+          fi
+          echo "::error::Chromium не запускается даже после установки библиотек"
           exit 1
 
       - name: Device matrix
