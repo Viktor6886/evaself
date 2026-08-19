@@ -284,6 +284,36 @@ export class PersonaSync {
   }
 
   /**
+   * Что у агента в блоках прямо сейчас — без единой записи.
+   *
+   * Самопроверке нужен факт, а не побочный эффект: спрашивать «какая у
+   * меня память» и попутно её править — разные операции, и вторая не
+   * должна случаться от вопроса. Классификация та же, что у сверки,
+   * поэтому «канонический» и «прежней схемы» здесь и там значат одно.
+   */
+  async observeAgent(agentId: string): Promise<{
+    canonicalPresent: string[];
+    legacy: LegacyBlockRecord[];
+  }> {
+    const present = await this.plane.listMemoryBlocks(agentId);
+    const canonicalLabels = new Set<string>(SYNCED_BLOCK_LABELS);
+    return {
+      canonicalPresent: present
+        .filter((block) => canonicalLabels.has(block.label))
+        .map((block) => block.label),
+      legacy: present
+        .filter((block) => !canonicalLabels.has(block.label))
+        .map((block) => ({
+          id: block.id,
+          label: block.label,
+          description: block.description,
+          size: block.value.length,
+          status: "legacy_pending_migration" as const,
+        })),
+    };
+  }
+
+  /**
    * Свести ядро памяти одного агента — прямо перед его ходом.
    *
    * Массовый проход идёт при старте и может не успеть к первому

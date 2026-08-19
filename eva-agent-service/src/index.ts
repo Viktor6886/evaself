@@ -227,6 +227,22 @@ async function main(): Promise<void> {
     goals,
     effects,
     mcpPolicies && mcpInvoker ? { policies: mcpPolicies, invoker: mcpInvoker } : undefined,
+    // Самопроверка смотрит на уже собранные факты: снимок сессии SDK и
+    // состав блоков через тот же control plane, что ведёт синхронизацию.
+    // Второго обхода рантайма не заводится.
+    {
+      facts: () => ({ runtime: letta.runtimeFacts, session: letta.sessionFacts }),
+      memory: async (agentId: string) => {
+        try {
+          const observed = await personaSync.observeAgent(agentId);
+          return { ...observed, checked: true };
+        } catch {
+          // Недоступный control plane — это «не наблюдаю», а не «пусто».
+          return null;
+        }
+      },
+      agentOf: async (userId: number) => await db.agentIdOfUser(userId),
+    },
   );
   toolFactory.setApprovalCompletionCallback(async (execution) => await approvals.completeApprovedExecution(execution));
   letta.setToolFactory((conversationId) => toolFactory.forConversation(conversationId));

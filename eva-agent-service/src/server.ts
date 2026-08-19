@@ -18,6 +18,7 @@ import type { LettaService } from "./letta.js";
 import type { ManagedAgentInput } from "./letta.js";
 import { DeleteGuard } from "./letta/delete-guard.js";
 import { personaSyncState } from "./letta/persona-sync.js";
+import { auditSkills } from "./letta/skills-audit.js";
 import type { LlmManager, LlmProviderInput } from "./llm.js";
 import { runVisionCheck } from "./llm/vision-check.js";
 import type { Logger } from "./logger.js";
@@ -375,6 +376,15 @@ export function buildServer(services: Services): FastifyInstance {
       observed_age_seconds: report.observedAgeSeconds,
       stale: report.stale,
       checks: report.checks,
+      // Что фактически наблюдается о памяти и навыках. Готовность от
+      // этого не зависит: агент со старым набором блоков отвечает, — но
+      // молча пропущенная сверка ничем не отличалась бы от выполненной.
+      memory: personaSyncState(),
+      skills: await auditSkills({
+        root: config.skillsDir,
+        sources: letta.runtimeFacts?.skillSources ?? null,
+        sessionTools: letta.sessionFacts?.tools ?? letta.runtimeFacts?.tools ?? null,
+      }),
     });
   });
 

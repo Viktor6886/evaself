@@ -5,6 +5,7 @@ import type { AgentRuntimeContext, Database } from "../db.js";
 import { ALLOWED_REACTIONS, type TelegramClient } from "../telegram.js";
 import { Crawl4aiReader, WebReadError } from "./web-read.js";
 import { KnowledgeSearch } from "../knowledge/search.js";
+import { inspectRuntime, type InspectionInput } from "../letta/runtime-inspection.js";
 import { currentTurn } from "../turns/turn-context.js";
 import { recordReaction } from "../metrics.js";
 import { LlmRouterClient } from "../router/client.js";
@@ -21,6 +22,21 @@ import {
   type ToolBuilder,
 } from "./tool-kit.js";
 
+/**
+ * Наблюдатель рантайма для самопроверки.
+ *
+ * Узкий намеренно: инструменту нужны факты, а не доступ к сессии Letta и
+ * не право что-нибудь в ней поменять. Оба поставщика могут вернуть
+ * `null` — это «не наблюдаем», и отчёт скажет об этом прямо.
+ */
+export interface RuntimeObserver {
+  facts(): Pick<InspectionInput, "runtime" | "session">;
+  /** Состав блоков агента без единой записи. `null` — путь недоступен. */
+  memory(agentId: string): Promise<InspectionInput["memory"]>;
+  /** Каким агентом Ева отвечает этому человеку. */
+  agentOf(userId: number): Promise<string | null>;
+}
+
 export class CoreToolFactory {
   private readonly knowledge: KnowledgeSearch;
 
@@ -29,6 +45,7 @@ export class CoreToolFactory {
     private readonly db: Database,
     private readonly telegram: TelegramClient,
     knowledge?: KnowledgeSearch,
+    private readonly observer?: RuntimeObserver,
   ) {
     // Вектор запроса считает тот же роутер, что и при приёме документа:
     // второго пути к моделям эмбеддингов не заводится.
@@ -478,6 +495,37 @@ export class CoreToolFactory {
               content: hit.content,
             })),
           };
+        },
+      ),
+      tool(
+        "inspect_eva_runtime",
+        "Проверить собственный рантайм",
+        "Показывает, что фактически наблюдается о собственной памяти, навыках и "
+          + "вызовах: метки блоков памяти, MemFS, источники навыков, доступные навыки, "
+          + "совпадения имён и число фактических открытий навыка. Ничего не меняет. "
+          + "Вызывать, когда человек спрашивает про память, навыки, рантайм или про то, "
+          + "открывала ли ты навык. Отвечать по этому ответу, а не по впечатлению: "
+          + "`null` означает «не могу подтвердить», а не «нет».",
+        objectSchema({}, []),
+        async (_args, runtime) => {
+          if (!this.observer) {
+            return {
+              ok: false,
+              reason: "runtime_observer_unavailable",
+              note: "Проверить рантайм нечем: наблюдатель не подключён.",
+            };
+          }
+          const agentId = await this.observer.agentOf(runtime.userId);
+          const report = await inspectRuntime({
+            ...this.observer.facts(),
+            memory: agentId ? await this.observer.memory(agentId) : null,
+            skillsRoot: this.config.skillsDir,
+            calls: await (async () => {
+              const stats = await this.db.skillCallStats(runtime.userId);
+              return { skillCalls: stats.total, last: stats.last };
+            })(),
+          });
+          return { ok: true, ...report };
         },
       ),
       tool(

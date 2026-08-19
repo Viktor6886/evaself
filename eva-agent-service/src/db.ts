@@ -413,6 +413,28 @@ export class Database {
     return rows[0] ?? null;
   }
 
+  /**
+   * Агент этого человека по внутреннему идентификатору.
+   *
+   * `getAgentLink` спрашивает по telegram_id, а самопроверка идёт из
+   * хода, где известен внутренний `user_id`: заводить ради этого второй
+   * путь к агенту незачем, но и подменять один идентификатор другим
+   * нельзя — это разные ключи.
+   */
+  async agentIdOfUser(userId: number, kind = "eva"): Promise<string | null> {
+    const { rows } = await this.withUserScope(
+      { userId, label: "db.agentIdOfUser", inherit: true },
+      async () => await this.require().query<{ agent_id: string }>(
+        `SELECT agent_id FROM agent_links
+          WHERE user_id = $1 AND kind = $2 AND status = 'active'
+          ORDER BY created_at DESC
+          LIMIT 1`,
+        [userId, kind],
+      ),
+    );
+    return rows[0]?.agent_id ?? null;
+  }
+
   async saveAgentLink(input: {
     userId: number;
     agentId: string;
