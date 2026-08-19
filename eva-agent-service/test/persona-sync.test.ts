@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { PersonaSync, personaVersion } from "../dist/letta/persona-sync.js";
+import { PersonaSync, personaSyncState, personaVersion } from "../dist/letta/persona-sync.js";
 import { evaMemoryBlocks } from "../dist/letta.js";
 
 const logger = { debug() {}, info() {}, warn() {}, error() {} };
@@ -130,4 +130,89 @@ test("и новый, и существующий агент получают о�
   }
   // Мужских форм о себе в персоне нет.
   assert.doesNotMatch(persona, /\bя\s+(понял|сделал|рад|готов)\b/iu);
+});
+
+/**
+ * Агент, созданный со старой персоной, не должен успеть ответить о себе
+ * в мужском роде.
+ *
+ * Массовая синхронизация идёт при старте и может не дойти до него к
+ * первому сообщению человека, поэтому у хода есть свой короткий проход.
+ */
+test("устаревший агент получает каноническую персону до хода", async () => {
+  const persona = await personaText();
+  const canonical = persona ?? PERSONA;
+  const db = fakeDb([]);
+  const plane = fakePlane({ blocks: { "agent-old": "Я Ева. Понял, сделал, рад помочь." } });
+  const sync = new PersonaSync(db as never, plane as never, logger);
+
+  const outcome = await sync.syncAgent(
+    { agentId: "agent-old", userId: 1, storedVersion: "прошлогодняя" },
+    canonical,
+  );
+
+  assert.equal(outcome, "updated");
+  const written = plane.updates[0]?.value ?? "";
+  for (const form of ["поняла", "сделала", "готова", "рада"]) {
+    assert.ok(written.includes(form), `в блок агента не попала форма «${form}»`);
+  }
+  assert.doesNotMatch(written, /\bПонял, сделал\b/);
+  assert.deepEqual(db.recorded, [{ agentId: "agent-old", version: personaVersion(canonical) }]);
+});
+
+test("агент с актуальной версией не тревожится перед ходом", async () => {
+  const db = fakeDb([]);
+  const plane = fakePlane();
+  const sync = new PersonaSync(db as never, plane as never, logger);
+  const outcome = await sync.syncAgent(
+    { agentId: "agent-1", userId: 1, storedVersion: personaVersion(PERSONA) },
+    PERSONA,
+  );
+  assert.equal(outcome, "up_to_date");
+  assert.deepEqual(plane.updates, [], "лишний поход в control plane перед ходом");
+});
+
+test("выключенная синхронизация видна в состоянии, а не пропадает молча", async () => {
+  const db = fakeDb([{ agentId: "agent-1", userId: 1, personaVersion: null }]);
+  const plane = fakePlane({ available: false });
+  await new PersonaSync(db as never, plane as never, logger).sync(PERSONA);
+
+  const state = personaSyncState();
+  assert.equal(state.enabled, false);
+  assert.equal(state.status, "disabled");
+  assert.equal(typeof state.lastRunAt, "string");
+});
+
+test("молчащий control plane не задерживает ход дольше отведённого", async () => {
+  const db = fakeDb([]);
+  const stuck = {
+    available: true,
+    updates: [] as unknown[],
+    // Control plane отвечает, но позже, чем ход готов ждать.
+    listMemoryBlocks: async () => await new Promise((resolve) => setTimeout(() => resolve([]), 200)),
+    updateMemoryBlock: async () => { throw new Error("не должно вызываться"); },
+  };
+  const sync = new PersonaSync(db as never, stuck as never, logger);
+  const started = Date.now();
+  const outcome = await sync.syncAgent(
+    { agentId: "agent-slow", userId: 1, storedVersion: null },
+    PERSONA,
+    { timeoutMs: 250 },
+  );
+  const waited = Date.now() - started;
+
+  assert.equal(outcome, "failed");
+  assert.ok(waited < 1_000, `ход ждал синхронизацию ${waited} мс`);
+  assert.equal(personaSyncState().status, "stale");
+  // Дать запоздавшему ответу дойти, чтобы он не повис после теста.
+  await new Promise((resolve) => setTimeout(resolve, 250));
+});
+
+test("резервный провайдер получает личность в женском роде", async () => {
+  const { BACKUP_PERSONA_DIRECTIVE } = await import("../dist/router/normalize.js");
+  // Резерв не видит memory block: если род не назвать здесь, Ева
+  // посреди разговора начнёт говорить о себе в мужском роде.
+  for (const form of ["женском роде", "поняла", "приняла", "сделала", "готова", "рада"]) {
+    assert.ok(BACKUP_PERSONA_DIRECTIVE.includes(form), `в резервной персоне нет формы «${form}»`);
+  }
 });

@@ -136,21 +136,25 @@ async function main(): Promise<void> {
   // Работа идёт в фоне и за тем же флагом, что и весь control plane:
   // старт сервиса её не ждёт, а без `EVA_LETTA_ADMIN_CLIENT` записывать
   // блоки нечем и синхронизация честно сообщает, что пропущена.
-  {
-    const plane = buildAdminPlane({
+  const personaSync = new PersonaSync(
+    db,
+    buildAdminPlane({
       enabled: config.lettaAdminClientEnabled,
       baseUrl: config.lettaAdminBaseUrl,
       token: config.appServerToken || null,
       logger,
+    }),
+    logger,
+  );
+  // Массовая синхронизация идёт в фоне: старт сервиса её не ждёт. Тот
+  // агент, чей человек написал раньше, чем она до него дошла, получит
+  // персону в своём же ходе — коротким проходом перед обращением к
+  // модели.
+  void personaSync.sync(persona).catch((error: unknown) => {
+    logger.warn("Синхронизация персоны не выполнена", {
+      code: error instanceof Error ? error.name : "unknown_error",
     });
-    if (plane.available) {
-      void new PersonaSync(db, plane, logger).sync(persona).catch((error: unknown) => {
-        logger.warn("Синхронизация персоны не выполнена", {
-          code: error instanceof Error ? error.name : "unknown_error",
-        });
-      });
-    }
-  }
+  });
   const telegram = new TelegramClient(config, logger);
   const telegramLimiter = new TelegramDeliveryLimiter(redis, {
     globalPerSecond: config.telegramGlobalRate,
@@ -276,6 +280,7 @@ async function main(): Promise<void> {
     // она не зависит от флага дневника, потому что отвечает за общий
     // аккаунт, а не за дневник.
     new ChannelLinkService(db),
+    { syncAgent: (input, text, options) => personaSync.syncAgent(input, text, options), persona: () => persona },
   );
   const inbox = new PostgresTelegramInbox(db);
   // Уведомление о мёртвой записи одно на оба пути обработки: человек

@@ -17,6 +17,7 @@ import type { GoalService } from "./goals/goal-service.js";
 import type { LettaService } from "./letta.js";
 import type { ManagedAgentInput } from "./letta.js";
 import { DeleteGuard } from "./letta/delete-guard.js";
+import { personaSyncState } from "./letta/persona-sync.js";
 import type { LlmManager, LlmProviderInput } from "./llm.js";
 import type { Logger } from "./logger.js";
 import { MetricsCollector } from "./metrics.js";
@@ -298,6 +299,15 @@ export function buildServer(services: Services): FastifyInstance {
     // инструментов и рефлексия. До первого хода снимка ещё нет — это не
     // деградация, а «пока не наблюдали».
     checks.letta_runtime = letta.runtimeFacts ?? { observed: false };
+
+    // Синхронизация персоны: выключенная или сорвавшаяся видна здесь, а
+    // не только в журнале. Молча пропущенная ничем не отличалась от
+    // выполненной — ровно так мужской род и держался месяцами.
+    const persona = personaSyncState();
+    checks.persona_sync = persona;
+    if (persona.status === "disabled" || persona.status === "failed" || persona.status === "stale") {
+      status = "degraded";
+    }
 
     try {
       await db.ping();

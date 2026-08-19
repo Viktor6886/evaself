@@ -139,6 +139,19 @@ export class EvaWorkflow {
      * ход без неё выполняется как прежде.
      */
     private readonly channelLinks?: ChannelLinkService,
+    /**
+     * Доставка канонической персоны агенту, который её ещё не получил.
+     * Необязательна: без неё ход идёт как прежде, просто устаревший агент
+     * остаётся устаревшим до массовой синхронизации.
+     */
+    private readonly personaSync?: {
+      syncAgent(
+        input: { agentId: string; userId: number; storedVersion: string | null },
+        persona: string,
+        options?: { timeoutMs?: number },
+      ): Promise<"updated" | "up_to_date" | "failed" | "disabled">;
+      persona(): string;
+    },
   ) {
     this.taskEvents = new TaskEventService(db);
     this.attachments = new TelegramAttachmentReader(telegram);
@@ -338,6 +351,22 @@ export class EvaWorkflow {
           conversationId: link.conversation_id,
           purpose: "chat",
         });
+
+        // Персона агента доводится до канонической до самого хода.
+        // Массовая синхронизация идёт при старте и может не успеть к
+        // первому сообщению человека, а агент со старым текстом успеет
+        // ответить о себе в мужском роде. Проход ограничен по времени и
+        // ход не роняет: молчащий control plane — не повод не ответить.
+        if (this.personaSync) {
+          const storedVersion = typeof link.meta?.persona_version === "string"
+            ? link.meta.persona_version
+            : null;
+          await this.personaSync.syncAgent(
+            { agentId: link.agent_id, userId: user.id, storedVersion },
+            this.personaSync.persona(),
+            { timeoutMs: this.config.personaSyncTurnTimeoutMs },
+          ).catch(() => undefined);
+        }
 
         if (user.is_blocked || user.state === "blocked") {
           await this.telegram.sendMessage(update.chatId, t(language, "accessBlocked"));
