@@ -655,7 +655,7 @@ test("персона несёт то, что ушло из хода", async (con
     return;
   }
   for (const carried of [
-    "женском роде", "set_reaction", "Telegram", "промежуток с прошлого сообщения",
+    "женском роде", "реакции", "Telegram", "промежуток с прошлого сообщения",
     "goals-values",
   ]) {
     assert.ok(persona.includes(carried), `персона потеряла «${carried}»`);

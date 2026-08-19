@@ -12,6 +12,7 @@ import type { ChannelLinkService } from "./channels/channel-links.js";
 import type { UserProfileService } from "./profile/profile-service.js";
 import type { UserTurnLock } from "./turns/user-turn-lock.js";
 import type { RuntimeContextBuilder } from "./runtime/runtime-context.js";
+import type { SendMessage } from "@letta-ai/letta-agent-sdk";
 import { TaskEventService } from "./tasks/task-event-service.js";
 import { withSpan } from "./observability/tracing.js";
 import { runInTurn } from "./turns/turn-context.js";
@@ -31,7 +32,16 @@ import {
   type TelegramMessage,
   type TelegramUpdate,
   TelegramClient,
+  TelegramFileTooLarge,
 } from "./telegram.js";
+import {
+  AttachmentError,
+  TelegramAttachmentReader,
+  audioFileOf,
+  imageFileOf,
+  telegramMediaKind,
+  type AttachmentImage,
+} from "./attachments/telegram-attachments.js";
 
 /**
  * Распознавание не удалось.
@@ -83,6 +93,15 @@ async function withDeadline<T>(work: Promise<T>, ms: number): Promise<T | null> 
  */
 const LEASE_OWNER = `eva-agent-service:${process.pid}`;
 
+/**
+ * Сколько изображений уходит в один ход.
+ *
+ * Ограничение не про вежливость, а про контекст: каждая картинка стоит
+ * тысяч токенов, и десяток снимков в одном окне вытеснит из контекста
+ * сам разговор.
+ */
+const MAX_IMAGES_PER_TURN = 4;
+
 interface NormalizedUpdate {
   updateId: number;
   message: TelegramMessage;
@@ -96,6 +115,8 @@ interface NormalizedUpdate {
 
 export class EvaWorkflow {
   private readonly taskEvents: TaskEventService;
+  /** Разбор вложений: общий с приёмом в базу знаний. */
+  private readonly attachments: TelegramAttachmentReader;
   constructor(
     private readonly config: Config,
     private readonly db: Database,
@@ -118,8 +139,22 @@ export class EvaWorkflow {
      * ход без неё выполняется как прежде.
      */
     private readonly channelLinks?: ChannelLinkService,
+    /**
+     * Доставка канонической персоны агенту, который её ещё не получил.
+     * Необязательна: без неё ход идёт как прежде, просто устаревший агент
+     * остаётся устаревшим до массовой синхронизации.
+     */
+    private readonly personaSync?: {
+      syncAgent(
+        input: { agentId: string; userId: number; storedVersion: string | null },
+        persona: string,
+        options?: { timeoutMs?: number },
+      ): Promise<"updated" | "up_to_date" | "failed" | "disabled">;
+      persona(): string;
+    },
   ) {
     this.taskEvents = new TaskEventService(db);
+    this.attachments = new TelegramAttachmentReader(telegram);
   }
 
   /**
@@ -317,6 +352,22 @@ export class EvaWorkflow {
           purpose: "chat",
         });
 
+        // Персона агента доводится до канонической до самого хода.
+        // Массовая синхронизация идёт при старте и может не успеть к
+        // первому сообщению человека, а агент со старым текстом успеет
+        // ответить о себе в мужском роде. Проход ограничен по времени и
+        // ход не роняет: молчащий control plane — не повод не ответить.
+        if (this.personaSync) {
+          const storedVersion = typeof link.meta?.persona_version === "string"
+            ? link.meta.persona_version
+            : null;
+          await this.personaSync.syncAgent(
+            { agentId: link.agent_id, userId: user.id, storedVersion },
+            this.personaSync.persona(),
+            { timeoutMs: this.config.personaSyncTurnTimeoutMs },
+          ).catch(() => undefined);
+        }
+
         if (user.is_blocked || user.state === "blocked") {
           await this.telegram.sendMessage(update.chatId, t(language, "accessBlocked"));
           await this.stopTurn(turnHandle, "user_blocked");
@@ -385,13 +436,20 @@ export class EvaWorkflow {
         }
 
         let prompt: string;
+        // Содержимое вложений едет отдельно от реплики человека: подпись
+        // к файлу — его слова, а сам файл — данные.
+        const attachments: string[] = [];
+        const images: AttachmentImage[] = [];
         try {
           // Порядок сообщений сохраняется: человек дописывал мысль, и
           // прочитать её задом наперёд — значит прочитать другую мысль.
           const texts: string[] = [];
           for (const part of parts) {
-            const text = (await this.promptFromMessage(part)).trim();
+            const collected = await this.promptFromMessage(part);
+            const text = collected.text.trim();
             if (text) texts.push(text);
+            attachments.push(...collected.attachments);
+            images.push(...collected.images);
           }
           prompt = texts.join("\n");
         } catch (error) {
@@ -401,6 +459,20 @@ export class EvaWorkflow {
           if (error instanceof VoiceTranscriptionError) {
             await this.telegram.sendMessage(update.chatId, t(language, "voiceFailed"));
             await this.stopTurn(turnHandle, "voice_transcription_failed");
+            return { status: "ignored" };
+          }
+          // Вложение, которое не прочиталось, — это ответ человеку, а не
+          // сбой Евы: он должен узнать, что именно не так с файлом.
+          if (error instanceof AttachmentError || error instanceof TelegramFileTooLarge) {
+            this.logger.info("Вложение не прочитано", {
+              telegram_id: update.telegramId,
+              code: error instanceof AttachmentError ? error.code : "attachment_too_large",
+            });
+            await this.telegram.sendMessage(
+              update.chatId,
+              error instanceof AttachmentError ? error.message : t(language, "attachmentTooLarge"),
+            );
+            await this.stopTurn(turnHandle, "attachment_rejected");
             return { status: "ignored" };
           }
           throw error;
@@ -561,19 +633,28 @@ export class EvaWorkflow {
               recorded: turnHandle?.recorded === true,
               isCancelled: async () =>
                 turnHandle && this.turns ? await this.turns.isCancelled(turnHandle) : false,
+              // Сообщение этого хода: на него ставится реакция. У
+              // объединённого хода — последнее сообщение окна, то самое,
+              // на которое Ева и отвечает.
+              chatId: update.chatId,
+              messageId: parts[parts.length - 1]?.messageId ?? update.messageId,
             },
             async () => await this.letta.runTurn(
               conversationId,
-              this.runtimeContext.wrapUserMessage(
+              this.messageForLetta(
+                this.runtimeContext.wrapUserMessage(
                 context,
                 signal ? `${safetyDirective(signal)}\n\n${prompt}` : prompt,
                 {
                   messageSource: update.kind,
+                  attachments,
                   // Фактический размер собранного контекста, а не
                   // обещание уложиться: без измерения бюджет — это
                   // намерение.
                   measure: (characters) => { metrics.context_characters = characters; },
                 },
+                ),
+                images,
               ),
               {
                 isCancelled: async () =>
@@ -1046,13 +1127,26 @@ export class EvaWorkflow {
     };
   }
 
+  /**
+   * Что человек прислал этим сообщением.
+   *
+   * Три вещи разделены намеренно: реплика человека (текст или подпись),
+   * изображения — они уходят модели изображениями, а не пересказом, — и
+   * содержимое файлов, которое остаётся недоверенными данными.
+   */
   private async promptFromMessage(
     update: NormalizedUpdate,
-  ): Promise<string> {
+  ): Promise<{ text: string; images: AttachmentImage[]; attachments: string[] }> {
     const message = update.message;
-    if (update.kind === "text") return message.text?.trim() || message.caption?.trim() || "";
+    const caption = (message.caption ?? message.text ?? "").trim();
+    const only = (text: string) => ({ text, images: [], attachments: [] });
+
+    if (update.kind === "text") return only(caption);
+
     if (update.kind === "voice") {
-      const file = message.voice ?? message.audio;
+      // Голосовое, аудио и звук, присланный файлом, идут одним и тем же
+      // путём распознавания: разными их делает только способ отправки.
+      const file = audioFileOf(message);
       if (!file) throw new Error("Голосовой файл отсутствует");
       const transcription = await this.transcribeVoice(
         "telegram_voice",
@@ -1064,7 +1158,6 @@ export class EvaWorkflow {
         file.file_unique_id ?? null,
         message.from?.language_code ?? "ru",
       );
-
       if (!transcription.fromCache && transcription.durationMinutes) {
         await this.db.incrementUsage(
           update.telegramId,
@@ -1076,50 +1169,51 @@ export class EvaWorkflow {
         update.chatId,
         formatVoiceTranscriptEcho(transcription.text),
       );
-      return transcription.text;
+      // Подпись к аудиофайлу — тоже слова человека, и терять её незачем.
+      return only([transcription.text, caption].filter(Boolean).join("\n"));
     }
+
     if (update.kind === "image") {
-      const photo = message.photo?.at(-1);
-      if (!photo) throw new Error("Изображение отсутствует");
-      const downloaded = await this.telegram.downloadFile(photo.file_id);
-      const mime = downloaded.path.toLowerCase().endsWith(".png") ? "image/png" : "image/jpeg";
-      const caption = message.caption?.trim();
-      const description = await this.llm.complete([
-        {
-          role: "user",
-          content: [
-            {
-              type: "text",
-              text: `Подробно и без домыслов опиши изображение для личного AI-агента Евы. Извлеки весь видимый текст. Вопрос пользователя: ${caption || "(нет вопроса)"}`,
-            },
-            {
-              type: "image_url",
-              image_url: {
-                url: `data:${mime};base64,${Buffer.from(downloaded.bytes).toString("base64")}`,
-              },
-            },
-          ],
-        },
-      ]);
-      return `[ИЗОБРАЖЕНИЕ ПОЛЬЗОВАТЕЛЯ]\n${description}\n\nКомментарий: ${caption || "нет"}`;
+      const file = imageFileOf(message);
+      if (!file) throw new Error("Изображение отсутствует");
+      const image = await this.attachments.image(file);
+      // Само изображение уходит модели изображением. Отдельного описания
+      // больше нет: пересказ картинки чужой моделью — это уже не то, что
+      // видит Ева.
+      return { text: caption, images: [image], attachments: [] };
     }
+
     if (update.kind === "document") {
       const document = message.document;
       if (!document) throw new Error("Документ отсутствует");
-      if ((document.file_size ?? 0) > 2 * 1024 * 1024) {
-        throw new Error("Документ больше 2 МБ; отправьте текст или более короткий файл");
-      }
-      const downloaded = await this.telegram.downloadFile(document.file_id);
-      const filename = document.file_name ?? downloaded.path;
-      const isText = /\.(txt|md|json|csv|log|yaml|yml)$/i.test(filename) ||
-        document.mime_type?.startsWith("text/");
-      if (!isText) {
-        throw new Error("Пока поддерживаются текстовые документы: txt, md, json, csv, yaml");
-      }
-      const contents = new TextDecoder("utf-8", { fatal: false }).decode(downloaded.bytes);
-      return `[ДОКУМЕНТ ${filename}]\n${contents.slice(0, 100_000)}\n\nКомментарий: ${message.caption ?? "нет"}`;
+      const content = await this.attachments.document(document);
+      return { text: caption, images: [], attachments: [content] };
     }
+
     throw new Error("Неподдерживаемый тип сообщения");
+  }
+
+  /**
+   * Сообщение для Letta.
+   *
+   * Без изображений это обычная строка — так ход выглядел всегда. С
+   * изображениями это список частей: текст и картинки рядом. Дальше их
+   * несёт Letta, а роутер разворачивает в формат провайдера и уводит
+   * запрос на маршрут зрения.
+   */
+  private messageForLetta(text: string, images: AttachmentImage[]): SendMessage {
+    if (images.length === 0) return text;
+    return [
+      { type: "text", text },
+      ...images.slice(0, MAX_IMAGES_PER_TURN).map((image) => ({
+        type: "image" as const,
+        source: {
+          type: "base64" as const,
+          media_type: image.mediaType as "image/png" | "image/jpeg" | "image/gif" | "image/webp",
+          data: image.base64,
+        },
+      })),
+    ];
   }
 
   /**
@@ -1156,15 +1250,9 @@ export function normalizeUpdate(update: TelegramUpdate): NormalizedUpdate | null
   if (!message || !from || from.is_bot) return null;
   const commandMatch = message.text?.trim().match(/^\/([a-z_]+)(?:@\w+)?(?:\s|$)/i);
   const command = commandMatch?.[1] ? `/${commandMatch[1].toLowerCase()}` : null;
-  const kind = message.voice || message.audio
-    ? "voice"
-    : message.photo?.length
-      ? "image"
-      : message.document
-        ? "document"
-        : message.text || message.caption
-          ? "text"
-          : "unsupported";
+  // Вид сообщения определяется одним разбором: снимок экрана, присланный
+  // файлом, остаётся изображением, а голосовая запись файлом — голосом.
+  const kind = telegramMediaKind(message);
   return {
     updateId: update.update_id,
     message,

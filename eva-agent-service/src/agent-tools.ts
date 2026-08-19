@@ -338,7 +338,11 @@ const TOOL_RISK: Readonly<Record<string, ToolRisk>> = Object.freeze({
   delete_notes: "destructive",
   delete_budget_records: "destructive",
   delete_tasks: "destructive",
-  set_reaction: "external_side_effect",
+  // Реакция — обратимое и безобидное действие в том же чате, где идёт
+  // разговор: снять её можно тем же движением. Пока она числилась
+  // внешним последствием, каждая просьба поддержать сообщение эмодзи
+  // требовала подтверждения человека — и Ева перестала их ставить вовсе.
+  set_reaction: "low_risk_write",
   upsert_user_profile_field: "sensitive_write",
   confirm_user_profile_field: "sensitive_write",
   decline_user_profile_field: "sensitive_write",

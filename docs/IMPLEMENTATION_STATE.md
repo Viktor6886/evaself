@@ -93,6 +93,8 @@ heartbeat по-прежнему ведёт `BackgroundRuntime`, а очеред�
 | Адаптеры | OpenAI-совместимый и Anthropic | `src/router/adapters/` | общий нормализатор в `shared.ts` | расш. |
 | Выбор маршрута | Техническая цепочка провайдеров | `src/router/routes.ts`, `routing-marker.ts` | детерминированно: режим, явный запрос, изображение/JSON, назначение conversation, выбор человека; содержание сообщения не разбирается | обяз. |
 | Проверка совместимости модели | Технический probe перед активацией | `src/llm/capability-probe.ts` | `probeModelCapabilities()`: ответ, streaming, вызов инструмента, JSON-аргументы, приём результата (assistant-сообщение с `reasoning_details` возвращается провайдеру без изменений), строгий JSON и Structured Outputs — отдельными неблокирующими проверками; отдельно проверяется цикл в форме LLM Router (без служебных полей), потому что роутер их сегодня не переносит; идёт с `additional_parameters` провайдера без секретов и маршрутизации; единственное разрешённое обращение к `/chat/completions` мимо роутера | обяз. |
+| Мультимодальный формат | Изображение и непрозрачное состояние провайдера во внутреннем формате роутера | `src/router/content.ts`, `types.ts` | `parseContent()`, `containsImage()`, `pickProviderState()`; `LlmMessage.parts` и `provider_state` переносятся провайдеру без чтения и без журнала | обяз. |
+| Проверка распознавания медиа | Настоящее изображение через production Router | `src/llm/vision-check.ts` | `runVisionCheck()`: указатель `eva/chat`, маршрут выбирает роутер; сверяется `x_eva_router.route === "vision"` и названный цвет; маршрут `POST /v1/llm/vision-check` | обяз. |
 | Учёт | Запросы и расход | таблицы `llm_requests`, `llm_spend_ledger`, `llm_breaker_state` | — | read |
 
 Своя fallback-цепочка в обход роутера запрещена (инвариант 16).
@@ -110,7 +112,7 @@ heartbeat по-прежнему ведёт `BackgroundRuntime`, а очеред�
 | Реестр возможностей Letta | Операция → кем поддержана → в какой версии | `src/letta/capabilities.ts` | `assertSupported()`, `missingCapabilities()`; неподдержанная — `unsupported_operation` | обяз. |
 | Состав memory blocks | Четыре блока и их границы | `src/letta/memory-blocks.ts` | `evaMemoryBlocks()`: `persona`, `human`, `current_state`, `therapeutic_framework` | обяз. |
 | Административный control plane | `@letta-ai/letta-client` 1.12.1 только как управляющий путь | `src/letta/admin-client.ts` | `LettaAdminPlane`; методов отправки сообщения нет | обяз. |
-| Синхронизация персоны | Канонический текст персоны существующим агентам | `src/letta/persona-sync.ts` | `PersonaSync.sync()`: одно направление файл → агент, за флагом `EVA_LETTA_ADMIN_CLIENT`; в PostgreSQL остаётся отметка версии, не значение блока | расш. |
+| Синхронизация персоны | Канонический текст персоны существующим агентам | `src/letta/persona-sync.ts` | `PersonaSync.sync()` при старте и `syncAgent()` с ограничением по времени перед ходом устаревшего агента; одно направление файл → агент; control plane включён по умолчанию; состояние видно в `/health` (`checks.persona_sync`) и в `doctor`; в PostgreSQL остаётся отметка версии, не значение блока | расш. |
 | Страж удаления | Запрет удаления при незакончившемся ходе | `src/letta/delete-guard.ts` | выборка по `turn_runs`, код `deletion_blocked` | обяз. |
 | Готовность | Может ли Ева работать | `src/letta/readiness.ts` | `evaluateReadiness()`: `state` — `ready`/`degraded`/`not_ready`, срок годности снимка фактов, `observed_at`; маршрут `/ready` | обяз. |
 | RuntimeContextBuilder | Сборщик продуктового контекста | `src/runtime/runtime-context.ts` | `RuntimeContext`: местное и UTC время, день недели, месяц, год, часовой пояс, промежуток с прошлого сообщения, окно быстрых сообщений, профиль, подписка, состояние целей; системный промпт не подменяет; потолок 2000 знаков, размер виден в `/metrics` | обяз. |
@@ -130,6 +132,9 @@ heartbeat по-прежнему ведёт `BackgroundRuntime`, а очеред�
 | Задачи и события | Напоминания и их история | `src/tasks/task-event-service.ts`, таблицы `tasks`, `task_events` | `reminder_sent` отделён от `done` | расш. |
 | Платежи | Провайдеры и намерения | `src/payments.ts`, таблицы `payments`, `payment_intents`, `subscriptions` | платёж ≠ право доступа (инвариант 27) | расш. |
 | Квоты | Лимиты бесплатного доступа | таблицы `quotas`, `usage_counters` | 9 сеяных строк, проверяется в CI | расш. |
+| Разбор документов | Текст из PDF, DOCX, TXT, MD, JSON, CSV, YAML, HTML | `src/knowledge/document-text.ts` | `documentMimeOf()`, `extractDocumentText()`; общий и для приёма в базу знаний, и для вложений Telegram — второго разбора нет | обяз. |
+| Вложения Telegram | Классификация и безопасная загрузка вложения хода | `src/attachments/telegram-attachments.ts` | `telegramMediaKind()`, `TelegramAttachmentReader`: предел байтов, сверка настоящего типа, конверт недоверенного содержимого; картинка едет картинкой, голос и аудио-документ — тем же STT | обяз. |
+| Поиск по базе знаний | Гибридный поиск по загруженным документам | `src/knowledge/search.ts` | `KnowledgeSearch.search()`: FTS `websearch_to_tsquery` и pgvector `<=>`, слияние Reciprocal Rank Fusion; граница арендатора; инструмент `knowledge_search` — когда искать, решает Letta | обяз. |
 
 ## Административный слой
 
@@ -151,6 +156,8 @@ heartbeat по-прежнему ведёт `BackgroundRuntime`, а очеред�
 | Маршруты CRUD | Регистрация разделов шага 12 | `src/admin/crud-routes.ts` | флаг `EVA_ADMIN_CRUD`, подтверждение — идентификатор цели | расш. |
 | Durable approvals | Подтверждение опасных tool calls по SDK request id | `src/tools/approvals.ts`, таблица `tool_approvals` | `canUseTool`, PostgreSQL outbox, Mini App decision route, recovery по request id; `reconcileStaleApprovals()` перед восстановлением снимает незакрытое разрешение и незавершённое ожидание старше срока (отказ человека не трогает); `EVA_TOOL_APPROVALS` | обяз. |
 | MCP policy | Только admin-added HTTP/SSE с SSRF, allowlist, Secret Store и аудитом | `src/tools/mcp.ts`, таблица `mcp_server_policies` | `McpHttpInvoker`; stdio, команды, `npx -y`, wildcard запрещены | обяз. |
+| Панель по разделам | Статика админки: раздел — файл | `admin-ui/public/ui-core.js` и `ui-<раздел>.js`, точка входа `ui.js` | обычные скрипты с общей глобальной областью, порядок подключения задан в `index.html`; `ui-core.js` первым, `ui.js` последним | расш. |
+| Раздел «Распознавание медиа» | Цепочка `vision` и проверка тракта | `admin-ui/public/ui-media.js`, `POST /api/admin/v1/llm/vision/check` | своего реестра провайдеров нет: тот же `/llm/state` и те же обработчики цепочки, что у раздела моделей | расш. |
 
 Матрица возможностей SDK — `docs/IMPLEMENTATION_STATUS.md`.
 Контракты API — `docs/ADMIN_PHASE1_CONTRACT.md`, `docs/ADMIN_PHASES_2_6_CONTRACT.md`.

@@ -13,6 +13,7 @@ import type {
   ProviderProfile,
 } from "../types.js";
 import { ProviderError } from "../types.js";
+import { pickProviderState } from "../content.js";
 import { ReasoningStripper, stripReasoning } from "../normalize.js";
 import { classifyHttp, readSse } from "./shared.js";
 
@@ -49,7 +50,22 @@ function buildBody(provider: ProviderProfile, request: LlmRequest, stream: boole
       });
       continue;
     }
-    const entry: Record<string, unknown> = { role: message.role, content: message.content };
+    const entry: Record<string, unknown> = {
+      role: message.role,
+      // Мультимодальное сообщение уходит целиком: текст и изображение
+      // рядом, как их и прислали. Раньше до провайдера доезжал только
+      // текст, а картинка терялась на границе роутера.
+      content: message.parts
+        ? message.parts.map((part) => part.type === "text"
+          ? { type: "text", text: part.text }
+          : part.type === "image_url"
+            ? { type: "image_url", image_url: { url: part.url } }
+            : { type: "image_url", image_url: { url: `data:${part.media_type};base64,${part.data}` } })
+        : message.content,
+    };
+    // Непрозрачное состояние провайдера возвращается ему без изменений:
+    // роутер его не читает.
+    if (message.provider_state) Object.assign(entry, message.provider_state);
     if (message.tool_calls?.length) {
       entry.tool_calls = message.tool_calls.map((call) => ({
         id: call.id,
@@ -207,6 +223,7 @@ export const openAiAdapter: ProviderAdapter = {
         { retryable: true },
       );
     }
+    const providerState = pickProviderState(choice?.message);
     return {
       content,
       tool_calls: toolCalls,
@@ -216,6 +233,7 @@ export const openAiAdapter: ProviderAdapter = {
         tokens_out: body.usage?.completion_tokens ?? 0,
       },
       model: body.model ?? provider.model,
+      ...(providerState ? { provider_state: providerState } : {}),
     };
   },
 

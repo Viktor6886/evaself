@@ -202,8 +202,7 @@ Batch 21–23 и 33 выполняются только по отдельной 
 **Целиком читается только модуль, который batch меняет.** Соседний модуль,
 из которого нужен один контракт, читается через поиск и чтение нужного
 участка, а не полностью: `src/admin/stt-service.ts` — это 1900 строк,
-`admin-ui/public/ui.js` — 3599, и каждое их полное чтение стоит десятков
-тысяч токенов.
+и каждое их полное чтение стоит десятков тысяч токенов.
 
 Не читай: `docs/PROGRESS_HISTORY.md`, `docs/AUDIT_BASELINE.md`,
 `docs/EVASELF_LAYER2_PLAN.md`, `.docx`, документы соседних подсистем — пока
@@ -231,10 +230,11 @@ Batch 21–23 и 33 выполняются только по отдельной 
 нельзя — правило 1 запрещает мешать рефакторинг с функциональными
 изменениями.
 
-Сегодня за границей: `admin-ui/public/ui.js` (3581), `src/admin/stt-service.ts`
-(1879), `src/letta.ts` (1764), `src/server.ts` (1593), `src/admin/server.ts`
-(1280), `src/db.ts` (1222), `src/public/webapp-core.ts` (1090),
-`src/eva-workflow.ts` (1022), `src/router/router.ts` (812).
+Сегодня за границей: `src/admin/stt-service.ts` (1879), `src/letta.ts` (1823),
+`src/server.ts` (1629), `src/eva-workflow.ts` (1319), `src/db.ts` (1287),
+`src/admin/server.ts` (1286), `src/public/webapp-core.ts` (1090),
+`src/router/router.ts` (819). `admin-ui/public/ui.js` из этого списка ушёл:
+панель разрезана по разделам, самый крупный файл — 617 строк.
 
 ## Цикл batch
 

@@ -810,6 +810,12 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
     return result;
   });
 
+  // Проверка распознавания медиа. Дежурному она нужна не меньше, чем
+  // администратору, но это платный запрос к модели — viewer'у не даётся.
+  app.post("/api/admin/v1/llm/vision/check", {
+    config: { roles: ["owner", "admin", "operator"] } satisfies RouteAccess,
+  }, async () => await services.providers.visionCheck());
+
   app.post("/api/admin/v1/providers/:id/activate", {
     config: {
       roles: ["owner", "admin"],

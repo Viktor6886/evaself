@@ -17,7 +17,9 @@ import type { GoalService } from "./goals/goal-service.js";
 import type { LettaService } from "./letta.js";
 import type { ManagedAgentInput } from "./letta.js";
 import { DeleteGuard } from "./letta/delete-guard.js";
+import { personaSyncState } from "./letta/persona-sync.js";
 import type { LlmManager, LlmProviderInput } from "./llm.js";
+import { runVisionCheck } from "./llm/vision-check.js";
 import type { Logger } from "./logger.js";
 import { MetricsCollector } from "./metrics.js";
 import { newCorrelationId, parseTraceparent } from "./observability/tracing.js";
@@ -298,6 +300,17 @@ export function buildServer(services: Services): FastifyInstance {
     // инструментов и рефлексия. До первого хода снимка ещё нет — это не
     // деградация, а «пока не наблюдали».
     checks.letta_runtime = letta.runtimeFacts ?? { observed: false };
+
+    // Синхронизация персоны: выключенная или сорвавшаяся видна здесь, а
+    // не только в журнале. Молча пропущенная ничем не отличалась от
+    // выполненной — ровно так мужской род и держался месяцами.
+    //
+    // Общий статус сервиса она при этом не роняет. Массовый проход идёт
+    // при старте, и control plane в этот момент может ещё подниматься:
+    // один отказ на старте означал бы «сервис нездоров» навсегда, при
+    // том что каждый такой агент получает персону в своём же ходе.
+    // Состояние читают `doctor` и человек, а не healthcheck контейнера.
+    checks.persona_sync = personaSyncState();
 
     try {
       await db.ping();
@@ -1141,6 +1154,17 @@ export function buildServer(services: Services): FastifyInstance {
     const { id } = request.params as { id: string };
     return { result: await llm.test(id) };
   });
+
+  // Проверка распознавания медиа. Прогоняет настоящее изображение через
+  // production Router: проба возможностей провайдера ходит к нему
+  // напрямую и потерю картинки в маршрутизации не видит.
+  app.post("/v1/llm/vision-check", async () => ({
+    result: await runVisionCheck({
+      routerUrl: config.routerUrl,
+      routerApiKey: config.routerApiKey,
+      timeoutMs: config.llmProbeTimeoutMs,
+    }),
+  }));
 
   app.get("/v1/llm/providers/:id/models", async (request) => {
     const { id } = request.params as { id: string };

@@ -99,13 +99,15 @@ jobs:
 
       - name: Install shellcheck and Caddy
         run: |
-          # На раннере параллельно работает свой apt. По умолчанию наша
-          # установка не ждёт освобождения, а падает с «Could not get lock»
-          # — либо стоит в очереди молча, пока job не снимут по времени.
-          printf 'DPkg::Lock::Timeout "600";\nAcquire::Retries "3";\n' \
-            | sudo tee /etc/apt/apt.conf.d/99evaself-ci >/dev/null
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq shellcheck
+          # shellcheck входит в образ раннера. Проверка дешевле похода в
+          # apt, который сегодня показал, что умеет молча висеть на
+          # недоступном зеркале до снятия job по времени.
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            ./scripts/ci/apt-wait.sh
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq shellcheck
+          fi
+          shellcheck --version | head -2
           CADDY_VERSION="$(grep '^CADDY_VERSION=' versions.env | cut -d= -f2 | cut -d- -f1)"
           curl -fsSL -o /tmp/caddy.tgz \
             "https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}/caddy_${CADDY_VERSION}_linux_amd64.tar.gz"
@@ -323,7 +325,8 @@ jobs:
       - name: Administrative WebUI JavaScript is valid
         run: |
           node --check letta-ui/public/ui.js
-          node --check admin-ui/public/ui.js
+          # Панель разрезана на страницы: проверяется каждая, а не одна.
+          for file in admin-ui/public/*.js; do node --check "$file"; done
 
       - name: The /v1 deny really precedes the proxy in the adapted config
         env:
@@ -353,7 +356,7 @@ jobs:
       - name: Front-end JavaScript is valid
         run: |
           node --check letta-ui/public/ui.js
-          node --check admin-ui/public/ui.js
+          for file in admin-ui/public/*.js; do node --check "$file"; done
           node --check webapp/public/app/app.js
           node --check webapp/public/app/journal.js
           node --check webapp/public/assets/bot-link.js
@@ -479,27 +482,45 @@ jobs:
 
       - name: Install Chromium
         if: needs.changes.outputs.adminui == 'true'
-        # Два разных отказа в одном шаге, и оба не про наш код.
+        # Отказ здесь ни разу не был про наш код — он был про apt.
         #
         # `--with-deps` зовёт apt-get, а на раннере параллельно работает
-        # свой apt: по умолчанию вторая попытка не ждёт освобождения, а
-        # падает с «Could not get lock». Поэтому apt-у велено ждать
-        # блокировку и повторять неудачные загрузки.
+        # своё фоновое обновление. Первая попытка вставала в очередь и
+        # снималась по таймауту, но убитым оказывался только `npx`:
+        # запущенный им под sudo apt-get продолжал держать блокировку, и
+        # следующие попытки падали уже на нём.
         #
-        # Сама загрузка браузера уходит в чужую сеть и уже снимала
-        # обязательную проверку по таймауту job. Поэтому ограниченное
-        # ожидание и три попытки.
+        # Поэтому apt убран с основного пути. Образ ubuntu-24.04 несёт
+        # библиотеки Chromium — в нём уже стоят Chrome и Edge, — и
+        # браузеру достаточно самой загрузки. Если библиотек всё-таки не
+        # хватит, браузер не запустится, и тогда — и только тогда — идём
+        # в apt, честно дождавшись чужой блокировки.
+        #
+        # Ожидание проверяется через `fuser`, а не `flock`: apt держит
+        # POSIX-блокировку (fcntl), и `flock` на том же файле берётся
+        # мгновенно, ничего не дожидаясь.
         run: |
-          printf 'DPkg::Lock::Timeout "600";\nAcquire::Retries "3";\n' \
-            | sudo tee /etc/apt/apt.conf.d/99evaself-ci >/dev/null
+          launches() {
+            node -e "require('playwright').chromium.launch({timeout:60000}).then((b)=>b.close())"
+          }
           for attempt in 1 2 3; do
-            if timeout 480 npx playwright install --with-deps chromium; then
-              exit 0
+            if timeout -k 30 300 npx playwright install chromium; then
+              break
             fi
-            echo "::warning::playwright install не удался (попытка $attempt)"
-            sleep 20
+            echo "::warning::загрузка Chromium не удалась (попытка $attempt)"
+            sleep 15
           done
-          echo "::error::playwright install не удался за три попытки"
+          if launches; then
+            exit 0
+          fi
+
+          echo "::warning::Chromium не запустился — доставляем системные библиотеки"
+          "$GITHUB_WORKSPACE/scripts/ci/apt-wait.sh"
+          sudo npx playwright install-deps chromium
+          if launches; then
+            exit 0
+          fi
+          echo "::error::Chromium не запускается даже после установки библиотек"
           exit 1
 
       - name: Behaviour tests
@@ -541,27 +562,45 @@ jobs:
 
       - name: Install Chromium
         if: needs.changes.outputs.webapp == 'true'
-        # Два разных отказа в одном шаге, и оба не про наш код.
+        # Отказ здесь ни разу не был про наш код — он был про apt.
         #
         # `--with-deps` зовёт apt-get, а на раннере параллельно работает
-        # свой apt: по умолчанию вторая попытка не ждёт освобождения, а
-        # падает с «Could not get lock». Поэтому apt-у велено ждать
-        # блокировку и повторять неудачные загрузки.
+        # своё фоновое обновление. Первая попытка вставала в очередь и
+        # снималась по таймауту, но убитым оказывался только `npx`:
+        # запущенный им под sudo apt-get продолжал держать блокировку, и
+        # следующие попытки падали уже на нём.
         #
-        # Сама загрузка браузера уходит в чужую сеть и уже снимала
-        # обязательную проверку по таймауту job. Поэтому ограниченное
-        # ожидание и три попытки.
+        # Поэтому apt убран с основного пути. Образ ubuntu-24.04 несёт
+        # библиотеки Chromium — в нём уже стоят Chrome и Edge, — и
+        # браузеру достаточно самой загрузки. Если библиотек всё-таки не
+        # хватит, браузер не запустится, и тогда — и только тогда — идём
+        # в apt, честно дождавшись чужой блокировки.
+        #
+        # Ожидание проверяется через `fuser`, а не `flock`: apt держит
+        # POSIX-блокировку (fcntl), и `flock` на том же файле берётся
+        # мгновенно, ничего не дожидаясь.
         run: |
-          printf 'DPkg::Lock::Timeout "600";\nAcquire::Retries "3";\n' \
-            | sudo tee /etc/apt/apt.conf.d/99evaself-ci >/dev/null
+          launches() {
+            node -e "require('playwright').chromium.launch({timeout:60000}).then((b)=>b.close())"
+          }
           for attempt in 1 2 3; do
-            if timeout 480 npx playwright install --with-deps chromium; then
-              exit 0
+            if timeout -k 30 300 npx playwright install chromium; then
+              break
             fi
-            echo "::warning::playwright install не удался (попытка $attempt)"
-            sleep 20
+            echo "::warning::загрузка Chromium не удалась (попытка $attempt)"
+            sleep 15
           done
-          echo "::error::playwright install не удался за три попытки"
+          if launches; then
+            exit 0
+          fi
+
+          echo "::warning::Chromium не запустился — доставляем системные библиотеки"
+          "$GITHUB_WORKSPACE/scripts/ci/apt-wait.sh"
+          sudo npx playwright install-deps chromium
+          if launches; then
+            exit 0
+          fi
+          echo "::error::Chromium не запускается даже после установки библиотек"
           exit 1
 
       - name: Device matrix
@@ -578,7 +617,9 @@ jobs:
   migrations:
     name: PostgreSQL migrations
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # Клиент PostgreSQL ставится из pgdg, то есть через apt, и ожидание
+    # чужой блокировки съедало весь предел до начала самих миграций.
+    timeout-minutes: 30
     services:
       postgres:
         image: pgvector/pgvector:0.8.5-pg17
@@ -607,11 +648,9 @@ jobs:
       # выглядели как две одинаковые схемы.
       - name: Install psql
         run: |
-          # На раннере параллельно работает свой apt. По умолчанию наша
-          # установка не ждёт освобождения, а падает с «Could not get lock»
-          # — либо стоит в очереди молча, пока job не снимут по времени.
-          printf 'DPkg::Lock::Timeout "600";\nAcquire::Retries "3";\n' \
-            | sudo tee /etc/apt/apt.conf.d/99evaself-ci >/dev/null
+          # Шаг уже снимался по двадцатиминутному пределу: он всё это
+          # время простоял в очереди за фоновым обновлением раннера.
+          ./scripts/ci/apt-wait.sh
           sudo apt-get update -qq
           sudo apt-get install -y -qq curl ca-certificates
           sudo install -d /usr/share/postgresql-common/pgdg
@@ -620,6 +659,7 @@ jobs:
           echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
             https://apt.postgresql.org/pub/repos/apt noble-pgdg main" \
             | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          ./scripts/ci/apt-wait.sh
           sudo apt-get update -qq
           sudo apt-get install -y -qq postgresql-client-17
           psql --version
@@ -713,6 +753,12 @@ jobs:
       # проверяется именно запрос, на настоящем PostgreSQL.
       - name: Claim параллельного диспетчера соблюдает порядок и исключения
         run: psql -v ON_ERROR_STOP=1 -q -f scripts/ci/test-inbox-claim.sql
+
+      # Поиск по базе знаний держится на двух половинах — словах и
+      # векторе — и на том, что чужой документ не находится никогда.
+      # Поддельная база проверяет форму запроса, но не сам SQL.
+      - name: Поиск по базе знаний гибридный и не выходит за арендатора
+        run: psql -v ON_ERROR_STOP=1 -q -f scripts/ci/test-knowledge-search.sql
 
       # Журнал побочных эффектов держится на семантике ON CONFLICT и на
       # условном обновлении, которым забирается право на повтор.
@@ -865,7 +911,9 @@ jobs:
   media-service:
     name: media-service (Python + ffmpeg)
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # Ожидание чужого apt на раннере доходит до десяти минут: пятнадцати
+    # на весь job не хватало, даже когда сами проверки идут полминуты.
+    timeout-minutes: 20
     needs: changes
     defaults:
       run:
@@ -881,11 +929,14 @@ jobs:
       - name: Install ffmpeg
         if: needs.changes.outputs.media == 'true'
         run: |
-          # На раннере параллельно работает свой apt. По умолчанию наша
-          # установка не ждёт освобождения, а падает с «Could not get lock»
-          # — либо стоит в очереди молча, пока job не снимут по времени.
-          printf 'DPkg::Lock::Timeout "600";\nAcquire::Retries "3";\n' \
-            | sudo tee /etc/apt/apt.conf.d/99evaself-ci >/dev/null
+          # Сначала смотрим, есть ли ffmpeg уже: заход в apt на этом
+          # раннере стоит до пятнадцати минут ожидания чужой блокировки,
+          # и job снимался по времени, так и не начав проверок.
+          if command -v ffmpeg >/dev/null 2>&1; then
+            ffmpeg -version | head -1
+            exit 0
+          fi
+          "$GITHUB_WORKSPACE/scripts/ci/apt-wait.sh"
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg
 

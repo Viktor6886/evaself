@@ -59,6 +59,12 @@ export interface AgentLinkRow {
   status: string;
   message_count: string;
   last_message_at: Date | null;
+  /**
+   * Служебные отметки связки. Здесь же живёт `persona_version` — версия
+   * персоны, доставленная агенту. Это отметка развёртывания, а не копия
+   * блока: значение блока живёт только в Letta (инвариант 12).
+   */
+  meta?: Record<string, unknown> | null;
 }
 
 export interface LlmProviderRow {

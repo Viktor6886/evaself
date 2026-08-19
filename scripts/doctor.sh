@@ -150,6 +150,29 @@ probe "webapp /healthz"   webapp        "http://127.0.0.1:8082/healthz"
 probe "llm-router /health" llm-router   "http://127.0.0.1:8073/health"
 probe "letta-ui /healthz" letta-ui      "http://127.0.0.1:8081/healthz"
 
+# Синхронизация персоны: канонический текст личности Евы у уже созданных
+# агентов. Выключенная или сорвавшаяся не видна ни по одному коду ответа
+# — агент просто продолжает говорить о себе прежним текстом, — поэтому
+# состояние читается явно.
+persona_state() {
+	local body
+	body="$(docker compose exec -T eva-agent-service sh -lc \
+		"wget -qO- http://127.0.0.1:\${EVA_AGENT_PORT:-8080}/health || curl -sS http://127.0.0.1:\${EVA_AGENT_PORT:-8080}/health" \
+		2>/dev/null || true)"
+	[ -n "$body" ] || { warn "persona sync: состояние недоступно (сервис не ответил)"; return; }
+	local status
+	status="$(printf '%s' "$body" | python3 -c 'import json,sys;print((json.load(sys.stdin).get("checks",{}).get("persona_sync") or {}).get("status","unknown"))' 2>/dev/null || echo unknown)"
+	case "$status" in
+		ok) ok "persona sync: канонический текст доставлен" ;;
+		never) warn "persona sync: ещё не выполнялась" ;;
+		disabled) critical "persona sync ВЫКЛЮЧЕНА: агенты остаются с прежней персоной (EVA_LETTA_ADMIN_CLIENT)" ;;
+		stale) critical "persona sync: есть агенты со старой персоной" ;;
+		failed) critical "persona sync: обновление персоны отказало" ;;
+		*) warn "persona sync: состояние неизвестно" ;;
+	esac
+}
+persona_state
+
 # The active LLM lives in the `llm_providers` registry, not in .env: a key
 # rotated through the WebUI never touches the file.
 LLM_STATE="$(compose exec -T eva-agent-service node -e "

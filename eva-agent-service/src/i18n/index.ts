@@ -28,6 +28,7 @@ const ru = {
     "Связь с агентом, заметки и задачи хранятся в PostgreSQL и Letta на сервере владельца Evaself. API-ключи зашифрованы и не выдаются в WebUI. Администратор может удалить агента и его данные.",
   unknownCommand: "Неизвестная команда. Список: /help",
   stopped: "Остановила. Можно писать дальше.",
+  attachmentTooLarge: "Файл слишком большой. Пришли версию поменьше или текстом.",
   nothingToStop: "Сейчас нечего останавливать.",
   transcript: "Распознала: {text}",
   // Один текст на все технические причины отказа. Пользователю
@@ -62,6 +63,7 @@ const en: Record<keyof typeof ru, string> = {
     "Your agent link, notes, and tasks are stored in PostgreSQL and Letta on the Evaself owner’s server. API keys are encrypted and never returned to WebUI. An administrator can delete the agent and its data.",
   unknownCommand: "Unknown command. See /help",
   stopped: "Stopped. You can keep writing.",
+  attachmentTooLarge: "That file is too large. Send a smaller version or paste the text.",
   nothingToStop: "There is nothing to stop right now.",
   transcript: "Transcribed: {text}",
   voiceFailed:

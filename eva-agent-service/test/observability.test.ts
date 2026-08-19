@@ -319,6 +319,9 @@ test("аудит кардинальности: в метках нет значе
   );
   const allowedLabels = new Set([
     "version", "state", "class", "stat", "kind", "quantile", "mode", "model",
+    // Исход действия: четыре значения, заданные кодом. Словарь закрытый,
+    // и число временных рядов от числа людей не зависит.
+    "outcome",
   ]);
   for (const [name, value] of pairs) {
     assert.ok(allowedLabels.has(name!.trim()), `метка ${name} не входит в разрешённый словарь`);

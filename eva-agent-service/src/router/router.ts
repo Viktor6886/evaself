@@ -68,6 +68,12 @@ export interface RoutedResult {
   provider_id: string;
   provider_name: string;
   switches: number;
+  /**
+   * Техническая цепочка, которой ушёл запрос. Нужна проверке
+   * распознавания медиа: без неё нельзя отличить «картинка доехала до
+   * vision» от «картинка потерялась и запрос ушёл обычным чатом».
+   */
+  route: string;
 }
 
 export class NoProviderAvailable extends Error {
@@ -237,6 +243,7 @@ export class LlmRouter {
           provider_id: entry.provider.id,
           provider_name: entry.provider.name,
           switches,
+          route: route.code,
         };
       }
       lastError = outcome.error;

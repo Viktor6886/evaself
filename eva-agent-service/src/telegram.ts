@@ -61,6 +61,22 @@ interface TelegramResponse<T> {
   parameters?: { retry_after?: number };
 }
 
+/**
+ * Файл больше отведённого предела.
+ *
+ * Отдельный тип, потому что ответ человеку здесь другой: не «что-то
+ * пошло не так», а «файл слишком большой» с названным пределом.
+ */
+export class TelegramFileTooLarge extends Error {
+  constructor(readonly size: number, readonly limit: number) {
+    super(`Файл больше предела: ${size} > ${limit} байт`);
+    this.name = "TelegramFileTooLarge";
+  }
+}
+
+/** Потолок загрузки по умолчанию: столько же, сколько принимает база знаний. */
+const DEFAULT_DOWNLOAD_LIMIT_BYTES = 10 * 1024 * 1024;
+
 export class TelegramApiError extends Error {
   constructor(message: string, readonly retryAfterMs: number | null = null) {
     super(message);
@@ -570,14 +586,57 @@ export class TelegramClient implements OutboxTransport {
     await this.parseResponse(response, "sendVoice");
   }
 
-  async downloadFile(fileId: string): Promise<{ bytes: Uint8Array; path: string }> {
-    const file = await this.call<{ file_path?: string }>("getFile", { file_id: fileId });
+  /**
+   * Скачать файл, не веря его размеру на слово.
+   *
+   * Размер проверяется трижды: по ответу `getFile`, по заголовку длины и
+   * по фактически прочитанным байтам. Первые два можно подделать или
+   * просто не прислать, а третий — единственный, который действительно
+   * ограничивает память процесса: без него один большой файл в чате
+   * укладывает сервис.
+   */
+  async downloadFile(
+    fileId: string,
+    options: { maxBytes?: number } = {},
+  ): Promise<{ bytes: Uint8Array; path: string; contentType: string | null }> {
+    const limit = Math.max(1, options.maxBytes ?? DEFAULT_DOWNLOAD_LIMIT_BYTES);
+    const file = await this.call<{ file_path?: string; file_size?: number }>(
+      "getFile",
+      { file_id: fileId },
+    );
     if (!file.file_path) throw new Error("Telegram getFile не вернул file_path");
+    if ((file.file_size ?? 0) > limit) throw new TelegramFileTooLarge(file.file_size ?? 0, limit);
+
     const response = await fetch(`${this.baseUrl}/file/bot${this.token}/${file.file_path}`);
     if (!response.ok) throw new Error(`Telegram file download: HTTP ${response.status}`);
+    const declared = Number(response.headers.get("content-length") ?? 0);
+    if (Number.isFinite(declared) && declared > limit) throw new TelegramFileTooLarge(declared, limit);
+
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error("Telegram file download: пустой ответ");
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      size += value.byteLength;
+      if (size > limit) {
+        await reader.cancel().catch(() => undefined);
+        throw new TelegramFileTooLarge(size, limit);
+      }
+      chunks.push(value);
+    }
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
     return {
-      bytes: new Uint8Array(await response.arrayBuffer()),
+      bytes,
       path: file.file_path,
+      contentType: response.headers.get("content-type"),
     };
   }
 

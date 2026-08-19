@@ -20,13 +20,17 @@ import type {
 } from "../types.js";
 import { ProviderError } from "../types.js";
 import { classifyHttp, readSse } from "./shared.js";
+import { decodeDataUri } from "../content.js";
 
 const API_VERSION = "2023-06-01";
 
 type Block =
   | { type: "text"; text: string }
+  | { type: "image"; source: { type: "base64"; media_type: string; data: string } | { type: "url"; url: string } }
   | { type: "tool_use"; id: string; name: string; input: unknown }
-  | { type: "tool_result"; tool_use_id: string; content: string };
+  | { type: "tool_result"; tool_use_id: string; content: string }
+  /** Блоки размышления возвращаются модели как есть, роутер их не читает. */
+  | Record<string, unknown>;
 
 interface WireMessage {
   role: "user" | "assistant";
@@ -65,7 +69,29 @@ function toWireMessages(request: LlmRequest): WireMessage[] {
       continue;
     }
     const blocks: Block[] = [];
-    if (message.content.trim()) blocks.push({ type: "text", text: message.content });
+    // Блоки размышления идут первыми: Anthropic требует вернуть их
+    // раньше остального содержимого того же сообщения.
+    const carried = message.provider_state?.thinking_blocks;
+    if (Array.isArray(carried)) blocks.push(...(carried as Block[]));
+    if (message.parts) {
+      for (const part of message.parts) {
+        if (part.type === "text") {
+          if (part.text.trim()) blocks.push({ type: "text", text: part.text });
+        } else if (part.type === "image") {
+          blocks.push({
+            type: "image",
+            source: { type: "base64", media_type: part.media_type, data: part.data },
+          });
+        } else {
+          const decoded = decodeDataUri(part.url);
+          blocks.push(decoded
+            ? { type: "image", source: { type: "base64", ...decoded } }
+            : { type: "image", source: { type: "url", url: part.url } });
+        }
+      }
+    } else if (message.content.trim()) {
+      blocks.push({ type: "text", text: message.content });
+    }
     for (const call of message.tool_calls ?? []) {
       blocks.push({
         type: "tool_use",
@@ -200,7 +226,11 @@ export const anthropicAdapter: ProviderAdapter = {
 
     let text = "";
     const toolCalls: LlmToolCall[] = [];
+    // Блоки размышления не читаются и не показываются — они сохраняются,
+    // чтобы вернуть их модели вместе с результатом инструмента.
+    const thinking: unknown[] = [];
     for (const block of body.content ?? []) {
+      if (block.type === "thinking" || block.type === "redacted_thinking") thinking.push(block);
       if (block.type === "text" && typeof block.text === "string") text += block.text;
       if (block.type === "tool_use" && block.name) {
         toolCalls.push({
@@ -222,6 +252,7 @@ export const anthropicAdapter: ProviderAdapter = {
         tokens_out: body.usage?.output_tokens ?? 0,
       },
       model: body.model ?? provider.model,
+      ...(thinking.length > 0 ? { provider_state: { thinking_blocks: thinking } } : {}),
     };
   },
 

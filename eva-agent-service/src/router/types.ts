@@ -21,14 +21,42 @@ export interface LlmToolCall {
   arguments: string;
 }
 
+/**
+ * Часть содержимого сообщения.
+ *
+ * Текст остаётся текстом, изображение приходит либо адресом (в том числе
+ * `data:`), либо base64 с типом. Разбор — `./content.ts`.
+ */
+export type LlmContentPart =
+  | { type: "text"; text: string }
+  | { type: "image"; media_type: string; data: string }
+  | { type: "image_url"; url: string };
+
 export interface LlmMessage {
   role: "system" | "user" | "assistant" | "tool";
+  /**
+   * Текстовая выжимка сообщения. Её читают журнал, лимиты и
+   * классификация — всё, чему нужен текст, а не картинка.
+   */
   content: string;
+  /**
+   * Полное содержимое, когда в сообщении есть не только текст. Пока поля
+   * не было, изображение терялось на границе роутера: до модели доходил
+   * один текст.
+   */
+  parts?: LlmContentPart[];
   /** Только для role="assistant". */
   tool_calls?: LlmToolCall[];
   /** Только для role="tool" — id вызова, на который это ответ. */
   tool_call_id?: string;
   name?: string;
+  /**
+   * Непрозрачное состояние провайдера: `reasoning_details` и подобные
+   * поля, которые провайдер требует вернуть без изменений вместе с
+   * результатом инструмента. Роутер их не читает, не логирует и не
+   * подмешивает в видимое содержимое — только переносит (инвариант 19).
+   */
+  provider_state?: Record<string, unknown>;
 }
 
 export interface LlmTool {
@@ -83,6 +111,8 @@ export interface LlmResponse {
   finish_reason: "stop" | "length" | "tool_calls" | "content_filter" | "unknown";
   usage: LlmUsage;
   model: string;
+  /** Непрозрачное состояние провайдера: см. `LlmMessage.provider_state`. */
+  provider_state?: Record<string, unknown>;
 }
 
 /** Кусок потокового ответа. */
