@@ -23,6 +23,7 @@ export const TENANT_TABLES: Readonly<Record<string, readonly string[]>> = {
   admin_user_notes: ["user_id"],
   agent_conversations: ["user_id"],
   agent_job_results: ["user_id"],
+  agent_tool_calls: ["user_id"],
   agent_links: ["user_id"],
   budget_entries: ["user_id"],
   channel_message_links: ["user_id"],

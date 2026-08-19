@@ -662,6 +662,94 @@ export class Database {
     );
   }
 
+  /**
+   * Записать фактические вызовы нативных инструментов за ход.
+   *
+   * Только метаданные: имя инструмента, имя навыка (если SDK его
+   * назвал), идентификаторы вызова и run, исход. Ни аргументов, ни
+   * содержимого навыка, ни текста человека здесь нет и быть не может.
+   *
+   * Повторный разбор того же хода — например, при восстановлении —
+   * ничего не дублирует: строка ключуется идентификатором вызова.
+   */
+  async recordAgentToolCalls(
+    userId: number,
+    conversationId: string | null,
+    calls: ReadonlyArray<{
+      toolName: string;
+      skillName: string | null;
+      toolCallId: string;
+      runId: string | null;
+      succeeded: boolean | null;
+    }>,
+  ): Promise<void> {
+    if (calls.length === 0) return;
+    await this.withUserScope(
+      { userId, label: "db.recordAgentToolCalls", inherit: true },
+      async () => await this.require().query(
+        `INSERT INTO agent_tool_calls
+           (user_id, conversation_id, tool_name, skill_name, tool_call_id, run_id, succeeded)
+         SELECT $1, $2, entry.tool_name, entry.skill_name, entry.tool_call_id,
+                entry.run_id, entry.succeeded
+           FROM jsonb_to_recordset($3::jsonb) AS entry(
+                  tool_name text, skill_name text, tool_call_id text,
+                  run_id text, succeeded boolean)
+         ON CONFLICT (user_id, tool_call_id) DO UPDATE
+            SET succeeded = COALESCE(EXCLUDED.succeeded, agent_tool_calls.succeeded)`,
+        [
+          userId,
+          conversationId,
+          JSON.stringify(calls.map((call) => ({
+            tool_name: call.toolName,
+            skill_name: call.skillName,
+            tool_call_id: call.toolCallId,
+            run_id: call.runId,
+            succeeded: call.succeeded,
+          }))),
+        ],
+      ),
+    );
+  }
+
+  /**
+   * Сколько раз агент открывал навыки и когда это было в последний раз.
+   *
+   * Нужен самопроверке рантайма: «Ева говорит, что пользуется навыками»
+   * и «Ева открывала навык» — разные утверждения, и второе проверяется
+   * только здесь.
+   */
+  async skillCallStats(userId: number): Promise<{
+    total: number;
+    last: { skillName: string | null; at: string; succeeded: boolean | null } | null;
+  }> {
+    const { rows } = await this.withUserScope(
+      { userId, label: "db.skillCallStats", inherit: true },
+      async () => await this.require().query<{
+        total: string;
+        skill_name: string | null;
+        called_at: Date | null;
+        succeeded: boolean | null;
+      }>(
+        `SELECT count(*) OVER () AS total, skill_name, called_at, succeeded
+           FROM agent_tool_calls
+          WHERE user_id = $1 AND tool_name = $2
+          ORDER BY called_at DESC
+          LIMIT 1`,
+        [userId, "Skill"],
+      ),
+    );
+    const row = rows[0];
+    if (!row) return { total: 0, last: null };
+    return {
+      total: Number(row.total),
+      last: {
+        skillName: row.skill_name,
+        at: (row.called_at ?? new Date()).toISOString(),
+        succeeded: row.succeeded,
+      },
+    };
+  }
+
   async listModelMappings(): Promise<ModelMapping[]> {
     const { rows } = await this.withSystemScope(
       "db.listModelMappings",

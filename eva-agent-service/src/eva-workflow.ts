@@ -696,6 +696,22 @@ export class EvaWorkflow {
           // Только счётчики: ни аргументов инструментов, ни текста.
           detail: { tool_calls: answer.toolCalls.length },
         });
+        // Факт вызова инструмента — единственное, чем можно подтвердить,
+        // что Ева открывала навык. Её собственные слова об этом такой же
+        // текст, как любой другой. Запись метаданных не должна ронять
+        // ход: телеметрия важна, но не важнее ответа человеку.
+        try {
+          await this.db.recordAgentToolCalls(
+            user.id,
+            answer.conversationId,
+            answer.toolCallRecords,
+          );
+        } catch (error) {
+          this.logger.warn("Вызовы инструментов не записаны", {
+            userId: user.id,
+            code: error instanceof Error ? error.name : "unknown_error",
+          });
+        }
         // Отдельного идентификатора сессии Agent SDK не отдаёт: сессия
         // адресуется conversation, им и связываем.
         await this.linkTurn(turnHandle, {
