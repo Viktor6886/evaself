@@ -940,19 +940,13 @@ jobs:
         with:
           python-version: "3.12"
 
+      # apt на раннере — лотерея: тот же шаг то занимает восемь минут, то
+      # не заканчивается вовсе и снимает job по пределу, не начав
+      # проверок. Поэтому у apt здесь жёсткий срок, а за ним ffmpeg
+      # берётся из образа.
       - name: Install ffmpeg
         if: needs.changes.outputs.media == 'true'
-        run: |
-          # Сначала смотрим, есть ли ffmpeg уже: заход в apt на этом
-          # раннере стоит до пятнадцати минут ожидания чужой блокировки,
-          # и job снимался по времени, так и не начав проверок.
-          if command -v ffmpeg >/dev/null 2>&1; then
-            ffmpeg -version | head -1
-            exit 0
-          fi
-          "$GITHUB_WORKSPACE/scripts/ci/apt-wait.sh"
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg
+        run: ./scripts/ci/install-ffmpeg.sh
 
       - if: needs.changes.outputs.media == 'true'
         run: pip install --quiet -r requirements.txt pytest pytest-asyncio ruff
