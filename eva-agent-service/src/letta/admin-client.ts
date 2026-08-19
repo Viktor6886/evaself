@@ -25,6 +25,11 @@ import { type LettaCapabilityId, assertSupported } from "./capabilities.js";
 
 /** Проекция блока, которой пользуется синхронизация. Ничего лишнего. */
 export interface AdminMemoryBlock {
+  /**
+   * Идентификатор блока. Нужен для attach и detach: они адресуют блок по
+   * `id`, а не по метке — метка у блока не уникальна в установке.
+   */
+  id: string;
   label: string;
   value: string;
   description: string | null;
@@ -44,6 +49,31 @@ export interface LettaAdminPlane {
   readonly available: boolean;
   listMemoryBlocks(agentId: string): Promise<AdminMemoryBlock[]>;
   updateMemoryBlock(agentId: string, label: string, value: string): Promise<AdminMemoryBlock>;
+  /**
+   * Создать отдельный блок и присоединить его к агенту.
+   *
+   * Две официальные операции подряд, а не одна: `blocks.create` заводит
+   * блок в установке, `agents.blocks.attach` вешает его на агента.
+   * Разделять их наружу незачем — созданный, но не присоединённый блок
+   * не нужен никому.
+   */
+  createMemoryBlock(agentId: string, block: NewMemoryBlock): Promise<AdminMemoryBlock>;
+  /**
+   * Отсоединить блок от агента, не удаляя сам блок.
+   *
+   * Detach предпочтительнее delete: содержимое остаётся в установке, и
+   * возврат — это ещё один attach, а не восстановление из резервной
+   * копии.
+   */
+  detachMemoryBlock(agentId: string, blockId: string): Promise<void>;
+}
+
+/** Что нужно, чтобы завести недостающий блок. Значение обязательно. */
+export interface NewMemoryBlock {
+  label: string;
+  value: string;
+  description?: string | null;
+  limit?: number | null;
 }
 
 export interface LettaAdminOptions {
@@ -83,6 +113,14 @@ export class DisabledAdminPlane implements LettaAdminPlane {
   async updateMemoryBlock(): Promise<AdminMemoryBlock> {
     this.refuse("memory-block.update");
   }
+
+  async createMemoryBlock(): Promise<AdminMemoryBlock> {
+    this.refuse("memory-block.create");
+  }
+
+  async detachMemoryBlock(): Promise<void> {
+    this.refuse("memory-block.detach");
+  }
 }
 
 /** Минимальная форма официального клиента, которой мы пользуемся. */
@@ -94,7 +132,12 @@ interface OfficialClient {
         blockLabel: string,
         params: Record<string, unknown>,
       ): PromiseLike<unknown>;
+      attach(blockId: string, params: Record<string, unknown>): PromiseLike<unknown>;
+      detach(blockId: string, params: Record<string, unknown>): PromiseLike<unknown>;
     };
+  };
+  blocks: {
+    create(params: Record<string, unknown>): PromiseLike<unknown>;
   };
 }
 
@@ -170,10 +213,49 @@ export class LettaAdminClient implements LettaAdminPlane {
       throw toEvaError(error, `updating memory block ${label} of ${agentId}`);
     }
   }
+
+  async createMemoryBlock(agentId: string, block: NewMemoryBlock): Promise<AdminMemoryBlock> {
+    assertSupported("memory-block.create");
+    assertSupported("memory-block.attach");
+    try {
+      const client = await this.connect();
+      const created = normalizeBlock(await client.blocks.create({
+        label: block.label,
+        value: block.value,
+        ...(block.description ? { description: block.description } : {}),
+        ...(block.limit ? { limit: block.limit } : {}),
+      }));
+      if (!created.id) {
+        throw new Error("Letta не вернула идентификатор созданного блока");
+      }
+      await client.agents.blocks.attach(created.id, { agent_id: agentId });
+      // Метка и длина — да, значение — нет: в блоке лежит текст о человеке.
+      this.options.logger.info("memory block created and attached", {
+        agentId,
+        label: block.label,
+        valueLength: block.value.length,
+      });
+      return created;
+    } catch (error) {
+      throw toEvaError(error, `creating memory block ${block.label} for ${agentId}`);
+    }
+  }
+
+  async detachMemoryBlock(agentId: string, blockId: string): Promise<void> {
+    assertSupported("memory-block.detach");
+    try {
+      const client = await this.connect();
+      await client.agents.blocks.detach(blockId, { agent_id: agentId });
+      this.options.logger.info("memory block detached from the agent", { agentId, blockId });
+    } catch (error) {
+      throw toEvaError(error, `detaching memory block ${blockId} from ${agentId}`);
+    }
+  }
 }
 
 function normalizeBlock(row: unknown): AdminMemoryBlock {
   const block = (row ?? {}) as {
+    id?: unknown;
     label?: unknown;
     value?: unknown;
     description?: unknown;
@@ -181,6 +263,7 @@ function normalizeBlock(row: unknown): AdminMemoryBlock {
     read_only?: unknown;
   };
   return {
+    id: typeof block.id === "string" ? block.id : "",
     label: typeof block.label === "string" ? block.label : "",
     value: typeof block.value === "string" ? block.value : "",
     description: typeof block.description === "string" ? block.description : null,

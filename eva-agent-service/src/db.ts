@@ -631,15 +631,33 @@ export class Database {
   }
 
   /** Отметить, что агенту доставлена эта версия персоны. */
-  async recordPersonaVersion(agentId: string, userId: number, version: string): Promise<void> {
+  /**
+   * Отметить, что ядро памяти агента сведено с каноническим.
+   *
+   * В `meta` попадают только отметки: версия канонического набора и
+   * метки блоков прежней схемы, которые остались у агента. Значений
+   * блоков здесь нет и быть не может — они живут в Letta (инвариант 12).
+   *
+   * Имя ключа `persona_version` осталось прежним: по нему уже отмечены
+   * работающие установки, и переименование потребовало бы миграции ради
+   * названия.
+   */
+  async recordMemoryReconciled(
+    agentId: string,
+    userId: number,
+    state: { version: string; legacy: string[] },
+  ): Promise<void> {
     await this.withUserScope(
-      { userId, label: "db.recordPersonaVersion", inherit: true },
+      { userId, label: "db.recordMemoryReconciled", inherit: true },
       async () => await this.require().query(
         `UPDATE agent_links
-            SET meta = meta || jsonb_build_object('persona_version', $3::text),
+            SET meta = meta || jsonb_build_object(
+                  'persona_version', $3::text,
+                  'memory_legacy_blocks', $4::jsonb
+                ),
                 updated_at = now()
           WHERE agent_id = $1 AND user_id = $2`,
-        [agentId, userId, version],
+        [agentId, userId, state.version, JSON.stringify(state.legacy)],
       ),
     );
   }
