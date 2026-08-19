@@ -9,9 +9,9 @@
 BASELINE:      cc87c7a — блок состояния после PR #198 и #199
 BRANCH:        claude/evaself-remove-cognitive-middleware-9zeg9t
 STATUS:        в работе
-LAST_COMMIT:   3e3df20 — фотография доходит до зрячей модели, реакция — до своего сообщения
+LAST_COMMIT:   8d565cc — нативные опросы Telegram: вопрос виджетом, ответ обычным ходом
 BLOCKER:       —
-NEXT:          влить первые пять шагов, затем опросы Telegram и общая проверка
+NEXT:          общая проверка шестого шага и pull request на опросы
 ```
 
 Значения полей:
