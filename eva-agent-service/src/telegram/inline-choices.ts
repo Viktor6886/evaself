@@ -100,18 +100,28 @@ export interface KeyboardButton {
 }
 
 /**
- * Клавиатура из уже выданных токенов.
- *
- * По кнопке в строке: варианты бывают длинными, а Telegram сжимает их в
- * строке до нечитаемого.
+ * Мобильная раскладка: две короткие кнопки в строке, длинные — отдельно.
+ * Токены и callback architecture не меняются.
  */
 export function inlineKeyboard(
   buttons: Array<{ label: string; token: string }>,
 ): { inline_keyboard: KeyboardButton[][] } {
-  return {
-    inline_keyboard: buttons.map((button) => [{
-      text: button.label,
-      callback_data: button.token,
-    }]),
+  const rows: KeyboardButton[][] = [];
+  let shortRow: KeyboardButton[] = [];
+  const flush = (): void => {
+    if (shortRow.length > 0) rows.push(shortRow);
+    shortRow = [];
   };
+  for (const button of buttons) {
+    const rendered = { text: button.label, callback_data: button.token };
+    if (Array.from(button.label).length > 16) {
+      flush();
+      rows.push([rendered]);
+      continue;
+    }
+    shortRow.push(rendered);
+    if (shortRow.length === 2) flush();
+  }
+  flush();
+  return { inline_keyboard: rows };
 }

@@ -48,9 +48,15 @@ function liveClient() {
   let nextMessageId = 500;
   telegram.call = async (method, body) => {
     calls.push({ method, body });
-    return (method === "sendMessage" ? { message_id: nextMessageId++ } : true) as never;
+    return (method === "sendMessage" || method === "sendRichMessage"
+      ? { message_id: nextMessageId++ }
+      : true) as never;
   };
   return { telegram, calls };
+}
+
+function renderedCallText(call: { body: Record<string, unknown> }): string {
+  return String((call.body.rich_message as { markdown?: string } | undefined)?.markdown ?? call.body.text);
 }
 
 /**
@@ -79,14 +85,14 @@ test("первый срез уходит одним сообщением, дал
   await live.finish("Понимаю. Расскажи, что было дальше.");
 
   assert.deepEqual(calls.map((call) => call.method), [
-    "sendMessage",
+    "sendRichMessage",
     "editMessageText",
     "editMessageText",
     "editMessageText",
   ]);
   // Состояния, пришедшие пока шла правка, схлопнулись в последнее:
   // «Понимаю. Рас» наружу не уходило, очередь правок не копится.
-  assert.deepEqual(calls.map((call) => call.body.text), [
+  assert.deepEqual(calls.map(renderedCallText), [
     "Понимаю",
     "Понимаю.",
     "Понимаю. Расскажи",
@@ -97,7 +103,7 @@ test("первый срез уходит одним сообщением, дал
   assert.equal(typeof messageId, "number");
   for (const call of calls.slice(1)) assert.equal(call.body.message_id, messageId);
   assert.equal(live.messageId, messageId);
-  assert.equal(calls.filter((call) => call.method === "sendMessage").length, 1);
+  assert.equal(calls.filter((call) => call.method === "sendRichMessage").length, 1);
 });
 
 test("правки не чаще заданного промежутка", async () => {
@@ -111,7 +117,7 @@ test("правки не чаще заданного промежутка", async
 
   // Минута промежутка ещё не прошла: второе состояние ждёт, а не летит
   // следом. Иначе лимит чата выбирается на первых секундах ответа.
-  assert.deepEqual(calls.map((call) => call.body.text), ["Первое состояние"]);
+  assert.deepEqual(calls.map(renderedCallText), ["Первое состояние"]);
   live.stop();
 });
 
@@ -123,7 +129,7 @@ test("пауза после 429 не задерживает доставку о�
   let finalizing = false;
   telegram.call = async (method, body) => {
     calls.push({ method, body });
-    if (method === "sendMessage") return { message_id: 777 } as never;
+    if (method === "sendRichMessage") return { message_id: 777 } as never;
     // Промежуточная правка упирается в лимит чата; итоговую доставку
     // Telegram принимает.
     if (!finalizing) throw new TelegramApiError("Telegram editMessageText: Too Many Requests", 30_000);
@@ -183,7 +189,7 @@ test("отменённый ход не правит сообщение посл�
   live.push("недописанный хвост");
   await new Promise((resolve) => setTimeout(resolve, 20));
 
-  assert.deepEqual(calls.map((call) => call.body.text), ["начало ответа"]);
+  assert.deepEqual(calls.map(renderedCallText), ["начало ответа"]);
 });
 
 test("если показывать было нечего, ответ уходит обычной отправкой", async () => {
@@ -218,12 +224,15 @@ test("итоговый текст доводится durable-правкой, а 
   assert.equal(finished.delivered, true);
   // Промежуточный показ идёт мимо outbox: повторять его после
   // перезапуска незачем, он уже неактуален.
-  assert.deepEqual(calls.map((call) => call.method), ["sendMessage"]);
+  assert.deepEqual(calls.map((call) => call.method), ["sendRichMessage"]);
   // Итог — durable, и это правка того же сообщения.
   assert.equal(enqueued.length, 1);
   assert.equal(enqueued[0]?.method, "editMessageText");
   assert.equal(enqueued[0]?.payload.message_id, live.messageId);
-  assert.match(String(enqueued[0]?.payload.text), /Начало и конец ответа\./);
+  assert.match(
+    String((enqueued[0]?.payload.rich_message as { markdown?: string })?.markdown),
+    /Начало и конец ответа\./,
+  );
 });
 
 test("«текст не изменился» — это доставленный ответ, а не отказ", async () => {

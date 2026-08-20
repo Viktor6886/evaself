@@ -698,6 +698,14 @@ async function runTelegramTurn(
       order.push(synthesis.done ? "text-after-speech" : "text");
       return [{ message_id: 4_243 }];
     },
+    sendAssistantMessage: async (
+      _chatId: number, text: string, sendOptions: Record<string, unknown> = {},
+    ) => {
+      sent.push(text);
+      if (sendOptions.reply_markup !== undefined) markups.push(sendOptions.reply_markup);
+      order.push(synthesis.done ? "text-after-speech" : "text");
+      return [{ message_id: 4_243 }];
+    },
     sendVoice: async () => {
       if (options.voiceSendFails) throw new Error("Telegram отклонил голосовое сообщение");
       order.push("voice");
@@ -1505,11 +1513,12 @@ test("кнопки, о которых попросил инструмент, д�
   assert.deepEqual(toolResult, { ok: true, choices: 2, attached_to: "final_message" });
   assert.equal(harness.markups.length, 1, "клавиатура ушла ровно один раз");
   const keyboard = harness.markups[0] as { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> };
-  assert.deepEqual(keyboard.inline_keyboard.map((row) => row[0]!.text), ["Поговорить", "Позже"]);
-  for (const row of keyboard.inline_keyboard) {
+  const renderedButtons = keyboard.inline_keyboard.flat();
+  assert.deepEqual(renderedButtons.map((button) => button.text), ["Поговорить", "Позже"]);
+  for (const button of renderedButtons) {
     // В `callback_data` уходит непрозрачный токен, а не подпись и не команда.
-    assert.match(row[0]!.callback_data, /^[A-Za-z0-9_-]+$/);
-    assert.ok(!row[0]!.callback_data.includes("later"));
+    assert.match(button.callback_data, /^[A-Za-z0-9_-]+$/);
+    assert.ok(!button.callback_data.includes("later"));
   }
 
   // Токены сохранены под тем сообщением, к которому клавиатура
@@ -1523,7 +1532,7 @@ test("кнопки, о которых попросил инструмент, д�
   assert.deepEqual(issued.choices.map((choice) => choice.value), ["Поговорить", "later"]);
   assert.deepEqual(
     issued.choices.map((choice) => choice.token),
-    keyboard.inline_keyboard.map((row) => row[0]!.callback_data),
+    renderedButtons.map((button) => button.callback_data),
   );
 });
 
