@@ -29,9 +29,10 @@ Migration 004 добавляет реестр LLM и не удаляет ста�
 умолчание.
 
 Migrations `008`–`013` совместимо добавляют Telegram inbox/outbox, локаль,
-профиль, цели, граф и purpose conversations. Не откатывайте их ручным
-удалением таблиц: старый код игнорирует новые сущности, а `make rollback`
-возвращает только код и версии образов.
+профиль, цели и purpose conversations. Они не создают память агента:
+conversations, история, memory blocks и MemFS принадлежат Letta. Не
+откатывайте migrations ручным удалением таблиц: `make rollback` возвращает
+код и версии образов, а схема откатывается только проверенным down-файлом.
 
 Migration `028` добавляет managed LLM routing и `task_events`. Она оставляет
 режим `adaptive`, сохраняет существующие providers и chains, а новые цепочки

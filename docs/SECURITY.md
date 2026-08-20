@@ -1,168 +1,49 @@
 # Модель безопасности
 
+## Letta-native граница
+
+Только `eva-agent-service` взаимодействует с Letta App Server. Agent SDK обслуживает диалог; `letta-client` используется только административным control plane. Браузер, Telegram и admin services не получают capability token App Server.
+
+Нативные memory blocks, MemFS, conversations, skills и recall не зеркалируются в PostgreSQL. Продуктовые tools исполняются сервером Evaself с tenant scope, permissions, idempotency и durable approvals. Произвольное выполнение shell-кода и запись в host filesystem агенту недоступны.
+
 ## Сеть
 
-Наружу опубликованы только Caddy 80/443. Внутренние сети сегментированы,
-чтобы компрометация одного контейнера не давала доступ ко всему стеку:
+Наружу публикуются Caddy 80/443. PostgreSQL, Valkey, Letta App Server, Docker API и внутренние service APIs не публикуются. Контейнерные сети разделяют edge, data, agent и tools. Caddy Admin API слушает localhost.
 
-| Сеть | Кто в ней |
-|---|---|
-| `evaself-edge` | Caddy и всё, что он проксирует: webapp, letta-ui, admin-ui, nocodb, uptime-kuma |
-| `evaself-data` | PostgreSQL, Valkey, NocoDB, backup helper, updater, bootstrap |
-| `evaself-agent` | только `eva-agent-service` ↔ Letta App Server |
-| `evaself-tools` | SearXNG, media-service, crawl4ai |
+Недоверенный web/document content обрабатывается в tools-сегменте без доступа к базе, Valkey и App Server. Исходный контент считается данными, а не инструкциями.
 
-`eva-agent-service` — единственный участник всех четырёх сегментов; это та
-же роль хаба, которую ему отводит архитектура. `admin-api` и `health-worker`
-входят в edge/data/tools, потому что опрашивают каталог сервисов из
-`src/admin/service-catalog.ts`; App Server им не нужен и остаётся наедине со
-своим единственным клиентом. SearXNG и crawl4ai обрабатывают недоверенный
-внешний контент и не видят ни PostgreSQL, ни Valkey, ни App Server, ни admin
-API Caddy. CI проверяет это утверждением, а не на словах.
+## Пользовательская идентичность и tenancy
 
-Admin API Caddy слушает `localhost:2019`, а не `0.0.0.0`: иначе любой сосед
-по сети мог бы перенастроить прокси и прочитать `EVA_AGENT_API_KEY` прямо из
-работающей конфигурации.
+- Telegram webhook проверяет secret token.
+- Mini App проверяет HMAC `initData`, возраст `auth_date` и replay window.
+- Пользователь определяется только из подписанного payload; `user_id` из body/query не доверяется.
+- Все запросы к пользовательским таблицам проходят `TenantScope`/`GuardedPool` и CI-проверку.
+- Имя, username, email и телефон не объединяют пользователей.
 
-Административная поверхность `/v1/*` закрыта на всех публичных хостах общим
-snippet `deny_internal`. Это `handle`, а не голый `respond`: Caddy сортирует
-`respond` после `handle`, поэтому на хосте с `/api/*` верхнеуровневый запрет
-был бы мёртвым кодом. Порядок закреплён проверкой
-`scripts/ci/assert-caddy-order.py`.
+## Admin API
 
-`media-service` требует общий секрет `MEDIA_SERVICE_TOKEN` в заголовке
-`X-Media-Key`: он распоряжается токеном бота и платными ключами ASR/TTS.
-Открыт только `/health` — его дёргает Docker healthcheck.
+Admin panel использует server-side sessions, Argon2id, `HttpOnly Secure SameSite=Strict`, CSRF, RBAC и короткие scoped sudo grants. Каждая административная операция имеет объявленный доступ и audit event.
 
-Консоль Letta защищена Caddy Basic Auth. Браузер вызывает только
-`/api/*`; Caddy добавляет внутренний `X-API-Key`, поэтому ключ
-`eva-agent-service` не попадает в JavaScript.
+Чтение переписки требует owner/admin и отдельного sudo scope. Сообщения читаются через `eva-agent-service` из Letta; копии в PostgreSQL нет. Текст не попадает в audit log.
 
-Общесистемная панель `/admin/` использует отдельный `admin-api`:
-Argon2id, server-side сессии, cookies `HttpOnly Secure SameSite=Strict`,
-double-submit CSRF, RBAC и scoped sudo-гранты на 10 минут. Secret Store
-шифрует значения AES-256-GCM мастер-ключом из отдельного host-файла.
-Мастер-ключ не хранится в PostgreSQL и не входит в backup.
+## Секреты
 
-Capability token Letta App Server также не возвращается: раздел настроек SDK
-показывает только факт его наличия. WebUI не принимает исполняемые callback
-или JavaScript custom tools — такие расширения добавляются только в
-исходный код сервиса, чтобы административная форма не превращалась в
-удалённое выполнение кода.
+Секреты принимаются write-only и хранятся в environment или Secret Store. API возвращает только факт настройки. Master keys не входят в backup и должны храниться отдельно. Секреты, tokens и provider credentials не пишутся в logs, traces, browser responses или Valkey.
 
-Удаление agent требует точного повторного ввода `agent_id`. Операция
-необратима; перед массовыми изменениями выполните backup.
+## Privacy и telemetry
 
-## Telegram Mini App
-
-Браузерные маршруты `/public/*` не защищены `X-API-Key` — их вызывает
-браузер. Пользователь выводится из подписи запуска Telegram
-(`X-Telegram-Init-Data`), проверяемой в
-`src/public/telegram-webapp-auth.ts`; ни один идентификатор из тела запроса
-не используется. Единственное исключение — `/public/bot`: лендинг это
-обычная веб-страница без initData, а @handle бота и так публичен, поэтому
-маршрут вынесен за пределы hook'а с проверкой подписи.
-
-## Кризисные ситуации
-
-Кроме инструкций в персоне работает детерминированный слой
-(`src/crisis.ts`): сообщение проверяется на признаки риска до запуска хода,
-событие пишется в `crisis_events`, а при severity `high`/`critical` владелец
-получает уведомление в Telegram. Само сообщение не пересылается и не
-сохраняется: в событии остаются тяжесть, сработавшие маркеры, время, длина
-сообщения и владелец. Кризисная фраза — самое чувствительное, что человек
-пишет Еве, а для разбора она не нужна: маркеры говорят, что сработало, а
-слова принадлежат разговору с человеком, а не таблице. Ответ человеку не
-блокируется никогда.
-
-## Доступ к переписке из панели
-
-Раздел «Пользователи» показывает метаданные: состояние, тариф, квоты,
-счётчики активности. Кризисные события выводятся только уровнем и временем.
-Колонки `crisis_events.trigger_text` и `response_text` в панель не попадают и
-новыми записями больше не заполняются; строки, записанные прежними версиями,
-остаются до отдельного решения владельца.
-
-Сама переписка доступна отдельно и обставлена так, чтобы её нельзя было
-открыть мимоходом:
-
-- роль `owner` или `admin`, роли `operator` и `viewer` доступа не имеют;
-- sudo-scope `users:messages` — повторный ввод пароля, грант на 10 минут;
-- запрос уходит только по явной кнопке: при открытии карточки переписка не
-  загружается;
-- каждое открытие пишется в `audit_log` (кто, чью, сколько сообщений) —
-  сам текст в журнал не попадает;
-- тела ответов admin-api не логируются, поэтому переписка живёт только в
-  окне браузера.
-
-`admin-api` не обращается к Letta напрямую: сообщения он запрашивает у
-`eva-agent-service`, единственного компонента, которому разрешено говорить с
-App Server. Пока App Server недоступен, переписка не читается: копии её в
-PostgreSQL нет.
-
-## Блокировка пользователя
-
-Признаков блокировки в схеме два: `users.is_blocked` и `users.state`. Диалог
-останавливается при любом из них, а фоновые рассылки требуют одновременно
-`state = 'active'` и снятого `is_blocked`. Поэтому панель не редактирует эти
-поля по отдельности: блокировка и разблокировка выставляют оба одним
-`UPDATE`, а смена состояния на `paused`/`active` попутно снимает флаг.
-Выставить `state = 'blocked'` правкой полей нельзя — только действием
-«Заблокировать», под sudo-scope `users:write`.
-
-## Секреты LLM
-
-- API Key принимается мастером, CLI или WebUI только при создании/замене;
-- в PostgreSQL хранится AES-256-GCM ciphertext;
-- административный API возвращает только `api_key_configured: true`;
-- официальный Letta CLI получает ключ через скрытый PTY prompt, не через argv;
-- ключ шифрования `LLM_CONFIG_ENCRYPTION_KEY` генерируется один раз;
-- provider volume и backup являются секретными, даже если UI скрывает ключ.
-
-Потеря ключа шифрования делает записи реестра нечитаемыми. Не меняйте его
-при обновлении.
-
-## Host
-
-- UFW запрещает входящие соединения, кроме SSH и 80/443;
-- Fail2Ban защищает SSH;
-- Docker API не публикуется;
-- `.env` mode 600 и исключён из Git;
-- контейнерные логи ограничены ротацией.
+User text, model response, documents, tool arguments/results, memory и reasoning не экспортируются. Crisis events сохраняют severity и безопасные метаданные без исходной фразы.
 
 ## Backup
 
-Backup содержит `.env`, Telegram tokens, ключи шифрования, agents, memory,
-настройки runtime и Letta provider store. Архив всегда шифруется мастер-ключом
-(AES-256-CBC, PBKDF2), а сам мастер-ключ в него не входит.
+Backup шифруется до внешней передачи и содержит чувствительные volumes/configuration. Master key не включается в архив. Restore выполняется только по [BACKUP.md](BACKUP.md) и [MIGRATION.md](MIGRATION.md).
 
-Копия вне сервера настраивается `BACKUP_UPLOAD_COMMAND` — команда получает
-путь к уже зашифрованному архиву как `"$1"`. Ротация ограничена и сроком
-(`BACKUP_RETENTION_DAYS`), и количеством (`BACKUP_RETENTION_COUNT`): возраст
-сам по себе не удерживает размер каталога на маленьком диске. Архив mode 600 — минимальная защита,
-а не шифрование. Для внешнего хранения зашифруйте его отдельно.
-
-## Проверка перед commit
+## Проверки
 
 ```bash
 git status --short
 git grep -nE 'BEGIN (RSA|OPENSSH) PRIVATE KEY'
 git ls-files .env
+python3 scripts/ci/assert-tenant-scope.py
+python3 scripts/ci/assert-admin-route-access.py
 ```
-
-CI дополнительно проверяет отсутствие `.env`, приватных ключей и Telegram
-bot token в tracked files.
-
-Публичный Telegram webhook проверяет заголовок
-`X-Telegram-Bot-Api-Secret-Token`. Lava webhook использует отдельные HTTP
-Basic Auth credentials и до изменения подписки сверяет event type, product,
-сумму, валюту и уникальный payment ID.
-
-Telegram Mini App использует другой механизм: каждый запрос к `/public/*`
-передаёт исходный `initData` в `X-Telegram-Init-Data`. Backend проверяет HMAC
-по bot token, ограничивает возраст `auth_date` и извлекает Telegram ID только
-из подписанного payload. ID из body или query не считается доверенным.
-
-Деструктивные Agent SDK tools проверяют `confirm=DELETE` в backend.
-Служебные conversation purposes дополнительно ограничивают доступные tools:
-например, `research` может искать, но не изменять профиль и не удалять данные.
