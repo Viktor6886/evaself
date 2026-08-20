@@ -305,9 +305,12 @@ if [ "${EVA_UPDATER_INVOCATION:-0}" = "1" ]; then
 	mapfile -t UPDATE_SERVICES < <(
 		compose config --services | grep -Ev '^(admin-api|eva-updater)$'
 	)
-	compose up -d --remove-orphans "${UPDATE_SERVICES[@]}" >/dev/null
+	# library/ is bind-mounted and not part of the service image. Recreate even
+	# when only eva.md or letta_local_memfs.md changed, so the process rereads it.
+	compose up -d --remove-orphans --force-recreate "${UPDATE_SERVICES[@]}" >/dev/null
 else
-	compose up -d --remove-orphans >/dev/null
+	# See above: prompt/persona-only commits must restart the long-lived reader.
+	compose up -d --remove-orphans --force-recreate >/dev/null
 fi
 ok "containers recreated"
 

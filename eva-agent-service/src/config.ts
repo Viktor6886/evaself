@@ -590,3 +590,22 @@ export async function readPersona(config: Config): Promise<string> {
     return FALLBACK_PERSONA;
   }
 }
+
+/**
+ * Канонический system prompt хранится рядом с библиотекой персоны и
+ * монтируется в runtime read-only. В отличие от персоны здесь нет fallback:
+ * запуск со штатным prompt Letta вместо репозиторного был бы тихим откатом.
+ */
+export async function readSystemPrompt(
+  file = "/app/library/system/letta_local_memfs.md",
+): Promise<string> {
+  const { readFile } = await import("node:fs/promises");
+  let text: string;
+  try {
+    text = await readFile(file, "utf8");
+  } catch (error) {
+    throw new Error(`Не удалось прочитать канонический system prompt: ${file}`, { cause: error });
+  }
+  if (!text.trim()) throw new Error(`Канонический system prompt пуст: ${file}`);
+  return text;
+}

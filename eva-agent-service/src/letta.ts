@@ -418,7 +418,8 @@ export class LettaService {
 
   private readonly config: Config;
   private readonly logger: Logger;
-  private persona: string;
+  private readonly persona: string;
+  private readonly systemPrompt: string;
   private defaultModel: string;
   private runtime: RuntimeSdkSettings;
   private toolFactory: ((conversationId: string) => AnyAgentTool[]) | null = null;
@@ -432,10 +433,11 @@ export class LettaService {
    */
   private unsupportedReasoningEffort: ReasoningEffort | null = null;
 
-  constructor(config: Config, logger: Logger, persona: string) {
+  constructor(config: Config, logger: Logger, persona: string, systemPrompt: string) {
     this.config = config;
     this.logger = logger;
     this.persona = persona;
+    this.systemPrompt = systemPrompt;
     this.defaultModel = config.model;
     this.safeSessions = config.safeSessionManager;
     this.drainTimeoutMs = config.sessionDrainMs;
@@ -556,7 +558,6 @@ export class LettaService {
     const reconnect =
       settings.app_server_request_timeout_ms !== this.runtime.app_server_request_timeout_ms;
     this.runtime = settings;
-    this.persona = settings.default_persona || this.persona;
     // Администратор мог выбрать другой уровень reasoning; прежний вывод о
     // его поддержке к новому значению не относится.
     this.unsupportedReasoningEffort = null;
@@ -645,7 +646,7 @@ export class LettaService {
     displayName: string;
     human?: string;
   }): Promise<string> {
-    const persona = this.runtime.default_persona || this.persona;
+    const persona = this.persona;
     const human =
       input.human ??
       this.runtime.default_human_template
@@ -672,9 +673,9 @@ export class LettaService {
       memfs: this.runtime.memfs_enabled,
       dreaming: this.runtime.dreaming as DreamingOptions,
       memory: evaMemoryBlocks(persona, human),
-      // Системный промпт не передаётся: агент живёт под штатным harness
-      // Letta. Персона и границы — это memory blocks и Skills, а не
-      // подменённый system prompt.
+      // Официальный raw override Agent SDK. Текст читается из tracked-файла,
+      // а не дублируется в TypeScript и не зависит от внутреннего bundle Letta.
+      systemPrompt: this.systemPrompt,
       // `skillSources` тоже не передаётся: умолчание CLI — все источники
       // (bundled, global, agent, project), и сузить их значит выключить
       // часть механизма навыков.
@@ -701,6 +702,15 @@ export class LettaService {
       return agentId;
     } catch (error) {
       throw toEvaError(error, "creating an agent");
+    }
+  }
+
+  /** Обновить prompt существующего агента без пересоздания и смены agent_id. */
+  async updateAgentSystemPrompt(agentId: string, systemPrompt: string): Promise<void> {
+    try {
+      await this.client.agents.update(agentId, { system: systemPrompt });
+    } catch (error) {
+      throw toEvaError(error, `updating the system prompt of ${agentId}`);
     }
   }
 
@@ -1223,6 +1233,7 @@ export class LettaService {
   get promptVersion(): string {
     return createHash("sha256")
       .update(this.persona)
+      .update(this.systemPrompt)
       .update(" ")
       .digest("hex")
       .slice(0, 12);
@@ -1646,10 +1657,7 @@ export class LettaService {
     agent: unknown;
     conversation: unknown | null;
   }> {
-    const persona =
-      input.persona ??
-      input.memory?.find((block) => block.label === "persona")?.value ??
-      this.runtime.default_persona;
+    const persona = this.persona;
     const human =
       input.human ??
       input.memory?.find((block) => block.label === "human")?.value ??
@@ -1663,25 +1671,15 @@ export class LettaService {
       persona,
       human,
       memory: input.memory
-        ? ensureCoreMemoryBlocks(input.memory, persona, human)
+        ? ensureCoreMemoryBlocks(input.memory, persona, human).map((block) =>
+            block.label === "persona" ? { ...block, value: persona } : block,
+          )
         : evaMemoryBlocks(persona, human),
       tags: input.tags ?? this.runtime.default_tags,
       permissionMode: input.permission_mode ?? this.runtime.permissionMode,
       memfs: input.memfs_enabled ?? this.runtime.memfs_enabled,
       dreaming: (input.dreaming ?? this.runtime.dreaming) as DreamingOptions,
-      // Только штатный preset harness и добавка к нему: подменять
-      // системный промпт целиком административный путь тоже не вправе.
-      ...(input.system_prompt_preset
-        ? {
-            systemPrompt: {
-              type: "preset" as const,
-              preset: input.system_prompt_preset,
-              ...(input.system_prompt_append?.trim()
-                ? { append: input.system_prompt_append.trim() }
-                : {}),
-            },
-          }
-        : {}),
+      systemPrompt: this.systemPrompt,
       ...((input.base_tools ?? this.runtime.base_tools) !== null
         ? { baseTools: input.base_tools ?? this.runtime.base_tools! }
         : {}),

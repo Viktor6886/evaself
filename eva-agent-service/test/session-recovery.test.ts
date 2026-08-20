@@ -93,7 +93,12 @@ interface Harness {
 }
 
 function harness(config: Partial<typeof CONFIG> = {}, events: unknown[] = REPLY): Harness {
-  const service = new LettaService({ ...CONFIG, ...config } as never, logger as never, "персона");
+  const service = new LettaService(
+    { ...CONFIG, ...config } as never,
+    logger as never,
+    "персона",
+    "repository system prompt",
+  );
   const internal = service as unknown as {
     client: Record<string, unknown>;
     sessions: Map<string, { activeTurns: number; closing: boolean; shardId: string }>;

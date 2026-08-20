@@ -1,5 +1,5 @@
 /**
- * Каноническое ядро памяти — существующим агентам.
+ * Канонические system prompt и ядро памяти — существующим агентам.
  *
  * Новый агент получает четыре блока при создании (`evaMemoryBlocks`), а
  * созданный раньше остаётся с тем набором, который был на тот день. Так
@@ -90,18 +90,21 @@ export interface PersonaSyncResult {
 const EVASELF_OWNED: ReadonlySet<string> = new Set(["persona", "therapeutic_framework"]);
 
 /**
- * Версия канонического ядра — отпечаток того, что мы доставляем.
+ * Версия канонического runtime-контекста — отпечаток того, что мы доставляем.
  *
  * Считается по содержимому блоков, которые ведёт Evaself, а не по одной
  * персоне: правка терапевтической рамки — такое же расхождение с
  * агентом, как правка персоны, и пропускать её нельзя.
  */
-export function canonicalMemoryVersion(persona: string): string {
+export function canonicalMemoryVersion(persona: string, systemPrompt?: string): string {
   const owned = evaMemoryBlocks(persona)
     .filter((block) => EVASELF_OWNED.has(block.label))
     .map((block) => `${block.label}\n${block.value}`)
     .join("\n---\n");
-  return createHash("sha256").update(owned).digest("hex").slice(0, 12);
+  const canonical = systemPrompt === undefined
+    ? owned
+    : `${owned}\n---\nsystem_prompt\n${systemPrompt}`;
+  return createHash("sha256").update(canonical).digest("hex").slice(0, 12);
 }
 
 /** Блок прежней схемы: что о нём известно, без единого знака содержимого. */
@@ -127,6 +130,12 @@ export interface MemoryReconcileReport {
   legacy: LegacyBlockRecord[];
   /** Сколько канонических блоков на месте после прохода. */
   canonical: number;
+  /** Обновлён ли raw system prompt агента через официальный Agent SDK. */
+  systemPromptUpdated: boolean;
+}
+
+interface SystemPromptWriter {
+  updateAgentSystemPrompt(agentId: string, systemPrompt: string): Promise<void>;
 }
 
 /**
@@ -154,6 +163,7 @@ export class PersonaSync {
     private readonly db: Database,
     private readonly plane: LettaAdminPlane,
     private readonly logger: Logger,
+    private readonly prompts?: SystemPromptWriter,
   ) {}
 
   /**
@@ -163,8 +173,8 @@ export class PersonaSync {
    * том, что у одного не отвечает control plane. Текст персоны и
    * значения блоков в журнал не попадают — только счётчики.
    */
-  async sync(persona: string, limit = 500): Promise<PersonaSyncResult> {
-    const version = canonicalMemoryVersion(persona);
+  async sync(persona: string, systemPrompt?: string, limit = 500): Promise<PersonaSyncResult> {
+    const version = canonicalMemoryVersion(persona, systemPrompt);
     const result: PersonaSyncResult = {
       checked: 0, updated: 0, upToDate: 0, failed: 0, legacyAgents: 0, version,
     };
@@ -184,9 +194,10 @@ export class PersonaSync {
         continue;
       }
       try {
-        const report = await this.reconcileAgent(agent, persona);
-        if (report.created.length + report.updated.length > 0) result.updated += 1;
-        else result.upToDate += 1;
+        const report = await this.reconcileAgent(agent, persona, systemPrompt);
+        if (report.created.length + report.updated.length > 0 || report.systemPromptUpdated) {
+          result.updated += 1;
+        } else result.upToDate += 1;
         result.legacyAgents += report.legacy.length > 0 ? 1 : 0;
       } catch (error) {
         result.failed += 1;
@@ -223,6 +234,7 @@ export class PersonaSync {
   async reconcileAgent(
     input: { agentId: string; userId: number },
     persona: string,
+    systemPrompt?: string,
   ): Promise<MemoryReconcileReport> {
     const canonical = evaMemoryBlocks(persona);
     const canonicalLabels = new Set<string>(SYNCED_BLOCK_LABELS);
@@ -230,7 +242,14 @@ export class PersonaSync {
     const byLabel = new Map(present.map((block) => [block.label, block]));
     const report: MemoryReconcileReport = {
       agentId: input.agentId, created: [], updated: [], kept: [], legacy: [], canonical: 0,
+      systemPromptUpdated: false,
     };
+
+    if (systemPrompt !== undefined) {
+      if (!this.prompts) throw new Error("Не настроена синхронизация system prompt");
+      await this.prompts.updateAgentSystemPrompt(input.agentId, systemPrompt);
+      report.systemPromptUpdated = true;
+    }
 
     for (const block of canonical) {
       const existing = byLabel.get(block.label);
@@ -266,7 +285,7 @@ export class PersonaSync {
       }));
 
     await this.db.recordMemoryReconciled(input.agentId, input.userId, {
-      version: canonicalMemoryVersion(persona),
+      version: canonicalMemoryVersion(persona, systemPrompt),
       legacy: report.legacy.map((block) => block.label),
     });
 
@@ -326,8 +345,9 @@ export class PersonaSync {
     input: { agentId: string; userId: number; storedVersion: string | null },
     persona: string,
     options: { timeoutMs?: number } = {},
+    systemPrompt?: string,
   ): Promise<"updated" | "up_to_date" | "failed" | "disabled"> {
-    const version = canonicalMemoryVersion(persona);
+    const version = canonicalMemoryVersion(persona, systemPrompt);
     state.version = version;
     if (!this.plane.available) {
       state.enabled = false;
@@ -342,8 +362,10 @@ export class PersonaSync {
     });
     const work = (async (): Promise<"updated" | "up_to_date" | "failed"> => {
       try {
-        const report = await this.reconcileAgent(input, persona);
-        return report.created.length + report.updated.length > 0 ? "updated" : "up_to_date";
+        const report = await this.reconcileAgent(input, persona, systemPrompt);
+        return report.created.length + report.updated.length > 0 || report.systemPromptUpdated
+          ? "updated"
+          : "up_to_date";
       } catch (error) {
         this.logger.warn("Ядро памяти агента не сведено перед ходом", {
           agentId: input.agentId,
