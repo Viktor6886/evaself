@@ -315,3 +315,52 @@ test("оболочка и запись в файловую систему хос
     assert.equal(isHostExecutionTool(name), false, name);
   }
 });
+
+/**
+ * Напоминание не должно теряться из-за формы записи времени.
+ *
+ * «Напомни через 3 минуты» модель превращает в дату сама, и делает это
+ * по-разному: то с пробелом вместо `T`, то одним временем, то словами.
+ * Строгий разбор отвечал отказом, а человек читал его как «Ева не умеет
+ * ставить напоминания».
+ */
+test("«через N минут» считает сервер, а не модель", async () => {
+  const before = Date.now();
+  const { result, statements } = await call("save_task", {
+    title: "Выключить посудомойку",
+    remind_in_minutes: 3,
+  });
+  assert.equal((result.details as { ok: boolean }).ok, true);
+
+  const insert = statements.find(({ sql }) => /insert into tasks/i.test(sql));
+  assert.ok(insert, "задача должна быть записана");
+  // remind_at — шестое значение вставки, next_run_at — десятое.
+  const remindAt = Date.parse(String(insert!.values[5]));
+  assert.ok(
+    remindAt >= before + 3 * 60_000 && remindAt <= Date.now() + 3 * 60_000 + 1_000,
+    `напоминание встало не через три минуты: ${insert!.values[5]}`,
+  );
+  assert.equal(insert!.values[9], insert!.values[5], "срабатывание идёт по напоминанию");
+});
+
+test("местное время с пробелом вместо T принимается", async () => {
+  const { result } = await call("save_task", {
+    title: "Позвонить",
+    remind_at: "2027-03-14 09:30",
+  });
+  assert.equal((result.details as { ok: boolean }).ok, true);
+});
+
+test("неразбираемое время объясняет, что делать дальше", async () => {
+  const { result, statements } = await call("save_task", {
+    title: "Выключить посудомойку",
+    remind_at: "через 3 минуты",
+  });
+  const details = result.details as { ok: boolean; error?: string };
+  assert.equal(details.ok, false);
+  assert.equal(statements.length, 0, "негодное время задачи не создаёт");
+  // Отказ обязан называть и ожидаемый вид, и то, что для «через N минут»
+  // есть отдельное поле: иначе модель повторит ту же ошибку.
+  assert.match(String(details.error), /Ожидается местное время/);
+  assert.match(String(details.error), /через N минут/);
+});

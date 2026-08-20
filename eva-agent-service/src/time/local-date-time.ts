@@ -82,16 +82,58 @@ export function formatLocalDateTime(
  * Converts a local ISO date/time to UTC. An explicit offset/Z in the value is
  * authoritative; otherwise the persisted user timezone is applied with DST.
  */
+/**
+ * Привести к ISO то, что человек и модель пишут как дату.
+ *
+ * Строгий ISO — договор, а не привычка: модель регулярно присылает
+ * «2026-08-20 10:09» с пробелом вместо `T`, время без секунд или
+ * «10:09» одним временем без даты. Отказывать на этом — значит терять
+ * напоминание из-за формы записи, а не из-за смысла: человек попросил
+ * напомнить, и «инструмент вернул ошибку» он читает как «Ева не может».
+ *
+ * Разбор остаётся детерминированным: никакого угадывания смысла, только
+ * приведение известных написаний к одному виду.
+ */
+function normalizeIsoish(value: string, now: DateTime): string {
+  const trimmed = value.trim().replace(/\s+/gu, " ");
+  // Пробел вместо `T` — самая частая запись.
+  const separated = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/u.test(trimmed)
+    ? trimmed.replace(" ", "T")
+    : trimmed;
+  // Одно время без даты: ближайшее наступление сегодня или завтра.
+  const timeOnly = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/u.exec(separated);
+  if (timeOnly) {
+    const candidate = now.set({
+      hour: Number(timeOnly[1]),
+      minute: Number(timeOnly[2]),
+      second: Number(timeOnly[3] ?? 0),
+      millisecond: 0,
+    });
+    const target = candidate <= now ? candidate.plus({ days: 1 }) : candidate;
+    return target.toISO({ suppressMilliseconds: true })!;
+  }
+  return separated;
+}
+
 export function localDateTimeToUtc(value: string, timezone: string): string {
   if (!isValidIanaTimezone(timezone)) {
     throw new Error(`Некорректный часовой пояс IANA: ${timezone}`);
   }
-  const hasExplicitOffset = /(?:Z|[+-]\d{2}:\d{2})$/i.test(value.trim());
+  const now = DateTime.now().setZone(timezone);
+  const normalized = normalizeIsoish(value, now);
+  const hasExplicitOffset = /(?:Z|[+-]\d{2}:\d{2})$/i.test(normalized);
   const parsed = hasExplicitOffset
-    ? DateTime.fromISO(value, { setZone: true })
-    : DateTime.fromISO(value, { zone: timezone });
+    ? DateTime.fromISO(normalized, { setZone: true })
+    : DateTime.fromISO(normalized, { zone: timezone });
   if (!parsed.isValid) {
-    throw new Error(`Некорректные локальные дата и время: ${parsed.invalidExplanation ?? value}`);
+    // Ошибка называет и ожидаемый вид, и текущее местное время: без
+    // второго модель не может исправиться, потому что не знает, от чего
+    // считать.
+    throw new Error(
+      `Не разобрать дату «${value.slice(0, 40)}». Ожидается местное время вида `
+      + `2026-08-20T10:09 (сейчас у пользователя ${now.toISO({ suppressMilliseconds: true })}); `
+      + "для «через N минут» есть отдельное поле",
+    );
   }
   return parsed.toUTC().toISO({ suppressMilliseconds: true })!;
 }

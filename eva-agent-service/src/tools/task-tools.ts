@@ -102,9 +102,18 @@ export class TaskToolFactory {
         "snooze_task_reminder",
         "Перенести напоминание",
         "Переносит напоминание текущего пользователя на указанное время.",
-        objectSchema({ task_id: integer("ID задачи"), remind_at: text("Дата и время ISO 8601") }, ["task_id", "remind_at"]),
+        objectSchema({
+          task_id: integer("ID задачи"),
+          remind_at: text("Дата и время ISO 8601 в местном времени пользователя"),
+          remind_in_minutes: integer("Через сколько минут напомнить; время считает сервер"),
+        }, ["task_id"]),
         async (args, runtime) => {
-          const until = new Date(localDateTimeToUtc(requiredString(args, "remind_at", 100), runtime.timezone));
+          const inMinutes = bounded(
+            optionalInteger(args, "remind_in_minutes"), "remind_in_minutes", 1, 60 * 24 * 30,
+          );
+          const until = inMinutes !== null
+            ? new Date(Date.now() + inMinutes * 60_000)
+            : new Date(localDateTimeToUtc(requiredString(args, "remind_at", 100), runtime.timezone));
           const task = await this.events.snooze(runtime.userId, requireInteger(args, "task_id"), until);
           return task ? { ok: true, task } : { ok: false, error: "Задача не найдена" };
         },
@@ -136,7 +145,15 @@ export class TaskToolFactory {
       throw new Error("Часовой пояс задачи должен совпадать с подтверждённым timezone пользователя");
     }
     const dueAt = dueInput ? localDateTimeToUtc(dueInput, runtime.timezone) : null;
-    const remindAt = remindInput ? localDateTimeToUtc(remindInput, runtime.timezone) : null;
+    // «Через N минут» считает сервер. Модель называет интервал, который
+    // услышала, и не пересчитывает его в стенные часы: там она ошибается,
+    // а ошибка выглядит как «напоминание не установилось».
+    const remindIn = bounded(
+      optionalInteger(args, "remind_in_minutes"), "remind_in_minutes", 1, 60 * 24 * 30,
+    );
+    const remindAt = remindIn !== null
+      ? new Date(Date.now() + remindIn * 60_000).toISOString()
+      : remindInput ? localDateTimeToUtc(remindInput, runtime.timezone) : null;
     const repeat = args.repeat === true;
     if (repeat && !cron) throw new Error("Для повторяющейся задачи требуется cron");
     // Validated before the row is written: an expression that can never fire
@@ -314,7 +331,11 @@ function taskSchema(): JsonObject {
     title: text("Название"),
     description: text("Описание"),
     due_at: text("Дата и время ISO 8601"),
-    remind_at: text("Дата напоминания ISO 8601"),
+    remind_at: text("Дата напоминания ISO 8601 в местном времени пользователя"),
+    remind_in_minutes: integer(
+      "Через сколько минут напомнить. Для «через 3 минуты», «через полчаса»: "
+      + "время считает сервер, и высчитывать его самой не нужно",
+    ),
     cron: text("Cron из пяти полей"),
     repeat: boolean("Повторять"),
     priority: integer("Приоритет 1–5"),
