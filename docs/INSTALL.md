@@ -103,9 +103,9 @@ PostgreSQL, volumes, agents, conversations и LLM-конфигурации со�
 Повторный импорт `.env` пропускается, если реестр LLM уже заполнен.
 Полный лог установки находится в `/var/log/evaself-install.log`.
 
-Новые migrations `008`–`013` добавляют durable inbox/outbox, локаль и
-timezone, постепенный профиль, цели «ВЕКТОР — Действие», граф и служебные
-conversation purposes. Они не удаляют старые данные и применяются повторно.
+Migrations применяются установщиком идемпотентно. Они создают durable
+inbox/outbox, локаль и timezone, профиль, цели и служебные conversation
+purposes. Память, история и управление контекстом остаются в Letta.
 
 ## Диагностика
 

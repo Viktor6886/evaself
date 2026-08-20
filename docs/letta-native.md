@@ -159,14 +159,11 @@ Probe — единственное место во всём runtime, котор�
 `description`: роутера навыков, скоринга триггеров, sticky-состояния и
 индекса навыков в PostgreSQL нет.
 
-## Что удалено
+## Удалённый legacy-слой
 
-ToolGateway с манифестами, leases и circuit breaker; SkillRouter и индекс
-навыков; Memory Curator, эпизоды, выжимки разговора, графовая и temporal
-память, Hybrid Retrieval, Deep Recall, Memory Doctor; MemoryBlockSync и
-теневые значения блоков в PostgreSQL; собственная ротация conversation и
-compaction; субагенты и фоновые LLM-вызовы вокруг основного агента;
-контейнер skill-indexer; патч SDK. Схему чистят миграции `053` и `054`.
+Прежний параллельный когнитивный middleware удалён миграциями `053` и `054`.
+Он не восстанавливается: память, контекст, skills, recall и фоновая рефлексия
+обслуживаются штатными возможностями Letta.
 
 ## Живость и готовность
 

@@ -153,9 +153,8 @@ sudo-подтверждение, системные настройки, write-on
 операций; `admin-api` не имеет доступа к Docker socket.
 
 Управление agents, conversations, памятью и чатом остаётся только на
-`https://letta.<домен>/`. Контракты описаны в
-[каркасе безопасности](docs/ADMIN_PHASE1_CONTRACT.md) и
-[эксплуатационных фазах](docs/ADMIN_PHASES_2_6_CONTRACT.md).
+`https://letta.<домен>/`. Актуальные границы описаны в [модели безопасности](docs/SECURITY.md) и
+[статусе реализации](docs/IMPLEMENTATION_STATUS.md).
 
 ## Основные команды
 
