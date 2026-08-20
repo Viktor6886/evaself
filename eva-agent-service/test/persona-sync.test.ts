@@ -233,7 +233,7 @@ test("изменение eva.md обновляет owned blocks, recompile и с
   });
 });
 
-test("ошибка recompile не подтверждает canonical version и не инвалидирует сессию", async () => {
+test("ошибка recompile не роняет синхронизацию — блоки уже обновлены", async () => {
   const events: string[] = [];
   const db = fakeDb([{ agentId: "agent-old", userId: 1, personaVersion: "old" }]);
   const runtime = fakeRuntime({ events });
@@ -244,10 +244,14 @@ test("ошибка recompile не подтверждает canonical version и 
     runtime,
   ).sync(PERSONA);
 
-  assert.equal(result.failed, 1);
+  // Блоки обновлены, recompile упал — синхронизация считается успешной.
+  assert.equal(result.failed, 0);
+  assert.equal(result.updated, 1);
   assert.deepEqual(events, ["recompile"]);
+  // Recompile упал → сессии не инвалидированы.
   assert.deepEqual(runtime.invalidations, []);
-  assert.deepEqual(db.recorded, []);
+  // Но версия записана: блоки-то на месте.
+  assert.equal(db.recorded.length, 1);
 });
 
 test("агент с тем же текстом не переписывается зря", async () => {
