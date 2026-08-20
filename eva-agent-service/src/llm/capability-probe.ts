@@ -167,6 +167,28 @@ interface ChatResponse {
  */
 const REASONING_FIELDS = ["reasoning", "reasoning_details", "reasoning_content", "thinking"];
 
+/**
+ * Бюджет второй попытки, когда с коротким модель не сказала ничего.
+ *
+ * У reasoning-модели размышление тратит те же `max_tokens`, что и
+ * ответ: с тридцатью двумя токенами она успевает только подумать и
+ * возвращает пустое сообщение. Проба, читающая пустоту как «не умеет»,
+ * объявляет исправную модель несовместимой — так и вышло с моделью,
+ * которая на деле и инструменты вызывает, и картинки смотрит.
+ *
+ * Тысяча токенов — не «пусть подумает подольше», а граница: не ответив
+ * и в ней, модель действительно молчит, и это уже её свойство, а не
+ * теснота пробы.
+ */
+const REASONING_RETRY_BUDGET = 1_024;
+
+/** Ответ пуст: ни текста, ни вызова инструмента. */
+function saidNothing(body: ChatResponse): boolean {
+  const message = body.choices?.[0]?.message;
+  return textOf(message?.content).trim().length === 0
+    && (message?.tool_calls?.length ?? 0) === 0;
+}
+
 function textOf(content: unknown): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
@@ -271,25 +293,62 @@ export async function probeModelCapabilities(
     }
   };
 
+  /**
+   * Ответ модели с одной оговоркой: пустоту при коротком бюджете
+   * перепроверяем большим. Иначе размышление reasoning-модели
+   * засчитывается ей как неумение отвечать.
+   */
+  const answer = async (body: Record<string, unknown>): Promise<
+    | { ok: false; status: number; detail: string }
+    | { ok: true; body: ChatResponse; retried: boolean }
+  > => {
+    const response = await call(body);
+    if (!response.ok) {
+      return { ok: false, status: response.status, detail: await httpDetail(response) };
+    }
+    const parsed = await response.json() as ChatResponse;
+    const budget = typeof body.max_tokens === "number" ? body.max_tokens : 0;
+    if (!saidNothing(parsed) || budget >= REASONING_RETRY_BUDGET) {
+      return { ok: true, body: parsed, retried: false };
+    }
+    const second = await call({ ...body, max_tokens: REASONING_RETRY_BUDGET });
+    if (!second.ok) {
+      return { ok: false, status: second.status, detail: await httpDetail(second) };
+    }
+    return { ok: true, body: await second.json() as ChatResponse, retried: true };
+  };
+
+  const budgetNote = (retried: boolean): string => retried
+    ? ` (ответ пришёл только с бюджетом ${REASONING_RETRY_BUDGET} токенов: размышление тратит те же)`
+    : "";
+
   const reason = (error: unknown): string => error instanceof Error && error.name === "AbortError"
     ? `нет ответа за ${input.timeoutMs} мс`
     : error instanceof Error ? error.message : String(error);
 
   // --- 1. Обычный ответ ---------------------------------------------
   try {
-    const response = await call({
+    const outcome = await answer({
       messages: [{ role: "user", content: PROBE_PROMPT }],
       max_tokens: 32,
       stream: false,
     });
-    if (!response.ok) {
-      checks.push(failure("completion", await httpDetail(response), true));
+    if (!outcome.ok) {
+      checks.push(failure("completion", outcome.detail, true));
     } else {
-      const body = await response.json() as ChatResponse;
-      const text = textOf(body.choices?.[0]?.message?.content).trim();
+      const text = textOf(outcome.body.choices?.[0]?.message?.content).trim();
       checks.push(text
-        ? { name: "completion", status: "ok", detail: `ответ получен (${text.length} знаков)`, blocking: true }
-        : failure("completion", "модель вернула пустой ответ", true));
+        ? {
+            name: "completion",
+            status: "ok",
+            detail: `ответ получен (${text.length} знаков)${budgetNote(outcome.retried)}`,
+            blocking: true,
+          }
+        : failure(
+            "completion",
+            `модель вернула пустой ответ даже при бюджете ${REASONING_RETRY_BUDGET} токенов`,
+            true,
+          ));
     }
   } catch (error) {
     checks.push(failure("completion", reason(error), true));
@@ -417,22 +476,28 @@ export async function probeModelCapabilities(
         const attempt = async (assistant: unknown): Promise<{
           ok: boolean; status: number; detail: string;
         }> => {
-          const response = await call(loop(assistant));
-          if (!response.ok) {
-            return { ok: false, status: response.status, detail: await httpDetail(response) };
+          const outcome = await answer(loop(assistant));
+          if (!outcome.ok) {
+            return { ok: false, status: outcome.status, detail: outcome.detail };
           }
-          const body = await response.json() as ChatResponse;
-          const message = body.choices?.[0]?.message;
+          const message = outcome.body.choices?.[0]?.message;
           const text = textOf(message?.content).trim();
-          if (text) return { ok: true, status: response.status, detail: "результат принят, цикл завершён" };
+          if (text) {
+            return {
+              ok: true,
+              status: 200,
+              detail: `результат принят, цикл завершён${budgetNote(outcome.retried)}`,
+            };
+          }
           // Модель, которая после результата снова просит инструмент и
           // не отвечает, зациклит ход: цикл не завершён.
           return {
             ok: false,
-            status: response.status,
+            status: 200,
             detail: (message?.tool_calls?.length ?? 0) > 0
               ? "после результата модель снова требует инструмент и не отвечает"
-              : "после результата инструмента модель не ответила",
+              : "после результата инструмента модель не ответила даже при бюджете "
+                + `${REASONING_RETRY_BUDGET} токенов`,
           };
         };
 
@@ -606,7 +671,7 @@ export async function probeModelCapabilities(
     checks.push({ name: "vision", status: "skipped", detail: "изображения не заявлены", blocking: false });
   } else {
     try {
-      const response = await call({
+      const outcome = await answer({
         messages: [{
           role: "user",
           content: [
@@ -623,14 +688,23 @@ export async function probeModelCapabilities(
         max_tokens: 32,
         stream: false,
       });
-      if (!response.ok) {
-        checks.push({ name: "vision", status: "failed", detail: await httpDetail(response), blocking: false });
+      if (!outcome.ok) {
+        checks.push({ name: "vision", status: "failed", detail: outcome.detail, blocking: false });
       } else {
-        const body = await response.json() as ChatResponse;
-        const text = textOf(body.choices?.[0]?.message?.content).trim();
+        const text = textOf(outcome.body.choices?.[0]?.message?.content).trim();
         checks.push(text
-          ? { name: "vision", status: "ok", detail: "изображение принято", blocking: false }
-          : { name: "vision", status: "failed", detail: "пустой ответ на изображение", blocking: false });
+          ? {
+              name: "vision",
+              status: "ok",
+              detail: `изображение принято${budgetNote(outcome.retried)}`,
+              blocking: false,
+            }
+          : {
+              name: "vision",
+              status: "failed",
+              detail: `пустой ответ на изображение даже при бюджете ${REASONING_RETRY_BUDGET} токенов`,
+              blocking: false,
+            });
       }
     } catch (error) {
       checks.push({ name: "vision", status: "failed", detail: reason(error), blocking: false });

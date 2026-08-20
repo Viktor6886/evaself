@@ -430,3 +430,66 @@ test("совместимая модель активируется", async () =>
   assert.equal(active.is_active, true);
   assert.equal(isActivated(), true);
 });
+
+/**
+ * Размышление тратит тот же бюджет, что и ответ.
+ *
+ * С тридцатью двумя токенами reasoning-модель успевает только подумать
+ * и возвращает пустое сообщение. Проба, читающая пустоту как «не
+ * умеет», объявляла несовместимой исправную модель — ту, которая на
+ * деле и инструменты вызывает, и картинки смотрит.
+ */
+const EMPTY_BY_BUDGET = () => json({
+  choices: [{ message: { content: "", reasoning: "…" }, finish_reason: "length" }],
+});
+
+test("модели, которой не хватило бюджета на ответ, даётся бюджет побольше", async () => {
+  const short: string[] = [];
+  const { fetcher, seen } = provider({
+    toolLoop: (body) => {
+      const budget = Number(body.max_tokens);
+      if (budget < 1_024) {
+        short.push("короткий");
+        return EMPTY_BY_BUDGET();
+      }
+      return json(CHAT("Готово."));
+    },
+  });
+  const result = await probeModelCapabilities(INPUT, fetcher);
+
+  assert.equal(statusOf(result, "tool_result_loop"), "ok", result.message);
+  assert.equal(result.ok, true, result.message);
+  assert.equal(short.length > 0, true, "короткая попытка должна была случиться первой");
+  // Повтор идёт с тем же ходом, только с большим бюджетом: иначе
+  // проверялось бы что-то другое.
+  const retry = seen.find((body) => Number(body.max_tokens) >= 1_024);
+  assert.ok(retry, "повтор с увеличенным бюджетом не состоялся");
+  assert.ok(
+    (retry!.messages as Array<{ role: string }>).some((message) => message.role === "tool"),
+    "повторяется тот же цикл с результатом инструмента",
+  );
+  const detail = result.checks.find((entry) => entry.name === "tool_result_loop")?.detail ?? "";
+  assert.match(detail, /1024/, "оператору видно, что ответ пришёл только с большим бюджетом");
+});
+
+test("молчание и при большом бюджете остаётся отказом", async () => {
+  const { fetcher } = provider({ toolLoop: EMPTY_BY_BUDGET });
+  const result = await probeModelCapabilities(INPUT, fetcher);
+
+  assert.equal(statusOf(result, "tool_result_loop"), "failed");
+  assert.equal(result.ok, false);
+  // Отказ называет проверенную границу, а не просто «не ответила»:
+  // иначе непонятно, тесно модели или она действительно молчит.
+  assert.match(result.message, /1024/);
+});
+
+test("пустой ответ на изображение перепроверяется большим бюджетом", async () => {
+  const { fetcher } = provider({
+    vision: (body) => Number(body.max_tokens) < 1_024 ? EMPTY_BY_BUDGET() : json(CHAT("ready")),
+  });
+  const result = await probeModelCapabilities(
+    { ...INPUT, claims: { ...INPUT.claims, vision: true } },
+    fetcher,
+  );
+  assert.equal(statusOf(result, "vision"), "ok", result.message);
+});
