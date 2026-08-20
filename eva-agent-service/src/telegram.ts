@@ -1,6 +1,7 @@
 import {
   formatEvaReply,
   isValidTelegramHtml,
+  richMarkdownForTelegram,
   splitTelegramHtml,
   stripTags,
 } from "./telegram-format.js";
@@ -320,6 +321,26 @@ export class TelegramClient implements OutboxTransport {
     return results;
   }
 
+  /** Native Rich Message for assistant replies; regular HTML remains the fallback. */
+  async sendAssistantMessage(
+    chatId: number,
+    text: string,
+    options: Record<string, unknown> = {},
+    priority?: DeliveryPriority,
+  ): Promise<unknown[]> {
+    const markdown = richMarkdownForTelegram(text);
+    if (!markdown || Buffer.byteLength(markdown, "utf8") > 32_768) {
+      return await this.sendMessage(chatId, text, options, priority);
+    }
+    const result = await this.dispatch("sendRichMessage", chatId, {
+      chat_id: chatId,
+      rich_message: { markdown, skip_entity_detection: false },
+      ...options,
+      _fallback_text: text,
+    }, priority);
+    return [result];
+  }
+
   /**
    * Send text byte-for-byte without treating user-controlled content as Markdown.
    *
@@ -377,6 +398,7 @@ export class TelegramClient implements OutboxTransport {
     let pending: string | null = null;
     let shown = "";
     let messageId: number | null = null;
+    let richMode: boolean | null = null;
     let updates = 0;
     let lastSentAt = -Infinity;
     /** До этого момента Telegram просил не приходить: 429 с retry_after. */
@@ -409,21 +431,49 @@ export class TelegramClient implements OutboxTransport {
     const interrupt = (): void => wake?.();
 
     const write = async (text: string): Promise<void> => {
-      const payload = renderTelegramText(text);
+      const richPayload = renderTelegramRichText(text);
       if (messageId === null) {
-        const sent = await this.call<{ message_id?: number }>("sendMessage", {
-          chat_id: chatId,
-          ...payload,
-        });
+        let sent: { message_id?: number };
+        try {
+          sent = await this.call<{ message_id?: number }>("sendRichMessage", {
+            chat_id: chatId,
+            ...richPayload,
+          });
+          richMode = true;
+        } catch (error) {
+          if (!isRichMessageFallbackError(error)) throw error;
+          sent = await this.call<{ message_id?: number }>("sendMessage", {
+            chat_id: chatId,
+            ...renderTelegramText(text),
+          });
+          richMode = false;
+        }
         const id = Number(sent?.message_id);
         if (!Number.isSafeInteger(id)) throw new TelegramApiError("Telegram не вернул message_id");
         messageId = id;
         options.onSent?.(id);
+      } else if (richMode !== false) {
+        try {
+          await this.call("editMessageText", {
+            chat_id: chatId,
+            message_id: messageId,
+            ...richPayload,
+          });
+          richMode = true;
+        } catch (error) {
+          if (!isRichMessageFallbackError(error)) throw error;
+          await this.call("editMessageText", {
+            chat_id: chatId,
+            message_id: messageId,
+            ...renderTelegramText(text),
+          });
+          richMode = false;
+        }
       } else {
         await this.call("editMessageText", {
           chat_id: chatId,
           message_id: messageId,
-          ...payload,
+          ...renderTelegramText(text),
         });
       }
       shown = text;
@@ -500,7 +550,7 @@ export class TelegramClient implements OutboxTransport {
         await flushing?.catch(() => undefined);
         if (messageId === null) return { delivered: false, messageId: null, keyboardMessageId: null };
         const keyboardMessageId = await this.finalizeLiveMessage(
-          chatId, messageId, text, replyMarkup,
+          chatId, messageId, text, replyMarkup, richMode !== false,
         );
         return { delivered: true, messageId, keyboardMessageId };
       },
@@ -529,6 +579,7 @@ export class TelegramClient implements OutboxTransport {
     messageId: number,
     text: string,
     replyMarkup?: unknown,
+    useRich = true,
   ): Promise<number | null> {
     const chunks = splitTelegramText(text, LIVE_MESSAGE_LIMIT);
     const head = chunks[0] ?? text.trim();
@@ -541,14 +592,15 @@ export class TelegramClient implements OutboxTransport {
       await this.dispatch("editMessageText", chatId, {
         chat_id: chatId,
         message_id: messageId,
-        ...renderTelegramText(head),
+        ...(useRich ? renderTelegramRichText(head) : renderTelegramText(head)),
+        _fallback_text: head,
         ...(headKeyboard === undefined ? {} : { reply_markup: headKeyboard }),
       });
       if (headKeyboard !== undefined) keyboardMessageId = messageId;
     }
     for (const [index, rest] of tail.entries()) {
       const last = index === tail.length - 1;
-      const sent = await this.sendMessage(
+      const sent = await this.sendAssistantMessage(
         chatId, rest,
         last && replyMarkup !== undefined ? { reply_markup: replyMarkup } : {},
       );
@@ -636,28 +688,48 @@ export class TelegramClient implements OutboxTransport {
   }
 
   async deliver(method: string, payload: Record<string, unknown>): Promise<unknown> {
-    if (method === "editMessageText") {
+    const fallbackText = typeof payload._fallback_text === "string" ? payload._fallback_text : "";
+    const apiPayload = { ...payload };
+    delete apiPayload._fallback_text;
+
+    if (method === "sendRichMessage") {
       try {
-        return await this.call(method, payload);
+        return await this.call(method, apiPayload);
       } catch (error) {
-        // Итоговый текст уже показан целиком: править нечего. Для
-        // Telegram это ошибка, для доставки — доставленный ответ.
-        if (isTelegramNotModified(error)) return {};
-        if (!isTelegramMarkupError(error)) throw error;
-        // Разметку Telegram не принял: ответ уходит без оформления, но
-        // уходит. Текст в лог не пишется — он пользовательский.
-        this.logger.warn("Telegram отклонил разметку правки, отправляю без неё", {
+        if (!isRichMessageFallbackError(error)) throw error;
+        this.logger.warn("Telegram Rich Messages недоступны, использую regular formatter", {
           chatId: Number(payload.chat_id) || null,
           message: error instanceof Error ? error.message.slice(0, 200) : String(error),
         });
-        const plain = { ...payload };
-        delete plain.parse_mode;
-        plain.text = stripTags(String(payload.text ?? ""));
+        const { rich_message: _rich, ...common } = apiPayload;
+        return await this.call("sendMessage", {
+          ...common,
+          ...renderTelegramText(fallbackText),
+        });
+      }
+    }
+
+    if (method === "editMessageText") {
+      try {
+        return await this.call(method, apiPayload);
+      } catch (error) {
+        if (isTelegramNotModified(error)) return {};
+        const wasRich = "rich_message" in apiPayload;
+        if (!isTelegramMarkupError(error) && !(wasRich && isRichMessageFallbackError(error))) throw error;
+        this.logger.warn("Telegram отклонил разметку правки, использую regular formatter", {
+          chatId: Number(payload.chat_id) || null,
+          message: error instanceof Error ? error.message.slice(0, 200) : String(error),
+        });
+        const { rich_message: _rich, text: _text, parse_mode: _mode, link_preview_options: _preview, ...common } = apiPayload;
+        const source = fallbackText || stripTags(String(apiPayload.text ?? ""));
+        const regular = { ...common, ...renderTelegramText(source) };
         try {
-          return await this.call(method, plain);
+          return await this.call(method, regular);
         } catch (retryError) {
           if (isTelegramNotModified(retryError)) return {};
-          throw retryError;
+          if (!isTelegramMarkupError(retryError)) throw retryError;
+          const plain = { ...common, text: stripTags(formatEvaReply(source)) };
+          return await this.call(method, plain);
         }
       }
     }
@@ -673,7 +745,7 @@ export class TelegramClient implements OutboxTransport {
       );
       return {};
     }
-    return await this.call(method, payload);
+    return await this.call(method, apiPayload);
   }
 
   private async sendVoiceDirect(
@@ -786,7 +858,7 @@ export class TelegramClient implements OutboxTransport {
     if (!this.outbox) {
       const started = performance.now();
       try {
-        return await this.call(method, payload);
+        return await this.deliver(method, payload);
       } finally {
         this.addDeliveryMetrics({ telegramSendMs: elapsed(started) });
       }
@@ -879,6 +951,16 @@ export function renderTelegramText(text: string): Record<string, unknown> {
   };
 }
 
+/** Safe native Rich Message payload; sanitizer excludes media/maps/custom blocks. */
+export function renderTelegramRichText(text: string): Record<string, unknown> {
+  return {
+    rich_message: {
+      markdown: richMarkdownForTelegram(text),
+      skip_entity_detection: false,
+    },
+  };
+}
+
 function isTelegramNotModified(error: unknown): boolean {
   return error instanceof TelegramApiError
     && /message is not modified/iu.test(error.message);
@@ -887,6 +969,13 @@ function isTelegramNotModified(error: unknown): boolean {
 function isTelegramMarkupError(error: unknown): boolean {
   if (!(error instanceof TelegramApiError) || error.retryAfterMs !== null) return false;
   return /can't parse entities|can't find end|unsupported start tag|entity byte offset/iu.test(
+    error.message,
+  );
+}
+
+function isRichMessageFallbackError(error: unknown): boolean {
+  if (!(error instanceof TelegramApiError) || error.retryAfterMs !== null) return false;
+  return /method not found|unknown method|sendrichmessage|rich[_ ]message|can't parse|unsupported|bad request/iu.test(
     error.message,
   );
 }

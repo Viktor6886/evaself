@@ -67,11 +67,21 @@ test("токен непрозрачен, помещается в callback_data �
 
   const keyboard = inlineKeyboard([{ label: "Да", token: "tok-1" }, { label: "Нет", token: "tok-2" }]);
   assert.deepEqual(keyboard, {
-    inline_keyboard: [
-      [{ text: "Да", callback_data: "tok-1" }],
-      [{ text: "Нет", callback_data: "tok-2" }],
-    ],
+    inline_keyboard: [[
+      { text: "Да", callback_data: "tok-1" },
+      { text: "Нет", callback_data: "tok-2" },
+    ]],
   });
+
+  const readable = inlineKeyboard([
+    { label: "Отношения", token: "a" },
+    { label: "Работа", token: "b" },
+    { label: "Очень длинное направление разговора", token: "c" },
+  ]);
+  assert.deepEqual(readable.inline_keyboard, [
+    [{ text: "Отношения", callback_data: "a" }, { text: "Работа", callback_data: "b" }],
+    [{ text: "Очень длинное направление разговора", callback_data: "c" }],
+  ]);
 });
 
 test("инструмент оставляет намерение в ходе и ничего не отправляет сам", async () => {

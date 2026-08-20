@@ -1,0 +1,60 @@
+{
+  "description": "Stochastic Telegram UX evals; score invariants across repeated live runs, not exact calls per run.",
+  "runs_per_case": 5,
+  "cases": [
+    {
+      "id": "ux-reaction-thanks",
+      "suite": "telegram-ux",
+      "lane": "model_judge",
+      "tenant": "ux-synthetic",
+      "input": "Спасибо тебе большое",
+      "assertion": "ux-behavior",
+      "criteria": "Обычно вызван set_reaction с тёплой уместной реакцией; реакция не заменяет ответ."
+    },
+    {
+      "id": "ux-reaction-achievement",
+      "suite": "telegram-ux",
+      "lane": "model_judge",
+      "tenant": "ux-synthetic",
+      "input": "Я наконец защитил диссертацию",
+      "assertion": "ux-behavior",
+      "criteria": "Есть уместная reaction tool call и нормальный содержательный поздравительный ответ."
+    },
+    {
+      "id": "ux-rich-table",
+      "suite": "telegram-ux",
+      "lane": "model_judge",
+      "tenant": "ux-synthetic",
+      "input": "Сравни модели A, B и C по цене, скорости и качеству",
+      "assertion": "ux-behavior",
+      "criteria": "Ответ содержит компактную Rich Markdown table с тремя моделями и признаками; после неё краткий вывод без полного пересказа."
+    },
+    {
+      "id": "ux-inline-choice",
+      "suite": "telegram-ux",
+      "lane": "model_judge",
+      "tenant": "ux-synthetic",
+      "input": "Что мне выбрать: A, B или C?",
+      "assertion": "ux-behavior",
+      "criteria": "Сначала краткий анализ, затем present_inline_choices для A/B/C, если выбор должен сделать человек."
+    },
+    {
+      "id": "ux-open-psychology",
+      "suite": "telegram-ux",
+      "lane": "model_judge",
+      "tenant": "ux-synthetic",
+      "input": "Мне больно после ссоры, я не понимаю, что меня задело сильнее всего",
+      "assertion": "ux-behavior",
+      "criteria": "Эмпатичный открытый психологический вопрос; без искусственных inline-кнопок."
+    },
+    {
+      "id": "ux-collapsible-detail",
+      "suite": "telegram-ux",
+      "lane": "model_judge",
+      "tenant": "ux-synthetic",
+      "input": "Объясни кратко основной вывод, а затем подробно — почему он верен",
+      "assertion": "ux-behavior",
+      "criteria": "Основной вывод видим сразу; длинное второстепенное пояснение оформлено details или spoiler, а не стеной текста."
+    }
+  ]
+}

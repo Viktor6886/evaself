@@ -354,6 +354,115 @@ export function stripTags(html: string): string {
     .replace(/&amp;/g, "&");
 }
 
+/**
+ * Безопасное подмножество Rich Markdown для ответов Евы.
+ *
+ * Telegram Rich Markdown допускает произвольный HTML, media, карты и
+ * специальные блоки. Модель не должна получать через оформление право
+ * выполнять такие действия, поэтому наружу проходят только текстовые
+ * конструкции и details/summary/underline.
+ */
+export function richMarkdownForTelegram(markdown: string): string {
+  const source = markdown.replace(/\r\n/g, "\n").trim();
+  if (!source) return "";
+
+  const expandedLines: string[] = [];
+  const sourceLines = source.split("\n");
+  for (let index = 0; index < sourceLines.length; index += 1) {
+    const first = /^>>\s?(.*)$/.exec(sourceLines[index]!);
+    if (!first) {
+      expandedLines.push(sourceLines[index]!);
+      continue;
+    }
+    const body = [first[1]!];
+    while (index + 1 < sourceLines.length) {
+      const next = /^>>\s?(.*)$/.exec(sourceLines[index + 1]!);
+      if (!next) break;
+      body.push(next[1]!);
+      index += 1;
+    }
+    expandedLines.push("<details><summary>Подробнее</summary>", ...body, "</details>");
+  }
+  const expandedSource = expandedLines.join("\n");
+
+  // Code is content, not markup. Protect it before removing media/map HTML,
+  // otherwise an example such as `<img>` would disappear from a code block.
+  const codeSegments: string[] = [];
+  const protectCode = (segment: string): string => {
+    codeSegments.push(segment);
+    return `\u{E200}${codeSegments.length - 1}\u{E201}`;
+  };
+  const protectedSource = expandedSource
+    .replace(/```[\s\S]*?```/g, protectCode)
+    .replace(/`[^`\n]+`/g, protectCode);
+
+  const allowedTags: string[] = [];
+  const keep = (tag: string): string => {
+    allowedTags.push(tag);
+    return `\u{E100}${allowedTags.length - 1}\u{E101}`;
+  };
+
+  let safe = protectedSource
+    .replace(/!\[[^\]\n]*\]\([^\n)]*\)/g, "")
+    .replace(/<(tg-collage|tg-slideshow|figure|video|audio|aside)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, "")
+    .replace(/<(?:tg-map|img|video|audio|tg-thinking)\b[^>]*\/?\s*>/gi, "")
+    .replace(/<\/?(?:details|summary|u|ins)\b[^>]*>/gi, (tag) => keep(tag.replace(/\s+open(?=[\s>])/i, "")))
+    .replace(/<[^>\n]+>/g, "")
+    .replace(/\u{E100}(\d+)\u{E101}/gu, (_match, index: string) => allowedTags[Number(index)] ?? "")
+    .replace(/\u{E200}(\d+)\u{E201}/gu, (_match, index: string) => codeSegments[Number(index)] ?? "")
+    .replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (match, label: string, url: string) =>
+      /^https?:\/\//i.test(url) ? match : label)
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  const opens = (safe.match(/<details>/gi) ?? []).length;
+  const closes = (safe.match(/<\/details>/gi) ?? []).length;
+  const summaries = (safe.match(/<summary>/gi) ?? []).length;
+  const summaryCloses = (safe.match(/<\/summary>/gi) ?? []).length;
+  if (opens !== closes || summaries !== summaryCloses || summaries > opens) {
+    safe = safe.replace(/<\/?(?:details|summary)>/gi, "");
+  }
+  return safe;
+}
+
+/** Смысловой текст ответа для TTS, без Rich Markdown и таблиц. */
+export function speechTextFromReply(reply: string): string {
+  const lines = richMarkdownForTelegram(reply).split("\n");
+  const spoken: string[] = [];
+  let inFence = false;
+  for (const raw of lines) {
+    if (/^\s*```/.test(raw)) {
+      inFence = !inFence;
+      continue;
+    }
+    let line = raw.trim();
+    if (!line || inFence || /^\|?\s*:?-{3,}/.test(line)) continue;
+    if (/^\|(?!\|).*\|$/.test(line) && (line.match(/\|/g) ?? []).length >= 3) {
+      const cells = line.slice(1, -1).split("|")
+        .map((cell) => cell.trim().replace(/(?:\*\*|__|~~|`)/g, ""))
+        .filter(Boolean);
+      if (cells.length > 0) {
+        const sentence = cells.join(". ");
+        spoken.push(/[.!?]$/.test(sentence) ? sentence : `${sentence}.`);
+      }
+      continue;
+    }
+    line = line
+      .replace(/<\/?(?:details|summary|u|ins)>/gi, "")
+      .replace(/^#{1,6}\s+/, "")
+      .replace(/^>{1,2}\s?/, "")
+      .replace(/^[-*+]\s+/, "")
+      .replace(/^\d+[.)]\s+/, "")
+      .replace(/\|\|([\s\S]*?)\|\|/g, "$1")
+      .replace(/\[([^\]]+)]\((?:https?:\/\/)[^)]+\)/g, "$1")
+      .replace(/(?:\*\*|__|~~|`)/g, "")
+      .replace(/(^|\s)[*_]([^*_]+)[*_](?=\s|[.,!?;:]|$)/g, "$1$2")
+      .trim();
+    if (line) spoken.push(line);
+  }
+  return spoken.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 // =====================================================================
 // Сборка сообщения из структуры
 // =====================================================================

@@ -40,6 +40,7 @@ import {
   telegramMessageIdOf,
   TelegramFileTooLarge,
 } from "./telegram.js";
+import { speechTextFromReply } from "./telegram-format.js";
 import {
   AttachmentError,
   TelegramAttachmentReader,
@@ -937,7 +938,7 @@ export class EvaWorkflow {
         // секунд, и весь выигрыш от потока пропадал на последнем шаге.
         const ttsStarted = performance.now();
         const speech = wantsVoice
-          ? this.synthesizeVoice(reply)
+          ? this.synthesizeVoice(speechTextFromReply(reply))
             .then((audio) => {
               metrics.tts_ms = elapsed(ttsStarted);
               return audio;
@@ -982,7 +983,7 @@ export class EvaWorkflow {
             : { delivered: false, messageId: null, keyboardMessageId: null };
           let keyboardMessageId = finished.keyboardMessageId;
           if (!finished.delivered) {
-            const sent = await this.telegram.sendMessage(
+            const sent = await this.telegram.sendAssistantMessage(
               update.chatId, reply, markup === undefined ? {} : { reply_markup: markup },
             );
             keyboardMessageId = markup === undefined
@@ -1031,7 +1032,7 @@ export class EvaWorkflow {
           if (!voiced && !wantsText) {
             // Голосовой режим без голоса — это молчание. Текст здесь не
             // дублирует отправленное, а заменяет несостоявшийся звук.
-            await this.telegram.sendMessage(update.chatId, reply);
+            await this.telegram.sendAssistantMessage(update.chatId, reply);
           }
           deliveryMs += elapsed(voiceStarted);
         }
