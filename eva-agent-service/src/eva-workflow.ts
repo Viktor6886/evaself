@@ -1010,10 +1010,25 @@ export class EvaWorkflow {
             ? await speech
             : (await withDeadline(speech, VOICE_SYNC_BUDGET_MS)) ?? await speech;
           const voiceStarted = performance.now();
-          if (audio) {
-            await this.telegram.sendVoice(update.chatId, audio);
-            await this.touchVoiceUsage(context.userId);
-          } else if (!wantsText) {
+          // Отказ голоса не отменяет ответ. Ход к этому времени уже
+          // сделан, а в режиме «оба» текст и вовсе отправлен: падение
+          // здесь означало бы повтор всего хода — второй вызов модели,
+          // второй текст в чате и «не получилось обработать сообщение»
+          // человеку, который ответ уже видит.
+          let voiced = false;
+          if (audio && audio.length > 0) {
+            try {
+              await this.telegram.sendVoice(update.chatId, audio);
+              voiced = true;
+              await this.touchVoiceUsage(context.userId);
+            } catch (error) {
+              this.logger.warn("Голосовое сообщение не доставлено", {
+                updateId: update.updateId,
+                code: error instanceof Error ? error.name : "unknown_error",
+              });
+            }
+          }
+          if (!voiced && !wantsText) {
             // Голосовой режим без голоса — это молчание. Текст здесь не
             // дублирует отправленное, а заменяет несостоявшийся звук.
             await this.telegram.sendMessage(update.chatId, reply);
@@ -1022,20 +1037,36 @@ export class EvaWorkflow {
         }
         metrics.telegram_delivery_ms = deliveryMs;
 
-        await this.linkTurn(turnHandle, {
-          outboxId: this.telegram.getDeliveryOutboxId(),
-        });
-        await this.moveTurn(turnHandle, "outbox_committed");
-        await this.moveTurn(turnHandle, "delivering");
-        await this.moveTurn(turnHandle, "delivered");
+        // Ответ доставлен. Дальше идёт только учёт — запись состояния
+        // хода и списание квоты, — и его отказ не должен возвращать
+        // апдейт в очередь: повтор означает второй вызов модели и второй
+        // ответ в чате человеку, который первый уже получил. Не
+        // списанная квота хуже двойного ответа ровно настолько,
+        // насколько её потом дороже сверить.
+        let usageCharged = false;
+        try {
+          await this.linkTurn(turnHandle, {
+            outboxId: this.telegram.getDeliveryOutboxId(),
+          });
+          await this.moveTurn(turnHandle, "outbox_committed");
+          await this.moveTurn(turnHandle, "delivering");
+          await this.moveTurn(turnHandle, "delivered");
 
-        await this.db.incrementUsage(update.telegramId, "messages");
-        await this.linkTurn(turnHandle, {
-          quotaMetric: "messages",
-          quotaCharged: true,
-        });
-        await this.moveTurn(turnHandle, "completed");
-        return { status: "completed", usageCharged: true };
+          await this.db.incrementUsage(update.telegramId, "messages");
+          usageCharged = true;
+          await this.linkTurn(turnHandle, {
+            quotaMetric: "messages",
+            quotaCharged: true,
+          });
+          await this.moveTurn(turnHandle, "completed");
+        } catch (error) {
+          this.logger.warn("Учёт хода после доставки не завершён", {
+            updateId: update.updateId,
+            usage_charged: usageCharged,
+            code: error instanceof Error ? error.name : "unknown_error",
+          });
+        }
+        return { status: "completed", usageCharged };
           },
         );
         },
