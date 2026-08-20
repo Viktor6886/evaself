@@ -152,7 +152,7 @@ interface OfficialClient {
   conversations: {
     list(
       params: Record<string, unknown>,
-    ): AsyncIterable<unknown> & PromiseLike<unknown>;
+    ): PromiseLike<unknown>;
     recompile(
       conversationId: string,
       params: Record<string, unknown>,
@@ -275,14 +275,15 @@ export class LettaAdminClient implements LettaAdminPlane {
     assertSupported("conversation.recompile");
     try {
       const client = await this.connect();
-      const conversationIds: string[] = [];
-      // Официальная страница клиента — AsyncIterable: так обрабатываются
-      // все страницы, а не только первый лимит выдачи.
-      for await (const row of client.conversations.list({
+      // conversations.list() возвращает APIPromise<Array<Conversation>>,
+      // а не AsyncIterable. После await — готовый массив.
+      const rows = (await client.conversations.list({
         agent_id: agentId,
         archive_status: "all",
-      })) {
-        const id = (row as { id?: unknown } | null)?.id;
+      })) as Array<{ id?: unknown } | null>;
+      const conversationIds: string[] = [];
+      for (const row of rows) {
+        const id = row?.id;
         if (typeof id === "string" && id.length > 0) conversationIds.push(id);
       }
       for (const conversationId of conversationIds) {

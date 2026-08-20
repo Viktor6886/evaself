@@ -297,9 +297,20 @@ export class PersonaSync {
     // контекст explicit conversation от этого не обновляется. Версию можно
     // подтвердить только после официального recompile и удаления старой
     // runtime-сессии из пула.
-    const conversationIds = await this.plane.recompileAgentConversations(input.agentId);
-    report.recompiledConversations = conversationIds.length;
-    this.runtime.invalidateAgentSessions(input.agentId, conversationIds);
+    //
+    // Recompile — best-effort: блоки уже записаны, а медленный recompile
+    // нескольких conversations не должен ронять весь ход пользователя.
+    // Устаревший compiled context обновится при следующем цикле синхронизации.
+    try {
+      const conversationIds = await this.plane.recompileAgentConversations(input.agentId);
+      report.recompiledConversations = conversationIds.length;
+      this.runtime.invalidateAgentSessions(input.agentId, conversationIds);
+    } catch (error) {
+      this.logger.warn("Recompile conversations не выполнен; блоки уже обновлены", {
+        agentId: input.agentId,
+        code: error instanceof Error ? error.name : "unknown_error",
+      });
+    }
 
     await this.db.recordMemoryReconciled(input.agentId, input.userId, {
       version: canonicalMemoryVersion(persona, systemPrompt),

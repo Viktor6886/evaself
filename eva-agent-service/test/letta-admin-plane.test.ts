@@ -259,12 +259,11 @@ test("explicit conversations пересобираются официальным
     { enabled: true, baseUrl: "http://letta:8283", token: null, logger },
     async () => ({
       conversations: {
+        // Реальный @letta-ai/letta-client@1.12.1 возвращает
+        // APIPromise<Array<Conversation>>, а не AsyncIterable.
         list: (params: Record<string, unknown>) => {
           listed.push(params);
-          return (async function* () {
-            yield { id: "conv-1" };
-            yield { id: "conv-2" };
-          })();
+          return Promise.resolve([{ id: "conv-1" }, { id: "conv-2" }]);
         },
         recompile: async (conversationId: string, params: Record<string, unknown>) => {
           calls.push({ conversationId, params });
@@ -282,4 +281,21 @@ test("explicit conversations пересобираются официальным
     { conversationId: "conv-1", params: { agent_id: "agent-1" } },
     { conversationId: "conv-2", params: { agent_id: "agent-1" } },
   ]);
+});
+
+test("conversations.list() возвращает Promise/массив, а не AsyncIterable — regression", async () => {
+  // Проверяем, что реальный SDK-контракт совместим с нашим кодом:
+  // conversations.list() — это APIPromise<Array<Conversation>>.
+  // Если кто-то снова объявит его как AsyncIterable, этот тест поймает.
+  const client = new LettaAdminClient(
+    { enabled: true, baseUrl: "http://letta:8283", token: null, logger },
+    async () => ({
+      conversations: {
+        list: () => Promise.resolve([{ id: "c1" }]),
+        recompile: async () => ({}),
+      },
+    }) as never,
+  );
+  const ids = await client.recompileAgentConversations("agent-x");
+  assert.deepEqual(ids, ["c1"]);
 });
