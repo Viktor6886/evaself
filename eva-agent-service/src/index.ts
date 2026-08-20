@@ -12,7 +12,7 @@ import { Redis } from "ioredis";
 import { applyManagedRuntimeConfig } from "./admin/managed-runtime-config.js";
 import { AgentToolFactory, isHostExecutionTool, toolApprovalCategory, toolRisk } from "./agent-tools.js";
 import { BackgroundRuntime } from "./background.js";
-import { configWarnings, loadConfig, readPersona } from "./config.js";
+import { configWarnings, loadConfig, readPersona, readSystemPrompt } from "./config.js";
 import { CrisisMonitor } from "./crisis.js";
 import { ConversationPurposeService } from "./conversations/purpose-service.js";
 import { Database } from "./db.js";
@@ -68,7 +68,10 @@ async function main(): Promise<void> {
   // иначе трассы окажутся пустыми (требование 2 шага 09).
   const observability = buildObservability(config, VERSION, logger);
 
-  const persona = await readPersona(config);
+  const [persona, systemPrompt] = await Promise.all([
+    readPersona(config),
+    readSystemPrompt(),
+  ]);
   const db = new Database(config.databaseUrl);
   await db.connect();
   logger.info("PostgreSQL подключён");
@@ -111,7 +114,7 @@ async function main(): Promise<void> {
   // означает лишь повторное открытие приложения.
   const miniAppSessions = new ValkeyMiniAppSessions(redis);
   const rateLimiter = new ValkeyRateLimiter(redis);
-  const letta = new LettaService(config, logger, persona);
+  const letta = new LettaService(config, logger, persona, systemPrompt);
   {
     // Сверка установленного пакета Letta с проверенной матрицей.
     // Расхождение попадает в журнал всегда — молча ехать на непроверенной
@@ -128,10 +131,9 @@ async function main(): Promise<void> {
       logger.warn("установленный пакет Letta не покрывает проверенную матрицу", detail);
     }
   }
-  // Канонический текст персоны — существующим агентам. Новый агент
-  // получает его при создании, созданный раньше остаётся с текстом того
-  // дня: так часть агентов и говорила о себе в мужском роде, хотя файл
-  // персоны давно поправлен.
+  // Канонические prompt и persona — существующим агентам. Новый агент
+  // получает их при создании; созданного раньше приводит к текущей версии
+  // тот же проход, не меняя agent_id, память или conversations.
   //
   // Работа идёт в фоне и за тем же флагом, что и весь control plane:
   // старт сервиса её не ждёт, а без `EVA_LETTA_ADMIN_CLIENT` записывать
@@ -145,13 +147,14 @@ async function main(): Promise<void> {
       logger,
     }),
     logger,
+    letta,
   );
   // Массовая синхронизация идёт в фоне: старт сервиса её не ждёт. Тот
   // агент, чей человек написал раньше, чем она до него дошла, получит
-  // персону в своём же ходе — коротким проходом перед обращением к
+  // prompt и persona в своём же ходе — коротким проходом перед обращением к
   // модели.
-  void personaSync.sync(persona).catch((error: unknown) => {
-    logger.warn("Синхронизация персоны не выполнена", {
+  void personaSync.sync(persona, systemPrompt).catch((error: unknown) => {
+    logger.warn("Синхронизация prompt/persona не выполнена", {
       code: error instanceof Error ? error.name : "unknown_error",
     });
   });
@@ -296,7 +299,11 @@ async function main(): Promise<void> {
     // она не зависит от флага дневника, потому что отвечает за общий
     // аккаунт, а не за дневник.
     new ChannelLinkService(db),
-    { syncAgent: (input, text, options) => personaSync.syncAgent(input, text, options), persona: () => persona },
+    {
+      syncAgent: (input, text, options, prompt) => personaSync.syncAgent(input, text, options, prompt),
+      persona: () => persona,
+      systemPrompt: () => systemPrompt,
+    },
   );
   const inbox = new PostgresTelegramInbox(db);
   // Уведомление о мёртвой записи одно на оба пути обработки: человек

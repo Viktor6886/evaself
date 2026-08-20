@@ -41,6 +41,7 @@ const service = new LettaService(
   },
   silent,
   await readFile(new URL("../library/persona/eva.md", import.meta.url), "utf8"),
+  await readFile(new URL("../library/system/letta_local_memfs.md", import.meta.url), "utf8"),
 );
 
 const results = [];

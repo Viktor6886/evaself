@@ -22,6 +22,18 @@ async function personaText(): Promise<string | null> {
   }
 }
 
+/** Repository-controlled system prompt or `null` in the service-only image build. */
+async function systemPromptText(): Promise<string | null> {
+  try {
+    return await readFile(
+      new URL("../../library/system/letta_local_memfs.md", import.meta.url),
+      "utf8",
+    );
+  } catch {
+    return null;
+  }
+}
+
 function fakeDb(agents: Array<{ agentId: string; userId: number; personaVersion: string | null }>) {
   const recorded: Array<{ agentId: string; version: string }> = [];
   return {
@@ -125,6 +137,28 @@ test("существующий агент получает каноническ�
   // Отметка версии — не копия блока: в базе остаётся отпечаток, а не текст.
   assert.deepEqual(db.recorded, [{ agentId: "agent-old", version }]);
   assert.doesNotMatch(JSON.stringify(db.recorded), /женском роде/);
+});
+
+test("изменение repository prompt обновляет существующего агента без пересоздания", async () => {
+  const prompt = await systemPromptText();
+  if (prompt === null) return;
+
+  const db = fakeDb([{ agentId: "agent-old", userId: 1, personaVersion: null }]);
+  const writes: Array<{ agentId: string; value: string }> = [];
+  const sync = new PersonaSync(db as never, fakePlane() as never, logger, {
+    updateAgentSystemPrompt: async (agentId: string, value: string) => {
+      writes.push({ agentId, value });
+    },
+  });
+
+  const result = await sync.sync(PERSONA, prompt);
+
+  assert.equal(result.updated, 1);
+  assert.deepEqual(writes, [{ agentId: "agent-old", value: prompt }]);
+  assert.deepEqual(db.recorded, [{
+    agentId: "agent-old",
+    version: canonicalMemoryVersion(PERSONA, prompt),
+  }]);
 });
 
 test("агент с тем же текстом не переписывается зря", async () => {

@@ -173,8 +173,10 @@ export class EvaWorkflow {
         input: { agentId: string; userId: number; storedVersion: string | null },
         persona: string,
         options?: { timeoutMs?: number },
+        systemPrompt?: string,
       ): Promise<"updated" | "up_to_date" | "failed" | "disabled">;
       persona(): string;
+      systemPrompt(): string;
     },
   ) {
     this.taskEvents = new TaskEventService(db);
@@ -525,6 +527,7 @@ export class EvaWorkflow {
             { agentId: link.agent_id, userId: user.id, storedVersion },
             this.personaSync.persona(),
             { timeoutMs: this.config.personaSyncTurnTimeoutMs },
+            this.personaSync.systemPrompt(),
           ).catch(() => undefined);
         }
 

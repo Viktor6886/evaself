@@ -46,10 +46,15 @@ function build() {
     },
     silent,
     persona,
+    systemPrompt,
   );
 }
 
 const persona = await readFile(new URL("../library/persona/eva.md", import.meta.url), "utf8");
+const systemPrompt = await readFile(
+  new URL("../library/system/letta_local_memfs.md", import.meta.url),
+  "utf8",
+);
 
 async function restart() {
   const command = process.env.RESTART_COMMAND;

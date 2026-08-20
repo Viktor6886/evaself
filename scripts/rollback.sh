@@ -80,7 +80,9 @@ step "Restarting with the previous versions"
 # ---------------------------------------------------------------------
 compose pull --ignore-buildable >/dev/null 2>&1 || true
 compose build >/dev/null || warn "rebuild reported a problem"
-compose up -d --remove-orphans >/dev/null
+# The canonical prompt and persona are bind-mounted, so a prompt-only git
+# rollback still needs a fresh process even when every image id is unchanged.
+compose up -d --remove-orphans --force-recreate >/dev/null
 ok "containers recreated"
 recreate_caddy || warn "Caddy не запустился с восстановленной конфигурацией"
 

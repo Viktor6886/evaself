@@ -9,6 +9,8 @@ import {
   telegramTag,
 } from "../dist/letta.js";
 
+const SYSTEM_PROMPT = "repository system prompt";
+
 test("extractText handles plain strings", () => {
   assert.equal(extractText("hello"), "hello");
 });
@@ -190,6 +192,7 @@ test("model switching inventories standalone WebUI agents too", async () => {
       error() {},
     },
     "persona",
+    SYSTEM_PROMPT,
   );
   (service as unknown as { client: unknown }).client = {
     agents: {
@@ -233,9 +236,10 @@ test("App Server-only settings are applied at session open, not agent creation",
       error() {},
     },
     "persona",
+    SYSTEM_PROMPT,
   );
   const internal = service as unknown as {
-    runtime: { reasoning_effort: "none" | "high" };
+    runtime: { reasoning_effort: "none" | "high"; default_persona: string };
     client: {
       createAgent(options: Record<string, unknown>): Promise<string>;
       agents: { update(): Promise<void> };
@@ -245,6 +249,7 @@ test("App Server-only settings are applied at session open, not agent creation",
     sessionOptions(id: string): Promise<Record<string, unknown>>;
   };
   internal.runtime.reasoning_effort = "high";
+  internal.runtime.default_persona = "database persona must not override eva.md";
   service.setToolFactory(() => [
     { name: "safe_tool" },
     { name: "Bash" },
@@ -272,9 +277,10 @@ test("App Server-only settings are applied at session open, not agent creation",
   await service.createAgent({ telegramId: 123, displayName: "CI" });
   await internal.acquireSession("conversation-sdk-options");
 
-  // Штатный harness Letta: Evaself не подменяет системный промпт и не
-  // сужает ни серверные, ни клиентские инструменты агента.
-  assert.equal("systemPrompt" in createOptions, false);
+  // Официальный raw override несёт tracked prompt; остальные возможности
+  // Letta остаются штатными и не сужаются.
+  assert.equal(createOptions.systemPrompt, SYSTEM_PROMPT);
+  assert.equal(createOptions.persona, "persona");
   assert.equal("allowedTools" in createOptions, false);
   assert.equal("disallowedTools" in createOptions, false);
   assert.equal("systemInfoReminder" in createOptions, false);
@@ -314,7 +320,7 @@ test("session opening awaits the approval resolver and recovery uses the same re
   const service = new LettaService({
     appServerUrl: "ws://example.invalid/ws", appServerToken: "", appServerRequestTimeoutMs: 1000,
     model: "", sessionPoolSize: 5, sessionIdleMs: 1000, turnTimeoutMs: 1000,
-  } as never, { debug() {}, info() {}, warn() {}, error() {} }, "persona");
+  } as never, { debug() {}, info() {}, warn() {}, error() {} }, "persona", SYSTEM_PROMPT);
   service.setToolFactory(() => [{ name: "chat_write" }, { name: "research_read" }] as never);
   const seen: Array<{ name: string; requestId?: string }> = [];
   const canUseTool = async (name: string, _args: unknown, context: { requestId?: string }) => {
@@ -361,7 +367,7 @@ test("срезы ответа несут номер сообщения и вре
   const service = new LettaService({
     appServerUrl: "ws://example.invalid/ws", appServerToken: "", appServerRequestTimeoutMs: 1000,
     model: "", sessionPoolSize: 5, sessionIdleMs: 1000, turnTimeoutMs: 5000,
-  } as never, { debug() {}, info() {}, warn() {}, error() {} }, "persona");
+  } as never, { debug() {}, info() {}, warn() {}, error() {} }, "persona", SYSTEM_PROMPT);
 
   const events = [
     { type: "assistant", content: "Сейчас посмотрю", otid: "a" },
@@ -405,7 +411,7 @@ test("служебные события потока не показываютс
   const service = new LettaService({
     appServerUrl: "ws://example.invalid/ws", appServerToken: "", appServerRequestTimeoutMs: 1000,
     model: "", sessionPoolSize: 5, sessionIdleMs: 1000, turnTimeoutMs: 5000,
-  } as never, { debug() {}, info() {}, warn() {}, error() {} }, "persona");
+  } as never, { debug() {}, info() {}, warn() {}, error() {} }, "persona", SYSTEM_PROMPT);
   const events = [
     { type: "compaction", content: "Сжала историю до выжимки" },
     { type: "system", content: "SYSTEM: context window at 90%" },
@@ -438,7 +444,7 @@ test("ход без текста не выдумывает время перво
   const service = new LettaService({
     appServerUrl: "ws://example.invalid/ws", appServerToken: "", appServerRequestTimeoutMs: 1000,
     model: "", sessionPoolSize: 5, sessionIdleMs: 1000, turnTimeoutMs: 5000,
-  } as never, { debug() {}, info() {}, warn() {}, error() {} }, "persona");
+  } as never, { debug() {}, info() {}, warn() {}, error() {} }, "persona", SYSTEM_PROMPT);
   (service as unknown as { client: { resumeSession(id: string, options: unknown): unknown } }).client = {
     resumeSession: () => ({
       bootstrapState: async () => ({}),
@@ -639,6 +645,7 @@ function reasoningService(onWarn: (message: string) => void = () => {}) {
       error() {},
     } as never,
     "persona",
+    SYSTEM_PROMPT,
   );
 }
 
@@ -646,15 +653,14 @@ function reasoningService(onWarn: (message: string) => void = () => {}) {
  * Единственный cognitive runtime — Letta.
  *
  * Проверяется не намерение, а фактический набор полей, который Evaself
- * отправляет в SDK: подмена системного промпта, точный список
- * инструментов или суженные источники навыков видны здесь сразу, чем бы
- * они ни были мотивированы.
+ * отправляет в SDK: system prompt должен прийти из репозитория, а точный
+ * список инструментов или суженные источники навыков здесь недопустимы.
  */
-test("обычный ход не подменяет harness и не сужает штатные возможности Letta", async () => {
+test("агент получает repository prompt без сужения штатных возможностей Letta", async () => {
   const service = new LettaService({
     appServerUrl: "ws://example.invalid/ws", appServerToken: "", appServerRequestTimeoutMs: 1000,
     model: "", sessionPoolSize: 5, sessionIdleMs: 1000, turnTimeoutMs: 1000,
-  } as never, { debug() {}, info() {}, warn() {}, error() {} }, "persona");
+  } as never, { debug() {}, info() {}, warn() {}, error() {} }, "persona", SYSTEM_PROMPT);
   service.setToolFactory(() => [{ name: "eva_get_reminders" }] as never);
   const internal = service as unknown as {
     client: { createAgent(options: Record<string, unknown>): Promise<string> };
@@ -665,8 +671,9 @@ test("обычный ход не подменяет harness и не сужает
   internal.client.createAgent = async (options) => { created = options; return "agent-1"; };
   await service.createAgent({ telegramId: 1, displayName: "CI" });
 
-  // Агент: штатный harness, включённый MemFS, рефлексия на сжатии.
-  for (const forbidden of ["systemPrompt", "allowedTools", "disallowedTools", "skillSources"]) {
+  // Агент: tracked prompt, включённый MemFS, рефлексия на сжатии.
+  assert.equal(created.systemPrompt, SYSTEM_PROMPT);
+  for (const forbidden of ["allowedTools", "disallowedTools", "skillSources"]) {
     assert.equal(forbidden in created, false, `createAgent передал ${forbidden}`);
   }
   assert.equal(created.memfs, true);
@@ -683,6 +690,38 @@ test("обычный ход не подменяет harness и не сужает
   );
 });
 
+test("административное создание не обходит repository prompt и eva.md", async () => {
+  const service = new LettaService({
+    appServerUrl: "ws://example.invalid/ws", appServerToken: "", appServerRequestTimeoutMs: 1000,
+    model: "", sessionPoolSize: 5, sessionIdleMs: 1000, turnTimeoutMs: 1000,
+  } as never, { debug() {}, info() {}, warn() {}, error() {} }, "repository persona", SYSTEM_PROMPT);
+  const internal = service as unknown as {
+    client: {
+      createAgent(options: Record<string, unknown>): Promise<string>;
+      agents: { retrieve(agentId: string): Promise<unknown> };
+    };
+  };
+  let created: Record<string, unknown> = {};
+  internal.client = {
+    createAgent: async (options) => { created = options; return "agent-managed"; },
+    agents: { retrieve: async () => ({ id: "agent-managed" }) },
+  };
+
+  await service.createManagedAgent({
+    name: "Managed Eva",
+    persona: "request override",
+    system_prompt_preset: "codex",
+    system_prompt_append: "request append",
+    create_conversation: false,
+  });
+
+  assert.equal(created.persona, "repository persona");
+  assert.equal(created.systemPrompt, SYSTEM_PROMPT);
+  const persona = (created.memory as Array<{ label: string; value: string }>)
+    .find((block) => block.label === "persona");
+  assert.equal(persona?.value, "repository persona");
+});
+
 /** Факты runtime берутся из init-сообщения сессии, а не из настроек. */
 test("состояние MemFS, навыков и инструментов читается из init-сообщения", () => {
   const warnings: string[] = [];
@@ -691,7 +730,7 @@ test("состояние MemFS, навыков и инструментов чи�
     model: "", sessionPoolSize: 5, sessionIdleMs: 1000, turnTimeoutMs: 1000,
   } as never, {
     debug() {}, info() {}, warn: (message: string) => warnings.push(message), error() {},
-  }, "persona");
+  }, "persona", SYSTEM_PROMPT);
   const internal = service as unknown as {
     recordRuntimeFacts(message: Record<string, unknown>): void;
   };
@@ -723,7 +762,7 @@ test("готовность собирается из фактов открыто
   const service = new LettaService({
     appServerUrl: "ws://example.invalid/ws", appServerToken: "", appServerRequestTimeoutMs: 1000,
     model: "", sessionPoolSize: 5, sessionIdleMs: 1000, turnTimeoutMs: 1000,
-  } as never, { debug() {}, info() {}, warn() {}, error() {} }, "persona");
+  } as never, { debug() {}, info() {}, warn() {}, error() {} }, "persona", SYSTEM_PROMPT);
   service.setToolFactory(() => [{ name: "get_user_time_context" }] as never);
 
   const internal = service as unknown as {
@@ -769,7 +808,7 @@ test("неготовность видна, когда runtime не подтве�
   const service = new LettaService({
     appServerUrl: "ws://example.invalid/ws", appServerToken: "", appServerRequestTimeoutMs: 1000,
     model: "", sessionPoolSize: 5, sessionIdleMs: 1000, turnTimeoutMs: 1000,
-  } as never, { debug() {}, info() {}, warn() {}, error() {} }, "persona");
+  } as never, { debug() {}, info() {}, warn() {}, error() {} }, "persona", SYSTEM_PROMPT);
   service.setToolFactory(() => [{ name: "get_user_time_context" }] as never);
   const internal = service as unknown as {
     client: Record<string, unknown>;
