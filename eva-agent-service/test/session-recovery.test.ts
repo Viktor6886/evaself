@@ -171,6 +171,44 @@ test("при выключенном флаге поведение прежнее
   assert.ok(!sessions.has("conv-1"), "выключенный флаг должен возвращать прежнее поведение");
 });
 
+test("после recompile инвалидируются только pooled sessions нужного агента", async () => {
+  const { service, sessions, made } = harness();
+  const internal = service as unknown as {
+    acquirePooled: (id: string) => Promise<{ session: { agentId: string } }>;
+  };
+  const first = await internal.acquirePooled("conv-1");
+  const second = await internal.acquirePooled("conv-2");
+  first.session.agentId = "agent-1";
+  second.session.agentId = "agent-2";
+
+  service.invalidateAgentSessions("agent-1", ["conv-1"]);
+
+  assert.equal(sessions.has("conv-1"), false);
+  assert.equal(sessions.has("conv-2"), true, "сессия другого агента была закрыта");
+  assert.equal(made[0]?.state.closed, true);
+  assert.equal(made[1]?.state.closed, false);
+});
+
+test("system prompt обновляется только когда raw значение изменилось", async () => {
+  const { service } = harness();
+  let current = "old prompt";
+  const updates: string[] = [];
+  const internal = service as unknown as { client: Record<string, unknown> };
+  internal.client = {
+    agents: {
+      retrieve: async () => ({ system: current }),
+      update: async (_agentId: string, input: { system: string }) => {
+        current = input.system;
+        updates.push(input.system);
+      },
+    },
+  };
+
+  assert.equal(await service.updateAgentSystemPrompt("agent-1", "new prompt"), true);
+  assert.equal(await service.updateAgentSystemPrompt("agent-1", "new prompt"), false);
+  assert.deepEqual(updates, ["new prompt"]);
+});
+
 test("ход держит счётчик и отпускает его в любом случае", async () => {
   const { service, sessions } = harness();
   await service.runTurn("conv-1", { role: "user", content: "привет" } as never);

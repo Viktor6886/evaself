@@ -706,9 +706,12 @@ export class LettaService {
   }
 
   /** Обновить prompt существующего агента без пересоздания и смены agent_id. */
-  async updateAgentSystemPrompt(agentId: string, systemPrompt: string): Promise<void> {
+  async updateAgentSystemPrompt(agentId: string, systemPrompt: string): Promise<boolean> {
     try {
+      const agent = await this.client.agents.retrieve(agentId) as { system?: unknown };
+      if (agent.system === systemPrompt) return false;
       await this.client.agents.update(agentId, { system: systemPrompt });
+      return true;
     } catch (error) {
       throw toEvaError(error, `updating the system prompt of ${agentId}`);
     }
@@ -1089,6 +1092,21 @@ export class LettaService {
       });
     }
     return true;
+  }
+
+  /**
+   * Инвалидировать runtime только для conversations конкретного агента.
+   * Обычно достаточно списка, который вернул recompile; проверка agentId
+   * также закрывает его уже открытый default/скрытый conversation, если он
+   * не попал в административную выдачу.
+   */
+  invalidateAgentSessions(agentId: string, conversationIds: readonly string[]): void {
+    const related = new Set(conversationIds);
+    for (const [conversationId, pooled] of this.sessions) {
+      if (related.has(conversationId) || pooled.session.agentId === agentId) {
+        this.closeSession(conversationId);
+      }
+    }
   }
 
   get openSessions(): number {

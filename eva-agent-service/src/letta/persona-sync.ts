@@ -132,10 +132,15 @@ export interface MemoryReconcileReport {
   canonical: number;
   /** Обновлён ли raw system prompt агента через официальный Agent SDK. */
   systemPromptUpdated: boolean;
+  /** Сколько explicit conversations получили новый compiled context. */
+  recompiledConversations: number;
 }
 
-interface SystemPromptWriter {
-  updateAgentSystemPrompt(agentId: string, systemPrompt: string): Promise<void>;
+interface RuntimeContextCoordinator {
+  /** Возвращает `true`, только когда raw system prompt действительно отличался. */
+  updateAgentSystemPrompt(agentId: string, systemPrompt: string): Promise<boolean>;
+  /** Закрыть только pooled sessions указанного агента/conversations. */
+  invalidateAgentSessions(agentId: string, conversationIds: readonly string[]): void;
 }
 
 /**
@@ -163,7 +168,7 @@ export class PersonaSync {
     private readonly db: Database,
     private readonly plane: LettaAdminPlane,
     private readonly logger: Logger,
-    private readonly prompts?: SystemPromptWriter,
+    private readonly runtime: RuntimeContextCoordinator,
   ) {}
 
   /**
@@ -195,7 +200,10 @@ export class PersonaSync {
       }
       try {
         const report = await this.reconcileAgent(agent, persona, systemPrompt);
-        if (report.created.length + report.updated.length > 0 || report.systemPromptUpdated) {
+        if (
+          report.created.length + report.updated.length + report.recompiledConversations > 0
+          || report.systemPromptUpdated
+        ) {
           result.updated += 1;
         } else result.upToDate += 1;
         result.legacyAgents += report.legacy.length > 0 ? 1 : 0;
@@ -242,13 +250,14 @@ export class PersonaSync {
     const byLabel = new Map(present.map((block) => [block.label, block]));
     const report: MemoryReconcileReport = {
       agentId: input.agentId, created: [], updated: [], kept: [], legacy: [], canonical: 0,
-      systemPromptUpdated: false,
+      systemPromptUpdated: false, recompiledConversations: 0,
     };
 
     if (systemPrompt !== undefined) {
-      if (!this.prompts) throw new Error("Не настроена синхронизация system prompt");
-      await this.prompts.updateAgentSystemPrompt(input.agentId, systemPrompt);
-      report.systemPromptUpdated = true;
+      report.systemPromptUpdated = await this.runtime.updateAgentSystemPrompt(
+        input.agentId,
+        systemPrompt,
+      );
     }
 
     for (const block of canonical) {
@@ -283,6 +292,14 @@ export class PersonaSync {
         size: block.value.length,
         status: "legacy_pending_migration" as const,
       }));
+
+    // Запись блоков меняет canonical state, но уже скомпилированный
+    // контекст explicit conversation от этого не обновляется. Версию можно
+    // подтвердить только после официального recompile и удаления старой
+    // runtime-сессии из пула.
+    const conversationIds = await this.plane.recompileAgentConversations(input.agentId);
+    report.recompiledConversations = conversationIds.length;
+    this.runtime.invalidateAgentSessions(input.agentId, conversationIds);
 
     await this.db.recordMemoryReconciled(input.agentId, input.userId, {
       version: canonicalMemoryVersion(persona, systemPrompt),
@@ -363,7 +380,8 @@ export class PersonaSync {
     const work = (async (): Promise<"updated" | "up_to_date" | "failed"> => {
       try {
         const report = await this.reconcileAgent(input, persona, systemPrompt);
-        return report.created.length + report.updated.length > 0 || report.systemPromptUpdated
+        return report.created.length + report.updated.length + report.recompiledConversations > 0
+          || report.systemPromptUpdated
           ? "updated"
           : "up_to_date";
       } catch (error) {

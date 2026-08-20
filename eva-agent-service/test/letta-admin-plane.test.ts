@@ -249,4 +249,37 @@ test("выключенный путь отказывает и созданию �
     /недоступен/,
   );
   await assert.rejects(() => plane.detachMemoryBlock("agent-1", "block-1"), /недоступен/);
+  await assert.rejects(() => plane.recompileAgentConversations("agent-1"), /недоступен/);
+});
+
+test("explicit conversations пересобираются официальным conversations.recompile", async () => {
+  const calls: Array<{ conversationId: string; params: Record<string, unknown> }> = [];
+  const listed: Record<string, unknown>[] = [];
+  const client = new LettaAdminClient(
+    { enabled: true, baseUrl: "http://letta:8283", token: null, logger },
+    async () => ({
+      conversations: {
+        list: (params: Record<string, unknown>) => {
+          listed.push(params);
+          return (async function* () {
+            yield { id: "conv-1" };
+            yield { id: "conv-2" };
+          })();
+        },
+        recompile: async (conversationId: string, params: Record<string, unknown>) => {
+          calls.push({ conversationId, params });
+          return "compiled";
+        },
+      },
+    }) as never,
+  );
+
+  const ids = await client.recompileAgentConversations("agent-1");
+
+  assert.deepEqual(ids, ["conv-1", "conv-2"]);
+  assert.deepEqual(listed, [{ agent_id: "agent-1", archive_status: "all" }]);
+  assert.deepEqual(calls, [
+    { conversationId: "conv-1", params: { agent_id: "agent-1" } },
+    { conversationId: "conv-2", params: { agent_id: "agent-1" } },
+  ]);
 });

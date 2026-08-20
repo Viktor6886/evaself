@@ -66,6 +66,12 @@ export interface LettaAdminPlane {
    * копии.
    */
   detachMemoryBlock(agentId: string, blockId: string): Promise<void>;
+  /**
+   * Пересобрать compiled context всех explicit conversations агента.
+   * Возвращает их идентификаторы, чтобы runtime закрыл только связанные
+   * pooled sessions после успешной пересборки.
+   */
+  recompileAgentConversations(agentId: string): Promise<string[]>;
 }
 
 /** Что нужно, чтобы завести недостающий блок. Значение обязательно. */
@@ -121,6 +127,10 @@ export class DisabledAdminPlane implements LettaAdminPlane {
   async detachMemoryBlock(): Promise<void> {
     this.refuse("memory-block.detach");
   }
+
+  async recompileAgentConversations(): Promise<string[]> {
+    this.refuse("conversation.recompile");
+  }
 }
 
 /** Минимальная форма официального клиента, которой мы пользуемся. */
@@ -138,6 +148,15 @@ interface OfficialClient {
   };
   blocks: {
     create(params: Record<string, unknown>): PromiseLike<unknown>;
+  };
+  conversations: {
+    list(
+      params: Record<string, unknown>,
+    ): AsyncIterable<unknown> & PromiseLike<unknown>;
+    recompile(
+      conversationId: string,
+      params: Record<string, unknown>,
+    ): PromiseLike<unknown>;
   };
 }
 
@@ -249,6 +268,33 @@ export class LettaAdminClient implements LettaAdminPlane {
       this.options.logger.info("memory block detached from the agent", { agentId, blockId });
     } catch (error) {
       throw toEvaError(error, `detaching memory block ${blockId} from ${agentId}`);
+    }
+  }
+
+  async recompileAgentConversations(agentId: string): Promise<string[]> {
+    assertSupported("conversation.recompile");
+    try {
+      const client = await this.connect();
+      const conversationIds: string[] = [];
+      // Официальная страница клиента — AsyncIterable: так обрабатываются
+      // все страницы, а не только первый лимит выдачи.
+      for await (const row of client.conversations.list({
+        agent_id: agentId,
+        archive_status: "all",
+      })) {
+        const id = (row as { id?: unknown } | null)?.id;
+        if (typeof id === "string" && id.length > 0) conversationIds.push(id);
+      }
+      for (const conversationId of conversationIds) {
+        await client.conversations.recompile(conversationId, { agent_id: agentId });
+      }
+      this.options.logger.info("agent conversations recompiled through the control plane", {
+        agentId,
+        conversations: conversationIds.length,
+      });
+      return conversationIds;
+    } catch (error) {
+      throw toEvaError(error, `recompiling conversations of ${agentId}`);
     }
   }
 }
