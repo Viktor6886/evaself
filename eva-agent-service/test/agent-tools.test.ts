@@ -364,3 +364,48 @@ test("неразбираемое время объясняет, что дела�
   assert.match(String(details.error), /Ожидается местное время/);
   assert.match(String(details.error), /через N минут/);
 });
+
+/**
+ * Ноль в необязательной связи — это «связи нет».
+ *
+ * Модель заполняет необязательное поле нулём охотно: так у неё выглядит
+ * «пусто». Строгое чтение превращало бытовое напоминание в отказ «Цель
+ * задачи не найдена», и человек слышал, что система «требует привязать
+ * напоминание к цели».
+ */
+test("нулевая связь не мешает бытовой задаче", async () => {
+  const { result, statements } = await call("save_task", {
+    title: "Выключить посудомойку",
+    remind_in_minutes: 3,
+    goal_id: 0,
+    goal_result_id: 0,
+    work_block_id: 0,
+  });
+  assert.equal((result.details as { ok: boolean }).ok, true);
+
+  // Проверок владения при нулевых связях быть не должно: связывать не с чем.
+  assert.ok(
+    !statements.some(({ sql }) => /from goals|from goal_results|from work_blocks/i.test(sql)),
+    "нулевая связь не должна искать чужую запись",
+  );
+  const insert = statements.find(({ sql }) => /insert into tasks/i.test(sql));
+  assert.equal(insert!.values[10], null, "goal_id записывается пустым");
+  assert.equal(insert!.values[11], null, "goal_result_id записывается пустым");
+  assert.equal(insert!.values[12], null, "work_block_id записывается пустым");
+});
+
+test("несуществующая цель отказывает и объясняет, как быть", async () => {
+  // Владения нет: выборка цели возвращает пусто, как в настоящей базе.
+  const { tools } = harness({ rows: [] });
+  const result = await tools.get("save_task")!.execute("call-1", {
+    title: "Выключить посудомойку",
+    remind_in_minutes: 3,
+    goal_id: 4242,
+  });
+  const details = result.details as { ok: boolean; error?: string };
+  assert.equal(details.ok, false);
+  // Отказ называет и сам идентификатор, и выход: без этого модель
+  // повторяет тот же вызов с той же несуществующей целью.
+  assert.match(String(details.error), /4242/);
+  assert.match(String(details.error), /не заполняется вовсе/);
+});
