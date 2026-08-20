@@ -1037,20 +1037,36 @@ export class EvaWorkflow {
         }
         metrics.telegram_delivery_ms = deliveryMs;
 
-        await this.linkTurn(turnHandle, {
-          outboxId: this.telegram.getDeliveryOutboxId(),
-        });
-        await this.moveTurn(turnHandle, "outbox_committed");
-        await this.moveTurn(turnHandle, "delivering");
-        await this.moveTurn(turnHandle, "delivered");
+        // Ответ доставлен. Дальше идёт только учёт — запись состояния
+        // хода и списание квоты, — и его отказ не должен возвращать
+        // апдейт в очередь: повтор означает второй вызов модели и второй
+        // ответ в чате человеку, который первый уже получил. Не
+        // списанная квота хуже двойного ответа ровно настолько,
+        // насколько её потом дороже сверить.
+        let usageCharged = false;
+        try {
+          await this.linkTurn(turnHandle, {
+            outboxId: this.telegram.getDeliveryOutboxId(),
+          });
+          await this.moveTurn(turnHandle, "outbox_committed");
+          await this.moveTurn(turnHandle, "delivering");
+          await this.moveTurn(turnHandle, "delivered");
 
-        await this.db.incrementUsage(update.telegramId, "messages");
-        await this.linkTurn(turnHandle, {
-          quotaMetric: "messages",
-          quotaCharged: true,
-        });
-        await this.moveTurn(turnHandle, "completed");
-        return { status: "completed", usageCharged: true };
+          await this.db.incrementUsage(update.telegramId, "messages");
+          usageCharged = true;
+          await this.linkTurn(turnHandle, {
+            quotaMetric: "messages",
+            quotaCharged: true,
+          });
+          await this.moveTurn(turnHandle, "completed");
+        } catch (error) {
+          this.logger.warn("Учёт хода после доставки не завершён", {
+            updateId: update.updateId,
+            usage_charged: usageCharged,
+            code: error instanceof Error ? error.name : "unknown_error",
+          });
+        }
+        return { status: "completed", usageCharged };
           },
         );
         },

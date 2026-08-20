@@ -546,6 +546,8 @@ async function runTelegramTurn(
     synthesisFails?: boolean;
     /** Telegram не принимает голосовое сообщение. */
     voiceSendFails?: boolean;
+    /** Учёт после доставки отказывает: списание квоты не проходит. */
+    usageFails?: boolean;
     /**
      * Срезы ответа, которые «модель» отдаёт по ходу генерации. Каждый —
      * `[текст, начинает ли новое сообщение]`: агентный ход проговаривает
@@ -601,7 +603,9 @@ async function runTelegramTurn(
     },
     markAgentUsed: async () => {},
     recordSttUsage: async () => {},
-    incrementUsage: async () => {},
+    incrementUsage: async () => {
+      if (options.usageFails) throw new Error("квота недоступна");
+    },
     issueCallbackTokens: async (input: Record<string, unknown>) => {
       issuedTokens.push(input);
     },
@@ -1117,6 +1121,16 @@ test("в режиме «голос и текст» текст не ждёт си
   assert.deepEqual(probe.result, { status: "completed", usageCharged: true });
   // Синтез шёл параллельно доставке: он измерен и не приплюсован к ней.
   assert.ok(probe.metrics.tts_ms >= 50, `синтез не измерен: ${probe.metrics.tts_ms}`);
+});
+
+test("отказ учёта после доставки не заводит второй ответ", async () => {
+  // Ответ человеку уже ушёл. Возврат апдейта в очередь означал бы второй
+  // вызов модели и второй ответ в чате, а после нескольких попыток —
+  // «не получилось обработать сообщение» тому, кто ответ уже читает.
+  const harness = await runTelegramTurn(undefined, { usageFails: true });
+  assert.equal(harness.result.status, "completed");
+  assert.equal(harness.result.usageCharged, false, "не списанное списанным не считается");
+  assert.deepEqual(harness.sent.length, 1, "ответ отправлен ровно один раз");
 });
 
 test("отказ доставки голоса не заваливает ход и не отменяет ответ", async () => {
