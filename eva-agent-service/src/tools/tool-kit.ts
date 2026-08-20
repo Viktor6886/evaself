@@ -64,6 +64,20 @@ export function optionalString(
   return value.trim().slice(0, max);
 }
 
+/**
+ * Необязательная связь с другой записью.
+ *
+ * Ноль здесь означает «связи нет», а не «запись номер ноль». Модель
+ * заполняет необязательное поле нулём охотно — так у неё выглядит
+ * «пусто», — и строгое чтение превращало бытовое напоминание в отказ
+ * «Цель задачи не найдена». Отрицательные значения тем более не бывают
+ * идентификаторами.
+ */
+export function optionalLink(args: JsonObject, name: string): number | null {
+  const value = optionalInteger(args, name);
+  return value === null || value <= 0 ? null : value;
+}
+
 export function optionalInteger(args: JsonObject, name: string): number | null {
   const value = args[name];
   if (value == null || value === "") return null;

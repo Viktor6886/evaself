@@ -8,6 +8,7 @@ import {
   json,
   objectSchema,
   optionalInteger,
+  optionalLink,
   optionalString,
   requiredString,
   text,
@@ -81,8 +82,9 @@ export class GoalToolFactory {
               | "complete"
               | "cancel",
             goalId: optionalInteger(args, "goal_id") ?? 0,
-            goalResultId: optionalInteger(args, "goal_result_id"),
-            workBlockId: optionalInteger(args, "work_block_id") ?? undefined,
+            // Ноль означает «связи нет»: так модель заполняет пустое поле.
+            goalResultId: optionalLink(args, "goal_result_id"),
+            workBlockId: optionalLink(args, "work_block_id") ?? undefined,
             intention: optionalString(args, "intention", 2_000) ?? undefined,
             firstPhysicalStep: optionalString(args, "first_physical_step", 2_000),
             plannedStartAt: optionalString(args, "planned_start_at", 100),

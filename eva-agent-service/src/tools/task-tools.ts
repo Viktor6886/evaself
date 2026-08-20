@@ -10,6 +10,7 @@ import {
   integer,
   objectSchema,
   optionalInteger,
+  optionalLink,
   optionalString,
   requiredString,
   text,
@@ -162,9 +163,10 @@ export class TaskToolFactory {
     if (cron) assertCronExpression(cron, runtime.timezone);
     const nextRunAt = remindAt ?? dueAt ??
       (repeat && cron ? nextCronDate(cron, runtime.timezone, new Date()).toISOString() : null);
-    let goalId = optionalInteger(args, "goal_id");
-    let resultId = optionalInteger(args, "goal_result_id");
-    const blockId = optionalInteger(args, "work_block_id");
+    // Ноль — это «связи нет»: модель так заполняет необязательное поле.
+    let goalId = optionalLink(args, "goal_id");
+    let resultId = optionalLink(args, "goal_result_id");
+    const blockId = optionalLink(args, "work_block_id");
     const estimated = bounded(optionalInteger(args, "estimated_minutes"), "estimated_minutes", 1, 1440);
     const energy = bounded(optionalInteger(args, "energy_required"), "energy_required", 1, 5);
 
@@ -174,14 +176,24 @@ export class TaskToolFactory {
           "SELECT id FROM goals WHERE id = $1 AND user_id = $2",
           [goalId, runtime.userId],
         );
-        if (!owned.rows[0]) throw new Error("Цель задачи не найдена");
+        if (!owned.rows[0]) {
+          throw new Error(
+            `Цель ${goalId} не найдена. Если задача ни к какой цели не относится, `
+            + "поле goal_id не заполняется вовсе",
+          );
+        }
       }
       if (resultId !== null) {
         const owned = await client.query<{ goal_id: string }>(
           "SELECT goal_id FROM goal_results WHERE id = $1 AND user_id = $2",
           [resultId, runtime.userId],
         );
-        if (!owned.rows[0]) throw new Error("Результат задачи не найден");
+        if (!owned.rows[0]) {
+          throw new Error(
+            `Результат ${resultId} не найден. Если задача ни к какому результату не `
+            + "относится, поле goal_result_id не заполняется вовсе",
+          );
+        }
         const ownedGoalId = Number(owned.rows[0].goal_id);
         if (goalId !== null && goalId !== ownedGoalId) {
           throw new Error("Результат не принадлежит выбранной цели");
@@ -193,7 +205,12 @@ export class TaskToolFactory {
           "SELECT goal_id, goal_result_id FROM work_blocks WHERE id = $1 AND user_id = $2",
           [blockId, runtime.userId],
         );
-        if (!owned.rows[0]) throw new Error("Рабочий блок задачи не найден");
+        if (!owned.rows[0]) {
+          throw new Error(
+            `Рабочий блок ${blockId} не найден. Если задача ни к какому блоку не `
+            + "относится, поле work_block_id не заполняется вовсе",
+          );
+        }
         const ownedGoalId = Number(owned.rows[0].goal_id);
         const ownedResultId = Number(owned.rows[0].goal_result_id) || null;
         if (goalId !== null && goalId !== ownedGoalId) {
@@ -340,9 +357,9 @@ function taskSchema(): JsonObject {
     repeat: boolean("Повторять"),
     priority: integer("Приоритет 1–5"),
     timezone: text("IANA timezone"),
-    goal_id: integer("Связанная цель"),
-    goal_result_id: integer("Связанный результат"),
-    work_block_id: integer("Связанный рабочий блок"),
+    goal_id: integer("Связанная цель. Бытовая задача ни к какой цели не привязана — поле пропускается"),
+    goal_result_id: integer("Связанный результат; необязательно"),
+    work_block_id: integer("Связанный рабочий блок; необязательно"),
     estimated_minutes: integer("Оценка минут"),
     energy_required: integer("Энергия 1–5"),
   }, ["title"]);
