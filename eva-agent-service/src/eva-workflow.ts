@@ -2,7 +2,7 @@ import type { Config } from "./config.js";
 import { type CrisisMonitor, safetyDirective } from "./crisis.js";
 import type { AgentLinkRow, Database, SttUsageAttempt, UserRow } from "./db.js";
 import type { InboxResult } from "./delivery/inbox.js";
-import { EvaError } from "./errors.js";
+import { appServerUnavailable, EvaError } from "./errors.js";
 import { preferredResponseLanguage, t } from "./i18n/index.js";
 import type { SupportedLanguage } from "./i18n/language-resolver.js";
 import type { LettaService } from "./letta.js";
@@ -517,18 +517,19 @@ export class EvaWorkflow {
         // Персона агента доводится до канонической до самого хода.
         // Массовая синхронизация идёт при старте и может не успеть к
         // первому сообщению человека, а агент со старым текстом успеет
-        // ответить о себе в мужском роде. Проход ограничен по времени и
-        // ход не роняет: молчащий control plane — не повод не ответить.
+        // ответить о себе в мужском роде. Проход ограничен по времени;
+        // устаревший compiled context отправлять модели нельзя.
+        let syncOutcome: "updated" | "up_to_date" | "failed" | "disabled" = "up_to_date";
         if (this.personaSync) {
           const storedVersion = typeof link.meta?.persona_version === "string"
             ? link.meta.persona_version
             : null;
-          await this.personaSync.syncAgent(
+          syncOutcome = await this.personaSync.syncAgent(
             { agentId: link.agent_id, userId: user.id, storedVersion },
             this.personaSync.persona(),
             { timeoutMs: this.config.personaSyncTurnTimeoutMs },
             this.personaSync.systemPrompt(),
-          ).catch(() => undefined);
+          ).catch(() => "failed" as const);
         }
 
         if (user.is_blocked || user.state === "blocked") {
@@ -689,6 +690,12 @@ export class EvaWorkflow {
               prompt,
             ].join("\n");
           }
+        }
+        if (syncOutcome === "failed" || syncOutcome === "disabled") {
+          throw appServerUnavailable(
+            "Канонический context агента не применён; ход будет повторён после синхронизации",
+            { agent_id: link.agent_id, sync: syncOutcome },
+          );
         }
         typing.stop = this.telegram.startTyping(update.chatId, this.config.typingIntervalMs);
         // Окно этого хода после гейтов: голосовая часть могла выпасть по

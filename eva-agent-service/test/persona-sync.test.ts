@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { PersonaSync, personaSyncState, canonicalMemoryVersion } from "../dist/letta/persona-sync.js";
+import {
+  PersonaSync as PersonaSyncBase,
+  personaSyncState,
+  canonicalMemoryVersion,
+} from "../dist/letta/persona-sync.js";
 import { evaMemoryBlocks } from "../dist/letta.js";
 
 const logger = { debug() {}, info() {}, warn() {}, error() {} };
@@ -61,6 +65,9 @@ function fakePlane(options: {
   extra?: Array<{ id: string; label: string; value: string; description?: string | null }>;
   present?: string[];
   failOn?: string;
+  failRecompile?: boolean;
+  conversationIds?: string[];
+  events?: string[];
   available?: boolean;
 } = {}) {
   const updates: Array<{ agentId: string; label: string; value: string }> = [];
@@ -117,7 +124,37 @@ function fakePlane(options: {
     detachMemoryBlock: async (agentId: string, blockId: string) => {
       detached.push({ agentId, blockId });
     },
+    recompileAgentConversations: async () => {
+      options.events?.push("recompile");
+      if (options.failRecompile) throw new Error("recompile failed");
+      return options.conversationIds ?? ["conv-1"];
+    },
   };
+}
+
+function fakeRuntime(options: { events?: string[]; systemChanged?: boolean } = {}) {
+  const systemUpdates: Array<{ agentId: string; value: string }> = [];
+  const invalidations: Array<{ agentId: string; conversationIds: readonly string[] }> = [];
+  return {
+    systemUpdates,
+    invalidations,
+    updateAgentSystemPrompt: async (agentId: string, value: string) => {
+      options.events?.push("system");
+      systemUpdates.push({ agentId, value });
+      return options.systemChanged ?? true;
+    },
+    invalidateAgentSessions: (agentId: string, conversationIds: readonly string[]) => {
+      options.events?.push("invalidate");
+      invalidations.push({ agentId, conversationIds });
+    },
+  };
+}
+
+/** Test wrapper keeps every reconciliation on the production recompile path. */
+class PersonaSync extends PersonaSyncBase {
+  constructor(db: never, plane: never, testLogger: never, runtime = fakeRuntime()) {
+    super(db, plane, testLogger, runtime);
+  }
 }
 
 test("существующий агент получает канонический текст персоны", async () => {
@@ -143,22 +180,74 @@ test("изменение repository prompt обновляет существую
   const prompt = await systemPromptText();
   if (prompt === null) return;
 
+  const events: string[] = [];
   const db = fakeDb([{ agentId: "agent-old", userId: 1, personaVersion: null }]);
-  const writes: Array<{ agentId: string; value: string }> = [];
-  const sync = new PersonaSync(db as never, fakePlane() as never, logger, {
-    updateAgentSystemPrompt: async (agentId: string, value: string) => {
-      writes.push({ agentId, value });
-    },
-  });
+  const record = db.recordMemoryReconciled;
+  db.recordMemoryReconciled = async (...args: Parameters<typeof record>) => {
+    events.push("record");
+    await record(...args);
+  };
+  const runtime = fakeRuntime({ events, systemChanged: true });
+  const sync = new PersonaSync(
+    db as never,
+    fakePlane({ events, conversationIds: ["conv-existing"] }) as never,
+    logger as never,
+    runtime,
+  );
 
   const result = await sync.sync(PERSONA, prompt);
 
   assert.equal(result.updated, 1);
-  assert.deepEqual(writes, [{ agentId: "agent-old", value: prompt }]);
+  assert.deepEqual(runtime.systemUpdates, [{ agentId: "agent-old", value: prompt }]);
+  assert.deepEqual(runtime.invalidations, [{
+    agentId: "agent-old", conversationIds: ["conv-existing"],
+  }]);
+  assert.deepEqual(events, ["system", "recompile", "invalidate", "record"]);
   assert.deepEqual(db.recorded, [{
     agentId: "agent-old",
     version: canonicalMemoryVersion(PERSONA, prompt),
   }]);
+});
+
+test("изменение eva.md обновляет owned blocks, recompile и сессию до записи версии", async () => {
+  const events: string[] = [];
+  const db = fakeDb([{ agentId: "agent-old", userId: 1, personaVersion: "old" }]);
+  const record = db.recordMemoryReconciled;
+  db.recordMemoryReconciled = async (...args: Parameters<typeof record>) => {
+    events.push("record");
+    await record(...args);
+  };
+  const plane = fakePlane({ events, conversationIds: ["conv-existing"] });
+  const runtime = fakeRuntime({ events });
+
+  await new PersonaSync(db as never, plane as never, logger as never, runtime).sync(PERSONA);
+
+  assert.deepEqual(
+    plane.updates.map((entry) => entry.label),
+    ["persona"],
+    "синхронизация должна менять только Evaself-owned существующий блок",
+  );
+  assert.deepEqual(events, ["recompile", "invalidate", "record"]);
+  assert.deepEqual(runtime.invalidations[0], {
+    agentId: "agent-old", conversationIds: ["conv-existing"],
+  });
+});
+
+test("ошибка recompile не подтверждает canonical version и не инвалидирует сессию", async () => {
+  const events: string[] = [];
+  const db = fakeDb([{ agentId: "agent-old", userId: 1, personaVersion: "old" }]);
+  const runtime = fakeRuntime({ events });
+  const result = await new PersonaSync(
+    db as never,
+    fakePlane({ events, failRecompile: true }) as never,
+    logger as never,
+    runtime,
+  ).sync(PERSONA);
+
+  assert.equal(result.failed, 1);
+  assert.deepEqual(events, ["recompile"]);
+  assert.deepEqual(runtime.invalidations, []);
+  assert.deepEqual(db.recorded, []);
 });
 
 test("агент с тем же текстом не переписывается зря", async () => {
@@ -261,14 +350,18 @@ test("устаревший агент получает каноническую 
 
 test("агент с актуальной версией не тревожится перед ходом", async () => {
   const db = fakeDb([]);
-  const plane = fakePlane();
-  const sync = new PersonaSync(db as never, plane as never, logger);
+  const events: string[] = [];
+  const plane = fakePlane({ events });
+  const runtime = fakeRuntime({ events });
+  const sync = new PersonaSync(db as never, plane as never, logger as never, runtime);
   const outcome = await sync.syncAgent(
     { agentId: "agent-1", userId: 1, storedVersion: canonicalMemoryVersion(PERSONA) },
     PERSONA,
   );
   assert.equal(outcome, "up_to_date");
   assert.deepEqual(plane.updates, [], "лишний поход в control plane перед ходом");
+  assert.deepEqual(events, [], "совпавшая version не должна делать update/recompile");
+  assert.deepEqual(runtime.invalidations, []);
 });
 
 test("выключенная синхронизация видна в состоянии, а не пропадает молча", async () => {

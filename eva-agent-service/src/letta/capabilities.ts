@@ -163,6 +163,16 @@ const CAPABILITIES = [
       "В Agent SDK удаления conversation нет вовсе — только архивирование. " +
       "Официальный клиент его умеет, поэтому операция административная.",
   },
+  {
+    id: "conversation.recompile",
+    title: "Пересборка compiled context conversation",
+    surface: "admin-client",
+    path: "conversations.recompile",
+    check: "method",
+    note:
+      "Для explicit conversations используется официальный метод клиента 1.12.1; " +
+      "Agent SDK 0.7.1 не экспортирует recompile через свой conversations-фасад.",
+  },
 
   // --- ход диалога: сессия ---------------------------------------------
   {
