@@ -843,6 +843,12 @@ test("неготовность видна, когда runtime не подтве�
 });
 
 test("persona sync preserves frontmatter and commits only managed MemFS files", async (t) => {
+  try {
+    await exec("git", ["--version"]);
+  } catch {
+    t.skip("git is provided by the MemFS host, not the production service image");
+    return;
+  }
   const root = await mkdtemp(join(tmpdir(), "eva-memfs-"));
   t.after(async () => { await rm(root, { recursive: true, force: true }); });
   await mkdir(join(root, "system"), { recursive: true });
