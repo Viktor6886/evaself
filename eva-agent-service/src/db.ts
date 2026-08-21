@@ -899,17 +899,19 @@ export class Database {
    */
   async listAgentsForPersonaSync(
     limit = 500,
-  ): Promise<Array<{ agentId: string; userId: number; personaVersion: string | null }>> {
+  ): Promise<Array<{ agentId: string; userId: number; conversationId: string | null; personaVersion: string | null }>> {
     const { rows } = await this.withSystemScope(
       "db.listAgentsForPersonaSync",
       async () => await this.require().query<{
         agent_id: string;
         user_id: string;
+        conversation_id: string | null;
         persona_version: string | null;
       }>(
       `
         -- tenant: system — инвентарь агентов для доставки канонической персоны, пользовательских строк не отдаёт
-        SELECT a.agent_id, a.user_id, a.meta ->> 'persona_version' AS persona_version
+         SELECT a.agent_id, a.user_id, a.conversation_id,
+                a.meta ->> 'persona_version' AS persona_version
           FROM agent_links a
          WHERE a.kind = 'eva' AND a.status = 'active'
          ORDER BY a.created_at
@@ -922,6 +924,7 @@ export class Database {
       agentId: row.agent_id,
       userId: Number(row.user_id),
       personaVersion: row.persona_version,
+      conversationId: row.conversation_id,
     }));
   }
 
@@ -947,11 +950,33 @@ export class Database {
         `UPDATE agent_links
             SET meta = meta || jsonb_build_object(
                   'persona_version', $3::text,
-                  'memory_legacy_blocks', $4::jsonb
+                  'memory_legacy_blocks', $4::jsonb,
+                  'canonical_context_sync_status', 'ok',
+                  'canonical_context_sync_at', now()
                 ),
                 updated_at = now()
           WHERE agent_id = $1 AND user_id = $2`,
         [agentId, userId, state.version, JSON.stringify(state.legacy)],
+      ),
+    );
+  }
+
+  async recordCanonicalContextSyncState(
+    agentId: string,
+    userId: number,
+    status: "degraded" | "unsupported",
+  ): Promise<void> {
+    await this.withUserScope(
+      { userId, label: "db.recordCanonicalContextSyncState", inherit: true },
+      async () => await this.require().query(
+        `UPDATE agent_links
+            SET meta = meta || jsonb_build_object(
+                  'canonical_context_sync_status', $3::text,
+                  'canonical_context_sync_at', now()
+                ),
+                updated_at = now()
+          WHERE agent_id = $1 AND user_id = $2`,
+        [agentId, userId, status],
       ),
     );
   }
@@ -1023,7 +1048,7 @@ export class Database {
         skill_name: string | null;
         called_at: Date | null;
         succeeded: boolean | null;
-      }>(
+       }>(
         `SELECT count(*) OVER () AS total, skill_name, called_at, succeeded
            FROM agent_tool_calls
           WHERE user_id = $1 AND tool_name = $2

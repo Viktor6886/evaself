@@ -41,7 +41,7 @@ node --test --experimental-strip-types test/*.test.ts        # full regression
 | `src/letta.ts` | `letta.test.ts`, `letta-contract.test.ts` |
 | `src/letta/capabilities.ts` | `letta-contract.test.ts` |
 | `src/letta/readiness.ts` | `readiness.test.ts` |
-| `src/letta/admin-client.ts`, `delete-guard.ts` | `letta-admin-plane.test.ts` |
+| `src/letta.ts`, `src/letta/persona-sync.ts` | `persona-sync.test.ts`, `canonical-context-architecture.test.ts` |
 | `src/llm.ts`, `src/llm/capability-probe.ts` | `capability-probe.test.ts`, `llm.test.ts` |
 | `src/llm/vision-check.ts` | `vision-check.test.ts`, `media-page.test.mjs` в `admin-ui` |
 | `src/knowledge/search.ts`, `document-text.ts` | `knowledge-search.test.ts`, `attachments.test.ts` |

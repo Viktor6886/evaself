@@ -156,8 +156,8 @@ probe "letta-ui /healthz" letta-ui      "http://127.0.0.1:8081/healthz"
 # состояние читается явно.
 persona_state() {
 	local body
-	body="$(docker compose exec -T eva-agent-service sh -lc \
-		"wget -qO- http://127.0.0.1:\${EVA_AGENT_PORT:-8080}/health || curl -sS http://127.0.0.1:\${EVA_AGENT_PORT:-8080}/health" \
+	body="$(docker compose exec -T eva-agent-service node -e \
+		"fetch('http://127.0.0.1:'+(process.env.EVA_AGENT_PORT||8070)+'/health').then(r=>r.text()).then(console.log).catch(()=>process.exit(1))" \
 		2>/dev/null || true)"
 	[ -n "$body" ] || { warn "persona sync: состояние недоступно (сервис не ответил)"; return; }
 	local status
@@ -165,9 +165,8 @@ persona_state() {
 	case "$status" in
 		ok) ok "persona sync: канонический текст доставлен" ;;
 		never) warn "persona sync: ещё не выполнялась" ;;
-		disabled) critical "persona sync ВЫКЛЮЧЕНА: агенты остаются с прежней персоной (EVA_LETTA_ADMIN_CLIENT)" ;;
-		stale) critical "persona sync: есть агенты со старой персоной" ;;
-		failed) critical "persona sync: обновление персоны отказало" ;;
+		unsupported) soft "persona sync: SDK не поддерживает часть maintenance-операций" ;;
+		degraded|stale|failed) soft "persona sync: degraded, обычные ходы не блокируются" ;;
 		*) warn "persona sync: состояние неизвестно" ;;
 	esac
 }
@@ -181,8 +180,8 @@ persona_state
 # навыков не выводится — только метки и счётчики.
 runtime_state() {
 	local body
-	body="$(docker compose exec -T eva-agent-service sh -lc \
-		"wget -qO- http://127.0.0.1:\${EVA_AGENT_PORT:-8080}/ready || curl -sS http://127.0.0.1:\${EVA_AGENT_PORT:-8080}/ready" \
+	body="$(docker compose exec -T eva-agent-service node -e \
+		"fetch('http://127.0.0.1:'+(process.env.EVA_AGENT_PORT||8070)+'/ready').then(r=>r.text()).then(console.log).catch(()=>process.exit(1))" \
 		2>/dev/null || true)"
 	[ -n "$body" ] || { warn "рантайм: состояние недоступно (сервис не ответил)"; return; }
 	local summary

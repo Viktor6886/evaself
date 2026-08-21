@@ -8,6 +8,10 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
+import { readFile, writeFile } from "node:fs/promises";
+import { join, relative, resolve } from "node:path";
+import { promisify } from "node:util";
 
 import { LettaAgentClient } from "@letta-ai/letta-agent-sdk";
 import type {
@@ -51,6 +55,8 @@ import {
   evaMemoryBlocks,
 } from "./letta/memory-blocks.js";
 import type { Logger } from "./logger.js";
+
+const execFileAsync = promisify(execFile);
 
 /**
  * Идентификатор shard этого процесса. Шардирования шаг не вводит, но
@@ -397,6 +403,13 @@ export function extractText(content: unknown): string {
   return String(content);
 }
 
+function requiredFrontmatter(content: string): string {
+  const normalized = content.replace(/\r\n/g, "\n");
+  const match = normalized.match(/^---\n[\s\S]*?\n---\n/);
+  if (!match) throw new Error("persona projection has no YAML frontmatter");
+  return match[0];
+}
+
 export class LettaService {
   private client: LettaAgentClient;
   private readonly sessions = new Map<string, PooledSession>();
@@ -714,6 +727,77 @@ export class LettaService {
       return true;
     } catch (error) {
       throw toEvaError(error, `updating the system prompt of ${agentId}`);
+    }
+  }
+
+  /**
+   * Replace only the managed persona projection in the agent's MemFS.
+   *
+   * SDK 0.7.1 deliberately exposes the active checkout through
+   * getDeviceStatus(), but has no public self-hosted file mutation API. The
+   * App Server and this service therefore share the same persistent volume;
+   * the write follows Letta Code's own supported local MemFS convention:
+   * preserve frontmatter, update system/persona.md, and commit that path.
+   */
+  async updateAgentPersona(
+    agentId: string,
+    conversationId: string,
+    persona: string,
+  ): Promise<boolean> {
+    this.closeSession(conversationId);
+    const session = this.client.resumeSession(conversationId, await this.sessionOptions(conversationId));
+    try {
+      const initializable = session as unknown as { initialize?: () => Promise<unknown> };
+      if (typeof initializable.initialize === "function") await initializable.initialize();
+      const status = await session.getDeviceStatus({
+        timeoutMs: Math.min(this.runtime.app_server_request_timeout_ms, 15_000),
+      });
+      if (session.agentId && session.agentId !== agentId) {
+        throw new Error("conversation belongs to a different agent");
+      }
+      if (!status.memoryDirectory) throw new Error("MemFS memory directory is unavailable");
+      const memoryRoot = resolve(status.memoryDirectory);
+      const personaPath = join(memoryRoot, "system", "persona.md");
+      if (relative(memoryRoot, personaPath).startsWith("..")) {
+        throw new Error("persona projection is outside the MemFS checkout");
+      }
+      const current = await readFile(personaPath, "utf8");
+      const frontmatter = requiredFrontmatter(current);
+      const next = `${frontmatter}${persona.trim()}\n`;
+      const framework = evaMemoryBlocks(persona).find(
+        (block) => block.label === "therapeutic_framework",
+      )!;
+      const frameworkPath = join(memoryRoot, "system", "therapeutic_framework.md");
+      const frameworkCurrent = await readFile(frameworkPath, "utf8").catch(() => "");
+      const frameworkFrontmatter = frameworkCurrent
+        ? requiredFrontmatter(frameworkCurrent)
+        : `---\ndescription: ${framework.description}\n---\n`;
+      const frameworkNext = `${frameworkFrontmatter}${framework.value.trim()}\n`;
+      const personaChanged = current.replace(/\r\n/g, "\n") !== next;
+      const frameworkChanged = frameworkCurrent.replace(/\r\n/g, "\n") !== frameworkNext;
+      if (!personaChanged && !frameworkChanged) return false;
+
+      if (personaChanged) await writeFile(personaPath, next, "utf8");
+      if (frameworkChanged) await writeFile(frameworkPath, frameworkNext, "utf8");
+      const changedPaths = [
+        ...(personaChanged ? ["system/persona.md"] : []),
+        ...(frameworkChanged ? ["system/therapeutic_framework.md"] : []),
+      ];
+      await execFileAsync("git", [
+        "-c", "user.name=Evaself",
+        "-c", `user.email=${agentId}@letta.com`,
+        "add", "--", ...changedPaths,
+      ], { cwd: memoryRoot, timeout: 10_000 });
+      await execFileAsync("git", [
+        "-c", "user.name=Evaself",
+        "-c", `user.email=${agentId}@letta.com`,
+        "commit", "-m", "chore: sync canonical Eva context", "--", ...changedPaths,
+      ], { cwd: memoryRoot, timeout: 15_000 });
+      return true;
+    } catch (error) {
+      throw toEvaError(error, `updating the persona projection of ${agentId}`);
+    } finally {
+      session.close();
     }
   }
 

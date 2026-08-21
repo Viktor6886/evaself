@@ -20,7 +20,6 @@
 import { unsupportedOperation } from "../errors.js";
 
 export const AGENT_SDK_PACKAGE = "@letta-ai/letta-agent-sdk";
-export const ADMIN_CLIENT_PACKAGE = "@letta-ai/letta-client";
 
 /**
  * Версии, на которых реестр подтверждён. Держатся здесь, а не читаются из
@@ -30,7 +29,6 @@ export const ADMIN_CLIENT_PACKAGE = "@letta-ai/letta-client";
  */
 export const VERIFIED_VERSIONS = {
   agentSdk: "0.7.1",
-  adminClient: "1.12.1",
 } as const;
 
 /**
@@ -41,7 +39,7 @@ export const VERIFIED_VERSIONS = {
  * пакета значило бы потерять границу, ради которой административный
  * клиент вообще заведён отдельно.
  */
-export type LettaSurface = "agent-sdk" | "session" | "admin-client";
+export type LettaSurface = "agent-sdk" | "session";
 
 /**
  * Как операция проверяется.
@@ -156,8 +154,8 @@ const CAPABILITIES = [
   {
     id: "conversation.delete",
     title: "Удаление conversation",
-    surface: "admin-client",
-    path: "conversations.delete",
+    surface: null,
+    path: null,
     check: "method",
     note:
       "В Agent SDK удаления conversation нет вовсе — только архивирование. " +
@@ -166,8 +164,8 @@ const CAPABILITIES = [
   {
     id: "conversation.recompile",
     title: "Пересборка compiled context conversation",
-    surface: "admin-client",
-    path: "conversations.recompile",
+    surface: null,
+    path: null,
     check: "method",
     note:
       "Для explicit conversations используется официальный метод клиента 1.12.1; " +
@@ -245,22 +243,23 @@ const CAPABILITIES = [
   {
     id: "memory-block.list",
     title: "Список memory blocks агента",
-    surface: "admin-client",
-    path: "agents.blocks.list",
+    surface: null,
+    path: null,
     check: "method",
+    note: "Не поддерживается Agent SDK для self-hosted WebSocket App Server.",
   },
   {
     id: "memory-block.retrieve",
     title: "Чтение memory block агента",
-    surface: "admin-client",
-    path: "agents.blocks.retrieve",
+    surface: null,
+    path: null,
     check: "method",
   },
   {
     id: "memory-block.update",
     title: "Точечное изменение memory block",
-    surface: "admin-client",
-    path: "agents.blocks.update",
+    surface: null,
+    path: null,
     check: "method",
     note:
       "Единственная официальная запись в блок. В Agent SDK её нет: он умеет " +
@@ -269,22 +268,22 @@ const CAPABILITIES = [
   {
     id: "memory-block.attach",
     title: "Присоединение блока к агенту",
-    surface: "admin-client",
-    path: "agents.blocks.attach",
+    surface: null,
+    path: null,
     check: "method",
   },
   {
     id: "memory-block.detach",
     title: "Отсоединение блока от агента",
-    surface: "admin-client",
-    path: "agents.blocks.detach",
+    surface: null,
+    path: null,
     check: "method",
   },
   {
     id: "memory-block.create",
     title: "Создание отдельного блока",
-    surface: "admin-client",
-    path: "blocks.create",
+    surface: null,
+    path: null,
     check: "method",
   },
 
@@ -292,29 +291,29 @@ const CAPABILITIES = [
   {
     id: "tool.list",
     title: "Каталог инструментов",
-    surface: "admin-client",
-    path: "tools.list",
+    surface: null,
+    path: null,
     check: "method",
   },
   {
     id: "tool.attach",
     title: "Присоединение инструмента к агенту",
-    surface: "admin-client",
-    path: "agents.tools.attach",
+    surface: null,
+    path: null,
     check: "method",
   },
   {
     id: "tool.detach",
     title: "Отсоединение инструмента от агента",
-    surface: "admin-client",
-    path: "agents.tools.detach",
+    surface: null,
+    path: null,
     check: "method",
   },
   {
     id: "tool.approval",
     title: "Режим подтверждения инструмента",
-    surface: "admin-client",
-    path: "agents.tools.updateApproval",
+    surface: null,
+    path: null,
     check: "method",
   },
 
@@ -322,29 +321,29 @@ const CAPABILITIES = [
   {
     id: "mcp-server.list",
     title: "Список MCP-серверов",
-    surface: "admin-client",
-    path: "mcpServers.list",
+    surface: null,
+    path: null,
     check: "method",
   },
   {
     id: "folder.list",
     title: "Список knowledge folders",
-    surface: "admin-client",
-    path: "folders.list",
+    surface: null,
+    path: null,
     check: "method",
   },
   {
     id: "agent.export",
     title: "Экспорт агента",
-    surface: "admin-client",
-    path: "agents.exportFile",
+    surface: null,
+    path: null,
     check: "method",
   },
   {
     id: "agent.import",
     title: "Импорт агента",
-    surface: "admin-client",
-    path: "agents.importFile",
+    surface: null,
+    path: null,
     check: "method",
   },
 
@@ -511,12 +510,9 @@ export function capabilityMatrix(): Array<{
     title: entry.title,
     supported: entry.surface !== null,
     surface: entry.surface,
-    version:
-      entry.surface === "admin-client"
-        ? VERIFIED_VERSIONS.adminClient
-        : entry.surface === null
-          ? null
-          : VERIFIED_VERSIONS.agentSdk,
-    note: entry.note ?? null,
+    version: entry.surface === null ? null : VERIFIED_VERSIONS.agentSdk,
+    note: entry.note ?? (entry.surface === null
+      ? "Не поддерживается Agent SDK для self-hosted WebSocket App Server; maintenance не блокирует turn."
+      : null),
   }));
 }

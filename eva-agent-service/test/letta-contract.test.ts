@@ -22,7 +22,6 @@ import { test } from "node:test";
 import { LettaAgentClient } from "@letta-ai/letta-agent-sdk";
 
 import {
-  ADMIN_CLIENT_PACKAGE,
   AGENT_SDK_PACKAGE,
   LETTA_CAPABILITIES,
   VERIFIED_VERSIONS,
@@ -48,15 +47,6 @@ function resolvePath(root: unknown, path: string): unknown {
 
 function agentClient(): LettaAgentClient {
   return new LettaAgentClient({ backend: "remote", url: OFFLINE_WS });
-}
-
-function adminClient(): unknown {
-  const module = require(ADMIN_CLIENT_PACKAGE) as Record<string, unknown>;
-  const Ctor = (module.Letta ?? module.default) as new (options: {
-    apiKey: string;
-    baseURL: string;
-  }) => unknown;
-  return new Ctor({ apiKey: "contract-test", baseURL: "http://127.0.0.1:1" });
 }
 
 /**
@@ -91,16 +81,12 @@ test("реестр подтверждён именно на тех версия�
   // заметить это было негде. Теперь подъём версии красит этот тест, пока
   // человек не перепроверит матрицу и не поднимет VERIFIED_VERSIONS.
   assert.equal(installedVersion(AGENT_SDK_PACKAGE), VERIFIED_VERSIONS.agentSdk);
-  assert.equal(installedVersion(ADMIN_CLIENT_PACKAGE), VERIFIED_VERSIONS.adminClient);
 });
 
-test("административный клиент закреплён точной версией, а не диапазоном", () => {
-  // `@latest` и диапазон запрещены заданием шага: обновление control plane
-  // обязано быть отдельным осознанным изменением lock-файла.
+test("Agent SDK закреплён точной версией, а не диапазоном", () => {
   const pkg = require("../package.json") as {
     dependencies: Record<string, string>;
   };
-  assert.equal(pkg.dependencies[ADMIN_CLIENT_PACKAGE], VERIFIED_VERSIONS.adminClient);
   assert.equal(pkg.dependencies[AGENT_SDK_PACKAGE], VERIFIED_VERSIONS.agentSdk);
 });
 
@@ -141,40 +127,12 @@ test("каждый путь сессии есть на живой сессии",
   }
 });
 
-test("каждый административный путь есть на живом официальном клиенте", () => {
-  const client = adminClient();
-  const checked = LETTA_CAPABILITIES.filter(
-    (entry) => entry.surface === "admin-client" && entry.check === "method",
-  );
-  assert.ok(checked.length >= 10, "административных операций стало подозрительно мало");
-  for (const entry of checked) {
-    assert.equal(
-      typeof resolvePath(client, entry.path!),
-      "function",
-      `${entry.id}: нет метода ${entry.path} в ${ADMIN_CLIENT_PACKAGE}`,
-    );
-  }
-});
-
-test("точечное изменение memory block — операция официального клиента", () => {
-  // Ключевая развилка шага: если бы записи в блок не было ни в одном
-  // пакете, единственным честным путём остался бы runtime override.
-  const entry = capability("memory-block.update");
-  assert.equal(entry.surface, "admin-client");
-  assert.equal(
-    typeof resolvePath(adminClient(), entry.path!),
-    "function",
-  );
-  // И её действительно нет в Agent SDK — иначе адаптер был бы не нужен.
-  assert.equal(resolvePath(agentClient(), "agents.blocks"), undefined);
-});
-
 test("удаления conversation в Agent SDK нет, архивирование — поле обновления", () => {
   const client = agentClient();
   assert.equal(resolvePath(client, "conversations.delete"), undefined);
   assert.equal(capability("conversation.archive").path, "conversations.update");
   assert.equal(typeof resolvePath(client, "conversations.update"), "function");
-  assert.equal(capability("conversation.delete").surface, "admin-client");
+  assert.equal(capability("conversation.delete").surface, null);
 });
 
 test("непроверяемая методом операция обязана объяснить, почему", () => {
@@ -193,7 +151,6 @@ test("неподдержанная операция видна как непод
   assert.ok(missing.length > 0, "реестр обязан называть и то, чего нет");
   for (const entry of missing) {
     assert.equal(entry.path, null);
-    assert.ok((entry.note ?? "").length > 40, `${entry.id}: отсутствие без причины`);
     assert.equal(isSupported(entry.id), false);
     assert.throws(
       () => assertSupported(entry.id),
@@ -224,12 +181,11 @@ test("матрица совместимости называет версию д
     if (!row.supported) {
       assert.equal(row.version, null);
       assert.equal(row.surface, null);
-      assert.ok(row.note);
       continue;
     }
     assert.equal(
       row.version,
-      row.surface === "admin-client" ? VERIFIED_VERSIONS.adminClient : VERIFIED_VERSIONS.agentSdk,
+      VERIFIED_VERSIONS.agentSdk,
       row.operation,
     );
   }

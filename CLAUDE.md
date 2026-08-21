@@ -54,7 +54,7 @@ Evaself — продукт вокруг него.** Второго когнит�
 1. PostgreSQL — единственный канонический источник истины для продуктовых данных: пользователей, tenancy, mappings, бизнес-состояния, версий, заданий, approvals, конфигурации, аналитики, аудита и идемпотентности. Память агента к продуктовым данным не относится: она принадлежит Letta.
 2. Valkey хранит только восстановимое операционное состояние: locks, semaphores, BullMQ, rate limits, кэш. Потеря Valkey не означает потерю канонических данных.
 3. @letta-ai/letta-agent-sdk — единственный conversational и когнитивный runtime. LangChain, LangGraph, Hermes, OpenClaw, AgentOS не могут стать вторым agent runtime. Собственный слой поверх Letta, который решает за модель, что вспомнить, какой навык открыть или какой инструмент вызвать, — тот же второй runtime под другим именем.
-4. @letta-ai/letta-client разрешён только как административный control plane после contract-тестов. Он не создаёт второй путь выполнения диалога.
+4. `@letta-ai/letta-client` не используется приложением против self-hosted runtime. Runtime и maintenance идут через Agent SDK/WebSocket; неподдержанная maintenance-операция fail-open.
 5. Один внутренний пользователь = один активный агент Евы + несколько изолированных conversations по назначению. Agent — постоянная сущность, conversation — ветка сообщений: новый conversation не означает нового агента.
 6. Telegram и Mini App связываются с одной внутренней учётной записью через проверенную подпись и mapping. Имя, username, город, email и телефон не являются ключом объединения пользователей.
 7. Durable Telegram ingress и delivery остаются в PostgreSQL `telegram_updates` и `telegram_outbox`. Интерактивный ingress и agent runs не переносятся в BullMQ.
