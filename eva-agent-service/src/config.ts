@@ -157,10 +157,6 @@ export interface Config {
    * попадает в журнал и не мешает старту.
    */
   lettaContractVerify: boolean;
-  /** Административный control plane Letta (`@letta-ai/letta-client`). */
-  lettaAdminClientEnabled: boolean;
-  /** HTTP-адрес App Server для control plane. Пустой — путь недоступен. */
-  lettaAdminBaseUrl: string;
   /** Сколько ход ждёт доставку персоны устаревшему агенту. */
   personaSyncTurnTimeoutMs: number;
   /** Локальный час утреннего и вечернего check-in. */
@@ -216,28 +212,6 @@ export interface Config {
   /** How many idle sessions to keep open before evicting the oldest. */
   sessionPoolSize: number;
   sessionIdleMs: number;
-}
-
-/**
- * HTTP-адрес того же App Server.
- *
- * Agent SDK ходит по WebSocket, control plane — по HTTP, но сервис один.
- * Вторая переменная окружения ради одной замены схемы и хвоста пути
- * означала бы ещё одно место, где установка расходится сама с собой.
- */
-export function httpFromWebsocket(url: string): string {
-  const trimmed = url.trim();
-  if (!trimmed) return "";
-  try {
-    const parsed = new URL(trimmed);
-    parsed.protocol = parsed.protocol === "wss:" ? "https:" : "http:";
-    parsed.pathname = "/";
-    parsed.search = "";
-    parsed.hash = "";
-    return parsed.toString().replace(/\/$/, "");
-  } catch {
-    return "";
-  }
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -415,15 +389,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     knowledgeUploadsEnabled: bool("EVA_KNOWLEDGE_UPLOADS", false),
     researchOrchestratorEnabled: bool("EVA_RESEARCH_ORCHESTRATOR", false),
     lettaContractVerify: bool("EVA_LETTA_CONTRACT_VERIFY", false),
-    // Control plane включён по умолчанию: через него Ева получает
-    // канонический текст персоны. Выключенный, он оставлял агентов,
-    // созданных раньше, с персоной того дня — в том числе с мужским
-    // родом, — и починить это было нечем.
-    lettaAdminClientEnabled: bool("EVA_LETTA_ADMIN_CLIENT", true),
-    // Адрес выводится из адреса App Server, если не задан явно: это один
-    // и тот же сервис, и требовать вторую переменную незачем.
-    lettaAdminBaseUrl: str("EVA_LETTA_ADMIN_BASE_URL")
-      || httpFromWebsocket(str("LETTA_APP_SERVER_URL", "ws://letta-app-server:4500/ws")),
     personaSyncTurnTimeoutMs: clampedInt("EVA_PERSONA_SYNC_TURN_TIMEOUT_MS", 3_000, 250, 15_000),
     checkinMorningHour: clampedInt("EVA_CHECKIN_MORNING_HOUR", 9, 5, 12),
     checkinEveningHour: clampedInt("EVA_CHECKIN_EVENING_HOUR", 21, 17, 23),

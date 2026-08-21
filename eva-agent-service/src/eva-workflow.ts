@@ -2,7 +2,7 @@ import type { Config } from "./config.js";
 import { type CrisisMonitor, safetyDirective } from "./crisis.js";
 import type { AgentLinkRow, Database, SttUsageAttempt, UserRow } from "./db.js";
 import type { InboxResult } from "./delivery/inbox.js";
-import { appServerUnavailable, EvaError } from "./errors.js";
+import { EvaError } from "./errors.js";
 import { preferredResponseLanguage, t } from "./i18n/index.js";
 import type { SupportedLanguage } from "./i18n/language-resolver.js";
 import type { LettaService } from "./letta.js";
@@ -170,11 +170,16 @@ export class EvaWorkflow {
      */
     private readonly personaSync?: {
       syncAgent(
-        input: { agentId: string; userId: number; storedVersion: string | null },
+        input: {
+          agentId: string;
+          userId: number;
+          conversationId: string | null;
+          storedVersion: string | null;
+        },
         persona: string,
         options?: { timeoutMs?: number },
         systemPrompt?: string,
-      ): Promise<"updated" | "up_to_date" | "failed" | "disabled">;
+      ): Promise<"updated" | "up_to_date" | "failed" | "unsupported">;
       persona(): string;
       systemPrompt(): string;
     },
@@ -519,13 +524,18 @@ export class EvaWorkflow {
         // первому сообщению человека, а агент со старым текстом успеет
         // ответить о себе в мужском роде. Проход ограничен по времени;
         // устаревший compiled context отправлять модели нельзя.
-        let syncOutcome: "updated" | "up_to_date" | "failed" | "disabled" = "up_to_date";
+        let syncOutcome: "updated" | "up_to_date" | "failed" | "unsupported" = "up_to_date";
         if (this.personaSync) {
           const storedVersion = typeof link.meta?.persona_version === "string"
             ? link.meta.persona_version
             : null;
           syncOutcome = await this.personaSync.syncAgent(
-            { agentId: link.agent_id, userId: user.id, storedVersion },
+            {
+              agentId: link.agent_id,
+              userId: user.id,
+              conversationId: link.conversation_id,
+              storedVersion,
+            },
             this.personaSync.persona(),
             { timeoutMs: this.config.personaSyncTurnTimeoutMs },
             this.personaSync.systemPrompt(),
@@ -691,11 +701,11 @@ export class EvaWorkflow {
             ].join("\n");
           }
         }
-        if (syncOutcome === "failed" || syncOutcome === "disabled") {
-          throw appServerUnavailable(
-            "Канонический context агента не применён; ход будет повторён после синхронизации",
-            { agent_id: link.agent_id, sync: syncOutcome },
-          );
+        if (syncOutcome === "failed" || syncOutcome === "unsupported") {
+          this.logger.warn("Canonical context sync degraded; continuing turn", {
+            agent_id: link.agent_id,
+            sync: syncOutcome,
+          });
         }
         typing.stop = this.telegram.startTyping(update.chatId, this.config.typingIntervalMs);
         // Окно этого хода после гейтов: голосовая часть могла выпасть по

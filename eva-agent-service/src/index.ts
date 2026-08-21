@@ -35,7 +35,6 @@ import { UserProfileService } from "./profile/profile-service.js";
 import { ValkeyRateLimiter } from "./public/rate-limit.js";
 import { ValkeyMiniAppSessions } from "./public/webapp-session.js";
 import { UserTurnLock } from "./turns/user-turn-lock.js";
-import { buildAdminPlane } from "./letta/admin-client.js";
 import { PersonaSync } from "./letta/persona-sync.js";
 import { RuntimeContextBuilder } from "./runtime/runtime-context.js";
 import { SdkSettingsManager } from "./sdk-settings.js";
@@ -135,17 +134,8 @@ async function main(): Promise<void> {
   // получает их при создании; созданного раньше приводит к текущей версии
   // тот же проход, не меняя agent_id, память или conversations.
   //
-  // Работа идёт в фоне и за тем же флагом, что и весь control plane:
-  // старт сервиса её не ждёт, а без `EVA_LETTA_ADMIN_CLIENT` записывать
-  // блоки нечем и синхронизация честно сообщает, что пропущена.
   const personaSync = new PersonaSync(
     db,
-    buildAdminPlane({
-      enabled: config.lettaAdminClientEnabled,
-      baseUrl: config.lettaAdminBaseUrl,
-      token: config.appServerToken || null,
-      logger,
-    }),
     logger,
     letta,
   );
@@ -230,20 +220,11 @@ async function main(): Promise<void> {
     goals,
     effects,
     mcpPolicies && mcpInvoker ? { policies: mcpPolicies, invoker: mcpInvoker } : undefined,
-    // Самопроверка смотрит на уже собранные факты: снимок сессии SDK и
-    // состав блоков через тот же control plane, что ведёт синхронизацию.
-    // Второго обхода рантайма не заводится.
+    // Самопроверка смотрит на уже собранные факты сессии SDK. Состав
+    // legacy blocks через HTTP не запрашивается: App Server WebSocket-only.
     {
       facts: () => ({ runtime: letta.runtimeFacts, session: letta.sessionFacts }),
-      memory: async (agentId: string) => {
-        try {
-          const observed = await personaSync.observeAgent(agentId);
-          return { ...observed, checked: true };
-        } catch {
-          // Недоступный control plane — это «не наблюдаю», а не «пусто».
-          return null;
-        }
-      },
+      memory: async (_agentId: string) => null,
       agentOf: async (userId: number) => await db.agentIdOfUser(userId),
     },
   );
@@ -300,7 +281,7 @@ async function main(): Promise<void> {
     // аккаунт, а не за дневник.
     new ChannelLinkService(db),
     {
-      syncAgent: (input, text, options, prompt) => personaSync.syncAgent(input, text, options, prompt),
+       syncAgent: (input, text, options, prompt) => personaSync.syncAgent(input, text, options, prompt),
       persona: () => persona,
       systemPrompt: () => systemPrompt,
     },

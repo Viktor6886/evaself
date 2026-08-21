@@ -9,7 +9,7 @@
 | Letta session | Единственный conversational и cognitive runtime | `eva-agent-service/src/letta.ts` |
 | Runtime facts/readiness | Фактические возможности и готовность Letta | `src/letta/readiness.ts`, `src/letta/capabilities.ts` |
 | Memory blocks | Четыре нативных блока агента | `src/letta/memory-blocks.ts` |
-| Administrative plane | Управление объектами Letta без второго chat runtime | `src/letta/admin-client.ts` |
+| Canonical context | SDK/WebSocket system update и MemFS reconciliation, fail-open | `src/letta.ts`, `src/letta/persona-sync.ts` |
 | Persona sync | Односторонняя синхронизация канонической персоны | `src/letta/persona-sync.ts`, `library/persona/eva.md` |
 | Runtime context | Время, профиль, подписка, цели и ближайшие задачи текущего хода | `src/runtime/runtime-context.ts` |
 

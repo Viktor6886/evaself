@@ -1,418 +1,205 @@
-/**
- * Канонические system prompt и ядро памяти — существующим агентам.
- *
- * Новый агент получает четыре блока при создании (`evaMemoryBlocks`), а
- * созданный раньше остаётся с тем набором, который был на тот день. Так
- * и вышло, что часть агентов говорила о себе в мужском роде, а у части
- * вместо `therapeutic_framework` висели блоки прежней схемы.
- *
- * Здесь один проход сверки, а не два разных: персона — частный случай
- * канонического блока, и заводить ей отдельный путь значило бы иметь два
- * механизма, которые расходятся.
- *
- * Направление всегда одно: файл → агент. Обратной синхронизации нет
- * (инвариант 12). Содержимое блоков живёт только в Letta; в PostgreSQL
- * остаётся отметка версии и перечень legacy-меток — но не значения.
- *
- * Границы того, что этот проход себе позволяет:
- *
- * - `persona` и `therapeutic_framework` ведёт Evaself: их содержимое
- *   приводится к каноническому;
- * - `human` и `current_state` принадлежат агенту и человеку: проход
- *   гарантирует, что блок есть, и **никогда** не переписывает то, что в
- *   нём уже накоплено;
- * - блок прежней схемы не удаляется и не отсоединяется, пока его
- *   содержимое некуда безопасно перенести. Официального пути «блок →
- *   MemFS» через control plane на установленных версиях нет
- *   (`memory-block.export-to-memfs` в реестре возможностей), поэтому
- *   такой блок остаётся на месте с отметкой `legacy_pending_migration`.
- */
-
 import { createHash } from "node:crypto";
 
 import type { Database } from "../db.js";
 import type { Logger } from "../logger.js";
-import type { LettaAdminPlane } from "./admin-client.js";
-import { capability } from "./capabilities.js";
-import { evaMemoryBlocks, SYNCED_BLOCK_LABELS } from "./memory-blocks.js";
+import { evaMemoryBlocks } from "./memory-blocks.js";
 
-/**
- * Состояние синхронизации для `/health` и `doctor`.
- *
- * Молча пропущенная синхронизация ничем не отличается от выполненной, и
- * ровно так мужской род и держался месяцами: control plane был выключен,
- * а сказать об этом было некому.
- */
+export type CanonicalSyncStatus = "ok" | "degraded" | "unsupported" | "failed" | "never";
+
 export interface PersonaSyncState {
-  /** Доступен ли control plane. Выключенный — это `disabled`, а не «ок». */
-  enabled: boolean;
-  /**
-   * Исход последней попытки синхронизации, а не вечная отметка о былом
-   * отказе: агент, которого не удалось обновить массовым проходом,
-   * получает персону в своём же ходе, и держать после этого `failed`
-   * значило бы показывать человеку несуществующую поломку.
-   */
-  status: "ok" | "disabled" | "failed" | "stale" | "never";
+  status: CanonicalSyncStatus;
   version: string;
   lastRunAt: string | null;
   updated: number;
   upToDate: number;
   failed: number;
-  /** Агенты, которых нашли устаревшими прямо в ходе и не смогли обновить. */
+  unsupported: number;
   staleAgents: number;
-  /** Агенты, у которых остались блоки прежней схемы, ждущие переноса. */
-  legacyAgents: number;
 }
 
 export interface PersonaSyncResult {
-  /** Сколько агентов просмотрено. */
   checked: number;
-  /** Сколько получили новый текст. */
   updated: number;
-  /** Сколько уже были с ним. */
   upToDate: number;
-  /** Сколько не удалось обновить. */
   failed: number;
-  /** Версия канонического ядра, до которой шла сверка. */
+  unsupported: number;
   version: string;
-  /** У скольких агентов остались блоки прежней схемы. */
-  legacyAgents: number;
 }
 
-/**
- * Метки, чьё содержимое ведёт Evaself.
- *
- * Остальные два блока канонического набора принадлежат агенту и человеку:
- * проход только следит, что они есть. Перезапись `human` стартовым
- * значением стёрла бы всё, что Ева узнала о человеке, — это не «сверка
- * схемы», это потеря памяти.
- */
-const EVASELF_OWNED: ReadonlySet<string> = new Set(["persona", "therapeutic_framework"]);
-
-/**
- * Версия канонического runtime-контекста — отпечаток того, что мы доставляем.
- *
- * Считается по содержимому блоков, которые ведёт Evaself, а не по одной
- * персоне: правка терапевтической рамки — такое же расхождение с
- * агентом, как правка персоны, и пропускать её нельзя.
- */
-export function canonicalMemoryVersion(persona: string, systemPrompt?: string): string {
-  const owned = evaMemoryBlocks(persona)
-    .filter((block) => EVASELF_OWNED.has(block.label))
-    .map((block) => `${block.label}\n${block.value}`)
-    .join("\n---\n");
-  const canonical = systemPrompt === undefined
-    ? owned
-    : `${owned}\n---\nsystem_prompt\n${systemPrompt}`;
-  return createHash("sha256").update(canonical).digest("hex").slice(0, 12);
-}
-
-/** Блок прежней схемы: что о нём известно, без единого знака содержимого. */
 export interface LegacyBlockRecord {
   id: string;
   label: string;
   description: string | null;
-  /** Длина значения в знаках. Само значение никуда не уходит. */
   size: number;
-  /**
-   * Пока официального пути перенести содержимое во внешнюю память нет,
-   * состояние ровно одно: блок остаётся у агента и ждёт переноса.
-   */
   status: "legacy_pending_migration";
 }
 
-/** Что сделал один проход сверки. Метки — да, значения — нет. */
-export interface MemoryReconcileReport {
-  agentId: string;
-  created: string[];
-  updated: string[];
-  kept: string[];
-  legacy: LegacyBlockRecord[];
-  /** Сколько канонических блоков на месте после прохода. */
-  canonical: number;
-  /** Обновлён ли raw system prompt агента через официальный Agent SDK. */
-  systemPromptUpdated: boolean;
-  /** Сколько explicit conversations получили новый compiled context. */
-  recompiledConversations: number;
-}
-
-interface RuntimeContextCoordinator {
-  /** Возвращает `true`, только когда raw system prompt действительно отличался. */
+interface CanonicalRuntime {
   updateAgentSystemPrompt(agentId: string, systemPrompt: string): Promise<boolean>;
-  /** Закрыть только pooled sessions указанного агента/conversations. */
-  invalidateAgentSessions(agentId: string, conversationIds: readonly string[]): void;
+  updateAgentPersona(agentId: string, conversationId: string, persona: string): Promise<boolean>;
 }
 
-/**
- * Состояние живёт в модуле, а не в экземпляре: его спрашивает `/health`,
- * которому до конструктора синхронизации дела нет.
- */
 const state: PersonaSyncState = {
-  enabled: false,
   status: "never",
   version: "",
   lastRunAt: null,
   updated: 0,
   upToDate: 0,
   failed: 0,
+  unsupported: 0,
   staleAgents: 0,
-  legacyAgents: 0,
 };
 
 export function personaSyncState(): PersonaSyncState {
   return { ...state };
 }
 
+/** Fingerprint of every repository-managed runtime context component. */
+export function canonicalMemoryVersion(persona: string, systemPrompt = ""): string {
+  const managedBlocks = evaMemoryBlocks(persona)
+    .filter((block) => block.label === "persona" || block.label === "therapeutic_framework")
+    .map((block) => `${block.label}\n${block.value}`)
+    .join("\n---\n");
+  return createHash("sha256")
+    .update(`${systemPrompt}\n---\n${managedBlocks}`)
+    .digest("hex")
+    .slice(0, 12);
+}
+
 export class PersonaSync {
+  private readonly inFlight = new Map<string, Promise<"updated" | "up_to_date" | "failed" | "unsupported">>();
+
   constructor(
     private readonly db: Database,
-    private readonly plane: LettaAdminPlane,
     private readonly logger: Logger,
-    private readonly runtime: RuntimeContextCoordinator,
+    private readonly runtime: CanonicalRuntime,
   ) {}
 
-  /**
-   * Довести персону существующих агентов до канонической.
-   *
-   * Отказ на одном агенте не прекращает работу: остальные не виноваты в
-   * том, что у одного не отвечает control plane. Текст персоны и
-   * значения блоков в журнал не попадают — только счётчики.
-   */
-  async sync(persona: string, systemPrompt?: string, limit = 500): Promise<PersonaSyncResult> {
+  /** Reconcile existing agents with bounded concurrency and per-agent isolation. */
+  async sync(persona: string, systemPrompt: string, limit = 500): Promise<PersonaSyncResult> {
     const version = canonicalMemoryVersion(persona, systemPrompt);
     const result: PersonaSyncResult = {
-      checked: 0, updated: 0, upToDate: 0, failed: 0, legacyAgents: 0, version,
+      checked: 0,
+      updated: 0,
+      upToDate: 0,
+      failed: 0,
+      unsupported: 0,
+      version,
     };
     state.version = version;
-    state.enabled = this.plane.available;
-    if (!this.plane.available) {
-      state.status = "disabled";
-      state.lastRunAt = new Date().toISOString();
-      this.logger.warn("Сверка ядра памяти пропущена: control plane выключен", { version });
-      return result;
-    }
+    const agents = await this.db.listAgentsForPersonaSync(limit);
 
-    for (const agent of await this.db.listAgentsForPersonaSync(limit)) {
-      result.checked += 1;
-      if (agent.personaVersion === version) {
-        result.upToDate += 1;
-        continue;
+    let cursor = 0;
+    const worker = async (): Promise<void> => {
+      while (cursor < agents.length) {
+        const agent = agents[cursor++];
+        if (!agent) return;
+        result.checked += 1;
+        if (agent.personaVersion === version) {
+          result.upToDate += 1;
+          continue;
+        }
+        const outcome = await this.reconcileAgent(agent, persona, systemPrompt);
+        result[outcome === "updated" ? "updated" : outcome === "up_to_date" ? "upToDate" : outcome] += 1;
       }
-      try {
-        const report = await this.reconcileAgent(agent, persona, systemPrompt);
-        if (
-          report.created.length + report.updated.length + report.recompiledConversations > 0
-          || report.systemPromptUpdated
-        ) {
-          result.updated += 1;
-        } else result.upToDate += 1;
-        result.legacyAgents += report.legacy.length > 0 ? 1 : 0;
-      } catch (error) {
-        result.failed += 1;
-        this.logger.warn("Ядро памяти агента не сведено", {
-          agentId: agent.agentId,
-          code: error instanceof Error ? error.name : "unknown_error",
-        });
-      }
-    }
+    };
+    await Promise.all(Array.from({ length: Math.min(4, agents.length) }, worker));
 
     state.lastRunAt = new Date().toISOString();
     state.updated = result.updated;
     state.upToDate = result.upToDate;
     state.failed = result.failed;
-    state.status = result.failed > 0 ? "failed" : "ok";
+    state.unsupported = result.unsupported;
+    state.status = result.failed > 0
+      ? (result.updated + result.upToDate > 0 ? "degraded" : "failed")
+      : result.unsupported > 0 ? "unsupported" : "ok";
     if (state.status === "ok") state.staleAgents = 0;
-    state.legacyAgents = result.legacyAgents;
-    this.logger.info("Ядро памяти сведено с существующими агентами", { ...result });
+    this.logger.info("Canonical runtime context reconciliation finished", { ...result });
     return result;
   }
 
-  /**
-   * Свести ядро памяти одного агента с каноническим.
-   *
-   * Один проход на все четыре блока: недостающий заводится и
-   * присоединяется, наш — приводится к каноническому тексту, чужой
-   * остаётся как есть. Блоки прежней схемы только переписываются в
-   * инвентарь: их содержимое некуда безопасно перенести, а снять блок,
-   * не сохранив содержимое, значит потерять память человека.
-   *
-   * Повторный проход ничего не делает: недостающих нет, наши совпадают,
-   * чужие не трогаются, legacy остаются с той же отметкой.
-   */
   async reconcileAgent(
-    input: { agentId: string; userId: number },
+    input: { agentId: string; userId: number; conversationId: string | null },
     persona: string,
-    systemPrompt?: string,
-  ): Promise<MemoryReconcileReport> {
-    const canonical = evaMemoryBlocks(persona);
-    const canonicalLabels = new Set<string>(SYNCED_BLOCK_LABELS);
-    const present = await this.plane.listMemoryBlocks(input.agentId);
-    const byLabel = new Map(present.map((block) => [block.label, block]));
-    const report: MemoryReconcileReport = {
-      agentId: input.agentId, created: [], updated: [], kept: [], legacy: [], canonical: 0,
-      systemPromptUpdated: false, recompiledConversations: 0,
-    };
+    systemPrompt: string,
+  ): Promise<"updated" | "up_to_date" | "failed" | "unsupported"> {
+    const existing = this.inFlight.get(input.agentId);
+    if (existing) return await existing;
+    const work = this.reconcileAgentOnce(input, persona, systemPrompt)
+      .finally(() => this.inFlight.delete(input.agentId));
+    this.inFlight.set(input.agentId, work);
+    return await work;
+  }
 
-    if (systemPrompt !== undefined) {
-      report.systemPromptUpdated = await this.runtime.updateAgentSystemPrompt(
-        input.agentId,
-        systemPrompt,
-      );
+  private async reconcileAgentOnce(
+    input: { agentId: string; userId: number; conversationId: string | null },
+    persona: string,
+    systemPrompt: string,
+  ): Promise<"updated" | "up_to_date" | "failed" | "unsupported"> {
+    if (!input.conversationId) {
+      await this.db.recordCanonicalContextSyncState(input.agentId, input.userId, "unsupported");
+      return "unsupported";
     }
-
-    for (const block of canonical) {
-      const existing = byLabel.get(block.label);
-      if (!existing) {
-        await this.plane.createMemoryBlock(input.agentId, {
-          label: block.label,
-          value: block.value,
-          description: block.description ?? null,
-          limit: block.limit ?? null,
-        });
-        report.created.push(block.label);
-      } else if (!EVASELF_OWNED.has(block.label)) {
-        // Блок человека и агента. Он есть — этого достаточно; что в нём
-        // накоплено, знает только Ева, и стартовое значение это стёрло бы.
-        report.kept.push(block.label);
-      } else if (existing.value.trim() === block.value.trim()) {
-        report.kept.push(block.label);
-      } else {
-        await this.plane.updateMemoryBlock(input.agentId, block.label, block.value);
-        report.updated.push(block.label);
-      }
-      report.canonical += 1;
-    }
-
-    report.legacy = present
-      .filter((block) => !canonicalLabels.has(block.label))
-      .map((block) => ({
-        id: block.id,
-        label: block.label,
-        description: block.description,
-        size: block.value.length,
-        status: "legacy_pending_migration" as const,
-      }));
-
-    // Запись блоков меняет canonical state, но уже скомпилированный
-    // контекст explicit conversation от этого не обновляется. Версию можно
-    // подтвердить только после официального recompile и удаления старой
-    // runtime-сессии из пула.
-    //
-    // Recompile — best-effort: блоки уже записаны, а медленный recompile
-    // нескольких conversations не должен ронять весь ход пользователя.
-    // Устаревший compiled context обновится при следующем цикле синхронизации.
     try {
-      const conversationIds = await this.plane.recompileAgentConversations(input.agentId);
-      report.recompiledConversations = conversationIds.length;
-      this.runtime.invalidateAgentSessions(input.agentId, conversationIds);
+      const systemUpdated = await this.runtime.updateAgentSystemPrompt(input.agentId, systemPrompt);
+      const personaUpdated = await this.runtime.updateAgentPersona(
+        input.agentId,
+        input.conversationId,
+        persona,
+      );
+      await this.db.recordMemoryReconciled(input.agentId, input.userId, {
+        version: canonicalMemoryVersion(persona, systemPrompt),
+        legacy: [],
+      });
+      return systemUpdated || personaUpdated ? "updated" : "up_to_date";
     } catch (error) {
-      this.logger.warn("Recompile conversations не выполнен; блоки уже обновлены", {
+      await this.db.recordCanonicalContextSyncState(input.agentId, input.userId, "degraded")
+        .catch(() => undefined);
+      this.logger.warn("Canonical runtime context was not applied", {
         agentId: input.agentId,
         code: error instanceof Error ? error.name : "unknown_error",
       });
+      return "failed";
     }
-
-    await this.db.recordMemoryReconciled(input.agentId, input.userId, {
-      version: canonicalMemoryVersion(persona, systemPrompt),
-      legacy: report.legacy.map((block) => block.label),
-    });
-
-    if (report.legacy.length > 0) {
-      // Причина отказа от переноса записана в реестре возможностей —
-      // здесь она только пересказывается в журнал, чтобы дежурный не
-      // искал её по коду.
-      this.logger.info("У агента остались блоки прежней схемы", {
-        agentId: input.agentId,
-        labels: report.legacy.map((block) => block.label),
-        reason: capability("memory-block.export-to-memfs").note,
-      });
-    }
-    return report;
   }
 
-  /**
-   * Что у агента в блоках прямо сейчас — без единой записи.
-   *
-   * Самопроверке нужен факт, а не побочный эффект: спрашивать «какая у
-   * меня память» и попутно её править — разные операции, и вторая не
-   * должна случаться от вопроса. Классификация та же, что у сверки,
-   * поэтому «канонический» и «прежней схемы» здесь и там значат одно.
-   */
-  async observeAgent(agentId: string): Promise<{
-    canonicalPresent: string[];
-    legacy: LegacyBlockRecord[];
-  }> {
-    const present = await this.plane.listMemoryBlocks(agentId);
-    const canonicalLabels = new Set<string>(SYNCED_BLOCK_LABELS);
-    return {
-      canonicalPresent: present
-        .filter((block) => canonicalLabels.has(block.label))
-        .map((block) => block.label),
-      legacy: present
-        .filter((block) => !canonicalLabels.has(block.label))
-        .map((block) => ({
-          id: block.id,
-          label: block.label,
-          description: block.description,
-          size: block.value.length,
-          status: "legacy_pending_migration" as const,
-        })),
-    };
+  async observeAgent(): Promise<{ canonicalPresent: string[]; legacy: LegacyBlockRecord[] }> {
+    // Existing block CRUD is intentionally unavailable on the self-hosted
+    // WebSocket runtime. MemFS status is observed separately through the SDK.
+    return { canonicalPresent: [], legacy: [] };
   }
 
-  /**
-   * Свести ядро памяти одного агента — прямо перед его ходом.
-   *
-   * Массовый проход идёт при старте и может не успеть к первому
-   * сообщению человека, а агент со старым набором блоков успеет ответить
-   * о себе в мужском роде — или ответить вовсе без терапевтической
-   * рамки. Поэтому у хода есть свой короткий проход: он ограничен по
-   * времени и не роняет ход, если control plane молчит.
-   */
+  /** Fast pre-turn attempt. Failure is telemetry, never an availability gate. */
   async syncAgent(
-    input: { agentId: string; userId: number; storedVersion: string | null },
+    input: {
+      agentId: string;
+      userId: number;
+      conversationId: string | null;
+      storedVersion: string | null;
+    },
     persona: string,
     options: { timeoutMs?: number } = {},
-    systemPrompt?: string,
-  ): Promise<"updated" | "up_to_date" | "failed" | "disabled"> {
+    systemPrompt = "",
+  ): Promise<"updated" | "up_to_date" | "failed" | "unsupported"> {
     const version = canonicalMemoryVersion(persona, systemPrompt);
     state.version = version;
-    if (!this.plane.available) {
-      state.enabled = false;
-      state.status = "disabled";
-      return "disabled";
-    }
     if (input.storedVersion === version) return "up_to_date";
-
-    const deadline = new Promise<"failed">((resolve) => {
-      const timer = setTimeout(() => resolve("failed"), Math.max(250, options.timeoutMs ?? 3_000));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<"failed">((resolve) => {
+      timer = setTimeout(() => resolve("failed"), Math.max(250, options.timeoutMs ?? 3_000));
       timer.unref?.();
     });
-    const work = (async (): Promise<"updated" | "up_to_date" | "failed"> => {
-      try {
-        const report = await this.reconcileAgent(input, persona, systemPrompt);
-        return report.created.length + report.updated.length + report.recompiledConversations > 0
-          || report.systemPromptUpdated
-          ? "updated"
-          : "up_to_date";
-      } catch (error) {
-        this.logger.warn("Ядро памяти агента не сведено перед ходом", {
-          agentId: input.agentId,
-          code: error instanceof Error ? error.name : "unknown_error",
-        });
-        return "failed";
-      }
-    })();
-
-    const outcome = await Promise.race([work, deadline]);
+    const outcome = await Promise.race([
+      this.reconcileAgent(input, persona, systemPrompt),
+      timeout,
+    ]).finally(() => clearTimeout(timer));
     if (outcome === "failed") {
       state.staleAgents += 1;
-      state.status = "stale";
+      state.status = "degraded";
+    } else if (outcome === "unsupported") {
+      state.unsupported += 1;
+      state.status = "unsupported";
     } else {
-      // Проход удался — значит, control plane отвечает. Отказ прошлого
-      // массового прохода остаётся в счётчике `failed`, но текущим
-      // состоянием быть перестаёт.
-      if (outcome === "updated") state.updated += 1;
       state.status = "ok";
     }
     return outcome;
