@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import test from "node:test";
 
 test("canonical sync has no HTTP control-plane fallback", async () => {
@@ -22,7 +22,13 @@ test("sync failure cannot gate a Telegram turn", async () => {
   assert.doesNotMatch(source, /if \(syncOutcome[^}]+throw appServerUnavailable/s);
 });
 
-test("canonical files are mounted read-only and MemFS state is persisted", async () => {
+test("canonical files are mounted read-only and MemFS state is persisted", async (t) => {
+  try {
+    await access("../compose.yaml");
+  } catch {
+    t.skip("repository compose is outside the service Docker build context");
+    return;
+  }
   const compose = await readFile("../compose.yaml", "utf8");
   assert.match(compose, /\.\/library:\/app\/library:ro/);
   assert.match(compose, /letta_app_server_data:\/data\/letta:rw/);
