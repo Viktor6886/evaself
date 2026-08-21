@@ -896,9 +896,14 @@ export class Database {
    * а не копия блока: значение блока живёт только в Letta (инвариант 12).
    * По отметке видно, кому канонический текст уже доставлен, и повторная
    * синхронизация не трогает их снова.
+   *
+   * Выборка идёт страницами: `LIMIT` без смещения сводил первые 500
+   * агентов и молча оставлял остальных со старым текстом — на установке
+   * с большим числом людей это выглядело как успешный проход.
    */
   async listAgentsForPersonaSync(
     limit = 500,
+    offset = 0,
   ): Promise<Array<{ agentId: string; userId: number; conversationId: string | null; personaVersion: string | null }>> {
     const { rows } = await this.withSystemScope(
       "db.listAgentsForPersonaSync",
@@ -914,9 +919,9 @@ export class Database {
                 a.meta ->> 'persona_version' AS persona_version
           FROM agent_links a
          WHERE a.kind = 'eva' AND a.status = 'active'
-         ORDER BY a.created_at
-         LIMIT $1`,
-      [limit],
+         ORDER BY a.created_at, a.agent_id
+         LIMIT $1 OFFSET $2`,
+      [limit, Math.max(0, offset)],
       ),
       { crossUser: true },
     );
@@ -926,6 +931,69 @@ export class Database {
       personaVersion: row.persona_version,
       conversationId: row.conversation_id,
     }));
+  }
+
+  /**
+   * Фактическое состояние канонического контекста по базе.
+   *
+   * Health и `doctor` раньше читали снимок в памяти процесса: после
+   * рестарта он обнулялся, и установка с устаревшими агентами выглядела
+   * как «ещё не выполнялась». Здесь состояние считается из `agent_links`
+   * — единственного канонического источника отметок развёртывания.
+   */
+  async canonicalContextHealth(
+    version: string,
+  ): Promise<{
+    version: string;
+    total: number;
+    upToDate: number;
+    stale: number;
+    failed: number;
+    deferred: number;
+    unsupported: number;
+    never: number;
+    lastSyncAt: string | null;
+  }> {
+    const { rows } = await this.withSystemScope(
+      "db.canonicalContextHealth",
+      async () => await this.require().query<{
+        total: string;
+        up_to_date: string;
+        stale: string;
+        failed: string;
+        deferred: string;
+        unsupported: string;
+        never_synced: string;
+        last_sync_at: string | null;
+      }>(
+        `
+        -- tenant: system — сводка развёртывания канонического контекста, пользовательских строк не отдаёт
+        SELECT count(*)::text AS total,
+               count(*) FILTER (WHERE a.meta ->> 'persona_version' = $1)::text AS up_to_date,
+               count(*) FILTER (WHERE a.meta ->> 'persona_version' IS DISTINCT FROM $1)::text AS stale,
+               count(*) FILTER (WHERE a.meta ->> 'canonical_context_sync_status' = 'degraded')::text AS failed,
+               count(*) FILTER (WHERE a.meta ->> 'canonical_context_sync_status' = 'deferred')::text AS deferred,
+               count(*) FILTER (WHERE a.meta ->> 'canonical_context_sync_status' = 'unsupported')::text AS unsupported,
+               count(*) FILTER (WHERE a.meta ->> 'persona_version' IS NULL)::text AS never_synced,
+               max(a.meta ->> 'canonical_context_sync_at') AS last_sync_at
+          FROM agent_links a
+         WHERE a.kind = 'eva' AND a.status = 'active'`,
+        [version],
+      ),
+      { crossUser: true },
+    );
+    const row = rows[0];
+    return {
+      version,
+      total: Number(row?.total ?? 0),
+      upToDate: Number(row?.up_to_date ?? 0),
+      stale: Number(row?.stale ?? 0),
+      failed: Number(row?.failed ?? 0),
+      deferred: Number(row?.deferred ?? 0),
+      unsupported: Number(row?.unsupported ?? 0),
+      never: Number(row?.never_synced ?? 0),
+      lastSyncAt: row?.last_sync_at ?? null,
+    };
   }
 
   /**
@@ -964,7 +1032,7 @@ export class Database {
   async recordCanonicalContextSyncState(
     agentId: string,
     userId: number,
-    status: "degraded" | "unsupported",
+    status: "degraded" | "unsupported" | "deferred",
   ): Promise<void> {
     await this.withUserScope(
       { userId, label: "db.recordCanonicalContextSyncState", inherit: true },

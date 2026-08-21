@@ -7,14 +7,45 @@
  */
 
 import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
-import { configWarnings, loadConfig } from "../dist/config.js";
+import { configWarnings, loadConfig, readPersona } from "../dist/config.js";
 
 const base = {
   EVA_AGENT_API_KEY: "x".repeat(32),
   DATABASE_URL: "postgresql://localhost/eva",
 };
+
+/**
+ * Канонический текст личности — fail-closed.
+ *
+ * Встроенный fallback выглядел безопасным, но был худшим из отказов:
+ * не смонтированный `library/persona/eva.md` тихо раздавался всем агентам
+ * как канонический, отпечаток версии считался от подмены, а доставка
+ * отмечалась выполненной. Проверяется, что запуск на этом останавливается.
+ */
+test("отсутствующая каноническая персона останавливает запуск", async () => {
+  const config = loadConfig({ ...base, EVA_AGENT_PERSONA_FILE: "/nonexistent/eva.md" });
+  await assert.rejects(
+    () => readPersona(config),
+    /Не удалось прочитать каноническую персону/,
+  );
+});
+
+test("пустая каноническая персона останавливает запуск", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "eva-persona-"));
+  t.after(async () => { await rm(dir, { recursive: true, force: true }); });
+  const file = join(dir, "eva.md");
+  await writeFile(file, "   \n\t\n");
+  const config = loadConfig({ ...base, EVA_AGENT_PERSONA_FILE: file });
+  await assert.rejects(() => readPersona(config), /Каноническая персона пуста/);
+
+  await writeFile(file, "Ева — спутница и помощница в самопознании.\n");
+  assert.match(await readPersona(config), /самопознании/);
+});
 
 test("включённая агрегация без параллельного диспетчера не молчит", () => {
   const config = loadConfig({

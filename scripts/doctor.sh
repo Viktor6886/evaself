@@ -150,24 +150,26 @@ probe "webapp /healthz"   webapp        "http://127.0.0.1:8082/healthz"
 probe "llm-router /health" llm-router   "http://127.0.0.1:8073/health"
 probe "letta-ui /healthz" letta-ui      "http://127.0.0.1:8081/healthz"
 
-# Синхронизация персоны: канонический текст личности Евы у уже созданных
-# агентов. Выключенная или сорвавшаяся не видна ни по одному коду ответа
-# — агент просто продолжает говорить о себе прежним текстом, — поэтому
-# состояние читается явно.
+# Канонический контекст: system prompt и персона Евы у уже созданных
+# агентов. Выключенная или сорвавшаяся сверка не видна ни по одному коду
+# ответа — агент просто продолжает говорить прежним текстом, — поэтому
+# состояние читается явно и считается по базе, а не по памяти процесса:
+# после рестарта снимок процесса пуст, и установка с устаревшими агентами
+# выглядела как «сверка ещё не выполнялась».
 persona_state() {
-	local body
-	body="$(docker compose exec -T eva-agent-service node -e \
-		"fetch('http://127.0.0.1:'+(process.env.EVA_AGENT_PORT||8070)+'/health').then(r=>r.text()).then(console.log).catch(()=>process.exit(1))" \
-		2>/dev/null || true)"
-	[ -n "$body" ] || { warn "persona sync: состояние недоступно (сервис не ответил)"; return; }
-	local status
-	status="$(printf '%s' "$body" | python3 -c 'import json,sys;print((json.load(sys.stdin).get("checks",{}).get("persona_sync") or {}).get("status","unknown"))' 2>/dev/null || echo unknown)"
+	local verdict status version total up_to_date stale failed deferred
+	verdict="$(canonical_context_state || true)"
+	[ -n "$verdict" ] || { warn "canonical context: состояние недоступно (сервис не ответил)"; return; }
+	# shellcheck disable=SC2086
+	eval "$verdict"
+	info "canonical context: version=${version:-?} agents=${total:-0} up-to-date=${up_to_date:-0} stale=${stale:-0} failed=${failed:-0} deferred=${deferred:-0}"
 	case "$status" in
-		ok) ok "persona sync: канонический текст доставлен" ;;
-		never) warn "persona sync: ещё не выполнялась" ;;
-		unsupported) soft "persona sync: SDK не поддерживает часть maintenance-операций" ;;
-		degraded|stale|failed) soft "persona sync: degraded, обычные ходы не блокируются" ;;
-		*) warn "persona sync: состояние неизвестно" ;;
+		ok) ok "canonical context: канонический набор доставлен всем агентам" ;;
+		never) warn "canonical context: сверка ещё не выполнялась" ;;
+		unsupported) soft "canonical context: SDK не поддерживает часть maintenance-операций" ;;
+		degraded) soft "canonical context: stale=${stale:-0} failed=${failed:-0} deferred=${deferred:-0}, обычные ходы не блокируются" ;;
+		failed) soft "canonical context: канонический набор не доставлен ни одному агенту" ;;
+		*) warn "canonical context: состояние неизвестно" ;;
 	esac
 }
 persona_state

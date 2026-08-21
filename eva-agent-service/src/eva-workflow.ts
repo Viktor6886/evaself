@@ -179,7 +179,7 @@ export class EvaWorkflow {
         persona: string,
         options?: { timeoutMs?: number },
         systemPrompt?: string,
-      ): Promise<"updated" | "up_to_date" | "failed" | "unsupported">;
+      ): Promise<"updated" | "up_to_date" | "failed" | "unsupported" | "deferred">;
       persona(): string;
       systemPrompt(): string;
     },
@@ -522,9 +522,13 @@ export class EvaWorkflow {
         // Персона агента доводится до канонической до самого хода.
         // Массовая синхронизация идёт при старте и может не успеть к
         // первому сообщению человека, а агент со старым текстом успеет
-        // ответить о себе в мужском роде. Проход ограничен по времени;
-        // устаревший compiled context отправлять модели нельзя.
-        let syncOutcome: "updated" | "up_to_date" | "failed" | "unsupported" = "up_to_date";
+        // ответить о себе в мужском роде. Проход ограничен по времени и
+        // ход этим сроком действительно ограничен: не уложившаяся правка
+        // доводится сама под барьером обслуживания, а не задерживает
+        // ответ человеку. Полуприменённое состояние ход не увидит —
+        // барьер не пустит его внутрь правки.
+        let syncOutcome:
+          "updated" | "up_to_date" | "failed" | "unsupported" | "deferred" = "up_to_date";
         if (this.personaSync) {
           const storedVersion = typeof link.meta?.persona_version === "string"
             ? link.meta.persona_version
@@ -701,7 +705,7 @@ export class EvaWorkflow {
             ].join("\n");
           }
         }
-        if (syncOutcome === "failed" || syncOutcome === "unsupported") {
+        if (syncOutcome !== "updated" && syncOutcome !== "up_to_date") {
           this.logger.warn("Canonical context sync degraded; continuing turn", {
             agent_id: link.agent_id,
             sync: syncOutcome,

@@ -888,3 +888,180 @@ test("persona sync preserves frontmatter and commits only managed MemFS files", 
   assert.deepEqual(committed, ["system/persona.md", "system/therapeutic_framework.md"]);
   assert.equal(await readFile(join(root, "unrelated.md"), "utf8"), "user change\n");
 });
+
+/**
+ * MemFS ведёт Ева, а не сервис.
+ *
+ * Managed-файл, изменённый снаружи и ещё не закоммиченный, — это её
+ * незавершённая работа. Перетереть его значит потерять её молча, поэтому
+ * правка отменяется целиком и повторяется позже.
+ */
+async function memfsFixture(t: {
+  skip(reason: string): void;
+  after(fn: () => Promise<void> | void): void;
+}): Promise<{ root: string; service: LettaService } | null> {
+  try {
+    await exec("git", ["--version"]);
+  } catch {
+    t.skip("git is provided by the MemFS host, not the production service image");
+    return null;
+  }
+  const root = await mkdtemp(join(tmpdir(), "eva-memfs-"));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  await mkdir(join(root, "system"), { recursive: true });
+  await writeFile(join(root, "system", "persona.md"), "---\ndescription: Existing persona\n---\nold persona\n");
+  await writeFile(join(root, "system", "human.md"), "human owned\n");
+  await exec("git", ["init"], { cwd: root });
+  await exec("git", ["-c", "user.name=test", "-c", "user.email=test@example.com", "add", "."], { cwd: root });
+  await exec("git", ["-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "initial"], { cwd: root });
+
+  const service = new LettaService({
+    appServerUrl: "ws://example.invalid/ws", appServerToken: "", appServerRequestTimeoutMs: 1000,
+    model: "", sessionPoolSize: 5, sessionIdleMs: 1000, turnTimeoutMs: 1000,
+    safeSessionManager: true, sessionDrainMs: 100,
+  } as never, { debug() {}, info() {}, warn() {}, error() {} }, "persona", SYSTEM_PROMPT);
+  (service as unknown as { client: Record<string, unknown> }).client = {
+    resumeSession: () => ({
+      agentId: "agent-1",
+      bootstrapState: async () => ({}),
+      getDeviceStatus: async () => ({ memoryDirectory: root }),
+      close() {},
+    }),
+  };
+  return { root, service };
+}
+
+test("a dirty managed MemFS path defers the sync instead of overwriting it", async (t) => {
+  const fixture = await memfsFixture(t);
+  if (!fixture) return;
+  const { root, service } = fixture;
+  // Незакоммиченная правка Евы в managed-файле.
+  await writeFile(join(root, "system", "persona.md"), "---\ndescription: Existing persona\n---\nEva's own edit\n");
+
+  await assert.rejects(
+    () => service.updateAgentPersona("agent-1", "conv-1", "new persona"),
+    (error: unknown) => (error as { code?: string }).code === "maintenance_deferred",
+  );
+  assert.match(
+    await readFile(join(root, "system", "persona.md"), "utf8"),
+    /Eva's own edit/,
+    "a dirty managed file was overwritten",
+  );
+  const status = (await exec("git", ["status", "--porcelain"], { cwd: root })).stdout;
+  assert.doesNotMatch(status, /therapeutic_framework/, "a framework file was created while deferring");
+});
+
+test("a failed commit rolls back a framework file that did not exist before", async (t) => {
+  const fixture = await memfsFixture(t);
+  if (!fixture) return;
+  const { root, service } = fixture;
+  const frameworkPath = join(root, "system", "therapeutic_framework.md");
+  // Коммит обязан сорваться: путь становится каталогом, и git не может
+  // его закоммитить как файл.
+  await mkdir(join(root, ".git", "hooks"), { recursive: true });
+  await writeFile(
+    join(root, ".git", "hooks", "pre-commit"),
+    "#!/bin/sh\nexit 1\n",
+    { mode: 0o755 },
+  );
+
+  await assert.rejects(() => service.updateAgentPersona("agent-1", "conv-1", "new persona"));
+
+  // Файла не было — значит после отката его быть не должно: пустая
+  // проекция выглядела бы как применённая половина.
+  await assert.rejects(
+    () => readFile(frameworkPath, "utf8"),
+    (error: unknown) => (error as { code?: string }).code === "ENOENT",
+    "the rollback left a framework file that never existed",
+  );
+  assert.match(
+    await readFile(join(root, "system", "persona.md"), "utf8"),
+    /old persona/,
+    "the rollback did not restore the previous persona projection",
+  );
+  const status = (await exec("git", ["status", "--porcelain"], { cwd: root })).stdout.trim();
+  assert.equal(status, "", `the rollback left MemFS dirty: ${status}`);
+});
+
+test("an unreadable managed file is not treated as an absent one", async (t) => {
+  const fixture = await memfsFixture(t);
+  if (!fixture) return;
+  const { root, service } = fixture;
+  // Каталог вместо файла: чтение падает с EISDIR, а не ENOENT. Прежний
+  // `.catch(() => "")` считал это отсутствующим файлом и писал поверх.
+  await rm(join(root, "system", "therapeutic_framework.md"), { force: true });
+  await mkdir(join(root, "system", "therapeutic_framework.md"), { recursive: true });
+
+  await assert.rejects(
+    () => service.updateAgentPersona("agent-1", "conv-1", "new persona"),
+    (error: unknown) => (error as { code?: string }).code === "maintenance_deferred",
+  );
+  assert.match(
+    await readFile(join(root, "system", "persona.md"), "utf8"),
+    /old persona/,
+    "persona was rewritten while the framework state was unknown",
+  );
+});
+
+test("maintenance and a turn of the same agent never overlap", async () => {
+  const service = new LettaService({
+    appServerUrl: "ws://example.invalid/ws", appServerToken: "", appServerRequestTimeoutMs: 1000,
+    model: "", sessionPoolSize: 5, sessionIdleMs: 1000, turnTimeoutMs: 5000,
+    safeSessionManager: true, sessionDrainMs: 500,
+  } as never, { debug() {}, info() {}, warn() {}, error() {} }, "persona", SYSTEM_PROMPT);
+
+  const events: string[] = [];
+  let releaseTurn!: () => void;
+  const turnGate = new Promise<void>((resolve) => { releaseTurn = resolve; });
+  (service as unknown as { client: Record<string, unknown> }).client = {
+    resumeSession: (conversationId: string) => ({
+      agentId: conversationId === "conv-other" ? "agent-2" : "agent-1",
+      conversationId,
+      bootstrapState: async () => ({}),
+      recoverPendingApprovals: async () => ({}),
+      send: async () => {},
+      stream: () => {
+        events.push(`turn:${conversationId}:start`);
+        const gate = conversationId === "conv-other" ? Promise.resolve() : turnGate;
+        return (async function* () {
+          await gate;
+          yield { type: "assistant", content: "ok", otid: "a" };
+          // Отметка ставится до `result`: ход прерывает чтение потока на
+          // нём, и код после этого yield уже не выполняется.
+          events.push(`turn:${conversationId}:end`);
+          yield { type: "result", stopReason: "end_turn" };
+        })();
+      },
+      abort: async () => {},
+      close() {},
+    }),
+  };
+
+  const turn = service.runTurn("conv-1", { text: "hello" } as never);
+  // Ход уже держит агента: ждём, пока поток действительно начался.
+  while (!events.includes("turn:conv-1:start")) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  let mutationStarted = false;
+  const maintenance = service.runAgentMaintenance("agent-1", async () => {
+    mutationStarted = true;
+    events.push("maintenance");
+    return true;
+  }, { drainTimeoutMs: 2_000, conversationIds: ["conv-1"] });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(mutationStarted, false, "canonical mutation started inside a live turn");
+
+  // Другой агент при этом отвечает: барьер не общий стоп-кран.
+  const other = await service.runTurn("conv-other", { text: "hi" } as never);
+  assert.equal(other.reply, "ok");
+
+  releaseTurn();
+  await turn;
+  assert.deepEqual(await maintenance, { status: "done", value: true });
+  assert.equal(
+    events.indexOf("maintenance") > events.indexOf("turn:conv-1:end"),
+    true,
+    `maintenance did not wait for the turn to finish: ${events.join(" -> ")}`,
+  );
+});

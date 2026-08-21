@@ -17,6 +17,7 @@ import type { GoalService } from "./goals/goal-service.js";
 import type { LettaService } from "./letta.js";
 import type { ManagedAgentInput } from "./letta.js";
 import { DeleteGuard } from "./letta/delete-guard.js";
+import { canonicalContextHealth } from "./letta/canonical-health.js";
 import { personaSyncState } from "./letta/persona-sync.js";
 import { auditSkills } from "./letta/skills-audit.js";
 import type { LlmManager, LlmProviderInput } from "./llm.js";
@@ -76,6 +77,14 @@ export interface Services {
    * они действительно доступны runtime, а не только зарегистрированы.
    */
   productToolNames?: () => string[];
+  /**
+   * Отпечаток канонического контекста репозитория прямо сейчас.
+   *
+   * Health считает состояние развёртывания от него, а не от снимка в
+   * памяти процесса: после рестарта снимок пуст, и установка с
+   * устаревшими агентами выглядела как «сверка ещё не выполнялась».
+   */
+  canonicalContextVersion?: () => string;
   /**
    * Контур наблюдаемости. Нужен выдаче метрик (состояние буфера
    * телеметрии) и ingress — там начинается трасса хода.
@@ -306,12 +315,20 @@ export function buildServer(services: Services): FastifyInstance {
     // не только в журнале. Молча пропущенная ничем не отличалась от
     // выполненной — ровно так мужской род и держался месяцами.
     //
+    // Состояние считается из PostgreSQL, а не из снимка в памяти: после
+    // рестарта снимок пуст, и установка с устаревшими агентами выглядела
+    // как «сверка ещё не выполнялась». Снимок процесса остаётся рядом
+    // как диагностика последнего прохода.
+    //
     // Общий статус сервиса она при этом не роняет. Массовый проход идёт
     // при старте, и control plane в этот момент может ещё подниматься:
     // один отказ на старте означал бы «сервис нездоров» навсегда, при
     // том что каждый такой агент получает персону в своём же ходе.
     // Состояние читают `doctor` и человек, а не healthcheck контейнера.
-    checks.persona_sync = personaSyncState();
+    checks.persona_sync = services.canonicalContextVersion
+      ? await canonicalContextHealth(db, services.canonicalContextVersion())
+        .catch(() => ({ ...personaSyncState(), source: "process" as const }))
+      : personaSyncState();
 
     try {
       await db.ping();
@@ -379,7 +396,10 @@ export function buildServer(services: Services): FastifyInstance {
       // Что фактически наблюдается о памяти и навыках. Готовность от
       // этого не зависит: агент со старым набором блоков отвечает, — но
       // молча пропущенная сверка ничем не отличалась бы от выполненной.
-      memory: personaSyncState(),
+      memory: services.canonicalContextVersion
+        ? await canonicalContextHealth(db, services.canonicalContextVersion())
+          .catch(() => personaSyncState())
+        : personaSyncState(),
       skills: await auditSkills({
         root: config.skillsDir,
         sources: letta.runtimeFacts?.skillSources ?? null,

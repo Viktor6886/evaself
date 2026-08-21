@@ -9,7 +9,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 
@@ -32,11 +32,13 @@ import type { Config } from "./config.js";
 import {
   appServerUnavailable,
   EvaError,
+  maintenanceDeferred,
   notFound,
   toEvaError,
   turnCancelled,
   turnTimeout,
 } from "./errors.js";
+import { AgentMaintenanceBarrier, type MaintenanceOutcome } from "./letta/agent-barrier.js";
 import { missingCapabilities } from "./letta/capabilities.js";
 import { type AgentToolCall, collectToolCalls } from "./letta/tool-calls.js";
 import {
@@ -410,6 +412,25 @@ function requiredFrontmatter(content: string): string {
   return match[0];
 }
 
+/**
+ * Прочитать managed-файл MemFS, отличая «файла нет» от «прочитать не удалось».
+ *
+ * Прежний `.catch(() => "")` склеивал оба случая: сбой чтения выглядел
+ * как отсутствующий файл, и правка спокойно создавала проекцию поверх
+ * состояния, которого не видела. Отсутствие — `null`, любая другая
+ * ошибка уходит наверх и откладывает обслуживание.
+ */
+async function readManagedFile(path: string): Promise<string | null> {
+  try {
+    return await readFile(path, "utf8");
+  } catch (error) {
+    if ((error as { code?: string }).code === "ENOENT") return null;
+    throw maintenanceDeferred("managed MemFS file could not be read", {
+      code: (error as { code?: string }).code ?? "unknown_error",
+    });
+  }
+}
+
 export class LettaService {
   private client: LettaAgentClient;
   private readonly sessions = new Map<string, PooledSession>();
@@ -423,6 +444,12 @@ export class LettaService {
   private readonly drainTimeoutMs: number;
   /** Conversation, по которым ход выполняется прямо сейчас. */
   private readonly runningTurns = new Set<string>();
+  /**
+   * Барьер обслуживания: ход и правка канонического контекста одного
+   * агента не пересекаются. Пул сессий для этого не годится — сессия
+   * открывается заново на любом ходе, и снимок пула ничего не обещает.
+   */
+  private readonly barrier = new AgentMaintenanceBarrier();
 
   /** Последний снимок фактических возможностей сессии (init-сообщение SDK). */
   private lastRuntimeFacts: LettaRuntimeFacts | null = null;
@@ -747,8 +774,10 @@ export class LettaService {
     this.closeSession(conversationId);
     const session = this.client.resumeSession(conversationId, await this.sessionOptions(conversationId));
     let memoryRoot: string | null = null;
+    /** Что лежало в managed-файлах до правки. `null` — файла не было. */
     let current: string | null = null;
     let frameworkCurrent: string | null = null;
+    let frameworkExisted = false;
     let changedPaths: string[] = [];
     try {
       await session.bootstrapState();
@@ -760,24 +789,41 @@ export class LettaService {
       }
       if (!status.memoryDirectory) throw new Error("MemFS memory directory is unavailable");
       memoryRoot = resolve(status.memoryDirectory);
+      this.barrier.bind(conversationId, agentId);
       const personaPath = join(memoryRoot, "system", "persona.md");
       if (relative(memoryRoot, personaPath).startsWith("..")) {
         throw new Error("persona projection is outside the MemFS checkout");
       }
-      current = await readFile(personaPath, "utf8");
+      const frameworkPath = join(memoryRoot, "system", "therapeutic_framework.md");
+
+      // Managed-файл, изменённый снаружи, перетирать нельзя. Правка
+      // отменяется целиком и повторяется позже: MemFS ведёт Ева, и её
+      // незакоммиченная работа не наш черновик.
+      await this.assertManagedPathsClean(memoryRoot, [
+        "system/persona.md",
+        "system/therapeutic_framework.md",
+      ]);
+
+      current = await readManagedFile(personaPath);
+      if (current === null) {
+        // Отсутствующий persona.md — не «пустой»: MemFS ещё не
+        // развернут, и создавать проекцию поверх недоразвёрнутого
+        // checkout значит гадать за Letta.
+        throw maintenanceDeferred("persona projection is not checked out yet");
+      }
       const frontmatter = requiredFrontmatter(current);
       const next = `${frontmatter}${persona.trim()}\n`;
       const framework = evaMemoryBlocks(persona).find(
         (block) => block.label === "therapeutic_framework",
       )!;
-      const frameworkPath = join(memoryRoot, "system", "therapeutic_framework.md");
-      frameworkCurrent = await readFile(frameworkPath, "utf8").catch(() => "");
+      frameworkCurrent = await readManagedFile(frameworkPath);
+      frameworkExisted = frameworkCurrent !== null;
       const frameworkFrontmatter = frameworkCurrent
         ? requiredFrontmatter(frameworkCurrent)
         : `---\ndescription: ${framework.description}\n---\n`;
       const frameworkNext = `${frameworkFrontmatter}${framework.value.trim()}\n`;
       const personaChanged = current.replace(/\r\n/g, "\n") !== next;
-      const frameworkChanged = frameworkCurrent.replace(/\r\n/g, "\n") !== frameworkNext;
+      const frameworkChanged = (frameworkCurrent ?? "").replace(/\r\n/g, "\n") !== frameworkNext;
       if (!personaChanged && !frameworkChanged) return false;
 
       changedPaths = [
@@ -798,25 +844,63 @@ export class LettaService {
       ], { cwd: memoryRoot, timeout: 15_000 });
       return true;
     } catch (error) {
-      if (memoryRoot && changedPaths.length > 0 && current !== null && frameworkCurrent !== null) {
+      // Откат возвращает ровно то состояние, что было: файл, которого
+      // раньше не существовало, удаляется, а не остаётся как «пустая»
+      // проекция после сорвавшегося коммита.
+      if (memoryRoot && changedPaths.length > 0) {
         const personaPath = join(memoryRoot, "system", "persona.md");
         const frameworkPath = join(memoryRoot, "system", "therapeutic_framework.md");
         await Promise.all([
-          changedPaths.includes("system/persona.md")
+          changedPaths.includes("system/persona.md") && current !== null
             ? writeFile(personaPath, current, "utf8")
             : Promise.resolve(),
           changedPaths.includes("system/therapeutic_framework.md")
-            ? writeFile(frameworkPath, frameworkCurrent, "utf8")
+            ? frameworkExisted && frameworkCurrent !== null
+              ? writeFile(frameworkPath, frameworkCurrent, "utf8")
+              : rm(frameworkPath, { force: true })
             : Promise.resolve(),
         ]).then(async () => {
-          await execFileAsync("git", ["add", "--", ...changedPaths], {
+          // Индекс тоже возвращается: `git add` уже мог состояться, и
+          // оставленная в индексе правка попала бы в следующий коммит Евы.
+          await execFileAsync("git", ["reset", "--quiet", "--", ...changedPaths], {
             cwd: memoryRoot!, timeout: 10_000,
           });
         }).catch(() => undefined);
       }
+      if (error instanceof EvaError) throw error;
       throw toEvaError(error, `updating the persona projection of ${agentId}`);
     } finally {
       session.close();
+    }
+  }
+
+  /**
+   * Managed-файлы MemFS должны быть чистыми до правки.
+   *
+   * Отсутствие git — не разрешение писать: без него нельзя ни увидеть
+   * чужую правку, ни откатить свою, поэтому обслуживание откладывается.
+   */
+  private async assertManagedPathsClean(
+    memoryRoot: string,
+    paths: readonly string[],
+  ): Promise<void> {
+    let stdout: string;
+    try {
+      ({ stdout } = await execFileAsync(
+        "git",
+        ["status", "--porcelain", "--", ...paths],
+        { cwd: memoryRoot, timeout: 10_000 },
+      ));
+    } catch (error) {
+      throw maintenanceDeferred("MemFS checkout state is unreadable", {
+        reason: error instanceof Error ? error.name : "unknown_error",
+      });
+    }
+    const dirty = stdout.split("\n").map((line) => line.trim()).filter(Boolean);
+    if (dirty.length > 0) {
+      throw maintenanceDeferred("managed MemFS paths have uncommitted changes", {
+        paths: dirty.map((line) => line.slice(line.indexOf(" ") + 1)),
+      });
     }
   }
 
@@ -1216,19 +1300,37 @@ export class LettaService {
     }
   }
 
-  /** Drain this agent's sessions without ever forcing an active turn closed. */
-  async prepareAgentMaintenance(agentId: string): Promise<boolean> {
-    const related = [...this.sessions.values()].filter(
-      (pooled) => pooled.session.agentId === agentId,
-    );
-    for (const pooled of related) pooled.closing = true;
-    const deadline = Date.now() + Math.max(0, this.drainTimeoutMs);
-    while (Date.now() < deadline) {
-      for (const pooled of related) this.closeIfDrained(pooled);
-      if (related.every((pooled) => pooled.activeTurns === 0)) return true;
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-    return related.every((pooled) => pooled.activeTurns === 0);
+  /**
+   * Выполнить правку канонического контекста агента под барьером.
+   *
+   * Прежний `prepareAgentMaintenance()` опирался на снимок пула сессий:
+   * он ждал, пока уйдут те сессии, что были в пуле на входе, и на этом
+   * считал агента свободным. Ход, начавшийся секундой позже, открывал
+   * новую сессию посреди правки и читал половину нового состояния.
+   * Барьер закрывает вход, а не пул: пока правка идёт, новый ход этого
+   * агента ждёт, идущий договаривает, другой агент не ждёт ничего.
+   *
+   * `busy` означает, что ход не отпустил агента в отведённое окно и
+   * правка не начиналась вовсе.
+   */
+  async runAgentMaintenance<T>(
+    agentId: string,
+    work: () => Promise<T>,
+    options: { drainTimeoutMs?: number; conversationIds?: readonly string[] } = {},
+  ): Promise<MaintenanceOutcome<T>> {
+    const conversationIds = options.conversationIds
+      ?? [...this.sessions.values()]
+        .filter((pooled) => pooled.session.agentId === agentId)
+        .map((pooled) => pooled.conversationId);
+    return await this.barrier.runMaintenance(agentId, work, {
+      drainTimeoutMs: options.drainTimeoutMs ?? this.drainTimeoutMs,
+      conversationIds,
+    });
+  }
+
+  /** Идёт ли обслуживание этого агента прямо сейчас (для наблюдения и тестов). */
+  isMaintainingAgent(agentId: string): boolean {
+    return this.barrier.isMaintaining(agentId);
   }
 
   get openSessions(): number {
@@ -1374,7 +1476,7 @@ export class LettaService {
     return createHash("sha256")
       .update(this.persona)
       .update(this.systemPrompt)
-      .update(" ")
+      .update("\u0000")
       .digest("hex")
       .slice(0, 12);
   }
@@ -1430,12 +1532,27 @@ export class LettaService {
     } = {},
   ): Promise<TurnResult> {
     const startedAt = Date.now();
-    const pooled = await this.acquirePooled(conversationId, options.allowedTools === undefined ? undefined : {
-      allowedTools: options.allowedTools,
-      canUseTool: options.canUseTool ?? ((toolName) => options.allowedTools!.includes(toolName)
-        ? { behavior: "allow", updatedInput: {} }
-        : { behavior: "deny", message: `Tool ${toolName} is outside the job allowlist` }),
-    });
+    // Барьер занимается до открытия сессии: пока канонический контекст
+    // этого агента правят, ход не должен ни открыть сессию, ни прочитать
+    // половину нового состояния. Ход другого агента здесь не ждёт.
+    const leaveTurn = await this.barrier.enterTurn(conversationId);
+    let pooled: PooledSession;
+    try {
+      pooled = await this.acquirePooled(conversationId, options.allowedTools === undefined ? undefined : {
+        allowedTools: options.allowedTools,
+        canUseTool: options.canUseTool ?? ((toolName) => options.allowedTools!.includes(toolName)
+          ? { behavior: "allow", updatedInput: {} }
+          : { behavior: "deny", message: `Tool ${toolName} is outside the job allowlist` }),
+      });
+    } catch (error) {
+      // Место в барьере освобождается и на этом пути: иначе не открывшая
+      // сессию ошибка держала бы агента закрытым для обслуживания.
+      leaveTurn();
+      throw error;
+    }
+    // Агент опознан только теперь: связка нужна, чтобы следующий ход и
+    // обслуживание встретились на одном ключе барьера.
+    if (pooled.session.agentId) this.barrier.bind(conversationId, pooled.session.agentId);
     const sessionAcquireMs = Date.now() - startedAt;
     const session = pooled.session;
     const collected: SDKMessage[] = [];
@@ -1527,6 +1644,10 @@ export class LettaService {
       this.runningTurns.delete(conversationId);
       pooled.activeTurns = Math.max(0, pooled.activeTurns - 1);
       this.closeIfDrained(pooled);
+      // Барьер отпускается последним: обслуживание вправе начаться
+      // только когда ход действительно закончился, включая закрытие
+      // ушедшей сессии.
+      leaveTurn();
     }
 
     const summary = summarizeStream(collected);

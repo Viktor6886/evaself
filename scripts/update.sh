@@ -340,9 +340,23 @@ sleep 10
 if "$SCRIPT_DIR/doctor.sh"; then
 	mkdir -p "$ROLLBACK_DIR"
 	git -C "$ROOT_DIR" rev-parse HEAD > "$DEPLOYED_MARKER" 2>/dev/null || true
-	step "Update complete"
+	# Канонический набор — два файла в library/ — доводится до уже
+	# созданных агентов фоновым проходом, а не рестартом. Раньше update
+	# заканчивался до его окончания и сообщал полный успех, тогда как
+	# часть агентов оставалась со старым текстом: расхождение всплывало
+	# только в разговоре.
+	if canonical_context_settled 120; then
+		step "Update complete"
+		say "  Rollback point kept in .rollback/ — 'make rollback' returns to it."
+		exit 0
+	fi
+	step "Update finished, but the canonical context is not fully applied"
+	say ""
+	say "  Обычные ходы при этом идут: каждый устаревший агент получает"
+	say "  канонический набор в своём же ходе. Состояние — 'make doctor'."
+	say ""
 	say "  Rollback point kept in .rollback/ — 'make rollback' returns to it."
-	exit 0
+	exit 1
 fi
 
 # =====================================================================

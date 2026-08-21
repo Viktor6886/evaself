@@ -6,6 +6,8 @@
 
 `EVA_AGENT_PERSONA_FILE` указывает на этот файл. `src/letta/persona-sync.ts` синхронизирует его в нативный `persona` memory block Letta. Одностороннее направление: файл → Letta agent. В PostgreSQL хранится только служебная отметка версии, а не альтернативный текст персоны.
 
+Чтение — fail-closed: отсутствующий или пустой `library/persona/eva.md` останавливает запуск сервиса. Встроенного fallback-текста нет: раздать его агентам как канонический значило бы тихо подменить личность и при этом отметить доставку выполненной.
+
 Этот документ не содержит второй версии persona prompt. При изменении тона, правил памяти или границ ответа редактируется канонический файл и его тесты.
 
 ## Неизменяемые границы
@@ -18,6 +20,7 @@
 
 ## Проверка синхронизации
 
-- `/health` показывает состояние `persona_sync`;
-- `make doctor` проверяет доступность control plane;
-- поведение синхронизации покрыто `eva-agent-service/test/persona-sync.test.ts`.
+- `/health` показывает `checks.persona_sync`: состояние считается из PostgreSQL (`agent_links.meta`), а не из снимка в памяти процесса, и содержит текущую версию канонического набора плюс счётчики `total`/`upToDate`/`stale`/`failed`/`deferred`;
+- `make doctor` печатает эти счётчики и отличает `ok` от `degraded`;
+- `make update` и `make rollback` не сообщают полный успех, пока после окна сведения остаются `stale`/`failed` агенты;
+- поведение синхронизации покрыто `eva-agent-service/test/persona-sync.test.ts`, барьер обслуживания — `test/agent-barrier.test.ts`, состояние для health/update/rollback — `test/canonical-health.test.ts` и `scripts/ci/test-canonical-context-state.sh`.

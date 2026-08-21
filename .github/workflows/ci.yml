@@ -163,6 +163,14 @@ jobs:
       - name: An update tells behind from diverged
         run: ./scripts/ci/test-ahead-behind.sh
 
+      # Два канонических файла library/ доводятся до существующих агентов
+      # фоновым проходом, а не рестартом. Решение «успех или degraded» в
+      # update/rollback принимается по состоянию из PostgreSQL, и разбор
+      # этого состояния прогоняется здесь: полный успех при половине
+      # агентов на старом тексте всплывал бы только в разговоре.
+      - name: Update and rollback read the canonical context state from the database
+        run: ./scripts/ci/test-canonical-context-state.sh
+
       # Взятый не тот ключ не мешает архиву создаться и провериться —
       # расхождение всплывает при восстановлении, когда исходной установки
       # уже нет. Поэтому архивы здесь шифруются и расшифровываются по-настоящему.
@@ -2415,6 +2423,121 @@ jobs:
               find "$root" -type f ! -path "*/.git/*" -exec sha256sum "{}" \; | sort
             ' > /tmp/memory-after-restart
           diff -u /tmp/memory-before-llm /tmp/memory-after-restart
+
+      - name: Changing the two canonical files reconciles an existing agent
+        if: needs.changes.outputs.docs_only != 'true'
+        run: |
+          # Единственный критерий этого шага: правка двух файлов library/
+          # и обычный перезапуск (то, что делает `make update`) доводят
+          # канонический контекст до УЖЕ созданного агента, без REST, без
+          # ручных команд и без потери его памяти. Агент здесь — тот же,
+          # что был создан выше и уже отвечал в этом же прогоне.
+          AGENT_ID="$(cut -d'|' -f2 /tmp/mapping-after-restart)"
+          CONVERSATION_ID="$(cut -d'|' -f3 /tmp/mapping-after-restart)"
+          BEFORE="$(docker compose --env-file versions.env --env-file .env \
+            exec -T postgres psql -tA -U postgres -d eva \
+            -c "SELECT meta ->> 'persona_version' FROM agent_links WHERE agent_id='$AGENT_ID'" | tr -d '\r')"
+          echo "persona_version before: ${BEFORE:-<none>}"
+
+          # Правятся оба канонических файла: system prompt идёт через
+          # agents.update, персона — в git-backed MemFS.
+          printf '\n\nCanonical CI marker: ева отвечает по обновлённому канону.\n' >> library/persona/eva.md
+          printf '\n\n<!-- canonical CI marker -->\n' >> library/system/letta_local_memfs.md
+
+          # library/ смонтирован read-only, значит новый текст читается
+          # только новым процессом — ровно как в `make update`.
+          docker compose --env-file versions.env --env-file .env \
+            up -d --force-recreate eva-agent-service >/dev/null
+          for i in $(seq 1 60); do
+            STATUS="$(
+              (docker compose --env-file versions.env --env-file .env \
+                exec -T eva-agent-service node -e "
+                  fetch('http://127.0.0.1:8070/health')
+                    .then(r=>r.json()).then(b=>console.log(b.status))
+                    .catch(()=>console.log('down'))" 2>/dev/null || echo down) \
+                | tr -d '\r'
+            )"
+            [ "$STATUS" = "ok" ] || [ "$STATUS" = "degraded" ] && break
+            [ "$i" = "60" ] && { echo "::error::сервис не поднялся после правки канона"; exit 1; }
+            sleep 3
+          done
+
+          # Стартовое сведение идёт в фоне и не блокирует чат: ждём, пока
+          # отметка развёртывания у существующего агента станет новой.
+          for i in $(seq 1 40); do
+            AFTER="$(docker compose --env-file versions.env --env-file .env \
+              exec -T postgres psql -tA -U postgres -d eva \
+              -c "SELECT meta ->> 'persona_version' FROM agent_links WHERE agent_id='$AGENT_ID'" | tr -d '\r')"
+            STATE="$(docker compose --env-file versions.env --env-file .env \
+              exec -T postgres psql -tA -U postgres -d eva \
+              -c "SELECT meta ->> 'canonical_context_sync_status' FROM agent_links WHERE agent_id='$AGENT_ID'" | tr -d '\r')"
+            if [ -n "$AFTER" ] && [ "$AFTER" != "$BEFORE" ] && [ "$STATE" = "ok" ]; then
+              break
+            fi
+            [ "$i" = "40" ] && {
+              echo "::error::существующий агент не свёлся с новым каноном (version=$AFTER status=$STATE)"
+              docker compose --env-file versions.env --env-file .env \
+                logs --tail=100 eva-agent-service || true
+              exit 1
+            }
+            sleep 3
+          done
+          echo "persona_version after: $AFTER"
+
+          # MemFS: новый текст лежит в managed-проекции, коммит есть, а
+          # human.md и current_state.md принадлежат Еве и не тронуты.
+          docker compose --env-file versions.env --env-file .env \
+            exec -T -e AGENT_ID="$AGENT_ID" letta-app-server sh -c '
+              root="/data/letta/lc-local-backend/memfs/$AGENT_ID/memory"
+              grep -q "Canonical CI marker" "$root/system/persona.md"
+              test -s "$root/system/human.md"
+              cd "$root" && git status --porcelain -- system/persona.md system/therapeutic_framework.md
+            ' | tee /tmp/canonical-memfs
+          test ! -s /tmp/canonical-memfs
+
+          # Health отвечает по базе: канонический набор доставлен всем.
+          docker compose --env-file versions.env --env-file .env \
+            exec -T eva-agent-service node -e "
+              fetch('http://127.0.0.1:8070/health').then(r=>r.json()).then((body) => {
+                const state = body.checks.persona_sync;
+                console.log(JSON.stringify(state));
+                if (state.status !== 'ok') throw new Error('canonical context is not ok');
+                if (state.version !== '$AFTER') {
+                  throw new Error('health version disagrees with the database');
+                }
+                if (!state.agents || state.agents.stale !== 0) {
+                  throw new Error('health reports stale agents after reconciliation');
+                }
+              }).catch((error) => { console.error(error); process.exit(1); });
+            " | tee /tmp/canonical-health
+          grep -q '"status":"ok"' /tmp/canonical-health
+
+          # И главное: следующий настоящий ход SDK идёт с новым контекстом.
+          docker compose --env-file versions.env --env-file .env \
+            exec -T -e CONVERSATION_ID="$CONVERSATION_ID" eva-agent-service node -e "
+              const key = process.env.EVA_AGENT_API_KEY;
+              fetch(
+                'http://127.0.0.1:8070/v1/sdk/conversations/' +
+                  encodeURIComponent(process.env.CONVERSATION_ID) + '/messages',
+                {
+                  method:'POST',
+                  headers:{'Content-Type':'application/json','X-API-Key':key},
+                  body:JSON.stringify({text:'Ответь коротко после смены канона'}),
+                },
+              ).then(async (response) => {
+                const body = await response.json();
+                if (!response.ok) throw new Error(JSON.stringify(body));
+                if (!String(body.reply).includes('CI chat ok')) {
+                  throw new Error('turn after canonical change failed: ' + JSON.stringify(body));
+                }
+                console.log(JSON.stringify({turn_after_canonical_change:true,agent_id:body.agentId}));
+              }).catch((error) => { console.error(error); process.exit(1); });
+            " | tee /tmp/canonical-turn
+          grep -q '"turn_after_canonical_change":true' /tmp/canonical-turn
+
+          # Канонические файлы возвращаются в исходное состояние: правка
+          # была инструментом проверки, а не результатом прогона.
+          git checkout -- library/persona/eva.md library/system/letta_local_memfs.md
 
       - name: Logs on failure
         if: failure()

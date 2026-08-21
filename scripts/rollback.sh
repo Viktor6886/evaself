@@ -88,7 +88,23 @@ recreate_caddy || warn "Caddy не запустился с восстановл�
 
 sleep 10
 if "$SCRIPT_DIR/doctor.sh"; then
-	step "Rollback complete"
+	# Откат канонических файлов library/ — тоже смена версии контекста, и
+	# существующие агенты обязаны вернуться к прежнему тексту. Проход
+	# делает это сам после пересоздания контейнеров; сообщать полный
+	# успех до его окончания значило бы объявить откат состоявшимся,
+	# пока агенты ещё говорят текстом новой версии.
+	if canonical_context_settled 120; then
+		step "Rollback complete"
+	else
+		step "Rollback finished, but the canonical context is degraded"
+		say ""
+		say "  Образы вернулись на прежние версии, но прежний канонический"
+		say "  набор дошёл не до всех агентов. Обычные ходы идут: каждый"
+		say "  устаревший агент получает набор в своём же ходе."
+		say ""
+		say "  Состояние — 'make doctor'."
+		exit 1
+	fi
 else
 	step "Rollback finished, but checks still fail"
 	say ""

@@ -35,7 +35,7 @@ import { UserProfileService } from "./profile/profile-service.js";
 import { ValkeyRateLimiter } from "./public/rate-limit.js";
 import { ValkeyMiniAppSessions } from "./public/webapp-session.js";
 import { UserTurnLock } from "./turns/user-turn-lock.js";
-import { PersonaSync } from "./letta/persona-sync.js";
+import { canonicalMemoryVersion, PersonaSync } from "./letta/persona-sync.js";
 import { RuntimeContextBuilder } from "./runtime/runtime-context.js";
 import { SdkSettingsManager } from "./sdk-settings.js";
 import { ChannelLinkService } from "./channels/channel-links.js";
@@ -139,11 +139,12 @@ async function main(): Promise<void> {
     logger,
     letta,
   );
-  // Массовая синхронизация идёт в фоне: старт сервиса её не ждёт. Тот
-  // агент, чей человек написал раньше, чем она до него дошла, получит
-  // prompt и persona в своём же ходе — коротким проходом перед обращением к
-  // модели.
-  void personaSync.sync(persona, systemPrompt).catch((error: unknown) => {
+  // Массовая синхронизация идёт в фоне: старт сервиса её не ждёт. App
+  // Server поднимается медленнее сервиса, поэтому проход повторяется с
+  // возрастающей задержкой, идёт страницами и не останавливается на
+  // отказе одного агента. Тот, чей человек написал раньше, чем проход до
+  // него дошёл, получит prompt и persona в своём же ходе.
+  void personaSync.reconcileAtStartup(persona, systemPrompt).catch((error: unknown) => {
     logger.warn("Синхронизация prompt/persona не выполнена", {
       code: error instanceof Error ? error.name : "unknown_error",
     });
@@ -458,6 +459,9 @@ async function main(): Promise<void> {
     // инструменты на самом деле. Имена берутся из той же фабрики,
     // которая их регистрирует, — второго списка не заводим.
     productToolNames: () => toolFactory.forConversation("readiness-probe").map((tool) => tool.name),
+    // Отпечаток канонического набора репозитория: health сверяет с ним
+    // отметки развёртывания в базе, а не полагается на снимок процесса.
+    canonicalContextVersion: () => canonicalMemoryVersion(persona, systemPrompt),
     ...(knowledgeResearch ? { knowledgeResearch } : {}),
   });
 

@@ -540,20 +540,29 @@ export function configWarnings(config: Config): string[] {
   return warnings;
 }
 
-const FALLBACK_PERSONA =
-  "You are Eva, an AI companion and self-discovery assistant. You are warm, " +
-  "attentive and honest. You help the person understand themselves better, " +
-  "you never diagnose, and you never pretend to be a licensed therapist.";
-
-/** Eva's persona, loaded from library/ so it can be edited without a rebuild. */
+/**
+ * Eva's persona, loaded from library/ so it can be edited without a rebuild.
+ *
+ * Fail-closed, ровно как канонический system prompt ниже. Встроенный
+ * fallback выглядел безопасным, но был худшим из отказов: не прочитанный
+ * `library/persona/eva.md` тихо раздавался всем агентам как канонический
+ * текст, отпечаток версии считался от подмены, а `persona_version`
+ * отмечался как доставленный. Незакреплённый монтированный каталог
+ * должен останавливать запуск, а не переписывать личность Евы.
+ */
 export async function readPersona(config: Config): Promise<string> {
   const { readFile } = await import("node:fs/promises");
+  let text: string;
   try {
-    const text = await readFile(config.personaFile, "utf8");
-    return text.trim() || FALLBACK_PERSONA;
-  } catch {
-    return FALLBACK_PERSONA;
+    text = await readFile(config.personaFile, "utf8");
+  } catch (error) {
+    throw new Error(
+      `Не удалось прочитать каноническую персону: ${config.personaFile}`,
+      { cause: error },
+    );
   }
+  if (!text.trim()) throw new Error(`Каноническая персона пуста: ${config.personaFile}`);
+  return text;
 }
 
 /**

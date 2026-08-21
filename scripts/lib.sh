@@ -394,6 +394,93 @@ http_status() {
 	curl -sS -o /dev/null -w '%{http_code}' --max-time "${2:-10}" "$1" 2>/dev/null || echo "000"
 }
 
+# ---------------------------------------------------------------------
+# canonical runtime context (library/system + library/persona)
+# ---------------------------------------------------------------------
+
+# Разобрать `checks.persona_sync` из /health в одну строку вида
+#   status=<ok|degraded|failed|unsupported|never|unknown> version=<hex>
+#   total=<n> up_to_date=<n> stale=<n> failed=<n> deferred=<n>
+#
+# Вынесено отдельной функцией без docker и сети: `update` и `rollback`
+# принимают по этому состоянию решение «успех или degraded», и разбор,
+# который нельзя прогнать в тесте, — худшее место для такого решения.
+# Состояние приходит из PostgreSQL, а не из памяти процесса: после
+# рестарта снимок процесса пуст, и устаревшие агенты выглядели как
+# «сверка ещё не выполнялась».
+canonical_context_verdict() {
+	python3 -c '
+import json, sys
+
+try:
+    body = json.load(sys.stdin)
+except Exception:
+    print("status=unknown version= total=0 up_to_date=0 stale=0 failed=0 deferred=0")
+    raise SystemExit(0)
+
+state = (body.get("checks") or {}).get("persona_sync") or body.get("memory") or {}
+agents = state.get("agents") or {}
+
+
+def count(name, fallback=0):
+    value = agents.get(name, state.get(name, fallback))
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+print(
+    "status=%s version=%s total=%d up_to_date=%d stale=%d failed=%d deferred=%d"
+    % (
+        state.get("status", "unknown") or "unknown",
+        state.get("version", "") or "",
+        count("total"),
+        count("upToDate"),
+        count("stale", count("staleAgents")),
+        count("failed"),
+        count("deferred"),
+    )
+)
+'
+}
+
+# Спросить у сервиса состояние канонического контекста. Пустой вывод
+# означает «сервис не ответил», а не «всё в порядке».
+canonical_context_state() {
+	local body
+	body="$(compose_no_stdin exec -T eva-agent-service node -e \
+		"fetch('http://127.0.0.1:'+(process.env.EVA_AGENT_PORT||8070)+'/health').then(r=>r.text()).then(console.log).catch(()=>process.exit(1))" \
+		2>/dev/null || true)"
+	[ -n "$body" ] || return 1
+	printf '%s' "$body" | canonical_context_verdict
+}
+
+# Дождаться, пока канонический набор дойдёт до всех активных агентов.
+#
+# Проход идёт в фоне и специально не участвует в доступности чата, поэтому
+# `update` и `rollback` не вправе объявлять полный успех по одному факту
+# «контейнеры поднялись». Возвращает 0 только когда состояние по базе
+# стало `ok`; истёкшее окно — это `degraded`, а не успех.
+canonical_context_settled() {
+	local timeout="${1:-120}" waited=0 verdict status
+	while :; do
+		verdict="$(canonical_context_state || true)"
+		if [ -n "$verdict" ]; then
+			status=""
+			# shellcheck disable=SC2086
+			eval "$verdict"
+			[ "$status" = "ok" ] && return 0
+			# Неподдержанная maintenance-операция не станет поддержанной
+			# от ожидания: это состояние стабильное, и ждать его нечего.
+			[ "$status" = "unsupported" ] && return 1
+		fi
+		[ "$waited" -lt "$timeout" ] || return 1
+		sleep 5
+		waited=$((waited + 5))
+	done
+}
+
 # Content type only, lowercased, without the charset. A static server that
 # falls back to its SPA index answers 200 with text/html for a missing
 # asset, so a status code alone proves nothing about what actually came back.
