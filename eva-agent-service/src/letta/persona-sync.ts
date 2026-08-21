@@ -35,8 +35,10 @@ export interface LegacyBlockRecord {
 }
 
 interface CanonicalRuntime {
+  prepareAgentMaintenance?(agentId: string): Promise<boolean>;
   updateAgentSystemPrompt(agentId: string, systemPrompt: string): Promise<boolean>;
   updateAgentPersona(agentId: string, conversationId: string, persona: string): Promise<boolean>;
+  invalidateAgentSessions?(agentId: string, conversationIds?: readonly string[]): void;
 }
 
 const state: PersonaSyncState = {
@@ -141,12 +143,17 @@ export class PersonaSync {
       return "unsupported";
     }
     try {
+      if (this.runtime.prepareAgentMaintenance
+        && !await this.runtime.prepareAgentMaintenance(input.agentId)) {
+        throw new Error("agent sessions did not drain before canonical maintenance");
+      }
       const systemUpdated = await this.runtime.updateAgentSystemPrompt(input.agentId, systemPrompt);
       const personaUpdated = await this.runtime.updateAgentPersona(
         input.agentId,
         input.conversationId,
         persona,
       );
+      if (systemUpdated || personaUpdated) this.runtime.invalidateAgentSessions?.(input.agentId);
       await this.db.recordMemoryReconciled(input.agentId, input.userId, {
         version: canonicalMemoryVersion(persona, systemPrompt),
         legacy: [],
@@ -184,15 +191,19 @@ export class PersonaSync {
     const version = canonicalMemoryVersion(persona, systemPrompt);
     state.version = version;
     if (input.storedVersion === version) return "up_to_date";
+    const work = this.reconcileAgent(input, persona, systemPrompt);
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<"failed">((resolve) => {
-      timer = setTimeout(() => resolve("failed"), Math.max(250, options.timeoutMs ?? 3_000));
+    const timeout = new Promise<"timed_out">((resolve) => {
+      timer = setTimeout(() => resolve("timed_out"), Math.max(250, options.timeoutMs ?? 3_000));
       timer.unref?.();
     });
-    const outcome = await Promise.race([
-      this.reconcileAgent(input, persona, systemPrompt),
-      timeout,
-    ]).finally(() => clearTimeout(timer));
+    const raced = await Promise.race([work, timeout]);
+    clearTimeout(timer);
+    // Once mutation has started, releasing the pre-turn caller would let the
+    // turn use half-updated system/MemFS state. Errors still fail open, but an
+    // in-progress reconciliation reaches its safe session-invalidation point
+    // before the turn is allowed to continue.
+    const outcome = raced === "timed_out" ? await work : raced;
     if (outcome === "failed") {
       state.staleAgents += 1;
       state.status = "degraded";

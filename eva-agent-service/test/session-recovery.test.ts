@@ -189,6 +189,32 @@ test("после recompile инвалидируются только pooled sess
   assert.equal(made[1]?.state.closed, false);
 });
 
+test("canonical update инвалидирует все conversations агента и не обрывает активный ход", async () => {
+  const { service, sessions, made } = harness({ sessionPoolSize: 4 });
+  const internal = service as unknown as {
+    acquirePooled: (id: string) => Promise<{ session: { agentId: string }; activeTurns: number; closing: boolean }>;
+    closeIfDrained: (pooled: unknown) => void;
+  };
+  const first = await internal.acquirePooled("conv-1");
+  const second = await internal.acquirePooled("conv-2");
+  const other = await internal.acquirePooled("conv-3");
+  first.session.agentId = "agent-1";
+  second.session.agentId = "agent-1";
+  other.session.agentId = "agent-2";
+  first.activeTurns = 1;
+
+  service.invalidateAgentSessions("agent-1");
+
+  assert.equal(first.closing, true);
+  assert.equal(made[0]!.state.closed, false, "active turn was interrupted");
+  assert.equal(sessions.has("conv-2"), false);
+  assert.equal(made[1]!.state.closed, true);
+  assert.equal(sessions.has("conv-3"), true);
+  first.activeTurns = 0;
+  internal.closeIfDrained(first);
+  assert.equal(made[0]!.state.closed, true);
+});
+
 test("system prompt обновляется только когда raw значение изменилось", async () => {
   const { service } = harness();
   let current = "old prompt";

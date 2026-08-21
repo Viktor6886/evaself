@@ -13,6 +13,8 @@ test("canonical sync has no HTTP control-plane fallback", async () => {
   assert.doesNotMatch(source, /@letta-ai\/letta-client/);
   assert.doesNotMatch(source, /httpFromWebsocket|EVA_LETTA_ADMIN_(?:CLIENT|BASE_URL)/);
   assert.doesNotMatch(source, /parsed\.protocol\s*=.*https?/);
+  const letta = await readFile("src/letta.ts", "utf8");
+  assert.doesNotMatch(letta, /\.initialize\(\)/);
 });
 
 test("sync failure cannot gate a Telegram turn", async () => {
