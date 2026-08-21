@@ -36,8 +36,8 @@ export const VERIFIED_VERSIONS = {
  *
  * `session` отделён от `agent-sdk` намеренно: методы сессии — это путь
  * выполнения диалога, и смешивать их с управляющими вызовами того же
- * пакета значило бы потерять границу, ради которой административный
- * клиент вообще заведён отдельно.
+ * пакета значило бы потерять границу между диалоговым и управляющим
+ * контрактами Agent SDK.
  */
 export type LettaSurface = "agent-sdk" | "session";
 
@@ -159,7 +159,7 @@ const CAPABILITIES = [
     check: "method",
     note:
       "В Agent SDK удаления conversation нет вовсе — только архивирование. " +
-      "Официальный клиент его умеет, поэтому операция административная.",
+      "Agent SDK 0.7.1 для self-hosted WebSocket runtime её не предоставляет.",
   },
   {
     id: "conversation.recompile",
@@ -168,8 +168,8 @@ const CAPABILITIES = [
     path: null,
     check: "method",
     note:
-      "Для explicit conversations используется официальный метод клиента 1.12.1; " +
-      "Agent SDK 0.7.1 не экспортирует recompile через свой conversations-фасад.",
+      "Agent SDK 0.7.1 не экспортирует recompile через conversations-фасад; " +
+      "после canonical update pooled sessions инвалидируются безопасно.",
   },
 
   // --- ход диалога: сессия ---------------------------------------------

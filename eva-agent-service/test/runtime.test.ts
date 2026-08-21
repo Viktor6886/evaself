@@ -807,7 +807,7 @@ test("психологические навыки доступны нативн�
   // навык не будет ни найден, ни открыт.
   for (const name of entries) {
     const body = await readFile(new URL(`${name}/SKILL.md`, root), "utf8");
-    const frontmatter = /^---\n([\s\S]*?)\n---\n/u.exec(body);
+    const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---\r?\n/u.exec(body);
     assert.ok(frontmatter, `${name}: нет frontmatter`);
     assert.match(frontmatter[1]!, /^name: .+$/mu, `${name}: нет name`);
     assert.match(frontmatter[1]!, /^description: .+$/mu, `${name}: нет description`);

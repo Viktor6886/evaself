@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
+import { promisify } from "node:util";
 
 import {
   extractText,
@@ -10,6 +15,7 @@ import {
 } from "../dist/letta.js";
 
 const SYSTEM_PROMPT = "repository system prompt";
+const exec = promisify(execFile);
 
 test("extractText handles plain strings", () => {
   assert.equal(extractText("hello"), "hello");
@@ -834,4 +840,51 @@ test("неготовность видна, когда runtime не подтве�
   assert.equal(report.ready, false);
   assert.equal(report.checks.find((entry) => entry.name === "memfs")?.status, "failed");
   service.shutdown();
+});
+
+test("persona sync preserves frontmatter and commits only managed MemFS files", async (t) => {
+  try {
+    await exec("git", ["--version"]);
+  } catch {
+    t.skip("git is provided by the MemFS host, not the production service image");
+    return;
+  }
+  const root = await mkdtemp(join(tmpdir(), "eva-memfs-"));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  await mkdir(join(root, "system"), { recursive: true });
+  await writeFile(join(root, "system", "persona.md"), "---\ndescription: Existing persona\ncustom: keep\n---\nold persona\n");
+  await writeFile(join(root, "system", "therapeutic_framework.md"), "---\ndescription: Existing framework\ncustom: keep too\n---\nold framework\n");
+  await writeFile(join(root, "system", "human.md"), "human owned\n");
+  await writeFile(join(root, "system", "current_state.md"), "current state owned\n");
+  await writeFile(join(root, "unrelated.md"), "before\n");
+  await exec("git", ["init"], { cwd: root });
+  await exec("git", ["-c", "user.name=test", "-c", "user.email=test@example.com", "add", "."], { cwd: root });
+  await exec("git", ["-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "initial"], { cwd: root });
+  await writeFile(join(root, "unrelated.md"), "user change\n");
+
+  const service = new LettaService({
+    appServerUrl: "ws://example.invalid/ws", appServerToken: "", appServerRequestTimeoutMs: 1000,
+    model: "", sessionPoolSize: 5, sessionIdleMs: 1000, turnTimeoutMs: 1000,
+    safeSessionManager: true, sessionDrainMs: 100,
+  } as never, { debug() {}, info() {}, warn() {}, error() {} }, "persona", SYSTEM_PROMPT);
+  const calls: string[] = [];
+  const internal = service as unknown as { client: Record<string, unknown> };
+  internal.client = {
+    resumeSession: () => ({
+      agentId: "agent-1",
+      bootstrapState: async () => { calls.push("bootstrap"); return {}; },
+      getDeviceStatus: async () => { calls.push("status"); return { memoryDirectory: root }; },
+      close() {},
+    }),
+  };
+
+  assert.equal(await service.updateAgentPersona("agent-1", "conv-1", "new persona"), true);
+  assert.deepEqual(calls, ["bootstrap", "status"]);
+  assert.match(await readFile(join(root, "system", "persona.md"), "utf8"), /^---\ndescription: Existing persona\ncustom: keep\n---\nnew persona\n$/);
+  assert.match(await readFile(join(root, "system", "therapeutic_framework.md"), "utf8"), /^---\ndescription: Existing framework\ncustom: keep too\n---\n/);
+  assert.equal(await readFile(join(root, "system", "human.md"), "utf8"), "human owned\n");
+  assert.equal(await readFile(join(root, "system", "current_state.md"), "utf8"), "current state owned\n");
+  const committed = (await exec("git", ["show", "--pretty=format:", "--name-only", "HEAD"], { cwd: root })).stdout.trim().split(/\r?\n/).sort();
+  assert.deepEqual(committed, ["system/persona.md", "system/therapeutic_framework.md"]);
+  assert.equal(await readFile(join(root, "unrelated.md"), "utf8"), "user change\n");
 });

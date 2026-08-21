@@ -33,8 +33,9 @@ test("system prompt and persona are applied through the SDK runtime", async () =
 });
 
 test("sync failure is reported without preventing the turn", async () => {
+  const recorded: unknown[] = [];
   const service = new PersonaSync(
-    db(),
+    db({ recorded }),
     logger,
     {
       updateAgentSystemPrompt: async () => { throw new Error("control plane unavailable"); },
@@ -47,6 +48,76 @@ test("sync failure is reported without preventing the turn", async () => {
     { timeoutMs: 50 },
     "system",
   ), "failed");
+  assert.equal(recorded.length, 0, "failed reconciliation recorded a successful version");
+});
+
+test("pre-turn timeout does not leave mutation running beside the turn", async () => {
+  let finish!: () => void;
+  let mutating = false;
+  const mutation = new Promise<void>((resolve) => { finish = resolve; });
+  const service = new PersonaSync(
+    db(), logger,
+    {
+      updateAgentSystemPrompt: async () => {
+        mutating = true;
+        await mutation;
+        mutating = false;
+        return true;
+      },
+      updateAgentPersona: async () => true,
+    },
+  );
+  const sync = service.syncAgent(
+    { agentId: "agent-1", userId: 1, conversationId: "conv-1", storedVersion: null },
+    "persona", { timeoutMs: 1 }, "system",
+  );
+  await new Promise((resolve) => setTimeout(resolve, 275));
+  let returned = false;
+  void sync.then(() => { returned = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(returned, false, "turn was released while canonical mutation was running");
+  assert.equal(mutating, true);
+  finish();
+  assert.equal(await sync, "updated");
+  assert.equal(mutating, false);
+});
+
+test("concurrent reconciliation for one agent is coalesced", async () => {
+  let systemWrites = 0;
+  let personaWrites = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const service = new PersonaSync(
+    db(), logger,
+    {
+      updateAgentSystemPrompt: async () => { systemWrites += 1; await gate; return true; },
+      updateAgentPersona: async () => { personaWrites += 1; return true; },
+    },
+  );
+  const input = { agentId: "agent-1", userId: 1, conversationId: "conv-1" };
+  const first = service.reconcileAgent(input, "persona", "system");
+  const second = service.reconcileAgent(input, "persona", "system");
+  release();
+  assert.deepEqual(await Promise.all([first, second]), ["updated", "updated"]);
+  assert.equal(systemWrites, 1);
+  assert.equal(personaWrites, 1);
+});
+
+test("successful canonical change invalidates every pooled session of the agent", async () => {
+  const invalidated: string[] = [];
+  const service = new PersonaSync(
+    db(), logger,
+    {
+      updateAgentSystemPrompt: async () => true,
+      updateAgentPersona: async () => true,
+      invalidateAgentSessions: (agentId) => { invalidated.push(agentId); },
+    },
+  );
+  assert.equal(await service.reconcileAgent(
+    { agentId: "agent-1", userId: 1, conversationId: "conv-1" },
+    "persona", "system",
+  ), "updated");
+  assert.deepEqual(invalidated, ["agent-1"]);
 });
 
 test("same canonical version is idempotent", async () => {

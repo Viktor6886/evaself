@@ -746,9 +746,12 @@ export class LettaService {
   ): Promise<boolean> {
     this.closeSession(conversationId);
     const session = this.client.resumeSession(conversationId, await this.sessionOptions(conversationId));
+    let memoryRoot: string | null = null;
+    let current: string | null = null;
+    let frameworkCurrent: string | null = null;
+    let changedPaths: string[] = [];
     try {
-      const initializable = session as unknown as { initialize?: () => Promise<unknown> };
-      if (typeof initializable.initialize === "function") await initializable.initialize();
+      await session.bootstrapState();
       const status = await session.getDeviceStatus({
         timeoutMs: Math.min(this.runtime.app_server_request_timeout_ms, 15_000),
       });
@@ -756,19 +759,19 @@ export class LettaService {
         throw new Error("conversation belongs to a different agent");
       }
       if (!status.memoryDirectory) throw new Error("MemFS memory directory is unavailable");
-      const memoryRoot = resolve(status.memoryDirectory);
+      memoryRoot = resolve(status.memoryDirectory);
       const personaPath = join(memoryRoot, "system", "persona.md");
       if (relative(memoryRoot, personaPath).startsWith("..")) {
         throw new Error("persona projection is outside the MemFS checkout");
       }
-      const current = await readFile(personaPath, "utf8");
+      current = await readFile(personaPath, "utf8");
       const frontmatter = requiredFrontmatter(current);
       const next = `${frontmatter}${persona.trim()}\n`;
       const framework = evaMemoryBlocks(persona).find(
         (block) => block.label === "therapeutic_framework",
       )!;
       const frameworkPath = join(memoryRoot, "system", "therapeutic_framework.md");
-      const frameworkCurrent = await readFile(frameworkPath, "utf8").catch(() => "");
+      frameworkCurrent = await readFile(frameworkPath, "utf8").catch(() => "");
       const frameworkFrontmatter = frameworkCurrent
         ? requiredFrontmatter(frameworkCurrent)
         : `---\ndescription: ${framework.description}\n---\n`;
@@ -777,12 +780,12 @@ export class LettaService {
       const frameworkChanged = frameworkCurrent.replace(/\r\n/g, "\n") !== frameworkNext;
       if (!personaChanged && !frameworkChanged) return false;
 
-      if (personaChanged) await writeFile(personaPath, next, "utf8");
-      if (frameworkChanged) await writeFile(frameworkPath, frameworkNext, "utf8");
-      const changedPaths = [
+      changedPaths = [
         ...(personaChanged ? ["system/persona.md"] : []),
         ...(frameworkChanged ? ["system/therapeutic_framework.md"] : []),
       ];
+      if (personaChanged) await writeFile(personaPath, next, "utf8");
+      if (frameworkChanged) await writeFile(frameworkPath, frameworkNext, "utf8");
       await execFileAsync("git", [
         "-c", "user.name=Evaself",
         "-c", `user.email=${agentId}@letta.com`,
@@ -795,6 +798,22 @@ export class LettaService {
       ], { cwd: memoryRoot, timeout: 15_000 });
       return true;
     } catch (error) {
+      if (memoryRoot && changedPaths.length > 0 && current !== null && frameworkCurrent !== null) {
+        const personaPath = join(memoryRoot, "system", "persona.md");
+        const frameworkPath = join(memoryRoot, "system", "therapeutic_framework.md");
+        await Promise.all([
+          changedPaths.includes("system/persona.md")
+            ? writeFile(personaPath, current, "utf8")
+            : Promise.resolve(),
+          changedPaths.includes("system/therapeutic_framework.md")
+            ? writeFile(frameworkPath, frameworkCurrent, "utf8")
+            : Promise.resolve(),
+        ]).then(async () => {
+          await execFileAsync("git", ["add", "--", ...changedPaths], {
+            cwd: memoryRoot!, timeout: 10_000,
+          });
+        }).catch(() => undefined);
+      }
       throw toEvaError(error, `updating the persona projection of ${agentId}`);
     } finally {
       session.close();
@@ -1184,13 +1203,32 @@ export class LettaService {
    * также закрывает его уже открытый default/скрытый conversation, если он
    * не попал в административную выдачу.
    */
-  invalidateAgentSessions(agentId: string, conversationIds: readonly string[]): void {
+  invalidateAgentSessions(agentId: string, conversationIds: readonly string[] = []): void {
     const related = new Set(conversationIds);
     for (const [conversationId, pooled] of this.sessions) {
       if (related.has(conversationId) || pooled.session.agentId === agentId) {
-        this.closeSession(conversationId);
+        if (pooled.activeTurns > 0) {
+          pooled.closing = true;
+        } else {
+          this.closeSession(conversationId);
+        }
       }
     }
+  }
+
+  /** Drain this agent's sessions without ever forcing an active turn closed. */
+  async prepareAgentMaintenance(agentId: string): Promise<boolean> {
+    const related = [...this.sessions.values()].filter(
+      (pooled) => pooled.session.agentId === agentId,
+    );
+    for (const pooled of related) pooled.closing = true;
+    const deadline = Date.now() + Math.max(0, this.drainTimeoutMs);
+    while (Date.now() < deadline) {
+      for (const pooled of related) this.closeIfDrained(pooled);
+      if (related.every((pooled) => pooled.activeTurns === 0)) return true;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    return related.every((pooled) => pooled.activeTurns === 0);
   }
 
   get openSessions(): number {
