@@ -385,6 +385,31 @@ describe("Mini App hook-focused", () => {
     assert.match(text, /Продолжить/i);
   });
 
+  test("быстрые переключения формата ответа сохраняют последний выбор", async () => {
+    let writes = 0;
+    const app = await open({
+      viewport: { width: 390, height: 844 },
+      routes: {
+        "PATCH /public/profile": async ({ body }) => {
+          writes += 1;
+          if (writes === 1) await new Promise((resolve) => setTimeout(resolve, 80));
+          return { profile: { user: { response_mode: body.response_mode } } };
+        },
+      },
+    });
+
+    await app.openScreen("profile");
+    await app.page.click('[data-setting="voice"]');
+    await app.page.click('[data-response-mode="voice"]');
+    await app.page.click('[data-response-mode="text"]');
+    await app.page.waitForFunction(() => window.EvaApp.state.profile?.user?.response_mode === "text");
+
+    const modes = app.requests
+      .filter(({ method, path }) => method === "PATCH" && path === "/public/profile")
+      .map(({ body }) => body.response_mode);
+    assert.deepEqual(modes, ["voice", "text"]);
+  });
+
   test("journal остаётся в навигации даже если серверный модуль выключен", async () => {
     const app = await open({ viewport: { width: 360, height: 640 }, journal: false });
     assert.ok(await app.page.$("#journal-nav:not([hidden])"));

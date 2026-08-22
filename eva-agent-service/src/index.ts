@@ -226,6 +226,7 @@ async function main(): Promise<void> {
       memory: async (_agentId: string) => null,
       agentOf: async (userId: number) => await db.agentIdOfUser(userId),
     },
+    runtimeContext,
   );
   toolFactory.setApprovalCompletionCallback(async (execution) => await approvals.completeApprovedExecution(execution));
   letta.setToolFactory((conversationId) => toolFactory.forConversation(conversationId));
@@ -453,6 +454,7 @@ async function main(): Promise<void> {
     miniAppSessions,
     rateLimiter,
     approvals,
+    runtimeContext,
     // Готовность спрашивает у runtime, доступны ли продуктовые
     // инструменты на самом деле. Имена берутся из той же фабрики,
     // которая их регистрирует, — второго списка не заводим.

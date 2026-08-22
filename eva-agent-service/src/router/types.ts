@@ -84,6 +84,7 @@ export interface LlmRequestMetadata {
   has_image?: boolean;
   has_document?: boolean;
   has_voice?: boolean;
+  vision_preprocessed?: boolean;
   classification_source?: string;
   classification_reason_codes?: string[];
   single_failover_used?: boolean;

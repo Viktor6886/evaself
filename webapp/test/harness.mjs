@@ -214,7 +214,9 @@ export async function openApp({ routes = {}, viewport, journal = false } = {}) {
     const table = { ...DEFAULT_ROUTES, ...routes };
     const handler = table[`${method} ${pathname}`] ?? table[pathname]
       ?? table[Object.keys(table).find((key) => key.startsWith("/") && pathname.startsWith(key)) ?? ""];
-    const payload = typeof handler === "function" ? handler() : handler;
+    const payload = typeof handler === "function"
+      ? await handler({ method, pathname, body })
+      : handler;
     if (payload && typeof payload === "object" && "__status" in payload) {
       return await route.fulfill({
         status: payload.__status,

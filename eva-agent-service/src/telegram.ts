@@ -143,6 +143,11 @@ export interface TelegramLiveMessage {
   readonly shown: string;
 }
 
+export interface TelegramChatActionController {
+  transition(action: "typing" | "record_voice" | "upload_voice" | null): void;
+  stop(): void;
+}
+
 /**
  * Как часто правится растущее сообщение.
  *
@@ -155,6 +160,44 @@ const LIVE_UPDATE_INTERVAL_MS = 800;
 
 /** Предел одного сообщения Telegram с запасом на разметку. */
 const LIVE_MESSAGE_LIMIT = 3_900;
+const LIVE_CURSOR = "▉";
+
+/** Следующий читаемый prefix: целые слова, без разрыва code/link Markdown. */
+export function nextLivePrefix(current: string, target: string, maxWords: number): string {
+  if (!target.startsWith(current) || current.length >= target.length) return target;
+  let inlineCode = false;
+  let fencedCode = false;
+  let brackets = 0;
+  let linkParens = 0;
+  let words = 0;
+  let safe = current.length;
+  let reachedLimit = false;
+  for (let index = current.length; index < target.length; index += 1) {
+    if (target.startsWith("```", index)) {
+      fencedCode = !fencedCode;
+      index += 2;
+      continue;
+    }
+    const char = target[index]!;
+    if (!fencedCode && char === "`") inlineCode = !inlineCode;
+    if (!fencedCode && !inlineCode) {
+      if (char === "[") brackets += 1;
+      else if (char === "]") brackets = Math.max(0, brackets - 1);
+      else if (char === "(" && index > 0 && target[index - 1] === "]") linkParens += 1;
+      else if (char === ")") linkParens = Math.max(0, linkParens - 1);
+    }
+    if (/\s/u.test(char) && !fencedCode && !inlineCode && brackets === 0 && linkParens === 0) {
+      words += 1;
+      safe = index;
+      if (words >= maxWords) { reachedLimit = true; break; }
+    }
+  }
+  if (!reachedLimit && !fencedCode && !inlineCode && brackets === 0 && linkParens === 0) {
+    return target;
+  }
+  if (safe <= current.length) return target;
+  return target.slice(0, safe).trimEnd();
+}
 
 export class TelegramClient implements OutboxTransport {
   private readonly token: string;
@@ -368,6 +411,14 @@ export class TelegramClient implements OutboxTransport {
     return results;
   }
 
+  async editPlainMessage(chatId: number, messageId: number, text: string): Promise<void> {
+    await this.call("editMessageText", {
+      chat_id: chatId,
+      message_id: messageId,
+      ...renderTelegramText(text),
+    });
+  }
+
   async sendChatAction(chatId: number, action = "typing"): Promise<void> {
     await this.dispatch("sendChatAction", chatId, { chat_id: chatId, action }, "status");
   }
@@ -430,8 +481,9 @@ export class TelegramClient implements OutboxTransport {
     };
     const interrupt = (): void => wake?.();
 
-    const write = async (text: string): Promise<void> => {
-      const richPayload = renderTelegramRichText(text);
+    const write = async (text: string, cursor = true): Promise<void> => {
+      const displayed = cursor ? `${text} ${LIVE_CURSOR}` : text;
+      const richPayload = renderTelegramRichText(displayed);
       if (messageId === null) {
         let sent: { message_id?: number };
         try {
@@ -444,7 +496,7 @@ export class TelegramClient implements OutboxTransport {
           if (!isRichMessageFallbackError(error)) throw error;
           sent = await this.call<{ message_id?: number }>("sendMessage", {
             chat_id: chatId,
-            ...renderTelegramText(text),
+            ...renderTelegramText(displayed),
           });
           richMode = false;
         }
@@ -465,7 +517,7 @@ export class TelegramClient implements OutboxTransport {
           await this.call("editMessageText", {
             chat_id: chatId,
             message_id: messageId,
-            ...renderTelegramText(text),
+            ...renderTelegramText(displayed),
           });
           richMode = false;
         }
@@ -473,7 +525,7 @@ export class TelegramClient implements OutboxTransport {
         await this.call("editMessageText", {
           chat_id: chatId,
           message_id: messageId,
-          ...renderTelegramText(text),
+          ...renderTelegramText(displayed),
         });
       }
       shown = text;
@@ -490,10 +542,15 @@ export class TelegramClient implements OutboxTransport {
         if (wait > 0) await sleep(wait);
         if (stopped) return;
         const text = pending;
-        pending = null;
-        if (text === null || text === shown) continue;
+        if (text === null || text === shown) { pending = null; continue; }
+        const remainingWords = text.slice(shown.length).trim().split(/\s+/u).filter(Boolean).length;
+        // Обычно 6–15 слов; большой backlog догоняется несколькими
+        // крупными, но всё ещё читаемыми порциями.
+        const words = Math.max(6, Math.min(60, Math.max(15, Math.ceil(remainingWords / 3))));
+        const next = nextLivePrefix(shown, text, words);
         try {
-          await write(text);
+          await write(next);
+          if (next === pending) pending = null;
         } catch (error) {
           // Показ — украшение. Его отказ не роняет ход и не превращается
           // в повтор: ответ всё равно уйдёт итоговой отправкой.
@@ -515,6 +572,16 @@ export class TelegramClient implements OutboxTransport {
     const schedule = (): void => {
       if (flushing) return;
       flushing = flush().finally(() => { flushing = null; });
+    };
+    const removeCursor = (): void => {
+      if (messageId === null || !shown) return;
+      void (flushing ?? Promise.resolve()).finally(async () => {
+        await this.call("editMessageText", {
+          chat_id: chatId,
+          message_id: messageId,
+          ...(richMode !== false ? renderTelegramRichText(shown) : renderTelegramText(shown)),
+        }).catch(() => undefined);
+      });
     };
 
     return {
@@ -542,6 +609,22 @@ export class TelegramClient implements OutboxTransport {
         text: string,
         replyMarkup?: unknown,
       ): Promise<{ delivered: boolean; messageId: number | null; keyboardMessageId: number | null }> => {
+        const clean = text.trimEnd();
+        const finalWords = clean.slice(shown.length).trim().split(/\s+/u).filter(Boolean).length;
+        if (
+          messageId !== null && finalWords >= 6
+          && clean.length <= LIVE_MESSAGE_LIMIT && clean !== shown
+        ) {
+          pending = clean;
+          schedule();
+          await Promise.race([
+            flushing ?? Promise.resolve(),
+            new Promise<void>((resolve) => {
+              const timer = setTimeout(resolve, 1_600);
+              timer.unref?.();
+            }),
+          ]);
+        }
         stopped = true;
         pending = null;
         // Ожидание прерывается до `await`: иначе конец хода встал бы в
@@ -558,6 +641,9 @@ export class TelegramClient implements OutboxTransport {
         stopped = true;
         pending = null;
         interrupt();
+        // Cursor — только UI, не канонический текст. Cancel/error обязан
+        // снять его даже без обычной финализации ответа.
+        removeCursor();
       },
       get messageId(): number | null { return messageId; },
       get updates(): number { return updates; },
@@ -819,23 +905,49 @@ export class TelegramClient implements OutboxTransport {
   }
 
   startTyping(chatId: number, intervalMs: number): () => void {
-    let stopped = false;
-    const tick = () => {
-      if (!stopped) {
-        void this.sendChatAction(chatId).catch((error) => {
-          this.logger.debug("Не удалось обновить Telegram typing", {
-            chatId,
-            message: error instanceof Error ? error.message : String(error),
-          });
-        });
-      }
+    const controller = this.startChatActionController(chatId, intervalMs);
+    controller.transition("typing");
+    return () => controller.stop();
+  }
+
+  async sendSticker(chatId: number, fileId: string): Promise<unknown> {
+    return await this.dispatch("sendSticker", chatId, {
+      chat_id: chatId,
+      sticker: fileId,
+    });
+  }
+
+  startChatActionController(chatId: number, intervalMs: number): TelegramChatActionController {
+    let active: "typing" | "record_voice" | "upload_voice" | null = null;
+    let timer: NodeJS.Timeout | null = null;
+    const clear = () => {
+      if (timer) clearInterval(timer);
+      timer = null;
     };
-    tick();
-    const timer = setInterval(tick, Math.max(intervalMs, 2_000));
-    timer.unref();
-    return () => {
-      stopped = true;
-      clearInterval(timer);
+    const tick = () => {
+      if (!active) return;
+      void this.sendChatAction(chatId, active).catch((error) => {
+        this.logger.debug("Не удалось обновить Telegram chat action", {
+          chatId,
+          action: active,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      });
+    };
+    return {
+      transition: (action) => {
+        if (active === action) return;
+        clear();
+        active = action;
+        if (!active) return;
+        tick();
+        timer = setInterval(tick, Math.max(intervalMs, 2_000));
+        timer.unref();
+      },
+      stop: () => {
+        active = null;
+        clear();
+      },
     };
   }
 

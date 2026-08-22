@@ -95,6 +95,7 @@ export class PublicRepository implements PublicDataSource {
     private readonly profile: UserProfileService,
     private readonly goals: GoalService,
     private readonly conversations: ConversationService,
+    private readonly runtimeInvalidator?: { invalidate(userId: number): void },
   ) {}
 
   async listConversations(telegramId: number): Promise<Record<string, unknown>[]> {
@@ -453,6 +454,9 @@ export class PublicRepository implements PublicDataSource {
          ON CONFLICT (user_id) DO UPDATE SET response_mode = EXCLUDED.response_mode`,
         [user.id, mode],
       );
+      // Следующий ход обязан увидеть новый режим сразу, а уже начатый
+      // использует свой неизменяемый snapshot RuntimeContext.
+      this.runtimeInvalidator?.invalidate(user.id);
     }
     if (Object.hasOwn(input, "preferred_language")) {
       const language = input.preferred_language;

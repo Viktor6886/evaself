@@ -29,6 +29,7 @@ emit() { printf '%s=%s\n' "$1" "$2"; }
 
 everything() {
 	emit docs_only false
+	emit prompt_only false
 	emit media true
 	emit adminui true
 	emit webapp true
@@ -41,7 +42,7 @@ if [ -z "$BASE" ] || ! git rev-parse --verify --quiet "$BASE^{commit}" >/dev/nul
 	exit 0
 fi
 
-FILES="$(git diff --name-only "$BASE" "$HEAD")"
+FILES="${CHANGED_FILES:-$(git diff --name-only "$BASE" "$HEAD")}"
 
 if [ -z "$FILES" ]; then
 	echo "изменений нет: выполняются все проверки" >&2
@@ -59,12 +60,23 @@ if printf '%s\n' "$FILES" | grep -qE '^\.github/workflows/'; then
 	exit 0
 fi
 
-# Документацией считаются только markdown в корне, в docs/ верхнего уровня,
-# и задания шагов. Всё остальное, включая docs/openapi, — код.
+# Ровно два редактируемых prompt-файла — контент, а не изменение runtime.
+PROMPT_CODE="$(printf '%s\n' "$FILES" \
+	| grep -vE '^(library/persona/eva\.md|library/system/letta_local_memfs\.md)$' \
+	|| true)"
+if [ -z "$PROMPT_CODE" ]; then
+	emit prompt_only true
+else
+	emit prompt_only false
+fi
+
+# Документацией/контентом считаются только markdown в корне, docs,
+# архив prompts и два канонических редактируемых prompt-файла.
 CODE="$(printf '%s\n' "$FILES" \
 	| grep -vE '^[^/]+\.md$' \
 	| grep -vE '^docs/[^/]+\.md$' \
 	| grep -vE '^prompts/(archive/)?[^/]+\.md$' \
+	| grep -vE '^(library/persona/eva\.md|library/system/letta_local_memfs\.md)$' \
 	|| true)"
 
 if [ -z "$CODE" ]; then

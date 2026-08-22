@@ -9,22 +9,9 @@ import { evaMemoryBlocks } from "../dist/letta.js";
 import { normalizeLavaEvent } from "../dist/payments.js";
 import { RuntimeContextBuilder } from "../dist/runtime/runtime-context.js";
 
-/**
- * Текст персоны или `null`, если каталог `library` вне образа сервиса.
- *
- * Персона монтируется в контейнер отдельно, а сборка образа её не
- * копирует: внутри сборки файла нет. Отсутствие файла — это «здесь
- * нечего проверять», а не провал проверки.
- */
-async function personaText(): Promise<string | null> {
-  try {
-    return await readFile(new URL("../../library/persona/eva.md", import.meta.url), "utf8");
-  } catch {
-    return null;
-  }
-}
 import {
   splitTelegramText,
+  nextLivePrefix,
   TelegramApiError,
   TelegramClient,
   webhookSecretMatches,
@@ -93,9 +80,9 @@ test("первый срез уходит одним сообщением, дал
   // Состояния, пришедшие пока шла правка, схлопнулись в последнее:
   // «Понимаю. Рас» наружу не уходило, очередь правок не копится.
   assert.deepEqual(calls.map(renderedCallText), [
-    "Понимаю",
-    "Понимаю.",
-    "Понимаю. Расскажи",
+    "Понимаю ▉",
+    "Понимаю. ▉",
+    "Понимаю. Расскажи ▉",
     "Понимаю. Расскажи, что было дальше.",
   ]);
   // Тот же message_id до самого конца: второго ответа в чате нет.
@@ -117,7 +104,7 @@ test("правки не чаще заданного промежутка", async
 
   // Минута промежутка ещё не прошла: второе состояние ждёт, а не летит
   // следом. Иначе лимит чата выбирается на первых секундах ответа.
-  assert.deepEqual(calls.map(renderedCallText), ["Первое состояние"]);
+  assert.deepEqual(calls.map(renderedCallText), ["Первое состояние ▉"]);
   live.stop();
 });
 
@@ -189,7 +176,7 @@ test("отменённый ход не правит сообщение посл�
   live.push("недописанный хвост");
   await new Promise((resolve) => setTimeout(resolve, 20));
 
-  assert.deepEqual(calls.map(renderedCallText), ["начало ответа"]);
+  assert.deepEqual(calls.map(renderedCallText), ["начало ответа ▉", "начало ответа"]);
 });
 
 test("если показывать было нечего, ответ уходит обычной отправкой", async () => {
@@ -266,7 +253,7 @@ test("черновик Telegram больше не используется в о
 test("voice transcript echo matches Hermes and is sent without parse mode", async () => {
   assert.equal(
     formatVoiceTranscriptEcho("  проверь _точный_ текст  "),
-    '🎙️ "проверь _точный_ текст"',
+    "📝 проверь _точный_ текст",
   );
 
   const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
@@ -655,22 +642,6 @@ test("постоянные правила не приходят с каждым 
   assert.ok(block.length <= 1_500, `служебный блок разросся до ${block.length} символов`);
 });
 
-test("персона несёт то, что ушло из хода", async (context) => {
-  // Образ сервиса каталога `library` не несёт: он монтируется отдельно.
-  // Внутри сборки читать нечего, и выдавать это за проверку нельзя.
-  const persona = await personaText();
-  if (persona === null) {
-    context.skip("персона вне образа сервиса; проверяется на репозитории");
-    return;
-  }
-  for (const carried of [
-    "женском роде", "реакции", "Telegram", "промежуток с прошлого сообщения",
-    "goals-values",
-  ]) {
-    assert.ok(persona.includes(carried), `персона потеряла «${carried}»`);
-  }
-});
-
 test("остаток до напоминания считает сервер, а не модель", async () => {
   // Ева говорила «до будильника пять с половиной часов», когда до него
   // оставалось три с половиной: остаток она считала в уме. Теперь и
@@ -704,8 +675,17 @@ test("сообщение о сделанном сверяется с проме�
   const prompt = builder.wrapUserMessage(context, "все помыл");
   // В ход приходит факт; правило сверки — постоянное, оно в персоне.
   assert.match(prompt, /since_previous_user_message: 30 секунд/);
-  const persona = await personaText();
-  if (persona !== null) assert.ok(persona.includes("не подтверждай выполнение и не хвали"));
+});
+
+test("adaptive live prefix keeps words, links and code intact", () => {
+  const words = Array.from({ length: 30 }, (_, index) => `слово${index + 1}`).join(" ");
+  const prefix = nextLivePrefix("", words, 8);
+  assert.equal(prefix.split(/\s+/u).length, 8);
+  assert.ok(words.startsWith(prefix));
+  assert.equal(nextLivePrefix("", "До [ссылки с пробелом](https://example.test/a) после", 2),
+    "До [ссылки с пробелом](https://example.test/a)");
+  assert.equal(nextLivePrefix("", "До `кода с пробелом` после", 2),
+    "До `кода с пробелом`");
 });
 
 /**

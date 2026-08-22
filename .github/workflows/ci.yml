@@ -70,6 +70,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       docs_only: ${{ steps.detect.outputs.docs_only }}
+      prompt_only: ${{ steps.detect.outputs.prompt_only }}
       media: ${{ steps.detect.outputs.media }}
       adminui: ${{ steps.detect.outputs.adminui }}
       webapp: ${{ steps.detect.outputs.webapp }}
@@ -86,6 +87,19 @@ jobs:
             "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}" \
             "${{ github.sha }}" >> "$GITHUB_OUTPUT"
           cat "$GITHUB_OUTPUT"
+
+      - name: Validate editable prompts structurally
+        if: steps.detect.outputs.prompt_only == 'true'
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          for name in ("library/persona/eva.md", "library/system/letta_local_memfs.md"):
+              path = Path(name)
+              raw = path.read_bytes()
+              text = raw.decode("utf-8")
+              assert text.strip(), f"{name}: empty"
+              assert len(raw) <= 1_000_000, f"{name}: unexpectedly large"
+          PY
 
   # ===================================================================
   # Shell, compose, Caddy, migrations, secret scan
@@ -119,6 +133,9 @@ jobs:
           for f in scripts/*.sh backup-service/backup-service letta-app-server/entrypoint.sh; do
             bash -n "$f" || exit 1
           done
+
+      - name: Changed-scope classification tests
+        run: bash ./scripts/ci/test-changed-scope.sh
 
       - name: NocoDB automatic connection unit tests
         run: node --test nocodb/init-eva.test.mjs

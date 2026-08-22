@@ -44,6 +44,7 @@ import type { UserTurnLock } from "./turns/user-turn-lock.js";
 import type { SdkSettingsInput, SdkSettingsManager } from "./sdk-settings.js";
 import type { TelegramClient, TelegramUpdate } from "./telegram.js";
 import type { TurnSemaphores } from "./turns/semaphores.js";
+import type { RuntimeContextBuilder } from "./runtime/runtime-context.js";
 import { webhookSecretMatches } from "./telegram.js";
 
 export const VERSION = "0.3.0";
@@ -76,6 +77,7 @@ export interface Services {
    * они действительно доступны runtime, а не только зарегистрированы.
    */
   productToolNames?: () => string[];
+  runtimeContext?: RuntimeContextBuilder;
   /**
    * Контур наблюдаемости. Нужен выдаче метрик (состояние буфера
    * телеметрии) и ingress — там начинается трасса хода.
@@ -210,7 +212,7 @@ export function buildServer(services: Services): FastifyInstance {
           details: { telegram_id: event.telegramId },
         });
       },
-    )),
+    ), services.runtimeContext),
     telegram,
     ...(services.miniAppSessions ? { sessions: services.miniAppSessions } : {}),
     rateLimiter,

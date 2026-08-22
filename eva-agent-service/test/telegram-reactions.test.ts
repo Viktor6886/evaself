@@ -5,6 +5,7 @@ import { CoreToolFactory } from "../dist/tools/core-tools.js";
 import { toolRisk } from "../dist/agent-tools.js";
 import { approvalRequiredFor } from "../dist/tools/approvals.js";
 import { runInTurn } from "../dist/turns/turn-context.js";
+import { withToolTurn } from "../dist/tools/tool-kit.js";
 import { reactionStats } from "../dist/metrics.js";
 import { renderTelegramText, TelegramClient } from "../dist/telegram.js";
 import { formatEvaReply } from "../dist/telegram-format.js";
@@ -172,7 +173,7 @@ test("реакция находит свой ход, даже когда кон�
     runId: "r1", recorded: true, isCancelled: async () => false,
     chatId: 42, messageId: 555,
   };
-  openTurnScope("conv-1", turn as never);
+  const scope = openTurnScope("conv-1", turn as never);
   try {
     // Ни одного `runInTurn` вокруг: ровно как у SDK.
     const result = await tools.get("set_reaction")!.execute(
@@ -181,7 +182,7 @@ test("реакция находит свой ход, даже когда кон�
     assert.equal(result.ok, true);
     assert.deepEqual(reactions, [{ chatId: 42, messageId: 555, emoji: "👍" }]);
   } finally {
-    closeTurnScope("conv-1");
+    closeTurnScope(scope);
   }
 
   // Ход закончился — адрес снят, и следующий вызов уже не найдёт чужое
@@ -201,7 +202,7 @@ test("ход одного разговора не виден инструмен�
     { setReaction: async () => {} } as never,
   );
   const tools = new Map(factory.build(tool as never).map((entry) => [entry.name, entry]));
-  openTurnScope("conv-A", {
+  const scope = openTurnScope("conv-A", {
     runId: "r1", recorded: true, isCancelled: async () => false, chatId: 1, messageId: 10,
   } as never);
   try {
@@ -213,6 +214,60 @@ test("ход одного разговора не виден инструмен�
       /сообщения этого хода/i,
     );
   } finally {
-    closeTurnScope("conv-A");
+    closeTurnScope(scope);
+  }
+});
+
+test("старый close не снимает scope нового пересекающегося хода", async () => {
+  const { openTurnScope, closeTurnScope, turnOf } = await import("../dist/turns/turn-context.js");
+  const old = openTurnScope("conv-overlap", {
+    conversationId: "conv-overlap", runId: "old", recorded: true,
+    isCancelled: async () => false, chatId: 1, messageId: 10,
+  });
+  const fresh = openTurnScope("conv-overlap", {
+    conversationId: "conv-overlap", runId: "fresh", recorded: true,
+    isCancelled: async () => false, chatId: 1, messageId: 20,
+  });
+  closeTurnScope(old);
+  assert.equal(turnOf("conv-overlap")?.runId, "fresh");
+  closeTurnScope(fresh);
+  assert.equal(turnOf("conv-overlap"), undefined);
+});
+
+test("delayed tool callback keeps captured target after next turn opens", async () => {
+  const { openTurnScope, closeTurnScope } = await import("../dist/turns/turn-context.js");
+  const { reactions, reaction } = reactionTools();
+  const oldTurn = {
+    conversationId: "conv-1", runId: "old", recorded: true,
+    isCancelled: async () => false, chatId: 42, messageId: 101,
+  };
+  const oldScope = openTurnScope("conv-1", oldTurn);
+  const captured = withToolTurn(RUNTIME as never, oldTurn);
+  const freshScope = openTurnScope("conv-1", {
+    conversationId: "conv-1", runId: "fresh", recorded: true,
+    isCancelled: async () => false, chatId: 42, messageId: 202,
+  });
+  try {
+    await reaction.execute({ emoji: "👍" }, captured as never);
+    assert.deepEqual(reactions, [{ chatId: 42, messageId: 101, emoji: "👍" }]);
+  } finally {
+    closeTurnScope(oldScope);
+    closeTurnScope(freshScope);
+  }
+});
+
+test("ALS другого conversation не перекрывает точный scope", async () => {
+  const { openTurnScope, closeTurnScope, turnOf } = await import("../dist/turns/turn-context.js");
+  const scope = openTurnScope("conv-B", {
+    conversationId: "conv-B", runId: "B", recorded: true,
+    isCancelled: async () => false, chatId: 2, messageId: 2,
+  });
+  try {
+    await runInTurn({
+      conversationId: "conv-A", runId: "A", recorded: true,
+      isCancelled: async () => false, chatId: 1, messageId: 1,
+    }, async () => assert.equal(turnOf("conv-B")?.runId, "B"));
+  } finally {
+    closeTurnScope(scope);
   }
 });

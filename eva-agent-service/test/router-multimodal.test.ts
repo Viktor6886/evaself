@@ -323,6 +323,88 @@ test("резерв маршрута зрения получает изображ
   assert.ok(breakerKey(primary.id, primary.model));
 });
 
+test("single text model gets final answer after configured vision preprocessing", async () => {
+  const { LlmRouter } = await import("../dist/router/router.js");
+  const text = { ...PROVIDER, id: "text", name: "selected-text", supports_vision: false };
+  const vision = { ...PROVIDER, id: "vision", name: "technical-vision", supports_vision: true };
+  const calls: Array<{ provider: string; request: ReturnType<typeof fromOpenAi> }> = [];
+  const route = (code: string, requiresVision: boolean) => ({
+    code, title: code, requires_tools: false, requires_json: false,
+    requires_vision: requiresVision, requires_streaming: false, min_context_window: 1,
+    max_quality_tier: 5, allows_sensitive: true, rotation_enabled: true,
+  });
+  const store = {
+    routingSettings: async () => ({
+      mode: "single" as const, single_provider_id: text.id, single_failover_enabled: false,
+    }),
+    providers: async () => [text, vision],
+    routes: async () => new Map([["single", route("single", false)], ["vision", route("vision", true)]]),
+    chains: async () => new Map([["single", [text.id]], ["vision", [vision.id]]]),
+    breakers: async () => new Map(), spend: async () => ({ day: 0, month: 0 }),
+    claimProbe: async () => false, recordSuccess: async () => {}, recordFailure: async () => {},
+    addSpend: async () => {}, recordAttempt: async () => {},
+  };
+  const router = new LlmRouter(
+    store as never,
+    { debug() {}, info() {}, warn() {}, error() {} },
+    undefined,
+    async () => {},
+    ((provider: typeof text) => ({
+      protocol: "openai-compatible" as const,
+      complete: async (_profile: unknown, request: ReturnType<typeof fromOpenAi>) => {
+        calls.push({ provider: provider.id, request });
+        return {
+          content: provider.id === vision.id ? "На изображении зелёный квадрат." : "Финальный ответ выбранной модели.",
+          tool_calls: [], finish_reason: "stop" as const,
+          usage: { tokens_in: 1, tokens_out: 1 }, model: provider.model,
+        };
+      },
+      async *stream(_profile: unknown, request: ReturnType<typeof fromOpenAi>) {
+        calls.push({ provider: provider.id, request });
+        const response = {
+          content: "Финальный поток выбранной модели.", tool_calls: [], finish_reason: "stop" as const,
+          usage: { tokens_in: 1, tokens_out: 1 }, model: provider.model,
+        };
+        yield { type: "text" as const, delta: response.content };
+        yield { type: "done" as const, response };
+      },
+    })) as never,
+  );
+
+  const requestWithToolHistory = {
+    ...IMAGE_REQUEST,
+    messages: [
+      {
+        role: "assistant", content: "",
+        tool_calls: [{
+          id: "prior-call", type: "function",
+          function: { name: "remember", arguments: "{}" },
+        }],
+      },
+      { role: "tool", tool_call_id: "prior-call", content: "saved" },
+      ...IMAGE_REQUEST.messages,
+    ],
+  };
+  const result = await router.complete(fromOpenAi(requestWithToolHistory) as never);
+  assert.equal(result.provider_id, text.id);
+  assert.deepEqual(calls.map((entry) => entry.provider), [vision.id, text.id]);
+  assert.equal(containsImage(calls[0]!.request.messages), true);
+  assert.deepEqual(calls[0]!.request.messages.map((message) => message.role), ["user"]);
+  assert.equal(containsImage(calls[1]!.request.messages), false);
+  assert.match(calls[1]!.request.messages.at(-1)!.content, /зелёный квадрат/);
+  assert.equal(calls[1]!.request.metadata.vision_preprocessed, true);
+
+  calls.length = 0;
+  const streamed: string[] = [];
+  for await (const chunk of router.stream(fromOpenAi({ ...requestWithToolHistory, stream: true }) as never)) {
+    if (chunk.type === "text") streamed.push(chunk.delta);
+  }
+  assert.deepEqual(calls.map((entry) => entry.provider), [vision.id, text.id]);
+  assert.equal(containsImage(calls[0]!.request.messages), true);
+  assert.equal(containsImage(calls[1]!.request.messages), false);
+  assert.deepEqual(streamed, ["Финальный поток выбранной модели."]);
+});
+
 /**
  * Маршрут зрения без своей цепочки не роняет фотографию.
  *
@@ -395,7 +477,7 @@ test("технический маршрут без цепочки идёт об�
  * с вопросом и получал «не получилось обработать сообщение» после
  * нескольких попыток вместо ответа.
  */
-test("нечем посмотреть картинку — ход отвечает без неё и говорит об этом", async () => {
+test("нечем посмотреть картинку — явный отказ без слепого повтора", async () => {
   const seen: Array<Record<string, unknown>> = [];
   const app = createRouterServer({
     apiKey: "test-key",
@@ -445,18 +527,9 @@ test("нечем посмотреть картинку — ход отвечае
       },
     });
 
-    assert.equal(response.statusCode, 200, "ход не должен падать из-за картинки");
-    assert.equal(seen.length, 2, "второй заход идёт без изображения");
+    assert.equal(response.statusCode, 503);
+    assert.equal(seen.length, 1, "слепого повтора без изображения быть не должно");
     assert.equal((seen[0] as { metadata: { has_image?: boolean } }).metadata.has_image, true);
-    assert.equal((seen[1] as { metadata: { has_image?: boolean } }).metadata.has_image, false,
-      "иначе повтор снова уйдёт на маршрут зрения");
-    const retry = seen[1] as { messages: Array<{ content: string; parts?: Array<{ type: string }> }> };
-    const message = retry.messages[retry.messages.length - 1]!;
-    // Картинки в повторе нет вовсе, а модели прямо сказано, что она была
-    // и посмотреть её не удалось: иначе Ева опишет то, чего не видела.
-    assert.ok(!(message.parts ?? []).some((part) => part.type === "image_url"));
-    assert.match(message.content, /изображение приложено/);
-    assert.match(message.content, /что на фото\?/);
   } finally {
     await app.close();
   }

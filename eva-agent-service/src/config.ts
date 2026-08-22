@@ -80,6 +80,8 @@ export interface Config {
   schedulerIntervalMs: number;
   heartbeatIntervalMs: number;
   typingIntervalMs: number;
+  /** Семантический intent -> доверенный Telegram file_id. */
+  telegramStickerCatalog: Record<string, unknown>;
   defaultTimezone: string;
   profileCompletionEnabled: boolean;
   vectorGoalsEnabled: boolean;
@@ -355,6 +357,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     schedulerIntervalMs: int("EVA_SCHEDULER_INTERVAL_MS", 30_000),
     heartbeatIntervalMs: int("EVA_HEARTBEAT_INTERVAL_MS", 10 * 60_000),
     typingIntervalMs: int("EVA_TELEGRAM_TYPING_INTERVAL_MS", 4_000),
+    telegramStickerCatalog: json<Record<string, unknown>>(
+      "EVA_TELEGRAM_STICKER_CATALOG_JSON",
+      {},
+    ),
     defaultTimezone: str("TZ", "UTC"),
     profileCompletionEnabled: bool("EVA_PROFILE_COMPLETION_ENABLED", true),
     vectorGoalsEnabled: bool("EVA_VECTOR_GOALS_ENABLED", true),
