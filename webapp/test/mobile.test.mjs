@@ -11,12 +11,12 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { after, describe, test } from "node:test";
 
-import { DEVICES, PHONES, documentWidth, openApp, smallTapTargets } from "./harness.mjs";
+import { DEVICES, NOW, PHONES, documentWidth, openApp, smallTapTargets } from "./harness.mjs";
 
 const CORE_SCREENS = ["today", "journal", "development", "profile"];
 const APP_SOURCE = readFileSync(new URL("../public/app/app.js", import.meta.url), "utf8");
 const utcDateKeyDaysAgo = (days) => {
-  const date = new Date();
+  const date = new Date(NOW);
   date.setUTCDate(date.getUTCDate() - days);
   return date.toISOString().slice(0, 10);
 };
