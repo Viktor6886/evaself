@@ -276,6 +276,7 @@ test("проба идёт в конфигурации провайдера, но
       // Полями самой пробы настройка не распоряжается.
       temperature: 0.9,
       max_tokens: 4096,
+      max_completion_tokens: 4096,
       stream: true,
     },
   }, fetcher);
@@ -290,7 +291,8 @@ test("проба идёт в конфигурации провайдера, но
     assert.equal(body.user, undefined);
     assert.equal(body.api_key, undefined);
     assert.equal(body.temperature, 0, "проба остаётся детерминированной");
-    assert.ok(Number(body.max_tokens) <= 64, "проба остаётся дешёвой");
+    assert.equal(body.max_tokens, undefined);
+    assert.ok(Number(body.max_completion_tokens) <= 64, "проба остаётся дешёвой");
   }
   assert.doesNotMatch(JSON.stringify(seen), /sk-should-not-leak/);
 });
@@ -362,14 +364,15 @@ test("agent tools проверяются фактически даже при о
   assert.equal(seen.length, 3, "completion и полный agent tool loop");
 });
 
-test("провал зрения не блокирует разговорную модель", async () => {
+test("заявленное, но неработающее зрение блокирует активацию", async () => {
   const { fetcher } = provider({ vision: () => json({ error: "no vision" }, 400) });
   const result = await probeModelCapabilities(
     { ...INPUT, claims: { ...INPUT.claims, vision: true } },
     fetcher,
   );
   assert.equal(statusOf(result, "vision"), "failed");
-  assert.equal(result.ok, true, "разговаривать модель умеет и без зрения");
+  assert.equal(result.ok, false, "supports_vision нельзя сохранять без рабочего image path");
+  assert.match(result.message, /vision/);
 });
 
 /**

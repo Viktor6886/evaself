@@ -477,13 +477,16 @@ export class LlmManager {
 
     const previous = rollbackOverride ?? await this.db.getActiveLlmProvider();
     const routerAlreadyConfigured = previous?.is_active === true;
-    // App Server нужен только при первой привязке к стабильному маршруту.
-    // Последующие смены provider/model происходят за eva/chat и не должны
-    // зависеть даже от доступности Letta.
-    const mappings = routerAlreadyConfigured
-      ? []
-      : await this.step("опрос агентов App Server", candidate, async () =>
-          await this.letta.listAllModelMappings());
+    const previousChatChain = routerAlreadyConfigured
+      ? await this.step("снимок chat-chain", candidate, async () =>
+          await this.db.getLlmRouteChain("chat"))
+      : null;
+    // Провайдер остаётся скрыт за стабильным eva/chat, но metadata модели
+    // (context/model settings и обнаруженная vision capability) принадлежит
+    // текущей конфигурации. Поэтому mappings обновляются при каждой смене,
+    // без повторной настройки коннектора и без рестарта App Server.
+    const mappings = await this.step("опрос агентов App Server", candidate, async () =>
+      await this.letta.listAllModelMappings());
     const candidateKey = this.secretBox.decrypt(candidate.api_key_encrypted);
     const candidateHandle = ROUTER_ROUTE_HANDLE;
 
@@ -495,17 +498,20 @@ export class LlmManager {
       if (!routerAlreadyConfigured) {
         await this.configureProvider(candidate, candidateKey);
         await this.restartAppServer();
-        await this.letta.waitForModel(candidateHandle);
-        await this.letta.applyModelToMappings(
-          mappings,
-          candidateHandle,
-          candidate.context_window,
-          modelSettings(candidate.additional_parameters),
-        );
-        await this.db.setAgentModels(candidateHandle);
       }
+      // Сначала переключается реальная chat-chain. Тогда каталог
+      // /api/v0/models, который прочитает Letta ниже, уже описывает новую
+      // primary model, а не предыдущую конфигурацию под тем же eva/chat.
       const active = await this.db.activateLlmProvider(candidate.id);
       if (!active) throw new Error("конфигурация исчезла во время переключения");
+      await this.letta.waitForModel(candidateHandle);
+      await this.letta.applyModelToMappings(
+        mappings,
+        candidateHandle,
+        candidate.context_window,
+        modelSettings(candidate.additional_parameters),
+      );
+      await this.db.setAgentModels(candidateHandle);
       this.letta.setDefaultModel(candidateHandle);
       this.logger.info("LLM-конфигурация активирована", {
         providerId: candidate.id,
@@ -519,7 +525,9 @@ export class LlmManager {
         message: error instanceof Error ? error.message : String(error),
       });
       if (previous) {
-        if (routerAlreadyConfigured) await this.db.activateLlmProvider(previous.id);
+        if (routerAlreadyConfigured) {
+          await this.rollbackStableRoute(previous, mappings, previousChatChain ?? []);
+        }
         else await this.rollback(previous, mappings);
       }
       throw new EvaError(
@@ -528,6 +536,33 @@ export class LlmManager {
         }`,
         { code: "llm_switch_failed", statusCode: 502 },
       );
+    }
+  }
+
+  /** Roll back a provider behind eva/chat without reconnecting or restarting Letta. */
+  private async rollbackStableRoute(
+    previous: LlmProviderRow,
+    mappings: ModelMapping[],
+    chatChain: string[],
+  ): Promise<void> {
+    try {
+      await this.db.activateLlmProvider(previous.id);
+      if (chatChain.length > 0) await this.db.replaceLlmRouteChain("chat", chatChain);
+      const handle = ROUTER_ROUTE_HANDLE;
+      await this.letta.waitForModel(handle);
+      await this.letta.applyModelToMappings(
+        mappings,
+        handle,
+        previous.context_window,
+        modelSettings(previous.additional_parameters),
+      );
+      await this.db.setAgentModels(handle);
+      this.letta.setDefaultModel(handle);
+    } catch (rollbackError) {
+      this.logger.error("Rollback metadata LLM не удался", {
+        providerId: previous.id,
+        message: rollbackError instanceof Error ? rollbackError.message : String(rollbackError),
+      });
     }
   }
 

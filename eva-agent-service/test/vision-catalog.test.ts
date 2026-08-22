@@ -136,6 +136,41 @@ test("без зрячего провайдера модель зрячей не 
   }
 });
 
+test("смена primary chat provider сразу меняет vision metadata каталога", async () => {
+  const state = {
+    chains: new Map([["chat", ["p-active"]], ["vision", []]]),
+    providers: [{ id: "p-active", supports_vision: false, context_window: 64_000 }],
+  };
+  const app = surface(state);
+  await app.ready();
+  try {
+    assert.equal((await catalog(app)).get("eva/chat")!.type, "llm");
+    state.providers[0] = { id: "p-active", supports_vision: true, context_window: 128_000 };
+    const changed = (await catalog(app)).get("eva/chat")!;
+    assert.equal(changed.type, "vlm");
+    assert.deepEqual(changed.capabilities, ["vision"]);
+    assert.equal(changed.max_context_length, 128_000);
+  } finally {
+    await app.close();
+  }
+});
+
+test("контекст каталога принадлежит primary, а не старому fallback", async () => {
+  const app = surface({
+    chains: new Map([["chat", ["p-new", "p-old"]], ["vision", []]]),
+    providers: [
+      { id: "p-new", supports_vision: false, context_window: 32_000 },
+      { id: "p-old", supports_vision: false, context_window: 128_000 },
+    ],
+  });
+  await app.ready();
+  try {
+    assert.equal((await catalog(app)).get("eva/chat")!.max_context_length, 32_000);
+  } finally {
+    await app.close();
+  }
+});
+
 test("выключенный провайдер зрения не считается", async () => {
   const app = surface({
     // `providers()` отдаёт только включённых: выключенный остаётся в

@@ -15,7 +15,7 @@ import type {
 import { ProviderError } from "../types.js";
 import { mergeProviderState, pickProviderState } from "../content.js";
 import { ReasoningStripper, stripReasoning } from "../normalize.js";
-import { classifyHttp, readSse } from "./shared.js";
+import { classifyHttp, objectParameter, parameterValue, providerParameters, readSse } from "./shared.js";
 
 interface OpenAiChoiceMessage extends Record<string, unknown> {
   content?: string | null;
@@ -76,6 +76,15 @@ function buildBody(provider: ProviderProfile, request: LlmRequest, stream: boole
     messages.push(entry);
   }
 
+  const parameters = providerParameters(provider, [
+    "contents", "generationConfig", "input", "max_output_tokens", "response_format",
+    "systemInstruction", "tools",
+  ]);
+  const completionBudget = Object.hasOwn(parameters, "max_completion_tokens")
+    ? "max_completion_tokens"
+    : "max_tokens";
+  delete parameters.max_tokens;
+  delete parameters.max_completion_tokens;
   const body: Record<string, unknown> = {
     // additional_parameters читались из базы, но в запрос не попадали.
     // Без них оператору нечем отключить размышления у провайдера,
@@ -83,12 +92,11 @@ function buildBody(provider: ProviderProfile, request: LlmRequest, stream: boole
     // chat_template_kwargs.enable_thinking, reasoning.exclude и подобное.
     // Идут первыми — поля ниже задают сам роутер, и переопределять их
     // произвольной настройкой нельзя.
-    ...provider.additional_parameters,
-    ...provider.generation_defaults,
+    ...parameters,
     model: provider.model,
     messages,
-    temperature: request.temperature,
-    max_tokens: request.max_tokens,
+    temperature: parameterValue(parameters, "temperature", request.temperature),
+    [completionBudget]: request.max_tokens,
     stream,
   };
   if (request.tools.length) {
@@ -100,9 +108,16 @@ function buildBody(provider: ProviderProfile, request: LlmRequest, stream: boole
         parameters: tool.parameters,
       },
     }));
+  } else {
+    delete body.tool_choice;
+    delete body.parallel_tool_calls;
   }
   if (request.response_format) body.response_format = request.response_format;
-  if (stream) body.stream_options = { include_usage: true };
+  if (stream) {
+    body.stream_options = { ...objectParameter(parameters, "stream_options"), include_usage: true };
+  } else {
+    delete body.stream_options;
+  }
   return body;
 }
 

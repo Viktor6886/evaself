@@ -473,7 +473,7 @@ export class LlmRouter {
         { retryable: response.finish_reason !== "content_filter" },
       );
     }
-    if (request.response_format?.type === "json_object") {
+    if (request.response_format) {
       const text = stripFence(response.content);
       try {
         JSON.parse(text);

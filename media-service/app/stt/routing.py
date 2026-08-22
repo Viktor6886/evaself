@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass, field, replace
 
@@ -39,6 +40,7 @@ from .errors import (
     STT_CONFIG_INVALID,
     STT_RATE_LIMITED,
     STT_ROUTE_NOT_CONFIGURED,
+    STT_TRANSCRIPTION_FAILED,
     ProviderAttempt,
     SttError,
 )
@@ -47,6 +49,19 @@ from .runtime import SttRoute, SttRuntime
 from .types import SttAudioInput, SttKey, SttResolvedConfig, SttResult
 
 log = logging.getLogger("media.stt")
+
+_ASSISTANT_LIKE_TRANSCRIPT = re.compile(
+    r"^(?:я\s+(?:рядом|здесь)|i(?:'m|\s+am)\s+(?:here|ready))"
+    r"[.!,:;\s—-]+(?:попробуй|скажи|сформулируй|чем\s+могу|try|tell\s+me|how\s+can\s+i)",
+    re.IGNORECASE,
+)
+
+
+def _is_assistant_like_transcript(text: str) -> bool:
+    """Reject an obvious chat answer before it can become the user's words."""
+    normalized = " ".join(text.strip().strip('"“”«»').split())
+    return bool(_ASSISTANT_LIKE_TRANSCRIPT.search(normalized))
+
 
 # Ошибки, которые чинит следующий ключ того же провайдера.
 #
@@ -329,6 +344,11 @@ class SttRoutingService:
                         + "; ".join(validation.errors),
                     )
                 result = await adapter.transcribe(attempt_config, audio, options)
+                if _is_assistant_like_transcript(result.text):
+                    raise SttError(
+                        STT_TRANSCRIPTION_FAILED,
+                        "провайдер вернул ответ ассистента вместо транскрипции",
+                    )
             except SttError as error:
                 last_error = error
                 if error.code in KEY_ROTATION_CODES:

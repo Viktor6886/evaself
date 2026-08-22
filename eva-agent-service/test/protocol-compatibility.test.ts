@@ -150,3 +150,129 @@ test("Responses API переносит encrypted reasoning item через funct
   assert.match(JSON.stringify(bodies[1]), /ciphertext/);
   assert.match(JSON.stringify(bodies[1]), /function_call_output/);
 });
+
+test("каждый protocol сохраняет system, text и реальную image part", async () => {
+  const outbound = new Map<string, Record<string, unknown>>();
+  const canonical = request([{
+    role: "user",
+    content: "что на картинке?",
+    parts: [
+      { type: "text", text: "что на картинке?" },
+      { type: "image", media_type: "image/png", data: "cG5n" },
+    ],
+  }], []);
+  const capture = (protocol: string, response: unknown) => async (_url: unknown, init?: RequestInit) => {
+    outbound.set(protocol, JSON.parse(String(init?.body)) as Record<string, unknown>);
+    return new Response(JSON.stringify(response), { status: 200 });
+  };
+
+  await openAiAdapter.complete(
+    { ...profile("openai-compatible", capture("openai", { choices: [{ message: { content: "ok" }, finish_reason: "stop" }] }) as typeof fetch), supports_vision: true } as never,
+    canonical as never,
+    AbortSignal.timeout(1_000),
+  );
+  await responsesAdapter.complete(
+    { ...profile("openai-responses", capture("responses", { status: "completed", output: [{ type: "message", content: [{ type: "output_text", text: "ok" }] }] }) as typeof fetch), supports_vision: true } as never,
+    canonical as never,
+    AbortSignal.timeout(1_000),
+  );
+  await geminiAdapter.complete(
+    { ...profile("gemini-compatible", capture("gemini", { candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }] }) as typeof fetch), supports_vision: true } as never,
+    canonical as never,
+    AbortSignal.timeout(1_000),
+  );
+  await anthropicAdapter.complete(
+    { ...profile("anthropic-compatible", capture("anthropic", { content: [{ type: "text", text: "ok" }], stop_reason: "end_turn" }) as typeof fetch), supports_vision: true } as never,
+    canonical as never,
+    AbortSignal.timeout(1_000),
+  );
+
+  const openai = JSON.stringify(outbound.get("openai"));
+  const responses = JSON.stringify(outbound.get("responses"));
+  const gemini = JSON.stringify(outbound.get("gemini"));
+  const anthropic = JSON.stringify(outbound.get("anthropic"));
+  for (const wire of [openai, responses, gemini, anthropic]) {
+    assert.match(wire, /что на картинке/);
+    assert.match(wire, /cG5n/);
+    assert.match(wire, /You are EVE/);
+  }
+  assert.match(responses, /input_image/);
+  assert.match(gemini, /inlineData/);
+  assert.match(anthropic, /base64/);
+});
+
+test("additional_parameters перекрывают defaults, но не runtime protocol fields", async () => {
+  const bodies = new Map<string, Record<string, unknown>>();
+  const capture = (key: string, response: unknown) => async (_url: unknown, init?: RequestInit) => {
+    bodies.set(key, JSON.parse(String(init?.body)) as Record<string, unknown>);
+    return new Response(JSON.stringify(response), { status: 200 });
+  };
+  const configured = (protocol: string, fetcher: typeof fetch) => ({
+    ...profile(protocol, fetcher),
+    generation_defaults: { top_p: 0.1, generationConfig: { topP: 0.1, candidateCount: 1 } },
+    additional_parameters: {
+      top_p: 0.8,
+      max_completion_tokens: 1,
+      temperature: 0.25,
+      model: "must-not-win",
+      stream: true,
+      generationConfig: { topP: 0.8, temperature: 0.25 },
+    },
+  });
+  const text = request([{ role: "user", content: "hello" }], []);
+
+  await openAiAdapter.complete(configured("openai-compatible", capture("openai", { choices: [{ message: { content: "ok" }, finish_reason: "stop" }] }) as typeof fetch) as never, text as never, AbortSignal.timeout(1_000));
+  await responsesAdapter.complete(configured("openai-responses", capture("responses", { status: "completed", output_text: "ok" }) as typeof fetch) as never, text as never, AbortSignal.timeout(1_000));
+  await geminiAdapter.complete(configured("gemini-compatible", capture("gemini", { candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }] }) as typeof fetch) as never, text as never, AbortSignal.timeout(1_000));
+  await anthropicAdapter.complete(configured("anthropic-compatible", capture("anthropic", { content: [{ type: "text", text: "ok" }], stop_reason: "end_turn" }) as typeof fetch) as never, text as never, AbortSignal.timeout(1_000));
+
+  for (const key of ["openai", "responses", "anthropic"]) {
+    assert.equal(bodies.get(key)?.top_p, 0.8, `${key}: operator override`);
+    assert.equal(bodies.get(key)?.model, "arbitrary-model-id", `${key}: runtime model`);
+    assert.equal(bodies.get(key)?.stream, false, `${key}: runtime stream`);
+  }
+  assert.equal(bodies.get("openai")?.max_tokens, undefined);
+  assert.equal(bodies.get("openai")?.max_completion_tokens, 4_096);
+  assert.equal(bodies.get("responses")?.max_output_tokens, 4_096);
+  assert.equal(bodies.get("anthropic")?.max_tokens, 4_096);
+  assert.equal(bodies.get("openai")?.temperature, 0.25);
+  assert.equal(bodies.get("responses")?.temperature, 0.25);
+  assert.equal(bodies.get("anthropic")?.temperature, 0.25);
+  const generation = bodies.get("gemini")?.generationConfig as Record<string, unknown>;
+  assert.equal(generation.topP, 0.8);
+  assert.equal(generation.candidateCount, 1);
+  assert.equal(generation.temperature, 0.25);
+  assert.equal(bodies.get("gemini")?.top_p, undefined);
+  assert.equal(bodies.get("gemini")?.temperature, undefined);
+  assert.equal(bodies.get("gemini")?.model, undefined, "Gemini model belongs in URL, so the extra field must be removed");
+});
+
+test("native protocol streaming возвращает text delta и done", async () => {
+  const sse = (events: unknown[]) => new Response(
+    events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""),
+    { status: 200 },
+  );
+  const cases = [
+    [responsesAdapter, profile("openai-responses", (async () => sse([
+      { type: "response.output_text.delta", delta: "ok" },
+      { type: "response.completed", response: { status: "completed", model: "m" } },
+    ])) as typeof fetch)],
+    [geminiAdapter, profile("gemini-compatible", (async () => sse([
+      { candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }] },
+    ])) as typeof fetch)],
+    [anthropicAdapter, profile("anthropic-compatible", (async () => sse([
+      { type: "message_start", message: { model: "m", usage: { input_tokens: 1 } } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } },
+      { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
+    ])) as typeof fetch)],
+  ] as const;
+
+  for (const [adapter, provider] of cases) {
+    const chunks = [];
+    for await (const chunk of adapter.stream(provider as never, { ...request([{ role: "user", content: "hello" }], []), stream: true } as never, AbortSignal.timeout(1_000))) {
+      chunks.push(chunk);
+    }
+    assert.equal(chunks.find((chunk) => chunk.type === "text")?.delta, "ok");
+    assert.equal(chunks.find((chunk) => chunk.type === "done")?.response.content, "ok");
+  }
+});

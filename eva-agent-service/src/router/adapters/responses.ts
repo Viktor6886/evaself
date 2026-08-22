@@ -1,7 +1,25 @@
 /** OpenAI Responses API adapter. Opaque output items survive tool roundtrips. */
 import type { LlmRequest, LlmResponse, LlmToolCall, ProviderAdapter, ProviderProfile } from "../types.js";
 import { ProviderError } from "../types.js";
-import { classifyHttp, readSse } from "./shared.js";
+import { classifyHttp, objectParameter, parameterValue, providerParameters, readSse } from "./shared.js";
+
+function responseContent(message: LlmRequest["messages"][number]): unknown {
+  if (!message.parts) return message.content;
+  return message.parts.map((part) => {
+    if (part.type === "text") {
+      return {
+        type: message.role === "assistant" ? "output_text" : "input_text",
+        text: part.text,
+      };
+    }
+    return {
+      type: "input_image",
+      image_url: part.type === "image_url"
+        ? part.url
+        : `data:${part.media_type};base64,${part.data}`,
+    };
+  });
+}
 
 function inputItems(request: LlmRequest): unknown[] {
   const input: unknown[] = [];
@@ -14,25 +32,43 @@ function inputItems(request: LlmRequest): unknown[] {
     if (message.role === "assistant") {
       const carried = message.provider_state?.response_items;
       if (Array.isArray(carried)) input.push(...carried);
-      if (message.content.trim()) input.push({ role: "assistant", content: message.content });
+      if (message.content.trim() || message.parts?.length) {
+        input.push({ role: "assistant", content: responseContent(message) });
+      }
       for (const call of message.tool_calls ?? []) {
         input.push({ type: "function_call", call_id: call.id, name: call.name, arguments: call.arguments });
       }
       continue;
     }
-    input.push({ role: message.role, content: message.content });
+    input.push({ role: message.role, content: responseContent(message) });
   }
   return input;
 }
 
 function buildBody(provider: ProviderProfile, request: LlmRequest, stream: boolean) {
+  const parameters = providerParameters(provider, [
+    "contents", "generationConfig", "max_completion_tokens", "max_tokens", "messages",
+    "response_format", "systemInstruction", "tools",
+  ]);
+  const text = objectParameter(parameters, "text");
   const body: Record<string, unknown> = {
-    ...provider.additional_parameters, ...provider.generation_defaults,
+    ...parameters,
     model: provider.model, input: inputItems(request), stream,
-    temperature: request.temperature, max_output_tokens: request.max_tokens,
+    temperature: parameterValue(parameters, "temperature", request.temperature),
+    max_output_tokens: request.max_tokens,
   };
   if (request.tools.length) body.tools = request.tools.map((tool) => ({ type: "function", name: tool.name, description: tool.description, parameters: tool.parameters }));
-  if (request.response_format) body.text = { format: { type: "json_object" } };
+  if (request.response_format?.type === "json_object") {
+    body.text = { ...text, format: { type: "json_object" } };
+  } else if (request.response_format?.type === "json_schema") {
+    const configured = request.response_format.json_schema;
+    body.text = { ...text, format: {
+      type: "json_schema",
+      name: typeof configured.name === "string" ? configured.name : "evaself_response",
+      schema: configured.schema ?? configured,
+      ...(typeof configured.strict === "boolean" ? { strict: configured.strict } : {}),
+    } };
+  }
   return body;
 }
 

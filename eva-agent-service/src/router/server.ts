@@ -166,7 +166,10 @@ export function createRouterServer(input: RouterServerInput): FastifyInstance {
         const own = chainOf(route.code);
         const vision = [...own, ...chainOf(VISION_ROUTE)]
           .some((provider) => provider.supports_vision);
-        const context = Math.max(0, ...own.map((provider) => provider.context_window));
+        // Каталог описывает primary текущего маршрута. Максимум по всей
+        // цепочке оставлял старое большое окно после смены головы и Letta
+        // продолжала собирать контекст, который новая модель не принимает.
+        const context = own[0]?.context_window ?? 0;
         return {
           id: `${MODEL_PREFIX}${route.code}`,
           object: "model",

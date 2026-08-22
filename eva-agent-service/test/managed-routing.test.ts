@@ -48,6 +48,13 @@ test("технические требования запроса: изображ
     resolveRoute({ ...request("Верни объект"), response_format: { type: "json_object" as const } }, settings).effectiveRoute,
     "json",
   );
+  assert.equal(
+    resolveRoute({
+      ...request("Верни объект по схеме"),
+      response_format: { type: "json_schema" as const, json_schema: { schema: { type: "object" } } },
+    }, settings).effectiveRoute,
+    "json",
+  );
 });
 
 test("явно запрошенный маршрут продуктовой операции сохраняется", () => {

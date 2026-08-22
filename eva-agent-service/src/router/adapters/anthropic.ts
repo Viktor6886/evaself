@@ -19,7 +19,7 @@ import type {
   ProviderProfile,
 } from "../types.js";
 import { ProviderError } from "../types.js";
-import { classifyHttp, readSse } from "./shared.js";
+import { classifyHttp, parameterValue, providerParameters, readSse } from "./shared.js";
 import { decodeDataUri } from "../content.js";
 
 const API_VERSION = "2023-06-01";
@@ -124,13 +124,22 @@ function buildBody(provider: ProviderProfile, request: LlmRequest, stream: boole
     // response_format здесь нет; контракт задаётся словами, а проверяет его
     // роутер — он же переключит провайдера, если JSON не разобрался.
     system = `${system}\n\nОтвечай строго одним объектом JSON без пояснений и без markdown.`.trim();
+    if (request.response_format.type === "json_schema") {
+      const schema = request.response_format.json_schema.schema
+        ?? request.response_format.json_schema;
+      system = `${system}\nJSON Schema результата: ${JSON.stringify(schema)}`;
+    }
   }
 
+  const parameters = providerParameters(provider, [
+      "contents", "generationConfig", "input", "max_completion_tokens", "max_output_tokens",
+      "response_format", "system", "systemInstruction", "tools",
+    ]);
   const body: Record<string, unknown> = {
-    ...provider.generation_defaults,
+    ...parameters,
     model: provider.model,
     max_tokens: request.max_tokens,
-    temperature: request.temperature,
+    temperature: parameterValue(parameters, "temperature", request.temperature),
     messages: toWireMessages(request),
     stream,
   };

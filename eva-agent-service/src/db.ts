@@ -1566,7 +1566,7 @@ export class Database {
     return rows[0] ?? null;
   }
 
-  /** Legacy Letta connector selection. Route chains remain independent. */
+  /** Select the primary chat provider while leaving deep/vision routes independent. */
   async activateLlmProvider(id: string): Promise<LlmProviderRow | null> {
     const client = await this.require().connect();
     try {
@@ -1576,8 +1576,64 @@ export class Database {
         "UPDATE llm_providers SET is_active = true WHERE id = $1 RETURNING *",
         [id],
       );
+      if (rows[0]) {
+        const current = await client.query<{ provider_id: string }>(
+          `SELECT provider_id
+             FROM llm_route_providers
+            WHERE route_code = 'chat'
+            ORDER BY position`,
+        );
+        const providers = [
+          id,
+          ...current.rows
+            .map((row) => row.provider_id)
+            .filter((providerId) => providerId !== id),
+        ].slice(0, 6);
+        await client.query("DELETE FROM llm_route_providers WHERE route_code = 'chat'");
+        for (const [position, providerId] of providers.entries()) {
+          await client.query(
+            `INSERT INTO llm_route_providers (route_code, provider_id, position)
+             VALUES ('chat', $1, $2)`,
+            [providerId, position],
+          );
+        }
+        await client.query("SELECT pg_notify('llm_routing_settings_changed', '')");
+      }
       await client.query("COMMIT");
       return rows[0] ?? null;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async getLlmRouteChain(code: string): Promise<string[]> {
+    const { rows } = await this.require().query<{ provider_id: string }>(
+      `SELECT provider_id
+         FROM llm_route_providers
+        WHERE route_code = $1
+        ORDER BY position`,
+      [code],
+    );
+    return rows.map((row) => row.provider_id);
+  }
+
+  async replaceLlmRouteChain(code: string, providerIds: string[]): Promise<void> {
+    const client = await this.require().connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("DELETE FROM llm_route_providers WHERE route_code = $1", [code]);
+      for (const [position, providerId] of providerIds.slice(0, 6).entries()) {
+        await client.query(
+          `INSERT INTO llm_route_providers (route_code, provider_id, position)
+           VALUES ($1, $2, $3)`,
+          [code, providerId, position],
+        );
+      }
+      await client.query("SELECT pg_notify('llm_routing_settings_changed', '')");
+      await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK");
       throw error;

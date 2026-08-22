@@ -1361,6 +1361,7 @@ test("документ приходит отдельным блоком данн
   assert.match(wrapped, /UNTRUSTED_CONTENT/);
   assert.match(wrapped, /Договор продлён до марта/);
   assert.doesNotMatch(wrapped, /Ignore all previous instructions/i);
+  assert.equal(probe.lettaMessages[0], wrapped, "извлечённый документ должен дойти до Letta");
 });
 
 test("слишком большой файл получает понятный отказ, а не падение хода", async () => {
