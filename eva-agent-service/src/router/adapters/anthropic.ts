@@ -120,7 +120,7 @@ function safeJson(raw: string): unknown {
 
 function buildBody(provider: ProviderProfile, request: LlmRequest, stream: boolean) {
   let system = request.system_prompt.trim();
-  if (request.response_format?.type === "json_object") {
+  if (request.response_format) {
     // response_format здесь нет; контракт задаётся словами, а проверяет его
     // роутер — он же переключит провайдера, если JSON не разобрался.
     system = `${system}\n\nОтвечай строго одним объектом JSON без пояснений и без markdown.`.trim();
@@ -154,7 +154,7 @@ async function post(
   const url = `${provider.base_url.replace(/\/+$/, "")}/messages`;
   let response: Response;
   try {
-    response = await fetch(url, {
+    response = await (provider.fetcher ?? fetch)(url, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -268,14 +268,16 @@ export const anthropicAdapter: ProviderAdapter = {
     const usage = { tokens_in: 0, tokens_out: 0 };
     // Аргументы tool_use приходят кусками input_json_delta.
     const partial = new Map<number, { id: string; name: string; json: string }>();
+    const thinking = new Map<number, Record<string, unknown>>();
+    const thinkingBlocks: unknown[] = [];
     const toolCalls: LlmToolCall[] = [];
 
     for await (const event of readSse(response.body)) {
       let parsed: {
         type?: string;
         index?: number;
-        delta?: { type?: string; text?: string; partial_json?: string; stop_reason?: string };
-        content_block?: { type?: string; id?: string; name?: string };
+        delta?: { type?: string; text?: string; thinking?: string; signature?: string; partial_json?: string; stop_reason?: string };
+        content_block?: Record<string, unknown> & { type?: string; id?: string; name?: string };
         message?: { model?: string; usage?: { input_tokens?: number } };
         usage?: { output_tokens?: number };
       };
@@ -296,6 +298,10 @@ export const anthropicAdapter: ProviderAdapter = {
           json: "",
         });
       }
+      if (parsed.type === "content_block_start"
+        && (parsed.content_block?.type === "thinking" || parsed.content_block?.type === "redacted_thinking")) {
+        thinking.set(parsed.index ?? 0, { ...parsed.content_block });
+      }
       if (parsed.type === "content_block_delta") {
         if (parsed.delta?.type === "text_delta" && parsed.delta.text) {
           text += parsed.delta.text;
@@ -304,6 +310,13 @@ export const anthropicAdapter: ProviderAdapter = {
         if (parsed.delta?.type === "input_json_delta") {
           const current = partial.get(parsed.index ?? 0);
           if (current) current.json += parsed.delta.partial_json ?? "";
+        }
+        const block = thinking.get(parsed.index ?? 0);
+        if (block && parsed.delta?.type === "thinking_delta") {
+          block.thinking = String(block.thinking ?? "") + (parsed.delta.thinking ?? "");
+        }
+        if (block && parsed.delta?.type === "signature_delta") {
+          block.signature = String(block.signature ?? "") + (parsed.delta.signature ?? "");
         }
       }
       if (parsed.type === "content_block_stop") {
@@ -314,6 +327,12 @@ export const anthropicAdapter: ProviderAdapter = {
           yield { type: "tool_call", call };
         }
         partial.delete(parsed.index ?? 0);
+        const opaque = thinking.get(parsed.index ?? 0);
+        if (opaque) {
+          thinkingBlocks.push(opaque);
+          yield { type: "provider_state", state: { thinking_blocks: [opaque] } };
+          thinking.delete(parsed.index ?? 0);
+        }
       }
       if (parsed.type === "message_delta") {
         if (parsed.delta?.stop_reason) reason = stopReason(parsed.delta.stop_reason);
@@ -334,6 +353,7 @@ export const anthropicAdapter: ProviderAdapter = {
         finish_reason: reason === "unknown" && toolCalls.length ? "tool_calls" : reason,
         usage,
         model,
+        ...(thinkingBlocks.length ? { provider_state: { thinking_blocks: thinkingBlocks } } : {}),
       },
     };
   },

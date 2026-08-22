@@ -15,8 +15,7 @@
 import { randomUUID } from "node:crypto";
 
 import type { Logger } from "../logger.js";
-import { anthropicAdapter } from "./adapters/anthropic.js";
-import { openAiAdapter } from "./adapters/openai.js";
+import { adapterForProtocol } from "./adapters/index.js";
 import { buildChain } from "./chain.js";
 import type { ChainEntry } from "./chain.js";
 import { requestedRouteOnly, resolveRoute } from "./routes.js";
@@ -83,18 +82,13 @@ export class NoProviderAvailable extends Error {
   }
 }
 
-const ADAPTERS: Record<ProviderProfile["protocol"], ProviderAdapter> = {
-  "openai-compatible": openAiAdapter,
-  "anthropic-compatible": anthropicAdapter,
-};
-
 /**
  * Выбор адаптера вынесен в функцию, чтобы тесты могли подставить заглушку
  * вместо сетевого вызова. В продакшене это ровно таблица выше.
  */
 export type AdapterResolver = (provider: ProviderProfile) => ProviderAdapter;
 
-const defaultResolver: AdapterResolver = (provider) => ADAPTERS[provider.protocol];
+const defaultResolver: AdapterResolver = (provider) => adapterForProtocol(provider.protocol);
 
 export class LlmRouter {
   private readonly limits: RouterLimits;
@@ -472,6 +466,13 @@ export class LlmRouter {
     latencyMs: number,
     provider: ProviderProfile,
   ): ProviderError | null {
+    if (!response.content.trim() && response.tool_calls.length === 0) {
+      return new ProviderError(
+        `модель не дала ответа (finish_reason=${response.finish_reason}, output budget=${request.max_tokens})`,
+        "empty_response",
+        { retryable: response.finish_reason !== "content_filter" },
+      );
+    }
     if (request.response_format?.type === "json_object") {
       const text = stripFence(response.content);
       try {
@@ -611,10 +612,21 @@ export class LlmRouter {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), provider.request_timeout_ms);
       let emitted = false;
+      const pendingState: LlmStreamChunk[] = [];
 
       try {
         for await (const chunk of adapter.stream(provider, prepared, controller.signal)) {
-          if (chunk.type === "text" || chunk.type === "tool_call") emitted = true;
+          if (chunk.type === "provider_state") {
+            // Состояние имеет смысл только вместе с tool_call того же
+            // провайдера. До смысловой дельты держим его внутри, чтобы
+            // сохранить возможность чистого failover.
+            pendingState.push(chunk);
+            continue;
+          }
+          if (chunk.type === "text" || chunk.type === "tool_call") {
+            for (const state of pendingState.splice(0)) yield state;
+            emitted = true;
+          }
           if (chunk.type === "done") {
             await this.settleLimit(
               reservation,

@@ -60,9 +60,9 @@ export function relaxAfterBadRequest(request: LlmRequest): LlmRequest | null {
   if (request.response_format) {
     return { ...request, response_format: null };
   }
-  if (request.tools.length > 0) {
-    return { ...request, tools: [] };
-  }
+  // Tools — часть настоящего агентного хода, а не необязательная
+  // косметика запроса. Повтор без них превращает отказ API в тихий
+  // текстовый ответ и ломает состояние Letta.
   if (request.temperature !== 1) {
     return { ...request, temperature: 1 };
   }

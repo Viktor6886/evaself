@@ -218,18 +218,15 @@ test("параметры подрезаются под возможности п
   assert.equal(normalized.temperature, 2);
 });
 
-test("после HTTP 400 снимается по одному полю, затем сдаёмся", () => {
+test("после HTTP 400 tools не удаляются из настоящего agent turn", () => {
   const first = relaxAfterBadRequest(request({ response_format: { type: "json_object" }, tools: [{ name: "t", description: "", parameters: {} }] }));
   assert.equal(first?.response_format, null);
   assert.equal(first?.tools.length, 1, "инструменты снимаются только следующим шагом");
 
   const second = relaxAfterBadRequest(first);
-  assert.deepEqual(second?.tools, []);
-
-  const third = relaxAfterBadRequest(second);
-  assert.equal(third?.temperature, 1);
-
-  assert.equal(relaxAfterBadRequest(third), null, "снимать больше нечего");
+  assert.equal(second?.temperature, 1);
+  assert.equal(second?.tools.length, 1, "tools — обязательный контракт хода");
+  assert.equal(relaxAfterBadRequest(second), null, "снимать больше нечего");
 });
 
 test("резерв получает инструкцию о личности, основной — нет", () => {

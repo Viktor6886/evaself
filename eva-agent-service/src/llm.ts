@@ -21,7 +21,7 @@ import {
 
 export interface LlmProviderInput {
   name: string;
-  protocol?: "openai-compatible";
+  protocol?: "openai-compatible" | "openai-responses" | "gemini-compatible" | "anthropic-compatible";
   base_url: string;
   api_key?: string;
   model: string;
@@ -32,7 +32,7 @@ export interface LlmProviderInput {
 export interface PublicLlmProvider {
   id: string;
   name: string;
-  protocol: "openai-compatible";
+  protocol: NonNullable<LlmProviderInput["protocol"]>;
   base_url: string;
   model: string;
   model_handle: string;
@@ -216,17 +216,26 @@ export class LlmManager {
     this.restartAppServer = overrides.restartAppServer
       ?? (() => this.requestAppServerRestart());
     this.probeProvider = overrides.probeProvider
-      ?? ((provider, apiKey) => probeOpenAiProvider({
-        baseUrl: provider.base_url,
-        apiKey,
-        timeoutMs: this.config.llmProbeTimeoutMs,
-      }));
+      ?? ((provider, apiKey) => provider.protocol === "openai-compatible"
+        || provider.protocol === "openai-responses"
+        ? probeOpenAiProvider({ baseUrl: provider.base_url, apiKey, timeoutMs: this.config.llmProbeTimeoutMs })
+        : Promise.resolve({
+            ok: true, models_supported: false, models: [],
+            message: "Доступность native protocol проверяется фактическим model probe.", status_code: null,
+          }));
     this.probeCapabilities = overrides.probeCapabilities
       ?? ((provider, apiKey) => probeModelCapabilities({
         baseUrl: provider.base_url,
         apiKey,
         model: provider.model,
         timeoutMs: this.config.llmProbeTimeoutMs,
+        protocol: provider.protocol,
+        contextWindow: provider.context_window,
+        maxOutputTokens: numericParameter(
+          provider.additional_parameters,
+          "max_output_tokens",
+          provider.max_output_tokens ?? Math.min(provider.context_window, 8_192),
+        ),
         // Проверяется только заявленное: не заявлено — не проверяем и
         // не отказываем. Умолчания те же, что в схеме (миграция 017).
         claims: {
@@ -467,25 +476,34 @@ export class LlmManager {
     }
 
     const previous = rollbackOverride ?? await this.db.getActiveLlmProvider();
-    // App Server is the source of truth here: this includes both Telegram
-    // agents mapped in PostgreSQL and standalone agents created from WebUI.
-    const mappings = await this.step("опрос агентов App Server", candidate, async () =>
-      await this.letta.listAllModelMappings());
+    const routerAlreadyConfigured = previous?.is_active === true;
+    // App Server нужен только при первой привязке к стабильному маршруту.
+    // Последующие смены provider/model происходят за eva/chat и не должны
+    // зависеть даже от доступности Letta.
+    const mappings = routerAlreadyConfigured
+      ? []
+      : await this.step("опрос агентов App Server", candidate, async () =>
+          await this.letta.listAllModelMappings());
     const candidateKey = this.secretBox.decrypt(candidate.api_key_encrypted);
     const candidateHandle = ROUTER_ROUTE_HANDLE;
 
-    this.letta.closeAllSessions();
+    if (!routerAlreadyConfigured) this.letta.closeAllSessions();
     try {
-      await this.configureProvider(candidate, candidateKey);
-      await this.restartAppServer();
-      await this.letta.waitForModel(candidateHandle);
-      await this.letta.applyModelToMappings(
-        mappings,
-        candidateHandle,
-        candidate.context_window,
-        modelSettings(candidate.additional_parameters),
-      );
-      await this.db.setAgentModels(candidateHandle);
+      // После первой настройки Letta знает только стабильный eva/chat.
+      // Смена provider/model за этим маршрутом — операция Router/DB и не
+      // должна закрывать agent sessions или перезапускать App Server.
+      if (!routerAlreadyConfigured) {
+        await this.configureProvider(candidate, candidateKey);
+        await this.restartAppServer();
+        await this.letta.waitForModel(candidateHandle);
+        await this.letta.applyModelToMappings(
+          mappings,
+          candidateHandle,
+          candidate.context_window,
+          modelSettings(candidate.additional_parameters),
+        );
+        await this.db.setAgentModels(candidateHandle);
+      }
       const active = await this.db.activateLlmProvider(candidate.id);
       if (!active) throw new Error("конфигурация исчезла во время переключения");
       this.letta.setDefaultModel(candidateHandle);
@@ -501,7 +519,8 @@ export class LlmManager {
         message: error instanceof Error ? error.message : String(error),
       });
       if (previous) {
-        await this.rollback(previous, mappings);
+        if (routerAlreadyConfigured) await this.db.activateLlmProvider(previous.id);
+        else await this.rollback(previous, mappings);
       }
       throw new EvaError(
         `Не удалось переключить LLM; предыдущая конфигурация сохранена: ${
@@ -698,7 +717,9 @@ function validateInput(raw: LlmProviderInput, requireKey: boolean) {
   const additional = raw.additional_parameters ?? {};
 
   if (!name) throw badRequest("Название конфигурации обязательно");
-  if (protocol !== "openai-compatible") throw badRequest("Поддерживается только protocol=openai-compatible");
+  if (!["openai-compatible", "openai-responses", "gemini-compatible", "anthropic-compatible"].includes(protocol)) {
+    throw badRequest("Неизвестный LLM protocol");
+  }
   if (!/^https?:\/\//i.test(baseUrl)) throw badRequest("Base URL должен начинаться с http:// или https://");
   if (requireKey && !apiKey) throw badRequest("API Key обязателен");
   if (!model) throw badRequest("Название модели обязательно");

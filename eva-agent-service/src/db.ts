@@ -70,10 +70,11 @@ export interface AgentLinkRow {
 export interface LlmProviderRow {
   id: string;
   name: string;
-  protocol: "openai-compatible";
+  protocol: "openai-compatible" | "openai-responses" | "gemini-compatible" | "anthropic-compatible";
   base_url: string;
   model: string;
   context_window: number;
+  max_output_tokens?: number;
   additional_parameters: Record<string, unknown>;
   api_key_encrypted: string;
   is_active: boolean;
@@ -1483,7 +1484,7 @@ export class Database {
 
   async createLlmProvider(input: {
     name: string;
-    protocol: "openai-compatible";
+    protocol: LlmProviderRow["protocol"];
     baseUrl: string;
     model: string;
     contextWindow: number;
@@ -1512,7 +1513,7 @@ export class Database {
   async updateLlmProvider(input: {
     id: string;
     name: string;
-    protocol: "openai-compatible";
+    protocol: LlmProviderRow["protocol"];
     baseUrl: string;
     model: string;
     contextWindow: number;

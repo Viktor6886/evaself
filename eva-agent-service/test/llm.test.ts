@@ -80,7 +80,7 @@ test("public provider responses never expose ciphertext or API key", async () =>
   assert.equal(result.api_key_configured, true);
 });
 
-test("failed model switch restores the previous provider and mappings", async () => {
+test("смена chat-модели за eva/chat не перенастраивает Letta", async () => {
   const master = "z".repeat(64);
   const box = new SecretBox(master);
   const previous = providerRow("previous", true, box.encrypt("old-key"));
@@ -88,6 +88,8 @@ test("failed model switch restores the previous provider and mappings", async ()
   let active = previous;
   const configured: string[] = [];
   const applied: string[] = [];
+  let restarts = 0;
+  let closed = 0;
 
   const db = {
     getLlmProvider: async (id: string) => (id === candidate.id ? candidate : previous),
@@ -100,7 +102,7 @@ test("failed model switch restores the previous provider and mappings", async ()
     },
   };
   const letta = {
-    closeAllSessions: () => undefined,
+    closeAllSessions: () => { closed += 1; },
     setDefaultModel: () => undefined,
     waitForModel: async () => undefined,
     listAllModelMappings: async () => [{ agentId: "agent-1", conversationIds: ["conv-1"] }],
@@ -109,7 +111,6 @@ test("failed model switch restores the previous provider and mappings", async ()
     // привязывается к номеру попытки, а не к имени модели.
     applyModelToMappings: async (_mappings: unknown, model: string) => {
       applied.push(model);
-      if (applied.length === 1) throw new Error("synthetic SDK failure");
     },
   };
   const manager = new LlmManager(
@@ -121,7 +122,7 @@ test("failed model switch restores the previous provider and mappings", async ()
       configureProvider: async (provider) => {
         configured.push(provider.name);
       },
-      restartAppServer: async () => undefined,
+      restartAppServer: async () => { restarts += 1; },
       probeProvider: async () => ({
         ok: true,
         models_supported: true,
@@ -135,11 +136,13 @@ test("failed model switch restores the previous provider and mappings", async ()
     },
   );
 
-  await assert.rejects(() => manager.activate(candidate.id), /предыдущая конфигурация сохранена/i);
-  assert.deepEqual(configured, ["candidate", "previous"]);
-  // Обе привязки идут на маршрут роутера, а не на модель провайдера.
-  assert.deepEqual(applied, ["lmstudio/eva/chat", "lmstudio/eva/chat"]);
-  assert.equal(active.id, previous.id);
+  const result = await manager.activate(candidate.id);
+  assert.equal(result.id, candidate.id);
+  assert.deepEqual(configured, []);
+  assert.deepEqual(applied, []);
+  assert.equal(restarts, 0);
+  assert.equal(closed, 0);
+  assert.equal(active.id, candidate.id);
 });
 
 function providerRow(name: string, isActive: boolean, encrypted: string) {
