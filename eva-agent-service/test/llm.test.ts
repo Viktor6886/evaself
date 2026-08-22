@@ -4,9 +4,20 @@ import { test } from "node:test";
 import {
   LlmManager,
   SecretBox,
+  catalogVisionHint,
   modelHandle,
   probeOpenAiProvider,
 } from "../dist/llm.js";
+
+test("OpenRouter-style input_modalities is a hint, not a model-id rule", () => {
+  const models = [{
+    id: "vendor/future-model",
+    architecture: { input_modalities: ["text", "image"] },
+  }];
+  assert.equal(catalogVisionHint(models, "vendor/future-model"), true);
+  assert.equal(catalogVisionHint([{ id: "vendor/text", architecture: { input_modalities: ["text"] } }], "vendor/text"), false);
+  assert.equal(catalogVisionHint(models, "missing"), null);
+});
 
 test("API key encrypts with authenticated random ciphertext", () => {
   const box = new SecretBox("x".repeat(64));
@@ -194,6 +205,30 @@ test("startup discovers legacy vision=false before Letta opens a session", async
     `default:${modelHandle("eva/chat")}`,
     "persist:true",
   ]);
+});
+
+test("startup clears stale vision=true after factual probe fails", async () => {
+  const master = "s".repeat(64);
+  const row = {
+    ...providerRow("active", true, new SecretBox(master).encrypt("provider-key")),
+    supports_vision: true,
+  };
+  const persisted: boolean[] = [];
+  const manager = new LlmManager(
+    config(master),
+    {
+      getActiveLlmProvider: async () => row,
+      setLlmProviderVisionCapability: async (_id: string, value: boolean) => {
+        persisted.push(value);
+        return { ...row, supports_vision: value };
+      },
+    } as never,
+    { setDefaultModel() {} } as never,
+    logger() as never,
+    { probeVision: async () => ({ name: "vision", status: "failed", detail: "image rejected", blocking: true }) },
+  );
+  await manager.initializeDefaultModel();
+  assert.deepEqual(persisted, [false]);
 });
 
 test("activation persists discovered vision before Router catalog is refreshed", async () => {

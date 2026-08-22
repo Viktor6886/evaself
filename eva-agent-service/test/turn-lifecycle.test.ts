@@ -509,6 +509,7 @@ interface WorkflowProbe {
   /** Состояния черновика, показанные человеку по ходу генерации. */
   shown: string[];
   typingStopped: boolean;
+  actions: string[];
   /** Метрики хода из строки журнала. */
   metrics: Record<string, number>;
   /** С чем позвали сборку контекста хода. */
@@ -536,6 +537,8 @@ async function runTelegramTurn(
     responseMode?: "text" | "voice" | "both";
     /** Сколько «занимает» синтез в поддельном media-service. */
     synthesisMs?: number;
+    /** Сколько занимает распознавание входящего voice. */
+    sttMs?: number;
     /**
      * Что происходит внутри хода: настоящий инструмент вызывается отсюда,
      * потому что SDK в прогоне нет, а договор «инструмент оставил
@@ -617,6 +620,7 @@ async function runTelegramTurn(
   const issuedTokens: Array<Record<string, unknown>> = [];
   // «Печатает» снимается, как только у ответа появилось сообщение.
   let typingStopped = false;
+  const actions: string[] = [];
   // Метрики хода читаются оттуда же, откуда их читает оператор, — из
   // строки журнала: проверяется опубликованное, а не внутреннее поле.
   const turnMetrics: Record<string, number> = {};
@@ -634,6 +638,13 @@ async function runTelegramTurn(
   const telegram = {
     withDeliveryContext: async <T>(_prefix: string, work: () => Promise<T>) => await work(),
     startTyping: () => () => { typingStopped = true; },
+    startChatActionController: () => ({
+      transition: (value: string | null) => {
+        if (value === null) typingStopped = true;
+        else actions.push(value);
+      },
+      stop: () => { typingStopped = true; },
+    }),
     // Поддельный показ повторяет договор настоящего: первое состояние —
     // отправка сообщения, следующие — правки того же сообщения,
     // промежуточные схлопываются, и чаще, чем раз в `liveIntervalMs`,
@@ -710,7 +721,15 @@ async function runTelegramTurn(
       if (options.voiceSendFails) throw new Error("Telegram отклонил голосовое сообщение");
       order.push("voice");
     },
-    sendPlainMessage: async (_chatId: number, text: string) => { sent.push(text); },
+    sendPlainMessage: async (_chatId: number, text: string) => {
+      sent.push(text);
+      return [{ message_id: 7_001 }];
+    },
+    editPlainMessage: async (_chatId: number, _messageId: number, text: string) => {
+      const index = sent.findIndex((value) => value.startsWith("🎧"));
+      if (index >= 0) sent[index] = text;
+      else sent.push(text);
+    },
     downloadFile: async (_fileId: string, downloadOptions: { maxBytes?: number } = {}) => {
       downloadLimits.push(downloadOptions.maxBytes ?? null);
       return {
@@ -837,6 +856,7 @@ async function runTelegramTurn(
     globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
       if (!String(input).includes("/stt/transcribe")) return await originalFetch(input as never, init);
       transcribed.push(String(init?.body ?? ""));
+      if (options.sttMs) await new Promise((resolve) => setTimeout(resolve, options.sttMs));
       return new Response(JSON.stringify({
         text: "расшифровка присланной записи",
         duration_seconds: 12,
@@ -895,6 +915,7 @@ async function runTelegramTurn(
     channelLinks,
     shown,
     typingStopped,
+    actions,
     contextInputs,
     recordedMessageAt,
     lettaMessages,
@@ -1129,6 +1150,15 @@ test("в режиме «голос и текст» текст не ждёт си
   assert.deepEqual(probe.result, { status: "completed", usageCharged: true });
   // Синтез шёл параллельно доставке: он измерен и не приплюсован к ней.
   assert.ok(probe.metrics.tts_ms >= 50, `синтез не измерен: ${probe.metrics.tts_ms}`);
+  assert.deepEqual(probe.actions, ["typing", "record_voice", "upload_voice"]);
+});
+
+test("chat actions follow text, voice and both lifecycles", async () => {
+  const text = await runTelegramTurn(undefined, { responseMode: "text" });
+  const voice = await runTelegramTurn(undefined, { responseMode: "voice" });
+  assert.deepEqual(text.actions, ["typing"]);
+  assert.deepEqual(voice.actions, ["record_voice", "upload_voice"]);
+  assert.equal(voice.actions.includes("typing"), false);
 });
 
 test("отказ учёта после доставки не заводит второй ответ", async () => {
@@ -1340,6 +1370,21 @@ test("звук, присланный файлом, идёт тем же расп
   assert.match(probe.prompts[0] ?? "", /расшифровка присланной записи/);
   // В ход ушла строка: изображений здесь нет.
   assert.equal(typeof probe.lettaMessages[0], "string");
+});
+
+test("медленный ASR редактирует один статус в transcript без record_voice", async () => {
+  const probe = await runTelegramTurn(undefined, {
+    sttMs: 650,
+    attachment: {
+      message: {
+        document: { file_id: "slow-audio", file_name: "voice.ogg", mime_type: "audio/ogg", file_size: 100 },
+      },
+      bytes: PNG_BYTES,
+    },
+  });
+  assert.equal(probe.sent.filter((text) => text.startsWith("🎧")).length, 0);
+  assert.equal(probe.sent.filter((text) => text === "📝 расшифровка присланной записи").length, 1);
+  assert.equal(probe.actions.includes("record_voice"), false, "ASR не изображает запись ответа Евы");
 });
 
 test("документ приходит отдельным блоком данных, а подпись остаётся репликой", async () => {

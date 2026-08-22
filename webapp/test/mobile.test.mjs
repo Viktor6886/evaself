@@ -11,12 +11,12 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { after, describe, test } from "node:test";
 
-import { DEVICES, PHONES, documentWidth, openApp, smallTapTargets } from "./harness.mjs";
+import { DEVICES, NOW, PHONES, documentWidth, openApp, smallTapTargets } from "./harness.mjs";
 
 const CORE_SCREENS = ["today", "journal", "development", "profile"];
 const APP_SOURCE = readFileSync(new URL("../public/app/app.js", import.meta.url), "utf8");
 const utcDateKeyDaysAgo = (days) => {
-  const date = new Date();
+  const date = new Date(NOW);
   date.setUTCDate(date.getUTCDate() - days);
   return date.toISOString().slice(0, 10);
 };
@@ -383,6 +383,31 @@ describe("Mini App hook-focused", () => {
     assert.match(text, /Цели 55%/);
     assert.match(text, /Больше контекста|точнее выводы|устойчивый контекст/i);
     assert.match(text, /Продолжить/i);
+  });
+
+  test("быстрые переключения формата ответа сохраняют последний выбор", async () => {
+    let writes = 0;
+    const app = await open({
+      viewport: { width: 390, height: 844 },
+      routes: {
+        "PATCH /public/profile": async ({ body }) => {
+          writes += 1;
+          if (writes === 1) await new Promise((resolve) => setTimeout(resolve, 80));
+          return { profile: { user: { response_mode: body.response_mode } } };
+        },
+      },
+    });
+
+    await app.openScreen("profile");
+    await app.page.click('[data-setting="voice"]');
+    await app.page.click('[data-response-mode="voice"]');
+    await app.page.click('[data-response-mode="text"]');
+    await app.page.waitForFunction(() => window.EvaApp.state.profile?.user?.response_mode === "text");
+
+    const modes = app.requests
+      .filter(({ method, path }) => method === "PATCH" && path === "/public/profile")
+      .map(({ body }) => body.response_mode);
+    assert.deepEqual(modes, ["voice", "text"]);
   });
 
   test("journal остаётся в навигации даже если серверный модуль выключен", async () => {

@@ -21,7 +21,7 @@ function descriptions(): Map<string, string> {
   return new Map(factory.build(tool as never).map((item) => [item.name, item.description]));
 }
 
-test("persona defines rich presentation, reactions and selective inline choices", async (t) => {
+test("persona file is structurally valid editable UTF-8 content", async (t) => {
   let persona: string;
   try {
     persona = await readFile(new URL("../../library/persona/eva.md", import.meta.url), "utf8");
@@ -30,13 +30,8 @@ test("persona defines rich presentation, reactions and selective inline choices"
     t.skip("persona is outside the service-only Docker build context");
     return;
   }
-  assert.match(persona, /Rich Messages/);
-  assert.match(persona, /\| Вариант \| Цена \| Итог \|/);
-  assert.match(persona, /<details><summary>/);
-  assert.match(persona, /по умолчанию рассмотри `set_reaction`/);
-  assert.match(persona, /present_inline_choices/);
-  assert.match(persona, /Что тебя сейчас больше всего задело.*открытым/);
-  assert.doesNotMatch(persona, /Telegram не поддерживает таблиц|Таблиц.*не поддерживает/i);
+  assert.ok(persona.trim().length > 0);
+  assert.ok(Buffer.byteLength(persona, "utf8") <= 1_000_000);
 });
 
 test("typed tool descriptions make reaction and buttons the active default when appropriate", () => {

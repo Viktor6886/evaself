@@ -123,6 +123,9 @@ function incompatibility(
   if (route.requires_vision && !provider.supports_vision) {
     return "маршрут требует работу с изображениями";
   }
+  if (request.metadata.has_image && !provider.supports_vision) {
+    return "запрос содержит изображение";
+  }
   if (route.requires_streaming && !provider.supports_streaming) {
     return "маршрут требует потоковый ответ";
   }

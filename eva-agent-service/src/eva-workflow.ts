@@ -37,6 +37,7 @@ import {
   type TelegramMessage,
   type TelegramUpdate,
   TelegramClient,
+  type TelegramChatActionController,
   telegramMessageIdOf,
   TelegramFileTooLarge,
 } from "./telegram.js";
@@ -58,7 +59,7 @@ import {
  * Техническая причина остаётся в message и уходит только в лог.
  */
 export class VoiceTranscriptionError extends Error {
-  constructor(reason: string) {
+  constructor(reason: string, readonly reported = false) {
     super(reason);
     this.name = "VoiceTranscriptionError";
   }
@@ -416,7 +417,7 @@ export class EvaWorkflow {
     // который надо прервать, и просьба остановиться дождалась бы его
     // конца — то есть не остановила бы ничего.
     if (update.command === "/stop") return await this.stopRunningTurn(update);
-    const typing: { stop: (() => void) | null } = { stop: null };
+    const action: { current: TelegramChatActionController | null } = { current: null };
     // Ответ, который растёт на глазах: одно сообщение, которое правится
     // по мере генерации. Его конец — общий `finally`, каким бы ни был
     // исход хода.
@@ -614,6 +615,7 @@ export class EvaWorkflow {
         // к файлу — его слова, а сам файл — данные.
         const attachments: string[] = [];
         const images: AttachmentImage[] = [];
+        let turnScope: ReturnType<typeof openTurnScope> | null = null;
         try {
           // Порядок сообщений сохраняется: человек дописывал мысль, и
           // прочитать её задом наперёд — значит прочитать другую мысль.
@@ -631,7 +633,9 @@ export class EvaWorkflow {
           // просто этим сообщением. Технический текст провайдера сюда
           // не попадает, он остался в логе.
           if (error instanceof VoiceTranscriptionError) {
-            await this.telegram.sendMessage(update.chatId, t(language, "voiceFailed"));
+            if (!error.reported) {
+              await this.telegram.sendMessage(update.chatId, t(language, "voiceFailed"));
+            }
             await this.stopTurn(turnHandle, "voice_transcription_failed");
             return { status: "ignored" };
           }
@@ -707,7 +711,6 @@ export class EvaWorkflow {
             sync: syncOutcome,
           });
         }
-        typing.stop = this.telegram.startTyping(update.chatId, this.config.typingIntervalMs);
         // Окно этого хода после гейтов: голосовая часть могла выпасть по
         // квоте, и рассказывать про неё в контексте больше нечего.
         const promptTiming: MessageBatchTiming = messageBatchTiming(
@@ -764,6 +767,13 @@ export class EvaWorkflow {
         metrics.context_build_ms = context.metrics?.runtimeContextMs ?? 0;
         metrics.profile_check_ms = context.metrics?.profileCheckMs ?? 0;
         const responseMode = context.responseMode;
+        action.current = this.telegram.startChatActionController(
+          update.chatId,
+          this.config.typingIntervalMs,
+        );
+        if (responseMode === "text" || responseMode === "both") {
+          action.current.transition("typing");
+        }
         // Текст, показанный человеку прямо сейчас: он же сверяется с
         // итоговым ответом перед отправкой.
         let streamed = "";
@@ -774,8 +784,7 @@ export class EvaWorkflow {
           live.current = this.telegram.startLiveMessage(update.chatId, {
             onSent: () => {
               // Сообщение появилось — «печатает» становится враньём.
-              typing.stop?.();
-              typing.stop = null;
+              if (responseMode === "text") action.current?.transition(null);
             },
           });
         }
@@ -815,6 +824,7 @@ export class EvaWorkflow {
           // попросит инструментом, останется в нём, и прочитать его надо
           // уже после хода — на доставке контекста хода больше нет.
           const activeTurn: ActiveTurn = {
+            conversationId,
             runId: turnHandle?.runId ?? "",
             recorded: turnHandle?.recorded === true,
             isCancelled: async () =>
@@ -827,7 +837,7 @@ export class EvaWorkflow {
           };
           // Второй адрес того же хода: инструменты вызываются из
           // обработчика сокета SDK, куда контекст не доезжает.
-          openTurnScope(conversationId, activeTurn);
+          turnScope = openTurnScope(conversationId, activeTurn);
           answer = await runInTurn(
             activeTurn,
             async () => await this.letta.runTurn(
@@ -886,7 +896,7 @@ export class EvaWorkflow {
           // Ход закончился любым исходом — адрес по conversation
           // снимается здесь. Отменённый или упавший ход не должен
           // оставить после себя запись, в которую попадёт следующий.
-          closeTurnScope(conversationId);
+          if (turnScope) closeTurnScope(turnScope);
         }
         metrics.session_acquire_ms = answer.sessionAcquireMs;
         metrics.time_to_first_delta_ms = answer.firstDeltaMs ?? 0;
@@ -957,6 +967,7 @@ export class EvaWorkflow {
         // режиме «оба» он стоял в очереди за синтезом до сорока пяти
         // секунд, и весь выигрыш от потока пропадал на последнем шаге.
         const ttsStarted = performance.now();
+        if (responseMode === "voice") action.current?.transition("record_voice");
         const speech = wantsVoice
           ? this.synthesizeVoice(speechTextFromReply(reply))
             .then((audio) => {
@@ -1023,6 +1034,7 @@ export class EvaWorkflow {
           }
           live.current = null;
           deliveryMs += elapsed(deliveryStarted);
+          if (wantsVoice) action.current?.transition("record_voice");
         }
         if (speech) {
           // Голос догоняет текст. В голосовом режиме ждать по-прежнему
@@ -1039,6 +1051,7 @@ export class EvaWorkflow {
           let voiced = false;
           if (audio && audio.length > 0) {
             try {
+              action.current?.transition("upload_voice");
               await this.telegram.sendVoice(update.chatId, audio);
               voiced = true;
               await this.touchVoiceUsage(context.userId);
@@ -1055,6 +1068,7 @@ export class EvaWorkflow {
             await this.telegram.sendAssistantMessage(update.chatId, reply);
           }
           deliveryMs += elapsed(voiceStarted);
+          action.current?.transition(null);
         }
         metrics.telegram_delivery_ms = deliveryMs;
 
@@ -1111,7 +1125,7 @@ export class EvaWorkflow {
       throw error;
     } finally {
       live.current?.stop();
-      typing.stop?.();
+      action.current?.stop();
       const delivery = this.telegram.getDeliveryMetrics();
       metrics.outbox_insert_ms = delivery.outboxInsertMs;
       metrics.telegram_send_ms = delivery.telegramSendMs;
@@ -1427,16 +1441,56 @@ export class EvaWorkflow {
       // путём распознавания: разными их делает только способ отправки.
       const file = audioFileOf(message);
       if (!file) throw new Error("Голосовой файл отсутствует");
-      const transcription = await this.transcribeVoice(
-        "telegram_voice",
-        file.file_id,
-        // file_unique_id не меняется при повторной доставке апдейта, в
-        // отличие от file_id. Telegram повторяет доставку при таймауте
-        // вебхука, и без этого ключа одно голосовое оплачивалось бы
-        // дважды.
-        file.file_unique_id ?? null,
-        message.from?.language_code ?? "ru",
-      );
+      let settled = false;
+      const status: { promise: Promise<number | null> | null } = { promise: null };
+      const statusTimer = setTimeout(() => {
+        if (settled) return;
+        status.promise = this.telegram.sendPlainMessage(
+          update.chatId,
+          message.from?.language_code === "en"
+            ? "🎧 Transcribing voice message…"
+            : "🎧 Распознаю голосовое…",
+        ).then((sent) => telegramMessageIdOf(sent[sent.length - 1])).catch(() => null);
+      }, 600);
+      statusTimer.unref?.();
+      let transcription;
+      try {
+        transcription = await this.transcribeVoice(
+          "telegram_voice",
+          file.file_id,
+          // file_unique_id не меняется при повторной доставке апдейта, в
+          // отличие от file_id. Telegram повторяет доставку при таймауте
+          // вебхука, и без этого ключа одно голосовое оплачивалось бы
+          // дважды.
+          file.file_unique_id ?? null,
+          message.from?.language_code ?? "ru",
+        );
+      } catch (error) {
+        settled = true;
+        clearTimeout(statusTimer);
+        const statusId = status.promise ? await status.promise.catch(() => null) : null;
+        if (statusId !== null) {
+          const failureText = message.from?.language_code === "en"
+            ? "I could not transcribe that voice message."
+            : "Не удалось распознать голосовое.";
+          const edited = await this.telegram.editPlainMessage(
+            update.chatId,
+            statusId,
+            failureText,
+          ).then(() => true).catch(() => false);
+          if (!edited) {
+            await this.telegram.sendPlainMessage(update.chatId, failureText).catch(() => undefined);
+          }
+          throw new VoiceTranscriptionError(
+            error instanceof Error ? error.message : "transcription_failed",
+            true,
+          );
+        }
+        throw error;
+      } finally {
+        settled = true;
+        clearTimeout(statusTimer);
+      }
       if (!transcription.fromCache && transcription.durationMinutes) {
         await this.db.incrementUsage(
           update.telegramId,
@@ -1444,10 +1498,19 @@ export class EvaWorkflow {
           Math.max(1, Math.ceil(transcription.durationMinutes)),
         );
       }
-      await this.telegram.sendPlainMessage(
-        update.chatId,
-        formatVoiceTranscriptEcho(transcription.text),
-      );
+      const statusId = status.promise ? await status.promise.catch(() => null) : null;
+      if (statusId !== null) {
+        await this.telegram.editPlainMessage(
+          update.chatId,
+          statusId,
+          formatVoiceTranscriptEcho(transcription.text),
+        );
+      } else {
+        await this.telegram.sendPlainMessage(
+          update.chatId,
+          formatVoiceTranscriptEcho(transcription.text),
+        );
+      }
       // Подпись к аудиофайлу — тоже слова человека, и терять её незачем.
       return only([transcription.text, caption].filter(Boolean).join("\n"));
     }
@@ -1548,7 +1611,7 @@ export function normalizeUpdate(update: TelegramUpdate): NormalizedUpdate | null
 
 /** Hermes-compatible transcript echo shown before the agent's answer. */
 export function formatVoiceTranscriptEcho(text: string): string {
-  return `🎙️ "${text.trim()}"`;
+  return `📝 ${text.trim()}`;
 }
 
 function normalizeSttAttempts(

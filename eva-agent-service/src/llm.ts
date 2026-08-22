@@ -116,6 +116,20 @@ export function modelHandle(model: string): string {
   return trimmed.startsWith("lmstudio/") ? trimmed : `lmstudio/${trimmed}`;
 }
 
+/** Provider catalog is only a hint; the image probe remains authoritative. */
+export function catalogVisionHint(
+  models: Array<{ id: string; [key: string]: unknown }>,
+  model: string,
+): boolean | null {
+  const entry = models.find((candidate) => candidate.id === model);
+  if (!entry) return null;
+  const architecture = entry.architecture;
+  if (!architecture || typeof architecture !== "object") return null;
+  const modalities = (architecture as { input_modalities?: unknown }).input_modalities;
+  if (!Array.isArray(modalities)) return null;
+  return modalities.some((value) => typeof value === "string" && value.toLowerCase() === "image");
+}
+
 export async function probeOpenAiProvider(
   input: { baseUrl: string; apiKey: string; timeoutMs: number },
   fetcher: typeof fetch = fetch,
@@ -257,7 +271,7 @@ export class LlmManager {
     // image before the request reaches Router.
     try {
       const active = await this.db.getActiveLlmProvider();
-      if (!active || active.supports_vision === true) return;
+      if (!active) return;
       const apiKey = this.secretBox.decrypt(active.api_key_encrypted);
       const check = await this.probeVision(active, apiKey);
       await this.persistDetectedVision(active, { ok: true, checks: [check], message: "", warnings: "" });
@@ -376,11 +390,17 @@ export class LlmManager {
       apiKeyEncrypted: encrypted,
     });
     if (!updated) throw notFound(`LLM-конфигурация ${id} не найдена`);
+    const identityChanged = old.protocol !== updated.protocol
+      || old.base_url !== updated.base_url
+      || old.model !== updated.model;
+    const candidate = identityChanged
+      ? (await this.db.setLlmProviderVisionCapability(updated.id, false) ?? updated)
+      : updated;
 
-    if (!old.is_active) return publicProvider(updated);
+    if (!old.is_active) return publicProvider(candidate);
 
     try {
-      return await this.activateRow(updated, old);
+      return await this.activateRow(candidate, old);
     } catch (error) {
       await this.db.updateLlmProvider({
         id: old.id,
@@ -392,6 +412,7 @@ export class LlmManager {
         additionalParameters: old.additional_parameters,
         apiKeyEncrypted: old.api_key_encrypted,
       });
+      await this.db.setLlmProviderVisionCapability(old.id, old.supports_vision === true);
       throw error;
     }
   }
@@ -628,6 +649,18 @@ export class LlmManager {
     if (!connectivity.ok) return connectivity;
 
     const capabilities = await this.probeCapabilities(provider, apiKey);
+    const catalogHint = connectivity.models_supported
+      ? catalogVisionHint(connectivity.models, provider.model)
+      : null;
+    const detectedVision = capabilities.checks.find((entry) => entry.name === "vision")?.status === "ok";
+    if (catalogHint !== null) {
+      this.logger.info("LLM Router: catalog vision hint сопоставлен с фактической пробой", {
+        providerId: provider.id,
+        model: provider.model,
+        catalogVision: catalogHint,
+        detectedVision,
+      });
+    }
     return {
       ...connectivity,
       ok: capabilities.ok,
@@ -646,14 +679,16 @@ export class LlmManager {
     provider: LlmProviderRow,
     capabilities: CapabilityProbeResult,
   ): Promise<LlmProviderRow> {
-    const detected = capabilities.checks.some((entry) =>
-      entry.name === "vision" && entry.status === "ok");
-    if (!detected || provider.supports_vision === true) return provider;
-    const updated = await this.db.setLlmProviderVisionCapability(provider.id, true);
+    const vision = capabilities.checks.find((entry) => entry.name === "vision");
+    if (!vision) return provider;
+    const detected = vision.status === "ok";
+    if (detected === (provider.supports_vision === true)) return provider;
+    const updated = await this.db.setLlmProviderVisionCapability(provider.id, detected);
     if (!updated) return provider;
-    this.logger.info("LLM Router: фактически обнаружена поддержка изображений", {
+    this.logger.info("LLM Router: фактически обновлена поддержка изображений", {
       providerId: provider.id,
       model: provider.model,
+      supportsVision: detected,
     });
     return updated;
   }

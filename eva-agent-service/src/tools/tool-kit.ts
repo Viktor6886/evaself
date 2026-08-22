@@ -1,6 +1,7 @@
 import type { AnyAgentTool } from "@letta-ai/letta-agent-sdk";
 
 import type { AgentRuntimeContext } from "../db.js";
+import { turnOf, type ActiveTurn } from "../turns/turn-context.js";
 
 export type JsonObject = Record<string, unknown>;
 /**
@@ -19,6 +20,23 @@ export type ToolBuilder = (
     toolCallId: string,
   ) => Promise<unknown>,
 ) => AnyAgentTool;
+
+const TOOL_TURN = Symbol("evaself.tool.turn");
+type AffinedRuntime = AgentRuntimeContext & { [TOOL_TURN]?: ActiveTurn };
+
+export function withToolTurn(
+  runtime: AgentRuntimeContext,
+  turn: ActiveTurn | undefined,
+): AgentRuntimeContext {
+  return Object.assign({}, runtime, { [TOOL_TURN]: turn });
+}
+
+export function toolTurn(runtime: AgentRuntimeContext): ActiveTurn | undefined {
+  if (Object.prototype.hasOwnProperty.call(runtime, TOOL_TURN)) {
+    return (runtime as AffinedRuntime)[TOOL_TURN];
+  }
+  return turnOf(runtime.conversationId);
+}
 
 export const objectSchema = (
   properties: Record<string, JsonObject>,

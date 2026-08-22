@@ -85,7 +85,10 @@ function preferencesDb(initial: string | null = null) {
   return db;
 }
 
-function repositoryFor(db: ReturnType<typeof preferencesDb>) {
+function repositoryFor(
+  db: ReturnType<typeof preferencesDb>,
+  invalidator?: { invalidate(userId: number): void },
+) {
   return new PublicRepository(
     db as never,
     {
@@ -95,6 +98,7 @@ function repositoryFor(db: ReturnType<typeof preferencesDb>) {
     } as never,
     {} as never,
     {} as never,
+    invalidator,
   );
 }
 
@@ -108,6 +112,15 @@ test("формат ответа сохраняется по пользовате
     // Значение пишется владельцу хода, а не тому, кого назвал клиент.
     assert.equal(db.state.writes[0]?.[0], 7, mode);
   }
+});
+
+test("WebApp invalidates RuntimeContext immediately after response mode write", async () => {
+  const invalidated: number[] = [];
+  const repository = repositoryFor(preferencesDb(), {
+    invalidate: (userId) => invalidated.push(userId),
+  });
+  await repository.updateProfile(100_500, { response_mode: "voice" });
+  assert.deepEqual(invalidated, [7]);
 });
 
 test("без настройки действует текстовый режим, четвёртого варианта нет", async () => {

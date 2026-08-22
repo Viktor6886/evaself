@@ -34,75 +34,6 @@ export interface RouterServerInput {
 }
 
 
-/**
- * Пометка вместо изображения, которое посмотреть не удалось.
- *
- * Ход с картинкой не должен умирать оттого, что зрячего провайдера нет
- * или он отказал: человек прислал фотографию с вопросом, и потерять
- * из-за неё весь ответ хуже, чем ответить без картинки. Пометка идёт в
- * текст сообщения, чтобы модель сказала правду, а не придумала, будто
- * что-то разглядела.
- */
-const IMAGE_UNAVAILABLE_NOTE =
-  "[изображение приложено, но распознать его сейчас нечем: "
-  + "маршрут зрения недоступен. Скажи об этом прямо и не описывай картинку]";
-
-/**
- * Тот же запрос без изображений. `null` — изображений и не было, значит
- * повторять нечего.
- */
-function withoutImages(request: LlmRequest): LlmRequest | null {
-  let removed = false;
-  const messages = request.messages.map((message) => {
-    if (!message.parts?.some((part) => part.type !== "text")) return message;
-    removed = true;
-    const texts = message.parts.filter((part) => part.type === "text");
-    const content = [message.content, IMAGE_UNAVAILABLE_NOTE]
-      .filter((piece) => piece.trim().length > 0)
-      .join("\n\n");
-    return {
-      ...message,
-      content,
-      // Части остаются только текстовые; если их не было вовсе, оставляем
-      // одно поле `content` — так сообщение выглядит как обычное.
-      parts: texts.length > 0
-        ? [...texts, { type: "text" as const, text: IMAGE_UNAVAILABLE_NOTE }]
-        : undefined,
-    };
-  });
-  if (!removed) return null;
-  return {
-    ...request,
-    messages,
-    metadata: { ...request.metadata, has_image: false },
-  };
-}
-
-
-/**
- * Стоит ли повторить ход без изображений.
- *
- * Только на исчерпании маршрута: `NoProviderAvailable` означает, что
- * посмотреть картинку было некому — цепочка пуста, провайдер выключен
- * или все отказали. Прочие ошибки повтором не лечатся и маскировать их
- * нельзя.
- */
-function degradedRequest(
-  error: unknown,
-  request: LlmRequest,
-  logger: Logger,
-): LlmRequest | null {
-  if (!(error instanceof NoProviderAvailable)) return null;
-  const blind = withoutImages(request);
-  if (!blind) return null;
-  logger.warn("LLM Router: изображение не обслужено, отвечаем без него", {
-    request_id: request.metadata.request_id,
-    route: request.metadata.route,
-    detail: error.detail,
-  });
-  return blind;
-}
-
 export function createRouterServer(input: RouterServerInput): FastifyInstance {
   const app = Fastify({ logger: false, bodyLimit: 8 * 1024 * 1024 });
 
@@ -242,15 +173,6 @@ export function createRouterServer(input: RouterServerInput): FastifyInstance {
         const result = await input.router.complete(parsed);
         return reply.send(toOpenAi(result.response, result));
       } catch (error) {
-        const blind = degradedRequest(error, parsed, input.logger);
-        if (blind) {
-          try {
-            const result = await input.router.complete(blind);
-            return reply.send(toOpenAi(result.response, result));
-          } catch (fallbackError) {
-            return sendFailure(reply, fallbackError, input.logger, blind);
-          }
-        }
         return sendFailure(reply, error, input.logger, parsed);
       }
     }
@@ -260,17 +182,8 @@ export function createRouterServer(input: RouterServerInput): FastifyInstance {
     let headersSent = false;
     // Поток с картинкой, который не начался, ещё можно повторить без
     // изображения. После первого фрагмента поздно: ответ уже пошёл.
-    let streamed = parsed;
     async function* chunks(): AsyncGenerator<LlmStreamChunk> {
-      try {
-        yield* input.router.stream(streamed);
-        return;
-      } catch (error) {
-        const blind = headersSent ? null : degradedRequest(error, streamed, input.logger);
-        if (!blind) throw error;
-        streamed = blind;
-      }
-      yield* input.router.stream(streamed);
+      yield* input.router.stream(parsed);
     }
     try {
       for await (const chunk of chunks()) {
@@ -282,7 +195,7 @@ export function createRouterServer(input: RouterServerInput): FastifyInstance {
             connection: "keep-alive",
           });
         }
-        reply.raw.write(`data: ${JSON.stringify(toOpenAiChunk(chunk, streamed))}\n\n`);
+        reply.raw.write(`data: ${JSON.stringify(toOpenAiChunk(chunk, parsed))}\n\n`);
       }
       if (!headersSent) {
         reply.raw.writeHead(200, { "content-type": "text/event-stream; charset=utf-8" });
@@ -291,11 +204,11 @@ export function createRouterServer(input: RouterServerInput): FastifyInstance {
       reply.raw.end();
       return reply;
     } catch (error) {
-      if (!headersSent) return sendFailure(reply, error, input.logger, streamed);
+      if (!headersSent) return sendFailure(reply, error, input.logger, parsed);
       // Поток уже начался: HTTP-код изменить нельзя, поэтому ошибка
       // передаётся событием и соединение закрывается.
       input.logger.error("LLM Router: обрыв уже начатого потока", {
-        request_id: streamed.metadata.request_id,
+        request_id: parsed.metadata.request_id,
         error: error instanceof Error ? error.message : String(error),
       });
       reply.raw.write(

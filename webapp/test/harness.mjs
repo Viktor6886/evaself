@@ -91,7 +91,7 @@ async function launch() {
   }
 }
 
-const NOW = "2026-08-14T09:00:00.000Z";
+export const NOW = "2026-08-14T09:00:00.000Z";
 
 /** Ответы API по умолчанию: ровно столько, чтобы экраны наполнились. */
 export const DEFAULT_ROUTES = {
@@ -163,7 +163,15 @@ export async function openApp({ routes = {}, viewport, journal = false } = {}) {
   const requests = [];
   const errors = [];
 
-  await page.addInitScript(() => {
+  await page.addInitScript((now) => {
+    const NativeDate = Date;
+    const fixedNow = NativeDate.parse(now);
+    window.Date = class extends NativeDate {
+      constructor(...args) {
+        super(...(args.length > 0 ? args : [fixedNow]));
+      }
+      static now() { return fixedNow; }
+    };
     const noop = () => {};
     window.__backHandlers = [];
     window.Telegram = {
@@ -187,7 +195,7 @@ export async function openApp({ routes = {}, viewport, journal = false } = {}) {
         },
       },
     };
-  });
+  }, NOW);
 
   // Внешний скрипт Telegram в тесте недоступен: подмена уже стоит,
   // и загрузка настоящего файла только добавила бы минуту ожидания.
@@ -214,7 +222,9 @@ export async function openApp({ routes = {}, viewport, journal = false } = {}) {
     const table = { ...DEFAULT_ROUTES, ...routes };
     const handler = table[`${method} ${pathname}`] ?? table[pathname]
       ?? table[Object.keys(table).find((key) => key.startsWith("/") && pathname.startsWith(key)) ?? ""];
-    const payload = typeof handler === "function" ? handler() : handler;
+    const payload = typeof handler === "function"
+      ? await handler({ method, pathname, body })
+      : handler;
     if (payload && typeof payload === "object" && "__status" in payload) {
       return await route.fulfill({
         status: payload.__status,

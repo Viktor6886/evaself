@@ -17,6 +17,8 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { InlineChoiceIntent } from "../telegram/inline-choices.js";
 
 export interface ActiveTurn {
+  /** Conversation, которому принадлежит ход. Нужен для защиты от чужого ALS. */
+  conversationId?: string;
   runId: string;
   /** Записан ли ход в `turn_runs`. Без записи ключ эффекта не на что вешать. */
   recorded: boolean;
@@ -69,14 +71,26 @@ export function currentTurn(): ActiveTurn | undefined {
  * знает из своего runtime. Хранится ровно то же самое и ровно так же
  * недолго: запись живёт от начала хода до его конца.
  */
-const byConversation = new Map<string, ActiveTurn>();
-
-export function openTurnScope(conversationId: string, turn: ActiveTurn): void {
-  byConversation.set(conversationId, turn);
+export interface TurnScope {
+  readonly conversationId: string;
+  readonly turn: ActiveTurn;
+  readonly token: symbol;
 }
 
-export function closeTurnScope(conversationId: string): void {
-  byConversation.delete(conversationId);
+const byConversation = new Map<string, TurnScope>();
+
+export function openTurnScope(conversationId: string, turn: ActiveTurn): TurnScope {
+  const scope = Object.freeze({ conversationId, turn, token: Symbol(conversationId) });
+  byConversation.set(conversationId, scope);
+  return scope;
+}
+
+export function closeTurnScope(scope: TurnScope): void {
+  // Старый ход может завершиться после нового. Он не имеет права снять
+  // scope, который уже принадлежит более свежему ходу.
+  if (byConversation.get(scope.conversationId) === scope) {
+    byConversation.delete(scope.conversationId);
+  }
 }
 
 /**
@@ -87,5 +101,9 @@ export function closeTurnScope(conversationId: string): void {
  * где контекст не доехал.
  */
 export function turnOf(conversationId: string | undefined): ActiveTurn | undefined {
-  return currentTurn() ?? (conversationId ? byConversation.get(conversationId) : undefined);
+  const ambient = currentTurn();
+  if (ambient && (!ambient.conversationId || ambient.conversationId === conversationId)) {
+    return ambient;
+  }
+  return conversationId ? byConversation.get(conversationId)?.turn : undefined;
 }

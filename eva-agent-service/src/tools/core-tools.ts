@@ -8,7 +8,6 @@ import { ALLOWED_REACTIONS, telegramPollOf, type TelegramClient } from "../teleg
 import { Crawl4aiReader, WebReadError } from "./web-read.js";
 import { KnowledgeSearch } from "../knowledge/search.js";
 import { inspectRuntime, type InspectionInput } from "../letta/runtime-inspection.js";
-import { turnOf } from "../turns/turn-context.js";
 import {
   InlineChoiceError,
   MAX_CHOICES,
@@ -21,6 +20,7 @@ import {
   normalizePoll,
 } from "../telegram/polls.js";
 import { recordReaction } from "../metrics.js";
+import { STICKER_INTENTS, stickerFileId } from "../telegram/stickers.js";
 import { LlmRouterClient } from "../router/client.js";
 import { localDateWithWeekday, localNow } from "../time/local-date-time.js";
 import {
@@ -31,6 +31,7 @@ import {
   optionalString,
   requiredString,
   text,
+  toolTurn,
   type JsonObject,
   type ToolBuilder,
 } from "./tool-kit.js";
@@ -453,6 +454,7 @@ export class CoreToolFactory {
           + "Если useEmoji=false, инструмент сам безопасно пропустит действие.",
         objectSchema({ emoji: text("Одна поддерживаемая Telegram emoji") }, ["emoji"]),
         async (args, runtime) => {
+          const turn = toolTurn(runtime);
           const emoji = requiredString(args, "emoji", 16);
           if (!runtime.useEmoji) {
             recordReaction("skipped");
@@ -469,16 +471,15 @@ export class CoreToolFactory {
           // Ход берётся и по контексту, и по conversation: инструменты
           // регистрируются при открытии сессии, и до их вызова из
           // обработчика сокета SDK AsyncLocalStorage не дотягивается.
-          const turn = turnOf(runtime.conversationId);
           const messageId = turn?.messageId;
-          const chatId = turn?.chatId ?? runtime.chatId;
-          if (!Number.isSafeInteger(messageId)) {
+          const chatId = turn?.chatId;
+          if (!Number.isSafeInteger(messageId) || !Number.isSafeInteger(chatId)) {
             recordReaction("failed");
             throw new Error("Нет сообщения этого хода для реакции");
           }
           recordReaction("attempted");
           try {
-            await this.telegram.setReaction(chatId, messageId!, emoji);
+            await this.telegram.setReaction(chatId!, messageId!, emoji);
           } catch (error) {
             recordReaction("failed");
             throw error;
@@ -519,6 +520,26 @@ export class CoreToolFactory {
         },
       ),
       tool(
+        "send_sticker",
+        "Стикер Telegram",
+        "Отправляет один уместный стикер из безопасного серверного каталога. "
+          + "Выбирай только эмоциональное намерение; file_id, URL и файлы модель не задаёт.",
+        objectSchema({
+          intent: { type: "string", enum: [...STICKER_INTENTS] },
+        }, ["intent"]),
+        async (args, runtime) => {
+          const turn = toolTurn(runtime);
+          const intent = requiredString(args, "intent", 32);
+          const fileId = stickerFileId(this.config.telegramStickerCatalog, intent);
+          if (!fileId) return { ok: false, reason: "sticker_unavailable" };
+          if (!Number.isSafeInteger(turn?.chatId)) {
+            return { ok: false, reason: "no_active_turn" };
+          }
+          await this.telegram.sendSticker(turn!.chatId!, fileId);
+          return { ok: true, intent };
+        },
+      ),
+      tool(
         "present_inline_choices",
         "Показать варианты кнопками",
         "Добавляет к твоему ответу кнопки с вариантами выбора. Отдельного сообщения "
@@ -547,7 +568,7 @@ export class CoreToolFactory {
           ["choices"],
         ),
         async (args, runtime) => {
-          const turn = turnOf(runtime.conversationId);
+          const turn = toolTurn(runtime);
           if (!turn) {
             // Вне хода приклеивать кнопки не к чему: ответ уже ушёл.
             return { ok: false, reason: "no_active_turn" };
@@ -597,11 +618,12 @@ export class CoreToolFactory {
           ["question", "options"],
         ),
         async (args, runtime, toolCallId) => {
-          const turn = turnOf(runtime.conversationId);
-          const chatId = turn?.chatId ?? runtime.chatId;
+          const turn = toolTurn(runtime);
+          const chatId = turn?.chatId;
           if (!Number.isSafeInteger(chatId)) {
             return { ok: false, reason: "no_chat" };
           }
+          const targetChatId = chatId as number;
           let poll;
           try {
             poll = normalizePoll(args);
@@ -621,7 +643,7 @@ export class CoreToolFactory {
             || (turn?.runId ? `${turn.runId}:${poll.question}` : randomUUID());
           const record = await this.db.createPoll({
             userId: runtime.userId,
-            chatId,
+            chatId: targetChatId,
             conversationId: runtime.conversationId,
             toolCallId: call,
             runId: turn?.runId ?? null,
@@ -634,7 +656,7 @@ export class CoreToolFactory {
             // Тот же вызов уже отправил этот опрос. Второго в чате не будет.
             return { ok: true, repeated: true, answers_linked: true };
           }
-          const sent = telegramPollOf(await this.telegram.sendPoll(chatId, poll));
+          const sent = telegramPollOf(await this.telegram.sendPoll(targetChatId, poll));
           if (!sent) {
             // Доставка отложена очередью, и идентификатора опроса ещё
             // нет. Опрос человек увидит, но связать будущий голос с ним

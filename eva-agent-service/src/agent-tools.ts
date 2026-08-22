@@ -20,6 +20,7 @@ import {
   asObject,
   type JsonObject,
   type ToolBuilder,
+  withToolTurn,
 } from "./tools/tool-kit.js";
 
 const CONTEXT_MUTATING_TOOLS = new Set([
@@ -70,6 +71,7 @@ export class AgentToolFactory {
     private readonly mcp?: { policies: McpServerPolicyRepository; invoker: Pick<McpHttpInvoker, "invokeServer"> },
     /** Наблюдатель рантайма для самопроверки. Без него инструмент честно откажет. */
     observer?: RuntimeObserver,
+    private readonly runtimeInvalidator?: { invalidate(userId: number): void },
   ) {
     this.vectorGoalsEnabled = config.vectorGoalsEnabled !== false;
     this.core = new CoreToolFactory(config, db, telegram, undefined, observer);
@@ -124,6 +126,9 @@ export class AgentToolFactory {
       description,
       parameters,
       execute: async (toolCallId, rawArgs) => {
+        // Affinity фиксируется в момент входа callback, до любого await.
+        // Иначе чтение runtime даёт следующему ходу время заменить scope.
+        const turn = turnOf(conversationId);
         let executionUserId: number | undefined;
         let approvalCompletionAttempted = false;
         // Вызов вынесен в отдельную функцию, чтобы ранний выход —
@@ -164,7 +169,6 @@ export class AgentToolFactory {
           // обработчика сокета SDK AsyncLocalStorage не дотягивается.
           // Без этого журнал побочных эффектов оставался бы выключенным:
           // без хода нет ни ключа, ни барьера отмены.
-          const turn = turnOf(conversationId);
           // Барьер отмены перед побочным эффектом. Отменённый ход не
           // должен делать того, что потом нельзя отменить: генерацию мы
           // остановим, а созданную задачу или отправленное сообщение —
@@ -203,7 +207,7 @@ export class AgentToolFactory {
                 label: `tool:${name}`,
               },
               async () => await execute(
-                asObject(rawArgs), runtime, String(toolCallId ?? ""),
+                asObject(rawArgs), withToolTurn(runtime, turn), String(toolCallId ?? ""),
               ),
             );
           } catch (error) {
@@ -223,6 +227,7 @@ export class AgentToolFactory {
           if (key && this.effects) await this.effects.succeed(key, runtime.userId, output);
           if (CONTEXT_MUTATING_TOOLS.has(name)) {
             this.invalidate(conversationId);
+            this.runtimeInvalidator?.invalidate(runtime.userId);
           }
           return result(output);
         };
@@ -353,6 +358,7 @@ const TOOL_RISK: Readonly<Record<string, ToolRisk>> = Object.freeze({
   // внешним последствием, каждая просьба поддержать сообщение эмодзи
   // требовала подтверждения человека — и Ева перестала их ставить вовсе.
   set_reaction: "low_risk_write",
+  send_sticker: "low_risk_write",
   // Самопроверка рантайма ничего не меняет: она только складывает уже
   // наблюдаемые факты. Спрашивать за неё подтверждение значило бы
   // требовать разрешения на вопрос «что у меня с памятью».

@@ -19,6 +19,8 @@
   let activationMemory = {};
   let meaningfulMemory = [];
   let shieldMemory = {};
+  let responseModeSequence = 0;
+  let responseModeQueue = Promise.resolve();
 
   const state = {
     screen: "today",
@@ -1315,16 +1317,24 @@
     });
   }
 
-  async function saveResponseMode(mode) {
-    try {
-      const result = await api("/public/profile", { method: "PATCH", body: JSON.stringify({ response_mode: mode }) });
+  function saveResponseMode(mode) {
+    const sequence = ++responseModeSequence;
+    // Записи сериализованы в порядке нажатий: поздний ответ старого
+    // запроса не сможет стать последним значением в БД.
+    const request = responseModeQueue.then(async () => await api("/public/profile", {
+      method: "PATCH",
+      body: JSON.stringify({ response_mode: mode }),
+    }));
+    responseModeQueue = request.catch(() => undefined);
+    return request.then((result) => {
+      if (sequence !== responseModeSequence) return;
       state.profile = result.profile || state.profile;
       closeSheet();
       renderProfile();
       toast(`Формат ответов: ${responseModeTitle(mode).toLowerCase()}`);
-    } catch (error) {
-      toast(friendlyError(error), true);
-    }
+    }).catch((error) => {
+      if (sequence === responseModeSequence) toast(friendlyError(error), true);
+    });
   }
 
   function openSubscriptionSheet() {
