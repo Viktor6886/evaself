@@ -1566,6 +1566,23 @@ export class Database {
     return rows[0] ?? null;
   }
 
+  /** Persist a capability established by the real provider probe. */
+  async setLlmProviderVisionCapability(
+    id: string,
+    supportsVision: boolean,
+  ): Promise<LlmProviderRow | null> {
+    const { rows } = await this.require().query<LlmProviderRow>(
+      `UPDATE llm_providers SET
+         supports_vision = $2,
+         updated_at = now()
+       WHERE id = $1
+       RETURNING *`,
+      [id, supportsVision],
+    );
+    if (rows[0]) await this.require().query("SELECT pg_notify('llm_routing_settings_changed', '')");
+    return rows[0] ?? null;
+  }
+
   /** Select the primary chat provider while leaving deep/vision routes independent. */
   async activateLlmProvider(id: string): Promise<LlmProviderRow | null> {
     const client = await this.require().connect();

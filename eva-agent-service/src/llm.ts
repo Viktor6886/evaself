@@ -16,6 +16,8 @@ import type { LettaService } from "./letta.js";
 import type { Logger } from "./logger.js";
 import {
   probeModelCapabilities,
+  probeVisionCapability,
+  type CapabilityProbeInput,
   type CapabilityProbeResult,
 } from "./llm/capability-probe.js";
 
@@ -191,6 +193,7 @@ interface LlmManagerOverrides {
   restartAppServer?: () => Promise<void>;
   probeProvider?: (provider: LlmProviderRow, apiKey: string) => Promise<ProviderProbe>;
   probeCapabilities?: (provider: LlmProviderRow, apiKey: string) => Promise<CapabilityProbeResult>;
+  probeVision?: (provider: LlmProviderRow, apiKey: string) => Promise<CapabilityProbeResult["checks"][number]>;
 }
 
 export class LlmManager {
@@ -202,6 +205,7 @@ export class LlmManager {
     provider: LlmProviderRow,
     apiKey: string,
   ) => Promise<CapabilityProbeResult>;
+  private readonly probeVision: NonNullable<LlmManagerOverrides["probeVision"]>;
 
   constructor(
     private readonly config: Config,
@@ -224,31 +228,9 @@ export class LlmManager {
             message: "Доступность native protocol проверяется фактическим model probe.", status_code: null,
           }));
     this.probeCapabilities = overrides.probeCapabilities
-      ?? ((provider, apiKey) => probeModelCapabilities({
-        baseUrl: provider.base_url,
-        apiKey,
-        model: provider.model,
-        timeoutMs: this.config.llmProbeTimeoutMs,
-        protocol: provider.protocol,
-        contextWindow: provider.context_window,
-        maxOutputTokens: numericParameter(
-          provider.additional_parameters,
-          "max_output_tokens",
-          provider.max_output_tokens ?? Math.min(provider.context_window, 8_192),
-        ),
-        // Проверяется только заявленное: не заявлено — не проверяем и
-        // не отказываем. Умолчания те же, что в схеме (миграция 017).
-        claims: {
-          tools: provider.supports_tools !== false,
-          json: provider.supports_json !== false,
-          streaming: provider.supports_streaming !== false,
-          vision: provider.supports_vision === true,
-        },
-        // В той же конфигурации, в какой модель будет работать: роутер
-        // подставляет эти параметры в каждый настоящий запрос, и у
-        // reasoning-моделей от них зависит форма ответа.
-        additionalParameters: provider.additional_parameters,
-      }));
+      ?? ((provider, apiKey) => probeModelCapabilities(capabilityInput(provider, apiKey, this.config)));
+    this.probeVision = overrides.probeVision
+      ?? ((provider, apiKey) => probeVisionCapability(capabilityInput(provider, apiKey, this.config)));
   }
 
   /**
@@ -269,6 +251,21 @@ export class LlmManager {
    */
   async initializeDefaultModel(): Promise<void> {
     this.letta.setDefaultModel(ROUTER_ROUTE_HANDLE);
+    // Existing installations may have a vision-capable provider saved with
+    // the old default `supports_vision=false`. Discover it before the first
+    // session: otherwise Letta treats eva/chat as text-only and removes the
+    // image before the request reaches Router.
+    try {
+      const active = await this.db.getActiveLlmProvider();
+      if (!active || active.supports_vision === true) return;
+      const apiKey = this.secretBox.decrypt(active.api_key_encrypted);
+      const check = await this.probeVision(active, apiKey);
+      await this.persistDetectedVision(active, { ok: true, checks: [check], message: "", warnings: "" });
+    } catch (error) {
+      this.logger.warn("Не удалось автоматически проверить зрение активной LLM", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   /**
@@ -414,6 +411,7 @@ export class LlmManager {
   async test(id: string): Promise<ProviderProbe> {
     const provider = await this.get(id);
     const result = await this.probe(provider);
+    if (result.capabilities) await this.persistDetectedVision(provider, result.capabilities);
     await this.db.recordLlmCheck(id, {
       ok: result.ok,
       message: result.message,
@@ -462,6 +460,7 @@ export class LlmManager {
     });
     const check = await this.step("проверка конфигурации", candidate, async () =>
       await this.probe(candidate));
+    if (check.capabilities) candidate = await this.persistDetectedVision(candidate, check.capabilities);
     await this.db.recordLlmCheck(candidate.id, {
       ok: check.ok,
       message: check.message,
@@ -643,6 +642,22 @@ export class LlmManager {
     };
   }
 
+  private async persistDetectedVision(
+    provider: LlmProviderRow,
+    capabilities: CapabilityProbeResult,
+  ): Promise<LlmProviderRow> {
+    const detected = capabilities.checks.some((entry) =>
+      entry.name === "vision" && entry.status === "ok");
+    if (!detected || provider.supports_vision === true) return provider;
+    const updated = await this.db.setLlmProviderVisionCapability(provider.id, true);
+    if (!updated) return provider;
+    this.logger.info("LLM Router: фактически обнаружена поддержка изображений", {
+      providerId: provider.id,
+      model: provider.model,
+    });
+    return updated;
+  }
+
   /**
    * Подключает Letta App Server к LLM Router.
    *
@@ -811,6 +826,35 @@ function numericParameter(
 ): number {
   const value = Number(parameters[name]);
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+}
+
+function capabilityInput(
+  provider: LlmProviderRow,
+  apiKey: string,
+  config: Config,
+): CapabilityProbeInput {
+  return {
+    baseUrl: provider.base_url,
+    apiKey,
+    model: provider.model,
+    timeoutMs: config.llmProbeTimeoutMs,
+    protocol: provider.protocol,
+    contextWindow: provider.context_window,
+    maxOutputTokens: numericParameter(
+      provider.additional_parameters,
+      "max_output_tokens",
+      provider.max_output_tokens ?? Math.min(provider.context_window, 8_192),
+    ),
+    claims: {
+      tools: provider.supports_tools !== false,
+      json: provider.supports_json !== false,
+      streaming: provider.supports_streaming !== false,
+      vision: provider.supports_vision === true,
+    },
+    // Keep operator inference settings identical to production. The probe
+    // itself still owns protocol-critical fields such as messages/tools.
+    additionalParameters: provider.additional_parameters,
+  };
 }
 
 function parseJsonObject(raw: string): Record<string, unknown> {

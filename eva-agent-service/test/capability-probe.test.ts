@@ -64,7 +64,7 @@ function provider(overrides: {
         ? (overrides.jsonSchema ?? (() => json(CHAT('{"ok":true}'))))(body)
         : (overrides.jsonObject ?? (() => json(CHAT('{"ok":true}'))))(body);
     }
-    if (Array.isArray(messages[0]?.content)) return (overrides.vision ?? (() => json(CHAT("ready"))))(body);
+    if (Array.isArray(messages[0]?.content)) return (overrides.vision ?? (() => json(CHAT("green"))))(body);
     return (overrides.completion ?? (() => json(CHAT("ready"))))(body);
   };
   return { fetcher: fetcher as unknown as typeof fetch, seen };
@@ -89,14 +89,19 @@ test("совместимая модель проходит все заявлен
   for (const name of ["completion", "streaming", "tool_call", "tool_result_loop", "json_object", "json_schema"]) {
     assert.equal(statusOf(result, name), "ok", name);
   }
-  // Не заявлено — не проверяется: лишних запросов к провайдеру нет.
-  assert.equal(statusOf(result, "vision"), "skipped");
+  // Зрение обнаруживается фактически, даже если старая настройка его не заявляла.
+  assert.equal(statusOf(result, "vision"), "ok");
   // Модель без служебных полей размышления шлёт роутеру ровно то же, что
   // и проба: сравнивать нечего.
 
   // Проба дешёвая и без данных пользователя.
-  assert.ok(seen.length <= 6, `запросов к провайдеру: ${seen.length}`);
+  assert.ok(seen.length <= 7, `запросов к провайдеру: ${seen.length}`);
   assert.equal(result.warnings, "");
+  const visionRequest = seen.find((body) => {
+    const messages = body.messages as Array<{ content?: unknown }> | undefined;
+    return Array.isArray(messages?.[0]?.content);
+  });
+  assert.match(JSON.stringify(visionRequest), /image_url.*data:image\/png;base64/);
   for (const body of seen) {
     assert.equal(body.temperature, 0, "проба должна быть детерминированной");
     assert.ok(Number(body.max_tokens) <= 64, "проба должна быть дешёвой");
@@ -360,8 +365,8 @@ test("agent tools проверяются фактически даже при о
   assert.equal(statusOf(result, "tool_call"), "ok");
   assert.equal(statusOf(result, "tool_result_loop"), "ok");
   assert.equal(statusOf(result, "json_object"), "skipped");
-  assert.equal(statusOf(result, "vision"), "skipped");
-  assert.equal(seen.length, 3, "completion и полный agent tool loop");
+  assert.equal(statusOf(result, "vision"), "ok");
+  assert.equal(seen.length, 4, "completion, полный agent tool loop и vision discovery");
 });
 
 test("заявленное, но неработающее зрение блокирует активацию", async () => {
@@ -373,6 +378,14 @@ test("заявленное, но неработающее зрение блок�
   assert.equal(statusOf(result, "vision"), "failed");
   assert.equal(result.ok, false, "supports_vision нельзя сохранять без рабочего image path");
   assert.match(result.message, /vision/);
+});
+
+test("модель без зрения не получает ложную capability при auto-discovery", async () => {
+  const { fetcher } = provider({ vision: () => json({ error: "no vision" }, 400) });
+  const result = await probeModelCapabilities(INPUT, fetcher);
+
+  assert.equal(result.ok, true, "необязательное зрение не должно блокировать text/tool модель");
+  assert.equal(statusOf(result, "vision"), "skipped");
 });
 
 /**
@@ -498,7 +511,7 @@ test("молчание и при большом бюджете остаётся 
 
 test("пустой ответ на изображение перепроверяется большим бюджетом", async () => {
   const { fetcher } = provider({
-    vision: (body) => Number(body.max_tokens) < 1_024 ? EMPTY_BY_BUDGET() : json(CHAT("ready")),
+    vision: (body) => Number(body.max_tokens) < 1_024 ? EMPTY_BY_BUDGET() : json(CHAT("green")),
   });
   const result = await probeModelCapabilities(
     { ...INPUT, claims: { ...INPUT.claims, vision: true } },

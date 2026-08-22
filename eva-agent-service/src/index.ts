@@ -178,9 +178,8 @@ async function main(): Promise<void> {
     });
   }
   const llm = new LlmManager(config, db, letta, logger);
-  // Указатель на роутер ставится безусловно и в базу не ходит, поэтому
-  // упасть здесь нечему: прежняя обёртка ловила ошибку чтения реестра LLM,
-  // которого больше нет.
+  // Указатель на роутер ставится безусловно. Попутная проверка legacy
+  // vision metadata best-effort и не мешает старту при недоступной БД/LLM.
   await llm.initializeDefaultModel();
   const runtimeContext = new RuntimeContextBuilder(db, {
     defaultTimezone: config.defaultTimezone,
