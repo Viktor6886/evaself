@@ -2230,18 +2230,28 @@ jobs:
           grep -q '"secret_hidden":true' /tmp/llm-switch
           grep -q '"standalone_updated":true' /tmp/llm-switch
 
-          # Legacy-активация нужна App Server как выбор конфигурации, но не
-          # должна переписывать независимые managed-цепочки. В fixture уже
-          # настроены chat и fast; оба обязаны сохранить прежние головы.
+          # Активация через App Server обновляет только основную chat-цепочку.
+          # Независимая fast-цепочка должна сохранить прежнюю голову.
           . scripts/lib.sh
           load_env
-          ACTIVE_HEADS="$(docker compose --env-file versions.env --env-file .env \
+          CHAT_ACTIVE_HEADS="$(docker compose --env-file versions.env --env-file .env \
             exec -T -e PGPASSWORD="$EVA_DB_PASSWORD" postgres \
             psql -v ON_ERROR_STOP=1 -At -U "$EVA_DB_USER" -d "$EVA_DB_NAME" \
               -c "SELECT count(*)
                     FROM llm_route_providers rp
                     JOIN llm_providers p ON p.id = rp.provider_id
-                   WHERE rp.position = 0 AND p.is_active;")"
+                   WHERE rp.route_code = 'chat'
+                     AND rp.position = 0
+                     AND p.is_active;")"
+          FAST_ACTIVE_HEADS="$(docker compose --env-file versions.env --env-file .env \
+            exec -T -e PGPASSWORD="$EVA_DB_PASSWORD" postgres \
+            psql -v ON_ERROR_STOP=1 -At -U "$EVA_DB_USER" -d "$EVA_DB_NAME" \
+              -c "SELECT count(*)
+                    FROM llm_route_providers rp
+                    JOIN llm_providers p ON p.id = rp.provider_id
+                   WHERE rp.route_code = 'fast'
+                     AND rp.position = 0
+                     AND p.is_active;")"
           CONFIGURED_HEADS="$(docker compose --env-file versions.env --env-file .env \
             exec -T -e PGPASSWORD="$EVA_DB_PASSWORD" postgres \
             psql -v ON_ERROR_STOP=1 -At -U "$EVA_DB_USER" -d "$EVA_DB_NAME" \
@@ -2250,11 +2260,15 @@ jobs:
             echo "::error::активация изменила число настроенных цепочек: $CONFIGURED_HEADS"
             exit 1
           fi
-          if [ "$ACTIVE_HEADS" != "0" ]; then
-            echo "::error::legacy-активация переписала managed-цепочки: $ACTIVE_HEADS"
+          if [ "$CHAT_ACTIVE_HEADS" != "1" ]; then
+            echo "::error::активация не обновила chat-цепочку: $CHAT_ACTIVE_HEADS"
             exit 1
           fi
-          echo "managed-цепочки остались независимыми от legacy-активации"
+          if [ "$FAST_ACTIVE_HEADS" != "0" ]; then
+            echo "::error::активация переписала независимую fast-цепочку: $FAST_ACTIVE_HEADS"
+            exit 1
+          fi
+          echo "chat-цепочка обновлена, независимая fast-цепочка сохранена"
 
       - name: WebUI chat completes a real SDK turn through the test LLM
         if: needs.changes.outputs.docs_only != 'true'
