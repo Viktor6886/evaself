@@ -4,7 +4,7 @@ import type { AnyAgentTool } from "@letta-ai/letta-agent-sdk";
 
 import type { Config } from "../config.js";
 import type { AgentRuntimeContext, Database } from "../db.js";
-import { ALLOWED_REACTIONS, telegramPollOf, type TelegramClient } from "../telegram.js";
+import { normalizeReactionEmoji, telegramPollOf, type TelegramClient } from "../telegram.js";
 import { Crawl4aiReader, WebReadError } from "./web-read.js";
 import { KnowledgeSearch } from "../knowledge/search.js";
 import { inspectRuntime, type InspectionInput } from "../letta/runtime-inspection.js";
@@ -20,7 +20,11 @@ import {
   normalizePoll,
 } from "../telegram/polls.js";
 import { recordReaction } from "../metrics.js";
-import { STICKER_INTENTS, stickerFileId } from "../telegram/stickers.js";
+import {
+  STICKER_INTENTS,
+  inspectStickerCatalog,
+  stickerFileId,
+} from "../telegram/stickers.js";
 import { LlmRouterClient } from "../router/client.js";
 import { localDateWithWeekday, localNow } from "../time/local-date-time.js";
 import {
@@ -455,14 +459,17 @@ export class CoreToolFactory {
         objectSchema({ emoji: text("Одна поддерживаемая Telegram emoji") }, ["emoji"]),
         async (args, runtime) => {
           const turn = toolTurn(runtime);
-          const emoji = requiredString(args, "emoji", 16);
+          const requestedEmoji = requiredString(args, "emoji", 16);
           if (!runtime.useEmoji) {
             recordReaction("skipped");
-            return { ok: false, skipped: "Пользователь отключил emoji" };
+            if (turn) turn.reactionOutcome = { outcome: "skipped", reason: "emoji_disabled" };
+            return { ok: false, outcome: "skipped", reason: "emoji_disabled" };
           }
-          if (!ALLOWED_REACTIONS.has(emoji)) {
+          const emoji = normalizeReactionEmoji(requestedEmoji);
+          if (!emoji) {
             recordReaction("failed");
-            throw new Error("Telegram не поддерживает эту реакцию");
+            if (turn) turn.reactionOutcome = { outcome: "failed", reason: "unsupported_reaction" };
+            return { ok: false, outcome: "failed", reason: "unsupported_reaction" };
           }
           // Сообщение берётся из хода, а не из базы. Выборка «последнее
           // сообщение человека» была верной, пока поле ввода блокировалось
@@ -471,21 +478,39 @@ export class CoreToolFactory {
           // Ход берётся и по контексту, и по conversation: инструменты
           // регистрируются при открытии сессии, и до их вызова из
           // обработчика сокета SDK AsyncLocalStorage не дотягивается.
-          const messageId = turn?.messageId;
-          const chatId = turn?.chatId;
+          const messageId = turn?.reactionTarget?.messageId;
+          const chatId = turn?.reactionTarget?.chatId;
           if (!Number.isSafeInteger(messageId) || !Number.isSafeInteger(chatId)) {
-            recordReaction("failed");
-            throw new Error("Нет сообщения этого хода для реакции");
+            recordReaction("skipped");
+            if (turn) turn.reactionOutcome = { outcome: "skipped", reason: "no_reaction_target" };
+            return { ok: false, outcome: "skipped", reason: "no_reaction_target" };
           }
           recordReaction("attempted");
+          let delivery: unknown;
           try {
-            await this.telegram.setReaction(chatId!, messageId!, emoji);
-          } catch (error) {
+            delivery = await this.telegram.setReaction(chatId!, messageId!, emoji);
+          } catch {
             recordReaction("failed");
-            throw error;
+            turn!.reactionOutcome = { outcome: "failed", reason: "telegram_api_error" };
+            return { ok: false, outcome: "failed", reason: "telegram_api_error" };
+          }
+          const dead = Boolean(
+            delivery && typeof delivery === "object"
+              && (delivery as { dead?: unknown }).dead === true,
+          );
+          if (dead) {
+            recordReaction("failed");
+            turn!.reactionOutcome = { outcome: "failed", reason: "telegram_api_error" };
+            return { ok: false, outcome: "failed", reason: "telegram_api_error" };
           }
           recordReaction("succeeded");
-          return { ok: true, emoji };
+          const queued = Boolean(
+            delivery && typeof delivery === "object"
+              && (delivery as { queued?: unknown }).queued === true,
+          );
+          const reason = queued ? "queued_for_delivery" : "delivered";
+          turn!.reactionOutcome = { outcome: "succeeded", reason };
+          return { ok: true, outcome: "succeeded", reason, emoji };
         },
       ),
       tool(
@@ -531,7 +556,16 @@ export class CoreToolFactory {
           const turn = toolTurn(runtime);
           const intent = requiredString(args, "intent", 32);
           const fileId = stickerFileId(this.config.telegramStickerCatalog, intent);
-          if (!fileId) return { ok: false, reason: "sticker_unavailable" };
+          if (!fileId) {
+            const inspection = inspectStickerCatalog(this.config.telegramStickerCatalog);
+            return {
+              ok: false,
+              reason: "sticker_unavailable",
+              catalog_status: this.config.telegramStickerCatalogParseError
+                ? "invalid_json"
+                : inspection.status === "ready" ? "intent_unavailable" : inspection.status,
+            };
+          }
           if (!Number.isSafeInteger(turn?.chatId)) {
             return { ok: false, reason: "no_active_turn" };
           }

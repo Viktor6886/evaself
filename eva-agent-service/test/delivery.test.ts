@@ -190,7 +190,7 @@ test("delivery contexts assign command, payment and crisis priority classes", as
   ]);
 });
 
-test("typing and service reactions use the status outbox path", async () => {
+test("typing and out-of-turn service reactions use the status outbox path", async () => {
   const telegram = new TelegramClient({
     telegramBotToken: "fake",
     telegramApiBaseUrl: "https://api.telegram.invalid",
@@ -206,6 +206,29 @@ test("typing and service reactions use the status outbox path", async () => {
   assert.deepEqual(envelopes.map((item) => [item.method, item.priority]), [
     ["sendChatAction", "status"],
     ["setMessageReaction", "status"],
+  ]);
+});
+
+test("reaction and reply of one turn keep causal outbox order", async () => {
+  const telegram = new TelegramClient({
+    telegramBotToken: "fake",
+    telegramApiBaseUrl: "https://api.telegram.invalid",
+  } as never, logger);
+  const envelopes: OutboxEnvelope[] = [];
+  telegram.setOutbox({
+    send: async (envelope) => { envelopes.push(envelope); return { queued: true }; },
+  });
+
+  await telegram.withDeliveryContext("telegram-update:77", async () => {
+    await telegram.setReaction(7, 11, "👍");
+    await telegram.sendMessage(7, "reply");
+  });
+
+  assert.deepEqual(envelopes.map((item) => [
+    item.method, item.priority, item.idempotencyKey,
+  ]), [
+    ["setMessageReaction", "reply", "telegram-update:77:000:setMessageReaction"],
+    ["sendMessage", "reply", "telegram-update:77:001:sendMessage"],
   ]);
 });
 

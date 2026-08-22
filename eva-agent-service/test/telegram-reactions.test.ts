@@ -9,6 +9,7 @@ import { withToolTurn } from "../dist/tools/tool-kit.js";
 import { reactionStats } from "../dist/metrics.js";
 import { renderTelegramText, TelegramClient } from "../dist/telegram.js";
 import { formatEvaReply } from "../dist/telegram-format.js";
+import { normalizeUpdate, reactionTargetForTurn } from "../dist/eva-workflow.js";
 
 const tool = (
   name: string,
@@ -57,7 +58,10 @@ test("реакция ставится на сообщение своего хо�
   const { reactions, reaction } = reactionTools();
 
   await runInTurn(
-    { runId: "run-1", recorded: true, isCancelled: async () => false, chatId: 42, messageId: 17 },
+    {
+      runId: "run-1", recorded: true, isCancelled: async () => false,
+      chatId: 42, messageId: 17, reactionTarget: { chatId: 42, messageId: 17 },
+    },
     async () => await reaction.execute({ emoji: "🔥" }, RUNTIME as never),
   );
 
@@ -66,11 +70,68 @@ test("реакция ставится на сообщение своего хо�
 
 test("реакция без хода не угадывает сообщение", async () => {
   const { reactions, reaction } = reactionTools();
-  await assert.rejects(
-    () => reaction.execute({ emoji: "🔥" }, RUNTIME as never),
-    /Нет сообщения этого хода/,
-  );
+  assert.deepEqual(await reaction.execute({ emoji: "🔥" }, RUNTIME as never), {
+    ok: false, outcome: "skipped", reason: "no_reaction_target",
+  });
   assert.deepEqual(reactions, []);
+});
+
+test("synthetic ход не использует сохранённый messageId сообщения Евы", async () => {
+  const { reactions, reaction } = reactionTools();
+  const result = await runInTurn({
+    runId: "run-callback", recorded: true, isCancelled: async () => false,
+    chatId: 42, messageId: 600, reactionTarget: null,
+  }, async () => await reaction.execute({ emoji: "👍" }, RUNTIME as never));
+  assert.deepEqual(result, {
+    ok: false, outcome: "skipped", reason: "no_reaction_target",
+  });
+  assert.deepEqual(reactions, []);
+});
+
+test("useEmoji=false remains a structured safe skip", async () => {
+  const { reactions, reaction } = reactionTools();
+  const result = await runInTurn({
+    runId: "run-no-emoji", recorded: true, isCancelled: async () => false,
+    reactionTarget: { chatId: 42, messageId: 19 },
+  }, async () => await reaction.execute(
+    { emoji: "👍" }, { ...RUNTIME, useEmoji: false } as never,
+  ));
+  assert.deepEqual(result, { ok: false, outcome: "skipped", reason: "emoji_disabled" });
+  assert.deepEqual(reactions, []);
+});
+
+test("вариационный селектор emoji нормализуется до Telegram reaction", async () => {
+  const { reactions, reaction } = reactionTools();
+  const result = await runInTurn(
+    {
+      runId: "run-heart", recorded: true, isCancelled: async () => false,
+      reactionTarget: { chatId: 42, messageId: 18 },
+    },
+    async () => await reaction.execute({ emoji: "❤️" }, RUNTIME as never),
+  );
+  assert.deepEqual(reactions, [{ chatId: 42, messageId: 18, emoji: "❤" }]);
+  assert.deepEqual(result, {
+    ok: true, outcome: "succeeded", reason: "delivered", emoji: "❤",
+  });
+});
+
+test("агрегированный ход выбирает последнюю реальную реплику пользователя", () => {
+  const message = (updateId: number, messageId: number, allowReaction = true) =>
+    normalizeUpdate({
+      update_id: updateId,
+      message: {
+        message_id: messageId, date: updateId, chat: { id: 42, type: "private" },
+        from: { id: 7, is_bot: false }, text: `part ${updateId}`,
+      },
+    } as never, allowReaction)!;
+  assert.deepEqual(
+    reactionTargetForTurn([message(1, 101), message(2, 999, false), message(3, 103)]),
+    { chatId: 42, messageId: 103 },
+  );
+  assert.deepEqual(
+    reactionTargetForTurn([message(1, 101), message(2, 999, false)]),
+    { chatId: 42, messageId: 101 },
+  );
 });
 
 test("реакция не требует подтверждения человека", () => {
@@ -86,7 +147,10 @@ test("реакции считаются метрикой, а текст сооб
   const before = reactionStats();
   const { reaction } = reactionTools();
   await runInTurn(
-    { runId: "run-2", recorded: true, isCancelled: async () => false, chatId: 42, messageId: 21 },
+    {
+      runId: "run-2", recorded: true, isCancelled: async () => false,
+      reactionTarget: { chatId: 42, messageId: 21 },
+    },
     async () => await reaction.execute({ emoji: "👍" }, RUNTIME as never),
   );
   const after = reactionStats();
@@ -94,10 +158,16 @@ test("реакции считаются метрикой, а текст сооб
   assert.equal(after.succeeded, before.succeeded + 1);
 
   const failing = reactionTools({ fail: true });
-  await runInTurn(
-    { runId: "run-3", recorded: true, isCancelled: async () => false, chatId: 42, messageId: 22 },
-    async () => await assert.rejects(() => failing.reaction.execute({ emoji: "👍" }, RUNTIME as never)),
+  const failure = await runInTurn(
+    {
+      runId: "run-3", recorded: true, isCancelled: async () => false,
+      reactionTarget: { chatId: 42, messageId: 22 },
+    },
+    async () => await failing.reaction.execute({ emoji: "👍" }, RUNTIME as never),
   );
+  assert.deepEqual(failure, {
+    ok: false, outcome: "failed", reason: "telegram_api_error",
+  });
   assert.equal(reactionStats().failed, after.failed + 1);
   assert.doesNotMatch(JSON.stringify(reactionStats()), /[а-яё]/i);
 });
@@ -171,7 +241,7 @@ test("реакция находит свой ход, даже когда кон�
 
   const turn = {
     runId: "r1", recorded: true, isCancelled: async () => false,
-    chatId: 42, messageId: 555,
+    chatId: 42, messageId: 555, reactionTarget: { chatId: 42, messageId: 555 },
   };
   const scope = openTurnScope("conv-1", turn as never);
   try {
@@ -187,9 +257,9 @@ test("реакция находит свой ход, даже когда кон�
 
   // Ход закончился — адрес снят, и следующий вызов уже не найдёт чужое
   // сообщение.
-  await assert.rejects(
-    () => tools.get("set_reaction")!.execute({ emoji: "👍" }, runtime as never),
-    /сообщения этого хода/i,
+  assert.deepEqual(
+    await tools.get("set_reaction")!.execute({ emoji: "👍" }, runtime as never),
+    { ok: false, outcome: "skipped", reason: "no_reaction_target" },
   );
   assert.equal(reactions.length, 1);
 });
@@ -203,15 +273,16 @@ test("ход одного разговора не виден инструмен�
   );
   const tools = new Map(factory.build(tool as never).map((entry) => [entry.name, entry]));
   const scope = openTurnScope("conv-A", {
-    runId: "r1", recorded: true, isCancelled: async () => false, chatId: 1, messageId: 10,
+    runId: "r1", recorded: true, isCancelled: async () => false,
+    reactionTarget: { chatId: 1, messageId: 10 },
   } as never);
   try {
-    await assert.rejects(
-      () => tools.get("set_reaction")!.execute({ emoji: "👍" }, {
+    assert.deepEqual(
+      await tools.get("set_reaction")!.execute({ emoji: "👍" }, {
         userId: 2, telegramId: 2, chatId: 2, conversationId: "conv-B",
         purpose: "chat", useEmoji: true,
       } as never),
-      /сообщения этого хода/i,
+      { ok: false, outcome: "skipped", reason: "no_reaction_target" },
     );
   } finally {
     closeTurnScope(scope);
@@ -240,12 +311,14 @@ test("delayed tool callback keeps captured target after next turn opens", async 
   const oldTurn = {
     conversationId: "conv-1", runId: "old", recorded: true,
     isCancelled: async () => false, chatId: 42, messageId: 101,
+    reactionTarget: { chatId: 42, messageId: 101 },
   };
   const oldScope = openTurnScope("conv-1", oldTurn);
   const captured = withToolTurn(RUNTIME as never, oldTurn);
   const freshScope = openTurnScope("conv-1", {
     conversationId: "conv-1", runId: "fresh", recorded: true,
     isCancelled: async () => false, chatId: 42, messageId: 202,
+    reactionTarget: { chatId: 42, messageId: 202 },
   });
   try {
     await reaction.execute({ emoji: "👍" }, captured as never);

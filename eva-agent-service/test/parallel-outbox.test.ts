@@ -121,8 +121,12 @@ function outboxHarness(probe: Probe, options: Record<string, unknown> = {}) {
           (earlier) =>
             earlier.chat_id === row.chat_id
             && ["pending", "sending", "retry"].includes(earlier.status)
-            && (earlier.priority < row.priority
-              || (earlier.priority === row.priority && Number(earlier.id) < Number(row.id))),
+            && (((earlier.priority < row.priority
+              || (earlier.priority === row.priority && Number(earlier.id) < Number(row.id)))
+                && (row.telegram_method !== "setMessageReaction"
+                  || Number(earlier.id) < Number(row.id)))
+              || (Number(earlier.id) < Number(row.id)
+                && earlier.telegram_method === "setMessageReaction")),
         ),
       );
       eligible.sort(
@@ -237,6 +241,29 @@ test("сообщения разных чатов доставляются, по�
   const chat100 = probe.sent.filter((item) => item.chat === "100").map((item) => item.id);
   assert.deepEqual(chat100, ["1", "2", "3"], "части одного ответа переставлены местами");
   assert.ok(probe.rows.every((item) => item.status === "sent"));
+});
+
+test("persistent reaction blocks current and later replies in the same chat", async () => {
+  const probe: Probe = {
+    now: 1000,
+    sent: [],
+    rows: [
+      row({
+        id: "1", chat_id: "100", telegram_method: "setMessageReaction",
+        priority: PRIORITY_VALUE.reply,
+      }),
+      row({ id: "2", chat_id: "100", priority: PRIORITY_VALUE.reply }),
+      row({ id: "3", chat_id: "100", priority: PRIORITY_VALUE.crisis }),
+    ],
+  };
+  const outbox = outboxHarness(probe, { parallel: { concurrency: 3, limits: null } });
+  await outbox.tick();
+
+  assert.deepEqual(
+    probe.sent.map((item) => item.id),
+    ["1", "3", "2"],
+    "ответ текущего или следующего хода обогнал причинно связанную реакцию",
+  );
 });
 
 test("ошибка одной delivery не снимает concurrency guard, пока работают соседние", async () => {

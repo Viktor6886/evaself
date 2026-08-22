@@ -11,7 +11,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { EvaWorkflow } from "../dist/eva-workflow.js";
+import { EvaWorkflow, normalizeUpdate } from "../dist/eva-workflow.js";
 import {
   MAX_OPTIONS,
   MAX_OPTION_LENGTH,
@@ -373,6 +373,54 @@ test("кнопка и опрос разбираются и на пути пар�
     { status: "ignored" },
   );
   assert.deepEqual(asked, ["answered", "callback", "poll:tg-1"]);
+});
+
+test("callback и poll answer не наследуют reaction target сообщения Евы", async () => {
+  const db = pollDb();
+  db.polls.push({
+    id: "p1", userId: 1, chatId: 42, conversationId: "c", toolCallId: "call-1",
+    pollId: "tg-poll", messageId: 700, question: "Как ты?",
+    options: ["Хорошо", "Устал"], isAnonymous: false,
+  });
+  const workflow = new EvaWorkflow(
+    {} as never,
+    {
+      ...db,
+      claimCallbackToken: async () => ({
+        status: "claimed", chatId: 42, messageId: 600,
+        value: "Первый вариант", oneShot: false,
+      }),
+    } as never,
+    {} as never, {} as never, {} as never,
+    {
+      answerCallbackQuery: async () => {},
+      clearInlineKeyboard: async () => {},
+    } as never,
+    {} as never, {} as never,
+    { debug() {}, info() {}, warn() {}, error() {} } as never,
+  ) as unknown as {
+    resolveSpecial(update: unknown): Promise<{
+      update: Parameters<typeof normalizeUpdate>[0]; allowReaction: boolean;
+    } | null>;
+  };
+
+  const callback = await workflow.resolveSpecial({
+    update_id: 1,
+    callback_query: { id: "q", from: { id: 42 }, data: "token" },
+  });
+  const poll = await workflow.resolveSpecial({
+    update_id: 2,
+    poll_answer: { poll_id: "tg-poll", user: { id: 42 }, option_ids: [0] },
+  });
+  assert.equal(callback?.allowReaction, false);
+  assert.equal(poll?.allowReaction, false);
+  assert.equal(callback?.update.message?.message_id, 600, "ID бота остаётся только связью хода");
+  assert.equal(poll?.update.message?.message_id, 700, "ID опроса остаётся только связью хода");
+  assert.equal(
+    normalizeUpdate(callback!.update, callback!.allowReaction)?.reactionTarget,
+    null,
+  );
+  assert.equal(normalizeUpdate(poll!.update, poll!.allowReaction)?.reactionTarget, null);
 });
 
 test("голос в опросе не подмешивается в объединённый ход обычных сообщений", async () => {

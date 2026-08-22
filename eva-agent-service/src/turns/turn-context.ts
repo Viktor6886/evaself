@@ -16,6 +16,17 @@ import { AsyncLocalStorage } from "node:async_hooks";
 
 import type { InlineChoiceIntent } from "../telegram/inline-choices.js";
 
+export interface ReactionTarget {
+  /** Both fields come from the same real inbound Telegram message. */
+  chatId: number;
+  messageId: number;
+}
+
+export type ReactionOutcome =
+  | { outcome: "skipped"; reason: "model_not_called" | "emoji_disabled" | "no_reaction_target" }
+  | { outcome: "failed"; reason: "unsupported_reaction" | "telegram_api_error" }
+  | { outcome: "succeeded"; reason: "delivered" | "queued_for_delivery" };
+
 export interface ActiveTurn {
   /** Conversation, которому принадлежит ход. Нужен для защиты от чужого ALS. */
   conversationId?: string;
@@ -24,17 +35,19 @@ export interface ActiveTurn {
   recorded: boolean;
   /** Отменён ли ход. Спрашивается, а не кэшируется: отмена приходит извне. */
   isCancelled: () => Promise<boolean>;
-  /**
-   * Сообщение, на которое отвечает этот ход, — доверенное, от Telegram.
-   *
-   * Реакция ставится именно на него. Раньше инструмент брал последнее
-   * сообщение человека из базы, и с тех пор как поле ввода перестало
-   * блокироваться, это стало прямой ошибкой: человек успевает написать
-   * следующее, и реакция уезжает на чужой ход. У объединённого хода это
-   * последнее сообщение того же окна.
-   */
+  /** Адрес чата и ID реплики хода. Не являются целью реакции. */
   chatId?: number;
   messageId?: number;
+  /**
+   * Доверенная цель реакции, назначенная сервером.
+   *
+   * Она существует только для настоящего входящего сообщения человека.
+   * Callback, poll_answer и другие синтетические ходы никогда не получают
+   * её, даже если для связи хода у них есть messageId сообщения бота.
+   */
+  reactionTarget?: ReactionTarget | null;
+  /** Структурированный итог социального решения этого хода. */
+  reactionOutcome?: ReactionOutcome;
   /**
    * Оформление, которое Ева попросила добавить к своему ответу.
    *

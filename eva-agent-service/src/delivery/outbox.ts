@@ -303,7 +303,23 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
                  SELECT 1 FROM telegram_outbox earlier
                   WHERE earlier.chat_id = t.chat_id
                     AND earlier.status IN ('pending', 'sending', 'retry')
-                    AND (earlier.priority, earlier.id) < (t.priority, t.id)
+                    AND (
+                      (
+                        (earlier.priority, earlier.id) < (t.priority, t.id)
+                        -- A later high-priority row cannot hold the reaction
+                        -- that causally precedes it.
+                        AND (
+                          t.telegram_method <> 'setMessageReaction'
+                          OR earlier.id < t.id
+                        )
+                      )
+                      -- Once queued, a persistent reaction is a causal
+                      -- barrier for every later row in this chat.
+                      OR (
+                        earlier.id < t.id
+                        AND earlier.telegram_method = 'setMessageReaction'
+                      )
+                    )
                )
              ORDER BY t.priority, t.available_at, t.id
              FOR UPDATE OF t SKIP LOCKED
@@ -458,6 +474,13 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
         outboxId: row.id,
         telegram_send_ms: telegramSendMs,
       });
+      if (row.telegram_method === "setMessageReaction") {
+        this.logger.info("Доставка Telegram-реакции", {
+          outcome: "succeeded",
+          reason: "delivered",
+          outboxId: row.id,
+        });
+      }
       return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -503,6 +526,13 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
         retry_after_ms: retryAfterMs,
         message,
       });
+      if (row.telegram_method === "setMessageReaction" && retryAfterMs === null && dead) {
+        this.logger.warn("Доставка Telegram-реакции завершилась ошибкой", {
+          outcome: "failed",
+          reason: "telegram_api_error",
+          outboxId: row.id,
+        });
+      }
       return { queued: retryAfterMs !== null || !dead, dead: retryAfterMs === null && dead };
     }
   }
