@@ -15,6 +15,11 @@ import { DEVICES, PHONES, documentWidth, openApp, smallTapTargets } from "./harn
 
 const CORE_SCREENS = ["today", "journal", "development", "profile"];
 const APP_SOURCE = readFileSync(new URL("../public/app/app.js", import.meta.url), "utf8");
+const utcDateKeyDaysAgo = (days) => {
+  const date = new Date();
+  date.setUTCDate(date.getUTCDate() - days);
+  return date.toISOString().slice(0, 10);
+};
 
 describe("Mini App hook-focused", () => {
   const opened = [];
@@ -302,7 +307,7 @@ describe("Mini App hook-focused", () => {
         "/public/progress": {
           progress: {
             completed_results: [],
-            work_blocks: [{ id: "w", local_date: "2026-08-18" }],
+            work_blocks: [{ id: "w", local_date: utcDateKeyDaysAgo(1) }],
             streak_days: 5,
             weekly_steps_completed: 3,
             weekly_steps_target: 5,

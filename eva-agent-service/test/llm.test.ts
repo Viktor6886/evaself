@@ -80,23 +80,31 @@ test("public provider responses never expose ciphertext or API key", async () =>
   assert.equal(result.api_key_configured, true);
 });
 
-test("смена chat-модели за eva/chat не перенастраивает Letta", async () => {
+test("смена chat-модели обновляет metadata за eva/chat без рестарта Letta", async () => {
   const master = "z".repeat(64);
   const box = new SecretBox(master);
   const previous = providerRow("previous", true, box.encrypt("old-key"));
-  const candidate = providerRow("candidate", false, box.encrypt("new-key"));
+  const candidate = {
+    ...providerRow("candidate", false, box.encrypt("new-key")),
+    context_window: 65_536,
+    additional_parameters: { model_settings: { reasoning_effort: "high" } },
+  };
   let active = previous;
   const configured: string[] = [];
-  const applied: string[] = [];
+  const applied: Array<{ model: string; context: number; settings: unknown }> = [];
   let restarts = 0;
   let closed = 0;
+  const order: string[] = [];
 
   const db = {
     getLlmProvider: async (id: string) => (id === candidate.id ? candidate : previous),
     getActiveLlmProvider: async () => active,
+    getLlmRouteChain: async () => [previous.id],
+    replaceLlmRouteChain: async () => undefined,
     recordLlmCheck: async () => candidate,
     setAgentModels: async () => undefined,
     activateLlmProvider: async (id: string) => {
+      order.push(`activate:${id}`);
       active = id === previous.id ? previous : candidate;
       return active;
     },
@@ -109,8 +117,9 @@ test("смена chat-модели за eva/chat не перенастраива
     // Handle больше не кодирует модель провайдера: Letta всегда видит один
     // маршрут роутера, а конкретную модель выбирает роутер. Поэтому сбой
     // привязывается к номеру попытки, а не к имени модели.
-    applyModelToMappings: async (_mappings: unknown, model: string) => {
-      applied.push(model);
+    applyModelToMappings: async (_mappings: unknown, model: string, context: number, settings: unknown) => {
+      order.push("apply-metadata");
+      applied.push({ model, context, settings });
     },
   };
   const manager = new LlmManager(
@@ -139,10 +148,15 @@ test("смена chat-модели за eva/chat не перенастраива
   const result = await manager.activate(candidate.id);
   assert.equal(result.id, candidate.id);
   assert.deepEqual(configured, []);
-  assert.deepEqual(applied, []);
+  assert.deepEqual(applied, [{
+    model: modelHandle("eva/chat"),
+    context: candidate.context_window,
+    settings: { reasoning_effort: "high" },
+  }]);
   assert.equal(restarts, 0);
   assert.equal(closed, 0);
   assert.equal(active.id, candidate.id);
+  assert.deepEqual(order, [`activate:${candidate.id}`, "apply-metadata"]);
 });
 
 function providerRow(name: string, isActive: boolean, encrypted: string) {

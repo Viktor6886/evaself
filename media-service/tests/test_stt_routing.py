@@ -130,6 +130,22 @@ async def test_primary_success_costs_one_attempt(tmp_path, audio):
     assert beta.calls == 0, "резерв не должен вызываться при успехе основного"
 
 
+@pytest.mark.asyncio
+async def test_assistant_like_answer_is_not_accepted_as_transcript(tmp_path, audio):
+    alpha = FakeAdapter(
+        "alpha",
+        ["Я рядом. Попробуй сформулировать это немного иначе"],
+    )
+    beta = FakeAdapter("beta", ["настоящая расшифровка"])
+    router = build(tmp_path, {"alpha": alpha, "beta": beta})
+
+    outcome = await router.transcribe("telegram_voice", audio)
+
+    assert outcome.result.text == "настоящая расшифровка"
+    assert outcome.used_fallback is True
+    assert outcome.attempts[0].error_code == "stt_transcription_failed"
+
+
 @pytest.mark.parametrize(
     "code", [STT_TIMEOUT, STT_RATE_LIMITED, "stt_provider_unavailable", "stt_transcription_failed"]
 )

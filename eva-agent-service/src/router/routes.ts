@@ -70,7 +70,7 @@ export function resolveRoute(request: LlmRequest, settings: RoutingSettings): Ro
   if (request.metadata.has_image) {
     return fixed(requestedRoute, "vision", "technical", ["image_in_request"]);
   }
-  if (request.response_format?.type === "json_object") {
+  if (request.response_format) {
     return fixed(requestedRoute, "json", "technical", ["json_response_required"]);
   }
 

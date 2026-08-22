@@ -1,6 +1,35 @@
 /** Общее для адаптеров: классификация HTTP-ошибок и чтение SSE. */
 
 import { ProviderError } from "../types.js";
+import type { ProviderProfile } from "../types.js";
+
+/** Operator overrides win over defaults; adapters add required fields last. */
+export function providerParameters(
+  provider: ProviderProfile,
+  omit: readonly string[] = [],
+): Record<string, unknown> {
+  const parameters = { ...provider.generation_defaults, ...provider.additional_parameters };
+  for (const key of omit) delete parameters[key];
+  return parameters;
+}
+
+export function objectParameter(
+  source: Record<string, unknown>,
+  key: string,
+): Record<string, unknown> {
+  const value = source[key];
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+export function parameterValue(
+  source: Record<string, unknown>,
+  key: string,
+  fallback: unknown,
+): unknown {
+  return Object.hasOwn(source, key) ? source[key] : fallback;
+}
 
 /**
  * Классификация ответа провайдера. От неё зависит, повторять ли запрос тому

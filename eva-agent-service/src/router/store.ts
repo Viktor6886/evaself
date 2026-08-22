@@ -131,6 +131,8 @@ export class RouterStore {
       const value = Number(row[key]);
       return Number.isFinite(value) ? value : null;
     };
+    const additionalParameters = (row.additional_parameters as Record<string, unknown>) ?? {};
+    const configuredMaxOutput = Number(additionalParameters.max_output_tokens);
     return {
       id: String(row.id),
       name: String(row.name),
@@ -147,7 +149,9 @@ export class RouterStore {
       max_rpm: nullable("max_rpm"),
       max_tpm: nullable("max_tpm"),
       context_window: number("context_window", 8192),
-      max_output_tokens: number("max_output_tokens", 4096),
+      max_output_tokens: Number.isFinite(configuredMaxOutput) && configuredMaxOutput > 0
+        ? Math.floor(configuredMaxOutput)
+        : number("max_output_tokens", 4096),
       max_latency_ms: nullable("max_latency_ms"),
       supports_tools: row.supports_tools === true,
       supports_json: row.supports_json === true,
@@ -160,7 +164,7 @@ export class RouterStore {
       daily_budget_micro: nullable("daily_budget_micro"),
       monthly_budget_micro: nullable("monthly_budget_micro"),
       generation_defaults: (row.generation_defaults as Record<string, unknown>) ?? {},
-      additional_parameters: (row.additional_parameters as Record<string, unknown>) ?? {},
+      additional_parameters: additionalParameters,
     };
   }
 
@@ -232,7 +236,7 @@ export class RouterStore {
       try {
         await client.query("LISTEN llm_routing_settings_changed");
         client.on("notification", (message) => {
-          if (message.channel === "llm_routing_settings_changed") this.settingsCache = null;
+          if (message.channel === "llm_routing_settings_changed") this.invalidate();
         });
         client.on("error", () => {
           if (this.settingsListener === client) this.settingsListener = null;

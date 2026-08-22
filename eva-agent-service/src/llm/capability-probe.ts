@@ -32,11 +32,17 @@ const PROBE_CONTROLLED = new Set([
   "temperature", "max_tokens", "max_completion_tokens", "max_output_tokens", "maxOutputTokens", "n", "response_format",
 ]);
 const ROUTING_KEYS = new Set(["provider", "route", "models", "transforms", "user", "metadata", "headers", "extra_headers", "extra_body", "usage", "model_settings"]);
-const SECRET_KEY = /key|token|secret|password|credential|authorization|bearer|cookie/iu;
+const SECRET_KEY = /(?:api[_-]?key|access[_-]?token|auth[_-]?token|secret|password|credential|authorization|bearer|cookie)/iu;
 
 export function probeInferenceParameters(source: Record<string, unknown> | null | undefined): Record<string, unknown> {
   const safe: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(source ?? {})) {
+    // In Chat Completions the configured presence of this field selects
+    // the wire name. Its numeric value is still owned by the probe/runtime.
+    if (key === "max_completion_tokens") {
+      safe[key] = true;
+      continue;
+    }
     if (PROBE_CONTROLLED.has(key) || ROUTING_KEYS.has(key) || SECRET_KEY.test(key)) continue;
     safe[key] = value;
   }
@@ -185,8 +191,8 @@ export async function probeModelCapabilities(input: CapabilityProbeInput, fetche
         { type: "text", text: PROBE_PROMPT },
         { type: "image", media_type: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==" },
       ] }], { max_tokens: 32 }));
-      checks.push(result.response.content.trim() ? { name: "vision", status: "ok", detail: "изображение принято", blocking: false } : failure("vision", "пустой ответ на изображение", false));
-    } catch (error) { checks.push(failure("vision", errorDetail(error, input.timeoutMs), false)); }
+      checks.push(result.response.content.trim() ? { name: "vision", status: "ok", detail: "изображение принято", blocking: true } : failure("vision", "пустой ответ на изображение", true));
+    } catch (error) { checks.push(failure("vision", errorDetail(error, input.timeoutMs), true)); }
   }
 
   const failed = checks.filter((entry) => entry.status === "failed");

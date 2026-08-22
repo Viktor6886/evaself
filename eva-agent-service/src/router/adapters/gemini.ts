@@ -3,7 +3,7 @@ import type {
   LlmRequest, LlmResponse, LlmToolCall, ProviderAdapter, ProviderProfile,
 } from "../types.js";
 import { ProviderError } from "../types.js";
-import { classifyHttp, readSse } from "./shared.js";
+import { classifyHttp, objectParameter, parameterValue, providerParameters, readSse } from "./shared.js";
 import { decodeDataUri } from "../content.js";
 
 type GeminiPart = Record<string, unknown> & {
@@ -70,12 +70,35 @@ function toContents(request: LlmRequest) {
 }
 
 function buildBody(provider: ProviderProfile, request: LlmRequest) {
+  const common = providerParameters(provider);
+  const parameters = providerParameters(provider, [
+    "input", "max_completion_tokens", "max_output_tokens", "max_tokens", "messages",
+    "model", "response_format", "stop", "stream", "system", "systemInstruction",
+    "temperature", "tools", "top_k", "top_p",
+  ]);
+  const generationConfig = {
+    ...objectParameter(provider.generation_defaults, "generationConfig"),
+    ...objectParameter(provider.additional_parameters, "generationConfig"),
+  };
   const body: Record<string, unknown> = {
-    ...provider.additional_parameters,
-    ...provider.generation_defaults,
+    ...parameters,
     contents: toContents(request),
     generationConfig: {
-      temperature: request.temperature,
+      ...generationConfig,
+      temperature: parameterValue(
+        generationConfig,
+        "temperature",
+        parameterValue(common, "temperature", request.temperature),
+      ),
+      ...(!Object.hasOwn(generationConfig, "topP") && Object.hasOwn(common, "top_p")
+        ? { topP: common.top_p }
+        : {}),
+      ...(!Object.hasOwn(generationConfig, "topK") && Object.hasOwn(common, "top_k")
+        ? { topK: common.top_k }
+        : {}),
+      ...(!Object.hasOwn(generationConfig, "stopSequences") && Object.hasOwn(common, "stop")
+        ? { stopSequences: Array.isArray(common.stop) ? common.stop : [common.stop] }
+        : {}),
       maxOutputTokens: request.max_tokens,
       ...(request.response_format ? { responseMimeType: "application/json" } : {}),
       ...(request.response_format?.type === "json_schema"
