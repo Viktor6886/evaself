@@ -93,7 +93,6 @@ test("совместимая модель проходит все заявлен
   assert.equal(statusOf(result, "vision"), "skipped");
   // Модель без служебных полей размышления шлёт роутеру ровно то же, что
   // и проба: сравнивать нечего.
-  assert.equal(statusOf(result, "tool_loop_without_reasoning"), "skipped");
 
   // Проба дешёвая и без данных пользователя.
   assert.ok(seen.length <= 6, `запросов к провайдеру: ${seen.length}`);
@@ -199,11 +198,32 @@ test("reasoning-модель: служебные поля возвращаютс
   // результат, а значит и в базу с журналом, оно не попадает.
   assert.doesNotMatch(JSON.stringify(result), /opaque-blob/);
 
-  // Настоящий ход идёт через LLM Router, а он служебных полей не
-  // переносит. Зелёная проба не должна выдавать это за рабочий ход:
-  // разница названа отдельной непроходящей проверкой.
-  assert.equal(statusOf(result, "tool_loop_without_reasoning"), "failed");
-  assert.match(result.warnings, /LLM Router их сегодня не переносит/);
+  // Probe и production теперь проходят один и тот же canonical adapter,
+  // поэтому отдельного предупреждения о расхождении больше нет.
+  assert.equal(result.warnings, "");
+});
+
+test("OpenRouter reasoning+tools: length на 1024 не является несовместимостью", async () => {
+  const { fetcher, seen } = provider({
+    toolCall: REASONING_TOOL_CALL,
+    toolLoop: (body) => Number(body.max_tokens) <= 1_024
+      ? json({
+          choices: [{
+            message: { content: "", reasoning: "opaque-progress" },
+            finish_reason: "length",
+          }],
+        })
+      : json(CHAT("FINAL_OK")),
+  });
+
+  const result = await probeModelCapabilities({ ...INPUT, maxOutputTokens: 4_096 }, fetcher);
+  assert.equal(result.ok, true, result.message);
+  assert.equal(statusOf(result, "tool_result_loop"), "ok");
+  const loops = loopBodies(seen);
+  assert.ok(loops.some((body) => body.max_tokens === 1_024), "регрессия воспроизведена на старой границе");
+  assert.ok(loops.some((body) => Number(body.max_tokens) > 1_024), "probe использовал допустимый бюджет модели");
+  const finalMessages = loops.at(-1)?.messages as Array<{ role?: string; content?: string }>;
+  assert.match(finalMessages.at(-1)?.content ?? "", /FINAL_OK/, "final answer требуется явно");
 });
 
 test("модель, которой служебные поля не нужны, не получает предупреждения", async () => {
@@ -214,7 +234,6 @@ test("модель, которой служебные поля не нужны, 
 
   assert.equal(result.ok, true, result.message);
   assert.equal(statusOf(result, "tool_result_loop"), "ok");
-  assert.equal(statusOf(result, "tool_loop_without_reasoning"), "ok");
   assert.equal(result.warnings, "");
 });
 
@@ -225,10 +244,10 @@ test("reasoning-модель без завершения цикла всё ра�
   const result = await probeModelCapabilities(INPUT, fetcher);
   assert.equal(result.ok, false);
   assert.equal(statusOf(result, "tool_result_loop"), "failed");
-  assert.match(result.message, /после результата инструмента модель не ответила/);
+  assert.match(result.message, /tool_result_loop: пустой ответ модели/);
 });
 
-test("провайдер, не принявший свои же служебные поля, проверяется в минимальной форме", async () => {
+test("провайдер, не принявший обязательное opaque state, отклоняется с точной причиной", async () => {
   const { fetcher, seen } = provider({
     toolCall: REASONING_TOOL_CALL,
     toolLoop: (body) => ("reasoning_details" in echoedAssistant(body)
@@ -237,17 +256,9 @@ test("провайдер, не принявший свои же служебны
   });
 
   const result = await probeModelCapabilities(INPUT, fetcher);
-  assert.equal(result.ok, true, result.message);
-  const detail = result.checks.find((entry) => entry.name === "tool_result_loop")?.detail ?? "";
-  assert.match(detail, /без служебных полей/);
-
-  const bodies = loopBodies(seen);
-  assert.equal(bodies.length, 2, "минимальная форма — повтор, а не первая попытка");
-  const minimal = echoedAssistant(bodies[1] ?? {});
-  const call0 = (minimal.tool_calls as Array<{ function: { arguments: string } }>)[0];
-  assert.equal(call0.function.arguments, '{"value":"ok"}', "аргументы берутся у модели");
-  // Повтор и есть форма роутера: лишней проверки не нужно.
-  assert.equal(statusOf(result, "tool_loop_without_reasoning"), "ok");
+  assert.equal(result.ok, false);
+  assert.match(result.message, /Unrecognized key: reasoning_details/);
+  assert.equal(loopBodies(seen).length, 1, "opaque state нельзя молча удалить как fallback");
 });
 
 test("проба идёт в конфигурации провайдера, но без секретов и маршрутизации", async () => {
@@ -326,7 +337,7 @@ test("поток, пришедший не событиями SSE, не прох�
   const result = await probeModelCapabilities(INPUT, fetcher);
   assert.equal(result.ok, false);
   assert.equal(statusOf(result, "streaming"), "failed");
-  assert.match(result.message, /не событиями SSE/);
+  assert.match(result.message, /поток закончился без содержимого/);
 });
 
 test("отказ провайдера называет причину, а не «что-то пошло не так»", async () => {
@@ -336,20 +347,19 @@ test("отказ провайдера называет причину, а не �
   assert.match(result.message, /completion: HTTP 502/);
 });
 
-test("незаявленные возможности не проверяются и не отказывают", async () => {
+test("agent tools проверяются фактически даже при ошибочном false в настройке", async () => {
   const { fetcher, seen } = provider();
   const result = await probeModelCapabilities(
     { ...INPUT, claims: { tools: false, json: false, streaming: false, vision: false } },
     fetcher,
   );
   assert.equal(result.ok, true);
-  assert.equal(seen.length, 1, "остаётся только обычный ответ");
-  for (const name of [
-    "streaming", "tool_call", "tool_result_loop", "tool_loop_without_reasoning",
-    "json_object", "json_schema", "vision",
-  ]) {
-    assert.equal(statusOf(result, name), "skipped", name);
-  }
+  assert.equal(statusOf(result, "streaming"), "skipped");
+  assert.equal(statusOf(result, "tool_call"), "ok");
+  assert.equal(statusOf(result, "tool_result_loop"), "ok");
+  assert.equal(statusOf(result, "json_object"), "skipped");
+  assert.equal(statusOf(result, "vision"), "skipped");
+  assert.equal(seen.length, 3, "completion и полный agent tool loop");
 });
 
 test("провал зрения не блокирует разговорную модель", async () => {
@@ -480,7 +490,7 @@ test("молчание и при большом бюджете остаётся 
   assert.equal(result.ok, false);
   // Отказ называет проверенную границу, а не просто «не ответила»:
   // иначе непонятно, тесно модели или она действительно молчит.
-  assert.match(result.message, /1024/);
+  assert.match(result.message, /допустимый output budget=8192/);
 });
 
 test("пустой ответ на изображение перепроверяется большим бюджетом", async () => {

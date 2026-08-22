@@ -1,723 +1,200 @@
-/**
- * Совместима ли модель с тем, как её будет вызывать Letta.
- *
- * Рабочий `/models` доказывает только, что провайдер отвечает по HTTP.
- * Разговор Евы — это агентный цикл: поток, вызов инструмента с
- * аргументами по заданной схеме, возврат результата инструмента и
- * завершение цикла осмысленным ответом. Модель, у которой в конфигурации
- * стоит `supports_tools = true`, а на деле инструмент не вызывается,
- * ломается не на активации, а в первом же разговоре человека — и
- * выглядит это как «Ева молчит», а не как «модель не умеет tools».
- *
- * Поэтому здесь несколько крошечных технических запросов к самому
- * провайдеру. Проверяется только заявленное: не заявлено — не
- * проверяется. Никаких данных пользователя, `temperature: 0`, десятки
- * токенов на весь набор. Это не второй когнитивный слой: ни одно
- * решение о разговоре здесь не принимается, а результат — «умеет» или
- * «не умеет» с причиной.
- *
- * Проба обязана обращаться к модели так же, как это делает продакшн:
- * с теми же `additional_parameters` и с сохранением служебных полей
- * ответа. Проверка в чужой конфигурации отвечает на другой вопрос, и
- * её «не умеет» ничего не значит.
- */
+/** Capability probe executed through the same canonical request and adapters as production. */
+import { adapterForProtocol } from "../router/adapters/index.js";
+import type { LlmMessage, LlmRequest, LlmResponse, LlmTool, ProviderProfile } from "../router/types.js";
+import { ProviderError } from "../router/types.js";
 
 export type CapabilityName =
   | "completion" | "streaming" | "tool_call" | "tool_result_loop"
-  | "tool_loop_without_reasoning" | "json_object" | "json_schema" | "vision";
-
-export interface CapabilityCheck {
-  name: CapabilityName;
-  status: "ok" | "failed" | "skipped";
-  detail: string;
-  /** Провал этой проверки запрещает делать модель основной. */
-  blocking: boolean;
-}
-
-export interface CapabilityProbeResult {
-  ok: boolean;
-  checks: CapabilityCheck[];
-  /** Короткая причина отказа для человека. Пусто, когда всё сошлось. */
-  message: string;
-  /**
-   * Возможности, которых у модели нет, но разговор без них состоится.
-   * Молчать о них нельзя: продуктовые маршруты на них рассчитывают.
-   */
-  warnings: string;
-}
-
-export interface CapabilityClaims {
-  tools: boolean;
-  json: boolean;
-  streaming: boolean;
-  vision: boolean;
-}
-
+  | "json_object" | "json_schema" | "vision";
+export interface CapabilityCheck { name: CapabilityName; status: "ok" | "failed" | "skipped"; detail: string; blocking: boolean }
+export interface CapabilityProbeResult { ok: boolean; checks: CapabilityCheck[]; message: string; warnings: string }
+export interface CapabilityClaims { tools: boolean; json: boolean; streaming: boolean; vision: boolean }
 export interface CapabilityProbeInput {
-  baseUrl: string;
-  apiKey: string;
-  model: string;
-  timeoutMs: number;
-  claims: CapabilityClaims;
-  /**
-   * `additional_parameters` провайдера — те же, что роутер подставляет в
-   * каждый настоящий запрос (`src/router/adapters/openai.ts`). У
-   * reasoning-моделей от них зависит сама форма ответа.
-   */
+  baseUrl: string; apiKey: string; model: string; timeoutMs: number; claims: CapabilityClaims;
+  protocol?: ProviderProfile["protocol"];
+  contextWindow?: number;
+  maxOutputTokens?: number;
   additionalParameters?: Record<string, unknown> | null;
 }
 
-/** Инструмент пробы. Имя намеренно своё, чтобы не пересечься с продуктовыми. */
-const PROBE_TOOL = {
-  type: "function" as const,
-  function: {
-    name: "evaself_capability_probe",
-    description: "Technical probe. Call it once with value \"ok\".",
-    parameters: {
-      type: "object",
-      properties: { value: { type: "string", enum: ["ok"] } },
-      required: ["value"],
-      additionalProperties: false,
-    },
-  },
-};
-
-/** Схема для Structured Outputs: та же дешевизна, что и у остальных проб. */
-const PROBE_JSON_SCHEMA = {
+const PROBE_TOOL: LlmTool = {
   name: "evaself_capability_probe",
-  strict: true,
-  schema: {
-    type: "object",
-    properties: { ok: { type: "boolean" } },
-    required: ["ok"],
-    additionalProperties: false,
-  },
+  description: "Technical probe. Call it once with value \"ok\".",
+  parameters: { type: "object", properties: { value: { type: "string", enum: ["ok"] } }, required: ["value"], additionalProperties: false },
 };
-
-/** Один и тот же безобидный запрос: никаких данных пользователя. */
 const PROBE_PROMPT = "Reply with the single word: ready";
-
-/**
- * Поля запроса, которыми распоряжается сама проба. Настройка провайдера
- * их не переопределяет: иначе проба перестанет быть дешёвой,
- * детерминированной и проверяющей именно то, что заявлено.
- */
+const PROBE_JSON_SCHEMA = {
+  name: "evaself_capability_probe", strict: true,
+  schema: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"], additionalProperties: false },
+};
 const PROBE_CONTROLLED = new Set([
-  "model", "messages", "tools", "tool_choice", "stream", "stream_options",
-  "temperature", "max_tokens", "max_completion_tokens", "n", "response_format",
+  "model", "messages", "contents", "input", "tools", "tool_choice", "stream", "stream_options",
+  "temperature", "max_tokens", "max_completion_tokens", "max_output_tokens", "maxOutputTokens", "n", "response_format",
 ]);
-
-/**
- * Метаданные маршрутизации и учёта. Провайдеру они говорят, *куда* и *от
- * чьего имени* идёт запрос, а не *как* считать ответ, и в технической
- * пробе им делать нечего.
- */
-const ROUTING_KEYS = new Set([
-  "provider", "route", "models", "transforms", "user", "metadata",
-  "headers", "extra_headers", "extra_body", "usage",
-]);
-
-/** Ключ, похожий на учётные данные, в пробу не попадает никогда. */
+const ROUTING_KEYS = new Set(["provider", "route", "models", "transforms", "user", "metadata", "headers", "extra_headers", "extra_body", "usage", "model_settings"]);
 const SECRET_KEY = /key|token|secret|password|credential|authorization|bearer|cookie/iu;
 
-/**
- * Что из настроек провайдера уходит в пробу: всё, что влияет на вывод
- * модели (`reasoning`, `reasoning_effort`, `chat_template_kwargs`,
- * `top_p`, `verbosity` и прочее, что у провайдера означает режим
- * размышления), — и ничего из того, что относится к доступу и маршруту.
- */
-export function probeInferenceParameters(
-  source: Record<string, unknown> | null | undefined,
-): Record<string, unknown> {
+export function probeInferenceParameters(source: Record<string, unknown> | null | undefined): Record<string, unknown> {
   const safe: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(source ?? {})) {
-    if (PROBE_CONTROLLED.has(key) || ROUTING_KEYS.has(key)) continue;
-    if (SECRET_KEY.test(key)) continue;
+    if (PROBE_CONTROLLED.has(key) || ROUTING_KEYS.has(key) || SECRET_KEY.test(key)) continue;
     safe[key] = value;
   }
   return safe;
 }
 
-type Fetcher = typeof fetch;
-
-type ToolCallEntry = {
-  id?: string;
-  type?: string;
-  function?: { name?: string; arguments?: string };
-};
-
-/**
- * Сообщение модели — открытая запись, а не фиксированный набор полей:
- * `reasoning`, `reasoning_details`, `refusal`, `annotations` у разных
- * провайдеров свои, и проба их не разбирает, а пересылает обратно.
- */
-type AssistantMessage = Record<string, unknown> & {
-  content?: unknown;
-  tool_calls?: ToolCallEntry[];
-};
-
-interface ChatResponse {
-  choices?: Array<{ message?: AssistantMessage; finish_reason?: string }>;
+const failure = (name: CapabilityName, detail: string, blocking: boolean): CapabilityCheck => ({ name, status: "failed", detail, blocking });
+const skipped = (name: CapabilityName, detail: string): CapabilityCheck => ({ name, status: "skipped", detail, blocking: false });
+function errorDetail(error: unknown, timeoutMs: number): string {
+  if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) return `нет ответа за ${timeoutMs} мс`;
+  if (error instanceof ProviderError) return `${error.httpStatus ? `HTTP ${error.httpStatus}: ` : ""}${error.message}`;
+  return error instanceof Error ? error.message : String(error);
 }
 
-/**
- * Имена служебных полей размышления. Именно имена: содержимое reasoning
- * не читается, не логируется и не сохраняется — оно только уходит
- * обратно тому же провайдеру.
- */
-const REASONING_FIELDS = ["reasoning", "reasoning_details", "reasoning_content", "thinking"];
-
-/**
- * Бюджет второй попытки, когда с коротким модель не сказала ничего.
- *
- * У reasoning-модели размышление тратит те же `max_tokens`, что и
- * ответ: с тридцатью двумя токенами она успевает только подумать и
- * возвращает пустое сообщение. Проба, читающая пустоту как «не умеет»,
- * объявляет исправную модель несовместимой — так и вышло с моделью,
- * которая на деле и инструменты вызывает, и картинки смотрит.
- *
- * Тысяча токенов — не «пусть подумает подольше», а граница: не ответив
- * и в ней, модель действительно молчит, и это уже её свойство, а не
- * теснота пробы.
- */
-const REASONING_RETRY_BUDGET = 1_024;
-
-/** Ответ пуст: ни текста, ни вызова инструмента. */
-function saidNothing(body: ChatResponse): boolean {
-  const message = body.choices?.[0]?.message;
-  return textOf(message?.content).trim().length === 0
-    && (message?.tool_calls?.length ?? 0) === 0;
-}
-
-function textOf(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => (typeof part === "string" ? part : String((part as { text?: unknown }).text ?? "")))
-      .join("");
-  }
-  return "";
-}
-
-function failure(name: CapabilityName, detail: string, blocking: boolean): CapabilityCheck {
-  return { name, status: "failed", detail, blocking };
-}
-
-/**
- * Отказ провайдера словами провайдера. Один «HTTP 400» не отличает
- * неизвестную модель от непринятого параметра, а разбираться с этим
- * человеку.
- */
-async function httpDetail(response: Response): Promise<string> {
-  const raw = await response.text().catch(() => "");
-  if (!raw.trim()) return `HTTP ${response.status}`;
-  let text = raw;
-  try {
-    const parsed = JSON.parse(raw) as { error?: { message?: unknown } | string };
-    const inner = typeof parsed.error === "string" ? parsed.error : parsed.error?.message;
-    if (typeof inner === "string" && inner.trim()) text = inner;
-  } catch {
-    // Провайдер ответил не JSON — берём тело как есть.
-  }
-  return `HTTP ${response.status}: ${text.replace(/\s+/gu, " ").trim().slice(0, 200)}`;
-}
-
-/**
- * Ответ модели возвращается провайдеру ровно таким, каким пришёл.
- *
- * У reasoning-моделей вместе с вызовом инструмента приходит
- * `reasoning_details` — непрозрачный блок, который тот же провайдер
- * требует вернуть без изменений вместе с результатом инструмента. Проба,
- * собиравшая assistant-сообщение заново из одних `tool_calls`, этот блок
- * теряла: модель после результата отвечала пустотой, и цикл выглядел
- * незавершённым, хотя дело было в форме запроса, а не в модели.
- *
- * Дописывается ровно одно поле — идентификатор вызова, и только если
- * провайдер его не прислал: без него результат не связать с вызовом.
- */
-function echoedAssistant(message: AssistantMessage, toolCallId: string): AssistantMessage {
-  const calls = message.tool_calls ?? [];
-  const echoed: AssistantMessage = { role: "assistant", ...message };
-  if (calls[0]?.id === toolCallId) return echoed;
+function canonicalRequest(
+  messages: LlmMessage[],
+  options: Partial<Pick<LlmRequest, "tools" | "max_tokens" | "stream" | "response_format">> = {},
+): LlmRequest {
   return {
-    ...echoed,
-    tool_calls: calls.map((call, index) => (index === 0 ? { ...call, id: toolCallId } : call)),
+    messages, system_prompt: "", tools: options.tools ?? [], temperature: 0,
+    max_tokens: options.max_tokens ?? 32, stream: options.stream ?? false,
+    response_format: options.response_format ?? null,
+    metadata: { request_id: "capability-probe", user_id: null, agent_id: null, route: "chat", sensitive: false },
   };
 }
 
-/** Тот же вызов без служебных полей — для провайдеров, которые их не принимают. */
-function minimalAssistant(message: AssistantMessage, toolCallId: string): Record<string, unknown> {
-  const call = message.tool_calls?.[0];
-  return {
-    role: "assistant",
-    content: typeof message.content === "string" ? message.content : null,
-    tool_calls: [{
-      id: toolCallId,
-      type: "function",
-      function: {
-        name: call?.function?.name ?? PROBE_TOOL.function.name,
-        // Аргументы берутся у модели, а не придумываются пробой: иначе
-        // провайдеру уходит вызов, которого модель не делала.
-        arguments: call?.function?.arguments ?? "{}",
-      },
-    }],
-  };
+function budgets(initial: number, maximum: number): number[] {
+  const result = [Math.min(initial, maximum)];
+  while (result.at(-1)! < maximum) result.push(Math.min(maximum, Math.max(result.at(-1)! * 2, 256)));
+  return [...new Set(result)];
+}
+function parses(raw: string): unknown | undefined {
+  try { return JSON.parse(raw.replace(/^```(?:json)?\s*|\s*```$/gu, "")) as unknown; } catch { return undefined; }
 }
 
-export async function probeModelCapabilities(
-  input: CapabilityProbeInput,
-  fetcher: Fetcher = fetch,
-): Promise<CapabilityProbeResult> {
-  const url = `${input.baseUrl.replace(/\/+$/u, "")}/chat/completions`;
+export async function probeModelCapabilities(input: CapabilityProbeInput, fetcher: typeof fetch = fetch): Promise<CapabilityProbeResult> {
   const checks: CapabilityCheck[] = [];
-  const inference = probeInferenceParameters(input.additionalParameters);
-
-  const call = async (body: Record<string, unknown>): Promise<Response> => {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), input.timeoutMs);
-    try {
-      return await fetcher(url, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          accept: body.stream === true ? "text/event-stream" : "application/json",
-          authorization: `Bearer ${input.apiKey}`,
-        },
-        // Порядок как в роутере: настройка провайдера идёт первой, поля
-        // самой пробы её перекрывают.
-        body: JSON.stringify({ ...inference, model: input.model, temperature: 0, ...body }),
-        signal: controller.signal,
-      });
-    } finally {
-      clearTimeout(timer);
-    }
+  const maximum = Math.max(256, Math.floor(input.maxOutputTokens ?? Math.min(input.contextWindow ?? 8_192, 8_192)));
+  const provider: ProviderProfile = {
+    id: "capability-probe", name: "capability-probe", protocol: input.protocol ?? "openai-compatible",
+    base_url: input.baseUrl, model: input.model, api_key: input.apiKey,
+    connect_timeout_ms: input.timeoutMs, request_timeout_ms: input.timeoutMs, max_retries: 0,
+    max_concurrency: 1, max_rpm: null, max_tpm: null, context_window: input.contextWindow ?? 8_192,
+    max_output_tokens: maximum, max_latency_ms: null, supports_tools: true, supports_json: true,
+    supports_vision: input.claims.vision, supports_streaming: input.claims.streaming, quality_tier: 1,
+    sensitive_data_allowed: false, price_in_micro: 0, price_out_micro: 0,
+    daily_budget_micro: null, monthly_budget_micro: null, generation_defaults: {},
+    additional_parameters: probeInferenceParameters(input.additionalParameters), fetcher,
   };
-
-  /**
-   * Ответ модели с одной оговоркой: пустоту при коротком бюджете
-   * перепроверяем большим. Иначе размышление reasoning-модели
-   * засчитывается ей как неумение отвечать.
-   */
-  const answer = async (body: Record<string, unknown>): Promise<
-    | { ok: false; status: number; detail: string }
-    | { ok: true; body: ChatResponse; retried: boolean }
-  > => {
-    const response = await call(body);
-    if (!response.ok) {
-      return { ok: false, status: response.status, detail: await httpDetail(response) };
+  const adapter = adapterForProtocol(provider.protocol);
+  const complete = async (request: LlmRequest): Promise<{ response: LlmResponse; budget: number }> => {
+    let last: LlmResponse | null = null;
+    for (const budget of budgets(request.max_tokens, maximum)) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), input.timeoutMs);
+      try { last = await adapter.complete(provider, { ...request, max_tokens: budget }, controller.signal); }
+      finally { clearTimeout(timer); }
+      if (last.content.trim() || last.tool_calls.length) return { response: last, budget };
+      if (last.finish_reason !== "length" && !last.provider_state) break;
     }
-    const parsed = await response.json() as ChatResponse;
-    const budget = typeof body.max_tokens === "number" ? body.max_tokens : 0;
-    if (!saidNothing(parsed) || budget >= REASONING_RETRY_BUDGET) {
-      return { ok: true, body: parsed, retried: false };
-    }
-    const second = await call({ ...body, max_tokens: REASONING_RETRY_BUDGET });
-    if (!second.ok) {
-      return { ok: false, status: second.status, detail: await httpDetail(second) };
-    }
-    return { ok: true, body: await second.json() as ChatResponse, retried: true };
+    return { response: last ?? { content: "", tool_calls: [], finish_reason: "unknown", usage: { tokens_in: 0, tokens_out: 0 }, model: provider.model }, budget: maximum };
   };
+  const note = (budget: number, initial: number) => budget > initial ? ` (понадобился допустимый output budget ${budget} токенов)` : "";
 
-  const budgetNote = (retried: boolean): string => retried
-    ? ` (ответ пришёл только с бюджетом ${REASONING_RETRY_BUDGET} токенов: размышление тратит те же)`
-    : "";
-
-  const reason = (error: unknown): string => error instanceof Error && error.name === "AbortError"
-    ? `нет ответа за ${input.timeoutMs} мс`
-    : error instanceof Error ? error.message : String(error);
-
-  // --- 1. Обычный ответ ---------------------------------------------
   try {
-    const outcome = await answer({
-      messages: [{ role: "user", content: PROBE_PROMPT }],
-      max_tokens: 32,
-      stream: false,
-    });
-    if (!outcome.ok) {
-      checks.push(failure("completion", outcome.detail, true));
-    } else {
-      const text = textOf(outcome.body.choices?.[0]?.message?.content).trim();
-      checks.push(text
-        ? {
-            name: "completion",
-            status: "ok",
-            detail: `ответ получен (${text.length} знаков)${budgetNote(outcome.retried)}`,
-            blocking: true,
-          }
-        : failure(
-            "completion",
-            `модель вернула пустой ответ даже при бюджете ${REASONING_RETRY_BUDGET} токенов`,
-            true,
-          ));
-    }
-  } catch (error) {
-    checks.push(failure("completion", reason(error), true));
-  }
+    const initial = 32;
+    const result = await complete(canonicalRequest([{ role: "user", content: PROBE_PROMPT }], { max_tokens: initial }));
+    checks.push(result.response.content.trim()
+      ? { name: "completion", status: "ok", detail: `ответ получен${note(result.budget, initial)}`, blocking: true }
+      : failure("completion", `пустой ответ; finish_reason=${result.response.finish_reason}, допустимый output budget=${maximum}`, true));
+  } catch (error) { checks.push(failure("completion", errorDetail(error, input.timeoutMs), true)); }
 
-  // --- 2. Поток -----------------------------------------------------
-  if (!input.claims.streaming) {
-    checks.push({ name: "streaming", status: "skipped", detail: "поток не заявлен", blocking: false });
-  } else {
+  if (!input.claims.streaming) checks.push(skipped("streaming", "поток не заявлен"));
+  else {
     try {
-      const response = await call({
-        messages: [{ role: "user", content: PROBE_PROMPT }],
-        max_tokens: 32,
-        stream: true,
-      });
-      if (!response.ok) {
-        checks.push(failure("streaming", await httpDetail(response), true));
-      } else if (!response.body) {
-        checks.push(failure("streaming", "провайдер ответил без тела потока", true));
-      } else {
-        const raw = await response.text();
-        // Поток обязан приходить событиями SSE, а не одним телом JSON:
-        // ровно это Letta и разбирает.
-        const events = raw.split(/\n\n/u).filter((chunk) => chunk.startsWith("data:"));
-        const deltas = events.filter((chunk) => !chunk.includes("[DONE]"));
-        checks.push(deltas.length > 0
-          ? { name: "streaming", status: "ok", detail: `событий потока: ${deltas.length}`, blocking: true }
-          : failure("streaming", "ответ пришёл не событиями SSE", true));
-      }
-    } catch (error) {
-      checks.push(failure("streaming", reason(error), true));
-    }
-  }
-
-  // --- 3. Вызов инструмента и аргументы по схеме --------------------
-  let toolCall: { id: string; message: AssistantMessage } | null = null;
-  if (!input.claims.tools) {
-    checks.push({ name: "tool_call", status: "skipped", detail: "инструменты не заявлены", blocking: false });
-    checks.push({ name: "tool_result_loop", status: "skipped", detail: "инструменты не заявлены", blocking: false });
-    checks.push({
-      name: "tool_loop_without_reasoning",
-      status: "skipped",
-      detail: "инструменты не заявлены",
-      blocking: false,
-    });
-  } else {
-    const toolMessages = [{
-      role: "user",
-      content: "Call the tool evaself_capability_probe with value \"ok\". Do not answer with text.",
-    }];
-    try {
-      // Сначала с принуждением: так проверяется механика вызова, а не
-      // склонность модели им пользоваться. Провайдер, который не знает
-      // tool_choice, отвечает 4xx — тогда пробуем без него.
-      let response = await call({
-        messages: toolMessages,
-        tools: [PROBE_TOOL],
-        tool_choice: { type: "function", function: { name: PROBE_TOOL.function.name } },
-        max_tokens: 64,
-        stream: false,
-      });
-      if (response.status >= 400 && response.status < 500) {
-        response = await call({ messages: toolMessages, tools: [PROBE_TOOL], max_tokens: 64, stream: false });
-      }
-      if (!response.ok) {
-        checks.push(failure("tool_call", await httpDetail(response), true));
-      } else {
-        const body = await response.json() as ChatResponse;
-        const message = body.choices?.[0]?.message;
-        const call0 = message?.tool_calls?.[0];
-        if (!call0?.function?.name) {
-          checks.push(failure("tool_call", "модель не вызвала инструмент и ответила текстом", true));
-        } else if (call0.function.name !== PROBE_TOOL.function.name) {
-          checks.push(failure("tool_call", `вызван неизвестный инструмент ${call0.function.name}`, true));
-        } else {
-          let parsed: unknown;
-          try {
-            parsed = JSON.parse(call0.function.arguments ?? "");
-          } catch {
-            parsed = null;
-          }
-          const value = (parsed as { value?: unknown } | null)?.value;
-          if (value !== "ok") {
-            // Аргументы инструмента проверяются строго и остаются
-            // блокирующими: на них держится весь агентный ход.
-            checks.push(failure(
-              "tool_call",
-              parsed === null
-                ? "аргументы инструмента не разбираются как JSON"
-                : "аргументы не соответствуют заданной схеме",
-              true,
-            ));
-          } else {
-            toolCall = { id: call0.id ?? "probe-call-1", message: message ?? {} };
-            checks.push({ name: "tool_call", status: "ok", detail: "вызов и аргументы по схеме", blocking: true });
-          }
-        }
-      }
-    } catch (error) {
-      checks.push(failure("tool_call", reason(error), true));
-    }
-
-    // --- 4. Результат инструмента и завершение цикла -----------------
-    if (!toolCall) {
-      checks.push(failure("tool_result_loop", "цикл не проверялся: вызова инструмента не было", true));
-      checks.push({
-        name: "tool_loop_without_reasoning",
-        status: "skipped",
-        detail: "цикл не проверялся: вызова инструмента не было",
-        blocking: false,
-      });
-    } else {
-      const accepted = toolCall;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), input.timeoutMs);
+      let events = 0;
       try {
-        const loop = (assistant: unknown): Record<string, unknown> => ({
-          messages: [
-            ...toolMessages,
-            assistant,
-            { role: "tool", tool_call_id: accepted.id, content: "{\"echo\":\"ok\"}" },
-          ],
-          tools: [PROBE_TOOL],
-          max_tokens: 64,
-          stream: false,
-        });
-        const attempt = async (assistant: unknown): Promise<{
-          ok: boolean; status: number; detail: string;
-        }> => {
-          const outcome = await answer(loop(assistant));
-          if (!outcome.ok) {
-            return { ok: false, status: outcome.status, detail: outcome.detail };
-          }
-          const message = outcome.body.choices?.[0]?.message;
-          const text = textOf(message?.content).trim();
-          if (text) {
-            return {
-              ok: true,
-              status: 200,
-              detail: `результат принят, цикл завершён${budgetNote(outcome.retried)}`,
-            };
-          }
-          // Модель, которая после результата снова просит инструмент и
-          // не отвечает, зациклит ход: цикл не завершён.
-          return {
-            ok: false,
-            status: 200,
-            detail: (message?.tool_calls?.length ?? 0) > 0
-              ? "после результата модель снова требует инструмент и не отвечает"
-              : "после результата инструмента модель не ответила даже при бюджете "
-                + `${REASONING_RETRY_BUDGET} токенов`,
-          };
-        };
-
-        const echoedFields = REASONING_FIELDS.filter((field) => field in accepted.message);
-        let outcome = await attempt(echoedAssistant(accepted.message, accepted.id));
-        let trimmed = false;
-        if (!outcome.ok && outcome.status >= 400 && outcome.status < 500) {
-          // Строгий провайдер может не принять поля собственного ответа.
-          // Тогда цикл проверяется в минимальной форме — но проверяется,
-          // а не объявляется сломанным.
-          trimmed = true;
-          outcome = await attempt(minimalAssistant(accepted.message, accepted.id));
+        for await (const chunk of adapter.stream(provider, canonicalRequest([{ role: "user", content: PROBE_PROMPT }], { max_tokens: Math.min(64, maximum), stream: true }), controller.signal)) {
+          if (chunk.type !== "done") events += 1;
         }
-        const note = trimmed
-          ? " (без служебных полей: провайдер их не принял)"
-          : echoedFields.length > 0
-            ? ` (провайдеру возвращены поля: ${echoedFields.join(", ")})`
-            : "";
-        checks.push(outcome.ok
-          ? {
-              name: "tool_result_loop",
-              status: "ok",
-              detail: `${outcome.detail}${note}`,
-              blocking: true,
-            }
-          : failure("tool_result_loop", `${outcome.detail}${note}`, true));
-
-        // Настоящий разговор идёт не отсюда, а через LLM Router, и он
-        // служебные поля размышления сегодня не переносит: во внутреннем
-        // формате (`src/router/types.ts`) их просто нет. Значит, модель,
-        // которая завершает цикл только с ними, в проде замолчит — а
-        // проба, проверившая цикл лишь в полной форме, объявит её
-        // совместимой. Отдельная проверка называет эту разницу вслух.
-        //
-        // Не блокирующая: сама модель исправна и заработает, как только
-        // роутер научится переносить поля. Блокировать активацию из-за
-        // ограничения своего же кода — не то же самое, что признать его.
-        if (echoedFields.length === 0) {
-          checks.push({
-            name: "tool_loop_without_reasoning",
-            status: "skipped",
-            detail: "модель не присылает служебных полей размышления — форма роутера ничем не отличается",
-            blocking: false,
-          });
-        } else if (!outcome.ok) {
-          checks.push({
-            name: "tool_loop_without_reasoning",
-            status: "skipped",
-            detail: "цикл не завершился — сравнивать форму запроса не с чем",
-            blocking: false,
-          });
-        } else if (trimmed) {
-          // Цикл уже проверен ровно в той форме, какую шлёт роутер.
-          checks.push({
-            name: "tool_loop_without_reasoning",
-            status: "ok",
-            detail: "цикл завершён в форме роутера: служебные поля провайдер не принял и не потребовал",
-            blocking: false,
-          });
-        } else {
-          const plain = await attempt(minimalAssistant(accepted.message, accepted.id));
-          checks.push(plain.ok
-            ? {
-                name: "tool_loop_without_reasoning",
-                status: "ok",
-                detail: "цикл завершается и без служебных полей",
-                blocking: false,
-              }
-            : failure(
-                "tool_loop_without_reasoning",
-                `${plain.detail}, когда служебные поля не возвращены — LLM Router их сегодня не переносит,`
-                  + " и в настоящем ходе модель может замолчать",
-                false,
-              ));
-        }
-      } catch (error) {
-        checks.push(failure("tool_result_loop", reason(error), true));
-        checks.push({
-          name: "tool_loop_without_reasoning",
-          status: "skipped",
-          detail: "цикл не завершился — сравнивать форму запроса не с чем",
-          blocking: false,
-        });
-      }
-    }
+      } finally { clearTimeout(timer); }
+      checks.push(events > 0 ? { name: "streaming", status: "ok", detail: `дельт потока: ${events}`, blocking: true } : failure("streaming", "поток закончился без дельт", true));
+    } catch (error) { checks.push(failure("streaming", errorDetail(error, input.timeoutMs), true)); }
   }
 
-  // --- 5. Строгий JSON ----------------------------------------------
-  //
-  // Агентный ход Letta идёт инструментами: строгую форму ответа задаёт
-  // схема инструмента, а не `response_format`. Строгий JSON нужен
-  // продуктовым маршрутам (`eva/json`, исследование), и его отсутствие
-  // делает модель непригодной для них — но не для разговора. Раньше эта
-  // проверка была блокирующей и снимала с активации модель, у которой с
-  // агентным ходом всё в порядке.
-  //
-  // Способов два, и провайдеры поддерживают их независимо: свободный
-  // `json_object` и Structured Outputs со схемой. Поэтому проверяются
-  // оба и классифицируются раздельно.
+  let toolResponse: LlmResponse | null = null;
+  const toolPrompt: LlmMessage = { role: "user", content: "Call evaself_capability_probe with value \"ok\". After its result, reply exactly FINAL_OK." };
+  try {
+    const initial = 64;
+    const result = await complete(canonicalRequest([toolPrompt], { tools: [PROBE_TOOL], max_tokens: initial }));
+    const call = result.response.tool_calls[0];
+    let args: unknown;
+    try { args = JSON.parse(call?.arguments ?? ""); } catch { args = null; }
+    if (!call) checks.push(failure("tool_call", "модель не вызвала инструмент", true));
+    else if (call.name !== PROBE_TOOL.name) checks.push(failure("tool_call", `вызван неизвестный инструмент ${call.name}`, true));
+    else if ((args as { value?: unknown } | null)?.value !== "ok") checks.push(failure("tool_call", args === null ? "аргументы инструмента не разбираются как JSON" : "аргументы не соответствуют заданной схеме", true));
+    else {
+      toolResponse = result.response;
+      checks.push({ name: "tool_call", status: "ok", detail: `вызов и аргументы по схеме${note(result.budget, initial)}`, blocking: true });
+    }
+  } catch (error) { checks.push(failure("tool_call", errorDetail(error, input.timeoutMs), true)); }
+
+  if (!toolResponse) checks.push(failure("tool_result_loop", "цикл не проверялся: вызова инструмента не было", true));
+  else {
+    const call = toolResponse.tool_calls[0]!;
+    try {
+      const initial = 64;
+      const result = await complete(canonicalRequest([
+        toolPrompt,
+        { role: "assistant", content: toolResponse.content, tool_calls: toolResponse.tool_calls, ...(toolResponse.provider_state ? { provider_state: toolResponse.provider_state } : {}) },
+        { role: "tool", content: "{\"echo\":\"ok\"}", tool_call_id: call.id, name: call.name },
+        { role: "user", content: "The tool result is complete. Reply exactly FINAL_OK now. Do not call tools." },
+      ], { tools: [PROBE_TOOL], max_tokens: initial }));
+      checks.push(result.response.content.trim()
+        ? { name: "tool_result_loop", status: "ok", detail: `результат принят, final answer получен${note(result.budget, initial)}`, blocking: true }
+        : failure("tool_result_loop", result.response.tool_calls.length ? "после результата модель снова требует инструмент вместо final answer" : `после результата нет final answer; finish_reason=${result.response.finish_reason}, допустимый output budget=${maximum}`, true));
+    } catch (error) { checks.push(failure("tool_result_loop", errorDetail(error, input.timeoutMs), true)); }
+  }
+
   if (!input.claims.json) {
-    checks.push({ name: "json_object", status: "skipped", detail: "строгий JSON не заявлен", blocking: false });
-    checks.push({ name: "json_schema", status: "skipped", detail: "строгий JSON не заявлен", blocking: false });
+    checks.push(skipped("json_object", "строгий JSON не заявлен"));
+    checks.push(skipped("json_schema", "строгий JSON не заявлен"));
   } else {
-    const parses = (raw: string): unknown | undefined => {
-      try {
-        return JSON.parse(raw.replace(/^```(?:json)?\s*|\s*```$/gu, "")) as unknown;
-      } catch {
-        return undefined;
-      }
-    };
-
     try {
-      const response = await call({
-        messages: [{ role: "user", content: "Return the JSON object {\"ok\":true} and nothing else." }],
-        response_format: { type: "json_object" },
-        max_tokens: 32,
-        stream: false,
-      });
-      if (!response.ok) {
-        checks.push(failure(
-          "json_object",
-          `${await httpDetail(response)} — маршруты строгого JSON недоступны, разговор не затронут`,
-          false,
-        ));
-      } else {
-        const body = await response.json() as ChatResponse;
-        const text = textOf(body.choices?.[0]?.message?.content).trim();
-        checks.push(text && parses(text) !== undefined
-          ? { name: "json_object", status: "ok", detail: "ответ разбирается как JSON", blocking: false }
-          : failure(
-              "json_object",
-              "ответ не разбирается как JSON — маршруты строгого JSON недоступны, разговор не затронут",
-              false,
-            ));
-      }
-    } catch (error) {
-      checks.push(failure("json_object", reason(error), false));
-    }
-
+      const result = await complete(canonicalRequest([{ role: "user", content: "Return {\"ok\":true} and nothing else." }], { max_tokens: 32, response_format: { type: "json_object" } }));
+      checks.push(parses(result.response.content) !== undefined ? { name: "json_object", status: "ok", detail: "ответ разбирается как JSON", blocking: false } : failure("json_object", "ответ не разбирается как JSON — разговор не затронут", false));
+    } catch (error) { checks.push(failure("json_object", errorDetail(error, input.timeoutMs), false)); }
     try {
-      const response = await call({
-        messages: [{ role: "user", content: "Return an object with field ok set to true." }],
-        response_format: { type: "json_schema", json_schema: PROBE_JSON_SCHEMA },
-        max_tokens: 32,
-        stream: false,
-      });
-      if (!response.ok) {
-        checks.push(failure(
-          "json_schema",
-          `${await httpDetail(response)} — Structured Outputs не поддержаны`,
-          false,
-        ));
-      } else {
-        const body = await response.json() as ChatResponse;
-        const text = textOf(body.choices?.[0]?.message?.content).trim();
-        const parsed = parses(text) as { ok?: unknown } | undefined;
-        checks.push(typeof parsed?.ok === "boolean"
-          ? { name: "json_schema", status: "ok", detail: "ответ соответствует переданной схеме", blocking: false }
-          : failure("json_schema", "ответ не соответствует переданной схеме", false));
-      }
-    } catch (error) {
-      checks.push(failure("json_schema", reason(error), false));
-    }
+      const result = await complete(canonicalRequest(
+        [{ role: "user", content: "Return an object with ok set to true." }],
+        { max_tokens: 32, response_format: { type: "json_schema", json_schema: PROBE_JSON_SCHEMA } },
+      ));
+      const parsed = parses(result.response.content) as { ok?: unknown } | undefined;
+      checks.push(typeof parsed?.ok === "boolean"
+        ? { name: "json_schema", status: "ok", detail: "ответ соответствует переданной схеме", blocking: false }
+        : failure("json_schema", "ответ не соответствует переданной схеме", false));
+    } catch (error) { checks.push(failure("json_schema", errorDetail(error, input.timeoutMs), false)); }
   }
 
-  // --- 6. Изображения ------------------------------------------------
-  // Отдельная проба и намеренно не блокирующая: разговаривать модель
-  // умеет и без зрения, а маршрут изображений всё равно выбирает
-  // провайдера по `supports_vision`.
-  if (!input.claims.vision) {
-    checks.push({ name: "vision", status: "skipped", detail: "изображения не заявлены", blocking: false });
-  } else {
+  if (!input.claims.vision) checks.push(skipped("vision", "изображения не заявлены"));
+  else {
     try {
-      const outcome = await answer({
-        messages: [{
-          role: "user",
-          content: [
-            { type: "text", text: "Reply with the single word: ready" },
-            {
-              type: "image_url",
-              image_url: {
-                // Прозрачный PNG 1×1: дешевле изображения не бывает.
-                url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
-              },
-            },
-          ],
-        }],
-        max_tokens: 32,
-        stream: false,
-      });
-      if (!outcome.ok) {
-        checks.push({ name: "vision", status: "failed", detail: outcome.detail, blocking: false });
-      } else {
-        const text = textOf(outcome.body.choices?.[0]?.message?.content).trim();
-        checks.push(text
-          ? {
-              name: "vision",
-              status: "ok",
-              detail: `изображение принято${budgetNote(outcome.retried)}`,
-              blocking: false,
-            }
-          : {
-              name: "vision",
-              status: "failed",
-              detail: `пустой ответ на изображение даже при бюджете ${REASONING_RETRY_BUDGET} токенов`,
-              blocking: false,
-            });
-      }
-    } catch (error) {
-      checks.push({ name: "vision", status: "failed", detail: reason(error), blocking: false });
-    }
+      const result = await complete(canonicalRequest([{ role: "user", content: PROBE_PROMPT, parts: [
+        { type: "text", text: PROBE_PROMPT },
+        { type: "image", media_type: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==" },
+      ] }], { max_tokens: 32 }));
+      checks.push(result.response.content.trim() ? { name: "vision", status: "ok", detail: "изображение принято", blocking: false } : failure("vision", "пустой ответ на изображение", false));
+    } catch (error) { checks.push(failure("vision", errorDetail(error, input.timeoutMs), false)); }
   }
 
   const failed = checks.filter((entry) => entry.status === "failed");
-  const blockers = failed.filter((entry) => entry.blocking);
-  const line = (entry: CapabilityCheck): string => `${entry.name}: ${entry.detail}`;
+  const line = (entry: CapabilityCheck) => `${entry.name}: ${entry.detail}`;
   return {
-    ok: blockers.length === 0,
+    ok: failed.every((entry) => !entry.blocking),
     checks,
-    message: blockers.map(line).join("; "),
+    message: failed.filter((entry) => entry.blocking).map(line).join("; "),
     warnings: failed.filter((entry) => !entry.blocking).map(line).join("; "),
   };
 }

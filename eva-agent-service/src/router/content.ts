@@ -34,7 +34,11 @@ export const PROVIDER_STATE_KEYS = [
   "redacted_reasoning",
   "signature",
   "encrypted_content",
+  "response_items",
+  "gemini_parts",
 ] as const;
+
+const PROVIDER_STATE_KEY = /(?:reasoning|thinking|thought|signature|encrypted|opaque|provider_state)/iu;
 
 export function pickProviderState(
   raw: unknown,
@@ -42,10 +46,26 @@ export function pickProviderState(
   if (!raw || typeof raw !== "object") return undefined;
   const source = raw as Record<string, unknown>;
   const state: Record<string, unknown> = {};
-  for (const key of PROVIDER_STATE_KEYS) {
-    if (source[key] !== undefined && source[key] !== null) state[key] = source[key];
+  for (const [key, value] of Object.entries(source)) {
+    if (!PROVIDER_STATE_KEYS.includes(key as typeof PROVIDER_STATE_KEYS[number])
+      && !PROVIDER_STATE_KEY.test(key)) continue;
+    if (value !== undefined && value !== null) state[key] = value;
   }
   return Object.keys(state).length > 0 ? state : undefined;
+}
+
+/** Собрать логические значения из SSE-дельт, не разбирая их содержимое. */
+export function mergeProviderState(
+  target: Record<string, unknown>,
+  delta: Record<string, unknown>,
+): Record<string, unknown> {
+  for (const [key, value] of Object.entries(delta)) {
+    const current = target[key];
+    if (typeof current === "string" && typeof value === "string") target[key] = current + value;
+    else if (Array.isArray(current) && Array.isArray(value)) target[key] = [...current, ...value];
+    else target[key] = value;
+  }
+  return target;
 }
 
 interface ParsedContent {

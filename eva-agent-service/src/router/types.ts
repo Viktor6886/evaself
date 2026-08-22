@@ -96,7 +96,10 @@ export interface LlmRequest {
   temperature: number;
   max_tokens: number;
   stream: boolean;
-  response_format: { type: "json_object" } | null;
+  response_format:
+    | { type: "json_object" }
+    | { type: "json_schema"; json_schema: Record<string, unknown> }
+    | null;
   metadata: LlmRequestMetadata;
 }
 
@@ -118,6 +121,8 @@ export interface LlmResponse {
 /** Кусок потокового ответа. */
 export type LlmStreamChunk =
   | { type: "text"; delta: string }
+  /** Непрозрачная дельта состояния провайдера; наружу идёт до tool_call. */
+  | { type: "provider_state"; state: Record<string, unknown> }
   | { type: "tool_call"; call: LlmToolCall }
   | { type: "done"; response: LlmResponse };
 
@@ -182,7 +187,11 @@ export class ProviderError extends Error {
 export interface ProviderProfile {
   id: string;
   name: string;
-  protocol: "openai-compatible" | "anthropic-compatible";
+  protocol:
+    | "openai-compatible"
+    | "openai-responses"
+    | "gemini-compatible"
+    | "anthropic-compatible";
   base_url: string;
   model: string;
   api_key: string;
@@ -212,6 +221,8 @@ export interface ProviderProfile {
 
   generation_defaults: Record<string, unknown>;
   additional_parameters: Record<string, unknown>;
+  /** Только для тестов/probe: production использует глобальный fetch. */
+  fetcher?: typeof fetch;
 }
 
 export interface RouteDefinition {

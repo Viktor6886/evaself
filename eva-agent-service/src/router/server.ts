@@ -347,7 +347,7 @@ interface OpenAiIn {
   temperature?: unknown;
   max_tokens?: unknown;
   stream?: unknown;
-  response_format?: { type?: unknown } | null;
+  response_format?: { type?: unknown; json_schema?: unknown } | null;
   metadata?: { request_id?: unknown; user_id?: unknown; agent_id?: unknown; sensitive?: unknown };
   user?: unknown;
 }
@@ -436,9 +436,13 @@ export function fromOpenAi(raw: unknown, markerSecret = ""): LlmRequest {
       ? Math.floor(body.max_tokens)
       : 2_000,
     stream: body.stream === true,
-    response_format: (body.response_format?.type === "json_object")
+    response_format: body.response_format?.type === "json_object"
       ? { type: "json_object" }
-      : null,
+      : body.response_format?.type === "json_schema"
+        && body.response_format.json_schema
+        && typeof body.response_format.json_schema === "object"
+        ? { type: "json_schema", json_schema: body.response_format.json_schema as Record<string, unknown> }
+        : null,
     metadata: {
       request_id: routingClaims?.correlation_id && /^[0-9a-f-]{36}$/i.test(routingClaims.correlation_id)
         ? routingClaims.correlation_id
@@ -520,7 +524,13 @@ function toOpenAi(
 }
 
 function toOpenAiChunk(
-  chunk: { type: string; delta?: string; call?: { id: string; name: string; arguments: string }; response?: { model: string } },
+  chunk: {
+    type: string;
+    delta?: string;
+    state?: Record<string, unknown>;
+    call?: { id: string; name: string; arguments: string };
+    response?: { model: string; finish_reason?: string; provider_state?: Record<string, unknown> };
+  },
   request: LlmRequest,
 ) {
   const base = {
@@ -531,6 +541,9 @@ function toOpenAiChunk(
   };
   if (chunk.type === "text") {
     return { ...base, choices: [{ index: 0, delta: { content: chunk.delta }, finish_reason: null }] };
+  }
+  if (chunk.type === "provider_state" && chunk.state) {
+    return { ...base, choices: [{ index: 0, delta: chunk.state, finish_reason: null }] };
   }
   if (chunk.type === "tool_call" && chunk.call) {
     return {
@@ -549,5 +562,12 @@ function toOpenAiChunk(
       }],
     };
   }
-  return { ...base, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] };
+  return {
+    ...base,
+    choices: [{
+      index: 0,
+      delta: {},
+      finish_reason: chunk.response?.finish_reason ?? "stop",
+    }],
+  };
 }

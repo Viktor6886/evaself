@@ -13,11 +13,11 @@ import type {
   ProviderProfile,
 } from "../types.js";
 import { ProviderError } from "../types.js";
-import { pickProviderState } from "../content.js";
+import { mergeProviderState, pickProviderState } from "../content.js";
 import { ReasoningStripper, stripReasoning } from "../normalize.js";
 import { classifyHttp, readSse } from "./shared.js";
 
-interface OpenAiChoiceMessage {
+interface OpenAiChoiceMessage extends Record<string, unknown> {
   content?: string | null;
   // Reasoning-модели кладут ход мыслей сюда. Объявлено явно, чтобы было
   // видно: поле известно и в content не подмешивается намеренно.
@@ -115,7 +115,7 @@ async function post(
   const url = `${provider.base_url.replace(/\/+$/, "")}/chat/completions`;
   let response: Response;
   try {
-    response = await fetch(url, {
+    response = await (provider.fetcher ?? fetch)(url, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -209,7 +209,7 @@ export const openAiAdapter: ProviderAdapter = {
     // и в Telegram — вырезаем на границе.
     const { content } = stripReasoning(raw_content);
     const toolCalls = toolCallsFrom(choice?.message);
-    if (!content.trim() && toolCalls.length === 0) {
+    if (!content.trim() && toolCalls.length === 0 && finishReason(choice?.finish_reason) !== "length") {
       // Ответ, состоящий из одного рассуждения, — это не пустой ответ
       // модели, а неверно настроенный провайдер. Различаем в сообщении,
       // иначе оператор будет искать проблему не там.
@@ -251,12 +251,13 @@ export const openAiAdapter: ProviderAdapter = {
     let usage = { tokens_in: 0, tokens_out: 0 };
     let reason: LlmResponse["finish_reason"] = "unknown";
     let model = provider.model;
+    const providerState: Record<string, unknown> = {};
 
     for await (const event of readSse(response.body)) {
       if (event === "[DONE]") break;
       let parsed: {
         choices?: Array<{
-          delta?: {
+          delta?: Record<string, unknown> & {
             content?: string;
             tool_calls?: Array<{
               index?: number;
@@ -283,6 +284,14 @@ export const openAiAdapter: ProviderAdapter = {
       }
       const choice = parsed.choices?.[0];
       if (choice?.finish_reason) reason = finishReason(choice.finish_reason);
+
+      const stateDelta = pickProviderState(choice?.delta);
+      if (stateDelta) {
+        mergeProviderState(providerState, stateDelta);
+        // Letta должна получить дельту на том же assistant message до
+        // tool_call, чтобы вернуть её в следующем ходе без изменений.
+        yield { type: "provider_state", state: stateDelta };
+      }
 
       const delta = choice?.delta?.content;
       if (typeof delta === "string" && delta.length > 0) {
@@ -316,7 +325,7 @@ export const openAiAdapter: ProviderAdapter = {
       .map(([, call]) => ({ id: call.id, name: call.name, arguments: call.arguments || "{}" }))
       .filter((call) => call.name);
 
-    if (!text.trim() && toolCalls.length === 0) {
+    if (!text.trim() && toolCalls.length === 0 && reason !== "length") {
       throw new ProviderError(
         stripper.reasoning()
           ? "поток состоял из одного рассуждения: провайдер отдаёт ход мыслей "
@@ -335,6 +344,7 @@ export const openAiAdapter: ProviderAdapter = {
         finish_reason: reason === "unknown" && toolCalls.length ? "tool_calls" : reason,
         usage,
         model,
+        ...(Object.keys(providerState).length ? { provider_state: providerState } : {}),
       },
     };
   },
