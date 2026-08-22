@@ -20,6 +20,7 @@ import {
   openTurnScope,
   runInTurn,
   type ActiveTurn,
+  type ReactionTarget,
 } from "./turns/turn-context.js";
 import {
   messageBatchTiming,
@@ -127,7 +128,7 @@ import { namedOptions } from "./telegram/polls.js";
 const CALLBACK_TOKEN_TTL_SECONDS = 24 * 60 * 60;
 
 
-interface NormalizedUpdate {
+export interface NormalizedUpdate {
   updateId: number;
   message: TelegramMessage;
   telegramId: number;
@@ -136,6 +137,13 @@ interface NormalizedUpdate {
   kind: "text" | "voice" | "image" | "document" | "unsupported";
   command: string | null;
   replyToMessageId: number | null;
+  /** Server-owned target; synthetic events always carry null. */
+  reactionTarget: ReactionTarget | null;
+}
+
+interface ResolvedUpdate {
+  update: TelegramUpdate;
+  allowReaction: boolean;
 }
 
 export class EvaWorkflow {
@@ -236,10 +244,16 @@ export class EvaWorkflow {
    * Апдейт, который разобрать не удалось, ходом не становится: чужая
    * кнопка, повторный голос и просроченный токен — это не сообщение.
    */
-  private async resolveSpecial(update: TelegramUpdate): Promise<TelegramUpdate | null> {
-    if (update.callback_query) return await this.resolveCallback(update.callback_query);
-    if (update.poll_answer) return await this.resolvePollAnswer(update.poll_answer);
-    return update;
+  private async resolveSpecial(update: TelegramUpdate): Promise<ResolvedUpdate | null> {
+    if (update.callback_query) {
+      const resolved = await this.resolveCallback(update.callback_query);
+      return resolved ? { update: resolved, allowReaction: false } : null;
+    }
+    if (update.poll_answer) {
+      const resolved = await this.resolvePollAnswer(update.poll_answer);
+      return resolved ? { update: resolved, allowReaction: false } : null;
+    }
+    return { update, allowReaction: true };
   }
 
   /**
@@ -365,13 +379,13 @@ export class EvaWorkflow {
     // Кнопка и опрос становятся обычным сообщением здесь: дальше идёт
     // тот же ход, тот же замок пользователя, те же квоты и тот же
     // порядок, что и у написанного текста.
-    const incoming: TelegramUpdate[] = [];
+    const incoming: ResolvedUpdate[] = [];
     for (const update of updates) {
       const resolved = await this.resolveSpecial(update);
       if (resolved) incoming.push(resolved);
     }
     const normalized = incoming
-      .map((update) => normalizeUpdate(update))
+      .map(({ update, allowReaction }) => normalizeUpdate(update, allowReaction))
       .filter((item): item is NormalizedUpdate => item !== null);
     if (normalized.length === 0) return { status: "ignored" };
     const primary = normalized[normalized.length - 1]!;
@@ -834,6 +848,11 @@ export class EvaWorkflow {
             // на которое Ева и отвечает.
             chatId: update.chatId,
             messageId: parts[parts.length - 1]?.messageId ?? update.messageId,
+            // Не выводится из messageId: у callback/poll это ID старого
+            // сообщения самой Евы. В окне берём последнее настоящее
+            // входящее сообщение пользователя, если оно вообще есть.
+            reactionTarget: reactionTargetForTurn(parts),
+            reactionOutcome: { outcome: "skipped", reason: "model_not_called" },
           };
           // Второй адрес того же хода: инструменты вызываются из
           // обработчика сокета SDK, куда контекст не доезжает.
@@ -880,6 +899,7 @@ export class EvaWorkflow {
           // Что попросил инструмент внутри хода — забираем сразу:
           // дальше контекст хода уже закрыт.
           uiIntent = activeTurn.ui?.inlineChoices ?? null;
+          this.logger.info("Решение о Telegram-реакции", activeTurn.reactionOutcome);
         } catch (error) {
           // Отменённый ход не доставляет поздний ответ и не идёт в
           // повтор: он закончился по просьбе, а не по ошибке.
@@ -1586,7 +1606,10 @@ export class EvaWorkflow {
   }
 }
 
-export function normalizeUpdate(update: TelegramUpdate): NormalizedUpdate | null {
+export function normalizeUpdate(
+  update: TelegramUpdate,
+  allowReaction = true,
+): NormalizedUpdate | null {
   const message = update.message ?? update.edited_message;
   const from = message?.from;
   if (!message || !from || from.is_bot) return null;
@@ -1606,7 +1629,21 @@ export function normalizeUpdate(update: TelegramUpdate): NormalizedUpdate | null
     replyToMessageId: Number.isSafeInteger(message.reply_to_message?.message_id)
       ? message.reply_to_message!.message_id
       : null,
+    reactionTarget: allowReaction
+      ? { chatId: message.chat.id, messageId: message.message_id }
+      : null,
   };
+}
+
+/** Последняя настоящая реплика человека внутри того же агрегированного окна. */
+export function reactionTargetForTurn(
+  parts: readonly NormalizedUpdate[],
+): ReactionTarget | null {
+  for (let index = parts.length - 1; index >= 0; index -= 1) {
+    const target = parts[index]?.reactionTarget;
+    if (target) return target;
+  }
+  return null;
 }
 
 /** Hermes-compatible transcript echo shown before the agent's answer. */

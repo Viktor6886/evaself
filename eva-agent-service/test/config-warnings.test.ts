@@ -53,6 +53,22 @@ test("параллельная доставка без durable outbox не мо�
   );
 });
 
+test("пустой и невалидный sticker catalog видны оператору", () => {
+  const emptyWarnings = configWarnings(loadConfig(base));
+  assert.ok(emptyWarnings.some((warning) => warning.includes("sticker_unavailable")));
+
+  const invalidJson = loadConfig({
+    ...base, EVA_TELEGRAM_STICKER_CATALOG_JSON: "{broken",
+  });
+  assert.equal(invalidJson.telegramStickerCatalogParseError, true);
+  assert.ok(configWarnings(invalidJson).some((warning) => warning.includes("невалидный JSON")));
+
+  const invalidEntry = loadConfig({
+    ...base, EVA_TELEGRAM_STICKER_CATALOG_JSON: JSON.stringify({ custom: "not-a-file-id" }),
+  });
+  assert.ok(configWarnings(invalidEntry).some((warning) => warning.includes("custom")));
+});
+
 test("восстановление с жизненным циклом предупреждения не даёт", () => {
   const config = loadConfig({
     ...base,

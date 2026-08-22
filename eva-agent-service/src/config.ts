@@ -3,6 +3,7 @@
  */
 
 import { globalSecretRedactor } from "./admin/redactor.js";
+import { inspectStickerCatalog } from "./telegram/stickers.js";
 
 export interface Config {
   port: number;
@@ -81,7 +82,8 @@ export interface Config {
   heartbeatIntervalMs: number;
   typingIntervalMs: number;
   /** Семантический intent -> доверенный Telegram file_id. */
-  telegramStickerCatalog: Record<string, unknown>;
+  telegramStickerCatalog: unknown;
+  telegramStickerCatalogParseError: boolean;
   defaultTimezone: string;
   profileCompletionEnabled: boolean;
   vectorGoalsEnabled: boolean;
@@ -259,6 +261,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     }
   };
 
+  const stickerCatalogSource = str("EVA_TELEGRAM_STICKER_CATALOG_JSON");
+  let telegramStickerCatalog: unknown = {};
+  let telegramStickerCatalogParseError = false;
+  if (stickerCatalogSource) {
+    try {
+      telegramStickerCatalog = JSON.parse(stickerCatalogSource) as Record<string, unknown>;
+    } catch {
+      telegramStickerCatalogParseError = true;
+    }
+  }
+
   return {
     port: int("EVA_AGENT_PORT", 8070),
     host: str("EVA_AGENT_HOST", "0.0.0.0"),
@@ -357,10 +370,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     schedulerIntervalMs: int("EVA_SCHEDULER_INTERVAL_MS", 30_000),
     heartbeatIntervalMs: int("EVA_HEARTBEAT_INTERVAL_MS", 10 * 60_000),
     typingIntervalMs: int("EVA_TELEGRAM_TYPING_INTERVAL_MS", 4_000),
-    telegramStickerCatalog: json<Record<string, unknown>>(
-      "EVA_TELEGRAM_STICKER_CATALOG_JSON",
-      {},
-    ),
+    telegramStickerCatalog,
+    telegramStickerCatalogParseError,
     defaultTimezone: str("TZ", "UTC"),
     profileCompletionEnabled: bool("EVA_PROFILE_COMPLETION_ENABLED", true),
     vectorGoalsEnabled: bool("EVA_VECTOR_GOALS_ENABLED", true),
@@ -433,6 +444,23 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
  */
 export function configWarnings(config: Config): string[] {
   const warnings: string[] = [];
+  const stickerCatalog = inspectStickerCatalog(config.telegramStickerCatalog);
+  if (config.telegramStickerCatalogParseError) {
+    warnings.push(
+      "EVA_TELEGRAM_STICKER_CATALOG_JSON содержит невалидный JSON: "
+        + "send_sticker недоступен, пока каталог не будет исправлен.",
+    );
+  } else if (stickerCatalog.status === "empty") {
+    warnings.push(
+      "EVA_TELEGRAM_STICKER_CATALOG_JSON пуст: send_sticker будет возвращать "
+        + "sticker_unavailable. Добавьте bot-specific Telegram file_id.",
+    );
+  } else if (stickerCatalog.status === "invalid") {
+    warnings.push(
+      "EVA_TELEGRAM_STICKER_CATALOG_JSON содержит невалидные entries "
+        + `(${stickerCatalog.invalidEntries.join(", ")}): неизвестный intent или неверный file_id.`,
+    );
+  }
   // Ключ шифрования конфигураций провайдеров и ключ доступа к API — это
   // разные назначения. Совпадение допустимо ровно в одном случае: на
   // установке, обновившейся с версии, где отдельного ключа не было, —

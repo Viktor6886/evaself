@@ -41,6 +41,10 @@ done
 [ -n "$(get_env ACME_EMAIL || true)" ] || soft "ACME_EMAIL не задан — укажите его перед публичным HTTPS"
 [ -n "$(get_env EVA_TELEGRAM_BOT_TOKEN || true)" ] || soft "Telegram Bot Token не задан — бот пока отключён"
 [ -n "$(get_env OWNER_TELEGRAM_ID || true)" ] || soft "Telegram ID владельца не задан"
+STICKER_CATALOG="$(get_env EVA_TELEGRAM_STICKER_CATALOG_JSON || true)"
+if [ -z "$STICKER_CATALOG" ] || [ "$STICKER_CATALOG" = "{}" ]; then
+	soft "Telegram sticker catalog пуст — send_sticker будет возвращать sticker_unavailable"
+fi
 [ -n "$(get_env MEDIA_SERVICE_TOKEN || true)" ] || soft "MEDIA_SERVICE_TOKEN пуст — media-service принимает запросы без аутентификации"
 [ -n "$(get_env MEDIA_ASR_BASE_URL || true)" ] || info "ASR not configured yet (voice messages will be refused politely)"
 

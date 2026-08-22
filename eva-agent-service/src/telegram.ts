@@ -720,13 +720,13 @@ export class TelegramClient implements OutboxTransport {
     });
   }
 
-  async setReaction(chatId: number, messageId: number, emoji: string): Promise<void> {
-    await this.dispatch("setMessageReaction", chatId, {
+  async setReaction(chatId: number, messageId: number, emoji: string): Promise<unknown> {
+    return await this.dispatch("setMessageReaction", chatId, {
       chat_id: chatId,
       message_id: messageId,
       reaction: [{ type: "emoji", emoji }],
       is_big: false,
-    }, "status");
+    }, this.deliveryContext.getStore() ? undefined : "status");
   }
 
   /**
@@ -1129,6 +1129,20 @@ export const ALLOWED_REACTIONS = new Set([
   "🆒", "💘", "🙉", "🦄", "😘", "💊", "🙊", "😎", "👾", "🤷",
   "🤷‍♂", "🤷‍♀", "😡",
 ]);
+
+const REACTION_VARIATION_SELECTORS = /[\uFE0E\uFE0F]/gu;
+const CANONICAL_REACTIONS = new Map(
+  [...ALLOWED_REACTIONS].map((emoji) => [
+    emoji.normalize("NFC").replace(REACTION_VARIATION_SELECTORS, ""),
+    emoji,
+  ]),
+);
+
+/** Accept text/emoji presentation variants while sending Telegram's canonical spelling. */
+export function normalizeReactionEmoji(value: string): string | null {
+  const key = value.trim().normalize("NFC").replace(REACTION_VARIATION_SELECTORS, "");
+  return CANONICAL_REACTIONS.get(key) ?? null;
+}
 
 function elapsed(started: number): number {
   return Math.round((performance.now() - started) * 10) / 10;
