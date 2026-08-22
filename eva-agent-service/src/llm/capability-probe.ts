@@ -2,6 +2,7 @@
 import { adapterForProtocol } from "../router/adapters/index.js";
 import type { LlmMessage, LlmRequest, LlmResponse, LlmTool, ProviderProfile } from "../router/types.js";
 import { ProviderError } from "../router/types.js";
+import { solidPng } from "./vision-check.js";
 
 export type CapabilityName =
   | "completion" | "streaming" | "tool_call" | "tool_result_loop"
@@ -23,6 +24,9 @@ const PROBE_TOOL: LlmTool = {
   parameters: { type: "object", properties: { value: { type: "string", enum: ["ok"] } }, required: ["value"], additionalProperties: false },
 };
 const PROBE_PROMPT = "Reply with the single word: ready";
+const VISION_PROMPT = "The image is one solid color. Name that color with one word.";
+const VISION_WORDS = /(green|зел[её]н|verde|gr[uü]n|vert)/iu;
+const VISION_COLOR = [0x2f, 0xa8, 0x4a] as const;
 const PROBE_JSON_SCHEMA = {
   name: "evaself_capability_probe", strict: true,
   schema: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"], additionalProperties: false },
@@ -78,20 +82,71 @@ function parses(raw: string): unknown | undefined {
   try { return JSON.parse(raw.replace(/^```(?:json)?\s*|\s*```$/gu, "")) as unknown; } catch { return undefined; }
 }
 
-export async function probeModelCapabilities(input: CapabilityProbeInput, fetcher: typeof fetch = fetch): Promise<CapabilityProbeResult> {
-  const checks: CapabilityCheck[] = [];
+function probeProvider(input: CapabilityProbeInput, fetcher: typeof fetch): ProviderProfile {
   const maximum = Math.max(256, Math.floor(input.maxOutputTokens ?? Math.min(input.contextWindow ?? 8_192, 8_192)));
-  const provider: ProviderProfile = {
+  return {
     id: "capability-probe", name: "capability-probe", protocol: input.protocol ?? "openai-compatible",
     base_url: input.baseUrl, model: input.model, api_key: input.apiKey,
     connect_timeout_ms: input.timeoutMs, request_timeout_ms: input.timeoutMs, max_retries: 0,
     max_concurrency: 1, max_rpm: null, max_tpm: null, context_window: input.contextWindow ?? 8_192,
     max_output_tokens: maximum, max_latency_ms: null, supports_tools: true, supports_json: true,
-    supports_vision: input.claims.vision, supports_streaming: input.claims.streaming, quality_tier: 1,
+    // The probe must be allowed to send the image before that capability is known.
+    supports_vision: true, supports_streaming: input.claims.streaming, quality_tier: 1,
     sensitive_data_allowed: false, price_in_micro: 0, price_out_micro: 0,
     daily_budget_micro: null, monthly_budget_micro: null, generation_defaults: {},
     additional_parameters: probeInferenceParameters(input.additionalParameters), fetcher,
   };
+}
+
+/** Discover vision through the same canonical request and protocol adapter as production. */
+export async function probeVisionCapability(
+  input: CapabilityProbeInput,
+  fetcher: typeof fetch = fetch,
+): Promise<CapabilityCheck> {
+  const provider = probeProvider(input, fetcher);
+  const adapter = adapterForProtocol(provider.protocol);
+  const maximum = provider.max_output_tokens;
+  const request = canonicalRequest([{ role: "user", content: VISION_PROMPT, parts: [
+    { type: "text", text: VISION_PROMPT },
+    { type: "image", media_type: "image/png", data: solidPng(128, 128, VISION_COLOR).toString("base64") },
+  ] }], { max_tokens: 64 });
+  const unsupported = (detail: string): CapabilityCheck => input.claims.vision
+    ? failure("vision", detail, true)
+    : skipped("vision", `фактическая проба: ${detail}`);
+
+  try {
+    let last: LlmResponse | null = null;
+    let usedBudget = request.max_tokens;
+    for (const budget of budgets(request.max_tokens, maximum)) {
+      usedBudget = budget;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), input.timeoutMs);
+      try { last = await adapter.complete(provider, { ...request, max_tokens: budget }, controller.signal); }
+      finally { clearTimeout(timer); }
+      if (last.content.trim()) break;
+      if (last.finish_reason !== "length" && !last.provider_state) break;
+    }
+    const answer = last?.content.trim() ?? "";
+    if (!answer) {
+      return unsupported(`пустой ответ на изображение; finish_reason=${last?.finish_reason ?? "unknown"}, допустимый output budget=${maximum}`);
+    }
+    if (!VISION_WORDS.test(answer)) {
+      return unsupported(`изображение принято, но цвет не распознан (ответ: ${answer.slice(0, 80)})`);
+    }
+    return {
+      name: "vision", status: "ok",
+      detail: `изображение принято и распознано${usedBudget > request.max_tokens ? ` (output budget ${usedBudget})` : ""}`,
+      blocking: input.claims.vision,
+    };
+  } catch (error) {
+    return unsupported(errorDetail(error, input.timeoutMs));
+  }
+}
+
+export async function probeModelCapabilities(input: CapabilityProbeInput, fetcher: typeof fetch = fetch): Promise<CapabilityProbeResult> {
+  const checks: CapabilityCheck[] = [];
+  const maximum = Math.max(256, Math.floor(input.maxOutputTokens ?? Math.min(input.contextWindow ?? 8_192, 8_192)));
+  const provider = probeProvider(input, fetcher);
   const adapter = adapterForProtocol(provider.protocol);
   const complete = async (request: LlmRequest): Promise<{ response: LlmResponse; budget: number }> => {
     let last: LlmResponse | null = null;
@@ -184,16 +239,7 @@ export async function probeModelCapabilities(input: CapabilityProbeInput, fetche
     } catch (error) { checks.push(failure("json_schema", errorDetail(error, input.timeoutMs), false)); }
   }
 
-  if (!input.claims.vision) checks.push(skipped("vision", "изображения не заявлены"));
-  else {
-    try {
-      const result = await complete(canonicalRequest([{ role: "user", content: PROBE_PROMPT, parts: [
-        { type: "text", text: PROBE_PROMPT },
-        { type: "image", media_type: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==" },
-      ] }], { max_tokens: 32 }));
-      checks.push(result.response.content.trim() ? { name: "vision", status: "ok", detail: "изображение принято", blocking: true } : failure("vision", "пустой ответ на изображение", true));
-    } catch (error) { checks.push(failure("vision", errorDetail(error, input.timeoutMs), true)); }
-  }
+  checks.push(await probeVisionCapability(input, fetcher));
 
   const failed = checks.filter((entry) => entry.status === "failed");
   const line = (entry: CapabilityCheck) => `${entry.name}: ${entry.detail}`;

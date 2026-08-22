@@ -159,6 +159,96 @@ test("смена chat-модели обновляет metadata за eva/chat б�
   assert.deepEqual(order, [`activate:${candidate.id}`, "apply-metadata"]);
 });
 
+test("startup discovers legacy vision=false before Letta opens a session", async () => {
+  const master = "v".repeat(64);
+  const row = {
+    ...providerRow("active", true, new SecretBox(master).encrypt("provider-key")),
+    supports_vision: false,
+  };
+  const order: string[] = [];
+  const db = {
+    getActiveLlmProvider: async () => row,
+    setLlmProviderVisionCapability: async (_id: string, value: boolean) => {
+      order.push(`persist:${value}`);
+      return { ...row, supports_vision: value };
+    },
+  };
+  const letta = {
+    setDefaultModel: (model: string) => { order.push(`default:${model}`); },
+  };
+  const manager = new LlmManager(
+    config(master),
+    db as never,
+    letta as never,
+    logger() as never,
+    {
+      probeVision: async () => ({
+        name: "vision", status: "ok", detail: "image recognized", blocking: false,
+      }),
+    },
+  );
+
+  await manager.initializeDefaultModel();
+
+  assert.deepEqual(order, [
+    `default:${modelHandle("eva/chat")}`,
+    "persist:true",
+  ]);
+});
+
+test("activation persists discovered vision before Router catalog is refreshed", async () => {
+  const master = "w".repeat(64);
+  const candidate = {
+    ...providerRow("candidate", false, new SecretBox(master).encrypt("provider-key")),
+    supports_vision: false,
+  };
+  const order: string[] = [];
+  const db = {
+    getLlmProvider: async () => candidate,
+    getActiveLlmProvider: async () => null,
+    setLlmProviderVisionCapability: async () => {
+      order.push("persist-vision");
+      return { ...candidate, supports_vision: true };
+    },
+    recordLlmCheck: async () => undefined,
+    activateLlmProvider: async () => {
+      order.push("activate-route");
+      return { ...candidate, supports_vision: true, is_active: true };
+    },
+    setAgentModels: async () => undefined,
+  };
+  const letta = {
+    setDefaultModel: () => undefined,
+    closeAllSessions: () => undefined,
+    listAllModelMappings: async () => [],
+    waitForModel: async () => { order.push("read-catalog"); },
+    applyModelToMappings: async () => undefined,
+  };
+  const manager = new LlmManager(
+    config(master),
+    db as never,
+    letta as never,
+    logger() as never,
+    {
+      configureProvider: async () => undefined,
+      restartAppServer: async () => undefined,
+      probeProvider: async () => ({
+        ok: true, models_supported: true, models: [], message: "ok", status_code: 200,
+      }),
+      probeCapabilities: async () => ({
+        ok: true,
+        checks: [{ name: "vision", status: "ok", detail: "image recognized", blocking: false }],
+        message: "",
+        warnings: "",
+      }),
+    },
+  );
+
+  await manager.activate(candidate.id);
+
+  assert.deepEqual(order.slice(0, 3), ["persist-vision", "activate-route", "read-catalog"]);
+});
+
 function providerRow(name: string, isActive: boolean, encrypted: string) {
   const now = new Date("2026-07-28T00:00:00Z");
   return {
