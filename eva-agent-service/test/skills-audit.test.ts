@@ -33,7 +33,7 @@ async function catalog(entries: Record<string, string>): Promise<string> {
 const skill = (name: string, description = "когда открывать этот навык") =>
   `---\nname: ${name}\ndescription: ${description}\n---\n\n# ${name}\n`;
 
-test("двенадцать навыков проекта читаются нативным способом", async (context) => {
+test("тринадцать навыков проекта читаются нативным способом", async (context) => {
   const found = await readProjectSkills(REPO_SKILLS);
   if (!found.available) {
     // Каталог монтируется отдельно и в образе сервиса его нет.
