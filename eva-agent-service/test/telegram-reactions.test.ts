@@ -7,7 +7,7 @@ import { approvalRequiredFor } from "../dist/tools/approvals.js";
 import { runInTurn } from "../dist/turns/turn-context.js";
 import { withToolTurn } from "../dist/tools/tool-kit.js";
 import { reactionStats } from "../dist/metrics.js";
-import { renderTelegramText, TelegramClient } from "../dist/telegram.js";
+import { renderTelegramText, TelegramApiError, TelegramClient } from "../dist/telegram.js";
 import { formatEvaReply } from "../dist/telegram-format.js";
 import { normalizeUpdate, reactionTargetForTurn } from "../dist/eva-workflow.js";
 import { PostgresTelegramInbox } from "../dist/delivery/inbox.js";
@@ -133,9 +133,8 @@ test("A is skipped before enqueue when newer real B was already accepted", async
   assert.deepEqual(db.selectValues, [[7, 42, 10]]);
 });
 
-test("newer B accepted after enqueue is rechecked under lock before delivery", async () => {
+test("newer B accepted before confirmed delivery makes A stale", async () => {
   const calls: unknown[] = [];
-  let envelope: { method: string; payload: Record<string, unknown> } | null = null;
   const db = reactionDb([0, 1]);
   const telegram = new TelegramClient({
     telegramBotToken: "1001:secret", telegramApiBaseUrl: "https://api.telegram.invalid",
@@ -143,20 +142,65 @@ test("newer B accepted after enqueue is rechecked under lock before delivery", a
   } as never, { debug() {}, info() {}, warn() {}, error() {} }, db as never);
   telegram.call = async (...args) => { calls.push(args); return {} as never; };
   telegram.setOutbox({
-    send: async (value) => {
-      envelope = { method: value.method, payload: value.payload };
-      return { queued: true };
-    },
+    send: async () => ({ queued: true }),
+    sendConfirmed: async (value) => await telegram.deliver(value.method, value.payload),
   });
   const target = { updateId: 10, telegramUserId: 7, chatId: 42, messageId: 101 };
 
-  assert.deepEqual(await telegram.setReaction(42, 101, "👍", target), { queued: true });
-  assert.ok(envelope, "reaction was not durably enqueued");
-  assert.deepEqual(await telegram.deliver(envelope!.method, envelope!.payload), {
+  assert.deepEqual(await telegram.setReaction(42, 101, "👍", target), {
     skipped: true, reason: "stale_reaction_target",
   });
   assert.deepEqual(calls, [], "reaction must not move to B or be sent to A");
   assert.deepEqual(db.events.slice(-2), ["lock:telegram-reaction:7:42", "freshness"]);
+});
+
+test("parallel outbox cannot turn a later Telegram 400 into reaction success", async () => {
+  const db = reactionDb([0]);
+  const warnings: Record<string, unknown>[] = [];
+  const telegram = new TelegramClient({
+    telegramBotToken: "1001:secret", telegramApiBaseUrl: "https://api.telegram.invalid",
+    telegramStickerCatalog: {},
+  } as never, {
+    debug() {}, info() {}, warn(_message, fields) { warnings.push(fields ?? {}); }, error() {},
+  }, db as never);
+  let queued = 0;
+  telegram.setOutbox({
+    send: async () => { queued += 1; return { queued: true }; },
+    sendConfirmed: async () => {
+      throw new TelegramApiError(
+        "Telegram setMessageReaction: Bad Request: message can't be reacted",
+        null,
+        400,
+        "Bad Request: message can't be reacted",
+      );
+    },
+  });
+  const factory = new CoreToolFactory(
+    { routerUrl: "", routerApiKey: "" } as never,
+    db as never,
+    telegram,
+    { search: async () => ({ hits: [], degraded: false }) } as never,
+  );
+  const reaction = factory.build(tool as never).find((entry) => entry.name === "set_reaction")!;
+  const result = await runInTurn({
+    runId: "run-400", recorded: true, isCancelled: async () => false,
+    reactionTarget: { updateId: 10, telegramUserId: 7, chatId: 42, messageId: 101 },
+  }, async () => await reaction.execute({ emoji: "👍" }, RUNTIME as never));
+
+  assert.deepEqual(result, {
+    ok: false,
+    outcome: "failed",
+    reason: "telegram_api_error",
+    error_code: 400,
+    description: "Bad Request: message can't be reacted",
+  });
+  assert.equal(queued, 0, "reaction must use confirmed delivery, not report queue insertion");
+  assert.deepEqual(warnings.at(-1), {
+    outcome: "failed",
+    reason: "telegram_api_error",
+    error_code: 400,
+    description: "Bad Request: message can't be reacted",
+  });
 });
 
 test("fresh target is delivered to exact A and internal target never reaches Telegram", async () => {
@@ -252,6 +296,8 @@ test("реакции считаются метрикой, а текст сооб
   );
   assert.deepEqual(failure, {
     ok: false, outcome: "failed", reason: "telegram_api_error",
+    error_code: "telegram_transport_error",
+    description: "Telegram API request failed",
   });
   assert.equal(reactionStats().failed, after.failed + 1);
   assert.doesNotMatch(JSON.stringify(reactionStats()), /[а-яё]/i);

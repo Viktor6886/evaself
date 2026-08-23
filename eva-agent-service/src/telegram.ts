@@ -97,6 +97,7 @@ export interface TelegramUpdate {
 interface TelegramResponse<T> {
   ok: boolean;
   result?: T;
+  error_code?: number;
   description?: string;
   parameters?: { retry_after?: number };
 }
@@ -118,10 +119,31 @@ export class TelegramFileTooLarge extends Error {
 const DEFAULT_DOWNLOAD_LIMIT_BYTES = 10 * 1024 * 1024;
 
 export class TelegramApiError extends Error {
-  constructor(message: string, readonly retryAfterMs: number | null = null) {
+  constructor(
+    message: string,
+    readonly retryAfterMs: number | null = null,
+    readonly errorCode: number | null = null,
+    readonly description: string = "Telegram API request failed",
+  ) {
     super(message);
     this.name = "TelegramApiError";
   }
+}
+
+export function safeTelegramApiError(error: unknown): {
+  error_code: number | "telegram_transport_error";
+  description: string;
+} {
+  if (error instanceof TelegramApiError) {
+    return {
+      error_code: error.errorCode ?? "telegram_transport_error",
+      description: sanitizeTelegramDescription(error.description),
+    };
+  }
+  return {
+    error_code: "telegram_transport_error",
+    description: "Telegram API request failed",
+  };
 }
 
 /**
@@ -760,13 +782,22 @@ export class TelegramClient implements OutboxTransport {
     if (target && this.db && !await isReactionTargetFresh(this.db, target)) {
       return { skipped: true, reason: "stale_reaction_target" };
     }
-    return await this.dispatch("setMessageReaction", chatId, {
-      chat_id: chatId,
-      message_id: messageId,
-      reaction: [{ type: "emoji", emoji }],
-      is_big: false,
-      ...(target ? { _evaself_reaction_target: target } : {}),
-    }, this.deliveryContext.getStore() ? undefined : "status");
+    try {
+      return await this.dispatchConfirmed("setMessageReaction", chatId, {
+        chat_id: chatId,
+        message_id: messageId,
+        reaction: [{ type: "emoji", emoji }],
+        is_big: false,
+        ...(target ? { _evaself_reaction_target: target } : {}),
+      }, this.deliveryContext.getStore() ? undefined : "status");
+    } catch (error) {
+      this.logger.warn("Telegram отклонил реакцию", {
+        outcome: "failed",
+        reason: "telegram_api_error",
+        ...safeTelegramApiError(error),
+      });
+      throw error;
+    }
   }
 
   /**
@@ -1088,6 +1119,33 @@ export class TelegramClient implements OutboxTransport {
     });
   }
 
+  private async dispatchConfirmed(
+    method: string,
+    chatId: number,
+    payload: Record<string, unknown>,
+    priority?: DeliveryPriority,
+  ): Promise<unknown> {
+    const context = this.deliveryContext.getStore();
+    const idempotencyKey = context
+      ? `${context.prefix}:${String(context.sequence++).padStart(3, "0")}:${method}`
+      : undefined;
+    const envelope = {
+      method,
+      chatId,
+      payload,
+      idempotencyKey,
+      priority: priority ?? this.priorityContext.getStore() ?? context?.priority,
+      onMetrics: (metrics: Partial<DeliveryMetrics>) => this.addDeliveryMetrics(metrics),
+    };
+    if (this.outbox?.sendConfirmed) return await this.outbox.sendConfirmed(envelope);
+    const started = performance.now();
+    try {
+      return await this.deliver(method, payload);
+    } finally {
+      this.addDeliveryMetrics({ telegramSendMs: elapsed(started) });
+    }
+  }
+
   private addDeliveryMetrics(metrics: Partial<DeliveryMetrics>): void {
     const store = this.deliveryContext.getStore();
     if (!store) return;
@@ -1117,10 +1175,20 @@ export class TelegramClient implements OutboxTransport {
       throw new TelegramApiError(
         `Telegram ${method}: ${body.description ?? `HTTP ${response.status}`}`.slice(0, 1000),
         retryAfterMs > 0 ? retryAfterMs : null,
+        Number.isSafeInteger(body.error_code) ? body.error_code! : response.status || null,
+        body.description ?? `HTTP ${response.status}`,
       );
     }
     return body.result as T;
   }
+}
+
+function sanitizeTelegramDescription(value: string): string {
+  return value
+    .replace(/\b\d{5,}:[A-Za-z0-9_-]{20,}\b/gu, "[redacted]")
+    .replace(/[\r\n\t]+/gu, " ")
+    .trim()
+    .slice(0, 300) || "Telegram API request failed";
 }
 
 export function parseRetryAfter(value: string | null, now = Date.now()): number | null {

@@ -282,6 +282,22 @@ test("stale reaction is terminally skipped in parallel durable outbox", async ()
   assert.equal(probe.rows[0]!.attempts, 1);
 });
 
+test("confirmed parallel delivery propagates the transport failure", async () => {
+  const probe: Probe = { now: 1000, sent: [], rows: [] };
+  const outbox = outboxHarness(probe, { parallel: { concurrency: 2, limits: null } });
+  const internal = outbox as unknown as { transport: { deliver: () => Promise<unknown> } };
+  internal.transport = { deliver: async () => { throw new Error("Telegram 400"); } };
+
+  await assert.rejects(
+    () => outbox.sendConfirmed({
+      method: "setMessageReaction",
+      chatId: 100,
+      payload: { chat_id: 100, message_id: 7, reaction: [{ type: "emoji", emoji: "👍" }] },
+    }),
+    /Telegram 400/,
+  );
+});
+
 test("ошибка одной delivery не снимает concurrency guard, пока работают соседние", async () => {
   const probe: Probe = {
     now: 1000,
