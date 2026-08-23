@@ -22,7 +22,7 @@ import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 
 /**
- * Двенадцать навыков Evaself. Один список на сервис, тесты и диагностику:
+ * Тринадцать навыков Evaself. Один список на сервис, тесты и диагностику:
  * второй перечень разошёлся бы с первым на первом же добавлении.
  */
 export const EVA_PROJECT_SKILLS = [
@@ -35,6 +35,7 @@ export const EVA_PROJECT_SKILLS = [
   "journaling-reflection",
   "memory-hygiene",
   "motivational-interviewing",
+  "relational-presence",
   "relationships-boundaries",
   "schema-therapy",
   "therapeutic-conversation",
@@ -102,32 +103,49 @@ export async function readProjectSkills(root: string): Promise<{
 
   const skills: SkillEntry[] = [];
   const problems: SkillProblem[] = [];
+
   for (const directory of directories) {
     let body: string;
+
     try {
       body = await readFile(join(root, directory, "SKILL.md"), "utf8");
     } catch {
       problems.push({ skill: directory, reason: "нет SKILL.md" });
       continue;
     }
+
     const frontmatter = FRONTMATTER.exec(body)?.[1];
+
     if (!frontmatter) {
       problems.push({ skill: directory, reason: "нет frontmatter" });
       continue;
     }
+
     const name = /^name:\s*(.+)$/mu.exec(frontmatter)?.[1]?.trim();
     const description = /^description:\s*(.+)$/mu.exec(frontmatter)?.[1]?.trim();
+
     if (!name) {
       problems.push({ skill: directory, reason: "нет name" });
       continue;
     }
+
     if (!description) {
       problems.push({ skill: directory, reason: "нет description" });
       continue;
     }
-    skills.push({ name, directory, descriptionLength: description.length });
+
+    skills.push({
+      name,
+      directory,
+      descriptionLength: description.length,
+    });
   }
-  return { available: true, skills, problems };
+
+  return {
+    available: true,
+    skills,
+    problems,
+  };
 }
 
 /**
@@ -143,23 +161,45 @@ export async function auditSkills(input: {
   sessionTools: string[] | null;
 }): Promise<SkillsAuditResult> {
   const catalog = await readProjectSkills(input.root);
+
   const byName = new Map<string, string[]>();
+
   for (const skill of catalog.skills) {
-    byName.set(skill.name, [...(byName.get(skill.name) ?? []), skill.directory]);
+    byName.set(skill.name, [
+      ...(byName.get(skill.name) ?? []),
+      skill.directory,
+    ]);
   }
-  const present = new Set(catalog.skills.map((skill) => skill.name));
+
+  const present = new Set(
+    catalog.skills.map((skill) => skill.name),
+  );
+
   return {
     sources: input.sources,
-    nativeSkillTool: input.sessionTools === null ? null : input.sessionTools.includes("Skill"),
+
+    nativeSkillTool:
+      input.sessionTools === null
+        ? null
+        : input.sessionTools.includes("Skill"),
+
     catalogAvailable: catalog.available,
+
     project: catalog.skills,
+
     missing: catalog.available
       ? EVA_PROJECT_SKILLS.filter((name) => !present.has(name))
       : [...EVA_PROJECT_SKILLS],
+
     collisions: [...byName.entries()]
       .filter(([, directories]) => directories.length > 1)
-      .map(([name, directories]) => ({ name, directories })),
+      .map(([name, directories]) => ({
+        name,
+        directories,
+      })),
+
     problems: catalog.problems,
+
     notEnumerable: [...NOT_ENUMERABLE_SOURCES],
   };
 }
