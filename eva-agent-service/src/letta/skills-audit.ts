@@ -38,6 +38,7 @@ export const EVA_PROJECT_SKILLS = [
   "relationships-boundaries",
   "schema-therapy",
   "therapeutic-conversation",
+  "relational-presence",
 ] as const;
 
 /** Источники, состав которых на установленных версиях не перечисляется. */
