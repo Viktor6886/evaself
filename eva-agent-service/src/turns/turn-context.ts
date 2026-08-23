@@ -27,7 +27,7 @@ export interface ReactionTarget {
 export type ReactionOutcome =
   | { outcome: "skipped"; reason: "model_not_called" | "emoji_disabled" | "no_reaction_target" | "stale_reaction_target" }
   | { outcome: "failed"; reason: "unsupported_reaction" | "telegram_api_error" }
-  | { outcome: "succeeded"; reason: "delivered" | "queued_for_delivery" };
+  | { outcome: "succeeded"; reason: "delivered" };
 
 export interface ActiveTurn {
   /** Conversation, которому принадлежит ход. Нужен для защиты от чужого ALS. */

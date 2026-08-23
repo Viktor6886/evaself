@@ -37,22 +37,33 @@ jobs:
 
   evals-fast:
     name: Fast release evals
+    needs: changes
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
+      - name: Prompt-only change needs no runtime eval
+        if: needs.changes.outputs.prompt_only == 'true'
+        run: echo "editable prompts were structurally validated by the changes job"
       - uses: actions/checkout@v4
+        if: needs.changes.outputs.prompt_only != 'true'
       - uses: actions/setup-node@v4
+        if: needs.changes.outputs.prompt_only != 'true'
         with:
           node-version: "22.22"
           cache: npm
           cache-dependency-path: eva-agent-service/package-lock.json
       - run: npm ci --no-audit --no-fund
+        if: needs.changes.outputs.prompt_only != 'true'
         working-directory: eva-agent-service
       - run: npm run build
+        if: needs.changes.outputs.prompt_only != 'true'
         working-directory: eva-agent-service
       - run: node --test evals/framework.test.mjs
+        if: needs.changes.outputs.prompt_only != 'true'
       - run: node evals/run.mjs fast --target internal-api --cache "$RUNNER_TEMP/eval-cache"
+        if: needs.changes.outputs.prompt_only != 'true'
       - run: node evals/run.mjs fast --target telegram-simulator --cache "$RUNNER_TEMP/eval-cache-telegram"
+        if: needs.changes.outputs.prompt_only != 'true'
 
   # ===================================================================
   # Область изменений: что дорогим проверкам вообще есть смысл проверять

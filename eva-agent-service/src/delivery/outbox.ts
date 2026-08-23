@@ -33,6 +33,8 @@ export interface OutboxTransport {
 
 export interface OutboxDelivery {
   send(envelope: OutboxEnvelope): Promise<unknown>;
+  /** Deliver now and return only after the transport has answered. */
+  sendConfirmed?(envelope: OutboxEnvelope): Promise<unknown>;
 }
 
 interface OutboxRow {
@@ -121,6 +123,38 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
     const claimed = await this.claimById(row.id);
     if (!claimed) return { queued: true, duplicate: true };
     return await this.deliver(claimed, envelope.onMetrics);
+  }
+
+  /**
+   * Reactions are part of the active turn: the tool must see Telegram's
+   * actual answer before that turn can continue. They still share the
+   * distributed limiter with the parallel worker, while `busy` keeps a
+   * local worker from delivering another row for the same chat first.
+   */
+  async sendConfirmed(envelope: OutboxEnvelope): Promise<unknown> {
+    const chat = String(envelope.chatId);
+    while (this.busy.has(chat)) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    this.busy.add(chat);
+    try {
+      const limiter = this.options.parallel?.limits;
+      if (limiter) {
+        while (true) {
+          const waitMs = await limiter.reserve(envelope.chatId);
+          if (waitMs <= 0) break;
+          await new Promise((resolve) => setTimeout(resolve, waitMs));
+        }
+      }
+      const started = performance.now();
+      try {
+        return await this.transport.deliver(envelope.method, envelope.payload);
+      } finally {
+        envelope.onMetrics?.({ telegramSendMs: elapsed(started) });
+      }
+    } finally {
+      this.busy.delete(chat);
+    }
   }
 
   async tick(): Promise<void> {

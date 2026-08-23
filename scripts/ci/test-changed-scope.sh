@@ -23,4 +23,11 @@ expect $'library/persona/eva.md\ncompose.yml' false false
 expect 'library/persona/other.md' false false
 expect '.github/workflows/ci.yml' false false
 
+WORKFLOW="$ROOT/.github/workflows/ci.yml"
+grep -A30 '^  evals-fast:' "$WORKFLOW" | grep -q 'needs: changes'
+test "$(grep -A30 '^  evals-fast:' "$WORKFLOW" \
+	| grep -c "if: needs.changes.outputs.prompt_only != 'true'")" -eq 7
+grep -A30 '^  evals-fast:' "$WORKFLOW" \
+	| grep -q "if: needs.changes.outputs.prompt_only == 'true'"
+
 echo 'changed-scope prompt classification: ok'

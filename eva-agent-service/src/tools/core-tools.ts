@@ -4,7 +4,12 @@ import type { AnyAgentTool } from "@letta-ai/letta-agent-sdk";
 
 import type { Config } from "../config.js";
 import type { AgentRuntimeContext, Database } from "../db.js";
-import { normalizeReactionEmoji, telegramPollOf, type TelegramClient } from "../telegram.js";
+import {
+  normalizeReactionEmoji,
+  safeTelegramApiError,
+  telegramPollOf,
+  type TelegramClient,
+} from "../telegram.js";
 import { Crawl4aiReader, WebReadError } from "./web-read.js";
 import { KnowledgeSearch } from "../knowledge/search.js";
 import { inspectRuntime, type InspectionInput } from "../letta/runtime-inspection.js";
@@ -487,15 +492,16 @@ export class CoreToolFactory {
           let delivery: unknown;
           try {
             delivery = await this.telegram.setReaction(chatId!, messageId!, emoji, turn!.reactionTarget!);
-          } catch {
+          } catch (error) {
             recordReaction("failed");
             turn!.reactionOutcome = { outcome: "failed", reason: "telegram_api_error" };
-            return { ok: false, outcome: "failed", reason: "telegram_api_error" };
+            return {
+              ok: false,
+              outcome: "failed",
+              reason: "telegram_api_error",
+              ...safeTelegramApiError(error),
+            };
           }
-          const dead = Boolean(
-            delivery && typeof delivery === "object"
-              && (delivery as { dead?: unknown }).dead === true,
-          );
           const stale = Boolean(
             delivery && typeof delivery === "object"
               && (delivery as { reason?: unknown }).reason === "stale_reaction_target",
@@ -505,19 +511,9 @@ export class CoreToolFactory {
             turn!.reactionOutcome = { outcome: "skipped", reason: "stale_reaction_target" };
             return { ok: false, outcome: "skipped", reason: "stale_reaction_target" };
           }
-          if (dead) {
-            recordReaction("failed");
-            turn!.reactionOutcome = { outcome: "failed", reason: "telegram_api_error" };
-            return { ok: false, outcome: "failed", reason: "telegram_api_error" };
-          }
           recordReaction("succeeded");
-          const queued = Boolean(
-            delivery && typeof delivery === "object"
-              && (delivery as { queued?: unknown }).queued === true,
-          );
-          const reason = queued ? "queued_for_delivery" : "delivered";
-          turn!.reactionOutcome = { outcome: "succeeded", reason };
-          return { ok: true, outcome: "succeeded", reason, emoji };
+          turn!.reactionOutcome = { outcome: "succeeded", reason: "delivered" };
+          return { ok: true, outcome: "succeeded", reason: "delivered", emoji };
         },
       ),
       tool(
