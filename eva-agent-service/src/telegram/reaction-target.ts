@@ -20,19 +20,26 @@ export async function lockReactionTarget(
   ]);
 }
 
-/** A newer real inbound message makes the old target stale; synthetic updates do not. */
-export async function hasNewerRealMessage(
+/**
+ * Verify that every server-owned coordinate still names the same real
+ * inbound message. A later update is unrelated: Telegram can react to A
+ * after B arrives, and replacing A with B would be the unsafe operation.
+ * Turn completion/cancellation is guarded by the turn lifecycle before the
+ * tool executes, not inferred from inbox ordering.
+ */
+export async function matchesReactionTarget(
   client: QueryClient,
   target: ReactionTarget,
 ): Promise<boolean> {
   const { rowCount } = await client.query(
     `
-      -- tenant: system — freshness spans durable Telegram ingress for one trusted user/chat pair
+      -- tenant: system — validate the exact server-owned durable Telegram target
       SELECT 1
         FROM telegram_updates
-       WHERE telegram_user_id = $1
-         AND chat_id = $2
-         AND update_id > $3
+       WHERE update_id = $1
+         AND telegram_user_id = $2
+         AND chat_id = $3
+         AND message_id = $4
          AND (payload ? 'message' OR payload ? 'edited_message')
          AND COALESCE(
                payload #>> '{message,from,is_bot}',
@@ -40,19 +47,19 @@ export async function hasNewerRealMessage(
                'false'
              ) <> 'true'
        LIMIT 1`,
-    [target.telegramUserId, target.chatId, target.updateId],
+    [target.updateId, target.telegramUserId, target.chatId, target.messageId],
   );
   return (rowCount ?? 0) > 0;
 }
 
-/** Cheap pre-enqueue check; physical delivery repeats it while holding the shared lock. */
-export async function isReactionTargetFresh(
+/** Cheap identity check; physical delivery repeats it while holding the shared lock. */
+export async function isReactionTargetTrusted(
   db: Database,
   target: ReactionTarget,
 ): Promise<boolean> {
   return await db.withSystemScope(
-    "telegram.reaction.freshness",
-    async () => !await hasNewerRealMessage(db as unknown as QueryClient, target),
+    "telegram.reaction.target",
+    async () => await matchesReactionTarget(db as unknown as QueryClient, target),
     { crossUser: true },
   );
 }

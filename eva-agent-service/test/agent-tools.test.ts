@@ -32,7 +32,12 @@ const RUNTIME = {
 /** Tables holding per-user rows: touching one without a user filter is a leak. */
 const USER_SCOPED_TABLES = ["eva_notes", "budget_entries", "tasks", "user_preferences"];
 
-function harness(options: { rows?: Record<string, unknown>[]; rowCount?: number; runtime?: Omit<typeof RUNTIME, "purpose"> & { purpose: "chat" | "research" } } = {}) {
+function harness(options: {
+  rows?: Record<string, unknown>[];
+  rowCount?: number;
+  runtime?: Omit<typeof RUNTIME, "purpose"> & { purpose: "chat" | "research" };
+  onReaction?: () => void;
+} = {}) {
   const statements: Array<{ sql: string; values: unknown[] }> = [];
   const db = {
     getAgentRuntimeContext: () => Promise.resolve(options.runtime ?? RUNTIME),
@@ -59,7 +64,7 @@ function harness(options: { rows?: Record<string, unknown>[]; rowCount?: number;
       vectorGoalsEnabled: false,
     } as never,
     withTenantScopes(db) as never,
-    { setReaction: () => Promise.resolve() } as never,
+    { setReaction: async () => { options.onReaction?.(); } } as never,
     silentLogger,
   );
   const tools = new Map(
@@ -219,6 +224,21 @@ test("a valid repeating task is written with its next run", async () => {
 test("set_reaction refuses an emoji Telegram does not support", async () => {
   const { result } = await call("set_reaction", { emoji: "🧿" });
   assert.equal((result.details as { ok: boolean }).ok, false);
+});
+
+test("cancelled turn cannot send a reaction", async () => {
+  let reactions = 0;
+  const { tools } = harness({ onReaction: () => { reactions += 1; } });
+  const result = await runInTurn({
+    conversationId: "conv-1",
+    runId: "cancelled-run",
+    recorded: true,
+    isCancelled: async () => true,
+    reactionTarget: { updateId: 1, telegramUserId: 42, chatId: 42, messageId: 7 },
+  }, async () => await tools.get("set_reaction")!.execute("call-reaction", { emoji: "👍" }));
+
+  assert.deepEqual(result.details, { ok: false, error: "ход отменён" });
+  assert.equal(reactions, 0);
 });
 
 test("web_search stops at the quota instead of spending it", async () => {
