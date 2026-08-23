@@ -250,10 +250,10 @@ test("черновик Telegram больше не используется в о
   }
 });
 
-test("voice transcript echo matches Hermes and is sent without parse mode", async () => {
+test("voice transcript echo is quoted without changing the transcript and is sent without parse mode", async () => {
   assert.equal(
     formatVoiceTranscriptEcho("  проверь _точный_ текст  "),
-    "📝 проверь _точный_ текст",
+    '🎙️ "  проверь _точный_ текст  "',
   );
 
   const calls: Array<{ method: string; body: Record<string, unknown> }> = [];

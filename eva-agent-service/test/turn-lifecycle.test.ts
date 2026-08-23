@@ -1384,7 +1384,7 @@ test("медленный ASR редактирует один статус в tra
     },
   });
   assert.equal(probe.sent.filter((text) => text.startsWith("🎧")).length, 0);
-  assert.equal(probe.sent.filter((text) => text === "📝 расшифровка присланной записи").length, 1);
+  assert.equal(probe.sent.filter((text) => text === '🎙️ "расшифровка присланной записи"').length, 1);
   assert.equal(probe.actions.includes("record_voice"), false, "ASR не изображает запись ответа Евы");
 });
 
