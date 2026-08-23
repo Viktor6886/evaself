@@ -148,7 +148,7 @@ async function main(): Promise<void> {
       code: error instanceof Error ? error.name : "unknown_error",
     });
   });
-  const telegram = new TelegramClient(config, logger);
+  const telegram = new TelegramClient(config, logger, db);
   const telegramLimiter = new TelegramDeliveryLimiter(redis, {
     globalPerSecond: config.telegramGlobalRate,
     globalBurst: config.telegramGlobalBurst,

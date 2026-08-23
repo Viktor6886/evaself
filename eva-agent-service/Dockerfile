@@ -22,6 +22,7 @@ RUN npm ci --no-audit --no-fund
 COPY tsconfig.json ./
 COPY src ./src
 COPY test ./test
+COPY assets ./assets
 
 RUN npm run build && node --test --experimental-strip-types test/*.test.ts
 
@@ -44,6 +45,7 @@ RUN apt-get update \
 WORKDIR /app
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
+COPY --from=build /app/assets ./assets
 COPY --from=build /app/package.json ./package.json
 COPY docker-entrypoint.sh /usr/local/bin/evaself-entrypoint
 

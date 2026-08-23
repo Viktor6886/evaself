@@ -43,7 +43,13 @@ done
 [ -n "$(get_env OWNER_TELEGRAM_ID || true)" ] || soft "Telegram ID владельца не задан"
 STICKER_CATALOG="$(get_env EVA_TELEGRAM_STICKER_CATALOG_JSON || true)"
 if [ -z "$STICKER_CATALOG" ] || [ "$STICKER_CATALOG" = "{}" ]; then
-	soft "Telegram sticker catalog пуст — send_sticker будет возвращать sticker_unavailable"
+	if [ -f "eva-agent-service/assets/stickers/support.webp" ]; then
+		ok "Telegram stickers: using_local_assets (file_id появятся в bot-scoped cache после первой отправки)"
+	else
+		critical "Telegram stickers: asset_missing"
+	fi
+else
+	info "Telegram stickers: legacy file_id overrides configured; local assets remain fallback"
 fi
 [ -n "$(get_env MEDIA_SERVICE_TOKEN || true)" ] || soft "MEDIA_SERVICE_TOKEN пуст — media-service принимает запросы без аутентификации"
 [ -n "$(get_env MEDIA_ASR_BASE_URL || true)" ] || info "ASR not configured yet (voice messages will be refused politely)"

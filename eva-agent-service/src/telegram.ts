@@ -15,7 +15,29 @@ import type {
   OutboxTransport,
 } from "./delivery/outbox.js";
 import type { DeliveryPriority } from "./delivery/priority.js";
+import type { Database } from "./db.js";
 import type { Logger } from "./logger.js";
+import type { ReactionTarget } from "./turns/turn-context.js";
+import {
+  hasNewerRealMessage,
+  isReactionTargetFresh,
+  lockReactionTarget,
+} from "./telegram/reaction-target.js";
+import {
+  TelegramStickerCatalog,
+  type StickerRuntimeDiagnostics,
+} from "./telegram/stickers.js";
+
+function reactionTargetFromPayload(value: unknown): ReactionTarget | null {
+  if (!value || typeof value !== "object") return null;
+  const target = value as Partial<ReactionTarget>;
+  return Number.isSafeInteger(target.updateId)
+    && Number.isSafeInteger(target.telegramUserId)
+    && Number.isSafeInteger(target.chatId)
+    && Number.isSafeInteger(target.messageId)
+    ? target as ReactionTarget
+    : null;
+}
 
 export interface TelegramUser {
   id: number;
@@ -203,6 +225,8 @@ export class TelegramClient implements OutboxTransport {
   private readonly token: string;
   private readonly baseUrl: string;
   private readonly logger: Logger;
+  private readonly db: Database | null;
+  private readonly stickers: TelegramStickerCatalog;
   private outbox: OutboxDelivery | null = null;
   private cachedUsername: string | null | undefined;
   private readonly deliveryContext = new AsyncLocalStorage<{
@@ -228,10 +252,17 @@ export class TelegramClient implements OutboxTransport {
     return await this.priorityContext.run(priority, work);
   }
 
-  constructor(config: Config, logger: Logger) {
+  constructor(config: Config, logger: Logger, db?: Database) {
     this.token = config.telegramBotToken;
     this.baseUrl = config.telegramApiBaseUrl.replace(/\/+$/, "");
     this.logger = logger;
+    this.db = db ?? null;
+    this.stickers = new TelegramStickerCatalog(
+      config.telegramStickerCatalog,
+      this.token,
+      this.db,
+      logger,
+    );
   }
 
   /**
@@ -720,12 +751,21 @@ export class TelegramClient implements OutboxTransport {
     });
   }
 
-  async setReaction(chatId: number, messageId: number, emoji: string): Promise<unknown> {
+  async setReaction(
+    chatId: number,
+    messageId: number,
+    emoji: string,
+    target?: ReactionTarget,
+  ): Promise<unknown> {
+    if (target && this.db && !await isReactionTargetFresh(this.db, target)) {
+      return { skipped: true, reason: "stale_reaction_target" };
+    }
     return await this.dispatch("setMessageReaction", chatId, {
       chat_id: chatId,
       message_id: messageId,
       reaction: [{ type: "emoji", emoji }],
       is_big: false,
+      ...(target ? { _evaself_reaction_target: target } : {}),
     }, this.deliveryContext.getStore() ? undefined : "status");
   }
 
@@ -777,6 +817,38 @@ export class TelegramClient implements OutboxTransport {
     const fallbackText = typeof payload._fallback_text === "string" ? payload._fallback_text : "";
     const apiPayload = { ...payload };
     delete apiPayload._fallback_text;
+    const reactionTarget = reactionTargetFromPayload(apiPayload._evaself_reaction_target);
+    delete apiPayload._evaself_reaction_target;
+
+    if (method === "sendEvaSticker") {
+      const chatId = Number(apiPayload.chat_id);
+      const intent = typeof apiPayload.intent === "string" ? apiPayload.intent : "";
+      if (!Number.isSafeInteger(chatId)) throw new Error("Telegram sticker: неверный chat_id");
+      return await this.stickers.send(
+        intent,
+        async (fileId) => await this.call("sendSticker", { chat_id: chatId, sticker: fileId }),
+        async (bytes, filename) => await this.uploadSticker(chatId, bytes, filename),
+      );
+    }
+
+    if (method === "setMessageReaction" && reactionTarget && this.db) {
+      return await this.db.withSystemScope(
+        "telegram.reaction.deliver",
+        async () => await this.db!.transaction(async (client) => {
+          await lockReactionTarget(client, reactionTarget.telegramUserId, reactionTarget.chatId);
+          if (await hasNewerRealMessage(client, reactionTarget)) {
+            this.logger.info("Доставка Telegram-реакции пропущена", {
+              outcome: "skipped",
+              reason: "stale_reaction_target",
+              updateId: reactionTarget.updateId,
+            });
+            return { skipped: true, reason: "stale_reaction_target" };
+          }
+          return await this.call(method, apiPayload);
+        }),
+        { crossUser: true },
+      );
+    }
 
     if (method === "sendRichMessage") {
       try {
@@ -917,6 +989,15 @@ export class TelegramClient implements OutboxTransport {
     });
   }
 
+  /** Model supplies only a closed semantic intent; resolution stays server-owned. */
+  async sendStickerIntent(chatId: number, intent: string): Promise<unknown> {
+    return await this.dispatch("sendEvaSticker", chatId, { chat_id: chatId, intent });
+  }
+
+  async stickerDiagnostics(): Promise<StickerRuntimeDiagnostics> {
+    return await this.stickers.diagnostics();
+  }
+
   startChatActionController(chatId: number, intervalMs: number): TelegramChatActionController {
     let active: "typing" | "record_voice" | "upload_voice" | null = null;
     let timer: NodeJS.Timeout | null = null;
@@ -959,6 +1040,20 @@ export class TelegramClient implements OutboxTransport {
       body: JSON.stringify(body),
     });
     return await this.parseResponse<T>(response, method);
+  }
+
+  private async uploadSticker(chatId: number, bytes: Uint8Array, filename: string): Promise<{
+    sticker?: { file_id?: string };
+  }> {
+    this.assertConfigured();
+    const form = new FormData();
+    form.set("chat_id", String(chatId));
+    form.set("sticker", new Blob([Buffer.from(bytes)], { type: "image/webp" }), filename);
+    const response = await fetch(`${this.baseUrl}/bot${this.token}/sendSticker`, {
+      method: "POST",
+      body: form,
+    });
+    return await this.parseResponse(response, "sendSticker");
   }
 
   private async dispatch(

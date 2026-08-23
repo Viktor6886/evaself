@@ -17,13 +17,15 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { InlineChoiceIntent } from "../telegram/inline-choices.js";
 
 export interface ReactionTarget {
-  /** Both fields come from the same real inbound Telegram message. */
+  /** Every field comes from the same real inbound Telegram update. */
+  updateId: number;
+  telegramUserId: number;
   chatId: number;
   messageId: number;
 }
 
 export type ReactionOutcome =
-  | { outcome: "skipped"; reason: "model_not_called" | "emoji_disabled" | "no_reaction_target" }
+  | { outcome: "skipped"; reason: "model_not_called" | "emoji_disabled" | "no_reaction_target" | "stale_reaction_target" }
   | { outcome: "failed"; reason: "unsupported_reaction" | "telegram_api_error" }
   | { outcome: "succeeded"; reason: "delivered" | "queued_for_delivery" };
 

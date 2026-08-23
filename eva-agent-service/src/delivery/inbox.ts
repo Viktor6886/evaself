@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { Database } from "../db.js";
 import type { Logger } from "../logger.js";
 import type { TelegramUpdate } from "../telegram.js";
+import { lockReactionTarget } from "../telegram/reaction-target.js";
 
 export type InboxTerminalStatus = "completed" | "ignored";
 
@@ -117,27 +118,32 @@ export class PostgresTelegramInbox implements ParallelTelegramInbox {
     // опознан, запись хранит только проверенный Telegram-идентификатор.
     const { rowCount } = await this.db.withSystemScope(
       "telegram.inbox.enqueue",
-      async () => await this.db.query(
-      `
-        -- tenant: system — durable ingress Telegram: строки берутся по update_id и аренде воркера, а не по запросу пользователя
-        INSERT INTO telegram_updates
-         (update_id, telegram_user_id, chat_id, message_id, message_kind,
-          status, billable, payload, available_at)
-       VALUES ($1, $2, $3, $4, $5, 'queued', $6, $7::jsonb, now())
-       ON CONFLICT (update_id) DO NOTHING`,
-      [
-        update.update_id,
-        fromId,
-        chatId,
-        sourceMessageId,
-        kind,
-        // Выбор кнопкой и голос в опросе — продолжение того же
-        // разговора, за который уже заплачено ходом: второй раз квоту за
-        // них не списываем.
-        Boolean(message?.from && !message.from.is_bot && kind !== "unsupported" && !isCommand),
-        JSON.stringify(update),
-      ],
-      ),
+      async () => await this.db.transaction(async (client) => {
+        const realInbound = message?.from && !message.from.is_bot
+          && Number.isSafeInteger(fromId) && Number.isSafeInteger(chatId);
+        if (realInbound) await lockReactionTarget(client, fromId!, chatId!);
+        return await client.query(
+          `
+            -- tenant: system — durable ingress Telegram: строки берутся по update_id и аренде воркера, а не по запросу пользователя
+            INSERT INTO telegram_updates
+             (update_id, telegram_user_id, chat_id, message_id, message_kind,
+              status, billable, payload, available_at)
+           VALUES ($1, $2, $3, $4, $5, 'queued', $6, $7::jsonb, now())
+           ON CONFLICT (update_id) DO NOTHING`,
+          [
+            update.update_id,
+            fromId,
+            chatId,
+            sourceMessageId,
+            kind,
+            // Выбор кнопкой и голос в опросе — продолжение того же
+            // разговора, за который уже заплачено ходом: второй раз квоту за
+            // них не списываем.
+            Boolean(message?.from && !message.from.is_bot && kind !== "unsupported" && !isCommand),
+            JSON.stringify(update),
+          ],
+        );
+      }),
     );
     return { accepted: true, duplicate: rowCount === 0 };
   }

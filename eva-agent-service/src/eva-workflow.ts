@@ -1630,7 +1630,12 @@ export function normalizeUpdate(
       ? message.reply_to_message!.message_id
       : null,
     reactionTarget: allowReaction
-      ? { chatId: message.chat.id, messageId: message.message_id }
+      ? {
+          updateId: update.update_id,
+          telegramUserId: message.from!.id,
+          chatId: message.chat.id,
+          messageId: message.message_id,
+        }
       : null,
   };
 }

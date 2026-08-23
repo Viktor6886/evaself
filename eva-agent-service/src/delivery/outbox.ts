@@ -475,9 +475,11 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
         telegram_send_ms: telegramSendMs,
       });
       if (row.telegram_method === "setMessageReaction") {
-        this.logger.info("Доставка Telegram-реакции", {
-          outcome: "succeeded",
-          reason: "delivered",
+        const skipped = result && typeof result === "object"
+          && (result as { reason?: unknown }).reason === "stale_reaction_target";
+        this.logger.info(skipped ? "Доставка Telegram-реакции пропущена" : "Доставка Telegram-реакции", {
+          outcome: skipped ? "skipped" : "succeeded",
+          reason: skipped ? "stale_reaction_target" : "delivered",
           outboxId: row.id,
         });
       }

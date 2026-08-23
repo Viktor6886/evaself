@@ -53,9 +53,9 @@ test("параллельная доставка без durable outbox не мо�
   );
 });
 
-test("пустой и невалидный sticker catalog видны оператору", () => {
+test("пустой legacy sticker catalog не ломает assets, невалидный виден оператору", () => {
   const emptyWarnings = configWarnings(loadConfig(base));
-  assert.ok(emptyWarnings.some((warning) => warning.includes("sticker_unavailable")));
+  assert.equal(emptyWarnings.some((warning) => warning.includes("sticker_unavailable")), false);
 
   const invalidJson = loadConfig({
     ...base, EVA_TELEGRAM_STICKER_CATALOG_JSON: "{broken",

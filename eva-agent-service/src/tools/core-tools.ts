@@ -22,8 +22,6 @@ import {
 import { recordReaction } from "../metrics.js";
 import {
   STICKER_INTENTS,
-  inspectStickerCatalog,
-  stickerFileId,
 } from "../telegram/stickers.js";
 import { LlmRouterClient } from "../router/client.js";
 import { localDateWithWeekday, localNow } from "../time/local-date-time.js";
@@ -488,7 +486,7 @@ export class CoreToolFactory {
           recordReaction("attempted");
           let delivery: unknown;
           try {
-            delivery = await this.telegram.setReaction(chatId!, messageId!, emoji);
+            delivery = await this.telegram.setReaction(chatId!, messageId!, emoji, turn!.reactionTarget!);
           } catch {
             recordReaction("failed");
             turn!.reactionOutcome = { outcome: "failed", reason: "telegram_api_error" };
@@ -498,6 +496,15 @@ export class CoreToolFactory {
             delivery && typeof delivery === "object"
               && (delivery as { dead?: unknown }).dead === true,
           );
+          const stale = Boolean(
+            delivery && typeof delivery === "object"
+              && (delivery as { reason?: unknown }).reason === "stale_reaction_target",
+          );
+          if (stale) {
+            recordReaction("skipped");
+            turn!.reactionOutcome = { outcome: "skipped", reason: "stale_reaction_target" };
+            return { ok: false, outcome: "skipped", reason: "stale_reaction_target" };
+          }
           if (dead) {
             recordReaction("failed");
             turn!.reactionOutcome = { outcome: "failed", reason: "telegram_api_error" };
@@ -555,21 +562,21 @@ export class CoreToolFactory {
         async (args, runtime) => {
           const turn = toolTurn(runtime);
           const intent = requiredString(args, "intent", 32);
-          const fileId = stickerFileId(this.config.telegramStickerCatalog, intent);
-          if (!fileId) {
-            const inspection = inspectStickerCatalog(this.config.telegramStickerCatalog);
-            return {
-              ok: false,
-              reason: "sticker_unavailable",
-              catalog_status: this.config.telegramStickerCatalogParseError
-                ? "invalid_json"
-                : inspection.status === "ready" ? "intent_unavailable" : inspection.status,
-            };
-          }
           if (!Number.isSafeInteger(turn?.chatId)) {
             return { ok: false, reason: "no_active_turn" };
           }
-          await this.telegram.sendSticker(turn!.chatId!, fileId);
+          let delivery: unknown;
+          try {
+            delivery = await this.telegram.sendStickerIntent(turn!.chatId!, intent);
+          } catch {
+            return {
+              ok: false,
+              reason: "sticker_unavailable",
+              catalog_status: "telegram_upload_failed",
+            };
+          }
+          if (delivery && typeof delivery === "object"
+            && (delivery as { ok?: unknown }).ok === false) return delivery;
           return { ok: true, intent };
         },
       ),

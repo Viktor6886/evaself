@@ -10,6 +10,7 @@ import { reactionStats } from "../dist/metrics.js";
 import { renderTelegramText, TelegramClient } from "../dist/telegram.js";
 import { formatEvaReply } from "../dist/telegram-format.js";
 import { normalizeUpdate, reactionTargetForTurn } from "../dist/eva-workflow.js";
+import { PostgresTelegramInbox } from "../dist/delivery/inbox.js";
 
 const tool = (
   name: string,
@@ -60,7 +61,7 @@ test("реакция ставится на сообщение своего хо�
   await runInTurn(
     {
       runId: "run-1", recorded: true, isCancelled: async () => false,
-      chatId: 42, messageId: 17, reactionTarget: { chatId: 42, messageId: 17 },
+      chatId: 42, messageId: 17, reactionTarget: { updateId: 1, telegramUserId: 7, chatId: 42, messageId: 17 },
     },
     async () => await reaction.execute({ emoji: "🔥" }, RUNTIME as never),
   );
@@ -92,7 +93,7 @@ test("useEmoji=false remains a structured safe skip", async () => {
   const { reactions, reaction } = reactionTools();
   const result = await runInTurn({
     runId: "run-no-emoji", recorded: true, isCancelled: async () => false,
-    reactionTarget: { chatId: 42, messageId: 19 },
+    reactionTarget: { updateId: 2, telegramUserId: 7, chatId: 42, messageId: 19 },
   }, async () => await reaction.execute(
     { emoji: "👍" }, { ...RUNTIME, useEmoji: false } as never,
   ));
@@ -105,7 +106,7 @@ test("вариационный селектор emoji нормализуется
   const result = await runInTurn(
     {
       runId: "run-heart", recorded: true, isCancelled: async () => false,
-      reactionTarget: { chatId: 42, messageId: 18 },
+      reactionTarget: { updateId: 3, telegramUserId: 7, chatId: 42, messageId: 18 },
     },
     async () => await reaction.execute({ emoji: "❤️" }, RUNTIME as never),
   );
@@ -113,6 +114,90 @@ test("вариационный селектор emoji нормализуется
   assert.deepEqual(result, {
     ok: true, outcome: "succeeded", reason: "delivered", emoji: "❤",
   });
+});
+
+test("A is skipped before enqueue when newer real B was already accepted", async () => {
+  const calls: unknown[] = [];
+  const db = reactionDb([1]);
+  const telegram = new TelegramClient({
+    telegramBotToken: "1001:secret", telegramApiBaseUrl: "https://api.telegram.invalid",
+    telegramStickerCatalog: {},
+  } as never, { debug() {}, info() {}, warn() {}, error() {} }, db as never);
+  telegram.call = async (...args) => { calls.push(args); return {} as never; };
+  const target = { updateId: 10, telegramUserId: 7, chatId: 42, messageId: 101 };
+
+  assert.deepEqual(await telegram.setReaction(42, 101, "👍", target), {
+    skipped: true, reason: "stale_reaction_target",
+  });
+  assert.deepEqual(calls, []);
+  assert.deepEqual(db.selectValues, [[7, 42, 10]]);
+});
+
+test("newer B accepted after enqueue is rechecked under lock before delivery", async () => {
+  const calls: unknown[] = [];
+  let envelope: { method: string; payload: Record<string, unknown> } | null = null;
+  const db = reactionDb([0, 1]);
+  const telegram = new TelegramClient({
+    telegramBotToken: "1001:secret", telegramApiBaseUrl: "https://api.telegram.invalid",
+    telegramStickerCatalog: {},
+  } as never, { debug() {}, info() {}, warn() {}, error() {} }, db as never);
+  telegram.call = async (...args) => { calls.push(args); return {} as never; };
+  telegram.setOutbox({
+    send: async (value) => {
+      envelope = { method: value.method, payload: value.payload };
+      return { queued: true };
+    },
+  });
+  const target = { updateId: 10, telegramUserId: 7, chatId: 42, messageId: 101 };
+
+  assert.deepEqual(await telegram.setReaction(42, 101, "👍", target), { queued: true });
+  assert.ok(envelope, "reaction was not durably enqueued");
+  assert.deepEqual(await telegram.deliver(envelope!.method, envelope!.payload), {
+    skipped: true, reason: "stale_reaction_target",
+  });
+  assert.deepEqual(calls, [], "reaction must not move to B or be sent to A");
+  assert.deepEqual(db.events.slice(-2), ["lock:telegram-reaction:7:42", "freshness"]);
+});
+
+test("fresh target is delivered to exact A and internal target never reaches Telegram", async () => {
+  const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
+  const db = reactionDb([0, 0]);
+  const telegram = new TelegramClient({
+    telegramBotToken: "1001:secret", telegramApiBaseUrl: "https://api.telegram.invalid",
+    telegramStickerCatalog: {},
+  } as never, { debug() {}, info() {}, warn() {}, error() {} }, db as never);
+  telegram.call = async (method, body) => { calls.push({ method, body }); return {} as never; };
+  const target = { updateId: 10, telegramUserId: 7, chatId: 42, messageId: 101 };
+  await telegram.setReaction(42, 101, "👍", target);
+  assert.deepEqual(calls, [{
+    method: "setMessageReaction",
+    body: { chat_id: 42, message_id: 101, reaction: [{ type: "emoji", emoji: "👍" }], is_big: false },
+  }]);
+});
+
+test("real inbox acceptance takes reaction lock; callback and poll never create targets", async () => {
+  const events: string[] = [];
+  const query = async (sql: string, values: unknown[] = []) => {
+    if (/pg_advisory_xact_lock/u.test(sql)) events.push(`lock:${values[0]}`);
+    if (/INSERT INTO telegram_updates/u.test(sql)) events.push(`insert:${values[0]}`);
+    return { rows: [], rowCount: 1 };
+  };
+  const inbox = new PostgresTelegramInbox({
+    withSystemScope: async <T>(_reason: string, work: () => Promise<T>) => await work(),
+    transaction: async <T>(work: (client: { query: typeof query }) => Promise<T>) => await work({ query }),
+  } as never);
+  await inbox.enqueue({
+    update_id: 1,
+    message: { message_id: 101, chat: { id: 42 }, from: { id: 7, is_bot: false }, text: "A" },
+  });
+  assert.deepEqual(events, ["lock:telegram-reaction:7:42", "insert:1"]);
+  events.length = 0;
+  await inbox.enqueue({
+    update_id: 2,
+    callback_query: { id: "c", from: { id: 7 }, message: { message_id: 500, chat: { id: 42 } } },
+  } as never);
+  await inbox.enqueue({ update_id: 3, poll_answer: { poll_id: "p", user: { id: 7 }, option_ids: [0] } } as never);
+  assert.deepEqual(events, ["insert:2", "insert:3"]);
 });
 
 test("агрегированный ход выбирает последнюю реальную реплику пользователя", () => {
@@ -126,11 +211,11 @@ test("агрегированный ход выбирает последнюю р
     } as never, allowReaction)!;
   assert.deepEqual(
     reactionTargetForTurn([message(1, 101), message(2, 999, false), message(3, 103)]),
-    { chatId: 42, messageId: 103 },
+    { updateId: 3, telegramUserId: 7, chatId: 42, messageId: 103 },
   );
   assert.deepEqual(
     reactionTargetForTurn([message(1, 101), message(2, 999, false)]),
-    { chatId: 42, messageId: 101 },
+    { updateId: 1, telegramUserId: 7, chatId: 42, messageId: 101 },
   );
 });
 
@@ -149,7 +234,7 @@ test("реакции считаются метрикой, а текст сооб
   await runInTurn(
     {
       runId: "run-2", recorded: true, isCancelled: async () => false,
-      reactionTarget: { chatId: 42, messageId: 21 },
+      reactionTarget: { updateId: 4, telegramUserId: 7, chatId: 42, messageId: 21 },
     },
     async () => await reaction.execute({ emoji: "👍" }, RUNTIME as never),
   );
@@ -161,7 +246,7 @@ test("реакции считаются метрикой, а текст сооб
   const failure = await runInTurn(
     {
       runId: "run-3", recorded: true, isCancelled: async () => false,
-      reactionTarget: { chatId: 42, messageId: 22 },
+      reactionTarget: { updateId: 5, telegramUserId: 7, chatId: 42, messageId: 22 },
     },
     async () => await failing.reaction.execute({ emoji: "👍" }, RUNTIME as never),
   );
@@ -241,7 +326,7 @@ test("реакция находит свой ход, даже когда кон�
 
   const turn = {
     runId: "r1", recorded: true, isCancelled: async () => false,
-    chatId: 42, messageId: 555, reactionTarget: { chatId: 42, messageId: 555 },
+    chatId: 42, messageId: 555, reactionTarget: { updateId: 6, telegramUserId: 42, chatId: 42, messageId: 555 },
   };
   const scope = openTurnScope("conv-1", turn as never);
   try {
@@ -274,7 +359,7 @@ test("ход одного разговора не виден инструмен�
   const tools = new Map(factory.build(tool as never).map((entry) => [entry.name, entry]));
   const scope = openTurnScope("conv-A", {
     runId: "r1", recorded: true, isCancelled: async () => false,
-    reactionTarget: { chatId: 1, messageId: 10 },
+    reactionTarget: { updateId: 7, telegramUserId: 1, chatId: 1, messageId: 10 },
   } as never);
   try {
     assert.deepEqual(
@@ -311,14 +396,14 @@ test("delayed tool callback keeps captured target after next turn opens", async 
   const oldTurn = {
     conversationId: "conv-1", runId: "old", recorded: true,
     isCancelled: async () => false, chatId: 42, messageId: 101,
-    reactionTarget: { chatId: 42, messageId: 101 },
+    reactionTarget: { updateId: 8, telegramUserId: 42, chatId: 42, messageId: 101 },
   };
   const oldScope = openTurnScope("conv-1", oldTurn);
   const captured = withToolTurn(RUNTIME as never, oldTurn);
   const freshScope = openTurnScope("conv-1", {
     conversationId: "conv-1", runId: "fresh", recorded: true,
     isCancelled: async () => false, chatId: 42, messageId: 202,
-    reactionTarget: { chatId: 42, messageId: 202 },
+    reactionTarget: { updateId: 9, telegramUserId: 42, chatId: 42, messageId: 202 },
   });
   try {
     await reaction.execute({ emoji: "👍" }, captured as never);
@@ -344,3 +429,25 @@ test("ALS другого conversation не перекрывает точный s
     closeTurnScope(scope);
   }
 });
+
+function reactionDb(freshnessRows: number[]) {
+  const events: string[] = [];
+  const selectValues: unknown[][] = [];
+  const query = async (sql: string, values: unknown[] = []) => {
+    if (/pg_advisory_xact_lock/u.test(sql)) {
+      events.push(`lock:${values[0]}`);
+      return { rows: [], rowCount: 1 };
+    }
+    if (/FROM telegram_updates/u.test(sql)) {
+      events.push("freshness");
+      selectValues.push(values);
+      return { rows: [], rowCount: freshnessRows.shift() ?? 0 };
+    }
+    throw new Error(`unexpected SQL: ${sql}`);
+  };
+  return {
+    events, selectValues, query,
+    withSystemScope: async <T>(_reason: string, work: () => Promise<T>) => await work(),
+    transaction: async <T>(work: (client: { query: typeof query }) => Promise<T>) => await work({ query }),
+  };
+}
