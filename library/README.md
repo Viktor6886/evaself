@@ -4,8 +4,12 @@
 
 ```text
 library/
-├── persona/eva.md
+├── README.md
+├── persona/
+│   └── eva.md
 ├── prompts/
+├── system/
+│   └── letta_local_memfs.md
 └── tests/
 ```
 
