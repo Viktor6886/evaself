@@ -14,6 +14,7 @@ import { test } from "node:test";
 
 import { CoreToolFactory } from "../dist/tools/core-tools.js";
 import { EvaWorkflow } from "../dist/eva-workflow.js";
+import { TelegramClient } from "../dist/telegram.js";
 import { canTransition, TURN_STATES } from "../dist/turns/states.js";
 import {
   TurnLifecycle,
@@ -1580,6 +1581,77 @@ test("кнопки, о которых попросил инструмент, д�
     issued.choices.map((choice) => choice.token),
     renderedButtons.map((button) => button.callback_data),
   );
+});
+
+test("production workflow keeps reaction on A when durable inbox already contains B", async () => {
+  const durable = [
+    { updateId: 3001, telegramUserId: TELEGRAM_ID, chatId: TELEGRAM_ID, messageId: 5 },
+    { updateId: 3002, telegramUserId: TELEGRAM_ID, chatId: TELEGRAM_ID, messageId: 6 },
+  ];
+  const query = async (sql: string, values: unknown[] = []) => {
+    if (/pg_advisory_xact_lock/u.test(sql)) return { rows: [], rowCount: 1 };
+    if (/FROM telegram_updates/u.test(sql)) {
+      const found = durable.find((row) => row.updateId === Number(values[0])
+        && row.telegramUserId === Number(values[1])
+        && row.chatId === Number(values[2])
+        && row.messageId === Number(values[3]));
+      return { rows: found ? [{}] : [], rowCount: found ? 1 : 0 };
+    }
+    throw new Error(`unexpected SQL: ${sql}`);
+  };
+  const db = {
+    query,
+    withSystemScope: async <T>(_reason: string, work: () => Promise<T>) => await work(),
+    transaction: async <T>(work: (client: { query: typeof query }) => Promise<T>) =>
+      await work({ query }),
+  };
+  const telegram = new TelegramClient(
+    { telegramBotToken: "test", telegramApiBaseUrl: "https://api.telegram.invalid" } as never,
+    logger,
+    db as never,
+  );
+  const delivered: Array<Record<string, unknown>> = [];
+  telegram.call = async (_method, body) => { delivered.push(body); return {} as never; };
+  const tool = (
+    name: string,
+    label: string,
+    description: string,
+    parameters: unknown,
+    execute: (args: Record<string, unknown>, runtime: unknown) => Promise<unknown>,
+  ) => ({
+    name, label, description, parameters,
+    execute: async (_callId: string, args: Record<string, unknown>, runtime: unknown) =>
+      ({ details: await execute(args, runtime) }),
+  });
+  const reaction = new CoreToolFactory(
+    { routerUrl: "", routerApiKey: "" } as never,
+    db as never,
+    telegram,
+  ).build(tool as never).find((entry) => entry.name === "set_reaction")!;
+
+  let toolResult: unknown;
+  await runTelegramTurn(undefined, {
+    duringTurn: async (conversationId) => {
+      toolResult = (await reaction.execute(
+        "call-reaction",
+        { emoji: "👍", message_id: 6 },
+        {
+          userId: 77, telegramId: TELEGRAM_ID, chatId: TELEGRAM_ID,
+          conversationId, purpose: "chat", useEmoji: true,
+        } as never,
+      )).details;
+    },
+  });
+
+  assert.deepEqual(toolResult, {
+    ok: true, outcome: "succeeded", reason: "delivered", emoji: "👍",
+  });
+  assert.deepEqual(delivered, [{
+    chat_id: TELEGRAM_ID,
+    message_id: 5,
+    reaction: [{ type: "emoji", emoji: "👍" }],
+    is_big: false,
+  }]);
 });
 
 test("без потока клавиатура уезжает с обычной отправкой, и токены — под ней", async () => {

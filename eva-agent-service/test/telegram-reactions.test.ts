@@ -48,6 +48,13 @@ const RUNTIME = {
   purpose: "chat" as const, timezone: "UTC", responseMode: "text" as const, useEmoji: true,
 };
 
+const TARGET_A = { updateId: 10, telegramUserId: 7, chatId: 42, messageId: 101 };
+const UPDATE_A = { ...TARGET_A, isBot: false, kind: "message" };
+const UPDATE_B = {
+  updateId: 11, telegramUserId: 7, chatId: 42, messageId: 202,
+  isBot: false, kind: "message",
+};
+
 /**
  * Реакция принадлежит своему ходу.
  *
@@ -55,7 +62,7 @@ const RUNTIME = {
  * человека» и «сообщение этого хода» совпадали. Теперь человек пишет во
  * время ответа, и выборка из базы ставит реакцию на чужой ход.
  */
-test("реакция ставится на сообщение своего хода, а не на пришедшее следом", async () => {
+test("message_id and chat_id from the model cannot override the turn target", async () => {
   const { reactions, reaction } = reactionTools();
 
   await runInTurn(
@@ -63,7 +70,9 @@ test("реакция ставится на сообщение своего хо�
       runId: "run-1", recorded: true, isCancelled: async () => false,
       chatId: 42, messageId: 17, reactionTarget: { updateId: 1, telegramUserId: 7, chatId: 42, messageId: 17 },
     },
-    async () => await reaction.execute({ emoji: "🔥" }, RUNTIME as never),
+    async () => await reaction.execute(
+      { emoji: "🔥", message_id: 999, chat_id: 999 }, RUNTIME as never,
+    ),
   );
 
   assert.deepEqual(reactions, [{ chatId: 42, messageId: 17, emoji: "🔥" }]);
@@ -116,26 +125,25 @@ test("вариационный селектор emoji нормализуется
   });
 });
 
-test("A is skipped before enqueue when newer real B was already accepted", async () => {
+test("newer durable B does not invalidate current target A", async () => {
   const calls: unknown[] = [];
-  const db = reactionDb([1]);
+  const db = reactionDb([UPDATE_A, UPDATE_B]);
   const telegram = new TelegramClient({
     telegramBotToken: "1001:secret", telegramApiBaseUrl: "https://api.telegram.invalid",
     telegramStickerCatalog: {},
   } as never, { debug() {}, info() {}, warn() {}, error() {} }, db as never);
   telegram.call = async (...args) => { calls.push(args); return {} as never; };
-  const target = { updateId: 10, telegramUserId: 7, chatId: 42, messageId: 101 };
-
-  assert.deepEqual(await telegram.setReaction(42, 101, "👍", target), {
-    skipped: true, reason: "stale_reaction_target",
-  });
-  assert.deepEqual(calls, []);
-  assert.deepEqual(db.selectValues, [[7, 42, 10]]);
+  assert.deepEqual(await telegram.setReaction(42, 101, "👍", TARGET_A), {});
+  assert.deepEqual(calls, [[
+    "setMessageReaction",
+    { chat_id: 42, message_id: 101, reaction: [{ type: "emoji", emoji: "👍" }], is_big: false },
+  ]]);
+  assert.ok(db.selectValues.every((values) => values.includes(101)));
 });
 
-test("newer B accepted before confirmed delivery makes A stale", async () => {
+test("B accepted between preflight and confirmed delivery keeps reaction on A", async () => {
   const calls: unknown[] = [];
-  const db = reactionDb([0, 1]);
+  const db = reactionDb([UPDATE_A]);
   const telegram = new TelegramClient({
     telegramBotToken: "1001:secret", telegramApiBaseUrl: "https://api.telegram.invalid",
     telegramStickerCatalog: {},
@@ -143,19 +151,22 @@ test("newer B accepted before confirmed delivery makes A stale", async () => {
   telegram.call = async (...args) => { calls.push(args); return {} as never; };
   telegram.setOutbox({
     send: async () => ({ queued: true }),
-    sendConfirmed: async (value) => await telegram.deliver(value.method, value.payload),
+    sendConfirmed: async (value) => {
+      db.updates.push(UPDATE_B);
+      return await telegram.deliver(value.method, value.payload);
+    },
   });
-  const target = { updateId: 10, telegramUserId: 7, chatId: 42, messageId: 101 };
 
-  assert.deepEqual(await telegram.setReaction(42, 101, "👍", target), {
-    skipped: true, reason: "stale_reaction_target",
-  });
-  assert.deepEqual(calls, [], "reaction must not move to B or be sent to A");
-  assert.deepEqual(db.events.slice(-2), ["lock:telegram-reaction:7:42", "freshness"]);
+  assert.deepEqual(await telegram.setReaction(42, 101, "👍", TARGET_A), {});
+  assert.deepEqual(calls, [[
+    "setMessageReaction",
+    { chat_id: 42, message_id: 101, reaction: [{ type: "emoji", emoji: "👍" }], is_big: false },
+  ]], "reaction must remain on A after B arrives");
+  assert.deepEqual(db.events.slice(-2), ["lock:telegram-reaction:7:42", "target_validation"]);
 });
 
 test("parallel outbox cannot turn a later Telegram 400 into reaction success", async () => {
-  const db = reactionDb([0]);
+  const db = reactionDb([UPDATE_A]);
   const warnings: Record<string, unknown>[] = [];
   const telegram = new TelegramClient({
     telegramBotToken: "1001:secret", telegramApiBaseUrl: "https://api.telegram.invalid",
@@ -205,7 +216,7 @@ test("parallel outbox cannot turn a later Telegram 400 into reaction success", a
 
 test("fresh target is delivered to exact A and internal target never reaches Telegram", async () => {
   const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
-  const db = reactionDb([0, 0]);
+  const db = reactionDb([UPDATE_A]);
   const telegram = new TelegramClient({
     telegramBotToken: "1001:secret", telegramApiBaseUrl: "https://api.telegram.invalid",
     telegramStickerCatalog: {},
@@ -476,23 +487,44 @@ test("ALS другого conversation не перекрывает точный s
   }
 });
 
-function reactionDb(freshnessRows: number[]) {
+interface StoredReactionUpdate {
+  updateId: number;
+  telegramUserId: number;
+  chatId: number;
+  messageId: number;
+  isBot: boolean;
+  kind: string;
+}
+
+function reactionDb(initialUpdates: StoredReactionUpdate[]) {
   const events: string[] = [];
   const selectValues: unknown[][] = [];
+  const updates = [...initialUpdates];
   const query = async (sql: string, values: unknown[] = []) => {
     if (/pg_advisory_xact_lock/u.test(sql)) {
       events.push(`lock:${values[0]}`);
       return { rows: [], rowCount: 1 };
     }
     if (/FROM telegram_updates/u.test(sql)) {
-      events.push("freshness");
+      events.push("target_validation");
       selectValues.push(values);
-      return { rows: [], rowCount: freshnessRows.shift() ?? 0 };
+      const oldNewerPolicy = /update_id\s*>/u.test(sql);
+      const match = oldNewerPolicy
+        ? updates.find((update) => update.telegramUserId === Number(values[0])
+            && update.chatId === Number(values[1])
+            && update.updateId > Number(values[2])
+            && update.kind === "message" && !update.isBot)
+        : updates.find((update) => update.updateId === Number(values[0])
+            && update.telegramUserId === Number(values[1])
+            && update.chatId === Number(values[2])
+            && update.messageId === Number(values[3])
+            && update.kind === "message" && !update.isBot);
+      return { rows: match ? [{}] : [], rowCount: match ? 1 : 0 };
     }
     throw new Error(`unexpected SQL: ${sql}`);
   };
   return {
-    events, selectValues, query,
+    events, selectValues, updates, query,
     withSystemScope: async <T>(_reason: string, work: () => Promise<T>) => await work(),
     transaction: async <T>(work: (client: { query: typeof query }) => Promise<T>) => await work({ query }),
   };

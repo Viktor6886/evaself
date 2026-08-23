@@ -19,9 +19,9 @@ import type { Database } from "./db.js";
 import type { Logger } from "./logger.js";
 import type { ReactionTarget } from "./turns/turn-context.js";
 import {
-  hasNewerRealMessage,
-  isReactionTargetFresh,
+  isReactionTargetTrusted,
   lockReactionTarget,
+  matchesReactionTarget,
 } from "./telegram/reaction-target.js";
 import {
   TelegramStickerCatalog,
@@ -779,7 +779,7 @@ export class TelegramClient implements OutboxTransport {
     emoji: string,
     target?: ReactionTarget,
   ): Promise<unknown> {
-    if (target && this.db && !await isReactionTargetFresh(this.db, target)) {
+    if (target && this.db && !await isReactionTargetTrusted(this.db, target)) {
       return { skipped: true, reason: "stale_reaction_target" };
     }
     try {
@@ -867,7 +867,7 @@ export class TelegramClient implements OutboxTransport {
         "telegram.reaction.deliver",
         async () => await this.db!.transaction(async (client) => {
           await lockReactionTarget(client, reactionTarget.telegramUserId, reactionTarget.chatId);
-          if (await hasNewerRealMessage(client, reactionTarget)) {
+          if (!await matchesReactionTarget(client, reactionTarget)) {
             this.logger.info("Доставка Telegram-реакции пропущена", {
               outcome: "skipped",
               reason: "stale_reaction_target",
