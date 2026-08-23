@@ -266,6 +266,22 @@ test("persistent reaction blocks current and later replies in the same chat", as
   );
 });
 
+test("stale reaction is terminally skipped in parallel durable outbox", async () => {
+  const probe: Probe = {
+    now: 1000,
+    sent: [],
+    rows: [row({ id: "1", chat_id: "100", telegram_method: "setMessageReaction" })],
+  };
+  const outbox = outboxHarness(probe, { parallel: { concurrency: 2, limits: null } });
+  const internal = outbox as unknown as { transport: { deliver: () => Promise<unknown> } };
+  internal.transport = {
+    deliver: async () => ({ skipped: true, reason: "stale_reaction_target" }),
+  };
+  await outbox.tick();
+  assert.equal(probe.rows[0]!.status, "sent", "stale reaction must not retry or block replies");
+  assert.equal(probe.rows[0]!.attempts, 1);
+});
+
 test("ошибка одной delivery не снимает concurrency guard, пока работают соседние", async () => {
   const probe: Probe = {
     now: 1000,

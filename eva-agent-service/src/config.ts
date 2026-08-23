@@ -448,17 +448,12 @@ export function configWarnings(config: Config): string[] {
   if (config.telegramStickerCatalogParseError) {
     warnings.push(
       "EVA_TELEGRAM_STICKER_CATALOG_JSON содержит невалидный JSON: "
-        + "send_sticker недоступен, пока каталог не будет исправлен.",
-    );
-  } else if (stickerCatalog.status === "empty") {
-    warnings.push(
-      "EVA_TELEGRAM_STICKER_CATALOG_JSON пуст: send_sticker будет возвращать "
-        + "sticker_unavailable. Добавьте bot-specific Telegram file_id.",
+        + "legacy overrides проигнорированы; send_sticker использует встроенные assets.",
     );
   } else if (stickerCatalog.status === "invalid") {
     warnings.push(
       "EVA_TELEGRAM_STICKER_CATALOG_JSON содержит невалидные entries "
-        + `(${stickerCatalog.invalidEntries.join(", ")}): неизвестный intent или неверный file_id.`,
+        + `(${stickerCatalog.invalidEntries.join(", ")}): они проигнорированы, доступны встроенные assets.`,
     );
   }
   // Ключ шифрования конфигураций провайдеров и ключ доступа к API — это

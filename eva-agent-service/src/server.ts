@@ -314,6 +314,7 @@ export function buildServer(services: Services): FastifyInstance {
     // том что каждый такой агент получает персону в своём же ходе.
     // Состояние читают `doctor` и человек, а не healthcheck контейнера.
     checks.persona_sync = personaSyncState();
+    checks.telegram_stickers = await telegram.stickerDiagnostics();
 
     try {
       await db.ping();

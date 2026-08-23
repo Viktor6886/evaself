@@ -220,6 +220,17 @@ export class HealthWorker {
         };
       } else if (definition.healthUrl) {
         const response = await boundedFetch(definition.healthUrl);
+        let endpointDetail: Record<string, unknown> = {};
+        if (definition.id === "agent-runtime") {
+          try {
+            const body = response.body as {
+              checks?: { telegram_stickers?: unknown };
+            };
+            endpointDetail = { telegram_stickers: body.checks?.telegram_stickers ?? null };
+          } catch {
+            endpointDetail = { telegram_stickers: null };
+          }
+        }
         result = {
           ok: response.ok,
           running: true,
@@ -232,6 +243,7 @@ export class HealthWorker {
             docker_health: container.health,
             http_status: response.status,
             restart_count: container.restart_count ?? 0,
+            ...endpointDetail,
           },
         };
       } else {
@@ -452,6 +464,9 @@ async function boundedFetch(url: string) {
   });
   const length = Number(response.headers.get("content-length") ?? 0);
   if (length > 256 * 1024) throw new Error("Health response too large");
-  await response.body?.cancel();
-  return { ok: response.ok, status: response.status };
+  const raw = await response.text();
+  if (Buffer.byteLength(raw, "utf8") > 256 * 1024) throw new Error("Health response too large");
+  let body: unknown = null;
+  try { body = JSON.parse(raw) as unknown; } catch { /* diagnostics stay null */ }
+  return { ok: response.ok, status: response.status, body };
 }
