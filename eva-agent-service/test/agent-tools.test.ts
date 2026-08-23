@@ -13,7 +13,11 @@ import { test } from "node:test";
 import { AgentToolFactory, isHostExecutionTool, toolApprovalCategory, toolRisk } from "../dist/agent-tools.js";
 import { McpServerPolicyRepository } from "../dist/tools/mcp.js";
 import { withTenantScopes } from "./tenant-scope-helper.ts";
-import { runInTurn } from "../dist/turns/turn-context.js";
+import {
+  closeTurnScope,
+  openTurnScope,
+  runInTurn,
+} from "../dist/turns/turn-context.js";
 
 const silentLogger = { debug() {}, info() {}, warn() {}, error() {} };
 
@@ -36,7 +40,7 @@ function harness(options: {
   rows?: Record<string, unknown>[];
   rowCount?: number;
   runtime?: Omit<typeof RUNTIME, "purpose"> & { purpose: "chat" | "research" };
-  onReaction?: () => void;
+  onReaction?: (chatId: number, messageId: number) => void;
 } = {}) {
   const statements: Array<{ sql: string; values: unknown[] }> = [];
   const db = {
@@ -64,7 +68,11 @@ function harness(options: {
       vectorGoalsEnabled: false,
     } as never,
     withTenantScopes(db) as never,
-    { setReaction: async () => { options.onReaction?.(); } } as never,
+    {
+      setReaction: async (chatId: number, messageId: number) => {
+        options.onReaction?.(chatId, messageId);
+      },
+    } as never,
     silentLogger,
   );
   const tools = new Map(
@@ -239,6 +247,39 @@ test("cancelled turn cannot send a reaction", async () => {
 
   assert.deepEqual(result.details, { ok: false, error: "ход отменён" });
   assert.equal(reactions, 0);
+});
+
+test("pooled SDK callback uses the live turn instead of inherited stale ALS", async () => {
+  const reactions: Array<{ chatId: number; messageId: number }> = [];
+  const { tools } = harness({
+    onReaction: (chatId, messageId) => { reactions.push({ chatId, messageId }); },
+  });
+  const oldTurn = {
+    conversationId: "conv-1",
+    runId: "old-run",
+    recorded: true,
+    isCancelled: async () => false,
+    reactionTarget: { updateId: 1, telegramUserId: 42, chatId: 42, messageId: 100 },
+  };
+  const liveTurn = {
+    conversationId: "conv-1",
+    runId: "live-run",
+    recorded: true,
+    isCancelled: async () => false,
+    reactionTarget: { updateId: 2, telegramUserId: 42, chatId: 42, messageId: 200 },
+  };
+  const liveScope = openTurnScope("conv-1", liveTurn);
+  try {
+    // A pooled SDK session can retain the ALS store from the turn in which
+    // the session was opened. The server-owned live scope is the authority
+    // for the callback currently executing in this conversation.
+    await runInTurn(oldTurn, async () =>
+      await tools.get("set_reaction")!.execute("call-live", { emoji: "👍" }));
+  } finally {
+    closeTurnScope(liveScope);
+  }
+
+  assert.deepEqual(reactions, [{ chatId: 42, messageId: 200 }]);
 });
 
 test("web_search stops at the quota instead of spending it", async () => {

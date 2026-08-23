@@ -109,16 +109,22 @@ export function closeTurnScope(scope: TurnScope): void {
 }
 
 /**
- * Ход этого инструмента: сначала контекст, потом адрес по conversation.
+ * Ход этого инструмента: сначала активный адрес по conversation, потом контекст.
  *
- * Порядок именно такой: контекст точнее — он гарантированно принадлежит
- * текущему асинхронному стеку, — а карта по conversation работает там,
- * где контекст не доехал.
+ * Pooled SDK session может сохранить AsyncLocalStorage того хода, в котором
+ * сессия была открыта. На следующих ходах callback тогда по-прежнему видит
+ * старый ambient turn. Активный server-owned scope создаётся непосредственно
+ * перед каждым runTurn и снимается после него, поэтому для callback этой
+ * conversation именно он является актуальной привязкой. Ambient остаётся
+ * fallback для вызовов, которые действительно выполняются внутри своего
+ * асинхронного стека и не имеют открытого conversation scope.
  */
 export function turnOf(conversationId: string | undefined): ActiveTurn | undefined {
+  const scoped = conversationId ? byConversation.get(conversationId)?.turn : undefined;
+  if (scoped) return scoped;
   const ambient = currentTurn();
   if (ambient && (!ambient.conversationId || ambient.conversationId === conversationId)) {
     return ambient;
   }
-  return conversationId ? byConversation.get(conversationId)?.turn : undefined;
+  return undefined;
 }
