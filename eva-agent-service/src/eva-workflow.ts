@@ -1653,7 +1653,7 @@ export function reactionTargetForTurn(
 
 /** Hermes-compatible transcript echo shown before the agent's answer. */
 export function formatVoiceTranscriptEcho(text: string): string {
-  return `📝 ${text.trim()}`;
+  return `🎙️ "${text}"`;
 }
 
 function normalizeSttAttempts(
