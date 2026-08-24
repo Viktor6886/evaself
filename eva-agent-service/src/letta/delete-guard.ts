@@ -18,18 +18,7 @@
  */
 
 import { deletionBlocked } from "../errors.js";
-import { TERMINAL_STATES, TURN_STATES, type TurnState } from "../turns/states.js";
-
-/**
- * Состояния, при которых удаление запрещено: всё, что не терминально.
- *
- * Список выводится из канонического, а не выписывается рядом: любое новое
- * состояние по умолчанию считается активным. Ошибиться в сторону запрета
- * дешевле, чем в сторону удаления.
- */
-export const BLOCKING_TURN_STATES: readonly TurnState[] = TURN_STATES.filter(
-  (state) => !TERMINAL_STATES.has(state),
-);
+import { TERMINAL_STATES, type TurnState } from "../turns/states.js";
 
 export interface DeleteGuardDatabase {
   query(

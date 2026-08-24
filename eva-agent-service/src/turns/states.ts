@@ -137,10 +137,6 @@ export function canTransition(from: TurnState | null, to: TurnState): boolean {
   return GRAPH.get(from)?.has(to) === true;
 }
 
-export function nextStates(from: TurnState): ReadonlySet<TurnState> {
-  return GRAPH.get(from) ?? new Set<TurnState>();
-}
-
 /**
  * Кратчайший путь, не включая исходное состояние.
  *
