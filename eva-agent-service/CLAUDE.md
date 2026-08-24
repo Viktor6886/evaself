@@ -57,6 +57,7 @@ node --test --experimental-strip-types test/*.test.ts        # full regression
 | `src/payments.ts` | `payments.test.ts` |
 | `src/profile/` | `profile.test.ts` |
 | `src/goals/` | `goals.test.ts` |
+| `src/goals/goal-program-service.ts`, `goal-program-tools.ts` | `goals.test.ts`, `agent-tools.test.ts`, `runtime.test.ts` |
 | `src/public/rate-limit.ts` | `rate-limit.test.ts` |
 | `src/public/webapp-session.ts`, `telegram-webapp-auth.ts` | `webapp-session.test.ts` |
 | `src/public/routes.ts`, `webapp-core.ts` | `public-api.test.ts` |
@@ -110,17 +111,21 @@ node --test --experimental-strip-types test/*.test.ts        # full regression
 ## Размер файла
 
 Семь файлов сервиса перешагнули 1000 строк и стоят десятков тысяч токенов при
-каждом полном чтении:
+каждом полном чтении (сверено на `main`, 2026-08-24):
 
 | Файл | Строк |
 |---|---|
+| `src/letta.ts` | 1969 |
 | `src/admin/stt-service.ts` | 1879 |
-| `src/letta.ts` | 1823 |
-| `src/server.ts` | 1629 |
-| `src/eva-workflow.ts` | 1319 |
-| `src/db.ts` | 1287 |
+| `src/db.ts` | 1786 |
+| `src/eva-workflow.ts` | 1703 |
+| `src/server.ts` | 1644 |
 | `src/admin/server.ts` | 1286 |
 | `src/public/webapp-core.ts` | 1090 |
+
+Числа растут: с прошлой сверки `db.ts` прибавил пятьсот строк, а
+`eva-workflow.ts` — четыреста. Это не бухгалтерия, а стоимость каждой
+сессии, которая их касается.
 
 Шаг, который такой файл и так переписывает, оставляет после себя модули
 поменьше. Отдельным рефакторингом — нельзя.

@@ -6,7 +6,7 @@
  * Версия с непроверенным содержимым не должна попадать в реестр вовсе:
  * реестр обещает воспроизводимость, а воспроизвести мусор нельзя.
  *
- * Шаблон memory block проверяется строже прочих: набор из шести блоков не
+ * Шаблон memory block проверяется строже прочих: набор блоков ядра не
  * расширяется (инвариант 28), и шаблон — самый удобный способ протащить
  * седьмой блок незаметно. Здесь этот путь закрыт.
  */
@@ -133,12 +133,13 @@ export function validateArtifactBody(kind: ArtifactKind, body: unknown): Validat
       for (const [index, block] of (blocks as unknown[]).entries()) {
         const entry = block as { label?: unknown; value?: unknown; limit?: unknown };
         if (typeof entry.label !== "string") fail("template.blocks", `блок ${index} без метки`);
-        // Набор из шести блоков не расширяется. Шаблон — самый тихий способ
+        // Ядро памяти не расширяется (инвариант 28). Шаблон — самый тихий способ
         // протащить седьмой, поэтому проверка стоит именно здесь.
         if (!(SYNCED_BLOCK_LABELS as readonly string[]).includes(entry.label as string)) {
           fail(
             "template.blocks",
-            `метка «${entry.label}» вне закрытого набора из шести блоков`,
+            `метка «${entry.label}» вне ядра памяти: `
+            + SYNCED_BLOCK_LABELS.join(", "),
           );
         }
         if (seen.has(entry.label as string)) {

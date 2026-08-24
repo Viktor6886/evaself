@@ -376,7 +376,7 @@ export class AgentDirectoryService {
     };
   }
 
-  /** Состояние шести блоков агента: статусы и отпечатки, без значений. */
+  /** Состояние блоков ядра памяти: статусы и отпечатки, без значений. */
 }
 
 function toAgent(row: Record<string, unknown>): AgentSummary {

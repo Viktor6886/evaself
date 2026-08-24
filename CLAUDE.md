@@ -227,10 +227,11 @@ Batch 21–23 и 33 выполняются только по отдельной 
 нельзя — правило 1 запрещает мешать рефакторинг с функциональными
 изменениями.
 
-Сегодня за границей: `src/admin/stt-service.ts` (1879), `src/letta.ts` (1823),
-`src/server.ts` (1629), `src/eva-workflow.ts` (1319), `src/db.ts` (1287),
+Сегодня за границей (сверено на `main`, 2026-08-24): `src/letta.ts` (1969),
+`src/admin/stt-service.ts` (1879), `src/db.ts` (1786),
+`src/eva-workflow.ts` (1703), `src/server.ts` (1644),
 `src/admin/server.ts` (1286), `src/public/webapp-core.ts` (1090),
-`src/router/router.ts` (819). `admin-ui/public/ui.js` из этого списка ушёл:
+`src/router/router.ts` (955). `admin-ui/public/ui.js` из этого списка ушёл:
 панель разрезана по разделам, самый крупный файл — 617 строк.
 
 ## Цикл batch
