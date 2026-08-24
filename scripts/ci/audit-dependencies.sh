@@ -18,12 +18,12 @@ REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 # Пакеты, чьи предупреждения high приняты осознанно.
 #
 #   sharp, @letta-ai/letta-code, @letta-ai/letta-agent-sdk
-#     sharp приходит транзитивно: letta-agent-sdk 0.5.5 -> letta-code
-#     0.29.9 -> sharp 0.34.5. npm сообщает fixAvailable: false —
-#     починить можно только обновлением SDK, а его версия согласована с
-#     LETTA_CODE_VERSION в versions.env и меняется шагом 11 «Обновление
-#     Agent SDK до 0.6.0». Менять её здесь значит тихо развести версии
-#     образа и пакета.
+#     sharp приходит транзитивно: letta-agent-sdk -> letta-code ->
+#     sharp. npm сообщает fixAvailable: false — починить можно только
+#     обновлением SDK. Его версия связана с LETTA_CODE_VERSION в
+#     versions.env, и правит их обе разом
+#     scripts/ci/sync-letta-versions.py; менять что-то одно здесь значит
+#     тихо развести версии образа и пакета.
 ALLOWED_PACKAGES="
 sharp
 @letta-ai/letta-code
