@@ -181,6 +181,13 @@ function programDb(seed: Row[] = []) {
         const [userId, key, version, goalId, phase, step, nextStep, hint, resume] =
           values as [number, string, number, number | null, string | null,
             string | null, string | null, string | null, string];
+        // Зеркало частичного уникального индекса и ON CONFLICT DO NOTHING:
+        // второй открытый запуск не создаётся и строк не возвращает.
+        if (rows.some((row) =>
+          row.user_id === userId && row.program_key === key
+          && (row.status === "active" || row.status === "paused"))) {
+          return { rows: [] };
+        }
         const created: Row = {
           id: String(nextId++), user_id: userId, program_key: key,
           program_version: version, primary_goal_id: goalId, status: "active",
@@ -362,4 +369,30 @@ test("курсор программы читается и пишется тол�
     }),
     /Цель программы не найдена/,
   );
+});
+
+test("одновременный start не падает на индексе, а отдаёт то же место", async () => {
+  // Ход человека, восстановление после сбоя и фоновое задание могут
+  // позвать start одновременно. Индекс второй открытый запуск не пустит;
+  // ответом должно быть сохранённое место, а не ошибка уникальности.
+  const db = programDb();
+  const programs = new GoalProgramService(db as never);
+  const [first, second] = await Promise.all([
+    programs.update({
+      userId: 41, action: "start", programKey: "planning-30d", stepKey: "step-1",
+    }),
+    programs.update({
+      userId: 41, action: "start", programKey: "planning-30d", stepKey: "step-1",
+    }),
+  ]);
+
+  assert.equal(db.rows.length, 1, "создано больше одного открытого запуска");
+  assert.equal(first.run.id, second.run.id);
+  assert.equal([first.applied, second.applied].filter(Boolean).length, 1);
+  const inserts = db.calls.filter(({ sql }) =>
+    sql.startsWith("INSERT INTO goal_program_runs"));
+  for (const { sql } of inserts) {
+    assert.match(sql, /ON CONFLICT \(user_id, program_key\)/);
+    assert.match(sql, /WHERE status IN \('active', 'paused'\)/);
+  }
 });

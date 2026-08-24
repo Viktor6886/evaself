@@ -141,7 +141,16 @@ export class GoalProgramService {
       // сначала и теряет пройденные шаги. Открытый запуск возвращается
       // как есть, чтобы ход продолжился с сохранённого места.
       if (open) return { run: open, applied: false };
-      return { run: await this.insert(input, programKey), applied: true };
+      const created = await this.insert(input, programKey);
+      if (created) return { run: created, applied: true };
+      // Между чтением и вставкой запуск создал кто-то ещё: параллельный
+      // ход, восстановление после сбоя, фоновое задание. Второй открытый
+      // запуск не пропустил уникальный частичный индекс, и правильный
+      // ответ здесь тот же, что при обычном повторе, — сохранённое
+      // место, а не отказ на ровном месте.
+      const raced = await this.openRun(input.userId, programKey);
+      if (!raced) throw new Error("Программа не была создана");
+      return { run: raced, applied: false };
     }
 
     if (!open) {
@@ -231,16 +240,26 @@ export class GoalProgramService {
     return { run: normalize(updated), applied: true };
   }
 
+  /**
+   * Создать запуск, если открытого ещё нет.
+   *
+   * Проверка «нет открытого» и вставка идут не одним оператором, поэтому
+   * решает не она, а сама схема: `ON CONFLICT` по частичному уникальному
+   * индексу. `null` означает, что открытый запуск успел появиться, и
+   * вызывающий возвращает его вместо отказа.
+   */
   private async insert(
     input: UpdateGoalProgramInput,
     programKey: string,
-  ): Promise<GoalProgramRun> {
+  ): Promise<GoalProgramRun | null> {
     const { rows } = await this.db.query<GoalProgramRun>(
       `INSERT INTO goal_program_runs (
          user_id, program_key, program_version, primary_goal_id, status,
          phase_key, step_key, last_completed_step_key, next_step_key,
          next_action_hint, resume_policy
        ) VALUES ($1, $2, $3, $4, 'active', $5, $6, NULL, $7, $8, $9)
+       ON CONFLICT (user_id, program_key) WHERE status IN ('active', 'paused')
+       DO NOTHING
        RETURNING id, user_id, program_key, program_version, primary_goal_id, status,
                  phase_key, step_key, last_completed_step_key, next_step_key,
                  next_action_hint, resume_policy, revision,
@@ -258,8 +277,7 @@ export class GoalProgramService {
       ],
     );
     const created = rows[0];
-    if (!created) throw new Error("Программа не была создана");
-    return normalize(created);
+    return created ? normalize(created) : null;
   }
 
   /** Незавершённый запуск методики — активный или поставленный на паузу. */
