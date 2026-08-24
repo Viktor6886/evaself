@@ -4,6 +4,8 @@ import type { Config } from "./config.js";
 import { purposePolicy, type ConversationPurpose } from "./conversations/purpose-service.js";
 import type { AgentRuntimeContext, Database } from "./db.js";
 import { GoalToolFactory } from "./goals/goal-tools.js";
+import { GoalProgramToolFactory } from "./goals/goal-program-tools.js";
+import { GoalProgramService } from "./goals/goal-program-service.js";
 import { GoalService } from "./goals/goal-service.js";
 import type { Logger } from "./logger.js";
 import { ProfileToolFactory } from "./profile/profile-tools.js";
@@ -35,6 +37,7 @@ const CONTEXT_MUTATING_TOOLS = new Set([
   "upsert_goal_result",
   "record_work_block",
   "record_goal_review",
+  "update_goal_program",
   "save_task",
   "save_tasks_bulk",
   "update_task",
@@ -47,6 +50,7 @@ export class AgentToolFactory {
   private readonly core: CoreToolFactory;
   private readonly profile: ProfileToolFactory;
   private readonly goals: GoalToolFactory;
+  private readonly goalPrograms: GoalProgramToolFactory;
   private readonly tasks: TaskToolFactory;
   private readonly dynamicTools = new Map<string, AnyAgentTool[]>();
   private readonly vectorGoalsEnabled: boolean;
@@ -77,6 +81,9 @@ export class AgentToolFactory {
     this.core = new CoreToolFactory(config, db, telegram, undefined, observer);
     this.profile = new ProfileToolFactory(profile ?? new UserProfileService(db));
     this.goals = new GoalToolFactory(goals ?? new GoalService(db));
+    // Курсор программ идёт рядом с целями и под тем же флагом: без
+    // VECTOR-целей структурированной программе не к чему привязываться.
+    this.goalPrograms = new GoalProgramToolFactory(new GoalProgramService(db));
     this.tasks = new TaskToolFactory(db);
   }
 
@@ -89,7 +96,9 @@ export class AgentToolFactory {
     return [
       ...this.core.build(tool),
       ...this.profile.build(tool),
-      ...(this.vectorGoalsEnabled ? this.goals.build(tool) : []),
+      ...(this.vectorGoalsEnabled
+        ? [...this.goals.build(tool), ...this.goalPrograms.build(tool)]
+        : []),
       ...this.tasks.build(tool),
       ...(this.dynamicTools.get(conversationId) ?? []),
     ];
@@ -364,6 +373,7 @@ const TOOL_RISK: Readonly<Record<string, ToolRisk>> = Object.freeze({
   // требовать разрешения на вопрос «что у меня с памятью».
   inspect_eva_runtime: "read",
   knowledge_search: "read",
+  get_goal_program_context: "read",
   upsert_user_profile_field: "sensitive_write",
   confirm_user_profile_field: "sensitive_write",
   decline_user_profile_field: "sensitive_write",

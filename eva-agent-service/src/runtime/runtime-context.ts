@@ -55,6 +55,20 @@ export interface RuntimeContext {
   activeGoal: string | null;
   nextResult: string | null;
   nextStep: string | null;
+  /**
+   * Курсор запущенной guided-программы: `planning-30d@1`.
+   *
+   * Это продуктовый факт хода, а не команда модели. Продолжать ли
+   * программу в этом разговоре, решает Letta — здесь только сказано,
+   * что незакрытая программа есть и на каком она месте. Пауза,
+   * завершение и отмена сюда не попадают: закрытая работа не обязана
+   * приходить в каждый ход.
+   */
+  activeProgram: string | null;
+  programPhase: string | null;
+  programStep: string | null;
+  programNext: string | null;
+  programResume: string | null;
   llmQualityMode?: "economy" | "auto" | "quality";
   taskActivity?: string[];
   /** Ближайшие напоминания: когда сработают и через сколько. */
@@ -95,6 +109,13 @@ interface RuntimeContextRow {
   active_goal_title: string | null;
   next_result_title: string | null;
   next_action: string | null;
+  program_key: string | null;
+  program_version: number | null;
+  program_phase_key: string | null;
+  program_step_key: string | null;
+  program_next_step_key: string | null;
+  program_next_action_hint: string | null;
+  program_resume_policy: string | null;
   llm_quality_mode: "economy" | "auto" | "quality";
 }
 
@@ -268,6 +289,7 @@ export class RuntimeContextBuilder {
       activeGoal: this.options.vectorGoalsEnabled === false ? null : row.active_goal_title ?? null,
       nextResult: this.options.vectorGoalsEnabled === false ? null : row.next_result_title ?? null,
       nextStep: this.options.vectorGoalsEnabled === false ? null : row.next_action ?? null,
+      ...programFacts(row, this.options.vectorGoalsEnabled !== false),
       llmQualityMode: input.modelPolicy ?? row.llm_quality_mode,
       taskActivity,
       upcomingReminders,
@@ -328,6 +350,14 @@ export class RuntimeContextBuilder {
       ["active_goal", context.activeGoal],
       ["next_result", context.nextResult],
       ["next_step", context.nextStep],
+      // Программа названа фактом и только фактом. Строки вида «открой
+      // навык X и продолжи шаг Y» здесь быть не может: выбор навыка и
+      // уместность продолжения остаются за Letta.
+      ["active_program", context.activeProgram],
+      ["program_phase", context.programPhase],
+      ["program_step", context.programStep],
+      ["program_next", context.programNext],
+      ["program_resume", context.programResume],
     ];
     const lines = fields
       .filter((entry): entry is [string, string] => Boolean(entry[1]))
@@ -428,7 +458,14 @@ export class RuntimeContextBuilder {
           profile_hint.status AS profile_status,
           goal_context.active_goal_title,
           goal_context.next_result_title,
-          goal_context.next_action
+          goal_context.next_action,
+          program_run.program_key,
+          program_run.program_version,
+          program_run.phase_key AS program_phase_key,
+          program_run.step_key AS program_step_key,
+          program_run.next_step_key AS program_next_step_key,
+          program_run.next_action_hint AS program_next_action_hint,
+          program_run.resume_policy AS program_resume_policy
         FROM users u
         JOIN agent_conversations c
           ON c.user_id = u.id
@@ -513,6 +550,25 @@ export class RuntimeContextBuilder {
           ORDER BY g.priority, g.updated_at DESC
           LIMIT 1
         ) goal_context ON true
+        LEFT JOIN LATERAL (
+          SELECT
+            gpr.program_key,
+            gpr.program_version,
+            gpr.phase_key,
+            gpr.step_key,
+            gpr.next_step_key,
+            gpr.next_action_hint,
+            gpr.resume_policy
+          -- Алиас не повторяет тот, что взят картой результатов выше:
+          -- один алиас на две таблицы делает привязку одной неотличимой
+          -- от другой, и проверка границы арендатора перестаёт видеть обе.
+          FROM goal_program_runs gpr
+          WHERE gpr.user_id = u.id
+            AND $5::boolean
+            AND gpr.status = 'active'
+          ORDER BY gpr.last_progress_at DESC, gpr.id DESC
+          LIMIT 1
+        ) program_run ON true
        WHERE u.id = $1
        LIMIT 1`,
       [
@@ -531,6 +587,45 @@ export class RuntimeContextBuilder {
     });
     return { row, cacheHit: false };
   }
+}
+
+/**
+ * Компактные факты запущенной guided-программы.
+ *
+ * В ход приходит только курсор: методика с версией, фаза, шаг, следующий
+ * шаг и политика возврата. Истории программы, её текста и целей VECTOR
+ * здесь нет — за ними Ева идёт инструментом, когда решит, что они нужны.
+ * Флаг целей выключен — программы в ходе нет вовсе, как и состояния целей.
+ */
+function programFacts(
+  row: RuntimeContextRow,
+  enabled: boolean,
+): Pick<
+  RuntimeContext,
+  "activeProgram" | "programPhase" | "programStep" | "programNext" | "programResume"
+> {
+  if (!enabled || !row.program_key) {
+    return {
+      activeProgram: null,
+      programPhase: null,
+      programStep: null,
+      programNext: null,
+      programResume: null,
+    };
+  }
+  // Следующий шаг называется ключом, а подсказка только уточняет его.
+  // Одной подсказки достаточно, когда ключа ещё нет: первый ход
+  // программы знает, что делать, раньше, чем как это назвать.
+  const next = [row.program_next_step_key, row.program_next_action_hint]
+    .filter((value): value is string => Boolean(value && value.trim()))
+    .join(" — ");
+  return {
+    activeProgram: `${row.program_key}@${Number(row.program_version ?? 1)}`,
+    programPhase: row.program_phase_key,
+    programStep: row.program_step_key,
+    programNext: next || null,
+    programResume: row.program_resume_policy,
+  };
 }
 
 function profileHintFrom(row: RuntimeContextRow): string | null {

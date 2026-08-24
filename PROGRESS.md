@@ -6,12 +6,12 @@
 ## Состояние
 
 ```
-BASELINE:      5cfb3fb — main после PR #211, #212 и #213
-BRANCH:        —
-STATUS:        нет активной работы
-LAST_COMMIT:   5cfb3fb — ноль в необязательной связи (PR #213)
+BASELINE:      33ee6fd — main после PR #248
+BRANCH:        claude/eva-work-continuity-l65jr2
+STATUS:        на ревью
+LAST_COMMIT:   непрерывность длительной работы: ACTIVE WORK и курсор программ
 BLOCKER:       —
-NEXT:          ждать команду человека на следующую порцию
+NEXT:          дождаться проверок pull request и смержить
 ```
 
 Значения полей:

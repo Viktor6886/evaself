@@ -6,6 +6,7 @@ import { AgentToolFactory } from "../dist/agent-tools.js";
 import { assertCronExpression, cronFieldMatches, nextCronDate } from "../dist/background.js";
 import { formatVoiceTranscriptEcho, normalizeUpdate } from "../dist/eva-workflow.js";
 import { evaMemoryBlocks } from "../dist/letta.js";
+import { ensureCoreMemoryBlocks } from "../dist/letta/memory-blocks.js";
 import { normalizeLavaEvent } from "../dist/payments.js";
 import { RuntimeContextBuilder } from "../dist/runtime/runtime-context.js";
 
@@ -383,6 +384,65 @@ test("runtime context marks a transcript as voice without changing its words", (
   assert.match(prompt, /<USER_MESSAGE>\nЭто расшифровка\n<\/USER_MESSAGE>/);
 });
 
+test("активная программа приходит в ход компактными фактами, без команды модели", async () => {
+  const builder = new RuntimeContextBuilder(
+    {
+      query: async () => ({
+        rows: [{
+          ...CONTEXT_ROW,
+          program_key: "planning-30d", program_version: 1,
+          program_phase_key: "mapping", program_step_key: "step-7",
+          program_next_step_key: "step-8",
+          program_next_action_hint: "выбрать три результата",
+          program_resume_policy: "contextual",
+        }],
+      }),
+    } as never,
+    { defaultTimezone: "UTC", profileCompletionEnabled: false, now: () => new Date("2026-08-14T12:00:00Z") },
+  );
+  const context = await builder.build({ userId: 1, conversationId: "c", userMessage: "продолжим" });
+  assert.equal(context.activeProgram, "planning-30d@1");
+  assert.equal(context.programStep, "step-7");
+
+  const prompt = builder.wrapUserMessage(context, "продолжим");
+  assert.match(prompt, /active_program: planning-30d@1/);
+  assert.match(prompt, /program_phase: mapping/);
+  assert.match(prompt, /program_next: step-8 — выбрать три результата/);
+  assert.match(prompt, /program_resume: contextual/);
+  // Факт, а не указание: решение продолжать остаётся за Letta.
+  assert.doesNotMatch(prompt, /MUST|обязана|открой навык/i);
+});
+
+test("человек без программы получает прежний ход", async () => {
+  const builder = contextBuilder(new Date("2026-08-14T12:00:00Z"));
+  const context = await builder.build({ userId: 1, conversationId: "c", userMessage: "привет" });
+  assert.equal(context.activeProgram, null);
+  const prompt = builder.wrapUserMessage(context, "привет");
+  assert.doesNotMatch(prompt, /active_program|program_phase|program_step|program_next/);
+});
+
+test("выборка курсора берёт только активный запуск своего пользователя", async () => {
+  // Пауза, завершение и отмена в каждый ход не тянутся: закрытая работа
+  // не должна занимать контекст, пока человек к ней не вернулся.
+  const statements: string[] = [];
+  const builder = new RuntimeContextBuilder(
+    {
+      query: async (text: string) => {
+        statements.push(text);
+        return { rows: [{ ...CONTEXT_ROW }] };
+      },
+    } as never,
+    { defaultTimezone: "UTC", profileCompletionEnabled: false },
+  );
+  await builder.build({ userId: 1, conversationId: "c", userMessage: "привет" });
+  // Курсор читается тем же запросом контекста, а не отдельным round trip.
+  const sql = statements.find((text) => text.includes("goal_program_runs")) ?? "";
+  assert.equal(statements.filter((text) => text.includes("goal_program_runs")).length, 1);
+  assert.match(sql, /FROM goal_program_runs gpr/);
+  assert.match(sql, /gpr\.user_id = u\.id/);
+  assert.match(sql, /gpr\.status = 'active'/);
+});
+
 test("goal state and profile hints are removed when their feature flags are off", async () => {
   // Флаги режут состояние целей и подсказку профиля при сборке, а не при
   // упаковке: в блок не попадает то, чего в контексте нет.
@@ -408,6 +468,10 @@ test("goal state and profile hints are removed when their feature flags are off"
   const prompt = builder.wrapUserMessage(context, "Привет");
   assert.doesNotMatch(prompt, /active_goal|next_result|next_step/);
   assert.doesNotMatch(prompt, /Скрытая подсказка/);
+  // Курсор программ живёт под тем же флагом, что и цели: выключены цели —
+  // выключена и программа, а не половина состояния.
+  assert.equal(context.activeProgram, null);
+  assert.doesNotMatch(prompt, /active_program/);
 });
 
 test("cron supports wildcards, ranges, steps and Sunday alias", () => {
@@ -469,6 +533,55 @@ test("new Eva agents receive the structured memory blueprint", () => {
   const framework = blocks.find((block) => block.label === "therapeutic_framework")!;
   assert.match(framework.value, /AUTO/);
   assert.match(framework.value, /гипотез|Skill/i);
+});
+
+test("рамка работы различает устойчивую цель работы и цель одного ответа", () => {
+  const framework = evaMemoryBlocks()
+    .find((block) => block.label === "therapeutic_framework")!;
+  // Проверяется поведенческий инвариант, а не формулировка: без этой
+  // пары слабая модель считает целью последнюю реплику человека.
+  assert.match(framework.value, /ACTIVE OBJECTIVE/);
+  assert.match(framework.value, /TURN OBJECTIVE/);
+  // Незакрытая работа, временный переход и уважение паузы.
+  assert.match(framework.value, /ACTIVE WORK/);
+  assert.match(framework.value, /return_to/);
+  assert.match(framework.value, /paused/);
+  assert.ok(
+    framework.value.length <= (framework.limit ?? Number.POSITIVE_INFINITY),
+    "рамка не помещается в собственный предел блока",
+  );
+  // Место чекпойнта — current_state, а не пятый обязательный блок.
+  const current = evaMemoryBlocks().find((block) => block.label === "current_state")!;
+  assert.match(String(current.description), /ACTIVE WORK/);
+});
+
+test("непрерывность не заводит пятый обязательный блок и не выбрасывает чужие", () => {
+  // Инвариант — вложенность, а не равенство: ядро обязано присутствовать,
+  // но дополнительные и общие блоки Letta остаются как есть.
+  const labels = new Set(evaMemoryBlocks().map((block) => block.label));
+  assert.equal(labels.size, 4);
+  assert.equal(labels.has("active_work"), false);
+
+  const withExtras = ensureCoreMemoryBlocks(
+    [
+      { label: "project", value: "чужой блок" },
+      { label: "human", value: "известное" },
+      { label: "shared_notes", value: "общий блок" },
+    ],
+    "персона",
+    "человек",
+  );
+  const kept = withExtras.map((block) => block.label);
+  for (const core of ["persona", "human", "current_state", "therapeutic_framework"]) {
+    assert.ok(kept.includes(core), `${core} отсутствует`);
+  }
+  assert.ok(kept.includes("project"));
+  assert.ok(kept.includes("shared_notes"));
+  assert.equal(
+    withExtras.find((block) => block.label === "human")?.value,
+    "известное",
+    "существующее значение блока не подменяется стартовым",
+  );
 });
 
 function toolFactory() {
@@ -570,6 +683,9 @@ const CONTEXT_ROW = {
   response_mode: "text", use_emoji: false, communication_style: null,
   profile_field_key: null, profile_title: null, profile_prompt_hint: null, profile_status: null,
   active_goal_title: null, next_result_title: null, next_action: null, llm_quality_mode: "auto",
+  program_key: null, program_version: null, program_phase_key: null,
+  program_step_key: null, program_next_step_key: null,
+  program_next_action_hint: null, program_resume_policy: null,
 };
 
 function contextBuilder(now: Date) {

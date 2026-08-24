@@ -11,7 +11,8 @@
 | Memory blocks | Четыре нативных блока агента | `src/letta/memory-blocks.ts` |
 | Canonical context | SDK/WebSocket system update и MemFS reconciliation, fail-open | `src/letta.ts`, `src/letta/persona-sync.ts` |
 | Persona sync | Односторонняя синхронизация канонической персоны | `src/letta/persona-sync.ts`, `library/persona/eva.md` |
-| Runtime context | Время, профиль, подписка, цели и ближайшие задачи текущего хода | `src/runtime/runtime-context.ts` |
+| Runtime context | Время, профиль, подписка, цели, курсор программы и ближайшие задачи текущего хода | `src/runtime/runtime-context.ts` |
+| Непрерывность работы | ACTIVE OBJECTIVE/TURN OBJECTIVE и чекпойнт ACTIVE WORK в `current_state` | `src/letta/memory-blocks.ts`, `library/persona/eva.md` |
 
 Граница ответственности: [letta-native.md](letta-native.md).
 
@@ -66,6 +67,7 @@ BullMQ не обрабатывает интерактивный ход и не �
 |---|---|---|
 | Профиль | Поля профиля и подтверждения | `src/profile/profile-service.ts` |
 | Цели | Цели, результаты и рабочие блоки | `src/goals/goal-service.ts` |
+| Курсор программ | Где человек внутри длинной guided-программы; не дублирует VECTOR-Action | `src/goals/goal-program-service.ts`, `src/goals/goal-program-tools.ts` |
 | Задачи | Напоминания и события | `src/tasks/task-event-service.ts` |
 | Платежи | Платежи, intents и подписки | `src/payments.ts` |
 | Кризисный контур | Детерминированное обнаружение риска | `src/crisis.ts` |
