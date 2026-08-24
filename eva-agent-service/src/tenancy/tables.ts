@@ -34,6 +34,7 @@ export const TENANT_TABLES: Readonly<Record<string, readonly string[]>> = {
   eva_focus_sessions: ["user_id"],
   eva_notes: ["user_id"],
   goal_dependencies: ["user_id"],
+  goal_program_runs: ["user_id"],
   goal_recommendations: ["user_id"],
   goal_results: ["user_id"],
   goal_reviews: ["user_id"],

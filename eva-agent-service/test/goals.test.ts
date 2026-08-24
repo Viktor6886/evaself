@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { GoalProgramService } from "../dist/goals/goal-program-service.js";
 import { GoalService } from "../dist/goals/goal-service.js";
 
 test("a goal cannot become active before explicit confirmation", async () => {
@@ -136,5 +137,229 @@ test("result dependencies outside the owned goal are rejected", async () => {
       dependsOnResultIds: [2, 3],
     }),
     /не принадлежит этой цели/,
+  );
+});
+
+// ---------------------------------------------------------------------
+// Курсор длинной guided-программы
+// ---------------------------------------------------------------------
+
+type Row = Record<string, unknown>;
+
+/**
+ * Фейк одной таблицы `goal_program_runs`.
+ *
+ * Повторяет ровно те правила выборки, которые SQL обязан обеспечивать:
+ * область арендатора, один незакрытый запуск на ключ методики и условие
+ * по ревизии при записи. Сам SQL проверяет CI на настоящей базе.
+ */
+function programDb(seed: Row[] = []) {
+  const rows: Row[] = seed.map((row) => ({ ...row }));
+  let nextId = rows.length + 1;
+  const calls: Array<{ sql: string; values: unknown[] }> = [];
+  const db = {
+    calls,
+    rows,
+    query: async (sql: string, values: unknown[] = []) => {
+      calls.push({ sql, values });
+      if (sql.includes("FROM goals")) {
+        // Цель 7 принадлежит пользователю 41 и больше никому.
+        const [goalId, userId] = values as [number, number];
+        return { rows: goalId === 7 && userId === 41 ? [{ id: "7" }] : [] };
+      }
+      if (sql.startsWith("SELECT") && sql.includes("goal_program_runs")) {
+        const [userId, key] = values as [number, string | null];
+        const open = sql.includes("status IN ('active', 'paused')");
+        return {
+          rows: rows.filter((row) =>
+            row.user_id === userId
+            && (key === null || row.program_key === key)
+            && (!open || row.status === "active" || row.status === "paused")),
+        };
+      }
+      if (sql.startsWith("INSERT INTO goal_program_runs")) {
+        const [userId, key, version, goalId, phase, step, nextStep, hint, resume] =
+          values as [number, string, number, number | null, string | null,
+            string | null, string | null, string | null, string];
+        const created: Row = {
+          id: String(nextId++), user_id: userId, program_key: key,
+          program_version: version, primary_goal_id: goalId, status: "active",
+          phase_key: phase, step_key: step, last_completed_step_key: null,
+          next_step_key: nextStep, next_action_hint: hint, resume_policy: resume,
+          revision: 1, started_at: "t", last_progress_at: "t", completed_at: null,
+        };
+        rows.push(created);
+        return { rows: [created] };
+      }
+      if (sql.startsWith("UPDATE goal_program_runs")) {
+        const [id, userId, status, phase, step, done, nextStep, hint, resume,
+          goalId, terminal, revision] = values as [number, number, string,
+            string | null, string | null, string | null, string | null,
+            string | null, string, number | null, boolean, number];
+        const found = rows.find((row) =>
+          Number(row.id) === id && row.user_id === userId
+          && Number(row.revision) === revision);
+        if (!found) return { rows: [] };
+        Object.assign(found, {
+          status, phase_key: phase, step_key: step, last_completed_step_key: done,
+          next_step_key: nextStep, next_action_hint: hint, resume_policy: resume,
+          primary_goal_id: goalId, revision: Number(found.revision) + 1,
+          completed_at: terminal ? "t" : null,
+        });
+        return { rows: [found] };
+      }
+      return { rows: [] };
+    },
+  };
+  return db;
+}
+
+test("повторный start незакрытой программы не начинает методику заново", async () => {
+  // Это и есть чинимое поведение: слабая модель на новом ходе зовёт
+  // start и теряет пройденные шаги. Сохранённое место возвращается как
+  // есть, вторая запись не создаётся.
+  const db = programDb();
+  const programs = new GoalProgramService(db as never);
+
+  const started = await programs.update({
+    userId: 41, action: "start", programKey: "planning-30d",
+    phaseKey: "intake", stepKey: "step-1",
+  });
+  assert.equal(started.applied, true);
+  assert.equal(started.run.status, "active");
+
+  const again = await programs.update({
+    userId: 41, action: "start", programKey: "planning-30d", stepKey: "step-1",
+  });
+  assert.equal(again.applied, false);
+  assert.equal(again.run.id, started.run.id);
+  assert.equal(db.rows.length, 1);
+});
+
+test("advance двигает курсор, пауза и возобновление его не теряют", async () => {
+  const db = programDb();
+  const programs = new GoalProgramService(db as never);
+  await programs.update({
+    userId: 41, action: "start", programKey: "planning-30d",
+    phaseKey: "intake", stepKey: "step-1", nextStepKey: "step-2",
+  });
+
+  const advanced = await programs.update({
+    userId: 41, action: "advance", programKey: "planning-30d",
+    phaseKey: "mapping", stepKey: "step-2", lastCompletedStepKey: "step-1",
+    nextStepKey: "step-3", nextActionHint: "выбрать три результата",
+  });
+  assert.equal(advanced.applied, true);
+  assert.equal(advanced.run.revision, 2);
+
+  const paused = await programs.update({
+    userId: 41, action: "pause", programKey: "planning-30d",
+  });
+  assert.equal(paused.run.status, "paused");
+  // Пауза — это не забывание: место остаётся ровно тем же.
+  assert.equal(paused.run.step_key, "step-2");
+  assert.equal(paused.run.last_completed_step_key, "step-1");
+  assert.equal(paused.run.next_step_key, "step-3");
+
+  const resumed = await programs.update({
+    userId: 41, action: "resume", programKey: "planning-30d",
+  });
+  assert.equal(resumed.run.status, "active");
+  assert.equal(resumed.run.step_key, "step-2");
+  assert.equal(resumed.run.next_action_hint, "выбрать три результата");
+});
+
+test("новый разговор видит сохранённый шаг, а не начало методики", async () => {
+  // Между ходами нет ни conversation, ни истории — только курсор.
+  const db = programDb();
+  const first = new GoalProgramService(db as never);
+  await first.update({
+    userId: 41, action: "start", programKey: "planning-30d", stepKey: "step-1",
+  });
+  await first.update({
+    userId: 41, action: "advance", programKey: "planning-30d",
+    stepKey: "step-7", lastCompletedStepKey: "step-6", nextStepKey: "step-8",
+  });
+
+  const later = new GoalProgramService(db as never);
+  const context = await later.getContext(41);
+  assert.equal(context.active?.step_key, "step-7");
+  assert.equal(context.active?.next_step_key, "step-8");
+});
+
+test("завершённая программа не продвигается дальше", async () => {
+  const db = programDb();
+  const programs = new GoalProgramService(db as never);
+  await programs.update({
+    userId: 41, action: "start", programKey: "planning-30d", stepKey: "step-1",
+  });
+  const done = await programs.update({
+    userId: 41, action: "complete", programKey: "planning-30d",
+  });
+  assert.equal(done.run.status, "completed");
+  assert.notEqual(done.run.completed_at, null);
+
+  await assert.rejects(
+    programs.update({ userId: 41, action: "advance", programKey: "planning-30d" }),
+    /start/,
+  );
+  // Терминальный запуск не попадает в активные и не тянется в каждый ход.
+  const context = await programs.getContext(41);
+  assert.equal(context.active, null);
+  assert.equal(context.runs.length, 1);
+});
+
+test("устаревшая и повторная запись не затирают чужой шаг", async () => {
+  const db = programDb();
+  const programs = new GoalProgramService(db as never);
+  await programs.update({
+    userId: 41, action: "start", programKey: "planning-30d", stepKey: "step-1",
+  });
+  await programs.update({
+    userId: 41, action: "advance", programKey: "planning-30d", stepKey: "step-2",
+  });
+
+  // Ревизия из хода, открытого до чужого обновления.
+  await assert.rejects(
+    programs.update({
+      userId: 41, action: "advance", programKey: "planning-30d",
+      stepKey: "step-9", expectedRevision: 1,
+    }),
+    /get_goal_program_context/,
+  );
+
+  // Повтор того же шага — не изменение: ревизия не растёт, иначе честный
+  // expected_revision следующего хода отвергался бы на ровном месте.
+  const repeat = await programs.update({
+    userId: 41, action: "advance", programKey: "planning-30d",
+    stepKey: "step-2", expectedRevision: 2,
+  });
+  assert.equal(repeat.applied, false);
+  assert.equal(repeat.run.revision, 2);
+});
+
+test("курсор программы читается и пишется только в области владельца", async () => {
+  const db = programDb([{
+    id: "1", user_id: 41, program_key: "planning-30d", program_version: 1,
+    primary_goal_id: null, status: "active", phase_key: null, step_key: "step-3",
+    last_completed_step_key: null, next_step_key: null, next_action_hint: null,
+    resume_policy: "contextual", revision: 1,
+    started_at: "t", last_progress_at: "t", completed_at: null,
+  }]);
+  const programs = new GoalProgramService(db as never);
+
+  const stranger = await programs.getContext(42);
+  assert.equal(stranger.runs.length, 0);
+  assert.equal(stranger.active, null);
+  for (const call of db.calls) {
+    assert.match(call.sql, /user_id = \$1/);
+  }
+
+  // Чужая цель не привязывается к программе даже по прямому указанию.
+  await assert.rejects(
+    programs.update({
+      userId: 42, action: "start", programKey: "coaching", primaryGoalId: 7,
+    }),
+    /Цель программы не найдена/,
   );
 });
