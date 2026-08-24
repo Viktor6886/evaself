@@ -17,7 +17,7 @@ FROM node:${NODE_BASE_VERSION} AS build
 # evaself-network. The single client is eva-agent-service, which drives it
 # through the official Agent SDK.
 # ---------------------------------------------------------------------
-ARG LETTA_CODE_VERSION=0.30.28
+ARG LETTA_CODE_VERSION=0.30.11
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends python3 make g++ git ca-certificates \
