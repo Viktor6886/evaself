@@ -1,0 +1,68 @@
+# =====================================================================
+# Обновление Letta доезжает целиком, а не наполовину.
+#
+# Dependabot правит только `eva-agent-service/package.json`. Версия
+# образа App Server живёт в `versions.env`, и обновление одного пакета
+# оставляло клиент новее рантайма — разъехавшиеся версии одного
+# протокола. Из-за этого групповой PR приходил заведомо красным и
+# утаскивал за собой обычные обновления, которые иначе вливаются сами.
+#
+# Здесь недостающая половина дописывается в тот же pull request: версии
+# выводятся из lock-файла тем же скриптом, что проверяет их в CI.
+# Правило одно и то же, просто применённое, а не только проверенное.
+#
+# Что установленный SDK действительно умеет обещанное, доказывает не этот
+# workflow, а contract-тест на живых объектах пакета. Он остаётся
+# обязательной проверкой: если новая версия потеряет операцию из реестра,
+# pull request останется красным и после выравнивания.
+# =====================================================================
+name: Dependabot Letta sync
+
+on:
+  pull_request:
+    paths:
+      - eva-agent-service/package-lock.json
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dependabot-letta-sync-${{ github.head_ref }}
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    # Только для веток самого dependabot: в обычный pull request человека
+    # workflow не должен дописывать коммиты за его спиной.
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          # Коммит, отправленный штатным GITHUB_TOKEN, намеренно не
+          # запускает workflow — так GitHub защищается от петли. Для
+          # проверок это значит «висят на прежнем коммите», и pull
+          # request не смержить, пока их не перезапустят кнопкой.
+          #
+          # Поэтому если в секретах есть DEPENDABOT_SYNC_TOKEN (тонкий
+          # PAT с правом contents:write на этот репозиторий), пуш идёт
+          # им, и проверки стартуют сами. Без секрета выравнивание всё
+          # равно происходит — просто проверки перезапускает человек.
+          token: ${{ secrets.DEPENDABOT_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+          persist-credentials: true
+
+      - name: Derive Letta versions from the lockfile
+        id: sync
+        run: python3 scripts/ci/sync-letta-versions.py --fix
+
+      - name: Commit the other half of the update
+        run: |
+          if git diff --quiet; then
+            echo "версии уже согласованы — дописывать нечего"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "chore(deps): выровнять версии Letta по lock-файлу"
+          git push

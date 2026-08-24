@@ -410,6 +410,13 @@ jobs:
       - name: Every admin-era migration has a down file
         run: python3 scripts/ci/assert-down-migrations.py
 
+      # Клиент и App Server говорят по одному протоколу. Версия SDK живёт
+      # в package.json, а версия образа — в versions.env, и разъехаться им
+      # нельзя: обновление одного package.json давало бы клиент новее
+      # рантайма. Здесь проверяется, что оба выведены из одного lock-файла.
+      - name: Letta versions agree with the lockfile
+        run: python3 scripts/ci/sync-letta-versions.py
+
       - name: No secrets in tracked files
         run: |
           if git ls-files --error-unmatch .env >/dev/null 2>&1; then
