@@ -34,16 +34,19 @@ test("отпечаток не зависит от порядка ключей", 
   assert.notEqual(artifactChecksum({ a: 1 }), artifactChecksum({ a: 2 }));
 });
 
-test("шаблон memory block не расширяет набор из шести блоков", () => {
+test("шаблон memory block не расширяет ядро памяти", () => {
   // Инвариант 28 проще всего нарушить именно шаблоном: он выглядит как
   // безобидные данные и попадает в новых агентов целиком.
   assert.throws(
     () => validateArtifactBody("memory_block_template", {
-      blocks: [{ label: "persona", value: "x" }, { label: "seventh_block", value: "y" }],
+      blocks: [{ label: "persona", value: "x" }, { label: "fifth_block", value: "y" }],
     }),
     (error: unknown) => {
       assert.equal((error as { code?: string }).code, "bad_request");
-      assert.match((error as Error).message, /вне закрытого набора/);
+      // Сообщение называет ядро поимённо: «вне набора» без списка
+      // не говорит администратору, какие метки допустимы.
+      assert.match((error as Error).message, /вне ядра памяти/);
+      assert.match((error as Error).message, /persona.*therapeutic_framework/s);
       return true;
     },
   );

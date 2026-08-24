@@ -33,6 +33,7 @@ LOCKFILE = ROOT / "eva-agent-service" / "package-lock.json"
 VERSIONS_ENV = ROOT / "versions.env"
 CAPABILITIES = ROOT / "eva-agent-service" / "src" / "letta" / "capabilities.ts"
 DOCKERFILE = ROOT / "letta-app-server" / "Dockerfile"
+LETTA_NATIVE_DOC = ROOT / "docs" / "letta-native.md"
 
 SDK = "@letta-ai/letta-agent-sdk"
 CODE = "@letta-ai/letta-code"
@@ -105,6 +106,22 @@ def rules(version: dict[str, str]) -> list[tuple[Path, str, str, str]]:
             r"(?m)^ARG LETTA_CODE_VERSION=.*$",
             f"ARG LETTA_CODE_VERSION={version[CODE]}",
             "умолчание версии CLI в образе App Server",
+        ),
+        # Документ назывался четвёртым местом, где та же связка написана
+        # руками, и разошёлся с кодом при первом же откате версии. Раз
+        # значение выводится, выводить его нужно и здесь.
+        (
+            LETTA_NATIVE_DOC,
+            r"(?m)^`@letta-ai/letta-agent-sdk` \*\*[^*]+\*\* → `@letta-ai/letta-code` \*\*[^*]+\*\*$",
+            f"`@letta-ai/letta-agent-sdk` **{version[SDK]}** → "
+            f"`@letta-ai/letta-code` **{version[CODE]}**",
+            "связка версий в docs/letta-native.md",
+        ),
+        (
+            LETTA_NATIVE_DOC,
+            r"(?m)^→ `@letta-ai/letta-client` \*\*[^*]+\*\*\. Патча SDK нет\.$",
+            f"→ `@letta-ai/letta-client` **{version[CLIENT]}**. Патча SDK нет.",
+            "версия клиента в docs/letta-native.md",
         ),
     ]
 
