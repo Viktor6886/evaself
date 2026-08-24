@@ -62,7 +62,6 @@ done
 
 DOMAIN_APP="app.${DOMAIN}"
 DOMAIN_API="api.${DOMAIN}"
-DOMAIN_NOCODB="nocodb.${DOMAIN}"
 DOMAIN_LETTA="letta.${DOMAIN}"
 DOMAIN_STATUS="status.${DOMAIN}"
 
@@ -70,7 +69,6 @@ if [ "$ADVANCED" -eq 1 ]; then
 	say "  Расширенный режим: Enter оставляет автоматически рассчитанное значение."
 	ask_optional DOMAIN_APP    "Домен WebApp"   "$DOMAIN_APP"
 	ask_optional DOMAIN_API    "Домен API"      "$DOMAIN_API"
-	ask_optional DOMAIN_NOCODB "Домен NocoDB"   "$DOMAIN_NOCODB"
 	ask_optional DOMAIN_LETTA  "Домен Letta UI" "$DOMAIN_LETTA"
 	ask_optional DOMAIN_STATUS "Домен статуса"  "$DOMAIN_STATUS"
 fi
@@ -102,7 +100,7 @@ else
 fi
 
 info "HTTPS будет выпущен для:"
-for host in "$DOMAIN" "$DOMAIN_APP" "$DOMAIN_API" "$DOMAIN_NOCODB" "$DOMAIN_LETTA" "$DOMAIN_STATUS"; do
+for host in "$DOMAIN" "$DOMAIN_APP" "$DOMAIN_API" "$DOMAIN_LETTA" "$DOMAIN_STATUS"; do
 	info "  https://$host"
 done
 info "Все домены уже должны указывать на IP этого сервера."
@@ -200,17 +198,6 @@ PROFILES="$(current COMPOSE_PROFILES || true)"
 PROFILES="$(printf '%s' "$PROFILES" | sed 's/crawl4ai//; s/,,/,/g; s/^,//; s/,$//')"
 info "Crawl4AI устанавливается всегда (до 1–1,5 ГБ RAM во время обработки)"
 
-# NocoDB — ручной табличный интерфейс к базе. Ева от него не зависит:
-# ни один сервис к нему не обращается, а разделы данных есть в admin-ui.
-# Поэтому он предлагается, а не ставится по умолчанию.
-if confirm "Установить NocoDB — табличный интерфейс к базе (нужен не всем)?" n; then
-	case ",$PROFILES," in *,nocodb,*) : ;; *) PROFILES="${PROFILES:+$PROFILES,}nocodb" ;; esac
-	ok "NocoDB включён: https://$DOMAIN_NOCODB"
-else
-	PROFILES="$(printf '%s' "$PROFILES" | sed 's/nocodb//; s/,,/,/g; s/^,//; s/,$//')"
-	info "NocoDB не устанавливается; включить позже — COMPOSE_PROFILES=nocodb"
-fi
-
 if confirm "Установить Uptime Kuma для страницы статуса?" n; then
 	case ",$PROFILES," in *,monitoring,*) : ;; *) PROFILES="${PROFILES:+$PROFILES,}monitoring" ;; esac
 	ok "страница статуса включена: https://$DOMAIN_STATUS"
@@ -239,7 +226,6 @@ keep_or_generate() {
 
 POSTGRES_SUPER_PASSWORD="$(keep_or_generate POSTGRES_SUPER_PASSWORD)"
 EVA_DB_PASSWORD="$(keep_or_generate EVA_DB_PASSWORD)"
-NOCODB_DB_PASSWORD="$(keep_or_generate NOCODB_DB_PASSWORD)"
 LETTA_DB_PASSWORD="$(keep_or_generate LETTA_DB_PASSWORD)"
 EVA_DB_READONLY_PASSWORD="$(keep_or_generate EVA_DB_READONLY_PASSWORD)"
 VALKEY_PASSWORD="$(keep_or_generate VALKEY_PASSWORD)"
@@ -248,7 +234,6 @@ EVA_AGENT_API_KEY="$(keep_or_generate EVA_AGENT_API_KEY)"
 EVA_ROUTER_API_KEY="$(keep_or_generate EVA_ROUTER_API_KEY)"
 LETTA_APP_SERVER_TOKEN="$(keep_or_generate LETTA_APP_SERVER_TOKEN)"
 SEARXNG_SECRET="$(keep_or_generate SEARXNG_SECRET)"
-NC_AUTH_JWT_SECRET="$(keep_or_generate NC_AUTH_JWT_SECRET)"
 CRAWL4AI_API_TOKEN="$(keep_or_generate CRAWL4AI_API_TOKEN)"
 EVA_TELEGRAM_WEBHOOK_SECRET="$(keep_or_generate EVA_TELEGRAM_WEBHOOK_SECRET)"
 MEDIA_SERVICE_TOKEN="$(keep_or_generate MEDIA_SERVICE_TOKEN)"
@@ -257,12 +242,9 @@ MEDIA_SERVICE_TOKEN="$(keep_or_generate MEDIA_SERVICE_TOKEN)"
 LLM_CONFIG_ENCRYPTION_KEY="$(keep_or_generate LLM_CONFIG_ENCRYPTION_KEY)"
 
 # Admin passwords are stored only in the protected .env file.
-NC_ADMIN_PASSWORD="$(keep_or_generate NC_ADMIN_PASSWORD gen_password)"
 LETTA_UI_PASSWORD="$(keep_or_generate LETTA_UI_PASSWORD gen_password)"
 LAVA_WEBHOOK_PASSWORD="$(keep_or_generate LAVA_WEBHOOK_PASSWORD)"
 
-NC_ADMIN_EMAIL="$(current NC_ADMIN_EMAIL || true)"
-NC_ADMIN_EMAIL="${NC_ADMIN_EMAIL:-$ACME_EMAIL}"
 LAVA_WEBHOOK_USER="$(current LAVA_WEBHOOK_USER || true)"
 LAVA_WEBHOOK_USER="${LAVA_WEBHOOK_USER:-eva}"
 LETTA_UI_USER="$(current LETTA_UI_USER || true)"
@@ -282,7 +264,6 @@ step "Запись .env"
 set_env DOMAIN         "$DOMAIN"
 set_env DOMAIN_APP     "$DOMAIN_APP"
 set_env DOMAIN_API     "$DOMAIN_API"
-set_env DOMAIN_NOCODB  "$DOMAIN_NOCODB"
 set_env DOMAIN_LETTA   "$DOMAIN_LETTA"
 set_env DOMAIN_STATUS  "$DOMAIN_STATUS"
 set_env ACME_EMAIL     "$ACME_EMAIL"
@@ -311,7 +292,6 @@ set_env EVA_EMBEDDING_DIM      "$EVA_EMBEDDING_DIM"
 
 set_env POSTGRES_SUPER_PASSWORD  "$POSTGRES_SUPER_PASSWORD"
 set_env EVA_DB_PASSWORD          "$EVA_DB_PASSWORD"
-set_env NOCODB_DB_PASSWORD       "$NOCODB_DB_PASSWORD"
 set_env LETTA_DB_PASSWORD        "$LETTA_DB_PASSWORD"
 set_env EVA_DB_READONLY_PASSWORD "$EVA_DB_READONLY_PASSWORD"
 set_env VALKEY_PASSWORD          "$VALKEY_PASSWORD"
@@ -328,9 +308,6 @@ set_env EVA_ENV               "production"
 set_env EVA_HEALTH_INTERVAL_SECONDS "60"
 set_env EVA_HEALTH_TIMEOUT_MS "10000"
 
-set_env NC_ADMIN_EMAIL     "$NC_ADMIN_EMAIL"
-set_env NC_ADMIN_PASSWORD  "$NC_ADMIN_PASSWORD"
-set_env NC_AUTH_JWT_SECRET "$NC_AUTH_JWT_SECRET"
 
 set_env SEARXNG_SECRET      "$SEARXNG_SECRET"
 set_env MEDIA_SERVICE_TOKEN "$MEDIA_SERVICE_TOKEN"

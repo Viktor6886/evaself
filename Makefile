@@ -33,7 +33,7 @@ export ROOT_DIR SCRIPTS ENV_FILE VERSIONS COMPOSE_FILE
 .PHONY: help install configure configure-advanced start stop restart status logs doctor \
         backup restore update-preview update update-force rollback \
         configure-llm test-llm list-models configure-letta \
-        nocodb-sync disk-cleanup build pull ps shell-db validate test
+        disk-cleanup build pull ps shell-db validate test
 
 # ---------------------------------------------------------------------
 help: ## Показать справку
@@ -71,9 +71,6 @@ list-models: ## Получить /models активного LLM; можно пе
 
 configure-letta: ## Устаревший псевдоним configure-llm
 	@$(SCRIPTS)/configure-letta.sh
-
-nocodb-sync: ## Подключить и синхронизировать все таблицы Eva в NocoDB
-	@$(SCRIPTS)/nocodb-connect.sh
 
 validate: ## Статические проверки compose/Caddy/SQL/workflows
 	@$(SCRIPTS)/validate.sh

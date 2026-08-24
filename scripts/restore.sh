@@ -142,7 +142,7 @@ done
 # 3. stop everything that touches the data
 # ---------------------------------------------------------------------
 step "Остановка сервисов"
-compose stop eva-agent-service letta-app-server letta-ui nocodb webapp caddy >/dev/null 2>&1 || true
+compose stop eva-agent-service letta-app-server letta-ui webapp caddy >/dev/null 2>&1 || true
 ok "контейнеры приложений остановлены; PostgreSQL оставлен для restore"
 
 # ---------------------------------------------------------------------
@@ -166,7 +166,6 @@ restore_volume() {
 
 restore_volume letta_app_server_data.tar.gz evaself_letta_app_server_data
 restore_volume letta_provider_config.tar.gz evaself_letta_provider_config
-restore_volume nocodb_data.tar.gz evaself_nocodb_data
 restore_volume caddy_data.tar.gz  evaself_caddy_data
 
 # ---------------------------------------------------------------------

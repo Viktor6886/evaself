@@ -8,8 +8,8 @@
 # в архив не помещается: для восстановления его нужно хранить отдельно.
 #
 # Contents:
-#   postgres/     dumps of eva, nocodb, letta + roles/globals
-#   volumes/      app-server state, nocodb, caddy data volumes
+#   postgres/     dumps of eva, letta + roles/globals
+#   volumes/      app-server state, caddy data volumes
 #   letta/        the agent/conversation inventory as the App Server and
 #                 PostgreSQL each see it
 #   config/       .env, Caddyfile, versions.env
@@ -87,7 +87,6 @@ dump_volume() {
 
 dump_volume evaself_letta_app_server_data letta_app_server_data.tar.gz
 dump_volume evaself_letta_provider_config letta_provider_config.tar.gz
-dump_volume evaself_nocodb_data nocodb_data.tar.gz
 dump_volume evaself_caddy_data  caddy_data.tar.gz
 
 # ---------------------------------------------------------------------

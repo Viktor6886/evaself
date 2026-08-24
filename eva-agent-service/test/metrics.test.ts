@@ -166,7 +166,7 @@ function server() {
       apiKey: API_KEY,
       port: 0,
       host: "127.0.0.1",
-      domains: { root: "", app: "", api: "", nocodb: "", letta: "", status: "" },
+      domains: { root: "", app: "", api: "", letta: "", status: "" },
       turnLifecycleEnabled: false,
       healthRateLimitPerIp: 100,
       rateLimitWindowSeconds: 60,

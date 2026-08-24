@@ -33,7 +33,7 @@ make test-llm
 ## Проверка до DNS
 
 Временно добавьте домены в hosts на своём компьютере и проверьте HTTPS,
-NocoDB, Letta UI, активную LLM и тестовый agent turn.
+Letta UI, активную LLM и тестовый agent turn.
 
 ```bash
 make shell-db

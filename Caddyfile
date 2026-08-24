@@ -5,7 +5,7 @@
 # hard-coded domain anywhere in this repository. Caddy obtains and
 # renews HTTPS certificates automatically (HTTP-01 + TLS-ALPN-01).
 #
-# Only these six names are reachable from the internet. PostgreSQL,
+# Only these five names are reachable from the internet. PostgreSQL,
 # Valkey, the Letta App Server (WebSocket), eva-agent-service's internal
 # API, SearXNG and the media service stay on evaself-network.
 # =====================================================================
@@ -188,23 +188,7 @@
 }
 
 # ---------------------------------------------------------------------
-# 4. NocoDB admin panel — https://{$DOMAIN_NOCODB}
-# ---------------------------------------------------------------------
-# NocoDB brings its own authentication; open sign-up is disabled with
-# NC_INVITE_ONLY_SIGNUP=true.
-# ---------------------------------------------------------------------
-{$DOMAIN_NOCODB} {
-	import security_headers
-	import compression
-	import logging
-
-	reverse_proxy nocodb:8080 {
-		flush_interval -1
-	}
-}
-
-# ---------------------------------------------------------------------
-# 5. Letta console — https://{$DOMAIN_LETTA}
+# 4. Letta console — https://{$DOMAIN_LETTA}
 # ---------------------------------------------------------------------
 # Self-hosted console shipped with Evaself (see letta-ui/README.md). The
 # App Server speaks WebSocket only, so the console reads through
@@ -233,7 +217,7 @@
 }
 
 # ---------------------------------------------------------------------
-# 6. Status page — https://{$DOMAIN_STATUS}
+# 5. Status page — https://{$DOMAIN_STATUS}
 # ---------------------------------------------------------------------
 # Backed by Uptime Kuma, which is part of the optional "monitoring"
 # profile. When the profile is off, this host answers 503 instead of a

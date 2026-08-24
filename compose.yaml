@@ -38,7 +38,6 @@ services:
       DOMAIN: ${DOMAIN}
       DOMAIN_APP: ${DOMAIN_APP}
       DOMAIN_API: ${DOMAIN_API}
-      DOMAIN_NOCODB: ${DOMAIN_NOCODB}
       DOMAIN_LETTA: ${DOMAIN_LETTA}
       DOMAIN_STATUS: ${DOMAIN_STATUS}
       ACME_EMAIL: ${ACME_EMAIL}
@@ -84,9 +83,6 @@ services:
       EVA_DB_PASSWORD: ${EVA_DB_PASSWORD}
       EVA_DB_READONLY_USER: ${EVA_DB_READONLY_USER}
       EVA_DB_READONLY_PASSWORD: ${EVA_DB_READONLY_PASSWORD}
-      NOCODB_DB_NAME: ${NOCODB_DB_NAME}
-      NOCODB_DB_USER: ${NOCODB_DB_USER}
-      NOCODB_DB_PASSWORD: ${NOCODB_DB_PASSWORD}
       LETTA_DB_NAME: ${LETTA_DB_NAME}
       LETTA_DB_USER: ${LETTA_DB_USER}
       LETTA_DB_PASSWORD: ${LETTA_DB_PASSWORD}
@@ -252,7 +248,6 @@ services:
       DOMAIN: ${DOMAIN}
       DOMAIN_APP: ${DOMAIN_APP}
       DOMAIN_API: ${DOMAIN_API}
-      DOMAIN_NOCODB: ${DOMAIN_NOCODB}
       DOMAIN_LETTA: ${DOMAIN_LETTA}
       DOMAIN_STATUS: ${DOMAIN_STATUS}
       EVASELF_INCOMPLETE_SETTINGS: ${EVASELF_INCOMPLETE_SETTINGS:-}
@@ -605,52 +600,6 @@ services:
       retries: 5
       start_period: 15s
 
-  # ===================================================================
-  # ADMIN / DATA GUI
-  # ===================================================================
-  # Табличный интерфейс к базе `eva` — ручной инструмент администратора,
-  # а не часть работы Евы: ни один сервис к нему не обращается, а
-  # разделы данных есть в admin-ui. Поэтому он включается профилем и в
-  # обязательный production stack не входит:
-  #
-  #   COMPOSE_PROFILES=nocodb docker compose up -d nocodb
-  nocodb:
-    <<: [*restart, *logging]
-    profiles: ["nocodb"]
-    image: ${NOCODB_IMAGE}:${NOCODB_VERSION}
-    container_name: evaself-nocodb
-    environment:
-      # NocoDB metadata lives in its OWN database…
-      NC_DB: "pg://${POSTGRES_HOST}:${POSTGRES_PORT}?u=${NOCODB_DB_USER}&p=${NOCODB_DB_PASSWORD}&d=${NOCODB_DB_NAME}"
-      NC_PUBLIC_URL: https://${DOMAIN_NOCODB}
-      NC_AUTH_JWT_SECRET: ${NC_AUTH_JWT_SECRET}
-      NC_ADMIN_EMAIL: ${NC_ADMIN_EMAIL}
-      NC_ADMIN_PASSWORD: ${NC_ADMIN_PASSWORD}
-      NC_INVITE_ONLY_SIGNUP: ${NC_INVITE_ONLY_SIGNUP}
-      NC_DISABLE_TELE: ${NC_DISABLE_TELE}
-      # Разрешаем NocoDB подключаться к PostgreSQL внутри Docker-сети. Без этой
-      # настройки NocoDB отклоняет внутренний адрес сервиса `postgres`.
-      NC_ALLOW_LOCAL_EXTERNAL_DBS: "true"
-      # База `eva` подключается автоматически скриптом nocodb-connect.sh.
-      EVA_PG_HOST: ${POSTGRES_HOST}
-      EVA_PG_PORT: ${POSTGRES_PORT}
-      EVA_PG_DATABASE: ${EVA_DB_NAME}
-      EVA_PG_USER: ${EVA_DB_USER}
-      EVA_PG_PASSWORD: ${EVA_DB_PASSWORD}
-      TZ: ${TZ}
-    volumes:
-      - nocodb_data:/usr/app/data
-      - ./nocodb/init-eva.mjs:/opt/evaself/nocodb-init-eva.mjs:ro
-    networks: [edge, data]
-    depends_on:
-      postgres:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/api/v1/health || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 10
-      start_period: 60s
 
   # ===================================================================
   # FRONT-END & SUPPORT SERVICES
@@ -752,7 +701,6 @@ services:
       PGUSER: ${POSTGRES_SUPER_USER}
       PGPASSWORD: ${POSTGRES_SUPER_PASSWORD}
       EVA_DB_NAME: ${EVA_DB_NAME}
-      NOCODB_DB_NAME: ${NOCODB_DB_NAME}
       LETTA_DB_NAME: ${LETTA_DB_NAME}
       TZ: ${TZ}
     volumes:
@@ -857,8 +805,6 @@ volumes:
     name: evaself_letta_llm_control
   admin_updater_socket:
     name: evaself_admin_updater_socket
-  nocodb_data:
-    name: evaself_nocodb_data
   searxng_cache:
     name: evaself_searxng_cache
   eva_media_shared:

@@ -58,8 +58,6 @@ fi
 step "Containers"
 # =====================================================================
 EXPECTED=(caddy postgres valkey eva-agent-service llm-router admin-api admin-ui letta-app-server letta-ui webapp searxng crawl4ai media-service backup-service)
-# NocoDB — необязательный профиль: его отсутствие не отказ установки.
-case ",${COMPOSE_PROFILES:-}," in *,nocodb,*) EXPECTED+=(nocodb) ;; esac
 for svc in "${EXPECTED[@]}"; do
 	cid="$(compose ps -q "$svc" 2>/dev/null)"
 	if [ -z "$cid" ]; then
@@ -84,7 +82,7 @@ step "Databases"
 # =====================================================================
 if compose_no_stdin exec -T postgres pg_isready -q -U "$POSTGRES_SUPER_USER" 2>/dev/null; then
 	ok "PostgreSQL accepting connections"
-	for db in "$EVA_DB_NAME" "$NOCODB_DB_NAME" "$LETTA_DB_NAME"; do
+	for db in "$EVA_DB_NAME" "$LETTA_DB_NAME"; do
 		if compose_no_stdin exec -T postgres psql -tAq -U "$POSTGRES_SUPER_USER" -d postgres \
 			-c "SELECT 1 FROM pg_database WHERE datname='$db'" 2>/dev/null | grep -q 1; then
 			ok "database $db exists"
@@ -273,7 +271,6 @@ if [[ "$DOMAIN" == *.localhost ]]; then
 	info "локальный режим: DNS и публичные сертификаты не проверяются"
 else
 	PUBLIC=("site:$DOMAIN" "admin:$DOMAIN/admin/" "webapp:$DOMAIN_APP" "api:$DOMAIN_API/health" "letta:$DOMAIN_LETTA")
-	case ",${COMPOSE_PROFILES:-}," in *,nocodb,*) PUBLIC+=("nocodb:$DOMAIN_NOCODB") ;; esac
 	for pair in "${PUBLIC[@]}"; do
 		label="${pair%%:*}"; host="${pair#*:}"
 		code="$(http_status "https://$host" 12)"

@@ -19,7 +19,7 @@ const EXCLUDED = new Set([
 ]);
 
 const SAFE_EXTRA_SETTINGS = new Set([
-  "DOMAIN", "DOMAIN_APP", "DOMAIN_API", "DOMAIN_NOCODB", "DOMAIN_LETTA", "DOMAIN_STATUS",
+  "DOMAIN", "DOMAIN_APP", "DOMAIN_API", "DOMAIN_LETTA", "DOMAIN_STATUS",
   "ACME_EMAIL", "ACME_CA", "EVA_ENV", "EVA_ADMIN_BIND",
   "EVA_LLM_PROVIDER_NAME", "EVA_LLM_PROTOCOL", "EVA_LLM_BASE_URL", "EVA_LLM_MODEL",
   "EVA_LLM_CONTEXT_WINDOW", "EVA_LLM_ADDITIONAL_PARAMETERS", "EVA_LLM_PROBE_TIMEOUT_MS",
@@ -44,15 +44,12 @@ const SECRET_USED_BY: Record<string, string[]> = {
   MEDIA_SERVICE_TOKEN: ["media-service", "agent-runtime", "admin-api"],
   MEDIA_ASR_API_KEY: ["media-service"],
   MEDIA_TTS_API_KEY: ["media-service"],
-  NC_AUTH_JWT_SECRET: ["nocodb"],
-  NC_ADMIN_PASSWORD: ["nocodb"],
   LETTA_UI_PASSWORD: ["letta-ui"],
   LAVA_WEBHOOK_USER: ["payment-runtime"],
   LAVA_WEBHOOK_PASSWORD: ["payment-runtime"],
   POSTGRES_SUPER_PASSWORD: ["postgres"],
   EVA_DB_PASSWORD: ["postgres", "agent-runtime"],
-  EVA_DB_READONLY_PASSWORD: ["postgres", "nocodb"],
-  NOCODB_DB_PASSWORD: ["postgres", "nocodb"],
+  EVA_DB_READONLY_PASSWORD: ["postgres"],
   LETTA_DB_PASSWORD: ["postgres", "app-server"],
   VALKEY_PASSWORD: ["valkey", "agent-runtime", "admin-api"],
 };
