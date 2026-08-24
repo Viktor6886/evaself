@@ -45,7 +45,6 @@ interface CheckRow {
 const SETTING_KEYS = [
   "bootstrap.env.domain",
   "bootstrap.env.domain.app",
-  "bootstrap.env.domain.nocodb",
   "bootstrap.env.domain.letta",
   "bootstrap.env.domain.status",
 ] as const;

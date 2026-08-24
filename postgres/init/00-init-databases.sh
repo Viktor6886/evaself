@@ -6,8 +6,7 @@
 # Creates one role + one database per component so that a compromise of
 # any single service cannot read another service's data:
 #
-#   eva      — Eva's business data (the only database NocoDB exposes)
-#   nocodb   — NocoDB's own metadata
+#   eva      — Eva's business data
 #   letta    — Letta agents, memory, messages (needs pgvector)
 #
 # The `eva` schema itself is created by applying postgres/migrations/*.sql.
@@ -49,7 +48,6 @@ create_role_and_db() {
 }
 
 create_role_and_db "$EVA_DB_USER"    "$EVA_DB_PASSWORD"    "$EVA_DB_NAME"
-create_role_and_db "$NOCODB_DB_USER" "$NOCODB_DB_PASSWORD" "$NOCODB_DB_NAME"
 create_role_and_db "$LETTA_DB_USER"  "$LETTA_DB_PASSWORD"  "$LETTA_DB_NAME"
 
 # ---------------------------------------------------------------------
@@ -70,7 +68,9 @@ psql_super "$EVA_DB_NAME" <<-SQL
 SQL
 
 # ---------------------------------------------------------------------
-# Read-only role used by reporting views in NocoDB.
+# Read-only role for inspection and reporting: SELECT на схему `eva`
+# без права записи. Прикладной код им не пользуется — он нужен человеку,
+# который смотрит в базу, и внешним читателям отчётных представлений.
 # ---------------------------------------------------------------------
 echo "==> creating read-only reporting role"
 psql_super postgres <<-SQL

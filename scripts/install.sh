@@ -169,7 +169,7 @@ if [[ "$DOMAIN" == *.localhost ]]; then
 	info "локальный режим: публичная проверка DNS пропущена"
 elif [ -n "$SERVER_IP" ]; then
 	info "публичный IP сервера: $SERVER_IP"
-	for host in "$DOMAIN" "$DOMAIN_APP" "$DOMAIN_API" "$DOMAIN_NOCODB" "$DOMAIN_LETTA"; do
+	for host in "$DOMAIN" "$DOMAIN_APP" "$DOMAIN_API" "$DOMAIN_LETTA"; do
 		resolved="$(getent ahostsv4 "$host" 2>/dev/null | awk 'NR==1 {print $1}')"
 		if [ -z "$resolved" ]; then
 			warn "$host пока не разрешается — HTTPS не заработает"
@@ -211,7 +211,7 @@ step "Ожидание основных сервисов"
 for svc in postgres valkey; do
 	if wait_for_health "$svc" 180; then ok "$svc работает"; else die "$svc не прошёл healthcheck"; fi
 done
-for svc in letta-app-server eva-agent-service admin-api admin-ui nocodb; do
+for svc in letta-app-server eva-agent-service admin-api admin-ui; do
 	if wait_for_health "$svc" 300; then ok "$svc запущен"; else warn "$svc ещё запускается — проверьте make logs s=$svc"; fi
 done
 
@@ -220,7 +220,6 @@ done
 # =====================================================================
 "$SCRIPT_DIR/db-migrate.sh"
 "$SCRIPT_DIR/admin-finalize-env.sh"
-"$SCRIPT_DIR/nocodb-connect.sh"
 "$SCRIPT_DIR/configure-llm.sh" --from-env
 
 # =====================================================================
@@ -263,20 +262,17 @@ cat <<SUMMARY
     Консоль     https://${DOMAIN}/admin/
     WebApp      https://${DOMAIN_APP}
     API         https://${DOMAIN_API}/health
-    NocoDB      https://${DOMAIN_NOCODB}
     Letta       https://${DOMAIN_LETTA}
     Статус      https://${DOMAIN_STATUS}
 
   ${C_BOLD}Административный доступ${C_RESET}
     Evaself    ${EVA_ADMIN_USERNAME:-admin}
-    NocoDB      ${NC_ADMIN_EMAIL}
     Letta UI    ${LETTA_UI_USER}
     Пароли не выводятся в терминал и журнал.
   ${C_BOLD}Следующие шаги${C_RESET}
     1. Проверьте Telegram webhook: scripts/telegram-webhook.sh status
-    2. Откройте NocoDB — все таблицы Eva уже подключены автоматически.
-    3. Настройте агентов и проверьте чат в административной консоли Letta.
-    4. Для голоса заполните MEDIA_ASR_* / MEDIA_TTS_* и выполните make restart
+    2. Настройте агентов и проверьте чат в административной консоли Letta.
+    3. Для голоса заполните MEDIA_ASR_* / MEDIA_TTS_* и выполните make restart
 
   ${C_BOLD}Основные команды${C_RESET}
     make status | make doctor | make logs s=eva-agent-service

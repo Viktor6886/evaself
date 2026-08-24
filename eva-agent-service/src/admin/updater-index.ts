@@ -72,7 +72,6 @@ const CONTAINERS = new Map<string, string>([
   ["admin-ui", "evaself-admin-ui"],
   ["postgres", "evaself-postgres"],
   ["valkey", "evaself-valkey"],
-  ["nocodb", "evaself-nocodb"],
   ["media-service", "evaself-media-service"],
   ["searxng", "evaself-searxng"],
   ["crawl4ai", "evaself-crawl4ai"],

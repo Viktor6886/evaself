@@ -148,8 +148,6 @@ jobs:
       - name: Changed-scope classification tests
         run: bash ./scripts/ci/test-changed-scope.sh
 
-      - name: NocoDB automatic connection unit tests
-        run: node --test nocodb/init-eva.test.mjs
 
       - name: .env loader treats bcrypt and JSON as data
         run: |
@@ -175,7 +173,6 @@ jobs:
             load_env
             test "$DOMAIN" = "evaself.localhost"
             test "$DOMAIN_APP" = "app.evaself.localhost"
-            test "$DOMAIN_NOCODB" = "nocodb.evaself.localhost"
             test -z "$EVA_TELEGRAM_BOT_TOKEN"
             test -z "$EVA_LLM_API_KEY"
             test "$EVA_LLM_ADDITIONAL_PARAMETERS" = "{\"request_timeout_ms\":180000}"
@@ -313,7 +310,6 @@ jobs:
           DOMAIN: example.test
           DOMAIN_APP: app.example.test
           DOMAIN_API: api.example.test
-          DOMAIN_NOCODB: admin.example.test
           DOMAIN_LETTA: letta.example.test
           DOMAIN_STATUS: status.example.test
           ACME_EMAIL: ops@example.test
@@ -345,7 +341,7 @@ jobs:
 
       - name: Installer does not print generated passwords
         run: |
-          if grep -Eq 'NocoDB.*NC_ADMIN_PASSWORD|Letta UI.*LETTA_UI_PASSWORD' scripts/install.sh; then
+          if grep -Eq 'Letta UI.*LETTA_UI_PASSWORD' scripts/install.sh; then
             echo "::error::installer summary exposes an administrative password"
             exit 1
           fi
@@ -361,7 +357,6 @@ jobs:
           DOMAIN: example.test
           DOMAIN_APP: app.example.test
           DOMAIN_API: api.example.test
-          DOMAIN_NOCODB: admin.example.test
           DOMAIN_LETTA: letta.example.test
           DOMAIN_STATUS: status.example.test
           ACME_EMAIL: ops@example.test
@@ -1109,14 +1104,13 @@ jobs:
           values = {
             'DOMAIN': 'example.test', 'DOMAIN_APP': 'app.example.test',
             'DOMAIN_API': 'api.example.test',
-            'DOMAIN_NOCODB': 'admin.example.test', 'DOMAIN_LETTA': 'letta.example.test',
+            'DOMAIN_LETTA': 'letta.example.test',
             'DOMAIN_STATUS': 'status.example.test', 'ACME_EMAIL': 'ci@example.test',
             'EVA_AGENT_PORT': '8070', 'LETTA_APP_SERVER_BACKEND': 'local',
             'EVA_TELEGRAM_API_BASE_URL': 'http://127.0.0.1:1',
             'EVA_LLM_PROVIDER_NAME': 'CI-bootstrap', 'EVA_LLM_MODEL': '',
             'EVA_LLM_CONTEXT_WINDOW': '32768',
             'NC_ADMIN_EMAIL': 'admin@example.test',
-            'NC_ADMIN_PASSWORD': 'Ci-NocoDB-2026-Strong-Password',
             'EVA_ADMIN_USERNAME': 'admin',
             'EVA_ADMIN_BOOTSTRAP_PASSWORD': 'Ci-Phase1-Strong-Passphrase-2026!',
             'EVA_SECRETS_MASTER_KEY_FILE': '/tmp/evaself-ci-master-key',
@@ -1129,7 +1123,7 @@ jobs:
           for key, value in values.items():
             text = re.sub(rf'^{key}=.*$', f'{key}={value}', text, flags=re.M)
           for key in ('POSTGRES_SUPER_PASSWORD','EVA_DB_PASSWORD',
-                      'NOCODB_DB_PASSWORD','LETTA_DB_PASSWORD','EVA_DB_READONLY_PASSWORD',
+                      'LETTA_DB_PASSWORD','EVA_DB_READONLY_PASSWORD',
                       'VALKEY_PASSWORD','EVA_AGENT_API_KEY','LETTA_APP_SERVER_TOKEN',
                       'LLM_CONFIG_ENCRYPTION_KEY','EVA_ROUTER_API_KEY',
                       'NC_AUTH_JWT_SECRET','LAVA_WEBHOOK_PASSWORD','MEDIA_SERVICE_TOKEN',
@@ -1157,51 +1151,6 @@ jobs:
           done
           ./scripts/db-migrate.sh
 
-      # NocoDB не входит в обязательный stack: он поднимается профилем и
-      # только здесь. То, что все предыдущие и последующие шаги работают
-      # без него, и есть доказательство, что ядро от него не зависит.
-      - name: NocoDB поднимается профилем и импортирует таблицы Eva
-        if: needs.changes.outputs.docs_only != 'true'
-        run: |
-          docker compose --env-file versions.env --env-file .env config --services \
-            | grep -qx nocodb && { echo "::error::NocoDB не должен входить в обязательный stack"; exit 1; }
-          COMPOSE_PROFILES=nocodb docker compose --env-file versions.env --env-file .env up -d nocodb
-          for i in $(seq 1 90); do
-            STATUS="$(docker inspect -f \
-              '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' \
-              evaself-nocodb 2>/dev/null || echo down)"
-            echo "NocoDB, attempt $i: $STATUS"
-            [ "$STATUS" = "healthy" ] && break
-            [ "$i" = "90" ] && exit 1
-            sleep 2
-          done
-          ./scripts/nocodb-connect.sh
-          ./scripts/nocodb-connect.sh
-          . scripts/lib.sh
-          load_env
-          IFS='|' read -r BASE_COUNT SOURCE_COUNT MODEL_COUNT <<<"$(
-            docker compose --env-file versions.env --env-file .env \
-              exec -T -e PGPASSWORD="$NOCODB_DB_PASSWORD" postgres \
-              psql -v ON_ERROR_STOP=1 -At \
-                -U "$NOCODB_DB_USER" -d "$NOCODB_DB_NAME" \
-                -c "SELECT (SELECT count(*) FROM nc_bases_v2),
-                           (SELECT count(*) FROM nc_sources_v2),
-                           (SELECT count(*) FROM nc_models_v2);"
-          )"
-          EVA_OBJECT_COUNT="$(
-            docker compose --env-file versions.env --env-file .env \
-              exec -T -e PGPASSWORD="$EVA_DB_PASSWORD" postgres \
-              psql -v ON_ERROR_STOP=1 -At \
-                -U "$EVA_DB_USER" -d "$EVA_DB_NAME" \
-                -c "SELECT count(*) FROM information_schema.tables
-                    WHERE table_schema = 'public'
-                      AND table_type IN ('BASE TABLE', 'VIEW');"
-          )"
-          test "$BASE_COUNT" -eq 1
-          test "$SOURCE_COUNT" -eq 1
-          test "$MODEL_COUNT" -eq "$EVA_OBJECT_COUNT"
-          printf 'NocoDB metadata: bases=%s sources=%s objects=%s\n' \
-            "$BASE_COUNT" "$SOURCE_COUNT" "$MODEL_COUNT"
 
       - name: Start the App Server and the agent service
         if: needs.changes.outputs.docs_only != 'true'

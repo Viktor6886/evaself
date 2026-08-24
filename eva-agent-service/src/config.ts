@@ -14,7 +14,6 @@ export interface Config {
     root: string;
     app: string;
     api: string;
-    nocodb: string;
     letta: string;
     status: string;
   };
@@ -281,7 +280,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       root: str("DOMAIN"),
       app: str("DOMAIN_APP"),
       api: str("DOMAIN_API"),
-      nocodb: str("DOMAIN_NOCODB"),
       letta: str("DOMAIN_LETTA"),
       status: str("DOMAIN_STATUS"),
     },

@@ -69,19 +69,6 @@ export const SERVICES: readonly ServiceDefinition[] = [
     restartable: true,
   },
   {
-    // Ручной табличный интерфейс к базе. Не запущен — это нормальное
-    // состояние установки, а не отказ: сервисы к нему не обращаются.
-    id: "nocodb",
-    title: "NocoDB",
-    purpose: "Табличный интерфейс базы Eva (профиль `nocodb`)",
-    group: "storage",
-    container: "nocodb",
-    healthUrl: "http://nocodb:8080/api/v1/health",
-    publicSetting: "bootstrap.env.domain.nocodb",
-    restartable: true,
-    optional: true,
-  },
-  {
     id: "media-service",
     title: "Голос и медиа",
     purpose: "ASR, TTS и обработка вложений",
@@ -211,14 +198,6 @@ export const INTEGRATIONS: readonly IntegrationDefinition[] = [
     requiredSecrets: ["sec_media_tts_api_key"],
     requiredSettings: ["bootstrap.env.media.tts.base.url"],
     optional: true,
-  },
-  {
-    id: "nocodb",
-    title: "NocoDB",
-    purpose: "Подключение всех таблиц базы Eva",
-    group: "data",
-    serviceId: "nocodb",
-    publicSetting: "bootstrap.env.domain.nocodb",
   },
   {
     id: "monitoring",

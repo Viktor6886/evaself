@@ -480,7 +480,6 @@ export function buildServer(services: Services): FastifyInstance {
         site: url(config.domains.root),
         webapp: url(config.domains.app),
         api: config.domains.api ? `${url(config.domains.api)}/health` : null,
-        nocodb: url(config.domains.nocodb),
         letta: url(config.domains.letta),
         status: url(config.domains.status),
       },

@@ -7,10 +7,10 @@ make restore BACKUP=/var/backups/evaself/evaself-backup-YYYY-MM-DD-HH-MM.tar.gz.
 
 ## Что входит в архив
 
-- дампы PostgreSQL: `eva`, `nocodb`, legacy `letta` и роли;
+- дампы PostgreSQL: `eva`, legacy `letta` и роли;
 - `letta_app_server_data`: agents, conversations и memory filesystem;
 - `letta_provider_config`: активная локальная конфигурация Letta provider;
-- volumes NocoDB и Caddy;
+- volume Caddy;
 - `.env`, `versions.env`, Compose и Caddyfile;
 - `skills/`, `library/`, WebApp и инвентарь agents/conversations.
 

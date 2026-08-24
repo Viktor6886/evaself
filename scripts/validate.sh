@@ -78,7 +78,7 @@ else
 	CADDY_CMD=(
 		docker run --rm
 		-v "$ROOT_DIR:/work:ro" -w /work
-		-e DOMAIN -e DOMAIN_APP -e DOMAIN_API -e DOMAIN_NOCODB
+		-e DOMAIN -e DOMAIN_APP -e DOMAIN_API
 		-e DOMAIN_LETTA -e DOMAIN_STATUS -e ACME_EMAIL -e ACME_CA
 		-e LETTA_UI_USER -e LETTA_UI_PASSWORD_HASH
 		-e EVA_AGENT_PORT -e EVA_AGENT_URL -e EVA_AGENT_API_KEY
@@ -95,7 +95,6 @@ validate_caddyfile() {
 	fi
 	if env \
 		DOMAIN=example.test DOMAIN_APP=app.example.test DOMAIN_API=api.example.test \
-		DOMAIN_NOCODB=admin.example.test \
 		DOMAIN_LETTA=letta.example.test DOMAIN_STATUS=status.example.test \
 		ACME_EMAIL=ops@example.test ACME_CA=https://acme-v02.api.letsencrypt.org/directory \
 		LETTA_UI_USER=admin LETTA_UI_PASSWORD_HASH='$2a$14$placeholderplaceholderpl' \
