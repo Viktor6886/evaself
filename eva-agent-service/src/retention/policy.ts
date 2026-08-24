@@ -134,8 +134,6 @@ export const RETENTION_CLASSES: readonly RetentionClass[] = [
   },
 ];
 
-export const RETENTION_BY_CODE = new Map(RETENTION_CLASSES.map((item) => [item.code, item]));
-
 /** Действующие сроки: умолчание класса, если настройка не задана. */
 export function effectivePolicies(
   settings: Record<string, unknown>,

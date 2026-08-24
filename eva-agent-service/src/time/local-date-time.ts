@@ -63,21 +63,6 @@ export function humanizeInterval(milliseconds: number, locale = "ru"): string {
   return parts.length > 0 ? parts.join(" ") : "меньше секунды";
 }
 
-export function formatLocalDateTime(
-  value: Date | string,
-  timezone: string,
-  locale = "ru",
-): string {
-  const source = value instanceof Date
-    ? DateTime.fromJSDate(value)
-    : DateTime.fromISO(value, { setZone: true });
-  if (!source.isValid) throw new Error("Некорректная дата");
-  return source
-    .setZone(isValidIanaTimezone(timezone) ? timezone : "UTC")
-    .setLocale(locale)
-    .toLocaleString(DateTime.DATETIME_FULL_WITH_SECONDS);
-}
-
 /**
  * Converts a local ISO date/time to UTC. An explicit offset/Z in the value is
  * authoritative; otherwise the persisted user timezone is applied with DST.

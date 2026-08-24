@@ -1651,7 +1651,7 @@ export function reactionTargetForTurn(
   return null;
 }
 
-/** Hermes-compatible transcript echo shown before the agent's answer. */
+/** Расшифровка голосового, показанная человеку до ответа Евы. */
 export function formatVoiceTranscriptEcho(text: string): string {
   return `🎙️ "${text}"`;
 }

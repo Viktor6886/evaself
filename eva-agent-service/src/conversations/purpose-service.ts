@@ -200,11 +200,3 @@ export function purposePolicy(purpose: ConversationPurpose): {
       };
   }
 }
-
-export function toolAllowedForPurpose(
-  purpose: ConversationPurpose,
-  toolName: string,
-): boolean {
-  const allowed = purposePolicy(purpose).allowedTools;
-  return allowed === null || allowed.includes(toolName);
-}
