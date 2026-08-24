@@ -40,15 +40,17 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.head_ref }}
-          # Коммит, отправленный штатным GITHUB_TOKEN, намеренно не
-          # запускает workflow — так GitHub защищается от петли. Для
-          # проверок это значит «висят на прежнем коммите», и pull
-          # request не смержить, пока их не перезапустят кнопкой.
+          # Прогон, запущенный pull request от Dependabot, GitHub считает
+          # пришедшим извне: штатный GITHUB_TOKEN там read-only, а обычные
+          # секреты Actions не видны вовсе. Поэтому дописать половину
+          # обновления можно только своим токеном, и лежать он обязан в
+          # хранилище секретов **Dependabot**, а не Actions:
+          # Settings → Secrets and variables → Dependabot.
           #
-          # Поэтому если в секретах есть DEPENDABOT_SYNC_TOKEN (тонкий
-          # PAT с правом contents:write на этот репозиторий), пуш идёт
-          # им, и проверки стартуют сами. Без секрета выравнивание всё
-          # равно происходит — просто проверки перезапускает человек.
+          # DEPENDABOT_SYNC_TOKEN — тонкий PAT с правом contents:write на
+          # этот репозиторий. Он же снимает вторую проблему: коммит от
+          # штатного токена не запускает проверки заново, а коммит от PAT
+          # запускает.
           token: ${{ secrets.DEPENDABOT_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
           persist-credentials: true
 
@@ -57,9 +59,22 @@ jobs:
         run: python3 scripts/ci/sync-letta-versions.py --fix
 
       - name: Commit the other half of the update
+        env:
+          # Секрета нет — значит и права на пуш нет. Пробовать всё равно
+          # значит уронить job и добавить к настоящей причине вторую,
+          # мнимую. Молчать тоже нельзя: человек должен узнать, чего не
+          # хватает, из самого прогона, а не из чужой памяти.
+          HAS_TOKEN: ${{ secrets.DEPENDABOT_SYNC_TOKEN != '' }}
         run: |
           if git diff --quiet; then
             echo "версии уже согласованы — дописывать нечего"
+            exit 0
+          fi
+          git --no-pager diff --stat
+          if [ "$HAS_TOKEN" != "true" ]; then
+            echo "::warning::Версии Letta разошлись с lock-файлом, но секрета"\
+              "DEPENDABOT_SYNC_TOKEN нет, и права на пуш у этого прогона тоже."\
+              "Выровняйте локально: python3 scripts/ci/sync-letta-versions.py --fix"
             exit 0
           fi
           git config user.name "github-actions[bot]"
