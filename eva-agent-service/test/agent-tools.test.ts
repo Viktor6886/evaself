@@ -470,3 +470,77 @@ test("несуществующая цель отказывает и объясн
   assert.match(String(details.error), /4242/);
   assert.match(String(details.error), /не заполняется вовсе/);
 });
+
+/**
+ * Инструменты курсора программ добавляются к продуктовому набору, а не
+ * заменяют его, и берут владельца из runtime, а не из аргументов модели.
+ */
+function goalHarness() {
+  const statements: Array<{ sql: string; values: unknown[] }> = [];
+  const db = {
+    getAgentRuntimeContext: () => Promise.resolve(RUNTIME),
+    getQuotaStatus: () => Promise.resolve([]),
+    incrementUsage: () => Promise.resolve(1),
+    query(sql: string, values: unknown[] = []) {
+      statements.push({ sql, values });
+      return Promise.resolve({ rows: [], rowCount: 0 });
+    },
+    transaction<T>(work: (client: { query: typeof db.query }) => Promise<T>) {
+      return work({ query: db.query });
+    },
+  };
+  const factory = new AgentToolFactory(
+    { searxngUrl: "http://search", vectorGoalsEnabled: true } as never,
+    withTenantScopes(db) as never,
+    {} as never,
+    silentLogger,
+  );
+  return {
+    statements,
+    tools: new Map(factory.forConversation("conv-1").map((tool) => [tool.name, tool])),
+  };
+}
+
+test("инструменты программы добавляются к существующим, а не вытесняют их", () => {
+  const { tools } = goalHarness();
+  // Новая возможность не сужает набор: продуктовые инструменты, цели и
+  // задачи остаются на месте — состав хода по-прежнему решает Letta.
+  for (const existing of [
+    "save_note", "get_tasks", "get_goal_context", "upsert_goal", "record_work_block",
+  ]) {
+    assert.equal(tools.has(existing), true, `${existing} пропал из набора`);
+  }
+  assert.equal(tools.has("get_goal_program_context"), true);
+  assert.equal(tools.has("update_goal_program"), true);
+  // Курсор — не второй маршрутизатор навыков и не выбор подхода за модель.
+  for (const forbidden of ["select_skill", "route_therapy", "choose_method"]) {
+    assert.equal(tools.has(forbidden), false, forbidden);
+  }
+});
+
+test("курсор программы пишется под пользователем хода, а не под аргументом модели", async () => {
+  const { tools, statements } = goalHarness();
+  const tool = tools.get("update_goal_program");
+  assert.ok(tool);
+  await tool.execute("call-1", {
+    action: "start",
+    program_key: "planning-30d",
+    // Модель называет чужого владельца — он не должен попасть в запись.
+    user_id: 999,
+    step_key: "step-1",
+  });
+  const writes = statements.filter(({ sql }) => sql.includes("goal_program_runs"));
+  assert.ok(writes.length > 0, "инструмент не обратился к курсору");
+  for (const { values } of writes) {
+    assert.equal(values[0], RUNTIME.userId);
+    assert.equal(values.includes(999), false, "аргумент модели попал в запрос");
+  }
+});
+
+test("чтение курсора не требует подтверждения, запись остаётся обычной", () => {
+  // Подтверждение на каждый шаг методики превратило бы длинную программу
+  // в череду вопросов «разрешить?» и убило бы её на первом же шаге.
+  assert.equal(toolRisk("get_goal_program_context"), "read");
+  assert.equal(toolRisk("update_goal_program"), "low_risk_write");
+  assert.equal(toolApprovalCategory("update_goal_program"), undefined);
+});

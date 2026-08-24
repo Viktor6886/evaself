@@ -199,6 +199,24 @@
       "input": "**hello**",
       "operation": "format",
       "assertion": "telegram-delivery"
+    },
+    {
+      "id": "continuity-program-resume",
+      "suite": "continuity",
+      "lane": "mock",
+      "tenant": "t2",
+      "input": "продолжим",
+      "operation": "work_continuity",
+      "assertion": "operation"
+    },
+    {
+      "id": "continuity-protocol",
+      "suite": "continuity",
+      "lane": "mock",
+      "tenant": "t2",
+      "input": "давай пока не будем",
+      "operation": "work_continuity_protocol",
+      "assertion": "operation"
     }
   ]
 }
