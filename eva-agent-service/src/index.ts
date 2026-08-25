@@ -192,7 +192,7 @@ async function main(): Promise<void> {
   const profile = new UserProfileService(db, timezoneResolver, runtimeContext);
   const goals = new GoalService(db, runtimeContext);
   const turns = new TurnLifecycle(db, logger, config.turnLifecycleEnabled);
-  const approvals = new ApprovalService(db, config.toolApprovalsEnabled, { outbox, lifecycle: turns });
+  const approvals = new ApprovalService(db, config.toolApprovalsEnabled, { outbox, lifecycle: turns, logger });
   // Журнал побочных эффектов включается тем же флагом, что и
   // восстановление: без журнала повтор хода не защищён, и включать одно
   // без другого — значит получить повторные действия.
