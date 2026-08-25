@@ -140,6 +140,10 @@ function causeOf(error: unknown, name: CapabilityName): CapabilityCause {
     if (error.reason === "timeout" || error.reason === "connection_failed") return "temporary";
     if (error.reason === "quota_exhausted") return "config";
     if (error.options.badRequest === true && !ESSENTIAL_CAPABILITIES.has(name)) return "capability";
+    // Пустой ответ и оборванный поток — свойство ответа, а не настройки.
+    // Двусмысленность (модель не умеет или провайдер перегружен)
+    // разрешается ниже, в сводке, по остальным проверкам.
+    if (error.reason === "empty_response" || error.reason === "invalid_response") return "capability";
     return "config";
   }
   return "temporary";
@@ -363,6 +367,23 @@ export function summarize(checks: CapabilityCheck[]): CapabilityProbeResult {
   const line = (entry: CapabilityCheck) => `${entry.name}: ${entry.detail}`;
   const essentialFailures = failed.filter((entry) => ESSENTIAL_CAPABILITIES.has(entry.name));
   const optionalFailures = failed.filter((entry) => !ESSENTIAL_CAPABILITIES.has(entry.name));
+
+  // Пустой ответ двусмыслен: он приходит и от модели, которая не умеет
+  // отвечать, и от перегруженного провайдера — у бесплатных моделей вторая
+  // причина куда чаще, и в панели она соседствует с 429 от того же
+  // провайдера. Если хотя бы одна обязательная проверка прошла, модель
+  // отвечать явно умеет, и пустоту в соседней проверке честнее списать на
+  // состояние провайдера, а не записывать модели несовместимость.
+  const essentialPassed = checks.some(
+    (entry) => entry.status === "ok" && ESSENTIAL_CAPABILITIES.has(entry.name),
+  );
+  if (essentialPassed) {
+    for (const entry of essentialFailures) {
+      if (entry.cause === "capability" && /пустой ответ|без содержимого|поток не открылся/u.test(entry.detail)) {
+        entry.cause = "temporary";
+      }
+    }
+  }
 
   const status: ProbeStatus = essentialFailures.some((entry) => entry.cause === "temporary")
     ? "unavailable"

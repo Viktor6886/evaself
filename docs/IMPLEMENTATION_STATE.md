@@ -55,7 +55,7 @@ BullMQ не обрабатывает интерактивный ход и не �
 | Компонент | Назначение | Путь |
 |---|---|---|
 | LLM Router | Единственный выход к моделям и failover chains | `src/router/` |
-| Capability probe | Проверка streaming, tools и structured output до активации | `src/llm/capability-probe.ts` |
+| Capability probe | Проверка возможностей модели до активации. Четыре исхода: `ok`, `limited`, `config_error`, `unavailable`. Обязательны только ответ, вызов инструмента и приём его результата; поток, изображения и строгий JSON — необязательные и закрывают лишь соответствующие маршруты. Выясненное сохраняется в `supports_*` и решает отбор в `router/chain.ts` | `src/llm/capability-probe.ts` |
 | Vision check | Проверка маршрута изображения | `src/llm/vision-check.ts` |
 | Attachments | Безопасный приём Telegram-вложений | `src/attachments/telegram-attachments.ts` |
 | Documents | Извлечение текста из поддерживаемых форматов | `src/knowledge/document-text.ts` |

@@ -582,3 +582,36 @@ test("пустой ответ на изображение перепроверя
   );
   assert.equal(statusOf(result, "vision"), "ok", result.message);
 });
+
+/**
+ * Пустой ответ рядом с работающими инструментами — состояние провайдера.
+ *
+ * У бесплатных моделей под нагрузкой пустой ответ приходит вперемешку с
+ * 429 от того же провайдера. Записывать по нему несовместимость значит
+ * объявить сломанной модель, которая только что успешно вызвала
+ * инструмент и приняла его результат.
+ */
+test("пустой ответ при рабочих инструментах читается как временный", async () => {
+  const { fetcher } = provider({ completion: () => json(CHAT("")) });
+  const result = await probeModelCapabilities(INPUT, fetcher);
+
+  assert.equal(statusOf(result, "completion"), "failed");
+  assert.equal(statusOf(result, "tool_call"), "ok");
+  assert.equal(
+    result.checks.find((entry) => entry.name === "completion")?.cause, "temporary",
+    "модель только что вызвала инструмент — отвечать она умеет",
+  );
+  assert.equal(result.status, "unavailable");
+});
+
+/** Если пусто вообще всё — это уже про модель, а не про нагрузку. */
+test("пустой ответ на всех обязательных проверках остаётся несовместимостью", async () => {
+  const empty = () => json(CHAT(""));
+  const { fetcher } = provider({ completion: empty, toolCall: empty, toolLoop: empty });
+  const result = await probeModelCapabilities(INPUT, fetcher);
+
+  assert.equal(result.status, "config_error");
+  assert.equal(
+    result.checks.find((entry) => entry.name === "completion")?.cause, "capability",
+  );
+});
