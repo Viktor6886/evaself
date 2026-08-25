@@ -2291,7 +2291,7 @@ jobs:
                   streamed: raw.includes('event: delta'),
                 }));
               }).catch((error) => { console.error(error); process.exit(1); });
-            " | tee /tmp/sdk-chat
+            " 2>&1 | tee /tmp/sdk-chat
           grep -q '"reply":"CI chat ok"' /tmp/sdk-chat
           grep -q '"streamed":true' /tmp/sdk-chat
 
@@ -2443,7 +2443,12 @@ jobs:
             logs eva-agent-service 2>&1 | grep -i 'подтвержд' | tail -10 || true
           echo "--- последние записи агента:"
           docker compose --env-file versions.env --env-file .env \
-            logs --tail=25 eva-agent-service 2>&1 | tail -25 || true
+            logs --tail=20 eva-agent-service 2>&1 | tail -20 || true
+          # Ответ самого хода — последним и всегда. Вопрос «завис, ответил
+          # не то или упал» решается одной этой строкой, а искать её среди
+          # логов всех сервисов приходилось дольше, чем чинить причину.
+          echo "--- что ответил ход:"
+          tail -20 /tmp/sdk-chat 2>/dev/null || echo "(шаг чата не дошёл до ответа)"
 
       - name: Tear down
         if: always()
