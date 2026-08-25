@@ -2445,6 +2445,16 @@ jobs:
           echo "--- остановки хода подтверждением:"
           docker compose --env-file versions.env --env-file .env \
             logs eva-agent-service 2>&1 | grep -i 'подтвержд' | tail -10 || true
+          # Таймаут хода объявляет app-server, а не сервис Евы: в прошлый
+          # раз в диагностике были записи только сервиса, и причина
+          # молчания осталась за кадром. Смотрим того, кто и таймаутит.
+          echo "--- app-server, отказы и таймауты:"
+          docker compose --env-file versions.env --env-file .env \
+            logs letta-app-server 2>&1 \
+            | grep -iE 'error|timed out|timeout|abort|context|token' | tail -25 || true
+          echo "--- app-server, последнее:"
+          docker compose --env-file versions.env --env-file .env \
+            logs --tail=25 letta-app-server 2>&1 | tail -25 || true
           echo "--- последние записи агента:"
           docker compose --env-file versions.env --env-file .env \
             logs --tail=20 eva-agent-service 2>&1 | tail -20 || true
