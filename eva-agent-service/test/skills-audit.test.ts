@@ -9,6 +9,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -105,4 +106,28 @@ test("недоступный каталог не выдаётся за пуст�
   assert.equal(audit.catalogAvailable, false);
   assert.deepEqual(audit.project, []);
   assert.deepEqual(audit.missing, [...EVA_PROJECT_SKILLS]);
+});
+
+test("знаменатель «нашли N из M» приходит из канонического списка", async () => {
+  // В doctor.sh это число было вписано руками и устарело: навыков стало
+  // тринадцать, а знаменатель остался двенадцатью, и здоровая установка
+  // печатала «13/12» — вид отказа там, где его нет. Второй рукописной
+  // копии больше нет, и этот тест сторожит именно её отсутствие.
+  const audit = await auditSkills({
+    root: REPO_SKILLS,
+    sources: ["project"],
+    sessionTools: ["Skill"],
+  });
+  assert.equal(audit.expected, audit.project.length + audit.missing.length);
+
+  // Главное здесь — не равенство выше, а отсутствие второй копии числа.
+  // `doctor.sh` работает на сервере и TypeScript-тестами не покрыт, поэтому
+  // знаменатель сторожится отсюда: он обязан приходить из ответа рантайма.
+  const doctor = readFileSync(new URL("../../scripts/doctor.sh", import.meta.url), "utf8");
+  assert.doesNotMatch(
+    doctor,
+    /skills=%d\/\d+/,
+    "в doctor.sh снова вписан знаменатель числом — он устареет вместе со списком навыков",
+  );
+  assert.match(doctor, /skills\.get\("expected"\)/);
 });
