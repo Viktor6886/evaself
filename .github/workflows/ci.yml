@@ -1116,7 +1116,6 @@ jobs:
             'EVA_TELEGRAM_API_BASE_URL': 'http://127.0.0.1:1',
             'EVA_LLM_PROVIDER_NAME': 'CI-bootstrap', 'EVA_LLM_MODEL': '',
             'EVA_LLM_CONTEXT_WINDOW': '32768',
-            'NC_ADMIN_EMAIL': 'admin@example.test',
             'EVA_ADMIN_USERNAME': 'admin',
             'EVA_ADMIN_BOOTSTRAP_PASSWORD': 'Ci-Phase1-Strong-Passphrase-2026!',
             'EVA_SECRETS_MASTER_KEY_FILE': '/tmp/evaself-ci-master-key',
