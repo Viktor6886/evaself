@@ -313,3 +313,97 @@ describe("панель на телефоне", () => {
     assert.notEqual(dialog.radius, "0px", "нижние углы скругляются только у листа снизу");
   });
 });
+
+/**
+ * Раздел «Искусственный интеллект» на телефоне.
+ *
+ * Три вещи ломались именно здесь и именно на узком экране: описание
+ * ошибки в строке отказа налезало на заголовок, строка назначений
+ * провайдера вылезала за карточку, а восемь развёрнутых маршрутов давали
+ * несколько экранов прокрутки. Первые две не видны ни в коде, ни на
+ * широком экране — только измерением.
+ */
+describe("раздел ИИ на телефоне", () => {
+  const PROVIDERS = {
+    providers: [{
+      id: "p1", name: "Openrouter2", protocol: "openai-compatible",
+      base_url: "https://openrouter.ai/api/v1", model: "minimax/minimax-m3:free",
+      context_window: 1_000_000, is_active: true, api_key_configured: true,
+      last_checked_at: "2026-08-25T20:46:18Z",
+      last_check_ok: true, last_check_status: "limited",
+      last_check_message: "Подключение работает; получено моделей: 418. "
+        + "Модель работает с ограничениями: vision: пустой ответ на изображение; "
+        + "finish_reason=stop, допустимый output budget=4096.",
+      last_models: null, additional_parameters: {},
+      created_at: "2026-08-01T00:00:00Z", updated_at: "2026-08-25T20:46:18Z",
+    }],
+  };
+  const STATE = {
+    providers: [],
+    routes: [
+      { code: "chat", title: "Основная модель", min_context_window: 32768, rotation_enabled: true,
+        chain: [{ provider_id: "p1", name: "Openrouter2", model: "minimax/minimax-m3:free", protocol: "openai-compatible", enabled: true }] },
+      { code: "vision", title: "Изображения", min_context_window: 8192, rotation_enabled: true, chain: [] },
+      { code: "deep", title: "Мощная модель", min_context_window: 32768, rotation_enabled: true, chain: [] },
+    ],
+    // Один и тот же отказ десять раз — ровно то, что и было в панели.
+    recent_failures: Array.from({ length: 10 }, (_, index) => ({
+      provider: "Openrouter2", switch_reason: "rate_limited", http_status: 429,
+      started_at: `2026-08-25T2${index % 2}:01:42Z`,
+      error_summary: "лимит запросов провайдера: Provider returned error",
+    })),
+    routing_settings: { mode: "adaptive", updated_at: "2026-08-01T00:00:00Z" },
+  };
+
+  let panel;
+  after(async () => await panel?.close());
+
+  test("ничего не налезает друг на друга и не вылезает за экран", async () => {
+    panel = await openPanel({
+      routes: { ...ROUTES, "/providers": PROVIDERS, "/llm/state": STATE },
+      viewport: PHONE,
+    });
+    await panel.page.evaluate(() => openPage("ai"));
+    await panel.page.waitForFunction(
+      () => document.querySelectorAll("#providers-list .provider-card").length > 0);
+    await panel.page.waitForFunction(
+      () => document.querySelectorAll("#router-failures .failure-row").length > 0);
+
+    const layout = await panel.page.evaluate((width) => {
+      const overflowing = [];
+      const scope = document.querySelector("#page-ai");
+      for (const node of scope.querySelectorAll("*")) {
+        const rect = node.getBoundingClientRect();
+        if (rect.width === 0 && rect.height === 0) continue;
+        if (rect.right > width + 1) overflowing.push(node.className || node.tagName);
+      }
+      // Наложение: заголовок отказа и его подробность обязаны лежать в
+      // разных строках, а не в соседних колонках одной.
+      const row = document.querySelector("#router-failures .failure-row");
+      const title = row.querySelector(".failure-title").getBoundingClientRect();
+      const more = row.querySelector(".failure-more");
+      return {
+        overflowing: overflowing.slice(0, 5),
+        documentWidth: document.documentElement.scrollWidth,
+        failureRows: document.querySelectorAll("#router-failures .failure-row").length,
+        countBadge: row.querySelector(".failure-count")?.textContent ?? null,
+        detailBelowTitle: more ? more.getBoundingClientRect().top >= title.bottom : true,
+        openRoutes: scope.querySelectorAll(".route-item[open]").length,
+        totalRoutes: scope.querySelectorAll(".route-item").length,
+      };
+    }, PHONE.width);
+
+    assert.deepEqual(layout.overflowing, [], "элементы раздела выходят за экран");
+    assert.ok(layout.documentWidth <= PHONE.width,
+      `страница шире экрана: ${layout.documentWidth}`);
+    // Десять одинаковых отказов сводятся в одну строку со счётчиком.
+    assert.equal(layout.failureRows, 1, "одинаковые отказы обязаны схлопываться");
+    assert.equal(layout.countBadge, "10×");
+    assert.equal(layout.detailBelowTitle, true,
+      "подробность отказа лежит под заголовком, а не рядом с ним");
+    // Маршруты свёрнуты: список показывает, кто их обслуживает, а не
+    // повторяет одних и тех же провайдеров в каждом.
+    assert.equal(layout.openRoutes, 0, "маршруты по умолчанию свёрнуты");
+    assert.equal(layout.totalRoutes, 3);
+  });
+});

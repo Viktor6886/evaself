@@ -143,19 +143,82 @@
             <div><p class="eyebrow">ОБЩИЕ AI-ПРОВАЙДЕРЫ</p><h2>Искусственный интеллект</h2><p>LLM всей установки. API Key доступен только на запись; переключение сохраняет агентов и память.</p></div>
             <button id="new-provider" class="button primary">Добавить провайдера</button>
           </div>
+          <!-- Провайдеры идут первыми: это то, чем администратор
+               занимается каждый день. Маршруты, состояние и отказы —
+               ниже, и по умолчанию свёрнуты. Раньше страница начиналась
+               с режима маршрутизации и восьми развёрнутых маршрутов, а
+               список провайдеров оказывался за несколькими экранами. -->
+          <div id="providers-list" class="provider-list"></div>
+          <section id="provider-editor" class="card editor-card" hidden>
+            <div class="editor-heading"><div><h3 id="provider-editor-title">Новый LLM-провайдер</h3><p>OpenAI-compatible endpoint. Для локального адреса нужна серверная allowlist.</p></div><button id="close-provider" class="icon-button" aria-label="Закрыть">×</button></div>
+            <form id="provider-form" class="provider-form">
+              <input name="id" type="hidden">
+              <!-- Основной сценарий: провайдер, ключ, модель. Всё
+                   остальное имеет рабочие умолчания и убрано ниже:
+                   раньше форма спрашивала два десятка полей сразу, и
+                   среди них терялись те четыре, без которых не
+                   заработает ничего. -->
+              <label class="span-2">Название<input name="name" required maxlength="120" placeholder="Например: OpenRouter"></label>
+              <label>Протокол<select name="protocol">
+                <option value="openai-compatible">OpenAI-compatible</option>
+                <option value="anthropic-compatible">Anthropic native</option>
+              </select><small>Модель Anthropic через OpenAI-совместимый прокси — это OpenAI-compatible</small></label>
+              <label>Модель<input name="model" required placeholder="vendor/model"></label>
+              <label class="span-2">Base URL<input name="base_url" type="url" placeholder="https://api.openai.com/v1" required><small>Без пути дописывается /v1</small></label>
+              <label class="span-2">API Key<input name="api_key" type="password" autocomplete="new-password" placeholder="Для изменения введите новый"></label>
+
+              <details class="span-2 advanced-block">
+                <summary>Дополнительно</summary>
+                <div class="advanced-body">
+                  <p class="block-caption">Возможности модели — инструменты, поток, изображения, строгий JSON — выясняются проверкой и здесь не спрашиваются: галочка вместо факта уводила запрос к модели, которая его не потянет.</p>
+                  <div class="router-grid">
+                    <label>Context window<input name="context_window" type="number" min="1024" value="131072" required><small>Фактическое окно вашей модели</small></label>
+                    <label>Timeout, мс<input name="timeout_ms" type="number" min="1000" max="3600000" value="180000" required></label>
+                    <label>Приоритет<input name="priority" type="number" min="0" max="10000" value="100"><small>Меньше — раньше в цепочке</small></label>
+                    <label>Уровень качества<select name="quality_tier"><option value="1">1 — лучший</option><option value="2">2</option><option value="3" selected>3</option><option value="4">4</option><option value="5">5 — самый слабый</option></select><small>Резерв ниже допустимого маршрутом не подставится</small></label>
+                    <label>Max выходных токенов<input name="max_output_tokens" type="number" min="1" value="4096"></label>
+                    <label>Таймаут ответа, мс<input name="request_timeout_ms" type="number" min="5000" max="600000" value="180000"></label>
+                    <label>Повторов<input name="max_retries" type="number" min="0" max="5" value="2"><small>Перед уходом к резерву</small></label>
+                    <label>Параллельных запросов<input name="max_concurrency" type="number" min="1" max="256" value="8"></label>
+                    <label>RPM<input name="max_rpm" type="number" min="0" placeholder="без ограничения"></label>
+                    <label>TPM<input name="max_tpm" type="number" min="0" placeholder="без ограничения"></label>
+                    <label>Цена входа, $/1M<input name="price_in" type="number" min="0" step="0.01" value="0"></label>
+                    <label>Цена выхода, $/1M<input name="price_out" type="number" min="0" step="0.01" value="0"></label>
+                    <label>Дневной бюджет, $<input name="daily_budget" type="number" min="0" step="0.01" placeholder="без ограничения"><small>Исчерпание уводит на резерв</small></label>
+                    <label>Месячный бюджет, $<input name="monthly_budget" type="number" min="0" step="0.01" placeholder="без ограничения"></label>
+                  </div>
+                  <div class="router-flags">
+                    <label class="flag"><input type="checkbox" name="enabled" checked> Включён</label>
+                    <label class="flag"><input type="checkbox" name="sensitive_data_allowed"> Личные данные разрешены</label>
+                  </div>
+                  <!-- Возможности задаёт проба; поля остаются скрытыми,
+                       чтобы сохранить контракт API и уже сохранённые
+                       значения при правке провайдера. -->
+                  <input type="hidden" name="supports_tools" value="true">
+                  <input type="hidden" name="supports_json" value="true">
+                  <input type="hidden" name="supports_streaming" value="true">
+                  <input type="hidden" name="supports_vision" value="false">
+                  <label>Дополнительные параметры JSON<textarea name="additional_parameters" rows="4">{}</textarea></label>
+                </div>
+              </details>
+              <div class="form-actions span-2"><button class="button ghost" id="cancel-provider" type="button">Отмена</button><button class="button primary" type="submit">Сохранить</button></div>
+            </form>
+          </section>
+
           <section class="card router-card" id="routing-settings-card">
             <div class="section-heading">
-              <div><h3>Режим моделей Евы</h3><p class="block-caption">Адаптивный режим выбирает независимую модель по задаче. Режим одной модели не меняет сохранённые цепочки.</p></div>
+              <div><h3>Режим моделей Евы</h3><p class="block-caption">Адаптивный режим выбирает модель по задаче. Режим одной модели не меняет сохранённые цепочки.</p></div>
             </div>
             <div id="routing-settings"></div>
           </section>
-          <!-- Цепочки маршрутов. Основной провайдер и до пяти резервов;
-               порядок задаётся здесь, failover идёт строго по нему. -->
+
+          <!-- Маршруты. Строка на маршрут; цепочка резервов
+               раскрывается только у того, который правят. -->
           <section class="card router-card">
             <div class="section-heading">
               <div>
-                <h3>Цепочки failover</h3>
-                <p class="block-caption">Для каждого типа запроса — основной провайдер и резервы по порядку. Роутер переключается сверху вниз и пропускает тех, кто не подходит по возможностям или закрыт circuit breaker'ом. Пользователь переключения не видит.</p>
+                <h3>Маршруты</h3>
+                <p class="block-caption">Какая модель обслуживает каждый тип запроса. Роутер идёт по цепочке сверху вниз и пропускает тех, кто не подходит по возможностям или закрыт circuit breaker'ом. Пользователь переключения не видит.</p>
               </div>
               <button id="reload-router" class="reset">Обновить</button>
             </div>
@@ -177,53 +240,12 @@
             <div class="section-heading">
               <div>
                 <h3>Последние отказы</h3>
-                <p class="block-caption">Почему роутер переключался. Текста переписки здесь нет — только код причины и короткое описание ошибки провайдера.</p>
+                <p class="block-caption">Почему роутер переключался. Одинаковые отказы сведены в одну строку со счётчиком. Текста переписки здесь нет — только причина и ответ провайдера.</p>
               </div>
             </div>
             <div id="router-failures" class="compact-list"></div>
           </section>
 
-          <div id="providers-list" class="provider-list"></div>
-          <section id="provider-editor" class="card editor-card" hidden>
-            <div class="editor-heading"><div><h3 id="provider-editor-title">Новый LLM-провайдер</h3><p>OpenAI-compatible endpoint. Для локального адреса нужна серверная allowlist.</p></div><button id="close-provider" class="icon-button" aria-label="Закрыть">×</button></div>
-            <form id="provider-form" class="provider-form">
-              <input name="id" type="hidden">
-              <label>Название<input name="name" required maxlength="120"></label>
-              <label>Протокол<select name="protocol"><option value="openai-compatible">OpenAI-compatible</option><option value="anthropic-compatible">Anthropic-compatible</option></select></label>
-              <label class="span-2">Base URL<input name="base_url" type="url" placeholder="https://provider.example/v1" required></label>
-              <label>API Key<input name="api_key" type="password" autocomplete="new-password" placeholder="Для изменения введите новый"></label>
-              <label>Модель<input name="model" required></label>
-              <label>Context window<input name="context_window" type="number" min="1024" value="131072" required></label>
-              <label>Timeout, мс<input name="timeout_ms" type="number" min="1000" max="3600000" value="180000" required></label>
-              <fieldset class="span-2 router-fields">
-                <legend>Маршрутизация и лимиты</legend>
-                <div class="router-grid">
-                  <label>Приоритет<input name="priority" type="number" min="0" max="10000" value="100"><small>Меньше — раньше в цепочке</small></label>
-                  <label>Уровень качества<select name="quality_tier"><option value="1">1 — лучший</option><option value="2">2</option><option value="3" selected>3</option><option value="4">4</option><option value="5">5 — самый слабый</option></select><small>Резерв ниже допустимого маршрутом не подставится</small></label>
-                  <label>Max выходных токенов<input name="max_output_tokens" type="number" min="1" value="4096"></label>
-                  <label>Таймаут ответа, мс<input name="request_timeout_ms" type="number" min="5000" max="600000" value="180000"></label>
-                  <label>Повторов<input name="max_retries" type="number" min="0" max="5" value="2"><small>Перед уходом к резерву</small></label>
-                  <label>Параллельных запросов<input name="max_concurrency" type="number" min="1" max="256" value="8"></label>
-                  <label>RPM<input name="max_rpm" type="number" min="0" placeholder="без ограничения"></label>
-                  <label>TPM<input name="max_tpm" type="number" min="0" placeholder="без ограничения"></label>
-                  <label>Цена входа, $/1M<input name="price_in" type="number" min="0" step="0.01" value="0"></label>
-                  <label>Цена выхода, $/1M<input name="price_out" type="number" min="0" step="0.01" value="0"></label>
-                  <label>Дневной бюджет, $<input name="daily_budget" type="number" min="0" step="0.01" placeholder="без ограничения"><small>Исчерпание уводит на резерв</small></label>
-                  <label>Месячный бюджет, $<input name="monthly_budget" type="number" min="0" step="0.01" placeholder="без ограничения"></label>
-                </div>
-                <div class="router-flags">
-                  <label class="flag"><input type="checkbox" name="supports_tools" checked> Инструменты</label>
-                  <label class="flag"><input type="checkbox" name="supports_json" checked> Строгий JSON</label>
-                  <label class="flag"><input type="checkbox" name="supports_streaming" checked> Потоковый ответ</label>
-                  <label class="flag"><input type="checkbox" name="supports_vision"> Изображения</label>
-                  <label class="flag"><input type="checkbox" name="sensitive_data_allowed"> Личные данные разрешены</label>
-                  <label class="flag"><input type="checkbox" name="enabled" checked> Включён</label>
-                </div>
-              </fieldset>
-              <label class="span-2">Дополнительные параметры JSON<textarea name="additional_parameters" rows="4">{}</textarea></label>
-              <div class="form-actions span-2"><button class="button ghost" id="cancel-provider" type="button">Отмена</button><button class="button primary" type="submit">Сохранить</button></div>
-            </form>
-          </section>
         </section>
 
         <!-- Распознавание речи. Форма строится по схеме, которую

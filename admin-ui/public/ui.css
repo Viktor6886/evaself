@@ -885,3 +885,77 @@ dialog .eyebrow { margin-top: 0; }
 @media (prefers-reduced-motion: reduce) {
   .sidebar, .sidebar-scrim { transition: none; }
 }
+
+/* ------------------------------------------------------------------
+   Раздел «Искусственный интеллект».
+
+   Прежняя вёрстка ломалась на телефоне в трёх местах: трёхколоночная
+   строка отказа накладывала описание ошибки на заголовок, длинная
+   строка назначений маршрутов вылезала за карточку, а восемь развёрнутых
+   маршрутов давали несколько экранов прокрутки. Здесь всё, что этот
+   раздел рисует, — в одном месте и mobile-first.
+   ------------------------------------------------------------------ */
+
+.provider-title { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: center; }
+.provider-name { min-width: 0; display: grid; }
+.provider-name h3 { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.provider-name small { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Цвет состояния объявлен для всех четырёх положений: жёлтое —
+   «работает с ограничениями» и «временно недоступен», и путать его с
+   красным «ошибка конфигурации» нельзя, действия у них разные. */
+.status-pill.state-green { color: var(--green); background: rgba(91,234,154,.09); }
+.status-pill.state-yellow { color: var(--warning, #f5c768); background: rgba(245,199,104,.10); }
+.status-pill.state-red { color: var(--danger, #ff8f8f); background: rgba(255,143,143,.10); }
+.status-pill.state-gray { color: var(--muted); background: rgba(255,255,255,.05); }
+
+.capability-chips { margin: 12px 0 8px; display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { padding: 2px 8px; border-radius: 999px; background: rgba(91,234,154,.09); color: var(--green); font-size: 11px; }
+.chip-off { background: rgba(255,255,255,.04); color: var(--muted); text-decoration: line-through; }
+
+.provider-card .muted.small { margin: 4px 0; font-size: 11px; overflow-wrap: anywhere; }
+.provider-diagnostics { margin: 8px 0; }
+.provider-diagnostics summary { cursor: pointer; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.provider-diagnostics .status-message { margin-top: 8px; overflow-wrap: anywhere; }
+
+.card-more { position: relative; }
+.card-more summary { cursor: pointer; padding: 4px 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 12px; }
+.card-more-body { margin-top: 8px; display: grid; gap: 8px; }
+.route-assign { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
+.route-assign select { min-width: 0; }
+
+/* Отказы: заголовок и подробность идут друг под другом, а не в соседних
+   колонках, — тогда длинному описанию некуда налезать. */
+.failure-row { padding: 10px; display: grid; gap: 6px; border: 1px solid var(--line); border-radius: 9px; }
+.failure-head { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+.failure-title { min-width: 0; display: grid; }
+.failure-title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.failure-title small { color: var(--muted); overflow-wrap: anywhere; }
+.failure-count { padding: 2px 8px; border-radius: 999px; background: rgba(255,143,143,.10); color: var(--danger, #ff8f8f); font-size: 11px; font-weight: 800; }
+.failure-more summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.failure-more .failure-detail { margin: 6px 0 0; }
+
+/* Маршруты: строка на маршрут, редактор раскрывается только у нужного. */
+.route-summary { display: grid; gap: 8px; }
+.route-item { border: 1px solid var(--line); border-radius: 10px; }
+.route-item > summary { padding: 10px 12px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 8px; align-items: center; cursor: pointer; }
+.route-item .route-name { font-size: 12px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.route-item .route-head-model { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.route-item .route-backups { color: var(--muted); font-size: 11px; }
+.route-body { padding: 0 12px 12px; display: grid; gap: 10px; }
+.route-body .route-requires { margin: 0; color: var(--muted); font-size: 11px; }
+
+.advanced-block { border: 1px solid var(--line); border-radius: 10px; }
+.advanced-block > summary { padding: 10px 12px; cursor: pointer; font-size: 12px; font-weight: 700; }
+.advanced-body { padding: 0 12px 12px; display: grid; gap: 12px; }
+.advanced-body .block-caption { margin: 0; }
+
+@media (max-width: 620px) {
+  /* На узком экране колонки схлопываются: две строки лучше, чем
+     наложение. */
+  .route-item > summary { grid-template-columns: minmax(0, 1fr) auto; }
+  .route-item .route-head-model { grid-column: 1 / -1; }
+  .route-assign { grid-template-columns: minmax(0, 1fr); }
+  .provider-card .card-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .provider-card .card-actions .card-more { grid-column: 1 / -1; }
+}

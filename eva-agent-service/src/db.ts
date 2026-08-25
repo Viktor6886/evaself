@@ -92,6 +92,7 @@ export interface LlmProviderRow {
   supports_json?: boolean;
   supports_vision?: boolean;
   supports_streaming?: boolean;
+  last_check_status?: string | null;
 }
 
 export interface ModelMapping {
@@ -1549,19 +1550,32 @@ export class Database {
     return rows[0] ?? null;
   }
 
+  /**
+   * Итог проверки. `status` пишется рядом с булевым `ok`, а не вместо
+   * него: старый код читает булево и работает без изменений, панель
+   * показывает состояние. Отсутствие статуса означает проверку прежней
+   * версией — тогда остаётся булево.
+   */
   async recordLlmCheck(
     id: string,
-    result: { ok: boolean; message: string; models: unknown[] | null },
+    result: { ok: boolean; message: string; models: unknown[] | null; status?: string | null },
   ): Promise<LlmProviderRow | null> {
     const { rows } = await this.require().query<LlmProviderRow>(
       `UPDATE llm_providers SET
          last_checked_at = now(),
          last_check_ok = $2,
          last_check_message = $3,
-         last_models = $4::jsonb
+         last_models = $4::jsonb,
+         last_check_status = $5
        WHERE id = $1
        RETURNING *`,
-      [id, result.ok, result.message, result.models === null ? null : JSON.stringify(result.models)],
+      [
+        id,
+        result.ok,
+        result.message,
+        result.models === null ? null : JSON.stringify(result.models),
+        result.status ?? null,
+      ],
     );
     return rows[0] ?? null;
   }

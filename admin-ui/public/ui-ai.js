@@ -121,6 +121,19 @@ function renderRouterRoutes() {
   renderRouteChains($("#router-routes"));
 }
 
+/**
+ * Маршруты.
+ *
+ * Раньше каждый из восьми маршрутов разворачивался в полный редактор:
+ * список цепочки, кнопки перестановки, добавление и переключатель ротации.
+ * Провайдеров при этом три, и страница показывала одни и те же три имени
+ * восемь раз подряд — на телефоне это несколько экранов прокрутки, в
+ * которых ничего не найти.
+ *
+ * Теперь по умолчанию видно одно: какая модель обслуживает каждый маршрут.
+ * Полный редактор цепочки открывается для того маршрута, который правят, —
+ * и только он.
+ */
 function renderRouteChains(target, routeCodes = null, compact = false) {
   if (!target) return;
   const allowed = routeCodes ? new Set(routeCodes) : null;
@@ -129,27 +142,34 @@ function renderRouteChains(target, routeCodes = null, compact = false) {
     .sort((left, right) => routeCodes
       ? routeCodes.indexOf(left.code) - routeCodes.indexOf(right.code)
       : 0);
+  if (!routes.length) {
+    target.innerHTML = '<p class="muted">Маршруты появятся после применения миграций роутера.</p>';
+    return;
+  }
   const editable = ["owner", "admin"].includes(state.me.role);
-  target.innerHTML = routes.length
-    ? routes.map((route) => {
-      const chain = route.chain || [];
-      const requires = [
-        route.requires_tools ? "инструменты" : "",
-        route.requires_json ? "строгий JSON" : "",
-        route.requires_streaming ? "поток" : "",
-        `контекст от ${Number(route.min_context_window).toLocaleString("ru-RU")}`,
-      ].filter(Boolean).join(" · ");
-      return `
-        <section class="route-block${compact ? " compact" : ""}" data-route="${escapeHtml(route.code)}">
-          <div class="route-head">
-            <h4>${escapeHtml(ROUTE_TITLES[route.code] || route.title || route.code)}</h4>
-            <span class="route-requires">требует: ${escapeHtml(requires)}</span>
-          </div>
+  // Маршруты, запрошенные явно (страница медиа просит один), показываются
+  // раскрытыми: свёрнутая строка там прячет ровно то, ради чего раздел и
+  // открыли. Общий список остаётся свёрнутым.
+  const focused = Boolean(routeCodes) && routes.length <= 2;
+  target.innerHTML = `<div class="route-summary">${routes.map((route) => {
+    const chain = route.chain || [];
+    const head = chain[0];
+    const backups = Math.max(0, chain.length - 1);
+    return `
+      <details class="route-item route-block${compact ? " compact" : ""}"
+               data-route="${escapeHtml(route.code)}"${focused ? " open" : ""}>
+        <summary>
+          <span class="route-name">${escapeHtml(ROUTE_TITLES[route.code] || route.title || route.code)}</span>
+          <span class="route-head-model">${head ? escapeHtml(head.name) : "не настроен"}</span>
+          <span class="route-backups">${backups ? `+${backups}` : ""}</span>
+        </summary>
+        <div class="route-body">
+          ${routeRequirements(route)}
           ${chain.length ? `<ol class="chain${route.rotation_enabled === false ? " is-pinned" : ""}">${chain.map((link, index) => `
             <li class="chain-link${link.enabled && (route.rotation_enabled !== false || index === 0) ? "" : " is-off"}">
               <span class="chain-rank">${index === 0 ? "основной"
                 : route.rotation_enabled === false ? "не используется" : `резерв ${index}`}</span>
-              <span class="chain-name"><strong>${escapeHtml(link.name)}</strong><small>${escapeHtml(link.model)} · ${escapeHtml(link.protocol)}</small></span>
+              <span class="chain-name"><strong>${escapeHtml(link.name)}</strong><small>${escapeHtml(link.model)}</small></span>
               ${editable ? `<span class="chain-move">
                 <button class="button tiny ghost" data-chain-move="up" data-route="${escapeHtml(route.code)}" data-provider="${escapeHtml(link.provider_id)}"${index === 0 ? " disabled" : ""}>↑</button>
                 <button class="button tiny ghost" data-chain-move="down" data-route="${escapeHtml(route.code)}" data-provider="${escapeHtml(link.provider_id)}"${index === chain.length - 1 ? " disabled" : ""}>↓</button>
@@ -167,9 +187,20 @@ function renderRouteChains(target, routeCodes = null, compact = false) {
             ? "Этим маршрутом отвечает Ева. Выключите, если подмена на резервную модель "
               + "недопустима: стиль ответа у моделей разный."
             : "Выключенная ротация оставляет в работе только основного, а отказ остаётся отказом."}</small>
-        </section>`;
-    }).join("")
-    : '<p class="muted">Маршруты появятся после применения миграций роутера.</p>';
+        </div>
+      </details>`;
+  }).join("")}</div>`;
+}
+
+/** Требования маршрута — то, по чему роутер отбирает провайдеров. */
+function routeRequirements(route) {
+  const requires = [
+    route.requires_tools ? "инструменты" : "",
+    route.requires_json ? "строгий JSON" : "",
+    route.requires_streaming ? "поток" : "",
+    `контекст от ${Number(route.min_context_window).toLocaleString("ru-RU")}`,
+  ].filter(Boolean).join(" · ");
+  return `<p class="route-requires">Требует: ${escapeHtml(requires)}</p>`;
 }
 
 function chainAdder(route, chain) {
@@ -237,19 +268,61 @@ function money(micro) {
   return `$${value.toFixed(value < 1 ? 4 : 2)}`;
 }
 
+/**
+ * Последние отказы, сведённые по провайдеру и причине.
+ *
+ * Лента показывала каждый отказ отдельной строкой: десять подряд «лимит
+ * запросов провайдера» вытесняли всё остальное, а описание ошибки во
+ * третьей колонке на телефоне налезало на заголовок. Теперь одинаковые
+ * отказы — одна строка со счётчиком и временем последнего, а техническая
+ * подробность раскрывается по требованию.
+ */
 function renderRouterFailures() {
   const rows = state.router?.recent_failures || [];
-  $("#router-failures").innerHTML = rows.length
-    ? rows.map((row) => `
-      <article class="compact-row">
+  if (!rows.length) {
+    $("#router-failures").innerHTML = '<p class="muted">Отказов не было.</p>';
+    return;
+  }
+  const groups = new Map();
+  for (const row of rows) {
+    const key = `${row.provider || ""}|${row.switch_reason || ""}|${row.http_status || ""}`;
+    const existing = groups.get(key);
+    if (existing) {
+      existing.count += 1;
+      if (String(row.started_at) > String(existing.started_at)) existing.started_at = row.started_at;
+      if (row.error_summary && !existing.details.includes(row.error_summary)) {
+        existing.details.push(row.error_summary);
+      }
+      continue;
+    }
+    groups.set(key, {
+      provider: row.provider,
+      switch_reason: row.switch_reason,
+      http_status: row.http_status,
+      started_at: row.started_at,
+      count: 1,
+      details: row.error_summary ? [row.error_summary] : [],
+    });
+  }
+  const list = [...groups.values()].sort((left, right) =>
+    String(right.started_at).localeCompare(String(left.started_at)));
+
+  $("#router-failures").innerHTML = list.map((row) => `
+    <article class="failure-row">
+      <div class="failure-head">
         <span class="status-dot color-red"></span>
-        <span>
+        <div class="failure-title">
           <strong>${escapeHtml(row.provider || "провайдер не выбран")}</strong>
-          <small>${escapeHtml(SWITCH_REASONS[row.switch_reason] || row.switch_reason || "ошибка")}${row.http_status ? ` · HTTP ${row.http_status}` : ""} · ${escapeHtml(localDate(row.started_at))}</small>
-        </span>
-        <span class="failure-detail">${escapeHtml(row.error_summary || "")}</span>
-      </article>`).join("")
-    : '<p class="muted">Отказов не зафиксировано.</p>';
+          <small>${escapeHtml(SWITCH_REASONS[row.switch_reason] || row.switch_reason || "ошибка")}${row.http_status ? ` · HTTP ${row.http_status}` : ""}</small>
+        </div>
+        ${row.count > 1 ? `<span class="failure-count">${row.count}×</span>` : ""}
+      </div>
+      <small class="muted">Последний: ${escapeHtml(localDate(row.started_at))}</small>
+      ${row.details.length ? `<details class="failure-more">
+        <summary>Подробности провайдера</summary>
+        ${row.details.map((detail) => `<p class="failure-detail">${escapeHtml(detail)}</p>`).join("")}
+      </details>` : ""}
+    </article>`).join("");
 }
 
 const SWITCH_REASONS = {

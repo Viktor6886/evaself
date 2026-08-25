@@ -32,6 +32,11 @@ describe("флажки редактора провайдера", () => {
     await panel.page.evaluate(() => openProviderEditor(null));
     await panel.page.waitForFunction(
       () => !document.querySelector("#provider-editor").hidden);
+    // Флажки переехали в «Дополнительно»: свёрнутый блок не измерить,
+    // у скрытого элемента нулевой прямоугольник.
+    await panel.page.evaluate(() => {
+      document.querySelector("#provider-form .advanced-block").open = true;
+    });
 
     const boxes = await panel.page.$$eval(
       '.router-flags input[type="checkbox"]',
@@ -41,7 +46,15 @@ describe("флажки редактора провайдера", () => {
       }),
     );
 
-    assert.ok(boxes.length >= 6, `ожидались флажки редактора, найдено ${boxes.length}`);
+    // Флажков осталось два — «включён» и «личные данные разрешены».
+    // Возможности модели (инструменты, поток, изображения, строгий JSON)
+    // выясняет проба, и спрашивать их у оператора больше незачем: галочка
+    // вместо факта либо уводила запрос к модели, которая его не потянет,
+    // либо прятала пригодную.
+    assert.ok(boxes.length >= 2, `ожидались флажки редактора, найдено ${boxes.length}`);
+    const names = boxes.map((box) => box.name).sort();
+    assert.deepEqual(names, ["enabled", "sensitive_data_allowed"],
+      `в форме остались лишние флажки: ${names.join(", ")}`);
 
     const widths = new Set(boxes.map((b) => b.w));
     const heights = new Set(boxes.map((b) => b.h));

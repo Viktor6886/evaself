@@ -46,6 +46,12 @@ export interface PublicLlmProvider {
   api_key_configured: true;
   last_checked_at: string | null;
   last_check_ok: boolean | null;
+  /**
+   * Состояние последней пробы. Панель показывает по нему четыре разных
+   * положения вместо «прошёл / не прошёл»; `null` — проверки этой версией
+   * ещё не было.
+   */
+  last_check_status: string | null;
   last_check_message: string | null;
   last_models: unknown[] | null;
   created_at: string;
@@ -444,6 +450,7 @@ export class LlmManager {
       ok: result.ok,
       message: result.message,
       models: result.models_supported ? result.models : null,
+      status: result.status ?? null,
     });
     return result;
   }
@@ -493,6 +500,7 @@ export class LlmManager {
       ok: check.ok,
       message: check.message,
       models: check.models_supported ? check.models : null,
+      status: check.status ?? null,
     });
     // Активацию запрещает только настоящая ошибка настройки. Провайдер,
     // который прямо сейчас отвечает лимитом или пятисоткой, о модели не
@@ -900,6 +908,7 @@ function publicProvider(row: LlmProviderRow): PublicLlmProvider {
     api_key_configured: true,
     last_checked_at: row.last_checked_at?.toISOString() ?? null,
     last_check_ok: row.last_check_ok,
+    last_check_status: row.last_check_status ?? null,
     last_check_message: row.last_check_message,
     last_models: row.last_models,
     created_at: row.created_at.toISOString(),

@@ -2,41 +2,133 @@
  * Карточка провайдера и её редактор: создание, изменение, проверка,
  * список моделей и поля маршрутизации.
  */
+/**
+ * Состояние провайдера одним словом.
+ *
+ * Раньше состояний было два — прошёл проверку или нет, — и лимит запросов
+ * выглядел так же, как отклонённый ключ: красная точка и текст про
+ * несовместимость модели. Действия оператора при этом разные, поэтому
+ * состояний теперь четыре, и у каждого свой цвет и своя подсказка.
+ */
+const CHECK_STATES = {
+  ok: { color: "green", label: "работает" },
+  limited: { color: "yellow", label: "работает с ограничениями" },
+  unavailable: { color: "yellow", label: "временно недоступен" },
+  config_error: { color: "red", label: "ошибка конфигурации" },
+};
+
+function checkState(item) {
+  const known = CHECK_STATES[item.last_check_status];
+  if (known) return known;
+  // Провайдер, проверенный прежней версией: статуса нет, остаётся булево.
+  if (item.last_check_ok === true) return CHECK_STATES.ok;
+  if (item.last_check_ok === false) return CHECK_STATES.config_error;
+  return { color: "gray", label: "не проверялся" };
+}
+
+/**
+ * Что модель умеет — по фактической пробе, а не по галочкам оператора.
+ * Показываем только подтверждённое: отсутствие возможности закрывает
+ * модели соответствующие маршруты, и это важнее списка галочек.
+ */
+function capabilityChips(item) {
+  const chips = [
+    item.supports_tools === false ? null : { on: true, text: "инструменты" },
+    { on: item.supports_streaming !== false, text: "поток" },
+    { on: item.supports_vision === true, text: "изображения" },
+    { on: item.supports_json !== false, text: "строгий JSON" },
+  ].filter(Boolean);
+  return `<div class="capability-chips">${chips.map((chip) =>
+    `<span class="chip${chip.on ? "" : " chip-off"}">${escapeHtml(chip.text)}</span>`).join("")}</div>`;
+}
+
 function providerCard(item) {
-  const checkClass = item.last_check_ok === true
-    ? "green"
-    : item.last_check_ok === false
-      ? "red"
-      : "yellow";
+  // Не `state`: глобальная `state` — состояние страницы, и затенять её
+  // внутри карточки нельзя.
+  const check = checkState(item);
+  const message = item.last_check_message || "";
+  const placement = providerRouteLabel(item.id);
   return `
     <article class="provider-card">
       <div class="provider-title">
-        <div><span class="status-dot color-${checkClass}"></span><div><h3>${escapeHtml(item.name)}</h3><span class="technical">${escapeHtml(item.protocol)}</span></div></div>
-        <span class="status-pill">${escapeHtml(providerRouteLabel(item.id))}</span>
+        <span class="status-dot color-${check.color}"></span>
+        <div class="provider-name">
+          <h3>${escapeHtml(item.name)}</h3>
+          <small>${escapeHtml(item.model)}</small>
+        </div>
+        <span class="status-pill state-${check.color}">${escapeHtml(check.label)}</span>
       </div>
-      <div class="provider-details">
-        <span>Base URL<strong>${escapeHtml(item.base_url)}</strong></span>
-        <span>Модель<strong>${escapeHtml(item.model)}</strong></span>
-        <span>Context<strong>${Number(item.context_window).toLocaleString("ru-RU")}</strong></span>
-        <span>Последний тест<strong>${escapeHtml(localDate(item.last_checked_at))}</strong></span>
-      </div>
-      <p class="status-message">${escapeHtml(item.last_check_message || "Подключение ещё не проверялось")}</p>
+      ${capabilityChips(item)}
+      ${placement === "не назначен"
+        ? '<p class="muted small">Не назначен ни одному маршруту.</p>'
+        : `<p class="muted small">${escapeHtml(placement)}</p>`}
+      ${message ? `<details class="provider-diagnostics">
+        <summary>${escapeHtml(shortMessage(message))}</summary>
+        <p class="status-message">${escapeHtml(message)}</p>
+        <dl class="details-list">
+          <div><dt>Протокол</dt><dd>${escapeHtml(item.protocol)}</dd></div>
+          <div><dt>Base URL</dt><dd>${escapeHtml(item.base_url)}</dd></div>
+          <div><dt>Контекст</dt><dd>${Number(item.context_window).toLocaleString("ru-RU")}</dd></div>
+          <div><dt>Последний тест</dt><dd>${escapeHtml(localDate(item.last_checked_at))}</dd></div>
+        </dl>
+      </details>` : '<p class="muted small">Подключение ещё не проверялось.</p>'}
       <div class="card-actions">
         <button class="button tiny ghost" data-provider-action="check" data-provider-id="${escapeHtml(item.id)}">Проверить</button>
-        <button class="button tiny ghost" data-provider-action="models" data-provider-id="${escapeHtml(item.id)}">Получить модели</button>
         <button class="button tiny ghost" data-provider-action="edit" data-provider-id="${escapeHtml(item.id)}">Изменить</button>
-        <select data-provider-route-select>${(state.router?.routes || []).filter((route) => route.code !== "single").map((route) => `<option value="${escapeHtml(route.code)}">${escapeHtml(ROUTE_TITLES[route.code] || route.code)}</option>`).join("")}</select>
-        <button class="button tiny secondary" data-provider-action="route-primary" data-provider-id="${escapeHtml(item.id)}">Сделать основным для маршрута</button>
-        <button class="button tiny danger-outline" data-provider-action="delete" data-provider-id="${escapeHtml(item.id)}">Удалить</button>
+        <details class="card-more">
+          <summary>Ещё</summary>
+          <div class="card-more-body">
+            <button class="button tiny ghost" data-provider-action="models" data-provider-id="${escapeHtml(item.id)}">Получить модели</button>
+            <div class="route-assign">
+              <select data-provider-route-select>${assignableRoutes().map((route) => `<option value="${escapeHtml(route.code)}">${escapeHtml(ROUTE_TITLES[route.code] || route.code)}</option>`).join("")}</select>
+              <button class="button tiny secondary" data-provider-action="route-primary" data-provider-id="${escapeHtml(item.id)}">Сделать основным</button>
+            </div>
+            <button class="button tiny danger-outline" data-provider-action="delete" data-provider-id="${escapeHtml(item.id)}">Удалить</button>
+          </div>
+        </details>
       </div>
     </article>`;
 }
 
+function assignableRoutes() {
+  return (state.router?.routes || []).filter((route) => route.code !== "single");
+}
+
+/**
+ * Первая фраза сообщения — она и объясняет положение дел. Полный текст
+ * раскрывается по требованию: раньше он обрезался вёрсткой, и понять, что
+ * именно ответил провайдер, было нельзя.
+ */
+function shortMessage(message) {
+  const first = String(message).split(/(?<=[.;])\s/)[0] || String(message);
+  return first.length > 110 ? `${first.slice(0, 110)}…` : first;
+}
+
+/**
+ * Где провайдер стоит в маршрутах.
+ *
+ * Раньше строка перечисляла маршруты через « · » и на телефоне налезала на
+ * соседний текст. Считаем: как основной — назвать маршруты, как резерв —
+ * назвать число.
+ */
 function providerRouteLabel(providerId) {
-  const placements = (state.router?.routes || []).flatMap((route) =>
-    (route.chain || []).map((link, index) => link.provider_id === providerId
-      ? `${ROUTE_TITLES[route.code] || route.code}: ${index === 0 ? "основной" : `резерв ${index}`}` : null).filter(Boolean));
-  return placements.length ? placements.slice(0, 2).join(" · ") : "не назначен";
+  const primary = [];
+  let backup = 0;
+  for (const route of (state.router?.routes || [])) {
+    const index = (route.chain || []).findIndex((link) => link.provider_id === providerId);
+    if (index < 0) continue;
+    if (index === 0) primary.push(ROUTE_TITLES[route.code] || route.code);
+    else backup += 1;
+  }
+  if (primary.length === 0 && backup === 0) return "не назначен";
+  const parts = [];
+  if (primary.length) {
+    parts.push(primary.length > 2
+      ? `основной для ${primary.length} маршрутов`
+      : `основной: ${primary.join(", ")}`);
+  }
+  if (backup) parts.push(`резерв в ${backup}`);
+  return parts.join(" · ");
 }
 
 function openProviderEditor(provider = null) {
@@ -62,6 +154,11 @@ function openProviderEditor(provider = null) {
   const full = ROUTER_DEFAULTS;
   const set = (name, value) => { if (form.elements[name]) form.elements[name].value = value; };
   const flag = (name, value) => { if (form.elements[name]) form.elements[name].checked = value; };
+  // Скрытое поле переносит значение как текст: `checked` у него нет, и
+  // прежнее чтение отправило бы false за каждую возможность.
+  const capability = (name, value) => {
+    if (form.elements[name]) form.elements[name].value = value === true ? "true" : "false";
+  };
   set("priority", routing?.priority ?? full.priority);
   set("quality_tier", provider?.quality_tier ?? full.quality_tier);
   set("max_output_tokens", provider?.max_output_tokens ?? full.max_output_tokens);
@@ -74,10 +171,14 @@ function openProviderEditor(provider = null) {
   set("price_out", microToUnits(provider?.price_out_micro));
   set("daily_budget", provider?.daily_budget_micro == null ? "" : microToUnits(provider.daily_budget_micro));
   set("monthly_budget", provider?.monthly_budget_micro == null ? "" : microToUnits(provider.monthly_budget_micro));
-  flag("supports_tools", provider?.supports_tools ?? true);
-  flag("supports_json", provider?.supports_json ?? true);
-  flag("supports_streaming", provider?.supports_streaming ?? true);
-  flag("supports_vision", provider?.supports_vision ?? false);
+  // Возможности выясняет проба, оператор их больше не проставляет. Поля
+  // остались скрытыми и переносят уже выясненное: отправить сюда false
+  // означало бы выключить провайдера из маршрутов, которым эта
+  // возможность нужна, — и без единого действия человека.
+  capability("supports_tools", provider?.supports_tools ?? true);
+  capability("supports_json", provider?.supports_json ?? true);
+  capability("supports_streaming", provider?.supports_streaming ?? true);
+  capability("supports_vision", provider?.supports_vision ?? false);
   // Умолчание совпадает со схемой: провайдера заводит оператор, и это и
   // есть решение о доверии. Снятая галочка у нового провайдера означала
   // бы, что роутер отвергнет весь его трафик как чувствительный.
@@ -154,10 +255,10 @@ async function saveRoutingFields(form, providerId) {
     price_out_micro: unitsToMicro(form.elements.price_out.value),
     daily_budget_micro: form.elements.daily_budget.value === "" ? null : unitsToMicro(form.elements.daily_budget.value),
     monthly_budget_micro: form.elements.monthly_budget.value === "" ? null : unitsToMicro(form.elements.monthly_budget.value),
-    supports_tools: form.elements.supports_tools.checked,
-    supports_json: form.elements.supports_json.checked,
-    supports_streaming: form.elements.supports_streaming.checked,
-    supports_vision: form.elements.supports_vision.checked,
+    supports_tools: capabilityValue(form, "supports_tools"),
+    supports_json: capabilityValue(form, "supports_json"),
+    supports_streaming: capabilityValue(form, "supports_streaming"),
+    supports_vision: capabilityValue(form, "supports_vision"),
     sensitive_data_allowed: form.elements.sensitive_data_allowed.checked,
     enabled: form.elements.enabled.checked,
   };
@@ -165,6 +266,14 @@ async function saveRoutingFields(form, providerId) {
     method: "PATCH",
     body: JSON.stringify(body),
   });
+}
+
+function capabilityValue(form, name) {
+  const field = form.elements[name];
+  if (!field) return undefined;
+  // Поле может быть и скрытым (значение текстом), и галочкой — если
+  // разметку когда-нибудь вернут обратно.
+  return field.type === "checkbox" ? field.checked : field.value === "true";
 }
 
 async function providerAction(action, id) {
