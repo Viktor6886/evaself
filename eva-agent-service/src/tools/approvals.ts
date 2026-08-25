@@ -109,6 +109,14 @@ export class ApprovalService {
   constructor(private readonly db: Database, private readonly enabled: boolean, private readonly dependencies: {
     outbox?: Pick<OutboxDelivery, "send">;
     lifecycle?: { transition(turn: unknown, state: "approval_pending" | "tools_pending"): Promise<boolean> };
+    /**
+     * Журнал. Без него ход, остановленный подтверждением, не оставляет
+     * следа: человек видит молчание, а оператор — ничего. Пишется только
+     * метаданные — имя инструмента, риск и отпечаток аргументов; сами
+     * аргументы могут содержать текст человека и в журнал не попадают
+     * (инвариант 19).
+     */
+    logger?: { info(message: string, meta?: Record<string, unknown>): void };
     pollIntervalMs?: number;
     waitTimeoutMs?: number;
   } = {}) {}
@@ -370,8 +378,15 @@ export class ApprovalService {
       if (policy === "deny") return { behavior: "deny", message: "Denied by tool approval policy", interrupt: false };
       if (policy === "allow") return { behavior: "allow", message: "Allowed by tool approval policy" };
       const action = describeApprovalAction(toolName, toolInput);
+      const fingerprint = fingerprintApprovalArguments(toolInput);
+      this.dependencies.logger?.info("Ход остановлен подтверждением инструмента", {
+        tool: toolName,
+        risk,
+        conversationId: input.conversationId ?? null,
+        argumentFingerprint: fingerprint,
+      });
       await this.request({ userId: input.userId, conversationId: input.conversationId, sdkRequestId: requestId, toolName, risk,
-        description: action.description, affectedData: action.affectedData, argumentFingerprint: fingerprintApprovalArguments(toolInput) });
+        description: action.description, affectedData: action.affectedData, argumentFingerprint: fingerprint });
       await this.dependencies.lifecycle?.transition(input.turn, "approval_pending");
       await this.dependencies.outbox?.send({ method: "sendMessage", chatId: input.chatId, userId: input.userId,
         idempotencyKey: `tool-approval:${input.userId}:${requestId}`, priority: "command",

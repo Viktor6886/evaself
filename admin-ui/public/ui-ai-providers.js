@@ -47,7 +47,7 @@ function openProviderEditor(provider = null) {
   form.elements.protocol.value = provider?.protocol || "openai-compatible";
   form.elements.base_url.value = provider?.base_url || "";
   form.elements.model.value = provider?.model || "";
-  form.elements.context_window.value = provider?.context_window || 32768;
+  form.elements.context_window.value = provider?.context_window || 131072;
   form.elements.timeout_ms.value =
     provider?.additional_parameters?.request_timeout_ms || 180000;
   form.elements.additional_parameters.value = JSON.stringify(

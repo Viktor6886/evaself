@@ -2159,7 +2159,11 @@ jobs:
                     name, protocol: 'openai-compatible',
                     base_url: 'http://evaself-llm-mock:9000/v1',
                     api_key: 'ci-key-' + name,
-                    model, context_window: 32768,
+                    // Промпту Евы — системный текст, персона, рамка, описания
+                    // навыков и определения инструментов — нужно около 41 000
+                    // токенов. Окно меньше означает молчаливое обрезание: до
+                    // 0.30.28 движок так и делал, роняя память и персону.
+                    model, context_window: 131072,
                     additional_parameters: {request_timeout_ms: 30000},
                   }),
                 })).provider;
@@ -2296,7 +2300,7 @@ jobs:
                   streamed: raw.includes('event: delta'),
                 }));
               }).catch((error) => { console.error(error); process.exit(1); });
-            " | tee /tmp/sdk-chat
+            " 2>&1 | tee /tmp/sdk-chat
           grep -q '"reply":"CI chat ok"' /tmp/sdk-chat
           grep -q '"streamed":true' /tmp/sdk-chat
 
@@ -2422,10 +2426,44 @@ jobs:
       - name: Logs on failure
         if: failure()
         run: |
-          docker compose --env-file versions.env --env-file .env logs --tail=200 || true
+          docker compose --env-file versions.env --env-file .env logs --tail=120 || true
 
+      # Ход, остановленный подтверждением инструмента, выглядит как молчание:
+      # ответа нет, ошибки нет. Пока причина не названа, разбор идёт вслепую
+      # по чужим логам — так и искалась поломка обновления Agent SDK.
+      # Шаг стоит последним намеренно: его ответ не должен смывать дампом.
+      - name: Чего ждал ход
+        if: failure()
+        run: |
+          . scripts/lib.sh
+          load_env
+          echo "--- ожидавшие подтверждения инструменты:"
+          docker compose --env-file versions.env --env-file .env \
+            exec -T -e PGPASSWORD="$EVA_DB_PASSWORD" postgres \
+            psql -At -U "$EVA_DB_USER" -d "$EVA_DB_NAME" \
+              -c "SELECT created_at, status, tool_name, risk, action_description
+                    FROM tool_approvals ORDER BY created_at DESC LIMIT 10" 2>&1 || true
+          # Строка о подтверждении рождается до перезапуска сервиса, а
+          # `compose logs` показывает только текущий контейнер. Поэтому
+          # отбираем её по смыслу из всего, что есть, и лишь потом берём
+          # общий хвост.
+          echo "--- остановки хода подтверждением:"
+          docker compose --env-file versions.env --env-file .env \
+            logs eva-agent-service 2>&1 | grep -i 'подтвержд' | tail -10 || true
+          echo "--- последние записи агента:"
+          docker compose --env-file versions.env --env-file .env \
+            logs --tail=20 eva-agent-service 2>&1 | tail -20 || true
+          # Ответ самого хода — последним и всегда. Вопрос «завис, ответил
+          # не то или упал» решается одной этой строкой, а искать её среди
+          # логов всех сервисов приходилось дольше, чем чинить причину.
+          echo "--- что ответил ход:"
+          tail -20 /tmp/sdk-chat 2>/dev/null || echo "(шаг чата не дошёл до ответа)"
+
+      # Остановка контейнеров печатает под сотню строк и не объясняет
+      # ничего: при разборе отказа она вытесняет из хвоста журнала именно
+      # то, ради чего его читают. Поэтому молча.
       - name: Tear down
         if: always()
         run: |
-          docker rm -f evaself-llm-mock 2>/dev/null || true
-          docker compose --env-file versions.env --env-file .env down -v || true
+          docker rm -f evaself-llm-mock >/dev/null 2>&1 || true
+          docker compose --env-file versions.env --env-file .env down -v >/dev/null 2>&1 || true
