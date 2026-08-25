@@ -2454,8 +2454,11 @@ jobs:
           echo "--- что ответил ход:"
           tail -20 /tmp/sdk-chat 2>/dev/null || echo "(шаг чата не дошёл до ответа)"
 
+      # Остановка контейнеров печатает под сотню строк и не объясняет
+      # ничего: при разборе отказа она вытесняет из хвоста журнала именно
+      # то, ради чего его читают. Поэтому молча.
       - name: Tear down
         if: always()
         run: |
-          docker rm -f evaself-llm-mock 2>/dev/null || true
-          docker compose --env-file versions.env --env-file .env down -v || true
+          docker rm -f evaself-llm-mock >/dev/null 2>&1 || true
+          docker compose --env-file versions.env --env-file .env down -v >/dev/null 2>&1 || true
