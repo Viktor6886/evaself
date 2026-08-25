@@ -155,8 +155,8 @@ if [ -z "$EVA_LLM_BASE_URL" ] || [ -z "$EVA_LLM_API_KEY" ] || [ -z "$EVA_LLM_MOD
 	mark_incomplete "LLM-провайдер"
 fi
 while :; do
-	ask_optional EVA_LLM_CONTEXT_WINDOW "Context window" "$(current EVA_LLM_CONTEXT_WINDOW || echo 32768)"
-	EVA_LLM_CONTEXT_WINDOW="${EVA_LLM_CONTEXT_WINDOW:-32768}"
+	ask_optional EVA_LLM_CONTEXT_WINDOW "Context window (промпту Евы нужно ~41000)" "$(current EVA_LLM_CONTEXT_WINDOW || echo 131072)"
+	EVA_LLM_CONTEXT_WINDOW="${EVA_LLM_CONTEXT_WINDOW:-131072}"
 	is_number "$EVA_LLM_CONTEXT_WINDOW" && [ "$EVA_LLM_CONTEXT_WINDOW" -ge 1024 ] && break
 	warn "context window должен быть целым числом не меньше 1024"
 done
