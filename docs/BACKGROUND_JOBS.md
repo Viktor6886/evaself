@@ -15,7 +15,6 @@ BullMQ обслуживает только продуктовые и опера�
 | `src/jobs/runtime.ts` | Timeout, AbortController, retry, DLQ и graceful shutdown |
 | `src/jobs/maintenance.ts` | Диагностические сверки без самостоятельного исправления |
 | `src/jobs/proactive/` | Напоминания, heartbeat и check-in |
-| `src/jobs/cpu-offload.ts` | Вынос CPU-тяжёлой работы из event loop |
 
 ## Данные
 
