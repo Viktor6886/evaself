@@ -412,6 +412,12 @@ jobs:
       - name: Letta versions agree with the lockfile
         run: python3 scripts/ci/sync-letta-versions.py
 
+      # Документ переживает код: файл удаляют, а строка о нём остаётся и
+      # врёт дальше. Так BACKGROUND_JOBS.md описывал модуль, удалённый
+      # как мёртвый: уборка прошла по коду и не дошла до текста.
+      - name: Every path named in the docs exists
+        run: python3 scripts/ci/assert-doc-paths.py
+
       - name: No secrets in tracked files
         run: |
           if git ls-files --error-unmatch .env >/dev/null 2>&1; then
