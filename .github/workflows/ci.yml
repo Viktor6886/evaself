@@ -2154,7 +2154,11 @@ jobs:
                     name, protocol: 'openai-compatible',
                     base_url: 'http://evaself-llm-mock:9000/v1',
                     api_key: 'ci-key-' + name,
-                    model, context_window: 32768,
+                    // Промпту Евы — системный текст, персона, рамка, описания
+                    // навыков и определения инструментов — нужно около 41 000
+                    // токенов. Окно меньше означает молчаливое обрезание: до
+                    // 0.30.28 движок так и делал, роняя память и персону.
+                    model, context_window: 131072,
                     additional_parameters: {request_timeout_ms: 30000},
                   }),
                 })).provider;
