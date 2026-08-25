@@ -2417,7 +2417,26 @@ jobs:
       - name: Logs on failure
         if: failure()
         run: |
-          docker compose --env-file versions.env --env-file .env logs --tail=200 || true
+          docker compose --env-file versions.env --env-file .env logs --tail=120 || true
+
+      # Ход, остановленный подтверждением инструмента, выглядит как молчание:
+      # ответа нет, ошибки нет. Пока причина не названа, разбор идёт вслепую
+      # по чужим логам — так и искалась поломка обновления Agent SDK.
+      # Шаг стоит последним намеренно: его ответ не должен смывать дампом.
+      - name: Чего ждал ход
+        if: failure()
+        run: |
+          . scripts/lib.sh
+          load_env
+          echo "--- ожидавшие подтверждения инструменты:"
+          docker compose --env-file versions.env --env-file .env \
+            exec -T -e PGPASSWORD="$EVA_DB_PASSWORD" postgres \
+            psql -At -U "$EVA_DB_USER" -d "$EVA_DB_NAME" \
+              -c "SELECT status, tool_name, risk, action_description
+                    FROM tool_approvals ORDER BY id DESC LIMIT 10" 2>&1 || true
+          echo "--- последние записи агента:"
+          docker compose --env-file versions.env --env-file .env \
+            logs --tail=40 eva-agent-service 2>&1 | tail -40 || true
 
       - name: Tear down
         if: always()
