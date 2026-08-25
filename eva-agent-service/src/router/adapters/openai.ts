@@ -15,7 +15,7 @@ import type {
 import { ProviderError } from "../types.js";
 import { mergeProviderState, pickProviderState } from "../content.js";
 import { ReasoningStripper, stripReasoning } from "../normalize.js";
-import { classifyHttp, objectParameter, parameterValue, providerParameters, readSse } from "./shared.js";
+import { classifyHttp, objectParameter, parameterValue, providerParameters, providerUrl, readSse } from "./shared.js";
 
 interface OpenAiChoiceMessage extends Record<string, unknown> {
   content?: string | null;
@@ -127,7 +127,7 @@ async function post(
   stream: boolean,
   signal: AbortSignal,
 ): Promise<Response> {
-  const url = `${provider.base_url.replace(/\/+$/, "")}/chat/completions`;
+  const url = providerUrl(provider.base_url, "chat/completions");
   let response: Response;
   try {
     response = await (provider.fetcher ?? fetch)(url, {

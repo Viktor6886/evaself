@@ -8,6 +8,7 @@ import {
   modelHandle,
   probeOpenAiProvider,
 } from "../dist/llm.js";
+import { summarize } from "../dist/llm/capability-probe.js";
 
 test("OpenRouter-style input_modalities is a hint, not a model-id rule", () => {
   const models = [{
@@ -179,9 +180,12 @@ test("startup discovers legacy vision=false before Letta opens a session", async
   const order: string[] = [];
   const db = {
     getActiveLlmProvider: async () => row,
-    setLlmProviderVisionCapability: async (_id: string, value: boolean) => {
-      order.push(`persist:${value}`);
-      return { ...row, supports_vision: value };
+    setLlmProviderCapabilities: async (
+      _id: string,
+      values: { vision?: boolean },
+    ) => {
+      order.push(`persist:${values.vision}`);
+      return { ...row, supports_vision: values.vision === true };
     },
   };
   const letta = {
@@ -218,9 +222,12 @@ test("startup clears stale vision=true after factual probe fails", async () => {
     config(master),
     {
       getActiveLlmProvider: async () => row,
-      setLlmProviderVisionCapability: async (_id: string, value: boolean) => {
-        persisted.push(value);
-        return { ...row, supports_vision: value };
+      setLlmProviderCapabilities: async (
+        _id: string,
+        values: { vision?: boolean },
+      ) => {
+        persisted.push(values.vision === true);
+        return { ...row, supports_vision: values.vision === true };
       },
     } as never,
     { setDefaultModel() {} } as never,
@@ -241,7 +248,7 @@ test("activation persists discovered vision before Router catalog is refreshed",
   const db = {
     getLlmProvider: async () => candidate,
     getActiveLlmProvider: async () => null,
-    setLlmProviderVisionCapability: async () => {
+    setLlmProviderCapabilities: async () => {
       order.push("persist-vision");
       return { ...candidate, supports_vision: true };
     },
@@ -270,12 +277,11 @@ test("activation persists discovered vision before Router catalog is refreshed",
       probeProvider: async () => ({
         ok: true, models_supported: true, models: [], message: "ok", status_code: 200,
       }),
-      probeCapabilities: async () => ({
-        ok: true,
-        checks: [{ name: "vision", status: "ok", detail: "image recognized", blocking: false }],
-        message: "",
-        warnings: "",
-      }),
+      // Результат собирается настоящей сводкой: подделанная форма разошлась
+      // бы с рабочей и перестала проверять то, ради чего тест написан.
+      probeCapabilities: async () => summarize([
+        { name: "vision", status: "ok", detail: "image recognized", blocking: false },
+      ]),
     },
   );
 

@@ -7,8 +7,68 @@ import { solidPng } from "./vision-check.js";
 export type CapabilityName =
   | "completion" | "streaming" | "tool_call" | "tool_result_loop"
   | "json_object" | "json_schema" | "vision";
-export interface CapabilityCheck { name: CapabilityName; status: "ok" | "failed" | "skipped"; detail: string; blocking: boolean }
-export interface CapabilityProbeResult { ok: boolean; checks: CapabilityCheck[]; message: string; warnings: string }
+
+/**
+ * Почему проверка не прошла. Раньше этого различия не было, и любой отказ
+ * читался как «модель не умеет»: провайдер, ответивший 429, объявлялся
+ * несовместимым с агентным ходом и оставался таким до следующей ручной
+ * проверки. Ошибка провайдера уже приходит типизированной — `ProviderError`
+ * знает и вид отказа, и повторяемость, — так что причину достаточно не
+ * терять по дороге.
+ *
+ *   `capability` — провайдер ответил, но возможности нет: пустой ответ,
+ *                  инструмент не вызван, JSON не разобрался;
+ *   `config`     — отказ не пройдёт и со второй попытки: ключ отклонён,
+ *                  модели нет, запрос отклонён по существу;
+ *   `temporary`  — лимит, ошибка сервера, таймаут. О модели не говорит
+ *                  ничего.
+ */
+export type CapabilityCause = "capability" | "config" | "temporary";
+
+/**
+ * Итог по провайдеру целиком.
+ *
+ *   `ok`           — всё заявленное работает;
+ *   `limited`      — разговор с инструментами работает, часть
+ *                    необязательных возможностей — нет;
+ *   `config_error` — разговор невозможен, и сам собой отказ не пройдёт;
+ *   `unavailable`  — проверить не удалось: провайдер сейчас недоступен.
+ */
+export type ProbeStatus = "ok" | "limited" | "config_error" | "unavailable";
+
+/**
+ * Что нужно Еве, чтобы вести ход: ответить, вызвать инструмент и принять
+ * его результат. Остальное — streaming, изображения, строгий JSON —
+ * расширяет применимость модели и решает, каким маршрутам она подходит,
+ * но не делает её негодной.
+ */
+export const ESSENTIAL_CAPABILITIES: ReadonlySet<CapabilityName> =
+  new Set<CapabilityName>(["completion", "tool_call", "tool_result_loop"]);
+
+export interface CapabilityCheck {
+  name: CapabilityName;
+  status: "ok" | "failed" | "skipped";
+  detail: string;
+  blocking: boolean;
+  cause?: CapabilityCause;
+}
+
+/** Что модель фактически умеет — по пробе, а не по галочкам оператора. */
+export interface DetectedCapabilities {
+  streaming: boolean | null;
+  vision: boolean | null;
+  json: boolean | null;
+  tools: boolean | null;
+}
+
+export interface CapabilityProbeResult {
+  ok: boolean;
+  status: ProbeStatus;
+  checks: CapabilityCheck[];
+  message: string;
+  warnings: string;
+  detected: DetectedCapabilities;
+}
 export interface CapabilityClaims { tools: boolean; json: boolean; streaming: boolean; vision: boolean }
 export interface CapabilityProbeInput {
   baseUrl: string; apiKey: string; model: string; timeoutMs: number; claims: CapabilityClaims;
@@ -53,13 +113,51 @@ export function probeInferenceParameters(source: Record<string, unknown> | null 
   return safe;
 }
 
-const failure = (name: CapabilityName, detail: string, blocking: boolean): CapabilityCheck => ({ name, status: "failed", detail, blocking });
+const failure = (
+  name: CapabilityName,
+  detail: string,
+  blocking: boolean,
+  cause: CapabilityCause = "capability",
+): CapabilityCheck => ({ name, status: "failed", detail, blocking, cause });
 const skipped = (name: CapabilityName, detail: string): CapabilityCheck => ({ name, status: "skipped", detail, blocking: false });
+
+/**
+ * Отчего отказ: от модели, от конфигурации или от текущего состояния
+ * провайдера. Виды ошибок уже расставлены `classifyHttp`, здесь они
+ * только переводятся на язык пробы.
+ *
+ * `model_error` намеренно разделён: 400 и 422 на необязательной проверке
+ * означают, что провайдер не принимает саму возможность — это свойство
+ * модели, а не поломка настройки. Тот же 400 на обычном ответе означает,
+ * что запрос собран не так, как ждёт провайдер.
+ */
+function causeOf(error: unknown, name: CapabilityName): CapabilityCause {
+  if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
+    return "temporary";
+  }
+  if (error instanceof ProviderError) {
+    if (error.reason === "rate_limited" || error.reason === "server_error") return "temporary";
+    if (error.reason === "timeout" || error.reason === "connection_failed") return "temporary";
+    if (error.reason === "quota_exhausted") return "config";
+    if (error.options.badRequest === true && !ESSENTIAL_CAPABILITIES.has(name)) return "capability";
+    return "config";
+  }
+  return "temporary";
+}
+
 function errorDetail(error: unknown, timeoutMs: number): string {
   if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) return `нет ответа за ${timeoutMs} мс`;
   if (error instanceof ProviderError) return `${error.httpStatus ? `HTTP ${error.httpStatus}: ` : ""}${error.message}`;
   return error instanceof Error ? error.message : String(error);
 }
+
+/** Отказ, пришедший исключением: причина выводится из самой ошибки. */
+const thrown = (
+  name: CapabilityName,
+  error: unknown,
+  timeoutMs: number,
+  blocking: boolean,
+): CapabilityCheck => failure(name, errorDetail(error, timeoutMs), blocking, causeOf(error, name));
 
 function canonicalRequest(
   messages: LlmMessage[],
@@ -110,9 +208,13 @@ export async function probeVisionCapability(
     { type: "text", text: VISION_PROMPT },
     { type: "image", media_type: "image/png", data: solidPng(128, 128, VISION_COLOR).toString("base64") },
   ] }], { max_tokens: 64 });
-  const unsupported = (detail: string): CapabilityCheck => input.claims.vision
-    ? failure("vision", detail, true)
-    : skipped("vision", `фактическая проба: ${detail}`);
+  // Изображения — необязательная возможность. Раньше её отсутствие при
+  // заявленной галочке делало провайдера негодным целиком; теперь оно
+  // лишь закрывает модели маршруты, которым изображения нужны.
+  const unsupported = (detail: string, cause: CapabilityCause = "capability"): CapabilityCheck =>
+    input.claims.vision
+      ? failure("vision", detail, false, cause)
+      : skipped("vision", `фактическая проба: ${detail}`);
 
   try {
     let last: LlmResponse | null = null;
@@ -136,10 +238,10 @@ export async function probeVisionCapability(
     return {
       name: "vision", status: "ok",
       detail: `изображение принято и распознано${usedBudget > request.max_tokens ? ` (output budget ${usedBudget})` : ""}`,
-      blocking: input.claims.vision,
+      blocking: false,
     };
   } catch (error) {
-    return unsupported(errorDetail(error, input.timeoutMs));
+    return unsupported(errorDetail(error, input.timeoutMs), causeOf(error, "vision"));
   }
 }
 
@@ -168,7 +270,7 @@ export async function probeModelCapabilities(input: CapabilityProbeInput, fetche
     checks.push(result.response.content.trim()
       ? { name: "completion", status: "ok", detail: `ответ получен${note(result.budget, initial)}`, blocking: true }
       : failure("completion", `пустой ответ; finish_reason=${result.response.finish_reason}, допустимый output budget=${maximum}`, true));
-  } catch (error) { checks.push(failure("completion", errorDetail(error, input.timeoutMs), true)); }
+  } catch (error) { checks.push(thrown("completion", error, input.timeoutMs, true)); }
 
   if (!input.claims.streaming) checks.push(skipped("streaming", "поток не заявлен"));
   else {
@@ -181,8 +283,12 @@ export async function probeModelCapabilities(input: CapabilityProbeInput, fetche
           if (chunk.type !== "done") events += 1;
         }
       } finally { clearTimeout(timer); }
-      checks.push(events > 0 ? { name: "streaming", status: "ok", detail: `дельт потока: ${events}`, blocking: true } : failure("streaming", "поток закончился без дельт", true));
-    } catch (error) { checks.push(failure("streaming", errorDetail(error, input.timeoutMs), true)); }
+      // Поток — тоже необязательная возможность: без него Ева отвечает
+      // целиком, а не по мере генерации. Это ухудшение, а не поломка.
+      checks.push(events > 0
+        ? { name: "streaming", status: "ok", detail: `дельт потока: ${events}`, blocking: false }
+        : failure("streaming", "поток закончился без дельт", false));
+    } catch (error) { checks.push(thrown("streaming", error, input.timeoutMs, false)); }
   }
 
   let toolResponse: LlmResponse | null = null;
@@ -200,7 +306,7 @@ export async function probeModelCapabilities(input: CapabilityProbeInput, fetche
       toolResponse = result.response;
       checks.push({ name: "tool_call", status: "ok", detail: `вызов и аргументы по схеме${note(result.budget, initial)}`, blocking: true });
     }
-  } catch (error) { checks.push(failure("tool_call", errorDetail(error, input.timeoutMs), true)); }
+  } catch (error) { checks.push(thrown("tool_call", error, input.timeoutMs, true)); }
 
   if (!toolResponse) checks.push(failure("tool_result_loop", "цикл не проверялся: вызова инструмента не было", true));
   else {
@@ -216,7 +322,7 @@ export async function probeModelCapabilities(input: CapabilityProbeInput, fetche
       checks.push(result.response.content.trim()
         ? { name: "tool_result_loop", status: "ok", detail: `результат принят, final answer получен${note(result.budget, initial)}`, blocking: true }
         : failure("tool_result_loop", result.response.tool_calls.length ? "после результата модель снова требует инструмент вместо final answer" : `после результата нет final answer; finish_reason=${result.response.finish_reason}, допустимый output budget=${maximum}`, true));
-    } catch (error) { checks.push(failure("tool_result_loop", errorDetail(error, input.timeoutMs), true)); }
+    } catch (error) { checks.push(thrown("tool_result_loop", error, input.timeoutMs, true)); }
   }
 
   if (!input.claims.json) {
@@ -226,7 +332,7 @@ export async function probeModelCapabilities(input: CapabilityProbeInput, fetche
     try {
       const result = await complete(canonicalRequest([{ role: "user", content: "Return {\"ok\":true} and nothing else." }], { max_tokens: 32, response_format: { type: "json_object" } }));
       checks.push(parses(result.response.content) !== undefined ? { name: "json_object", status: "ok", detail: "ответ разбирается как JSON", blocking: false } : failure("json_object", "ответ не разбирается как JSON — разговор не затронут", false));
-    } catch (error) { checks.push(failure("json_object", errorDetail(error, input.timeoutMs), false)); }
+    } catch (error) { checks.push(thrown("json_object", error, input.timeoutMs, false)); }
     try {
       const result = await complete(canonicalRequest(
         [{ role: "user", content: "Return an object with ok set to true." }],
@@ -236,17 +342,56 @@ export async function probeModelCapabilities(input: CapabilityProbeInput, fetche
       checks.push(typeof parsed?.ok === "boolean"
         ? { name: "json_schema", status: "ok", detail: "ответ соответствует переданной схеме", blocking: false }
         : failure("json_schema", "ответ не соответствует переданной схеме", false));
-    } catch (error) { checks.push(failure("json_schema", errorDetail(error, input.timeoutMs), false)); }
+    } catch (error) { checks.push(thrown("json_schema", error, input.timeoutMs, false)); }
   }
 
   checks.push(await probeVisionCapability(input, fetcher));
 
+  return summarize(checks);
+}
+
+/**
+ * Сводит проверки в один итог.
+ *
+ * Порядок важен: временный отказ на обязательной проверке перекрывает всё
+ * остальное. Провайдер, ответивший 429, ничего не сообщил о модели, и
+ * записывать ему «несовместима» — значит запомнить неправду до следующей
+ * ручной проверки.
+ */
+export function summarize(checks: CapabilityCheck[]): CapabilityProbeResult {
   const failed = checks.filter((entry) => entry.status === "failed");
   const line = (entry: CapabilityCheck) => `${entry.name}: ${entry.detail}`;
+  const essentialFailures = failed.filter((entry) => ESSENTIAL_CAPABILITIES.has(entry.name));
+  const optionalFailures = failed.filter((entry) => !ESSENTIAL_CAPABILITIES.has(entry.name));
+
+  const status: ProbeStatus = essentialFailures.some((entry) => entry.cause === "temporary")
+    ? "unavailable"
+    : essentialFailures.length > 0
+      ? "config_error"
+      : optionalFailures.length > 0
+        ? "limited"
+        : "ok";
+
+  const passed = (name: CapabilityName): boolean =>
+    checks.some((entry) => entry.name === name && entry.status === "ok");
+  // Возможность, которую не удалось проверить из-за состояния провайдера,
+  // остаётся неизвестной: null сохраняет прежде выясненное, а false стёр бы
+  // его и закрыл модели маршруты на ровном месте.
+  const undecided = (...names: CapabilityName[]): boolean =>
+    names.some((name) => failed.some((entry) => entry.name === name && entry.cause === "temporary"));
+  const detected: DetectedCapabilities = {
+    streaming: undecided("streaming") ? null : passed("streaming"),
+    vision: undecided("vision") ? null : passed("vision"),
+    json: undecided("json_object", "json_schema") ? null : passed("json_object") || passed("json_schema"),
+    tools: undecided("tool_call", "tool_result_loop") ? null : passed("tool_call") && passed("tool_result_loop"),
+  };
+
   return {
-    ok: failed.every((entry) => !entry.blocking),
+    ok: status === "ok" || status === "limited",
+    status,
     checks,
-    message: failed.filter((entry) => entry.blocking).map(line).join("; "),
-    warnings: failed.filter((entry) => !entry.blocking).map(line).join("; "),
+    message: essentialFailures.map(line).join("; "),
+    warnings: optionalFailures.map(line).join("; "),
+    detected,
   };
 }

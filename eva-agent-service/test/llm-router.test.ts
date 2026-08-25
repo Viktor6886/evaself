@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { buildChain } from "../dist/router/chain.js";
+import { providerUrl } from "../dist/router/adapters/shared.js";
 import { ProviderLimits } from "../dist/router/limits.js";
 import {
   BACKUP_PERSONA_DIRECTIVE,
@@ -1019,4 +1020,37 @@ test("тот же провайдер с разрешением запрос об
   });
   const result = await router.complete(request());
   assert.equal(result.provider_name, "allowed");
+});
+
+/**
+ * Адрес провайдера: `/v1` дописывается, введённый путь — нет.
+ *
+ * `https://api.anthropic.com` — то, что человек берёт из документации, —
+ * превращалось в `/messages` вместо `/v1/messages`. Провайдер отвечал 404
+ * или 405, а панель показывала это как несовместимость модели, и найти
+ * настоящую причину по её тексту было нельзя.
+ */
+test("адрес провайдера получает версию, только если путь не задан", () => {
+  assert.equal(
+    providerUrl("https://api.anthropic.com", "messages"),
+    "https://api.anthropic.com/v1/messages",
+  );
+  assert.equal(
+    providerUrl("https://api.anthropic.com/", "messages"),
+    "https://api.anthropic.com/v1/messages",
+  );
+  // Уже указанная версия не удваивается.
+  assert.equal(
+    providerUrl("https://api.anthropic.com/v1", "messages"),
+    "https://api.anthropic.com/v1/messages",
+  );
+  assert.equal(
+    providerUrl("https://api.openai.com/v1/", "chat/completions"),
+    "https://api.openai.com/v1/chat/completions",
+  );
+  // Нестандартный путь прокси остаётся нетронутым: там `/v1` всё сломает.
+  assert.equal(
+    providerUrl("https://gateway.example/openai/deployments/eva", "chat/completions"),
+    "https://gateway.example/openai/deployments/eva/chat/completions",
+  );
 });

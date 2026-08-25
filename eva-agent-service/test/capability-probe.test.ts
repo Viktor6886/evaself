@@ -339,12 +339,19 @@ test("ответ, не соответствующий схеме, — отказ
   assert.match(result.warnings, /не соответствует переданной схеме/);
 });
 
-test("поток, пришедший не событиями SSE, не проходит", async () => {
+/**
+ * Поток — удобство, а не условие работы: без него Ева отвечает целиком.
+ * Отказ обязан быть обнаружен и назван, но модель из-за него не негодная.
+ */
+test("поток, пришедший не событиями SSE, не проходит и остаётся ограничением", async () => {
   const { fetcher } = provider({ streaming: () => json(CHAT("ready")) });
   const result = await probeModelCapabilities(INPUT, fetcher);
-  assert.equal(result.ok, false);
   assert.equal(statusOf(result, "streaming"), "failed");
-  assert.match(result.message, /поток закончился без содержимого/);
+  assert.equal(result.status, "limited");
+  assert.equal(result.ok, true, "разговор с инструментами работает");
+  assert.equal(result.detected.streaming, false);
+  assert.match(result.warnings, /streaming: поток закончился без содержимого/);
+  assert.equal(result.message, "", "обязательные возможности не пострадали");
 });
 
 test("отказ провайдера называет причину, а не «что-то пошло не так»", async () => {
@@ -369,15 +376,71 @@ test("agent tools проверяются фактически даже при о
   assert.equal(seen.length, 4, "completion, полный agent tool loop и vision discovery");
 });
 
-test("заявленное, но неработающее зрение блокирует активацию", async () => {
+/**
+ * Заявленное, но неработающее зрение — ограничение модели, а не приговор.
+ *
+ * Прежде такой отказ делал провайдера непригодным целиком: модель, которая
+ * прекрасно ведёт разговор и вызывает инструменты, объявлялась несовместимой
+ * с агентным ходом из-за одной картинки. Теперь она пригодна, но зрение
+ * записано как отсутствующее, и маршруты, которым оно нужно, её не возьмут.
+ */
+test("заявленное, но неработающее зрение делает модель ограниченной, а не негодной", async () => {
   const { fetcher } = provider({ vision: () => json({ error: "no vision" }, 400) });
   const result = await probeModelCapabilities(
     { ...INPUT, claims: { ...INPUT.claims, vision: true } },
     fetcher,
   );
   assert.equal(statusOf(result, "vision"), "failed");
-  assert.equal(result.ok, false, "supports_vision нельзя сохранять без рабочего image path");
-  assert.match(result.message, /vision/);
+  assert.equal(result.status, "limited");
+  assert.equal(result.ok, true, "разговор с инструментами работает — модель пригодна");
+  assert.equal(result.detected.vision, false, "supports_vision нельзя сохранять без рабочего image path");
+  assert.match(result.warnings, /vision/, "ограничение обязано быть названо оператору");
+  assert.equal(result.message, "", "обязательные возможности не пострадали");
+});
+
+/**
+ * Лимит запросов не говорит о модели ничего.
+ *
+ * Раньше 429 в момент проверки записывался как несовместимость и оставался
+ * записанным до следующей ручной проверки: провайдер, у которого просто
+ * кончилась минутная квота, выглядел сломанным.
+ */
+test("лимит запросов провайдера не выдаётся за несовместимость модели", async () => {
+  // Лимит бьёт по всем запросам, а не по одному: минутная квота кончается
+  // целиком.
+  const limited = () => json({ error: "rate limit exceeded" }, 429);
+  const { fetcher } = provider({
+    completion: limited, streaming: limited, toolCall: limited, toolLoop: limited,
+    jsonObject: limited, jsonSchema: limited, vision: limited,
+  });
+  const result = await probeModelCapabilities(INPUT, fetcher);
+
+  assert.equal(result.status, "unavailable");
+  assert.equal(result.ok, false, "проверка не прошла — но не по вине модели");
+  assert.equal(
+    statusOf(result, "completion"), "failed",
+    "сам отказ скрывать нельзя",
+  );
+  assert.equal(
+    result.checks.find((entry) => entry.name === "completion")?.cause, "temporary",
+    "причина отказа — состояние провайдера, а не отсутствие возможности",
+  );
+  assert.equal(
+    result.detected.tools, null,
+    "непроверенная возможность остаётся неизвестной и не стирает прежде выясненное",
+  );
+});
+
+/** Отклонённый ключ — ошибка настройки, и её обязано быть видно как таковую. */
+test("отклонённый ключ читается как ошибка конфигурации", async () => {
+  const { fetcher } = provider({ completion: () => json({ error: "invalid key" }, 401) });
+  const result = await probeModelCapabilities(INPUT, fetcher);
+
+  assert.equal(result.status, "config_error");
+  assert.equal(result.ok, false);
+  assert.equal(
+    result.checks.find((entry) => entry.name === "completion")?.cause, "config",
+  );
 });
 
 test("модель без зрения не получает ложную capability при auto-discovery", async () => {

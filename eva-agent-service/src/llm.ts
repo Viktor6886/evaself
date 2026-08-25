@@ -17,8 +17,10 @@ import type { Logger } from "./logger.js";
 import {
   probeModelCapabilities,
   probeVisionCapability,
+  summarize,
   type CapabilityProbeInput,
   type CapabilityProbeResult,
+  type ProbeStatus,
 } from "./llm/capability-probe.js";
 
 export interface LlmProviderInput {
@@ -52,6 +54,11 @@ export interface PublicLlmProvider {
 
 export interface ProviderProbe {
   ok: boolean;
+  /**
+   * Состояние проверки. `ok` оставлен для прежних потребителей и означает
+   * «модель пригодна»: и полностью, и с ограничениями.
+   */
+  status?: ProbeStatus;
   models_supported: boolean;
   models: Array<{ id: string; [key: string]: unknown }>;
   message: string;
@@ -274,7 +281,7 @@ export class LlmManager {
       if (!active) return;
       const apiKey = this.secretBox.decrypt(active.api_key_encrypted);
       const check = await this.probeVision(active, apiKey);
-      await this.persistDetectedVision(active, { ok: true, checks: [check], message: "", warnings: "" });
+      await this.persistDetectedVision(active, summarize([check]));
     } catch (error) {
       this.logger.warn("Не удалось автоматически проверить зрение активной LLM", {
         message: error instanceof Error ? error.message : String(error),
@@ -487,12 +494,23 @@ export class LlmManager {
       message: check.message,
       models: check.models_supported ? check.models : null,
     });
-    if (!check.ok) {
+    // Активацию запрещает только настоящая ошибка настройки. Провайдер,
+    // который прямо сейчас отвечает лимитом или пятисоткой, о модели не
+    // сказал ничего — и отказ настроить его из-за этого был бы ровно той
+    // ошибкой, ради которой в роутере есть цепочка резервов и breaker.
+    // Такой провайдер включается, а его состояние остаётся видно оператору.
+    if (check.status === "config_error" || (check.status === undefined && !check.ok)) {
       this.logger.error("Активация LLM: конфигурация не прошла проверку", {
         providerId: candidate.id,
         message: check.message,
       });
       throw badRequest(`Конфигурация не прошла проверку: ${check.message}`);
+    }
+    if (check.status === "unavailable") {
+      this.logger.warn("Активация LLM: провайдер сейчас недоступен, проверка отложена", {
+        providerId: candidate.id,
+        message: check.message,
+      });
     }
 
     const previous = rollbackOverride ?? await this.db.getActiveLlmProvider();
@@ -664,31 +682,73 @@ export class LlmManager {
     return {
       ...connectivity,
       ok: capabilities.ok,
+      status: capabilities.status,
       capabilities,
-      message: capabilities.ok
-        // Непроходящая, но не блокирующая возможность не запрещает
-        // активацию и потому должна быть названа: иначе оператор узнает
-        // об отсутствии строгого JSON на первом же продуктовом маршруте.
-        ? `${connectivity.message} Модель совместима с агентным ходом.${
-          capabilities.warnings ? ` Ограничения: ${capabilities.warnings}.` : ""}`
-        : `Модель несовместима с агентным ходом — ${capabilities.message}`,
+      message: `${connectivity.message} ${LlmManager.verdict(capabilities)}`.trim(),
     };
   }
 
+  /**
+   * Человеческая формулировка итога.
+   *
+   * Прежний текст знал две крайности: «совместима» и «несовместима». Из-за
+   * этого лимит запросов и отсутствие изображений выглядели одинаково —
+   * как приговор модели. Теперь состояние названо своим именем, и по тексту
+   * видно, что делать: чинить настройку, подождать или просто знать про
+   * ограничение.
+   */
+  private static verdict(capabilities: CapabilityProbeResult): string {
+    switch (capabilities.status) {
+      case "ok":
+        return "Модель работает.";
+      case "limited":
+        return `Модель работает с ограничениями: ${capabilities.warnings}.`;
+      case "unavailable":
+        return `Провайдер сейчас недоступен, о модели это ничего не говорит — ${capabilities.message}. Повторите проверку позже.`;
+      case "config_error":
+      default:
+        return `Ошибка конфигурации: ${capabilities.message}.`;
+    }
+  }
+
+  /**
+   * Сохраняет то, что проба выяснила о модели.
+   *
+   * Роутер отбирает провайдеров по этим полям, поэтому важно, чтобы там
+   * стоял факт, а не галочка оператора: заявленный, но неработающий JSON
+   * уводил на провайдера строгие маршруты, а незаявленное, но работающее
+   * зрение прятало пригодную модель от маршрута изображений.
+   *
+   * Невыясненное (`null` — провайдер ответил лимитом или упал) не
+   * записывается: стереть верное знание хуже, чем не обновить его.
+   */
   private async persistDetectedVision(
     provider: LlmProviderRow,
     capabilities: CapabilityProbeResult,
   ): Promise<LlmProviderRow> {
-    const vision = capabilities.checks.find((entry) => entry.name === "vision");
-    if (!vision) return provider;
-    const detected = vision.status === "ok";
-    if (detected === (provider.supports_vision === true)) return provider;
-    const updated = await this.db.setLlmProviderVisionCapability(provider.id, detected);
+    // Результат мог быть собран без раздела detected: падать на этом
+    // нельзя, возможности просто останутся невыясненными.
+    const detected = capabilities.detected ?? { vision: null, streaming: null, tools: null, json: null };
+    const current: Record<string, boolean | undefined> = {
+      vision: provider.supports_vision,
+      streaming: provider.supports_streaming,
+      tools: provider.supports_tools,
+      json: provider.supports_json,
+    };
+    const changed: Record<string, boolean> = {};
+    for (const key of ["vision", "streaming", "tools", "json"] as const) {
+      const value = detected[key];
+      if (value === null || value === undefined) continue;
+      if (value === (current[key] === true)) continue;
+      changed[key] = value;
+    }
+    if (Object.keys(changed).length === 0) return provider;
+    const updated = await this.db.setLlmProviderCapabilities(provider.id, changed);
     if (!updated) return provider;
-    this.logger.info("LLM Router: фактически обновлена поддержка изображений", {
+    this.logger.info("LLM Router: возможности модели обновлены по фактической пробе", {
       providerId: provider.id,
       model: provider.model,
-      supportsVision: detected,
+      ...changed,
     });
     return updated;
   }
