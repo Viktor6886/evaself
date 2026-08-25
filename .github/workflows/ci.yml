@@ -412,6 +412,12 @@ jobs:
       - name: Letta versions agree with the lockfile
         run: python3 scripts/ci/sync-letta-versions.py
 
+      # Документ переживает код: файл удаляют, а строка о нём остаётся и
+      # врёт дальше. Так BACKGROUND_JOBS.md описывал модуль, удалённый
+      # как мёртвый: уборка прошла по коду и не дошла до текста.
+      - name: Every path named in the docs exists
+        run: python3 scripts/ci/assert-doc-paths.py
+
       - name: No secrets in tracked files
         run: |
           if git ls-files --error-unmatch .env >/dev/null 2>&1; then
@@ -1110,7 +1116,6 @@ jobs:
             'EVA_TELEGRAM_API_BASE_URL': 'http://127.0.0.1:1',
             'EVA_LLM_PROVIDER_NAME': 'CI-bootstrap', 'EVA_LLM_MODEL': '',
             'EVA_LLM_CONTEXT_WINDOW': '32768',
-            'NC_ADMIN_EMAIL': 'admin@example.test',
             'EVA_ADMIN_USERNAME': 'admin',
             'EVA_ADMIN_BOOTSTRAP_PASSWORD': 'Ci-Phase1-Strong-Passphrase-2026!',
             'EVA_SECRETS_MASTER_KEY_FILE': '/tmp/evaself-ci-master-key',
@@ -2456,10 +2461,10 @@ jobs:
           # общий хвост.
           echo "--- остановки хода подтверждением:"
           docker compose --env-file versions.env --env-file .env \
-            logs eva-agent-service 2>&1 | grep -i 'подтвержд' | tail -10 || true
-          # Таймаут хода объявляет app-server, а не сервис Евы: в прошлый
-          # раз в диагностике были записи только сервиса, и причина
-          # молчания осталась за кадром. Смотрим того, кто и таймаутит.
+            logs eva-agent-service 2>&1 | grep -iE 'подтвержд|approval' | tail -10 || true
+          # Таймаут хода объявляет app-server, а не сервис Евы: когда в
+          # диагностике были записи только сервиса, причина молчания
+          # оставалась за кадром. Смотрим того, кто и таймаутит.
           echo "--- app-server, отказы и таймауты:"
           docker compose --env-file versions.env --env-file .env \
             logs letta-app-server 2>&1 \
