@@ -9,7 +9,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -108,7 +108,7 @@ test("недоступный каталог не выдаётся за пуст�
   assert.deepEqual(audit.missing, [...EVA_PROJECT_SKILLS]);
 });
 
-test("знаменатель «нашли N из M» приходит из канонического списка", async () => {
+test("знаменатель «нашли N из M» приходит из канонического списка", async (context) => {
   // В doctor.sh это число было вписано руками и устарело: навыков стало
   // тринадцать, а знаменатель остался двенадцатью, и здоровая установка
   // печатала «13/12» — вид отказа там, где его нет. Второй рукописной
@@ -123,7 +123,16 @@ test("знаменатель «нашли N из M» приходит из ка�
   // Главное здесь — не равенство выше, а отсутствие второй копии числа.
   // `doctor.sh` работает на сервере и TypeScript-тестами не покрыт, поэтому
   // знаменатель сторожится отсюда: он обязан приходить из ответа рантайма.
-  const doctor = readFileSync(new URL("../../scripts/doctor.sh", import.meta.url), "utf8");
+  //
+  // В образе сервиса каталога `scripts/` нет — он не входит в контекст
+  // сборки. Пропуск там честнее выдуманного PASS: проверка выполняется
+  // на репозитории, где файл есть.
+  const path = new URL("../../scripts/doctor.sh", import.meta.url);
+  if (!existsSync(path)) {
+    context.skip("doctor.sh вне образа; проверяется на репозитории");
+    return;
+  }
+  const doctor = readFileSync(path, "utf8");
   assert.doesNotMatch(
     doctor,
     /skills=%d\/\d+/,
