@@ -14,6 +14,8 @@
 -- NULL означает «проверки этой версией ещё не было» — так выглядят все
 -- существующие строки сразу после наката.
 
+BEGIN;
+
 ALTER TABLE llm_providers
     ADD COLUMN IF NOT EXISTS last_check_status text;
 
@@ -28,3 +30,9 @@ ALTER TABLE llm_providers
 
 COMMENT ON COLUMN llm_providers.last_check_status IS
     'Итог последней пробы: ok, limited, config_error, unavailable. NULL — проверки ещё не было.';
+
+INSERT INTO schema_migrations (version)
+VALUES ('066_llm_provider_check_status')
+ON CONFLICT DO NOTHING;
+
+COMMIT;
