@@ -19,6 +19,28 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 . "$SCRIPT_DIR/lib.sh"
 
+# Шаг, которого может не быть в только что скачанной версии.
+#
+# `git pull` заменяет файлы под уже запущенным скриптом, а bash продолжает
+# выполнять прежнюю версию: она зовёт то, что обновление как раз удалило.
+# Так упало обновление, убравшее `nocodb-connect.sh`, — на предпоследнем
+# шаге, когда код, миграции и контейнеры уже обновились. Пропустить
+# исчезнувший шаг правильнее, чем уронить почти законченное обновление.
+run_step_if_present() {
+	local script="$1"
+	shift
+	if [ ! -x "$script" ]; then
+		info "шаг пропущен: $(basename "$script") удалён этим обновлением"
+		return 0
+	fi
+	"$script" "$@"
+}
+
+# Отпечаток самого скрипта до обновления кода: по нему видно, что дальше
+# работает уже устаревшая версия.
+SELF_HASH_BEFORE="$(sha256sum "$SCRIPT_DIR/update.sh" | cut -d" " -f1)"
+SELF_CHANGED=0
+
 PREVIEW=0
 FORCE=0
 case "${1:-}" in
@@ -258,6 +280,9 @@ elif [ "$GIT_BEHIND" -gt 0 ] && [ "${DIRTY:-0}" -eq 0 ]; then
 		die "git pull не удался — обновление остановлено, ничего не пересобрано"
 	fi
 	cp "$ROLLBACK_DIR/versions.env.new" "$VERSIONS_FILE"
+	if [ "$(sha256sum "$SCRIPT_DIR/update.sh" | cut -d" " -f1)" != "$SELF_HASH_BEFORE" ]; then
+		SELF_CHANGED=1
+	fi
 elif [ "$GIT_BEHIND" -eq 0 ]; then
 	info "репозиторий уже актуален"
 else
@@ -270,7 +295,7 @@ step "Pulling and rebuilding"
 # =====================================================================
 # Settings introduced by the commits just pulled — added before the
 # containers are rebuilt so nothing starts with a missing value.
-"$SCRIPT_DIR/ensure-env-defaults.sh"
+run_step_if_present "$SCRIPT_DIR/ensure-env-defaults.sh"
 load_env
 # Crawl4AI перестал быть опциональным: профиля "crawl4ai" больше нет ни у
 # одного сервиса, и оставшееся в .env значение только вводит в
@@ -328,7 +353,7 @@ recreate_caddy || die "Caddy не запустился с обновлённой
 ok "Caddy пересоздан с актуальной конфигурацией"
 
 "$SCRIPT_DIR/db-migrate.sh" || die "миграции завершились ошибкой после перезапуска сервисов"
-"$SCRIPT_DIR/admin-finalize-env.sh" ||
+run_step_if_present "$SCRIPT_DIR/admin-finalize-env.sh" ||
 	warn "не удалось завершить bootstrap административной панели"
 
 # =====================================================================
@@ -340,6 +365,11 @@ if "$SCRIPT_DIR/doctor.sh"; then
 	git -C "$ROOT_DIR" rev-parse HEAD > "$DEPLOYED_MARKER" 2>/dev/null || true
 	step "Update complete"
 	say "  Rollback point kept in .rollback/ — 'make rollback' returns to it."
+	if [ "$SELF_CHANGED" -eq 1 ]; then
+		warn "сам скрипт обновления изменился этим обновлением"
+		warn "прогон доработала прежняя версия; повторите make update —"
+		warn "второй прогон пойдёт новой, скачивать ему будет уже нечего"
+	fi
 	exit 0
 fi
 
