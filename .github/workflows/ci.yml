@@ -2432,11 +2432,18 @@ jobs:
           docker compose --env-file versions.env --env-file .env \
             exec -T -e PGPASSWORD="$EVA_DB_PASSWORD" postgres \
             psql -At -U "$EVA_DB_USER" -d "$EVA_DB_NAME" \
-              -c "SELECT status, tool_name, risk, action_description
-                    FROM tool_approvals ORDER BY id DESC LIMIT 10" 2>&1 || true
+              -c "SELECT created_at, status, tool_name, risk, action_description
+                    FROM tool_approvals ORDER BY created_at DESC LIMIT 10" 2>&1 || true
+          # Строка о подтверждении рождается до перезапуска сервиса, а
+          # `compose logs` показывает только текущий контейнер. Поэтому
+          # отбираем её по смыслу из всего, что есть, и лишь потом берём
+          # общий хвост.
+          echo "--- остановки хода подтверждением:"
+          docker compose --env-file versions.env --env-file .env \
+            logs eva-agent-service 2>&1 | grep -i 'подтвержд' | tail -10 || true
           echo "--- последние записи агента:"
           docker compose --env-file versions.env --env-file .env \
-            logs --tail=40 eva-agent-service 2>&1 | tail -40 || true
+            logs --tail=25 eva-agent-service 2>&1 | tail -25 || true
 
       - name: Tear down
         if: always()
