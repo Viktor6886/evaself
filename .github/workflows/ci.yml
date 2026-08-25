@@ -1788,6 +1788,18 @@ jobs:
                         id, object:'chat.completion.chunk', created:Math.floor(Date.now()/1000),
                         model:body.model || 'ci-model-b',
                         choices:[{index:0,delta:{},finish_reason:'stop'}],
+                      }) + '\n\n');
+                      // Учёт токенов идёт отдельным последним чанком с пустым
+                      // choices — так его шлёт настоящий OpenAI-совместимый
+                      // провайдер при include_usage. Мок клал usage в тот же
+                      // чанк, что и finish_reason, и это сходило с рук, пока
+                      // SDK закрывал ход прямо по stop_reason. С 0.7.3 ход
+                      // держится до отдельного события учёта, и мок, не
+                      // отправив его, вешал ход до таймаута.
+                      res.write('data: ' + JSON.stringify({
+                        id, object:'chat.completion.chunk', created:Math.floor(Date.now()/1000),
+                        model:body.model || 'ci-model-b',
+                        choices:[],
                         usage:{prompt_tokens:10,completion_tokens:3,total_tokens:13},
                       }) + '\n\n');
                       res.end('data: [DONE]\n\n');
