@@ -386,3 +386,44 @@ test("выключенная подсистема ничего не примир
   assert.equal(await new ApprovalService(db as never, false).reconcileStaleApprovals(), 0);
   assert.deepEqual(statements, []);
 });
+
+test("остановка хода подтверждением попадает в журнал — без аргументов инструмента", async () => {
+  // Ход, остановленный подтверждением, выглядит для человека как молчание
+  // Евы. Пока имя инструмента не попадало в журнал, у оператора не было
+  // ни одной зацепки: ровно так пришлось искать вслепую причину зависшего
+  // хода после обновления Agent SDK.
+  const db = new ApprovalDb();
+  const entries: Array<{ message: string; meta?: Record<string, unknown> }> = [];
+  const service = new ApprovalService(db as never, true, {
+    outbox: { send: async () => ({ queued: true }) },
+    logger: { info: (message, meta) => entries.push({ message, meta }) },
+    pollIntervalMs: 2,
+    waitTimeoutMs: 10,
+  });
+
+  await service.canUseTool({
+    userId: 7, chatId: 77, turn: {}, conversationId: "conversation-1",
+    riskFor: () => "destructive",
+  })("delete_tasks", { taskIds: [12, 13], note: "личное сообщение человека" }, { requestId: "traced" });
+
+  const record = entries.find((entry) => entry.message.includes("подтверждением"));
+  assert.ok(record, "остановка хода не записана в журнал");
+  assert.equal(record.meta?.tool, "delete_tasks");
+  assert.equal(record.meta?.risk, "destructive");
+  assert.equal(record.meta?.conversationId, "conversation-1");
+  // Отпечаток — да, содержимое — никогда: аргументы несут текст человека.
+  assert.equal(typeof record.meta?.argumentFingerprint, "string");
+  assert.doesNotMatch(JSON.stringify(entries), /личное сообщение|taskIds/);
+});
+
+test("разрешённый инструмент журнал не засоряет", async () => {
+  const db = new ApprovalDb();
+  const entries: string[] = [];
+  const service = new ApprovalService(db as never, true, {
+    logger: { info: (message) => entries.push(message) },
+  });
+  await service.canUseTool({
+    userId: 7, chatId: 77, turn: {}, riskFor: () => "read",
+  })("get_notes", {}, { requestId: "allowed" });
+  assert.deepEqual(entries, []);
+});
