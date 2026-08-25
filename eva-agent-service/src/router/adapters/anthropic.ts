@@ -19,7 +19,7 @@ import type {
   ProviderProfile,
 } from "../types.js";
 import { ProviderError } from "../types.js";
-import { classifyHttp, parameterValue, providerParameters, readSse } from "./shared.js";
+import { classifyHttp, parameterValue, providerParameters, providerUrl, readSse } from "./shared.js";
 import { decodeDataUri } from "../content.js";
 
 const API_VERSION = "2023-06-01";
@@ -160,7 +160,7 @@ async function post(
   stream: boolean,
   signal: AbortSignal,
 ): Promise<Response> {
-  const url = `${provider.base_url.replace(/\/+$/, "")}/messages`;
+  const url = providerUrl(provider.base_url, "messages");
   let response: Response;
   try {
     response = await (provider.fetcher ?? fetch)(url, {

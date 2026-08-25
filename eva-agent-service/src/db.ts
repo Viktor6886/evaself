@@ -92,6 +92,7 @@ export interface LlmProviderRow {
   supports_json?: boolean;
   supports_vision?: boolean;
   supports_streaming?: boolean;
+  last_check_status?: string | null;
 }
 
 export interface ModelMapping {
@@ -1549,19 +1550,32 @@ export class Database {
     return rows[0] ?? null;
   }
 
+  /**
+   * Итог проверки. `status` пишется рядом с булевым `ok`, а не вместо
+   * него: старый код читает булево и работает без изменений, панель
+   * показывает состояние. Отсутствие статуса означает проверку прежней
+   * версией — тогда остаётся булево.
+   */
   async recordLlmCheck(
     id: string,
-    result: { ok: boolean; message: string; models: unknown[] | null },
+    result: { ok: boolean; message: string; models: unknown[] | null; status?: string | null },
   ): Promise<LlmProviderRow | null> {
     const { rows } = await this.require().query<LlmProviderRow>(
       `UPDATE llm_providers SET
          last_checked_at = now(),
          last_check_ok = $2,
          last_check_message = $3,
-         last_models = $4::jsonb
+         last_models = $4::jsonb,
+         last_check_status = $5
        WHERE id = $1
        RETURNING *`,
-      [id, result.ok, result.message, result.models === null ? null : JSON.stringify(result.models)],
+      [
+        id,
+        result.ok,
+        result.message,
+        result.models === null ? null : JSON.stringify(result.models),
+        result.status ?? null,
+      ],
     );
     return rows[0] ?? null;
   }
@@ -1571,13 +1585,50 @@ export class Database {
     id: string,
     supportsVision: boolean,
   ): Promise<LlmProviderRow | null> {
+    return await this.setLlmProviderCapabilities(id, { vision: supportsVision });
+  }
+
+  /**
+   * Записывает возможности, выясненные пробой.
+   *
+   * Раньше так сохранялось только зрение, а инструменты, поток и строгий
+   * JSON оставались галочками оператора. Роутер отбирает провайдеров по
+   * этим полям (`chain.ts`), поэтому неверная галочка либо уводила запрос
+   * к модели, которая его не потянет, либо прятала пригодную.
+   *
+   * `null` означает «не выяснено» и оставляет прежнее значение: провайдер,
+   * ответивший лимитом, не должен стирать то, что уже про него известно.
+   */
+  async setLlmProviderCapabilities(
+    id: string,
+    capabilities: {
+      vision?: boolean | null;
+      streaming?: boolean | null;
+      tools?: boolean | null;
+      json?: boolean | null;
+    },
+  ): Promise<LlmProviderRow | null> {
+    const columns: Record<string, boolean | null | undefined> = {
+      supports_vision: capabilities.vision,
+      supports_streaming: capabilities.streaming,
+      supports_tools: capabilities.tools,
+      supports_json: capabilities.json,
+    };
+    const assignments: string[] = [];
+    const values: unknown[] = [id];
+    for (const [column, value] of Object.entries(columns)) {
+      if (value === null || value === undefined) continue;
+      values.push(value);
+      assignments.push(`${column} = $${values.length}`);
+    }
+    if (assignments.length === 0) return null;
     const { rows } = await this.require().query<LlmProviderRow>(
       `UPDATE llm_providers SET
-         supports_vision = $2,
+         ${assignments.join(", ")},
          updated_at = now()
        WHERE id = $1
        RETURNING *`,
-      [id, supportsVision],
+      values,
     );
     if (rows[0]) await this.require().query("SELECT pg_notify('llm_routing_settings_changed', '')");
     return rows[0] ?? null;

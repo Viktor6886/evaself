@@ -180,6 +180,10 @@ function safeProvider(value: unknown): Record<string, unknown> {
     "api_key_configured",
     "last_checked_at",
     "last_check_ok",
+    // Состояние пробы: панель показывает по нему четыре положения вместо
+    // «прошёл / не прошёл». Без него в списке провайдеров лимит запросов
+    // выглядел бы так же, как отклонённый ключ.
+    "last_check_status",
     "last_check_message",
     "last_models",
     "created_at",
