@@ -67,6 +67,15 @@ export interface SkillsAuditResult {
   catalogAvailable: boolean;
   /** Навыки проекта, перечисленные штатным чтением каталога. */
   project: SkillEntry[];
+  /**
+   * Сколько навыков Evaself ожидает.
+   *
+   * Отдаётся наружу, чтобы знаменатель «нашли N из M» не пришлось писать
+   * второй раз рядом с потребителем. Ровно так `doctor.sh` и разошёлся с
+   * кодом: в нём стояло рукописное 12, когда навыков стало тринадцать, и
+   * здоровая установка печатала «13/12» — вид отказа там, где его нет.
+   */
+  expected: number;
   /** Каких навыков Evaself не хватает в каталоге. */
   missing: string[];
   /** Одинаковые `name` среди перечислимого. */
@@ -154,6 +163,7 @@ export async function auditSkills(input: {
     nativeSkillTool: input.sessionTools === null ? null : input.sessionTools.includes("Skill"),
     catalogAvailable: catalog.available,
     project: catalog.skills,
+    expected: EVA_PROJECT_SKILLS.length,
     missing: catalog.available
       ? EVA_PROJECT_SKILLS.filter((name) => !present.has(name))
       : [...EVA_PROJECT_SKILLS],
