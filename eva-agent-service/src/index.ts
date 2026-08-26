@@ -12,7 +12,13 @@ import { Redis } from "ioredis";
 import { applyManagedRuntimeConfig } from "./admin/managed-runtime-config.js";
 import { AgentToolFactory, isHostExecutionTool, toolApprovalCategory, toolRisk } from "./agent-tools.js";
 import { BackgroundRuntime } from "./background.js";
-import { configWarnings, loadConfig, readPersona, readSystemPrompt } from "./config.js";
+import {
+  configWarnings,
+  loadConfig,
+  readPersona,
+  readSystemPrompt,
+  SYSTEM_PROMPT_FILE,
+} from "./config.js";
 import { CrisisMonitor } from "./crisis.js";
 import { ConversationPurposeService } from "./conversations/purpose-service.js";
 import { Database } from "./db.js";
@@ -37,6 +43,8 @@ import { ValkeyMiniAppSessions } from "./public/webapp-session.js";
 import { UserTurnLock } from "./turns/user-turn-lock.js";
 import { PersonaSync } from "./letta/persona-sync.js";
 import { RuntimeContextBuilder } from "./runtime/runtime-context.js";
+import { CanonicalContextStore } from "./runtime/canonical-context.js";
+import { ArtifactRegistry } from "./artifacts/registry.js";
 import { SdkSettingsManager } from "./sdk-settings.js";
 import { ChannelLinkService } from "./channels/channel-links.js";
 import { buildServer, VERSION } from "./server.js";
@@ -67,10 +75,17 @@ async function main(): Promise<void> {
   // иначе трассы окажутся пустыми (требование 2 шага 09).
   const observability = buildObservability(config, VERSION, logger);
 
-  const [persona, systemPrompt] = await Promise.all([
-    readPersona(config),
-    readSystemPrompt(),
-  ]);
+  // Значение по умолчанию — файлы репозитория. Правка из панели живёт
+  // версией в реестре артефактов и подменяет их на чтении; пока правок
+  // нет, поведение установки в точности прежнее.
+  const canonicalDefaults = {
+    persona: await readPersona(config),
+    systemPrompt: await readSystemPrompt(),
+    personaPath: config.personaFile,
+    systemPromptPath: SYSTEM_PROMPT_FILE,
+  };
+  let persona = canonicalDefaults.persona;
+  let systemPrompt = canonicalDefaults.systemPrompt;
   const db = new Database(config.databaseUrl);
   await db.connect();
   logger.info("PostgreSQL подключён");
@@ -113,6 +128,32 @@ async function main(): Promise<void> {
   // означает лишь повторное открытие приложения.
   const miniAppSessions = new ValkeyMiniAppSessions(redis);
   const rateLimiter = new ValkeyRateLimiter(redis);
+  // Реестр артефактов ведёт версии обоих канонических текстов. Узкий
+  // адаптер пула: `pg` типизирует строку как `QueryResultRow`, реестру
+  // достаточно объекта с полями.
+  const canonicalStore = new CanonicalContextStore(
+    new ArtifactRegistry({
+      query: async (sql: string, values: unknown[] = []) =>
+        await db.query(sql, values) as unknown as {
+          rows: Record<string, unknown>[];
+          rowCount: number | null;
+        },
+    }),
+    canonicalDefaults,
+    process.env.EVA_ENV ?? "production",
+  );
+  try {
+    const stored = await canonicalStore.current();
+    persona = stored.persona;
+    systemPrompt = stored.systemPrompt;
+  } catch (error) {
+    // Установка без миграции 067: таблиц реестра нет, тексты берутся из
+    // файлов. Это рабочее состояние, а не отказ — обновление накатывает
+    // миграцию отдельным шагом, и до него сервис обязан подниматься.
+    logger.warn("Реестр канонических текстов недоступен, читаются файлы", {
+      code: error instanceof Error ? error.name : "unknown_error",
+    });
+  }
   const letta = new LettaService(config, logger, persona, systemPrompt);
   {
     // Сверка установленного пакета Letta с проверенной матрицей.
@@ -282,8 +323,11 @@ async function main(): Promise<void> {
     new ChannelLinkService(db),
     {
        syncAgent: (input, text, options, prompt) => personaSync.syncAgent(input, text, options, prompt),
-      persona: () => persona,
-      systemPrompt: () => systemPrompt,
+      // Живое значение процесса, а не снимок старта: администратор
+      // правит персону из панели, и ход обязан сверяться с тем, что
+      // действует сейчас.
+      persona: () => letta.canonicalContext().persona,
+      systemPrompt: () => letta.canonicalContext().systemPrompt,
     },
   );
   const inbox = new PostgresTelegramInbox(db);
@@ -459,6 +503,14 @@ async function main(): Promise<void> {
     // инструменты на самом деле. Имена берутся из той же фабрики,
     // которая их регистрирует, — второго списка не заводим.
     productToolNames: () => toolFactory.forConversation("readiness-probe").map((tool) => tool.name),
+    // Правка персоны и системного промпта из панели. Доставку живым
+    // агентам выполняет тот же PersonaSync, что и при старте: второго
+    // пути синхронизации не появляется.
+    canonicalContext: {
+      store: canonicalStore,
+      sync: async (nextPersona, nextSystemPrompt) =>
+        await personaSync.sync(nextPersona, nextSystemPrompt),
+    },
     ...(knowledgeResearch ? { knowledgeResearch } : {}),
   });
 

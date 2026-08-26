@@ -169,7 +169,7 @@ if [[ "$DOMAIN" == *.localhost ]]; then
 	info "локальный режим: публичная проверка DNS пропущена"
 elif [ -n "$SERVER_IP" ]; then
 	info "публичный IP сервера: $SERVER_IP"
-	for host in "$DOMAIN" "$DOMAIN_APP" "$DOMAIN_API" "$DOMAIN_LETTA"; do
+	for host in "$DOMAIN" "$DOMAIN_APP" "$DOMAIN_API"; do
 		resolved="$(getent ahostsv4 "$host" 2>/dev/null | awk 'NR==1 {print $1}')"
 		if [ -z "$resolved" ]; then
 			warn "$host пока не разрешается — HTTPS не заработает"
@@ -188,10 +188,6 @@ fi
 # =====================================================================
 step "Загрузка образов"
 run_with_progress "загрузка upstream-образов" compose pull --ignore-buildable
-
-# The Caddy image exists now, so the basic-auth hash can be produced even
-# on a host that had no Docker at all when configure.sh ran.
-"$SCRIPT_DIR/hash-letta-password.sh" || warn "пароль Letta UI не хеширован — вход на https://${DOMAIN_LETTA} не сработает"
 
 step "Сборка локальных образов"
 run_with_progress "сборка локальных образов" compose build --pull
@@ -259,19 +255,17 @@ cat <<SUMMARY
 
   ${C_BOLD}Адреса${C_RESET}
     Сайт        https://${DOMAIN}
-    Консоль     https://${DOMAIN}/admin/
+    Панель      https://${DOMAIN}/admin
     WebApp      https://${DOMAIN_APP}
     API         https://${DOMAIN_API}/health
-    Letta       https://${DOMAIN_LETTA}
-    Статус      https://${DOMAIN_STATUS}
 
   ${C_BOLD}Административный доступ${C_RESET}
-    Evaself    ${EVA_ADMIN_USERNAME:-admin}
-    Letta UI    ${LETTA_UI_USER}
+    Вход один: https://${DOMAIN}/admin, логин ${EVA_ADMIN_USERNAME:-admin}.
+    Letta, мониторинг, агенты и подписки — разделы этой же панели.
     Пароли не выводятся в терминал и журнал.
   ${C_BOLD}Следующие шаги${C_RESET}
     1. Проверьте Telegram webhook: scripts/telegram-webhook.sh status
-    2. Настройте агентов и проверьте чат в административной консоли Letta.
+    2. Откройте https://${DOMAIN}/admin и проверьте разделы «Агенты» и «Letta».
     3. Для голоса заполните MEDIA_ASR_* / MEDIA_TTS_* и выполните make restart
 
   ${C_BOLD}Основные команды${C_RESET}

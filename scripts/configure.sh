@@ -62,15 +62,31 @@ done
 
 DOMAIN_APP="app.${DOMAIN}"
 DOMAIN_API="api.${DOMAIN}"
-DOMAIN_LETTA="letta.${DOMAIN}"
-DOMAIN_STATUS="status.${DOMAIN}"
+
+# Консоль Letta и страница статуса стали разделами административной
+# панели (/admin/letta и /admin/monitoring). Новая установка отдельных
+# поддоменов не заводит: они не нужны, а лишний публичный сертификат —
+# это лишняя публичная поверхность.
+#
+# Уже настроенная установка сохраняет свои значения: Caddy отвечает на
+# них 308-редиректом на нужный раздел, чтобы закладки не умерли
+# одновременно с обновлением. Очистить их и удалить DNS-записи —
+# отдельное решение оператора.
+DOMAIN_LETTA="$(current DOMAIN_LETTA || true)"
+DOMAIN_STATUS="$(current DOMAIN_STATUS || true)"
 
 if [ "$ADVANCED" -eq 1 ]; then
 	say "  Расширенный режим: Enter оставляет автоматически рассчитанное значение."
 	ask_optional DOMAIN_APP    "Домен WebApp"   "$DOMAIN_APP"
 	ask_optional DOMAIN_API    "Домен API"      "$DOMAIN_API"
-	ask_optional DOMAIN_LETTA  "Домен Letta UI" "$DOMAIN_LETTA"
-	ask_optional DOMAIN_STATUS "Домен статуса"  "$DOMAIN_STATUS"
+	if [ -n "$DOMAIN_LETTA$DOMAIN_STATUS" ]; then
+		say ""
+		say "  Прежние поддомены консоли Letta и страницы статуса выведены из"
+		say "  эксплуатации: оба раздела теперь в https://$DOMAIN/admin."
+		say "  Пустое значение снимает редирект — после этого DNS-записи можно удалить."
+		ask_optional DOMAIN_LETTA  "Старый домен Letta (редирект)" "$DOMAIN_LETTA"
+		ask_optional DOMAIN_STATUS "Старый домен статуса (редирект)" "$DOMAIN_STATUS"
+	fi
 fi
 
 while :; do
@@ -100,10 +116,11 @@ else
 fi
 
 info "HTTPS будет выпущен для:"
-for host in "$DOMAIN" "$DOMAIN_APP" "$DOMAIN_API" "$DOMAIN_LETTA" "$DOMAIN_STATUS"; do
+for host in "$DOMAIN" "$DOMAIN_APP" "$DOMAIN_API" ${DOMAIN_LETTA:+"$DOMAIN_LETTA"} ${DOMAIN_STATUS:+"$DOMAIN_STATUS"}; do
 	info "  https://$host"
 done
 info "Все домены уже должны указывать на IP этого сервера."
+info "Административная панель: https://$DOMAIN/admin — Letta и мониторинг внутри неё."
 
 # =====================================================================
 # 2. Telegram
@@ -198,12 +215,13 @@ PROFILES="$(current COMPOSE_PROFILES || true)"
 PROFILES="$(printf '%s' "$PROFILES" | sed 's/crawl4ai//; s/,,/,/g; s/^,//; s/,$//')"
 info "Crawl4AI устанавливается всегда (до 1–1,5 ГБ RAM во время обработки)"
 
-if confirm "Установить Uptime Kuma для страницы статуса?" n; then
-	case ",$PROFILES," in *,monitoring,*) : ;; *) PROFILES="${PROFILES:+$PROFILES,}monitoring" ;; esac
-	ok "страница статуса включена: https://$DOMAIN_STATUS"
-else
-	PROFILES="$(printf '%s' "$PROFILES" | sed 's/monitoring//; s/,,/,/g; s/^,//; s/,$//')"
-fi
+# Профиль monitoring поднимал Uptime Kuma ради публичной страницы
+# статуса. Сервиса больше нет: мониторинг стал разделом панели и строится
+# на собственных проверках health-worker, которые и так выполняются.
+# Оставшееся значение вычищаем — иначе compose ругается на профиль,
+# которого больше нет ни у одного сервиса.
+PROFILES="$(printf '%s' "$PROFILES" | sed 's/monitoring//; s/,,/,/g; s/^,//; s/,$//')"
+info "Мониторинг доступен в панели: https://$DOMAIN/admin/monitoring"
 
 TZ_DEFAULT="$(current TZ || true)"
 TZ_DEFAULT="${TZ_DEFAULT:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
@@ -242,6 +260,14 @@ MEDIA_SERVICE_TOKEN="$(keep_or_generate MEDIA_SERVICE_TOKEN)"
 LLM_CONFIG_ENCRYPTION_KEY="$(keep_or_generate LLM_CONFIG_ENCRYPTION_KEY)"
 
 # Admin passwords are stored only in the protected .env file.
+#
+# Имя переменной осталось от отдельной консоли Letta, у которой был свой
+# HTTP Basic Auth. Самой консоли и её входа больше нет: вход в установку
+# один — административная панель. Значение при этом продолжает работать
+# и переименования не требует: из него bootstrap создаёт первого owner
+# панели, и на обновляемых установках оно уже лежит в .env. Хеша
+# LETTA_UI_PASSWORD_HASH больше нет ни у кого — basic auth снят вместе с
+# поддоменом.
 LETTA_UI_PASSWORD="$(keep_or_generate LETTA_UI_PASSWORD gen_password)"
 LAVA_WEBHOOK_PASSWORD="$(keep_or_generate LAVA_WEBHOOK_PASSWORD)"
 
@@ -344,16 +370,6 @@ set_env EVASELF_INCOMPLETE_SETTINGS "$INCOMPLETE_CSV"
 
 chmod 600 "$ENV_FILE"
 ok ".env записан с mode 600"
-
-# ---------------------------------------------------------------------
-# bcrypt hash for the Letta console's basic auth
-# ---------------------------------------------------------------------
-# On a truly clean host the Caddy image is not pulled yet, so this can
-# fail here; install.sh runs it again after the pull.
-if [ "${EVASELF_SKIP_PASSWORD_HASH:-0}" != "1" ]; then
-	"$SCRIPT_DIR/hash-letta-password.sh" --force 2>/dev/null \
-		|| warn "пароль Letta UI будет хеширован после загрузки образов"
-fi
 
 step "Настройка завершена"
 say "  Проверить файл: less .env"

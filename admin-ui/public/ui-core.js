@@ -40,7 +40,30 @@ const state = {
   sttEditing: null,
   sttTestingId: null,
   sttSchemaError: null,
+  // Разделы единой панели.
+  agents: [],
+  currentAgent: null,
+  currentSubscription: null,
+  persona: null,
+  personaTab: "persona",
+  letta: null,
+  lettaTab: "runtime",
+  lettaAgentId: null,
+  monitoring: null,
 };
+
+/**
+ * Базовый путь панели.
+ *
+ * Панель отдаётся с `/admin/` основного домена, и Caddy снимает этот
+ * префикс до статики: `/admin/agents` приходит сюда как `/agents` и
+ * попадает в index.html через try_files. Значит, адрес раздела —
+ * настоящий адрес, его можно скопировать и открыть заново, а не якорь.
+ *
+ * Префикс вычисляется, а не зашит: браузерные тесты открывают ту же
+ * статику с корня, и зашитое `/admin/` увело бы их в несуществующий путь.
+ */
+const PANEL_BASE = window.location.pathname.replace(/\/[^/]*$/, "/");
 const $ = (selector) => document.querySelector(selector);
 
 function csrf() {

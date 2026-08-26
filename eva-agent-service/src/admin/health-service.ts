@@ -232,6 +232,54 @@ export class HealthService {
     return rows[0];
   }
 
+  /**
+   * Последние проверки установки: что проверяли, когда и с каким исходом.
+   *
+   * Раздел «Мониторинг» строится на собственных данных Evaself, а не на
+   * внешней статусной странице: health-worker уже опрашивает каждый
+   * сервис из каталога и пишет сюда исход, а `service_statuses` держит
+   * текущее состояние. Внешнему Uptime Kuma в этой картине нечего
+   * добавить — он видел бы то же самое снаружи и с большим опозданием.
+   */
+  async recentChecks(limit: number) {
+    const cap = Math.min(Math.max(1, Math.floor(limit)), 200);
+    const { rows } = await this.pool.query<{
+      id: string; target_type: TargetType; target_id: string; status: string;
+      requested_at: Date; finished_at: Date | null; ok: boolean | null;
+      duration_ms: number | null; error_code: string | null;
+      error_message_short: string | null;
+    }>(
+      `SELECT id, target_type, target_id, status, requested_at, finished_at,
+              ok, duration_ms, error_code, error_message_short
+         FROM health_checks
+        ORDER BY requested_at DESC
+        LIMIT $1`,
+      [cap],
+    );
+    return {
+      checks: rows.map((row) => ({
+        ...row,
+        title: this.titleOf(row.target_type, row.target_id),
+      })),
+    };
+  }
+
+  /**
+   * Сводка раздела «Мониторинг» одним запросом.
+   *
+   * Три источника собираются на сервере, а не тремя обращениями из
+   * браузера: они читаются вместе, показываются вместе и расходиться им
+   * незачем.
+   */
+  async monitoring(hours: number, limit: number) {
+    const [overview, checks, errors] = await Promise.all([
+      this.overview(),
+      this.recentChecks(limit),
+      this.errors(hours, limit),
+    ]);
+    return { ...overview, recent_checks: checks.checks, errors };
+  }
+
   async statusMap(): Promise<Map<string, StatusRow>> {
     const { rows } = await this.pool.query<StatusRow>(
       `SELECT target_id, target_type, enabled, configured, state, color,

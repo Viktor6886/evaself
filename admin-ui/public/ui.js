@@ -14,12 +14,30 @@ const LOADERS = {
   tts: loadTts,
   operations: loadOperations,
   users: loadUsers,
+  subscriptions: loadSubscriptions,
+  agents: loadAgents,
+  persona: loadPersona,
+  letta: loadLetta,
+  monitoring: loadMonitoring,
   settings: loadSettings,
   security: loadSecrets,
   audit: loadAudit,
 };
 
-function openPage(name) {
+/**
+ * Раздел, названный в адресе.
+ *
+ * `/admin/letta` и `/admin/monitoring` — настоящие адреса, а не якоря:
+ * их можно дать ссылкой, открыть в новой вкладке и обновить страницей.
+ * Неизвестный сегмент (в том числе `index.html` в браузерных тестах)
+ * означает «раздел не назван» и открывает обзор.
+ */
+function pageFromLocation() {
+  const name = window.location.pathname.slice(PANEL_BASE.length).replace(/\/$/, "");
+  return Object.prototype.hasOwnProperty.call(LOADERS, name) ? name : "overview";
+}
+
+function openPage(name, options = {}) {
   state.page = name;
   document.querySelectorAll(".page").forEach((item) => {
     item.classList.toggle("active", item.id === `page-${name}`);
@@ -27,9 +45,25 @@ function openPage(name) {
   document.querySelectorAll(".nav-item[data-page]").forEach((item) => {
     item.classList.toggle("active", item.dataset.page === name);
   });
+  // Адрес меняется без перезагрузки. `replaceState` — для первого
+  // открытия и для кнопки «назад»: иначе один и тот же раздел копился бы
+  // в истории и «назад» не выходило бы из панели вовсе.
+  const target = `${PANEL_BASE}${name === "overview" ? "" : name}`;
+  if (!options.fromHistory && window.location.pathname !== target) {
+    try {
+      window.history[options.replace ? "replaceState" : "pushState"]({ page: name }, "", target);
+    } catch {
+      // file:// и песочницы без истории: раздел всё равно открывается,
+      // просто адрес остаётся прежним.
+    }
+  }
   setSidebar(false);
   LOADERS[name]?.().catch(handleError);
 }
+
+window.addEventListener("popstate", () => {
+  openPage(pageFromLocation(), { fromHistory: true });
+});
 
 function startLiveUpdates() {
   stopLiveUpdates();
@@ -74,7 +108,7 @@ $("#login-form").addEventListener("submit", async (event) => {
     });
     formElement.reset();
     showApp(payload.user);
-    openPage("overview");
+    openPage(pageFromLocation(), { replace: true });
   } catch (error) {
     showLogin(error.message);
   } finally {
@@ -122,5 +156,5 @@ $("#nav").addEventListener("click", (event) => {
 request("/me").then(({ payload }) => {
   showApp(payload.user);
   watchTables();
-  openPage("overview");
+  openPage(pageFromLocation(), { replace: true });
 }).catch(() => showLogin());

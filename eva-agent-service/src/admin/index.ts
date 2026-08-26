@@ -18,6 +18,10 @@ import { buildAdminServer } from "./server.js";
 import { UserService } from "./user-service.js";
 import { ArtifactRegistry } from "../artifacts/registry.js";
 import { AgentDirectoryService } from "./agent-directory.js";
+import { AdminAgentService } from "./agent-admin-service.js";
+import { SubscriptionAdminService } from "./subscription-service.js";
+import { PersonaAdminService } from "./persona-admin-service.js";
+import { LettaConsoleService } from "./letta-console-service.js";
 import { ToolApprovalService } from "./tool-approvals.js";
 import { McpServerPolicyRepository } from "../tools/mcp.js";
 import { TurnOperationsService } from "./turn-operations.js";
@@ -118,6 +122,14 @@ async function main(): Promise<void> {
   };
   const artifacts = new ArtifactRegistry(registryDb);
 
+  // Каталог агентов нужен и разделу «Агенты» единой панели, и старому
+  // CRUD за флагом. Экземпляр один: два означали бы два разных стража
+  // удаления на одних и тех же данных.
+  const directory = new AgentDirectoryService(registryDb, new DeleteGuard({
+    query: registryDb.query,
+    withSystemScope: async (_reason, work) => await work(),
+  }));
+
   const app = buildAdminServer({
     auth,
     audit,
@@ -139,16 +151,17 @@ async function main(): Promise<void> {
     // регистрируется только при включённом EVA_ADMIN_CRUD: собранный, но
     // незарегистрированный сервис ничего не стоит и ни к чему не
     // обращается.
+    // Разделы единой панели. Все изменяющие действия уходят в
+    // eva-agent-service тем же путём, каким работает production: агентов
+    // создаёт и удаляет только он, персону раскатывает только он.
+    panel: {
+      agents: new AdminAgentService(pool, directory, agentClient),
+      subscriptions: new SubscriptionAdminService(pool),
+      persona: new PersonaAdminService(agentClient),
+      letta: new LettaConsoleService(agentClient),
+    },
     crud: {
-      directory: new AgentDirectoryService(registryDb, new DeleteGuard({
-        query: registryDb.query,
-        // Область у административного запроса уже своя: роль подтверждена,
-        // запись аудита открыта, и именно она разрешает границе арендатора
-        // видеть данные всех пользователей. Заводить поверх неё системную
-        // область значило бы объявить второе основание доступа к тем же
-        // строкам — и потерять связь запроса с записью аудита.
-        withSystemScope: async (_reason, work) => await work(),
-      })),
+      directory,
       tools: new ToolApprovalService(registryDb),
       mcp: new McpServerPolicyRepository(registryDb as never),
       turns: new TurnOperationsService(registryDb),

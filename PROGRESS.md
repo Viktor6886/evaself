@@ -6,12 +6,12 @@
 ## Состояние
 
 ```
-BASELINE:      1173b6e — main после PR #251
-BRANCH:        —
-STATUS:        выполнен
-LAST_COMMIT:   1173b6e — непрерывность длительной работы (PR #251)
+BASELINE:      f2267d3 — main после PR #267
+BRANCH:        claude/evaself-unified-admin-panel-bi77r0
+STATUS:        в работе
+LAST_COMMIT:   —
 BLOCKER:       —
-NEXT:          ждать команду человека на следующую порцию
+NEXT:          единая административная панель: один домен, один вход
 ```
 
 Значения полей:

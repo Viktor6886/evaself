@@ -10,6 +10,7 @@
 | Runtime facts/readiness | Фактические возможности и готовность Letta | `src/letta/readiness.ts`, `src/letta/capabilities.ts` |
 | Memory blocks | Четыре нативных блока агента | `src/letta/memory-blocks.ts` |
 | Canonical context | SDK/WebSocket system update и MemFS reconciliation, fail-open | `src/letta.ts`, `src/letta/persona-sync.ts` |
+| Canonical context store | Действующие персона и системный промпт: файл репозитория либо опубликованная версия реестра артефактов | `src/runtime/canonical-context.ts`, `src/runtime/canonical-routes.ts` |
 | Persona sync | Односторонняя синхронизация канонической персоны | `src/letta/persona-sync.ts`, `library/persona/eva.md` |
 | Runtime context | Время, профиль, подписка, цели, курсор программы и ближайшие задачи текущего хода | `src/runtime/runtime-context.ts` |
 | Непрерывность работы | ACTIVE OBJECTIVE/TURN OBJECTIVE и чекпойнт ACTIVE WORK в `current_state` | `src/letta/memory-blocks.ts`, `library/persona/eva.md` |
@@ -79,6 +80,12 @@ BullMQ не обрабатывает интерактивный ход и не �
 | Компонент | Назначение | Путь |
 |---|---|---|
 | Admin API | RBAC, sudo, audit и системные операции | `src/admin/` |
+| Единая панель | Разделы агентов, подписок, персоны, Letta и мониторинга под одной сессией | `src/admin/panel-routes.ts`, `admin-ui/public/` |
+| Агенты (админ) | Список, карточка, создание, изменение и удаление через production-путь Letta Agent SDK | `src/admin/agent-admin-service.ts` |
+| Подписки (админ) | Ручное назначение, тариф, продление, отмена и снятие ручного решения; оплата и решение администратора различимы | `src/admin/subscription-service.ts` |
+| Персона (админ) | Правка и применение канонических текстов | `src/admin/persona-admin-service.ts` |
+| Letta (админ) | Runtime, диалоги, контекст и журнал Letta без открытого прокси | `src/admin/letta-console-service.ts` |
+| Мониторинг | Состояние сервисов, история проверок и ошибки за окно | `src/admin/health-service.ts`, `src/admin/health-worker.ts` |
 | Secret Store | Зашифрованные write-only секреты | `src/admin/secret-store.ts` |
 | Outbound gateway | SSRF-защита внешних Base URL | `src/admin/outbound-gateway.ts` |
 | Updater | Ограниченные операции обновления/перезапуска | `src/admin/updater-index.ts` |

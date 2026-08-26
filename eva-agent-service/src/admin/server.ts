@@ -20,6 +20,11 @@ import type { ArtifactRegistry } from "../artifacts/registry.js";
 import type { AgentDirectoryService } from "./agent-directory.js";
 import { registerArtifactRoutes } from "./artifact-routes.js";
 import { registerCrudRoutes } from "./crud-routes.js";
+import { registerPanelRoutes } from "./panel-routes.js";
+import type { AdminAgentService } from "./agent-admin-service.js";
+import type { SubscriptionAdminService } from "./subscription-service.js";
+import type { PersonaAdminService } from "./persona-admin-service.js";
+import type { LettaConsoleService } from "./letta-console-service.js";
 import type { ToolApprovalService } from "./tool-approvals.js";
 import type { TurnOperationsService } from "./turn-operations.js";
 import type { McpServerPolicyRepository } from "../tools/mcp.js";
@@ -100,6 +105,18 @@ export interface AdminServerServices {
     tools: ToolApprovalService;
     mcp?: McpServerPolicyRepository;
     turns: TurnOperationsService;
+  };
+  /**
+   * Разделы единой панели: агенты, подписки, персона и промпт, Letta и
+   * мониторинг. Флага у них нет намеренно — это и есть административная
+   * панель, а не эксперимент поверх неё: выключенный раздел «Агенты»
+   * означал бы установку, которой нечем управлять.
+   */
+  panel?: {
+    agents: AdminAgentService;
+    subscriptions: SubscriptionAdminService;
+    persona: PersonaAdminService;
+    letta: LettaConsoleService;
   };
   events: Redis;
   logger: Logger;
@@ -496,6 +513,47 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
         const context = contexts.get(request as FastifyRequest);
         if (!context?.audit) return;
         await services.audit.annotate(context.audit.id, details);
+      },
+    });
+  }
+
+  // Разделы единой панели. Регистрируются всегда: домен один, панель
+  // одна, и половина её разделов хуже, чем понятный отказ сервиса.
+  if (services.panel) {
+    registerPanelRoutes(app, {
+      ...services.panel,
+      health: services.health,
+      actorId: (request) => contexts.get(request as FastifyRequest)?.session?.user.id ?? null,
+      actor: (request) => {
+        const session = contexts.get(request as FastifyRequest)?.session;
+        return {
+          id: session?.user.id ?? null,
+          username: session?.user.username ?? "unknown",
+        };
+      },
+      audit: async (request, details) => {
+        const context = contexts.get(request as FastifyRequest);
+        if (!context?.audit) return;
+        await services.audit.annotate(context.audit.id, details);
+      },
+      // Чтение переписки — безопасный метод, и автоматическая запись
+      // аудита его не покрывает. Запись открывается здесь руками: кто,
+      // чей диалог и сколько сообщений открыл. Область запроса получает
+      // её идентификатор — без него граница арендатора до переписки не
+      // пропустит.
+      auditMessages: async (request, details) => {
+        const context = contexts.get(request as FastifyRequest);
+        if (!context) return;
+        const entry = await services.audit.start({
+          requestId: context.requestId,
+          operation: "GET /api/admin/v1/panel/letta/conversations/:conversationId/messages",
+          target: String(details.conversation_id ?? ""),
+          ip: safeIp((request as FastifyRequest).ip),
+          actor: actorOf(context),
+          params: details,
+        });
+        context.audit = entry;
+        context.scope.auditId = entry.id;
       },
     });
   }

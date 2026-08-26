@@ -41,7 +41,7 @@ const KNOWN_SECRETS: Readonly<Record<string, string[]>> = {
   sec_searxng_secret: ["searxng"],
   sec_media_asr_api_key: ["media-service"],
   sec_media_tts_api_key: ["media-service"],
-  sec_letta_ui_password: ["letta-ui"],
+  sec_letta_ui_password: ["admin-api"],
   sec_lava_webhook_user: ["payment-runtime"],
   sec_lava_webhook_password: ["payment-runtime"],
   sec_postgres_super_password: ["postgres"],
