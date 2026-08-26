@@ -313,6 +313,84 @@ describe("разделы единой панели", () => {
     );
   });
 
+  /*
+   * Полноэкранная правка.
+   *
+   * Персона — тридцать шесть килобайт markdown. В поле на четверть
+   * экрана телефона такой текст правят, прокручивая страницу вокруг
+   * поля: место правки теряется, а кнопка «Сохранить» уезжает за нижний
+   * край. Проверяется то, ради чего режим существует: поле занимает
+   * большую часть экрана, действия остаются в нём, а текст не теряется.
+   */
+  test("развёрнутый редактор отдаёт полю экран и держит кнопки на виду", async () => {
+    const panel = await open({ viewport: PHONE });
+    await panel.page.evaluate(() => openPage("persona"));
+    await panel.page.waitForFunction(() => document.querySelector("#persona-text").value.length > 0);
+
+    const before = await panel.page.evaluate(() =>
+      document.querySelector("#persona-text").getBoundingClientRect().height);
+    await panel.page.click("#persona-expand");
+    await panel.page.waitForTimeout(200);
+
+    const after = await panel.page.evaluate(() => {
+      const field = document.querySelector("#persona-text").getBoundingClientRect();
+      const actions = document.querySelector("#persona-actions").getBoundingClientRect();
+      return {
+        fieldHeight: field.height,
+        fieldWidth: field.width,
+        actionsVisible: actions.bottom <= window.innerHeight + 1 && actions.top >= 0,
+        screen: window.innerHeight,
+        width: window.innerWidth,
+        text: document.querySelector("#persona-text").value.length,
+      };
+    });
+    assert.ok(
+      after.fieldHeight > before * 1.5,
+      `поле не выросло: было ${Math.round(before)}, стало ${Math.round(after.fieldHeight)}`,
+    );
+    assert.ok(
+      after.fieldHeight > after.screen * 0.5,
+      `поле занимает меньше половины экрана: ${Math.round(after.fieldHeight)} из ${after.screen}`,
+    );
+    assert.ok(after.fieldWidth <= after.width, "поле шире экрана");
+    assert.ok(after.actionsVisible, "кнопки ушли за край — до них надо прокручивать вслепую");
+    assert.ok(after.text > 0, "текст потерялся при разворачивании");
+
+    // Сквозь развёрнутый редактор не должно читаться то, что под ним.
+    const alpha = await panel.page.evaluate(() => {
+      const value = getComputedStyle(document.querySelector("#persona-editor")).backgroundColor;
+      const parts = value.match(/[\d.]+/g) ?? [];
+      return parts.length > 3 ? Number(parts[3]) : 1;
+    });
+    assert.equal(alpha, 1, "фон развёрнутого редактора полупрозрачен");
+  });
+
+  test("Escape сворачивает редактор, а переход в другой раздел его не оставляет", async () => {
+    const panel = await open({ viewport: PHONE });
+    await panel.page.evaluate(() => openPage("persona"));
+    await panel.page.waitForFunction(() => document.querySelector("#persona-text").value.length > 0);
+    const expanded = () => panel.page.evaluate(() =>
+      document.querySelector("#persona-editor").classList.contains("is-fullscreen"));
+
+    await panel.page.click("#persona-expand");
+    assert.equal(await expanded(), true);
+    await panel.page.keyboard.press("Escape");
+    assert.equal(await expanded(), false, "Escape не свернул редактор");
+
+    // Развёрнутый редактор закрывает собой всё; уход в другой раздел
+    // обязан его снять, иначе он накроет страницу, которую не открывали.
+    await panel.page.click("#persona-expand");
+    assert.equal(await expanded(), true);
+    await panel.page.evaluate(() => document.querySelector('#nav [data-page="agents"]').click());
+    await panel.page.waitForTimeout(150);
+    assert.equal(await expanded(), false, "редактор остался поверх другого раздела");
+    assert.equal(
+      await panel.page.evaluate(() => document.body.classList.contains("editor-open")),
+      false,
+      "прокрутка страницы осталась заблокированной",
+    );
+  });
+
   test("viewer не правит канонический текст", async () => {
     const panel = await open({ role: "viewer" });
     await panel.page.evaluate(() => openPage("persona"));

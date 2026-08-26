@@ -39,6 +39,14 @@ function personaCell(agent) {
     + `<br><span class="technical">${escapeHtml(agent.personaVersion || "—")}</span>`;
 }
 
+/*
+ * Список ведёт человеком, а не именем агента.
+ *
+ * Один человек — один агент, и называются агенты одинаково: «Ева». Список,
+ * ведомый именем, был списком одинаковых строк, а на телефоне заголовком
+ * каждой карточки становилось слово «Ева». Искать в нём нужную строку
+ * можно было только вчитываясь в agent_id.
+ */
 async function loadAgents() {
   const form = $("#agents-filter-form");
   const params = new URLSearchParams();
@@ -52,8 +60,8 @@ async function loadAgents() {
   $("#agents-body").innerHTML = payload.agents.length
     ? payload.agents.map((agent) => `
       <tr class="agent-row" data-agent="${escapeHtml(agent.agentId)}">
-        <td><strong>${escapeHtml(agentTitle(agent))}</strong><br><span class="technical">${escapeHtml(agent.agentId)}</span></td>
-        <td>${escapeHtml(ownerTitle(agent.owner))}${agent.owner?.isBlocked ? '<br><span class="pill-blocked">Заблокирован</span>' : ""}</td>
+        <td><strong>${escapeHtml(ownerTitle(agent.owner))}</strong>${agent.owner?.isBlocked ? ' <span class="pill-blocked">Заблокирован</span>' : ""}<br><span class="technical">telegram ${escapeHtml(agent.owner?.telegramId ?? "—")}</span></td>
+        <td>${escapeHtml(agentTitle(agent))}<br><span class="technical">${escapeHtml(agent.agentId)}</span></td>
         <td>${escapeHtml(agent.model || "по умолчанию")}</td>
         <td>${escapeHtml(agent.conversations)}</td>
         <td>${personaCell(agent)}</td>

@@ -61,7 +61,7 @@ async function main(): Promise<void> {
   const audit = new AuditService(pool);
   const config = new ConfigService(pool, redis);
   const health = new HealthService(pool, redis);
-  const operations = new OperationService(pool, redis, new UpdaterClient());
+  const operations = new OperationService(pool, redis, new UpdaterClient(), logger);
   const llmRouter = new LlmRouterAdminService(pool);
   const integrations = new IntegrationConfigService(pool, secrets);
   // Схемы провайдеров и валидацию параметров admin-api спрашивает у
@@ -105,9 +105,24 @@ async function main(): Promise<void> {
    */
   const snapshotRetry = setInterval(() => {
     if (stt.pushStatus().delivered) return;
-    void stt.pushSnapshot().then((result) => {
-      if (result.applied) logger.info("Снимок STT доставлен после повторной попытки");
-    });
+    // `catch` обязателен, а не на всякий случай.
+    //
+    // `pushSnapshot()` начинается с запроса к PostgreSQL и отклоняется,
+    // когда база недоступна. Отклонённый промис из таймера не ловит
+    // никто: Node считает это необработанным отказом и завершает
+    // процесс. То есть минутная недоступность PostgreSQL, пока снимок
+    // ещё не доставлен, роняла admin-api — панель уходила в перезапуск
+    // из-за повторной попытки, которая по замыслу как раз и должна
+    // переживать недоступность.
+    void stt.pushSnapshot()
+      .then((result) => {
+        if (result.applied) logger.info("Снимок STT доставлен после повторной попытки");
+      })
+      .catch((error: unknown) => {
+        logger.warn("Повторная доставка снимка STT не удалась", {
+          code: error instanceof Error ? error.name : "unknown_error",
+        });
+      });
   }, 60_000);
   snapshotRetry.unref();
 

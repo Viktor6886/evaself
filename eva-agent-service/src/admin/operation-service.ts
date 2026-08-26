@@ -12,6 +12,13 @@ export class OperationService {
     private readonly pool: pg.Pool,
     private readonly publisher: Redis,
     private readonly updater: UpdaterClient,
+    /**
+     * Журнал нужен ровно одному месту — `runInBackground`. Когда
+     * PostgreSQL недоступен, отметить отказ в самой операции нечем, и
+     * строка в журнале остаётся единственным следом того, что операция
+     * была и провалилась.
+     */
+    private readonly logger?: { warn(message: string, meta?: Record<string, unknown>): void },
   ) {}
 
   restart(serviceId: string, actorId: string) {
@@ -53,7 +60,7 @@ export class OperationService {
        VALUES ($1, $2, 'pending', $3, $4)`,
       [id, action, serviceId, actorId],
     );
-    setImmediate(() => void this.executeLifecycle(id, action, serviceId));
+    this.runInBackground(id, () => this.executeLifecycle(id, action, serviceId));
     return { operation_id: id, status: "pending", target: serviceId, action };
   }
 
@@ -136,6 +143,39 @@ export class OperationService {
     return await this.enqueueOperation("update", "repository", actorId, idempotencyKey);
   }
 
+  /**
+   * Фоновая работа операции, которая не роняет процесс.
+   *
+   * `executeLifecycle` и `executeOperation` начинаются с записи в
+   * `admin_operations` — до собственного `try`. Запускаются они из
+   * `setImmediate` без обработчика, и отклонённый промис не ловит никто:
+   * Node на необработанном отказе завершает процесс.
+   *
+   * Путь к этому короткий и штатный. Панель разрешает перезапуск
+   * PostgreSQL, а бухгалтерия операции идёт в ту же базу, которую в этот
+   * момент перезапускают. Оператор нажимал «Перезапустить», получал
+   * упавший admin-api и не понимал, при чём тут его нажатие.
+   *
+   * Отказ фиксируется в самой операции, если база к тому времени
+   * вернулась: строка `pending`, о которой никто ничего не знает, —
+   * худший из исходов, потому что выглядит как «ещё выполняется».
+   */
+  private runInBackground(id: string, work: () => Promise<void>): void {
+    setImmediate(() => {
+      void work().catch(async (error: unknown) => {
+        const code = error instanceof Error ? error.name : "unknown_error";
+        this.logger?.warn("Фоновая операция завершилась ошибкой", { operation_id: id, code });
+        await this.pool.query(
+          `UPDATE admin_operations
+              SET status = 'failure', finished_at = now(),
+                  error_code = $2, error_message = $3
+            WHERE id = $1 AND status IN ('pending', 'running')`,
+          [id, code, "операция прервана: сервис недоступен"],
+        ).catch(() => undefined);
+      });
+    });
+  }
+
   private async executeLifecycle(
     id: string,
     action: "restart" | "start" | "stop",
@@ -209,7 +249,7 @@ export class OperationService {
        VALUES ($1, $2, 'pending', $3, $4, $5)`,
       [id, kind, target, actorId, idempotencyKey ?? null],
     );
-    setImmediate(() => void this.executeOperation(id, kind));
+    this.runInBackground(id, () => this.executeOperation(id, kind));
     return { operation_id: id, kind, status: "pending", target };
   }
 

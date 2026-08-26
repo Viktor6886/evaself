@@ -114,6 +114,75 @@ describe("панель на телефоне", () => {
     }
   });
 
+  /*
+   * Раздел, до которого нельзя дотянуться, отсутствует — но выглядит
+   * присутствующим.
+   *
+   * Список разделов вырос до тысячи с лишним пикселей, а выехавшее меню
+   * — это высота экрана с `overflow: visible`. «Системные настройки»,
+   * «Безопасность и ключи» и «Журнал событий» на телефоне просто не
+   * пролезали: ни ошибки, ни обрезанного края — они молча были ниже
+   * экрана, и открыть их было нельзя вовсе.
+   */
+  test("до последнего раздела меню можно дотянуться прокруткой", async () => {
+    for (const size of [{ width: 320, height: 568 }, PHONE]) {
+      const panel = await openPanel({ routes: ROUTES, viewport: size });
+      panels.push(panel);
+      await panel.page.evaluate(() => setSidebar(true));
+      await panel.page.waitForTimeout(150);
+
+      const state = await panel.page.evaluate(() => {
+        const bar = document.querySelector(".sidebar");
+        return {
+          scrollable: getComputedStyle(bar).overflowY,
+          hidden: bar.scrollHeight > bar.clientHeight,
+        };
+      });
+      // Содержимое выше ящика — это норма; недопустимо, когда его при
+      // этом нельзя прокрутить.
+      if (state.hidden) {
+        assert.match(
+          state.scrollable, /auto|scroll/,
+          `${size.width}: меню не прокручивается, а содержимое в него не помещается`,
+        );
+      }
+
+      const reached = await panel.page.evaluate(() => {
+        const bar = document.querySelector(".sidebar");
+        const items = [...document.querySelectorAll(".nav-item")];
+        const last = items[items.length - 1];
+        bar.scrollTop = bar.scrollHeight;
+        const box = last.getBoundingClientRect();
+        return {
+          page: last.dataset.page,
+          visible: box.top >= 0 && box.bottom <= window.innerHeight + 1,
+        };
+      });
+      assert.ok(
+        reached.visible,
+        `${size.width}: до раздела «${reached.page}» нельзя дотянуться даже прокруткой`,
+      );
+    }
+  });
+
+  /*
+   * Выехавшее меню накрывает содержимое, а не просвечивает сквозь себя.
+   * У боковой панели фон был на 94 % непрозрачности: в своей колонке на
+   * широком экране разницы нет, а поверх страницы сквозь список разделов
+   * читался чужой текст.
+   */
+  test("выехавшее меню непрозрачно", async () => {
+    const panel = await open({ routes: ROUTES });
+    await panel.page.evaluate(() => setSidebar(true));
+    await panel.page.waitForTimeout(150);
+    const alpha = await panel.page.evaluate(() => {
+      const value = getComputedStyle(document.querySelector(".sidebar")).backgroundColor;
+      const parts = value.match(/[\d.]+/g) ?? [];
+      return parts.length > 3 ? Number(parts[3]) : 1;
+    });
+    assert.equal(alpha, 1, `фон меню полупрозрачен (alpha ${alpha})`);
+  });
+
   test("вкладки раздела STT переносятся, а не уезжают за экран", async () => {
     const panel = await open({ routes: ROUTES });
     await panel.page.evaluate(() => openPage("stt"));
@@ -256,6 +325,60 @@ describe("панель на телефоне", () => {
     assert.equal(layout.display, "grid", "строка должна раскладываться карточкой");
     assert.equal(layout.headHidden, true, "заголовок таблицы уходит с экрана");
     assert.ok(layout.rowWidth <= PHONE.width, "карточка не шире экрана");
+  });
+
+  /*
+   * Подпись поля не рвётся посреди слова.
+   *
+   * Колонка подписи фиксированной ширины, и «ПРОИСХОЖДЕНИЕ» в неё не
+   * влезало на шесть пикселей: `overflow-wrap: anywhere`, нужный длинным
+   * путям и отпечаткам в значениях, ломал слово на «ПРОИСХОЖДЕНИ» и «Е».
+   * Читается это как опечатка в интерфейсе.
+   *
+   * Проверяется не конкретная подпись, а правило: ни одной подписи не
+   * должно быть тесно. Следующая длинная подпись сломает этот тест, а не
+   * вёрстку у оператора.
+   */
+  test("ни одна подпись поля не рвётся посреди слова", async () => {
+    const panel = await open({ routes: ROUTES });
+    const pages = await panel.page.evaluate(() =>
+      [...document.querySelectorAll("#nav .nav-item")].map((item) => item.dataset.page));
+
+    const tight = [];
+    for (const name of pages) {
+      await panel.page.evaluate((page) => openPage(page), name);
+      await panel.page.waitForTimeout(120);
+      tight.push(...await panel.page.evaluate((section) => {
+        const found = [];
+        const probe = document.createElement("span");
+        probe.style.position = "absolute";
+        probe.style.visibility = "hidden";
+        probe.style.whiteSpace = "nowrap";
+        document.body.appendChild(probe);
+        for (const cell of document.querySelectorAll("td[data-label]")) {
+          const style = getComputedStyle(cell);
+          if (style.display !== "grid") continue;
+          const track = parseFloat(style.gridTemplateColumns.split(" ")[0]);
+          if (!Number.isFinite(track)) continue;
+          const label = getComputedStyle(cell, "::before");
+          probe.style.font = label.font;
+          probe.style.letterSpacing = label.letterSpacing;
+          probe.style.textTransform = label.textTransform;
+          probe.textContent = cell.dataset.label;
+          const need = probe.getBoundingClientRect().width;
+          // Однословной подписи переноситься некуда: ей обязано хватить.
+          if (!cell.dataset.label.includes(" ") && need > track) {
+            found.push({ section, label: cell.dataset.label, need: Math.round(need), track });
+          }
+        }
+        probe.remove();
+        return found;
+      }, name));
+    }
+    assert.deepEqual(
+      tight, [],
+      `подписи не помещаются в свою колонку и порвутся по букве: ${JSON.stringify(tight)}`,
+    );
   });
 
   test("на телефоне до каждой кнопки раздела можно дотянуться", async () => {

@@ -706,7 +706,7 @@
           <div class="card table-card">
             <div class="table-wrap">
               <table>
-                <thead><tr><th>Агент</th><th>Владелец</th><th>Модель</th><th>Диалогов</th><th>Персона</th><th>Активных ходов</th></tr></thead>
+                <thead><tr><th>Владелец</th><th>Агент</th><th>Модель</th><th>Диалогов</th><th>Персона</th><th>Ходов</th></tr></thead>
                 <tbody id="agents-body"></tbody>
               </table>
             </div>
@@ -769,10 +769,20 @@
               <div><h3 id="persona-editor-title">Персона</h3><p class="block-caption" id="persona-editor-caption"></p></div>
             </div>
             <div id="persona-facts" class="status-facts"></div>
-            <label class="code-label">Текст
+            <!-- Полноэкранный режим — не украшение. Персона это тридцать
+                 шесть килобайт markdown, и править её в окне на четверть
+                 экрана телефона, пока страница ездит вокруг, невозможно.
+                 В развёрнутом виде поле занимает всё, а кнопки прибиты
+                 снизу, у большого пальца. -->
+            <div class="code-head">
+              <span>Текст</span>
+              <button id="persona-expand" class="button tiny ghost" type="button" aria-expanded="false">На весь экран</button>
+            </div>
+            <label class="code-label" for="persona-text">
+              <span class="visually-hidden">Текст</span>
               <textarea id="persona-text" rows="22" spellcheck="false" wrap="soft"></textarea>
             </label>
-            <div class="form-actions">
+            <div class="form-actions" id="persona-actions">
               <button id="persona-save" class="button primary" type="button">Сохранить и применить</button>
               <button id="persona-rollback" class="button secondary" type="button">Откатить версию</button>
               <button id="persona-restore" class="button ghost" type="button">Вернуть текст файла</button>

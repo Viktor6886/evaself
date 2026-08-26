@@ -201,11 +201,24 @@ export class JobRuntime {
     const hard = setTimeout(() => controller.abort(new Error("job_deadline_exceeded")), hardMs);
     hard.unref();
     const renewal = setInterval(() => {
-      void this.runs.renew(handle, this.ownerId, timing.leaseDurationMs).then((state) => {
-        if (state.held) return;
-        stopReason = state.reason === "cancelled" ? "cancelled" : "lease_lost";
-        controller.abort(new Error(`job_${state.reason}`));
-      });
+      // Отказ продления не прерывает задание и не роняет процесс.
+      //
+      // `renew()` ходит в PostgreSQL, и при недоступности базы промис
+      // отклоняется. Из таймера этот отказ не ловит никто, а Node на
+      // необработанном отказе завершает процесс — недоступность базы на
+      // секунду убивала бы весь сервис посреди чужого хода.
+      //
+      // Правильное поведение здесь — ничего не делать: аренда истечёт
+      // сама, и задание подберёт другой исполнитель. Отменять работу по
+      // одной неудавшейся попытке продления нельзя, она может быть
+      // единственной сетевой икотой за час.
+      void this.runs.renew(handle, this.ownerId, timing.leaseDurationMs)
+        .then((state) => {
+          if (state.held) return;
+          stopReason = state.reason === "cancelled" ? "cancelled" : "lease_lost";
+          controller.abort(new Error(`job_${state.reason}`));
+        })
+        .catch(() => undefined);
     }, timing.leaseRenewIntervalMs);
     renewal.unref();
 

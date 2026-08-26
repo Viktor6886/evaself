@@ -45,7 +45,14 @@ GitHub Actions выполняет:
     (`scripts/ci/test-admin-routing.sh`);
 26. структуру административной поверхности: три публичных имени, ни одного
     отдельного `basic_auth`, никаких сервисов `letta-ui` и `uptime-kuma`
-    (`scripts/ci/assert-single-admin-domain.py`).
+    (`scripts/ci/assert-single-admin-domain.py`);
+27. виды операций, которые панель записывает: `start` и `stop` падали на
+    CHECK, и кнопки «Запустить» и «Остановить» не работали ни разу
+    (`scripts/ci/test-operation-kinds.sql` на живой базе плюс тест
+    сервиса — по одному на каждую половину расхождения);
+28. что каждому правилу в `admin-ui/public/ui.css` есть что оформлять
+    (`scripts/ci/assert-live-css.py`): мёртвое правило ничего не ломает и
+    потому копится незаметно.
 
 ## Локальные команды
 

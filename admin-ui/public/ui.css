@@ -69,9 +69,6 @@ nav { display: grid; gap: 4px; }
 .nav-item.active span { color: var(--green); }
 .nav-item.disabled { opacity: .34; cursor: default; }
 .nav-caption { padding: 23px 12px 7px; color: #546a60; font-size: 10px; font-weight: 800; letter-spacing: .12em; }
-.letta-link { margin-top: auto; padding: 12px; display: flex; gap: 10px; align-items: center; border: 1px solid var(--line); border-radius: 12px; color: var(--text); text-decoration: none; background: linear-gradient(135deg, rgba(91,234,154,.08), transparent); }
-.letta-link span:last-child { display: grid; }
-.letta-link small { color: var(--muted); }
 .workspace { min-width: 0; }
 .topbar { height: 72px; padding: 0 28px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); background: rgba(8,17,14,.78); backdrop-filter: blur(18px); }
 .system-state { display: flex; align-items: center; gap: 9px; color: var(--muted); }
@@ -93,10 +90,6 @@ nav { display: grid; gap: 4px; }
 .notice strong { white-space: nowrap; }
 .notice span { color: var(--muted); }
 .stats { display: flex; gap: 12px; margin-bottom: 17px; }
-.overview-stats { flex-wrap: wrap; }
-.stat { min-width: 140px; padding: 13px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
-.stat strong { display: block; font-size: 21px; }
-.stat span { color: var(--muted); font-size: 11px; }
 .settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 13px; }
 .card, .setting-card, .secret-card { border: 1px solid var(--line); border-radius: 14px; background: linear-gradient(145deg, rgba(17,31,26,.95), rgba(11,23,18,.95)); }
 .setting-card { padding: 18px; }
@@ -172,11 +165,6 @@ dialog .eyebrow { margin-top: 0; }
 .icon-button { border: 0; color: var(--text); background: transparent; cursor: pointer; }
 .menu { display: none; }
 .heading-actions, .card-actions, .form-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.resource-grid { margin-bottom: 18px; display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 12px; }
-.resource-card { padding: 16px; display: grid; border: 1px solid var(--line); border-radius: 13px; background: var(--panel); }
-.resource-card > span { color: var(--muted); font-size: 11px; }
-.resource-card strong { margin: 4px 0 2px; font-size: 18px; }
-.resource-card small { color: #647d71; }
 .overview-groups { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 13px; }
 .overview-group { padding: 17px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); }
 .section-heading, .editor-heading { display: flex; align-items: start; justify-content: space-between; gap: 16px; }
@@ -233,9 +221,6 @@ dialog .eyebrow { margin-top: 0; }
 .provider-title, .provider-title > div { display: flex; align-items: center; gap: 10px; }
 .provider-title { justify-content: space-between; }
 .provider-title h3 { margin: 0; }
-.provider-details { margin: 16px 0 12px; display: grid; grid-template-columns: 1.4fr 1fr .6fr .8fr; gap: 10px; }
-.provider-details span { min-width: 0; display: grid; color: var(--muted); font-size: 10px; }
-.provider-details strong { overflow: hidden; color: #c8d7d0; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .editor-card { margin-top: 16px; padding: 21px; }
 .editor-heading p { color: var(--muted); }
 .editor-heading .icon-button { font-size: 26px; }
@@ -260,13 +245,41 @@ dialog .eyebrow { margin-top: 0; }
 .result.rolled_back { color: var(--warning); background: rgba(245,199,104,.08); }
 @media (max-width: 980px) {
   .app-shell { grid-template-columns: 1fr; }
-  .sidebar { position: fixed; z-index: 30; width: 260px; transform: translateX(-105%); transition: transform .2s; }
+  /*
+   * Выехавшее меню прокручивается и не просвечивает.
+   *
+   * Два дефекта, которые видно только на телефоне. Список разделов —
+   * тысяча с лишним пикселей, ящик — высота экрана, а `overflow` был
+   * `visible`: «Системные настройки», «Безопасность и ключи» и «Журнал
+   * событий» просто не пролезали на экран, и открыть их с телефона было
+   * нельзя вовсе. Ничего при этом не ломалось и не мигало — разделы
+   * молча отсутствовали.
+   *
+   * Фон боковой панели — 94 % непрозрачности. На широком экране она стоит
+   * в своей колонке, и разницы нет; выехав поверх содержимого, она
+   * показывала сквозь себя текст страницы, и список разделов читался
+   * поверх чужих букв.
+   */
+  .sidebar {
+    position: fixed;
+    z-index: 30;
+    width: min(300px, 86vw);
+    transform: translateX(-105%);
+    transition: transform .2s;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    background: var(--bg);
+    padding-bottom: max(22px, env(safe-area-inset-bottom));
+  }
   .sidebar.open { transform: translateX(0); }
+  /* Заголовки групп на телефоне занимают меньше по вертикали: на
+     широком экране между группами есть воздух, а здесь каждый лишний
+     отступ — это ещё один раздел, до которого надо прокручивать. */
+  .nav-caption { padding: 14px 12px 5px; }
   .menu { display: block; }
   .settings-grid { grid-template-columns: 1fr; }
   .secret-card, .password-card { grid-template-columns: 1fr; }
   .password-card form { grid-template-columns: 1fr; }
-  .resource-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
   .overview-groups, .status-grid, .operations-grid { grid-template-columns: 1fr; }
 }
 @media (max-width: 680px) {
@@ -277,8 +290,7 @@ dialog .eyebrow { margin-top: 0; }
   .notice { flex-direction: column; }
   .secret-form { grid-template-columns: 1fr; }
   .login-card { padding: 30px 24px; }
-  .resource-grid, .mini-status-list { grid-template-columns: 1fr; }
-  .provider-details { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .mini-status-list { grid-template-columns: 1fr; }
   .provider-form { grid-template-columns: 1fr; }
   .span-2 { grid-column: span 1; }
 }
@@ -553,8 +565,6 @@ dialog .eyebrow { margin-top: 0; }
 .router-card { padding: 18px; margin-bottom: 16px; }
 .router-routes { display: grid; gap: 16px; margin-top: 4px; }
 .route-block { padding: 14px; border: 1px solid var(--line, #2a2f3a); border-radius: 12px; }
-.route-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
-.route-head h4 { margin: 0; font-size: 15px; }
 .route-requires { color: var(--muted, #8b93a4); font-size: 11.5px; }
 
 .chain { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; counter-reset: chain; }
@@ -597,8 +607,6 @@ dialog .eyebrow { margin-top: 0; }
 .health-row .card-actions { margin-top: 11px; }
 .failure-detail { color: var(--muted, #8b93a4); font-size: 12px; overflow-wrap: anywhere; }
 
-.router-fields { margin: 0; padding: 14px; border: 1px solid var(--line, #2a2f3a); border-radius: 12px; }
-.router-fields legend { padding: 0 6px; color: var(--muted, #8b93a4); font-size: 12px; }
 .router-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
 .router-grid label { display: grid; gap: 4px; font-size: 12px; }
 .router-grid small { color: var(--muted, #8b93a4); font-size: 11px; }
@@ -786,7 +794,6 @@ dialog .eyebrow { margin-top: 0; }
   .key-row .key-actions { justify-content: flex-start; flex-wrap: wrap; }
   .key-row .dot { justify-self: start; }
 
-  .provider-details { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   /* Подпись и значение остаются в одной строке и на узком экране:
      разложить их по двум строкам — это вдвое более длинная карточка,
      от которой читать не легче. Переносится только значение. */
@@ -812,10 +819,22 @@ dialog .eyebrow { margin-top: 0; }
   }
   tbody td {
     display: grid;
-    grid-template-columns: minmax(0, 40%) minmax(0, 1fr);
-    gap: 10px;
+    /* Подпись фиксированной ширины, а не 40 % экрана. На 360 пикселях
+       сорок процентов — это 144, и «АКТИВНЫХ ХОДОВ» переносилось на две
+       строки, отодвигая само значение вниз: подпись занимала больше
+       места, чем то, ради чего её читают.
+       
+       Ширина фиксированная и с запасом: 8.5rem это 127 пикселей при
+       корневых 15, а самой длинной подписи панели («Происхождение»)
+       нужно 119 — измерено, а не прикинуто. Семи с половиной ремов не
+       хватало шести пикселей, и подпись рвалась посреди слова на
+       «ПРОИСХОЖДЕНИ» и «Е». Одинаковая для всех строк, а не по
+       содержимому: каждая ячейка — своя сетка, и подпись по содержимому
+       давала бы рваный левый край у значений. */
+    grid-template-columns: 8.5rem minmax(0, 1fr);
+    gap: 4px 10px;
     align-items: baseline;
-    padding: 9px 12px;
+    padding: 7px 12px;
     border-bottom: 1px solid var(--line);
     font-size: 13px;
     overflow-wrap: anywhere;
@@ -824,17 +843,45 @@ dialog .eyebrow { margin-top: 0; }
   tbody td[data-label]::before {
     content: attr(data-label);
     color: var(--muted, #8b93a7);
-    font-size: 11px;
+    font-size: 10.5px;
     font-weight: 700;
+    line-height: 1.35;
     text-transform: uppercase;
     letter-spacing: .04em;
+    /* `anywhere` у ячейки нужен значениям — длинным путям и отпечаткам.
+       Подписи он вредит: она рвётся по букве вместо переноса по словам.
+       Двухсловная подпись перенесётся между словами, односложная выйдет
+       за дорожку — и это видно, в отличие от тихого разрыва. */
+    overflow-wrap: normal;
   }
   /* Ячейка без подписи (сообщение «данных нет», колонка с кнопками)
      занимает карточку целиком. */
   tbody td:not([data-label]) { grid-template-columns: minmax(0, 1fr); }
-  /* Ключевое поле — первое: карточка читается сверху вниз, и по первой
-     строке видно, о чём она, без раскрытия подробностей. */
-  tbody td:first-child { font-weight: 700; }
+
+  /* Первая ячейка — заголовок карточки, а не ещё одна пара
+     «подпись — значение».
+     
+     В ней всегда лежит то, чем строка называется: имя агента и его
+     agent_id, человек и его telegram_id, время проверки. Прочитанная как
+     обычная строка, она сливалась с остальными пятью, и найти нужную
+     карточку в списке можно было только вчитываясь в каждую. Подпись у
+     неё при этом не пропадает — она уходит наверх мелким шрифтом, чтобы
+     колонка осталась названной. */
+  tbody td:first-child {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+    padding: 11px 12px 9px;
+    font-size: 15px;
+    font-weight: 700;
+    line-height: 1.3;
+  }
+  tbody td:first-child[data-label]::before { font-size: 10px; opacity: .75; }
+  tbody td:first-child .technical { font-size: 10.5px; font-weight: 500; }
+  /* Заголовком карточки бывает и сам идентификатор — тогда у ячейки
+     класс `.technical`, и её собственные цвет и кегль делают заголовок
+     нечитаемым. Моноширинный шрифт остаётся: по нему идентификатор и
+     узнают. */
+  tbody td.technical:first-child { color: var(--text); font-size: 12.5px; }
 
   /* Диалог как нижний лист — то, чего ждёт рука на телефоне: он
      появляется снизу, у большого пальца, а не в центре экрана. */
@@ -1029,6 +1076,31 @@ dialog .eyebrow { margin-top: 0; }
 
 @media (max-width: 720px) {
   .inline-form { grid-template-columns: 1fr; }
+
+  /* Факты о конфигурации — в один столбец.
+   *
+   * `repeat(3,1fr)` на 360 пикселях даёт колонку в 110: в неё не влезает
+   * ни «Файл-умолчание», ни сам путь `/app/library/persona/eva.md`.
+   * Подпись переносилась в три строки, значение обрезалось, и раздел
+   * «Персона» открывался нечитаемой сеткой из шести обрубков. */
+  .status-facts { grid-template-columns: 1fr; gap: 10px; }
+  .status-facts span {
+    grid-template-columns: minmax(0, 7.5rem) minmax(0, 1fr);
+    display: grid;
+    gap: 10px;
+    align-items: baseline;
+    font-size: 11px;
+  }
+  .status-facts strong { font-size: 12.5px; overflow-wrap: anywhere; }
+
+  /* Строка сервера не оставляет пустых клеток.
+   *
+   * Показателей пять, колонок две — последний всегда оставался один, а
+   * рядом с ним зияла половина строки. `auto-fit` тут не помогает: он
+   * схлопывает пустые дорожки, а не недобранный последний ряд. Поэтому
+   * нечётный последний показатель растягивается на всю ширину. */
+  .host-bar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .host-cell:last-child:nth-child(odd) { grid-column: 1 / -1; }
   /*
    * Высота задаётся явно, а не через min-height: у <textarea> её решает
    * атрибут rows, и min-height ниже собственной высоты поля ни на что не
@@ -1043,14 +1115,113 @@ dialog .eyebrow { margin-top: 0; }
    * не хватает никогда, и раньше именно такие сетки растягивали
    * документ вбок.
    */
+  /*
+   * Строка сервиса складывается в две: «точка + имя» сверху, состояние и
+   * время под ними, кнопка справа от них.
+   *
+   * Именованные области здесь были ошибкой: `justify-self` у элементов
+   * сетки по умолчанию `stretch`, и имя растягивалось на всю вторую
+   * колонку — визуально уезжая вправо от точки, к правому краю. Читалось
+   * это как «состояние принадлежит соседней строке».
+   */
   .monitor-row {
-    grid-template-columns: auto minmax(0,1fr);
-    grid-template-areas: "dot name" "state state" "time action";
-    row-gap: 6px;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    row-gap: 4px;
+    padding: 11px 12px;
   }
-  .monitor-row > .status-dot { grid-area: dot; }
-  .monitor-row > strong { grid-area: name; }
-  .monitor-row > .mini-hint { grid-area: state; white-space: normal; }
-  .monitor-row > .technical { grid-area: time; }
-  .monitor-row > .button { grid-area: action; justify-self: end; }
+  .monitor-row > .status-dot { grid-row: 1; }
+  .monitor-row > strong { grid-row: 1; justify-self: start; }
+  .monitor-row > .button { grid-row: 1 / span 2; grid-column: 3; align-self: center; }
+  .monitor-row > .mini-hint {
+    grid-row: 2;
+    grid-column: 2;
+    white-space: normal;
+    font-size: 12px;
+  }
+  .monitor-row > .technical { grid-row: 3; grid-column: 2; }
+}
+
+/* ---------------------------------------------------------------------
+ * Полноэкранная правка канонического текста.
+ *
+ * Персона — тридцать шесть килобайт markdown, системный промпт — почти
+ * пятьдесят. В поле на четверть экрана телефона такой текст правят,
+ * прокручивая страницу вокруг поля: место правки теряется, а кнопка
+ * «Сохранить» уезжает за нижний край. Развёрнутый режим отдаёт полю весь
+ * экран и прибивает действия к нижней кромке — там, где палец.
+ * ------------------------------------------------------------------- */
+.code-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
+/* Страница под развёрнутым редактором не прокручивается: иначе жест
+   внутри поля уводил бы саму страницу. */
+body.editor-open { overflow: hidden; }
+
+.card.is-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  /* Непрозрачный фон, а не карточный. У `.card` он на 95 %: поверх
+     страницы это незаметно, а поверх экрана целиком сквозь него читается
+     то, что осталось внизу, — и текст правки смешивается с текстом
+     страницы. */
+  background: var(--bg);
+  padding:
+    max(12px, env(safe-area-inset-top))
+    max(12px, env(safe-area-inset-right))
+    max(12px, env(safe-area-inset-bottom))
+    max(12px, env(safe-area-inset-left));
+  overflow: hidden;
+}
+/* Всё, кроме заголовка, поля и действий, в развёрнутом виде не нужно:
+   подсказки и подписи занимают половину экрана, ради которого его и
+   разворачивали. */
+.card.is-fullscreen .status-facts,
+.card.is-fullscreen .block-caption,
+.card.is-fullscreen #persona-hint { display: none; }
+.card.is-fullscreen .section-heading { margin-bottom: 4px; }
+.card.is-fullscreen .code-head { margin-top: 4px; }
+.card.is-fullscreen .code-label { flex: 1; min-height: 0; margin-top: 6px; }
+.card.is-fullscreen .code-label textarea {
+  height: 100%;
+  min-height: 0;
+  resize: none;
+}
+.card.is-fullscreen .form-actions {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  justify-content: stretch;
+}
+
+@media (max-width: 720px) {
+  /* На телефоне кнопки в развёрнутом режиме идут в колонку и во всю
+     ширину: две в строку дают цели по 150 пикселей, а промах здесь
+     стоит либо потерянной правки, либо применения не глядя. */
+  .card.is-fullscreen .form-actions { flex-direction: column; }
+  .card.is-fullscreen .form-actions .button { width: 100%; }
+  /* Второстепенные действия в развёрнутом виде прячутся: разворачивают
+     ради правки, а откат и возврат к файлу делают из обычного вида. */
+  .card.is-fullscreen #persona-rollback,
+  .card.is-fullscreen #persona-restore { display: none; }
 }
