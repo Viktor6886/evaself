@@ -588,8 +588,10 @@ export async function readPersona(config: Config): Promise<string> {
  * монтируется в runtime read-only. В отличие от персоны здесь нет fallback:
  * запуск со штатным prompt Letta вместо репозиторного был бы тихим откатом.
  */
+export const SYSTEM_PROMPT_FILE = "/app/library/system/letta_local_memfs.md";
+
 export async function readSystemPrompt(
-  file = "/app/library/system/letta_local_memfs.md",
+  file = SYSTEM_PROMPT_FILE,
 ): Promise<string> {
   const { readFile } = await import("node:fs/promises");
   let text: string;

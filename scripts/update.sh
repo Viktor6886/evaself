@@ -311,6 +311,23 @@ case ",$CURRENT_PROFILES," in
 		;;
 esac
 
+# Профиль monitoring поднимал Uptime Kuma ради публичной страницы статуса.
+# Сервиса больше нет: мониторинг стал разделом панели и строится на
+# проверках health-worker. Значение вычищается здесь, до `compose up`,
+# иначе профиля, которого нет ни у одного сервиса, хватает, чтобы
+# запуск закончился ошибкой. Сам контейнер уносит `--remove-orphans`
+# ниже; том `evaself_uptime_kuma_data` остаётся — его удаление
+# необратимо и остаётся решением человека.
+CURRENT_PROFILES="$(get_env COMPOSE_PROFILES || true)"
+case ",$CURRENT_PROFILES," in
+	*,monitoring,*)
+		CLEANED="$(printf '%s' "$CURRENT_PROFILES" | sed 's/monitoring//; s/,,/,/g; s/^,//; s/,$//')"
+		set_env COMPOSE_PROFILES "$CLEANED"
+		load_env
+		ok "мониторинг переехал в панель: https://$(get_env DOMAIN)/admin/monitoring"
+		;;
+esac
+
 compose pull --ignore-buildable >/dev/null 2>&1 || warn "some images could not be pulled"
 compose build --pull >/dev/null || die "image build failed — nothing was restarted"
 ok "images ready"

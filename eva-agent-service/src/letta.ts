@@ -431,8 +431,17 @@ export class LettaService {
 
   private readonly config: Config;
   private readonly logger: Logger;
-  private readonly persona: string;
-  private readonly systemPrompt: string;
+  /**
+   * Канонические тексты личности.
+   *
+   * Не `readonly`: администратор правит персону и системный промпт из
+   * панели, и применение правки не должно требовать перезапуска стека.
+   * Меняются они ровно одним способом — `setCanonicalContext()`, который
+   * вызывает владелец канонических текстов; никакой другой код их не
+   * трогает.
+   */
+  private persona: string;
+  private systemPrompt: string;
   private defaultModel: string;
   private runtime: RuntimeSdkSettings;
   private toolFactory: ((conversationId: string) => AnyAgentTool[]) | null = null;
@@ -539,6 +548,36 @@ export class LettaService {
     // сервису: у новой модели каталог может знать этот уровень.
     if (model !== this.defaultModel) this.unsupportedReasoningEffort = null;
     this.defaultModel = model;
+  }
+
+  /**
+   * Заменить канонические тексты личности без перезапуска процесса.
+   *
+   * Нужно ровно одному сценарию: администратор сохранил персону или
+   * системный промпт в панели, и следующий созданный агент обязан
+   * получить новый текст, а не тот, что процесс прочитал при старте.
+   * Существующих агентов приводит к новой версии `PersonaSync` — здесь
+   * меняется только то, из чего собирается **новый** агент и новая
+   * сессия.
+   *
+   * Открытые сессии закрываются: `sessionOptions()` уже отдала им
+   * прежнюю персону, и оставить их значило бы получить два разных
+   * канонических текста в одном процессе.
+   */
+  setCanonicalContext(input: { persona?: string; systemPrompt?: string }): boolean {
+    const persona = input.persona ?? this.persona;
+    const systemPrompt = input.systemPrompt ?? this.systemPrompt;
+    if (persona === this.persona && systemPrompt === this.systemPrompt) return false;
+    this.persona = persona;
+    this.systemPrompt = systemPrompt;
+    this.runtime = { ...this.runtime, default_persona: persona };
+    this.closeAllSessions();
+    return true;
+  }
+
+  /** Что процесс считает каноническим прямо сейчас. Только для диагностики. */
+  canonicalContext(): { persona: string; systemPrompt: string } {
+    return { persona: this.persona, systemPrompt: this.systemPrompt };
   }
 
   setToolFactory(factory: (conversationId: string) => AnyAgentTool[]): void {

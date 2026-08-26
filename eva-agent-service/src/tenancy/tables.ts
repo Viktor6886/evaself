@@ -65,6 +65,7 @@ export const TENANT_TABLES: Readonly<Record<string, readonly string[]>> = {
   research_requests: ["user_id"],
   research_sources: ["user_id"],
   retention_holds: ["user_id"],
+  subscription_admin_events: ["user_id"],
   subscriptions: ["user_id"],
   task_events: ["user_id"],
   tasks: ["user_id"],

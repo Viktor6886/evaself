@@ -14,12 +14,58 @@ const LOADERS = {
   tts: loadTts,
   operations: loadOperations,
   users: loadUsers,
+  subscriptions: loadSubscriptions,
+  agents: loadAgents,
+  persona: loadPersona,
+  letta: loadLetta,
+  monitoring: loadMonitoring,
   settings: loadSettings,
   security: loadSecrets,
   audit: loadAudit,
 };
 
-function openPage(name) {
+const isPage = (name) => Object.prototype.hasOwnProperty.call(LOADERS, name);
+
+/**
+ * Базовый путь панели и раздел, названный в адресе.
+ *
+ * Панель отдаётся с `/admin/` основного домена, и Caddy снимает этот
+ * префикс до статики: `/admin/agents` приходит сюда как `/agents` и
+ * попадает в index.html через try_files. Значит, адрес раздела —
+ * настоящий адрес: его можно дать ссылкой, открыть в новой вкладке и
+ * обновить страницей.
+ *
+ * Префикс вычисляется, а не зашит: браузерные тесты открывают ту же
+ * статику с корня, и зашитое `/admin/` увело бы их в несуществующий путь.
+ *
+ * Считается он от последнего сегмента, а не отрезанием всего после
+ * последнего слэша. Разница видна на двух адресах, которые иначе
+ * неразличимы: `/admin/` — это база без раздела, а `/admin/agents/` —
+ * раздел с хвостовым слэшем. Наивное отрезание принимало второй за базу,
+ * показывало обзор и потом строило адреса вида `/admin/agents/letta`.
+ *
+ * Сегмент с точкой (`index.html` на стенде тестов) — файл, а не раздел, и
+ * в базу не входит.
+ */
+function panelBase() {
+  const parts = window.location.pathname.replace(/\/+$/, "").split("/");
+  const last = parts[parts.length - 1] ?? "";
+  if (isPage(last) || last.includes(".")) parts.pop();
+  return `${parts.join("/")}/`.replace(/\/{2,}/g, "/");
+}
+
+const PANEL_BASE = panelBase();
+
+/**
+ * Неизвестный сегмент означает «раздел не назван» и открывает обзор:
+ * чужая ссылка не должна давать пустой экран.
+ */
+function pageFromLocation() {
+  const name = window.location.pathname.slice(PANEL_BASE.length).replace(/\/+$/, "");
+  return isPage(name) ? name : "overview";
+}
+
+function openPage(name, options = {}) {
   state.page = name;
   document.querySelectorAll(".page").forEach((item) => {
     item.classList.toggle("active", item.id === `page-${name}`);
@@ -27,9 +73,25 @@ function openPage(name) {
   document.querySelectorAll(".nav-item[data-page]").forEach((item) => {
     item.classList.toggle("active", item.dataset.page === name);
   });
+  // Адрес меняется без перезагрузки. `replaceState` — для первого
+  // открытия и для кнопки «назад»: иначе один и тот же раздел копился бы
+  // в истории и «назад» не выходило бы из панели вовсе.
+  const target = `${PANEL_BASE}${name === "overview" ? "" : name}`;
+  if (!options.fromHistory && window.location.pathname !== target) {
+    try {
+      window.history[options.replace ? "replaceState" : "pushState"]({ page: name }, "", target);
+    } catch {
+      // file:// и песочницы без истории: раздел всё равно открывается,
+      // просто адрес остаётся прежним.
+    }
+  }
   setSidebar(false);
   LOADERS[name]?.().catch(handleError);
 }
+
+window.addEventListener("popstate", () => {
+  openPage(pageFromLocation(), { fromHistory: true });
+});
 
 function startLiveUpdates() {
   stopLiveUpdates();
@@ -74,7 +136,7 @@ $("#login-form").addEventListener("submit", async (event) => {
     });
     formElement.reset();
     showApp(payload.user);
-    openPage("overview");
+    openPage(pageFromLocation(), { replace: true });
   } catch (error) {
     showLogin(error.message);
   } finally {
@@ -122,5 +184,5 @@ $("#nav").addEventListener("click", (event) => {
 request("/me").then(({ payload }) => {
   showApp(payload.user);
   watchTables();
-  openPage("overview");
+  openPage(pageFromLocation(), { replace: true });
 }).catch(() => showLogin());

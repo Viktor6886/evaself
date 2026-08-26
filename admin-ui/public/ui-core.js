@@ -40,7 +40,18 @@ const state = {
   sttEditing: null,
   sttTestingId: null,
   sttSchemaError: null,
+  // Разделы единой панели.
+  agents: [],
+  currentAgent: null,
+  currentSubscription: null,
+  persona: null,
+  personaTab: "persona",
+  letta: null,
+  lettaTab: "runtime",
+  lettaAgentId: null,
+  monitoring: null,
 };
+
 const $ = (selector) => document.querySelector(selector);
 
 function csrf() {

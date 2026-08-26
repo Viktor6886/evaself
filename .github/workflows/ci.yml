@@ -310,20 +310,24 @@ jobs:
           DOMAIN: example.test
           DOMAIN_APP: app.example.test
           DOMAIN_API: api.example.test
-          DOMAIN_LETTA: letta.example.test
-          DOMAIN_STATUS: status.example.test
+          DOMAIN_LETTA_LEGACY: letta.localhost
+          DOMAIN_STATUS_LEGACY: status.localhost
           ACME_EMAIL: ops@example.test
           ACME_CA: https://acme-v02.api.letsencrypt.org/directory
-          LETTA_UI_USER: admin
-          LETTA_UI_PASSWORD_HASH: $2a$14$placeholderplaceholderpl
           EVA_AGENT_PORT: "8070"
           EVA_AGENT_URL: http://eva-agent-service:8070
           EVA_AGENT_API_KEY: placeholder
         run: |
           caddy validate --config Caddyfile
           caddy validate --config webapp/Caddyfile
-          caddy validate --config letta-ui/Caddyfile
           caddy validate --config admin-ui/Caddyfile
+
+      # Разделы панели — настоящие адреса, и ломаются они молча: закладка
+      # на /admin/letta возвращает 404, а в журнале — обычный 404 без
+      # объяснений. Здесь поднимаются два настоящих Caddy с файлами
+      # репозитория и проверяется поведение, а не текст конфигурации.
+      - name: Panel sections and retired host names route correctly
+        run: sudo -E env "PATH=$PATH" ./scripts/ci/test-admin-routing.sh
 
       - name: Validation works without Caddy installed on the host
         run: |
@@ -348,7 +352,6 @@ jobs:
 
       - name: Administrative WebUI JavaScript is valid
         run: |
-          node --check letta-ui/public/ui.js
           # Панель разрезана на страницы: проверяется каждая, а не одна.
           for file in admin-ui/public/*.js; do node --check "$file"; done
 
@@ -357,12 +360,10 @@ jobs:
           DOMAIN: example.test
           DOMAIN_APP: app.example.test
           DOMAIN_API: api.example.test
-          DOMAIN_LETTA: letta.example.test
-          DOMAIN_STATUS: status.example.test
+          DOMAIN_LETTA_LEGACY: letta.localhost
+          DOMAIN_STATUS_LEGACY: status.localhost
           ACME_EMAIL: ops@example.test
           ACME_CA: https://acme-v02.api.letsencrypt.org/directory
-          LETTA_UI_USER: admin
-          LETTA_UI_PASSWORD_HASH: $2a$14$placeholderplaceholderpl
           EVA_AGENT_PORT: "8070"
           EVA_AGENT_API_KEY: placeholder
         run: |
@@ -378,7 +379,6 @@ jobs:
 
       - name: Front-end JavaScript is valid
         run: |
-          node --check letta-ui/public/ui.js
           for file in admin-ui/public/*.js; do node --check "$file"; done
           node --check webapp/public/app/app.js
           node --check webapp/public/app/journal.js
@@ -386,6 +386,13 @@ jobs:
 
       - name: Every API path the front-ends call exists in the service
         run: python3 scripts/ci/assert-frontend-routes.py
+
+      # Пять публичных имён и два отдельных входа — то, ради чего
+      # административная часть была сведена в одну панель. Расползание
+      # обратно не выглядит как поломка: всё работает, просто поверхность
+      # шире, чем кажется.
+      - name: The administrative surface stays on one domain
+        run: python3 scripts/ci/assert-single-admin-domain.py
 
       # Проверка роли в server.ts начинается с `access.roles &&`, поэтому
       # маршрут, забывший объявить роли, её не проваливает, а пропускает —
@@ -1057,8 +1064,6 @@ jobs:
             --build-arg PYTHON_BASE_VERSION="$PYTHON_BASE_VERSION" media-service
           docker build -t evaself/webapp:ci \
             --build-arg CADDY_IMAGE="$CADDY_IMAGE" --build-arg CADDY_VERSION="$CADDY_VERSION" webapp
-          docker build -t evaself/letta-ui:ci \
-            --build-arg CADDY_IMAGE="$CADDY_IMAGE" --build-arg CADDY_VERSION="$CADDY_VERSION" letta-ui
           docker build -t evaself/admin-ui:ci \
             --build-arg CADDY_IMAGE="$CADDY_IMAGE" --build-arg CADDY_VERSION="$CADDY_VERSION" admin-ui
           docker build -t evaself/backup-service:ci \
@@ -1110,8 +1115,10 @@ jobs:
           values = {
             'DOMAIN': 'example.test', 'DOMAIN_APP': 'app.example.test',
             'DOMAIN_API': 'api.example.test',
-            'DOMAIN_LETTA': 'letta.example.test',
-            'DOMAIN_STATUS': 'status.example.test', 'ACME_EMAIL': 'ci@example.test',
+            # Выведенные из эксплуатации имена: пусто = поддомен не
+            # публикуется, compose подставляет Caddy *.localhost.
+            'DOMAIN_LETTA': '', 'DOMAIN_STATUS': '',
+            'ACME_EMAIL': 'ci@example.test',
             'EVA_AGENT_PORT': '8070', 'LETTA_APP_SERVER_BACKEND': 'local',
             'EVA_TELEGRAM_API_BASE_URL': 'http://127.0.0.1:1',
             'EVA_LLM_PROVIDER_NAME': 'CI-bootstrap', 'EVA_LLM_MODEL': '',

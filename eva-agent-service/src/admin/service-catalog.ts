@@ -25,6 +25,21 @@ export interface IntegrationDefinition {
   optional?: boolean;
 }
 
+/*
+ * Каталог того, что установка обязана иметь работающим.
+ *
+ * Двух записей здесь больше нет. `letta-ui` был отдельной консолью на
+ * своём поддомене — она стала разделом панели, и контейнера под неё не
+ * существует. `monitoring` был Uptime Kuma ради публичной страницы
+ * статуса — раздел «Мониторинг» строится на проверках, которые
+ * health-worker и так выполняет по этому же каталогу, и внешнему
+ * наблюдателю в нём нечего добавить.
+ *
+ * Снимки состояния этих двух целей могли остаться в `service_statuses` у
+ * обновлённой установки. Они безвредны: карточки строятся по этому
+ * списку, а не по таблице, — поэтому лишняя строка ничего не показывает
+ * и ничего не ломает.
+ */
 export const SERVICES: readonly ServiceDefinition[] = [
   {
     id: "agent-runtime",
@@ -114,19 +129,9 @@ export const SERVICES: readonly ServiceDefinition[] = [
     restartable: true,
   },
   {
-    id: "letta-ui",
-    title: "Letta",
-    purpose: "Отдельная консоль агентов и диалогов",
-    group: "infrastructure",
-    container: "letta-ui",
-    healthUrl: "http://letta-ui:8081/healthz",
-    publicSetting: "bootstrap.env.domain.letta",
-    restartable: true,
-  },
-  {
     id: "admin-ui",
     title: "Admin WebUI",
-    purpose: "Главная административная панель",
+    purpose: "Единая административная панель: люди, агенты, модели, Letta и мониторинг",
     group: "infrastructure",
     container: "admin-ui",
     healthUrl: "http://admin-ui:8083/healthz",
@@ -138,16 +143,6 @@ export const SERVICES: readonly ServiceDefinition[] = [
     purpose: "Версионные дампы PostgreSQL",
     group: "infrastructure",
     container: "backup-service",
-    restartable: true,
-  },
-  {
-    id: "monitoring",
-    title: "Monitoring",
-    purpose: "Проверки доступности в Uptime Kuma",
-    group: "infrastructure",
-    container: "uptime-kuma",
-    publicSetting: "bootstrap.env.domain.status",
-    optional: true,
     restartable: true,
   },
 ] as const;
@@ -197,15 +192,6 @@ export const INTEGRATIONS: readonly IntegrationDefinition[] = [
     serviceId: "media-service",
     requiredSecrets: ["sec_media_tts_api_key"],
     requiredSettings: ["bootstrap.env.media.tts.base.url"],
-    optional: true,
-  },
-  {
-    id: "monitoring",
-    title: "Monitoring",
-    purpose: "Внешняя статусная страница установки",
-    group: "external",
-    serviceId: "monitoring",
-    publicSetting: "bootstrap.env.domain.status",
     optional: true,
   },
 ] as const;

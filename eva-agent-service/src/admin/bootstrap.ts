@@ -44,7 +44,10 @@ const SECRET_USED_BY: Record<string, string[]> = {
   MEDIA_SERVICE_TOKEN: ["media-service", "agent-runtime", "admin-api"],
   MEDIA_ASR_API_KEY: ["media-service"],
   MEDIA_TTS_API_KEY: ["media-service"],
-  LETTA_UI_PASSWORD: ["letta-ui"],
+  // Прежняя консоль Letta с собственным Basic Auth выведена из
+  // эксплуатации; значение осталось источником пароля первого owner
+  // панели и потому по-прежнему импортируется.
+  LETTA_UI_PASSWORD: ["admin-api"],
   LAVA_WEBHOOK_USER: ["payment-runtime"],
   LAVA_WEBHOOK_PASSWORD: ["payment-runtime"],
   POSTGRES_SUPER_PASSWORD: ["postgres"],

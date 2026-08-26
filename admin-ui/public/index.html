@@ -15,7 +15,7 @@
       <div class="brand-mark" aria-hidden="true">E</div>
       <p class="eyebrow">EVASELF CONTROL</p>
       <h1>Управление системой</h1>
-      <p class="muted">Общие настройки, секреты доступа и журнал действий. Агенты настраиваются отдельно в Letta.</p>
+      <p class="muted">Одна панель на всю установку: пользователи, агенты, подписки, модели, Letta и мониторинг.</p>
       <form id="login-form">
         <label>Имя администратора<input name="username" autocomplete="username" required></label>
         <label>Пароль<input name="password" type="password" autocomplete="current-password" minlength="12" required></label>
@@ -34,25 +34,32 @@
         <div class="brand-mark small" aria-hidden="true">E</div>
         <div><strong>Evaself</strong><span>Control Center</span></div>
       </div>
+      <!-- Разделы сгруппированы по тому, чем управляют, а не по тому,
+           каким сервисом они реализованы: оператор ищет «подписку
+           человека», а не «таблицу subscriptions». Отдельных консолей на
+           своих доменах больше нет — Letta и мониторинг живут здесь же. -->
       <nav id="nav" aria-label="Разделы">
         <button data-page="overview" class="nav-item active"><span>◉</span>Обзор</button>
-        <button data-page="services" class="nav-item"><span>▦</span>Сервисы и интеграции</button>
+        <div class="nav-caption">Люди</div>
+        <button data-page="users" class="nav-item"><span>◍</span>Пользователи</button>
+        <button data-page="subscriptions" class="nav-item"><span>◆</span>Подписки</button>
+        <div class="nav-caption">Ева</div>
+        <button data-page="agents" class="nav-item"><span>❂</span>Агенты</button>
+        <button data-page="persona" class="nav-item"><span>✎</span>Персона и промпт</button>
+        <button data-page="letta" class="nav-item"><span>⌬</span>Letta</button>
+        <div class="nav-caption">Модели и медиа</div>
         <button data-page="ai" class="nav-item"><span>✦</span>Искусственный интеллект</button>
         <button data-page="stt" class="nav-item"><span>◎</span>Распознавание речи</button>
-        <button data-page="media" class="nav-item"><span>◈</span>Распознавание медиа</button>
         <button data-page="tts" class="nav-item"><span>◍</span>Синтез речи</button>
+        <button data-page="media" class="nav-item"><span>◈</span>Распознавание медиа</button>
+        <div class="nav-caption">Система</div>
+        <button data-page="monitoring" class="nav-item"><span>⏱</span>Мониторинг</button>
+        <button data-page="services" class="nav-item"><span>▦</span>Сервисы и интеграции</button>
         <button data-page="operations" class="nav-item"><span>↻</span>Backup и обновления</button>
-        <div class="nav-caption">Управление</div>
-        <button data-page="users" class="nav-item"><span>◍</span>Пользователи</button>
         <button data-page="settings" class="nav-item"><span>⌁</span>Системные настройки</button>
         <button data-page="security" class="nav-item"><span>◇</span>Безопасность и ключи</button>
         <button data-page="audit" class="nav-item"><span>≋</span>Журнал событий</button>
       </nav>
-      <!-- Адрес подставляется из настроек установки: зашитый домен работал
-           только на одной инсталляции и на всех остальных вёл в никуда. -->
-      <a class="letta-link" id="letta-link" href="#" target="_blank" rel="noreferrer" hidden>
-        <span>↗</span><span><strong>Открыть Letta</strong><small>Агенты и диалоги</small></span>
-      </a>
     </aside>
 
     <section class="workspace">
@@ -617,6 +624,317 @@
           </section>
         </section>
 
+        <!-- ==============================================================
+             Подписки
+             --------------------------------------------------------------
+             Раздел отвечает на два разных вопроса и потому разделён на
+             свод по установке и карточку одного человека. Ручное решение
+             администратора и оплата всегда названы по имени: в них разная
+             цена ошибки, и путать их нельзя.
+             ============================================================ -->
+        <section id="page-subscriptions" class="page">
+          <div class="page-heading">
+            <div><p class="eyebrow">ДОСТУП И ТАРИФЫ</p><h2>Подписки</h2><p>Оплата и право доступа — разные вещи. Ручное решение видно отдельно от оплаты и снимается, не задевая оплаченный период.</p></div>
+            <button id="reload-subscriptions" class="button ghost">Обновить</button>
+          </div>
+
+          <div class="card table-card">
+            <div class="section-heading"><div><h3>Действующие подписки</h3><p class="block-caption">По тарифу и происхождению.</p></div></div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Тариф</th><th>Происхождение</th><th>Статус</th><th>Людей</th></tr></thead>
+                <tbody id="subscriptions-summary-body"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="card table-card">
+            <div class="section-heading"><div><h3>Истекают в ближайшие две недели</h3><p class="block-caption">Строка открывает карточку доступа.</p></div></div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Пользователь</th><th>Тариф</th><th>Происхождение</th><th>Действует до</th></tr></thead>
+                <tbody id="subscriptions-expiring-body"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="section-heading"><div><h3>Карточка доступа</h3><p class="block-caption">Внутренний идентификатор пользователя. Его показывает раздел «Пользователи».</p></div></div>
+            <form id="subscription-open-form" class="inline-form">
+              <label>user_id<input name="user_id" inputmode="numeric" placeholder="например 42" autocomplete="off" required></label>
+              <button class="button secondary" type="submit">Открыть</button>
+            </form>
+          </div>
+
+          <section class="card" id="subscription-card" hidden>
+            <div class="page-heading">
+              <div><p class="eyebrow">ДОСТУП</p><h3 id="subscription-card-title">—</h3><p class="block-caption" id="subscription-card-subtitle"></p></div>
+              <button id="close-subscription-card" class="button ghost" type="button">Закрыть</button>
+            </div>
+            <div id="subscription-card-body"></div>
+          </section>
+        </section>
+
+        <!-- ==============================================================
+             Агенты
+             --------------------------------------------------------------
+             Создание, изменение и удаление уходят в eva-agent-service тем
+             же путём, каким агент заводится при первом сообщении человека
+             в Telegram. Второго механизма создания агентов не существует.
+             ============================================================ -->
+        <section id="page-agents" class="page">
+          <div class="page-heading">
+            <div><p class="eyebrow">ЛИЧНЫЕ АГЕНТЫ ЕВЫ</p><h2>Агенты</h2><p>Один человек — один агент. Создание идёт тем же путём Letta Agent SDK, что и первое сообщение в Telegram.</p></div>
+            <div class="heading-actions">
+              <button id="new-agent" class="button primary" type="button">Создать агента</button>
+              <button id="reload-agents" class="button ghost">Обновить</button>
+            </div>
+          </div>
+
+          <div class="card users-filters">
+            <form id="agents-filter-form">
+              <label>Поиск<input name="query" placeholder="agent_id или имя агента" autocomplete="off"></label>
+              <label>Состояние<select name="status">
+                <option value="">Любое</option>
+                <option value="active">active</option>
+                <option value="archived">archived</option>
+              </select></label>
+              <button class="button secondary" type="submit">Найти</button>
+            </form>
+          </div>
+
+          <div class="card table-card">
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Агент</th><th>Владелец</th><th>Модель</th><th>Диалогов</th><th>Персона</th><th>Активных ходов</th></tr></thead>
+                <tbody id="agents-body"></tbody>
+              </table>
+            </div>
+            <p class="muted users-total" id="agents-total"></p>
+          </div>
+
+          <section class="card" id="agent-card" hidden>
+            <div class="page-heading">
+              <div><p class="eyebrow">КАРТОЧКА АГЕНТА</p><h3 id="agent-card-title">—</h3><p class="block-caption" id="agent-card-subtitle"></p></div>
+              <button id="close-agent-card" class="button ghost" type="button">Закрыть</button>
+            </div>
+            <div id="agent-card-body"></div>
+          </section>
+
+          <dialog id="agent-create-dialog" class="sheet-dialog">
+            <div class="sheet-head">
+              <div><h3>Создать агента</h3><p class="muted">Агент заводится человеку по его Telegram ID. Если агент уже есть, ничего не создаётся.</p></div>
+              <button id="close-agent-create" class="icon-button" aria-label="Закрыть" type="button">×</button>
+            </div>
+            <form id="agent-create-form">
+              <label>Telegram ID<input name="telegram_id" inputmode="numeric" placeholder="например 123456789" autocomplete="off" required></label>
+              <label>Имя (необязательно)<input name="first_name" autocomplete="off" placeholder="Как обращаться"></label>
+              <label>Username (необязательно)<input name="username" autocomplete="off" placeholder="без @"></label>
+              <div class="form-actions">
+                <button class="button primary" type="submit">Создать</button>
+              </div>
+            </form>
+          </dialog>
+        </section>
+
+        <!-- ==============================================================
+             Персона и системный промпт
+             --------------------------------------------------------------
+             Правятся настоящие production-источники: значение по умолчанию
+             — файлы репозитория, правка живёт версией в реестре
+             артефактов. Сохранение сразу применяется — состояния
+             «сохранено, но не действует» в панели нет.
+             ============================================================ -->
+        <section id="page-persona" class="page">
+          <div class="page-heading">
+            <div><p class="eyebrow">ЛИЧНОСТЬ ЕВЫ</p><h2>Персона и промпт</h2><p>Сохранение применяется сразу: новый агент создаётся с новым текстом, существующие приводятся к нему тем же PersonaSync.</p></div>
+            <div class="heading-actions">
+              <button id="persona-sync" class="button ghost" type="button">Синхронизировать</button>
+              <button id="reload-persona" class="button ghost">Обновить</button>
+            </div>
+          </div>
+
+          <section class="card" id="persona-apply-state">
+            <div class="section-heading"><div><h3>Состояние применения</h3><p class="block-caption">Сколько агентов уже работает на действующей версии.</p></div></div>
+            <div id="persona-apply-body" class="routing-summary"></div>
+          </section>
+
+          <div class="tabs" role="tablist">
+            <button class="tab active" data-persona-tab="persona">Персона (eva.md)</button>
+            <button class="tab" data-persona-tab="system_prompt">Системный промпт</button>
+          </div>
+
+          <section class="card" id="persona-editor">
+            <div class="section-heading">
+              <div><h3 id="persona-editor-title">Персона</h3><p class="block-caption" id="persona-editor-caption"></p></div>
+            </div>
+            <div id="persona-facts" class="status-facts"></div>
+            <label class="code-label">Текст
+              <textarea id="persona-text" rows="22" spellcheck="false" wrap="soft"></textarea>
+            </label>
+            <div class="form-actions">
+              <button id="persona-save" class="button primary" type="button">Сохранить и применить</button>
+              <button id="persona-rollback" class="button secondary" type="button">Откатить версию</button>
+              <button id="persona-restore" class="button ghost" type="button">Вернуть текст файла</button>
+              <button id="persona-reset" class="button ghost" type="button">Отменить правку</button>
+            </div>
+            <p class="muted" id="persona-hint"></p>
+          </section>
+
+          <div class="card table-card">
+            <div class="section-heading"><div><h3>История версий</h3><p class="block-caption">Что и когда становилось действующим. Текстов здесь нет — только отпечатки.</p></div></div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Версия</th><th>Опубликована</th><th>Снята</th><th>Причина</th><th>Отпечаток</th></tr></thead>
+                <tbody id="persona-history-body"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <!-- ==============================================================
+             Letta
+             --------------------------------------------------------------
+             Прежняя консоль на своём поддомене за Basic Auth переехала
+             сюда целиком: те же внутренние маршруты, но под сессией
+             панели, ролями, sudo и аудитом. Ключ Agent Runtime остаётся
+             у admin-api и в браузер не попадает.
+             ============================================================ -->
+        <section id="page-letta" class="page">
+          <div class="page-heading">
+            <div><p class="eyebrow">КОГНИТИВНЫЙ RUNTIME</p><h2>Letta</h2><p>App Server наружу не публикуется. Всё, что видно здесь, панель читает через eva-agent-service.</p></div>
+            <div class="heading-actions">
+              <button id="letta-test" class="button ghost" type="button">Проверить соединение</button>
+              <button id="reload-letta" class="button ghost">Обновить</button>
+            </div>
+          </div>
+
+          <div id="letta-summary" class="host-bar"></div>
+
+          <div class="tabs" role="tablist">
+            <button class="tab active" data-letta-tab="runtime">Runtime</button>
+            <button class="tab" data-letta-tab="conversations">Диалоги</button>
+            <button class="tab" data-letta-tab="context">Контекст</button>
+            <button class="tab" data-letta-tab="audit">Журнал Letta</button>
+          </div>
+
+          <div id="letta-tab-runtime" class="letta-tab">
+            <section class="card router-card">
+              <div class="section-heading"><div><h3>Настройки SDK</h3><p class="block-caption">Сериализуемые умолчания сессии. Capability token App Server сюда не приходит никогда.</p></div></div>
+              <div id="letta-settings" class="routing-summary"></div>
+            </section>
+            <section class="card table-card">
+              <div class="section-heading"><div><h3>Живые агенты App Server</h3><p class="block-caption">Что видит сам Letta. Расхождение с разделом «Агенты» означает, что каталог и runtime разошлись.</p></div></div>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>Агент</th><th>Имя</th><th>Модель</th><th>Скрыт</th></tr></thead>
+                  <tbody id="letta-agents-body"></tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+
+          <div id="letta-tab-conversations" class="letta-tab" hidden>
+            <div class="card">
+              <form id="letta-conversations-form" class="inline-form">
+                <label>agent_id<input name="agent_id" placeholder="agent-…" autocomplete="off" required></label>
+                <button class="button secondary" type="submit">Показать диалоги</button>
+              </form>
+            </div>
+            <div class="card table-card">
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>Диалог</th><th>Состояние</th><th>Сообщений</th><th>Действия</th></tr></thead>
+                  <tbody id="letta-conversations-body"></tbody>
+                </table>
+              </div>
+            </div>
+            <div class="card" id="letta-messages-card" hidden>
+              <div class="section-heading"><div><h3>История диалога</h3><p class="block-caption">Личная переписка. Открытие требует отдельного подтверждения и попадает в журнал событий.</p></div></div>
+              <div id="letta-messages"></div>
+            </div>
+          </div>
+
+          <div id="letta-tab-context" class="letta-tab" hidden>
+            <div class="card table-card">
+              <div class="section-heading"><div><h3>Расход контекста</h3><p class="block-caption">Где ближе всего к пределу окна.</p></div></div>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>Агент</th><th>Диалог</th><th>Сообщений</th><th>Окно контекста</th></tr></thead>
+                  <tbody id="letta-context-body"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <div id="letta-tab-audit" class="letta-tab" hidden>
+            <div class="card table-card">
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>Время</th><th>Действие</th><th>Цель</th><th>Результат</th></tr></thead>
+                  <tbody id="letta-audit-body"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ==============================================================
+             Мониторинг
+             --------------------------------------------------------------
+             Собственные данные Evaself: health-worker уже опрашивает
+             каждый сервис каталога и пишет исход в health_checks, а
+             service_statuses держит текущее состояние. Внешняя статусная
+             страница видела бы то же самое снаружи и с опозданием.
+             ============================================================ -->
+        <section id="page-monitoring" class="page">
+          <div class="page-heading">
+            <div><p class="eyebrow">СОБСТВЕННЫЕ ПРОВЕРКИ</p><h2>Мониторинг</h2><p>Состояние сервисов, последние проверки и ошибки за сутки. Отдельная статусная страница больше не нужна.</p></div>
+            <div class="heading-actions">
+              <label class="inline-label">Окно
+                <select id="monitoring-hours">
+                  <option value="1">1 час</option>
+                  <option value="6">6 часов</option>
+                  <option value="24" selected>24 часа</option>
+                  <option value="168">7 дней</option>
+                </select>
+              </label>
+              <button id="reload-monitoring" class="button ghost">Обновить</button>
+            </div>
+          </div>
+
+          <section id="monitoring-verdict" class="verdict">
+            <span class="verdict-beacon" aria-hidden="true"></span>
+            <div class="verdict-copy">
+              <strong id="monitoring-title">Проверяю состояние…</strong>
+              <p id="monitoring-detail"></p>
+            </div>
+          </section>
+
+          <div id="monitoring-host" class="host-bar"></div>
+          <div id="monitoring-groups" class="overview-groups"></div>
+
+          <div class="card table-card">
+            <div class="section-heading"><div><h3>Последние проверки</h3><p class="block-caption">Что проверял health-worker и чем это кончилось.</p></div></div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Когда</th><th>Цель</th><th>Исход</th><th>Длительность</th><th>Сообщение</th></tr></thead>
+                <tbody id="monitoring-checks-body"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="card table-card">
+            <div class="section-heading"><div><h3>Ошибки за окно</h3><p class="block-caption">Операции, проверки и текущие нездоровые состояния — вместе.</p></div></div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Когда</th><th>Источник</th><th>Цель</th><th>Сообщение</th></tr></thead>
+                <tbody id="monitoring-errors-body"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
         <section id="page-audit" class="page">
           <div class="page-heading">
             <div><p class="eyebrow">КОНТРОЛЬ ИЗМЕНЕНИЙ</p><h2>Журнал событий</h2><p>Каждая административная мутация фиксируется до и после выполнения.</p></div>
@@ -667,6 +985,11 @@
   <script src="./ui-ai-providers.js" defer></script>
   <script src="./ui-operations.js" defer></script>
   <script src="./ui-users.js" defer></script>
+  <script src="./ui-subscriptions.js" defer></script>
+  <script src="./ui-agents.js" defer></script>
+  <script src="./ui-persona.js" defer></script>
+  <script src="./ui-letta.js" defer></script>
+  <script src="./ui-monitoring.js" defer></script>
   <script src="./ui-media.js" defer></script>
   <script src="./ui-stt.js" defer></script>
   <script src="./ui-stt-editor.js" defer></script>

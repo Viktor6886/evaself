@@ -38,12 +38,22 @@ services:
       DOMAIN: ${DOMAIN}
       DOMAIN_APP: ${DOMAIN_APP}
       DOMAIN_API: ${DOMAIN_API}
-      DOMAIN_LETTA: ${DOMAIN_LETTA}
-      DOMAIN_STATUS: ${DOMAIN_STATUS}
+      # Выведенные из эксплуатации имена. Консоль Letta и статусная
+      # страница стали разделами панели (/admin/letta, /admin/monitoring),
+      # и эти два имени остались только как 308-редирект на них.
+      #
+      # `:-` подставляет значение, когда переменная не задана ИЛИ пуста, —
+      # именно поэтому подстановка сделана здесь, а не в Caddyfile: там
+      # `{$VAR:default}` считает пустую строку заданным значением, и
+      # очищенная переменная дала бы блок без имени хоста.
+      #
+      # `*.localhost` Caddy выдаёт собственным внутренним CA и никогда не
+      # просит для него публичный сертификат: чистая установка не публикует
+      # эти имена и не долбится в ACME за записями, которых нет.
+      DOMAIN_LETTA_LEGACY: ${DOMAIN_LETTA:-letta.localhost}
+      DOMAIN_STATUS_LEGACY: ${DOMAIN_STATUS:-status.localhost}
       ACME_EMAIL: ${ACME_EMAIL}
       ACME_CA: ${ACME_CA:-https://acme-v02.api.letsencrypt.org/directory}
-      LETTA_UI_USER: ${LETTA_UI_USER}
-      LETTA_UI_PASSWORD_HASH: ${LETTA_UI_PASSWORD_HASH}
       EVA_AGENT_PORT: ${EVA_AGENT_PORT}
       # Used only by Caddy to inject the protected backend header.
       # It is never returned to the browser.
@@ -58,7 +68,6 @@ services:
       - eva-agent-service
       - admin-api
       - admin-ui
-      - letta-ui
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:2019/config/"]
       interval: 30s
@@ -183,31 +192,6 @@ services:
       timeout: 10s
       retries: 10
       start_period: 60s
-
-  letta-ui:
-    <<: [*restart, *logging]
-    build:
-      context: ./letta-ui
-      args:
-        CADDY_IMAGE: ${CADDY_IMAGE}
-        CADDY_VERSION: ${CADDY_VERSION}
-    image: evaself/letta-ui:0.3.0
-    container_name: evaself-letta-ui
-    # The App Server is WebSocket-only, so the console cannot talk to it
-    # from a browser. It goes through eva-agent-service.
-    environment:
-      EVA_AGENT_URL: http://eva-agent-service:${EVA_AGENT_PORT}
-      EVA_AGENT_API_KEY: ${EVA_AGENT_API_KEY}
-    networks: [edge]
-    depends_on:
-      eva-agent-service:
-        condition: service_started
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8081/healthz"]
-      interval: 30s
-      timeout: 5s
-      retries: 5
-      start_period: 15s
 
   admin-ui:
     <<: [*restart, *logging]
@@ -742,20 +726,6 @@ services:
       retries: 5
       start_period: 60s
 
-  # ===================================================================
-  # OPTIONAL — enabled via COMPOSE_PROFILES in .env
-  # ===================================================================
-  uptime-kuma:
-    <<: [*restart, *logging]
-    profiles: ["monitoring"]
-    image: ${UPTIME_KUMA_IMAGE}:${UPTIME_KUMA_VERSION}
-    container_name: evaself-uptime-kuma
-    environment:
-      TZ: ${TZ}
-    volumes:
-      - uptime_kuma_data:/app/data
-    networks: [edge]
-
 # ---------------------------------------------------------------------
 # Segmented networks.
 #
@@ -811,5 +781,10 @@ volumes:
     name: evaself_media_shared
   backup_work:
     name: evaself_backup_work
+  # Том Uptime Kuma. Сам сервис выведен из эксплуатации вместе со
+  # статусной страницей: мониторинг стал разделом панели и строится на
+  # собственных проверках health-worker. Том объявлен и не удаляется —
+  # в нём остаётся история установок, которые Kuma включали, и решение
+  # о её удалении принимает человек, а не обновление.
   uptime_kuma_data:
     name: evaself_uptime_kuma_data

@@ -79,8 +79,7 @@ else
 		docker run --rm
 		-v "$ROOT_DIR:/work:ro" -w /work
 		-e DOMAIN -e DOMAIN_APP -e DOMAIN_API
-		-e DOMAIN_LETTA -e DOMAIN_STATUS -e ACME_EMAIL -e ACME_CA
-		-e LETTA_UI_USER -e LETTA_UI_PASSWORD_HASH
+		-e DOMAIN_LETTA_LEGACY -e DOMAIN_STATUS_LEGACY -e ACME_EMAIL -e ACME_CA
 		-e EVA_AGENT_PORT -e EVA_AGENT_URL -e EVA_AGENT_API_KEY
 		"${CADDY_IMAGE}:${CADDY_VERSION}" caddy
 	)
@@ -95,9 +94,8 @@ validate_caddyfile() {
 	fi
 	if env \
 		DOMAIN=example.test DOMAIN_APP=app.example.test DOMAIN_API=api.example.test \
-		DOMAIN_LETTA=letta.example.test DOMAIN_STATUS=status.example.test \
+		DOMAIN_LETTA_LEGACY=letta.localhost DOMAIN_STATUS_LEGACY=status.localhost \
 		ACME_EMAIL=ops@example.test ACME_CA=https://acme-v02.api.letsencrypt.org/directory \
-		LETTA_UI_USER=admin LETTA_UI_PASSWORD_HASH='$2a$14$placeholderplaceholderpl' \
 		EVA_AGENT_PORT=8070 EVA_AGENT_URL=http://eva-agent-service:8070 \
 		EVA_AGENT_API_KEY=placeholder \
 		"${CADDY_CMD[@]}" validate --config "$config_path" >/dev/null 2>&1; then
@@ -109,7 +107,6 @@ validate_caddyfile() {
 
 validate_caddyfile "$ROOT_DIR/Caddyfile"          "Caddyfile (edge)"
 validate_caddyfile "$ROOT_DIR/webapp/Caddyfile"   "webapp/Caddyfile"
-validate_caddyfile "$ROOT_DIR/letta-ui/Caddyfile" "letta-ui/Caddyfile"
 validate_caddyfile "$ROOT_DIR/admin-ui/Caddyfile" "admin-ui/Caddyfile"
 
 # ---------------------------------------------------------------------

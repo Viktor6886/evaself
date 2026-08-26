@@ -8,7 +8,9 @@
 
 ## Сеть
 
-Наружу публикуются Caddy 80/443. PostgreSQL, Valkey, Letta App Server, Docker API и внутренние service APIs не публикуются. Контейнерные сети разделяют edge, data, agent и tools. Caddy Admin API слушает localhost.
+Наружу публикуются Caddy 80/443 и ровно три имени: корневой домен, `app.` и `api.`. PostgreSQL, Valkey, Letta App Server, Docker API и внутренние service APIs не публикуются. Контейнерные сети разделяют edge, data, agent и tools. Caddy Admin API слушает localhost.
+
+Прежние `letta.` и `status.` выведены из эксплуатации: консоль Letta со своим HTTP Basic Auth и статусная страница без входа вовсе стали разделами административной панели. На старых именах остался только 308-редирект, и его можно снять, очистив `DOMAIN_LETTA`/`DOMAIN_STATUS`. Структуру проверяет `scripts/ci/assert-single-admin-domain.py`.
 
 Недоверенный web/document content обрабатывается в tools-сегменте без доступа к базе, Valkey и App Server. Исходный контент считается данными, а не инструкциями.
 
@@ -24,7 +26,11 @@
 
 Admin panel использует server-side sessions, Argon2id, `HttpOnly Secure SameSite=Strict`, CSRF, RBAC и короткие scoped sudo grants. Каждая административная операция имеет объявленный доступ и audit event.
 
-Чтение переписки требует owner/admin и отдельного sudo scope. Сообщения читаются через `eva-agent-service` из Letta; копии в PostgreSQL нет. Текст не попадает в audit log.
+Чтение переписки требует owner/admin и отдельного sudo scope. Это верно для обоих путей: карточки пользователя и раздела «Letta». Сообщения читаются через `eva-agent-service` из Letta; копии в PostgreSQL нет. Текст не попадает в audit log — только счётчик и идентификатор диалога.
+
+Раздел «Letta» не является прокси внутреннего API: каждая операция — названный метод с фиксированным путём, и браузер не может попросить произвольный `/v1/*`. Ключ `EVA_AGENT_API_KEY` остаётся у `admin-api`.
+
+Правка канонической персоны и системного промпта требует owner/admin, sudo-гранта `settings:write` и подтверждения именем источника. В audit log уходят номер версии, отпечаток и итог применения; текста там нет.
 
 ## Секреты
 
@@ -46,4 +52,5 @@ git grep -nE 'BEGIN (RSA|OPENSSH) PRIVATE KEY'
 git ls-files .env
 python3 scripts/ci/assert-tenant-scope.py
 python3 scripts/ci/assert-admin-route-access.py
+python3 scripts/ci/assert-single-admin-domain.py
 ```

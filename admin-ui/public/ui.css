@@ -959,3 +959,98 @@ dialog .eyebrow { margin-top: 0; }
   .provider-card .card-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .provider-card .card-actions .card-more { grid-column: 1 / -1; }
 }
+
+/* ---------------------------------------------------------------------
+ * Разделы единой панели: агенты, подписки, персона, Letta, мониторинг.
+ *
+ * Ничего нового по языку интерфейса здесь не изобретается: карточки,
+ * таблицы и кнопки те же, что и в остальных разделах. Правил ровно
+ * столько, сколько нужно новым видам содержимого — редактору текста,
+ * строке сервиса и короткой форме «поле и кнопка».
+ * ------------------------------------------------------------------- */
+
+/* Короткая форма в одну строку: «user_id — Открыть», «agent_id — Показать». */
+.inline-form { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 12px; align-items: end; }
+.inline-form label { margin: 0; }
+
+/* Несколько полей рядом внутри карточки. Ниже 720 они уже складываются
+   в колонку общим правилом, поэтому отдельного медиазапроса не нужно. */
+.field-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; align-items: end; }
+.field-row label { margin: 0; }
+
+.inline-label { display: grid; gap: 4px; font-size: 11px; color: var(--muted); }
+.inline-label select { min-height: 36px; }
+
+/*
+ * Редактор персоны и системного промпта.
+ *
+ * Моноширинный шрифт и мягкий перенос: это markdown, а не проза, и
+ * ломать строки по словам здесь мешает — правку сверяют по строкам.
+ * Ниже 720 высота уменьшается, иначе поле выше экрана, и до кнопок
+ * «Сохранить» приходится прокручивать вслепую.
+ */
+.code-label { display: grid; gap: 6px; margin-top: 14px; }
+.code-label textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  line-height: 1.55;
+  min-height: 320px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+#persona-facts { margin-top: 4px; }
+#persona-apply-body .host-bar { margin: 0; }
+
+.letta-tab { display: grid; gap: 18px; }
+
+/*
+ * Строка сервиса в мониторинге: точка, название, состояние, время и
+ * кнопка проверки. Сетка, а не флекс: название и состояние должны
+ * стоять столбиком друг под другом на всех строках, иначе список
+ * читается как каша.
+ */
+.monitor-row {
+  display: grid;
+  grid-template-columns: auto minmax(0,1.4fr) minmax(0,1fr) auto auto;
+  gap: 10px;
+  align-items: center;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-size: 12.5px;
+}
+.monitor-row strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.monitor-row .mini-hint { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Кнопки внутри ячейки таблицы. Без переноса они растягивают таблицу
+   ровно на ту ширину, которой не хватает телефону. */
+.row-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+
+@media (max-width: 720px) {
+  .inline-form { grid-template-columns: 1fr; }
+  /*
+   * Высота задаётся явно, а не через min-height: у <textarea> её решает
+   * атрибут rows, и min-height ниже собственной высоты поля ни на что не
+   * влияет. Поле в двадцать две строки на телефоне выше экрана целиком, и
+   * кнопки «Сохранить и применить» оказываются за его нижним краем — до
+   * них приходится прокручивать вслепую, уже перестав видеть текст.
+   */
+  .code-label textarea { height: 260px; min-height: 160px; font-size: 12px; }
+  /*
+   * Строка сервиса складывается в две: точка и название сверху,
+   * остальное — под ними. В одну строку из пяти колонок 360 пикселей
+   * не хватает никогда, и раньше именно такие сетки растягивали
+   * документ вбок.
+   */
+  .monitor-row {
+    grid-template-columns: auto minmax(0,1fr);
+    grid-template-areas: "dot name" "state state" "time action";
+    row-gap: 6px;
+  }
+  .monitor-row > .status-dot { grid-area: dot; }
+  .monitor-row > strong { grid-area: name; }
+  .monitor-row > .mini-hint { grid-area: state; white-space: normal; }
+  .monitor-row > .technical { grid-area: time; }
+  .monitor-row > .button { grid-area: action; justify-self: end; }
+}

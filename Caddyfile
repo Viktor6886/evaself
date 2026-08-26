@@ -5,9 +5,16 @@
 # hard-coded domain anywhere in this repository. Caddy obtains and
 # renews HTTPS certificates automatically (HTTP-01 + TLS-ALPN-01).
 #
-# Only these five names are reachable from the internet. PostgreSQL,
-# Valkey, the Letta App Server (WebSocket), eva-agent-service's internal
-# API, SearXNG and the media service stay on evaself-network.
+# Only three names are reachable from the internet: the main site, the
+# Mini App and the public API. PostgreSQL, Valkey, the Letta App Server
+# (WebSocket), eva-agent-service's internal API, SearXNG and the media
+# service stay on the internal networks.
+#
+# The Letta console and the status page used to be two more public host
+# names, each with its own login. Both are now sections of the one admin
+# panel at https://{$DOMAIN}/admin — see the redirect blocks at the end,
+# which exist only so that installations that already published those
+# names keep working while their DNS records are removed.
 # =====================================================================
 {
 	email {$ACME_EMAIL}
@@ -71,12 +78,6 @@
 	}
 }
 
-(admin_auth) {
-	basic_auth {
-		{$LETTA_UI_USER} {$LETTA_UI_PASSWORD_HASH}
-	}
-}
-
 # ---------------------------------------------------------------------
 # 1. Main site — https://{$DOMAIN}
 # ---------------------------------------------------------------------
@@ -85,8 +86,20 @@
 	import compression
 	import logging
 
+	# `redir * /admin/ 308`, а не `redir /admin/ 308`.
+	#
+	# У `redir` первым аргументом может стоять матчер, и путь, начинающийся
+	# со слэша, им и считается. Без явной звёздочки `/admin/` разбиралось
+	# как матчер, `308` — как адрес назначения, а запрос `/admin` (который
+	# матчеру `/admin/` не соответствует) уходил в пустой ответ 200: белая
+	# страница, ни одного заголовка безопасности и ничего в журнале.
+	#
+	# Поймать это было нечем, пока адрес панели писали со слэшем. Теперь
+	# без него: `/admin` — короткий адрес входа, а `/admin/letta` и
+	# `/admin/monitoring` — адреса разделов, на которые ведут редиректы с
+	# выведенных из эксплуатации имён. Регрессия — `scripts/ci/test-admin-routing.sh`.
 	handle /admin {
-		redir /admin/ 308
+		redir * /admin/ 308
 	}
 
 	handle /api/admin/v1/* {
@@ -188,51 +201,40 @@
 }
 
 # ---------------------------------------------------------------------
-# 4. Letta console — https://{$DOMAIN_LETTA}
+# 4. Retired host names — https://{$DOMAIN_LETTA_LEGACY}
+#                         https://{$DOMAIN_STATUS_LEGACY}
 # ---------------------------------------------------------------------
-# Self-hosted console shipped with Evaself (see letta-ui/README.md). The
-# App Server speaks WebSocket only, so the console reads through
-# eva-agent-service — the App Server itself is never
-# routed from the internet. Protected by HTTP basic auth on top of that.
+# The Letta console and the status page are sections of the admin panel
+# now: /admin/letta and /admin/monitoring, behind the panel's own session,
+# roles and audit instead of a second HTTP basic auth and a second UI with
+# no login at all.
+#
+# These two blocks are compatibility only. An installation that already
+# published letta.<domain> and status.<domain> keeps working — a bookmark
+# lands on the right section instead of a dead name — while its operator
+# removes the DNS records at their own pace.
+#
+# When DOMAIN_LETTA and DOMAIN_STATUS are cleared from .env, compose
+# substitutes letta.localhost / status.localhost here. Caddy issues those
+# from its internal CA and never asks a public ACME server for them, so a
+# fresh installation neither publishes the names nor retries certificates
+# for records that do not exist.
+#
+# Both are `redir`, not `reverse_proxy`: nothing is served on these names,
+# and {uri} is deliberately dropped — the old console's paths have no
+# counterpart in the panel, so every one of them lands on the section
+# root rather than a 404 inside it.
 # ---------------------------------------------------------------------
-{$DOMAIN_LETTA} {
+{$DOMAIN_LETTA_LEGACY} {
 	import security_headers
-	import compression
 	import logging
 
-	import admin_auth
-
-	handle_path /api/* {
-		reverse_proxy eva-agent-service:{$EVA_AGENT_PORT} {
-			header_up X-API-Key "{$EVA_AGENT_API_KEY}"
-			flush_interval -1
-		}
-	}
-
-	handle {
-		reverse_proxy letta-ui:8081 {
-			flush_interval -1
-		}
-	}
+	redir https://{$DOMAIN}/admin/letta 308
 }
 
-# ---------------------------------------------------------------------
-# 5. Status page — https://{$DOMAIN_STATUS}
-# ---------------------------------------------------------------------
-# Backed by Uptime Kuma, which is part of the optional "monitoring"
-# profile. When the profile is off, this host answers 503 instead of a
-# raw gateway error.
-# ---------------------------------------------------------------------
-{$DOMAIN_STATUS} {
+{$DOMAIN_STATUS_LEGACY} {
 	import security_headers
-	import compression
 	import logging
 
-	reverse_proxy uptime-kuma:3001 {
-		flush_interval -1
-	}
-
-	handle_errors {
-		respond "Status page is not enabled on this installation (enable the 'monitoring' compose profile)." 503
-	}
+	redir https://{$DOMAIN}/admin/monitoring 308
 }

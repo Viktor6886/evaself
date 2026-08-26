@@ -142,7 +142,7 @@ done
 # 3. stop everything that touches the data
 # ---------------------------------------------------------------------
 step "Остановка сервисов"
-compose stop eva-agent-service letta-app-server letta-ui webapp caddy >/dev/null 2>&1 || true
+compose stop eva-agent-service letta-app-server admin-api admin-ui webapp caddy >/dev/null 2>&1 || true
 ok "контейнеры приложений остановлены; PostgreSQL оставлен для restore"
 
 # ---------------------------------------------------------------------

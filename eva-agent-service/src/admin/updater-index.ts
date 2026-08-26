@@ -77,9 +77,7 @@ const CONTAINERS = new Map<string, string>([
   ["crawl4ai", "evaself-crawl4ai"],
   ["caddy", "evaself-caddy"],
   ["webapp", "evaself-webapp"],
-  ["letta-ui", "evaself-letta-ui"],
   ["backup-service", "evaself-backup-service"],
-  ["monitoring", "evaself-uptime-kuma"],
 ]);
 
 interface RequestMessage {

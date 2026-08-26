@@ -53,24 +53,6 @@ async function loadServicesAndIntegrations() {
   $("#integrations-list").innerHTML = integrations.payload.integrations
     .map((item) => statusCard(item))
     .join("");
-  applyLettaLink(services.payload.services);
-}
-
-/**
- * Ссылка «Открыть Letta» в боковом меню. Раньше в разметке стоял домен
- * одной конкретной установки, поэтому у всех остальных кнопка вела в
- * никуда. Берём адрес оттуда же, откуда его берут карточки сервисов.
- */
-function applyLettaLink(services) {
-  const link = $("#letta-link");
-  if (!link) return;
-  const letta = services.find((item) => item.id === "letta-ui");
-  if (letta?.public_url) {
-    link.href = letta.public_url;
-    link.hidden = false;
-  } else {
-    link.hidden = true;
-  }
 }
 
 /* ---------------------------------------------------------------------

@@ -45,6 +45,9 @@ import type { SdkSettingsInput, SdkSettingsManager } from "./sdk-settings.js";
 import type { TelegramClient, TelegramUpdate } from "./telegram.js";
 import type { TurnSemaphores } from "./turns/semaphores.js";
 import type { RuntimeContextBuilder } from "./runtime/runtime-context.js";
+import type { CanonicalContextStore } from "./runtime/canonical-context.js";
+import { registerCanonicalRoutes } from "./runtime/canonical-routes.js";
+import type { PersonaSyncResult } from "./letta/persona-sync.js";
 import { webhookSecretMatches } from "./telegram.js";
 
 export const VERSION = "0.3.0";
@@ -78,6 +81,15 @@ export interface Services {
    */
   productToolNames?: () => string[];
   runtimeContext?: RuntimeContextBuilder;
+  /**
+   * Канонические персона и системный промпт: то, что администратор правит
+   * в панели. Отсутствие поля означает установку без миграции 067 —
+   * маршруты просто не появляются, а runtime читает файлы, как и читал.
+   */
+  canonicalContext?: {
+    store: CanonicalContextStore;
+    sync(persona: string, systemPrompt: string): Promise<PersonaSyncResult>;
+  };
   /**
    * Контур наблюдаемости. Нужен выдаче метрик (состояние буфера
    * телеметрии) и ingress — там начинается трасса хода.
@@ -229,6 +241,18 @@ export function buildServer(services: Services): FastifyInstance {
     ...(services.miniAppSessions ? { sessions: services.miniAppSessions } : {}),
     rateLimiter,
   });
+
+  // Канонические источники личности Евы. Регистрируются, только когда
+  // владелец текстов передан: без реестра артефактов править нечего, а
+  // маршрут, отвечающий 500, хуже отсутствующего.
+  if (services.canonicalContext) {
+    registerCanonicalRoutes(app, {
+      store: services.canonicalContext.store,
+      applyToRuntime: (input) => letta.setCanonicalContext(input),
+      sync: services.canonicalContext.sync,
+      logger,
+    });
+  }
 
   // ---------------------------------------------------------------
   // metrics — Prometheus, за тем же внутренним ключом, что и /v1
