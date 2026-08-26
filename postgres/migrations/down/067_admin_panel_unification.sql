@@ -19,6 +19,10 @@ ALTER TABLE subscriptions
 
 DROP INDEX IF EXISTS subscriptions_source_idx;
 
+-- Представление сюда не возвращается к `SELECT *` намеренно: его выдача
+-- одинакова в обе стороны, а зависимость от каждой колонки `subscriptions`
+-- — это и есть то, из-за чего откат однажды не сработал. Старый код читает
+-- из него те же поля.
 ALTER TABLE subscriptions DROP COLUMN IF EXISTS source;
 ALTER TABLE subscriptions DROP COLUMN IF EXISTS actor_id;
 ALTER TABLE subscriptions DROP COLUMN IF EXISTS actor_name;

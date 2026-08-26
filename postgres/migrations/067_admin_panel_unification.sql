@@ -75,6 +75,67 @@ CREATE INDEX IF NOT EXISTS subscriptions_source_idx
     ON subscriptions (source, status);
 
 -- ---------------------------------------------------------------------
+-- 1a. v_user_overview перестаёт зависеть от `SELECT *`
+-- ---------------------------------------------------------------------
+-- Представление собиралось боковыми выборками `SELECT * FROM subscriptions`
+-- и `SELECT * FROM agent_links`. PostgreSQL раскрывает `*` в момент
+-- создания представления и запоминает получившийся список колонок как
+-- зависимость.
+--
+-- Само по себе это ничего не ломало, пока состав колонок не менялся. Но
+-- `db-migrate.sh` прогоняет все миграции заново при каждом `make update`,
+-- и миграция 003 пересоздаёт представление — уже после того, как эта
+-- добавила `source`, `actor_id`, `actor_name` и `note`. С этого момента
+-- представление зависит от них, и откат отвечает:
+--
+--   cannot drop column source of table subscriptions because other
+--   objects depend on it
+--
+-- То есть миграция, у которой есть down-файл, переставала откатываться —
+-- молча и не сразу, а со второго прогона. Заодно выдача представления
+-- тихо прирастала четырьмя служебными колонками.
+--
+-- Список колонок в боковых выборках теперь явный. Выдача представления не
+-- меняется ни на одну колонку: те же поля, в том же порядке, — меняется
+-- только то, от чего оно зависит. Следующая колонка в `subscriptions` или
+-- `agent_links` этой ловушки уже не расставит.
+DROP VIEW IF EXISTS v_user_overview;
+CREATE VIEW v_user_overview AS
+SELECT
+    u.id,
+    u.telegram_id,
+    u.username,
+    u.first_name,
+    u.state,
+    u.is_blocked,
+    u.language_code,
+    u.timezone,
+    COALESCE(s.plan, 'free')            AS plan,
+    COALESCE(s.status, 'none')          AS subscription_status,
+    s.current_period_end,
+    a.agent_id                          AS letta_agent_id,
+    a.conversation_id                   AS letta_conversation_id,
+    a.runtime                           AS agent_runtime,
+    a.message_count,
+    a.last_message_at,
+    u.created_at,
+    u.last_seen_at
+FROM users u
+LEFT JOIN LATERAL (
+    SELECT plan, status, current_period_end, created_at
+      FROM subscriptions
+     WHERE user_id = u.id AND status IN ('trialing', 'active', 'past_due')
+     ORDER BY created_at DESC LIMIT 1
+) s ON true
+LEFT JOIN LATERAL (
+    SELECT agent_id, conversation_id, runtime, message_count,
+           last_message_at, created_at
+      FROM agent_links
+     WHERE user_id = u.id AND kind = 'eva' AND status = 'active'
+     ORDER BY created_at DESC LIMIT 1
+) a ON true;
+
+-- ---------------------------------------------------------------------
 -- 2. Журнал ручных решений по подпискам
 -- ---------------------------------------------------------------------
 -- Отдельная таблица, а не только audit_log: в аудите лежит факт вызова

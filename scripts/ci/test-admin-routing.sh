@@ -45,18 +45,27 @@ command -v "$CADDY" >/dev/null 2>&1 || { echo "caddy не найден; укаж
 # некому разрешить, и всякий /admin/* отвечал бы 502 — то есть тест
 # «падал» бы на своём стенде, а не на конфигурации. Имена заводятся на
 # loopback; строка помечена, чтобы её было видно в /etc/hosts.
+#
+# Отказ, а не пропуск. Зелёная проверка, которая ничего не выполнила,
+# хуже отсутствующей: она обещает, что маршрутизация цела, и молчит ровно
+# тогда, когда её некому проверить. В CI запуск идёт под sudo, и прав
+# всегда достаточно; локально без них — явный отказ с подсказкой.
 HOSTS_MARK="# evaself admin routing test"
 if ! grep -q "$HOSTS_MARK" /etc/hosts 2>/dev/null; then
-	printf '127.0.0.1 admin-ui admin-api eva-agent-service webapp %s\n' "$HOSTS_MARK" \
-		>> /etc/hosts 2>/dev/null \
-		|| { echo "нет прав дописать /etc/hosts — тест пропущен"; exit 0; }
+	if ! printf '127.0.0.1 admin-ui admin-api eva-agent-service webapp %s\n' "$HOSTS_MARK" \
+		>> /etc/hosts 2>/dev/null; then
+		echo "::error::нет прав дописать /etc/hosts: запустите под sudo"
+		exit 1
+	fi
 	ADDED_HOSTS=1
 fi
 
 fail=0
+checked=0
 say() { printf '  %s\n' "$1"; }
 check() {
 	local label="$1" want="$2" got="$3"
+	checked=$((checked + 1))
 	if [ "$want" = "$got" ]; then
 		say "ok   $label ($got)"
 	else
@@ -184,4 +193,11 @@ check "/api/v1 наружу" 404 "$(code "http://localhost:${EDGE_PORT}/api/v1/s
 check "/api/metrics наружу" 404 "$(code "http://localhost:${EDGE_PORT}/api/metrics")"
 
 [ "$fail" -eq 0 ] || { echo "::error::маршрутизация панели сломана"; exit 1; }
-echo "маршрутизация панели: ok"
+# Счётчик, а не просто «ok»: если стенд когда-нибудь поднимется, но до
+# проверок дело не дойдёт, зелёный лог с нулём выполненных проверок
+# выглядел бы точно так же, как настоящий успех.
+[ "$checked" -ge 15 ] || {
+	echo "::error::выполнено проверок: $checked — стенд поднялся, но проверять было нечего"
+	exit 1
+}
+echo "маршрутизация панели: ok, проверок выполнено: $checked"
