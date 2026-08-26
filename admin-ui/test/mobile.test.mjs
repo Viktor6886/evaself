@@ -114,6 +114,75 @@ describe("панель на телефоне", () => {
     }
   });
 
+  /*
+   * Раздел, до которого нельзя дотянуться, отсутствует — но выглядит
+   * присутствующим.
+   *
+   * Список разделов вырос до тысячи с лишним пикселей, а выехавшее меню
+   * — это высота экрана с `overflow: visible`. «Системные настройки»,
+   * «Безопасность и ключи» и «Журнал событий» на телефоне просто не
+   * пролезали: ни ошибки, ни обрезанного края — они молча были ниже
+   * экрана, и открыть их было нельзя вовсе.
+   */
+  test("до последнего раздела меню можно дотянуться прокруткой", async () => {
+    for (const size of [{ width: 320, height: 568 }, PHONE]) {
+      const panel = await openPanel({ routes: ROUTES, viewport: size });
+      panels.push(panel);
+      await panel.page.evaluate(() => setSidebar(true));
+      await panel.page.waitForTimeout(150);
+
+      const state = await panel.page.evaluate(() => {
+        const bar = document.querySelector(".sidebar");
+        return {
+          scrollable: getComputedStyle(bar).overflowY,
+          hidden: bar.scrollHeight > bar.clientHeight,
+        };
+      });
+      // Содержимое выше ящика — это норма; недопустимо, когда его при
+      // этом нельзя прокрутить.
+      if (state.hidden) {
+        assert.match(
+          state.scrollable, /auto|scroll/,
+          `${size.width}: меню не прокручивается, а содержимое в него не помещается`,
+        );
+      }
+
+      const reached = await panel.page.evaluate(() => {
+        const bar = document.querySelector(".sidebar");
+        const items = [...document.querySelectorAll(".nav-item")];
+        const last = items[items.length - 1];
+        bar.scrollTop = bar.scrollHeight;
+        const box = last.getBoundingClientRect();
+        return {
+          page: last.dataset.page,
+          visible: box.top >= 0 && box.bottom <= window.innerHeight + 1,
+        };
+      });
+      assert.ok(
+        reached.visible,
+        `${size.width}: до раздела «${reached.page}» нельзя дотянуться даже прокруткой`,
+      );
+    }
+  });
+
+  /*
+   * Выехавшее меню накрывает содержимое, а не просвечивает сквозь себя.
+   * У боковой панели фон был на 94 % непрозрачности: в своей колонке на
+   * широком экране разницы нет, а поверх страницы сквозь список разделов
+   * читался чужой текст.
+   */
+  test("выехавшее меню непрозрачно", async () => {
+    const panel = await open({ routes: ROUTES });
+    await panel.page.evaluate(() => setSidebar(true));
+    await panel.page.waitForTimeout(150);
+    const alpha = await panel.page.evaluate(() => {
+      const value = getComputedStyle(document.querySelector(".sidebar")).backgroundColor;
+      const parts = value.match(/[\d.]+/g) ?? [];
+      return parts.length > 3 ? Number(parts[3]) : 1;
+    });
+    assert.equal(alpha, 1, `фон меню полупрозрачен (alpha ${alpha})`);
+  });
+
   test("вкладки раздела STT переносятся, а не уезжают за экран", async () => {
     const panel = await open({ routes: ROUTES });
     await panel.page.evaluate(() => openPage("stt"));

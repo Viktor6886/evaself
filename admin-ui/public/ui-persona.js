@@ -199,6 +199,39 @@ async function syncPersona() {
   await loadPersona();
 }
 
+/**
+ * Полноэкранная правка.
+ *
+ * Персона — тридцать шесть килобайт markdown, системный промпт — почти
+ * пятьдесят. В поле на четверть экрана телефона такой текст правят,
+ * прокручивая страницу вокруг поля: кнопка «Сохранить» уезжает, место
+ * правки теряется. В развёрнутом виде поле занимает экран целиком, а
+ * действия прибиты к нижнему краю.
+ *
+ * Выход — той же кнопкой и Escape: одного способа мало, когда режим
+ * закрывает собой всё остальное.
+ */
+function setPersonaFullscreen(on) {
+  const editor = $("#persona-editor");
+  editor.classList.toggle("is-fullscreen", on);
+  document.body.classList.toggle("editor-open", on);
+  $("#persona-expand").textContent = on ? "Свернуть" : "На весь экран";
+  $("#persona-expand").setAttribute("aria-expanded", String(on));
+  if (on) $("#persona-text").focus();
+}
+
+$("#persona-expand").addEventListener("click", () => {
+  setPersonaFullscreen(!$("#persona-editor").classList.contains("is-fullscreen"));
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && $("#persona-editor")?.classList.contains("is-fullscreen")) {
+    setPersonaFullscreen(false);
+  }
+});
+// Переход в другой раздел не оставляет за собой развёрнутый редактор:
+// иначе он накрывал бы новую страницу, которую никто не открывал.
+$("#nav").addEventListener("click", () => setPersonaFullscreen(false));
+
 $("#reload-persona").addEventListener("click", () => loadPersona().catch(handleError));
 $("#persona-sync").addEventListener("click", () => syncPersona().catch(handleError));
 $("#persona-save").addEventListener("click", () => savePersona());
