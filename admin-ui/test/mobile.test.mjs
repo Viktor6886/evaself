@@ -327,6 +327,60 @@ describe("панель на телефоне", () => {
     assert.ok(layout.rowWidth <= PHONE.width, "карточка не шире экрана");
   });
 
+  /*
+   * Подпись поля не рвётся посреди слова.
+   *
+   * Колонка подписи фиксированной ширины, и «ПРОИСХОЖДЕНИЕ» в неё не
+   * влезало на шесть пикселей: `overflow-wrap: anywhere`, нужный длинным
+   * путям и отпечаткам в значениях, ломал слово на «ПРОИСХОЖДЕНИ» и «Е».
+   * Читается это как опечатка в интерфейсе.
+   *
+   * Проверяется не конкретная подпись, а правило: ни одной подписи не
+   * должно быть тесно. Следующая длинная подпись сломает этот тест, а не
+   * вёрстку у оператора.
+   */
+  test("ни одна подпись поля не рвётся посреди слова", async () => {
+    const panel = await open({ routes: ROUTES });
+    const pages = await panel.page.evaluate(() =>
+      [...document.querySelectorAll("#nav .nav-item")].map((item) => item.dataset.page));
+
+    const tight = [];
+    for (const name of pages) {
+      await panel.page.evaluate((page) => openPage(page), name);
+      await panel.page.waitForTimeout(120);
+      tight.push(...await panel.page.evaluate((section) => {
+        const found = [];
+        const probe = document.createElement("span");
+        probe.style.position = "absolute";
+        probe.style.visibility = "hidden";
+        probe.style.whiteSpace = "nowrap";
+        document.body.appendChild(probe);
+        for (const cell of document.querySelectorAll("td[data-label]")) {
+          const style = getComputedStyle(cell);
+          if (style.display !== "grid") continue;
+          const track = parseFloat(style.gridTemplateColumns.split(" ")[0]);
+          if (!Number.isFinite(track)) continue;
+          const label = getComputedStyle(cell, "::before");
+          probe.style.font = label.font;
+          probe.style.letterSpacing = label.letterSpacing;
+          probe.style.textTransform = label.textTransform;
+          probe.textContent = cell.dataset.label;
+          const need = probe.getBoundingClientRect().width;
+          // Однословной подписи переноситься некуда: ей обязано хватить.
+          if (!cell.dataset.label.includes(" ") && need > track) {
+            found.push({ section, label: cell.dataset.label, need: Math.round(need), track });
+          }
+        }
+        probe.remove();
+        return found;
+      }, name));
+    }
+    assert.deepEqual(
+      tight, [],
+      `подписи не помещаются в свою колонку и порвутся по букве: ${JSON.stringify(tight)}`,
+    );
+  });
+
   test("на телефоне до каждой кнопки раздела можно дотянуться", async () => {
     const panel = await open({ routes: ROUTES });
     for (const name of ["overview", "operations", "stt"]) {
