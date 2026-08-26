@@ -31,6 +31,7 @@ import { SubscriptionAdminService } from "../dist/admin/subscription-service.js"
 import { PersonaAdminService } from "../dist/admin/persona-admin-service.js";
 import { LettaConsoleService } from "../dist/admin/letta-console-service.js";
 import { DeleteGuard } from "../dist/letta/delete-guard.js";
+import { guardQuery } from "../dist/tenancy/index.js";
 
 const PERSONA_TEXT = "Ева — внимательный собеседник, и этого текста в журнале быть не должно";
 
@@ -76,6 +77,19 @@ class FakeDb {
   });
 
   query = async (sql: string, values: unknown[] = []) => {
+    /*
+     * Та же граница арендатора, что и у настоящего пула.
+     *
+     * `guardPool` в admin-api оборачивает каждый запрос этой проверкой, и
+     * она смотрит не на SQL, а на рамку запроса: административное
+     * обращение к пользовательским таблицам обязано идти под ролью И под
+     * записью аудита. Маршрут, забывший `tenantAccess: "cross-user"`,
+     * пишется и типизируется без единой жалобы, а падает у первого
+     * оператора, который откроет раздел. Поддельная база без этой строки
+     * такой маршрут пропускала бы.
+     */
+    guardQuery([sql, values]);
+
     const text = sql.replace(/--[^\n]*\n/g, " ").replace(/\s+/g, " ").trim();
 
     if (text.startsWith("BEGIN") || text.startsWith("COMMIT") || text.startsWith("ROLLBACK")) {
@@ -290,6 +304,47 @@ function harness(db: FakeDb, options: HarnessOptions = {}) {
 }
 
 const COOKIE = { cookie: "eva_admin=session-1" };
+
+// ---------------------------------------------------------------------
+// 0. Граница арендатора действительно проверяется
+// ---------------------------------------------------------------------
+
+/*
+ * Без этого теста остальные ничего не доказывают о доступе. Если
+ * `guardQuery` в поддельной базе окажется бездействующим — потому что
+ * таблицу забыли объявить в `tenancy/tables.ts`, или проверка изменилась,
+ * — все проверки ниже продолжат проходить, а маршрут без
+ * `tenantAccess: "cross-user"` попадёт в production и упадёт у первого
+ * оператора, который откроет раздел.
+ */
+test("запрос к подпискам вне области арендатора отклоняется", async () => {
+  const db = new FakeDb();
+  await assert.rejects(
+    () => db.query(
+      "SELECT id, plan, status, source, provider, started_at, current_period_start,"
+      + " current_period_end, canceled_at, actor_name, note FROM subscriptions WHERE user_id = $1",
+      [11],
+    ),
+    /вне области арендатора/,
+  );
+});
+
+test("маршрут без tenantAccess не доходит до пользовательских таблиц", async () => {
+  const db = new FakeDb();
+  const { app } = harness(db);
+  // Тот же сервис, но маршрут объявлен без `tenantAccess`: запись аудита
+  // для безопасного метода не создаётся, и граница арендатора запрос не
+  // пропускает. Именно так выглядела бы забытая строка в объявлении.
+  app.get("/api/admin/v1/panel/__no-tenant-access", {
+    config: { roles: ["owner", "admin", "operator", "viewer"] },
+  }, async () => await new SubscriptionAdminService(db as never).summary());
+  await app.ready();
+  const response = await app.inject({
+    method: "GET", url: "/api/admin/v1/panel/__no-tenant-access", headers: COOKIE,
+  });
+  assert.equal(response.statusCode, 500, response.body);
+  await app.close();
+});
 
 // ---------------------------------------------------------------------
 // 1. Агенты
