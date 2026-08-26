@@ -30,6 +30,7 @@ import { AdminAgentService } from "../dist/admin/agent-admin-service.js";
 import { SubscriptionAdminService } from "../dist/admin/subscription-service.js";
 import { PersonaAdminService } from "../dist/admin/persona-admin-service.js";
 import { LettaConsoleService } from "../dist/admin/letta-console-service.js";
+import { HealthService } from "../dist/admin/health-service.js";
 import { DeleteGuard } from "../dist/letta/delete-guard.js";
 import { guardQuery } from "../dist/tenancy/index.js";
 
@@ -830,6 +831,44 @@ test("мониторинг отдаёт состояние, проверки и 
   assert.equal(payload.recent_checks.length, 1);
   assert.equal(payload.errors.items.length, 1);
   await app.close();
+});
+
+test("снимки выведенных из эксплуатации сервисов не попадают в ошибки", async () => {
+  // Настоящий HealthService на поддельном пуле: проверяется отбор строк,
+  // а не SQL. `service_statuses` переживает выведение сервиса из
+  // эксплуатации, и у обновлённой установки там остаются красные строки
+  // `letta-ui` и `integration:monitoring` — контейнеров под них больше
+  // нет. Без отбора список ошибок навсегда получал бы два пункта про то,
+  // чего в установке не существует.
+  const rows = {
+    audit: [],
+    checks: [],
+    statuses: [
+      { target_id: "letta-ui", target_type: "service", state: "stopped", color: "red",
+        last_check_at: new Date(), last_ok_at: null, detail_json: {} },
+      { target_id: "integration:monitoring", target_type: "integration", state: "stopped",
+        color: "red", last_check_at: new Date(), last_ok_at: null, detail_json: {} },
+      { target_id: "searxng", target_type: "service", state: "degraded", color: "yellow",
+        last_check_at: new Date(), last_ok_at: null, detail_json: { message: "медленно" } },
+      { target_id: "infrastructure:host", target_type: "infrastructure", state: "degraded",
+        color: "yellow", last_check_at: new Date(), last_ok_at: null, detail_json: { message: "диск" } },
+    ],
+  };
+  const pool = {
+    query: async (sql: string) => {
+      const text = sql.replace(/\s+/g, " ");
+      if (text.includes("FROM audit_log")) return { rows: rows.audit, rowCount: 0 };
+      if (text.includes("FROM health_checks")) return { rows: rows.checks, rowCount: 0 };
+      if (text.includes("FROM service_statuses")) {
+        return { rows: rows.statuses, rowCount: rows.statuses.length };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+  };
+  const health = new HealthService(pool as never, { publish: async () => 1 } as never);
+  const result = await health.errors(24, 50) as { items: Array<{ target: string }> };
+  const targets = result.items.map((item) => item.target).sort();
+  assert.deepEqual(targets, ["infrastructure:host", "searxng"]);
 });
 
 test("мониторинг доступен на чтение любому вошедшему", async () => {

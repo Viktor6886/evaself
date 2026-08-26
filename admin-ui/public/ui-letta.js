@@ -143,7 +143,7 @@ async function loadLettaConversations(agentId) {
         <td class="row-actions">
           <button class="button tiny ghost" data-letta-messages="${escapeHtml(id)}" type="button">История</button>
           <button class="button tiny ghost" data-letta-abort="${escapeHtml(id)}" type="button">Остановить ход</button>
-          <button class="button tiny ghost" data-letta-archive="${escapeHtml(id)}" type="button">${row.archived ? "Вернуть" : "В архив"}</button>
+          <button class="button tiny ghost" data-letta-archive="${escapeHtml(id)}" data-archived="${row.archived ? "1" : "0"}" type="button">${row.archived ? "Вернуть" : "В архив"}</button>
         </td>
       </tr>`;
     }).join("")
@@ -286,6 +286,9 @@ $("#letta-conversations-body").addEventListener("click", (event) => {
   }
   const archive = event.target.closest("[data-letta-archive]");
   if (archive) {
-    archiveLettaConversation(archive.dataset.lettaArchive, archive.textContent.trim() === "В архив");
+    // Состояние берётся из атрибута, а не из подписи кнопки: сравнение с
+    // текстом ломается от любой правки формулировки, и ломается молча —
+    // «Вернуть» начинает архивировать.
+    archiveLettaConversation(archive.dataset.lettaArchive, archive.dataset.archived !== "1");
   }
 });

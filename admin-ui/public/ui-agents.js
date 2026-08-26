@@ -150,11 +150,16 @@ async function openAgentCard(id) {
 
 async function saveAgent(form) {
   const id = form.dataset.agent;
+  // Пустые имя и модель не отправляются вовсе: у Letta это поля с
+  // минимальной длиной, и пустая строка вернулась бы отказом «name должно
+  // быть от 1 до 100» — то есть очистка поля выглядела бы поломкой
+  // панели. Описание пустым быть может: им его и очищают.
   const patch = {
-    name: form.elements.name.value.trim(),
     description: form.elements.description.value.trim(),
     hidden: form.elements.hidden.checked,
   };
+  const name = form.elements.name.value.trim();
+  if (name) patch.name = name;
   const model = form.elements.model.value.trim();
   if (model) patch.model = model;
   await request(`/panel/agents/${encodeURIComponent(id)}`, {

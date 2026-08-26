@@ -366,7 +366,14 @@ export class HealthService {
         actor: null,
         request_id: null,
       })),
-      ...statuses.rows.map((row) => ({
+      // Снимки целей, которых больше нет в каталоге, пропускаются.
+      // `service_statuses` переживает выведение сервиса из эксплуатации:
+      // у обновлённой установки там остаются строки `letta-ui` и
+      // `integration:monitoring`, и остановленный контейнер держит их
+      // красными. Без фильтра список ошибок навсегда получал бы два
+      // пункта про то, чего в установке нет, — и настоящая поломка
+      // терялась бы среди них.
+      ...statuses.rows.filter((row) => this.known(row.target_id)).map((row) => ({
         source: "status" as const,
         at: row.last_check_at ?? new Date(0),
         target: row.target_id,
@@ -380,6 +387,18 @@ export class HealthService {
     ].sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime());
 
     return { hours: window, count: items.length, items: items.slice(0, cap) };
+  }
+
+  /**
+   * Знает ли каталог эту цель.
+   *
+   * `infrastructure:*` — не сервис и не интеграция, а показатели хоста и
+   * обновлений; каталога у них нет, и пропускать их нельзя.
+   */
+  private known(targetId: string): boolean {
+    if (targetId.startsWith("infrastructure:")) return true;
+    const bare = targetId.replace(/^integration:/, "");
+    return SERVICE_BY_ID.has(bare) || INTEGRATION_BY_ID.has(bare);
   }
 
   /** Человеческое имя цели; для инфраструктуры каталога нет. */
