@@ -267,6 +267,16 @@ export class SubscriptionAdminService {
     const userId = userIdOf(rawUserId);
     const reason = reasonOf(input.reason);
     const current = await this.requireCurrent(userId);
+    // Продление бессрочной подписки числом дней её бы ограничило: срока
+    // не было, а после «продлить на 30 дней» он появился бы. Это ровно
+    // обратное тому, что оператор нажимал. Явная дата остаётся
+    // разрешённой — это осознанная смена срока, а не продление.
+    if (current.current_period_end === null && input.days !== undefined) {
+      throw adminBadRequest(
+        "Подписка бессрочная: продление числом дней задало бы ей срок. "
+          + "Укажите дату окончания, если срок нужен.",
+      );
+    }
     const periodEnd = periodEndOf(
       input,
       current.current_period_end ? new Date(current.current_period_end) : null,

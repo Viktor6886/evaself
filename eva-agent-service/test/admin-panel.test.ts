@@ -625,6 +625,32 @@ test("продление считается от конца периода, а �
   await app.close();
 });
 
+test("бессрочную подписку нельзя «продлить» и тем самым ограничить", async () => {
+  const db = new FakeDb();
+  db.subscriptions.push({
+    id: 100, user_id: 11, plan: "plus", status: "active", source: "manual",
+    provider: null, started_at: "2026-07-01", current_period_start: "2026-07-01",
+    current_period_end: null, canceled_at: null, actor_name: "owner", note: "навсегда",
+  });
+  const { app } = harness(db);
+  await app.ready();
+  const response = await app.inject({
+    method: "POST", url: "/api/admin/v1/panel/subscriptions/11/extend", headers: COOKIE,
+    payload: { days: 30, reason: "продление" },
+  });
+  assert.equal(response.statusCode, 400, response.body);
+  assert.match(response.json().error.message, /бессрочная/);
+  assert.equal(db.subscriptions[0]!.current_period_end, null, "бессрочный доступ получил срок");
+
+  // Явная дата остаётся разрешённой: это осознанная смена срока.
+  const explicit = await app.inject({
+    method: "POST", url: "/api/admin/v1/panel/subscriptions/11/extend", headers: COOKIE,
+    payload: { period_end: "2027-01-01T00:00:00Z", reason: "теперь со сроком" },
+  });
+  assert.equal(explicit.statusCode, 200, explicit.body);
+  await app.close();
+});
+
 test("действующее право доступа считает сервер, а не интерфейс", async () => {
   const db = new FakeDb();
   db.users[0]!.is_blocked = true;
