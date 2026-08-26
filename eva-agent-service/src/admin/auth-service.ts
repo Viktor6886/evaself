@@ -227,7 +227,16 @@ export class AuthService {
     );
     const row = rows[0];
     if (!row) throw adminUnauthorized("Сессия недействительна или истекла");
-    void this.pool.query("UPDATE admin_sessions SET last_seen_at = now() WHERE id = $1", [row.session_id]);
+    // Отметка «был здесь» не обязана удаться и не имеет права уронить
+    // процесс. Запрос отправляется без ожидания намеренно: держать из-за
+    // него каждый запрос панели незачем. Но отклонённый промис без
+    // обработчика Node считает необработанным отказом и завершает
+    // процесс — а этот код выполняется на КАЖДОМ авторизованном запросе,
+    // так что секундная недоступность PostgreSQL роняла admin-api.
+    void this.pool.query(
+      "UPDATE admin_sessions SET last_seen_at = now() WHERE id = $1",
+      [row.session_id],
+    ).catch(() => undefined);
     return {
       id: row.session_id,
       user: publicUser(row),
