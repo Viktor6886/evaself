@@ -193,6 +193,20 @@ describe("разделы единой панели", () => {
     assert.equal(new URL(panel.page.url()).pathname, "/");
   });
 
+  test("хвостовой слэш в адресе раздела не ломает базовый путь", async () => {
+    // `/admin/agents/` набирают руками и присылают ссылкой. Наивное
+    // вычисление базы принимало такой адрес за корень панели: показывался
+    // обзор, а следующий переход строил `/admin/agents/letta`.
+    const panel = await open();
+    await panel.page.evaluate(() => window.history.replaceState({}, "", "/agents/"));
+    const resolved = await panel.page.evaluate(() => {
+      const base = panelBase();
+      return { base, page: pageFromLocation() };
+    });
+    assert.equal(resolved.base, "/");
+    assert.equal(resolved.page, "agents");
+  });
+
   test("кнопка «назад» возвращает в предыдущий раздел", async () => {
     const panel = await open();
     await panel.page.evaluate(() => openPage("agents"));

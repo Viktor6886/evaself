@@ -24,17 +24,45 @@ const LOADERS = {
   audit: loadAudit,
 };
 
+const isPage = (name) => Object.prototype.hasOwnProperty.call(LOADERS, name);
+
 /**
- * Раздел, названный в адресе.
+ * Базовый путь панели и раздел, названный в адресе.
  *
- * `/admin/letta` и `/admin/monitoring` — настоящие адреса, а не якоря:
- * их можно дать ссылкой, открыть в новой вкладке и обновить страницей.
- * Неизвестный сегмент (в том числе `index.html` в браузерных тестах)
- * означает «раздел не назван» и открывает обзор.
+ * Панель отдаётся с `/admin/` основного домена, и Caddy снимает этот
+ * префикс до статики: `/admin/agents` приходит сюда как `/agents` и
+ * попадает в index.html через try_files. Значит, адрес раздела —
+ * настоящий адрес: его можно дать ссылкой, открыть в новой вкладке и
+ * обновить страницей.
+ *
+ * Префикс вычисляется, а не зашит: браузерные тесты открывают ту же
+ * статику с корня, и зашитое `/admin/` увело бы их в несуществующий путь.
+ *
+ * Считается он от последнего сегмента, а не отрезанием всего после
+ * последнего слэша. Разница видна на двух адресах, которые иначе
+ * неразличимы: `/admin/` — это база без раздела, а `/admin/agents/` —
+ * раздел с хвостовым слэшем. Наивное отрезание принимало второй за базу,
+ * показывало обзор и потом строило адреса вида `/admin/agents/letta`.
+ *
+ * Сегмент с точкой (`index.html` на стенде тестов) — файл, а не раздел, и
+ * в базу не входит.
+ */
+function panelBase() {
+  const parts = window.location.pathname.replace(/\/+$/, "").split("/");
+  const last = parts[parts.length - 1] ?? "";
+  if (isPage(last) || last.includes(".")) parts.pop();
+  return `${parts.join("/")}/`.replace(/\/{2,}/g, "/");
+}
+
+const PANEL_BASE = panelBase();
+
+/**
+ * Неизвестный сегмент означает «раздел не назван» и открывает обзор:
+ * чужая ссылка не должна давать пустой экран.
  */
 function pageFromLocation() {
-  const name = window.location.pathname.slice(PANEL_BASE.length).replace(/\/$/, "");
-  return Object.prototype.hasOwnProperty.call(LOADERS, name) ? name : "overview";
+  const name = window.location.pathname.slice(PANEL_BASE.length).replace(/\/+$/, "");
+  return isPage(name) ? name : "overview";
 }
 
 function openPage(name, options = {}) {
