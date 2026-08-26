@@ -560,9 +560,22 @@ export class LettaService {
    * меняется только то, из чего собирается **новый** агент и новая
    * сессия.
    *
-   * Открытые сессии закрываются: `sessionOptions()` уже отдала им
-   * прежнюю персону, и оставить их значило бы получить два разных
+   * Открытые сессии выводятся из обращения: `sessionOptions()` уже отдала
+   * им прежнюю персону, и оставить их значило бы получить два разных
    * канонических текста в одном процессе.
+   *
+   * Именно выводятся, а не закрываются. `closeAllSessions()` при
+   * выключенном `EVA_SAFE_SESSION_MANAGER` — а он выключен по умолчанию —
+   * закрывает и ту сессию, в которой прямо сейчас идёт ход. Человек в
+   * этот момент ждёт ответа, и администратор, сохранивший персону,
+   * обрывал бы чужой разговор на середине. Сохранение персоны — как раз
+   * тот момент, когда кто-то с Евой разговаривает.
+   *
+   * Поэтому здесь та же механика, что и у `invalidateAgentSessions`:
+   * занятая сессия помечается `closing` и закрывается сама, когда ход
+   * закончится, свободная — сразу. Идущий ход при этом доработает на
+   * прежнем тексте: это честнее, чем оборвать его ради новой персоны,
+   * которую всё равно применит `PersonaSync`.
    */
   setCanonicalContext(input: { persona?: string; systemPrompt?: string }): boolean {
     const persona = input.persona ?? this.persona;
@@ -571,8 +584,23 @@ export class LettaService {
     this.persona = persona;
     this.systemPrompt = systemPrompt;
     this.runtime = { ...this.runtime, default_persona: persona };
-    this.closeAllSessions();
+    this.retireAllSessions();
     return true;
+  }
+
+  /**
+   * Вывести из обращения все открытые сессии, не обрывая идущих ходов.
+   *
+   * Свободная сессия закрывается сразу, занятая помечается и закрывается
+   * по окончании хода (`closeIfDrained`). Ни одна из них не будет выдана
+   * следующему ходу: он откроет новую — уже с текущим каноническим
+   * текстом.
+   */
+  private retireAllSessions(): void {
+    for (const [conversationId, pooled] of [...this.sessions]) {
+      if (pooled.activeTurns > 0) pooled.closing = true;
+      else this.closeSession(conversationId);
+    }
   }
 
   /** Что процесс считает каноническим прямо сейчас. Только для диагностики. */
