@@ -394,6 +394,12 @@ jobs:
       - name: The administrative surface stays on one domain
         run: python3 scripts/ci/assert-single-admin-domain.py
 
+      # Мёртвое правило не ломает страницу — в этом и беда. Оно копится
+      # незаметно, и через год половину файла нельзя тронуть, потому что
+      # неизвестно, что из неё ещё работает.
+      - name: Every style rule still has something to style
+        run: python3 scripts/ci/assert-live-css.py
+
       # Проверка роли в server.ts начинается с `access.roles &&`, поэтому
       # маршрут, забывший объявить роли, её не проваливает, а пропускает —
       # и становится доступен любому вошедшему, включая viewer.
@@ -1144,7 +1150,7 @@ jobs:
                       'LETTA_DB_PASSWORD','EVA_DB_READONLY_PASSWORD',
                       'VALKEY_PASSWORD','EVA_AGENT_API_KEY','LETTA_APP_SERVER_TOKEN',
                       'LLM_CONFIG_ENCRYPTION_KEY','EVA_ROUTER_API_KEY',
-                      'NC_AUTH_JWT_SECRET','LAVA_WEBHOOK_PASSWORD','MEDIA_SERVICE_TOKEN',
+                      'LAVA_WEBHOOK_PASSWORD','MEDIA_SERVICE_TOKEN',
                       'SEARXNG_SECRET','EVA_TELEGRAM_WEBHOOK_SECRET'):
             text = re.sub(rf'^{key}=.*$', f'{key}={secrets.token_hex(24)}', text, flags=re.M)
           path.write_text(text)
