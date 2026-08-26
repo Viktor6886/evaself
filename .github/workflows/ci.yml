@@ -322,6 +322,13 @@ jobs:
           caddy validate --config webapp/Caddyfile
           caddy validate --config admin-ui/Caddyfile
 
+      # Разделы панели — настоящие адреса, и ломаются они молча: закладка
+      # на /admin/letta возвращает 404, а в журнале — обычный 404 без
+      # объяснений. Здесь поднимаются два настоящих Caddy с файлами
+      # репозитория и проверяется поведение, а не текст конфигурации.
+      - name: Panel sections and retired host names route correctly
+        run: sudo -E env "PATH=$PATH" ./scripts/ci/test-admin-routing.sh
+
       - name: Validation works without Caddy installed on the host
         run: |
           sudo mv /usr/local/bin/caddy /usr/local/bin/caddy.disabled
