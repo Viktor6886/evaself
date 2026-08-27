@@ -2,6 +2,7 @@ import { AdminApiError, adminBadRequest } from "./errors.js";
 import { OutboundGateway } from "./outbound-gateway.js";
 import { globalSecretRedactor } from "./redactor.js";
 import { SecretStore } from "./secret-store.js";
+import { findSecretField, sanitizeParameters } from "./provider-safe.js";
 
 interface AgentResponse {
   [key: string]: unknown;
@@ -135,8 +136,6 @@ export class ProviderService {
   }
 }
 
-const SECRET_FIELD = /(?:api[_-]?key|token|password|secret|authorization|credential)/i;
-
 function rejectSecretParameters(value: unknown) {
   if (value === undefined) return;
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -148,21 +147,6 @@ function rejectSecretParameters(value: unknown) {
       `Секретный параметр ${unsafe} нужно сохранять через поле API Key`,
     );
   }
-}
-
-function findSecretField(
-  value: Record<string, unknown>,
-  prefix = "additional_parameters",
-): string | null {
-  for (const [key, item] of Object.entries(value)) {
-    const path = `${prefix}.${key}`;
-    if (SECRET_FIELD.test(key)) return path;
-    if (item && typeof item === "object" && !Array.isArray(item)) {
-      const nested = findSecretField(item as Record<string, unknown>, path);
-      if (nested) return nested;
-    }
-  }
-  return null;
 }
 
 function safeProvider(value: unknown): Record<string, unknown> {
@@ -195,17 +179,4 @@ function safeProvider(value: unknown): Record<string, unknown> {
   }
   result.additional_parameters = sanitizeParameters(source.additional_parameters);
   return result;
-}
-
-function sanitizeParameters(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  return Object.fromEntries(
-    Object.entries(value as Record<string, unknown>).flatMap(([key, item]) => {
-      if (SECRET_FIELD.test(key)) return [];
-      if (item && typeof item === "object" && !Array.isArray(item)) {
-        return [[key, sanitizeParameters(item)]];
-      }
-      return [[key, item]];
-    }),
-  );
 }

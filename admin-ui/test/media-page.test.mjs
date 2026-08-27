@@ -18,6 +18,10 @@ const SEEING = {
   enabled: true, priority: 10, breaker_state: "closed", p95_latency_ms: 812,
   supports_tools: true, supports_json: true, supports_vision: true, supports_streaming: true,
   context_window: 128000, sensitive_data_allowed: true, pinned_out: false,
+  // Операционный статус считает сервер: раздел медиа берёт его
+  // готовым, как и карточка провайдера.
+  status: { code: "ok", label: "работает", color: "green", detail: { check: "ok", router: "closed" } },
+  routes: [{ code: "vision", title: "vision", position: 0 }],
 };
 const BLIND = {
   ...SEEING,
@@ -81,9 +85,11 @@ describe("раздел распознавания медиа", () => {
     assert.match(capable, /в цепочке vision/);
 
     // Своего реестра у раздела нет: открытие страницы читает то же
-    // состояние роутера, что и раздел моделей, и больше ничего.
+    // состояние роутера, что и раздел моделей, и больше ничего. Запрос
+    // ровно один: /llm/state отдаёт провайдера целиком, склеивать его с
+    // /providers в браузере больше не нужно.
     const opened = panel.requests.slice(before).map((item) => item.path).sort();
-    assert.deepEqual(opened, ["/llm/state", "/providers"]);
+    assert.deepEqual(opened, ["/llm/state"]);
     assert.equal(panel.countTo("/vision/check"), 0, "проверка сама собой не запускается");
   });
 

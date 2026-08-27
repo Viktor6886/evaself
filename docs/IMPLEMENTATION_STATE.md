@@ -58,6 +58,8 @@ BullMQ не обрабатывает интерактивный ход и не �
 | LLM Router | Единственный выход к моделям и failover chains | `src/router/` |
 | Capability probe | Проверка возможностей модели до активации. Четыре исхода: `ok`, `limited`, `config_error`, `unavailable`. Обязательны только ответ, вызов инструмента и приём его результата; поток, изображения и строгий JSON — необязательные и закрывают лишь соответствующие маршруты. Выясненное сохраняется в `supports_*` и решает отбор в `router/chain.ts` | `src/llm/capability-probe.ts` |
 | Vision check | Проверка маршрута изображения | `src/llm/vision-check.ts` |
+| Состояние роутера для панели | Единый view-model провайдера для `/admin/ai`: конфигурация, возможности, членство в маршрутах (`code`, `title`, `position`), breaker, расход и один операционный статус `providerStatus()`. Секреты и API key через него не проходят. Клиент ничего не досчитывает и второго запроса за провайдерами не делает | `src/admin/llm-router-service.ts` |
+| Безопасные поля провайдера | Общий фильтр секретов в `additional_parameters` для `/providers` и `/llm/state`: два представления одной записи не могут разойтись в том, что считается безопасным | `src/admin/provider-safe.ts` |
 | Attachments | Безопасный приём Telegram-вложений | `src/attachments/telegram-attachments.ts` |
 | Documents | Извлечение текста из поддерживаемых форматов | `src/knowledge/document-text.ts` |
 | Knowledge search | Tenant-scoped FTS/pgvector поиск по документам | `src/knowledge/search.ts` |

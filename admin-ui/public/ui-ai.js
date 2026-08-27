@@ -1,20 +1,25 @@
 /**
- * Раздел «Искусственный интеллект»: режим маршрутизации, цепочки
- * маршрутов, здоровье провайдеров и последние отказы.
+ * Раздел «Искусственный интеллект»: карточки провайдеров, режим
+ * маршрутизации, полная схема маршрутов и последние отказы.
+ *
+ * Провайдер живёт в одной карточке (`ui-ai-providers.js`). Отдельного
+ * списка «Состояние провайдеров» здесь больше нет: он показывал тех же
+ * провайдеров второй раз, с другим набором фактов и другим пониманием
+ * того, что значит «работает».
  */
 async function loadProviders() {
-  const [list, router] = await Promise.all([
-    request("/providers?kind=llm"),
-    // Роутер мог ещё не получить ни одного запроса — тогда состояние
-    // пустое, но страница всё равно должна открыться.
-    request("/llm/state").catch(() => ({ payload: { providers: [], routes: [], recent_failures: [] } })),
-  ]);
-  state.providers = Array.isArray(list.payload.providers) ? list.payload.providers : [];
+  // Один запрос вместо двух. `/llm/state` отдаёт провайдера целиком —
+  // конфигурацию, возможности, маршруты, breaker и расход, — поэтому
+  // склеивать его с `/providers` в браузере больше нечем и незачем.
+  // Роутер мог ещё не получить ни одного запроса: тогда состояние
+  // пустое, но страница всё равно должна открыться.
+  const router = await request("/llm/state")
+    .catch(() => ({ payload: { providers: [], routes: [], recent_failures: [] } }));
   state.router = router.payload;
+  state.providers = Array.isArray(router.payload?.providers) ? router.payload.providers : [];
 
   renderRouterRoutes();
   renderRoutingSettings();
-  renderRouterHealth();
   renderRouterFailures();
 
   $("#providers-list").innerHTML = state.providers.length
@@ -221,53 +226,6 @@ function chainAdder(route, chain) {
   </div>`;
 }
 
-const BREAKER_LABELS = {
-  closed: { title: "работает", color: "green" },
-  open: { title: "закрыт после ошибок", color: "red" },
-  half_open: { title: "пробный запрос", color: "yellow" },
-};
-
-function renderRouterHealth() {
-  const rows = state.router?.providers || [];
-  const editable = ["owner", "admin"].includes(state.me.role);
-  $("#router-health").innerHTML = rows.length
-    ? rows.map((row) => {
-      const breaker = BREAKER_LABELS[row.breaker_state] || BREAKER_LABELS.closed;
-      const failures = Number(row.failures_1h || 0);
-      const requests = Number(row.requests_1h || 0);
-      return `
-        <article class="health-row">
-          <div class="health-head">
-            <span class="status-dot color-${row.pinned_out ? "gray" : breaker.color}"></span>
-            <div>
-              <strong>${escapeHtml(row.name)}</strong>
-              <small>${escapeHtml(row.model)} · приоритет ${row.priority}${row.enabled ? "" : " · выключен"}</small>
-            </div>
-            <span class="health-state">${row.pinned_out ? "снят вручную" : escapeHtml(breaker.title)}</span>
-          </div>
-          <dl class="health-facts">
-            <div><dt>Запросов за час</dt><dd>${requests}${failures ? ` · ошибок ${failures}` : ""}</dd></div>
-            <div><dt>Задержка p95</dt><dd>${row.p95_latency_ms == null ? "нет данных" : `${row.p95_latency_ms} мс`}</dd></div>
-            <div><dt>Потрачено сегодня</dt><dd>${money(row.spent_today_micro)}${row.daily_budget_micro ? ` из ${money(row.daily_budget_micro)}` : " · без лимита"}</dd></div>
-            <div><dt>Потрачено за месяц</dt><dd>${money(row.spent_month_micro)}${row.monthly_budget_micro ? ` из ${money(row.monthly_budget_micro)}` : " · без лимита"}</dd></div>
-            ${row.last_error_code ? `<div><dt>Последняя ошибка</dt><dd>${escapeHtml(row.last_error_code)}</dd></div>` : ""}
-            ${row.probe_after ? `<div><dt>Пробный запрос после</dt><dd>${escapeHtml(localDate(row.probe_after))}</dd></div>` : ""}
-          </dl>
-          ${editable ? `<div class="card-actions">
-            ${row.breaker_state === "closed" ? "" : `<button class="button tiny secondary" data-breaker-reset="${escapeHtml(row.id)}">Вернуть в строй</button>`}
-            <button class="button tiny ghost" data-pin="${row.pinned_out ? "off" : "on"}" data-provider="${escapeHtml(row.id)}">${row.pinned_out ? "Вернуть автовозврат" : "Снять с автовозврата"}</button>
-          </div>` : ""}
-        </article>`;
-    }).join("")
-    : '<p class="muted">Роутер ещё не обслуживал запросы.</p>';
-}
-
-/** Микроединицы валюты в доллары. */
-function money(micro) {
-  const value = Number(micro || 0) / 1_000_000;
-  return `$${value.toFixed(value < 1 ? 4 : 2)}`;
-}
-
 /**
  * Последние отказы, сведённые по провайдеру и причине.
  *
@@ -457,26 +415,3 @@ function handleRouteChainClick(event) {
   }
 }
 $("#router-routes").addEventListener("click", handleRouteChainClick);
-
-$("#router-health").addEventListener("click", (event) => {
-  const reset = event.target.closest("[data-breaker-reset]");
-  if (reset) {
-    request(`/llm/providers/${encodeURIComponent(reset.dataset.breakerReset)}/breaker/reset`, { method: "POST" })
-      .then(() => { toast("Провайдер возвращён в строй"); return loadProviders(); })
-      .catch(handleError);
-    return;
-  }
-  const pin = event.target.closest("[data-pin]");
-  if (pin) {
-    const on = pin.dataset.pin === "on";
-    request(`/llm/providers/${encodeURIComponent(pin.dataset.provider)}/pin`, {
-      method: "POST",
-      body: JSON.stringify({ pinned_out: on }),
-    })
-      .then(() => {
-        toast(on ? "Провайдер снят с автовозврата" : "Автовозврат включён");
-        return loadProviders();
-      })
-      .catch(handleError);
-  }
-});
