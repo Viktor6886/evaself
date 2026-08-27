@@ -40,6 +40,7 @@ import {
 import { auditParams, globalSecretRedactor } from "./redactor.js";
 import { SecretStore } from "./secret-store.js";
 import type { SecurityAuditService } from "./security-audit.js";
+import type { TariffService } from "./tariff-service.js";
 import type { TelegramTokenService } from "./telegram-token-service.js";
 import { HealthService } from "./health-service.js";
 import { IntegrationConfigService, MEDIA_INTEGRATIONS } from "./integration-config-service.js";
@@ -92,6 +93,7 @@ export interface AdminServerServices {
   };
   securityAudit?: SecurityAuditService;
   telegramTokens?: TelegramTokenService;
+  tariffs?: TariffService;
   /** Предпросмотр политик хранения. Удаление выполняет задание очереди. */
   retention?: { preview(settings: Record<string, unknown>): Promise<unknown> };
   /** Единый реестр артефактов. Отсутствует — раздел просто не появляется. */
@@ -1201,6 +1203,36 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
       secretRef,
       value,
       body.used_by,
+      contexts.get(request)!.session!.user.id,
+    );
+  });
+
+  // -------------------------------------------------------------------
+  // тарифы: лимиты, пробные, цены в звёздах и расход
+  // -------------------------------------------------------------------
+  // Смотреть может любая вошедшая роль: это настройка продукта, а не
+  // персональные данные — в ответе только количества. Править — владелец
+  // и администратор, как и остальную конфигурацию установки.
+  app.get("/api/admin/v1/tariffs", {
+    config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
+  }, async () => {
+    if (!services.tariffs) throw adminBadRequest("Тарифы недоступны");
+    return await services.tariffs.state();
+  });
+
+  app.put("/api/admin/v1/tariffs/limits", {
+    config: { roles: ["owner", "admin"] } satisfies RouteAccess,
+  }, async (request) => {
+    if (!services.tariffs) throw adminBadRequest("Тарифы недоступны");
+    return await services.tariffs.setLimit(objectBody(request.body));
+  });
+
+  app.put("/api/admin/v1/tariffs/prices", {
+    config: { roles: ["owner", "admin"] } satisfies RouteAccess,
+  }, async (request) => {
+    if (!services.tariffs) throw adminBadRequest("Тарифы недоступны");
+    return await services.tariffs.setPrice(
+      objectBody(request.body),
       contexts.get(request)!.session!.user.id,
     );
   });

@@ -27,6 +27,7 @@ import { McpServerPolicyRepository } from "../tools/mcp.js";
 import { TurnOperationsService } from "./turn-operations.js";
 import { DeleteGuard } from "../letta/delete-guard.js";
 import { createTelegramBotApi } from "./telegram-bot-api.js";
+import { TariffService } from "./tariff-service.js";
 import { TelegramTokenService } from "./telegram-token-service.js";
 import { SecurityAuditService } from "./security-audit.js";
 import { RetentionService } from "../retention/service.js";
@@ -169,6 +170,7 @@ async function main(): Promise<void> {
     config,
     secrets,
     telegramTokens,
+    tariffs: new TariffService(pool),
     health,
     operations,
     providers,

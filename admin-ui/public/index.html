@@ -42,6 +42,7 @@
         <button data-page="overview" class="nav-item active"><span>◉</span>Обзор</button>
         <div class="nav-caption">Люди</div>
         <button data-page="users" class="nav-item"><span>◍</span>Пользователи</button>
+        <button data-page="tariffs" class="nav-item"><span>◆</span>Тарифы</button>
         <button data-page="subscriptions" class="nav-item"><span>◆</span>Подписки</button>
         <div class="nav-caption">Ева</div>
         <button data-page="agents" class="nav-item"><span>❂</span>Агенты</button>
@@ -682,6 +683,46 @@
              администратора и оплата всегда названы по имени: в них разная
              цена ошибки, и путать их нельзя.
              ============================================================ -->
+        <!-- Тарифы. Лимиты живут в quotas, расход — в usage_counters;
+             обе таблицы были до тарификации. Здесь их правят и смотрят,
+             а не дублируют. -->
+        <section id="page-tariffs" class="page">
+          <div class="page-heading">
+            <div><p class="eyebrow">ТАРИФИКАЦИЯ</p><h2>Тарифы</h2><p>Сколько положено на каждом тарифе и сколько стоит подписка. Значения применяются ко всем сразу.</p></div>
+            <button id="reload-tariffs" class="button ghost">Обновить</button>
+          </div>
+
+          <section class="card">
+            <div class="section-heading">
+              <div>
+                <h3>Цена подписки</h3>
+                <p class="block-caption">В звёздах Telegram за срок. Ноль поставить нельзя: это не «бесплатно», а «цена не задана», и такой тариф не должен попасть в продажу молча.</p>
+              </div>
+            </div>
+            <div id="tariff-prices"></div>
+          </section>
+
+          <section class="card">
+            <div class="section-heading">
+              <div>
+                <h3>Лимиты</h3>
+                <p class="block-caption">«Пробные» — сколько доступно на тарифе без оплаченной подписки. Пустой лимит означает безлимит; пробных не может быть больше лимита.</p>
+              </div>
+            </div>
+            <div id="tariff-limits"></div>
+          </section>
+
+          <section class="card">
+            <div class="section-heading">
+              <div>
+                <h3>Фактический расход</h3>
+                <p class="block-caption">По всей установке за сутки и за месяц. Кто именно сколько израсходовал — в карточке пользователя.</p>
+              </div>
+            </div>
+            <div id="tariff-usage"></div>
+          </section>
+        </section>
+
         <section id="page-subscriptions" class="page">
           <div class="page-heading">
             <div><p class="eyebrow">ДОСТУП И ТАРИФЫ</p><h2>Подписки</h2><p>Оплата и право доступа — разные вещи. Ручное решение видно отдельно от оплаты и снимается, не задевая оплаченный период.</p></div>
@@ -1045,6 +1086,7 @@
   <script src="./ui-ai-providers.js" defer></script>
   <script src="./ui-operations.js" defer></script>
   <script src="./ui-users.js" defer></script>
+  <script src="./ui-tariffs.js" defer></script>
   <script src="./ui-subscriptions.js" defer></script>
   <script src="./ui-agents.js" defer></script>
   <script src="./ui-persona.js" defer></script>

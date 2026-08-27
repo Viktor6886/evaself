@@ -1082,6 +1082,7 @@ export class EvaWorkflow {
               action.current?.transition("upload_voice");
               await this.telegram.sendVoice(update.chatId, audio);
               voiced = true;
+              await this.countUsage(update.telegramId, "voice_out");
               await this.touchVoiceUsage(context.userId);
             } catch (error) {
               this.logger.warn("Голосовое сообщение не доставлено", {
@@ -1116,6 +1117,9 @@ export class EvaWorkflow {
           await this.moveTurn(turnHandle, "delivered");
 
           await this.db.incrementUsage(update.telegramId, "messages");
+          // Ответ Евы — такой же расходник, как входящее сообщение: он
+          // стоит вызова модели, и тариф считает его отдельно.
+          await this.countUsage(update.telegramId, "messages_out");
           usageCharged = true;
           await this.linkTurn(turnHandle, {
             quotaMetric: "messages",
@@ -1342,6 +1346,26 @@ export class EvaWorkflow {
    * провайдера: «Deepgram вернул HTTP 429» ему нечего с этим делать.
    * Полная причина уходит в лог и в панель администратора.
    */
+  /**
+   * Записать расход. Отказ учёта не должен ронять разговор.
+   *
+   * Гейт хода читает `messages` и `voice_minutes` — их запись остаётся
+   * обязательной, иначе лимит можно обойти отказом базы. Остальные
+   * метрики нужны для счёта и отчётности: если их не удалось записать,
+   * человеку об этом знать незачем, а прерывать из-за этого ответ —
+   * тем более.
+   */
+  private async countUsage(telegramId: number, metric: string, amount = 1): Promise<void> {
+    try {
+      await this.db.incrementUsage(telegramId, metric, amount);
+    } catch (error) {
+      this.logger.warn("Расход не записан", {
+        metric,
+        code: error instanceof Error ? error.name : "unknown_error",
+      });
+    }
+  }
+
   private async transcribeVoice(
     useCase: "telegram_voice" | "webapp_voice_message",
     fileId: string,
@@ -1525,6 +1549,9 @@ export class EvaWorkflow {
           "voice_minutes",
           Math.max(1, Math.ceil(transcription.durationMinutes)),
         );
+        // Минуты и штуки — разные величины: тариф может ограничивать и
+        // длительность распознавания, и число голосовых.
+        await this.countUsage(update.telegramId, "voice_in");
       }
       const statusId = status.promise ? await status.promise.catch(() => null) : null;
       if (statusId !== null) {
@@ -1547,6 +1574,7 @@ export class EvaWorkflow {
       const file = imageFileOf(message);
       if (!file) throw new Error("Изображение отсутствует");
       const image = await this.attachments.image(file);
+      await this.countUsage(update.telegramId, "images");
       // Само изображение уходит модели изображением. Отдельного описания
       // больше нет: пересказ картинки чужой моделью — это уже не то, что
       // видит Ева.
@@ -1557,6 +1585,7 @@ export class EvaWorkflow {
       const document = message.document;
       if (!document) throw new Error("Документ отсутствует");
       const content = await this.attachments.document(document);
+      await this.countUsage(update.telegramId, "documents");
       return { text: caption, images: [], attachments: [content] };
     }
 

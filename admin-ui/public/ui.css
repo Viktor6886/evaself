@@ -1261,3 +1261,31 @@ body.editor-open { overflow: hidden; }
   .card.is-fullscreen #persona-rollback,
   .card.is-fullscreen #persona-restore { display: none; }
 }
+
+/* ---------------------------------------------------------------------
+ * Тарифы: цены и матрица лимитов.
+ *
+ * Матрица — обычная таблица панели: мобильный карточный режим ниже 720
+ * подхватывается общим правилом по data-label, поэтому своего здесь
+ * только оформление карточек цены и полей ввода в клетках.
+ * ------------------------------------------------------------------ */
+
+.tariff-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+.tariff-card { padding: 14px; border: 1px solid var(--line); border-radius: 12px; display: grid; gap: 10px; }
+.tariff-card h4 { margin: 0; font-size: 14px; }
+/* Звёздочка стоит за полем, а не подписью снизу: единица измерения
+   читается вместе с числом, а не под ним. */
+.tariff-field { display: grid; grid-template-columns: minmax(0, 1fr) 88px auto; gap: 8px; align-items: center; }
+.tariff-field > span { color: var(--muted); font-size: 12px; }
+.tariff-field input { width: 100%; }
+.tariff-field small { color: var(--muted); }
+/* Клетка матрицы: поле по ширине содержимого, иначе таблица из пяти
+   столбцов уезжает за экран даже на широком мониторе. */
+.tariff-limit-input { width: 100%; min-width: 72px; max-width: 120px; }
+
+@media (max-width: 720px) {
+  /* В карточном режиме подпись уже слева, и растягивать поле незачем. */
+  .tariff-field { grid-template-columns: minmax(0, 1fr) auto; }
+  .tariff-field small { display: none; }
+  .tariff-limit-input { max-width: none; }
+}

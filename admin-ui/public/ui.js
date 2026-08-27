@@ -7,6 +7,7 @@
  */
 const LOADERS = {
   overview: loadOverview,
+  tariffs: loadTariffs,
   services: loadServicesAndIntegrations,
   ai: loadProviders,
   stt: loadStt,
