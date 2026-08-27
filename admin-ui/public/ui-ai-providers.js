@@ -415,7 +415,16 @@ async function providerAction(action, id, routeArg = null, pinArg = null) {
     const { payload } = await request(`/providers/${encodeURIComponent(id)}/check`, {
       method: "POST",
     });
-    toast(payload.result?.message || "Проверка завершена", !payload.result?.ok);
+    // Красным — только то, что человеку чинить. «Временно недоступен»
+    // означает лимит или занятый сервис и о модели не говорит ничего:
+    // так прямо и написано в самом сообщении, а тост при этом кричал
+    // красным о рабочем провайдере. Ошибка конфигурации остаётся
+    // красной — её и правда чинят руками.
+    const status = payload.result?.capabilities?.status ?? payload.result?.status;
+    toast(
+      payload.result?.message || "Проверка завершена",
+      !payload.result?.ok && status !== "unavailable",
+    );
     await refreshRoutingPage();
     return;
   }

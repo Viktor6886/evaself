@@ -107,6 +107,80 @@ test("gemini probe reports an HTTP failure instead of an empty catalogue", async
   assert.deepEqual(result.models, []);
 });
 
+/**
+ * Проба обходит пул так же, как роутер.
+ *
+ * Иначе панель врёт: первый ключ упирается в квоту, роутер берёт
+ * следующий и Ева отвечает, а «Проверить» бьёт в тот же исчерпанный ключ
+ * и показывает «временно недоступен». Человек видит рабочего провайдера
+ * с красной подписью и не знает, кому верить.
+ */
+test("исчерпанный ключ уводит пробу на следующий ключ пула", async () => {
+  const master = "q".repeat(64);
+  const box = new SecretBox(master);
+  const tried: string[] = [];
+  const row = {
+    ...providerRow("pooled", true, box.encrypt("dead")),
+    api_keys_encrypted: [box.encrypt("dead"), box.encrypt("alive")],
+  };
+  const manager = new LlmManager(
+    config(master),
+    { getLlmProvider: async () => row, getActiveLlmProvider: async () => row,
+      recordLlmCheck: async () => row, setLlmProviderCapabilities: async () => row } as never,
+    { setDefaultModel() {} } as never,
+    logger() as never,
+    {
+      probeProvider: async (_provider: unknown, apiKey: string) => {
+        tried.push(apiKey);
+        return { ok: true, models_supported: true, models: [], message: "ok", status_code: 200 };
+      },
+      probeCapabilities: async (_provider: unknown, apiKey: string) => (apiKey === "alive"
+        ? { ok: true, status: "ok", checks: [], message: "", warnings: "",
+            detected: { vision: null, streaming: null, tools: null, json: null } }
+        : { ok: false, status: "unavailable", checks: [], message: "квота", warnings: "",
+            detected: { vision: null, streaming: null, tools: null, json: null },
+            keyExhausted: true }),
+    } as never,
+  );
+
+  const result = await manager.test(row.id);
+  assert.deepEqual(tried, ["dead", "alive"], "пул перебирается по порядку");
+  assert.equal(result.ok, true, "рабочий ключ найден — провайдер исправен");
+});
+
+test("занятый сервис пул не перебирает", async () => {
+  const master = "w".repeat(64);
+  const box = new SecretBox(master);
+  const tried: string[] = [];
+  const row = {
+    ...providerRow("busy", true, box.encrypt("k1")),
+    api_keys_encrypted: [box.encrypt("k1"), box.encrypt("k2"), box.encrypt("k3")],
+  };
+  const manager = new LlmManager(
+    config(master),
+    { getLlmProvider: async () => row, getActiveLlmProvider: async () => row,
+      recordLlmCheck: async () => row, setLlmProviderCapabilities: async () => row } as never,
+    { setDefaultModel() {} } as never,
+    logger() as never,
+    {
+      probeProvider: async (_provider: unknown, apiKey: string) => {
+        tried.push(apiKey);
+        return { ok: true, models_supported: true, models: [], message: "ok", status_code: 200 };
+      },
+      // 503 high demand: к ключу отношения не имеет, следующий ответит
+      // тем же. Полная проба десять раз — минуты ожидания ни за что.
+      probeCapabilities: async () => ({
+        ok: false, status: "unavailable", checks: [], message: "503 high demand", warnings: "",
+        detected: { vision: null, streaming: null, tools: null, json: null },
+        keyExhausted: false,
+      }),
+    } as never,
+  );
+
+  await manager.test(row.id);
+  assert.deepEqual(tried, ["k1"], "занятость сервиса не повод жечь пул");
+});
+
 test("пул ключей сохраняет порядок, убирает повторы и держит предел", () => {
   // Порядок значим: роутер обходит пул сверху вниз.
   assert.deepEqual(keyPool("main", ["spare-1", "spare-2"]), ["main", "spare-1", "spare-2"]);

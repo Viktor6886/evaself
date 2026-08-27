@@ -51,6 +51,13 @@ export interface CapabilityCheck {
   detail: string;
   blocking: boolean;
   cause?: CapabilityCause;
+  /**
+   * HTTP-код отказа, если он был.
+   *
+   * По нему отличают «квота этого ключа кончилась» от «сервис занят»:
+   * первое лечится следующим ключом пула, второе — нет.
+   */
+  httpStatus?: number;
 }
 
 /** Что модель фактически умеет — по пробе, а не по галочкам оператора. */
@@ -68,6 +75,8 @@ export interface CapabilityProbeResult {
   message: string;
   warnings: string;
   detected: DetectedCapabilities;
+  /** Отказ упёрся в квоту или ключ, а не в модель и не в занятость сервиса. */
+  keyExhausted?: boolean;
 }
 export interface CapabilityClaims { tools: boolean; json: boolean; streaming: boolean; vision: boolean }
 export interface CapabilityProbeInput {
@@ -114,6 +123,7 @@ const PROBE_CONTROLLED = new Set([
   "temperature", "max_tokens", "max_completion_tokens", "max_output_tokens", "maxOutputTokens", "n", "response_format",
 ]);
 const ROUTING_KEYS = new Set(["provider", "route", "models", "transforms", "user", "metadata", "headers", "extra_headers", "extra_body", "usage", "model_settings"]);
+const KEY_EXHAUSTED_STATUS: ReadonlySet<number> = new Set([401, 402, 403, 429]);
 const SECRET_KEY = /(?:api[_-]?key|access[_-]?token|auth[_-]?token|secret|password|credential|authorization|bearer|cookie)/iu;
 
 export function probeInferenceParameters(source: Record<string, unknown> | null | undefined): Record<string, unknown> {
@@ -179,7 +189,10 @@ const thrown = (
   error: unknown,
   timeoutMs: number,
   blocking: boolean,
-): CapabilityCheck => failure(name, errorDetail(error, timeoutMs), blocking, causeOf(error, name));
+): CapabilityCheck => ({
+  ...failure(name, errorDetail(error, timeoutMs), blocking, causeOf(error, name)),
+  ...(error instanceof ProviderError && error.httpStatus ? { httpStatus: error.httpStatus } : {}),
+});
 
 function canonicalRequest(
   messages: LlmMessage[],
@@ -476,5 +489,14 @@ export function summarize(checks: CapabilityCheck[]): CapabilityProbeResult {
     message: essentialFailures.map(line).join("; "),
     warnings: optionalFailures.map(line).join("; "),
     detected,
+    // Квота и отклонённый ключ — свойства ключа: у провайдера с пулом
+    // следующий ключ ответит иначе. Занятый сервис (503) к ключу
+    // отношения не имеет, и перебирать пул из-за него значит впустую
+    // гонять полную пробу десять раз.
+    keyExhausted: checks.some(
+      (entry) => entry.status === "failed"
+        && entry.httpStatus !== undefined
+        && KEY_EXHAUSTED_STATUS.has(entry.httpStatus),
+    ),
   };
 }

@@ -760,7 +760,47 @@ export class LlmManager {
    * первом же разговоре.
    */
   private async probe(provider: LlmProviderRow): Promise<ProviderProbe> {
-    const apiKey = this.secretBox.decrypt(provider.api_key_encrypted);
+    // Проба идёт по тому же пулу, что и роутер.
+    //
+    // Иначе панель врёт: у провайдера с пулом первый ключ упирается в
+    // квоту, роутер спокойно берёт следующий и Ева отвечает, а
+    // «Проверить» бьёт в тот же исчерпанный ключ и показывает «временно
+    // недоступен». Человек видит рабочего провайдера с красной
+    // подписью и не понимает, кому верить.
+    //
+    // Перебор запускает только исчерпанный ключ. Занятый сервис (503) к
+    // ключу отношения не имеет, и гонять из-за него полную пробу
+    // десять раз — минуты ожидания ради того же ответа.
+    const pool = this.probePool(provider);
+    let last: ProviderProbe | null = null;
+    for (const apiKey of pool) {
+      const result = await this.probeWithKey(provider, apiKey);
+      if (!result.capabilities?.keyExhausted) return result;
+      last = result;
+    }
+    return last!;
+  }
+
+  /** Ключи провайдера по порядку; первый — основной. */
+  private probePool(provider: LlmProviderRow): string[] {
+    const keys: string[] = [];
+    const add = (encrypted: string): void => {
+      let value: string;
+      try {
+        value = this.secretBox.decrypt(encrypted);
+      } catch {
+        return;
+      }
+      if (value && !keys.includes(value)) keys.push(value);
+    };
+    add(provider.api_key_encrypted);
+    for (const entry of provider.api_keys_encrypted ?? []) {
+      if (typeof entry === "string" && entry.trim()) add(entry);
+    }
+    return keys;
+  }
+
+  private async probeWithKey(provider: LlmProviderRow, apiKey: string): Promise<ProviderProbe> {
     const connectivity = await this.probeProvider(provider, apiKey);
     // Модель не спрашиваем, пока провайдер не ответил: смысла нет, а
     // причина отказа была бы менее понятной.
