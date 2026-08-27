@@ -467,7 +467,7 @@ function harness(providers, script, chain, optionOverrides = {}) {
       const n = (attemptsByProvider.get(target.name) ?? 0) + 1;
       attemptsByProvider.set(target.name, n);
       calls.push({ provider: target.name, attempt: n, stream: false, request: req });
-      return script[target.name].complete(n, req);
+      return script[target.name].complete(n, req, target);
     },
     async *stream(target, req) {
       const n = (attemptsByProvider.get(target.name) ?? 0) + 1;
@@ -730,6 +730,100 @@ test("идущая проба по-прежнему не пускает втор
   });
 
   await assert.rejects(() => router.complete(request()), /единственный пробный запрос/);
+});
+
+/**
+ * Несколько ключей у одного провайдера.
+ *
+ * У льготных тарифов квота считается на ключ, а не на аккаунт: один
+ * упирается в лимит за минуты, и провайдер целиком выпадал из маршрутов,
+ * хотя рядом лежат рабочие ключи того же владельца.
+ */
+test("лимит ключа уводит на следующий ключ, а не на резервного провайдера", async () => {
+  const used = [];
+  const p = provider({ id: "a", name: "primary", max_retries: 0 });
+  p.api_keys = ["k1", "k2", "k3"];
+  const { router, calls } = harness([p, provider({ id: "b", name: "backup" })], {
+    primary: {
+      complete: (n, req, target) => {
+        used.push(target.api_key);
+        // Первые два ключа исчерпаны, третий работает.
+        return target.api_key === "k3"
+          ? Promise.resolve(ok("ответ третьим ключом"))
+          : Promise.reject(new ProviderError("лимит", "rate_limited", { retryable: true }));
+      },
+      stream: async function* () { throw new Error("не используется"); },
+    },
+    backup: always(() => Promise.resolve(ok("резерв"))),
+  });
+
+  const result = await router.complete(request());
+  assert.equal(result.provider_name, "primary", "переключаться на резерв было рано");
+  assert.deepEqual(used, ["k1", "k2", "k3"], "пул перебирается по порядку");
+  assert.equal(calls.filter((call) => call.provider === "backup").length, 0);
+});
+
+test("исчерпанный пул всё же уходит на резервного провайдера", async () => {
+  const used = [];
+  const p = provider({ id: "a", name: "primary", max_retries: 0 });
+  p.api_keys = ["k1", "k2"];
+  const { router } = harness([p, provider({ id: "b", name: "backup" })], {
+    primary: {
+      complete: (n, req, target) => {
+        used.push(target.api_key);
+        return Promise.reject(new ProviderError("лимит", "rate_limited", { retryable: true }));
+      },
+      stream: async function* () { throw new Error("не используется"); },
+    },
+    backup: always(() => Promise.resolve(ok("резерв"))),
+  });
+
+  const result = await router.complete(request());
+  assert.equal(result.provider_name, "backup");
+  assert.deepEqual(used, ["k1", "k2"], "перед уходом перебраны все ключи");
+});
+
+test("следующий ход начинается с ключа, который сработал", async () => {
+  const used = [];
+  const p = provider({ id: "a", name: "primary", max_retries: 0 });
+  p.api_keys = ["dead", "alive"];
+  const { router } = harness([p], {
+    primary: {
+      complete: (n, req, target) => {
+        used.push(target.api_key);
+        return target.api_key === "alive"
+          ? Promise.resolve(ok("готово"))
+          : Promise.reject(new ProviderError("лимит", "rate_limited", { retryable: true }));
+      },
+      stream: async function* () { throw new Error("не используется"); },
+    },
+  });
+
+  await router.complete(request());
+  await router.complete(request());
+  // Второй ход не бьётся о ту же стену: курсор переживает ход.
+  assert.deepEqual(used, ["dead", "alive", "alive"]);
+});
+
+test("ошибка не про ключ пул не перебирает", async () => {
+  const used = [];
+  const p = provider({ id: "a", name: "primary", max_retries: 0 });
+  p.api_keys = ["k1", "k2", "k3"];
+  const { router } = harness([p, provider({ id: "b", name: "backup" })], {
+    primary: {
+      complete: (n, req, target) => {
+        used.push(target.api_key);
+        // Сервис лёг — второй ключ ответит ровно тем же.
+        return Promise.reject(new ProviderError("500", "server_error", { retryable: true }));
+      },
+      stream: async function* () { throw new Error("не используется"); },
+    },
+    backup: always(() => Promise.resolve(ok("резерв"))),
+  });
+
+  const result = await router.complete(request());
+  assert.equal(result.provider_name, "backup");
+  assert.deepEqual(used, ["k1"], "перебирать пул на отказе сервиса бессмысленно");
 });
 
 test("HTTP 400 сначала нормализуется у того же провайдера, а не гонится по цепочке", async () => {

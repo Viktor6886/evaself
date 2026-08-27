@@ -105,7 +105,7 @@ export class RouterStore {
       return this.providerCache.rows;
     }
     const { rows } = await this.pool.query<Record<string, unknown>>(
-      `SELECT id, name, protocol, base_url, model, api_key_encrypted,
+      `SELECT id, name, protocol, base_url, model, api_key_encrypted, api_keys_encrypted,
               connect_timeout_ms, request_timeout_ms, max_retries, max_concurrency,
               max_rpm, max_tpm, context_window, max_output_tokens, max_latency_ms,
               supports_tools, supports_json, supports_vision, supports_streaming,
@@ -119,6 +119,32 @@ export class RouterStore {
     const parsed = rows.map((row) => this.toProfile(row));
     this.providerCache = { at: Date.now(), rows: parsed };
     return parsed;
+  }
+
+  /**
+   * Пул ключей провайдера.
+   *
+   * Битый или неразбираемый ключ не должен ронять весь провайдер: он
+   * просто выпадает из пула, а рабочие остаются. Первым идёт основной —
+   * тот же, что в api_key_encrypted, — чтобы поведение без пула не
+   * отличалось от прежнего ни одним запросом.
+   */
+  private decryptPool(raw: unknown, primaryEncrypted: string): string[] {
+    const keys: string[] = [];
+    const add = (encrypted: string): void => {
+      let value: string;
+      try {
+        value = this.secrets.decrypt(encrypted);
+      } catch {
+        return;
+      }
+      if (value && !keys.includes(value)) keys.push(value);
+    };
+    add(primaryEncrypted);
+    for (const entry of Array.isArray(raw) ? raw : []) {
+      if (typeof entry === "string" && entry.trim()) add(entry);
+    }
+    return keys;
   }
 
   private toProfile(row: Record<string, unknown>): ProviderProfile {
@@ -142,6 +168,9 @@ export class RouterStore {
       // Расшифровка происходит здесь и только здесь; дальше ключ живёт в
       // памяти процесса и не попадает ни в журнал, ни в ответ.
       api_key: this.secrets.decrypt(String(row.api_key_encrypted)),
+      // Пул ключей. Пустой массив — пул не заводили, и ключ ровно один,
+      // прежний: так выглядят все строки до миграции 069.
+      api_keys: this.decryptPool(row.api_keys_encrypted, String(row.api_key_encrypted)),
       connect_timeout_ms: number("connect_timeout_ms", 10_000),
       request_timeout_ms: number("request_timeout_ms", 180_000),
       max_retries: number("max_retries", 2),

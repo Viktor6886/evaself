@@ -189,6 +189,19 @@ export interface TelegramLiveMessage {
 
 export interface TelegramChatActionController {
   transition(action: "typing" | "record_voice" | "upload_voice" | null): void;
+  /**
+   * Повторить текущее действие немедленно.
+   *
+   * Telegram гасит «печатает» на клиенте, как только от бота приходит
+   * сообщение, — и правка растущего ответа считается таким же приходом.
+   * Между правкой и очередным тиком интервала индикатор пропадает, хотя
+   * Ева продолжает писать: человек видит курсор в конце текста и ничего
+   * под именем собеседника.
+   *
+   * `transition` для этого не годится: при том же действии он выходит
+   * сразу, чтобы не сбивать интервал.
+   */
+  refresh(): void;
   stop(): void;
 }
 
@@ -493,8 +506,15 @@ export class TelegramClient implements OutboxTransport {
     options: {
       intervalMs?: number;
       now?: () => number;
-      /** Первое сообщение отправлено: печатать «typing» больше незачем. */
+      /** Первое сообщение отправлено; его идентификатор известен. */
       onSent?: (messageId: number) => void;
+      /**
+       * Состояние показано: отправка или очередная правка.
+       *
+       * Нужен тому, кто держит «печатает»: каждая запись гасит индикатор
+       * на клиенте, и его приходится ставить заново.
+       */
+      onUpdate?: () => void;
     } = {},
   ): TelegramLiveMessage {
     const intervalMs = Math.max(0, options.intervalMs ?? LIVE_UPDATE_INTERVAL_MS);
@@ -584,6 +604,7 @@ export class TelegramClient implements OutboxTransport {
       shown = text;
       updates += 1;
       lastSentAt = now();
+      options.onUpdate?.();
     };
 
     const flush = async (): Promise<void> => {
@@ -1056,6 +1077,7 @@ export class TelegramClient implements OutboxTransport {
         timer = setInterval(tick, Math.max(intervalMs, 2_000));
         timer.unref();
       },
+      refresh: () => tick(),
       stop: () => {
         active = null;
         clear();

@@ -6,6 +6,7 @@ import {
   SecretBox,
   catalogVisionHint,
   modelHandle,
+  keyPool,
   probeGeminiProvider,
   probeOpenAiProvider,
 } from "../dist/llm.js";
@@ -104,6 +105,22 @@ test("gemini probe reports an HTTP failure instead of an empty catalogue", async
   assert.equal(result.ok, false);
   assert.equal(result.status_code, 403);
   assert.deepEqual(result.models, []);
+});
+
+test("пул ключей сохраняет порядок, убирает повторы и держит предел", () => {
+  // Порядок значим: роутер обходит пул сверху вниз.
+  assert.deepEqual(keyPool("main", ["spare-1", "spare-2"]), ["main", "spare-1", "spare-2"]);
+  // Повтор выбрасывается, а не переставляется.
+  assert.deepEqual(keyPool("main", ["main", "spare"]), ["main", "spare"]);
+  // Пустые строки — след копирования из документа, а не ключ.
+  assert.deepEqual(keyPool("main", ["", "  ", "spare"]), ["main", "spare"]);
+  // Основного может не быть: тогда первый запасной становится основным.
+  assert.deepEqual(keyPool("", ["only"]), ["only"]);
+  assert.throws(() => keyPool("", []), /хотя бы один/u);
+  assert.throws(
+    () => keyPool("main", Array.from({ length: 10 }, (_, index) => `k${index}`)),
+    /не больше десяти/u,
+  );
 });
 
 test("public provider responses never expose ciphertext or API key", async () => {
