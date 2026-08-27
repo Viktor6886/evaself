@@ -25,7 +25,17 @@ COPY src ./src
 COPY test ./test
 COPY assets ./assets
 
-RUN npm run build && node --test --experimental-strip-types test/*.test.ts
+# Репортёр `spec`, а не умолчательный `tap`.
+#
+# Сборка образа гоняет весь набор, и упавший тест обрывает `make update`.
+# При `tap` его имя тонет среди тысяч строк вывода: и в терминале
+# оператора, и в логе CI, который отдаётся усечённым с конца, — видно
+# только «# fail 1», а какой именно тест упал, узнать неоткуда.
+#
+# `spec` печатает в конце блок «failing tests» с именами. Проверка от
+# этого не слабеет: падает и останавливает сборку она ровно так же.
+RUN npm run build \
+ && node --test --test-reporter=spec --experimental-strip-types test/*.test.ts
 
 # Drop dev dependencies from the tree that ships.
 RUN npm prune --omit=dev
