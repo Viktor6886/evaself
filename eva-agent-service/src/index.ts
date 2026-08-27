@@ -339,11 +339,18 @@ async function main(): Promise<void> {
     error: unknown,
   ): Promise<void> => {
     const message = error instanceof Error ? error.message : String(error);
+    // Владелец, разговаривающий с Евой в своём же чате, попадал в слепую
+    // зону: подробность уходила только в «другой» чат, а этим другим он и
+    // был. Он видел «попробуйте ещё раз» и не имел ни одного способа
+    // узнать причину, не открывая журнал на сервере.
+    const ownerReadsThisChat = config.ownerTelegramId !== null
+      && config.ownerTelegramId === record.chatId;
     await telegram.withDeliveryContext(`telegram-dead:${record.updateId}`, async () => {
       if (record.chatId) {
         await telegram.sendMessage(
           record.chatId,
-          "Не получилось обработать сообщение после нескольких попыток. Ошибка сохранена; попробуйте отправить сообщение ещё раз.",
+          "Не получилось обработать сообщение после нескольких попыток. Ошибка сохранена; попробуйте отправить сообщение ещё раз."
+            + (ownerReadsThisChat ? `\n\nПричина: ${message.slice(0, 1200)}` : ""),
         );
       }
       if (config.ownerTelegramId && config.ownerTelegramId !== record.chatId) {

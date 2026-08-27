@@ -83,6 +83,24 @@ const PROBE_TOOL: LlmTool = {
   description: "Technical probe. Call it once with value \"ok\".",
   parameters: { type: "object", properties: { value: { type: "string", enum: ["ok"] } }, required: ["value"], additionalProperties: false },
 };
+/**
+ * Стартовый допустимый output budget пробы.
+ *
+ * Раньше здесь стояло 32 токена: «ответь одним словом» — короткий ответ,
+ * и большего вроде бы не нужно. Но `max_tokens` ограничивает всё, что
+ * модель порождает, включая рассуждение, а рассуждающая модель тратит на
+ * него сотни токенов прежде, чем напишет первое слово ответа. В 32
+ * токена она не укладывается никогда и возвращает пустой текст — проба
+ * читала это как «модель не умеет отвечать» и закрывала ей все маршруты.
+ *
+ * Работающей модели свободный потолок ничего не стоит: `max_tokens` —
+ * предел, а не цель, и на «ready» она потратит те же несколько токенов.
+ * Платят за него только те, кому его не хватало.
+ */
+const PROBE_BUDGET = 1024;
+/** Вызов инструмента дороже: к рассуждению добавляются аргументы JSON. */
+const PROBE_TOOL_BUDGET = 2048;
+
 const PROBE_PROMPT = "Reply with the single word: ready";
 const VISION_PROMPT = "The image is one solid color. Name that color with one word.";
 const VISION_WORDS = /(green|зел[её]н|verde|gr[uü]n|vert)/iu;
@@ -169,16 +187,25 @@ function canonicalRequest(
 ): LlmRequest {
   return {
     messages, system_prompt: "", tools: options.tools ?? [], temperature: 0,
-    max_tokens: options.max_tokens ?? 32, stream: options.stream ?? false,
+    max_tokens: options.max_tokens ?? PROBE_BUDGET, stream: options.stream ?? false,
     response_format: options.response_format ?? null,
     metadata: { request_id: "capability-probe", user_id: null, agent_id: null, route: "chat", sensitive: false },
   };
 }
 
+/**
+ * Ступени допустимого output budget: сама попытка, крупный шаг и потолок.
+ *
+ * Шагов ровно три, а не семь. Наращивание нужно ровно одному случаю —
+ * модель или прокси не уложились в бюджет и вернули пустоту, — и в этом
+ * случае разница между 512 и 1024 ничего не решает: либо хватает
+ * нескольких тысяч, либо не хватит вовсе. Семь ступеней означали семь
+ * запросов на каждую неудачную проверку, то есть минуты ожидания в
+ * панели за тот же ответ.
+ */
 function budgets(initial: number, maximum: number): number[] {
-  const result = [Math.min(initial, maximum)];
-  while (result.at(-1)! < maximum) result.push(Math.min(maximum, Math.max(result.at(-1)! * 2, 256)));
-  return [...new Set(result)];
+  const first = Math.min(initial, maximum);
+  return [...new Set([first, Math.min(maximum, first * 8), maximum])];
 }
 function parses(raw: string): unknown | undefined {
   try { return JSON.parse(raw.replace(/^```(?:json)?\s*|\s*```$/gu, "")) as unknown; } catch { return undefined; }
@@ -211,7 +238,7 @@ export async function probeVisionCapability(
   const request = canonicalRequest([{ role: "user", content: VISION_PROMPT, parts: [
     { type: "text", text: VISION_PROMPT },
     { type: "image", media_type: "image/png", data: solidPng(128, 128, VISION_COLOR).toString("base64") },
-  ] }], { max_tokens: 64 });
+  ] }], { max_tokens: PROBE_BUDGET });
   // Изображения — необязательная возможность. Раньше её отсутствие при
   // заявленной галочке делало провайдера негодным целиком; теперь оно
   // лишь закрывает модели маршруты, которым изображения нужны.
@@ -256,20 +283,39 @@ export async function probeModelCapabilities(input: CapabilityProbeInput, fetche
   const adapter = adapterForProtocol(provider.protocol);
   const complete = async (request: LlmRequest): Promise<{ response: LlmResponse; budget: number }> => {
     let last: LlmResponse | null = null;
-    for (const budget of budgets(request.max_tokens, maximum)) {
+    const steps = budgets(request.max_tokens, maximum);
+    for (const [index, budget] of steps.entries()) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), input.timeoutMs);
       try { last = await adapter.complete(provider, { ...request, max_tokens: budget }, controller.signal); }
+      catch (error) {
+        // Пустой ответ приходит от адаптера исключением, а не значением:
+        // он не отличает тесноту бюджета от сломанного провайдера. Пока
+        // ступени не кончились, это теснота — наращиваем и пробуем ещё.
+        // Прежде исключение улетало наружу мимо всего цикла, и модель,
+        // которой не хватило места на рассуждение, объявлялась
+        // несовместимой с первой же попытки.
+        if (!(error instanceof ProviderError) || error.reason !== "empty_response") throw error;
+        if (index === steps.length - 1) throw error;
+        last = null;
+        continue;
+      }
       finally { clearTimeout(timer); }
       if (last.content.trim() || last.tool_calls.length) return { response: last, budget };
-      if (last.finish_reason !== "length" && !last.provider_state) break;
+      // Пустой ответ — это и есть повод поднять бюджет, а не повод
+      // остановиться. Прежнее условие выходило из цикла, если
+      // finish_reason не «length»: наращивание не срабатывало ровно там,
+      // ради чего написано. Рассуждающая модель тратит бюджет на
+      // рассуждение и отдаёт пустой текст с finish_reason=stop, и часть
+      // прокси ведёт себя так же — такой провайдер объявлялся
+      // несовместимым, ни разу не получив достаточного бюджета.
     }
     return { response: last ?? { content: "", tool_calls: [], finish_reason: "unknown", usage: { tokens_in: 0, tokens_out: 0 }, model: provider.model }, budget: maximum };
   };
   const note = (budget: number, initial: number) => budget > initial ? ` (понадобился допустимый output budget ${budget} токенов)` : "";
 
   try {
-    const initial = 32;
+    const initial = PROBE_BUDGET;
     const result = await complete(canonicalRequest([{ role: "user", content: PROBE_PROMPT }], { max_tokens: initial }));
     checks.push(result.response.content.trim()
       ? { name: "completion", status: "ok", detail: `ответ получен${note(result.budget, initial)}`, blocking: true }
@@ -283,7 +329,7 @@ export async function probeModelCapabilities(input: CapabilityProbeInput, fetche
       const timer = setTimeout(() => controller.abort(), input.timeoutMs);
       let events = 0;
       try {
-        for await (const chunk of adapter.stream(provider, canonicalRequest([{ role: "user", content: PROBE_PROMPT }], { max_tokens: Math.min(64, maximum), stream: true }), controller.signal)) {
+        for await (const chunk of adapter.stream(provider, canonicalRequest([{ role: "user", content: PROBE_PROMPT }], { max_tokens: Math.min(PROBE_BUDGET, maximum), stream: true }), controller.signal)) {
           if (chunk.type !== "done") events += 1;
         }
       } finally { clearTimeout(timer); }
@@ -298,7 +344,7 @@ export async function probeModelCapabilities(input: CapabilityProbeInput, fetche
   let toolResponse: LlmResponse | null = null;
   const toolPrompt: LlmMessage = { role: "user", content: "Call evaself_capability_probe with value \"ok\". After its result, reply exactly FINAL_OK." };
   try {
-    const initial = 64;
+    const initial = PROBE_TOOL_BUDGET;
     const result = await complete(canonicalRequest([toolPrompt], { tools: [PROBE_TOOL], max_tokens: initial }));
     const call = result.response.tool_calls[0];
     let args: unknown;
@@ -316,7 +362,7 @@ export async function probeModelCapabilities(input: CapabilityProbeInput, fetche
   else {
     const call = toolResponse.tool_calls[0]!;
     try {
-      const initial = 64;
+      const initial = PROBE_TOOL_BUDGET;
       const result = await complete(canonicalRequest([
         toolPrompt,
         { role: "assistant", content: toolResponse.content, tool_calls: toolResponse.tool_calls, ...(toolResponse.provider_state ? { provider_state: toolResponse.provider_state } : {}) },
@@ -334,13 +380,13 @@ export async function probeModelCapabilities(input: CapabilityProbeInput, fetche
     checks.push(skipped("json_schema", "строгий JSON не заявлен"));
   } else {
     try {
-      const result = await complete(canonicalRequest([{ role: "user", content: "Return {\"ok\":true} and nothing else." }], { max_tokens: 32, response_format: { type: "json_object" } }));
+      const result = await complete(canonicalRequest([{ role: "user", content: "Return {\"ok\":true} and nothing else." }], { max_tokens: PROBE_BUDGET, response_format: { type: "json_object" } }));
       checks.push(parses(result.response.content) !== undefined ? { name: "json_object", status: "ok", detail: "ответ разбирается как JSON", blocking: false } : failure("json_object", "ответ не разбирается как JSON — разговор не затронут", false));
     } catch (error) { checks.push(thrown("json_object", error, input.timeoutMs, false)); }
     try {
       const result = await complete(canonicalRequest(
         [{ role: "user", content: "Return an object with ok set to true." }],
-        { max_tokens: 32, response_format: { type: "json_schema", json_schema: PROBE_JSON_SCHEMA } },
+        { max_tokens: PROBE_BUDGET, response_format: { type: "json_schema", json_schema: PROBE_JSON_SCHEMA } },
       ));
       const parsed = parses(result.response.content) as { ok?: unknown } | undefined;
       checks.push(typeof parsed?.ok === "boolean"

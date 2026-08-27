@@ -17,6 +17,9 @@
 /** Микроединицы валюты в доллары. */
 function money(micro) {
   const value = Number(micro || 0) / 1_000_000;
+  // Ноль показывается нулём: «$0.0000» занимает место значащего числа и
+  // читается как результат измерения, хотя измерять было нечего.
+  if (value === 0) return "$0";
   return `$${value.toFixed(value < 1 ? 4 : 2)}`;
 }
 
@@ -49,7 +52,12 @@ function capabilityChips(item) {
  */
 function providerRoutes(item, editable) {
   const single = state.router?.routing_settings?.mode === "single";
-  const memberships = item.routes || [];
+  // Маршрут `single` в списке не показывается. В режиме одной модели
+  // роутер берёт провайдера из настроек режима, а не из этой цепочки:
+  // запись в ней ни на что не влияет, и «Сделать основным» на ней —
+  // кнопка, которая ничего не делает. Выбор единой модели живёт в блоке
+  // «Режим моделей Евы», и второго места для него быть не должно.
+  const memberships = (item.routes || []).filter((route) => route.code !== "single");
   const rank = (position) => position === 0 ? "основной" : `резерв ${position}`;
   const title = (code, fallback) => ROUTE_TITLES[code] || fallback || code;
 
@@ -196,7 +204,10 @@ function assignableRoutes() {
  * именно ответил провайдер, было нельзя.
  */
 function shortMessage(message) {
-  const first = String(message).split(/(?<=[.;])\s/)[0] || String(message);
+  const first = (String(message).split(/(?<=[.;])\s/)[0] || String(message))
+    // Точка или точка с запятой на конце — след разреза, а не часть
+    // фразы: «Подключение работает;» выглядит как оборванный текст.
+    .replace(/[.;,\s]+$/u, "");
   return first.length > 90 ? `${first.slice(0, 90)}…` : first;
 }
 
