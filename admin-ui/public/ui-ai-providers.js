@@ -238,8 +238,14 @@ function openProviderEditor(provider = null) {
   const flag = (name, value) => { if (form.elements[name]) form.elements[name].checked = value; };
   // Скрытое поле переносит значение как текст: `checked` у него нет, и
   // прежнее чтение отправило бы false за каждую возможность.
+  // Возможности переехали из скрытых полей в галочки: снять неверную
+  // запись пробы иначе нечем. Обе формы поддержаны — скрытое поле несёт
+  // значение текстом, галочка отметкой.
   const capability = (name, value) => {
-    if (form.elements[name]) form.elements[name].value = value === true ? "true" : "false";
+    const field = form.elements[name];
+    if (!field) return;
+    if (field.type === "checkbox") field.checked = value === true;
+    else field.value = value === true ? "true" : "false";
   };
   set("priority", provider?.priority ?? full.priority);
   set("quality_tier", provider?.quality_tier ?? full.quality_tier);

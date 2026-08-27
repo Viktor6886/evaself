@@ -201,13 +201,25 @@
                     <label class="flag"><input type="checkbox" name="enabled" checked> Включён</label>
                     <label class="flag"><input type="checkbox" name="sensitive_data_allowed"> Личные данные разрешены</label>
                   </div>
-                  <!-- Возможности задаёт проба; поля остаются скрытыми,
-                       чтобы сохранить контракт API и уже сохранённые
-                       значения при правке провайдера. -->
-                  <input type="hidden" name="supports_tools" value="true">
-                  <input type="hidden" name="supports_json" value="true">
-                  <input type="hidden" name="supports_streaming" value="true">
-                  <input type="hidden" name="supports_vision" value="false">
+                  <!-- Возможности выясняет проба, и обычно их не трогают:
+                       галочка вместо факта либо уводит запрос к модели,
+                       которая его не потянет, либо прячет пригодную.
+
+                       Но запись пробы бывает и неверной — отказ, который
+                       о модели ничего не говорил, мог оставить в базе
+                       «инструменты не поддерживаются». Такой провайдер
+                       выпадает из всех маршрутов, а исправить это нечем:
+                       у занятого провайдера новая проба отвечает лимитом
+                       и прежнее значение не трогает. Дверь должна
+                       открываться в обе стороны, поэтому правка здесь
+                       есть — и следующая удачная проверка её перепишет. -->
+                  <div class="router-flags">
+                    <label class="flag"><input type="checkbox" name="supports_tools" checked> Вызывает инструменты</label>
+                    <label class="flag"><input type="checkbox" name="supports_json" checked> Строгий JSON</label>
+                    <label class="flag"><input type="checkbox" name="supports_streaming" checked> Потоковый ответ</label>
+                    <label class="flag"><input type="checkbox" name="supports_vision"> Понимает изображения</label>
+                  </div>
+                  <p class="block-caption">Эти четыре поля выясняет проба «Проверить», и она же их перепишет. Правьте, только чтобы снять неверную запись, из-за которой провайдер выпал из маршрутов.</p>
                   <label>Дополнительные параметры JSON<textarea name="additional_parameters" rows="4">{}</textarea></label>
                 </div>
               </details>
