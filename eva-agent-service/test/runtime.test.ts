@@ -12,6 +12,7 @@ import { RuntimeContextBuilder } from "../dist/runtime/runtime-context.js";
 
 import {
   splitTelegramText,
+  liveStepWords,
   nextLivePrefix,
   TelegramApiError,
   TelegramClient,
@@ -791,6 +792,31 @@ test("сообщение о сделанном сверяется с проме�
   const prompt = builder.wrapUserMessage(context, "все помыл");
   // В ход приходит факт; правило сверки — постоянное, оно в персоне.
   assert.match(prompt, /since_previous_user_message: 30 секунд/);
+});
+
+/**
+ * Плавность показа — это «мельче и чаще», а не «медленнее».
+ *
+ * Прежде за раз появлялось до пятнадцати слов раз в 800 мс: строка
+ * возникала вспышкой, и текст прыгал вместо того, чтобы течь.
+ */
+test("шаг показа мельче строки и не растёт со временем", () => {
+  // Первые правки короче: начало ответа — тот момент, который и
+  // читается «резко», когда только что было пусто.
+  assert.equal(liveStepWords(0), 5);
+  assert.equal(liveStepWords(1), 9);
+  // Дальше — обычный темп, и он постоянный: рывки модели не должны
+  // становиться рывками показа.
+  for (const updates of [2, 3, 10, 100]) {
+    assert.equal(liveStepWords(updates), 14, `правка ${updates}`);
+  }
+});
+
+test("шаг остаётся заметно меньше прежних пятнадцати слов", () => {
+  // Ради этого всё и делалось: кусок не должен быть целой строкой.
+  const steps = [0, 1, 2, 5, 50].map(liveStepWords);
+  assert.ok(Math.max(...steps) < 15, `шаг вырос до ${Math.max(...steps)}`);
+  assert.ok(Math.min(...steps) >= 3, "слишком мелкий шаг — это уже посимвольная печать");
 });
 
 test("adaptive live prefix keeps words, links and code intact", () => {
