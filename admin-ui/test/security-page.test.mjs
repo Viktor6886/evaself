@@ -188,20 +188,49 @@ describe("боты Telegram", () => {
     ]);
   });
 
-  test("переезд на другого бота требует подтверждения словом", async () => {
+  /**
+   * Токен бота — секрет, и маршруты требуют sudo-грант. Прежде окно
+   * пароля не открывалось вовсе: запрос уходил сразу и возвращался с
+   * «требуется повторное подтверждение пароля». Со стороны выглядело,
+   * будто токен не сохраняется, — и он действительно не сохранялся.
+   */
+  test("переезд на другого бота спрашивает пароль и предупреждает о последствиях", async () => {
     const before = panel.requests.length;
     await panel.page.click('[data-telegram-action="activate"]');
-    await panel.page.waitForFunction(() => !document.querySelector("#confirm-dialog")?.hidden);
+    await panel.page.waitForFunction(() => document.querySelector("#sudo-dialog")?.open === true);
 
-    const dialog = await panel.page.textContent("#confirm-dialog");
+    const dialog = await panel.page.textContent("#sudo-dialog");
     // Человеку сказано главное: люди прежнего бота сами не перейдут.
     assert.match(dialog, /eva_spare_bot/);
-    assert.match(dialog, /начать с ним диалог/);
+    assert.match(dialog, /сами не перейдут/);
     assert.match(dialog, /перезапуск/i);
-    // До подтверждения наружу не ушло ни одного запроса.
+    // До ввода пароля наружу не ушло ни одного запроса.
     assert.equal(
       panel.requests.slice(before).filter((item) => item.method === "POST").length, 0,
       "переезд не должен случаться от одного касания",
     );
+  });
+
+  test("сохранение бота идёт через пароль, а не мимо него", async () => {
+    await panel.page.evaluate(() => {
+      document.querySelector("#sudo-dialog").close();
+      const form = document.querySelector("#telegram-token-form");
+      form.elements.label.value = "запасной";
+      form.elements.token.value = "123456:ABC";
+      form.requestSubmit();
+    });
+    await panel.page.waitForFunction(() => document.querySelector("#sudo-dialog")?.open === true);
+
+    const before = panel.requests.length;
+    const dialog = await panel.page.textContent("#sudo-dialog");
+    assert.match(dialog, /запасной/);
+    assert.equal(
+      panel.requests.slice(before).filter((item) => item.path === "/telegram/tokens").length, 0,
+      "токен не должен уходить до подтверждения пароля",
+    );
+    // Поле не очищается заранее: отклонённый токен пришлось бы вводить снова.
+    const stillThere = await panel.page.$eval(
+      '#telegram-token-form [name="token"]', (node) => node.value);
+    assert.equal(stillThere, "123456:ABC");
   });
 });

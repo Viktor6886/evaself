@@ -263,11 +263,23 @@ function renderTelegramTokens(limit) {
   if (form) form.hidden = tokens.length >= limit;
 }
 
-async function telegramTokenAction(action, id) {
+/**
+ * Токен бота — секрет, и маршруты требуют sudo-грант.
+ *
+ * Прежде окно пароля не открывалось вовсе: форма отправляла запрос сразу
+ * и получала «для операции требуется повторное подтверждение пароля».
+ * Со стороны это выглядело так, будто токен не сохраняется, — и он
+ * действительно не сохранялся.
+ *
+ * Окно sudo несёт и предупреждение: у переезда есть последствия, а
+ * второе окно подряд к одному действию человек читать не станет.
+ */
+function telegramTokenAction(action, id) {
   const token = (state.telegramTokens || []).find((item) => item.id === id);
   if (!token) return;
   if (action === "remove") {
-    askConfirm({
+    askSudo({
+      scope: "secrets:write",
       title: `Удалить бота «${token.label}»?`,
       description: `@${token.bot_username} исчезнет из списка. Сам бот в Telegram останется, но его токен придётся вводить заново.`,
       action: async () => {
@@ -278,11 +290,12 @@ async function telegramTokenAction(action, id) {
     });
     return;
   }
-  askConfirm({
+  askSudo({
+    scope: "secrets:write",
     title: `Перевести Еву на @${token.bot_username}?`,
-    description: "Вебхук снимется у прежнего бота и встанет новому. Люди, писавшие прежнему, к новому не перейдут сами:"
-      + " им придётся начать с ним диалог. Чтобы смена вступила в силу, потребуется перезапуск eva-agent-service.",
-    expected: "ПЕРЕЕЗД",
+    description: "Вебхук снимется у прежнего бота и встанет новому. Люди, писавшие прежнему, к новому"
+      + " сами не перейдут: им придётся начать с ним диалог. Чтобы смена вступила в силу, потребуется"
+      + " перезапуск eva-agent-service.",
     action: async () => {
       const { payload } = await request(`/telegram/tokens/${encodeURIComponent(id)}/activate`, { method: "POST" });
       toast(`Активен @${token.bot_username}. Перезапустите ${payload.restart_required || "eva-agent-service"}, чтобы смена вступила в силу.`);
@@ -291,17 +304,29 @@ async function telegramTokenAction(action, id) {
   });
 }
 
-async function saveTelegramToken(form) {
-  await request("/telegram/tokens", {
-    method: "POST",
-    body: JSON.stringify({
-      label: form.elements.label.value.trim(),
-      token: form.elements.token.value.trim(),
-    }),
+function saveTelegramToken(form) {
+  const label = form.elements.label.value.trim();
+  const token = form.elements.token.value.trim();
+  if (!label || !token) {
+    toast("Заполните метку и токен", true);
+    return;
+  }
+  askSudo({
+    scope: "secrets:write",
+    title: "Сохранить бота",
+    description: `«${label}» будет добавлен в список. Токен проверяется у Telegram до записи и наружу больше не выходит.`,
+    action: async () => {
+      await request("/telegram/tokens", {
+        method: "POST",
+        body: JSON.stringify({ label, token }),
+      });
+      // Поле очищается только после успеха: иначе отклонённый токен
+      // пришлось бы искать и вводить заново.
+      form.reset();
+      toast("Бот сохранён. Чтобы перевести Еву на него, нажмите «Сделать активным».");
+      await loadTelegramTokens();
+    },
   });
-  form.reset();
-  toast("Бот сохранён. Чтобы перевести Еву на него, нажмите «Сделать активным».");
-  await loadTelegramTokens();
 }
 
 /**
@@ -501,9 +526,9 @@ $("#reload-audit").addEventListener("click", () => loadAudit().catch(handleError
 $("#telegram-tokens-list")?.addEventListener("click", (event) => {
   const button = event.target.closest("[data-telegram-action]");
   if (!button) return;
-  telegramTokenAction(button.dataset.telegramAction, button.dataset.telegramId).catch(handleError);
+  telegramTokenAction(button.dataset.telegramAction, button.dataset.telegramId);
 });
 $("#telegram-token-form")?.addEventListener("submit", (event) => {
   event.preventDefault();
-  saveTelegramToken(event.target).catch(handleError);
+  saveTelegramToken(event.target);
 });
