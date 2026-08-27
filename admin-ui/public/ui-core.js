@@ -11,7 +11,8 @@
 const API = "/api/admin/v1";
 const ROUTER_DEFAULTS = {
   priority: 100, quality_tier: 3, max_output_tokens: 4096,
-  request_timeout_ms: 180000, max_retries: 2, max_concurrency: 8,
+  request_timeout_ms: 180000, connect_timeout_ms: 10000,
+  max_retries: 2, max_concurrency: 8,
 };
 
 const state = {

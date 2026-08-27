@@ -143,6 +143,76 @@ export function catalogVisionHint(
   return modalities.some((value) => typeof value === "string" && value.toLowerCase() === "image");
 }
 
+/**
+ * Список моделей у Gemini.
+ *
+ * Отдельная проба, а не параметр к OpenAI-совместимой: у Google другой
+ * способ аутентификации (`x-goog-api-key` вместо `Authorization: Bearer`)
+ * и другая форма ответа (`{ models: [{ name: "models/…" }] }` вместо
+ * `{ data: [{ id }] }`). Послать сюда Bearer — получить 401 и показать
+ * оператору «провайдер недоступен» там, где он вполне доступен.
+ *
+ * Префикс `models/` снимается: адаптер подставляет имя в путь
+ * `/models/{model}:generateContent`, и с префиксом получился бы
+ * `/models/models%2Fgemini-…`.
+ */
+export async function probeGeminiProvider(
+  input: { baseUrl: string; apiKey: string; timeoutMs: number },
+  fetcher: typeof fetch = fetch,
+): Promise<ProviderProbe> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), input.timeoutMs);
+  const modelsUrl = `${input.baseUrl.replace(/\/+$/, "")}/models`;
+
+  try {
+    const response = await fetcher(modelsUrl, {
+      method: "GET",
+      headers: { Accept: "application/json", "x-goog-api-key": input.apiKey },
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        models_supported: true,
+        models: [],
+        message: `Проверка /models завершилась HTTP ${response.status}.`,
+        status_code: response.status,
+      };
+    }
+
+    const raw = await response.json() as { models?: unknown[] };
+    const models = Array.isArray(raw.models)
+      ? raw.models.flatMap((item) => {
+          if (!item || typeof item !== "object") return [];
+          const name = (item as { name?: unknown }).name;
+          if (typeof name !== "string" || !name) return [];
+          return [{ ...(item as Record<string, unknown>), id: name.replace(/^models\//u, "") }];
+        })
+      : [];
+
+    return {
+      ok: true,
+      models_supported: true,
+      models,
+      message: `Подключение работает; получено моделей: ${models.length}.`,
+      status_code: response.status,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      models_supported: true,
+      models: [],
+      message: error instanceof Error && error.name === "AbortError"
+        ? `Провайдер не ответил за ${input.timeoutMs} мс.`
+        : `Не удалось связаться с провайдером: ${error instanceof Error ? error.message : String(error)}`,
+      status_code: null,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function probeOpenAiProvider(
   input: { baseUrl: string; apiKey: string; timeoutMs: number },
   fetcher: typeof fetch = fetch,
@@ -250,6 +320,8 @@ export class LlmManager {
       ?? ((provider, apiKey) => provider.protocol === "openai-compatible"
         || provider.protocol === "openai-responses"
         ? probeOpenAiProvider({ baseUrl: provider.base_url, apiKey, timeoutMs: this.config.llmProbeTimeoutMs })
+        : provider.protocol === "gemini-compatible"
+        ? probeGeminiProvider({ baseUrl: provider.base_url, apiKey, timeoutMs: this.config.llmProbeTimeoutMs })
         : Promise.resolve({
             ok: true, models_supported: false, models: [],
             message: "Доступность native protocol проверяется фактическим model probe.", status_code: null,
