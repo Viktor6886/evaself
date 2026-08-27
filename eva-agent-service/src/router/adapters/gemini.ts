@@ -69,6 +69,48 @@ function toContents(request: LlmRequest) {
   return contents;
 }
 
+/**
+ * Схема инструмента в том виде, в каком её принимает Gemini.
+ *
+ * Инструменты описаны JSON Schema — так их отдаёт Letta и так их берут
+ * OpenAI-совместимые провайдеры. Gemini разбирает не JSON Schema, а свой
+ * урезанный вариант OpenAPI и на лишнее ключевое слово отвечает отказом
+ * всего запроса:
+ *
+ *   HTTP 400: Unknown name "additionalProperties"
+ *   at 'tools[0].function_declarations[0].parameters'
+ *
+ * То есть у Gemini не работал ни один вызов инструмента, а без них Ева
+ * не ведёт ни целей, ни напоминаний, ни дневника.
+ *
+ * Отбрасывается только то, чего Gemini не знает; сама структура —
+ * `type`, `properties`, `required`, `items`, `enum` — сохраняется, иначе
+ * модель потеряет описание аргументов. Обход рекурсивный: вложенный
+ * объект несёт те же ключевые слова, что и корневой.
+ */
+const GEMINI_SCHEMA_KEYS: ReadonlySet<string> = new Set([
+  "type", "format", "description", "nullable", "enum",
+  "properties", "required", "items", "anyOf", "title", "default",
+]);
+
+export function geminiSchema(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => geminiSchema(item));
+  if (!value || typeof value !== "object") return value;
+  const result: Record<string, unknown> = {};
+  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+    if (!GEMINI_SCHEMA_KEYS.has(key)) continue;
+    // `properties` — словарь имён аргументов, а не набор ключевых слов:
+    // его ключи чистить нельзя, чистятся только значения.
+    result[key] = key === "properties" && nested && typeof nested === "object" && !Array.isArray(nested)
+      ? Object.fromEntries(
+          Object.entries(nested as Record<string, unknown>)
+            .map(([name, schema]) => [name, geminiSchema(schema)]),
+        )
+      : geminiSchema(nested);
+  }
+  return result;
+}
+
 function buildBody(provider: ProviderProfile, request: LlmRequest) {
   const common = providerParameters(provider);
   const parameters = providerParameters(provider, [
@@ -109,7 +151,8 @@ function buildBody(provider: ProviderProfile, request: LlmRequest) {
   if (request.system_prompt.trim()) body.systemInstruction = { parts: [{ text: request.system_prompt }] };
   if (request.tools.length) {
     body.tools = [{ functionDeclarations: request.tools.map((tool) => ({
-      name: tool.name, description: tool.description, parameters: tool.parameters,
+      name: tool.name, description: tool.description,
+      parameters: geminiSchema(tool.parameters),
     })) }];
   }
   return body;

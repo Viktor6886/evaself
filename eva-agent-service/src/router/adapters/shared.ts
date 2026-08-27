@@ -4,12 +4,37 @@ import { ProviderError } from "../types.js";
 import type { ProviderProfile } from "../types.js";
 
 /** Operator overrides win over defaults; adapters add required fields last. */
+/**
+ * Настройки транспорта, а не генерации.
+ *
+ * Живут они в `additional_parameters` — оттуда их читает роутер, и
+ * панель сама кладёт туда `request_timeout_ms`. Но в теле запроса
+ * провайдеру им места нет: это наши таймауты и лимиты, а не параметры
+ * модели.
+ *
+ * OpenAI-совместимые endpoint'ы лишние поля молча игнорируют, и до сих
+ * пор это сходило с рук. Gemini разбирает тело строго и отвечает
+ * `HTTP 400: Unknown name "request_timeout_ms": Cannot find field` —
+ * то есть провайдер, заведённый из панели со стандартным таймаутом, не
+ * работал вовсе.
+ *
+ * Список общий для всех адаптеров: ни один из этих ключей не является
+ * допустимым параметром вывода ни у кого.
+ */
+const TRANSPORT_KEYS: ReadonlySet<string> = new Set([
+  "request_timeout_ms", "connect_timeout_ms", "timeout_ms", "max_retries",
+  "max_concurrency", "max_rpm", "max_tpm", "max_latency_ms",
+  "priority", "quality_tier", "sensitive_data_allowed", "enabled",
+  "daily_budget_micro", "monthly_budget_micro", "price_in_micro", "price_out_micro",
+]);
+
 export function providerParameters(
   provider: ProviderProfile,
   omit: readonly string[] = [],
 ): Record<string, unknown> {
   const parameters = { ...provider.generation_defaults, ...provider.additional_parameters };
   for (const key of omit) delete parameters[key];
+  for (const key of TRANSPORT_KEYS) delete parameters[key];
   return parameters;
 }
 

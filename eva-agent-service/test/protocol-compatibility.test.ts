@@ -22,6 +22,78 @@ const profile = (protocol: string, fetcher: typeof fetch) => ({
   daily_budget_micro: null, monthly_budget_micro: null, generation_defaults: {}, additional_parameters: {}, fetcher,
 });
 
+/**
+ * Провайдер, заведённый из панели, не работал у Gemini вовсе: два поля в
+ * теле запроса Google отвергает целиком, а OpenAI-совместимые endpoint'ы
+ * их молча игнорируют, поэтому до сих пор это не всплывало.
+ */
+test("транспортные настройки не уходят в тело запроса провайдеру", async () => {
+  let body: Record<string, unknown> = {};
+  const fetcher = (async (_url: unknown, init?: RequestInit) => {
+    body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response(JSON.stringify({
+      candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+
+  await geminiAdapter.complete({
+    ...profile("gemini-compatible", fetcher),
+    // Ровно то, что кладёт в additional_parameters форма панели.
+    additional_parameters: { request_timeout_ms: 180_000, connect_timeout_ms: 10_000 },
+  } as never, request([{ role: "user", content: "привет" }]) as never, AbortSignal.timeout(1_000));
+
+  assert.equal(body.request_timeout_ms, undefined,
+    "HTTP 400: Unknown name \"request_timeout_ms\": Cannot find field");
+  assert.equal(body.connect_timeout_ms, undefined);
+  // Полезная нагрузка при этом на месте.
+  assert.ok(Array.isArray(body.contents));
+});
+
+test("схема инструмента приводится к тому, что принимает Gemini", async () => {
+  let body: Record<string, unknown> = {};
+  const fetcher = (async (_url: unknown, init?: RequestInit) => {
+    body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response(JSON.stringify({
+      candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+
+  // JSON Schema, какую отдаёт Letta: с ключевыми словами, которых нет в
+  // урезанном OpenAPI Gemini.
+  const tool = {
+    name: "save_goal", description: "save",
+    parameters: {
+      type: "object", additionalProperties: false, $schema: "http://json-schema.org/draft-07/schema#",
+      properties: {
+        title: { type: "string", minLength: 1, description: "заголовок" },
+        tags: { type: "array", items: { type: "string", additionalProperties: false } },
+      },
+      required: ["title"],
+    },
+  };
+  await geminiAdapter.complete(
+    profile("gemini-compatible", fetcher) as never,
+    request([{ role: "user", content: "цель" }], [tool]) as never,
+    AbortSignal.timeout(1_000),
+  );
+
+  const declaration = (body.tools as Array<{ functionDeclarations: Array<Record<string, unknown>> }>)[0]
+    .functionDeclarations[0];
+  const parameters = declaration.parameters as Record<string, unknown>;
+  assert.equal(parameters.additionalProperties, undefined,
+    "HTTP 400: Unknown name \"additionalProperties\" at tools[0].function_declarations[0].parameters");
+  assert.equal(parameters.$schema, undefined);
+  // Структура сохранена: иначе модель потеряет описание аргументов.
+  assert.equal(parameters.type, "object");
+  assert.deepEqual(parameters.required, ["title"]);
+  const properties = parameters.properties as Record<string, Record<string, unknown>>;
+  assert.equal(properties.title.type, "string");
+  assert.equal(properties.title.description, "заголовок");
+  // Чистка рекурсивная и не трогает имена аргументов.
+  assert.equal((properties.tags.items as Record<string, unknown>).additionalProperties, undefined);
+  assert.equal((properties.tags.items as Record<string, unknown>).type, "string");
+});
+
 test("Gemini native functionCall/functionResponse сохраняет thoughtSignature", async () => {
   const bodies: Array<Record<string, unknown>> = [];
   const fetcher = async (_url: unknown, init?: RequestInit) => {

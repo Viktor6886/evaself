@@ -437,7 +437,7 @@ export class LlmManager {
 
   async create(raw: LlmProviderInput): Promise<PublicLlmProvider> {
     const input = validateInput(raw, true);
-    const row = await this.db.createLlmProvider({
+    const row = await nameConflictAsMessage(input.name, () => this.db.createLlmProvider({
       name: input.name,
       protocol: input.protocol,
       baseUrl: input.base_url,
@@ -445,7 +445,7 @@ export class LlmManager {
       contextWindow: input.context_window,
       additionalParameters: input.additional_parameters,
       apiKeyEncrypted: this.secretBox.encrypt(input.api_key),
-    });
+    }));
     return publicProvider(row);
   }
 
@@ -929,6 +929,28 @@ export class LlmManager {
       await delay(1_000);
     }
     throw new Error(`App Server не восстановился после переконфигурации: ${lastError}`);
+  }
+}
+
+/**
+ * Занятое имя провайдера — это ошибка человека, а не сбой.
+ *
+ * Уникальность объявлена индексом по `lower(name)`, и PostgreSQL
+ * отвечает на неё текстом `duplicate key value violates unique
+ * constraint "llm_providers_name_uidx"`. Он доходил до панели как есть:
+ * человек видел имя индекса и не понимал ни что случилось, ни что
+ * делать. Причём совпадение считается без учёта регистра — «Google» и
+ * «google» конфликтуют, и по сообщению базы это не угадать.
+ */
+async function nameConflictAsMessage<T>(name: string, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    const code = (error as { code?: unknown } | null)?.code;
+    if (code === "23505" && /llm_providers_name_uidx/u.test(String((error as Error).message ?? ""))) {
+      throw badRequest(`Провайдер с именем «${name}» уже есть. Имена сравниваются без учёта регистра — выберите другое.`);
+    }
+    throw error;
   }
 }
 
