@@ -600,6 +600,37 @@ test("пустой ответ со штатным завершением тож�
   assert.ok(budgets.at(-1)! >= 4_096, "до достаточного бюджета проба не дошла");
 });
 
+/**
+ * Опечатка в имени модели не должна отнимать у провайдера инструменты.
+ *
+ * HTTP 404 приходит на запрос, до модели он не доходит вовсе — значит и
+ * сказать о её возможностях не может. Записанный по нему `false`
+ * исключал провайдера из каждого хода с инструментами, то есть из всех,
+ * и снять это было нечем: у занятого провайдера новая проба отвечает
+ * лимитом, а лимит оставляет прежнее значение.
+ */
+test("отказ конфигурации не записывает модели отсутствие возможностей", async () => {
+  const notFound = () => json({ error: { message: "model not found" } }, 404);
+  const { fetcher } = provider({
+    completion: notFound, toolCall: notFound, toolLoop: notFound,
+    jsonObject: notFound, jsonSchema: notFound,
+  });
+  const result = await probeModelCapabilities(INPUT, fetcher);
+
+  assert.equal(result.status, "config_error", result.message);
+  // Невыясненное остаётся невыясненным: null сохранит прежде известное.
+  assert.equal(result.detected.tools, null, "404 не вправе объявлять отсутствие инструментов");
+  assert.equal(result.detected.json, null);
+});
+
+test("вердикт самой модели по-прежнему записывается", async () => {
+  // Модель ответила и инструмент не вызвала — это про неё, а не про запрос.
+  const { fetcher } = provider({ toolCall: () => json(CHAT("не буду вызывать")) });
+  const result = await probeModelCapabilities(INPUT, fetcher);
+
+  assert.equal(result.detected.tools, false, "настоящий отказ модели обязан записаться");
+});
+
 test("молчание и при большом бюджете остаётся отказом", async () => {
   const { fetcher } = provider({ toolLoop: EMPTY_BY_BUDGET });
   const result = await probeModelCapabilities(INPUT, fetcher);
