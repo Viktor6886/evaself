@@ -330,16 +330,33 @@ export class RouterStore {
    * UPDATE ... RETURNING делает переход атомарным: две реплики роутера не
    * отправят два пробных запроса одновременно.
    */
-  async claimProbe(providerId: string, model: string): Promise<boolean> {
+  /**
+   * Захватывает право на пробный запрос — на срок, а не навсегда.
+   *
+   * Прежде состояние `half_open` ставилось без срока. Пока проба идёт,
+   * это верно: второй запрос к упавшему провайдеру не нужен. Но если
+   * процесс перезапустился, контейнер пересоздали или запрос оборвался
+   * между `claimProbe` и записью исхода, `half_open` оставался в таблице
+   * навсегда, и провайдер исключался из каждого хода с формулировкой
+   * «circuit breaker уже выполняет единственный пробный запрос».
+   * Выполнять его к тому моменту было некому. Вернуть провайдера могла
+   * только кнопка в панели, а сам он не восстанавливался никогда.
+   *
+   * Теперь захват продлевает `probe_after`: пока срок не вышел, чужая
+   * проба считается идущей, после — брошенной, и её место можно занять.
+   */
+  async claimProbe(providerId: string, model: string, leaseMs: number): Promise<boolean> {
     const { rowCount } = await this.pool.query(
       `UPDATE llm_breaker_model_state
-          SET state = 'half_open'
+          SET state = 'half_open',
+              probe_after = now() + make_interval(secs => $3)
         WHERE provider_id = $1 AND model = $2
-          AND state = 'open'
+          -- half_open с истёкшим сроком — брошенная проба, а не идущая.
+          AND state IN ('open', 'half_open')
           AND NOT pinned_out
           AND probe_after IS NOT NULL
           AND probe_after <= now()`,
-      [providerId, model],
+      [providerId, model, Math.max(1, Math.ceil(leaseMs / 1000))],
     );
     return (rowCount ?? 0) > 0;
   }

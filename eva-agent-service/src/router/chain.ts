@@ -78,7 +78,11 @@ export function buildChain(input: ChainInput): BuiltChain {
       // Время выдержки вышло: провайдер остаётся в цепочке, роутер
       // попробует занять пробный запрос через claimProbe().
     }
-    if (breaker?.state === "half_open") {
+    // Проба считается идущей, пока не вышел срок захвата. Без срока
+    // оборвавшаяся проба исключала провайдера из цепочки навсегда: он
+    // выпадал из каждого хода, а выполнять пробу было уже некому.
+    if (breaker?.state === "half_open"
+      && breaker.probe_after !== null && breaker.probe_after > input.now) {
       rejected.push({
         provider,
         reason: "breaker_open",

@@ -441,11 +441,27 @@ export function summarize(checks: CapabilityCheck[]): CapabilityProbeResult {
 
   const passed = (name: CapabilityName): boolean =>
     checks.some((entry) => entry.name === name && entry.status === "ok");
-  // Возможность, которую не удалось проверить из-за состояния провайдера,
-  // остаётся неизвестной: null сохраняет прежде выясненное, а false стёр бы
-  // его и закрыл модели маршруты на ровном месте.
+  // Записать `false` вправе только сам вердикт модели: она ответила и
+  // возможности не показала. Любой другой отказ — лимит, отклонённый
+  // ключ, ненайденная модель — говорит о запросе, а не о модели, и
+  // оставляет возможность невыясненной.
+  //
+  // Прежде так трактовался только `temporary`. HTTP 404 «модель не
+  // найдена» проходил как вердикт и записывал провайдеру отсутствие
+  // инструментов — после чего роутер исключал его из каждого хода с
+  // инструментами, то есть из всех. Выйти из этого было нельзя: новая
+  // проба у занятого провайдера отвечает лимитом, лимит оставляет
+  // значение прежним, а руками возможности не выставляются. Провайдер
+  // оставался мёртвым из-за опечатки в имени модели.
+  //
+  // Причина называется явно, а не через «всё, кроме capability»:
+  // проверка без causa — вердикт модели по умолчанию, ровно как в
+  // `failure()`, и трактовать её как невыясненную нельзя.
+  const UNDETERMINED: ReadonlySet<CapabilityCause> = new Set(["config", "temporary"]);
   const undecided = (...names: CapabilityName[]): boolean =>
-    names.some((name) => failed.some((entry) => entry.name === name && entry.cause === "temporary"));
+    names.some((name) => failed.some(
+      (entry) => entry.name === name && entry.cause !== undefined && UNDETERMINED.has(entry.cause),
+    ));
   const detected: DetectedCapabilities = {
     streaming: undecided("streaming") ? null : passed("streaming"),
     vision: undecided("vision") ? null : passed("vision"),

@@ -283,6 +283,18 @@ export class LlmRouter {
   }
 
   /**
+   * Идёт ли прямо сейчас чужая проба.
+   *
+   * `half_open` без срока означал «навсегда»: оборвавшаяся проба
+   * исключала провайдера из каждого хода, и вернуть его могла только
+   * кнопка в панели. Срок захвата лежит в `probe_after`.
+   */
+  private probeInFlight(breaker: { state: string; probe_after: Date | null } | undefined): boolean {
+    if (breaker?.state !== "half_open") return false;
+    return breaker.probe_after !== null && breaker.probe_after.getTime() > Date.now();
+  }
+
+  /**
    * Одна позиция цепочки: проверки, до max_retries повторов с backoff,
    * нормализация после HTTP 400, запись телеметрии.
    */
@@ -312,8 +324,8 @@ export class LlmRouter {
     // после лимитера: иначе отказ Valkey оставил бы breaker в half_open,
     // хотя до провайдера не ушло ни одного запроса.
     const breakers = await this.store.breakers();
-    const breakerState = breakers.get(breakerKey(provider.id, provider.model))?.state;
-    if (breakerState === "half_open") {
+    const breaker = breakers.get(breakerKey(provider.id, provider.model));
+    if (this.probeInFlight(breaker)) {
       return {
         kind: "failure",
         error: new ProviderError("circuit breaker уже выполняет пробный запрос", "breaker_open", {
@@ -321,7 +333,8 @@ export class LlmRouter {
         }),
       };
     }
-    const needsProbe = breakerState === "open";
+    // Брошенная проба тоже требует нового захвата: её место свободно.
+    const needsProbe = breaker?.state === "open" || breaker?.state === "half_open";
 
     const adapter = this.adapterFor(provider);
     const maxAttempts = needsProbe ? 1 : provider.max_retries + 1;
@@ -373,7 +386,8 @@ export class LlmRouter {
         break;
       }
       const reservation = limited.reservation;
-      if (needsProbe && attempt === 1 && !(await this.store.claimProbe(provider.id, provider.model))) {
+      if (needsProbe && attempt === 1
+        && !(await this.store.claimProbe(provider.id, provider.model, probeLeaseMs(provider)))) {
         await this.releaseLimit(reservation, original.metadata.request_id);
         lastError = new ProviderError("circuit breaker открыт", "breaker_open", {
           retryable: false,
@@ -573,8 +587,8 @@ export class LlmRouter {
       const adapter = this.adapterFor(provider);
       const started = new Date();
       const breakers = await this.store.breakers();
-      const breakerState = breakers.get(breakerKey(provider.id, provider.model))?.state;
-      if (breakerState === "half_open") {
+      const breaker = breakers.get(breakerKey(provider.id, provider.model));
+      if (this.probeInFlight(breaker)) {
         lastError = new ProviderError(
           "circuit breaker уже выполняет пробный запрос",
           "breaker_open",
@@ -583,7 +597,7 @@ export class LlmRouter {
         switches += 1;
         continue;
       }
-      const needsProbe = breakerState === "open";
+      const needsProbe = breaker?.state === "open" || breaker?.state === "half_open";
       let limited;
       try {
         limited = await this.limits.reserve({
@@ -619,7 +633,7 @@ export class LlmRouter {
         continue;
       }
       const reservation = limited.reservation;
-      if (needsProbe && !(await this.store.claimProbe(provider.id, provider.model))) {
+      if (needsProbe && !(await this.store.claimProbe(provider.id, provider.model, probeLeaseMs(provider)))) {
         await this.releaseLimit(reservation, request.metadata.request_id);
         lastError = new ProviderError("circuit breaker открыт", "breaker_open", {
           retryable: false,
@@ -948,6 +962,17 @@ const DEFAULT_ROUTING_SETTINGS: RoutingSettings = {
   single_provider_id: null,
   single_failover_enabled: false,
 };
+
+/**
+ * Насколько захват пробы считается действующим.
+ *
+ * Аренда обязана пережить сам запрос, иначе второй ход отберёт пробу у
+ * первого, пока тот ещё ждёт ответа. Запас вдвое покрывает и повтор
+ * после HTTP 400, и наращивание бюджета.
+ */
+function probeLeaseMs(provider: ProviderProfile): number {
+  return Math.max(60_000, provider.request_timeout_ms * 2);
+}
 
 function isTechnicalSingleFailover(reason: SwitchReason): boolean {
   return [

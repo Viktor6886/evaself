@@ -61,8 +61,8 @@ test("две реплики занимают только один общий ha
   const replicaB = new RouterStore(pool, key);
 
   const claims = await Promise.all([
-    replicaA.claimProbe("provider-1", "model-a"),
-    replicaB.claimProbe("provider-1", "model-a"),
+    replicaA.claimProbe("provider-1", "model-a", 60_000),
+    replicaB.claimProbe("provider-1", "model-a", 60_000),
   ]);
   assert.deepEqual(claims.sort(), [false, true]);
 });
@@ -186,11 +186,14 @@ class FakeStore {
     });
     return Promise.resolve();
   }
-  claimProbe(id, model) {
+  claimProbe(id, model, leaseMs) {
     const row = this.breakerRows.get(breakerKey(id, model));
-    if (!row || row.state !== "open" || row.pinned_out) return Promise.resolve(false);
+    if (!row || row.pinned_out) return Promise.resolve(false);
+    // half_open с истёкшим сроком — брошенная проба: её место свободно.
+    if (row.state !== "open" && row.state !== "half_open") return Promise.resolve(false);
     if (row.probe_after && row.probe_after > new Date()) return Promise.resolve(false);
     row.state = "half_open";
+    row.probe_after = new Date(Date.now() + (leaseMs ?? 60_000));
     this.probeClaims += 1;
     return Promise.resolve(true);
   }
@@ -552,13 +555,32 @@ test("half-open breaker не пропускает второй пробный з
     providerIds: ["a"],
     providers: new Map([["a", p]]),
     breakers: new Map([[breakerKey("a", "model-a"), {
-      state: "half_open", probe_after: null, pinned_out: false,
+      // Срок захвата ещё не вышел: проба действительно выполняется.
+      state: "half_open", probe_after: new Date(Date.now() + 60_000), pinned_out: false,
     }]]),
     now: new Date(),
   });
   assert.equal(chain.usable.length, 0);
   assert.equal(chain.rejected[0]?.reason, "breaker_open");
   assert.match(chain.rejected[0]?.detail ?? "", /единственный пробный запрос/);
+});
+
+test("half-open без срока считается брошенной пробой, а не вечной", () => {
+  // Так выглядит запись, оставшаяся от оборвавшейся пробы: состояние
+  // есть, срока нет, выполнять её некому. Провайдер обязан вернуться в
+  // цепочку — иначе он мёртв до ручного вмешательства.
+  const p = provider({ id: "a", name: "primary" });
+  const chain = buildChain({
+    route: ROUTE,
+    request: request(),
+    providerIds: ["a"],
+    providers: new Map([["a", p]]),
+    breakers: new Map([[breakerKey("a", "model-a"), {
+      state: "half_open", probe_after: null, pinned_out: false,
+    }]]),
+    now: new Date(),
+  });
+  assert.equal(chain.usable.length, 1, "брошенная проба не должна хоронить провайдера");
 });
 
 test("long Retry-After switches immediately; short value is waited with configured jitter", async () => {
@@ -667,6 +689,47 @@ test("бюджет наращивается до потолка провайде
   assert.ok(budgets.length > 1, "наращивание не состоялось");
   // Молчание при полном бюджете остаётся отказом, а не бесконечным циклом.
   assert.ok(budgets.length < 10, `цикл не сошёлся: ${budgets.length} попыток`);
+});
+
+/**
+ * Брошенная проба не должна хоронить провайдера навсегда.
+ *
+ * `half_open` ставился без срока. Пока проба идёт, это верно. Но если
+ * процесс перезапустили или запрос оборвался между захватом и записью
+ * исхода, состояние оставалось в таблице навечно, и провайдер выпадал из
+ * каждого хода с формулировкой «circuit breaker уже выполняет
+ * единственный пробный запрос» — выполнять его было уже некому.
+ */
+test("half_open с истёкшим сроком перезахватывается, а не блокирует навсегда", async () => {
+  const { router, store, calls } = harness([provider({ id: "a", name: "primary" })], {
+    primary: always(() => Promise.resolve(ok("живой"))),
+  });
+  // Проба, которую никто не завершил: срок вышел час назад.
+  store.breakerRows.set(breakerKey("a", "model-a"), {
+    provider_id: "a", model: "model-a", state: "half_open", consecutive_errors: 3,
+    pinned_out: false, first_error_at: null, opened_at: new Date(Date.now() - 7_200_000),
+    probe_after: new Date(Date.now() - 3_600_000),
+    last_error_code: "timeout", last_success_at: null,
+  });
+
+  const result = await router.complete(request());
+  assert.equal(result.provider_name, "primary", "провайдер обязан вернуться сам");
+  assert.equal(calls.length, 1);
+});
+
+test("идущая проба по-прежнему не пускает второй запрос", async () => {
+  const { router, store } = harness([provider({ id: "a", name: "primary" })], {
+    primary: always(() => Promise.resolve(ok("живой"))),
+  });
+  // Захват свежий: чужая проба действительно выполняется прямо сейчас.
+  store.breakerRows.set(breakerKey("a", "model-a"), {
+    provider_id: "a", model: "model-a", state: "half_open", consecutive_errors: 3,
+    pinned_out: false, first_error_at: null, opened_at: new Date(),
+    probe_after: new Date(Date.now() + 60_000),
+    last_error_code: "timeout", last_success_at: null,
+  });
+
+  await assert.rejects(() => router.complete(request()), /единственный пробный запрос/);
 });
 
 test("HTTP 400 сначала нормализуется у того же провайдера, а не гонится по цепочке", async () => {
