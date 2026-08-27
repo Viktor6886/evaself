@@ -196,6 +196,14 @@ export interface ProviderProfile {
   base_url: string;
   model: string;
   api_key: string;
+  /**
+   * Все ключи провайдера по порядку; первый совпадает с `api_key`.
+   *
+   * Лимит у льготных тарифов считается на ключ, а не на аккаунт: когда
+   * один упирается в квоту, роутер берёт следующий вместо того, чтобы
+   * уводить весь провайдер из маршрутов.
+   */
+  api_keys?: string[];
 
   connect_timeout_ms: number;
   request_timeout_ms: number;

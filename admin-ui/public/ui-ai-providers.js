@@ -222,6 +222,14 @@ function openProviderEditor(provider = null) {
   form.elements.context_window.value = provider?.context_window || 131072;
   form.elements.timeout_ms.value =
     provider?.additional_parameters?.request_timeout_ms || 180000;
+  // Сами ключи не показываются никогда; видно только, сколько их.
+  const keysHint = $("#api-keys-hint");
+  if (keysHint) {
+    const configured = Number(provider?.api_keys_configured ?? 0);
+    keysHint.textContent = configured > 1
+      ? `Сейчас настроено ключей: ${configured}. Заполненное поле заменит весь набор; пустое оставит сохранённый.`
+      : "До десяти ключей всего. Роутер берёт следующий, когда предыдущий упёрся в лимит или отклонён, и дальше по кругу. Заполненное поле заменяет весь набор; пустое оставляет сохранённый.";
+  }
   form.elements.additional_parameters.value = JSON.stringify(
     provider?.additional_parameters || {},
     null,
@@ -302,6 +310,12 @@ async function saveProvider(form) {
     additional_parameters: additional,
   };
   if (form.elements.api_key.value) body.api_key = form.elements.api_key.value;
+  // Пул уходит, только когда поле заполнено: пустое означает «не трогать
+  // сохранённый», а не «стереть». Показать сохранённые ключи нельзя —
+  // они write-only, — поэтому заполненное поле заменяет набор целиком.
+  const pool = (form.elements.api_keys?.value ?? "")
+    .split("\n").map((line) => line.trim()).filter(Boolean);
+  if (pool.length) body.api_keys = pool;
   const saved = await request(id ? `/providers/${encodeURIComponent(id)}` : "/providers", {
     method: id ? "PATCH" : "POST",
     body: JSON.stringify(body),
@@ -311,6 +325,7 @@ async function saveProvider(form) {
   await saveRoutingFields(form, id || saved.payload?.id);
 
   form.elements.api_key.value = "";
+  if (form.elements.api_keys) form.elements.api_keys.value = "";
   $("#provider-editor").hidden = true;
   toast(id ? "Провайдер обновлён" : "Провайдер создан");
   await loadProviders();

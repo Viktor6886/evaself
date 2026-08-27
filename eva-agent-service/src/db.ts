@@ -77,6 +77,8 @@ export interface LlmProviderRow {
   max_output_tokens?: number;
   additional_parameters: Record<string, unknown>;
   api_key_encrypted: string;
+  /** Пул ключей; пустой массив — пул не заводили (строки до миграции 069). */
+  api_keys_encrypted: string[] | null;
   is_active: boolean;
   last_checked_at: Date | null;
   last_check_ok: boolean | null;
@@ -1491,12 +1493,14 @@ export class Database {
     contextWindow: number;
     additionalParameters: Record<string, unknown>;
     apiKeyEncrypted: string;
+    /** Пул целиком; первый элемент совпадает с apiKeyEncrypted. */
+    apiKeysEncrypted?: string[];
   }): Promise<LlmProviderRow> {
     const { rows } = await this.require().query<LlmProviderRow>(
       `INSERT INTO llm_providers
          (name, protocol, base_url, model, context_window,
-          additional_parameters, api_key_encrypted)
-       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+          additional_parameters, api_key_encrypted, api_keys_encrypted)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::text[])
        RETURNING *`,
       [
         input.name,
@@ -1506,6 +1510,7 @@ export class Database {
         input.contextWindow,
         JSON.stringify(input.additionalParameters),
         input.apiKeyEncrypted,
+        input.apiKeysEncrypted ?? [input.apiKeyEncrypted],
       ],
     );
     return rows[0]!;
@@ -1520,6 +1525,8 @@ export class Database {
     contextWindow: number;
     additionalParameters: Record<string, unknown>;
     apiKeyEncrypted: string;
+    /** Пул целиком. `undefined` — не трогать сохранённый. */
+    apiKeysEncrypted?: string[];
   }): Promise<LlmProviderRow | null> {
     const { rows } = await this.require().query<LlmProviderRow>(
       `UPDATE llm_providers SET
@@ -1530,6 +1537,9 @@ export class Database {
          context_window = $6,
          additional_parameters = $7::jsonb,
          api_key_encrypted = $8,
+         -- NULL означает «пул не меняли»: правка имени или таймаута не
+         -- должна стирать запасные ключи, которых форма не показывает.
+         api_keys_encrypted = COALESCE($9::text[], api_keys_encrypted),
          last_checked_at = NULL,
          last_check_ok = NULL,
          last_check_message = NULL,
@@ -1545,6 +1555,7 @@ export class Database {
         input.contextWindow,
         JSON.stringify(input.additionalParameters),
         input.apiKeyEncrypted,
+        input.apiKeysEncrypted ?? null,
       ],
     );
     return rows[0] ?? null;

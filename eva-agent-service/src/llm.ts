@@ -28,6 +28,13 @@ export interface LlmProviderInput {
   protocol?: "openai-compatible" | "openai-responses" | "gemini-compatible" | "anthropic-compatible";
   base_url: string;
   api_key?: string;
+  /**
+   * Пул ключей: до десяти, по порядку обхода.
+   *
+   * Заменяет набор целиком — показать сохранённые ключи нельзя, они
+   * write-only, поэтому дописать один к невидимым остальным невозможно.
+   */
+  api_keys?: string[];
   model: string;
   context_window: number;
   additional_parameters?: Record<string, unknown>;
@@ -44,6 +51,8 @@ export interface PublicLlmProvider {
   additional_parameters: Record<string, unknown>;
   is_active: boolean;
   api_key_configured: true;
+  /** Сколько ключей в пуле. Сами ключи наружу не выходят. */
+  api_keys_configured: number;
   last_checked_at: string | null;
   last_check_ok: boolean | null;
   /**
@@ -437,6 +446,7 @@ export class LlmManager {
 
   async create(raw: LlmProviderInput): Promise<PublicLlmProvider> {
     const input = validateInput(raw, true);
+    const pool = keyPool(input.api_key, raw.api_keys);
     const row = await nameConflictAsMessage(input.name, () => this.db.createLlmProvider({
       name: input.name,
       protocol: input.protocol,
@@ -444,7 +454,10 @@ export class LlmManager {
       model: input.model,
       contextWindow: input.context_window,
       additionalParameters: input.additional_parameters,
-      apiKeyEncrypted: this.secretBox.encrypt(input.api_key),
+      // Первым в пуле идёт основной ключ, и он же остаётся в
+      // api_key_encrypted: старый код читает только его.
+      apiKeyEncrypted: this.secretBox.encrypt(pool[0]!),
+      apiKeysEncrypted: pool.map((key) => this.secretBox.encrypt(key)),
     }));
     return publicProvider(row);
   }
@@ -460,11 +473,17 @@ export class LlmManager {
       context_window: raw.context_window ?? old.context_window,
       additional_parameters: raw.additional_parameters ?? old.additional_parameters,
     }, false);
-    const encrypted = merged.api_key
-      ? this.secretBox.encrypt(merged.api_key)
+    // Пул трогается, только когда его прислали. Ключи write-only и в
+    // форму не возвращаются, поэтому правка имени или таймаута не должна
+    // стирать запасные ключи, которых человек в этот момент не видит.
+    const pool = merged.api_key || raw.api_keys !== undefined
+      ? keyPool(merged.api_key ?? "", raw.api_keys)
+      : null;
+    const encrypted = pool
+      ? this.secretBox.encrypt(pool[0]!)
       : old.api_key_encrypted;
 
-    const updated = await this.db.updateLlmProvider({
+    const updated = await nameConflictAsMessage(merged.name, () => this.db.updateLlmProvider({
       id,
       name: merged.name,
       protocol: merged.protocol,
@@ -473,7 +492,8 @@ export class LlmManager {
       contextWindow: merged.context_window,
       additionalParameters: merged.additional_parameters,
       apiKeyEncrypted: encrypted,
-    });
+      apiKeysEncrypted: pool?.map((key) => this.secretBox.encrypt(key)),
+    }));
     if (!updated) throw notFound(`LLM-конфигурация ${id} не найдена`);
     const identityChanged = old.protocol !== updated.protocol
       || old.base_url !== updated.base_url
@@ -954,6 +974,32 @@ async function nameConflictAsMessage<T>(name: string, run: () => Promise<T>): Pr
   }
 }
 
+/**
+ * Пул ключей провайдера: основной плюс запасные, без повторов.
+ *
+ * Порядок значим — роутер обходит пул сверху вниз, — поэтому
+ * дублирующийся ключ выбрасывается, а не переставляется. Предел в десять
+ * повторяет ограничение схемы: там он защищает базу, здесь называет
+ * причину человеку.
+ */
+export function keyPool(primary: string, extra: unknown): string[] {
+  const keys: string[] = [];
+  const add = (value: unknown): void => {
+    const key = String(value ?? "").trim();
+    if (key && !keys.includes(key)) keys.push(key);
+  };
+  add(primary);
+  if (extra !== undefined && extra !== null) {
+    if (!Array.isArray(extra)) throw badRequest("api_keys: ожидается список ключей");
+    for (const value of extra) add(value);
+  }
+  if (keys.length === 0) throw badRequest("Нужен хотя бы один API key");
+  if (keys.length > 10) {
+    throw badRequest(`Ключей не больше десяти, получено ${keys.length}. Лишние уберите из списка.`);
+  }
+  return keys;
+}
+
 function validateInput(raw: LlmProviderInput, requireKey: boolean) {
   const name = String(raw.name ?? "").trim();
   const protocol = raw.protocol ?? "openai-compatible";
@@ -1000,6 +1046,7 @@ function publicProvider(row: LlmProviderRow): PublicLlmProvider {
     additional_parameters: row.additional_parameters,
     is_active: row.is_active,
     api_key_configured: true,
+    api_keys_configured: Math.max(1, (row.api_keys_encrypted ?? []).filter((key: string) => typeof key === "string" && key.trim()).length),
     last_checked_at: row.last_checked_at?.toISOString() ?? null,
     last_check_ok: row.last_check_ok,
     last_check_status: row.last_check_status ?? null,

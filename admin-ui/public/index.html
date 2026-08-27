@@ -182,6 +182,16 @@
               <label>Модель<input name="model" required placeholder="vendor/model"></label>
               <label class="span-2">Base URL<input name="base_url" type="url" placeholder="https://api.openai.com/v1" required><small>Без пути дописывается /v1. Указанный путь остаётся нетронутым — Gemini ждёт /v1beta</small></label>
               <label class="span-2">API Key<input name="api_key" type="password" autocomplete="new-password" placeholder="Для изменения введите новый"></label>
+              <!-- Пул ключей. Лимит льготных тарифов считается на ключ, а
+                   не на аккаунт: у Gemini один ключ упирается в квоту за
+                   минуты, и провайдер выпадает из маршрутов, хотя рядом
+                   лежат рабочие ключи того же владельца.
+
+                   Заменяет набор целиком, и об этом сказано прямо:
+                   сохранённые ключи write-only и в форму не
+                   возвращаются, поэтому дописать один к невидимым
+                   остальным нельзя. Пустое поле пул не трогает. -->
+              <label class="span-2">Запасные ключи<textarea name="api_keys" rows="3" autocomplete="off" placeholder="По одному ключу в строке"></textarea><small id="api-keys-hint">До десяти ключей всего. Роутер берёт следующий, когда предыдущий упёрся в лимит или отклонён, и дальше по кругу. Заполненное поле заменяет весь набор; пустое оставляет сохранённый.</small></label>
 
               <details class="span-2 advanced-block">
                 <summary>Дополнительно</summary>

@@ -289,6 +289,34 @@ export class LlmRouter {
    * исключала провайдера из каждого хода, и вернуть его могла только
    * кнопка в панели. Срок захвата лежит в `probe_after`.
    */
+  /**
+   * С какого ключа провайдера начинать.
+   *
+   * Курсор переживает ход: если ключ упёрся в квоту, следующий разговор
+   * начинается со следующего, а не бьётся о ту же стену снова. Значение
+   * восстановимое — после перезапуска пул просто начинается сначала.
+   */
+  private readonly keyCursor = new Map<string, number>();
+
+  /**
+   * Ключ, которым выполняется попытка.
+   *
+   * Адаптеры про пул не знают и не должны: им отдаётся обычный профиль,
+   * у которого `api_key` — выбранный ключ. Так ротация не размазывается
+   * по четырём адаптерам и работает одинаково у всех протоколов.
+   */
+  private withKey(provider: ProviderProfile, index: number): ProviderProfile {
+    const keys = provider.api_keys?.length ? provider.api_keys : [provider.api_key];
+    const key = keys[index % keys.length]!;
+    return key === provider.api_key ? provider : { ...provider, api_key: key };
+  }
+
+  /** С какого ключа начать эту позицию цепочки. */
+  private keyStart(provider: ProviderProfile): number {
+    const keys = provider.api_keys?.length ?? 1;
+    return (this.keyCursor.get(provider.id) ?? 0) % keys;
+  }
+
   private probeInFlight(breaker: { state: string; probe_after: Date | null } | undefined): boolean {
     if (breaker?.state !== "half_open") return false;
     return breaker.probe_after !== null && breaker.probe_after.getTime() > Date.now();
@@ -339,6 +367,15 @@ export class LlmRouter {
     const adapter = this.adapterFor(provider);
     const maxAttempts = needsProbe ? 1 : provider.max_retries + 1;
     let attempt = 0;
+    /**
+     * Сколько ключей пула уже отработали в этой позиции цепочки.
+     *
+     * Отсчёт идёт от `keyStart` — курсора, оставшегося от прошлого хода.
+     * Сам курсор в переборе не участвует: он только запоминает ключ,
+     * которым ход удался, чтобы следующий начался с него.
+     */
+    const keyStart = this.keyStart(provider);
+    let keyOffset = 0;
     let retryAfterDelay: number | null = null;
     let providerAttempted = false;
     let lastError = new ProviderError("не выполнено ни одной попытки", "model_error", {
@@ -398,7 +435,9 @@ export class LlmRouter {
       const timer = setTimeout(() => controller.abort(), provider.request_timeout_ms);
       try {
         providerAttempted = true;
-        const response = await adapter.complete(provider, request, controller.signal);
+        const response = await adapter.complete(
+          this.withKey(provider, keyStart + keyOffset), request, controller.signal,
+        );
         const latency = Date.now() - started.getTime();
 
         const contract = this.checkContract(request, response, latency, provider);
@@ -409,6 +448,7 @@ export class LlmRouter {
           response.usage.tokens_in + response.usage.tokens_out,
           original.metadata.request_id,
         );
+        if (keyOffset > 0) this.keyCursor.set(provider.id, keyStart + keyOffset);
         await this.store.recordSuccess(provider.id, provider.model);
         await this.store.addSpend(provider.id, {
           tokens_in: response.usage.tokens_in,
@@ -437,6 +477,33 @@ export class LlmRouter {
             continue;
           }
           break;
+        }
+        // Лимит и отклонённый ключ — свойства ключа, а не провайдера.
+        // У льготных тарифов квота считается на ключ, и пока в пуле есть
+        // непробованный, уводить провайдера из маршрута рано: следующий
+        // ключ того же владельца обслужит тот же запрос. Ротация идёт до
+        // конца пула и по кругу — курсор переживает ход, поэтому
+        // следующий разговор начнётся с того ключа, что сработал.
+        if (KEY_SCOPED_REASONS.has(error.reason)) {
+          const keys = provider.api_keys?.length ?? 1;
+          if (keyOffset + 1 < keys) {
+            keyOffset += 1;
+            this.logger.info("LLM Router: следующий ключ провайдера", {
+              request_id: original.metadata.request_id,
+              provider: provider.name,
+              reason: error.reason,
+              // Номер, а не ключ: сам ключ в журнал не попадает.
+              key_index: (keyStart + keyOffset) % (provider.api_keys?.length ?? 1),
+            });
+            // Смена ключа — не повтор того же запроса той же учётной
+            // записью, а обращение другой. Бюджет повторов она не тратит:
+            // иначе при max_retries=3 до десятого ключа дело не дошло бы
+            // никогда. Цикл всё равно конечен — его держит keyOffset.
+            attempt -= 1;
+            // И не ждёт: пауза относилась к квоте прежнего ключа.
+            retryAfterDelay = 0;
+            continue;
+          }
         }
         // Пустой ответ при тесном бюджете — не отказ провайдера, а
         // нехватка места на рассуждение. Повторяем тому же провайдеру с
@@ -973,6 +1040,17 @@ const DEFAULT_ROUTING_SETTINGS: RoutingSettings = {
 function probeLeaseMs(provider: ProviderProfile): number {
   return Math.max(60_000, provider.request_timeout_ms * 2);
 }
+
+/**
+ * Отказы, которые говорят о ключе, а не о провайдере.
+ *
+ * `rate_limited` — квота ключа за окно; `quota_exhausted` — ключ
+ * отклонён или исчерпан. Всё остальное — модель, запрос или сам сервис:
+ * второй ключ ответит ровно тем же, и перебирать пул бессмысленно.
+ */
+const KEY_SCOPED_REASONS: ReadonlySet<SwitchReason> = new Set([
+  "rate_limited", "quota_exhausted",
+]);
 
 function isTechnicalSingleFailover(reason: SwitchReason): boolean {
   return [
