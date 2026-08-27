@@ -199,3 +199,46 @@ DROP ROLE nocodb;
 серьёзно: `secrets/eva-secrets-master-key` шифрует резервные копии и **в них
 самих не содержится**. Потеря файла означает, что ни один архив не
 восстановить. Скопируйте его за пределы сервера сразу.
+
+## Сборка не достучалась до Docker Hub
+
+```
+target media-service: failed to solve: python:3.12-slim-bookworm:
+  failed to do request: Head "https://registry-1.docker.io/...":
+  net/http: TLS handshake timeout
+✖ image build failed — nothing was restarted
+```
+
+Это сеть, а не поломка обновления. `nothing was restarted` означает, что
+работающая установка не тронута: старые контейнеры продолжают отвечать, и
+торопиться некуда.
+
+Первое, что стоит сделать, — повторить `make update`. Таймаут рукопожатия
+бывает и разовым.
+
+Если Docker Hub недоступен постоянно — так бывает у части хостингов и
+целых регионов, — нужен реестр-зеркало. Самый широкий способ: сказать о
+нём демону Docker, тогда через зеркало пойдут вообще все образы, включая
+базовые из `FROM`.
+
+```jsonc
+// /etc/docker/daemon.json
+{ "registry-mirrors": ["https://<адрес-зеркала>"] }
+```
+
+```bash
+sudo systemctl restart docker
+```
+
+Второй способ — назвать другой источник только для базовых образов. Все
+сторонние образы установки объявлены в `versions.env` парой «откуда» и
+«какой версии», и базовые не исключение:
+
+```bash
+PYTHON_BASE_IMAGE=mirror.example.org/library/python
+NODE_BASE_IMAGE=mirror.example.org/library/node
+```
+
+Версии при этом остаются прежними: меняется только адрес, откуда образ
+берут. Это же место пригодится, если зеркало хранит не весь Docker Hub, а
+только нужные образы, — тогда общий `registry-mirrors` не подойдёт.

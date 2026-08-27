@@ -158,6 +158,7 @@ services:
     build:
       context: ./letta-app-server
       args:
+        NODE_BASE_IMAGE: ${NODE_BASE_IMAGE}
         NODE_BASE_VERSION: ${NODE_BASE_VERSION}
         LETTA_CODE_VERSION: ${LETTA_CODE_VERSION}
     image: evaself/letta-app-server:${LETTA_CODE_VERSION}
@@ -218,6 +219,7 @@ services:
     build:
       context: ./eva-agent-service
       args:
+        NODE_BASE_IMAGE: ${NODE_BASE_IMAGE}
         NODE_BASE_VERSION: ${NODE_BASE_VERSION}
     image: evaself/eva-agent-service:0.3.0
     container_name: evaself-eva-agent-service
@@ -373,6 +375,7 @@ services:
     build:
       context: ./eva-agent-service
       args:
+        NODE_BASE_IMAGE: ${NODE_BASE_IMAGE}
         NODE_BASE_VERSION: ${NODE_BASE_VERSION}
     image: evaself/eva-agent-service:0.3.0
     container_name: evaself-admin-bootstrap
@@ -403,6 +406,7 @@ services:
     build:
       context: ./eva-agent-service
       args:
+        NODE_BASE_IMAGE: ${NODE_BASE_IMAGE}
         NODE_BASE_VERSION: ${NODE_BASE_VERSION}
     image: evaself/eva-agent-service:0.3.0
     container_name: evaself-admin-api
@@ -468,6 +472,7 @@ services:
       context: ./eva-agent-service
       target: updater
       args:
+        NODE_BASE_IMAGE: ${NODE_BASE_IMAGE}
         NODE_BASE_VERSION: ${NODE_BASE_VERSION}
         DOCKER_CLI_IMAGE: ${DOCKER_CLI_IMAGE}
         DOCKER_CLI_VERSION: ${DOCKER_CLI_VERSION}
@@ -503,6 +508,7 @@ services:
     build:
       context: ./eva-agent-service
       args:
+        NODE_BASE_IMAGE: ${NODE_BASE_IMAGE}
         NODE_BASE_VERSION: ${NODE_BASE_VERSION}
     image: evaself/eva-agent-service:0.3.0
     container_name: evaself-health-worker
@@ -549,6 +555,7 @@ services:
     build:
       context: ./eva-agent-service
       args:
+        NODE_BASE_IMAGE: ${NODE_BASE_IMAGE}
         NODE_BASE_VERSION: ${NODE_BASE_VERSION}
     image: evaself/eva-agent-service:0.3.0
     container_name: evaself-llm-router
@@ -635,6 +642,7 @@ services:
     build:
       context: ./media-service
       args:
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE}
         PYTHON_BASE_VERSION: ${PYTHON_BASE_VERSION}
     image: evaself/media-service:0.1.0
     container_name: evaself-media-service

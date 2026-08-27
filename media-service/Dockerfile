@@ -1,5 +1,6 @@
+ARG PYTHON_BASE_IMAGE=python
 ARG PYTHON_BASE_VERSION=3.12-slim-bookworm
-FROM python:${PYTHON_BASE_VERSION}
+FROM ${PYTHON_BASE_IMAGE}:${PYTHON_BASE_VERSION}
 
 # ---------------------------------------------------------------------
 # Media service — ffmpeg + ASR/TTS glue for Eva.

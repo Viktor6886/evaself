@@ -1,3 +1,4 @@
+ARG NODE_BASE_IMAGE=node
 ARG NODE_BASE_VERSION=22.22-bookworm-slim
 ARG DOCKER_CLI_IMAGE=docker
 ARG DOCKER_CLI_VERSION=28.5.2-cli
@@ -7,7 +8,7 @@ FROM ${DOCKER_CLI_IMAGE}:${DOCKER_CLI_VERSION} AS docker-cli
 # ---------------------------------------------------------------------
 # Build stage: install everything, compile TypeScript, run the tests.
 # ---------------------------------------------------------------------
-FROM node:${NODE_BASE_VERSION} AS build
+FROM ${NODE_BASE_IMAGE}:${NODE_BASE_VERSION} AS build
 
 WORKDIR /app
 ENV NODE_ENV=development
@@ -24,7 +25,17 @@ COPY src ./src
 COPY test ./test
 COPY assets ./assets
 
-RUN npm run build && node --test --experimental-strip-types test/*.test.ts
+# Репортёр `spec`, а не умолчательный `tap`.
+#
+# Сборка образа гоняет весь набор, и упавший тест обрывает `make update`.
+# При `tap` его имя тонет среди тысяч строк вывода: и в терминале
+# оператора, и в логе CI, который отдаётся усечённым с конца, — видно
+# только «# fail 1», а какой именно тест упал, узнать неоткуда.
+#
+# `spec` печатает в конце блок «failing tests» с именами. Проверка от
+# этого не слабеет: падает и останавливает сборку она ровно так же.
+RUN npm run build \
+ && node --test --test-reporter=spec --experimental-strip-types test/*.test.ts
 
 # Drop dev dependencies from the tree that ships.
 RUN npm prune --omit=dev
@@ -32,7 +43,7 @@ RUN npm prune --omit=dev
 # ---------------------------------------------------------------------
 # Runtime stage
 # ---------------------------------------------------------------------
-FROM node:${NODE_BASE_VERSION} AS runtime
+FROM ${NODE_BASE_IMAGE}:${NODE_BASE_VERSION} AS runtime
 
 # The Agent SDK requires Node >= 22.19.
 ENV NODE_ENV=production \
