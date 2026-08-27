@@ -145,3 +145,63 @@ describe("пароль архива backup", () => {
     assert.equal(left, "", "пароль не должен оставаться в поле формы");
   });
 });
+
+/**
+ * Боты Евы в разделе безопасности.
+ *
+ * Токен Telegram — секрет, и правило то же, что у остальных: наружу он
+ * не выходит. Проверяется и это, и то, что переезд на другого бота не
+ * случается от одного касания: он меняет, кому пишут люди.
+ */
+describe("боты Telegram", () => {
+  const TOKENS = {
+    limit: 5,
+    tokens: [
+      { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", label: "рабочий", bot_username: "eva_bot",
+        is_active: true, created_at: "2026-08-01T10:00:00Z", activated_at: "2026-08-01T10:00:00Z" },
+      { id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", label: "запасной", bot_username: "eva_spare_bot",
+        is_active: false, created_at: "2026-08-02T10:00:00Z", activated_at: null },
+    ],
+  };
+  let panel;
+  after(async () => await panel?.close());
+
+  test("список показывает бота по метке и @username, но не токен", async () => {
+    panel = await openPanel({ routes: { ...ROUTES, "/telegram/tokens": TOKENS } });
+    await panel.page.evaluate(() => openPage("security"));
+    await panel.page.waitForFunction(
+      () => document.querySelectorAll("#telegram-tokens-list [data-telegram-token]").length > 0);
+
+    const card = await panel.page.textContent("#telegram-tokens-card");
+    assert.match(card, /рабочий/);
+    assert.match(card, /@eva_bot/);
+    assert.match(card, /активен/);
+    assert.match(card, /запасной/);
+
+    // У активного нет ни «сделать активным», ни «удалить»: первое
+    // бессмысленно, второе оставило бы Еву без токена.
+    const actions = await panel.page.$$eval("[data-telegram-action]",
+      (nodes) => nodes.map((node) => `${node.dataset.telegramAction}:${node.dataset.telegramId}`));
+    assert.deepEqual(actions.sort(), [
+      "activate:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      "remove:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    ]);
+  });
+
+  test("переезд на другого бота требует подтверждения словом", async () => {
+    const before = panel.requests.length;
+    await panel.page.click('[data-telegram-action="activate"]');
+    await panel.page.waitForFunction(() => !document.querySelector("#confirm-dialog")?.hidden);
+
+    const dialog = await panel.page.textContent("#confirm-dialog");
+    // Человеку сказано главное: люди прежнего бота сами не перейдут.
+    assert.match(dialog, /eva_spare_bot/);
+    assert.match(dialog, /начать с ним диалог/);
+    assert.match(dialog, /перезапуск/i);
+    // До подтверждения наружу не ушло ни одного запроса.
+    assert.equal(
+      panel.requests.slice(before).filter((item) => item.method === "POST").length, 0,
+      "переезд не должен случаться от одного касания",
+    );
+  });
+});

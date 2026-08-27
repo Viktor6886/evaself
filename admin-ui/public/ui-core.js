@@ -26,6 +26,7 @@ const state = {
   router: null,
   settingProfiles: [],
   secrets: [],
+  telegramTokens: [],
   showAllSecrets: false,
   users: [],
   currentUser: null,

@@ -593,6 +593,25 @@
             </form>
           </section>
 
+          <!-- Боты Евы. Токен Telegram — не взаимозаменяемый ключ, а
+               личность бота: у каждого свой @username, свои диалоги и
+               свой вебхук. Поэтому переключение здесь называется
+               переездом и требует подтверждения. -->
+          <section class="card" id="telegram-tokens-card">
+            <div class="section-heading">
+              <div>
+                <h3>Бот Telegram</h3>
+                <p class="block-caption">До пяти сохранённых ботов, активен один. При переключении вебхук снимается у прежнего и ставится новому — вручную ничего делать не нужно. Сами токены не показываются никогда: бот узнаётся по метке и @username.</p>
+              </div>
+            </div>
+            <div id="telegram-tokens-list" class="compact-list"></div>
+            <form id="telegram-token-form" class="provider-form">
+              <label class="span-2">Метка<input name="label" maxlength="60" required placeholder="Например: рабочий бот"><small>По ней вы отличите его от остальных</small></label>
+              <label class="span-2">Токен от BotFather<input name="token" type="password" autocomplete="new-password" required placeholder="123456:ABC-DEF..."><small>Проверяется у Telegram до сохранения: опечатка не попадёт в базу</small></label>
+              <div class="form-actions span-2"><button class="button secondary" type="submit">Сохранить бота</button></div>
+            </form>
+          </section>
+
           <div class="section-heading">
             <div>
               <h3>Системные ключи</h3>

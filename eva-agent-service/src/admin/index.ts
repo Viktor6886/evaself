@@ -26,6 +26,8 @@ import { ToolApprovalService } from "./tool-approvals.js";
 import { McpServerPolicyRepository } from "../tools/mcp.js";
 import { TurnOperationsService } from "./turn-operations.js";
 import { DeleteGuard } from "../letta/delete-guard.js";
+import { createTelegramBotApi } from "./telegram-bot-api.js";
+import { TelegramTokenService } from "./telegram-token-service.js";
 import { SecurityAuditService } from "./security-audit.js";
 import { RetentionService } from "../retention/service.js";
 import { UpdaterClient } from "./updater-client.js";
@@ -145,11 +147,28 @@ async function main(): Promise<void> {
     withSystemScope: async (_reason, work) => await work(),
   }));
 
+  // Боты Евы. Активный токен остаётся в secret_records под прежним
+  // ref — здесь только набор, из которого его выбирают, и переустановка
+  // вебхука при переезде.
+  const telegramTokens = new TelegramTokenService({
+    pool,
+    secrets,
+    // Admin API читает окружение напрямую, как и остальные его службы:
+    // полный Config агента этот процесс не поднимает.
+    api: createTelegramBotApi({
+      baseUrl: process.env.EVA_TELEGRAM_API_BASE_URL ?? "https://api.telegram.org",
+    }),
+    webhookUrl: `https://${process.env.DOMAIN_API ?? ""}/telegram/webhook`,
+    webhookSecret: process.env.EVA_TELEGRAM_WEBHOOK_SECRET ?? "",
+    logger,
+  });
+
   const app = buildAdminServer({
     auth,
     audit,
     config,
     secrets,
+    telegramTokens,
     health,
     operations,
     providers,

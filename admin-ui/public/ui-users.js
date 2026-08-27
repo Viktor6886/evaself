@@ -205,11 +205,103 @@ async function addUserNote(form) {
 async function loadSecrets() {
   if (!["owner", "admin"].includes(state.me.role)) {
     $("#secrets-list").innerHTML = '<article class="secret-card">Для просмотра метаданных секретов нужна роль owner или admin.</article>';
+    $("#telegram-tokens-card").hidden = true;
     return;
   }
   const { payload } = await request("/secrets");
   state.secrets = payload.secrets;
   renderSecrets();
+  await loadTelegramTokens();
+}
+
+/**
+ * Боты Евы.
+ *
+ * Токен Telegram — это личность бота, а не взаимозаменяемый ключ: у
+ * каждого свой @username, свои диалоги и свой вебхук. Поэтому здесь не
+ * ротация, а выбор: сохранённых несколько, активен ровно один.
+ *
+ * Сами токены не показываются никогда — как и остальные секреты, они
+ * write-only. Бот узнаётся по метке и @username, и ни то, ни другое
+ * секретом не является.
+ */
+async function loadTelegramTokens() {
+  const card = $("#telegram-tokens-card");
+  if (!card) return;
+  card.hidden = false;
+  const { payload } = await request("/telegram/tokens").catch(() => ({ payload: null }));
+  if (!payload) {
+    $("#telegram-tokens-list").innerHTML = '<p class="muted">Не удалось получить список ботов.</p>';
+    return;
+  }
+  state.telegramTokens = payload.tokens || [];
+  renderTelegramTokens(payload.limit || 5);
+}
+
+function renderTelegramTokens(limit) {
+  const tokens = state.telegramTokens || [];
+  $("#telegram-tokens-list").innerHTML = tokens.length
+    ? tokens.map((token) => `
+        <article class="failure-row" data-telegram-token="${escapeHtml(token.id)}">
+          <div class="failure-head">
+            <span class="status-dot color-${token.is_active ? "green" : "gray"}"></span>
+            <div class="failure-title">
+              <strong>${escapeHtml(token.label)}</strong>
+              <small>@${escapeHtml(token.bot_username)} · добавлен ${escapeHtml(localDate(token.created_at))}</small>
+            </div>
+            <span class="status-pill state-${token.is_active ? "green" : "gray"}">${token.is_active ? "активен" : "сохранён"}</span>
+          </div>
+          ${token.is_active ? "" : `<div class="provider-route-actions">
+            <button class="button tiny secondary" data-telegram-action="activate" data-telegram-id="${escapeHtml(token.id)}">Сделать активным</button>
+            <button class="button tiny danger-outline" data-telegram-action="remove" data-telegram-id="${escapeHtml(token.id)}">Удалить</button>
+          </div>`}
+        </article>`).join("")
+    : '<p class="muted">Ни одного бота не сохранено. Активный токен при этом может быть задан установщиком — он продолжает работать.</p>';
+  const form = $("#telegram-token-form");
+  // Предел объявлен сервером: форма просто перестаёт предлагать то,
+  // что всё равно будет отвергнуто.
+  if (form) form.hidden = tokens.length >= limit;
+}
+
+async function telegramTokenAction(action, id) {
+  const token = (state.telegramTokens || []).find((item) => item.id === id);
+  if (!token) return;
+  if (action === "remove") {
+    askConfirm({
+      title: `Удалить бота «${token.label}»?`,
+      description: `@${token.bot_username} исчезнет из списка. Сам бот в Telegram останется, но его токен придётся вводить заново.`,
+      action: async () => {
+        await request(`/telegram/tokens/${encodeURIComponent(id)}`, { method: "DELETE" });
+        toast("Бот удалён из списка");
+        await loadTelegramTokens();
+      },
+    });
+    return;
+  }
+  askConfirm({
+    title: `Перевести Еву на @${token.bot_username}?`,
+    description: "Вебхук снимется у прежнего бота и встанет новому. Люди, писавшие прежнему, к новому не перейдут сами:"
+      + " им придётся начать с ним диалог. Чтобы смена вступила в силу, потребуется перезапуск eva-agent-service.",
+    expected: "ПЕРЕЕЗД",
+    action: async () => {
+      const { payload } = await request(`/telegram/tokens/${encodeURIComponent(id)}/activate`, { method: "POST" });
+      toast(`Активен @${token.bot_username}. Перезапустите ${payload.restart_required || "eva-agent-service"}, чтобы смена вступила в силу.`);
+      await loadTelegramTokens();
+    },
+  });
+}
+
+async function saveTelegramToken(form) {
+  await request("/telegram/tokens", {
+    method: "POST",
+    body: JSON.stringify({
+      label: form.elements.label.value.trim(),
+      token: form.elements.token.value.trim(),
+    }),
+  });
+  form.reset();
+  toast("Бот сохранён. Чтобы перевести Еву на него, нажмите «Сделать активным».");
+  await loadTelegramTokens();
 }
 
 /**
@@ -405,3 +497,13 @@ $("#password-form").addEventListener("submit", async (event) => {
   }
 });
 $("#reload-audit").addEventListener("click", () => loadAudit().catch(handleError));
+
+$("#telegram-tokens-list")?.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-telegram-action]");
+  if (!button) return;
+  telegramTokenAction(button.dataset.telegramAction, button.dataset.telegramId).catch(handleError);
+});
+$("#telegram-token-form")?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  saveTelegramToken(event.target).catch(handleError);
+});
