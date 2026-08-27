@@ -618,6 +618,57 @@ test("пустой ответ и повреждённый JSON приводят 
   assert.equal(calls.length, 2);
 });
 
+/**
+ * Пустой ответ у единственного провайдера.
+ *
+ * Так выглядел отказ в Telegram: рассуждающая модель не укладывалась в
+ * бюджет, возвращала пустоту, роутеру некуда было переключаться — и ход
+ * доходил до «не получилось обработать сообщение». Переключение здесь не
+ * лечит ничего: провайдер один. Лечит бюджет.
+ */
+test("пустой ответ повторяется тому же провайдеру с бо́льшим бюджетом", async () => {
+  const budgets = [];
+  const { router, calls } = harness([provider({ id: "a", name: "primary", max_output_tokens: 8192 })], {
+    primary: {
+      complete: (n, req) => {
+        budgets.push(req.max_tokens);
+        // Пустой ответ ровно до тех пор, пока бюджета не хватает.
+        return req.max_tokens < 2048
+          ? Promise.resolve({ ...ok(), content: "" })
+          : Promise.resolve(ok("готово"));
+      },
+      stream: async function* () { throw new Error("не используется"); },
+    },
+  });
+  const result = await router.complete(request({ max_tokens: 256 }));
+
+  assert.equal(result.provider_name, "primary", "переключаться было некуда, и не потребовалось");
+  assert.equal(result.response.content, "готово");
+  assert.equal(budgets[0], 256, "первая попытка идёт с запрошенным бюджетом");
+  assert.ok(budgets[1] >= 2048, `повтор должен получить запас, получил ${budgets[1]}`);
+  assert.equal(calls.length, budgets.length);
+});
+
+test("бюджет наращивается до потолка провайдера и не выше", async () => {
+  const budgets = [];
+  const { router } = harness([provider({ id: "a", name: "primary", max_output_tokens: 1024 })], {
+    primary: {
+      complete: (n, req) => {
+        budgets.push(req.max_tokens);
+        return Promise.resolve({ ...ok(), content: "" });
+      },
+      stream: async function* () { throw new Error("не используется"); },
+    },
+  });
+  await assert.rejects(() => router.complete(request({ max_tokens: 256 })));
+  // Потолок провайдера — предел: просить больше, чем он разрешает,
+  // значит получить HTTP 400 вместо ответа.
+  assert.ok(budgets.every((budget) => budget <= 1024), `вышли за потолок: ${budgets.join()}`);
+  assert.ok(budgets.length > 1, "наращивание не состоялось");
+  // Молчание при полном бюджете остаётся отказом, а не бесконечным циклом.
+  assert.ok(budgets.length < 10, `цикл не сошёлся: ${budgets.length} попыток`);
+});
+
 test("HTTP 400 сначала нормализуется у того же провайдера, а не гонится по цепочке", async () => {
   const p = provider({ id: "a", name: "primary" });
   const b = provider({ id: "b", name: "backup" });

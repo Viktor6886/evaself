@@ -20,7 +20,7 @@ import { buildChain } from "./chain.js";
 import type { ChainEntry } from "./chain.js";
 import { requestedRouteOnly, resolveRoute } from "./routes.js";
 import { LocalRouterLimits, type RouterLimits } from "./limits.js";
-import { estimateTokens, normalizeForProvider, relaxAfterBadRequest, withBackupDirective } from "./normalize.js";
+import { estimateTokens, normalizeForProvider, raiseOutputBudget, relaxAfterBadRequest, withBackupDirective } from "./normalize.js";
 import { costOf, RouterStore, userIdOf } from "./store.js";
 import type {
   LlmRequest,
@@ -423,6 +423,24 @@ export class LlmRouter {
             continue;
           }
           break;
+        }
+        // Пустой ответ при тесном бюджете — не отказ провайдера, а
+        // нехватка места на рассуждение. Повторяем тому же провайдеру с
+        // запасом, как и после HTTP 400: гонять по цепочке запрос,
+        // который никому не удастся выполнить в этих рамках,
+        // бессмысленно, а у человека может быть всего один провайдер —
+        // тогда переключаться просто некуда, и ход уходил в отказ.
+        if (error.reason === "empty_response") {
+          const raised = raiseOutputBudget(request, provider);
+          if (raised) {
+            request = raised;
+            this.logger.info("LLM Router: повтор с увеличенным output budget", {
+              request_id: original.metadata.request_id,
+              provider: provider.name,
+              max_tokens: raised.max_tokens,
+            });
+            continue;
+          }
         }
         if (error.reason === "rate_limited" && error.retryAfterMs !== null) {
           if (error.retryAfterMs > (this.options.maxRetryAfterMs ?? DEFAULT_OPTIONS.maxRetryAfterMs!)) break;

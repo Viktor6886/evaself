@@ -983,8 +983,14 @@ dialog .eyebrow { margin-top: 0; }
 .provider-route-rank { color: var(--muted); font-size: 11px; white-space: nowrap; }
 .provider-route-rank.is-primary { color: var(--green); font-weight: 800; }
 /* Кнопки маршрута переносятся на свою строку: на узком экране им не
-   хватает места рядом с названием, и они наезжали на позицию. */
+   хватает места рядом с названием, и они наезжали на позицию.
+
+   Растягивать их по ширине нельзя. Маршрутов у провайдера до восьми, и
+   кнопка во всю строку превращала каждый в блок высотой в три строки —
+   карточка уходила на несколько экранов, а «Убрать» выглядело главным
+   действием раздела. Кнопка занимает ровно свой текст. */
 .provider-route-actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px; }
+.provider-route-actions .button { flex: 0 0 auto; font-size: 11px; }
 .provider-route-add { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
 .provider-route-add select { min-width: 0; }
 
@@ -1028,9 +1034,11 @@ dialog .eyebrow { margin-top: 0; }
   .route-item > summary { grid-template-columns: minmax(0, 1fr) auto; }
   .route-item .route-head-model { grid-column: 1 / -1; }
   .provider-route-add { grid-template-columns: minmax(0, 1fr); }
-  .provider-route-add .button { min-height: 40px; }
-  /* Кнопки маршрута — полноразмерные цели касания, а не 20px строчки. */
-  .provider-route-actions .button { flex: 1 1 auto; min-height: 34px; }
+  /* 44 пикселя — цель касания, принятая в панели и проверяемая тестом.
+     По высоте кнопка маршрута полноразмерная, по ширине — ровно текст:
+     палец не мышь, а восемь кнопок во всю строку не помещаются в экран. */
+  .provider-route-add .button { min-height: 44px; }
+  .provider-route-actions .button { min-height: 44px; padding: 8px 12px; }
   .provider-card .card-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .provider-card .card-actions .card-more { grid-column: 1 / -1; }
 }

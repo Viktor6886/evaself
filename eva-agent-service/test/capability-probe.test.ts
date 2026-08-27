@@ -104,7 +104,12 @@ test("совместимая модель проходит все заявлен
   assert.match(JSON.stringify(visionRequest), /image_url.*data:image\/png;base64/);
   for (const body of seen) {
     assert.equal(body.temperature, 0, "проба должна быть детерминированной");
-    assert.ok(Number(body.max_tokens) <= 64, "проба должна быть дешёвой");
+    // Дешевизна пробы — это отсутствие лишних попыток, а не крошечный
+    // потолок: `max_tokens` ограничивает, а не заказывает, и на «ready»
+    // модель потратит те же несколько токенов при любом пределе. Все
+    // проверки здесь проходят с первой попытки, поэтому ни один запрос
+    // не должен выйти за стартовый бюджет.
+    assert.ok(Number(body.max_tokens) <= 2_048, "проба не должна наращивать бюджет без нужды");
   }
   assert.doesNotMatch(JSON.stringify(seen), /Сергей|Бореалис|EVA_RUNTIME_CONTEXT|USER_MESSAGE/);
 });
@@ -208,10 +213,12 @@ test("reasoning-модель: служебные поля возвращаютс
   assert.equal(result.warnings, "");
 });
 
-test("OpenRouter reasoning+tools: length на 1024 не является несовместимостью", async () => {
+test("OpenRouter reasoning+tools: length на стартовом бюджете не является несовместимостью", async () => {
   const { fetcher, seen } = provider({
     toolCall: REASONING_TOOL_CALL,
-    toolLoop: (body) => Number(body.max_tokens) <= 1_024
+    // Модель не укладывается в стартовый бюджет цикла инструмента и
+    // отдаёт пустоту с finish_reason=length. Это теснота, а не поломка.
+    toolLoop: (body) => Number(body.max_tokens) <= 2_048
       ? json({
           choices: [{
             message: { content: "", reasoning: "opaque-progress" },
@@ -225,8 +232,8 @@ test("OpenRouter reasoning+tools: length на 1024 не является нес�
   assert.equal(result.ok, true, result.message);
   assert.equal(statusOf(result, "tool_result_loop"), "ok");
   const loops = loopBodies(seen);
-  assert.ok(loops.some((body) => body.max_tokens === 1_024), "регрессия воспроизведена на старой границе");
-  assert.ok(loops.some((body) => Number(body.max_tokens) > 1_024), "probe использовал допустимый бюджет модели");
+  assert.ok(loops.some((body) => body.max_tokens === 2_048), "регрессия воспроизведена на стартовом бюджете");
+  assert.ok(loops.some((body) => Number(body.max_tokens) > 2_048), "probe использовал допустимый бюджет модели");
   const finalMessages = loops.at(-1)?.messages as Array<{ role?: string; content?: string }>;
   assert.match(finalMessages.at(-1)?.content ?? "", /FINAL_OK/, "final answer требуется явно");
 });
@@ -297,7 +304,7 @@ test("проба идёт в конфигурации провайдера, но
     assert.equal(body.api_key, undefined);
     assert.equal(body.temperature, 0, "проба остаётся детерминированной");
     assert.equal(body.max_tokens, undefined);
-    assert.ok(Number(body.max_completion_tokens) <= 64, "проба остаётся дешёвой");
+    assert.ok(Number(body.max_completion_tokens) <= 2_048, "проба не наращивает бюджет без нужды");
   }
   assert.doesNotMatch(JSON.stringify(seen), /sk-should-not-leak/);
 });
@@ -537,7 +544,7 @@ test("модели, которой не хватило бюджета на от�
   const { fetcher, seen } = provider({
     toolLoop: (body) => {
       const budget = Number(body.max_tokens);
-      if (budget < 1_024) {
+      if (budget < 4_096) {
         short.push("короткий");
         return EMPTY_BY_BUDGET();
       }
@@ -551,14 +558,46 @@ test("модели, которой не хватило бюджета на от�
   assert.equal(short.length > 0, true, "короткая попытка должна была случиться первой");
   // Повтор идёт с тем же ходом, только с большим бюджетом: иначе
   // проверялось бы что-то другое.
-  const retry = seen.find((body) => Number(body.max_tokens) >= 1_024);
+  const retry = seen.find((body) => Number(body.max_tokens) >= 4_096);
   assert.ok(retry, "повтор с увеличенным бюджетом не состоялся");
   assert.ok(
     (retry!.messages as Array<{ role: string }>).some((message) => message.role === "tool"),
     "повторяется тот же цикл с результатом инструмента",
   );
   const detail = result.checks.find((entry) => entry.name === "tool_result_loop")?.detail ?? "";
-  assert.match(detail, /1024/, "оператору видно, что ответ пришёл только с большим бюджетом");
+  assert.match(detail, /8192/, "оператору видно, что ответ пришёл только с большим бюджетом");
+});
+
+/**
+ * Пустой ответ с finish_reason=stop.
+ *
+ * Так ведут себя прокси перед рассуждающими моделями: рассуждение
+ * съедает весь бюджет, ответ приходит пустым, но завершение объявляется
+ * штатным — «length» провайдер не говорит. Прежнее условие выхода из
+ * цикла проверяло именно `finish_reason !== "length"` и обрывало
+ * наращивание ровно здесь: модель объявлялась несовместимой, ни разу не
+ * получив достаточного бюджета, и теряла все маршруты.
+ */
+const EMPTY_BUT_STOPPED = () => json({
+  choices: [{ message: { content: "" }, finish_reason: "stop" }],
+});
+
+test("пустой ответ со штатным завершением тоже наращивает бюджет", async () => {
+  const budgets: number[] = [];
+  const { fetcher } = provider({
+    completion: (body) => {
+      const budget = Number(body.max_tokens);
+      budgets.push(budget);
+      return budget < 4_096 ? EMPTY_BUT_STOPPED() : json(CHAT("ready"));
+    },
+  });
+  const result = await probeModelCapabilities(INPUT, fetcher);
+
+  assert.equal(statusOf(result, "completion"), "ok", result.message);
+  assert.equal(result.ok, true, result.message);
+  // Наращивание состоялось: первая попытка не была последней.
+  assert.ok(budgets.length > 1, "проба сдалась на первой же попытке");
+  assert.ok(budgets.at(-1)! >= 4_096, "до достаточного бюджета проба не дошла");
 });
 
 test("молчание и при большом бюджете остаётся отказом", async () => {

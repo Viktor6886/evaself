@@ -41,8 +41,60 @@ const CONFIG = {
   secret: { configured: true }, keys: { total: 3, usable: 2, exhausted: 1, invalid: 0 },
 };
 
+// Провайдер приходит одной записью из /llm/state: конфигурация,
+// возможности, маршруты, breaker и расход вместе. Имя модели длинное,
+// а сообщение проверки — в три строки: ровно то, что и вылезало.
+const PROVIDER = {
+  id: "p1", name: "Openrouter2", protocol: "openai-compatible",
+  base_url: "https://openrouter.ai/api/v1", model: "minimax/minimax-m3:free",
+  context_window: 1_000_000, is_active: true, enabled: true, api_key_configured: true,
+  supports_tools: true, supports_json: true, supports_vision: false, supports_streaming: true,
+  breaker_state: "closed", pinned_out: false,
+  // Имена — те же, что отдаёт v_llm_provider_health. Значения нарочно
+  // крупные: пятизначная задержка и двузначный расход и растягивали
+  // карточку за край экрана.
+  requests_1h: 1284, failures_1h: 17, p95_latency_ms: 12480,
+  spent_today_micro: 1234560, spent_month_micro: 98765432,
+  daily_budget_micro: 2000000, monthly_budget_micro: 150000000,
+  priority: 10, last_error_code: "429", probe_after: "2026-08-25T21:00:00Z",
+  last_checked_at: "2026-08-25T20:46:18Z",
+  last_check_ok: true, last_check_status: "limited",
+  last_check_message: "Подключение работает; получено моделей: 418. "
+    + "Модель работает с ограничениями: vision: пустой ответ на изображение; "
+    + "finish_reason=stop, допустимый output budget=4096.",
+  last_models: null, additional_parameters: {},
+  status: {
+    code: "limited", label: "работает с ограничениями", color: "yellow",
+    detail: { check: "limited", router: "closed" },
+  },
+  routes: [{ code: "chat", title: "Основная модель", position: 0 }],
+  single_selected: false,
+  created_at: "2026-08-01T00:00:00Z", updated_at: "2026-08-25T20:46:18Z",
+};
+const PROVIDERS = { providers: [PROVIDER] };
+const STATE = {
+  providers: [PROVIDER],
+  routes: [
+    { code: "chat", title: "Основная модель", min_context_window: 32768, rotation_enabled: true,
+      chain: [{ provider_id: "p1", name: "Openrouter2", model: "minimax/minimax-m3:free", protocol: "openai-compatible", enabled: true }] },
+    { code: "vision", title: "Изображения", min_context_window: 8192, rotation_enabled: true, chain: [] },
+    { code: "deep", title: "Мощная модель", min_context_window: 32768, rotation_enabled: true, chain: [] },
+  ],
+  // Один и тот же отказ десять раз — ровно то, что и было в панели.
+  recent_failures: Array.from({ length: 10 }, (_, index) => ({
+    provider: "Openrouter2", switch_reason: "rate_limited", http_status: 429,
+    started_at: `2026-08-25T2${index % 2}:01:42Z`,
+    error_summary: "лимит запросов провайдера: Provider returned error",
+  })),
+  routing_settings: { mode: "adaptive", updated_at: "2026-08-01T00:00:00Z" },
+};
+
 const ROUTES = {
   "/overview": OVERVIEW,
+  // Без состояния роутера раздел ИИ рисует пустую заглушку, и проверка
+  // целей касания смотрит на страницу без единой кнопки маршрута.
+  "/llm/state": STATE,
+  "/providers": PROVIDERS,
   "/stt/provider-schemas": { providers: [] },
   "/stt/configs": { configs: [CONFIG] },
   "/stt/routes": {
@@ -383,7 +435,10 @@ describe("панель на телефоне", () => {
 
   test("на телефоне до каждой кнопки раздела можно дотянуться", async () => {
     const panel = await open({ routes: ROUTES });
-    for (const name of ["overview", "operations", "stt"]) {
+    // Раздел ИИ сюда добавлен после того, как кнопки маршрутов в карточке
+    // провайдера оказались втрое мельче цели касания: страница, на которую
+    // жалуются с телефона, обязана проверяться наравне с остальными.
+    for (const name of ["overview", "operations", "stt", "ai"]) {
       await panel.page.evaluate((page) => openPage(page), name);
       await panel.page.waitForTimeout(120);
       const small = await smallTapTargets(panel.page);
@@ -447,54 +502,6 @@ describe("панель на телефоне", () => {
  * широком экране — только измерением.
  */
 describe("раздел ИИ на телефоне", () => {
-  // Провайдер приходит одной записью из /llm/state: конфигурация,
-  // возможности, маршруты, breaker и расход вместе. Имя модели длинное,
-  // а сообщение проверки — в три строки: ровно то, что и вылезало.
-  const PROVIDER = {
-    id: "p1", name: "Openrouter2", protocol: "openai-compatible",
-    base_url: "https://openrouter.ai/api/v1", model: "minimax/minimax-m3:free",
-    context_window: 1_000_000, is_active: true, enabled: true, api_key_configured: true,
-    supports_tools: true, supports_json: true, supports_vision: false, supports_streaming: true,
-    breaker_state: "closed", pinned_out: false,
-    // Имена — те же, что отдаёт v_llm_provider_health. Значения нарочно
-    // крупные: пятизначная задержка и двузначный расход и растягивали
-    // карточку за край экрана.
-    requests_1h: 1284, failures_1h: 17, p95_latency_ms: 12480,
-    spent_today_micro: 1234560, spent_month_micro: 98765432,
-    daily_budget_micro: 2000000, monthly_budget_micro: 150000000,
-    priority: 10, last_error_code: "429", probe_after: "2026-08-25T21:00:00Z",
-    last_checked_at: "2026-08-25T20:46:18Z",
-    last_check_ok: true, last_check_status: "limited",
-    last_check_message: "Подключение работает; получено моделей: 418. "
-      + "Модель работает с ограничениями: vision: пустой ответ на изображение; "
-      + "finish_reason=stop, допустимый output budget=4096.",
-    last_models: null, additional_parameters: {},
-    status: {
-      code: "limited", label: "работает с ограничениями", color: "yellow",
-      detail: { check: "limited", router: "closed" },
-    },
-    routes: [{ code: "chat", title: "Основная модель", position: 0 }],
-    single_selected: false,
-    created_at: "2026-08-01T00:00:00Z", updated_at: "2026-08-25T20:46:18Z",
-  };
-  const PROVIDERS = { providers: [PROVIDER] };
-  const STATE = {
-    providers: [PROVIDER],
-    routes: [
-      { code: "chat", title: "Основная модель", min_context_window: 32768, rotation_enabled: true,
-        chain: [{ provider_id: "p1", name: "Openrouter2", model: "minimax/minimax-m3:free", protocol: "openai-compatible", enabled: true }] },
-      { code: "vision", title: "Изображения", min_context_window: 8192, rotation_enabled: true, chain: [] },
-      { code: "deep", title: "Мощная модель", min_context_window: 32768, rotation_enabled: true, chain: [] },
-    ],
-    // Один и тот же отказ десять раз — ровно то, что и было в панели.
-    recent_failures: Array.from({ length: 10 }, (_, index) => ({
-      provider: "Openrouter2", switch_reason: "rate_limited", http_status: 429,
-      started_at: `2026-08-25T2${index % 2}:01:42Z`,
-      error_summary: "лимит запросов провайдера: Provider returned error",
-    })),
-    routing_settings: { mode: "adaptive", updated_at: "2026-08-01T00:00:00Z" },
-  };
-
   let panel;
   after(async () => await panel?.close());
 
