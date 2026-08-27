@@ -298,7 +298,15 @@ function telegramTokenAction(action, id) {
       + " перезапуск eva-agent-service.",
     action: async () => {
       const { payload } = await request(`/telegram/tokens/${encodeURIComponent(id)}/activate`, { method: "POST" });
-      toast(`Активен @${token.bot_username}. Перезапустите ${payload.restart_required || "eva-agent-service"}, чтобы смена вступила в силу.`);
+      // Переезд состоялся в любом случае: вебхук переставлен, выбор
+      // записан. Разница в том, дошёл ли токен до работающего сервиса —
+      // и если нет, человеку нужно знать, что делать руками, иначе он
+      // увидит бота, который принимает сообщения, но отвечает прежним.
+      toast(payload.applied_live
+        ? `Активен @${token.bot_username}. Сервис перезапущен, смена уже действует.`
+        : `Активен @${token.bot_username}, но применить не удалось: ${payload.apply_error || "сервис операций недоступен"}.`
+          + ` Пропишите токен в .env и перезапустите ${payload.restart_required || "eva-agent-service"}.`,
+        !payload.applied_live);
       await loadTelegramTokens();
     },
   });

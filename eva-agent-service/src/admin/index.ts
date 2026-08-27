@@ -161,6 +161,17 @@ async function main(): Promise<void> {
     }),
     webhookUrl: `https://${process.env.DOMAIN_API ?? ""}/telegram/webhook`,
     webhookSecret: process.env.EVA_TELEGRAM_WEBHOOK_SECRET ?? "",
+    // Выбранный токен доносится до `.env` и сервис перечитывает
+    // окружение: secret_records ему недоступны — мастер-ключ монтируется
+    // только административным контейнерам.
+    runtime: {
+      setToken: async (token) => {
+        await new UpdaterClient().call("set_telegram_token", { token });
+      },
+      restart: async () => {
+        await new UpdaterClient().call("restart_service", { service: "eva-agent-service" }, 120_000);
+      },
+    },
     logger,
   });
 

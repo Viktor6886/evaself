@@ -51,6 +51,7 @@ const logger = { info() {}, warn() {} };
 function service(overrides: Record<string, unknown>) {
   return new TelegramTokenService({
     pool: overrides.pool, secrets: overrides.secrets, api: overrides.api,
+    runtime: overrides.runtime,
     webhookUrl: "https://api.eva.test/telegram/webhook",
     webhookSecret: "hook-secret",
     logger,
@@ -183,6 +184,83 @@ test("неудача при снятии вебхука у прежнего пе
   const result = await svc.activate(ROW().id, null);
   assert.equal(result.token.is_active, true);
   assert.equal(written.length, 1);
+});
+
+/**
+ * Переезд обязан дойти до работающего сервиса.
+ *
+ * secret_records читают только административные контейнеры: мастер-ключ
+ * монтируется им, а eva-agent-service берёт токен из окружения при
+ * старте. Без записи в `.env` переезд ломался ровно посередине — вебхук
+ * уже стоял на новом боте и входящие приходили ему, а ответы уходили
+ * прежним токеном. Со стороны выглядело так, будто новый бот пересылает
+ * сообщения старому.
+ */
+test("выбранный токен доезжает до .env, и сервис перечитывает окружение", async () => {
+  const order: string[] = [];
+  let written: string | null = null;
+  const svc = service({
+    pool: pool({
+      row: [ROW()],
+      previous: [{ ...ENVELOPE, auth_tag: ENVELOPE.authTag, bot_username: "старый_bot" }],
+      activated: [ROW({ is_active: true })],
+    }),
+    secrets: secrets([]),
+    api: {
+      identify: async () => ({ id: 7, username: "eva_bot" }),
+      setWebhook: async () => { order.push("setWebhook"); },
+      deleteWebhook: async () => { order.push("deleteWebhook"); },
+    },
+    runtime: {
+      setToken: async (token: string) => { order.push("env"); written = token; },
+      restart: async () => { order.push("restart"); },
+    },
+  });
+
+  const result = await svc.activate(ROW().id, null);
+  assert.equal(written, "TOKEN-VALUE", "в .env должен уехать сам токен");
+  // Вебхук первым: откажет Telegram — ничего ещё не изменилось.
+  // Перезапуск после записи: иначе сервис перечитал бы прежний токен.
+  assert.deepEqual(order, ["setWebhook", "env", "restart", "deleteWebhook"]);
+  assert.equal(result.applied_live, true);
+  assert.equal(result.apply_error, null);
+});
+
+test("недоступный сервис операций не отменяет переезд, но и не молчит", async () => {
+  const svc = service({
+    pool: pool({ row: [ROW()], activated: [ROW({ is_active: true })] }),
+    secrets: secrets([]),
+    api: {
+      identify: async () => ({ id: 7, username: "eva_bot" }),
+      setWebhook: async () => {}, deleteWebhook: async () => {},
+    },
+    runtime: {
+      setToken: async () => { throw new Error("socket недоступен"); },
+      restart: async () => { throw new Error("не должен вызываться"); },
+    },
+  });
+
+  const result = await svc.activate(ROW().id, null);
+  // Выбор записан и вебхук переставлен — откатывать это поздно и незачем.
+  assert.equal(result.token.is_active, true);
+  // Но человеку сказано, что руками осталось сделать.
+  assert.equal(result.applied_live, false);
+  assert.match(result.apply_error ?? "", /socket недоступен/u);
+});
+
+test("без сервиса операций переезд честно сообщает, что не применён", async () => {
+  const svc = service({
+    pool: pool({ row: [ROW()], activated: [ROW({ is_active: true })] }),
+    secrets: secrets([]),
+    api: {
+      identify: async () => ({ id: 7, username: "eva_bot" }),
+      setWebhook: async () => {}, deleteWebhook: async () => {},
+    },
+    // runtime не передан вовсе.
+  });
+  const result = await svc.activate(ROW().id, null);
+  assert.equal(result.applied_live, false);
+  assert.match(result.apply_error ?? "", /недоступен/u);
 });
 
 test("активного бота удалить нельзя", async () => {

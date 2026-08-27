@@ -45,10 +45,20 @@ export interface TelegramBotApi {
   deleteWebhook(token: string): Promise<void>;
 }
 
+/** Что нужно, чтобы выбранный токен доехал до работающего сервиса. */
+export interface TelegramRuntimeApply {
+  /** Записать токен в `.env` установки. */
+  setToken(token: string): Promise<void>;
+  /** Перечитать окружение: токен читается при старте. */
+  restart(): Promise<void>;
+}
+
 export interface TelegramTokenServiceOptions {
   pool: pg.Pool;
   secrets: SecretStore;
   api: TelegramBotApi;
+  /** Отсутствует — переезд сохранится, но до рантайма не дойдёт. */
+  runtime?: TelegramRuntimeApply;
   /** Адрес, на который Telegram шлёт обновления. */
   webhookUrl: string;
   /** Заголовок, которым webhook отличает Telegram от постороннего. */
@@ -126,10 +136,18 @@ export class TelegramTokenService {
    *     всё равно больше не наш, и его неудача не повод откатывать
    *     переезд.
    */
-  async activate(id: string, actorId: string | null): Promise<{ token: TelegramBotTokenView; restart_required: string }> {
+  async activate(id: string, actorId: string | null): Promise<{
+    token: TelegramBotTokenView;
+    restart_required: string;
+    applied_live: boolean;
+    apply_error: string | null;
+  }> {
     const row = await this.row(id);
     if (row.is_active === true) {
-      return { token: toView(row), restart_required: "eva-agent-service" };
+      return {
+        token: toView(row), restart_required: "eva-agent-service",
+        applied_live: true, apply_error: null,
+      };
     }
     const token = this.options.secrets.open({
       ciphertext: row.ciphertext as Buffer,
@@ -139,6 +157,29 @@ export class TelegramTokenService {
 
     await this.options.api.setWebhook(token, this.options.webhookUrl, this.options.webhookSecret);
     await this.options.secrets.put(TOKEN_SECRET_REF, token, ["telegram-runtime"], actorId);
+
+    // Токен обязан дойти до `.env`.
+    //
+    // secret_records читают только административные контейнеры: мастер-ключ
+    // монтируется им, а eva-agent-service берёт токен из окружения при
+    // старте. Без этой записи переезд выглядел исправным и ломался
+    // ровно посередине: вебхук уже стоял на новом боте и входящие
+    // приходили ему, а ответы продолжали уходить прежним токеном — со
+    // стороны так, будто новый бот пересылает сообщения старому.
+    let appliedLive = false;
+    let applyError: string | null = null;
+    try {
+      if (!this.options.runtime) throw new Error("сервис операций недоступен");
+      await this.options.runtime.setToken(token);
+      await this.options.runtime.restart();
+      appliedLive = true;
+    } catch (error) {
+      applyError = error instanceof Error ? error.message : String(error);
+      this.options.logger.warn("Токен выбран, но не доехал до сервиса", {
+        // Самого токена в журнале нет и быть не может.
+        message: applyError,
+      });
+    }
 
     const previous = await this.options.pool.query<Record<string, unknown>>(
       "SELECT ciphertext, nonce, auth_tag, bot_username FROM telegram_bot_tokens WHERE is_active",
@@ -174,7 +215,12 @@ export class TelegramTokenService {
       bot: rows[0]?.bot_username,
       // Токена в журнале нет и быть не может.
     });
-    return { token: toView(rows[0]!), restart_required: "eva-agent-service" };
+    return {
+      token: toView(rows[0]!),
+      restart_required: "eva-agent-service",
+      applied_live: appliedLive,
+      apply_error: applyError,
+    };
   }
 
   async remove(id: string): Promise<void> {

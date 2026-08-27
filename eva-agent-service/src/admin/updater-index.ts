@@ -276,6 +276,54 @@ async function serviceLogs(service: unknown, rawTail: unknown) {
  * Значение сюда приходит от admin-api и дальше никуда не уходит: ни в
  * ответ, ни в журнал.
  */
+/**
+ * Токен бота Евы в `.env`.
+ *
+ * Панель хранит выбранный токен в secret_records, но рантайм читает его
+ * из окружения: мастер-ключ секретов монтируется только
+ * административным контейнерам, у eva-agent-service его нет и не должно
+ * быть. Поэтому переезд на другого бота обязан дойти до `.env` — иначе
+ * вебхук уже переставлен на новый бот, входящие приходят ему, а ответы
+ * продолжают уходить прежним токеном. Со стороны это выглядит так, будто
+ * новый бот пересылает сообщения старому.
+ *
+ * Правка ровно того же вида, что делает set_env установщика: строка с
+ * этим ключом заменяется целиком, остальные не трогаются, а если ключа
+ * не было — он дописывается.
+ */
+async function setTelegramToken(value: unknown) {
+  const token = typeof value === "string" ? value.trim() : "";
+  if (!token) throw new Error("токен бота не может быть пустым");
+  // Перевод строки разорвал бы .env на две записи, и вторая половина
+  // стала бы мусорной переменной окружения.
+  if (/[\r\n]/.test(token)) throw new Error("токен бота не должен содержать перевод строки");
+
+  const file = path.join(projectDir, ".env");
+  let lines: string[] = [];
+  try {
+    lines = (await readFile(file, "utf8")).split("\n");
+  } catch {
+    throw new Error(".env не найден: установка не настроена");
+  }
+  const key = "EVA_TELEGRAM_BOT_TOKEN";
+  let replaced = false;
+  const out = lines.map((line) => {
+    if (line.split("=", 1)[0]?.trim() !== key) return line;
+    replaced = true;
+    return `${key}=${token}`;
+  });
+  if (!replaced) {
+    // Пустая последняя строка — обычный хвост файла; дописываем в неё,
+    // чтобы не плодить пустых строк при каждой смене бота.
+    if (out.length && out[out.length - 1] === "") out[out.length - 1] = `${key}=${token}`;
+    else out.push(`${key}=${token}`);
+    out.push("");
+  }
+  await writeFile(file, out.join("\n"), { encoding: "utf8", mode: 0o600 });
+  await chmod(file, 0o600);
+  return { configured: true, replaced };
+}
+
 async function setBackupPassword(value: unknown) {
   const password = typeof value === "string" ? value : "";
   const file = process.env.EVA_BACKUP_PASSWORD_FILE
@@ -496,6 +544,21 @@ async function handoffUpdate() {
   return { scheduled: true };
 }
 
+/**
+ * Разрешённый контракт updater'а.
+ *
+ * Список объявлен явно и служит заодно счётчиком в стартовой строке:
+ * прежде число писалось руками и разошлось бы с действительностью на
+ * первой же новой команде — ровно так же, как «ровно девять квот» в проверке
+ * сида описывало не правило, а состояние на тот день.
+ */
+const UPDATER_COMMANDS = [
+  "get_service_status", "start_service", "stop_service", "restart_service",
+  "get_service_logs", "set_backup_password", "set_telegram_token", "host_metrics",
+  "list_backups", "create_backup", "get_update_info", "check_update",
+  "pull_and_up", "handoff_update",
+] as const;
+
 async function dispatch(command: string, params: Record<string, unknown>) {
   switch (command) {
     case "get_service_status":
@@ -510,6 +573,8 @@ async function dispatch(command: string, params: Record<string, unknown>) {
       return await serviceLogs(params.service, params.tail);
     case "set_backup_password":
       return await setBackupPassword(params.password);
+    case "set_telegram_token":
+      return await setTelegramToken(params.token);
     case "host_metrics":
       return await hostMetrics();
     case "list_backups":
@@ -580,7 +645,7 @@ async function main() {
         socket: updaterSocket,
         socket_mode: "0660",
         socket_group: updaterSocketGroup,
-        command_count: 10,
+        command_count: UPDATER_COMMANDS.length,
       })}\n`);
     })().catch((error) => {
       process.stderr.write(`${JSON.stringify({
