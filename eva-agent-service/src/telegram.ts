@@ -213,13 +213,47 @@ export interface TelegramChatActionController {
  * первых секундах ответа и получить 429 на самой доставке. Промежуточные
  * состояния поэтому не отправляются вовсе, уходит только последнее.
  */
-const LIVE_UPDATE_INTERVAL_MS = 800;
+const LIVE_UPDATE_INTERVAL_MS = 600;
 
 /** Предел одного сообщения Telegram с запасом на разметку. */
 const LIVE_MESSAGE_LIMIT = 3_900;
 const LIVE_CURSOR = "▉";
 
-/** Следующий читаемый prefix: целые слова, без разрыва code/link Markdown. */
+/**
+ * Сколько слов показывать за одну правку.
+ *
+ * Прежде за раз появлялось до пятнадцати слов раз в 800 мс — целая
+ * строка возникала вспышкой, и текст не тёк, а прыгал. Читать такое
+ * неудобно: глаз не следит за письмом, а каждый раз заново ищет, где
+ * продолжение.
+ *
+ * Плавность здесь — это не «медленнее», а «мельче и чаще». Правки стали
+ * чаще, шаг меньше, и суммарная пропускная способность при этом даже
+ * выросла: 14 слов за 600 мс против 15 за 800. То есть показ не отстаёт
+ * от модели сильнее прежнего — наоборот, накопленный хвост, который в
+ * конце пришлось бы показать разом, стал меньше.
+ *
+ * Чаще нельзя: Telegram считает частоту обращений к чату, и на слишком
+ * частых правках отвечает 429. Пауза после него длиннее любой выгоды от
+ * дробления — рывок вернулся бы, только больший.
+ */
+const LIVE_STEP_MAX = 14;
+
+/**
+ * Первые правки мельче остальных.
+ *
+ * Начало ответа — тот момент, который и читается «резко»: только что
+ * было пусто, и вдруг строка. Первые шаги укорочены, дальше темп выходит
+ * на обычный. Хвосту это почти ничего не стоит: в начале ответа модель
+ * ещё не успела накопить отставание.
+ */
+const LIVE_STEP_RAMP = [5, 9] as const;
+
+/** Слов в этой правке: по счётчику показанных, а не по остатку. */
+export function liveStepWords(updates: number): number {
+  return LIVE_STEP_RAMP[updates] ?? LIVE_STEP_MAX;
+}
+
 export function nextLivePrefix(current: string, target: string, maxWords: number): string {
   if (!target.startsWith(current) || current.length >= target.length) return target;
   let inlineCode = false;
@@ -617,11 +651,7 @@ export class TelegramClient implements OutboxTransport {
         if (stopped) return;
         const text = pending;
         if (text === null || text === shown) { pending = null; continue; }
-        const remainingWords = text.slice(shown.length).trim().split(/\s+/u).filter(Boolean).length;
-        // Обычно 6–15 слов; большой backlog догоняется несколькими
-        // крупными, но всё ещё читаемыми порциями.
-        const words = Math.max(6, Math.min(60, Math.max(15, Math.ceil(remainingWords / 3))));
-        const next = nextLivePrefix(shown, text, words);
+        const next = nextLivePrefix(shown, text, liveStepWords(updates));
         try {
           await write(next);
           if (next === pending) pending = null;
