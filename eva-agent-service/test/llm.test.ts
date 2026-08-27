@@ -6,6 +6,7 @@ import {
   SecretBox,
   catalogVisionHint,
   modelHandle,
+  probeGeminiProvider,
   probeOpenAiProvider,
 } from "../dist/llm.js";
 import { summarize } from "../dist/llm/capability-probe.js";
@@ -64,6 +65,45 @@ test("provider probe allows manual model entry when /models is unsupported", asy
   );
   assert.equal(result.ok, true);
   assert.equal(result.models_supported, false);
+});
+
+/**
+ * У Google другой ключевой заголовок и другая форма ответа. Послать сюда
+ * `Authorization: Bearer` — получить 401 и объявить недоступным
+ * провайдера, который вполне доступен.
+ */
+test("provider probe reads a native Gemini /models response", async () => {
+  let headers: Record<string, string> = {};
+  const result = await probeGeminiProvider(
+    { baseUrl: "https://generativelanguage.googleapis.com/v1beta", apiKey: "hidden", timeoutMs: 1000 },
+    (async (url: string | URL | Request, init?: RequestInit) => {
+      assert.equal(String(url), "https://generativelanguage.googleapis.com/v1beta/models");
+      headers = (init?.headers ?? {}) as Record<string, string>;
+      return new Response(JSON.stringify({
+        models: [
+          { name: "models/gemini-3.7-flash", inputTokenLimit: 1_000_000 },
+          { name: "models/gemini-3.7-pro" },
+        ],
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }) as typeof fetch,
+  );
+
+  assert.equal(headers["x-goog-api-key"], "hidden");
+  assert.equal(headers.Authorization, undefined, "Bearer у Google означает 401");
+  assert.equal(result.ok, true);
+  // Префикс `models/` снят: адаптер подставляет имя в путь
+  // `/models/{model}:generateContent`, и с ним вышло бы `models%2F…`.
+  assert.deepEqual(result.models.map((item) => item.id), ["gemini-3.7-flash", "gemini-3.7-pro"]);
+});
+
+test("gemini probe reports an HTTP failure instead of an empty catalogue", async () => {
+  const result = await probeGeminiProvider(
+    { baseUrl: "https://generativelanguage.googleapis.com/v1beta", apiKey: "bad", timeoutMs: 1000 },
+    (async () => new Response("", { status: 403 })) as typeof fetch,
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.status_code, 403);
+  assert.deepEqual(result.models, []);
 });
 
 test("public provider responses never expose ciphertext or API key", async () => {

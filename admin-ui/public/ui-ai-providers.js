@@ -251,6 +251,7 @@ function openProviderEditor(provider = null) {
   set("quality_tier", provider?.quality_tier ?? full.quality_tier);
   set("max_output_tokens", provider?.max_output_tokens ?? full.max_output_tokens);
   set("request_timeout_ms", provider?.additional_parameters?.request_timeout_ms ?? full.request_timeout_ms);
+  set("connect_timeout_ms", provider?.connect_timeout_ms ?? full.connect_timeout_ms);
   set("max_retries", provider?.max_retries ?? full.max_retries);
   set("max_concurrency", provider?.max_concurrency ?? full.max_concurrency);
   set("max_rpm", provider?.max_rpm ?? "");
@@ -325,6 +326,28 @@ function unitsToMicro(value) {
 }
 
 /** Поля маршрутизации отправляются отдельным PATCH в API роутера. */
+/**
+ * Настройки генерации из формы.
+ *
+ * Разбор здесь, а не в общем `saveProvider`: пустое поле означает «без
+ * умолчаний», а не «пустой объект», и невалидный JSON должен назвать себя
+ * до отправки — сервер откажет тем же, но уже потеряв остальную правку.
+ */
+function generationDefaults(form) {
+  const raw = form.elements.generation_defaults?.value?.trim();
+  if (!raw) return {};
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("Параметры генерации должны быть JSON-объектом");
+  }
+  if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
+    throw new Error("Параметры генерации должны быть JSON-объектом");
+  }
+  return parsed;
+}
+
 async function saveRoutingFields(form, providerId) {
   const nullableNumber = (name) => {
     const raw = form.elements[name]?.value;
@@ -335,6 +358,7 @@ async function saveRoutingFields(form, providerId) {
     quality_tier: Number(form.elements.quality_tier.value),
     max_output_tokens: Number(form.elements.max_output_tokens.value),
     request_timeout_ms: Number(form.elements.request_timeout_ms.value),
+    connect_timeout_ms: Number(form.elements.connect_timeout_ms.value),
     max_retries: Number(form.elements.max_retries.value),
     max_concurrency: Number(form.elements.max_concurrency.value),
     max_rpm: nullableNumber("max_rpm"),
@@ -349,6 +373,7 @@ async function saveRoutingFields(form, providerId) {
     supports_vision: capabilityValue(form, "supports_vision"),
     sensitive_data_allowed: form.elements.sensitive_data_allowed.checked,
     enabled: form.elements.enabled.checked,
+    generation_defaults: generationDefaults(form),
   };
   await request(`/llm/providers/${encodeURIComponent(providerId)}`, {
     method: "PATCH",

@@ -169,12 +169,18 @@
                    среди них терялись те четыре, без которых не
                    заработает ничего. -->
               <label class="span-2">Название<input name="name" required maxlength="120" placeholder="Например: OpenRouter"></label>
+              <!-- Список повторяет адаптеры роутера. Их четыре, а
+                   предлагалось два: Gemini и Responses завести из панели
+                   было нельзя вовсе, хотя схема их принимает и адаптеры
+                   работают. -->
               <label>Протокол<select name="protocol">
                 <option value="openai-compatible">OpenAI-compatible</option>
                 <option value="anthropic-compatible">Anthropic native</option>
-              </select><small>Модель Anthropic через OpenAI-совместимый прокси — это OpenAI-compatible</small></label>
+                <option value="gemini-compatible">Google Gemini native</option>
+                <option value="openai-responses">OpenAI Responses</option>
+              </select><small>Через OpenAI-совместимый прокси — это OpenAI-compatible, каким бы ни был вендор модели. Native выбирают, когда обращаются к API вендора напрямую.</small></label>
               <label>Модель<input name="model" required placeholder="vendor/model"></label>
-              <label class="span-2">Base URL<input name="base_url" type="url" placeholder="https://api.openai.com/v1" required><small>Без пути дописывается /v1</small></label>
+              <label class="span-2">Base URL<input name="base_url" type="url" placeholder="https://api.openai.com/v1" required><small>Без пути дописывается /v1. Указанный путь остаётся нетронутым — Gemini ждёт /v1beta</small></label>
               <label class="span-2">API Key<input name="api_key" type="password" autocomplete="new-password" placeholder="Для изменения введите новый"></label>
 
               <details class="span-2 advanced-block">
@@ -194,6 +200,7 @@
                     <label>TPM<input name="max_tpm" type="number" min="0" placeholder="без ограничения"></label>
                     <label>Цена входа, $/1M<input name="price_in" type="number" min="0" step="0.01" value="0"></label>
                     <label>Цена выхода, $/1M<input name="price_out" type="number" min="0" step="0.01" value="0"></label>
+                    <label>Таймаут подключения, мс<input name="connect_timeout_ms" type="number" min="1000" step="500" value="10000"><small>Отдельно от таймаута ответа</small></label>
                     <label>Дневной бюджет, $<input name="daily_budget" type="number" min="0" step="0.01" placeholder="без ограничения"><small>Исчерпание уводит на резерв</small></label>
                     <label>Месячный бюджет, $<input name="monthly_budget" type="number" min="0" step="0.01" placeholder="без ограничения"></label>
                   </div>
@@ -220,7 +227,14 @@
                     <label class="flag"><input type="checkbox" name="supports_vision"> Понимает изображения</label>
                   </div>
                   <p class="block-caption">Эти четыре поля выясняет проба «Проверить», и она же их перепишет. Правьте, только чтобы снять неверную запись, из-за которой провайдер выпал из маршрутов.</p>
-                  <label>Дополнительные параметры JSON<textarea name="additional_parameters" rows="4">{}</textarea></label>
+                  <label>Дополнительные параметры JSON<textarea name="additional_parameters" rows="4">{}</textarea><small>Транспорт: заголовки, таймауты, служебные поля запроса</small></label>
+                  <!-- Отдельное поле, а не часть additional_parameters:
+                       эти значения адаптер кладёт в тело запроса как
+                       настройки генерации, и у каждого протокола форма
+                       своя — generationConfig у Gemini, плоские поля у
+                       OpenAI. Смешивать их с транспортными параметрами
+                       значит отправить провайдеру неизвестные ключи. -->
+                  <label>Параметры генерации JSON<textarea name="generation_defaults" rows="4">{}</textarea><small>Например для Gemini: {"generationConfig": {"temperature": 0.7}}</small></label>
                 </div>
               </details>
               <div class="form-actions span-2"><button class="button ghost" id="cancel-provider" type="button">Отмена</button><button class="button primary" type="submit">Сохранить</button></div>

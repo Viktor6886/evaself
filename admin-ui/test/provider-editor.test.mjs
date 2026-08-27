@@ -180,3 +180,85 @@ describe("редактор открывается из состояния роу
     assert.equal(panel.countTo("/providers"), 0);
   });
 });
+
+/**
+ * Завести провайдера с нативным протоколом.
+ *
+ * Адаптеров в роутере четыре, схема принимает все четыре, а панель
+ * предлагала два: Gemini и Responses не заводились из неё вовсе. Плюс
+ * два поля, которых в форме не было совсем, — таймаут подключения и
+ * параметры генерации, — из-за чего конфигурацию приходилось дописывать
+ * запросом к API мимо панели.
+ */
+describe("создание провайдера с нативным протоколом", () => {
+  let panel;
+  after(async () => await panel?.close());
+
+  test("Gemini заводится целиком: протокол, таймаут подключения и параметры генерации", async () => {
+    panel = await openPanel({ routes: ROUTES });
+    await panel.page.evaluate(() => openPage("ai"));
+    await panel.page.waitForFunction(
+      () => document.querySelector("#page-ai").classList.contains("active"));
+    await panel.page.evaluate(() => openProviderEditor(null));
+    await panel.page.waitForFunction(
+      () => !document.querySelector("#provider-editor").hidden);
+
+    // Все четыре адаптера роутера доступны из панели.
+    const protocols = await panel.page.$$eval(
+      '#provider-form select[name="protocol"] option', (nodes) => nodes.map((n) => n.value));
+    assert.deepEqual(protocols.sort(), [
+      "anthropic-compatible", "gemini-compatible", "openai-compatible", "openai-responses",
+    ]);
+
+    await panel.page.evaluate(() => {
+      const form = document.querySelector("#provider-form");
+      form.elements.name.value = "Google Gemini 3.7 Flash";
+      form.elements.protocol.value = "gemini-compatible";
+      form.elements.base_url.value = "https://generativelanguage.googleapis.com/v1beta";
+      form.elements.model.value = "gemini-3.7-flash";
+      form.elements.api_key.value = "test-key";
+      form.elements.context_window.value = "1000000";
+      form.elements.max_output_tokens.value = "65536";
+      form.elements.connect_timeout_ms.value = "10000";
+      form.elements.request_timeout_ms.value = "180000";
+      form.elements.max_retries.value = "3";
+      form.elements.max_concurrency.value = "4";
+      form.elements.priority.value = "100";
+      form.elements.quality_tier.value = "3";
+      form.elements.supports_vision.checked = true;
+      form.elements.sensitive_data_allowed.checked = true;
+      form.elements.generation_defaults.value =
+        '{"generationConfig":{"temperature":0.7,"topP":0.95}}';
+      form.requestSubmit();
+    });
+    await panel.page.waitForFunction(
+      () => document.querySelector("#provider-editor").hidden);
+
+    const created = panel.requests.find((item) => item.path === "/providers" && item.method === "POST");
+    assert.ok(created, "создание провайдера не отправлено");
+    assert.equal(created.body.protocol, "gemini-compatible");
+    // Путь у Gemini свой и /v1 к нему дописывать нельзя.
+    assert.equal(created.body.base_url, "https://generativelanguage.googleapis.com/v1beta");
+    assert.equal(created.body.context_window, 1000000);
+
+    const routing = panel.requests.find((item) => item.path.startsWith("/llm/providers/") && item.method === "PATCH");
+    assert.ok(routing, "поля маршрутизации не отправлены");
+    assert.equal(routing.body.connect_timeout_ms, 10000);
+    assert.equal(routing.body.request_timeout_ms, 180000);
+    // Три повтора и 180 секунд — требование самого провайдера: у него
+    // регулярные 503 high demand, и с двумя повторами ход срывается.
+    assert.equal(routing.body.max_retries, 3);
+    assert.equal(routing.body.max_concurrency, 4);
+    assert.equal(routing.body.max_output_tokens, 65536);
+    assert.deepEqual(routing.body.generation_defaults, {
+      generationConfig: { temperature: 0.7, topP: 0.95 },
+    });
+    assert.equal(routing.body.supports_vision, true);
+    assert.equal(routing.body.sensitive_data_allowed, true);
+
+    // Ключ уходит только в создание и не остаётся в форме.
+    assert.equal(created.body.api_key, "test-key");
+    const leftover = await panel.page.$eval('#provider-form [name="api_key"]', (n) => n.value);
+    assert.equal(leftover, "");
+  });
+});
