@@ -447,22 +447,39 @@ describe("панель на телефоне", () => {
  * широком экране — только измерением.
  */
 describe("раздел ИИ на телефоне", () => {
-  const PROVIDERS = {
-    providers: [{
-      id: "p1", name: "Openrouter2", protocol: "openai-compatible",
-      base_url: "https://openrouter.ai/api/v1", model: "minimax/minimax-m3:free",
-      context_window: 1_000_000, is_active: true, api_key_configured: true,
-      last_checked_at: "2026-08-25T20:46:18Z",
-      last_check_ok: true, last_check_status: "limited",
-      last_check_message: "Подключение работает; получено моделей: 418. "
-        + "Модель работает с ограничениями: vision: пустой ответ на изображение; "
-        + "finish_reason=stop, допустимый output budget=4096.",
-      last_models: null, additional_parameters: {},
-      created_at: "2026-08-01T00:00:00Z", updated_at: "2026-08-25T20:46:18Z",
-    }],
+  // Провайдер приходит одной записью из /llm/state: конфигурация,
+  // возможности, маршруты, breaker и расход вместе. Имя модели длинное,
+  // а сообщение проверки — в три строки: ровно то, что и вылезало.
+  const PROVIDER = {
+    id: "p1", name: "Openrouter2", protocol: "openai-compatible",
+    base_url: "https://openrouter.ai/api/v1", model: "minimax/minimax-m3:free",
+    context_window: 1_000_000, is_active: true, enabled: true, api_key_configured: true,
+    supports_tools: true, supports_json: true, supports_vision: false, supports_streaming: true,
+    breaker_state: "closed", pinned_out: false,
+    // Имена — те же, что отдаёт v_llm_provider_health. Значения нарочно
+    // крупные: пятизначная задержка и двузначный расход и растягивали
+    // карточку за край экрана.
+    requests_1h: 1284, failures_1h: 17, p95_latency_ms: 12480,
+    spent_today_micro: 1234560, spent_month_micro: 98765432,
+    daily_budget_micro: 2000000, monthly_budget_micro: 150000000,
+    priority: 10, last_error_code: "429", probe_after: "2026-08-25T21:00:00Z",
+    last_checked_at: "2026-08-25T20:46:18Z",
+    last_check_ok: true, last_check_status: "limited",
+    last_check_message: "Подключение работает; получено моделей: 418. "
+      + "Модель работает с ограничениями: vision: пустой ответ на изображение; "
+      + "finish_reason=stop, допустимый output budget=4096.",
+    last_models: null, additional_parameters: {},
+    status: {
+      code: "limited", label: "работает с ограничениями", color: "yellow",
+      detail: { check: "limited", router: "closed" },
+    },
+    routes: [{ code: "chat", title: "Основная модель", position: 0 }],
+    single_selected: false,
+    created_at: "2026-08-01T00:00:00Z", updated_at: "2026-08-25T20:46:18Z",
   };
+  const PROVIDERS = { providers: [PROVIDER] };
   const STATE = {
-    providers: [],
+    providers: [PROVIDER],
     routes: [
       { code: "chat", title: "Основная модель", min_context_window: 32768, rotation_enabled: true,
         chain: [{ provider_id: "p1", name: "Openrouter2", model: "minimax/minimax-m3:free", protocol: "openai-compatible", enabled: true }] },
@@ -513,6 +530,26 @@ describe("раздел ИИ на телефоне", () => {
         detailBelowTitle: more ? more.getBoundingClientRect().top >= title.bottom : true,
         openRoutes: scope.querySelectorAll(".route-item[open]").length,
         totalRoutes: scope.querySelectorAll(".route-item").length,
+        // Провайдер рисуется ровно одной карточкой. Отдельного списка
+        // «Состояние провайдеров», повторявшего тех же провайдеров с
+        // другим набором фактов, в разделе больше нет.
+        cards: scope.querySelectorAll(".provider-card").length,
+        healthRows: scope.querySelectorAll(".health-row").length,
+        // Место в маршрутах — в самой карточке, и оба факта про маршрут
+        // (имя и позиция) обязаны лежать в разных колонках, а не
+        // накладываться друг на друга.
+        routeChips: [...scope.querySelectorAll(".provider-route")].map((node) => {
+          const name = node.querySelector(".provider-route-name").getBoundingClientRect();
+          const rank = node.querySelector(".provider-route-rank").getBoundingClientRect();
+          return { text: node.textContent.trim(), overlap: rank.left < name.right - 0.5 };
+        }),
+        // Полная схема маршрутов свёрнута: разворачивают её тогда, когда
+        // правят цепочку целиком.
+        routesCardOpen: document.querySelector("#router-routes-card")?.open ?? null,
+        // Числа эксплуатации видны сразу, без разворачивания.
+        facts: [...scope.querySelectorAll(".provider-facts dd")].map((node) => node.textContent),
+        // Техническая справка по умолчанию свёрнута.
+        diagnosticsOpen: scope.querySelector(".provider-diagnostics")?.open ?? null,
       };
     }, PHONE.width);
 
@@ -528,5 +565,63 @@ describe("раздел ИИ на телефоне", () => {
     // повторяет одних и тех же провайдеров в каждом.
     assert.equal(layout.openRoutes, 0, "маршруты по умолчанию свёрнуты");
     assert.equal(layout.totalRoutes, 3);
+    assert.equal(layout.routesCardOpen, false, "полная схема маршрутов свёрнута");
+
+    // Один провайдер — одна карточка.
+    assert.equal(layout.cards, 1, "провайдер нарисован дважды");
+    assert.equal(layout.healthRows, 0,
+      "отдельный список «Состояние провайдеров» повторяет карточки");
+    assert.equal(layout.routeChips.length, 1);
+    assert.match(layout.routeChips[0].text, /Основная модель/);
+    assert.match(layout.routeChips[0].text, /основной/);
+    assert.equal(layout.routeChips[0].overlap, false,
+      "позиция в маршруте налезает на его название");
+
+    // Четыре числа, из-за которых в карточку и приходят, — на виду.
+    assert.deepEqual(layout.facts, ["1284 · ошибок 17", "12480 мс", "$1.23", "$98.77"]);
+    assert.equal(layout.diagnosticsOpen, false,
+      "техническая справка не должна быть развёрнута по умолчанию");
   });
+
+  /**
+   * Карточка не рисует кнопку, которую роль не может выполнить.
+   *
+   * Раньше «Проверить» и «Изменить» показывались всем, и viewer узнавал
+   * о своих правах из 403 после нажатия. Роли здесь ровно те же, что
+   * объявлены у маршрутов: правка — owner/admin, проверка — ещё и
+   * operator.
+   */
+  for (const [role, expected] of [["viewer", []], ["operator", ["check"]]]) {
+    test(`${role} видит состояние и только разрешённые ему действия`, async () => {
+      const limited = await openPanel({
+        routes: { ...ROUTES, "/providers": PROVIDERS, "/llm/state": STATE },
+        viewport: PHONE, role,
+      });
+      try {
+        await limited.page.evaluate(() => openPage("ai"));
+        await limited.page.waitForFunction(
+          () => document.querySelectorAll("#providers-list .provider-card").length > 0);
+        const card = await limited.page.evaluate(() => {
+          const node = document.querySelector("#providers-list .provider-card");
+          return {
+            status: node.querySelector(".status-pill")?.textContent.trim(),
+            routeChip: node.querySelector(".provider-route")?.textContent.trim(),
+            actions: [...node.querySelectorAll("[data-provider-action]")]
+              .map((button) => button.dataset.providerAction),
+            routeActions: node.querySelectorAll(".provider-route-actions").length,
+            addRoute: node.querySelectorAll(".provider-route-add").length,
+          };
+        });
+        // Читать состояние роль обязана: раздел для неё не пустой.
+        assert.equal(card.status, "работает с ограничениями");
+        assert.match(card.routeChip, /Основная модель/);
+        assert.deepEqual(card.actions, expected);
+        // Маршруты не правятся ни той, ни другой ролью.
+        assert.equal(card.routeActions, 0);
+        assert.equal(card.addRoute, 0);
+      } finally {
+        await limited.close();
+      }
+    });
+  }
 });

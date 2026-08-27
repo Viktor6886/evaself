@@ -1,29 +1,23 @@
 /**
- * Карточка провайдера и её редактор: создание, изменение, проверка,
- * список моделей и поля маршрутизации.
- */
-/**
- * Состояние провайдера одним словом.
+ * Единая карточка LLM-провайдера: кто это, работает ли, где используется,
+ * что с ним происходило — и все действия над ним.
  *
- * Раньше состояний было два — прошёл проверку или нет, — и лимит запросов
- * выглядел так же, как отклонённый ключ: красная точка и текст про
- * несовместимость модели. Действия оператора при этом разные, поэтому
- * состояний теперь четыре, и у каждого свой цвет и своя подсказка.
+ * Раньше сведения об одном провайдере лежали в трёх местах длинной
+ * страницы: карточка показывала итог проверки модели, отдельный список
+ * «Состояние провайдеров» ниже — circuit breaker и расход, а место в
+ * маршрутах приходилось искать в третьем разделе. Оператор, у которого
+ * одна модель ведёт себя странно, собирал её состояние по всей странице —
+ * на телефоне это несколько экранов прокрутки в обе стороны.
+ *
+ * Теперь провайдер встречается ровно один раз. Итоговый статус, маршруты
+ * и членство в них считает сервер (`/llm/state`): два места, вычислявшие
+ * одно и то же по-своему, — это два места, где они могут разойтись.
  */
-const CHECK_STATES = {
-  ok: { color: "green", label: "работает" },
-  limited: { color: "yellow", label: "работает с ограничениями" },
-  unavailable: { color: "yellow", label: "временно недоступен" },
-  config_error: { color: "red", label: "ошибка конфигурации" },
-};
 
-function checkState(item) {
-  const known = CHECK_STATES[item.last_check_status];
-  if (known) return known;
-  // Провайдер, проверенный прежней версией: статуса нет, остаётся булево.
-  if (item.last_check_ok === true) return CHECK_STATES.ok;
-  if (item.last_check_ok === false) return CHECK_STATES.config_error;
-  return { color: "gray", label: "не проверялся" };
+/** Микроединицы валюты в доллары. */
+function money(micro) {
+  const value = Number(micro || 0) / 1_000_000;
+  return `$${value.toFixed(value < 1 ? 4 : 2)}`;
 }
 
 /**
@@ -33,59 +27,161 @@ function checkState(item) {
  */
 function capabilityChips(item) {
   const chips = [
-    item.supports_tools === false ? null : { on: true, text: "инструменты" },
+    { on: item.supports_tools !== false, text: "инструменты" },
     { on: item.supports_streaming !== false, text: "поток" },
     { on: item.supports_vision === true, text: "изображения" },
     { on: item.supports_json !== false, text: "строгий JSON" },
-  ].filter(Boolean);
+  ];
   return `<div class="capability-chips">${chips.map((chip) =>
     `<span class="chip${chip.on ? "" : " chip-off"}">${escapeHtml(chip.text)}</span>`).join("")}</div>`;
 }
 
+/**
+ * Место провайдера в маршрутах — прямо в карточке.
+ *
+ * Позиция приходит с сервера (`position` цепочки, 0 — основной), а не
+ * вычисляется пересканированием всех цепочек на каждого провайдера: так
+ * это делали две разные функции, и трактовали по-разному.
+ *
+ * В режиме одной модели сохранённые цепочки показываются как сохранённые,
+ * но неработающие. Иначе карточка обещала бы маршрутизацию, которой
+ * сейчас нет.
+ */
+function providerRoutes(item, editable) {
+  const single = state.router?.routing_settings?.mode === "single";
+  const memberships = item.routes || [];
+  const rank = (position) => position === 0 ? "основной" : `резерв ${position}`;
+  const title = (code, fallback) => ROUTE_TITLES[code] || fallback || code;
+
+  const rows = memberships.length
+    ? memberships.map((route) => `
+        <li class="provider-route">
+          <span class="provider-route-name">${escapeHtml(title(route.code, route.title))}</span>
+          <span class="provider-route-rank${route.position === 0 ? " is-primary" : ""}">${escapeHtml(rank(route.position))}</span>
+          ${editable ? `<span class="provider-route-actions">
+            ${route.position === 0 ? "" : `<button class="button tiny ghost" data-provider-action="route-primary" data-provider-id="${escapeHtml(item.id)}" data-route="${escapeHtml(route.code)}">Сделать основным</button>`}
+            <button class="button tiny danger-outline" data-provider-action="route-remove" data-provider-id="${escapeHtml(item.id)}" data-route="${escapeHtml(route.code)}">Убрать</button>
+          </span>` : ""}
+        </li>`).join("")
+    : '<li class="provider-route muted">Не назначен ни одному маршруту.</li>';
+
+  const free = assignableRoutes().filter(
+    (route) => !memberships.some((member) => member.code === route.code));
+
+  return `
+    <div class="provider-routes">
+      <div class="provider-block-head">
+        <span>Маршруты</span>
+        ${single ? '<span class="status-pill state-gray">цепочки сохранены, но не используются</span>' : ""}
+      </div>
+      <ul class="provider-route-list">${rows}</ul>
+      ${editable && free.length ? `<div class="provider-route-add">
+        <select data-provider-route-select="${escapeHtml(item.id)}">
+          ${free.map((route) => `<option value="${escapeHtml(route.code)}">${escapeHtml(title(route.code, route.title))}</option>`).join("")}
+        </select>
+        <button class="button tiny secondary" data-provider-action="route-add" data-provider-id="${escapeHtml(item.id)}">Добавить</button>
+      </div>` : ""}
+    </div>`;
+}
+
+/**
+ * Эксплуатационные симптомы: то, что видно сразу, и то, что по требованию.
+ *
+ * Наверху — четыре числа, из-за которых сюда и приходят: сколько работы
+ * прошло, сколько сорвалось, как долго и сколько стоило. Остальное —
+ * бюджеты, последняя ошибка, срок пробного запроса, адрес и протокол —
+ * в `<details>`: на телефоне постоянно раскрытая техническая справка
+ * превращает карточку в три экрана, и найти в ней ничего нельзя.
+ */
+function providerOperations(item) {
+  const requests = Number(item.requests_1h || 0);
+  const failures = Number(item.failures_1h || 0);
+  const facts = [
+    ["За час", `${requests}${failures ? ` · ошибок ${failures}` : ""}`],
+    ["Задержка p95", item.p95_latency_ms == null ? "нет данных" : `${item.p95_latency_ms} мс`],
+    ["Сегодня", money(item.spent_today_micro)],
+    ["За месяц", money(item.spent_month_micro)],
+  ];
+  const details = [
+    item.daily_budget_micro ? ["Дневной бюджет", `${money(item.spent_today_micro)} из ${money(item.daily_budget_micro)}`] : null,
+    item.monthly_budget_micro ? ["Месячный бюджет", `${money(item.spent_month_micro)} из ${money(item.monthly_budget_micro)}`] : null,
+    item.last_error_code ? ["Последняя ошибка", String(item.last_error_code)] : null,
+    item.probe_after ? ["Пробный запрос после", localDate(item.probe_after)] : null,
+    // Два источника статуса названы отдельно: проверка возможностей
+    // спрашивает модель, breaker знает, что было в работе. Смешивать их
+    // в одну фразу — значит объяснять отказ не той причиной.
+    ["Проверка модели", CHECK_DETAIL[item.status?.detail?.check] || "не проверялась"],
+    ["Router", ROUTER_DETAIL[item.status?.detail?.router] || "в работе"],
+    ["Последняя проверка", localDate(item.last_checked_at)],
+    ["Протокол", String(item.protocol || "—")],
+    ["Base URL", String(item.base_url || "—")],
+    ["Контекст", Number(item.context_window || 0).toLocaleString("ru-RU")],
+    ["Приоритет", String(item.priority ?? "—")],
+  ].filter(Boolean);
+  const message = item.last_check_message || "";
+
+  return `
+    <dl class="provider-facts">${facts.map(([term, value]) =>
+      `<div><dt>${escapeHtml(term)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}</dl>
+    <details class="provider-diagnostics">
+      <summary>${escapeHtml(message ? shortMessage(message) : "Подробнее")}</summary>
+      ${message ? `<p class="status-message">${escapeHtml(message)}</p>` : ""}
+      <dl class="details-list">${details.map(([term, value]) =>
+        `<div><dt>${escapeHtml(term)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}</dl>
+    </details>`;
+}
+
+const CHECK_DETAIL = {
+  ok: "возможности подтверждены",
+  limited: "часть возможностей недоступна",
+  unavailable: "провайдер не ответил на пробу",
+  config_error: "конфигурация отклонена провайдером",
+};
+
+const ROUTER_DETAIL = {
+  closed: "в работе",
+  open: "исключён после ошибок",
+  half_open: "ждёт пробного запроса",
+  pinned_out: "снят с автовозврата вручную",
+};
+
 function providerCard(item) {
+  const editable = ["owner", "admin"].includes(state.me.role);
+  // Проверка провайдера разрешена и оператору — так же, как на сервере
+  // (`providers/:id/check`). Кнопки, которых роль не может выполнить,
+  // карточка не рисует: раньше viewer видел «Проверить» и «Изменить» и
+  // получал 403 уже после нажатия.
+  const canCheck = ["owner", "admin", "operator"].includes(state.me.role);
   // Не `state`: глобальная `state` — состояние страницы, и затенять её
   // внутри карточки нельзя.
-  const check = checkState(item);
-  const message = item.last_check_message || "";
-  const placement = providerRouteLabel(item.id);
+  const status = item.status || { code: "unchecked", label: "не проверялся", color: "gray" };
+  const breakerOpen = item.status?.detail?.router === "open"
+    || item.status?.detail?.router === "half_open";
   return `
-    <article class="provider-card">
+    <article class="provider-card" data-provider-card="${escapeHtml(item.id)}">
       <div class="provider-title">
-        <span class="status-dot color-${check.color}"></span>
+        <span class="status-dot color-${escapeHtml(status.color)}"></span>
         <div class="provider-name">
-          <h3>${escapeHtml(item.name)}</h3>
+          <h3>${escapeHtml(item.name)}${item.single_selected ? ' <span class="status-pill state-green">Единая модель</span>' : ""}</h3>
           <small>${escapeHtml(item.model)}</small>
         </div>
-        <span class="status-pill state-${check.color}">${escapeHtml(check.label)}</span>
+        <span class="status-pill state-${escapeHtml(status.color)}">${escapeHtml(status.label)}</span>
       </div>
       ${capabilityChips(item)}
-      ${placement === "не назначен"
-        ? '<p class="muted small">Не назначен ни одному маршруту.</p>'
-        : `<p class="muted small">${escapeHtml(placement)}</p>`}
-      ${message ? `<details class="provider-diagnostics">
-        <summary>${escapeHtml(shortMessage(message))}</summary>
-        <p class="status-message">${escapeHtml(message)}</p>
-        <dl class="details-list">
-          <div><dt>Протокол</dt><dd>${escapeHtml(item.protocol)}</dd></div>
-          <div><dt>Base URL</dt><dd>${escapeHtml(item.base_url)}</dd></div>
-          <div><dt>Контекст</dt><dd>${Number(item.context_window).toLocaleString("ru-RU")}</dd></div>
-          <div><dt>Последний тест</dt><dd>${escapeHtml(localDate(item.last_checked_at))}</dd></div>
-        </dl>
-      </details>` : '<p class="muted small">Подключение ещё не проверялось.</p>'}
+      ${providerRoutes(item, editable)}
+      ${providerOperations(item)}
       <div class="card-actions">
-        <button class="button tiny ghost" data-provider-action="check" data-provider-id="${escapeHtml(item.id)}">Проверить</button>
-        <button class="button tiny ghost" data-provider-action="edit" data-provider-id="${escapeHtml(item.id)}">Изменить</button>
-        <details class="card-more">
+        ${canCheck ? `<button class="button tiny ghost" data-provider-action="check" data-provider-id="${escapeHtml(item.id)}">Проверить</button>` : ""}
+        ${editable ? `<button class="button tiny ghost" data-provider-action="edit" data-provider-id="${escapeHtml(item.id)}">Изменить</button>` : ""}
+        ${editable && breakerOpen ? `<button class="button tiny secondary" data-provider-action="breaker-reset" data-provider-id="${escapeHtml(item.id)}">Вернуть в строй</button>` : ""}
+        ${editable ? `<details class="card-more">
           <summary>Ещё</summary>
           <div class="card-more-body">
             <button class="button tiny ghost" data-provider-action="models" data-provider-id="${escapeHtml(item.id)}">Получить модели</button>
-            <div class="route-assign">
-              <select data-provider-route-select>${assignableRoutes().map((route) => `<option value="${escapeHtml(route.code)}">${escapeHtml(ROUTE_TITLES[route.code] || route.code)}</option>`).join("")}</select>
-              <button class="button tiny secondary" data-provider-action="route-primary" data-provider-id="${escapeHtml(item.id)}">Сделать основным</button>
-            </div>
+            <button class="button tiny ghost" data-provider-action="pin" data-provider-id="${escapeHtml(item.id)}" data-pin="${item.pinned_out ? "off" : "on"}">${item.pinned_out ? "Вернуть автовозврат" : "Снять с автовозврата"}</button>
             <button class="button tiny danger-outline" data-provider-action="delete" data-provider-id="${escapeHtml(item.id)}">Удалить</button>
           </div>
-        </details>
+        </details>` : ""}
       </div>
     </article>`;
 }
@@ -101,34 +197,7 @@ function assignableRoutes() {
  */
 function shortMessage(message) {
   const first = String(message).split(/(?<=[.;])\s/)[0] || String(message);
-  return first.length > 110 ? `${first.slice(0, 110)}…` : first;
-}
-
-/**
- * Где провайдер стоит в маршрутах.
- *
- * Раньше строка перечисляла маршруты через « · » и на телефоне налезала на
- * соседний текст. Считаем: как основной — назвать маршруты, как резерв —
- * назвать число.
- */
-function providerRouteLabel(providerId) {
-  const primary = [];
-  let backup = 0;
-  for (const route of (state.router?.routes || [])) {
-    const index = (route.chain || []).findIndex((link) => link.provider_id === providerId);
-    if (index < 0) continue;
-    if (index === 0) primary.push(ROUTE_TITLES[route.code] || route.code);
-    else backup += 1;
-  }
-  if (primary.length === 0 && backup === 0) return "не назначен";
-  const parts = [];
-  if (primary.length) {
-    parts.push(primary.length > 2
-      ? `основной для ${primary.length} маршрутов`
-      : `основной: ${primary.join(", ")}`);
-  }
-  if (backup) parts.push(`резерв в ${backup}`);
-  return parts.join(" · ");
+  return first.length > 90 ? `${first.slice(0, 90)}…` : first;
 }
 
 function openProviderEditor(provider = null) {
@@ -150,7 +219,9 @@ function openProviderEditor(provider = null) {
 
   // Поля маршрутизации живут в таблице роутера, а не в
   // additional_parameters: подставляем их из /llm/state.
-  const routing = (state.router?.providers || []).find((item) => item.id === provider?.id);
+  // Приоритет берётся из самой записи: `/llm/state` отдаёт провайдера
+  // целиком, и отдельный поиск по состоянию роутера искал бы тот же
+  // объект.
   const full = ROUTER_DEFAULTS;
   const set = (name, value) => { if (form.elements[name]) form.elements[name].value = value; };
   const flag = (name, value) => { if (form.elements[name]) form.elements[name].checked = value; };
@@ -159,7 +230,7 @@ function openProviderEditor(provider = null) {
   const capability = (name, value) => {
     if (form.elements[name]) form.elements[name].value = value === true ? "true" : "false";
   };
-  set("priority", routing?.priority ?? full.priority);
+  set("priority", provider?.priority ?? full.priority);
   set("quality_tier", provider?.quality_tier ?? full.quality_tier);
   set("max_output_tokens", provider?.max_output_tokens ?? full.max_output_tokens);
   set("request_timeout_ms", provider?.additional_parameters?.request_timeout_ms ?? full.request_timeout_ms);
@@ -276,8 +347,8 @@ function capabilityValue(form, name) {
   return field.type === "checkbox" ? field.checked : field.value === "true";
 }
 
-async function providerAction(action, id) {
-  const provider = state.providers.find((item) => item.id === id);
+async function providerAction(action, id, routeArg = null, pinArg = null) {
+  const provider = (state.providers || []).find((item) => item.id === id);
   if (!provider) return;
   if (action === "edit") {
     openProviderEditor(provider);
@@ -288,7 +359,7 @@ async function providerAction(action, id) {
       method: "POST",
     });
     toast(payload.result?.message || "Проверка завершена", !payload.result?.ok);
-    await loadProviders();
+    await refreshRoutingPage();
     return;
   }
   if (action === "models") {
@@ -302,13 +373,47 @@ async function providerAction(action, id) {
     await loadProviders();
     return;
   }
-  if (action === "route-primary") {
-    const card = document.querySelector(`[data-provider-id="${CSS.escape(id)}"]`)?.closest(".provider-card");
-    const routeCode = card?.querySelector("[data-provider-route-select]")?.value;
+  // Маршруты правятся тем же `saveChain`, что и полная схема: второго
+  // механизма маршрутизации не заводится, семантика позиции сохраняется
+  // (0 — основной, дальше резервы).
+  if (action === "route-primary" || action === "route-remove" || action === "route-add") {
+    const routeCode = action === "route-add"
+      ? document.querySelector(`[data-provider-route-select="${CSS.escape(id)}"]`)?.value
+      : routeArg;
     const route = (state.router?.routes || []).find((item) => item.code === routeCode);
     if (!route) return;
-    const ids = [id, ...(route.chain || []).map((link) => link.provider_id).filter((providerId) => providerId !== id)].slice(0, 6);
-    await saveChain(routeCode, ids);
+    const current = (route.chain || []).map((link) => link.provider_id);
+    if (action === "route-remove") {
+      const ids = current.filter((providerId) => providerId !== id);
+      if (ids.length === 0) {
+        // Сервер и так отклонит пустую цепочку, но сказать причину лучше
+        // до запроса, чем показать 400.
+        toast("В цепочке должен остаться хотя бы основной провайдер", true);
+        return;
+      }
+      await saveChain(routeCode, ids);
+      return;
+    }
+    const rest = current.filter((providerId) => providerId !== id);
+    await saveChain(routeCode, action === "route-primary"
+      ? [id, ...rest].slice(0, 6)
+      : [...rest, id].slice(0, 6));
+    return;
+  }
+  if (action === "breaker-reset") {
+    await request(`/llm/providers/${encodeURIComponent(id)}/breaker/reset`, { method: "POST" });
+    toast("Провайдер возвращён в строй");
+    await refreshRoutingPage();
+    return;
+  }
+  if (action === "pin") {
+    const on = pinArg === "on";
+    await request(`/llm/providers/${encodeURIComponent(id)}/pin`, {
+      method: "POST",
+      body: JSON.stringify({ pinned_out: on }),
+    });
+    toast(on ? "Провайдер снят с автовозврата" : "Автовозврат включён");
+    await refreshRoutingPage();
     return;
   }
   if (action === "delete") {
@@ -340,6 +445,11 @@ $("#provider-form").addEventListener("submit", (event) => {
 $("#providers-list").addEventListener("click", (event) => {
   const button = event.target.closest("[data-provider-action]");
   if (button) {
-    providerAction(button.dataset.providerAction, button.dataset.providerId).catch(handleError);
+    providerAction(
+      button.dataset.providerAction,
+      button.dataset.providerId,
+      button.dataset.route ?? null,
+      button.dataset.pin ?? null,
+    ).catch(handleError);
   }
 });

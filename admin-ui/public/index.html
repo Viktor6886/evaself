@@ -148,7 +148,10 @@
         <section id="page-ai" class="page">
           <div class="page-heading">
             <div><p class="eyebrow">ОБЩИЕ AI-ПРОВАЙДЕРЫ</p><h2>Искусственный интеллект</h2><p>LLM всей установки. API Key доступен только на запись; переключение сохраняет агентов и память.</p></div>
-            <button id="new-provider" class="button primary">Добавить провайдера</button>
+            <div class="heading-actions">
+              <button id="reload-router" class="button ghost">Обновить</button>
+              <button id="new-provider" class="button primary">Добавить провайдера</button>
+            </div>
           </div>
           <!-- Провайдеры идут первыми: это то, чем администратор
                занимается каждый день. Маршруты, состояние и отказы —
@@ -219,29 +222,21 @@
             <div id="routing-settings"></div>
           </section>
 
-          <!-- Маршруты. Строка на маршрут; цепочка резервов
-               раскрывается только у того, который правят. -->
-          <section class="card router-card">
-            <div class="section-heading">
-              <div>
-                <h3>Маршруты</h3>
-                <p class="block-caption">Какая модель обслуживает каждый тип запроса. Роутер идёт по цепочке сверху вниз и пропускает тех, кто не подходит по возможностям или закрыт circuit breaker'ом. Пользователь переключения не видит.</p>
-              </div>
-              <button id="reload-router" class="reset">Обновить</button>
-            </div>
-            <div id="router-routes" class="router-routes"></div>
-          </section>
+          <!-- Полная схема маршрутов — вспомогательный вид, а не второй
+               список тех же данных.
 
-          <!-- Состояние провайдеров: breaker, задержка, расход, бюджет. -->
-          <section class="card router-card">
-            <div class="section-heading">
-              <div>
-                <h3>Состояние провайдеров</h3>
-                <p class="block-caption">Circuit breaker закрывается после нескольких подряд ошибок и сам открывается после выдержки. «Снять с автовозврата» удерживает провайдера выключенным, пока вы не вернёте его вручную.</p>
-              </div>
-            </div>
-            <div id="router-health" class="router-health"></div>
-          </section>
+               Место провайдера в маршрутах и управление им живут в его
+               карточке: там же, где всё остальное про эту модель. Здесь
+               остаётся то, чего в карточке провайдера быть не может, —
+               свойства самого маршрута: требования отбора и ротация.
+               Разворачивают её тогда, когда правят цепочку целиком. -->
+          <details class="card router-card" id="router-routes-card">
+            <summary>
+              <span><strong>Полная схема маршрутов</strong>
+              <small class="block-caption">Требования маршрутов и ротация. Роутер идёт по цепочке сверху вниз и пропускает тех, кто не подходит по возможностям или закрыт circuit breaker'ом.</small></span>
+            </summary>
+            <div id="router-routes" class="router-routes"></div>
+          </details>
 
           <section class="card router-card">
             <div class="section-heading">

@@ -968,8 +968,33 @@ dialog .eyebrow { margin-top: 0; }
 .card-more { position: relative; }
 .card-more summary { cursor: pointer; padding: 4px 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 12px; }
 .card-more-body { margin-top: 8px; display: grid; gap: 8px; }
-.route-assign { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
-.route-assign select { min-width: 0; }
+
+/* Маршруты внутри карточки провайдера.
+
+   Место провайдера в маршрутах — часть ответа на «где он используется»,
+   поэтому оно живёт здесь, а не в отдельной секции, повторяющей тех же
+   провайдеров. Имя маршрута и позиция стоят в разных колонках сетки:
+   «Основная модель» и «резерв 1» на 360px иначе наезжают друг на друга. */
+.provider-routes { margin: 10px 0; display: grid; gap: 8px; }
+.provider-block-head { color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.provider-route-list { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+.provider-route { padding: 7px 9px; border: 1px solid var(--line); border-radius: 9px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; align-items: center; }
+.provider-route-name { min-width: 0; font-size: 12px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.provider-route-rank { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.provider-route-rank.is-primary { color: var(--green); font-weight: 800; }
+/* Кнопки маршрута переносятся на свою строку: на узком экране им не
+   хватает места рядом с названием, и они наезжали на позицию. */
+.provider-route-actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px; }
+.provider-route-add { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
+.provider-route-add select { min-width: 0; }
+
+/* Факты работы: пары «что» / «сколько». Значение переносится по любому
+   символу — «$1 234.56» и четырёхзначная задержка иначе растягивают
+   карточку и дают горизонтальную прокрутку страницы. */
+.provider-facts { margin: 10px 0 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.provider-facts > div { min-width: 0; }
+.provider-facts dt { color: var(--muted); font-size: 11px; }
+.provider-facts dd { margin: 2px 0 0; font-size: 13px; font-weight: 700; overflow-wrap: anywhere; }
 
 /* Отказы: заголовок и подробность идут друг под другом, а не в соседних
    колонках, — тогда длинному описанию некуда налезать. */
@@ -1002,7 +1027,10 @@ dialog .eyebrow { margin-top: 0; }
      наложение. */
   .route-item > summary { grid-template-columns: minmax(0, 1fr) auto; }
   .route-item .route-head-model { grid-column: 1 / -1; }
-  .route-assign { grid-template-columns: minmax(0, 1fr); }
+  .provider-route-add { grid-template-columns: minmax(0, 1fr); }
+  .provider-route-add .button { min-height: 40px; }
+  /* Кнопки маршрута — полноразмерные цели касания, а не 20px строчки. */
+  .provider-route-actions .button { flex: 1 1 auto; min-height: 34px; }
   .provider-card .card-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .provider-card .card-actions .card-more { grid-column: 1 / -1; }
 }

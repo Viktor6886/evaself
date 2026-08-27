@@ -43,11 +43,14 @@ function renderMediaProviders() {
   const capable = providers.filter((provider) => provider.supports_vision);
   $("#media-providers").innerHTML = capable.length
     ? capable.map((provider) => {
-      const breaker = BREAKER_LABELS[provider.breaker_state] || BREAKER_LABELS.closed;
+      // Тот же операционный статус, что и в карточке провайдера. Своё
+      // прочтение breaker здесь означало бы, что один провайдер
+      // называется «работает» на одной странице и «исключён» на другой.
+      const status = provider.status || { label: "не проверялся", color: "gray" };
       return `
         <article class="health-row">
           <div class="health-head">
-            <span class="status-dot color-${provider.pinned_out ? "gray" : breaker.color}"></span>
+            <span class="status-dot color-${escapeHtml(status.color)}"></span>
             <div>
               <strong>${escapeHtml(provider.name)}</strong>
               <small>${escapeHtml(provider.model)} · ${escapeHtml(provider.protocol)}${provider.enabled ? "" : " · выключен"}</small>
@@ -57,7 +60,7 @@ function renderMediaProviders() {
           <dl class="health-facts">
             <div><dt>Понимает изображения</dt><dd>да</dd></div>
             <div><dt>Задержка p95</dt><dd>${provider.p95_latency_ms == null ? "нет данных" : `${provider.p95_latency_ms} мс`}</dd></div>
-            <div><dt>Состояние</dt><dd>${escapeHtml(breaker.title)}</dd></div>
+            <div><dt>Состояние</dt><dd>${escapeHtml(status.label)}</dd></div>
           </dl>
         </article>`;
     }).join("")
