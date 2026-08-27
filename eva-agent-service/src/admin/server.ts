@@ -40,6 +40,7 @@ import {
 import { auditParams, globalSecretRedactor } from "./redactor.js";
 import { SecretStore } from "./secret-store.js";
 import type { SecurityAuditService } from "./security-audit.js";
+import type { TelegramTokenService } from "./telegram-token-service.js";
 import { HealthService } from "./health-service.js";
 import { IntegrationConfigService, MEDIA_INTEGRATIONS } from "./integration-config-service.js";
 import { LlmRouterAdminService } from "./llm-router-service.js";
@@ -90,6 +91,7 @@ export interface AdminServerServices {
     updateConversation(id: string, contextWindowLimit: number): Promise<unknown>;
   };
   securityAudit?: SecurityAuditService;
+  telegramTokens?: TelegramTokenService;
   /** Предпросмотр политик хранения. Удаление выполняет задание очереди. */
   retention?: { preview(settings: Record<string, unknown>): Promise<unknown> };
   /** Единый реестр артефактов. Отсутствует — раздел просто не появляется. */
@@ -1201,6 +1203,49 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
       body.used_by,
       contexts.get(request)!.session!.user.id,
     );
+  });
+
+  // -------------------------------------------------------------------
+  // боты Евы: набор токенов Telegram и переключение между ними
+  // -------------------------------------------------------------------
+  // Токен — секрет, поэтому права те же, что у остальных секретов, и
+  // мутации требуют sudo. Наружу уходят только метка и @username: по ним
+  // человек узнаёт своего бота, и секретом они не являются.
+  app.get("/api/admin/v1/telegram/tokens", {
+    config: { roles: ["owner", "admin"] } satisfies RouteAccess,
+  }, async () => {
+    if (!services.telegramTokens) throw adminBadRequest("Управление токенами недоступно");
+    return await services.telegramTokens.list();
+  });
+
+  app.post("/api/admin/v1/telegram/tokens", {
+    config: { roles: ["owner", "admin"], sudoScope: "secrets:write" } satisfies RouteAccess,
+  }, async (request, reply) => {
+    if (!services.telegramTokens) throw adminBadRequest("Управление токенами недоступно");
+    const body = objectBody(request.body);
+    const created = await services.telegramTokens.add(
+      { token: body.token, label: body.label },
+      contexts.get(request)!.session!.user.id,
+    );
+    return reply.status(201).send(created);
+  });
+
+  app.post("/api/admin/v1/telegram/tokens/:id/activate", {
+    config: { roles: ["owner", "admin"], sudoScope: "secrets:write" } satisfies RouteAccess,
+  }, async (request) => {
+    if (!services.telegramTokens) throw adminBadRequest("Управление токенами недоступно");
+    return await services.telegramTokens.activate(
+      (request.params as { id?: string }).id ?? "",
+      contexts.get(request)!.session!.user.id,
+    );
+  });
+
+  app.delete("/api/admin/v1/telegram/tokens/:id", {
+    config: { roles: ["owner", "admin"], sudoScope: "secrets:write" } satisfies RouteAccess,
+  }, async (request, reply) => {
+    if (!services.telegramTokens) throw adminBadRequest("Управление токенами недоступно");
+    await services.telegramTokens.remove((request.params as { id?: string }).id ?? "");
+    return reply.status(204).send();
   });
 
   app.get("/api/admin/v1/audit", {

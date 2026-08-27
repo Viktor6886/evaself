@@ -439,6 +439,20 @@ services:
       # контейнером и не получал её вовсе.
       MEDIA_SERVICE_TOKEN: ${MEDIA_SERVICE_TOKEN}
       EVA_OUTBOUND_HOST_ALLOWLIST: ${EVA_OUTBOUND_HOST_ALLOWLIST:-}
+      # Переключение бота Евы из панели. Смена токена — это переезд на
+      # другого бота, и вебхук надо переставить: снять у прежнего и
+      # поставить новому. Для этого нужен адрес, на который Telegram
+      # шлёт обновления, и секрет, которым webhook отличает Telegram от
+      # постороннего.
+      #
+      # Без них панель построила бы адрес вида https:///telegram/webhook
+      # с пустым секретом — и переезд молча оставил бы Еву без
+      # сообщений. Это ровно та же история, что с MEDIA_SERVICE_TOKEN
+      # выше: агенту переменную передают, а admin-api живёт отдельным
+      # контейнером и не получал её вовсе.
+      DOMAIN_API: ${DOMAIN_API}
+      EVA_TELEGRAM_WEBHOOK_SECRET: ${EVA_TELEGRAM_WEBHOOK_SECRET}
+      EVA_TELEGRAM_API_BASE_URL: ${EVA_TELEGRAM_API_BASE_URL:-https://api.telegram.org}
     command: ["node", "dist/admin/index.js"]
     volumes:
       - type: bind
