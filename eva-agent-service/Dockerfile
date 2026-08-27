@@ -1,3 +1,4 @@
+ARG NODE_BASE_IMAGE=node
 ARG NODE_BASE_VERSION=22.22-bookworm-slim
 ARG DOCKER_CLI_IMAGE=docker
 ARG DOCKER_CLI_VERSION=28.5.2-cli
@@ -7,7 +8,7 @@ FROM ${DOCKER_CLI_IMAGE}:${DOCKER_CLI_VERSION} AS docker-cli
 # ---------------------------------------------------------------------
 # Build stage: install everything, compile TypeScript, run the tests.
 # ---------------------------------------------------------------------
-FROM node:${NODE_BASE_VERSION} AS build
+FROM ${NODE_BASE_IMAGE}:${NODE_BASE_VERSION} AS build
 
 WORKDIR /app
 ENV NODE_ENV=development
@@ -32,7 +33,7 @@ RUN npm prune --omit=dev
 # ---------------------------------------------------------------------
 # Runtime stage
 # ---------------------------------------------------------------------
-FROM node:${NODE_BASE_VERSION} AS runtime
+FROM ${NODE_BASE_IMAGE}:${NODE_BASE_VERSION} AS runtime
 
 # The Agent SDK requires Node >= 22.19.
 ENV NODE_ENV=production \
