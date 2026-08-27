@@ -785,10 +785,32 @@ jobs:
           SQL
           echo "provider defaults verified"
 
+      # Проверяется отсутствие дублей, а не число строк.
+      #
+      # Раньше здесь стояло «ровно девять» — столько квот засевала
+      # миграция 002. Число описывало не правило, а состояние сида на тот
+      # день: любое законное пополнение — новый расходник, новый тариф —
+      # роняло проверку, ничего при этом не сломав. Правило же в том, что
+      # повторный накат не должен задваивать строки, и оно проверяется
+      # сравнением с числом уникальных троек.
       - name: Seed data is not duplicated by a re-run
         run: |
-          COUNT="$(psql -tA -c 'SELECT count(*) FROM quotas')"
-          [ "$COUNT" = "9" ] || { echo "::error::quotas has $COUNT rows, expected 9"; exit 1; }
+          psql -v ON_ERROR_STOP=1 -tA <<'SQL'
+          DO $$
+          DECLARE total int; unique_rows int;
+          BEGIN
+            SELECT count(*) INTO total FROM quotas;
+            SELECT count(*) INTO unique_rows
+              FROM (SELECT DISTINCT plan, metric, period FROM quotas) d;
+            IF total = 0 THEN
+              RAISE EXCEPTION 'quotas пуст: сид не отработал';
+            END IF;
+            IF total <> unique_rows THEN
+              RAISE EXCEPTION 'сид задвоился: % строк на % троек', total, unique_rows;
+            END IF;
+          END $$;
+          SQL
+          echo "seed verified"
 
       # Поддельный inbox в тестах TypeScript повторяет правила выборки, но
       # не проверяет сам SQL: ни FOR UPDATE OF t SKIP LOCKED, ни сравнение
@@ -859,6 +881,13 @@ jobs:
       # TypeScript-тестах ограничений не проверяет — только живая.
       - name: Виды операций панели принимаются схемой
         run: psql -v ON_ERROR_STOP=1 -q -f scripts/ci/test-operation-kinds.sql
+
+      # Переименование тарифа и границы цены. Миграции накатываются
+      # заново на каждом обновлении, и повторный проход уже ловил здесь
+      # столкновение: сид возвращал строки прежнего тарифа, а
+      # переименование упиралось в уже существующие новые.
+      - name: Тарифы переименованы без дублей, цена уникальна
+        run: psql -v ON_ERROR_STOP=1 -q -f scripts/ci/test-plan-tariffs.sql
 
       - name: Версия артефакта неизменяема, а откат не переписывает историю
         run: psql -v ON_ERROR_STOP=1 -q -f scripts/ci/test-artifact-immutability.sql

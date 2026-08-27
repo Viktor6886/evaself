@@ -1746,19 +1746,43 @@ export class Database {
     return now.toISOString().slice(0, 10);
   }
 
-  async incrementUsage(telegramId: number, metric: string, amount = 1, period = "day"): Promise<number> {
+  /**
+   * Расход одной метрики. Пишется сразу во все периоды.
+   *
+   * Прежде счётчик увеличивался только за сутки. Схема при этом
+   * допускает лимиты на неделю и месяц, и представление их честно
+   * показывает — но расходовать их было нечем: недельный счётчик не
+   * увеличивал никто, и любой недельный лимит оставался нетронутым
+   * навсегда. Тариф с ограничением «столько-то в месяц» просто не
+   * работал бы.
+   *
+   * Три строки идут одним запросом: раздельные вызовы означали бы, что
+   * между ними ход может оборваться и расход попадёт в сутки, но не в
+   * месяц.
+   */
+  async incrementUsage(telegramId: number, metric: string, amount = 1): Promise<number> {
     const { rows } = await this.withUserScope(
       { telegramId, label: "db.incrementUsage", inherit: true },
-      async () => await this.require().query<{ used: string }>(
+      async () => await this.require().query<{ period: string; used: string }>(
       `INSERT INTO usage_counters (user_id, metric, period, period_start, used)
-       SELECT id, $2, $3, $4, $5 FROM users WHERE telegram_id = $1
+       SELECT u.id, $2, p.period, p.start::date, $3
+         FROM users u
+         CROSS JOIN (VALUES ('day', $4::text), ('week', $5::text), ('month', $6::text))
+              AS p(period, start)
+        WHERE u.telegram_id = $1
        ON CONFLICT (user_id, metric, period, period_start) DO UPDATE
          SET used = usage_counters.used + EXCLUDED.used, updated_at = now()
-       RETURNING used`,
-      [telegramId, metric, period, Database.periodStart(period), amount],
+       RETURNING period, used`,
+      [
+        telegramId, metric, amount,
+        Database.periodStart("day"),
+        Database.periodStart("week"),
+        Database.periodStart("month"),
+      ],
       ),
     );
-    return Number(rows[0]?.used ?? 0);
+    // Возвращается суточный: на него смотрят вызывающие и гейт хода.
+    return Number(rows.find((row) => row.period === "day")?.used ?? 0);
   }
 
   async isLlmSingleProviderSelected(id: string): Promise<boolean> {

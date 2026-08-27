@@ -27,6 +27,7 @@ const state = {
   settingProfiles: [],
   secrets: [],
   telegramTokens: [],
+  tariffs: null,
   showAllSecrets: false,
   users: [],
   currentUser: null,
