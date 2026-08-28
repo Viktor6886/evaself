@@ -1,4 +1,8 @@
 import {
+  sameAllowedUpdates,
+  TELEGRAM_ALLOWED_UPDATES,
+} from "./telegram/allowed-updates.js";
+import {
   formatEvaReply,
   isValidTelegramHtml,
   richMarkdownForTelegram,
@@ -473,6 +477,46 @@ export class TelegramClient implements OutboxTransport {
       currency: "XTR",
       prices: [{ label: invoice.label, amount: invoice.stars }],
     });
+  }
+
+  /**
+   * Привести вебхук к тому, что сервис действительно умеет принимать.
+   *
+   * Список видов апдейтов растёт вместе с продуктом, а ставится вебхук
+   * редко — при установке и при переезде на другого бота. Бот,
+   * зарегистрированный раньше, остаётся с прежним списком, и новые виды
+   * до сервиса не доходят: ни ошибки, ни следа. Оплата звёздами так и не
+   * работала — Telegram не доставлял `pre_checkout_query` и отменял
+   * платёж по таймауту.
+   *
+   * Поэтому сверка идёт при каждом старте. Она дешёвая (один запрос) и
+   * ничего не делает, когда всё на месте; отказ не мешает сервису
+   * работать — он просто останется с прежним вебхуком, и об этом будет
+   * сказано в журнале.
+   */
+  async ensureWebhook(url: string, secret: string): Promise<"ok" | "updated" | "failed"> {
+    if (!this.token || !url) return "ok";
+    try {
+      const info = await this.call<{ url?: string; allowed_updates?: string[] }>(
+        "getWebhookInfo",
+        {},
+      );
+      if (info.url === url && sameAllowedUpdates(info.allowed_updates)) return "ok";
+      await this.call("setWebhook", {
+        url,
+        secret_token: secret,
+        allowed_updates: TELEGRAM_ALLOWED_UPDATES,
+        // Очередь не сбрасывается: здесь не переезд на другого бота, а
+        // приведение списка в порядок, и накопленные сообщения — наши.
+        drop_pending_updates: false,
+      });
+      return "updated";
+    } catch (error) {
+      this.logger.warn("Не удалось сверить webhook", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return "failed";
+    }
   }
 
   /**
