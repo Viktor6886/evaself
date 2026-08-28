@@ -1348,8 +1348,90 @@
         ${quotas.length
           ? quotas.map((item) => `<p>${escapeHtml(item.name || item.type || "Квота")}: <strong>${escapeHtml(item.remaining ?? item.value ?? "—")}</strong></p>`).join("")
           : "<p>Подробная квота не передана сервером.</p>"}
+      </article>
+      <article class="section-card" id="subscription-offers">
+        <span class="eyebrow">ТАРИФЫ</span>
+        <p class="muted">Загружаю…</p>
       </article>`,
+      onMount: (host) => { void renderSubscriptionOffers(host); },
     });
+  }
+
+  /**
+   * Тарифы и оплата внутри приложения.
+   *
+   * Список и цена приходят с сервера, из того же прайса, что и в чате:
+   * второй прайс для приложения означал бы, что человек видит одну цену,
+   * а платит другую.
+   */
+  async function renderSubscriptionOffers(host) {
+    const card = host.querySelector("#subscription-offers");
+    if (!card) return;
+    let payload;
+    try {
+      payload = await api("/public/subscription/offers");
+    } catch (error) {
+      card.innerHTML = `<span class="eyebrow">ТАРИФЫ</span>
+        <p class="muted">Не удалось загрузить: ${escapeHtml(friendlyError(error))}</p>`;
+      return;
+    }
+    const offers = Array.isArray(payload?.offers) ? payload.offers : [];
+    if (!offers.length) {
+      // Пусто — это «продажи не настроены», а не поломка. Кнопка,
+      // которая ничего не делает, хуже честной строки.
+      card.innerHTML = `<span class="eyebrow">ТАРИФЫ</span>
+        <p class="muted">Оплата пока не настроена владельцем.</p>`;
+      return;
+    }
+    card.innerHTML = `<span class="eyebrow">ТАРИФЫ</span>
+      <p class="muted">Оплата звёздами Telegram — карта и адрес не нужны.</p>
+      ${offers.map((offer) => `
+        <button class="choice-button" type="button"
+                data-buy-plan="${escapeHtml(offer.plan)}"
+                data-buy-period="${escapeHtml(offer.period)}">
+          <strong>${escapeHtml(offer.title)}</strong>
+          <span>${escapeHtml(String(offer.stars))} ⭐</span>
+        </button>`).join("")}`;
+    card.querySelectorAll("[data-buy-plan]").forEach((button) => {
+      button.addEventListener("click", () => void buySubscription(button));
+    });
+  }
+
+  /** Счёт открывается внутри Telegram: приложение не закрывается. */
+  async function buySubscription(button) {
+    const { buyPlan, buyPeriod } = button.dataset;
+    button.disabled = true;
+    try {
+      const { link } = await api("/public/subscription/invoice", {
+        method: "POST",
+        body: JSON.stringify({ plan: buyPlan, period: buyPeriod }),
+      });
+      if (!link) throw new Error("Сервер не вернул ссылку на счёт");
+      if (!tg?.openInvoice) {
+        // Вне Telegram счёт открыть нечем. Молча ничего не делать
+        // нельзя: человек нажал и ждёт.
+        toast("Оплата доступна только внутри Telegram", true);
+        return;
+      }
+      tg.openInvoice(link, (status) => {
+        if (status === "paid") {
+          // Подписка открывается на сервере по событию Telegram, а не по
+          // ответу клиенту: обновляем сессию, чтобы карточка доступа
+          // показывала новый тариф, а не прежний.
+          toast("Оплата прошла. Подписка открыта.");
+          closeSheet();
+          void api("/public/session", { method: "POST" })
+            .then((session) => { state.session = session; })
+            .catch(() => undefined);
+        } else if (status === "failed") {
+          toast("Оплата не прошла", true);
+        }
+      });
+    } catch (error) {
+      toast(friendlyError(error), true);
+    } finally {
+      button.disabled = false;
+    }
   }
 
   function openPrivacySheet() {

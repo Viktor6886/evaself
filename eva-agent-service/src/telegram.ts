@@ -476,6 +476,30 @@ export class TelegramClient implements OutboxTransport {
   }
 
   /**
+   * Ссылка на счёт для Mini App.
+   *
+   * В чате счёт отправляют сообщением, но Mini App — не чат: там его
+   * открывает `openInvoice` по ссылке, не выходя из приложения. Счёт
+   * при этом тот же самый и с тем же payload, поэтому предварительная
+   * проверка и применение платежа ничем не отличаются от чатовых.
+   */
+  async createStarsInvoiceLink(invoice: {
+    title: string;
+    description: string;
+    payload: string;
+    stars: number;
+    label: string;
+  }): Promise<string> {
+    return await this.call<string>("createInvoiceLink", {
+      title: invoice.title,
+      description: invoice.description,
+      payload: invoice.payload,
+      currency: "XTR",
+      prices: [{ label: invoice.label, amount: invoice.stars }],
+    });
+  }
+
+  /**
    * Ответ на предварительную проверку.
    *
    * Telegram ждёт его не дольше десяти секунд и иначе отменяет платёж

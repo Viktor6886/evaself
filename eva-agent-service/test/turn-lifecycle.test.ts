@@ -566,6 +566,8 @@ async function runTelegramTurn(
     modelReply?: string;
     /** Что продаётся: пусто — продажи не настроены. */
     offers?: Array<{ plan: string; period: string; stars: number; title: string }>;
+    /** Домен Mini App. Пусто — приложения у установки нет. */
+    appDomain?: string;
     /** Команда вместо обычного сообщения. */
     command?: string;
     /** Отметка отправки последнего сообщения, секунды epoch. */
@@ -835,6 +837,9 @@ async function runTelegramTurn(
       typingIntervalMs: 4000,
       lockTtlSeconds: 180,
       mediaServiceUrl: "http://media-service:8090",
+      // Домен Mini App: пусто — установка без приложения, и кнопке на
+      // него взяться неоткуда.
+      domains: { app: options.appDomain ?? "" },
     } as never,
     db as never,
     letta as never,
@@ -1761,12 +1766,26 @@ test("исчерпанный лимит приходит вместе с пре�
   assert.match(JSON.stringify(probe.markups[0]), /buy:plus:month/u);
 });
 
-test("без настроенных продаж лимит объясняют, но оплату не обещают", async () => {
+test("без настроенных продаж лимит всё равно ведёт к тарифам", async () => {
+  // Человеку, упёршемуся в лимит, нужен путь дальше, а не только
+  // сообщение о том, что путь кончился. Mini App показывает тарифы и
+  // принимает оплату, даже когда звёздных предложений в чате нет.
+  const probe = await runTelegramTurn(undefined, {
+    quota: [{ metric: "messages", remaining: 0 }],
+    appDomain: "app.example.test",
+  });
+  const delivered = probe.sent.join("\n");
+  assert.match(delivered, /по кнопке ниже/u);
+  assert.doesNotMatch(delivered, /подписку прямо здесь/u);
+  assert.equal(probe.markups.length, 1);
+  assert.match(JSON.stringify(probe.markups[0]), /app\.example\.test/u);
+});
+
+test("без Mini App и без продаж лимит просто объясняют", async () => {
   const probe = await runTelegramTurn(undefined, {
     quota: [{ metric: "messages", remaining: 0 }],
   });
   const delivered = probe.sent.join("\n");
   assert.match(delivered, /обновится/u);
-  assert.doesNotMatch(delivered, /подписку прямо здесь/u);
-  assert.equal(probe.markups.length, 0, "кнопки оплаты быть не должно");
+  assert.equal(probe.markups.length, 0, "обещать оплату, которой нет, нельзя");
 });

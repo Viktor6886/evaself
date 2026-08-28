@@ -638,6 +638,25 @@ export function registerPublicRoutes(
     rateLimiter?: RateLimiter;
     approvals?: { decide(input: { telegramId: number; sdkRequestId: string; decision: "allow" | "deny" }): Promise<unknown> };
     knowledgeResearch?: KnowledgeResearchPublic;
+    /**
+     * Подписка в Mini App. Отсутствует — раздел честно говорит, что
+     * оплата не настроена, вместо кнопки, которая ничего не делает.
+     */
+    subscription?: {
+      offers(): Promise<Array<{
+        plan: string; period: string; stars: number;
+        title: string; description: string;
+      }>>;
+      /**
+       * Ссылка на счёт: Mini App открывает её, не выходя из приложения.
+       *
+       * Владелец назван идентификатором Telegram — единственным, который
+       * здесь проверен подписью. Внутренний идентификатор ищет тот, у
+       * кого есть база: подставить его здесь значило бы выдать счёт не
+       * тому человеку и записать чужое намерение оплаты.
+       */
+      invoiceLink(telegramId: number, plan: string, period: string): Promise<string>;
+    };
   },
 ): void {
   const limiter = input.rateLimiter ?? new NoopRateLimiter();
@@ -748,6 +767,34 @@ export function registerPublicRoutes(
         ...session,
         session_token: token,
         session_expires_in: input.config.webAppSessionTtlSeconds,
+      };
+    });
+
+    /*
+     * Подписка внутри Mini App.
+     *
+     * Продаётся то же и по той же цене, что в чате: и список, и счёт
+     * приходят из `plan_prices` через тот же сервис. Второго прайса для
+     * приложения нет — цена, разошедшаяся с чатовой, была бы обманом.
+     */
+    publicApp.get("/subscription/offers", async () => ({
+      offers: input.subscription ? await input.subscription.offers() : [],
+      // Пусто — не поломка, а «продажи не настроены»: приложению нужно
+      // различать эти два случая, чтобы не показывать пустой раздел
+      // молча.
+      available: Boolean(input.subscription),
+    }));
+
+    publicApp.post("/subscription/invoice", async (request) => {
+      if (!input.subscription) throw badRequest("Оплата не настроена");
+      const body = requestBody(request) as { plan?: unknown; period?: unknown };
+      const plan = String(body.plan ?? "");
+      const period = String(body.period ?? "");
+      if (!plan || !period) throw badRequest("Не выбран тариф или срок");
+      // Счёт выставляется тому, кто открыл приложение: владелец берётся
+      // из проверенной подписи Telegram, а не из тела запроса.
+      return {
+        link: await input.subscription.invoiceLink(publicUser(request).id, plan, period),
       };
     });
 
