@@ -294,8 +294,8 @@ function telegramTokenAction(action, id) {
     scope: "secrets:write",
     title: `Перевести Еву на @${token.bot_username}?`,
     description: "Вебхук снимется у прежнего бота и встанет новому. Люди, писавшие прежнему, к новому"
-      + " сами не перейдут: им придётся начать с ним диалог. Чтобы смена вступила в силу, потребуется"
-      + " перезапуск eva-agent-service.",
+      + " сами не перейдут: им придётся начать с ним диалог. Смена действует сразу — перезапускать"
+      + " ничего не нужно.",
     action: async () => {
       const { payload } = await request(`/telegram/tokens/${encodeURIComponent(id)}/activate`, { method: "POST" });
       // Переезд состоялся в любом случае: вебхук переставлен, выбор
@@ -303,9 +303,9 @@ function telegramTokenAction(action, id) {
       // и если нет, человеку нужно знать, что делать руками, иначе он
       // увидит бота, который принимает сообщения, но отвечает прежним.
       toast(payload.applied_live
-        ? `Активен @${token.bot_username}. Сервис перезапущен, смена уже действует.`
+        ? `Активен @${token.bot_username}. Смена уже действует.`
         : `Активен @${token.bot_username}, но применить не удалось: ${payload.apply_error || "сервис операций недоступен"}.`
-          + ` Пропишите токен в .env и перезапустите ${payload.restart_required || "eva-agent-service"}.`,
+          + ` Пропишите токен в .env и выполните: ${payload.restart_required || "docker compose up -d eva-agent-service"}`,
         !payload.applied_live);
       await loadTelegramTokens();
     },

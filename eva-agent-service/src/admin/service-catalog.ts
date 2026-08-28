@@ -40,9 +40,19 @@ export interface IntegrationDefinition {
  * списку, а не по таблице, — поэтому лишняя строка ничего не показывает
  * и ничего не ломает.
  */
+/**
+ * Идентификатор рантайма Евы в этом каталоге.
+ *
+ * Он же — имя цели для сервиса операций: тот знает контейнеры по
+ * идентификаторам каталога, а не по именам сервисов compose. Вынесен в
+ * константу, чтобы вызывающий не подставил `eva-agent-service`: такую цель
+ * updater отклоняет, а понятно это становится только в проде.
+ */
+export const AGENT_RUNTIME_ID = "agent-runtime";
+
 export const SERVICES: readonly ServiceDefinition[] = [
   {
-    id: "agent-runtime",
+    id: AGENT_RUNTIME_ID,
     title: "Agent Runtime",
     purpose: "Telegram, очереди, инструменты и официальный Letta Agent SDK",
     group: "core",
@@ -153,7 +163,7 @@ export const INTEGRATIONS: readonly IntegrationDefinition[] = [
     title: "Telegram",
     purpose: "Бот, webhook, Mini App, inbox и outbox",
     group: "external",
-    serviceId: "agent-runtime",
+    serviceId: AGENT_RUNTIME_ID,
     requiredSecrets: ["sec_eva_telegram_bot_token", "sec_eva_telegram_webhook_secret"],
     requiredSettings: ["bootstrap.env.owner.telegram.id"],
   },
@@ -197,6 +207,21 @@ export const INTEGRATIONS: readonly IntegrationDefinition[] = [
 ] as const;
 
 export const SERVICE_BY_ID = new Map(SERVICES.map((item) => [item.id, item]));
+
+/**
+ * Имя контейнера цели каталога — или null, если такой цели нет.
+ *
+ * compose называет контейнеры `evaself-<сервис>`, а поле `container`
+ * держит имя сервиса compose: отсюда приставка. Сервис операций берёт
+ * свои цели отсюда, а не из собственного списка. Второй список означал
+ * бы, что добавленная в каталог служба для него не существует, — а
+ * разошедшийся идентификатор виден только на проде, отказом в ответ на
+ * действие человека.
+ */
+export function containerNameOf(id: string): string | null {
+  const service = SERVICE_BY_ID.get(id);
+  return service ? `evaself-${service.container}` : null;
+}
 export const INTEGRATION_BY_ID = new Map(INTEGRATIONS.map((item) => [item.id, item]));
 
 export function statusColor(input: {

@@ -28,7 +28,7 @@ import { TurnOperationsService } from "./turn-operations.js";
 import { DeleteGuard } from "../letta/delete-guard.js";
 import { createTelegramBotApi } from "./telegram-bot-api.js";
 import { TariffService } from "./tariff-service.js";
-import { TelegramTokenService } from "./telegram-token-service.js";
+import { createTelegramRuntimeApply, TelegramTokenService } from "./telegram-token-service.js";
 import { SecurityAuditService } from "./security-audit.js";
 import { RetentionService } from "../retention/service.js";
 import { UpdaterClient } from "./updater-client.js";
@@ -161,17 +161,13 @@ async function main(): Promise<void> {
     }),
     webhookUrl: `https://${process.env.DOMAIN_API ?? ""}/telegram/webhook`,
     webhookSecret: process.env.EVA_TELEGRAM_WEBHOOK_SECRET ?? "",
-    // Выбранный токен доносится до `.env` и сервис перечитывает
-    // окружение: secret_records ему недоступны — мастер-ключ монтируется
-    // только административным контейнерам.
-    runtime: {
-      setToken: async (token) => {
-        await new UpdaterClient().call("set_telegram_token", { token });
-      },
-      restart: async () => {
-        await new UpdaterClient().call("restart_service", { service: "eva-agent-service" }, 120_000);
-      },
-    },
+    // Выбранный токен доносится и до `.env`, и до работающего сервиса:
+    // secret_records ему недоступны — мастер-ключ монтируется только
+    // административным контейнерам.
+    runtime: createTelegramRuntimeApply({
+      updater: new UpdaterClient(),
+      agent: agentClient,
+    }),
     logger,
   });
 

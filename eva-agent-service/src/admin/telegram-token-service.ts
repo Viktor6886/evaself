@@ -19,12 +19,22 @@
 import type pg from "pg";
 
 import { adminBadRequest, adminNotFound } from "./errors.js";
+import type { InternalAgentClient } from "./provider-service.js";
 import type { SecretStore } from "./secret-store.js";
+import type { UpdaterClient } from "./updater-client.js";
 
 /** Больше пяти ботов у одной установки — это уже не переезд, а свалка. */
 const MAX_TOKENS = 5;
 
 const TOKEN_SECRET_REF = "sec_eva_telegram_bot_token";
+
+/**
+ * Что человеку сделать руками, если автоматика не дошла.
+ *
+ * Именно `up -d`, а не `restart`: перезапуск отдаёт контейнеру то
+ * окружение, с которым он был создан, и правку `.env` не заметит.
+ */
+const RECREATE_HINT = "docker compose up -d eva-agent-service";
 
 export interface TelegramBotTokenView {
   id: string;
@@ -45,12 +55,20 @@ export interface TelegramBotApi {
   deleteWebhook(token: string): Promise<void>;
 }
 
-/** Что нужно, чтобы выбранный токен доехал до работающего сервиса. */
+/**
+ * Что нужно, чтобы выбранный токен доехал до работающего сервиса.
+ *
+ * Шага два, и они отвечают за разное время. `persist` кладёт токен в
+ * `.env` — это переживёт пересоздание контейнера, но само по себе на
+ * работающий процесс не влияет: compose подставляет значение при
+ * создании контейнера, и перезапуск возвращает контейнеру прежнее
+ * окружение. `applyLive` доносит токен до рантайма прямо сейчас.
+ */
 export interface TelegramRuntimeApply {
-  /** Записать токен в `.env` установки. */
-  setToken(token: string): Promise<void>;
-  /** Перечитать окружение: токен читается при старте. */
-  restart(): Promise<void>;
+  /** Записать токен в `.env` установки — ради следующего `compose up`. */
+  persist(token: string): Promise<void>;
+  /** Донести токен до работающего сервиса — ради этой минуты. */
+  applyLive(token: string): Promise<void>;
 }
 
 export interface TelegramTokenServiceOptions {
@@ -64,6 +82,34 @@ export interface TelegramTokenServiceOptions {
   /** Заголовок, которым webhook отличает Telegram от постороннего. */
   webhookSecret: string;
   logger: { info(message: string, meta?: unknown): void; warn(message: string, meta?: unknown): void };
+}
+
+/**
+ * Как выбор бота доходит до установки в проде.
+ *
+ * Собран здесь, а не в сборке административного сервера: там это было
+ * четыре строки, которые нечем проверить, и цена ошибки в них — отказ
+ * ровно в тот момент, когда человек нажал «Сделать активным».
+ *
+ * Оба клиента уже существуют и используются: `UpdaterClient` — узкий
+ * контракт команд к хосту, `InternalAgentClient` — тот самый путь,
+ * которым панель доносит до рантайма настройки моделей.
+ */
+export function createTelegramRuntimeApply(input: {
+  updater: Pick<UpdaterClient, "call">;
+  agent: Pick<InternalAgentClient, "request">;
+}): TelegramRuntimeApply {
+  return {
+    persist: async (token) => {
+      await input.updater.call("set_telegram_token", { token });
+    },
+    applyLive: async (token) => {
+      await input.agent.request("/v1/telegram/token", {
+        method: "POST",
+        body: JSON.stringify({ token }),
+      });
+    },
+  };
 }
 
 export class TelegramTokenService {
@@ -145,7 +191,7 @@ export class TelegramTokenService {
     const row = await this.row(id);
     if (row.is_active === true) {
       return {
-        token: toView(row), restart_required: "eva-agent-service",
+        token: toView(row), restart_required: RECREATE_HINT,
         applied_live: true, apply_error: null,
       };
     }
@@ -158,20 +204,24 @@ export class TelegramTokenService {
     await this.options.api.setWebhook(token, this.options.webhookUrl, this.options.webhookSecret);
     await this.options.secrets.put(TOKEN_SECRET_REF, token, ["telegram-runtime"], actorId);
 
-    // Токен обязан дойти до `.env`.
+    // Токен обязан дойти до работающего сервиса.
     //
-    // secret_records читают только административные контейнеры: мастер-ключ
-    // монтируется им, а eva-agent-service берёт токен из окружения при
-    // старте. Без этой записи переезд выглядел исправным и ломался
+    // secret_records читают только административные контейнеры:
+    // мастер-ключ монтируется им, а eva-agent-service берёт токен из
+    // окружения. Без этого шага переезд выглядел исправным и ломался
     // ровно посередине: вебхук уже стоял на новом боте и входящие
     // приходили ему, а ответы продолжали уходить прежним токеном — со
     // стороны так, будто новый бот пересылает сообщения старому.
+    //
+    // Одной правкой `.env` это не лечится: её увидит только заново
+    // созданный контейнер. Поэтому `.env` — ради следующего
+    // `compose up`, а рантайму токен доносится отдельным шагом.
     let appliedLive = false;
     let applyError: string | null = null;
     try {
       if (!this.options.runtime) throw new Error("сервис операций недоступен");
-      await this.options.runtime.setToken(token);
-      await this.options.runtime.restart();
+      await this.options.runtime.persist(token);
+      await this.options.runtime.applyLive(token);
       appliedLive = true;
     } catch (error) {
       applyError = error instanceof Error ? error.message : String(error);
@@ -217,7 +267,7 @@ export class TelegramTokenService {
     });
     return {
       token: toView(rows[0]!),
-      restart_required: "eva-agent-service",
+      restart_required: RECREATE_HINT,
       applied_live: appliedLive,
       apply_error: applyError,
     };

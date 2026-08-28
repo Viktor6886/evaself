@@ -37,6 +37,7 @@
 | Telegram limits | `retry_after` и распределённые лимиты | `src/delivery/telegram-limits.ts` |
 | Интерактивные элементы | Кнопки и опросы | `src/telegram/inline-choices.ts`, `src/telegram/polls.ts` |
 | Live message | Показ streaming-ответа одним редактируемым сообщением | Telegram client runtime |
+| Боты Евы | До пяти сохранённых токенов, активен один; переезд переставляет вебхук и меняет бота в рантайме без перезапуска | `src/admin/telegram-token-service.ts`, `POST /v1/telegram/token` |
 
 ## Фоновые задания
 
@@ -90,7 +91,7 @@ BullMQ не обрабатывает интерактивный ход и не �
 | Мониторинг | Состояние сервисов, история проверок и ошибки за окно | `src/admin/health-service.ts`, `src/admin/health-worker.ts` |
 | Secret Store | Зашифрованные write-only секреты | `src/admin/secret-store.ts` |
 | Outbound gateway | SSRF-защита внешних Base URL | `src/admin/outbound-gateway.ts` |
-| Updater | Ограниченные операции обновления/перезапуска | `src/admin/updater-index.ts` |
+| Updater | Ограниченные операции обновления/перезапуска; цели берутся из каталога служб | `src/admin/updater-index.ts`, `src/admin/service-catalog.ts` |
 | Observability | Метрики, трассировка и privacy boundary | `src/observability/`, `src/metrics.ts` |
 | Retention | Политики и применение сроков хранения | `src/retention/` |
 | Backup/restore | Зашифрованный архив и восстановление | `scripts/backup.sh`, `scripts/restore.sh`, `backup-service/` |

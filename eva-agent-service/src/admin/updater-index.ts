@@ -8,6 +8,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import { globalSecretRedactor } from "./redactor.js";
+import { containerNameOf } from "./service-catalog.js";
 
 const execFileAsync = promisify(execFile);
 const dockerSocket = process.env.DOCKER_HOST_SOCKET ?? "/var/run/docker.sock";
@@ -65,20 +66,6 @@ async function secureUpdaterSocket(): Promise<void> {
   await chmod(updaterSocket, 0o660);
 }
 
-const CONTAINERS = new Map<string, string>([
-  ["agent-runtime", "evaself-eva-agent-service"],
-  ["app-server", "evaself-letta-app-server"],
-  ["admin-api", "evaself-admin-api"],
-  ["admin-ui", "evaself-admin-ui"],
-  ["postgres", "evaself-postgres"],
-  ["valkey", "evaself-valkey"],
-  ["media-service", "evaself-media-service"],
-  ["searxng", "evaself-searxng"],
-  ["crawl4ai", "evaself-crawl4ai"],
-  ["caddy", "evaself-caddy"],
-  ["webapp", "evaself-webapp"],
-  ["backup-service", "evaself-backup-service"],
-]);
 
 interface RequestMessage {
   id?: unknown;
@@ -132,9 +119,16 @@ function dockerRequest<T>(
   });
 }
 
+/*
+ * Цели известны из каталога служб: он и так перечисляет всё, что
+ * установка обязана иметь работающим, вместе с именами сервисов compose.
+ * Собственный список здесь был копией — и разошёлся: панель просила
+ * перезапуск по имени контейнера, а список знал идентификатор каталога,
+ * и человек получал «Сервис отсутствует в списке разрешённых» на
+ * действие, которое обязано было сработать.
+ */
 function containerName(target: unknown): string {
-  const id = String(target ?? "");
-  const name = CONTAINERS.get(id);
+  const name = containerNameOf(String(target ?? ""));
   if (!name) throw new Error("Сервис отсутствует в списке разрешённых");
   return name;
 }
