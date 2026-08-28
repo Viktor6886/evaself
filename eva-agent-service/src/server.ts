@@ -483,6 +483,31 @@ export function buildServer(services: Services): FastifyInstance {
     return { result };
   });
 
+  /*
+   * Смена бота Телеграма без перезапуска.
+   *
+   * Токен лежит зашифрованным в secret_records, и ключ к ним есть
+   * только у административных контейнеров: у этого сервиса его нет и
+   * по устройству быть не должно. Поэтому расшифровывает панель, а
+   * сюда доносит уже готовое значение — тем же внутренним API, каким
+   * доносит настройки моделей.
+   *
+   * Перезапуск эту задачу не решает: compose подставляет значение из
+   * `.env` при создании контейнера, и перезапущенный контейнер получает
+   * прежнее окружение. `.env` панель тоже пишет — но ради следующего
+   * `compose up`, а не ради этой минуты.
+   */
+  app.post("/v1/telegram/token", async (request) => {
+    const body = (request.body ?? {}) as { token?: unknown };
+    const token = typeof body.token === "string" ? body.token.trim() : "";
+    if (!token) throw new EvaError("token обязателен", { statusCode: 400 });
+    config.telegramBotToken = token;
+    telegram.setToken(token);
+    const username = await telegram.username();
+    logger.info("Telegram: рантайм принял другой токен", { bot: username });
+    return { applied: true, username };
+  });
+
   app.get("/v1/system", async () => {
     const providers = await llm.list();
     const active = providers.find((provider) => provider.is_active) ?? null;

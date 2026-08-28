@@ -291,11 +291,12 @@ export function nextLivePrefix(current: string, target: string, maxWords: number
 }
 
 export class TelegramClient implements OutboxTransport {
-  private readonly token: string;
+  private token: string;
   private readonly baseUrl: string;
   private readonly logger: Logger;
   private readonly db: Database | null;
-  private readonly stickers: TelegramStickerCatalog;
+  private readonly stickerCatalog: unknown;
+  private stickers: TelegramStickerCatalog;
   private outbox: OutboxDelivery | null = null;
   private cachedUsername: string | null | undefined;
   private readonly deliveryContext = new AsyncLocalStorage<{
@@ -326,11 +327,37 @@ export class TelegramClient implements OutboxTransport {
     this.baseUrl = config.telegramApiBaseUrl.replace(/\/+$/, "");
     this.logger = logger;
     this.db = db ?? null;
+    this.stickerCatalog = config.telegramStickerCatalog;
     this.stickers = new TelegramStickerCatalog(
-      config.telegramStickerCatalog,
+      this.stickerCatalog,
       this.token,
       this.db,
       logger,
+    );
+  }
+
+  /**
+   * Сменить бота на ходу.
+   *
+   * Перезапуск для этого не годится: compose подставляет
+   * `EVA_TELEGRAM_BOT_TOKEN` из `.env` при создании контейнера, а
+   * `docker restart` возвращает контейнеру то окружение, с которым он
+   * был создан. Правка `.env` доживёт до следующего `compose up`, но
+   * до работающего процесса сама по себе не дойдёт — поэтому токен
+   * доносит сюда административный контур, у которого есть ключ, чтобы
+   * его расшифровать.
+   *
+   * Каталог стикеров пересоздаётся: file_id принадлежат тому боту,
+   * который их загрузил, и новому Telegram их не отдаст.
+   */
+  setToken(token: string): void {
+    this.token = token;
+    this.cachedUsername = undefined;
+    this.stickers = new TelegramStickerCatalog(
+      this.stickerCatalog,
+      token,
+      this.db,
+      this.logger,
     );
   }
 

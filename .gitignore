@@ -44,3 +44,6 @@ dist/
 
 /evals/reports/
 /evals/.cache/
+
+# Артефакт локального прогона браузерных тестов.
+admin-ui/test-results/

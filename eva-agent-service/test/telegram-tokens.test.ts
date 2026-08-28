@@ -13,7 +13,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { TelegramTokenService } from "../dist/admin/telegram-token-service.js";
+import {
+  createTelegramRuntimeApply,
+  TelegramTokenService,
+} from "../dist/admin/telegram-token-service.js";
+import { containerNameOf } from "../dist/admin/service-catalog.js";
+import { TelegramClient } from "../dist/telegram.js";
+import { buildServer } from "../dist/server.js";
+import { withTenantScopes } from "./tenant-scope-helper.ts";
 
 const ENVELOPE = {
   ciphertext: Buffer.from("cipher"),
@@ -145,7 +152,9 @@ test("вебхук ставится новому боту раньше, чем �
   // Активный токен ложится в прежний ref: его читают service-catalog,
   // bootstrap и форма интеграций, и менять их не пришлось.
   assert.deepEqual(written, [{ ref: "sec_eva_telegram_bot_token", value: "TOKEN-VALUE" }]);
-  assert.equal(result.restart_required, "eva-agent-service");
+  // Именно `up -d`: перезапуск отдаёт контейнеру то окружение, с
+  // которым он был создан, и правку `.env` не заметил бы.
+  assert.equal(result.restart_required, "docker compose up -d eva-agent-service");
 });
 
 test("отказ Telegram на новом боте оставляет прежнего нетронутым", async () => {
@@ -196,9 +205,10 @@ test("неудача при снятии вебхука у прежнего пе
  * прежним токеном. Со стороны выглядело так, будто новый бот пересылает
  * сообщения старому.
  */
-test("выбранный токен доезжает до .env, и сервис перечитывает окружение", async () => {
+test("выбранный токен доезжает и до .env, и до работающего сервиса", async () => {
   const order: string[] = [];
   let written: string | null = null;
+  let live: string | null = null;
   const svc = service({
     pool: pool({
       row: [ROW()],
@@ -212,16 +222,16 @@ test("выбранный токен доезжает до .env, и сервис 
       deleteWebhook: async () => { order.push("deleteWebhook"); },
     },
     runtime: {
-      setToken: async (token: string) => { order.push("env"); written = token; },
-      restart: async () => { order.push("restart"); },
+      persist: async (token: string) => { order.push("env"); written = token; },
+      applyLive: async (token: string) => { order.push("live"); live = token; },
     },
   });
 
   const result = await svc.activate(ROW().id, null);
   assert.equal(written, "TOKEN-VALUE", "в .env должен уехать сам токен");
+  assert.equal(live, "TOKEN-VALUE", "и он же — в работающий сервис");
   // Вебхук первым: откажет Telegram — ничего ещё не изменилось.
-  // Перезапуск после записи: иначе сервис перечитал бы прежний токен.
-  assert.deepEqual(order, ["setWebhook", "env", "restart", "deleteWebhook"]);
+  assert.deepEqual(order, ["setWebhook", "env", "live", "deleteWebhook"]);
   assert.equal(result.applied_live, true);
   assert.equal(result.apply_error, null);
 });
@@ -235,8 +245,8 @@ test("недоступный сервис операций не отменяет
       setWebhook: async () => {}, deleteWebhook: async () => {},
     },
     runtime: {
-      setToken: async () => { throw new Error("socket недоступен"); },
-      restart: async () => { throw new Error("не должен вызываться"); },
+      persist: async () => { throw new Error("socket недоступен"); },
+      applyLive: async () => { throw new Error("не должен вызываться"); },
     },
   });
 
@@ -283,4 +293,157 @@ test("список не содержит ни токена, ни его шифр
   assert.doesNotMatch(serialized, /cipher|ciphertext|auth_tag|TOKEN-VALUE/u);
   assert.equal(view.tokens[0]!.bot_username, "eva_bot");
   assert.equal(view.limit, 5);
+});
+
+/*
+ * Как выбор доходит до прода.
+ *
+ * Обе цели пишутся строками в чужие контракты, и ошибка в них видна
+ * только на живой установке: панель отвечала «Сервис отсутствует в
+ * списке разрешённых», потому что перезапуск просили по имени
+ * контейнера, а сервис операций знает цели по идентификаторам каталога.
+ */
+test("боевой адаптер шлёт токен обеими дорогами", async () => {
+  const updaterCalls: Array<{ command: string; params: Record<string, unknown> }> = [];
+  const agentCalls: Array<{ path: string; body: unknown }> = [];
+  const apply = createTelegramRuntimeApply({
+    updater: {
+      call: async (command: string, params: Record<string, unknown> = {}) => {
+        updaterCalls.push({ command, params });
+        return null;
+      },
+    },
+    agent: {
+      request: async (path: string, options: { body?: unknown } = {}) => {
+        agentCalls.push({ path, body: options.body });
+        return null;
+      },
+    },
+  });
+
+  await apply.persist("TOKEN-VALUE");
+  await apply.applyLive("TOKEN-VALUE");
+
+  assert.deepEqual(updaterCalls, [
+    { command: "set_telegram_token", params: { token: "TOKEN-VALUE" } },
+  ]);
+  assert.equal(agentCalls.length, 1);
+  assert.equal(agentCalls[0]?.path, "/v1/telegram/token");
+  assert.deepEqual(JSON.parse(String(agentCalls[0]?.body)), { token: "TOKEN-VALUE" });
+});
+
+test("сервис операций знает цели по идентификаторам каталога", () => {
+  assert.equal(containerNameOf("agent-runtime"), "evaself-eva-agent-service");
+  // Имя сервиса compose целью не является. Разница между этими двумя
+  // строками и стоила человеку отказа на кнопке «Сделать активным».
+  assert.equal(containerNameOf("eva-agent-service"), null);
+});
+
+/*
+ * Переезд обязан состояться в этом же процессе.
+ *
+ * Перезапуск здесь не помощник: compose подставляет
+ * `EVA_TELEGRAM_BOT_TOKEN` в контейнер при создании, и перезапущенный
+ * контейнер получает то же окружение, что и раньше. Пока рантайм не
+ * умеет сменить токен на ходу, панель может сколько угодно писать
+ * `.env` — отвечать будет прежний бот.
+ */
+test("рантайм отвечает новым ботом сразу после смены токена", async () => {
+  const urls: string[] = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (url: unknown) => {
+    urls.push(String(url));
+    return new Response(JSON.stringify({ ok: true, result: { username: "новый_bot" } }), {
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof globalThis.fetch;
+  try {
+    const telegram = new TelegramClient(
+      { telegramBotToken: "СТАРЫЙ", telegramApiBaseUrl: "https://api.telegram.invalid" } as never,
+      { debug() {}, info() {}, warn() {}, error() {} },
+    );
+    await telegram.call("sendMessage", { chat_id: 1, text: "до" });
+    telegram.setToken("НОВЫЙ");
+    await telegram.call("sendMessage", { chat_id: 1, text: "после" });
+
+    assert.match(urls[0] ?? "", /\/botСТАРЫЙ\//u);
+    assert.match(urls[1] ?? "", /\/botНОВЫЙ\//u, "исходящие обязаны уйти новым токеном");
+    // Имя бота кешируется на время процесса — после переезда кеш назвал
+    // бы человеку прежнего бота.
+    assert.equal(await telegram.username(), "новый_bot");
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+/*
+ * Дорога, которой панель доносит токен до рантайма.
+ *
+ * Она же — единственная: мастер-ключ секретов этому сервису не
+ * монтируется, поэтому расшифровать токен он не может и получает его
+ * готовым, тем же внутренним ключом, что и остальные `/v1`.
+ */
+test("внутренний маршрут смены токена закрыт ключом и меняет бота", async () => {
+  const API_KEY = "test-internal-key-32-characters!!";
+  const applied: string[] = [];
+  const config = {
+    apiKey: API_KEY,
+    port: 0,
+    host: "127.0.0.1",
+    domains: { root: "", app: "", api: "", letta: "", status: "" },
+    turnLifecycleEnabled: false,
+    healthRateLimitPerIp: 100,
+    rateLimitWindowSeconds: 60,
+    publicRateLimitPerIp: 100,
+    publicRateLimitPerUser: 100,
+    webhookRateLimitPerIp: 100,
+    telegramBotToken: "СТАРЫЙ",
+  };
+  const app = buildServer({
+    config: config as never,
+    logger: { debug() {}, info() {}, warn() {}, error() {} } as never,
+    db: withTenantScopes({
+      query: async () => ({ rows: [] }),
+      poolStats: () => ({ total: 0, idle: 0, waiting: 0 }),
+    }) as never,
+    letta: { sessionStats: () => ({ active: 0, idle: 0 }) } as never,
+    sdk: {} as never,
+    llm: {} as never,
+    inbox: {} as never,
+    profile: {} as never,
+    goals: {} as never,
+    payments: {} as never,
+    queue: { activeUsers: 0, queuedUsers: 0 } as never,
+    telegram: {
+      setToken: (token: string) => { applied.push(token); },
+      username: async () => "новый_bot",
+    } as never,
+    redisPing: async () => true,
+  });
+  try {
+    const anonymous = await app.inject({
+      method: "POST", url: "/v1/telegram/token", payload: { token: "НОВЫЙ" },
+    });
+    assert.equal(anonymous.statusCode, 401, "чужой смены бота быть не может");
+    assert.deepEqual(applied, []);
+
+    const empty = await app.inject({
+      method: "POST", url: "/v1/telegram/token",
+      headers: { "x-api-key": API_KEY }, payload: { token: "   " },
+    });
+    assert.equal(empty.statusCode, 400);
+
+    const ok = await app.inject({
+      method: "POST", url: "/v1/telegram/token",
+      headers: { "x-api-key": API_KEY }, payload: { token: "НОВЫЙ" },
+    });
+    assert.equal(ok.statusCode, 200);
+    assert.deepEqual(JSON.parse(ok.body), { applied: true, username: "новый_bot" });
+    assert.deepEqual(applied, ["НОВЫЙ"]);
+    // Mini App проверяет initData тем же токеном: он читается из config
+    // на каждом запросе, поэтому переезд обязан дойти и туда.
+    assert.equal(config.telegramBotToken, "НОВЫЙ");
+  } finally {
+    await app.close();
+  }
 });
