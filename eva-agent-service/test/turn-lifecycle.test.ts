@@ -562,6 +562,8 @@ async function runTelegramTurn(
     deltaGapMs?: number;
     /** Минимальный промежуток между правками показанного сообщения. */
     liveIntervalMs?: number;
+    /** Что «ответила» модель: для проверок, зависящих от текста ответа. */
+    modelReply?: string;
     /** Команда вместо обычного сообщения. */
     command?: string;
     /** Отметка отправки последнего сообщения, секунды epoch. */
@@ -770,7 +772,9 @@ async function runTelegramTurn(
         }
       }
       return {
-      reply: deltas ? streamedReply.trim() : "Понимаю. Расскажи, что было дальше.",
+      reply: deltas
+        ? streamedReply.trim()
+        : options.modelReply ?? "Понимаю. Расскажи, что было дальше.",
       reasoning: [],
       assistantGroups: 1,
       assistantHadIds: true,
@@ -1697,4 +1701,33 @@ test("без просьбы инструмента клавиатуры не п�
   const harness = await runTelegramTurn(undefined, {});
   assert.equal(harness.markups.length, 0);
   assert.equal(harness.issuedTokens.length, 0);
+});
+
+/*
+ * Женский род доходит до человека, а не только до модуля.
+ *
+ * Правку легко написать и забыть подключить: тесты самого модуля при
+ * этом остаются зелёными, а в чат уходит прежний текст. Здесь
+ * проверяется именно проводка — то, что ушло в Telegram.
+ */
+test("ответ уходит человеку в женском роде", async () => {
+  const probe = await runTelegramTurn(undefined, {
+    modelReply: "Понял. Я сделал что мог и я рад помочь.",
+  });
+  const delivered = probe.sent.join("\n");
+  assert.match(delivered, /Поняла/u, "короткая реплика не поправлена");
+  assert.match(delivered, /Я сделала/u, "сказуемое при «я» не поправлено");
+  assert.match(delivered, /я рада/u, "краткое прилагательное не поправлено");
+  // Придаточное «что мог» правило не берёт: подлежащее там опущено, а
+  // угадывать его нельзя. Известный предел, а не упущение.
+  assert.match(delivered, /что мог/u);
+});
+
+test("ответ без мужского рода уходит слово в слово", async () => {
+  const original = "Расскажи, как прошёл твой день.";
+  const probe = await runTelegramTurn(undefined, { modelReply: original });
+  assert.ok(
+    probe.sent.some((item) => item.includes(original)),
+    "текст, который трогать не нужно, изменился",
+  );
 });

@@ -5,6 +5,7 @@ import {
 } from "../i18n/language-resolver.js";
 import { shouldSuppressProfileQuestion } from "../profile/profile-completeness.js";
 import {
+  formatLocalShort,
   humanizeInterval,
   localDateWithWeekday,
   localNow,
@@ -44,6 +45,15 @@ export interface RuntimeContext {
    * сообщения нет: разговор начинается.
    */
   sincePreviousMessage: string | null;
+  /**
+   * Когда было предыдущее сообщение — по местному времени человека.
+   *
+   * Промежутка одного мало. «Три часа» модель читает как оценку и
+   * рассуждает от неё вольно; две отметки на часах — это две точки,
+   * между которыми либо помещается поездка в другой город, либо нет,
+   * и разница видна без арифметики.
+   */
+  previousMessageLocalTime: string | null;
   timezone: string;
   city: string | null;
   countryCode: string | null;
@@ -278,6 +288,9 @@ export class RuntimeContextBuilder {
         input.currentMessageAt ?? local.toJSDate(),
         input.previousUserMessageAt ?? null,
       ),
+      previousMessageLocalTime: input.previousUserMessageAt
+        ? formatLocalShort(input.previousUserMessageAt, timezone)
+        : null,
       timezone,
       city: row.city,
       countryCode: row.country_code,
@@ -331,6 +344,7 @@ export class RuntimeContextBuilder {
       // Ева знает из персоны: правило постоянное, и платить за него в
       // каждом сообщении незачем.
       ["since_previous_user_message", context.sincePreviousMessage],
+      ["previous_user_message_local_time", context.previousMessageLocalTime],
       ["timezone", context.timezone],
       ["city", context.city],
       ["response_language", context.responseLanguage],

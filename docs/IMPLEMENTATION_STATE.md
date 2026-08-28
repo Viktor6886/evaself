@@ -37,6 +37,7 @@
 | Telegram limits | `retry_after` и распределённые лимиты | `src/delivery/telegram-limits.ts` |
 | Интерактивные элементы | Кнопки и опросы | `src/telegram/inline-choices.ts`, `src/telegram/polls.ts` |
 | Live message | Показ streaming-ответа одним редактируемым сообщением | Telegram client runtime |
+| Женский род | Детерминированная правка речи Евы о себе на выходе; правило персоны перестаёт быть вероятностью | `src/i18n/eva-gender.ts` |
 | Боты Евы | До пяти сохранённых токенов, активен один; переезд переставляет вебхук и меняет бота в рантайме без перезапуска | `src/admin/telegram-token-service.ts`, `POST /v1/telegram/token` |
 
 ## Фоновые задания

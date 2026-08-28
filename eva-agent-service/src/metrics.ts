@@ -15,6 +15,7 @@
 import { monitorEventLoopDelay, type IntervalHistogram } from "node:perf_hooks";
 
 import type { Database } from "./db.js";
+import { genderFixStats } from "./i18n/eva-gender.js";
 import { deliveryStats, jobStats, providerStats } from "./metrics-queries.js";
 import { runtimeContextSizeStats } from "./runtime/runtime-context.js";
 import type { TurnClass } from "./turns/semaphores.js";
@@ -136,6 +137,7 @@ export class MetricsCollector {
     const delivery = await deliveryStats(this.sources.db);
     const telemetry = this.sources.telemetryBuffer?.() ?? { buffered: 0, dropped: 0 };
     const contextSize = runtimeContextSizeStats();
+    const genderFix = genderFixStats();
     const latency = this.sources.queryLatency?.() ?? { avg: 0, max: 0, samples: 0 };
 
     const samples: Sample[] = [
@@ -392,6 +394,18 @@ export class MetricsCollector {
       // Имя семейства не называет транспорт: аудит приватности
       // запрещает `telegram_` в именах метрик — так в имя метрики
       // попадает идентификатор человека.
+      {
+        name: "eva_gender_corrections_total",
+        help: "Срывы Евы в мужской род, поправленные на выходе. Без текста.",
+        type: "counter",
+        values: [{ value: genderFix.corrections }],
+      },
+      {
+        name: "eva_gender_checked_replies_total",
+        help: "Ответы Евы, прошедшие проверку рода.",
+        type: "counter",
+        values: [{ value: genderFix.replies }],
+      },
       {
         name: "eva_reactions_total",
         help: "Реакции на сообщения: попытки, успехи и отказы. Без текста и без emoji.",
