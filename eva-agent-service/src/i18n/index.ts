@@ -8,7 +8,11 @@ const ru = {
   unsupportedMessage:
     "Сейчас я понимаю текст, голосовые сообщения, изображения и небольшие документы.",
   messageQuotaEnded:
-    "Лимит сообщений на текущий период закончился. Проверить его можно командой /balance.",
+    "Лимит сообщений на текущий период закончился. Он обновится в начале следующего периода — проверить можно командой /balance.",
+  messageQuotaEndedWithOffer:
+    "Свободные сообщения на этот период закончились — я пока не смогу отвечать."
+    + " Можно оформить подписку прямо здесь, а можно дождаться обновления лимита:"
+    + " сколько его осталось и когда он обновится, покажет /balance.",
   voiceQuotaEnded:
     "Лимит распознавания голоса закончился. Можно продолжить текстом.",
   emptyReply: "Я рядом. Попробуй сформулировать это немного иначе.",
@@ -47,7 +51,11 @@ const en: Record<keyof typeof ru, string> = {
   unsupportedMessage:
     "I currently understand text, voice messages, images, and small documents.",
   messageQuotaEnded:
-    "Your message allowance for this period is used up. Check it with /balance.",
+    "Your message allowance for this period is used up. It resets at the start of the next period — check it with /balance.",
+  messageQuotaEndedWithOffer:
+    "You have used up the free messages for this period, so I cannot reply for now."
+    + " You can subscribe right here, or wait for the limit to reset:"
+    + " /balance shows what is left and when it renews.",
   voiceQuotaEnded:
     "Your voice transcription allowance is used up. You can continue with text.",
   emptyReply: "I’m here. Try phrasing that a little differently.",

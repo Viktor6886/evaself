@@ -173,6 +173,14 @@ async function main(): Promise<void> {
     runtime: createTelegramRuntimeApply({
       updater: new UpdaterClient(),
       agent: agentClient,
+      // Токен нужен двум службам: рантайму — чтобы отвечать, и
+      // media-service — чтобы скачать голосовое у Telegram. Реестр
+      // секретов называет обе; доводить его нужно до обеих.
+      media: {
+        baseUrl: process.env.EVA_MEDIA_SERVICE_URL ?? "http://media-service:8090",
+        serviceToken: async () => (process.env.MEDIA_SERVICE_TOKEN ?? "").trim()
+          || await secrets.get("sec_media_service_token"),
+      },
     }),
     logger,
   });

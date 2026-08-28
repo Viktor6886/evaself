@@ -19,6 +19,7 @@
 import type pg from "pg";
 
 import { adminBadRequest, adminNotFound } from "./errors.js";
+import { pushMediaConfig } from "./media-runtime.js";
 import { declaredUsedBy, type SecretStore } from "./secret-store.js";
 import { INTEGRATION_BY_ID } from "./service-catalog.js";
 
@@ -298,28 +299,13 @@ export class IntegrationConfigService {
     section: "asr" | "tts",
     values: Record<string, string>,
   ): Promise<{ applied: boolean; error?: string }> {
-    if (Object.keys(values).length === 0) return { applied: false };
-    const token = await this.mediaToken();
-    if (!token) {
-      return { applied: false, error: "MEDIA_SERVICE_TOKEN не задан" };
-    }
-    try {
-      const response = await fetch(`${this.mediaUrl.replace(/\/+$/, "")}/config/media`, {
-        method: "PUT",
-        headers: { "content-type": "application/json", "X-Media-Key": token },
-        body: JSON.stringify({ [section]: values }),
-        signal: AbortSignal.timeout(15_000),
-      });
-      if (!response.ok) {
-        return { applied: false, error: `media-service вернул HTTP ${response.status}` };
-      }
-      return { applied: true };
-    } catch (error) {
-      return {
-        applied: false,
-        error: error instanceof Error ? error.message : "media-service недоступен",
-      };
-    }
+    // Сам запрос общий с переездом на другого бота: он тоже доносит
+    // значение до media-service тем же путём.
+    return await pushMediaConfig({
+      baseUrl: this.mediaUrl,
+      serviceToken: await this.mediaToken(),
+      payload: { [section]: values },
+    });
   }
 
   /** Запускает настоящую проверку синтеза или распознавания. */

@@ -623,10 +623,11 @@ export class EvaWorkflow {
           messageQuota?.remaining !== undefined &&
           Number(messageQuota.remaining) <= 0
         ) {
-          await this.telegram.sendMessage(
-            update.chatId,
-            t(language, "messageQuotaEnded"),
-          );
+          // Кончились сообщения — человеку нужен не отчёт о лимите, а
+          // выход из положения. Предложение оплаты идёт тем же
+          // сообщением: отправлять его в другой команде значит просить
+          // человека догадаться, что делать дальше.
+          await this.sendQuotaOffer(update.chatId, language);
           await this.stopTurn(turnHandle, "quota_messages");
           return { status: "ignored" };
         }
@@ -1232,6 +1233,31 @@ export class EvaWorkflow {
    * нужны, нужен только барьер отмены. Ход, который его увидит,
    * закончится сам и ничего не доставит.
    */
+  /**
+   * Лимит кончился: сказать об этом и сразу предложить выход.
+   *
+   * Кнопки те же, что у `/subscription`, и берутся из включённых цен.
+   * Продажи не настроены — остаётся только текст: обещать оплату,
+   * которой нет, хуже, чем честно назвать предел.
+   */
+  private async sendQuotaOffer(
+    chatId: number,
+    language: SupportedLanguage,
+  ): Promise<void> {
+    const offers = this.stars ? await this.stars.offers().catch(() => []) : [];
+    const buttons = offers.map((offer) => [{
+      text: `${offer.title} — ${offer.stars} ⭐`,
+      callback_data: `buy:${offer.plan}:${offer.period}`,
+    }]);
+    await this.telegram.sendMessage(
+      chatId,
+      buttons.length
+        ? t(language, "messageQuotaEndedWithOffer")
+        : t(language, "messageQuotaEnded"),
+      buttons.length ? { reply_markup: { inline_keyboard: buttons } } : {},
+    );
+  }
+
   /**
    * Выставить счёт в звёздах.
    *

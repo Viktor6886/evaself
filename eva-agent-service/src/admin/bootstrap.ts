@@ -33,7 +33,7 @@ const SAFE_EXTRA_SETTINGS = new Set([
 ]);
 
 const SECRET_USED_BY: Record<string, string[]> = {
-  EVA_TELEGRAM_BOT_TOKEN: ["telegram-runtime"],
+  EVA_TELEGRAM_BOT_TOKEN: ["agent-runtime", "media-service"],
   EVA_TELEGRAM_WEBHOOK_SECRET: ["telegram-runtime"],
   EVA_AGENT_API_KEY: ["agent-runtime"],
   LETTA_APP_SERVER_TOKEN: ["agent-runtime", "app-server"],

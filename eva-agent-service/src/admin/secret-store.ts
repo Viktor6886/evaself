@@ -30,7 +30,12 @@ export interface SecretStoreOptions {
 }
 
 const KNOWN_SECRETS: Readonly<Record<string, string[]>> = {
-  sec_eva_telegram_bot_token: ["telegram-runtime"],
+  // Токен бота нужен двум службам: рантайм им отвечает, а media-service
+  // скачивает им голосовое у Telegram. Прежняя запись называла одну
+  // выдуманную цель «telegram-runtime», и вторая служба выпадала из
+  // виду — ровно так голосовые и перестали распознаваться после
+  // переезда на другого бота.
+  sec_eva_telegram_bot_token: ["agent-runtime", "media-service"],
   sec_eva_telegram_webhook_secret: ["telegram-runtime"],
   sec_eva_agent_api_key: ["agent-runtime"],
   sec_letta_app_server_token: ["agent-runtime", "app-server"],

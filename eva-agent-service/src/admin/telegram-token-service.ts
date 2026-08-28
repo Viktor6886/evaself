@@ -19,6 +19,7 @@
 import type pg from "pg";
 
 import { adminBadRequest, adminNotFound } from "./errors.js";
+import { pushMediaConfig } from "./media-runtime.js";
 import type { InternalAgentClient } from "./provider-service.js";
 import type { SecretStore } from "./secret-store.js";
 import type { UpdaterClient } from "./updater-client.js";
@@ -98,6 +99,15 @@ export interface TelegramTokenServiceOptions {
 export function createTelegramRuntimeApply(input: {
   updater: Pick<UpdaterClient, "call">;
   agent: Pick<InternalAgentClient, "request">;
+  /**
+   * Media-service. Голосовое он скачивает у Telegram сам и своим
+   * токеном: без этого шага переезд оставлял распознавание на прежнем
+   * боте, и человек получал «не получилось распознать» без причины.
+   */
+  media: {
+    baseUrl: string;
+    serviceToken: () => Promise<string | null>;
+  };
 }): TelegramRuntimeApply {
   return {
     persist: async (token) => {
@@ -108,6 +118,17 @@ export function createTelegramRuntimeApply(input: {
         method: "POST",
         body: JSON.stringify({ token }),
       });
+      const media = await pushMediaConfig({
+        baseUrl: input.media.baseUrl,
+        serviceToken: await input.media.serviceToken(),
+        payload: { telegram: { bot_token: token } },
+      });
+      // Отказ media-service не отменяет переезд: бот уже сменился, и
+      // текстом Ева отвечает. Но молчать нельзя — иначе голосовые
+      // перестанут распознаваться, а причина не будет названа нигде.
+      if (!media.applied) {
+        throw new Error(`распознавание голоса осталось на прежнем боте: ${media.error ?? "media-service недоступен"}`);
+      }
     },
   };
 }
