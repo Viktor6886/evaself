@@ -42,6 +42,7 @@ import {
   telegramMessageIdOf,
   TelegramFileTooLarge,
 } from "./telegram.js";
+import { feminizeSelfReference, recordGenderFix } from "./i18n/eva-gender.js";
 import { speechTextFromReply } from "./telegram-format.js";
 import {
   AttachmentError,
@@ -986,7 +987,22 @@ export class EvaWorkflow {
           return { status: "ignored" };
         }
 
-        const reply = turn.reply.trim() || t(language, "emptyReply");
+        // Ева говорит о себе в женском роде. Правило записано в персоне,
+        // в системном промпте и в директиве резерву — и всё равно
+        // срывается на коротких репликах. Здесь оно перестаёт быть
+        // вероятностью: правка детерминированная, смысла не трогает и
+        // молчит, когда трогать нечего.
+        const answered = turn.reply.trim() || t(language, "emptyReply");
+        const gender = feminizeSelfReference(answered);
+        recordGenderFix(gender.corrections.length);
+        if (gender.corrections.length > 0) {
+          this.logger.info("Ответ приведён к женскому роду", {
+            updateId: update.updateId,
+            // Только сами формы: текста ответа в журнале нет и быть не может.
+            corrections: gender.corrections.slice(0, 5),
+          });
+        }
+        const reply = gender.text;
         const wantsText = responseMode === "text" || responseMode === "both";
         const wantsVoice = responseMode === "voice" || responseMode === "both";
 

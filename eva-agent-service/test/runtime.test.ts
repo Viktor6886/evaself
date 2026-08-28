@@ -712,6 +712,11 @@ test("ход знает день недели и промежуток с про�
   const prompt = builder.wrapUserMessage(context, "сделал");
   assert.match(prompt, /local_date: пятница, 14 августа 2026/);
   assert.match(prompt, /since_previous_user_message: 9 секунд/);
+  // Промежутка одного мало: «девять секунд» модель читает как оценку и
+  // рассуждает от неё вольно. Две отметки на часах — это две точки, и
+  // помещается между ними поездка или нет, видно без арифметики.
+  assert.equal(context.previousMessageLocalTime, "14 августа, 17:00");
+  assert.match(prompt, /previous_user_message_local_time: 14 августа, 17:00/);
   // Что делать с промежутком, Ева знает из персоны — в ходе только факт.
   assert.doesNotMatch(prompt, /since_previous_user_message_note/);
 });
@@ -722,8 +727,10 @@ test("первое сообщение промежутка не выдумыва
     userId: 1, conversationId: "c", userMessage: "привет", previousUserMessageAt: null,
   });
   assert.equal(context.sincePreviousMessage, null);
+  assert.equal(context.previousMessageLocalTime, null);
   const prompt = builder.wrapUserMessage(context, "привет");
   assert.doesNotMatch(prompt, /since_previous_user_message/);
+  assert.doesNotMatch(prompt, /previous_user_message_local_time/);
 });
 
 test("длинные промежутки называются старшими единицами", async () => {
