@@ -376,11 +376,25 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
   app.setErrorHandler((error: unknown, request, reply) => {
     const context = contexts.get(request);
     const apiError = toAdminError(error);
+    // У ответа наружу подробностей нет и быть не должно, но у записи в
+    // журнале они обязаны быть. Прежде «internal_error» не оставлял ни
+    // причины, ни места: 500 в панели нельзя было объяснить ничем, кроме
+    // догадок, и разбор такой ошибки стоил нескольких заходов вместо
+    // одного. Текст и стек проходят через редактор секретов — тот же,
+    // которым чистится ответ.
+    const cause = apiError.statusCode >= 500 && error instanceof Error
+      ? {
+        reason: String(globalSecretRedactor.redact(error.message)).slice(0, 300),
+        reason_name: error.name,
+        at: String(globalSecretRedactor.redact(error.stack ?? "")).split("\n")[1]?.trim(),
+      }
+      : {};
     services.logger.error("Ошибка admin-api", {
       request_id: context?.requestId,
       url: request.url,
       code: apiError.code,
       status: apiError.statusCode,
+      ...cause,
     });
     reply.status(apiError.statusCode).send({
       error: {

@@ -59,19 +59,23 @@ export class TariffService {
    * тариф связан с расходом.
    */
   async state(): Promise<Record<string, unknown>> {
+    // Четыре независимых источника, и раньше падение любого гасило всю
+    // вкладку: человек видел четыре пустые карточки и общее «внутренняя
+    // ошибка», по которому нельзя понять даже, какая из них не пришла.
+    // Теперь каждая отвечает за себя и называет свою причину.
     const [limits, prices, usage, subscribers] = await Promise.all([
-      this.pool.query(
+      this.read(
         `SELECT plan, metric, period, limit_value, free_value
            FROM quotas ORDER BY plan, metric, period`,
       ),
-      this.pool.query(
+      this.read(
         `SELECT plan, period, stars, enabled, updated_at
            FROM plan_prices ORDER BY plan, period`,
       ),
       // Расход всей установки по метрикам за сутки и месяц. Людей в
       // ответе нет — только количества: кто именно сколько потратил,
       // видно в карточке пользователя, и туда ведёт отдельный доступ.
-      this.pool.query(
+      this.read(
         `
           -- tenant: system — сводный расход установки для вкладки тарифов, доступ ограничен RBAC на маршруте
           SELECT metric, period, sum(used)::bigint AS used, count(*)::int AS users
@@ -83,7 +87,7 @@ export class TariffService {
                  END
            GROUP BY metric, period`,
       ),
-      this.pool.query(
+      this.read(
         `
           -- tenant: system — сколько человек на каждом тарифе, без единой пользовательской строки
           SELECT COALESCE(plan, 'free') AS plan, count(*)::int AS people
@@ -92,6 +96,10 @@ export class TariffService {
            GROUP BY plan`,
       ),
     ]);
+    const errors: Record<string, string> = {};
+    for (const [name, source] of Object.entries({ limits, prices, usage, subscribers })) {
+      if (source.error) errors[name] = source.error;
+    }
     return {
       plans: PLANS,
       limit_periods: LIMIT_PERIODS,
@@ -105,7 +113,28 @@ export class TariffService {
       // подписка. Панель показывает его человеку, а не выдумывает своё.
       period_days: PERIOD_DAYS,
       period_titles: PERIOD_TITLE,
+      // Пусто — пришло всё. Иначе здесь названо, что именно не пришло и
+      // почему: страница администратора обязана объяснять свой отказ, а
+      // не оставлять человека с общей фразой.
+      errors,
     };
+  }
+
+  /**
+   * Запрос, который не роняет соседей.
+   *
+   * Причина отказа сохраняется вместе с кодом PostgreSQL: по нему видно
+   * «нет такой колонки» против «нет прав» без чтения журнала на сервере.
+   */
+  private async read(text: string): Promise<{ rows: unknown[]; error?: string }> {
+    try {
+      const { rows } = await this.pool.query(text);
+      return { rows };
+    } catch (error) {
+      const code = (error as { code?: string })?.code;
+      const message = error instanceof Error ? error.message : String(error);
+      return { rows: [], error: code ? `${code}: ${message}` : message };
+    }
   }
 
   /**
