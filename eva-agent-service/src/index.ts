@@ -551,6 +551,19 @@ async function main(): Promise<void> {
       });
     });
   }
+  // Вебхук приводится к действующему списку видов апдейтов.
+  //
+  // Ставится он редко — при установке и при переезде на другого бота, —
+  // а список растёт вместе с продуктом. Без этой сверки бот,
+  // зарегистрированный раньше, молча не получает новые виды: так и не
+  // работала оплата звёздами.
+  void telegram.ensureWebhook(
+    config.domains?.api ? `https://${config.domains.api}/telegram/webhook` : "",
+    config.telegramWebhookSecret,
+  ).then((outcome) => {
+    if (outcome === "updated") logger.info("Webhook приведён к действующему списку апдейтов");
+  }).catch(() => undefined);
+
   logger.info("eva-agent-service принимает запросы", {
     version: VERSION,
     port: config.port,

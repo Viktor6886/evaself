@@ -431,6 +431,13 @@ jobs:
       - name: Every path named in the docs exists
         run: python3 scripts/ci/assert-doc-paths.py
 
+      # Список видов апдейтов ограничительный: чего в нём нет, того
+      # webhook не увидит — молча. Ставят вебхук код и установщик; их
+      # списки обязаны совпадать, иначе отказ будет тихим и на живых
+      # деньгах, как это случилось с оплатой звёздами.
+      - name: Webhook update kinds match between code and installer
+        run: python3 scripts/ci/assert-allowed-updates.py
+
       - name: No secrets in tracked files
         run: |
           if git ls-files --error-unmatch .env >/dev/null 2>&1; then

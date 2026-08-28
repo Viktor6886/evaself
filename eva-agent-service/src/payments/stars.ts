@@ -46,9 +46,22 @@ export const PERIOD_DAYS: Record<string, number> = {
   quarter: 90,
 };
 
-/** Как срок называется человеку. */
+/** Как срок называется человеку в заголовке: «Ева Плюс — неделя». */
 export const PERIOD_TITLE: Record<string, string> = {
   week: "неделя",
+  month: "месяц",
+  quarter: "три месяца",
+};
+
+/**
+ * Тот же срок в винительном падеже: «подписка на неделю».
+ *
+ * Отдельной формой, а не склейкой: «на неделя» человек читает как
+ * небрежность, и первое же впечатление от платного продукта — что его
+ * делали наспех.
+ */
+export const PERIOD_FOR: Record<string, string> = {
+  week: "неделю",
   month: "месяц",
   quarter: "три месяца",
 };
@@ -282,6 +295,7 @@ function describe(plan: string, period: string, stars: number): StarsOffer {
     period,
     stars,
     title: `${planTitle} — ${periodTitle}`,
-    description: `Подписка «${planTitle}» на ${periodTitle}. Оплата звёздами Telegram.`,
+    description: `Подписка «${planTitle}» на ${PERIOD_FOR[period] ?? periodTitle}.`
+      + " Оплата звёздами Telegram.",
   };
 }

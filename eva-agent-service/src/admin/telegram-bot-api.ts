@@ -8,27 +8,7 @@
  * а инструмент управления тем, каким клиент станет.
  */
 
-/*
- * Что Telegram вообще доставляет боту.
- *
- * Список ограничительный: чего в нём нет, того webhook не увидит — молча,
- * без ошибки. Здесь не хватало двух видов, и оба отказывали именно так.
- *
- * `pre_checkout_query` — подтверждение перед списанием звёзд. Без него
- * Telegram не спросит подтверждения, не дождётся ответа и отменит платёж:
- * оплата не работала бы вовсе, а причина не была бы видна нигде.
- *
- * `poll_answer` — голос человека в опросе. Ева умеет их отправлять и
- * разбирать ответы, но после переезда на другого бота ответы переставали
- * приходить.
- */
-const ALLOWED_UPDATES = [
-  "message",
-  "edited_message",
-  "callback_query",
-  "poll_answer",
-  "pre_checkout_query",
-] as const;
+import { TELEGRAM_ALLOWED_UPDATES as ALLOWED_UPDATES } from "../telegram/allowed-updates.js";
 
 export interface TelegramBotApiOptions {
   baseUrl: string;
