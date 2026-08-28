@@ -39,6 +39,7 @@
 | Live message | Показ streaming-ответа одним редактируемым сообщением | Telegram client runtime |
 | Женский род | Детерминированная правка речи Евы о себе на выходе; правило персоны перестаёт быть вероятностью | `src/i18n/eva-gender.ts` |
 | Оплата звёздами | Счёт, предварительная проверка до списания, применение платежа и возврат — в тех же `payments`, `payment_intents`, `subscriptions` | `src/payments/stars.ts`, `src/payments/grant.ts` |
+| Подписка в Mini App | Тарифы и оплата внутри приложения: тот же прайс и тот же счёт, что в чате | `src/public/routes.ts`, `webapp/public/app/app.js` |
 | Доставка настроек в media-service | `PUT /config/media` одним путём для формы интеграций и для переезда на другого бота | `src/admin/media-runtime.ts` |
 | Боты Евы | До пяти сохранённых токенов, активен один; переезд переставляет вебхук и меняет бота в рантайме без перезапуска | `src/admin/telegram-token-service.ts`, `POST /v1/telegram/token` |
 

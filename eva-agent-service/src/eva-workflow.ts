@@ -1245,15 +1245,31 @@ export class EvaWorkflow {
     language: SupportedLanguage,
   ): Promise<void> {
     const offers = this.stars ? await this.stars.offers().catch(() => []) : [];
-    const buttons = offers.map((offer) => [{
+    const buttons: Array<Array<Record<string, unknown>>> = offers.map((offer) => [{
       text: `${offer.title} — ${offer.stars} ⭐`,
       callback_data: `buy:${offer.plan}:${offer.period}`,
     }]);
+    // Mini App показывает тарифы и принимает оплату не выходя из
+    // Telegram. Кнопка на него нужна и тогда, когда звёздных
+    // предложений нет: человеку, упёршемуся в лимит, нужен путь
+    // дальше, а не только сообщение о том, что путь кончился.
+    // Домен приложения может быть не настроен — в установке без Mini App
+    // или в проверке. Отсутствие раздела конфигурации не должно ронять
+    // путь, по которому человек упёрся в лимит.
+    const app = this.config.domains?.app;
+    if (app) {
+      buttons.push([{
+        text: t(language, "openSubscriptionApp"),
+        web_app: { url: `https://${app}` },
+      }]);
+    }
     await this.telegram.sendMessage(
       chatId,
-      buttons.length
+      offers.length
         ? t(language, "messageQuotaEndedWithOffer")
-        : t(language, "messageQuotaEnded"),
+        : app
+          ? t(language, "messageQuotaEndedWithApp")
+          : t(language, "messageQuotaEnded"),
       buttons.length ? { reply_markup: { inline_keyboard: buttons } } : {},
     );
   }

@@ -234,6 +234,31 @@ export function buildServer(services: Services): FastifyInstance {
     rateLimiter,
     ...(services.approvals ? { approvals: { decide: async (input) => await services.approvals!.decideByTelegram(input) } } : {}),
     ...(services.knowledgeResearch ? { knowledgeResearch: services.knowledgeResearch } : {}),
+    // Подписка в Mini App: тот же прайс и тот же счёт, что в чате.
+    // Ссылку на счёт делает Bot API — Mini App открывает её, не выходя
+    // из приложения, и платёж дальше идёт обычным путём.
+    ...(stars
+      ? {
+        subscription: {
+          offers: async () => await stars.offers(),
+          invoiceLink: async (telegramId: number, plan: string, period: string) => {
+            // Подпись Telegram подтверждает идентификатор Telegram;
+            // намерение оплаты записывается на внутреннего владельца.
+            // Перевод — здесь, где есть база: в публичном слое его нет.
+            const owner = await db.findUserByTelegramId(telegramId);
+            if (!owner) throw new EvaError("Пользователь не найден", { statusCode: 404 });
+            const invoice = await stars.invoice(Number(owner.id), plan, period);
+            return await telegram.createStarsInvoiceLink({
+              title: invoice.title,
+              description: invoice.description,
+              payload: invoice.payload,
+              stars: invoice.stars,
+              label: invoice.title,
+            });
+          },
+        },
+      }
+      : {}),
   });
 
   // Новые разделы Mini App (задачи, заметки, бюджет, решения, check-in,

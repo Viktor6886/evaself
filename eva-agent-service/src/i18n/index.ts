@@ -13,6 +13,11 @@ const ru = {
     "Свободные сообщения на этот период закончились — я пока не смогу отвечать."
     + " Можно оформить подписку прямо здесь, а можно дождаться обновления лимита:"
     + " сколько его осталось и когда он обновится, покажет /balance.",
+  messageQuotaEndedWithApp:
+    "Лимит сообщений на текущий период закончился — я пока не смогу отвечать."
+    + " Тарифы и оплата — по кнопке ниже. Лимит обновится в начале следующего"
+    + " периода; сколько осталось, покажет /balance.",
+  openSubscriptionApp: "Тарифы и оплата",
   voiceQuotaEnded:
     "Лимит распознавания голоса закончился. Можно продолжить текстом.",
   emptyReply: "Я рядом. Попробуй сформулировать это немного иначе.",
@@ -56,6 +61,11 @@ const en: Record<keyof typeof ru, string> = {
     "You have used up the free messages for this period, so I cannot reply for now."
     + " You can subscribe right here, or wait for the limit to reset:"
     + " /balance shows what is left and when it renews.",
+  messageQuotaEndedWithApp:
+    "The message limit for this period is used up, so I cannot reply for now."
+    + " Plans and payment are behind the button below. The limit resets at the"
+    + " start of the next period; /balance shows what is left.",
+  openSubscriptionApp: "Plans and payment",
   voiceQuotaEnded:
     "Your voice transcription allowance is used up. You can continue with text.",
   emptyReply: "I’m here. Try phrasing that a little differently.",
