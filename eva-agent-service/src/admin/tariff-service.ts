@@ -182,8 +182,13 @@ export class TariffService {
     const limit = this.integer(body.limit_value, "limit_value", -1);
     const free = this.integer(body.free_value ?? 0, "free_value", 0);
     if (free > limit && limit >= 0) {
+      // Строка названа поимённо: без неё человек видит отказ и не знает,
+      // в какой из двух десятков клеток он ошибся.
+      const title = METRICS.find((entry) => entry.metric === metric)?.title ?? metric;
       throw adminBadRequest(
-        "Пробных не может быть больше лимита тарифа: иначе платить будет не за что.",
+        `«${title}», ${period === "day" ? "сутки" : period === "week" ? "неделя" : "месяц"}: `
+        + `пробных ${free} при лимите ${limit}. `
+        + "Пробных не может быть больше лимита тарифа: иначе платить будет не за что.",
       );
     }
     const { rows } = await this.pool.query<TariffLimit>(

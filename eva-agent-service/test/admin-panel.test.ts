@@ -250,7 +250,7 @@ interface HarnessOptions {
   monitoring?: unknown;
 }
 
-function harness(db: FakeDb, options: HarnessOptions = {}) {
+function harness(db: FakeDb, options: HarnessOptions & { tariffs?: unknown } = {}) {
   process.env.EVA_ADMIN_CRUD = "0";
   process.env.EVA_ARTIFACT_VERSIONS = "0";
   const agentClient = options.agent ?? new FakeAgentClient();
@@ -296,6 +296,7 @@ function harness(db: FakeDb, options: HarnessOptions = {}) {
       },
     },
     config: {}, secrets: {}, operations: {}, providers: {},
+    ...(options.tariffs ? { tariffs: options.tariffs } : {}),
     llmRouter: {}, stt: {}, integrations: {}, users: {},
     events: { publish: async () => undefined },
     logger: { debug() {}, info() {}, warn() {}, error() {} },
@@ -906,4 +907,63 @@ test("мониторинг доступен на чтение любому во�
   });
   assert.equal(response.statusCode, 200, response.body);
   await app.close();
+});
+
+/*
+ * Вкладка тарифов читает данные людей.
+ *
+ * Сводка расхода живёт в `usage_counters`, состав тарифов — в
+ * `subscriptions`. Маршрут, забывший `tenantAccess: "cross-user"`, до них
+ * не доходит: граница арендатора требует записи аудита, и без неё
+ * возвращает отказ. Именно так вкладка и открывалась с «внутренней
+ * ошибкой» — у неё этого объявления не было с самого появления.
+ */
+test("маршрут тарифов объявляет доступ к данным людей и потому работает", async () => {
+  const db = new FakeDb();
+  const { app, audits } = harness(db, {
+    tariffs: {
+      state: async () => {
+        // Настоящие таблицы, настоящая граница: если объявления нет,
+        // запрос отсюда и не пройдёт.
+        await db.query(
+          "SELECT metric, period, sum(used) FROM usage_counters GROUP BY metric, period", [],
+        );
+        await db.query(
+          "SELECT plan, count(*) FROM subscriptions WHERE status IN ('active') GROUP BY plan", [],
+        );
+        return { limits: [], prices: [], usage: [], subscribers: [], errors: {} };
+      },
+    },
+  });
+  await app.ready();
+  const response = await app.inject({
+    method: "GET", url: "/api/admin/v1/tariffs", headers: COOKIE,
+  });
+  assert.equal(response.statusCode, 200, response.body);
+  // Чтение чужих данных обязано попасть в аудит — это и есть цена
+  // объявления, а не формальность.
+  assert.equal(
+    audits.some((entry) => entry.operation.includes("/tariffs")), true,
+    "чтение данных людей не записано в аудит",
+  );
+});
+
+test("журнал платежей объявляет то же самое", async () => {
+  const db = new FakeDb();
+  const { app } = harness(db, {
+    tariffs: {
+      payments: async () => {
+        await db.query(
+          "SELECT p.id FROM payments p JOIN users u ON u.id = p.user_id WHERE p.provider = $1",
+          ["telegram_stars"],
+        );
+        return { payments: [], totals: [], limit: 50 };
+      },
+    },
+  });
+  await app.ready();
+  const response = await app.inject({
+    method: "GET", url: "/api/admin/v1/tariffs/payments", headers: COOKIE,
+  });
+  assert.equal(response.statusCode, 200, response.body);
 });
