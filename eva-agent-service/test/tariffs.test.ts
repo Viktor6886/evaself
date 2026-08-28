@@ -118,3 +118,44 @@ test("сводный расход не выносит наружу ни одно
   // обязан называть, от чьего имени он идёт.
   assert.match(usage.text, /-- tenant: system/u);
 });
+
+/*
+ * Вкладка тарифов собирается из четырёх независимых источников.
+ *
+ * Пока падение любого гасило её целиком, человек видел четыре пустые
+ * карточки и общее «внутренняя ошибка»: по нему нельзя понять даже,
+ * какая часть не пришла, и разбор начинался с чтения журнала на сервере.
+ */
+test("отказ одного запроса не гасит соседние панели и называет себя", async () => {
+  const pool = {
+    query: async (text: string) => {
+      if (text.includes("FROM plan_prices")) {
+        const error = new Error('relation "plan_prices" does not exist') as Error & { code?: string };
+        error.code = "42P01";
+        throw error;
+      }
+      return { rows: [{ ok: true }] };
+    },
+  };
+  const state = await new TariffService(pool as never).state() as {
+    limits: unknown[]; prices: unknown[]; usage: unknown[];
+    subscribers: unknown[]; errors: Record<string, string>;
+  };
+
+  assert.equal(state.prices.length, 0, "упавший источник отдаёт пусто, а не мусор");
+  assert.equal(state.limits.length, 1, "соседние панели обязаны прийти");
+  assert.equal(state.usage.length, 1);
+  assert.equal(state.subscribers.length, 1);
+  // Код PostgreSQL отличает «нет такой таблицы» от «нет прав» без
+  // чтения журнала на сервере.
+  assert.match(state.errors.prices ?? "", /42P01/u);
+  assert.deepEqual(Object.keys(state.errors), ["prices"]);
+});
+
+test("всё пришло — списка отказов нет", async () => {
+  const pool = { query: async () => ({ rows: [] }) };
+  const state = await new TariffService(pool as never).state() as {
+    errors: Record<string, string>;
+  };
+  assert.deepEqual(state.errors, {});
+});

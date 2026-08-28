@@ -18,12 +18,29 @@ async function loadTariffs() {
   renderTariffUsage();
 }
 
+/**
+ * Панель, которая не пришла, объясняет себя на своём месте.
+ *
+ * Раньше отказ любого из четырёх запросов гасил вкладку целиком и
+ * оставлял общий тост «внутренняя ошибка»: по нему нельзя понять даже,
+ * какая часть не пришла, и разбор начинался с чтения журнала на
+ * сервере.
+ */
+function tariffFailure(source) {
+  const reason = (state.tariffs.errors || {})[source];
+  return reason
+    ? `<p class="warn-value">Не удалось загрузить: ${escapeHtml(reason)}</p>`
+    : null;
+}
+
 function tariffEditable() {
   return ["owner", "admin"].includes(state.me.role);
 }
 
 /** Цена: тариф × срок → звёзды. Бесплатный тариф не продаётся. */
 function renderTariffPrices() {
+  const failure = tariffFailure("prices");
+  if (failure) { $("#tariff-prices").innerHTML = failure; return; }
   const data = state.tariffs;
   const editable = tariffEditable();
   const paid = data.plans.filter((plan) => plan !== "free");
@@ -55,6 +72,8 @@ function renderTariffPrices() {
 
 /** Лимиты: тариф × расходник × период, плюс пробные. */
 function renderTariffLimits() {
+  const failure = tariffFailure("limits");
+  if (failure) { $("#tariff-limits").innerHTML = failure; return; }
   const data = state.tariffs;
   const editable = tariffEditable();
   const limitOf = (plan, metric, period) =>
@@ -97,6 +116,8 @@ function renderTariffLimits() {
 
 /** Фактический расход по всей установке: только количества. */
 function renderTariffUsage() {
+  const failure = tariffFailure("usage");
+  if (failure) { $("#tariff-usage").innerHTML = failure; return; }
   const rows = state.tariffs.usage || [];
   if (!rows.length) {
     $("#tariff-usage").innerHTML = '<p class="muted">За сегодня расхода ещё не было.</p>';
