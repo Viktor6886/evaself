@@ -444,6 +444,22 @@ async function updateInfo() {
   let commit = "unknown";
   let branch = "unknown";
   let dirty = false;
+  /*
+   * Что развёрнуто — это не то же самое, что лежит в рабочем дереве.
+   *
+   * `update.sh` пишет сюда HEAD только после того, как контейнеры
+   * пересозданы и doctor.sh их принял. Пока этого не случилось —
+   * прерванное обновление, автоматический откат, `git pull` руками —
+   * в дереве уже новый код, а работает прежний. Панель называла
+   * «развёрнутым» именно checkout и тем самым уверяла, что
+   * исправление доехало, когда оно не доехало.
+   */
+  let deployed: string | null = null;
+  try {
+    deployed = (await readFile(path.join(projectDir, ".rollback", "deployed"), "utf8")).trim() || null;
+  } catch {
+    // Установка, которую ни разу не обновляли этим скриптом.
+  }
   try {
     [commit, branch] = await Promise.all([
       git("rev-parse", "HEAD"),
@@ -453,7 +469,7 @@ async function updateInfo() {
   } catch {
     // A packaged installation can legitimately be outside a Git checkout.
   }
-  return { commit, branch, dirty };
+  return { commit, branch, dirty, deployed };
 }
 
 async function recreateContainer(currentName: string, removeDelayMs: number) {

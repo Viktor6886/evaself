@@ -586,3 +586,50 @@ describe("новые разделы на телефоне", () => {
     }
   });
 });
+
+/**
+ * Что развёрнуто и что скачано — разные вещи.
+ *
+ * Пока панель называла «развёрнутым» commit рабочего дерева, прерванное
+ * или откаченное обновление выглядело как успешное: в дереве новый код,
+ * на стенде — прежний, и человек искал ошибку в исправлении, которое
+ * до него не доехало.
+ */
+describe("раздел обновлений отличает развёрнутое от скачанного", () => {
+  const panels = [];
+  after(async () => { for (const panel of panels) await panel.close(); });
+
+  const withUpdates = (current) => ({
+    ...ROUTES,
+    "/backups": { backups: [] },
+    "/updates": { current, history: [] },
+  });
+
+  const openOperations = async (current) => {
+    const panel = await openPanel({ routes: withUpdates(current), viewport: PHONE });
+    panels.push(panel);
+    await panel.page.evaluate(() => openPage("operations"));
+    await panel.page.waitForFunction(
+      () => document.querySelector("#update-info dl") !== null);
+    return await panel.page.evaluate(() => document.querySelector("#update-info").textContent);
+  };
+
+  test("показан развёрнутый commit, а расхождение названо вслух", async () => {
+    const text = await openOperations({
+      branch: "main", dirty: false,
+      commit: "aaaaaaaaaaaaaaaaaaaa", deployed: "bbbbbbbbbbbbbbbbbbbb",
+    });
+    assert.match(text, /bbbbbbbbbbbb/u, "развёрнутым назван commit из маркера");
+    assert.match(text, /aaaaaaaaaaaa/u, "скачанное тоже показано");
+    assert.match(text, /не развёрнут/u, "расхождение названо прямо");
+  });
+
+  test("совпали — лишней строки нет", async () => {
+    const text = await openOperations({
+      branch: "main", dirty: false,
+      commit: "cccccccccccccccccccc", deployed: "cccccccccccccccccccc",
+    });
+    assert.match(text, /cccccccccccc/u);
+    assert.doesNotMatch(text, /не развёрнут/u);
+  });
+});

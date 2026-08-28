@@ -21,10 +21,19 @@ async function loadOperations() {
   // Значения без пояснения читаются неверно: «dirty» звучит как мелочь,
   // хотя блокирует обновление, а пустое «Доступно обновлений» означает
   // «никто ещё не спрашивал», а не «обновлений нет».
+  //
+  // «Развёрнутый commit» — тот, на котором работают контейнеры, а не тот,
+  // что лежит в рабочем дереве. Разница между ними и есть прерванное или
+  // откаченное обновление: без неё панель уверяет, что исправление уже
+  // на стенде, пока стенд отвечает прежним кодом.
   $("#update-info").innerHTML = `
     <dl class="details-list">
       <div><dt>Ветка</dt><dd>${escapeHtml(current.branch || "неизвестна")}</dd></div>
-      <div><dt>Развёрнутый commit</dt><dd class="technical">${escapeHtml(String(current.commit || "неизвестен").slice(0, 12))}</dd></div>
+      <div><dt>Развёрнутый commit</dt><dd class="technical">${escapeHtml(String(current.deployed || "неизвестен").slice(0, 12))}</dd></div>
+      ${current.deployed && current.commit && current.deployed !== current.commit ? `
+      <div><dt>В рабочем дереве</dt>
+        <dd><span class="warn-value technical">${escapeHtml(String(current.commit).slice(0, 12))}</span>
+        — код скачан, но не развёрнут: выполните обновление</dd></div>` : ""}
       <div><dt>Незакоммиченные правки на сервере</dt>
         <dd>${current.dirty
           ? '<span class="warn-value">есть — обновление будет заблокировано</span>'
