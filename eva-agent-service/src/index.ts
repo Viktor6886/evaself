@@ -37,6 +37,7 @@ import { LettaService } from "./letta.js";
 import { LlmManager } from "./llm.js";
 import { createLogger } from "./logger.js";
 import { LavaPayments } from "./payments.js";
+import { StarsPayments } from "./payments/stars.js";
 import { UserProfileService } from "./profile/profile-service.js";
 import { ValkeyRateLimiter } from "./public/rate-limit.js";
 import { ValkeyMiniAppSessions } from "./public/webapp-session.js";
@@ -305,6 +306,9 @@ async function main(): Promise<void> {
   const crisis = new CrisisMonitor(db, telegram, logger, config.ownerTelegramId);
   // Наблюдатель хода создаётся до approval callback, чтобы пауза и resume
   // использовали тот же канонический lifecycle.
+  // Оплата звёздами. Своего хранилища нет: те же payment_intents,
+  // payments и subscriptions, что и у карточной оплаты.
+  const stars = new StarsPayments({ db });
   const workflow = new EvaWorkflow(
     config,
     db,
@@ -329,6 +333,7 @@ async function main(): Promise<void> {
       persona: () => letta.canonicalContext().persona,
       systemPrompt: () => letta.canonicalContext().systemPrompt,
     },
+    stars,
   );
   const inbox = new PostgresTelegramInbox(db);
   // Уведомление о мёртвой записи одно на оба пути обработки: человек
@@ -496,6 +501,7 @@ async function main(): Promise<void> {
     profile,
     goals,
     payments,
+    stars,
     queue,
     telegram,
     slots,

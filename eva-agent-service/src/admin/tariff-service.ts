@@ -14,6 +14,7 @@
 import type pg from "pg";
 
 import { adminBadRequest } from "./errors.js";
+import { PERIOD_DAYS, PERIOD_TITLE, STARS_PROVIDER } from "../payments/stars.js";
 
 /** Тарифы, которые панель показывает и правит. */
 export const PLANS = ["free", "plus", "max"] as const;
@@ -100,7 +101,43 @@ export class TariffService {
       prices: prices.rows,
       usage: usage.rows,
       subscribers: subscribers.rows,
+      // Сколько дней в сроке — то же число, по которому продлевается
+      // подписка. Панель показывает его человеку, а не выдумывает своё.
+      period_days: PERIOD_DAYS,
+      period_titles: PERIOD_TITLE,
     };
+  }
+
+  /**
+   * Последние платежи звёздами.
+   *
+   * Отдельным запросом, а не частью `state()`: сводка тарифов нужна на
+   * каждом открытии вкладки, а список платежей — когда его открыли.
+   * Тянуть его всегда значит платить за него всегда.
+   */
+  async payments(limit = 50): Promise<Record<string, unknown>> {
+    const size = Math.min(200, Math.max(1, Math.floor(Number(limit) || 50)));
+    const { rows } = await this.pool.query(
+      `
+        -- tenant: system — журнал платежей установки, доступ ограничен RBAC на маршруте
+        SELECT p.id, p.status, p.amount_minor AS stars, p.paid_at, p.created_at,
+               p.provider_payment_id AS charge_id, p.description,
+               u.telegram_id, u.username, u.first_name
+          FROM payments p
+          JOIN users u ON u.id = p.user_id
+         WHERE p.provider = $1
+         ORDER BY p.created_at DESC
+         LIMIT $2`,
+      [STARS_PROVIDER, size],
+    );
+    const totals = await this.pool.query(
+      `
+        -- tenant: system — сводка по платежам установки
+        SELECT status, count(*)::int AS payments, COALESCE(sum(amount_minor), 0)::bigint AS stars
+          FROM payments WHERE provider = $1 GROUP BY status`,
+      [STARS_PROVIDER],
+    );
+    return { payments: rows, totals: totals.rows, limit: size };
   }
 
   /**
@@ -150,6 +187,75 @@ export class TariffService {
       [plan, period, stars, enabled, actorId],
     );
     return rows[0]!;
+  }
+
+  /**
+   * Возврат звёзд.
+   *
+   * Порядок обязателен: сначала Telegram возвращает списание, и только
+   * потом закрывается подписка. Обратный порядок оставил бы человека без
+   * доступа при неудавшемся возврате — то есть без денег и без Евы.
+   *
+   * Записывается ровно та подписка, которую оплатил этот платёж:
+   * `provider_subscription_id` — идентификатор его намерения оплаты.
+   * Снимать всё живое разом нельзя, иначе возврат за неделю унёс бы и
+   * оплаченный отдельно месяц.
+   */
+  async refund(
+    chargeId: string,
+    refundWithTelegram: (telegramId: number, chargeId: string) => Promise<void>,
+  ): Promise<Record<string, unknown>> {
+    const charge = String(chargeId ?? "").trim();
+    if (!charge) throw adminBadRequest("Не указан идентификатор списания");
+    const found = await this.pool.query<{
+      id: string; user_id: string; telegram_id: string; intent_id: string | null;
+      amount_minor: string;
+    }>(
+      `
+        -- tenant: system — возврат платежа установки, доступ ограничен ролью и sudo на маршруте
+        SELECT p.id, p.user_id, u.telegram_id, p.amount_minor,
+               p.raw ->> 'invoice_payload' AS intent_id
+          FROM payments p
+          JOIN users u ON u.id = p.user_id
+         WHERE p.provider = $1 AND p.provider_payment_id = $2 AND p.status = 'succeeded'`,
+      [STARS_PROVIDER, charge],
+    );
+    const payment = found.rows[0];
+    if (!payment) throw adminBadRequest("Платёж не найден или уже возвращён");
+
+    await refundWithTelegram(Number(payment.telegram_id), charge);
+
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        `
+          -- tenant: system — закрытие подписки, оплаченной возвращённым платежом
+          UPDATE subscriptions SET status = 'canceled', canceled_at = now()
+            WHERE user_id = $1 AND provider = $2 AND provider_subscription_id = $3
+              AND status IN ('trialing', 'active', 'past_due')`,
+        [payment.user_id, STARS_PROVIDER, payment.intent_id],
+      );
+      await client.query(
+        `
+          -- tenant: system — отметка возврата на платеже установки
+          UPDATE payments SET status = 'refunded', updated_at = now()
+            WHERE id = $1 AND user_id = $2`,
+        [payment.id, payment.user_id],
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
+    return {
+      refunded: true,
+      charge_id: charge,
+      stars: Number(payment.amount_minor),
+      telegram_id: Number(payment.telegram_id),
+    };
   }
 
   private plan(value: unknown): string {

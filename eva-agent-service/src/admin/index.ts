@@ -26,6 +26,7 @@ import { ToolApprovalService } from "./tool-approvals.js";
 import { McpServerPolicyRepository } from "../tools/mcp.js";
 import { TurnOperationsService } from "./turn-operations.js";
 import { DeleteGuard } from "../letta/delete-guard.js";
+import { adminBadRequest } from "./errors.js";
 import { createTelegramBotApi } from "./telegram-bot-api.js";
 import { TariffService } from "./tariff-service.js";
 import { createTelegramRuntimeApply, TelegramTokenService } from "./telegram-token-service.js";
@@ -148,6 +149,13 @@ async function main(): Promise<void> {
     withSystemScope: async (_reason, work) => await work(),
   }));
 
+  // Обращения к Bot API от имени активного токена. Экземпляр один:
+  // переезд на другого бота и возврат звёзд говорят с Telegram одинаково.
+  const botApi = createTelegramBotApi({
+    baseUrl: process.env.EVA_TELEGRAM_API_BASE_URL ?? "https://api.telegram.org",
+  });
+  const tariffs = new TariffService(pool);
+
   // Боты Евы. Активный токен остаётся в secret_records под прежним
   // ref — здесь только набор, из которого его выбирают, и переустановка
   // вебхука при переезде.
@@ -156,9 +164,7 @@ async function main(): Promise<void> {
     secrets,
     // Admin API читает окружение напрямую, как и остальные его службы:
     // полный Config агента этот процесс не поднимает.
-    api: createTelegramBotApi({
-      baseUrl: process.env.EVA_TELEGRAM_API_BASE_URL ?? "https://api.telegram.org",
-    }),
+    api: botApi,
     webhookUrl: `https://${process.env.DOMAIN_API ?? ""}/telegram/webhook`,
     webhookSecret: process.env.EVA_TELEGRAM_WEBHOOK_SECRET ?? "",
     // Выбранный токен доносится и до `.env`, и до работающего сервиса:
@@ -167,6 +173,14 @@ async function main(): Promise<void> {
     runtime: createTelegramRuntimeApply({
       updater: new UpdaterClient(),
       agent: agentClient,
+      // Токен нужен двум службам: рантайму — чтобы отвечать, и
+      // media-service — чтобы скачать голосовое у Telegram. Реестр
+      // секретов называет обе; доводить его нужно до обеих.
+      media: {
+        baseUrl: process.env.EVA_MEDIA_SERVICE_URL ?? "http://media-service:8090",
+        serviceToken: async () => (process.env.MEDIA_SERVICE_TOKEN ?? "").trim()
+          || await secrets.get("sec_media_service_token"),
+      },
     }),
     logger,
   });
@@ -177,7 +191,19 @@ async function main(): Promise<void> {
     config,
     secrets,
     telegramTokens,
-    tariffs: new TariffService(pool),
+    tariffs,
+    // Возврат звёзд идёт активным токеном бота: тем же, которым счёт
+    // был выставлен. Токен берётся из хранилища секретов в момент
+    // возврата, а не запоминается при старте, — переезд на другого бота
+    // не должен делать возврат невозможным.
+    starsRefund: async (chargeId: string) => await tariffs.refund(
+      chargeId,
+      async (telegramId, charge) => {
+        const token = await secrets.get("sec_eva_telegram_bot_token");
+        if (!token) throw adminBadRequest("Токен бота не настроен");
+        await botApi.refundStars(token, telegramId, charge);
+      },
+    ),
     health,
     operations,
     providers,

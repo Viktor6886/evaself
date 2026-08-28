@@ -54,6 +54,15 @@ export interface RuntimeContext {
    * и разница видна без арифметики.
    */
   previousMessageLocalTime: string | null;
+  /**
+   * Тот же промежуток в секундах.
+   *
+   * «Девять секунд» и «три часа» — проза, и сравнивать её приходится
+   * разбором. Число в одной единице сравнивается прямо: помещается ли в
+   * него названное человеком действие, видно без перевода слов в
+   * величину.
+   */
+  sincePreviousMessageSeconds: number | null;
   timezone: string;
   city: string | null;
   countryCode: string | null;
@@ -291,6 +300,12 @@ export class RuntimeContextBuilder {
       previousMessageLocalTime: input.previousUserMessageAt
         ? formatLocalShort(input.previousUserMessageAt, timezone)
         : null,
+      sincePreviousMessageSeconds: input.previousUserMessageAt
+        ? Math.max(0, Math.round(
+          ((input.currentMessageAt ?? local.toJSDate()).getTime()
+            - input.previousUserMessageAt.getTime()) / 1000,
+        ))
+        : null,
       timezone,
       city: row.city,
       countryCode: row.country_code,
@@ -344,6 +359,12 @@ export class RuntimeContextBuilder {
       // Ева знает из персоны: правило постоянное, и платить за него в
       // каждом сообщении незачем.
       ["since_previous_user_message", context.sincePreviousMessage],
+      [
+        "since_previous_user_message_seconds",
+        context.sincePreviousMessageSeconds === null
+          ? null
+          : String(context.sincePreviousMessageSeconds),
+      ],
       ["previous_user_message_local_time", context.previousMessageLocalTime],
       ["timezone", context.timezone],
       ["city", context.city],

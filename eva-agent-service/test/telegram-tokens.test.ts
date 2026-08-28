@@ -303,33 +303,79 @@ test("список не содержит ни токена, ни его шифр
  * списке разрешённых», потому что перезапуск просили по имени
  * контейнера, а сервис операций знает цели по идентификаторам каталога.
  */
-test("боевой адаптер шлёт токен обеими дорогами", async () => {
+/*
+ * Токен нужен двум службам, а не одной.
+ *
+ * Рантайм им отвечает, media-service — скачивает голосовое у Telegram.
+ * Переезд, дошедший только до первой, выглядел исправным: Ева отвечала
+ * текстом, а голосовые переставали распознаваться, и человек видел
+ * общее «не получилось распознать» без единого указания на причину.
+ */
+test("боевой адаптер доносит токен до всех, кому он нужен", async () => {
   const updaterCalls: Array<{ command: string; params: Record<string, unknown> }> = [];
   const agentCalls: Array<{ path: string; body: unknown }> = [];
-  const apply = createTelegramRuntimeApply({
-    updater: {
-      call: async (command: string, params: Record<string, unknown> = {}) => {
-        updaterCalls.push({ command, params });
-        return null;
+  const mediaCalls: Array<{ url: string; body: unknown }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: unknown, init: { body?: unknown } = {}) => {
+    mediaCalls.push({ url: String(url), body: init.body });
+    return new Response("{}", { status: 200 });
+  }) as typeof globalThis.fetch;
+  try {
+    const apply = createTelegramRuntimeApply({
+      updater: {
+        call: async (command: string, params: Record<string, unknown> = {}) => {
+          updaterCalls.push({ command, params });
+          return null;
+        },
       },
-    },
-    agent: {
-      request: async (path: string, options: { body?: unknown } = {}) => {
-        agentCalls.push({ path, body: options.body });
-        return null;
+      agent: {
+        request: async (path: string, options: { body?: unknown } = {}) => {
+          agentCalls.push({ path, body: options.body });
+          return null;
+        },
       },
-    },
-  });
+      media: {
+        baseUrl: "http://media-service:8090",
+        serviceToken: async () => "media-key",
+      },
+    });
 
-  await apply.persist("TOKEN-VALUE");
-  await apply.applyLive("TOKEN-VALUE");
+    await apply.persist("TOKEN-VALUE");
+    await apply.applyLive("TOKEN-VALUE");
 
-  assert.deepEqual(updaterCalls, [
-    { command: "set_telegram_token", params: { token: "TOKEN-VALUE" } },
-  ]);
-  assert.equal(agentCalls.length, 1);
-  assert.equal(agentCalls[0]?.path, "/v1/telegram/token");
-  assert.deepEqual(JSON.parse(String(agentCalls[0]?.body)), { token: "TOKEN-VALUE" });
+    assert.deepEqual(updaterCalls, [
+      { command: "set_telegram_token", params: { token: "TOKEN-VALUE" } },
+    ]);
+    assert.equal(agentCalls.length, 1);
+    assert.equal(agentCalls[0]?.path, "/v1/telegram/token");
+    assert.deepEqual(JSON.parse(String(agentCalls[0]?.body)), { token: "TOKEN-VALUE" });
+
+    assert.equal(mediaCalls.length, 1, "media-service тоже должен узнать о переезде");
+    assert.match(mediaCalls[0]?.url ?? "", /\/config\/media$/u);
+    assert.deepEqual(
+      JSON.parse(String(mediaCalls[0]?.body)),
+      { telegram: { bot_token: "TOKEN-VALUE" } },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("недоступный media-service не выдаётся за успешный переезд", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response("", { status: 503 })) as typeof globalThis.fetch;
+  try {
+    const apply = createTelegramRuntimeApply({
+      updater: { call: async () => null },
+      agent: { request: async () => null },
+      media: { baseUrl: "http://media-service:8090", serviceToken: async () => "media-key" },
+    });
+    // Переезд состоялся, но распознавание осталось на прежнем боте:
+    // человеку об этом говорят, а не показывают зелёную галочку.
+    await assert.rejects(() => apply.applyLive("TOKEN-VALUE"), /распознавание голоса/u);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("сервис операций знает цели по идентификаторам каталога", () => {

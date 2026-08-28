@@ -37,8 +37,29 @@ const TARIFFS = {
   subscribers: [{ plan: "plus", people: 12 }, { plan: "max", people: 3 }],
 };
 
+const PAYMENTS = {
+  payments: [
+    {
+      id: 1, status: "succeeded", stars: 500, paid_at: "2026-08-20T10:00:00Z",
+      created_at: "2026-08-20T10:00:00Z", charge_id: "charge-1",
+      description: "План plus", telegram_id: "77", username: "kolya", first_name: "Коля",
+    },
+    {
+      id: 2, status: "refunded", stars: 300, paid_at: "2026-08-19T10:00:00Z",
+      created_at: "2026-08-19T10:00:00Z", charge_id: "charge-2",
+      description: "План plus", telegram_id: "78", username: null, first_name: "Оля",
+    },
+  ],
+  totals: [
+    { status: "succeeded", payments: 1, stars: 500 },
+    { status: "refunded", payments: 1, stars: 300 },
+  ],
+  limit: 50,
+};
+
 const ROUTES = {
   "/tariffs": TARIFFS,
+  "/tariffs/payments": PAYMENTS,
   // Запись тоже перехватывается: тест проверяет, что уходит наружу, а не
   // как это ляжет в базу.
   "PUT /tariffs/limits": { ok: true },
@@ -116,6 +137,46 @@ describe("вкладка тарифов", () => {
       const editable = await viewer.page.$$eval(
         "#page-tariffs input:not([disabled])", (nodes) => nodes.length);
       assert.equal(editable, 0, "поля читающей роли обязаны быть заблокированы");
+    } finally {
+      await viewer.close();
+    }
+  });
+
+  /*
+   * Возврат — необратимое денежное действие.
+   *
+   * Проверяется не «кнопка есть», а что она не срабатывает мимо
+   * подтверждения: запрос на возврат не должен уходить от одного клика.
+   */
+  test("возврат не уходит без подтверждения, а возвращённый платёж не предлагают вернуть снова", async () => {
+    const view = await openPanel({ routes: ROUTES });
+    try {
+      await view.page.evaluate(() => openPage("tariffs"));
+      await view.page.click("#reload-payments");
+      await view.page.waitForFunction(
+        () => document.querySelectorAll("#tariff-payments tbody tr").length === 2);
+
+      const buttons = await view.page.$$eval("[data-refund]", (nodes) => nodes.length);
+      assert.equal(buttons, 1, "вернуть можно только оплаченный платёж");
+
+      await view.page.click("[data-refund]");
+      await view.page.waitForTimeout(150);
+      const sent = view.requests.filter((item) => item.path.includes("/refund"));
+      assert.deepEqual(sent, [], "возврат ушёл без подтверждения");
+    } finally {
+      await view.close();
+    }
+  });
+
+  test("читающей роли возврат не предлагается", async () => {
+    const viewer = await openPanel({ routes: ROUTES, role: "viewer" });
+    try {
+      await viewer.page.evaluate(() => openPage("tariffs"));
+      await viewer.page.click("#reload-payments");
+      await viewer.page.waitForFunction(
+        () => document.querySelectorAll("#tariff-payments tbody tr").length === 2);
+      const buttons = await viewer.page.$$eval("[data-refund]", (nodes) => nodes.length);
+      assert.equal(buttons, 0);
     } finally {
       await viewer.close();
     }

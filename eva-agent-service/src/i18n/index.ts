@@ -8,7 +8,11 @@ const ru = {
   unsupportedMessage:
     "Сейчас я понимаю текст, голосовые сообщения, изображения и небольшие документы.",
   messageQuotaEnded:
-    "Лимит сообщений на текущий период закончился. Проверить его можно командой /balance.",
+    "Лимит сообщений на текущий период закончился. Он обновится в начале следующего периода — проверить можно командой /balance.",
+  messageQuotaEndedWithOffer:
+    "Свободные сообщения на этот период закончились — я пока не смогу отвечать."
+    + " Можно оформить подписку прямо здесь, а можно дождаться обновления лимита:"
+    + " сколько его осталось и когда он обновится, покажет /balance.",
   voiceQuotaEnded:
     "Лимит распознавания голоса закончился. Можно продолжить текстом.",
   emptyReply: "Я рядом. Попробуй сформулировать это немного иначе.",
@@ -23,6 +27,10 @@ const ru = {
   remaining: "осталось {value}",
   unlimited: "без ограничений",
   chooseSubscription: "Выбери подходящий вариант доступа:",
+  paymentThanks:
+    "Спасибо! Подписка открыта на {days} дн. Проверить лимиты можно командой /balance.",
+  paymentStuck:
+    "Оплата прошла, но подписку не удалось открыть автоматически. Владелец уже видит это в журнале — напиши ему, доступ восстановят вручную.",
   subscriptionUnavailable: "Онлайн-оплата ещё не настроена администратором.",
   privacy:
     "Связь с агентом, заметки и задачи хранятся в PostgreSQL и Letta на сервере владельца Evaself. API-ключи зашифрованы и не выдаются в WebUI. Администратор может удалить агента и его данные.",
@@ -43,7 +51,11 @@ const en: Record<keyof typeof ru, string> = {
   unsupportedMessage:
     "I currently understand text, voice messages, images, and small documents.",
   messageQuotaEnded:
-    "Your message allowance for this period is used up. Check it with /balance.",
+    "Your message allowance for this period is used up. It resets at the start of the next period — check it with /balance.",
+  messageQuotaEndedWithOffer:
+    "You have used up the free messages for this period, so I cannot reply for now."
+    + " You can subscribe right here, or wait for the limit to reset:"
+    + " /balance shows what is left and when it renews.",
   voiceQuotaEnded:
     "Your voice transcription allowance is used up. You can continue with text.",
   emptyReply: "I’m here. Try phrasing that a little differently.",
@@ -58,6 +70,10 @@ const en: Record<keyof typeof ru, string> = {
   remaining: "{value} remaining",
   unlimited: "unlimited",
   chooseSubscription: "Choose an access option:",
+  paymentThanks:
+    "Thank you! Your subscription is active for {days} days. Check your limits with /balance.",
+  paymentStuck:
+    "The payment went through, but the subscription could not be opened automatically. The owner can already see this in the log — contact them and access will be restored manually.",
   subscriptionUnavailable: "Online payments have not been configured by the administrator yet.",
   privacy:
     "Your agent link, notes, and tasks are stored in PostgreSQL and Letta on the Evaself owner’s server. API keys are encrypted and never returned to WebUI. An administrator can delete the agent and its data.",

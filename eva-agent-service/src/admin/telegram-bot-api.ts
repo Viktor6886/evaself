@@ -8,7 +8,27 @@
  * а инструмент управления тем, каким клиент станет.
  */
 
-const ALLOWED_UPDATES = ["message", "edited_message", "callback_query"] as const;
+/*
+ * Что Telegram вообще доставляет боту.
+ *
+ * Список ограничительный: чего в нём нет, того webhook не увидит — молча,
+ * без ошибки. Здесь не хватало двух видов, и оба отказывали именно так.
+ *
+ * `pre_checkout_query` — подтверждение перед списанием звёзд. Без него
+ * Telegram не спросит подтверждения, не дождётся ответа и отменит платёж:
+ * оплата не работала бы вовсе, а причина не была бы видна нигде.
+ *
+ * `poll_answer` — голос человека в опросе. Ева умеет их отправлять и
+ * разбирать ответы, но после переезда на другого бота ответы переставали
+ * приходить.
+ */
+const ALLOWED_UPDATES = [
+  "message",
+  "edited_message",
+  "callback_query",
+  "poll_answer",
+  "pre_checkout_query",
+] as const;
 
 export interface TelegramBotApiOptions {
   baseUrl: string;
@@ -70,6 +90,19 @@ export function createTelegramBotApi(options: TelegramBotApiOptions) {
 
     async deleteWebhook(token: string): Promise<void> {
       await call(token, "deleteWebhook", { drop_pending_updates: true });
+    },
+
+    /**
+     * Вернуть звёзды по идентификатору списания.
+     *
+     * Возврат делает Telegram, а не мы: наша запись о нём — следствие, и
+     * она ставится только после того, как возврат состоялся.
+     */
+    async refundStars(token: string, telegramUserId: number, chargeId: string): Promise<void> {
+      await call(token, "refundStarPayment", {
+        user_id: telegramUserId,
+        telegram_payment_charge_id: chargeId,
+      });
     },
   };
 }

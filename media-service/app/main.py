@@ -86,6 +86,7 @@ RUNTIME = RuntimeConfig(
             "voice": TTS_VOICE,
             "response_format": "mp3",
         },
+        "telegram": {"bot_token": os.environ.get("EVA_TELEGRAM_BOT_TOKEN", "")},
     },
 )
 
@@ -96,8 +97,18 @@ STT_RUNTIME = SttRuntime(WORK_DIR / "stt-runtime.json")
 STT_REGISTRY: SttProviderRegistry | None = None
 STT_ROUTER: SttRoutingService | None = None
 
-TELEGRAM_TOKEN = os.environ.get("EVA_TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_API = "https://api.telegram.org"
+
+
+def telegram_token() -> str:
+    """Действующий токен бота.
+
+    Читается на каждый вызов, а не один раз при импорте: переезд на
+    другого бота меняет токен без пересоздания контейнера, и запомненное
+    при старте значение означало бы, что голосовые перестают
+    распознаваться — молча, с общим «не получилось».
+    """
+    return RUNTIME.telegram().get("bot_token", "")
 
 # Shared secret presented by eva-agent-service. The service is not routed by
 # Caddy, but "not routed" is not "not reachable": every other container on the
@@ -295,7 +306,7 @@ async def transcribe_upload(
 @app.post("/telegram/transcribe", dependencies=[Depends(require_service_token)])
 async def transcribe_telegram(payload: TelegramTranscribeRequest):
     """Download a Telegram voice note by file_id, then transcribe it."""
-    if not TELEGRAM_TOKEN:
+    if not telegram_token():
         return _error("telegram_not_configured", "EVA_TELEGRAM_BOT_TOKEN is not set", 503)
 
     with Workspace(WORK_DIR) as work:
@@ -454,7 +465,7 @@ async def stt_transcribe(payload: SttTranscribeRequest):
         return _error("stt_not_ready", "сервис ещё не инициализирован", 503)
     if not payload.file_id:
         return _error("stt_audio_invalid", "не передан file_id", 400)
-    if not TELEGRAM_TOKEN:
+    if not telegram_token():
         return _error("telegram_not_configured", "EVA_TELEGRAM_BOT_TOKEN is not set", 503)
 
     with Workspace(WORK_DIR) as work:
@@ -1037,7 +1048,7 @@ async def _save_upload(upload: UploadFile, work: Path) -> Path:
 
 async def _download_telegram_file(file_id: str, work: Path) -> Path:
     meta = await app.state.http.get(
-        f"{TELEGRAM_API}/bot{TELEGRAM_TOKEN}/getFile", params={"file_id": file_id}
+        f"{TELEGRAM_API}/bot{telegram_token()}/getFile", params={"file_id": file_id}
     )
     if meta.status_code >= 400:
         raise MediaError("getFile failed", details=meta.text[:300])
@@ -1050,7 +1061,7 @@ async def _download_telegram_file(file_id: str, work: Path) -> Path:
     target = work / Path(file_path).name
 
     async with app.state.http.stream(
-        "GET", f"{TELEGRAM_API}/file/bot{TELEGRAM_TOKEN}/{file_path}"
+        "GET", f"{TELEGRAM_API}/file/bot{telegram_token()}/{file_path}"
     ) as stream:
         if stream.status_code >= 400:
             raise MediaError(f"file download returned {stream.status_code}")

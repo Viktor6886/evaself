@@ -38,6 +38,8 @@
 | Интерактивные элементы | Кнопки и опросы | `src/telegram/inline-choices.ts`, `src/telegram/polls.ts` |
 | Live message | Показ streaming-ответа одним редактируемым сообщением | Telegram client runtime |
 | Женский род | Детерминированная правка речи Евы о себе на выходе; правило персоны перестаёт быть вероятностью | `src/i18n/eva-gender.ts` |
+| Оплата звёздами | Счёт, предварительная проверка до списания, применение платежа и возврат — в тех же `payments`, `payment_intents`, `subscriptions` | `src/payments/stars.ts`, `src/payments/grant.ts` |
+| Доставка настроек в media-service | `PUT /config/media` одним путём для формы интеграций и для переезда на другого бота | `src/admin/media-runtime.ts` |
 | Боты Евы | До пяти сохранённых токенов, активен один; переезд переставляет вебхук и меняет бота в рантайме без перезапуска | `src/admin/telegram-token-service.ts`, `POST /v1/telegram/token` |
 
 ## Фоновые задания
@@ -87,6 +89,7 @@ BullMQ не обрабатывает интерактивный ход и не �
 | Единая панель | Разделы агентов, подписок, персоны, Letta и мониторинга под одной сессией | `src/admin/panel-routes.ts`, `admin-ui/public/` |
 | Агенты (админ) | Список, карточка, создание, изменение и удаление через production-путь Letta Agent SDK | `src/admin/agent-admin-service.ts` |
 | Подписки (админ) | Ручное назначение, тариф, продление, отмена и снятие ручного решения; оплата и решение администратора различимы | `src/admin/subscription-service.ts` |
+| Тарифы и оплата (админ) | Лимиты, пробные, цены в звёздах, расход, журнал платежей и возврат под sudo | `src/admin/tariff-service.ts`, `admin-ui/public/ui-tariffs.js` |
 | Персона (админ) | Правка и применение канонических текстов | `src/admin/persona-admin-service.ts` |
 | Letta (админ) | Runtime, диалоги, контекст и журнал Letta без открытого прокси | `src/admin/letta-console-service.ts` |
 | Мониторинг | Состояние сервисов, история проверок и ошибки за окно | `src/admin/health-service.ts`, `src/admin/health-worker.ts` |

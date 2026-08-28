@@ -564,6 +564,8 @@ async function runTelegramTurn(
     liveIntervalMs?: number;
     /** Что «ответила» модель: для проверок, зависящих от текста ответа. */
     modelReply?: string;
+    /** Что продаётся: пусто — продажи не настроены. */
+    offers?: Array<{ plan: string; period: string; stars: number; title: string }>;
     /** Команда вместо обычного сообщения. */
     command?: string;
     /** Отметка отправки последнего сообщения, секунды epoch. */
@@ -851,6 +853,13 @@ async function runTelegramTurn(
         return {} as never;
       },
     } as never,
+    // personaSync тесту не нужен, но место в списке занимает: без него
+    // оплата звёздами встала бы на его позицию.
+    undefined,
+    // Оплата звёздами: подставляется только там, где тест её просит.
+    options.offers
+      ? { offers: async () => options.offers } as never
+      : undefined,
   );
 
   // Поддельный media-service: синтез занимает время, как настоящий, а
@@ -1730,4 +1739,34 @@ test("ответ без мужского рода уходит слово в с�
     probe.sent.some((item) => item.includes(original)),
     "текст, который трогать не нужно, изменился",
   );
+});
+
+/*
+ * Кончились сообщения — человеку нужен выход, а не отчёт о лимите.
+ *
+ * Отменённая подписка возвращает человека на бесплатный тариф, и рано
+ * или поздно его лимит кончается. До этого Ева отвечала «лимит
+ * закончился, проверьте /balance»: что делать дальше, человек должен
+ * был додуматься сам.
+ */
+test("исчерпанный лимит приходит вместе с предложением оплаты", async () => {
+  const probe = await runTelegramTurn(undefined, {
+    quota: [{ metric: "messages", remaining: 0 }],
+    offers: [{ plan: "plus", period: "month", stars: 500, title: "Ева Плюс — месяц" }],
+  });
+  assert.deepEqual(probe.result, { status: "ignored" });
+  const delivered = probe.sent.join("\n");
+  assert.match(delivered, /подписку прямо здесь/u, "предложение не отправлено");
+  assert.equal(probe.markups.length, 1, "кнопка оплаты не приложена");
+  assert.match(JSON.stringify(probe.markups[0]), /buy:plus:month/u);
+});
+
+test("без настроенных продаж лимит объясняют, но оплату не обещают", async () => {
+  const probe = await runTelegramTurn(undefined, {
+    quota: [{ metric: "messages", remaining: 0 }],
+  });
+  const delivered = probe.sent.join("\n");
+  assert.match(delivered, /обновится/u);
+  assert.doesNotMatch(delivered, /подписку прямо здесь/u);
+  assert.equal(probe.markups.length, 0, "кнопки оплаты быть не должно");
 });

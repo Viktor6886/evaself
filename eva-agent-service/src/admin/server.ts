@@ -94,6 +94,11 @@ export interface AdminServerServices {
   securityAudit?: SecurityAuditService;
   telegramTokens?: TelegramTokenService;
   tariffs?: TariffService;
+  /**
+   * Возврат звёзд. Отсутствует — маршрут отвечает отказом, а не делает
+   * вид, что вернул: деньги молча не возвращаются.
+   */
+  starsRefund?: (chargeId: string) => Promise<Record<string, unknown>>;
   /** Предпросмотр политик хранения. Удаление выполняет задание очереди. */
   retention?: { preview(settings: Record<string, unknown>): Promise<unknown> };
   /** Единый реестр артефактов. Отсутствует — раздел просто не появляется. */
@@ -1235,6 +1240,30 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
       objectBody(request.body),
       contexts.get(request)!.session!.user.id,
     );
+  });
+
+  // Журнал платежей звёздами. Читают все роли — деньги установки видит и
+  // оператор, — но персональные данные ограничены тем же, что и в списке
+  // людей: идентификатор Telegram, username и имя.
+  app.get("/api/admin/v1/tariffs/payments", {
+    config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
+  }, async (request) => {
+    if (!services.tariffs) throw adminBadRequest("Тарифы недоступны");
+    const query = (request.query ?? {}) as { limit?: unknown };
+    return await services.tariffs.payments(Number(query.limit ?? 50));
+  });
+
+  // Возврат звёзд. Действие необратимое и денежное: только владелец и
+  // администратор, только под sudo, и всегда в аудите.
+  app.post("/api/admin/v1/tariffs/payments/:chargeId/refund", {
+    config: {
+      roles: ["owner", "admin"],
+      sudoScope: "payments:refund",
+    } satisfies RouteAccess,
+  }, async (request) => {
+    if (!services.starsRefund) throw adminBadRequest("Возврат звёзд недоступен");
+    const { chargeId } = request.params as { chargeId: string };
+    return await services.starsRefund(chargeId);
   });
 
   // -------------------------------------------------------------------
