@@ -31,7 +31,7 @@ case "${1:-status}" in
 		response="$(curl -fsS -X POST "$API/setWebhook" \
 			--data-urlencode "url=${URL}" \
 			--data-urlencode "secret_token=${EVA_TELEGRAM_WEBHOOK_SECRET}" \
-			--data-urlencode 'allowed_updates=["message","edited_message","callback_query"]' \
+			--data-urlencode 'allowed_updates=["message","edited_message","callback_query","poll_answer","pre_checkout_query"]' \
 			--data-urlencode 'drop_pending_updates=true')"
 		if printf '%s' "$response" | jq -e '.ok' >/dev/null 2>&1; then
 			ok "webhook зарегистрирован"

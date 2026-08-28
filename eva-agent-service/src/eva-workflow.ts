@@ -43,6 +43,7 @@ import {
   TelegramFileTooLarge,
 } from "./telegram.js";
 import { feminizeSelfReference, recordGenderFix } from "./i18n/eva-gender.js";
+import type { StarsPayments } from "./payments/stars.js";
 import { speechTextFromReply } from "./telegram-format.js";
 import {
   AttachmentError,
@@ -135,7 +136,7 @@ export interface NormalizedUpdate {
   telegramId: number;
   chatId: number;
   messageId: number;
-  kind: "text" | "voice" | "image" | "document" | "unsupported";
+  kind: "text" | "voice" | "image" | "document" | "payment" | "unsupported";
   command: string | null;
   replyToMessageId: number | null;
   /** Server-owned target; synthetic events always carry null. */
@@ -193,6 +194,13 @@ export class EvaWorkflow {
       persona(): string;
       systemPrompt(): string;
     },
+    /**
+     * Оплата звёздами. Необязательна: без неё `/subscription` показывает
+     * только прежние способы, а платёж, если он всё же придёт, не
+     * применяется молча — он и не может прийти, потому что счёт не
+     * выставлялся.
+     */
+    private readonly stars?: StarsPayments,
   ) {
     this.taskEvents = new TaskEventService(db);
     this.attachments = new TelegramAttachmentReader(telegram);
@@ -335,6 +343,22 @@ export class EvaWorkflow {
 
     const user = await this.db.findUserByTelegramId(telegramId!);
     if (!user) return null;
+
+    // Кнопка покупки — не выбор Евы, а действие человека над своей
+    // подпиской. Токена ей не нужно: она называет публичное предложение,
+    // а не скрытый смысл, и всё равно проверяется на сервере — цена
+    // берётся из `plan_prices`, счёт выставляется тому, кто нажал.
+    // Ходом это не становится: модель здесь ни при чём.
+    const purchase = /^buy:([a-z]+):([a-z]+)$/u.exec(token);
+    if (purchase) {
+      await this.sendStarsInvoice(
+        user.id,
+        callback.message?.chat?.id ?? telegramId!,
+        purchase[1]!,
+        purchase[2]!,
+      );
+      return null;
+    }
     const claim = await this.db.claimCallbackToken({ token, userId: user.id });
     if (claim.status !== "claimed") {
       // Повторный клик, чужая или просроченная кнопка — молча ничего.
@@ -567,6 +591,17 @@ export class EvaWorkflow {
         if (update.command) {
           await this.handleCommand(update, user, language);
           await this.stopTurn(turnHandle, "command");
+          return { status: "completed" };
+        }
+
+        // Платёж применяется до всего остального: он не тратит квоту, не
+        // идёт в модель и обязан примениться даже тогда, когда сообщения
+        // человеку уже закончились. Иначе оплата, сделанная ради
+        // продолжения разговора, упёрлась бы в лимит, который сама и
+        // снимает.
+        if (update.kind === "payment") {
+          await this.applyPayment(update, language);
+          await this.stopTurn(turnHandle, "payment");
           return { status: "completed" };
         }
 
@@ -875,7 +910,10 @@ export class EvaWorkflow {
                 context,
                 signal ? `${safetyDirective(signal)}\n\n${prompt}` : prompt,
                 {
-                  messageSource: update.kind,
+                  // Платёж до этой точки не доходит — он применён и
+                  // завершён выше. Здесь это сказано типу явно, чтобы не
+                  // приводить вид сообщения принудительно.
+                  messageSource: update.kind === "payment" ? undefined : update.kind,
                   attachments,
                   // Фактический размер собранного контекста, а не
                   // обещание уложиться: без измерения бюджет — это
@@ -1194,6 +1232,97 @@ export class EvaWorkflow {
    * нужны, нужен только барьер отмены. Ход, который его увидит,
    * закончится сам и ничего не доставит.
    */
+  /**
+   * Выставить счёт в звёздах.
+   *
+   * Отказ здесь виден человеку: молча не показать счёт — значит оставить
+   * его нажимать кнопку, которая ничего не делает.
+   */
+  private async sendStarsInvoice(
+    userId: number,
+    chatId: number,
+    plan: string,
+    period: string,
+  ): Promise<void> {
+    if (!this.stars) return;
+    try {
+      const invoice = await this.stars.invoice(userId, plan, period);
+      await this.telegram.sendStarsInvoice(chatId, {
+        title: invoice.title,
+        description: invoice.description,
+        payload: invoice.payload,
+        stars: invoice.stars,
+        label: invoice.title,
+      });
+    } catch (error) {
+      this.logger.warn("Счёт в звёздах не выставлен", {
+        plan,
+        period,
+        code: error instanceof Error ? error.name : "unknown_error",
+      });
+      await this.telegram.sendMessage(chatId, "Не удалось открыть счёт. Попробуй ещё раз чуть позже.")
+        .catch(() => undefined);
+    }
+  }
+
+  /**
+   * Применить состоявшийся платёж.
+   *
+   * Повторное событие — норма: Telegram может прислать его снова, и
+   * второй подписки от этого не появляется. Человеку в таком случае
+   * ничего не пишем: он уже получил подтверждение в первый раз.
+   */
+  private async applyPayment(
+    update: NormalizedUpdate,
+    language: SupportedLanguage,
+  ): Promise<void> {
+    const payment = update.message.successful_payment;
+    if (!payment || !this.stars) return;
+    let outcome: Awaited<ReturnType<StarsPayments["apply"]>>;
+    try {
+      outcome = await this.stars.apply({
+        telegramUserId: update.telegramId,
+        payload: payment.invoice_payload,
+        chargeId: payment.telegram_payment_charge_id,
+        totalAmount: payment.total_amount,
+        // Идентификатор списания нужен для возврата, payload — чтобы
+        // потом понять, какую именно подписку этот платёж оплатил.
+        raw: {
+          invoice_payload: payment.invoice_payload,
+          telegram_payment_charge_id: payment.telegram_payment_charge_id,
+          total_amount: payment.total_amount,
+          currency: payment.currency,
+        },
+      });
+    } catch (error) {
+      // Деньги списаны. Молчать нельзя: человек должен знать, что
+      // подписка не открылась сама, — и владелец увидит это в журнале.
+      this.logger.error("Платёж не применён", {
+        telegramId: update.telegramId,
+        code: error instanceof Error ? error.name : "unknown_error",
+      });
+      await this.telegram.sendMessage(update.chatId, t(language, "paymentStuck"))
+        .catch(() => undefined);
+      return;
+    }
+    if (outcome.state === "unknown_intent") {
+      this.logger.error("Платёж без намерения оплаты", { telegramId: update.telegramId });
+      await this.telegram.sendMessage(update.chatId, t(language, "paymentStuck"))
+        .catch(() => undefined);
+      return;
+    }
+    if (outcome.state === "duplicate") return;
+    this.logger.info("Подписка оплачена звёздами", {
+      telegramId: update.telegramId,
+      plan: outcome.plan,
+      days: outcome.days,
+    });
+    await this.telegram.sendMessage(
+      update.chatId,
+      t(language, "paymentThanks", { days: String(outcome.days) }),
+    ).catch(() => undefined);
+  }
+
   private async stopRunningTurn(update: NormalizedUpdate): Promise<InboxResult> {
     return await this.db.withUserScope(
       { telegramId: update.telegramId, label: "telegram.stop" },
@@ -1311,12 +1440,20 @@ export class EvaWorkflow {
         break;
       }
       case "/subscription": {
-        const buttons = Object.entries(this.config.lavaPlans)
+        // Звёзды идут первыми: оплата внутри Telegram не уводит человека
+        // из чата и не требует ни карты, ни адреса.
+        const offers = this.stars ? await this.stars.offers().catch(() => []) : [];
+        const starsButtons = offers.map((offer) => [{
+          text: `${offer.title} — ${offer.stars} ⭐`,
+          callback_data: `buy:${offer.plan}:${offer.period}`,
+        }]);
+        const linkButtons = Object.entries(this.config.lavaPlans)
           .filter(([, plan]) => plan.paymentUrl)
           .map(([, plan]) => [{
             text: `${plan.plan} — ${(plan.amountMinor / 100).toFixed(0)} ${plan.currency}`,
             url: plan.paymentUrl,
           }]);
+        const buttons = [...starsButtons, ...linkButtons];
         await this.telegram.sendMessage(
           update.chatId,
           buttons.length
@@ -1670,7 +1807,9 @@ export function normalizeUpdate(
   const command = commandMatch?.[1] ? `/${commandMatch[1].toLowerCase()}` : null;
   // Вид сообщения определяется одним разбором: снимок экрана, присланный
   // файлом, остаётся изображением, а голосовая запись файлом — голосом.
-  const kind = telegramMediaKind(message);
+  // Состоявшийся платёж — не сообщение человека и не ход модели: у него
+  // свой разбор, детерминированный и без Letta.
+  const kind = message.successful_payment ? "payment" as const : telegramMediaKind(message);
   return {
     updateId: update.update_id,
     message,

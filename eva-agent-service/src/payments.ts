@@ -5,6 +5,7 @@ import type pg from "pg";
 import type { Config } from "./config.js";
 import type { Database } from "./db.js";
 import type { Logger } from "./logger.js";
+import { grantPaidAccess } from "./payments/grant.js";
 import type { TelegramClient } from "./telegram.js";
 
 interface LavaEvent {
@@ -151,64 +152,20 @@ export class LavaPayments {
     | { state: "duplicate"; telegramId: number }
     | { state: "applied"; telegramId: number }
   > {
-    const payment = await client.query<{ id: string }>(
-      `INSERT INTO payments
-         (user_id, provider, provider_payment_id, amount_minor, currency,
-          status, description, paid_at, raw)
-       VALUES ($1, 'lava', $2, $3, $4, 'succeeded', $5, now(), $6::jsonb)
-       ON CONFLICT (provider, provider_payment_id)
-         WHERE provider_payment_id IS NOT NULL
-       DO NOTHING
-       RETURNING id`,
-      [
-        found.id,
-        event.paymentId,
-        event.amountMinor,
-        event.currency,
-        `План ${plan.plan}`,
-        JSON.stringify(event.raw),
-      ],
+    // Запись общая со звёздами: что происходит после оплаты, знает одно
+    // место. Поведение прежнее — провайдер и валюта были здесь строками.
+    const outcome = await grantPaidAccess(
+      client,
+      {
+        userId: found.id,
+        provider: "lava",
+        paymentId: event.paymentId,
+        contractId: event.contractId,
+        raw: event.raw,
+      },
+      plan,
     );
-    if (!payment.rows[0]) return { state: "duplicate" as const, telegramId: Number(found.telegram_id) };
-
-    const previousSubscription = await client.query<{ current_period_end: Date | null }>(
-      `SELECT current_period_end
-         FROM subscriptions
-        WHERE user_id = $1 AND status IN ('trialing', 'active', 'past_due')
-        ORDER BY current_period_end DESC NULLS LAST, created_at DESC
-        LIMIT 1
-        FOR UPDATE`,
-      [found.id],
-    );
-    await client.query(
-      `UPDATE subscriptions SET status = 'expired'
-        WHERE user_id = $1 AND status IN ('trialing', 'active', 'past_due')`,
-      [found.id],
-    );
-    await client.query(
-      `INSERT INTO subscriptions
-         (user_id, plan, status, provider, provider_subscription_id,
-          current_period_start, current_period_end)
-       VALUES (
-         $1, $2, 'active', 'lava', $3, now(),
-         GREATEST(now(), COALESCE($5::timestamptz, now())) + make_interval(days => $4)
-       )`,
-      [
-        found.id,
-        plan.plan,
-        event.contractId ?? event.paymentId,
-        plan.durationDays,
-        previousSubscription.rows[0]?.current_period_end?.toISOString() ?? null,
-      ],
-    );
-    await client.query(
-      `UPDATE payment_intents SET status = 'succeeded'
-        WHERE provider = 'lava'
-          AND (provider_contract_id = $1 OR user_id = $2)
-          AND status = 'pending'`,
-      [event.contractId, found.id],
-    );
-    return { state: "applied" as const, telegramId: Number(found.telegram_id) };
+    return { state: outcome, telegramId: Number(found.telegram_id) };
   }
 }
 

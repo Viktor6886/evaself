@@ -25,6 +25,7 @@ import type { Logger } from "./logger.js";
 import { MetricsCollector } from "./metrics.js";
 import { newCorrelationId, parseTraceparent } from "./observability/tracing.js";
 import type { LavaPayments } from "./payments.js";
+import type { StarsPayments } from "./payments/stars.js";
 import type { UserProfileService } from "./profile/profile-service.js";
 import {
   PublicRepository,
@@ -63,6 +64,8 @@ export interface Services {
   profile: UserProfileService;
   goals: GoalService;
   payments: LavaPayments;
+  /** Оплата звёздами. Отсутствует — счета не выставляются и не проверяются. */
+  stars?: StarsPayments;
   queue: UserTurnLock;
   telegram: TelegramClient;
   redisPing: () => Promise<boolean>;
@@ -128,6 +131,7 @@ export function buildServer(services: Services): FastifyInstance {
     queue,
     telegram,
   } = services;
+  const stars = services.stars ?? null;
 
   // Без Valkey лимитер пропускал бы всё: подставляется явный no-op, а не
   // «случайно отключилось». Рантайм всегда передаёт настоящий.
@@ -588,7 +592,42 @@ export function buildServer(services: Services): FastifyInstance {
     ) {
       throw unauthorized("Неверный секрет Telegram webhook");
     }
-    const result = await inbox.enqueue(request.body as TelegramUpdate);
+    const update = request.body as TelegramUpdate;
+    // Предварительная проверка платежа отвечается здесь и сейчас.
+    //
+    // Telegram ждёт ответа десять секунд и иначе отменяет платёж сам.
+    // Durable ingress этого срока не гарантирует и не должен: очередь
+    // существует ради того, чтобы ход пережил перезапуск, а здесь
+    // решение детерминированное, без модели и без хода. Отказ дешевле
+    // возврата — списания просто не происходит.
+    if (update.pre_checkout_query && stars) {
+      const query = update.pre_checkout_query;
+      const verdict = await stars.preCheckout({
+        payload: query.invoice_payload,
+        telegramUserId: query.from.id,
+        totalAmount: query.total_amount,
+        currency: query.currency,
+      }).catch((error: unknown) => {
+        logger.error("Предварительная проверка платежа не выполнена", {
+          code: error instanceof Error ? error.name : "unknown_error",
+        });
+        return { ok: false as const, reason: "internal", message: "Оплата временно недоступна" };
+      });
+      await telegram.answerPreCheckout(
+        query.id,
+        verdict.ok,
+        verdict.ok ? undefined : verdict.message,
+      ).catch((error: unknown) => {
+        logger.warn("Ответ на предварительную проверку не доставлен", {
+          code: error instanceof Error ? error.name : "unknown_error",
+        });
+      });
+      if (!verdict.ok) {
+        logger.info("Платёж отклонён до списания", { reason: verdict.reason });
+      }
+      return reply.status(200).send({ ok: true, pre_checkout: verdict.ok });
+    }
+    const result = await inbox.enqueue(update);
     return reply.status(200).send({ ok: true, ...result });
   });
 

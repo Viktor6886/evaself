@@ -23,6 +23,10 @@ const ru = {
   remaining: "осталось {value}",
   unlimited: "без ограничений",
   chooseSubscription: "Выбери подходящий вариант доступа:",
+  paymentThanks:
+    "Спасибо! Подписка открыта на {days} дн. Проверить лимиты можно командой /balance.",
+  paymentStuck:
+    "Оплата прошла, но подписку не удалось открыть автоматически. Владелец уже видит это в журнале — напиши ему, доступ восстановят вручную.",
   subscriptionUnavailable: "Онлайн-оплата ещё не настроена администратором.",
   privacy:
     "Связь с агентом, заметки и задачи хранятся в PostgreSQL и Letta на сервере владельца Evaself. API-ключи зашифрованы и не выдаются в WebUI. Администратор может удалить агента и его данные.",
@@ -58,6 +62,10 @@ const en: Record<keyof typeof ru, string> = {
   remaining: "{value} remaining",
   unlimited: "unlimited",
   chooseSubscription: "Choose an access option:",
+  paymentThanks:
+    "Thank you! Your subscription is active for {days} days. Check your limits with /balance.",
+  paymentStuck:
+    "The payment went through, but the subscription could not be opened automatically. The owner can already see this in the log — contact them and access will be restored manually.",
   subscriptionUnavailable: "Online payments have not been configured by the administrator yet.",
   privacy:
     "Your agent link, notes, and tasks are stored in PostgreSQL and Letta on the Evaself owner’s server. API keys are encrypted and never returned to WebUI. An administrator can delete the agent and its data.",

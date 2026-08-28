@@ -168,10 +168,83 @@ async function saveTariffPrices(plan) {
   await loadTariffs();
 }
 
+/**
+ * Журнал платежей.
+ *
+ * Грузится по нажатию, а не вместе со вкладкой: сводка тарифов нужна
+ * каждый раз, а список платежей — когда его открыли.
+ */
+async function loadTariffPayments() {
+  const { payload } = await request("/tariffs/payments?limit=50");
+  const rows = payload.payments || [];
+  const totals = payload.totals || [];
+  const sum = (status) =>
+    Number((totals.find((item) => item.status === status) || {}).stars ?? 0);
+  const count = (status) =>
+    Number((totals.find((item) => item.status === status) || {}).payments ?? 0);
+  const canRefund = tariffEditable();
+  const who = (row) => row.username
+    ? `@${row.username}`
+    : row.first_name || `id ${row.telegram_id}`;
+  $("#tariff-payments").innerHTML = `
+    <dl class="details-list">
+      <div><dt>Получено</dt><dd>${escapeHtml(String(sum("succeeded")))} ⭐ за ${escapeHtml(String(count("succeeded")))} платеж(ей)</dd></div>
+      <div><dt>Возвращено</dt><dd>${escapeHtml(String(sum("refunded")))} ⭐ за ${escapeHtml(String(count("refunded")))} платеж(ей)</dd></div>
+    </dl>
+    ${rows.length ? `<div class="table-wrap"><table>
+      <thead><tr><th>Когда</th><th>Кто</th><th>Сколько</th><th>Что</th><th>Состояние</th>${canRefund ? "<th></th>" : ""}</tr></thead>
+      <tbody>${rows.map((row) => `
+        <tr>
+          <td data-label="Когда">${escapeHtml(localDate(row.paid_at || row.created_at))}</td>
+          <td data-label="Кто">${escapeHtml(who(row))}</td>
+          <td data-label="Сколько">${escapeHtml(String(row.stars))} ⭐</td>
+          <td data-label="Что">${escapeHtml(row.description || "")}</td>
+          <td data-label="Состояние">${row.status === "refunded"
+            ? '<span class="tag">возвращён</span>'
+            : '<span class="tag safe">оплачен</span>'}</td>
+          ${canRefund ? `<td>${row.status === "succeeded" && row.charge_id
+            ? `<button class="button danger" data-refund="${escapeHtml(row.charge_id)}" data-refund-who="${escapeHtml(who(row))}" data-refund-stars="${escapeHtml(String(row.stars))}">Вернуть</button>`
+            : ""}</td>` : ""}
+        </tr>`).join("")}</tbody>
+    </table></div>` : '<p class="muted">Платежей звёздами ещё не было.</p>'}`;
+}
+
+/**
+ * Возврат.
+ *
+ * Необратимое денежное действие: Telegram вернёт звёзды, а подписка
+ * закроется. Поэтому отдельное подтверждение, и в нём названо, кому и
+ * сколько возвращается, — вернуть не тому дороже, чем не вернуть вовсе.
+ */
+function refundStars(chargeId, who, stars) {
+  askSudo({
+    scope: "payments:refund",
+    title: `Вернуть ${stars} ⭐ пользователю ${who}?`,
+    description: "Telegram вернёт звёзды, а подписка, которую оплатил этот платёж, закроется."
+      + " Отменить возврат нельзя: доступ вернётся только новой оплатой.",
+    action: async () => {
+      const { payload } = await request(`/tariffs/payments/${encodeURIComponent(chargeId)}/refund`, {
+        method: "POST",
+      });
+      toast(`Возвращено ${payload.stars} ⭐. Подписка закрыта.`);
+      await loadTariffPayments();
+    },
+  });
+}
+
 $("#reload-tariffs")?.addEventListener("click", () => loadTariffs().catch(handleError));
+$("#reload-payments")?.addEventListener("click", () => loadTariffPayments().catch(handleError));
 $("#page-tariffs")?.addEventListener("click", (event) => {
   const limits = event.target.closest("[data-save-limits]");
   if (limits) return void saveTariffLimits(limits.dataset.saveLimits).catch(handleError);
   const prices = event.target.closest("[data-save-prices]");
   if (prices) return void saveTariffPrices(prices.dataset.savePrices).catch(handleError);
+  const refund = event.target.closest("[data-refund]");
+  if (refund) {
+    return void refundStars(
+      refund.dataset.refund,
+      refund.dataset.refundWho,
+      refund.dataset.refundStars,
+    );
+  }
 });

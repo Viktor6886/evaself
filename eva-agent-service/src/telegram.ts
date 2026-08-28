@@ -69,6 +69,7 @@ export interface TelegramMessage {
   document?: TelegramFile;
   photo?: TelegramFile[];
   reply_to_message?: TelegramMessage;
+  successful_payment?: TelegramSuccessfulPayment;
 }
 
 /** Нажатие inline-кнопки. `data` — наш непрозрачный токен, не команда. */
@@ -92,6 +93,25 @@ export interface TelegramUpdate {
   edited_message?: TelegramMessage;
   callback_query?: TelegramCallbackQuery;
   poll_answer?: TelegramPollAnswer;
+  pre_checkout_query?: TelegramPreCheckoutQuery;
+}
+
+/** Предварительная проверка платежа: Telegram ждёт ответа десять секунд. */
+export interface TelegramPreCheckoutQuery {
+  id: string;
+  from: { id: number };
+  currency: string;
+  total_amount: number;
+  invoice_payload: string;
+}
+
+/** Состоявшийся платёж: приходит полем сообщения. */
+export interface TelegramSuccessfulPayment {
+  currency: string;
+  total_amount: number;
+  invoice_payload: string;
+  telegram_payment_charge_id: string;
+  provider_payment_charge_id?: string;
 }
 
 interface TelegramResponse<T> {
@@ -427,6 +447,62 @@ export class TelegramClient implements OutboxTransport {
    * обычным текстом: потерять ответ из-за одной скобки хуже, чем
    * потерять жирный шрифт.
    */
+  /**
+   * Счёт в звёздах Telegram.
+   *
+   * Идёт прямым вызовом, а не через outbox: счёт — ответ на действие
+   * человека здесь и сейчас, и его нельзя доставить «когда-нибудь».
+   * Просроченный счёт хуже отсутствующего: человек нажмёт «Оплатить» и
+   * заплатит за то, чего уже не выбирал.
+   *
+   * `provider_token` у звёзд пустой, а валюта всегда `XTR`: это цифровой
+   * товар внутри Telegram, платёжного провайдера у него нет.
+   */
+  async sendStarsInvoice(chatId: number, invoice: {
+    title: string;
+    description: string;
+    payload: string;
+    stars: number;
+    label: string;
+  }): Promise<unknown> {
+    return await this.call("sendInvoice", {
+      chat_id: chatId,
+      title: invoice.title,
+      description: invoice.description,
+      payload: invoice.payload,
+      currency: "XTR",
+      prices: [{ label: invoice.label, amount: invoice.stars }],
+    });
+  }
+
+  /**
+   * Ответ на предварительную проверку.
+   *
+   * Telegram ждёт его не дольше десяти секунд и иначе отменяет платёж
+   * сам. Поэтому решение здесь детерминированное и не ждёт ни модели, ни
+   * очереди: либо намерение оплаты найдено и цена совпала, либо человеку
+   * названа причина отказа.
+   */
+  async answerPreCheckout(
+    queryId: string,
+    ok: boolean,
+    errorMessage?: string,
+  ): Promise<unknown> {
+    return await this.call("answerPreCheckoutQuery", {
+      pre_checkout_query_id: queryId,
+      ok,
+      ...(ok ? {} : { error_message: errorMessage ?? "Счёт больше не действителен" }),
+    });
+  }
+
+  /** Возврат звёзд по идентификатору списания. */
+  async refundStars(telegramUserId: number, chargeId: string): Promise<unknown> {
+    return await this.call("refundStarPayment", {
+      user_id: telegramUserId,
+      telegram_payment_charge_id: chargeId,
+    });
+  }
+
   async sendMessage(
     chatId: number,
     text: string,

@@ -96,19 +96,24 @@ export class PostgresTelegramInbox implements ParallelTelegramInbox {
     // webhook и терять и порядок, и восстановление после перезапуска.
     const callback = update.callback_query;
     const pollAnswer = update.poll_answer;
-    const kind = callback
-      ? "callback"
-      : pollAnswer
-        ? "poll_answer"
-        : message?.voice || message?.audio
-          ? "voice"
-          : message?.photo?.length
-            ? "image"
-            : message?.document
-              ? "document"
-              : message?.text || message?.caption
-                ? "text"
-                : "unsupported";
+    // Состоявшийся платёж идёт тем же durable ingress, что и сообщение:
+    // применить его нужно ровно один раз и пережив перезапуск, а это и
+    // есть то, ради чего очередь существует. Ход модели он не запускает.
+    const kind = message?.successful_payment
+      ? "payment"
+      : callback
+        ? "callback"
+        : pollAnswer
+          ? "poll_answer"
+          : message?.voice || message?.audio
+            ? "voice"
+            : message?.photo?.length
+              ? "image"
+              : message?.document
+                ? "document"
+                : message?.text || message?.caption
+                  ? "text"
+                  : "unsupported";
     // Кто прислал и куда отвечать. У опроса чата в апдейте нет вовсе —
     // он берётся из серверного соответствия при обработке.
     const fromId = message?.from?.id ?? callback?.from?.id ?? pollAnswer?.user?.id ?? null;
@@ -139,7 +144,10 @@ export class PostgresTelegramInbox implements ParallelTelegramInbox {
             // Выбор кнопкой и голос в опросе — продолжение того же
             // разговора, за который уже заплачено ходом: второй раз квоту за
             // них не списываем.
-            Boolean(message?.from && !message.from.is_bot && kind !== "unsupported" && !isCommand),
+            Boolean(
+              message?.from && !message.from.is_bot
+              && kind !== "unsupported" && kind !== "payment" && !isCommand,
+            ),
             JSON.stringify(update),
           ],
         );

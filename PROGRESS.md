@@ -6,12 +6,12 @@
 ## Состояние
 
 ```
-BASELINE:      40be1db — main после PR #282
+BASELINE:      81529b4 — main после PR #285
 BRANCH:        claude/evaself-unified-admin-panel-bi77r0
 STATUS:        в работе
-LAST_COMMIT:   e99ef42 — смена бота применяется без перезапуска
+LAST_COMMIT:   08a7a16 — оплата звёздами Telegram
 BLOCKER:       —
-NEXT:          смена бота применяется без перезапуска; проверки на PR
+NEXT:          оплата звёздами Telegram и раздел оплаты в панели
 ```
 
 ## Текущая порция: единая административная панель
