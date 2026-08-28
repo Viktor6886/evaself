@@ -89,3 +89,52 @@ test("отказ Telegram не мешает сервису подняться", 
   telegram.call = (async () => { throw new Error("Telegram недоступен"); }) as never;
   assert.equal(await telegram.ensureWebhook(URL_, "секрет"), "failed");
 });
+
+/*
+ * Ожидание — тоже отказ.
+ *
+ * У бота десять секунд на подтверждение списания, после которых Telegram
+ * отменяет платёж сам. Запрос без срока может провисеть дольше — и
+ * человек увидит BOT_PRECHECKOUT_TIMEOUT вместо ответа, который сервис
+ * якобы отправил.
+ */
+test("ответ на предварительную проверку не ждёт дольше отведённого", async () => {
+  const seen: Array<{ method: string; timeout: number | undefined }> = [];
+  const telegram = new TelegramClient(
+    { telegramBotToken: "TOKEN", telegramApiBaseUrl: "https://api.telegram.invalid" } as never,
+    { debug() {}, info() {}, warn() {}, error() {} },
+  );
+  telegram.call = (async (
+    method: string,
+    _body: Record<string, unknown>,
+    timeoutMs?: number,
+  ) => {
+    seen.push({ method, timeout: timeoutMs });
+    return true;
+  }) as never;
+
+  await telegram.answerPreCheckout("q-1", true);
+  assert.equal(seen[0]?.method, "answerPreCheckoutQuery");
+  assert.ok(
+    typeof seen[0]?.timeout === "number" && seen[0].timeout <= 10_000,
+    "ответ обязан укладываться в срок, который даёт Telegram",
+  );
+});
+
+test("сверка вебхука при старте не висит бесконечно", async () => {
+  const seen: number[] = [];
+  const telegram = new TelegramClient(
+    { telegramBotToken: "TOKEN", telegramApiBaseUrl: "https://api.telegram.invalid" } as never,
+    { debug() {}, info() {}, warn() {}, error() {} },
+  );
+  telegram.call = (async (
+    _method: string,
+    _body: Record<string, unknown>,
+    timeoutMs?: number,
+  ) => {
+    seen.push(timeoutMs ?? 0);
+    return { url: URL_, allowed_updates: [...TELEGRAM_ALLOWED_UPDATES] };
+  }) as never;
+  await telegram.ensureWebhook(URL_, "секрет");
+  assert.ok(seen.every((value) => value > 0), "запрос при старте остался без срока");
+});

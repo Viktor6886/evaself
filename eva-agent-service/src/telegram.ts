@@ -237,6 +237,23 @@ export interface TelegramChatActionController {
  * первых секундах ответа и получить 429 на самой доставке. Промежуточные
  * состояния поэтому не отправляются вовсе, уходит только последнее.
  */
+/**
+ * Сколько ждать ответа Telegram на подтверждение списания.
+ *
+ * Всего у бота десять секунд, после которых Telegram отменяет платёж
+ * сам. Пять — на сам ответ, остаток на проверку намерения оплаты и на
+ * дорогу: висящий запрос здесь равен потерянной оплате.
+ */
+const PRE_CHECKOUT_ANSWER_TIMEOUT_MS = 5_000;
+
+/**
+ * Сверка вебхука при старте ждёт недолго.
+ *
+ * Она полезная, но не обязательная: недоступный Telegram не повод
+ * держать в сервисе висящий запрос всё время его жизни.
+ */
+const WEBHOOK_RECONCILE_TIMEOUT_MS = 10_000;
+
 const LIVE_UPDATE_INTERVAL_MS = 600;
 
 /** Предел одного сообщения Telegram с запасом на разметку. */
@@ -500,6 +517,7 @@ export class TelegramClient implements OutboxTransport {
       const info = await this.call<{ url?: string; allowed_updates?: string[] }>(
         "getWebhookInfo",
         {},
+        WEBHOOK_RECONCILE_TIMEOUT_MS,
       );
       if (info.url === url && sameAllowedUpdates(info.allowed_updates)) return "ok";
       await this.call("setWebhook", {
@@ -509,7 +527,7 @@ export class TelegramClient implements OutboxTransport {
         // Очередь не сбрасывается: здесь не переезд на другого бота, а
         // приведение списка в порядок, и накопленные сообщения — наши.
         drop_pending_updates: false,
-      });
+      }, WEBHOOK_RECONCILE_TIMEOUT_MS);
       return "updated";
     } catch (error) {
       this.logger.warn("Не удалось сверить webhook", {
@@ -556,11 +574,13 @@ export class TelegramClient implements OutboxTransport {
     ok: boolean,
     errorMessage?: string,
   ): Promise<unknown> {
+    // Пять секунд из десяти, которые даёт Telegram: остаток остаётся на
+    // проверку намерения оплаты и на дорогу.
     return await this.call("answerPreCheckoutQuery", {
       pre_checkout_query_id: queryId,
       ok,
       ...(ok ? {} : { error_message: errorMessage ?? "Счёт больше не действителен" }),
-    });
+    }, PRE_CHECKOUT_ANSWER_TIMEOUT_MS);
   }
 
   /** Возврат звёзд по идентификатору списания. */
@@ -1286,12 +1306,27 @@ export class TelegramClient implements OutboxTransport {
     };
   }
 
-  async call<T = unknown>(method: string, body: Record<string, unknown>): Promise<T> {
+  /**
+   * Вызов Bot API.
+   *
+   * `timeoutMs` задают там, где ожидание само по себе — отказ.
+   * Подтверждение списания Telegram ждёт десять секунд и после этого
+   * отменяет платёж: висящий запрос там равен потерянной оплате, и
+   * лучше ответить отказом вовремя, чем согласием никогда. Остальные
+   * вызовы ограничения не получают: отправка файла может идти долго
+   * законно.
+   */
+  async call<T = unknown>(
+    method: string,
+    body: Record<string, unknown>,
+    timeoutMs?: number,
+  ): Promise<T> {
     this.assertConfigured();
     const response = await fetch(`${this.baseUrl}/bot${this.token}/${method}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
+      ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
     });
     return await this.parseResponse<T>(response, method);
   }
