@@ -1233,7 +1233,14 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
   // персональные данные — в ответе только количества. Править — владелец
   // и администратор, как и остальную конфигурацию установки.
   app.get("/api/admin/v1/tariffs", {
-    config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
+    config: {
+      roles: ["owner", "admin", "operator", "viewer"],
+      // Сводка расхода читает `usage_counters`, а состав тарифов —
+      // `subscriptions`: это данные людей, пусть и в виде одних только
+      // количеств. Без объявления граница арендатора запрос не пропускает
+      // и права: чтение чужих данных обязано попасть в аудит.
+      tenantAccess: "cross-user",
+    } satisfies RouteAccess,
   }, async () => {
     if (!services.tariffs) throw adminBadRequest("Тарифы недоступны");
     return await services.tariffs.state();
@@ -1260,7 +1267,11 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
   // оператор, — но персональные данные ограничены тем же, что и в списке
   // людей: идентификатор Telegram, username и имя.
   app.get("/api/admin/v1/tariffs/payments", {
-    config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
+    config: {
+      roles: ["owner", "admin", "operator", "viewer"],
+      // Журнал платежей называет людей поимённо — тем более аудит.
+      tenantAccess: "cross-user",
+    } satisfies RouteAccess,
   }, async (request) => {
     if (!services.tariffs) throw adminBadRequest("Тарифы недоступны");
     const query = (request.query ?? {}) as { limit?: unknown };

@@ -145,28 +145,44 @@ function renderTariffUsage() {
  */
 async function saveTariffLimits(plan) {
   const inputs = [...document.querySelectorAll(`[data-limit-plan="${CSS.escape(plan)}"]`)];
-  let saved = 0;
-  for (const input of inputs) {
+  const freeOf = (metric) => Number(
+    document.querySelector(
+      `[data-free-plan="${CSS.escape(plan)}"][data-free-metric="${CSS.escape(metric)}"]`,
+    )?.value ?? 0,
+  );
+  const rows = inputs.map((input) => {
     const raw = input.value.trim();
-    // Пустое поле означает «безлимит»: так его и записываем, а не
-    // пропускаем — иначе снять лимит было бы нечем.
-    const limit = raw === "" ? -1 : Number(raw);
-    const free = Number(
-      document.querySelector(
-        `[data-free-plan="${CSS.escape(plan)}"][data-free-metric="${CSS.escape(input.dataset.limitMetric)}"]`,
-      )?.value ?? 0,
+    return {
+      metric: input.dataset.limitMetric,
+      period: input.dataset.limitPeriod,
+      // Пустое поле означает «безлимит»: так его и записываем, а не
+      // пропускаем — иначе снять лимит было бы нечем.
+      limit_value: raw === "" ? -1 : Number(raw),
+      // Пробные заданы на сутки: их поле в таблице одно.
+      free_value: input.dataset.limitPeriod === "day" ? freeOf(input.dataset.limitMetric) : 0,
+    };
+  });
+
+  // Проверка до первой отправки.
+  //
+  // Раньше строки уходили по одной, и отказ на середине оставлял тариф
+  // наполовину записанным: часть значений сохранена, часть нет, и по
+  // сообщению не понять даже, на какой клетке всё встало.
+  const bad = rows.find((row) => row.limit_value >= 0 && row.free_value > row.limit_value);
+  if (bad) {
+    const title = (state.tariffs.metrics.find((item) => item.metric === bad.metric) || {}).title
+      || bad.metric;
+    toast(
+      `«${title}», сутки: пробных ${bad.free_value} при лимите ${bad.limit_value}.`
+      + " Пробных не может быть больше лимита — иначе платить будет не за что.",
+      true,
     );
-    await request("/tariffs/limits", {
-      method: "PUT",
-      body: JSON.stringify({
-        plan,
-        metric: input.dataset.limitMetric,
-        period: input.dataset.limitPeriod,
-        limit_value: limit,
-        // Пробные заданы на сутки: их поле в таблице одно.
-        free_value: input.dataset.limitPeriod === "day" ? free : 0,
-      }),
-    });
+    return;
+  }
+
+  let saved = 0;
+  for (const row of rows) {
+    await request("/tariffs/limits", { method: "PUT", body: JSON.stringify({ plan, ...row }) });
     saved += 1;
   }
   toast(`Лимиты тарифа сохранены: ${saved}`);
