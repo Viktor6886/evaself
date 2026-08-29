@@ -45,7 +45,9 @@ export interface PaymentFacts {
   raw: Record<string, unknown>;
 }
 
-export type GrantOutcome = "applied" | "duplicate";
+export type GrantOutcome =
+  | { state: "applied"; effectivePlan: string }
+  | { state: "duplicate"; effectivePlan: null };
 
 /**
  * Записать платёж и продлить подписку.
@@ -79,7 +81,7 @@ export async function grantPaidAccess(
       JSON.stringify(facts.raw),
     ],
   );
-  if (!payment.rows[0]) return "duplicate";
+  if (!payment.rows[0]) return { state: "duplicate", effectivePlan: null };
 
   const previous = await client.query<{
     id: string;
@@ -177,7 +179,7 @@ export async function grantPaidAccess(
         AND status IN ('pending', 'expired')`,
     [facts.contractId ?? null, facts.userId, facts.provider, facts.intentId ?? null],
   );
-  return "applied";
+  return { state: "applied", effectivePlan };
 }
 
 interface QuotaLimit {

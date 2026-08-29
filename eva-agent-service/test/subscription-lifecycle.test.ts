@@ -40,7 +40,7 @@ test("Plus → Max складывает срок и взвешивает сут�
     plan: "max", amountMinor: 700, durationDays: 30, currency: "XTR",
   }, { subscriptionLifecycleEnabled: true });
 
-  assert.equal(outcome, "applied");
+  assert.deepEqual(outcome, { state: "applied", effectivePlan: "max" });
   const inserted = calls.find((call) => call.sql.includes("INSERT INTO subscriptions"));
   assert.equal(inserted?.values[1], "max");
   assert.equal(inserted?.values[3], 30);

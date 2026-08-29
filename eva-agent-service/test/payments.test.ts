@@ -23,6 +23,8 @@ interface FakeOptions {
   /** false means the payment insert hit the idempotency conflict */
   paymentInserted?: boolean;
   previousPeriodEnd?: Date | null;
+  previousPlan?: string;
+  lifecycleEnabled?: boolean;
 }
 
 function harness(options: FakeOptions = {}) {
@@ -50,7 +52,12 @@ function harness(options: FakeOptions = {}) {
         return Promise.resolve({
           rows: options.previousPeriodEnd === undefined
             ? []
-            : [{ id: "sub-old", plan: "plus", status: "active", current_period_end: options.previousPeriodEnd }],
+            : [{
+              id: "sub-old",
+              plan: options.previousPlan ?? "plus",
+              status: "active",
+              current_period_end: options.previousPeriodEnd,
+            }],
         });
       }
       if (normalized.includes("INSERT INTO subscriptions")) {
@@ -77,7 +84,12 @@ function harness(options: FakeOptions = {}) {
     },
   };
   const payments = new LavaPayments(
-    { lavaWebhookUser: "eva", lavaWebhookPassword: "s3cret", lavaPlans: PLANS } as never,
+    {
+      lavaWebhookUser: "eva",
+      lavaWebhookPassword: "s3cret",
+      lavaPlans: PLANS,
+      subscriptionLifecycleEnabled: options.lifecycleEnabled ?? false,
+    } as never,
     db as never,
     telegram as never,
     silentLogger,
@@ -149,6 +161,21 @@ test("remaining time on the previous subscription is carried over", async () => 
   // The new period starts from GREATEST(now(), previous end), so the value
   // has to reach the statement rather than being silently dropped.
   assert.equal(insert.values[4], future.toISOString());
+});
+
+test("Lava confirmation reports the plan preserved by downgrade fail-safe", async () => {
+  const future = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000);
+  const { payments, statements, sent } = harness({
+    previousPeriodEnd: future,
+    previousPlan: "max",
+    lifecycleEnabled: true,
+  });
+  await payments.handle(event());
+
+  const insert = statements.find((statement) => statement.sql.includes("INSERT INTO subscriptions"));
+  assert.equal(insert?.values[1], "max");
+  assert.match(sent[0]!.text, /max/);
+  assert.doesNotMatch(sent[0]!.text, /plus/);
 });
 
 // ---------------------------------------------------------------------

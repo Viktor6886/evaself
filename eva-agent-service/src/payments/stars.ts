@@ -386,7 +386,11 @@ export class StarsPayments {
             },
             { subscriptionLifecycleEnabled: this.lifecycleEnabled },
           );
-          return { state: outcome, plan: intent.plan, days: Number(intent.duration_days) };
+          return {
+            state: outcome.state,
+            plan: outcome.effectivePlan ?? intent.plan,
+            days: Number(intent.duration_days),
+          };
         },
       );
     });
