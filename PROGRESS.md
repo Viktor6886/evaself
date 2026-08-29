@@ -9,7 +9,7 @@
 BASELINE:      d44571f — main после PR #294
 BRANCH:        codex/subscription-lifecycle-readonly
 STATUS:        в работе
-LAST_COMMIT:   —
+LAST_COMMIT:   19d573f — жизненный цикл подписки, read-only статус и уведомление
 BLOCKER:       —
 NEXT:          зафиксировать реализацию, открыть PR и дождаться полного CI
 ```
