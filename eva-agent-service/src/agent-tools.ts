@@ -16,6 +16,8 @@ import { CoreToolFactory, type RuntimeObserver } from "./tools/core-tools.js";
 import { EffectJournal, effectKey } from "./turns/effect-journal.js";
 import { turnOf } from "./turns/turn-context.js";
 import { TaskToolFactory } from "./tools/task-tools.js";
+import { SubscriptionStatusService } from "./subscriptions/status-service.js";
+import { SubscriptionToolFactory } from "./subscriptions/subscription-tools.js";
 import type { McpHttpInvoker, McpServerPolicyRepository } from "./tools/mcp.js";
 import type { MandatoryApprovalCategory, ToolRisk } from "./tools/approvals.js";
 import {
@@ -52,6 +54,7 @@ export class AgentToolFactory {
   private readonly goals: GoalToolFactory;
   private readonly goalPrograms: GoalProgramToolFactory;
   private readonly tasks: TaskToolFactory;
+  private readonly subscriptions: SubscriptionToolFactory;
   private readonly dynamicTools = new Map<string, AnyAgentTool[]>();
   private readonly vectorGoalsEnabled: boolean;
   private approvalCompletion?: (input: { userId: number; conversationId: string; toolName: string; args: unknown; outcome: "executed" | "failed" }) => Promise<unknown>;
@@ -85,6 +88,7 @@ export class AgentToolFactory {
     // VECTOR-целей структурированной программе не к чему привязываться.
     this.goalPrograms = new GoalProgramToolFactory(new GoalProgramService(db));
     this.tasks = new TaskToolFactory(db);
+    this.subscriptions = new SubscriptionToolFactory(new SubscriptionStatusService(db));
   }
 
   setApprovalCompletionCallback(callback: (input: { userId: number; conversationId: string; toolName: string; args: unknown; outcome: "executed" | "failed" }) => Promise<unknown>): void {
@@ -100,6 +104,7 @@ export class AgentToolFactory {
         ? [...this.goals.build(tool), ...this.goalPrograms.build(tool)]
         : []),
       ...this.tasks.build(tool),
+      ...this.subscriptions.build(tool),
       ...(this.dynamicTools.get(conversationId) ?? []),
     ];
   }
@@ -372,6 +377,7 @@ const TOOL_RISK: Readonly<Record<string, ToolRisk>> = Object.freeze({
   // наблюдаемые факты. Спрашивать за неё подтверждение значило бы
   // требовать разрешения на вопрос «что у меня с памятью».
   inspect_eva_runtime: "read",
+  get_subscription_status: "read",
   knowledge_search: "read",
   get_goal_program_context: "read",
   upsert_user_profile_field: "sensitive_write",

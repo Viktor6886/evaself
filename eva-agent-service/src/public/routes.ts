@@ -643,10 +643,11 @@ export function registerPublicRoutes(
      * оплата не настроена, вместо кнопки, которая ничего не делает.
      */
     subscription?: {
-      offers(): Promise<Array<{
+      offers(telegramId: number): Promise<Array<{
         plan: string; period: string; stars: number;
         title: string; description: string;
       }>>;
+      unavailableMessage?(telegramId: number): Promise<string | null>;
       /**
        * Ссылка на счёт: Mini App открывает её, не выходя из приложения.
        *
@@ -777,8 +778,11 @@ export function registerPublicRoutes(
      * приходят из `plan_prices` через тот же сервис. Второго прайса для
      * приложения нет — цена, разошедшаяся с чатовой, была бы обманом.
      */
-    publicApp.get("/subscription/offers", async () => ({
-      offers: input.subscription ? await input.subscription.offers() : [],
+    publicApp.get("/subscription/offers", async (request) => ({
+      offers: input.subscription ? await input.subscription.offers(publicUser(request).id) : [],
+      ...(input.subscription?.unavailableMessage
+        ? { blocked_reason: await input.subscription.unavailableMessage(publicUser(request).id) }
+        : {}),
       // Пусто — не поломка, а «продажи не настроены»: приложению нужно
       // различать эти два случая, чтобы не показывать пустой раздел
       // молча.

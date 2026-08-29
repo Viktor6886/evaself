@@ -46,12 +46,15 @@ function harness(options: FakeOptions = {}) {
           rows: options.paymentInserted === false ? [] : [{ id: "9" }],
         });
       }
-      if (normalized.includes("SELECT current_period_end")) {
+      if (normalized.includes("FROM subscriptions")) {
         return Promise.resolve({
           rows: options.previousPeriodEnd === undefined
             ? []
-            : [{ current_period_end: options.previousPeriodEnd }],
+            : [{ id: "sub-old", plan: "plus", status: "active", current_period_end: options.previousPeriodEnd }],
         });
+      }
+      if (normalized.includes("INSERT INTO subscriptions")) {
+        return Promise.resolve({ rows: [{ id: "sub-new" }] });
       }
       return Promise.resolve({ rows: [] });
     },
@@ -247,6 +250,7 @@ test("a failure to confirm over Telegram does not undo the subscription", async 
           return Promise.resolve({ rows: [{ id: "3", telegram_id: "42" }] });
         }
         if (sql.includes("INSERT INTO payments")) return Promise.resolve({ rows: [{ id: "9" }] });
+        if (sql.includes("INSERT INTO subscriptions")) return Promise.resolve({ rows: [{ id: "sub-new" }] });
         return Promise.resolve({ rows: [] });
       },
       transaction: <T,>(work: (c: unknown) => Promise<T>) => work({
@@ -255,6 +259,7 @@ test("a failure to confirm over Telegram does not undo the subscription", async 
             return Promise.resolve({ rows: [{ id: "3", telegram_id: "42" }] });
           }
           if (sql.includes("INSERT INTO payments")) return Promise.resolve({ rows: [{ id: "9" }] });
+          if (sql.includes("INSERT INTO subscriptions")) return Promise.resolve({ rows: [{ id: "sub-new" }] });
           return Promise.resolve({ rows: [] });
         },
       }),

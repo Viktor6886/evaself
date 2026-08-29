@@ -37,6 +37,8 @@ const ru = {
   paymentStuck:
     "Оплата прошла, но подписку не удалось открыть автоматически. Владелец уже видит это в журнале — напиши ему, доступ восстановят вручную.",
   subscriptionUnavailable: "Онлайн-оплата ещё не настроена администратором.",
+  subscriptionExpiresTomorrow:
+    "Напоминаю: подписка {plan} закончится {date}. После этого начнут действовать бесплатные лимиты.",
   privacy:
     "Связь с агентом, заметки и задачи хранятся в PostgreSQL и Letta на сервере владельца Evaself. API-ключи зашифрованы и не выдаются в WebUI. Администратор может удалить агента и его данные.",
   unknownCommand: "Неизвестная команда. Список: /help",
@@ -85,6 +87,8 @@ const en: Record<keyof typeof ru, string> = {
   paymentStuck:
     "The payment went through, but the subscription could not be opened automatically. The owner can already see this in the log — contact them and access will be restored manually.",
   subscriptionUnavailable: "Online payments have not been configured by the administrator yet.",
+  subscriptionExpiresTomorrow:
+    "Reminder: your {plan} subscription ends on {date}. Free limits will apply after that.",
   privacy:
     "Your agent link, notes, and tasks are stored in PostgreSQL and Letta on the Evaself owner’s server. API keys are encrypted and never returned to WebUI. An administrator can delete the agent and its data.",
   unknownCommand: "Unknown command. See /help",

@@ -23,9 +23,10 @@
  * индекс уже стоит: повторное событие второй подписки не выдаст.
  */
 
-import { adminBadRequest } from "../admin/errors.js";
 import type { Database } from "../db.js";
+import { badRequest } from "../errors.js";
 import { grantPaidAccess } from "./grant.js";
+import { isPaidPlan, paidPlanLevel } from "./plans.js";
 
 /** Имя провайдера в `payments`, `payment_intents` и `subscriptions`. */
 export const STARS_PROVIDER = "telegram_stars";
@@ -109,7 +110,7 @@ export class StarsPayments {
   private get db(): Database { return this.options.db; }
 
   /** Что сейчас продаётся: только тарифы с назначенной и включённой ценой. */
-  async offers(): Promise<StarsOffer[]> {
+  async offers(userId?: number): Promise<StarsOffer[]> {
     const { rows } = await this.db.withSystemScope(
       "payments.stars.offers",
       async () => await this.db.query<{ plan: string; period: string; stars: number }>(
@@ -121,9 +122,30 @@ export class StarsPayments {
            ORDER BY plan, period`,
       ),
     );
+    const active = userId === undefined ? null : await this.activeSubscription(userId);
     return rows
+      .filter((row) => isPaidPlan(row.plan))
       .filter((row) => PERIOD_DAYS[row.period] !== undefined)
+      .filter((row) => purchaseBlock(active, row.plan) === null)
       .map((row) => describe(row.plan, row.period, Number(row.stars)));
+  }
+
+  /** Единая read-only проверка для Stars, Mini App и внешних кнопок. */
+  async eligibility(
+    userId: number,
+    targetPlan: string,
+  ): Promise<{ ok: true } | { ok: false; reason: string; message: string }> {
+    if (!isPaidPlan(targetPlan)) {
+      return { ok: false, reason: "unknown_plan", message: "Неизвестный тариф подписки" };
+    }
+    const blocked = purchaseBlock(await this.activeSubscription(userId), targetPlan);
+    return blocked ? { ok: false, ...blocked } : { ok: true };
+  }
+
+  /** Почему сейчас нет ни одного допустимого тарифа. */
+  async unavailableMessage(userId: number): Promise<string | null> {
+    const active = await this.activeSubscription(userId);
+    return active ? purchaseBlock(active, active.plan)?.message ?? null : null;
   }
 
   /**
@@ -137,33 +159,54 @@ export class StarsPayments {
    */
   async invoice(userId: number, plan: string, period: string): Promise<StarsInvoice> {
     const days = PERIOD_DAYS[period];
-    if (days === undefined) throw adminBadRequest("Неизвестный срок подписки");
-    const { rows } = await this.db.withSystemScope(
-      "payments.stars.price",
-      async () => await this.db.query<{ stars: number }>(
-        `
-          -- tenant: system — прайс общий для установки, владельца у строки нет
-          SELECT stars FROM plan_prices WHERE plan = $1 AND period = $2 AND enabled`,
-        [plan, period],
-      ),
-    );
-    const stars = rows[0] ? Number(rows[0].stars) : null;
-    if (stars === null || !Number.isSafeInteger(stars) || stars <= 0) {
-      throw adminBadRequest("Для этого тарифа и срока цена не назначена");
-    }
-    const offer = describe(plan, period, stars);
-    const created = await this.db.withUserScope(
+    if (days === undefined) throw badRequest("Неизвестный срок подписки");
+    if (!isPaidPlan(plan)) throw badRequest("Неизвестный тариф подписки");
+    return await this.db.withUserScope(
       { userId, label: "payments.stars.intent" },
-      async () => await this.db.query<{ id: string }>(
-        `INSERT INTO payment_intents
-           (user_id, provider, provider_product_id, plan, duration_days,
-            amount_minor, currency, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
-         RETURNING id`,
-        [userId, STARS_PROVIDER, `${plan}:${period}`, plan, days, stars, STARS_CURRENCY],
-      ),
+      async () => await this.db.transaction(async (client) => {
+        const owner = await client.query("SELECT id FROM users WHERE id = $1 FOR UPDATE", [userId]);
+        if (!owner.rows[0]) throw badRequest("Пользователь не найден");
+        // Неоткрытый счёт заменяется новым. После pre-checkout даём
+        // Telegram пятнадцать минут завершить списание и второй checkout
+        // не создаём: иначе два быстрых нажатия могли списать деньги дважды.
+        await client.query(
+          `UPDATE payment_intents SET status = 'expired'
+            WHERE user_id = $1 AND provider = $2 AND status = 'pending'
+              AND (prechecked_at IS NULL OR prechecked_at < now() - interval '15 minutes')`,
+          [userId, STARS_PROVIDER],
+        );
+        const inProgress = await client.query(
+          `SELECT 1 FROM payment_intents
+            WHERE user_id = $1 AND provider = $2 AND status = 'pending'
+              AND prechecked_at >= now() - interval '15 minutes'
+            LIMIT 1`,
+          [userId, STARS_PROVIDER],
+        );
+        if (inProgress.rows[0]) {
+          throw badRequest("Предыдущая оплата ещё завершается. Подождите несколько минут");
+        }
+        const active = await activeSubscriptionWith(client, userId);
+        const blocked = purchaseBlock(active, plan);
+        if (blocked) throw badRequest(blocked.message, { reason: blocked.reason });
+        const priced = await client.query<{ stars: number }>(
+          `SELECT stars FROM plan_prices WHERE plan = $1 AND period = $2 AND enabled`,
+          [plan, period],
+        );
+        const stars = priced.rows[0] ? Number(priced.rows[0].stars) : null;
+        if (stars === null || !Number.isSafeInteger(stars) || stars <= 0) {
+          throw badRequest("Для этого тарифа и срока цена не назначена");
+        }
+        const created = await client.query<{ id: string }>(
+          `INSERT INTO payment_intents
+             (user_id, provider, provider_product_id, plan, duration_days,
+              amount_minor, currency, status)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
+           RETURNING id`,
+          [userId, STARS_PROVIDER, `${plan}:${period}`, plan, days, stars, STARS_CURRENCY],
+        );
+        return { ...describe(plan, period, stars), payload: created.rows[0]!.id };
+      }),
     );
-    return { ...offer, payload: created.rows[0]!.id };
   }
 
   /**
@@ -185,34 +228,73 @@ export class StarsPayments {
     if (!UUID.test(input.payload)) {
       return deny("payload", "Счёт больше не действителен");
     }
-    const { rows } = await this.db.withUserScope(
+    return await this.db.withUserScope(
       { telegramId: input.telegramUserId, label: "payments.stars.pre_checkout" },
-      async () => await this.db.query<{
-        id: string; status: string; amount_minor: string; plan: string;
-        telegram_id: string | null;
-      }>(
-        `
-          -- tenant: by telegram_id — счёт ищется только среди своих
-          SELECT i.id, i.status, i.amount_minor, i.plan, u.telegram_id
-            FROM payment_intents i
-            JOIN users u ON u.id = i.user_id
-           WHERE i.id = $1 AND i.provider = $2 AND u.telegram_id = $3`,
-        [input.payload, STARS_PROVIDER, input.telegramUserId],
-      ),
+      async () => await this.db.transaction(async (client) => {
+        const owner = await client.query<{ id: string }>(
+          "SELECT id FROM users WHERE telegram_id = $1 FOR UPDATE",
+          [input.telegramUserId],
+        );
+        const userId = Number(owner.rows[0]?.id ?? 0);
+        if (!Number.isSafeInteger(userId) || userId <= 0) {
+          return deny("unknown_intent", "Счёт больше не действителен");
+        }
+        const found = await client.query<{
+          id: string; status: string; amount_minor: string; plan: string;
+          provider_product_id: string | null;
+        }>(
+          `SELECT i.id, i.status, i.amount_minor, i.plan, i.provider_product_id
+             FROM payment_intents i
+            WHERE i.id = $1 AND i.provider = $2 AND i.user_id = $3
+            FOR UPDATE`,
+          [input.payload, STARS_PROVIDER, userId],
+        );
+        const intent = found.rows[0];
+        if (!intent) return deny("unknown_intent", "Счёт больше не действителен");
+        if (intent.status !== "pending") {
+          return deny("not_pending", "Этот счёт уже оплачен или отменён");
+        }
+        // Старый контейнер до rolling deploy мог оставить несколько
+        // счетов. Первый реальный pre-checkout атомарно занимает слот:
+        // неоткрытые старые счета закрываются, уже начатое списание
+        // другого счёта не перебивается.
+        const anotherCheckout = await client.query(
+          `SELECT 1 FROM payment_intents
+            WHERE user_id = $1 AND provider = $2 AND id <> $3
+              AND status = 'pending'
+              AND prechecked_at >= now() - interval '15 minutes'
+            LIMIT 1`,
+          [userId, STARS_PROVIDER, intent.id],
+        );
+        if (anotherCheckout.rows[0]) {
+          return deny("payment_in_progress", "Предыдущая оплата ещё завершается");
+        }
+        await client.query(
+          `UPDATE payment_intents SET status = 'expired'
+            WHERE user_id = $1 AND provider = $2 AND id <> $3
+              AND status = 'pending' AND prechecked_at IS NULL`,
+          [userId, STARS_PROVIDER, intent.id],
+        );
+        if (Number(intent.amount_minor) !== input.totalAmount) {
+          return deny("amount_changed", "Цена изменилась — откройте счёт заново");
+        }
+        const period = intent.provider_product_id?.split(":", 2)[1] ?? "";
+        const currentPrice = await client.query<{ stars: number }>(
+          `SELECT stars FROM plan_prices WHERE plan = $1 AND period = $2 AND enabled`,
+          [intent.plan, period],
+        );
+        if (Number(currentPrice.rows[0]?.stars ?? 0) !== input.totalAmount) {
+          return deny("amount_changed", "Цена изменилась — откройте счёт заново");
+        }
+        const blocked = purchaseBlock(await activeSubscriptionWith(client, userId), intent.plan);
+        if (blocked) return deny(blocked.reason, blocked.message);
+        await client.query(
+          `UPDATE payment_intents SET prechecked_at = now() WHERE id = $1 AND user_id = $2`,
+          [intent.id, userId],
+        );
+        return { ok: true, intentId: intent.id };
+      }),
     );
-    // Чужой счёт сюда не доходит: запрос ограничен своим владельцем, и
-    // от несуществующего чужой неотличим намеренно. За чужую подписку
-    // платить нельзя — доступ получил бы не плательщик, — а сообщать
-    // плательщику, что счёт существует и чей он, незачем.
-    const intent = rows[0];
-    if (!intent) return deny("unknown_intent", "Счёт больше не действителен");
-    if (intent.status !== "pending") {
-      return deny("not_pending", "Этот счёт уже оплачен или отменён");
-    }
-    if (Number(intent.amount_minor) !== input.totalAmount) {
-      return deny("amount_changed", "Цена изменилась — откройте счёт заново");
-    }
-    return { ok: true, intentId: intent.id };
   }
 
   /**
@@ -236,12 +318,12 @@ export class StarsPayments {
     return await this.db.transaction(async (client) => {
       const { rows } = await client.query<{
         id: string; user_id: string; plan: string; duration_days: number;
-        amount_minor: string; currency: string; status: string;
+        amount_minor: string; currency: string; status: string; prechecked_at: Date | null;
       }>(
         `
           -- tenant: by telegram_id — платёж применяется только к своему намерению
           SELECT i.id, i.user_id, i.plan, i.duration_days,
-                 i.amount_minor, i.currency, i.status
+                 i.amount_minor, i.currency, i.status, i.prechecked_at
             FROM payment_intents i
             JOIN users u ON u.id = i.user_id
            WHERE i.id = $1 AND i.provider = $2 AND u.telegram_id = $3
@@ -260,7 +342,10 @@ export class StarsPayments {
         || !Number.isSafeInteger(input.totalAmount)
         || input.totalAmount <= 0
         || !input.chargeId.trim()
-        || !["pending", "succeeded"].includes(intent.status)
+        || !(
+          ["pending", "succeeded"].includes(intent.status)
+          || (intent.status === "expired" && intent.prechecked_at)
+        )
       ) {
         throw new Error("Успешный платёж не совпадает с намерением оплаты");
       }
@@ -278,6 +363,7 @@ export class StarsPayments {
               provider: STARS_PROVIDER,
               paymentId: input.chargeId,
               contractId: intent.id,
+              intentId: intent.id,
               raw: input.raw,
             },
             {
@@ -295,6 +381,85 @@ export class StarsPayments {
     });
   }
 
+  private async activeSubscription(userId: number): Promise<ActiveSubscription | null> {
+    return await this.db.withUserScope(
+      { userId, label: "payments.stars.active_subscription" },
+      async () => await activeSubscriptionWith(this.db, userId),
+    );
+  }
+
+}
+
+interface Queryable {
+  query<T extends Record<string, unknown> = Record<string, unknown>>(
+    text: string,
+    values?: unknown[],
+  ): Promise<{ rows: T[] }>;
+}
+
+interface ActiveSubscription {
+  [key: string]: unknown;
+  plan: string;
+  status: string;
+  source: string;
+  current_period_end: Date | null;
+}
+
+async function activeSubscriptionWith(
+  queryable: Queryable,
+  userId: number,
+): Promise<ActiveSubscription | null> {
+  const { rows } = await queryable.query<ActiveSubscription>(
+    `SELECT plan, status, source, current_period_end
+       FROM subscriptions
+      WHERE user_id = $1
+        AND status IN ('trialing', 'active', 'past_due')
+        AND (current_period_end IS NULL OR current_period_end > now())
+      ORDER BY current_period_end DESC NULLS FIRST, created_at DESC
+      LIMIT 1`,
+    [userId],
+  );
+  return rows[0] ?? null;
+}
+
+function purchaseBlock(
+  active: ActiveSubscription | null,
+  targetPlan: string,
+): { reason: string; message: string } | null {
+  if (!active) return null;
+  const currentLevel = paidPlanLevel(active.plan);
+  const targetLevel = paidPlanLevel(targetPlan);
+  if (currentLevel === null || targetLevel === null) {
+    return { reason: "unknown_plan", message: "Текущий тариф нельзя изменить онлайн" };
+  }
+  if (!active.current_period_end) {
+    return {
+      reason: "indefinite_subscription",
+      message: "Текущий доступ бессрочный. Изменить его может только администратор",
+    };
+  }
+  // Пробный доступ можно превратить в оплату того же тарифа. Все прочие
+  // действующие права повторно не продаются.
+  if (currentLevel === targetLevel && active.status !== "trialing") {
+    return {
+      reason: "same_plan_active",
+      message: `Этот тариф уже действует до ${formatDate(active.current_period_end)}. Повторная оплата будет доступна после окончания`,
+    };
+  }
+  if (targetLevel < currentLevel) {
+    return {
+      reason: "downgrade_active",
+      message: `Понизить тариф можно после ${formatDate(active.current_period_end)}, когда закончится текущий`,
+    };
+  }
+  return null;
+}
+
+function formatDate(value: Date): string {
+  const parsed = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(parsed.getTime())
+    ? "окончания текущей подписки"
+    : new Intl.DateTimeFormat("ru-RU", { dateStyle: "long", timeZone: "UTC" }).format(parsed);
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;

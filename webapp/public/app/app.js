@@ -1377,10 +1377,10 @@
     }
     const offers = Array.isArray(payload?.offers) ? payload.offers : [];
     if (!offers.length) {
-      // Пусто — это «продажи не настроены», а не поломка. Кнопка,
-      // которая ничего не делает, хуже честной строки.
+      // Пусто означает либо отсутствие прайса, либо действующий тариф,
+      // который нельзя повторить/понизить. Причину считает сервер.
       card.innerHTML = `<span class="eyebrow">ТАРИФЫ</span>
-        <p class="muted">Оплата пока не настроена владельцем.</p>`;
+        <p class="muted">${escapeHtml(payload?.blocked_reason || "Оплата пока не настроена владельцем.")}</p>`;
       return;
     }
     card.innerHTML = `<span class="eyebrow">ТАРИФЫ</span>

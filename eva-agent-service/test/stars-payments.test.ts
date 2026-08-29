@@ -19,12 +19,17 @@ function db(rows: Record<string, unknown[]>) {
   const asked: string[] = [];
   const pick = (text: string): unknown[] => {
     asked.push(text);
+    if (text.includes("FROM users WHERE id =")) return rows.owner ?? [{ id: "7" }];
+    if (text.includes("FROM users WHERE telegram_id")) return rows.owner ?? [{ id: "7" }];
     if (text.includes("FROM plan_prices") && text.includes("ORDER BY")) return rows.offers ?? [];
     if (text.includes("FROM plan_prices")) return rows.price ?? [];
     if (text.includes("INSERT INTO payment_intents")) return rows.intent ?? [{ id: INTENT }];
+    if (text.includes("SELECT 1 FROM payment_intents")) return rows.inProgress ?? [];
     if (text.includes("FROM payment_intents")) return rows.lookup ?? [];
     if (text.includes("INSERT INTO payments")) return rows.payment ?? [{ id: "9" }];
-    if (text.includes("SELECT current_period_end")) return rows.previous ?? [];
+    if (text.includes("FROM subscriptions")) return rows.active ?? [];
+    if (text.includes("INSERT INTO subscriptions")) return rows.subscription ?? [{ id: "10" }];
+    if (text.includes("FROM quotas")) return rows.quotas ?? [];
     return [];
   };
   return {
@@ -87,7 +92,7 @@ test("счёт запоминает цену на момент выставле�
 
 test("предварительная проверка отвергает чужой и просроченный счёт", async () => {
   const verdicts = async (lookup: Record<string, unknown>[]) => {
-    const { db: fake } = db({ lookup });
+    const { db: fake } = db({ lookup, price: [{ stars: 500 }] });
     return await new StarsPayments({ db: fake }).preCheckout({
       payload: INTENT, telegramUserId: 42, totalAmount: 500, currency: "XTR",
     });
@@ -102,21 +107,21 @@ test("предварительная проверка отвергает чуж�
 
   // Цена изменилась, пока счёт висел в чате.
   const changed = await verdicts([
-    { id: INTENT, status: "pending", amount_minor: "900", plan: "plus", telegram_id: "42" },
+    { id: INTENT, status: "pending", amount_minor: "900", plan: "plus", provider_product_id: "plus:month" },
   ]);
   assert.equal(changed.ok, false);
   assert.equal(changed.ok === false && changed.reason, "amount_changed");
 
   // Уже оплачено — второй раз списывать не за что.
   const used = await verdicts([
-    { id: INTENT, status: "succeeded", amount_minor: "500", plan: "plus", telegram_id: "42" },
+    { id: INTENT, status: "succeeded", amount_minor: "500", plan: "plus", provider_product_id: "plus:month" },
   ]);
   assert.equal(used.ok, false);
   assert.equal(used.ok === false && used.reason, "not_pending");
 
   // Всё сходится.
   const good = await verdicts([
-    { id: INTENT, status: "pending", amount_minor: "500", plan: "plus", telegram_id: "42" },
+    { id: INTENT, status: "pending", amount_minor: "500", plan: "plus", provider_product_id: "plus:month" },
   ]);
   assert.equal(good.ok, true);
 });
@@ -155,6 +160,7 @@ test("состоявшийся платёж записывает подписк�
       amount_minor: "1",
       currency: "XTR",
       status: "pending",
+      prechecked_at: new Date(),
     }],
   });
   const outcome = await new StarsPayments({ db: fake }).apply({
@@ -182,6 +188,7 @@ test("состоявшийся платёж повторно сверяется 
       amount_minor: "1",
       currency: "XTR",
       status: "pending",
+      prechecked_at: new Date(),
     }],
   });
   await assert.rejects(
@@ -200,4 +207,51 @@ test("состоявшийся платёж повторно сверяется 
     false,
     "несовпадающий платёж не должен выдавать доступ",
   );
+});
+
+test("активный тариф нельзя оплатить повторно или понизить", async () => {
+  const end = new Date(Date.now() + 7 * 86_400_000);
+  const same = db({
+    price: [{ stars: 100 }],
+    active: [{ plan: "plus", status: "active", source: "payment", current_period_end: end }],
+  });
+  await assert.rejects(
+    () => new StarsPayments({ db: same.db }).invoice(7, "plus", "month"),
+    /уже действует/iu,
+  );
+  assert.match(
+    await new StarsPayments({ db: same.db }).unavailableMessage(7) ?? "",
+    /повторная оплата.*после окончания/iu,
+  );
+  assert.equal(same.asked.some((sql) => sql.includes("INSERT INTO payment_intents")), false);
+
+  const downgrade = db({
+    price: [{ stars: 100 }],
+    active: [{ plan: "max", status: "active", source: "payment", current_period_end: end }],
+  });
+  await assert.rejects(
+    () => new StarsPayments({ db: downgrade.db }).invoice(7, "plus", "month"),
+    /понизить тариф/iu,
+  );
+});
+
+test("повышение Plus → Max остаётся доступным", async () => {
+  const { db: fake } = db({
+    price: [{ stars: 700 }],
+    active: [{
+      plan: "plus", status: "active", source: "payment",
+      current_period_end: new Date(Date.now() + 7 * 86_400_000),
+    }],
+  });
+  const invoice = await new StarsPayments({ db: fake }).invoice(7, "max", "month");
+  assert.equal(invoice.plan, "max");
+});
+
+test("после pre-checkout второй счёт не создаётся", async () => {
+  const { db: fake, asked } = db({ inProgress: [{ exists: 1 }] });
+  await assert.rejects(
+    () => new StarsPayments({ db: fake }).invoice(7, "plus", "month"),
+    /оплата ещё завершается/iu,
+  );
+  assert.equal(asked.some((sql) => sql.includes("INSERT INTO payment_intents")), false);
 });

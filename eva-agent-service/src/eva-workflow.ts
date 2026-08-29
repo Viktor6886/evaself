@@ -629,7 +629,7 @@ export class EvaWorkflow {
           // выход из положения. Предложение оплаты идёт тем же
           // сообщением: отправлять его в другой команде значит просить
           // человека догадаться, что делать дальше.
-          await this.sendQuotaOffer(update.chatId, language);
+          await this.sendQuotaOffer(user.id, update.chatId, language);
           await this.stopTurn(turnHandle, "quota_messages");
           return { status: "ignored" };
         }
@@ -1243,10 +1243,11 @@ export class EvaWorkflow {
    * которой нет, хуже, чем честно назвать предел.
    */
   private async sendQuotaOffer(
+    userId: number,
     chatId: number,
     language: SupportedLanguage,
   ): Promise<void> {
-    const offers = this.stars ? await this.stars.offers().catch(() => []) : [];
+    const offers = this.stars ? await this.stars.offers(userId).catch(() => []) : [];
     const buttons: Array<Array<Record<string, unknown>>> = offers.map((offer) => [{
       text: `${offer.title} — ${offer.stars} ⭐`,
       callback_data: `buy:${offer.plan}:${offer.period}`,
@@ -1304,7 +1305,10 @@ export class EvaWorkflow {
         period,
         code: error instanceof Error ? error.name : "unknown_error",
       });
-      await this.telegram.sendMessage(chatId, "Не удалось открыть счёт. Попробуй ещё раз чуть позже.")
+      const message = error instanceof EvaError && error.code === "bad_request"
+        ? error.message
+        : "Не удалось открыть счёт. Попробуй ещё раз чуть позже.";
+      await this.telegram.sendMessage(chatId, message)
         .catch(() => undefined);
     }
   }
@@ -1490,23 +1494,32 @@ export class EvaWorkflow {
       case "/subscription": {
         // Звёзды идут первыми: оплата внутри Telegram не уводит человека
         // из чата и не требует ни карты, ни адреса.
-        const offers = this.stars ? await this.stars.offers().catch(() => []) : [];
+        const offers = this.stars ? await this.stars.offers(user.id).catch(() => []) : [];
         const starsButtons = offers.map((offer) => [{
           text: `${offer.title} — ${offer.stars} ⭐`,
           callback_data: `buy:${offer.plan}:${offer.period}`,
         }]);
-        const linkButtons = Object.entries(this.config.lavaPlans)
-          .filter(([, plan]) => plan.paymentUrl)
-          .map(([, plan]) => [{
+        const lavaPlans = await Promise.all(Object.entries(this.config.lavaPlans).map(
+          async ([, plan]) => ({
+            plan,
+            allowed: !this.stars || (await this.stars.eligibility(user.id, plan.plan).catch(() => ({ ok: false as const }))).ok,
+          }),
+        ));
+        const linkButtons = lavaPlans
+          .filter(({ plan, allowed }) => plan.paymentUrl && allowed)
+          .map(({ plan }) => [{
             text: `${plan.plan} — ${(plan.amountMinor / 100).toFixed(0)} ${plan.currency}`,
             url: plan.paymentUrl,
           }]);
         const buttons = [...starsButtons, ...linkButtons];
+        const unavailable = buttons.length || !this.stars
+          ? null
+          : await this.stars.unavailableMessage(user.id).catch(() => null);
         await this.telegram.sendMessage(
           update.chatId,
           buttons.length
             ? t(language, "chooseSubscription")
-            : t(language, "subscriptionUnavailable"),
+            : unavailable ?? t(language, "subscriptionUnavailable"),
           buttons.length ? { reply_markup: { inline_keyboard: buttons } } : {},
         );
         break;

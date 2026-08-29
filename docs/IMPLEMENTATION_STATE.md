@@ -38,7 +38,7 @@
 | Интерактивные элементы | Кнопки и опросы | `src/telegram/inline-choices.ts`, `src/telegram/polls.ts` |
 | Live message | Показ streaming-ответа одним редактируемым сообщением | Telegram client runtime |
 | Женский род | Детерминированная правка речи Евы о себе на выходе; правило персоны перестаёт быть вероятностью | `src/i18n/eva-gender.ts` |
-| Оплата звёздами | Счёт, проверка до и после списания, идемпотентная выдача доступа с durable retry, восстановление неприменённых платежей и возврат — в тех же `payments`, `payment_intents`, `subscriptions` | `src/payments/stars.ts`, `src/payments/grant.ts`, `src/delivery/inbox.ts` |
+| Оплата звёздами | Счёт, проверка до и после списания, один незавершённый checkout, запрет повтора/понижения, суммирование срока и взвешивание квот при повышении, идемпотентная выдача доступа с durable retry, восстановление неприменённых платежей и возврат — в тех же `payments`, `payment_intents`, `subscriptions` | `src/payments/stars.ts`, `src/payments/grant.ts`, `src/delivery/inbox.ts` |
 | Подписка в Mini App | Тарифы и оплата внутри приложения: тот же прайс и тот же счёт, что в чате | `src/public/routes.ts`, `webapp/public/app/app.js` |
 | Доставка настроек в media-service | `PUT /config/media` одним путём для формы интеграций и для переезда на другого бота | `src/admin/media-runtime.ts` |
 | Боты Евы | До пяти сохранённых токенов, активен один; переезд переставляет вебхук и меняет бота в рантайме без перезапуска | `src/admin/telegram-token-service.ts`, `POST /v1/telegram/token` |
@@ -79,6 +79,8 @@ BullMQ не обрабатывает интерактивный ход и не �
 | Курсор программ | Где человек внутри длинной guided-программы; не дублирует VECTOR-Action | `src/goals/goal-program-service.ts`, `src/goals/goal-program-tools.ts` |
 | Задачи | Напоминания и события | `src/tasks/task-event-service.ts` |
 | Платежи | Платежи, intents и подписки | `src/payments.ts` |
+| Статус подписки | Read-only инструмент текущего пользователя: тариф, срок, дни, расход и бесплатные сообщения; изменение моделью отсутствует | `src/subscriptions/status-service.ts`, `src/subscriptions/subscription-tools.ts` |
+| Окончание подписки | Детерминированное предупреждение за 24 часа через durable outbox, без LLM и с идемпотентностью по подписке и сроку | `src/subscriptions/expiry-notifier.ts` |
 | Кризисный контур | Детерминированное обнаружение риска | `src/crisis.ts` |
 | Дневник | Записи, люди и недельный обзор | `src/public/journal/` |
 | Каналы | Связь внешнего сообщения с внутренним пользователем | `src/channels/channel-links.ts` |
