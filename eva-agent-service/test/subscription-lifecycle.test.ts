@@ -109,6 +109,31 @@ test("платный апгрейд не превращает прежний б�
   assert.deepEqual(outcome, { state: "applied", effectivePlan: "plus" });
 });
 
+test("бессрочный fail-safe действует и при выключенном rollout-флаге", async () => {
+  const calls: Array<{ sql: string; values: unknown[] }> = [];
+  const client = {
+    async query(sql: string, values: unknown[] = []) {
+      calls.push({ sql, values });
+      if (sql.includes("INSERT INTO payments")) return { rows: [{ id: "pay-rollback" }] };
+      if (sql.includes("FROM subscriptions")) return { rows: [{
+        id: "sub-plus-forever", plan: "plus", status: "active", current_period_end: null,
+      }] };
+      if (sql.includes("INSERT INTO subscriptions")) return { rows: [{ id: "sub-rollback" }] };
+      return { rows: [] };
+    },
+  };
+
+  const outcome = await grantPaidAccess(client as never, {
+    userId: "7", provider: "lava", paymentId: "rollback-paid-max", raw: {},
+  }, {
+    plan: "max", amountMinor: 700, durationDays: 30, currency: "RUB",
+  }, { subscriptionLifecycleEnabled: false });
+
+  const inserted = calls.find((call) => call.sql.includes("INSERT INTO subscriptions"));
+  assert.equal(inserted?.values[1], "plus");
+  assert.deepEqual(outcome, { state: "applied", effectivePlan: "plus" });
+});
+
 test("безлимит Max начинается после оплаченных конечных дней Plus", async () => {
   const end = new Date(Date.now() + 10 * 86_400_000);
   const calls: Array<{ sql: string; values: unknown[] }> = [];

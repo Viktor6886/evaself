@@ -107,10 +107,13 @@ export async function grantPaidAccess(
   // downgrade до списания; этот fail-safe нужен для внешнего провайдера
   // или гонки с ручным изменением подписки.
   const lifecycleEnabled = options.subscriptionLifecycleEnabled === true;
-  const effectivePlan = lifecycleEnabled && previousSubscription
+  const effectivePlan = previousSubscription && (
+    previousIndefinite
+    || (lifecycleEnabled
       && previousLevel !== null
       && targetLevel !== null
-      && (previousIndefinite || previousLevel > targetLevel)
+      && previousLevel > targetLevel)
+  )
     ? previousSubscription.plan
     : plan.plan;
   const blended = lifecycleEnabled && previousSubscription && !previousIndefinite && previousDays > 0
