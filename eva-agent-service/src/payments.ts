@@ -164,6 +164,7 @@ export class LavaPayments {
         raw: event.raw,
       },
       plan,
+      { subscriptionLifecycleEnabled: this.config.subscriptionLifecycleEnabled },
     );
     return { state: outcome, telegramId: Number(found.telegram_id) };
   }

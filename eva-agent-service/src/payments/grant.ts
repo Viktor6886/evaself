@@ -58,6 +58,7 @@ export async function grantPaidAccess(
   client: pg.PoolClient,
   facts: PaymentFacts,
   plan: PaidPlan,
+  options: { subscriptionLifecycleEnabled?: boolean } = {},
 ): Promise<GrantOutcome> {
   const payment = await client.query<{ id: string }>(
     `INSERT INTO payments
@@ -103,18 +104,19 @@ export async function grantPaidAccess(
   // После списания понизить доступ нельзя. Штатный путь Stars отсекает
   // downgrade до списания; этот fail-safe нужен для внешнего провайдера
   // или гонки с ручным изменением подписки.
-  const effectivePlan = previousSubscription
+  const lifecycleEnabled = options.subscriptionLifecycleEnabled === true;
+  const effectivePlan = lifecycleEnabled && previousSubscription
       && previousLevel !== null
       && targetLevel !== null
       && previousLevel > targetLevel
     ? previousSubscription.plan
     : plan.plan;
-  const blended = previousSubscription && !previousIndefinite && previousDays > 0
+  const blended = lifecycleEnabled && previousSubscription && !previousIndefinite && previousDays > 0
     ? await blendQuotaLimits(
       client,
       facts.userId,
       previousSubscription,
-      plan.plan,
+      effectivePlan,
       previousDays,
       plan.durationDays,
     )

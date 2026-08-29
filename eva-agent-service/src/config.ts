@@ -88,6 +88,8 @@ export interface Config {
   vectorGoalsEnabled: boolean;
   profileCacheTtlSeconds: number;
   outboxEnabled: boolean;
+  /** Новые правила покупки, смешанные квоты, read-only tool и expiry notice. */
+  subscriptionLifecycleEnabled: boolean;
   /**
    * Запись жизненного цикла хода в `turn_runs`. Shadow-режим: путь
    * обработки сообщения и ответ пользователю от него не зависят.
@@ -375,6 +377,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     vectorGoalsEnabled: bool("EVA_VECTOR_GOALS_ENABLED", true),
     profileCacheTtlSeconds: int("EVA_PROFILE_CACHE_TTL_SECONDS", 60),
     outboxEnabled: bool("EVA_OUTBOX_ENABLED", true),
+    subscriptionLifecycleEnabled: bool("EVA_SUBSCRIPTION_LIFECYCLE", false),
     turnLifecycleEnabled: bool("EVA_TURN_LIFECYCLE", false),
     parallelInboxEnabled: bool("EVA_PARALLEL_INBOX", false),
     turnAggregationEnabled: bool("EVA_TURN_AGGREGATION", false),

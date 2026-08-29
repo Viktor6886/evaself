@@ -255,3 +255,16 @@ test("после pre-checkout второй счёт не создаётся", as
   );
   assert.equal(asked.some((sql) => sql.includes("INSERT INTO payment_intents")), false);
 });
+
+test("выключенный lifecycle-флаг возвращает прежнюю возможность продления", async () => {
+  const { db: fake } = db({
+    price: [{ stars: 100 }],
+    active: [{
+      plan: "plus", status: "active", source: "payment",
+      current_period_end: new Date(Date.now() + 7 * 86_400_000),
+    }],
+  });
+  const invoice = await new StarsPayments({ db: fake, lifecycleEnabled: false })
+    .invoice(7, "plus", "month");
+  assert.equal(invoice.plan, "plus");
+});

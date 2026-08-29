@@ -104,7 +104,7 @@ export class AgentToolFactory {
         ? [...this.goals.build(tool), ...this.goalPrograms.build(tool)]
         : []),
       ...this.tasks.build(tool),
-      ...this.subscriptions.build(tool),
+      ...(this.config.subscriptionLifecycleEnabled ? this.subscriptions.build(tool) : []),
       ...(this.dynamicTools.get(conversationId) ?? []),
     ];
   }

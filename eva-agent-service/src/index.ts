@@ -315,7 +315,7 @@ async function main(): Promise<void> {
   // использовали тот же канонический lifecycle.
   // Оплата звёздами. Своего хранилища нет: те же payment_intents,
   // payments и subscriptions, что и у карточной оплаты.
-  const stars = new StarsPayments({ db });
+  const stars = new StarsPayments({ db, lifecycleEnabled: config.subscriptionLifecycleEnabled });
   const workflow = new EvaWorkflow(
     config,
     db,
@@ -551,7 +551,9 @@ async function main(): Promise<void> {
 
   await app.listen({ port: config.port, host: config.host });
   if (config.outboxEnabled) outbox.start();
-  if (telegram.configured) subscriptionExpiryNotifier.start();
+  if (telegram.configured && config.subscriptionLifecycleEnabled) {
+    subscriptionExpiryNotifier.start();
+  }
   if (config.parallelInboxEnabled) dispatcher.start();
   else inboxWorker.start();
   // Сочетание флагов проверяет `configWarnings`: заход без жизненного

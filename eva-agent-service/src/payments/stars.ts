@@ -102,12 +102,15 @@ export type PreCheckoutVerdict =
  */
 export interface StarsPaymentsOptions {
   db: Database;
+  /** Omit only in focused tests; production always passes the feature flag. */
+  lifecycleEnabled?: boolean;
 }
 
 export class StarsPayments {
   constructor(private readonly options: StarsPaymentsOptions) {}
 
   private get db(): Database { return this.options.db; }
+  private get lifecycleEnabled(): boolean { return this.options.lifecycleEnabled !== false; }
 
   /** Что сейчас продаётся: только тарифы с назначенной и включённой ценой. */
   async offers(userId?: number): Promise<StarsOffer[]> {
@@ -122,7 +125,9 @@ export class StarsPayments {
            ORDER BY plan, period`,
       ),
     );
-    const active = userId === undefined ? null : await this.activeSubscription(userId);
+    const active = !this.lifecycleEnabled || userId === undefined
+      ? null
+      : await this.activeSubscription(userId);
     return rows
       .filter((row) => isPaidPlan(row.plan))
       .filter((row) => PERIOD_DAYS[row.period] !== undefined)
@@ -135,6 +140,7 @@ export class StarsPayments {
     userId: number,
     targetPlan: string,
   ): Promise<{ ok: true } | { ok: false; reason: string; message: string }> {
+    if (!this.lifecycleEnabled) return { ok: true };
     if (!isPaidPlan(targetPlan)) {
       return { ok: false, reason: "unknown_plan", message: "Неизвестный тариф подписки" };
     }
@@ -144,6 +150,7 @@ export class StarsPayments {
 
   /** Почему сейчас нет ни одного допустимого тарифа. */
   async unavailableMessage(userId: number): Promise<string | null> {
+    if (!this.lifecycleEnabled) return null;
     const active = await this.activeSubscription(userId);
     return active ? purchaseBlock(active, active.plan)?.message ?? null : null;
   }
@@ -169,25 +176,26 @@ export class StarsPayments {
         // Неоткрытый счёт заменяется новым. После pre-checkout даём
         // Telegram пятнадцать минут завершить списание и второй checkout
         // не создаём: иначе два быстрых нажатия могли списать деньги дважды.
-        await client.query(
+        if (this.lifecycleEnabled) await client.query(
           `UPDATE payment_intents SET status = 'expired'
             WHERE user_id = $1 AND provider = $2 AND status = 'pending'
               AND (prechecked_at IS NULL OR prechecked_at < now() - interval '15 minutes')`,
           [userId, STARS_PROVIDER],
         );
-        const inProgress = await client.query(
+        const inProgress = this.lifecycleEnabled ? await client.query(
           `SELECT 1 FROM payment_intents
             WHERE user_id = $1 AND provider = $2 AND status = 'pending'
               AND prechecked_at >= now() - interval '15 minutes'
             LIMIT 1`,
           [userId, STARS_PROVIDER],
-        );
+        ) : { rows: [] };
         if (inProgress.rows[0]) {
           throw badRequest("Предыдущая оплата ещё завершается. Подождите несколько минут");
         }
-        const active = await activeSubscriptionWith(client, userId);
-        const blocked = purchaseBlock(active, plan);
-        if (blocked) throw badRequest(blocked.message, { reason: blocked.reason });
+        if (this.lifecycleEnabled) {
+          const blocked = purchaseBlock(await activeSubscriptionWith(client, userId), plan);
+          if (blocked) throw badRequest(blocked.message, { reason: blocked.reason });
+        }
         const priced = await client.query<{ stars: number }>(
           `SELECT stars FROM plan_prices WHERE plan = $1 AND period = $2 AND enabled`,
           [plan, period],
@@ -258,18 +266,18 @@ export class StarsPayments {
         // счетов. Первый реальный pre-checkout атомарно занимает слот:
         // неоткрытые старые счета закрываются, уже начатое списание
         // другого счёта не перебивается.
-        const anotherCheckout = await client.query(
+        const anotherCheckout = this.lifecycleEnabled ? await client.query(
           `SELECT 1 FROM payment_intents
             WHERE user_id = $1 AND provider = $2 AND id <> $3
               AND status = 'pending'
               AND prechecked_at >= now() - interval '15 minutes'
             LIMIT 1`,
           [userId, STARS_PROVIDER, intent.id],
-        );
+        ) : { rows: [] };
         if (anotherCheckout.rows[0]) {
           return deny("payment_in_progress", "Предыдущая оплата ещё завершается");
         }
-        await client.query(
+        if (this.lifecycleEnabled) await client.query(
           `UPDATE payment_intents SET status = 'expired'
             WHERE user_id = $1 AND provider = $2 AND id <> $3
               AND status = 'pending' AND prechecked_at IS NULL`,
@@ -286,8 +294,10 @@ export class StarsPayments {
         if (Number(currentPrice.rows[0]?.stars ?? 0) !== input.totalAmount) {
           return deny("amount_changed", "Цена изменилась — откройте счёт заново");
         }
-        const blocked = purchaseBlock(await activeSubscriptionWith(client, userId), intent.plan);
-        if (blocked) return deny(blocked.reason, blocked.message);
+        if (this.lifecycleEnabled) {
+          const blocked = purchaseBlock(await activeSubscriptionWith(client, userId), intent.plan);
+          if (blocked) return deny(blocked.reason, blocked.message);
+        }
         await client.query(
           `UPDATE payment_intents SET prechecked_at = now() WHERE id = $1 AND user_id = $2`,
           [intent.id, userId],
@@ -374,6 +384,7 @@ export class StarsPayments {
               durationDays: Number(intent.duration_days),
               currency: STARS_CURRENCY,
             },
+            { subscriptionLifecycleEnabled: this.lifecycleEnabled },
           );
           return { state: outcome, plan: intent.plan, days: Number(intent.duration_days) };
         },

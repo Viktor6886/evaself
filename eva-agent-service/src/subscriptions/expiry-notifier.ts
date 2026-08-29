@@ -44,9 +44,12 @@ export class SubscriptionExpiryNotifier {
     if (this.running) return;
     this.running = true;
     try {
-      const { rows } = await this.db.withSystemScope(
-        "subscriptions.expiry_notifications",
-        async () => await this.db.query<ExpiringSubscription>(
+      let cursorEnd: string | null = null;
+      let cursorId: string | null = null;
+      while (true) {
+        const { rows } = await this.db.withSystemScope(
+          "subscriptions.expiry_notifications",
+          async () => await this.db.query<ExpiringSubscription>(
           `-- tenant: system — системное уведомление выбирает истекающие подписки всех пользователей
            SELECT s.id::text AS subscription_id, u.id::text AS user_id,
                   COALESCE(tu.chat_id, u.telegram_id)::text AS chat_id,
@@ -65,28 +68,36 @@ export class SubscriptionExpiryNotifier {
               AND s.current_period_end > now()
               AND s.current_period_end <= now() + interval '24 hours'
               AND u.state = 'active' AND NOT u.is_blocked
-            ORDER BY s.current_period_end
+              AND ($1::timestamptz IS NULL
+                   OR (s.current_period_end, s.id) > ($1::timestamptz, $2::bigint))
+            ORDER BY s.current_period_end, s.id
             LIMIT 100`,
-        ),
-        { crossUser: true },
-      );
-      for (const row of rows) {
-        const language = preferredResponseLanguage(row);
-        const end = asDate(row.current_period_end);
-        await this.outbox.send({
-          method: "sendMessage",
-          chatId: Number(row.chat_id),
-          userId: Number(row.user_id),
-          priority: "reminder",
-          idempotencyKey: `subscription-expiry:${row.subscription_id}:${end.toISOString()}`,
-          payload: {
-            chat_id: Number(row.chat_id),
-            text: t(language, "subscriptionExpiresTomorrow", {
-              plan: row.plan,
-              date: formatEnd(end, row.timezone, language),
-            }),
-          },
-        });
+            [cursorEnd, cursorId],
+          ),
+          { crossUser: true },
+        );
+        for (const row of rows) {
+          const language = preferredResponseLanguage(row);
+          const end = asDate(row.current_period_end);
+          await this.outbox.send({
+            method: "sendMessage",
+            chatId: Number(row.chat_id),
+            userId: Number(row.user_id),
+            priority: "reminder",
+            idempotencyKey: `subscription-expiry:${row.subscription_id}:${end.toISOString()}`,
+            payload: {
+              chat_id: Number(row.chat_id),
+              text: t(language, "subscriptionExpiresTomorrow", {
+                plan: row.plan,
+                date: formatEnd(end, row.timezone, language),
+              }),
+            },
+          });
+        }
+        if (rows.length < 100) break;
+        const last = rows.at(-1)!;
+        cursorEnd = asDate(last.current_period_end).toISOString();
+        cursorId = last.subscription_id;
       }
     } catch (error) {
       this.logger.error("Не удалось отправить уведомления об окончании подписки", {

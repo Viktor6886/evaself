@@ -38,7 +38,7 @@ test("Plus → Max складывает срок и взвешивает сут�
     raw: {},
   }, {
     plan: "max", amountMinor: 700, durationDays: 30, currency: "XTR",
-  });
+  }, { subscriptionLifecycleEnabled: true });
 
   assert.equal(outcome, "applied");
   const inserted = calls.find((call) => call.sql.includes("INSERT INTO subscriptions"));
@@ -50,6 +50,37 @@ test("Plus → Max складывает срок и взвешивает сут�
   assert.ok(Number(snapshot?.values[4]) >= 175 && Number(snapshot?.values[4]) <= 176);
   const intentUpdate = calls.find((call) => call.sql.includes("UPDATE payment_intents SET status"));
   assert.equal(intentUpdate?.values[3], "intent-1", "закрывается только оплаченный intent");
+});
+
+test("fail-safe понижения сохраняет и имя, и квоты высокого тарифа", async () => {
+  const end = new Date(Date.now() + 10 * 86_400_000);
+  const calls: Array<{ sql: string; values: unknown[] }> = [];
+  const client = {
+    async query(sql: string, values: unknown[] = []) {
+      calls.push({ sql, values });
+      if (sql.includes("INSERT INTO payments")) return { rows: [{ id: "pay-2" }] };
+      if (sql.includes("FROM subscriptions")) return { rows: [{
+        id: "sub-max", plan: "max", status: "active", current_period_end: end,
+      }] };
+      if (sql.includes("FROM quotas")) return { rows: [{
+        metric: "messages", period: "day", limit_value: "200",
+      }] };
+      if (sql.includes("INSERT INTO subscriptions")) return { rows: [{ id: "sub-safe" }] };
+      return { rows: [] };
+    },
+  };
+  await grantPaidAccess(client as never, {
+    userId: "7", provider: "lava", paymentId: "paid-lower", raw: {},
+  }, {
+    plan: "plus", amountMinor: 100, durationDays: 30, currency: "RUB",
+  }, { subscriptionLifecycleEnabled: true });
+
+  const inserted = calls.find((call) => call.sql.includes("INSERT INTO subscriptions"));
+  assert.equal(inserted?.values[1], "max");
+  const targetQuota = calls.find((call) => call.sql.includes("FROM quotas WHERE plan"));
+  assert.equal(targetQuota?.values[0], "max", "новые дни не получают пониженную квоту Plus");
+  const snapshot = calls.find((call) => call.sql.includes("INSERT INTO subscription_quota_limits"));
+  assert.equal(snapshot?.values[4], 200);
 });
 
 test("статус подписки возвращает только read-only снимок текущего пользователя", async () => {
@@ -98,7 +129,7 @@ test("инструмент статуса не принимает владель
     },
   };
   const factory = new AgentToolFactory(
-    { vectorGoalsEnabled: false } as never,
+    { vectorGoalsEnabled: false, subscriptionLifecycleEnabled: true } as never,
     db as never,
     {} as never,
     silentLogger,
@@ -137,4 +168,34 @@ test("уведомление за сутки идёт через durable outbox 
   assert.equal(sent[0]?.idempotencyKey, `subscription-expiry:55:${end.toISOString()}`);
   assert.equal(sent[1]?.idempotencyKey, `subscription-expiry:55:${end.toISOString()}`);
   assert.match(String((sent[0]?.payload as { text: string }).text), /закончится/iu);
+});
+
+test("уведомитель проходит дальше первых ста подписок", async () => {
+  const end = new Date("2026-08-30T12:00:00Z");
+  let page = 0;
+  let delivered = 0;
+  const row = (id: number) => ({
+    subscription_id: String(id), user_id: String(id), chat_id: String(id), plan: "plus",
+    current_period_end: end, timezone: "UTC", language_mode: "fixed",
+    preferred_language: "ru", last_message_language: null, language_code: "ru",
+  });
+  const notifier = new SubscriptionExpiryNotifier(
+    {
+      withSystemScope: async (_label: string, work: () => Promise<unknown>) => await work(),
+      query: async (_sql: string, values: unknown[]) => {
+        page += 1;
+        if (page === 1) {
+          assert.deepEqual(values, [null, null]);
+          return { rows: Array.from({ length: 100 }, (_, index) => row(index + 1)) };
+        }
+        assert.deepEqual(values, [end.toISOString(), "100"]);
+        return { rows: [row(101)] };
+      },
+    } as never,
+    { send: async () => { delivered += 1; } } as never,
+    silentLogger,
+  );
+  await notifier.tick();
+  assert.equal(page, 2);
+  assert.equal(delivered, 101);
 });
