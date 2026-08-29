@@ -110,7 +110,7 @@ export async function grantPaidAccess(
   const effectivePlan = lifecycleEnabled && previousSubscription
       && previousLevel !== null
       && targetLevel !== null
-      && previousLevel > targetLevel
+      && (previousIndefinite || previousLevel > targetLevel)
     ? previousSubscription.plan
     : plan.plan;
   const blended = lifecycleEnabled && previousSubscription && !previousIndefinite && previousDays > 0

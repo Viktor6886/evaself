@@ -83,6 +83,32 @@ test("fail-safe понижения сохраняет и имя, и квоты �
   assert.equal(snapshot?.values[4], 200);
 });
 
+test("платный апгрейд не превращает прежний бессрочный тариф в новый бессрочный", async () => {
+  const calls: Array<{ sql: string; values: unknown[] }> = [];
+  const client = {
+    async query(sql: string, values: unknown[] = []) {
+      calls.push({ sql, values });
+      if (sql.includes("INSERT INTO payments")) return { rows: [{ id: "pay-indefinite" }] };
+      if (sql.includes("FROM subscriptions")) return { rows: [{
+        id: "sub-plus-forever", plan: "plus", status: "active", current_period_end: null,
+      }] };
+      if (sql.includes("INSERT INTO subscriptions")) return { rows: [{ id: "sub-preserved" }] };
+      return { rows: [] };
+    },
+  };
+
+  const outcome = await grantPaidAccess(client as never, {
+    userId: "7", provider: "lava", paymentId: "paid-max-month", raw: {},
+  }, {
+    plan: "max", amountMinor: 700, durationDays: 30, currency: "RUB",
+  }, { subscriptionLifecycleEnabled: true });
+
+  const inserted = calls.find((call) => call.sql.includes("INSERT INTO subscriptions"));
+  assert.equal(inserted?.values[1], "plus", "старый бессрочный тариф сохраняется");
+  assert.equal(inserted?.values[6], true, "срок остаётся бессрочным только у старого тарифа");
+  assert.deepEqual(outcome, { state: "applied", effectivePlan: "plus" });
+});
+
 test("безлимит Max начинается после оплаченных конечных дней Plus", async () => {
   const end = new Date(Date.now() + 10 * 86_400_000);
   const calls: Array<{ sql: string; values: unknown[] }> = [];
