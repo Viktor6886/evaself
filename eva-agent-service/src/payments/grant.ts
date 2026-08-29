@@ -210,13 +210,14 @@ async function blendQuotaLimits(
   targetDays: number,
 ): Promise<QuotaLimit[]> {
   const oldRows = await client.query<{
-    metric: string; period: string; limit_value: string;
+    metric: string; period: string; limit_value: string; unlimited_from: Date | null;
   }>(
     `SELECT q.metric, q.period,
             CASE WHEN $4::text = 'trialing' THEN q.free_value
                  WHEN sq.unlimited_from IS NOT NULL AND sq.unlimited_from <= now() THEN -1
                  ELSE COALESCE(sq.limit_value, q.limit_value)
-            END::text AS limit_value
+            END::text AS limit_value,
+            sq.unlimited_from
        FROM quotas q
        LEFT JOIN subscription_quota_limits sq
          ON sq.subscription_id = $2
@@ -234,6 +235,11 @@ async function blendQuotaLimits(
     [targetPlan],
   );
   const old = quotaMap(oldRows.rows);
+  const oldUnlimitedFrom = new Map(
+    oldRows.rows
+      .filter((row) => row.unlimited_from)
+      .map((row) => [`${row.metric}\u0000${row.period}`, row.unlimited_from!]),
+  );
   const target = quotaMap(targetRows.rows);
   const keys = new Set([...old.keys(), ...target.keys()]);
   const totalDays = previousDays + targetDays;
@@ -255,7 +261,7 @@ async function blendQuotaLimits(
       // конца действует прежний лимит, затем начинается купленный
       // безлимит. Остальные конечные квоты по-прежнему усредняются.
       limitValue = oldLimit;
-      unlimitedFrom = previous.current_period_end;
+      unlimitedFrom = oldUnlimitedFrom.get(key) ?? previous.current_period_end;
     } else if (period === "total") {
       limitValue = safeCeil(oldLimit + targetLimit);
     } else {

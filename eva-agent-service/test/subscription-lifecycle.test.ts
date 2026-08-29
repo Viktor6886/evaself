@@ -114,6 +114,37 @@ test("безлимит Max начинается после оплаченных 
   assert.equal(snapshot?.values[5], end.toISOString(), "безлимит включается с начала купленных дней Max");
 });
 
+test("повторный платёж не отодвигает уже купленную дату безлимита", async () => {
+  const unlimitedFrom = new Date(Date.now() + 5 * 86_400_000);
+  const currentEnd = new Date(Date.now() + 12 * 86_400_000);
+  const calls: Array<{ sql: string; values: unknown[] }> = [];
+  const client = {
+    async query(sql: string, values: unknown[] = []) {
+      calls.push({ sql, values });
+      if (sql.includes("INSERT INTO payments")) return { rows: [{ id: "pay-repeat" }] };
+      if (sql.includes("FROM subscriptions")) return { rows: [{
+        id: "sub-mixed", plan: "max", status: "active", current_period_end: currentEnd,
+      }] };
+      if (sql.includes("COALESCE(sq.limit_value")) return { rows: [{
+        metric: "messages", period: "day", limit_value: "200", unlimited_from: unlimitedFrom,
+      }] };
+      if (sql.includes("FROM quotas WHERE plan")) return { rows: [{
+        metric: "messages", period: "day", limit_value: "-1",
+      }] };
+      if (sql.includes("INSERT INTO subscriptions")) return { rows: [{ id: "sub-extended" }] };
+      return { rows: [] };
+    },
+  };
+  await grantPaidAccess(client as never, {
+    userId: "7", provider: "lava", paymentId: "repeat-unlimited", raw: {},
+  }, {
+    plan: "max", amountMinor: 700, durationDays: 7, currency: "RUB",
+  }, { subscriptionLifecycleEnabled: true });
+
+  const snapshot = calls.find((call) => call.sql.includes("INSERT INTO subscription_quota_limits"));
+  assert.equal(snapshot?.values[5], unlimitedFrom.toISOString());
+});
+
 test("статус подписки возвращает только read-only снимок текущего пользователя", async () => {
   const values: unknown[][] = [];
   const db = {
