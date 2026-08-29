@@ -8,10 +8,10 @@
 ```
 BASELINE:      d44571f — main после PR #294
 BRANCH:        codex/subscription-lifecycle-readonly
-STATUS:        в работе
+STATUS:        на ревью
 LAST_COMMIT:   19d573f — жизненный цикл подписки, read-only статус и уведомление
 BLOCKER:       —
-NEXT:          зафиксировать реализацию, открыть PR и дождаться полного CI
+NEXT:          дождаться CI и независимого Codex review в PR #295, затем merge
 ```
 
 ## Текущая порция: жизненный цикл подписки и read-only статус
@@ -28,7 +28,9 @@ NEXT:          зафиксировать реализацию, открыть P
 24 часа до конца, один раз для каждой пары «подписка + срок».
 
 Проверки: targeted payment/subscription tests, build, lint, typecheck,
-tenant-scope и полный набор тестов сервиса. PR ещё не открыт.
+tenant-scope и полный набор тестов сервиса. Pull request
+[#295](https://github.com/Viktor6886/evaself/pull/295) открыт, CI и независимое
+ревью ожидаются.
 
 ## Предыдущая порция: надёжная активация подписки после оплаты звёздами
 
