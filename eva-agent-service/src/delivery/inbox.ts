@@ -84,6 +84,54 @@ function toRecord(row: InboxRow): InboxRecord {
 export class PostgresTelegramInbox implements ParallelTelegramInbox {
   constructor(private readonly db: Database) {}
 
+  /**
+   * Вернуть в очередь списанные, но не применённые платежи.
+   *
+   * До исправления обработчик платежа проглатывал отказ выдачи доступа,
+   * после чего durable update становился `completed` и больше никогда не
+   * запускался. Идентификатор списания позволяет отличить такой платёж от
+   * уже применённого без догадок: применённый всегда есть в `payments`.
+   * Повтор безопасен — тот же идентификатор является ключом
+   * идемпотентности в `grantPaidAccess`.
+   */
+  async recoverUnappliedStarPayments(): Promise<number> {
+    const result = await this.db.withSystemScope(
+      "telegram.inbox.recover_unapplied_star_payments",
+      async () => await this.db.query(
+        `
+          -- tenant: system — восстановление durable ingress сверяет терминальные платежи со всесистемным журналом платежей
+          UPDATE telegram_updates t
+             SET status = 'queued',
+                 attempts = 0,
+                 available_at = now(),
+                 completed_at = NULL,
+                 error_code = NULL,
+                 error_message = NULL,
+                 last_error = NULL,
+                 locked_at = NULL,
+                 locked_by = NULL
+           WHERE t.message_kind = 'payment'
+             -- Старый дефект оставлял именно completed. Dead не
+             -- трогаем: иначе безнадёжно повреждённый платёж оживал бы
+             -- после каждого перезапуска сервиса.
+             AND t.status = 'completed'
+             AND COALESCE(
+                   t.payload #>> '{message,successful_payment,telegram_payment_charge_id}',
+                   ''
+                 ) <> ''
+             AND NOT EXISTS (
+                   SELECT 1
+                     FROM payments p
+                    WHERE p.provider = 'telegram_stars'
+                      AND p.provider_payment_id =
+                          t.payload #>> '{message,successful_payment,telegram_payment_charge_id}'
+                 )`,
+      ),
+      { crossUser: true },
+    );
+    return result.rowCount ?? 0;
+  }
+
   async enqueue(update: TelegramUpdate): Promise<{ accepted: boolean; duplicate: boolean }> {
     if (!Number.isSafeInteger(update.update_id)) {
       return { accepted: false, duplicate: false };

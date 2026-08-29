@@ -23,7 +23,12 @@ import { CrisisMonitor } from "./crisis.js";
 import { ConversationPurposeService } from "./conversations/purpose-service.js";
 import { Database } from "./db.js";
 import { ParallelInboxDispatcher } from "./delivery/dispatcher.js";
-import { PostgresTelegramInbox, TelegramInboxWorker } from "./delivery/inbox.js";
+import {
+  PostgresTelegramInbox,
+  TelegramInboxWorker,
+  type InboxRecord,
+} from "./delivery/inbox.js";
+import { t } from "./i18n/index.js";
 import { PostgresTelegramOutbox } from "./delivery/outbox.js";
 import { TelegramDeliveryLimiter } from "./delivery/telegram-limits.js";
 import { badRequest, notFound } from "./errors.js";
@@ -336,14 +341,27 @@ async function main(): Promise<void> {
     stars,
   );
   const inbox = new PostgresTelegramInbox(db);
+  const recoveredStarPayments = await inbox.recoverUnappliedStarPayments().catch((error) => {
+    logger.warn("Не удалось найти неприменённые платежи в звёздах", {
+      code: error instanceof Error ? error.name : "unknown_error",
+    });
+    return 0;
+  });
+  if (recoveredStarPayments > 0) {
+    logger.warn("Неприменённые платежи в звёздах возвращены в очередь", {
+      count: recoveredStarPayments,
+    });
+  }
   // Уведомление о мёртвой записи одно на оба пути обработки: человек
   // должен узнать про потерянное сообщение независимо от того, каким
   // воркером оно обрабатывалось.
   const notifyDeadUpdate = async (
-    record: { updateId: number; chatId: number | null; telegramUserId: number | null },
+    record: InboxRecord,
     error: unknown,
   ): Promise<void> => {
     const message = error instanceof Error ? error.message : String(error);
+    const payment = record.payload.message?.successful_payment;
+    const language = record.payload.message?.from?.language_code === "en" ? "en" : "ru";
     // Владелец, разговаривающий с Евой в своём же чате, попадал в слепую
     // зону: подробность уходила только в «другой» чат, а этим другим он и
     // был. Он видел «попробуйте ещё раз» и не имел ни одного способа
@@ -354,7 +372,9 @@ async function main(): Promise<void> {
       if (record.chatId) {
         await telegram.sendMessage(
           record.chatId,
-          "Не получилось обработать сообщение после нескольких попыток. Ошибка сохранена; попробуйте отправить сообщение ещё раз."
+          (payment
+            ? t(language, "paymentStuck")
+            : "Не получилось обработать сообщение после нескольких попыток. Ошибка сохранена; попробуйте отправить сообщение ещё раз.")
             + (ownerReadsThisChat ? `\n\nПричина: ${message.slice(0, 1200)}` : ""),
         );
       }

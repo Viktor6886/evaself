@@ -227,6 +227,7 @@ export class StarsPayments {
     payload: string;
     chargeId: string;
     totalAmount: number;
+    currency: string;
     raw: Record<string, unknown>;
   }): Promise<
     | { state: "applied" | "duplicate"; plan: string; days: number }
@@ -235,10 +236,12 @@ export class StarsPayments {
     return await this.db.transaction(async (client) => {
       const { rows } = await client.query<{
         id: string; user_id: string; plan: string; duration_days: number;
+        amount_minor: string; currency: string; status: string;
       }>(
         `
           -- tenant: by telegram_id — платёж применяется только к своему намерению
-          SELECT i.id, i.user_id, i.plan, i.duration_days
+          SELECT i.id, i.user_id, i.plan, i.duration_days,
+                 i.amount_minor, i.currency, i.status
             FROM payment_intents i
             JOIN users u ON u.id = i.user_id
            WHERE i.id = $1 AND i.provider = $2 AND u.telegram_id = $3
@@ -247,6 +250,20 @@ export class StarsPayments {
       );
       const intent = rows[0];
       if (!intent) return { state: "unknown_intent" as const };
+      // Предварительная проверка была до списания, но состоявшийся платёж
+      // является отдельным событием и проверяется заново. Иначе
+      // повреждённый update мог выдать тариф за другую сумму или валюту.
+      if (
+        input.currency !== STARS_CURRENCY
+        || intent.currency !== STARS_CURRENCY
+        || Number(intent.amount_minor) !== input.totalAmount
+        || !Number.isSafeInteger(input.totalAmount)
+        || input.totalAmount <= 0
+        || !input.chargeId.trim()
+        || !["pending", "succeeded"].includes(intent.status)
+      ) {
+        throw new Error("Успешный платёж не совпадает с намерением оплаты");
+      }
       return await this.db.withUserScope(
         {
           userId: Number(intent.user_id),
