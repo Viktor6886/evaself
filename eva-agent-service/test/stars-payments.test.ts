@@ -23,6 +23,8 @@ function db(rows: Record<string, unknown[]>) {
     if (text.includes("FROM plan_prices")) return rows.price ?? [];
     if (text.includes("INSERT INTO payment_intents")) return rows.intent ?? [{ id: INTENT }];
     if (text.includes("FROM payment_intents")) return rows.lookup ?? [];
+    if (text.includes("INSERT INTO payments")) return rows.payment ?? [{ id: "9" }];
+    if (text.includes("SELECT current_period_end")) return rows.previous ?? [];
     return [];
   };
   return {
@@ -138,7 +140,64 @@ test("платёж без намерения оплаты не выдаёт по
   const stars = new StarsPayments({ db: fake });
   const outcome = await stars.apply({
     telegramUserId: 42, payload: INTENT, chargeId: "charge-1",
-    totalAmount: 500, raw: {},
+    totalAmount: 500, currency: "XTR", raw: {},
   });
   assert.equal(outcome.state, "unknown_intent");
+});
+
+test("состоявшийся платёж записывает подписку и закрывает намерение", async () => {
+  const { db: fake, asked } = db({
+    lookup: [{
+      id: INTENT,
+      user_id: "7",
+      plan: "plus",
+      duration_days: 30,
+      amount_minor: "1",
+      currency: "XTR",
+      status: "pending",
+    }],
+  });
+  const outcome = await new StarsPayments({ db: fake }).apply({
+    telegramUserId: 42,
+    payload: INTENT,
+    chargeId: "charge-paid",
+    totalAmount: 1,
+    currency: "XTR",
+    raw: { telegram_payment_charge_id: "charge-paid" },
+  });
+
+  assert.deepEqual(outcome, { state: "applied", plan: "plus", days: 30 });
+  assert.equal(asked.some((sql) => sql.includes("INSERT INTO payments")), true);
+  assert.equal(asked.some((sql) => sql.includes("INSERT INTO subscriptions")), true);
+  assert.equal(asked.some((sql) => sql.includes("UPDATE payment_intents")), true);
+});
+
+test("состоявшийся платёж повторно сверяется с намерением", async () => {
+  const { db: fake, asked } = db({
+    lookup: [{
+      id: INTENT,
+      user_id: "7",
+      plan: "plus",
+      duration_days: 30,
+      amount_minor: "1",
+      currency: "XTR",
+      status: "pending",
+    }],
+  });
+  await assert.rejects(
+    () => new StarsPayments({ db: fake }).apply({
+      telegramUserId: 42,
+      payload: INTENT,
+      chargeId: "charge-wrong",
+      totalAmount: 2,
+      currency: "XTR",
+      raw: {},
+    }),
+    /не совпадает/iu,
+  );
+  assert.equal(
+    asked.some((sql) => sql.includes("INSERT INTO payments")),
+    false,
+    "несовпадающий платёж не должен выдавать доступ",
+  );
 });

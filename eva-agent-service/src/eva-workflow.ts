@@ -544,7 +544,7 @@ export class EvaWorkflow {
         return await this.db.withUserScope(
           { telegramId: update.telegramId, label: "telegram.turn" },
           async (): Promise<InboxResult> => {
-        const { user, link } = await this.ensureUserAndAgent(update);
+        const user = await this.ensureUser(update);
         const language = preferredResponseLanguage(user);
         // Владельца получает каждая запись окна, а не только та, на
         // которую отвечаем: иначе присоединённые строки остались бы без
@@ -552,6 +552,19 @@ export class EvaWorkflow {
         for (const part of [...earlier, update]) {
           await this.db.attachTelegramUpdateToUser(part.updateId, user.id);
         }
+
+        // Платёж не зависит от агента, conversation, Letta и синхронизации
+        // персоны. Деньги уже списаны: ставить выдачу доступа после этих
+        // внешних зависимостей значило бы потерять подписку из-за отказа,
+        // который к оплате не относится. Ошибка здесь пробрасывается в
+        // durable inbox и становится повторной попыткой, а не `completed`.
+        if (update.kind === "payment") {
+          await this.applyPayment(update, language);
+          await this.stopTurn(turnHandle, "payment");
+          return { status: "completed" };
+        }
+
+        const { link } = await this.ensureUserAndAgent(update, user);
         await this.linkTurn(turnHandle, {
           userId: user.id,
           agentId: link.agent_id,
@@ -591,17 +604,6 @@ export class EvaWorkflow {
         if (update.command) {
           await this.handleCommand(update, user, language);
           await this.stopTurn(turnHandle, "command");
-          return { status: "completed" };
-        }
-
-        // Платёж применяется до всего остального: он не тратит квоту, не
-        // идёт в модель и обязан примениться даже тогда, когда сообщения
-        // человеку уже закончились. Иначе оплата, сделанная ради
-        // продолжения разговора, упёрлась бы в лимит, который сама и
-        // снимает.
-        if (update.kind === "payment") {
-          await this.applyPayment(update, language);
-          await this.stopTurn(turnHandle, "payment");
           return { status: "completed" };
         }
 
@@ -1320,13 +1322,13 @@ export class EvaWorkflow {
   ): Promise<void> {
     const payment = update.message.successful_payment;
     if (!payment || !this.stars) return;
-    let outcome: Awaited<ReturnType<StarsPayments["apply"]>>;
     try {
-      outcome = await this.stars.apply({
+      const outcome = await this.stars.apply({
         telegramUserId: update.telegramId,
         payload: payment.invoice_payload,
         chargeId: payment.telegram_payment_charge_id,
         totalAmount: payment.total_amount,
+        currency: payment.currency,
         // Идентификатор списания нужен для возврата, payload — чтобы
         // потом понять, какую именно подписку этот платёж оплатил.
         raw: {
@@ -1336,33 +1338,30 @@ export class EvaWorkflow {
           currency: payment.currency,
         },
       });
+      if (outcome.state === "unknown_intent") {
+        throw new Error("У успешного платежа не найдено намерение оплаты");
+      }
+      if (outcome.state === "duplicate") return;
+      this.logger.info("Подписка оплачена звёздами", {
+        telegramId: update.telegramId,
+        plan: outcome.plan,
+        days: outcome.days,
+      });
+      await this.telegram.sendMessage(
+        update.chatId,
+        t(language, "paymentThanks", { days: String(outcome.days) }),
+      ).catch(() => undefined);
     } catch (error) {
-      // Деньги списаны. Молчать нельзя: человек должен знать, что
-      // подписка не открылась сама, — и владелец увидит это в журнале.
+      // Деньги уже списаны. Ошибка обязана выйти в durable inbox: только
+      // так update получит retry вместо ложного `completed`. Уведомление
+      // человеку отправит onDead после исчерпания попыток; до этого
+      // подписка ещё может открыться автоматически.
       this.logger.error("Платёж не применён", {
         telegramId: update.telegramId,
         code: error instanceof Error ? error.name : "unknown_error",
       });
-      await this.telegram.sendMessage(update.chatId, t(language, "paymentStuck"))
-        .catch(() => undefined);
-      return;
+      throw error;
     }
-    if (outcome.state === "unknown_intent") {
-      this.logger.error("Платёж без намерения оплаты", { telegramId: update.telegramId });
-      await this.telegram.sendMessage(update.chatId, t(language, "paymentStuck"))
-        .catch(() => undefined);
-      return;
-    }
-    if (outcome.state === "duplicate") return;
-    this.logger.info("Подписка оплачена звёздами", {
-      telegramId: update.telegramId,
-      plan: outcome.plan,
-      days: outcome.days,
-    });
-    await this.telegram.sendMessage(
-      update.chatId,
-      t(language, "paymentThanks", { days: String(outcome.days) }),
-    ).catch(() => undefined);
   }
 
   private async stopRunningTurn(update: NormalizedUpdate): Promise<InboxResult> {
@@ -1395,9 +1394,7 @@ export class EvaWorkflow {
     );
   }
 
-  private async ensureUserAndAgent(
-    update: NormalizedUpdate,
-  ): Promise<{ user: UserRow; link: AgentLinkRow }> {
+  private async ensureUser(update: NormalizedUpdate): Promise<UserRow> {
     const from = update.message.from!;
     const user = await this.db.upsertUser({
       telegramId: update.telegramId,
@@ -1410,6 +1407,15 @@ export class EvaWorkflow {
     // внутренний `users.id` появляется здесь, и до этого момента данные
     // пользователя ей недоступны.
     this.db.bindScopeUserId(user.id);
+    return user;
+  }
+
+  private async ensureUserAndAgent(
+    update: NormalizedUpdate,
+    knownUser?: UserRow,
+  ): Promise<{ user: UserRow; link: AgentLinkRow }> {
+    const from = update.message.from!;
+    const user = knownUser ?? await this.ensureUser(update);
     let link = await this.db.getAgentLink(update.telegramId);
     if (!link) {
       let agentId = await this.letta.findAgentByTelegramId(update.telegramId);
