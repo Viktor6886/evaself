@@ -240,7 +240,16 @@ export function buildServer(services: Services): FastifyInstance {
     ...(stars
       ? {
         subscription: {
-          offers: async () => await stars.offers(),
+          offers: async (telegramId: number) => {
+            const owner = await db.findUserByTelegramId(telegramId);
+            if (!owner) throw new EvaError("Пользователь не найден", { statusCode: 404 });
+            return await stars.offers(Number(owner.id));
+          },
+          unavailableMessage: async (telegramId: number) => {
+            const owner = await db.findUserByTelegramId(telegramId);
+            if (!owner) throw new EvaError("Пользователь не найден", { statusCode: 404 });
+            return await stars.unavailableMessage(Number(owner.id));
+          },
           invoiceLink: async (telegramId: number, plan: string, period: string) => {
             // Подпись Telegram подтверждает идентификатор Telegram;
             // намерение оплаты записывается на внутреннего владельца.

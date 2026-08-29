@@ -43,6 +43,7 @@ import { LlmManager } from "./llm.js";
 import { createLogger } from "./logger.js";
 import { LavaPayments } from "./payments.js";
 import { StarsPayments } from "./payments/stars.js";
+import { SubscriptionExpiryNotifier } from "./subscriptions/expiry-notifier.js";
 import { UserProfileService } from "./profile/profile-service.js";
 import { ValkeyRateLimiter } from "./public/rate-limit.js";
 import { ValkeyMiniAppSessions } from "./public/webapp-session.js";
@@ -214,6 +215,7 @@ async function main(): Promise<void> {
         }
       : null,
   });
+  const subscriptionExpiryNotifier = new SubscriptionExpiryNotifier(db, outbox, logger);
   if (config.outboxEnabled) telegram.setOutbox(outbox);
   const sdk = new SdkSettingsManager(config, db, letta);
   try {
@@ -313,7 +315,7 @@ async function main(): Promise<void> {
   // использовали тот же канонический lifecycle.
   // Оплата звёздами. Своего хранилища нет: те же payment_intents,
   // payments и subscriptions, что и у карточной оплаты.
-  const stars = new StarsPayments({ db });
+  const stars = new StarsPayments({ db, lifecycleEnabled: config.subscriptionLifecycleEnabled });
   const workflow = new EvaWorkflow(
     config,
     db,
@@ -549,6 +551,9 @@ async function main(): Promise<void> {
 
   await app.listen({ port: config.port, host: config.host });
   if (config.outboxEnabled) outbox.start();
+  if (telegram.configured && config.subscriptionLifecycleEnabled) {
+    subscriptionExpiryNotifier.start();
+  }
   if (config.parallelInboxEnabled) dispatcher.start();
   else inboxWorker.start();
   // Сочетание флагов проверяет `configWarnings`: заход без жизненного
@@ -605,6 +610,7 @@ async function main(): Promise<void> {
     logger.info("Остановка сервиса", { signal });
     try {
       background.stop();
+      subscriptionExpiryNotifier.stop();
       if (recoveryTimer) clearInterval(recoveryTimer);
       dispatcher.stop();
       inboxWorker.stop();

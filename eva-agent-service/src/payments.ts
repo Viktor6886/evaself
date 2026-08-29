@@ -131,7 +131,7 @@ export class LavaPayments {
         await this.telegram.withPriority("command", async () =>
           await this.telegram.sendMessage(
             applied.telegramId,
-            `Оплата получена. Доступ по плану «${plan.plan}» активирован на ${plan.durationDays} дней.`,
+            `Оплата получена. Доступ по плану «${applied.plan}» активирован на ${plan.durationDays} дней.`,
           ))).catch((error) => {
         this.logger.warn("Не удалось отправить подтверждение оплаты", {
           paymentId: event.paymentId,
@@ -150,7 +150,7 @@ export class LavaPayments {
     plan: { plan: string; amountMinor: number; durationDays: number; currency: string },
   ): Promise<
     | { state: "duplicate"; telegramId: number }
-    | { state: "applied"; telegramId: number }
+    | { state: "applied"; telegramId: number; plan: string }
   > {
     // Запись общая со звёздами: что происходит после оплаты, знает одно
     // место. Поведение прежнее — провайдер и валюта были здесь строками.
@@ -164,8 +164,16 @@ export class LavaPayments {
         raw: event.raw,
       },
       plan,
+      { subscriptionLifecycleEnabled: this.config.subscriptionLifecycleEnabled },
     );
-    return { state: outcome, telegramId: Number(found.telegram_id) };
+    if (outcome.state === "duplicate") {
+      return { state: "duplicate", telegramId: Number(found.telegram_id) };
+    }
+    return {
+      state: "applied",
+      telegramId: Number(found.telegram_id),
+      plan: outcome.effectivePlan,
+    };
   }
 }
 
