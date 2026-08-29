@@ -153,9 +153,12 @@ export async function grantPaidAccess(
   for (const quota of blended) {
     await client.query(
       `INSERT INTO subscription_quota_limits
-         (subscription_id, user_id, metric, period, limit_value)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [subscriptionId, facts.userId, quota.metric, quota.period, quota.limitValue],
+         (subscription_id, user_id, metric, period, limit_value, unlimited_from)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [
+        subscriptionId, facts.userId, quota.metric, quota.period,
+        quota.limitValue, quota.unlimitedFrom?.toISOString() ?? null,
+      ],
     );
   }
   await client.query(
@@ -181,6 +184,7 @@ interface QuotaLimit {
   metric: string;
   period: string;
   limitValue: number;
+  unlimitedFrom: Date | null;
 }
 
 const PERIOD_DAYS: Readonly<Record<string, number>> = Object.freeze({
@@ -200,7 +204,7 @@ const PERIOD_DAYS: Readonly<Record<string, number>> = Object.freeze({
 async function blendQuotaLimits(
   client: pg.PoolClient,
   userId: string,
-  previous: { id: string; plan: string; status: string },
+  previous: { id: string; plan: string; status: string; current_period_end: Date | null },
   targetPlan: string,
   previousDays: number,
   targetDays: number,
@@ -210,6 +214,7 @@ async function blendQuotaLimits(
   }>(
     `SELECT q.metric, q.period,
             CASE WHEN $4::text = 'trialing' THEN q.free_value
+                 WHEN sq.unlimited_from IS NOT NULL AND sq.unlimited_from <= now() THEN -1
                  ELSE COALESCE(sq.limit_value, q.limit_value)
             END::text AS limit_value
        FROM quotas q
@@ -239,8 +244,18 @@ async function blendQuotaLimits(
     const oldLimit = old.get(key) ?? 0;
     const targetLimit = target.get(key) ?? 0;
     let limitValue: number;
-    if (oldLimit < 0 || targetLimit < 0) {
+    let unlimitedFrom: Date | null = null;
+    if (oldLimit < 0) {
+      // Уже оплаченный безлимит нельзя понизить даже при необычной
+      // конфигурации более высокого тарифа.
       limitValue = -1;
+    } else if (targetLimit < 0) {
+      // У бесконечности нет средневзвешенного конечного значения.
+      // Поэтому старые дни не превращаются в Max бесплатно: до старого
+      // конца действует прежний лимит, затем начинается купленный
+      // безлимит. Остальные конечные квоты по-прежнему усредняются.
+      limitValue = oldLimit;
+      unlimitedFrom = previous.current_period_end;
     } else if (period === "total") {
       limitValue = safeCeil(oldLimit + targetLimit);
     } else {
@@ -250,7 +265,7 @@ async function blendQuotaLimits(
         + (targetLimit / periodDays) * targetDays;
       limitValue = safeCeil((dailyCapacity / totalDays) * periodDays);
     }
-    result.push({ metric, period, limitValue });
+    result.push({ metric, period, limitValue, unlimitedFrom });
   }
   return result;
 }

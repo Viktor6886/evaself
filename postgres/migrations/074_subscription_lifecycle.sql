@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS subscription_quota_limits (
     metric           text   NOT NULL,
     period           text   NOT NULL,
     limit_value      bigint NOT NULL,
+    unlimited_from   timestamptz,
     created_at       timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (subscription_id, metric, period),
     CONSTRAINT subscription_quota_limits_period_check
@@ -35,7 +36,7 @@ CREATE INDEX IF NOT EXISTS subscription_quota_limits_user_idx
     ON subscription_quota_limits (user_id, subscription_id);
 
 COMMENT ON TABLE subscription_quota_limits IS
-    'Снимок средневзвешенных квот конкретной оплаченной подписки при смене тарифа.';
+    'Снимок квот оплаченной подписки; unlimited_from фазово включает неусреднимый безлимит нового тарифа.';
 
 -- Квота активной подписки сначала берётся из её снимка, а при обычной
 -- покупке — из тарифа. Пробная подписка по-прежнему использует free_value.
@@ -46,22 +47,13 @@ SELECT
     COALESCE(s.plan, 'free') AS plan,
     q.metric,
     q.period,
-    CASE
-        WHEN s.status = 'trialing' THEN q.free_value
-        ELSE COALESCE(sq.limit_value, q.limit_value)
-    END                      AS limit_value,
+    effective.limit_value,
     COALESCE(c.used, 0)      AS used,
     CASE
-        WHEN (CASE
-                WHEN s.status = 'trialing' THEN q.free_value
-                ELSE COALESCE(sq.limit_value, q.limit_value)
-              END) < 0
+        WHEN effective.limit_value < 0
             THEN NULL
         ELSE GREATEST(
-            (CASE
-               WHEN s.status = 'trialing' THEN q.free_value
-               ELSE COALESCE(sq.limit_value, q.limit_value)
-             END) - COALESCE(c.used, 0),
+            effective.limit_value - COALESCE(c.used, 0),
             0
         )
     END                      AS remaining
@@ -87,10 +79,17 @@ LEFT JOIN usage_counters c
             WHEN 'week'  THEN date_trunc('week',  CURRENT_DATE)::date
             WHEN 'month' THEN date_trunc('month', CURRENT_DATE)::date
             ELSE DATE '1970-01-01'
-          END;
+          END
+CROSS JOIN LATERAL (
+    SELECT CASE
+        WHEN s.status = 'trialing' THEN q.free_value
+        WHEN sq.unlimited_from IS NOT NULL AND sq.unlimited_from <= now() THEN -1
+        ELSE COALESCE(sq.limit_value, q.limit_value)
+    END AS limit_value
+) effective;
 
 COMMENT ON VIEW v_quota_status IS
-    'Право доступа: пробная квота, тарифная квота либо средневзвешенный снимок оплаченного апгрейда.';
+    'Право доступа: пробная, тарифная или смешанная квота; безлимит нового тарифа начинается после сохранённых старых дней.';
 
 INSERT INTO schema_migrations (version)
 VALUES ('074_subscription_lifecycle')

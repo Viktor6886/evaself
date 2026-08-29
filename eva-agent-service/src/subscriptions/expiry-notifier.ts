@@ -52,18 +52,13 @@ export class SubscriptionExpiryNotifier {
           async () => await this.db.query<ExpiringSubscription>(
           `-- tenant: system — системное уведомление выбирает истекающие подписки всех пользователей
            SELECT s.id::text AS subscription_id, u.id::text AS user_id,
-                  COALESCE(tu.chat_id, u.telegram_id)::text AS chat_id,
+                  u.telegram_id::text AS chat_id,
                   s.plan, s.current_period_end,
                   COALESCE(u.timezone, 'UTC') AS timezone,
                   u.language_mode, u.preferred_language,
                   u.last_message_language, u.language_code
              FROM subscriptions s
              JOIN users u ON u.id = s.user_id
-             LEFT JOIN LATERAL (
-               SELECT chat_id FROM telegram_updates
-                WHERE user_id = u.id AND chat_id IS NOT NULL
-                ORDER BY received_at DESC LIMIT 1
-             ) tu ON true
             WHERE s.status IN ('trialing', 'active', 'past_due')
               AND s.current_period_end > now()
               AND s.current_period_end <= now() + interval '24 hours'

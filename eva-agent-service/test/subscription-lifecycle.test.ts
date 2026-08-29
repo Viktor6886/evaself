@@ -83,6 +83,37 @@ test("fail-safe понижения сохраняет и имя, и квоты �
   assert.equal(snapshot?.values[4], 200);
 });
 
+test("безлимит Max начинается после оплаченных конечных дней Plus", async () => {
+  const end = new Date(Date.now() + 10 * 86_400_000);
+  const calls: Array<{ sql: string; values: unknown[] }> = [];
+  const client = {
+    async query(sql: string, values: unknown[] = []) {
+      calls.push({ sql, values });
+      if (sql.includes("INSERT INTO payments")) return { rows: [{ id: "pay-unlimited" }] };
+      if (sql.includes("FROM subscriptions")) return { rows: [{
+        id: "sub-plus", plan: "plus", status: "active", current_period_end: end,
+      }] };
+      if (sql.includes("COALESCE(sq.limit_value")) return { rows: [{
+        metric: "messages", period: "day", limit_value: "200",
+      }] };
+      if (sql.includes("FROM quotas WHERE plan")) return { rows: [{
+        metric: "messages", period: "day", limit_value: "-1",
+      }] };
+      if (sql.includes("INSERT INTO subscriptions")) return { rows: [{ id: "sub-max" }] };
+      return { rows: [] };
+    },
+  };
+  await grantPaidAccess(client as never, {
+    userId: "7", provider: "telegram_stars", paymentId: "upgrade-unlimited", raw: {},
+  }, {
+    plan: "max", amountMinor: 700, durationDays: 7, currency: "XTR",
+  }, { subscriptionLifecycleEnabled: true });
+
+  const snapshot = calls.find((call) => call.sql.includes("INSERT INTO subscription_quota_limits"));
+  assert.equal(snapshot?.values[4], 200, "старые дни Plus остаются конечными");
+  assert.equal(snapshot?.values[5], end.toISOString(), "безлимит включается с начала купленных дней Max");
+});
+
 test("статус подписки возвращает только read-only снимок текущего пользователя", async () => {
   const values: unknown[][] = [];
   const db = {
@@ -145,6 +176,7 @@ test("инструмент статуса не принимает владель
 
 test("уведомление за сутки идёт через durable outbox с одним ключом", async () => {
   const sent: Array<Record<string, unknown>> = [];
+  let selectionSql = "";
   const end = new Date("2026-08-30T12:00:00Z");
   const notifier = new SubscriptionExpiryNotifier(
     {
@@ -152,11 +184,14 @@ test("уведомление за сутки идёт через durable outbox 
         assert.deepEqual(options, { crossUser: true });
         return await work();
       },
-      query: async () => ({ rows: [{
+      query: async (sql: string) => {
+        selectionSql = sql;
+        return { rows: [{
         subscription_id: "55", user_id: "7", chat_id: "42", plan: "max",
         current_period_end: end, timezone: "UTC", language_mode: "fixed",
         preferred_language: "ru", last_message_language: null, language_code: "ru",
-      }] }),
+        }] };
+      },
     } as never,
     { send: async (envelope: Record<string, unknown>) => { sent.push(envelope); } } as never,
     silentLogger,
@@ -168,6 +203,8 @@ test("уведомление за сутки идёт через durable outbox 
   assert.equal(sent[0]?.idempotencyKey, `subscription-expiry:55:${end.toISOString()}`);
   assert.equal(sent[1]?.idempotencyKey, `subscription-expiry:55:${end.toISOString()}`);
   assert.match(String((sent[0]?.payload as { text: string }).text), /закончится/iu);
+  assert.match(selectionSql, /u\.telegram_id::text AS chat_id/u);
+  assert.doesNotMatch(selectionSql, /FROM telegram_updates/u);
 });
 
 test("уведомитель проходит дальше первых ста подписок", async () => {
