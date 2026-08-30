@@ -1,5 +1,9 @@
 BEGIN;
 
+DROP TRIGGER IF EXISTS normalize_usage_counter_period_start_trigger
+    ON usage_counters;
+DROP FUNCTION IF EXISTS normalize_usage_counter_period_start();
+
 CREATE OR REPLACE VIEW v_quota_status AS
 SELECT
     u.id                     AS user_id,

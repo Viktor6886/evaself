@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import { AgentToolFactory, toolRisk } from "../dist/agent-tools.js";
@@ -316,6 +317,14 @@ test("расход суток, недели и месяца пишет един�
   assert.match(statements[0]?.sql ?? "", /AT TIME ZONE 'UTC'/u);
   assert.match(statements[0]?.sql ?? "", /date_trunc\('month'/u);
   assert.doesNotMatch(statements[0]?.sql ?? "", /\$[456]/u, "локальные JS-даты больше не передаются");
+});
+
+test("миграция нормализует поздние записи старого writer до переноса данных", () => {
+  const migration = readFileSync("../postgres/migrations/075_quota_periods_utc.sql", "utf8");
+  const trigger = migration.indexOf("CREATE TRIGGER normalize_usage_counter_period_start_trigger");
+  const repair = migration.indexOf("WITH misplaced AS");
+  assert.ok(trigger >= 0 && repair > trigger, "защита от гонки должна включиться до разового переноса");
+  assert.match(migration, /BEFORE INSERT OR UPDATE OF period, period_start/u);
 });
 
 test("уведомление за сутки идёт через durable outbox с одним ключом", async () => {

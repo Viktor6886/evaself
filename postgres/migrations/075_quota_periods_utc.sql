@@ -4,6 +4,32 @@ BEGIN;
 -- Начало каждого периода должно определяться одинаково с записью расхода:
 -- прежний CURRENT_DATE и локальный JS-конструктор месяца расходились на
 -- границе месяца и прятали месячный расход от этого представления.
+-- Триггер ставится до переноса: пока updater ещё не пересоздал старый
+-- eva-agent-service, его поздняя запись тоже нормализуется и не потеряется.
+CREATE OR REPLACE FUNCTION normalize_usage_counter_period_start()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.period = 'month'
+       AND NEW.period_start <> date_trunc('month', NEW.period_start)::date THEN
+        NEW.period_start := date_trunc(
+            'month', NEW.period_start + INTERVAL '1 day'
+        )::date;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS normalize_usage_counter_period_start_trigger
+    ON usage_counters;
+CREATE TRIGGER normalize_usage_counter_period_start_trigger
+BEFORE INSERT OR UPDATE OF period, period_start ON usage_counters
+FOR EACH ROW EXECUTE FUNCTION normalize_usage_counter_period_start();
+
+COMMENT ON FUNCTION normalize_usage_counter_period_start() IS
+    'Защищает границы месячных квот при обновлении со старого writer в локальном TZ.';
+
 -- Уже накопленные строки вида 2026-07-31 → август сначала переносим и
 -- складываем с корректной строкой, если после hotfix она уже появилась.
 WITH misplaced AS (
