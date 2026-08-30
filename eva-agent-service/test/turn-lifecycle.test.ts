@@ -1762,15 +1762,24 @@ test("/balance различает суточную, недельную и мес
   const probe = await runTelegramTurn(undefined, {
     command: "/balance",
     quota: [
-      { metric: "messages", period: "day", remaining: 4 },
-      { metric: "messages", period: "week", remaining: 9 },
       { metric: "messages", period: "month", remaining: 20 },
+      { metric: "voice_in", period: "week", remaining: 3 },
+      { metric: "messages_out", period: "day", remaining: 2 },
+      { metric: "messages", period: "week", remaining: 9 },
+      { metric: "messages", period: "day", remaining: 4 },
     ],
   });
   const delivered = probe.sent.join("\n");
   assert.match(delivered, /Сообщения \(сутки\): осталось 4/u);
   assert.match(delivered, /Сообщения \(неделя\): осталось 9/u);
   assert.match(delivered, /Сообщения \(месяц\): осталось 20/u);
+  assert.match(delivered, /Ответы Евы \(сутки\): осталось 2/u);
+  assert.match(delivered, /Голосовые сообщения \(неделя\): осталось 3/u);
+  assert.ok(
+    delivered.indexOf("Сообщения (сутки)") < delivered.indexOf("Сообщения (неделя)")
+      && delivered.indexOf("Сообщения (неделя)") < delivered.indexOf("Сообщения (месяц)"),
+    "периоды должны идти в понятном порядке",
+  );
 });
 
 /*

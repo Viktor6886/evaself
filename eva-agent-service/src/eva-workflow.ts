@@ -1467,7 +1467,7 @@ export class EvaWorkflow {
         break;
       case "/balance": {
         const quotas = await this.db.getQuotaStatus(update.telegramId);
-        const lines = quotas.map((item) => {
+        const lines = [...quotas].sort(compareQuotas).map((item) => {
           const row = item as Record<string, unknown>;
           const remaining = row.remaining === null
             ? t(language, "unlimited")
@@ -1918,13 +1918,23 @@ function quotaLabel(metric: string, period: string, language: SupportedLanguage)
   const metricLabel = (language === "en"
     ? {
         messages: "Messages",
+        messages_out: "Eva replies",
+        voice_in: "Voice messages",
         voice_minutes: "Voice minutes",
+        voice_out: "Voiced replies",
+        documents: "Documents",
+        images: "Images",
         web_search: "Search",
         tests: "Tests",
       }
     : {
         messages: "Сообщения",
+        messages_out: "Ответы Евы",
+        voice_in: "Голосовые сообщения",
         voice_minutes: "Голосовые минуты",
+        voice_out: "Озвученные ответы",
+        documents: "Документы",
+        images: "Изображения",
         web_search: "Поиск",
         tests: "Тесты",
       })[metric] ?? metric;
@@ -1933,6 +1943,24 @@ function quotaLabel(metric: string, period: string, language: SupportedLanguage)
     : { day: "сутки", week: "неделя", month: "месяц", total: "всё время" }
   )[period as "day" | "week" | "month" | "total"];
   return periodLabel ? `${metricLabel} (${periodLabel})` : metricLabel;
+}
+
+function compareQuotas(left: unknown, right: unknown): number {
+  const metricOrder = [
+    "messages", "messages_out", "voice_in", "voice_minutes", "voice_out",
+    "documents", "images", "web_search", "tests",
+  ];
+  const periodOrder = ["day", "week", "month", "total"];
+  const a = left as Record<string, unknown>;
+  const b = right as Record<string, unknown>;
+  const metric = rank(metricOrder, String(a.metric)) - rank(metricOrder, String(b.metric));
+  if (metric !== 0) return metric;
+  return rank(periodOrder, String(a.period)) - rank(periodOrder, String(b.period));
+}
+
+function rank(order: string[], value: string): number {
+  const index = order.indexOf(value);
+  return index < 0 ? order.length : index;
 }
 
 function elapsed(started: number): number {

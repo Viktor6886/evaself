@@ -69,9 +69,9 @@ export class SubscriptionStatusService {
              LEFT JOIN usage_counters c
                ON c.user_id = $1 AND c.metric = q.metric AND c.period = q.period
               AND c.period_start = CASE q.period
-                    WHEN 'day' THEN CURRENT_DATE
-                    WHEN 'week' THEN date_trunc('week', CURRENT_DATE)::date
-                    WHEN 'month' THEN date_trunc('month', CURRENT_DATE)::date
+                    WHEN 'day' THEN (now() AT TIME ZONE 'UTC')::date
+                    WHEN 'week' THEN date_trunc('week', (now() AT TIME ZONE 'UTC')::date)::date
+                    WHEN 'month' THEN date_trunc('month', (now() AT TIME ZONE 'UTC')::date)::date
                     ELSE DATE '1970-01-01' END
             WHERE q.plan = 'free' AND q.metric = 'messages'
             ORDER BY CASE q.period WHEN 'day' THEN 1 WHEN 'week' THEN 2 WHEN 'month' THEN 3 ELSE 4 END

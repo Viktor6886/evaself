@@ -1733,19 +1733,6 @@ export class Database {
   // usage & quotas
   // -----------------------------------------------------------------
 
-  private static periodStart(period: string): string {
-    const now = new Date();
-    if (period === "month") return new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
-    if (period === "week") {
-      const day = (now.getUTCDay() + 6) % 7;
-      const monday = new Date(now);
-      monday.setUTCDate(now.getUTCDate() - day);
-      return monday.toISOString().slice(0, 10);
-    }
-    if (period === "total") return "1970-01-01";
-    return now.toISOString().slice(0, 10);
-  }
-
   /**
    * Расход одной метрики. Пишется сразу во все периоды.
    *
@@ -1765,20 +1752,19 @@ export class Database {
       { telegramId, label: "db.incrementUsage", inherit: true },
       async () => await this.require().query<{ period: string; used: string }>(
       `INSERT INTO usage_counters (user_id, metric, period, period_start, used)
-       SELECT u.id, $2, p.period, p.start::date, $3
+       SELECT u.id, $2, p.period, p.start, $3
          FROM users u
-         CROSS JOIN (VALUES ('day', $4::text), ('week', $5::text), ('month', $6::text))
+         CROSS JOIN (VALUES
+           ('day', (now() AT TIME ZONE 'UTC')::date),
+           ('week', date_trunc('week', (now() AT TIME ZONE 'UTC')::date)::date),
+           ('month', date_trunc('month', (now() AT TIME ZONE 'UTC')::date)::date)
+         )
               AS p(period, start)
         WHERE u.telegram_id = $1
        ON CONFLICT (user_id, metric, period, period_start) DO UPDATE
          SET used = usage_counters.used + EXCLUDED.used, updated_at = now()
        RETURNING period, used`,
-      [
-        telegramId, metric, amount,
-        Database.periodStart("day"),
-        Database.periodStart("week"),
-        Database.periodStart("month"),
-      ],
+      [telegramId, metric, amount],
       ),
     );
     // Возвращается суточный: на него смотрят вызывающие и гейт хода.
