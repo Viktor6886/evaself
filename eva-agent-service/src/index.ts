@@ -43,6 +43,7 @@ import { LlmManager } from "./llm.js";
 import { createLogger } from "./logger.js";
 import { StarsPayments } from "./payments/stars.js";
 import { SubscriptionExpiryNotifier } from "./subscriptions/expiry-notifier.js";
+import { QuotaExhaustionNotifier } from "./subscriptions/quota-exhaustion-notifier.js";
 import { UserProfileService } from "./profile/profile-service.js";
 import { ValkeyRateLimiter } from "./public/rate-limit.js";
 import { ValkeyMiniAppSessions } from "./public/webapp-session.js";
@@ -214,7 +215,16 @@ async function main(): Promise<void> {
         }
       : null,
   });
-  const subscriptionExpiryNotifier = new SubscriptionExpiryNotifier(db, outbox, logger);
+  const subscriptionExpiryNotifier = new SubscriptionExpiryNotifier(
+    db,
+    outbox,
+    logger,
+    undefined,
+    config.subscriptionExpiryWarningDays,
+  );
+  const quotaExhaustionNotifier = config.quotaExhaustionNotificationsEnabled
+    ? new QuotaExhaustionNotifier(db, outbox, logger)
+    : undefined;
   if (config.outboxEnabled) telegram.setOutbox(outbox);
   const sdk = new SdkSettingsManager(config, db, letta);
   try {
@@ -340,6 +350,7 @@ async function main(): Promise<void> {
       systemPrompt: () => letta.canonicalContext().systemPrompt,
     },
     stars,
+    quotaExhaustionNotifier,
   );
   const inbox = new PostgresTelegramInbox(db);
   const recoveredStarPayments = await inbox.recoverUnappliedStarPayments().catch((error) => {

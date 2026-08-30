@@ -22,7 +22,7 @@ import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 
 /**
- * Двенадцать навыков Evaself. Один список на сервис, тесты и диагностику:
+ * Навыки Evaself. Один список на сервис, тесты и диагностику:
  * второй перечень разошёлся бы с первым на первом же добавлении.
  */
 export const EVA_PROJECT_SKILLS = [
@@ -37,6 +37,7 @@ export const EVA_PROJECT_SKILLS = [
   "motivational-interviewing",
   "relationships-boundaries",
   "schema-therapy",
+  "subscription-status",
   "therapeutic-conversation",
   "relational-presence",
 ] as const;

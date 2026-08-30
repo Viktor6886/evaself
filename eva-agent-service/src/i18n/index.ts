@@ -39,6 +39,10 @@ const ru = {
   subscriptionUnavailable: "Онлайн-оплата ещё не настроена администратором.",
   subscriptionExpiresTomorrow:
     "Напоминаю: подписка {plan} закончится {date}. После этого начнут действовать бесплатные лимиты.",
+  subscriptionExpiresInDays:
+    "Напоминаю: подписка {plan} закончится через {days} — {date}. После этого начнут действовать бесплатные лимиты.",
+  messageQuotaExhaustedNotice:
+    "Квота сообщений закончилась: {periods}. До обновления этого лимита я не смогу отвечать; актуальные остатки покажет /balance.",
   privacy:
     "Связь с агентом, заметки и задачи хранятся в PostgreSQL и Letta на сервере владельца Evaself. API-ключи зашифрованы и не выдаются в WebUI. Администратор может удалить агента и его данные.",
   unknownCommand: "Неизвестная команда. Список: /help",
@@ -89,6 +93,10 @@ const en: Record<keyof typeof ru, string> = {
   subscriptionUnavailable: "Online payments have not been configured by the administrator yet.",
   subscriptionExpiresTomorrow:
     "Reminder: your {plan} subscription ends on {date}. Free limits will apply after that.",
+  subscriptionExpiresInDays:
+    "Reminder: your {plan} subscription ends in {days}, on {date}. Free limits will apply after that.",
+  messageQuotaExhaustedNotice:
+    "Your message allowance is used up for: {periods}. I cannot reply until that limit resets; /balance shows the current amounts.",
   privacy:
     "Your agent link, notes, and tasks are stored in PostgreSQL and Letta on the Evaself owner’s server. API keys are encrypted and never returned to WebUI. An administrator can delete the agent and its data.",
   unknownCommand: "Unknown command. See /help",

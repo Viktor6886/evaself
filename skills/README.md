@@ -18,6 +18,7 @@ skills/
 ├── goals-values/               — цель, результат, действие, отклонение
 ├── journaling-reflection/      — направляемая рефлексия и дневник
 ├── memory-hygiene/             — как вести память и что в ней не хранить
+├── subscription-status/        — точный read-only статус тарифа и квот
 └── crisis-response/            — явная непосредственная опасность
 ```
 

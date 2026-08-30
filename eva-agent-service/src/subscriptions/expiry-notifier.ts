@@ -14,9 +14,10 @@ interface ExpiringSubscription {
   preferred_language: string | null;
   last_message_language: string | null;
   language_code: string | null;
+  warning_days: number;
 }
 
-/** Durable, model-independent notification one day before access ends. */
+/** Durable, model-independent notifications before access ends. */
 export class SubscriptionExpiryNotifier {
   private timer: NodeJS.Timeout | null = null;
   private running = false;
@@ -26,6 +27,7 @@ export class SubscriptionExpiryNotifier {
     private readonly outbox: OutboxDelivery,
     private readonly logger: Logger,
     private readonly intervalMs = 15 * 60_000,
+    private readonly warningDays: readonly number[] = [3, 1],
   ) {}
 
   start(): void {
@@ -56,18 +58,23 @@ export class SubscriptionExpiryNotifier {
                   s.plan, s.current_period_end,
                   COALESCE(u.timezone, 'UTC') AS timezone,
                   u.language_mode, u.preferred_language,
-                  u.last_message_language, u.language_code
+                  u.last_message_language, u.language_code,
+                  warning.warning_days
              FROM subscriptions s
              JOIN users u ON u.id = s.user_id
+             JOIN LATERAL (
+               SELECT min(configured.days)::int AS warning_days
+                 FROM unnest($3::int[]) AS configured(days)
+                WHERE s.current_period_end <= now() + make_interval(days => configured.days)
+             ) warning ON warning.warning_days IS NOT NULL
             WHERE s.status IN ('trialing', 'active', 'past_due')
               AND s.current_period_end > now()
-              AND s.current_period_end <= now() + interval '24 hours'
               AND u.state = 'active' AND NOT u.is_blocked
               AND ($1::timestamptz IS NULL
                    OR (s.current_period_end, s.id) > ($1::timestamptz, $2::bigint))
             ORDER BY s.current_period_end, s.id
             LIMIT 100`,
-            [cursorEnd, cursorId],
+            [cursorEnd, cursorId, this.warningDays],
           ),
           { crossUser: true },
         );
@@ -79,12 +86,13 @@ export class SubscriptionExpiryNotifier {
             chatId: Number(row.chat_id),
             userId: Number(row.user_id),
             priority: "reminder",
-            idempotencyKey: `subscription-expiry:${row.subscription_id}:${end.toISOString()}`,
+            idempotencyKey: expiryKey(row.subscription_id, end, row.warning_days),
             payload: {
               chat_id: Number(row.chat_id),
-              text: t(language, "subscriptionExpiresTomorrow", {
+              text: t(language, "subscriptionExpiresInDays", {
                 plan: row.plan,
                 date: formatEnd(end, row.timezone, language),
+                days: daysLabel(row.warning_days, language),
               }),
             },
           });
@@ -102,6 +110,25 @@ export class SubscriptionExpiryNotifier {
       this.running = false;
     }
   }
+}
+
+function expiryKey(subscriptionId: string, end: Date, warningDays: number): string {
+  const base = `subscription-expiry:${subscriptionId}:${end.toISOString()}`;
+  // Сохраняем прежний ключ суточного уведомления: обновление не должно
+  // повторно написать тем, кто уже получил его до появления второго порога.
+  return warningDays === 1 ? base : `${base}:${warningDays}d`;
+}
+
+function daysLabel(days: number, language: "ru" | "en"): string {
+  if (language === "en") return `${days} ${days === 1 ? "day" : "days"}`;
+  const mod10 = days % 10;
+  const mod100 = days % 100;
+  const noun = mod10 === 1 && mod100 !== 11
+    ? "день"
+    : mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)
+      ? "дня"
+      : "дней";
+  return `${days} ${noun}`;
 }
 
 function asDate(value: Date): Date {
