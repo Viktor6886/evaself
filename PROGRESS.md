@@ -8,10 +8,10 @@
 ```
 BASELINE:      7307cf8 — main после PR #297
 BRANCH:        codex/stars-precheckout-manual-access
-STATUS:        в работе
-LAST_COMMIT:   7307cf8 — точка ветвления
+STATUS:        на ревью
+LAST_COMMIT:   183393b — pre-checkout Stars и новый период квот
 BLOCKER:       —
-NEXT:          полный прогон проверок, коммит и pull request
+NEXT:          push, pull request, CI и независимое ревью
 ```
 
 ## Текущая порция: pre-checkout Stars и новый период ручного доступа
@@ -26,6 +26,10 @@ Telegram ID, но после канонической выборки польз�
 Платный апгрейд сохраняет расход, потому что его срок и лимиты складываются с
 предыдущим тарифом. Добавлены регрессионные тесты с настоящим tenant guard и
 проверкой порядка сброса квот.
+
+Локально зелёные: build, lint, typecheck, tenant-scope, env plumbing,
+down migrations, пути документации и полный набор сервиса — 1129 тестов
+(1119 пройдено, 10 штатно пропущено).
 
 ## Предыдущая порция: составные квоты и только Telegram Stars
 
