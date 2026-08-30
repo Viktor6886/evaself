@@ -330,75 +330,77 @@ export class StarsPayments {
     | { state: "applied" | "duplicate"; plan: string; days: number }
     | { state: "unknown_intent" }
   > {
-    return await this.db.transaction(async (client) => {
-      const { rows } = await client.query<{
-        id: string; user_id: string; plan: string; duration_days: number;
-        amount_minor: string; currency: string; status: string; prechecked_at: Date | null;
-      }>(
-        `
-          -- tenant: by telegram_id — платёж применяется только к своему намерению
-          SELECT i.id, i.user_id, i.plan, i.duration_days,
-                 i.amount_minor, i.currency, i.status, i.prechecked_at
-            FROM payment_intents i
-            JOIN users u ON u.id = i.user_id
-           WHERE i.id = $1 AND i.provider = $2 AND u.telegram_id = $3
-           FOR UPDATE OF i`,
-        [UUID.test(input.payload) ? input.payload : NIL_UUID, STARS_PROVIDER, input.telegramUserId],
-      );
-      const intent = rows[0];
-      if (!intent) return { state: "unknown_intent" as const };
-      // Предварительная проверка была до списания, но состоявшийся платёж
-      // является отдельным событием и проверяется заново. Иначе
-      // повреждённый update мог выдать тариф за другую сумму или валюту.
-      if (
-        input.currency !== STARS_CURRENCY
-        || intent.currency !== STARS_CURRENCY
-        || Number(intent.amount_minor) !== input.totalAmount
-        || !Number.isSafeInteger(input.totalAmount)
-        || input.totalAmount <= 0
-        || !input.chargeId.trim()
-        || !(
-          ["pending", "succeeded"].includes(intent.status)
-          || (intent.status === "expired" && intent.prechecked_at)
-        )
-      ) {
-        throw new Error("Успешный платёж не совпадает с намерением оплаты");
-      }
-      return await this.db.withUserScope(
-        {
-          userId: Number(intent.user_id),
-          telegramId: input.telegramUserId,
-          label: "payments.stars.apply",
-        },
-        async () => {
-          const outcome = await grantPaidAccess(
-            client,
-            {
-              userId: intent.user_id,
-              provider: STARS_PROVIDER,
-              paymentId: input.chargeId,
-              contractId: intent.id,
-              intentId: intent.id,
-              raw: input.raw,
-            },
-            {
-              plan: intent.plan,
-              // Сумма берётся из платежа, а не из намерения: заплачено
-              // столько, сколько списал Telegram.
-              amountMinor: input.totalAmount,
-              durationDays: Number(intent.duration_days),
-              currency: STARS_CURRENCY,
-            },
-            { subscriptionLifecycleEnabled: this.lifecycleEnabled },
-          );
-          return {
-            state: outcome.state,
-            plan: outcome.effectivePlan ?? intent.plan,
-            days: Number(intent.duration_days),
-          };
-        },
-      );
-    });
+    return await this.db.withUserScope(
+      { telegramId: input.telegramUserId, label: "payments.stars.apply" },
+      async () => await this.db.transaction(async (client) => {
+        const owner = await client.query<{ id: string }>(
+          "SELECT id FROM users WHERE telegram_id = $1 FOR UPDATE",
+          [input.telegramUserId],
+        );
+        const userId = Number(owner.rows[0]?.id ?? 0);
+        if (!Number.isSafeInteger(userId) || userId <= 0) {
+          return { state: "unknown_intent" as const };
+        }
+        this.db.bindScopeUserId(userId);
+        const { rows } = await client.query<{
+          id: string; user_id: string; plan: string; duration_days: number;
+          amount_minor: string; currency: string; status: string; prechecked_at: Date | null;
+        }>(
+          `
+            -- tenant: user_id канонически получен из Telegram ID плательщика
+            SELECT i.id, i.user_id, i.plan, i.duration_days,
+                   i.amount_minor, i.currency, i.status, i.prechecked_at
+              FROM payment_intents i
+             WHERE i.id = $1 AND i.provider = $2 AND i.user_id = $3
+             FOR UPDATE`,
+          [UUID.test(input.payload) ? input.payload : NIL_UUID, STARS_PROVIDER, userId],
+        );
+        const intent = rows[0];
+        if (!intent) return { state: "unknown_intent" as const };
+        // Предварительная проверка была до списания, но состоявшийся платёж
+        // является отдельным событием и проверяется заново. Иначе
+        // повреждённый update мог выдать тариф за другую сумму или валюту.
+        if (
+          input.currency !== STARS_CURRENCY
+          || intent.currency !== STARS_CURRENCY
+          || Number(intent.amount_minor) !== input.totalAmount
+          || !Number.isSafeInteger(input.totalAmount)
+          || input.totalAmount <= 0
+          || !input.chargeId.trim()
+          || !(
+            ["pending", "succeeded"].includes(intent.status)
+            || (intent.status === "expired" && intent.prechecked_at)
+          )
+        ) {
+          throw new Error("Успешный платёж не совпадает с намерением оплаты");
+        }
+        const outcome = await grantPaidAccess(
+          client,
+          {
+            userId: intent.user_id,
+            provider: STARS_PROVIDER,
+            paymentId: input.chargeId,
+            contractId: intent.id,
+            intentId: intent.id,
+            raw: input.raw,
+          },
+          {
+            plan: intent.plan,
+            // Сумма берётся из платежа, а не из намерения: заплачено
+            // столько, сколько списал Telegram.
+            amountMinor: input.totalAmount,
+            durationDays: Number(intent.duration_days),
+            currency: STARS_CURRENCY,
+          },
+          { subscriptionLifecycleEnabled: this.lifecycleEnabled },
+        );
+        return {
+          state: outcome.state,
+          plan: outcome.effectivePlan ?? intent.plan,
+          days: Number(intent.duration_days),
+        };
+      }),
+    );
   }
 
   private async activeSubscription(userId: number): Promise<ActiveSubscription | null> {
