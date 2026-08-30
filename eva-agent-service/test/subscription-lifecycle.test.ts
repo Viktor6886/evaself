@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { AgentToolFactory, toolRisk } from "../dist/agent-tools.js";
+import { Database } from "../dist/db.js";
 import { grantPaidAccess } from "../dist/payments/grant.js";
 import { SubscriptionExpiryNotifier } from "../dist/subscriptions/expiry-notifier.js";
 import { QuotaExhaustionNotifier } from "../dist/subscriptions/quota-exhaustion-notifier.js";
@@ -263,7 +264,7 @@ test("статус подписки возвращает только read-only 
   assert.equal("update" in status, false);
 });
 
-test("инструмент статуса не принимает владельца от модели и считается чтением", async () => {
+test("инструмент статуса всегда доступен, не принимает владельца от модели и считается чтением", async () => {
   const queried: unknown[][] = [];
   const db = {
     getAgentRuntimeContext: async () => ({
@@ -279,7 +280,7 @@ test("инструмент статуса не принимает владель
     },
   };
   const factory = new AgentToolFactory(
-    { vectorGoalsEnabled: false, subscriptionLifecycleEnabled: true } as never,
+    { vectorGoalsEnabled: false, subscriptionLifecycleEnabled: false } as never,
     db as never,
     {} as never,
     silentLogger,
@@ -291,6 +292,30 @@ test("инструмент статуса не принимает владель
   assert.equal((result.details as { read_only?: boolean }).read_only, true);
   assert.deepEqual(queried, [[7], [7], [7]]);
   assert.equal(toolRisk("get_subscription_status"), "read");
+});
+
+test("расход суток, недели и месяца пишет единые UTC-границы в одном запросе", async () => {
+  const statements: Array<{ sql: string; values: unknown[] }> = [];
+  const db = new Database("postgres://unused");
+  Object.assign(db, {
+    poolView: {
+      async query(sql: string, values: unknown[] = []) {
+        statements.push({ sql, values });
+        return { rows: [
+          { period: "day", used: "1" },
+          { period: "week", used: "1" },
+          { period: "month", used: "1" },
+        ] };
+      },
+    },
+  });
+
+  assert.equal(await db.incrementUsage(42, "messages"), 1);
+  assert.equal(statements.length, 1, "три периода должны обновляться атомарно");
+  assert.deepEqual(statements[0]?.values, [42, "messages", 1]);
+  assert.match(statements[0]?.sql ?? "", /AT TIME ZONE 'UTC'/u);
+  assert.match(statements[0]?.sql ?? "", /date_trunc\('month'/u);
+  assert.doesNotMatch(statements[0]?.sql ?? "", /\$[456]/u, "локальные JS-даты больше не передаются");
 });
 
 test("уведомление за сутки идёт через durable outbox с одним ключом", async () => {

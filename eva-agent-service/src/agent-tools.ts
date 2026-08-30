@@ -104,7 +104,9 @@ export class AgentToolFactory {
         ? [...this.goals.build(tool), ...this.goalPrograms.build(tool)]
         : []),
       ...this.tasks.build(tool),
-      ...(this.config.subscriptionLifecycleEnabled ? this.subscriptions.build(tool) : []),
+      // Статус подписки — безопасное чтение владельца conversation. Он
+      // нужен Еве независимо от rollout-флага покупки/апгрейда тарифов.
+      ...this.subscriptions.build(tool),
       ...(this.dynamicTools.get(conversationId) ?? []),
     ];
   }

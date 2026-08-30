@@ -37,9 +37,9 @@ export class QuotaExhaustionNotifier {
           `SELECT u.id::text AS user_id, u.telegram_id::text AS chat_id,
                   q.period,
                   (CASE q.period
-                    WHEN 'day' THEN CURRENT_DATE
-                    WHEN 'week' THEN date_trunc('week', CURRENT_DATE)::date
-                    WHEN 'month' THEN date_trunc('month', CURRENT_DATE)::date
+                    WHEN 'day' THEN (now() AT TIME ZONE 'UTC')::date
+                    WHEN 'week' THEN date_trunc('week', (now() AT TIME ZONE 'UTC')::date)::date
+                    WHEN 'month' THEN date_trunc('month', (now() AT TIME ZONE 'UTC')::date)::date
                   END)::text AS period_start,
                   u.language_mode, u.preferred_language,
                   u.last_message_language, u.language_code
