@@ -8,10 +8,10 @@
 ```
 BASELINE:      073a6d9 — main после PR #295
 BRANCH:        codex/stars-only-quota-fix
-STATUS:        проверка
-LAST_COMMIT:   073a6d9 — жизненный цикл подписки и квот
+STATUS:        выполнен
+LAST_COMMIT:   7f7db61 — составные квоты и только Telegram Stars
 BLOCKER:       —
-NEXT:          открыть чистый PR, получить независимое ревью и смержить
+NEXT:          —
 ```
 
 ## Текущая порция: составные квоты и только Telegram Stars
@@ -27,6 +27,9 @@ Lava выведена из runtime, конфигурации, секретов �
 
 Проверки: build, lint, typecheck, tenant-scope, env plumbing, down migrations,
 маршруты, 112 браузерных тестов панели и полный набор из 1127 тестов сервиса.
+Pull request [#296](https://github.com/Viktor6886/evaself/pull/296): все
+обязательные проверки зелёные, повторное независимое ревью без замечаний,
+смержен в `main`.
 
 ## Предыдущая порция: жизненный цикл подписки и read-only статус
 
