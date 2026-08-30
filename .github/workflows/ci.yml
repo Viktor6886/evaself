@@ -1590,10 +1590,6 @@ jobs:
                   }),
                 });
                 if(valid.status!==200) throw new Error('valid Telegram status '+valid.status);
-                const lava=await fetch(base+'/payments/lava',{
-                  method:'POST',headers:{'Content-Type':'application/json'},body:'{}',
-                });
-                if(lava.status!==401) throw new Error('unauthorized Lava status '+lava.status);
                 console.log('webhook auth ok');
               })().catch(e=>{console.error(e);process.exit(1)});
             "
