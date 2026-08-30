@@ -200,6 +200,43 @@ test("состоявшийся платёж записывает подписк�
   assert.equal(asked.some((sql) => sql.includes("UPDATE payment_intents")), true);
 });
 
+test("состоявшийся платёж проходит настоящую границу арендатора", async () => {
+  const setup = db({
+    lookup: [{
+      id: INTENT,
+      user_id: "7",
+      plan: "plus",
+      duration_days: 7,
+      amount_minor: "1",
+      currency: "XTR",
+      status: "pending",
+      prechecked_at: new Date(),
+    }],
+    active: [],
+  });
+  const guarded = withTenantScopes(setup.db as unknown as {
+    query: (sql: string, values?: unknown[]) => Promise<{ rows: unknown[] }>;
+  });
+  const stars = new StarsPayments({ db: guarded as never });
+
+  const outcome = await guarded.withUserScope(
+    { telegramId: 42, label: "telegram.turn" },
+    async () => {
+      guarded.bindScopeUserId(7);
+      return await stars.apply({
+        telegramUserId: 42,
+        payload: INTENT,
+        chargeId: "charge-tenant",
+        totalAmount: 1,
+        currency: "XTR",
+        raw: {},
+      });
+    },
+  );
+
+  assert.deepEqual(outcome, { state: "applied", plan: "plus", days: 7 });
+});
+
 test("состоявшийся платёж повторно сверяется с намерением", async () => {
   const { db: fake, asked } = db({
     lookup: [{

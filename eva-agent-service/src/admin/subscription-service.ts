@@ -223,6 +223,7 @@ export class SubscriptionAdminService {
       actor,
       note: reason,
       keepPeriodStart: false,
+      resetUsageCounters: true,
     });
     await this.record(userId, row, "assign", actor, reason);
     return { subscription: row };
@@ -245,6 +246,7 @@ export class SubscriptionAdminService {
       note: reason,
       keepPeriodStart: true,
       periodStart: new Date(current.current_period_start),
+      resetUsageCounters: false,
     });
     await this.record(userId, row, "change_plan", actor, reason);
     return { subscription: row };
@@ -437,6 +439,7 @@ export class SubscriptionAdminService {
       note: string;
       keepPeriodStart: boolean;
       periodStart?: Date;
+      resetUsageCounters: boolean;
     },
   ): Promise<SubscriptionRow> {
     const client = await this.pool.connect();
@@ -448,14 +451,16 @@ export class SubscriptionAdminService {
           WHERE user_id = $1 AND status = ANY($2::text[])`,
         [userId, LIVE_STATUSES],
       );
-      // Счётчики принадлежат периоду доступа, а не тарифу. Без сброса
-      // новая ручная подписка наследовала исчерпанную бесплатную квоту
-      // или большой расход прошлого тарифа и могла блокироваться сразу.
-      await client.query(
-        `-- tenant: system — ручное назначение начинает новый период квот пользователя
-         DELETE FROM usage_counters WHERE user_id = $1`,
-        [userId],
-      );
+      if (input.resetUsageCounters) {
+        // Счётчики принадлежат периоду доступа, а не тарифу. Без сброса
+        // новое ручное назначение наследовало исчерпанную бесплатную
+        // квоту. Смена тарифа внутри того же срока расход сохраняет.
+        await client.query(
+          `-- tenant: system — ручное назначение начинает новый период квот пользователя
+           DELETE FROM usage_counters WHERE user_id = $1`,
+          [userId],
+        );
+      }
       const { rows } = await client.query<SubscriptionRow>(
         `-- tenant: system — ручное назначение подписки администратором; область объявлена маршрутом и записана в аудит
          INSERT INTO subscriptions

@@ -546,6 +546,27 @@ test("ручное назначение отличимо от оплаты и т
   await app.close();
 });
 
+test("смена ручного тарифа сохраняет расход текущего периода", async () => {
+  const db = new FakeDb();
+  db.subscriptions.push({
+    id: 100, user_id: 11, plan: "plus", status: "active", source: "manual",
+    provider: null, started_at: "2026-08-01", current_period_start: "2026-08-01",
+    current_period_end: "2026-09-01", canceled_at: null, actor_name: "owner", note: "n",
+  });
+  const { app } = harness(db);
+  await app.ready();
+
+  const response = await app.inject({
+    method: "POST", url: "/api/admin/v1/panel/subscriptions/11/plan", headers: COOKIE,
+    payload: { plan: "max", reason: "повышение тарифа" },
+  });
+
+  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(response.json().subscription.plan, "max");
+  assert.equal(db.written.includes("usage_counters.reset"), false);
+  await app.close();
+});
+
 test("снятие ручного решения возвращает оплаченный доступ", async () => {
   const db = new FakeDb();
   db.subscriptions.push({
