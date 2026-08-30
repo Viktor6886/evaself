@@ -6,12 +6,12 @@
 ## Состояние
 
 ```
-BASELINE:      7307cf8 — main после PR #297
-BRANCH:        codex/stars-precheckout-manual-access
+BASELINE:      0b99b5a — main после PR #298
+BRANCH:        codex/stars-successful-payment-activation
 STATUS:        на ревью
-LAST_COMMIT:   2bd2924 — активация successful_payment через tenant guard
+LAST_COMMIT:   aa2f29e — активация successful_payment через tenant guard
 BLOCKER:       —
-NEXT:          push исправлений, повторные CI и независимое ревью
+NEXT:          push, follow-up pull request, CI и независимое ревью
 ```
 
 ## Текущая порция: pre-checkout Stars и новый период ручного доступа
