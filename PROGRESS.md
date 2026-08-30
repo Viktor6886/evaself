@@ -8,10 +8,10 @@
 ```
 BASELINE:      0b99b5a — main после PR #298
 BRANCH:        codex/stars-successful-payment-activation
-STATUS:        на ревью
-LAST_COMMIT:   aa2f29e — активация successful_payment через tenant guard
+STATUS:        выполнен
+LAST_COMMIT:   04f2fcc — активация successful_payment смержена в main
 BLOCKER:       —
-NEXT:          push, follow-up pull request, CI и независимое ревью
+NEXT:          —
 ```
 
 ## Текущая порция: pre-checkout Stars и новый период ручного доступа
@@ -37,6 +37,10 @@ guard принадлежность `payment_intents`. Оба этапа тепе
 Локально зелёные: build, lint, typecheck, tenant-scope, env plumbing,
 down migrations, пути документации и полный набор сервиса — 1131 тест
 (1121 пройден, 10 штатно пропущено).
+
+Pull request [#299](https://github.com/Viktor6886/evaself/pull/299): все 11
+проверок CI зелёные, повторное независимое ревью не нашло замечаний, изменения
+смержены в `main` коммитом `04f2fcc`.
 
 ## Предыдущая порция: составные квоты и только Telegram Stars
 
