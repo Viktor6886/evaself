@@ -8,10 +8,10 @@
 ```
 BASELINE:      76af6a4 — main после PR #300
 BRANCH:        codex/subscription-quota-notifications
-STATUS:        готово к PR
-LAST_COMMIT:   рабочее дерево — уведомления и read-only навык
+STATUS:        PR #301 — CI и независимое ревью
+LAST_COMMIT:   213c93b — уведомления и read-only навык
 BLOCKER:       —
-NEXT:          commit, PR, CI, независимое ревью и merge
+NEXT:          дождаться CI/review, исправить замечания и merge
 ```
 
 ## Текущая порция: уведомления и доступ Евы к подписке
@@ -35,6 +35,9 @@ NEXT:          commit, PR, CI, независимое ревью и merge
 down-migrations, пути документации и полный набор сервиса — 1135 тестов
 (1125 пройдено, 10 штатно пропущено). После последнего теста отображения
 `/balance` повторно пройдены 83 целевых теста (82 + 1 штатный skip).
+
+Pull request [#301](https://github.com/Viktor6886/evaself/pull/301) открыт,
+запущены обязательные проверки и независимое `@codex review`.
 
 ## Текущая порция: pre-checkout Stars и новый период ручного доступа
 
