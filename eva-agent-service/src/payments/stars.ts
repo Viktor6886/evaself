@@ -247,6 +247,11 @@ export class StarsPayments {
         if (!Number.isSafeInteger(userId) || userId <= 0) {
           return deny("unknown_intent", "Счёт больше не действителен");
         }
+        // Область webhook сначала знает только Telegram ID. После
+        // канонической выборки users связываем с ней внутренний ID,
+        // иначе tenant-guard справедливо отвергнет следующий запрос к
+        // payment_intents.user_id и Telegram получит PRECHECKOUT_FAILED.
+        this.db.bindScopeUserId(userId);
         const found = await client.query<{
           id: string; status: string; amount_minor: string; plan: string;
           provider_product_id: string | null;

@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { PERIOD_DAYS, StarsPayments } from "../dist/payments/stars.js";
+import { withTenantScopes } from "./tenant-scope-helper.ts";
 
 const INTENT = "11111111-2222-3333-4444-555555555555";
 
@@ -38,6 +39,7 @@ function db(rows: Record<string, unknown[]>) {
       query: async (text: string) => ({ rows: pick(text) }),
       withSystemScope: async (_label: string, work: () => Promise<unknown>) => await work(),
       withUserScope: async (_input: unknown, work: () => Promise<unknown>) => await work(),
+      bindScopeUserId: (_userId: number) => undefined,
       transaction: async (work: (client: unknown) => Promise<unknown>) => await work({
         query: async (text: string) => ({ rows: pick(text) }),
       }),
@@ -124,6 +126,26 @@ test("предварительная проверка отвергает чуж�
     { id: INTENT, status: "pending", amount_minor: "500", plan: "plus", provider_product_id: "plus:month" },
   ]);
   assert.equal(good.ok, true);
+});
+
+test("pre-checkout связывает Telegram ID с внутренним владельцем", async () => {
+  const setup = db({
+    lookup: [{
+      id: INTENT, status: "pending", amount_minor: "1", plan: "plus",
+      provider_product_id: "plus:week",
+    }],
+    price: [{ stars: 1 }],
+    active: [],
+  });
+  const guarded = withTenantScopes(setup.db as unknown as {
+    query: (sql: string, values?: unknown[]) => Promise<{ rows: unknown[] }>;
+  });
+
+  const verdict = await new StarsPayments({ db: guarded as never }).preCheckout({
+    payload: INTENT, telegramUserId: 42, totalAmount: 1, currency: "XTR",
+  });
+
+  assert.deepEqual(verdict, { ok: true, intentId: INTENT });
 });
 
 test("чужая валюта и мусорный payload не доходят до базы", async () => {

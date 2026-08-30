@@ -166,6 +166,10 @@ class FakeDb {
       }
       return { rows: [], rowCount: 1 };
     }
+    if (text.startsWith("DELETE FROM usage_counters")) {
+      this.written.push("usage_counters.reset");
+      return { rows: [], rowCount: 1 };
+    }
     if (text.startsWith("UPDATE subscriptions SET status = 'expired', actor_id")) {
       this.written.push("subscriptions.clear");
       const row = this.subscriptions.find((item) => item.id === values[0]);
@@ -534,6 +538,11 @@ test("ручное назначение отличимо от оплаты и т
   assert.ok(guards.includes("sudo:users:write"));
   // Решение попало и в доменную историю, и в аудит маршрута.
   assert.ok(db.written.includes("subscription_admin_events"));
+  assert.ok(db.written.includes("usage_counters.reset"));
+  assert.ok(
+    db.written.indexOf("usage_counters.reset") < db.written.indexOf("subscriptions.insert"),
+    "ручной период начинает квоту до выдачи подписки",
+  );
   await app.close();
 });
 
