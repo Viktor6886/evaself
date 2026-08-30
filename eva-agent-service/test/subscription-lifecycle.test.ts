@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { AgentToolFactory, toolRisk } from "../dist/agent-tools.js";
 import { grantPaidAccess } from "../dist/payments/grant.js";
 import { SubscriptionExpiryNotifier } from "../dist/subscriptions/expiry-notifier.js";
+import { QuotaExhaustionNotifier } from "../dist/subscriptions/quota-exhaustion-notifier.js";
 import { SubscriptionStatusService } from "../dist/subscriptions/status-service.js";
 
 const silentLogger = { debug() {}, info() {}, warn() {}, error() {} };
@@ -308,6 +309,7 @@ test("уведомление за сутки идёт через durable outbox 
         subscription_id: "55", user_id: "7", chat_id: "42", plan: "max",
         current_period_end: end, timezone: "UTC", language_mode: "fixed",
         preferred_language: "ru", last_message_language: null, language_code: "ru",
+        warning_days: 1,
         }] };
       },
     } as never,
@@ -323,6 +325,34 @@ test("уведомление за сутки идёт через durable outbox 
   assert.match(String((sent[0]?.payload as { text: string }).text), /закончится/iu);
   assert.match(selectionSql, /u\.telegram_id::text AS chat_id/u);
   assert.doesNotMatch(selectionSql, /FROM telegram_updates/u);
+  assert.match(selectionSql, /min\(configured\.days\)/u);
+});
+
+test("трёхдневное предупреждение имеет отдельный durable key", async () => {
+  const sent: Array<Record<string, unknown>> = [];
+  const end = new Date("2026-09-03T12:00:00Z");
+  const notifier = new SubscriptionExpiryNotifier(
+    {
+      withSystemScope: async (_label: string, work: () => Promise<unknown>) => await work(),
+      query: async (_sql: string, values: unknown[]) => {
+        assert.deepEqual(values, [null, null, [3, 1]]);
+        return { rows: [{
+          subscription_id: "56", user_id: "7", chat_id: "42", plan: "plus",
+          current_period_end: end, timezone: "UTC", language_mode: "fixed",
+          preferred_language: "ru", last_message_language: null, language_code: "ru",
+          warning_days: 3,
+        }] };
+      },
+    } as never,
+    { send: async (envelope: Record<string, unknown>) => { sent.push(envelope); } } as never,
+    silentLogger,
+    undefined,
+    [3, 1],
+  );
+
+  await notifier.tick();
+  assert.equal(sent[0]?.idempotencyKey, `subscription-expiry:56:${end.toISOString()}:3d`);
+  assert.match(String((sent[0]?.payload as { text: string }).text), /через 3 дня/iu);
 });
 
 test("уведомитель проходит дальше первых ста подписок", async () => {
@@ -333,6 +363,7 @@ test("уведомитель проходит дальше первых ста �
     subscription_id: String(id), user_id: String(id), chat_id: String(id), plan: "plus",
     current_period_end: end, timezone: "UTC", language_mode: "fixed",
     preferred_language: "ru", last_message_language: null, language_code: "ru",
+    warning_days: 1,
   });
   const notifier = new SubscriptionExpiryNotifier(
     {
@@ -340,10 +371,10 @@ test("уведомитель проходит дальше первых ста �
       query: async (_sql: string, values: unknown[]) => {
         page += 1;
         if (page === 1) {
-          assert.deepEqual(values, [null, null]);
+          assert.deepEqual(values, [null, null, [3, 1]]);
           return { rows: Array.from({ length: 100 }, (_, index) => row(index + 1)) };
         }
-        assert.deepEqual(values, [end.toISOString(), "100"]);
+        assert.deepEqual(values, [end.toISOString(), "100", [3, 1]]);
         return { rows: [row(101)] };
       },
     } as never,
@@ -353,4 +384,49 @@ test("уведомитель проходит дальше первых ста �
   await notifier.tick();
   assert.equal(page, 2);
   assert.equal(delivered, 101);
+});
+
+test("исчерпанные периоды сообщений объединяются в одно durable-уведомление", async () => {
+  const sent: Array<Record<string, unknown>> = [];
+  const notifier = new QuotaExhaustionNotifier(
+    {
+      withUserScope: async (scope: unknown, work: () => Promise<unknown>) => {
+        assert.deepEqual(scope, {
+          telegramId: 42, label: "subscriptions.quota_exhaustion", inherit: true,
+        });
+        return await work();
+      },
+      query: async (sql: string, values: unknown[]) => {
+        assert.deepEqual(values, [42]);
+        assert.match(sql, /q\.metric = 'messages'/u);
+        assert.match(sql, /q\.remaining <= 0/u);
+        return { rows: [
+          {
+            user_id: "7", chat_id: "42", period: "day", period_start: "2026-08-30",
+            language_mode: "fixed", preferred_language: "ru",
+            last_message_language: null, language_code: "ru",
+          },
+          {
+            user_id: "7", chat_id: "42", period: "week", period_start: "2026-08-24",
+            language_mode: "fixed", preferred_language: "ru",
+            last_message_language: null, language_code: "ru",
+          },
+        ] };
+      },
+    } as never,
+    { send: async (envelope: Record<string, unknown>) => { sent.push(envelope); } } as never,
+    silentLogger,
+  );
+
+  await notifier.notifyMessages(42);
+  await notifier.notifyMessages(42);
+  assert.equal(sent.length, 2, "outbox принимает повтор и дедуплицирует его по тому же ключу");
+  assert.equal(
+    sent[0]?.idempotencyKey,
+    "quota-exhausted:7:messages:day:2026-08-30+week:2026-08-24",
+  );
+  assert.equal(sent[0]?.chatId, 42, "уведомление идёт в личный Telegram ID");
+  const text = String((sent[0]?.payload as { text: string }).text);
+  assert.match(text, /за сутки/iu);
+  assert.match(text, /за неделю/iu);
 });

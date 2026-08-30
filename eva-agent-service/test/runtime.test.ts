@@ -901,7 +901,7 @@ test("психологические навыки доступны нативн�
     "therapeutic-conversation", "cbt", "act", "motivational-interviewing",
     "schema-therapy", "emotion-regulation", "behavioral-activation",
     "relationships-boundaries", "goals-values", "journaling-reflection",
-    "memory-hygiene", "crisis-response",
+    "memory-hygiene", "subscription-status", "crisis-response",
   ]) {
     assert.ok(entries.includes(required), `навык ${required} отсутствует`);
   }

@@ -90,6 +90,10 @@ export interface Config {
   outboxEnabled: boolean;
   /** Новые правила покупки, смешанные квоты, read-only tool и expiry notice. */
   subscriptionLifecycleEnabled: boolean;
+  /** За сколько полных суток напоминать об окончании подписки. */
+  subscriptionExpiryWarningDays: number[];
+  /** Уведомлять сразу после расходования последнего сообщения в периоде. */
+  quotaExhaustionNotificationsEnabled: boolean;
   /**
    * Запись жизненного цикла хода в `turn_runs`. Shadow-режим: путь
    * обработки сообщения и ответ пользователю от него не зависят.
@@ -242,6 +246,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     if (!value) return fallback;
     return ["1", "true", "yes", "on"].includes(value);
   };
+  const intList = (name: string, fallback: number[], min: number, max: number): number[] => {
+    const values = str(name)
+      .split(",")
+      .map((value) => Number.parseInt(value.trim(), 10))
+      .filter((value) => Number.isSafeInteger(value) && value >= min && value <= max);
+    return values.length > 0
+      ? [...new Set(values)].sort((left, right) => right - left)
+      : [...fallback];
+  };
   const stickerCatalogSource = str("EVA_TELEGRAM_STICKER_CATALOG_JSON");
   let telegramStickerCatalog: unknown = {};
   let telegramStickerCatalogParseError = false;
@@ -358,6 +371,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     profileCacheTtlSeconds: int("EVA_PROFILE_CACHE_TTL_SECONDS", 60),
     outboxEnabled: bool("EVA_OUTBOX_ENABLED", true),
     subscriptionLifecycleEnabled: bool("EVA_SUBSCRIPTION_LIFECYCLE", false),
+    subscriptionExpiryWarningDays: intList("EVA_SUBSCRIPTION_WARNING_DAYS", [3, 1], 1, 30),
+    quotaExhaustionNotificationsEnabled: bool("EVA_QUOTA_EXHAUSTION_NOTIFICATIONS", true),
     turnLifecycleEnabled: bool("EVA_TURN_LIFECYCLE", false),
     parallelInboxEnabled: bool("EVA_PARALLEL_INBOX", false),
     turnAggregationEnabled: bool("EVA_TURN_AGGREGATION", false),

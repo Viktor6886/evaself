@@ -525,6 +525,8 @@ interface WorkflowProbe {
   transcribed: string[];
   /** Готовый текст хода вместе с вложениями. */
   wrapped: string[];
+  /** После какого успешного расхода проверили переход квоты в ноль. */
+  quotaNotifications: number[];
 }
 
 async function runTelegramTurn(
@@ -832,6 +834,7 @@ async function runTelegramTurn(
     },
   };
   const channelLinks: Array<Record<string, unknown>> = [];
+  const quotaNotifications: number[] = [];
   const workflow = new EvaWorkflow(
     {
       typingIntervalMs: 4000,
@@ -865,6 +868,7 @@ async function runTelegramTurn(
     options.offers
       ? { offers: async () => options.offers } as never
       : undefined,
+    { notifyMessages: async (telegramId: number) => { quotaNotifications.push(telegramId); } } as never,
   );
 
   // Поддельный media-service: синтез занимает время, как настоящий, а
@@ -943,6 +947,7 @@ async function runTelegramTurn(
     wrapped,
     markups,
     issuedTokens,
+    quotaNotifications,
     metrics: turnMetrics,
   };
 }
@@ -1189,6 +1194,12 @@ test("отказ учёта после доставки не заводит вт
   assert.equal(harness.result.status, "completed");
   assert.equal(harness.result.usageCharged, false, "не списанное списанным не считается");
   assert.deepEqual(harness.sent.length, 1, "ответ отправлен ровно один раз");
+  assert.deepEqual(harness.quotaNotifications, [], "без успешного расхода уведомлять не о чем");
+});
+
+test("после успешного расхода проверяется исчерпание квоты сообщений", async () => {
+  const harness = await runTelegramTurn(undefined);
+  assert.deepEqual(harness.quotaNotifications, [TELEGRAM_ID]);
 });
 
 test("отказ доставки голоса не заваливает ход и не отменяет ответ", async () => {
@@ -1745,6 +1756,21 @@ test("ответ без мужского рода уходит слово в с�
     probe.sent.some((item) => item.includes(original)),
     "текст, который трогать не нужно, изменился",
   );
+});
+
+test("/balance различает суточную, недельную и месячную квоты", async () => {
+  const probe = await runTelegramTurn(undefined, {
+    command: "/balance",
+    quota: [
+      { metric: "messages", period: "day", remaining: 4 },
+      { metric: "messages", period: "week", remaining: 9 },
+      { metric: "messages", period: "month", remaining: 20 },
+    ],
+  });
+  const delivered = probe.sent.join("\n");
+  assert.match(delivered, /Сообщения \(сутки\): осталось 4/u);
+  assert.match(delivered, /Сообщения \(неделя\): осталось 9/u);
+  assert.match(delivered, /Сообщения \(месяц\): осталось 20/u);
 });
 
 /*

@@ -79,8 +79,8 @@ BullMQ не обрабатывает интерактивный ход и не �
 | Курсор программ | Где человек внутри длинной guided-программы; не дублирует VECTOR-Action | `src/goals/goal-program-service.ts`, `src/goals/goal-program-tools.ts` |
 | Задачи | Напоминания и события | `src/tasks/task-event-service.ts` |
 | Платежи | Telegram Stars, intents и выдача подписки | `src/payments/stars.ts`, `src/payments/grant.ts` |
-| Статус подписки | Read-only инструмент текущего пользователя: тариф, срок, дни, расход и бесплатные сообщения; изменение моделью отсутствует; rollout под `EVA_SUBSCRIPTION_LIFECYCLE` | `src/subscriptions/status-service.ts`, `src/subscriptions/subscription-tools.ts` |
-| Окончание подписки | Детерминированное предупреждение за 24 часа через durable outbox, без LLM и с идемпотентностью по подписке и сроку; выключается тем же lifecycle-флагом | `src/subscriptions/expiry-notifier.ts` |
+| Статус подписки | Read-only инструмент и навык текущего пользователя: тариф, срок, дни и остатки суточной/недельной/месячной квоты; модель не принимает ID и не может менять данные | `src/subscriptions/status-service.ts`, `src/subscriptions/subscription-tools.ts`, `../skills/subscription-status/SKILL.md` |
+| Уведомления доступа | Настраиваемые предупреждения за 3/1 день до окончания и одно durable-уведомление о закончившихся периодах сообщений; без LLM, ключи содержат подписку/срок или начало периода | `src/subscriptions/expiry-notifier.ts`, `src/subscriptions/quota-exhaustion-notifier.ts` |
 | Кризисный контур | Детерминированное обнаружение риска | `src/crisis.ts` |
 | Дневник | Записи, люди и недельный обзор | `src/public/journal/` |
 | Каналы | Связь внешнего сообщения с внутренним пользователем | `src/channels/channel-links.ts` |

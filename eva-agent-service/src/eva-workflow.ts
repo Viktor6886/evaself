@@ -44,6 +44,7 @@ import {
 } from "./telegram.js";
 import { feminizeSelfReference, recordGenderFix } from "./i18n/eva-gender.js";
 import type { StarsPayments } from "./payments/stars.js";
+import type { QuotaExhaustionNotifier } from "./subscriptions/quota-exhaustion-notifier.js";
 import { quotaExhausted } from "./subscriptions/quota-policy.js";
 import { speechTextFromReply } from "./telegram-format.js";
 import {
@@ -202,6 +203,8 @@ export class EvaWorkflow {
      * выставлялся.
      */
     private readonly stars?: StarsPayments,
+    /** Служебное read-only уведомление после расхода последнего сообщения. */
+    private readonly quotaExhaustion?: QuotaExhaustionNotifier,
   ) {
     this.taskEvents = new TaskEventService(db);
     this.attachments = new TelegramAttachmentReader(telegram);
@@ -1161,6 +1164,7 @@ export class EvaWorkflow {
           await this.moveTurn(turnHandle, "delivered");
 
           await this.db.incrementUsage(update.telegramId, "messages");
+          await this.quotaExhaustion?.notifyMessages(update.telegramId);
           // Ответ Евы — такой же расходник, как входящее сообщение: он
           // стоит вызова модели, и тариф считает его отдельно.
           await this.countUsage(update.telegramId, "messages_out");
@@ -1468,7 +1472,7 @@ export class EvaWorkflow {
           const remaining = row.remaining === null
             ? t(language, "unlimited")
             : t(language, "remaining", { value: String(row.remaining) });
-          return `${quotaLabel(String(row.metric), language)}: ${remaining}`;
+          return `${quotaLabel(String(row.metric), String(row.period ?? ""), language)}: ${remaining}`;
         });
         await this.telegram.sendMessage(
           update.chatId,
@@ -1910,8 +1914,8 @@ function normalizeSttAttempts(
       }];
 }
 
-function quotaLabel(metric: string, language: SupportedLanguage): string {
-  return (language === "en"
+function quotaLabel(metric: string, period: string, language: SupportedLanguage): string {
+  const metricLabel = (language === "en"
     ? {
         messages: "Messages",
         voice_minutes: "Voice minutes",
@@ -1924,6 +1928,11 @@ function quotaLabel(metric: string, language: SupportedLanguage): string {
         web_search: "Поиск",
         tests: "Тесты",
       })[metric] ?? metric;
+  const periodLabel = (language === "en"
+    ? { day: "day", week: "week", month: "month", total: "total" }
+    : { day: "сутки", week: "неделя", month: "месяц", total: "всё время" }
+  )[period as "day" | "week" | "month" | "total"];
+  return periodLabel ? `${metricLabel} (${periodLabel})` : metricLabel;
 }
 
 function elapsed(started: number): number {
