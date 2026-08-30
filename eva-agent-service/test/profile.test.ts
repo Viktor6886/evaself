@@ -79,6 +79,34 @@ test("normal explicit facts are confirmed while sensitive facts remain candidate
   assert.deepEqual(savedStatuses, ["confirmed", "candidate"]);
 });
 
+test("grammatical gender accepts Russian aliases but stores one canonical value", async () => {
+  let stored: unknown;
+  const db = {
+    query: async (sql: string, values: unknown[] = []) => {
+      if (sql.includes("FROM profile_field_definitions WHERE field_key")) {
+        return { rows: [definition("grammatical_gender", "string", "normal", false)] };
+      }
+      if (sql.includes("INSERT INTO onboarding_fields")) {
+        stored = values[2];
+        return { rows: [{ field_key: values[1], field_value: values[2], status: values[4] }] };
+      }
+      return { rows: [] };
+    },
+  };
+  const profile = new UserProfileService(db as never);
+  await profile.upsert({
+    userId: 1,
+    fieldKey: "grammatical_gender",
+    value: "мужской",
+    explicitlyStated: true,
+  });
+  assert.equal(stored, "masculine");
+  await assert.rejects(
+    profile.upsert({ userId: 1, fieldKey: "grammatical_gender", value: "не знаю" }),
+    /мужской или женский/u,
+  );
+});
+
 test("profile hint is suppressed during a crisis and selects no more than one field", async () => {
   let queries = 0;
   const service = new ProfileCompletenessService({

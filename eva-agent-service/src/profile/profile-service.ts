@@ -1,6 +1,7 @@
 import type { Database } from "../db.js";
 import type { RuntimeContextBuilder } from "../runtime/runtime-context.js";
 import type { TimezoneResolver } from "../time/timezone-resolver.js";
+import type { UserGrammaticalGender } from "../i18n/eva-gender.js";
 
 export type ProfileStatus =
   | "missing"
@@ -63,7 +64,10 @@ export class UserProfileService {
     forceCandidate?: boolean;
   }): Promise<ProfileField> {
     const definition = await this.definition(input.fieldKey);
-    const normalized = normalizeProfileValue(input.value, definition.value_type);
+    const profileValue = definition.field_key === "grammatical_gender"
+      ? normalizeGrammaticalGender(input.value)
+      : input.value;
+    const normalized = normalizeProfileValue(profileValue, definition.value_type);
     const confidence = clamp(input.confidence ?? (input.explicitlyStated ? 1 : 0.7), 0, 1);
     const needsConfirmation =
       input.forceCandidate === true ||
@@ -334,4 +338,18 @@ function cleanString(value: string, limit: number): string {
 function clamp(value: number, min: number, max: number): number {
   if (!Number.isFinite(value)) return min;
   return Math.min(Math.max(value, min), max);
+}
+
+function normalizeGrammaticalGender(value: unknown): UserGrammaticalGender {
+  if (typeof value !== "string") {
+    throw new Error("Грамматический род должен быть строкой");
+  }
+  const normalized = value.trim().toLocaleLowerCase("ru");
+  if (["masculine", "male", "мужской", "мужчина", "м"].includes(normalized)) {
+    return "masculine";
+  }
+  if (["feminine", "female", "женский", "женщина", "ж"].includes(normalized)) {
+    return "feminine";
+  }
+  throw new Error("Допустим только мужской или женский грамматический род");
 }

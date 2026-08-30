@@ -42,7 +42,11 @@ import {
   telegramMessageIdOf,
   TelegramFileTooLarge,
 } from "./telegram.js";
-import { feminizeSelfReference, recordGenderFix } from "./i18n/eva-gender.js";
+import {
+  explicitUserGrammaticalGender,
+  normalizeReplyGender,
+  recordGenderFix,
+} from "./i18n/eva-gender.js";
 import type { StarsPayments } from "./payments/stars.js";
 import type { QuotaExhaustionNotifier } from "./subscriptions/quota-exhaustion-notifier.js";
 import { quotaExhausted } from "./subscriptions/quota-policy.js";
@@ -698,6 +702,24 @@ export class EvaWorkflow {
           }
           throw error;
         }
+        // Пол нельзя надёжно вывести из имени, фото или ответа модели.
+        // Прямая фраза самого человека — единственный автоматический
+        // источник канонического грамматического рода.
+        const statedGender = explicitUserGrammaticalGender(prompt);
+        if (statedGender) {
+          await this.profile.upsert({
+            userId: user.id,
+            fieldKey: "grammatical_gender",
+            value: statedGender,
+            sourceType: "conversation_explicit",
+            sourceQuote: prompt.slice(0, 2_000),
+            confidence: 1,
+            explicitlyStated: true,
+          }).catch((error) => this.logger.warn("Грамматический род не сохранён", {
+            userId: user.id,
+            code: error instanceof Error ? error.name : "unknown_error",
+          }));
+        }
         if (update.replyToMessageId !== null) {
           const linked = await this.taskEvents.findByTelegramReply(
             user.id,
@@ -807,6 +829,7 @@ export class EvaWorkflow {
           currentMessageAt: promptTiming.firstAt,
           messageBatch: promptTiming,
         });
+        const userGender = context.userGrammaticalGender ?? null;
         metrics.context_build_ms = context.metrics?.runtimeContextMs ?? 0;
         metrics.profile_check_ms = context.metrics?.profileCheckMs ?? 0;
         const responseMode = context.responseMode;
@@ -930,7 +953,7 @@ export class EvaWorkflow {
                     // является и к нему не приклеивается.
                     if (delta.startsGroup) streamed = "";
                     streamed += delta.text;
-                    stream?.push(streamed);
+                    stream?.push(normalizeReplyGender(streamed, userGender).text);
                   }
                   : undefined,
               },
@@ -1024,10 +1047,10 @@ export class EvaWorkflow {
         // вероятностью: правка детерминированная, смысла не трогает и
         // молчит, когда трогать нечего.
         const answered = turn.reply.trim() || t(language, "emptyReply");
-        const gender = feminizeSelfReference(answered);
+        const gender = normalizeReplyGender(answered, userGender);
         recordGenderFix(gender.corrections.length);
         if (gender.corrections.length > 0) {
-          this.logger.info("Ответ приведён к женскому роду", {
+          this.logger.info("Согласование рода в ответе исправлено", {
             updateId: update.updateId,
             // Только сами формы: текста ответа в журнале нет и быть не может.
             corrections: gender.corrections.slice(0, 5),
