@@ -83,9 +83,10 @@ export async function grantPaidAccess(
     id: string;
     plan: string;
     status: string;
+    source: string;
     current_period_end: Date | null;
   }>(
-    `SELECT id, plan, status, current_period_end
+    `SELECT id, plan, status, source, current_period_end
        FROM subscriptions
       WHERE user_id = $1 AND status IN ('trialing', 'active', 'past_due')
         AND (current_period_end IS NULL OR current_period_end > now())
@@ -127,6 +128,15 @@ export async function grantPaidAccess(
       WHERE user_id = $1 AND status IN ('trialing', 'active', 'past_due')`,
     [facts.userId],
   );
+  // Бесплатный, пробный и ручной доступ не должны расходовать квоту
+  // первой платной подписки. При платном апгрейде расход сохраняется:
+  // для него лимиты уже смешаны с остатком прежнего тарифа.
+  if (!previousSubscription || previousSubscription.source !== "payment") {
+    await client.query(
+      `DELETE FROM usage_counters WHERE user_id = $1`,
+      [facts.userId],
+    );
+  }
   const inserted = await client.query<{ id: string }>(
     `INSERT INTO subscriptions
        (user_id, plan, status, provider, provider_subscription_id,
@@ -205,7 +215,13 @@ const PERIOD_DAYS: Readonly<Record<string, number>> = Object.freeze({
 async function blendQuotaLimits(
   client: pg.PoolClient,
   userId: string,
-  previous: { id: string; plan: string; status: string; current_period_end: Date | null },
+  previous: {
+    id: string;
+    plan: string;
+    status: string;
+    source: string;
+    current_period_end: Date | null;
+  },
   targetPlan: string,
   previousDays: number,
   targetDays: number,

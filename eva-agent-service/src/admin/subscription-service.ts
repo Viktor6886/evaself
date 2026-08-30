@@ -448,6 +448,14 @@ export class SubscriptionAdminService {
           WHERE user_id = $1 AND status = ANY($2::text[])`,
         [userId, LIVE_STATUSES],
       );
+      // Счётчики принадлежат периоду доступа, а не тарифу. Без сброса
+      // новая ручная подписка наследовала исчерпанную бесплатную квоту
+      // или большой расход прошлого тарифа и могла блокироваться сразу.
+      await client.query(
+        `-- tenant: system — ручное назначение начинает новый период квот пользователя
+         DELETE FROM usage_counters WHERE user_id = $1`,
+        [userId],
+      );
       const { rows } = await client.query<SubscriptionRow>(
         `-- tenant: system — ручное назначение подписки администратором; область объявлена маршрутом и записана в аудит
          INSERT INTO subscriptions

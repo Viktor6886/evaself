@@ -16,7 +16,10 @@ test("Plus → Max складывает срок и взвешивает сут�
       calls.push({ sql, values });
       if (sql.includes("INSERT INTO payments")) return { rows: [{ id: "pay-1" }] };
       if (sql.includes("FROM subscriptions")) {
-        return { rows: [{ id: "sub-old", plan: "plus", status: "active", current_period_end: end }] };
+        return { rows: [{
+          id: "sub-old", plan: "plus", status: "active", source: "payment",
+          current_period_end: end,
+        }] };
       }
       if (sql.includes("COALESCE(sq.limit_value")) {
         return { rows: [{ metric: "messages", period: "day", limit_value: "100" }] };
@@ -50,6 +53,34 @@ test("Plus → Max складывает срок и взвешивает сут�
   assert.ok(Number(snapshot?.values[4]) >= 175 && Number(snapshot?.values[4]) <= 176);
   const intentUpdate = calls.find((call) => call.sql.includes("UPDATE payment_intents SET status"));
   assert.equal(intentUpdate?.values[3], "intent-1", "закрывается только оплаченный intent");
+  assert.equal(
+    calls.some((call) => call.sql.includes("DELETE FROM usage_counters")),
+    false,
+    "платный апгрейд сохраняет уже учтённый расход",
+  );
+});
+
+test("первая платная подписка начинает квоту заново", async () => {
+  const calls: Array<{ sql: string; values: unknown[] }> = [];
+  const client = {
+    async query(sql: string, values: unknown[] = []) {
+      calls.push({ sql, values });
+      if (sql.includes("INSERT INTO payments")) return { rows: [{ id: "pay-first" }] };
+      if (sql.includes("FROM subscriptions")) return { rows: [] };
+      if (sql.includes("INSERT INTO subscriptions")) return { rows: [{ id: "sub-first" }] };
+      return { rows: [] };
+    },
+  };
+
+  const outcome = await grantPaidAccess(client as never, {
+    userId: "7", provider: "telegram_stars", paymentId: "first-paid", raw: {},
+  }, {
+    plan: "plus", amountMinor: 1, durationDays: 7, currency: "XTR",
+  }, { subscriptionLifecycleEnabled: true });
+
+  assert.deepEqual(outcome, { state: "applied", effectivePlan: "plus" });
+  const reset = calls.find((call) => call.sql.includes("DELETE FROM usage_counters"));
+  assert.deepEqual(reset?.values, ["7"]);
 });
 
 test("fail-safe понижения сохраняет и имя, и квоты высокого тарифа", async () => {
@@ -60,7 +91,8 @@ test("fail-safe понижения сохраняет и имя, и квоты �
       calls.push({ sql, values });
       if (sql.includes("INSERT INTO payments")) return { rows: [{ id: "pay-2" }] };
       if (sql.includes("FROM subscriptions")) return { rows: [{
-        id: "sub-max", plan: "max", status: "active", current_period_end: end,
+        id: "sub-max", plan: "max", status: "active", source: "payment",
+        current_period_end: end,
       }] };
       if (sql.includes("FROM quotas")) return { rows: [{
         metric: "messages", period: "day", limit_value: "200",
@@ -90,7 +122,8 @@ test("платный апгрейд не превращает прежний б�
       calls.push({ sql, values });
       if (sql.includes("INSERT INTO payments")) return { rows: [{ id: "pay-indefinite" }] };
       if (sql.includes("FROM subscriptions")) return { rows: [{
-        id: "sub-plus-forever", plan: "plus", status: "active", current_period_end: null,
+        id: "sub-plus-forever", plan: "plus", status: "active", source: "payment",
+        current_period_end: null,
       }] };
       if (sql.includes("INSERT INTO subscriptions")) return { rows: [{ id: "sub-preserved" }] };
       return { rows: [] };
@@ -116,7 +149,8 @@ test("бессрочный fail-safe действует и при выключе
       calls.push({ sql, values });
       if (sql.includes("INSERT INTO payments")) return { rows: [{ id: "pay-rollback" }] };
       if (sql.includes("FROM subscriptions")) return { rows: [{
-        id: "sub-plus-forever", plan: "plus", status: "active", current_period_end: null,
+        id: "sub-plus-forever", plan: "plus", status: "active", source: "payment",
+        current_period_end: null,
       }] };
       if (sql.includes("INSERT INTO subscriptions")) return { rows: [{ id: "sub-rollback" }] };
       return { rows: [] };
@@ -142,7 +176,8 @@ test("безлимит Max начинается после оплаченных 
       calls.push({ sql, values });
       if (sql.includes("INSERT INTO payments")) return { rows: [{ id: "pay-unlimited" }] };
       if (sql.includes("FROM subscriptions")) return { rows: [{
-        id: "sub-plus", plan: "plus", status: "active", current_period_end: end,
+        id: "sub-plus", plan: "plus", status: "active", source: "payment",
+        current_period_end: end,
       }] };
       if (sql.includes("COALESCE(sq.limit_value")) return { rows: [{
         metric: "messages", period: "day", limit_value: "200",
@@ -174,7 +209,8 @@ test("повторный платёж не отодвигает уже купл�
       calls.push({ sql, values });
       if (sql.includes("INSERT INTO payments")) return { rows: [{ id: "pay-repeat" }] };
       if (sql.includes("FROM subscriptions")) return { rows: [{
-        id: "sub-mixed", plan: "max", status: "active", current_period_end: currentEnd,
+        id: "sub-mixed", plan: "max", status: "active", source: "payment",
+        current_period_end: currentEnd,
       }] };
       if (sql.includes("COALESCE(sq.limit_value")) return { rows: [{
         metric: "messages", period: "day", limit_value: "200", unlimited_from: unlimitedFrom,
