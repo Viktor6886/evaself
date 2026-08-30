@@ -288,7 +288,10 @@ test("web_search stops at the quota instead of spending it", async () => {
     { searxngUrl: "http://search", vectorGoalsEnabled: false } as never,
     withTenantScopes({
       getAgentRuntimeContext: () => Promise.resolve(RUNTIME),
-      getQuotaStatus: () => Promise.resolve([{ metric: "web_search", remaining: 0 }]),
+      getQuotaStatus: () => Promise.resolve([
+        { metric: "web_search", period: "month", remaining: 7 },
+        { metric: "web_search", period: "day", remaining: 0 },
+      ]),
       incrementUsage: () => Promise.resolve(1),
       query(sql: string, values: unknown[] = []) {
         statements.push({ sql, values });

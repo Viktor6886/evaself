@@ -41,7 +41,6 @@ import { buildObservability } from "./observability/index.js";
 import { LettaService } from "./letta.js";
 import { LlmManager } from "./llm.js";
 import { createLogger } from "./logger.js";
-import { LavaPayments } from "./payments.js";
 import { StarsPayments } from "./payments/stars.js";
 import { SubscriptionExpiryNotifier } from "./subscriptions/expiry-notifier.js";
 import { UserProfileService } from "./profile/profile-service.js";
@@ -439,7 +438,6 @@ async function main(): Promise<void> {
   );
   let recoveryTimer: NodeJS.Timeout | null = null;
 
-  const payments = new LavaPayments(config, db, telegram, logger);
   const purposes = new ConversationPurposeService(db, letta, logger);
   const background = new BackgroundRuntime(
     config,
@@ -522,7 +520,6 @@ async function main(): Promise<void> {
     inbox,
     profile,
     goals,
-    payments,
     stars,
     queue,
     telegram,

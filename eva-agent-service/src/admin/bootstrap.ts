@@ -48,8 +48,6 @@ const SECRET_USED_BY: Record<string, string[]> = {
   // эксплуатации; значение осталось источником пароля первого owner
   // панели и потому по-прежнему импортируется.
   LETTA_UI_PASSWORD: ["admin-api"],
-  LAVA_WEBHOOK_USER: ["payment-runtime"],
-  LAVA_WEBHOOK_PASSWORD: ["payment-runtime"],
   POSTGRES_SUPER_PASSWORD: ["postgres"],
   EVA_DB_PASSWORD: ["postgres", "agent-runtime"],
   EVA_DB_READONLY_PASSWORD: ["postgres"],
@@ -174,8 +172,7 @@ async function bootstrapTransaction(
     for (const [name, rawValue] of Object.entries(env).sort(([a], [b]) => a.localeCompare(b))) {
       const value = rawValue?.trim() ?? "";
       if (!value || EXCLUDED.has(name)) continue;
-      const explicitlySecret = name === "LAVA_WEBHOOK_USER";
-      if (explicitlySecret || SECRET_NAME.test(name)) {
+      if (SECRET_NAME.test(name)) {
         const ref = secretRef(name);
         const envelope = secretStore.seal(value);
         const inserted = await client.query(

@@ -1458,7 +1458,6 @@ export function parseRetryAfter(value: string | null, now = Date.now()): number 
 }
 
 function priorityForContext(prefix: string): DeliveryPriority {
-  if (prefix.startsWith("lava-payment:")) return "command";
   if (prefix.startsWith("telegram-command:")) return "command";
   if (prefix.startsWith("telegram-dead:")) return "status";
   return "reply";

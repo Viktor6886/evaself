@@ -458,7 +458,6 @@ test("внутренний маршрут смены токена закрыт �
     inbox: {} as never,
     profile: {} as never,
     goals: {} as never,
-    payments: {} as never,
     queue: { activeUsers: 0, queuedUsers: 0 } as never,
     telegram: {
       setToken: (token: string) => { applied.push(token); },

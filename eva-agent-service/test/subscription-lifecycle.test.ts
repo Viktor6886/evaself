@@ -70,9 +70,9 @@ test("fail-safe понижения сохраняет и имя, и квоты �
     },
   };
   await grantPaidAccess(client as never, {
-    userId: "7", provider: "lava", paymentId: "paid-lower", raw: {},
+    userId: "7", provider: "telegram_stars", paymentId: "paid-lower", raw: {},
   }, {
-    plan: "plus", amountMinor: 100, durationDays: 30, currency: "RUB",
+    plan: "plus", amountMinor: 100, durationDays: 30, currency: "XTR",
   }, { subscriptionLifecycleEnabled: true });
 
   const inserted = calls.find((call) => call.sql.includes("INSERT INTO subscriptions"));
@@ -98,9 +98,9 @@ test("платный апгрейд не превращает прежний б�
   };
 
   const outcome = await grantPaidAccess(client as never, {
-    userId: "7", provider: "lava", paymentId: "paid-max-month", raw: {},
+    userId: "7", provider: "telegram_stars", paymentId: "paid-max-month", raw: {},
   }, {
-    plan: "max", amountMinor: 700, durationDays: 30, currency: "RUB",
+    plan: "max", amountMinor: 700, durationDays: 30, currency: "XTR",
   }, { subscriptionLifecycleEnabled: true });
 
   const inserted = calls.find((call) => call.sql.includes("INSERT INTO subscriptions"));
@@ -124,9 +124,9 @@ test("бессрочный fail-safe действует и при выключе
   };
 
   const outcome = await grantPaidAccess(client as never, {
-    userId: "7", provider: "lava", paymentId: "rollback-paid-max", raw: {},
+    userId: "7", provider: "telegram_stars", paymentId: "rollback-paid-max", raw: {},
   }, {
-    plan: "max", amountMinor: 700, durationDays: 30, currency: "RUB",
+    plan: "max", amountMinor: 700, durationDays: 30, currency: "XTR",
   }, { subscriptionLifecycleEnabled: false });
 
   const inserted = calls.find((call) => call.sql.includes("INSERT INTO subscriptions"));
@@ -187,9 +187,9 @@ test("повторный платёж не отодвигает уже купл�
     },
   };
   await grantPaidAccess(client as never, {
-    userId: "7", provider: "lava", paymentId: "repeat-unlimited", raw: {},
+    userId: "7", provider: "telegram_stars", paymentId: "repeat-unlimited", raw: {},
   }, {
-    plan: "max", amountMinor: 700, durationDays: 7, currency: "RUB",
+    plan: "max", amountMinor: 700, durationDays: 7, currency: "XTR",
   }, { subscriptionLifecycleEnabled: true });
 
   const snapshot = calls.find((call) => call.sql.includes("INSERT INTO subscription_quota_limits"));

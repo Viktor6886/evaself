@@ -347,7 +347,6 @@ const ADMIN_FACING_SECRETS = new Set([
   "sec_eva_telegram_bot_token",
   "sec_media_asr_api_key",
   "sec_media_tts_api_key",
-  "sec_lava_webhook_password",
   "sec_eva_llm_api_key",
   // Ключ эмбеддингов при установке копируется из ключа LLM, но провайдер
   // у них может быть разный — тогда его меняют отдельно.

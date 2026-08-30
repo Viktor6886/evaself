@@ -202,16 +202,6 @@ export interface Config {
    */
   journalVoiceRetentionDays: number;
 
-  lavaWebhookUser: string;
-  lavaWebhookPassword: string;
-  lavaPlans: Record<string, {
-    plan: string;
-    durationDays: number;
-    amountMinor: number;
-    currency: string;
-    paymentUrl?: string;
-  }>;
-
   lockTtlSeconds: number;
   turnTimeoutMs: number;
   /** How many idle sessions to keep open before evicting the oldest. */
@@ -252,16 +242,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     if (!value) return fallback;
     return ["1", "true", "yes", "on"].includes(value);
   };
-  const json = <T>(name: string, fallback: T): T => {
-    const value = str(name);
-    if (!value) return fallback;
-    try {
-      return JSON.parse(value) as T;
-    } catch {
-      return fallback;
-    }
-  };
-
   const stickerCatalogSource = str("EVA_TELEGRAM_STICKER_CATALOG_JSON");
   let telegramStickerCatalog: unknown = {};
   let telegramStickerCatalogParseError = false;
@@ -426,10 +406,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       1,
       365,
     ),
-
-    lavaWebhookUser: str("LAVA_WEBHOOK_USER"),
-    lavaWebhookPassword: str("LAVA_WEBHOOK_PASSWORD"),
-    lavaPlans: json("LAVA_PLANS_JSON", {}),
 
     lockTtlSeconds: int("EVA_AGENT_LOCK_TTL", 180),
     turnTimeoutMs: int("EVA_AGENT_TURN_TIMEOUT_MS", 240_000),

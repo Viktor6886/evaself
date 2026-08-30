@@ -7,7 +7,6 @@ import { assertCronExpression, cronFieldMatches, nextCronDate } from "../dist/ba
 import { formatVoiceTranscriptEcho, normalizeUpdate } from "../dist/eva-workflow.js";
 import { evaMemoryBlocks } from "../dist/letta.js";
 import { ensureCoreMemoryBlocks } from "../dist/letta/memory-blocks.js";
-import { normalizeLavaEvent } from "../dist/payments.js";
 import { RuntimeContextBuilder } from "../dist/runtime/runtime-context.js";
 
 import {
@@ -486,34 +485,6 @@ test("cron supports wildcards, ranges, steps and Sunday alias", () => {
 test("next cron date respects an IANA timezone", () => {
   const next = nextCronDate("0 9 * * *", "Asia/Yekaterinburg", new Date("2026-07-29T02:00:00Z"));
   assert.equal(next.toISOString(), "2026-07-29T04:00:00.000Z");
-});
-
-test("Lava webhook normalizer accepts the old nested shape", () => {
-  const event = normalizeLavaEvent({
-    eventType: "payment.success",
-    product: { id: "plus-month" },
-    buyer: { email: "owner@example.test" },
-    invoice: { id: "inv-1", amount: 990, currency: "rub", status: "completed" },
-    metadata: { telegram_id: "123" },
-  });
-  assert.equal(event.productId, "plus-month");
-  assert.equal(event.paymentId, "inv-1");
-  assert.equal(event.telegramId, 123);
-  assert.equal(event.amountMinor, 99_000);
-  assert.equal(event.currency, "RUB");
-});
-
-test("Lava webhook does not invent a successful status or reinterpret explicit minor units", () => {
-  const event = normalizeLavaEvent({
-    eventType: "payment.success",
-    product: { id: "plus-month" },
-    contractId: "contract-1",
-    amount_minor: 99_000,
-  });
-  assert.equal(event.paymentId, "contract-1");
-  assert.equal(event.amountMinor, 99_000);
-  assert.equal(event.currency, "");
-  assert.equal(event.status, "");
 });
 
 test("new Eva agents receive the structured memory blueprint", () => {

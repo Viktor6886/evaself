@@ -1,6 +1,6 @@
 /**
- * HTTP surface. Administrative routes use `X-API-Key`; Telegram and Lava
- * have their own webhook authentication.
+ * HTTP surface. Administrative routes use `X-API-Key`; Telegram has its
+ * own webhook authentication.
  *
  * No public client reaches the Letta App Server directly — every agent, session,
  * memory, skill and tool operation goes through these routes.
@@ -24,7 +24,6 @@ import { runVisionCheck } from "./llm/vision-check.js";
 import type { Logger } from "./logger.js";
 import { MetricsCollector } from "./metrics.js";
 import { newCorrelationId, parseTraceparent } from "./observability/tracing.js";
-import type { LavaPayments } from "./payments.js";
 import type { StarsPayments } from "./payments/stars.js";
 import type { UserProfileService } from "./profile/profile-service.js";
 import {
@@ -63,7 +62,6 @@ export interface Services {
   inbox: TelegramInbox;
   profile: UserProfileService;
   goals: GoalService;
-  payments: LavaPayments;
   /** Оплата звёздами. Отсутствует — счета не выставляются и не проверяются. */
   stars?: StarsPayments;
   queue: UserTurnLock;
@@ -127,7 +125,6 @@ export function buildServer(services: Services): FastifyInstance {
     inbox,
     profile,
     goals,
-    payments,
     queue,
     telegram,
   } = services;
@@ -559,7 +556,7 @@ export function buildServer(services: Services): FastifyInstance {
       integrations: {
         telegram: Boolean(config.telegramBotToken),
         telegram_owner: config.ownerTelegramId !== null,
-        lava: Boolean(config.lavaWebhookUser && config.lavaWebhookPassword),
+        telegram_stars: Boolean(config.telegramBotToken),
         llm: active !== null,
       },
       active_llm: active,
@@ -663,24 +660,6 @@ export function buildServer(services: Services): FastifyInstance {
     }
     const result = await inbox.enqueue(update);
     return reply.status(200).send({ ok: true, ...result });
-  });
-
-  app.post("/payments/lava", async (request, reply) => {
-    // Лимит до проверки Basic-авторизации: перебор пароля webhook тоже
-    // стоит времени.
-    await enforceRateLimit(
-      rateLimiter,
-      `payments:ip:${clientAddress(request.headers as Record<string, unknown>, request.ip)}`,
-      {
-        limit: config.webhookRateLimitPerIp,
-        windowSeconds: config.rateLimitWindowSeconds,
-      },
-    );
-    if (!payments.authorized(request.headers.authorization)) {
-      reply.header("WWW-Authenticate", 'Basic realm="Evaself Lava webhook"');
-      throw unauthorized("Неверная авторизация Lava webhook");
-    }
-    return reply.status(200).send(await payments.handle(request.body));
   });
 
   app.get("/v1/sdk/agents", async () => ({

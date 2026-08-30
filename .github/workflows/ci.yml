@@ -1186,7 +1186,7 @@ jobs:
                       'LETTA_DB_PASSWORD','EVA_DB_READONLY_PASSWORD',
                       'VALKEY_PASSWORD','EVA_AGENT_API_KEY','LETTA_APP_SERVER_TOKEN',
                       'LLM_CONFIG_ENCRYPTION_KEY','EVA_ROUTER_API_KEY',
-                      'LAVA_WEBHOOK_PASSWORD','MEDIA_SERVICE_TOKEN',
+                      'MEDIA_SERVICE_TOKEN',
                       'SEARXNG_SECRET','EVA_TELEGRAM_WEBHOOK_SECRET'):
             text = re.sub(rf'^{key}=.*$', f'{key}={secrets.token_hex(24)}', text, flags=re.M)
           path.write_text(text)
@@ -1590,10 +1590,6 @@ jobs:
                   }),
                 });
                 if(valid.status!==200) throw new Error('valid Telegram status '+valid.status);
-                const lava=await fetch(base+'/payments/lava',{
-                  method:'POST',headers:{'Content-Type':'application/json'},body:'{}',
-                });
-                if(lava.status!==401) throw new Error('unauthorized Lava status '+lava.status);
                 console.log('webhook auth ok');
               })().catch(e=>{console.error(e);process.exit(1)});
             "

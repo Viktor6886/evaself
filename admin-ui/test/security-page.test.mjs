@@ -17,7 +17,6 @@ const ADMIN_FACING = [
   "sec_eva_telegram_bot_token",
   "sec_media_asr_api_key",
   "sec_media_tts_api_key",
-  "sec_lava_webhook_password",
   "sec_eva_llm_api_key",
   "sec_eva_embedding_api_key",
 ];
