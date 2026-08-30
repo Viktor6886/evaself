@@ -44,6 +44,7 @@ import {
 } from "./telegram.js";
 import { feminizeSelfReference, recordGenderFix } from "./i18n/eva-gender.js";
 import type { StarsPayments } from "./payments/stars.js";
+import { quotaExhausted } from "./subscriptions/quota-policy.js";
 import { speechTextFromReply } from "./telegram-format.js";
 import {
   AttachmentError,
@@ -617,14 +618,7 @@ export class EvaWorkflow {
         }
 
         const quota = await this.db.getQuotaStatus(update.telegramId);
-        const messageQuota = quota.find((item) => item.metric === "messages") as
-          | { remaining?: number | string | null; limit_value?: number | string }
-          | undefined;
-        if (
-          messageQuota?.remaining !== null &&
-          messageQuota?.remaining !== undefined &&
-          Number(messageQuota.remaining) <= 0
-        ) {
+        if (quotaExhausted(quota, "messages")) {
           // Кончились сообщения — человеку нужен не отчёт о лимите, а
           // выход из положения. Предложение оплаты идёт тем же
           // сообщением: отправлять его в другой команде значит просить
@@ -639,14 +633,7 @@ export class EvaWorkflow {
         // бы мимо гейта и тратило минуты сверх исчерпанной квоты.
         let parts = [...earlier, update];
         if (parts.some((part) => part.kind === "voice")) {
-          const voiceQuota = quota.find((item) => item.metric === "voice_minutes") as
-            | { remaining?: number | string | null }
-            | undefined;
-          if (
-            voiceQuota?.remaining !== null &&
-            voiceQuota?.remaining !== undefined &&
-            Number(voiceQuota.remaining) <= 0
-          ) {
+          if (quotaExhausted(quota, "voice_minutes")) {
             await this.telegram.sendMessage(
               update.chatId,
               t(language, "voiceQuotaEnded"),
@@ -1499,19 +1486,7 @@ export class EvaWorkflow {
           text: `${offer.title} — ${offer.stars} ⭐`,
           callback_data: `buy:${offer.plan}:${offer.period}`,
         }]);
-        const lavaPlans = await Promise.all(Object.entries(this.config.lavaPlans).map(
-          async ([, plan]) => ({
-            plan,
-            allowed: !this.stars || (await this.stars.eligibility(user.id, plan.plan).catch(() => ({ ok: false as const }))).ok,
-          }),
-        ));
-        const linkButtons = lavaPlans
-          .filter(({ plan, allowed }) => plan.paymentUrl && allowed)
-          .map(({ plan }) => [{
-            text: `${plan.plan} — ${(plan.amountMinor / 100).toFixed(0)} ${plan.currency}`,
-            url: plan.paymentUrl,
-          }]);
-        const buttons = [...starsButtons, ...linkButtons];
+        const buttons = starsButtons;
         const unavailable = buttons.length || !this.stars
           ? null
           : await this.stars.unavailableMessage(user.id).catch(() => null);

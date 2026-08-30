@@ -30,6 +30,7 @@ import {
 } from "../telegram/stickers.js";
 import { LlmRouterClient } from "../router/client.js";
 import { localDateWithWeekday, localNow } from "../time/local-date-time.js";
+import { quotaExhausted } from "../subscriptions/quota-policy.js";
 import {
   boolean,
   integer,
@@ -845,14 +846,7 @@ export class CoreToolFactory {
   /** Общий гейт интернета: и поиск, и чтение живут в одном лимите. */
   private async assertInternetQuota(runtime: AgentRuntimeContext): Promise<void> {
     const quotas = await this.db.getQuotaStatus(runtime.telegramId);
-    const quota = quotas.find((item) => item.metric === "web_search") as
-      | { remaining?: string | number | null }
-      | undefined;
-    if (
-      quota?.remaining !== null &&
-      quota?.remaining !== undefined &&
-      Number(quota.remaining) <= 0
-    ) {
+    if (quotaExhausted(quotas, "web_search")) {
       throw new Error("Лимит интернет-поиска на текущий период закончился");
     }
   }

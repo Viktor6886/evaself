@@ -1089,7 +1089,8 @@ test("объединённый ход не проносит голос мимо 
   const probe = await runTelegramTurn(lifecycle(store), {
     quota: [
       { metric: "messages", remaining: 10 },
-      { metric: "voice_minutes", remaining: 0 },
+      { metric: "voice_minutes", period: "month", remaining: 5 },
+      { metric: "voice_minutes", period: "day", remaining: 0 },
     ],
     extraUpdates: [
       {
@@ -1764,6 +1765,21 @@ test("исчерпанный лимит приходит вместе с пре�
   assert.match(delivered, /подписку прямо здесь/u, "предложение не отправлено");
   assert.equal(probe.markups.length, 1, "кнопка оплаты не приложена");
   assert.match(JSON.stringify(probe.markups[0]), /buy:plus:month/u);
+});
+
+test("исчерпанный дневной лимит нельзя обойти свободным месячным", async () => {
+  const probe = await runTelegramTurn(undefined, {
+    // Порядок воспроизводит опасный случай: SQL может вернуть месяц раньше
+    // суток, и прежний find() разрешал ход по первой строке.
+    quota: [
+      { metric: "messages", period: "month", remaining: 60 },
+      { metric: "messages", period: "day", remaining: 0 },
+      { metric: "messages", period: "week", remaining: 0 },
+    ],
+  });
+
+  assert.deepEqual(probe.result, { status: "ignored" });
+  assert.equal(probe.prompts.length, 0, "ход дошёл до модели после исчерпания суток");
 });
 
 test("без настроенных продаж лимит всё равно ведёт к тарифам", async () => {

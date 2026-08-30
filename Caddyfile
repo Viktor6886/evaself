@@ -191,10 +191,6 @@
 		reverse_proxy eva-agent-service:{$EVA_AGENT_PORT}
 	}
 
-	handle /payments/lava {
-		reverse_proxy eva-agent-service:{$EVA_AGENT_PORT}
-	}
-
 	handle {
 		respond "not found" 404
 	}
