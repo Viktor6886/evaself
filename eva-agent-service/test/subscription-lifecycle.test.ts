@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import { AgentToolFactory, toolRisk } from "../dist/agent-tools.js";
@@ -319,8 +319,11 @@ test("расход суток, недели и месяца пишет един�
   assert.doesNotMatch(statements[0]?.sql ?? "", /\$[456]/u, "локальные JS-даты больше не передаются");
 });
 
-test("миграция нормализует поздние записи старого writer до переноса данных", () => {
-  const migration = readFileSync("../postgres/migrations/075_quota_periods_utc.sql", "utf8");
+const quotaMigration = "../postgres/migrations/075_quota_periods_utc.sql";
+test("миграция нормализует поздние записи старого writer до переноса данных", {
+  skip: !existsSync(quotaMigration) && "repository migrations are outside the service Docker build context",
+}, () => {
+  const migration = readFileSync(quotaMigration, "utf8");
   const trigger = migration.indexOf("CREATE TRIGGER normalize_usage_counter_period_start_trigger");
   const repair = migration.indexOf("WITH misplaced AS");
   assert.ok(trigger >= 0 && repair > trigger, "защита от гонки должна включиться до разового переноса");
