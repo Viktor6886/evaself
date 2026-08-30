@@ -11,7 +11,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { feminineForm, feminizeSelfReference } from "../dist/i18n/eva-gender.js";
+import {
+  alignUserReference,
+  explicitUserGrammaticalGender,
+  feminineForm,
+  feminizeSelfReference,
+  normalizeReplyGender,
+} from "../dist/i18n/eva-gender.js";
 
 const fix = (text: string) => feminizeSelfReference(text).text;
 
@@ -132,5 +138,85 @@ test("несколько правок в одной строке не сдвиг
   assert.equal(
     fix("Я записал, я проверил и я готов продолжать."),
     "Я записала, я проверила и я готова продолжать.",
+  );
+});
+
+test("явное самоопределение пользователя распознаётся без догадки по имени", () => {
+  assert.equal(explicitUserGrammaticalGender("Я мужчина."), "masculine");
+  assert.equal(explicitUserGrammaticalGender("Я девушка из Перми"), "feminine");
+  assert.equal(
+    explicitUserGrammaticalGender("Обращайся ко мне в мужском роде"),
+    "masculine",
+  );
+  assert.equal(explicitUserGrammaticalGender("Мой пол — мужской"), "masculine");
+  assert.equal(
+    explicitUserGrammaticalGender("Обращайся ко мне как к женщине"),
+    "feminine",
+  );
+  assert.equal(explicitUserGrammaticalGender("Я не мужчина"), null);
+  assert.equal(explicitUserGrammaticalGender("Виктор — мужчина"), null);
+  assert.equal(explicitUserGrammaticalGender("Я мужчина. Я женщина."), null);
+});
+
+test("обращение через ты согласуется с подтверждённым мужским родом", () => {
+  assert.equal(
+    alignUserReference("Ты уже сделала всё, что могла.", "masculine").text,
+    "Ты уже сделал всё, что могла.",
+  );
+  assert.equal(
+    alignUserReference("Готова ли ты продолжить?", "masculine").text,
+    "Готов ли ты продолжить?",
+  );
+  assert.equal(
+    alignUserReference("Если ты устала, сделай паузу.", "masculine").text,
+    "Если ты устал, сделай паузу.",
+  );
+  assert.equal(alignUserReference("Поняла меня?", "masculine").text, "Понял меня?");
+  assert.equal(alignUserReference("Ты пришла?", "masculine").text, "Ты пришёл?");
+  assert.equal(alignUserReference("Ты умная.", "masculine").text, "Ты умный.");
+});
+
+test("обращение через ты согласуется с подтверждённым женским родом", () => {
+  assert.equal(
+    alignUserReference("Ты не уверен, что готов?", "feminine").text,
+    "Ты не уверена, что готов?",
+  );
+  assert.equal(
+    alignUserReference("Готов ли ты продолжить?", "feminine").text,
+    "Готова ли ты продолжить?",
+  );
+  assert.equal(alignUserReference("Устал?", "feminine").text, "Устала?");
+  assert.equal(alignUserReference("Ты пришёл?", "feminine").text, "Ты пришла?");
+  assert.equal(alignUserReference("Ты сильный.", "feminine").text, "Ты сильная.");
+});
+
+test("профиль пользователя не меняет цитаты, код и третьих лиц", () => {
+  const original = "Ты сказал: «она устала». В коде `ты готова`. Пётр был рад.";
+  assert.equal(alignUserReference(original, "masculine").text, original);
+  assert.equal(alignUserReference("Она устала?", "masculine").text, "Она устала?");
+  assert.equal(alignUserReference("Ты готова?", null).text, "Ты готова?");
+  assert.equal(
+    alignUserReference("Если пошла посылка, сообщи мне.", "masculine").text,
+    "Если пошла посылка, сообщи мне.",
+  );
+  assert.equal(alignUserReference("Начался дождь?", "feminine").text, "Начался дождь?");
+  assert.equal(
+    alignUserReference("Ты устала, была проблема с сетью.", "masculine").text,
+    "Ты устал, была проблема с сетью.",
+  );
+});
+
+test("единый барьер различает род Евы и пользователя", () => {
+  assert.equal(
+    normalizeReplyGender("Я понял тебя. Ты устала?", "masculine").text,
+    "Я поняла тебя. Ты устал?",
+  );
+  assert.equal(
+    normalizeReplyGender("Я понял тебя. Ты устал?", "feminine").text,
+    "Я поняла тебя. Ты устала?",
+  );
+  assert.equal(
+    normalizeReplyGender("Я женщина, а ты женщина.", "masculine").text,
+    "Я женщина, а ты мужчина.",
   );
 });

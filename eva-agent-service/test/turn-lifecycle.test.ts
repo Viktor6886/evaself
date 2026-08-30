@@ -566,6 +566,8 @@ async function runTelegramTurn(
     liveIntervalMs?: number;
     /** Что «ответила» модель: для проверок, зависящих от текста ответа. */
     modelReply?: string;
+    /** Подтверждённый грамматический род пользователя. */
+    userGender?: "masculine" | "feminine" | null;
     /** Что продаётся: пусто — продажи не настроены. */
     offers?: Array<{ plan: string; period: string; stars: number; title: string }>;
     /** Домен Mini App. Пусто — приложения у установки нет. */
@@ -807,6 +809,7 @@ async function runTelegramTurn(
       userId: user.id,
       conversationId: "conv-1",
       responseMode: options.responseMode ?? "text",
+      userGrammaticalGender: options.userGender ?? null,
       metrics: { runtimeContextMs: 0, profileCheckMs: 0, cacheHit: false },
       };
     },
@@ -850,7 +853,10 @@ async function runTelegramTurn(
     queue as never,
     telegram as never,
     runtimeContext as never,
-    {} as never,
+    {
+      grammaticalGender: async () => options.userGender ?? null,
+      upsert: async () => ({}),
+    } as never,
     turnLogger as never,
     undefined,
     turns as never,
@@ -1756,6 +1762,30 @@ test("ответ без мужского рода уходит слово в с�
     probe.sent.some((item) => item.includes(original)),
     "текст, который трогать не нужно, изменился",
   );
+});
+
+test("ответ согласует Еву и пользователя с разными родами", async () => {
+  const probe = await runTelegramTurn(undefined, {
+    userGender: "masculine",
+    modelReply: "Я понял тебя. Ты устала и была готова продолжить?",
+  });
+  const delivered = probe.sent.join("\n");
+  assert.match(delivered, /Я поняла тебя/u);
+  assert.match(delivered, /Ты устал и был готов продолжить/u);
+  assert.doesNotMatch(delivered, /Ты устала/u);
+});
+
+test("ошибочный род не показывается даже в растущем ответе", async () => {
+  const probe = await runTelegramTurn(undefined, {
+    userGender: "masculine",
+    deltas: [["Я понял. ", true], ["Ты устала?", false]],
+  });
+  assert.ok(probe.shown.length > 0, "поток не был показан");
+  assert.ok(
+    probe.shown.every((text) => !/Я понял\b|Ты устала/u.test(text)),
+    `в поток попала неверная форма: ${probe.shown.join(" | ")}`,
+  );
+  assert.match(probe.shown.at(-1) ?? "", /Я поняла\. Ты устал\?/u);
 });
 
 test("/balance различает суточную, недельную и месячную квоты", async () => {

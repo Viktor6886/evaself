@@ -70,6 +70,8 @@ export interface RuntimeContext {
   responseMode: "text" | "voice" | "both";
   useEmoji: boolean;
   communicationStyle: string | null;
+  /** Подтверждённое согласование обращения; по имени не выводится. */
+  userGrammaticalGender: "masculine" | "feminine" | null;
   profileHint: string | null;
   activeGoal: string | null;
   nextResult: string | null;
@@ -121,6 +123,7 @@ interface RuntimeContextRow {
   response_mode: "text" | "voice" | "both";
   use_emoji: boolean;
   communication_style: string | null;
+  grammatical_gender: string | null;
   profile_field_key: string | null;
   profile_title: string | null;
   profile_prompt_hint: string | null;
@@ -313,6 +316,10 @@ export class RuntimeContextBuilder {
       responseMode: row.response_mode,
       useEmoji: row.use_emoji,
       communicationStyle: row.communication_style,
+      userGrammaticalGender:
+        row.grammatical_gender === "masculine" || row.grammatical_gender === "feminine"
+          ? row.grammatical_gender
+          : null,
       profileHint,
       activeGoal: this.options.vectorGoalsEnabled === false ? null : row.active_goal_title ?? null,
       nextResult: this.options.vectorGoalsEnabled === false ? null : row.next_result_title ?? null,
@@ -371,6 +378,7 @@ export class RuntimeContextBuilder {
       ["response_language", context.responseLanguage],
       ["response_mode", context.responseMode],
       ["communication_style", context.communicationStyle],
+      ["user_grammatical_gender", context.userGrammaticalGender],
       ["message_source", options.messageSource ?? null],
       [
         "message_source_note",
@@ -486,6 +494,7 @@ export class RuntimeContextBuilder {
           COALESCE(p.response_mode, 'text') AS response_mode,
           COALESCE(p.use_emoji, true) AS use_emoji,
           p.character AS communication_style,
+          grammar.field_value AS grammatical_gender,
           COALESCE(p.llm_quality_mode, 'auto') AS llm_quality_mode,
           profile_hint.field_key AS profile_field_key,
           profile_hint.title AS profile_title,
@@ -512,6 +521,10 @@ export class RuntimeContextBuilder {
          AND a.kind = 'eva'
          AND a.status = 'active'
         LEFT JOIN user_preferences p ON p.user_id = u.id
+        LEFT JOIN onboarding_fields grammar
+          ON grammar.user_id = u.id
+         AND grammar.field_key = 'grammatical_gender'
+         AND grammar.status = 'confirmed'
         LEFT JOIN LATERAL (
           SELECT
             d.field_key,

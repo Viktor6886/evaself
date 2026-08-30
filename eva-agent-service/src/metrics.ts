@@ -396,7 +396,7 @@ export class MetricsCollector {
       // попадает идентификатор человека.
       {
         name: "eva_gender_corrections_total",
-        help: "Срывы Евы в мужской род, поправленные на выходе. Без текста.",
+        help: "Ошибки рода Евы и обращения к пользователю, исправленные на выходе. Без текста.",
         type: "counter",
         values: [{ value: genderFix.corrections }],
       },

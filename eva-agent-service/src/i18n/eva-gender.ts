@@ -49,12 +49,84 @@ const IRREGULAR = new Map<string, string>([
   ["мог", "могла"],
   ["смог", "смогла"],
   ["помог", "помогла"],
+  ["пошёл", "пошла"],
+  ["пришёл", "пришла"],
+  ["нашёл", "нашла"],
+  ["зашёл", "зашла"],
+  ["ушёл", "ушла"],
+  ["вошёл", "вошла"],
+  ["дошёл", "дошла"],
+  ["перешёл", "перешла"],
+  ["прошёл", "прошла"],
+  ["подошёл", "подошла"],
+  ["отошёл", "отошла"],
+  ["вышел", "вышла"],
   ["лёг", "легла"],
   ["ошибся", "ошиблась"],
   ["увлёкся", "увлеклась"],
   ["сбился", "сбилась"],
   ["привык", "привыкла"],
+  // Частые формы обращения к человеку. Они нужны не только для речи
+  // Евы о себе: тот же словарь используется строгим корректором «ты».
+  ["важен", "важна"],
+  ["нужен", "нужна"],
+  ["интересен", "интересна"],
+  ["расстроен", "расстроена"],
+  ["взволнован", "взволнована"],
+  ["удивлён", "удивлена"],
+  ["удивлен", "удивлена"],
+  ["хороший", "хорошая"],
+  ["умный", "умная"],
+  ["сильный", "сильная"],
+  ["смелый", "смелая"],
+  ["красивый", "красивая"],
+  ["талантливый", "талантливая"],
+  ["внимательный", "внимательная"],
+  ["милый", "милая"],
+  ["добрый", "добрая"],
+  ["дорогой", "дорогая"],
+  ["любимый", "любимая"],
+  ["молодой", "молодая"],
+  ["мужчина", "женщина"],
+  ["парень", "девушка"],
 ]);
+
+/** Каноническое предпочтение согласования с пользователем. */
+export type UserGrammaticalGender = "masculine" | "feminine";
+
+/** Женская форма -> мужская; неоднозначность допустима только после «ты». */
+const REVERSE_IRREGULAR = new Map(
+  [...IRREGULAR].map(([masculine, feminine]) => [feminine, masculine]),
+);
+
+/**
+ * Явный выбор пользователя, который можно сохранить без догадки модели.
+ *
+ * Имя, фотография и пол третьих лиц намеренно ничего не значат. Берутся
+ * только слова от первого лица или прямая просьба о грамматическом роде.
+ */
+export function explicitUserGrammaticalGender(
+  input: string,
+): UserGrammaticalGender | null {
+  const text = input.trim().toLocaleLowerCase("ru");
+  const masculine = [
+    /(?:^|[.!?]\s+)я\s+(?!не\b)(?:мужчина|парень)(?=$|[\s,.!?;:])/u,
+    /(?:^|[.!?]\s+)(?:обращайся|говори|пиши)\s+(?:со\s+мной\s+|ко\s+мне\s+)?(?:в|используя)\s+мужск[\p{L}-]*\s+род[\p{L}-]*/u,
+    /(?:^|[.!?]\s+)(?:мой|мне\s+подходит)\s+(?:грамматический\s+)?род\s*[—:-]?\s*мужск[\p{L}-]*/u,
+    /(?:^|[.!?]\s+)(?:мой\s+)?пол\s*[—:-]?\s*мужск[\p{L}-]*/u,
+    /(?:^|[.!?]\s+)обращайся\s+ко\s+мне\s+как\s+к\s+мужчине/u,
+  ].some((pattern) => pattern.test(text));
+  const feminine = [
+    /(?:^|[.!?]\s+)я\s+(?!не\b)(?:женщина|девушка)(?=$|[\s,.!?;:])/u,
+    /(?:^|[.!?]\s+)(?:обращайся|говори|пиши)\s+(?:со\s+мной\s+|ко\s+мне\s+)?(?:в|используя)\s+женск[\p{L}-]*\s+род[\p{L}-]*/u,
+    /(?:^|[.!?]\s+)(?:мой|мне\s+подходит)\s+(?:грамматический\s+)?род\s*[—:-]?\s*женск[\p{L}-]*/u,
+    /(?:^|[.!?]\s+)(?:мой\s+)?пол\s*[—:-]?\s*женск[\p{L}-]*/u,
+    /(?:^|[.!?]\s+)обращайся\s+ко\s+мне\s+как\s+к\s+женщине/u,
+  ].some((pattern) => pattern.test(text));
+  // Противоречивое сообщение не должно молча менять профиль.
+  if (masculine === feminine) return null;
+  return masculine ? "masculine" : "feminine";
+}
 
 /**
  * Окончания прошедшего времени.
@@ -141,6 +213,23 @@ export interface GenderFix {
   text: string;
   /** Что исправлено: для метрики и журнала, без самого текста. */
   corrections: string[];
+}
+
+/** Мужская форма слова — или null, если правило небезопасно. */
+export function masculineForm(word: string): string | null {
+  const lower = word.toLocaleLowerCase("ru");
+  const irregular = REVERSE_IRREGULAR.get(lower);
+  if (irregular) return matchCase(word, irregular);
+  if (lower.length < 4 || !CYRILLIC_WORD.test(word)) return null;
+  if (lower.endsWith("лась")) {
+    return matchCase(word, lower.slice(0, -4) + "лся");
+  }
+  // Вне синтаксически защищённого обращения это правило применять
+  // нельзя: «школа» тоже оканчивается на -ла.
+  if (lower.endsWith("ла")) {
+    return matchCase(word, lower.slice(0, -1));
+  }
+  return null;
 }
 
 /*
@@ -287,6 +376,141 @@ export function feminizeSelfReference(input: string): GenderFix {
     text: text + input.slice(cursor),
     corrections: edits.map((edit) => pair(edit.was, edit.text)),
   };
+}
+
+/** Служебные слова между «ты» и согласуемым с ним сказуемым. */
+const USER_FILLERS = new Set([
+  "не", "уже", "ещё", "еще", "тоже", "сейчас", "точно", "правда",
+  "ведь", "же", "бы", "очень", "совсем", "сегодня", "вчера", "теперь",
+  "наверное", "кажется", "действительно", "просто", "всё", "все",
+]);
+
+const STANDALONE_YOU = /(?<![\p{L}\p{N}-])ты(?![\p{L}\p{N}-])/giu;
+const BEFORE_YOU = /([а-яёА-ЯЁ-]+)\s+ли\s+ты(?=$|[\s,.!?;:])/giu;
+const USER_SERIES = /\s+и\s+([а-яёА-ЯЁ-]+)/yu;
+const USER_COMPLEMENT = /\s+([а-яёА-ЯЁ-]+)/yu;
+
+/** Без «ты» только эти короткие вопросы надёжно обращены к человеку. */
+const USER_QUESTION_OPENERS = new Set([
+  "понял", "поняла", "готов", "готова", "рад", "рада", "согласен", "согласна",
+  "уверен", "уверена", "устал", "устала", "занят", "занята", "свободен", "свободна",
+  "расстроен", "расстроена", "взволнован", "взволнована", "удивлён", "удивлена",
+  "сделал", "сделала", "решил", "решила", "смог", "смогла", "пришёл", "пришла",
+  "нашёл", "нашла", "ушёл", "ушла", "закончил", "закончила", "начал", "начала",
+]);
+
+function userForm(
+  word: string,
+  gender: UserGrammaticalGender,
+): string | null {
+  return gender === "feminine" ? feminineForm(word) : masculineForm(word);
+}
+
+/**
+ * Привести только надёжные обращения к пользователю к сохранённому роду.
+ *
+ * Правятся формы после явного «ты», конструкция «готова ли ты», условное
+ * «если устал» и короткий вопрос. Цитаты, код, утверждения о третьих лицах
+ * и любые случаи без подтверждённого профиля остаются как есть.
+ */
+export function alignUserReference(
+  input: string,
+  gender: UserGrammaticalGender | null,
+): GenderFix {
+  if (!gender) return { text: input, corrections: [] };
+  const spans = protectedSpans(input);
+  const guarded = (index: number) => spans.some(([from, to]) => index >= from && index < to);
+  const edits: Edit[] = [];
+  const add = (from: number, word: string): boolean => {
+    if (guarded(from)) return false;
+    const fixed = userForm(word, gender);
+    if (!fixed || fixed === word || edits.some((edit) => edit.from === from)) return false;
+    edits.push({ from, to: from + word.length, text: fixed, was: word });
+    return true;
+  };
+
+  /** Однородные формы того же «ты»: «устала и была готова». */
+  const continueSeries = (from: number): void => {
+    let cursor = from;
+    for (;;) {
+      USER_SERIES.lastIndex = cursor;
+      const next = USER_SERIES.exec(input);
+      const word = next?.[1] ?? "";
+      if (!next || !word) break;
+      const at = next.index + next[0].length - word.length;
+      if (!add(at, word)) break;
+      cursor = next.index + next[0].length;
+      if (word.toLocaleLowerCase("ru") === "был" || word.toLocaleLowerCase("ru") === "была") {
+        USER_COMPLEMENT.lastIndex = cursor;
+        const complement = USER_COMPLEMENT.exec(input);
+        const complementWord = complement?.[1] ?? "";
+        if (complement && complementWord) {
+          const complementAt = complement.index + complement[0].length - complementWord.length;
+          if (add(complementAt, complementWord)) {
+            cursor = complement.index + complement[0].length;
+          }
+        }
+      }
+    }
+  };
+
+  for (const match of input.matchAll(STANDALONE_YOU)) {
+    const start = match.index ?? 0;
+    if (guarded(start)) continue;
+    let cursor = start + match[0].length;
+    for (let step = 0; step <= MAX_FILLERS; step += 1) {
+      NEXT_WORD.lastIndex = cursor;
+      const next = NEXT_WORD.exec(input);
+      if (!next) break;
+      const word = next[1] ?? "";
+      const at = next.index + next[0].length - word.length;
+      if (step < MAX_FILLERS && USER_FILLERS.has(word.toLocaleLowerCase("ru"))) {
+        cursor = next.index + next[0].length;
+        continue;
+      }
+      if (add(at, word)) continueSeries(at + word.length);
+      break;
+    }
+  }
+
+  for (const match of input.matchAll(BEFORE_YOU)) {
+    const word = match[1] ?? "";
+    add((match.index ?? 0), word);
+  }
+
+  // Без «ты» безопасен только вопрос: «Поняла?», «Готова продолжить?».
+  // Утверждение «Понял.» по-прежнему относится к самой Еве.
+  for (const match of input.matchAll(OPENER)) {
+    const start = match.index ?? 0;
+    const [, lead = "", word = ""] = match;
+    const at = start + lead.length;
+    if (guarded(at) || sentenceEnd(input, at) !== "?") continue;
+    if (!USER_QUESTION_OPENERS.has(word.toLocaleLowerCase("ru"))) continue;
+    add(at, word);
+  }
+
+  if (edits.length === 0) return { text: input, corrections: [] };
+  edits.sort((left, right) => left.from - right.from);
+  let text = "";
+  let cursor = 0;
+  for (const edit of edits) {
+    text += input.slice(cursor, edit.from) + edit.text;
+    cursor = edit.to;
+  }
+  return {
+    text: text + input.slice(cursor),
+    corrections: edits.map((edit) => pair(edit.was, edit.text)),
+  };
+}
+
+/** Единый выходной барьер рода: сначала Ева, затем её собеседник. */
+export function normalizeReplyGender(
+  input: string,
+  userGender: UserGrammaticalGender | null,
+): GenderFix {
+  const self = feminizeSelfReference(input);
+  const user = alignUserReference(self.text, userGender);
+  return { text: user.text, corrections: [...self.corrections, ...user.corrections] };
 }
 
 const pair = (from: string, to: string) =>
