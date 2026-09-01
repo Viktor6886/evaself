@@ -1132,15 +1132,19 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
     config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
   }, async () => await services.stt.health());
 
+  /**
+   * Совместимость с панелью, закэшированной браузером до отмены
+   * повторного пароля. Права сессия получает при входе; этот маршрут
+   * только подтверждает scope и ничего не спрашивает. Пароль, если он
+   * всё же пришёл из старой формы, не читается и никуда не попадает.
+   */
   app.post("/api/admin/v1/sudo", {
     config: { roles: ["owner", "admin"] } satisfies RouteAccess,
   }, async (request, reply) => {
     const body = objectBody(request.body);
-    const password = typeof body.password === "string" ? body.password : "";
     const scope = typeof body.scope === "string" ? body.scope : "";
     const expiresAt = await services.auth.grantSudo(
       contexts.get(request)!.session!,
-      password,
       scope,
     );
     return reply.status(201).send({ scope, expires_at: expiresAt.toISOString() });

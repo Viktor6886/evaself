@@ -194,28 +194,15 @@ async function deleteAgent(id) {
     title: "Удалить агента?",
     description: "Необратимо. Вместе с агентом уходят его диалоги, история сообщений и блоки памяти.",
     expected: id,
-    action: () => new Promise((resolve, reject) => {
-      askSudo({
-        scope: "users:write",
-        title: "Удаление агента",
-        description: "Повторите пароль: действие необратимо и будет записано в журнал событий.",
-        action: async () => {
-          try {
-            await request(`/panel/agents/${encodeURIComponent(id)}`, {
-              method: "DELETE",
-              body: JSON.stringify({ confirm: id }),
-            });
-            toast("Агент удалён");
-            $("#agent-card").hidden = true;
-            await loadAgents();
-            resolve();
-          } catch (error) {
-            reject(error);
-            throw error;
-          }
-        },
+    action: async () => {
+      await request(`/panel/agents/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+        body: JSON.stringify({ confirm: id }),
       });
-    }),
+      toast("Агент удалён");
+      $("#agent-card").hidden = true;
+      await loadAgents();
+    },
   });
 }
 
@@ -226,26 +213,26 @@ function createAgent(form) {
     toast("Telegram ID — целое число", true);
     return;
   }
-  askSudo({
-    scope: "users:write",
-    title: "Создать агента",
-    description: "Агент создаётся тем же путём Letta Agent SDK, что и при первом сообщении человека. Если агент уже есть, ничего не создастся.",
-    action: async () => {
-      const { payload } = await request("/panel/agents", {
-        method: "POST",
-        body: JSON.stringify({
-          telegram_id: Number(telegramId),
-          first_name: String(data.get("first_name") || "").trim() || undefined,
-          username: String(data.get("username") || "").trim() || undefined,
-        }),
-      });
-      $("#agent-create-dialog").close();
-      form.reset();
-      toast(payload.created ? "Агент создан" : "У этого человека агент уже был");
-      await loadAgents();
-      await openAgentCard(payload.agent_id);
-    },
+  // Создание идемпотентно и не разрушает ничего: если агент у человека
+  // уже есть, запрос его и вернёт. Отдельного окна такому действию не
+  // нужно — форму уже заполнили и отправили осознанно.
+  createAgentRequest(telegramId, data, form).catch(handleError);
+}
+
+async function createAgentRequest(telegramId, data, form) {
+  const { payload } = await request("/panel/agents", {
+    method: "POST",
+    body: JSON.stringify({
+      telegram_id: Number(telegramId),
+      first_name: String(data.get("first_name") || "").trim() || undefined,
+      username: String(data.get("username") || "").trim() || undefined,
+    }),
   });
+  $("#agent-create-dialog").close();
+  form.reset();
+  toast(payload.created ? "Агент создан" : "У этого человека агент уже был");
+  await loadAgents();
+  await openAgentCard(payload.agent_id);
 }
 
 $("#reload-agents").addEventListener("click", () => loadAgents().catch(handleError));

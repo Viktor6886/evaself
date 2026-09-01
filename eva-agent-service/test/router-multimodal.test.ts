@@ -394,15 +394,108 @@ test("single text model gets final answer after configured vision preprocessing"
   assert.match(calls[1]!.request.messages.at(-1)!.content, /зелёный квадрат/);
   assert.equal(calls[1]!.request.metadata.vision_preprocessed, true);
 
+  // Описание встаёт на место картинки, в то же сообщение. Новой реплики в
+  // конце разговора не появляется: прежде она там появлялась, и модель
+  // читала её как только что присланное изображение.
+  assert.deepEqual(
+    calls[1]!.request.messages.map((message) => message.role),
+    requestWithToolHistory.messages.map((message) => message.role),
+  );
+  assert.match(calls[1]!.request.messages.at(-1)!.content, /что на фотографии\?/);
+
+  // Та же картинка вторым ходом описывается не заново: у истории Letta
+  // она приходит в каждом следующем ходе, и повторный вызов VLM стоил бы
+  // денег и давал бы другой текст описания того же снимка.
   calls.length = 0;
   const streamed: string[] = [];
   for await (const chunk of router.stream(fromOpenAi({ ...requestWithToolHistory, stream: true }) as never)) {
     if (chunk.type === "text") streamed.push(chunk.delta);
   }
-  assert.deepEqual(calls.map((entry) => entry.provider), [vision.id, text.id]);
-  assert.equal(containsImage(calls[0]!.request.messages), true);
-  assert.equal(containsImage(calls[1]!.request.messages), false);
+  assert.deepEqual(calls.map((entry) => entry.provider), [text.id]);
+  assert.equal(containsImage(calls[0]!.request.messages), false);
+  assert.match(calls[0]!.request.messages.at(-1)!.content, /зелёный квадрат/);
   assert.deepEqual(streamed, ["Финальный поток выбранной модели."]);
+});
+
+/**
+ * Старая фотография не превращается в новую.
+ *
+ * Letta присылает роутеру всю историю, поэтому картинка приходит в каждом
+ * следующем ходе. Прежде её описание добавлялось отдельной репликой в
+ * конец разговора: для модели это выглядело как только что присланное
+ * фото, и Ева на каждый вопрос возвращалась к нему и «разглядывала»
+ * заново. Описание обязано стоять на месте картинки, а последней репликой
+ * обязан оставаться новый вопрос человека.
+ */
+test("картинка из истории описывается на своём месте и один раз", async () => {
+  const { LlmRouter } = await import("../dist/router/router.js");
+  const text = { ...PROVIDER, id: "text", name: "selected-text", supports_vision: false };
+  const vision = { ...PROVIDER, id: "vision", name: "technical-vision", supports_vision: true };
+  const calls: Array<{ provider: string; request: ReturnType<typeof fromOpenAi> }> = [];
+  const route = (code: string, requiresVision: boolean) => ({
+    code, title: code, requires_tools: false, requires_json: false,
+    requires_vision: requiresVision, requires_streaming: false, min_context_window: 1,
+    max_quality_tier: 5, allows_sensitive: true, rotation_enabled: true,
+  });
+  const store = {
+    routingSettings: async () => ({
+      mode: "single" as const, single_provider_id: text.id, single_failover_enabled: false,
+    }),
+    providers: async () => [text, vision],
+    routes: async () => new Map([["single", route("single", false)], ["vision", route("vision", true)]]),
+    chains: async () => new Map([["single", [text.id]], ["vision", [vision.id]]]),
+    breakers: async () => new Map(), spend: async () => ({ day: 0, month: 0 }),
+    claimProbe: async () => false, recordSuccess: async () => {}, recordFailure: async () => {},
+    addSpend: async () => {}, recordAttempt: async () => {},
+  };
+  const router = new LlmRouter(
+    store as never,
+    { debug() {}, info() {}, warn() {}, error() {} },
+    undefined,
+    async () => {},
+    ((provider: typeof text) => ({
+      protocol: "openai-compatible" as const,
+      complete: async (_profile: unknown, request: ReturnType<typeof fromOpenAi>) => {
+        calls.push({ provider: provider.id, request });
+        return {
+          content: provider.id === vision.id
+            ? "На изображении зелёный квадрат."
+            : "Ответ по существу вопроса.",
+          tool_calls: [], finish_reason: "stop" as const,
+          usage: { tokens_in: 1, tokens_out: 1 }, model: provider.model,
+        };
+      },
+      async *stream() { throw new Error("поток здесь не используется"); },
+    })) as never,
+  );
+
+  const withHistory = {
+    ...IMAGE_REQUEST,
+    messages: [
+      ...IMAGE_REQUEST.messages,
+      { role: "assistant", content: "Вижу зелёный квадрат." },
+      { role: "user", content: "а сколько сейчас времени?" },
+    ],
+  };
+
+  await router.complete(fromOpenAi(withHistory) as never);
+  assert.deepEqual(calls.map((entry) => entry.provider), [vision.id, text.id]);
+  const sent = calls[1]!.request.messages;
+  assert.deepEqual(sent.map((message) => message.role), ["user", "assistant", "user"]);
+  // Описание — в сообщении с картинкой, а не в конце разговора.
+  assert.match(sent[0]!.content, /EVA_VISION_CONTEXT/);
+  assert.match(sent[0]!.content, /зелёный квадрат/);
+  assert.doesNotMatch(sent.at(-1)!.content, /EVA_VISION_CONTEXT/);
+  assert.equal(sent.at(-1)!.content, "а сколько сейчас времени?");
+
+  // Следующий ход с той же историей вообще не трогает vision-модель.
+  calls.length = 0;
+  await router.complete(fromOpenAi({
+    ...withHistory,
+    messages: [...withHistory.messages, { role: "user", content: "и какой сегодня день?" }],
+  }) as never);
+  assert.deepEqual(calls.map((entry) => entry.provider), [text.id]);
+  assert.match(calls[0]!.request.messages[0]!.content, /зелёный квадрат/);
 });
 
 /**

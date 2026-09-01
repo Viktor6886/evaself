@@ -409,6 +409,27 @@ export class EvaWorkflow {
    * Квота снимается один раз: ход один.
    */
   async processAggregated(updates: TelegramUpdate[]): Promise<InboxResult> {
+    // Платёж не участвует в объединении.
+    //
+    // Окно отвечает на последнее сообщение, а предыдущие входят в тот же
+    // промпт. Оплата, сделанная за секунду до сообщения, молча
+    // становилась «предыдущей репликой» и не применялась вовсе: человек
+    // платил и упирался в тот же лимит. Обратный порядок терял уже не
+    // деньги, а сообщение: ход с платежом последним завершался сразу
+    // после выдачи подписки, и написанное перед оплатой оставалось без
+    // ответа.
+    //
+    // Поэтому каждый платёж проходит своим ходом — тем же путём, что и
+    // платёж, пришедший в одиночку, — а разговор продолжается тем, что
+    // осталось. Рекурсия здесь ровно на один уровень: внутрь уходит либо
+    // один апдейт, либо набор без платежей.
+    const payments = updates.filter(isPaymentUpdate);
+    if (payments.length > 0 && updates.length > 1) {
+      for (const payment of payments) await this.processAggregated([payment]);
+      const conversation = updates.filter((update) => !isPaymentUpdate(update));
+      if (conversation.length === 0) return { status: "completed" };
+      return await this.processAggregated(conversation);
+    }
     // Кнопка и опрос становятся обычным сообщением здесь: дальше идёт
     // тот же ход, тот же замок пользователя, те же квоты и тот же
     // порядок, что и у написанного текста.
@@ -1857,6 +1878,16 @@ export class EvaWorkflow {
       [userId],
     );
   }
+}
+
+/**
+ * Состоявшийся платёж Telegram.
+ *
+ * Проверяется то же поле, по которому `normalizeUpdate` определяет вид
+ * `payment`: второе правило разошлось бы с первым на первой же правке.
+ */
+function isPaymentUpdate(update: TelegramUpdate): boolean {
+  return Boolean((update.message ?? update.edited_message)?.successful_payment);
 }
 
 export function normalizeUpdate(

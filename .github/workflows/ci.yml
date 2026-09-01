@@ -1237,7 +1237,7 @@ jobs:
           docker compose --env-file versions.env --env-file .env logs --tail=80 eva-agent-service letta-app-server
           exit 1
 
-      - name: Admin phase 1 — auth, RBAC, sudo, audit and no secret leaks
+      - name: Admin phase 1 — auth, RBAC, session rights, audit and no secret leaks
         if: needs.changes.outputs.docs_only != 'true'
         run: |
           if ! docker compose --env-file versions.env --env-file .env \
@@ -1300,13 +1300,21 @@ jobs:
             body:JSON.stringify({settings:{'runtime.telegram_typing_interval_ms':4500}}),
           });
           if (!response.ok) throw new Error('owner settings PUT failed: ' + response.status);
+          // Права даёт вход: пароль вводится один раз, и запись секрета
+          // сразу после входа проходит без повторного подтверждения.
           response = await call(session, '/secrets/sec_ci_acceptance_secret', {
             method:'PUT',
             body:JSON.stringify({value:'known-ci-secret-must-never-leak', used_by:['admin-api']}),
           });
-          if (response.status !== 403) throw new Error('secret write without sudo was allowed');
+          if (!response.ok) throw new Error('secret write after login was refused: ' + response.status);
+          if ((await response.text()).includes('known-ci-secret-must-never-leak')) {
+            throw new Error('secret leaked in PUT');
+          }
+          // Совместимость: панель, закэшированная браузером до отмены
+          // повторного пароля, всё ещё зовёт /sudo перед мутацией, и
+          // пароля в этом запросе больше нет.
           response = await call(session, '/sudo', {
-            method:'POST', body:JSON.stringify({password, scope:'secrets:write'}),
+            method:'POST', body:JSON.stringify({scope:'secrets:write'}),
           });
           if (response.status !== 201) throw new Error('sudo grant failed');
           response = await call(session, '/secrets/sec_ci_acceptance_secret', {
@@ -1326,7 +1334,10 @@ jobs:
             method:'PUT',
             body:JSON.stringify({value:'known-ci-secret-must-never-leak', used_by:['admin-api']}),
           });
-          if (response.status !== 403) throw new Error('expired sudo grant was accepted');
+          // Механизм прав никуда не делся: когда гранты сессии истекли,
+          // запись обязана отказать. Это ловит регрессию «право
+          // перестало проверяться вовсе».
+          if (response.status !== 403) throw new Error('expired session grant was accepted');
 
           const roleHash = await hash(password, {
             type:argon2id, memoryCost:19456, timeCost:2, parallelism:1, hashLength:32,
@@ -1454,13 +1465,20 @@ jobs:
               const result = await call(session, path);
               if (!result.ok) throw new Error(role + ' cannot GET ' + path);
             }
-            // Блокировать может только owner и admin, и только под sudo.
-            const withoutSudo = await call(session, '/users/' + userId + '/block', {method:'POST'});
-            if (withoutSudo.status !== 403) {
-              throw new Error('block without sudo allowed for ' + role + ': ' + withoutSudo.status);
+            // Блокировать может только owner и admin. Право даёт вход:
+            // повторный пароль перед блокировкой не спрашивается, а
+            // operator и viewer не пройдут и с ним.
+            const attempt = await call(session, '/users/' + userId + '/block', {method:'POST'});
+            const mayBlock = ['owner','admin'].includes(role);
+            if (mayBlock !== attempt.ok) {
+              throw new Error('block RBAC mismatch for ' + role + ': ' + attempt.status);
+            }
+            if (mayBlock) {
+              const restored = await call(session, '/users/' + userId + '/unblock', {method:'POST'});
+              if (!restored.ok) throw new Error('unblock failed for ' + role);
             }
             // Переписка — только owner и admin. Роль проверяется раньше
-            // sudo, поэтому operator и viewer получают отказ и с грантом.
+            // прав сессии, поэтому operator и viewer получают отказ.
             if (['operator','viewer'].includes(role)) {
               const denied = await call(session, '/users/' + userId + '/conversation');
               if (denied.status !== 403) {
@@ -1512,11 +1530,10 @@ jobs:
             throw new Error('idempotency key produced ' + notes.rows[0].n + ' notes');
           }
 
-          // Чтение переписки требует отдельного гранта.
-          const noGrant = await call(owner, '/users/' + userId + '/conversation');
-          if (noGrant.status !== 403) {
-            throw new Error('conversation read without sudo: ' + noGrant.status);
-          }
+          // Чтение переписки доступно owner и admin по правам сессии:
+          // пароль второй раз не спрашивается. Что operator и viewer не
+          // проходят, проверено выше по ролям, а что факт открытия
+          // остаётся в журнале — ниже.
           await sudo(owner, 'users:messages');
           const conversation = await call(owner, '/users/' + userId + '/conversation?limit=20');
           if (!conversation.ok) throw new Error('conversation failed: ' + conversation.status);

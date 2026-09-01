@@ -348,7 +348,7 @@ describe("раздел распознавания речи", () => {
     await panel.page.waitForTimeout(400);
 
     assert.equal(
-      await panel.page.evaluate(() => !!document.querySelector("#sudo-dialog[open]")),
+      await panel.page.evaluate(() => !!document.querySelector("#confirm-dialog[open]")),
       false,
       "окно пароля больше не появляется",
     );
@@ -369,7 +369,7 @@ describe("раздел распознавания речи", () => {
     await panel.page.waitForTimeout(400);
 
     assert.equal(
-      await panel.page.evaluate(() => !!document.querySelector("#sudo-dialog[open]")),
+      await panel.page.evaluate(() => !!document.querySelector("#confirm-dialog[open]")),
       false,
     );
     assert.ok(panel.requests.some((item) => item.method === "PUT"
@@ -476,7 +476,7 @@ describe("раздел распознавания речи", () => {
     await panel.page.waitForTimeout(400);
 
     assert.equal(
-      await panel.page.evaluate(() => !!document.querySelector("#sudo-dialog[open]")),
+      await panel.page.evaluate(() => !!document.querySelector("#confirm-dialog[open]")),
       false,
       "пароль при вводе ключа больше не спрашивается",
     );
@@ -514,7 +514,7 @@ describe("раздел распознавания речи", () => {
     await panel.page.click('[data-key-action="toggle"]');
     await panel.page.waitForTimeout(400);
     assert.equal(
-      await panel.page.evaluate(() => !!document.querySelector("#sudo-dialog[open]")),
+      await panel.page.evaluate(() => !!document.querySelector("#confirm-dialog[open]")),
       false,
     );
     assert.ok(

@@ -5,8 +5,8 @@
  * Ради чего этот файл существует — отрицательные проверки. Какие запросы
  * интерфейс НЕ отправляет: переписка не должна уходить при открытии
  * раздела, текст персоны — до подтверждения, а удаление агента — до
- * предпросмотра и sudo. Это нельзя увидеть в `node --check`, и на сервере
- * уже поздно: запрос либо ушёл, либо нет.
+ * предпросмотра и подтверждения. Это нельзя увидеть в `node --check`, а
+ * на сервере уже поздно: запрос либо ушёл, либо нет.
  */
 
 import assert from "node:assert/strict";
@@ -229,7 +229,7 @@ describe("разделы единой панели", () => {
     assert.match(row, /abc123/);
   });
 
-  test("удаление агента не уходит на сервер без предпросмотра и sudo", async () => {
+  test("удаление агента не уходит на сервер без предпросмотра и подтверждения", async () => {
     const panel = await open();
     await panel.page.evaluate(() => openPage("agents"));
     await panel.page.waitForSelector("#agents-body .agent-row");
@@ -288,7 +288,7 @@ describe("разделы единой панели", () => {
     assert.match(await panel.page.textContent("#persona-history-body"), /правка тона/);
   });
 
-  test("сохранение персоны не уходит на сервер без подтверждения и sudo", async () => {
+  test("сохранение персоны не уходит на сервер без подтверждения", async () => {
     const panel = await open();
     await panel.page.evaluate(() => openPage("persona"));
     await panel.page.waitForFunction(() => document.querySelector("#persona-text").value.length > 0);
@@ -412,7 +412,7 @@ describe("разделы единой панели", () => {
     assert.match(summary, /letta-agent-sdk/);
   });
 
-  test("история диалога открывается только под sudo-грантом на переписку", async () => {
+  test("история диалога открывается только после подтверждения", async () => {
     const panel = await open();
     await panel.page.evaluate(() => openPage("letta"));
     await panel.page.waitForSelector("#letta-agents-body tr");
@@ -421,10 +421,16 @@ describe("разделы единой панели", () => {
     await panel.page.click('#letta-conversations-form button[type="submit"]');
     await panel.page.waitForSelector("[data-letta-messages]");
     await panel.page.click("[data-letta-messages]");
-    await panel.page.waitForFunction(() => state.pendingSudo !== null);
+    await panel.page.waitForFunction(() => state.pendingConfirm !== null);
 
-    assert.equal(await panel.sudoScope(), "users:messages");
+    // Окно объясняет, что открывается личный разговор, но пароль не
+    // спрашивает: он введён при входе в панель.
+    assert.equal(await panel.confirmTitle(), "Открыть переписку");
+    assert.equal(
+      await panel.page.textContent("#confirm-eyebrow"), "ЛИЧНЫЕ ДАННЫЕ",
+    );
     assert.equal(panel.countTo("/messages"), 0, "переписка ушла до подтверждения");
+    assert.equal(panel.countTo("/sudo"), 0, "панель всё ещё просит sudo-грант");
   });
 
   test("настройки SDK правит только owner и admin", async () => {

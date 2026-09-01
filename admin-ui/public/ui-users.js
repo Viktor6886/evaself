@@ -130,13 +130,14 @@ async function openUserCard(id) {
 }
 
 /**
- * Переписка загружается только по явной кнопке и под sudo: открыть личный
- * разговор — осознанное действие, а не побочный эффект просмотра карточки.
- * Каждое открытие попадает в журнал (кто и чью, без текста).
+ * Переписка загружается только по явной кнопке и после подтверждения:
+ * открыть личный разговор — осознанное действие, а не побочный эффект
+ * просмотра карточки. Каждое открытие попадает в журнал (кто и чью, без
+ * текста). Пароль не спрашивается — вход в панель уже подтвердил, кто это.
  */
 function showConversation(id) {
-  askSudo({
-    scope: "users:messages",
+  askConfirm({
+    eyebrow: "ЛИЧНЫЕ ДАННЫЕ",
     title: "Открыть переписку",
     description: "Личный разговор пользователя с Евой. Факт открытия будет записан в журнал событий.",
     action: async () => {
@@ -162,8 +163,7 @@ function showConversation(id) {
 }
 
 function setUserBlocked(id, blocked) {
-  askSudo({
-    scope: "users:write",
+  askConfirm({
     title: blocked ? "Заблокировать пользователя" : "Разблокировать пользователя",
     description: blocked
       ? "Ева перестанет отвечать и не будет писать сама. Выставляются оба признака сразу."
@@ -264,22 +264,18 @@ function renderTelegramTokens(limit) {
 }
 
 /**
- * Токен бота — секрет, и маршруты требуют sudo-грант.
+ * Токен бота — секрет, но пароль за него больше не спрашивается: право
+ * даёт роль сессии, а запись о правке уходит в журнал событий.
  *
- * Прежде окно пароля не открывалось вовсе: форма отправляла запрос сразу
- * и получала «для операции требуется повторное подтверждение пароля».
- * Со стороны это выглядело так, будто токен не сохраняется, — и он
- * действительно не сохранялся.
- *
- * Окно sudo несёт и предупреждение: у переезда есть последствия, а
- * второе окно подряд к одному действию человек читать не станет.
+ * Окно осталось там, где у действия есть последствия: удаление бота из
+ * списка и перевод Евы на другого бота. Оно объясняет, что произойдёт, —
+ * это и было единственным, что человек в нём читал.
  */
 function telegramTokenAction(action, id) {
   const token = (state.telegramTokens || []).find((item) => item.id === id);
   if (!token) return;
   if (action === "remove") {
-    askSudo({
-      scope: "secrets:write",
+    askConfirm({
       title: `Удалить бота «${token.label}»?`,
       description: `@${token.bot_username} исчезнет из списка. Сам бот в Telegram останется, но его токен придётся вводить заново.`,
       action: async () => {
@@ -290,8 +286,7 @@ function telegramTokenAction(action, id) {
     });
     return;
   }
-  askSudo({
-    scope: "secrets:write",
+  askConfirm({
     title: `Перевести Еву на @${token.bot_username}?`,
     description: "Вебхук снимется у прежнего бота и встанет новому. Люди, писавшие прежнему, к новому"
       + " сами не перейдут: им придётся начать с ним диалог. Смена действует сразу — перезапускать"
@@ -319,22 +314,22 @@ function saveTelegramToken(form) {
     toast("Заполните метку и токен", true);
     return;
   }
-  askSudo({
-    scope: "secrets:write",
-    title: "Сохранить бота",
-    description: `«${label}» будет добавлен в список. Токен проверяется у Telegram до записи и наружу больше не выходит.`,
-    action: async () => {
-      await request("/telegram/tokens", {
-        method: "POST",
-        body: JSON.stringify({ label, token }),
-      });
-      // Поле очищается только после успеха: иначе отклонённый токен
-      // пришлось бы искать и вводить заново.
-      form.reset();
-      toast("Бот сохранён. Чтобы перевести Еву на него, нажмите «Сделать активным».");
-      await loadTelegramTokens();
-    },
+  // Добавление в список ничего не переключает: Ева продолжает отвечать
+  // прежним ботом, пока его не сделают активным. Отдельного окна такой
+  // записи не нужно.
+  saveTelegramTokenRequest(label, token, form).catch(handleError);
+}
+
+async function saveTelegramTokenRequest(label, token, form) {
+  await request("/telegram/tokens", {
+    method: "POST",
+    body: JSON.stringify({ label, token }),
   });
+  // Поле очищается только после успеха: иначе отклонённый токен
+  // пришлось бы искать и вводить заново.
+  form.reset();
+  toast("Бот сохранён. Чтобы перевести Еву на него, нажмите «Сделать активным».");
+  await loadTelegramTokens();
 }
 
 /**
@@ -383,33 +378,22 @@ function renderSecrets() {
     : '<article class="secret-card"><div><h3>Нет ключей для показа</h3><p class="muted">Либо секреты ещё не импортированы, либо все они служебные — нажмите «Показать все».</p></div></article>');
 }
 
-/** Пароль архива backup. Значение уходит на сервер и обратно не возвращается. */
+/**
+ * Пароль архива backup. Значение уходит на сервер и обратно не
+ * возвращается.
+ *
+ * Подтверждение последствий даёт вызывающая сторона: у обеих кнопок оно
+ * своё, и второе окно подряд к одному действию человек читать не станет.
+ */
 async function setBackupPassword(password, form) {
-  await new Promise((resolve, reject) => {
-    askSudo({
-      scope: "secrets:write",
-      title: password ? "Задать пароль архива backup" : "Вернуться к мастер-ключу",
-      description: password
-        ? "Новые архивы будут шифроваться этим паролем. Без него восстановление станет невозможным — сохраните его вне сервера."
-        : "Новые архивы снова будут шифроваться мастер-ключом Secret Store.",
-      action: async () => {
-        try {
-          const { payload } = await request("/backups/password", {
-            method: "PUT",
-            body: JSON.stringify({ password }),
-          });
-          form.reset();
-          toast(payload.configured
-            ? "Пароль архива задан. Сохраните его вне сервера — восстановить его нельзя."
-            : "Пароль снят, архивы шифруются мастер-ключом");
-          resolve();
-        } catch (error) {
-          reject(error);
-          throw error;
-        }
-      },
-    });
-  }).catch(handleError);
+  const { payload } = await request("/backups/password", {
+    method: "PUT",
+    body: JSON.stringify({ password }),
+  });
+  form.reset();
+  toast(payload.configured
+    ? "Пароль архива задан. Сохраните его вне сервера — восстановить его нельзя."
+    : "Пароль снят, архивы шифруются мастер-ключом");
 }
 
 async function writeSecret(form) {
@@ -490,7 +474,11 @@ $("#backup-password-form").addEventListener("submit", (event) => {
     toast("Пароли не совпадают", true);
     return;
   }
-  setBackupPassword(password, form);
+  askConfirm({
+    title: "Задать пароль архива backup?",
+    description: "Новые архивы будут шифроваться этим паролем. Без него восстановление станет невозможным — сохраните его вне сервера.",
+    action: async () => await setBackupPassword(password, form),
+  });
 });
 $("#clear-backup-password").addEventListener("click", () => {
   askConfirm({
@@ -503,8 +491,7 @@ $("#clear-backup-password").addEventListener("click", () => {
 $("#secrets-list").addEventListener("submit", (event) => {
   event.preventDefault();
   const form = event.target;
-  askSudo({
-    scope: "secrets:write",
+  askConfirm({
     title: "Сменить системный ключ",
     description: "Новое значение будет зашифровано; прежнее больше не будет доступно.",
     action: async () => await writeSecret(form),
