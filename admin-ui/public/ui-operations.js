@@ -91,21 +91,14 @@ function installUpdate() {
     description: "Будет создан backup, сервисы могут быть временно недоступны. Ошибка запускает автоматический rollback.",
     expected: "UPDATE",
     action: async () => {
-      askSudo({
-        scope: "operations:update",
-        title: "Подтвердите установку обновления",
-        description: "Операция изменяет код, миграции и контейнеры установки.",
-        action: async () => {
-          const { payload } = await request("/updates/install", {
-            method: "POST",
-            headers: { "Idempotency-Key": `update-${crypto.randomUUID()}` },
-            body: JSON.stringify({ confirm: "UPDATE" }),
-          });
-          toast("Обновление запущено. Панель может кратковременно отключиться.");
-          pollOperation(payload.operation_id).catch(() => {
-            toast("Соединение прервано во время обновления; панель переподключится автоматически.");
-          });
-        },
+      const { payload } = await request("/updates/install", {
+        method: "POST",
+        headers: { "Idempotency-Key": `update-${crypto.randomUUID()}` },
+        body: JSON.stringify({ confirm: "UPDATE" }),
+      });
+      toast("Обновление запущено. Панель может кратковременно отключиться.");
+      pollOperation(payload.operation_id).catch(() => {
+        toast("Соединение прервано во время обновления; панель переподключится автоматически.");
       });
     },
   });
@@ -264,9 +257,11 @@ async function saveSettings(restart = false) {
   state.etag = response.headers.get("ETag");
   toast("Настройки сохранены");
   await loadSettings();
+  // Настройки уже сохранены. Перезапуск — отдельное последствие: он
+  // рвёт живые соединения, поэтому спрашивается отдельно. Пароля здесь
+  // нет: подтверждается последствие, а не личность.
   if (restart) {
-    askSudo({
-      scope: "services:restart",
+    askConfirm({
       title: "Применить настройки перезапуском",
       description: "Agent Runtime будет перезапущен. Агенты, conversation и память сохранятся.",
       action: async () => await lifecycleService("restart", "agent-runtime"),

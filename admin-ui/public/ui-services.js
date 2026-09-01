@@ -215,31 +215,19 @@ async function saveIntegration() {
   });
 }
 
-/** Интеграции речи. Тот же список, что у сервера. */
-const MEDIA_INTEGRATIONS = new Set(["asr", "tts"]);
-
 /**
  * Запись настроек интеграции.
  *
  * Общая и для модального редактора, и для раздела синтеза: два пути
  * записи одних и тех же значений разошлись бы на первой правке — в
- * подтверждении sudo, в разборе ответа или в тексте уведомления.
+ * разборе ответа или в тексте уведомления.
+ *
+ * Пароль здесь больше не спрашивается ни у речи, ни у остальных
+ * интеграций: ключ вводят и проверяют десяток раз за настройку, и окно
+ * пароля на каждое сохранение приучало набирать его не глядя. Право на
+ * запись даёт роль сессии, а сам факт правки уходит в журнал событий.
  */
 async function applyIntegrationConfig(id, body, afterSave) {
-  // У речи пароль не спрашивается — решение владельца: ключи ASR и TTS
-  // вводят и проверяют десяток раз за настройку. У остальных интеграций
-  // тем же запросом меняется Telegram bot_token или ключ Crawl4AI,
-  // поэтому подтверждение остаётся — и его требует сервер, а не только
-  // эта форма.
-  if (!MEDIA_INTEGRATIONS.has(id)) {
-    askSudo({
-      scope: "secrets:write",
-      title: "Сохранить настройки интеграции",
-      description: "Запрос меняет учётные данные интеграции. Подтвердите паролем.",
-      action: () => sendIntegrationConfig(id, body, afterSave),
-    });
-    return;
-  }
   await sendIntegrationConfig(id, body, afterSave);
 }
 
@@ -346,8 +334,9 @@ $("#page-services").addEventListener("click", (event) => {
     const action = lifecycle.dataset.lifecycle;
     const labels = LIFECYCLE_LABELS[action];
     if (!labels) return;
-    askSudo({
-      scope: "services:restart",
+    // Старт, стоп и перезапуск рвут живые соединения — последствие
+    // объясняется до нажатия, но паролем не подтверждается.
+    askConfirm({
       title: labels.title,
       description: labels.description,
       action: async () => await lifecycleService(action, lifecycle.dataset.service),

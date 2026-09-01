@@ -113,25 +113,28 @@ describe("пароль архива backup", () => {
     assert.equal(panel.countTo("/backups/password"), 0);
   });
 
-  test("смена пароля требует sudo secrets:write", async () => {
-    await panel.sudoWatch();
+  test("пароль архива подтверждается последствиями, а не паролем входа", async () => {
+    await panel.confirmWatch();
     await panel.page.evaluate(() => {
       const form = document.querySelector("#backup-password-form");
       form.elements.password.value = "correct-horse-battery-staple";
       form.elements.confirm.value = "correct-horse-battery-staple";
       form.dispatchEvent(new Event("submit", { cancelable: true }));
     });
-    await panel.page.waitForTimeout(150);
+    await panel.page.waitForFunction(() => state.pendingConfirm !== null);
 
-    assert.equal(await panel.sudoScope(), "secrets:write");
+    // Окно называет последствие: без этого пароля архив не восстановить.
+    const dialog = await panel.page.textContent("#confirm-dialog");
+    assert.match(dialog, /восстановление станет невозможным/);
     assert.equal(
       panel.countTo("/backups/password"), 0,
       "пароль не должен уходить до подтверждения",
     );
+    assert.equal(panel.countTo("/sudo"), 0, "панель всё ещё просит sudo-грант");
   });
 
   test("после подтверждения пароль уходит и поле очищается", async () => {
-    await panel.confirmSudo();
+    await panel.confirmAccept();
     await panel.page.waitForTimeout(150);
 
     const sent = panel.requests.filter((r) => r.path.includes("/backups/password"));
@@ -188,48 +191,48 @@ describe("боты Telegram", () => {
   });
 
   /**
-   * Токен бота — секрет, и маршруты требуют sudo-грант. Прежде окно
-   * пароля не открывалось вовсе: запрос уходил сразу и возвращался с
-   * «требуется повторное подтверждение пароля». Со стороны выглядело,
-   * будто токен не сохраняется, — и он действительно не сохранялся.
+   * Переезд на другого бота меняет, кому пишут люди: у прежнего бота
+   * снимается вебхук, а его собеседники сами к новому не перейдут.
+   * Поэтому окно с последствиями осталось — но пароль в нём больше не
+   * спрашивается: он введён при входе в панель.
    */
-  test("переезд на другого бота спрашивает пароль и предупреждает о последствиях", async () => {
+  test("переезд на другого бота предупреждает о последствиях", async () => {
     const before = panel.requests.length;
     await panel.page.click('[data-telegram-action="activate"]');
-    await panel.page.waitForFunction(() => document.querySelector("#sudo-dialog")?.open === true);
+    await panel.page.waitForFunction(() => document.querySelector("#confirm-dialog")?.open === true);
 
-    const dialog = await panel.page.textContent("#sudo-dialog");
+    const dialog = await panel.page.textContent("#confirm-dialog");
     // Человеку сказано главное: люди прежнего бота сами не перейдут.
     assert.match(dialog, /eva_spare_bot/);
     assert.match(dialog, /сами не перейдут/);
     assert.match(dialog, /перезапуск/i);
-    // До ввода пароля наружу не ушло ни одного запроса.
+    // До подтверждения наружу не ушло ни одного запроса.
     assert.equal(
       panel.requests.slice(before).filter((item) => item.method === "POST").length, 0,
       "переезд не должен случаться от одного касания",
     );
   });
 
-  test("сохранение бота идёт через пароль, а не мимо него", async () => {
+  test("сохранение бота уходит сразу и не требует второго пароля", async () => {
     await panel.page.evaluate(() => {
-      document.querySelector("#sudo-dialog").close();
+      document.querySelector("#confirm-dialog").close();
+      state.pendingConfirm = null;
       const form = document.querySelector("#telegram-token-form");
       form.elements.label.value = "запасной";
       form.elements.token.value = "123456:ABC";
       form.requestSubmit();
     });
-    await panel.page.waitForFunction(() => document.querySelector("#sudo-dialog")?.open === true);
 
-    const before = panel.requests.length;
-    const dialog = await panel.page.textContent("#sudo-dialog");
-    assert.match(dialog, /запасной/);
-    assert.equal(
-      panel.requests.slice(before).filter((item) => item.path === "/telegram/tokens").length, 0,
-      "токен не должен уходить до подтверждения пароля",
+    const saved = await panel.waitForRequest(
+      (item) => item.method === "POST" && item.path === "/telegram/tokens",
     );
-    // Поле не очищается заранее: отклонённый токен пришлось бы вводить снова.
-    const stillThere = await panel.page.$eval(
-      '#telegram-token-form [name="token"]', (node) => node.value);
-    assert.equal(stillThere, "123456:ABC");
+    assert.ok(saved, "токен не ушёл на сервер");
+    assert.equal(saved.body.token, "123456:ABC");
+    assert.equal(saved.body.label, "запасной");
+    assert.equal(
+      await panel.page.evaluate(() => state.pendingConfirm), null,
+      "добавление бота в список открыло окно",
+    );
+    assert.equal(panel.countTo("/sudo"), 0, "панель всё ещё просит sudo-грант");
   });
 });

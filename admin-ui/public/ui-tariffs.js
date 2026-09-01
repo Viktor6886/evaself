@@ -254,8 +254,7 @@ async function loadTariffPayments() {
  * сколько возвращается, — вернуть не тому дороже, чем не вернуть вовсе.
  */
 function refundStars(chargeId, who, stars) {
-  askSudo({
-    scope: "payments:refund",
+  askConfirm({
     title: `Вернуть ${stars} ⭐ пользователю ${who}?`,
     description: "Telegram вернёт звёзды, а подписка, которую оплатил этот платёж, закроется."
       + " Отменить возврат нельзя: доступ вернётся только новой оплатой.",

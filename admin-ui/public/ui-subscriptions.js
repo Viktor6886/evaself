@@ -202,20 +202,20 @@ function submitSubscription(form, action) {
     ? { plan: form.elements.plan.value.trim(), reason }
     : { plan: form.elements.plan.value.trim(), reason, ...term };
 
-  askSudo({
-    scope: "users:write",
-    title: { assign: "Назначить подписку", plan: "Сменить тариф", extend: "Продлить подписку" }[action],
-    description: "Изменение доступа человека. Будет записано в журнал событий и в историю решений.",
-    action: async () => {
-      await request(`/panel/subscriptions/${encodeURIComponent(userId)}/${path}`, {
-        method: "POST",
-        body: JSON.stringify(bodyPayload),
-      });
-      toast("Подписка изменена");
-      await loadSubscriptions();
-      await openSubscriptionCard(userId);
-    },
+  // Назначение, смена тарифа и продление обратимы и уже подтверждены
+  // заполненной формой: доступ можно вернуть тем же разделом. Запись о
+  // решении всё равно уходит в журнал событий и в историю решений.
+  applySubscriptionRequest(userId, path, bodyPayload).catch(handleError);
+}
+
+async function applySubscriptionRequest(userId, path, bodyPayload) {
+  await request(`/panel/subscriptions/${encodeURIComponent(userId)}/${path}`, {
+    method: "POST",
+    body: JSON.stringify(bodyPayload),
   });
+  toast("Подписка изменена");
+  await loadSubscriptions();
+  await openSubscriptionCard(userId);
 }
 
 function cancelSubscription(userId) {
@@ -223,35 +223,23 @@ function cancelSubscription(userId) {
     title: "Отменить подписку?",
     description: "Человек потеряет доступ, в том числе оплаченный. Строка останется в истории со статусом canceled.",
     expected: String(userId),
-    action: () => new Promise((resolve, reject) => {
-      const reason = "Отмена из административной панели";
-      askSudo({
-        scope: "users:write",
-        title: "Отмена подписки",
-        description: "Повторите пароль: доступ будет снят немедленно.",
-        action: async () => {
-          try {
-            await request(`/panel/subscriptions/${encodeURIComponent(userId)}/cancel`, {
-              method: "POST",
-              body: JSON.stringify({ reason, confirm: String(userId) }),
-            });
-            toast("Подписка отменена");
-            await loadSubscriptions();
-            await openSubscriptionCard(userId);
-            resolve();
-          } catch (error) {
-            reject(error);
-            throw error;
-          }
-        },
+    action: async () => {
+      await request(`/panel/subscriptions/${encodeURIComponent(userId)}/cancel`, {
+        method: "POST",
+        body: JSON.stringify({
+          reason: "Отмена из административной панели",
+          confirm: String(userId),
+        }),
       });
-    }),
+      toast("Подписка отменена");
+      await loadSubscriptions();
+      await openSubscriptionCard(userId);
+    },
   });
 }
 
 function clearManualSubscription(userId) {
-  askSudo({
-    scope: "users:write",
+  askConfirm({
     title: "Снять ручное решение",
     description: "Ручная подписка перестанет действовать. Если у человека идёт оплаченный период, он вернётся.",
     action: async () => {

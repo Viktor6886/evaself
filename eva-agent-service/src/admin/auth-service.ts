@@ -40,6 +40,7 @@ interface UserRow extends AdminUser {
   password_hash: string;
   failed_attempts: number;
   locked_until: Date | null;
+  last_failed_at: Date | null;
 }
 
 interface RateStore {
@@ -47,6 +48,7 @@ interface RateStore {
   incr(key: string): Promise<number>;
   expire(key: string, seconds: number): Promise<number | boolean>;
   del(...keys: string[]): Promise<number>;
+  set(key: string, value: string, mode: "EX", seconds: number): Promise<unknown>;
 }
 
 export interface LoginResult {
@@ -57,13 +59,30 @@ export interface LoginResult {
 }
 
 const SESSION_SECONDS = 12 * 60 * 60;
-const LOGIN_WINDOW_SECONDS = 15 * 60;
-const MAX_ATTEMPTS = 5;
+/**
+ * Политика неудачных входов.
+ *
+ * Десять ошибок подряд — минута блокировки. После неё даётся ещё одна
+ * попытка, и каждая следующая ошибка снова стоит минуты: подбирать пароль
+ * по одному разу в минуту бессмысленно, а человек, который просто
+ * перепутал раскладку, ждёт минуту, а не четверть часа.
+ *
+ * Счётчик обнуляется сам: если с последней ошибки прошло больше суток,
+ * попыток снова десять. Успешный вход обнуляет его сразу.
+ */
+const MAX_ATTEMPTS = 10;
+const LOCK_SECONDS = 60;
+const ATTEMPT_RESET_SECONDS = 24 * 60 * 60;
 export const ADMIN_SUDO_SCOPES = Object.freeze([
   "operations:update",
   "providers:activate",
   "secrets:write",
   "services:restart",
+  // Канонический текст персоны и системного промпта и настройки SDK.
+  // Раньше маршруты требовали этот scope, а выдать его было нельзя:
+  // в списке его не было, и `/sudo` отвечал «недопустимый scope».
+  // Панель персоны из-за этого не сохранялась вовсе.
+  "settings:write",
   // Блокировка отрезает человека от Евы, а чтение переписки открывает его
   // личный разговор: оба — осознанные действия, а не побочный эффект
   // перехода по разделу.
@@ -89,6 +108,11 @@ const ALLOWED_SUDO_SCOPES = new Set<string>(ADMIN_SUDO_SCOPES);
 
 function tokenHash(value: string): Buffer {
   return createHash("sha256").update(value, "utf8").digest();
+}
+
+/** Ключ блокировки рядом со счётчиком: счётчик живёт сутки, блокировка — минуту. */
+function lockKey(counterKey: string): string {
+  return `${counterKey}:lock`;
 }
 
 function safeIp(ip: string): string | null {
@@ -143,14 +167,18 @@ export class AuthService {
 
     const { rows } = await this.pool.query<UserRow>(
       `SELECT id, username, password_hash, role, status, last_login_at,
-              password_changed_at, failed_attempts, locked_until
+              password_changed_at, failed_attempts, locked_until, last_failed_at
          FROM admin_users
         WHERE lower(username) = lower($1)`,
       [username],
     );
     const user = rows[0];
     if (!user || user.status !== "active") {
-      await this.recordRateFailure([ipKey, accountKey]);
+      // Несуществующее имя считается по той же политике: иначе перебор
+      // имён обходил бы блокировку, а разница в ответах подсказывала бы,
+      // какое имя существует.
+      const locked = await this.recordRateFailure([ipKey, accountKey]);
+      if (locked) throw adminLocked("Вход временно заблокирован", { retry_after_seconds: locked });
       throw adminUnauthorized("Неверное имя пользователя или пароль");
     }
     if (user.locked_until && user.locked_until.getTime() > Date.now()) {
@@ -158,29 +186,49 @@ export class AuthService {
       throw adminLocked("Вход временно заблокирован", { retry_after_seconds: retry });
     }
     if (!await verifyPassword(user.password_hash, password)) {
-      const failedAttempts = user.failed_attempts + 1;
-      const delaySeconds = failedAttempts >= MAX_ATTEMPTS
-        ? Math.min(900, 30 * 2 ** Math.min(5, failedAttempts - MAX_ATTEMPTS))
-        : 0;
-      await this.pool.query(
-        `UPDATE admin_users
-            SET failed_attempts = $2,
-                locked_until = CASE WHEN $3 > 0 THEN now() + ($3 * interval '1 second') ELSE NULL END
-          WHERE id = $1`,
-        [user.id, failedAttempts, delaySeconds],
+      // Счётчик и срок считает PostgreSQL: и порог, и сутки тишины
+      // меряются его часами, а не часами процесса. Иначе рассинхрон
+      // времени между сервисом и базой давал бы то лишнюю попытку, то
+      // блокировку раньше десятой ошибки.
+      const { rows: updated } = await this.pool.query<{ locked_until: Date | null }>(
+        `UPDATE admin_users AS u
+            SET failed_attempts = next.attempts,
+                last_failed_at = now(),
+                locked_until = CASE
+                  WHEN next.attempts >= $2 THEN now() + ($3 * interval '1 second')
+                  ELSE NULL
+                END
+           FROM (
+             SELECT CASE
+                      WHEN last_failed_at IS NULL
+                        OR last_failed_at < now() - ($4 * interval '1 second')
+                      THEN 1
+                      ELSE failed_attempts + 1
+                    END AS attempts
+               FROM admin_users
+              WHERE id = $1
+           ) AS next
+          WHERE u.id = $1
+        RETURNING u.locked_until`,
+        [user.id, MAX_ATTEMPTS, LOCK_SECONDS, ATTEMPT_RESET_SECONDS],
       );
-      await this.recordRateFailure([ipKey, accountKey]);
-      if (delaySeconds > 0) {
-        throw adminLocked("Вход временно заблокирован", { retry_after_seconds: delaySeconds });
+      const rateLock = await this.recordRateFailure([ipKey, accountKey]);
+      const lockedUntil = updated[0]?.locked_until ?? null;
+      const dbLock = lockedUntil
+        ? Math.max(1, Math.ceil((lockedUntil.getTime() - Date.now()) / 1000))
+        : 0;
+      const retryAfter = Math.max(dbLock, rateLock);
+      if (retryAfter > 0) {
+        throw adminLocked("Вход временно заблокирован", { retry_after_seconds: retryAfter });
       }
       throw adminUnauthorized("Неверное имя пользователя или пароль");
     }
 
-    await this.rates.del(ipKey, accountKey);
+    await this.rates.del(ipKey, accountKey, lockKey(ipKey), lockKey(accountKey));
     const sessionToken = randomBytes(32).toString("base64url");
     const csrfToken = randomBytes(24).toString("base64url");
     const expiresAt = new Date(Date.now() + SESSION_SECONDS * 1000);
-    await this.pool.query<{ id: string }>(
+    const { rows: created } = await this.pool.query<{ id: string }>(
       `INSERT INTO admin_sessions
          (user_id, token_hash, csrf_hash, expires_at, ip, user_agent)
        VALUES ($1, $2, $3, $4, $5::inet, $6)
@@ -194,9 +242,17 @@ export class AuthService {
         userAgent.slice(0, 500),
       ],
     );
+    // Пароль подтверждает личность один раз — при входе. Дальше правами
+    // распоряжается роль сессии, а не повторный ввод того же пароля:
+    // человек, уже вошедший в панель, вводил его в то же поле минуту
+    // назад, и второй ввод ничего не доказывает — он лишь приучает
+    // набирать пароль по любому запросу окна.
+    const sessionId = created[0]?.id;
+    if (sessionId) await this.issueSessionGrants(sessionId, expiresAt);
     await this.pool.query(
       `UPDATE admin_users
-          SET failed_attempts = 0, locked_until = NULL, last_login_at = now()
+          SET failed_attempts = 0, locked_until = NULL, last_failed_at = NULL,
+              last_login_at = now()
         WHERE id = $1`,
       [user.id],
     );
@@ -288,17 +344,42 @@ export class AuthService {
     );
   }
 
-  async grantSudo(session: AuthenticatedSession, password: string, scope: string): Promise<Date> {
-    if (!ALLOWED_SUDO_SCOPES.has(scope)) throw adminBadRequest("Недопустимый scope sudo");
-    globalSecretRedactor.register(password);
-    const { rows } = await this.pool.query<{ password_hash: string }>(
-      "SELECT password_hash FROM admin_users WHERE id = $1 AND status = 'active'",
-      [session.user.id],
+  /**
+   * Права сессии выдаются один раз — при входе.
+   *
+   * Гранты остались: по ним маршрут по-прежнему проверяет право, а
+   * журнал — кто и что мог. Исчез только повторный ввод пароля: он
+   * подтверждал не намерение, а способность набрать те же символы во
+   * второй раз, и в панели, где настройка меняется десятками, приучал
+   * вводить пароль в любое всплывшее окно.
+   *
+   * Срок гранта равен сроку сессии: выход и смена пароля снимают их
+   * тем же запросом, что и раньше.
+   */
+  private async issueSessionGrants(sessionId: string, expiresAt: Date): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO sudo_grants (session_id, expires_at, scope)
+       SELECT $1, $2, scope FROM unnest($3::text[]) AS scope`,
+      [sessionId, expiresAt, [...ADMIN_SUDO_SCOPES]],
     );
-    if (!rows[0] || !await verifyPassword(rows[0].password_hash, password)) {
-      throw adminForbidden("Пароль не подтверждён");
-    }
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+  }
+
+  /**
+   * Повторная выдача гранта на действующую сессию.
+   *
+   * Пароль здесь больше не спрашивается: сессия уже подтверждена входом,
+   * а роль маршрута проверяется отдельно. Метод остаётся ради панелей,
+   * закэшированных браузером до этой выкладки: они всё ещё зовут `/sudo`
+   * перед мутацией, и без ответа у них ломается сохранение.
+   */
+  async grantSudo(session: AuthenticatedSession, scope: string): Promise<Date> {
+    if (!ALLOWED_SUDO_SCOPES.has(scope)) throw adminBadRequest("Недопустимый scope sudo");
+    const { rows } = await this.pool.query<{ expires_at: Date }>(
+      `SELECT expires_at FROM admin_sessions
+        WHERE id = $1 AND revoked_at IS NULL AND expires_at > now()`,
+      [session.id],
+    );
+    const expiresAt = rows[0]?.expires_at ?? new Date(Date.now() + SESSION_SECONDS * 1000);
     await this.pool.query(
       `INSERT INTO sudo_grants (session_id, expires_at, scope)
        VALUES ($1, $2, $3)`,
@@ -318,7 +399,7 @@ export class AuthService {
         LIMIT 1`,
       [sessionId, scope],
     );
-    if (!rowCount) throw adminForbidden("Для операции требуется повторное подтверждение пароля");
+    if (!rowCount) throw adminForbidden("Сессия не имеет права на эту операцию; войдите в панель заново");
   }
 
   async changePassword(
@@ -341,7 +422,7 @@ export class AuthService {
       `WITH changed AS (
          UPDATE admin_users
             SET password_hash = $2, password_changed_at = now(),
-                failed_attempts = 0, locked_until = NULL
+                failed_attempts = 0, locked_until = NULL, last_failed_at = NULL
           WHERE id = $1
           RETURNING id
        ), revoked_sessions AS (
@@ -360,20 +441,46 @@ export class AuthService {
     );
   }
 
+  /**
+   * Блокировка до обращения к базе.
+   *
+   * Валяется на Valkey и потому действует и на несуществующие имена: без
+   * неё перебор по чужому логину не встречал бы вообще никакого предела,
+   * потому что счётчик в `admin_users` есть только у существующей строки.
+   */
   private async enforceRate(keys: string[]): Promise<void> {
     for (const key of keys) {
-      const count = Number(await this.rates.get(key) ?? 0);
-      if (count >= MAX_ATTEMPTS) {
-        throw adminLocked("Слишком много попыток входа", { retry_after_seconds: LOGIN_WINDOW_SECONDS });
+      const until = Number(await this.rates.get(lockKey(key)) ?? 0);
+      if (!until) continue;
+      const retry = Math.ceil((until - Date.now()) / 1000);
+      if (retry > 0) {
+        throw adminLocked("Вход временно заблокирован", { retry_after_seconds: retry });
       }
     }
   }
 
-  private async recordRateFailure(keys: string[]): Promise<void> {
+  /**
+   * Учёт неудачной попытки. Возвращает оставшиеся секунды блокировки.
+   *
+   * Срок счётчика продлевается на сутки при каждой ошибке: «прошло больше
+   * суток» отсчитывается от последней ошибки, а не от первой, — иначе
+   * подбор просто ждал бы истечения общего окна.
+   */
+  private async recordRateFailure(keys: string[]): Promise<number> {
+    let lockedFor = 0;
     for (const key of keys) {
       const count = await this.rates.incr(key);
-      if (count === 1) await this.rates.expire(key, LOGIN_WINDOW_SECONDS);
+      await this.rates.expire(key, ATTEMPT_RESET_SECONDS);
+      if (count < MAX_ATTEMPTS) continue;
+      await this.rates.set(
+        lockKey(key),
+        String(Date.now() + LOCK_SECONDS * 1000),
+        "EX",
+        LOCK_SECONDS,
+      );
+      lockedFor = LOCK_SECONDS;
     }
+    return lockedFor;
   }
 }
 

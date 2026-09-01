@@ -89,11 +89,11 @@ BullMQ не обрабатывает интерактивный ход и не �
 
 | Компонент | Назначение | Путь |
 |---|---|---|
-| Admin API | RBAC, sudo, audit и системные операции | `src/admin/` |
+| Admin API | RBAC, права сессии, audit и системные операции | `src/admin/` |
 | Единая панель | Разделы агентов, подписок, персоны, Letta и мониторинга под одной сессией | `src/admin/panel-routes.ts`, `admin-ui/public/` |
 | Агенты (админ) | Список, карточка, создание, изменение и удаление через production-путь Letta Agent SDK | `src/admin/agent-admin-service.ts` |
 | Подписки (админ) | Ручное назначение, тариф, продление, отмена и снятие ручного решения; оплата и решение администратора различимы | `src/admin/subscription-service.ts` |
-| Тарифы и оплата (админ) | Лимиты, пробные, цены в звёздах, расход, журнал платежей и возврат под sudo | `src/admin/tariff-service.ts`, `admin-ui/public/ui-tariffs.js` |
+| Тарифы и оплата (админ) | Лимиты, пробные, цены в звёздах, расход, журнал платежей и возврат под подтверждением | `src/admin/tariff-service.ts`, `admin-ui/public/ui-tariffs.js` |
 | Персона (админ) | Правка и применение канонических текстов | `src/admin/persona-admin-service.ts` |
 | Letta (админ) | Runtime, диалоги, контекст и журнал Letta без открытого прокси | `src/admin/letta-console-service.ts` |
 | Мониторинг | Состояние сервисов, история проверок и ошибки за окно | `src/admin/health-service.ts`, `src/admin/health-worker.ts` |

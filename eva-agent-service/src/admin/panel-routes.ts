@@ -278,8 +278,8 @@ export function registerPanelRoutes(app: FastifyInstance, ctx: PanelRouteContext
 
   /*
    * Сохранение меняет то, чем Ева говорит с людьми прямо сейчас, —
-   * поэтому sudo и подтверждение именем источника. В аудит идут версия,
-   * отпечаток и итог применения; текста там нет.
+   * поэтому право `settings:write` и подтверждение именем источника.
+   * В аудит идут версия, отпечаток и итог применения; текста там нет.
    */
   app.put("/api/admin/v1/panel/persona/:source", {
     config: { roles: ["owner", "admin"], sudoScope: "settings:write" },

@@ -31,7 +31,6 @@ const state = {
   showAllSecrets: false,
   users: [],
   currentUser: null,
-  pendingSudo: null,
   pendingConfirm: null,
   events: null,
   refreshTimer: null,
@@ -309,25 +308,22 @@ function statusCard(item, options = {}) {
     </article>`;
 }
 
-function askSudo({ scope, title, description, action }) {
-  state.pendingSudo = { scope, action };
-  $("#sudo-title").textContent = title;
-  $("#sudo-description").textContent = description;
-  $("#sudo-form").reset();
-  $("#sudo-dialog").showModal();
-}
-
 /**
- * Подтверждение опасной операции.
+ * Подтверждение действия с последствиями.
  *
  * `expected` задаёт контрольное слово: его вводят там, где ошибка
  * необратима. Без него окно остаётся тем же — с описанием последствий и
  * разнесёнными кнопками, — но набирать ничего не нужно. Это заменило
  * `window.confirm`: системное окно на телефоне появляется у верхнего
  * края, где палец уже стоит после нажатия, и последствий не объясняет.
+ *
+ * Пароль здесь не спрашивается ни в каком виде. Личность подтверждена
+ * входом в панель; окно объясняет последствия, а не проверяет, помнит ли
+ * человек тот же пароль, который набрал десять минут назад.
  */
-function askConfirm({ title, description, expected = null, action }) {
+function askConfirm({ title, description, expected = null, eyebrow = "ОПАСНАЯ ОПЕРАЦИЯ", action }) {
   state.pendingConfirm = { expected, action };
+  $("#confirm-eyebrow").textContent = eyebrow;
   $("#confirm-title").textContent = title;
   $("#confirm-description").textContent = expected
     ? `${description} Введите ${expected}.`
@@ -340,27 +336,6 @@ function askConfirm({ title, description, expected = null, action }) {
   $("#confirm-form").querySelector('button[value="cancel"]').focus();
 }
 
-$("#sudo-form").addEventListener("submit", (event) => {
-  event.preventDefault();
-  const form = event.currentTarget;
-  if (event.submitter?.value === "cancel") {
-    state.pendingSudo = null;
-    $("#sudo-dialog").close();
-    return;
-  }
-  const pending = state.pendingSudo;
-  if (!pending) return;
-  const password = new FormData(form).get("password");
-  request("/sudo", {
-    method: "POST",
-    body: JSON.stringify({ password, scope: pending.scope }),
-  }).then(async () => {
-    $("#sudo-dialog").close();
-    form.reset();
-    state.pendingSudo = null;
-    await pending.action();
-  }).catch(handleError);
-});
 $("#confirm-form").addEventListener("submit", (event) => {
   event.preventDefault();
   if (event.submitter?.value === "cancel") {

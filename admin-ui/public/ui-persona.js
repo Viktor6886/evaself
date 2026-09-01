@@ -142,31 +142,18 @@ function savePersona() {
     title: `Сохранить и применить: ${PERSONA_TITLES[source].toLowerCase()}`,
     description: "Изменится то, чем Ева говорит с людьми. Новый текст получат и новые агенты, и существующие.",
     expected: source,
-    action: () => new Promise((resolve, reject) => {
-      askSudo({
-        scope: "settings:write",
-        title: "Применение канонического текста",
-        description: "Повторите пароль: изменение применяется сразу ко всем агентам.",
-        action: async () => {
-          try {
-            const { payload } = await request(`/panel/persona/${source}`, {
-              method: "PUT",
-              body: JSON.stringify({
-                text,
-                reason: `правка из панели: ${PERSONA_TITLES[source]}`,
-                confirm: source,
-              }),
-            });
-            reportApply(payload);
-            await loadPersona();
-            resolve();
-          } catch (error) {
-            reject(error);
-            throw error;
-          }
-        },
+    action: async () => {
+      const { payload } = await request(`/panel/persona/${source}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          text,
+          reason: `правка из панели: ${PERSONA_TITLES[source]}`,
+          confirm: source,
+        }),
       });
-    }),
+      reportApply(payload);
+      await loadPersona();
+    },
   });
 }
 
@@ -176,8 +163,7 @@ function personaAction(kind) {
     rollback: "Откатить версию",
     "restore-default": "Вернуть текст файла",
   };
-  askSudo({
-    scope: "settings:write",
+  askConfirm({
     title: titles[kind],
     description: kind === "rollback"
       ? "Вернётся версия, действовавшая до текущей. История не переписывается: откат — ещё одна публикация."

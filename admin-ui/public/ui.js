@@ -139,11 +139,22 @@ $("#login-form").addEventListener("submit", async (event) => {
     showApp(payload.user);
     openPage(pageFromLocation(), { replace: true });
   } catch (error) {
-    showLogin(error.message);
+    // Блокировка — единственный отказ входа, у которого есть срок. Без
+    // него «вход временно заблокирован» выглядит как «пароль больше не
+    // работает», и человек начинает искать, где его сбросить.
+    const retry = Number(error.details?.retry_after_seconds ?? 0);
+    showLogin(retry > 0
+      ? `${error.message}. Попробуйте снова через ${retryText(retry)}.`
+      : error.message);
   } finally {
     if (submit) submit.disabled = false;
   }
 });
+
+function retryText(seconds) {
+  if (seconds <= 90) return `${seconds} с`;
+  return `${Math.ceil(seconds / 60)} мин`;
+}
 
 $("#logout").addEventListener("click", async () => {
   try {

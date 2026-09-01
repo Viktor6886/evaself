@@ -622,7 +622,7 @@
           </div>
           <div id="secrets-list" class="secret-list"></div>
           <section class="card password-card">
-            <div><h3>Пароль администратора</h3><p>Смена пароля завершает остальные сессии и отзывает все sudo-гранты.</p></div>
+            <div><h3>Пароль администратора</h3><p>Смена пароля завершает остальные сессии и отзывает их права.</p></div>
             <form id="password-form">
               <input name="current_password" type="password" autocomplete="current-password" placeholder="Текущий пароль" required>
               <input name="new_password" type="password" autocomplete="new-password" minlength="12" placeholder="Новый пароль, минимум 12 символов" required>
@@ -1065,19 +1065,9 @@
     </section>
   </div>
 
-  <dialog id="sudo-dialog">
-    <form id="sudo-form" method="dialog">
-      <p class="eyebrow">SUDO-РЕЖИМ</p>
-      <h2 id="sudo-title">Подтвердите действие</h2>
-      <p id="sudo-description">Повторно введите пароль. Разрешение действует 10 минут.</p>
-      <label>Пароль<input name="password" type="password" autocomplete="current-password" required></label>
-      <div class="dialog-actions"><button value="cancel" class="button ghost">Отмена</button><button value="confirm" class="button primary">Подтвердить</button></div>
-    </form>
-  </dialog>
-
   <dialog id="confirm-dialog">
     <form id="confirm-form" method="dialog">
-      <p class="eyebrow">ОПАСНАЯ ОПЕРАЦИЯ</p>
+      <p class="eyebrow" id="confirm-eyebrow">ОПАСНАЯ ОПЕРАЦИЯ</p>
       <h2 id="confirm-title">Подтвердите последствия</h2>
       <p id="confirm-description"></p>
       <label id="confirm-input-label">Контрольное слово<input name="confirmation" autocomplete="off" required></label>
