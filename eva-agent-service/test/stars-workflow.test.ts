@@ -24,8 +24,10 @@ const UPDATE = {
   },
 };
 
-function workflow(apply: () => Promise<unknown>) {
+function workflow(apply: (input: never) => Promise<unknown>) {
   let lettaCalls = 0;
+  /** Апдейты, дошедшие до тела хода: владельца им проставляет только оно. */
+  const attached: number[] = [];
   const db = {
     withQueryMetrics: async (work: () => Promise<unknown>) => ({
       result: await work(), queryCount: 0,
@@ -41,7 +43,7 @@ function workflow(apply: () => Promise<unknown>) {
       is_blocked: false,
     }),
     bindScopeUserId() {},
-    attachTelegramUpdateToUser: async () => {},
+    attachTelegramUpdateToUser: async (updateId: number) => { attached.push(updateId); },
   };
   const telegram = {
     withDeliveryContext: async (_key: string, work: () => Promise<unknown>) => await work(),
@@ -68,7 +70,7 @@ function workflow(apply: () => Promise<unknown>) {
     undefined,
     { apply } as never,
   );
-  return { instance, lettaCalls: () => lettaCalls };
+  return { instance, lettaCalls: () => lettaCalls, attached };
 }
 
 test("ошибка выдачи подписки остаётся retryable и не зависит от Letta", async () => {
@@ -86,4 +88,66 @@ test("успешный платёж завершается без обращен
 
   assert.deepEqual(await instance.processQueued(UPDATE), { status: "completed" });
   assert.equal(lettaCalls(), 0);
+});
+
+/**
+ * Платёж в окне объединения.
+ *
+ * Окно отвечает на последнее сообщение, а предыдущие идут в тот же
+ * промпт. Для платежа это означало потерю денег: оплата за секунду до
+ * сообщения становилась «предыдущей репликой» и не применялась вовсе.
+ */
+const SECOND_PAYMENT = {
+  ...UPDATE,
+  update_id: 902,
+  message: {
+    ...UPDATE.message,
+    message_id: 78,
+    successful_payment: {
+      ...UPDATE.message.successful_payment,
+      invoice_payload: "66666666-7777-8888-9999-000000000000",
+      telegram_payment_charge_id: "charge-902",
+    },
+  },
+};
+
+const TEXT_UPDATE = {
+  update_id: 903,
+  message: {
+    message_id: 79,
+    date: 1_777_777_800,
+    chat: { id: 42, type: "private" },
+    from: { id: 42, is_bot: false, language_code: "ru" },
+    text: "спасибо, оплатил",
+  },
+};
+
+test("два платежа в одном окне применяются оба", async () => {
+  const applied: string[] = [];
+  const { instance } = workflow(async (input: { chargeId: string }) => {
+    applied.push(input.chargeId);
+    return { state: "applied", plan: "plus", days: 30 };
+  });
+
+  assert.deepEqual(
+    await instance.processAggregated([UPDATE, SECOND_PAYMENT]),
+    { status: "completed" },
+  );
+  assert.deepEqual(applied, ["charge-901", "charge-902"]);
+});
+
+test("платёж перед сообщением не теряется, а сообщение доходит до разговора", async () => {
+  const applied: string[] = [];
+  const { instance, attached } = workflow(async (input: { chargeId: string }) => {
+    applied.push(input.chargeId);
+    return { state: "applied", plan: "plus", days: 30 };
+  });
+
+  // Разговорная половина хода требует полного стенда квот и Letta,
+  // которого у этого набора нет: дальше владельца апдейта она не уходит.
+  // Здесь важно другое — деньги приняты, и сообщение начало свой
+  // собственный ход, а не растворилось в окне вместе с платежом.
+  await assert.rejects(() => instance.processAggregated([UPDATE, TEXT_UPDATE]));
+  assert.deepEqual(applied, ["charge-901"]);
+  assert.ok(attached.includes(903), "сообщение после оплаты не начало своего хода");
 });
