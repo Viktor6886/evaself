@@ -37,7 +37,9 @@ import { LettaService } from "./letta.js";
 import { LlmManager } from "./llm.js";
 import { createLogger } from "./logger.js";
 import { LavaPayments } from "./payments.js";
-import { StarsPayments } from "./payments/stars.js";
+import { t } from "./i18n/index.js";
+import { SubscriptionExpiryNotices } from "./payments/expiry-notices.js";
+import { PLAN_TITLE, StarsPayments } from "./payments/stars.js";
 import { UserProfileService } from "./profile/profile-service.js";
 import { ValkeyRateLimiter } from "./public/rate-limit.js";
 import { ValkeyMiniAppSessions } from "./public/webapp-session.js";
@@ -541,6 +543,51 @@ async function main(): Promise<void> {
 
 
   background.start(jobs ? jobs.legacySchedulerActive : true);
+
+  // Предупреждения о конце подписки.
+  //
+  // Своего планировщика у них нет (инвариант 9): проверка идёт тем же
+  // часовым тиком, что и остальная фоновая работа, а от повторов
+  // защищает отметка в самой подписке, а не расписание.
+  const expiryNotices = new SubscriptionExpiryNotices({
+    db,
+    logger,
+    notify: async ({ chatId, plan, daysLeft }) => {
+      const offers = await stars.offers().catch(() => []);
+      const buttons: Array<Array<Record<string, unknown>>> = offers.map((offer) => [{
+        text: `${offer.title} — ${offer.stars} ⭐`,
+        callback_data: `buy:${offer.plan}:${offer.period}`,
+      }]);
+      if (config.domains?.app) {
+        buttons.push([{
+          text: t("ru", "openSubscriptionApp"),
+          web_app: { url: `https://${config.domains.app}` },
+        }]);
+      }
+      const key = daysLeft === 0
+        ? "subscriptionEndsToday"
+        : daysLeft === 1 ? "subscriptionEndsTomorrow" : "subscriptionEndsInDays";
+      await telegram.withDeliveryContext(
+        `subscription-expiry:${chatId}:${daysLeft}`,
+        async () => await telegram.withPriority("command", async () => {
+          await telegram.sendMessage(
+            chatId,
+            t("ru", key, { plan: PLAN_TITLE[plan] ?? plan, days: String(daysLeft) }),
+            buttons.length ? { reply_markup: { inline_keyboard: buttons } } : {},
+          );
+        }),
+      );
+    },
+  });
+  const expiryTimer = setInterval(() => {
+    void expiryNotices.run().catch((error: unknown) => {
+      logger.warn("Проверка окончания подписок не выполнена", {
+        code: error instanceof Error ? error.name : "unknown_error",
+      });
+    });
+  }, 60 * 60_000);
+  expiryTimer.unref();
+  void expiryNotices.run().catch(() => undefined);
   if (jobs) {
     await jobs.start().catch((error: unknown) => {
       // Недоступный Valkey не должен мешать сервису отвечать людям:

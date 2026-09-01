@@ -18,6 +18,15 @@ const ru = {
     + " Тарифы и оплата — по кнопке ниже. Лимит обновится в начале следующего"
     + " периода; сколько осталось, покажет /balance.",
   openSubscriptionApp: "Тарифы и оплата",
+  subscriptionEndsInDays:
+    "Подписка «{plan}» заканчивается через {days} дн. После этого останутся"
+    + " бесплатные сообщения — их немного. Продлить можно прямо здесь.",
+  subscriptionEndsTomorrow:
+    "Подписка «{plan}» заканчивается завтра. После этого останутся бесплатные"
+    + " сообщения — их немного. Продлить можно прямо здесь.",
+  subscriptionEndsToday:
+    "Подписка «{plan}» заканчивается сегодня. Дальше останутся бесплатные"
+    + " сообщения — их немного. Продлить можно прямо здесь.",
   voiceQuotaEnded:
     "Лимит распознавания голоса закончился. Можно продолжить текстом.",
   emptyReply: "Я рядом. Попробуй сформулировать это немного иначе.",
@@ -66,6 +75,15 @@ const en: Record<keyof typeof ru, string> = {
     + " Plans and payment are behind the button below. The limit resets at the"
     + " start of the next period; /balance shows what is left.",
   openSubscriptionApp: "Plans and payment",
+  subscriptionEndsInDays:
+    "Your «{plan}» subscription ends in {days} days. After that only the free"
+    + " messages remain, and there are not many. You can renew right here.",
+  subscriptionEndsTomorrow:
+    "Your «{plan}» subscription ends tomorrow. After that only the free messages"
+    + " remain, and there are not many. You can renew right here.",
+  subscriptionEndsToday:
+    "Your «{plan}» subscription ends today. After that only the free messages"
+    + " remain, and there are not many. You can renew right here.",
   voiceQuotaEnded:
     "Your voice transcription allowance is used up. You can continue with text.",
   emptyReply: "I’m here. Try phrasing that a little differently.",

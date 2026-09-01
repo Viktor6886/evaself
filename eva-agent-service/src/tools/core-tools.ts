@@ -142,6 +142,52 @@ export class CoreToolFactory {
         },
       ),
       tool(
+        "get_subscription_status",
+        "Тариф, лимиты и срок подписки",
+        "Возвращает действующий тариф пользователя, остаток по каждому расходнику и "
+        + "сколько дней осталось до конца подписки. Только чтение: тарифы, цены и "
+        + "лимиты этим инструментом не меняются — их назначает владелец в панели. "
+        + "Числа берутся отсюда и не пересчитываются: остаток, который назвали "
+        + "по памяти, человек проверит и не простит.",
+        objectSchema({}),
+        async (_args, runtime) => {
+          const quotas = await this.db.getQuotaStatus(runtime.telegramId);
+          const { rows } = await this.db.query<{
+            plan: string; status: string; current_period_end: Date | null;
+          }>(
+            `SELECT plan, status, current_period_end
+               FROM subscriptions
+              WHERE user_id = $1 AND status IN ('trialing', 'active', 'past_due')
+              ORDER BY current_period_end DESC NULLS LAST, created_at DESC
+              LIMIT 1`,
+            [runtime.userId],
+          );
+          const subscription = rows[0] ?? null;
+          const endsAt = subscription?.current_period_end ?? null;
+          // Дни считает серверный код: «сколько осталось» — арифметика, а
+          // её модель делает уверенно и неверно.
+          const daysLeft = endsAt
+            ? Math.max(0, Math.ceil((endsAt.getTime() - Date.now()) / 86_400_000))
+            : null;
+          return {
+            ok: true,
+            plan: subscription?.plan ?? "free",
+            subscription_status: subscription?.status ?? "none",
+            ends_at: endsAt ? endsAt.toISOString() : null,
+            days_left: daysLeft,
+            // Остаток `null` — это безлимит, а не ноль.
+            limits: quotas.map((item) => ({
+              metric: item.metric,
+              period: item.period,
+              limit: item.limit_value,
+              used: item.used,
+              remaining: item.remaining,
+            })),
+            note: "Тариф и лимиты назначает владелец. Изменить их отсюда нельзя.",
+          };
+        },
+      ),
+      tool(
         "get_psychological_test_results",
         "Результаты психологических тестов",
         "Возвращает результаты пройденных пользователем психометрических методик. "

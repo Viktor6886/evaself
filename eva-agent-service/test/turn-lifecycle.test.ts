@@ -566,6 +566,8 @@ async function runTelegramTurn(
     modelReply?: string;
     /** Что продаётся: пусто — продажи не настроены. */
     offers?: Array<{ plan: string; period: string; stars: number; title: string }>;
+    /** Как применяется состоявшийся платёж. */
+    starsApply?: (input: { chargeId: string }) => Promise<unknown>;
     /** Домен Mini App. Пусто — приложения у установки нет. */
     appDomain?: string;
     /** Команда вместо обычного сообщения. */
@@ -600,6 +602,10 @@ async function runTelegramTurn(
     }),
     withUserScope: async <T>(_input: unknown, work: () => Promise<T>) => await work(),
     bindScopeUserId() {},
+    // Профиль для языка подтверждения оплаты: настоящая база его отдаёт,
+    // и подделка обязана отвечать так же, иначе проверка ничего не
+    // говорит о боевом пути.
+    getUserOverview: async () => user,
     upsertUser: async () => user,
     getAgentLink: async () => link,
     attachTelegramUpdateToUser: async (updateId: number) => {
@@ -862,8 +868,11 @@ async function runTelegramTurn(
     // оплата звёздами встала бы на его позицию.
     undefined,
     // Оплата звёздами: подставляется только там, где тест её просит.
-    options.offers
-      ? { offers: async () => options.offers } as never
+    options.offers || options.starsApply
+      ? {
+        offers: async () => options.offers ?? [],
+        apply: options.starsApply ?? (async () => ({ state: "duplicate" })),
+      } as never
       : undefined,
   );
 
@@ -1788,4 +1797,47 @@ test("без Mini App и без продаж лимит просто объяс�
   const delivered = probe.sent.join("\n");
   assert.match(delivered, /обновится/u);
   assert.equal(probe.markups.length, 0, "обещать оплату, которой нет, нельзя");
+});
+
+/*
+ * Оплата не должна теряться в окне объединения.
+ *
+ * Ход отвечает на последнее сообщение, а предыдущие входят в тот же
+ * промпт. Для платежа это означало, что оплата, сделанная за секунду до
+ * сообщения, молча становилась «предыдущей репликой» и не применялась
+ * вовсе: человек платил и упирался в тот же лимит. Ровно так и вышло на
+ * первом настоящем платеже.
+ */
+test("платёж применяется, даже если следом пришло сообщение", async () => {
+  const applied: string[] = [];
+  const probe = await runTelegramTurn(undefined, {
+    quota: [{ metric: "messages", remaining: 0 }],
+    starsApply: async (input: { chargeId: string }) => {
+      applied.push(input.chargeId);
+      return { state: "applied", plan: "plus", days: 7 };
+    },
+    // Платёж пришёл первым, обычное сообщение — следом, и оба попали в
+    // одно окно.
+    extraUpdates: [
+      {
+        update_id: 5000,
+        message: {
+          message_id: 20,
+          chat: { id: TELEGRAM_ID },
+          from: { id: TELEGRAM_ID, is_bot: false },
+          date: Math.floor(Date.now() / 1000),
+          successful_payment: {
+            currency: "XTR",
+            total_amount: 2,
+            invoice_payload: "11111111-2222-3333-4444-555555555555",
+            telegram_payment_charge_id: "charge-window",
+          },
+        },
+      },
+    ],
+  });
+  assert.deepEqual(applied, ["charge-window"], "платёж потерялся в окне");
+  // Сообщение при этом обработано своим чередом — здесь упирается в
+  // лимит, потому что подписку выдаёт уже применённый платёж.
+  assert.deepEqual(probe.result, { status: "ignored" });
 });

@@ -413,8 +413,27 @@ export class EvaWorkflow {
       .map(({ update, allowReaction }) => normalizeUpdate(update, allowReaction))
       .filter((item): item is NormalizedUpdate => item !== null);
     if (normalized.length === 0) return { status: "ignored" };
-    const primary = normalized[normalized.length - 1]!;
-    const earlier = normalized.slice(0, -1);
+
+    // Платежи вынимаются из окна до всего остального.
+    //
+    // Объединение отвечает на последнее сообщение, а предыдущие входят в
+    // тот же промпт. Для платежа это означало бы, что оплата, сделанная
+    // за секунду до сообщения, молча становится «предыдущей репликой» и
+    // не применяется вовсе: человек платит и упирается в тот же лимит.
+    // Платёж — не реплика, и в разговор он не входит ни первым, ни
+    // последним.
+    const payments = normalized.filter((item) => item.kind === "payment");
+    for (const payment of payments) {
+      await this.telegram.withDeliveryContext(
+        `telegram-payment:${payment.updateId}`,
+        async () => { await this.applyPayment(payment); },
+      );
+    }
+    const conversational = normalized.filter((item) => item.kind !== "payment");
+    if (conversational.length === 0) return { status: "completed" };
+
+    const primary = conversational[conversational.length - 1]!;
+    const earlier = conversational.slice(0, -1);
     // Спан хода открывается здесь и накрывает всё, что ход делает
     // дальше: обращение к Letta, обращения к модели через Router,
     // постановку заданий и доставку. Контекст OpenTelemetry живёт в
@@ -600,7 +619,7 @@ export class EvaWorkflow {
         // продолжения разговора, упёрлась бы в лимит, который сама и
         // снимает.
         if (update.kind === "payment") {
-          await this.applyPayment(update, language);
+          await this.applyPayment(update);
           await this.stopTurn(turnHandle, "payment");
           return { status: "completed" };
         }
@@ -1314,12 +1333,33 @@ export class EvaWorkflow {
    * второй подписки от этого не появляется. Человеку в таком случае
    * ничего не пишем: он уже получил подтверждение в первый раз.
    */
-  private async applyPayment(
-    update: NormalizedUpdate,
-    language: SupportedLanguage,
-  ): Promise<void> {
+  private async applyPayment(update: NormalizedUpdate): Promise<void> {
     const payment = update.message.successful_payment;
-    if (!payment || !this.stars) return;
+    // Молчаливого выхода здесь быть не может: деньги уже списаны.
+    // Отсутствие оплаты в сборке — это не «нечего делать», а «пришли
+    // деньги, а принять их некому», и об этом обязаны узнать оба.
+    if (!payment) return;
+    // Язык берётся из профиля: подтверждение оплаты — не то сообщение,
+    // которое человек должен получить не на своём языке. Но и ради языка
+    // терять платёж нельзя: недоступный профиль — повод ответить
+    // на языке по умолчанию, а не уронить приём денег.
+    let profile: Record<string, unknown> | null = null;
+    try {
+      profile = await this.db.getUserOverview(update.telegramId);
+    } catch (error) {
+      this.logger.warn("Профиль для подтверждения оплаты недоступен", {
+        code: error instanceof Error ? error.name : "unknown_error",
+      });
+    }
+    const language = preferredResponseLanguage(profile ?? {});
+    if (!this.stars) {
+      this.logger.error("Платёж пришёл, а приём оплаты не собран", {
+        telegramId: update.telegramId,
+      });
+      await this.telegram.sendMessage(update.chatId, t(language, "paymentStuck"))
+        .catch(() => undefined);
+      return;
+    }
     let outcome: Awaited<ReturnType<StarsPayments["apply"]>>;
     try {
       outcome = await this.stars.apply({

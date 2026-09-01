@@ -232,7 +232,15 @@ export class StarsPayments {
     | { state: "applied" | "duplicate"; plan: string; days: number }
     | { state: "unknown_intent" }
   > {
-    return await this.db.transaction(async (client) => {
+    // Область объявляется здесь, а не наследуется от вызывающего.
+    //
+    // Применение платежа приходит из хода, из восстановления и из
+    // повтора очереди: полагаться на то, что кто-то из них уже открыл
+    // область арендатора, значит принять деньги там, где повезло, и
+    // отказать там, где нет. Деньги на «повезло» не работают.
+    return await this.db.withUserScope(
+      { telegramId: input.telegramUserId, label: "payments.stars.apply" },
+      async () => await this.db.transaction(async (client) => {
       const { rows } = await client.query<{
         id: string; user_id: string; plan: string; duration_days: number;
       }>(
@@ -275,7 +283,8 @@ export class StarsPayments {
           return { state: outcome, plan: intent.plan, days: Number(intent.duration_days) };
         },
       );
-    });
+      }),
+    );
   }
 
 }
