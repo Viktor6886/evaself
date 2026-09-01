@@ -24,7 +24,11 @@ server:
 search:
   safe_search: 1
   autocomplete: ""
-  default_lang: ""
+  # "auto" — определить язык по самому запросу. Пустое значение означало
+  # «взять язык браузера», а браузера здесь нет: запрос на русском получал
+  # международную выдачу вперемешку. Явный язык инструмент передаёт
+  # параметром запроса, это значение работает, когда он его не назвал.
+  default_lang: "auto"
   # JSON is what the Agent SDK tool consumes; html stays on for debugging
   # from inside the network.
   formats:
@@ -60,3 +64,13 @@ engines:
     disabled: true
   - name: qwant
     disabled: true
+  # Погода. Отдельная категория `weather`: в общий поиск движок не
+  # попадает, его запрашивают явным `categories=weather`. Без него на
+  # «погода в Москве» приходили статьи о погоде, а не погода. Движок
+  # описан целиком, а не одним переключателем `disabled`, чтобы не
+  # зависеть от того, есть ли он в defaults конкретного образа.
+  - name: wttr.in
+    engine: wttr
+    shortcut: wttr
+    timeout: 9.0
+    disabled: false
