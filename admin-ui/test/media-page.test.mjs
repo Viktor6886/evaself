@@ -67,6 +67,17 @@ describe("раздел распознавания медиа", () => {
 
   test("раздел показывает цепочку vision и только зрячих провайдеров", async () => {
     panel = await openPanel({ routes: routes() });
+    // Стартовая загрузка панели — поток событий и обзор вместе с
+    // состоянием роутера — заканчивается уже после того, как появился
+    // `#app`. Без этого барьера её запросы попадали в измерение
+    // открытия раздела: тест падал примерно в одном прогоне из трёх и
+    // жаловался на «лишние» /events, /overview и второй /llm/state.
+    for (const path of ["/events", "/overview", "/llm/state"]) {
+      assert.ok(
+        await panel.waitForRequest((item) => item.path === path),
+        `стартовая загрузка панели не запросила ${path}`,
+      );
+    }
     const before = panel.requests.length;
     await panel.page.evaluate(() => openPage("media"));
     await panel.page.waitForSelector("#media-chain .route-block");
