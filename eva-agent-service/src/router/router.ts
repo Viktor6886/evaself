@@ -133,8 +133,6 @@ export class LlmRouter {
     this.visionDescriptions = new VisionDescriptionCache(options.visionCache);
   }
 
-
-
   // -----------------------------------------------------------------
   // подготовка цепочки
   // -----------------------------------------------------------------

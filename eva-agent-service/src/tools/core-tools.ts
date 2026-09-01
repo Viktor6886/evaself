@@ -887,15 +887,16 @@ export class CoreToolFactory {
       ? options.language
       : undefined;
 
-    // Расход списывается один раз за вызов инструмента, а не за HTTP-запрос:
-    // повтор без языкового фильтра — та же попытка человека найти ответ.
-    await this.db.incrementUsage(runtime.telegramId, "web_search");
     let found = await this.searxng(query, limit, { category, timeRange, language });
+    // Расход списывается один раз за вызов инструмента и только после
+    // того, как поиск ответил: недоступный SearXNG не должен стоить
+    // человеку попытки. Повтор без языкового фильтра — та же попытка, и
+    // второй раз не списывается.
+    await this.db.incrementUsage(runtime.telegramId, "web_search");
     // Языковой фильтр SearXNG отсекает жёстко: у редкого запроса на
     // русском выдача бывает пустой там, где без фильтра ответ есть.
-    // Повтор бесплатен по квоте и стоит одного запроса к своему же
-    // контейнеру.
-    if (language && found.results.length === 0 && found.answers.length === 0) {
+    if (language && found.results.length === 0
+      && found.answers.length === 0 && found.infoboxes.length === 0) {
       found = await this.searxng(query, limit, { category, timeRange });
     }
 
