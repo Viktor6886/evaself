@@ -862,6 +862,21 @@ export class LlmManager {
    * Невыясненное (`null` — провайдер ответил лимитом или упал) не
    * записывается: стереть верное знание хуже, чем не обновить его.
    */
+  /** Выбрана ли эта модель режимом одной модели. */
+  private async isSingleModeProvider(id: string): Promise<boolean> {
+    const database = this.db as typeof this.db & {
+      isLlmSingleProviderSelected?: (providerId: string) => Promise<boolean>;
+    };
+    if (typeof database.isLlmSingleProviderSelected !== "function") return false;
+    try {
+      return await database.isLlmSingleProviderSelected(id);
+    } catch {
+      // Недоступная база не повод записать провайдеру несовместимость:
+      // неизвестно — значит не трогаем.
+      return true;
+    }
+  }
+
   private async persistDetectedVision(
     provider: LlmProviderRow,
     capabilities: CapabilityProbeResult,
@@ -881,6 +896,23 @@ export class LlmManager {
       if (value === null || value === undefined) continue;
       if (value === (current[key] === true)) continue;
       changed[key] = value;
+    }
+    // Инструменты у модели, на которой держится вся установка, проба не
+    // выключает.
+    //
+    // Панель этого не позволяет (`updateProvider` отвергает
+    // `supports_tools: false` для выбранной модели), а проба писала в ту
+    // же колонку мимо проверки. Итог был тупиком: роутер отсекал модель
+    // от каждого хода с инструментами, а пересохранить режим панель не
+    // давала — «единая модель должна уметь вызывать инструменты».
+    // Вердикт пробы при этом не теряется: он остаётся в её сообщении и
+    // в журнале, а решение — за человеком.
+    if (changed.tools === false && await this.isSingleModeProvider(provider.id)) {
+      delete changed.tools;
+      this.logger.warn(
+        "Проба не подтвердила инструменты у модели режима одной модели; значение оставлено",
+        { providerId: provider.id, model: provider.model },
+      );
     }
     if (Object.keys(changed).length === 0) return provider;
     const updated = await this.db.setLlmProviderCapabilities(provider.id, changed);

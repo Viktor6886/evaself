@@ -460,3 +460,86 @@ function logger() {
     error() {},
   };
 }
+
+/**
+ * Старт сервиса выясняет у активной модели только зрение.
+ *
+ * Раньше он писал заодно «не умеет инструменты, поток и строгий JSON» —
+ * просто потому, что этих проверок в сводке не было. Установка в режиме
+ * одной модели после этого отвечала пятисоткой на каждое сообщение:
+ * роутер отсекает провайдера без инструментов от всех ходов, а панель не
+ * даёт пересохранить режим, пока у модели нет инструментов.
+ */
+test("старт выясняет зрение и не трогает остальные возможности", async () => {
+  const master = "v".repeat(64);
+  const row = {
+    ...providerRow("active", true, new SecretBox(master).encrypt("provider-key")),
+    supports_vision: false, supports_tools: true, supports_json: true, supports_streaming: true,
+  };
+  const written: Array<Record<string, unknown>> = [];
+  const manager = new LlmManager(
+    config(master),
+    {
+      getActiveLlmProvider: async () => row,
+      setLlmProviderCapabilities: async (_id: string, values: Record<string, unknown>) => {
+        written.push(values);
+        return { ...row, supports_vision: true };
+      },
+    } as never,
+    { setDefaultModel() {} } as never,
+    logger() as never,
+    {
+      probeVision: async () => ({
+        name: "vision", status: "ok", detail: "image recognized", blocking: false,
+      }),
+    },
+  );
+
+  await manager.initializeDefaultModel();
+
+  assert.deepEqual(written, [{ vision: true }], "старт вправе записать только проверенное зрение");
+});
+
+/**
+ * Панель не позволяет снять инструменты у модели, на которой держится
+ * установка (`updateProvider`). Проба писала в ту же колонку мимо этой
+ * проверки, и выйти из тупика было нельзя: роутер модель не берёт,
+ * панель режим не пересохраняет.
+ */
+test("проба не выключает инструменты у модели режима одной модели", async () => {
+  const master = "t".repeat(64);
+  const row = {
+    ...providerRow("selected", true, new SecretBox(master).encrypt("provider-key")),
+    supports_vision: false, supports_tools: true,
+  };
+  const written: Array<Record<string, unknown>> = [];
+  const manager = new LlmManager(
+    config(master),
+    {
+      getLlmProvider: async () => row,
+      isLlmSingleProviderSelected: async () => true,
+      setLlmProviderCapabilities: async (_id: string, values: Record<string, unknown>) => {
+        written.push(values);
+        return { ...row, ...values };
+      },
+      recordLlmCheck: async () => undefined,
+    } as never,
+    { setDefaultModel() {} } as never,
+    logger() as never,
+    {
+      probeProvider: async () => ({
+        ok: true, models_supported: true, models: [], message: "ok", status_code: 200,
+      }),
+      probeCapabilities: async () => summarize([
+        { name: "completion", status: "ok", detail: "ответ получен", blocking: true },
+        { name: "vision", status: "ok", detail: "изображение распознано", blocking: false },
+        { name: "tool_call", status: "failed", detail: "модель не вызвала инструмент", blocking: true },
+        { name: "tool_result_loop", status: "failed", detail: "вызова инструмента не было", blocking: true },
+      ]),
+    },
+  );
+
+  await manager.test(row.id);
+
+  assert.deepEqual(written, [{ vision: true }], "выясненное зрение записывается, инструменты — нет");
+});

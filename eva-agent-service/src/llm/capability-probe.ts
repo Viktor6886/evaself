@@ -475,11 +475,34 @@ export function summarize(checks: CapabilityCheck[]): CapabilityProbeResult {
     names.some((name) => failed.some(
       (entry) => entry.name === name && entry.cause !== undefined && UNDETERMINED.has(entry.cause),
     ));
+  /**
+   * Возможность решает только та проверка, которая действительно шла.
+   *
+   * Сводка собирается и из одной проверки: старт сервиса выясняет у
+   * активной модели зрение и зовёт `summarize([vision])`. В таком наборе
+   * `passed("tool_call")` ложно просто потому, что инструменты никто не
+   * проверял, — и модели записывалось «не умеет инструменты, поток и
+   * JSON». Для установки в режиме одной модели это смертельно: роутер
+   * отсекает провайдера от каждого хода с инструментами, то есть от
+   * всех, а панель отказывается пересохранить режим, пока у модели нет
+   * инструментов. Один перезапуск сервиса — и Ева молчит.
+   *
+   * Пропущенная проверка (`skipped`) тоже ничего не выясняет: «поток не
+   * заявлен» — это про галочку оператора, а не про модель.
+   */
+  const examined = (...names: CapabilityName[]): boolean =>
+    names.some((name) => checks.some(
+      (entry) => entry.name === name && (entry.status === "ok" || entry.status === "failed"),
+    ));
+  const verdict = (
+    value: () => boolean,
+    ...names: CapabilityName[]
+  ): boolean | null => (examined(...names) && !undecided(...names) ? value() : null);
   const detected: DetectedCapabilities = {
-    streaming: undecided("streaming") ? null : passed("streaming"),
-    vision: undecided("vision") ? null : passed("vision"),
-    json: undecided("json_object", "json_schema") ? null : passed("json_object") || passed("json_schema"),
-    tools: undecided("tool_call", "tool_result_loop") ? null : passed("tool_call") && passed("tool_result_loop"),
+    streaming: verdict(() => passed("streaming"), "streaming"),
+    vision: verdict(() => passed("vision"), "vision"),
+    json: verdict(() => passed("json_object") || passed("json_schema"), "json_object", "json_schema"),
+    tools: verdict(() => passed("tool_call") && passed("tool_result_loop"), "tool_call", "tool_result_loop"),
   };
 
   return {

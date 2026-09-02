@@ -271,3 +271,67 @@ test("обычный ход не делает второго вызова мод
   assert.equal(result.provider_id, "chat");
   assert.deepEqual(calls, ["chat"]);
 });
+
+/**
+ * Отметка «модель не умеет инструменты» не должна убивать разговор.
+ *
+ * Инструменты есть в каждом ходе Евы, поэтому провайдер с
+ * `supports_tools: false` отсекается от всех ходов сразу. Раньше режим
+ * одной модели в этом случае падал ещё до цепочки — независимо от
+ * галочки аварийного резерва, — и человек получал в Telegram 503
+ * «выбранная модель несовместима с запросом» на каждое сообщение.
+ */
+function singleToolsHarness(failover: boolean) {
+  const calls: string[] = [];
+  const p1 = provider("chat-primary");
+  const p2 = { ...provider("single-selected"), supports_tools: false };
+  const route = (code: string, rotation_enabled: boolean) => ({
+    code, title: code, requires_tools: false, requires_json: false,
+    requires_vision: false, requires_streaming: false, min_context_window: 1024,
+    max_quality_tier: 5, allows_sensitive: true, rotation_enabled,
+  });
+  const store = {
+    routingSettings: async () => ({
+      ...settings, mode: "single" as const, single_provider_id: p2.id,
+      single_failover_enabled: failover,
+    }),
+    providers: async () => [p1, p2],
+    routes: async () => new Map([["chat", route("chat", true)], ["single", route("single", true)]]),
+    chains: async () => new Map([["chat", [p1.id]]]),
+    breakers: async () => new Map(), spend: async () => ({ day: 0, month: 0 }),
+    claimProbe: async () => false, recordSuccess: async () => {},
+    recordFailure: async () => {}, addSpend: async () => {}, recordAttempt: async () => {},
+  };
+  const adapters = (p: { id: string; model: string }) => ({
+    protocol: "openai-compatible" as const,
+    complete: async () => {
+      calls.push(p.id);
+      return { content: "ok", tool_calls: [], finish_reason: "stop" as const,
+        usage: { tokens_in: 1, tokens_out: 1 }, model: p.model };
+    },
+    async *stream() { throw new Error("unused"); },
+  });
+  const router = new LlmRouter(store as never, { debug() {}, info() {}, warn() {}, error() {} }, undefined, async () => {}, adapters as never);
+  const withTools = {
+    ...request("привет"),
+    tools: [{ name: "save_note", description: "", parameters: { type: "object" } }],
+  };
+  return { router, calls, withTools };
+}
+
+test("аварийный резерв спасает ход, который выбранная модель не тянет", async () => {
+  const { router, calls, withTools } = singleToolsHarness(true);
+  const result = await router.complete(withTools as never);
+
+  assert.equal(result.provider_id, "chat-primary");
+  assert.deepEqual(calls, ["chat-primary"], "несовместимую модель дёргать незачем");
+});
+
+test("без аварийного резерва отказ называет, что делать", async () => {
+  const { router, withTools } = singleToolsHarness(false);
+  await assert.rejects(
+    router.complete(withTools as never),
+    (error: Error) => /несовместима с запросом/.test(error.message)
+      && /перепроверьте её|аварийный резерв/iu.test(error.message),
+  );
+});
