@@ -685,3 +685,39 @@ test("пустой ответ на всех обязательных прове�
     result.checks.find((entry) => entry.name === "completion")?.cause, "capability",
   );
 });
+
+/**
+ * Сводка из одной проверки.
+ *
+ * Старт сервиса выясняет у активной модели только зрение и зовёт
+ * `summarize([vision])`. Прежде такая сводка объявляла модели отсутствие
+ * инструментов, потока и строгого JSON — просто потому, что их никто не
+ * проверял. Для установки в режиме одной модели это смертельно: роутер
+ * отсекает провайдера от каждого хода с инструментами, а панель не даёт
+ * пересохранить режим, пока у модели нет инструментов. Один перезапуск
+ * сервиса — и Ева отвечает пятисоткой на каждое сообщение.
+ */
+test("проверка, которой не было, не объявляет модель неумелой", async () => {
+  const { summarize } = await import("../dist/llm/capability-probe.js");
+  const result = summarize([
+    { name: "vision", status: "ok", detail: "изображение распознано", blocking: false },
+  ]);
+
+  assert.equal(result.detected.vision, true, "выясненное записывается");
+  assert.equal(result.detected.tools, null, "инструменты не проверялись — значит не выяснены");
+  assert.equal(result.detected.streaming, null);
+  assert.equal(result.detected.json, null);
+});
+
+test("пропущенная проверка тоже ничего не выясняет", async () => {
+  const { summarize } = await import("../dist/llm/capability-probe.js");
+  const result = summarize([
+    { name: "completion", status: "ok", detail: "ответ получен", blocking: true },
+    { name: "streaming", status: "skipped", detail: "поток не заявлен", blocking: false },
+    { name: "tool_call", status: "ok", detail: "вызов по схеме", blocking: true },
+    { name: "tool_result_loop", status: "ok", detail: "final answer получен", blocking: true },
+  ]);
+
+  assert.equal(result.detected.streaming, null, "«не заявлен» — это про галочку, а не про модель");
+  assert.equal(result.detected.tools, true);
+});

@@ -198,7 +198,23 @@ export class LlmRouter {
       }
       const rejection = chain.rejected.find((item) => item.provider.id === selected);
       if (rejection && rejection.reason !== "breaker_open") {
-        throw new NoProviderAvailable(`выбранная модель несовместима с запросом: ${rejection.detail}`);
+        // «Аварийный резерв через цепочку разговора» обещает ровно это:
+        // выбранная модель не тянет ход — его берёт цепочка. Прежде
+        // резерв спасал только от открытого breaker, а несовместимость
+        // — например, устаревшая отметка «не умеет инструменты» —
+        // убивала каждый ход, хотя рабочая модель в установке была.
+        if (!settings.single_failover_enabled || chain.usable.length === 0) {
+          throw new NoProviderAvailable(
+            `выбранная модель несовместима с запросом: ${rejection.detail}.`
+            + " Перепроверьте её в разделе моделей или включите аварийный резерв",
+          );
+        }
+        this.logger.warn("LLM Router: режим одной модели ушёл на аварийный резерв", {
+          request_id: request.metadata.request_id,
+          selected: rejection.provider.name,
+          reason: rejection.reason,
+          fallback: chain.usable[0]?.provider.name,
+        });
       }
     }
 
