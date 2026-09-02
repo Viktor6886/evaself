@@ -17,6 +17,7 @@ skills/
 ├── relationships-boundaries/   — конфликты, границы, трудные разговоры
 ├── goals-values/               — цель, результат, действие, отклонение
 ├── journaling-reflection/      — направляемая рефлексия и дневник
+├── long-arc/                   — динамика и повторения на длинной дистанции
 ├── memory-hygiene/             — как вести память и что в ней не хранить
 ├── subscription-status/        — точный read-only статус тарифа и квот
 └── crisis-response/            — явная непосредственная опасность
