@@ -22,6 +22,30 @@ import { ProviderError } from "../types.js";
 import { classifyHttp, parameterValue, providerParameters, providerUrl, readSse } from "./shared.js";
 import { decodeDataUri } from "../content.js";
 
+/**
+ * Учёт токенов Anthropic.
+ *
+ * `input_tokens` здесь — только та часть запроса, которую модель читала
+ * заново: прочитанное из кэша лежит отдельным `cache_read_input_tokens`,
+ * а запись нового кэша — в `cache_creation_input_tokens`. Сложить их
+ * обязательно, иначе журнал показывает вход втрое меньше настоящего и
+ * счёт провайдера с ним не сходится.
+ */
+interface AnthropicUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+}
+
+function inputUsage(usage: AnthropicUsage | undefined): { tokens_in: number; cached_tokens_in?: number } {
+  const fresh = usage?.input_tokens ?? 0;
+  const read = usage?.cache_read_input_tokens;
+  const created = usage?.cache_creation_input_tokens ?? 0;
+  const tokens_in = fresh + (read ?? 0) + created;
+  return read === undefined ? { tokens_in } : { tokens_in, cached_tokens_in: read };
+}
+
 const API_VERSION = "2023-06-01";
 
 type Block =
@@ -223,7 +247,7 @@ export const anthropicAdapter: ProviderAdapter = {
       content?: Array<{ type?: string; text?: string; id?: string; name?: string; input?: unknown }>;
       stop_reason?: string;
       model?: string;
-      usage?: { input_tokens?: number; output_tokens?: number };
+      usage?: AnthropicUsage;
     };
     try {
       body = JSON.parse(raw) as typeof body;
@@ -257,7 +281,7 @@ export const anthropicAdapter: ProviderAdapter = {
       tool_calls: toolCalls,
       finish_reason: stopReason(body.stop_reason),
       usage: {
-        tokens_in: body.usage?.input_tokens ?? 0,
+        ...inputUsage(body.usage),
         tokens_out: body.usage?.output_tokens ?? 0,
       },
       model: body.model ?? provider.model,
@@ -274,7 +298,7 @@ export const anthropicAdapter: ProviderAdapter = {
     let text = "";
     let reason: LlmResponse["finish_reason"] = "unknown";
     let model = provider.model;
-    const usage = { tokens_in: 0, tokens_out: 0 };
+    const usage: LlmResponse["usage"] = { tokens_in: 0, tokens_out: 0 };
     // Аргументы tool_use приходят кусками input_json_delta.
     const partial = new Map<number, { id: string; name: string; json: string }>();
     const thinking = new Map<number, Record<string, unknown>>();
@@ -287,7 +311,7 @@ export const anthropicAdapter: ProviderAdapter = {
         index?: number;
         delta?: { type?: string; text?: string; thinking?: string; signature?: string; partial_json?: string; stop_reason?: string };
         content_block?: Record<string, unknown> & { type?: string; id?: string; name?: string };
-        message?: { model?: string; usage?: { input_tokens?: number } };
+        message?: { model?: string; usage?: AnthropicUsage };
         usage?: { output_tokens?: number };
       };
       try {
@@ -298,7 +322,13 @@ export const anthropicAdapter: ProviderAdapter = {
 
       if (parsed.type === "message_start") {
         model = parsed.message?.model ?? model;
-        usage.tokens_in = parsed.message?.usage?.input_tokens ?? usage.tokens_in;
+        if (parsed.message?.usage) {
+          const counted = inputUsage(parsed.message.usage);
+          usage.tokens_in = counted.tokens_in;
+          if (counted.cached_tokens_in !== undefined) {
+            usage.cached_tokens_in = counted.cached_tokens_in;
+          }
+        }
       }
       if (parsed.type === "content_block_start" && parsed.content_block?.type === "tool_use") {
         partial.set(parsed.index ?? 0, {

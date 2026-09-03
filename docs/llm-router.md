@@ -36,6 +36,33 @@ Route задаётся детерминированно из:
 
 `llm_requests` хранит requested/actual route, purpose, correlation ID, provider, model, status, latency и usage. Prompt, response, документы, memory и reasoning не сохраняются.
 
+### Кэшированный вход
+
+Провайдеры отдают часть промпта из своего кэша и берут за неё от четверти до десятой доли обычной ставки. Постоянная часть запроса Евы — системный промпт, персона, блоки памяти и описания инструментов — почти сто килобайт, и она едет в каждом обращении к модели, поэтому разница между холодным и тёплым ходом в счёте измеряется разами.
+
+`cached_tokens_in` — **часть** `tokens_in`, а не добавка к ней: кэш меняет не объём запроса, а его цену. Поле пишется в `llm_requests` и в `llm_spend_ledger`, читается у всех четырёх протоколов (`prompt_tokens_details.cached_tokens` и `prompt_cache_hit_tokens` у OpenAI-совместимых, `cache_read_input_tokens` у Anthropic, `cachedContentTokenCount` у Gemini, `input_tokens_details.cached_tokens` у Responses API).
+
+У Anthropic `input_tokens` не включает кэш: чтение и запись лежат отдельными полями, и вход считается их суммой — иначе журнал показывает запрос втрое меньше настоящего.
+
+Ставка задаётся полем «Цена кэша» в карточке провайдера (`price_cached_in_micro`). Пусто — кэшированный вход считается по обычной цене: занизить счёт хуже, чем не показать экономию. Ноль — законное значение для провайдеров, у которых чтение кэша бесплатно.
+
+Дневной и месячный бюджеты провайдера считаются по этой же оценке, поэтому с учётом кэша они перестали срабатывать раньше времени.
+
+Разложение дорогого хода по запросам:
+
+```sql
+SELECT date_trunc('minute', started_at) AS minute,
+       count(*) AS requests, sum(tokens_in) AS tokens_in,
+       sum(cached_tokens_in) AS cached, sum(tokens_out) AS tokens_out,
+       sum(tool_calls) AS tool_calls,
+       round(sum(cost_micro) / 1000000.0, 4) AS cost
+  FROM llm_requests
+ WHERE started_at > now() - interval '3 days'
+ GROUP BY 1 ORDER BY 1 DESC LIMIT 25;
+```
+
+Одно сообщение человека — это несколько строк: каждый вызов инструмента идёт к модели отдельным запросом со всем контекстом.
+
 ## Проверка
 
 ```bash

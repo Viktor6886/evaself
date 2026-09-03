@@ -51,6 +51,8 @@ export interface AttemptRecord {
   error_summary: string | null;
   http_status: number | null;
   tokens_in: number;
+  /** Часть `tokens_in`, пришедшая из кэша промпта провайдера. */
+  cached_tokens_in: number;
   tokens_out: number;
   cost_micro: number;
   tool_calls: number;
@@ -110,7 +112,8 @@ export class RouterStore {
               max_rpm, max_tpm, context_window, max_output_tokens, max_latency_ms,
               supports_tools, supports_json, supports_vision, supports_streaming,
               quality_tier, sensitive_data_allowed,
-              price_in_micro, price_out_micro, daily_budget_micro, monthly_budget_micro,
+              price_in_micro, price_out_micro, price_cached_in_micro,
+              daily_budget_micro, monthly_budget_micro,
               generation_defaults, additional_parameters
          FROM llm_providers
         WHERE enabled
@@ -190,6 +193,7 @@ export class RouterStore {
       sensitive_data_allowed: row.sensitive_data_allowed === true,
       price_in_micro: number("price_in_micro", 0),
       price_out_micro: number("price_out_micro", 0),
+      price_cached_in_micro: nullable("price_cached_in_micro"),
       daily_budget_micro: nullable("daily_budget_micro"),
       monthly_budget_micro: nullable("monthly_budget_micro"),
       generation_defaults: (row.generation_defaults as Record<string, unknown>) ?? {},
@@ -445,24 +449,34 @@ export class RouterStore {
 
   async addSpend(
     providerId: string,
-    usage: { tokens_in: number; tokens_out: number; cost_micro: number },
+    usage: {
+      tokens_in: number;
+      tokens_out: number;
+      cost_micro: number;
+      cached_tokens_in?: number;
+    },
   ): Promise<void> {
     // Границы периодов считаются в UTC на стороне PostgreSQL, а не через
     // new Date(y, m, 1) в процессе: часовой пояс контейнера иначе сдвигает
     // начало месяца на сутки назад.
     await this.pool.query(
       `INSERT INTO llm_spend_ledger
-           (provider_id, period, period_start, tokens_in, tokens_out, requests, cost_micro)
+           (provider_id, period, period_start, tokens_in, tokens_out, requests,
+            cost_micro, cached_tokens_in)
        VALUES
-           ($1, 'day',   (now() AT TIME ZONE 'UTC')::date, $2, $3, 1, $4),
-           ($1, 'month', date_trunc('month', (now() AT TIME ZONE 'UTC')::date)::date, $2, $3, 1, $4)
+           ($1, 'day',   (now() AT TIME ZONE 'UTC')::date, $2, $3, 1, $4, $5),
+           ($1, 'month', date_trunc('month', (now() AT TIME ZONE 'UTC')::date)::date, $2, $3, 1, $4, $5)
        ON CONFLICT (provider_id, period, period_start) DO UPDATE SET
            tokens_in  = llm_spend_ledger.tokens_in  + EXCLUDED.tokens_in,
            tokens_out = llm_spend_ledger.tokens_out + EXCLUDED.tokens_out,
            requests   = llm_spend_ledger.requests   + 1,
            cost_micro = llm_spend_ledger.cost_micro + EXCLUDED.cost_micro,
+           cached_tokens_in = llm_spend_ledger.cached_tokens_in + EXCLUDED.cached_tokens_in,
            updated_at = now()`,
-      [providerId, usage.tokens_in, usage.tokens_out, usage.cost_micro],
+      [
+        providerId, usage.tokens_in, usage.tokens_out, usage.cost_micro,
+        usage.cached_tokens_in ?? 0,
+      ],
     );
   }
 
@@ -499,9 +513,9 @@ export class RouterStore {
             tool_calls, streamed, routing_mode, requested_route, effective_route,
             classification_source, classification_confidence, classification_score,
             classification_reason_codes, purpose, internal_operation_type,
-            single_failover_used)
+            single_failover_used, cached_tokens_in)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now(),$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,
-               $22,$23,$24,$25,$26,$27,$28,$29,$30,$31)`,
+               $22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32)`,
       [
         record.request_id,
         record.route_code,
@@ -534,6 +548,7 @@ export class RouterStore {
         record.purpose,
         record.internal_operation_type,
         record.single_failover_used,
+        record.cached_tokens_in,
       ],
     );
     });
@@ -547,9 +562,23 @@ export class RouterStore {
   }
 }
 
-/** Стоимость ответа в микроединицах валюты провайдера. */
+/**
+ * Стоимость ответа в микроединицах валюты провайдера.
+ *
+ * Кэшированный вход считается отдельной ставкой: у провайдеров он стоит
+ * от четверти до десятой доли обычного, и без этого разделения тёплый
+ * ход выглядел в журнале так же дорого, как холодный. Ставка не
+ * задана — весь вход идёт по обычной цене: завысить оценку безопаснее,
+ * чем показать экономию, которой не было.
+ */
 export function costOf(provider: ProviderProfile, response: LlmResponse): number {
-  const input = (response.usage.tokens_in * provider.price_in_micro) / 1_000_000;
+  const cached = Math.min(
+    Math.max(response.usage.cached_tokens_in ?? 0, 0),
+    response.usage.tokens_in,
+  );
+  const cachedRate = provider.price_cached_in_micro ?? provider.price_in_micro;
+  const input = ((response.usage.tokens_in - cached) * provider.price_in_micro
+    + cached * cachedRate) / 1_000_000;
   const output = (response.usage.tokens_out * provider.price_out_micro) / 1_000_000;
   return Math.round(input + output);
 }

@@ -348,3 +348,120 @@ test("native protocol streaming возвращает text delta и done", async 
     assert.equal(chunks.find((chunk) => chunk.type === "done")?.response.content, "ok");
   }
 });
+
+/* =====================================================================
+ * Кэшированный вход
+ *
+ * Счёт за первый ход после паузы нечем было объяснить: журнал показывал
+ * десятки тысяч входных токенов, а провайдер брал за них как за единицы
+ * — почти весь запрос приходил из его кэша промпта. Поле кэша не
+ * читалось ни у одного протокола, и стоимость считалась по одной ставке
+ * на весь вход: тёплый ход выглядел так же дорого, как холодный.
+ * ===================================================================== */
+
+const json = (body: unknown) => new Response(JSON.stringify(body), {
+  status: 200, headers: { "content-type": "application/json" },
+});
+
+test("OpenAI-совместимый ответ отдаёт кэшированную часть входа", async () => {
+  const adapter = openAiAdapter;
+  const response = await adapter.complete(
+    profile("openai-compatible", (async () => json({
+      choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+      usage: {
+        prompt_tokens: 40_000,
+        completion_tokens: 120,
+        prompt_tokens_details: { cached_tokens: 38_000 },
+      },
+    })) as never) as never,
+    request([{ role: "user", content: "привет" }]) as never,
+    new AbortController().signal,
+  );
+
+  assert.equal(response.usage.tokens_in, 40_000);
+  assert.equal(response.usage.cached_tokens_in, 38_000, "кэш провайдера потерян");
+});
+
+test("DeepSeek называет кэш своим полем, и оно тоже читается", async () => {
+  const response = await openAiAdapter.complete(
+    profile("openai-compatible", (async () => json({
+      choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 30_000, completion_tokens: 50, prompt_cache_hit_tokens: 28_672 },
+    })) as never) as never,
+    request([{ role: "user", content: "привет" }]) as never,
+    new AbortController().signal,
+  );
+
+  assert.equal(response.usage.cached_tokens_in, 28_672);
+});
+
+test("провайдер, который о кэше молчит, не выдумывает ноль", async () => {
+  const response = await openAiAdapter.complete(
+    profile("openai-compatible", (async () => json({
+      choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 1_000, completion_tokens: 10 },
+    })) as never) as never,
+    request([{ role: "user", content: "привет" }]) as never,
+    new AbortController().signal,
+  );
+
+  // «Не сказал» и «кэш не сработал» — разные вещи: во втором случае
+  // цена полная, и записывать её как факт по молчанию нельзя.
+  assert.equal(response.usage.cached_tokens_in, undefined);
+});
+
+/**
+ * У Anthropic `input_tokens` — только та часть, которую модель читала
+ * заново: прочитанное из кэша и записанное в него лежат отдельно.
+ * Пока их не складывали, журнал показывал вход втрое меньше настоящего.
+ */
+test("Anthropic складывает свежий вход, чтение кэша и его запись", async () => {
+  const response = await anthropicAdapter.complete(
+    profile("anthropic", (async () => json({
+      content: [{ type: "text", text: "ok" }],
+      stop_reason: "end_turn",
+      model: "claude",
+      usage: {
+        input_tokens: 500,
+        output_tokens: 80,
+        cache_read_input_tokens: 36_000,
+        cache_creation_input_tokens: 1_200,
+      },
+    })) as never) as never,
+    request([{ role: "user", content: "привет" }]) as never,
+    new AbortController().signal,
+  );
+
+  assert.equal(response.usage.tokens_in, 37_700);
+  assert.equal(response.usage.cached_tokens_in, 36_000);
+});
+
+test("Gemini отдаёт кэшированную часть промпта", async () => {
+  const response = await geminiAdapter.complete(
+    profile("gemini", (async () => json({
+      candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+      usageMetadata: {
+        promptTokenCount: 20_000, candidatesTokenCount: 40, cachedContentTokenCount: 19_000,
+      },
+    })) as never) as never,
+    request([{ role: "user", content: "привет" }]) as never,
+    new AbortController().signal,
+  );
+
+  assert.equal(response.usage.tokens_in, 20_000);
+  assert.equal(response.usage.cached_tokens_in, 19_000);
+});
+
+test("Responses API читает кэш из деталей входа", async () => {
+  const response = await responsesAdapter.complete(
+    profile("openai-responses", (async () => json({
+      output: [{ type: "message", content: [{ type: "output_text", text: "ok" }] }],
+      status: "completed",
+      usage: { input_tokens: 12_000, output_tokens: 30, input_tokens_details: { cached_tokens: 11_500 } },
+    })) as never) as never,
+    request([{ role: "user", content: "привет" }]) as never,
+    new AbortController().signal,
+  );
+
+  assert.equal(response.usage.cached_tokens_in, 11_500);
+});

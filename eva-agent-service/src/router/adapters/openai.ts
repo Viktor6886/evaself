@@ -31,9 +31,31 @@ interface OpenAiChoiceMessage extends Record<string, unknown> {
 
 interface OpenAiBody {
   choices?: Array<{ message?: OpenAiChoiceMessage; finish_reason?: string }>;
-  usage?: { prompt_tokens?: number; completion_tokens?: number };
+  usage?: OpenAiUsage;
   model?: string;
   error?: { message?: string; type?: string; code?: string };
+}
+
+/**
+ * Учёт токенов OpenAI-совместимого ответа.
+ *
+ * Кэшированный вход называется по-разному: OpenAI и прокси за ним
+ * (OpenRouter) кладут его в `prompt_tokens_details.cached_tokens`,
+ * DeepSeek отвечает своим `prompt_cache_hit_tokens`. Читаем обе формы:
+ * поле есть у того, кто его прислал, и стоит оно у всех дешевле
+ * обычного входа.
+ */
+interface OpenAiUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  prompt_tokens_details?: { cached_tokens?: number };
+  prompt_cache_hit_tokens?: number;
+}
+
+/** Кэшированная часть входа — та, за которую взяли по льготной ставке. */
+function cachedInput(usage: OpenAiUsage | undefined): number | undefined {
+  const value = usage?.prompt_tokens_details?.cached_tokens ?? usage?.prompt_cache_hit_tokens;
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
 function buildBody(provider: ProviderProfile, request: LlmRequest, stream: boolean) {
@@ -246,6 +268,9 @@ export const openAiAdapter: ProviderAdapter = {
       usage: {
         tokens_in: body.usage?.prompt_tokens ?? 0,
         tokens_out: body.usage?.completion_tokens ?? 0,
+        ...(cachedInput(body.usage) !== undefined
+          ? { cached_tokens_in: cachedInput(body.usage) }
+          : {}),
       },
       model: body.model ?? provider.model,
       ...(providerState ? { provider_state: providerState } : {}),
@@ -263,7 +288,7 @@ export const openAiAdapter: ProviderAdapter = {
     // ведётся с состоянием, а не по каждому дельта-куску отдельно.
     const stripper = new ReasoningStripper();
     const calls = new Map<number, { id: string; name: string; arguments: string }>();
-    let usage = { tokens_in: 0, tokens_out: 0 };
+    let usage: LlmResponse["usage"] = { tokens_in: 0, tokens_out: 0 };
     let reason: LlmResponse["finish_reason"] = "unknown";
     let model = provider.model;
     const providerState: Record<string, unknown> = {};
@@ -282,7 +307,7 @@ export const openAiAdapter: ProviderAdapter = {
           };
           finish_reason?: string;
         }>;
-        usage?: { prompt_tokens?: number; completion_tokens?: number };
+        usage?: OpenAiUsage;
         model?: string;
       };
       try {
@@ -292,9 +317,11 @@ export const openAiAdapter: ProviderAdapter = {
       }
       if (parsed.model) model = parsed.model;
       if (parsed.usage) {
+        const cached = cachedInput(parsed.usage);
         usage = {
           tokens_in: parsed.usage.prompt_tokens ?? usage.tokens_in,
           tokens_out: parsed.usage.completion_tokens ?? usage.tokens_out,
+          ...(cached !== undefined ? { cached_tokens_in: cached } : {}),
         };
       }
       const choice = parsed.choices?.[0];

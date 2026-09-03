@@ -335,3 +335,99 @@ test("без аварийного резерва отказ называет, ч
       && /перепроверьте её|аварийный резерв/iu.test(error.message),
   );
 });
+
+/* =====================================================================
+ * Цена кэшированного входа
+ *
+ * Провайдеры отдают часть промпта из своего кэша и берут за неё от
+ * четверти до десятой доли обычной ставки. Пока стоимость считалась
+ * одной ставкой на весь вход, тёплый ход выглядел в журнале так же
+ * дорого, как холодный, и объяснить счёт было нечем.
+ * ===================================================================== */
+
+const priced = (rates: { in: number; out: number; cached?: number | null }) => ({
+  ...provider("priced"),
+  price_in_micro: rates.in,
+  price_out_micro: rates.out,
+  ...(rates.cached === undefined ? {} : { price_cached_in_micro: rates.cached }),
+});
+
+const answered = (usage: { tokens_in: number; tokens_out: number; cached_tokens_in?: number }) => ({
+  content: "ok", tool_calls: [], finish_reason: "stop" as const, usage, model: "m",
+});
+
+test("кэшированный вход считается своей ставкой", async () => {
+  const { costOf } = await import("../dist/router/store.js");
+  // 100 000 входа, из них 90 000 из кэша; вход 300, кэш 30 за миллион.
+  const cost = costOf(
+    priced({ in: 300, out: 1_200, cached: 30 }) as never,
+    answered({ tokens_in: 100_000, tokens_out: 1_000, cached_tokens_in: 90_000 }) as never,
+  );
+
+  // (10 000 × 300 + 90 000 × 30) / 1e6 + 1 000 × 1 200 / 1e6 = 3 + 2.7 + 1.2
+  assert.equal(cost, 7);
+});
+
+test("без своей ставки кэш считается по обычной цене", async () => {
+  const { costOf } = await import("../dist/router/store.js");
+  const full = costOf(
+    priced({ in: 300, out: 1_200 }) as never,
+    answered({ tokens_in: 100_000, tokens_out: 1_000, cached_tokens_in: 90_000 }) as never,
+  );
+
+  // Занизить счёт хуже, чем не показать экономию: пока ставка не задана,
+  // весь вход идёт по обычной.
+  assert.equal(full, costOf(
+    priced({ in: 300, out: 1_200 }) as never,
+    answered({ tokens_in: 100_000, tokens_out: 1_000 }) as never,
+  ));
+});
+
+test("кэш больше входа не делает ход бесплатным", async () => {
+  const { costOf } = await import("../dist/router/store.js");
+  // Битое или чужое число не должно уводить стоимость в минус.
+  const cost = costOf(
+    priced({ in: 300, out: 0, cached: 0 }) as never,
+    answered({ tokens_in: 1_000, tokens_out: 0, cached_tokens_in: 999_999 }) as never,
+  );
+  assert.equal(cost, 0);
+  assert.ok(cost >= 0);
+});
+
+test("телеметрия хода записывает кэшированную часть входа", async () => {
+  const attempts: Array<Record<string, unknown>> = [];
+  const p1 = { ...provider("cached-provider"), price_in_micro: 300, price_out_micro: 900 };
+  const route = {
+    code: "chat", title: "chat", requires_tools: false, requires_json: false,
+    requires_vision: false, requires_streaming: false, min_context_window: 1024,
+    max_quality_tier: 5, allows_sensitive: true, rotation_enabled: true,
+  };
+  const store = {
+    routingSettings: async () => settings,
+    providers: async () => [p1],
+    routes: async () => new Map([["chat", route]]),
+    chains: async () => new Map([["chat", [p1.id]]]),
+    breakers: async () => new Map(), spend: async () => ({ day: 0, month: 0 }),
+    claimProbe: async () => false, recordSuccess: async () => {},
+    recordFailure: async () => {}, addSpend: async () => {},
+    recordAttempt: async (value: Record<string, unknown>) => { attempts.push(value); },
+  };
+  const adapters = () => ({
+    protocol: "openai-compatible" as const,
+    complete: async () => ({
+      content: "ok", tool_calls: [], finish_reason: "stop" as const,
+      usage: { tokens_in: 40_000, tokens_out: 100, cached_tokens_in: 38_000 },
+      model: p1.model,
+    }),
+    async *stream() { throw new Error("unused"); },
+  });
+  const router = new LlmRouter(
+    store as never, { debug() {}, info() {}, warn() {}, error() {} },
+    undefined, async () => {}, adapters as never,
+  );
+
+  await router.complete(request("привет"));
+
+  assert.equal(attempts.at(-1)?.tokens_in, 40_000);
+  assert.equal(attempts.at(-1)?.cached_tokens_in, 38_000, "кэш не доехал до журнала");
+});

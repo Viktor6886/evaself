@@ -266,6 +266,11 @@ function openProviderEditor(provider = null) {
   set("max_tpm", provider?.max_tpm ?? "");
   set("price_in", microToUnits(provider?.price_in_micro));
   set("price_out", microToUnits(provider?.price_out_micro));
+  // Пусто — ставка не задана, и кэшированный вход считается по обычной
+  // цене. Ноль здесь законен: часть провайдеров отдаёт кэш бесплатно,
+  // и подставлять вместо пустого нуль означало бы занизить счёт.
+  set("price_cached_in", provider?.price_cached_in_micro == null
+    ? "" : microToUnits(provider.price_cached_in_micro));
   set("daily_budget", provider?.daily_budget_micro == null ? "" : microToUnits(provider.daily_budget_micro));
   set("monthly_budget", provider?.monthly_budget_micro == null ? "" : microToUnits(provider.monthly_budget_micro));
   // Возможности выясняет проба, оператор их больше не проставляет. Поля
@@ -380,6 +385,8 @@ async function saveRoutingFields(form, providerId) {
     max_tpm: nullableNumber("max_tpm"),
     price_in_micro: unitsToMicro(form.elements.price_in.value),
     price_out_micro: unitsToMicro(form.elements.price_out.value),
+    price_cached_in_micro: form.elements.price_cached_in.value.trim() === ""
+      ? null : unitsToMicro(form.elements.price_cached_in.value),
     daily_budget_micro: form.elements.daily_budget.value === "" ? null : unitsToMicro(form.elements.daily_budget.value),
     monthly_budget_micro: form.elements.monthly_budget.value === "" ? null : unitsToMicro(form.elements.monthly_budget.value),
     supports_tools: capabilityValue(form, "supports_tools"),

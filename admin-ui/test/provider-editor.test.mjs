@@ -262,3 +262,41 @@ describe("создание провайдера с нативным проток
     assert.equal(leftover, "");
   });
 });
+
+/**
+ * Цена кэшированного входа.
+ *
+ * Провайдер отдаёт повторный запрос из своего кэша промпта и берёт за
+ * него в разы меньше. Пока ставки не было, холодный и тёплый ход в
+ * журнале стоили одинаково, и объяснить списание было нечем.
+ *
+ * Пустое поле и ноль — разные вещи: пусто значит «ставка не задана,
+ * считать по обычной цене», ноль — «чтение кэша бесплатно». Подстановка
+ * нуля вместо пустого занизила бы счёт.
+ */
+test("ставка кэша уходит на сервер пустой, а не нулём", async () => {
+  const panel = await openPanel({ routes: ROUTES });
+  try {
+    await panel.page.evaluate(() => openPage("ai"));
+    await panel.page.waitForFunction(
+      () => document.querySelector("#page-ai").classList.contains("active"));
+    await panel.page.evaluate(() => openProviderEditor(null));
+    await panel.page.waitForFunction(
+      () => !document.querySelector("#provider-editor").hidden);
+    // Ставка живёт в «Дополнительно»: свёрнутый блок нельзя заполнить.
+    await panel.page.evaluate(() => {
+      document.querySelector("#provider-form .advanced-block").open = true;
+    });
+
+    const empty = await panel.page.$eval(
+      '#provider-form [name="price_cached_in"]', (node) => node.value);
+    assert.equal(empty, "", "по умолчанию ставка не задана");
+
+    await panel.page.fill('#provider-form [name="price_cached_in"]', "0.03");
+    const filled = await panel.page.$eval(
+      '#provider-form [name="price_cached_in"]', (node) => node.value);
+    assert.equal(filled, "0.03", "поле ставки не принимает значение");
+  } finally {
+    await panel.close();
+  }
+});

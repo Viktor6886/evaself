@@ -499,6 +499,7 @@ export class LlmRouter {
           tokens_in: response.usage.tokens_in,
           tokens_out: response.usage.tokens_out,
           cost_micro: costOf(provider, response),
+          cached_tokens_in: response.usage.cached_tokens_in ?? 0,
         });
         await this.log(provider, original, primaryId, {
           started, attempts: attempt, switches: switchesSoFar, response, streamed: false,
@@ -782,6 +783,7 @@ export class LlmRouter {
               tokens_in: chunk.response.usage.tokens_in,
               tokens_out: chunk.response.usage.tokens_out,
               cost_micro: costOf(provider, chunk.response),
+              cached_tokens_in: chunk.response.usage.cached_tokens_in ?? 0,
             });
             await this.log(provider, attemptRequest, chain.primary?.id ?? null, {
               started, attempts: attempt, switches, response: chunk.response, streamed: true,
@@ -1079,6 +1081,7 @@ export class LlmRouter {
         error_summary: outcome.error?.summary() ?? null,
         http_status: outcome.error?.httpStatus ?? null,
         tokens_in: outcome.response?.usage.tokens_in ?? 0,
+        cached_tokens_in: outcome.response?.usage.cached_tokens_in ?? 0,
         tokens_out: outcome.response?.usage.tokens_out ?? 0,
         cost_micro: outcome.response ? costOf(provider, outcome.response) : 0,
         tool_calls: outcome.response?.tool_calls.length ?? 0,

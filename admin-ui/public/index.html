@@ -211,6 +211,7 @@
                     <label>TPM<input name="max_tpm" type="number" min="0" placeholder="без ограничения"></label>
                     <label>Цена входа, $/1M<input name="price_in" type="number" min="0" step="0.01" value="0"></label>
                     <label>Цена выхода, $/1M<input name="price_out" type="number" min="0" step="0.01" value="0"></label>
+                    <label>Цена кэша, $/1M<input name="price_cached_in" type="number" min="0" step="0.01" placeholder="как обычный вход"><small>Повторный запрос провайдер отдаёт из кэша промпта дешевле</small></label>
                     <label>Таймаут подключения, мс<input name="connect_timeout_ms" type="number" min="1000" step="500" value="10000"><small>Отдельно от таймаута ответа</small></label>
                     <label>Дневной бюджет, $<input name="daily_budget" type="number" min="0" step="0.01" placeholder="без ограничения"><small>Исчерпание уводит на резерв</small></label>
                     <label>Месячный бюджет, $<input name="monthly_budget" type="number" min="0" step="0.01" placeholder="без ограничения"></label>
