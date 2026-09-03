@@ -6,6 +6,28 @@ import { ProviderError } from "../types.js";
 import { classifyHttp, objectParameter, parameterValue, providerParameters, readSse } from "./shared.js";
 import { decodeDataUri } from "../content.js";
 
+/**
+ * Учёт токенов Gemini.
+ *
+ * `promptTokenCount` включает и кэшированную часть, а сколько её было —
+ * говорит `cachedContentTokenCount`. Цена у этой части другая, поэтому
+ * она сохраняется отдельно.
+ */
+interface GeminiUsage {
+  promptTokenCount?: number;
+  candidatesTokenCount?: number;
+  cachedContentTokenCount?: number;
+}
+
+function usageOf(usage: GeminiUsage | undefined): LlmResponse["usage"] {
+  const cached = usage?.cachedContentTokenCount;
+  return {
+    tokens_in: usage?.promptTokenCount ?? 0,
+    tokens_out: usage?.candidatesTokenCount ?? 0,
+    ...(typeof cached === "number" ? { cached_tokens_in: cached } : {}),
+  };
+}
+
 type GeminiPart = Record<string, unknown> & {
   text?: string;
   functionCall?: { name?: string; args?: unknown };
@@ -212,7 +234,7 @@ export const geminiAdapter: ProviderAdapter = {
     const response = await post(provider, request, false, signal);
     const body = await response.json() as {
       candidates?: Array<{ content?: { parts?: GeminiPart[] }; finishReason?: string }>;
-      usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
+      usageMetadata?: GeminiUsage;
       modelVersion?: string;
     };
     const parsed = parseCandidate(body.candidates?.[0] ?? {});
@@ -222,7 +244,7 @@ export const geminiAdapter: ProviderAdapter = {
     return {
       content: parsed.content, tool_calls: parsed.tool_calls,
       finish_reason: parsed.tool_calls.length ? "tool_calls" : parsed.finish_reason,
-      usage: { tokens_in: body.usageMetadata?.promptTokenCount ?? 0, tokens_out: body.usageMetadata?.candidatesTokenCount ?? 0 },
+      usage: usageOf(body.usageMetadata),
       model: body.modelVersion ?? provider.model,
       ...(parsed.opaque.length ? { provider_state: { gemini_parts: parsed.opaque } } : {}),
     };
@@ -234,13 +256,13 @@ export const geminiAdapter: ProviderAdapter = {
     let reason: LlmResponse["finish_reason"] = "unknown";
     const tool_calls: LlmToolCall[] = [];
     const opaque: GeminiPart[] = [];
-    let usage = { tokens_in: 0, tokens_out: 0 };
+    let usage: LlmResponse["usage"] = { tokens_in: 0, tokens_out: 0 };
     for await (const event of readSse(response.body)) {
-      let body: { candidates?: Array<{ content?: { parts?: GeminiPart[] }; finishReason?: string }>; usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number } };
+      let body: { candidates?: Array<{ content?: { parts?: GeminiPart[] }; finishReason?: string }>; usageMetadata?: GeminiUsage };
       try { body = JSON.parse(event) as typeof body; } catch { continue; }
       const parsed = parseCandidate(body.candidates?.[0] ?? {});
       reason = parsed.finish_reason === "unknown" ? reason : parsed.finish_reason;
-      usage = { tokens_in: body.usageMetadata?.promptTokenCount ?? usage.tokens_in, tokens_out: body.usageMetadata?.candidatesTokenCount ?? usage.tokens_out };
+      usage = body.usageMetadata ? usageOf(body.usageMetadata) : usage;
       if (parsed.content) { content += parsed.content; yield { type: "text", delta: parsed.content }; }
       if (parsed.opaque.length) {
         opaque.push(...parsed.opaque);

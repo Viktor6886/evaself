@@ -30,6 +30,10 @@ const NUMERIC_FIELDS = [
 
 /** Те же, но допускающие NULL — «ограничения нет». */
 const NULLABLE_NUMERIC_FIELDS = [
+  // Цена кэшированного входа. NULL — не задана, и такой вход считается
+  // по обычной ставке; ноль — законное значение: у части провайдеров
+  // чтение кэша бесплатно.
+  "price_cached_in_micro",
   "max_rpm",
   "max_tpm",
   "max_latency_ms",
@@ -130,6 +134,7 @@ export class LlmRouterAdminService {
                 provider.max_output_tokens, provider.max_retries,
                 provider.max_concurrency, provider.max_rpm, provider.max_tpm,
                 provider.price_in_micro, provider.price_out_micro,
+                provider.price_cached_in_micro,
                 provider.additional_parameters,
                 provider.is_active,
                 -- Только факт: сам ключ write-only и наружу не выходит.
@@ -332,7 +337,7 @@ export class LlmRouterAdminService {
     const window = Math.min(Math.max(1, Math.floor(days)), 90);
     const { rows } = await this.pool.query(
       `SELECT l.period_start, p.name AS provider, l.requests,
-              l.tokens_in, l.tokens_out, l.cost_micro
+              l.tokens_in, l.tokens_out, l.cached_tokens_in, l.cost_micro
          FROM llm_spend_ledger l
          JOIN llm_providers p ON p.id = l.provider_id
         WHERE l.period = 'day'
@@ -409,7 +414,8 @@ export class LlmRouterAdminService {
                   max_rpm, max_tpm, max_output_tokens, max_latency_ms,
                   supports_tools, supports_json, supports_vision, supports_streaming,
                   quality_tier, sensitive_data_allowed, price_in_micro, price_out_micro,
-                  currency, daily_budget_micro, monthly_budget_micro, generation_defaults`,
+                  price_cached_in_micro, currency, daily_budget_micro,
+                  monthly_budget_micro, generation_defaults`,
         values,
       );
       const row = rows[0];

@@ -121,7 +121,11 @@ export const responsesAdapter: ProviderAdapter = {
     const body = await response.json() as {
       output?: OutputItem[]; output_text?: string; status?: string; model?: string;
       incomplete_details?: { reason?: string };
-      usage?: { input_tokens?: number; output_tokens?: number };
+      usage?: {
+        input_tokens?: number;
+        output_tokens?: number;
+        input_tokens_details?: { cached_tokens?: number };
+      };
     };
     const parsed = parsedOutput(body.output ?? []);
     if (!parsed.content && typeof body.output_text === "string") parsed.content = body.output_text;
@@ -130,7 +134,14 @@ export const responsesAdapter: ProviderAdapter = {
     return {
       content: parsed.content, tool_calls: parsed.tool_calls,
       finish_reason: parsed.tool_calls.length ? "tool_calls" : reason,
-      usage: { tokens_in: body.usage?.input_tokens ?? 0, tokens_out: body.usage?.output_tokens ?? 0 },
+      usage: {
+        tokens_in: body.usage?.input_tokens ?? 0,
+        tokens_out: body.usage?.output_tokens ?? 0,
+        // Кэшированный вход — часть `input_tokens`, и стоит он дешевле.
+        ...(typeof body.usage?.input_tokens_details?.cached_tokens === "number"
+          ? { cached_tokens_in: body.usage.input_tokens_details.cached_tokens }
+          : {}),
+      },
       model: body.model ?? provider.model,
       ...(parsed.opaque.length ? { provider_state: { response_items: parsed.opaque } } : {}),
     };
