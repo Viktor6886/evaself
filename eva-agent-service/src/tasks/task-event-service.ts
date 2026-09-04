@@ -4,7 +4,7 @@ import { formatLocalShort, humanizeInterval } from "../time/local-date-time.js";
 export type TaskEventType =
   | "created" | "updated" | "reminder_generated" | "reminder_sent"
   | "delivery_failed" | "user_replied" | "snoozed" | "completed"
-  | "cancelled" | "reopened";
+  | "cancelled" | "reopened" | "action_done" | "action_failed";
 
 export interface TaskEventInput {
   userId: number;
@@ -39,8 +39,12 @@ export class TaskEventService {
        ) VALUES (
          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19::jsonb
        )
+       -- Предикат повторяет частичный уникальный индекс
+       -- task_events_delivery_once_idx: ON CONFLICT ищет индекс по
+       -- совпадению предиката, и разойдись они — вставка падала бы на
+       -- каждом событии, а не на редком повторе.
        ON CONFLICT (task_id, event_type, scheduled_at)
-         WHERE event_type IN ('reminder_generated', 'reminder_sent')
+         WHERE event_type IN ('reminder_generated', 'reminder_sent', 'action_done')
        DO UPDATE SET
          generated_at = COALESCE(EXCLUDED.generated_at, task_events.generated_at),
          sent_at = COALESCE(EXCLUDED.sent_at, task_events.sent_at),
@@ -113,6 +117,26 @@ export class TaskEventService {
       [userId, Math.min(Math.max(limit, 1), 10)],
     );
     return rows;
+  }
+
+  /**
+   * Сколько задач Ева выполнила сама за последние сутки.
+   *
+   * Считаются и удачи, и отказы: неудачный ход стоил тех же обращений к
+   * модели, что и удачный. Отложенный по самому потолку заход не
+   * считается — он не выполнялся, и учитывать его значило бы запирать
+   * человека до конца суток из-за одного всплеска.
+   */
+  async actionsLastDay(userId: number): Promise<number> {
+    const { rows } = await this.db.query<{ used: string }>(
+      `SELECT count(*)::int AS used FROM task_events
+        WHERE user_id = $1
+          AND event_type IN ('action_done', 'action_failed')
+          AND COALESCE(error_code, '') <> 'daily_limit'
+          AND created_at > now() - interval '24 hours'`,
+      [userId],
+    );
+    return Number(rows[0]?.used ?? 0);
   }
 
   async forTask(userId: number, taskId: number, limit = 50): Promise<Record<string, unknown>[]> {
@@ -210,7 +234,8 @@ export class TaskEventService {
       `SELECT t.title, e.event_type, e.created_at, t.status AS task_status
          FROM task_events e JOIN tasks t ON t.id=e.task_id AND t.user_id=e.user_id
         WHERE e.user_id=$1 AND e.created_at >= now() - interval '14 days'
-          AND e.event_type IN ('reminder_sent','user_replied','snoozed','completed','cancelled')
+          AND e.event_type IN ('reminder_sent','user_replied','snoozed','completed',
+                               'cancelled','action_done','action_failed')
         ORDER BY e.created_at DESC LIMIT 5`,
       [userId],
     );
@@ -225,6 +250,8 @@ export class TaskEventService {
         snoozed: "напоминание перенесено",
         completed: "задача выполнена",
         cancelled: "задача отменена",
+        action_done: "выполнено запланированное действие",
+        action_failed: "запланированное действие не удалось",
       };
       const status = ["open", "in_progress"].includes(row.task_status)
         ? "; задача ещё не отмечена выполненной" : "";

@@ -139,7 +139,8 @@ export interface AgentRuntimeContext {
     | "profile"
     | "goal_review"
     | "partner_analysis"
-    | "research";
+    | "research"
+    | "task_action";
   timezone: string;
   responseMode: "text" | "voice" | "both";
   useEmoji: boolean;

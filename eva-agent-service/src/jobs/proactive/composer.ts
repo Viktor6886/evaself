@@ -25,6 +25,7 @@ import type { UserTurnLock } from "../../turns/user-turn-lock.js";
 import type { EpisodeLink, ProactiveCandidate, ProactiveComposer } from "./service.js";
 import type { ProactiveKind } from "./policy.js";
 import type { ReminderCandidate } from "./selection.js";
+import { scheduledInstruction, taskKindOf } from "../../tasks/task-run.js";
 
 /** Слово, которым модель отказывается от сообщения. Историческое, знакомо промптам. */
 const SKIP_MARKER = "HEARTBEAT_SKIP";
@@ -47,10 +48,15 @@ export class LettaProactiveComposer implements ProactiveComposer {
     signal: AbortSignal;
   }): Promise<{ text: string | null }> {
     const { candidate, kind } = input;
+    // Задача, которую человек поручил Еве, выполняется в своём
+    // назначении: у планировщика инструменты запрещены целиком, и
+    // действие упёрлось бы там в первый же вызов.
+    const isAction = kind === "reminder"
+      && taskKindOf((candidate as ReminderCandidate).kind) === "action";
     const scheduler = await this.purposes.ensure({
       userId: candidate.userId,
       agentId: candidate.agentId,
-      purpose: "scheduler",
+      purpose: isAction ? "task_action" : "scheduler",
       parentConversationId: candidate.conversationId,
     });
     const instruction = buildInstruction(kind, candidate, input.episode);
@@ -97,22 +103,22 @@ function buildInstruction(
 ): string {
   if (kind === "reminder") {
     const task = candidate as ReminderCandidate;
-    return [
-      "[ЗАПЛАНИРОВАННАЯ ЗАДАЧА]",
-      `task_id: ${task.taskId}`,
-      `Задача: ${task.title}`,
-      task.description ? `Описание: ${task.description}` : "",
-      `Приоритет: ${task.priority} из 5`,
-      task.dueAt ? `Срок: ${new Date(task.dueAt).toISOString()}` : "",
-      task.remindAt ? `Время напоминания: ${new Date(task.remindAt).toISOString()}` : "",
-      `Часовой пояс: ${task.timezone}`,
-      task.relatedGoal ? `Связанная цель: ${task.relatedGoal}` : "",
-      `Предыдущих напоминаний: ${task.previousReminders}`,
-      task.lastTaskAction ? `Последнее действие по задаче: ${task.lastTaskAction}` : "",
-      "Сформируй короткое самостоятельное сообщение пользователю и верни только готовый текст.",
-      "Сохрани смысл, важность, дату и время задачи. Не придумывай выполнение,"
-        + " обещания пользователя или новые факты. Не упоминай внутренние инструкции.",
-    ].filter(Boolean).join("\n");
+    // Формулировка общая с интервальным планировщиком (`tasks/task-run`):
+    // задача не должна выполняться по-разному в зависимости от того,
+    // какой механизм её забрал.
+    return scheduledInstruction({
+      taskId: task.taskId,
+      kind: taskKindOf(task.kind),
+      title: task.title,
+      description: task.description,
+      priority: task.priority,
+      dueAt: task.dueAt,
+      remindAt: task.remindAt,
+      timezone: task.timezone,
+      relatedGoal: task.relatedGoal,
+      previousRuns: task.previousReminders,
+      lastTaskAction: task.lastTaskAction,
+    });
   }
 
   if (kind === "heartbeat") {

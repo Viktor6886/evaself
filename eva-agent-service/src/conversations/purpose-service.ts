@@ -18,6 +18,7 @@ export const CONVERSATION_PURPOSES = [
   "goal_review",
   "partner_analysis",
   "research",
+  "task_action",
 ] as const;
 
 export type ConversationPurpose = (typeof CONVERSATION_PURPOSES)[number];
@@ -52,6 +53,10 @@ const PURPOSE_TEXT: Record<ConversationPurpose, { summary: string; description: 
   research: {
     summary: "Исследование",
     description: "Поиск информации без опасных операций и изменения профиля",
+  },
+  task_action: {
+    summary: "Выполнение задачи",
+    description: "Запланированное человеком действие: Ева выполняет его сама и отдаёт результат",
   },
 };
 
@@ -160,16 +165,31 @@ export class ConversationPurposeService {
   }
 }
 
+/**
+ * Что позволено в conversation этого назначения.
+ *
+ * `allowedTools` — точный список: `null` означает «не сужаем».
+ * `deniedTools` — точечный запрет поверх него, и нужен он ровно там, где
+ * назначение разрешает работать инструментами, но одно свойство обязано
+ * остаться выключенным. До него `canChangeProfile` был только словом:
+ * профиль защищал пустой список инструментов, а не сам флаг, — и
+ * назначение с непустой работой унесло бы защиту с собой.
+ */
 export function purposePolicy(purpose: ConversationPurpose): {
   canSendToUser: boolean;
   canChangeProfile: boolean;
   allowedTools: string[] | null;
+  deniedTools: string[] | null;
 } {
   switch (purpose) {
     case "chat":
-      return { canSendToUser: true, canChangeProfile: true, allowedTools: null };
+      return {
+        canSendToUser: true, canChangeProfile: true, allowedTools: null, deniedTools: null,
+      };
     case "scheduler":
-      return { canSendToUser: true, canChangeProfile: false, allowedTools: [] };
+      return {
+        canSendToUser: true, canChangeProfile: false, allowedTools: [], deniedTools: null,
+      };
     case "profile":
       return {
         canSendToUser: false,
@@ -179,24 +199,46 @@ export function purposePolicy(purpose: ConversationPurpose): {
           "mark_profile_field_asked",
           "get_user_profile",
         ],
+        deniedTools: null,
       };
     case "goal_review":
       return {
         canSendToUser: false,
         canChangeProfile: false,
         allowedTools: ["get_goal_context", "record_goal_review"],
+        deniedTools: null,
       };
     case "research":
       return {
         canSendToUser: false,
         canChangeProfile: false,
         allowedTools: ["web_search", "PERPLEXITY_SEARCH", "brave_search"],
+        deniedTools: null,
       };
     case "partner_analysis":
       return {
         canSendToUser: false,
         canChangeProfile: false,
         allowedTools: ["get_user_profile", "get_goal_context"],
+        deniedTools: null,
+      };
+    case "task_action":
+      // Человек попросил сделать дело, а не поговорить о нём: сузить
+      // здесь набор инструментов значило бы решить за модель, чем задачу
+      // выполнять, и «найди новости» упёрлось бы в список, который кто-то
+      // забыл дополнить (инвариант 17). Поэтому запрет точечный и ровно
+      // по одному свойству назначения: профиль человека фоновым ходом не
+      // меняется — он меняется в разговоре с ним.
+      return {
+        canSendToUser: true,
+        canChangeProfile: false,
+        allowedTools: null,
+        deniedTools: [
+          "upsert_user_profile_field",
+          "confirm_user_profile_field",
+          "decline_user_profile_field",
+          "mark_profile_field_asked",
+        ],
       };
   }
 }

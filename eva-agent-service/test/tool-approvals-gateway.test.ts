@@ -139,6 +139,23 @@ test("SDK canUseTool uses exact requestId, pauses turn, durable-prompts Telegram
   assert.deepEqual(states, ["approval_pending", "tools_pending"]);
 });
 
+test("фоновый ход не спрашивает подтверждение, а отказывает", async () => {
+  const db = new ApprovalDb(); const sent: unknown[] = [];
+  const service = new ApprovalService(db as never, true, {
+    outbox: { send: async (message: unknown) => { sent.push(message); return { queued: true }; } },
+    pollIntervalMs: 2, waitTimeoutMs: 10,
+  });
+  const decision = await service.canUseTool({
+    userId: 7, chatId: 77, turn: {}, riskFor: () => "destructive", unattended: true,
+  })("delete_tasks", { taskIds: [1] }, { requestId: "sdk-unattended" });
+
+  assert.equal(decision.behavior, "deny");
+  assert.match(String(decision.message), /подтверждения человека/);
+  // Ни вопроса в чат, ни строки ожидания: спрашивать в фоне некого.
+  assert.deepEqual(sent, []);
+  assert.equal(await service.lookup(7, "sdk-unattended"), null);
+});
+
 test("approval prompt and durable affected data redact secrets and raw large text", async () => {
   const db = new ApprovalDb(); const sent: unknown[] = [];
   const service = new ApprovalService(db as never, true, { outbox: { send: async (message: unknown) => { sent.push(message); return { queued: true }; } }, pollIntervalMs: 2, waitTimeoutMs: 10 });
