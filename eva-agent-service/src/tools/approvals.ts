@@ -363,9 +363,19 @@ export class ApprovalService {
     }
   }
 
+  /**
+   * `unattended` — ход, у которого нет человека по ту сторону: фоновое
+   * выполнение запланированной задачи. Спрашивать там подтверждение
+   * бессмысленно и вредно: вопрос уходит в чат, ответа пятнадцать минут
+   * нет, а блокировка пользователя всё это время занята — человек ждёт
+   * ответа на живое сообщение и не понимает, почему Ева молчит. Поэтому
+   * действие, которое человек не разрешил заранее, в фоне не
+   * выполняется: модель получает отказ и говорит о нём словами.
+   */
   canUseTool(input: { userId: number; chatId: number; turn: unknown; riskFor(toolName: string): ToolRisk;
     categoryFor?(toolName: string): MandatoryApprovalCategory | undefined; signal?: AbortSignal;
-    conversationId?: string | null; sessionId?: string | null; actorAllowed?: boolean; toolAllowed?: boolean; riskThreshold?: ToolRisk }): CanUseToolCallback {
+    conversationId?: string | null; sessionId?: string | null; actorAllowed?: boolean; toolAllowed?: boolean;
+    riskThreshold?: ToolRisk; unattended?: boolean }): CanUseToolCallback {
     return async (toolName, toolInput, context) => {
       if (!this.enabled) return { behavior: "allow", message: "Tool approvals disabled" };
       const requestId = context?.requestId;
@@ -377,6 +387,19 @@ export class ApprovalService {
         category: input.categoryFor?.(toolName) });
       if (policy === "deny") return { behavior: "deny", message: "Denied by tool approval policy", interrupt: false };
       if (policy === "allow") return { behavior: "allow", message: "Allowed by tool approval policy" };
+      if (input.unattended) {
+        this.dependencies.logger?.info("Фоновый ход не выполняет действие без подтверждения", {
+          tool: toolName,
+          risk,
+          conversationId: input.conversationId ?? null,
+        });
+        return {
+          behavior: "deny",
+          message: "Это действие требует подтверждения человека, а фоновый ход спросить"
+            + " его не может. Скажи человеку, что нужно его согласие, и не выполняй действие.",
+          interrupt: false,
+        };
+      }
       const action = describeApprovalAction(toolName, toolInput);
       const fingerprint = fingerprintApprovalArguments(toolInput);
       this.dependencies.logger?.info("Ход остановлен подтверждением инструмента", {

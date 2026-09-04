@@ -299,6 +299,9 @@ async function main(): Promise<void> {
       turn: currentTurn(),
       riskFor: toolRisk,
       categoryFor: toolApprovalCategory,
+      // В conversation выполнения запланированной задачи человека нет:
+      // подтверждение там не спрашивается, а отказывается.
+      unattended: runtime.purpose === "task_action",
     });
     return async (toolName, toolInput, context) => {
       // Оболочка и произвольная запись в файловую систему хоста —

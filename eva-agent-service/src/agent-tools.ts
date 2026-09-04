@@ -157,8 +157,11 @@ export class AgentToolFactory {
           // назначение перечисляет, что в ней вообще позволено; список
           // объявлен один раз в purpose-service и записан вместе с самой
           // conversation, поэтому проверка идёт по нему, а не по имени.
-          const allowed = purposePolicy(runtime.purpose as ConversationPurpose).allowedTools;
-          if (allowed !== null && !allowed.includes(name)) {
+          const policy = purposePolicy(runtime.purpose as ConversationPurpose);
+          if (
+            (policy.allowedTools !== null && !policy.allowedTools.includes(name))
+            || policy.deniedTools?.includes(name)
+          ) {
             throw new Error(
               `Инструмент ${name} недоступен в служебном conversation purpose=${runtime.purpose}`,
             );

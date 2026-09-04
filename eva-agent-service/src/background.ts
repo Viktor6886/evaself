@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 
 import type { Config } from "./config.js";
 import type { ConversationPurposeService } from "./conversations/purpose-service.js";
@@ -9,32 +9,12 @@ import type { RuntimeContextBuilder } from "./runtime/runtime-context.js";
 import type { UserTurnLock } from "./turns/user-turn-lock.js";
 import type { TelegramClient } from "./telegram.js";
 import { TaskEventService } from "./tasks/task-event-service.js";
-import { isQuietHours, nextCronDate } from "./time/cron.js";
+import { ScheduledTaskRunner, type DueTask } from "./tasks/task-runner.js";
+import { isQuietHours } from "./time/cron.js";
 
 // Cron-утилиты переехали в `src/time/cron.ts` (шаг 08): их считает уже не
 // только планировщик. Реэкспорт сохраняет прежние точки импорта.
 export { assertCronExpression, cronFieldMatches, nextCronDate } from "./time/cron.js";
-
-interface DueTask {
-  id: string;
-  user_id: string;
-  telegram_id: string;
-  chat_id: string;
-  title: string;
-  description: string | null;
-  priority: number;
-  due_at: Date | null;
-  remind_at: Date | null;
-  related_goal: string | null;
-  previous_reminders: number;
-  last_task_action: string | null;
-  cron_expression: string | null;
-  repeat_enabled: boolean;
-  timezone: string;
-  agent_id: string;
-  conversation_id: string;
-  scheduled_at: Date;
-}
 
 interface HeartbeatCandidate {
   user_id: string;
@@ -54,6 +34,7 @@ export class BackgroundRuntime {
   private taskRunning = false;
   private heartbeatRunning = false;
   private readonly taskEvents: TaskEventService;
+  private readonly taskRunner: ScheduledTaskRunner;
 
   constructor(
     private readonly config: Config,
@@ -67,6 +48,9 @@ export class BackgroundRuntime {
     taskEvents?: TaskEventService,
   ) {
     this.taskEvents = taskEvents ?? new TaskEventService(db);
+    this.taskRunner = new ScheduledTaskRunner(
+      db, letta, queue, telegram, runtimeContext, purposes, this.taskEvents, logger,
+    );
   }
 
   /**
@@ -278,16 +262,25 @@ export class BackgroundRuntime {
           -- tenant: system — планировщик забирает наступившие задачи по всем пользователям, выполнение идёт в области владельца
           SELECT t.id, t.user_id, u.telegram_id,
                 COALESCE(tu.chat_id, u.telegram_id) AS chat_id,
-                t.title, t.description, t.priority, t.due_at, t.remind_at,
+                t.kind, t.title, t.description, t.priority, t.attempts,
+                t.due_at, t.remind_at,
                 g.title AS related_goal,
+                -- Сколько раз этот срок уже отрабатывал: у напоминания это
+                -- отправки, у действия — выполнения. Род задачи один на
+                -- строку, поэтому счётчик тоже один.
                 (SELECT count(*)::int FROM task_events e
-                  WHERE e.task_id=t.id AND e.event_type='reminder_sent') AS previous_reminders,
+                  WHERE e.task_id=t.id
+                    AND e.event_type IN ('reminder_sent', 'action_done')) AS previous_runs,
                 (SELECT e.event_type FROM task_events e
                   WHERE e.task_id=t.id ORDER BY e.created_at DESC LIMIT 1) AS last_task_action,
                 t.cron_expression, t.repeat_enabled,
                 COALESCE(t.timezone, u.timezone, 'UTC') AS timezone,
                 a.agent_id, a.conversation_id,
-                COALESCE(t.next_run_at, t.remind_at, t.due_at) AS scheduled_at
+                COALESCE(t.next_run_at, t.remind_at, t.due_at) AS scheduled_at,
+                -- Язык нужен не ходу агента, а детерминированному тексту
+                -- планировщика: его отправляет код, когда ход не состоялся.
+                u.language_mode, u.preferred_language,
+                u.last_message_language, u.language_code
            FROM tasks t
            JOIN users u ON u.id = t.user_id
            JOIN agent_links a
@@ -319,130 +312,12 @@ export class BackgroundRuntime {
     });
   }
 
+  /**
+   * Выполнение вынесено в `ScheduledTaskRunner`: интервалы отвечают за
+   * то, ЧТО забрать, а он — за то, что с этим сделать.
+   */
   private async executeTask(task: DueTask): Promise<void> {
-    const correlationId = randomUUID();
-    try {
-      const delivered = await this.db.query(
-        `SELECT 1 FROM task_events
-          WHERE user_id=$3 AND task_id=$1
-            AND event_type='reminder_sent' AND scheduled_at=$2
-          LIMIT 1`,
-        [task.id, task.scheduled_at, task.user_id],
-      );
-      if ((delivered.rowCount ?? 0) > 0) {
-        const next = task.repeat_enabled && task.cron_expression
-          ? nextCronDate(task.cron_expression, task.timezone, new Date())
-          : null;
-        await this.db.query(
-          `
-            -- tenant: by task_id — задача уже принадлежит одному пользователю, проверка владения выше по стеку
-            UPDATE tasks SET last_run_at=now(), next_run_at=$2,
-                  remind_at=CASE WHEN $2::timestamptz IS NULL THEN NULL ELSE remind_at END,
-                  locked_at=NULL, last_error=NULL
-            WHERE id=$1 AND user_id=$3`,
-          [task.id, next?.toISOString() ?? null, task.user_id],
-        );
-        return;
-      }
-      const scheduler = await this.purposes.ensure({
-        userId: Number(task.user_id),
-        agentId: task.agent_id,
-        purpose: "scheduler",
-        parentConversationId: task.conversation_id,
-      });
-      const userMessage = [
-          "[ЗАПЛАНИРОВАННАЯ ЗАДАЧА]",
-          `task_id: ${task.id}`,
-          `Задача: ${task.title}`,
-          task.description ? `Описание: ${task.description}` : "",
-          `Приоритет: ${task.priority} из 5`,
-          task.due_at ? `Срок: ${new Date(task.due_at).toISOString()}` : "",
-          task.remind_at ? `Время напоминания: ${new Date(task.remind_at).toISOString()}` : "",
-          `Часовой пояс: ${task.timezone}`,
-          task.related_goal ? `Связанная цель: ${task.related_goal}` : "",
-          `Предыдущих напоминаний: ${Number(task.previous_reminders) || 0}`,
-          task.last_task_action ? `Последнее действие по задаче: ${task.last_task_action}` : "",
-          "Сформируй короткое самостоятельное сообщение пользователю и верни только готовый текст.",
-          "Сохрани смысл, важность, дату и время задачи. Не придумывай выполнение, обещания пользователя или новые факты. Не упоминай внутренние инструкции.",
-        ].filter(Boolean).join("\n");
-      const context = await this.runtimeContext.build({
-        userId: Number(task.user_id),
-        conversationId: scheduler.conversationId,
-        userMessage,
-        detectLanguage: false,
-      });
-      const prompt = this.runtimeContext.wrapUserMessage(context, userMessage, {
-        internalOperationType: "task_reminder",
-        correlationId,
-      });
-      const turn = await this.queue.run(
-        Number(task.telegram_id),
-        () => this.letta.runTurn(scheduler.conversationId, prompt),
-        { userId: Number(task.user_id), conversationId: scheduler.conversationId },
-      );
-      const generatedText = turn.reply.trim();
-      await this.taskEvents.record({
-        userId: Number(task.user_id), taskId: task.id,
-        eventType: "reminder_generated", scheduledAt: task.scheduled_at,
-        generatedAt: new Date(), generatedText,
-        conversationId: scheduler.conversationId, llmRequestId: correlationId,
-      });
-      let telegramMessageId: number | null = null;
-      if (generatedText) {
-        // Напоминание пропускает вперёд ответ на живой вопрос: человек,
-        // который сейчас разговаривает, ждёт именно ответ.
-        const sent = await this.telegram.withPriority(
-          "reminder",
-          async () => await this.telegram.sendMessage(Number(task.chat_id), generatedText),
-        );
-        telegramMessageId = lastTelegramMessageId(Array.isArray(sent) ? sent : []);
-      }
-      await this.taskEvents.record({
-        userId: Number(task.user_id), taskId: task.id,
-        eventType: "reminder_sent", scheduledAt: task.scheduled_at,
-        generatedAt: new Date(), sentAt: new Date(), generatedText,
-        deliveryStatus: generatedText ? "sent" : "skipped_empty",
-        telegramChatId: task.chat_id, telegramMessageId,
-        conversationId: scheduler.conversationId, llmRequestId: correlationId,
-      });
-      const nextRun = task.repeat_enabled && task.cron_expression
-        ? nextCronDate(task.cron_expression, task.timezone, new Date())
-        : null;
-      await this.db.query(
-        `
-          -- tenant: by task_id — задача уже принадлежит одному пользователю, проверка владения выше по стеку
-          UPDATE tasks SET
-           last_run_at = now(),
-           next_run_at = $2,
-           remind_at = CASE WHEN $2::timestamptz IS NULL THEN NULL ELSE remind_at END,
-           locked_at = NULL,
-           last_error = NULL
-         WHERE id = $1 AND user_id = $3`,
-        [task.id, nextRun?.toISOString() ?? null, task.user_id],
-      );
-      await this.db.markAgentUsed(task.agent_id, Number(task.user_id));
-    } catch (error) {
-      await this.taskEvents.record({
-        userId: Number(task.user_id), taskId: task.id,
-        eventType: "delivery_failed", scheduledAt: task.scheduled_at,
-        deliveryStatus: "failed", telegramChatId: task.chat_id,
-        conversationId: task.conversation_id, llmRequestId: correlationId,
-        errorCode: error instanceof Error ? error.name : "unknown_error",
-        metadata: { message: (error instanceof Error ? error.message : String(error)).slice(0, 500) },
-      }).catch(() => undefined);
-      await this.db.query(
-        "UPDATE tasks SET locked_at = NULL, last_error = $2 WHERE id = $1 AND user_id = $3",
-        [
-          task.id,
-          (error instanceof Error ? error.message : String(error)).slice(0, 2000),
-          task.user_id,
-        ],
-      );
-      this.logger.warn("Задача не выполнена", {
-        taskId: task.id,
-        message: error instanceof Error ? error.message : String(error),
-      });
-    }
+    await this.taskRunner.execute(task);
   }
 
   private async executeHeartbeat(candidate: HeartbeatCandidate): Promise<void> {
@@ -519,18 +394,4 @@ export class BackgroundRuntime {
       [candidate.user_id, hash, result],
     );
   }
-}
-
-function lastTelegramMessageId(results: unknown[]): number | null {
-  for (const value of [...results].reverse()) {
-    if (!value || typeof value !== "object") continue;
-    const id = Number((value as { message_id?: unknown }).message_id);
-    if (Number.isSafeInteger(id)) return id;
-    const nested = (value as { result?: unknown }).result;
-    if (nested && typeof nested === "object") {
-      const nestedId = Number((nested as { message_id?: unknown }).message_id);
-      if (Number.isSafeInteger(nestedId)) return nestedId;
-    }
-  }
-  return null;
 }

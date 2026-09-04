@@ -77,7 +77,8 @@ BullMQ не обрабатывает интерактивный ход и не �
 | Профиль | Поля профиля и подтверждения | `src/profile/profile-service.ts` |
 | Цели | Цели, результаты и рабочие блоки | `src/goals/goal-service.ts` |
 | Курсор программ | Где человек внутри длинной guided-программы; не дублирует VECTOR-Action | `src/goals/goal-program-service.ts`, `src/goals/goal-program-tools.ts` |
-| Задачи | Напоминания и события | `src/tasks/task-event-service.ts` |
+| Задачи | Напоминания, отложенные действия и события | `src/tasks/task-event-service.ts`, `src/tasks/task-run.ts`, `src/tasks/task-runner.ts` |
+| Отложенное действие | `tasks.kind='action'`: в назначенное время Ева выполняет задачу сама в conversation назначения `task_action` и отдаёт результат; попытки ограничены, суточный потолок действий — 20 | `src/tasks/task-run.ts`, `src/tasks/task-runner.ts`, `src/conversations/purpose-service.ts` |
 | Платежи | Telegram Stars, intents и выдача подписки | `src/payments/stars.ts`, `src/payments/grant.ts` |
 | Статус подписки | Read-only инструмент и навык текущего пользователя: тариф, срок, дни и остатки суточной/недельной/месячной квоты; модель не принимает ID и не может менять данные | `src/subscriptions/status-service.ts`, `src/subscriptions/subscription-tools.ts`, `../skills/subscription-status/SKILL.md` |
 | Уведомления доступа | Настраиваемые предупреждения за 3/1 день до окончания и одно durable-уведомление о закончившихся периодах сообщений; без LLM, ключи содержат подписку/срок или начало периода | `src/subscriptions/expiry-notifier.ts`, `src/subscriptions/quota-exhaustion-notifier.ts` |

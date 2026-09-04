@@ -17,6 +17,8 @@ import type { ProactiveCandidate } from "./service.js";
 
 export interface ReminderCandidate extends ProactiveCandidate {
   taskId: string;
+  /** Род задачи: напомнить человеку или выполнить самой. */
+  kind: string;
   title: string;
   description: string | null;
   priority: number;
@@ -45,6 +47,7 @@ interface CandidateRow {
 
 interface ReminderRow extends CandidateRow {
   task_id: string;
+  kind: string;
   title: string;
   description: string | null;
   priority: number;
@@ -205,11 +208,12 @@ export class ProactiveSelection {
         `-- tenant: system — планировщик смотрит наступившие задачи всех
          -- пользователей, выполнение идёт в области владельца
          SELECT ${CANDIDATE_COLUMNS},
-                task.id AS task_id, task.title, task.description, task.priority,
-                task.due_at, task.remind_at,
+                task.id AS task_id, task.kind, task.title, task.description,
+                task.priority, task.due_at, task.remind_at,
                 g.title AS related_goal,
                 (SELECT count(*)::int FROM task_events e
-                  WHERE e.task_id = task.id AND e.event_type = 'reminder_sent')
+                  WHERE e.task_id = task.id
+                    AND e.event_type IN ('reminder_sent', 'action_done'))
                   AS previous_reminders,
                 (SELECT e.event_type FROM task_events e
                   WHERE e.task_id = task.id ORDER BY e.created_at DESC LIMIT 1)
@@ -236,6 +240,7 @@ export class ProactiveSelection {
       // Часовой пояс задачи сильнее пояса пользователя: напоминание
       // назначено в конкретной зоне и при переезде не переезжает.
       taskId: row.task_id,
+      kind: row.kind,
       title: row.title,
       description: row.description,
       priority: Number(row.priority) || 3,

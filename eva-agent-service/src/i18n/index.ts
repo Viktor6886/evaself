@@ -50,6 +50,12 @@ const ru = {
   attachmentTooLarge: "Файл слишком большой. Пришли версию поменьше или текстом.",
   nothingToStop: "Сейчас нечего останавливать.",
   transcript: "Распознала: {text}",
+  // Детерминированные сообщения планировщика. Их отправляет код, когда
+  // ход агента не состоялся: молчание на месте обещанного действия
+  // выглядит так, будто задачи никогда и не было.
+  scheduledReminderFallback: "Напоминаю: {title}",
+  scheduledActionFailed:
+    "Не получилось сделать это самой: «{title}». Напиши, когда будешь — попробуем вместе.",
   // Один текст на все технические причины отказа. Пользователю
   // нечего делать с «провайдер вернул 429», а «попробуй ещё раз» —
   // есть что. Полная причина остаётся в логе и в панели.
@@ -104,6 +110,9 @@ const en: Record<keyof typeof ru, string> = {
   attachmentTooLarge: "That file is too large. Send a smaller version or paste the text.",
   nothingToStop: "There is nothing to stop right now.",
   transcript: "Transcribed: {text}",
+  scheduledReminderFallback: "A reminder: {title}",
+  scheduledActionFailed:
+    "I could not do this on my own: “{title}”. Write to me and we will try together.",
   voiceFailed:
     "I could not transcribe that voice message. Please send it again or write to me instead.",
 };
