@@ -36,7 +36,7 @@ export const AGENT_SDK_PACKAGE = "@letta-ai/letta-agent-sdk";
  * объектах SDK. Поведение на работающем App Server остаётся за smoke.
  */
 export const VERIFIED_VERSIONS = {
-  agentSdk: "0.7.1",
+  agentSdk: "0.7.3",
 } as const;
 
 /**

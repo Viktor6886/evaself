@@ -22,7 +22,7 @@ Agent SDK и App Server:
 - выбор инструментов на ход.
 
 Версии согласованы по фактической зависимости пакета:
-`@letta-ai/letta-agent-sdk` **0.7.1** → `@letta-ai/letta-code` **0.30.11**
+`@letta-ai/letta-agent-sdk` **0.7.3** → `@letta-ai/letta-code` **0.30.28**
 → `@letta-ai/letta-client` **1.12.1**. Патча SDK нет.
 
 Согласованы они не вручную. Клиент и App Server говорят по одному
