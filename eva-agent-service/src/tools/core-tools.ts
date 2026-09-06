@@ -887,17 +887,48 @@ export class CoreToolFactory {
       ? options.language
       : undefined;
 
-    let found = await this.searxng(query, limit, { category, timeRange, language });
-    // Расход списывается один раз за вызов инструмента и только после
-    // того, как поиск ответил: недоступный SearXNG не должен стоить
-    // человеку попытки. Повтор без языкового фильтра — та же попытка, и
-    // второй раз не списывается.
-    await this.db.incrementUsage(runtime.telegramId, "web_search");
+    // Сужения снимаются по одному, от узкого запроса к широкому.
+    //
     // Языковой фильтр SearXNG отсекает жёстко: у редкого запроса на
     // русском выдача бывает пустой там, где без фильтра ответ есть.
-    if (language && found.results.length === 0
-      && found.answers.length === 0 && found.infoboxes.length === 0) {
-      found = await this.searxng(query, limit, { category, timeRange });
+    // Окно свежести понимают не все движки — у тех, кто его не
+    // понимает, запрос с `time_range` возвращает пустоту, и «новости
+    // Перми за неделю» не находились не потому, что их нет.
+    //
+    // Каждая ступень строго шире предыдущей, поэтому цикл либо находит,
+    // либо честно заканчивается пустотой.
+    const ladder: Array<{
+      options: { category?: string; timeRange?: string; language?: string };
+      relaxed: string[];
+    }> = [{ options: { category, timeRange, language }, relaxed: [] }];
+    if (language) {
+      ladder.push({ options: { category, timeRange }, relaxed: ["language"] });
+    }
+    if (timeRange) {
+      ladder.push({
+        options: { category },
+        relaxed: language ? ["language", "time_range"] : ["time_range"],
+      });
+    }
+
+    let found = EMPTY_SEARCH;
+    let relaxed: string[] = [];
+    let charged = false;
+    for (const step of ladder) {
+      found = await this.searxng(query, limit, step.options);
+      relaxed = step.relaxed;
+      // Расход списывается один раз за вызов инструмента и только после
+      // того, как поиск ответил: недоступный SearXNG не должен стоить
+      // человеку попытки. Снятые сужения — та же попытка, и второй раз
+      // не списываются.
+      if (!charged) {
+        await this.db.incrementUsage(runtime.telegramId, "web_search");
+        charged = true;
+      }
+      if (found.results.length > 0 || found.answers.length > 0
+        || found.infoboxes.length > 0) {
+        break;
+      }
     }
 
     const failed = found.unresponsive.length > 0
@@ -922,7 +953,18 @@ export class CoreToolFactory {
       ok: true,
       query,
       ...(category ? { category } : {}),
-      ...(timeRange ? { time_range: timeRange } : {}),
+      // Окно свежести называется только если оно действительно
+      // соблюдено. Снятое — отдельным полем: без него модель говорила бы
+      // «вот новости за неделю» о выдаче, в которой недели нет.
+      ...(timeRange && !relaxed.includes("time_range") ? { time_range: timeRange } : {}),
+      ...(relaxed.length > 0
+        ? {
+          relaxed_filters: relaxed,
+          relaxed_note: "По исходному запросу ничего не нашлось, поэтому"
+            + " перечисленные ограничения были сняты. Не выдавай результат"
+            + " за то, чему он больше не удовлетворяет.",
+        }
+        : {}),
       // Прямые ответы SearXNG — курс, погода, перевод единиц — приходят
       // отдельно от ссылок и раньше терялись целиком: инструмент читал
       // только `results`, и погода до Евы просто не доезжала.
@@ -1022,6 +1064,14 @@ export class CoreToolFactory {
  * движков, и «ничего не найдено» получается не из-за интернета, а из-за
  * опечатки в аргументе.
  */
+/** Пустой ответ поиска: начальное значение лестницы сужений. */
+const EMPTY_SEARCH = {
+  results: [] as Array<Record<string, unknown>>,
+  answers: [] as string[],
+  infoboxes: [] as Array<Record<string, unknown>>,
+  unresponsive: [] as string[],
+};
+
 const SEARCH_CATEGORIES = new Set([
   "general", "news", "weather", "science", "it", "map", "images", "videos",
 ]);
