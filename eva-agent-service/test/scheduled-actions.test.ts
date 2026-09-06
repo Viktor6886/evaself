@@ -459,8 +459,12 @@ test("живое сообщение отодвигает фоновую зада
   // Ход выполнения задачи держит блокировку пользователя. Без уступки
   // человек, написавший в эту минуту, ждал бы её до конца — до десяти
   // минут молчания в ответ на «привет».
-  const db = fakeDb((sql) =>
-    sql.includes("FROM telegram_updates") ? [{ ok: 1 }] : null);
+  // Строка приёма апдейта: `user_id` пуст, заполнен `telegram_user_id`.
+  // Проверка, искавшая по `user_id`, не совпадала никогда.
+  const db = fakeDb((sql, values) =>
+    sql.includes("FROM telegram_updates") && Number(values[0]) === 77
+      ? [{ ok: 1 }]
+      : null);
   const layer = harness({ db, cancel: true });
   await layer.runner.execute(taskRow() as never);
 
@@ -476,8 +480,10 @@ test("напоминание живому сообщению не уступае
   // Напоминание — это одно короткое сообщение, а не работа минутами:
   // уступать здесь нечему, а барьер стоил бы запроса к базе на каждый
   // десяток событий потока.
-  const db = fakeDb((sql) =>
-    sql.includes("FROM telegram_updates") ? [{ ok: 1 }] : null);
+  const db = fakeDb((sql, values) =>
+    sql.includes("FROM telegram_updates") && Number(values[0]) === 77
+      ? [{ ok: 1 }]
+      : null);
   const layer = harness({ db, cancel: true });
   await layer.runner.execute(taskRow({ kind: "reminder" }) as never);
   assert.equal(layer.sent.length, 1);

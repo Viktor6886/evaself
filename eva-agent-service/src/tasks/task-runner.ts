@@ -12,6 +12,7 @@ import { randomUUID } from "node:crypto";
 import type { ConversationPurposeService } from "../conversations/purpose-service.js";
 import type { Database } from "../db.js";
 import { EvaError } from "../errors.js";
+import { LiveMessageWatch } from "../turns/live-message.js";
 import { preferredResponseLanguage, t } from "../i18n/index.js";
 import type { LettaService } from "../letta.js";
 import type { Logger } from "../logger.js";
@@ -113,7 +114,12 @@ export class ScheduledTaskRunner {
      * получилось». `undefined` — общий потолок.
      */
     private readonly actionTurnTimeoutMs?: number,
-  ) {}
+  ) {
+    this.liveMessages = new LiveMessageWatch(db);
+  }
+
+  /** Ждёт ли человек ответа прямо сейчас. */
+  private readonly liveMessages: LiveMessageWatch;
 
   /**
    * Наступивший срок задачи.
@@ -238,14 +244,16 @@ export class ScheduledTaskRunner {
             // человек, написавший в эту минуту, ждал бы её до конца —
             // до десяти минут молчания в ответ на «привет».
             //
-            // Барьер спрашивается раз в пять секунд: это запрос к базе,
-            // и на десятиминутной работе разница между пятью секундами
-            // и двумя — это сотня лишних запросов ради задержки, которой
-            // человек не заметит.
+            // Барьер спрашивается раз в две секунды. Это запрос к базе,
+            // но дешёвый: частичный индекс `telegram_updates_delivery_idx`
+            // покрывает ровно непринятые строки, а их обычно ноль.
+            // Столько человек и ждёт ответа на «привет», пока идёт чужая
+            // работа, — дороже платить ему секундами, чем базе запросами.
             ...(kind === "action"
               ? {
-                isCancelled: async () => await this.userIsWriting(task, turnStartedAt),
-                cancelPollMs: 5_000,
+                isCancelled: async () =>
+                await this.liveMessages.waiting(Number(task.telegram_id), turnStartedAt),
+                cancelPollMs: 2_000,
               }
               : {}),
           });
@@ -326,36 +334,6 @@ export class ScheduledTaskRunner {
       [task.id, retryAt.toISOString(), task.user_id],
     );
     this.logger.info("Задача уступила живому сообщению", { taskId: task.id });
-  }
-
-  /**
-   * Человек написал, пока Ева делала своё дело.
-   *
-   * Проверяется непринятое входящее: строка `telegram_updates`, до
-   * которой обработчик ещё не дошёл, — она и стоит в очереди за
-   * блокировкой, которую держит этот ход. Уступка стоит переделанной
-   * работы, ожидание стоит человеку десяти минут молчания в ответ на
-   * живое сообщение; второе дороже.
-   *
-   * Отказ запроса уступкой не считается: потерять ход из-за сорванной
-   * проверки хуже, чем один раз не уступить.
-   */
-  private async userIsWriting(task: DueTask, since: Date): Promise<boolean> {
-    try {
-      const { rowCount } = await this.db.query(
-        `
-          -- tenant: by user_id — входящие того же владельца, что и задача
-          SELECT 1 FROM telegram_updates
-           WHERE user_id = $1
-             AND status IN ('queued', 'retry')
-             AND received_at >= $2
-           LIMIT 1`,
-        [task.user_id, since.toISOString()],
-      );
-      return (rowCount ?? 0) > 0;
-    } catch {
-      return false;
-    }
   }
 
   /**
