@@ -545,19 +545,92 @@ export class PublicRepository implements PublicDataSource {
           );
         }
         if (!Object.hasOwn(input, "windows")) return;
-        await client.query(
-          "DELETE FROM proactive_windows WHERE user_id = $1",
+
+        // Окно сохраняет свой идентификатор между сохранениями.
+        //
+        // Раньше набор переписывался целиком — `DELETE` и `INSERT`, — и
+        // каждое окно получало новый `bigserial id`. Слот выбранной на
+        // сегодня минуты собран из этого идентификатора, поэтому любая
+        // правка настроек делала уже разложенное окно «ещё не
+        // тронутым»: планировщик выбирал ему ВТОРУЮ минуту в те же
+        // сутки, и человек получал два сообщения там, где просил одно.
+        const { rows: before } = await client.query<{
+          id: string; start_minute: number; end_minute: number;
+          weekdays: number[] | null; enabled: boolean;
+        }>(
+          `SELECT id::text, start_minute, end_minute, weekdays, enabled
+             FROM proactive_windows WHERE user_id = $1`,
           [user.id],
         );
+        const previous = new Map(before.map((row) => [row.id, row]));
+        const kept: string[] = [];
+        const rescheduled: string[] = [];
+
         for (const window of windows) {
+          const existing = window.id ? previous.get(window.id) : undefined;
+          if (existing) {
+            await client.query(
+              `UPDATE proactive_windows
+                  SET start_minute = $3, end_minute = $4,
+                      weekdays = $5::smallint[], enabled = $6, label = $7
+                WHERE id = $1 AND user_id = $2`,
+              [
+                window.id, user.id, window.startMinute, window.endMinute,
+                window.weekdays, window.enabled, window.label,
+              ],
+            );
+            kept.push(window.id!);
+            // Время окна изменилось — значит изменилось и то, когда
+            // сегодня писать. Уже выбранная минута считалась по старым
+            // границам и за новыми могла оказаться вовсе.
+            if (existing.start_minute !== window.startMinute
+              || existing.end_minute !== window.endMinute
+              || existing.enabled !== window.enabled
+              || [...(existing.weekdays ?? [])].sort().join() !== [...window.weekdays].sort().join()) {
+              rescheduled.push(window.id!);
+            }
+          } else {
+            const { rows } = await client.query<{ id: string }>(
+              `INSERT INTO proactive_windows
+                 (user_id, start_minute, end_minute, weekdays, enabled, label)
+               VALUES ($1, $2, $3, $4::smallint[], $5, $6)
+               RETURNING id::text`,
+              [
+                user.id, window.startMinute, window.endMinute,
+                window.weekdays, window.enabled, window.label,
+              ],
+            );
+            kept.push(rows[0]!.id);
+          }
+        }
+
+        // Снятые окна. Ссылка на окно в запланированном сообщении —
+        // `ON DELETE SET NULL`, поэтому без этого шага уже выбранная
+        // минута пережила бы удаление окна и сработала бы сама по себе.
+        await client.query(
+          `UPDATE proactive_messages
+              SET status = 'skipped', reason = 'window_removed'
+            WHERE user_id = $1 AND kind = 'initiative' AND status = 'scheduled'
+              AND window_id IS NOT NULL
+              AND NOT (window_id::text = ANY($2::text[]))`,
+          [user.id, kept],
+        );
+        await client.query(
+          `DELETE FROM proactive_windows
+            WHERE user_id = $1 AND NOT (id::text = ANY($2::text[]))`,
+          [user.id, kept],
+        );
+
+        // Изменённые окна: ещё не отправленная минута снимается, и
+        // планировщик выберет новую по новым границам. Отправленное не
+        // трогается — слот остаётся занятым, и второго сообщения в те же
+        // сутки не будет.
+        if (rescheduled.length > 0) {
           await client.query(
-            `INSERT INTO proactive_windows
-               (user_id, start_minute, end_minute, weekdays, enabled, label)
-             VALUES ($1, $2, $3, $4::smallint[], $5, $6)`,
-            [
-              user.id, window.startMinute, window.endMinute,
-              window.weekdays, window.enabled, window.label,
-            ],
+            `DELETE FROM proactive_messages
+              WHERE user_id = $1 AND kind = 'initiative' AND status = 'scheduled'
+                AND window_id::text = ANY($2::text[])`,
+            [user.id, rescheduled],
           );
         }
       });
@@ -1148,6 +1221,8 @@ function optionalEnum<T extends string>(
 
 /** Окно, пришедшее из Mini App, после проверки. */
 interface ParsedProactiveWindow {
+  /** Идентификатор уже существующего окна; `null` — окно новое. */
+  id: string | null;
   startMinute: number;
   endMinute: number;
   weekdays: number[];
@@ -1191,6 +1266,10 @@ function parseProactiveWindows(value: unknown): ParsedProactiveWindow[] {
       throw new Error("weekdays — дни недели по ISO: от 1 (понедельник) до 7");
     }
     return {
+      // Идентификатор — то, чем окно остаётся собой между сохранениями.
+      // Владение проверяется при записи: чужой идентификатор не найдётся
+      // среди окон этого человека и будет прочитан как новое окно.
+      id: optionalText(item.id, 40),
       startMinute,
       endMinute,
       weekdays,

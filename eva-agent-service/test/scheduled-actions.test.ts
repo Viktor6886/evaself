@@ -470,3 +470,17 @@ test("у действия свой потолок хода, у напомина�
   await reminder.runner.execute(taskRow({ kind: "reminder" }) as never);
   assert.equal(reminder.turns[0]!.timeoutMs, undefined);
 });
+
+test("ожиданий на одно меньше, чем вопросов", () => {
+  // Между тремя вопросами два ожидания. Третий интервал в списке был бы
+  // кодом, до которого исполнение не доходит никогда.
+  const now = new Date("2026-09-04T10:00:00Z");
+  const delays: number[] = [];
+  for (let waits = 1; waits <= MAX_APPROVAL_WAITS; waits += 1) {
+    const at = approvalRetryAt(waits, now);
+    if (at) delays.push(at.getTime() - now.getTime());
+  }
+  assert.equal(delays.length, MAX_APPROVAL_WAITS - 1);
+  assert.deepEqual(delays, [...delays].sort((left, right) => left - right));
+  assert.ok(new Set(delays).size === delays.length, "одинаковых отступов быть не должно");
+});

@@ -71,6 +71,7 @@ export function windowOccurrence(
   window: Pick<ProactiveWindow, "id" | "startMinute" | "endMinute" | "weekdays">,
   localDate: string,
   timezone: string,
+  now: Date,
   random: () => number = Math.random,
 ): WindowOccurrence | null {
   const tz = zone(timezone);
@@ -78,24 +79,35 @@ export function windowOccurrence(
   if (!day.isValid) return null;
   if (!window.weekdays.includes(day.weekday)) return null;
 
-  const width = window.endMinute - window.startMinute;
+  // Через `plus`, а не через `set({ hour, minute })`: в день перехода на
+  // летнее время местного времени 02:30 не существует вовсе, и `set`
+  // отдал бы невалидную дату. Прибавление к началу суток даёт ближайшее
+  // существующее мгновение — сообщение сдвигается на час, а не пропадает.
+  const opens = day.plus({ minutes: window.startMinute });
+  const closes = day.plus({ minutes: window.endMinute });
+
+  // Минута выбирается только из ещё не прошедшей части окна.
+  //
+  // Окно, заведённое в 11:30 на 11:00–12:00, иначе получило бы минуту в
+  // прошлом — и сообщение ушло бы через секунду после того, как человек
+  // нажал «Сохранить». Это не инициатива, а отклик на нажатие кнопки.
+  const from = DateTime.fromJSDate(now, { zone: tz }) > opens
+    ? DateTime.fromJSDate(now, { zone: tz }).plus({ minutes: 1 }).startOf("minute")
+    : opens;
+  const width = Math.floor(closes.diff(from, "minutes").minutes);
+  // Окно уже закончилось (или закончится в течение минуты): догонять его
+  // нечем — пропущенное окно не догоняется.
   if (width <= 0) return null;
   // `Math.min` страхует от `random()`, вернувшего единицу: спецификация
   // её исключает, но подменённый в тесте генератор — нет, а минута,
   // равная концу окна, ушла бы за его границу.
   const offset = Math.min(width - 1, Math.floor(random() * width));
 
-  // Через `plus`, а не через `set({ hour, minute })`: в день перехода на
-  // летнее время местного времени 02:30 не существует вовсе, и `set`
-  // отдал бы невалидную дату. Прибавление к началу суток даёт ближайшее
-  // существующее мгновение — сообщение сдвигается на час, а не пропадает.
-  const scheduledFor = day.plus({ minutes: window.startMinute + offset });
-  const validUntil = day.plus({ minutes: window.endMinute });
   return {
     localDate,
     slotKey: initiativeSlotKey(localDate, window.id),
-    scheduledFor: scheduledFor.toJSDate(),
-    validUntil: validUntil.toJSDate(),
+    scheduledFor: from.plus({ minutes: offset }).toJSDate(),
+    validUntil: closes.toJSDate(),
   };
 }
 
@@ -130,7 +142,7 @@ export class ProactiveWindowPlanner {
    * забираются, поэтому обычный заход не делает ничего и стоит одного
    * индексного запроса.
    */
-  async plan(limit = 200): Promise<number> {
+  async plan(limit = 200, now: Date = new Date()): Promise<number> {
     const rows = await this.due(limit);
     let planned = 0;
     for (const row of rows) {
@@ -143,6 +155,7 @@ export class ProactiveWindowPlanner {
         },
         row.local_date,
         row.timezone,
+        now,
         this.random,
       );
       // Сегодня окно не работает — этот день недели человек не выбирал.

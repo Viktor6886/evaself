@@ -54,7 +54,7 @@ export class ProactiveInitiativeRunner {
     // сегодняшнего дня выбраны на прошлом заходе, и человек ждёт их, а
     // не завтрашних.
     try {
-      result.planned = await this.planner.plan();
+      result.planned = await this.planner.plan(undefined, now);
     } catch (error) {
       this.logger.warn("Окна инициативы не разложены", {
         message: error instanceof Error ? error.message : String(error),

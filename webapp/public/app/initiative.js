@@ -127,7 +127,9 @@
       render(host);
     });
     host.querySelector("#initiative-add").addEventListener("click", () => {
-      state.draft.windows.push({ ...DEFAULT_WINDOW, weekdays: [1, 2, 3, 4, 5, 6, 7], enabled: true });
+      state.draft.windows.push({
+        id: null, ...DEFAULT_WINDOW, weekdays: [1, 2, 3, 4, 5, 6, 7], enabled: true,
+      });
       render(host);
     });
     host.querySelector("#initiative-save").addEventListener("click", () => void save(host));
@@ -170,6 +172,7 @@
         body: JSON.stringify({
           enabled: state.draft.enabled,
           windows: state.draft.windows.map((window) => ({
+            id: window.id ?? null,
             start_minute: window.start_minute,
             end_minute: window.end_minute,
             weekdays: window.weekdays,
@@ -203,6 +206,11 @@
     state.draft = {
       enabled: loaded.enabled !== false,
       windows: (loaded.windows || []).map((window) => ({
+        // Идентификатор — то, чем окно остаётся собой между
+        // сохранениями. Без него сервер видел бы правку одного окна как
+        // замену всего набора, и уже назначенная на сегодня минута
+        // выбиралась бы заново.
+        id: window.id ?? null,
         start_minute: Number(window.start_minute),
         end_minute: Number(window.end_minute),
         weekdays: Array.isArray(window.weekdays) && window.weekdays.length

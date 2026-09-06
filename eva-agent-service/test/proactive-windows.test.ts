@@ -8,11 +8,15 @@ import {
 } from "../dist/jobs/proactive/windows.js";
 import { decideProactive, initiativeSlotKey } from "../dist/jobs/proactive/policy.js";
 import { ProactiveService } from "../dist/jobs/proactive/service.js";
+import { PublicRepository } from "../dist/public/routes.js";
 
 const logger = {
   info: () => undefined, warn: () => undefined,
   error: () => undefined, debug: () => undefined,
 };
+
+/** Полночь тех суток, для которых считается окно. */
+const DAY_START = new Date("2026-08-16T19:00:00Z"); // 00:00 17 августа в Екатеринбурге
 
 const WINDOW = {
   id: "7",
@@ -29,7 +33,9 @@ test("минута выбирается внутри окна и не выход
   // Правый край исключается: окно 11:00–12:00 даёт минуты с 11:00 по
   // 11:59. Иначе «до двенадцати» и «с двенадцати» делили бы одну минуту.
   for (const value of [0, 0.5, 0.999999, 1]) {
-    const occurrence = windowOccurrence(WINDOW, "2026-08-17", "Asia/Yekaterinburg", () => value);
+    const occurrence = windowOccurrence(
+      WINDOW, "2026-08-17", "Asia/Yekaterinburg", DAY_START, () => value,
+    );
     assert.ok(occurrence, `random=${value}`);
     const local = new Intl.DateTimeFormat("en-GB", {
       timeZone: "Asia/Yekaterinburg", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
@@ -46,7 +52,8 @@ test("минута действительно разная, а не одна и 
   for (let day = 1; day <= 20; day += 1) {
     seed += 0.137;
     const occurrence = windowOccurrence(
-      WINDOW, `2026-08-${String(day).padStart(2, "0")}`, "UTC", () => seed % 1,
+      WINDOW, `2026-08-${String(day).padStart(2, "0")}`,
+      "UTC", new Date(`2026-08-${String(day).padStart(2, "0")}T00:00:00Z`), () => seed % 1,
     );
     minutes.add(occurrence!.scheduledFor.toISOString().slice(11, 16));
   }
@@ -56,12 +63,14 @@ test("минута действительно разная, а не одна и 
 test("в невыбранный день недели окно не срабатывает", () => {
   // 2026-08-17 — понедельник.
   const weekend = { ...WINDOW, weekdays: [6, 7] };
-  assert.equal(windowOccurrence(weekend, "2026-08-17", "UTC", () => 0.5), null);
-  assert.ok(windowOccurrence(weekend, "2026-08-15", "UTC", () => 0.5));
+  assert.equal(windowOccurrence(weekend, "2026-08-17", "UTC", DAY_START, () => 0.5), null);
+  assert.ok(windowOccurrence(
+    weekend, "2026-08-15", "UTC", new Date("2026-08-15T00:00:00Z"), () => 0.5,
+  ));
 });
 
 test("конец окна приходит вместе с минутой", () => {
-  const occurrence = windowOccurrence(WINDOW, "2026-08-17", "UTC", () => 0.5)!;
+  const occurrence = windowOccurrence(WINDOW, "2026-08-17", "UTC", DAY_START, () => 0.5)!;
   assert.equal(occurrence.validUntil.toISOString(), "2026-08-17T12:00:00.000Z");
   assert.ok(occurrence.scheduledFor < occurrence.validUntil);
   assert.equal(occurrence.slotKey, initiativeSlotKey("2026-08-17", "7"));
@@ -73,7 +82,10 @@ test("переход на летнее время не съедает окно",
   // арифметикой над UTC, попало бы в несуществующее время; прибавление
   // к началу суток отдаёт ближайшее существующее.
   const night = { ...WINDOW, startMinute: 2 * 60, endMinute: 3 * 60 };
-  const occurrence = windowOccurrence(night, "2026-03-29", "Europe/Amsterdam", () => 0.5);
+  const occurrence = windowOccurrence(
+    night, "2026-03-29", "Europe/Amsterdam",
+    new Date("2026-03-28T22:00:00Z"), () => 0.5,
+  );
   assert.ok(occurrence, "окно обязано дать время, а не исчезнуть");
   assert.ok(!Number.isNaN(occurrence.scheduledFor.getTime()));
 });
@@ -132,12 +144,12 @@ test("выбранная минута переживает перезапуск,
     fake as never, logger as never, () => { seed += 0.31; return seed % 1; },
   );
 
-  assert.equal(await planner.plan(), 1);
+  assert.equal(await planner.plan(undefined, DAY_START), 1);
   const first = fake.planned[0]!.scheduled_for;
 
   // Второй заход того же дня: выборка ЕЩЁ отдаёт окно (в фейке она это
   // делает всегда), но слот уже занят — и записи не будет.
-  assert.equal(await planner.plan(), 0);
+  assert.equal(await planner.plan(undefined, DAY_START), 0);
   assert.equal(fake.planned.length, 1);
   assert.equal(fake.planned[0]!.scheduled_for, first);
 });
@@ -151,7 +163,7 @@ test("несколько окон одного дня не мешают друг
     windowRow({ id: "8", start_minute: 17 * 60, end_minute: 18 * 60 }),
   ];
   const planner = new ProactiveWindowPlanner(fake as never, logger as never, () => 0.5);
-  assert.equal(await planner.plan(), 2);
+  assert.equal(await planner.plan(undefined, DAY_START), 2);
   assert.equal(new Set(fake.planned.map((row) => row.slot_key)).size, 2);
 });
 
@@ -160,7 +172,7 @@ test("день, который человек не выбирал, строки 
   // 2026-08-17 — понедельник, а окно только на выходные.
   fake.rows = [windowRow({ weekdays: [6, 7] })];
   const planner = new ProactiveWindowPlanner(fake as never, logger as never, () => 0.5);
-  assert.equal(await planner.plan(), 0);
+  assert.equal(await planner.plan(undefined, DAY_START), 0);
   assert.equal(fake.planned.length, 0);
 });
 
@@ -319,4 +331,186 @@ test("выключенное согласие останавливает окн�
   );
   assert.deepEqual(outcome, { status: "skipped", reason: "consent_withheld" });
   assert.equal(layer.delivered.length, 0);
+});
+
+test("окно, у которого день уже прошёл, минуты не получает", () => {
+  // Пропущенное окно не догоняется. Минута в прошлом означала бы
+  // сообщение, ушедшее в ту же секунду, — а «доброе утро» в три часа
+  // дня человек воспринимает не как заботу, а как сбой.
+  const afternoon = new Date("2026-08-17T09:00:00Z"); // 14:00 в Екатеринбурге
+  assert.equal(
+    windowOccurrence(WINDOW, "2026-08-17", "Asia/Yekaterinburg", afternoon, () => 0.5),
+    null,
+  );
+});
+
+test("окно, заведённое посреди себя, пишет в оставшуюся часть", () => {
+  // Человек нажал «Сохранить» в 11:30 на окно 11:00–12:00. Минута из
+  // прошедшей половины означала бы сообщение через секунду после
+  // нажатия кнопки — это отклик на нажатие, а не инициатива.
+  const midway = new Date("2026-08-17T06:30:00Z"); // 11:30 в Екатеринбурге
+  for (const value of [0, 0.5, 0.999]) {
+    const occurrence = windowOccurrence(
+      WINDOW, "2026-08-17", "Asia/Yekaterinburg", midway, () => value,
+    );
+    assert.ok(occurrence, `random=${value}`);
+    assert.ok(
+      occurrence.scheduledFor > midway,
+      `минута обязана быть впереди: ${occurrence.scheduledFor.toISOString()}`,
+    );
+    assert.ok(occurrence.scheduledFor < occurrence.validUntil);
+  }
+});
+
+// ---------------------------------------------------------------------
+// Окно остаётся собой между сохранениями
+// ---------------------------------------------------------------------
+
+/** База, в которой живут окна и уже выбранные на сегодня минуты. */
+class FakeWindowStore {
+  windows: Record<string, unknown>[] = [];
+  messages: Record<string, unknown>[] = [];
+  private nextId = 1;
+
+  query = async (sql: string, values: unknown[] = []) => {
+    const text = sql.replace(/--[^\n]*\n/g, " ").replace(/\s+/g, " ").trim();
+
+    if (text.includes("FROM users WHERE telegram_id")) {
+      return { rows: [{ id: 7, city: null, timezone: "UTC", language_mode: "auto", preferred_language: null }] };
+    }
+    if (text.includes("FROM user_preferences WHERE user_id")) {
+      return { rows: [{ heartbeat_enabled: true }] };
+    }
+    if (text.startsWith("SELECT id::text, start_minute, end_minute, weekdays, enabled FROM proactive_windows")) {
+      return { rows: this.windows.map((row) => ({ ...row })) };
+    }
+    if (text.startsWith("SELECT id::text, start_minute, end_minute, weekdays, enabled, label")) {
+      return { rows: this.windows.map((row) => ({ ...row })) };
+    }
+    if (text.startsWith("UPDATE proactive_windows SET start_minute")) {
+      const row = this.windows.find((item) => item.id === values[0]);
+      if (row) {
+        row.start_minute = values[2];
+        row.end_minute = values[3];
+        row.weekdays = values[4];
+        row.enabled = values[5];
+        row.label = values[6];
+      }
+      return { rows: [] };
+    }
+    if (text.startsWith("INSERT INTO proactive_windows")) {
+      const row = {
+        id: String(this.nextId++), start_minute: values[1], end_minute: values[2],
+        weekdays: values[3], enabled: values[4], label: values[5],
+      };
+      this.windows.push(row);
+      return { rows: [{ id: row.id }] };
+    }
+    if (text.startsWith("UPDATE proactive_messages SET status = 'skipped', reason = 'window_removed'")) {
+      const kept = values[1] as string[];
+      for (const row of this.messages) {
+        if (row.status === "scheduled" && row.window_id && !kept.includes(String(row.window_id))) {
+          row.status = "skipped";
+          row.reason = "window_removed";
+        }
+      }
+      return { rows: [] };
+    }
+    if (text.startsWith("DELETE FROM proactive_windows")) {
+      const kept = values[1] as string[];
+      this.windows = this.windows.filter((row) => kept.includes(String(row.id)));
+      return { rows: [] };
+    }
+    if (text.startsWith("DELETE FROM proactive_messages")) {
+      const changed = values[1] as string[];
+      this.messages = this.messages.filter(
+        (row) => !(row.status === "scheduled" && changed.includes(String(row.window_id))),
+      );
+      return { rows: [] };
+    }
+    throw new Error(`Неожиданный запрос: ${text.slice(0, 80)}`);
+  };
+
+  withUserScope = async <T>(_scope: unknown, work: () => Promise<T>): Promise<T> => await work();
+  bindScopeUserId = () => undefined;
+  transaction = async <T>(work: (client: { query: typeof this.query }) => Promise<T>): Promise<T> =>
+    await work({ query: this.query });
+}
+
+function repository(store: FakeWindowStore) {
+  return new PublicRepository(store as never, {} as never, {} as never, {} as never);
+}
+
+test("правка одного окна не перекатывает минуту соседнего", async () => {
+  // Набор сохранялся целиком — `DELETE` и `INSERT`, — и каждое окно
+  // получало новый идентификатор. Слот выбранной минуты собран из него,
+  // поэтому любая правка настроек делала уже разложенное окно «ещё не
+  // тронутым»: планировщик выбирал ему ВТОРУЮ минуту в те же сутки, и
+  // человек получал два сообщения там, где просил одно.
+  const store = new FakeWindowStore();
+  store.windows = [
+    { id: "1", start_minute: 660, end_minute: 720, weekdays: [1, 2, 3], enabled: true, label: null },
+    { id: "2", start_minute: 1020, end_minute: 1080, weekdays: [1, 2, 3], enabled: true, label: null },
+  ];
+  store.messages = [
+    { id: "m1", window_id: "1", status: "scheduled", reason: null },
+    { id: "m2", window_id: "2", status: "scheduled", reason: null },
+  ];
+
+  // Человек тронул только второе окно.
+  await repository(store).saveProactiveWindows(4242, {
+    windows: [
+      { id: "1", start_minute: 660, end_minute: 720, weekdays: [1, 2, 3] },
+      { id: "2", start_minute: 1080, end_minute: 1140, weekdays: [1, 2, 3] },
+    ],
+  });
+
+  assert.deepEqual(store.windows.map((row) => row.id), ["1", "2"], "идентификаторы обязаны уцелеть");
+  // Минута нетронутого окна на месте: второго сообщения сегодня не будет.
+  assert.ok(store.messages.some((row) => row.id === "m1" && row.status === "scheduled"));
+  // У изменённого минута снята: она считалась по старым границам.
+  assert.ok(!store.messages.some((row) => row.id === "m2"));
+});
+
+test("снятое окно не срабатывает по уже выбранной минуте", async () => {
+  // Ссылка на окно — `ON DELETE SET NULL`: без явной отмены выбранная
+  // минута пережила бы удаление окна и сработала бы сама по себе.
+  const store = new FakeWindowStore();
+  store.windows = [
+    { id: "1", start_minute: 660, end_minute: 720, weekdays: [1], enabled: true, label: null },
+  ];
+  store.messages = [{ id: "m1", window_id: "1", status: "scheduled", reason: null }];
+
+  await repository(store).saveProactiveWindows(4242, { windows: [] });
+
+  assert.deepEqual(store.windows, []);
+  const message = store.messages.find((row) => row.id === "m1")!;
+  assert.equal(message.status, "skipped");
+  assert.equal(message.reason, "window_removed");
+});
+
+test("отправленное сообщение сохранением настроек не воскрешается", async () => {
+  // Слот отправленного остаётся занятым: иначе правка настроек днём
+  // давала бы второе сообщение в то же окно тех же суток.
+  const store = new FakeWindowStore();
+  store.windows = [
+    { id: "1", start_minute: 660, end_minute: 720, weekdays: [1], enabled: true, label: null },
+  ];
+  store.messages = [{ id: "m1", window_id: "1", status: "sent", reason: null }];
+
+  await repository(store).saveProactiveWindows(4242, {
+    windows: [{ id: "1", start_minute: 600, end_minute: 700, weekdays: [1] }],
+  });
+
+  assert.equal(store.messages.find((row) => row.id === "m1")!.status, "sent");
+});
+
+test("чужой идентификатор окна читается как новое окно, а не крадёт чужое", async () => {
+  const store = new FakeWindowStore();
+  store.windows = [];
+  await repository(store).saveProactiveWindows(4242, {
+    windows: [{ id: "999", start_minute: 660, end_minute: 720, weekdays: [1] }],
+  });
+  assert.equal(store.windows.length, 1);
+  assert.notEqual(store.windows[0]!.id, "999");
 });
