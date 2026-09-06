@@ -141,7 +141,7 @@ export class ProactiveService {
       if (!text) {
         // «Ничего не отправлять» — валидный успешный исход (требование 8
         // шага 8): heartbeat без повода обязан уметь промолчать.
-        await this.finish(claimed, "skipped", "empty_message", null);
+        await this.finish(claimed, "skipped", "empty_message", null, null);
         return { status: "skipped", reason: "empty_message" };
       }
       const delivered = await this.delivery.deliver({
@@ -152,12 +152,12 @@ export class ProactiveService {
         // слота будет занята дважды, outbox отправит одно сообщение.
         idempotencyKey: `proactive:${kind}:${candidate.userId}:${slot.slotKey}`,
       });
-      await this.finish(claimed, "sent", null, delivered.outboxId);
+      await this.finish(claimed, "sent", null, delivered.outboxId, text);
       if (episode) await this.linkEpisode(kind, candidate.userId, episode, claimed);
       return { status: "sent", outboxId: delivered.outboxId };
     } catch (error) {
       const code = error instanceof Error ? error.name : "unknown_error";
-      await this.finish(claimed, "failed", code, null);
+      await this.finish(claimed, "failed", code, null, null);
       this.logger.warn("Проактивное сообщение не отправлено", { kind, code });
       return { status: "failed", code };
     }
@@ -243,11 +243,20 @@ export class ProactiveService {
     }
   }
 
+  /**
+   * Итог попытки.
+   *
+   * Текст сохраняется вместе со статусом, а не отдельным запросом: между
+   * доставкой и записью текста ничего произойти не должно. Без текста
+   * Ева не помнит собственного сообщения — она сочинила его в служебной
+   * conversation, и основной диалог о нём не знает (`OwnMessagesService`).
+   */
   private async finish(
     id: string,
     status: "sent" | "skipped" | "failed",
     reason: string | null,
     outboxId: string | null,
+    text: string | null,
   ): Promise<void> {
     await this.db.withSystemScope(
       "proactive.finish",
@@ -255,9 +264,11 @@ export class ProactiveService {
         `-- tenant: system — строка адресуется своим первичным ключом,
          -- владелец назначен при занятии слота и не меняется
          UPDATE proactive_messages
-            SET status = $2, reason = $3, outbox_id = $4
+            SET status = $2, reason = $3, outbox_id = $4,
+                message_text = $5,
+                sent_at = CASE WHEN $2 = 'sent' THEN now() ELSE sent_at END
           WHERE id = $1`,
-        [id, status, reason, outboxId],
+        [id, status, reason, outboxId, text?.slice(0, 4000) ?? null],
       ),
       { crossUser: true },
     );

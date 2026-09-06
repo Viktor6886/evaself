@@ -3,6 +3,7 @@ import type { AnyAgentTool } from "@letta-ai/letta-agent-sdk";
 import { assertCronExpression, nextCronDate } from "../background.js";
 import type { AgentRuntimeContext, Database } from "../db.js";
 import { localDateTimeToUtc } from "../time/local-date-time.js";
+import { OwnMessagesService } from "../runtime/own-messages.js";
 import { TaskEventService } from "../tasks/task-event-service.js";
 import {
   asObject,
@@ -20,10 +21,12 @@ import {
 
 export class TaskToolFactory {
   private readonly events: TaskEventService;
+  private readonly ownMessages: OwnMessagesService;
   constructor(
     private readonly db: Database,
   ) {
     this.events = new TaskEventService(db);
+    this.ownMessages = new OwnMessagesService(db);
   }
 
   build(tool: ToolBuilder): AnyAgentTool[] {
@@ -74,6 +77,39 @@ export class TaskToolFactory {
             Math.min(Math.max(optionalInteger(args, "limit") ?? 20, 1), 100),
           ),
         }),
+      ),
+      // Проверка отсутствия эквивалента (инвариант 20): `get_recent_reminders`
+      // отдаёт события задач и о heartbeat, check-in и сообщении в
+      // выбранное человеком окно не знает вовсе — они живут в
+      // `proactive_messages`. Инструмент отвечает на другой вопрос:
+      // «что я отправила сама», независимо от того, каким механизмом.
+      tool(
+        "get_my_sent_messages",
+        "Мои отправленные сообщения",
+        "Возвращает сообщения, которые Ева отправила сама: напоминания, "
+        + "результаты выполненных задач и сообщения по своей инициативе. "
+        + "Нужен, когда человек ссылается на сообщение Евы, а в ходе виден "
+        + "только его укороченный текст.",
+        objectSchema({
+          limit: integer("Количество, максимум 20"),
+          since_hours: integer("За сколько последних часов, максимум 168"),
+        }),
+        async (args, runtime) => {
+          const hours = Math.min(Math.max(optionalInteger(args, "since_hours") ?? 24, 1), 168);
+          const messages = await this.ownMessages.since(
+            runtime.userId,
+            new Date(Date.now() - hours * 3_600_000),
+            Math.min(Math.max(optionalInteger(args, "limit") ?? 10, 1), 20),
+          );
+          return {
+            ok: true,
+            messages: messages.map((message) => ({
+              sent_at: message.sentAt.toISOString(),
+              source: message.source,
+              text: message.text,
+            })),
+          };
+        },
       ),
       tool(
         "get_task_events",

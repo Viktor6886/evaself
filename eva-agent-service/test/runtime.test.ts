@@ -948,3 +948,121 @@ test("размер служебного блока измеряется и ви�
   recordRuntimeContextSize(RUNTIME_CONTEXT_CEILING);
   assert.equal(runtimeContextSizeStats().nearCeilingTotal, before.nearCeilingTotal + 1);
 });
+
+// ---------------------------------------------------------------------
+// Собственные сообщения Евы
+// ---------------------------------------------------------------------
+
+/** Фейк базы, различающий запросы по характерному куску SQL. */
+function routedDb(routes: Array<[string, unknown[]]>, seen: string[] = []) {
+  return {
+    seen,
+    query: async (sql: string) => {
+      seen.push(sql);
+      for (const [marker, rows] of routes) {
+        if (sql.includes(marker)) return { rows };
+      }
+      return { rows: [{ ...CONTEXT_ROW }] };
+    },
+  };
+}
+
+test("Ева видит, что написала сама с прошлого сообщения человека", async () => {
+  // Напоминание сочиняется в служебной conversation и уходит в Telegram
+  // мимо основного диалога. Без этого блока на «ты же мне писала утром»
+  // Еве нечего ответить: для неё этого утра не было.
+  const now = new Date("2026-08-15T12:00:00Z");
+  const db = routedDb([
+    ["UNION ALL", [{
+      sent_at: new Date("2026-08-15T09:30:00Z"),
+      message_text: "Напоминаю про зубного в 11:00.",
+      source: "task",
+    }]],
+  ]);
+  const builder = new RuntimeContextBuilder(db as never, {
+    defaultTimezone: "UTC", profileCompletionEnabled: false,
+    vectorGoalsEnabled: false, now: () => now,
+  });
+  const context = await builder.build({
+    userId: 1, conversationId: "c", userMessage: "спасибо, сходил",
+    previousUserMessageAt: new Date("2026-08-15T08:00:00Z"),
+  });
+
+  assert.deepEqual(context.ownMessages, [
+    "15 августа, 14:30: «Напоминаю про зубного в 11:00.»",
+  ]);
+  const prompt = builder.wrapUserMessage(context, "спасибо, сходил");
+  assert.match(prompt, /i_wrote_since_your_last_message:/);
+  assert.match(prompt, /Напоминаю про зубного/);
+});
+
+test("собственные сообщения стоят выше журнала событий задач", async () => {
+  // Блок обрезается по общему потолку с конца. Первым обязан уцелеть
+  // текст, который Ева сказала своими словами: событие «отправлено
+  // напоминание» она восстановит из задачи, текст — ниоткуда.
+  const now = new Date("2026-08-15T12:00:00Z");
+  const db = routedDb([
+    ["UNION ALL", [{
+      sent_at: new Date("2026-08-15T09:30:00Z"),
+      message_text: "Своими словами",
+      source: "proactive",
+    }]],
+    ["JOIN tasks t ON t.id=e.task_id", [{
+      title: "Зубной", event_type: "reminder_sent",
+      created_at: new Date("2026-08-15T09:30:00Z"), task_status: "open",
+    }]],
+  ]);
+  const builder = new RuntimeContextBuilder(db as never, {
+    defaultTimezone: "UTC", profileCompletionEnabled: false,
+    vectorGoalsEnabled: false, now: () => now,
+  });
+  const context = await builder.build({
+    userId: 1, conversationId: "c", userMessage: "ок", previousUserMessageAt: null,
+  });
+  const prompt = builder.wrapUserMessage(context, "ок");
+  assert.ok(
+    prompt.indexOf("i_wrote_since_your_last_message:") < prompt.indexOf("recent_task_events:"),
+    "собственное сообщение обязано стоять до журнала событий",
+  );
+});
+
+test("фоновый ход сам узнаёт, когда человек писал в последний раз", async () => {
+  // У живого хода граница уже на руках: `recordUserMessage` вернул
+  // предыдущее значение. У фонового её нет, и спросить базу — это
+  // единственный способ не показать Еве её же сообщение как новое.
+  const seen: string[] = [];
+  const db = routedDb([
+    ["LEFT JOIN heartbeat_state h ON h.user_id = u.id", [{
+      at: new Date("2026-08-15T08:00:00Z"),
+    }]],
+    ["UNION ALL", []],
+  ], seen);
+  const builder = new RuntimeContextBuilder(db as never, {
+    defaultTimezone: "UTC", profileCompletionEnabled: false,
+    vectorGoalsEnabled: false, now: () => new Date("2026-08-15T12:00:00Z"),
+  });
+  await builder.build({ userId: 1, conversationId: "c", userMessage: "[HEARTBEAT CONTROL]" });
+  assert.ok(
+    seen.some((sql) => sql.includes("LEFT JOIN heartbeat_state h ON h.user_id = u.id")),
+    "граница фонового хода обязана читаться из базы",
+  );
+});
+
+test("живой ход не спрашивает у базы то, что ему уже передали", async () => {
+  // Спросить базу здесь значило бы получить время только что
+  // записанного сообщения человека и не показать Еве ничего никогда.
+  const seen: string[] = [];
+  const db = routedDb([["UNION ALL", []]], seen);
+  const builder = new RuntimeContextBuilder(db as never, {
+    defaultTimezone: "UTC", profileCompletionEnabled: false,
+    vectorGoalsEnabled: false, now: () => new Date("2026-08-15T12:00:00Z"),
+  });
+  await builder.build({
+    userId: 1, conversationId: "c", userMessage: "привет",
+    previousUserMessageAt: null,
+  });
+  assert.ok(
+    !seen.some((sql) => sql.includes("LEFT JOIN heartbeat_state h ON h.user_id = u.id")),
+    "живому ходу граница уже передана",
+  );
+});

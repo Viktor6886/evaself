@@ -17,6 +17,7 @@ import {
   type MessageBatchTiming,
 } from "../turns/message-timeline.js";
 import { TaskEventService } from "../tasks/task-event-service.js";
+import { OWN_MESSAGE_LINES, OwnMessagesService } from "./own-messages.js";
 
 export interface RuntimeContext {
   userId: number;
@@ -94,6 +95,13 @@ export interface RuntimeContext {
   taskActivity?: string[];
   /** Ближайшие напоминания: когда сработают и через сколько. */
   upcomingReminders?: string[];
+  /**
+   * Что Ева отправила сама с прошлого сообщения человека.
+   *
+   * Без этого её собственное сообщение проходит мимо неё: сочиняется в
+   * служебной conversation, уходит в Telegram и нигде больше не звучит.
+   */
+  ownMessages?: string[];
   /** Окно быстрых сообщений: сколько их и за какое время. `null` — одно. */
   messageBatch?: string | null;
   /** По строке на сообщение окна: порядок, время и промежуток. */
@@ -203,6 +211,7 @@ export function runtimeContextSizeStats(): RuntimeContextSizeStats {
 export class RuntimeContextBuilder {
   private readonly languageResolver: LanguageResolver;
   private readonly taskEvents: TaskEventService;
+  private readonly ownMessages: OwnMessagesService;
   private readonly cache = new Map<string, { expiresAt: number; row: RuntimeContextRow }>();
 
   constructor(
@@ -219,6 +228,7 @@ export class RuntimeContextBuilder {
   ) {
     this.languageResolver = new LanguageResolver(db);
     this.taskEvents = new TaskEventService(db);
+    this.ownMessages = new OwnMessagesService(db);
   }
 
   async build(input: {
@@ -280,9 +290,21 @@ export class RuntimeContextBuilder {
     // ответа человеку не должен ждать два round-trip подряд.
     // Момент напоминания и остаток до него считает серверный код: модель
     // берёт такой остаток из головы и ошибается на часы.
-    const [taskActivity, upcomingReminders] = await Promise.all([
+    //
+    // Граница собственных сообщений — прошлое сообщение человека. У
+    // живого хода оно уже на руках (`recordUserMessage` вернул
+    // предыдущее значение), и спрашивать базу заново нельзя: там уже
+    // записано время только что пришедшего сообщения, и выборка была бы
+    // пуста всегда. У фонового хода вызывающий его не знает, и тогда —
+    // и только тогда — граница читается из базы.
+    const ownSince = input.previousUserMessageAt !== undefined
+      ? input.previousUserMessageAt
+      : await this.ownMessages.lastUserMessageAt(input.userId).catch(() => null);
+    const [taskActivity, upcomingReminders, ownMessages] = await Promise.all([
       this.taskEvents.contextLines(input.userId, timezone).catch(() => []),
       this.taskEvents.upcomingLines(input.userId, timezone, local.toJSDate()).catch(() => []),
+      this.ownMessages.lines(input.userId, timezone, ownSince, OWN_MESSAGE_LINES)
+        .catch(() => []),
     ]);
     return {
       userId: Number(row.user_id),
@@ -328,6 +350,7 @@ export class RuntimeContextBuilder {
       llmQualityMode: input.modelPolicy ?? row.llm_quality_mode,
       taskActivity,
       upcomingReminders,
+      ownMessages,
       messageBatch: input.messageBatch ? batchSummary(input.messageBatch) : null,
       messageTimeline: input.messageBatch ? timelineLines(input.messageBatch, timezone) : [],
       metrics: {
@@ -413,6 +436,17 @@ export class RuntimeContextBuilder {
     if (timeline.length > 0) {
       lines.push("message_times:", ...timeline.map((item) => `  - ${escapeContextValue(item)}`));
     }
+    // Собственные сообщения стоят ВЫШЕ журнала событий задач намеренно.
+    // Блок обрезается по общему потолку с конца, и первым обязано
+    // уцелеть то, что Ева сказала человеку своими словами: событие
+    // «отправлено напоминание «зубной»» она восстановит из задачи, а
+    // текст сообщения — ниоткуда.
+    const own = (context.ownMessages ?? []).slice(0, 3)
+      .map((item) => `  - ${escapeContextValue(item)}`);
+    if (own.length > 0) {
+      lines.push("i_wrote_since_your_last_message:", ...own);
+    }
+
     const events = (context.taskActivity ?? []).slice(0, 5)
       .map((item) => `  - ${escapeContextValue(item)}`);
     if (events.length > 0) lines.push("recent_task_events:", ...events);

@@ -8,6 +8,7 @@ import type { Logger } from "./logger.js";
 import type { RuntimeContextBuilder } from "./runtime/runtime-context.js";
 import type { UserTurnLock } from "./turns/user-turn-lock.js";
 import type { TelegramClient } from "./telegram.js";
+import { proactiveSlot } from "./jobs/proactive/policy.js";
 import { TaskEventService } from "./tasks/task-event-service.js";
 import { ScheduledTaskRunner, type DueTask } from "./tasks/task-runner.js";
 import { isQuietHours } from "./time/cron.js";
@@ -364,6 +365,7 @@ export class BackgroundRuntime {
         async () => await this.telegram.sendMessage(Number(candidate.chat_id), reply),
       );
       await this.saveHeartbeat(candidate, hash, "sent");
+      await this.recordOwnMessage(candidate, reply);
       await this.db.markAgentUsed(candidate.agent_id, Number(candidate.user_id));
     } catch (error) {
       this.logger.warn("Heartbeat не отправлен", {
@@ -376,6 +378,53 @@ export class BackgroundRuntime {
          ON CONFLICT (user_id) DO UPDATE SET last_result = EXCLUDED.last_result`,
         [candidate.user_id, `error:${String(error).slice(0, 500)}`],
       );
+    }
+  }
+
+  /**
+   * Отправленный heartbeat как собственное сообщение Евы.
+   *
+   * `heartbeat_state` хранит sha256 последнего сообщения: этого хватает
+   * на защиту от дубля и не хватает ни на что другое — хэш нельзя
+   * прочитать. Поэтому текст ложится туда же, куда его кладёт очередь,
+   * — в `proactive_messages`, и следующий ход видит его одним запросом
+   * независимо от того, какой механизм отправлял (`OwnMessagesService`).
+   *
+   * Второй строки не будет: старый интервал и очередь никогда не
+   * работают одновременно — их разводит `legacySchedulerActive`, — а
+   * слот всё равно уникален.
+   *
+   * Отказ записи не отменяет отправленного сообщения: оно уже у
+   * человека, и ронять из-за журнала успешный heartbeat незачем.
+   */
+  private async recordOwnMessage(
+    candidate: HeartbeatCandidate,
+    text: string,
+  ): Promise<void> {
+    const slot = proactiveSlot("heartbeat", candidate.timezone, new Date());
+    try {
+      await this.db.query(
+        `INSERT INTO proactive_messages
+           (user_id, kind, slot_key, local_date, timezone, status,
+            message_text, sent_at)
+         VALUES ($1, 'heartbeat', $2, $3::date, $4, 'sent', $5, now())
+         ON CONFLICT (user_id, kind, slot_key) DO UPDATE
+           SET status = 'sent',
+               message_text = EXCLUDED.message_text,
+               sent_at = EXCLUDED.sent_at`,
+        [
+          candidate.user_id,
+          slot.slotKey,
+          slot.localDate,
+          slot.timezone,
+          text.slice(0, 4000),
+        ],
+      );
+    } catch (error) {
+      this.logger.warn("Собственное сообщение Евы не записано", {
+        userId: candidate.user_id,
+        message: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 

@@ -210,6 +210,8 @@ class FakeProactiveDatabase {
         row.status = values[1];
         row.reason = values[2];
         row.outbox_id = values[3];
+        row.message_text = values[4];
+        if (values[1] === "sent") row.sent_at = new Date(this.now);
       }
       return { rows: [] as never };
     }
@@ -594,4 +596,33 @@ test("сверка отличает отказ от «проблем нет»", 
   assert.equal(outbox?.status, "checked");
   assert.equal(report.total, 0);
   assert.deepEqual(report.degraded, []);
+});
+
+test("отправленное сообщение остаётся текстом, а не только фактом", async () => {
+  // Слот знал, что сообщение было, и не знал, каким оно было. Для Евы
+  // это означало, что своего утреннего сообщения она не помнит: оно
+  // сочинено в служебной conversation и в основной диалог не попадало.
+  const layer = buildService("Доброе утро. С чем входишь в день?");
+  const now = new Date("2026-08-10T06:00:00Z"); // 09:00 в Москве
+
+  const outcome = await layer.service.handle("checkin_morning", candidate(), { now });
+  assert.equal(outcome.status, "sent");
+
+  const row = layer.fake.messages.at(-1)!;
+  assert.equal(row.message_text, "Доброе утро. С чем входишь в день?");
+  assert.ok(row.sent_at instanceof Date, "у отправленного обязано быть время отправки");
+});
+
+test("несостоявшееся сообщение текста после себя не оставляет", async () => {
+  // Молчание — валидный исход, и записывать его как сообщение нельзя:
+  // иначе Ева «вспомнит», что писала, когда промолчала.
+  const layer = buildService(null);
+  const outcome = await layer.service.handle(
+    "checkin_morning", candidate(), { now: new Date("2026-08-10T06:00:00Z") },
+  );
+  assert.deepEqual(outcome, { status: "skipped", reason: "empty_message" });
+
+  const row = layer.fake.messages.at(-1)!;
+  assert.equal(row.message_text, null);
+  assert.equal(row.sent_at, undefined);
 });
