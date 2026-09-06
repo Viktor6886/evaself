@@ -423,6 +423,8 @@ export class LettaService {
   private readonly drainTimeoutMs: number;
   /** Conversation, по которым ход выполняется прямо сейчас. */
   private readonly runningTurns = new Set<string>();
+  /** Conversation, которым предел истории уже объявлен в этом процессе. */
+  private readonly contextWindowApplied = new Set<string>();
 
   /** Последний снимок фактических возможностей сессии (init-сообщение SDK). */
   private lastRuntimeFacts: LettaRuntimeFacts | null = null;
@@ -1507,6 +1509,9 @@ export class LettaService {
   ): Promise<TurnResult> {
     const startedAt = Date.now();
     const turnTimeoutMs = Math.max(1_000, options.timeoutMs ?? this.runtime.turn_timeout_ms);
+    // Предел истории объявляется до открытия сессии: `updateConversation`
+    // закрывает сессию, и после неё пришлось бы поднимать её заново.
+    await this.ensureContextWindow(conversationId);
     const pooled = await this.acquirePooled(conversationId, options.allowedTools === undefined ? undefined : {
       allowedTools: options.allowedTools,
       canUseTool: options.canUseTool ?? ((toolName) => options.allowedTools!.includes(toolName)
@@ -1615,6 +1620,41 @@ export class LettaService {
       sessionAcquireMs,
       firstDeltaMs: firstDeltaAt === null ? null : firstDeltaAt - sentAt,
     };
+  }
+
+  /**
+   * Объявить conversation предел истории.
+   *
+   * Диалоги, созданные до того, как предел вообще стал вычисляться,
+   * живут без него: Letta не знает, когда сжимать, и история растёт до
+   * отказа модели. На боевой установке диалог дорос до 770 000 токенов
+   * при окне 256 000 — после чего умирает любое сообщение, включая
+   * «привет», и сжаться сам он уже не может.
+   *
+   * Поэтому предел проставляется существующим conversation, а не только
+   * новым. Один раз на conversation за жизнь процесса: это управляющий
+   * вызов, и повторять его на каждом ходе незачем.
+   *
+   * Отказ не роняет ход: без предела всё работает ровно так, как
+   * работало до сих пор.
+   */
+  private async ensureContextWindow(conversationId: string): Promise<void> {
+    const limit = this.runtime.default_context_window;
+    if (limit === null || this.contextWindowApplied.has(conversationId)) return;
+    this.contextWindowApplied.add(conversationId);
+    try {
+      await this.client.conversations.update(conversationId, {
+        contextWindowLimit: limit,
+      } as never);
+      this.logger.info("conversation context window announced", { conversationId, limit });
+    } catch (error) {
+      // Повторно не пробуем: если App Server не принял предел, он не
+      // примет его и через ход, а ход важнее.
+      this.logger.warn("conversation context window not announced", {
+        conversationId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   /**

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { EvaError, toEvaError, userBusy } from "../dist/errors.js";
+import { EvaError, explainFailure, toEvaError, userBusy } from "../dist/errors.js";
 
 test("the error payload is the stable shape runtime callers branch on", () => {
   const payload = userBusy("busy", 12).toPayload() as {
@@ -55,4 +55,21 @@ test("EvaError defaults are conservative", () => {
   assert.equal(error.code, "internal_error");
   assert.equal(error.statusCode, 500);
   assert.equal(error.retryable, false);
+});
+
+test("владелец получает причину словами, а не только вложенный JSON", () => {
+  // Он получал тысячу двести знаков JSON и должен был вычитывать из них,
+  // что произошло. Самая частая причина читается однозначно.
+  const real = 'running a turn: {"error":{"error":{"type":"llm_error","message":"503: '
+    + '{\\"message\\":\\"выбранная модель несовместима с запросом: запрос примерно на '
+    + '770055 токенов не помещается в 256000\\"}"}}}';
+  const explained = explainFailure(real)!;
+  assert.match(explained, /770055/);
+  assert.match(explained, /256000/);
+  assert.match(explained, /История диалога переросла окно модели/);
+});
+
+test("незнакомая ошибка объяснения не выдумывает", () => {
+  assert.equal(explainFailure("connect ECONNREFUSED 10.0.0.5:8283"), null);
+  assert.equal(explainFailure(""), null);
 });
