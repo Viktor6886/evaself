@@ -11,12 +11,26 @@ import type { TelegramClient } from "./telegram.js";
 import type { ProactiveInitiativeRunner } from "./jobs/proactive/initiative-runner.js";
 import { proactiveSlot } from "./jobs/proactive/policy.js";
 import { TaskEventService } from "./tasks/task-event-service.js";
-import { ScheduledTaskRunner, type DueTask } from "./tasks/task-runner.js";
+import {
+  ScheduledTaskRunner,
+  type ApprovalOutcomeSource,
+  type DueTask,
+} from "./tasks/task-runner.js";
 import { isQuietHours } from "./time/cron.js";
 
 // Cron-утилиты переехали в `src/time/cron.ts` (шаг 08): их считает уже не
 // только планировщик. Реэкспорт сохраняет прежние точки импорта.
 export { assertCronExpression, cronFieldMatches, nextCronDate } from "./time/cron.js";
+
+/**
+ * Сколько людей планировщик обслуживает одновременно.
+ *
+ * Четыре, а не «сколько наберётся»: каждый заход — это ход агента, и
+ * бюджет отдаёт фоновой работе двенадцать слотов из ста двадцати
+ * восьми. Занять их все одним всплеском наступивших задач значит
+ * отобрать слоты у живых разговоров.
+ */
+const SCHEDULER_CONCURRENCY = 4;
 
 interface HeartbeatCandidate {
   user_id: string;
@@ -51,6 +65,13 @@ export class BackgroundRuntime {
     private readonly logger: Logger,
     taskEvents?: TaskEventService,
     /**
+     * Подтверждения действий. Планировщик не выдаёт прав и не решает за
+     * человека — он только узнаёт, чем кончился вопрос, заданный внутри
+     * фонового хода, и переносит задачу вместо того, чтобы считать её
+     * проваленной.
+     */
+    approvals?: ApprovalOutcomeSource | null,
+    /**
      * Заход инициативы. Приходит снаружи, а не собирается здесь:
      * доставка идёт только через durable outbox, а его знает точка
      * сборки, не планировщик. `null` — окна выключены флагом.
@@ -60,6 +81,7 @@ export class BackgroundRuntime {
     this.taskEvents = taskEvents ?? new TaskEventService(db);
     this.taskRunner = new ScheduledTaskRunner(
       db, letta, queue, telegram, runtimeContext, purposes, this.taskEvents, logger,
+      approvals ?? null, config.taskActionTurnTimeoutMs,
     );
   }
 
@@ -217,16 +239,7 @@ export class BackgroundRuntime {
         },
         { crossUser: true },
       );
-      for (const task of tasks) {
-        await this.db.withUserScope(
-          {
-            userId: Number(task.user_id),
-            telegramId: Number(task.telegram_id),
-            label: "scheduler.task",
-          },
-          async () => await this.executeTask(task),
-        );
-      }
+      await this.executeByUser(tasks);
     } catch (error) {
       this.logger.error("Ошибка планировщика задач", {
         message: error instanceof Error ? error.message : String(error),
@@ -295,6 +308,52 @@ export class BackgroundRuntime {
     } finally {
       this.heartbeatRunning = false;
     }
+  }
+
+  /**
+   * Наступившие задачи: разные люди параллельно, один человек — по
+   * очереди.
+   *
+   * Последовательный обход по всем пользователям означал, что одна
+   * длинная задача задерживает чужие напоминания: цепочка «найди —
+   * прочитай — напиши» идёт минутами, а стоящее за ней напоминание
+   * назначено на конкретное время и опаздывает на эти минуты.
+   *
+   * Внутри одного человека порядок сохраняется: у него один активный
+   * мутирующий ход (инвариант 10), и параллельные заходы просто стояли
+   * бы в очереди за его же блокировкой.
+   *
+   * Ширина ограничена: слоты ходов по бюджету принадлежат живым
+   * разговорам (не менее 80%), и фоновая работа не вправе занять больше
+   * своей доли.
+   */
+  private async executeByUser(tasks: DueTask[]): Promise<void> {
+    const byUser = new Map<string, DueTask[]>();
+    for (const task of tasks) {
+      const queue = byUser.get(task.user_id);
+      if (queue) queue.push(task);
+      else byUser.set(task.user_id, [task]);
+    }
+    const queues = [...byUser.values()];
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      while (next < queues.length) {
+        const queue = queues[next++]!;
+        for (const task of queue) {
+          await this.db.withUserScope(
+            {
+              userId: Number(task.user_id),
+              telegramId: Number(task.telegram_id),
+              label: "scheduler.task",
+            },
+            async () => await this.executeTask(task),
+          );
+        }
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(SCHEDULER_CONCURRENCY, queues.length) }, worker),
+    );
   }
 
   private async claimDueTasks(): Promise<DueTask[]> {

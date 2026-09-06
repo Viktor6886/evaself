@@ -81,6 +81,8 @@ export interface Config {
   heartbeatIntervalMs: number;
   /** Ева пишет первой в окна, которые выбрал человек. */
   proactiveInitiativeEnabled: boolean;
+  /** Потолок хода, в котором Ева выполняет запланированное дело сама. */
+  taskActionTurnTimeoutMs: number;
   /** Как часто проверяются наступившие окна. */
   initiativeIntervalMs: number;
   typingIntervalMs: number;
@@ -367,6 +369,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     schedulerIntervalMs: int("EVA_SCHEDULER_INTERVAL_MS", 30_000),
     heartbeatIntervalMs: int("EVA_HEARTBEAT_INTERVAL_MS", 10 * 60_000),
     proactiveInitiativeEnabled: bool("EVA_PROACTIVE_INITIATIVE", false),
+    // Вдвое с лишним больше интерактивного потолка. Человек попросил
+    // заранее и не сидит перед экраном, а цепочка «найди — прочитай —
+    // напиши — опубликуй» в четыре минуты не укладывается: обрыв по
+    // таймауту выглядит для него как «не получилось».
+    taskActionTurnTimeoutMs: clampedInt("EVA_TASK_ACTION_TURN_TIMEOUT_MS", 600_000, 60_000, 1_800_000),
     // Минута выбрана заранее, поэтому точность захода — это точность
     // попадания в неё. Шестьдесят секунд означают опоздание не больше
     // минуты; чаще спрашивать незачем, реже — заметно человеку.

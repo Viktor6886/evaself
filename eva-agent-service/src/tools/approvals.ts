@@ -125,19 +125,110 @@ export class ApprovalService {
     return this.db.withUserScope({ userId, label: "tool.approvals", inherit: true }, work);
   }
 
-  async request(input: { userId: number; conversationId?: string | null; sdkRequestId: string; toolName: string; risk: ToolRisk; description: string; affectedData?: Record<string, unknown>; argumentFingerprint?: string }): Promise<ApprovalRow> {
+  async request(input: { userId: number; conversationId?: string | null; sdkRequestId: string; toolName: string; risk: ToolRisk; description: string; affectedData?: Record<string, unknown>; argumentFingerprint?: string; unattended?: boolean }): Promise<ApprovalRow> {
     if (!this.enabled) throw new Error("Tool approvals are disabled");
     if (!input.sdkRequestId) throw new Error("SDK request id is required");
     return await this.scoped(input.userId, async () => {
       const { rows } = await this.db.query<ApprovalRow>(
-        `INSERT INTO tool_approvals (user_id, conversation_id, sdk_request_id, tool_name, risk, argument_fingerprint, status, action_description, affected_data)
-         VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8)
+        `INSERT INTO tool_approvals (user_id, conversation_id, sdk_request_id, tool_name, risk, argument_fingerprint, status, action_description, affected_data, unattended)
+         VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8, $9)
          ON CONFLICT (user_id, sdk_request_id) DO UPDATE SET sdk_request_id = EXCLUDED.sdk_request_id
          RETURNING user_id, conversation_id, sdk_request_id, tool_name, risk, status, decision`,
-        [input.userId, input.conversationId ?? null, input.sdkRequestId, input.toolName, input.risk, input.argumentFingerprint ?? fingerprintApprovalArguments({}), input.description.slice(0, 240), input.affectedData ?? {}],
+        [input.userId, input.conversationId ?? null, input.sdkRequestId, input.toolName, input.risk, input.argumentFingerprint ?? fingerprintApprovalArguments({}), input.description.slice(0, 240), input.affectedData ?? {}, input.unattended === true],
       );
       return rows[0]!;
     });
+  }
+
+  /**
+   * Чем кончился вопрос, заданный фоновым ходом в этой conversation.
+   *
+   * Нужен планировщику: он не видит, что происходило внутри хода, и
+   * без этого не отличит «человека спросили и ждём» от «действие не
+   * удалось». Первое — повод перенести задачу, второе — повод считать
+   * попытку.
+   *
+   * Берётся последняя запись: заход мог упереться в подтверждение не с
+   * первого вызова инструмента, и ранние строки того же захода уже
+   * закрыты.
+   */
+  async lastUnattendedApproval(
+    userId: number,
+    conversationId: string,
+    since: Date,
+  ): Promise<{ status: ApprovalStatus; toolName: string; description: string } | null> {
+    if (!this.enabled) return null;
+    return await this.scoped(userId, async () => {
+      const { rows } = await this.db.query<{
+        status: ApprovalStatus; tool_name: string; action_description: string;
+      }>(
+        `SELECT status, tool_name, action_description
+           FROM tool_approvals
+          WHERE user_id = $1 AND conversation_id = $2
+            AND unattended AND created_at >= $3
+          ORDER BY created_at DESC
+          LIMIT 1`,
+        [userId, conversationId, since.toISOString()],
+      );
+      const row = rows[0];
+      return row
+        ? { status: row.status, toolName: row.tool_name, description: row.action_description }
+        : null;
+    });
+  }
+
+  /**
+   * Уже спрошенное не спрашивается второй раз.
+   *
+   * Задача возвращается к тому же действию на каждом повторе, и без
+   * этой проверки человек получал бы одинаковый вопрос столько раз,
+   * сколько было повторов. Сверяются инструмент и отпечаток аргументов:
+   * тот же инструмент с другими аргументами — другое действие, и
+   * молчаливо разрешать его нельзя.
+   */
+  private async pendingUnattendedRequest(
+    userId: number,
+    conversationId: string | null,
+    toolName: string,
+    fingerprint: string,
+  ): Promise<boolean> {
+    if (!conversationId) return false;
+    return await this.scoped(userId, async () => {
+      const { rowCount } = await this.db.query(
+        `SELECT 1 FROM tool_approvals
+          WHERE user_id = $1 AND conversation_id = $2 AND tool_name = $3
+            AND argument_fingerprint = $4 AND status = 'pending' AND unattended
+          LIMIT 1`,
+        [userId, conversationId, toolName, fingerprint],
+      );
+      return (rowCount ?? 0) > 0;
+    });
+  }
+
+  /**
+   * Согласие, данное на фоновое действие, обязано пережить сам ход.
+   *
+   * Ход, задавший вопрос, уже закончился: ждать ответа он не мог —
+   * блокировка пользователя стоит дороже. Работу переделает следующий
+   * заход задачи, и без выданного права он упёрся бы в тот же вопрос.
+   *
+   * Право узкое и короткое: один инструмент, тот же уровень риска,
+   * один час. Часа хватает повтору задачи (он приходит через минуты) и
+   * не хватает, чтобы превратиться в постоянное разрешение, о котором
+   * человек забудет.
+   */
+  private async grantAfterUnattended(row: ApprovalRow): Promise<void> {
+    await this.db.query(
+      `INSERT INTO tool_approval_rules
+         (user_id, tool_name, decision, scope, max_risk, expires_at,
+          actor_type, actor_id, actor_metadata)
+       VALUES ($1, $2, 'allow', 'standing', $3, now() + interval '1 hour',
+               'user', $4, $5::jsonb)`,
+      [
+        row.user_id, row.tool_name, row.risk, String(row.user_id),
+        JSON.stringify({ source: "unattended_approval", sdk_request_id: row.sdk_request_id }),
+      ],
+    );
   }
 
   /**
@@ -258,14 +349,20 @@ export class ApprovalService {
   async decide(input: { userId: number; sdkRequestId: string; status: "approved_once" | "approved_session" | "denied" | "cancelled"; actorDecision: ApprovalDecision }): Promise<ApprovalRow> {
     const decision: ApprovalDecision = input.status === "denied" || input.status === "cancelled" ? "deny" : input.actorDecision;
     return await this.scoped(input.userId, async () => {
-      const { rows } = await this.db.query<ApprovalRow>(
+      const { rows } = await this.db.query<ApprovalRow & { unattended: boolean }>(
         `UPDATE tool_approvals SET status = $1, decision = $2, decided_at = now()
           WHERE user_id = $3 AND sdk_request_id = $4 AND status = 'pending'
-          RETURNING user_id, sdk_request_id, tool_name, risk, status, decision`,
+          RETURNING user_id, sdk_request_id, tool_name, risk, status, decision, unattended`,
         [input.status, decision, input.userId, input.sdkRequestId],
       );
       if (!rows[0]) throw new Error("Pending approval not found");
       const row = rows[0];
+      // Согласие на фоновое действие обязано пережить ход, который его
+      // просил: тот уже закончился, и работу переделает следующий заход
+      // задачи. Отказ права не создаёт вовсе — повторов задачи конечное
+      // число, и постоянный запрет вместо ответа «нет» закрыл бы
+      // инструмент и в живом разговоре.
+      if (row.unattended && decision === "allow") await this.grantAfterUnattended(row);
       for (const resolve of this.waiters.get(`${input.userId}:${input.sdkRequestId}`) ?? []) resolve(decision);
       this.waiters.delete(`${input.userId}:${input.sdkRequestId}`);
       return row;
@@ -387,21 +484,57 @@ export class ApprovalService {
         category: input.categoryFor?.(toolName) });
       if (policy === "deny") return { behavior: "deny", message: "Denied by tool approval policy", interrupt: false };
       if (policy === "allow") return { behavior: "allow", message: "Allowed by tool approval policy" };
+      const action = describeApprovalAction(toolName, toolInput);
+      const fingerprint = fingerprintApprovalArguments(toolInput);
       if (input.unattended) {
-        this.dependencies.logger?.info("Фоновый ход не выполняет действие без подтверждения", {
+        // Фоновый ход спрашивает и заканчивается. Ждать он не может:
+        // пятнадцать минут ожидания — это пятнадцать минут удержанной
+        // блокировки пользователя, и человек, написавший живое
+        // сообщение, всё это время слышит молчание.
+        //
+        // Работу переделает следующий заход задачи, когда согласие
+        // будет получено. Планировщик узнаёт об этом по
+        // `lastUnattendedApproval` и переносит задачу, не считая
+        // попытку.
+        const alreadyAsked = await this.pendingUnattendedRequest(
+          input.userId, input.conversationId ?? null, toolName, fingerprint,
+        );
+        if (!alreadyAsked) {
+          await this.request({
+            userId: input.userId, conversationId: input.conversationId,
+            sdkRequestId: requestId, toolName, risk,
+            description: action.description, affectedData: action.affectedData,
+            argumentFingerprint: fingerprint, unattended: true,
+          });
+          await this.dependencies.outbox?.send({
+            method: "sendMessage", chatId: input.chatId, userId: input.userId,
+            // Ключ по действию, а не по вызову: повтор задачи порождает
+            // новый идентификатор вызова, и без этого человек получил бы
+            // одинаковый вопрос столько раз, сколько было повторов.
+            idempotencyKey: `tool-approval:${input.userId}:${input.conversationId ?? "-"}:${fingerprint}`,
+            priority: "command",
+            payload: {
+              chat_id: input.chatId,
+              text: `Чтобы доделать поручение, нужно твоё согласие: ${action.description}.`
+                + ` Данные: ${JSON.stringify(action.affectedData)}.`
+                + " Откройте Mini App, чтобы разрешить или отклонить — после этого я продолжу сама.",
+            },
+          });
+        }
+        this.dependencies.logger?.info("Фоновый ход спросил подтверждение и закончился", {
           tool: toolName,
           risk,
           conversationId: input.conversationId ?? null,
+          repeated: alreadyAsked,
         });
         return {
           behavior: "deny",
-          message: "Это действие требует подтверждения человека, а фоновый ход спросить"
-            + " его не может. Скажи человеку, что нужно его согласие, и не выполняй действие.",
+          message: "Это действие требует согласия человека. Он уже спрошен, и ход на этом"
+            + " заканчивается: дождись ответа и не выполняй действие сейчас."
+            + " Ничего не сочиняй и не отчитывайся о результате, которого не было.",
           interrupt: false,
         };
       }
-      const action = describeApprovalAction(toolName, toolInput);
-      const fingerprint = fingerprintApprovalArguments(toolInput);
       this.dependencies.logger?.info("Ход остановлен подтверждением инструмента", {
         tool: toolName,
         risk,

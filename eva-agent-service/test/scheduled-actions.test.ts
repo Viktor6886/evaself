@@ -5,10 +5,13 @@ import { AgentToolFactory } from "../dist/agent-tools.js";
 import { withTenantScopes } from "./tenant-scope-helper.ts";
 import { purposePolicy } from "../dist/conversations/purpose-service.js";
 import { TaskEventService } from "../dist/tasks/task-event-service.js";
+import { turnCancelled } from "../dist/errors.js";
 import { ScheduledTaskRunner } from "../dist/tasks/task-runner.js";
 import {
   ACTION_DAILY_LIMIT,
+  MAX_APPROVAL_WAITS,
   MAX_ATTEMPTS,
+  approvalRetryAt,
   retryAfterFailure,
   scheduledInstruction,
   taskKindOf,
@@ -67,13 +70,28 @@ function harness(options: {
   db?: ReturnType<typeof fakeDb>;
   reply?: string;
   fail?: Error;
+  /** Чем кончился вопрос, заданный внутри фонового хода. */
+  approval?: { status: string; toolName: string; description: string } | null;
+  /** Ход уступает живому сообщению: барьер отмены отвечает «да». */
+  cancel?: boolean;
+  actionTurnTimeoutMs?: number;
 } = {}) {
   const db = options.db ?? fakeDb();
-  const turns: Array<{ conversationId: string; prompt: string }> = [];
+  const turns: Array<{
+    conversationId: string; prompt: string; timeoutMs?: number;
+  }> = [];
   const sent: Array<{ chatId: number; text: string }> = [];
+  const deliveries: Array<{ prefix: string; priority: string }> = [];
   const letta = {
-    runTurn: async (conversationId: string, prompt: string) => {
-      turns.push({ conversationId, prompt });
+    runTurn: async (
+      conversationId: string,
+      prompt: string,
+      turnOptions: { timeoutMs?: number; isCancelled?: () => Promise<boolean> } = {},
+    ) => {
+      turns.push({ conversationId, prompt, timeoutMs: turnOptions.timeoutMs });
+      if (options.cancel && await turnOptions.isCancelled?.()) {
+        throw turnCancelled("ход отменён живым сообщением");
+      }
       if (options.fail) throw options.fail;
       return { reply: options.reply ?? "Вот три новости Перми на сегодня: …" };
     },
@@ -81,6 +99,17 @@ function harness(options: {
   const telegram = {
     configured: true,
     withPriority: async (_priority: string, work: () => Promise<unknown>) => await work(),
+    // Результат задачи уходит в durable outbox с ключом идемпотентности,
+    // собранным из задачи и её срока: строка переживает перезапуск,
+    // HTTP-запрос из упавшего процесса — нет.
+    withDeliveryContext: async (
+      prefix: string,
+      work: () => Promise<unknown>,
+      priority: string,
+    ) => {
+      deliveries.push({ prefix, priority });
+      return await work();
+    },
     sendMessage: async (chatId: number, text: string) => {
       sent.push({ chatId, text });
       return [{ message_id: 500 }];
@@ -104,8 +133,12 @@ function harness(options: {
     } as never,
     new TaskEventService(db as never),
     logger,
+    options.approval === undefined
+      ? null
+      : { lastUnattendedApproval: async () => options.approval ?? null },
+    options.actionTurnTimeoutMs,
   );
-  return { db, runner, turns, sent };
+  return { db, runner, turns, sent, deliveries };
 }
 
 function updates(db: ReturnType<typeof fakeDb>): Call[] {
@@ -320,4 +353,120 @@ test("фоновое действие не меняет профиль чело�
     title: "Новости Перми", content: "Три главные новости дня",
   }) as { details?: { ok?: boolean } };
   assert.equal(saved.details?.ok, true);
+});
+
+// ---------------------------------------------------------------------
+// Фоновое действие, которому нужно согласие человека
+// ---------------------------------------------------------------------
+
+test("ход, упершийся в согласие, переносит задачу, а не тратит попытку", async () => {
+  // «Через десять минут сделай пост для моего телеграм-канала»:
+  // публикация — действие с внешним последствием, и фоновый ход не
+  // выполнял его вовсе. Теперь ход спрашивает человека и заканчивается,
+  // не удерживая блокировку, а задача возвращается за ответом.
+  const layer = harness({
+    approval: { status: "pending", toolName: "publish_post", description: "Опубликовать пост" },
+  });
+  await layer.runner.execute(taskRow() as never);
+
+  const waiting = events(layer.db).filter(
+    (call) => call.values[2] === "action_awaiting_approval",
+  );
+  assert.equal(waiting.length, 1, "ожидание согласия обязано оставить след");
+
+  // Попытка не считается: человек ещё не ответил, и исчерпывать на нём
+  // три попытки нельзя.
+  const moved = updates(layer.db).filter((call) => call.sql.includes("next_run_at = $2"));
+  assert.equal(moved.length, 1);
+  assert.equal(layer.sent.length, 0, "второго сообщения о том же вопросе быть не должно");
+
+  // Работы не было — значит и результата тоже.
+  const done = events(layer.db).filter((call) => call.values[2] === "action_done");
+  assert.equal(done.length, 0);
+});
+
+test("отказ человека закрывает задачу, а не повторяет вопрос", async () => {
+  const layer = harness({
+    approval: { status: "denied", toolName: "publish_post", description: "Опубликовать пост" },
+  });
+  await layer.runner.execute(taskRow() as never);
+
+  assert.equal(layer.sent.length, 1);
+  assert.match(layer.sent[0]!.text, /не разрешил/);
+  const closed = updates(layer.db).filter((call) => call.sql.includes("status = CASE WHEN"));
+  assert.equal(closed.length, 1, "задача обязана закрыться, а не ждать снова");
+});
+
+test("вопросы кончаются: человек слышит прямой ответ вместо четвёртого", () => {
+  const now = new Date("2026-09-04T10:00:00Z");
+  assert.ok(approvalRetryAt(1, now));
+  assert.ok(approvalRetryAt(MAX_APPROVAL_WAITS - 1, now));
+  assert.equal(approvalRetryAt(MAX_APPROVAL_WAITS, now), null);
+  // Отступ растёт: тот, кто не ответил за десять минут, занят.
+  assert.ok(approvalRetryAt(2, now)!.getTime() > approvalRetryAt(1, now)!.getTime());
+});
+
+test("без контура подтверждений задача работает по-прежнему", async () => {
+  // `approval: undefined` — источник не передан вовсе.
+  const layer = harness();
+  await layer.runner.execute(taskRow() as never);
+  assert.equal(layer.sent.length, 1);
+  const done = events(layer.db).filter((call) => call.values[2] === "action_done");
+  assert.equal(done.length, 1);
+});
+
+// ---------------------------------------------------------------------
+// Живое сообщение важнее фоновой работы
+// ---------------------------------------------------------------------
+
+test("живое сообщение отодвигает фоновую задачу и не тратит попытку", async () => {
+  // Ход выполнения задачи держит блокировку пользователя. Без уступки
+  // человек, написавший в эту минуту, ждал бы её до конца — до десяти
+  // минут молчания в ответ на «привет».
+  const db = fakeDb((sql) =>
+    sql.includes("FROM telegram_updates") ? [{ ok: 1 }] : null);
+  const layer = harness({ db, cancel: true });
+  await layer.runner.execute(taskRow() as never);
+
+  const moved = updates(layer.db).filter((call) => call.sql.includes("next_run_at = $2"));
+  assert.equal(moved.length, 1, "срок обязан сдвинуться");
+  // Ни отказа, ни сообщения: человек написал сам и сейчас получит ответ.
+  assert.equal(layer.sent.length, 0);
+  const failed = events(layer.db).filter((call) => call.values[2] === "action_failed");
+  assert.equal(failed.length, 0, "уступка — не отказ");
+});
+
+test("напоминание живому сообщению не уступает", async () => {
+  // Напоминание — это одно короткое сообщение, а не работа минутами:
+  // уступать здесь нечему, а барьер стоил бы запроса к базе на каждый
+  // десяток событий потока.
+  const db = fakeDb((sql) =>
+    sql.includes("FROM telegram_updates") ? [{ ok: 1 }] : null);
+  const layer = harness({ db, cancel: true });
+  await layer.runner.execute(taskRow({ kind: "reminder" }) as never);
+  assert.equal(layer.sent.length, 1);
+});
+
+// ---------------------------------------------------------------------
+// Доставка и потолок хода
+// ---------------------------------------------------------------------
+
+test("результат уходит с ключом идемпотентности, а не мимо outbox", async () => {
+  // Падение между ходом и отправкой теряло уже оплаченную работу: ход
+  // агента и поиск стоили денег, а сообщения человек не получал.
+  const layer = harness();
+  await layer.runner.execute(taskRow() as never);
+  assert.equal(layer.deliveries.length, 1);
+  assert.match(layer.deliveries[0]!.prefix, /^task:11:/);
+  assert.equal(layer.deliveries[0]!.priority, "reminder");
+});
+
+test("у действия свой потолок хода, у напоминания — общий", async () => {
+  const action = harness({ actionTurnTimeoutMs: 600_000 });
+  await action.runner.execute(taskRow() as never);
+  assert.equal(action.turns[0]!.timeoutMs, 600_000);
+
+  const reminder = harness({ actionTurnTimeoutMs: 600_000 });
+  await reminder.runner.execute(taskRow({ kind: "reminder" }) as never);
+  assert.equal(reminder.turns[0]!.timeoutMs, undefined);
 });

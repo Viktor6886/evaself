@@ -56,6 +56,14 @@ const ru = {
   scheduledReminderFallback: "Напоминаю: {title}",
   scheduledActionFailed:
     "Не получилось сделать это самой: «{title}». Напиши, когда будешь — попробуем вместе.",
+  // Согласия так и не дождались. Вопрос человек уже видел — здесь
+  // только итог, чтобы задача не заканчивалась молчанием.
+  scheduledActionStarted:
+    "Взялась за «{title}». Займёт пару минут — пришлю, когда будет готово.",
+  scheduledActionApprovalTimeout:
+    "Не стала доделывать «{title}» без твоего согласия. Скажи, когда будет можно.",
+  scheduledActionDeclined:
+    "Не стала доделывать «{title}»: ты не разрешил это действие.",
   // Один текст на все технические причины отказа. Пользователю
   // нечего делать с «провайдер вернул 429», а «попробуй ещё раз» —
   // есть что. Полная причина остаётся в логе и в панели.
@@ -113,6 +121,12 @@ const en: Record<keyof typeof ru, string> = {
   scheduledReminderFallback: "A reminder: {title}",
   scheduledActionFailed:
     "I could not do this on my own: “{title}”. Write to me and we will try together.",
+  scheduledActionStarted:
+    "I am working on “{title}”. It will take a couple of minutes — I will send it when it is ready.",
+  scheduledActionApprovalTimeout:
+    "I did not finish “{title}” without your consent. Tell me when it is fine to go ahead.",
+  scheduledActionDeclined:
+    "I did not finish “{title}”: you declined that action.",
   voiceFailed:
     "I could not transcribe that voice message. Please send it again or write to me instead.",
 };

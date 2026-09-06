@@ -108,6 +108,8 @@
 
       <article class="section-card">
         <p class="muted">Окно должно быть не короче ${minutes} минут, окон — не больше ${limit}.
+        Между двумя сообщениями Ева выдерживает минимум сорок пять минут, поэтому
+        окна вплотную друг к другу дадут одно сообщение, а не два.
         Часовой пояс: ${app().escapeHtml(state.loaded?.timezone || "не определён")}.</p>
         <div class="action-row">
           <button class="secondary-action" type="button" id="initiative-add"

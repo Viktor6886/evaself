@@ -489,6 +489,7 @@ async function main(): Promise<void> {
     purposes,
     logger,
     undefined,
+    approvals,
     initiative,
   );
 

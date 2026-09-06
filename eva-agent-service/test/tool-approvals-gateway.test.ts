@@ -24,7 +24,7 @@ class ApprovalDb {
     }
     if (sql.includes("INSERT INTO tool_approvals")) {
       const key = `${values[0]}:${values[2]}`;
-      if (!this.rows.has(key)) this.rows.set(key, { user_id: values[0], conversation_id: values[1], sdk_request_id: values[2], tool_name: values[3], risk: values[4], argument_fingerprint: values[5], status: "pending", decision: null, action_description: values[6], affected_data: values[7], created_at: this.rows.size, created_at_ms: this.now(), decided_at_ms: null });
+      if (!this.rows.has(key)) this.rows.set(key, { user_id: values[0], conversation_id: values[1], sdk_request_id: values[2], tool_name: values[3], risk: values[4], argument_fingerprint: values[5], status: "pending", decision: null, action_description: values[6], affected_data: values[7], unattended: values[8] === true, created_at: this.rows.size, created_at_ms: this.now(), decided_at_ms: null });
       return { rows: [this.rows.get(key) as T], rowCount: 1 };
     }
     // Примирение: разовое разрешение и незакрытое ожидание не живут
@@ -57,6 +57,36 @@ class ApprovalDb {
         .sort((a, b) => Number(a.created_at) - Number(b.created_at) || String(a.sdk_request_id).localeCompare(String(b.sdk_request_id)))[0];
       if (!row) return { rows: [], rowCount: 0 };
       row.status = outcome; return { rows: [row as T], rowCount: 1 };
+    }
+    // Право, выданное человеком по фоновому вопросу: без него повтор
+    // задачи упёрся бы в тот же вопрос.
+    if (sql.includes("INSERT INTO tool_approval_rules")) {
+      this.rules.push({
+        id: this.rules.length + 1, user_id: values[0], tool_name: values[1],
+        decision: "allow", scope: "standing", max_risk: values[2],
+        session_id: null, expires_at: this.now() + 3_600_000, revoked_at: null,
+        actor_metadata: values[4],
+      });
+      return { rows: [], rowCount: 1 };
+    }
+    // «Уже спрошенное не спрашивается второй раз».
+    if (sql.includes("SELECT 1 FROM tool_approvals")) {
+      const [userId, conversationId, toolName, fingerprint] = values;
+      const rows = [...this.rows.values()].filter((row) => row.user_id === userId
+        && row.conversation_id === conversationId && row.tool_name === toolName
+        && row.argument_fingerprint === fingerprint
+        && row.status === "pending" && row.unattended === true);
+      return { rows: rows as T[], rowCount: rows.length };
+    }
+    // Чем кончился вопрос, заданный фоновым ходом.
+    if (sql.includes("action_description") && sql.includes("unattended")) {
+      const [userId, conversationId] = values;
+      const rows = [...this.rows.values()]
+        .filter((row) => row.user_id === userId && row.conversation_id === conversationId
+          && row.unattended === true)
+        .sort((a, b) => Number(b.created_at) - Number(a.created_at))
+        .slice(0, 1);
+      return { rows: rows as T[], rowCount: rows.length };
     }
     if (sql.includes("UPDATE tool_approvals")) {
       const key = `${values[2]}:${values[3]}`;
@@ -139,21 +169,131 @@ test("SDK canUseTool uses exact requestId, pauses turn, durable-prompts Telegram
   assert.deepEqual(states, ["approval_pending", "tools_pending"]);
 });
 
-test("фоновый ход не спрашивает подтверждение, а отказывает", async () => {
+test("фоновый ход спрашивает человека и заканчивается, а не ждёт", async () => {
+  // Раньше он отказывал молча, и «через десять минут сделай пост в мой
+  // канал» кончалось словами «нужно твоё согласие». Ждать он по-прежнему
+  // не может: пятнадцать минут ожидания — это пятнадцать минут
+  // удержанной блокировки пользователя. Поэтому спрашивает и выходит.
+  const db = new ApprovalDb(); const sent: unknown[] = [];
+  const service = new ApprovalService(db as never, true, {
+    outbox: { send: async (message: unknown) => { sent.push(message); return { queued: true }; } },
+    pollIntervalMs: 2, waitTimeoutMs: 10,
+  });
+  const started = Date.now();
+  const decision = await service.canUseTool({
+    userId: 7, chatId: 77, turn: {}, riskFor: () => "destructive", unattended: true,
+    conversationId: "conversation-task",
+  })("publish_post", { text: "черновик" }, { requestId: "sdk-unattended" });
+
+  // Действие не выполнено: согласия ещё нет.
+  assert.equal(decision.behavior, "deny");
+  assert.match(String(decision.message), /согласия человека/);
+  // Ход не ждал: вернулся сразу, а не через таймаут ожидания.
+  assert.ok(Date.now() - started < 1_000);
+  // Вопрос человеку задан ровно один и записан как фоновый.
+  assert.equal(sent.length, 1);
+  assert.equal((await service.lookup(7, "sdk-unattended"))?.status, "pending");
+  const outcome = await service.lastUnattendedApproval(
+    7, "conversation-task", new Date(0),
+  );
+  assert.equal(outcome?.status, "pending");
+  assert.equal(outcome?.toolName, "publish_post");
+});
+
+test("повтор задачи не спрашивает человека второй раз о том же действии", async () => {
+  // Задача возвращается к тому же действию на каждом повторе. Без
+  // проверки человек получал бы одинаковый вопрос столько раз, сколько
+  // было повторов.
+  const db = new ApprovalDb(); const sent: unknown[] = [];
+  const service = new ApprovalService(db as never, true, {
+    outbox: { send: async (message: unknown) => { sent.push(message); return { queued: true }; } },
+  });
+  const ask = (requestId: string, args: Record<string, unknown>) => service.canUseTool({
+    userId: 7, chatId: 77, turn: {}, riskFor: () => "external_side_effect",
+    unattended: true, conversationId: "conversation-task",
+  })("publish_post", args, { requestId });
+
+  await ask("sdk-1", { text: "черновик" });
+  await ask("sdk-2", { text: "черновик" });
+  assert.equal(sent.length, 1, "второй вопрос о том же действии — шум");
+
+  // Другие аргументы — другое действие: молчаливо разрешать его нельзя.
+  await ask("sdk-3", { text: "совсем другой пост" });
+  assert.equal(sent.length, 2);
+});
+
+test("согласие на фоновое действие переживает ход, который его просил", async () => {
+  // Ход уже закончился — ждать он не мог. Работу переделает следующий
+  // заход задачи, и без выданного права он упёрся бы в тот же вопрос.
+  const db = new ApprovalDb();
+  const service = new ApprovalService(db as never, true, {
+    outbox: { send: async () => ({ queued: true }) },
+  });
+  await service.canUseTool({
+    userId: 7, chatId: 77, turn: {}, riskFor: () => "external_side_effect",
+    unattended: true, conversationId: "conversation-task",
+  })("publish_post", { text: "черновик" }, { requestId: "sdk-unattended" });
+
+  assert.equal(
+    await service.evaluatePolicy({
+      userId: 7, toolName: "publish_post", risk: "external_side_effect",
+      sessionId: null, actorAllowed: true, toolAllowed: true,
+    }),
+    "approval_required",
+    "до ответа человека права нет",
+  );
+
+  await service.decide({
+    userId: 7, sdkRequestId: "sdk-unattended",
+    status: "approved_once", actorDecision: "allow",
+  });
+
+  assert.equal(
+    await service.evaluatePolicy({
+      userId: 7, toolName: "publish_post", risk: "external_side_effect",
+      sessionId: null, actorAllowed: true, toolAllowed: true,
+    }),
+    "allow",
+    "повтор задачи обязан пройти по выданному праву",
+  );
+});
+
+test("отказ человека права не создаёт", async () => {
+  // Постоянный запрет вместо ответа «нет» закрыл бы инструмент и в
+  // живом разговоре, о чём человек не просил. Повторов задачи конечное
+  // число, и их достаточно.
+  const db = new ApprovalDb();
+  const service = new ApprovalService(db as never, true, {
+    outbox: { send: async () => ({ queued: true }) },
+  });
+  await service.canUseTool({
+    userId: 7, chatId: 77, turn: {}, riskFor: () => "external_side_effect",
+    unattended: true, conversationId: "conversation-task",
+  })("publish_post", { text: "черновик" }, { requestId: "sdk-denied" });
+  await service.decide({
+    userId: 7, sdkRequestId: "sdk-denied", status: "denied", actorDecision: "deny",
+  });
+
+  assert.deepEqual(db.rules, []);
+  const outcome = await service.lastUnattendedApproval(7, "conversation-task", new Date(0));
+  assert.equal(outcome?.status, "denied");
+});
+
+test("живой ход подтверждений не изменился: он по-прежнему ждёт ответа", async () => {
   const db = new ApprovalDb(); const sent: unknown[] = [];
   const service = new ApprovalService(db as never, true, {
     outbox: { send: async (message: unknown) => { sent.push(message); return { queued: true }; } },
     pollIntervalMs: 2, waitTimeoutMs: 10,
   });
   const decision = await service.canUseTool({
-    userId: 7, chatId: 77, turn: {}, riskFor: () => "destructive", unattended: true,
-  })("delete_tasks", { taskIds: [1] }, { requestId: "sdk-unattended" });
+    userId: 7, chatId: 77, turn: {}, riskFor: () => "destructive",
+    conversationId: "conversation-chat",
+  })("delete_tasks", { taskIds: [1] }, { requestId: "sdk-live" });
 
+  // Ответа не было — ожидание истекло отказом, а не разрешением.
   assert.equal(decision.behavior, "deny");
-  assert.match(String(decision.message), /подтверждения человека/);
-  // Ни вопроса в чат, ни строки ожидания: спрашивать в фоне некого.
-  assert.deepEqual(sent, []);
-  assert.equal(await service.lookup(7, "sdk-unattended"), null);
+  assert.equal(sent.length, 1);
+  assert.equal((await service.lookup(7, "sdk-live"))?.status, "expired");
 });
 
 test("approval prompt and durable affected data redact secrets and raw large text", async () => {
