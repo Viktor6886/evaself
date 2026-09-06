@@ -23,6 +23,7 @@ import { TaskEventService } from "./task-event-service.js";
 import {
   ACTION_DAILY_LIMIT,
   DAILY_LIMIT_DELAY_MS,
+  actionDeadlinePassed,
   approvalRetryAt,
   retryAfterFailure,
   scheduledInstruction,
@@ -174,6 +175,14 @@ export class ScheduledTaskRunner {
         return;
       }
       if (kind === "action" && await this.postponedByDailyLimit(task)) return;
+
+      // Срок уже опоздал настолько, что перестал быть ответом. Ход
+      // длиной в пять минут здесь только отодвинул бы честное «не
+      // получилось» ещё на пять минут — и потратил бы деньги.
+      if (kind === "action" && actionDeadlinePassed(task.scheduled_at, new Date())) {
+        await this.giveUp(task, "deadline");
+        return;
+      }
 
       const conversation = await this.purposes.ensure({
         userId: Number(task.user_id),
@@ -549,6 +558,41 @@ export class ScheduledTaskRunner {
   }
 
   /**
+   * Срок вышел: сказать прямо и закрыть.
+   *
+   * Молчание на месте обещанного действия выглядит так, будто задачи
+   * никогда и не было, — а именно им заканчивались все сорок две минуты
+   * повторов.
+   */
+  private async giveUp(task: DueTask, reason: string): Promise<void> {
+    const language = preferredResponseLanguage({
+      language_mode: task.language_mode,
+      preferred_language: task.preferred_language,
+      last_message_language: task.last_message_language,
+      language_code: task.language_code,
+    });
+    const text = t(language, "scheduledActionFailed", { title: task.title.slice(0, 200) });
+    try {
+      const sent = await this.deliver(task, text);
+      await this.taskEvents.record({
+        userId: Number(task.user_id), taskId: task.id,
+        eventType: "action_failed", scheduledAt: task.scheduled_at,
+        sentAt: new Date(), generatedText: text, deliveryStatus: "fallback",
+        telegramChatId: task.chat_id,
+        telegramMessageId: lastTelegramMessageId(Array.isArray(sent) ? sent : []),
+        errorCode: reason,
+      });
+    } catch (error) {
+      this.logger.warn("Сообщение о просроченной задаче не доставлено", {
+        taskId: task.id,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+    await this.rescheduleTask(task, { complete: true, error: reason });
+    this.logger.warn("Срок действия исчерпан", { taskId: task.id, reason });
+  }
+
+  /**
    * Заход не удался.
    *
    * Попытки считаются и заканчиваются. Раньше неудача только снимала
@@ -569,7 +613,12 @@ export class ScheduledTaskRunner {
   ): Promise<void> {
     const message = (error instanceof Error ? error.message : String(error)).slice(0, 2000);
     const attempts = (Number(task.attempts) || 0) + 1;
-    const retryAt = retryAfterFailure(attempts, new Date());
+    const now = new Date();
+    // Повтор имеет смысл, только если его результат ещё успеет пригодиться.
+    // Три попытки с отступами складывались в сорок две минуты, и человек
+    // всё это время не слышал ничего.
+    const outOfTime = kind === "action" && actionDeadlinePassed(task.scheduled_at, now);
+    const retryAt = outOfTime ? null : retryAfterFailure(attempts, now);
     await this.taskEvents.record({
       userId: Number(task.user_id), taskId: task.id,
       eventType: kind === "action" ? "action_failed" : "delivery_failed",
@@ -577,7 +626,14 @@ export class ScheduledTaskRunner {
       deliveryStatus: "failed", telegramChatId: task.chat_id,
       conversationId: task.conversation_id, llmRequestId: correlationId,
       errorCode: error instanceof Error ? error.name : "unknown_error",
-      metadata: { message: message.slice(0, 500), attempts },
+      // Сколько заход прожил — единственный способ отличить «упал сразу»
+      // от «висел до потолка», не имея доступа к машине человека.
+      metadata: {
+        message: message.slice(0, 500),
+        attempts,
+        elapsed_ms: now.getTime() - new Date(task.scheduled_at).getTime(),
+        out_of_time: outOfTime,
+      },
     }).catch(() => undefined);
     if (retryAt) {
       await this.db.query(

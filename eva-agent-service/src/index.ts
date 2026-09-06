@@ -37,7 +37,7 @@ import { InitiativeSelection } from "./jobs/proactive/selection.js";
 import { ProactiveService } from "./jobs/proactive/service.js";
 import { ProactiveWindowPlanner } from "./jobs/proactive/windows.js";
 import { TelegramDeliveryLimiter } from "./delivery/telegram-limits.js";
-import { badRequest, notFound } from "./errors.js";
+import { badRequest, explainFailure, notFound } from "./errors.js";
 import { EvaWorkflow } from "./eva-workflow.js";
 import { GoalService } from "./goals/goal-service.js";
 import { buildJobLayer } from "./jobs/index.js";
@@ -396,7 +396,9 @@ async function main(): Promise<void> {
           (payment
             ? t(language, "paymentStuck")
             : "Не получилось обработать сообщение после нескольких попыток. Ошибка сохранена; попробуйте отправить сообщение ещё раз.")
-            + (ownerReadsThisChat ? `\n\nПричина: ${message.slice(0, 1200)}` : ""),
+            + (ownerReadsThisChat
+              ? `\n\n${explainFailure(message) ?? ""}\n\nПричина: ${message.slice(0, 1200)}`.trimStart()
+              : ""),
         );
       }
       if (config.ownerTelegramId && config.ownerTelegramId !== record.chatId) {

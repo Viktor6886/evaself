@@ -3,6 +3,7 @@ import type { PermissionMode, ReasoningEffort } from "@letta-ai/letta-agent-sdk"
 import type { Config } from "./config.js";
 import type { Database, SdkSettingsRow } from "./db.js";
 import { badRequest } from "./errors.js";
+import { safeContextWindow } from "./letta/context-window.js";
 import type { LettaService, RuntimeSdkSettings } from "./letta.js";
 
 export interface SdkSettingsInput {
@@ -54,8 +55,51 @@ export class SdkSettingsManager {
       row.default_persona = this.letta.currentPersona;
       await this.db.saveSdkSettings(row);
     }
-    await this.letta.applySdkSettings(runtimeFromRow(row));
+    await this.applyRuntime(row);
     return this.public(row);
+  }
+
+  /**
+   * Отдать Letta действующие настройки, дополнив то, чего человек не
+   * задавал.
+   *
+   * Предел истории — не вкус администратора, а факт модели: он лежит в
+   * `llm_providers.context_window`, и им же роутер отвергает слишком
+   * большой запрос. Пока сюда не подставлялось ничего, Letta не знала,
+   * когда сжимать историю, и диалог рос до отказа — на боевой установке
+   * до 770 000 токенов при окне 256 000, после чего умирало любое
+   * сообщение, включая «привет».
+   *
+   * Подставляется только когда человек не выбрал число сам: явная
+   * настройка сильнее выведенной.
+   */
+  private async applyRuntime(row: SdkSettingsRow): Promise<void> {
+    const runtime = runtimeFromRow(row);
+    if (runtime.default_context_window === null) {
+      const derived = await this.derivedContextWindow();
+      if (derived !== null) runtime.default_context_window = derived;
+    }
+    await this.letta.applySdkSettings(runtime);
+  }
+
+  /** Предел по самой слабой включённой модели. `null` — считать не из чего. */
+  private async derivedContextWindow(): Promise<number | null> {
+    try {
+      const { rows } = await this.db.query<{
+        context_window: number | string | null;
+        max_output_tokens: number | string | null;
+      }>(
+        `SELECT context_window, max_output_tokens FROM llm_providers WHERE enabled`,
+      );
+      return safeContextWindow(rows.map((item) => ({
+        context_window: Number(item.context_window) || 0,
+        max_output_tokens: Number(item.max_output_tokens) || 0,
+      })));
+    } catch {
+      // Недоступный список провайдеров не должен мешать старту: без
+      // предела Letta работает так же, как работала до сих пор.
+      return null;
+    }
   }
 
   async get(): Promise<PublicSdkSettings> {
@@ -74,7 +118,7 @@ export class SdkSettingsManager {
       await this.assertReasoningEffortSupported(merged.reasoning_effort);
     }
     const saved = await this.db.saveSdkSettings({ ...current, ...merged });
-    await this.letta.applySdkSettings(runtimeFromRow(saved));
+    await this.applyRuntime(saved);
     return this.public(saved);
   }
 

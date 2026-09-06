@@ -740,6 +740,9 @@ test("сужения снимаются по одному, от узкого к 
       ["ru", "week", "news"],
       [null, "week", "news"],
       [null, null, "news"],
+      // Раздел снимается последним: он выбирает набор движков, а не
+      // фильтрует выдачу одних и тех же.
+      [null, null, null],
     ]);
   } finally {
     harnessed.restore();
@@ -770,6 +773,77 @@ test("найденное сразу ничего не снимает и назы
     assert.equal(harnessed.requests.length, 1);
     assert.equal(payload.time_range, "week");
     assert.equal("relaxed_filters" in payload, false);
+  } finally {
+    harnessed.restore();
+  }
+});
+
+test("отказ движков не пробуется ещё раз: сужения тут ни при чём", async () => {
+  // Снимать фильтр у того, кто не ответил, бессмысленно, а каждая
+  // ступень стоит целого круга ожидания: три круга по двадцать секунд —
+  // минута на один вызов, и ход упирался в потолок раньше, чем успевал
+  // что-нибудь сделать.
+  const harnessed = searchHarness({
+    results: [], answers: [], infoboxes: [],
+    unresponsive_engines: [["google", "CAPTCHA"], ["brave", "timeout"]],
+  });
+  try {
+    const result = await harnessed.tool.execute("call-1", {
+      query: "погода Камень-на-Оби", time_range: "week", language: "ru",
+    });
+    const payload = result.details as { ok: boolean; error?: string };
+    assert.equal(harnessed.requests.length, 1, "второй круг ничего не изменит");
+    assert.equal(payload.ok, false);
+    assert.equal(payload.error, "search_engines_failed");
+  } finally {
+    harnessed.restore();
+  }
+});
+
+test("сломанный раздел не лечится фильтрами — лечится другим разделом", async () => {
+  // Боевые данные: `categories=weather` пуст всегда, потому что оба
+  // погодных движка отвечают ошибкой («wttr.in: parsing error»,
+  // «duckduckgo weather: unexpected crash»), — а тот же вопрос без
+  // раздела отдаёт три десятка ссылок. Раздел выбирает НАБОР движков,
+  // поэтому отказ прежних — как раз повод сменить его, а не остановиться.
+  const harnessed = searchHarness((request) =>
+    request.searchParams.has("categories")
+      ? {
+        results: [], answers: [], infoboxes: [],
+        unresponsive_engines: [["wttr.in", "parsing error"], ["duckduckgo weather", "unexpected crash"]],
+      }
+      : SOME_REPLY);
+  try {
+    const result = await harnessed.tool.execute("call-1", {
+      query: "погода Камень-на-Оби", category: "weather", language: "ru",
+    });
+    const payload = result.details as Record<string, unknown>;
+
+    assert.equal(payload.ok, true, "ответ обязан найтись без раздела");
+    assert.ok((payload.relaxed_filters as string[]).includes("category"));
+    assert.equal("category" in payload, false, "снятый раздел не называется");
+    // Последний запрос ушёл вообще без раздела.
+    assert.equal(harnessed.requests.at(-1)!.searchParams.has("categories"), false);
+  } finally {
+    harnessed.restore();
+  }
+});
+
+test("отказ движков внутри одного набора не гоняет фильтры по кругу", async () => {
+  // Снимать язык и окно свежести у того, кто не ответил, бессмысленно;
+  // каждая ступень стоит целого круга ожидания. Раздела здесь нет —
+  // значит и менять набор движков не на что, и повтора быть не должно.
+  const harnessed = searchHarness({
+    results: [], answers: [], infoboxes: [],
+    unresponsive_engines: [["google", "CAPTCHA"], ["brave", "too many requests"]],
+  });
+  try {
+    const result = await harnessed.tool.execute("call-1", {
+      query: "курс евро", time_range: "week", language: "ru",
+    });
+    const payload = result.details as { ok: boolean; error?: string };
+    assert.equal(harnessed.requests.length, 1);
+    assert.equal(payload.error, "search_engines_failed");
   } finally {
     harnessed.restore();
   }
