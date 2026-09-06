@@ -94,6 +94,7 @@ test("scheduler runtime uses its own conversation instead of the main chat", asy
         purpose: "scheduler",
         created: false,
       }),
+      close: async () => undefined,
     } as never,
     logger,
   );

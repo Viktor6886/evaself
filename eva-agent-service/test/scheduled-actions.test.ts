@@ -84,6 +84,7 @@ function harness(options: {
   }> = [];
   const sent: Array<{ chatId: number; text: string }> = [];
   const deliveries: Array<{ prefix: string; priority: string }> = [];
+  const closed: Array<{ userId: number; agentId: string; purpose: string }> = [];
   const letta = {
     runTurn: async (
       conversationId: string,
@@ -138,6 +139,12 @@ function harness(options: {
         purpose: input.purpose,
         created: false,
       }),
+      // Ветка служебного хода закрывается, чем бы заход ни кончился:
+      // иначе в ней копятся прошлые задания, и модель отвечает человеку
+      // сводкой по ним вместо работы.
+      close: async (userId: number, agentId: string, purpose: string) => {
+        closed.push({ userId, agentId, purpose });
+      },
     } as never,
     new TaskEventService(db as never),
     logger,
@@ -146,7 +153,7 @@ function harness(options: {
       : { lastUnattendedApproval: async () => options.approval ?? null },
     options.actionTurnTimeoutMs,
   );
-  return { db, runner, turns, sent, deliveries };
+  return { db, runner, turns, sent, deliveries, closed };
 }
 
 function updates(db: ReturnType<typeof fakeDb>): Call[] {
@@ -612,4 +619,43 @@ test("журнал задач не приходит в ход выполнени
   const initiative = await build("initiative");
   assert.doesNotMatch(initiative, /recent_task_events:/);
   assert.match(initiative, /upcoming_reminders:/);
+});
+
+// ---------------------------------------------------------------------
+// Служебная ветка закрывается вместе с работой
+// ---------------------------------------------------------------------
+
+test("ветка задачи закрывается, чем бы заход ни кончился", async () => {
+  // Она была вечной: одна на человека, и в ней копились все задания
+  // подряд вместе с ответами на них. На новом задании модель видела
+  // перед собой не задачу, а накопленное состояние трекера, и отвечала
+  // человеку «Поняла, где остановились…» вместо погоды.
+  const done = harness();
+  await done.runner.execute(taskRow() as never);
+  assert.deepEqual(done.closed, [{ userId: 7, agentId: "agent-7", purpose: "task_action" }]);
+
+  // Неудачный заход оставляет после себя самый мусор, и повтору он
+  // мешает больше всего — значит закрывать надо и его.
+  const failed = harness({ fail: new Error("поиск не ответил") });
+  await failed.runner.execute(taskRow() as never);
+  assert.equal(failed.closed.length, 1);
+  assert.equal(failed.closed[0]!.purpose, "task_action");
+});
+
+test("напоминание закрывает свою ветку, а не ветку действия", async () => {
+  const layer = harness();
+  await layer.runner.execute(taskRow({ kind: "reminder" }) as never);
+  assert.deepEqual(layer.closed, [{ userId: 7, agentId: "agent-7", purpose: "scheduler" }]);
+});
+
+test("незакрытая ветка не роняет уже сделанную работу", async () => {
+  // Результат человеку важнее уборки: отказ закрытия — это ровно то,
+  // что было до сих пор, а не новая поломка.
+  const layer = harness();
+  (layer.runner as unknown as {
+    purposes: { close: () => Promise<void> };
+  }).purposes.close = async () => { throw new Error("App Server недоступен"); };
+
+  await assert.doesNotReject(() => layer.runner.execute(taskRow() as never));
+  assert.equal(layer.sent.length, 1, "результат обязан дойти");
 });

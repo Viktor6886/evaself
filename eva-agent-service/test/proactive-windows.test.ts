@@ -531,3 +531,44 @@ test("одинаковый идентификатор у двух окон от�
   );
   assert.equal(store.windows.length, 1);
 });
+
+test("ветка инициативы закрывается после каждого выхода на связь", async () => {
+  // Она была вечной и копила прошлые выходы вместе с ответами на них:
+  // на новом ходе модель писала человеку сводку по накопленному вместо
+  // повода. Что она уже отправляла, приходит ей блоком
+  // `i_wrote_since_your_last_message` — без накопления.
+  const { LettaProactiveComposer } = await import("../dist/jobs/proactive/composer.js");
+  const closed: Array<{ purpose: string }> = [];
+  const purposes = {
+    ensure: async (input: { purpose: string }) => ({
+      conversationId: `conversation-${input.purpose}`,
+      purpose: input.purpose,
+      created: false,
+    }),
+    close: async (_userId: number, _agentId: string, purpose: string) => {
+      closed.push({ purpose });
+    },
+  };
+  const build = (runTurn: () => Promise<{ reply: string }>) => new LettaProactiveComposer(
+    { runTurn } as never,
+    purposes as never,
+    { build: async () => ({}), wrapUserMessage: (_c: unknown, m: string) => m } as never,
+    { run: async (_id: number, work: () => Promise<unknown>) => await work() } as never,
+    logger as never,
+  );
+
+  const composer = build(async () => ({ reply: "Вспомнила про твой разговор." }));
+  await composer.compose({
+    kind: "initiative", candidate: scheduledCandidate(), episode: null,
+    signal: new AbortController().signal,
+  } as never);
+  assert.deepEqual(closed, [{ purpose: "initiative" }]);
+
+  // Сорванный ход оставляет после себя самый мусор — значит и его.
+  const failing = build(async () => { throw new Error("ход не состоялся"); });
+  await assert.rejects(() => failing.compose({
+    kind: "initiative", candidate: scheduledCandidate(), episode: null,
+    signal: new AbortController().signal,
+  } as never));
+  assert.equal(closed.length, 2);
+});
