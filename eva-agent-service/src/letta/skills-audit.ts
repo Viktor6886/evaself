@@ -32,6 +32,7 @@ export const EVA_PROJECT_SKILLS = [
   "crisis-response",
   "emotion-regulation",
   "goals-values",
+  "initiative",
   "journaling-reflection",
   "long-arc",
   "memory-hygiene",

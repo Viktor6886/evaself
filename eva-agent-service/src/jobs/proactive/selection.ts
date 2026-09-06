@@ -30,6 +30,17 @@ export interface ReminderCandidate extends ProactiveCandidate {
   scheduledAt: Date;
 }
 
+/** Наступившее окно: кандидат плюс уже выбранная минута. */
+export interface InitiativeCandidate extends ProactiveCandidate {
+  /** Строка `proactive_messages`, в которой минута выбрана. */
+  messageId: string;
+  scheduledFor: Date;
+  /** Конец окна: после него сообщение не отправляется вовсе. */
+  validUntil: Date | null;
+  /** Как человек назвал окно. Может отсутствовать. */
+  windowLabel: string | null;
+}
+
 interface CandidateRow {
   user_id: string;
   telegram_id: string;
@@ -43,6 +54,13 @@ interface CandidateRow {
   consent: boolean;
   frequency: string | null;
   awaiting_reply: boolean;
+}
+
+interface InitiativeRow extends CandidateRow {
+  message_id: string;
+  scheduled_for: Date;
+  valid_until: Date | null;
+  window_label: string | null;
 }
 
 interface ReminderRow extends CandidateRow {
@@ -250,6 +268,55 @@ export class ProactiveSelection {
       previousReminders: Number(row.previous_reminders) || 0,
       lastTaskAction: row.last_task_action,
       scheduledAt: row.scheduled_at,
+    }));
+  }
+}
+
+/**
+ * Наступившие окна инициативы.
+ *
+ * Минута выбрана заранее планировщиком (`windows.ts`), поэтому выборка
+ * не решает, когда писать, — она только замечает, что время пришло.
+ * Просроченные строки берутся тоже: их надо закрыть, а не оставить
+ * лежать до бесконечности.
+ */
+export class InitiativeSelection {
+  constructor(private readonly db: Database) {}
+
+  async due(limit = 25): Promise<InitiativeCandidate[]> {
+    const { rows } = await this.db.withSystemScope(
+      "proactive.select.initiative",
+      async () => await this.db.query<InitiativeRow>(
+        `-- tenant: system — диспетчер смотрит наступившие окна всех
+         -- пользователей, сообщение готовится в области владельца
+         SELECT ${CANDIDATE_COLUMNS},
+                pmsg.id AS message_id,
+                pmsg.scheduled_for,
+                pmsg.valid_until,
+                w.label AS window_label
+           FROM proactive_messages pmsg
+           JOIN users u ON u.id = pmsg.user_id
+           ${CANDIDATE_JOINS}
+           LEFT JOIN proactive_windows w
+             ON w.id = pmsg.window_id AND w.user_id = pmsg.user_id
+          WHERE pmsg.kind = $1
+            AND pmsg.status = 'scheduled'
+            AND pmsg.scheduled_for <= now()
+            AND u.state = 'active'
+            AND NOT u.is_blocked
+            AND a.conversation_id IS NOT NULL
+          ORDER BY pmsg.scheduled_for
+          LIMIT $2`,
+        ["initiative", limit],
+      ),
+      { crossUser: true },
+    );
+    return rows.map((row) => ({
+      ...toCandidate(row),
+      messageId: row.message_id,
+      scheduledFor: new Date(row.scheduled_for),
+      validUntil: row.valid_until ? new Date(row.valid_until) : null,
+      windowLabel: row.window_label,
     }));
   }
 }

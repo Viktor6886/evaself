@@ -1494,9 +1494,19 @@ export class LettaService {
       cancelPollMs?: number;
       allowedTools?: readonly string[];
       canUseTool?: CanUseToolCallback;
+      /**
+       * Потолок этого хода. По умолчанию — общий
+       * `EVA_AGENT_TURN_TIMEOUT_MS`, рассчитанный на живой ответ
+       * человеку. Запланированное действие живёт по другим правилам:
+       * человек попросил заранее и не сидит перед экраном, а цепочка
+       * «найди — прочитай — напиши — опубликуй» в интерактивный потолок
+       * не укладывается, и обрыв по нему выглядит как «не получилось».
+       */
+      timeoutMs?: number;
     } = {},
   ): Promise<TurnResult> {
     const startedAt = Date.now();
+    const turnTimeoutMs = Math.max(1_000, options.timeoutMs ?? this.runtime.turn_timeout_ms);
     const pooled = await this.acquirePooled(conversationId, options.allowedTools === undefined ? undefined : {
       allowedTools: options.allowedTools,
       canUseTool: options.canUseTool ?? ((toolName) => options.allowedTools!.includes(toolName)
@@ -1526,13 +1536,13 @@ export class LettaService {
       sentAt = Date.now();
 
       const stream = session.stream();
-      const deadline = startedAt + this.runtime.turn_timeout_ms;
+      const deadline = startedAt + turnTimeoutMs;
 
       while (true) {
         const remaining = deadline - Date.now();
         if (remaining <= 0) {
           await session.abort().catch(() => undefined);
-          throw turnTimeout(`the agent did not finish within ${this.runtime.turn_timeout_ms} ms`);
+          throw turnTimeout(`the agent did not finish within ${turnTimeoutMs} ms`);
         }
 
         const next = await withTimeout(stream.next(), remaining);

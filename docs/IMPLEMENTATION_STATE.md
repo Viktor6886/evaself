@@ -12,7 +12,7 @@
 | Canonical context | SDK/WebSocket system update и MemFS reconciliation, fail-open | `src/letta.ts`, `src/letta/persona-sync.ts` |
 | Canonical context store | Действующие персона и системный промпт: файл репозитория либо опубликованная версия реестра артефактов | `src/runtime/canonical-context.ts`, `src/runtime/canonical-routes.ts` |
 | Persona sync | Односторонняя синхронизация канонической персоны | `src/letta/persona-sync.ts`, `library/persona/eva.md` |
-| Runtime context | Время, профиль, подписка, цели, курсор программы и ближайшие задачи текущего хода | `src/runtime/runtime-context.ts` |
+| Runtime context | Время, профиль, подписка, цели, курсор программы, ближайшие задачи и собственные сообщения Евы с прошлой реплики человека | `src/runtime/runtime-context.ts` |
 | Непрерывность работы | ACTIVE OBJECTIVE/TURN OBJECTIVE и чекпойнт ACTIVE WORK в `current_state` | `src/letta/memory-blocks.ts`, `library/persona/eva.md` |
 
 Граница ответственности: [letta-native.md](letta-native.md).
@@ -53,6 +53,9 @@
 | Runtime/policy | Таймауты, отмена, retry, DLQ | `src/jobs/runtime.ts`, `src/jobs/policy.ts` |
 | Schedules | Канонические расписания в PostgreSQL | `src/jobs/schedules.ts` |
 | Proactive jobs | Напоминания, heartbeat и check-in | `src/jobs/proactive/` |
+| Окна инициативы | Промежутки, в которые человек разрешил писать первой; минута внутри окна выбирается один раз на сутки и переживает перезапуск | `src/jobs/proactive/windows.ts`, `initiative-runner.ts`, таблица `proactive_windows` |
+| Собственные сообщения Евы | Что она отправила сама с прошлого сообщения человека: два источника, один блок контекста хода | `src/runtime/own-messages.ts` |
+| Выполнение наступившей задачи | Ход, доставка через outbox, попытки, суточный потолок, уступка живому сообщению и ожидание согласия | `src/tasks/task-runner.ts`, `src/tasks/task-run.ts` |
 | Maintenance | Диагностические сверки без автоматического изменения данных | `src/jobs/maintenance.ts` |
 
 BullMQ не обрабатывает интерактивный ход и не управляет памятью агента.

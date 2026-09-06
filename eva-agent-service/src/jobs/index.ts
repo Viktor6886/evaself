@@ -74,6 +74,13 @@ export interface JobLayerDeps {
   outbox: OutboxDelivery;
   /** Выборка старого интервала для режима зеркала. */
   legacySelector?: (kind: ProactiveKind) => Promise<string[]> | null;
+  /**
+   * Заход инициативы. Собирается в точке сборки и передаётся сюда, а не
+   * строится заново: механизмов запуска два, а заход обязан быть один
+   * (инвариант 9). Пока идут старые интервалы, задание не регистрируется
+   * вовсе — иначе окно сработало бы дважды.
+   */
+  initiative?: { tick(options?: { runId?: string; signal?: AbortSignal }): Promise<unknown> } | null;
   /** Действующие значения настроек: сроки хранения приходят оттуда. */
   settings?: () => Record<string, unknown>;
 }
@@ -178,6 +185,17 @@ export function buildJobLayer(
         await runner.tick(kind, { runId: context.runId, signal: context.signal });
       });
     }
+  }
+
+  // Окна инициативы регистрируются только там, где старые интервалы уже
+  // не работают. На ступенях `legacy` и `mirror` заход делает
+  // `BackgroundRuntime`, и второй владелец означал бы два сообщения в
+  // одно окно — от слота спасает только то, что механизм один.
+  if (deps.initiative && !legacySchedulerActive(stage)) {
+    const initiative = deps.initiative;
+    runtime.register("proactive_initiative", async (context) => {
+      await initiative.tick({ runId: context.runId, signal: context.signal });
+    });
   }
 
   return {

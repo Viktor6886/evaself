@@ -8,13 +8,29 @@ import type { Logger } from "./logger.js";
 import type { RuntimeContextBuilder } from "./runtime/runtime-context.js";
 import type { UserTurnLock } from "./turns/user-turn-lock.js";
 import type { TelegramClient } from "./telegram.js";
+import type { ProactiveInitiativeRunner } from "./jobs/proactive/initiative-runner.js";
+import { proactiveSlot } from "./jobs/proactive/policy.js";
 import { TaskEventService } from "./tasks/task-event-service.js";
-import { ScheduledTaskRunner, type DueTask } from "./tasks/task-runner.js";
+import {
+  ScheduledTaskRunner,
+  type ApprovalOutcomeSource,
+  type DueTask,
+} from "./tasks/task-runner.js";
 import { isQuietHours } from "./time/cron.js";
 
 // Cron-утилиты переехали в `src/time/cron.ts` (шаг 08): их считает уже не
 // только планировщик. Реэкспорт сохраняет прежние точки импорта.
 export { assertCronExpression, cronFieldMatches, nextCronDate } from "./time/cron.js";
+
+/**
+ * Сколько людей планировщик обслуживает одновременно.
+ *
+ * Четыре, а не «сколько наберётся»: каждый заход — это ход агента, и
+ * бюджет отдаёт фоновой работе двенадцать слотов из ста двадцати
+ * восьми. Занять их все одним всплеском наступивших задач значит
+ * отобрать слоты у живых разговоров.
+ */
+const SCHEDULER_CONCURRENCY = 4;
 
 interface HeartbeatCandidate {
   user_id: string;
@@ -31,8 +47,10 @@ interface HeartbeatCandidate {
 export class BackgroundRuntime {
   private taskTimer: NodeJS.Timeout | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
+  private initiativeTimer: NodeJS.Timeout | null = null;
   private taskRunning = false;
   private heartbeatRunning = false;
+  private initiativeRunning = false;
   private readonly taskEvents: TaskEventService;
   private readonly taskRunner: ScheduledTaskRunner;
 
@@ -46,10 +64,24 @@ export class BackgroundRuntime {
     private readonly purposes: ConversationPurposeService,
     private readonly logger: Logger,
     taskEvents?: TaskEventService,
+    /**
+     * Подтверждения действий. Планировщик не выдаёт прав и не решает за
+     * человека — он только узнаёт, чем кончился вопрос, заданный внутри
+     * фонового хода, и переносит задачу вместо того, чтобы считать её
+     * проваленной.
+     */
+    approvals?: ApprovalOutcomeSource | null,
+    /**
+     * Заход инициативы. Приходит снаружи, а не собирается здесь:
+     * доставка идёт только через durable outbox, а его знает точка
+     * сборки, не планировщик. `null` — окна выключены флагом.
+     */
+    private readonly initiative: ProactiveInitiativeRunner | null = null,
   ) {
     this.taskEvents = taskEvents ?? new TaskEventService(db);
     this.taskRunner = new ScheduledTaskRunner(
       db, letta, queue, telegram, runtimeContext, purposes, this.taskEvents, logger,
+      approvals ?? null, config.taskActionTurnTimeoutMs,
     );
   }
 
@@ -77,12 +109,42 @@ export class BackgroundRuntime {
     );
     this.taskTimer.unref();
     this.heartbeatTimer.unref();
+    // Окна инициативы: заход отдельным интервалом, потому что его
+    // точность — это точность попадания в выбранную минуту, и делить
+    // её с десятиминутным циклом heartbeat нельзя.
+    if (this.initiative) {
+      this.initiativeTimer = setInterval(
+        () => void this.runInitiative(),
+        Math.max(this.config.initiativeIntervalMs, 15_000),
+      );
+      this.initiativeTimer.unref();
+    }
     void this.runTasks();
   }
 
   /** Работают ли сейчас старые интервалы. Нужно наблюдению и тестам переноса. */
   get schedulerActive(): boolean {
     return this.taskTimer !== null || this.heartbeatTimer !== null;
+  }
+
+  /**
+   * Наступившие окна инициативы.
+   *
+   * Заход не переоткрывается, пока идёт предыдущий: ход агента длится
+   * дольше минуты, и второй заход забрал бы те же строки.
+   */
+  async runInitiative(): Promise<void> {
+    if (this.initiativeRunning || !this.initiative) return;
+    this.initiativeRunning = true;
+    try {
+      await this.initiative.tick();
+    } catch (error) {
+      this.logger.error("Ошибка захода инициативы", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      this.initiativeRunning = false;
+    }
   }
 
   /**
@@ -147,8 +209,10 @@ export class BackgroundRuntime {
   stop(): void {
     if (this.taskTimer) clearInterval(this.taskTimer);
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    if (this.initiativeTimer) clearInterval(this.initiativeTimer);
     this.taskTimer = null;
     this.heartbeatTimer = null;
+    this.initiativeTimer = null;
   }
 
   async runTasks(): Promise<void> {
@@ -175,16 +239,7 @@ export class BackgroundRuntime {
         },
         { crossUser: true },
       );
-      for (const task of tasks) {
-        await this.db.withUserScope(
-          {
-            userId: Number(task.user_id),
-            telegramId: Number(task.telegram_id),
-            label: "scheduler.task",
-          },
-          async () => await this.executeTask(task),
-        );
-      }
+      await this.executeByUser(tasks);
     } catch (error) {
       this.logger.error("Ошибка планировщика задач", {
         message: error instanceof Error ? error.message : String(error),
@@ -253,6 +308,52 @@ export class BackgroundRuntime {
     } finally {
       this.heartbeatRunning = false;
     }
+  }
+
+  /**
+   * Наступившие задачи: разные люди параллельно, один человек — по
+   * очереди.
+   *
+   * Последовательный обход по всем пользователям означал, что одна
+   * длинная задача задерживает чужие напоминания: цепочка «найди —
+   * прочитай — напиши» идёт минутами, а стоящее за ней напоминание
+   * назначено на конкретное время и опаздывает на эти минуты.
+   *
+   * Внутри одного человека порядок сохраняется: у него один активный
+   * мутирующий ход (инвариант 10), и параллельные заходы просто стояли
+   * бы в очереди за его же блокировкой.
+   *
+   * Ширина ограничена: слоты ходов по бюджету принадлежат живым
+   * разговорам (не менее 80%), и фоновая работа не вправе занять больше
+   * своей доли.
+   */
+  private async executeByUser(tasks: DueTask[]): Promise<void> {
+    const byUser = new Map<string, DueTask[]>();
+    for (const task of tasks) {
+      const queue = byUser.get(task.user_id);
+      if (queue) queue.push(task);
+      else byUser.set(task.user_id, [task]);
+    }
+    const queues = [...byUser.values()];
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      while (next < queues.length) {
+        const queue = queues[next++]!;
+        for (const task of queue) {
+          await this.db.withUserScope(
+            {
+              userId: Number(task.user_id),
+              telegramId: Number(task.telegram_id),
+              label: "scheduler.task",
+            },
+            async () => await this.executeTask(task),
+          );
+        }
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(SCHEDULER_CONCURRENCY, queues.length) }, worker),
+    );
   }
 
   private async claimDueTasks(): Promise<DueTask[]> {
@@ -364,6 +465,7 @@ export class BackgroundRuntime {
         async () => await this.telegram.sendMessage(Number(candidate.chat_id), reply),
       );
       await this.saveHeartbeat(candidate, hash, "sent");
+      await this.recordOwnMessage(candidate, reply);
       await this.db.markAgentUsed(candidate.agent_id, Number(candidate.user_id));
     } catch (error) {
       this.logger.warn("Heartbeat не отправлен", {
@@ -376,6 +478,53 @@ export class BackgroundRuntime {
          ON CONFLICT (user_id) DO UPDATE SET last_result = EXCLUDED.last_result`,
         [candidate.user_id, `error:${String(error).slice(0, 500)}`],
       );
+    }
+  }
+
+  /**
+   * Отправленный heartbeat как собственное сообщение Евы.
+   *
+   * `heartbeat_state` хранит sha256 последнего сообщения: этого хватает
+   * на защиту от дубля и не хватает ни на что другое — хэш нельзя
+   * прочитать. Поэтому текст ложится туда же, куда его кладёт очередь,
+   * — в `proactive_messages`, и следующий ход видит его одним запросом
+   * независимо от того, какой механизм отправлял (`OwnMessagesService`).
+   *
+   * Второй строки не будет: старый интервал и очередь никогда не
+   * работают одновременно — их разводит `legacySchedulerActive`, — а
+   * слот всё равно уникален.
+   *
+   * Отказ записи не отменяет отправленного сообщения: оно уже у
+   * человека, и ронять из-за журнала успешный heartbeat незачем.
+   */
+  private async recordOwnMessage(
+    candidate: HeartbeatCandidate,
+    text: string,
+  ): Promise<void> {
+    const slot = proactiveSlot("heartbeat", candidate.timezone, new Date());
+    try {
+      await this.db.query(
+        `INSERT INTO proactive_messages
+           (user_id, kind, slot_key, local_date, timezone, status,
+            message_text, sent_at)
+         VALUES ($1, 'heartbeat', $2, $3::date, $4, 'sent', $5, now())
+         ON CONFLICT (user_id, kind, slot_key) DO UPDATE
+           SET status = 'sent',
+               message_text = EXCLUDED.message_text,
+               sent_at = EXCLUDED.sent_at`,
+        [
+          candidate.user_id,
+          slot.slotKey,
+          slot.localDate,
+          slot.timezone,
+          text.slice(0, 4000),
+        ],
+      );
+    } catch (error) {
+      this.logger.warn("Собственное сообщение Евы не записано", {
+        userId: candidate.user_id,
+        message: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 

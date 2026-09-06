@@ -4,7 +4,10 @@ import { formatLocalShort, humanizeInterval } from "../time/local-date-time.js";
 export type TaskEventType =
   | "created" | "updated" | "reminder_generated" | "reminder_sent"
   | "delivery_failed" | "user_replied" | "snoozed" | "completed"
-  | "cancelled" | "reopened" | "action_done" | "action_failed";
+  | "cancelled" | "reopened" | "action_done" | "action_failed"
+  // Ход упёрся в действие, которого человек не разрешал заранее:
+  // вопрос задан, задача ждёт ответа. Не удача и не отказ.
+  | "action_awaiting_approval";
 
 export interface TaskEventInput {
   userId: number;
@@ -139,6 +142,28 @@ export class TaskEventService {
     return Number(rows[0]?.used ?? 0);
   }
 
+  /**
+   * Сколько раз по этому сроку уже спрашивали согласия.
+   *
+   * Считается по сроку, а не по задаче: повторяющаяся задача вправе
+   * спросить снова завтра, и счётчик, общий на всю задачу, закрыл бы ей
+   * дорогу навсегда после первого неотвеченного вопроса.
+   */
+  async approvalWaits(
+    userId: number,
+    taskId: number | string,
+    scheduledAt: Date | string,
+  ): Promise<number> {
+    const { rows } = await this.db.query<{ waits: string }>(
+      `SELECT count(*)::int AS waits FROM task_events
+        WHERE user_id = $1 AND task_id = $2
+          AND event_type = 'action_awaiting_approval'
+          AND scheduled_at = $3`,
+      [userId, taskId, scheduledAt],
+    );
+    return Number(rows[0]?.waits ?? 0);
+  }
+
   async forTask(userId: number, taskId: number, limit = 50): Promise<Record<string, unknown>[]> {
     const { rows } = await this.db.query<Record<string, unknown>>(
       `SELECT e.*, t.title, t.status AS task_status
@@ -235,7 +260,8 @@ export class TaskEventService {
          FROM task_events e JOIN tasks t ON t.id=e.task_id AND t.user_id=e.user_id
         WHERE e.user_id=$1 AND e.created_at >= now() - interval '14 days'
           AND e.event_type IN ('reminder_sent','user_replied','snoozed','completed',
-                               'cancelled','action_done','action_failed')
+                               'cancelled','action_done','action_failed',
+                               'action_awaiting_approval')
         ORDER BY e.created_at DESC LIMIT 5`,
       [userId],
     );
@@ -252,6 +278,7 @@ export class TaskEventService {
         cancelled: "задача отменена",
         action_done: "выполнено запланированное действие",
         action_failed: "запланированное действие не удалось",
+        action_awaiting_approval: "запланированное действие ждёт согласия человека",
       };
       const status = ["open", "in_progress"].includes(row.task_status)
         ? "; задача ещё не отмечена выполненной" : "";

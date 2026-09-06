@@ -106,6 +106,10 @@
 
       state.journalEnabled = Boolean(await window.EvaJournal?.probe?.());
       document.getElementById("journal-add-top").hidden = !state.journalEnabled;
+      // Окна инициативы подгружаются вместе с остальным профилем, чтобы
+      // строка настроек сразу показывала выбранное, а не «Открыть».
+      // Отказ не мешает запуску: раздел просто откроется пустым.
+      await window.EvaInitiative?.load?.().catch(() => undefined);
 
       state.phase = "ready";
       state.performance.coldStartMs = Math.round(performance.now() - APP_STARTED_AT);
@@ -1223,6 +1227,7 @@
         ${settingsRow("conversations", "Диалоги с Евой", "Создать, выбрать или архивировать диалог", "Открыть")}
         ${settingsRow("subscription", "Подписка и квоты", "Текущий доступ и остаток квоты", state.session?.plan || "free")}
         ${settingsRow("voice", "Формат ответов", "Текст, голос или оба", responseModeTitle(user.response_mode))}
+        ${settingsRow("initiative", "Когда Ева пишет первой", "Промежутки, в которые Ева может начать разговор", window.EvaInitiative ? window.EvaInitiative.summary() : "Открыть")}
         ${settingsRow("notifications", "Уведомления", "Конкретные поводы вернуться к Еве", state.dashboard?.next_reminder ? "Есть ближайшее" : "Открыть")}
         ${settingsRow("privacy", "Приватность", "Как хранятся данные и память Евы", "Открыть")}
       </div>
@@ -1236,7 +1241,7 @@
   }
 
   function settingsRow(code, title, note, status) {
-    const icons = { conversations: "chat", subscription: "card", voice: "voice", notifications: "bell", privacy: "shield" };
+    const icons = { conversations: "chat", subscription: "card", voice: "voice", initiative: "bell", notifications: "bell", privacy: "shield" };
     return `<button class="settings-row" data-setting="${code}" type="button">
       <span data-icon="${icons[code]}"></span>
       <span><strong>${title}</strong><small>${note}</small></span>
@@ -1294,6 +1299,9 @@
     if (code === "conversations") return void openConversationsSheet();
     if (code === "voice") return void openResponseModeSheet();
     if (code === "subscription") return openSubscriptionSheet();
+    // Окна инициативы живут отдельным модулем: `app.js` уже слишком
+    // велик, чтобы дописывать в него разделы.
+    if (code === "initiative") return void window.EvaInitiative?.open();
     if (code === "notifications") return openNotificationsSheet();
     if (code === "privacy") return openPrivacySheet();
   }

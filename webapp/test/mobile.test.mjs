@@ -495,3 +495,104 @@ describe("Mini App hook-focused", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------
+// Когда Ева пишет первой
+// ---------------------------------------------------------------------
+
+describe("окна инициативы", () => {
+  const opened = [];
+  const open = async (options) => {
+    const app = await openApp(options);
+    opened.push(app);
+    return app;
+  };
+  after(async () => {
+    for (const app of opened) await app.close().catch(() => {});
+  });
+
+  const WINDOWS = {
+    "/public/proactive-windows": {
+      proactive: {
+        enabled: true,
+        max_windows: 6,
+        min_minutes: 15,
+        timezone: "Europe/Moscow",
+        windows: [
+          { id: "1", start_minute: 660, end_minute: 720, weekdays: [1, 2, 3, 4, 5], enabled: true },
+        ],
+      },
+    },
+  };
+
+  test("выбранное окно видно прямо в списке настроек", async () => {
+    const app = await open({ routes: WINDOWS });
+    await app.openScreen("profile");
+    const status = await app.page.textContent('[data-setting="initiative"] em');
+    // Не «Открыть»: человек должен видеть своё расписание, не заходя внутрь.
+    assert.equal(status.trim(), "11:00–12:00");
+    assert.deepEqual(app.errors, []);
+  });
+
+  test("окно редактируется и сохраняется одним набором", async () => {
+    const app = await open({ routes: WINDOWS });
+    await app.openScreen("profile");
+    await app.page.click('[data-setting="initiative"]');
+    await app.page.waitForSelector("#initiative-save");
+
+    // Второе окно: человек вправе завести несколько промежутков.
+    await app.page.click("#initiative-add");
+    await app.page.waitForSelector('[data-window="1"]');
+    await app.page.fill('[data-window="1"] input[data-field="start"]', "17:00");
+    await app.page.fill('[data-window="1"] input[data-field="end"]', "18:00");
+    await app.page.click("#initiative-save");
+    await app.page.waitForTimeout(200);
+
+    const saved = app.requests.find(
+      (item) => item.method === "PUT" && item.path === "/public/proactive-windows",
+    );
+    assert.ok(saved, "сохранение обязано уйти одним запросом");
+    assert.equal(saved.body.enabled, true);
+    assert.equal(saved.body.windows.length, 2);
+    assert.deepEqual(
+      saved.body.windows.map((window) => [window.start_minute, window.end_minute]),
+      [[660, 720], [1020, 1080]],
+    );
+    assert.deepEqual(app.errors, []);
+  });
+
+  test("последний день недели снять нельзя: окно без дней не сработает", async () => {
+    const app = await open({ routes: WINDOWS });
+    await app.openScreen("profile");
+    await app.page.click('[data-setting="initiative"]');
+    await app.page.waitForSelector('[data-window="0"]');
+
+    for (const day of [1, 2, 3, 4, 5]) {
+      await app.page.click(`[data-window="0"] [data-day="${day}"]`);
+      await app.page.waitForTimeout(40);
+    }
+    const selected = await app.page.$$eval(
+      '[data-window="0"] .choice-button.is-selected',
+      (nodes) => nodes.length,
+    );
+    assert.equal(selected, 1, "хотя бы один день обязан остаться");
+  });
+
+  test("выключенное согласие названо прямо, а не спрятано", async () => {
+    const app = await open({
+      routes: {
+        "/public/proactive-windows": {
+          proactive: {
+            enabled: false, max_windows: 6, min_minutes: 15,
+            timezone: "Europe/Moscow", windows: [],
+          },
+        },
+      },
+    });
+    await app.openScreen("profile");
+    assert.equal(
+      (await app.page.textContent('[data-setting="initiative"] em')).trim(),
+      "Выключено",
+    );
+  });
+});

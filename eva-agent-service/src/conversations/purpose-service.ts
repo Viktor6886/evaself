@@ -19,6 +19,7 @@ export const CONVERSATION_PURPOSES = [
   "partner_analysis",
   "research",
   "task_action",
+  "initiative",
 ] as const;
 
 export type ConversationPurpose = (typeof CONVERSATION_PURPOSES)[number];
@@ -57,6 +58,10 @@ const PURPOSE_TEXT: Record<ConversationPurpose, { summary: string; description: 
   task_action: {
     summary: "Выполнение задачи",
     description: "Запланированное человеком действие: Ева выполняет его сама и отдаёт результат",
+  },
+  initiative: {
+    summary: "Своя инициатива",
+    description: "Сообщение в выбранное человеком окно: Ева сама находит повод и пишет первой",
   },
 };
 
@@ -221,6 +226,29 @@ export function purposePolicy(purpose: ConversationPurpose): {
         canChangeProfile: false,
         allowedTools: ["get_user_profile", "get_goal_context"],
         deniedTools: null,
+      };
+    case "initiative":
+      // Ева выходит на связь первой, и повод она обязана найти сама.
+      // У назначения `scheduler` инструменты запрещены целиком — оно
+      // сочиняет текст напоминания по готовым фактам, — и инициатива
+      // упёрлась бы там в первый же вызов: посмотреть, что вообще
+      // происходит у человека, ей нечем. Из пустых рук получается
+      // вежливая пустота, а не разговор.
+      //
+      // Поэтому набор не сужается (инвариант 17) — какой памятью и
+      // каким инструментом искать повод, решает Letta, — а запрет
+      // точечный и ровно по одному свойству: профиль человека фоновым
+      // ходом не меняется. Он меняется в разговоре с ним.
+      return {
+        canSendToUser: true,
+        canChangeProfile: false,
+        allowedTools: null,
+        deniedTools: [
+          "upsert_user_profile_field",
+          "confirm_user_profile_field",
+          "decline_user_profile_field",
+          "mark_profile_field_asked",
+        ],
       };
     case "task_action":
       // Человек попросил сделать дело, а не поговорить о нём: сузить

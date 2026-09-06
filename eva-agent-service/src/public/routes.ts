@@ -6,6 +6,10 @@ import type { Database } from "../db.js";
 import { badRequest, EvaError, unauthorized } from "../errors.js";
 import type { GoalService } from "../goals/goal-service.js";
 import type { UserProfileService } from "../profile/profile-service.js";
+import {
+  MAX_WINDOWS_PER_USER,
+  MIN_WINDOW_MINUTES,
+} from "../jobs/proactive/windows.js";
 import type { ConversationService } from "./conversation-service.js";
 import {
   type TelegramWebAppUser,
@@ -81,6 +85,11 @@ export interface PublicDataSource {
   completeWorkBlock(
     telegramId: number,
     workBlockId: number,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+  listProactiveWindows(telegramId: number): Promise<Record<string, unknown>>;
+  saveProactiveWindows(
+    telegramId: number,
     input: Record<string, unknown>,
   ): Promise<Record<string, unknown>>;
   listConversations(telegramId: number): Promise<Record<string, unknown>[]>;
@@ -466,6 +475,166 @@ export class PublicRepository implements PublicDataSource {
       await this.profile.setLanguage(user.id, language);
     }
     return await this.getProfile(telegramId);
+    });
+  }
+
+  /**
+   * Окна, в которые Ева может писать первой.
+   *
+   * Отдаётся вместе с согласием: выключенное согласие делает окна
+   * недействующими, и показывать список без него значило бы обещать
+   * человеку сообщения, которых не будет.
+   */
+  async listProactiveWindows(telegramId: number): Promise<Record<string, unknown>> {
+    return await this.scoped(telegramId, "proactive-windows", async () => {
+      const user = await this.userByTelegramId(telegramId);
+      const [windows, preference] = await Promise.all([
+        this.db.query<Record<string, unknown>>(
+          `SELECT id::text, start_minute, end_minute, weekdays, enabled, label
+             FROM proactive_windows
+            WHERE user_id = $1
+            ORDER BY start_minute, id`,
+          [user.id],
+        ),
+        this.db.query<{ heartbeat_enabled: boolean }>(
+          `SELECT heartbeat_enabled FROM user_preferences WHERE user_id = $1`,
+          [user.id],
+        ),
+      ]);
+      return {
+        enabled: preference.rows[0]?.heartbeat_enabled !== false,
+        max_windows: MAX_WINDOWS_PER_USER,
+        min_minutes: MIN_WINDOW_MINUTES,
+        timezone: user.timezone,
+        windows: windows.rows,
+      };
+    });
+  }
+
+  /**
+   * Сохранить набор окон целиком.
+   *
+   * Именно набором, а не по одному: человек в интерфейсе двигает
+   * несколько окон сразу, и частичное сохранение оставило бы его с
+   * расписанием, которого он не выбирал. Строки заменяются в одной
+   * транзакции.
+   *
+   * Уже разложенные на сегодня минуты при этом не трогаются: удалять их
+   * значило бы отменить сообщение, о котором человек не просил, а
+   * пересчитывать — перекатить минуту, которая уже выбрана. Снятое окно
+   * перестаёт работать со следующих суток; выключенное согласие
+   * останавливает всё сразу, и это отдельный переключатель.
+   */
+  async saveProactiveWindows(
+    telegramId: number,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const windows = parseProactiveWindows(input.windows);
+    return await this.scoped(telegramId, "proactive-windows.save", async () => {
+      const user = await this.userByTelegramId(telegramId);
+      await this.db.transaction(async (client) => {
+        if (Object.hasOwn(input, "enabled")) {
+          if (typeof input.enabled !== "boolean") {
+            throw new Error("enabled должен быть true или false");
+          }
+          await client.query(
+            `INSERT INTO user_preferences (user_id, heartbeat_enabled)
+             VALUES ($1, $2)
+             ON CONFLICT (user_id) DO UPDATE SET heartbeat_enabled = EXCLUDED.heartbeat_enabled`,
+            [user.id, input.enabled],
+          );
+        }
+        if (!Object.hasOwn(input, "windows")) return;
+
+        // Окно сохраняет свой идентификатор между сохранениями.
+        //
+        // Раньше набор переписывался целиком — `DELETE` и `INSERT`, — и
+        // каждое окно получало новый `bigserial id`. Слот выбранной на
+        // сегодня минуты собран из этого идентификатора, поэтому любая
+        // правка настроек делала уже разложенное окно «ещё не
+        // тронутым»: планировщик выбирал ему ВТОРУЮ минуту в те же
+        // сутки, и человек получал два сообщения там, где просил одно.
+        const { rows: before } = await client.query<{
+          id: string; start_minute: number; end_minute: number;
+          weekdays: number[] | null; enabled: boolean;
+        }>(
+          `SELECT id::text, start_minute, end_minute, weekdays, enabled
+             FROM proactive_windows WHERE user_id = $1`,
+          [user.id],
+        );
+        const previous = new Map(before.map((row) => [row.id, row]));
+        const kept: string[] = [];
+        const rescheduled: string[] = [];
+
+        for (const window of windows) {
+          const existing = window.id ? previous.get(window.id) : undefined;
+          if (existing) {
+            await client.query(
+              `UPDATE proactive_windows
+                  SET start_minute = $3, end_minute = $4,
+                      weekdays = $5::smallint[], enabled = $6, label = $7
+                WHERE id = $1 AND user_id = $2`,
+              [
+                window.id, user.id, window.startMinute, window.endMinute,
+                window.weekdays, window.enabled, window.label,
+              ],
+            );
+            kept.push(window.id!);
+            // Время окна изменилось — значит изменилось и то, когда
+            // сегодня писать. Уже выбранная минута считалась по старым
+            // границам и за новыми могла оказаться вовсе.
+            if (existing.start_minute !== window.startMinute
+              || existing.end_minute !== window.endMinute
+              || existing.enabled !== window.enabled
+              || [...(existing.weekdays ?? [])].sort().join() !== [...window.weekdays].sort().join()) {
+              rescheduled.push(window.id!);
+            }
+          } else {
+            const { rows } = await client.query<{ id: string }>(
+              `INSERT INTO proactive_windows
+                 (user_id, start_minute, end_minute, weekdays, enabled, label)
+               VALUES ($1, $2, $3, $4::smallint[], $5, $6)
+               RETURNING id::text`,
+              [
+                user.id, window.startMinute, window.endMinute,
+                window.weekdays, window.enabled, window.label,
+              ],
+            );
+            kept.push(rows[0]!.id);
+          }
+        }
+
+        // Снятые окна. Ссылка на окно в запланированном сообщении —
+        // `ON DELETE SET NULL`, поэтому без этого шага уже выбранная
+        // минута пережила бы удаление окна и сработала бы сама по себе.
+        await client.query(
+          `UPDATE proactive_messages
+              SET status = 'skipped', reason = 'window_removed'
+            WHERE user_id = $1 AND kind = 'initiative' AND status = 'scheduled'
+              AND window_id IS NOT NULL
+              AND NOT (window_id::text = ANY($2::text[]))`,
+          [user.id, kept],
+        );
+        await client.query(
+          `DELETE FROM proactive_windows
+            WHERE user_id = $1 AND NOT (id::text = ANY($2::text[]))`,
+          [user.id, kept],
+        );
+
+        // Изменённые окна: ещё не отправленная минута снимается, и
+        // планировщик выберет новую по новым границам. Отправленное не
+        // трогается — слот остаётся занятым, и второго сообщения в те же
+        // сутки не будет.
+        if (rescheduled.length > 0) {
+          await client.query(
+            `DELETE FROM proactive_messages
+              WHERE user_id = $1 AND kind = 'initiative' AND status = 'scheduled'
+                AND window_id::text = ANY($2::text[])`,
+            [user.id, rescheduled],
+          );
+        }
+      });
+      return await this.listProactiveWindows(telegramId);
     });
   }
 
@@ -865,6 +1034,25 @@ export function registerPublicRoutes(
       }
     });
 
+    publicApp.get("/proactive-windows", async (request) => ({
+      proactive: await input.repository.listProactiveWindows(publicUser(request).id),
+    }));
+
+    publicApp.put("/proactive-windows", async (request) => {
+      try {
+        return {
+          proactive: await input.repository.saveProactiveWindows(
+            publicUser(request).id,
+            request.body && typeof request.body === "object"
+              ? request.body as Record<string, unknown>
+              : {},
+          ),
+        };
+      } catch (error) {
+        throw badRequest(error instanceof Error ? error.message : "Некорректные окна");
+      }
+    });
+
     publicApp.get("/progress", async (request) => ({
       progress: await input.repository.getProgress(publicUser(request).id),
     }));
@@ -1029,4 +1217,84 @@ function optionalEnum<T extends string>(
     throw new Error(`${name}: недопустимое значение`);
   }
   return value as T;
+}
+
+/** Окно, пришедшее из Mini App, после проверки. */
+interface ParsedProactiveWindow {
+  /** Идентификатор уже существующего окна; `null` — окно новое. */
+  id: string | null;
+  startMinute: number;
+  endMinute: number;
+  weekdays: number[];
+  enabled: boolean;
+  label: string | null;
+}
+
+/**
+ * Разбор набора окон.
+ *
+ * Границы проверяются здесь, а не только ограничением таблицы: отказ
+ * базы человек увидит как «что-то пошло не так», а он всего лишь
+ * поставил конец раньше начала. Ограничения при этом остаются — они
+ * последняя линия, а не первая.
+ */
+function parseProactiveWindows(value: unknown): ParsedProactiveWindow[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error("windows должен быть массивом");
+  if (value.length > MAX_WINDOWS_PER_USER) {
+    throw new Error(`Окон не может быть больше ${MAX_WINDOWS_PER_USER}`);
+  }
+  const windows = value.map((raw) => {
+    const item = raw && typeof raw === "object" && !Array.isArray(raw)
+      ? raw as Record<string, unknown>
+      : {};
+    const startMinute = optionalInteger(item.start_minute, 0, 1_439);
+    const endMinute = optionalInteger(item.end_minute, 1, 1_440);
+    if (startMinute === undefined || endMinute === undefined) {
+      throw new Error("У окна обязательны start_minute и end_minute");
+    }
+    if (endMinute - startMinute < MIN_WINDOW_MINUTES) {
+      throw new Error(
+        `Окно должно быть не короче ${MIN_WINDOW_MINUTES} минут: `
+        + "внутри более узкого случайная минута перестаёт быть случайной",
+      );
+    }
+    const weekdays = Array.isArray(item.weekdays) && item.weekdays.length > 0
+      ? [...new Set(item.weekdays.map((day) => Number(day)))].sort((a, b) => a - b)
+      : [1, 2, 3, 4, 5, 6, 7];
+    if (!weekdays.every((day) => Number.isSafeInteger(day) && day >= 1 && day <= 7)) {
+      throw new Error("weekdays — дни недели по ISO: от 1 (понедельник) до 7");
+    }
+    return {
+      // Идентификатор — то, чем окно остаётся собой между сохранениями.
+      // Владение проверяется при записи: чужой идентификатор не найдётся
+      // среди окон этого человека и будет прочитан как новое окно.
+      id: optionalText(item.id, 40),
+      startMinute,
+      endMinute,
+      weekdays,
+      enabled: item.enabled !== false,
+      label: optionalText(item.label, 100),
+    };
+  });
+
+  // Один и тот же идентификатор дважды означал бы, что два окна — это
+  // одно: второе обновление затёрло бы первое, и человек молча потерял
+  // бы окно, которое видел на экране.
+  const identified = windows.map((window) => window.id).filter((id) => id !== null);
+  if (new Set(identified).size !== identified.length) {
+    throw new Error("Два окна не могут иметь один идентификатор");
+  }
+
+  // Пересечение окон — это два сообщения подряд в один промежуток.
+  // Политика их потом разведёт по минимальному интервалу, но человек об
+  // этом не знает и увидит просто пропавшее сообщение. Честнее сказать
+  // сразу.
+  const ordered = [...windows].sort((left, right) => left.startMinute - right.startMinute);
+  for (let index = 1; index < ordered.length; index += 1) {
+    if (ordered[index]!.startMinute < ordered[index - 1]!.endMinute) {
+      throw new Error("Окна не должны пересекаться");
+    }
+  }
+  return windows;
 }

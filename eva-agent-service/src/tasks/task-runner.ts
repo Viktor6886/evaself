@@ -11,6 +11,7 @@ import { randomUUID } from "node:crypto";
 
 import type { ConversationPurposeService } from "../conversations/purpose-service.js";
 import type { Database } from "../db.js";
+import { EvaError } from "../errors.js";
 import { preferredResponseLanguage, t } from "../i18n/index.js";
 import type { LettaService } from "../letta.js";
 import type { Logger } from "../logger.js";
@@ -22,11 +23,45 @@ import { TaskEventService } from "./task-event-service.js";
 import {
   ACTION_DAILY_LIMIT,
   DAILY_LIMIT_DELAY_MS,
+  approvalRetryAt,
   retryAfterFailure,
   scheduledInstruction,
   taskKindOf,
   type TaskKind,
 } from "./task-run.js";
+
+/**
+ * Что планировщику нужно знать о подтверждениях.
+ *
+ * Интерфейс узкий намеренно: планировщик не выдаёт прав и не принимает
+ * решений за человека — он только спрашивает, чем кончился вопрос,
+ * заданный внутри хода, которого он не видел.
+ */
+/**
+ * Через сколько сказать человеку, что работа идёт.
+ *
+ * Полторы минуты — граница между «сейчас придёт» и «кажется, ничего не
+ * будет». Быстрая задача до неё не доживает и лишнего сообщения не
+ * порождает.
+ */
+const LONG_WORK_NOTICE_MS = 90_000;
+
+/**
+ * Через сколько вернуться к задаче, уступившей живому сообщению.
+ *
+ * Две минуты: столько живой ход занимает в худшем случае. Человек,
+ * который пишет непрерывно час, будет откладывать задачу час — и это
+ * верно: его разговор важнее её срока.
+ */
+const YIELD_DELAY_MS = 2 * 60_000;
+
+export interface ApprovalOutcomeSource {
+  lastUnattendedApproval(
+    userId: number,
+    conversationId: string,
+    since: Date,
+  ): Promise<{ status: string; toolName: string; description: string } | null>;
+}
 
 export interface DueTask {
   id: string;
@@ -65,6 +100,18 @@ export class ScheduledTaskRunner {
     private readonly purposes: ConversationPurposeService,
     private readonly taskEvents: TaskEventService,
     private readonly logger: Logger,
+    /**
+     * Подтверждения действий. `null` — контур выключен, и тогда
+     * фоновому ходу нечего ждать: он либо выполнил, либо нет.
+     */
+    private readonly approvals: ApprovalOutcomeSource | null = null,
+    /**
+     * Потолок хода выполнения задачи. Отдельный от интерактивного:
+     * цепочка «найди — прочитай — напиши — опубликуй» в четыре минуты
+     * не укладывается, а обрыв по таймауту человек читает как «не
+     * получилось». `undefined` — общий потолок.
+     */
+    private readonly actionTurnTimeoutMs?: number,
   ) {}
 
   /**
@@ -127,12 +174,51 @@ export class ScheduledTaskRunner {
         internalOperationType: kind === "action" ? "task_action" : "task_reminder",
         correlationId,
       });
+      // Момент запуска нужен разбору подтверждений: вопросы, заданные
+      // прошлыми заходами, уже закрыты, и принимать их за свои значило
+      // бы ждать ответа, который давно получен.
+      const turnStartedAt = new Date();
+      // Отметка о долгой работе заводится ВНУТРИ блокировки, а не до
+      // неё: снаружи её отсчёт включал бы ожидание очереди, и человек
+      // получал бы «взялась» за работу, которая ещё не началась.
+      let progress: NodeJS.Timeout | null = null;
       const turn = await this.queue.run(
         Number(task.telegram_id),
-        () => this.letta.runTurn(conversation.conversationId, prompt),
+        () => {
+          if (kind === "action") progress = this.announceLongWork(task);
+          return this.letta.runTurn(conversation.conversationId, prompt, {
+            timeoutMs: kind === "action" ? this.actionTurnTimeoutMs : undefined,
+            // Живое сообщение важнее фоновой работы. Ход выполнения
+            // задачи держит блокировку пользователя, и без уступки
+            // человек, написавший в эту минуту, ждал бы её до конца —
+            // до десяти минут молчания в ответ на «привет».
+            //
+            // Барьер спрашивается раз в пять секунд: это запрос к базе,
+            // и на десятиминутной работе разница между пятью секундами
+            // и двумя — это сотня лишних запросов ради задержки, которой
+            // человек не заметит.
+            ...(kind === "action"
+              ? {
+                isCancelled: async () => await this.userIsWriting(task, turnStartedAt),
+                cancelPollMs: 5_000,
+              }
+              : {}),
+          });
+        },
         { userId: Number(task.user_id), conversationId: conversation.conversationId },
-      );
+      ).finally(() => {
+        if (progress) clearTimeout(progress);
+      });
       const generatedText = turn.reply.trim();
+
+      // Ход мог упереться в действие, которое человек не разрешал
+      // заранее. Тогда он не выполнил работу, а задал вопрос и
+      // закончился — и это не отказ: попытка не считается, задача
+      // возвращается, когда согласие будет получено.
+      if (kind === "action"
+        && await this.handledByApproval(task, conversation.conversationId, turnStartedAt)) {
+        return;
+      }
       // Пустой ответ на действие — это отказ, а не «нечего сказать»:
       // человек ждёт результат, и промолчать здесь значит сделать вид,
       // что задачи не было. Такой заход уходит в общий путь неудачи и
@@ -150,12 +236,7 @@ export class ScheduledTaskRunner {
       }
       let telegramMessageId: number | null = null;
       if (generatedText) {
-        // Напоминание пропускает вперёд ответ на живой вопрос: человек,
-        // который сейчас разговаривает, ждёт именно ответ.
-        const sent = await this.telegram.withPriority(
-          "reminder",
-          async () => await this.telegram.sendMessage(Number(task.chat_id), generatedText),
-        );
+        const sent = await this.deliver(task, generatedText);
         telegramMessageId = lastTelegramMessageId(Array.isArray(sent) ? sent : []);
       }
       await this.taskEvents.record({
@@ -172,8 +253,199 @@ export class ScheduledTaskRunner {
       await this.rescheduleTask(task, { complete: kind === "action" });
       await this.db.markAgentUsed(task.agent_id, Number(task.user_id));
     } catch (error) {
+      // Уступка живому сообщению — не отказ. Работа переделается через
+      // пару минут, когда человек получит свой ответ; считать это
+      // попыткой значило бы исчерпать их на человеке, который просто
+      // разговаривает.
+      if (error instanceof EvaError && error.code === "turn_cancelled") {
+        await this.yieldToUser(task);
+        return;
+      }
       await this.failTask(task, kind, error, correlationId);
     }
+  }
+
+  /**
+   * Отойти в сторону и вернуться позже.
+   *
+   * Срок сдвигается, попытка не считается, ничего человеку не
+   * отправляется: он написал сам и сейчас получит ответ, а сообщение
+   * «отложила своё дело» ему в этот момент не нужно.
+   */
+  private async yieldToUser(task: DueTask): Promise<void> {
+    const retryAt = new Date(Date.now() + YIELD_DELAY_MS);
+    await this.db.query(
+      `
+        -- tenant: by task_id — задача принадлежит одному пользователю, проверка владения выше по стеку
+        UPDATE tasks SET next_run_at = $2, locked_at = NULL WHERE id = $1 AND user_id = $3`,
+      [task.id, retryAt.toISOString(), task.user_id],
+    );
+    this.logger.info("Задача уступила живому сообщению", { taskId: task.id });
+  }
+
+  /**
+   * Человек написал, пока Ева делала своё дело.
+   *
+   * Проверяется непринятое входящее: строка `telegram_updates`, до
+   * которой обработчик ещё не дошёл, — она и стоит в очереди за
+   * блокировкой, которую держит этот ход. Уступка стоит переделанной
+   * работы, ожидание стоит человеку десяти минут молчания в ответ на
+   * живое сообщение; второе дороже.
+   *
+   * Отказ запроса уступкой не считается: потерять ход из-за сорванной
+   * проверки хуже, чем один раз не уступить.
+   */
+  private async userIsWriting(task: DueTask, since: Date): Promise<boolean> {
+    try {
+      const { rowCount } = await this.db.query(
+        `
+          -- tenant: by user_id — входящие того же владельца, что и задача
+          SELECT 1 FROM telegram_updates
+           WHERE user_id = $1
+             AND status IN ('queued', 'retry')
+             AND received_at >= $2
+           LIMIT 1`,
+        [task.user_id, since.toISOString()],
+      );
+      return (rowCount ?? 0) > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Сказать, что работа идёт, если она затянулась.
+   *
+   * Таймер, а не сообщение сразу: длительность заранее неизвестна, и
+   * отметка на каждую задачу превратила бы одно обещанное сообщение в
+   * два. Отказ доставки молчаливый — это вежливость, а не результат.
+   */
+  private announceLongWork(task: DueTask): NodeJS.Timeout {
+    const timer = setTimeout(() => {
+      const language = preferredResponseLanguage({
+        language_mode: task.language_mode,
+        preferred_language: task.preferred_language,
+        last_message_language: task.last_message_language,
+        language_code: task.language_code,
+      });
+      void this.deliver(
+        task,
+        t(language, "scheduledActionStarted", { title: task.title.slice(0, 200) }),
+        "progress",
+      ).catch(() => undefined);
+    }, LONG_WORK_NOTICE_MS);
+    timer.unref();
+    return timer;
+  }
+
+  /**
+   * Ход закончился вопросом к человеку, а не работой.
+   *
+   * Возвращает `true`, если задачей дальше занимается ожидание
+   * согласия: заход не считается ни удачей, ни неудачей. Текст хода при
+   * этом не доставляется — человек уже получил сам вопрос, и второе
+   * сообщение о том же было бы шумом.
+   */
+  private async handledByApproval(
+    task: DueTask,
+    conversationId: string,
+    since: Date,
+  ): Promise<boolean> {
+    const approval = await this.approvals
+      ?.lastUnattendedApproval(Number(task.user_id), conversationId, since)
+      .catch(() => null);
+    if (!approval) return false;
+
+    if (approval.status === "pending") {
+      const waits = await this.taskEvents.approvalWaits(
+        Number(task.user_id), task.id, task.scheduled_at,
+      ) + 1;
+      await this.taskEvents.record({
+        userId: Number(task.user_id), taskId: task.id,
+        eventType: "action_awaiting_approval", scheduledAt: task.scheduled_at,
+        conversationId, metadata: { tool: approval.toolName, waits },
+      });
+      const retryAt = approvalRetryAt(waits, new Date());
+      if (retryAt) {
+        await this.db.query(
+          `
+            -- tenant: by task_id — задача принадлежит одному пользователю, проверка владения выше по стеку
+            UPDATE tasks SET next_run_at = $2, locked_at = NULL WHERE id = $1 AND user_id = $3`,
+          [task.id, retryAt.toISOString(), task.user_id],
+        );
+        this.logger.info("Задача ждёт согласия человека", {
+          taskId: task.id, tool: approval.toolName, waits,
+        });
+        return true;
+      }
+      // Согласия так и не дождались. Молчание на месте обещанного
+      // действия выглядит так, будто задачи никогда и не было.
+      await this.notifyApprovalOutcome(task, "scheduledActionApprovalTimeout");
+      await this.rescheduleTask(task, { error: "approval_timeout" });
+      return true;
+    }
+
+    // Человек ответил «нет». Возвращаться к тому же действию незачем:
+    // ответ уже есть, и повтор выглядел бы как попытка переспросить.
+    if (approval.status === "denied" || approval.status === "cancelled") {
+      await this.notifyApprovalOutcome(task, "scheduledActionDeclined");
+      await this.rescheduleTask(task, { complete: true, error: "approval_denied" });
+      return true;
+    }
+    return false;
+  }
+
+  /** Прямой ответ человеку, когда действие так и не состоялось. */
+  private async notifyApprovalOutcome(
+    task: DueTask,
+    key: "scheduledActionApprovalTimeout" | "scheduledActionDeclined",
+  ): Promise<void> {
+    const language = preferredResponseLanguage({
+      language_mode: task.language_mode,
+      preferred_language: task.preferred_language,
+      last_message_language: task.last_message_language,
+      language_code: task.language_code,
+    });
+    const text = t(language, key, { title: task.title.slice(0, 200) });
+    try {
+      const sent = await this.deliver(task, text);
+      await this.taskEvents.record({
+        userId: Number(task.user_id), taskId: task.id,
+        eventType: "action_failed", scheduledAt: task.scheduled_at,
+        sentAt: new Date(), generatedText: text, deliveryStatus: "fallback",
+        telegramChatId: task.chat_id,
+        telegramMessageId: lastTelegramMessageId(Array.isArray(sent) ? sent : []),
+        errorCode: key === "scheduledActionDeclined" ? "approval_denied" : "approval_timeout",
+      });
+    } catch (error) {
+      this.logger.warn("Итог ожидания согласия не доставлен", {
+        taskId: task.id,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  /**
+   * Доставка результата задачи.
+   *
+   * Идёт в durable outbox: строка переживает перезапуск, HTTP-запрос из
+   * упавшего процесса — нет, а результат действия уже оплачен ходом
+   * агента и поиском. Ключ идемпотентности собирается из задачи и её
+   * срока — повторный заход того же срока не отправит второе сообщение.
+   *
+   * Напоминание пропускает вперёд ответ на живой вопрос: человек,
+   * который сейчас разговаривает, ждёт именно ответ.
+   */
+  private async deliver(
+    task: DueTask,
+    text: string,
+    slot = "result",
+  ): Promise<unknown> {
+    return await this.telegram.withDeliveryContext(
+      `task:${task.id}:${new Date(task.scheduled_at).getTime()}:${slot}`,
+      async () => await this.telegram.sendMessage(Number(task.chat_id), text),
+      "reminder",
+    );
   }
 
   /**
@@ -308,10 +580,7 @@ export class ScheduledTaskRunner {
       { title: task.title.slice(0, 200) },
     );
     try {
-      const sent = await this.telegram.withPriority(
-        "reminder",
-        async () => await this.telegram.sendMessage(Number(task.chat_id), text),
-      );
+      const sent = await this.deliver(task, text);
       await this.taskEvents.record({
         userId: Number(task.user_id), taskId: task.id,
         eventType: kind === "action" ? "action_failed" : "reminder_sent",

@@ -10,6 +10,7 @@
  * agent and the same conversation back up.
  */
 
+import type { ConversationPurpose } from "./conversations/purpose-service.js";
 import pg from "pg";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { databaseUnavailable } from "./errors.js";
@@ -133,14 +134,17 @@ export interface AgentRuntimeContext {
   telegramId: number;
   chatId: number;
   conversationId: string;
-  purpose:
-    | "chat"
-    | "scheduler"
-    | "profile"
-    | "goal_review"
-    | "partner_analysis"
-    | "research"
-    | "task_action";
+  /**
+   * Назначение берётся из общего списка, а не переписывается здесь
+   * заново: третья копия перечня уже однажды разошлась с двумя первыми
+   * (`CONVERSATION_PURPOSES` и `agent_conversations_purpose_check`), и
+   * новое назначение молча оказывалось «не тем» ровно там, где по нему
+   * принимается решение о подтверждениях.
+   *
+   * Импорт только типовой: во время выполнения его не остаётся, и
+   * взаимной ссылки между модулями не возникает.
+   */
+  purpose: ConversationPurpose;
   timezone: string;
   responseMode: "text" | "voice" | "both";
   useEmoji: boolean;

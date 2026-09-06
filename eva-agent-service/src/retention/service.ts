@@ -197,6 +197,50 @@ export const RETENTION_QUERIES: Record<string, ClassQueries> = {
                 LIMIT $2
              )`],
   },
+  // Текст сообщений, которые Ева отправила сама.
+  //
+  // Редактирование, а не удаление: строка события задачи и строка слота
+  // проактивного сообщения остаются. Удалить их значило бы снять защиту
+  // от повторной отправки — слот освободился бы, и человек получил бы
+  // то же сообщение второй раз.
+  //
+  // Слова человека сюда не попадают: обе колонки хранят только то, что
+  // сочинила Ева. Полного зеркала переписки в PostgreSQL по-прежнему
+  // нет.
+  eva_message_text: {
+    count: [
+      `-- tenant: system — общесистемное применение политики хранения
+       SELECT count(*)::int AS value FROM task_events
+        WHERE created_at < now() - make_interval(days => $1)
+          AND generated_text IS NOT NULL`,
+      `-- tenant: system — общесистемное применение политики хранения
+       SELECT count(*)::int AS value FROM proactive_messages
+        WHERE created_at < now() - make_interval(days => $1)
+          AND message_text IS NOT NULL`,
+    ],
+    apply: [
+      `-- tenant: system — общесистемное применение политики хранения
+       UPDATE task_events
+          SET generated_text = NULL
+        WHERE id IN (
+          SELECT id FROM task_events
+           WHERE created_at < now() - make_interval(days => $1)
+             AND generated_text IS NOT NULL
+           ORDER BY created_at
+           LIMIT $2
+        )`,
+      `-- tenant: system — общесистемное применение политики хранения
+       UPDATE proactive_messages
+          SET message_text = NULL
+        WHERE id IN (
+          SELECT id FROM proactive_messages
+           WHERE created_at < now() - make_interval(days => $1)
+             AND message_text IS NOT NULL
+           ORDER BY created_at
+           LIMIT $2
+        )`,
+    ],
+  },
   metrics_aggregated: {
     count: [`-- tenant: system — общесистемное применение политики хранения
             SELECT count(*)::int AS value FROM job_mirror_samples

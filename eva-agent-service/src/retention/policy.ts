@@ -107,6 +107,16 @@ export const RETENTION_CLASSES: readonly RetentionClass[] = [
     targets: "job_dead_letters",
   },
   {
+    code: "eva_message_text",
+    title: "Текст сообщений, отправленных Евой по своей инициативе",
+    action: "redact",
+    settingKey: "retention.eva_message_text_days",
+    defaultDays: 90,
+    minDays: 30,
+    maxDays: 365,
+    targets: "task_events.generated_text, proactive_messages.message_text",
+  },
+  {
     code: "metrics_aggregated",
     title: "Агрегированные метрики без содержания",
     action: "delete",
