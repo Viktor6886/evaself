@@ -9,7 +9,9 @@ import { turnCancelled } from "../dist/errors.js";
 import { ScheduledTaskRunner } from "../dist/tasks/task-runner.js";
 import {
   ACTION_DAILY_LIMIT,
+  ACTION_DEADLINE_MS,
   MAX_APPROVAL_WAITS,
+  actionDeadlinePassed,
   MAX_ATTEMPTS,
   approvalRetryAt,
   retryAfterFailure,
@@ -57,7 +59,10 @@ function taskRow(overrides: Record<string, unknown> = {}): Record<string, unknow
     timezone: "Asia/Yekaterinburg",
     agent_id: "agent-7",
     conversation_id: "conversation-chat",
-    scheduled_at: new Date("2026-09-04T10:00:00Z"),
+    // Срок «только что»: у действия ограничен общий срок ответа, и
+    // фиксированная дата из прошлого означала бы, что каждый тест
+    // проверяет просроченную задачу, а не свой случай.
+    scheduled_at: new Date(),
     language_mode: "auto",
     preferred_language: null,
     last_message_language: "ru",
@@ -658,4 +663,59 @@ test("незакрытая ветка не роняет уже сделанну�
 
   await assert.doesNotReject(() => layer.runner.execute(taskRow() as never));
   assert.equal(layer.sent.length, 1, "результат обязан дойти");
+});
+
+// ---------------------------------------------------------------------
+// Срок ответа ограничен, а не складывается из попыток
+// ---------------------------------------------------------------------
+
+test("человек слышит ответ в срок, а не через сорок две минуты", () => {
+  // Попыток три, у каждой свой потолок хода, между ними отступы. По
+  // отдельности каждое число разумно; вместе они складывались в сорок
+  // две минуты молчания, а человек просил «через пять минут».
+  const scheduled = new Date("2026-09-06T21:22:00Z");
+  assert.equal(actionDeadlinePassed(scheduled, new Date("2026-09-06T21:25:00Z")), false);
+  assert.equal(actionDeadlinePassed(scheduled, new Date("2026-09-06T21:31:59Z")), false);
+  assert.equal(actionDeadlinePassed(scheduled, new Date("2026-09-06T21:32:00Z")), true);
+  assert.equal(ACTION_DEADLINE_MS, 10 * 60_000);
+});
+
+test("просроченный срок не запускает ход, а говорит прямо", async () => {
+  // Ход длиной в пять минут здесь только отодвинул бы честное «не
+  // получилось» ещё на пять минут — и потратил бы деньги.
+  const layer = harness();
+  await layer.runner.execute(taskRow({
+    scheduled_at: new Date(Date.now() - 30 * 60_000),
+  }) as never);
+
+  assert.equal(layer.turns.length, 0, "ход обязан не начаться");
+  assert.equal(layer.sent.length, 1);
+  assert.match(layer.sent[0]!.text, /Не получилось/);
+  const closed = updates(layer.db).filter((call) => call.sql.includes("status = CASE WHEN"));
+  assert.equal(closed.length, 1, "срок обязан закрыться, а не ждать снова");
+});
+
+test("отсечка повтора считает от назначенного времени, а не от начала попытки", () => {
+  // Ход, начатый внутри срока, может закончиться за его пределами: пять
+  // минут работы, начатой на седьмой минуте, кончаются на двенадцатой.
+  // Решение о повторе принимается уже по факту окончания — иначе
+  // четвёртая попытка уходит в никуда.
+  //
+  // Проверяется решающая функция, а не ход целиком: в фейке ход падает
+  // мгновенно, время не идёт, и «долгий ход» изобразить нечем, не
+  // подменив часы всему планировщику.
+  const scheduled = new Date("2026-09-06T21:22:00Z");
+  const startedInsideEndedOutside = new Date("2026-09-06T21:34:00Z");
+  assert.equal(actionDeadlinePassed(scheduled, startedInsideEndedOutside), true);
+  assert.equal(actionDeadlinePassed(scheduled, new Date("2026-09-06T21:28:00Z")), false);
+});
+
+test("неудача внутри срока по-прежнему повторяется", async () => {
+  const layer = harness({ fail: new Error("провайдер ответил 503") });
+  await layer.runner.execute(taskRow({
+    attempts: 0, scheduled_at: new Date(Date.now() - 30_000),
+  }) as never);
+  const retried = updates(layer.db).filter((call) => call.sql.includes("attempts = $4"));
+  assert.equal(retried.length, 1);
+  assert.equal(layer.sent.length, 0, "о первой неудаче человеку знать незачем");
 });

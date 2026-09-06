@@ -774,3 +774,25 @@ test("найденное сразу ничего не снимает и назы
     harnessed.restore();
   }
 });
+
+test("отказ движков не пробуется ещё раз: сужения тут ни при чём", async () => {
+  // Снимать фильтр у того, кто не ответил, бессмысленно, а каждая
+  // ступень стоит целого круга ожидания: три круга по двадцать секунд —
+  // минута на один вызов, и ход упирался в потолок раньше, чем успевал
+  // что-нибудь сделать.
+  const harnessed = searchHarness({
+    results: [], answers: [], infoboxes: [],
+    unresponsive_engines: [["google", "CAPTCHA"], ["brave", "timeout"]],
+  });
+  try {
+    const result = await harnessed.tool.execute("call-1", {
+      query: "погода Камень-на-Оби", time_range: "week", language: "ru",
+    });
+    const payload = result.details as { ok: boolean; error?: string };
+    assert.equal(harnessed.requests.length, 1, "второй круг ничего не изменит");
+    assert.equal(payload.ok, false);
+    assert.equal(payload.error, "search_engines_failed");
+  } finally {
+    harnessed.restore();
+  }
+});
