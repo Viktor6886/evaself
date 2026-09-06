@@ -447,14 +447,27 @@ export class RuntimeContextBuilder {
       lines.push("i_wrote_since_your_last_message:", ...own);
     }
 
-    const events = (context.taskActivity ?? []).slice(0, 5)
-      .map((item) => `  - ${escapeContextValue(item)}`);
+    // Журнал задач — материал разговора, а не работы. В служебном ходе
+    // он оказывался единственным конкретным, что у модели есть перед
+    // глазами, и она писала человеку сводку по задачам вместо того, что
+    // он просил: «Остались две незавершённые задачи…». Живому разговору
+    // журнал по-прежнему нужен — там он отвечает на «ты же напоминала».
+    const serviceTurn = context.purpose === "task_action" || context.purpose === "initiative";
+    const events = serviceTurn
+      ? []
+      : (context.taskActivity ?? []).slice(0, 5)
+        .map((item) => `  - ${escapeContextValue(item)}`);
     if (events.length > 0) lines.push("recent_task_events:", ...events);
 
     // Ближайшие напоминания стоят рядом с местным временем и приходят с
     // уже посчитанным остатком: «через сколько» — это арифметика, а её
     // модель делает неверно и уверенно.
-    const upcoming = (context.upcomingReminders ?? []).slice(0, 3);
+    // Ближайшие напоминания в ходе выполнения задачи — тот же соблазн
+    // отчитаться. Инициативе они остаются: «не забудь про звонок в
+    // час» — это разговор, а не сводка.
+    const upcoming = context.purpose === "task_action"
+      ? []
+      : (context.upcomingReminders ?? []).slice(0, 3);
     if (upcoming.length > 0) {
       lines.push(
         "upcoming_reminders:",

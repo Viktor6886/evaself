@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { mock } from "node:test";
 
 import { AgentToolFactory } from "../dist/agent-tools.js";
 import { withTenantScopes } from "./tenant-scope-helper.ts";
@@ -74,6 +74,8 @@ function harness(options: {
   approval?: { status: string; toolName: string; description: string } | null;
   /** Ход уступает живому сообщению: барьер отмены отвечает «да». */
   cancel?: boolean;
+  /** Держать ход открытым, пока тест не отпустит: нужно виртуальным часам. */
+  hold?: { promise: Promise<void>; reached: () => void };
   actionTurnTimeoutMs?: number;
 } = {}) {
   const db = options.db ?? fakeDb();
@@ -89,6 +91,12 @@ function harness(options: {
       turnOptions: { timeoutMs?: number; isCancelled?: () => Promise<boolean> } = {},
     ) => {
       turns.push({ conversationId, prompt, timeoutMs: turnOptions.timeoutMs });
+      if (options.hold) {
+        // Ход дошёл до сюда — значит отметка о долгой работе уже
+        // заведена, и часы можно двигать.
+        options.hold.reached();
+        await options.hold.promise;
+      }
       if (options.cancel && await turnOptions.isCancelled?.()) {
         throw turnCancelled("ход отменён живым сообщением");
       }
@@ -158,8 +166,20 @@ test("наступившее действие поручает работу Ев
   });
   assert.match(action, /\[ЗАПЛАНИРОВАННОЕ ДЕЙСТВИЕ\]/);
   assert.match(action, /Сделай это сейчас сама/);
-  assert.match(action, /дай сам результат/);
+  assert.match(action, /сообщение человеку, а не отчёт/);
   assert.equal(action.includes("верни только готовый текст"), false);
+
+  // Служебный номер в инструкции доезжал до человека словами «задачу 44
+  // выполненной не считаю»: ответ превращался в отчёт трекера. Закрывает
+  // задачу планировщик, модели номер не нужен.
+  assert.equal(action.includes("task_id"), false);
+  assert.equal(action.includes("11"), false);
+  // Эта conversation общая для всех отложенных дел и копит служебные
+  // блоки. Запрет поимённый, потому что каждый пункт модель писала
+  // человеку на самом деле.
+  assert.match(action, /восстановлении или потере контекста/);
+  assert.match(action, /других задач, их номеров, статусов/);
+  assert.match(action, /предложения повторить/);
 
   // Напоминание не тронуто: его формулировка работает и переписывать её
   // этот шаг не нанимали.
@@ -171,6 +191,10 @@ test("наступившее действие поручает работу Ев
   assert.match(reminder, /\[ЗАПЛАНИРОВАННАЯ ЗАДАЧА\]/);
   assert.match(reminder, /верни только готовый текст/);
   assert.equal(reminder.includes("Сделай это сейчас сама"), false);
+  // «Задача открыта» в хвосте напоминания — это доехавшая до человека
+  // служебная отметка, а не часть напоминания.
+  assert.equal(reminder.includes("task_id"), false);
+  assert.match(reminder, /Служебных отметок/);
 });
 
 test("род задачи по умолчанию — напоминание", () => {
@@ -483,4 +507,109 @@ test("ожиданий на одно меньше, чем вопросов", () 
   assert.equal(delays.length, MAX_APPROVAL_WAITS - 1);
   assert.deepEqual(delays, [...delays].sort((left, right) => left - right));
   assert.ok(new Set(delays).size === delays.length, "одинаковых отступов быть не должно");
+});
+
+/**
+ * Долгая работа на виртуальных часах.
+ *
+ * Ход держится открытым, часы сдвигаются на две минуты, и только потом
+ * ход отпускается: отметка «взялась» висит на таймере, и без остановки
+ * времени тест ловил бы не её, а собственную скорость фейка.
+ */
+async function longWork(attempts: number) {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    let release: () => void = () => undefined;
+    let reached: () => void = () => undefined;
+    const started = new Promise<void>((resolve) => { reached = resolve; });
+    const hold = {
+      promise: new Promise<void>((resolve) => { release = resolve; }),
+      reached: () => reached(),
+    };
+    const layer = harness({ hold });
+    const running = layer.runner.execute(taskRow({ attempts }) as never);
+    // Ждём не такты, а сам факт: ход дошёл до середины, таймер заведён.
+    await started;
+    mock.timers.tick(120_000);
+    release();
+    await running;
+    // Отметка уходит из обработчика таймера и никем не ожидается:
+    // дать её цепочке дойти до фейка доставки.
+    await new Promise((resolve) => setImmediate(resolve));
+    return layer.sent.map((item) => item.text);
+  } finally {
+    mock.timers.reset();
+  }
+}
+
+test("«взялась за работу» приходит один раз, а не на каждой попытке", async () => {
+  // Человек получал «Взялась за „Найти погоду“» второй и третий раз
+  // подряд: отметка висела на попытке, а не на работе, и повтор после
+  // неудачи выглядел как топтание на месте.
+  const first = await longWork(0);
+  assert.ok(
+    first.some((text) => text.startsWith("Взялась за")),
+    "на первой попытке долгая работа обязана назваться",
+  );
+
+  const retry = await longWork(1);
+  assert.ok(
+    !retry.some((text) => text.startsWith("Взялась за")),
+    "повтор — та же работа, а не новая",
+  );
+});
+
+test("отметка о работе не обещает срока, которого не знает", async () => {
+  // «Займёт пару минут» превращалось в невыполненное обещание ровно
+  // тогда, когда работа затягивалась, — то есть всегда, когда эта
+  // отметка вообще отправляется.
+  const sent = await longWork(0);
+  const notice = sent.find((text) => text.startsWith("Взялась за"))!;
+  assert.doesNotMatch(notice, /минут|час|скоро/i);
+});
+
+test("журнал задач не приходит в ход выполнения задачи", async () => {
+  // Он оказывался единственным конкретным, что у модели перед глазами,
+  // и она писала человеку сводку по задачам вместо того, что он просил.
+  const { RuntimeContextBuilder } = await import("../dist/runtime/runtime-context.js");
+  const row = {
+    user_id: "1", telegram_id: "2", language_code: "ru", language_mode: "fixed",
+    preferred_language: "ru", last_message_language: "ru", timezone: "UTC",
+    city: null, country_code: null, agent_id: "a", conversation_id: "c",
+    response_mode: "text", use_emoji: false, communication_style: null,
+    profile_field_key: null, profile_title: null, profile_prompt_hint: null,
+    profile_status: null, active_goal_title: null, next_result_title: null,
+    next_action: null, llm_quality_mode: "auto", program_key: null,
+    program_version: null, program_phase_key: null, program_step_key: null,
+    program_next_step_key: null, program_next_action_hint: null, program_resume_policy: null,
+  };
+  const build = async (purpose: string) => {
+    const builder = new RuntimeContextBuilder(
+      {
+        query: async (sql: string) => sql.includes("JOIN tasks t ON t.id=e.task_id")
+          ? { rows: [{ title: "Собрать новости", event_type: "action_failed",
+            created_at: new Date("2026-09-06T10:00:00Z"), task_status: "open" }] }
+          : sql.includes("FROM tasks t")
+            ? { rows: [{ title: "Позвонить", scheduled_at: new Date("2026-09-06T12:00:00Z") }] }
+            : { rows: [{ ...row, purpose }] },
+      } as never,
+      { defaultTimezone: "UTC", profileCompletionEnabled: false, vectorGoalsEnabled: false,
+        now: () => new Date("2026-09-06T11:00:00Z") },
+    );
+    const context = await builder.build({ userId: 1, conversationId: "c", userMessage: "x" });
+    return builder.wrapUserMessage(context, "x");
+  };
+
+  const chat = await build("chat");
+  assert.match(chat, /recent_task_events:/, "живому разговору журнал нужен");
+
+  const action = await build("task_action");
+  assert.doesNotMatch(action, /recent_task_events:/);
+  assert.doesNotMatch(action, /upcoming_reminders:/);
+
+  // Инициативе ближайшее напоминание остаётся: «не забудь про звонок» —
+  // это разговор, а не сводка. Журнал прошедшего — нет.
+  const initiative = await build("initiative");
+  assert.doesNotMatch(initiative, /recent_task_events:/);
+  assert.match(initiative, /upcoming_reminders:/);
 });

@@ -181,11 +181,17 @@ export class ScheduledTaskRunner {
       // Отметка о долгой работе заводится ВНУТРИ блокировки, а не до
       // неё: снаружи её отсчёт включал бы ожидание очереди, и человек
       // получал бы «взялась» за работу, которая ещё не началась.
+      //
+      // И только на первой попытке. Повтор — это та же работа, а не
+      // новая: человек получал «Взялась за „Найти погоду“» второй и
+      // третий раз подряд и справедливо считал, что Ева топчется на
+      // месте.
+      const firstAttempt = (Number(task.attempts) || 0) === 0;
       let progress: NodeJS.Timeout | null = null;
       const turn = await this.queue.run(
         Number(task.telegram_id),
         () => {
-          if (kind === "action") progress = this.announceLongWork(task);
+          if (kind === "action" && firstAttempt) progress = this.announceLongWork(task);
           return this.letta.runTurn(conversation.conversationId, prompt, {
             timeoutMs: kind === "action" ? this.actionTurnTimeoutMs : undefined,
             // Живое сообщение важнее фоновой работы. Ход выполнения
