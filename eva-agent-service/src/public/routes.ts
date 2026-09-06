@@ -6,6 +6,10 @@ import type { Database } from "../db.js";
 import { badRequest, EvaError, unauthorized } from "../errors.js";
 import type { GoalService } from "../goals/goal-service.js";
 import type { UserProfileService } from "../profile/profile-service.js";
+import {
+  MAX_WINDOWS_PER_USER,
+  MIN_WINDOW_MINUTES,
+} from "../jobs/proactive/windows.js";
 import type { ConversationService } from "./conversation-service.js";
 import {
   type TelegramWebAppUser,
@@ -81,6 +85,11 @@ export interface PublicDataSource {
   completeWorkBlock(
     telegramId: number,
     workBlockId: number,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+  listProactiveWindows(telegramId: number): Promise<Record<string, unknown>>;
+  saveProactiveWindows(
+    telegramId: number,
     input: Record<string, unknown>,
   ): Promise<Record<string, unknown>>;
   listConversations(telegramId: number): Promise<Record<string, unknown>[]>;
@@ -466,6 +475,93 @@ export class PublicRepository implements PublicDataSource {
       await this.profile.setLanguage(user.id, language);
     }
     return await this.getProfile(telegramId);
+    });
+  }
+
+  /**
+   * Окна, в которые Ева может писать первой.
+   *
+   * Отдаётся вместе с согласием: выключенное согласие делает окна
+   * недействующими, и показывать список без него значило бы обещать
+   * человеку сообщения, которых не будет.
+   */
+  async listProactiveWindows(telegramId: number): Promise<Record<string, unknown>> {
+    return await this.scoped(telegramId, "proactive-windows", async () => {
+      const user = await this.userByTelegramId(telegramId);
+      const [windows, preference] = await Promise.all([
+        this.db.query<Record<string, unknown>>(
+          `SELECT id::text, start_minute, end_minute, weekdays, enabled, label
+             FROM proactive_windows
+            WHERE user_id = $1
+            ORDER BY start_minute, id`,
+          [user.id],
+        ),
+        this.db.query<{ heartbeat_enabled: boolean }>(
+          `SELECT heartbeat_enabled FROM user_preferences WHERE user_id = $1`,
+          [user.id],
+        ),
+      ]);
+      return {
+        enabled: preference.rows[0]?.heartbeat_enabled !== false,
+        max_windows: MAX_WINDOWS_PER_USER,
+        min_minutes: MIN_WINDOW_MINUTES,
+        timezone: user.timezone,
+        windows: windows.rows,
+      };
+    });
+  }
+
+  /**
+   * Сохранить набор окон целиком.
+   *
+   * Именно набором, а не по одному: человек в интерфейсе двигает
+   * несколько окон сразу, и частичное сохранение оставило бы его с
+   * расписанием, которого он не выбирал. Строки заменяются в одной
+   * транзакции.
+   *
+   * Уже разложенные на сегодня минуты при этом не трогаются: удалять их
+   * значило бы отменить сообщение, о котором человек не просил, а
+   * пересчитывать — перекатить минуту, которая уже выбрана. Снятое окно
+   * перестаёт работать со следующих суток; выключенное согласие
+   * останавливает всё сразу, и это отдельный переключатель.
+   */
+  async saveProactiveWindows(
+    telegramId: number,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const windows = parseProactiveWindows(input.windows);
+    return await this.scoped(telegramId, "proactive-windows.save", async () => {
+      const user = await this.userByTelegramId(telegramId);
+      await this.db.transaction(async (client) => {
+        if (Object.hasOwn(input, "enabled")) {
+          if (typeof input.enabled !== "boolean") {
+            throw new Error("enabled должен быть true или false");
+          }
+          await client.query(
+            `INSERT INTO user_preferences (user_id, heartbeat_enabled)
+             VALUES ($1, $2)
+             ON CONFLICT (user_id) DO UPDATE SET heartbeat_enabled = EXCLUDED.heartbeat_enabled`,
+            [user.id, input.enabled],
+          );
+        }
+        if (!Object.hasOwn(input, "windows")) return;
+        await client.query(
+          "DELETE FROM proactive_windows WHERE user_id = $1",
+          [user.id],
+        );
+        for (const window of windows) {
+          await client.query(
+            `INSERT INTO proactive_windows
+               (user_id, start_minute, end_minute, weekdays, enabled, label)
+             VALUES ($1, $2, $3, $4::smallint[], $5, $6)`,
+            [
+              user.id, window.startMinute, window.endMinute,
+              window.weekdays, window.enabled, window.label,
+            ],
+          );
+        }
+      });
+      return await this.listProactiveWindows(telegramId);
     });
   }
 
@@ -865,6 +961,25 @@ export function registerPublicRoutes(
       }
     });
 
+    publicApp.get("/proactive-windows", async (request) => ({
+      proactive: await input.repository.listProactiveWindows(publicUser(request).id),
+    }));
+
+    publicApp.put("/proactive-windows", async (request) => {
+      try {
+        return {
+          proactive: await input.repository.saveProactiveWindows(
+            publicUser(request).id,
+            request.body && typeof request.body === "object"
+              ? request.body as Record<string, unknown>
+              : {},
+          ),
+        };
+      } catch (error) {
+        throw badRequest(error instanceof Error ? error.message : "Некорректные окна");
+      }
+    });
+
     publicApp.get("/progress", async (request) => ({
       progress: await input.repository.getProgress(publicUser(request).id),
     }));
@@ -1029,4 +1144,70 @@ function optionalEnum<T extends string>(
     throw new Error(`${name}: недопустимое значение`);
   }
   return value as T;
+}
+
+/** Окно, пришедшее из Mini App, после проверки. */
+interface ParsedProactiveWindow {
+  startMinute: number;
+  endMinute: number;
+  weekdays: number[];
+  enabled: boolean;
+  label: string | null;
+}
+
+/**
+ * Разбор набора окон.
+ *
+ * Границы проверяются здесь, а не только ограничением таблицы: отказ
+ * базы человек увидит как «что-то пошло не так», а он всего лишь
+ * поставил конец раньше начала. Ограничения при этом остаются — они
+ * последняя линия, а не первая.
+ */
+function parseProactiveWindows(value: unknown): ParsedProactiveWindow[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error("windows должен быть массивом");
+  if (value.length > MAX_WINDOWS_PER_USER) {
+    throw new Error(`Окон не может быть больше ${MAX_WINDOWS_PER_USER}`);
+  }
+  const windows = value.map((raw) => {
+    const item = raw && typeof raw === "object" && !Array.isArray(raw)
+      ? raw as Record<string, unknown>
+      : {};
+    const startMinute = optionalInteger(item.start_minute, 0, 1_439);
+    const endMinute = optionalInteger(item.end_minute, 1, 1_440);
+    if (startMinute === undefined || endMinute === undefined) {
+      throw new Error("У окна обязательны start_minute и end_minute");
+    }
+    if (endMinute - startMinute < MIN_WINDOW_MINUTES) {
+      throw new Error(
+        `Окно должно быть не короче ${MIN_WINDOW_MINUTES} минут: `
+        + "внутри более узкого случайная минута перестаёт быть случайной",
+      );
+    }
+    const weekdays = Array.isArray(item.weekdays) && item.weekdays.length > 0
+      ? [...new Set(item.weekdays.map((day) => Number(day)))].sort((a, b) => a - b)
+      : [1, 2, 3, 4, 5, 6, 7];
+    if (!weekdays.every((day) => Number.isSafeInteger(day) && day >= 1 && day <= 7)) {
+      throw new Error("weekdays — дни недели по ISO: от 1 (понедельник) до 7");
+    }
+    return {
+      startMinute,
+      endMinute,
+      weekdays,
+      enabled: item.enabled !== false,
+      label: optionalText(item.label, 100),
+    };
+  });
+
+  // Пересечение окон — это два сообщения подряд в один промежуток.
+  // Политика их потом разведёт по минимальному интервалу, но человек об
+  // этом не знает и увидит просто пропавшее сообщение. Честнее сказать
+  // сразу.
+  const ordered = [...windows].sort((left, right) => left.startMinute - right.startMinute);
+  for (let index = 1; index < ordered.length; index += 1) {
+    if (ordered[index]!.startMinute < ordered[index - 1]!.endMinute) {
+      throw new Error("Окна не должны пересекаться");
+    }
+  }
+  return windows;
 }

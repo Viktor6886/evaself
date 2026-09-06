@@ -59,6 +59,7 @@ export const TENANT_TABLES: Readonly<Record<string, readonly string[]>> = {
   payment_intents: ["user_id"],
   payments: ["user_id"],
   proactive_messages: ["user_id"],
+  proactive_windows: ["user_id"],
   referrals: ["referrer_user_id", "referred_user_id"],
   research_claim_sources: ["user_id"],
   research_reports: ["user_id"],

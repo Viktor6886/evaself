@@ -79,6 +79,10 @@ export interface Config {
   crawl4aiToken: string;
   schedulerIntervalMs: number;
   heartbeatIntervalMs: number;
+  /** Ева пишет первой в окна, которые выбрал человек. */
+  proactiveInitiativeEnabled: boolean;
+  /** Как часто проверяются наступившие окна. */
+  initiativeIntervalMs: number;
   typingIntervalMs: number;
   /** Семантический intent -> доверенный Telegram file_id. */
   telegramStickerCatalog: unknown;
@@ -362,6 +366,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     crawl4aiToken: str("CRAWL4AI_API_TOKEN"),
     schedulerIntervalMs: int("EVA_SCHEDULER_INTERVAL_MS", 30_000),
     heartbeatIntervalMs: int("EVA_HEARTBEAT_INTERVAL_MS", 10 * 60_000),
+    proactiveInitiativeEnabled: bool("EVA_PROACTIVE_INITIATIVE", false),
+    // Минута выбрана заранее, поэтому точность захода — это точность
+    // попадания в неё. Шестьдесят секунд означают опоздание не больше
+    // минуты; чаще спрашивать незачем, реже — заметно человеку.
+    initiativeIntervalMs: clampedInt("EVA_INITIATIVE_INTERVAL_MS", 60_000, 15_000, 900_000),
     typingIntervalMs: int("EVA_TELEGRAM_TYPING_INTERVAL_MS", 4_000),
     telegramStickerCatalog,
     telegramStickerCatalogParseError,

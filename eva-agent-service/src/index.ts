@@ -30,6 +30,12 @@ import {
 } from "./delivery/inbox.js";
 import { t } from "./i18n/index.js";
 import { PostgresTelegramOutbox } from "./delivery/outbox.js";
+import { LettaProactiveComposer } from "./jobs/proactive/composer.js";
+import { OutboxProactiveDelivery } from "./jobs/proactive/delivery.js";
+import { ProactiveInitiativeRunner } from "./jobs/proactive/initiative-runner.js";
+import { InitiativeSelection } from "./jobs/proactive/selection.js";
+import { ProactiveService } from "./jobs/proactive/service.js";
+import { ProactiveWindowPlanner } from "./jobs/proactive/windows.js";
 import { TelegramDeliveryLimiter } from "./delivery/telegram-limits.js";
 import { badRequest, notFound } from "./errors.js";
 import { EvaWorkflow } from "./eva-workflow.js";
@@ -299,9 +305,9 @@ async function main(): Promise<void> {
       turn: currentTurn(),
       riskFor: toolRisk,
       categoryFor: toolApprovalCategory,
-      // В conversation выполнения запланированной задачи человека нет:
-      // подтверждение там не спрашивается, а отказывается.
-      unattended: runtime.purpose === "task_action",
+      // В conversation запланированной задачи и собственной инициативы
+      // человека нет: подтверждение там не спрашивается, а отказывается.
+      unattended: runtime.purpose === "task_action" || runtime.purpose === "initiative",
     });
     return async (toolName, toolInput, context) => {
       // Оболочка и произвольная запись в файловую систему хоста —
@@ -453,6 +459,26 @@ async function main(): Promise<void> {
   let recoveryTimer: NodeJS.Timeout | null = null;
 
   const purposes = new ConversationPurposeService(db, letta, logger);
+
+  // Ева пишет первой в окна, которые человек выбрал в Mini App.
+  //
+  // Собирается здесь, а не внутри планировщика: доставка идёт только
+  // через durable outbox, и клиента Telegram этот путь не получает
+  // вовсе — отправить напрямую ему структурно нечем.
+  const initiative = config.proactiveInitiativeEnabled
+    ? new ProactiveInitiativeRunner(
+      new ProactiveWindowPlanner(db, logger),
+      new InitiativeSelection(db),
+      new ProactiveService(
+        db,
+        new LettaProactiveComposer(letta, purposes, runtimeContext, queue, logger),
+        new OutboxProactiveDelivery(outbox),
+        logger,
+      ),
+      logger,
+    )
+    : null;
+
   const background = new BackgroundRuntime(
     config,
     db,
@@ -462,6 +488,8 @@ async function main(): Promise<void> {
     runtimeContext,
     purposes,
     logger,
+    undefined,
+    initiative,
   );
 
   // Слой фоновых заданий. Ступень переноса решает, кто ведёт напоминания
@@ -474,6 +502,10 @@ async function main(): Promise<void> {
       runtimeContext,
       lock: queue,
       outbox,
+      // Инициатива переезжает вместе с остальной проактивностью: после
+      // снятия зеркала интервалы не стартуют, и заход обязан достаться
+      // очереди, а не пропасть (инвариант 9).
+      initiative,
       // Выборка старого интервала для режима зеркала. Сравнивать есть с
       // чем только у тех видов, у которых старый механизм существует:
       // check-in до этого шага не было вовсе.

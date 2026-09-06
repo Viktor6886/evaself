@@ -8,6 +8,7 @@ import type { Logger } from "./logger.js";
 import type { RuntimeContextBuilder } from "./runtime/runtime-context.js";
 import type { UserTurnLock } from "./turns/user-turn-lock.js";
 import type { TelegramClient } from "./telegram.js";
+import type { ProactiveInitiativeRunner } from "./jobs/proactive/initiative-runner.js";
 import { proactiveSlot } from "./jobs/proactive/policy.js";
 import { TaskEventService } from "./tasks/task-event-service.js";
 import { ScheduledTaskRunner, type DueTask } from "./tasks/task-runner.js";
@@ -32,8 +33,10 @@ interface HeartbeatCandidate {
 export class BackgroundRuntime {
   private taskTimer: NodeJS.Timeout | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
+  private initiativeTimer: NodeJS.Timeout | null = null;
   private taskRunning = false;
   private heartbeatRunning = false;
+  private initiativeRunning = false;
   private readonly taskEvents: TaskEventService;
   private readonly taskRunner: ScheduledTaskRunner;
 
@@ -47,6 +50,12 @@ export class BackgroundRuntime {
     private readonly purposes: ConversationPurposeService,
     private readonly logger: Logger,
     taskEvents?: TaskEventService,
+    /**
+     * Заход инициативы. Приходит снаружи, а не собирается здесь:
+     * доставка идёт только через durable outbox, а его знает точка
+     * сборки, не планировщик. `null` — окна выключены флагом.
+     */
+    private readonly initiative: ProactiveInitiativeRunner | null = null,
   ) {
     this.taskEvents = taskEvents ?? new TaskEventService(db);
     this.taskRunner = new ScheduledTaskRunner(
@@ -78,12 +87,42 @@ export class BackgroundRuntime {
     );
     this.taskTimer.unref();
     this.heartbeatTimer.unref();
+    // Окна инициативы: заход отдельным интервалом, потому что его
+    // точность — это точность попадания в выбранную минуту, и делить
+    // её с десятиминутным циклом heartbeat нельзя.
+    if (this.initiative) {
+      this.initiativeTimer = setInterval(
+        () => void this.runInitiative(),
+        Math.max(this.config.initiativeIntervalMs, 15_000),
+      );
+      this.initiativeTimer.unref();
+    }
     void this.runTasks();
   }
 
   /** Работают ли сейчас старые интервалы. Нужно наблюдению и тестам переноса. */
   get schedulerActive(): boolean {
     return this.taskTimer !== null || this.heartbeatTimer !== null;
+  }
+
+  /**
+   * Наступившие окна инициативы.
+   *
+   * Заход не переоткрывается, пока идёт предыдущий: ход агента длится
+   * дольше минуты, и второй заход забрал бы те же строки.
+   */
+  async runInitiative(): Promise<void> {
+    if (this.initiativeRunning || !this.initiative) return;
+    this.initiativeRunning = true;
+    try {
+      await this.initiative.tick();
+    } catch (error) {
+      this.logger.error("Ошибка захода инициативы", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      this.initiativeRunning = false;
+    }
   }
 
   /**
@@ -148,8 +187,10 @@ export class BackgroundRuntime {
   stop(): void {
     if (this.taskTimer) clearInterval(this.taskTimer);
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    if (this.initiativeTimer) clearInterval(this.initiativeTimer);
     this.taskTimer = null;
     this.heartbeatTimer = null;
+    this.initiativeTimer = null;
   }
 
   async runTasks(): Promise<void> {
