@@ -58,8 +58,11 @@ const ru = {
     "Не получилось сделать это самой: «{title}». Напиши, когда будешь — попробуем вместе.",
   // Согласия так и не дождались. Вопрос человек уже видел — здесь
   // только итог, чтобы задача не заканчивалась молчанием.
-  scheduledActionStarted:
-    "Взялась за «{title}». Займёт пару минут — пришлю, когда будет готово.",
+  // Срок не обещается: сколько займёт работа, заранее не знает никто, а
+  // «пару минут» превращается в невыполненное обещание ровно тогда,
+  // когда работа затянулась, — то есть всегда, когда это сообщение
+  // вообще отправляется.
+  scheduledActionStarted: "Взялась за «{title}» — пришлю, когда будет готово.",
   scheduledActionApprovalTimeout:
     "Не стала доделывать «{title}» без твоего согласия. Скажи, когда будет можно.",
   scheduledActionDeclined:
@@ -121,8 +124,7 @@ const en: Record<keyof typeof ru, string> = {
   scheduledReminderFallback: "A reminder: {title}",
   scheduledActionFailed:
     "I could not do this on my own: “{title}”. Write to me and we will try together.",
-  scheduledActionStarted:
-    "I am working on “{title}”. It will take a couple of minutes — I will send it when it is ready.",
+  scheduledActionStarted: "I am working on “{title}” — I will send it when it is ready.",
   scheduledActionApprovalTimeout:
     "I did not finish “{title}” without your consent. Tell me when it is fine to go ahead.",
   scheduledActionDeclined:

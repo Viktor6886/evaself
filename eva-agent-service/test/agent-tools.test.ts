@@ -559,15 +559,22 @@ test("чтение курсора не требует подтверждения
  * нашлось», и Ева отвечала по памяти.
  * ===================================================================== */
 
-function searchHarness(reply: unknown, options: { status?: number } = {}) {
+function searchHarness(
+  reply: unknown | ((request: URL, index: number) => unknown),
+  options: { status?: number } = {},
+) {
   const requests: URL[] = [];
+  const charged: number[] = [];
   const original = globalThis.fetch;
   globalThis.fetch = (async (input: string | URL) => ({
     ok: (options.status ?? 200) < 400,
     status: options.status ?? 200,
     json: async () => {
-      requests.push(new URL(String(input)));
-      return reply;
+      const url = new URL(String(input));
+      requests.push(url);
+      return typeof reply === "function"
+        ? (reply as (request: URL, index: number) => unknown)(url, requests.length - 1)
+        : reply;
     },
   })) as never;
   const factory = new AgentToolFactory(
@@ -575,15 +582,21 @@ function searchHarness(reply: unknown, options: { status?: number } = {}) {
     withTenantScopes({
       getAgentRuntimeContext: () => Promise.resolve(RUNTIME),
       getQuotaStatus: () => Promise.resolve([{ metric: "web_search", remaining: 5 }]),
-      incrementUsage: () => Promise.resolve(1),
+      incrementUsage: () => { charged.push(1); return Promise.resolve(1); },
       query: () => Promise.resolve({ rows: [], rowCount: 0 }),
     }) as never,
     {} as never,
     silentLogger,
   );
   const tool = factory.forConversation("conv-1").find((item) => item.name === "web_search")!;
-  return { tool, requests, restore: () => { globalThis.fetch = original; } };
+  return { tool, requests, charged, restore: () => { globalThis.fetch = original; } };
 }
+
+const EMPTY_REPLY = { results: [], answers: [], infoboxes: [], unresponsive_engines: [] };
+const SOME_REPLY = {
+  results: [{ title: "Новость", url: "https://example.org/n", content: "текст", engine: "mojeek" }],
+  answers: [], infoboxes: [], unresponsive_engines: [],
+};
 
 test("поиск доносит прямой ответ и погоду, а не только ссылки", async () => {
   const harnessed = searchHarness({
@@ -681,5 +694,83 @@ test("пустой ответ языкового фильтра повторяе
     assert.deepEqual(spent, ["web_search"]);
   } finally {
     globalThis.fetch = original;
+  }
+});
+
+/* =====================================================================
+ * Сужения снимаются по одному
+ *
+ * «Новости Перми за неделю» возвращали пустоту не потому, что новостей
+ * нет: окно свежести понимают не все движки, и у тех, кто не понимает,
+ * запрос с `time_range` пуст всегда.
+ * ===================================================================== */
+
+test("пустая выдача под окном свежести пробуется ещё раз без него", async () => {
+  const harnessed = searchHarness((request) =>
+    request.searchParams.has("time_range") ? EMPTY_REPLY : SOME_REPLY);
+  try {
+    const result = await harnessed.tool.execute("call-1", {
+      query: "новости Перми", category: "news", time_range: "week", language: "ru",
+    });
+    const payload = result.details as Record<string, unknown>;
+
+    assert.equal(payload.ok, true);
+    assert.deepEqual(payload.relaxed_filters, ["language", "time_range"]);
+    // Окно не соблюдено — значит и называть его нельзя: иначе Ева
+    // выдаст найденное за «новости за неделю».
+    assert.equal("time_range" in payload, false);
+    assert.match(String(payload.relaxed_note), /Не выдавай результат/);
+  } finally {
+    harnessed.restore();
+  }
+});
+
+test("сужения снимаются по одному, от узкого к широкому", async () => {
+  const harnessed = searchHarness(EMPTY_REPLY);
+  try {
+    await harnessed.tool.execute("call-1", {
+      query: "новости Перми", category: "news", time_range: "week", language: "ru",
+    });
+    const shapes = harnessed.requests.map((request) => [
+      request.searchParams.get("language"),
+      request.searchParams.get("time_range"),
+      request.searchParams.get("categories"),
+    ]);
+    assert.deepEqual(shapes, [
+      ["ru", "week", "news"],
+      [null, "week", "news"],
+      [null, null, "news"],
+    ]);
+  } finally {
+    harnessed.restore();
+  }
+});
+
+test("снятые сужения — та же попытка, а не вторая", async () => {
+  // Иначе один вопрос человека стоил бы ему трёх поисков из квоты.
+  const harnessed = searchHarness(EMPTY_REPLY);
+  try {
+    await harnessed.tool.execute("call-1", {
+      query: "новости Перми", time_range: "week", language: "ru",
+    });
+    assert.equal(harnessed.requests.length, 3);
+    assert.equal(harnessed.charged.length, 1);
+  } finally {
+    harnessed.restore();
+  }
+});
+
+test("найденное сразу ничего не снимает и называет окно свежести", async () => {
+  const harnessed = searchHarness(SOME_REPLY);
+  try {
+    const result = await harnessed.tool.execute("call-1", {
+      query: "новости Перми", category: "news", time_range: "week", language: "ru",
+    });
+    const payload = result.details as Record<string, unknown>;
+    assert.equal(harnessed.requests.length, 1);
+    assert.equal(payload.time_range, "week");
+    assert.equal("relaxed_filters" in payload, false);
+  } finally {
+    harnessed.restore();
   }
 });
