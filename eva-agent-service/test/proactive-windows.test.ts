@@ -514,3 +514,20 @@ test("чужой идентификатор окна читается как н�
   assert.equal(store.windows.length, 1);
   assert.notEqual(store.windows[0]!.id, "999");
 });
+
+test("одинаковый идентификатор у двух окон отвергается, а не теряет одно из них", async () => {
+  const store = new FakeWindowStore();
+  store.windows = [
+    { id: "1", start_minute: 660, end_minute: 720, weekdays: [1], enabled: true, label: null },
+  ];
+  await assert.rejects(
+    () => repository(store).saveProactiveWindows(4242, {
+      windows: [
+        { id: "1", start_minute: 660, end_minute: 720, weekdays: [1] },
+        { id: "1", start_minute: 1020, end_minute: 1080, weekdays: [1] },
+      ],
+    }),
+    /идентификатор/,
+  );
+  assert.equal(store.windows.length, 1);
+});
