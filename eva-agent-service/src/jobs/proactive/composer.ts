@@ -21,6 +21,7 @@ import type { ConversationPurposeService } from "../../conversations/purpose-ser
 import type { LettaService } from "../../letta.js";
 import type { Logger } from "../../logger.js";
 import type { RuntimeContextBuilder } from "../../runtime/runtime-context.js";
+import type { LiveMessageWatch } from "../../turns/live-message.js";
 import type { UserTurnLock } from "../../turns/user-turn-lock.js";
 import type { EpisodeLink, ProactiveCandidate, ProactiveComposer } from "./service.js";
 import type { ProactiveKind } from "./policy.js";
@@ -39,6 +40,11 @@ export class LettaProactiveComposer implements ProactiveComposer {
     private readonly runtimeContext: RuntimeContextBuilder,
     private readonly lock: UserTurnLock,
     private readonly logger: Logger,
+    /**
+     * Ждёт ли человек ответа прямо сейчас. `null` — не проверяем, и
+     * тогда ход идёт до конца, как раньше.
+     */
+    private readonly liveMessages: LiveMessageWatch | null = null,
   ) {}
 
   async compose(input: {
@@ -77,12 +83,19 @@ export class LettaProactiveComposer implements ProactiveComposer {
     });
 
     let turn;
+    // Ход держит блокировку человека всё время работы, а инструменты
+    // здесь не сужены — значит он может идти минутами. Живое сообщение
+    // в это время стоит в очереди, и после третьего очередь его вовсе
+    // отвергает. Уступаем: своя инициатива подождёт, разговор — нет.
+    const startedAt = new Date();
     try {
       turn = await this.lock.run(
         candidate.telegramId,
         async () => await this.letta.runTurn(scheduler.conversationId, prompt, {
-          isCancelled: async () => input.signal.aborted,
-          cancelPollMs: 500,
+          isCancelled: async () => input.signal.aborted
+            || (this.liveMessages !== null
+              && await this.liveMessages.waiting(candidate.telegramId, startedAt)),
+          cancelPollMs: 2_000,
         }),
         { userId: candidate.userId, conversationId: scheduler.conversationId },
       );

@@ -26,6 +26,7 @@ import { BullMqJobDriver } from "./bullmq-driver.js";
 import { ReconcileService } from "./maintenance.js";
 import { RetentionService } from "../retention/service.js";
 import { MirrorRecorder } from "./mirror.js";
+import { LiveMessageWatch } from "../turns/live-message.js";
 import { LettaProactiveComposer } from "./proactive/composer.js";
 import { proactiveStage, legacySchedulerActive } from "./proactive/cutover.js";
 import { OutboxProactiveDelivery } from "./proactive/delivery.js";
@@ -161,6 +162,9 @@ export function buildJobLayer(
           deps.runtimeContext,
           deps.lock,
           logger,
+          // Ход инициативы держит блокировку человека и уступает живому
+          // сообщению так же, как выполнение задачи.
+          new LiveMessageWatch(db),
         ),
         new OutboxProactiveDelivery(deps.outbox),
         logger,
