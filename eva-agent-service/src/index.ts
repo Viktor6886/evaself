@@ -30,6 +30,7 @@ import {
 } from "./delivery/inbox.js";
 import { t } from "./i18n/index.js";
 import { PostgresTelegramOutbox } from "./delivery/outbox.js";
+import { LiveMessageWatch } from "./turns/live-message.js";
 import { LettaProactiveComposer } from "./jobs/proactive/composer.js";
 import { OutboxProactiveDelivery } from "./jobs/proactive/delivery.js";
 import { ProactiveInitiativeRunner } from "./jobs/proactive/initiative-runner.js";
@@ -473,7 +474,9 @@ async function main(): Promise<void> {
       new InitiativeSelection(db),
       new ProactiveService(
         db,
-        new LettaProactiveComposer(letta, purposes, runtimeContext, queue, logger),
+        new LettaProactiveComposer(
+          letta, purposes, runtimeContext, queue, logger, new LiveMessageWatch(db),
+        ),
         new OutboxProactiveDelivery(outbox),
         logger,
       ),
