@@ -76,14 +76,26 @@ export class LettaProactiveComposer implements ProactiveComposer {
       internalOperationType: kind,
     });
 
-    const turn = await this.lock.run(
-      candidate.telegramId,
-      async () => await this.letta.runTurn(scheduler.conversationId, prompt, {
-        isCancelled: async () => input.signal.aborted,
-        cancelPollMs: 500,
-      }),
-      { userId: candidate.userId, conversationId: scheduler.conversationId },
-    );
+    let turn;
+    try {
+      turn = await this.lock.run(
+        candidate.telegramId,
+        async () => await this.letta.runTurn(scheduler.conversationId, prompt, {
+          isCancelled: async () => input.signal.aborted,
+          cancelPollMs: 500,
+        }),
+        { userId: candidate.userId, conversationId: scheduler.conversationId },
+      );
+    } finally {
+      // Ветка закрывается сразу: она была вечной, копила прошлые выходы
+      // на связь вместе с ответами на них, и на новом ходе модель писала
+      // человеку сводку по накопленному вместо повода. Что она уже
+      // отправляла, ей и так приходит блоком
+      // `i_wrote_since_your_last_message` — детерминированно и без
+      // накопления.
+      await this.purposes.close(candidate.userId, candidate.agentId, purpose)
+        .catch(() => undefined);
+    }
 
     const reply = turn.reply.trim().slice(0, MAX_MESSAGE);
     if (!reply || reply === SKIP_MARKER) {

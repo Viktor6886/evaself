@@ -88,6 +88,56 @@ export class ConversationPurposeService {
     return await operation;
   }
 
+  /**
+   * Закрыть служебную ветку: работа кончилась.
+   *
+   * Служебные conversation — `scheduler`, `task_action`, `initiative` —
+   * до сих пор были вечными: одна на человека, и в ней копились все
+   * задания подряд вместе с ответами на них. На новом задании модель
+   * видела перед собой не задачу, а накопленное состояние трекера, и
+   * отвечала человеку сводкой: «Поняла, где остановились: … Проверка
+   * отмены подписки ещё не начиналась» — фразой из хода двухчасовой
+   * давности. Никакая формулировка инструкции этого не перебивает:
+   * прошлые ответы в той же ветке — это примеры, и их много.
+   *
+   * Здесь закрывается ветка одной фоновой работы, а не ведётся память:
+   * что Ева знает о человеке, живёт в memory blocks и MemFS — они
+   * принадлежат агенту, а не conversation, и переживают закрытие. Свой
+   * compaction и своя ротация диалога человека этим не заводятся
+   * (раздел «Запрещено»): диалог человека — `chat`, его никто не
+   * трогает.
+   *
+   * Отказ не пробрасывается: работа уже сделана, и ронять её из-за
+   * неубранной ветки незачем. Незакрытая ветка — это ровно то, что было
+   * до сих пор, а не новая поломка.
+   */
+  async close(
+    userId: number,
+    agentId: string,
+    purpose: Exclude<ConversationPurpose, "chat">,
+  ): Promise<void> {
+    try {
+      const active = await this.find(userId, agentId, purpose);
+      if (!active) return;
+      await this.db.query(
+        `UPDATE agent_conversations
+            SET status = 'archived', archived_at = now()
+          WHERE conversation_id = $1 AND user_id = $2 AND status = 'active'`,
+        [active.conversationId, userId],
+      );
+      await this.letta.updateConversation(active.conversationId, { archived: true });
+      this.logger.debug("Служебная ветка закрыта", {
+        userId, purpose, conversationId: active.conversationId,
+      });
+    } catch (error) {
+      this.logger.warn("Служебную ветку не удалось закрыть", {
+        userId,
+        purpose,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   async find(
     userId: number,
     agentId: string,

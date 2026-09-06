@@ -130,6 +130,36 @@ export class ScheduledTaskRunner {
   async execute(task: DueTask): Promise<void> {
     const correlationId = randomUUID();
     const kind = taskKindOf(task.kind);
+    // Ветка служебного хода закрывается, чем бы заход ни кончился.
+    //
+    // Она была вечной: одна на человека, и в ней копились все задания
+    // подряд вместе с ответами на них. На новом задании модель видела
+    // перед собой не задачу, а накопленное состояние трекера — и
+    // отвечала человеку сводкой вместо погоды. Прошлые ответы в той же
+    // ветке перебивают любую формулировку инструкции: их много, и они
+    // выглядят как образец.
+    //
+    // `finally`, а не «после успеха»: неудачный заход оставляет после
+    // себя самый мусор, и повтору он мешает больше всего.
+    const purpose = kind === "action" ? "task_action" : "scheduler";
+    try {
+      await this.runOccurrence(task, kind, correlationId);
+    } finally {
+      // Уборка не может отменить сделанную работу: результат уже у
+      // человека или уже записан, а незакрытая ветка — это ровно то,
+      // что было до сих пор, а не новая поломка. Сам сервис назначений
+      // ошибки тоже глушит, но полагаться на чужую вежливость в
+      // `finally` нельзя: отсюда исключение перекрыло бы исход захода.
+      await this.purposes.close(Number(task.user_id), task.agent_id, purpose)
+        .catch(() => undefined);
+    }
+  }
+
+  private async runOccurrence(
+    task: DueTask,
+    kind: TaskKind,
+    correlationId: string,
+  ): Promise<void> {
     const doneEvent = kind === "action" ? "action_done" : "reminder_sent";
     try {
       const delivered = await this.db.query(
