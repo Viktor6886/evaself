@@ -4,7 +4,7 @@
   const tg = window.Telegram?.WebApp;
   const DEMO = new URLSearchParams(location.search).get("demo") === "1";
   const API = "/api";
-  const BUILD = "20260819-hook-v17";
+  const BUILD = "20260906-discovery-v18";
   const APP_STARTED_AT = performance.now();
   const SESSION_STARTED_AT = Date.now();
   const CLIENT_SESSION_ID = globalThis.crypto?.randomUUID?.() || `session-${SESSION_STARTED_AT}-${Math.random().toString(36).slice(2,8)}`;
@@ -140,6 +140,7 @@
   function renderAll() {
     renderToday();
     renderDevelopment();
+    renderDiscovery();
     renderProfile();
     updateNotificationDot();
   }
@@ -600,7 +601,6 @@
     document.querySelectorAll(".nav-item[data-target]").forEach((button) => {
       button.addEventListener("click", () => openScreen(button.dataset.target));
     });
-    document.getElementById("dialog-nav").addEventListener("click", () => openEvaHandoff(screenContext()));
     document.getElementById("journal-add-top").addEventListener("click", () => window.EvaJournal?.openNew?.());
     document.getElementById("main-focus-action").addEventListener("click", (event) => {
       event.stopPropagation();
@@ -615,9 +615,7 @@
         completion_percent: profileInvestmentState().overall,
         next_focus: profileInvestmentState().next.label,
       });
-      state.developmentTab = "tests";
-      syncDevelopmentTabs();
-      openScreen("development");
+      openScreen("discovery");
     });
     document.getElementById("streak-button").addEventListener("click", openStreakSheet);
     document.getElementById("development-tabs").addEventListener("click", (event) => {
@@ -666,6 +664,7 @@
     if (screen === "journal") void window.EvaJournal?.render?.();
     if (screen === "development") renderDevelopment();
     if (screen === "profile") renderProfile();
+    if (screen === "discovery") renderDiscovery();
     haptic("light");
   }
 
@@ -816,7 +815,7 @@
       || main?.goal_title
       || "Один короткий шаг перед следующим результатом";
 
-    document.getElementById("main-focus-title").textContent = conciseTitle(title);
+    document.getElementById("main-focus-title").textContent = title;
     document.getElementById("main-focus-source").textContent = conciseFocusSubtitle(source);
     document.getElementById("hero-duration").textContent = `${plannedMinutes} мин`;
 
@@ -835,12 +834,6 @@
       : `Неделя: ${week.done} из ${week.target} шагов`;
     document.getElementById("week-progress-bar").style.width = `${week.percent}%`;
     document.getElementById("main-focus-card").classList.toggle("is-near-week-goal", remaining === 1);
-  }
-
-  function conciseTitle(value) {
-    const text = String(value || "").trim();
-    if (!text) return "Продолжить путь";
-    return text.length > 72 ? `${text.slice(0, 69).trim()}…` : text;
   }
 
   function conciseFocusSubtitle(source) {
@@ -1083,27 +1076,12 @@
       return;
     }
     if (state.developmentTab === "progress") return renderProgress(host);
-    if (state.developmentTab === "tests") return renderTests(host);
     renderGoals(host);
   }
 
-  function renderTests(host) {
-    const profile = profileInvestmentState();
-    host.innerHTML = `<div class="section-stack">
-      <article class="tests-placeholder">
-        <span class="tests-placeholder-icon">${icon("brain")}</span>
-        <span class="eyebrow">ТЕСТЫ И САМОПОЗНАНИЕ · СКОРО</span>
-        <h2>Профиль, который становится точнее со временем</h2>
-        <p>Личность, эмоции, отношения и профориентация будут собираться в единый профиль Евы. До подключения юридически допустимых методик результаты не имитируются.</p>
-        <div class="tests-tags"><span>Личность</span><span>Эмоции</span><span>Отношения</span><span>Профориентация</span></div>
-      </article>
-      <article class="section-card">
-        <span class="eyebrow">ТЕКУЩАЯ ИНВЕСТИЦИЯ</span>
-        <h3>Профиль самопонимания: ${profile.overall}%</h3>
-        <div class="goal-progress"><span style="width:${profile.overall}%"></span></div>
-        <p>Эмоции ${profile.emotions}% · Отношения ${profile.relationships}% · Цели ${profile.goals}%</p>
-      </article>
-    </div>`;
+  function renderDiscovery() {
+    const host = document.getElementById("discovery-content");
+    window.EvaDiscovery.render({ host, icon, openSheet, openEvaHandoff });
   }
 
   function renderGoals(host) {
@@ -1214,8 +1192,8 @@
 
       <article class="section-card">
         <span class="eyebrow">ЧТО ЕВА УЖЕ ЗНАЕТ</span>
-        <h2>Профиль растёт постепенно</h2>
-        <p>Не нужно заполнять большую анкету. Ева уточняет только уместные данные по ходу общения.</p>
+        <h2>То, что важно о тебе</h2>
+        <p>Проверь детали — они помогают Еве лучше тебя понимать.</p>
         <div class="known-grid">${known.length
           ? known.map(([label,value]) => `<div class="known-card"><small>${escapeHtml(label)}</small><strong>${escapeHtml(value)}</strong></div>`).join("")
           : '<div class="known-card"><small>Пока мало данных</small><strong>Начни с обычного разговора с Евой</strong></div>'}
@@ -2159,9 +2137,7 @@
 
         host.querySelector("#reward-profile").addEventListener("click", () => {
           closeSheet();
-          state.developmentTab = "tests";
-          syncDevelopmentTabs();
-          openScreen("development");
+          openScreen("discovery");
         });
 
         host.querySelector("#reward-share")?.addEventListener("click", () => {
@@ -2606,16 +2582,6 @@
         });
       },
     });
-  }
-
-  function screenContext() {
-    if (state.screen === "today") {
-      return `Помоги с моим следующим шагом: ${state.dashboard?.main_focus?.title || "пока не выбран"}`;
-    }
-    if (state.screen === "journal") return "Хочу обсудить мои записи и текущее состояние";
-    if (state.screen === "development") return "Хочу обсудить мой рост, цели и реальный прогресс";
-    if (state.screen === "profile") return "Помоги уточнить то, что тебе важно знать обо мне для более персональной помощи";
-    return "Продолжим";
   }
 
   function haptic(type) {

@@ -6,7 +6,9 @@
   <meta name="theme-color" content="#f3f6f5">
   <meta name="color-scheme" content="light dark">
   <title>Ева</title>
-  <link rel="stylesheet" href="/app/app.css?v=20260819-hook-v17">
+  <link rel="stylesheet" href="/app/app.css?v=20260906-discovery-v18">
+  <link rel="stylesheet" href="/app/theme.css?v=20260906-discovery-v18">
+  <link rel="stylesheet" href="/app/discovery.css?v=20260906-discovery-v18">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -31,7 +33,7 @@
 
         <section class="hero-card" id="main-focus-card">
           <div class="hero-meta">
-            <span class="hero-badge">Сегодня</span>
+            <span class="hero-badge">Твой фокус на сегодня</span>
             <span class="hero-duration" id="hero-duration">6 мин</span>
           </div>
 
@@ -88,6 +90,17 @@
         </button>
       </section>
 
+      <section class="screen inner-screen" data-screen="discovery" hidden>
+        <header class="screen-header">
+          <div>
+            <span class="screen-kicker">Ближе к себе</span>
+            <h1>Самопознание</h1>
+            <p>Пойми свои реакции, найди опору и то, что хочется развивать.</p>
+          </div>
+        </header>
+        <div class="scroll-content" id="discovery-content"></div>
+      </section>
+
       <section class="screen inner-screen" data-screen="journal" hidden>
         <header class="screen-header">
           <div>
@@ -103,16 +116,15 @@
       <section class="screen inner-screen" data-screen="development" hidden>
         <header class="screen-header">
           <div>
-            <span class="screen-kicker">Накопленная ценность</span>
+            <span class="screen-kicker">От намерения к действию</span>
             <h1>Рост</h1>
-            <p>Цели, реальные изменения и профиль самопонимания.</p>
+            <p>Твои цели, небольшие шаги и заметные изменения.</p>
           </div>
         </header>
 
         <nav class="glass-segmented" id="development-tabs" aria-label="Разделы роста">
           <button class="is-active" data-development="goals" type="button">Цели</button>
           <button data-development="progress" type="button">Прогресс</button>
-          <button data-development="tests" type="button">Тесты</button>
         </nav>
 
         <div class="scroll-content" id="development-content"></div>
@@ -131,11 +143,11 @@
     </main>
 
     <nav class="bottom-nav liquid-glass" aria-label="Основная навигация">
-      <button class="nav-item is-active" data-target="today" type="button">
+      <button class="nav-item is-active" data-target="today" aria-current="page" type="button">
         <span data-icon="home"></span><b>Сегодня</b>
       </button>
-      <button class="nav-item dialog-nav" id="dialog-nav" type="button">
-        <span data-icon="chat"></span><b>Диалог</b>
+      <button class="nav-item discovery-nav" data-target="discovery" type="button">
+        <span data-icon="brain"></span><b>Самопознание</b>
       </button>
       <button class="nav-item" id="journal-nav" data-target="journal" type="button">
         <span data-icon="note"></span><b>Дневник</b>
@@ -173,8 +185,9 @@
     <div class="toast liquid-glass" id="toast" hidden></div>
   </div>
 
-  <script src="/app/journal.js?v=20260819-hook-v17"></script>
-  <script src="/app/initiative.js?v=20260819-hook-v17"></script>
-  <script src="/app/app.js?v=20260819-hook-v17"></script>
+  <script src="/app/journal.js?v=20260906-discovery-v18"></script>
+  <script src="/app/initiative.js?v=20260906-discovery-v18"></script>
+  <script src="/app/discovery.js?v=20260906-discovery-v18"></script>
+  <script src="/app/app.js?v=20260906-discovery-v18"></script>
 </body>
 </html>

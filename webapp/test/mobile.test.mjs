@@ -3,8 +3,8 @@
  *
  * Главный экран строится вокруг одного действия:
  * trigger → один hero CTA → variable reward → post-reward investment.
- * Тесты находятся только в «Рост», а нижняя навигация фиксирована:
- * Сегодня | Диалог | Дневник | Рост | Профиль.
+ * Самопознание доступно в основной навигации:
+ * Сегодня | Самопознание | Дневник | Рост | Профиль.
  */
 
 import assert from "node:assert/strict";
@@ -13,7 +13,7 @@ import { after, describe, test } from "node:test";
 
 import { DEVICES, NOW, PHONES, documentWidth, openApp, smallTapTargets } from "./harness.mjs";
 
-const CORE_SCREENS = ["today", "journal", "development", "profile"];
+const CORE_SCREENS = ["today", "discovery", "journal", "development", "profile"];
 const APP_SOURCE = readFileSync(new URL("../public/app/app.js", import.meta.url), "utf8");
 const utcDateKeyDaysAgo = (days) => {
   const date = new Date(NOW);
@@ -61,7 +61,7 @@ describe("Mini App hook-focused", () => {
     const labels = await app.page.$$eval(".bottom-nav button", (nodes) =>
       nodes.map((node) => (node.textContent || "").trim()),
     );
-    assert.deepEqual(labels, ["Сегодня", "Диалог", "Дневник", "Рост", "Профиль"]);
+    assert.deepEqual(labels, ["Сегодня", "Самопознание", "Дневник", "Рост", "Профиль"]);
     assert.doesNotMatch(labels.join(" "), /Органайзер|Пульт|Бюджет|Астро|Интеграц/i);
   });
 
@@ -166,14 +166,14 @@ describe("Mini App hook-focused", () => {
     );
   });
 
-  test("тесты перенесены в Рост и не конкурируют с hero", async () => {
+  test("самопознание доступно напрямую и не обещает готовые опросники", async () => {
     const app = await open({ viewport: { width: 390, height: 844 } });
-    await app.openScreen("development");
-    await app.page.click('[data-development="tests"]');
-    const text = await app.page.textContent("#development-content");
-    assert.match(text, /Тесты и самопознание/i);
+    await app.openScreen("discovery");
+    const text = await app.page.textContent("#discovery-content");
+    assert.match(text, /опросники/i);
     assert.match(text, /Скоро/i);
-    assert.match(text, /Профиль самопонимания/i);
+    assert.match(text, /Пока они недоступны/i);
+    assert.equal(await app.page.locator('[data-development="tests"]').count(), 0);
   });
 
   test("reward короткий, персональный и не выглядит системным отчётом", async () => {
@@ -418,16 +418,16 @@ describe("Mini App hook-focused", () => {
     assert.match(text, /Дневник пока недоступен/i);
   });
 
-  test("клик по профилю самопонимания открывает Рост → Тесты", async () => {
+  test("клик по профилю самопонимания открывает Самопознание", async () => {
     const app = await open({ viewport: { width: 390, height: 844 } });
     await app.page.click("#profile-investment");
-    assert.equal(await app.page.evaluate(() => window.EvaApp.state.screen), "development");
-    assert.equal(await app.page.evaluate(() => window.EvaApp.state.developmentTab), "tests");
+    assert.equal(await app.page.evaluate(() => window.EvaApp.state.screen), "discovery");
   });
 
-  test("Диалог открывает handoff к Еве, а не отдельный дублирующий экран", async () => {
+  test("самопознание открывает существующий handoff к Еве", async () => {
     const app = await open({ viewport: { width: 390, height: 844 } });
-    await app.page.click("#dialog-nav");
+    await app.openScreen("discovery");
+    await app.page.click("#discovery-start");
     await app.page.waitForSelector("#sheet[open]");
     assert.match(await app.page.textContent("#sheet-title"), /Обсудить с Евой/i);
   });
