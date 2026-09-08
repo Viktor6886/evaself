@@ -26,7 +26,36 @@ const TRANSPORT_KEYS: ReadonlySet<string> = new Set([
   "max_concurrency", "max_rpm", "max_tpm", "max_latency_ms",
   "priority", "quality_tier", "sensitive_data_allowed", "enabled",
   "daily_budget_micro", "monthly_budget_micro", "price_in_micro", "price_out_micro",
+  // Кэш промпта — свойство обращения, а не параметр вывода. Провайдеру
+  // эти ключи отправлять нельзя: строгий разбор тела ответит 400.
+  "prompt_cache", "prompt_cache_ttl",
 ]);
+
+/**
+ * Включён ли кэш промпта у провайдера и на какой срок.
+ *
+ * Настройка живёт в `additional_parameters` провайдера, а не в общей
+ * переменной окружения, по двум причинам. Кэширование поддерживают не
+ * все совместимые endpoint'ы, и включать его сразу всем — значит
+ * рисковать отказом там, где до сих пор всё работало. И канареечное
+ * включение на одном провайдере при глобальном флаге невозможно.
+ *
+ * Умолчание — выключено: флаг в production включает человек.
+ *
+ * `ttl`: `5m` (умолчание) держит запись пять минут и обновляет её при
+ * каждом чтении — этого хватает шагам одного хода, идущим подряд. `1h`
+ * стоит вдвое дороже на запись и оправдан там, где между ходами
+ * проходят десятки минут.
+ */
+export function promptCacheControl(
+  provider: ProviderProfile,
+): { type: "ephemeral"; ttl?: "1h" } | null {
+  const parameters = { ...provider.generation_defaults, ...provider.additional_parameters };
+  if (parameters.prompt_cache !== true) return null;
+  return parameters.prompt_cache_ttl === "1h"
+    ? { type: "ephemeral", ttl: "1h" }
+    : { type: "ephemeral" };
+}
 
 export function providerParameters(
   provider: ProviderProfile,

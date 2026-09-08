@@ -56,6 +56,7 @@ import { ValkeyRateLimiter } from "./public/rate-limit.js";
 import { ValkeyMiniAppSessions } from "./public/webapp-session.js";
 import { UserTurnLock } from "./turns/user-turn-lock.js";
 import { PersonaSync } from "./letta/persona-sync.js";
+import { evaMemoryBlocks } from "./letta/memory-blocks.js";
 import { RuntimeContextBuilder } from "./runtime/runtime-context.js";
 import { CanonicalContextStore } from "./runtime/canonical-context.js";
 import { ArtifactRegistry } from "./artifacts/registry.js";
@@ -594,6 +595,28 @@ async function main(): Promise<void> {
       store: canonicalStore,
       sync: async (nextPersona, nextSystemPrompt) =>
         await personaSync.sync(nextPersona, nextSystemPrompt),
+      // Состав префикса берётся из тех же источников, что уходят
+      // провайдеру: живой канонический контекст и та же фабрика
+      // инструментов, которая их регистрирует. Второго списка нет.
+      prefix: () => {
+        const context = letta.canonicalContext();
+        const framework = evaMemoryBlocks(context.persona)
+          .find((block) => block.label === "therapeutic_framework");
+        return {
+          systemPrompt: context.systemPrompt,
+          persona: context.persona,
+          // Только то, что одинаково у всех: `human` и `current_state`
+          // принадлежат конкретному человеку и здесь не считаются.
+          sharedBlocks: framework
+            ? [{ label: framework.label, value: framework.value }]
+            : [],
+          tools: toolFactory.forConversation("prefix-probe").map((tool) => ({
+            name: tool.name,
+            description: tool.description ?? "",
+            parameters: (tool as { parameters?: unknown }).parameters ?? {},
+          })),
+        };
+      },
     },
     ...(knowledgeResearch ? { knowledgeResearch } : {}),
   });

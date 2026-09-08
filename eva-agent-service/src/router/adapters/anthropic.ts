@@ -19,7 +19,9 @@ import type {
   ProviderProfile,
 } from "../types.js";
 import { ProviderError } from "../types.js";
-import { classifyHttp, parameterValue, providerParameters, providerUrl, readSse } from "./shared.js";
+import {
+  classifyHttp, parameterValue, promptCacheControl, providerParameters, providerUrl, readSse,
+} from "./shared.js";
 import { decodeDataUri } from "../content.js";
 
 /**
@@ -142,7 +144,51 @@ function safeJson(raw: string): unknown {
   }
 }
 
-function buildBody(provider: ProviderProfile, request: LlmRequest, stream: boolean) {
+type CacheControl = { type: "ephemeral"; ttl?: "1h" };
+
+/**
+ * Блоки, на которые Anthropic разрешает ставить точку кэширования.
+ *
+ * Блок размышления в этот список не входит: он возвращается модели как
+ * есть, и лишнее поле в нём — отказ разбора, а не экономия.
+ */
+const CACHEABLE_BLOCKS: ReadonlySet<string> = new Set([
+  "text", "image", "tool_use", "tool_result", "document",
+]);
+
+/**
+ * Пометить последний пригодный блок последнего сообщения.
+ *
+ * Кэш Anthropic — совпадение по префиксу: точка в конце истории делает
+ * весь предыдущий разговор читаемым из кэша на следующем обращении.
+ * Именно это нужно ходу с инструментами, где каждый вызов — отдельное
+ * обращение с той же историей плюс один новый результат: платится
+ * только приращение.
+ *
+ * Идём с конца и пропускаем непригодные блоки: последним в сообщении
+ * может оказаться блок размышления. Если непригодно всё сообщение —
+ * отступаем на предыдущее: точка на шаг раньше кэширует почти тот же
+ * префикс, а её отсутствие не кэширует ничего.
+ */
+function markConversationTail(messages: WireMessage[], cache: CacheControl): void {
+  for (let message = messages.length - 1; message >= 0; message -= 1) {
+    const content = messages[message]!.content;
+    for (let index = content.length - 1; index >= 0; index -= 1) {
+      const block = content[index] as { type?: unknown };
+      if (typeof block.type === "string" && CACHEABLE_BLOCKS.has(block.type)) {
+        Object.assign(block, { cache_control: cache });
+        return;
+      }
+    }
+  }
+}
+
+function buildBody(
+  provider: ProviderProfile,
+  request: LlmRequest,
+  stream: boolean,
+  cache: CacheControl | null,
+) {
   let system = request.system_prompt.trim();
   if (request.response_format) {
     // response_format здесь нет; контракт задаётся словами, а проверяет его
@@ -159,15 +205,28 @@ function buildBody(provider: ProviderProfile, request: LlmRequest, stream: boole
       "contents", "generationConfig", "input", "max_completion_tokens", "max_output_tokens",
       "response_format", "system", "systemInstruction", "tools",
     ]);
+  const messages = toWireMessages(request);
   const body: Record<string, unknown> = {
     ...parameters,
     model: provider.model,
     max_tokens: request.max_tokens,
     temperature: parameterValue(parameters, "temperature", request.temperature),
-    messages: toWireMessages(request),
+    messages,
     stream,
   };
-  if (system) body.system = system;
+  // Порядок рендера у Anthropic — tools, system, messages. Поэтому точка
+  // на системном блоке закрывает собой И описания инструментов: отдельная
+  // точка на инструментах тратила бы одну из четырёх впустую.
+  //
+  // Системный промпт, персона, блоки памяти и описания инструментов
+  // одинаковы в каждом обращении — это самая большая постоянная часть
+  // запроса, и до сих пор она оплачивалась целиком в каждом шаге
+  // каждого хода.
+  if (system) {
+    body.system = cache
+      ? [{ type: "text", text: system, cache_control: cache }]
+      : system;
+  }
   if (request.tools.length) {
     body.tools = request.tools.map((tool) => ({
       name: tool.name,
@@ -175,8 +234,19 @@ function buildBody(provider: ProviderProfile, request: LlmRequest, stream: boole
       input_schema: tool.parameters,
     }));
   }
+  if (cache) markConversationTail(messages, cache);
   return body;
 }
+
+/**
+ * Провайдеры, ответившие отказом на `cache_control`.
+ *
+ * Совместимость с Anthropic заявляют многие endpoint'ы, и часть из них
+ * разбирает тело строго: незнакомое поле — 400 на КАЖДОМ обращении.
+ * Один отказ выключает кэш для этого провайдера до перезапуска, и
+ * запрос повторяется без кэша, а не падает человеку в лицо.
+ */
+const cacheRejected = new Set<string>();
 
 async function post(
   provider: ProviderProfile,
@@ -185,6 +255,7 @@ async function post(
   signal: AbortSignal,
 ): Promise<Response> {
   const url = providerUrl(provider.base_url, "messages");
+  const cache = cacheRejected.has(provider.id) ? null : promptCacheControl(provider);
   let response: Response;
   try {
     response = await (provider.fetcher ?? fetch)(url, {
@@ -195,7 +266,7 @@ async function post(
         "x-api-key": provider.api_key,
         "anthropic-version": API_VERSION,
       },
-      body: JSON.stringify(buildBody(provider, request, stream)),
+      body: JSON.stringify(buildBody(provider, request, stream, cache)),
       signal,
     });
   } catch (error) {
@@ -218,9 +289,24 @@ async function post(
     } catch {
       detail = "";
     }
+    // Endpoint не понял cache_control — выключаем кэш для него и
+    // повторяем тот же запрос без кэша. Повтор ровно один: провайдер
+    // уже в списке отказавших, и рекурсия дальше первого раза не идёт.
+    if (cache && response.status === 400 && /cache_control/i.test(`${detail}\n${raw}`)) {
+      cacheRejected.add(provider.id);
+      return await post(provider, request, stream, signal);
+    }
     throw classifyHttp(response.status, detail, raw, response.headers.get("retry-after"));
   }
   return response;
+}
+
+/**
+ * Забыть накопленные отказы. Нужно тестам и смене настроек провайдера:
+ * администратор, поправивший endpoint, не должен ждать перезапуска.
+ */
+export function resetPromptCacheRejections(): void {
+  cacheRejected.clear();
 }
 
 function stopReason(raw: string | undefined): LlmResponse["finish_reason"] {

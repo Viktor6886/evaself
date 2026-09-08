@@ -13,6 +13,7 @@
 | Canonical context store | Действующие персона и системный промпт: файл репозитория либо опубликованная версия реестра артефактов | `src/runtime/canonical-context.ts`, `src/runtime/canonical-routes.ts` |
 | Persona sync | Односторонняя синхронизация канонической персоны | `src/letta/persona-sync.ts`, `library/persona/eva.md` |
 | Runtime context | Время, профиль, подписка, цели, курсор программы, ближайшие задачи и собственные сообщения Евы с прошлой реплики человека | `src/runtime/runtime-context.ts` |
+| Предел истории | Две разные величины под одним числом `default_context_window`: безопасность (`safeContextWindow` — сколько примет самая слабая включённая модель) и бюджет (`historyLimit` — сколько истории мы согласны оплачивать в каждом шаге). Бюджет предел только опускает | `src/letta/context-window.ts`, `src/sdk-settings.ts` |
 | Непрерывность работы | ACTIVE OBJECTIVE/TURN OBJECTIVE и чекпойнт ACTIVE WORK в `current_state` | `src/letta/memory-blocks.ts`, `library/persona/eva.md` |
 
 Граница ответственности: [letta-native.md](letta-native.md).
@@ -69,6 +70,8 @@ BullMQ не обрабатывает интерактивный ход и не �
 | Capability probe | Проверка возможностей модели до активации. Четыре исхода: `ok`, `limited`, `config_error`, `unavailable`. Обязательны только ответ, вызов инструмента и приём его результата; поток, изображения и строгий JSON — необязательные и закрывают лишь соответствующие маршруты. Выясненное сохраняется в `supports_*` и решает отбор в `router/chain.ts` | `src/llm/capability-probe.ts` |
 | Vision check | Проверка маршрута изображения | `src/llm/vision-check.ts` |
 | Состояние роутера для панели | Единый view-model провайдера для `/admin/ai`: конфигурация, возможности, членство в маршрутах (`code`, `title`, `position`), breaker, расход и один операционный статус `providerStatus()`. Секреты и API key через него не проходят. Клиент ничего не досчитывает и второго запроса за провайдерами не делает | `src/admin/llm-router-service.ts` |
+| Кэш промпта | Точки `cache_control` в запросе к Anthropic: на системном блоке (закрывает и описания инструментов) и в конце истории. Включается по провайдеру полем `additional_parameters.prompt_cache`, срок — `prompt_cache_ttl`. Отказ `400` на незнакомое поле выключает кэш для провайдера и повторяет запрос без него | `src/router/adapters/shared.ts`, `src/router/adapters/anthropic.ts` |
+| Состав префикса | Из чего складывается постоянная часть каждого обращения: системный промпт, персона, общие блоки, описания инструментов — в знаках и долях. Отдаётся в `GET /v1/canonical-context` | `src/letta/prefix-size.ts` |
 | Безопасные поля провайдера | Общий фильтр секретов в `additional_parameters` для `/providers` и `/llm/state`: два представления одной записи не могут разойтись в том, что считается безопасным | `src/admin/provider-safe.ts` |
 | Attachments | Безопасный приём Telegram-вложений | `src/attachments/telegram-attachments.ts` |
 | Documents | Извлечение текста из поддерживаемых форматов | `src/knowledge/document-text.ts` |
