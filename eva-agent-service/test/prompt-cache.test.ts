@@ -187,6 +187,13 @@ test("бюджет предел только опускает: выше безо
 });
 
 test("бюджет не опускает предел ниже того, при котором разговор не помещается в себя", () => {
+  // Большая модель и заведомо слишком маленький бюджет: без нижней
+  // границы предел стал бы равен бюджету, и разговор перестал бы
+  // помещаться сам в себя — сжатие пошло бы по кругу.
+  const roomy = [{ context_window: 256_000, max_output_tokens: 8_000 }];
+  assert.ok(safeContextWindow(roomy)! > MIN_CONTEXT_WINDOW);
+  assert.equal(historyLimit(roomy, 1_000), MIN_CONTEXT_WINDOW);
+
   assert.ok(historyLimit([{ context_window: 32_000, max_output_tokens: 4_000 }])! >= MIN_CONTEXT_WINDOW);
   assert.equal(historyLimit([], 1_000), null);
 });
