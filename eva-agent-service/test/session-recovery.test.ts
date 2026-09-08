@@ -272,7 +272,17 @@ test("сбой хода закрывает только повреждённую
   assert.ok(!sessions.has("conv-broken"));
 });
 
-test("смена настроек SDK не рвёт идущий ход, а дожидается его", async () => {
+/**
+ * Дать циклу дренажа прокрутиться после сдвига виртуальных часов.
+ *
+ * `setImmediate` не подменён, поэтому ожидание его очереди пропускает
+ * вперёд и микрозадачи, и продолжение цикла, разбуженное таймером.
+ */
+const settle = async (): Promise<void> => {
+  await new Promise((resolve) => setImmediate(resolve));
+};
+
+test("смена настроек SDK не рвёт идущий ход, а дожидается его", async (t) => {
   const { service, sessions, made } = harness();
   const internal = service as unknown as {
     acquirePooled: (id: string) => Promise<{ activeTurns: number }>;
@@ -281,13 +291,34 @@ test("смена настроек SDK не рвёт идущий ход, а до
   const pooled = await internal.acquirePooled("conv-1");
   pooled.activeTurns = 1;
 
+  // Часы виртуальные, и это не удобство, а условие проверки. Тест о
+  // том, что дренаж ДОЖИДАЕТСЯ хода, а не о том, успеет ли раннер
+  // выполнить ожидание за отведённые миллисекунды. На настоящих часах
+  // здесь была гонка: `drainSessions` держит дедлайн `Date.now() + 150`,
+  // а тест ждал реальные 60 мс, и достаточно было задержки в девяносто —
+  // обычное дело на загруженной сборке, — чтобы окно кончилось раньше
+  // освобождения и сессию закрыло силой. Проверяемая семантика при этом
+  // цела: срок остаётся прежним, ход по-прежнему освобождается внутри
+  // него, а дедлайн проверяет соседний тест.
+  //
+  // Часы включаются только на время дренажа: `acquirePooled` выше и
+  // фейковая сессия внутри работают на настоящих.
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
+
+  // Цикл дренажа опрашивает сессии каждые 25 мс.
   const drain = service.drainSessions(150);
+  await settle();
+  for (let elapsed = 0; elapsed < 50; elapsed += 25) {
+    t.mock.timers.tick(25);
+    await settle();
+  }
   // Пока ход идёт, сессия на месте.
-  await new Promise((resolve) => setTimeout(resolve, 60));
   assert.ok(sessions.has("conv-1"), "сессия закрыта, не дождавшись хода");
   assert.equal(made[0]!.state.closed, false);
 
   pooled.activeTurns = 0;
+  t.mock.timers.tick(25);
+  await settle();
   const outcome = await drain;
   assert.ok(!sessions.has("conv-1"), "сессия не закрылась после освобождения");
   assert.equal(outcome.forced, 0, "сессию закрыли силой, хотя она освободилась сама");
