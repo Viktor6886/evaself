@@ -13,7 +13,7 @@
 | Canonical context store | Действующие персона и системный промпт: файл репозитория либо опубликованная версия реестра артефактов | `src/runtime/canonical-context.ts`, `src/runtime/canonical-routes.ts` |
 | Persona sync | Односторонняя синхронизация канонической персоны | `src/letta/persona-sync.ts`, `library/persona/eva.md` |
 | Runtime context | Время, профиль, подписка, цели, курсор программы, ближайшие задачи и собственные сообщения Евы с прошлой реплики человека | `src/runtime/runtime-context.ts` |
-| Предел истории | Две разные величины под одним числом `default_context_window`: безопасность (`safeContextWindow` — сколько примет самая слабая включённая модель) и бюджет (`historyLimit` — сколько истории мы согласны оплачивать в каждом шаге). Бюджет предел только опускает | `src/letta/context-window.ts`, `src/sdk-settings.ts` |
+| Предел контекста | Две разные величины под одним числом `default_context_window`: безопасность (`safeContextWindow` — сколько примет самая слабая включённая модель) и бюджет (`contextLimit` — сколько контекста мы согласны оплачивать в каждом шаге). Обе — ПОЛНОЕ окно вместе с постоянным префиксом: Letta получает это число как `context_window_limit` и меряет им весь собранный контекст. Бюджет предел только опускает | `src/letta/context-window.ts`, `src/sdk-settings.ts` |
 | Непрерывность работы | ACTIVE OBJECTIVE/TURN OBJECTIVE и чекпойнт ACTIVE WORK в `current_state` | `src/letta/memory-blocks.ts`, `library/persona/eva.md` |
 
 Граница ответственности: [letta-native.md](letta-native.md).
