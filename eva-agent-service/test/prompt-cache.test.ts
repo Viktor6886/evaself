@@ -11,7 +11,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { anthropicAdapter, resetPromptCacheRejections } from "../dist/router/adapters/anthropic.js";
-import { historyLimit, HISTORY_BUDGET_TOKENS, MIN_CONTEXT_WINDOW, safeContextWindow } from "../dist/letta/context-window.js";
+import {
+  contextLimit, CONTEXT_BUDGET_TOKENS, CONTEXT_RESERVE_TOKENS, MIN_CONTEXT_WINDOW, safeContextWindow,
+} from "../dist/letta/context-window.js";
 import { prefixReport } from "../dist/letta/prefix-size.js";
 
 const TOOL = {
@@ -168,22 +170,41 @@ test("чужой отказ 400 остаётся отказом и повтор�
 // Бюджет истории
 // ---------------------------------------------------------------------
 
-test("бюджет опускает предел истории ниже того, что модель физически принимает", () => {
-  // Окно 256к разрешало истории дорасти до двухсот тысяч токенов, и
+test("бюджет опускает предел ниже того, что модель физически принимает", () => {
+  // Окно 256к разрешало контексту дорасти до двухсот тысяч токенов, и
   // столько же уходило заново в каждом шаге каждого хода.
   const providers = [{ context_window: 256_000, max_output_tokens: 8_000 }];
   const safe = safeContextWindow(providers)!;
-  const limit = historyLimit(providers)!;
-  assert.ok(safe > HISTORY_BUDGET_TOKENS, "исходный предел заведомо больше бюджета");
-  assert.equal(limit, HISTORY_BUDGET_TOKENS);
+  const limit = contextLimit(providers)!;
+  assert.ok(safe > CONTEXT_BUDGET_TOKENS, "исходный предел заведомо больше бюджета");
+  assert.equal(limit, CONTEXT_BUDGET_TOKENS);
+});
+
+test("после постоянного префикса разговору остаётся место, иначе сжатие идёт каждый ход", () => {
+  // Тот самый отказ: Letta понимает `context_window_limit` как ПОЛНОЕ
+  // окно и меряет им весь собранный контекст вместе с префиксом. Бюджет,
+  // названный «историей» и выставленный в 60 000, оставлял разговору
+  // тридцать тысяч вместо ста семидесяти — Ева начинала подолгу думать
+  // перед ответом, потому что почти каждый ход упирался в сжатие, а на
+  // событии сжатия заводится ещё и рефлексия.
+  //
+  // Разговору должно оставаться не меньше, чем занимает сам префикс:
+  // окно, которое больше чем наполовину занято постоянной частью, —
+  // это не бюджет, а непрерывное сжатие.
+  const limit = contextLimit([{ context_window: 256_000, max_output_tokens: 16_000 }])!;
+  const conversation = limit - CONTEXT_RESERVE_TOKENS;
+  assert.ok(
+    conversation >= CONTEXT_RESERVE_TOKENS,
+    `на разговор осталось ${conversation} токенов при префиксе ${CONTEXT_RESERVE_TOKENS}`,
+  );
 });
 
 test("бюджет предел только опускает: выше безопасного он не поднимает", () => {
   // Иначе вернулась бы смерть диалога, ради которой предел и появился.
-  const providers = [{ context_window: 96_000, max_output_tokens: 8_000 }];
+  const providers = [{ context_window: 128_000, max_output_tokens: 8_000 }];
   const safe = safeContextWindow(providers)!;
-  assert.ok(safe < HISTORY_BUDGET_TOKENS, "у этой модели безопасный предел меньше бюджета");
-  assert.equal(historyLimit(providers), safe);
+  assert.ok(safe < CONTEXT_BUDGET_TOKENS, "у этой модели безопасный предел меньше бюджета");
+  assert.equal(contextLimit(providers), safe);
 });
 
 test("бюджет не опускает предел ниже того, при котором разговор не помещается в себя", () => {
@@ -192,10 +213,10 @@ test("бюджет не опускает предел ниже того, при 
   // помещаться сам в себя — сжатие пошло бы по кругу.
   const roomy = [{ context_window: 256_000, max_output_tokens: 8_000 }];
   assert.ok(safeContextWindow(roomy)! > MIN_CONTEXT_WINDOW);
-  assert.equal(historyLimit(roomy, 1_000), MIN_CONTEXT_WINDOW);
+  assert.equal(contextLimit(roomy, 1_000), MIN_CONTEXT_WINDOW);
 
-  assert.ok(historyLimit([{ context_window: 32_000, max_output_tokens: 4_000 }])! >= MIN_CONTEXT_WINDOW);
-  assert.equal(historyLimit([], 1_000), null);
+  assert.ok(contextLimit([{ context_window: 32_000, max_output_tokens: 4_000 }])! >= MIN_CONTEXT_WINDOW);
+  assert.equal(contextLimit([], 1_000), null);
 });
 
 // ---------------------------------------------------------------------

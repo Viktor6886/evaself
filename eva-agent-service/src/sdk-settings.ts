@@ -3,7 +3,7 @@ import type { PermissionMode, ReasoningEffort } from "@letta-ai/letta-agent-sdk"
 import type { Config } from "./config.js";
 import type { Database, SdkSettingsRow } from "./db.js";
 import { badRequest } from "./errors.js";
-import { historyLimit } from "./letta/context-window.js";
+import { contextLimit } from "./letta/context-window.js";
 import type { LettaService, RuntimeSdkSettings } from "./letta.js";
 
 export interface SdkSettingsInput {
@@ -70,10 +70,10 @@ export class SdkSettingsManager {
    * отказа — на боевой установке до 770 000 токенов при окне 256 000,
    * после чего умирало любое сообщение, включая «привет».
    *
-   * Второе — цена. Предел безопасности разрешает истории дорасти до
+   * Второе — цена. Предел безопасности разрешает контексту дорасти до
    * двухсот тысяч токенов, и столько же отправляется заново в каждом
    * шаге каждого хода. Поэтому поверх него стоит бюджет
-   * (`historyLimit`), который предел только опускает.
+   * (`contextLimit`), который предел только опускает.
    *
    * Подставляется только когда человек не выбрал число сам: явная
    * настройка сильнее выведенной.
@@ -88,7 +88,7 @@ export class SdkSettingsManager {
   }
 
   /**
-   * Бюджет истории, ограниченный сверху самой слабой включённой
+   * Бюджет контекста, ограниченный сверху самой слабой включённой
    * моделью. `null` — считать не из чего.
    */
   private async derivedContextWindow(): Promise<number | null> {
@@ -99,7 +99,7 @@ export class SdkSettingsManager {
       }>(
         `SELECT context_window, max_output_tokens FROM llm_providers WHERE enabled`,
       );
-      return historyLimit(rows.map((item) => ({
+      return contextLimit(rows.map((item) => ({
         context_window: Number(item.context_window) || 0,
         max_output_tokens: Number(item.max_output_tokens) || 0,
       })));
