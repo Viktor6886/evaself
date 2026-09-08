@@ -47,6 +47,7 @@ import type { TurnSemaphores } from "./turns/semaphores.js";
 import type { RuntimeContextBuilder } from "./runtime/runtime-context.js";
 import type { CanonicalContextStore } from "./runtime/canonical-context.js";
 import { registerCanonicalRoutes } from "./runtime/canonical-routes.js";
+import type { PrefixInput } from "./letta/prefix-size.js";
 import type { PersonaSyncResult } from "./letta/persona-sync.js";
 import { webhookSecretMatches } from "./telegram.js";
 
@@ -90,6 +91,8 @@ export interface Services {
   canonicalContext?: {
     store: CanonicalContextStore;
     sync(persona: string, systemPrompt: string): Promise<PersonaSyncResult>;
+    /** Живой состав постоянной части обращения к модели. Необязателен. */
+    prefix?(): PrefixInput;
   };
   /**
    * Контур наблюдаемости. Нужен выдаче метрик (состояние буфера
@@ -283,6 +286,9 @@ export function buildServer(services: Services): FastifyInstance {
   if (services.canonicalContext) {
     registerCanonicalRoutes(app, {
       store: services.canonicalContext.store,
+      ...(services.canonicalContext.prefix
+        ? { prefix: services.canonicalContext.prefix }
+        : {}),
       applyToRuntime: (input) => letta.setCanonicalContext(input),
       sync: services.canonicalContext.sync,
       logger,

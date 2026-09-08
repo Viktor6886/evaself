@@ -36,6 +36,7 @@ import {
   type CanonicalSource,
 } from "./canonical-context.js";
 import { personaSyncState, type PersonaSyncResult } from "../letta/persona-sync.js";
+import { prefixReport, type PrefixInput } from "../letta/prefix-size.js";
 
 export interface CanonicalRouteContext {
   store: CanonicalContextStore;
@@ -43,6 +44,15 @@ export interface CanonicalRouteContext {
   applyToRuntime(input: { persona: string; systemPrompt: string }): boolean;
   /** Единственный путь доставки текста живым агентам. */
   sync(persona: string, systemPrompt: string): Promise<PersonaSyncResult>;
+  /**
+   * Живой состав постоянной части обращения к модели.
+   *
+   * Необязателен: без него маршрут отвечает как раньше. Отдельного
+   * маршрута под это нет намеренно — это тот же канонический контекст,
+   * только измеренный, и заводить ради него второй путь с собственным
+   * объявлением доступа было бы лишней сущностью.
+   */
+  prefix?(): PrefixInput;
   logger: Logger;
 }
 
@@ -107,7 +117,14 @@ export function registerCanonicalRoutes(app: FastifyInstance, ctx: CanonicalRout
       ctx.store.document("persona"),
       ctx.store.document("system_prompt"),
     ]);
-    return { documents: { persona, system_prompt: systemPrompt }, state: personaSyncState() };
+    return {
+      documents: { persona, system_prompt: systemPrompt },
+      state: personaSyncState(),
+      // Из чего состоит то, что уходит провайдеру в каждом шаге. Общее
+      // число в токенах даёт `make check-tokens`; здесь видно, какая
+      // часть занимает место.
+      prefix: ctx.prefix ? prefixReport(ctx.prefix()) : null,
+    };
   });
 
   app.get("/v1/canonical-context/:source/history", async (request) => {
