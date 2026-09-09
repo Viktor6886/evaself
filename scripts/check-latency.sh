@@ -11,8 +11,9 @@
 # `Telegram turn обработан`. Здесь оно только собирается в таблицу.
 # Ничего нового не измеряется и не включается.
 #
-#   ./scripts/check-latency.sh          — по последним 5000 строк лога
-#   ./scripts/check-latency.sh 20000    — глубже в историю логов
+#   ./scripts/check-latency.sh          — за последние сутки
+#   ./scripts/check-latency.sh 3d       — за трое суток
+#   ./scripts/check-latency.sh 5000     — по числу строк, если так удобнее
 #
 # Числа в миллисекундах. Медиана — обычный ход, p90 — то, на что человек
 # жалуется: раз в десять ходов бывает так.
@@ -25,15 +26,27 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 load_env
 
-TAIL="${1:-5000}"
-[[ "$TAIL" =~ ^[0-9]+$ ]] || die "глубина задаётся числом строк: ./scripts/check-latency.sh 20000"
+# Окно задаётся временем, а не числом строк: сервис пишет много строк на
+# ход, и «последние 5000» на боевой установке не покрыли ни одного
+# законченного хода. Число строк оставлено на случай, когда нужно именно
+# оно.
+WINDOW="${1:-24h}"
+if [[ "$WINDOW" =~ ^[0-9]+$ ]]; then
+	LOG_SELECTOR=(--tail="$WINDOW")
+	WINDOW_LABEL="последние $WINDOW строк лога"
+elif [[ "$WINDOW" =~ ^[0-9]+[mhd]$ ]]; then
+	LOG_SELECTOR=(--since="$WINDOW" --tail=200000)
+	WINDOW_LABEL="последние $WINDOW"
+else
+	die "окно задаётся как 24h, 3d, 90m или числом строк"
+fi
 
 LOG_FILE="$(mktemp)"
 trap 'rm -f "$LOG_FILE"' EXIT
 
 # Логи берутся с хоста: строка о ходе пишется сервисом Евы, а `grep`
 # внутри контейнера потребовал бы его же оболочки.
-compose_no_stdin logs --no-color --tail="$TAIL" eva-agent-service 2>/dev/null \
+compose_no_stdin logs --no-color "${LOG_SELECTOR[@]}" eva-agent-service 2>/dev/null \
   | grep -F 'Telegram turn обработан' > "$LOG_FILE" || true
 
 TURNS="$(wc -l < "$LOG_FILE" | tr -d ' ')"
@@ -41,11 +54,17 @@ TURNS="$(wc -l < "$LOG_FILE" | tr -d ' ')"
 step "Из чего складывается ход"
 
 if [ "${TURNS:-0}" -eq 0 ]; then
-	echo "  В последних $TAIL строках лога законченных ходов нет."
-	echo "  Либо человек ещё не писал после перезапуска, либо глубина мала:"
-	echo "  попробуйте ./scripts/check-latency.sh 50000"
+	echo "  За $WINDOW_LABEL законченных ходов в логе нет."
+	echo
+	echo "  Строка о ходе пишется, когда ход дошёл до конца. Её нет, если:"
+	echo "    — человек не писал Еве за это окно;"
+	echo "    — сервис перезапускали, и логи предыдущего контейнера ушли;"
+	echo "    — окно мало́: попробуйте ./scripts/check-latency.sh 7d"
+	echo
+	echo "  Остальные разделы ниже работают и без логов: они берут факты"
+	echo "  из базы."
 else
-	echo "  Ходов в выборке: $TURNS"
+	echo "  Ходов в выборке: $TURNS (окно: $WINDOW_LABEL)"
 	echo
 	printf '  %-26s %8s %8s %8s\n' "стадия" "медиана" "p90" "макс"
 	printf '  %-26s %8s %8s %8s\n' "--------------------------" "--------" "--------" "--------"
@@ -110,14 +129,19 @@ step "Сколько обращений приходится на один хо�
 # Шаг с инструментом — отдельное обращение с полным контекстом. Ход из
 # четырёх шагов идёт вчетверо дольше одного, и это не поломка, а цена
 # работы: увидеть её нужно раньше, чем начинать оптимизировать другое.
+#
+# По человеку не группируем: `llm_requests.user_id` заполняется из
+# метаданных запроса, а Letta App Server внутренний идентификатор не
+# передаёт — у ходов агента он пуст всегда. Условие `user_id IS NOT NULL`
+# показывало ноль ходов при тысяче обращений.
 q "
 WITH bursts AS (
-  SELECT user_id, date_trunc('minute', started_at) AS slot,
+  SELECT date_trunc('minute', started_at) AS slot,
          count(*) AS steps, sum(latency_ms) AS model_ms
     FROM llm_requests
-   WHERE succeeded AND user_id IS NOT NULL
+   WHERE succeeded
      AND started_at > now() - interval '3 days'
-   GROUP BY user_id, date_trunc('minute', started_at)
+   GROUP BY date_trunc('minute', started_at)
 )
 SELECT count(*)                                            AS turns,
        round(avg(steps), 2)                                AS avg_steps,
