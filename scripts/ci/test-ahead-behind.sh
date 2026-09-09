@@ -20,6 +20,7 @@ WORK="$(mktemp -d)"
 # превращался в упавший CI на ровном месте.
 trap 'rm -rf "$WORK" 2>/dev/null || true' EXIT
 failures=0
+servers=0
 
 check() {
 	local label="$1" expected="$2" actual="$3"
@@ -44,11 +45,20 @@ git -C "$WORK/seed" commit -qm one
 git -C "$WORK/seed" branch -M main
 git -C "$WORK/seed" push -q origin main
 
+# Каждый сценарий получает свой каталог, а прежний не сносится.
+#
+# Снос на ходу спотыкался о `.git`, в который что-то дописывало прямо
+# во время обхода: `rm -rf` возвращал «Directory not empty», `set -e`
+# ронял скрипт — и проверка была красной ПОСЛЕ того, как все сценарии
+# прошли. Кто именно дописывал, по логу не видно, и гадать не нужно:
+# удалять на ходу здесь незачем. Каталоги уносит trap на выходе, где
+# отказ уборки уже никого не роняет.
 fresh_server() {
-	rm -rf "$WORK/server"
-	git clone -q "$WORK/origin.git" "$WORK/server"
-	git -C "$WORK/server" config user.email server@example.test
-	git -C "$WORK/server" config user.name Server
+	servers=$((servers + 1))
+	SERVER="$WORK/server-$servers"
+	git clone -q "$WORK/origin.git" "$SERVER"
+	git -C "$SERVER" config user.email server@example.test
+	git -C "$SERVER" config user.name Server
 }
 
 upstream_commit() {
@@ -58,14 +68,14 @@ upstream_commit() {
 }
 
 server_commit() {
-	echo "$1" > "$WORK/server/$1"
-	git -C "$WORK/server" add -A
-	git -C "$WORK/server" commit -qm "$1"
+	echo "$1" > "$SERVER/$1"
+	git -C "$SERVER" add -A
+	git -C "$SERVER" commit -qm "$1"
 }
 
 state() {
-	git -C "$WORK/server" fetch -q origin main
-	git_ahead_behind "$WORK/server" main
+	git -C "$SERVER" fetch -q origin main
+	git_ahead_behind "$SERVER" main
 }
 
 # 1. in sync
@@ -77,7 +87,7 @@ fresh_server
 upstream_commit upstream-a
 upstream_commit upstream-b
 check "позади origin" "2 0" "$(state)"
-git -C "$WORK/server" pull -q --ff-only origin main
+git -C "$SERVER" pull -q --ff-only origin main
 check "после pull" "0 0" "$(state)"
 
 # 3. only ahead — nothing to pull, an update must not be blocked
@@ -91,7 +101,7 @@ server_commit local-landing-page
 upstream_commit upstream-c
 upstream_commit upstream-d
 check "разошлась" "2 1" "$(state)"
-if git -C "$WORK/server" pull --ff-only origin main >/dev/null 2>&1; then
+if git -C "$SERVER" pull --ff-only origin main >/dev/null 2>&1; then
 	printf '  FAIL  pull --ff-only прошёл на разошедшейся ветке\n'
 	failures=$((failures + 1))
 else
@@ -100,9 +110,9 @@ fi
 
 # 5. rebase is the recovery path the message suggests — it must leave the
 #    branch pullable and keep the local commit.
-git -C "$WORK/server" rebase -q origin/main
+git -C "$SERVER" rebase -q origin/main
 check "после rebase" "0 1" "$(state)"
-if ! git -C "$WORK/server" log --oneline -1 | grep -q local-landing-page; then
+if ! git -C "$SERVER" log --oneline -1 | grep -q local-landing-page; then
 	printf '  FAIL  локальный коммит потерян при rebase\n'
 	failures=$((failures + 1))
 fi

@@ -2,9 +2,10 @@
  * Общая запись настроек интеграции.
  *
  * Один и тот же маршрут обслуживает и речь, и Telegram с поиском, а тем
- * же запросом меняется bot_token. Послабление с паролем сделано только
- * для речи, и здесь сторожится граница: у остальных интеграций окно
- * пароля обязано появиться, а запрос — уйти лишь после подтверждения.
+ * же запросом меняется bot_token. Пароль за настройку больше не
+ * спрашивается нигде: он вводится один раз при входе в панель. Здесь
+ * сторожится именно это — сохранение уходит на сервер сразу, без
+ * промежуточного окна, и уносит введённое значение.
  */
 
 import assert from "node:assert/strict";
@@ -31,7 +32,7 @@ describe("запись настроек интеграции", () => {
   let panel;
   after(async () => { await panel?.close(); });
 
-  test("смена токена Telegram требует подтверждения паролем", async () => {
+  test("смена токена Telegram сохраняется без повторного пароля", async () => {
     panel = await openPanel({
       routes: {
         "/services": { services: [] },
@@ -50,16 +51,18 @@ describe("запись настроек интеграции", () => {
     await page.fill("#integration-form input[name=bot_token]", "новый-токен");
     await page.click("#integration-save");
 
-    assert.equal(await panel.sudoScope(), "secrets:write", "пароль не запрошен");
-    assert.equal(
-      requests.filter((item) => item.method === "PUT").length,
-      0,
-      "запрос ушёл до подтверждения пароля",
+    const saved = await panel.waitForRequest(
+      (item) => item.method === "PUT" && item.path === "/integrations/telegram/config",
     );
-
-    await panel.confirmSudo();
-    const saved = requests.find((item) => item.method === "PUT" && item.path === "/integrations/telegram/config");
-    assert.ok(saved, "после подтверждения запрос не ушёл");
+    assert.ok(saved, "сохранение не ушло на сервер");
     assert.equal(saved.body.bot_token, "новый-токен");
+    // Ни одного окна между нажатием и запросом: пароль вводится только
+    // при входе в панель.
+    assert.equal(await panel.confirmTitle(), null, "сохранение настройки открыло окно");
+    assert.equal(
+      requests.filter((item) => item.path === "/sudo").length,
+      0,
+      "панель всё ещё просит sudo-грант",
+    );
   });
 });

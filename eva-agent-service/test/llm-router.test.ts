@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { buildChain } from "../dist/router/chain.js";
+import { providerUrl } from "../dist/router/adapters/shared.js";
 import { ProviderLimits } from "../dist/router/limits.js";
 import {
   BACKUP_PERSONA_DIRECTIVE,
@@ -60,8 +61,8 @@ test("две реплики занимают только один общий ha
   const replicaB = new RouterStore(pool, key);
 
   const claims = await Promise.all([
-    replicaA.claimProbe("provider-1", "model-a"),
-    replicaB.claimProbe("provider-1", "model-a"),
+    replicaA.claimProbe("provider-1", "model-a", 60_000),
+    replicaB.claimProbe("provider-1", "model-a", 60_000),
   ]);
   assert.deepEqual(claims.sort(), [false, true]);
 });
@@ -185,11 +186,14 @@ class FakeStore {
     });
     return Promise.resolve();
   }
-  claimProbe(id, model) {
+  claimProbe(id, model, leaseMs) {
     const row = this.breakerRows.get(breakerKey(id, model));
-    if (!row || row.state !== "open" || row.pinned_out) return Promise.resolve(false);
+    if (!row || row.pinned_out) return Promise.resolve(false);
+    // half_open с истёкшим сроком — брошенная проба: её место свободно.
+    if (row.state !== "open" && row.state !== "half_open") return Promise.resolve(false);
     if (row.probe_after && row.probe_after > new Date()) return Promise.resolve(false);
     row.state = "half_open";
+    row.probe_after = new Date(Date.now() + (leaseMs ?? 60_000));
     this.probeClaims += 1;
     return Promise.resolve(true);
   }
@@ -463,7 +467,7 @@ function harness(providers, script, chain, optionOverrides = {}) {
       const n = (attemptsByProvider.get(target.name) ?? 0) + 1;
       attemptsByProvider.set(target.name, n);
       calls.push({ provider: target.name, attempt: n, stream: false, request: req });
-      return script[target.name].complete(n, req);
+      return script[target.name].complete(n, req, target);
     },
     async *stream(target, req) {
       const n = (attemptsByProvider.get(target.name) ?? 0) + 1;
@@ -551,13 +555,32 @@ test("half-open breaker не пропускает второй пробный з
     providerIds: ["a"],
     providers: new Map([["a", p]]),
     breakers: new Map([[breakerKey("a", "model-a"), {
-      state: "half_open", probe_after: null, pinned_out: false,
+      // Срок захвата ещё не вышел: проба действительно выполняется.
+      state: "half_open", probe_after: new Date(Date.now() + 60_000), pinned_out: false,
     }]]),
     now: new Date(),
   });
   assert.equal(chain.usable.length, 0);
   assert.equal(chain.rejected[0]?.reason, "breaker_open");
   assert.match(chain.rejected[0]?.detail ?? "", /единственный пробный запрос/);
+});
+
+test("half-open без срока считается брошенной пробой, а не вечной", () => {
+  // Так выглядит запись, оставшаяся от оборвавшейся пробы: состояние
+  // есть, срока нет, выполнять её некому. Провайдер обязан вернуться в
+  // цепочку — иначе он мёртв до ручного вмешательства.
+  const p = provider({ id: "a", name: "primary" });
+  const chain = buildChain({
+    route: ROUTE,
+    request: request(),
+    providerIds: ["a"],
+    providers: new Map([["a", p]]),
+    breakers: new Map([[breakerKey("a", "model-a"), {
+      state: "half_open", probe_after: null, pinned_out: false,
+    }]]),
+    now: new Date(),
+  });
+  assert.equal(chain.usable.length, 1, "брошенная проба не должна хоронить провайдера");
 });
 
 test("long Retry-After switches immediately; short value is waited with configured jitter", async () => {
@@ -615,6 +638,192 @@ test("пустой ответ и повреждённый JSON приводят 
   const result = await router.complete(request({ response_format: { type: "json_object" } }));
   assert.equal(result.provider_name, "backup");
   assert.equal(calls.length, 2);
+});
+
+/**
+ * Пустой ответ у единственного провайдера.
+ *
+ * Так выглядел отказ в Telegram: рассуждающая модель не укладывалась в
+ * бюджет, возвращала пустоту, роутеру некуда было переключаться — и ход
+ * доходил до «не получилось обработать сообщение». Переключение здесь не
+ * лечит ничего: провайдер один. Лечит бюджет.
+ */
+test("пустой ответ повторяется тому же провайдеру с бо́льшим бюджетом", async () => {
+  const budgets = [];
+  const { router, calls } = harness([provider({ id: "a", name: "primary", max_output_tokens: 8192 })], {
+    primary: {
+      complete: (n, req) => {
+        budgets.push(req.max_tokens);
+        // Пустой ответ ровно до тех пор, пока бюджета не хватает.
+        return req.max_tokens < 2048
+          ? Promise.resolve({ ...ok(), content: "" })
+          : Promise.resolve(ok("готово"));
+      },
+      stream: async function* () { throw new Error("не используется"); },
+    },
+  });
+  const result = await router.complete(request({ max_tokens: 256 }));
+
+  assert.equal(result.provider_name, "primary", "переключаться было некуда, и не потребовалось");
+  assert.equal(result.response.content, "готово");
+  assert.equal(budgets[0], 256, "первая попытка идёт с запрошенным бюджетом");
+  assert.ok(budgets[1] >= 2048, `повтор должен получить запас, получил ${budgets[1]}`);
+  assert.equal(calls.length, budgets.length);
+});
+
+test("бюджет наращивается до потолка провайдера и не выше", async () => {
+  const budgets = [];
+  const { router } = harness([provider({ id: "a", name: "primary", max_output_tokens: 1024 })], {
+    primary: {
+      complete: (n, req) => {
+        budgets.push(req.max_tokens);
+        return Promise.resolve({ ...ok(), content: "" });
+      },
+      stream: async function* () { throw new Error("не используется"); },
+    },
+  });
+  await assert.rejects(() => router.complete(request({ max_tokens: 256 })));
+  // Потолок провайдера — предел: просить больше, чем он разрешает,
+  // значит получить HTTP 400 вместо ответа.
+  assert.ok(budgets.every((budget) => budget <= 1024), `вышли за потолок: ${budgets.join()}`);
+  assert.ok(budgets.length > 1, "наращивание не состоялось");
+  // Молчание при полном бюджете остаётся отказом, а не бесконечным циклом.
+  assert.ok(budgets.length < 10, `цикл не сошёлся: ${budgets.length} попыток`);
+});
+
+/**
+ * Брошенная проба не должна хоронить провайдера навсегда.
+ *
+ * `half_open` ставился без срока. Пока проба идёт, это верно. Но если
+ * процесс перезапустили или запрос оборвался между захватом и записью
+ * исхода, состояние оставалось в таблице навечно, и провайдер выпадал из
+ * каждого хода с формулировкой «circuit breaker уже выполняет
+ * единственный пробный запрос» — выполнять его было уже некому.
+ */
+test("half_open с истёкшим сроком перезахватывается, а не блокирует навсегда", async () => {
+  const { router, store, calls } = harness([provider({ id: "a", name: "primary" })], {
+    primary: always(() => Promise.resolve(ok("живой"))),
+  });
+  // Проба, которую никто не завершил: срок вышел час назад.
+  store.breakerRows.set(breakerKey("a", "model-a"), {
+    provider_id: "a", model: "model-a", state: "half_open", consecutive_errors: 3,
+    pinned_out: false, first_error_at: null, opened_at: new Date(Date.now() - 7_200_000),
+    probe_after: new Date(Date.now() - 3_600_000),
+    last_error_code: "timeout", last_success_at: null,
+  });
+
+  const result = await router.complete(request());
+  assert.equal(result.provider_name, "primary", "провайдер обязан вернуться сам");
+  assert.equal(calls.length, 1);
+});
+
+test("идущая проба по-прежнему не пускает второй запрос", async () => {
+  const { router, store } = harness([provider({ id: "a", name: "primary" })], {
+    primary: always(() => Promise.resolve(ok("живой"))),
+  });
+  // Захват свежий: чужая проба действительно выполняется прямо сейчас.
+  store.breakerRows.set(breakerKey("a", "model-a"), {
+    provider_id: "a", model: "model-a", state: "half_open", consecutive_errors: 3,
+    pinned_out: false, first_error_at: null, opened_at: new Date(),
+    probe_after: new Date(Date.now() + 60_000),
+    last_error_code: "timeout", last_success_at: null,
+  });
+
+  await assert.rejects(() => router.complete(request()), /единственный пробный запрос/);
+});
+
+/**
+ * Несколько ключей у одного провайдера.
+ *
+ * У льготных тарифов квота считается на ключ, а не на аккаунт: один
+ * упирается в лимит за минуты, и провайдер целиком выпадал из маршрутов,
+ * хотя рядом лежат рабочие ключи того же владельца.
+ */
+test("лимит ключа уводит на следующий ключ, а не на резервного провайдера", async () => {
+  const used = [];
+  const p = provider({ id: "a", name: "primary", max_retries: 0 });
+  p.api_keys = ["k1", "k2", "k3"];
+  const { router, calls } = harness([p, provider({ id: "b", name: "backup" })], {
+    primary: {
+      complete: (n, req, target) => {
+        used.push(target.api_key);
+        // Первые два ключа исчерпаны, третий работает.
+        return target.api_key === "k3"
+          ? Promise.resolve(ok("ответ третьим ключом"))
+          : Promise.reject(new ProviderError("лимит", "rate_limited", { retryable: true }));
+      },
+      stream: async function* () { throw new Error("не используется"); },
+    },
+    backup: always(() => Promise.resolve(ok("резерв"))),
+  });
+
+  const result = await router.complete(request());
+  assert.equal(result.provider_name, "primary", "переключаться на резерв было рано");
+  assert.deepEqual(used, ["k1", "k2", "k3"], "пул перебирается по порядку");
+  assert.equal(calls.filter((call) => call.provider === "backup").length, 0);
+});
+
+test("исчерпанный пул всё же уходит на резервного провайдера", async () => {
+  const used = [];
+  const p = provider({ id: "a", name: "primary", max_retries: 0 });
+  p.api_keys = ["k1", "k2"];
+  const { router } = harness([p, provider({ id: "b", name: "backup" })], {
+    primary: {
+      complete: (n, req, target) => {
+        used.push(target.api_key);
+        return Promise.reject(new ProviderError("лимит", "rate_limited", { retryable: true }));
+      },
+      stream: async function* () { throw new Error("не используется"); },
+    },
+    backup: always(() => Promise.resolve(ok("резерв"))),
+  });
+
+  const result = await router.complete(request());
+  assert.equal(result.provider_name, "backup");
+  assert.deepEqual(used, ["k1", "k2"], "перед уходом перебраны все ключи");
+});
+
+test("следующий ход начинается с ключа, который сработал", async () => {
+  const used = [];
+  const p = provider({ id: "a", name: "primary", max_retries: 0 });
+  p.api_keys = ["dead", "alive"];
+  const { router } = harness([p], {
+    primary: {
+      complete: (n, req, target) => {
+        used.push(target.api_key);
+        return target.api_key === "alive"
+          ? Promise.resolve(ok("готово"))
+          : Promise.reject(new ProviderError("лимит", "rate_limited", { retryable: true }));
+      },
+      stream: async function* () { throw new Error("не используется"); },
+    },
+  });
+
+  await router.complete(request());
+  await router.complete(request());
+  // Второй ход не бьётся о ту же стену: курсор переживает ход.
+  assert.deepEqual(used, ["dead", "alive", "alive"]);
+});
+
+test("ошибка не про ключ пул не перебирает", async () => {
+  const used = [];
+  const p = provider({ id: "a", name: "primary", max_retries: 0 });
+  p.api_keys = ["k1", "k2", "k3"];
+  const { router } = harness([p, provider({ id: "b", name: "backup" })], {
+    primary: {
+      complete: (n, req, target) => {
+        used.push(target.api_key);
+        // Сервис лёг — второй ключ ответит ровно тем же.
+        return Promise.reject(new ProviderError("500", "server_error", { retryable: true }));
+      },
+      stream: async function* () { throw new Error("не используется"); },
+    },
+    backup: always(() => Promise.resolve(ok("резерв"))),
+  });
+
+  const result = await router.complete(request());
+  assert.equal(result.provider_name, "backup");
+  assert.deepEqual(used, ["k1"], "перебирать пул на отказе сервиса бессмысленно");
 });
 
 test("HTTP 400 сначала нормализуется у того же провайдера, а не гонится по цепочке", async () => {
@@ -1019,4 +1228,37 @@ test("тот же провайдер с разрешением запрос об
   });
   const result = await router.complete(request());
   assert.equal(result.provider_name, "allowed");
+});
+
+/**
+ * Адрес провайдера: `/v1` дописывается, введённый путь — нет.
+ *
+ * `https://api.anthropic.com` — то, что человек берёт из документации, —
+ * превращалось в `/messages` вместо `/v1/messages`. Провайдер отвечал 404
+ * или 405, а панель показывала это как несовместимость модели, и найти
+ * настоящую причину по её тексту было нельзя.
+ */
+test("адрес провайдера получает версию, только если путь не задан", () => {
+  assert.equal(
+    providerUrl("https://api.anthropic.com", "messages"),
+    "https://api.anthropic.com/v1/messages",
+  );
+  assert.equal(
+    providerUrl("https://api.anthropic.com/", "messages"),
+    "https://api.anthropic.com/v1/messages",
+  );
+  // Уже указанная версия не удваивается.
+  assert.equal(
+    providerUrl("https://api.anthropic.com/v1", "messages"),
+    "https://api.anthropic.com/v1/messages",
+  );
+  assert.equal(
+    providerUrl("https://api.openai.com/v1/", "chat/completions"),
+    "https://api.openai.com/v1/chat/completions",
+  );
+  // Нестандартный путь прокси остаётся нетронутым: там `/v1` всё сломает.
+  assert.equal(
+    providerUrl("https://gateway.example/openai/deployments/eva", "chat/completions"),
+    "https://gateway.example/openai/deployments/eva/chat/completions",
+  );
 });

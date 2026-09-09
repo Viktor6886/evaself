@@ -21,10 +21,19 @@ async function loadOperations() {
   // Значения без пояснения читаются неверно: «dirty» звучит как мелочь,
   // хотя блокирует обновление, а пустое «Доступно обновлений» означает
   // «никто ещё не спрашивал», а не «обновлений нет».
+  //
+  // «Развёрнутый commit» — тот, на котором работают контейнеры, а не тот,
+  // что лежит в рабочем дереве. Разница между ними и есть прерванное или
+  // откаченное обновление: без неё панель уверяет, что исправление уже
+  // на стенде, пока стенд отвечает прежним кодом.
   $("#update-info").innerHTML = `
     <dl class="details-list">
       <div><dt>Ветка</dt><dd>${escapeHtml(current.branch || "неизвестна")}</dd></div>
-      <div><dt>Развёрнутый commit</dt><dd class="technical">${escapeHtml(String(current.commit || "неизвестен").slice(0, 12))}</dd></div>
+      <div><dt>Развёрнутый commit</dt><dd class="technical">${escapeHtml(String(current.deployed || "неизвестен").slice(0, 12))}</dd></div>
+      ${current.deployed && current.commit && current.deployed !== current.commit ? `
+      <div><dt>В рабочем дереве</dt>
+        <dd><span class="warn-value technical">${escapeHtml(String(current.commit).slice(0, 12))}</span>
+        — код скачан, но не развёрнут: выполните обновление</dd></div>` : ""}
       <div><dt>Незакоммиченные правки на сервере</dt>
         <dd>${current.dirty
           ? '<span class="warn-value">есть — обновление будет заблокировано</span>'
@@ -82,21 +91,14 @@ function installUpdate() {
     description: "Будет создан backup, сервисы могут быть временно недоступны. Ошибка запускает автоматический rollback.",
     expected: "UPDATE",
     action: async () => {
-      askSudo({
-        scope: "operations:update",
-        title: "Подтвердите установку обновления",
-        description: "Операция изменяет код, миграции и контейнеры установки.",
-        action: async () => {
-          const { payload } = await request("/updates/install", {
-            method: "POST",
-            headers: { "Idempotency-Key": `update-${crypto.randomUUID()}` },
-            body: JSON.stringify({ confirm: "UPDATE" }),
-          });
-          toast("Обновление запущено. Панель может кратковременно отключиться.");
-          pollOperation(payload.operation_id).catch(() => {
-            toast("Соединение прервано во время обновления; панель переподключится автоматически.");
-          });
-        },
+      const { payload } = await request("/updates/install", {
+        method: "POST",
+        headers: { "Idempotency-Key": `update-${crypto.randomUUID()}` },
+        body: JSON.stringify({ confirm: "UPDATE" }),
+      });
+      toast("Обновление запущено. Панель может кратковременно отключиться.");
+      pollOperation(payload.operation_id).catch(() => {
+        toast("Соединение прервано во время обновления; панель переподключится автоматически.");
       });
     },
   });
@@ -255,9 +257,11 @@ async function saveSettings(restart = false) {
   state.etag = response.headers.get("ETag");
   toast("Настройки сохранены");
   await loadSettings();
+  // Настройки уже сохранены. Перезапуск — отдельное последствие: он
+  // рвёт живые соединения, поэтому спрашивается отдельно. Пароля здесь
+  // нет: подтверждается последствие, а не личность.
   if (restart) {
-    askSudo({
-      scope: "services:restart",
+    askConfirm({
       title: "Применить настройки перезапуском",
       description: "Agent Runtime будет перезапущен. Агенты, conversation и память сохранятся.",
       action: async () => await lifecycleService("restart", "agent-runtime"),

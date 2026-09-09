@@ -167,7 +167,7 @@ test("delivery metrics separate outbox insert from Telegram send", async () => {
   assert.deepEqual(metrics, { outboxInsertMs: 1.5, telegramSendMs: 4.25 });
 });
 
-test("delivery contexts assign command, payment and crisis priority classes", async () => {
+test("delivery contexts assign command and crisis priority classes", async () => {
   const telegram = new TelegramClient({
     telegramBotToken: "fake",
     telegramApiBaseUrl: "https://api.telegram.invalid",
@@ -180,13 +180,10 @@ test("delivery contexts assign command, payment and crisis priority classes", as
   await telegram.withDeliveryContext("telegram-command:1", async () => {
     await telegram.sendMessage(1, "command response");
   });
-  await telegram.withDeliveryContext("lava-payment:2", async () => {
-    await telegram.sendMessage(2, "payment response");
-  });
   await telegram.sendMessage(3, "crisis page", {}, "crisis");
 
   assert.deepEqual(envelopes.map((item) => item.priority), [
-    "command", "command", "crisis",
+    "command", "crisis",
   ]);
 });
 

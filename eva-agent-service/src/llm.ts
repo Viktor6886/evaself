@@ -17,8 +17,10 @@ import type { Logger } from "./logger.js";
 import {
   probeModelCapabilities,
   probeVisionCapability,
+  summarize,
   type CapabilityProbeInput,
   type CapabilityProbeResult,
+  type ProbeStatus,
 } from "./llm/capability-probe.js";
 
 export interface LlmProviderInput {
@@ -26,6 +28,13 @@ export interface LlmProviderInput {
   protocol?: "openai-compatible" | "openai-responses" | "gemini-compatible" | "anthropic-compatible";
   base_url: string;
   api_key?: string;
+  /**
+   * Пул ключей: до десяти, по порядку обхода.
+   *
+   * Заменяет набор целиком — показать сохранённые ключи нельзя, они
+   * write-only, поэтому дописать один к невидимым остальным невозможно.
+   */
+  api_keys?: string[];
   model: string;
   context_window: number;
   additional_parameters?: Record<string, unknown>;
@@ -42,8 +51,16 @@ export interface PublicLlmProvider {
   additional_parameters: Record<string, unknown>;
   is_active: boolean;
   api_key_configured: true;
+  /** Сколько ключей в пуле. Сами ключи наружу не выходят. */
+  api_keys_configured: number;
   last_checked_at: string | null;
   last_check_ok: boolean | null;
+  /**
+   * Состояние последней пробы. Панель показывает по нему четыре разных
+   * положения вместо «прошёл / не прошёл»; `null` — проверки этой версией
+   * ещё не было.
+   */
+  last_check_status: string | null;
   last_check_message: string | null;
   last_models: unknown[] | null;
   created_at: string;
@@ -52,6 +69,11 @@ export interface PublicLlmProvider {
 
 export interface ProviderProbe {
   ok: boolean;
+  /**
+   * Состояние проверки. `ok` оставлен для прежних потребителей и означает
+   * «модель пригодна»: и полностью, и с ограничениями.
+   */
+  status?: ProbeStatus;
   models_supported: boolean;
   models: Array<{ id: string; [key: string]: unknown }>;
   message: string;
@@ -128,6 +150,76 @@ export function catalogVisionHint(
   const modalities = (architecture as { input_modalities?: unknown }).input_modalities;
   if (!Array.isArray(modalities)) return null;
   return modalities.some((value) => typeof value === "string" && value.toLowerCase() === "image");
+}
+
+/**
+ * Список моделей у Gemini.
+ *
+ * Отдельная проба, а не параметр к OpenAI-совместимой: у Google другой
+ * способ аутентификации (`x-goog-api-key` вместо `Authorization: Bearer`)
+ * и другая форма ответа (`{ models: [{ name: "models/…" }] }` вместо
+ * `{ data: [{ id }] }`). Послать сюда Bearer — получить 401 и показать
+ * оператору «провайдер недоступен» там, где он вполне доступен.
+ *
+ * Префикс `models/` снимается: адаптер подставляет имя в путь
+ * `/models/{model}:generateContent`, и с префиксом получился бы
+ * `/models/models%2Fgemini-…`.
+ */
+export async function probeGeminiProvider(
+  input: { baseUrl: string; apiKey: string; timeoutMs: number },
+  fetcher: typeof fetch = fetch,
+): Promise<ProviderProbe> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), input.timeoutMs);
+  const modelsUrl = `${input.baseUrl.replace(/\/+$/, "")}/models`;
+
+  try {
+    const response = await fetcher(modelsUrl, {
+      method: "GET",
+      headers: { Accept: "application/json", "x-goog-api-key": input.apiKey },
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        models_supported: true,
+        models: [],
+        message: `Проверка /models завершилась HTTP ${response.status}.`,
+        status_code: response.status,
+      };
+    }
+
+    const raw = await response.json() as { models?: unknown[] };
+    const models = Array.isArray(raw.models)
+      ? raw.models.flatMap((item) => {
+          if (!item || typeof item !== "object") return [];
+          const name = (item as { name?: unknown }).name;
+          if (typeof name !== "string" || !name) return [];
+          return [{ ...(item as Record<string, unknown>), id: name.replace(/^models\//u, "") }];
+        })
+      : [];
+
+    return {
+      ok: true,
+      models_supported: true,
+      models,
+      message: `Подключение работает; получено моделей: ${models.length}.`,
+      status_code: response.status,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      models_supported: true,
+      models: [],
+      message: error instanceof Error && error.name === "AbortError"
+        ? `Провайдер не ответил за ${input.timeoutMs} мс.`
+        : `Не удалось связаться с провайдером: ${error instanceof Error ? error.message : String(error)}`,
+      status_code: null,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export async function probeOpenAiProvider(
@@ -237,6 +329,8 @@ export class LlmManager {
       ?? ((provider, apiKey) => provider.protocol === "openai-compatible"
         || provider.protocol === "openai-responses"
         ? probeOpenAiProvider({ baseUrl: provider.base_url, apiKey, timeoutMs: this.config.llmProbeTimeoutMs })
+        : provider.protocol === "gemini-compatible"
+        ? probeGeminiProvider({ baseUrl: provider.base_url, apiKey, timeoutMs: this.config.llmProbeTimeoutMs })
         : Promise.resolve({
             ok: true, models_supported: false, models: [],
             message: "Доступность native protocol проверяется фактическим model probe.", status_code: null,
@@ -274,7 +368,7 @@ export class LlmManager {
       if (!active) return;
       const apiKey = this.secretBox.decrypt(active.api_key_encrypted);
       const check = await this.probeVision(active, apiKey);
-      await this.persistDetectedVision(active, { ok: true, checks: [check], message: "", warnings: "" });
+      await this.persistDetectedVision(active, summarize([check]));
     } catch (error) {
       this.logger.warn("Не удалось автоматически проверить зрение активной LLM", {
         message: error instanceof Error ? error.message : String(error),
@@ -352,15 +446,19 @@ export class LlmManager {
 
   async create(raw: LlmProviderInput): Promise<PublicLlmProvider> {
     const input = validateInput(raw, true);
-    const row = await this.db.createLlmProvider({
+    const pool = keyPool(input.api_key, raw.api_keys);
+    const row = await nameConflictAsMessage(input.name, () => this.db.createLlmProvider({
       name: input.name,
       protocol: input.protocol,
       baseUrl: input.base_url,
       model: input.model,
       contextWindow: input.context_window,
       additionalParameters: input.additional_parameters,
-      apiKeyEncrypted: this.secretBox.encrypt(input.api_key),
-    });
+      // Первым в пуле идёт основной ключ, и он же остаётся в
+      // api_key_encrypted: старый код читает только его.
+      apiKeyEncrypted: this.secretBox.encrypt(pool[0]!),
+      apiKeysEncrypted: pool.map((key) => this.secretBox.encrypt(key)),
+    }));
     return publicProvider(row);
   }
 
@@ -375,11 +473,17 @@ export class LlmManager {
       context_window: raw.context_window ?? old.context_window,
       additional_parameters: raw.additional_parameters ?? old.additional_parameters,
     }, false);
-    const encrypted = merged.api_key
-      ? this.secretBox.encrypt(merged.api_key)
+    // Пул трогается, только когда его прислали. Ключи write-only и в
+    // форму не возвращаются, поэтому правка имени или таймаута не должна
+    // стирать запасные ключи, которых человек в этот момент не видит.
+    const pool = merged.api_key || raw.api_keys !== undefined
+      ? keyPool(merged.api_key ?? "", raw.api_keys)
+      : null;
+    const encrypted = pool
+      ? this.secretBox.encrypt(pool[0]!)
       : old.api_key_encrypted;
 
-    const updated = await this.db.updateLlmProvider({
+    const updated = await nameConflictAsMessage(merged.name, () => this.db.updateLlmProvider({
       id,
       name: merged.name,
       protocol: merged.protocol,
@@ -388,7 +492,8 @@ export class LlmManager {
       contextWindow: merged.context_window,
       additionalParameters: merged.additional_parameters,
       apiKeyEncrypted: encrypted,
-    });
+      apiKeysEncrypted: pool?.map((key) => this.secretBox.encrypt(key)),
+    }));
     if (!updated) throw notFound(`LLM-конфигурация ${id} не найдена`);
     const identityChanged = old.protocol !== updated.protocol
       || old.base_url !== updated.base_url
@@ -437,6 +542,7 @@ export class LlmManager {
       ok: result.ok,
       message: result.message,
       models: result.models_supported ? result.models : null,
+      status: result.status ?? null,
     });
     return result;
   }
@@ -486,13 +592,25 @@ export class LlmManager {
       ok: check.ok,
       message: check.message,
       models: check.models_supported ? check.models : null,
+      status: check.status ?? null,
     });
-    if (!check.ok) {
+    // Активацию запрещает только настоящая ошибка настройки. Провайдер,
+    // который прямо сейчас отвечает лимитом или пятисоткой, о модели не
+    // сказал ничего — и отказ настроить его из-за этого был бы ровно той
+    // ошибкой, ради которой в роутере есть цепочка резервов и breaker.
+    // Такой провайдер включается, а его состояние остаётся видно оператору.
+    if (check.status === "config_error" || (check.status === undefined && !check.ok)) {
       this.logger.error("Активация LLM: конфигурация не прошла проверку", {
         providerId: candidate.id,
         message: check.message,
       });
       throw badRequest(`Конфигурация не прошла проверку: ${check.message}`);
+    }
+    if (check.status === "unavailable") {
+      this.logger.warn("Активация LLM: провайдер сейчас недоступен, проверка отложена", {
+        providerId: candidate.id,
+        message: check.message,
+      });
     }
 
     const previous = rollbackOverride ?? await this.db.getActiveLlmProvider();
@@ -642,7 +760,47 @@ export class LlmManager {
    * первом же разговоре.
    */
   private async probe(provider: LlmProviderRow): Promise<ProviderProbe> {
-    const apiKey = this.secretBox.decrypt(provider.api_key_encrypted);
+    // Проба идёт по тому же пулу, что и роутер.
+    //
+    // Иначе панель врёт: у провайдера с пулом первый ключ упирается в
+    // квоту, роутер спокойно берёт следующий и Ева отвечает, а
+    // «Проверить» бьёт в тот же исчерпанный ключ и показывает «временно
+    // недоступен». Человек видит рабочего провайдера с красной
+    // подписью и не понимает, кому верить.
+    //
+    // Перебор запускает только исчерпанный ключ. Занятый сервис (503) к
+    // ключу отношения не имеет, и гонять из-за него полную пробу
+    // десять раз — минуты ожидания ради того же ответа.
+    const pool = this.probePool(provider);
+    let last: ProviderProbe | null = null;
+    for (const apiKey of pool) {
+      const result = await this.probeWithKey(provider, apiKey);
+      if (!result.capabilities?.keyExhausted) return result;
+      last = result;
+    }
+    return last!;
+  }
+
+  /** Ключи провайдера по порядку; первый — основной. */
+  private probePool(provider: LlmProviderRow): string[] {
+    const keys: string[] = [];
+    const add = (encrypted: string): void => {
+      let value: string;
+      try {
+        value = this.secretBox.decrypt(encrypted);
+      } catch {
+        return;
+      }
+      if (value && !keys.includes(value)) keys.push(value);
+    };
+    add(provider.api_key_encrypted);
+    for (const entry of provider.api_keys_encrypted ?? []) {
+      if (typeof entry === "string" && entry.trim()) add(entry);
+    }
+    return keys;
+  }
+
+  private async probeWithKey(provider: LlmProviderRow, apiKey: string): Promise<ProviderProbe> {
     const connectivity = await this.probeProvider(provider, apiKey);
     // Модель не спрашиваем, пока провайдер не ответил: смысла нет, а
     // причина отказа была бы менее понятной.
@@ -664,31 +822,105 @@ export class LlmManager {
     return {
       ...connectivity,
       ok: capabilities.ok,
+      status: capabilities.status,
       capabilities,
-      message: capabilities.ok
-        // Непроходящая, но не блокирующая возможность не запрещает
-        // активацию и потому должна быть названа: иначе оператор узнает
-        // об отсутствии строгого JSON на первом же продуктовом маршруте.
-        ? `${connectivity.message} Модель совместима с агентным ходом.${
-          capabilities.warnings ? ` Ограничения: ${capabilities.warnings}.` : ""}`
-        : `Модель несовместима с агентным ходом — ${capabilities.message}`,
+      message: `${connectivity.message} ${LlmManager.verdict(capabilities)}`.trim(),
     };
+  }
+
+  /**
+   * Человеческая формулировка итога.
+   *
+   * Прежний текст знал две крайности: «совместима» и «несовместима». Из-за
+   * этого лимит запросов и отсутствие изображений выглядели одинаково —
+   * как приговор модели. Теперь состояние названо своим именем, и по тексту
+   * видно, что делать: чинить настройку, подождать или просто знать про
+   * ограничение.
+   */
+  private static verdict(capabilities: CapabilityProbeResult): string {
+    switch (capabilities.status) {
+      case "ok":
+        return "Модель работает.";
+      case "limited":
+        return `Модель работает с ограничениями: ${capabilities.warnings}.`;
+      case "unavailable":
+        return `Провайдер сейчас недоступен, о модели это ничего не говорит — ${capabilities.message}. Повторите проверку позже.`;
+      case "config_error":
+      default:
+        return `Ошибка конфигурации: ${capabilities.message}.`;
+    }
+  }
+
+  /**
+   * Сохраняет то, что проба выяснила о модели.
+   *
+   * Роутер отбирает провайдеров по этим полям, поэтому важно, чтобы там
+   * стоял факт, а не галочка оператора: заявленный, но неработающий JSON
+   * уводил на провайдера строгие маршруты, а незаявленное, но работающее
+   * зрение прятало пригодную модель от маршрута изображений.
+   *
+   * Невыясненное (`null` — провайдер ответил лимитом или упал) не
+   * записывается: стереть верное знание хуже, чем не обновить его.
+   */
+  /** Выбрана ли эта модель режимом одной модели. */
+  private async isSingleModeProvider(id: string): Promise<boolean> {
+    const database = this.db as typeof this.db & {
+      isLlmSingleProviderSelected?: (providerId: string) => Promise<boolean>;
+    };
+    if (typeof database.isLlmSingleProviderSelected !== "function") return false;
+    try {
+      return await database.isLlmSingleProviderSelected(id);
+    } catch {
+      // Недоступная база не повод записать провайдеру несовместимость:
+      // неизвестно — значит не трогаем.
+      return true;
+    }
   }
 
   private async persistDetectedVision(
     provider: LlmProviderRow,
     capabilities: CapabilityProbeResult,
   ): Promise<LlmProviderRow> {
-    const vision = capabilities.checks.find((entry) => entry.name === "vision");
-    if (!vision) return provider;
-    const detected = vision.status === "ok";
-    if (detected === (provider.supports_vision === true)) return provider;
-    const updated = await this.db.setLlmProviderVisionCapability(provider.id, detected);
+    // Результат мог быть собран без раздела detected: падать на этом
+    // нельзя, возможности просто останутся невыясненными.
+    const detected = capabilities.detected ?? { vision: null, streaming: null, tools: null, json: null };
+    const current: Record<string, boolean | undefined> = {
+      vision: provider.supports_vision,
+      streaming: provider.supports_streaming,
+      tools: provider.supports_tools,
+      json: provider.supports_json,
+    };
+    const changed: Record<string, boolean> = {};
+    for (const key of ["vision", "streaming", "tools", "json"] as const) {
+      const value = detected[key];
+      if (value === null || value === undefined) continue;
+      if (value === (current[key] === true)) continue;
+      changed[key] = value;
+    }
+    // Инструменты у модели, на которой держится вся установка, проба не
+    // выключает.
+    //
+    // Панель этого не позволяет (`updateProvider` отвергает
+    // `supports_tools: false` для выбранной модели), а проба писала в ту
+    // же колонку мимо проверки. Итог был тупиком: роутер отсекал модель
+    // от каждого хода с инструментами, а пересохранить режим панель не
+    // давала — «единая модель должна уметь вызывать инструменты».
+    // Вердикт пробы при этом не теряется: он остаётся в её сообщении и
+    // в журнале, а решение — за человеком.
+    if (changed.tools === false && await this.isSingleModeProvider(provider.id)) {
+      delete changed.tools;
+      this.logger.warn(
+        "Проба не подтвердила инструменты у модели режима одной модели; значение оставлено",
+        { providerId: provider.id, model: provider.model },
+      );
+    }
+    if (Object.keys(changed).length === 0) return provider;
+    const updated = await this.db.setLlmProviderCapabilities(provider.id, changed);
     if (!updated) return provider;
-    this.logger.info("LLM Router: фактически обновлена поддержка изображений", {
+    this.logger.info("LLM Router: возможности модели обновлены по фактической пробе", {
       providerId: provider.id,
       model: provider.model,
-      supportsVision: detected,
+      ...changed,
     });
     return updated;
   }
@@ -792,6 +1024,54 @@ export class LlmManager {
   }
 }
 
+/**
+ * Занятое имя провайдера — это ошибка человека, а не сбой.
+ *
+ * Уникальность объявлена индексом по `lower(name)`, и PostgreSQL
+ * отвечает на неё текстом `duplicate key value violates unique
+ * constraint "llm_providers_name_uidx"`. Он доходил до панели как есть:
+ * человек видел имя индекса и не понимал ни что случилось, ни что
+ * делать. Причём совпадение считается без учёта регистра — «Google» и
+ * «google» конфликтуют, и по сообщению базы это не угадать.
+ */
+async function nameConflictAsMessage<T>(name: string, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    const code = (error as { code?: unknown } | null)?.code;
+    if (code === "23505" && /llm_providers_name_uidx/u.test(String((error as Error).message ?? ""))) {
+      throw badRequest(`Провайдер с именем «${name}» уже есть. Имена сравниваются без учёта регистра — выберите другое.`);
+    }
+    throw error;
+  }
+}
+
+/**
+ * Пул ключей провайдера: основной плюс запасные, без повторов.
+ *
+ * Порядок значим — роутер обходит пул сверху вниз, — поэтому
+ * дублирующийся ключ выбрасывается, а не переставляется. Предел в десять
+ * повторяет ограничение схемы: там он защищает базу, здесь называет
+ * причину человеку.
+ */
+export function keyPool(primary: string, extra: unknown): string[] {
+  const keys: string[] = [];
+  const add = (value: unknown): void => {
+    const key = String(value ?? "").trim();
+    if (key && !keys.includes(key)) keys.push(key);
+  };
+  add(primary);
+  if (extra !== undefined && extra !== null) {
+    if (!Array.isArray(extra)) throw badRequest("api_keys: ожидается список ключей");
+    for (const value of extra) add(value);
+  }
+  if (keys.length === 0) throw badRequest("Нужен хотя бы один API key");
+  if (keys.length > 10) {
+    throw badRequest(`Ключей не больше десяти, получено ${keys.length}. Лишние уберите из списка.`);
+  }
+  return keys;
+}
+
 function validateInput(raw: LlmProviderInput, requireKey: boolean) {
   const name = String(raw.name ?? "").trim();
   const protocol = raw.protocol ?? "openai-compatible";
@@ -838,8 +1118,10 @@ function publicProvider(row: LlmProviderRow): PublicLlmProvider {
     additional_parameters: row.additional_parameters,
     is_active: row.is_active,
     api_key_configured: true,
+    api_keys_configured: Math.max(1, (row.api_keys_encrypted ?? []).filter((key: string) => typeof key === "string" && key.trim()).length),
     last_checked_at: row.last_checked_at?.toISOString() ?? null,
     last_check_ok: row.last_check_ok,
+    last_check_status: row.last_check_status ?? null,
     last_check_message: row.last_check_message,
     last_models: row.last_models,
     created_at: row.created_at.toISOString(),

@@ -4,7 +4,7 @@
   const tg = window.Telegram?.WebApp;
   const DEMO = new URLSearchParams(location.search).get("demo") === "1";
   const API = "/api";
-  const BUILD = "20260819-hook-v17";
+  const BUILD = "20260906-discovery-v18";
   const APP_STARTED_AT = performance.now();
   const SESSION_STARTED_AT = Date.now();
   const CLIENT_SESSION_ID = globalThis.crypto?.randomUUID?.() || `session-${SESSION_STARTED_AT}-${Math.random().toString(36).slice(2,8)}`;
@@ -106,6 +106,10 @@
 
       state.journalEnabled = Boolean(await window.EvaJournal?.probe?.());
       document.getElementById("journal-add-top").hidden = !state.journalEnabled;
+      // Окна инициативы подгружаются вместе с остальным профилем, чтобы
+      // строка настроек сразу показывала выбранное, а не «Открыть».
+      // Отказ не мешает запуску: раздел просто откроется пустым.
+      await window.EvaInitiative?.load?.().catch(() => undefined);
 
       state.phase = "ready";
       state.performance.coldStartMs = Math.round(performance.now() - APP_STARTED_AT);
@@ -136,6 +140,7 @@
   function renderAll() {
     renderToday();
     renderDevelopment();
+    renderDiscovery();
     renderProfile();
     updateNotificationDot();
   }
@@ -596,7 +601,6 @@
     document.querySelectorAll(".nav-item[data-target]").forEach((button) => {
       button.addEventListener("click", () => openScreen(button.dataset.target));
     });
-    document.getElementById("dialog-nav").addEventListener("click", () => openEvaHandoff(screenContext()));
     document.getElementById("journal-add-top").addEventListener("click", () => window.EvaJournal?.openNew?.());
     document.getElementById("main-focus-action").addEventListener("click", (event) => {
       event.stopPropagation();
@@ -611,9 +615,7 @@
         completion_percent: profileInvestmentState().overall,
         next_focus: profileInvestmentState().next.label,
       });
-      state.developmentTab = "tests";
-      syncDevelopmentTabs();
-      openScreen("development");
+      openScreen("discovery");
     });
     document.getElementById("streak-button").addEventListener("click", openStreakSheet);
     document.getElementById("development-tabs").addEventListener("click", (event) => {
@@ -662,6 +664,7 @@
     if (screen === "journal") void window.EvaJournal?.render?.();
     if (screen === "development") renderDevelopment();
     if (screen === "profile") renderProfile();
+    if (screen === "discovery") renderDiscovery();
     haptic("light");
   }
 
@@ -812,7 +815,7 @@
       || main?.goal_title
       || "Один короткий шаг перед следующим результатом";
 
-    document.getElementById("main-focus-title").textContent = conciseTitle(title);
+    document.getElementById("main-focus-title").textContent = title;
     document.getElementById("main-focus-source").textContent = conciseFocusSubtitle(source);
     document.getElementById("hero-duration").textContent = `${plannedMinutes} мин`;
 
@@ -831,12 +834,6 @@
       : `Неделя: ${week.done} из ${week.target} шагов`;
     document.getElementById("week-progress-bar").style.width = `${week.percent}%`;
     document.getElementById("main-focus-card").classList.toggle("is-near-week-goal", remaining === 1);
-  }
-
-  function conciseTitle(value) {
-    const text = String(value || "").trim();
-    if (!text) return "Продолжить путь";
-    return text.length > 72 ? `${text.slice(0, 69).trim()}…` : text;
   }
 
   function conciseFocusSubtitle(source) {
@@ -1079,27 +1076,12 @@
       return;
     }
     if (state.developmentTab === "progress") return renderProgress(host);
-    if (state.developmentTab === "tests") return renderTests(host);
     renderGoals(host);
   }
 
-  function renderTests(host) {
-    const profile = profileInvestmentState();
-    host.innerHTML = `<div class="section-stack">
-      <article class="tests-placeholder">
-        <span class="tests-placeholder-icon">${icon("brain")}</span>
-        <span class="eyebrow">ТЕСТЫ И САМОПОЗНАНИЕ · СКОРО</span>
-        <h2>Профиль, который становится точнее со временем</h2>
-        <p>Личность, эмоции, отношения и профориентация будут собираться в единый профиль Евы. До подключения юридически допустимых методик результаты не имитируются.</p>
-        <div class="tests-tags"><span>Личность</span><span>Эмоции</span><span>Отношения</span><span>Профориентация</span></div>
-      </article>
-      <article class="section-card">
-        <span class="eyebrow">ТЕКУЩАЯ ИНВЕСТИЦИЯ</span>
-        <h3>Профиль самопонимания: ${profile.overall}%</h3>
-        <div class="goal-progress"><span style="width:${profile.overall}%"></span></div>
-        <p>Эмоции ${profile.emotions}% · Отношения ${profile.relationships}% · Цели ${profile.goals}%</p>
-      </article>
-    </div>`;
+  function renderDiscovery() {
+    const host = document.getElementById("discovery-content");
+    window.EvaDiscovery.render({ host, icon, openSheet, openEvaHandoff });
   }
 
   function renderGoals(host) {
@@ -1210,8 +1192,8 @@
 
       <article class="section-card">
         <span class="eyebrow">ЧТО ЕВА УЖЕ ЗНАЕТ</span>
-        <h2>Профиль растёт постепенно</h2>
-        <p>Не нужно заполнять большую анкету. Ева уточняет только уместные данные по ходу общения.</p>
+        <h2>То, что важно о тебе</h2>
+        <p>Проверь детали — они помогают Еве лучше тебя понимать.</p>
         <div class="known-grid">${known.length
           ? known.map(([label,value]) => `<div class="known-card"><small>${escapeHtml(label)}</small><strong>${escapeHtml(value)}</strong></div>`).join("")
           : '<div class="known-card"><small>Пока мало данных</small><strong>Начни с обычного разговора с Евой</strong></div>'}
@@ -1223,6 +1205,7 @@
         ${settingsRow("conversations", "Диалоги с Евой", "Создать, выбрать или архивировать диалог", "Открыть")}
         ${settingsRow("subscription", "Подписка и квоты", "Текущий доступ и остаток квоты", state.session?.plan || "free")}
         ${settingsRow("voice", "Формат ответов", "Текст, голос или оба", responseModeTitle(user.response_mode))}
+        ${settingsRow("initiative", "Когда Ева пишет первой", "Промежутки, в которые Ева может начать разговор", window.EvaInitiative ? window.EvaInitiative.summary() : "Открыть")}
         ${settingsRow("notifications", "Уведомления", "Конкретные поводы вернуться к Еве", state.dashboard?.next_reminder ? "Есть ближайшее" : "Открыть")}
         ${settingsRow("privacy", "Приватность", "Как хранятся данные и память Евы", "Открыть")}
       </div>
@@ -1236,7 +1219,7 @@
   }
 
   function settingsRow(code, title, note, status) {
-    const icons = { conversations: "chat", subscription: "card", voice: "voice", notifications: "bell", privacy: "shield" };
+    const icons = { conversations: "chat", subscription: "card", voice: "voice", initiative: "bell", notifications: "bell", privacy: "shield" };
     return `<button class="settings-row" data-setting="${code}" type="button">
       <span data-icon="${icons[code]}"></span>
       <span><strong>${title}</strong><small>${note}</small></span>
@@ -1294,6 +1277,9 @@
     if (code === "conversations") return void openConversationsSheet();
     if (code === "voice") return void openResponseModeSheet();
     if (code === "subscription") return openSubscriptionSheet();
+    // Окна инициативы живут отдельным модулем: `app.js` уже слишком
+    // велик, чтобы дописывать в него разделы.
+    if (code === "initiative") return void window.EvaInitiative?.open();
     if (code === "notifications") return openNotificationsSheet();
     if (code === "privacy") return openPrivacySheet();
   }
@@ -1348,8 +1334,90 @@
         ${quotas.length
           ? quotas.map((item) => `<p>${escapeHtml(item.name || item.type || "Квота")}: <strong>${escapeHtml(item.remaining ?? item.value ?? "—")}</strong></p>`).join("")
           : "<p>Подробная квота не передана сервером.</p>"}
+      </article>
+      <article class="section-card" id="subscription-offers">
+        <span class="eyebrow">ТАРИФЫ</span>
+        <p class="muted">Загружаю…</p>
       </article>`,
+      onMount: (host) => { void renderSubscriptionOffers(host); },
     });
+  }
+
+  /**
+   * Тарифы и оплата внутри приложения.
+   *
+   * Список и цена приходят с сервера, из того же прайса, что и в чате:
+   * второй прайс для приложения означал бы, что человек видит одну цену,
+   * а платит другую.
+   */
+  async function renderSubscriptionOffers(host) {
+    const card = host.querySelector("#subscription-offers");
+    if (!card) return;
+    let payload;
+    try {
+      payload = await api("/public/subscription/offers");
+    } catch (error) {
+      card.innerHTML = `<span class="eyebrow">ТАРИФЫ</span>
+        <p class="muted">Не удалось загрузить: ${escapeHtml(friendlyError(error))}</p>`;
+      return;
+    }
+    const offers = Array.isArray(payload?.offers) ? payload.offers : [];
+    if (!offers.length) {
+      // Пусто означает либо отсутствие прайса, либо действующий тариф,
+      // который нельзя повторить/понизить. Причину считает сервер.
+      card.innerHTML = `<span class="eyebrow">ТАРИФЫ</span>
+        <p class="muted">${escapeHtml(payload?.blocked_reason || "Оплата пока не настроена владельцем.")}</p>`;
+      return;
+    }
+    card.innerHTML = `<span class="eyebrow">ТАРИФЫ</span>
+      <p class="muted">Оплата звёздами Telegram — карта и адрес не нужны.</p>
+      ${offers.map((offer) => `
+        <button class="choice-button" type="button"
+                data-buy-plan="${escapeHtml(offer.plan)}"
+                data-buy-period="${escapeHtml(offer.period)}">
+          <strong>${escapeHtml(offer.title)}</strong>
+          <span>${escapeHtml(String(offer.stars))} ⭐</span>
+        </button>`).join("")}`;
+    card.querySelectorAll("[data-buy-plan]").forEach((button) => {
+      button.addEventListener("click", () => void buySubscription(button));
+    });
+  }
+
+  /** Счёт открывается внутри Telegram: приложение не закрывается. */
+  async function buySubscription(button) {
+    const { buyPlan, buyPeriod } = button.dataset;
+    button.disabled = true;
+    try {
+      const { link } = await api("/public/subscription/invoice", {
+        method: "POST",
+        body: JSON.stringify({ plan: buyPlan, period: buyPeriod }),
+      });
+      if (!link) throw new Error("Сервер не вернул ссылку на счёт");
+      if (!tg?.openInvoice) {
+        // Вне Telegram счёт открыть нечем. Молча ничего не делать
+        // нельзя: человек нажал и ждёт.
+        toast("Оплата доступна только внутри Telegram", true);
+        return;
+      }
+      tg.openInvoice(link, (status) => {
+        if (status === "paid") {
+          // Подписка открывается на сервере по событию Telegram, а не по
+          // ответу клиенту: обновляем сессию, чтобы карточка доступа
+          // показывала новый тариф, а не прежний.
+          toast("Оплата прошла. Подписка открыта.");
+          closeSheet();
+          void api("/public/session", { method: "POST" })
+            .then((session) => { state.session = session; })
+            .catch(() => undefined);
+        } else if (status === "failed") {
+          toast("Оплата не прошла", true);
+        }
+      });
+    } catch (error) {
+      toast(friendlyError(error), true);
+    } finally {
+      button.disabled = false;
+    }
   }
 
   function openPrivacySheet() {
@@ -2069,9 +2137,7 @@
 
         host.querySelector("#reward-profile").addEventListener("click", () => {
           closeSheet();
-          state.developmentTab = "tests";
-          syncDevelopmentTabs();
-          openScreen("development");
+          openScreen("discovery");
         });
 
         host.querySelector("#reward-share")?.addEventListener("click", () => {
@@ -2516,16 +2582,6 @@
         });
       },
     });
-  }
-
-  function screenContext() {
-    if (state.screen === "today") {
-      return `Помоги с моим следующим шагом: ${state.dashboard?.main_focus?.title || "пока не выбран"}`;
-    }
-    if (state.screen === "journal") return "Хочу обсудить мои записи и текущее состояние";
-    if (state.screen === "development") return "Хочу обсудить мой рост, цели и реальный прогресс";
-    if (state.screen === "profile") return "Помоги уточнить то, что тебе важно знать обо мне для более персональной помощи";
-    return "Продолжим";
   }
 
   function haptic(type) {

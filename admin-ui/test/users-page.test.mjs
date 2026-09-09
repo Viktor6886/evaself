@@ -4,7 +4,7 @@
  * Здесь проверяется в первую очередь то, чего интерфейс делать НЕ должен.
  * Переписка — личный разговор, и правило «её нельзя открыть мимоходом»
  * держится не сервером, а именно интерфейсом: сервер честно отдаст
- * сообщения любому, у кого есть роль и действующий sudo. Регрессия, при
+ * сообщения любому, у кого есть роль и права сессии. Регрессия, при
  * которой карточка начнёт подгружать переписку сама, не уронит ни один
  * серверный тест.
  */
@@ -109,19 +109,23 @@ describe("приватность переписки", () => {
     assert.equal(block.trim(), "", "блок переписки должен быть пуст до нажатия");
   });
 
-  test("переписка требует sudo и не уходит до подтверждения", async () => {
-    await panel.sudoWatch();
+  test("переписка требует подтверждения и не уходит до него", async () => {
+    await panel.confirmWatch();
     await panel.page.click('[data-action="conversation"]');
+    await panel.page.waitForFunction(() => state.pendingConfirm !== null);
 
-    assert.equal(await panel.sudoScope(), "users:messages");
+    assert.equal(await panel.confirmTitle(), "Открыть переписку");
     assert.equal(
       panel.countTo("conversation"), 0,
-      "запрос не должен уходить до подтверждения пароля",
+      "запрос не должен уходить до подтверждения",
     );
+    // Пароль вводится один раз при входе: грант отдельным запросом
+    // панель больше не берёт.
+    assert.equal(panel.countTo("/sudo"), 0, "панель всё ещё просит sudo-грант");
   });
 
   test("после подтверждения приходит переписка", async () => {
-    await panel.confirmSudo();
+    await panel.confirmAccept();
     await panel.page.waitForFunction(
       () => document.querySelector("#user-conversation").textContent.includes("Переписка"),
     );
@@ -138,16 +142,18 @@ describe("мутации", () => {
   let panel;
   after(async () => await panel?.close());
 
-  test("блокировка требует sudo и не уходит до подтверждения", async () => {
+  test("блокировка требует подтверждения и не уходит до него", async () => {
     panel = await openUsers();
     await panel.page.click("#users-body .user-row");
     await panel.page.waitForFunction(() => !document.querySelector("#user-card").hidden);
 
-    await panel.sudoWatch();
+    await panel.confirmWatch();
     await panel.page.click('[data-action="block"]');
+    await panel.page.waitForFunction(() => state.pendingConfirm !== null);
 
-    assert.equal(await panel.sudoScope(), "users:write");
+    assert.equal(await panel.confirmTitle(), "Заблокировать пользователя");
     assert.equal(panel.countTo("/block"), 0, "блокировка не должна уходить до подтверждения");
+    assert.equal(panel.countTo("/sudo"), 0, "панель всё ещё просит sudo-грант");
   });
 });
 
@@ -188,7 +194,8 @@ describe("экранирование", () => {
     await panel.page.click("#users-body .user-row");
     await panel.page.waitForFunction(() => !document.querySelector("#user-card").hidden);
     await panel.page.click('[data-action="conversation"]');
-    await panel.confirmSudo();
+    await panel.page.waitForFunction(() => state.pendingConfirm !== null);
+    await panel.confirmAccept();
     await panel.page.waitForFunction(
       () => document.querySelector("#user-conversation").textContent.includes("Переписка"),
     );

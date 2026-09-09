@@ -24,7 +24,11 @@ server:
 search:
   safe_search: 1
   autocomplete: ""
-  default_lang: ""
+  # "auto" — определить язык по самому запросу. Пустое значение означало
+  # «взять язык браузера», а браузера здесь нет: запрос на русском получал
+  # международную выдачу вперемешку. Явный язык инструмент передаёт
+  # параметром запроса, это значение работает, когда он его не назвал.
+  default_lang: "auto"
   # JSON is what the Agent SDK tool consumes; html stays on for debugging
   # from inside the network.
   formats:
@@ -37,14 +41,40 @@ ui:
   default_theme: simple
 
 outgoing:
-  request_timeout: 6.0
+  # Восемь секунд, а не шесть. Движок, не уложившийся в срок, попадает в
+  # `unresponsive_engines`, и его результаты теряются целиком — а на
+  # загруженной машине шести секунд не хватало и работающим движкам.
+  # Потолок инструмента — двадцать секунд, так что запас есть.
+  request_timeout: 8.0
   max_request_timeout: 12.0
   pool_connections: 50
   pool_maxsize: 20
   enable_http2: true
 
-# Engines that are noisy, rate-limited or useless for Eva are disabled to
-# keep latency predictable on a 4 vCPU box.
+# Состав движков подобран под одно обстоятельство: Evaself живёт на VPS,
+# а с адреса дата-центра большинство поисковиков отвечает капчей или
+# отказом.
+#
+# Что показала боевая установка (`make check-search`), а не догадки:
+#
+#   отвечают:     bing, google cse, bing news
+#   не отвечают:  duckduckgo (CAPTCHA), qwant (CAPTCHA),
+#                 startpage (CAPTCHA), brave (too many requests),
+#                 mojeek news (access denied)
+#
+# То есть предположение «Mojeek и Qwant не блокируют дата-центры»
+# оказалось неверным для этого адреса, а вытащил поиск именно Bing,
+# который до этого был выключен как «шумный». Отсюда правило: движки не
+# выбираются по репутации, их держат несколько разом, а кто из них
+# реально отвечает — показывает `make check-search` на конкретной машине.
+#
+# Выключать молчащих не нужно: они не мешают, их отказ виден в
+# `unresponsive_engines`, и на другом адресе они же могут оказаться
+# единственными работающими.
+#
+# Сверено с умолчаниями образа `searxng/searxng:2026.7.26-b060c780d`:
+# `mojeek`, `mojeek news`, `qwant`, `qwant news` и `bing` выключены в
+# defaults, поэтому их нужно включать явно.
 engines:
   - name: wikipedia
     disabled: false
@@ -56,7 +86,45 @@ engines:
     disabled: false
   - name: google
     disabled: false
-  - name: bing
-    disabled: true
+  # Mojeek ищет своим индексом. На проверенной установке он отвечает
+  # отказом доступа, но на другом адресе может оказаться единственным
+  # работающим — молчащий движок не мешает.
+  - name: mojeek
+    disabled: false
   - name: qwant
-    disabled: true
+    disabled: false
+  # Bing был выключен как «шумный» — и оказался тем единственным, кто
+  # отвечает: на боевой установке общий поиск и новости держатся на нём
+  # и на `google cse`. Пустая выдача хуже шумной.
+  - name: bing
+    disabled: false
+  # Новости. В умолчаниях образа включены только те, кто чаще всего и
+  # блокирует дата-центры (`google news`, `startpage news`, `brave.news`,
+  # `bing news`, `yahoo news`), поэтому «новости за неделю» возвращали
+  # пустоту. Эти двое выключены в defaults и не блокируют.
+  - name: mojeek news
+    disabled: false
+  - name: qwant news
+    disabled: false
+
+  # Погода. Отдельная категория `weather`: в общий поиск движок не
+  # попадает, его запрашивают явным `categories=weather`.
+  #
+  # На проверенной установке этот раздел пуст ВСЕГДА: `wttr.in` отвечает
+  # `parsing error`, `duckduckgo weather` — `unexpected crash`. Это не
+  # блокировка по адресу, а поломка разбора в самих движках, и починить
+  # её из конфигурации нельзя.
+  #
+  # Движок оставлен: где-то он работает, а вреда от молчащего нет.
+  # Погоду при этом достаёт не он: пустой раздел заставляет инструмент
+  # повторить запрос БЕЗ раздела (`relaxed_filters: ["category"]`), и
+  # дальше страница дочитывается через web_read. Ради этого случая
+  # смена раздела и стоит в лестнице сужений последней ступенью.
+  #
+  # Движок описан целиком, а не одним переключателем `disabled`, чтобы не
+  # зависеть от того, есть ли он в defaults конкретного образа.
+  - name: wttr.in
+    engine: wttr
+    shortcut: wttr
+    timeout: 9.0
+    disabled: false

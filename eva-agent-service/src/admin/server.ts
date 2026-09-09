@@ -20,6 +20,11 @@ import type { ArtifactRegistry } from "../artifacts/registry.js";
 import type { AgentDirectoryService } from "./agent-directory.js";
 import { registerArtifactRoutes } from "./artifact-routes.js";
 import { registerCrudRoutes } from "./crud-routes.js";
+import { registerPanelRoutes } from "./panel-routes.js";
+import type { AdminAgentService } from "./agent-admin-service.js";
+import type { SubscriptionAdminService } from "./subscription-service.js";
+import type { PersonaAdminService } from "./persona-admin-service.js";
+import type { LettaConsoleService } from "./letta-console-service.js";
 import type { ToolApprovalService } from "./tool-approvals.js";
 import type { TurnOperationsService } from "./turn-operations.js";
 import type { McpServerPolicyRepository } from "../tools/mcp.js";
@@ -35,6 +40,8 @@ import {
 import { auditParams, globalSecretRedactor } from "./redactor.js";
 import { SecretStore } from "./secret-store.js";
 import type { SecurityAuditService } from "./security-audit.js";
+import type { TariffService } from "./tariff-service.js";
+import type { TelegramTokenService } from "./telegram-token-service.js";
 import { HealthService } from "./health-service.js";
 import { IntegrationConfigService, MEDIA_INTEGRATIONS } from "./integration-config-service.js";
 import { LlmRouterAdminService } from "./llm-router-service.js";
@@ -85,6 +92,13 @@ export interface AdminServerServices {
     updateConversation(id: string, contextWindowLimit: number): Promise<unknown>;
   };
   securityAudit?: SecurityAuditService;
+  telegramTokens?: TelegramTokenService;
+  tariffs?: TariffService;
+  /**
+   * Возврат звёзд. Отсутствует — маршрут отвечает отказом, а не делает
+   * вид, что вернул: деньги молча не возвращаются.
+   */
+  starsRefund?: (chargeId: string) => Promise<Record<string, unknown>>;
   /** Предпросмотр политик хранения. Удаление выполняет задание очереди. */
   retention?: { preview(settings: Record<string, unknown>): Promise<unknown> };
   /** Единый реестр артефактов. Отсутствует — раздел просто не появляется. */
@@ -100,6 +114,18 @@ export interface AdminServerServices {
     tools: ToolApprovalService;
     mcp?: McpServerPolicyRepository;
     turns: TurnOperationsService;
+  };
+  /**
+   * Разделы единой панели: агенты, подписки, персона и промпт, Letta и
+   * мониторинг. Флага у них нет намеренно — это и есть административная
+   * панель, а не эксперимент поверх неё: выключенный раздел «Агенты»
+   * означал бы установку, которой нечем управлять.
+   */
+  panel?: {
+    agents: AdminAgentService;
+    subscriptions: SubscriptionAdminService;
+    persona: PersonaAdminService;
+    letta: LettaConsoleService;
   };
   events: Redis;
   logger: Logger;
@@ -350,11 +376,25 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
   app.setErrorHandler((error: unknown, request, reply) => {
     const context = contexts.get(request);
     const apiError = toAdminError(error);
+    // У ответа наружу подробностей нет и быть не должно, но у записи в
+    // журнале они обязаны быть. Прежде «internal_error» не оставлял ни
+    // причины, ни места: 500 в панели нельзя было объяснить ничем, кроме
+    // догадок, и разбор такой ошибки стоил нескольких заходов вместо
+    // одного. Текст и стек проходят через редактор секретов — тот же,
+    // которым чистится ответ.
+    const cause = apiError.statusCode >= 500 && error instanceof Error
+      ? {
+        reason: String(globalSecretRedactor.redact(error.message)).slice(0, 300),
+        reason_name: error.name,
+        at: String(globalSecretRedactor.redact(error.stack ?? "")).split("\n")[1]?.trim(),
+      }
+      : {};
     services.logger.error("Ошибка admin-api", {
       request_id: context?.requestId,
       url: request.url,
       code: apiError.code,
       status: apiError.statusCode,
+      ...cause,
     });
     reply.status(apiError.statusCode).send({
       error: {
@@ -496,6 +536,47 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
         const context = contexts.get(request as FastifyRequest);
         if (!context?.audit) return;
         await services.audit.annotate(context.audit.id, details);
+      },
+    });
+  }
+
+  // Разделы единой панели. Регистрируются всегда: домен один, панель
+  // одна, и половина её разделов хуже, чем понятный отказ сервиса.
+  if (services.panel) {
+    registerPanelRoutes(app, {
+      ...services.panel,
+      health: services.health,
+      actorId: (request) => contexts.get(request as FastifyRequest)?.session?.user.id ?? null,
+      actor: (request) => {
+        const session = contexts.get(request as FastifyRequest)?.session;
+        return {
+          id: session?.user.id ?? null,
+          username: session?.user.username ?? "unknown",
+        };
+      },
+      audit: async (request, details) => {
+        const context = contexts.get(request as FastifyRequest);
+        if (!context?.audit) return;
+        await services.audit.annotate(context.audit.id, details);
+      },
+      // Чтение переписки — безопасный метод, и автоматическая запись
+      // аудита его не покрывает. Запись открывается здесь руками: кто,
+      // чей диалог и сколько сообщений открыл. Область запроса получает
+      // её идентификатор — без него граница арендатора до переписки не
+      // пропустит.
+      auditMessages: async (request, details) => {
+        const context = contexts.get(request as FastifyRequest);
+        if (!context) return;
+        const entry = await services.audit.start({
+          requestId: context.requestId,
+          operation: "GET /api/admin/v1/panel/letta/conversations/:conversationId/messages",
+          target: String(details.conversation_id ?? ""),
+          ip: safeIp((request as FastifyRequest).ip),
+          actor: actorOf(context),
+          params: details,
+        });
+        context.audit = entry;
+        context.scope.auditId = entry.id;
       },
     });
   }
@@ -1051,15 +1132,19 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
     config: { roles: ["owner", "admin", "operator", "viewer"] } satisfies RouteAccess,
   }, async () => await services.stt.health());
 
+  /**
+   * Совместимость с панелью, закэшированной браузером до отмены
+   * повторного пароля. Права сессия получает при входе; этот маршрут
+   * только подтверждает scope и ничего не спрашивает. Пароль, если он
+   * всё же пришёл из старой формы, не читается и никуда не попадает.
+   */
   app.post("/api/admin/v1/sudo", {
     config: { roles: ["owner", "admin"] } satisfies RouteAccess,
   }, async (request, reply) => {
     const body = objectBody(request.body);
-    const password = typeof body.password === "string" ? body.password : "";
     const scope = typeof body.scope === "string" ? body.scope : "";
     const expiresAt = await services.auth.grantSudo(
       contexts.get(request)!.session!,
-      password,
       scope,
     );
     return reply.status(201).send({ scope, expires_at: expiresAt.toISOString() });
@@ -1143,6 +1228,114 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
       body.used_by,
       contexts.get(request)!.session!.user.id,
     );
+  });
+
+  // -------------------------------------------------------------------
+  // тарифы: лимиты, пробные, цены в звёздах и расход
+  // -------------------------------------------------------------------
+  // Смотреть может любая вошедшая роль: это настройка продукта, а не
+  // персональные данные — в ответе только количества. Править — владелец
+  // и администратор, как и остальную конфигурацию установки.
+  app.get("/api/admin/v1/tariffs", {
+    config: {
+      roles: ["owner", "admin", "operator", "viewer"],
+      // Сводка расхода читает `usage_counters`, а состав тарифов —
+      // `subscriptions`: это данные людей, пусть и в виде одних только
+      // количеств. Без объявления граница арендатора запрос не пропускает
+      // и права: чтение чужих данных обязано попасть в аудит.
+      tenantAccess: "cross-user",
+    } satisfies RouteAccess,
+  }, async () => {
+    if (!services.tariffs) throw adminBadRequest("Тарифы недоступны");
+    return await services.tariffs.state();
+  });
+
+  app.put("/api/admin/v1/tariffs/limits", {
+    config: { roles: ["owner", "admin"] } satisfies RouteAccess,
+  }, async (request) => {
+    if (!services.tariffs) throw adminBadRequest("Тарифы недоступны");
+    return await services.tariffs.setLimit(objectBody(request.body));
+  });
+
+  app.put("/api/admin/v1/tariffs/prices", {
+    config: { roles: ["owner", "admin"] } satisfies RouteAccess,
+  }, async (request) => {
+    if (!services.tariffs) throw adminBadRequest("Тарифы недоступны");
+    return await services.tariffs.setPrice(
+      objectBody(request.body),
+      contexts.get(request)!.session!.user.id,
+    );
+  });
+
+  // Журнал платежей звёздами. Читают все роли — деньги установки видит и
+  // оператор, — но персональные данные ограничены тем же, что и в списке
+  // людей: идентификатор Telegram, username и имя.
+  app.get("/api/admin/v1/tariffs/payments", {
+    config: {
+      roles: ["owner", "admin", "operator", "viewer"],
+      // Журнал платежей называет людей поимённо — тем более аудит.
+      tenantAccess: "cross-user",
+    } satisfies RouteAccess,
+  }, async (request) => {
+    if (!services.tariffs) throw adminBadRequest("Тарифы недоступны");
+    const query = (request.query ?? {}) as { limit?: unknown };
+    return await services.tariffs.payments(Number(query.limit ?? 50));
+  });
+
+  // Возврат звёзд. Действие необратимое и денежное: только владелец и
+  // администратор, только под sudo, и всегда в аудите.
+  app.post("/api/admin/v1/tariffs/payments/:chargeId/refund", {
+    config: {
+      roles: ["owner", "admin"],
+      sudoScope: "payments:refund",
+    } satisfies RouteAccess,
+  }, async (request) => {
+    if (!services.starsRefund) throw adminBadRequest("Возврат звёзд недоступен");
+    const { chargeId } = request.params as { chargeId: string };
+    return await services.starsRefund(chargeId);
+  });
+
+  // -------------------------------------------------------------------
+  // боты Евы: набор токенов Telegram и переключение между ними
+  // -------------------------------------------------------------------
+  // Токен — секрет, поэтому права те же, что у остальных секретов, и
+  // мутации требуют sudo. Наружу уходят только метка и @username: по ним
+  // человек узнаёт своего бота, и секретом они не являются.
+  app.get("/api/admin/v1/telegram/tokens", {
+    config: { roles: ["owner", "admin"] } satisfies RouteAccess,
+  }, async () => {
+    if (!services.telegramTokens) throw adminBadRequest("Управление токенами недоступно");
+    return await services.telegramTokens.list();
+  });
+
+  app.post("/api/admin/v1/telegram/tokens", {
+    config: { roles: ["owner", "admin"], sudoScope: "secrets:write" } satisfies RouteAccess,
+  }, async (request, reply) => {
+    if (!services.telegramTokens) throw adminBadRequest("Управление токенами недоступно");
+    const body = objectBody(request.body);
+    const created = await services.telegramTokens.add(
+      { token: body.token, label: body.label },
+      contexts.get(request)!.session!.user.id,
+    );
+    return reply.status(201).send(created);
+  });
+
+  app.post("/api/admin/v1/telegram/tokens/:id/activate", {
+    config: { roles: ["owner", "admin"], sudoScope: "secrets:write" } satisfies RouteAccess,
+  }, async (request) => {
+    if (!services.telegramTokens) throw adminBadRequest("Управление токенами недоступно");
+    return await services.telegramTokens.activate(
+      (request.params as { id?: string }).id ?? "",
+      contexts.get(request)!.session!.user.id,
+    );
+  });
+
+  app.delete("/api/admin/v1/telegram/tokens/:id", {
+    config: { roles: ["owner", "admin"], sudoScope: "secrets:write" } satisfies RouteAccess,
+  }, async (request, reply) => {
+    if (!services.telegramTokens) throw adminBadRequest("Управление токенами недоступно");
+    await services.telegramTokens.remove((request.params as { id?: string }).id ?? "");
+    return reply.status(204).send();
   });
 
   app.get("/api/admin/v1/audit", {

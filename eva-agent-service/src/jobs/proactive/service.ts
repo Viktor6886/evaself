@@ -77,7 +77,13 @@ export interface EpisodeLink {
 
 export type ProactiveOutcome =
   | { status: "sent"; outboxId: string | null }
-  | { status: "skipped"; reason: ProactiveSkipReason | "duplicate" | "empty_message" }
+  | {
+    status: "skipped";
+    // `window_missed` — окно прошло, пока сервис лежал. Отдельная
+    // причина, а не «too_soon»: это отказ по времени человека, и в
+    // метриках он означает простой, а не сработавшую политику.
+    reason: ProactiveSkipReason | "duplicate" | "empty_message" | "window_missed";
+  }
   | { status: "failed"; code: string };
 
 /**
@@ -141,7 +147,7 @@ export class ProactiveService {
       if (!text) {
         // «Ничего не отправлять» — валидный успешный исход (требование 8
         // шага 8): heartbeat без повода обязан уметь промолчать.
-        await this.finish(claimed, "skipped", "empty_message", null);
+        await this.finish(claimed, "skipped", "empty_message", null, null);
         return { status: "skipped", reason: "empty_message" };
       }
       const delivered = await this.delivery.deliver({
@@ -152,15 +158,133 @@ export class ProactiveService {
         // слота будет занята дважды, outbox отправит одно сообщение.
         idempotencyKey: `proactive:${kind}:${candidate.userId}:${slot.slotKey}`,
       });
-      await this.finish(claimed, "sent", null, delivered.outboxId);
+      await this.finish(claimed, "sent", null, delivered.outboxId, text);
       if (episode) await this.linkEpisode(kind, candidate.userId, episode, claimed);
       return { status: "sent", outboxId: delivered.outboxId };
     } catch (error) {
       const code = error instanceof Error ? error.name : "unknown_error";
-      await this.finish(claimed, "failed", code, null);
+      await this.finish(claimed, "failed", code, null, null);
       this.logger.warn("Проактивное сообщение не отправлено", { kind, code });
       return { status: "failed", code };
     }
+  }
+
+  /**
+   * Наступившее окно инициативы.
+   *
+   * Отличается от `handle` одним: слот уже занят — минуту выбрал
+   * планировщик заранее, и второй раз её бросать нельзя. Поэтому строка
+   * не создаётся, а переводится из `scheduled` в `planned`.
+   *
+   * Пропущенное окно не догоняется. Сервис, пролежавший до вечера,
+   * не должен присылать «доброе утро» в три часа дня: сообщение вне
+   * своего окна хуже молчания, и человек воспримет его не как заботу, а
+   * как сбой.
+   */
+  async handleScheduled(
+    candidate: ProactiveCandidate & {
+      messageId: string;
+      scheduledFor: Date;
+      validUntil: Date | null;
+    },
+    options: { now?: Date; runId?: string; signal?: AbortSignal } = {},
+  ): Promise<ProactiveOutcome> {
+    const now = options.now ?? new Date();
+    const signal = options.signal ?? new AbortController().signal;
+
+    if (candidate.validUntil && now > candidate.validUntil) {
+      await this.close(candidate.messageId, "window_missed");
+      return { status: "skipped", reason: "window_missed" };
+    }
+
+    const decision = decideProactive("initiative", {
+      timezone: candidate.timezone,
+      lastUserMessageAt: candidate.lastUserMessageAt,
+      lastProactiveAt: candidate.lastProactiveAt,
+      unansweredProactive: candidate.unansweredProactive,
+      consent: candidate.consent,
+      frequency: candidate.frequency,
+      awaitingReply: candidate.awaitingReply,
+    }, now);
+    if (!decision.send) {
+      await this.close(candidate.messageId, decision.reason);
+      return { status: "skipped", reason: decision.reason };
+    }
+
+    const claimed = await this.claimScheduled(candidate.messageId, options.runId);
+    if (!claimed) return { status: "skipped", reason: "duplicate" };
+
+    try {
+      const composed = await this.composer.compose({
+        kind: "initiative", candidate, episode: null, signal,
+      });
+      const text = composed.text?.trim() ?? "";
+      if (!text) {
+        // Промолчать — валидный исход и здесь: окно означает «можно
+        // писать», а не «обязана написать».
+        await this.finish(claimed, "skipped", "empty_message", null, null);
+        return { status: "skipped", reason: "empty_message" };
+      }
+      const delivered = await this.delivery.deliver({
+        userId: candidate.userId,
+        chatId: candidate.chatId,
+        text,
+        idempotencyKey: `proactive:initiative:${candidate.userId}:${candidate.messageId}`,
+      });
+      await this.finish(claimed, "sent", null, delivered.outboxId, text);
+      return { status: "sent", outboxId: delivered.outboxId };
+    } catch (error) {
+      const code = error instanceof Error ? error.name : "unknown_error";
+      await this.finish(claimed, "failed", code, null, null);
+      this.logger.warn("Сообщение в окно не отправлено", { code });
+      return { status: "failed", code };
+    }
+  }
+
+  /**
+   * Занять уже запланированную строку.
+   *
+   * Забирается либо нетронутая `scheduled`, либо зависшая `planned`:
+   * процесс, упавший между занятием и доставкой, оставил бы окно
+   * навсегда занятым и без сообщения.
+   */
+  private async claimScheduled(
+    messageId: string,
+    runId?: string,
+  ): Promise<string | null> {
+    const { rows } = await this.db.withSystemScope(
+      "proactive.claim.scheduled",
+      async () => await this.db.query<{ id: string }>(
+        `-- tenant: system — строка адресуется своим первичным ключом,
+         -- владелец назначен при выборе минуты и не меняется
+         UPDATE proactive_messages
+            SET status = 'planned', run_id = $2, updated_at = now()
+          WHERE id = $1
+            AND (status = 'scheduled'
+                 OR (status = 'planned'
+                     AND updated_at < now() - make_interval(secs => $3)))
+          RETURNING id`,
+        [messageId, runId ?? null, STALE_CLAIM_SECONDS],
+      ),
+      { crossUser: true },
+    );
+    return rows[0]?.id ?? null;
+  }
+
+  /** Закрыть запланированную строку, не начиная работы. */
+  private async close(messageId: string, reason: string): Promise<void> {
+    await this.db.withSystemScope(
+      "proactive.close",
+      async () => await this.db.query(
+        `-- tenant: system — строка адресуется своим первичным ключом,
+         -- владелец назначен при выборе минуты и не меняется
+         UPDATE proactive_messages
+            SET status = 'skipped', reason = $2
+          WHERE id = $1 AND status = 'scheduled'`,
+        [messageId, reason],
+      ),
+      { crossUser: true },
+    );
   }
 
   /**
@@ -243,11 +367,20 @@ export class ProactiveService {
     }
   }
 
+  /**
+   * Итог попытки.
+   *
+   * Текст сохраняется вместе со статусом, а не отдельным запросом: между
+   * доставкой и записью текста ничего произойти не должно. Без текста
+   * Ева не помнит собственного сообщения — она сочинила его в служебной
+   * conversation, и основной диалог о нём не знает (`OwnMessagesService`).
+   */
   private async finish(
     id: string,
     status: "sent" | "skipped" | "failed",
     reason: string | null,
     outboxId: string | null,
+    text: string | null,
   ): Promise<void> {
     await this.db.withSystemScope(
       "proactive.finish",
@@ -255,9 +388,11 @@ export class ProactiveService {
         `-- tenant: system — строка адресуется своим первичным ключом,
          -- владелец назначен при занятии слота и не меняется
          UPDATE proactive_messages
-            SET status = $2, reason = $3, outbox_id = $4
+            SET status = $2, reason = $3, outbox_id = $4,
+                message_text = $5,
+                sent_at = CASE WHEN $2 = 'sent' THEN now() ELSE sent_at END
           WHERE id = $1`,
-        [id, status, reason, outboxId],
+        [id, status, reason, outboxId, text?.slice(0, 4000) ?? null],
       ),
       { crossUser: true },
     );

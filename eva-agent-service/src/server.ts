@@ -1,6 +1,6 @@
 /**
- * HTTP surface. Administrative routes use `X-API-Key`; Telegram and Lava
- * have their own webhook authentication.
+ * HTTP surface. Administrative routes use `X-API-Key`; Telegram has its
+ * own webhook authentication.
  *
  * No public client reaches the Letta App Server directly — every agent, session,
  * memory, skill and tool operation goes through these routes.
@@ -24,7 +24,7 @@ import { runVisionCheck } from "./llm/vision-check.js";
 import type { Logger } from "./logger.js";
 import { MetricsCollector } from "./metrics.js";
 import { newCorrelationId, parseTraceparent } from "./observability/tracing.js";
-import type { LavaPayments } from "./payments.js";
+import type { StarsPayments } from "./payments/stars.js";
 import type { UserProfileService } from "./profile/profile-service.js";
 import {
   PublicRepository,
@@ -45,6 +45,10 @@ import type { SdkSettingsInput, SdkSettingsManager } from "./sdk-settings.js";
 import type { TelegramClient, TelegramUpdate } from "./telegram.js";
 import type { TurnSemaphores } from "./turns/semaphores.js";
 import type { RuntimeContextBuilder } from "./runtime/runtime-context.js";
+import type { CanonicalContextStore } from "./runtime/canonical-context.js";
+import { registerCanonicalRoutes } from "./runtime/canonical-routes.js";
+import type { PrefixInput } from "./letta/prefix-size.js";
+import type { PersonaSyncResult } from "./letta/persona-sync.js";
 import { webhookSecretMatches } from "./telegram.js";
 
 export const VERSION = "0.3.0";
@@ -59,7 +63,8 @@ export interface Services {
   inbox: TelegramInbox;
   profile: UserProfileService;
   goals: GoalService;
-  payments: LavaPayments;
+  /** Оплата звёздами. Отсутствует — счета не выставляются и не проверяются. */
+  stars?: StarsPayments;
   queue: UserTurnLock;
   telegram: TelegramClient;
   redisPing: () => Promise<boolean>;
@@ -78,6 +83,17 @@ export interface Services {
    */
   productToolNames?: () => string[];
   runtimeContext?: RuntimeContextBuilder;
+  /**
+   * Канонические персона и системный промпт: то, что администратор правит
+   * в панели. Отсутствие поля означает установку без миграции 067 —
+   * маршруты просто не появляются, а runtime читает файлы, как и читал.
+   */
+  canonicalContext?: {
+    store: CanonicalContextStore;
+    sync(persona: string, systemPrompt: string): Promise<PersonaSyncResult>;
+    /** Живой состав постоянной части обращения к модели. Необязателен. */
+    prefix?(): PrefixInput;
+  };
   /**
    * Контур наблюдаемости. Нужен выдаче метрик (состояние буфера
    * телеметрии) и ingress — там начинается трасса хода.
@@ -112,10 +128,10 @@ export function buildServer(services: Services): FastifyInstance {
     inbox,
     profile,
     goals,
-    payments,
     queue,
     telegram,
   } = services;
+  const stars = services.stars ?? null;
 
   // Без Valkey лимитер пропускал бы всё: подставляется явный no-op, а не
   // «случайно отключилось». Рантайм всегда передаёт настоящий.
@@ -218,6 +234,40 @@ export function buildServer(services: Services): FastifyInstance {
     rateLimiter,
     ...(services.approvals ? { approvals: { decide: async (input) => await services.approvals!.decideByTelegram(input) } } : {}),
     ...(services.knowledgeResearch ? { knowledgeResearch: services.knowledgeResearch } : {}),
+    // Подписка в Mini App: тот же прайс и тот же счёт, что в чате.
+    // Ссылку на счёт делает Bot API — Mini App открывает её, не выходя
+    // из приложения, и платёж дальше идёт обычным путём.
+    ...(stars
+      ? {
+        subscription: {
+          offers: async (telegramId: number) => {
+            const owner = await db.findUserByTelegramId(telegramId);
+            if (!owner) throw new EvaError("Пользователь не найден", { statusCode: 404 });
+            return await stars.offers(Number(owner.id));
+          },
+          unavailableMessage: async (telegramId: number) => {
+            const owner = await db.findUserByTelegramId(telegramId);
+            if (!owner) throw new EvaError("Пользователь не найден", { statusCode: 404 });
+            return await stars.unavailableMessage(Number(owner.id));
+          },
+          invoiceLink: async (telegramId: number, plan: string, period: string) => {
+            // Подпись Telegram подтверждает идентификатор Telegram;
+            // намерение оплаты записывается на внутреннего владельца.
+            // Перевод — здесь, где есть база: в публичном слое его нет.
+            const owner = await db.findUserByTelegramId(telegramId);
+            if (!owner) throw new EvaError("Пользователь не найден", { statusCode: 404 });
+            const invoice = await stars.invoice(Number(owner.id), plan, period);
+            return await telegram.createStarsInvoiceLink({
+              title: invoice.title,
+              description: invoice.description,
+              payload: invoice.payload,
+              stars: invoice.stars,
+              label: invoice.title,
+            });
+          },
+        },
+      }
+      : {}),
   });
 
   // Новые разделы Mini App (задачи, заметки, бюджет, решения, check-in,
@@ -229,6 +279,21 @@ export function buildServer(services: Services): FastifyInstance {
     ...(services.miniAppSessions ? { sessions: services.miniAppSessions } : {}),
     rateLimiter,
   });
+
+  // Канонические источники личности Евы. Регистрируются, только когда
+  // владелец текстов передан: без реестра артефактов править нечего, а
+  // маршрут, отвечающий 500, хуже отсутствующего.
+  if (services.canonicalContext) {
+    registerCanonicalRoutes(app, {
+      store: services.canonicalContext.store,
+      ...(services.canonicalContext.prefix
+        ? { prefix: services.canonicalContext.prefix }
+        : {}),
+      applyToRuntime: (input) => letta.setCanonicalContext(input),
+      sync: services.canonicalContext.sync,
+      logger,
+    });
+  }
 
   // ---------------------------------------------------------------
   // metrics — Prometheus, за тем же внутренним ключом, что и /v1
@@ -459,6 +524,31 @@ export function buildServer(services: Services): FastifyInstance {
     return { result };
   });
 
+  /*
+   * Смена бота Телеграма без перезапуска.
+   *
+   * Токен лежит зашифрованным в secret_records, и ключ к ним есть
+   * только у административных контейнеров: у этого сервиса его нет и
+   * по устройству быть не должно. Поэтому расшифровывает панель, а
+   * сюда доносит уже готовое значение — тем же внутренним API, каким
+   * доносит настройки моделей.
+   *
+   * Перезапуск эту задачу не решает: compose подставляет значение из
+   * `.env` при создании контейнера, и перезапущенный контейнер получает
+   * прежнее окружение. `.env` панель тоже пишет — но ради следующего
+   * `compose up`, а не ради этой минуты.
+   */
+  app.post("/v1/telegram/token", async (request) => {
+    const body = (request.body ?? {}) as { token?: unknown };
+    const token = typeof body.token === "string" ? body.token.trim() : "";
+    if (!token) throw new EvaError("token обязателен", { statusCode: 400 });
+    config.telegramBotToken = token;
+    telegram.setToken(token);
+    const username = await telegram.username();
+    logger.info("Telegram: рантайм принял другой токен", { bot: username });
+    return { applied: true, username };
+  });
+
   app.get("/v1/system", async () => {
     const providers = await llm.list();
     const active = providers.find((provider) => provider.is_active) ?? null;
@@ -472,7 +562,7 @@ export function buildServer(services: Services): FastifyInstance {
       integrations: {
         telegram: Boolean(config.telegramBotToken),
         telegram_owner: config.ownerTelegramId !== null,
-        lava: Boolean(config.lavaWebhookUser && config.lavaWebhookPassword),
+        telegram_stars: Boolean(config.telegramBotToken),
         llm: active !== null,
       },
       active_llm: active,
@@ -539,26 +629,43 @@ export function buildServer(services: Services): FastifyInstance {
     ) {
       throw unauthorized("Неверный секрет Telegram webhook");
     }
-    const result = await inbox.enqueue(request.body as TelegramUpdate);
-    return reply.status(200).send({ ok: true, ...result });
-  });
-
-  app.post("/payments/lava", async (request, reply) => {
-    // Лимит до проверки Basic-авторизации: перебор пароля webhook тоже
-    // стоит времени.
-    await enforceRateLimit(
-      rateLimiter,
-      `payments:ip:${clientAddress(request.headers as Record<string, unknown>, request.ip)}`,
-      {
-        limit: config.webhookRateLimitPerIp,
-        windowSeconds: config.rateLimitWindowSeconds,
-      },
-    );
-    if (!payments.authorized(request.headers.authorization)) {
-      reply.header("WWW-Authenticate", 'Basic realm="Evaself Lava webhook"');
-      throw unauthorized("Неверная авторизация Lava webhook");
+    const update = request.body as TelegramUpdate;
+    // Предварительная проверка платежа отвечается здесь и сейчас.
+    //
+    // Telegram ждёт ответа десять секунд и иначе отменяет платёж сам.
+    // Durable ingress этого срока не гарантирует и не должен: очередь
+    // существует ради того, чтобы ход пережил перезапуск, а здесь
+    // решение детерминированное, без модели и без хода. Отказ дешевле
+    // возврата — списания просто не происходит.
+    if (update.pre_checkout_query && stars) {
+      const query = update.pre_checkout_query;
+      const verdict = await stars.preCheckout({
+        payload: query.invoice_payload,
+        telegramUserId: query.from.id,
+        totalAmount: query.total_amount,
+        currency: query.currency,
+      }).catch((error: unknown) => {
+        logger.error("Предварительная проверка платежа не выполнена", {
+          code: error instanceof Error ? error.name : "unknown_error",
+        });
+        return { ok: false as const, reason: "internal", message: "Оплата временно недоступна" };
+      });
+      await telegram.answerPreCheckout(
+        query.id,
+        verdict.ok,
+        verdict.ok ? undefined : verdict.message,
+      ).catch((error: unknown) => {
+        logger.warn("Ответ на предварительную проверку не доставлен", {
+          code: error instanceof Error ? error.name : "unknown_error",
+        });
+      });
+      if (!verdict.ok) {
+        logger.info("Платёж отклонён до списания", { reason: verdict.reason });
+      }
+      return reply.status(200).send({ ok: true, pre_checkout: verdict.ok });
     }
-    return reply.status(200).send(await payments.handle(request.body));
+    const result = await inbox.enqueue(update);
+    return reply.status(200).send({ ok: true, ...result });
   });
 
   app.get("/v1/sdk/agents", async () => ({

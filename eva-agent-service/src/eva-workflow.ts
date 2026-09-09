@@ -42,6 +42,14 @@ import {
   telegramMessageIdOf,
   TelegramFileTooLarge,
 } from "./telegram.js";
+import {
+  explicitUserGrammaticalGender,
+  normalizeReplyGender,
+  recordGenderFix,
+} from "./i18n/eva-gender.js";
+import type { StarsPayments } from "./payments/stars.js";
+import type { QuotaExhaustionNotifier } from "./subscriptions/quota-exhaustion-notifier.js";
+import { quotaExhausted } from "./subscriptions/quota-policy.js";
 import { speechTextFromReply } from "./telegram-format.js";
 import {
   AttachmentError,
@@ -134,7 +142,7 @@ export interface NormalizedUpdate {
   telegramId: number;
   chatId: number;
   messageId: number;
-  kind: "text" | "voice" | "image" | "document" | "unsupported";
+  kind: "text" | "voice" | "image" | "document" | "payment" | "unsupported";
   command: string | null;
   replyToMessageId: number | null;
   /** Server-owned target; synthetic events always carry null. */
@@ -192,6 +200,15 @@ export class EvaWorkflow {
       persona(): string;
       systemPrompt(): string;
     },
+    /**
+     * Оплата звёздами. Необязательна: без неё `/subscription` показывает
+     * только прежние способы, а платёж, если он всё же придёт, не
+     * применяется молча — он и не может прийти, потому что счёт не
+     * выставлялся.
+     */
+    private readonly stars?: StarsPayments,
+    /** Служебное read-only уведомление после расхода последнего сообщения. */
+    private readonly quotaExhaustion?: QuotaExhaustionNotifier,
   ) {
     this.taskEvents = new TaskEventService(db);
     this.attachments = new TelegramAttachmentReader(telegram);
@@ -334,6 +351,22 @@ export class EvaWorkflow {
 
     const user = await this.db.findUserByTelegramId(telegramId!);
     if (!user) return null;
+
+    // Кнопка покупки — не выбор Евы, а действие человека над своей
+    // подпиской. Токена ей не нужно: она называет публичное предложение,
+    // а не скрытый смысл, и всё равно проверяется на сервере — цена
+    // берётся из `plan_prices`, счёт выставляется тому, кто нажал.
+    // Ходом это не становится: модель здесь ни при чём.
+    const purchase = /^buy:([a-z]+):([a-z]+)$/u.exec(token);
+    if (purchase) {
+      await this.sendStarsInvoice(
+        user.id,
+        callback.message?.chat?.id ?? telegramId!,
+        purchase[1]!,
+        purchase[2]!,
+      );
+      return null;
+    }
     const claim = await this.db.claimCallbackToken({ token, userId: user.id });
     if (claim.status !== "claimed") {
       // Повторный клик, чужая или просроченная кнопка — молча ничего.
@@ -376,6 +409,27 @@ export class EvaWorkflow {
    * Квота снимается один раз: ход один.
    */
   async processAggregated(updates: TelegramUpdate[]): Promise<InboxResult> {
+    // Платёж не участвует в объединении.
+    //
+    // Окно отвечает на последнее сообщение, а предыдущие входят в тот же
+    // промпт. Оплата, сделанная за секунду до сообщения, молча
+    // становилась «предыдущей репликой» и не применялась вовсе: человек
+    // платил и упирался в тот же лимит. Обратный порядок терял уже не
+    // деньги, а сообщение: ход с платежом последним завершался сразу
+    // после выдачи подписки, и написанное перед оплатой оставалось без
+    // ответа.
+    //
+    // Поэтому каждый платёж проходит своим ходом — тем же путём, что и
+    // платёж, пришедший в одиночку, — а разговор продолжается тем, что
+    // осталось. Рекурсия здесь ровно на один уровень: внутрь уходит либо
+    // один апдейт, либо набор без платежей.
+    const payments = updates.filter(isPaymentUpdate);
+    if (payments.length > 0 && updates.length > 1) {
+      for (const payment of payments) await this.processAggregated([payment]);
+      const conversation = updates.filter((update) => !isPaymentUpdate(update));
+      if (conversation.length === 0) return { status: "completed" };
+      return await this.processAggregated(conversation);
+    }
     // Кнопка и опрос становятся обычным сообщением здесь: дальше идёт
     // тот же ход, тот же замок пользователя, те же квоты и тот же
     // порядок, что и у написанного текста.
@@ -519,7 +573,7 @@ export class EvaWorkflow {
         return await this.db.withUserScope(
           { telegramId: update.telegramId, label: "telegram.turn" },
           async (): Promise<InboxResult> => {
-        const { user, link } = await this.ensureUserAndAgent(update);
+        const user = await this.ensureUser(update);
         const language = preferredResponseLanguage(user);
         // Владельца получает каждая запись окна, а не только та, на
         // которую отвечаем: иначе присоединённые строки остались бы без
@@ -527,6 +581,19 @@ export class EvaWorkflow {
         for (const part of [...earlier, update]) {
           await this.db.attachTelegramUpdateToUser(part.updateId, user.id);
         }
+
+        // Платёж не зависит от агента, conversation, Letta и синхронизации
+        // персоны. Деньги уже списаны: ставить выдачу доступа после этих
+        // внешних зависимостей значило бы потерять подписку из-за отказа,
+        // который к оплате не относится. Ошибка здесь пробрасывается в
+        // durable inbox и становится повторной попыткой, а не `completed`.
+        if (update.kind === "payment") {
+          await this.applyPayment(update, language);
+          await this.stopTurn(turnHandle, "payment");
+          return { status: "completed" };
+        }
+
+        const { link } = await this.ensureUserAndAgent(update, user);
         await this.linkTurn(turnHandle, {
           userId: user.id,
           agentId: link.agent_id,
@@ -579,18 +646,12 @@ export class EvaWorkflow {
         }
 
         const quota = await this.db.getQuotaStatus(update.telegramId);
-        const messageQuota = quota.find((item) => item.metric === "messages") as
-          | { remaining?: number | string | null; limit_value?: number | string }
-          | undefined;
-        if (
-          messageQuota?.remaining !== null &&
-          messageQuota?.remaining !== undefined &&
-          Number(messageQuota.remaining) <= 0
-        ) {
-          await this.telegram.sendMessage(
-            update.chatId,
-            t(language, "messageQuotaEnded"),
-          );
+        if (quotaExhausted(quota, "messages")) {
+          // Кончились сообщения — человеку нужен не отчёт о лимите, а
+          // выход из положения. Предложение оплаты идёт тем же
+          // сообщением: отправлять его в другой команде значит просить
+          // человека догадаться, что делать дальше.
+          await this.sendQuotaOffer(user.id, update.chatId, language);
           await this.stopTurn(turnHandle, "quota_messages");
           return { status: "ignored" };
         }
@@ -600,14 +661,7 @@ export class EvaWorkflow {
         // бы мимо гейта и тратило минуты сверх исчерпанной квоты.
         let parts = [...earlier, update];
         if (parts.some((part) => part.kind === "voice")) {
-          const voiceQuota = quota.find((item) => item.metric === "voice_minutes") as
-            | { remaining?: number | string | null }
-            | undefined;
-          if (
-            voiceQuota?.remaining !== null &&
-            voiceQuota?.remaining !== undefined &&
-            Number(voiceQuota.remaining) <= 0
-          ) {
+          if (quotaExhausted(quota, "voice_minutes")) {
             await this.telegram.sendMessage(
               update.chatId,
               t(language, "voiceQuotaEnded"),
@@ -668,6 +722,24 @@ export class EvaWorkflow {
             return { status: "ignored" };
           }
           throw error;
+        }
+        // Пол нельзя надёжно вывести из имени, фото или ответа модели.
+        // Прямая фраза самого человека — единственный автоматический
+        // источник канонического грамматического рода.
+        const statedGender = explicitUserGrammaticalGender(prompt);
+        if (statedGender) {
+          await this.profile.upsert({
+            userId: user.id,
+            fieldKey: "grammatical_gender",
+            value: statedGender,
+            sourceType: "conversation_explicit",
+            sourceQuote: prompt.slice(0, 2_000),
+            confidence: 1,
+            explicitlyStated: true,
+          }).catch((error) => this.logger.warn("Грамматический род не сохранён", {
+            userId: user.id,
+            code: error instanceof Error ? error.name : "unknown_error",
+          }));
         }
         if (update.replyToMessageId !== null) {
           const linked = await this.taskEvents.findByTelegramReply(
@@ -778,6 +850,7 @@ export class EvaWorkflow {
           currentMessageAt: promptTiming.firstAt,
           messageBatch: promptTiming,
         });
+        const userGender = context.userGrammaticalGender ?? null;
         metrics.context_build_ms = context.metrics?.runtimeContextMs ?? 0;
         metrics.profile_check_ms = context.metrics?.profileCheckMs ?? 0;
         const responseMode = context.responseMode;
@@ -796,10 +869,18 @@ export class EvaWorkflow {
           // содержательный срез: до этого момента человек видит «Ева
           // печатает», а поле ввода остаётся свободным.
           live.current = this.telegram.startLiveMessage(update.chatId, {
-            onSent: () => {
-              // Сообщение появилось — «печатает» становится враньём.
-              if (responseMode === "text") action.current?.transition(null);
-            },
+            // «Печатает» держится, пока ответ растёт.
+            //
+            // Прежде индикатор снимался на первом же срезе: появление
+            // сообщения считалось concом ответа. С растущим сообщением это
+            // неправда — Ева продолжает писать, человек видит курсор в
+            // конце текста, а под именем собеседника пусто.
+            //
+            // Каждая правка гасит индикатор на клиенте, поэтому его мало
+            // не выключать — его нужно ставить заново после каждой
+            // записи. Снимается он там же, где и раньше: когда ответ
+            // дописан или ход закончился.
+            onUpdate: () => action.current?.refresh(),
           });
         }
         const stream = live.current;
@@ -866,7 +947,10 @@ export class EvaWorkflow {
                 context,
                 signal ? `${safetyDirective(signal)}\n\n${prompt}` : prompt,
                 {
-                  messageSource: update.kind,
+                  // Платёж до этой точки не доходит — он применён и
+                  // завершён выше. Здесь это сказано типу явно, чтобы не
+                  // приводить вид сообщения принудительно.
+                  messageSource: update.kind === "payment" ? undefined : update.kind,
                   attachments,
                   // Фактический размер собранного контекста, а не
                   // обещание уложиться: без измерения бюджет — это
@@ -890,7 +974,7 @@ export class EvaWorkflow {
                     // является и к нему не приклеивается.
                     if (delta.startsGroup) streamed = "";
                     streamed += delta.text;
-                    stream?.push(streamed);
+                    stream?.push(normalizeReplyGender(streamed, userGender).text);
                   }
                   : undefined,
               },
@@ -978,7 +1062,22 @@ export class EvaWorkflow {
           return { status: "ignored" };
         }
 
-        const reply = turn.reply.trim() || t(language, "emptyReply");
+        // Ева говорит о себе в женском роде. Правило записано в персоне,
+        // в системном промпте и в директиве резерву — и всё равно
+        // срывается на коротких репликах. Здесь оно перестаёт быть
+        // вероятностью: правка детерминированная, смысла не трогает и
+        // молчит, когда трогать нечего.
+        const answered = turn.reply.trim() || t(language, "emptyReply");
+        const gender = normalizeReplyGender(answered, userGender);
+        recordGenderFix(gender.corrections.length);
+        if (gender.corrections.length > 0) {
+          this.logger.info("Согласование рода в ответе исправлено", {
+            updateId: update.updateId,
+            // Только сами формы: текста ответа в журнале нет и быть не может.
+            corrections: gender.corrections.slice(0, 5),
+          });
+        }
+        const reply = gender.text;
         const wantsText = responseMode === "text" || responseMode === "both";
         const wantsVoice = responseMode === "voice" || responseMode === "both";
 
@@ -1074,6 +1173,7 @@ export class EvaWorkflow {
               action.current?.transition("upload_voice");
               await this.telegram.sendVoice(update.chatId, audio);
               voiced = true;
+              await this.countUsage(update.telegramId, "voice_out");
               await this.touchVoiceUsage(context.userId);
             } catch (error) {
               this.logger.warn("Голосовое сообщение не доставлено", {
@@ -1108,6 +1208,10 @@ export class EvaWorkflow {
           await this.moveTurn(turnHandle, "delivered");
 
           await this.db.incrementUsage(update.telegramId, "messages");
+          await this.quotaExhaustion?.notifyMessages(update.telegramId);
+          // Ответ Евы — такой же расходник, как входящее сообщение: он
+          // стоит вызова модели, и тариф считает его отдельно.
+          await this.countUsage(update.telegramId, "messages_out");
           usageCharged = true;
           await this.linkTurn(turnHandle, {
             quotaMetric: "messages",
@@ -1166,6 +1270,139 @@ export class EvaWorkflow {
    * нужны, нужен только барьер отмены. Ход, который его увидит,
    * закончится сам и ничего не доставит.
    */
+  /**
+   * Лимит кончился: сказать об этом и сразу предложить выход.
+   *
+   * Кнопки те же, что у `/subscription`, и берутся из включённых цен.
+   * Продажи не настроены — остаётся только текст: обещать оплату,
+   * которой нет, хуже, чем честно назвать предел.
+   */
+  private async sendQuotaOffer(
+    userId: number,
+    chatId: number,
+    language: SupportedLanguage,
+  ): Promise<void> {
+    const offers = this.stars ? await this.stars.offers(userId).catch(() => []) : [];
+    const buttons: Array<Array<Record<string, unknown>>> = offers.map((offer) => [{
+      text: `${offer.title} — ${offer.stars} ⭐`,
+      callback_data: `buy:${offer.plan}:${offer.period}`,
+    }]);
+    // Mini App показывает тарифы и принимает оплату не выходя из
+    // Telegram. Кнопка на него нужна и тогда, когда звёздных
+    // предложений нет: человеку, упёршемуся в лимит, нужен путь
+    // дальше, а не только сообщение о том, что путь кончился.
+    // Домен приложения может быть не настроен — в установке без Mini App
+    // или в проверке. Отсутствие раздела конфигурации не должно ронять
+    // путь, по которому человек упёрся в лимит.
+    const app = this.config.domains?.app;
+    if (app) {
+      buttons.push([{
+        text: t(language, "openSubscriptionApp"),
+        web_app: { url: `https://${app}` },
+      }]);
+    }
+    await this.telegram.sendMessage(
+      chatId,
+      offers.length
+        ? t(language, "messageQuotaEndedWithOffer")
+        : app
+          ? t(language, "messageQuotaEndedWithApp")
+          : t(language, "messageQuotaEnded"),
+      buttons.length ? { reply_markup: { inline_keyboard: buttons } } : {},
+    );
+  }
+
+  /**
+   * Выставить счёт в звёздах.
+   *
+   * Отказ здесь виден человеку: молча не показать счёт — значит оставить
+   * его нажимать кнопку, которая ничего не делает.
+   */
+  private async sendStarsInvoice(
+    userId: number,
+    chatId: number,
+    plan: string,
+    period: string,
+  ): Promise<void> {
+    if (!this.stars) return;
+    try {
+      const invoice = await this.stars.invoice(userId, plan, period);
+      await this.telegram.sendStarsInvoice(chatId, {
+        title: invoice.title,
+        description: invoice.description,
+        payload: invoice.payload,
+        stars: invoice.stars,
+        label: invoice.title,
+      });
+    } catch (error) {
+      this.logger.warn("Счёт в звёздах не выставлен", {
+        plan,
+        period,
+        code: error instanceof Error ? error.name : "unknown_error",
+      });
+      const message = error instanceof EvaError && error.code === "bad_request"
+        ? error.message
+        : "Не удалось открыть счёт. Попробуй ещё раз чуть позже.";
+      await this.telegram.sendMessage(chatId, message)
+        .catch(() => undefined);
+    }
+  }
+
+  /**
+   * Применить состоявшийся платёж.
+   *
+   * Повторное событие — норма: Telegram может прислать его снова, и
+   * второй подписки от этого не появляется. Человеку в таком случае
+   * ничего не пишем: он уже получил подтверждение в первый раз.
+   */
+  private async applyPayment(
+    update: NormalizedUpdate,
+    language: SupportedLanguage,
+  ): Promise<void> {
+    const payment = update.message.successful_payment;
+    if (!payment || !this.stars) return;
+    try {
+      const outcome = await this.stars.apply({
+        telegramUserId: update.telegramId,
+        payload: payment.invoice_payload,
+        chargeId: payment.telegram_payment_charge_id,
+        totalAmount: payment.total_amount,
+        currency: payment.currency,
+        // Идентификатор списания нужен для возврата, payload — чтобы
+        // потом понять, какую именно подписку этот платёж оплатил.
+        raw: {
+          invoice_payload: payment.invoice_payload,
+          telegram_payment_charge_id: payment.telegram_payment_charge_id,
+          total_amount: payment.total_amount,
+          currency: payment.currency,
+        },
+      });
+      if (outcome.state === "unknown_intent") {
+        throw new Error("У успешного платежа не найдено намерение оплаты");
+      }
+      if (outcome.state === "duplicate") return;
+      this.logger.info("Подписка оплачена звёздами", {
+        telegramId: update.telegramId,
+        plan: outcome.plan,
+        days: outcome.days,
+      });
+      await this.telegram.sendMessage(
+        update.chatId,
+        t(language, "paymentThanks", { days: String(outcome.days) }),
+      ).catch(() => undefined);
+    } catch (error) {
+      // Деньги уже списаны. Ошибка обязана выйти в durable inbox: только
+      // так update получит retry вместо ложного `completed`. Уведомление
+      // человеку отправит onDead после исчерпания попыток; до этого
+      // подписка ещё может открыться автоматически.
+      this.logger.error("Платёж не применён", {
+        telegramId: update.telegramId,
+        code: error instanceof Error ? error.name : "unknown_error",
+      });
+      throw error;
+    }
+  }
+
   private async stopRunningTurn(update: NormalizedUpdate): Promise<InboxResult> {
     return await this.db.withUserScope(
       { telegramId: update.telegramId, label: "telegram.stop" },
@@ -1196,9 +1433,7 @@ export class EvaWorkflow {
     );
   }
 
-  private async ensureUserAndAgent(
-    update: NormalizedUpdate,
-  ): Promise<{ user: UserRow; link: AgentLinkRow }> {
+  private async ensureUser(update: NormalizedUpdate): Promise<UserRow> {
     const from = update.message.from!;
     const user = await this.db.upsertUser({
       telegramId: update.telegramId,
@@ -1211,6 +1446,15 @@ export class EvaWorkflow {
     // внутренний `users.id` появляется здесь, и до этого момента данные
     // пользователя ей недоступны.
     this.db.bindScopeUserId(user.id);
+    return user;
+  }
+
+  private async ensureUserAndAgent(
+    update: NormalizedUpdate,
+    knownUser?: UserRow,
+  ): Promise<{ user: UserRow; link: AgentLinkRow }> {
+    const from = update.message.from!;
+    const user = knownUser ?? await this.ensureUser(update);
     let link = await this.db.getAgentLink(update.telegramId);
     if (!link) {
       let agentId = await this.letta.findAgentByTelegramId(update.telegramId);
@@ -1267,12 +1511,12 @@ export class EvaWorkflow {
         break;
       case "/balance": {
         const quotas = await this.db.getQuotaStatus(update.telegramId);
-        const lines = quotas.map((item) => {
+        const lines = [...quotas].sort(compareQuotas).map((item) => {
           const row = item as Record<string, unknown>;
           const remaining = row.remaining === null
             ? t(language, "unlimited")
             : t(language, "remaining", { value: String(row.remaining) });
-          return `${quotaLabel(String(row.metric), language)}: ${remaining}`;
+          return `${quotaLabel(String(row.metric), String(row.period ?? ""), language)}: ${remaining}`;
         });
         await this.telegram.sendMessage(
           update.chatId,
@@ -1283,17 +1527,22 @@ export class EvaWorkflow {
         break;
       }
       case "/subscription": {
-        const buttons = Object.entries(this.config.lavaPlans)
-          .filter(([, plan]) => plan.paymentUrl)
-          .map(([, plan]) => [{
-            text: `${plan.plan} — ${(plan.amountMinor / 100).toFixed(0)} ${plan.currency}`,
-            url: plan.paymentUrl,
-          }]);
+        // Звёзды идут первыми: оплата внутри Telegram не уводит человека
+        // из чата и не требует ни карты, ни адреса.
+        const offers = this.stars ? await this.stars.offers(user.id).catch(() => []) : [];
+        const starsButtons = offers.map((offer) => [{
+          text: `${offer.title} — ${offer.stars} ⭐`,
+          callback_data: `buy:${offer.plan}:${offer.period}`,
+        }]);
+        const buttons = starsButtons;
+        const unavailable = buttons.length || !this.stars
+          ? null
+          : await this.stars.unavailableMessage(user.id).catch(() => null);
         await this.telegram.sendMessage(
           update.chatId,
           buttons.length
             ? t(language, "chooseSubscription")
-            : t(language, "subscriptionUnavailable"),
+            : unavailable ?? t(language, "subscriptionUnavailable"),
           buttons.length ? { reply_markup: { inline_keyboard: buttons } } : {},
         );
         break;
@@ -1334,6 +1583,26 @@ export class EvaWorkflow {
    * провайдера: «Deepgram вернул HTTP 429» ему нечего с этим делать.
    * Полная причина уходит в лог и в панель администратора.
    */
+  /**
+   * Записать расход. Отказ учёта не должен ронять разговор.
+   *
+   * Гейт хода читает `messages` и `voice_minutes` — их запись остаётся
+   * обязательной, иначе лимит можно обойти отказом базы. Остальные
+   * метрики нужны для счёта и отчётности: если их не удалось записать,
+   * человеку об этом знать незачем, а прерывать из-за этого ответ —
+   * тем более.
+   */
+  private async countUsage(telegramId: number, metric: string, amount = 1): Promise<void> {
+    try {
+      await this.db.incrementUsage(telegramId, metric, amount);
+    } catch (error) {
+      this.logger.warn("Расход не записан", {
+        metric,
+        code: error instanceof Error ? error.name : "unknown_error",
+      });
+    }
+  }
+
   private async transcribeVoice(
     useCase: "telegram_voice" | "webapp_voice_message",
     fileId: string,
@@ -1517,6 +1786,9 @@ export class EvaWorkflow {
           "voice_minutes",
           Math.max(1, Math.ceil(transcription.durationMinutes)),
         );
+        // Минуты и штуки — разные величины: тариф может ограничивать и
+        // длительность распознавания, и число голосовых.
+        await this.countUsage(update.telegramId, "voice_in");
       }
       const statusId = status.promise ? await status.promise.catch(() => null) : null;
       if (statusId !== null) {
@@ -1539,6 +1811,7 @@ export class EvaWorkflow {
       const file = imageFileOf(message);
       if (!file) throw new Error("Изображение отсутствует");
       const image = await this.attachments.image(file);
+      await this.countUsage(update.telegramId, "images");
       // Само изображение уходит модели изображением. Отдельного описания
       // больше нет: пересказ картинки чужой моделью — это уже не то, что
       // видит Ева.
@@ -1549,6 +1822,7 @@ export class EvaWorkflow {
       const document = message.document;
       if (!document) throw new Error("Документ отсутствует");
       const content = await this.attachments.document(document);
+      await this.countUsage(update.telegramId, "documents");
       return { text: caption, images: [], attachments: [content] };
     }
 
@@ -1606,6 +1880,16 @@ export class EvaWorkflow {
   }
 }
 
+/**
+ * Состоявшийся платёж Telegram.
+ *
+ * Проверяется то же поле, по которому `normalizeUpdate` определяет вид
+ * `payment`: второе правило разошлось бы с первым на первой же правке.
+ */
+function isPaymentUpdate(update: TelegramUpdate): boolean {
+  return Boolean((update.message ?? update.edited_message)?.successful_payment);
+}
+
 export function normalizeUpdate(
   update: TelegramUpdate,
   allowReaction = true,
@@ -1617,7 +1901,9 @@ export function normalizeUpdate(
   const command = commandMatch?.[1] ? `/${commandMatch[1].toLowerCase()}` : null;
   // Вид сообщения определяется одним разбором: снимок экрана, присланный
   // файлом, остаётся изображением, а голосовая запись файлом — голосом.
-  const kind = telegramMediaKind(message);
+  // Состоявшийся платёж — не сообщение человека и не ход модели: у него
+  // свой разбор, детерминированный и без Letta.
+  const kind = message.successful_payment ? "payment" as const : telegramMediaKind(message);
   return {
     updateId: update.update_id,
     message,
@@ -1682,20 +1968,53 @@ function normalizeSttAttempts(
       }];
 }
 
-function quotaLabel(metric: string, language: SupportedLanguage): string {
-  return (language === "en"
+function quotaLabel(metric: string, period: string, language: SupportedLanguage): string {
+  const metricLabel = (language === "en"
     ? {
         messages: "Messages",
+        messages_out: "Eva replies",
+        voice_in: "Voice messages",
         voice_minutes: "Voice minutes",
+        voice_out: "Voiced replies",
+        documents: "Documents",
+        images: "Images",
         web_search: "Search",
         tests: "Tests",
       }
     : {
         messages: "Сообщения",
+        messages_out: "Ответы Евы",
+        voice_in: "Голосовые сообщения",
         voice_minutes: "Голосовые минуты",
+        voice_out: "Озвученные ответы",
+        documents: "Документы",
+        images: "Изображения",
         web_search: "Поиск",
         tests: "Тесты",
       })[metric] ?? metric;
+  const periodLabel = (language === "en"
+    ? { day: "day", week: "week", month: "month", total: "total" }
+    : { day: "сутки", week: "неделя", month: "месяц", total: "всё время" }
+  )[period as "day" | "week" | "month" | "total"];
+  return periodLabel ? `${metricLabel} (${periodLabel})` : metricLabel;
+}
+
+function compareQuotas(left: unknown, right: unknown): number {
+  const metricOrder = [
+    "messages", "messages_out", "voice_in", "voice_minutes", "voice_out",
+    "documents", "images", "web_search", "tests",
+  ];
+  const periodOrder = ["day", "week", "month", "total"];
+  const a = left as Record<string, unknown>;
+  const b = right as Record<string, unknown>;
+  const metric = rank(metricOrder, String(a.metric)) - rank(metricOrder, String(b.metric));
+  if (metric !== 0) return metric;
+  return rank(periodOrder, String(a.period)) - rank(periodOrder, String(b.period));
+}
+
+function rank(order: string[], value: string): number {
+  const index = order.indexOf(value);
+  return index < 0 ? order.length : index;
 }
 
 function elapsed(started: number): number {

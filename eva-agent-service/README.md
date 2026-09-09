@@ -78,6 +78,5 @@ Slim и toolchain для нативной зависимости `node-pty`.
 ## Webhook API
 
 - `POST /telegram/webhook` — проверяет
-  `X-Telegram-Bot-Api-Secret-Token`;
-- `POST /payments/lava` — проверяет HTTP Basic Auth, продукт, сумму,
-  валюту и идемпотентно активирует подписку.
+  `X-Telegram-Bot-Api-Secret-Token`; успешная оплата Telegram Stars
+  приходит тем же защищённым webhook.

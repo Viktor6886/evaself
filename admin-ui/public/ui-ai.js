@@ -1,20 +1,25 @@
 /**
- * Раздел «Искусственный интеллект»: режим маршрутизации, цепочки
- * маршрутов, здоровье провайдеров и последние отказы.
+ * Раздел «Искусственный интеллект»: карточки провайдеров, режим
+ * маршрутизации, полная схема маршрутов и последние отказы.
+ *
+ * Провайдер живёт в одной карточке (`ui-ai-providers.js`). Отдельного
+ * списка «Состояние провайдеров» здесь больше нет: он показывал тех же
+ * провайдеров второй раз, с другим набором фактов и другим пониманием
+ * того, что значит «работает».
  */
 async function loadProviders() {
-  const [list, router] = await Promise.all([
-    request("/providers?kind=llm"),
-    // Роутер мог ещё не получить ни одного запроса — тогда состояние
-    // пустое, но страница всё равно должна открыться.
-    request("/llm/state").catch(() => ({ payload: { providers: [], routes: [], recent_failures: [] } })),
-  ]);
-  state.providers = Array.isArray(list.payload.providers) ? list.payload.providers : [];
+  // Один запрос вместо двух. `/llm/state` отдаёт провайдера целиком —
+  // конфигурацию, возможности, маршруты, breaker и расход, — поэтому
+  // склеивать его с `/providers` в браузере больше нечем и незачем.
+  // Роутер мог ещё не получить ни одного запроса: тогда состояние
+  // пустое, но страница всё равно должна открыться.
+  const router = await request("/llm/state")
+    .catch(() => ({ payload: { providers: [], routes: [], recent_failures: [] } }));
   state.router = router.payload;
+  state.providers = Array.isArray(router.payload?.providers) ? router.payload.providers : [];
 
   renderRouterRoutes();
   renderRoutingSettings();
-  renderRouterHealth();
   renderRouterFailures();
 
   $("#providers-list").innerHTML = state.providers.length
@@ -121,6 +126,19 @@ function renderRouterRoutes() {
   renderRouteChains($("#router-routes"));
 }
 
+/**
+ * Маршруты.
+ *
+ * Раньше каждый из восьми маршрутов разворачивался в полный редактор:
+ * список цепочки, кнопки перестановки, добавление и переключатель ротации.
+ * Провайдеров при этом три, и страница показывала одни и те же три имени
+ * восемь раз подряд — на телефоне это несколько экранов прокрутки, в
+ * которых ничего не найти.
+ *
+ * Теперь по умолчанию видно одно: какая модель обслуживает каждый маршрут.
+ * Полный редактор цепочки открывается для того маршрута, который правят, —
+ * и только он.
+ */
 function renderRouteChains(target, routeCodes = null, compact = false) {
   if (!target) return;
   const allowed = routeCodes ? new Set(routeCodes) : null;
@@ -129,27 +147,34 @@ function renderRouteChains(target, routeCodes = null, compact = false) {
     .sort((left, right) => routeCodes
       ? routeCodes.indexOf(left.code) - routeCodes.indexOf(right.code)
       : 0);
+  if (!routes.length) {
+    target.innerHTML = '<p class="muted">Маршруты появятся после применения миграций роутера.</p>';
+    return;
+  }
   const editable = ["owner", "admin"].includes(state.me.role);
-  target.innerHTML = routes.length
-    ? routes.map((route) => {
-      const chain = route.chain || [];
-      const requires = [
-        route.requires_tools ? "инструменты" : "",
-        route.requires_json ? "строгий JSON" : "",
-        route.requires_streaming ? "поток" : "",
-        `контекст от ${Number(route.min_context_window).toLocaleString("ru-RU")}`,
-      ].filter(Boolean).join(" · ");
-      return `
-        <section class="route-block${compact ? " compact" : ""}" data-route="${escapeHtml(route.code)}">
-          <div class="route-head">
-            <h4>${escapeHtml(ROUTE_TITLES[route.code] || route.title || route.code)}</h4>
-            <span class="route-requires">требует: ${escapeHtml(requires)}</span>
-          </div>
+  // Маршруты, запрошенные явно (страница медиа просит один), показываются
+  // раскрытыми: свёрнутая строка там прячет ровно то, ради чего раздел и
+  // открыли. Общий список остаётся свёрнутым.
+  const focused = Boolean(routeCodes) && routes.length <= 2;
+  target.innerHTML = `<div class="route-summary">${routes.map((route) => {
+    const chain = route.chain || [];
+    const head = chain[0];
+    const backups = Math.max(0, chain.length - 1);
+    return `
+      <details class="route-item route-block${compact ? " compact" : ""}"
+               data-route="${escapeHtml(route.code)}"${focused ? " open" : ""}>
+        <summary>
+          <span class="route-name">${escapeHtml(ROUTE_TITLES[route.code] || route.title || route.code)}</span>
+          <span class="route-head-model">${head ? escapeHtml(head.name) : "не настроен"}</span>
+          <span class="route-backups">${backups ? `+${backups}` : ""}</span>
+        </summary>
+        <div class="route-body">
+          ${routeRequirements(route)}
           ${chain.length ? `<ol class="chain${route.rotation_enabled === false ? " is-pinned" : ""}">${chain.map((link, index) => `
             <li class="chain-link${link.enabled && (route.rotation_enabled !== false || index === 0) ? "" : " is-off"}">
               <span class="chain-rank">${index === 0 ? "основной"
                 : route.rotation_enabled === false ? "не используется" : `резерв ${index}`}</span>
-              <span class="chain-name"><strong>${escapeHtml(link.name)}</strong><small>${escapeHtml(link.model)} · ${escapeHtml(link.protocol)}</small></span>
+              <span class="chain-name"><strong>${escapeHtml(link.name)}</strong><small>${escapeHtml(link.model)}</small></span>
               ${editable ? `<span class="chain-move">
                 <button class="button tiny ghost" data-chain-move="up" data-route="${escapeHtml(route.code)}" data-provider="${escapeHtml(link.provider_id)}"${index === 0 ? " disabled" : ""}>↑</button>
                 <button class="button tiny ghost" data-chain-move="down" data-route="${escapeHtml(route.code)}" data-provider="${escapeHtml(link.provider_id)}"${index === chain.length - 1 ? " disabled" : ""}>↓</button>
@@ -167,9 +192,20 @@ function renderRouteChains(target, routeCodes = null, compact = false) {
             ? "Этим маршрутом отвечает Ева. Выключите, если подмена на резервную модель "
               + "недопустима: стиль ответа у моделей разный."
             : "Выключенная ротация оставляет в работе только основного, а отказ остаётся отказом."}</small>
-        </section>`;
-    }).join("")
-    : '<p class="muted">Маршруты появятся после применения миграций роутера.</p>';
+        </div>
+      </details>`;
+  }).join("")}</div>`;
+}
+
+/** Требования маршрута — то, по чему роутер отбирает провайдеров. */
+function routeRequirements(route) {
+  const requires = [
+    route.requires_tools ? "инструменты" : "",
+    route.requires_json ? "строгий JSON" : "",
+    route.requires_streaming ? "поток" : "",
+    `контекст от ${Number(route.min_context_window).toLocaleString("ru-RU")}`,
+  ].filter(Boolean).join(" · ");
+  return `<p class="route-requires">Требует: ${escapeHtml(requires)}</p>`;
 }
 
 function chainAdder(route, chain) {
@@ -190,66 +226,61 @@ function chainAdder(route, chain) {
   </div>`;
 }
 
-const BREAKER_LABELS = {
-  closed: { title: "работает", color: "green" },
-  open: { title: "закрыт после ошибок", color: "red" },
-  half_open: { title: "пробный запрос", color: "yellow" },
-};
-
-function renderRouterHealth() {
-  const rows = state.router?.providers || [];
-  const editable = ["owner", "admin"].includes(state.me.role);
-  $("#router-health").innerHTML = rows.length
-    ? rows.map((row) => {
-      const breaker = BREAKER_LABELS[row.breaker_state] || BREAKER_LABELS.closed;
-      const failures = Number(row.failures_1h || 0);
-      const requests = Number(row.requests_1h || 0);
-      return `
-        <article class="health-row">
-          <div class="health-head">
-            <span class="status-dot color-${row.pinned_out ? "gray" : breaker.color}"></span>
-            <div>
-              <strong>${escapeHtml(row.name)}</strong>
-              <small>${escapeHtml(row.model)} · приоритет ${row.priority}${row.enabled ? "" : " · выключен"}</small>
-            </div>
-            <span class="health-state">${row.pinned_out ? "снят вручную" : escapeHtml(breaker.title)}</span>
-          </div>
-          <dl class="health-facts">
-            <div><dt>Запросов за час</dt><dd>${requests}${failures ? ` · ошибок ${failures}` : ""}</dd></div>
-            <div><dt>Задержка p95</dt><dd>${row.p95_latency_ms == null ? "нет данных" : `${row.p95_latency_ms} мс`}</dd></div>
-            <div><dt>Потрачено сегодня</dt><dd>${money(row.spent_today_micro)}${row.daily_budget_micro ? ` из ${money(row.daily_budget_micro)}` : " · без лимита"}</dd></div>
-            <div><dt>Потрачено за месяц</dt><dd>${money(row.spent_month_micro)}${row.monthly_budget_micro ? ` из ${money(row.monthly_budget_micro)}` : " · без лимита"}</dd></div>
-            ${row.last_error_code ? `<div><dt>Последняя ошибка</dt><dd>${escapeHtml(row.last_error_code)}</dd></div>` : ""}
-            ${row.probe_after ? `<div><dt>Пробный запрос после</dt><dd>${escapeHtml(localDate(row.probe_after))}</dd></div>` : ""}
-          </dl>
-          ${editable ? `<div class="card-actions">
-            ${row.breaker_state === "closed" ? "" : `<button class="button tiny secondary" data-breaker-reset="${escapeHtml(row.id)}">Вернуть в строй</button>`}
-            <button class="button tiny ghost" data-pin="${row.pinned_out ? "off" : "on"}" data-provider="${escapeHtml(row.id)}">${row.pinned_out ? "Вернуть автовозврат" : "Снять с автовозврата"}</button>
-          </div>` : ""}
-        </article>`;
-    }).join("")
-    : '<p class="muted">Роутер ещё не обслуживал запросы.</p>';
-}
-
-/** Микроединицы валюты в доллары. */
-function money(micro) {
-  const value = Number(micro || 0) / 1_000_000;
-  return `$${value.toFixed(value < 1 ? 4 : 2)}`;
-}
-
+/**
+ * Последние отказы, сведённые по провайдеру и причине.
+ *
+ * Лента показывала каждый отказ отдельной строкой: десять подряд «лимит
+ * запросов провайдера» вытесняли всё остальное, а описание ошибки во
+ * третьей колонке на телефоне налезало на заголовок. Теперь одинаковые
+ * отказы — одна строка со счётчиком и временем последнего, а техническая
+ * подробность раскрывается по требованию.
+ */
 function renderRouterFailures() {
   const rows = state.router?.recent_failures || [];
-  $("#router-failures").innerHTML = rows.length
-    ? rows.map((row) => `
-      <article class="compact-row">
+  if (!rows.length) {
+    $("#router-failures").innerHTML = '<p class="muted">Отказов не было.</p>';
+    return;
+  }
+  const groups = new Map();
+  for (const row of rows) {
+    const key = `${row.provider || ""}|${row.switch_reason || ""}|${row.http_status || ""}`;
+    const existing = groups.get(key);
+    if (existing) {
+      existing.count += 1;
+      if (String(row.started_at) > String(existing.started_at)) existing.started_at = row.started_at;
+      if (row.error_summary && !existing.details.includes(row.error_summary)) {
+        existing.details.push(row.error_summary);
+      }
+      continue;
+    }
+    groups.set(key, {
+      provider: row.provider,
+      switch_reason: row.switch_reason,
+      http_status: row.http_status,
+      started_at: row.started_at,
+      count: 1,
+      details: row.error_summary ? [row.error_summary] : [],
+    });
+  }
+  const list = [...groups.values()].sort((left, right) =>
+    String(right.started_at).localeCompare(String(left.started_at)));
+
+  $("#router-failures").innerHTML = list.map((row) => `
+    <article class="failure-row">
+      <div class="failure-head">
         <span class="status-dot color-red"></span>
-        <span>
+        <div class="failure-title">
           <strong>${escapeHtml(row.provider || "провайдер не выбран")}</strong>
-          <small>${escapeHtml(SWITCH_REASONS[row.switch_reason] || row.switch_reason || "ошибка")}${row.http_status ? ` · HTTP ${row.http_status}` : ""} · ${escapeHtml(localDate(row.started_at))}</small>
-        </span>
-        <span class="failure-detail">${escapeHtml(row.error_summary || "")}</span>
-      </article>`).join("")
-    : '<p class="muted">Отказов не зафиксировано.</p>';
+          <small>${escapeHtml(SWITCH_REASONS[row.switch_reason] || row.switch_reason || "ошибка")}${row.http_status ? ` · HTTP ${row.http_status}` : ""}</small>
+        </div>
+        ${row.count > 1 ? `<span class="failure-count">${row.count}×</span>` : ""}
+      </div>
+      <small class="muted">Последний: ${escapeHtml(localDate(row.started_at))}</small>
+      ${row.details.length ? `<details class="failure-more">
+        <summary>Подробности провайдера</summary>
+        ${row.details.map((detail) => `<p class="failure-detail">${escapeHtml(detail)}</p>`).join("")}
+      </details>` : ""}
+    </article>`).join("");
 }
 
 const SWITCH_REASONS = {
@@ -384,26 +415,3 @@ function handleRouteChainClick(event) {
   }
 }
 $("#router-routes").addEventListener("click", handleRouteChainClick);
-
-$("#router-health").addEventListener("click", (event) => {
-  const reset = event.target.closest("[data-breaker-reset]");
-  if (reset) {
-    request(`/llm/providers/${encodeURIComponent(reset.dataset.breakerReset)}/breaker/reset`, { method: "POST" })
-      .then(() => { toast("Провайдер возвращён в строй"); return loadProviders(); })
-      .catch(handleError);
-    return;
-  }
-  const pin = event.target.closest("[data-pin]");
-  if (pin) {
-    const on = pin.dataset.pin === "on";
-    request(`/llm/providers/${encodeURIComponent(pin.dataset.provider)}/pin`, {
-      method: "POST",
-      body: JSON.stringify({ pinned_out: on }),
-    })
-      .then(() => {
-        toast(on ? "Провайдер снят с автовозврата" : "Автовозврат включён");
-        return loadProviders();
-      })
-      .catch(handleError);
-  }
-});

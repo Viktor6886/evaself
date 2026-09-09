@@ -4,12 +4,66 @@ import { ProviderError } from "../types.js";
 import type { ProviderProfile } from "../types.js";
 
 /** Operator overrides win over defaults; adapters add required fields last. */
+/**
+ * Настройки транспорта, а не генерации.
+ *
+ * Живут они в `additional_parameters` — оттуда их читает роутер, и
+ * панель сама кладёт туда `request_timeout_ms`. Но в теле запроса
+ * провайдеру им места нет: это наши таймауты и лимиты, а не параметры
+ * модели.
+ *
+ * OpenAI-совместимые endpoint'ы лишние поля молча игнорируют, и до сих
+ * пор это сходило с рук. Gemini разбирает тело строго и отвечает
+ * `HTTP 400: Unknown name "request_timeout_ms": Cannot find field` —
+ * то есть провайдер, заведённый из панели со стандартным таймаутом, не
+ * работал вовсе.
+ *
+ * Список общий для всех адаптеров: ни один из этих ключей не является
+ * допустимым параметром вывода ни у кого.
+ */
+const TRANSPORT_KEYS: ReadonlySet<string> = new Set([
+  "request_timeout_ms", "connect_timeout_ms", "timeout_ms", "max_retries",
+  "max_concurrency", "max_rpm", "max_tpm", "max_latency_ms",
+  "priority", "quality_tier", "sensitive_data_allowed", "enabled",
+  "daily_budget_micro", "monthly_budget_micro", "price_in_micro", "price_out_micro",
+  // Кэш промпта — свойство обращения, а не параметр вывода. Провайдеру
+  // эти ключи отправлять нельзя: строгий разбор тела ответит 400.
+  "prompt_cache", "prompt_cache_ttl",
+]);
+
+/**
+ * Включён ли кэш промпта у провайдера и на какой срок.
+ *
+ * Настройка живёт в `additional_parameters` провайдера, а не в общей
+ * переменной окружения, по двум причинам. Кэширование поддерживают не
+ * все совместимые endpoint'ы, и включать его сразу всем — значит
+ * рисковать отказом там, где до сих пор всё работало. И канареечное
+ * включение на одном провайдере при глобальном флаге невозможно.
+ *
+ * Умолчание — выключено: флаг в production включает человек.
+ *
+ * `ttl`: `5m` (умолчание) держит запись пять минут и обновляет её при
+ * каждом чтении — этого хватает шагам одного хода, идущим подряд. `1h`
+ * стоит вдвое дороже на запись и оправдан там, где между ходами
+ * проходят десятки минут.
+ */
+export function promptCacheControl(
+  provider: ProviderProfile,
+): { type: "ephemeral"; ttl?: "1h" } | null {
+  const parameters = { ...provider.generation_defaults, ...provider.additional_parameters };
+  if (parameters.prompt_cache !== true) return null;
+  return parameters.prompt_cache_ttl === "1h"
+    ? { type: "ephemeral", ttl: "1h" }
+    : { type: "ephemeral" };
+}
+
 export function providerParameters(
   provider: ProviderProfile,
   omit: readonly string[] = [],
 ): Record<string, unknown> {
   const parameters = { ...provider.generation_defaults, ...provider.additional_parameters };
   for (const key of omit) delete parameters[key];
+  for (const key of TRANSPORT_KEYS) delete parameters[key];
   return parameters;
 }
 
@@ -29,6 +83,35 @@ export function parameterValue(
   fallback: unknown,
 ): unknown {
   return Object.hasOwn(source, key) ? source[key] : fallback;
+}
+
+/**
+ * Адрес запроса к провайдеру.
+ *
+ * Адаптеры дописывали путь к введённому адресу как есть, и `https://
+ * api.anthropic.com` превращался в `/messages` вместо `/v1/messages` —
+ * провайдер отвечал 404 или 405, а панель показывала это как
+ * несовместимость модели. Догадаться, что не хватает `/v1`, оператор мог
+ * только по документации провайдера.
+ *
+ * Версия дописывается, только если человек не указал путь вовсе. Любой
+ * введённый путь — включая нестандартный у прокси и Azure — остаётся
+ * нетронутым: там `/v1` мог бы всё сломать.
+ */
+export function providerUrl(baseUrl: string, path: string): string {
+  const trimmed = baseUrl.trim().replace(/\/+$/, "");
+  let prefix = trimmed;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.pathname === "" || parsed.pathname === "/") {
+      parsed.pathname = "/v1";
+      prefix = parsed.toString().replace(/\/+$/, "");
+    }
+  } catch {
+    // Неразбираемый адрес — не дело адаптера: запрос уйдёт как есть и
+    // провайдер (или fetch) скажет об этом яснее любой догадки здесь.
+  }
+  return `${prefix}/${path.replace(/^\/+/, "")}`;
 }
 
 /**

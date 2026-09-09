@@ -525,6 +525,8 @@ interface WorkflowProbe {
   transcribed: string[];
   /** Готовый текст хода вместе с вложениями. */
   wrapped: string[];
+  /** После какого успешного расхода проверили переход квоты в ноль. */
+  quotaNotifications: number[];
 }
 
 async function runTelegramTurn(
@@ -562,6 +564,14 @@ async function runTelegramTurn(
     deltaGapMs?: number;
     /** Минимальный промежуток между правками показанного сообщения. */
     liveIntervalMs?: number;
+    /** Что «ответила» модель: для проверок, зависящих от текста ответа. */
+    modelReply?: string;
+    /** Подтверждённый грамматический род пользователя. */
+    userGender?: "masculine" | "feminine" | null;
+    /** Что продаётся: пусто — продажи не настроены. */
+    offers?: Array<{ plan: string; period: string; stars: number; title: string }>;
+    /** Домен Mini App. Пусто — приложения у установки нет. */
+    appDomain?: string;
     /** Команда вместо обычного сообщения. */
     command?: string;
     /** Отметка отправки последнего сообщения, секунды epoch. */
@@ -770,7 +780,9 @@ async function runTelegramTurn(
         }
       }
       return {
-      reply: deltas ? streamedReply.trim() : "Понимаю. Расскажи, что было дальше.",
+      reply: deltas
+        ? streamedReply.trim()
+        : options.modelReply ?? "Понимаю. Расскажи, что было дальше.",
       reasoning: [],
       assistantGroups: 1,
       assistantHadIds: true,
@@ -797,6 +809,7 @@ async function runTelegramTurn(
       userId: user.id,
       conversationId: "conv-1",
       responseMode: options.responseMode ?? "text",
+      userGrammaticalGender: options.userGender ?? null,
       metrics: { runtimeContextMs: 0, profileCheckMs: 0, cacheHit: false },
       };
     },
@@ -824,11 +837,15 @@ async function runTelegramTurn(
     },
   };
   const channelLinks: Array<Record<string, unknown>> = [];
+  const quotaNotifications: number[] = [];
   const workflow = new EvaWorkflow(
     {
       typingIntervalMs: 4000,
       lockTtlSeconds: 180,
       mediaServiceUrl: "http://media-service:8090",
+      // Домен Mini App: пусто — установка без приложения, и кнопке на
+      // него взяться неоткуда.
+      domains: { app: options.appDomain ?? "" },
     } as never,
     db as never,
     letta as never,
@@ -836,7 +853,10 @@ async function runTelegramTurn(
     queue as never,
     telegram as never,
     runtimeContext as never,
-    {} as never,
+    {
+      grammaticalGender: async () => options.userGender ?? null,
+      upsert: async () => ({}),
+    } as never,
     turnLogger as never,
     undefined,
     turns as never,
@@ -847,6 +867,14 @@ async function runTelegramTurn(
         return {} as never;
       },
     } as never,
+    // personaSync тесту не нужен, но место в списке занимает: без него
+    // оплата звёздами встала бы на его позицию.
+    undefined,
+    // Оплата звёздами: подставляется только там, где тест её просит.
+    options.offers
+      ? { offers: async () => options.offers } as never
+      : undefined,
+    { notifyMessages: async (telegramId: number) => { quotaNotifications.push(telegramId); } } as never,
   );
 
   // Поддельный media-service: синтез занимает время, как настоящий, а
@@ -925,6 +953,7 @@ async function runTelegramTurn(
     wrapped,
     markups,
     issuedTokens,
+    quotaNotifications,
     metrics: turnMetrics,
   };
 }
@@ -1071,7 +1100,8 @@ test("объединённый ход не проносит голос мимо 
   const probe = await runTelegramTurn(lifecycle(store), {
     quota: [
       { metric: "messages", remaining: 10 },
-      { metric: "voice_minutes", remaining: 0 },
+      { metric: "voice_minutes", period: "month", remaining: 5 },
+      { metric: "voice_minutes", period: "day", remaining: 0 },
     ],
     extraUpdates: [
       {
@@ -1170,6 +1200,12 @@ test("отказ учёта после доставки не заводит вт
   assert.equal(harness.result.status, "completed");
   assert.equal(harness.result.usageCharged, false, "не списанное списанным не считается");
   assert.deepEqual(harness.sent.length, 1, "ответ отправлен ровно один раз");
+  assert.deepEqual(harness.quotaNotifications, [], "без успешного расхода уведомлять не о чем");
+});
+
+test("после успешного расхода проверяется исчерпание квоты сообщений", async () => {
+  const harness = await runTelegramTurn(undefined);
+  assert.deepEqual(harness.quotaNotifications, [TELEGRAM_ID]);
 });
 
 test("отказ доставки голоса не заваливает ход и не отменяет ответ", async () => {
@@ -1697,4 +1733,140 @@ test("без просьбы инструмента клавиатуры не п�
   const harness = await runTelegramTurn(undefined, {});
   assert.equal(harness.markups.length, 0);
   assert.equal(harness.issuedTokens.length, 0);
+});
+
+/*
+ * Женский род доходит до человека, а не только до модуля.
+ *
+ * Правку легко написать и забыть подключить: тесты самого модуля при
+ * этом остаются зелёными, а в чат уходит прежний текст. Здесь
+ * проверяется именно проводка — то, что ушло в Telegram.
+ */
+test("ответ уходит человеку в женском роде", async () => {
+  const probe = await runTelegramTurn(undefined, {
+    modelReply: "Понял. Я сделал что мог и я рад помочь.",
+  });
+  const delivered = probe.sent.join("\n");
+  assert.match(delivered, /Поняла/u, "короткая реплика не поправлена");
+  assert.match(delivered, /Я сделала/u, "сказуемое при «я» не поправлено");
+  assert.match(delivered, /я рада/u, "краткое прилагательное не поправлено");
+  // Придаточное «что мог» правило не берёт: подлежащее там опущено, а
+  // угадывать его нельзя. Известный предел, а не упущение.
+  assert.match(delivered, /что мог/u);
+});
+
+test("ответ без мужского рода уходит слово в слово", async () => {
+  const original = "Расскажи, как прошёл твой день.";
+  const probe = await runTelegramTurn(undefined, { modelReply: original });
+  assert.ok(
+    probe.sent.some((item) => item.includes(original)),
+    "текст, который трогать не нужно, изменился",
+  );
+});
+
+test("ответ согласует Еву и пользователя с разными родами", async () => {
+  const probe = await runTelegramTurn(undefined, {
+    userGender: "masculine",
+    modelReply: "Я понял тебя. Ты устала и была готова продолжить?",
+  });
+  const delivered = probe.sent.join("\n");
+  assert.match(delivered, /Я поняла тебя/u);
+  assert.match(delivered, /Ты устал и был готов продолжить/u);
+  assert.doesNotMatch(delivered, /Ты устала/u);
+});
+
+test("ошибочный род не показывается даже в растущем ответе", async () => {
+  const probe = await runTelegramTurn(undefined, {
+    userGender: "masculine",
+    deltas: [["Я понял. ", true], ["Ты устала?", false]],
+  });
+  assert.ok(probe.shown.length > 0, "поток не был показан");
+  assert.ok(
+    probe.shown.every((text) => !/Я понял\b|Ты устала/u.test(text)),
+    `в поток попала неверная форма: ${probe.shown.join(" | ")}`,
+  );
+  assert.match(probe.shown.at(-1) ?? "", /Я поняла\. Ты устал\?/u);
+});
+
+test("/balance различает суточную, недельную и месячную квоты", async () => {
+  const probe = await runTelegramTurn(undefined, {
+    command: "/balance",
+    quota: [
+      { metric: "messages", period: "month", remaining: 20 },
+      { metric: "voice_in", period: "week", remaining: 3 },
+      { metric: "messages_out", period: "day", remaining: 2 },
+      { metric: "messages", period: "week", remaining: 9 },
+      { metric: "messages", period: "day", remaining: 4 },
+    ],
+  });
+  const delivered = probe.sent.join("\n");
+  assert.match(delivered, /Сообщения \(сутки\): осталось 4/u);
+  assert.match(delivered, /Сообщения \(неделя\): осталось 9/u);
+  assert.match(delivered, /Сообщения \(месяц\): осталось 20/u);
+  assert.match(delivered, /Ответы Евы \(сутки\): осталось 2/u);
+  assert.match(delivered, /Голосовые сообщения \(неделя\): осталось 3/u);
+  assert.ok(
+    delivered.indexOf("Сообщения (сутки)") < delivered.indexOf("Сообщения (неделя)")
+      && delivered.indexOf("Сообщения (неделя)") < delivered.indexOf("Сообщения (месяц)"),
+    "периоды должны идти в понятном порядке",
+  );
+});
+
+/*
+ * Кончились сообщения — человеку нужен выход, а не отчёт о лимите.
+ *
+ * Отменённая подписка возвращает человека на бесплатный тариф, и рано
+ * или поздно его лимит кончается. До этого Ева отвечала «лимит
+ * закончился, проверьте /balance»: что делать дальше, человек должен
+ * был додуматься сам.
+ */
+test("исчерпанный лимит приходит вместе с предложением оплаты", async () => {
+  const probe = await runTelegramTurn(undefined, {
+    quota: [{ metric: "messages", remaining: 0 }],
+    offers: [{ plan: "plus", period: "month", stars: 500, title: "Ева Плюс — месяц" }],
+  });
+  assert.deepEqual(probe.result, { status: "ignored" });
+  const delivered = probe.sent.join("\n");
+  assert.match(delivered, /подписку прямо здесь/u, "предложение не отправлено");
+  assert.equal(probe.markups.length, 1, "кнопка оплаты не приложена");
+  assert.match(JSON.stringify(probe.markups[0]), /buy:plus:month/u);
+});
+
+test("исчерпанный дневной лимит нельзя обойти свободным месячным", async () => {
+  const probe = await runTelegramTurn(undefined, {
+    // Порядок воспроизводит опасный случай: SQL может вернуть месяц раньше
+    // суток, и прежний find() разрешал ход по первой строке.
+    quota: [
+      { metric: "messages", period: "month", remaining: 60 },
+      { metric: "messages", period: "day", remaining: 0 },
+      { metric: "messages", period: "week", remaining: 0 },
+    ],
+  });
+
+  assert.deepEqual(probe.result, { status: "ignored" });
+  assert.equal(probe.prompts.length, 0, "ход дошёл до модели после исчерпания суток");
+});
+
+test("без настроенных продаж лимит всё равно ведёт к тарифам", async () => {
+  // Человеку, упёршемуся в лимит, нужен путь дальше, а не только
+  // сообщение о том, что путь кончился. Mini App показывает тарифы и
+  // принимает оплату, даже когда звёздных предложений в чате нет.
+  const probe = await runTelegramTurn(undefined, {
+    quota: [{ metric: "messages", remaining: 0 }],
+    appDomain: "app.example.test",
+  });
+  const delivered = probe.sent.join("\n");
+  assert.match(delivered, /по кнопке ниже/u);
+  assert.doesNotMatch(delivered, /подписку прямо здесь/u);
+  assert.equal(probe.markups.length, 1);
+  assert.match(JSON.stringify(probe.markups[0]), /app\.example\.test/u);
+});
+
+test("без Mini App и без продаж лимит просто объясняют", async () => {
+  const probe = await runTelegramTurn(undefined, {
+    quota: [{ metric: "messages", remaining: 0 }],
+  });
+  const delivered = probe.sent.join("\n");
+  assert.match(delivered, /обновится/u);
+  assert.equal(probe.markups.length, 0, "обещать оплату, которой нет, нельзя");
 });

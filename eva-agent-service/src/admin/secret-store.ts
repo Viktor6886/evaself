@@ -30,7 +30,12 @@ export interface SecretStoreOptions {
 }
 
 const KNOWN_SECRETS: Readonly<Record<string, string[]>> = {
-  sec_eva_telegram_bot_token: ["telegram-runtime"],
+  // Токен бота нужен двум службам: рантайм им отвечает, а media-service
+  // скачивает им голосовое у Telegram. Прежняя запись называла одну
+  // выдуманную цель «telegram-runtime», и вторая служба выпадала из
+  // виду — ровно так голосовые и перестали распознаваться после
+  // переезда на другого бота.
+  sec_eva_telegram_bot_token: ["agent-runtime", "media-service"],
   sec_eva_telegram_webhook_secret: ["telegram-runtime"],
   sec_eva_agent_api_key: ["agent-runtime"],
   sec_letta_app_server_token: ["agent-runtime", "app-server"],
@@ -41,9 +46,7 @@ const KNOWN_SECRETS: Readonly<Record<string, string[]>> = {
   sec_searxng_secret: ["searxng"],
   sec_media_asr_api_key: ["media-service"],
   sec_media_tts_api_key: ["media-service"],
-  sec_letta_ui_password: ["letta-ui"],
-  sec_lava_webhook_user: ["payment-runtime"],
-  sec_lava_webhook_password: ["payment-runtime"],
+  sec_letta_ui_password: ["admin-api"],
   sec_postgres_super_password: ["postgres"],
   sec_eva_db_password: ["postgres", "agent-runtime", "admin-api"],
   sec_eva_db_readonly_password: ["postgres"],

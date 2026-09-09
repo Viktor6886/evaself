@@ -6,6 +6,7 @@ import {
   OutboundGateway,
 } from "../dist/admin/outbound-gateway.js";
 import { optionalIntegrationEnabled } from "../dist/admin/health-worker.js";
+import { OperationService } from "../dist/admin/operation-service.js";
 import {
   SERVICES,
   statusColor,
@@ -112,4 +113,51 @@ test("OutboundGateway повторно проверяет redirect и не сл�
     ),
   );
   assert.equal(calls, 1);
+});
+
+/*
+ * Вид операции, который пишет панель, обязан быть в схеме.
+ *
+ * Кнопки «Запустить» и «Остановить» падали именно здесь: `lifecycle()`
+ * передаёт действие в `admin_operations.kind`, а CHECK колонки знал
+ * только `restart`. Оператор получал «внутренняя ошибка», в журнале
+ * лежало нарушение ограничения — и связать одно с другим было нечем.
+ *
+ * Поддельная база ограничений схемы не проверяет, поэтому сама вставка
+ * проверяется на живом PostgreSQL (`scripts/ci/test-operation-kinds.sql`).
+ * Здесь — вторая половина той же пары: что сервис не начал писать вид,
+ * которого в списке нет. Список продублирован намеренно: тест обязан
+ * сломаться, когда его меняют, — иначе он подтвердит любое расхождение.
+ */
+test("панель пишет только те виды операций, которые знает схема", async () => {
+  const written: string[] = [];
+  const pool = {
+    query: async (sql: string, values: unknown[] = []) => {
+      if (sql.includes("INSERT INTO admin_operations")) written.push(String(values[1]));
+      return { rows: [], rowCount: 0 };
+    },
+    connect: async () => ({ query: async () => ({ rows: [], rowCount: 0 }), release() {} }),
+  };
+  const service = new OperationService(
+    pool as never,
+    { publish: async () => 1 } as never,
+    { call: async () => ({}) } as never,
+  );
+
+  await service.restart("searxng", "actor");
+  await service.start("searxng", "actor");
+  await service.stop("searxng", "actor");
+  await service.createBackup("actor", undefined);
+  await service.checkUpdate("actor");
+  await service.installUpdate("actor", undefined);
+
+  // Ровно те значения, которые перечисляет CHECK в миграции 068.
+  const allowed = new Set([
+    "restart", "start", "stop", "backup", "restore",
+    "update-check", "update", "rollback", "migration",
+  ]);
+  assert.deepEqual(written, ["restart", "start", "stop", "backup", "update-check", "update"]);
+  for (const kind of written) {
+    assert.ok(allowed.has(kind), `вид «${kind}» схема не примет: кнопка не сработает`);
+  }
 });

@@ -79,3 +79,37 @@ def test_a_corrupt_file_falls_back_instead_of_crashing(tmp_path):
     path = tmp_path / "runtime-config.json"
     path.write_text("{ это не json")
     assert RuntimeConfig(path, ENV).asr()["model"] == "whisper-1"
+
+
+def test_bot_token_overrides_environment(tmp_path):
+    """Переезд на другого бота доходит до распознавания голоса.
+
+    Голосовое сервис скачивает у Telegram сам. Пока токен читался из
+    окружения один раз при импорте, смена бота означала, что getFile
+    отвечает отказом, а человек видит общее «не получилось распознать» —
+    без единого указания на причину.
+    """
+    config = RuntimeConfig(
+        tmp_path / "runtime.json",
+        {"telegram": {"bot_token": "СТАРЫЙ"}},
+    )
+    assert config.telegram()["bot_token"] == "СТАРЫЙ"
+
+    applied = config.update({"telegram": {"bot_token": "НОВЫЙ"}})
+    assert applied == {"telegram": ["bot_token"]}
+    assert config.telegram()["bot_token"] == "НОВЫЙ"
+
+    # Пустое значение возвращает к окружению, а не стирает токен: иначе
+    # очистку поля нельзя было бы отличить от «не задавал».
+    config.update({"telegram": {"bot_token": ""}})
+    assert config.telegram()["bot_token"] == "СТАРЫЙ"
+
+
+def test_bot_token_never_leaves_in_plain_text(tmp_path):
+    config = RuntimeConfig(
+        tmp_path / "runtime.json",
+        {"telegram": {"bot_token": "123:секрет"}},
+    )
+    described = config.describe()
+    assert described["telegram"] == {"bot_token": "configured"}
+    assert "секрет" not in str(described)

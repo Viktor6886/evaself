@@ -13,6 +13,7 @@
 import type pg from "pg";
 
 import { adminBadRequest, AdminApiError } from "./errors.js";
+import { sanitizeParameters } from "./provider-safe.js";
 
 /** Поля llm_providers, которые роутер использует и админ может менять. */
 const NUMERIC_FIELDS = [
@@ -29,6 +30,10 @@ const NUMERIC_FIELDS = [
 
 /** Те же, но допускающие NULL — «ограничения нет». */
 const NULLABLE_NUMERIC_FIELDS = [
+  // Цена кэшированного входа. NULL — не задана, и такой вход считается
+  // по обычной ставке; ноль — законное значение: у части провайдеров
+  // чтение кэша бесплатно.
+  "price_cached_in_micro",
   "max_rpm",
   "max_tpm",
   "max_latency_ms",
@@ -101,14 +106,43 @@ export class LlmRouterAdminService {
   // -----------------------------------------------------------------
   // состояние
   // -----------------------------------------------------------------
-  /** Всё, что нужно вкладке «Искусственный интеллект», одним запросом. */
+  /**
+   * Всё, что нужно вкладке «Искусственный интеллект», одним запросом.
+   *
+   * Провайдер приходит одной записью, а не тремя.
+   *
+   * Раньше один и тот же провайдер существовал в трёх видах: конфигурация
+   * из `/providers`, состояние из `v_llm_provider_health` и место в
+   * цепочках из `routes[].chain`. Все три читают одну таблицу
+   * `llm_providers`, но склеивал их браузер: карточка показывала итог
+   * проверки модели, отдельный список ниже — состояние breaker'а, а
+   * маршруты приходилось вычислять пересканированием всех цепочек на
+   * каждого провайдера. Три представления расходились в трактовке и жили
+   * в разных концах длинной страницы.
+   *
+   * Здесь они сводятся один раз и на сервере: у клиента остаётся один
+   * массив, в котором про провайдера известно всё.
+   */
   async state(): Promise<Record<string, unknown>> {
-    const [health, routes, chains, recent, settings] = await Promise.all([
-      this.pool.query<RouterHealthRow>(
-        `SELECT health.*, provider.protocol, provider.context_window,
+    const [providers, routes, chains, recent, settings] = await Promise.all([
+      this.pool.query<Record<string, unknown>>(
+        `SELECT health.*,
+                provider.protocol, provider.base_url, provider.context_window,
+                provider.quality_tier, provider.sensitive_data_allowed,
                 provider.supports_tools, provider.supports_json,
                 provider.supports_vision, provider.supports_streaming,
-                provider.sensitive_data_allowed
+                provider.max_output_tokens, provider.max_retries,
+                provider.max_concurrency, provider.max_rpm, provider.max_tpm,
+                provider.price_in_micro, provider.price_out_micro,
+                provider.price_cached_in_micro,
+                provider.additional_parameters,
+                provider.is_active,
+                -- Только факт: сам ключ write-only и наружу не выходит.
+                (provider.api_key_encrypted IS NOT NULL
+                 AND btrim(provider.api_key_encrypted) <> '') AS api_key_configured,
+                provider.last_checked_at, provider.last_check_ok,
+                provider.last_check_status, provider.last_check_message,
+                provider.created_at, provider.updated_at
            FROM v_llm_provider_health health
            JOIN llm_providers provider ON provider.id = health.id
           ORDER BY health.priority, lower(health.name)`,
@@ -143,16 +177,48 @@ export class LlmRouterAdminService {
       this.routingSettings(),
     ]);
 
-    const byRoute = new Map<string, unknown[]>();
+    const byRoute = new Map<string, Array<Record<string, unknown>>>();
+    const byProvider = new Map<string, Array<{ code: string; title: string; position: number }>>();
+    const routeTitles = new Map(
+      (routes.rows as Array<Record<string, unknown>>)
+        .map((route) => [String(route.code), String(route.title ?? route.code)]),
+    );
     for (const row of chains.rows as Array<Record<string, unknown>>) {
       const code = String(row.route_code);
       const list = byRoute.get(code) ?? [];
       list.push(row);
       byRoute.set(code, list);
+
+      // Членство в маршрутах считается здесь, один раз на цепочку.
+      // Клиент раньше пересканировал все цепочки на каждого провайдера и
+      // трактовал позиции по-своему в двух разных функциях.
+      const id = String(row.provider_id);
+      const memberships = byProvider.get(id) ?? [];
+      memberships.push({
+        code,
+        title: routeTitles.get(code) ?? code,
+        position: Number(row.position ?? 0),
+      });
+      byProvider.set(id, memberships);
     }
 
+    const singleId = settings.mode === "single" && settings.single_provider_id
+      ? String(settings.single_provider_id)
+      : null;
+
     return {
-      providers: health.rows,
+      providers: providers.rows.map((row) => {
+        const id = String(row.id);
+        const memberships = (byProvider.get(id) ?? [])
+          .sort((left, right) => left.position - right.position);
+        return {
+          ...row,
+          additional_parameters: sanitizeParameters(row.additional_parameters),
+          routes: memberships,
+          single_selected: singleId === id,
+          status: providerStatus(row),
+        };
+      }),
       routes: (routes.rows as Array<Record<string, unknown>>).map((route) => ({
         ...route,
         chain: byRoute.get(String(route.code)) ?? [],
@@ -206,8 +272,35 @@ export class LlmRouterAdminService {
         );
         const row = provider.rows[0];
         if (!row || !row.enabled) throw adminBadRequest("Выбранный provider не существует или выключен");
-        if (!row.supports_tools || !row.supports_json || !row.sensitive_data_allowed) {
-          throw adminBadRequest("Одна модель должна поддерживать tools, JSON и чувствительные данные");
+        // Блокирует только то, без чего Ева не работает вообще.
+        //
+        // Инструменты — единственная такая возможность: без вызова
+        // инструмента не сохранится ни цель, ни напоминание, ни запись
+        // дневника, и Ева превращается в собеседника без рук.
+        if (!row.supports_tools) {
+          throw adminBadRequest(
+            "Единая модель должна уметь вызывать инструменты: без этого не работают "
+            + "цели, напоминания и дневник. Проверьте модель — возможность выясняет проба.",
+          );
+        }
+        // Личные данные — не возможность модели, а решение владельца о
+        // том, что ей можно доверить. Отказ по этому полю раньше приходил
+        // общей фразой про tools и JSON, и человек шёл проверять модель
+        // вместо того, чтобы поставить галочку в её карточке.
+        if (!row.sensitive_data_allowed) {
+          throw adminBadRequest(
+            "Единой модели пойдут все сообщения, включая личные. Разрешите ей личные "
+            + "данные в карточке провайдера («Личные данные разрешены») или выберите другую модель.",
+          );
+        }
+        // Строгий JSON проба считает необязательным: без него Ева
+        // разговаривает и пользуется инструментами, страдают лишь
+        // служебные ответы по схеме. Запрет по нему отсекал рабочие
+        // модели от режима, в котором они прекрасно работают.
+        if (!row.supports_json) {
+          warnings.push(
+            "Модель не подтвердила строгий JSON: ответы по схеме могут приходить текстом",
+          );
         }
         if (!row.supports_vision) warnings.push("Выбранная модель не поддерживает изображения");
         if (!row.supports_streaming) warnings.push("Выбранная модель не поддерживает streaming");
@@ -244,7 +337,7 @@ export class LlmRouterAdminService {
     const window = Math.min(Math.max(1, Math.floor(days)), 90);
     const { rows } = await this.pool.query(
       `SELECT l.period_start, p.name AS provider, l.requests,
-              l.tokens_in, l.tokens_out, l.cost_micro
+              l.tokens_in, l.tokens_out, l.cached_tokens_in, l.cost_micro
          FROM llm_spend_ledger l
          JOIN llm_providers p ON p.id = l.provider_id
         WHERE l.period = 'day'
@@ -321,7 +414,8 @@ export class LlmRouterAdminService {
                   max_rpm, max_tpm, max_output_tokens, max_latency_ms,
                   supports_tools, supports_json, supports_vision, supports_streaming,
                   quality_tier, sensitive_data_allowed, price_in_micro, price_out_micro,
-                  currency, daily_budget_micro, monthly_budget_micro, generation_defaults`,
+                  price_cached_in_micro, currency, daily_budget_micro,
+                  monthly_budget_micro, generation_defaults`,
         values,
       );
       const row = rows[0];
@@ -474,4 +568,54 @@ function asBadRequest(error: unknown, fallback: string): AdminApiError {
     return adminBadRequest(detail ? `${fallback}: нарушено ограничение ${detail}` : fallback);
   }
   throw error;
+}
+
+/**
+ * Итоговое состояние провайдера одной фразой.
+ *
+ * Считается на сервере, а не в браузере, потому что причин две и они из
+ * разных миров. Проверка возможностей спрашивает модель напрямую: умеет
+ * ли она инструменты, поток, изображения, строгий JSON. Circuit breaker
+ * знает, что происходило с ней в работе. Панель показывала их двумя
+ * разными списками в разных концах страницы, и провайдер мог
+ * одновременно быть «работает» в одном и «закрыт после ошибок» в другом.
+ *
+ * Порядок причин — от «ничего не поедет, пока не почините» к «работает».
+ * Он важнее самих ярлыков: первая подходящая причина и есть та, с
+ * которой оператору надо разбираться.
+ *
+ * `detail` разделяет два источника явно, чтобы подробности карточки
+ * могли показать «Проверка модели» и «Router» отдельно и не выдавать
+ * одно за другое.
+ */
+export function providerStatus(row: Record<string, unknown>): {
+  code: string;
+  label: string;
+  color: "green" | "yellow" | "red" | "gray";
+  detail: { check: string | null; router: string | null };
+} {
+  const check = typeof row.last_check_status === "string" ? row.last_check_status : null;
+  const legacyFailed = check === null && row.last_check_ok === false;
+  const breaker = String(row.breaker_state ?? "closed");
+  const detail = {
+    check: check ?? (row.last_check_ok === true ? "ok" : legacyFailed ? "config_error" : null),
+    router: row.pinned_out === true ? "pinned_out" : breaker,
+  };
+  const state = (
+    code: string,
+    label: string,
+    color: "green" | "yellow" | "red" | "gray",
+  ) => ({ code, label, color, detail });
+
+  if (check === "config_error" || legacyFailed) {
+    return state("config_error", "ошибка конфигурации", "red");
+  }
+  if (row.enabled === false) return state("disabled", "выключен вручную", "gray");
+  if (row.pinned_out === true) return state("pinned_out", "снят с автовозврата", "gray");
+  if (breaker === "open") return state("breaker_open", "временно исключён", "red");
+  if (breaker === "half_open") return state("breaker_probe", "пробный запрос", "yellow");
+  if (check === "unavailable") return state("unavailable", "временно недоступен", "yellow");
+  if (check === "limited") return state("limited", "работает с ограничениями", "yellow");
+  if (check === "ok" || row.last_check_ok === true) return state("ok", "работает", "green");
+  return state("unchecked", "не проверялся", "gray");
 }

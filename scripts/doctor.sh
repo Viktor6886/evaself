@@ -57,7 +57,7 @@ fi
 # =====================================================================
 step "Containers"
 # =====================================================================
-EXPECTED=(caddy postgres valkey eva-agent-service llm-router admin-api admin-ui letta-app-server letta-ui webapp searxng crawl4ai media-service backup-service)
+EXPECTED=(caddy postgres valkey eva-agent-service llm-router admin-api admin-ui letta-app-server webapp searxng crawl4ai media-service backup-service)
 for svc in "${EXPECTED[@]}"; do
 	cid="$(compose ps -q "$svc" 2>/dev/null)"
 	if [ -z "$cid" ]; then
@@ -156,7 +156,6 @@ probe "webapp /healthz"   webapp        "http://127.0.0.1:8082/healthz"
 # Роутер — единственная точка выхода к языковым моделям: если он лёг,
 # Ева молчит целиком, поэтому проверка обязательная, а не мягкая.
 probe "llm-router /health" llm-router   "http://127.0.0.1:8073/health"
-probe "letta-ui /healthz" letta-ui      "http://127.0.0.1:8081/healthz"
 
 # Синхронизация персоны: канонический текст личности Евы у уже созданных
 # агентов. Выключенная или сорвавшаяся не видна ни по одному коду ответа
@@ -270,7 +269,11 @@ step "Public HTTPS"
 if [[ "$DOMAIN" == *.localhost ]]; then
 	info "локальный режим: DNS и публичные сертификаты не проверяются"
 else
-	PUBLIC=("site:$DOMAIN" "admin:$DOMAIN/admin/" "webapp:$DOMAIN_APP" "api:$DOMAIN_API/health" "letta:$DOMAIN_LETTA")
+	# Публичных имён три. Панель, Letta и мониторинг живут на одном
+	# домене под одним входом; отдельные поддомены выведены из
+	# эксплуатации и проверяются ниже отдельно — как редирект, а не как
+	# сервис.
+	PUBLIC=("site:$DOMAIN" "admin:$DOMAIN/admin/" "webapp:$DOMAIN_APP" "api:$DOMAIN_API/health")
 	for pair in "${PUBLIC[@]}"; do
 		label="${pair%%:*}"; host="${pair#*:}"
 		code="$(http_status "https://$host" 12)"
@@ -283,19 +286,23 @@ else
 			esac
 			continue
 		fi
-		if [ "$label" = "letta" ]; then
-			case "$code" in
-				401) ok "$label https://$host (401 — защищена, как и задумано)" ;;
-				000) critical "$label https://$host недоступна" ;;
-				*) critical "$label https://$host не защищена ожидаемой Basic Auth (код $code)" ;;
-			esac
-			continue
-		fi
 		case "$code" in
 			200|204|301|302) ok "$label https://$host ($code)" ;;
 			401) ok "$label https://$host (401 — protected, as intended)" ;;
 			000) critical "$label https://$host unreachable (DNS, firewall or certificate)" ;;
 			*) soft "$label https://$host returned $code" ;;
+		esac
+	done
+
+	# Разделы панели — настоящие адреса, а не якоря: Caddy обязан отдать
+	# на них ту же страницу, иначе закладка на /admin/letta вернёт 404, а
+	# в журнале ничего не появится.
+	for section in letta monitoring agents; do
+		code="$(http_status "https://$DOMAIN/admin/$section" 12)"
+		case "$code" in
+			200|204) ok "раздел панели https://$DOMAIN/admin/$section ($code)" ;;
+			000) critical "раздел панели https://$DOMAIN/admin/$section недоступен" ;;
+			*) critical "раздел панели https://$DOMAIN/admin/$section вернул $code" ;;
 		esac
 	done
 
@@ -317,12 +324,21 @@ else
 	done
 fi
 
-if [ -n "${DOMAIN_STATUS:-}" ]; then
-	case ",${COMPOSE_PROFILES:-}," in
-		*,monitoring,*) code="$(http_status "https://$DOMAIN_STATUS" 12)"; info "status page: $code" ;;
-		*) info "status page disabled (monitoring profile off)" ;;
+# Выведенные из эксплуатации поддомены. Пустое значение — норма и
+# ничего не проверяется: имя не публикуется вовсе. Непустое обязано
+# отвечать редиректом на раздел панели — установка, где он не работает,
+# теряет закладки молча.
+for pair in "letta:${DOMAIN_LETTA:-}:/admin/letta" "status:${DOMAIN_STATUS:-}:/admin/monitoring"; do
+	label="${pair%%:*}"; rest="${pair#*:}"
+	host="${rest%%:*}"; target="${rest#*:}"
+	[ -n "$host" ] || { info "$label: поддомен не публикуется (DNS-запись можно удалить)"; continue; }
+	code="$(http_status "https://$host" 12)"
+	case "$code" in
+		301|302|307|308) ok "$label https://$host → https://$DOMAIN$target ($code)" ;;
+		000) info "$label https://$host не отвечает — если DNS-запись удалена, это ожидаемо" ;;
+		*) soft "$label https://$host вернул $code вместо редиректа на $target" ;;
 	esac
-fi
+done
 
 # =====================================================================
 step "Security"

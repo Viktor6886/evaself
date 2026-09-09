@@ -19,8 +19,34 @@ import type {
   ProviderProfile,
 } from "../types.js";
 import { ProviderError } from "../types.js";
-import { classifyHttp, parameterValue, providerParameters, readSse } from "./shared.js";
+import {
+  classifyHttp, parameterValue, promptCacheControl, providerParameters, providerUrl, readSse,
+} from "./shared.js";
 import { decodeDataUri } from "../content.js";
+
+/**
+ * Учёт токенов Anthropic.
+ *
+ * `input_tokens` здесь — только та часть запроса, которую модель читала
+ * заново: прочитанное из кэша лежит отдельным `cache_read_input_tokens`,
+ * а запись нового кэша — в `cache_creation_input_tokens`. Сложить их
+ * обязательно, иначе журнал показывает вход втрое меньше настоящего и
+ * счёт провайдера с ним не сходится.
+ */
+interface AnthropicUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+}
+
+function inputUsage(usage: AnthropicUsage | undefined): { tokens_in: number; cached_tokens_in?: number } {
+  const fresh = usage?.input_tokens ?? 0;
+  const read = usage?.cache_read_input_tokens;
+  const created = usage?.cache_creation_input_tokens ?? 0;
+  const tokens_in = fresh + (read ?? 0) + created;
+  return read === undefined ? { tokens_in } : { tokens_in, cached_tokens_in: read };
+}
 
 const API_VERSION = "2023-06-01";
 
@@ -118,7 +144,51 @@ function safeJson(raw: string): unknown {
   }
 }
 
-function buildBody(provider: ProviderProfile, request: LlmRequest, stream: boolean) {
+type CacheControl = { type: "ephemeral"; ttl?: "1h" };
+
+/**
+ * Блоки, на которые Anthropic разрешает ставить точку кэширования.
+ *
+ * Блок размышления в этот список не входит: он возвращается модели как
+ * есть, и лишнее поле в нём — отказ разбора, а не экономия.
+ */
+const CACHEABLE_BLOCKS: ReadonlySet<string> = new Set([
+  "text", "image", "tool_use", "tool_result", "document",
+]);
+
+/**
+ * Пометить последний пригодный блок последнего сообщения.
+ *
+ * Кэш Anthropic — совпадение по префиксу: точка в конце истории делает
+ * весь предыдущий разговор читаемым из кэша на следующем обращении.
+ * Именно это нужно ходу с инструментами, где каждый вызов — отдельное
+ * обращение с той же историей плюс один новый результат: платится
+ * только приращение.
+ *
+ * Идём с конца и пропускаем непригодные блоки: последним в сообщении
+ * может оказаться блок размышления. Если непригодно всё сообщение —
+ * отступаем на предыдущее: точка на шаг раньше кэширует почти тот же
+ * префикс, а её отсутствие не кэширует ничего.
+ */
+function markConversationTail(messages: WireMessage[], cache: CacheControl): void {
+  for (let message = messages.length - 1; message >= 0; message -= 1) {
+    const content = messages[message]!.content;
+    for (let index = content.length - 1; index >= 0; index -= 1) {
+      const block = content[index] as { type?: unknown };
+      if (typeof block.type === "string" && CACHEABLE_BLOCKS.has(block.type)) {
+        Object.assign(block, { cache_control: cache });
+        return;
+      }
+    }
+  }
+}
+
+function buildBody(
+  provider: ProviderProfile,
+  request: LlmRequest,
+  stream: boolean,
+  cache: CacheControl | null,
+) {
   let system = request.system_prompt.trim();
   if (request.response_format) {
     // response_format здесь нет; контракт задаётся словами, а проверяет его
@@ -135,15 +205,28 @@ function buildBody(provider: ProviderProfile, request: LlmRequest, stream: boole
       "contents", "generationConfig", "input", "max_completion_tokens", "max_output_tokens",
       "response_format", "system", "systemInstruction", "tools",
     ]);
+  const messages = toWireMessages(request);
   const body: Record<string, unknown> = {
     ...parameters,
     model: provider.model,
     max_tokens: request.max_tokens,
     temperature: parameterValue(parameters, "temperature", request.temperature),
-    messages: toWireMessages(request),
+    messages,
     stream,
   };
-  if (system) body.system = system;
+  // Порядок рендера у Anthropic — tools, system, messages. Поэтому точка
+  // на системном блоке закрывает собой И описания инструментов: отдельная
+  // точка на инструментах тратила бы одну из четырёх впустую.
+  //
+  // Системный промпт, персона, блоки памяти и описания инструментов
+  // одинаковы в каждом обращении — это самая большая постоянная часть
+  // запроса, и до сих пор она оплачивалась целиком в каждом шаге
+  // каждого хода.
+  if (system) {
+    body.system = cache
+      ? [{ type: "text", text: system, cache_control: cache }]
+      : system;
+  }
   if (request.tools.length) {
     body.tools = request.tools.map((tool) => ({
       name: tool.name,
@@ -151,8 +234,19 @@ function buildBody(provider: ProviderProfile, request: LlmRequest, stream: boole
       input_schema: tool.parameters,
     }));
   }
+  if (cache) markConversationTail(messages, cache);
   return body;
 }
+
+/**
+ * Провайдеры, ответившие отказом на `cache_control`.
+ *
+ * Совместимость с Anthropic заявляют многие endpoint'ы, и часть из них
+ * разбирает тело строго: незнакомое поле — 400 на КАЖДОМ обращении.
+ * Один отказ выключает кэш для этого провайдера до перезапуска, и
+ * запрос повторяется без кэша, а не падает человеку в лицо.
+ */
+const cacheRejected = new Set<string>();
 
 async function post(
   provider: ProviderProfile,
@@ -160,7 +254,8 @@ async function post(
   stream: boolean,
   signal: AbortSignal,
 ): Promise<Response> {
-  const url = `${provider.base_url.replace(/\/+$/, "")}/messages`;
+  const url = providerUrl(provider.base_url, "messages");
+  const cache = cacheRejected.has(provider.id) ? null : promptCacheControl(provider);
   let response: Response;
   try {
     response = await (provider.fetcher ?? fetch)(url, {
@@ -171,7 +266,7 @@ async function post(
         "x-api-key": provider.api_key,
         "anthropic-version": API_VERSION,
       },
-      body: JSON.stringify(buildBody(provider, request, stream)),
+      body: JSON.stringify(buildBody(provider, request, stream, cache)),
       signal,
     });
   } catch (error) {
@@ -194,9 +289,24 @@ async function post(
     } catch {
       detail = "";
     }
+    // Endpoint не понял cache_control — выключаем кэш для него и
+    // повторяем тот же запрос без кэша. Повтор ровно один: провайдер
+    // уже в списке отказавших, и рекурсия дальше первого раза не идёт.
+    if (cache && response.status === 400 && /cache_control/i.test(`${detail}\n${raw}`)) {
+      cacheRejected.add(provider.id);
+      return await post(provider, request, stream, signal);
+    }
     throw classifyHttp(response.status, detail, raw, response.headers.get("retry-after"));
   }
   return response;
+}
+
+/**
+ * Забыть накопленные отказы. Нужно тестам и смене настроек провайдера:
+ * администратор, поправивший endpoint, не должен ждать перезапуска.
+ */
+export function resetPromptCacheRejections(): void {
+  cacheRejected.clear();
 }
 
 function stopReason(raw: string | undefined): LlmResponse["finish_reason"] {
@@ -223,7 +333,7 @@ export const anthropicAdapter: ProviderAdapter = {
       content?: Array<{ type?: string; text?: string; id?: string; name?: string; input?: unknown }>;
       stop_reason?: string;
       model?: string;
-      usage?: { input_tokens?: number; output_tokens?: number };
+      usage?: AnthropicUsage;
     };
     try {
       body = JSON.parse(raw) as typeof body;
@@ -257,7 +367,7 @@ export const anthropicAdapter: ProviderAdapter = {
       tool_calls: toolCalls,
       finish_reason: stopReason(body.stop_reason),
       usage: {
-        tokens_in: body.usage?.input_tokens ?? 0,
+        ...inputUsage(body.usage),
         tokens_out: body.usage?.output_tokens ?? 0,
       },
       model: body.model ?? provider.model,
@@ -274,7 +384,7 @@ export const anthropicAdapter: ProviderAdapter = {
     let text = "";
     let reason: LlmResponse["finish_reason"] = "unknown";
     let model = provider.model;
-    const usage = { tokens_in: 0, tokens_out: 0 };
+    const usage: LlmResponse["usage"] = { tokens_in: 0, tokens_out: 0 };
     // Аргументы tool_use приходят кусками input_json_delta.
     const partial = new Map<number, { id: string; name: string; json: string }>();
     const thinking = new Map<number, Record<string, unknown>>();
@@ -287,7 +397,7 @@ export const anthropicAdapter: ProviderAdapter = {
         index?: number;
         delta?: { type?: string; text?: string; thinking?: string; signature?: string; partial_json?: string; stop_reason?: string };
         content_block?: Record<string, unknown> & { type?: string; id?: string; name?: string };
-        message?: { model?: string; usage?: { input_tokens?: number } };
+        message?: { model?: string; usage?: AnthropicUsage };
         usage?: { output_tokens?: number };
       };
       try {
@@ -298,7 +408,13 @@ export const anthropicAdapter: ProviderAdapter = {
 
       if (parsed.type === "message_start") {
         model = parsed.message?.model ?? model;
-        usage.tokens_in = parsed.message?.usage?.input_tokens ?? usage.tokens_in;
+        if (parsed.message?.usage) {
+          const counted = inputUsage(parsed.message.usage);
+          usage.tokens_in = counted.tokens_in;
+          if (counted.cached_tokens_in !== undefined) {
+            usage.cached_tokens_in = counted.cached_tokens_in;
+          }
+        }
       }
       if (parsed.type === "content_block_start" && parsed.content_block?.type === "tool_use") {
         partial.set(parsed.index ?? 0, {

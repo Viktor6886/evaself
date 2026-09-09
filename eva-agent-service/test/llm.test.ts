@@ -6,8 +6,11 @@ import {
   SecretBox,
   catalogVisionHint,
   modelHandle,
+  keyPool,
+  probeGeminiProvider,
   probeOpenAiProvider,
 } from "../dist/llm.js";
+import { summarize } from "../dist/llm/capability-probe.js";
 
 test("OpenRouter-style input_modalities is a hint, not a model-id rule", () => {
   const models = [{
@@ -63,6 +66,135 @@ test("provider probe allows manual model entry when /models is unsupported", asy
   );
   assert.equal(result.ok, true);
   assert.equal(result.models_supported, false);
+});
+
+/**
+ * У Google другой ключевой заголовок и другая форма ответа. Послать сюда
+ * `Authorization: Bearer` — получить 401 и объявить недоступным
+ * провайдера, который вполне доступен.
+ */
+test("provider probe reads a native Gemini /models response", async () => {
+  let headers: Record<string, string> = {};
+  const result = await probeGeminiProvider(
+    { baseUrl: "https://generativelanguage.googleapis.com/v1beta", apiKey: "hidden", timeoutMs: 1000 },
+    (async (url: string | URL | Request, init?: RequestInit) => {
+      assert.equal(String(url), "https://generativelanguage.googleapis.com/v1beta/models");
+      headers = (init?.headers ?? {}) as Record<string, string>;
+      return new Response(JSON.stringify({
+        models: [
+          { name: "models/gemini-3.7-flash", inputTokenLimit: 1_000_000 },
+          { name: "models/gemini-3.7-pro" },
+        ],
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }) as typeof fetch,
+  );
+
+  assert.equal(headers["x-goog-api-key"], "hidden");
+  assert.equal(headers.Authorization, undefined, "Bearer у Google означает 401");
+  assert.equal(result.ok, true);
+  // Префикс `models/` снят: адаптер подставляет имя в путь
+  // `/models/{model}:generateContent`, и с ним вышло бы `models%2F…`.
+  assert.deepEqual(result.models.map((item) => item.id), ["gemini-3.7-flash", "gemini-3.7-pro"]);
+});
+
+test("gemini probe reports an HTTP failure instead of an empty catalogue", async () => {
+  const result = await probeGeminiProvider(
+    { baseUrl: "https://generativelanguage.googleapis.com/v1beta", apiKey: "bad", timeoutMs: 1000 },
+    (async () => new Response("", { status: 403 })) as typeof fetch,
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.status_code, 403);
+  assert.deepEqual(result.models, []);
+});
+
+/**
+ * Проба обходит пул так же, как роутер.
+ *
+ * Иначе панель врёт: первый ключ упирается в квоту, роутер берёт
+ * следующий и Ева отвечает, а «Проверить» бьёт в тот же исчерпанный ключ
+ * и показывает «временно недоступен». Человек видит рабочего провайдера
+ * с красной подписью и не знает, кому верить.
+ */
+test("исчерпанный ключ уводит пробу на следующий ключ пула", async () => {
+  const master = "q".repeat(64);
+  const box = new SecretBox(master);
+  const tried: string[] = [];
+  const row = {
+    ...providerRow("pooled", true, box.encrypt("dead")),
+    api_keys_encrypted: [box.encrypt("dead"), box.encrypt("alive")],
+  };
+  const manager = new LlmManager(
+    config(master),
+    { getLlmProvider: async () => row, getActiveLlmProvider: async () => row,
+      recordLlmCheck: async () => row, setLlmProviderCapabilities: async () => row } as never,
+    { setDefaultModel() {} } as never,
+    logger() as never,
+    {
+      probeProvider: async (_provider: unknown, apiKey: string) => {
+        tried.push(apiKey);
+        return { ok: true, models_supported: true, models: [], message: "ok", status_code: 200 };
+      },
+      probeCapabilities: async (_provider: unknown, apiKey: string) => (apiKey === "alive"
+        ? { ok: true, status: "ok", checks: [], message: "", warnings: "",
+            detected: { vision: null, streaming: null, tools: null, json: null } }
+        : { ok: false, status: "unavailable", checks: [], message: "квота", warnings: "",
+            detected: { vision: null, streaming: null, tools: null, json: null },
+            keyExhausted: true }),
+    } as never,
+  );
+
+  const result = await manager.test(row.id);
+  assert.deepEqual(tried, ["dead", "alive"], "пул перебирается по порядку");
+  assert.equal(result.ok, true, "рабочий ключ найден — провайдер исправен");
+});
+
+test("занятый сервис пул не перебирает", async () => {
+  const master = "w".repeat(64);
+  const box = new SecretBox(master);
+  const tried: string[] = [];
+  const row = {
+    ...providerRow("busy", true, box.encrypt("k1")),
+    api_keys_encrypted: [box.encrypt("k1"), box.encrypt("k2"), box.encrypt("k3")],
+  };
+  const manager = new LlmManager(
+    config(master),
+    { getLlmProvider: async () => row, getActiveLlmProvider: async () => row,
+      recordLlmCheck: async () => row, setLlmProviderCapabilities: async () => row } as never,
+    { setDefaultModel() {} } as never,
+    logger() as never,
+    {
+      probeProvider: async (_provider: unknown, apiKey: string) => {
+        tried.push(apiKey);
+        return { ok: true, models_supported: true, models: [], message: "ok", status_code: 200 };
+      },
+      // 503 high demand: к ключу отношения не имеет, следующий ответит
+      // тем же. Полная проба десять раз — минуты ожидания ни за что.
+      probeCapabilities: async () => ({
+        ok: false, status: "unavailable", checks: [], message: "503 high demand", warnings: "",
+        detected: { vision: null, streaming: null, tools: null, json: null },
+        keyExhausted: false,
+      }),
+    } as never,
+  );
+
+  await manager.test(row.id);
+  assert.deepEqual(tried, ["k1"], "занятость сервиса не повод жечь пул");
+});
+
+test("пул ключей сохраняет порядок, убирает повторы и держит предел", () => {
+  // Порядок значим: роутер обходит пул сверху вниз.
+  assert.deepEqual(keyPool("main", ["spare-1", "spare-2"]), ["main", "spare-1", "spare-2"]);
+  // Повтор выбрасывается, а не переставляется.
+  assert.deepEqual(keyPool("main", ["main", "spare"]), ["main", "spare"]);
+  // Пустые строки — след копирования из документа, а не ключ.
+  assert.deepEqual(keyPool("main", ["", "  ", "spare"]), ["main", "spare"]);
+  // Основного может не быть: тогда первый запасной становится основным.
+  assert.deepEqual(keyPool("", ["only"]), ["only"]);
+  assert.throws(() => keyPool("", []), /хотя бы один/u);
+  assert.throws(
+    () => keyPool("main", Array.from({ length: 10 }, (_, index) => `k${index}`)),
+    /не больше десяти/u,
+  );
 });
 
 test("public provider responses never expose ciphertext or API key", async () => {
@@ -179,9 +311,12 @@ test("startup discovers legacy vision=false before Letta opens a session", async
   const order: string[] = [];
   const db = {
     getActiveLlmProvider: async () => row,
-    setLlmProviderVisionCapability: async (_id: string, value: boolean) => {
-      order.push(`persist:${value}`);
-      return { ...row, supports_vision: value };
+    setLlmProviderCapabilities: async (
+      _id: string,
+      values: { vision?: boolean },
+    ) => {
+      order.push(`persist:${values.vision}`);
+      return { ...row, supports_vision: values.vision === true };
     },
   };
   const letta = {
@@ -218,9 +353,12 @@ test("startup clears stale vision=true after factual probe fails", async () => {
     config(master),
     {
       getActiveLlmProvider: async () => row,
-      setLlmProviderVisionCapability: async (_id: string, value: boolean) => {
-        persisted.push(value);
-        return { ...row, supports_vision: value };
+      setLlmProviderCapabilities: async (
+        _id: string,
+        values: { vision?: boolean },
+      ) => {
+        persisted.push(values.vision === true);
+        return { ...row, supports_vision: values.vision === true };
       },
     } as never,
     { setDefaultModel() {} } as never,
@@ -241,7 +379,7 @@ test("activation persists discovered vision before Router catalog is refreshed",
   const db = {
     getLlmProvider: async () => candidate,
     getActiveLlmProvider: async () => null,
-    setLlmProviderVisionCapability: async () => {
+    setLlmProviderCapabilities: async () => {
       order.push("persist-vision");
       return { ...candidate, supports_vision: true };
     },
@@ -270,12 +408,11 @@ test("activation persists discovered vision before Router catalog is refreshed",
       probeProvider: async () => ({
         ok: true, models_supported: true, models: [], message: "ok", status_code: 200,
       }),
-      probeCapabilities: async () => ({
-        ok: true,
-        checks: [{ name: "vision", status: "ok", detail: "image recognized", blocking: false }],
-        message: "",
-        warnings: "",
-      }),
+      // Результат собирается настоящей сводкой: подделанная форма разошлась
+      // бы с рабочей и перестала проверять то, ради чего тест написан.
+      probeCapabilities: async () => summarize([
+        { name: "vision", status: "ok", detail: "image recognized", blocking: false },
+      ]),
     },
   );
 
@@ -323,3 +460,86 @@ function logger() {
     error() {},
   };
 }
+
+/**
+ * Старт сервиса выясняет у активной модели только зрение.
+ *
+ * Раньше он писал заодно «не умеет инструменты, поток и строгий JSON» —
+ * просто потому, что этих проверок в сводке не было. Установка в режиме
+ * одной модели после этого отвечала пятисоткой на каждое сообщение:
+ * роутер отсекает провайдера без инструментов от всех ходов, а панель не
+ * даёт пересохранить режим, пока у модели нет инструментов.
+ */
+test("старт выясняет зрение и не трогает остальные возможности", async () => {
+  const master = "v".repeat(64);
+  const row = {
+    ...providerRow("active", true, new SecretBox(master).encrypt("provider-key")),
+    supports_vision: false, supports_tools: true, supports_json: true, supports_streaming: true,
+  };
+  const written: Array<Record<string, unknown>> = [];
+  const manager = new LlmManager(
+    config(master),
+    {
+      getActiveLlmProvider: async () => row,
+      setLlmProviderCapabilities: async (_id: string, values: Record<string, unknown>) => {
+        written.push(values);
+        return { ...row, supports_vision: true };
+      },
+    } as never,
+    { setDefaultModel() {} } as never,
+    logger() as never,
+    {
+      probeVision: async () => ({
+        name: "vision", status: "ok", detail: "image recognized", blocking: false,
+      }),
+    },
+  );
+
+  await manager.initializeDefaultModel();
+
+  assert.deepEqual(written, [{ vision: true }], "старт вправе записать только проверенное зрение");
+});
+
+/**
+ * Панель не позволяет снять инструменты у модели, на которой держится
+ * установка (`updateProvider`). Проба писала в ту же колонку мимо этой
+ * проверки, и выйти из тупика было нельзя: роутер модель не берёт,
+ * панель режим не пересохраняет.
+ */
+test("проба не выключает инструменты у модели режима одной модели", async () => {
+  const master = "t".repeat(64);
+  const row = {
+    ...providerRow("selected", true, new SecretBox(master).encrypt("provider-key")),
+    supports_vision: false, supports_tools: true,
+  };
+  const written: Array<Record<string, unknown>> = [];
+  const manager = new LlmManager(
+    config(master),
+    {
+      getLlmProvider: async () => row,
+      isLlmSingleProviderSelected: async () => true,
+      setLlmProviderCapabilities: async (_id: string, values: Record<string, unknown>) => {
+        written.push(values);
+        return { ...row, ...values };
+      },
+      recordLlmCheck: async () => undefined,
+    } as never,
+    { setDefaultModel() {} } as never,
+    logger() as never,
+    {
+      probeProvider: async () => ({
+        ok: true, models_supported: true, models: [], message: "ok", status_code: 200,
+      }),
+      probeCapabilities: async () => summarize([
+        { name: "completion", status: "ok", detail: "ответ получен", blocking: true },
+        { name: "vision", status: "ok", detail: "изображение распознано", blocking: false },
+        { name: "tool_call", status: "failed", detail: "модель не вызвала инструмент", blocking: true },
+        { name: "tool_result_loop", status: "failed", detail: "вызова инструмента не было", blocking: true },
+      ]),
+    },
+  );
+
+  await manager.test(row.id);
+
+  assert.deepEqual(written, [{ vision: true }], "выясненное зрение записывается, инструменты — нет");
+});

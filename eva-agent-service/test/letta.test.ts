@@ -888,3 +888,63 @@ test("persona sync preserves frontmatter and commits only managed MemFS files", 
   assert.deepEqual(committed, ["system/persona.md", "system/therapeutic_framework.md"]);
   assert.equal(await readFile(join(root, "unrelated.md"), "utf8"), "user change\n");
 });
+
+/*
+ * Сохранение персоны не обрывает чужой разговор.
+ *
+ * `setCanonicalContext` выводит из обращения открытые сессии: они
+ * созданы с прежним текстом, и выдавать их следующему ходу нельзя.
+ * Соблазн закрыть их сразу опасен: `EVA_SAFE_SESSION_MANAGER` выключен
+ * по умолчанию, и `closeAllSessions()` закрывает в том числе ту сессию,
+ * в которой прямо сейчас идёт ход. Человек в этот момент ждёт ответа —
+ * а сохранение персоны это ровно тот момент, когда с Евой кто-то
+ * разговаривает.
+ *
+ * Занятая сессия обязана дожить до конца хода и не достаться
+ * следующему; свободная — закрыться сразу.
+ */
+test("смена канонического текста не обрывает идущий ход", () => {
+  const service = new LettaService(
+    {
+      appServerUrl: "ws://example.invalid/ws",
+      appServerToken: "",
+      appServerRequestTimeoutMs: 1000,
+      model: "",
+      sessionPoolSize: 5,
+      sessionIdleMs: 1000,
+      turnTimeoutMs: 1000,
+      // Именно так и стоит на обычной установке.
+      safeSessionManager: false,
+    } as never,
+    { debug() {}, info() {}, warn() {}, error() {} },
+    "персона до правки",
+    SYSTEM_PROMPT,
+  );
+
+  const closed: string[] = [];
+  const sessions = (service as unknown as {
+    sessions: Map<string, { activeTurns: number; closing: boolean; session: { close(): void } }>;
+  }).sessions;
+  sessions.set("conv-busy", {
+    activeTurns: 1,
+    closing: false,
+    session: { close: () => closed.push("conv-busy") },
+  });
+  sessions.set("conv-idle", {
+    activeTurns: 0,
+    closing: false,
+    session: { close: () => closed.push("conv-idle") },
+  });
+
+  assert.equal(service.setCanonicalContext({ persona: "персона после правки" }), true);
+
+  assert.deepEqual(closed, ["conv-idle"], "закрыта сессия, в которой шёл ход");
+  assert.equal(sessions.has("conv-idle"), false, "свободная сессия осталась в пуле");
+  assert.equal(sessions.get("conv-busy")?.closing, true, "занятая сессия не помечена к закрытию");
+  assert.equal(sessions.get("conv-busy")?.activeTurns, 1, "ход прерван");
+
+  // Новый текст действует немедленно — его получит следующий агент.
+  assert.equal(service.canonicalContext().persona, "персона после правки");
+  // Повторное применение того же текста ничего не трогает.
+  assert.equal(service.setCanonicalContext({ persona: "персона после правки" }), false);
+});

@@ -1,4 +1,8 @@
 import {
+  sameAllowedUpdates,
+  TELEGRAM_ALLOWED_UPDATES,
+} from "./telegram/allowed-updates.js";
+import {
   formatEvaReply,
   isValidTelegramHtml,
   richMarkdownForTelegram,
@@ -69,6 +73,7 @@ export interface TelegramMessage {
   document?: TelegramFile;
   photo?: TelegramFile[];
   reply_to_message?: TelegramMessage;
+  successful_payment?: TelegramSuccessfulPayment;
 }
 
 /** Нажатие inline-кнопки. `data` — наш непрозрачный токен, не команда. */
@@ -92,6 +97,25 @@ export interface TelegramUpdate {
   edited_message?: TelegramMessage;
   callback_query?: TelegramCallbackQuery;
   poll_answer?: TelegramPollAnswer;
+  pre_checkout_query?: TelegramPreCheckoutQuery;
+}
+
+/** Предварительная проверка платежа: Telegram ждёт ответа десять секунд. */
+export interface TelegramPreCheckoutQuery {
+  id: string;
+  from: { id: number };
+  currency: string;
+  total_amount: number;
+  invoice_payload: string;
+}
+
+/** Состоявшийся платёж: приходит полем сообщения. */
+export interface TelegramSuccessfulPayment {
+  currency: string;
+  total_amount: number;
+  invoice_payload: string;
+  telegram_payment_charge_id: string;
+  provider_payment_charge_id?: string;
 }
 
 interface TelegramResponse<T> {
@@ -189,6 +213,19 @@ export interface TelegramLiveMessage {
 
 export interface TelegramChatActionController {
   transition(action: "typing" | "record_voice" | "upload_voice" | null): void;
+  /**
+   * Повторить текущее действие немедленно.
+   *
+   * Telegram гасит «печатает» на клиенте, как только от бота приходит
+   * сообщение, — и правка растущего ответа считается таким же приходом.
+   * Между правкой и очередным тиком интервала индикатор пропадает, хотя
+   * Ева продолжает писать: человек видит курсор в конце текста и ничего
+   * под именем собеседника.
+   *
+   * `transition` для этого не годится: при том же действии он выходит
+   * сразу, чтобы не сбивать интервал.
+   */
+  refresh(): void;
   stop(): void;
 }
 
@@ -200,13 +237,64 @@ export interface TelegramChatActionController {
  * первых секундах ответа и получить 429 на самой доставке. Промежуточные
  * состояния поэтому не отправляются вовсе, уходит только последнее.
  */
-const LIVE_UPDATE_INTERVAL_MS = 800;
+/**
+ * Сколько ждать ответа Telegram на подтверждение списания.
+ *
+ * Всего у бота десять секунд, после которых Telegram отменяет платёж
+ * сам. Пять — на сам ответ, остаток на проверку намерения оплаты и на
+ * дорогу: висящий запрос здесь равен потерянной оплате.
+ */
+const PRE_CHECKOUT_ANSWER_TIMEOUT_MS = 5_000;
+
+/**
+ * Сверка вебхука при старте ждёт недолго.
+ *
+ * Она полезная, но не обязательная: недоступный Telegram не повод
+ * держать в сервисе висящий запрос всё время его жизни.
+ */
+const WEBHOOK_RECONCILE_TIMEOUT_MS = 10_000;
+
+const LIVE_UPDATE_INTERVAL_MS = 600;
 
 /** Предел одного сообщения Telegram с запасом на разметку. */
 const LIVE_MESSAGE_LIMIT = 3_900;
 const LIVE_CURSOR = "▉";
 
-/** Следующий читаемый prefix: целые слова, без разрыва code/link Markdown. */
+/**
+ * Сколько слов показывать за одну правку.
+ *
+ * Прежде за раз появлялось до пятнадцати слов раз в 800 мс — целая
+ * строка возникала вспышкой, и текст не тёк, а прыгал. Читать такое
+ * неудобно: глаз не следит за письмом, а каждый раз заново ищет, где
+ * продолжение.
+ *
+ * Плавность здесь — это не «медленнее», а «мельче и чаще». Правки стали
+ * чаще, шаг меньше, и суммарная пропускная способность при этом даже
+ * выросла: 14 слов за 600 мс против 15 за 800. То есть показ не отстаёт
+ * от модели сильнее прежнего — наоборот, накопленный хвост, который в
+ * конце пришлось бы показать разом, стал меньше.
+ *
+ * Чаще нельзя: Telegram считает частоту обращений к чату, и на слишком
+ * частых правках отвечает 429. Пауза после него длиннее любой выгоды от
+ * дробления — рывок вернулся бы, только больший.
+ */
+const LIVE_STEP_MAX = 14;
+
+/**
+ * Первые правки мельче остальных.
+ *
+ * Начало ответа — тот момент, который и читается «резко»: только что
+ * было пусто, и вдруг строка. Первые шаги укорочены, дальше темп выходит
+ * на обычный. Хвосту это почти ничего не стоит: в начале ответа модель
+ * ещё не успела накопить отставание.
+ */
+const LIVE_STEP_RAMP = [5, 9] as const;
+
+/** Слов в этой правке: по счётчику показанных, а не по остатку. */
+export function liveStepWords(updates: number): number {
+  return LIVE_STEP_RAMP[updates] ?? LIVE_STEP_MAX;
+}
+
 export function nextLivePrefix(current: string, target: string, maxWords: number): string {
   if (!target.startsWith(current) || current.length >= target.length) return target;
   let inlineCode = false;
@@ -244,11 +332,12 @@ export function nextLivePrefix(current: string, target: string, maxWords: number
 }
 
 export class TelegramClient implements OutboxTransport {
-  private readonly token: string;
+  private token: string;
   private readonly baseUrl: string;
   private readonly logger: Logger;
   private readonly db: Database | null;
-  private readonly stickers: TelegramStickerCatalog;
+  private readonly stickerCatalog: unknown;
+  private stickers: TelegramStickerCatalog;
   private outbox: OutboxDelivery | null = null;
   private cachedUsername: string | null | undefined;
   private readonly deliveryContext = new AsyncLocalStorage<{
@@ -279,11 +368,37 @@ export class TelegramClient implements OutboxTransport {
     this.baseUrl = config.telegramApiBaseUrl.replace(/\/+$/, "");
     this.logger = logger;
     this.db = db ?? null;
+    this.stickerCatalog = config.telegramStickerCatalog;
     this.stickers = new TelegramStickerCatalog(
-      config.telegramStickerCatalog,
+      this.stickerCatalog,
       this.token,
       this.db,
       logger,
+    );
+  }
+
+  /**
+   * Сменить бота на ходу.
+   *
+   * Перезапуск для этого не годится: compose подставляет
+   * `EVA_TELEGRAM_BOT_TOKEN` из `.env` при создании контейнера, а
+   * `docker restart` возвращает контейнеру то окружение, с которым он
+   * был создан. Правка `.env` доживёт до следующего `compose up`, но
+   * до работающего процесса сама по себе не дойдёт — поэтому токен
+   * доносит сюда административный контур, у которого есть ключ, чтобы
+   * его расшифровать.
+   *
+   * Каталог стикеров пересоздаётся: file_id принадлежат тому боту,
+   * который их загрузил, и новому Telegram их не отдаст.
+   */
+  setToken(token: string): void {
+    this.token = token;
+    this.cachedUsername = undefined;
+    this.stickers = new TelegramStickerCatalog(
+      this.stickerCatalog,
+      token,
+      this.db,
+      this.logger,
     );
   }
 
@@ -353,6 +468,129 @@ export class TelegramClient implements OutboxTransport {
    * обычным текстом: потерять ответ из-за одной скобки хуже, чем
    * потерять жирный шрифт.
    */
+  /**
+   * Счёт в звёздах Telegram.
+   *
+   * Идёт прямым вызовом, а не через outbox: счёт — ответ на действие
+   * человека здесь и сейчас, и его нельзя доставить «когда-нибудь».
+   * Просроченный счёт хуже отсутствующего: человек нажмёт «Оплатить» и
+   * заплатит за то, чего уже не выбирал.
+   *
+   * `provider_token` у звёзд пустой, а валюта всегда `XTR`: это цифровой
+   * товар внутри Telegram, платёжного провайдера у него нет.
+   */
+  async sendStarsInvoice(chatId: number, invoice: {
+    title: string;
+    description: string;
+    payload: string;
+    stars: number;
+    label: string;
+  }): Promise<unknown> {
+    return await this.call("sendInvoice", {
+      chat_id: chatId,
+      title: invoice.title,
+      description: invoice.description,
+      payload: invoice.payload,
+      currency: "XTR",
+      prices: [{ label: invoice.label, amount: invoice.stars }],
+    });
+  }
+
+  /**
+   * Привести вебхук к тому, что сервис действительно умеет принимать.
+   *
+   * Список видов апдейтов растёт вместе с продуктом, а ставится вебхук
+   * редко — при установке и при переезде на другого бота. Бот,
+   * зарегистрированный раньше, остаётся с прежним списком, и новые виды
+   * до сервиса не доходят: ни ошибки, ни следа. Оплата звёздами так и не
+   * работала — Telegram не доставлял `pre_checkout_query` и отменял
+   * платёж по таймауту.
+   *
+   * Поэтому сверка идёт при каждом старте. Она дешёвая (один запрос) и
+   * ничего не делает, когда всё на месте; отказ не мешает сервису
+   * работать — он просто останется с прежним вебхуком, и об этом будет
+   * сказано в журнале.
+   */
+  async ensureWebhook(url: string, secret: string): Promise<"ok" | "updated" | "failed"> {
+    if (!this.token || !url) return "ok";
+    try {
+      const info = await this.call<{ url?: string; allowed_updates?: string[] }>(
+        "getWebhookInfo",
+        {},
+        WEBHOOK_RECONCILE_TIMEOUT_MS,
+      );
+      if (info.url === url && sameAllowedUpdates(info.allowed_updates)) return "ok";
+      await this.call("setWebhook", {
+        url,
+        secret_token: secret,
+        allowed_updates: TELEGRAM_ALLOWED_UPDATES,
+        // Очередь не сбрасывается: здесь не переезд на другого бота, а
+        // приведение списка в порядок, и накопленные сообщения — наши.
+        drop_pending_updates: false,
+      }, WEBHOOK_RECONCILE_TIMEOUT_MS);
+      return "updated";
+    } catch (error) {
+      this.logger.warn("Не удалось сверить webhook", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return "failed";
+    }
+  }
+
+  /**
+   * Ссылка на счёт для Mini App.
+   *
+   * В чате счёт отправляют сообщением, но Mini App — не чат: там его
+   * открывает `openInvoice` по ссылке, не выходя из приложения. Счёт
+   * при этом тот же самый и с тем же payload, поэтому предварительная
+   * проверка и применение платежа ничем не отличаются от чатовых.
+   */
+  async createStarsInvoiceLink(invoice: {
+    title: string;
+    description: string;
+    payload: string;
+    stars: number;
+    label: string;
+  }): Promise<string> {
+    return await this.call<string>("createInvoiceLink", {
+      title: invoice.title,
+      description: invoice.description,
+      payload: invoice.payload,
+      currency: "XTR",
+      prices: [{ label: invoice.label, amount: invoice.stars }],
+    });
+  }
+
+  /**
+   * Ответ на предварительную проверку.
+   *
+   * Telegram ждёт его не дольше десяти секунд и иначе отменяет платёж
+   * сам. Поэтому решение здесь детерминированное и не ждёт ни модели, ни
+   * очереди: либо намерение оплаты найдено и цена совпала, либо человеку
+   * названа причина отказа.
+   */
+  async answerPreCheckout(
+    queryId: string,
+    ok: boolean,
+    errorMessage?: string,
+  ): Promise<unknown> {
+    // Пять секунд из десяти, которые даёт Telegram: остаток остаётся на
+    // проверку намерения оплаты и на дорогу.
+    return await this.call("answerPreCheckoutQuery", {
+      pre_checkout_query_id: queryId,
+      ok,
+      ...(ok ? {} : { error_message: errorMessage ?? "Счёт больше не действителен" }),
+    }, PRE_CHECKOUT_ANSWER_TIMEOUT_MS);
+  }
+
+  /** Возврат звёзд по идентификатору списания. */
+  async refundStars(telegramUserId: number, chargeId: string): Promise<unknown> {
+    return await this.call("refundStarPayment", {
+      user_id: telegramUserId,
+      telegram_payment_charge_id: chargeId,
+    });
+  }
+
   async sendMessage(
     chatId: number,
     text: string,
@@ -493,8 +731,15 @@ export class TelegramClient implements OutboxTransport {
     options: {
       intervalMs?: number;
       now?: () => number;
-      /** Первое сообщение отправлено: печатать «typing» больше незачем. */
+      /** Первое сообщение отправлено; его идентификатор известен. */
       onSent?: (messageId: number) => void;
+      /**
+       * Состояние показано: отправка или очередная правка.
+       *
+       * Нужен тому, кто держит «печатает»: каждая запись гасит индикатор
+       * на клиенте, и его приходится ставить заново.
+       */
+      onUpdate?: () => void;
     } = {},
   ): TelegramLiveMessage {
     const intervalMs = Math.max(0, options.intervalMs ?? LIVE_UPDATE_INTERVAL_MS);
@@ -584,6 +829,7 @@ export class TelegramClient implements OutboxTransport {
       shown = text;
       updates += 1;
       lastSentAt = now();
+      options.onUpdate?.();
     };
 
     const flush = async (): Promise<void> => {
@@ -596,11 +842,7 @@ export class TelegramClient implements OutboxTransport {
         if (stopped) return;
         const text = pending;
         if (text === null || text === shown) { pending = null; continue; }
-        const remainingWords = text.slice(shown.length).trim().split(/\s+/u).filter(Boolean).length;
-        // Обычно 6–15 слов; большой backlog догоняется несколькими
-        // крупными, но всё ещё читаемыми порциями.
-        const words = Math.max(6, Math.min(60, Math.max(15, Math.ceil(remainingWords / 3))));
-        const next = nextLivePrefix(shown, text, words);
+        const next = nextLivePrefix(shown, text, liveStepWords(updates));
         try {
           await write(next);
           if (next === pending) pending = null;
@@ -1056,6 +1298,7 @@ export class TelegramClient implements OutboxTransport {
         timer = setInterval(tick, Math.max(intervalMs, 2_000));
         timer.unref();
       },
+      refresh: () => tick(),
       stop: () => {
         active = null;
         clear();
@@ -1063,12 +1306,27 @@ export class TelegramClient implements OutboxTransport {
     };
   }
 
-  async call<T = unknown>(method: string, body: Record<string, unknown>): Promise<T> {
+  /**
+   * Вызов Bot API.
+   *
+   * `timeoutMs` задают там, где ожидание само по себе — отказ.
+   * Подтверждение списания Telegram ждёт десять секунд и после этого
+   * отменяет платёж: висящий запрос там равен потерянной оплате, и
+   * лучше ответить отказом вовремя, чем согласием никогда. Остальные
+   * вызовы ограничения не получают: отправка файла может идти долго
+   * законно.
+   */
+  async call<T = unknown>(
+    method: string,
+    body: Record<string, unknown>,
+    timeoutMs?: number,
+  ): Promise<T> {
     this.assertConfigured();
     const response = await fetch(`${this.baseUrl}/bot${this.token}/${method}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
+      ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
     });
     return await this.parseResponse<T>(response, method);
   }
@@ -1200,7 +1458,6 @@ export function parseRetryAfter(value: string | null, now = Date.now()): number 
 }
 
 function priorityForContext(prefix: string): DeliveryPriority {
-  if (prefix.startsWith("lava-payment:")) return "command";
   if (prefix.startsWith("telegram-command:")) return "command";
   if (prefix.startsWith("telegram-dead:")) return "status";
   return "reply";

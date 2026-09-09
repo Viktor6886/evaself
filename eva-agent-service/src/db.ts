@@ -10,6 +10,7 @@
  * agent and the same conversation back up.
  */
 
+import type { ConversationPurpose } from "./conversations/purpose-service.js";
 import pg from "pg";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { databaseUnavailable } from "./errors.js";
@@ -77,6 +78,8 @@ export interface LlmProviderRow {
   max_output_tokens?: number;
   additional_parameters: Record<string, unknown>;
   api_key_encrypted: string;
+  /** Пул ключей; пустой массив — пул не заводили (строки до миграции 069). */
+  api_keys_encrypted: string[] | null;
   is_active: boolean;
   last_checked_at: Date | null;
   last_check_ok: boolean | null;
@@ -92,6 +95,7 @@ export interface LlmProviderRow {
   supports_json?: boolean;
   supports_vision?: boolean;
   supports_streaming?: boolean;
+  last_check_status?: string | null;
 }
 
 export interface ModelMapping {
@@ -130,13 +134,17 @@ export interface AgentRuntimeContext {
   telegramId: number;
   chatId: number;
   conversationId: string;
-  purpose:
-    | "chat"
-    | "scheduler"
-    | "profile"
-    | "goal_review"
-    | "partner_analysis"
-    | "research";
+  /**
+   * Назначение берётся из общего списка, а не переписывается здесь
+   * заново: третья копия перечня уже однажды разошлась с двумя первыми
+   * (`CONVERSATION_PURPOSES` и `agent_conversations_purpose_check`), и
+   * новое назначение молча оказывалось «не тем» ровно там, где по нему
+   * принимается решение о подтверждениях.
+   *
+   * Импорт только типовой: во время выполнения его не остаётся, и
+   * взаимной ссылки между модулями не возникает.
+   */
+  purpose: ConversationPurpose;
   timezone: string;
   responseMode: "text" | "voice" | "both";
   useEmoji: boolean;
@@ -1490,12 +1498,14 @@ export class Database {
     contextWindow: number;
     additionalParameters: Record<string, unknown>;
     apiKeyEncrypted: string;
+    /** Пул целиком; первый элемент совпадает с apiKeyEncrypted. */
+    apiKeysEncrypted?: string[];
   }): Promise<LlmProviderRow> {
     const { rows } = await this.require().query<LlmProviderRow>(
       `INSERT INTO llm_providers
          (name, protocol, base_url, model, context_window,
-          additional_parameters, api_key_encrypted)
-       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+          additional_parameters, api_key_encrypted, api_keys_encrypted)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::text[])
        RETURNING *`,
       [
         input.name,
@@ -1505,6 +1515,7 @@ export class Database {
         input.contextWindow,
         JSON.stringify(input.additionalParameters),
         input.apiKeyEncrypted,
+        input.apiKeysEncrypted ?? [input.apiKeyEncrypted],
       ],
     );
     return rows[0]!;
@@ -1519,6 +1530,8 @@ export class Database {
     contextWindow: number;
     additionalParameters: Record<string, unknown>;
     apiKeyEncrypted: string;
+    /** Пул целиком. `undefined` — не трогать сохранённый. */
+    apiKeysEncrypted?: string[];
   }): Promise<LlmProviderRow | null> {
     const { rows } = await this.require().query<LlmProviderRow>(
       `UPDATE llm_providers SET
@@ -1529,6 +1542,9 @@ export class Database {
          context_window = $6,
          additional_parameters = $7::jsonb,
          api_key_encrypted = $8,
+         -- NULL означает «пул не меняли»: правка имени или таймаута не
+         -- должна стирать запасные ключи, которых форма не показывает.
+         api_keys_encrypted = COALESCE($9::text[], api_keys_encrypted),
          last_checked_at = NULL,
          last_check_ok = NULL,
          last_check_message = NULL,
@@ -1544,24 +1560,38 @@ export class Database {
         input.contextWindow,
         JSON.stringify(input.additionalParameters),
         input.apiKeyEncrypted,
+        input.apiKeysEncrypted ?? null,
       ],
     );
     return rows[0] ?? null;
   }
 
+  /**
+   * Итог проверки. `status` пишется рядом с булевым `ok`, а не вместо
+   * него: старый код читает булево и работает без изменений, панель
+   * показывает состояние. Отсутствие статуса означает проверку прежней
+   * версией — тогда остаётся булево.
+   */
   async recordLlmCheck(
     id: string,
-    result: { ok: boolean; message: string; models: unknown[] | null },
+    result: { ok: boolean; message: string; models: unknown[] | null; status?: string | null },
   ): Promise<LlmProviderRow | null> {
     const { rows } = await this.require().query<LlmProviderRow>(
       `UPDATE llm_providers SET
          last_checked_at = now(),
          last_check_ok = $2,
          last_check_message = $3,
-         last_models = $4::jsonb
+         last_models = $4::jsonb,
+         last_check_status = $5
        WHERE id = $1
        RETURNING *`,
-      [id, result.ok, result.message, result.models === null ? null : JSON.stringify(result.models)],
+      [
+        id,
+        result.ok,
+        result.message,
+        result.models === null ? null : JSON.stringify(result.models),
+        result.status ?? null,
+      ],
     );
     return rows[0] ?? null;
   }
@@ -1571,13 +1601,50 @@ export class Database {
     id: string,
     supportsVision: boolean,
   ): Promise<LlmProviderRow | null> {
+    return await this.setLlmProviderCapabilities(id, { vision: supportsVision });
+  }
+
+  /**
+   * Записывает возможности, выясненные пробой.
+   *
+   * Раньше так сохранялось только зрение, а инструменты, поток и строгий
+   * JSON оставались галочками оператора. Роутер отбирает провайдеров по
+   * этим полям (`chain.ts`), поэтому неверная галочка либо уводила запрос
+   * к модели, которая его не потянет, либо прятала пригодную.
+   *
+   * `null` означает «не выяснено» и оставляет прежнее значение: провайдер,
+   * ответивший лимитом, не должен стирать то, что уже про него известно.
+   */
+  async setLlmProviderCapabilities(
+    id: string,
+    capabilities: {
+      vision?: boolean | null;
+      streaming?: boolean | null;
+      tools?: boolean | null;
+      json?: boolean | null;
+    },
+  ): Promise<LlmProviderRow | null> {
+    const columns: Record<string, boolean | null | undefined> = {
+      supports_vision: capabilities.vision,
+      supports_streaming: capabilities.streaming,
+      supports_tools: capabilities.tools,
+      supports_json: capabilities.json,
+    };
+    const assignments: string[] = [];
+    const values: unknown[] = [id];
+    for (const [column, value] of Object.entries(columns)) {
+      if (value === null || value === undefined) continue;
+      values.push(value);
+      assignments.push(`${column} = $${values.length}`);
+    }
+    if (assignments.length === 0) return null;
     const { rows } = await this.require().query<LlmProviderRow>(
       `UPDATE llm_providers SET
-         supports_vision = $2,
+         ${assignments.join(", ")},
          updated_at = now()
        WHERE id = $1
        RETURNING *`,
-      [id, supportsVision],
+      values,
     );
     if (rows[0]) await this.require().query("SELECT pg_notify('llm_routing_settings_changed', '')");
     return rows[0] ?? null;
@@ -1671,32 +1738,42 @@ export class Database {
   // usage & quotas
   // -----------------------------------------------------------------
 
-  private static periodStart(period: string): string {
-    const now = new Date();
-    if (period === "month") return new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
-    if (period === "week") {
-      const day = (now.getUTCDay() + 6) % 7;
-      const monday = new Date(now);
-      monday.setUTCDate(now.getUTCDate() - day);
-      return monday.toISOString().slice(0, 10);
-    }
-    if (period === "total") return "1970-01-01";
-    return now.toISOString().slice(0, 10);
-  }
-
-  async incrementUsage(telegramId: number, metric: string, amount = 1, period = "day"): Promise<number> {
+  /**
+   * Расход одной метрики. Пишется сразу во все периоды.
+   *
+   * Прежде счётчик увеличивался только за сутки. Схема при этом
+   * допускает лимиты на неделю и месяц, и представление их честно
+   * показывает — но расходовать их было нечем: недельный счётчик не
+   * увеличивал никто, и любой недельный лимит оставался нетронутым
+   * навсегда. Тариф с ограничением «столько-то в месяц» просто не
+   * работал бы.
+   *
+   * Три строки идут одним запросом: раздельные вызовы означали бы, что
+   * между ними ход может оборваться и расход попадёт в сутки, но не в
+   * месяц.
+   */
+  async incrementUsage(telegramId: number, metric: string, amount = 1): Promise<number> {
     const { rows } = await this.withUserScope(
       { telegramId, label: "db.incrementUsage", inherit: true },
-      async () => await this.require().query<{ used: string }>(
+      async () => await this.require().query<{ period: string; used: string }>(
       `INSERT INTO usage_counters (user_id, metric, period, period_start, used)
-       SELECT id, $2, $3, $4, $5 FROM users WHERE telegram_id = $1
+       SELECT u.id, $2, p.period, p.start, $3
+         FROM users u
+         CROSS JOIN (VALUES
+           ('day', (now() AT TIME ZONE 'UTC')::date),
+           ('week', date_trunc('week', (now() AT TIME ZONE 'UTC')::date)::date),
+           ('month', date_trunc('month', (now() AT TIME ZONE 'UTC')::date)::date)
+         )
+              AS p(period, start)
+        WHERE u.telegram_id = $1
        ON CONFLICT (user_id, metric, period, period_start) DO UPDATE
          SET used = usage_counters.used + EXCLUDED.used, updated_at = now()
-       RETURNING used`,
-      [telegramId, metric, period, Database.periodStart(period), amount],
+       RETURNING period, used`,
+      [telegramId, metric, amount],
       ),
     );
-    return Number(rows[0]?.used ?? 0);
+    // Возвращается суточный: на него смотрят вызывающие и гейт хода.
+    return Number(rows.find((row) => row.period === "day")?.used ?? 0);
   }
 
   async isLlmSingleProviderSelected(id: string): Promise<boolean> {

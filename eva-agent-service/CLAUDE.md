@@ -54,7 +54,7 @@ node --test --experimental-strip-types test/*.test.ts        # full regression
 | `src/conversations/purpose-service.ts` | `conversations.test.ts` |
 | `src/tools/`, `src/agent-tools.ts` | `agent-tools.test.ts` |
 | `src/crisis.ts` | `crisis.test.ts` |
-| `src/payments.ts` | `payments.test.ts` |
+| `src/payments/stars.ts`, `src/payments/grant.ts` | `stars-payments.test.ts`, `subscription-lifecycle.test.ts` |
 | `src/profile/` | `profile.test.ts` |
 | `src/goals/` | `goals.test.ts` |
 | `src/goals/goal-program-service.ts`, `goal-program-tools.ts` | `goals.test.ts`, `agent-tools.test.ts`, `runtime.test.ts` |

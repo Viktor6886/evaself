@@ -36,6 +36,22 @@ updates:
       # Мажоры не предлагаются: см. шапку файла.
       - dependency-name: "*"
         update-types: [version-update:semver-major]
+      # Letta по той же причине, что и мажоры: подъём Agent SDK — работа
+      # шага, а не автоматического PR. Версия пакета связана с версией
+      # App Server: SDK 0.7.1 тянет letta-code 0.30.11, и ровно эти
+      # значения стоят в versions.env, откуда собирается образ App
+      # Server. Обновить один package.json значит развести рантайм и
+      # клиент по разным версиям одного протокола. Плюс матрицу
+      # возможностей (VERIFIED_VERSIONS) обязан перепроверить человек, и
+      # contract-тест намеренно краснеет, пока он этого не сделал.
+      #
+      # Из-за этого групповой PR приходил заведомо красным и тянул за
+      # собой безобидные bullmq и fastify, которые иначе вливаются сами.
+      # Обновления БЕЗОПАСНОСТИ это условие не отсекает.
+      - dependency-name: "@letta-ai/*"
+        update-types:
+          - version-update:semver-minor
+          - version-update:semver-patch
 
   - package-ecosystem: npm
     directory: /admin-ui

@@ -8,7 +8,16 @@ const ru = {
   unsupportedMessage:
     "Сейчас я понимаю текст, голосовые сообщения, изображения и небольшие документы.",
   messageQuotaEnded:
-    "Лимит сообщений на текущий период закончился. Проверить его можно командой /balance.",
+    "Лимит сообщений на текущий период закончился. Он обновится в начале следующего периода — проверить можно командой /balance.",
+  messageQuotaEndedWithOffer:
+    "Свободные сообщения на этот период закончились — я пока не смогу отвечать."
+    + " Можно оформить подписку прямо здесь, а можно дождаться обновления лимита:"
+    + " сколько его осталось и когда он обновится, покажет /balance.",
+  messageQuotaEndedWithApp:
+    "Лимит сообщений на текущий период закончился — я пока не смогу отвечать."
+    + " Тарифы и оплата — по кнопке ниже. Лимит обновится в начале следующего"
+    + " периода; сколько осталось, покажет /balance.",
+  openSubscriptionApp: "Тарифы и оплата",
   voiceQuotaEnded:
     "Лимит распознавания голоса закончился. Можно продолжить текстом.",
   emptyReply: "Я рядом. Попробуй сформулировать это немного иначе.",
@@ -23,7 +32,17 @@ const ru = {
   remaining: "осталось {value}",
   unlimited: "без ограничений",
   chooseSubscription: "Выбери подходящий вариант доступа:",
+  paymentThanks:
+    "Спасибо! Подписка открыта на {days} дн. Проверить лимиты можно командой /balance.",
+  paymentStuck:
+    "Оплата прошла, но подписку не удалось открыть автоматически. Владелец уже видит это в журнале — напиши ему, доступ восстановят вручную.",
   subscriptionUnavailable: "Онлайн-оплата ещё не настроена администратором.",
+  subscriptionExpiresTomorrow:
+    "Напоминаю: подписка {plan} закончится {date}. После этого начнут действовать бесплатные лимиты.",
+  subscriptionExpiresInDays:
+    "Напоминаю: подписка {plan} закончится через {days} — {date}. После этого начнут действовать бесплатные лимиты.",
+  messageQuotaExhaustedNotice:
+    "Квота сообщений закончилась: {periods}. До обновления этого лимита я не смогу отвечать; актуальные остатки покажет /balance.",
   privacy:
     "Связь с агентом, заметки и задачи хранятся в PostgreSQL и Letta на сервере владельца Evaself. API-ключи зашифрованы и не выдаются в WebUI. Администратор может удалить агента и его данные.",
   unknownCommand: "Неизвестная команда. Список: /help",
@@ -31,6 +50,23 @@ const ru = {
   attachmentTooLarge: "Файл слишком большой. Пришли версию поменьше или текстом.",
   nothingToStop: "Сейчас нечего останавливать.",
   transcript: "Распознала: {text}",
+  // Детерминированные сообщения планировщика. Их отправляет код, когда
+  // ход агента не состоялся: молчание на месте обещанного действия
+  // выглядит так, будто задачи никогда и не было.
+  scheduledReminderFallback: "Напоминаю: {title}",
+  scheduledActionFailed:
+    "Не получилось сделать это самой: «{title}». Напиши, когда будешь — попробуем вместе.",
+  // Согласия так и не дождались. Вопрос человек уже видел — здесь
+  // только итог, чтобы задача не заканчивалась молчанием.
+  // Срок не обещается: сколько займёт работа, заранее не знает никто, а
+  // «пару минут» превращается в невыполненное обещание ровно тогда,
+  // когда работа затянулась, — то есть всегда, когда это сообщение
+  // вообще отправляется.
+  scheduledActionStarted: "Взялась за «{title}» — пришлю, когда будет готово.",
+  scheduledActionApprovalTimeout:
+    "Не стала доделывать «{title}» без твоего согласия. Скажи, когда будет можно.",
+  scheduledActionDeclined:
+    "Не стала доделывать «{title}»: ты не разрешил это действие.",
   // Один текст на все технические причины отказа. Пользователю
   // нечего делать с «провайдер вернул 429», а «попробуй ещё раз» —
   // есть что. Полная причина остаётся в логе и в панели.
@@ -43,7 +79,16 @@ const en: Record<keyof typeof ru, string> = {
   unsupportedMessage:
     "I currently understand text, voice messages, images, and small documents.",
   messageQuotaEnded:
-    "Your message allowance for this period is used up. Check it with /balance.",
+    "Your message allowance for this period is used up. It resets at the start of the next period — check it with /balance.",
+  messageQuotaEndedWithOffer:
+    "You have used up the free messages for this period, so I cannot reply for now."
+    + " You can subscribe right here, or wait for the limit to reset:"
+    + " /balance shows what is left and when it renews.",
+  messageQuotaEndedWithApp:
+    "The message limit for this period is used up, so I cannot reply for now."
+    + " Plans and payment are behind the button below. The limit resets at the"
+    + " start of the next period; /balance shows what is left.",
+  openSubscriptionApp: "Plans and payment",
   voiceQuotaEnded:
     "Your voice transcription allowance is used up. You can continue with text.",
   emptyReply: "I’m here. Try phrasing that a little differently.",
@@ -58,7 +103,17 @@ const en: Record<keyof typeof ru, string> = {
   remaining: "{value} remaining",
   unlimited: "unlimited",
   chooseSubscription: "Choose an access option:",
+  paymentThanks:
+    "Thank you! Your subscription is active for {days} days. Check your limits with /balance.",
+  paymentStuck:
+    "The payment went through, but the subscription could not be opened automatically. The owner can already see this in the log — contact them and access will be restored manually.",
   subscriptionUnavailable: "Online payments have not been configured by the administrator yet.",
+  subscriptionExpiresTomorrow:
+    "Reminder: your {plan} subscription ends on {date}. Free limits will apply after that.",
+  subscriptionExpiresInDays:
+    "Reminder: your {plan} subscription ends in {days}, on {date}. Free limits will apply after that.",
+  messageQuotaExhaustedNotice:
+    "Your message allowance is used up for: {periods}. I cannot reply until that limit resets; /balance shows the current amounts.",
   privacy:
     "Your agent link, notes, and tasks are stored in PostgreSQL and Letta on the Evaself owner’s server. API keys are encrypted and never returned to WebUI. An administrator can delete the agent and its data.",
   unknownCommand: "Unknown command. See /help",
@@ -66,6 +121,14 @@ const en: Record<keyof typeof ru, string> = {
   attachmentTooLarge: "That file is too large. Send a smaller version or paste the text.",
   nothingToStop: "There is nothing to stop right now.",
   transcript: "Transcribed: {text}",
+  scheduledReminderFallback: "A reminder: {title}",
+  scheduledActionFailed:
+    "I could not do this on my own: “{title}”. Write to me and we will try together.",
+  scheduledActionStarted: "I am working on “{title}” — I will send it when it is ready.",
+  scheduledActionApprovalTimeout:
+    "I did not finish “{title}” without your consent. Tell me when it is fine to go ahead.",
+  scheduledActionDeclined:
+    "I did not finish “{title}”: you declined that action.",
   voiceFailed:
     "I could not transcribe that voice message. Please send it again or write to me instead.",
 };

@@ -22,6 +22,78 @@ const profile = (protocol: string, fetcher: typeof fetch) => ({
   daily_budget_micro: null, monthly_budget_micro: null, generation_defaults: {}, additional_parameters: {}, fetcher,
 });
 
+/**
+ * Провайдер, заведённый из панели, не работал у Gemini вовсе: два поля в
+ * теле запроса Google отвергает целиком, а OpenAI-совместимые endpoint'ы
+ * их молча игнорируют, поэтому до сих пор это не всплывало.
+ */
+test("транспортные настройки не уходят в тело запроса провайдеру", async () => {
+  let body: Record<string, unknown> = {};
+  const fetcher = (async (_url: unknown, init?: RequestInit) => {
+    body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response(JSON.stringify({
+      candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+
+  await geminiAdapter.complete({
+    ...profile("gemini-compatible", fetcher),
+    // Ровно то, что кладёт в additional_parameters форма панели.
+    additional_parameters: { request_timeout_ms: 180_000, connect_timeout_ms: 10_000 },
+  } as never, request([{ role: "user", content: "привет" }]) as never, AbortSignal.timeout(1_000));
+
+  assert.equal(body.request_timeout_ms, undefined,
+    "HTTP 400: Unknown name \"request_timeout_ms\": Cannot find field");
+  assert.equal(body.connect_timeout_ms, undefined);
+  // Полезная нагрузка при этом на месте.
+  assert.ok(Array.isArray(body.contents));
+});
+
+test("схема инструмента приводится к тому, что принимает Gemini", async () => {
+  let body: Record<string, unknown> = {};
+  const fetcher = (async (_url: unknown, init?: RequestInit) => {
+    body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response(JSON.stringify({
+      candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+
+  // JSON Schema, какую отдаёт Letta: с ключевыми словами, которых нет в
+  // урезанном OpenAPI Gemini.
+  const tool = {
+    name: "save_goal", description: "save",
+    parameters: {
+      type: "object", additionalProperties: false, $schema: "http://json-schema.org/draft-07/schema#",
+      properties: {
+        title: { type: "string", minLength: 1, description: "заголовок" },
+        tags: { type: "array", items: { type: "string", additionalProperties: false } },
+      },
+      required: ["title"],
+    },
+  };
+  await geminiAdapter.complete(
+    profile("gemini-compatible", fetcher) as never,
+    request([{ role: "user", content: "цель" }], [tool]) as never,
+    AbortSignal.timeout(1_000),
+  );
+
+  const declaration = (body.tools as Array<{ functionDeclarations: Array<Record<string, unknown>> }>)[0]
+    .functionDeclarations[0];
+  const parameters = declaration.parameters as Record<string, unknown>;
+  assert.equal(parameters.additionalProperties, undefined,
+    "HTTP 400: Unknown name \"additionalProperties\" at tools[0].function_declarations[0].parameters");
+  assert.equal(parameters.$schema, undefined);
+  // Структура сохранена: иначе модель потеряет описание аргументов.
+  assert.equal(parameters.type, "object");
+  assert.deepEqual(parameters.required, ["title"]);
+  const properties = parameters.properties as Record<string, Record<string, unknown>>;
+  assert.equal(properties.title.type, "string");
+  assert.equal(properties.title.description, "заголовок");
+  // Чистка рекурсивная и не трогает имена аргументов.
+  assert.equal((properties.tags.items as Record<string, unknown>).additionalProperties, undefined);
+  assert.equal((properties.tags.items as Record<string, unknown>).type, "string");
+});
+
 test("Gemini native functionCall/functionResponse сохраняет thoughtSignature", async () => {
   const bodies: Array<Record<string, unknown>> = [];
   const fetcher = async (_url: unknown, init?: RequestInit) => {
@@ -275,4 +347,121 @@ test("native protocol streaming возвращает text delta и done", async 
     assert.equal(chunks.find((chunk) => chunk.type === "text")?.delta, "ok");
     assert.equal(chunks.find((chunk) => chunk.type === "done")?.response.content, "ok");
   }
+});
+
+/* =====================================================================
+ * Кэшированный вход
+ *
+ * Счёт за первый ход после паузы нечем было объяснить: журнал показывал
+ * десятки тысяч входных токенов, а провайдер брал за них как за единицы
+ * — почти весь запрос приходил из его кэша промпта. Поле кэша не
+ * читалось ни у одного протокола, и стоимость считалась по одной ставке
+ * на весь вход: тёплый ход выглядел так же дорого, как холодный.
+ * ===================================================================== */
+
+const json = (body: unknown) => new Response(JSON.stringify(body), {
+  status: 200, headers: { "content-type": "application/json" },
+});
+
+test("OpenAI-совместимый ответ отдаёт кэшированную часть входа", async () => {
+  const adapter = openAiAdapter;
+  const response = await adapter.complete(
+    profile("openai-compatible", (async () => json({
+      choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+      usage: {
+        prompt_tokens: 40_000,
+        completion_tokens: 120,
+        prompt_tokens_details: { cached_tokens: 38_000 },
+      },
+    })) as never) as never,
+    request([{ role: "user", content: "привет" }]) as never,
+    new AbortController().signal,
+  );
+
+  assert.equal(response.usage.tokens_in, 40_000);
+  assert.equal(response.usage.cached_tokens_in, 38_000, "кэш провайдера потерян");
+});
+
+test("DeepSeek называет кэш своим полем, и оно тоже читается", async () => {
+  const response = await openAiAdapter.complete(
+    profile("openai-compatible", (async () => json({
+      choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 30_000, completion_tokens: 50, prompt_cache_hit_tokens: 28_672 },
+    })) as never) as never,
+    request([{ role: "user", content: "привет" }]) as never,
+    new AbortController().signal,
+  );
+
+  assert.equal(response.usage.cached_tokens_in, 28_672);
+});
+
+test("провайдер, который о кэше молчит, не выдумывает ноль", async () => {
+  const response = await openAiAdapter.complete(
+    profile("openai-compatible", (async () => json({
+      choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 1_000, completion_tokens: 10 },
+    })) as never) as never,
+    request([{ role: "user", content: "привет" }]) as never,
+    new AbortController().signal,
+  );
+
+  // «Не сказал» и «кэш не сработал» — разные вещи: во втором случае
+  // цена полная, и записывать её как факт по молчанию нельзя.
+  assert.equal(response.usage.cached_tokens_in, undefined);
+});
+
+/**
+ * У Anthropic `input_tokens` — только та часть, которую модель читала
+ * заново: прочитанное из кэша и записанное в него лежат отдельно.
+ * Пока их не складывали, журнал показывал вход втрое меньше настоящего.
+ */
+test("Anthropic складывает свежий вход, чтение кэша и его запись", async () => {
+  const response = await anthropicAdapter.complete(
+    profile("anthropic", (async () => json({
+      content: [{ type: "text", text: "ok" }],
+      stop_reason: "end_turn",
+      model: "claude",
+      usage: {
+        input_tokens: 500,
+        output_tokens: 80,
+        cache_read_input_tokens: 36_000,
+        cache_creation_input_tokens: 1_200,
+      },
+    })) as never) as never,
+    request([{ role: "user", content: "привет" }]) as never,
+    new AbortController().signal,
+  );
+
+  assert.equal(response.usage.tokens_in, 37_700);
+  assert.equal(response.usage.cached_tokens_in, 36_000);
+});
+
+test("Gemini отдаёт кэшированную часть промпта", async () => {
+  const response = await geminiAdapter.complete(
+    profile("gemini", (async () => json({
+      candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+      usageMetadata: {
+        promptTokenCount: 20_000, candidatesTokenCount: 40, cachedContentTokenCount: 19_000,
+      },
+    })) as never) as never,
+    request([{ role: "user", content: "привет" }]) as never,
+    new AbortController().signal,
+  );
+
+  assert.equal(response.usage.tokens_in, 20_000);
+  assert.equal(response.usage.cached_tokens_in, 19_000);
+});
+
+test("Responses API читает кэш из деталей входа", async () => {
+  const response = await responsesAdapter.complete(
+    profile("openai-responses", (async () => json({
+      output: [{ type: "message", content: [{ type: "output_text", text: "ok" }] }],
+      status: "completed",
+      usage: { input_tokens: 12_000, output_tokens: 30, input_tokens_details: { cached_tokens: 11_500 } },
+    })) as never) as never,
+    request([{ role: "user", content: "привет" }]) as never,
+    new AbortController().signal,
+  );
+
+  assert.equal(response.usage.cached_tokens_in, 11_500);
 });

@@ -185,7 +185,6 @@ function server() {
     inbox: {} as never,
     profile: {} as never,
     goals: {} as never,
-    payments: {} as never,
     queue: { activeUsers: 0, queuedUsers: 0 } as never,
     telegram: {} as never,
     redisPing: async () => true,

@@ -18,6 +18,8 @@ export const CONVERSATION_PURPOSES = [
   "goal_review",
   "partner_analysis",
   "research",
+  "task_action",
+  "initiative",
 ] as const;
 
 export type ConversationPurpose = (typeof CONVERSATION_PURPOSES)[number];
@@ -53,6 +55,14 @@ const PURPOSE_TEXT: Record<ConversationPurpose, { summary: string; description: 
     summary: "Исследование",
     description: "Поиск информации без опасных операций и изменения профиля",
   },
+  task_action: {
+    summary: "Выполнение задачи",
+    description: "Запланированное человеком действие: Ева выполняет его сама и отдаёт результат",
+  },
+  initiative: {
+    summary: "Своя инициатива",
+    description: "Сообщение в выбранное человеком окно: Ева сама находит повод и пишет первой",
+  },
 };
 
 export class ConversationPurposeService {
@@ -76,6 +86,56 @@ export class ConversationPurposeService {
     const operation = this.ensureInternal(input).finally(() => this.pending.delete(key));
     this.pending.set(key, operation);
     return await operation;
+  }
+
+  /**
+   * Закрыть служебную ветку: работа кончилась.
+   *
+   * Служебные conversation — `scheduler`, `task_action`, `initiative` —
+   * до сих пор были вечными: одна на человека, и в ней копились все
+   * задания подряд вместе с ответами на них. На новом задании модель
+   * видела перед собой не задачу, а накопленное состояние трекера, и
+   * отвечала человеку сводкой: «Поняла, где остановились: … Проверка
+   * отмены подписки ещё не начиналась» — фразой из хода двухчасовой
+   * давности. Никакая формулировка инструкции этого не перебивает:
+   * прошлые ответы в той же ветке — это примеры, и их много.
+   *
+   * Здесь закрывается ветка одной фоновой работы, а не ведётся память:
+   * что Ева знает о человеке, живёт в memory blocks и MemFS — они
+   * принадлежат агенту, а не conversation, и переживают закрытие. Свой
+   * compaction и своя ротация диалога человека этим не заводятся
+   * (раздел «Запрещено»): диалог человека — `chat`, его никто не
+   * трогает.
+   *
+   * Отказ не пробрасывается: работа уже сделана, и ронять её из-за
+   * неубранной ветки незачем. Незакрытая ветка — это ровно то, что было
+   * до сих пор, а не новая поломка.
+   */
+  async close(
+    userId: number,
+    agentId: string,
+    purpose: Exclude<ConversationPurpose, "chat">,
+  ): Promise<void> {
+    try {
+      const active = await this.find(userId, agentId, purpose);
+      if (!active) return;
+      await this.db.query(
+        `UPDATE agent_conversations
+            SET status = 'archived', archived_at = now()
+          WHERE conversation_id = $1 AND user_id = $2 AND status = 'active'`,
+        [active.conversationId, userId],
+      );
+      await this.letta.updateConversation(active.conversationId, { archived: true });
+      this.logger.debug("Служебная ветка закрыта", {
+        userId, purpose, conversationId: active.conversationId,
+      });
+    } catch (error) {
+      this.logger.warn("Служебную ветку не удалось закрыть", {
+        userId,
+        purpose,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   async find(
@@ -160,16 +220,31 @@ export class ConversationPurposeService {
   }
 }
 
+/**
+ * Что позволено в conversation этого назначения.
+ *
+ * `allowedTools` — точный список: `null` означает «не сужаем».
+ * `deniedTools` — точечный запрет поверх него, и нужен он ровно там, где
+ * назначение разрешает работать инструментами, но одно свойство обязано
+ * остаться выключенным. До него `canChangeProfile` был только словом:
+ * профиль защищал пустой список инструментов, а не сам флаг, — и
+ * назначение с непустой работой унесло бы защиту с собой.
+ */
 export function purposePolicy(purpose: ConversationPurpose): {
   canSendToUser: boolean;
   canChangeProfile: boolean;
   allowedTools: string[] | null;
+  deniedTools: string[] | null;
 } {
   switch (purpose) {
     case "chat":
-      return { canSendToUser: true, canChangeProfile: true, allowedTools: null };
+      return {
+        canSendToUser: true, canChangeProfile: true, allowedTools: null, deniedTools: null,
+      };
     case "scheduler":
-      return { canSendToUser: true, canChangeProfile: false, allowedTools: [] };
+      return {
+        canSendToUser: true, canChangeProfile: false, allowedTools: [], deniedTools: null,
+      };
     case "profile":
       return {
         canSendToUser: false,
@@ -179,24 +254,69 @@ export function purposePolicy(purpose: ConversationPurpose): {
           "mark_profile_field_asked",
           "get_user_profile",
         ],
+        deniedTools: null,
       };
     case "goal_review":
       return {
         canSendToUser: false,
         canChangeProfile: false,
         allowedTools: ["get_goal_context", "record_goal_review"],
+        deniedTools: null,
       };
     case "research":
       return {
         canSendToUser: false,
         canChangeProfile: false,
         allowedTools: ["web_search", "PERPLEXITY_SEARCH", "brave_search"],
+        deniedTools: null,
       };
     case "partner_analysis":
       return {
         canSendToUser: false,
         canChangeProfile: false,
         allowedTools: ["get_user_profile", "get_goal_context"],
+        deniedTools: null,
+      };
+    case "initiative":
+      // Ева выходит на связь первой, и повод она обязана найти сама.
+      // У назначения `scheduler` инструменты запрещены целиком — оно
+      // сочиняет текст напоминания по готовым фактам, — и инициатива
+      // упёрлась бы там в первый же вызов: посмотреть, что вообще
+      // происходит у человека, ей нечем. Из пустых рук получается
+      // вежливая пустота, а не разговор.
+      //
+      // Поэтому набор не сужается (инвариант 17) — какой памятью и
+      // каким инструментом искать повод, решает Letta, — а запрет
+      // точечный и ровно по одному свойству: профиль человека фоновым
+      // ходом не меняется. Он меняется в разговоре с ним.
+      return {
+        canSendToUser: true,
+        canChangeProfile: false,
+        allowedTools: null,
+        deniedTools: [
+          "upsert_user_profile_field",
+          "confirm_user_profile_field",
+          "decline_user_profile_field",
+          "mark_profile_field_asked",
+        ],
+      };
+    case "task_action":
+      // Человек попросил сделать дело, а не поговорить о нём: сузить
+      // здесь набор инструментов значило бы решить за модель, чем задачу
+      // выполнять, и «найди новости» упёрлось бы в список, который кто-то
+      // забыл дополнить (инвариант 17). Поэтому запрет точечный и ровно
+      // по одному свойству назначения: профиль человека фоновым ходом не
+      // меняется — он меняется в разговоре с ним.
+      return {
+        canSendToUser: true,
+        canChangeProfile: false,
+        allowedTools: null,
+        deniedTools: [
+          "upsert_user_profile_field",
+          "confirm_user_profile_field",
+          "decline_user_profile_field",
+          "mark_profile_field_asked",
+        ],
       };
   }
 }

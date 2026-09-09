@@ -4,6 +4,9 @@
 #   sudo make install     one-command install on clean Ubuntu 24.04
 #   make status           what is running
 #   make doctor           full health report
+#   make check-search     does search actually return anything
+#   make check-tokens     where the model's input tokens actually go
+#   make check-latency    where the seconds of a turn actually go
 #   make backup / restore / update / rollback
 #
 # Every target is a thin wrapper around a script in scripts/ so the same
@@ -30,7 +33,8 @@ BACKUP ?=
 
 export ROOT_DIR SCRIPTS ENV_FILE VERSIONS COMPOSE_FILE
 
-.PHONY: help install configure configure-advanced start stop restart status logs doctor \
+.PHONY: help install configure configure-advanced start stop restart status logs doctor check-search \
+        check-tokens check-latency \
         backup restore update-preview update update-force rollback \
         configure-llm test-llm list-models configure-letta \
         disk-cleanup build pull ps shell-db validate test
@@ -112,6 +116,15 @@ logs: ## Смотреть логи; один сервис: make logs s=<service>
 
 doctor: ## Проверить контейнеры, HTTPS, БД, очередь и агентов
 	@$(SCRIPTS)/doctor.sh
+
+check-search: ## Проверить, что поиск действительно ищет: make check-search q="запрос"
+	@$(SCRIPTS)/check-search.sh $(q)
+
+check-tokens: ## Куда уходит вход модели: make check-tokens days=30
+	@$(SCRIPTS)/check-tokens.sh $(days)
+
+check-latency: ## Куда уходит время хода: make check-latency lines=20000
+	@$(SCRIPTS)/check-latency.sh $(lines)
 
 shell-db: ## Открыть psql для базы eva
 	@$(SCRIPTS)/require-env.sh

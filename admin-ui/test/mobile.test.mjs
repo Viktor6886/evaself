@@ -41,8 +41,60 @@ const CONFIG = {
   secret: { configured: true }, keys: { total: 3, usable: 2, exhausted: 1, invalid: 0 },
 };
 
+// Провайдер приходит одной записью из /llm/state: конфигурация,
+// возможности, маршруты, breaker и расход вместе. Имя модели длинное,
+// а сообщение проверки — в три строки: ровно то, что и вылезало.
+const PROVIDER = {
+  id: "p1", name: "Openrouter2", protocol: "openai-compatible",
+  base_url: "https://openrouter.ai/api/v1", model: "minimax/minimax-m3:free",
+  context_window: 1_000_000, is_active: true, enabled: true, api_key_configured: true,
+  supports_tools: true, supports_json: true, supports_vision: false, supports_streaming: true,
+  breaker_state: "closed", pinned_out: false,
+  // Имена — те же, что отдаёт v_llm_provider_health. Значения нарочно
+  // крупные: пятизначная задержка и двузначный расход и растягивали
+  // карточку за край экрана.
+  requests_1h: 1284, failures_1h: 17, p95_latency_ms: 12480,
+  spent_today_micro: 1234560, spent_month_micro: 98765432,
+  daily_budget_micro: 2000000, monthly_budget_micro: 150000000,
+  priority: 10, last_error_code: "429", probe_after: "2026-08-25T21:00:00Z",
+  last_checked_at: "2026-08-25T20:46:18Z",
+  last_check_ok: true, last_check_status: "limited",
+  last_check_message: "Подключение работает; получено моделей: 418. "
+    + "Модель работает с ограничениями: vision: пустой ответ на изображение; "
+    + "finish_reason=stop, допустимый output budget=4096.",
+  last_models: null, additional_parameters: {},
+  status: {
+    code: "limited", label: "работает с ограничениями", color: "yellow",
+    detail: { check: "limited", router: "closed" },
+  },
+  routes: [{ code: "chat", title: "Основная модель", position: 0 }],
+  single_selected: false,
+  created_at: "2026-08-01T00:00:00Z", updated_at: "2026-08-25T20:46:18Z",
+};
+const PROVIDERS = { providers: [PROVIDER] };
+const STATE = {
+  providers: [PROVIDER],
+  routes: [
+    { code: "chat", title: "Основная модель", min_context_window: 32768, rotation_enabled: true,
+      chain: [{ provider_id: "p1", name: "Openrouter2", model: "minimax/minimax-m3:free", protocol: "openai-compatible", enabled: true }] },
+    { code: "vision", title: "Изображения", min_context_window: 8192, rotation_enabled: true, chain: [] },
+    { code: "deep", title: "Мощная модель", min_context_window: 32768, rotation_enabled: true, chain: [] },
+  ],
+  // Один и тот же отказ десять раз — ровно то, что и было в панели.
+  recent_failures: Array.from({ length: 10 }, (_, index) => ({
+    provider: "Openrouter2", switch_reason: "rate_limited", http_status: 429,
+    started_at: `2026-08-25T2${index % 2}:01:42Z`,
+    error_summary: "лимит запросов провайдера: Provider returned error",
+  })),
+  routing_settings: { mode: "adaptive", updated_at: "2026-08-01T00:00:00Z" },
+};
+
 const ROUTES = {
   "/overview": OVERVIEW,
+  // Без состояния роутера раздел ИИ рисует пустую заглушку, и проверка
+  // целей касания смотрит на страницу без единой кнопки маршрута.
+  "/llm/state": STATE,
+  "/providers": PROVIDERS,
   "/stt/provider-schemas": { providers: [] },
   "/stt/configs": { configs: [CONFIG] },
   "/stt/routes": {
@@ -112,6 +164,75 @@ describe("панель на телефоне", () => {
         `раздел «${name}» растягивает страницу до ${width.document} при экране ${width.screen}`,
       );
     }
+  });
+
+  /*
+   * Раздел, до которого нельзя дотянуться, отсутствует — но выглядит
+   * присутствующим.
+   *
+   * Список разделов вырос до тысячи с лишним пикселей, а выехавшее меню
+   * — это высота экрана с `overflow: visible`. «Системные настройки»,
+   * «Безопасность и ключи» и «Журнал событий» на телефоне просто не
+   * пролезали: ни ошибки, ни обрезанного края — они молча были ниже
+   * экрана, и открыть их было нельзя вовсе.
+   */
+  test("до последнего раздела меню можно дотянуться прокруткой", async () => {
+    for (const size of [{ width: 320, height: 568 }, PHONE]) {
+      const panel = await openPanel({ routes: ROUTES, viewport: size });
+      panels.push(panel);
+      await panel.page.evaluate(() => setSidebar(true));
+      await panel.page.waitForTimeout(150);
+
+      const state = await panel.page.evaluate(() => {
+        const bar = document.querySelector(".sidebar");
+        return {
+          scrollable: getComputedStyle(bar).overflowY,
+          hidden: bar.scrollHeight > bar.clientHeight,
+        };
+      });
+      // Содержимое выше ящика — это норма; недопустимо, когда его при
+      // этом нельзя прокрутить.
+      if (state.hidden) {
+        assert.match(
+          state.scrollable, /auto|scroll/,
+          `${size.width}: меню не прокручивается, а содержимое в него не помещается`,
+        );
+      }
+
+      const reached = await panel.page.evaluate(() => {
+        const bar = document.querySelector(".sidebar");
+        const items = [...document.querySelectorAll(".nav-item")];
+        const last = items[items.length - 1];
+        bar.scrollTop = bar.scrollHeight;
+        const box = last.getBoundingClientRect();
+        return {
+          page: last.dataset.page,
+          visible: box.top >= 0 && box.bottom <= window.innerHeight + 1,
+        };
+      });
+      assert.ok(
+        reached.visible,
+        `${size.width}: до раздела «${reached.page}» нельзя дотянуться даже прокруткой`,
+      );
+    }
+  });
+
+  /*
+   * Выехавшее меню накрывает содержимое, а не просвечивает сквозь себя.
+   * У боковой панели фон был на 94 % непрозрачности: в своей колонке на
+   * широком экране разницы нет, а поверх страницы сквозь список разделов
+   * читался чужой текст.
+   */
+  test("выехавшее меню непрозрачно", async () => {
+    const panel = await open({ routes: ROUTES });
+    await panel.page.evaluate(() => setSidebar(true));
+    await panel.page.waitForTimeout(150);
+    const alpha = await panel.page.evaluate(() => {
+      const value = getComputedStyle(document.querySelector(".sidebar")).backgroundColor;
+      const parts = value.match(/[\d.]+/g) ?? [];
+      return parts.length > 3 ? Number(parts[3]) : 1;
+    });
+    assert.equal(alpha, 1, `фон меню полупрозрачен (alpha ${alpha})`);
   });
 
   test("вкладки раздела STT переносятся, а не уезжают за экран", async () => {
@@ -258,9 +379,66 @@ describe("панель на телефоне", () => {
     assert.ok(layout.rowWidth <= PHONE.width, "карточка не шире экрана");
   });
 
+  /*
+   * Подпись поля не рвётся посреди слова.
+   *
+   * Колонка подписи фиксированной ширины, и «ПРОИСХОЖДЕНИЕ» в неё не
+   * влезало на шесть пикселей: `overflow-wrap: anywhere`, нужный длинным
+   * путям и отпечаткам в значениях, ломал слово на «ПРОИСХОЖДЕНИ» и «Е».
+   * Читается это как опечатка в интерфейсе.
+   *
+   * Проверяется не конкретная подпись, а правило: ни одной подписи не
+   * должно быть тесно. Следующая длинная подпись сломает этот тест, а не
+   * вёрстку у оператора.
+   */
+  test("ни одна подпись поля не рвётся посреди слова", async () => {
+    const panel = await open({ routes: ROUTES });
+    const pages = await panel.page.evaluate(() =>
+      [...document.querySelectorAll("#nav .nav-item")].map((item) => item.dataset.page));
+
+    const tight = [];
+    for (const name of pages) {
+      await panel.page.evaluate((page) => openPage(page), name);
+      await panel.page.waitForTimeout(120);
+      tight.push(...await panel.page.evaluate((section) => {
+        const found = [];
+        const probe = document.createElement("span");
+        probe.style.position = "absolute";
+        probe.style.visibility = "hidden";
+        probe.style.whiteSpace = "nowrap";
+        document.body.appendChild(probe);
+        for (const cell of document.querySelectorAll("td[data-label]")) {
+          const style = getComputedStyle(cell);
+          if (style.display !== "grid") continue;
+          const track = parseFloat(style.gridTemplateColumns.split(" ")[0]);
+          if (!Number.isFinite(track)) continue;
+          const label = getComputedStyle(cell, "::before");
+          probe.style.font = label.font;
+          probe.style.letterSpacing = label.letterSpacing;
+          probe.style.textTransform = label.textTransform;
+          probe.textContent = cell.dataset.label;
+          const need = probe.getBoundingClientRect().width;
+          // Однословной подписи переноситься некуда: ей обязано хватить.
+          if (!cell.dataset.label.includes(" ") && need > track) {
+            found.push({ section, label: cell.dataset.label, need: Math.round(need), track });
+          }
+        }
+        probe.remove();
+        return found;
+      }, name));
+    }
+    assert.deepEqual(
+      tight, [],
+      `подписи не помещаются в свою колонку и порвутся по букве: ${JSON.stringify(tight)}`,
+    );
+  });
+
   test("на телефоне до каждой кнопки раздела можно дотянуться", async () => {
     const panel = await open({ routes: ROUTES });
-    for (const name of ["overview", "operations", "stt"]) {
+    // Раздел ИИ сюда добавлен после того, как кнопки маршрутов в карточке
+    // провайдера оказались втрое мельче цели касания: страница, на которую
+    // жалуются с телефона, обязана проверяться наравне с остальными.
+    for (const name of ["overview", "operations", "stt", "ai"]) {
       await panel.page.evaluate((page) => openPage(page), name);
       await panel.page.waitForTimeout(120);
       const small = await smallTapTargets(panel.page);
@@ -312,4 +490,145 @@ describe("панель на телефоне", () => {
     assert.ok(dialog.width <= 620, "на широком экране диалог не растягивается во всю ширину");
     assert.notEqual(dialog.radius, "0px", "нижние углы скругляются только у листа снизу");
   });
+});
+
+/**
+ * Раздел «Искусственный интеллект» на телефоне.
+ *
+ * Три вещи ломались именно здесь и именно на узком экране: описание
+ * ошибки в строке отказа налезало на заголовок, строка назначений
+ * провайдера вылезала за карточку, а восемь развёрнутых маршрутов давали
+ * несколько экранов прокрутки. Первые две не видны ни в коде, ни на
+ * широком экране — только измерением.
+ */
+describe("раздел ИИ на телефоне", () => {
+  let panel;
+  after(async () => await panel?.close());
+
+  test("ничего не налезает друг на друга и не вылезает за экран", async () => {
+    panel = await openPanel({
+      routes: { ...ROUTES, "/providers": PROVIDERS, "/llm/state": STATE },
+      viewport: PHONE,
+    });
+    await panel.page.evaluate(() => openPage("ai"));
+    await panel.page.waitForFunction(
+      () => document.querySelectorAll("#providers-list .provider-card").length > 0);
+    await panel.page.waitForFunction(
+      () => document.querySelectorAll("#router-failures .failure-row").length > 0);
+
+    const layout = await panel.page.evaluate((width) => {
+      const overflowing = [];
+      const scope = document.querySelector("#page-ai");
+      for (const node of scope.querySelectorAll("*")) {
+        const rect = node.getBoundingClientRect();
+        if (rect.width === 0 && rect.height === 0) continue;
+        if (rect.right > width + 1) overflowing.push(node.className || node.tagName);
+      }
+      // Наложение: заголовок отказа и его подробность обязаны лежать в
+      // разных строках, а не в соседних колонках одной.
+      const row = document.querySelector("#router-failures .failure-row");
+      const title = row.querySelector(".failure-title").getBoundingClientRect();
+      const more = row.querySelector(".failure-more");
+      return {
+        overflowing: overflowing.slice(0, 5),
+        documentWidth: document.documentElement.scrollWidth,
+        failureRows: document.querySelectorAll("#router-failures .failure-row").length,
+        countBadge: row.querySelector(".failure-count")?.textContent ?? null,
+        detailBelowTitle: more ? more.getBoundingClientRect().top >= title.bottom : true,
+        openRoutes: scope.querySelectorAll(".route-item[open]").length,
+        totalRoutes: scope.querySelectorAll(".route-item").length,
+        // Провайдер рисуется ровно одной карточкой. Отдельного списка
+        // «Состояние провайдеров», повторявшего тех же провайдеров с
+        // другим набором фактов, в разделе больше нет.
+        cards: scope.querySelectorAll(".provider-card").length,
+        healthRows: scope.querySelectorAll(".health-row").length,
+        // Место в маршрутах — в самой карточке, и оба факта про маршрут
+        // (имя и позиция) обязаны лежать в разных колонках, а не
+        // накладываться друг на друга.
+        routeChips: [...scope.querySelectorAll(".provider-route")].map((node) => {
+          const name = node.querySelector(".provider-route-name").getBoundingClientRect();
+          const rank = node.querySelector(".provider-route-rank").getBoundingClientRect();
+          return { text: node.textContent.trim(), overlap: rank.left < name.right - 0.5 };
+        }),
+        // Полная схема маршрутов свёрнута: разворачивают её тогда, когда
+        // правят цепочку целиком.
+        routesCardOpen: document.querySelector("#router-routes-card")?.open ?? null,
+        // Числа эксплуатации видны сразу, без разворачивания.
+        facts: [...scope.querySelectorAll(".provider-facts dd")].map((node) => node.textContent),
+        // Техническая справка по умолчанию свёрнута.
+        diagnosticsOpen: scope.querySelector(".provider-diagnostics")?.open ?? null,
+      };
+    }, PHONE.width);
+
+    assert.deepEqual(layout.overflowing, [], "элементы раздела выходят за экран");
+    assert.ok(layout.documentWidth <= PHONE.width,
+      `страница шире экрана: ${layout.documentWidth}`);
+    // Десять одинаковых отказов сводятся в одну строку со счётчиком.
+    assert.equal(layout.failureRows, 1, "одинаковые отказы обязаны схлопываться");
+    assert.equal(layout.countBadge, "10×");
+    assert.equal(layout.detailBelowTitle, true,
+      "подробность отказа лежит под заголовком, а не рядом с ним");
+    // Маршруты свёрнуты: список показывает, кто их обслуживает, а не
+    // повторяет одних и тех же провайдеров в каждом.
+    assert.equal(layout.openRoutes, 0, "маршруты по умолчанию свёрнуты");
+    assert.equal(layout.totalRoutes, 3);
+    assert.equal(layout.routesCardOpen, false, "полная схема маршрутов свёрнута");
+
+    // Один провайдер — одна карточка.
+    assert.equal(layout.cards, 1, "провайдер нарисован дважды");
+    assert.equal(layout.healthRows, 0,
+      "отдельный список «Состояние провайдеров» повторяет карточки");
+    assert.equal(layout.routeChips.length, 1);
+    assert.match(layout.routeChips[0].text, /Основная модель/);
+    assert.match(layout.routeChips[0].text, /основной/);
+    assert.equal(layout.routeChips[0].overlap, false,
+      "позиция в маршруте налезает на его название");
+
+    // Четыре числа, из-за которых в карточку и приходят, — на виду.
+    assert.deepEqual(layout.facts, ["1284 · ошибок 17", "12480 мс", "$1.23", "$98.77"]);
+    assert.equal(layout.diagnosticsOpen, false,
+      "техническая справка не должна быть развёрнута по умолчанию");
+  });
+
+  /**
+   * Карточка не рисует кнопку, которую роль не может выполнить.
+   *
+   * Раньше «Проверить» и «Изменить» показывались всем, и viewer узнавал
+   * о своих правах из 403 после нажатия. Роли здесь ровно те же, что
+   * объявлены у маршрутов: правка — owner/admin, проверка — ещё и
+   * operator.
+   */
+  for (const [role, expected] of [["viewer", []], ["operator", ["check"]]]) {
+    test(`${role} видит состояние и только разрешённые ему действия`, async () => {
+      const limited = await openPanel({
+        routes: { ...ROUTES, "/providers": PROVIDERS, "/llm/state": STATE },
+        viewport: PHONE, role,
+      });
+      try {
+        await limited.page.evaluate(() => openPage("ai"));
+        await limited.page.waitForFunction(
+          () => document.querySelectorAll("#providers-list .provider-card").length > 0);
+        const card = await limited.page.evaluate(() => {
+          const node = document.querySelector("#providers-list .provider-card");
+          return {
+            status: node.querySelector(".status-pill")?.textContent.trim(),
+            routeChip: node.querySelector(".provider-route")?.textContent.trim(),
+            actions: [...node.querySelectorAll("[data-provider-action]")]
+              .map((button) => button.dataset.providerAction),
+            routeActions: node.querySelectorAll(".provider-route-actions").length,
+            addRoute: node.querySelectorAll(".provider-route-add").length,
+          };
+        });
+        // Читать состояние роль обязана: раздел для неё не пустой.
+        assert.equal(card.status, "работает с ограничениями");
+        assert.match(card.routeChip, /Основная модель/);
+        assert.deepEqual(card.actions, expected);
+        // Маршруты не правятся ни той, ни другой ролью.
+        assert.equal(card.routeActions, 0);
+        assert.equal(card.addRoute, 0);
+      } finally {
+        await limited.close();
+      }
+    });
+  }
 });

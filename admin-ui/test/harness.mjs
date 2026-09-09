@@ -7,9 +7,9 @@
  *
  * Ключевое, ради чего это вообще написано, — отрицательные проверки:
  * какие запросы интерфейс НЕ отправляет. Переписка не должна уходить при
- * открытии карточки, а мутации — до подтверждения sudo. Такое нельзя
- * увидеть в `node --check`, и на сервере это уже не поймать: запрос либо
- * пришёл, либо нет.
+ * открытии карточки, а действие с последствиями — до подтверждения в
+ * окне. Такое нельзя увидеть в `node --check`, и на сервере это уже не
+ * поймать: запрос либо пришёл, либо нет.
  */
 
 import { chromium } from "playwright";
@@ -210,16 +210,36 @@ export async function openPanel({ routes = {}, role = "owner", viewport = null }
     errors,
     /** Сколько запросов ушло на путь, содержащий фрагмент. */
     countTo: (fragment) => requests.filter((r) => r.path.includes(fragment)).length,
-    /** Сбросить и затем прочитать реальное отложенное sudo-действие. */
-    sudoWatch: async () => await page.evaluate(() => {
-      state.pendingSudo = null;
+    /**
+     * Дождаться запроса, который интерфейс отправляет сам.
+     *
+     * Запись ведётся в Node, а отправляет её браузер: без ожидания тест
+     * читал бы массив раньше, чем в него попал запрос, и падал бы через
+     * раз в зависимости от скорости машины.
+     */
+    waitForRequest: async (predicate, timeout = 5000) => {
+      const deadline = Date.now() + timeout;
+      for (;;) {
+        const found = requests.find(predicate);
+        if (found) return found;
+        if (Date.now() > deadline) return null;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    },
+    /** Сбросить отложенное подтверждение, чтобы увидеть именно новое. */
+    confirmWatch: async () => await page.evaluate(() => {
+      state.pendingConfirm = null;
       return true;
     }),
-    sudoScope: async () => await page.evaluate(() => state.pendingSudo?.scope ?? null),
-    /** Подтвердить отложенное sudo так же, как это делает форма диалога. */
-    confirmSudo: async () => await page.evaluate(async () => {
-      const pending = state.pendingSudo;
-      document.querySelector("#sudo-dialog").close();
+    /** Заголовок открытого окна подтверждения или `null`, если его нет. */
+    confirmTitle: async () => await page.evaluate(() => (
+      state.pendingConfirm ? document.querySelector("#confirm-title").textContent : null
+    )),
+    /** Подтвердить так же, как это делает форма диалога. */
+    confirmAccept: async () => await page.evaluate(async () => {
+      const pending = state.pendingConfirm;
+      state.pendingConfirm = null;
+      document.querySelector("#confirm-dialog").close();
       await pending.action();
     }),
     close: async () => {

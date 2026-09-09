@@ -100,15 +100,15 @@ describe("раздел синтеза речи", () => {
     await page.click("#tts-save");
     await sent;
 
-    // Пароль при сохранении речи не спрашивается — решение владельца.
-    // Тест сторожит именно это: окно пароля не появляется, значения
-    // уходят сразу.
+    // Пароль при сохранении речи не спрашивается — как и в любой другой
+    // настройке панели. Тест сторожит именно это: никакого окна между
+    // нажатием и запросом, значения уходят сразу.
     assert.equal(
-      await page.evaluate(() => !!document.querySelector("#sudo-dialog[open]")),
+      await page.evaluate(() => !!document.querySelector("#confirm-dialog[open]")),
       false,
-      "появилось окно пароля",
+      "появилось окно подтверждения",
     );
-    assert.equal(await panel.sudoScope(), null, "запись речи запросила sudo");
+    assert.equal(await panel.confirmTitle(), null, "запись речи потребовала подтверждения");
 
     const saved = requests.find((item) => item.method === "PUT" && item.path === "/integrations/tts/config");
     assert.ok(saved, `запрос сохранения не ушёл: ${JSON.stringify(requests.map((r) => `${r.method} ${r.path}`))}`);

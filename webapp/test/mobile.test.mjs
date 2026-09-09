@@ -3,8 +3,8 @@
  *
  * Главный экран строится вокруг одного действия:
  * trigger → один hero CTA → variable reward → post-reward investment.
- * Тесты находятся только в «Рост», а нижняя навигация фиксирована:
- * Сегодня | Диалог | Дневник | Рост | Профиль.
+ * Самопознание доступно в основной навигации:
+ * Сегодня | Самопознание | Дневник | Рост | Профиль.
  */
 
 import assert from "node:assert/strict";
@@ -13,7 +13,7 @@ import { after, describe, test } from "node:test";
 
 import { DEVICES, NOW, PHONES, documentWidth, openApp, smallTapTargets } from "./harness.mjs";
 
-const CORE_SCREENS = ["today", "journal", "development", "profile"];
+const CORE_SCREENS = ["today", "discovery", "journal", "development", "profile"];
 const APP_SOURCE = readFileSync(new URL("../public/app/app.js", import.meta.url), "utf8");
 const utcDateKeyDaysAgo = (days) => {
   const date = new Date(NOW);
@@ -61,7 +61,7 @@ describe("Mini App hook-focused", () => {
     const labels = await app.page.$$eval(".bottom-nav button", (nodes) =>
       nodes.map((node) => (node.textContent || "").trim()),
     );
-    assert.deepEqual(labels, ["Сегодня", "Диалог", "Дневник", "Рост", "Профиль"]);
+    assert.deepEqual(labels, ["Сегодня", "Самопознание", "Дневник", "Рост", "Профиль"]);
     assert.doesNotMatch(labels.join(" "), /Органайзер|Пульт|Бюджет|Астро|Интеграц/i);
   });
 
@@ -166,14 +166,14 @@ describe("Mini App hook-focused", () => {
     );
   });
 
-  test("тесты перенесены в Рост и не конкурируют с hero", async () => {
+  test("самопознание доступно напрямую и не обещает готовые опросники", async () => {
     const app = await open({ viewport: { width: 390, height: 844 } });
-    await app.openScreen("development");
-    await app.page.click('[data-development="tests"]');
-    const text = await app.page.textContent("#development-content");
-    assert.match(text, /Тесты и самопознание/i);
+    await app.openScreen("discovery");
+    const text = await app.page.textContent("#discovery-content");
+    assert.match(text, /опросники/i);
     assert.match(text, /Скоро/i);
-    assert.match(text, /Профиль самопонимания/i);
+    assert.match(text, /Пока они недоступны/i);
+    assert.equal(await app.page.locator('[data-development="tests"]').count(), 0);
   });
 
   test("reward короткий, персональный и не выглядит системным отчётом", async () => {
@@ -418,16 +418,16 @@ describe("Mini App hook-focused", () => {
     assert.match(text, /Дневник пока недоступен/i);
   });
 
-  test("клик по профилю самопонимания открывает Рост → Тесты", async () => {
+  test("клик по профилю самопонимания открывает Самопознание", async () => {
     const app = await open({ viewport: { width: 390, height: 844 } });
     await app.page.click("#profile-investment");
-    assert.equal(await app.page.evaluate(() => window.EvaApp.state.screen), "development");
-    assert.equal(await app.page.evaluate(() => window.EvaApp.state.developmentTab), "tests");
+    assert.equal(await app.page.evaluate(() => window.EvaApp.state.screen), "discovery");
   });
 
-  test("Диалог открывает handoff к Еве, а не отдельный дублирующий экран", async () => {
+  test("самопознание открывает существующий handoff к Еве", async () => {
     const app = await open({ viewport: { width: 390, height: 844 } });
-    await app.page.click("#dialog-nav");
+    await app.openScreen("discovery");
+    await app.page.click("#discovery-start");
     await app.page.waitForSelector("#sheet[open]");
     assert.match(await app.page.textContent("#sheet-title"), /Обсудить с Евой/i);
   });
@@ -492,6 +492,107 @@ describe("Mini App hook-focused", () => {
     assert.equal(
       app.requests.filter((item) => item.method === "DELETE" && item.path.includes("/journal/9")).length,
       1,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------
+// Когда Ева пишет первой
+// ---------------------------------------------------------------------
+
+describe("окна инициативы", () => {
+  const opened = [];
+  const open = async (options) => {
+    const app = await openApp(options);
+    opened.push(app);
+    return app;
+  };
+  after(async () => {
+    for (const app of opened) await app.close().catch(() => {});
+  });
+
+  const WINDOWS = {
+    "/public/proactive-windows": {
+      proactive: {
+        enabled: true,
+        max_windows: 6,
+        min_minutes: 15,
+        timezone: "Europe/Moscow",
+        windows: [
+          { id: "1", start_minute: 660, end_minute: 720, weekdays: [1, 2, 3, 4, 5], enabled: true },
+        ],
+      },
+    },
+  };
+
+  test("выбранное окно видно прямо в списке настроек", async () => {
+    const app = await open({ routes: WINDOWS });
+    await app.openScreen("profile");
+    const status = await app.page.textContent('[data-setting="initiative"] em');
+    // Не «Открыть»: человек должен видеть своё расписание, не заходя внутрь.
+    assert.equal(status.trim(), "11:00–12:00");
+    assert.deepEqual(app.errors, []);
+  });
+
+  test("окно редактируется и сохраняется одним набором", async () => {
+    const app = await open({ routes: WINDOWS });
+    await app.openScreen("profile");
+    await app.page.click('[data-setting="initiative"]');
+    await app.page.waitForSelector("#initiative-save");
+
+    // Второе окно: человек вправе завести несколько промежутков.
+    await app.page.click("#initiative-add");
+    await app.page.waitForSelector('[data-window="1"]');
+    await app.page.fill('[data-window="1"] input[data-field="start"]', "17:00");
+    await app.page.fill('[data-window="1"] input[data-field="end"]', "18:00");
+    await app.page.click("#initiative-save");
+    await app.page.waitForTimeout(200);
+
+    const saved = app.requests.find(
+      (item) => item.method === "PUT" && item.path === "/public/proactive-windows",
+    );
+    assert.ok(saved, "сохранение обязано уйти одним запросом");
+    assert.equal(saved.body.enabled, true);
+    assert.equal(saved.body.windows.length, 2);
+    assert.deepEqual(
+      saved.body.windows.map((window) => [window.start_minute, window.end_minute]),
+      [[660, 720], [1020, 1080]],
+    );
+    assert.deepEqual(app.errors, []);
+  });
+
+  test("последний день недели снять нельзя: окно без дней не сработает", async () => {
+    const app = await open({ routes: WINDOWS });
+    await app.openScreen("profile");
+    await app.page.click('[data-setting="initiative"]');
+    await app.page.waitForSelector('[data-window="0"]');
+
+    for (const day of [1, 2, 3, 4, 5]) {
+      await app.page.click(`[data-window="0"] [data-day="${day}"]`);
+      await app.page.waitForTimeout(40);
+    }
+    const selected = await app.page.$$eval(
+      '[data-window="0"] .choice-button.is-selected',
+      (nodes) => nodes.length,
+    );
+    assert.equal(selected, 1, "хотя бы один день обязан остаться");
+  });
+
+  test("выключенное согласие названо прямо, а не спрятано", async () => {
+    const app = await open({
+      routes: {
+        "/public/proactive-windows": {
+          proactive: {
+            enabled: false, max_windows: 6, min_minutes: 15,
+            timezone: "Europe/Moscow", windows: [],
+          },
+        },
+      },
+    });
+    await app.openScreen("profile");
+    assert.equal(
+      (await app.page.textContent('[data-setting="initiative"] em')).trim(),
+      "Выключено",
     );
   });
 });

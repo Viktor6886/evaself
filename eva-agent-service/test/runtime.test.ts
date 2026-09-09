@@ -7,11 +7,11 @@ import { assertCronExpression, cronFieldMatches, nextCronDate } from "../dist/ba
 import { formatVoiceTranscriptEcho, normalizeUpdate } from "../dist/eva-workflow.js";
 import { evaMemoryBlocks } from "../dist/letta.js";
 import { ensureCoreMemoryBlocks } from "../dist/letta/memory-blocks.js";
-import { normalizeLavaEvent } from "../dist/payments.js";
 import { RuntimeContextBuilder } from "../dist/runtime/runtime-context.js";
 
 import {
   splitTelegramText,
+  liveStepWords,
   nextLivePrefix,
   TelegramApiError,
   TelegramClient,
@@ -487,34 +487,6 @@ test("next cron date respects an IANA timezone", () => {
   assert.equal(next.toISOString(), "2026-07-29T04:00:00.000Z");
 });
 
-test("Lava webhook normalizer accepts the old nested shape", () => {
-  const event = normalizeLavaEvent({
-    eventType: "payment.success",
-    product: { id: "plus-month" },
-    buyer: { email: "owner@example.test" },
-    invoice: { id: "inv-1", amount: 990, currency: "rub", status: "completed" },
-    metadata: { telegram_id: "123" },
-  });
-  assert.equal(event.productId, "plus-month");
-  assert.equal(event.paymentId, "inv-1");
-  assert.equal(event.telegramId, 123);
-  assert.equal(event.amountMinor, 99_000);
-  assert.equal(event.currency, "RUB");
-});
-
-test("Lava webhook does not invent a successful status or reinterpret explicit minor units", () => {
-  const event = normalizeLavaEvent({
-    eventType: "payment.success",
-    product: { id: "plus-month" },
-    contractId: "contract-1",
-    amount_minor: 99_000,
-  });
-  assert.equal(event.paymentId, "contract-1");
-  assert.equal(event.amountMinor, 99_000);
-  assert.equal(event.currency, "");
-  assert.equal(event.status, "");
-});
-
 test("new Eva agents receive the structured memory blueprint", () => {
   const blocks = evaMemoryBlocks();
   assert.deepEqual(
@@ -711,6 +683,13 @@ test("ход знает день недели и промежуток с про�
   const prompt = builder.wrapUserMessage(context, "сделал");
   assert.match(prompt, /local_date: пятница, 14 августа 2026/);
   assert.match(prompt, /since_previous_user_message: 9 секунд/);
+  // Промежутка одного мало: «девять секунд» модель читает как оценку и
+  // рассуждает от неё вольно. Две отметки на часах — это две точки, и
+  // помещается между ними поездка или нет, видно без арифметики.
+  assert.equal(context.previousMessageLocalTime, "14 августа, 17:00");
+  assert.equal(context.sincePreviousMessageSeconds, 9);
+  assert.match(prompt, /previous_user_message_local_time: 14 августа, 17:00/);
+  assert.match(prompt, /since_previous_user_message_seconds: 9/);
   // Что делать с промежутком, Ева знает из персоны — в ходе только факт.
   assert.doesNotMatch(prompt, /since_previous_user_message_note/);
 });
@@ -721,8 +700,11 @@ test("первое сообщение промежутка не выдумыва
     userId: 1, conversationId: "c", userMessage: "привет", previousUserMessageAt: null,
   });
   assert.equal(context.sincePreviousMessage, null);
+  assert.equal(context.previousMessageLocalTime, null);
+  assert.equal(context.sincePreviousMessageSeconds, null);
   const prompt = builder.wrapUserMessage(context, "привет");
   assert.doesNotMatch(prompt, /since_previous_user_message/);
+  assert.doesNotMatch(prompt, /previous_user_message_local_time/);
 });
 
 test("длинные промежутки называются старшими единицами", async () => {
@@ -791,6 +773,31 @@ test("сообщение о сделанном сверяется с проме�
   const prompt = builder.wrapUserMessage(context, "все помыл");
   // В ход приходит факт; правило сверки — постоянное, оно в персоне.
   assert.match(prompt, /since_previous_user_message: 30 секунд/);
+});
+
+/**
+ * Плавность показа — это «мельче и чаще», а не «медленнее».
+ *
+ * Прежде за раз появлялось до пятнадцати слов раз в 800 мс: строка
+ * возникала вспышкой, и текст прыгал вместо того, чтобы течь.
+ */
+test("шаг показа мельче строки и не растёт со временем", () => {
+  // Первые правки короче: начало ответа — тот момент, который и
+  // читается «резко», когда только что было пусто.
+  assert.equal(liveStepWords(0), 5);
+  assert.equal(liveStepWords(1), 9);
+  // Дальше — обычный темп, и он постоянный: рывки модели не должны
+  // становиться рывками показа.
+  for (const updates of [2, 3, 10, 100]) {
+    assert.equal(liveStepWords(updates), 14, `правка ${updates}`);
+  }
+});
+
+test("шаг остаётся заметно меньше прежних пятнадцати слов", () => {
+  // Ради этого всё и делалось: кусок не должен быть целой строкой.
+  const steps = [0, 1, 2, 5, 50].map(liveStepWords);
+  assert.ok(Math.max(...steps) < 15, `шаг вырос до ${Math.max(...steps)}`);
+  assert.ok(Math.min(...steps) >= 3, "слишком мелкий шаг — это уже посимвольная печать");
 });
 
 test("adaptive live prefix keeps words, links and code intact", () => {
@@ -894,7 +901,7 @@ test("психологические навыки доступны нативн�
     "therapeutic-conversation", "cbt", "act", "motivational-interviewing",
     "schema-therapy", "emotion-regulation", "behavioral-activation",
     "relationships-boundaries", "goals-values", "journaling-reflection",
-    "memory-hygiene", "crisis-response",
+    "memory-hygiene", "subscription-status", "crisis-response",
   ]) {
     assert.ok(entries.includes(required), `навык ${required} отсутствует`);
   }
@@ -940,4 +947,122 @@ test("размер служебного блока измеряется и ви�
   // контекст снова тащат постоянные правила.
   recordRuntimeContextSize(RUNTIME_CONTEXT_CEILING);
   assert.equal(runtimeContextSizeStats().nearCeilingTotal, before.nearCeilingTotal + 1);
+});
+
+// ---------------------------------------------------------------------
+// Собственные сообщения Евы
+// ---------------------------------------------------------------------
+
+/** Фейк базы, различающий запросы по характерному куску SQL. */
+function routedDb(routes: Array<[string, unknown[]]>, seen: string[] = []) {
+  return {
+    seen,
+    query: async (sql: string) => {
+      seen.push(sql);
+      for (const [marker, rows] of routes) {
+        if (sql.includes(marker)) return { rows };
+      }
+      return { rows: [{ ...CONTEXT_ROW }] };
+    },
+  };
+}
+
+test("Ева видит, что написала сама с прошлого сообщения человека", async () => {
+  // Напоминание сочиняется в служебной conversation и уходит в Telegram
+  // мимо основного диалога. Без этого блока на «ты же мне писала утром»
+  // Еве нечего ответить: для неё этого утра не было.
+  const now = new Date("2026-08-15T12:00:00Z");
+  const db = routedDb([
+    ["UNION ALL", [{
+      sent_at: new Date("2026-08-15T09:30:00Z"),
+      message_text: "Напоминаю про зубного в 11:00.",
+      source: "task",
+    }]],
+  ]);
+  const builder = new RuntimeContextBuilder(db as never, {
+    defaultTimezone: "UTC", profileCompletionEnabled: false,
+    vectorGoalsEnabled: false, now: () => now,
+  });
+  const context = await builder.build({
+    userId: 1, conversationId: "c", userMessage: "спасибо, сходил",
+    previousUserMessageAt: new Date("2026-08-15T08:00:00Z"),
+  });
+
+  assert.deepEqual(context.ownMessages, [
+    "15 августа, 14:30: «Напоминаю про зубного в 11:00.»",
+  ]);
+  const prompt = builder.wrapUserMessage(context, "спасибо, сходил");
+  assert.match(prompt, /i_wrote_since_your_last_message:/);
+  assert.match(prompt, /Напоминаю про зубного/);
+});
+
+test("собственные сообщения стоят выше журнала событий задач", async () => {
+  // Блок обрезается по общему потолку с конца. Первым обязан уцелеть
+  // текст, который Ева сказала своими словами: событие «отправлено
+  // напоминание» она восстановит из задачи, текст — ниоткуда.
+  const now = new Date("2026-08-15T12:00:00Z");
+  const db = routedDb([
+    ["UNION ALL", [{
+      sent_at: new Date("2026-08-15T09:30:00Z"),
+      message_text: "Своими словами",
+      source: "proactive",
+    }]],
+    ["JOIN tasks t ON t.id=e.task_id", [{
+      title: "Зубной", event_type: "reminder_sent",
+      created_at: new Date("2026-08-15T09:30:00Z"), task_status: "open",
+    }]],
+  ]);
+  const builder = new RuntimeContextBuilder(db as never, {
+    defaultTimezone: "UTC", profileCompletionEnabled: false,
+    vectorGoalsEnabled: false, now: () => now,
+  });
+  const context = await builder.build({
+    userId: 1, conversationId: "c", userMessage: "ок", previousUserMessageAt: null,
+  });
+  const prompt = builder.wrapUserMessage(context, "ок");
+  assert.ok(
+    prompt.indexOf("i_wrote_since_your_last_message:") < prompt.indexOf("recent_task_events:"),
+    "собственное сообщение обязано стоять до журнала событий",
+  );
+});
+
+test("фоновый ход сам узнаёт, когда человек писал в последний раз", async () => {
+  // У живого хода граница уже на руках: `recordUserMessage` вернул
+  // предыдущее значение. У фонового её нет, и спросить базу — это
+  // единственный способ не показать Еве её же сообщение как новое.
+  const seen: string[] = [];
+  const db = routedDb([
+    ["LEFT JOIN heartbeat_state h ON h.user_id = u.id", [{
+      at: new Date("2026-08-15T08:00:00Z"),
+    }]],
+    ["UNION ALL", []],
+  ], seen);
+  const builder = new RuntimeContextBuilder(db as never, {
+    defaultTimezone: "UTC", profileCompletionEnabled: false,
+    vectorGoalsEnabled: false, now: () => new Date("2026-08-15T12:00:00Z"),
+  });
+  await builder.build({ userId: 1, conversationId: "c", userMessage: "[HEARTBEAT CONTROL]" });
+  assert.ok(
+    seen.some((sql) => sql.includes("LEFT JOIN heartbeat_state h ON h.user_id = u.id")),
+    "граница фонового хода обязана читаться из базы",
+  );
+});
+
+test("живой ход не спрашивает у базы то, что ему уже передали", async () => {
+  // Спросить базу здесь значило бы получить время только что
+  // записанного сообщения человека и не показать Еве ничего никогда.
+  const seen: string[] = [];
+  const db = routedDb([["UNION ALL", []]], seen);
+  const builder = new RuntimeContextBuilder(db as never, {
+    defaultTimezone: "UTC", profileCompletionEnabled: false,
+    vectorGoalsEnabled: false, now: () => new Date("2026-08-15T12:00:00Z"),
+  });
+  await builder.build({
+    userId: 1, conversationId: "c", userMessage: "привет",
+    previousUserMessageAt: null,
+  });
+  assert.ok(
+    !seen.some((sql) => sql.includes("LEFT JOIN heartbeat_state h ON h.user_id = u.id")),
+    "живому ходу граница уже передана",
+  );
 });

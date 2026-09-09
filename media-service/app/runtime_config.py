@@ -31,6 +31,11 @@ ASR_FIELDS = ("base_url", "api_key", "model", "language")
 # уходит в поле `instructions`, у Gemini TTS через OpenRouter — туда же:
 # провайдерские поля endpoint пропускает без изменений.
 TTS_FIELDS = ("base_url", "api_key", "model", "voice", "voice_prompt", "response_format")
+# Токен бота. Голосовое сообщение сервис скачивает у Telegram сам, и без
+# действующего токена `getFile` отвечает отказом: после переезда на
+# другого бота распознавание молча переставало работать, потому что
+# контейнер продолжал жить с прежним значением из окружения.
+TELEGRAM_FIELDS = ("bot_token",)
 
 _LOCK = threading.Lock()
 
@@ -81,12 +86,15 @@ class RuntimeConfig:
     def tts(self) -> dict[str, str]:
         return self.section("tts")
 
+    def telegram(self) -> dict[str, str]:
+        return self.section("telegram")
+
     # -----------------------------------------------------------------
     # запись
     # -----------------------------------------------------------------
     def update(self, payload: dict) -> dict[str, list[str]]:
         """Сохраняет только известные поля. Возвращает, что изменилось."""
-        allowed = {"asr": ASR_FIELDS, "tts": TTS_FIELDS}
+        allowed = {"asr": ASR_FIELDS, "tts": TTS_FIELDS, "telegram": TELEGRAM_FIELDS}
         applied: dict[str, list[str]] = {}
 
         with _LOCK:
@@ -132,4 +140,9 @@ class RuntimeConfig:
                 else values.get(key, "")
                 for key in values
             }
+        # Токен бота — секрет ровно так же, как ключ провайдера: наружу
+        # уходит только «настроен».
+        out["telegram"] = {
+            "bot_token": "configured" if self.section("telegram").get("bot_token") else "",
+        }
         return out

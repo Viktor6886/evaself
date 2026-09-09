@@ -191,11 +191,12 @@ test("токен провайдера сохраняется вместе с о�
   if (previousToken !== undefined) process.env.MEDIA_SERVICE_TOKEN = previousToken;
 });
 
-test("пароль при записи интеграции спрашивается по интеграции, а не по маршруту", async () => {
-  // Маршрут один на все интеграции. Владелец решил не спрашивать пароль
-  // при настройке речи — но тем же запросом меняются Telegram bot_token,
-  // секрет SearXNG и ключ Crawl4AI, поэтому послабление ограничено
-  // asr и tts.
+test("право secrets:write требуется по интеграции, а не по маршруту", async () => {
+  // Маршрут один на все интеграции. Речь настраивают часто и без
+  // отдельного права — но тем же запросом меняются Telegram bot_token,
+  // секрет SearXNG и ключ Crawl4AI, поэтому проверка права ограничена
+  // остальными интеграциями. Пароль здесь ни при чём: право даёт роль
+  // сессии, полученная при входе.
   const { buildAdminServer } = await import("../dist/admin/server.js");
   const sudo: string[] = [];
   const saved: string[] = [];
@@ -235,7 +236,7 @@ test("пароль при записи интеграции спрашивает
   for (const id of ["tts", "asr"]) {
     assert.equal((await put(id)).statusCode, 200, id);
   }
-  assert.deepEqual(sudo, [], "речь не должна требовать пароль");
+  assert.deepEqual(sudo, [], "речь не должна требовать отдельного права");
 
   for (const id of ["telegram", "searxng", "crawl4ai"]) {
     assert.equal((await put(id)).statusCode, 200, id);

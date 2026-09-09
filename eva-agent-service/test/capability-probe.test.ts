@@ -104,7 +104,12 @@ test("совместимая модель проходит все заявлен
   assert.match(JSON.stringify(visionRequest), /image_url.*data:image\/png;base64/);
   for (const body of seen) {
     assert.equal(body.temperature, 0, "проба должна быть детерминированной");
-    assert.ok(Number(body.max_tokens) <= 64, "проба должна быть дешёвой");
+    // Дешевизна пробы — это отсутствие лишних попыток, а не крошечный
+    // потолок: `max_tokens` ограничивает, а не заказывает, и на «ready»
+    // модель потратит те же несколько токенов при любом пределе. Все
+    // проверки здесь проходят с первой попытки, поэтому ни один запрос
+    // не должен выйти за стартовый бюджет.
+    assert.ok(Number(body.max_tokens) <= 2_048, "проба не должна наращивать бюджет без нужды");
   }
   assert.doesNotMatch(JSON.stringify(seen), /Сергей|Бореалис|EVA_RUNTIME_CONTEXT|USER_MESSAGE/);
 });
@@ -208,10 +213,12 @@ test("reasoning-модель: служебные поля возвращаютс
   assert.equal(result.warnings, "");
 });
 
-test("OpenRouter reasoning+tools: length на 1024 не является несовместимостью", async () => {
+test("OpenRouter reasoning+tools: length на стартовом бюджете не является несовместимостью", async () => {
   const { fetcher, seen } = provider({
     toolCall: REASONING_TOOL_CALL,
-    toolLoop: (body) => Number(body.max_tokens) <= 1_024
+    // Модель не укладывается в стартовый бюджет цикла инструмента и
+    // отдаёт пустоту с finish_reason=length. Это теснота, а не поломка.
+    toolLoop: (body) => Number(body.max_tokens) <= 2_048
       ? json({
           choices: [{
             message: { content: "", reasoning: "opaque-progress" },
@@ -225,8 +232,8 @@ test("OpenRouter reasoning+tools: length на 1024 не является нес�
   assert.equal(result.ok, true, result.message);
   assert.equal(statusOf(result, "tool_result_loop"), "ok");
   const loops = loopBodies(seen);
-  assert.ok(loops.some((body) => body.max_tokens === 1_024), "регрессия воспроизведена на старой границе");
-  assert.ok(loops.some((body) => Number(body.max_tokens) > 1_024), "probe использовал допустимый бюджет модели");
+  assert.ok(loops.some((body) => body.max_tokens === 2_048), "регрессия воспроизведена на стартовом бюджете");
+  assert.ok(loops.some((body) => Number(body.max_tokens) > 2_048), "probe использовал допустимый бюджет модели");
   const finalMessages = loops.at(-1)?.messages as Array<{ role?: string; content?: string }>;
   assert.match(finalMessages.at(-1)?.content ?? "", /FINAL_OK/, "final answer требуется явно");
 });
@@ -297,7 +304,7 @@ test("проба идёт в конфигурации провайдера, но
     assert.equal(body.api_key, undefined);
     assert.equal(body.temperature, 0, "проба остаётся детерминированной");
     assert.equal(body.max_tokens, undefined);
-    assert.ok(Number(body.max_completion_tokens) <= 64, "проба остаётся дешёвой");
+    assert.ok(Number(body.max_completion_tokens) <= 2_048, "проба не наращивает бюджет без нужды");
   }
   assert.doesNotMatch(JSON.stringify(seen), /sk-should-not-leak/);
 });
@@ -339,12 +346,19 @@ test("ответ, не соответствующий схеме, — отказ
   assert.match(result.warnings, /не соответствует переданной схеме/);
 });
 
-test("поток, пришедший не событиями SSE, не проходит", async () => {
+/**
+ * Поток — удобство, а не условие работы: без него Ева отвечает целиком.
+ * Отказ обязан быть обнаружен и назван, но модель из-за него не негодная.
+ */
+test("поток, пришедший не событиями SSE, не проходит и остаётся ограничением", async () => {
   const { fetcher } = provider({ streaming: () => json(CHAT("ready")) });
   const result = await probeModelCapabilities(INPUT, fetcher);
-  assert.equal(result.ok, false);
   assert.equal(statusOf(result, "streaming"), "failed");
-  assert.match(result.message, /поток закончился без содержимого/);
+  assert.equal(result.status, "limited");
+  assert.equal(result.ok, true, "разговор с инструментами работает");
+  assert.equal(result.detected.streaming, false);
+  assert.match(result.warnings, /streaming: поток закончился без содержимого/);
+  assert.equal(result.message, "", "обязательные возможности не пострадали");
 });
 
 test("отказ провайдера называет причину, а не «что-то пошло не так»", async () => {
@@ -369,15 +383,71 @@ test("agent tools проверяются фактически даже при о
   assert.equal(seen.length, 4, "completion, полный agent tool loop и vision discovery");
 });
 
-test("заявленное, но неработающее зрение блокирует активацию", async () => {
+/**
+ * Заявленное, но неработающее зрение — ограничение модели, а не приговор.
+ *
+ * Прежде такой отказ делал провайдера непригодным целиком: модель, которая
+ * прекрасно ведёт разговор и вызывает инструменты, объявлялась несовместимой
+ * с агентным ходом из-за одной картинки. Теперь она пригодна, но зрение
+ * записано как отсутствующее, и маршруты, которым оно нужно, её не возьмут.
+ */
+test("заявленное, но неработающее зрение делает модель ограниченной, а не негодной", async () => {
   const { fetcher } = provider({ vision: () => json({ error: "no vision" }, 400) });
   const result = await probeModelCapabilities(
     { ...INPUT, claims: { ...INPUT.claims, vision: true } },
     fetcher,
   );
   assert.equal(statusOf(result, "vision"), "failed");
-  assert.equal(result.ok, false, "supports_vision нельзя сохранять без рабочего image path");
-  assert.match(result.message, /vision/);
+  assert.equal(result.status, "limited");
+  assert.equal(result.ok, true, "разговор с инструментами работает — модель пригодна");
+  assert.equal(result.detected.vision, false, "supports_vision нельзя сохранять без рабочего image path");
+  assert.match(result.warnings, /vision/, "ограничение обязано быть названо оператору");
+  assert.equal(result.message, "", "обязательные возможности не пострадали");
+});
+
+/**
+ * Лимит запросов не говорит о модели ничего.
+ *
+ * Раньше 429 в момент проверки записывался как несовместимость и оставался
+ * записанным до следующей ручной проверки: провайдер, у которого просто
+ * кончилась минутная квота, выглядел сломанным.
+ */
+test("лимит запросов провайдера не выдаётся за несовместимость модели", async () => {
+  // Лимит бьёт по всем запросам, а не по одному: минутная квота кончается
+  // целиком.
+  const limited = () => json({ error: "rate limit exceeded" }, 429);
+  const { fetcher } = provider({
+    completion: limited, streaming: limited, toolCall: limited, toolLoop: limited,
+    jsonObject: limited, jsonSchema: limited, vision: limited,
+  });
+  const result = await probeModelCapabilities(INPUT, fetcher);
+
+  assert.equal(result.status, "unavailable");
+  assert.equal(result.ok, false, "проверка не прошла — но не по вине модели");
+  assert.equal(
+    statusOf(result, "completion"), "failed",
+    "сам отказ скрывать нельзя",
+  );
+  assert.equal(
+    result.checks.find((entry) => entry.name === "completion")?.cause, "temporary",
+    "причина отказа — состояние провайдера, а не отсутствие возможности",
+  );
+  assert.equal(
+    result.detected.tools, null,
+    "непроверенная возможность остаётся неизвестной и не стирает прежде выясненное",
+  );
+});
+
+/** Отклонённый ключ — ошибка настройки, и её обязано быть видно как таковую. */
+test("отклонённый ключ читается как ошибка конфигурации", async () => {
+  const { fetcher } = provider({ completion: () => json({ error: "invalid key" }, 401) });
+  const result = await probeModelCapabilities(INPUT, fetcher);
+
+  assert.equal(result.status, "config_error");
+  assert.equal(result.ok, false);
+  assert.equal(
+    result.checks.find((entry) => entry.name === "completion")?.cause, "config",
+  );
 });
 
 test("модель без зрения не получает ложную capability при auto-discovery", async () => {
@@ -474,7 +544,7 @@ test("модели, которой не хватило бюджета на от�
   const { fetcher, seen } = provider({
     toolLoop: (body) => {
       const budget = Number(body.max_tokens);
-      if (budget < 1_024) {
+      if (budget < 4_096) {
         short.push("короткий");
         return EMPTY_BY_BUDGET();
       }
@@ -488,14 +558,77 @@ test("модели, которой не хватило бюджета на от�
   assert.equal(short.length > 0, true, "короткая попытка должна была случиться первой");
   // Повтор идёт с тем же ходом, только с большим бюджетом: иначе
   // проверялось бы что-то другое.
-  const retry = seen.find((body) => Number(body.max_tokens) >= 1_024);
+  const retry = seen.find((body) => Number(body.max_tokens) >= 4_096);
   assert.ok(retry, "повтор с увеличенным бюджетом не состоялся");
   assert.ok(
     (retry!.messages as Array<{ role: string }>).some((message) => message.role === "tool"),
     "повторяется тот же цикл с результатом инструмента",
   );
   const detail = result.checks.find((entry) => entry.name === "tool_result_loop")?.detail ?? "";
-  assert.match(detail, /1024/, "оператору видно, что ответ пришёл только с большим бюджетом");
+  assert.match(detail, /8192/, "оператору видно, что ответ пришёл только с большим бюджетом");
+});
+
+/**
+ * Пустой ответ с finish_reason=stop.
+ *
+ * Так ведут себя прокси перед рассуждающими моделями: рассуждение
+ * съедает весь бюджет, ответ приходит пустым, но завершение объявляется
+ * штатным — «length» провайдер не говорит. Прежнее условие выхода из
+ * цикла проверяло именно `finish_reason !== "length"` и обрывало
+ * наращивание ровно здесь: модель объявлялась несовместимой, ни разу не
+ * получив достаточного бюджета, и теряла все маршруты.
+ */
+const EMPTY_BUT_STOPPED = () => json({
+  choices: [{ message: { content: "" }, finish_reason: "stop" }],
+});
+
+test("пустой ответ со штатным завершением тоже наращивает бюджет", async () => {
+  const budgets: number[] = [];
+  const { fetcher } = provider({
+    completion: (body) => {
+      const budget = Number(body.max_tokens);
+      budgets.push(budget);
+      return budget < 4_096 ? EMPTY_BUT_STOPPED() : json(CHAT("ready"));
+    },
+  });
+  const result = await probeModelCapabilities(INPUT, fetcher);
+
+  assert.equal(statusOf(result, "completion"), "ok", result.message);
+  assert.equal(result.ok, true, result.message);
+  // Наращивание состоялось: первая попытка не была последней.
+  assert.ok(budgets.length > 1, "проба сдалась на первой же попытке");
+  assert.ok(budgets.at(-1)! >= 4_096, "до достаточного бюджета проба не дошла");
+});
+
+/**
+ * Опечатка в имени модели не должна отнимать у провайдера инструменты.
+ *
+ * HTTP 404 приходит на запрос, до модели он не доходит вовсе — значит и
+ * сказать о её возможностях не может. Записанный по нему `false`
+ * исключал провайдера из каждого хода с инструментами, то есть из всех,
+ * и снять это было нечем: у занятого провайдера новая проба отвечает
+ * лимитом, а лимит оставляет прежнее значение.
+ */
+test("отказ конфигурации не записывает модели отсутствие возможностей", async () => {
+  const notFound = () => json({ error: { message: "model not found" } }, 404);
+  const { fetcher } = provider({
+    completion: notFound, toolCall: notFound, toolLoop: notFound,
+    jsonObject: notFound, jsonSchema: notFound,
+  });
+  const result = await probeModelCapabilities(INPUT, fetcher);
+
+  assert.equal(result.status, "config_error", result.message);
+  // Невыясненное остаётся невыясненным: null сохранит прежде известное.
+  assert.equal(result.detected.tools, null, "404 не вправе объявлять отсутствие инструментов");
+  assert.equal(result.detected.json, null);
+});
+
+test("вердикт самой модели по-прежнему записывается", async () => {
+  // Модель ответила и инструмент не вызвала — это про неё, а не про запрос.
+  const { fetcher } = provider({ toolCall: () => json(CHAT("не буду вызывать")) });
+  const result = await probeModelCapabilities(INPUT, fetcher);
+
+  assert.equal(result.detected.tools, false, "настоящий отказ модели обязан записаться");
 });
 
 test("молчание и при большом бюджете остаётся отказом", async () => {
@@ -518,4 +651,73 @@ test("пустой ответ на изображение перепроверя
     fetcher,
   );
   assert.equal(statusOf(result, "vision"), "ok", result.message);
+});
+
+/**
+ * Пустой ответ рядом с работающими инструментами — состояние провайдера.
+ *
+ * У бесплатных моделей под нагрузкой пустой ответ приходит вперемешку с
+ * 429 от того же провайдера. Записывать по нему несовместимость значит
+ * объявить сломанной модель, которая только что успешно вызвала
+ * инструмент и приняла его результат.
+ */
+test("пустой ответ при рабочих инструментах читается как временный", async () => {
+  const { fetcher } = provider({ completion: () => json(CHAT("")) });
+  const result = await probeModelCapabilities(INPUT, fetcher);
+
+  assert.equal(statusOf(result, "completion"), "failed");
+  assert.equal(statusOf(result, "tool_call"), "ok");
+  assert.equal(
+    result.checks.find((entry) => entry.name === "completion")?.cause, "temporary",
+    "модель только что вызвала инструмент — отвечать она умеет",
+  );
+  assert.equal(result.status, "unavailable");
+});
+
+/** Если пусто вообще всё — это уже про модель, а не про нагрузку. */
+test("пустой ответ на всех обязательных проверках остаётся несовместимостью", async () => {
+  const empty = () => json(CHAT(""));
+  const { fetcher } = provider({ completion: empty, toolCall: empty, toolLoop: empty });
+  const result = await probeModelCapabilities(INPUT, fetcher);
+
+  assert.equal(result.status, "config_error");
+  assert.equal(
+    result.checks.find((entry) => entry.name === "completion")?.cause, "capability",
+  );
+});
+
+/**
+ * Сводка из одной проверки.
+ *
+ * Старт сервиса выясняет у активной модели только зрение и зовёт
+ * `summarize([vision])`. Прежде такая сводка объявляла модели отсутствие
+ * инструментов, потока и строгого JSON — просто потому, что их никто не
+ * проверял. Для установки в режиме одной модели это смертельно: роутер
+ * отсекает провайдера от каждого хода с инструментами, а панель не даёт
+ * пересохранить режим, пока у модели нет инструментов. Один перезапуск
+ * сервиса — и Ева отвечает пятисоткой на каждое сообщение.
+ */
+test("проверка, которой не было, не объявляет модель неумелой", async () => {
+  const { summarize } = await import("../dist/llm/capability-probe.js");
+  const result = summarize([
+    { name: "vision", status: "ok", detail: "изображение распознано", blocking: false },
+  ]);
+
+  assert.equal(result.detected.vision, true, "выясненное записывается");
+  assert.equal(result.detected.tools, null, "инструменты не проверялись — значит не выяснены");
+  assert.equal(result.detected.streaming, null);
+  assert.equal(result.detected.json, null);
+});
+
+test("пропущенная проверка тоже ничего не выясняет", async () => {
+  const { summarize } = await import("../dist/llm/capability-probe.js");
+  const result = summarize([
+    { name: "completion", status: "ok", detail: "ответ получен", blocking: true },
+    { name: "streaming", status: "skipped", detail: "поток не заявлен", blocking: false },
+    { name: "tool_call", status: "ok", detail: "вызов по схеме", blocking: true },
+    { name: "tool_result_loop", status: "ok", detail: "final answer получен", blocking: true },
+  ]);
+
+  assert.equal(result.detected.streaming, null, "«не заявлен» — это про галочку, а не про модель");
+  assert.equal(result.detected.tools, true);
 });

@@ -11,7 +11,8 @@
 const API = "/api/admin/v1";
 const ROUTER_DEFAULTS = {
   priority: 100, quality_tier: 3, max_output_tokens: 4096,
-  request_timeout_ms: 180000, max_retries: 2, max_concurrency: 8,
+  request_timeout_ms: 180000, connect_timeout_ms: 10000,
+  max_retries: 2, max_concurrency: 8,
 };
 
 const state = {
@@ -25,10 +26,11 @@ const state = {
   router: null,
   settingProfiles: [],
   secrets: [],
+  telegramTokens: [],
+  tariffs: null,
   showAllSecrets: false,
   users: [],
   currentUser: null,
-  pendingSudo: null,
   pendingConfirm: null,
   events: null,
   refreshTimer: null,
@@ -40,7 +42,18 @@ const state = {
   sttEditing: null,
   sttTestingId: null,
   sttSchemaError: null,
+  // Разделы единой панели.
+  agents: [],
+  currentAgent: null,
+  currentSubscription: null,
+  persona: null,
+  personaTab: "persona",
+  letta: null,
+  lettaTab: "runtime",
+  lettaAgentId: null,
+  monitoring: null,
 };
+
 const $ = (selector) => document.querySelector(selector);
 
 function csrf() {
@@ -155,6 +168,24 @@ function handleError(error) {
   }
   if (error.status === 409) {
     toast("Настройки изменены в другой сессии. Обновите страницу.", true);
+    return;
+  }
+  /*
+   * Отказ API и поломка отрисовки — разные вещи, и говорить о них одним
+   * текстом нельзя.
+   *
+   * У ответа API есть `status`: его `message` написали мы, он объясняет,
+   * что не так, и его показывают как есть. У TypeError внутри отрисовки
+   * `status` нет, а `message` — «Cannot convert undefined or null to
+   * object». Оператор видел эту строку вместо раздела и не мог понять ни
+   * что сломалось, ни что теперь делать.
+   *
+   * Технический текст при этом не выбрасывается: без него не с чем идти
+   * в журнал. Он уходит в консоль, а на экран — то, что можно сделать.
+   */
+  if (error.status === undefined && error.code === undefined) {
+    console.error("Раздел не отрисовался", error);
+    toast("Раздел не отрисовался. Обновите страницу; если повторится — смотрите журнал событий.", true);
     return;
   }
   toast(error.message || "Не удалось выполнить действие", true);
@@ -277,25 +308,22 @@ function statusCard(item, options = {}) {
     </article>`;
 }
 
-function askSudo({ scope, title, description, action }) {
-  state.pendingSudo = { scope, action };
-  $("#sudo-title").textContent = title;
-  $("#sudo-description").textContent = description;
-  $("#sudo-form").reset();
-  $("#sudo-dialog").showModal();
-}
-
 /**
- * Подтверждение опасной операции.
+ * Подтверждение действия с последствиями.
  *
  * `expected` задаёт контрольное слово: его вводят там, где ошибка
  * необратима. Без него окно остаётся тем же — с описанием последствий и
  * разнесёнными кнопками, — но набирать ничего не нужно. Это заменило
  * `window.confirm`: системное окно на телефоне появляется у верхнего
  * края, где палец уже стоит после нажатия, и последствий не объясняет.
+ *
+ * Пароль здесь не спрашивается ни в каком виде. Личность подтверждена
+ * входом в панель; окно объясняет последствия, а не проверяет, помнит ли
+ * человек тот же пароль, который набрал десять минут назад.
  */
-function askConfirm({ title, description, expected = null, action }) {
+function askConfirm({ title, description, expected = null, eyebrow = "ОПАСНАЯ ОПЕРАЦИЯ", action }) {
   state.pendingConfirm = { expected, action };
+  $("#confirm-eyebrow").textContent = eyebrow;
   $("#confirm-title").textContent = title;
   $("#confirm-description").textContent = expected
     ? `${description} Введите ${expected}.`
@@ -308,27 +336,6 @@ function askConfirm({ title, description, expected = null, action }) {
   $("#confirm-form").querySelector('button[value="cancel"]').focus();
 }
 
-$("#sudo-form").addEventListener("submit", (event) => {
-  event.preventDefault();
-  const form = event.currentTarget;
-  if (event.submitter?.value === "cancel") {
-    state.pendingSudo = null;
-    $("#sudo-dialog").close();
-    return;
-  }
-  const pending = state.pendingSudo;
-  if (!pending) return;
-  const password = new FormData(form).get("password");
-  request("/sudo", {
-    method: "POST",
-    body: JSON.stringify({ password, scope: pending.scope }),
-  }).then(async () => {
-    $("#sudo-dialog").close();
-    form.reset();
-    state.pendingSudo = null;
-    await pending.action();
-  }).catch(handleError);
-});
 $("#confirm-form").addEventListener("submit", (event) => {
   event.preventDefault();
   if (event.submitter?.value === "cancel") {

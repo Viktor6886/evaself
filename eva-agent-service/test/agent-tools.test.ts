@@ -288,7 +288,10 @@ test("web_search stops at the quota instead of spending it", async () => {
     { searxngUrl: "http://search", vectorGoalsEnabled: false } as never,
     withTenantScopes({
       getAgentRuntimeContext: () => Promise.resolve(RUNTIME),
-      getQuotaStatus: () => Promise.resolve([{ metric: "web_search", remaining: 0 }]),
+      getQuotaStatus: () => Promise.resolve([
+        { metric: "web_search", period: "month", remaining: 7 },
+        { metric: "web_search", period: "day", remaining: 0 },
+      ]),
       incrementUsage: () => Promise.resolve(1),
       query(sql: string, values: unknown[] = []) {
         statements.push({ sql, values });
@@ -543,4 +546,305 @@ test("чтение курсора не требует подтверждения
   assert.equal(toolRisk("get_goal_program_context"), "read");
   assert.equal(toolRisk("update_goal_program"), "low_risk_write");
   assert.equal(toolApprovalCategory("update_goal_program"), undefined);
+});
+
+/* =====================================================================
+ * Поиск в интернете
+ *
+ * Инструмент читал у SearXNG только список ссылок. Прямой ответ поиска —
+ * погода, курс, перевод единиц — приходит отдельными полями `answers` и
+ * `infoboxes`, и до Евы он не доезжал вовсе: на «какая погода» она
+ * получала статьи про погоду. Отдельно проверяется, что сломанный поиск
+ * отличим от пустой выдачи: раньше и то и другое выглядело как «ничего не
+ * нашлось», и Ева отвечала по памяти.
+ * ===================================================================== */
+
+function searchHarness(
+  reply: unknown | ((request: URL, index: number) => unknown),
+  options: { status?: number } = {},
+) {
+  const requests: URL[] = [];
+  const charged: number[] = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL) => ({
+    ok: (options.status ?? 200) < 400,
+    status: options.status ?? 200,
+    json: async () => {
+      const url = new URL(String(input));
+      requests.push(url);
+      return typeof reply === "function"
+        ? (reply as (request: URL, index: number) => unknown)(url, requests.length - 1)
+        : reply;
+    },
+  })) as never;
+  const factory = new AgentToolFactory(
+    { searxngUrl: "http://search", vectorGoalsEnabled: false } as never,
+    withTenantScopes({
+      getAgentRuntimeContext: () => Promise.resolve(RUNTIME),
+      getQuotaStatus: () => Promise.resolve([{ metric: "web_search", remaining: 5 }]),
+      incrementUsage: () => { charged.push(1); return Promise.resolve(1); },
+      query: () => Promise.resolve({ rows: [], rowCount: 0 }),
+    }) as never,
+    {} as never,
+    silentLogger,
+  );
+  const tool = factory.forConversation("conv-1").find((item) => item.name === "web_search")!;
+  return { tool, requests, charged, restore: () => { globalThis.fetch = original; } };
+}
+
+const EMPTY_REPLY = { results: [], answers: [], infoboxes: [], unresponsive_engines: [] };
+const SOME_REPLY = {
+  results: [{ title: "Новость", url: "https://example.org/n", content: "текст", engine: "mojeek" }],
+  answers: [], infoboxes: [], unresponsive_engines: [],
+};
+
+test("поиск доносит прямой ответ и погоду, а не только ссылки", async () => {
+  const harnessed = searchHarness({
+    results: [{ title: "Погода в Москве", url: "https://example.org/msk", content: "Прогноз", engine: "duckduckgo", publishedDate: "2026-09-01" }],
+    answers: [{ answer: "+18 °C, ясно" }],
+    infoboxes: [{
+      infobox: "Москва", content: "+18 °C", engine: "wttr.in",
+      attributes: [{ label: "Ветер", value: "3 м/с" }],
+      urls: [{ title: "wttr.in", url: "https://wttr.in/Moscow" }],
+    }],
+    unresponsive_engines: [],
+  });
+  try {
+    const result = await harnessed.tool.execute("call-1", {
+      query: "погода в Москве", category: "weather", language: "ru", time_range: "day",
+    });
+    const payload = result.details as {
+      ok: boolean;
+      answers?: string[];
+      infoboxes?: Array<{ title?: string; attributes?: unknown[] }>;
+      results: Array<{ published?: string }>;
+    };
+    assert.equal(payload.ok, true);
+    assert.deepEqual(payload.answers, ["+18 °C, ясно"]);
+    assert.equal(payload.infoboxes?.[0]?.title, "Москва");
+    assert.equal(payload.results[0]?.published, "2026-09-01");
+
+    // Раздел, окно свежести и язык доезжают до SearXNG: без них движок
+    // погоды не запрашивается вовсе, а выдача идёт «на всех языках».
+    const sent = harnessed.requests[0]!;
+    assert.equal(sent.searchParams.get("categories"), "weather");
+    assert.equal(sent.searchParams.get("time_range"), "day");
+    assert.equal(sent.searchParams.get("language"), "ru");
+    assert.equal(sent.searchParams.get("format"), "json");
+  } finally {
+    harnessed.restore();
+  }
+});
+
+test("отказ движков не выдаётся за пустую выдачу", async () => {
+  const harnessed = searchHarness({
+    results: [], answers: [], infoboxes: [],
+    unresponsive_engines: [["google", "CAPTCHA"], ["brave", "timeout"]],
+  });
+  try {
+    const result = await harnessed.tool.execute("call-1", { query: "курс евро" });
+    const payload = result.details as { ok: boolean; error?: string; engines_failed?: string[] };
+    assert.equal(payload.ok, false);
+    assert.equal(payload.error, "search_engines_failed");
+    assert.deepEqual(payload.engines_failed, ["google: CAPTCHA", "brave: timeout"]);
+  } finally {
+    harnessed.restore();
+  }
+});
+
+test("пустой ответ языкового фильтра повторяется без него", async () => {
+  const replies = [
+    { results: [], answers: [], infoboxes: [], unresponsive_engines: [] },
+    {
+      results: [{ title: "Ответ", url: "https://example.org", content: "текст", engine: "wikipedia" }],
+      answers: [], infoboxes: [], unresponsive_engines: [],
+    },
+  ];
+  const requests: URL[] = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL) => {
+    requests.push(new URL(String(input)));
+    return { ok: true, status: 200, json: async () => replies[requests.length - 1] ?? replies[1] };
+  }) as never;
+  const spent: string[] = [];
+  const factory = new AgentToolFactory(
+    { searxngUrl: "http://search", vectorGoalsEnabled: false } as never,
+    withTenantScopes({
+      getAgentRuntimeContext: () => Promise.resolve(RUNTIME),
+      getQuotaStatus: () => Promise.resolve([{ metric: "web_search", remaining: 5 }]),
+      incrementUsage: (_id: number, metric: string) => {
+        spent.push(metric);
+        return Promise.resolve(1);
+      },
+      query: () => Promise.resolve({ rows: [], rowCount: 0 }),
+    }) as never,
+    {} as never,
+    silentLogger,
+  );
+  try {
+    const tool = factory.forConversation("conv-1").find((item) => item.name === "web_search")!;
+    const result = await tool.execute("call-1", { query: "редкий запрос", language: "ru" });
+    const payload = result.details as { ok: boolean; results: unknown[] };
+    assert.equal(payload.ok, true);
+    assert.equal(payload.results.length, 1);
+    assert.equal(requests.length, 2, "повтора без языкового фильтра не было");
+    assert.equal(requests[0]!.searchParams.get("language"), "ru");
+    assert.equal(requests[1]!.searchParams.get("language"), null);
+    // Квота — за действие человека, а не за HTTP-запрос.
+    assert.deepEqual(spent, ["web_search"]);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+/* =====================================================================
+ * Сужения снимаются по одному
+ *
+ * «Новости Перми за неделю» возвращали пустоту не потому, что новостей
+ * нет: окно свежести понимают не все движки, и у тех, кто не понимает,
+ * запрос с `time_range` пуст всегда.
+ * ===================================================================== */
+
+test("пустая выдача под окном свежести пробуется ещё раз без него", async () => {
+  const harnessed = searchHarness((request) =>
+    request.searchParams.has("time_range") ? EMPTY_REPLY : SOME_REPLY);
+  try {
+    const result = await harnessed.tool.execute("call-1", {
+      query: "новости Перми", category: "news", time_range: "week", language: "ru",
+    });
+    const payload = result.details as Record<string, unknown>;
+
+    assert.equal(payload.ok, true);
+    assert.deepEqual(payload.relaxed_filters, ["language", "time_range"]);
+    // Окно не соблюдено — значит и называть его нельзя: иначе Ева
+    // выдаст найденное за «новости за неделю».
+    assert.equal("time_range" in payload, false);
+    assert.match(String(payload.relaxed_note), /Не выдавай результат/);
+  } finally {
+    harnessed.restore();
+  }
+});
+
+test("сужения снимаются по одному, от узкого к широкому", async () => {
+  const harnessed = searchHarness(EMPTY_REPLY);
+  try {
+    await harnessed.tool.execute("call-1", {
+      query: "новости Перми", category: "news", time_range: "week", language: "ru",
+    });
+    const shapes = harnessed.requests.map((request) => [
+      request.searchParams.get("language"),
+      request.searchParams.get("time_range"),
+      request.searchParams.get("categories"),
+    ]);
+    assert.deepEqual(shapes, [
+      ["ru", "week", "news"],
+      [null, "week", "news"],
+      [null, null, "news"],
+      // Раздел снимается последним: он выбирает набор движков, а не
+      // фильтрует выдачу одних и тех же.
+      [null, null, null],
+    ]);
+  } finally {
+    harnessed.restore();
+  }
+});
+
+test("снятые сужения — та же попытка, а не вторая", async () => {
+  // Иначе один вопрос человека стоил бы ему трёх поисков из квоты.
+  const harnessed = searchHarness(EMPTY_REPLY);
+  try {
+    await harnessed.tool.execute("call-1", {
+      query: "новости Перми", time_range: "week", language: "ru",
+    });
+    assert.equal(harnessed.requests.length, 3);
+    assert.equal(harnessed.charged.length, 1);
+  } finally {
+    harnessed.restore();
+  }
+});
+
+test("найденное сразу ничего не снимает и называет окно свежести", async () => {
+  const harnessed = searchHarness(SOME_REPLY);
+  try {
+    const result = await harnessed.tool.execute("call-1", {
+      query: "новости Перми", category: "news", time_range: "week", language: "ru",
+    });
+    const payload = result.details as Record<string, unknown>;
+    assert.equal(harnessed.requests.length, 1);
+    assert.equal(payload.time_range, "week");
+    assert.equal("relaxed_filters" in payload, false);
+  } finally {
+    harnessed.restore();
+  }
+});
+
+test("отказ движков не пробуется ещё раз: сужения тут ни при чём", async () => {
+  // Снимать фильтр у того, кто не ответил, бессмысленно, а каждая
+  // ступень стоит целого круга ожидания: три круга по двадцать секунд —
+  // минута на один вызов, и ход упирался в потолок раньше, чем успевал
+  // что-нибудь сделать.
+  const harnessed = searchHarness({
+    results: [], answers: [], infoboxes: [],
+    unresponsive_engines: [["google", "CAPTCHA"], ["brave", "timeout"]],
+  });
+  try {
+    const result = await harnessed.tool.execute("call-1", {
+      query: "погода Камень-на-Оби", time_range: "week", language: "ru",
+    });
+    const payload = result.details as { ok: boolean; error?: string };
+    assert.equal(harnessed.requests.length, 1, "второй круг ничего не изменит");
+    assert.equal(payload.ok, false);
+    assert.equal(payload.error, "search_engines_failed");
+  } finally {
+    harnessed.restore();
+  }
+});
+
+test("сломанный раздел не лечится фильтрами — лечится другим разделом", async () => {
+  // Боевые данные: `categories=weather` пуст всегда, потому что оба
+  // погодных движка отвечают ошибкой («wttr.in: parsing error»,
+  // «duckduckgo weather: unexpected crash»), — а тот же вопрос без
+  // раздела отдаёт три десятка ссылок. Раздел выбирает НАБОР движков,
+  // поэтому отказ прежних — как раз повод сменить его, а не остановиться.
+  const harnessed = searchHarness((request) =>
+    request.searchParams.has("categories")
+      ? {
+        results: [], answers: [], infoboxes: [],
+        unresponsive_engines: [["wttr.in", "parsing error"], ["duckduckgo weather", "unexpected crash"]],
+      }
+      : SOME_REPLY);
+  try {
+    const result = await harnessed.tool.execute("call-1", {
+      query: "погода Камень-на-Оби", category: "weather", language: "ru",
+    });
+    const payload = result.details as Record<string, unknown>;
+
+    assert.equal(payload.ok, true, "ответ обязан найтись без раздела");
+    assert.ok((payload.relaxed_filters as string[]).includes("category"));
+    assert.equal("category" in payload, false, "снятый раздел не называется");
+    // Последний запрос ушёл вообще без раздела.
+    assert.equal(harnessed.requests.at(-1)!.searchParams.has("categories"), false);
+  } finally {
+    harnessed.restore();
+  }
+});
+
+test("отказ движков внутри одного набора не гоняет фильтры по кругу", async () => {
+  // Снимать язык и окно свежести у того, кто не ответил, бессмысленно;
+  // каждая ступень стоит целого круга ожидания. Раздела здесь нет —
+  // значит и менять набор движков не на что, и повтора быть не должно.
+  const harnessed = searchHarness({
+    results: [], answers: [], infoboxes: [],
+    unresponsive_engines: [["google", "CAPTCHA"], ["brave", "too many requests"]],
+  });
+  try {
+    const result = await harnessed.tool.execute("call-1", {
+      query: "курс евро", time_range: "week", language: "ru",
+    });
+    const payload = result.details as { ok: boolean; error?: string };
+    assert.equal(harnessed.requests.length, 1);
+    assert.equal(payload.error, "search_engines_failed");
+  } finally {
+    harnessed.restore();
+  }
 });

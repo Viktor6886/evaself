@@ -105,6 +105,19 @@ test("срок ожидания остановки укладывается в g
   );
 });
 
+test("пороги окончания подписки нормализуются и имеют безопасное умолчание", () => {
+  const configured = loadConfig({
+    ...base,
+    EVA_SUBSCRIPTION_WARNING_DAYS: "1, 3, 3, 45, мусор",
+    EVA_QUOTA_EXHAUSTION_NOTIFICATIONS: "false",
+  });
+  assert.deepEqual(configured.subscriptionExpiryWarningDays, [3, 1]);
+  assert.equal(configured.quotaExhaustionNotificationsEnabled, false);
+
+  const fallback = loadConfig({ ...base, EVA_SUBSCRIPTION_WARNING_DAYS: "0, 31" });
+  assert.deepEqual(fallback.subscriptionExpiryWarningDays, [3, 1]);
+});
+
 test("значения по умолчанию из .env.example не противоречат друг другу", async (context) => {
   // Включённый флаг, который ничего не делает без соседнего, — худшая
   // ступень rollout, и на новой установке её не должно быть с самого

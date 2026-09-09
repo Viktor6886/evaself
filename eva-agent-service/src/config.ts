@@ -79,6 +79,12 @@ export interface Config {
   crawl4aiToken: string;
   schedulerIntervalMs: number;
   heartbeatIntervalMs: number;
+  /** Ева пишет первой в окна, которые выбрал человек. */
+  proactiveInitiativeEnabled: boolean;
+  /** Потолок хода, в котором Ева выполняет запланированное дело сама. */
+  taskActionTurnTimeoutMs: number;
+  /** Как часто проверяются наступившие окна. */
+  initiativeIntervalMs: number;
   typingIntervalMs: number;
   /** Семантический intent -> доверенный Telegram file_id. */
   telegramStickerCatalog: unknown;
@@ -88,6 +94,12 @@ export interface Config {
   vectorGoalsEnabled: boolean;
   profileCacheTtlSeconds: number;
   outboxEnabled: boolean;
+  /** Новые правила покупки, смешанные квоты, read-only tool и expiry notice. */
+  subscriptionLifecycleEnabled: boolean;
+  /** За сколько полных суток напоминать об окончании подписки. */
+  subscriptionExpiryWarningDays: number[];
+  /** Уведомлять сразу после расходования последнего сообщения в периоде. */
+  quotaExhaustionNotificationsEnabled: boolean;
   /**
    * Запись жизненного цикла хода в `turn_runs`. Shadow-режим: путь
    * обработки сообщения и ответ пользователю от него не зависят.
@@ -200,16 +212,6 @@ export interface Config {
    */
   journalVoiceRetentionDays: number;
 
-  lavaWebhookUser: string;
-  lavaWebhookPassword: string;
-  lavaPlans: Record<string, {
-    plan: string;
-    durationDays: number;
-    amountMinor: number;
-    currency: string;
-    paymentUrl?: string;
-  }>;
-
   lockTtlSeconds: number;
   turnTimeoutMs: number;
   /** How many idle sessions to keep open before evicting the oldest. */
@@ -250,16 +252,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     if (!value) return fallback;
     return ["1", "true", "yes", "on"].includes(value);
   };
-  const json = <T>(name: string, fallback: T): T => {
-    const value = str(name);
-    if (!value) return fallback;
-    try {
-      return JSON.parse(value) as T;
-    } catch {
-      return fallback;
-    }
+  const intList = (name: string, fallback: number[], min: number, max: number): number[] => {
+    const values = str(name)
+      .split(",")
+      .map((value) => Number.parseInt(value.trim(), 10))
+      .filter((value) => Number.isSafeInteger(value) && value >= min && value <= max);
+    return values.length > 0
+      ? [...new Set(values)].sort((left, right) => right - left)
+      : [...fallback];
   };
-
   const stickerCatalogSource = str("EVA_TELEGRAM_STICKER_CATALOG_JSON");
   let telegramStickerCatalog: unknown = {};
   let telegramStickerCatalogParseError = false;
@@ -367,6 +368,21 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     crawl4aiToken: str("CRAWL4AI_API_TOKEN"),
     schedulerIntervalMs: int("EVA_SCHEDULER_INTERVAL_MS", 30_000),
     heartbeatIntervalMs: int("EVA_HEARTBEAT_INTERVAL_MS", 10 * 60_000),
+    proactiveInitiativeEnabled: bool("EVA_PROACTIVE_INITIATIVE", false),
+    // Вдвое с лишним больше интерактивного потолка. Человек попросил
+    // заранее и не сидит перед экраном, а цепочка «найди — прочитай —
+    // напиши — опубликуй» в четыре минуты не укладывается: обрыв по
+    // таймауту выглядит для него как «не получилось».
+    // Пять минут, а не десять. Потолок хода складывается с попытками и
+    // отступами между ними: при десяти первое слово доходило до
+    // человека через сорок две минуты после того, как он попросил
+    // «через пять». Общий срок ограничен отдельно (`ACTION_DEADLINE_MS`),
+    // и потолок хода обязан быть заметно меньше него.
+    taskActionTurnTimeoutMs: clampedInt("EVA_TASK_ACTION_TURN_TIMEOUT_MS", 300_000, 60_000, 900_000),
+    // Минута выбрана заранее, поэтому точность захода — это точность
+    // попадания в неё. Шестьдесят секунд означают опоздание не больше
+    // минуты; чаще спрашивать незачем, реже — заметно человеку.
+    initiativeIntervalMs: clampedInt("EVA_INITIATIVE_INTERVAL_MS", 60_000, 15_000, 900_000),
     typingIntervalMs: int("EVA_TELEGRAM_TYPING_INTERVAL_MS", 4_000),
     telegramStickerCatalog,
     telegramStickerCatalogParseError,
@@ -375,6 +391,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     vectorGoalsEnabled: bool("EVA_VECTOR_GOALS_ENABLED", true),
     profileCacheTtlSeconds: int("EVA_PROFILE_CACHE_TTL_SECONDS", 60),
     outboxEnabled: bool("EVA_OUTBOX_ENABLED", true),
+    subscriptionLifecycleEnabled: bool("EVA_SUBSCRIPTION_LIFECYCLE", false),
+    subscriptionExpiryWarningDays: intList("EVA_SUBSCRIPTION_WARNING_DAYS", [3, 1], 1, 30),
+    quotaExhaustionNotificationsEnabled: bool("EVA_QUOTA_EXHAUSTION_NOTIFICATIONS", true),
     turnLifecycleEnabled: bool("EVA_TURN_LIFECYCLE", false),
     parallelInboxEnabled: bool("EVA_PARALLEL_INBOX", false),
     turnAggregationEnabled: bool("EVA_TURN_AGGREGATION", false),
@@ -423,10 +442,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       1,
       365,
     ),
-
-    lavaWebhookUser: str("LAVA_WEBHOOK_USER"),
-    lavaWebhookPassword: str("LAVA_WEBHOOK_PASSWORD"),
-    lavaPlans: json("LAVA_PLANS_JSON", {}),
 
     lockTtlSeconds: int("EVA_AGENT_LOCK_TTL", 180),
     turnTimeoutMs: int("EVA_AGENT_TURN_TIMEOUT_MS", 240_000),
@@ -588,8 +603,10 @@ export async function readPersona(config: Config): Promise<string> {
  * монтируется в runtime read-only. В отличие от персоны здесь нет fallback:
  * запуск со штатным prompt Letta вместо репозиторного был бы тихим откатом.
  */
+export const SYSTEM_PROMPT_FILE = "/app/library/system/letta_local_memfs.md";
+
 export async function readSystemPrompt(
-  file = "/app/library/system/letta_local_memfs.md",
+  file = SYSTEM_PROMPT_FILE,
 ): Promise<string> {
   const { readFile } = await import("node:fs/promises");
   let text: string;

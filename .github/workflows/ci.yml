@@ -310,20 +310,24 @@ jobs:
           DOMAIN: example.test
           DOMAIN_APP: app.example.test
           DOMAIN_API: api.example.test
-          DOMAIN_LETTA: letta.example.test
-          DOMAIN_STATUS: status.example.test
+          DOMAIN_LETTA_LEGACY: letta.localhost
+          DOMAIN_STATUS_LEGACY: status.localhost
           ACME_EMAIL: ops@example.test
           ACME_CA: https://acme-v02.api.letsencrypt.org/directory
-          LETTA_UI_USER: admin
-          LETTA_UI_PASSWORD_HASH: $2a$14$placeholderplaceholderpl
           EVA_AGENT_PORT: "8070"
           EVA_AGENT_URL: http://eva-agent-service:8070
           EVA_AGENT_API_KEY: placeholder
         run: |
           caddy validate --config Caddyfile
           caddy validate --config webapp/Caddyfile
-          caddy validate --config letta-ui/Caddyfile
           caddy validate --config admin-ui/Caddyfile
+
+      # Разделы панели — настоящие адреса, и ломаются они молча: закладка
+      # на /admin/letta возвращает 404, а в журнале — обычный 404 без
+      # объяснений. Здесь поднимаются два настоящих Caddy с файлами
+      # репозитория и проверяется поведение, а не текст конфигурации.
+      - name: Panel sections and retired host names route correctly
+        run: sudo -E env "PATH=$PATH" ./scripts/ci/test-admin-routing.sh
 
       - name: Validation works without Caddy installed on the host
         run: |
@@ -348,7 +352,6 @@ jobs:
 
       - name: Administrative WebUI JavaScript is valid
         run: |
-          node --check letta-ui/public/ui.js
           # Панель разрезана на страницы: проверяется каждая, а не одна.
           for file in admin-ui/public/*.js; do node --check "$file"; done
 
@@ -357,12 +360,10 @@ jobs:
           DOMAIN: example.test
           DOMAIN_APP: app.example.test
           DOMAIN_API: api.example.test
-          DOMAIN_LETTA: letta.example.test
-          DOMAIN_STATUS: status.example.test
+          DOMAIN_LETTA_LEGACY: letta.localhost
+          DOMAIN_STATUS_LEGACY: status.localhost
           ACME_EMAIL: ops@example.test
           ACME_CA: https://acme-v02.api.letsencrypt.org/directory
-          LETTA_UI_USER: admin
-          LETTA_UI_PASSWORD_HASH: $2a$14$placeholderplaceholderpl
           EVA_AGENT_PORT: "8070"
           EVA_AGENT_API_KEY: placeholder
         run: |
@@ -378,7 +379,6 @@ jobs:
 
       - name: Front-end JavaScript is valid
         run: |
-          node --check letta-ui/public/ui.js
           for file in admin-ui/public/*.js; do node --check "$file"; done
           node --check webapp/public/app/app.js
           node --check webapp/public/app/journal.js
@@ -386,6 +386,19 @@ jobs:
 
       - name: Every API path the front-ends call exists in the service
         run: python3 scripts/ci/assert-frontend-routes.py
+
+      # Пять публичных имён и два отдельных входа — то, ради чего
+      # административная часть была сведена в одну панель. Расползание
+      # обратно не выглядит как поломка: всё работает, просто поверхность
+      # шире, чем кажется.
+      - name: The administrative surface stays on one domain
+        run: python3 scripts/ci/assert-single-admin-domain.py
+
+      # Мёртвое правило не ломает страницу — в этом и беда. Оно копится
+      # незаметно, и через год половину файла нельзя тронуть, потому что
+      # неизвестно, что из неё ещё работает.
+      - name: Every style rule still has something to style
+        run: python3 scripts/ci/assert-live-css.py
 
       # Проверка роли в server.ts начинается с `access.roles &&`, поэтому
       # маршрут, забывший объявить роли, её не проваливает, а пропускает —
@@ -417,6 +430,13 @@ jobs:
       # как мёртвый: уборка прошла по коду и не дошла до текста.
       - name: Every path named in the docs exists
         run: python3 scripts/ci/assert-doc-paths.py
+
+      # Список видов апдейтов ограничительный: чего в нём нет, того
+      # webhook не увидит — молча. Ставят вебхук код и установщик; их
+      # списки обязаны совпадать, иначе отказ будет тихим и на живых
+      # деньгах, как это случилось с оплатой звёздами.
+      - name: Webhook update kinds match between code and installer
+        run: python3 scripts/ci/assert-allowed-updates.py
 
       - name: No secrets in tracked files
         run: |
@@ -772,10 +792,32 @@ jobs:
           SQL
           echo "provider defaults verified"
 
+      # Проверяется отсутствие дублей, а не число строк.
+      #
+      # Раньше здесь стояло «ровно девять» — столько квот засевала
+      # миграция 002. Число описывало не правило, а состояние сида на тот
+      # день: любое законное пополнение — новый расходник, новый тариф —
+      # роняло проверку, ничего при этом не сломав. Правило же в том, что
+      # повторный накат не должен задваивать строки, и оно проверяется
+      # сравнением с числом уникальных троек.
       - name: Seed data is not duplicated by a re-run
         run: |
-          COUNT="$(psql -tA -c 'SELECT count(*) FROM quotas')"
-          [ "$COUNT" = "9" ] || { echo "::error::quotas has $COUNT rows, expected 9"; exit 1; }
+          psql -v ON_ERROR_STOP=1 -tA <<'SQL'
+          DO $$
+          DECLARE total int; unique_rows int;
+          BEGIN
+            SELECT count(*) INTO total FROM quotas;
+            SELECT count(*) INTO unique_rows
+              FROM (SELECT DISTINCT plan, metric, period FROM quotas) d;
+            IF total = 0 THEN
+              RAISE EXCEPTION 'quotas пуст: сид не отработал';
+            END IF;
+            IF total <> unique_rows THEN
+              RAISE EXCEPTION 'сид задвоился: % строк на % троек', total, unique_rows;
+            END IF;
+          END $$;
+          SQL
+          echo "seed verified"
 
       # Поддельный inbox в тестах TypeScript повторяет правила выборки, но
       # не проверяет сам SQL: ни FOR UPDATE OF t SKIP LOCKED, ни сравнение
@@ -841,6 +883,19 @@ jobs:
       # который ей напишут, и не отличит запрет от намерения. Здесь
       # проверяется сам триггер, частичный уникальный индекс публикации и
       # то, что откат не переписывает историю.
+      # Кнопки «Запустить» и «Остановить» падали на CHECK: панель писала
+      # вид операции, которого схема не знала. Поддельная база в
+      # TypeScript-тестах ограничений не проверяет — только живая.
+      - name: Виды операций панели принимаются схемой
+        run: psql -v ON_ERROR_STOP=1 -q -f scripts/ci/test-operation-kinds.sql
+
+      # Переименование тарифа и границы цены. Миграции накатываются
+      # заново на каждом обновлении, и повторный проход уже ловил здесь
+      # столкновение: сид возвращал строки прежнего тарифа, а
+      # переименование упиралось в уже существующие новые.
+      - name: Тарифы переименованы без дублей, цена уникальна
+        run: psql -v ON_ERROR_STOP=1 -q -f scripts/ci/test-plan-tariffs.sql
+
       - name: Версия артефакта неизменяема, а откат не переписывает историю
         run: psql -v ON_ERROR_STOP=1 -q -f scripts/ci/test-artifact-immutability.sql
 
@@ -1057,8 +1112,6 @@ jobs:
             --build-arg PYTHON_BASE_VERSION="$PYTHON_BASE_VERSION" media-service
           docker build -t evaself/webapp:ci \
             --build-arg CADDY_IMAGE="$CADDY_IMAGE" --build-arg CADDY_VERSION="$CADDY_VERSION" webapp
-          docker build -t evaself/letta-ui:ci \
-            --build-arg CADDY_IMAGE="$CADDY_IMAGE" --build-arg CADDY_VERSION="$CADDY_VERSION" letta-ui
           docker build -t evaself/admin-ui:ci \
             --build-arg CADDY_IMAGE="$CADDY_IMAGE" --build-arg CADDY_VERSION="$CADDY_VERSION" admin-ui
           docker build -t evaself/backup-service:ci \
@@ -1110,8 +1163,10 @@ jobs:
           values = {
             'DOMAIN': 'example.test', 'DOMAIN_APP': 'app.example.test',
             'DOMAIN_API': 'api.example.test',
-            'DOMAIN_LETTA': 'letta.example.test',
-            'DOMAIN_STATUS': 'status.example.test', 'ACME_EMAIL': 'ci@example.test',
+            # Выведенные из эксплуатации имена: пусто = поддомен не
+            # публикуется, compose подставляет Caddy *.localhost.
+            'DOMAIN_LETTA': '', 'DOMAIN_STATUS': '',
+            'ACME_EMAIL': 'ci@example.test',
             'EVA_AGENT_PORT': '8070', 'LETTA_APP_SERVER_BACKEND': 'local',
             'EVA_TELEGRAM_API_BASE_URL': 'http://127.0.0.1:1',
             'EVA_LLM_PROVIDER_NAME': 'CI-bootstrap', 'EVA_LLM_MODEL': '',
@@ -1131,7 +1186,7 @@ jobs:
                       'LETTA_DB_PASSWORD','EVA_DB_READONLY_PASSWORD',
                       'VALKEY_PASSWORD','EVA_AGENT_API_KEY','LETTA_APP_SERVER_TOKEN',
                       'LLM_CONFIG_ENCRYPTION_KEY','EVA_ROUTER_API_KEY',
-                      'NC_AUTH_JWT_SECRET','LAVA_WEBHOOK_PASSWORD','MEDIA_SERVICE_TOKEN',
+                      'MEDIA_SERVICE_TOKEN',
                       'SEARXNG_SECRET','EVA_TELEGRAM_WEBHOOK_SECRET'):
             text = re.sub(rf'^{key}=.*$', f'{key}={secrets.token_hex(24)}', text, flags=re.M)
           path.write_text(text)
@@ -1182,7 +1237,7 @@ jobs:
           docker compose --env-file versions.env --env-file .env logs --tail=80 eva-agent-service letta-app-server
           exit 1
 
-      - name: Admin phase 1 — auth, RBAC, sudo, audit and no secret leaks
+      - name: Admin phase 1 — auth, RBAC, session rights, audit and no secret leaks
         if: needs.changes.outputs.docs_only != 'true'
         run: |
           if ! docker compose --env-file versions.env --env-file .env \
@@ -1245,13 +1300,21 @@ jobs:
             body:JSON.stringify({settings:{'runtime.telegram_typing_interval_ms':4500}}),
           });
           if (!response.ok) throw new Error('owner settings PUT failed: ' + response.status);
+          // Права даёт вход: пароль вводится один раз, и запись секрета
+          // сразу после входа проходит без повторного подтверждения.
           response = await call(session, '/secrets/sec_ci_acceptance_secret', {
             method:'PUT',
             body:JSON.stringify({value:'known-ci-secret-must-never-leak', used_by:['admin-api']}),
           });
-          if (response.status !== 403) throw new Error('secret write without sudo was allowed');
+          if (!response.ok) throw new Error('secret write after login was refused: ' + response.status);
+          if ((await response.text()).includes('known-ci-secret-must-never-leak')) {
+            throw new Error('secret leaked in PUT');
+          }
+          // Совместимость: панель, закэшированная браузером до отмены
+          // повторного пароля, всё ещё зовёт /sudo перед мутацией, и
+          // пароля в этом запросе больше нет.
           response = await call(session, '/sudo', {
-            method:'POST', body:JSON.stringify({password, scope:'secrets:write'}),
+            method:'POST', body:JSON.stringify({scope:'secrets:write'}),
           });
           if (response.status !== 201) throw new Error('sudo grant failed');
           response = await call(session, '/secrets/sec_ci_acceptance_secret', {
@@ -1271,7 +1334,10 @@ jobs:
             method:'PUT',
             body:JSON.stringify({value:'known-ci-secret-must-never-leak', used_by:['admin-api']}),
           });
-          if (response.status !== 403) throw new Error('expired sudo grant was accepted');
+          // Механизм прав никуда не делся: когда гранты сессии истекли,
+          // запись обязана отказать. Это ловит регрессию «право
+          // перестало проверяться вовсе».
+          if (response.status !== 403) throw new Error('expired session grant was accepted');
 
           const roleHash = await hash(password, {
             type:argon2id, memoryCost:19456, timeCost:2, parallelism:1, hashLength:32,
@@ -1399,13 +1465,20 @@ jobs:
               const result = await call(session, path);
               if (!result.ok) throw new Error(role + ' cannot GET ' + path);
             }
-            // Блокировать может только owner и admin, и только под sudo.
-            const withoutSudo = await call(session, '/users/' + userId + '/block', {method:'POST'});
-            if (withoutSudo.status !== 403) {
-              throw new Error('block without sudo allowed for ' + role + ': ' + withoutSudo.status);
+            // Блокировать может только owner и admin. Право даёт вход:
+            // повторный пароль перед блокировкой не спрашивается, а
+            // operator и viewer не пройдут и с ним.
+            const attempt = await call(session, '/users/' + userId + '/block', {method:'POST'});
+            const mayBlock = ['owner','admin'].includes(role);
+            if (mayBlock !== attempt.ok) {
+              throw new Error('block RBAC mismatch for ' + role + ': ' + attempt.status);
+            }
+            if (mayBlock) {
+              const restored = await call(session, '/users/' + userId + '/unblock', {method:'POST'});
+              if (!restored.ok) throw new Error('unblock failed for ' + role);
             }
             // Переписка — только owner и admin. Роль проверяется раньше
-            // sudo, поэтому operator и viewer получают отказ и с грантом.
+            // прав сессии, поэтому operator и viewer получают отказ.
             if (['operator','viewer'].includes(role)) {
               const denied = await call(session, '/users/' + userId + '/conversation');
               if (denied.status !== 403) {
@@ -1457,11 +1530,10 @@ jobs:
             throw new Error('idempotency key produced ' + notes.rows[0].n + ' notes');
           }
 
-          // Чтение переписки требует отдельного гранта.
-          const noGrant = await call(owner, '/users/' + userId + '/conversation');
-          if (noGrant.status !== 403) {
-            throw new Error('conversation read without sudo: ' + noGrant.status);
-          }
+          // Чтение переписки доступно owner и admin по правам сессии:
+          // пароль второй раз не спрашивается. Что operator и viewer не
+          // проходят, проверено выше по ролям, а что факт открытия
+          // остаётся в журнале — ниже.
           await sudo(owner, 'users:messages');
           const conversation = await call(owner, '/users/' + userId + '/conversation?limit=20');
           if (!conversation.ok) throw new Error('conversation failed: ' + conversation.status);
@@ -1535,10 +1607,6 @@ jobs:
                   }),
                 });
                 if(valid.status!==200) throw new Error('valid Telegram status '+valid.status);
-                const lava=await fetch(base+'/payments/lava',{
-                  method:'POST',headers:{'Content-Type':'application/json'},body:'{}',
-                });
-                if(lava.status!==401) throw new Error('unauthorized Lava status '+lava.status);
                 console.log('webhook auth ok');
               })().catch(e=>{console.error(e);process.exit(1)});
             "

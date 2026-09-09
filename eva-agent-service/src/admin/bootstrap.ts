@@ -33,7 +33,7 @@ const SAFE_EXTRA_SETTINGS = new Set([
 ]);
 
 const SECRET_USED_BY: Record<string, string[]> = {
-  EVA_TELEGRAM_BOT_TOKEN: ["telegram-runtime"],
+  EVA_TELEGRAM_BOT_TOKEN: ["agent-runtime", "media-service"],
   EVA_TELEGRAM_WEBHOOK_SECRET: ["telegram-runtime"],
   EVA_AGENT_API_KEY: ["agent-runtime"],
   LETTA_APP_SERVER_TOKEN: ["agent-runtime", "app-server"],
@@ -44,9 +44,10 @@ const SECRET_USED_BY: Record<string, string[]> = {
   MEDIA_SERVICE_TOKEN: ["media-service", "agent-runtime", "admin-api"],
   MEDIA_ASR_API_KEY: ["media-service"],
   MEDIA_TTS_API_KEY: ["media-service"],
-  LETTA_UI_PASSWORD: ["letta-ui"],
-  LAVA_WEBHOOK_USER: ["payment-runtime"],
-  LAVA_WEBHOOK_PASSWORD: ["payment-runtime"],
+  // Прежняя консоль Letta с собственным Basic Auth выведена из
+  // эксплуатации; значение осталось источником пароля первого owner
+  // панели и потому по-прежнему импортируется.
+  LETTA_UI_PASSWORD: ["admin-api"],
   POSTGRES_SUPER_PASSWORD: ["postgres"],
   EVA_DB_PASSWORD: ["postgres", "agent-runtime"],
   EVA_DB_READONLY_PASSWORD: ["postgres"],
@@ -171,8 +172,7 @@ async function bootstrapTransaction(
     for (const [name, rawValue] of Object.entries(env).sort(([a], [b]) => a.localeCompare(b))) {
       const value = rawValue?.trim() ?? "";
       if (!value || EXCLUDED.has(name)) continue;
-      const explicitlySecret = name === "LAVA_WEBHOOK_USER";
-      if (explicitlySecret || SECRET_NAME.test(name)) {
+      if (SECRET_NAME.test(name)) {
         const ref = secretRef(name);
         const envelope = secretStore.seal(value);
         const inserted = await client.query(

@@ -107,6 +107,19 @@ export interface LlmRequest {
 export interface LlmUsage {
   tokens_in: number;
   tokens_out: number;
+  /**
+   * Сколько входных токенов провайдер отдал из своего кэша промпта.
+   *
+   * Это ЧАСТЬ `tokens_in`, а не добавка к ним: кэш меняет не объём
+   * запроса, а его цену — у разных провайдеров кэшированный вход стоит
+   * от четверти до десятой доли обычного. Без этого числа счёт за ход
+   * нечем объяснить: в журнале видно «сорок тысяч входных токенов», а
+   * провайдер взял за них как за четыре.
+   *
+   * `undefined` — провайдер о кэше не сказал. Это не то же самое, что
+   * ноль: ноль означает «кэш не сработал», и цена тогда полная.
+   */
+  cached_tokens_in?: number;
 }
 
 export interface LlmResponse {
@@ -196,6 +209,14 @@ export interface ProviderProfile {
   base_url: string;
   model: string;
   api_key: string;
+  /**
+   * Все ключи провайдера по порядку; первый совпадает с `api_key`.
+   *
+   * Лимит у льготных тарифов считается на ключ, а не на аккаунт: когда
+   * один упирается в квоту, роутер берёт следующий вместо того, чтобы
+   * уводить весь провайдер из маршрутов.
+   */
+  api_keys?: string[];
 
   connect_timeout_ms: number;
   request_timeout_ms: number;
@@ -216,6 +237,12 @@ export interface ProviderProfile {
   sensitive_data_allowed: boolean;
 
   price_in_micro: number;
+  /**
+   * Цена миллиона кэшированных входных токенов. `null` — не задана, и
+   * тогда кэшированный вход считается по обычной ставке: занизить счёт
+   * хуже, чем не показать экономию.
+   */
+  price_cached_in_micro?: number | null;
   price_out_micro: number;
   daily_budget_micro: number | null;
   monthly_budget_micro: number | null;

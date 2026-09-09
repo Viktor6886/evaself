@@ -423,6 +423,8 @@ export class LettaService {
   private readonly drainTimeoutMs: number;
   /** Conversation, по которым ход выполняется прямо сейчас. */
   private readonly runningTurns = new Set<string>();
+  /** Conversation, которым предел истории уже объявлен в этом процессе. */
+  private readonly contextWindowApplied = new Set<string>();
 
   /** Последний снимок фактических возможностей сессии (init-сообщение SDK). */
   private lastRuntimeFacts: LettaRuntimeFacts | null = null;
@@ -431,8 +433,17 @@ export class LettaService {
 
   private readonly config: Config;
   private readonly logger: Logger;
-  private readonly persona: string;
-  private readonly systemPrompt: string;
+  /**
+   * Канонические тексты личности.
+   *
+   * Не `readonly`: администратор правит персону и системный промпт из
+   * панели, и применение правки не должно требовать перезапуска стека.
+   * Меняются они ровно одним способом — `setCanonicalContext()`, который
+   * вызывает владелец канонических текстов; никакой другой код их не
+   * трогает.
+   */
+  private persona: string;
+  private systemPrompt: string;
   private defaultModel: string;
   private runtime: RuntimeSdkSettings;
   private toolFactory: ((conversationId: string) => AnyAgentTool[]) | null = null;
@@ -539,6 +550,64 @@ export class LettaService {
     // сервису: у новой модели каталог может знать этот уровень.
     if (model !== this.defaultModel) this.unsupportedReasoningEffort = null;
     this.defaultModel = model;
+  }
+
+  /**
+   * Заменить канонические тексты личности без перезапуска процесса.
+   *
+   * Нужно ровно одному сценарию: администратор сохранил персону или
+   * системный промпт в панели, и следующий созданный агент обязан
+   * получить новый текст, а не тот, что процесс прочитал при старте.
+   * Существующих агентов приводит к новой версии `PersonaSync` — здесь
+   * меняется только то, из чего собирается **новый** агент и новая
+   * сессия.
+   *
+   * Открытые сессии выводятся из обращения: `sessionOptions()` уже отдала
+   * им прежнюю персону, и оставить их значило бы получить два разных
+   * канонических текста в одном процессе.
+   *
+   * Именно выводятся, а не закрываются. `closeAllSessions()` при
+   * выключенном `EVA_SAFE_SESSION_MANAGER` — а он выключен по умолчанию —
+   * закрывает и ту сессию, в которой прямо сейчас идёт ход. Человек в
+   * этот момент ждёт ответа, и администратор, сохранивший персону,
+   * обрывал бы чужой разговор на середине. Сохранение персоны — как раз
+   * тот момент, когда кто-то с Евой разговаривает.
+   *
+   * Поэтому здесь та же механика, что и у `invalidateAgentSessions`:
+   * занятая сессия помечается `closing` и закрывается сама, когда ход
+   * закончится, свободная — сразу. Идущий ход при этом доработает на
+   * прежнем тексте: это честнее, чем оборвать его ради новой персоны,
+   * которую всё равно применит `PersonaSync`.
+   */
+  setCanonicalContext(input: { persona?: string; systemPrompt?: string }): boolean {
+    const persona = input.persona ?? this.persona;
+    const systemPrompt = input.systemPrompt ?? this.systemPrompt;
+    if (persona === this.persona && systemPrompt === this.systemPrompt) return false;
+    this.persona = persona;
+    this.systemPrompt = systemPrompt;
+    this.runtime = { ...this.runtime, default_persona: persona };
+    this.retireAllSessions();
+    return true;
+  }
+
+  /**
+   * Вывести из обращения все открытые сессии, не обрывая идущих ходов.
+   *
+   * Свободная сессия закрывается сразу, занятая помечается и закрывается
+   * по окончании хода (`closeIfDrained`). Ни одна из них не будет выдана
+   * следующему ходу: он откроет новую — уже с текущим каноническим
+   * текстом.
+   */
+  private retireAllSessions(): void {
+    for (const [conversationId, pooled] of [...this.sessions]) {
+      if (pooled.activeTurns > 0) pooled.closing = true;
+      else this.closeSession(conversationId);
+    }
+  }
+
+  /** Что процесс считает каноническим прямо сейчас. Только для диагностики. */
+  canonicalContext(): { persona: string; systemPrompt: string } {
+    return { persona: this.persona, systemPrompt: this.systemPrompt };
   }
 
   setToolFactory(factory: (conversationId: string) => AnyAgentTool[]): void {
@@ -1427,9 +1496,22 @@ export class LettaService {
       cancelPollMs?: number;
       allowedTools?: readonly string[];
       canUseTool?: CanUseToolCallback;
+      /**
+       * Потолок этого хода. По умолчанию — общий
+       * `EVA_AGENT_TURN_TIMEOUT_MS`, рассчитанный на живой ответ
+       * человеку. Запланированное действие живёт по другим правилам:
+       * человек попросил заранее и не сидит перед экраном, а цепочка
+       * «найди — прочитай — напиши — опубликуй» в интерактивный потолок
+       * не укладывается, и обрыв по нему выглядит как «не получилось».
+       */
+      timeoutMs?: number;
     } = {},
   ): Promise<TurnResult> {
     const startedAt = Date.now();
+    const turnTimeoutMs = Math.max(1_000, options.timeoutMs ?? this.runtime.turn_timeout_ms);
+    // Предел истории объявляется до открытия сессии: `updateConversation`
+    // закрывает сессию, и после неё пришлось бы поднимать её заново.
+    await this.ensureContextWindow(conversationId);
     const pooled = await this.acquirePooled(conversationId, options.allowedTools === undefined ? undefined : {
       allowedTools: options.allowedTools,
       canUseTool: options.canUseTool ?? ((toolName) => options.allowedTools!.includes(toolName)
@@ -1459,13 +1541,13 @@ export class LettaService {
       sentAt = Date.now();
 
       const stream = session.stream();
-      const deadline = startedAt + this.runtime.turn_timeout_ms;
+      const deadline = startedAt + turnTimeoutMs;
 
       while (true) {
         const remaining = deadline - Date.now();
         if (remaining <= 0) {
           await session.abort().catch(() => undefined);
-          throw turnTimeout(`the agent did not finish within ${this.runtime.turn_timeout_ms} ms`);
+          throw turnTimeout(`the agent did not finish within ${turnTimeoutMs} ms`);
         }
 
         const next = await withTimeout(stream.next(), remaining);
@@ -1538,6 +1620,41 @@ export class LettaService {
       sessionAcquireMs,
       firstDeltaMs: firstDeltaAt === null ? null : firstDeltaAt - sentAt,
     };
+  }
+
+  /**
+   * Объявить conversation предел истории.
+   *
+   * Диалоги, созданные до того, как предел вообще стал вычисляться,
+   * живут без него: Letta не знает, когда сжимать, и история растёт до
+   * отказа модели. На боевой установке диалог дорос до 770 000 токенов
+   * при окне 256 000 — после чего умирает любое сообщение, включая
+   * «привет», и сжаться сам он уже не может.
+   *
+   * Поэтому предел проставляется существующим conversation, а не только
+   * новым. Один раз на conversation за жизнь процесса: это управляющий
+   * вызов, и повторять его на каждом ходе незачем.
+   *
+   * Отказ не роняет ход: без предела всё работает ровно так, как
+   * работало до сих пор.
+   */
+  private async ensureContextWindow(conversationId: string): Promise<void> {
+    const limit = this.runtime.default_context_window;
+    if (limit === null || this.contextWindowApplied.has(conversationId)) return;
+    this.contextWindowApplied.add(conversationId);
+    try {
+      await this.client.conversations.update(conversationId, {
+        contextWindowLimit: limit,
+      } as never);
+      this.logger.info("conversation context window announced", { conversationId, limit });
+    } catch (error) {
+      // Повторно не пробуем: если App Server не принял предел, он не
+      // примет его и через ход, а ход важнее.
+      this.logger.warn("conversation context window not announced", {
+        conversationId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   /**

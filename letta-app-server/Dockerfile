@@ -1,5 +1,6 @@
+ARG NODE_BASE_IMAGE=node
 ARG NODE_BASE_VERSION=22.22-bookworm-slim
-FROM node:${NODE_BASE_VERSION} AS build
+FROM ${NODE_BASE_IMAGE}:${NODE_BASE_VERSION} AS build
 
 # ---------------------------------------------------------------------
 # Self-hosted Letta App Server.
@@ -24,7 +25,7 @@ RUN apt-get update \
  && npm install -g --prefix /opt/letta "@letta-ai/letta-code@${LETTA_CODE_VERSION}" \
  && npm cache clean --force
 
-FROM node:${NODE_BASE_VERSION}
+FROM ${NODE_BASE_IMAGE}:${NODE_BASE_VERSION}
 
 ENV LETTA_HOME=/data/letta \
     LETTA_LOCAL_BACKEND_DIR=/data/letta/lc-local-backend \

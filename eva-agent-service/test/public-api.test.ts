@@ -202,6 +202,87 @@ test("/public/session and /public/tasks derive identity only from initData", asy
   await app.close();
 });
 
+/*
+ * Подписка в Mini App.
+ *
+ * Проверяется не «эндпоинт есть», а граница: счёт выставляется тому, чью
+ * подпись проверил Telegram, а не тому, кого назвали в теле запроса. И
+ * ненастроенная оплата отвечает честным «пусто», а не пятисоткой.
+ */
+test("счёт в Mini App выставляется владельцу проверенной подписи", async () => {
+  const invoices: Array<{ telegramId: number; plan: string; period: string }> = [];
+  const app = Fastify();
+  registerPublicRoutes(app, {
+    config: {
+      telegramBotToken: BOT_TOKEN,
+      telegramWebAppMaxAgeSeconds: 3_600,
+    } as never,
+    repository: {
+      session: async (telegramId: number) => ({
+        user: { id: 77, telegram_id: telegramId }, plan: "free", quotas: [],
+      }),
+    } as never,
+    now: () => NOW,
+    subscription: {
+      offers: async () => [{
+        plan: "plus", period: "month", stars: 500,
+        title: "Ева Плюс — месяц", description: "подписка",
+      }],
+      invoiceLink: async (telegramId: number, plan: string, period: string) => {
+        invoices.push({ telegramId, plan, period });
+        return "https://t.me/invoice/abc";
+      },
+    },
+  });
+  const initData = signInitData(USER, Math.floor(NOW.getTime() / 1000));
+
+  const offers = await app.inject({
+    method: "GET", url: "/public/subscription/offers",
+    headers: { "x-telegram-init-data": initData },
+  });
+  assert.equal(offers.statusCode, 200);
+  assert.equal(JSON.parse(offers.body).offers.length, 1);
+
+  // Чужой идентификатор в теле игнорируется: владельца называет подпись.
+  const created = await app.inject({
+    method: "POST", url: "/public/subscription/invoice",
+    headers: { "x-telegram-init-data": initData },
+    payload: { plan: "plus", period: "month", user_id: 999999 },
+  });
+  assert.equal(created.statusCode, 200);
+  assert.equal(JSON.parse(created.body).link, "https://t.me/invoice/abc");
+  // Идентификатор из подписи, а не из тела: внутреннего владельца по
+  // нему находит тот слой, у которого есть база.
+  assert.deepEqual(invoices, [{ telegramId: USER.id, plan: "plus", period: "month" }]);
+
+  // Без подписи — ни списка, ни счёта.
+  const anonymous = await app.inject({
+    method: "POST", url: "/public/subscription/invoice",
+    payload: { plan: "plus", period: "month" },
+  });
+  assert.equal(anonymous.statusCode >= 400, true);
+  assert.equal(invoices.length, 1, "неподписанный запрос счёта не создаёт");
+});
+
+test("ненастроенная оплата отвечает пустым списком, а не отказом", async () => {
+  const app = Fastify();
+  registerPublicRoutes(app, {
+    config: {
+      telegramBotToken: BOT_TOKEN,
+      telegramWebAppMaxAgeSeconds: 3_600,
+    } as never,
+    repository: {} as never,
+    now: () => NOW,
+  });
+  const initData = signInitData(USER, Math.floor(NOW.getTime() / 1000));
+  const offers = await app.inject({
+    method: "GET", url: "/public/subscription/offers",
+    headers: { "x-telegram-init-data": initData },
+  });
+  assert.equal(offers.statusCode, 200);
+  assert.deepEqual(JSON.parse(offers.body), { offers: [], available: false });
+});
+
 function signInitData(
   user: Record<string, unknown>,
   authDate: number,

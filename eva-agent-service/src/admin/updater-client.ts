@@ -6,6 +6,7 @@ import { AdminApiError } from "./errors.js";
 export type UpdaterCommand =
   | "restart_service"
   | "set_backup_password"
+  | "set_telegram_token"
   | "start_service"
   | "stop_service"
   | "get_service_status"

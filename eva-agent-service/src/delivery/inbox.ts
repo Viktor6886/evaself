@@ -84,6 +84,54 @@ function toRecord(row: InboxRow): InboxRecord {
 export class PostgresTelegramInbox implements ParallelTelegramInbox {
   constructor(private readonly db: Database) {}
 
+  /**
+   * Вернуть в очередь списанные, но не применённые платежи.
+   *
+   * До исправления обработчик платежа проглатывал отказ выдачи доступа,
+   * после чего durable update становился `completed` и больше никогда не
+   * запускался. Идентификатор списания позволяет отличить такой платёж от
+   * уже применённого без догадок: применённый всегда есть в `payments`.
+   * Повтор безопасен — тот же идентификатор является ключом
+   * идемпотентности в `grantPaidAccess`.
+   */
+  async recoverUnappliedStarPayments(): Promise<number> {
+    const result = await this.db.withSystemScope(
+      "telegram.inbox.recover_unapplied_star_payments",
+      async () => await this.db.query(
+        `
+          -- tenant: system — восстановление durable ingress сверяет терминальные платежи со всесистемным журналом платежей
+          UPDATE telegram_updates t
+             SET status = 'queued',
+                 attempts = 0,
+                 available_at = now(),
+                 completed_at = NULL,
+                 error_code = NULL,
+                 error_message = NULL,
+                 last_error = NULL,
+                 locked_at = NULL,
+                 locked_by = NULL
+           WHERE t.message_kind = 'payment'
+             -- Старый дефект оставлял именно completed. Dead не
+             -- трогаем: иначе безнадёжно повреждённый платёж оживал бы
+             -- после каждого перезапуска сервиса.
+             AND t.status = 'completed'
+             AND COALESCE(
+                   t.payload #>> '{message,successful_payment,telegram_payment_charge_id}',
+                   ''
+                 ) <> ''
+             AND NOT EXISTS (
+                   SELECT 1
+                     FROM payments p
+                    WHERE p.provider = 'telegram_stars'
+                      AND p.provider_payment_id =
+                          t.payload #>> '{message,successful_payment,telegram_payment_charge_id}'
+                 )`,
+      ),
+      { crossUser: true },
+    );
+    return result.rowCount ?? 0;
+  }
+
   async enqueue(update: TelegramUpdate): Promise<{ accepted: boolean; duplicate: boolean }> {
     if (!Number.isSafeInteger(update.update_id)) {
       return { accepted: false, duplicate: false };
@@ -96,19 +144,24 @@ export class PostgresTelegramInbox implements ParallelTelegramInbox {
     // webhook и терять и порядок, и восстановление после перезапуска.
     const callback = update.callback_query;
     const pollAnswer = update.poll_answer;
-    const kind = callback
-      ? "callback"
-      : pollAnswer
-        ? "poll_answer"
-        : message?.voice || message?.audio
-          ? "voice"
-          : message?.photo?.length
-            ? "image"
-            : message?.document
-              ? "document"
-              : message?.text || message?.caption
-                ? "text"
-                : "unsupported";
+    // Состоявшийся платёж идёт тем же durable ingress, что и сообщение:
+    // применить его нужно ровно один раз и пережив перезапуск, а это и
+    // есть то, ради чего очередь существует. Ход модели он не запускает.
+    const kind = message?.successful_payment
+      ? "payment"
+      : callback
+        ? "callback"
+        : pollAnswer
+          ? "poll_answer"
+          : message?.voice || message?.audio
+            ? "voice"
+            : message?.photo?.length
+              ? "image"
+              : message?.document
+                ? "document"
+                : message?.text || message?.caption
+                  ? "text"
+                  : "unsupported";
     // Кто прислал и куда отвечать. У опроса чата в апдейте нет вовсе —
     // он берётся из серверного соответствия при обработке.
     const fromId = message?.from?.id ?? callback?.from?.id ?? pollAnswer?.user?.id ?? null;
@@ -139,7 +192,10 @@ export class PostgresTelegramInbox implements ParallelTelegramInbox {
             // Выбор кнопкой и голос в опросе — продолжение того же
             // разговора, за который уже заплачено ходом: второй раз квоту за
             // них не списываем.
-            Boolean(message?.from && !message.from.is_bot && kind !== "unsupported" && !isCommand),
+            Boolean(
+              message?.from && !message.from.is_bot
+              && kind !== "unsupported" && kind !== "payment" && !isCommand,
+            ),
             JSON.stringify(update),
           ],
         );

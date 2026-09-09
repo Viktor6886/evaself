@@ -18,10 +18,18 @@ import { buildAdminServer } from "./server.js";
 import { UserService } from "./user-service.js";
 import { ArtifactRegistry } from "../artifacts/registry.js";
 import { AgentDirectoryService } from "./agent-directory.js";
+import { AdminAgentService } from "./agent-admin-service.js";
+import { SubscriptionAdminService } from "./subscription-service.js";
+import { PersonaAdminService } from "./persona-admin-service.js";
+import { LettaConsoleService } from "./letta-console-service.js";
 import { ToolApprovalService } from "./tool-approvals.js";
 import { McpServerPolicyRepository } from "../tools/mcp.js";
 import { TurnOperationsService } from "./turn-operations.js";
 import { DeleteGuard } from "../letta/delete-guard.js";
+import { adminBadRequest } from "./errors.js";
+import { createTelegramBotApi } from "./telegram-bot-api.js";
+import { TariffService } from "./tariff-service.js";
+import { createTelegramRuntimeApply, TelegramTokenService } from "./telegram-token-service.js";
 import { SecurityAuditService } from "./security-audit.js";
 import { RetentionService } from "../retention/service.js";
 import { UpdaterClient } from "./updater-client.js";
@@ -57,7 +65,7 @@ async function main(): Promise<void> {
   const audit = new AuditService(pool);
   const config = new ConfigService(pool, redis);
   const health = new HealthService(pool, redis);
-  const operations = new OperationService(pool, redis, new UpdaterClient());
+  const operations = new OperationService(pool, redis, new UpdaterClient(), logger);
   const llmRouter = new LlmRouterAdminService(pool);
   const integrations = new IntegrationConfigService(pool, secrets);
   // Схемы провайдеров и валидацию параметров admin-api спрашивает у
@@ -101,9 +109,24 @@ async function main(): Promise<void> {
    */
   const snapshotRetry = setInterval(() => {
     if (stt.pushStatus().delivered) return;
-    void stt.pushSnapshot().then((result) => {
-      if (result.applied) logger.info("Снимок STT доставлен после повторной попытки");
-    });
+    // `catch` обязателен, а не на всякий случай.
+    //
+    // `pushSnapshot()` начинается с запроса к PostgreSQL и отклоняется,
+    // когда база недоступна. Отклонённый промис из таймера не ловит
+    // никто: Node считает это необработанным отказом и завершает
+    // процесс. То есть минутная недоступность PostgreSQL, пока снимок
+    // ещё не доставлен, роняла admin-api — панель уходила в перезапуск
+    // из-за повторной попытки, которая по замыслу как раз и должна
+    // переживать недоступность.
+    void stt.pushSnapshot()
+      .then((result) => {
+        if (result.applied) logger.info("Снимок STT доставлен после повторной попытки");
+      })
+      .catch((error: unknown) => {
+        logger.warn("Повторная доставка снимка STT не удалась", {
+          code: error instanceof Error ? error.name : "unknown_error",
+        });
+      });
   }, 60_000);
   snapshotRetry.unref();
 
@@ -118,11 +141,69 @@ async function main(): Promise<void> {
   };
   const artifacts = new ArtifactRegistry(registryDb);
 
+  // Каталог агентов нужен и разделу «Агенты» единой панели, и старому
+  // CRUD за флагом. Экземпляр один: два означали бы два разных стража
+  // удаления на одних и тех же данных.
+  const directory = new AgentDirectoryService(registryDb, new DeleteGuard({
+    query: registryDb.query,
+    withSystemScope: async (_reason, work) => await work(),
+  }));
+
+  // Обращения к Bot API от имени активного токена. Экземпляр один:
+  // переезд на другого бота и возврат звёзд говорят с Telegram одинаково.
+  const botApi = createTelegramBotApi({
+    baseUrl: process.env.EVA_TELEGRAM_API_BASE_URL ?? "https://api.telegram.org",
+  });
+  const tariffs = new TariffService(pool);
+
+  // Боты Евы. Активный токен остаётся в secret_records под прежним
+  // ref — здесь только набор, из которого его выбирают, и переустановка
+  // вебхука при переезде.
+  const telegramTokens = new TelegramTokenService({
+    pool,
+    secrets,
+    // Admin API читает окружение напрямую, как и остальные его службы:
+    // полный Config агента этот процесс не поднимает.
+    api: botApi,
+    webhookUrl: `https://${process.env.DOMAIN_API ?? ""}/telegram/webhook`,
+    webhookSecret: process.env.EVA_TELEGRAM_WEBHOOK_SECRET ?? "",
+    // Выбранный токен доносится и до `.env`, и до работающего сервиса:
+    // secret_records ему недоступны — мастер-ключ монтируется только
+    // административным контейнерам.
+    runtime: createTelegramRuntimeApply({
+      updater: new UpdaterClient(),
+      agent: agentClient,
+      // Токен нужен двум службам: рантайму — чтобы отвечать, и
+      // media-service — чтобы скачать голосовое у Telegram. Реестр
+      // секретов называет обе; доводить его нужно до обеих.
+      media: {
+        baseUrl: process.env.EVA_MEDIA_SERVICE_URL ?? "http://media-service:8090",
+        serviceToken: async () => (process.env.MEDIA_SERVICE_TOKEN ?? "").trim()
+          || await secrets.get("sec_media_service_token"),
+      },
+    }),
+    logger,
+  });
+
   const app = buildAdminServer({
     auth,
     audit,
     config,
     secrets,
+    telegramTokens,
+    tariffs,
+    // Возврат звёзд идёт активным токеном бота: тем же, которым счёт
+    // был выставлен. Токен берётся из хранилища секретов в момент
+    // возврата, а не запоминается при старте, — переезд на другого бота
+    // не должен делать возврат невозможным.
+    starsRefund: async (chargeId: string) => await tariffs.refund(
+      chargeId,
+      async (telegramId, charge) => {
+        const token = await secrets.get("sec_eva_telegram_bot_token");
+        if (!token) throw adminBadRequest("Токен бота не настроен");
+        await botApi.refundStars(token, telegramId, charge);
+      },
+    ),
     health,
     operations,
     providers,
@@ -139,16 +220,17 @@ async function main(): Promise<void> {
     // регистрируется только при включённом EVA_ADMIN_CRUD: собранный, но
     // незарегистрированный сервис ничего не стоит и ни к чему не
     // обращается.
+    // Разделы единой панели. Все изменяющие действия уходят в
+    // eva-agent-service тем же путём, каким работает production: агентов
+    // создаёт и удаляет только он, персону раскатывает только он.
+    panel: {
+      agents: new AdminAgentService(pool, directory, agentClient),
+      subscriptions: new SubscriptionAdminService(pool),
+      persona: new PersonaAdminService(agentClient),
+      letta: new LettaConsoleService(agentClient),
+    },
     crud: {
-      directory: new AgentDirectoryService(registryDb, new DeleteGuard({
-        query: registryDb.query,
-        // Область у административного запроса уже своя: роль подтверждена,
-        // запись аудита открыта, и именно она разрешает границе арендатора
-        // видеть данные всех пользователей. Заводить поверх неё системную
-        // область значило бы объявить второе основание доступа к тем же
-        // строкам — и потерять связь запроса с записью аудита.
-        withSystemScope: async (_reason, work) => await work(),
-      })),
+      directory,
       tools: new ToolApprovalService(registryDb),
       mcp: new McpServerPolicyRepository(registryDb as never),
       turns: new TurnOperationsService(registryDb),

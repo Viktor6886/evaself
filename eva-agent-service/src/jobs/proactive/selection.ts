@@ -17,6 +17,8 @@ import type { ProactiveCandidate } from "./service.js";
 
 export interface ReminderCandidate extends ProactiveCandidate {
   taskId: string;
+  /** Род задачи: напомнить человеку или выполнить самой. */
+  kind: string;
   title: string;
   description: string | null;
   priority: number;
@@ -26,6 +28,17 @@ export interface ReminderCandidate extends ProactiveCandidate {
   previousReminders: number;
   lastTaskAction: string | null;
   scheduledAt: Date;
+}
+
+/** Наступившее окно: кандидат плюс уже выбранная минута. */
+export interface InitiativeCandidate extends ProactiveCandidate {
+  /** Строка `proactive_messages`, в которой минута выбрана. */
+  messageId: string;
+  scheduledFor: Date;
+  /** Конец окна: после него сообщение не отправляется вовсе. */
+  validUntil: Date | null;
+  /** Как человек назвал окно. Может отсутствовать. */
+  windowLabel: string | null;
 }
 
 interface CandidateRow {
@@ -43,8 +56,16 @@ interface CandidateRow {
   awaiting_reply: boolean;
 }
 
+interface InitiativeRow extends CandidateRow {
+  message_id: string;
+  scheduled_for: Date;
+  valid_until: Date | null;
+  window_label: string | null;
+}
+
 interface ReminderRow extends CandidateRow {
   task_id: string;
+  kind: string;
   title: string;
   description: string | null;
   priority: number;
@@ -205,11 +226,12 @@ export class ProactiveSelection {
         `-- tenant: system — планировщик смотрит наступившие задачи всех
          -- пользователей, выполнение идёт в области владельца
          SELECT ${CANDIDATE_COLUMNS},
-                task.id AS task_id, task.title, task.description, task.priority,
-                task.due_at, task.remind_at,
+                task.id AS task_id, task.kind, task.title, task.description,
+                task.priority, task.due_at, task.remind_at,
                 g.title AS related_goal,
                 (SELECT count(*)::int FROM task_events e
-                  WHERE e.task_id = task.id AND e.event_type = 'reminder_sent')
+                  WHERE e.task_id = task.id
+                    AND e.event_type IN ('reminder_sent', 'action_done'))
                   AS previous_reminders,
                 (SELECT e.event_type FROM task_events e
                   WHERE e.task_id = task.id ORDER BY e.created_at DESC LIMIT 1)
@@ -236,6 +258,7 @@ export class ProactiveSelection {
       // Часовой пояс задачи сильнее пояса пользователя: напоминание
       // назначено в конкретной зоне и при переезде не переезжает.
       taskId: row.task_id,
+      kind: row.kind,
       title: row.title,
       description: row.description,
       priority: Number(row.priority) || 3,
@@ -245,6 +268,55 @@ export class ProactiveSelection {
       previousReminders: Number(row.previous_reminders) || 0,
       lastTaskAction: row.last_task_action,
       scheduledAt: row.scheduled_at,
+    }));
+  }
+}
+
+/**
+ * Наступившие окна инициативы.
+ *
+ * Минута выбрана заранее планировщиком (`windows.ts`), поэтому выборка
+ * не решает, когда писать, — она только замечает, что время пришло.
+ * Просроченные строки берутся тоже: их надо закрыть, а не оставить
+ * лежать до бесконечности.
+ */
+export class InitiativeSelection {
+  constructor(private readonly db: Database) {}
+
+  async due(limit = 25): Promise<InitiativeCandidate[]> {
+    const { rows } = await this.db.withSystemScope(
+      "proactive.select.initiative",
+      async () => await this.db.query<InitiativeRow>(
+        `-- tenant: system — диспетчер смотрит наступившие окна всех
+         -- пользователей, сообщение готовится в области владельца
+         SELECT ${CANDIDATE_COLUMNS},
+                pmsg.id AS message_id,
+                pmsg.scheduled_for,
+                pmsg.valid_until,
+                w.label AS window_label
+           FROM proactive_messages pmsg
+           JOIN users u ON u.id = pmsg.user_id
+           ${CANDIDATE_JOINS}
+           LEFT JOIN proactive_windows w
+             ON w.id = pmsg.window_id AND w.user_id = pmsg.user_id
+          WHERE pmsg.kind = $1
+            AND pmsg.status = 'scheduled'
+            AND pmsg.scheduled_for <= now()
+            AND u.state = 'active'
+            AND NOT u.is_blocked
+            AND a.conversation_id IS NOT NULL
+          ORDER BY pmsg.scheduled_for
+          LIMIT $2`,
+        ["initiative", limit],
+      ),
+      { crossUser: true },
+    );
+    return rows.map((row) => ({
+      ...toCandidate(row),
+      messageId: row.message_id,
+      scheduledFor: new Date(row.scheduled_for),
+      validUntil: row.valid_until ? new Date(row.valid_until) : null,
+      windowLabel: row.window_label,
     }));
   }
 }

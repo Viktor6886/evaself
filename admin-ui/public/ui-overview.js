@@ -122,7 +122,10 @@ const GROUP_NAMES = {
  * взят намеренно — он доступен с клавиатуры и не требует состояния в JS.
  */
 function renderOverviewGroups(payload) {
-  $("#overview-groups").innerHTML = Object.entries(payload.groups)
+  // `|| {}`, как у соседей по этой же функции: `renderVerdict` и
+  // `renderHostBar` уже так написаны, и разнобой здесь означал бы, что
+  // один и тот же неполный ответ роняет обзор через раз.
+  $("#overview-groups").innerHTML = Object.entries(payload.groups || {})
     .map(([name, items]) => `
       <section class="overview-group">
         <div class="section-heading">

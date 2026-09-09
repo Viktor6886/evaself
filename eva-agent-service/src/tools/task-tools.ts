@@ -3,6 +3,7 @@ import type { AnyAgentTool } from "@letta-ai/letta-agent-sdk";
 import { assertCronExpression, nextCronDate } from "../background.js";
 import type { AgentRuntimeContext, Database } from "../db.js";
 import { localDateTimeToUtc } from "../time/local-date-time.js";
+import { OwnMessagesService } from "../runtime/own-messages.js";
 import { TaskEventService } from "../tasks/task-event-service.js";
 import {
   asObject,
@@ -20,10 +21,12 @@ import {
 
 export class TaskToolFactory {
   private readonly events: TaskEventService;
+  private readonly ownMessages: OwnMessagesService;
   constructor(
     private readonly db: Database,
   ) {
     this.events = new TaskEventService(db);
+    this.ownMessages = new OwnMessagesService(db);
   }
 
   build(tool: ToolBuilder): AnyAgentTool[] {
@@ -33,7 +36,14 @@ export class TaskToolFactory {
     const list = async (args: JsonObject, runtime: AgentRuntimeContext) =>
       await this.list(args, runtime);
     return [
-      tool("save_task", "Сохранить задачу", "Создаёт задачу или напоминание.", schema, save),
+      tool(
+      "save_task",
+      "Сохранить задачу",
+      "Создаёт напоминание человеку (kind=reminder) или отложенное дело, "
+      + "которое Ева выполнит сама и пришлёт результат (kind=action).",
+      schema,
+      save,
+    ),
       tool(
         "save_tasks_bulk",
         "Сохранить несколько задач",
@@ -67,6 +77,39 @@ export class TaskToolFactory {
             Math.min(Math.max(optionalInteger(args, "limit") ?? 20, 1), 100),
           ),
         }),
+      ),
+      // Проверка отсутствия эквивалента (инвариант 20): `get_recent_reminders`
+      // отдаёт события задач и о heartbeat, check-in и сообщении в
+      // выбранное человеком окно не знает вовсе — они живут в
+      // `proactive_messages`. Инструмент отвечает на другой вопрос:
+      // «что я отправила сама», независимо от того, каким механизмом.
+      tool(
+        "get_my_sent_messages",
+        "Мои отправленные сообщения",
+        "Возвращает сообщения, которые Ева отправила сама: напоминания, "
+        + "результаты выполненных задач и сообщения по своей инициативе. "
+        + "Нужен, когда человек ссылается на сообщение Евы, а в ходе виден "
+        + "только его укороченный текст.",
+        objectSchema({
+          limit: integer("Количество, максимум 20"),
+          since_hours: integer("За сколько последних часов, максимум 168"),
+        }),
+        async (args, runtime) => {
+          const hours = Math.min(Math.max(optionalInteger(args, "since_hours") ?? 24, 1), 168);
+          const messages = await this.ownMessages.since(
+            runtime.userId,
+            new Date(Date.now() - hours * 3_600_000),
+            Math.min(Math.max(optionalInteger(args, "limit") ?? 10, 1), 20),
+          );
+          return {
+            ok: true,
+            messages: messages.map((message) => ({
+              sent_at: message.sentAt.toISOString(),
+              source: message.source,
+              text: message.text,
+            })),
+          };
+        },
       ),
       tool(
         "get_task_events",
@@ -138,6 +181,13 @@ export class TaskToolFactory {
 
   private async save(args: JsonObject, runtime: AgentRuntimeContext): Promise<unknown> {
     const priority = Math.min(Math.max(optionalInteger(args, "priority") ?? 3, 1), 5);
+    // Род задачи решает, что произойдёт в назначенное время: напомнить
+    // человеку или сделать дело самой. Значение по умолчанию — прежнее
+    // поведение: задача, о роде которой не сказано, остаётся напоминанием.
+    const kind = optionalString(args, "kind", 20) ?? "reminder";
+    if (kind !== "reminder" && kind !== "action") {
+      throw new Error("kind должен быть reminder или action");
+    }
     const dueInput = optionalString(args, "due_at", 100);
     const remindInput = optionalString(args, "remind_at", 100);
     const cron = optionalString(args, "cron", 100);
@@ -226,10 +276,12 @@ export class TaskToolFactory {
         `INSERT INTO tasks (
            user_id, title, description, priority, due_at, remind_at,
            cron_expression, repeat_enabled, timezone, next_run_at,
-           goal_id, goal_result_id, work_block_id, estimated_minutes, energy_required
+           goal_id, goal_result_id, work_block_id, estimated_minutes, energy_required,
+           kind
          ) VALUES (
            $1, $2, $3, $4, $5::timestamptz, $6::timestamptz,
-           $7, $8, $9, $10::timestamptz, $11, $12, $13, $14, $15
+           $7, $8, $9, $10::timestamptz, $11, $12, $13, $14, $15,
+           $16
          ) RETURNING *`,
         [
           runtime.userId,
@@ -247,6 +299,7 @@ export class TaskToolFactory {
           blockId,
           estimated,
           energy,
+          kind,
         ],
       );
       return rows[0];
@@ -353,6 +406,17 @@ function taskSchema(): JsonObject {
       "Через сколько минут напомнить. Для «через 3 минуты», «через полчаса»: "
       + "время считает сервер, и высчитывать его самой не нужно",
     ),
+    kind: {
+      type: "string",
+      enum: ["reminder", "action"],
+      description:
+        "Что произойдёт в назначенное время. reminder — напомнить человеку, "
+        + "дело делает он сам. action — сделать дело самой и прислать результат: "
+        + "«через десять минут найди новости в Перми», «каждое утро присылай погоду», "
+        + "«вечером подбери мне упражнения», «в пятницу собери итоги недели». "
+        + "Просьба сделать что-то позже — это action; reminder на неё вернёт "
+        + "человеку его же поручение. По умолчанию reminder.",
+    },
     cron: text("Cron из пяти полей"),
     repeat: boolean("Повторять"),
     priority: integer("Приоритет 1–5"),

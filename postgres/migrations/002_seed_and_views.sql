@@ -10,7 +10,7 @@ BEGIN;
 -- Metrics are the names eva-agent-service increments in usage_counters.
 -- ---------------------------------------------------------------------
 INSERT INTO quotas (plan, metric, period, limit_value, description) VALUES
-    ('free',    'messages',      'day',   30,   'Messages to Eva per day'),
+    ('free', 'messages',      'day',   10,   'Messages to Eva per day'),
     ('free',    'voice_minutes', 'day',   5,    'Minutes of voice transcription per day'),
     ('free',    'web_search',    'day',   10,   'Web searches per day'),
     ('plus',    'messages',      'day',   200,  'Messages to Eva per day'),

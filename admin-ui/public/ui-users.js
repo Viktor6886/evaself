@@ -130,13 +130,14 @@ async function openUserCard(id) {
 }
 
 /**
- * Переписка загружается только по явной кнопке и под sudo: открыть личный
- * разговор — осознанное действие, а не побочный эффект просмотра карточки.
- * Каждое открытие попадает в журнал (кто и чью, без текста).
+ * Переписка загружается только по явной кнопке и после подтверждения:
+ * открыть личный разговор — осознанное действие, а не побочный эффект
+ * просмотра карточки. Каждое открытие попадает в журнал (кто и чью, без
+ * текста). Пароль не спрашивается — вход в панель уже подтвердил, кто это.
  */
 function showConversation(id) {
-  askSudo({
-    scope: "users:messages",
+  askConfirm({
+    eyebrow: "ЛИЧНЫЕ ДАННЫЕ",
     title: "Открыть переписку",
     description: "Личный разговор пользователя с Евой. Факт открытия будет записан в журнал событий.",
     action: async () => {
@@ -162,8 +163,7 @@ function showConversation(id) {
 }
 
 function setUserBlocked(id, blocked) {
-  askSudo({
-    scope: "users:write",
+  askConfirm({
     title: blocked ? "Заблокировать пользователя" : "Разблокировать пользователя",
     description: blocked
       ? "Ева перестанет отвечать и не будет писать сама. Выставляются оба признака сразу."
@@ -205,11 +205,131 @@ async function addUserNote(form) {
 async function loadSecrets() {
   if (!["owner", "admin"].includes(state.me.role)) {
     $("#secrets-list").innerHTML = '<article class="secret-card">Для просмотра метаданных секретов нужна роль owner или admin.</article>';
+    $("#telegram-tokens-card").hidden = true;
     return;
   }
   const { payload } = await request("/secrets");
   state.secrets = payload.secrets;
   renderSecrets();
+  await loadTelegramTokens();
+}
+
+/**
+ * Боты Евы.
+ *
+ * Токен Telegram — это личность бота, а не взаимозаменяемый ключ: у
+ * каждого свой @username, свои диалоги и свой вебхук. Поэтому здесь не
+ * ротация, а выбор: сохранённых несколько, активен ровно один.
+ *
+ * Сами токены не показываются никогда — как и остальные секреты, они
+ * write-only. Бот узнаётся по метке и @username, и ни то, ни другое
+ * секретом не является.
+ */
+async function loadTelegramTokens() {
+  const card = $("#telegram-tokens-card");
+  if (!card) return;
+  card.hidden = false;
+  const { payload } = await request("/telegram/tokens").catch(() => ({ payload: null }));
+  if (!payload) {
+    $("#telegram-tokens-list").innerHTML = '<p class="muted">Не удалось получить список ботов.</p>';
+    return;
+  }
+  state.telegramTokens = payload.tokens || [];
+  renderTelegramTokens(payload.limit || 5);
+}
+
+function renderTelegramTokens(limit) {
+  const tokens = state.telegramTokens || [];
+  $("#telegram-tokens-list").innerHTML = tokens.length
+    ? tokens.map((token) => `
+        <article class="failure-row" data-telegram-token="${escapeHtml(token.id)}">
+          <div class="failure-head">
+            <span class="status-dot color-${token.is_active ? "green" : "gray"}"></span>
+            <div class="failure-title">
+              <strong>${escapeHtml(token.label)}</strong>
+              <small>@${escapeHtml(token.bot_username)} · добавлен ${escapeHtml(localDate(token.created_at))}</small>
+            </div>
+            <span class="status-pill state-${token.is_active ? "green" : "gray"}">${token.is_active ? "активен" : "сохранён"}</span>
+          </div>
+          ${token.is_active ? "" : `<div class="provider-route-actions">
+            <button class="button tiny secondary" data-telegram-action="activate" data-telegram-id="${escapeHtml(token.id)}">Сделать активным</button>
+            <button class="button tiny danger-outline" data-telegram-action="remove" data-telegram-id="${escapeHtml(token.id)}">Удалить</button>
+          </div>`}
+        </article>`).join("")
+    : '<p class="muted">Ни одного бота не сохранено. Активный токен при этом может быть задан установщиком — он продолжает работать.</p>';
+  const form = $("#telegram-token-form");
+  // Предел объявлен сервером: форма просто перестаёт предлагать то,
+  // что всё равно будет отвергнуто.
+  if (form) form.hidden = tokens.length >= limit;
+}
+
+/**
+ * Токен бота — секрет, но пароль за него больше не спрашивается: право
+ * даёт роль сессии, а запись о правке уходит в журнал событий.
+ *
+ * Окно осталось там, где у действия есть последствия: удаление бота из
+ * списка и перевод Евы на другого бота. Оно объясняет, что произойдёт, —
+ * это и было единственным, что человек в нём читал.
+ */
+function telegramTokenAction(action, id) {
+  const token = (state.telegramTokens || []).find((item) => item.id === id);
+  if (!token) return;
+  if (action === "remove") {
+    askConfirm({
+      title: `Удалить бота «${token.label}»?`,
+      description: `@${token.bot_username} исчезнет из списка. Сам бот в Telegram останется, но его токен придётся вводить заново.`,
+      action: async () => {
+        await request(`/telegram/tokens/${encodeURIComponent(id)}`, { method: "DELETE" });
+        toast("Бот удалён из списка");
+        await loadTelegramTokens();
+      },
+    });
+    return;
+  }
+  askConfirm({
+    title: `Перевести Еву на @${token.bot_username}?`,
+    description: "Вебхук снимется у прежнего бота и встанет новому. Люди, писавшие прежнему, к новому"
+      + " сами не перейдут: им придётся начать с ним диалог. Смена действует сразу — перезапускать"
+      + " ничего не нужно.",
+    action: async () => {
+      const { payload } = await request(`/telegram/tokens/${encodeURIComponent(id)}/activate`, { method: "POST" });
+      // Переезд состоялся в любом случае: вебхук переставлен, выбор
+      // записан. Разница в том, дошёл ли токен до работающего сервиса —
+      // и если нет, человеку нужно знать, что делать руками, иначе он
+      // увидит бота, который принимает сообщения, но отвечает прежним.
+      toast(payload.applied_live
+        ? `Активен @${token.bot_username}. Смена уже действует.`
+        : `Активен @${token.bot_username}, но применить не удалось: ${payload.apply_error || "сервис операций недоступен"}.`
+          + ` Пропишите токен в .env и выполните: ${payload.restart_required || "docker compose up -d eva-agent-service"}`,
+        !payload.applied_live);
+      await loadTelegramTokens();
+    },
+  });
+}
+
+function saveTelegramToken(form) {
+  const label = form.elements.label.value.trim();
+  const token = form.elements.token.value.trim();
+  if (!label || !token) {
+    toast("Заполните метку и токен", true);
+    return;
+  }
+  // Добавление в список ничего не переключает: Ева продолжает отвечать
+  // прежним ботом, пока его не сделают активным. Отдельного окна такой
+  // записи не нужно.
+  saveTelegramTokenRequest(label, token, form).catch(handleError);
+}
+
+async function saveTelegramTokenRequest(label, token, form) {
+  await request("/telegram/tokens", {
+    method: "POST",
+    body: JSON.stringify({ label, token }),
+  });
+  // Поле очищается только после успеха: иначе отклонённый токен
+  // пришлось бы искать и вводить заново.
+  form.reset();
+  toast("Бот сохранён. Чтобы перевести Еву на него, нажмите «Сделать активным».");
+  await loadTelegramTokens();
 }
 
 /**
@@ -222,7 +342,6 @@ const ADMIN_FACING_SECRETS = new Set([
   "sec_eva_telegram_bot_token",
   "sec_media_asr_api_key",
   "sec_media_tts_api_key",
-  "sec_lava_webhook_password",
   "sec_eva_llm_api_key",
   // Ключ эмбеддингов при установке копируется из ключа LLM, но провайдер
   // у них может быть разный — тогда его меняют отдельно.
@@ -259,33 +378,22 @@ function renderSecrets() {
     : '<article class="secret-card"><div><h3>Нет ключей для показа</h3><p class="muted">Либо секреты ещё не импортированы, либо все они служебные — нажмите «Показать все».</p></div></article>');
 }
 
-/** Пароль архива backup. Значение уходит на сервер и обратно не возвращается. */
+/**
+ * Пароль архива backup. Значение уходит на сервер и обратно не
+ * возвращается.
+ *
+ * Подтверждение последствий даёт вызывающая сторона: у обеих кнопок оно
+ * своё, и второе окно подряд к одному действию человек читать не станет.
+ */
 async function setBackupPassword(password, form) {
-  await new Promise((resolve, reject) => {
-    askSudo({
-      scope: "secrets:write",
-      title: password ? "Задать пароль архива backup" : "Вернуться к мастер-ключу",
-      description: password
-        ? "Новые архивы будут шифроваться этим паролем. Без него восстановление станет невозможным — сохраните его вне сервера."
-        : "Новые архивы снова будут шифроваться мастер-ключом Secret Store.",
-      action: async () => {
-        try {
-          const { payload } = await request("/backups/password", {
-            method: "PUT",
-            body: JSON.stringify({ password }),
-          });
-          form.reset();
-          toast(payload.configured
-            ? "Пароль архива задан. Сохраните его вне сервера — восстановить его нельзя."
-            : "Пароль снят, архивы шифруются мастер-ключом");
-          resolve();
-        } catch (error) {
-          reject(error);
-          throw error;
-        }
-      },
-    });
-  }).catch(handleError);
+  const { payload } = await request("/backups/password", {
+    method: "PUT",
+    body: JSON.stringify({ password }),
+  });
+  form.reset();
+  toast(payload.configured
+    ? "Пароль архива задан. Сохраните его вне сервера — восстановить его нельзя."
+    : "Пароль снят, архивы шифруются мастер-ключом");
 }
 
 async function writeSecret(form) {
@@ -366,7 +474,11 @@ $("#backup-password-form").addEventListener("submit", (event) => {
     toast("Пароли не совпадают", true);
     return;
   }
-  setBackupPassword(password, form);
+  askConfirm({
+    title: "Задать пароль архива backup?",
+    description: "Новые архивы будут шифроваться этим паролем. Без него восстановление станет невозможным — сохраните его вне сервера.",
+    action: async () => await setBackupPassword(password, form),
+  });
 });
 $("#clear-backup-password").addEventListener("click", () => {
   askConfirm({
@@ -379,8 +491,7 @@ $("#clear-backup-password").addEventListener("click", () => {
 $("#secrets-list").addEventListener("submit", (event) => {
   event.preventDefault();
   const form = event.target;
-  askSudo({
-    scope: "secrets:write",
+  askConfirm({
     title: "Сменить системный ключ",
     description: "Новое значение будет зашифровано; прежнее больше не будет доступно.",
     action: async () => await writeSecret(form),
@@ -405,3 +516,13 @@ $("#password-form").addEventListener("submit", async (event) => {
   }
 });
 $("#reload-audit").addEventListener("click", () => loadAudit().catch(handleError));
+
+$("#telegram-tokens-list")?.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-telegram-action]");
+  if (!button) return;
+  telegramTokenAction(button.dataset.telegramAction, button.dataset.telegramId);
+});
+$("#telegram-token-form")?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  saveTelegramToken(event.target);
+});

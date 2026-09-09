@@ -28,7 +28,6 @@ SOURCES = [
     ("webapp/public/app/app.js", ""),
     ("webapp/public/app/journal.js", ""),
     ("webapp/public/assets/bot-link.js", ""),
-    ("letta-ui/public/ui.js", ""),
 ]
 
 # Административная панель разрезана на страницы, и каждая ходит в API
@@ -48,6 +47,12 @@ ROUTE_FILES = [
     # Маршруты дневника регистрируются внутри той же группы /public/v2.
     ("eva-agent-service/src/public/journal/routes.ts", "/public/v2"),
     ("eva-agent-service/src/admin/server.ts", "/api/admin/v1"),
+    # Разделы единой панели регистрируются отдельным модулем: он такая
+    # же часть административного API, и без него каждый его маршрут
+    # выглядел бы для этой проверки несуществующим.
+    ("eva-agent-service/src/admin/panel-routes.ts", "/api/admin/v1"),
+    ("eva-agent-service/src/admin/crud-routes.ts", "/api/admin/v1"),
+    ("eva-agent-service/src/admin/artifact-routes.ts", "/api/admin/v1"),
 ]
 
 ROUTE_RE = re.compile(

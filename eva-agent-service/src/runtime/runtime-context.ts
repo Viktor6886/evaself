@@ -5,6 +5,7 @@ import {
 } from "../i18n/language-resolver.js";
 import { shouldSuppressProfileQuestion } from "../profile/profile-completeness.js";
 import {
+  formatLocalShort,
   humanizeInterval,
   localDateWithWeekday,
   localNow,
@@ -16,6 +17,7 @@ import {
   type MessageBatchTiming,
 } from "../turns/message-timeline.js";
 import { TaskEventService } from "../tasks/task-event-service.js";
+import { OWN_MESSAGE_LINES, OwnMessagesService } from "./own-messages.js";
 
 export interface RuntimeContext {
   userId: number;
@@ -44,6 +46,24 @@ export interface RuntimeContext {
    * сообщения нет: разговор начинается.
    */
   sincePreviousMessage: string | null;
+  /**
+   * Когда было предыдущее сообщение — по местному времени человека.
+   *
+   * Промежутка одного мало. «Три часа» модель читает как оценку и
+   * рассуждает от неё вольно; две отметки на часах — это две точки,
+   * между которыми либо помещается поездка в другой город, либо нет,
+   * и разница видна без арифметики.
+   */
+  previousMessageLocalTime: string | null;
+  /**
+   * Тот же промежуток в секундах.
+   *
+   * «Девять секунд» и «три часа» — проза, и сравнивать её приходится
+   * разбором. Число в одной единице сравнивается прямо: помещается ли в
+   * него названное человеком действие, видно без перевода слов в
+   * величину.
+   */
+  sincePreviousMessageSeconds: number | null;
   timezone: string;
   city: string | null;
   countryCode: string | null;
@@ -51,6 +71,8 @@ export interface RuntimeContext {
   responseMode: "text" | "voice" | "both";
   useEmoji: boolean;
   communicationStyle: string | null;
+  /** Подтверждённое согласование обращения; по имени не выводится. */
+  userGrammaticalGender: "masculine" | "feminine" | null;
   profileHint: string | null;
   activeGoal: string | null;
   nextResult: string | null;
@@ -73,6 +95,13 @@ export interface RuntimeContext {
   taskActivity?: string[];
   /** Ближайшие напоминания: когда сработают и через сколько. */
   upcomingReminders?: string[];
+  /**
+   * Что Ева отправила сама с прошлого сообщения человека.
+   *
+   * Без этого её собственное сообщение проходит мимо неё: сочиняется в
+   * служебной conversation, уходит в Telegram и нигде больше не звучит.
+   */
+  ownMessages?: string[];
   /** Окно быстрых сообщений: сколько их и за какое время. `null` — одно. */
   messageBatch?: string | null;
   /** По строке на сообщение окна: порядок, время и промежуток. */
@@ -102,6 +131,7 @@ interface RuntimeContextRow {
   response_mode: "text" | "voice" | "both";
   use_emoji: boolean;
   communication_style: string | null;
+  grammatical_gender: string | null;
   profile_field_key: string | null;
   profile_title: string | null;
   profile_prompt_hint: string | null;
@@ -181,6 +211,7 @@ export function runtimeContextSizeStats(): RuntimeContextSizeStats {
 export class RuntimeContextBuilder {
   private readonly languageResolver: LanguageResolver;
   private readonly taskEvents: TaskEventService;
+  private readonly ownMessages: OwnMessagesService;
   private readonly cache = new Map<string, { expiresAt: number; row: RuntimeContextRow }>();
 
   constructor(
@@ -197,6 +228,7 @@ export class RuntimeContextBuilder {
   ) {
     this.languageResolver = new LanguageResolver(db);
     this.taskEvents = new TaskEventService(db);
+    this.ownMessages = new OwnMessagesService(db);
   }
 
   async build(input: {
@@ -258,9 +290,21 @@ export class RuntimeContextBuilder {
     // ответа человеку не должен ждать два round-trip подряд.
     // Момент напоминания и остаток до него считает серверный код: модель
     // берёт такой остаток из головы и ошибается на часы.
-    const [taskActivity, upcomingReminders] = await Promise.all([
+    //
+    // Граница собственных сообщений — прошлое сообщение человека. У
+    // живого хода оно уже на руках (`recordUserMessage` вернул
+    // предыдущее значение), и спрашивать базу заново нельзя: там уже
+    // записано время только что пришедшего сообщения, и выборка была бы
+    // пуста всегда. У фонового хода вызывающий его не знает, и тогда —
+    // и только тогда — граница читается из базы.
+    const ownSince = input.previousUserMessageAt !== undefined
+      ? input.previousUserMessageAt
+      : await this.ownMessages.lastUserMessageAt(input.userId).catch(() => null);
+    const [taskActivity, upcomingReminders, ownMessages] = await Promise.all([
       this.taskEvents.contextLines(input.userId, timezone).catch(() => []),
       this.taskEvents.upcomingLines(input.userId, timezone, local.toJSDate()).catch(() => []),
+      this.ownMessages.lines(input.userId, timezone, ownSince, OWN_MESSAGE_LINES)
+        .catch(() => []),
     ]);
     return {
       userId: Number(row.user_id),
@@ -278,6 +322,15 @@ export class RuntimeContextBuilder {
         input.currentMessageAt ?? local.toJSDate(),
         input.previousUserMessageAt ?? null,
       ),
+      previousMessageLocalTime: input.previousUserMessageAt
+        ? formatLocalShort(input.previousUserMessageAt, timezone)
+        : null,
+      sincePreviousMessageSeconds: input.previousUserMessageAt
+        ? Math.max(0, Math.round(
+          ((input.currentMessageAt ?? local.toJSDate()).getTime()
+            - input.previousUserMessageAt.getTime()) / 1000,
+        ))
+        : null,
       timezone,
       city: row.city,
       countryCode: row.country_code,
@@ -285,6 +338,10 @@ export class RuntimeContextBuilder {
       responseMode: row.response_mode,
       useEmoji: row.use_emoji,
       communicationStyle: row.communication_style,
+      userGrammaticalGender:
+        row.grammatical_gender === "masculine" || row.grammatical_gender === "feminine"
+          ? row.grammatical_gender
+          : null,
       profileHint,
       activeGoal: this.options.vectorGoalsEnabled === false ? null : row.active_goal_title ?? null,
       nextResult: this.options.vectorGoalsEnabled === false ? null : row.next_result_title ?? null,
@@ -293,6 +350,7 @@ export class RuntimeContextBuilder {
       llmQualityMode: input.modelPolicy ?? row.llm_quality_mode,
       taskActivity,
       upcomingReminders,
+      ownMessages,
       messageBatch: input.messageBatch ? batchSummary(input.messageBatch) : null,
       messageTimeline: input.messageBatch ? timelineLines(input.messageBatch, timezone) : [],
       metrics: {
@@ -331,11 +389,19 @@ export class RuntimeContextBuilder {
       // Ева знает из персоны: правило постоянное, и платить за него в
       // каждом сообщении незачем.
       ["since_previous_user_message", context.sincePreviousMessage],
+      [
+        "since_previous_user_message_seconds",
+        context.sincePreviousMessageSeconds === null
+          ? null
+          : String(context.sincePreviousMessageSeconds),
+      ],
+      ["previous_user_message_local_time", context.previousMessageLocalTime],
       ["timezone", context.timezone],
       ["city", context.city],
       ["response_language", context.responseLanguage],
       ["response_mode", context.responseMode],
       ["communication_style", context.communicationStyle],
+      ["user_grammatical_gender", context.userGrammaticalGender],
       ["message_source", options.messageSource ?? null],
       [
         "message_source_note",
@@ -370,14 +436,38 @@ export class RuntimeContextBuilder {
     if (timeline.length > 0) {
       lines.push("message_times:", ...timeline.map((item) => `  - ${escapeContextValue(item)}`));
     }
-    const events = (context.taskActivity ?? []).slice(0, 5)
+    // Собственные сообщения стоят ВЫШЕ журнала событий задач намеренно.
+    // Блок обрезается по общему потолку с конца, и первым обязано
+    // уцелеть то, что Ева сказала человеку своими словами: событие
+    // «отправлено напоминание «зубной»» она восстановит из задачи, а
+    // текст сообщения — ниоткуда.
+    const own = (context.ownMessages ?? []).slice(0, 3)
       .map((item) => `  - ${escapeContextValue(item)}`);
+    if (own.length > 0) {
+      lines.push("i_wrote_since_your_last_message:", ...own);
+    }
+
+    // Журнал задач — материал разговора, а не работы. В служебном ходе
+    // он оказывался единственным конкретным, что у модели есть перед
+    // глазами, и она писала человеку сводку по задачам вместо того, что
+    // он просил: «Остались две незавершённые задачи…». Живому разговору
+    // журнал по-прежнему нужен — там он отвечает на «ты же напоминала».
+    const serviceTurn = context.purpose === "task_action" || context.purpose === "initiative";
+    const events = serviceTurn
+      ? []
+      : (context.taskActivity ?? []).slice(0, 5)
+        .map((item) => `  - ${escapeContextValue(item)}`);
     if (events.length > 0) lines.push("recent_task_events:", ...events);
 
     // Ближайшие напоминания стоят рядом с местным временем и приходят с
     // уже посчитанным остатком: «через сколько» — это арифметика, а её
     // модель делает неверно и уверенно.
-    const upcoming = (context.upcomingReminders ?? []).slice(0, 3);
+    // Ближайшие напоминания в ходе выполнения задачи — тот же соблазн
+    // отчитаться. Инициативе они остаются: «не забудь про звонок в
+    // час» — это разговор, а не сводка.
+    const upcoming = context.purpose === "task_action"
+      ? []
+      : (context.upcomingReminders ?? []).slice(0, 3);
     if (upcoming.length > 0) {
       lines.push(
         "upcoming_reminders:",
@@ -451,6 +541,7 @@ export class RuntimeContextBuilder {
           COALESCE(p.response_mode, 'text') AS response_mode,
           COALESCE(p.use_emoji, true) AS use_emoji,
           p.character AS communication_style,
+          grammar.field_value AS grammatical_gender,
           COALESCE(p.llm_quality_mode, 'auto') AS llm_quality_mode,
           profile_hint.field_key AS profile_field_key,
           profile_hint.title AS profile_title,
@@ -477,6 +568,10 @@ export class RuntimeContextBuilder {
          AND a.kind = 'eva'
          AND a.status = 'active'
         LEFT JOIN user_preferences p ON p.user_id = u.id
+        LEFT JOIN onboarding_fields grammar
+          ON grammar.user_id = u.id
+         AND grammar.field_key = 'grammatical_gender'
+         AND grammar.status = 'confirmed'
         LEFT JOIN LATERAL (
           SELECT
             d.field_key,

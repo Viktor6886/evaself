@@ -12,15 +12,33 @@ import { Redis } from "ioredis";
 import { applyManagedRuntimeConfig } from "./admin/managed-runtime-config.js";
 import { AgentToolFactory, isHostExecutionTool, toolApprovalCategory, toolRisk } from "./agent-tools.js";
 import { BackgroundRuntime } from "./background.js";
-import { configWarnings, loadConfig, readPersona, readSystemPrompt } from "./config.js";
+import {
+  configWarnings,
+  loadConfig,
+  readPersona,
+  readSystemPrompt,
+  SYSTEM_PROMPT_FILE,
+} from "./config.js";
 import { CrisisMonitor } from "./crisis.js";
 import { ConversationPurposeService } from "./conversations/purpose-service.js";
 import { Database } from "./db.js";
 import { ParallelInboxDispatcher } from "./delivery/dispatcher.js";
-import { PostgresTelegramInbox, TelegramInboxWorker } from "./delivery/inbox.js";
+import {
+  PostgresTelegramInbox,
+  TelegramInboxWorker,
+  type InboxRecord,
+} from "./delivery/inbox.js";
+import { t } from "./i18n/index.js";
 import { PostgresTelegramOutbox } from "./delivery/outbox.js";
+import { LiveMessageWatch } from "./turns/live-message.js";
+import { LettaProactiveComposer } from "./jobs/proactive/composer.js";
+import { OutboxProactiveDelivery } from "./jobs/proactive/delivery.js";
+import { ProactiveInitiativeRunner } from "./jobs/proactive/initiative-runner.js";
+import { InitiativeSelection } from "./jobs/proactive/selection.js";
+import { ProactiveService } from "./jobs/proactive/service.js";
+import { ProactiveWindowPlanner } from "./jobs/proactive/windows.js";
 import { TelegramDeliveryLimiter } from "./delivery/telegram-limits.js";
-import { badRequest, notFound } from "./errors.js";
+import { badRequest, explainFailure, notFound } from "./errors.js";
 import { EvaWorkflow } from "./eva-workflow.js";
 import { GoalService } from "./goals/goal-service.js";
 import { buildJobLayer } from "./jobs/index.js";
@@ -30,13 +48,18 @@ import { buildObservability } from "./observability/index.js";
 import { LettaService } from "./letta.js";
 import { LlmManager } from "./llm.js";
 import { createLogger } from "./logger.js";
-import { LavaPayments } from "./payments.js";
+import { StarsPayments } from "./payments/stars.js";
+import { SubscriptionExpiryNotifier } from "./subscriptions/expiry-notifier.js";
+import { QuotaExhaustionNotifier } from "./subscriptions/quota-exhaustion-notifier.js";
 import { UserProfileService } from "./profile/profile-service.js";
 import { ValkeyRateLimiter } from "./public/rate-limit.js";
 import { ValkeyMiniAppSessions } from "./public/webapp-session.js";
 import { UserTurnLock } from "./turns/user-turn-lock.js";
 import { PersonaSync } from "./letta/persona-sync.js";
+import { evaMemoryBlocks } from "./letta/memory-blocks.js";
 import { RuntimeContextBuilder } from "./runtime/runtime-context.js";
+import { CanonicalContextStore } from "./runtime/canonical-context.js";
+import { ArtifactRegistry } from "./artifacts/registry.js";
 import { SdkSettingsManager } from "./sdk-settings.js";
 import { ChannelLinkService } from "./channels/channel-links.js";
 import { buildServer, VERSION } from "./server.js";
@@ -67,10 +90,17 @@ async function main(): Promise<void> {
   // иначе трассы окажутся пустыми (требование 2 шага 09).
   const observability = buildObservability(config, VERSION, logger);
 
-  const [persona, systemPrompt] = await Promise.all([
-    readPersona(config),
-    readSystemPrompt(),
-  ]);
+  // Значение по умолчанию — файлы репозитория. Правка из панели живёт
+  // версией в реестре артефактов и подменяет их на чтении; пока правок
+  // нет, поведение установки в точности прежнее.
+  const canonicalDefaults = {
+    persona: await readPersona(config),
+    systemPrompt: await readSystemPrompt(),
+    personaPath: config.personaFile,
+    systemPromptPath: SYSTEM_PROMPT_FILE,
+  };
+  let persona = canonicalDefaults.persona;
+  let systemPrompt = canonicalDefaults.systemPrompt;
   const db = new Database(config.databaseUrl);
   await db.connect();
   logger.info("PostgreSQL подключён");
@@ -113,6 +143,32 @@ async function main(): Promise<void> {
   // означает лишь повторное открытие приложения.
   const miniAppSessions = new ValkeyMiniAppSessions(redis);
   const rateLimiter = new ValkeyRateLimiter(redis);
+  // Реестр артефактов ведёт версии обоих канонических текстов. Узкий
+  // адаптер пула: `pg` типизирует строку как `QueryResultRow`, реестру
+  // достаточно объекта с полями.
+  const canonicalStore = new CanonicalContextStore(
+    new ArtifactRegistry({
+      query: async (sql: string, values: unknown[] = []) =>
+        await db.query(sql, values) as unknown as {
+          rows: Record<string, unknown>[];
+          rowCount: number | null;
+        },
+    }),
+    canonicalDefaults,
+    process.env.EVA_ENV ?? "production",
+  );
+  try {
+    const stored = await canonicalStore.current();
+    persona = stored.persona;
+    systemPrompt = stored.systemPrompt;
+  } catch (error) {
+    // Установка без миграции 067: таблиц реестра нет, тексты берутся из
+    // файлов. Это рабочее состояние, а не отказ — обновление накатывает
+    // миграцию отдельным шагом, и до него сервис обязан подниматься.
+    logger.warn("Реестр канонических текстов недоступен, читаются файлы", {
+      code: error instanceof Error ? error.name : "unknown_error",
+    });
+  }
   const letta = new LettaService(config, logger, persona, systemPrompt);
   {
     // Сверка установленного пакета Letta с проверенной матрицей.
@@ -167,6 +223,16 @@ async function main(): Promise<void> {
         }
       : null,
   });
+  const subscriptionExpiryNotifier = new SubscriptionExpiryNotifier(
+    db,
+    outbox,
+    logger,
+    undefined,
+    config.subscriptionExpiryWarningDays,
+  );
+  const quotaExhaustionNotifier = config.quotaExhaustionNotificationsEnabled
+    ? new QuotaExhaustionNotifier(db, outbox, logger)
+    : undefined;
   if (config.outboxEnabled) telegram.setOutbox(outbox);
   const sdk = new SdkSettingsManager(config, db, letta);
   try {
@@ -241,6 +307,9 @@ async function main(): Promise<void> {
       turn: currentTurn(),
       riskFor: toolRisk,
       categoryFor: toolApprovalCategory,
+      // В conversation запланированной задачи и собственной инициативы
+      // человека нет: подтверждение там не спрашивается, а отказывается.
+      unattended: runtime.purpose === "task_action" || runtime.purpose === "initiative",
     });
     return async (toolName, toolInput, context) => {
       // Оболочка и произвольная запись в файловую систему хоста —
@@ -264,6 +333,9 @@ async function main(): Promise<void> {
   const crisis = new CrisisMonitor(db, telegram, logger, config.ownerTelegramId);
   // Наблюдатель хода создаётся до approval callback, чтобы пауза и resume
   // использовали тот же канонический lifecycle.
+  // Оплата звёздами. Своего хранилища нет: те же payment_intents,
+  // payments и subscriptions, что и у карточной оплаты.
+  const stars = new StarsPayments({ db, lifecycleEnabled: config.subscriptionLifecycleEnabled });
   const workflow = new EvaWorkflow(
     config,
     db,
@@ -282,24 +354,53 @@ async function main(): Promise<void> {
     new ChannelLinkService(db),
     {
        syncAgent: (input, text, options, prompt) => personaSync.syncAgent(input, text, options, prompt),
-      persona: () => persona,
-      systemPrompt: () => systemPrompt,
+      // Живое значение процесса, а не снимок старта: администратор
+      // правит персону из панели, и ход обязан сверяться с тем, что
+      // действует сейчас.
+      persona: () => letta.canonicalContext().persona,
+      systemPrompt: () => letta.canonicalContext().systemPrompt,
     },
+    stars,
+    quotaExhaustionNotifier,
   );
   const inbox = new PostgresTelegramInbox(db);
+  const recoveredStarPayments = await inbox.recoverUnappliedStarPayments().catch((error) => {
+    logger.warn("Не удалось найти неприменённые платежи в звёздах", {
+      code: error instanceof Error ? error.name : "unknown_error",
+    });
+    return 0;
+  });
+  if (recoveredStarPayments > 0) {
+    logger.warn("Неприменённые платежи в звёздах возвращены в очередь", {
+      count: recoveredStarPayments,
+    });
+  }
   // Уведомление о мёртвой записи одно на оба пути обработки: человек
   // должен узнать про потерянное сообщение независимо от того, каким
   // воркером оно обрабатывалось.
   const notifyDeadUpdate = async (
-    record: { updateId: number; chatId: number | null; telegramUserId: number | null },
+    record: InboxRecord,
     error: unknown,
   ): Promise<void> => {
     const message = error instanceof Error ? error.message : String(error);
+    const payment = record.payload.message?.successful_payment;
+    const language = record.payload.message?.from?.language_code === "en" ? "en" : "ru";
+    // Владелец, разговаривающий с Евой в своём же чате, попадал в слепую
+    // зону: подробность уходила только в «другой» чат, а этим другим он и
+    // был. Он видел «попробуйте ещё раз» и не имел ни одного способа
+    // узнать причину, не открывая журнал на сервере.
+    const ownerReadsThisChat = config.ownerTelegramId !== null
+      && config.ownerTelegramId === record.chatId;
     await telegram.withDeliveryContext(`telegram-dead:${record.updateId}`, async () => {
       if (record.chatId) {
         await telegram.sendMessage(
           record.chatId,
-          "Не получилось обработать сообщение после нескольких попыток. Ошибка сохранена; попробуйте отправить сообщение ещё раз.",
+          (payment
+            ? t(language, "paymentStuck")
+            : "Не получилось обработать сообщение после нескольких попыток. Ошибка сохранена; попробуйте отправить сообщение ещё раз.")
+            + (ownerReadsThisChat
+              ? `\n\n${explainFailure(message) ?? ""}\n\nПричина: ${message.slice(0, 1200)}`.trimStart()
+              : ""),
         );
       }
       if (config.ownerTelegramId && config.ownerTelegramId !== record.chatId) {
@@ -361,8 +462,29 @@ async function main(): Promise<void> {
   );
   let recoveryTimer: NodeJS.Timeout | null = null;
 
-  const payments = new LavaPayments(config, db, telegram, logger);
   const purposes = new ConversationPurposeService(db, letta, logger);
+
+  // Ева пишет первой в окна, которые человек выбрал в Mini App.
+  //
+  // Собирается здесь, а не внутри планировщика: доставка идёт только
+  // через durable outbox, и клиента Telegram этот путь не получает
+  // вовсе — отправить напрямую ему структурно нечем.
+  const initiative = config.proactiveInitiativeEnabled
+    ? new ProactiveInitiativeRunner(
+      new ProactiveWindowPlanner(db, logger),
+      new InitiativeSelection(db),
+      new ProactiveService(
+        db,
+        new LettaProactiveComposer(
+          letta, purposes, runtimeContext, queue, logger, new LiveMessageWatch(db),
+        ),
+        new OutboxProactiveDelivery(outbox),
+        logger,
+      ),
+      logger,
+    )
+    : null;
+
   const background = new BackgroundRuntime(
     config,
     db,
@@ -372,6 +494,9 @@ async function main(): Promise<void> {
     runtimeContext,
     purposes,
     logger,
+    undefined,
+    approvals,
+    initiative,
   );
 
   // Слой фоновых заданий. Ступень переноса решает, кто ведёт напоминания
@@ -384,6 +509,10 @@ async function main(): Promise<void> {
       runtimeContext,
       lock: queue,
       outbox,
+      // Инициатива переезжает вместе с остальной проактивностью: после
+      // снятия зеркала интервалы не стартуют, и заход обязан достаться
+      // очереди, а не пропасть (инвариант 9).
+      initiative,
       // Выборка старого интервала для режима зеркала. Сравнивать есть с
       // чем только у тех видов, у которых старый механизм существует:
       // check-in до этого шага не было вовсе.
@@ -444,7 +573,7 @@ async function main(): Promise<void> {
     inbox,
     profile,
     goals,
-    payments,
+    stars,
     queue,
     telegram,
     slots,
@@ -459,11 +588,44 @@ async function main(): Promise<void> {
     // инструменты на самом деле. Имена берутся из той же фабрики,
     // которая их регистрирует, — второго списка не заводим.
     productToolNames: () => toolFactory.forConversation("readiness-probe").map((tool) => tool.name),
+    // Правка персоны и системного промпта из панели. Доставку живым
+    // агентам выполняет тот же PersonaSync, что и при старте: второго
+    // пути синхронизации не появляется.
+    canonicalContext: {
+      store: canonicalStore,
+      sync: async (nextPersona, nextSystemPrompt) =>
+        await personaSync.sync(nextPersona, nextSystemPrompt),
+      // Состав префикса берётся из тех же источников, что уходят
+      // провайдеру: живой канонический контекст и та же фабрика
+      // инструментов, которая их регистрирует. Второго списка нет.
+      prefix: () => {
+        const context = letta.canonicalContext();
+        const framework = evaMemoryBlocks(context.persona)
+          .find((block) => block.label === "therapeutic_framework");
+        return {
+          systemPrompt: context.systemPrompt,
+          persona: context.persona,
+          // Только то, что одинаково у всех: `human` и `current_state`
+          // принадлежат конкретному человеку и здесь не считаются.
+          sharedBlocks: framework
+            ? [{ label: framework.label, value: framework.value }]
+            : [],
+          tools: toolFactory.forConversation("prefix-probe").map((tool) => ({
+            name: tool.name,
+            description: tool.description ?? "",
+            parameters: (tool as { parameters?: unknown }).parameters ?? {},
+          })),
+        };
+      },
+    },
     ...(knowledgeResearch ? { knowledgeResearch } : {}),
   });
 
   await app.listen({ port: config.port, host: config.host });
   if (config.outboxEnabled) outbox.start();
+  if (telegram.configured && config.subscriptionLifecycleEnabled) {
+    subscriptionExpiryNotifier.start();
+  }
   if (config.parallelInboxEnabled) dispatcher.start();
   else inboxWorker.start();
   // Сочетание флагов проверяет `configWarnings`: заход без жизненного
@@ -486,6 +648,19 @@ async function main(): Promise<void> {
       });
     });
   }
+  // Вебхук приводится к действующему списку видов апдейтов.
+  //
+  // Ставится он редко — при установке и при переезде на другого бота, —
+  // а список растёт вместе с продуктом. Без этой сверки бот,
+  // зарегистрированный раньше, молча не получает новые виды: так и не
+  // работала оплата звёздами.
+  void telegram.ensureWebhook(
+    config.domains?.api ? `https://${config.domains.api}/telegram/webhook` : "",
+    config.telegramWebhookSecret,
+  ).then((outcome) => {
+    if (outcome === "updated") logger.info("Webhook приведён к действующему списку апдейтов");
+  }).catch(() => undefined);
+
   logger.info("eva-agent-service принимает запросы", {
     version: VERSION,
     port: config.port,
@@ -507,6 +682,7 @@ async function main(): Promise<void> {
     logger.info("Остановка сервиса", { signal });
     try {
       background.stop();
+      subscriptionExpiryNotifier.stop();
       if (recoveryTimer) clearInterval(recoveryTimer);
       dispatcher.stop();
       inboxWorker.stop();

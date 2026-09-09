@@ -106,6 +106,58 @@ test("rich streaming edits the same persistent message and adds keyboard only at
   assert.ok(calls.slice(1).every((call) => "rich_message" in call.body));
 });
 
+/**
+ * «Печатает» во время растущего ответа.
+ *
+ * Telegram гасит индикатор на клиенте, как только от бота приходит
+ * сообщение, — правка растущего ответа считается таким же приходом.
+ * Поэтому его мало включить один раз: после каждой записи он снимается,
+ * и человек видит курсор в конце текста, а под именем собеседника —
+ * ничего. Прежде индикатор вдобавок снимался нарочно, на первом же
+ * срезе: тогда появление сообщения означало готовый ответ.
+ */
+test("каждая правка растущего ответа переподтверждает «печатает»", async () => {
+  const { telegram, calls } = client();
+  const refreshes: number[] = [];
+  const live = telegram.startLiveMessage(42, {
+    intervalMs: 0,
+    onUpdate: () => refreshes.push(calls.length),
+  });
+  live.push("Первая часть");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  live.push("Первая часть и вторая");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  // Отправка и правка — каждая зовёт хук: обе гасят индикатор.
+  assert.ok(refreshes.length >= 2, `ожидались отправка и правка, было ${refreshes.length}`);
+  await live.finish("Первая часть и вторая");
+  // Финальная правка хук не зовёт: она гасит индикатор на клиенте, и
+  // ставить его заново значило бы обещать продолжение, которого нет.
+  const afterFinish = refreshes.length;
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(refreshes.length, afterFinish);
+});
+
+test("контроллер действия умеет переподтвердить то же самое действие", async () => {
+  const { telegram, calls } = client();
+  const controller = telegram.startChatActionController(42, 60_000);
+  controller.transition("typing");
+  const afterFirst = calls.filter((call) => call.method === "sendChatAction").length;
+  assert.equal(afterFirst, 1);
+
+  // transition при том же действии выходит сразу — иначе он сбивал бы
+  // интервал. Для повтора есть refresh.
+  controller.transition("typing");
+  assert.equal(calls.filter((call) => call.method === "sendChatAction").length, 1);
+
+  controller.refresh();
+  assert.equal(calls.filter((call) => call.method === "sendChatAction").length, 2);
+  controller.stop();
+  controller.refresh();
+  assert.equal(calls.filter((call) => call.method === "sendChatAction").length, 2,
+    "после остановки индикатор не воскресает");
+});
+
 test("unsupported rich endpoint falls back to regular formatter without losing reply", async () => {
   const { telegram, calls } = client();
   telegram.call = async (method, body) => {
