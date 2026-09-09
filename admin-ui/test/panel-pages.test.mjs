@@ -148,6 +148,7 @@ const ROUTES = {
   },
   "/panel/letta/context": { conversations: [] },
   "/panel/letta/audit": { events: [] },
+  "PATCH /panel/letta/settings": LETTA,
   "/panel/monitoring": MONITORING,
 };
 
@@ -637,5 +638,38 @@ describe("раздел обновлений отличает развёрнут�
     });
     assert.match(text, /cccccccccccc/u);
     assert.doesNotMatch(text, /не развёрнут/u);
+  });
+});
+
+describe("настройки Letta", () => {
+  let panel;
+  after(async () => { await panel?.close(); });
+
+  test("пустое окно контекста очищает настройку, а не пропускается", async () => {
+    // Заданное вручную число СИЛЬНЕЕ выведенного кодом: пока оно стоит,
+    // предел по включённым моделям не применяется вовсе. Подсказка под
+    // полем обещает «пусто — по умолчанию», но пустая строка молча
+    // пропускалась, и вернуться к выведенному значению из панели было
+    // нельзя. На боевой установке из-за этого месяцами действовало
+    // число, которое никто не выбирал заново.
+    panel = await openPanel({ routes: ROUTES });
+    const { page } = panel;
+
+    await page.click('.nav-item[data-page="letta"]');
+    await page.waitForSelector('#letta-settings-form input[name=default_context_window]');
+    await page.fill('#letta-settings-form input[name=default_context_window]', "");
+    await page.click('#letta-settings-form button[type=submit]');
+
+    const saved = await panel.waitForRequest(
+      (item) => item.method === "PATCH" && item.path === "/panel/letta/settings",
+    );
+    assert.ok(saved, "сохранение не ушло на сервер");
+    assert.ok(
+      "default_context_window" in saved.body,
+      "пустое поле снова пропущено: очистить настройку из панели нельзя",
+    );
+    assert.equal(saved.body.default_context_window, null);
+    // Соседние поля пустыми не трогали — они и не должны уехать.
+    assert.equal(saved.body.turn_timeout_ms, 240000);
   });
 });
