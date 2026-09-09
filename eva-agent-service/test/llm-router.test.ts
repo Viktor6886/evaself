@@ -1144,7 +1144,16 @@ function surface() {
         },
         request_id: "r1", provider_name: "primary", switches: 0,
       }),
-      stream: async function* () { throw new Error("не используется"); },
+      stream: async function* () {
+        yield { type: "text", delta: "CI chat ok" };
+        yield {
+          type: "done",
+          response: {
+            content: "CI chat ok", tool_calls: [], finish_reason: "stop",
+            usage: { tokens_in: 11, tokens_out: 7 }, model: "eva/chat",
+          },
+        };
+      },
     },
   });
 }
@@ -1261,4 +1270,50 @@ test("адрес провайдера получает версию, тольк�
     providerUrl("https://gateway.example/openai/deployments/eva", "chat/completions"),
     "https://gateway.example/openai/deployments/eva/chat/completions",
   );
+});
+
+test("поток несёт учёт токенов отдельным последним чанком", async () => {
+  // С Agent SDK 0.7.3 ход закрывается НЕ по `finish_reason`, а по
+  // событию учёта: причина остановки только запоминает исход, а
+  // завершает ход `usage_statistics`. Роутер учёт в поток не клал
+  // вовсе — и ход висел до таймаута при том, что модель отвечала.
+  // Именно так падал `Stack smoke test`: «CI chat ok» в логе и следом
+  // `Timed out waiting for app-server turn`.
+  //
+  // Проверяется то, что действительно уходит клиенту, а не намерение:
+  // мок провайдера тут ни при чём, Letta читает наш поток.
+  const app = surface();
+  const response = await app.inject({
+    method: "POST",
+    url: "/chat/completions",
+    headers: { authorization: "Bearer test-key" },
+    payload: { model: "eva/chat", stream: true, messages: [{ role: "user", content: "привет" }] },
+  });
+  assert.equal(response.statusCode, 200);
+
+  const chunks = response.body
+    .split("\n\n")
+    .map((line) => line.replace(/^data: /, "").trim())
+    .filter((line) => line && line !== "[DONE]")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+
+  const withUsage = chunks.filter((chunk) => chunk.usage !== undefined);
+  assert.equal(withUsage.length, 1, "учёт токенов в потоке не пришёл");
+  assert.deepEqual(withUsage[0]!.usage, {
+    prompt_tokens: 11, completion_tokens: 7, total_tokens: 18,
+  });
+  // Пустой `choices`: клиент, читающий только содержимое, этот чанк
+  // пропустит и ничего не потеряет.
+  assert.deepEqual(withUsage[0]!.choices, []);
+
+  // Порядок обязателен: сначала причина остановки, потом учёт. Обратный
+  // порядок SDK не закрывает — он ждёт учёт ПОСЛЕ исхода.
+  const finishIndex = chunks.findIndex((chunk) => {
+    const choices = chunk.choices as Array<{ finish_reason?: string | null }> | undefined;
+    return Boolean(choices?.[0]?.finish_reason);
+  });
+  const usageIndex = chunks.indexOf(withUsage[0]!);
+  assert.ok(finishIndex >= 0, "чанка с причиной остановки нет вовсе");
+  assert.ok(usageIndex > finishIndex, "учёт пришёл раньше причины остановки");
+  await app.close();
 });
