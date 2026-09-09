@@ -96,11 +96,25 @@ function renderLettaSettings(settings) {
     </form>` : '<p class="block-caption">Для правки настроек SDK нужна роль owner или admin.</p>'}`;
 }
 
+/**
+ * Поля, где пусто — это значение, а не «не трогать».
+ *
+ * Окно контекста единственное из трёх допускает `null`, и он означает
+ * «вывести предел из кода по включённым моделям». Пустая строка
+ * молча пропускалась вместе с остальными, поэтому очистить поле из
+ * панели было нельзя — при том что подсказка под ним обещает ровно
+ * это, а заданное вручную число сильнее выведенного и отменяет его.
+ */
+const CLEARABLE_LETTA_FIELDS = new Set(["default_context_window"]);
+
 function saveLettaSettings(form) {
   const patch = {};
   for (const field of ["default_context_window", "turn_timeout_ms", "session_pool_size"]) {
     const raw = form.elements[field].value.trim();
-    if (raw === "") continue;
+    if (raw === "") {
+      if (CLEARABLE_LETTA_FIELDS.has(field)) patch[field] = null;
+      continue;
+    }
     const value = Number.parseInt(raw, 10);
     if (!Number.isFinite(value)) {
       toast(`${field}: нужно целое число`, true);
