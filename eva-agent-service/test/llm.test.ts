@@ -543,3 +543,168 @@ test("проба не выключает инструменты у модели 
 
   assert.deepEqual(written, [{ vision: true }], "выясненное зрение записывается, инструменты — нет");
 });
+
+/**
+ * Удаление конфигурации, которая числится активной.
+ *
+ * Флаг `is_active` переставляет только активация, а зовёт её при
+ * установке `configure-llm.sh`. В панели модель меняют маршрутом или
+ * режимом одной модели, флаг при этом остаётся на первой настроенной
+ * конфигурации — и она навсегда становилась неудаляемой. Теперь роль
+ * переходит той модели, которую человек уже выбрал основной в разговоре,
+ * и удаление проходит.
+ */
+test("активная конфигурация удаляется, роль переходит к голове цепочки разговора", async () => {
+  const master = "d".repeat(64);
+  const box = new SecretBox(master);
+  const openrouter = providerRow("openrouter", true, box.encrypt("or-key"));
+  const local = {
+    ...providerRow("local", false, box.encrypt("local-key")),
+    context_window: 65_536,
+  };
+  const activated: string[] = [];
+  const deleted: string[] = [];
+  const applied: Array<{ context: number }> = [];
+
+  const manager = new LlmManager(
+    config(master),
+    {
+      getLlmProvider: async (id: string) => (id === openrouter.id ? openrouter : local),
+      isLlmSingleProviderSelected: async () => false,
+      listLlmProviders: async () => [openrouter, local],
+      // Человек уже сделал вторую модель основной в разговоре.
+      getLlmRouteChain: async () => [local.id],
+      getActiveLlmProvider: async () => openrouter,
+      recordLlmCheck: async () => undefined,
+      setAgentModels: async () => undefined,
+      activateLlmProvider: async (id: string) => {
+        activated.push(id);
+        return local;
+      },
+      deleteInactiveLlmProvider: async (id: string) => {
+        deleted.push(id);
+        return true;
+      },
+    } as never,
+    {
+      closeAllSessions() {},
+      setDefaultModel() {},
+      waitForModel: async () => undefined,
+      listAllModelMappings: async () => [{ agentId: "agent-1", conversationIds: ["conv-1"] }],
+      applyModelToMappings: async (_mappings: unknown, _model: string, context: number) => {
+        applied.push({ context });
+      },
+    } as never,
+    logger() as never,
+    {
+      configureProvider: async () => { throw new Error("перенастройка коннектора здесь не нужна"); },
+      restartAppServer: async () => { throw new Error("рестарт App Server здесь не нужен"); },
+      probeProvider: async () => ({
+        ok: true, models_supported: true, models: [], message: "ok", status_code: 200,
+      }),
+      probeCapabilities: async () => ({ ok: true, checks: [], message: "", warnings: "" }),
+    },
+  );
+
+  await manager.remove(openrouter.id);
+
+  assert.deepEqual(activated, [local.id], "роль активной переходит к модели разговора");
+  assert.deepEqual(deleted, [openrouter.id], "после передачи роли строка удаляется");
+  assert.deepEqual(applied, [{ context: local.context_window }],
+    "metadata агентов описывает новую активную модель, а не удалённую");
+});
+
+test("неактивная конфигурация удаляется без передачи роли", async () => {
+  const master = "e".repeat(64);
+  const box = new SecretBox(master);
+  const active = providerRow("active", true, box.encrypt("active-key"));
+  const spare = providerRow("spare", false, box.encrypt("spare-key"));
+  const deleted: string[] = [];
+
+  const manager = new LlmManager(
+    config(master),
+    {
+      getLlmProvider: async () => spare,
+      isLlmSingleProviderSelected: async () => false,
+      listLlmProviders: async () => [active, spare],
+      deleteInactiveLlmProvider: async (id: string) => {
+        deleted.push(id);
+        return true;
+      },
+    } as never,
+    { setDefaultModel() {} } as never,
+    logger() as never,
+    {
+      probeProvider: async () => { throw new Error("проба здесь не нужна"); },
+      probeCapabilities: async () => { throw new Error("проба здесь не нужна"); },
+    },
+  );
+
+  await manager.remove(spare.id);
+
+  assert.deepEqual(deleted, [spare.id]);
+});
+
+test("последнюю конфигурацию удалить нельзя: заменить её некем", async () => {
+  const master = "f".repeat(64);
+  const only = providerRow("only", true, new SecretBox(master).encrypt("only-key"));
+  const deleted: string[] = [];
+
+  const manager = new LlmManager(
+    config(master),
+    {
+      getLlmProvider: async () => only,
+      isLlmSingleProviderSelected: async () => false,
+      listLlmProviders: async () => [only],
+      getLlmRouteChain: async () => [only.id],
+      deleteInactiveLlmProvider: async (id: string) => {
+        deleted.push(id);
+        return true;
+      },
+    } as never,
+    { setDefaultModel() {} } as never,
+    logger() as never,
+    {
+      probeProvider: async () => { throw new Error("проба здесь не нужна"); },
+      probeCapabilities: async () => { throw new Error("проба здесь не нужна"); },
+    },
+  );
+
+  await assert.rejects(
+    manager.remove(only.id),
+    /Заменить эту конфигурацию некем/,
+  );
+  assert.deepEqual(deleted, [], "отказ не удаляет строку");
+});
+
+test("модель режима одной модели удалить нельзя", async () => {
+  const master = "g".repeat(64);
+  const box = new SecretBox(master);
+  const selected = providerRow("selected", false, box.encrypt("selected-key"));
+  const deleted: string[] = [];
+
+  const manager = new LlmManager(
+    config(master),
+    {
+      getLlmProvider: async () => selected,
+      isLlmSingleProviderSelected: async () => true,
+      listLlmProviders: async () => [selected, providerRow("other", true, box.encrypt("other-key"))],
+      deleteInactiveLlmProvider: async (id: string) => {
+        deleted.push(id);
+        return true;
+      },
+    } as never,
+    { setDefaultModel() {} } as never,
+    logger() as never,
+    {
+      probeProvider: async () => { throw new Error("проба здесь не нужна"); },
+      probeCapabilities: async () => { throw new Error("проба здесь не нужна"); },
+    },
+  );
+
+  await assert.rejects(
+    manager.remove(selected.id),
+    /режима одной модели/,
+  );
+  assert.deepEqual(deleted, []);
+});

@@ -522,25 +522,96 @@ export class LlmManager {
     }
   }
 
+  /**
+   * Удаление конфигурации.
+   *
+   * Прежде удаление упиралось в флаг `is_active`, и выхода из этого
+   * положения в панели не было. Флаг переставляет только активация
+   * (`POST /v1/llm/providers/:id/activate`), а зовёт её сегодня один
+   * `scripts/configure-llm.sh` при установке: в панели модель меняют
+   * маршрутом («Сделать основным») или режимом одной модели, и до флага
+   * это не доходит. Он так и оставался на той конфигурации, которую
+   * включили при первой настройке, — и она становилась неудаляемой
+   * навсегда. Совет «сначала активируйте другую модель» указывал на
+   * кнопку, которой нет.
+   *
+   * Теперь вопрос задаётся не о флаге, а о работе: кто обслуживает
+   * разговор вместо удаляемой конфигурации. Такая конфигурация уже
+   * выбрана человеком — это голова цепочки `chat`, — и роль активной
+   * переходит к ней перед удалением. Отказ остаётся там, где замены
+   * нет: последнюю конфигурацию удалять нельзя, иначе Ева останется
+   * без модели.
+   */
   async remove(id: string): Promise<void> {
     const provider = await this.get(id);
-    // Отказ называет выход, а не только запрет. Соседняя проверка ниже
-    // так и написана («сначала выберите другой»), а эта оставляла
-    // человека перед кнопкой, которая не работает, без единого слова о
-    // том, что делать. Человек с медленной моделью не мог ни удалить
-    // её, ни понять, почему.
-    if (provider.is_active) {
+    // Отказ называет место, а не только запрет: выбор единой модели
+    // живёт в блоке «Режим моделей Евы», и в адаптивном режиме он
+    // спрятан в «Резервная модель» — искать его по всей странице
+    // человеку не из чего.
+    if (await this.isSingleModeProvider(id)) {
       throw badRequest(
-        "Активную LLM-конфигурацию удалить нельзя: сначала активируйте другую модель",
+        "Эта модель выбрана для режима одной модели: выберите другую в блоке "
+        + "«Режим моделей Евы» и сохраните, тогда конфигурация удалится",
       );
     }
-    const database = this.db as typeof this.db & { isLlmSingleProviderSelected?: (providerId: string) => Promise<boolean> };
-    if (typeof database.isLlmSingleProviderSelected === "function" && await database.isLlmSingleProviderSelected(id)) {
-      throw badRequest("Провайдер выбран для режима одной модели; сначала выберите другой");
-    }
+    if (provider.is_active) await this.handOverActiveRole(provider);
     if (!await this.db.deleteInactiveLlmProvider(id)) {
       throw notFound(`LLM-конфигурация ${id} не найдена`);
     }
+  }
+
+  /**
+   * Передаёт роль активной конфигурации той, что обслуживает разговор.
+   *
+   * Это полноценная активация, а не переписывание флага: metadata агентов
+   * (окно контекста и model settings) принадлежит активной конфигурации,
+   * и оставить в ней параметры удалённой модели значит соврать Letta.
+   * Провал активации отменяет и удаление — `activateRow` возвращает
+   * прежнюю конфигурацию на место, и человек видит, на чём всё встало.
+   */
+  private async handOverActiveRole(provider: LlmProviderRow): Promise<void> {
+    const successor = await this.activeSuccessor(provider.id);
+    if (!successor) {
+      throw badRequest(
+        "Заменить эту конфигурацию некем: других включённых LLM-конфигураций нет, "
+        + "и удаление оставит Еву без модели. Сначала добавьте или включите другую.",
+      );
+    }
+    try {
+      await this.activateRow(successor);
+    } catch (error) {
+      throw badRequest(
+        `Не удалось передать роль активной модели «${successor.name}»: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  /**
+   * Кто станет активным вместо удаляемой конфигурации.
+   *
+   * Первым спрашивается маршрут разговора: его голова — и есть модель,
+   * которую человек уже выбрал основной. Если цепочка пуста или состоит
+   * из удаляемой конфигурации, берётся любая оставшаяся включённая:
+   * выбор без замены — это отказ, а он здесь неуместен, пока в системе
+   * есть хоть одна другая модель.
+   */
+  private async activeSuccessor(excludeId: string): Promise<LlmProviderRow | null> {
+    const providers = await this.db.listLlmProviders();
+    const usable = new Map(
+      providers
+        .filter((row) => row.id !== excludeId
+          && (row as LlmProviderRow & { enabled?: boolean }).enabled !== false)
+        .map((row) => [row.id, row] as const),
+    );
+    if (usable.size === 0) return null;
+    const chain = await this.db.getLlmRouteChain("chat").catch(() => [] as string[]);
+    for (const providerId of chain) {
+      const row = usable.get(providerId);
+      if (row) return row;
+    }
+    return usable.values().next().value ?? null;
   }
 
   async test(id: string): Promise<ProviderProbe> {
