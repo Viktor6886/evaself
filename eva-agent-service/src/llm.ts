@@ -524,7 +524,16 @@ export class LlmManager {
 
   async remove(id: string): Promise<void> {
     const provider = await this.get(id);
-    if (provider.is_active) throw badRequest("Активную LLM-конфигурацию удалить нельзя");
+    // Отказ называет выход, а не только запрет. Соседняя проверка ниже
+    // так и написана («сначала выберите другой»), а эта оставляла
+    // человека перед кнопкой, которая не работает, без единого слова о
+    // том, что делать. Человек с медленной моделью не мог ни удалить
+    // её, ни понять, почему.
+    if (provider.is_active) {
+      throw badRequest(
+        "Активную LLM-конфигурацию удалить нельзя: сначала активируйте другую модель",
+      );
+    }
     const database = this.db as typeof this.db & { isLlmSingleProviderSelected?: (providerId: string) => Promise<boolean> };
     if (typeof database.isLlmSingleProviderSelected === "function" && await database.isLlmSingleProviderSelected(id)) {
       throw badRequest("Провайдер выбран для режима одной модели; сначала выберите другой");
