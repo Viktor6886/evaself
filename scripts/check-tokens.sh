@@ -44,10 +44,17 @@ DAYS="${1:-7}"
 [[ "$DAYS" =~ ^[0-9]+$ ]] || die "период задаётся числом суток: ./scripts/check-tokens.sh 30"
 
 # psql внутри контейнера базы: снаружи её порт наружу не смотрит.
+#
+# Период подставляется здесь, а не переменной psql. `-v days=7` вместе с
+# `:days` внутри `-c` не работает: psql разбирает свои переменные во
+# входном потоке, а строку из `-c` отдаёт серверу как есть, и тот честно
+# отвечает `syntax error at or near ":"`. Все шесть запросов падали на
+# боевой установке ровно так. Значение уже проверено на целое число
+# выше, так что подстановка безопасна.
 q() {
 	compose_no_stdin exec -T -e PGPASSWORD="$EVA_DB_PASSWORD" postgres \
 		psql -X -q -U "$EVA_DB_USER" -d "$EVA_DB_NAME" \
-		-v "days=$DAYS" -c "$1" 2>&1
+		-c "${1//__DAYS__/$DAYS}" 2>&1
 }
 
 echo "Период: последние $DAYS суток."
@@ -66,7 +73,7 @@ SELECT p.name AS provider,
   FROM llm_requests r
   JOIN llm_providers p ON p.id = r.actual_provider_id
  WHERE r.succeeded
-   AND r.started_at > now() - make_interval(days => :days)
+   AND r.started_at > now() - make_interval(days => __DAYS__)
  GROUP BY p.name
  ORDER BY count(*) DESC
  LIMIT 10;"
@@ -86,7 +93,7 @@ SELECT p.name AS provider,
   FROM llm_requests r
   JOIN llm_providers p ON p.id = r.actual_provider_id
  WHERE r.succeeded
-   AND r.started_at > now() - make_interval(days => :days)
+   AND r.started_at > now() - make_interval(days => __DAYS__)
  GROUP BY p.name, p.protocol, p.price_cached_in_micro
  ORDER BY sum(r.tokens_in) DESC
  LIMIT 10;"
@@ -103,7 +110,7 @@ SELECT r.route_code,
        round(avg(r.tokens_out))                   AS avg_out
   FROM llm_requests r
  WHERE r.succeeded
-   AND r.started_at > now() - make_interval(days => :days)
+   AND r.started_at > now() - make_interval(days => __DAYS__)
  GROUP BY r.route_code, r.purpose
  ORDER BY sum(r.tokens_in) DESC
  LIMIT 12;"
@@ -112,17 +119,21 @@ step "Шагов в ходе: во сколько раз ход дороже о�
 # Шаги одного хода идут подряд и укладываются в минуту. Точного
 # идентификатора хода в журнале нет, поэтому берётся окно: это оценка
 # снизу — растянувшийся ход попадёт в два окна и занизит число.
+#
+# По человеку не группируем: `llm_requests.user_id` заполняется из
+# метаданных запроса, а Letta App Server внутренний идентификатор не
+# передаёт — у ходов агента он пуст всегда. Прежнее условие
+# `user_id IS NOT NULL` отбрасывало ровно ту работу, ради которой
+# таблица и заведена, и показывало ноль ходов при тысяче обращений.
 q "
 WITH bursts AS (
-  SELECT r.user_id,
-         date_trunc('minute', r.started_at) AS slot,
+  SELECT date_trunc('minute', r.started_at) AS slot,
          count(*)      AS steps,
          sum(r.tokens_in) AS tokens_in
     FROM llm_requests r
    WHERE r.succeeded
-     AND r.user_id IS NOT NULL
-     AND r.started_at > now() - make_interval(days => :days)
-   GROUP BY r.user_id, date_trunc('minute', r.started_at)
+     AND r.started_at > now() - make_interval(days => __DAYS__)
+   GROUP BY date_trunc('minute', r.started_at)
 )
 SELECT count(*)                                        AS turns,
        round(avg(steps), 2)                            AS avg_steps,
@@ -143,7 +154,7 @@ SELECT date_trunc('day', r.started_at)::date       AS day,
        sum(r.tokens_in)                            AS tokens_in
   FROM llm_requests r
  WHERE r.succeeded
-   AND r.started_at > now() - make_interval(days => :days)
+   AND r.started_at > now() - make_interval(days => __DAYS__)
  GROUP BY 1
  ORDER BY 1 DESC
  LIMIT 14;"
