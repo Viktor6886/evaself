@@ -1833,6 +1833,40 @@ export class LettaService {
     return mappings;
   }
 
+  /**
+   * Окно, которое объявляется Letta при смене модели.
+   *
+   * Активация приходит сюда с физическим окном провайдера
+   * (`llm_providers.context_window`) — это предел модели, а не бюджет
+   * хода. Бюджет считается отдельно (`contextLimit`), лежит в
+   * `sdk_settings.default_context_window` и им же пользуются создание
+   * агента, создание conversation и `ensureContextWindow`. Активация
+   * была единственным местом, которое его не знало: она поднимала окно
+   * КАЖДОГО агента и КАЖДОЙ conversation до предела модели, и Letta
+   * после этого имела право растить контекст до него.
+   *
+   * Дальше это уже не настройка, а счёт: контекст уходит провайдеру
+   * заново в каждом шаге каждого хода. Разговор, доросший до 130 000
+   * токенов, столько же и отправляет — на любой модели и у любого
+   * провайдера. Ровно так «Ева долго думает» перестаёт зависеть от
+   * выбора модели.
+   *
+   * Вернуть бюджет сама установка не могла: `ensureContextWindow`
+   * объявляет предел один раз на процесс и после активации молчит до
+   * перезапуска.
+   *
+   * Берётся меньшее из двух: бюджет не может быть больше того, что
+   * модель физически принимает, иначе вернулась бы смерть разговора,
+   * ради которой предел и появился.
+   */
+  private announcedContextWindow(providerWindow: number): number {
+    const budget = this.runtime.default_context_window;
+    if (budget === null || !Number.isFinite(providerWindow) || providerWindow <= 0) {
+      return providerWindow;
+    }
+    return Math.min(providerWindow, budget);
+  }
+
   async applyModelToMappings(
     mappings: Array<{ agentId: string; conversationIds: string[] }>,
     model: string,
@@ -1840,17 +1874,24 @@ export class LettaService {
     modelSettings?: Record<string, unknown>,
   ): Promise<void> {
     this.closeAllSessions();
+    const limit = this.announcedContextWindow(contextWindow);
+    if (limit !== contextWindow) {
+      this.logger.info("Окно контекста ограничено бюджетом хода", {
+        provider_context_window: contextWindow,
+        announced: limit,
+      });
+    }
     for (const mapping of mappings) {
       try {
         await this.client.agents.update(mapping.agentId, {
           model,
-          contextWindowLimit: contextWindow,
+          contextWindowLimit: limit,
           ...(modelSettings ? { modelSettings } : {}),
         } as never);
         for (const conversationId of mapping.conversationIds) {
           await this.client.conversations.update(conversationId, {
             model,
-            contextWindowLimit: contextWindow,
+            contextWindowLimit: limit,
             ...(modelSettings ? { modelSettings } : {}),
           } as never);
         }

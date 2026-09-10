@@ -948,3 +948,71 @@ test("смена канонического текста не обрывает �
   // Повторное применение того же текста ничего не трогает.
   assert.equal(service.setCanonicalContext({ persona: "персона после правки" }), false);
 });
+
+/**
+ * Активация модели не имеет права поднять окно контекста выше бюджета.
+ *
+ * Окно уходит в Letta как `context_window_limit`, и до него разговор
+ * дорастает — а потом отправляется провайдеру заново в каждом шаге
+ * каждого хода. Активация приходила сюда с физическим окном модели и
+ * этим отменяла бюджет для всех агентов и всех conversations сразу.
+ */
+test("активация объявляет бюджет хода, а не физическое окно модели", async () => {
+  const service = new LettaService(
+    {
+      appServerUrl: "ws://example.invalid/ws",
+      appServerToken: "",
+      appServerRequestTimeoutMs: 1000,
+      model: "",
+      sessionPoolSize: 5,
+      sessionIdleMs: 1000,
+      turnTimeoutMs: 1000,
+    } as never,
+    { debug() {}, info() {}, warn() {}, error() {} },
+    "persona",
+    SYSTEM_PROMPT,
+  );
+  const announced: number[] = [];
+  (service as unknown as { client: unknown }).client = {
+    agents: {
+      update: async (_id: string, patch: { contextWindowLimit: number }) => {
+        announced.push(patch.contextWindowLimit);
+      },
+    },
+    conversations: {
+      update: async (_id: string, patch: { contextWindowLimit: number }) => {
+        announced.push(patch.contextWindowLimit);
+      },
+    },
+  };
+  const runtimeOf = (value: LettaService) =>
+    (value as unknown as { runtime: Record<string, unknown> }).runtime;
+
+  runtimeOf(service).default_context_window = 87_000;
+  await service.applyModelToMappings(
+    [{ agentId: "agent-1", conversationIds: ["conv-1"] }],
+    "lmstudio/eva/chat",
+    131_072,
+  );
+  assert.deepEqual(announced, [87_000, 87_000], "объявлен бюджет, а не окно провайдера");
+
+  // Модель слабее бюджета: физический предел меньше, и он же и уходит —
+  // иначе Letta растила бы контекст сверх того, что модель принимает.
+  announced.length = 0;
+  await service.applyModelToMappings(
+    [{ agentId: "agent-1", conversationIds: ["conv-1"] }],
+    "lmstudio/eva/chat",
+    32_768,
+  );
+  assert.deepEqual(announced, [32_768, 32_768], "меньшее из двух");
+
+  // Бюджета нет — считать не из чего, поведение прежнее.
+  announced.length = 0;
+  runtimeOf(service).default_context_window = null;
+  await service.applyModelToMappings(
+    [{ agentId: "agent-1", conversationIds: ["conv-1"] }],
+    "lmstudio/eva/chat",
+    131_072,
+  );
+  assert.deepEqual(announced, [131_072, 131_072], "без бюджета объявляется окно модели");
+});
