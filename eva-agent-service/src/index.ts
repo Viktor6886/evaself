@@ -243,7 +243,13 @@ async function main(): Promise<void> {
       message: error instanceof Error ? error.message : String(error),
     });
   }
-  const llm = new LlmManager(config, db, letta, logger);
+  // Активация меняет состав провайдеров, а из него выводится бюджет
+  // контекста. Вывод остаётся за `SdkSettingsManager`; активация только
+  // просит повторить его — иначе на чистой установке первая же модель
+  // объявила бы Letta своё полное физическое окно.
+  const llm = new LlmManager(config, db, letta, logger, {
+    refreshRuntimeSettings: () => sdk.refresh(),
+  });
   // Указатель на роутер ставится безусловно. Попутная проверка legacy
   // vision metadata best-effort и не мешает старту при недоступной БД/LLM.
   await llm.initializeDefaultModel();

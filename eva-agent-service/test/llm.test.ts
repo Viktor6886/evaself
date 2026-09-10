@@ -708,3 +708,100 @@ test("модель режима одной модели удалить нель�
   );
   assert.deepEqual(deleted, []);
 });
+
+/**
+ * Первая активация на чистой установке.
+ *
+ * Бюджет контекста выводится из включённых провайдеров, а вывод идёт при
+ * старте сервиса — когда провайдеров ещё нет вовсе. Пустое значение так и
+ * оставалось до перезапуска: агенты создавались без предела, а активация
+ * объявляла Letta полное физическое окно модели. Теперь состав
+ * провайдеров изменила активация — она же и просит вывести бюджет заново,
+ * до того как окно будет объявлено.
+ */
+test("активация выводит бюджет контекста заново до объявления окна", async () => {
+  const master = "b".repeat(64);
+  const box = new SecretBox(master);
+  const candidate = providerRow("first", false, box.encrypt("first-key"));
+  const order: string[] = [];
+
+  const manager = new LlmManager(
+    config(master),
+    {
+      getLlmProvider: async () => candidate,
+      getActiveLlmProvider: async () => null,
+      getLlmRouteChain: async () => [],
+      replaceLlmRouteChain: async () => undefined,
+      recordLlmCheck: async () => candidate,
+      setAgentModels: async () => undefined,
+      activateLlmProvider: async () => candidate,
+    } as never,
+    {
+      closeAllSessions() {},
+      setDefaultModel() {},
+      waitForModel: async () => undefined,
+      listAllModelMappings: async () => {
+        order.push("mappings");
+        return [{ agentId: "agent-1", conversationIds: ["conv-1"] }];
+      },
+      applyModelToMappings: async () => { order.push("announce"); },
+    } as never,
+    logger() as never,
+    {
+      configureProvider: async () => undefined,
+      restartAppServer: async () => undefined,
+      refreshRuntimeSettings: async () => { order.push("refresh"); },
+      probeProvider: async () => ({
+        ok: true, models_supported: true, models: [], message: "ok", status_code: 200,
+      }),
+      probeCapabilities: async () => ({ ok: true, checks: [], message: "", warnings: "" }),
+    },
+  );
+
+  await manager.activate(candidate.id);
+
+  assert.deepEqual(order, ["refresh", "mappings", "announce"],
+    "бюджет выводится до того, как окно объявлено агентам");
+});
+
+test("отказ вывода бюджета не отменяет активацию", async () => {
+  const master = "c".repeat(64);
+  const box = new SecretBox(master);
+  const candidate = providerRow("first", false, box.encrypt("first-key"));
+  let announced = 0;
+
+  const manager = new LlmManager(
+    config(master),
+    {
+      getLlmProvider: async () => candidate,
+      getActiveLlmProvider: async () => null,
+      getLlmRouteChain: async () => [],
+      replaceLlmRouteChain: async () => undefined,
+      recordLlmCheck: async () => candidate,
+      setAgentModels: async () => undefined,
+      activateLlmProvider: async () => candidate,
+    } as never,
+    {
+      closeAllSessions() {},
+      setDefaultModel() {},
+      waitForModel: async () => undefined,
+      listAllModelMappings: async () => [{ agentId: "agent-1", conversationIds: ["conv-1"] }],
+      applyModelToMappings: async () => { announced += 1; },
+    } as never,
+    logger() as never,
+    {
+      configureProvider: async () => undefined,
+      restartAppServer: async () => undefined,
+      refreshRuntimeSettings: async () => { throw new Error("база недоступна"); },
+      probeProvider: async () => ({
+        ok: true, models_supported: true, models: [], message: "ok", status_code: 200,
+      }),
+      probeCapabilities: async () => ({ ok: true, checks: [], message: "", warnings: "" }),
+    },
+  );
+
+  const result = await manager.activate(candidate.id);
+
+  assert.equal(result.id, candidate.id);
+  assert.equal(announced, 1, "активация доведена до конца");
+});

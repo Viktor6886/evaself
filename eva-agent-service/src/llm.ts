@@ -300,6 +300,7 @@ interface LlmManagerOverrides {
   probeProvider?: (provider: LlmProviderRow, apiKey: string) => Promise<ProviderProbe>;
   probeCapabilities?: (provider: LlmProviderRow, apiKey: string) => Promise<CapabilityProbeResult>;
   probeVision?: (provider: LlmProviderRow, apiKey: string) => Promise<CapabilityProbeResult["checks"][number]>;
+  refreshRuntimeSettings?: () => Promise<void>;
 }
 
 export class LlmManager {
@@ -312,6 +313,18 @@ export class LlmManager {
     apiKey: string,
   ) => Promise<CapabilityProbeResult>;
   private readonly probeVision: NonNullable<LlmManagerOverrides["probeVision"]>;
+  /**
+   * Перечитать настройки SDK перед объявлением окна контекста.
+   *
+   * Бюджет контекста выводится из включённых провайдеров, а вывод
+   * делается один раз — при старте сервиса. На чистой установке
+   * провайдеров в этот момент ещё нет: `default_context_window`
+   * остаётся пустым, и первая же активация объявила бы Letta полное
+   * физическое окно модели, а новые агенты создавались бы вовсе без
+   * предела — до перезапуска сервиса. Состав провайдеров меняет как раз
+   * активация, поэтому она же и просит вывести бюджет заново.
+   */
+  private readonly refreshRuntimeSettings: () => Promise<void>;
 
   constructor(
     private readonly config: Config,
@@ -339,6 +352,10 @@ export class LlmManager {
       ?? ((provider, apiKey) => probeModelCapabilities(capabilityInput(provider, apiKey, this.config)));
     this.probeVision = overrides.probeVision
       ?? ((provider, apiKey) => probeVisionCapability(capabilityInput(provider, apiKey, this.config)));
+    // Умолчание — ничего не делать: вывод бюджета принадлежит
+    // `SdkSettingsManager`, и повторять его здесь значило бы завести
+    // второе место, которое считает одно и то же по-своему.
+    this.refreshRuntimeSettings = overrides.refreshRuntimeSettings ?? (async () => undefined);
   }
 
   /**
@@ -699,6 +716,20 @@ export class LlmManager {
       ? await this.step("снимок chat-chain", candidate, async () =>
           await this.db.getLlmRouteChain("chat"))
       : null;
+    // Состав провайдеров только что изменился — бюджет контекста
+    // выводится заново. Без этого первая активация на чистой установке
+    // объявляла бы физическое окно модели: на старте выводить было не
+    // из чего, и пустое значение так и оставалось до перезапуска.
+    //
+    // Отказ вывода не отменяет активацию: без бюджета Letta работает
+    // так же, как работала до сих пор, а не отвечать человеку из-за
+    // ненастроенного предела хуже.
+    await this.refreshRuntimeSettings().catch((error: unknown) => {
+      this.logger.warn("Бюджет контекста не выведен заново при активации", {
+        providerId: candidate.id,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    });
     // Провайдер остаётся скрыт за стабильным eva/chat, но metadata модели
     // (context/model settings и обнаруженная vision capability) принадлежит
     // текущей конфигурации. Поэтому mappings обновляются при каждой смене,

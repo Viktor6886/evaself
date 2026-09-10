@@ -498,6 +498,11 @@ export class EvaWorkflow {
     const metrics = {
       /** Сколько ход ждал слот пользователя. */
       queue_wait_ms: 0,
+      /**
+       * Сверка канонической персоны и системного промпта перед ходом.
+       * Ноль — сверять было нечего: версия агента совпала.
+       */
+      persona_sync_ms: 0,
       /** Сборка продуктового контекста хода. */
       context_build_ms: 0,
       profile_check_ms: 0,
@@ -611,6 +616,14 @@ export class EvaWorkflow {
           const storedVersion = typeof link.meta?.persona_version === "string"
             ? link.meta.persona_version
             : null;
+          // Сверка идёт внутри хода и до сборки контекста, а в разложении
+          // задержки её не было ни одним слагаемым: `check-latency`
+          // показывал маленькие стадии при большом ВЕСЬ ХОД, и разницу
+          // нечем было объяснить. Между тем неудачная сверка повторяется
+          // КАЖДЫЙ ход — версия записывается только после успеха, — и
+          // каждый раз выводит сессию агента из пула, так что следующий
+          // шаг платит ещё и за открытие сессии заново.
+          const syncStarted = performance.now();
           syncOutcome = await this.personaSync.syncAgent(
             {
               agentId: link.agent_id,
@@ -622,6 +635,7 @@ export class EvaWorkflow {
             { timeoutMs: this.config.personaSyncTurnTimeoutMs },
             this.personaSync.systemPrompt(),
           ).catch(() => "failed" as const);
+          metrics.persona_sync_ms = elapsed(syncStarted);
         }
 
         if (user.is_blocked || user.state === "blocked") {
