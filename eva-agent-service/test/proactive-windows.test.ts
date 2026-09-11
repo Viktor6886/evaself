@@ -532,6 +532,56 @@ test("одинаковый идентификатор у двух окон от�
   assert.equal(store.windows.length, 1);
 });
 
+/**
+ * Служебное слово не уходит человеку.
+ *
+ * Отказ писать проверялся на точное равенство `HEARTBEAT_SKIP`, а модель
+ * отвечает текстом и текст оформляет. «HEARTBEAT_SKIP.» равенству не
+ * удовлетворяет — и на боевой установке человек получил в чат ровно это
+ * служебное слово вместо сообщения.
+ */
+test("оформленный отказ модели не превращается в сообщение человеку", async () => {
+  const { LettaProactiveComposer } = await import("../dist/jobs/proactive/composer.js");
+  const purposes = {
+    ensure: async (input: { purpose: string }) => ({
+      conversationId: `conversation-${input.purpose}`,
+      purpose: input.purpose,
+      created: false,
+    }),
+    close: async () => undefined,
+  };
+  const build = (reply: string) => new LettaProactiveComposer(
+    { runTurn: async () => ({ reply }) } as never,
+    purposes as never,
+    { build: async () => ({}), wrapUserMessage: (_c: unknown, m: string) => m } as never,
+    { run: async (_id: number, work: () => Promise<unknown>) => await work() } as never,
+    logger as never,
+  );
+  const compose = async (reply: string) => await build(reply).compose({
+    kind: "heartbeat", candidate: scheduledCandidate(), episode: null,
+    signal: new AbortController().signal,
+  } as never);
+
+  for (const refusal of [
+    "HEARTBEAT_SKIP",
+    "HEARTBEAT_SKIP.",
+    "**HEARTBEAT_SKIP**",
+    "\"HEARTBEAT_SKIP\"",
+    "HEARTBEAT_SKIP — повода писать нет",
+    "   ",
+  ]) {
+    assert.deepEqual(await compose(refusal), { text: null },
+      `служебное слово ушло бы человеку: ${refusal}`);
+  }
+
+  // Настоящее сообщение при этом проходит: запрет касается маркера, а
+  // не любого ответа.
+  assert.deepEqual(
+    await compose("Вспомнила про твой разговор с дядей Колей."),
+    { text: "Вспомнила про твой разговор с дядей Колей." },
+  );
+});
+
 test("ветка инициативы закрывается после каждого выхода на связь", async () => {
   // Она была вечной и копила прошлые выходы вместе с ответами на них:
   // на новом ходе модель писала человеку сводку по накопленному вместо
