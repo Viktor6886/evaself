@@ -10,7 +10,7 @@
  */
 
 import assert from "node:assert/strict";
-import { after, describe, test } from "node:test";
+import { after, afterEach, describe, test } from "node:test";
 
 import { DEVICES, openPanel, PHONE } from "./harness.mjs";
 
@@ -671,5 +671,123 @@ describe("настройки Letta", () => {
     assert.equal(saved.body.default_context_window, null);
     // Соседние поля пустыми не трогали — они и не должны уехать.
     assert.equal(saved.body.turn_timeout_ms, 240000);
+  });
+});
+
+/**
+ * Рефлексия правится из панели.
+ *
+ * `dreaming.trigger = compaction-event` заводит отдельное обращение к
+ * модели на каждом сжатии контекста, а на тесном окне сжатие случается
+ * чуть ли не каждый ход — человек видит это как «Ева долго думает».
+ * Сервер настройку принимал всегда, а панель показывала её строкой JSON
+ * и выключить не давала: единственным способом был psql.
+ */
+describe("рефлексия в настройках Letta", () => {
+  let panel;
+  afterEach(async () => {
+    await panel?.close();
+    panel = null;
+  });
+
+  /** Маршруты, где сохранение действительно меняет то, что вернёт чтение. */
+  const persistingRoutes = () => {
+    let settings = { ...LETTA.settings };
+    return {
+      ...ROUTES,
+      "/panel/letta": () => ({ ...LETTA, settings }),
+      "PATCH /panel/letta/settings": () => ({ ...LETTA, settings }),
+      apply: (patch) => { settings = { ...settings, ...patch }; },
+    };
+  };
+
+  test("рефлексию можно выключить, и панель показывает сохранённое", async () => {
+    const routes = persistingRoutes();
+    // Ответ на сохранение отражает то, что пришло: иначе тест доказал бы
+    // только отправку запроса, а не то, что значение где-то осталось.
+    routes["PATCH /panel/letta/settings"] = () => {
+      routes.apply({ dreaming: { trigger: "off" } });
+      return { ...LETTA, settings: { ...LETTA.settings, dreaming: { trigger: "off" } } };
+    };
+    panel = await openPanel({ routes });
+    const { page } = panel;
+
+    await page.click('.nav-item[data-page="letta"]');
+    await page.waitForSelector('#letta-settings-form select[name=dreaming_trigger]');
+    assert.equal(
+      await page.inputValue('#letta-settings-form select[name=dreaming_trigger]'),
+      "compaction-event",
+      "список открылся не на том значении, которое пришло с сервера",
+    );
+
+    await page.selectOption('#letta-settings-form select[name=dreaming_trigger]', "off");
+    await page.click('#letta-settings-form button[type=submit]');
+
+    const saved = await panel.waitForRequest(
+      (item) => item.method === "PATCH" && item.path === "/panel/letta/settings",
+    );
+    assert.ok(saved, "сохранение не ушло на сервер");
+    assert.deepEqual(saved.body.dreaming, { trigger: "off" });
+
+    // Панель перечитывает раздел после сохранения — и показывает уже
+    // сохранённое значение, а не то, что осталось на экране.
+    await page.waitForFunction(
+      () => document.querySelector("#letta-settings .kv").textContent.includes("выключена"),
+    );
+    assert.equal(
+      await page.inputValue('#letta-settings-form select[name=dreaming_trigger]'),
+      "off",
+    );
+  });
+
+  test("рефлексия по числу шагов уходит вместе с числом", async () => {
+    panel = await openPanel({ routes: ROUTES });
+    const { page } = panel;
+
+    await page.click('.nav-item[data-page="letta"]');
+    await page.waitForSelector('#letta-settings-form select[name=dreaming_trigger]');
+    await page.selectOption('#letta-settings-form select[name=dreaming_trigger]', "step-count");
+    await page.fill('#letta-settings-form input[name=dreaming_step_count]', "40");
+    await page.click('#letta-settings-form button[type=submit]');
+
+    const saved = await panel.waitForRequest(
+      (item) => item.method === "PATCH" && item.path === "/panel/letta/settings",
+    );
+    assert.ok(saved, "сохранение не ушло на сервер");
+    assert.deepEqual(saved.body.dreaming, { trigger: "step-count", stepCount: 40 });
+  });
+
+  test("по числу шагов без числа не сохраняется", async () => {
+    panel = await openPanel({ routes: ROUTES });
+    const { page } = panel;
+
+    await page.click('.nav-item[data-page="letta"]');
+    await page.waitForSelector('#letta-settings-form select[name=dreaming_trigger]');
+    await page.selectOption('#letta-settings-form select[name=dreaming_trigger]', "step-count");
+    await page.fill('#letta-settings-form input[name=dreaming_step_count]', "");
+    await page.click('#letta-settings-form button[type=submit]');
+
+    const saved = await panel.waitForRequest(
+      (item) => item.method === "PATCH" && item.path === "/panel/letta/settings",
+      700,
+    );
+    assert.equal(saved, null, "настройка без числа шагов ушла на сервер");
+  });
+
+  test("нетронутая рефлексия не переписывается при сохранении соседнего поля", async () => {
+    panel = await openPanel({ routes: ROUTES });
+    const { page } = panel;
+
+    await page.click('.nav-item[data-page="letta"]');
+    await page.waitForSelector('#letta-settings-form input[name=turn_timeout_ms]');
+    await page.fill('#letta-settings-form input[name=turn_timeout_ms]', "120000");
+    await page.click('#letta-settings-form button[type=submit]');
+
+    const saved = await panel.waitForRequest(
+      (item) => item.method === "PATCH" && item.path === "/panel/letta/settings",
+    );
+    assert.ok(saved, "сохранение не ушло на сервер");
+    assert.equal(saved.body.turn_timeout_ms, 120000);
+    assert.equal("dreaming" in saved.body, false, "рефлексия уехала, хотя её не трогали");
   });
 });

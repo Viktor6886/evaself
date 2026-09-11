@@ -156,6 +156,73 @@ test("возврат к none не требует каталога моделей
   assert.equal(result.reasoning_effort, "none");
 });
 
+/**
+ * Рефлексию выключают из панели одним полем.
+ *
+ * Панель шлёт частичный patch — только `dreaming`. Он обязан сохраниться
+ * и доехать до Letta: настройка, которая принята и не применена, ничем
+ * не отличается от непринятой. Соседние поля при этом не трогаются:
+ * человек менял одно.
+ */
+test("частичная правка рефлексии сохраняется и доезжает до runtime", async () => {
+  const row = { ...settingsRow(), dreaming: { trigger: "compaction-event" } };
+  const saved: Array<Record<string, unknown>> = [];
+  const applied: Array<Record<string, unknown>> = [];
+  const manager = new SdkSettingsManager(
+    { appServerUrl: "ws://letta-app-server:4500/ws", appServerToken: "" } as never,
+    {
+      getSdkSettings: async () => row,
+      saveSdkSettings: async (input: Record<string, unknown>) => {
+        saved.push(input);
+        return { ...row, ...input };
+      },
+      query: async () => ({ rows: [] }),
+    } as never,
+    {
+      currentPersona: "persona",
+      applySdkSettings(settings: Record<string, unknown>) { applied.push(settings); },
+    } as never,
+  );
+
+  const result = await manager.update({ dreaming: { trigger: "off" } });
+
+  assert.deepEqual(result.dreaming, { trigger: "off" });
+  assert.deepEqual(saved.at(-1)?.dreaming, { trigger: "off" });
+  assert.deepEqual(applied.at(-1)?.dreaming, { trigger: "off" },
+    "настройка сохранена, но до Letta не доехала");
+  // Соседние значения остались прежними: правилось одно поле.
+  assert.equal(result.turn_timeout_ms, row.turn_timeout_ms);
+  assert.equal(result.session_pool_size, row.session_pool_size);
+  assert.equal(result.permission_mode, row.permission_mode);
+});
+
+/**
+ * Окно контекста правится тем же путём. Поле в панели есть давно, но
+ * проверки round-trip у него не было: очистка проверялась в браузерном
+ * тесте, а сохранение числа — нигде.
+ */
+test("окно контекста сохраняется и доезжает до runtime", async () => {
+  const row = { ...settingsRow(), default_context_window: 64_000 };
+  const applied: Array<Record<string, unknown>> = [];
+  const manager = new SdkSettingsManager(
+    { appServerUrl: "ws://letta-app-server:4500/ws", appServerToken: "" } as never,
+    {
+      getSdkSettings: async () => row,
+      saveSdkSettings: async (input: Record<string, unknown>) => ({ ...row, ...input }),
+      query: async () => ({ rows: [] }),
+    } as never,
+    {
+      currentPersona: "persona",
+      applySdkSettings(settings: Record<string, unknown>) { applied.push(settings); },
+    } as never,
+  );
+
+  const result = await manager.update({ default_context_window: 120_000 });
+
+  assert.equal(result.default_context_window, 120_000);
+  assert.equal(applied.at(-1)?.default_context_window, 120_000);
+});
+
 function settingsRow() {
   const now = new Date("2026-07-28T00:00:00Z");
   return {

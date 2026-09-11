@@ -61,6 +61,35 @@ async function loadLetta() {
 }
 
 /**
+ * Когда Ева отвлекается на рефлексию.
+ *
+ * Порядок здесь — от самого дешёвого хода к самому дорогому, и это не
+ * оформление: `compaction-event` заводит отдельное обращение к модели на
+ * каждом сжатии контекста, а сжатие на тесном окне случается чуть ли не
+ * каждый ход. Человек видит это как «Ева долго думает».
+ */
+const DREAMING_LABELS = {
+  off: "выключена",
+  "step-count": "по числу шагов",
+  "compaction-event": "на каждом сжатии контекста",
+};
+const DREAMING_TRIGGERS = Object.keys(DREAMING_LABELS);
+
+function dreamingTrigger(dreaming) {
+  const trigger = String(dreaming?.trigger ?? "off");
+  return DREAMING_TRIGGERS.includes(trigger) ? trigger : "off";
+}
+
+/** Текущее значение словами, а не JSON: его читает человек, а не разработчик. */
+function dreamingLabel(dreaming) {
+  const trigger = dreamingTrigger(dreaming);
+  const steps = Number(dreaming?.stepCount);
+  return trigger === "step-count" && Number.isFinite(steps)
+    ? `${DREAMING_LABELS[trigger]}: каждые ${steps}`
+    : DREAMING_LABELS[trigger];
+}
+
+/**
  * Настройки SDK показываются как список «поле — значение», а не формой с
  * тремя десятками полей: правится здесь только то, что администратор
  * действительно меняет, остальное читается.
@@ -75,7 +104,7 @@ function renderLettaSettings(settings) {
   const rows = [
     ["Режим разрешений", settings.permissionMode ?? settings.permission_mode ?? "—"],
     ["MemFS", (settings.memfs_enabled ?? settings.memfsEnabled) ? "включён" : "выключен"],
-    ["Рефлексия", JSON.stringify(settings.dreaming ?? null)],
+    ["Рефлексия", dreamingLabel(settings.dreaming)],
     ["Уровень reasoning", settings.reasoning_effort ?? "—"],
     ["Окно контекста", settings.default_context_window ?? "по умолчанию модели"],
     ["Размер пула сессий", settings.session_pool_size ?? "—"],
@@ -92,6 +121,18 @@ function renderLettaSettings(settings) {
         <label>Таймаут хода, мс<input name="turn_timeout_ms" inputmode="numeric" value="${escapeHtml(settings.turn_timeout_ms ?? "")}"></label>
         <label>Пул сессий<input name="session_pool_size" inputmode="numeric" value="${escapeHtml(settings.session_pool_size ?? "")}"></label>
       </div>
+      <div class="field-row">
+        <label>Рефлексия<select name="dreaming_trigger">
+          ${DREAMING_TRIGGERS.map((trigger) => `<option value="${escapeHtml(trigger)}"${
+            trigger === dreamingTrigger(settings.dreaming) ? " selected" : ""
+          }>${escapeHtml(DREAMING_LABELS[trigger])}</option>`).join("")}
+        </select></label>
+        <label>Шагов до рефлексии<input name="dreaming_step_count" inputmode="numeric" value="${escapeHtml(settings.dreaming?.stepCount ?? "")}" placeholder="только для «по числу шагов»"></label>
+      </div>
+      <p class="block-caption">Рефлексия — отдельное обращение к модели сверх ответа. На каждом
+        сжатии контекста она делает ход заметно длиннее; выключение её не стирает.
+        Окно контекста задаёт, сколько разговора уходит модели в каждом шаге: чем оно меньше,
+        тем чаще Letta сжимает историю, а сжатие — это тоже обращение к модели внутри хода.</p>
       <div class="form-actions"><button class="button secondary" type="submit">Сохранить настройки SDK</button></div>
     </form>` : '<p class="block-caption">Для правки настроек SDK нужна роль owner или admin.</p>'}`;
 }
@@ -122,6 +163,12 @@ function saveLettaSettings(form) {
     }
     patch[field] = value;
   }
+  // Рефлексия отправляется только изменённой. У списка всегда есть
+  // значение, и слать его при каждом сохранении значило бы переписывать
+  // настройку молча, а проверку «нечего менять» превратить в неправду.
+  const dreaming = dreamingPatch(form);
+  if (dreaming === undefined) return;
+  if (dreaming !== null) patch.dreaming = dreaming;
   if (Object.keys(patch).length === 0) {
     toast("Нечего менять", true);
     return;
@@ -129,6 +176,32 @@ function saveLettaSettings(form) {
   // Обычная настройка: сохраняется прямо по кнопке. Новые значения
   // применяются к сессиям, которые откроются после сохранения.
   saveLettaSettingsRequest(patch).catch(handleError);
+}
+
+/**
+ * Что отправить в `dreaming`: объект — менять, `null` — нечего менять,
+ * `undefined` — форма заполнена неверно и сохранять нельзя.
+ *
+ * Прежнее значение переносится целиком: `behavior` панель не показывает,
+ * и молча стереть его сменой триггера она не вправе.
+ */
+function dreamingPatch(form) {
+  const select = form.elements.dreaming_trigger;
+  if (!select) return null;
+  const current = state.letta?.settings?.dreaming ?? {};
+  const next = { ...current, trigger: select.value };
+  if (select.value === "step-count") {
+    const raw = form.elements.dreaming_step_count.value.trim();
+    const steps = Number.parseInt(raw, 10);
+    if (!Number.isFinite(steps) || steps < 1) {
+      toast("Для рефлексии по числу шагов укажите, через сколько шагов", true);
+      return undefined;
+    }
+    next.stepCount = steps;
+  } else {
+    delete next.stepCount;
+  }
+  return JSON.stringify(next) === JSON.stringify(current) ? null : next;
 }
 
 async function saveLettaSettingsRequest(patch) {
