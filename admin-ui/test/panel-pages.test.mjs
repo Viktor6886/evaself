@@ -774,6 +774,46 @@ describe("рефлексия в настройках Letta", () => {
     assert.equal(saved, null, "настройка без числа шагов ушла на сервер");
   });
 
+  /**
+   * Поле текстовое: `inputmode` меняет клавиатуру телефона, а не то, что
+   * можно вставить. `Number.parseInt` разбирает начало строки и молчит об
+   * остатке — «1e3» стало бы единицей, то есть рефлексией на каждом шаге
+   * вместо каждой тысячи. Сохранение не того, что набрал человек, хуже
+   * отказа сохранять.
+   */
+  test("число шагов не обрезается: «1e3» отвергается, а не превращается в 1", async () => {
+    panel = await openPanel({ routes: ROUTES });
+    const { page } = panel;
+
+    await page.click('.nav-item[data-page="letta"]');
+    await page.waitForSelector('#letta-settings-form select[name=dreaming_trigger]');
+    await page.selectOption('#letta-settings-form select[name=dreaming_trigger]', "step-count");
+    await page.fill('#letta-settings-form input[name=dreaming_step_count]', "1e3");
+    await page.click('#letta-settings-form button[type=submit]');
+
+    const saved = await panel.waitForRequest(
+      (item) => item.method === "PATCH" && item.path === "/panel/letta/settings",
+      700,
+    );
+    assert.equal(saved, null, "«1e3» уехало на сервер — значит было молча обрезано");
+  });
+
+  test("дробное окно контекста тоже отвергается, а не округляется", async () => {
+    panel = await openPanel({ routes: ROUTES });
+    const { page } = panel;
+
+    await page.click('.nav-item[data-page="letta"]');
+    await page.waitForSelector('#letta-settings-form input[name=default_context_window]');
+    await page.fill('#letta-settings-form input[name=default_context_window]', "2.5");
+    await page.click('#letta-settings-form button[type=submit]');
+
+    const saved = await panel.waitForRequest(
+      (item) => item.method === "PATCH" && item.path === "/panel/letta/settings",
+      700,
+    );
+    assert.equal(saved, null, "«2.5» уехало на сервер — значит было молча обрезано");
+  });
+
   test("нетронутая рефлексия не переписывается при сохранении соседнего поля", async () => {
     panel = await openPanel({ routes: ROUTES });
     const { page } = panel;

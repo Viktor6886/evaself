@@ -148,6 +148,21 @@ function renderLettaSettings(settings) {
  */
 const CLEARABLE_LETTA_FIELDS = new Set(["default_context_window"]);
 
+/**
+ * Целое из поля формы или `null`, если набрано не целое.
+ *
+ * `Number.parseInt` разбирает начало строки и молча выбрасывает хвост:
+ * «1e3» превращается в 1, «2.5» — в 2, «40abc» — в 40. Поле здесь
+ * текстовое (`inputmode` меняет только клавиатуру телефона, а не то,
+ * что можно вставить), так что дойти сюда может любая строка. Для
+ * интервала рефлексии разница не косметическая: «1e3» означало бы
+ * рефлексию на КАЖДОМ шаге вместо каждой тысячи — то есть ровно то, от
+ * чего эта настройка и нужна.
+ */
+function wholeNumber(raw) {
+  return /^\d+$/.test(raw) ? Number.parseInt(raw, 10) : null;
+}
+
 function saveLettaSettings(form) {
   const patch = {};
   for (const field of ["default_context_window", "turn_timeout_ms", "session_pool_size"]) {
@@ -156,8 +171,8 @@ function saveLettaSettings(form) {
       if (CLEARABLE_LETTA_FIELDS.has(field)) patch[field] = null;
       continue;
     }
-    const value = Number.parseInt(raw, 10);
-    if (!Number.isFinite(value)) {
+    const value = wholeNumber(raw);
+    if (value === null) {
       toast(`${field}: нужно целое число`, true);
       return;
     }
@@ -191,10 +206,9 @@ function dreamingPatch(form) {
   const current = state.letta?.settings?.dreaming ?? {};
   const next = { ...current, trigger: select.value };
   if (select.value === "step-count") {
-    const raw = form.elements.dreaming_step_count.value.trim();
-    const steps = Number.parseInt(raw, 10);
-    if (!Number.isFinite(steps) || steps < 1) {
-      toast("Для рефлексии по числу шагов укажите, через сколько шагов", true);
+    const steps = wholeNumber(form.elements.dreaming_step_count.value.trim());
+    if (steps === null || steps < 1) {
+      toast("Для рефлексии по числу шагов укажите целое число шагов", true);
       return undefined;
     }
     next.stepCount = steps;
