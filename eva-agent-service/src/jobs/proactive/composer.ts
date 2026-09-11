@@ -27,9 +27,7 @@ import type { EpisodeLink, ProactiveCandidate, ProactiveComposer } from "./servi
 import type { ProactiveKind } from "./policy.js";
 import type { ReminderCandidate } from "./selection.js";
 import { scheduledInstruction, taskKindOf } from "../../tasks/task-run.js";
-
-/** Слово, которым модель отказывается от сообщения. Историческое, знакомо промптам. */
-const SKIP_MARKER = "HEARTBEAT_SKIP";
+import { isSkipReply, SKIP_MARKER } from "./skip-marker.js";
 
 const MAX_MESSAGE = 1200;
 
@@ -111,8 +109,13 @@ export class LettaProactiveComposer implements ProactiveComposer {
     }
 
     const reply = turn.reply.trim().slice(0, MAX_MESSAGE);
-    if (!reply || reply === SKIP_MARKER) {
-      this.logger.debug("Проактивное сообщение не понадобилось", { kind });
+    if (isSkipReply(reply)) {
+      this.logger.debug("Проактивное сообщение не понадобилось", {
+        kind,
+        // Оформленный маркер — не то же самое, что чистый отказ: модель
+        // писала что-то ещё, и это видно только по длине.
+        decorated: reply !== "" && reply !== SKIP_MARKER,
+      });
       return { text: null };
     }
     return { text: reply };

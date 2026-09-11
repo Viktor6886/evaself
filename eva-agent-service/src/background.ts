@@ -10,6 +10,7 @@ import type { UserTurnLock } from "./turns/user-turn-lock.js";
 import type { TelegramClient } from "./telegram.js";
 import type { ProactiveInitiativeRunner } from "./jobs/proactive/initiative-runner.js";
 import { proactiveSlot } from "./jobs/proactive/policy.js";
+import { isSkipReply, SKIP_MARKER } from "./jobs/proactive/skip-marker.js";
 import { TaskEventService } from "./tasks/task-event-service.js";
 import {
   ScheduledTaskRunner,
@@ -433,7 +434,7 @@ export class BackgroundRuntime {
           "[HEARTBEAT CONTROL]",
           "Пользователь давно не писал. Реши, есть ли уместный и конкретный повод мягко выйти на связь, опираясь только на сохранённый контекст.",
           "Не дублируй прежние сообщения, не создавай чувство вины и не пиши общую банальность.",
-          "Если полезного повода нет, ответь ровно HEARTBEAT_SKIP.",
+          `Если полезного повода нет, ответь ровно ${SKIP_MARKER}.`,
           "Иначе дай только готовое сообщение пользователю, до 1200 символов.",
         ].join("\n");
       const context = await this.runtimeContext.build({
@@ -451,8 +452,18 @@ export class BackgroundRuntime {
         { userId: Number(candidate.user_id), conversationId: scheduler.conversationId },
       );
       const reply = turn.reply.trim().slice(0, 1200);
-      if (!reply || reply === "HEARTBEAT_SKIP") {
+      // Достаточно упоминания маркера, а не равенства ему: оформленный
+      // отказ («HEARTBEAT_SKIP.», «**HEARTBEAT_SKIP**») равенству не
+      // удовлетворял и уходил человеку в чат служебным словом.
+      if (isSkipReply(reply)) {
         await this.saveHeartbeat(candidate, null, "skipped");
+        if (reply !== "" && reply !== SKIP_MARKER) {
+          this.logger.info("Отказ от выхода на связь пришёл оформленным", {
+            userId: candidate.user_id,
+            // Только длина: текста хода в журнале нет и быть не должно.
+            replyChars: reply.length,
+          });
+        }
         return;
       }
       const hash = createHash("sha256").update(reply, "utf8").digest("hex");
