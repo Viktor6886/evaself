@@ -8,7 +8,7 @@
 |---|---|---|
 | Letta session | Единственный conversational и cognitive runtime | `eva-agent-service/src/letta.ts` |
 | Runtime facts/readiness | Фактические возможности и готовность Letta | `src/letta/readiness.ts`, `src/letta/capabilities.ts` |
-| Memory blocks | Четыре нативных блока агента. `limit` каждого блока не меньше текста, которым блок создают: значение длиннее потолка Letta укорачивает, и правила из хвоста персоны до агента не доезжают | `src/letta/memory-blocks.ts` |
+| Memory blocks | Четыре нативных блока агента. `limit` каждого блока не меньше текста, которым блок создают: это character limit блока, и при значении длиннее потолка хвост персоны до агента не доезжает | `src/letta/memory-blocks.ts` |
 | Canonical context | SDK/WebSocket system update и MemFS reconciliation, fail-open | `src/letta.ts`, `src/letta/persona-sync.ts` |
 | Canonical context store | Действующие персона и системный промпт: файл репозитория либо опубликованная версия реестра артефактов | `src/runtime/canonical-context.ts`, `src/runtime/canonical-routes.ts` |
 | Persona sync | Односторонняя синхронизация канонической персоны | `src/letta/persona-sync.ts`, `library/persona/eva.md` |
