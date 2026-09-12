@@ -196,6 +196,18 @@ export function createRouterServer(input: RouterServerInput): FastifyInstance {
           });
         }
         reply.raw.write(`data: ${JSON.stringify(toOpenAiChunk(chunk, parsed))}\n\n`);
+        // Учёт токенов — отдельным последним чанком, после причины
+        // остановки. Так его шлёт настоящий OpenAI-совместимый
+        // провайдер при `stream_options.include_usage`, и так его ждёт
+        // Agent SDK: с версии 0.7.3 ход закрывается НЕ по
+        // `finish_reason`, а по событию учёта — «keep result last so
+        // consumers that stop at result cannot miss the accounting
+        // event». Роутер учёт в поток не клал вовсе, поэтому ход
+        // висел до таймаута: модель отвечала, а App Server ждал
+        // события, которого не будет.
+        if (chunk.type === "done") {
+          reply.raw.write(`data: ${JSON.stringify(usageChunk(chunk, parsed))}\n\n`);
+        }
       }
       if (!headersSent) {
         reply.raw.writeHead(200, { "content-type": "text/event-stream; charset=utf-8" });
@@ -485,5 +497,34 @@ function toOpenAiChunk(
       delta: {},
       finish_reason: chunk.response?.finish_reason ?? "stop",
     }],
+  };
+}
+
+/**
+ * Финальный чанк с учётом токенов: пустой `choices` и `usage`.
+ *
+ * Отдельным чанком, а не полем в чанке с `finish_reason`: именно так
+ * различает их Agent SDK. Причина остановки только запоминает исход
+ * (`pendingTerminal`), а закрывает ход событие учёта.
+ *
+ * Пустой `choices` — не небрежность, а часть контракта: клиент, который
+ * читает только содержимое, этот чанк пропустит и ничего не потеряет.
+ */
+function usageChunk(
+  chunk: Extract<LlmStreamChunk, { type: "done" }>,
+  request: LlmRequest,
+): Record<string, unknown> {
+  const usage = chunk.response.usage;
+  return {
+    id: `chatcmpl-${request.metadata.request_id}`,
+    object: "chat.completion.chunk",
+    created: Math.floor(Date.now() / 1000),
+    model: chunk.response.model ?? `${MODEL_PREFIX}${request.metadata.route}`,
+    choices: [],
+    usage: {
+      prompt_tokens: usage.tokens_in,
+      completion_tokens: usage.tokens_out,
+      total_tokens: usage.tokens_in + usage.tokens_out,
+    },
   };
 }
