@@ -9,75 +9,64 @@
   <link rel="stylesheet" href="/app/app.css?v=20260906-discovery-v18">
   <link rel="stylesheet" href="/app/theme.css?v=20260906-discovery-v18">
   <link rel="stylesheet" href="/app/discovery.css?v=20260906-discovery-v18">
-  <link rel="stylesheet" href="/app/ui-v12.css?v=20260913-ui-v12">
+  <link rel="stylesheet" href="/app/ui-v12.css?v=20260913-ui-v13-fix1">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
   <div class="app-shell" id="app-shell">
-    <div class="ambient ambient-one" aria-hidden="true"></div>
-    <div class="ambient ambient-two" aria-hidden="true"></div>
-
     <main class="screens" id="screens">
       <section class="screen screen-today is-active" data-screen="today">
-        <header class="utility-bar">
-          <div class="utility-avatar" id="eva-status-avatar" aria-hidden="true">
-            <span data-icon="spark"></span>
-          </div>
-          <div class="utility-copy">
-            <strong id="today-summary">1 шаг и 1 инсайт</strong>
-          </div>
-          <button class="streak-pill" id="streak-button" type="button" aria-label="Серия дней">
-            <span data-icon="flame"></span>
-            <strong id="streak-days">0</strong>
+        <header class="ios-home-head">
+          <h1>Сегодня</h1>
+          <button class="ios-profile-shortcut" type="button" data-ui-target="profile" aria-label="Открыть профиль">
+            <span data-icon="user"></span>
           </button>
         </header>
 
+        <header class="utility-bar ui-runtime-only" aria-hidden="true">
+          <div class="utility-avatar" id="eva-status-avatar"><span data-icon="spark"></span></div>
+          <div class="utility-copy"><strong id="today-summary">1 шаг и 1 инсайт</strong></div>
+          <button class="streak-pill" id="streak-button" type="button" aria-label="Серия дней">
+            <span data-icon="flame"></span><strong id="streak-days">0</strong>
+          </button>
+        </header>
+
+        <h2 class="ios-section-title ios-first-title">Фокус на сегодня</h2>
         <section class="hero-card" id="main-focus-card">
           <div class="hero-meta">
-            <span class="hero-badge">Твой фокус на сегодня</span>
+            <span class="hero-badge">Один небольшой шаг</span>
             <span class="hero-duration" id="hero-duration">6 мин</span>
           </div>
-
           <div class="hero-copy">
-            <h2 id="main-focus-title">Продолжить путь</h2>
-            <p id="main-focus-source">Остался один короткий шаг</p>
+            <h2 id="main-focus-title">Собираю актуальный фокус…</h2>
+            <p id="main-focus-source">Один короткий шаг перед следующим результатом</p>
           </div>
-
           <button class="hero-cta" id="main-focus-action" type="button">
-            <span>Продолжить</span>
-            <span aria-hidden="true">›</span>
+            <span>Начать</span><span aria-hidden="true">›</span>
           </button>
-
-          <div class="week-progress">
-            <div class="week-progress-copy">
-              <span id="week-progress-label">Неделя: 0 из 5 шагов</span>
-            </div>
-            <div class="progress-track" aria-hidden="true">
-              <span id="week-progress-bar" style="width:0%"></span>
-            </div>
+          <div class="week-progress ui-runtime-only" aria-hidden="true">
+            <div class="week-progress-copy"><span id="week-progress-label">Неделя: 0 из 5 шагов</span></div>
+            <div class="progress-track"><span id="week-progress-bar" style="width:0%"></span></div>
           </div>
         </section>
 
-        <article class="reward-card" id="reward-card">
-          <div class="reward-icon" id="reward-icon"><span data-icon="award"></span></div>
+        <h2 class="ios-section-title">О тебе сегодня</h2>
+        <article class="reward-card" id="reward-card" tabindex="0">
+          <div class="reward-icon" id="reward-icon"><span data-icon="user"></span></div>
           <div class="reward-copy">
             <span class="reward-type" id="reward-type">Сильная сторона</span>
-            <h3 id="reward-title">Ты умеешь быстро убирать лишнее</h3>
-            <p id="reward-text">Это помогает быстрее переходить к действию.</p>
+            <h3 id="reward-title">Ева собирает личный вывод…</h3>
+            <p id="reward-text">Здесь появится короткий позитивный тезис о тебе.</p>
           </div>
-          <button class="reward-action" id="reward-action" type="button">Посмотреть</button>
+          <button class="reward-action" id="reward-action" type="button" aria-label="Открыть вывод">›</button>
         </article>
 
+        <h2 class="ios-section-title">Твой путь</h2>
         <button class="profile-investment" id="profile-investment" type="button">
           <div class="profile-investment-top">
-            <div>
-              <span>Профиль самопонимания</span>
-              <strong id="profile-progress-label">0%</strong>
-            </div>
+            <div><span>Профиль самопонимания</span><strong id="profile-progress-label">0%</strong></div>
           </div>
-          <div class="progress-track profile-track" aria-hidden="true">
-            <span id="profile-progress-bar" style="width:0%"></span>
-          </div>
+          <div class="progress-track profile-track" aria-hidden="true"><span id="profile-progress-bar" style="width:0%"></span></div>
           <div class="profile-dimensions" id="profile-dimensions">
             <span>Эмоции <b id="profile-emotions">0%</b></span>
             <span>Отношения <b id="profile-relationships">0%</b></span>
@@ -85,111 +74,74 @@
           </div>
           <p class="profile-value-note" id="profile-value-note">Больше контекста — точнее инсайты</p>
           <div class="profile-next-row">
-            <span id="profile-next">Дальше: отношения</span>
-            <strong>Продолжить <b aria-hidden="true">›</b></strong>
+            <span id="profile-next">Дальше: отношения</span><strong>Продолжить <b aria-hidden="true">›</b></strong>
           </div>
+        </button>
+
+        <h2 class="ios-section-title ios-resume-title">Можно продолжить</h2>
+        <button class="ios-resume-card" type="button" data-ui-target="discovery">
+          <span class="ios-resume-icon" aria-hidden="true"><span data-icon="brain"></span></span>
+          <span class="ios-resume-copy"><strong>Перейти к тестам</strong><small>Продолжи самопознание, когда будет удобно.</small></span>
+          <span class="ios-chevron" aria-hidden="true">›</span>
         </button>
       </section>
 
       <section class="screen inner-screen" data-screen="discovery" hidden>
-        <header class="screen-header">
-          <div>
-            <span class="screen-kicker">Ближе к себе</span>
-            <h1>Самопознание</h1>
-            <p>Пойми свои реакции, найди опору и то, что хочется развивать.</p>
-          </div>
+        <header class="screen-header ios-clean-header">
+          <div><h1>Узнай себя</h1><p>Короткие тесты помогают Еве точнее понимать твои реакции и цели.</p></div>
         </header>
         <div class="scroll-content" id="discovery-content"></div>
       </section>
 
       <section class="screen inner-screen" data-screen="journal" hidden>
-        <header class="screen-header">
-          <div>
-            <span class="screen-kicker">Наблюдения и эмоции</span>
-            <h1>Дневник</h1>
-            <p>Сохраняй важное. Ева увидит запись только по твоей команде.</p>
-          </div>
-          <button class="glass-control header-add" id="journal-add-top" type="button" aria-label="Новая запись">+</button>
-        </header>
-        <div class="scroll-content" id="journal-content"></div>
+        <header class="screen-header ios-clean-header"><div><h1>Дневник</h1></div></header>
+        <button class="ui-runtime-only" id="journal-add-top" type="button" aria-label="Новая запись">+</button>
+        <div class="ios-journal-tabs" role="tablist" aria-label="Разделы дневника">
+          <button type="button" data-ios-journal-tab="notes" role="tab">Записи</button>
+          <button type="button" data-ios-journal-tab="plan" class="is-active" role="tab">План</button>
+        </div>
+        <div class="scroll-content" id="journal-content" hidden></div>
+        <div class="ios-journal-plan" id="ios-journal-plan">
+          <div class="scroll-content" id="development-content"></div>
+        </div>
+        <button class="ios-journal-fab" id="ios-journal-fab" type="button" aria-label="Добавить">+</button>
       </section>
 
-      <section class="screen inner-screen" data-screen="development" hidden>
-        <header class="screen-header">
-          <div>
-            <span class="screen-kicker">От намерения к действию</span>
-            <h1>Рост</h1>
-            <p>Твои цели, небольшие шаги и заметные изменения.</p>
-          </div>
-        </header>
-
+      <section class="screen inner-screen ui-development-screen" data-screen="development" hidden>
+        <header class="screen-header"><div><h1>Рост</h1></div></header>
         <nav class="glass-segmented" id="development-tabs" aria-label="Разделы роста">
           <button class="is-active" data-development="goals" type="button">Цели</button>
           <button data-development="progress" type="button">Прогресс</button>
         </nav>
-
-        <div class="scroll-content" id="development-content"></div>
       </section>
 
       <section class="screen inner-screen" data-screen="profile" hidden>
-        <header class="screen-header">
-          <div>
-            <span class="screen-kicker">Персонализация</span>
-            <h1>Профиль</h1>
-            <p>Что Ева знает о тебе и как должна отвечать.</p>
-          </div>
-        </header>
+        <header class="screen-header ios-clean-header"><div><h1>Профиль</h1></div></header>
         <div class="scroll-content" id="profile-content"></div>
       </section>
     </main>
 
-    <nav class="bottom-nav liquid-glass" aria-label="Основная навигация">
-      <button class="nav-item is-active" data-target="today" aria-current="page" type="button">
-        <span data-icon="home"></span><b>Главная</b>
-      </button>
-      <button class="nav-item discovery-nav" data-target="discovery" type="button">
-        <span data-icon="brain"></span><b>Тесты</b>
-      </button>
-      <button class="nav-item" id="journal-nav" data-target="journal" type="button">
-        <span data-icon="note"></span><b>Дневник</b>
-      </button>
-      <button class="nav-item" data-target="development" type="button">
-        <span data-icon="sprout"></span><b>Рост</b>
-      </button>
-      <button class="nav-item" data-target="profile" type="button">
-        <span data-icon="user"></span><b>Профиль</b>
-      </button>
+    <nav class="bottom-nav" aria-label="Основная навигация">
+      <button class="nav-item is-active" data-target="today" aria-current="page" type="button"><span data-icon="home"></span><b>Главная</b></button>
+      <button class="nav-item" data-target="discovery" type="button"><span data-icon="brain"></span><b>Тесты</b></button>
+      <button class="nav-item" id="journal-nav" data-target="journal" type="button"><span data-icon="note"></span><b>Дневник</b></button>
+      <button class="nav-item ui-development-nav" data-target="development" type="button" hidden><span data-icon="sprout"></span><b>Рост</b></button>
+      <button class="nav-item" data-target="profile" type="button"><span data-icon="user"></span><b>Профиль</b></button>
     </nav>
 
     <dialog class="sheet" id="sheet">
-      <div class="sheet-card liquid-glass">
-        <div class="grabber"></div>
-        <header class="sheet-header">
-          <div><h2 id="sheet-title">Действие</h2><p id="sheet-subtitle"></p></div>
-          <button class="glass-control sheet-close" id="sheet-close" type="button" aria-label="Закрыть">×</button>
-        </header>
-        <div class="sheet-content" id="sheet-content"></div>
-      </div>
+      <div class="sheet-card"><div class="grabber"></div><header class="sheet-header"><div><h2 id="sheet-title">Действие</h2><p id="sheet-subtitle"></p></div><button class="sheet-close" id="sheet-close" type="button" aria-label="Закрыть">×</button></header><div class="sheet-content" id="sheet-content"></div></div>
     </dialog>
-
     <dialog class="confirm" id="confirm-dialog" aria-labelledby="confirm-title">
-      <div class="confirm-card liquid-glass">
-        <h2 id="confirm-title">Подтвердите действие</h2>
-        <p id="confirm-detail"></p>
-        <div class="confirm-actions">
-          <button class="secondary-action" id="confirm-cancel" type="button">Отмена</button>
-          <button class="danger-action" id="confirm-accept" type="button">Удалить</button>
-        </div>
-      </div>
+      <div class="confirm-card"><h2 id="confirm-title">Подтвердите действие</h2><p id="confirm-detail"></p><div class="confirm-actions"><button class="secondary-action" id="confirm-cancel" type="button">Отмена</button><button class="danger-action" id="confirm-accept" type="button">Удалить</button></div></div>
     </dialog>
-
-    <div class="toast liquid-glass" id="toast" hidden></div>
+    <div class="toast" id="toast" hidden></div>
   </div>
 
   <script src="/app/journal.js?v=20260906-discovery-v18"></script>
   <script src="/app/initiative.js?v=20260906-discovery-v18"></script>
   <script src="/app/discovery.js?v=20260906-discovery-v18"></script>
   <script src="/app/app.js?v=20260906-discovery-v18"></script>
-  <script src="/app/ui-v12.js?v=20260913-ui-v12"></script>
+  <script src="/app/ui-v12.js?v=20260913-ui-v13-fix1"></script>
 </body>
 </html>
