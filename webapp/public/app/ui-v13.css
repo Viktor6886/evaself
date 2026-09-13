@@ -1,4 +1,8 @@
 /* Production fixes after device-matrix review. */
+:root{
+  /* Secondary text stays visually quiet but meets WCAG AA on white. */
+  --muted:#6e6e73;
+}
 .ios-profile-shortcut{
   width:44px!important;
   height:44px!important;
@@ -11,4 +15,7 @@
   width:44px!important;
   min-width:44px!important;
   height:44px!important;
+}
+@media(prefers-color-scheme:dark){
+  :root{--muted:#98989d;}
 }
