@@ -250,7 +250,8 @@
   }
 
   function syncProfileSummary() {
-    var summary = document.getElementById("subscription-summary");
+    var row = document.querySelector('[data-setting="subscription"]');
+    var summary = row ? row.querySelector("em") : null;
     if (!summary) return;
     var desired = planName(session().plan);
     if (summary.textContent !== desired) summary.textContent = desired;
