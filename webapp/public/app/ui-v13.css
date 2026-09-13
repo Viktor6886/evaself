@@ -1,0 +1,14 @@
+/* Production fixes after device-matrix review. */
+.ios-profile-shortcut{
+  width:44px!important;
+  height:44px!important;
+  min-width:44px!important;
+}
+.hero-cta{
+  min-height:44px!important;
+}
+.reward-action{
+  width:44px!important;
+  min-width:44px!important;
+  height:44px!important;
+}
