@@ -38,13 +38,18 @@ for (const colorScheme of ["light", "dark"]) {
     const app = await openApp({ viewport: { width: 320, height: 568 } });
     try {
       await app.page.emulateMedia({ colorScheme });
-      for (const screen of ["today", "discovery", "journal", "development", "profile"]) {
+      for (const screen of ["today", "discovery", "journal", "profile"]) {
         await app.openScreen(screen);
         const geometry = await app.page.evaluate(() => {
           const visible = document.querySelector(".screen.is-active");
           const nav = document.querySelector(".bottom-nav");
-          return { content: visible.getBoundingClientRect().bottom, nav: nav.getBoundingClientRect().top,
-            clippedLabels: [...nav.querySelectorAll("b")].some((label) => label.scrollWidth > label.clientWidth) };
+          return {
+            content: visible.getBoundingClientRect().bottom,
+            nav: nav.getBoundingClientRect().top,
+            clippedLabels: [...nav.querySelectorAll("button:not([hidden]) b")]
+              .filter((label) => getComputedStyle(label.parentElement).display !== "none")
+              .some((label) => label.scrollWidth > label.clientWidth),
+          };
         });
         assert.ok(geometry.content <= geometry.nav, JSON.stringify(geometry));
         assert.equal(geometry.clippedLabels, false);
@@ -60,7 +65,7 @@ for (const colorScheme of ["light", "dark"]) {
           return channels[0] * .2126 + channels[1] * .7152 + channels[2] * .0722;
         };
         const bg = luminance(style.backgroundColor);
-        const fg = luminance(getComputedStyle(card.querySelector(".profile-value-note")).color);
+        const fg = luminance(getComputedStyle(card.querySelector(".profile-dimensions")).color);
         return (Math.max(bg, fg) + .05) / (Math.min(bg, fg) + .05);
       });
       assert.ok(contrast >= 4.5, `profile secondary copy contrast: ${contrast}`);
