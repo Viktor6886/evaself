@@ -39,8 +39,8 @@ test("подписка показывает понятный тариф и то�
 
   try {
     await app.openScreen("profile");
-    await app.page.waitForFunction(() => document.getElementById("subscription-summary")?.textContent === "Plus");
-    assert.equal((await app.page.textContent("#subscription-summary")).trim(), "Plus");
+    await app.page.waitForFunction(() => document.querySelector('[data-setting="subscription"] em')?.textContent === "Plus");
+    assert.equal((await app.page.textContent('[data-setting="subscription"] em')).trim(), "Plus");
 
     await app.page.click('[data-setting="subscription"]');
     await app.page.waitForSelector("#sheet[open] .subscription-overview");
