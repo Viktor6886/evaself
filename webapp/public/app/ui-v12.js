@@ -1,170 +1,164 @@
-(() => {
-  "use strict";
+(function () {
+  'use strict';
 
-  const qs = (selector, root = document) => root.querySelector(selector);
-  const qsa = (selector, root = document) => [...root.querySelectorAll(selector)];
-
-  function create(tag, className, html = "") {
-    const node = document.createElement(tag);
-    if (className) node.className = className;
-    if (html) node.innerHTML = html;
-    return node;
+  function qs(selector, root) {
+    return (root || document).querySelector(selector);
   }
 
-  function activateScreen(name) {
-    qs(`.bottom-nav [data-target="${name}"]`)?.click();
+  function qsa(selector, root) {
+    return (root || document).querySelectorAll(selector);
   }
 
-  function installHome() {
-    const screen = qs('[data-screen="today"]');
-    if (!screen || qs('.ios-home-head', screen)) return;
+  function clickScreen(name) {
+    var button = qs('.bottom-nav [data-target="' + name + '"]');
+    if (button && typeof button.click === 'function') button.click();
+  }
 
-    qs('.utility-bar', screen)?.classList.add('ui-hidden');
-
-    const head = create('header', 'ios-home-head', `
-      <h1>Сегодня</h1>
-      <button class="ios-profile-shortcut" type="button" aria-label="Открыть профиль">
-        <span data-icon="user"></span>
-      </button>
-    `);
-    screen.prepend(head);
-    qs('.ios-profile-shortcut', head)?.addEventListener('click', () => activateScreen('profile'));
-
-    const hero = qs('#main-focus-card', screen);
-    const reward = qs('#reward-card', screen);
-    const path = qs('#profile-investment', screen);
-
-    qs('.hero-badge', hero)?.replaceChildren(document.createTextNode('Фокус на сегодня'));
-
-    if (reward) {
-      const title = create('h2', 'ios-section-title', 'О тебе сегодня');
-      reward.before(title);
+  function setJournalTab(name) {
+    var notes = document.getElementById('journal-content');
+    var plan = document.getElementById('ios-journal-plan');
+    var buttons = qsa('[data-ios-journal-tab]');
+    var i;
+    for (i = 0; i < buttons.length; i += 1) {
+      buttons[i].classList.toggle('is-active', buttons[i].getAttribute('data-ios-journal-tab') === name);
+      buttons[i].setAttribute('aria-selected', buttons[i].getAttribute('data-ios-journal-tab') === name ? 'true' : 'false');
     }
-
-    if (path) {
-      const title = create('h2', 'ios-section-title', 'Твой путь');
-      path.before(title);
-    }
-
-    const resumeTitle = create('h2', 'ios-section-title ios-resume-title', 'Можно продолжить');
-    const resume = create('button', 'ios-resume-card', `
-      <span class="ios-resume-icon" aria-hidden="true"><span data-icon="brain"></span></span>
-      <span class="ios-resume-copy">
-        <strong>Перейти к тестам</strong>
-        <small>Продолжи самопознание, когда будет удобно.</small>
-      </span>
-      <span class="ios-chevron" aria-hidden="true">›</span>
-    `);
-    resume.type = 'button';
-    resume.addEventListener('click', () => activateScreen('discovery'));
-    screen.append(resumeTitle, resume);
-
-    try { window.dispatchEvent(new CustomEvent('eva:ui-v12-ready')); } catch {}
-  }
-
-  function installDiscovery() {
-    const screen = qs('[data-screen="discovery"]');
-    if (!screen) return;
-    const header = qs('.screen-header', screen);
-    if (header) {
-      qs('.screen-kicker', header)?.classList.add('ui-hidden');
-      const title = qs('h1', header);
-      if (title) title.textContent = 'Узнай себя';
-      const lead = qs('p', header);
-      if (lead) lead.textContent = 'Короткие тесты помогают Еве точнее понимать твои реакции и цели.';
-    }
-  }
-
-  function installProfile() {
-    const screen = qs('[data-screen="profile"]');
-    if (!screen) return;
-    const header = qs('.screen-header', screen);
-    qs('.screen-kicker', header)?.classList.add('ui-hidden');
-    qs('p', header)?.classList.add('ui-hidden');
-  }
-
-  function showJournalTab(name) {
-    const notes = qs('#journal-content');
-    const planHost = qs('#ios-journal-plan');
-    const buttons = qsa('[data-ios-journal-tab]');
-    buttons.forEach((button) => button.classList.toggle('is-active', button.dataset.iosJournalTab === name));
     if (notes) notes.hidden = name !== 'notes';
-    if (planHost) planHost.hidden = name !== 'plan';
+    if (plan) plan.hidden = name !== 'plan';
   }
 
-  function installJournal() {
-    const screen = qs('[data-screen="journal"]');
-    if (!screen || qs('.ios-journal-tabs', screen)) return;
-
-    const header = qs('.screen-header', screen);
-    qs('.screen-kicker', header)?.classList.add('ui-hidden');
-    qs('p', header)?.classList.add('ui-hidden');
-    const oldAdd = qs('#journal-add-top');
-    if (oldAdd) oldAdd.classList.add('ui-hidden');
-
-    const tabs = create('div', 'ios-journal-tabs', `
-      <button type="button" data-ios-journal-tab="notes">Записи</button>
-      <button type="button" data-ios-journal-tab="plan" class="is-active">План</button>
-    `);
-    header.after(tabs);
-
-    const planHost = create('div', 'ios-journal-plan');
-    planHost.id = 'ios-journal-plan';
-    const developmentContent = qs('#development-content');
-    if (developmentContent) planHost.append(developmentContent);
-    tabs.after(planHost);
-
-    qsa('[data-ios-journal-tab]', tabs).forEach((button) => {
-      button.addEventListener('click', () => showJournalTab(button.dataset.iosJournalTab));
-    });
-    showJournalTab('plan');
-
-    const fab = create('button', 'ios-journal-fab', '+');
-    fab.type = 'button';
-    fab.setAttribute('aria-label', 'Добавить');
-    fab.addEventListener('click', () => {
-      const planVisible = !planHost.hidden;
-      if (!planVisible) {
-        oldAdd?.click();
-        return;
-      }
-      const addGoal = qs('#add-goal', planHost);
-      if (addGoal) {
-        addGoal.click();
-        return;
-      }
-      oldAdd?.click();
-    });
-    screen.append(fab);
+  function bindNavigationExtras() {
+    var shortcuts = qsa('[data-ui-target]');
+    var i;
+    for (i = 0; i < shortcuts.length; i += 1) {
+      if (shortcuts[i].getAttribute('data-ui-v13-bound') === '1') continue;
+      shortcuts[i].setAttribute('data-ui-v13-bound', '1');
+      shortcuts[i].addEventListener('click', function () {
+        clickScreen(this.getAttribute('data-ui-target'));
+      });
+    }
   }
 
-  function installNavigation() {
-    const development = qs('.bottom-nav [data-target="development"]');
-    if (development) development.hidden = true;
-    const discovery = qs('.bottom-nav [data-target="discovery"] b');
-    if (discovery) discovery.textContent = 'Тесты';
-    const today = qs('.bottom-nav [data-target="today"] b');
-    if (today) today.textContent = 'Главная';
+  function bindJournal() {
+    var buttons = qsa('[data-ios-journal-tab]');
+    var i;
+    for (i = 0; i < buttons.length; i += 1) {
+      if (buttons[i].getAttribute('data-ui-v13-bound') === '1') continue;
+      buttons[i].setAttribute('data-ui-v13-bound', '1');
+      buttons[i].addEventListener('click', function () {
+        setJournalTab(this.getAttribute('data-ios-journal-tab'));
+      });
+    }
+
+    var fab = document.getElementById('ios-journal-fab');
+    if (fab && fab.getAttribute('data-ui-v13-bound') !== '1') {
+      fab.setAttribute('data-ui-v13-bound', '1');
+      fab.addEventListener('click', function () {
+        var plan = document.getElementById('ios-journal-plan');
+        var addGoal = plan ? qs('#add-goal', plan) : null;
+        var addNote = document.getElementById('journal-add-top');
+        if (plan && !plan.hidden && addGoal && typeof addGoal.click === 'function') {
+          addGoal.click();
+        } else if (addNote && typeof addNote.click === 'function') {
+          addNote.click();
+        }
+      });
+    }
+    setJournalTab('plan');
+  }
+
+  function bindRewardCard() {
+    var card = document.getElementById('reward-card');
+    var action = document.getElementById('reward-action');
+    if (!card || !action || card.getAttribute('data-ui-v13-bound') === '1') return;
+    card.setAttribute('data-ui-v13-bound', '1');
+    card.addEventListener('click', function (event) {
+      if (event.target === action || action.contains(event.target)) return;
+      if (typeof action.click === 'function') action.click();
+    });
+  }
+
+  function iconSvg() {
+    return '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3"></circle><path d="M6 20c.7-4 2.7-6 6-6s5.3 2 6 6"></path></svg>';
+  }
+
+  function createProfileRow(title, clickHandler) {
+    var button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'settings-row ios-personal-row';
+    button.innerHTML = '<span class="ios-row-icon">' + iconSvg() + '</span><span><strong>' + title + '</strong></span><em></em>';
+    button.addEventListener('click', clickHandler);
+    return button;
+  }
+
+  function makeProfileGroup(label, nodes) {
+    var section = document.createElement('section');
+    section.className = 'ios-profile-group';
+    var heading = document.createElement('div');
+    heading.className = 'ios-profile-label';
+    heading.textContent = label;
+    var list = document.createElement('div');
+    list.className = 'ios-settings-group';
+    var i;
+    section.appendChild(heading);
+    section.appendChild(list);
+    for (i = 0; i < nodes.length; i += 1) {
+      if (nodes[i]) list.appendChild(nodes[i]);
+    }
+    return section;
+  }
+
+  function decorateProfile() {
+    var host = document.getElementById('profile-content');
+    if (!host) return;
+    var stack = qs('.profile-stack', host);
+    var list = qs('.settings-list', host);
+    if (!stack || !list || list.getAttribute('data-ui-v13-grouped') === '1') return;
+
+    var personal = createProfileRow('Личные данные', function () {
+      var current = document.getElementById('edit-profile');
+      if (current && typeof current.click === 'function') current.click();
+    });
+
+    var rows = {};
+    var settingRows = qsa('[data-setting]', list);
+    var i;
+    for (i = 0; i < settingRows.length; i += 1) {
+      rows[settingRows[i].getAttribute('data-setting')] = settingRows[i];
+    }
+
+    var knownCard = qs('.profile-stack > .section-card', host);
+    if (knownCard) knownCard.classList.add('ui-hidden');
+    list.setAttribute('data-ui-v13-grouped', '1');
+    list.className = 'ios-profile-groups';
+    while (list.firstChild) list.removeChild(list.firstChild);
+    list.appendChild(makeProfileGroup('Ева и данные', [personal, rows.conversations, rows.voice]));
+    list.appendChild(makeProfileGroup('Приложение', [rows.notifications, rows.initiative, rows.privacy]));
+    list.appendChild(makeProfileGroup('Подписка', [rows.subscription]));
+  }
+
+  function bindProfileObserver() {
+    var host = document.getElementById('profile-content');
+    if (!host) return;
+    decorateProfile();
+    if (host.getAttribute('data-ui-v13-observed') === '1') return;
+    host.setAttribute('data-ui-v13-observed', '1');
+    if (window.MutationObserver) {
+      var observer = new MutationObserver(function () { decorateProfile(); });
+      observer.observe(host, { childList: true });
+    }
   }
 
   function install() {
-    installNavigation();
-    installHome();
-    installDiscovery();
-    installJournal();
-    installProfile();
+    bindNavigationExtras();
+    bindJournal();
+    bindRewardCard();
+    bindProfileObserver();
   }
 
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', install, { once: true });
+    document.addEventListener('DOMContentLoaded', install, false);
   } else {
     install();
   }
-
-  const observer = new MutationObserver(() => {
-    installNavigation();
-    installDiscovery();
-    installProfile();
-  });
-  observer.observe(document.documentElement, { subtree: true, childList: true });
 })();
