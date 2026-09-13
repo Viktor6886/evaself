@@ -9,7 +9,7 @@
   };
 
   var QUOTA_DEFINITIONS = [
-    { metric: "messages", label: "Сообщения", core: true },
+    { metric: "messages", label: "Сообщения Еве", core: true },
     { metric: "voice_minutes", label: "Голос", unit: "мин", core: true },
     { metric: "web_search", label: "Поиск в интернете", core: true },
     { metric: "documents", label: "Документы", secondary: true },
@@ -17,10 +17,10 @@
   ];
 
   var PERIOD_LABELS = {
-    day: "Лимит на день",
-    week: "Лимит на неделю",
-    month: "Лимит на месяц",
-    total: "Лимит за весь период"
+    day: "Обновляется ежедневно",
+    week: "Обновляется каждую неделю",
+    month: "Обновляется каждый месяц",
+    total: "За весь период"
   };
 
   var PERIOD_RANK = { day: 1, week: 2, month: 3, total: 4 };
@@ -39,7 +39,7 @@
   function finiteNumber(value) {
     if (value === null || value === undefined || value === "") return null;
     var number = Number(value);
-    return Number.isFinite(number) ? number : null;
+    return isFinite(number) ? number : null;
   }
 
   function clamp(value, min, max) {
