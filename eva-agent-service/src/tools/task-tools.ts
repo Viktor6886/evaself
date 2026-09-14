@@ -1,10 +1,12 @@
 import type { AnyAgentTool } from "@letta-ai/letta-agent-sdk";
+import type { PoolClient } from "pg";
 
 import { assertCronExpression, nextCronDate } from "../background.js";
 import type { AgentRuntimeContext, Database } from "../db.js";
 import { localDateTimeToUtc } from "../time/local-date-time.js";
 import { OwnMessagesService } from "../runtime/own-messages.js";
 import { TaskEventService } from "../tasks/task-event-service.js";
+import { recordToolFallback } from "../turns/tool-fallback.js";
 import {
   asObject,
   boolean,
@@ -19,6 +21,23 @@ import {
   type ToolBuilder,
 } from "./tool-kit.js";
 
+interface PreparedTask {
+  title: string;
+  description: string | null;
+  priority: number;
+  dueAt: string | null;
+  remindAt: string | null;
+  cron: string | null;
+  repeat: boolean;
+  nextRunAt: string | null;
+  goalId: number | null;
+  resultId: number | null;
+  blockId: number | null;
+  estimated: number | null;
+  energy: number | null;
+  kind: "reminder" | "action";
+}
+
 export class TaskToolFactory {
   private readonly events: TaskEventService;
   private readonly ownMessages: OwnMessagesService;
@@ -31,8 +50,26 @@ export class TaskToolFactory {
 
   build(tool: ToolBuilder): AnyAgentTool[] {
     const schema = taskSchema();
-    const save = async (args: JsonObject, runtime: AgentRuntimeContext) =>
-      await this.save(args, runtime);
+    const save = async (args: JsonObject, runtime: AgentRuntimeContext) => {
+      try {
+        const saved = await this.save(args, runtime);
+        recordToolFallback(runtime.userId, "save_task", saved);
+        return saved;
+      } catch (error) {
+        recordToolFallback(runtime.userId, "save_task", { ok: false });
+        throw error;
+      }
+    };
+    const saveBulk = async (args: JsonObject, runtime: AgentRuntimeContext) => {
+      try {
+        const saved = await this.saveBulk(args, runtime);
+        recordToolFallback(runtime.userId, "save_tasks_bulk", saved);
+        return saved;
+      } catch (error) {
+        recordToolFallback(runtime.userId, "save_tasks_bulk", { ok: false });
+        throw error;
+      }
+    };
     const list = async (args: JsonObject, runtime: AgentRuntimeContext) =>
       await this.list(args, runtime);
     return [
@@ -47,16 +84,9 @@ export class TaskToolFactory {
       tool(
         "save_tasks_bulk",
         "Сохранить несколько задач",
-        "Создаёт несколько задач последовательно с проверкой владельца связей.",
+        "Атомарно создаёт до 50 задач: либо сохраняются все задачи, либо ни одна.",
         objectSchema({ tasks: { type: "array", items: schema, minItems: 1, maxItems: 50 } }, ["tasks"]),
-        async (args, runtime) => {
-          if (!Array.isArray(args.tasks)) throw new Error("tasks должен быть массивом");
-          const tasks = [];
-          for (const item of args.tasks.slice(0, 50)) {
-            tasks.push(await save(asObject(item), runtime));
-          }
-          return { ok: true, tasks };
-        },
+        saveBulk,
       ),
       tool(
         "get_tasks",
@@ -179,15 +209,16 @@ export class TaskToolFactory {
     ];
   }
 
-  private async save(args: JsonObject, runtime: AgentRuntimeContext): Promise<unknown> {
+  private prepareTask(args: JsonObject, runtime: AgentRuntimeContext): PreparedTask {
     const priority = Math.min(Math.max(optionalInteger(args, "priority") ?? 3, 1), 5);
     // Род задачи решает, что произойдёт в назначенное время: напомнить
     // человеку или сделать дело самой. Значение по умолчанию — прежнее
     // поведение: задача, о роде которой не сказано, остаётся напоминанием.
-    const kind = optionalString(args, "kind", 20) ?? "reminder";
-    if (kind !== "reminder" && kind !== "action") {
+    const kindValue = optionalString(args, "kind", 20) ?? "reminder";
+    if (kindValue !== "reminder" && kindValue !== "action") {
       throw new Error("kind должен быть reminder или action");
     }
+    const kind: "reminder" | "action" = kindValue;
     const dueInput = optionalString(args, "due_at", 100);
     const remindInput = optionalString(args, "remind_at", 100);
     const cron = optionalString(args, "cron", 100);
@@ -213,106 +244,164 @@ export class TaskToolFactory {
     if (cron) assertCronExpression(cron, runtime.timezone);
     const nextRunAt = remindAt ?? dueAt ??
       (repeat && cron ? nextCronDate(cron, runtime.timezone, new Date()).toISOString() : null);
-    // Ноль — это «связи нет»: модель так заполняет необязательное поле.
-    let goalId = optionalLink(args, "goal_id");
-    let resultId = optionalLink(args, "goal_result_id");
-    const blockId = optionalLink(args, "work_block_id");
-    const estimated = bounded(optionalInteger(args, "estimated_minutes"), "estimated_minutes", 1, 1440);
-    const energy = bounded(optionalInteger(args, "energy_required"), "energy_required", 1, 5);
 
-    const task = await this.db.transaction(async (client) => {
-      if (goalId !== null) {
-        const owned = await client.query(
-          "SELECT id FROM goals WHERE id = $1 AND user_id = $2",
-          [goalId, runtime.userId],
-        );
-        if (!owned.rows[0]) {
-          throw new Error(
-            `Цель ${goalId} не найдена. Если задача ни к какой цели не относится, `
-            + "поле goal_id не заполняется вовсе",
-          );
-        }
-      }
-      if (resultId !== null) {
-        const owned = await client.query<{ goal_id: string }>(
-          "SELECT goal_id FROM goal_results WHERE id = $1 AND user_id = $2",
-          [resultId, runtime.userId],
-        );
-        if (!owned.rows[0]) {
-          throw new Error(
-            `Результат ${resultId} не найден. Если задача ни к какому результату не `
-            + "относится, поле goal_result_id не заполняется вовсе",
-          );
-        }
-        const ownedGoalId = Number(owned.rows[0].goal_id);
-        if (goalId !== null && goalId !== ownedGoalId) {
-          throw new Error("Результат не принадлежит выбранной цели");
-        }
-        goalId = ownedGoalId;
-      }
-      if (blockId !== null) {
-        const owned = await client.query<{ goal_id: string; goal_result_id: string | null }>(
-          "SELECT goal_id, goal_result_id FROM work_blocks WHERE id = $1 AND user_id = $2",
-          [blockId, runtime.userId],
-        );
-        if (!owned.rows[0]) {
-          throw new Error(
-            `Рабочий блок ${blockId} не найден. Если задача ни к какому блоку не `
-            + "относится, поле work_block_id не заполняется вовсе",
-          );
-        }
-        const ownedGoalId = Number(owned.rows[0].goal_id);
-        const ownedResultId = Number(owned.rows[0].goal_result_id) || null;
-        if (goalId !== null && goalId !== ownedGoalId) {
-          throw new Error("Рабочий блок не принадлежит выбранной цели");
-        }
-        if (resultId !== null && resultId !== ownedResultId) {
-          throw new Error("Рабочий блок не принадлежит выбранному результату");
-        }
-        goalId = ownedGoalId;
-        resultId = resultId ?? ownedResultId;
-      }
-      const { rows } = await client.query(
-        `INSERT INTO tasks (
-           user_id, title, description, priority, due_at, remind_at,
-           cron_expression, repeat_enabled, timezone, next_run_at,
-           goal_id, goal_result_id, work_block_id, estimated_minutes, energy_required,
-           kind
-         ) VALUES (
-           $1, $2, $3, $4, $5::timestamptz, $6::timestamptz,
-           $7, $8, $9, $10::timestamptz, $11, $12, $13, $14, $15,
-           $16
-         ) RETURNING *`,
-        [
-          runtime.userId,
-          requiredString(args, "title", 500),
-          optionalString(args, "description", 5_000),
-          priority,
-          dueAt,
-          remindAt,
-          cron,
-          repeat,
-          runtime.timezone,
-          nextRunAt,
-          goalId,
-          resultId,
-          blockId,
-          estimated,
-          energy,
-          kind,
-        ],
+    return {
+      title: requiredString(args, "title", 500),
+      description: optionalString(args, "description", 5_000),
+      priority,
+      dueAt,
+      remindAt,
+      cron,
+      repeat,
+      nextRunAt,
+      goalId: optionalLink(args, "goal_id"),
+      resultId: optionalLink(args, "goal_result_id"),
+      blockId: optionalLink(args, "work_block_id"),
+      estimated: bounded(optionalInteger(args, "estimated_minutes"), "estimated_minutes", 1, 1440),
+      energy: bounded(optionalInteger(args, "energy_required"), "energy_required", 1, 5),
+      kind,
+    };
+  }
+
+  private async insertPreparedTask(
+    prepared: PreparedTask,
+    runtime: AgentRuntimeContext,
+    client: PoolClient,
+  ): Promise<Record<string, unknown>> {
+    // Связи проверяются в той же транзакции, что и INSERT. Для bulk это
+    // означает all-or-nothing даже при ошибке в последней из 50 задач.
+    let goalId = prepared.goalId;
+    let resultId = prepared.resultId;
+    const blockId = prepared.blockId;
+
+    if (goalId !== null) {
+      const owned = await client.query(
+        "SELECT id FROM goals WHERE id = $1 AND user_id = $2",
+        [goalId, runtime.userId],
       );
-      return rows[0];
-    });
-    if (task && typeof task === "object" && "id" in task) {
-      await this.events.record({
-        userId: runtime.userId,
-        taskId: String((task as { id: unknown }).id),
-        eventType: "created",
-        scheduledAt: remindAt ?? dueAt,
-      });
+      if (!owned.rows[0]) {
+        throw new Error(
+          `Цель ${goalId} не найдена. Если задача ни к какой цели не относится, `
+          + "поле goal_id не заполняется вовсе",
+        );
+      }
     }
+    if (resultId !== null) {
+      const owned = await client.query<{ goal_id: string }>(
+        "SELECT goal_id FROM goal_results WHERE id = $1 AND user_id = $2",
+        [resultId, runtime.userId],
+      );
+      if (!owned.rows[0]) {
+        throw new Error(
+          `Результат ${resultId} не найден. Если задача ни к какому результату не `
+          + "относится, поле goal_result_id не заполняется вовсе",
+        );
+      }
+      const ownedGoalId = Number(owned.rows[0].goal_id);
+      if (goalId !== null && goalId !== ownedGoalId) {
+        throw new Error("Результат не принадлежит выбранной цели");
+      }
+      goalId = ownedGoalId;
+    }
+    if (blockId !== null) {
+      const owned = await client.query<{ goal_id: string; goal_result_id: string | null }>(
+        "SELECT goal_id, goal_result_id FROM work_blocks WHERE id = $1 AND user_id = $2",
+        [blockId, runtime.userId],
+      );
+      if (!owned.rows[0]) {
+        throw new Error(
+          `Рабочий блок ${blockId} не найден. Если задача ни к какому блоку не `
+          + "относится, поле work_block_id не заполняется вовсе",
+        );
+      }
+      const ownedGoalId = Number(owned.rows[0].goal_id);
+      const ownedResultId = Number(owned.rows[0].goal_result_id) || null;
+      if (goalId !== null && goalId !== ownedGoalId) {
+        throw new Error("Рабочий блок не принадлежит выбранной цели");
+      }
+      if (resultId !== null && resultId !== ownedResultId) {
+        throw new Error("Рабочий блок не принадлежит выбранному результату");
+      }
+      goalId = ownedGoalId;
+      resultId = resultId ?? ownedResultId;
+    }
+
+    const { rows } = await client.query<Record<string, unknown>>(
+      `INSERT INTO tasks (
+         user_id, title, description, priority, due_at, remind_at,
+         cron_expression, repeat_enabled, timezone, next_run_at,
+         goal_id, goal_result_id, work_block_id, estimated_minutes, energy_required,
+         kind
+       ) VALUES (
+         $1, $2, $3, $4, $5::timestamptz, $6::timestamptz,
+         $7, $8, $9, $10::timestamptz, $11, $12, $13, $14, $15,
+         $16
+       ) RETURNING *`,
+      [
+        runtime.userId,
+        prepared.title,
+        prepared.description,
+        prepared.priority,
+        prepared.dueAt,
+        prepared.remindAt,
+        prepared.cron,
+        prepared.repeat,
+        runtime.timezone,
+        prepared.nextRunAt,
+        goalId,
+        resultId,
+        blockId,
+        prepared.estimated,
+        prepared.energy,
+        prepared.kind,
+      ],
+    );
+    const task = rows[0];
+    if (!task || task.id === undefined || task.id === null) {
+      throw new Error("Созданная задача не вернула идентификатор");
+    }
+
+    // Событие created — часть той же транзакции. Раньше задача могла
+    // сохраниться, а запись события упасть после COMMIT; инструмент тогда
+    // сообщал об ошибке и повтор запроса создавал дубликаты.
+    await client.query(
+      `INSERT INTO task_events (user_id, task_id, event_type, scheduled_at, metadata)
+       VALUES ($1, $2, 'created', $3::timestamptz, '{}'::jsonb)`,
+      [runtime.userId, task.id, prepared.remindAt ?? prepared.dueAt],
+    );
+    return task;
+  }
+
+  private async save(args: JsonObject, runtime: AgentRuntimeContext): Promise<unknown> {
+    const prepared = this.prepareTask(args, runtime);
+    const task = await this.db.transaction(async (client) =>
+      await this.insertPreparedTask(prepared, runtime, client));
     return { ok: true, task };
+  }
+
+  private async saveBulk(args: JsonObject, runtime: AgentRuntimeContext): Promise<unknown> {
+    if (!Array.isArray(args.tasks)) throw new Error("tasks должен быть массивом");
+    // Сначала полностью валидируем вход. Ошибка в 41-й записи не должна
+    // открывать транзакцию после того, как 40 предыдущих уже подготовлены к записи.
+    const prepared = args.tasks.slice(0, 50).map((item) =>
+      this.prepareTask(asObject(item), runtime));
+
+    const tasks = await this.db.transaction(async (client) => {
+      const created: Record<string, unknown>[] = [];
+      for (const task of prepared) {
+        created.push(await this.insertPreparedTask(task, runtime, client));
+      }
+      return created;
+    });
+
+    // Полные строки PostgreSQL не возвращаются модели: на десятках задач
+    // такой tool_result раздувал контекст и провоцировал завершение хода
+    // без финального assistant_message.
+    return {
+      ok: true,
+      created: tasks.length,
+      task_ids: tasks.map((task) => task.id),
+    };
   }
 
   private async list(args: JsonObject, runtime: AgentRuntimeContext): Promise<unknown> {
