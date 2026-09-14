@@ -2,6 +2,12 @@ import {
   normalizeSupportedLanguage,
   type SupportedLanguage,
 } from "./language-resolver.js";
+import { currentScope } from "../tenancy/index.js";
+import {
+  resetToolFallback,
+  takeToolFallback,
+  type ToolFallbackOutcome,
+} from "../turns/tool-fallback.js";
 
 const ru = {
   accessBlocked: "Доступ к Еве временно ограничен.",
@@ -20,7 +26,7 @@ const ru = {
   openSubscriptionApp: "Тарифы и оплата",
   voiceQuotaEnded:
     "Лимит распознавания голоса закончился. Можно продолжить текстом.",
-  emptyReply: "Я рядом. Попробуй сформулировать это немного иначе.",
+  emptyReply: "Не удалось сформировать текстовый ответ. Попробуй отправить сообщение ещё раз.",
   start:
     "Привет! Я Ева — собеседник и помощник в самопознании. Я запоминаю важный контекст на твоём сервере. Напиши, что сейчас занимает твои мысли.",
   startFirst:
@@ -91,7 +97,7 @@ const en: Record<keyof typeof ru, string> = {
   openSubscriptionApp: "Plans and payment",
   voiceQuotaEnded:
     "Your voice transcription allowance is used up. You can continue with text.",
-  emptyReply: "I’m here. Try phrasing that a little differently.",
+  emptyReply: "I could not produce a text reply. Please send the message again.",
   start:
     "Hi! I’m Eva, a companion and self-discovery assistant. I keep important context on your server. Tell me what is on your mind right now.",
   startFirst:
@@ -135,11 +141,39 @@ const en: Record<keyof typeof ru, string> = {
 
 export type MessageKey = keyof typeof ru;
 
+function toolFallbackMessage(
+  language: SupportedLanguage,
+  outcome: ToolFallbackOutcome,
+): string {
+  if (!outcome.ok) {
+    return language === "en"
+      ? "I could not complete the requested action. Nothing from that failed operation needs to be repeated blindly."
+      : "Не удалось выполнить запрошенное действие. Не повторяй его вслепую — сначала уточни результат.";
+  }
+  if (outcome.toolName === "save_tasks_bulk" && outcome.created !== undefined) {
+    return language === "en"
+      ? `Done. ${outcome.created} tasks were saved.`
+      : `Готово. Сохранено задач: ${outcome.created}.`;
+  }
+  if (outcome.toolName === "save_task") {
+    return language === "en" ? "Done. The task was saved." : "Готово. Задача сохранена.";
+  }
+  return language === "en" ? "Done. The action was completed." : "Готово. Действие выполнено.";
+}
+
 export function t(
   language: SupportedLanguage,
   key: MessageKey,
   values: Record<string, string | number> = {},
 ): string {
+  if (key === "emptyReply") {
+    const scope = currentScope();
+    if (scope?.kind === "user" && scope.userId !== null) {
+      const outcome = takeToolFallback(scope.userId);
+      if (outcome) return toolFallbackMessage(language, outcome);
+    }
+  }
+
   let message: string = (language === "en" ? en : ru)[key];
   for (const [name, value] of Object.entries(values)) {
     message = message.replaceAll(`{${name}}`, String(value));
@@ -148,11 +182,18 @@ export function t(
 }
 
 export function preferredResponseLanguage(user: {
+  id?: number;
   language_mode?: string;
   preferred_language?: string | null;
   last_message_language?: string | null;
   language_code?: string | null;
 }): SupportedLanguage {
+  if (typeof user.id === "number" && Number.isSafeInteger(user.id) && user.id > 0) {
+    // Успешный инструмент прошлого хода не имеет права объяснять пустой
+    // ответ нового. UserTurnLock сериализует ходы одного пользователя,
+    // поэтому очистка в начале канонического хода не теряет параллельную работу.
+    resetToolFallback(user.id);
+  }
   return (
     (user.language_mode === "fixed"
       ? normalizeSupportedLanguage(user.preferred_language)
