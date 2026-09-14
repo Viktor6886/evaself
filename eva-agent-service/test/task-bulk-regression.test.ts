@@ -54,14 +54,10 @@ function taskHarness() {
         },
       };
 
-      try {
-        const result = await work(client);
-        committedTasks.push(...stagedTasks);
-        committedEvents.push(...stagedEvents);
-        return result;
-      } catch (error) {
-        throw error;
-      }
+      const result = await work(client);
+      committedTasks.push(...stagedTasks);
+      committedEvents.push(...stagedEvents);
+      return result;
     },
   };
 
