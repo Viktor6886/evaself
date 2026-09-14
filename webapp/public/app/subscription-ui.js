@@ -209,7 +209,7 @@
         '<p>Доступ и лимиты применяются автоматически по вашему тарифу.</p>' +
       '</section>' +
       '<section class="subscription-usage-card">' +
-        '<div class="subscription-section-head"><div><h3>Использование</h3><p>Показываем только лимиты, которые важны при работе с Евой.</p></div></div>' +
+        '<div class="subscription-section-head"><div><h3>Использование</h3></div></div>' +
         '<div class="subscription-usage-list">' + usage + '</div>' +
       '</section>' +
     '</div>';
