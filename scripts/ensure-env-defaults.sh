@@ -96,10 +96,24 @@ done < "$EXAMPLE_FILE"
 # из прежнего умолчания примера и никогда не выбирала сама, — это не
 # выбор, а наследство.
 #
+# EVA_PROACTIVE_INITIATIVE раньше устанавливался в false, хотя Mini App
+# уже показывал рабочий переключатель и позволял сохранять окна. В итоге
+# окна лежали в БД, но исполнитель вообще не создавался. Миграция ниже
+# одноразовая: после неё оператор снова может выключить аварийный флаг
+# вручную, и следующий update его решение не перезапишет.
+#
 # Устаревшие EVA_LETTA_ADMIN_* могут оставаться в существующем .env, но
 # runtime их больше не читает и не передаёт контейнеру.
 # ---------------------------------------------------------------------
 corrected=()
+PROACTIVE_DEFAULT_MARKER="# evaself-default-migrated: EVA_PROACTIVE_INITIATIVE=true"
+if ! grep -qxF -- "$PROACTIVE_DEFAULT_MARKER" "$ENV_FILE"; then
+	if [ "$(get_env EVA_PROACTIVE_INITIATIVE 2>/dev/null || true)" = "false" ]; then
+		set_env "EVA_PROACTIVE_INITIATIVE" "true"
+		corrected+=("EVA_PROACTIVE_INITIATIVE")
+	fi
+	printf '\n%s\n' "$PROACTIVE_DEFAULT_MARKER" >> "$ENV_FILE"
+fi
 
 chmod 600 "$ENV_FILE"
 
