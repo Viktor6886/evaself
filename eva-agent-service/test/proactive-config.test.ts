@@ -1,12 +1,19 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
 
 const root = resolve(process.cwd(), "..");
+const example = resolve(root, ".env.example");
 const migrate = resolve(root, "scripts/ensure-env-defaults.sh");
+const repositorySourcesAvailable = existsSync(example) && existsSync(migrate);
+const repositoryOnly = {
+  skip: repositorySourcesAvailable
+    ? false
+    : "repository .env.example and scripts are outside the service-only Docker build context",
+};
 
 function runMigration(envFile: string, exampleFile: string): void {
   execFileSync("bash", [migrate], {
@@ -26,12 +33,12 @@ function valueOf(text: string, key: string): string | null {
   return line ? line.slice(key.length + 1) : null;
 }
 
-test("новая установка включает пользовательские окна инициативы", () => {
-  const example = readFileSync(resolve(root, ".env.example"), "utf8");
-  assert.equal(valueOf(example, "EVA_PROACTIVE_INITIATIVE"), "true");
+test("новая установка включает пользовательские окна инициативы", repositoryOnly, () => {
+  const contents = readFileSync(example, "utf8");
+  assert.equal(valueOf(contents, "EVA_PROACTIVE_INITIATIVE"), "true");
 });
 
-test("обновление исправляет старое штатное false только один раз", () => {
+test("обновление исправляет старое штатное false только один раз", repositoryOnly, () => {
   const dir = mkdtempSync(resolve(tmpdir(), "evaself-proactive-config-"));
   const envFile = resolve(dir, ".env");
   const exampleFile = resolve(dir, ".env.example");
@@ -61,7 +68,7 @@ test("обновление исправляет старое штатное fals
   }
 });
 
-test("отсутствующий флаг добавляется включённым", () => {
+test("отсутствующий флаг добавляется включённым", repositoryOnly, () => {
   const dir = mkdtempSync(resolve(tmpdir(), "evaself-proactive-config-"));
   const envFile = resolve(dir, ".env");
   const exampleFile = resolve(dir, ".env.example");
