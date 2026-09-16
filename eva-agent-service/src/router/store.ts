@@ -71,6 +71,23 @@ export interface AttemptRecord {
 
 const CACHE_TTL_MS = 5_000;
 
+/**
+ * Breaker описывает доступность транспорта/сервиса, а не любой неуспешный
+ * ответ модели. 429, исчерпанный ключ, неверный JSON или несовместимый
+ * tool-call доказывают как раз обратное: провайдер ответил, поэтому
+ * выключать его целиком после трёх таких запросов нельзя.
+ */
+const BREAKER_HEALTH_FAILURES: ReadonlySet<SwitchReason> = new Set([
+  "server_error",
+  "connection_failed",
+  "timeout",
+  "invalid_response",
+]);
+
+export function isBreakerHealthFailure(errorCode: string): boolean {
+  return BREAKER_HEALTH_FAILURES.has(errorCode as SwitchReason);
+}
+
 export class RouterStore {
   private readonly secrets: SecretBox;
   private providerCache: { at: number; rows: ProviderProfile[] } | null = null;
@@ -296,9 +313,12 @@ export class RouterStore {
   }
 
   /**
-   * Записывает ошибку и, если порог превышен, открывает breaker.
-   * Счётчик сбрасывается, когда предыдущая ошибка была давно: три ошибки за
-   * неделю — это не отказ провайдера.
+   * Записывает ошибку и открывает breaker только на отказах доступности.
+   *
+   * Квота ключа, 429, ошибка запроса или контракта модели не означают,
+   * что transport/provider упал. Если такой ответ пришёл контрольной
+   * пробе, провайдер доказал, что доступен: half-open нужно закрыть, а не
+   * отправлять модель ещё на один cooldown.
    */
   async recordFailure(
     providerId: string,
@@ -308,6 +328,38 @@ export class RouterStore {
     windowMs: number,
     cooldownMs: number,
   ): Promise<void> {
+    if (!isBreakerHealthFailure(errorCode)) {
+      await this.pool.query(
+        `INSERT INTO llm_breaker_model_state
+             (provider_id, model, state, consecutive_errors, last_error_code)
+         VALUES ($1, $2, 'closed', 0, $3)
+         ON CONFLICT (provider_id, model) DO UPDATE SET
+             state = CASE
+               WHEN llm_breaker_model_state.pinned_out THEN llm_breaker_model_state.state
+               ELSE 'closed'
+             END,
+             consecutive_errors = CASE
+               WHEN llm_breaker_model_state.pinned_out THEN llm_breaker_model_state.consecutive_errors
+               ELSE 0
+             END,
+             first_error_at = CASE
+               WHEN llm_breaker_model_state.pinned_out THEN llm_breaker_model_state.first_error_at
+               ELSE NULL
+             END,
+             opened_at = CASE
+               WHEN llm_breaker_model_state.pinned_out THEN llm_breaker_model_state.opened_at
+               ELSE NULL
+             END,
+             probe_after = CASE
+               WHEN llm_breaker_model_state.pinned_out THEN llm_breaker_model_state.probe_after
+               ELSE NULL
+             END,
+             last_error_code = $3`,
+        [providerId, model, errorCode.slice(0, 120)],
+      );
+      return;
+    }
+
     await this.pool.query(
       `INSERT INTO llm_breaker_model_state
            (provider_id, model, state, consecutive_errors, first_error_at, last_error_code)
@@ -377,6 +429,8 @@ export class RouterStore {
    *
    * Теперь захват продлевает `probe_after`: пока срок не вышел, чужая
    * проба считается идущей, после — брошенной, и её место можно занять.
+   * NULL от старой версии тоже означает брошенную пробу: действующего
+   * срока аренды у неё нет.
    */
   async claimProbe(providerId: string, model: string, leaseMs: number): Promise<boolean> {
     const { rowCount } = await this.pool.query(
@@ -384,11 +438,9 @@ export class RouterStore {
           SET state = 'half_open',
               probe_after = now() + make_interval(secs => $3)
         WHERE provider_id = $1 AND model = $2
-          -- half_open с истёкшим сроком — брошенная проба, а не идущая.
           AND state IN ('open', 'half_open')
           AND NOT pinned_out
-          AND probe_after IS NOT NULL
-          AND probe_after <= now()`,
+          AND (probe_after IS NULL OR probe_after <= now())`,
       [providerId, model, Math.max(1, Math.ceil(leaseMs / 1000))],
     );
     return (rowCount ?? 0) > 0;
