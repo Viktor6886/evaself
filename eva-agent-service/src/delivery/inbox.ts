@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import type { Database } from "../db.js";
+import { isProviderCircuitOpen } from "../errors.js";
 import type { Logger } from "../logger.js";
 import type { TelegramUpdate } from "../telegram.js";
 import { lockReactionTarget } from "../telegram/reaction-target.js";
@@ -455,27 +456,43 @@ export class PostgresTelegramInbox implements ParallelTelegramInbox {
     attempts: number,
     maxAttempts: number,
   ): Promise<{ dead: boolean }> {
-    const dead = attempts >= maxAttempts;
+    const waitingForProviderProbe = isProviderCircuitOpen(error);
+    // Открытый breaker — это пауза перед контрольной пробой, а не новая
+    // неудачная попытка сообщения. Если считать её попыткой, inbox успеет
+    // исчерпать лимит за секунды, пока breaker ещё честно ждёт cooldown.
+    const dead = !waitingForProviderProbe && attempts >= maxAttempts;
     const message = error instanceof Error ? error.message : String(error);
-    const backoffSeconds = Math.min(300, Math.max(2, 2 ** Math.max(0, attempts - 1)));
+    const backoffSeconds = waitingForProviderProbe
+      ? 10
+      : Math.min(300, Math.max(2, 2 ** Math.max(0, attempts - 1)));
     await this.db.withSystemScope("telegram.inbox.fail", async () =>
       await this.db.query(
       `
         -- tenant: system — durable ingress Telegram: строки берутся по update_id и аренде воркера, а не по запросу пользователя
         UPDATE telegram_updates
           SET status = $2,
+              attempts = CASE
+                WHEN $5 THEN GREATEST(0, attempts - 1)
+                ELSE attempts
+              END,
               available_at = CASE
                 WHEN $2 = 'retry' THEN now() + make_interval(secs => $3)
                 ELSE available_at
               END,
-              error_code = 'workflow_failed',
+              error_code = CASE WHEN $5 THEN 'provider_recovery_wait' ELSE 'workflow_failed' END,
               error_message = $4,
               last_error = $4,
               completed_at = CASE WHEN $2 = 'dead' THEN now() ELSE NULL END,
               locked_at = NULL,
               locked_by = NULL
         WHERE update_id = $1`,
-      [updateId, dead ? "dead" : "retry", backoffSeconds, message.slice(0, 2_000)],
+      [
+        updateId,
+        dead ? "dead" : "retry",
+        backoffSeconds,
+        message.slice(0, 2_000),
+        waitingForProviderProbe,
+      ],
       ),
       { crossUser: true },
     );
