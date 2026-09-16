@@ -112,7 +112,11 @@ async function main(): Promise<void> {
     ...DEFAULT_OPTIONS,
     breakerThreshold: intFromEnv("EVA_ROUTER_BREAKER_THRESHOLD", DEFAULT_OPTIONS.breakerThreshold),
     breakerWindowMs: intFromEnv("EVA_ROUTER_BREAKER_WINDOW_MS", DEFAULT_OPTIONS.breakerWindowMs),
-    breakerCooldownMs: intFromEnv("EVA_ROUTER_BREAKER_COOLDOWN_MS", DEFAULT_OPTIONS.breakerCooldownMs),
+    // Семь минут делали защиту похожей на постоянный отказ: Telegram
+    // успевал исчерпать свои попытки намного раньше. Тридцать секунд —
+    // достаточно, чтобы не стучаться в упавший upstream, и достаточно
+    // мало, чтобы durable сообщение само дождалось контрольной пробы.
+    breakerCooldownMs: intFromEnv("EVA_ROUTER_BREAKER_COOLDOWN_MS", 30_000),
     maxRetryAfterMs: intFromEnv("EVA_ROUTER_MAX_RETRY_AFTER_MS", 5_000),
     retryAfterJitterMs: intFromEnv("EVA_ROUTER_RETRY_AFTER_JITTER_MS", 250),
     reservationTtlMs: intFromEnv("EVA_ROUTER_LIMIT_RESERVATION_TTL_MS", 300_000),

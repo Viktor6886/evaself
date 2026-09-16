@@ -70,7 +70,10 @@ export function buildChain(input: ChainInput): BuiltChain {
       return;
     }
     if (breaker?.state === "open") {
-      const ready = breaker.probe_after !== null && breaker.probe_after <= input.now;
+      // `probe_after = NULL` встречается у записей, созданных старой
+      // версией. Срока ожидания в такой записи уже нет, поэтому держать
+      // её открытой вечно нельзя: считаем её готовой к новой пробе.
+      const ready = breaker.probe_after === null || breaker.probe_after <= input.now;
       if (!ready) {
         rejected.push({ provider, reason: "breaker_open", detail: "circuit breaker открыт" });
         return;

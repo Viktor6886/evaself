@@ -119,6 +119,34 @@ export const deletionBlocked = (message: string, details?: unknown) =>
   });
 
 /**
+ * Вложенный отказ роутера проходит через Letta как строка с экранированным
+ * JSON. По этой строке нельзя строить общую классификацию ошибок, но
+ * состояние breaker имеет однозначный маркер и важно durable inbox: пока
+ * провайдер ждёт контрольной пробы, попытки сообщения расходовать нельзя.
+ */
+export function isProviderCircuitOpen(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /circuit breaker/i.test(message)
+    && /(открыт|open|пробн|half[_ -]?open)/i.test(message);
+}
+
+/**
+ * Убирает из пользовательского пути многоэтажный JSON Letta/Router для
+ * известных временных отказов провайдера. Полная причина остаётся в
+ * журнале LLM Router; наружу достаточно класса отказа.
+ */
+function compactProviderFailure(message: string): string | null {
+  if (isProviderCircuitOpen(message)) {
+    return "провайдер LLM временно недоступен: circuit breaker открыт";
+  }
+  const decoded = message.replaceAll('\\"', '"');
+  if (/service_unavailable/i.test(decoded) && /\b503\b/.test(decoded)) {
+    return "провайдер LLM временно недоступен (503)";
+  }
+  return null;
+}
+
+/**
  * Map anything thrown by the SDK or a driver onto an EvaError.
  * Connection-shaped failures are retryable; protocol-shaped ones are not.
  */
@@ -127,7 +155,11 @@ export function toEvaError(error: unknown, context: string): EvaError {
 
   const message = error instanceof Error ? error.message : String(error);
   const lower = message.toLowerCase();
+  const providerFailure = compactProviderFailure(message);
 
+  if (providerFailure) {
+    return appServerUnavailable(`${context}: ${providerFailure}`);
+  }
   if (
     lower.includes("econnrefused") ||
     lower.includes("enotfound") ||
@@ -166,6 +198,12 @@ export function explainFailure(message: string): string | null {
         + " Letta сожмёт её, как только предел ей объявлен; если это повторяется —"
         + " проверьте окно контекста активной модели в разделе моделей."
       : `Запрос не поместился в окно модели (${limit} токенов).`;
+  }
+  if (isProviderCircuitOpen(message)) {
+    return "Провайдер модели временно недоступен. Ева автоматически дождётся контрольной пробы и вернёт его в работу при восстановлении.";
+  }
+  if (/провайдер LLM временно недоступен|service_unavailable/i.test(message)) {
+    return "Провайдер модели временно недоступен; сообщение будет повторено автоматически по политике восстановления.";
   }
   return null;
 }
