@@ -50,6 +50,7 @@ import {
 import type { StarsPayments } from "./payments/stars.js";
 import type { QuotaExhaustionNotifier } from "./subscriptions/quota-exhaustion-notifier.js";
 import { quotaExhausted } from "./subscriptions/quota-policy.js";
+import { recordMessageUsage } from "./subscriptions/usage-ledger.js";
 import { speechTextFromReply } from "./telegram-format.js";
 import {
   AttachmentError,
@@ -669,6 +670,24 @@ export class EvaWorkflow {
           await this.stopTurn(turnHandle, "quota_messages");
           return { status: "ignored" };
         }
+        // Тариф считает каждое фактическое сообщение человека, а не один
+        // агрегированный ход. Запись делается до LLM: если провайдер
+        // упадёт, сообщение всё равно было принято Евой. Stable update_id
+        // делает повтор durable inbox безопасным — второй раз расход не
+        // увеличится.
+        for (const part of [...earlier, update]) {
+          await recordMessageUsage(this.db, {
+            userId: user.id,
+            metric: "messages",
+            source: "telegram_user",
+            idempotencyKey: `telegram:update:${part.updateId}:message-in`,
+            correlationId: `telegram-update:${part.updateId}`,
+            metadata: {
+              kind: part.kind,
+              aggregated_into: update.updateId,
+            },
+          });
+        }
         // Голос проверяется по всему окну, а не по последнему сообщению.
         // Расшифровываются и списывают минуты все части объединённого
         // хода, поэтому «голосовое плюс короткий текст» иначе проходило
@@ -1221,11 +1240,18 @@ export class EvaWorkflow {
           await this.moveTurn(turnHandle, "delivering");
           await this.moveTurn(turnHandle, "delivered");
 
-          await this.db.incrementUsage(update.telegramId, "messages");
           await this.quotaExhaustion?.notifyMessages(update.telegramId);
-          // Ответ Евы — такой же расходник, как входящее сообщение: он
-          // стоит вызова модели, и тариф считает его отдельно.
-          await this.countUsage(update.telegramId, "messages_out");
+          // Ответ считается отдельно от входящих сообщений. Stable key
+          // привязан к update_id, поэтому повторный post-delivery учёт не
+          // создаёт вторую единицу.
+          await recordMessageUsage(this.db, {
+            userId: user.id,
+            metric: "messages_out",
+            source: "assistant_reply",
+            idempotencyKey: `telegram:update:${update.updateId}:message-out`,
+            correlationId: `telegram-update:${update.updateId}`,
+            metadata: { aggregated_messages: earlier.length + 1 },
+          });
           usageCharged = true;
           await this.linkTurn(turnHandle, {
             quotaMetric: "messages",
@@ -1986,7 +2012,7 @@ function quotaLabel(metric: string, period: string, language: SupportedLanguage)
   const metricLabel = (language === "en"
     ? {
         messages: "Messages",
-        messages_out: "Eva replies",
+        messages_out: "Eva messages",
         voice_in: "Voice messages",
         voice_minutes: "Voice minutes",
         voice_out: "Voiced replies",
@@ -1997,7 +2023,7 @@ function quotaLabel(metric: string, period: string, language: SupportedLanguage)
       }
     : {
         messages: "Сообщения",
-        messages_out: "Ответы Евы",
+        messages_out: "Сообщения Евы",
         voice_in: "Голосовые сообщения",
         voice_minutes: "Голосовые минуты",
         voice_out: "Озвученные ответы",
