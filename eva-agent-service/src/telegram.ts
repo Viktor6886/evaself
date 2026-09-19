@@ -346,6 +346,7 @@ export class TelegramClient implements OutboxTransport {
     metrics: DeliveryMetrics;
     lastOutboxId: string | null;
     priority: DeliveryPriority;
+    usage: { userId: number; metric: string; amount: number } | null;
   }>();
 
   /**
@@ -435,6 +436,7 @@ export class TelegramClient implements OutboxTransport {
     prefix: string,
     work: () => Promise<T>,
     priority: DeliveryPriority = priorityForContext(prefix),
+    usage: { userId: number; metric: string; amount?: number } | null = null,
   ): Promise<T> {
     return await this.deliveryContext.run({
       prefix,
@@ -442,6 +444,13 @@ export class TelegramClient implements OutboxTransport {
       metrics: { outboxInsertMs: 0, telegramSendMs: 0 },
       lastOutboxId: null,
       priority,
+      usage: usage
+        ? {
+          userId: usage.userId,
+          metric: usage.metric,
+          amount: Math.max(1, Math.trunc(usage.amount ?? 1)),
+        }
+        : null,
     }, work);
   }
 
@@ -1360,14 +1369,22 @@ export class TelegramClient implements OutboxTransport {
       }
     }
     const context = this.deliveryContext.getStore();
+    const sequence = context?.sequence ?? 0;
     const idempotencyKey = context
       ? `${context.prefix}:${String(context.sequence++).padStart(3, "0")}:${method}`
       : undefined;
+    // Одна логическая отправка может быть разрезана Telegram formatter-ом
+    // на несколько частей. Тариф списывается один раз — на первой durable
+    // строке контекста, а не за каждый технический chunk.
+    const usage = context?.usage && sequence === 0 ? context.usage : null;
     return await this.outbox.send({
       method,
       chatId,
       payload,
       idempotencyKey,
+      userId: usage?.userId,
+      usageMetric: usage?.metric,
+      usageAmount: usage?.amount,
       priority: priority ?? this.priorityContext.getStore() ?? context?.priority,
       onMetrics: (metrics) => this.addDeliveryMetrics(metrics),
       onEnqueued: (outboxId) => {
