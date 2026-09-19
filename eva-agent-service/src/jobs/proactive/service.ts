@@ -160,14 +160,24 @@ export class ProactiveService {
         // слота будет занята дважды, outbox отправит одно сообщение.
         idempotencyKey: deliveryKey,
       });
-      await recordMessageUsage(this.db, {
-        userId: candidate.userId,
-        metric: "messages_out",
-        source: "proactive",
-        idempotencyKey: `${deliveryKey}:message-usage`,
-        correlationId: options.runId ?? deliveryKey,
-        metadata: { kind, slot_key: slot.slotKey },
-      });
+      try {
+        await recordMessageUsage(this.db, {
+          userId: candidate.userId,
+          metric: "messages_out",
+          source: "proactive",
+          idempotencyKey: `${deliveryKey}:message-usage`,
+          correlationId: options.runId ?? deliveryKey,
+          metadata: { kind, slot_key: slot.slotKey },
+        });
+      } catch (error) {
+        // Durable доставка уже поставлена. Учёт не имеет права превращать
+        // успешную постановку в повторную отправку.
+        this.logger.warn("Расход проактивного сообщения не записан", {
+          kind,
+          userId: candidate.userId,
+          code: error instanceof Error ? error.name : "unknown_error",
+        });
+      }
       await this.finish(claimed, "sent", null, delivered.outboxId, text);
       if (episode) await this.linkEpisode(kind, candidate.userId, episode, claimed);
       return { status: "sent", outboxId: delivered.outboxId };
@@ -242,14 +252,21 @@ export class ProactiveService {
         text,
         idempotencyKey: deliveryKey,
       });
-      await recordMessageUsage(this.db, {
-        userId: candidate.userId,
-        metric: "messages_out",
-        source: "proactive",
-        idempotencyKey: `${deliveryKey}:message-usage`,
-        correlationId: options.runId ?? deliveryKey,
-        metadata: { kind: "initiative", message_id: candidate.messageId },
-      });
+      try {
+        await recordMessageUsage(this.db, {
+          userId: candidate.userId,
+          metric: "messages_out",
+          source: "proactive",
+          idempotencyKey: `${deliveryKey}:message-usage`,
+          correlationId: options.runId ?? deliveryKey,
+          metadata: { kind: "initiative", message_id: candidate.messageId },
+        });
+      } catch (error) {
+        this.logger.warn("Расход инициативного сообщения не записан", {
+          userId: candidate.userId,
+          code: error instanceof Error ? error.name : "unknown_error",
+        });
+      }
       await this.finish(claimed, "sent", null, delivered.outboxId, text);
       return { status: "sent", outboxId: delivered.outboxId };
     } catch (error) {
