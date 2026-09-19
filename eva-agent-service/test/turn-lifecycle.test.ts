@@ -623,7 +623,16 @@ async function runTelegramTurn(
     issueCallbackTokens: async (input: Record<string, unknown>) => {
       issuedTokens.push(input);
     },
-    query: async () => ({ rows: [] }),
+    query: async (sql: string, values: unknown[] = []) => {
+      if (sql.includes("INSERT INTO usage_events")) {
+        const events = JSON.parse(String(values[0] ?? "[]")) as Array<{ metric?: string }>;
+        if (options.usageFails && events.some((event) => event.metric === "messages")) {
+          throw new Error("квота недоступна");
+        }
+        return { rows: [{ recorded: String(events.length) }] };
+      }
+      return { rows: [] };
+    },
   };
   const shown: string[] = [];
   /** Клавиатуры, ушедшие в Telegram, и выданные под них токены. */
