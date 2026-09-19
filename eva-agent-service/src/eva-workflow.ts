@@ -50,6 +50,7 @@ import {
 import type { StarsPayments } from "./payments/stars.js";
 import type { QuotaExhaustionNotifier } from "./subscriptions/quota-exhaustion-notifier.js";
 import { quotaExhausted } from "./subscriptions/quota-policy.js";
+import { recordMessageUsage, recordMessageUsageBatch } from "./subscriptions/usage-ledger.js";
 import { speechTextFromReply } from "./telegram-format.js";
 import {
   AttachmentError,
@@ -1221,12 +1222,44 @@ export class EvaWorkflow {
           await this.moveTurn(turnHandle, "delivering");
           await this.moveTurn(turnHandle, "delivered");
 
-          await this.db.incrementUsage(update.telegramId, "messages");
-          await this.quotaExhaustion?.notifyMessages(update.telegramId);
-          // Ответ Евы — такой же расходник, как входящее сообщение: он
-          // стоит вызова модели, и тариф считает его отдельно.
-          await this.countUsage(update.telegramId, "messages_out");
+          // Один агрегированный ход может содержать несколько сообщений.
+          // Списываем каждое, но атомарно: либо весь batch, либо ни одного.
+          // Stable update_id не даёт durable retry списать их повторно.
+          await recordMessageUsageBatch(
+            this.db,
+            [...earlier, update].map((part) => ({
+              userId: user.id,
+              metric: "messages" as const,
+              source: "telegram_user",
+              idempotencyKey: `telegram:update:${part.updateId}:message-in`,
+              correlationId: `telegram-update:${part.updateId}`,
+              metadata: {
+                kind: part.kind,
+                aggregated_into: update.updateId,
+              },
+            })),
+          );
           usageCharged = true;
+          await this.quotaExhaustion?.notifyMessages(update.telegramId);
+
+          // Исходящее сообщение — отдельная тарифная метрика. Его учёт
+          // остаётся best-effort: ответ уже доставлен, и ошибка счётчика
+          // не должна запускать второй вызов модели и второй ответ.
+          try {
+            await recordMessageUsage(this.db, {
+              userId: user.id,
+              metric: "messages_out",
+              source: "assistant_reply",
+              idempotencyKey: `telegram:update:${update.updateId}:message-out`,
+              correlationId: `telegram-update:${update.updateId}`,
+              metadata: { aggregated_messages: earlier.length + 1 },
+            });
+          } catch (error) {
+            this.logger.warn("Расход ответа Евы не записан", {
+              updateId: update.updateId,
+              code: error instanceof Error ? error.name : "unknown_error",
+            });
+          }
           await this.linkTurn(turnHandle, {
             quotaMetric: "messages",
             quotaCharged: true,

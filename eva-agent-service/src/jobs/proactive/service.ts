@@ -21,6 +21,7 @@
 
 import type { Database } from "../../db.js";
 import type { Logger } from "../../logger.js";
+import { recordMessageUsage } from "../../subscriptions/usage-ledger.js";
 import {
   type ProactiveContext,
   type ProactiveKind,
@@ -150,14 +151,33 @@ export class ProactiveService {
         await this.finish(claimed, "skipped", "empty_message", null, null);
         return { status: "skipped", reason: "empty_message" };
       }
+      const deliveryKey = `proactive:${kind}:${candidate.userId}:${slot.slotKey}`;
       const delivered = await this.delivery.deliver({
         userId: candidate.userId,
         chatId: candidate.chatId,
         text,
         // Ключ идемпотентности доставки повторяет слот: даже если строка
         // слота будет занята дважды, outbox отправит одно сообщение.
-        idempotencyKey: `proactive:${kind}:${candidate.userId}:${slot.slotKey}`,
+        idempotencyKey: deliveryKey,
       });
+      try {
+        await recordMessageUsage(this.db, {
+          userId: candidate.userId,
+          metric: "messages_out",
+          source: "proactive",
+          idempotencyKey: `${deliveryKey}:message-usage`,
+          correlationId: options.runId ?? deliveryKey,
+          metadata: { kind, slot_key: slot.slotKey },
+        });
+      } catch (error) {
+        // Durable доставка уже поставлена. Учёт не имеет права превращать
+        // успешную постановку в повторную отправку.
+        this.logger.warn("Расход проактивного сообщения не записан", {
+          kind,
+          userId: candidate.userId,
+          code: error instanceof Error ? error.name : "unknown_error",
+        });
+      }
       await this.finish(claimed, "sent", null, delivered.outboxId, text);
       if (episode) await this.linkEpisode(kind, candidate.userId, episode, claimed);
       return { status: "sent", outboxId: delivered.outboxId };
@@ -225,12 +245,28 @@ export class ProactiveService {
         await this.finish(claimed, "skipped", "empty_message", null, null);
         return { status: "skipped", reason: "empty_message" };
       }
+      const deliveryKey = `proactive:initiative:${candidate.userId}:${candidate.messageId}`;
       const delivered = await this.delivery.deliver({
         userId: candidate.userId,
         chatId: candidate.chatId,
         text,
-        idempotencyKey: `proactive:initiative:${candidate.userId}:${candidate.messageId}`,
+        idempotencyKey: deliveryKey,
       });
+      try {
+        await recordMessageUsage(this.db, {
+          userId: candidate.userId,
+          metric: "messages_out",
+          source: "proactive",
+          idempotencyKey: `${deliveryKey}:message-usage`,
+          correlationId: options.runId ?? deliveryKey,
+          metadata: { kind: "initiative", message_id: candidate.messageId },
+        });
+      } catch (error) {
+        this.logger.warn("Расход инициативного сообщения не записан", {
+          userId: candidate.userId,
+          code: error instanceof Error ? error.name : "unknown_error",
+        });
+      }
       await this.finish(claimed, "sent", null, delivered.outboxId, text);
       return { status: "sent", outboxId: delivered.outboxId };
     } catch (error) {

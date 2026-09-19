@@ -83,6 +83,7 @@ export const TENANT_TABLES: Readonly<Record<string, readonly string[]>> = {
   turn_recovery_attempts: ["user_id"],
   turn_runs: ["user_id", "telegram_user_id"],
   usage_counters: ["user_id"],
+  usage_events: ["user_id"],
   user_checkins: ["user_id"],
   user_north: ["user_id"],
   user_preferences: ["user_id"],
