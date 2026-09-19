@@ -5,6 +5,7 @@ import type { ConversationPurposeService } from "./conversations/purpose-service
 import type { Database } from "./db.js";
 import type { LettaService } from "./letta.js";
 import type { Logger } from "./logger.js";
+import { recordMessageUsage } from "./subscriptions/usage-ledger.js";
 import type { RuntimeContextBuilder } from "./runtime/runtime-context.js";
 import type { UserTurnLock } from "./turns/user-turn-lock.js";
 import type { TelegramClient } from "./telegram.js";
@@ -471,10 +472,18 @@ export class BackgroundRuntime {
         await this.saveHeartbeat(candidate, null, "duplicate");
         return;
       }
+      const usageSlot = proactiveSlot("heartbeat", candidate.timezone, new Date());
       await this.telegram.withPriority(
         "reminder",
         async () => await this.telegram.sendMessage(Number(candidate.chat_id), reply),
       );
+      await recordMessageUsage(this.db, {
+        userId: Number(candidate.user_id),
+        metric: "messages_out",
+        source: "heartbeat",
+        idempotencyKey: `heartbeat:${candidate.user_id}:${usageSlot.slotKey}:message-usage`,
+        correlationId: `heartbeat:${candidate.user_id}:${usageSlot.slotKey}`,
+      });
       await this.saveHeartbeat(candidate, hash, "sent");
       await this.recordOwnMessage(candidate, reply);
       await this.db.markAgentUsed(candidate.agent_id, Number(candidate.user_id));
