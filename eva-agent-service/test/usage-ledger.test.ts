@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { Database } from "../src/db.js";
-import { recordMessageUsage } from "../src/subscriptions/usage-ledger.js";
+import type { Database } from "../dist/db.js";
+import { recordMessageUsage } from "../dist/subscriptions/usage-ledger.js";
 
 test("message usage is idempotent by stable event key", async () => {
   const seen = new Set<string>();
