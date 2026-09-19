@@ -1244,7 +1244,7 @@ export class EvaWorkflow {
           // Ответ считается отдельно от входящих сообщений. Stable key
           // привязан к update_id, поэтому повторный post-delivery учёт не
           // создаёт вторую единицу.
-          await recordMessageUsage(this.db, {
+          usageCharged = await recordMessageUsage(this.db, {
             userId: user.id,
             metric: "messages_out",
             source: "assistant_reply",
@@ -1252,7 +1252,6 @@ export class EvaWorkflow {
             correlationId: `telegram-update:${update.updateId}`,
             metadata: { aggregated_messages: earlier.length + 1 },
           });
-          usageCharged = true;
           await this.linkTurn(turnHandle, {
             quotaMetric: "messages",
             quotaCharged: true,
@@ -2012,7 +2011,7 @@ function quotaLabel(metric: string, period: string, language: SupportedLanguage)
   const metricLabel = (language === "en"
     ? {
         messages: "Messages",
-        messages_out: "Eva messages",
+        messages_out: "Eva replies",
         voice_in: "Voice messages",
         voice_minutes: "Voice minutes",
         voice_out: "Voiced replies",
@@ -2023,7 +2022,7 @@ function quotaLabel(metric: string, period: string, language: SupportedLanguage)
       }
     : {
         messages: "Сообщения",
-        messages_out: "Сообщения Евы",
+        messages_out: "Ответы Евы",
         voice_in: "Голосовые сообщения",
         voice_minutes: "Голосовые минуты",
         voice_out: "Озвученные ответы",
