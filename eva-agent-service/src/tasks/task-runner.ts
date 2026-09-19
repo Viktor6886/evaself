@@ -468,6 +468,10 @@ export class ScheduledTaskRunner {
       `task:${task.id}:${new Date(task.scheduled_at).getTime()}:${slot}`,
       async () => await this.telegram.sendMessage(Number(task.chat_id), text),
       "reminder",
+      {
+        userId: Number(task.user_id),
+        metric: "messages_out",
+      },
     );
   }
 
