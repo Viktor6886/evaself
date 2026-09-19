@@ -11,6 +11,10 @@ export interface OutboxEnvelope {
   payload: Record<string, unknown>;
   idempotencyKey?: string;
   userId?: number;
+  /** Тарифная метрика: списывается только после успешной durable delivery. */
+  usageMetric?: string;
+  /** Одна логическая отправка по умолчанию расходует одну единицу метрики. */
+  usageAmount?: number;
   /** Ступень очереди. Не указана — выводится из метода. */
   priority?: DeliveryPriority;
   onMetrics?: (metrics: Partial<DeliveryMetrics>) => void;
@@ -39,11 +43,15 @@ export interface OutboxDelivery {
 
 interface OutboxRow {
   id: string;
+  user_id: string | null;
   chat_id: string;
   telegram_method: string;
   payload: Record<string, unknown>;
   attempts: number;
   priority: number;
+  usage_metric: string | null;
+  usage_amount: string | number;
+  usage_charged: boolean;
 }
 
 export interface ParallelOutboxOptions {
@@ -90,6 +98,10 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
   async send(envelope: OutboxEnvelope): Promise<unknown> {
     const insertStarted = performance.now();
     const idempotencyKey = envelope.idempotencyKey ?? `telegram:${randomUUID()}`;
+    const usageMetric = envelope.usageMetric?.trim() || null;
+    const usageAmount = usageMetric
+      ? Math.max(1, Math.trunc(envelope.usageAmount ?? 1))
+      : 0;
     // Постановка в outbox принадлежит тому ходу, из которого пришла:
     // области пользователя, если сообщение — часть его диалога, и
     // системной, если сообщение отправляет сам сервис.
@@ -97,10 +109,17 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
       "telegram.outbox.enqueue",
       async () => await this.db.query<{ id: string; status: string }>(
       `INSERT INTO telegram_outbox
-         (idempotency_key, user_id, chat_id, telegram_method, payload, priority)
-       VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+         (idempotency_key, user_id, chat_id, telegram_method, payload, priority,
+          usage_metric, usage_amount)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8)
        ON CONFLICT (idempotency_key) DO UPDATE SET
-         idempotency_key = EXCLUDED.idempotency_key
+         idempotency_key = EXCLUDED.idempotency_key,
+         user_id = COALESCE(telegram_outbox.user_id, EXCLUDED.user_id),
+         usage_metric = COALESCE(telegram_outbox.usage_metric, EXCLUDED.usage_metric),
+         usage_amount = CASE
+           WHEN telegram_outbox.usage_metric IS NULL THEN EXCLUDED.usage_amount
+           ELSE telegram_outbox.usage_amount
+         END
        RETURNING id, status`,
       [
         idempotencyKey,
@@ -109,6 +128,8 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
         envelope.method,
         JSON.stringify(envelope.payload),
         priorityValue(envelope.priority, envelope.method),
+        usageMetric,
+        usageAmount,
       ],
       ),
       { inherit: true },
@@ -325,7 +346,8 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
         const { rows } = await client.query<OutboxRow & { priority: number }>(
           `
             -- tenant: system — durable delivery: строки берутся по id и аренде воркера, а не по запросу пользователя
-            SELECT t.id, t.telegram_method, t.payload, t.attempts, t.chat_id, t.priority
+            SELECT t.id, t.user_id, t.telegram_method, t.payload, t.attempts,
+                   t.chat_id, t.priority, t.usage_metric, t.usage_amount, t.usage_charged
               FROM telegram_outbox t
              WHERE t.attempts < $2
                AND (
@@ -407,7 +429,8 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
           AND status IN ('pending', 'retry')
           AND available_at <= now()
           AND attempts < $3
-      RETURNING id, chat_id, telegram_method, payload, attempts, priority`,
+      RETURNING id, user_id, chat_id, telegram_method, payload, attempts, priority,
+                usage_metric, usage_amount, usage_charged`,
       [id, this.workerId, Math.max(1, this.options.maxAttempts)],
       ),
       { crossUser: true },
@@ -444,7 +467,8 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
       const { rows } = await client.query<OutboxRow>(
         `
           -- tenant: system — durable delivery: строки берутся по id и аренде воркера, а не по запросу пользователя
-          SELECT id, chat_id, telegram_method, payload, attempts, priority
+          SELECT id, user_id, chat_id, telegram_method, payload, attempts, priority,
+                 usage_metric, usage_amount, usage_charged
            FROM telegram_outbox
           WHERE attempts < $2
             AND (
@@ -477,6 +501,73 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
     );
   }
 
+  /**
+   * Закрыть durable delivery и, если сообщение тарифицируемое, в той же
+   * транзакции перенести ровно одну логическую отправку в usage_counters.
+   *
+   * Telegram уже ответил успешно. Поэтому idempotency живёт на строке
+   * outbox: повтор worker-а увидит usage_charged и не спишет квоту ещё раз.
+   */
+  private async markSentAndCountUsage(
+    row: OutboxRow,
+    messageIds: number[],
+  ): Promise<void> {
+    await this.db.withSystemScope(
+      "telegram.outbox.sent",
+      async () => await this.db.transaction(async (client) => {
+        const { rows } = await client.query<{
+          user_id: string | null;
+          usage_metric: string | null;
+          usage_amount: string;
+          usage_charged: boolean;
+        }>(
+          `-- tenant: system — durable delivery: строка адресуется своим id,
+           -- владелец и тарифная метрика были зафиксированы при enqueue
+           UPDATE telegram_outbox
+              SET status = 'sent',
+                  telegram_message_ids = $2::bigint[],
+                  last_error = NULL,
+                  sent_at = COALESCE(sent_at, now()),
+                  locked_at = NULL,
+                  locked_by = NULL
+            WHERE id = $1
+            RETURNING user_id, usage_metric, usage_amount, usage_charged`,
+          [row.id, messageIds],
+        );
+        const sent = rows[0];
+        const userId = Number(sent?.user_id);
+        const amount = Number(sent?.usage_amount ?? 0);
+        if (!sent || sent.usage_charged || !sent.usage_metric
+          || !Number.isSafeInteger(userId) || userId <= 0
+          || !Number.isSafeInteger(amount) || amount <= 0) {
+          return;
+        }
+
+        await client.query(
+          `INSERT INTO usage_counters (user_id, metric, period, period_start, used)
+           SELECT $1, $2, p.period, p.start, $3
+             FROM (VALUES
+               ('day', (now() AT TIME ZONE 'UTC')::date),
+               ('week', date_trunc('week', (now() AT TIME ZONE 'UTC')::date)::date),
+               ('month', date_trunc('month', (now() AT TIME ZONE 'UTC')::date)::date)
+             ) AS p(period, start)
+           ON CONFLICT (user_id, metric, period, period_start) DO UPDATE
+             SET used = usage_counters.used + EXCLUDED.used,
+                 updated_at = now()`,
+          [userId, sent.usage_metric, amount],
+        );
+        await client.query(
+          `-- tenant: system — маркер относится к той же durable delivery
+           UPDATE telegram_outbox
+              SET usage_charged = true
+            WHERE id = $1 AND user_id = $2 AND NOT usage_charged`,
+          [row.id, userId],
+        );
+      }),
+      { crossUser: true },
+    );
+  }
+
   private async deliver(
     row: OutboxRow,
     onMetrics?: OutboxEnvelope["onMetrics"],
@@ -488,22 +579,7 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
       const telegramSendMs = elapsed(sendStarted);
       onMetrics?.({ telegramSendMs });
       const messageIds = extractMessageIds(result);
-      await this.db.withSystemScope("telegram.outbox.sent", async () =>
-        await this.db.query(
-        `
-          -- tenant: system — durable delivery: строки берутся по id и аренде воркера, а не по запросу пользователя
-          UPDATE telegram_outbox
-            SET status = 'sent',
-                telegram_message_ids = $2::bigint[],
-                last_error = NULL,
-                sent_at = now(),
-                locked_at = NULL,
-                locked_by = NULL
-          WHERE id = $1`,
-        [row.id, messageIds],
-        ),
-      { crossUser: true },
-    );
+      await this.markSentAndCountUsage(row, messageIds);
       this.logger.debug("Telegram outbox доставлен", {
         outboxId: row.id,
         telegram_send_ms: telegramSendMs,
