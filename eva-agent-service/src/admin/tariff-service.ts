@@ -31,7 +31,7 @@ export const PRICE_PERIODS = ["week", "month", "quarter"] as const;
  */
 export const METRICS = [
   { metric: "messages", title: "Сообщения человека" },
-  { metric: "messages_out", title: "Сообщения Евы" },
+  { metric: "messages_out", title: "Ответы Евы" },
   { metric: "voice_in", title: "Принятые голосовые" },
   { metric: "voice_minutes", title: "Минуты распознавания" },
   { metric: "voice_out", title: "Озвученные ответы" },
