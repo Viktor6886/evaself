@@ -11,6 +11,7 @@ import { randomUUID } from "node:crypto";
 
 import type { ConversationPurposeService } from "../conversations/purpose-service.js";
 import type { Database } from "../db.js";
+import { recordMessageUsage } from "../subscriptions/usage-ledger.js";
 import { EvaError } from "../errors.js";
 import { LiveMessageWatch } from "../turns/live-message.js";
 import { preferredResponseLanguage, t } from "../i18n/index.js";
@@ -464,11 +465,26 @@ export class ScheduledTaskRunner {
     text: string,
     slot = "result",
   ): Promise<unknown> {
-    return await this.telegram.withDeliveryContext(
-      `task:${task.id}:${new Date(task.scheduled_at).getTime()}:${slot}`,
+    const occurrence = new Date(task.scheduled_at).getTime();
+    const deliveryKey = `task:${task.id}:${occurrence}:${slot}`;
+    const sent = await this.telegram.withDeliveryContext(
+      deliveryKey,
       async () => await this.telegram.sendMessage(Number(task.chat_id), text),
       "reminder",
     );
+    // Любое автоматическое сообщение задачи расходует исходящую
+    // тарифную единицу: результат, напоминание, progress и fallback.
+    // Ключ повторяет durable delivery slot, поэтому retry не списывает
+    // одну и ту же отправку дважды.
+    await recordMessageUsage(this.db, {
+      userId: Number(task.user_id),
+      metric: "messages_out",
+      source: "scheduled_task",
+      idempotencyKey: `${deliveryKey}:message-usage`,
+      correlationId: `task:${task.id}:${occurrence}`,
+      metadata: { slot },
+    });
+    return sent;
   }
 
   /**
