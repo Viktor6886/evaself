@@ -476,14 +476,24 @@ export class ScheduledTaskRunner {
     // тарифную единицу: результат, напоминание, progress и fallback.
     // Ключ повторяет durable delivery slot, поэтому retry не списывает
     // одну и ту же отправку дважды.
-    await recordMessageUsage(this.db, {
-      userId: Number(task.user_id),
-      metric: "messages_out",
-      source: "scheduled_task",
-      idempotencyKey: `${deliveryKey}:message-usage`,
-      correlationId: `task:${task.id}:${occurrence}`,
-      metadata: { slot },
-    });
+    try {
+      await recordMessageUsage(this.db, {
+        userId: Number(task.user_id),
+        metric: "messages_out",
+        source: "scheduled_task",
+        idempotencyKey: `${deliveryKey}:message-usage`,
+        correlationId: `task:${task.id}:${occurrence}`,
+        metadata: { slot },
+      });
+    } catch (error) {
+      // Сообщение уже принято durable delivery. Ошибка счётчика не должна
+      // запускать повтор задачи и создавать вторую отправку.
+      this.logger.warn("Расход автоматического сообщения не записан", {
+        taskId: task.id,
+        slot,
+        code: error instanceof Error ? error.name : "unknown_error",
+      });
+    }
     return sent;
   }
 
