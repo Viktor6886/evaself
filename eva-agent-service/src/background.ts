@@ -477,13 +477,20 @@ export class BackgroundRuntime {
         "reminder",
         async () => await this.telegram.sendMessage(Number(candidate.chat_id), reply),
       );
-      await recordMessageUsage(this.db, {
-        userId: Number(candidate.user_id),
-        metric: "messages_out",
-        source: "heartbeat",
-        idempotencyKey: `heartbeat:${candidate.user_id}:${usageSlot.slotKey}:message-usage`,
-        correlationId: `heartbeat:${candidate.user_id}:${usageSlot.slotKey}`,
-      });
+      try {
+        await recordMessageUsage(this.db, {
+          userId: Number(candidate.user_id),
+          metric: "messages_out",
+          source: "heartbeat",
+          idempotencyKey: `heartbeat:${candidate.user_id}:${usageSlot.slotKey}:message-usage`,
+          correlationId: `heartbeat:${candidate.user_id}:${usageSlot.slotKey}`,
+        });
+      } catch (error) {
+        this.logger.warn("Расход heartbeat не записан", {
+          userId: candidate.user_id,
+          code: error instanceof Error ? error.name : "unknown_error",
+        });
+      }
       await this.saveHeartbeat(candidate, hash, "sent");
       await this.recordOwnMessage(candidate, reply);
       await this.db.markAgentUsed(candidate.agent_id, Number(candidate.user_id));
