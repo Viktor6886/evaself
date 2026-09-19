@@ -346,8 +346,8 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
         const { rows } = await client.query<OutboxRow & { priority: number }>(
           `
             -- tenant: system — durable delivery: строки берутся по id и аренде воркера, а не по запросу пользователя
-            SELECT t.id, t.user_id, t.telegram_method, t.payload, t.attempts,
-                   t.chat_id, t.priority, t.usage_metric, t.usage_amount, t.usage_charged
+            SELECT t.id, t.telegram_method, t.payload, t.attempts, t.chat_id, t.priority,
+                   t.user_id, t.usage_metric, t.usage_amount, t.usage_charged
               FROM telegram_outbox t
              WHERE t.attempts < $2
                AND (
