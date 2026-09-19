@@ -28,6 +28,8 @@ export class OutboxProactiveDelivery implements ProactiveDelivery {
       method: "sendMessage",
       chatId: input.chatId,
       userId: input.userId,
+      usageMetric: "messages_out",
+      usageAmount: 1,
       payload: { chat_id: input.chatId, text: input.text },
       // Ступень «напоминание»: проактивное сообщение пропускает вперёд
       // ответ на живой вопрос и кризисный контур.

@@ -48,6 +48,7 @@ import {
   recordGenderFix,
 } from "./i18n/eva-gender.js";
 import type { StarsPayments } from "./payments/stars.js";
+import { countInteractiveUserMessages } from "./subscriptions/message-usage.js";
 import type { QuotaExhaustionNotifier } from "./subscriptions/quota-exhaustion-notifier.js";
 import { quotaExhausted } from "./subscriptions/quota-policy.js";
 import { speechTextFromReply } from "./telegram-format.js";
@@ -1221,10 +1222,19 @@ export class EvaWorkflow {
           await this.moveTurn(turnHandle, "delivering");
           await this.moveTurn(turnHandle, "delivered");
 
-          await this.db.incrementUsage(update.telegramId, "messages");
-          await this.quotaExhaustion?.notifyMessages(update.telegramId);
-          // Ответ Евы — такой же расходник, как входящее сообщение: он
-          // стоит вызова модели, и тариф считает его отдельно.
+          // Квота считает физические сообщения человека, а не ходы
+          // модели. Быстрые сообщения могут объединиться в один prompt,
+          // но каждое из них остаётся отдельной единицей тарифа.
+          const messageUsage = await countInteractiveUserMessages(
+            this.db,
+            user.id,
+            parts.map((part) => part.updateId),
+          );
+          if (messageUsage.charged > 0) {
+            await this.quotaExhaustion?.notifyMessages(update.telegramId);
+          }
+          // Ответ Евы — отдельный расходник. Автоматические сообщения
+          // задач/напоминаний учитывает durable outbox тем же metric.
           await this.countUsage(update.telegramId, "messages_out");
           usageCharged = true;
           await this.linkTurn(turnHandle, {

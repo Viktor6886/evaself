@@ -471,12 +471,18 @@ export class BackgroundRuntime {
         await this.saveHeartbeat(candidate, null, "duplicate");
         return;
       }
-      await this.telegram.withPriority(
-        "reminder",
+      const heartbeatSlot = proactiveSlot("heartbeat", candidate.timezone, new Date());
+      await this.telegram.withDeliveryContext(
+        `heartbeat:${candidate.user_id}:${heartbeatSlot.slotKey}`,
         async () => await this.telegram.sendMessage(Number(candidate.chat_id), reply),
+        "reminder",
+        {
+          userId: Number(candidate.user_id),
+          metric: "messages_out",
+        },
       );
       await this.saveHeartbeat(candidate, hash, "sent");
-      await this.recordOwnMessage(candidate, reply);
+      await this.recordOwnMessage(candidate, reply, heartbeatSlot);
       await this.db.markAgentUsed(candidate.agent_id, Number(candidate.user_id));
     } catch (error) {
       this.logger.warn("Heartbeat не отправлен", {
@@ -511,8 +517,8 @@ export class BackgroundRuntime {
   private async recordOwnMessage(
     candidate: HeartbeatCandidate,
     text: string,
+    slot = proactiveSlot("heartbeat", candidate.timezone, new Date()),
   ): Promise<void> {
-    const slot = proactiveSlot("heartbeat", candidate.timezone, new Date());
     try {
       await this.db.query(
         `INSERT INTO proactive_messages
