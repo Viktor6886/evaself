@@ -17,7 +17,15 @@ interface LedgerEvent {
 
 function fakeLedgerDb(seen = new Set<string>()) {
   const calls: Array<{ sql: string; values: unknown[]; events: LedgerEvent[] }> = [];
+  const scopes: Array<{ userId?: number; label?: string }> = [];
   const db = {
+    async withUserScope<T>(
+      scope: { userId?: number; label?: string },
+      work: () => Promise<T>,
+    ): Promise<T> {
+      scopes.push(scope);
+      return await work();
+    },
     async query(sql: string, values: unknown[]) {
       const events = JSON.parse(String(values[0] ?? "[]")) as LedgerEvent[];
       calls.push({ sql, values, events });
@@ -30,7 +38,7 @@ function fakeLedgerDb(seen = new Set<string>()) {
       return { rows: [{ recorded: String(recorded) }], rowCount: 1 };
     },
   } as unknown as Database;
-  return { db, calls };
+  return { db, calls, scopes };
 }
 
 test("message usage is idempotent by stable event key", async () => {
@@ -78,7 +86,7 @@ test("aggregated user messages are written in one atomic batch", async () => {
 });
 
 test("outbound automatic messages use the same accounting path", async () => {
-  const { db, calls } = fakeLedgerDb();
+  const { db, calls, scopes } = fakeLedgerDb();
   const recorded = await recordMessageUsage(db, {
     userId: 7,
     metric: "messages_out",
@@ -93,6 +101,10 @@ test("outbound automatic messages use the same accounting path", async () => {
   assert.equal(event.metric, "messages_out");
   assert.equal(event.source, "scheduled_task");
   assert.equal(event.idempotency_key, "task:9:1720000000000:result:usage");
+  assert.deepEqual(scopes, [{
+    userId: 7,
+    label: "subscriptions.usage_ledger",
+  }], "фоновые сообщения обязаны входить в tenant scope владельца");
 });
 
 test("one usage batch cannot mix users", async () => {
@@ -117,7 +129,12 @@ test("one usage batch cannot mix users", async () => {
 });
 
 test("invalid usage amount is rejected before SQL", async () => {
-  const db = { async query() { throw new Error("must not query"); } } as unknown as Database;
+  const db = {
+    async withUserScope<T>(_scope: unknown, work: () => Promise<T>): Promise<T> {
+      return await work();
+    },
+    async query() { throw new Error("must not query"); },
+  } as unknown as Database;
   await assert.rejects(
     recordMessageUsage(db, {
       userId: 1,
