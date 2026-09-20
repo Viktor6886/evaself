@@ -49,7 +49,7 @@ import {
 } from "./i18n/eva-gender.js";
 import type { StarsPayments } from "./payments/stars.js";
 import type { QuotaExhaustionNotifier } from "./subscriptions/quota-exhaustion-notifier.js";
-import { quotaExhausted } from "./subscriptions/quota-policy.js";
+import { quotaAllowsAmount, quotaExhausted } from "./subscriptions/quota-policy.js";
 import { recordMessageUsage, recordMessageUsageBatch } from "./subscriptions/usage-ledger.js";
 import { speechTextFromReply } from "./telegram-format.js";
 import {
@@ -675,6 +675,15 @@ export class EvaWorkflow {
         // хода, поэтому «голосовое плюс короткий текст» иначе проходило
         // бы мимо гейта и тратило минуты сверх исчерпанной квоты.
         let parts = [...earlier, update];
+        // Aggregation is atomic from the user's point of view. If the
+        // whole window does not fit the smallest active message quota,
+        // do not send any of it to the model and do not overspend the
+        // plan by several physical Telegram messages at once.
+        if (!quotaAllowsAmount(quota, "messages", parts.length)) {
+          await this.sendQuotaOffer(user.id, update.chatId, language);
+          await this.stopTurn(turnHandle, "quota_messages_batch");
+          return { status: "ignored" };
+        }
         if (parts.some((part) => part.kind === "voice")) {
           if (quotaExhausted(quota, "voice_minutes")) {
             await this.telegram.sendMessage(
