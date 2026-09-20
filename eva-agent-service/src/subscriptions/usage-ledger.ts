@@ -64,7 +64,10 @@ export async function recordMessageUsageBatch(
     };
   });
 
-  const { rows } = await db.query<{ recorded: string | number }>(
+  return await db.withUserScope(
+    { userId, label: "subscriptions.usage_ledger", inherit: true },
+    async () => {
+      const { rows } = await db.query<{ recorded: string | number }>(
     `-- tenant: by user_id — весь batch принадлежит одному явно проверенному пользователю
      WITH source AS (
        SELECT *
@@ -105,7 +108,9 @@ export async function recordMessageUsageBatch(
        RETURNING 1
      )
      SELECT count(*)::text AS recorded FROM inserted`,
-    [JSON.stringify(events)],
+        [JSON.stringify(events)],
+      );
+      return Number(rows[0]?.recorded ?? 0);
+    },
   );
-  return Number(rows[0]?.recorded ?? 0);
 }
