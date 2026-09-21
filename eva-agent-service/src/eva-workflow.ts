@@ -125,7 +125,7 @@ const LEASE_OWNER = `eva-agent-service:${process.pid}`;
  */
 const MAX_IMAGES_PER_TURN = 4;
 /** Full transcript is archived; only this much enters one model turn. */
-const TRANSCRIPT_TURN_CHARACTERS = 120_000;
+const TRANSCRIPT_TURN_CHARACTERS = 60_000;
 
 import {
   inlineKeyboard,
@@ -1664,7 +1664,7 @@ export class EvaWorkflow {
   }
 
   private async transcribeVoice(
-    useCase: "telegram_voice" | "webapp_voice_message",
+    useCase: "telegram_voice" | "telegram_audio" | "webapp_voice_message",
     fileId: string,
     idempotencyKey: string | null,
     language: string,
@@ -1805,7 +1805,7 @@ export class EvaWorkflow {
       let transcription;
       try {
         transcription = await this.transcribeVoice(
-          "telegram_voice",
+          isUploadedAudio ? "telegram_audio" : "telegram_voice",
           file.file_id,
           file.file_unique_id ?? null,
           message.from?.language_code ?? "ru",
@@ -1871,12 +1871,20 @@ export class EvaWorkflow {
         message.from?.language_code ?? "ru",
       );
       const readyText = message.from?.language_code === "en"
-        ? (archive.knowledgeQueued
-          ? "✅ Transcript is ready. I saved the DOCX and can answer questions about this audio later."
-          : "✅ Transcript is ready. I sent the DOCX; long-term material search is not enabled on this server.")
-        : (archive.knowledgeQueued
-          ? "✅ Транскрипция готова. DOCX сохранён; по этому аудио можно задавать вопросы и позже."
-          : "✅ Транскрипция готова. DOCX отправлен; долговременный поиск по материалу на сервере пока не включён.");
+        ? (archive.documentQueued && archive.knowledgeQueued
+          ? "✅ Transcript is ready. The DOCX is being delivered and the full text is saved for later questions."
+          : archive.documentQueued
+            ? "✅ Transcript is ready. The DOCX is being delivered; long-term material search is not enabled on this server."
+            : archive.knowledgeQueued
+              ? "✅ Transcript is ready and saved for later questions, but I could not send the DOCX."
+              : "✅ Transcript is ready, but I could not save or send the DOCX.")
+        : (archive.documentQueued && archive.knowledgeQueued
+          ? "✅ Транскрипция готова. DOCX поставлен в доставку, полный текст сохранён для последующих вопросов."
+          : archive.documentQueued
+            ? "✅ Транскрипция готова. DOCX поставлен в доставку; долговременный поиск по материалу на сервере пока не включён."
+            : archive.knowledgeQueued
+              ? "✅ Транскрипция готова и сохранена для последующих вопросов, но DOCX отправить не удалось."
+              : "✅ Транскрипция готова, но сохранить и отправить DOCX не удалось.");
       if (statusId !== null) {
         await this.telegram.editPlainMessage(update.chatId, statusId, readyText).catch(() => undefined);
       } else {
@@ -1922,7 +1930,7 @@ export class EvaWorkflow {
     transcript: string,
     durationSeconds: number,
     language: string,
-  ): Promise<{ knowledgeQueued: boolean }> {
+  ): Promise<{ knowledgeQueued: boolean; documentQueued: boolean }> {
     const sourceName = (file.file_name ?? "audio").slice(0, 200);
     const base = sourceName
       .replace(/\.[^.]+$/u, "")
@@ -1950,7 +1958,7 @@ export class EvaWorkflow {
         status: response.status,
         detail: detail.slice(0, 200),
       });
-      return { knowledgeQueued: false };
+      return { knowledgeQueued: false, documentQueued: false };
     }
 
     const bytes = new Uint8Array(await response.arrayBuffer());
@@ -1972,18 +1980,22 @@ export class EvaWorkflow {
       }
     }
 
-    await this.telegram.sendDocument(
-      update.chatId,
-      bytes,
-      filename,
-      "Транскрипция аудиозаписи",
-    ).catch((error) => {
+    let documentQueued = false;
+    try {
+      await this.telegram.sendDocument(
+        update.chatId,
+        bytes,
+        filename,
+        "Транскрипция аудиозаписи",
+      );
+      documentQueued = true;
+    } catch (error) {
       this.logger.warn("DOCX транскрипции не доставлен в Telegram", {
         telegram_id: update.telegramId,
         code: error instanceof Error ? error.name : "unknown_error",
       });
-    });
-    return { knowledgeQueued };
+    }
+    return { knowledgeQueued, documentQueued };
   }
   /**
    * Сообщение для Letta.

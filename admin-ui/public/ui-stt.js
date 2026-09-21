@@ -31,6 +31,7 @@ const STT_STATUS = {
 
 const STT_USE_CASE_LABELS = {
   telegram_voice: "Голосовые в Telegram",
+  telegram_audio: "Аудиофайлы в Telegram",
   webapp_voice_message: "Голосовые в WebApp",
   webapp_live: "Живой режим (в разработке)",
 };

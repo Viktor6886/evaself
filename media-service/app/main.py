@@ -56,7 +56,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 
 WORK_DIR = Path(os.environ.get("MEDIA_WORK_DIR", "/data/media"))
 MAX_UPLOAD_BYTES = int(os.environ.get("MEDIA_MAX_UPLOAD_MB", "200")) * 1024 * 1024
-MAX_AUDIO_SECONDS = int(os.environ.get("MEDIA_MAX_AUDIO_SECONDS", "14400"))
+MAX_AUDIO_SECONDS = int(os.environ.get("MEDIA_MAX_AUDIO_SECONDS", "7200"))
 # 10 minutes of mono 16 kHz PCM are ~19.2 MB. Clamp the configurable
 # segment below that so an accidental env value cannot recreate a >25 MB
 # Whisper-style multipart request.
@@ -306,8 +306,8 @@ async def probe_upload(file: UploadFile = File(...)):
 @app.post("/transcript/docx", dependencies=[Depends(require_service_token)])
 async def transcript_docx(payload: TranscriptDocxRequest):
     """Render transcript text into an editable DOCX and delete temp files after send."""
-    work = Workspace(WORK_DIR)
-    work.__enter__()
+    workspace = Workspace(WORK_DIR)
+    work = workspace.__enter__()
     target = work / "transcript.docx"
     try:
         build_transcript_docx(
@@ -319,7 +319,7 @@ async def transcript_docx(payload: TranscriptDocxRequest):
             duration_seconds=payload.duration_seconds,
         )
     except Exception:  # noqa: BLE001 - document failure must not leak internals
-        work.__exit__(None, None, None)
+        workspace.__exit__(None, None, None)
         log.exception("transcript DOCX rendering failed")
         return _error("transcript_docx_failed", "не удалось сформировать DOCX", 500)
 
@@ -571,8 +571,18 @@ async def _route_transcription(
         )
 
     route = STT_RUNTIME.route(use_case)
-    route_limit = route.max_audio_seconds if route and route.max_audio_seconds else ASR_CHUNK_SECONDS
-    chunk_seconds = max(10, min(ASR_CHUNK_SECONDS, route_limit))
+    route_limit = route.max_audio_seconds if route else None
+    if route_limit and info["duration_seconds"] > route_limit:
+        return _error(
+            "stt_audio_too_long",
+            f"запись длиной {info['duration_seconds']:.0f} с превышает предел "
+            f"{route_limit} с для сценария «{use_case}»",
+            413,
+        )
+    # Route limit is the total recording limit. Chunk size is an internal
+    # transport bound; when an administrator sets a smaller total limit,
+    # each chunk must stay below it too.
+    chunk_seconds = max(10, min(ASR_CHUNK_SECONDS, route_limit or ASR_CHUNK_SECONDS))
     try:
         chunks = await split_to_asr_wav(source, work / "asr-parts", chunk_seconds)
     except MediaError as exc:
