@@ -2,7 +2,9 @@
 
 import shutil
 import subprocess
+from io import BytesIO
 from pathlib import Path
+from zipfile import ZipFile
 
 import pytest
 from fastapi.testclient import TestClient
@@ -66,6 +68,24 @@ def test_telegram_transcribe_without_a_token_is_refused(client):
     response = client.post("/telegram/transcribe", json={"file_id": "abc"})
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "telegram_not_configured"
+
+
+def test_transcript_docx_endpoint_returns_editable_docx(client):
+    response = client.post("/transcript/docx", json={
+        "title": "Транскрипция",
+        "text": "Первая строка\nВторая строка",
+        "source_name": "meeting.mp3",
+        "language": "ru",
+        "duration_seconds": 90,
+    })
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+    with ZipFile(BytesIO(response.content)) as archive:
+        xml = archive.read("word/document.xml").decode("utf-8")
+    assert "meeting.mp3" in xml
+    assert "Первая строка" in xml
 
 
 def test_temp_directory_is_empty_after_requests(client):
