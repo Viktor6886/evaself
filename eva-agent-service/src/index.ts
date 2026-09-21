@@ -530,6 +530,9 @@ async function main(): Promise<void> {
     : null;
 
   const knowledgeUploads = jobs && config.knowledgeUploadsEnabled ? new KnowledgeUploadService(db,jobs.outbox,"/data/knowledge-uploads") : null;
+  // Audio transcripts reuse the same tenant-scoped ingestion as documents;
+  // there is no second storage or RAG path.
+  workflow.setKnowledgeUploadService(knowledgeUploads);
   const research = jobs && config.researchOrchestratorEnabled ? new ResearchEnqueuer(db,jobs.outbox,jobs.runs) : null;
   // Telegram id is a verified identity key. Resolution is the only cross-user
   // lookup and therefore runs in an explicitly named system scope; every

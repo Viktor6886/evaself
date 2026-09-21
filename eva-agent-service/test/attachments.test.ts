@@ -68,10 +68,22 @@ test("вид сообщения не зависит от способа отпр
     telegramMediaKind({ message_id: 1, chat, document: { file_id: "d", mime_type: "image/png", file_name: "screen.png" } } as never),
     "image",
   );
-  // Голосовая запись, отправленная файлом, — всё ещё голос.
+  // Voice note is direct user speech; regular audio is reference material.
+  assert.equal(
+    telegramMediaKind({ message_id: 1, chat, voice: { file_id: "v", mime_type: "audio/ogg" } } as never),
+    "voice",
+  );
+  assert.equal(
+    telegramMediaKind({ message_id: 1, chat, audio: { file_id: "a", mime_type: "audio/mpeg", file_name: "meeting.mp3" } } as never),
+    "audio",
+  );
   assert.equal(
     telegramMediaKind({ message_id: 1, chat, document: { file_id: "d", mime_type: "audio/ogg", file_name: "note.ogg" } } as never),
-    "voice",
+    "audio",
+  );
+  assert.equal(
+    telegramMediaKind({ message_id: 1, chat, document: { file_id: "d", file_name: "meeting.webm" } } as never),
+    "audio",
   );
   assert.equal(
     telegramMediaKind({ message_id: 1, chat, document: { file_id: "d", file_name: "договор.docx" } } as never),

@@ -1069,6 +1069,28 @@ export class TelegramClient implements OutboxTransport {
     });
   }
 
+  async sendDocument(
+    chatId: number,
+    document: Uint8Array,
+    filename: string,
+    caption?: string,
+  ): Promise<void> {
+    if (this.outbox) {
+      await this.dispatch("sendDocument", chatId, {
+        chat_id: chatId,
+        document_base64: Buffer.from(document).toString("base64"),
+        filename,
+        ...(caption?.trim() ? { caption: caption.trim().slice(0, 1024) } : {}),
+      });
+      return;
+    }
+    const started = performance.now();
+    try {
+      await this.sendDocumentDirect(chatId, document, filename, caption);
+    } finally {
+      this.addDeliveryMetrics({ telegramSendMs: elapsed(started) });
+    }
+  }
   async sendVoice(chatId: number, audio: Uint8Array, filename = "eva.ogg"): Promise<void> {
     if (this.outbox) {
       await this.dispatch("sendVoice", chatId, {
@@ -1164,6 +1186,19 @@ export class TelegramClient implements OutboxTransport {
         }
       }
     }
+    if (method === "sendDocument") {
+      const encoded = typeof payload.document_base64 === "string" ? payload.document_base64 : "";
+      if (!encoded) throw new Error("Telegram outbox: отсутствуют данные документа");
+      const chatId = Number(payload.chat_id);
+      if (!Number.isSafeInteger(chatId)) throw new Error("Telegram outbox: неверный chat_id");
+      await this.sendDocumentDirect(
+        chatId,
+        new Uint8Array(Buffer.from(encoded, "base64")),
+        typeof payload.filename === "string" ? payload.filename : "document.docx",
+        typeof payload.caption === "string" ? payload.caption : undefined,
+      );
+      return {};
+    }
     if (method === "sendVoice") {
       const encoded = typeof payload.audio_base64 === "string" ? payload.audio_base64 : "";
       if (!encoded) throw new Error("Telegram outbox: отсутствуют данные голосового сообщения");
@@ -1179,6 +1214,30 @@ export class TelegramClient implements OutboxTransport {
     return await this.call(method, apiPayload);
   }
 
+  private async sendDocumentDirect(
+    chatId: number,
+    document: Uint8Array,
+    filename: string,
+    caption?: string,
+  ): Promise<void> {
+    this.assertConfigured();
+    const form = new FormData();
+    form.set("chat_id", String(chatId));
+    form.set(
+      "document",
+      new Blob(
+        [Buffer.from(document)],
+        { type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" },
+      ),
+      filename,
+    );
+    if (caption?.trim()) form.set("caption", caption.trim().slice(0, 1024));
+    const response = await fetch(this.baseUrl + "/bot" + this.token + "/sendDocument", {
+      method: "POST",
+      body: form,
+    });
+    await this.parseResponse(response, "sendDocument");
+  }
   private async sendVoiceDirect(
     chatId: number,
     audio: Uint8Array,

@@ -1,3 +1,5 @@
+import { Readable } from "node:stream";
+
 import type { Config } from "./config.js";
 import { type CrisisMonitor, safetyDirective } from "./crisis.js";
 import type { AgentLinkRow, Database, SttUsageAttempt, UserRow } from "./db.js";
@@ -35,6 +37,7 @@ import {
 } from "./turns/turn-lifecycle.js";
 import {
   type TelegramLiveMessage,
+  type TelegramFile,
   type TelegramMessage,
   type TelegramUpdate,
   TelegramClient,
@@ -49,6 +52,8 @@ import {
 } from "./i18n/eva-gender.js";
 import type { StarsPayments } from "./payments/stars.js";
 import type { QuotaExhaustionNotifier } from "./subscriptions/quota-exhaustion-notifier.js";
+import type { KnowledgeUploadService } from "./knowledge/lifecycle.js";
+import { sanitizeUntrustedContent } from "./knowledge/security.js";
 import { quotaExhausted } from "./subscriptions/quota-policy.js";
 import { recordMessageUsage, recordMessageUsageBatch } from "./subscriptions/usage-ledger.js";
 import { speechTextFromReply } from "./telegram-format.js";
@@ -119,6 +124,8 @@ const LEASE_OWNER = `eva-agent-service:${process.pid}`;
  * сам разговор.
  */
 const MAX_IMAGES_PER_TURN = 4;
+/** Full transcript is archived; only this much enters one model turn. */
+const TRANSCRIPT_TURN_CHARACTERS = 120_000;
 
 import {
   inlineKeyboard,
@@ -143,7 +150,7 @@ export interface NormalizedUpdate {
   telegramId: number;
   chatId: number;
   messageId: number;
-  kind: "text" | "voice" | "image" | "document" | "payment" | "unsupported";
+  kind: "text" | "voice" | "audio" | "image" | "document" | "payment" | "unsupported";
   command: string | null;
   replyToMessageId: number | null;
   /** Server-owned target; synthetic events always carry null. */
@@ -159,6 +166,8 @@ export class EvaWorkflow {
   private readonly taskEvents: TaskEventService;
   /** Разбор вложений: общий с приёмом в базу знаний. */
   private readonly attachments: TelegramAttachmentReader;
+  /** Existing tenant-scoped knowledge ingestion; wired after the job layer is built. */
+  private knowledgeUploads: KnowledgeUploadService | null = null;
   constructor(
     private readonly config: Config,
     private readonly db: Database,
@@ -213,6 +222,10 @@ export class EvaWorkflow {
   ) {
     this.taskEvents = new TaskEventService(db);
     this.attachments = new TelegramAttachmentReader(telegram);
+  }
+
+  setKnowledgeUploadService(service: KnowledgeUploadService | null): void {
+    this.knowledgeUploads = service;
   }
 
   /**
@@ -675,7 +688,7 @@ export class EvaWorkflow {
         // хода, поэтому «голосовое плюс короткий текст» иначе проходило
         // бы мимо гейта и тратило минуты сверх исчерпанной квоты.
         let parts = [...earlier, update];
-        if (parts.some((part) => part.kind === "voice")) {
+        if (parts.some((part) => part.kind === "voice" || part.kind === "audio")) {
           if (quotaExhausted(quota, "voice_minutes")) {
             await this.telegram.sendMessage(
               update.chatId,
@@ -685,7 +698,7 @@ export class EvaWorkflow {
             // ход целиком значило бы потерять текст, который человек
             // написал в том же окне: последовательный воркер на него
             // ответил бы, потому что гейтил каждое сообщение отдельно.
-            parts = parts.filter((part) => part.kind !== "voice");
+            parts = parts.filter((part) => part.kind !== "voice" && part.kind !== "audio");
             if (parts.length === 0) {
               await this.stopTurn(turnHandle, "quota_voice");
               return { status: "ignored" };
@@ -1679,7 +1692,7 @@ export class EvaWorkflow {
             language,
             idempotency_key: idempotencyKey,
           }),
-          signal: AbortSignal.timeout(5 * 60_000),
+          signal: AbortSignal.timeout(30 * 60_000),
         },
       );
     } catch (error) {
@@ -1772,11 +1785,10 @@ export class EvaWorkflow {
 
     if (update.kind === "text") return only(caption);
 
-    if (update.kind === "voice") {
-      // Голосовое, аудио и звук, присланный файлом, идут одним и тем же
-      // путём распознавания: разными их делает только способ отправки.
+    if (update.kind === "voice" || update.kind === "audio") {
       const file = audioFileOf(message);
-      if (!file) throw new Error("Голосовой файл отсутствует");
+      if (!file) throw new Error("Аудиофайл отсутствует");
+      const isUploadedAudio = update.kind === "audio";
       let settled = false;
       const status: { promise: Promise<number | null> | null } = { promise: null };
       const statusTimer = setTimeout(() => {
@@ -1784,20 +1796,17 @@ export class EvaWorkflow {
         status.promise = this.telegram.sendPlainMessage(
           update.chatId,
           message.from?.language_code === "en"
-            ? "🎧 Transcribing voice message…"
-            : "🎧 Распознаю голосовое…",
+            ? (isUploadedAudio ? "🎧 Transcribing audio file…" : "🎧 Transcribing voice message…")
+            : (isUploadedAudio ? "🎧 Расшифровываю аудиофайл…" : "🎧 Распознаю голосовое…"),
         ).then((sent) => telegramMessageIdOf(sent[sent.length - 1])).catch(() => null);
       }, 600);
       statusTimer.unref?.();
+
       let transcription;
       try {
         transcription = await this.transcribeVoice(
           "telegram_voice",
           file.file_id,
-          // file_unique_id не меняется при повторной доставке апдейта, в
-          // отличие от file_id. Telegram повторяет доставку при таймауте
-          // вебхука, и без этого ключа одно голосовое оплачивалось бы
-          // дважды.
           file.file_unique_id ?? null,
           message.from?.language_code ?? "ru",
         );
@@ -1807,8 +1816,8 @@ export class EvaWorkflow {
         const statusId = status.promise ? await status.promise.catch(() => null) : null;
         if (statusId !== null) {
           const failureText = message.from?.language_code === "en"
-            ? "I could not transcribe that voice message."
-            : "Не удалось распознать голосовое.";
+            ? "I could not transcribe that audio."
+            : "Не удалось распознать аудио.";
           const edited = await this.telegram.editPlainMessage(
             update.chatId,
             statusId,
@@ -1827,33 +1836,64 @@ export class EvaWorkflow {
         settled = true;
         clearTimeout(statusTimer);
       }
+
       if (!transcription.fromCache && transcription.durationMinutes) {
         await this.db.incrementUsage(
           update.telegramId,
           "voice_minutes",
           Math.max(1, Math.ceil(transcription.durationMinutes)),
         );
-        // Минуты и штуки — разные величины: тариф может ограничивать и
-        // длительность распознавания, и число голосовых.
         await this.countUsage(update.telegramId, "voice_in");
       }
-      const statusId = status.promise ? await status.promise.catch(() => null) : null;
-      if (statusId !== null) {
-        await this.telegram.editPlainMessage(
-          update.chatId,
-          statusId,
-          formatVoiceTranscriptEcho(transcription.text),
-        );
-      } else {
-        await this.telegram.sendPlainMessage(
-          update.chatId,
-          formatVoiceTranscriptEcho(transcription.text),
-        );
-      }
-      // Подпись к аудиофайлу — тоже слова человека, и терять её незачем.
-      return only([transcription.text, caption].filter(Boolean).join("\n"));
-    }
 
+      const statusId = status.promise ? await status.promise.catch(() => null) : null;
+      if (!isUploadedAudio) {
+        if (statusId !== null) {
+          await this.telegram.editPlainMessage(
+            update.chatId,
+            statusId,
+            formatVoiceTranscriptEcho(transcription.text),
+          );
+        } else {
+          await this.telegram.sendPlainMessage(
+            update.chatId,
+            formatVoiceTranscriptEcho(transcription.text),
+          );
+        }
+        return only([transcription.text, caption].filter(Boolean).join("\n"));
+      }
+
+      const archive = await this.archiveAudioTranscript(
+        update,
+        file,
+        transcription.text,
+        transcription.durationSeconds,
+        message.from?.language_code ?? "ru",
+      );
+      const readyText = message.from?.language_code === "en"
+        ? (archive.knowledgeQueued
+          ? "✅ Transcript is ready. I saved the DOCX and can answer questions about this audio later."
+          : "✅ Transcript is ready. I sent the DOCX; long-term material search is not enabled on this server.")
+        : (archive.knowledgeQueued
+          ? "✅ Транскрипция готова. DOCX сохранён; по этому аудио можно задавать вопросы и позже."
+          : "✅ Транскрипция готова. DOCX отправлен; долговременный поиск по материалу на сервере пока не включён.");
+      if (statusId !== null) {
+        await this.telegram.editPlainMessage(update.chatId, statusId, readyText).catch(() => undefined);
+      } else {
+        await this.telegram.sendPlainMessage(update.chatId, readyText).catch(() => undefined);
+      }
+
+      const material = [
+        "Аудиофайл: " + (file.file_name ?? "audio").slice(0, 200),
+        sanitizeUntrustedContent(
+          transcription.text.slice(0, TRANSCRIPT_TURN_CHARACTERS),
+        ),
+        transcription.text.length > TRANSCRIPT_TURN_CHARACTERS
+          ? "[Транскрипция сокращена в текущем ходе; полный текст сохранён в DOCX и базе знаний.]"
+          : "",
+      ].filter(Boolean).join("\n");
+      return { text: caption, images: [], attachments: [material] };
+    }
     if (update.kind === "image") {
       const file = imageFileOf(message);
       if (!file) throw new Error("Изображение отсутствует");
@@ -1876,6 +1916,75 @@ export class EvaWorkflow {
     throw new Error("Неподдерживаемый тип сообщения");
   }
 
+  private async archiveAudioTranscript(
+    update: NormalizedUpdate,
+    file: TelegramFile,
+    transcript: string,
+    durationSeconds: number,
+    language: string,
+  ): Promise<{ knowledgeQueued: boolean }> {
+    const sourceName = (file.file_name ?? "audio").slice(0, 200);
+    const base = sourceName
+      .replace(/\.[^.]+$/u, "")
+      .replace(/[\\/:*?"<>|]+/gu, "_")
+      .trim() || "audio";
+    const filename = base.slice(0, 160) + " — транскрипция.docx";
+    const response = await fetch(
+      this.config.mediaServiceUrl.replace(/\/+$/, "") + "/transcript/docx",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", ...this.mediaHeaders() },
+        body: JSON.stringify({
+          title: "Транскрипция: " + sourceName,
+          text: transcript,
+          source_name: sourceName,
+          language,
+          duration_seconds: durationSeconds,
+        }),
+        signal: AbortSignal.timeout(60_000),
+      },
+    );
+    if (!response.ok) {
+      const detail = await response.text().catch(() => "");
+      this.logger.warn("DOCX транскрипции не сформирован", {
+        status: response.status,
+        detail: detail.slice(0, 200),
+      });
+      return { knowledgeQueued: false };
+    }
+
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    let knowledgeQueued = false;
+    if (this.knowledgeUploads) {
+      try {
+        await this.knowledgeUploads.createFromStream(update.telegramId, {
+          name: filename,
+          mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          stream: Readable.from([Buffer.from(bytes)]),
+          truncated: () => false,
+        });
+        knowledgeQueued = true;
+      } catch (error) {
+        this.logger.warn("Транскрипция не поставлена в базу знаний", {
+          telegram_id: update.telegramId,
+          code: error instanceof Error ? error.name : "unknown_error",
+        });
+      }
+    }
+
+    await this.telegram.sendDocument(
+      update.chatId,
+      bytes,
+      filename,
+      "Транскрипция аудиозаписи",
+    ).catch((error) => {
+      this.logger.warn("DOCX транскрипции не доставлен в Telegram", {
+        telegram_id: update.telegramId,
+        code: error instanceof Error ? error.name : "unknown_error",
+      });
+    });
+    return { knowledgeQueued };
+  }
   /**
    * Сообщение для Letta.
    *

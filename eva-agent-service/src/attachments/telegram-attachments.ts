@@ -32,7 +32,7 @@ export const VISION_MEDIA_TYPES = new Set([
   "image/webp",
 ]);
 
-export type MediaKind = "text" | "voice" | "image" | "document" | "unsupported";
+export type MediaKind = "text" | "voice" | "audio" | "image" | "document" | "unsupported";
 
 export interface AttachmentImage {
   mediaType: string;
@@ -62,15 +62,21 @@ export const DEFAULT_ATTACHMENT_LIMITS: AttachmentLimits = {
  * их и присылают: «отправить как файл» в Telegram — обычное действие.
  */
 export function telegramMediaKind(message: TelegramMessage): MediaKind {
-  if (message.voice || message.audio) return "voice";
+  // A Telegram voice note is the user speaking. A regular audio file is
+  // reference material and must not silently become a personal-memory fact.
+  if (message.voice) return "voice";
+  if (message.audio) return "audio";
   if (message.photo?.length) return "image";
   const document = message.document;
   if (document) {
     const mime = document.mime_type?.split(";")[0]?.trim().toLowerCase() ?? "";
     const name = document.file_name ?? "";
     if (mime.startsWith("image/") || /\.(png|jpe?g|gif|webp)$/i.test(name)) return "image";
-    if (mime.startsWith("audio/") || /\.(ogg|oga|mp3|m4a|wav|opus|aac|flac)$/i.test(name)) {
-      return "voice";
+    if (
+      mime.startsWith("audio/")
+      || /\.(ogg|oga|mp3|mp4|mpeg|mpga|m4a|wav|webm|opus|aac|flac|wma|aiff?|amr|3gp)$/i.test(name)
+    ) {
+      return "audio";
     }
     return "document";
   }
