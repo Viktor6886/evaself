@@ -190,6 +190,7 @@ https://{location}-speech.googleapis.com/v2
 | Сценарий | Что это |
 | --- | --- |
 | `telegram_voice` | Обычные голосовые Telegram |
+| `telegram_audio` | Загруженные аудиофайлы Telegram; длинные записи режутся на части перед STT |
 | `webapp_voice_message` | Голосовая запись в WebApp |
 | `webapp_live` | Потоковый режим живой Евы. Маршрут заведён, выключен |
 
