@@ -667,6 +667,7 @@ services:
       MEDIA_ASR_BASE_URL: ${MEDIA_ASR_BASE_URL}
       MEDIA_ASR_API_KEY: ${MEDIA_ASR_API_KEY}
       MEDIA_ASR_MODEL: ${MEDIA_ASR_MODEL}
+      MEDIA_ASR_CHUNK_SECONDS: ${MEDIA_ASR_CHUNK_SECONDS:-480}
       MEDIA_TTS_BASE_URL: ${MEDIA_TTS_BASE_URL}
       MEDIA_TTS_API_KEY: ${MEDIA_TTS_API_KEY}
       MEDIA_TTS_MODEL: ${MEDIA_TTS_MODEL}
@@ -680,6 +681,7 @@ services:
       # ASR/TTS, а в сети compose его может вызвать любой контейнер.
       EVA_ENV: ${EVA_ENV:-production}
       EVA_TELEGRAM_BOT_TOKEN: ${EVA_TELEGRAM_BOT_TOKEN}
+      EVA_TELEGRAM_API_BASE_URL: ${EVA_TELEGRAM_API_BASE_URL:-https://api.telegram.org}
       TZ: ${TZ}
     volumes:
       - eva_media_shared:/data/media

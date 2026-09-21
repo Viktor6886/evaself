@@ -34,9 +34,11 @@ from .audio import (
     convert,
     make_test_tone,
     probe,
+    split_to_asr_wav,
     to_asr_wav,
     to_telegram_voice,
 )
+from .docx import DOCX_MIME, build_transcript_docx
 from .runtime_config import RuntimeConfig
 from .stt import (
     SttAudioInput,
@@ -53,8 +55,12 @@ log = logging.getLogger("media")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
 WORK_DIR = Path(os.environ.get("MEDIA_WORK_DIR", "/data/media"))
-MAX_UPLOAD_BYTES = int(os.environ.get("MEDIA_MAX_UPLOAD_MB", "50")) * 1024 * 1024
-MAX_AUDIO_SECONDS = int(os.environ.get("MEDIA_MAX_AUDIO_SECONDS", "1800"))
+MAX_UPLOAD_BYTES = int(os.environ.get("MEDIA_MAX_UPLOAD_MB", "200")) * 1024 * 1024
+MAX_AUDIO_SECONDS = int(os.environ.get("MEDIA_MAX_AUDIO_SECONDS", "14400"))
+# 10 minutes of mono 16 kHz PCM are ~19.2 MB. Clamp the configurable
+# segment below that so an accidental env value cannot recreate a >25 MB
+# Whisper-style multipart request.
+ASR_CHUNK_SECONDS = max(30, min(int(os.environ.get("MEDIA_ASR_CHUNK_SECONDS", "480")), 600))
 TMP_TTL_SECONDS = int(os.environ.get("MEDIA_TMP_TTL_SECONDS", "900"))
 
 ASR_BASE_URL = os.environ.get("MEDIA_ASR_BASE_URL", "").rstrip("/")
@@ -97,7 +103,9 @@ STT_RUNTIME = SttRuntime(WORK_DIR / "stt-runtime.json")
 STT_REGISTRY: SttProviderRegistry | None = None
 STT_ROUTER: SttRoutingService | None = None
 
-TELEGRAM_API = "https://api.telegram.org"
+TELEGRAM_API = os.environ.get(
+    "EVA_TELEGRAM_API_BASE_URL", "https://api.telegram.org"
+).rstrip("/")
 
 
 def telegram_token() -> str:
@@ -223,6 +231,13 @@ class TelegramTranscribeRequest(BaseModel):
     language: str | None = None
     prompt: str | None = None
 
+class TranscriptDocxRequest(BaseModel):
+    title: str = Field(default="Транскрипция аудиозаписи", min_length=1, max_length=300)
+    text: str = Field(min_length=1, max_length=2_000_000)
+    source_name: str | None = Field(default=None, max_length=300)
+    language: str | None = Field(default=None, max_length=32)
+    duration_seconds: float | None = Field(default=None, ge=0, le=MAX_AUDIO_SECONDS)
+
 
 # Форматы ответа синтеза и расширение файла для каждого. Список
 # закрытый: значение уходит провайдеру как есть, а произвольная строка
@@ -286,6 +301,36 @@ async def probe_upload(file: UploadFile = File(...)):
 
 
 # =====================================================================
+# transcript documents
+# =====================================================================
+@app.post("/transcript/docx", dependencies=[Depends(require_service_token)])
+async def transcript_docx(payload: TranscriptDocxRequest):
+    """Render transcript text into an editable DOCX and delete temp files after send."""
+    work = Workspace(WORK_DIR)
+    work.__enter__()
+    target = work / "transcript.docx"
+    try:
+        build_transcript_docx(
+            target,
+            title=payload.title,
+            transcript=payload.text,
+            source_name=payload.source_name,
+            language=payload.language,
+            duration_seconds=payload.duration_seconds,
+        )
+    except Exception:  # noqa: BLE001 - document failure must not leak internals
+        work.__exit__(None, None, None)
+        log.exception("transcript DOCX rendering failed")
+        return _error("transcript_docx_failed", "не удалось сформировать DOCX", 500)
+
+    return FileResponse(
+        target,
+        media_type=DOCX_MIME,
+        filename="transcript.docx",
+        background=_cleanup_task(work),
+    )
+
+# =====================================================================
 # transcription
 # =====================================================================
 @app.post("/transcribe", dependencies=[Depends(require_service_token)])
@@ -320,6 +365,7 @@ async def transcribe_telegram(payload: TelegramTranscribeRequest):
 async def _transcribe_path(
     source: Path, work: Path, language: str | None, prompt: str | None
 ):
+    """Legacy OpenAI-compatible STT path, chunked for long compressed audio."""
     try:
         info = await probe(source)
     except MediaError as exc:
@@ -341,55 +387,60 @@ async def _transcribe_path(
             503,
         )
 
-    wav = work / "asr.wav"
     try:
-        await to_asr_wav(source, wav)
+        chunks = await split_to_asr_wav(source, work / "asr-parts", ASR_CHUNK_SECONDS)
     except MediaError as exc:
         return _error("conversion_failed", exc.message, 422, details=exc.details)
 
-    data = {"model": asr["model"]}
-    # Язык из запроса важнее настройки: конкретное сообщение может быть
-    # на другом языке, чем обычно у пользователя.
-    if language or asr.get("language"):
-        data["language"] = language or asr["language"]
-    if prompt:
-        data["prompt"] = prompt
+    texts: list[str] = []
+    for index, wav in enumerate(chunks):
+        data = {"model": asr["model"]}
+        if language or asr.get("language"):
+            data["language"] = language or asr["language"]
+        if prompt:
+            data["prompt"] = prompt
 
-    try:
-        with wav.open("rb") as handle:
-            response = await app.state.http.post(
-                f"{asr['base_url']}/audio/transcriptions",
-                headers={"Authorization": f"Bearer {asr['api_key']}"},
-                data=data,
-                files={"file": ("audio.wav", handle, "audio/wav")},
+        try:
+            with wav.open("rb") as handle:
+                response = await app.state.http.post(
+                    f"{asr['base_url']}/audio/transcriptions",
+                    headers={"Authorization": f"Bearer {asr['api_key']}"},
+                    data=data,
+                    files={"file": (wav.name, handle, "audio/wav")},
+                )
+        except httpx.TimeoutException:
+            return _error(
+                "asr_timeout",
+                f"ASR endpoint did not answer in time on chunk {index + 1}/{len(chunks)}",
+                504,
             )
-    except httpx.TimeoutException:
-        return _error("asr_timeout", "the ASR endpoint did not answer in time", 504)
-    except httpx.TransportError as exc:
-        return _error("asr_unavailable", f"cannot reach the ASR endpoint: {exc}", 503)
+        except httpx.TransportError as exc:
+            return _error("asr_unavailable", f"cannot reach the ASR endpoint: {exc}", 503)
 
-    if response.status_code >= 400:
-        return _error(
-            "asr_error",
-            f"ASR endpoint returned {response.status_code}",
-            502,
-            details=response.text[:500],
-        )
+        if response.status_code >= 400:
+            return _error(
+                "asr_error",
+                f"ASR endpoint returned {response.status_code} on chunk {index + 1}/{len(chunks)}",
+                502,
+                details=response.text[:500],
+            )
 
-    try:
-        body = response.json()
-        text = body.get("text", "")
-    except ValueError:
-        text = response.text
+        try:
+            body = response.json()
+            text = body.get("text", "")
+        except ValueError:
+            text = response.text
+        if str(text).strip():
+            texts.append(str(text).strip())
 
     return {
-        "text": text.strip(),
+        "text": "\n\n".join(texts),
         "language": language,
         "duration_seconds": info["duration_seconds"],
         "duration_minutes": round(info["duration_seconds"] / 60.0, 3),
         "source_codec": info["audio_codec"],
+        "chunk_count": len(chunks),
     }
-
 
 # =====================================================================
 # STT: реестр провайдеров, снимок маршрутов, распознавание по сценарию
@@ -505,7 +556,7 @@ async def _route_transcription(
     language: str | None,
     idempotency_key: str | None,
 ):
-    """Общий путь: проверить файл, привести к WAV, отдать маршрутизатору."""
+    """Probe once, split long media, then transcribe bounded chunks in order."""
     try:
         info = await probe(source)
     except MediaError as exc:
@@ -515,34 +566,36 @@ async def _route_transcription(
     if info["duration_seconds"] > MAX_AUDIO_SECONDS:
         return _error(
             "stt_audio_too_long",
-            f"запись длиной {info['duration_seconds']:.0f} с превышает предел "
-            f"{MAX_AUDIO_SECONDS} с",
+            f"запись длиной {info['duration_seconds']:.0f} с превышает предел {MAX_AUDIO_SECONDS} с",
             413,
         )
 
-    wav = work / "asr.wav"
+    route = STT_RUNTIME.route(use_case)
+    route_limit = route.max_audio_seconds if route and route.max_audio_seconds else ASR_CHUNK_SECONDS
+    chunk_seconds = max(10, min(ASR_CHUNK_SECONDS, route_limit))
     try:
-        await to_asr_wav(source, wav)
+        chunks = await split_to_asr_wav(source, work / "asr-parts", chunk_seconds)
     except MediaError as exc:
         return _error("stt_audio_invalid", exc.message, 422, details=exc.details)
 
-    audio = SttAudioInput(
-        path=wav,
-        duration_seconds=info["duration_seconds"],
-        mime_type="audio/wav",
-        filename="audio.wav",
-    )
+    outcomes = []
     try:
-        outcome = await STT_ROUTER.transcribe(
-            use_case, audio, language=language, idempotency_key=idempotency_key
-        )
+        for index, wav in enumerate(chunks):
+            chunk_info = await probe(wav)
+            audio = SttAudioInput(
+                path=wav,
+                duration_seconds=chunk_info["duration_seconds"],
+                mime_type="audio/wav",
+                filename=wav.name,
+            )
+            chunk_key = f"{idempotency_key}:part:{index:05d}" if idempotency_key else None
+            outcomes.append(
+                await STT_ROUTER.transcribe(
+                    use_case, audio, language=language, idempotency_key=chunk_key
+                )
+            )
     except SttError as exc:
-        if exc.code == "stt_route_not_configured":
-            # Установка ещё не завела ни одной конфигурации в панели.
-            # Поддержку MEDIA_ASR_* нельзя убирать в том же релизе,
-            # который вводит реестр: `make update` не должен ломать
-            # голосовые сообщения на работающем сервере. Переменные
-            # объявлены устаревшими, срок удаления — в docs/stt.md.
+        if exc.code == "stt_route_not_configured" and not outcomes:
             legacy = RUNTIME.asr()
             if legacy.get("base_url") and legacy.get("api_key"):
                 log.info(
@@ -550,20 +603,38 @@ async def _route_transcription(
                     use_case,
                 )
                 return await _transcribe_path(source, work, language, None)
-        # Техническая причина уходит в ответ для admin-api и в лог; в
-        # Telegram eva-agent-service покажет свой безопасный текст.
         log.warning("распознавание %s не удалось: %s — %s", use_case, exc.code, exc.message)
         return _error(exc.code, exc.message, 502 if exc.retryable else 422)
 
-    result = outcome.result
+    if not outcomes:
+        return _error("stt_transcription_failed", "распознавание не вернуло частей", 502)
+
+    first = outcomes[0].result
+    texts = [item.result.text.strip() for item in outcomes if item.result.text.strip()]
+    payload = first.as_dict()
+    payload["text"] = "\n\n".join(texts)
+    payload["duration_ms"] = round(info["duration_seconds"] * 1000)
+    if len(outcomes) > 1:
+        payload.pop("words", None)
+        payload.pop("segments", None)
+        payload.pop("provider_request_id", None)
+        warnings = []
+        for item in outcomes:
+            for warning in item.result.warnings:
+                if warning not in warnings:
+                    warnings.append(warning)
+        if "audio_chunked" not in warnings:
+            warnings.append("audio_chunked")
+        payload["warnings"] = warnings
+
     return {
-        **result.as_dict(),
+        **payload,
         "use_case": use_case,
         "duration_seconds": info["duration_seconds"],
         "duration_minutes": round(info["duration_seconds"] / 60.0, 3),
-        "used_fallback": outcome.used_fallback,
-        "from_cache": outcome.from_cache,
-        # Телеметрию пишет admin-api: у него есть база, у media-service нет.
+        "chunk_count": len(outcomes),
+        "used_fallback": any(item.used_fallback for item in outcomes),
+        "from_cache": all(item.from_cache for item in outcomes),
         "attempts": [
             {
                 "config_id": attempt.config_id,
@@ -575,18 +646,15 @@ async def _route_transcription(
                 "error_code": attempt.error_code,
                 "error_message": attempt.error_message,
                 "provider_request_id": attempt.provider_request_id,
-                # Каким ключом отработала попытка и что случилось с
-                # остальными. Состояние ключей живёт в памяти этого
-                # сервиса; другого способа довезти его до панели нет.
                 "key_id": attempt.key_id,
                 "key_label": attempt.key_label,
                 "keys_tried": attempt.keys_tried,
                 "key_failures": attempt.key_failures,
             }
-            for attempt in outcome.attempts
+            for item in outcomes
+            for attempt in item.attempts
         ],
     }
-
 
 @app.post("/stt/test", dependencies=[Depends(require_service_token)])
 async def stt_test(payload: dict):

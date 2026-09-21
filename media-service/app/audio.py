@@ -95,6 +95,47 @@ async def to_asr_wav(source: Path, destination: Path) -> Path:
     return destination
 
 
+async def split_to_asr_wav(
+    source: Path,
+    directory: Path,
+    segment_seconds: float = 480.0,
+) -> list[Path]:
+    """Convert media into bounded 16 kHz mono WAV chunks for batch ASR.
+
+    A long compressed MP3 can become a much larger PCM WAV. Keeping every
+    request below a fixed time bound also keeps the resulting multipart file
+    below providers' upload limits. The caller still enforces the total audio
+    duration separately.
+    """
+    if segment_seconds <= 0:
+        raise MediaError("ASR segment duration must be positive")
+
+    directory.mkdir(parents=True, exist_ok=True)
+    pattern = directory / "part-%05d.wav"
+    code, _stdout, stderr = await _run(
+        FFMPEG,
+        "-hide_banner", "-loglevel", "error",
+        "-y",
+        "-i", str(source),
+        "-map", "0:a:0",
+        "-vn",
+        "-ac", "1",
+        "-ar", str(ASR_SAMPLE_RATE),
+        "-c:a", "pcm_s16le",
+        "-f", "segment",
+        "-segment_time", str(segment_seconds),
+        "-reset_timestamps", "1",
+        str(pattern),
+        timeout=900,
+    )
+    parts = sorted(directory.glob("part-*.wav"))
+    if code != 0 or not parts:
+        raise MediaError(
+            "audio chunking failed",
+            details=stderr.decode(errors="replace")[:500],
+        )
+    return parts
+
 async def make_test_tone(destination: Path, seconds: float = 1.0) -> Path:
     """Короткий корректный WAV для проверки тракта распознавания.
 
