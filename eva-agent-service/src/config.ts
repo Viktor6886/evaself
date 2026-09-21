@@ -420,7 +420,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     // совпадения выборок обязана сначала понаблюдать, а не начать
     // писать людям параллельно со старым интервалом.
     jobsMirrorMode: bool("EVA_JOBS_MIRROR", true),
-    knowledgeUploadsEnabled: bool("EVA_KNOWLEDGE_UPLOADS", false),
+    knowledgeUploadsEnabled: bool("EVA_KNOWLEDGE_UPLOADS", true),
     researchOrchestratorEnabled: bool("EVA_RESEARCH_ORCHESTRATOR", false),
     lettaContractVerify: bool("EVA_LETTA_CONTRACT_VERIFY", false),
     personaSyncTurnTimeoutMs: clampedInt("EVA_PERSONA_SYNC_TURN_TIMEOUT_MS", 3_000, 250, 15_000),
