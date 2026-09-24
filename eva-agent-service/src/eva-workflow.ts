@@ -11,7 +11,7 @@ import type { Logger } from "./logger.js";
 import type { ChannelLinkService } from "./channels/channel-links.js";
 import type { UserProfileService } from "./profile/profile-service.js";
 import type { UserTurnLock } from "./turns/user-turn-lock.js";
-import type { RuntimeContextBuilder } from "./runtime/runtime-context.js";
+import type { MessageSource, RuntimeContextBuilder } from "./runtime/runtime-context.js";
 import type { SendMessage } from "@letta-ai/letta-agent-sdk";
 import { TaskEventService } from "./tasks/task-event-service.js";
 import { withSpan } from "./observability/tracing.js";
@@ -966,13 +966,7 @@ export class EvaWorkflow {
                   // Платёж до этой точки не доходит — он применён и
                   // завершён выше. Здесь это сказано типу явно, чтобы не
                   // приводить вид сообщения принудительно.
-                  // Аудиофайл при выключенном флаге идёт прежним путём
-                  // голосового, и контекст говорит о нём то же самое.
-                  messageSource: update.kind === "payment"
-                    ? undefined
-                    : update.kind === "audio_file" && !this.config.audioFileTranscriptsEnabled
-                      ? "voice"
-                      : update.kind,
+                  messageSource: this.messageSourceOf(parts),
                   attachments,
                   // Фактический размер собранного контекста, а не
                   // обещание уложиться: без измерения бюджет — это
@@ -1904,6 +1898,23 @@ export class EvaWorkflow {
     }
 
     throw new Error("Неподдерживаемый тип сообщения");
+  }
+
+  /**
+   * Вид сообщения хода — по частям, которые в ход действительно вошли.
+   *
+   * Последнее сообщение окна для этого не годится: аудиофайл с коротким
+   * текстом следом всё равно несёт расшифровку, а часть, выпавшая по
+   * квоте, ничего в ход не принесла. Аудиофайл при выключенном флаге
+   * идёт прежним путём голосового, и контекст говорит о нём то же самое.
+   */
+  private messageSourceOf(parts: NormalizedUpdate[]): MessageSource | undefined {
+    const asFiles = this.config.audioFileTranscriptsEnabled;
+    if (asFiles && parts.some((part) => part.kind === "audio_file")) return "audio_file";
+    const last = parts[parts.length - 1]?.kind;
+    // Платёж до хода модели не доходит — он применён и завершён раньше.
+    if (!last || last === "payment") return undefined;
+    return last === "audio_file" ? "voice" : last;
   }
 
   /**

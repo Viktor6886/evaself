@@ -578,6 +578,8 @@ async function runTelegramTurn(
     command?: string;
     /** Отметка отправки последнего сообщения, секунды epoch. */
     messageDate?: number;
+    /** Поддельное распознавание без вложения в последнем сообщении. */
+    stt?: boolean;
     /** Флаг EVA_AUDIO_FILE_TRANSCRIPTS. */
     audioFileTranscripts?: boolean;
     /** Вложение вместо обычного текста. */
@@ -898,7 +900,7 @@ async function runTelegramTurn(
   // распознавание отвечает готовой расшифровкой.
   const originalFetch = globalThis.fetch;
   const transcribed: string[] = [];
-  if (options.attachment) {
+  if (options.attachment || options.stt) {
     globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
       if (!String(input).includes("/stt/transcribe")) return await originalFetch(input as never, init);
       transcribed.push(String(init?.body ?? ""));
@@ -1504,6 +1506,55 @@ test("аудиофайл списывает квоту минут, как гол
   assert.equal(probe.transcribed.length, 0, "распознавание пошло без квоты");
   const row = [...store.rows.values()][0]!;
   assert.equal(row.cancel_reason, "quota_voice");
+});
+
+const audioFileUpdate = (updateId: number, messageId: number) => ({
+  update_id: updateId,
+  message: {
+    message_id: messageId,
+    chat: { id: TELEGRAM_ID },
+    from: { id: TELEGRAM_ID, first_name: "Анна" },
+    audio: { file_id: `mp3-${messageId}`, file_name: "встреча.mp3", mime_type: "audio/mpeg", file_size: 100 },
+  },
+});
+
+test("аудиофайл с текстом следом в одном окне остаётся аудиофайлом", async () => {
+  const probe = await runTelegramTurn(undefined, {
+    audioFileTranscripts: true,
+    stt: true,
+    extraUpdates: [audioFileUpdate(3000, 4)],
+  });
+  assert.equal(probe.transcribed.length, 1);
+  assert.match(probe.wrapped[0] ?? "", /Аудиофайл: встреча\.mp3/);
+  assert.deepEqual(probe.messageSources, ["audio_file"]);
+});
+
+test("аудиофайл, выпавший по квоте, не называет ход аудиофайлом", async () => {
+  const probe = await runTelegramTurn(undefined, {
+    audioFileTranscripts: true,
+    quota: [
+      { metric: "messages", remaining: 10 },
+      { metric: "voice_minutes", remaining: 0 },
+    ],
+    extraUpdates: [{
+      update_id: 3000,
+      message: {
+        message_id: 4,
+        chat: { id: TELEGRAM_ID },
+        from: { id: TELEGRAM_ID, first_name: "Анна" },
+        text: "сейчас пришлю запись",
+      },
+    }],
+    attachment: {
+      message: {
+        audio: { file_id: "mp3-late", file_name: "встреча.mp3", mime_type: "audio/mpeg", file_size: 100 },
+      },
+      bytes: PNG_BYTES,
+    },
+  });
+  assert.equal(probe.transcribed.length, 0);
+  assert.deepEqual(probe.messageSources, ["text"]);
+  assert.doesNotMatch(probe.wrapped[0] ?? "", /<ATTACHMENTS>/);
 });
 
 test("аудиофайл больше 20 МБ получает понятный отказ до распознавания", async () => {
