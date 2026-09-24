@@ -13,6 +13,7 @@ import type { ConversationPurposeService } from "../conversations/purpose-servic
 import type { Database } from "../db.js";
 import { recordMessageUsage } from "../subscriptions/usage-ledger.js";
 import { EvaError } from "../errors.js";
+import { SKIP_MARKER } from "../jobs/proactive/skip-marker.js";
 import { LiveMessageWatch } from "../turns/live-message.js";
 import { preferredResponseLanguage, t } from "../i18n/index.js";
 import type { LettaService } from "../letta.js";
@@ -263,7 +264,24 @@ export class ScheduledTaskRunner {
       ).finally(() => {
         if (progress) clearTimeout(progress);
       });
-      const generatedText = turn.reply.trim();
+      let generatedText = turn.reply.trim();
+
+      // Маркер отказа от выхода на связь — не ответ на задачу. В ветку
+      // напоминаний он попадает из инструкции heartbeat, и вместе с ним
+      // модель пишет рассуждение «есть ли повод написать»: отправленное
+      // как есть, оно пришло человеку служебным текстом. Действие
+      // повторяется как несостоявшееся; напоминание человек назначил сам,
+      // поэтому оно приходит детерминированным текстом, а не молчанием.
+      if (generatedText.includes(SKIP_MARKER)) {
+        this.logger.warn("Ход задачи вернул маркер отказа вместо сообщения", {
+          taskId: task.id,
+          kind,
+          // Только длина: текста хода в журнале нет и быть не должно.
+          replyChars: generatedText.length,
+        });
+        if (kind === "action") throw new Error("ход вернул маркер отказа вместо результата");
+        generatedText = this.reminderFallbackText(task);
+      }
 
       // Ход мог упереться в действие, которое человек не разрешал
       // заранее. Тогда он не выполнил работу, а задал вопрос и
@@ -663,18 +681,24 @@ export class ScheduledTaskRunner {
    * генерация и не удалась. Для напоминания это само напоминание: оно
    * лучше молчания, ради него задача и заводилась.
    */
-  private async notifyFailure(task: DueTask, kind: TaskKind): Promise<void> {
-    const language = preferredResponseLanguage({
+  /** Напоминание без модели: название задачи на языке человека. */
+  private reminderFallbackText(task: DueTask): string {
+    return t(this.languageOf(task), "scheduledReminderFallback", { title: task.title.slice(0, 200) });
+  }
+
+  private languageOf(task: DueTask) {
+    return preferredResponseLanguage({
       language_mode: task.language_mode,
       preferred_language: task.preferred_language,
       last_message_language: task.last_message_language,
       language_code: task.language_code,
     });
-    const text = t(
-      language,
-      kind === "action" ? "scheduledActionFailed" : "scheduledReminderFallback",
-      { title: task.title.slice(0, 200) },
-    );
+  }
+
+  private async notifyFailure(task: DueTask, kind: TaskKind): Promise<void> {
+    const text = kind === "action"
+      ? t(this.languageOf(task), "scheduledActionFailed", { title: task.title.slice(0, 200) })
+      : this.reminderFallbackText(task);
     try {
       const sent = await this.deliver(task, text);
       await this.taskEvents.record({

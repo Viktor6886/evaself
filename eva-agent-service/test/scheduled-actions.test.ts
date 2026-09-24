@@ -318,6 +318,37 @@ test("пустой ответ на действие считается отка�
   assert.equal(sent.length, 0);
 });
 
+/**
+ * Рассуждение heartbeat в ответе на задачу.
+ *
+ * Ветка напоминаний общая с heartbeat, и модель отвечала на напоминание
+ * в его манере: «Давай проверю, есть ли повод… Повода нет.
+ * HEARTBEAT_SKIP». Путь задачи отправлял это человеку как есть.
+ */
+const HEARTBEAT_LEAK = "Давай сначала проверю, есть ли уместный повод для сообщения."
+  + "\n\nПовод слабый, конкретного вопроса нет.\n\nHEARTBEAT_SKIP";
+
+test("напоминание с маркером отказа приходит своим текстом, без рассуждения", async () => {
+  const { db, runner, sent } = harness({ reply: HEARTBEAT_LEAK });
+  await runner.execute(taskRow({ kind: "reminder", title: "позвонить маме" }) as never);
+
+  assert.deepEqual(sent.map((message) => message.text), ["Напоминаю: позвонить маме"]);
+  assert.ok(!sent.some((message) => message.text.includes("HEARTBEAT_SKIP")));
+  assert.deepEqual(events(db).map((call) => call.values[2]), [
+    "reminder_generated", "reminder_sent",
+  ]);
+  // Рассуждение не сохраняется и как «сгенерированный текст».
+  assert.ok(!JSON.stringify(events(db).map((call) => call.values)).includes("HEARTBEAT_SKIP"));
+});
+
+test("действие с маркером отказа повторяется, а не отправляется", async () => {
+  const { db, runner, sent } = harness({ reply: HEARTBEAT_LEAK });
+  await runner.execute(taskRow() as never);
+
+  assert.equal(sent.length, 0, "служебный ответ ушёл человеку");
+  assert.deepEqual(events(db).map((call) => call.values[2]), ["action_failed"]);
+});
+
 test("суточный потолок действий откладывает задачу, а не теряет её", async () => {
   const db = fakeDb((sql) => (
     sql.includes("AS used") ? [{ used: ACTION_DAILY_LIMIT }] : null
