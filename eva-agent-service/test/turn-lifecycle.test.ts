@@ -491,6 +491,8 @@ const SHADOW_BUDGET_MS = 250;
 
 interface WorkflowProbe {
   sent: string[];
+  /** Какой вид сообщения назван контексту. */
+  messageSources: Array<string | undefined>;
   result: unknown;
   elapsedMs: number;
   /** Чем ход представился блокировке пользователя. */
@@ -576,6 +578,8 @@ async function runTelegramTurn(
     command?: string;
     /** Отметка отправки последнего сообщения, секунды epoch. */
     messageDate?: number;
+    /** Флаг EVA_AUDIO_FILE_TRANSCRIPTS. */
+    audioFileTranscripts?: boolean;
     /** Вложение вместо обычного текста. */
     attachment?: {
       message: Record<string, unknown>;
@@ -595,6 +599,8 @@ async function runTelegramTurn(
   const downloadLimits: Array<number | null> = [];
   /** Что именно ушло в Letta: строка или список частей. */
   const lettaMessages: unknown[] = [];
+  /** Какой вид сообщения назван контексту. */
+  const messageSources: Array<string | undefined> = [];
   const user = { id: 77, telegram_id: TELEGRAM_ID, state: "active", is_blocked: false };
   const link = { agent_id: "agent-1", conversation_id: "conv-1", user_id: user.id };
   const db = {
@@ -825,8 +831,9 @@ async function runTelegramTurn(
     wrapUserMessage: (
       _context: unknown,
       prompt: string,
-      wrapOptions: { attachments?: string[] } = {},
+      wrapOptions: { attachments?: string[]; messageSource?: string } = {},
     ) => {
+      messageSources.push(wrapOptions.messageSource);
       const text = wrapOptions.attachments?.length
         ? [prompt, "<ATTACHMENTS>", ...wrapOptions.attachments, "</ATTACHMENTS>"].join("\n")
         : prompt;
@@ -855,6 +862,7 @@ async function runTelegramTurn(
       // Домен Mini App: пусто — установка без приложения, и кнопке на
       // него взяться неоткуда.
       domains: { app: options.appDomain ?? "" },
+      audioFileTranscriptsEnabled: options.audioFileTranscripts ?? false,
     } as never,
     db as never,
     letta as never,
@@ -959,6 +967,7 @@ async function runTelegramTurn(
     lettaMessages,
     downloadLimits,
     transcribed,
+    messageSources,
     wrapped,
     markups,
     issuedTokens,
@@ -1416,6 +1425,101 @@ test("звук, присланный файлом, идёт тем же расп
   assert.match(probe.prompts[0] ?? "", /расшифровка присланной записи/);
   // В ход ушла строка: изображений здесь нет.
   assert.equal(typeof probe.lettaMessages[0], "string");
+});
+
+test("без флага аудиофайл идёт прежним путём голосового", async () => {
+  const probe = await runTelegramTurn(undefined, {
+    attachment: {
+      message: {
+        audio: { file_id: "mp3-off", file_name: "лекция.mp3", mime_type: "audio/mpeg", file_size: 100 },
+      },
+      bytes: PNG_BYTES,
+    },
+  });
+  assert.equal(probe.transcribed.length, 1);
+  assert.match(probe.prompts[0] ?? "", /расшифровка присланной записи/);
+  assert.deepEqual(probe.messageSources, ["voice"]);
+  assert.doesNotMatch(probe.wrapped[0] ?? "", /<ATTACHMENTS>/);
+});
+
+test("аудиофайл с флагом уходит Еве расшифровкой-вложением, подпись остаётся репликой", async () => {
+  const probe = await runTelegramTurn(undefined, {
+    audioFileTranscripts: true,
+    attachment: {
+      message: {
+        document: { file_id: "mp3-on", file_name: "встреча.mp3", mime_type: "audio/mpeg", file_size: 100 },
+        caption: "о чём договорились?",
+      },
+      bytes: PNG_BYTES,
+    },
+  });
+
+  assert.equal(probe.transcribed.length, 1, "распознавание не вызвано");
+  assert.match(probe.transcribed[0] ?? "", /mp3-on/);
+  const input = probe.contextInputs[0] as { userMessage?: string };
+  assert.equal(input.userMessage, "о чём договорились?");
+  assert.deepEqual(probe.messageSources, ["audio_file"]);
+  const wrapped = probe.wrapped[0] ?? "";
+  assert.match(wrapped, /<ATTACHMENTS>/);
+  assert.match(wrapped, /Аудиофайл: встреча\.mp3/);
+  assert.match(wrapped, /Длительность: 0:12/);
+  assert.match(wrapped, /UNTRUSTED_CONTENT/);
+  assert.match(wrapped, /расшифровка присланной записи/);
+  assert.equal(probe.lettaMessages[0], wrapped, "расшифровка должна дойти до Letta");
+  // Сырая расшифровка файла человеку не повторяется: исправленный текст
+  // и краткое содержание пишет Ева.
+  assert.equal(probe.sent.filter((text) => text.startsWith("🎙️")).length, 0);
+});
+
+test("голосовое с флагом остаётся репликой человека", async () => {
+  const probe = await runTelegramTurn(undefined, {
+    audioFileTranscripts: true,
+    attachment: {
+      message: { voice: { file_id: "voice-on", file_unique_id: "voice-on", mime_type: "audio/ogg" } },
+      bytes: PNG_BYTES,
+    },
+  });
+  assert.equal(probe.transcribed.length, 1);
+  assert.match(probe.prompts[0] ?? "", /расшифровка присланной записи/);
+  assert.deepEqual(probe.messageSources, ["voice"]);
+  assert.doesNotMatch(probe.wrapped[0] ?? "", /<ATTACHMENTS>/);
+});
+
+test("аудиофайл списывает квоту минут, как голосовое", async () => {
+  const store = new TurnStore();
+  const probe = await runTelegramTurn(lifecycle(store), {
+    audioFileTranscripts: true,
+    quota: [
+      { metric: "messages", remaining: 10 },
+      { metric: "voice_minutes", remaining: 0 },
+    ],
+    attachment: {
+      message: {
+        audio: { file_id: "mp3-quota", file_name: "лекция.mp3", mime_type: "audio/mpeg", file_size: 100 },
+      },
+      bytes: PNG_BYTES,
+    },
+  });
+  assert.deepEqual(probe.result, { status: "ignored" });
+  assert.equal(probe.transcribed.length, 0, "распознавание пошло без квоты");
+  const row = [...store.rows.values()][0]!;
+  assert.equal(row.cancel_reason, "quota_voice");
+});
+
+test("аудиофайл больше 20 МБ получает понятный отказ до распознавания", async () => {
+  const probe = await runTelegramTurn(undefined, {
+    audioFileTranscripts: true,
+    attachment: {
+      message: {
+        audio: { file_id: "huge", file_name: "подкаст.mp3", mime_type: "audio/mpeg", file_size: 30 * 1024 * 1024 },
+      },
+      bytes: PNG_BYTES,
+    },
+  });
+  assert.equal(probe.transcribed.length, 0, "файл всё-таки ушёл на распознавание");
+  assert.match(probe.sent.join("\n"), /20 МБ/);
+  assert.deepEqual(probe.lettaMessages, []);
+  assert.deepEqual(probe.result, { status: "ignored" });
 });
 
 test("медленный ASR редактирует один статус в transcript без record_voice", async () => {

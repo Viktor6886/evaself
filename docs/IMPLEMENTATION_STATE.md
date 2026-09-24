@@ -74,7 +74,7 @@ BullMQ не обрабатывает интерактивный ход и не �
 | Разложение задержки хода | Стадии хода — очередь, сборка контекста, ожидание сессии, время до первого слова, генерация, доставка — считаются на каждом ходе и уходят в лог строкой `Telegram turn обработан`. Собираются в таблицу командой `make check-latency` | `src/eva-workflow.ts`, `scripts/check-latency.sh` |
 | Состав префикса | Из чего складывается постоянная часть каждого обращения: системный промпт, персона, общие блоки, описания инструментов — в знаках и долях. Отдаётся в `GET /v1/canonical-context` | `src/letta/prefix-size.ts` |
 | Безопасные поля провайдера | Общий фильтр секретов в `additional_parameters` для `/providers` и `/llm/state`: два представления одной записи не могут разойтись в том, что считается безопасным | `src/admin/provider-safe.ts` |
-| Attachments | Безопасный приём Telegram-вложений | `src/attachments/telegram-attachments.ts` |
+| Attachments | Безопасный приём Telegram-вложений; аудиофайл (MP3, M4A, WAV…) отличается от голосового видом `audio_file` и под флагом `EVA_AUDIO_FILE_TRANSCRIPTS` идёт Еве расшифровкой-вложением, разбор — навык `audio-transcripts` | `src/attachments/telegram-attachments.ts` |
 | Documents | Извлечение текста из поддерживаемых форматов | `src/knowledge/document-text.ts` |
 | Knowledge search | Tenant-scoped FTS/pgvector поиск по документам | `src/knowledge/search.ts` |
 

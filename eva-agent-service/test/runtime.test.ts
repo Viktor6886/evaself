@@ -384,6 +384,35 @@ test("runtime context marks a transcript as voice without changing its words", (
   assert.match(prompt, /<USER_MESSAGE>\nЭто расшифровка\n<\/USER_MESSAGE>/);
 });
 
+test("runtime context marks an audio file transcript as data, not the user's words", () => {
+  const builder = new RuntimeContextBuilder({} as never, { defaultTimezone: "UTC" });
+  const prompt = builder.wrapUserMessage({
+    userId: 1,
+    telegramId: 1,
+    agentId: "agent",
+    conversationId: "conversation",
+    purpose: "chat",
+    localTime: "2026-08-02T12:00:00Z",
+    timezone: "UTC",
+    city: null,
+    countryCode: null,
+    responseLanguage: "ru",
+    responseMode: "text",
+    useEmoji: true,
+    communicationStyle: null,
+    profileHint: null,
+    activeGoal: null,
+    nextResult: null,
+    nextStep: null,
+    relevantMemory: [],
+  }, "о чём запись?", { messageSource: "audio_file", attachments: ["Аудиофайл: лекция.mp3"] });
+
+  assert.match(prompt, /message_source: audio_file/);
+  assert.match(prompt, /audio file, not a voice message/);
+  assert.match(prompt, /<USER_MESSAGE>\nо чём запись\?\n<\/USER_MESSAGE>/);
+  assert.match(prompt, /<ATTACHMENTS>\nАудиофайл: лекция\.mp3\n<\/ATTACHMENTS>/);
+});
+
 test("активная программа приходит в ход компактными фактами, без команды модели", async () => {
   const builder = new RuntimeContextBuilder(
     {

@@ -113,7 +113,7 @@ export interface RuntimeContext {
   };
 }
 
-export type MessageSource = "text" | "voice" | "image" | "document" | "unsupported";
+export type MessageSource = "text" | "voice" | "audio_file" | "image" | "document" | "unsupported";
 
 interface RuntimeContextRow {
   user_id: string;
@@ -407,7 +407,10 @@ export class RuntimeContextBuilder {
         "message_source_note",
         options.messageSource === "voice"
           ? "USER_MESSAGE is the speech-to-text transcript of a voice message sent by the user"
-          : null,
+          : options.messageSource === "audio_file"
+            ? "the user sent an audio file, not a voice message: ATTACHMENTS holds its raw " +
+              "speech-to-text transcript, USER_MESSAGE holds the user's caption if any"
+            : null,
       ],
       [
         "profile_hint",

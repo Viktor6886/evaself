@@ -80,7 +80,7 @@ export interface LlmRequestMetadata {
   internal_operation_type?: string;
   /** Явный выбор человека: экономия, авто или качество. */
   user_mode?: "economy" | "auto" | "quality";
-  message_source?: "text" | "voice" | "image" | "document" | "unsupported";
+  message_source?: "text" | "voice" | "audio_file" | "image" | "document" | "unsupported";
   has_image?: boolean;
   has_document?: boolean;
   has_voice?: boolean;
