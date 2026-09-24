@@ -111,6 +111,11 @@ function inputFor(setting) {
   if (setting.key === "runtime.log_level") {
     return `<select data-key="${escapeHtml(setting.key)}">${["debug", "info", "warn", "error"].map((value) => `<option${setting.value === value ? " selected" : ""}>${value}</option>`).join("")}</select>`;
   }
+  // Выбор из готовых значений: список вместо ручного ввода, чтобы нельзя
+  // было сохранить значение, которого сервис не знает.
+  if (setting.type === "select" && setting.presets?.length) {
+    return `<select data-key="${escapeHtml(setting.key)}">${setting.presets.map((preset) => `<option value="${escapeHtml(String(preset.value))}"${setting.value === preset.value ? " selected" : ""}>${escapeHtml(preset.title)}</option>`).join("")}</select>`;
+  }
   const type = setting.type === "integer" ? "number" : "text";
   return `<input data-key="${escapeHtml(setting.key)}" type="${type}" value="${escapeHtml(setting.value)}"${setting.min !== undefined ? ` min="${setting.min}"` : ""}${setting.max !== undefined ? ` max="${setting.max}"` : ""} required>`;
 }
@@ -178,7 +183,9 @@ async function loadRetentionPreview() {
  * туда положить.
  */
 function settingCard(item) {
-  const presets = item.presets?.length
+  // У списка варианты уже в самом поле: второй список «готовых значений»
+  // рядом повторил бы их.
+  const presets = item.presets?.length && !(item.type === "select" && item.key !== "runtime.log_level")
     ? `<label class="preset-row">Готовое значение
         <select data-preset-for="${escapeHtml(item.key)}">
           <option value="">— выбрать —</option>

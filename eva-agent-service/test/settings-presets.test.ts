@@ -156,3 +156,53 @@ test("версия настроек принимается и в слабой ф
   }
   assert.throws(() => parseEtag(undefined));
 });
+
+test("режим и темп печати переключаются из панели без перезапуска", async () => {
+  const { applyManagedRuntimeConfig } = await import("../dist/admin/managed-runtime-config.js");
+  const mode = SETTING_BY_KEY.get("runtime.telegram_stream_mode");
+  const speed = SETTING_BY_KEY.get("runtime.telegram_typing_speed");
+  assert.ok(mode && speed, "переключателей нет в реестре панели");
+  // Режим — в основном списке: его ищут на странице, а не под «остальными».
+  assert.ok(!mode.advanced);
+  assert.equal(mode.default, "edit", "по умолчанию — прежний показ");
+  assert.equal(speed.default, "calm");
+  assert.equal(mode.requires_restart, false);
+  assert.equal(speed.requires_restart, false);
+  assert.deepEqual(mode.presets?.map((preset) => preset.value), ["edit", "draft"]);
+  assert.deepEqual(speed.presets?.map((preset) => preset.value), ["slow", "calm", "fast"]);
+
+  const config = { telegramStreamMode: "edit", telegramTypingSpeed: "calm" };
+  await applyManagedRuntimeConfig(config as never, {
+    query: async () => ({ rows: [
+      { key: "runtime.telegram_stream_mode", value_json: "draft" },
+      { key: "runtime.telegram_typing_speed", value_json: "slow" },
+    ] }),
+  } as never);
+  assert.equal(config.telegramStreamMode, "draft");
+  assert.equal(config.telegramTypingSpeed, "slow");
+  // Неизвестное значение не переключает режим.
+  await applyManagedRuntimeConfig(config as never, {
+    query: async () => ({ rows: [{ key: "runtime.telegram_stream_mode", value_json: "stream" }] }),
+  } as never);
+  assert.equal(config.telegramStreamMode, "draft");
+  // Откат удаляет строку: темп и режим возвращаются к значениям старта,
+  // а не держат выбранное до перезапуска.
+  assert.equal(config.telegramTypingSpeed, "calm", "темп застрял после удаления строки");
+  await applyManagedRuntimeConfig(config as never, { query: async () => ({ rows: [] }) } as never);
+  assert.equal(config.telegramStreamMode, "edit", "режим застрял после удаления строки");
+});
+
+test("темп догоняет отставание от модели плавно и успевает к сроку хвоста", async () => {
+  const { livePacedChars, LIVE_TYPING_CPS } = await import("../dist/telegram/live-pace.js");
+  const calm = LIVE_TYPING_CPS.calm;
+  // Без хвоста — около темпа: 25 знаков в секунду.
+  assert.equal(livePacedChars({ cps: calm, elapsedMs: 1_000, backlog: 0, tailRemainingMs: null }), calm);
+  // Большой хвост ускоряет показ, но без скачка до «всё сразу».
+  const catching = livePacedChars({ cps: calm, elapsedMs: 600, backlog: 600, tailRemainingMs: null });
+  assert.ok(catching > calm * 0.6 && catching < 600, String(catching));
+  // Модель закончила: хвост успевает к сроку.
+  const tail = livePacedChars({ cps: calm, elapsedMs: 1_000, backlog: 800, tailRemainingMs: 2_000 });
+  assert.ok(tail >= 400, String(tail));
+  // Долгая пауза (429) не превращается в один гигантский шаг.
+  assert.ok(livePacedChars({ cps: calm, elapsedMs: 60_000, backlog: 0, tailRemainingMs: null }) <= calm * 2);
+});

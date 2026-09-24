@@ -885,6 +885,9 @@ export class EvaWorkflow {
           // содержательный срез: до этого момента человек видит «Ева
           // печатает», а поле ввода остаётся свободным.
           live.current = this.telegram.startLiveMessage(update.chatId, {
+            // Режим и темп — из панели, читаются на каждом ответе.
+            mode: this.config.telegramStreamMode,
+            speed: this.config.telegramTypingSpeed,
             // «Печатает» держится, пока ответ растёт.
             //
             // Прежде индикатор снимался на первом же срезе: появление

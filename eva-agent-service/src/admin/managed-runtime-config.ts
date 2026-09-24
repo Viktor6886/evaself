@@ -1,5 +1,6 @@
 import type { Config } from "../config.js";
 import type { Database } from "../db.js";
+import { parseLiveStreamMode, parseLiveTypingSpeed } from "../telegram/live-pace.js";
 
 interface SettingRow {
   key: string;
@@ -22,15 +23,28 @@ function boolean(value: unknown, fallback: boolean): boolean {
  * исходного значения флаг остался бы в памяти таким, каким его включили,
  * и держался бы до перезапуска, хотя панель уже показывает другое.
  */
-const bootstrapAudioFileTranscripts = new WeakMap<Config, boolean>();
+type LiveSettings = Pick<
+  Config,
+  "audioFileTranscriptsEnabled" | "telegramStreamMode" | "telegramTypingSpeed"
+>;
+const bootstrapLiveSettings = new WeakMap<Config, LiveSettings>();
+const LIVE_SETTING_FIELDS: Array<[string, keyof LiveSettings]> = [
+  ["runtime.audio_file_transcripts", "audioFileTranscriptsEnabled"],
+  ["runtime.telegram_stream_mode", "telegramStreamMode"],
+  ["runtime.telegram_typing_speed", "telegramTypingSpeed"],
+];
 
 /** Apply PostgreSQL settings over bootstrap environment values. */
 export async function applyManagedRuntimeConfig(
   config: Config,
   db: Database,
 ): Promise<string[]> {
-  if (!bootstrapAudioFileTranscripts.has(config)) {
-    bootstrapAudioFileTranscripts.set(config, config.audioFileTranscriptsEnabled);
+  if (!bootstrapLiveSettings.has(config)) {
+    bootstrapLiveSettings.set(config, {
+      audioFileTranscriptsEnabled: config.audioFileTranscriptsEnabled,
+      telegramStreamMode: config.telegramStreamMode,
+      telegramTypingSpeed: config.telegramTypingSpeed,
+    });
   }
   const { rows } = await db.query<SettingRow>(
     `SELECT key, value_json
@@ -67,6 +81,14 @@ export async function applyManagedRuntimeConfig(
       case "runtime.audio_file_transcripts":
         config.audioFileTranscriptsEnabled = boolean(value, config.audioFileTranscriptsEnabled);
         break;
+      // Режим и темп показа читаются при каждом ответе: переключатель в
+      // панели действует со следующего сообщения.
+      case "runtime.telegram_stream_mode":
+        config.telegramStreamMode = parseLiveStreamMode(value, config.telegramStreamMode);
+        break;
+      case "runtime.telegram_typing_speed":
+        config.telegramTypingSpeed = parseLiveTypingSpeed(value, config.telegramTypingSpeed);
+        break;
       case "runtime.outbox_enabled":
         config.outboxEnabled = boolean(value, config.outboxEnabled);
         break;
@@ -84,8 +106,11 @@ export async function applyManagedRuntimeConfig(
     }
     changed.push(row.key);
   }
-  if (!rows.some((row) => row.key === "runtime.audio_file_transcripts")) {
-    config.audioFileTranscriptsEnabled = bootstrapAudioFileTranscripts.get(config)!;
+  const bootstrap = bootstrapLiveSettings.get(config)!;
+  for (const [key, field] of LIVE_SETTING_FIELDS) {
+    if (!rows.some((row) => row.key === key)) {
+      (config as Record<keyof LiveSettings, unknown>)[field] = bootstrap[field];
+    }
   }
   return changed;
 }
