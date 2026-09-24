@@ -49,6 +49,11 @@ export async function applyManagedRuntimeConfig(
       case "runtime.profile_cache_ttl_seconds":
         config.profileCacheTtlSeconds = integer(value, config.profileCacheTtlSeconds);
         break;
+      // Флаг читается на каждом сообщении, поэтому переключатель в
+      // панели действует сразу, без перезапуска.
+      case "runtime.audio_file_transcripts":
+        config.audioFileTranscriptsEnabled = boolean(value, config.audioFileTranscriptsEnabled);
+        break;
       case "runtime.outbox_enabled":
         config.outboxEnabled = boolean(value, config.outboxEnabled);
         break;
