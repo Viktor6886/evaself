@@ -925,13 +925,17 @@ export class TelegramClient implements OutboxTransport {
             continue;
           }
           if (draft) {
-            // Черновик не принят — старый клиент, не личный чат или
-            // метод недоступен боту. Ответ продолжается правкой обычного
-            // сообщения, человек разницы почти не заметит.
+            // Черновик не принят. Этот ответ продолжается правкой обычного
+            // сообщения — человек разницы почти не заметит. Запоминается
+            // отказ только для неизвестного метода (404): сбой сети, 5xx
+            // или отказ в одном чате не должны отключать выбранный в
+            // панели режим для всех до перезапуска.
             draft = false;
-            this.draftUnavailable = true;
-            this.logger.info("Черновик Telegram недоступен, показ правкой сообщения", {
+            const permanent = error instanceof TelegramApiError && error.errorCode === 404;
+            if (permanent) this.draftUnavailable = true;
+            this.logger.info("Черновик Telegram не принят, показ правкой сообщения", {
               chatId,
+              permanent,
               message: error instanceof Error ? error.message.slice(0, 200) : String(error),
             });
             continue;

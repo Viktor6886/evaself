@@ -185,6 +185,11 @@ test("режим и темп печати переключаются из пан
     query: async () => ({ rows: [{ key: "runtime.telegram_stream_mode", value_json: "stream" }] }),
   } as never);
   assert.equal(config.telegramStreamMode, "draft");
+  // Откат удаляет строку: темп и режим возвращаются к значениям старта,
+  // а не держат выбранное до перезапуска.
+  assert.equal(config.telegramTypingSpeed, "calm", "темп застрял после удаления строки");
+  await applyManagedRuntimeConfig(config as never, { query: async () => ({ rows: [] }) } as never);
+  assert.equal(config.telegramStreamMode, "edit", "режим застрял после удаления строки");
 });
 
 test("темп догоняет отставание от модели плавно и успевает к сроку хвоста", async () => {

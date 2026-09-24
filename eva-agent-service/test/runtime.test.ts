@@ -279,7 +279,7 @@ test("отвергнутый черновик сменяется правкой 
   telegram.call = async (method, body) => {
     if (method === "sendMessageDraft") {
       calls.push({ method, body });
-      throw new TelegramApiError("Telegram sendMessageDraft: Bad Request: method not found", null);
+      throw new TelegramApiError("Telegram sendMessageDraft: Not Found", null, 404, "Not Found");
     }
     return await base(method, body);
   };
@@ -296,6 +296,34 @@ test("отвергнутый черновик сменяется правкой 
   next.stop();
   assert.equal(calls.filter((call) => call.method === "sendMessageDraft").length, 1,
     "черновик пробуется снова после отказа");
+});
+
+test("разовый отказ черновика не отключает режим для следующих ответов", async () => {
+  const { telegram, calls } = liveClient();
+  const base = telegram.call;
+  let failures = 1;
+  telegram.call = async (method, body) => {
+    if (method === "sendMessageDraft") {
+      calls.push({ method, body });
+      if (failures-- > 0) {
+        throw new TelegramApiError("Telegram sendMessageDraft: Internal Server Error", null, 500, "Internal Server Error");
+      }
+      return true;
+    }
+    return await base(method, body);
+  };
+  const live = telegram.startLiveMessage(123, { intervalMs: 0, mode: "draft" });
+  live.push("Первое состояние");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await live.finish("Первое состояние и полный ответ до конца.");
+  assert.ok(calls.some((call) => call.method === "sendRichMessage"), "ответ не показан правкой");
+
+  const next = telegram.startLiveMessage(123, { intervalMs: 0, mode: "draft" });
+  next.push("Второй ответ");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  next.stop();
+  assert.equal(calls.filter((call) => call.method === "sendMessageDraft").length, 2,
+    "сбой 5xx отключил черновик до перезапуска");
 });
 
 test("спокойный темп показывает ответ мелкими шагами и дописывает хвост к сроку", async () => {
