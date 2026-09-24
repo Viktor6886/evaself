@@ -245,10 +245,10 @@ export const SETTINGS_REGISTRY: readonly SettingDefinition[] = [
     type: "boolean",
     default: false,
     required: true,
-    requires_restart: true,
+    requires_restart: false,
     description: "Аудиофайл (MP3, M4A, WAV и др.), присланный файлом, Ева расшифровывает, исправляет ошибки распознавания, кратко пересказывает и отвечает по нему на вопросы",
     affects: ["agent-runtime", "telegram-runtime"],
-    recommended: "Выключено до проверки на canary. Выключено — аудиофайл распознаётся как голосовое.",
+    recommended: "Включите после проверки на canary: действует со следующего сообщения, перезапуск не нужен. Выключено — аудиофайл распознаётся как голосовое.",
   },
   {
     key: "runtime.log_level",

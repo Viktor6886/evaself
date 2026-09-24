@@ -95,3 +95,49 @@ test("профиль по умолчанию совпадает с default ре�
     assert.deepEqual(value, SETTING_BY_KEY.get(key)?.default, `${key} расходится с default`);
   }
 });
+
+test("разбор аудиофайлов включается из панели без перезапуска", async () => {
+  // Переключатель, который сохраняется, но ни на что не влияет, хуже
+  // отсутствующего: администратор видит «включено», а Ева работает
+  // по-старому. Параметр без пометки «нужен перезапуск» обязан доезжать
+  // до конфига через applyManagedRuntimeConfig.
+  const { applyManagedRuntimeConfig } = await import("../dist/admin/managed-runtime-config.js");
+  const definition = SETTING_BY_KEY.get("runtime.audio_file_transcripts");
+  assert.ok(definition, "переключателя нет в реестре панели");
+  assert.equal(definition.env, "EVA_AUDIO_FILE_TRANSCRIPTS");
+  assert.equal(definition.type, "boolean");
+  assert.equal(definition.default, false, "флаг в production включает человек");
+  assert.equal(definition.requires_restart, false);
+  assert.ok(!definition.advanced, "переключатель спрятан в «остальные настройки»");
+
+  const apply = async (value: unknown, start: boolean) => {
+    const config = { audioFileTranscriptsEnabled: start };
+    const changed = await applyManagedRuntimeConfig(config as never, {
+      query: async () => ({ rows: [{ key: "runtime.audio_file_transcripts", value_json: value }] }),
+    } as never);
+    return { config, changed };
+  };
+  const on = await apply(true, false);
+  assert.equal(on.config.audioFileTranscriptsEnabled, true);
+  assert.deepEqual(on.changed, ["runtime.audio_file_transcripts"]);
+  assert.equal((await apply(false, true)).config.audioFileTranscriptsEnabled, false);
+  // Мусор в строке настройки не переключает флаг.
+  assert.equal((await apply("yes", false)).config.audioFileTranscriptsEnabled, false);
+
+  // Откат первого сохранения удаляет строку: флаг возвращается к
+  // значению старта, а не застревает включённым до перезапуска.
+  for (const bootstrap of [false, true]) {
+    const config = { audioFileTranscriptsEnabled: bootstrap };
+    let rows: Array<{ key: string; value_json: unknown }> = [];
+    const db = { query: async () => ({ rows }) } as never;
+    await applyManagedRuntimeConfig(config as never, db);
+    assert.equal(config.audioFileTranscriptsEnabled, bootstrap, "старт без строки меняет флаг");
+    rows = [{ key: "runtime.audio_file_transcripts", value_json: !bootstrap }];
+    await applyManagedRuntimeConfig(config as never, db);
+    assert.equal(config.audioFileTranscriptsEnabled, !bootstrap);
+    rows = [];
+    const changed = await applyManagedRuntimeConfig(config as never, db);
+    assert.equal(config.audioFileTranscriptsEnabled, bootstrap, "флаг застрял после удаления строки");
+    assert.deepEqual(changed, []);
+  }
+});

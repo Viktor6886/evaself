@@ -46,6 +46,16 @@ handoff в Telegram; все прежние входы в тесты перена
 `assert-tenant-scope.py`, `assert-admin-route-access.py`,
 `assert-env-plumbing.py` → PASS.
 Откат: `EVA_AUDIO_FILE_TRANSCRIPTS=false` и перезапуск eva-agent-service.
+Статус: выполнен, PR #352.
+
+Доработка: переключатель в панели. Карточка «Разбор аудиофайлов» в
+«Системных настройках» была, но сохранённое значение не доходило до
+сервиса — `applyManagedRuntimeConfig` не знал ключа
+`runtime.audio_file_transcripts`. Теперь знает; флаг читается на каждом
+сообщении, поэтому пометка «нужен перезапуск» снята.
+Проверки: `node --test test/*.test.ts` → PASS (1321, 0 fail); новый тест
+в `settings-presets.test.ts` без исправления → FAIL, с ним → PASS.
+Откат: выключить переключатель в панели.
 
 ## Состояние
 

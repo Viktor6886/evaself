@@ -14,11 +14,24 @@ function boolean(value: unknown, fallback: boolean): boolean {
   return typeof value === "boolean" ? value : fallback;
 }
 
+/**
+ * Значения, с которыми процесс стартовал из окружения, — для флагов,
+ * которые панель переключает без перезапуска.
+ *
+ * Откат первого сохранения удаляет строку настройки. Без запомненного
+ * исходного значения флаг остался бы в памяти таким, каким его включили,
+ * и держался бы до перезапуска, хотя панель уже показывает другое.
+ */
+const bootstrapAudioFileTranscripts = new WeakMap<Config, boolean>();
+
 /** Apply PostgreSQL settings over bootstrap environment values. */
 export async function applyManagedRuntimeConfig(
   config: Config,
   db: Database,
 ): Promise<string[]> {
+  if (!bootstrapAudioFileTranscripts.has(config)) {
+    bootstrapAudioFileTranscripts.set(config, config.audioFileTranscriptsEnabled);
+  }
   const { rows } = await db.query<SettingRow>(
     `SELECT key, value_json
        FROM system_settings
@@ -49,6 +62,11 @@ export async function applyManagedRuntimeConfig(
       case "runtime.profile_cache_ttl_seconds":
         config.profileCacheTtlSeconds = integer(value, config.profileCacheTtlSeconds);
         break;
+      // Флаг читается на каждом сообщении, поэтому переключатель в
+      // панели действует сразу, без перезапуска.
+      case "runtime.audio_file_transcripts":
+        config.audioFileTranscriptsEnabled = boolean(value, config.audioFileTranscriptsEnabled);
+        break;
       case "runtime.outbox_enabled":
         config.outboxEnabled = boolean(value, config.outboxEnabled);
         break;
@@ -65,6 +83,9 @@ export async function applyManagedRuntimeConfig(
         continue;
     }
     changed.push(row.key);
+  }
+  if (!rows.some((row) => row.key === "runtime.audio_file_transcripts")) {
+    config.audioFileTranscriptsEnabled = bootstrapAudioFileTranscripts.get(config)!;
   }
   return changed;
 }
