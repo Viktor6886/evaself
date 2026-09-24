@@ -51,9 +51,17 @@ function validate(definition: SettingDefinition, value: unknown): unknown {
   return value.trim();
 }
 
-function parseEtag(value: string | undefined): number {
+/**
+ * Версия настроек из If-Match.
+ *
+ * Слабая форма `W/"cfg-N"` принимается наравне с сильной: Caddy при
+ * сжатии ответа (`encode zstd gzip`) ослабляет ETag, панель возвращает
+ * его как получила, и без этого ни одно сохранение настроек за прокси
+ * не проходило — «Некорректный If-Match».
+ */
+export function parseEtag(value: string | undefined): number {
   if (!value) throw preconditionRequired();
-  const matched = /^"?cfg-(\d+)"?$/.exec(value.trim());
+  const matched = /^(?:W\/)?"?cfg-(\d+)"?$/.exec(value.trim());
   if (!matched) throw adminBadRequest("Некорректный If-Match");
   return Number(matched[1]);
 }

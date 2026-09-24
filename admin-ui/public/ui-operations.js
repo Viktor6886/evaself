@@ -118,7 +118,9 @@ function inputFor(setting) {
 async function loadSettings() {
   const { payload, response } = await request("/settings");
   state.settings = payload.settings;
-  state.etag = response.headers.get("ETag");
+  // Версия берётся из тела: заголовок ETag прокси ослабляет при сжатии
+  // (`W/"cfg-N"`), а тело доезжает как есть.
+  state.etag = payload.etag || response.headers.get("ETag");
   state.settingProfiles = payload.profiles || [];
   renderSettingProfiles();
 
@@ -254,7 +256,7 @@ async function saveSettings(restart = false) {
     body: JSON.stringify({ settings }),
   });
   state.settings = payload.settings;
-  state.etag = response.headers.get("ETag");
+  state.etag = payload.etag || response.headers.get("ETag");
   toast("Настройки сохранены");
   await loadSettings();
   // Настройки уже сохранены. Перезапуск — отдельное последствие: он
