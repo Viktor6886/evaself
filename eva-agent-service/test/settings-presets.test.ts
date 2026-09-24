@@ -141,3 +141,18 @@ test("разбор аудиофайлов включается из панели
     assert.deepEqual(changed, []);
   }
 });
+
+test("версия настроек принимается и в слабой форме, которую даёт прокси", async () => {
+  // Caddy при сжатии ответа ослабляет ETag: `"cfg-12"` → `W/"cfg-12"`.
+  // Панель возвращает его в If-Match как получила, и сохранение любой
+  // настройки падало с «Некорректный If-Match».
+  const { parseEtag } = await import("../dist/admin/config-service.js");
+  assert.equal(parseEtag('"cfg-12"'), 12);
+  assert.equal(parseEtag('W/"cfg-12"'), 12);
+  assert.equal(parseEtag(" W/\"cfg-7\" "), 7);
+  assert.equal(parseEtag("cfg-3"), 3);
+  for (const bad of ['W/"other-1"', '"cfg-"', "W/cfg-x", '"cfg-1", "cfg-2"']) {
+    assert.throws(() => parseEtag(bad), /Некорректный If-Match/, bad);
+  }
+  assert.throws(() => parseEtag(undefined));
+});
