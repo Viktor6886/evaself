@@ -1016,3 +1016,22 @@ test("активация объявляет бюджет хода, а не фи�
   );
   assert.deepEqual(announced, [131_072, 131_072], "без бюджета объявляется окно модели");
 });
+
+test("ответ любого пути приходит с речью Евы о себе в женском роде", () => {
+  // Правка стояла только в Telegram-ходе. Напоминания, выходы на связь,
+  // heartbeat и WebUI берут ответ из этой же сборки и присылали «Разобрал
+  // запись», «понял», «уточнил».
+  const summary = summarizeStream([
+    { type: "assistant", content: "Разобрал запись. Уточнил детали и отправил тебе список." },
+    { type: "result", stopReason: "end_turn" },
+  ] as never);
+  assert.equal(summary.reply, "Разобрала запись. Уточнила детали и отправила тебе список.");
+  assert.equal(summary.genderCorrections, 3);
+
+  const clean = summarizeStream([
+    { type: "assistant", content: "Поняла, записала." },
+    { type: "result", stopReason: "end_turn" },
+  ] as never);
+  assert.equal(clean.reply, "Поняла, записала.");
+  assert.equal(clean.genderCorrections, 0);
+});

@@ -38,6 +38,7 @@ import {
   turnTimeout,
 } from "./errors.js";
 import { missingCapabilities } from "./letta/capabilities.js";
+import { feminizeSelfReference } from "./i18n/eva-gender.js";
 import { type AgentToolCall, collectToolCalls } from "./letta/tool-calls.js";
 import {
   evaluateReadiness,
@@ -93,6 +94,12 @@ export const telegramTag = (telegramId: number | string) => `tg:${telegramId}`;
 
 export interface TurnResult {
   reply: string;
+  /**
+   * Сколько форм речи Евы о себе приведено к женскому роду в `reply`.
+   * Только число: правка общая для всех путей, а метрику ведёт тот, кто
+   * отправляет ответ.
+   */
+  genderCorrections: number;
   /**
    * Сколько событий reasoning пришло за ход. Только число: сырые
    * рассуждения не сохраняются, не трассируются и не показываются
@@ -363,10 +370,16 @@ export function summarizeStream(
   // Ответ — последнее сообщение. Всё, что модель сказала до него, это
   // рассуждение вслух: оно не уходит ни пользователю, ни в трассу —
   // от него остаётся только счётчик сообщений.
-  const reply = rendered.at(-1) ?? "";
+  //
+  // Женский род Евы правится здесь, а не у каждого отправителя: через
+  // эту точку проходит любой ответ — живой ход, напоминание, выход на
+  // связь первой, heartbeat, WebUI. Правка у отправителей стояла только
+  // в Telegram-ходе, и остальные пути присылали «понял» и «разобрал».
+  const gender = feminizeSelfReference((rendered.at(-1) ?? "").trim());
 
   return {
-    reply: reply.trim(),
+    reply: gender.text,
+    genderCorrections: gender.corrections.length,
     reasoningEvents,
     assistantGroups: rendered.length,
     assistantHadIds: sawSliceIds,

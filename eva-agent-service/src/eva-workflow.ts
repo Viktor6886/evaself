@@ -1085,7 +1085,9 @@ export class EvaWorkflow {
         // молчит, когда трогать нечего.
         const answered = turn.reply.trim() || t(language, "emptyReply");
         const gender = normalizeReplyGender(answered, userGender);
-        recordGenderFix(gender.corrections.length);
+        // Речь Евы о себе уже поправлена при сборке ответа (`summarizeStream`);
+        // её правки считаются вместе с согласованием обращения к человеку.
+        recordGenderFix(gender.corrections.length + (turn.genderCorrections ?? 0));
         if (gender.corrections.length > 0) {
           this.logger.info("Согласование рода в ответе исправлено", {
             updateId: update.updateId,
