@@ -15,7 +15,7 @@ export type RoutingPurpose =
  */
 export interface RoutingMarkerClaims {
   purpose: RoutingPurpose;
-  message_source?: "text" | "voice" | "image" | "document" | "unsupported";
+  message_source?: "text" | "voice" | "audio_file" | "image" | "document" | "unsupported";
   user_mode?: "economy" | "auto" | "quality";
   internal_operation_type?: string;
   correlation_id?: string;

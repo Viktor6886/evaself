@@ -27,6 +27,26 @@ handoff в Telegram; все прежние входы в тесты перена
 
 Предыдущая запись о серверной работе сохранена ниже.
 
+## Разбор аудиофайлов — 2026-09-24
+
+Ветка: `claude/eva-audio-recognition-summary-5f5nd2`, база `dd2e65d`.
+Запрос: принимать MP3 и другие форматы; файл (не голосовое) распознать,
+исправить ошибки, дать краткое содержание и отвечать по тексту.
+
+Реализовано: вид `audio_file` для `audio` и звуковых документов (расширен
+список форматов); под флагом `EVA_AUDIO_FILE_TRANSCRIPTS` расшифровка идёт
+вложением `<ATTACHMENTS>`, контекст помечает `message_source: audio_file`,
+правка, саммари и ответы — навык `skills/audio-transcripts`. Квота минут
+общая с голосовым; файл больше 20 МБ отвергается заранее. media-service не
+менялся: ffmpeg уже принимает любые форматы. Новых таблиц, очередей и
+сервисов нет.
+
+Проверки: `npm run build`, `npm run lint`, `npm run typecheck` → PASS;
+`node --test test/*.test.ts` → PASS (1318, 0 fail);
+`assert-tenant-scope.py`, `assert-admin-route-access.py`,
+`assert-env-plumbing.py` → PASS.
+Откат: `EVA_AUDIO_FILE_TRANSCRIPTS=false` и перезапуск eva-agent-service.
+
 ## Состояние
 
 ```

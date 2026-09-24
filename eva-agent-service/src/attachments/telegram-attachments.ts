@@ -32,7 +32,7 @@ export const VISION_MEDIA_TYPES = new Set([
   "image/webp",
 ]);
 
-export type MediaKind = "text" | "voice" | "image" | "document" | "unsupported";
+export type MediaKind = "text" | "voice" | "audio_file" | "image" | "document" | "unsupported";
 
 export interface AttachmentImage {
   mediaType: string;
@@ -46,36 +46,61 @@ export interface AttachmentLimits {
   documentBytes: number;
   /** Сколько знаков текста документа уходит в ход. */
   documentCharacters: number;
+  /**
+   * Потолок аудиофайла. Bot API отдаёт ботам файлы не больше 20 МБ:
+   * файл крупнее скачать нельзя, и честнее сказать это сразу, чем
+   * после ожидания распознавания.
+   */
+  audioBytes: number;
 }
 
 export const DEFAULT_ATTACHMENT_LIMITS: AttachmentLimits = {
   imageBytes: 10 * 1024 * 1024,
   documentBytes: 10 * 1024 * 1024,
   documentCharacters: 60_000,
+  audioBytes: 20 * 1024 * 1024,
 };
+
+/**
+ * Звук, присланный файлом. Распознаёт media-service через ffmpeg, так
+ * что список — это то, что люди действительно присылают, а не то, что
+ * умеет декодер.
+ */
+const AUDIO_FILE_EXTENSION =
+  /\.(mp3|mpga|mpeg|mp2|m4a|m4b|aac|wav|wave|ogg|oga|opus|spx|flac|alac|aif|aiff|aifc|caf|amr|awb|3gp|3ga|wma|weba|webm|mka|ac3)$/i;
+
+/** MIME, под которым Telegram и телефоны отдают звук не из `audio/*`. */
+const AUDIO_FILE_MIME = new Set(["application/ogg", "video/ogg", "audio/webm", "video/webm"]);
 
 /**
  * Вид сообщения.
  *
  * Файл, отправленный документом, разбирается по своему типу: снимок
- * экрана остаётся изображением, голосовая запись — голосом. Именно так
- * их и присылают: «отправить как файл» в Telegram — обычное действие.
+ * экрана остаётся изображением, звук — звуком. Именно так их и
+ * присылают: «отправить как файл» в Telegram — обычное действие.
+ *
+ * Голосовое и аудиофайл различаются способом отправки, а не форматом:
+ * голосовое — это реплика человека, аудиофайл (MP3, запись встречи,
+ * лекция) — материал, который он принёс разобрать.
  */
 export function telegramMediaKind(message: TelegramMessage): MediaKind {
-  if (message.voice || message.audio) return "voice";
+  if (message.voice) return "voice";
+  if (message.audio) return "audio_file";
   if (message.photo?.length) return "image";
   const document = message.document;
   if (document) {
     const mime = document.mime_type?.split(";")[0]?.trim().toLowerCase() ?? "";
     const name = document.file_name ?? "";
     if (mime.startsWith("image/") || /\.(png|jpe?g|gif|webp)$/i.test(name)) return "image";
-    if (mime.startsWith("audio/") || /\.(ogg|oga|mp3|m4a|wav|opus|aac|flac)$/i.test(name)) {
-      return "voice";
-    }
+    if (isAudioFile(mime, name)) return "audio_file";
     return "document";
   }
   if (message.text || message.caption) return "text";
   return "unsupported";
+}
+
+function isAudioFile(mime: string, name: string): boolean {
+  return mime.startsWith("audio/") || AUDIO_FILE_MIME.has(mime) || AUDIO_FILE_EXTENSION.test(name);
 }
 
 /** Файл изображения сообщения: снимок наибольшего размера или документ. */
@@ -130,6 +155,22 @@ export class TelegramAttachmentReader {
   }
 
   /**
+   * Аудиофайл, который можно отдать на распознавание.
+   *
+   * Скачивает и распознаёт его media-service; здесь только проверка,
+   * что Bot API вообще отдаст файл такого размера.
+   */
+  audioFile(file: TelegramFile): TelegramFile {
+    if ((file.file_size ?? 0) > this.limits.audioBytes) {
+      throw new AttachmentError(
+        "attachment_too_large",
+        "Аудиофайл больше 20 МБ: Telegram не отдаёт ботам файлы такого размера. Пришли запись покороче или сожми её.",
+      );
+    }
+    return file;
+  }
+
+  /**
    * Текст документа — данные, а не инструкции.
    *
    * Разбор общий с приёмом в базу знаний: те же проверки подделки типа,
@@ -160,6 +201,40 @@ export class TelegramAttachmentReader {
       sanitizeUntrustedContent(text),
     ].join("\n");
   }
+}
+
+/**
+ * Расшифровка аудиофайла для хода — данные, а не инструкции.
+ *
+ * Сказанное в записи может звучать как указание («забудь всё и…»), но
+ * произнёс его не собеседник Евы. Поэтому расшифровка идёт тем же
+ * путём, что текст документа, а не репликой человека.
+ */
+export function audioFileTranscript(
+  file: TelegramFile,
+  transcript: string,
+  durationSeconds: number,
+  limits: Pick<AttachmentLimits, "documentCharacters"> = DEFAULT_ATTACHMENT_LIMITS,
+): string {
+  const name = (file.file_name ?? file.title ?? "аудио").slice(0, 200);
+  const cut = transcript.length > limits.documentCharacters;
+  return [
+    `Аудиофайл: ${name}`,
+    `Длительность: ${formatDuration(durationSeconds)}`,
+    "Расшифровка распознавания речи, без правки: возможны ошибки в словах, именах и знаках препинания.",
+    ...(cut ? ["Расшифровка длиннее допустимого и обрезана по концу."] : []),
+    sanitizeUntrustedContent(transcript.slice(0, limits.documentCharacters)),
+  ].join("\n");
+}
+
+function formatDuration(seconds: number): string {
+  const total = Math.max(0, Math.round(seconds));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const rest = String(total % 60).padStart(2, "0");
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${rest}`
+    : `${minutes}:${rest}`;
 }
 
 /** Отказ вложения с кодом: человеку — фраза, в журнал — код. */

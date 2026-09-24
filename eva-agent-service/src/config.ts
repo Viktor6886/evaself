@@ -206,6 +206,13 @@ export interface Config {
    */
   miniAppJournalEnabled: boolean;
   /**
+   * Аудиофайл (MP3 и прочее, присланное файлом, а не голосовым) идёт
+   * Еве расшифровкой-вложением: она правит ошибки распознавания,
+   * пишет краткое содержание и отвечает по тексту. Выключено — файл
+   * распознаётся как голосовое, прежним путём.
+   */
+  audioFileTranscriptsEnabled: boolean;
+  /**
    * Сколько живёт голосовая заметка дневника. Файл удаляется по сроку,
    * расшифровка остаётся в записи: иначе человек терял бы саму запись
    * вместе с истечением аудио.
@@ -436,6 +443,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     retentionEnforcementEnabled: bool("EVA_RETENTION_ENFORCEMENT", false),
     toolApprovalsEnabled: bool("EVA_TOOL_APPROVALS", false),
     miniAppJournalEnabled: bool("EVA_MINIAPP_JOURNAL_V2", false),
+    audioFileTranscriptsEnabled: bool("EVA_AUDIO_FILE_TRANSCRIPTS", false),
     journalVoiceRetentionDays: clampedInt(
       "EVA_JOURNAL_VOICE_RETENTION_DAYS",
       30,

@@ -57,6 +57,8 @@ export interface TelegramFile {
   file_unique_id?: string;
   duration?: number;
   file_name?: string;
+  /** Название трека у `audio`: у MP3 имени файла часто нет. */
+  title?: string;
   mime_type?: string;
   file_size?: number;
 }

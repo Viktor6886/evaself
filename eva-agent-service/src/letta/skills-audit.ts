@@ -27,6 +27,7 @@ import { join } from "node:path";
  */
 export const EVA_PROJECT_SKILLS = [
   "act",
+  "audio-transcripts",
   "behavioral-activation",
   "cbt",
   "crisis-response",

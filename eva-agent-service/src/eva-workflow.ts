@@ -11,7 +11,7 @@ import type { Logger } from "./logger.js";
 import type { ChannelLinkService } from "./channels/channel-links.js";
 import type { UserProfileService } from "./profile/profile-service.js";
 import type { UserTurnLock } from "./turns/user-turn-lock.js";
-import type { RuntimeContextBuilder } from "./runtime/runtime-context.js";
+import type { MessageSource, RuntimeContextBuilder } from "./runtime/runtime-context.js";
 import type { SendMessage } from "@letta-ai/letta-agent-sdk";
 import { TaskEventService } from "./tasks/task-event-service.js";
 import { withSpan } from "./observability/tracing.js";
@@ -56,6 +56,7 @@ import {
   AttachmentError,
   TelegramAttachmentReader,
   audioFileOf,
+  audioFileTranscript,
   imageFileOf,
   telegramMediaKind,
   type AttachmentImage,
@@ -143,7 +144,7 @@ export interface NormalizedUpdate {
   telegramId: number;
   chatId: number;
   messageId: number;
-  kind: "text" | "voice" | "image" | "document" | "payment" | "unsupported";
+  kind: "text" | "voice" | "audio_file" | "image" | "document" | "payment" | "unsupported";
   command: string | null;
   replyToMessageId: number | null;
   /** Server-owned target; synthetic events always carry null. */
@@ -675,7 +676,7 @@ export class EvaWorkflow {
         // хода, поэтому «голосовое плюс короткий текст» иначе проходило
         // бы мимо гейта и тратило минуты сверх исчерпанной квоты.
         let parts = [...earlier, update];
-        if (parts.some((part) => part.kind === "voice")) {
+        if (parts.some((part) => isSpeech(part.kind))) {
           if (quotaExhausted(quota, "voice_minutes")) {
             await this.telegram.sendMessage(
               update.chatId,
@@ -685,7 +686,7 @@ export class EvaWorkflow {
             // ход целиком значило бы потерять текст, который человек
             // написал в том же окне: последовательный воркер на него
             // ответил бы, потому что гейтил каждое сообщение отдельно.
-            parts = parts.filter((part) => part.kind !== "voice");
+            parts = parts.filter((part) => !isSpeech(part.kind));
             if (parts.length === 0) {
               await this.stopTurn(turnHandle, "quota_voice");
               return { status: "ignored" };
@@ -859,7 +860,7 @@ export class EvaWorkflow {
           languageMessage:
             update.message.text?.trim() ||
             update.message.caption?.trim() ||
-            (update.kind === "voice" ? prompt : ""),
+            (isSpeech(update.kind) ? prompt : ""),
           turnId: turnHandle?.runId,
           previousUserMessageAt,
           currentMessageAt: promptTiming.firstAt,
@@ -965,7 +966,7 @@ export class EvaWorkflow {
                   // Платёж до этой точки не доходит — он применён и
                   // завершён выше. Здесь это сказано типу явно, чтобы не
                   // приводить вид сообщения принудительно.
-                  messageSource: update.kind === "payment" ? undefined : update.kind,
+                  messageSource: this.messageSourceOf(parts),
                   attachments,
                   // Фактический размер собранного контекста, а не
                   // обещание уложиться: без измерения бюджет — это
@@ -1772,20 +1773,25 @@ export class EvaWorkflow {
 
     if (update.kind === "text") return only(caption);
 
-    if (update.kind === "voice") {
-      // Голосовое, аудио и звук, присланный файлом, идут одним и тем же
-      // путём распознавания: разными их делает только способ отправки.
+    if (update.kind === "voice" || update.kind === "audio_file") {
+      // Голосовое, аудио и звук, присланный файлом, распознаются одним и
+      // тем же путём. Разными их делает способ отправки: голосовое —
+      // реплика человека, аудиофайл — материал, который он принёс
+      // разобрать, и с флагом он уходит Еве вложением.
+      const english = message.from?.language_code === "en";
+      const asFile = update.kind === "audio_file" && this.config.audioFileTranscriptsEnabled;
       const file = audioFileOf(message);
       if (!file) throw new Error("Голосовой файл отсутствует");
+      if (asFile) this.attachments.audioFile(file);
       let settled = false;
       const status: { promise: Promise<number | null> | null } = { promise: null };
       const statusTimer = setTimeout(() => {
         if (settled) return;
         status.promise = this.telegram.sendPlainMessage(
           update.chatId,
-          message.from?.language_code === "en"
-            ? "🎧 Transcribing voice message…"
-            : "🎧 Распознаю голосовое…",
+          asFile
+            ? english ? "🎧 Transcribing the audio file…" : "🎧 Распознаю аудиофайл…"
+            : english ? "🎧 Transcribing voice message…" : "🎧 Распознаю голосовое…",
         ).then((sent) => telegramMessageIdOf(sent[sent.length - 1])).catch(() => null);
       }, 600);
       statusTimer.unref?.();
@@ -1806,9 +1812,9 @@ export class EvaWorkflow {
         clearTimeout(statusTimer);
         const statusId = status.promise ? await status.promise.catch(() => null) : null;
         if (statusId !== null) {
-          const failureText = message.from?.language_code === "en"
-            ? "I could not transcribe that voice message."
-            : "Не удалось распознать голосовое.";
+          const failureText = asFile
+            ? english ? "I could not transcribe that audio file." : "Не удалось распознать аудиофайл."
+            : english ? "I could not transcribe that voice message." : "Не удалось распознать голосовое.";
           const edited = await this.telegram.editPlainMessage(
             update.chatId,
             statusId,
@@ -1838,6 +1844,24 @@ export class EvaWorkflow {
         await this.countUsage(update.telegramId, "voice_in");
       }
       const statusId = status.promise ? await status.promise.catch(() => null) : null;
+      if (asFile) {
+        // Сырую расшифровку файла человеку не повторяем: длинная запись
+        // заняла бы десяток сообщений, а исправленный текст и краткое
+        // содержание сейчас напишет Ева.
+        const done = english
+          ? "🎧 Transcribed. Fixing recognition errors and writing a summary…"
+          : "🎧 Расшифровала. Исправляю ошибки распознавания и готовлю краткое содержание…";
+        if (statusId !== null) {
+          await this.telegram.editPlainMessage(update.chatId, statusId, done).catch(() => undefined);
+        }
+        return {
+          text: caption,
+          images: [],
+          attachments: [
+            audioFileTranscript(file, transcription.text, transcription.durationSeconds),
+          ],
+        };
+      }
       if (statusId !== null) {
         await this.telegram.editPlainMessage(
           update.chatId,
@@ -1874,6 +1898,23 @@ export class EvaWorkflow {
     }
 
     throw new Error("Неподдерживаемый тип сообщения");
+  }
+
+  /**
+   * Вид сообщения хода — по частям, которые в ход действительно вошли.
+   *
+   * Последнее сообщение окна для этого не годится: аудиофайл с коротким
+   * текстом следом всё равно несёт расшифровку, а часть, выпавшая по
+   * квоте, ничего в ход не принесла. Аудиофайл при выключенном флаге
+   * идёт прежним путём голосового, и контекст говорит о нём то же самое.
+   */
+  private messageSourceOf(parts: NormalizedUpdate[]): MessageSource | undefined {
+    const asFiles = this.config.audioFileTranscriptsEnabled;
+    if (asFiles && parts.some((part) => part.kind === "audio_file")) return "audio_file";
+    const last = parts[parts.length - 1]?.kind;
+    // Платёж до хода модели не доходит — он применён и завершён раньше.
+    if (!last || last === "payment") return undefined;
+    return last === "audio_file" ? "voice" : last;
   }
 
   /**
@@ -1935,6 +1976,11 @@ export class EvaWorkflow {
  */
 function isPaymentUpdate(update: TelegramUpdate): boolean {
   return Boolean((update.message ?? update.edited_message)?.successful_payment);
+}
+
+/** Речь, которую распознаёт STT и за которую списываются минуты. */
+function isSpeech(kind: NormalizedUpdate["kind"]): boolean {
+  return kind === "voice" || kind === "audio_file";
 }
 
 export function normalizeUpdate(

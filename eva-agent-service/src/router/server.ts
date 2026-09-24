@@ -377,8 +377,11 @@ export function fromOpenAi(raw: unknown, markerSecret = ""): LlmRequest {
       // Изображение объявляет само содержимое: маркер приходит от
       // вызывающего, а картинка — это факт запроса.
       has_image: containsImage(messages) || routingClaims?.message_source === "image",
-      has_document: routingClaims?.message_source === "document",
-      has_voice: routingClaims?.message_source === "voice",
+      // Расшифровка аудиофайла — длинный текст, как у документа.
+      has_document: routingClaims?.message_source === "document" ||
+        routingClaims?.message_source === "audio_file",
+      has_voice: routingClaims?.message_source === "voice" ||
+        routingClaims?.message_source === "audio_file",
     },
   };
 }
