@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import test from "node:test";
+import test, { after } from "node:test";
 
 import { AgentToolFactory } from "../dist/agent-tools.js";
 import { assertCronExpression, cronFieldMatches, nextCronDate } from "../dist/background.js";
@@ -238,17 +237,89 @@ test("«текст не изменился» — это доставленный
   assert.deepEqual(result, {});
 });
 
-test("черновик Telegram больше не используется в обычном ходе", async () => {
-  // Отдельная проверка на состав кода: пока метод существует хоть
-  // где-то, он вернётся в первый же ход, а вместе с ним и «•••» вместо
-  // кнопки отправки.
-  const sources = await Promise.all(
-    ["../dist/telegram.js", "../dist/eva-workflow.js"].map(async (file) =>
-      await readFile(new URL(file, import.meta.url), "utf8")),
-  );
-  for (const source of sources) {
-    assert.doesNotMatch(source, /"sendMessageDraft"|'sendMessageDraft'/);
+test("черновик Telegram не используется, пока его не выбрали в панели", async () => {
+  // Черновик занимает кнопку отправки («•••»), пока Ева пишет. Поэтому он
+  // только по выбору администратора: без режима `draft` показ идёт
+  // правкой обычного сообщения, как всегда.
+  for (const mode of [undefined, "edit"] as const) {
+    const { telegram, calls } = liveClient();
+    const live = telegram.startLiveMessage(123, { intervalMs: 0, ...(mode ? { mode } : {}) });
+    live.push("Первое состояние ответа");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await live.finish("Первое состояние ответа и его продолжение до конца мысли.");
+    assert.equal(calls.some((call) => call.method === "sendMessageDraft"), false, String(mode));
   }
+});
+
+test("в режиме черновика ответ растёт черновиком и доставляется обычным сообщением", async () => {
+  const { telegram, calls } = liveClient();
+  const live = telegram.startLiveMessage(123, { intervalMs: 0, mode: "draft" });
+  live.push("Понимаю");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  live.push("Понимаю. Расскажи");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const finished = await live.finish("Понимаю. Расскажи, что было дальше.");
+
+  const drafts = calls.filter((call) => call.method === "sendMessageDraft");
+  assert.ok(drafts.length >= 2, "черновик не обновлялся");
+  // Один и тот же черновик от начала до конца, без курсора: печать
+  // анимирует сам клиент.
+  assert.equal(new Set(drafts.map((call) => call.body.draft_id)).size, 1);
+  assert.ok(Number(drafts[0]!.body.draft_id) > 0);
+  assert.equal(drafts.some((call) => String(call.body.text).includes("▉")), false);
+  // Ни сообщения, ни правки во время показа: итог уходит обычной
+  // доставкой через outbox у вызывающего.
+  assert.deepEqual(calls.filter((call) => call.method !== "sendMessageDraft"), []);
+  assert.equal(finished.delivered, false);
+});
+
+test("отвергнутый черновик сменяется правкой сообщения и больше не пробуется", async () => {
+  const { telegram, calls } = liveClient();
+  const base = telegram.call;
+  telegram.call = async (method, body) => {
+    if (method === "sendMessageDraft") {
+      calls.push({ method, body });
+      throw new TelegramApiError("Telegram sendMessageDraft: Bad Request: method not found", null);
+    }
+    return await base(method, body);
+  };
+  const live = telegram.startLiveMessage(123, { intervalMs: 0, mode: "draft" });
+  live.push("Первое состояние");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await live.finish("Первое состояние и полный ответ до конца.");
+  assert.equal(calls.filter((call) => call.method === "sendMessageDraft").length, 1);
+  assert.ok(calls.some((call) => call.method === "sendRichMessage"), "ответ не показан правкой");
+
+  const next = telegram.startLiveMessage(123, { intervalMs: 0, mode: "draft" });
+  next.push("Второй ответ");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  next.stop();
+  assert.equal(calls.filter((call) => call.method === "sendMessageDraft").length, 1,
+    "черновик пробуется снова после отказа");
+});
+
+test("спокойный темп показывает ответ мелкими шагами и дописывает хвост к сроку", async () => {
+  // Таймеры показа не держат процесс (`unref`): в сервисе цикл событий
+  // занят и так, а в тесте его приходится держать самим.
+  const keepAlive = setInterval(() => undefined, 50);
+  after(() => clearInterval(keepAlive));
+  const { telegram, calls } = liveClient();
+  const live = telegram.startLiveMessage(123, { intervalMs: 20, speed: "calm" });
+  const answer = "Это довольно длинный ответ, который модель уже написала целиком, "
+    + "а показ должен выводить его постепенно, а не одной вспышкой в конце.";
+  live.push(answer);
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  const shownSoFar = calls.map(renderedCallText);
+  assert.ok(shownSoFar.length >= 2, "показ не шёл шагами");
+  // Первый шаг — несколько слов, а не строка.
+  assert.ok(shownSoFar[0]!.replace(" ▉", "").length < 30, shownSoFar[0]);
+  // Каждый следующий шаг продолжает предыдущий.
+  for (let index = 1; index < shownSoFar.length; index += 1) {
+    assert.ok(shownSoFar[index]!.replace(" ▉", "").startsWith(shownSoFar[index - 1]!.replace(" ▉", "")));
+  }
+  const finished = await live.finish(answer);
+  assert.equal(finished.delivered, true);
+  assert.equal(renderedCallText(calls.at(-1)!), answer);
 });
 
 test("voice transcript echo is quoted without changing the transcript and is sent without parse mode", async () => {

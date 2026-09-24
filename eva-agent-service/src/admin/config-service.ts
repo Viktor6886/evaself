@@ -38,6 +38,12 @@ function validate(definition: SettingDefinition, value: unknown): unknown {
   if (typeof value !== "string" || (definition.required && !value.trim())) {
     throw adminBadRequest(`${definition.title}: ожидается непустая строка`);
   }
+  if (
+    definition.type === "select" && definition.key !== "runtime.log_level" && definition.presets
+    && !definition.presets.some((preset) => preset.value === value.trim())
+  ) {
+    throw adminBadRequest(`${definition.title}: выберите одно из значений списка`);
+  }
   if (definition.key === "runtime.log_level" && !["debug", "info", "warn", "error"].includes(value)) {
     throw adminBadRequest("Допустимые уровни: debug, info, warn, error");
   }

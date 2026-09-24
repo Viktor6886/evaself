@@ -23,6 +23,14 @@ import type { Database } from "./db.js";
 import type { Logger } from "./logger.js";
 import type { ReactionTarget } from "./turns/turn-context.js";
 import {
+  LIVE_DRAFT_INTERVAL_MS,
+  LIVE_TAIL_MS,
+  LIVE_TYPING_CPS,
+  livePacedChars,
+  type LiveStreamMode,
+  type LiveTypingSpeed,
+} from "./telegram/live-pace.js";
+import {
   isReactionTargetTrusted,
   lockReactionTarget,
   matchesReactionTarget,
@@ -297,7 +305,12 @@ export function liveStepWords(updates: number): number {
   return LIVE_STEP_RAMP[updates] ?? LIVE_STEP_MAX;
 }
 
-export function nextLivePrefix(current: string, target: string, maxWords: number): string {
+export function nextLivePrefix(
+  current: string,
+  target: string,
+  maxWords: number,
+  maxChars = Number.POSITIVE_INFINITY,
+): string {
   if (!target.startsWith(current) || current.length >= target.length) return target;
   let inlineCode = false;
   let fencedCode = false;
@@ -323,7 +336,9 @@ export function nextLivePrefix(current: string, target: string, maxWords: number
     if (/\s/u.test(char) && !fencedCode && !inlineCode && brackets === 0 && linkParens === 0) {
       words += 1;
       safe = index;
-      if (words >= maxWords) { reachedLimit = true; break; }
+      // Граница по знакам тоже ставится только на пробеле: слово не
+      // обрывается посередине.
+      if (words >= maxWords || index - current.length >= maxChars) { reachedLimit = true; break; }
     }
   }
   if (!reachedLimit && !fencedCode && !inlineCode && brackets === 0 && linkParens === 0) {
@@ -342,6 +357,8 @@ export class TelegramClient implements OutboxTransport {
   private stickers: TelegramStickerCatalog;
   private outbox: OutboxDelivery | null = null;
   private cachedUsername: string | null | undefined;
+  /** Telegram отверг черновик: дальше показ идёт только правкой. */
+  private draftUnavailable = false;
   private readonly deliveryContext = new AsyncLocalStorage<{
     prefix: string;
     sequence: number;
@@ -732,6 +749,16 @@ export class TelegramClient implements OutboxTransport {
     chatId: number,
     options: {
       intervalMs?: number;
+      /**
+       * Чем показывать: правкой сообщения или черновиком бота. По
+       * умолчанию — правкой, как было всегда.
+       */
+      mode?: LiveStreamMode;
+      /**
+       * Темп показа. По умолчанию — прежний пословный (`fast`): новый
+       * темп включает тот, кто знает настройку.
+       */
+      speed?: LiveTypingSpeed;
       now?: () => number;
       /** Первое сообщение отправлено; его идентификатор известен. */
       onSent?: (messageId: number) => void;
@@ -744,8 +771,19 @@ export class TelegramClient implements OutboxTransport {
       onUpdate?: () => void;
     } = {},
   ): TelegramLiveMessage {
-    const intervalMs = Math.max(0, options.intervalMs ?? LIVE_UPDATE_INTERVAL_MS);
+    const speed = options.speed ?? "fast";
+    const paced = speed !== "fast";
+    // Черновик, который Telegram однажды отверг, больше не пробуется:
+    // каждый ответ платил бы за отказ лишним запросом.
+    let draft = options.mode === "draft" && !this.draftUnavailable;
+    const draftId = 1 + Math.floor(Math.random() * 2_000_000_000);
+    const intervalMs = Math.max(
+      0,
+      options.intervalMs ?? (draft ? LIVE_DRAFT_INTERVAL_MS : LIVE_UPDATE_INTERVAL_MS),
+    );
     const now = options.now ?? (() => Date.now());
+    /** Когда модель закончила и хвост дописывается: крайний срок. */
+    let tailDeadline: number | null = null;
     let pending: string | null = null;
     let shown = "";
     let messageId: number | null = null;
@@ -782,6 +820,21 @@ export class TelegramClient implements OutboxTransport {
     const interrupt = (): void => wake?.();
 
     const write = async (text: string, cursor = true): Promise<void> => {
+      if (draft) {
+        // Курсора в черновике нет: печать анимирует сам клиент.
+        const rendered = renderTelegramText(text);
+        await this.call("sendMessageDraft", {
+          chat_id: chatId,
+          draft_id: draftId,
+          text: rendered.text,
+          ...(rendered.parse_mode ? { parse_mode: rendered.parse_mode } : {}),
+        });
+        shown = text;
+        updates += 1;
+        lastSentAt = now();
+        options.onUpdate?.();
+        return;
+      }
       const displayed = cursor ? `${text} ${LIVE_CURSOR}` : text;
       const richPayload = renderTelegramRichText(displayed);
       if (messageId === null) {
@@ -844,7 +897,21 @@ export class TelegramClient implements OutboxTransport {
         if (stopped) return;
         const text = pending;
         if (text === null || text === shown) { pending = null; continue; }
-        const next = nextLivePrefix(shown, text, liveStepWords(updates));
+        let next: string;
+        if (paced) {
+          // Новая группа ответа не продолжает показанное: темп считается
+          // от начала, а не прыжком к её концу.
+          const base = text.startsWith(shown) ? shown : "";
+          const budget = livePacedChars({
+            cps: LIVE_TYPING_CPS[speed as Exclude<LiveTypingSpeed, "fast">],
+            elapsedMs: updates === 0 ? intervalMs : now() - lastSentAt,
+            backlog: text.length - base.length,
+            tailRemainingMs: tailDeadline === null ? null : tailDeadline - now(),
+          });
+          next = nextLivePrefix(base, text, Number.POSITIVE_INFINITY, budget);
+        } else {
+          next = nextLivePrefix(shown, text, liveStepWords(updates));
+        }
         try {
           await write(next);
           if (next === pending) pending = null;
@@ -855,6 +922,18 @@ export class TelegramClient implements OutboxTransport {
             // 429: следующая попытка не раньше названного срока, и без
             // очереди накопленных правок — только последнее состояние.
             pausedUntil = now() + error.retryAfterMs;
+            continue;
+          }
+          if (draft) {
+            // Черновик не принят — старый клиент, не личный чат или
+            // метод недоступен боту. Ответ продолжается правкой обычного
+            // сообщения, человек разницы почти не заметит.
+            draft = false;
+            this.draftUnavailable = true;
+            this.logger.info("Черновик Telegram недоступен, показ правкой сообщения", {
+              chatId,
+              message: error instanceof Error ? error.message.slice(0, 200) : String(error),
+            });
             continue;
           }
           this.logger.debug("Telegram не принял промежуточное состояние ответа", {
@@ -908,7 +987,24 @@ export class TelegramClient implements OutboxTransport {
       ): Promise<{ delivered: boolean; messageId: number | null; keyboardMessageId: number | null }> => {
         const clean = text.trimEnd();
         const finalWords = clean.slice(shown.length).trim().split(/\s+/u).filter(Boolean).length;
+        const started = messageId !== null || (draft && shown !== "");
         if (
+          (paced || draft) && started
+          && clean.length <= LIVE_MESSAGE_LIMIT && clean !== shown
+        ) {
+          // Модель закончила: хвост дописывается тем же темпом с
+          // ускорением к сроку, а не появляется разом.
+          tailDeadline = now() + LIVE_TAIL_MS;
+          pending = clean;
+          schedule();
+          await Promise.race([
+            flushing ?? Promise.resolve(),
+            new Promise<void>((resolve) => {
+              const timer = setTimeout(resolve, LIVE_TAIL_MS + intervalMs + 200);
+              timer.unref?.();
+            }),
+          ]);
+        } else if (
           messageId !== null && finalWords >= 6
           && clean.length <= LIVE_MESSAGE_LIMIT && clean !== shown
         ) {

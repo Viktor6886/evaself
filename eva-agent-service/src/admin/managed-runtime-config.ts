@@ -1,5 +1,6 @@
 import type { Config } from "../config.js";
 import type { Database } from "../db.js";
+import { parseLiveStreamMode, parseLiveTypingSpeed } from "../telegram/live-pace.js";
 
 interface SettingRow {
   key: string;
@@ -66,6 +67,14 @@ export async function applyManagedRuntimeConfig(
       // панели действует сразу, без перезапуска.
       case "runtime.audio_file_transcripts":
         config.audioFileTranscriptsEnabled = boolean(value, config.audioFileTranscriptsEnabled);
+        break;
+      // Режим и темп показа читаются при каждом ответе: переключатель в
+      // панели действует со следующего сообщения.
+      case "runtime.telegram_stream_mode":
+        config.telegramStreamMode = parseLiveStreamMode(value, config.telegramStreamMode);
+        break;
+      case "runtime.telegram_typing_speed":
+        config.telegramTypingSpeed = parseLiveTypingSpeed(value, config.telegramTypingSpeed);
         break;
       case "runtime.outbox_enabled":
         config.outboxEnabled = boolean(value, config.outboxEnabled);

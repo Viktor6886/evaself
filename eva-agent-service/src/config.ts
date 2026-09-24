@@ -2,6 +2,7 @@
  * Configuration, read once from the process environment.
  */
 
+import { parseLiveStreamMode, parseLiveTypingSpeed } from "./telegram/live-pace.js";
 import { globalSecretRedactor } from "./admin/redactor.js";
 import { inspectStickerCatalog } from "./telegram/stickers.js";
 
@@ -212,6 +213,14 @@ export interface Config {
    * распознаётся как голосовое, прежним путём.
    */
   audioFileTranscriptsEnabled: boolean;
+  /**
+   * Как показывается ответ, пока Ева пишет: правкой сообщения (`edit`)
+   * или черновиком бота (`draft`, сообщение человека уходит вверх, но
+   * клиент Telegram на это время занимает кнопку отправки).
+   */
+  telegramStreamMode: "edit" | "draft";
+  /** Темп показа: `slow` ≈ 18, `calm` ≈ 25 знаков в секунду, `fast` — прежний пословный. */
+  telegramTypingSpeed: "slow" | "calm" | "fast";
   /**
    * Сколько живёт голосовая заметка дневника. Файл удаляется по сроку,
    * расшифровка остаётся в записи: иначе человек терял бы саму запись
@@ -444,6 +453,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     toolApprovalsEnabled: bool("EVA_TOOL_APPROVALS", false),
     miniAppJournalEnabled: bool("EVA_MINIAPP_JOURNAL_V2", false),
     audioFileTranscriptsEnabled: bool("EVA_AUDIO_FILE_TRANSCRIPTS", false),
+    telegramStreamMode: parseLiveStreamMode(str("EVA_TELEGRAM_STREAM_MODE", "edit")),
+    telegramTypingSpeed: parseLiveTypingSpeed(str("EVA_TELEGRAM_TYPING_SPEED", "calm")),
     journalVoiceRetentionDays: clampedInt(
       "EVA_JOURNAL_VOICE_RETENTION_DAYS",
       30,
