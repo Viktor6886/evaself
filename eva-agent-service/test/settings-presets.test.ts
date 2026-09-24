@@ -123,4 +123,21 @@ test("разбор аудиофайлов включается из панели
   assert.equal((await apply(false, true)).config.audioFileTranscriptsEnabled, false);
   // Мусор в строке настройки не переключает флаг.
   assert.equal((await apply("yes", false)).config.audioFileTranscriptsEnabled, false);
+
+  // Откат первого сохранения удаляет строку: флаг возвращается к
+  // значению старта, а не застревает включённым до перезапуска.
+  for (const bootstrap of [false, true]) {
+    const config = { audioFileTranscriptsEnabled: bootstrap };
+    let rows: Array<{ key: string; value_json: unknown }> = [];
+    const db = { query: async () => ({ rows }) } as never;
+    await applyManagedRuntimeConfig(config as never, db);
+    assert.equal(config.audioFileTranscriptsEnabled, bootstrap, "старт без строки меняет флаг");
+    rows = [{ key: "runtime.audio_file_transcripts", value_json: !bootstrap }];
+    await applyManagedRuntimeConfig(config as never, db);
+    assert.equal(config.audioFileTranscriptsEnabled, !bootstrap);
+    rows = [];
+    const changed = await applyManagedRuntimeConfig(config as never, db);
+    assert.equal(config.audioFileTranscriptsEnabled, bootstrap, "флаг застрял после удаления строки");
+    assert.deepEqual(changed, []);
+  }
 });
