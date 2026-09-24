@@ -120,6 +120,65 @@ test("scheduler runtime uses its own conversation instead of the main chat", asy
   assert.equal(turns.includes("conversation-chat"), false);
 });
 
+test("heartbeat закрывает ветку scheduler, чтобы не заразить ею напоминание", async () => {
+  // Ветка `scheduler` общая с напоминаниями по задачам. Heartbeat
+  // оставлял её открытой, и следующее напоминание выполнялось поверх
+  // инструкции «ответь ровно HEARTBEAT_SKIP»: человек получил в чат
+  // рассуждение «есть ли повод написать» с маркером в конце.
+  const sent: string[] = [];
+  const closed: Array<{ userId: number; agentId: string; purpose: string }> = [];
+  const background = new BackgroundRuntime(
+    {
+      schedulerIntervalMs: 30_000,
+      heartbeatIntervalMs: 600_000,
+      typingIntervalMs: 4_000,
+    } as never,
+    {
+      transaction: async () => [],
+      query: async () => ({ rows: [] }),
+      markAgentUsed: async () => {},
+    } as never,
+    {
+      runTurn: async () => ({
+        reply: "Давай проверю, есть ли повод… Повода нет.\n\nHEARTBEAT_SKIP",
+      }),
+    } as never,
+    { run: async (_id: number, work: () => Promise<unknown>) => await work() } as never,
+    {
+      configured: true,
+      withPriority: async (_p: string, work: () => Promise<unknown>) => await work(),
+      sendMessage: async (_chat: number, text: string) => { sent.push(text); },
+    } as never,
+    { build: async () => ({}), wrapUserMessage: () => "prompt" } as never,
+    {
+      ensure: async () => ({
+        conversationId: "conversation-scheduler",
+        purpose: "scheduler",
+        created: false,
+      }),
+      close: async (userId: number, agentId: string, purpose: string) => {
+        closed.push({ userId, agentId, purpose });
+      },
+    } as never,
+    logger,
+  );
+
+  await (background as unknown as {
+    executeHeartbeat(candidate: Record<string, unknown>): Promise<void>;
+  }).executeHeartbeat({
+    user_id: "7",
+    telegram_id: "77",
+    chat_id: "77",
+    agent_id: "agent-7",
+    conversation_id: "conversation-chat",
+    timezone: "UTC",
+    last_message_hash: null,
+  });
+
+  assert.deepEqual(sent, [], "отказ с рассуждением ушёл человеку");
+  assert.deepEqual(closed, [{ userId: 7, agentId: "agent-7", purpose: "scheduler" }]);
+});
+
 test("purpose policy denies destructive chat tools in research conversations", async () => {
   const factory = new AgentToolFactory(
     { searxngUrl: "http://search.invalid" } as never,

@@ -505,6 +505,14 @@ export class BackgroundRuntime {
          ON CONFLICT (user_id) DO UPDATE SET last_result = EXCLUDED.last_result`,
         [candidate.user_id, `error:${String(error).slice(0, 500)}`],
       );
+    } finally {
+      // Ветка `scheduler` общая с напоминаниями по задачам. Оставленная
+      // открытой, она несла следующему напоминанию инструкцию heartbeat,
+      // и модель отвечала на напоминание рассуждением «есть ли повод» с
+      // маркером отказа в конце — а напоминание отправляет ответ как
+      // есть. Очередь и выполнение задач закрывают ветку так же.
+      await this.purposes.close(Number(candidate.user_id), candidate.agent_id, "scheduler")
+        .catch(() => undefined);
     }
   }
 
