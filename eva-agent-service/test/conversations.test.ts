@@ -126,7 +126,8 @@ test("heartbeat закрывает ветку scheduler, чтобы не зар�
   // инструкции «ответь ровно HEARTBEAT_SKIP»: человек получил в чат
   // рассуждение «есть ли повод написать» с маркером в конце.
   const sent: string[] = [];
-  const closed: Array<{ userId: number; agentId: string; purpose: string }> = [];
+  const closed: Array<{ userId: number; agentId: string; purpose: string; locked: boolean }> = [];
+  let locked = false;
   const background = new BackgroundRuntime(
     {
       schedulerIntervalMs: 30_000,
@@ -143,7 +144,16 @@ test("heartbeat закрывает ветку scheduler, чтобы не зар�
         reply: "Давай проверю, есть ли повод… Повода нет.\n\nHEARTBEAT_SKIP",
       }),
     } as never,
-    { run: async (_id: number, work: () => Promise<unknown>) => await work() } as never,
+    {
+      run: async (_id: number, work: () => Promise<unknown>) => {
+        locked = true;
+        try {
+          return await work();
+        } finally {
+          locked = false;
+        }
+      },
+    } as never,
     {
       configured: true,
       withPriority: async (_p: string, work: () => Promise<unknown>) => await work(),
@@ -157,7 +167,7 @@ test("heartbeat закрывает ветку scheduler, чтобы не зар�
         created: false,
       }),
       close: async (userId: number, agentId: string, purpose: string) => {
-        closed.push({ userId, agentId, purpose });
+        closed.push({ userId, agentId, purpose, locked });
       },
     } as never,
     logger,
@@ -176,7 +186,9 @@ test("heartbeat закрывает ветку scheduler, чтобы не зар�
   });
 
   assert.deepEqual(sent, [], "отказ с рассуждением ушёл человеку");
-  assert.deepEqual(closed, [{ userId: 7, agentId: "agent-7", purpose: "scheduler" }]);
+  // Закрытие внутри блокировки человека: ход напоминания в той же
+  // ветке не вклинится между концом heartbeat и закрытием.
+  assert.deepEqual(closed, [{ userId: 7, agentId: "agent-7", purpose: "scheduler", locked: true }]);
 });
 
 test("purpose policy denies destructive chat tools in research conversations", async () => {
