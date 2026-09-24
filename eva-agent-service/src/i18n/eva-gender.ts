@@ -265,6 +265,16 @@ export function isSelfPastPredicate(word: string, next: string): boolean {
     // «Позвонил Иван», «Сделал он» — подлежащее стоит после глагола.
     if (next[0] !== next[0]!.toLocaleLowerCase("ru")) return false;
     if (SUBJECT_PRONOUNS.has(next.toLocaleLowerCase("ru"))) return false;
+    // «Стамбул встретил», «Кабул остался»: если сразу за словом стоит
+    // глагол прошедшего времени, само слово — подлежащее, а не глагол.
+    // Словарём топонимы и имена на «-ул», «-ал» не перечислить.
+    // Признак — только мужская форма: «детали», «школа» оканчиваются на
+    // «-ли», «-ла», но глаголами не являются.
+    const nextLower = next.toLocaleLowerCase("ru");
+    if (/(?:[аяиеуы]л|ёл|лся)$/u.test(nextLower) && nextLower.length >= 4
+      && !NOUNS_LIKE_PAST.has(nextLower) && !OPENERS.has(nextLower)) {
+      return false;
+    }
   }
   if (OPENERS.has(lower)) return true;
   if (lower.length < 5 || !CYRILLIC_WORD.test(word)) return false;
@@ -289,6 +299,16 @@ const CLAUSE_TOKEN = /([,—–:;(])|([а-яёА-ЯЁ-]+)/gu;
  */
 const HANDOVER =
   /(?:скажи|скажите|сказать|говоришь|говорит|напиши|напишите|написать|ответь|ответьте|фраз\w*|например|звучит|так и скажи)[^.!?\n]{0,24}$/iu;
+
+/**
+ * Пересказ чужих слов без кавычек: «Ты написал мне: я всё понял».
+ *
+ * После двоеточия за глаголом речи в прошедшем времени идут слова
+ * человека, а не Евы. Косвенная речь («ты сказал, что я справилась»)
+ * сюда не относится: там «я» — сама Ева.
+ */
+const REPORTED_SPEECH =
+  /(?:написал|написала|писал|писала|сказал|сказала|говорил|говорила|отметил|отметила|ответил|ответила|спросил|спросила|пишешь|сообщил|сообщила)[^.!?\n:]{0,24}:\s*$/iu;
 
 const CYRILLIC_WORD = /^[а-яёА-ЯЁ-]+$/u;
 
@@ -388,8 +408,10 @@ interface Edit { from: number; to: number; text: string; was: string }
 export function feminizeSelfReference(input: string): GenderFix {
   const spans = protectedSpans(input);
   const guarded = (index: number) => spans.some(([from, to]) => index >= from && index < to);
-  const handedOver = (index: number) =>
-    HANDOVER.test(input.slice(Math.max(0, index - 48), index));
+  const handedOver = (index: number) => {
+    const before = input.slice(Math.max(0, index - 48), index);
+    return HANDOVER.test(before) || REPORTED_SPEECH.test(before);
+  };
   // Правки собираются по исходному тексту и применяются одной сборкой:
   // менять строку на ходу значит сдвигать смещения следующих совпадений.
   const edits: Edit[] = [];
