@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { PersonaSync, canonicalMemoryVersion } from "../dist/letta/persona-sync.js";
+import { PersonaSync, canonicalMemoryVersion, markCreatedAgentCanonical } from "../dist/letta/persona-sync.js";
 
 const logger = { debug() {}, info() {}, warn() {}, error() {} };
 
@@ -156,4 +156,43 @@ test("one agent failure does not stop other agents", async () => {
   assert.equal(result.failed, 1);
   assert.equal(result.updated, 1);
   assert.deepEqual(calls.sort(), ["agent-1", "agent-2"]);
+});
+
+test("новый агент отмечен сверенным и не переписывается при запуске сервиса", async () => {
+  // Раньше новый агент оставался без persona_version, и перезапуск раньше
+  // первого хода переписывал persona.md и therapeutic_framework.md тем же
+  // текстом: файлы памяти менялись без причины, smoke стенда падал.
+  const stored: Record<string, string | null> = { "agent-1": null };
+  const store = {
+    recordMemoryReconciled: async (agentId: string, _userId: number, state: { version: string }) => {
+      stored[agentId] = state.version;
+    },
+    listAgentsForPersonaSync: async () => [{
+      agentId: "agent-1", userId: 1, conversationId: "conv-1", personaVersion: stored["agent-1"],
+    }],
+    recordCanonicalContextSyncState: async () => {},
+  };
+  await markCreatedAgentCanonical(store, logger, {
+    agentId: "agent-1", userId: 1, persona: "canonical persona", systemPrompt: "canonical system",
+  });
+  assert.equal(stored["agent-1"], canonicalMemoryVersion("canonical persona", "canonical system"));
+
+  const writes: string[] = [];
+  const service = new PersonaSync(store as never, logger, {
+    updateAgentSystemPrompt: async () => { writes.push("system"); return true; },
+    updateAgentPersona: async () => { writes.push("persona"); return true; },
+  });
+  const result = await service.sync("canonical persona", "canonical system");
+  assert.equal(result.upToDate, 1);
+  assert.deepEqual(writes, [], "сверка переписала файлы памяти нового агента");
+});
+
+test("отказ записи версии не роняет создание агента", async () => {
+  const warnings: unknown[] = [];
+  await markCreatedAgentCanonical(
+    { recordMemoryReconciled: async () => { throw new Error("db down"); } },
+    { warn: (...args: unknown[]) => { warnings.push(args); } },
+    { agentId: "agent-1", userId: 1, persona: "p", systemPrompt: "s" },
+  );
+  assert.equal(warnings.length, 1);
 });
