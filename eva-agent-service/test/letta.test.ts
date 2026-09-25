@@ -467,6 +467,143 @@ test("ход без текста не выдумывает время перво
   assert.equal(result.firstDeltaMs, null, "времени первого среза взяться неоткуда");
 });
 
+/**
+ * Ход, закончившийся молча.
+ *
+ * Длинная цепочка инструментов («разложи 40 задач») кончалась без слова
+ * человеку: модель исчерпывала шаги или токены вывода. Человек получал
+ * «попробуй ещё раз», повторял — и задачи создавались второй раз.
+ */
+function silentTurnService(rounds: unknown[][]) {
+  const warnings: Array<Record<string, unknown>> = [];
+  const service = new LettaService({
+    appServerUrl: "ws://example.invalid/ws", appServerToken: "", appServerRequestTimeoutMs: 1000,
+    model: "", sessionPoolSize: 5, sessionIdleMs: 1000, turnTimeoutMs: 5000,
+  } as never, {
+    debug() {}, info() {}, warn(_message: string, meta: Record<string, unknown>) { warnings.push(meta); }, error() {},
+  }, "persona", SYSTEM_PROMPT);
+  const sent: unknown[] = [];
+  let round = -1;
+  (service as unknown as { client: { resumeSession(id: string, options: unknown): unknown } }).client = {
+    resumeSession: () => ({
+      bootstrapState: async () => ({}),
+      recoverPendingApprovals: async () => ({ recovered: false }),
+      send: async (message: unknown) => { sent.push(message); round += 1; },
+      stream: () => (rounds[round] ?? [])[Symbol.iterator](),
+      close() {},
+      agentId: "agent-1",
+      conversationId: "conv-1",
+    }),
+  };
+  return { service, sent, warnings };
+}
+
+test("молча закончившийся ход Letta досказывает, не повторяя действий", async () => {
+  const { FINISH_REPLY_PROMPT } = await import("../dist/letta/empty-reply.js");
+  const { service, sent, warnings } = silentTurnService([
+    [
+      { type: "tool_call", name: "save_tasks_bulk" },
+      { type: "result", stopReason: "max_steps" },
+    ],
+    [
+      { type: "assistant", content: "Сохранила 41 задачу.", otid: "b" },
+      { type: "result", stopReason: "end_turn" },
+    ],
+  ]);
+  const deltas: string[] = [];
+  const result = await service.runTurn("conv-1", "разложи задачи", {
+    onDelta: (delta) => deltas.push(delta.text),
+  });
+
+  assert.deepEqual(sent, ["разложи задачи", FINISH_REPLY_PROMPT]);
+  assert.equal(result.reply, "Сохранила 41 задачу.");
+  assert.deepEqual(deltas, ["Сохранила 41 задачу."]);
+  // Вызовы первого круга не теряются: по ним учитывается сделанное.
+  assert.deepEqual(result.toolCalls, ["save_tasks_bulk"]);
+  // В журнале — причина остановки и счётчики, текста нет.
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0]!.stop_reason, "max_steps");
+  assert.equal(warnings[0]!.tool_calls, 1);
+});
+
+test("во время досказа продуктовые инструменты не выполняются", async () => {
+  // Просьба «не повторяй действия» — только слова. Если модель всё же
+  // позовёт save_tasks_bulk, задачи не должны создаться второй раз.
+  const service = new LettaService({
+    appServerUrl: "ws://example.invalid/ws", appServerToken: "", appServerRequestTimeoutMs: 1000,
+    model: "", sessionPoolSize: 5, sessionIdleMs: 1000, turnTimeoutMs: 5000,
+  } as never, { debug() {}, info() {}, warn() {}, error() {} }, "persona", SYSTEM_PROMPT);
+  let executed = 0;
+  service.setToolFactory(() => [{
+    name: "save_tasks_bulk", label: "save", description: "", parameters: {},
+    execute: async () => { executed += 1; return { ok: true }; },
+  } as never]);
+  const outcomes: string[] = [];
+  let tools: Array<{ execute(id: string, args: unknown): Promise<unknown> }> = [];
+  let round = -1;
+  const rounds = [
+    [{ type: "result", stopReason: "max_steps" }],
+    [{ type: "assistant", content: "Сохранила задачи.", otid: "b" }, { type: "result", stopReason: "end_turn" }],
+  ];
+  const call = async () => {
+    try {
+      await tools[0]!.execute("call", {});
+      outcomes.push("ran");
+    } catch {
+      outcomes.push("refused");
+    }
+  };
+  (service as unknown as { client: { resumeSession(id: string, options: unknown): unknown } }).client = {
+    resumeSession: (_id: string, options: { tools?: typeof tools }) => {
+      tools = options.tools ?? [];
+      return {
+        bootstrapState: async () => ({}),
+        recoverPendingApprovals: async () => ({ recovered: false }),
+        // Модель зовёт инструмент в каждом круге.
+        send: async () => { round += 1; await call(); },
+        stream: () => (rounds[round] ?? [])[Symbol.iterator](),
+        close() {},
+        agentId: "agent-1",
+        conversationId: "conv-1",
+      };
+    },
+  };
+
+  const result = await service.runTurn("conv-1", "разложи задачи");
+  assert.equal(result.reply, "Сохранила задачи.");
+  assert.deepEqual(outcomes, ["ran", "refused"]);
+  assert.equal(executed, 1, "досказ повторил действие");
+  // После досказа запрет снят: следующий ход работает как обычно.
+  await call();
+  assert.equal(executed, 2);
+});
+
+test("досказ просится один раз и не при ожидании подтверждения", async () => {
+  // Второй круг тоже молчит — третьего нет, ход не зацикливается.
+  const twice = silentTurnService([
+    [{ type: "result", stopReason: "end_turn" }],
+    [{ type: "result", stopReason: "end_turn" }],
+  ]);
+  const silent = await twice.service.runTurn("conv-1", "привет");
+  assert.equal(twice.sent.length, 2);
+  assert.equal(silent.reply, "");
+
+  // Ход ждёт решения человека или отменён — досказывать нечего.
+  for (const stopReason of ["requires_approval", "cancelled"]) {
+    const waiting = silentTurnService([[{ type: "result", stopReason }]]);
+    await waiting.service.runTurn("conv-1", "привет");
+    assert.equal(waiting.sent.length, 1, stopReason);
+  }
+
+  // Ход с ответом досказа не просит.
+  const answered = silentTurnService([[
+    { type: "assistant", content: "Я рядом.", otid: "a" },
+    { type: "result", stopReason: "end_turn" },
+  ]]);
+  await answered.service.runTurn("conv-1", "привет");
+  assert.equal(answered.sent.length, 1);
+});
+
 // --------------------------------------------------------------------
 // Уровень reasoning и каталог моделей App Server
 //

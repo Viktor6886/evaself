@@ -39,6 +39,7 @@ import {
 } from "./errors.js";
 import { missingCapabilities } from "./letta/capabilities.js";
 import { feminizeSelfReference } from "./i18n/eva-gender.js";
+import { FINISH_REPLY_PROMPT, FINISHING_TOOL_REFUSAL, recoverableEmptyStop } from "./letta/empty-reply.js";
 import { type AgentToolCall, collectToolCalls } from "./letta/tool-calls.js";
 import {
   evaluateReadiness,
@@ -460,6 +461,12 @@ export class LettaService {
   private defaultModel: string;
   private runtime: RuntimeSdkSettings;
   private toolFactory: ((conversationId: string) => AnyAgentTool[]) | null = null;
+  /**
+   * Conversation, в которых идёт досказ молчаливого хода. Продуктовые
+   * инструменты в них не выполняются: просьба «не повторяй действия» —
+   * только слова, а повторный `save_tasks_bulk` создал бы те же задачи.
+   */
+  private readonly finishing = new Set<string>();
   private sessionApprovalResolver: ((conversationId: string) => Promise<CanUseToolCallback>) | null = null;
   /**
    * Уровень reasoning, который текущая модель заведомо не предлагает.
@@ -1550,64 +1557,91 @@ export class LettaService {
     pooled.activeTurns += 1;
 
     try {
-      await session.send(message);
-      sentAt = Date.now();
-
-      const stream = session.stream();
       const deadline = startedAt + turnTimeoutMs;
+      // Второй круг — только досказ ответа: см. ниже.
+      let outgoing: SendMessage | null = message;
+      for (let round = 0; outgoing !== null; round += 1) {
+        await session.send(outgoing);
+        if (round === 0) sentAt = Date.now();
+        outgoing = null;
+        const stream = session.stream();
 
-      while (true) {
-        const remaining = deadline - Date.now();
-        if (remaining <= 0) {
-          await session.abort().catch(() => undefined);
-          throw turnTimeout(`the agent did not finish within ${turnTimeoutMs} ms`);
+        while (true) {
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) {
+            await session.abort().catch(() => undefined);
+            throw turnTimeout(`the agent did not finish within ${turnTimeoutMs} ms`);
+          }
+
+          const next = await withTimeout(stream.next(), remaining);
+          if (next.done) break;
+
+          // Барьер отмены стоит до накопления сообщения: отменённый ход
+          // не должен ни дособрать ответ, ни отдать его наружу.
+          //
+          // Спрашивается не чаще раза в CANCEL_POLL_MS: событий потока
+          // сотни, и отдельный запрос к базе на каждое превратил бы
+          // барьер в основной источник нагрузки. Задержка обнаружения
+          // отмены при этом ограничена той же величиной.
+          const now = Date.now();
+          const pollMs = options.cancelPollMs ?? CANCEL_POLL_MS;
+          if (options.isCancelled && now - lastCancelCheck >= pollMs) {
+            lastCancelCheck = now;
+            cancelled = await options.isCancelled();
+          }
+          if (cancelled) {
+            await session.abort().catch(() => undefined);
+            throw turnCancelled(`ход в ${conversationId} отменён`);
+          }
+
+          const sdkMessage = next.value as SDKMessage;
+          collected.push(sdkMessage);
+
+          if (sdkMessage.type === "assistant") {
+            const raw = sdkMessage as { content?: unknown; uuid?: string; otid?: string | null };
+            const text = extractText(raw.content);
+            if (text) {
+              if (firstDeltaAt === null) firstDeltaAt = Date.now();
+              const key: string = raw.otid ?? raw.uuid ?? deltaKey ?? "single";
+              const startsGroup = deltaGroup < 0 || key !== deltaKey;
+              if (startsGroup) deltaGroup += 1;
+              deltaKey = key;
+              options.onDelta?.({ text, group: deltaGroup, startsGroup });
+            }
+          }
+          if (sdkMessage.type === "init") this.recordRuntimeFacts(sdkMessage);
+          if (sdkMessage.type === "error") {
+            const detail = (sdkMessage as { message?: string; error?: string });
+            throw toEvaError(
+              new Error(detail.message ?? detail.error ?? "the agent reported an error"),
+              "running a turn",
+            );
+          }
+          if (sdkMessage.type === "result") break;
         }
 
-        const next = await withTimeout(stream.next(), remaining);
-        if (next.done) break;
-
-        // Барьер отмены стоит до накопления сообщения: отменённый ход
-        // не должен ни дособрать ответ, ни отдать его наружу.
-        //
-        // Спрашивается не чаще раза в CANCEL_POLL_MS: событий потока
-        // сотни, и отдельный запрос к базе на каждое превратил бы
-        // барьер в основной источник нагрузки. Задержка обнаружения
-        // отмены при этом ограничена той же величиной.
-        const now = Date.now();
-        const pollMs = options.cancelPollMs ?? CANCEL_POLL_MS;
-        if (options.isCancelled && now - lastCancelCheck >= pollMs) {
-          lastCancelCheck = now;
-          cancelled = await options.isCancelled();
-        }
-        if (cancelled) {
-          await session.abort().catch(() => undefined);
-          throw turnCancelled(`ход в ${conversationId} отменён`);
-        }
-
-        const sdkMessage = next.value as SDKMessage;
-        collected.push(sdkMessage);
-
-        if (sdkMessage.type === "assistant") {
-          const raw = sdkMessage as { content?: unknown; uuid?: string; otid?: string | null };
-          const text = extractText(raw.content);
-          if (text) {
-            if (firstDeltaAt === null) firstDeltaAt = Date.now();
-            const key: string = raw.otid ?? raw.uuid ?? deltaKey ?? "single";
-            const startsGroup = deltaGroup < 0 || key !== deltaKey;
-            if (startsGroup) deltaGroup += 1;
-            deltaKey = key;
-            options.onDelta?.({ text, group: deltaGroup, startsGroup });
+        // Ход закончился без единого слова человеку. Так бывает в длинной
+        // цепочке инструментов: модель исчерпала шаги или токены вывода
+        // (`max_steps`, `max_tokens_exceeded`) или замолчала после
+        // последнего вызова. Человек видел «попробуй ещё раз», повторял —
+        // и те же задачи создавались второй раз. Действия уже выполнены и
+        // лежат в истории conversation, поэтому Letta просят только
+        // досказать ответ — один раз и в пределах того же потолка хода.
+        // Что сказать, решает Ева: здесь нет ни выбора, ни текста за неё.
+        if (round === 0) {
+          const partial = summarizeStream(collected);
+          if (!partial.reply && recoverableEmptyStop(partial.stopReason)) {
+            this.logger.warn("Ход закончился без ответа, Letta досказывает его", {
+              conversationId,
+              stop_reason: partial.stopReason,
+              tool_calls: partial.toolCalls.length,
+              reasoning_events: partial.reasoningEvents,
+              message_count: partial.messageCount,
+            });
+            outgoing = FINISH_REPLY_PROMPT;
+            this.finishing.add(conversationId);
           }
         }
-        if (sdkMessage.type === "init") this.recordRuntimeFacts(sdkMessage);
-        if (sdkMessage.type === "error") {
-          const detail = (sdkMessage as { message?: string; error?: string });
-          throw toEvaError(
-            new Error(detail.message ?? detail.error ?? "the agent reported an error"),
-            "running a turn",
-          );
-        }
-        if (sdkMessage.type === "result") break;
       }
     } catch (error) {
       // Отмена — не поломка: сессия здорова, её просто попросили
@@ -1619,6 +1653,7 @@ export class LettaService {
       pooled.closing = true;
       throw toEvaError(error, "running a turn");
     } finally {
+      this.finishing.delete(conversationId);
       this.runningTurns.delete(conversationId);
       pooled.activeTurns = Math.max(0, pooled.activeTurns - 1);
       this.closeIfDrained(pooled);
@@ -1802,7 +1837,13 @@ export class LettaService {
     const approval = this.sessionApprovalResolver
       ? await this.sessionApprovalResolver(conversationId)
       : null;
-    const tools = this.toolFactory?.(conversationId) ?? [];
+    const tools = (this.toolFactory?.(conversationId) ?? []).map((tool) => ({
+      ...tool,
+      execute: async (...args: Parameters<AnyAgentTool["execute"]>) => {
+        if (this.finishing.has(conversationId)) throw new Error(FINISHING_TOOL_REFUSAL);
+        return await tool.execute(...args);
+      },
+    }) as AnyAgentTool);
     return {
       // The remote path belongs to the self-hosted App Server container.
       // compose mounts versioned project skills at /data/letta/.skills,
