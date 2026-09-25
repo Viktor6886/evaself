@@ -1103,11 +1103,20 @@ jobs:
           fi
           docker run -d --name osint --read-only --tmpfs /tmp -e HOME=/tmp \
             -e EVA_ENV=production -e OSINT_WORKER_TOKEN=ci-token evaself/osint-worker:ci
+          ready=false
           for _ in $(seq 1 30); do
-            docker exec osint python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8095/health')" 2>/dev/null && break
+            if docker exec osint python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8095/health')" 2>/dev/null; then
+              ready=true; break
+            fi
             sleep 2
           done
-          docker exec osint python - <<'PY'
+          if [ "$ready" != true ]; then
+            docker logs osint 2>&1 | tail -30
+            echo "::error::osint-worker не ответил на /health"; exit 1
+          fi
+          # -i обязателен: без него скрипт из heredoc не доходит до python
+          # в контейнере, и проверка молча проходит, ничего не проверив.
+          docker exec -i osint python - <<'PY'
           import json, urllib.error, urllib.request
           health = json.load(urllib.request.urlopen("http://127.0.0.1:8095/health"))
           assert health["rules"]["whatsmyname"] > 300, health
@@ -1123,7 +1132,7 @@ jobs:
               assert error.code == 401, error.code
           print("osint-worker runtime: ok", health["rules"])
           PY
-          docker rm -f osint
+          docker rm -f osint >/dev/null
 
       - name: osint-worker не затронут
         if: needs.changes.outputs.osint != 'true'
