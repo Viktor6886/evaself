@@ -10,9 +10,12 @@
  * Три правила, которые важнее любых весов:
  *
  *  1. Совпадение имени никогда не объединяет. Тёзок больше, чем кажется,
- *     и «Иван Петров из Москвы» — это тысячи людей. Без связующего
- *     признака (ссылки, общего адреса почты, телефона, username) пара не
- *     поднимается выше `possible`.
+ *     и «Иван Петров из Москвы» — это тысячи людей. Без сильного
+ *     связующего признака (ссылки между профилями, общей почты,
+ *     телефона) пара не поднимается выше `possible`. Общий сайт и
+ *     одинаковый username таким признаком не считаются: двое коллег-тёзок
+ *     ссылаются на один сайт компании, а короткий username носят разные
+ *     люди в разных сервисах.
  *  2. Жёсткое противоречие (разный ИНН, разная дата рождения) не
  *     перевешивается суммой совпадений. Есть сильные признаки за — это
  *     `conflicting`, и человек видит обе стороны; нет — `rejected`.
@@ -171,6 +174,9 @@ export function decideMatch(input: readonly MatchFeature[]): MatchDecision {
   if (identity) return softPenalty > 0 ? decide("conflicting") : { status: "confirmed", score: 1, features };
   if (softPenalty > 0 && positive >= MATCH_THRESHOLDS.probable) return decide("conflicting");
   if (!linking) return decide(score >= MATCH_THRESHOLDS.possible ? "possible" : "rejected");
+  // Слабые связующие признаки без сильного — не выше `possible`, какой бы
+  // ни была сумма контекста.
+  if (strongCount === 0) return decide(score >= MATCH_THRESHOLDS.possible ? "possible" : "rejected");
   if (
     score >= MATCH_THRESHOLDS.confirmed
     && (strongCount >= 2 || kinds.has("profile_link_bidirectional"))

@@ -153,6 +153,14 @@ test("одинаковый username у разных людей не склеив
   );
 });
 
+test("коллеги-тёзки с общим сайтом компании не становятся одним человеком", () => {
+  const namesakes = decideMatch(features(
+    "shared_website", "name_exact", "same_city", "same_employer", "same_position", "biography_overlap",
+  ));
+  assert.equal(namesakes.status, "possible", `счёт ${namesakes.score}`);
+  assert.equal(decideMatch(features("exact_username", "shared_website", "name_exact", "same_city")).status, "possible");
+});
+
 test("подтверждение требует независимых сильных признаков", () => {
   assert.equal(decideMatch(features("shared_email")).status, "probable");
   assert.equal(decideMatch(features("shared_email", "shared_phone", "name_exact")).status, "confirmed");
