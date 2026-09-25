@@ -12,7 +12,7 @@
 # Границы намеренно осторожные. Пропускается только то, что физически не
 # может сломаться от изменения: сборка образов и смоук-стенд — при правке
 # одной документации; браузерные тесты admin-ui и webapp и тесты
-# media-service — когда их каталог не тронут. Любая правка кода, схемы,
+# media-service и osint-worker — когда их каталог не тронут. Любая правка кода, схемы,
 # compose или самого CI прогоняет всё.
 #
 # На push в main и на ручном запуске фильтр не применяется: там нужна
@@ -31,6 +31,7 @@ everything() {
 	emit docs_only false
 	emit prompt_only false
 	emit media true
+	emit osint true
 	emit adminui true
 	emit webapp true
 }
@@ -90,6 +91,12 @@ if printf '%s\n' "$FILES" | grep -qE '^media-service/'; then
 	emit media true
 else
 	emit media false
+fi
+
+if printf '%s\n' "$FILES" | grep -qE '^osint-worker/'; then
+	emit osint true
+else
+	emit osint false
 fi
 
 if printf '%s\n' "$FILES" | grep -qE '^admin-ui/'; then

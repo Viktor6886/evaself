@@ -52,6 +52,9 @@ else
 	info "Telegram stickers: legacy file_id overrides configured; local assets remain fallback"
 fi
 [ -n "$(get_env MEDIA_SERVICE_TOKEN || true)" ] || soft "MEDIA_SERVICE_TOKEN пуст — media-service принимает запросы без аутентификации"
+case ",$(get_env COMPOSE_PROFILES || true)," in
+*,osint,*) [ -n "$(get_env OSINT_WORKER_TOKEN || true)" ] || soft "OSINT_WORKER_TOKEN пуст — osint-worker не стартует в production" ;;
+esac
 [ -n "$(get_env MEDIA_ASR_BASE_URL || true)" ] || info "ASR not configured yet (voice messages will be refused politely)"
 
 # =====================================================================

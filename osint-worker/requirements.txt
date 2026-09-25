@@ -1,0 +1,7 @@
+fastapi==0.141.1
+uvicorn[standard]==0.53.0
+httpx==0.28.1
+pydantic==2.13.5
+followthemoney==4.11.0
+nomenklatura==4.17.0
+maigret==0.6.6

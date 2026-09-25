@@ -3,7 +3,24 @@
 Оперативное состояние работы. Единственный источник истины о том, где работа
 остановилась. Агент читает этот файл первым и обновляет его после каждого шага.
 
-## OSINT, batch OSINT-1: фундамент — 2026-09-25
+## OSINT, batch OSINT-2: osint-worker — 2026-09-25
+
+Ветка: `claude/eva-audio-recognition-summary-5f5nd2`. Статус: в работе.
+
+- сервис `osint-worker/` (FastAPI): Maigret, проверка профилей правилами
+  WhatsMyName и Sherlock, сравнение nomenklatura; SSRF-защита с повторной
+  проверкой редиректов, пределы на домен, автоматический выключатель;
+- compose (профиль `osint`, сеть `tools`, без портов, read-only),
+  `OSINT_WORKER_TOKEN` в `.env.example`, `configure.sh`,
+  `ensure-env-defaults.sh`, `doctor.sh`, `bootstrap.ts`;
+- CI: job `osint-worker` (линт и тесты в стадии образа, проверка
+  рантайм-образа), pip-audit по `requirements.lock`;
+- клиент `src/osint/worker-client.ts` и перевод ответов
+  `src/osint/worker-mapping.ts` (в runtime не подключены — OSINT-3).
+
+Следующий: OSINT-3 — репозиторий, оркестратор, задания, флаги.
+
+## OSINT, batch OSINT-1: фундамент — 2026-09-25 — выполнен (#360)
 
 Ветка: `claude/eva-audio-recognition-summary-5f5nd2`.
 Запрос: полноценный OSINT-контур по открытым источникам (33 этапа). Разбит на

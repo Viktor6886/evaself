@@ -42,6 +42,7 @@ const SECRET_USED_BY: Record<string, string[]> = {
   CRAWL4AI_API_TOKEN: ["crawl4ai"],
   SEARXNG_SECRET: ["searxng"],
   MEDIA_SERVICE_TOKEN: ["media-service", "agent-runtime", "admin-api"],
+  OSINT_WORKER_TOKEN: ["osint-worker"],
   MEDIA_ASR_API_KEY: ["media-service"],
   MEDIA_TTS_API_KEY: ["media-service"],
   // Прежняя консоль Letta с собственным Basic Auth выведена из
