@@ -526,6 +526,58 @@ test("молча закончившийся ход Letta досказывает,
   assert.equal(warnings[0]!.tool_calls, 1);
 });
 
+test("во время досказа продуктовые инструменты не выполняются", async () => {
+  // Просьба «не повторяй действия» — только слова. Если модель всё же
+  // позовёт save_tasks_bulk, задачи не должны создаться второй раз.
+  const service = new LettaService({
+    appServerUrl: "ws://example.invalid/ws", appServerToken: "", appServerRequestTimeoutMs: 1000,
+    model: "", sessionPoolSize: 5, sessionIdleMs: 1000, turnTimeoutMs: 5000,
+  } as never, { debug() {}, info() {}, warn() {}, error() {} }, "persona", SYSTEM_PROMPT);
+  let executed = 0;
+  service.setToolFactory(() => [{
+    name: "save_tasks_bulk", label: "save", description: "", parameters: {},
+    execute: async () => { executed += 1; return { ok: true }; },
+  } as never]);
+  const outcomes: string[] = [];
+  let tools: Array<{ execute(id: string, args: unknown): Promise<unknown> }> = [];
+  let round = -1;
+  const rounds = [
+    [{ type: "result", stopReason: "max_steps" }],
+    [{ type: "assistant", content: "Сохранила задачи.", otid: "b" }, { type: "result", stopReason: "end_turn" }],
+  ];
+  const call = async () => {
+    try {
+      await tools[0]!.execute("call", {});
+      outcomes.push("ran");
+    } catch {
+      outcomes.push("refused");
+    }
+  };
+  (service as unknown as { client: { resumeSession(id: string, options: unknown): unknown } }).client = {
+    resumeSession: (_id: string, options: { tools?: typeof tools }) => {
+      tools = options.tools ?? [];
+      return {
+        bootstrapState: async () => ({}),
+        recoverPendingApprovals: async () => ({ recovered: false }),
+        // Модель зовёт инструмент в каждом круге.
+        send: async () => { round += 1; await call(); },
+        stream: () => (rounds[round] ?? [])[Symbol.iterator](),
+        close() {},
+        agentId: "agent-1",
+        conversationId: "conv-1",
+      };
+    },
+  };
+
+  const result = await service.runTurn("conv-1", "разложи задачи");
+  assert.equal(result.reply, "Сохранила задачи.");
+  assert.deepEqual(outcomes, ["ran", "refused"]);
+  assert.equal(executed, 1, "досказ повторил действие");
+  // После досказа запрет снят: следующий ход работает как обычно.
+  await call();
+  assert.equal(executed, 2);
+});
+
 test("досказ просится один раз и не при ожидании подтверждения", async () => {
   // Второй круг тоже молчит — третьего нет, ход не зацикливается.
   const twice = silentTurnService([

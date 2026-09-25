@@ -39,7 +39,7 @@ import {
 } from "./errors.js";
 import { missingCapabilities } from "./letta/capabilities.js";
 import { feminizeSelfReference } from "./i18n/eva-gender.js";
-import { FINISH_REPLY_PROMPT, recoverableEmptyStop } from "./letta/empty-reply.js";
+import { FINISH_REPLY_PROMPT, FINISHING_TOOL_REFUSAL, recoverableEmptyStop } from "./letta/empty-reply.js";
 import { type AgentToolCall, collectToolCalls } from "./letta/tool-calls.js";
 import {
   evaluateReadiness,
@@ -461,6 +461,12 @@ export class LettaService {
   private defaultModel: string;
   private runtime: RuntimeSdkSettings;
   private toolFactory: ((conversationId: string) => AnyAgentTool[]) | null = null;
+  /**
+   * Conversation, в которых идёт досказ молчаливого хода. Продуктовые
+   * инструменты в них не выполняются: просьба «не повторяй действия» —
+   * только слова, а повторный `save_tasks_bulk` создал бы те же задачи.
+   */
+  private readonly finishing = new Set<string>();
   private sessionApprovalResolver: ((conversationId: string) => Promise<CanUseToolCallback>) | null = null;
   /**
    * Уровень reasoning, который текущая модель заведомо не предлагает.
@@ -1633,6 +1639,7 @@ export class LettaService {
               message_count: partial.messageCount,
             });
             outgoing = FINISH_REPLY_PROMPT;
+            this.finishing.add(conversationId);
           }
         }
       }
@@ -1646,6 +1653,7 @@ export class LettaService {
       pooled.closing = true;
       throw toEvaError(error, "running a turn");
     } finally {
+      this.finishing.delete(conversationId);
       this.runningTurns.delete(conversationId);
       pooled.activeTurns = Math.max(0, pooled.activeTurns - 1);
       this.closeIfDrained(pooled);
@@ -1829,7 +1837,13 @@ export class LettaService {
     const approval = this.sessionApprovalResolver
       ? await this.sessionApprovalResolver(conversationId)
       : null;
-    const tools = this.toolFactory?.(conversationId) ?? [];
+    const tools = (this.toolFactory?.(conversationId) ?? []).map((tool) => ({
+      ...tool,
+      execute: async (...args: Parameters<AnyAgentTool["execute"]>) => {
+        if (this.finishing.has(conversationId)) throw new Error(FINISHING_TOOL_REFUSAL);
+        return await tool.execute(...args);
+      },
+    }) as AnyAgentTool);
     return {
       // The remote path belongs to the self-hosted App Server container.
       // compose mounts versioned project skills at /data/letta/.skills,
