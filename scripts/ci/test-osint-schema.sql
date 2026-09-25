@@ -22,6 +22,7 @@ DECLARE
     bob        bigint;
     inv_alice  uuid := gen_random_uuid();
     inv_bob    uuid := gen_random_uuid();
+    inv_alice_2 uuid := gen_random_uuid();
     ent_alice  uuid := gen_random_uuid();
     ent_bob    uuid := gen_random_uuid();
     src_alice  uuid := gen_random_uuid();
@@ -74,6 +75,30 @@ BEGIN
     EXCEPTION WHEN foreign_key_violation THEN rejected := true;
     END;
     IF NOT rejected THEN RAISE EXCEPTION 'утверждение сослалось на чужое доказательство'; END IF;
+
+    -- Доказательство одного исследования не встаёт на источник другого
+    -- исследования того же пользователя: иначе удаление первого унесло бы
+    -- строки второго и спутало происхождение.
+    INSERT INTO osint_investigations (id, user_id, query, purpose, budget, idempotency_key)
+    VALUES (inv_alice_2, alice, 'q', 'проверка контрагента', '{}'::jsonb, 'a-3');
+    rejected := false;
+    BEGIN
+        INSERT INTO osint_evidence (id, user_id, investigation_id, source_id, kind, quote, evidence_hash)
+        VALUES (gen_random_uuid(), alice, inv_alice_2, src_alice, 'quote', 'цитата', 'h3');
+    EXCEPTION WHEN foreign_key_violation THEN rejected := true;
+    END;
+    IF NOT rejected THEN RAISE EXCEPTION 'доказательство встало на источник чужого исследования'; END IF;
+
+    -- И утверждение другого исследования не ссылается на это доказательство.
+    rejected := false;
+    BEGIN
+        INSERT INTO osint_claims (id, user_id, investigation_id, entity_id, property, value, evidence_id,
+                                  collector, confidence, status, retrieved_at)
+        VALUES (gen_random_uuid(), alice, inv_alice_2, ent_alice, 'gender', 'male', ev_alice,
+                'web', 0.2, 'unverified', now());
+    EXCEPTION WHEN foreign_key_violation THEN rejected := true;
+    END;
+    IF NOT rejected THEN RAISE EXCEPTION 'утверждение сослалось на доказательство чужого исследования'; END IF;
 
     -- Привязать чужую сущность к своему исследованию нельзя.
     rejected := false;

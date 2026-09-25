@@ -5,9 +5,9 @@
  * сравниваются и дедуплицируются. Поэтому правило здесь одно:
  * нормализация сводит только разные записи одного и того же значения
  * (`8 (912) 345-67-89` и `+7 912 3456789`), но никогда не склеивает
- * разные значения. Точки и `+метки` в почте Gmail не выбрасываются:
- * у других провайдеров это разные ящики, и склеить их значит приписать
- * одному человеку чужой адрес.
+ * разные значения. Точки и `+метки` в почте Gmail не выбрасываются, и
+ * регистр локальной части не меняется: у других провайдеров это разные
+ * ящики, и склеить их значит приписать одному человеку чужой адрес.
  *
  * Значение, которое не удалось нормализовать, отвергается (`null`), а не
  * пропускается «как есть»: сырой мусор во frontier превращается в
@@ -68,7 +68,13 @@ export function normalizeDomain(raw: string): string | null {
   return valid && (/^[a-z]{2,63}$/.test(tld) || tld.startsWith("xn--")) ? value : null;
 }
 
-/** Почта: регистр и IDN домена приводятся, локальная часть не трогается. */
+/**
+ * Почта: регистр и IDN домена приводятся, локальная часть не трогается.
+ *
+ * RFC 5321 разрешает провайдеру различать `User@` и `user@`. Без знания
+ * провайдера безопасно приводить только домен: склеить два ящика хуже,
+ * чем не заметить, что это один.
+ */
 export function normalizeEmail(raw: string): string | null {
   const value = raw.trim().replace(/^mailto:/i, "");
   const at = value.lastIndexOf("@");
@@ -77,7 +83,7 @@ export function normalizeEmail(raw: string): string | null {
   const domain = normalizeDomain(value.slice(at + 1));
   if (!domain || !/^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+$/.test(local)) return null;
   if (local.startsWith(".") || local.endsWith(".") || local.includes("..")) return null;
-  return `${local.toLowerCase()}@${domain}`;
+  return `${local}@${domain}`;
 }
 
 /**
@@ -179,22 +185,60 @@ export function isValidOgrn(digits: string): boolean {
  * Налоговый номер.
  *
  * Российский ИНН проверяется контрольной суммой: опечатка в одной цифре —
- * это другой человек или другая компания. Иностранные номера (4–20
- * знаков) принимаются без проверки — правило их страны появится вместе с
- * её реестром.
+ * это другой человек или другая компания. Но правило применяется только в
+ * российском контексте — при пометке «ИНН» или стране RU: десять цифр
+ * бывают и иностранным номером, и отвергать его по чужой контрольной
+ * сумме нельзя. Без контекста номер принимается без проверки, как любой
+ * иностранный (4–20 знаков).
  */
-export function normalizeTaxId(raw: string): string | null {
-  const value = raw.trim().toUpperCase().replace(/[\s.-]/g, "").replace(/^(?:ИНН|INN):?/, "");
-  if (/^\d{10}$|^\d{12}$/.test(value)) return isValidInn(value) ? value : null;
+export function normalizeTaxId(raw: string, country?: CountryCode): string | null {
+  const upper = raw.trim().toUpperCase().replace(/[\s.-]/g, "");
+  const marked = /^(?:ИНН|INN):?/.test(upper);
+  const value = upper.replace(/^(?:ИНН|INN):?/, "");
+  if ((marked || country === "RU") && /^\d{10}$|^\d{12}$/.test(value)) {
+    return isValidInn(value) ? value : null;
+  }
+  if (marked) return null;
   return /^[A-Z0-9]{4,20}$/.test(value) ? value : null;
 }
 
-/** Регистрационный номер: ОГРН/ОГРНИП с контрольной суммой, иностранный — как есть. */
-export function normalizeRegistrationNumber(raw: string): string | null {
-  const value = raw.trim().toUpperCase().replace(/[\s.-]/g, "").replace(/^(?:ОГРНИП|ОГРН|OGRN):?/, "");
-  if (/^\d{13}$|^\d{15}$/.test(value)) return isValidOgrn(value) ? value : null;
+/** Регистрационный номер: ОГРН/ОГРНИП с контрольной суммой — в российском контексте. */
+export function normalizeRegistrationNumber(raw: string, country?: CountryCode): string | null {
+  const upper = raw.trim().toUpperCase().replace(/[\s.-]/g, "");
+  const marked = /^(?:ОГРНИП|ОГРН|OGRN):?/.test(upper);
+  const value = upper.replace(/^(?:ОГРНИП|ОГРН|OGRN):?/, "");
+  if ((marked || country === "RU") && /^\d{13}$|^\d{15}$/.test(value)) {
+    return isValidOgrn(value) ? value : null;
+  }
+  if (marked) return null;
   return /^[A-Z0-9]{4,30}$/.test(value) ? value : null;
 }
+
+/**
+ * Адреса профилей известных сервисов: хост и форма пути.
+ *
+ * Профилем считается только ссылка, похожая на профиль: статья на
+ * произвольном сайте — это адрес страницы, и обрабатываться она должна
+ * как страница. Полный список сайтов придёт с Maigret и WhatsMyName
+ * (batch OSINT-2); здесь — сервисы, на которые чаще всего ссылаются.
+ */
+const PROFILE_PATTERNS: ReadonlyArray<readonly [string, RegExp]> = [
+  ["github.com", /^\/[A-Za-z0-9-]+$/],
+  ["gitlab.com", /^\/[A-Za-z0-9._-]+$/],
+  ["vk.com", /^\/[A-Za-z0-9._]+$/],
+  ["t.me", /^\/[A-Za-z0-9_]{4,}$/],
+  ["twitter.com", /^\/[A-Za-z0-9_]{1,15}$/],
+  ["x.com", /^\/[A-Za-z0-9_]{1,15}$/],
+  ["instagram.com", /^\/[A-Za-z0-9._]+$/],
+  ["facebook.com", /^\/[A-Za-z0-9.]+$/],
+  ["linkedin.com", /^\/in\/[A-Za-z0-9-]+$/],
+  ["ok.ru", /^\/profile\/\d+$/],
+  ["youtube.com", /^\/@[A-Za-z0-9._-]+$/],
+  ["tiktok.com", /^\/@[A-Za-z0-9._]+$/],
+  ["medium.com", /^\/@[A-Za-z0-9._-]+$/],
+  ["reddit.com", /^\/(?:user|u)\/[A-Za-z0-9_-]+$/],
+  ["habr.com", /^\/(?:ru\/)?users\/[A-Za-z0-9_-]+$/],
+];
 
 /**
  * Аккаунт в сервисе: канонический адрес профиля или `сервис:имя`.
@@ -205,7 +249,14 @@ export function normalizeRegistrationNumber(raw: string): string | null {
  */
 export function normalizeSocialAccount(raw: string): string | null {
   const value = raw.trim();
-  if (/^https?:\/\//i.test(value)) return canonicalizeUrl(value);
+  if (/^https?:\/\//i.test(value)) {
+    const canonical = canonicalizeUrl(value);
+    if (!canonical) return null;
+    const url = new URL(canonical);
+    const profile = PROFILE_PATTERNS.some(([host, path]) =>
+      (url.hostname === host || url.hostname === `m.${host}`) && path.test(url.pathname));
+    return profile ? canonical : null;
+  }
   const match = /^([a-z0-9.-]{2,40}):@?(.+)$/i.exec(value);
   if (!match) return null;
   const username = normalizeUsername(match[2]!);
@@ -215,7 +266,12 @@ export function normalizeSocialAccount(raw: string): string | null {
 export function normalizeIdentifier(
   type: IdentifierType,
   raw: string,
-  options: { defaultCountry?: CountryCode } = {},
+  options: {
+    /** Страна для номера телефона без кода страны. */
+    defaultCountry?: CountryCode;
+    /** Страна запроса: включает её правила налоговых и регистрационных номеров. */
+    country?: CountryCode;
+  } = {},
 ): NormalizedIdentifier | null {
   if (!raw || raw.length > MAX_RAW_LENGTH) return null;
   let normalized: string | null;
@@ -249,10 +305,10 @@ export function normalizeIdentifier(
       normalized = normalizeAsn(raw);
       break;
     case "tax_id":
-      normalized = normalizeTaxId(raw);
+      normalized = normalizeTaxId(raw, options.country);
       break;
     case "registration_number":
-      normalized = normalizeRegistrationNumber(raw);
+      normalized = normalizeRegistrationNumber(raw, options.country);
       break;
     case "social_account":
       normalized = normalizeSocialAccount(raw);
@@ -276,7 +332,7 @@ export function normalizeIdentifier(
  */
 export function classifyIdentifier(
   raw: string,
-  options: { defaultCountry?: CountryCode } = {},
+  options: { defaultCountry?: CountryCode; country?: CountryCode } = {},
 ): NormalizedIdentifier[] {
   const value = raw.trim();
   const candidates: IdentifierType[] = [];

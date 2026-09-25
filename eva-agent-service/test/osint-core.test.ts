@@ -30,7 +30,8 @@ const norm = (type: Parameters<typeof normalizeIdentifier>[0], raw: string) =>
 test("разные записи одного значения сводятся к одной форме", () => {
   assert.equal(norm("phone", "8 (912) 345-67-89"), "+79123456789");
   assert.equal(norm("phone", "+7 912 345 67 89"), "+79123456789");
-  assert.equal(norm("email", "Ivan.Petrov@Example.COM"), "ivan.petrov@example.com");
+  // Регистр приводится только у домена: локальную часть провайдер вправе различать.
+  assert.equal(norm("email", "Ivan.Petrov@Example.COM"), "Ivan.Petrov@example.com");
   assert.equal(norm("email", "user@пример.рф"), "user@xn--e1afmkfd.xn--p1ai");
   assert.equal(norm("domain", "https://WWW.Example.com/about"), "example.com");
   assert.equal(norm("username", "@Torvalds"), "torvalds");
@@ -46,10 +47,11 @@ test("нормализация не склеивает разные значен
   // Точки и +метки — у многих провайдеров разные ящики.
   assert.notEqual(norm("email", "i.petrov@example.com"), norm("email", "ipetrov@example.com"));
   assert.notEqual(norm("email", "ivan+work@example.com"), norm("email", "ivan@example.com"));
+  assert.notEqual(norm("email", "User@example.com"), norm("email", "user@example.com"));
   // Мусор отвергается, а не проходит «как есть».
   for (const [type, raw] of [
     ["phone", "123"], ["email", "not-an-email"], ["domain", "localhost"], ["ip", "999.1.1.1"],
-    ["asn", "AS0"], ["cidr", "10.0.0.0/33"], ["username", "a b"], ["tax_id", "7707083894"],
+    ["asn", "AS0"], ["cidr", "10.0.0.0/33"], ["username", "a b"], ["tax_id", "ИНН 7707083894"],
   ] as const) {
     assert.equal(norm(type, raw), null, `${type}: ${raw}`);
   }
@@ -63,6 +65,12 @@ test("ИНН и ОГРН проверяются контрольной сумм�
   assert.equal(isValidOgrn("1027700132196"), false);
   assert.equal(norm("tax_id", "ИНН 7707083893"), "7707083893");
   assert.equal(norm("registration_number", "ОГРН 1027700132195"), "1027700132195");
+  // Российское правило — только в российском контексте.
+  assert.equal(normalizeIdentifier("tax_id", "7707083894", { country: "RU" }), null);
+  assert.equal(normalizeIdentifier("registration_number", "1027700132196", { country: "RU" }), null);
+  // Без него десять цифр — возможный иностранный номер, а не ошибочный ИНН.
+  assert.equal(norm("tax_id", "7707083894"), "7707083894");
+  assert.equal(norm("registration_number", "1027700132196"), "1027700132196");
 });
 
 test("тип запроса не угадывается за человека: неоднозначное даёт варианты", () => {
@@ -71,6 +79,9 @@ test("тип запроса не угадывается за человека: �
   assert.ok(types.includes("tax_id") && types.includes("phone"), types.join(","));
   assert.deepEqual(classifyIdentifier("ivan@example.com").map((item) => item.type), ["email"]);
   assert.deepEqual(classifyIdentifier("https://github.com/torvalds").map((item) => item.type), ["social_account"]);
+  // Статья на обычном сайте — адрес страницы, а не профиль.
+  assert.deepEqual(classifyIdentifier("https://example.com/article").map((item) => item.type), ["url"]);
+  assert.deepEqual(classifyIdentifier("https://github.com/torvalds/linux").map((item) => item.type), ["url"]);
   assert.deepEqual(classifyIdentifier("Петров Иван Сергеевич").map((item) => item.type), ["name"]);
   // «AS13335» бывает и username, но первым идёт более специфичный тип.
   assert.equal(classifyIdentifier("AS13335")[0]!.type, "asn");

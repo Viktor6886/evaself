@@ -11,6 +11,10 @@ BEGIN;
 -- Все строки принадлежат пользователю: user_id NOT NULL в каждой таблице, и
 -- каждая ссылка между таблицами идёт по паре (id, user_id). Строка одного
 -- пользователя физически не может сослаться на сущность или источник другого.
+-- Доказательство, утверждение и связь, кроме того, привязаны к исследованию
+-- своего источника тройкой (id, investigation_id, user_id): доказательство
+-- исследования B не может стоять на источнике исследования A, иначе удаление A
+-- унесло бы чужие для него строки и спутало происхождение.
 --
 -- Эти данные — о третьих лицах, а не память Евы. В memory blocks Letta они не
 -- попадают, и Evaself их туда не пишет.
@@ -104,6 +108,7 @@ CREATE TABLE IF NOT EXISTS osint_sources (
     raw_expires_at   timestamptz,
     created_at       timestamptz NOT NULL DEFAULT now(),
     UNIQUE (id, user_id),
+    UNIQUE (id, investigation_id, user_id),
     UNIQUE (investigation_id, collector, locator),
     FOREIGN KEY (investigation_id, user_id) REFERENCES osint_investigations (id, user_id) ON DELETE CASCADE
 );
@@ -122,9 +127,11 @@ CREATE TABLE IF NOT EXISTS osint_evidence (
     created_at       timestamptz NOT NULL DEFAULT now(),
     CHECK ((kind = 'quote' AND quote IS NOT NULL) OR (kind = 'structured' AND structured IS NOT NULL)),
     UNIQUE (id, user_id),
+    UNIQUE (id, investigation_id, user_id),
     UNIQUE (source_id, evidence_hash),
     FOREIGN KEY (investigation_id, user_id) REFERENCES osint_investigations (id, user_id) ON DELETE CASCADE,
-    FOREIGN KEY (source_id, user_id) REFERENCES osint_sources (id, user_id) ON DELETE CASCADE
+    FOREIGN KEY (source_id, investigation_id, user_id)
+        REFERENCES osint_sources (id, investigation_id, user_id) ON DELETE CASCADE
 );
 
 -- Идентификатор, найденный у сущности, — со своим источником и уверенностью:
@@ -165,7 +172,8 @@ CREATE TABLE IF NOT EXISTS osint_claims (
     UNIQUE (entity_id, property, value, evidence_id),
     FOREIGN KEY (investigation_id, user_id) REFERENCES osint_investigations (id, user_id) ON DELETE CASCADE,
     FOREIGN KEY (entity_id, user_id) REFERENCES osint_entities (id, user_id) ON DELETE CASCADE,
-    FOREIGN KEY (evidence_id, user_id) REFERENCES osint_evidence (id, user_id) ON DELETE CASCADE
+    FOREIGN KEY (evidence_id, investigation_id, user_id)
+        REFERENCES osint_evidence (id, investigation_id, user_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS osint_claims_entity_idx ON osint_claims (entity_id, property);
 CREATE INDEX IF NOT EXISTS osint_claims_investigation_idx ON osint_claims (investigation_id);
@@ -191,7 +199,8 @@ CREATE TABLE IF NOT EXISTS osint_relationships (
     FOREIGN KEY (investigation_id, user_id) REFERENCES osint_investigations (id, user_id) ON DELETE CASCADE,
     FOREIGN KEY (source_entity_id, user_id) REFERENCES osint_entities (id, user_id) ON DELETE CASCADE,
     FOREIGN KEY (target_entity_id, user_id) REFERENCES osint_entities (id, user_id) ON DELETE CASCADE,
-    FOREIGN KEY (evidence_id, user_id) REFERENCES osint_evidence (id, user_id) ON DELETE CASCADE
+    FOREIGN KEY (evidence_id, investigation_id, user_id)
+        REFERENCES osint_evidence (id, investigation_id, user_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS osint_relationships_source_idx ON osint_relationships (source_entity_id);
 CREATE INDEX IF NOT EXISTS osint_relationships_target_idx ON osint_relationships (target_entity_id);
@@ -233,6 +242,7 @@ CREATE TABLE IF NOT EXISTS osint_collector_runs (
     finished_at          timestamptz,
     created_at           timestamptz NOT NULL DEFAULT now(),
     UNIQUE (id, user_id),
+    UNIQUE (id, investigation_id, user_id),
     FOREIGN KEY (investigation_id, user_id) REFERENCES osint_investigations (id, user_id) ON DELETE CASCADE,
     FOREIGN KEY (target_identifier_id, user_id) REFERENCES osint_identifiers (id, user_id) ON DELETE CASCADE
 );
@@ -255,7 +265,8 @@ CREATE TABLE IF NOT EXISTS osint_frontier (
     PRIMARY KEY (investigation_id, identifier_id),
     FOREIGN KEY (investigation_id, user_id) REFERENCES osint_investigations (id, user_id) ON DELETE CASCADE,
     FOREIGN KEY (identifier_id, user_id) REFERENCES osint_identifiers (id, user_id) ON DELETE CASCADE,
-    FOREIGN KEY (discovered_by_run, user_id) REFERENCES osint_collector_runs (id, user_id) ON DELETE SET NULL (discovered_by_run)
+    FOREIGN KEY (discovered_by_run, investigation_id, user_id)
+        REFERENCES osint_collector_runs (id, investigation_id, user_id) ON DELETE SET NULL (discovered_by_run)
 );
 CREATE INDEX IF NOT EXISTS osint_frontier_pending_idx ON osint_frontier (investigation_id, depth)
     WHERE status = 'pending';
