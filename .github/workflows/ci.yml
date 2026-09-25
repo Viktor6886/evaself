@@ -83,6 +83,7 @@ jobs:
       docs_only: ${{ steps.detect.outputs.docs_only }}
       prompt_only: ${{ steps.detect.outputs.prompt_only }}
       media: ${{ steps.detect.outputs.media }}
+      osint: ${{ steps.detect.outputs.osint }}
       adminui: ${{ steps.detect.outputs.adminui }}
       webapp: ${{ steps.detect.outputs.webapp }}
     steps:
@@ -1062,6 +1063,71 @@ jobs:
       - name: media-service не затронут
         if: needs.changes.outputs.media != 'true'
         run: echo "media-service/ не изменялся — проверять нечего"
+
+  # ===================================================================
+  # osint-worker
+  # ===================================================================
+  # Линт и тесты идут внутри стадии test образа: FollowTheMoney тянет
+  # PyICU, который собирается из исходников против libicu, и на раннере
+  # пришлось бы повторять ту же сборку. Там же проверяется, что
+  # рантайм-образ собирается и отвечает на /health.
+  osint-worker:
+    name: osint-worker (Python, в образе)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    needs: changes
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+        if: needs.changes.outputs.osint == 'true'
+
+      - name: Lint and tests (docker build --target test)
+        if: needs.changes.outputs.osint == 'true'
+        run: |
+          . ./versions.env
+          docker buildx build --load --target test -t evaself/osint-worker:test \
+            --cache-from type=gha,scope=osint --cache-to type=gha,mode=max,scope=osint \
+            --build-arg PYTHON_BASE_VERSION="$PYTHON_BASE_VERSION" osint-worker
+
+      - name: Runtime image serves /health and refuses callers without the key
+        if: needs.changes.outputs.osint == 'true'
+        run: |
+          . ./versions.env
+          docker buildx build --load --target runtime -t evaself/osint-worker:ci \
+            --cache-from type=gha,scope=osint \
+            --build-arg PYTHON_BASE_VERSION="$PYTHON_BASE_VERSION" osint-worker
+          # Без токена в production сервис отказывается стартовать.
+          if docker run --rm -e EVA_ENV=production evaself/osint-worker:ci \
+            python -c 'import app.main' 2>/dev/null; then
+            echo "::error::osint-worker стартовал в production без OSINT_WORKER_TOKEN"; exit 1
+          fi
+          docker run -d --name osint --read-only --tmpfs /tmp -e HOME=/tmp \
+            -e EVA_ENV=production -e OSINT_WORKER_TOKEN=ci-token evaself/osint-worker:ci
+          for _ in $(seq 1 30); do
+            docker exec osint python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8095/health')" 2>/dev/null && break
+            sleep 2
+          done
+          docker exec osint python - <<'PY'
+          import json, urllib.error, urllib.request
+          health = json.load(urllib.request.urlopen("http://127.0.0.1:8095/health"))
+          assert health["rules"]["whatsmyname"] > 300, health
+          assert health["rules"]["sherlock"] > 300, health
+          request = urllib.request.Request(
+              "http://127.0.0.1:8095/v1/match/compare", method="POST",
+              data=b'{"left":{"schema":"Person","properties":{}},"right":{"schema":"Person","properties":{}}}',
+              headers={"Content-Type": "application/json"})
+          try:
+              urllib.request.urlopen(request)
+              raise SystemExit("request without X-Osint-Key was accepted")
+          except urllib.error.HTTPError as error:
+              assert error.code == 401, error.code
+          print("osint-worker runtime: ok", health["rules"])
+          PY
+          docker rm -f osint
+
+      - name: osint-worker не затронут
+        if: needs.changes.outputs.osint != 'true'
+        run: echo "osint-worker/ не изменялся — проверять нечего"
 
   # ===================================================================
   # Images build (and, for the agent service, its tests run in-build)

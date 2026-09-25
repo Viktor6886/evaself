@@ -23,6 +23,9 @@ expect $'library/persona/eva.md\ncompose.yml' false false
 expect 'library/persona/other.md' false false
 expect '.github/workflows/ci.yml' false false
 
+test "$(value 'osint-worker/app/main.py' osint)" = true
+test "$(value 'media-service/app/main.py' osint)" = false
+
 WORKFLOW="$ROOT/.github/workflows/ci.yml"
 grep -A30 '^  evals-fast:' "$WORKFLOW" | grep -q 'needs: changes'
 test "$(grep -A30 '^  evals-fast:' "$WORKFLOW" \

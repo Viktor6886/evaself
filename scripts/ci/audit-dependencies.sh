@@ -101,6 +101,20 @@ else
 	failures=$((failures + 1))
 fi
 
+# osint-worker проверяется по полному закреплённому набору: разрешать
+# requirements.txt заново значило бы собирать PyICU на раннере.
+echo "== pip-audit: osint-worker"
+if with_retry 600 python3 -m pip_audit --strict --disable-pip --no-deps \
+	--requirement "$REPO_ROOT/osint-worker/requirements.lock"; then
+	echo "  уязвимостей нет"
+elif [ $? -eq 124 ]; then
+	echo "::error::pip-audit не ответил за три попытки — аудит не выполнен"
+	failures=$((failures + 1))
+else
+	echo "::error::pip-audit нашёл уязвимости в osint-worker"
+	failures=$((failures + 1))
+fi
+
 echo
 if [ "$failures" -gt 0 ]; then
 	echo "провалов аудита: $failures" >&2

@@ -94,6 +94,7 @@ BullMQ не обрабатывает интерактивный ход и не �
 | Дневник | Записи, люди и недельный обзор | `src/public/journal/` |
 | Каналы | Связь внешнего сообщения с внутренним пользователем | `src/channels/channel-links.ts` |
 | OSINT (фундамент) | Доменный слой исследования открытых источников: нормализация идентификаторов, доказательства, уверенность, детерминированное тождество, противоречия; схема `osint_*`. Сборщиков и инструментов пока нет — `docs/OSINT.md` | `src/osint/`, `postgres/migrations/084_osint_foundation.sql` |
+| osint-worker | Python-сервис сборщиков OSINT (Maigret, проверка правилами WhatsMyName/Sherlock, nomenklatura) в сети `tools`, профиль `osint`; клиент и перевод ответов в домен — `worker-client.ts`, `worker-mapping.ts` (runtime подключает OSINT-3) | `osint-worker/`, `src/osint/worker-client.ts`, `src/osint/worker-mapping.ts` |
 
 ## Администрирование и инфраструктура
 

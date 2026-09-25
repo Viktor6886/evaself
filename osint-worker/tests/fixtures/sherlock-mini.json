@@ -1,0 +1,6 @@
+{
+  "$schema": "data.schema.json",
+  "CodeHub": {"url": "https://codehub.example/{}", "urlMain": "https://codehub.example/", "errorType": "status_code"},
+  "Forum": {"url": "https://forum.example/u/{}", "urlMain": "https://forum.example/", "errorType": "message", "errorMsg": ["User not found"], "regexCheck": "^[a-z0-9]{3,12}$"},
+  "Redirector": {"url": "https://redir.example/{}", "urlMain": "https://redir.example/", "errorType": "response_url"}
+}

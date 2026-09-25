@@ -1,0 +1,10 @@
+{
+  "license": ["CC BY-SA 4.0 — test fixture shaped like WhatsMyName"],
+  "categories": ["coding", "dating", "social"],
+  "sites": [
+    {"name": "CodeHub", "uri_check": "https://codehub.example/api/users/{account}", "uri_pretty": "https://codehub.example/{account}", "e_code": 200, "e_string": "\"login\"", "m_code": 404, "m_string": "Not Found", "cat": "coding"},
+    {"name": "LoveSite", "uri_check": "https://love.example/{account}", "e_code": 200, "e_string": "profile", "m_code": 404, "m_string": "", "cat": "dating"},
+    {"name": "Shielded", "uri_check": "https://shielded.example/{account}", "e_code": 200, "e_string": "profile", "m_code": 404, "m_string": "", "cat": "social", "protection": ["cloudflare"]},
+    {"name": "Retired", "uri_check": "https://retired.example/{account}", "e_code": 200, "e_string": "x", "m_code": 404, "m_string": "", "cat": "social", "valid": false}
+  ]
+}

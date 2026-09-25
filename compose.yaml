@@ -694,6 +694,43 @@ services:
       retries: 5
       start_period: 20s
 
+  # Детерминированные сборщики OSINT (docs/OSINT.md, osint-worker/README.md).
+  # Профиль osint: по умолчанию сервис не собирается и не запускается —
+  # OSINT-контур выключен, пока человек не включит его сам
+  # (COMPOSE_PROFILES=osint). Портов нет, сеть только tools: наружу
+  # сервис ходит сам, а к нему обращается только eva-agent-service.
+  osint-worker:
+    <<: [*restart, *logging]
+    profiles: ["osint"]
+    build:
+      context: ./osint-worker
+      target: runtime
+      args:
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE}
+        PYTHON_BASE_VERSION: ${PYTHON_BASE_VERSION}
+    image: evaself/osint-worker:0.1.0
+    container_name: evaself-osint-worker
+    environment:
+      # Без EVA_ENV сервис считает себя production и не стартует с пустым
+      # токеном: он ходит во внешний интернет от имени установки.
+      OSINT_WORKER_TOKEN: ${OSINT_WORKER_TOKEN}
+      EVA_ENV: ${EVA_ENV:-production}
+      TZ: ${TZ}
+      # Корень только для чтения: всё, что библиотекам захочется
+      # закэшировать в домашнем каталоге, уходит в tmpfs.
+      HOME: /tmp
+    networks: [tools]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8095/health').status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
   backup-service:
     <<: [*restart, *logging]
     build:
