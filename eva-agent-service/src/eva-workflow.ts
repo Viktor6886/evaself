@@ -1513,6 +1513,10 @@ export class EvaWorkflow {
     if (!link) {
       let agentId = await this.letta.findAgentByTelegramId(update.telegramId);
       const created = !agentId;
+      // Контекст снимается до создания: `createAgent` пишет агенту текущий
+      // канонический текст, и отметка должна описывать именно его, даже
+      // если администратор сменит персону, пока агент создаётся.
+      const canonical = this.letta.canonicalContext();
       if (!agentId) {
         const displayName =
           [from.first_name, from.last_name].filter(Boolean).join(" ") ||
@@ -1537,7 +1541,7 @@ export class EvaWorkflow {
         await markCreatedAgentCanonical(this.db, this.logger, {
           agentId,
           userId: user.id,
-          ...this.letta.canonicalContext(),
+          ...canonical,
         });
       }
       await this.db.setUserState(user.id, "active");

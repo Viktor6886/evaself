@@ -1082,6 +1082,9 @@ export function buildServer(services: Services): FastifyInstance {
       // The database may have been restored without the App Server state, or
       // the other way round: ask Letta before creating a duplicate agent.
       let agentId = await letta.findAgentByTelegramId(body.telegram_id);
+      // Контекст снимается до создания: отметка версии описывает ровно тот
+      // текст, который `createAgent` записал агенту.
+      const canonical = letta.canonicalContext();
       if (!agentId) {
         const displayName =
           [body.first_name, body.last_name].filter(Boolean).join(" ") ||
@@ -1103,7 +1106,7 @@ export function buildServer(services: Services): FastifyInstance {
         await markCreatedAgentCanonical(db, logger, {
           agentId,
           userId: user.id,
-          ...letta.canonicalContext(),
+          ...canonical,
         });
       }
     }
