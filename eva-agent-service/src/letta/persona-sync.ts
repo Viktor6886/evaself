@@ -68,6 +68,35 @@ export function canonicalMemoryVersion(persona: string, systemPrompt = ""): stri
     .slice(0, 12);
 }
 
+/**
+ * Отметить агента, только что созданного с канонической персоной, как сверенного.
+ *
+ * `createAgent` пишет агенту ту же персону и системный промпт, из которых
+ * считается версия, но без отметки `persona_version` агент выглядел
+ * устаревшим. Первую сверку тогда делал либо ход (с потолком в три
+ * секунды), либо запуск сервиса — и перезапуск, пришедший раньше хода,
+ * переписывал `persona.md` и `therapeutic_framework.md` тем же текстом.
+ * Файлы памяти менялись без причины, а smoke-проверка стенда падала
+ * через раз. Отказ записи не роняет создание: остаётся прежняя сверка.
+ */
+export async function markCreatedAgentCanonical(
+  db: Pick<Database, "recordMemoryReconciled">,
+  logger: Pick<Logger, "warn">,
+  input: { agentId: string; userId: number; persona: string; systemPrompt: string },
+): Promise<void> {
+  try {
+    await db.recordMemoryReconciled(input.agentId, input.userId, {
+      version: canonicalMemoryVersion(input.persona, input.systemPrompt),
+      legacy: [],
+    });
+  } catch (error) {
+    logger.warn("Версия канонического контекста нового агента не записана", {
+      agentId: input.agentId,
+      code: error instanceof Error ? error.name : "unknown_error",
+    });
+  }
+}
+
 export class PersonaSync {
   private readonly inFlight = new Map<string, Promise<"updated" | "up_to_date" | "failed" | "unsupported">>();
 

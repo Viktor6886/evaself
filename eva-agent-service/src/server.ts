@@ -17,7 +17,7 @@ import type { GoalService } from "./goals/goal-service.js";
 import type { LettaService } from "./letta.js";
 import type { ManagedAgentInput } from "./letta.js";
 import { DeleteGuard } from "./letta/delete-guard.js";
-import { personaSyncState } from "./letta/persona-sync.js";
+import { markCreatedAgentCanonical, personaSyncState } from "./letta/persona-sync.js";
 import { auditSkills } from "./letta/skills-audit.js";
 import type { LlmManager, LlmProviderInput } from "./llm.js";
 import { runVisionCheck } from "./llm/vision-check.js";
@@ -1099,6 +1099,13 @@ export function buildServer(services: Services): FastifyInstance {
         agentName: `eva-${body.telegram_id}`,
         model: config.model || null,
       });
+      if (agentCreated) {
+        await markCreatedAgentCanonical(db, logger, {
+          agentId,
+          userId: user.id,
+          ...letta.canonicalContext(),
+        });
+      }
     }
 
     // An agent restored without its conversation gets a fresh one.
