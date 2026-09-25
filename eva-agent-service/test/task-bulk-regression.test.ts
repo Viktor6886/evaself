@@ -131,7 +131,7 @@ test("a new user turn clears an unconsumed tool fallback from the previous turn"
     preferredResponseLanguage({ id: 7, language_code: "ru" });
     assert.equal(
       t("ru", "emptyReply"),
-      "Не удалось сформировать текстовый ответ. Попробуй отправить сообщение ещё раз.",
+      "Не успела сформулировать ответ. Напиши «продолжи» — и я расскажу, что сделала.",
     );
   });
 });

@@ -26,7 +26,10 @@ const ru = {
   openSubscriptionApp: "Тарифы и оплата",
   voiceQuotaEnded:
     "Лимит распознавания голоса закончился. Можно продолжить текстом.",
-  emptyReply: "Не удалось сформировать текстовый ответ. Попробуй отправить сообщение ещё раз.",
+  // Не «отправь ещё раз»: действия хода уже выполнены, и повтор того же
+  // сообщения создаёт те же задачи второй раз. «Продолжи» опирается на
+  // историю conversation, где всё сделанное уже лежит.
+  emptyReply: "Не успела сформулировать ответ. Напиши «продолжи» — и я расскажу, что сделала.",
   start:
     "Привет! Я Ева — собеседник и помощник в самопознании. Я запоминаю важный контекст на твоём сервере. Напиши, что сейчас занимает твои мысли.",
   startFirst:
@@ -97,7 +100,7 @@ const en: Record<keyof typeof ru, string> = {
   openSubscriptionApp: "Plans and payment",
   voiceQuotaEnded:
     "Your voice transcription allowance is used up. You can continue with text.",
-  emptyReply: "I could not produce a text reply. Please send the message again.",
+  emptyReply: "I did not manage to put the reply into words. Write “continue” and I will tell you what I did.",
   start:
     "Hi! I’m Eva, a companion and self-discovery assistant. I keep important context on your server. Tell me what is on your mind right now.",
   startFirst:
