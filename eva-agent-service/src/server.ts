@@ -17,7 +17,7 @@ import type { GoalService } from "./goals/goal-service.js";
 import type { LettaService } from "./letta.js";
 import type { ManagedAgentInput } from "./letta.js";
 import { DeleteGuard } from "./letta/delete-guard.js";
-import { personaSyncState } from "./letta/persona-sync.js";
+import { markCreatedAgentCanonical, personaSyncState } from "./letta/persona-sync.js";
 import { auditSkills } from "./letta/skills-audit.js";
 import type { LlmManager, LlmProviderInput } from "./llm.js";
 import { runVisionCheck } from "./llm/vision-check.js";
@@ -1082,6 +1082,9 @@ export function buildServer(services: Services): FastifyInstance {
       // The database may have been restored without the App Server state, or
       // the other way round: ask Letta before creating a duplicate agent.
       let agentId = await letta.findAgentByTelegramId(body.telegram_id);
+      // Контекст снимается до создания: отметка версии описывает ровно тот
+      // текст, который `createAgent` записал агенту.
+      const canonical = letta.canonicalContext();
       if (!agentId) {
         const displayName =
           [body.first_name, body.last_name].filter(Boolean).join(" ") ||
@@ -1099,6 +1102,13 @@ export function buildServer(services: Services): FastifyInstance {
         agentName: `eva-${body.telegram_id}`,
         model: config.model || null,
       });
+      if (agentCreated) {
+        await markCreatedAgentCanonical(db, logger, {
+          agentId,
+          userId: user.id,
+          ...canonical,
+        });
+      }
     }
 
     // An agent restored without its conversation gets a fresh one.

@@ -6,6 +6,7 @@ import { EvaError } from "./errors.js";
 import { preferredResponseLanguage, t } from "./i18n/index.js";
 import type { SupportedLanguage } from "./i18n/language-resolver.js";
 import type { LettaService } from "./letta.js";
+import { markCreatedAgentCanonical } from "./letta/persona-sync.js";
 import type { LlmManager } from "./llm.js";
 import type { Logger } from "./logger.js";
 import type { ChannelLinkService } from "./channels/channel-links.js";
@@ -1511,6 +1512,11 @@ export class EvaWorkflow {
     let link = await this.db.getAgentLink(update.telegramId);
     if (!link) {
       let agentId = await this.letta.findAgentByTelegramId(update.telegramId);
+      const created = !agentId;
+      // Контекст снимается до создания: `createAgent` пишет агенту текущий
+      // канонический текст, и отметка должна описывать именно его, даже
+      // если администратор сменит персону, пока агент создаётся.
+      const canonical = this.letta.canonicalContext();
       if (!agentId) {
         const displayName =
           [from.first_name, from.last_name].filter(Boolean).join(" ") ||
@@ -1529,6 +1535,15 @@ export class EvaWorkflow {
         agentName: `eva-${update.telegramId}`,
         model: this.config.model || null,
       });
+      // Найденный в Letta агент мог быть создан с прежней персоной — его
+      // сверяет PersonaSync. Отметка ставится только новому.
+      if (created) {
+        await markCreatedAgentCanonical(this.db, this.logger, {
+          agentId,
+          userId: user.id,
+          ...canonical,
+        });
+      }
       await this.db.setUserState(user.id, "active");
       return { user: { ...user, state: "active" }, link };
     }
