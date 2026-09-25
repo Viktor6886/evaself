@@ -306,6 +306,12 @@ export function isSelfPastPredicate(word: string, next: string): boolean {
       return false;
     }
   }
+  // «Был сбой», «Да, был дождь»: бытийное «был» с подлежащим за ним —
+  // не Ева о себе. О себе — только перед её сказуемым: «Был рад помочь»,
+  // «Был бы рад».
+  if (lower === "был") {
+    return /^(?:бы|не|очень|так|уже|тоже)$/iu.test(next) || IRREGULAR.has(next.toLocaleLowerCase("ru"));
+  }
   if (OPENERS.has(lower)) return true;
   if (lower.length < 5 || !CYRILLIC_WORD.test(word)) return false;
   if (!/[аяиеуы]л$/u.test(lower)) return false;
@@ -523,7 +529,9 @@ export function feminizeSelfReference(input: string): GenderFix {
       if (!next || !following) break;
       // «Был бы рад», «был не прав»: частица между связкой и
       // сказуемым подлежащего не меняет — сказуемое за ней то же.
-      if (/^(?:бы|не)$/iu.test(following)) {
+      // Только внутри той же группы сказуемого: за запятой «не» открывает
+      // косвенный вопрос — «я подумала, не пришёл ли поезд».
+      if (/^(?:бы|не)$/iu.test(following) && /^\s+$/u.test(next[0].slice(0, next[0].length - following.length))) {
         cursor = next.index + next[0].length;
         continue;
       }
