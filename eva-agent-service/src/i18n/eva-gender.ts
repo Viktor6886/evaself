@@ -360,6 +360,10 @@ const LEADING_INTERJECTIONS = new Set([
 function isFeminineSelf(word: string, next: string): boolean {
   const lower = word.toLocaleLowerCase("ru");
   if (!/(?:ла|лась)$/u.test(lower) && !REVERSE_IRREGULAR.has(lower)) return false;
+  // «Была весна, и запел скворец»: безличная связка — не Ева о себе.
+  // Опорой она становится, только когда за ней стоит её сказуемое:
+  // «Была рада помочь».
+  if (lower === "была") return REVERSE_IRREGULAR.has(next.toLocaleLowerCase("ru"));
   const masculine = masculineForm(word);
   if (!masculine) return false;
   return OPENERS.has(masculine.toLocaleLowerCase("ru")) || isSelfPastPredicate(masculine, next);
@@ -571,6 +575,9 @@ export function feminizeSelfReference(input: string): GenderFix {
       if (guarded(at)) return;
       const lowerIsSelf = isSelfContinuation(word, next);
       if (!lowerIsSelf) return;
+      // «…, и объяснил её врач»: подлежащее после дополнения.
+      const rest = segment.slice((token.index ?? 0) + word.length).split(/[,;:—–]/u)[0] ?? "";
+      if (rest.split(/\s+/u).some((item) => ANIMATE_SUBJECTS.has(item.toLocaleLowerCase("ru")))) return;
       add(at, word);
       joined = false;
     }
