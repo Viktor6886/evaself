@@ -3,6 +3,34 @@
 Оперативное состояние работы. Единственный источник истины о том, где работа
 остановилась. Агент читает этот файл первым и обновляет его после каждого шага.
 
+## OSINT, batch OSINT-1: фундамент — 2026-09-25
+
+Ветка: `claude/eva-audio-recognition-summary-5f5nd2`.
+Запрос: полноценный OSINT-контур по открытым источникам (33 этапа). Разбит на
+batch OSINT-1…6 — план в `docs/OSINT.md`. Решения владельца: исследование
+людей доступно всем пользователям (исключение из инварианта 30 с условиями:
+явная просьба, заявленная цель, лимит, аудит, флаг выключен); yente отложен.
+
+Сделано в OSINT-1:
+
+- доменный слой `eva-agent-service/src/osint/`: типы, нормализация
+  идентификаторов, доказательства, уверенность, тождество, противоречия,
+  варианты поиска, маскирование;
+- миграция `084_osint_foundation` с обратной и SQL-проверка границы
+  арендатора `scripts/ci/test-osint-schema.sql`;
+- реестр `tenancy/tables.ts`, `docs/OSINT.md`, инвариант 30.
+
+Проверки:
+
+- `node --test test/*.test.ts` → PASS;
+- lint, typecheck → PASS;
+- цикл up → up → down → up миграции 084 и `test-osint-schema.sql` на
+  PostgreSQL 16 → PASS;
+- `assert-tenant-scope.py`, `assert-down-migrations.py` → PASS.
+
+Следующий: OSINT-2 — `osint-worker` (FtM, nomenklatura, Maigret,
+WhatsMyName, Sherlock).
+
 ## Доработка Mini App: самопознание и оформление — 2026-09-06
 
 Ветка: `codex/webapp-self-discovery`, база `5a029462` (main после PR #317).
