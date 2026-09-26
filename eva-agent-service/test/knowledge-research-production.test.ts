@@ -74,7 +74,7 @@ before(async () => {
     "CREATE EXTENSION IF NOT EXISTS vector",
     "CREATE TABLE IF NOT EXISTS schema_migrations(version text primary key)",
     "CREATE TABLE IF NOT EXISTS users(id bigserial primary key, telegram_id bigint unique)",
-    "CREATE TABLE IF NOT EXISTS telegram_outbox(id bigserial primary key,idempotency_key text unique,user_id bigint,chat_id bigint,telegram_method text,payload jsonb,priority int)",
+    "CREATE TABLE IF NOT EXISTS telegram_outbox(id bigserial primary key,idempotency_key text unique,user_id bigint,chat_id bigint,telegram_method text,payload jsonb,priority int CHECK (priority IN (10,20,30,40,50)))",
     "CREATE TABLE IF NOT EXISTS agent_conversations(user_id bigint,conversation_id text,agent_id text,purpose text,status text)",
     "CREATE TABLE IF NOT EXISTS job_outbox(id bigserial primary key,type text,queue text,user_id bigint,trace_id text,correlation_id text,idempotency_key text,payload_ref text,payload jsonb,deadline_ms int,timezone text,source text,privacy text)",
     "CREATE TABLE IF NOT EXISTS job_runs(id text primary key,type text,queue text,user_id bigint,correlation_id text,status text,started_at timestamptz,completed_at timestamptz,expires_at timestamptz,last_heartbeat_at timestamptz,cancel_requested boolean DEFAULT false,cancel_token text)",

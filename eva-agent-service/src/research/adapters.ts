@@ -3,6 +3,15 @@ import type { PoolClient } from "pg";
 import { OutboundGateway } from "../admin/outbound-gateway.js";
 import { Crawl4aiReader } from "../tools/web-read.js";
 import type { ResearchReport } from "./orchestrator.js";
+import { PRIORITY_VALUE } from "../delivery/priority.js";
+
+/**
+ * Итог исследования — сообщение человеку о фоновой работе, как
+ * напоминание. Раньше здесь стоял 0, которого нет среди допустимых
+ * приоритетов outbox: вставка нарушала CHECK и откатывала всю транзакцию
+ * вместе с отчётом.
+ */
+const RESEARCH_SUMMARY_PRIORITY = PRIORITY_VALUE.reminder;
 
 export class ResearchRepository {
   constructor(private readonly db: Database) {}
@@ -15,7 +24,7 @@ export class ResearchRepository {
       await client.query(`INSERT INTO research_reports(id,user_id,conversation_id,summary,confidence,checked_at,report_json,status) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,'completed')`, [report.id, report.userId, report.conversationId, report.summary, report.confidence, report.checkedAt, JSON.stringify(report)]);
       for (const source of report.sources) await client.query(`INSERT INTO research_sources(id,report_id,user_id,url,canonical_url,domain,title,author,published_at,retrieved_at,content_hash,content_type,language,relevance,quality,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`, [source.id, report.id, report.userId, source.url, source.canonicalUrl, source.domain, source.title, source.author, source.publishedAt, source.retrievedAt, source.contentHash, source.type, source.language, source.relevance, source.quality, source.status]);
       for (const claim of report.claims) await client.query(`INSERT INTO research_claim_sources(report_id,user_id,source_id,claim,evidence_quote,evidence_start,evidence_end,evidence_hash,contradiction) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, [report.id, report.userId, claim.sourceId, claim.claim,claim.evidenceQuote,claim.evidenceStart,claim.evidenceEnd, claim.evidenceHash, claim.contradiction]);
-      if(completion){await client.query(`UPDATE research_requests SET status='completed',report_id=$3,completed_at=now() WHERE id=$1 AND user_id=$2`,[completion.requestId,report.userId,report.id]);const link=`/app/research/${report.id}`;await client.query(`INSERT INTO telegram_outbox(idempotency_key,user_id,chat_id,telegram_method,payload,priority) VALUES($1,$2,$3,'sendMessage',$4::jsonb,0) ON CONFLICT(idempotency_key) DO NOTHING`,[`research-summary:${report.id}`,report.userId,completion.chatId,JSON.stringify({chat_id:completion.chatId,text:`${report.summary||"Исследование завершено"}\n\nПолный отчёт: ${link}`})]);}
+      if(completion){await client.query(`UPDATE research_requests SET status='completed',report_id=$3,completed_at=now() WHERE id=$1 AND user_id=$2`,[completion.requestId,report.userId,report.id]);const link=`/app/research/${report.id}`;await client.query(`INSERT INTO telegram_outbox(idempotency_key,user_id,chat_id,telegram_method,payload,priority) VALUES($1,$2,$3,'sendMessage',$4::jsonb,$5) ON CONFLICT(idempotency_key) DO NOTHING`,[`research-summary:${report.id}`,report.userId,completion.chatId,JSON.stringify({chat_id:completion.chatId,text:`${report.summary||"Исследование завершено"}\n\nПолный отчёт: ${link}`}),RESEARCH_SUMMARY_PRIORITY]);}
   }
 }
 
