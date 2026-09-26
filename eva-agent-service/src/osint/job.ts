@@ -140,9 +140,13 @@ export class OsintJobWorker {
     if (this.announcer) {
       // Повтор задания после отправленного итога второго хода не
       // запускает: ход Letta стоит денег и написал бы человеку дважды.
+      // Поиск по чату, а не по user_id: ответы Евы (и этот пересказ)
+      // пишутся в outbox без владельца, и проверка по user_id не видела бы
+      // уже поставленное сообщение.
       const { rows: sent } = await this.db.query(
-        `SELECT 1 FROM telegram_outbox WHERE user_id = $1 AND idempotency_key LIKE $2 LIMIT 1`,
-        [userId, `${deliveryKey}%`],
+        `-- tenant: by chat_id — чат владельца исследования; строки ответов Евы пишутся без user_id
+         SELECT 1 FROM telegram_outbox WHERE chat_id = $1 AND idempotency_key LIKE $2 LIMIT 1`,
+        [chatId, `${deliveryKey}%`],
       );
       if (sent.length > 0) return;
       let text: string | null = null;

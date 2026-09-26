@@ -272,8 +272,9 @@ try {
       sent.push({ chatId, text, key });
       await pool.query(
         `INSERT INTO telegram_outbox (idempotency_key, user_id, chat_id, telegram_method, payload, priority)
-         VALUES ($1, $2, $3, 'sendMessage', $4::jsonb, 30)`,
-        [`${key}:000:sendMessage`, first, chatId, JSON.stringify({ chat_id: chatId, text })],
+         VALUES ($1, NULL, $2, 'sendMessage', $3::jsonb, 30)`,
+        // Как настоящая отправка ответа Евы: строка без владельца.
+        [`${key}:000:sendMessage`, chatId, JSON.stringify({ chat_id: chatId, text })],
       );
     },
   });
@@ -284,11 +285,11 @@ try {
   assert(narrations.length === 1 && narrations[0] === created.id, "пересказ запрошен один раз и по своему исследованию");
   assert(sent.length === 1 && sent[0].key === doneKey && /нашла два профиля/.test(sent[0].text),
     "человек получает пересказ Евы, а не шаблон");
-  await pool.query(`DELETE FROM telegram_outbox WHERE idempotency_key LIKE $1 AND user_id = $2`, [`${doneKey}%`, first]);
+  await pool.query(`DELETE FROM telegram_outbox WHERE idempotency_key LIKE $1`, [`${doneKey}%`]);
   sent.length = 0;
   await new OsintJobWorker(db, [quiet], flagsOn, announcer(async () => { throw new Error("letta down"); })).run(job(db));
   assert(sent.length === 1 && /Источников: 2/.test(sent[0].text), "сбой пересказа — шаблон со счётчиками");
-  await pool.query(`DELETE FROM telegram_outbox WHERE idempotency_key LIKE $1 AND user_id = $2`, [`${doneKey}%`, first]);
+  await pool.query(`DELETE FROM telegram_outbox WHERE idempotency_key LIKE $1`, [`${doneKey}%`]);
 
   // ------------------------------------------------------------------
   // Реестр о субъекте-организации

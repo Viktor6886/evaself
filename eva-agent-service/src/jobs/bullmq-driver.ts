@@ -125,7 +125,11 @@ class BullConsumerHandle implements JobConsumerHandle {
   }
 
   async close(): Promise<void> {
-    await this.worker.close();
+    // Принудительно: закрытие идёт после ожидания `JobRuntime.stop`, и
+    // задание, не отпустившее работу к этому сроку, иначе держало бы
+    // остановку сколько угодно. Брошенное задание BullMQ вернёт как
+    // зависшее, а аренда в журнале запусков не даст выполнить его дважды.
+    await this.worker.close(true);
   }
 }
 
