@@ -93,7 +93,7 @@ else
 	emit media false
 fi
 
-if printf '%s\n' "$FILES" | grep -qE '^osint-worker/'; then
+if printf '%s\n' "$FILES" | grep -qE '^osint-(worker|harvester|spiderfoot)/'; then
 	emit osint true
 else
 	emit osint false

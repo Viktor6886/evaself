@@ -16,6 +16,7 @@
 | Sherlock (данные) | `3760187` | MIT | независимая проверка профиля |
 | FollowTheMoney | 4.11.0 | MIT | модель сущностей |
 | nomenklatura | 4.17.0 | MIT | признаки сходства (`LogicV2`) |
+| dnspython | 2.8.0 | ISC | записи DNS |
 
 Из Sherlock и WhatsMyName берутся только наборы правил; проверка
 выполняется своим кодом (`app/site_rules.py`) через `app/netguard.py`.
@@ -29,6 +30,11 @@
 - `POST /v1/username/scan` `{username, top_sites?}` — Maigret.
 - `POST /v1/username/verify` `{username, hosts[≤100], sources[]}` —
   проверка профилей правилами WhatsMyName/Sherlock.
+- `POST /v1/infra/rdap` `{kind: domain|ip|asn, value}` — RDAP через IANA
+  bootstrap; из ответа берутся только организации, не физические лица.
+- `POST /v1/infra/ripestat` `{kind: ip|asn, value}` — RIPEstat.
+- `POST /v1/infra/certificates` `{domain}` — имена из журналов CT (crt.sh).
+- `POST /v1/infra/dns` `{domain}` — записи A, AAAA, CNAME, MX, NS, TXT, SOA.
 - `POST /v1/match/compare` `{left, right}` — признаки nomenklatura для
   двух сущностей FtM (Person, Organization, Company, LegalEntity,
   PublicBody, UserAccount).

@@ -96,6 +96,7 @@ BullMQ не обрабатывает интерактивный ход и не �
 | OSINT (фундамент) | Доменный слой исследования открытых источников: нормализация идентификаторов, доказательства, уверенность, детерминированное тождество, противоречия; схема `osint_*`. Сборщиков и инструментов пока нет — `docs/OSINT.md` | `src/osint/`, `postgres/migrations/084_osint_foundation.sql` |
 | osint-worker | Python-сервис сборщиков OSINT (Maigret, проверка правилами WhatsMyName/Sherlock, nomenklatura) в сети `tools`, профиль `osint`; клиент и перевод ответов в домен — `worker-client.ts`, `worker-mapping.ts` (runtime подключает OSINT-3) | `osint-worker/`, `src/osint/worker-client.ts`, `src/osint/worker-mapping.ts` |
 | OSINT-исследование | Создание (цель, лимит, идемпотентность, аудит), оркестратор с очередью по глубине и бюджетом, сборщики `maigret` и `web_search`, хранилище в PostgreSQL, задание `osint_investigation` (очередь `research`), политика хранения `osint_investigations`; флаг `EVA_OSINT_ENABLED` выключен | `src/osint/service.ts`, `orchestrator.ts`, `collectors.ts`, `repository.ts`, `job.ts`, `postgres/migrations/085_osint_subject.sql` |
+| OSINT: инфраструктура | Сборщики `infrastructure` (RDAP, RIPEstat, crt.sh, DNS через osint-worker), `theharvester` (контейнер osint-harvester, GPL-2.0), `spiderfoot` (контейнер osint-spiderfoot, закрытый список модулей) | `src/osint/infra-collectors.ts`, `service-clients.ts`, `osint-worker/app/infra.py`, `osint-harvester/`, `osint-spiderfoot/` |
 
 ## Администрирование и инфраструктура
 

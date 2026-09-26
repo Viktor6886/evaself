@@ -101,7 +101,7 @@ function profileCollector(calls) {
               properties: [{ property: "name", value: "CI Person" }],
             },
             ...(target.depth === 0 ? [{
-              kind: "discovered", evidence, accountUrl: url,
+              kind: "discovered", evidence, owner: url,
               identifier: { type: "username", raw: `${target.normalized}_two`, normalized: `${target.normalized}_two` },
             }] : []),
           ],

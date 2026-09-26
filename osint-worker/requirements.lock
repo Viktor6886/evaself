@@ -27,6 +27,7 @@ click==8.5.0
 cloudpickle==3.1.2
 colorama==0.4.6
 curl_cffi==0.16.3
+dnspython==2.8.0
 duckdb==1.5.5
 et_xmlfile==2.0.0
 executing==2.2.1

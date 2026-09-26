@@ -42,6 +42,8 @@ import { JobScheduleRegistry } from "./schedules.js";
 import { ResearchJobWorker } from "../research/worker.js";
 import { SearxCrawlAdapters } from "../research/adapters.js";
 import { UsernameProfilesCollector, WebSearchCollector } from "../osint/collectors.js";
+import { HarvesterCollector, InfrastructureCollector, SpiderfootCollector } from "../osint/infra-collectors.js";
+import { HarvesterClient, SpiderfootClient } from "../osint/service-clients.js";
 import { OSINT_JOB_TIMING, OsintJobWorker } from "../osint/job.js";
 import { OSINT_JOB_TYPE } from "../osint/service.js";
 import { OsintWorkerClient } from "../osint/worker-client.js";
@@ -131,7 +133,13 @@ export function buildJobLayer(
   if (config.osintEnabled) {
     const worker = new OsintWorkerClient({ baseUrl: config.osintWorkerUrl, token: config.osintWorkerToken });
     const web = new SearxCrawlAdapters(config.searxngUrl, config.crawl4aiUrl, { crawlToken: config.crawl4aiToken });
+    const services = { token: config.osintWorkerToken };
     const osint = new OsintJobWorker(db, [
+      // Реестры и журналы — первыми: они дешёвые и дают следы (адреса,
+      // AS, организацию), по которым идут остальные сборщики.
+      new InfrastructureCollector(worker),
+      new HarvesterCollector(new HarvesterClient({ baseUrl: config.osintHarvesterUrl, ...services })),
+      new SpiderfootCollector(new SpiderfootClient({ baseUrl: config.osintSpiderfootUrl, ...services })),
       new UsernameProfilesCollector(worker, { topSites: 300 }),
       new WebSearchCollector(web, { queriesPerIdentifier: 3, pagesPerIdentifier: 4, maxPageBytes: 512_000 }),
     ]);

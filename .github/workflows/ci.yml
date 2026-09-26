@@ -1146,6 +1146,79 @@ jobs:
         run: echo "osint-worker/ не изменялся — проверять нечего"
 
   # ===================================================================
+  # osint-harvester и osint-spiderfoot
+  # ===================================================================
+  # theHarvester и SpiderFoot — отдельные контейнеры со своими закрытыми
+  # списками источников и модулей. Стадия test каждого образа проверяет
+  # обёртку и то, что все разрешённые источники существуют в закреплённой
+  # версии; рантайм-образ обязан подняться и отказать запросу без ключа.
+  osint-services:
+    name: osint-harvester и osint-spiderfoot (в образах)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    needs: changes
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+        if: needs.changes.outputs.osint == 'true'
+
+      - name: Lint, tests and allowlists (docker build --target test)
+        if: needs.changes.outputs.osint == 'true'
+        run: |
+          . ./versions.env
+          for service in osint-harvester osint-spiderfoot; do
+            docker buildx build --load --target test -t "evaself/$service:test" \
+              --cache-from "type=gha,scope=$service" --cache-to "type=gha,mode=max,scope=$service" \
+              --build-arg PYTHON_BASE_VERSION="$PYTHON_BASE_VERSION" "$service"
+          done
+
+      - name: Runtime images serve /health and refuse callers without the key
+        if: needs.changes.outputs.osint == 'true'
+        run: |
+          . ./versions.env
+          check() {
+            local service="$1" port="$2" path="$3" body="$4"
+            docker buildx build --load --target runtime -t "evaself/$service:ci" \
+              --cache-from "type=gha,scope=$service" \
+              --build-arg PYTHON_BASE_VERSION="$PYTHON_BASE_VERSION" "$service"
+            if docker run --rm -e EVA_ENV=production "evaself/$service:ci" python -c 'import app.main' 2>/dev/null; then
+              echo "::error::$service стартовал в production без OSINT_WORKER_TOKEN"; exit 1
+            fi
+            docker run -d --name "$service" --read-only --tmpfs /tmp -e HOME=/tmp \
+              -e EVA_ENV=production -e OSINT_WORKER_TOKEN=ci-token "evaself/$service:ci"
+            ready=false
+            for _ in $(seq 1 30); do
+              if docker exec "$service" python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:$port/health')" 2>/dev/null; then
+                ready=true; break
+              fi
+              sleep 2
+            done
+            if [ "$ready" != true ]; then
+              docker logs "$service" 2>&1 | tail -30
+              echo "::error::$service не ответил на /health"; exit 1
+            fi
+            code="$(docker exec -e URL="http://127.0.0.1:$port$path" -e BODY="$body" "$service" python -c '
+          import os, urllib.error, urllib.request
+          request = urllib.request.Request(os.environ["URL"], method="POST", data=os.environ["BODY"].encode(),
+                                           headers={"Content-Type": "application/json"})
+          try:
+              urllib.request.urlopen(request)
+              print(200)
+          except urllib.error.HTTPError as error:
+              print(error.code)
+          ')"
+            test "$code" = 401 || { echo "::error::$service принял запрос без ключа ($code)"; exit 1; }
+            docker rm -f "$service" >/dev/null
+            echo "$service runtime: ok"
+          }
+          check osint-harvester 8096 /v1/domain/harvest '{"domain":"example.com"}'
+          check osint-spiderfoot 8097 /v1/scan '{"kind":"domain","target":"example.com"}'
+
+      - name: OSINT-сервисы не затронуты
+        if: needs.changes.outputs.osint != 'true'
+        run: echo "osint-*/ не изменялись — проверять нечего"
+
+  # ===================================================================
   # Images build (and, for the agent service, its tests run in-build)
   # ===================================================================
   images:

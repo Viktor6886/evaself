@@ -3,9 +3,25 @@
 Оперативное состояние работы. Единственный источник истины о том, где работа
 остановилась. Агент читает этот файл первым и обновляет его после каждого шага.
 
-## OSINT, batch OSINT-3: оркестратор, задания, хранение — 2026-09-26
+## OSINT, batch OSINT-4: инфраструктура — 2026-09-26
 
 Ветка: `claude/eva-audio-recognition-summary-5f5nd2`. Статус: в работе.
+
+- osint-worker: RDAP (IANA bootstrap), RIPEstat, crt.sh, DNS (dnspython);
+- `osint-harvester/`: theHarvester 4.11.1 (GPL-2.0, отдельный контейнер),
+  только пассивные источники без ключей, свой lock с исправленными версиями;
+- `osint-spiderfoot/`: SpiderFoot master (MIT), закрытый список из 28
+  пассивных модулей, наружу только инфраструктурные события;
+- сборщики `infrastructure`, `theharvester`, `spiderfoot`; находка
+  «сущность» (домен, адрес, сеть); поддомены не расширяются, частные
+  адреса отбрасываются;
+- compose (профиль `osint`), CI job `osint-services`, pip-audit обоих lock.
+
+Следующий: OSINT-5 — инструменты Letta, отчёт, API Mini App, метрики, evals.
+
+## OSINT, batch OSINT-3: оркестратор, задания, хранение — 2026-09-26 — выполнен (#363)
+
+Ветка: `claude/eva-audio-recognition-summary-5f5nd2`.
 
 - миграция `085_osint_subject` (субъект исследования) с обратной;
 - сборщики `src/osint/collectors.ts`: `maigret` (osint-worker) и

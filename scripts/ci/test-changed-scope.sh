@@ -24,6 +24,7 @@ expect 'library/persona/other.md' false false
 expect '.github/workflows/ci.yml' false false
 
 test "$(value 'osint-worker/app/main.py' osint)" = true
+test "$(value 'osint-spiderfoot/app/main.py' osint)" = true
 test "$(value 'media-service/app/main.py' osint)" = false
 
 WORKFLOW="$ROOT/.github/workflows/ci.yml"
