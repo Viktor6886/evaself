@@ -9,6 +9,7 @@
  */
 
 import type { ToolSource } from "./registry.js";
+import type { ToolCallPath } from "./tool-hooks.js";
 
 type Outcome = "ok" | "refused" | "error" | "denied";
 
@@ -30,9 +31,9 @@ function observe(key: string, ms: number): void {
 
 const SEP = "\u0000";
 
-export function recordToolCall(source: ToolSource, bridged: boolean, outcome: Outcome, durationMs: number): void {
-  add(["call", source, bridged ? "bridge" : "direct", outcome].join(SEP));
-  observe(["call", source].join(SEP), durationMs);
+export function recordToolCall(source: ToolSource, path: ToolCallPath, outcome: Outcome, durationMs: number): void {
+  add(["call", source, path, outcome].join(SEP));
+  if (outcome !== "denied") observe(["call", source].join(SEP), durationMs);
 }
 
 export function recordToolSearch(outcome: "hit" | "empty"): void {

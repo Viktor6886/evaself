@@ -32,10 +32,15 @@ export interface ToolCallInfo {
   toolCallId: string;
   /** Ход Evaself, если вызов идёт внутри него. */
   runId: string | null;
-  /** Вызов пришёл через `tool_call`. */
-  bridged: boolean;
+  /**
+   * Каким путём пришёл вызов: прямой вызов модели, мост `tool_call` или
+   * рабочий агент делегирования.
+   */
+  path: ToolCallPath;
   startedAt: number;
 }
+
+export type ToolCallPath = "direct" | "bridge" | "delegation";
 
 export interface ToolCallOutcome {
   durationMs: number;
@@ -54,6 +59,8 @@ export interface ToolHooks {
   beforeToolCall?(call: ToolCallInfo): Promise<{ deny: string } | void> | { deny: string } | void;
   afterToolCall?(call: ToolCallInfo, outcome: ToolCallOutcome): Promise<void> | void;
   onToolError?(call: ToolCallInfo, failure: ToolCallFailure): Promise<void> | void;
+  /** Вызов остановлен хуком `denied` (квота). Видят все хуки, а не только запретивший. */
+  onToolDenied?(call: ToolCallInfo, denied: { hook: string }): Promise<void> | void;
 }
 
 export class ToolHookChain {
@@ -66,11 +73,22 @@ export class ToolHookChain {
   /** Первый явный запрет останавливает вызов; исключения хуков — нет. */
   async before(call: ToolCallInfo): Promise<string | null> {
     for (const hook of this.hooks) {
+      let verdict: { deny: string } | void;
       try {
-        const verdict = await hook.beforeToolCall?.(call);
-        if (verdict && typeof verdict.deny === "string") return verdict.deny;
+        verdict = await hook.beforeToolCall?.(call);
       } catch (error) {
         this.warn(hook.name, "before", error);
+        continue;
+      }
+      if (verdict && typeof verdict.deny === "string") {
+        for (const observer of this.hooks) {
+          try {
+            await observer.onToolDenied?.(call, { hook: hook.name });
+          } catch (error) {
+            this.warn(observer.name, "denied", error);
+          }
+        }
+        return verdict.deny;
       }
     }
     return null;

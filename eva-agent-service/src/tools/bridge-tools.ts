@@ -25,6 +25,7 @@ import {
 import type { ToolExecutor } from "./tool-executor.js";
 import { toolResult } from "./tool-executor.js";
 import { buildIndex, catalogListing, searchCatalog } from "./tool-search.js";
+import { recordToolSearch } from "./tool-metrics.js";
 import { integer, objectSchema, text, type JsonObject } from "./tool-kit.js";
 
 const MAX_SEARCH_RESULTS = 10;
@@ -142,6 +143,7 @@ export function bridgeTools(input: {
       const limit = Math.min(MAX_SEARCH_RESULTS, Math.max(1, Number(args.limit) || DEFAULT_SEARCH_RESULTS));
       const tools = input.catalog();
       const found = searchCatalog(buildIndex(tools), query, limit);
+      recordToolSearch(found.length ? "hit" : "empty");
       return {
         ok: true,
         results: found.map((tool) => ({ name: tool.name, group: tool.group, summary: summary(tool.description) })),

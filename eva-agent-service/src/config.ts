@@ -219,6 +219,10 @@ export interface Config {
   delegationTimeoutMs: number;
   /** Модель субагентов; пусто — модель Евы по умолчанию. */
   delegationModel: string;
+  /** Предохранитель от петли: вызовов через мосты и делегирование за ход. */
+  toolCallsPerTurn: number;
+  /** Действий браузера на пользователя в минуту. */
+  browserOpsPerMinute: number;
   /**
    * Проверка контракта Letta на живом развёртывании.
    *
@@ -515,6 +519,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     delegationMaxParallel: clampedInt("EVA_DELEGATION_MAX_PARALLEL", 3, 1, 8),
     delegationTimeoutMs: clampedInt("EVA_DELEGATION_TIMEOUT_MS", 180_000, 10_000, 900_000),
     delegationModel: str("EVA_DELEGATION_MODEL"),
+    toolCallsPerTurn: clampedInt("EVA_TOOL_CALLS_PER_TURN", 40, 5, 200),
+    browserOpsPerMinute: clampedInt("EVA_BROWSER_OPS_PER_MINUTE", 30, 1, 300),
     lettaContractVerify: bool("EVA_LETTA_CONTRACT_VERIFY", false),
     personaSyncTurnTimeoutMs: clampedInt("EVA_PERSONA_SYNC_TURN_TIMEOUT_MS", 3_000, 250, 15_000),
     checkinMorningHour: clampedInt("EVA_CHECKIN_MORNING_HOUR", 9, 5, 12),

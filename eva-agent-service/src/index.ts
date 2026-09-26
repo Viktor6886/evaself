@@ -78,6 +78,8 @@ import { loadMasterKey, SecretStore } from "./admin/secret-store.js";
 import { McpHttpInvoker, McpServerPolicyRepository } from "./tools/mcp.js";
 import { McpDiscovery } from "./tools/mcp-discovery.js";
 import { recordMcpDiscovery } from "./tools/tool-metrics.js";
+import { ToolHookChain } from "./tools/tool-hooks.js";
+import { ToolLatencyTracker, auditHook, metricsHook, quotaHook, tracingHook } from "./tools/standard-hooks.js";
 import { BrowserServiceClient } from "./browser/client.js";
 import { BrowserToolSource } from "./browser/tools.js";
 import { LettaSubagentRunner } from "./letta/subagents.js";
@@ -310,6 +312,17 @@ async function main(): Promise<void> {
     logger,
     onResult: (outcome, durationMs) => recordMcpDiscovery(outcome, durationMs),
   }) : undefined;
+  // Хуки инструментов — фиксированный список наблюдателей, собранный
+  // здесь. Установки хуков извне нет: это не система плагинов.
+  const toolLatency = new ToolLatencyTracker();
+  const toolQuota = quotaHook({ perTurn: config.toolCallsPerTurn, browserPerMinute: config.browserOpsPerMinute });
+  const toolHooks = new ToolHookChain([
+    toolQuota,
+    auditHook(db),
+    metricsHook(),
+    tracingHook(),
+    toolLatency.hook(),
+  ], logger);
   const toolFactory = new AgentToolFactory(
     config,
     db,
@@ -327,6 +340,7 @@ async function main(): Promise<void> {
       agentOf: async (userId: number) => await db.agentIdOfUser(userId),
     },
     runtimeContext,
+    toolHooks,
   );
   // Браузер — отдельный источник реестра. Источник регистрируется
   // всегда, а флаг проверяется при каждой сборке набора: выключенный

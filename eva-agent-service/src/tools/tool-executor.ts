@@ -178,7 +178,8 @@ export class ToolExecutor {
         name: tool.name, source: tool.source, group: tool.group, risk,
         userId: runtime.userId, conversationId, purpose: String(runtime.purpose),
         toolCallId: invocation.toolCallId, runId: turn?.runId ?? null,
-        bridged: invocation.via === TOOL_CALL_NAME, startedAt,
+        path: invocation.via === TOOL_CALL_NAME ? "bridge" : invocation.allowedTools ? "delegation" : "direct",
+        startedAt,
       };
       if (invocation.via === TOOL_CALL_NAME) {
         const gate = this.deps.gate?.();
