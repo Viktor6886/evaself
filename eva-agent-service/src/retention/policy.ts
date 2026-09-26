@@ -107,6 +107,16 @@ export const RETENTION_CLASSES: readonly RetentionClass[] = [
     targets: "job_dead_letters",
   },
   {
+    code: "osint_investigations",
+    title: "OSINT-исследования о третьих лицах",
+    action: "delete",
+    settingKey: "retention.osint_investigations_days",
+    defaultDays: 90,
+    minDays: 7,
+    maxDays: 365,
+    targets: "osint_investigations со всем графом; сущности и идентификаторы без исследований",
+  },
+  {
     code: "eva_message_text",
     title: "Текст сообщений, отправленных Евой по своей инициативе",
     action: "redact",

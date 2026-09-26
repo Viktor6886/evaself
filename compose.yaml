@@ -328,6 +328,12 @@ services:
       EVA_JOBS_MIRROR: ${EVA_JOBS_MIRROR:-true}
       EVA_KNOWLEDGE_UPLOADS: ${EVA_KNOWLEDGE_UPLOADS:-false}
       EVA_RESEARCH_ORCHESTRATOR: ${EVA_RESEARCH_ORCHESTRATOR:-false}
+      # OSINT-исследования (docs/OSINT.md): выключены, пока человек не
+      # включит флаг и профиль compose osint вместе.
+      EVA_OSINT_ENABLED: ${EVA_OSINT_ENABLED:-false}
+      EVA_OSINT_WORKER_URL: ${EVA_OSINT_WORKER_URL:-http://osint-worker:8095}
+      OSINT_WORKER_TOKEN: ${OSINT_WORKER_TOKEN}
+      EVA_OSINT_DAILY_LIMIT: ${EVA_OSINT_DAILY_LIMIT:-3}
       EVA_LETTA_CONTRACT_VERIFY: ${EVA_LETTA_CONTRACT_VERIFY:-false}
       EVA_TOOL_APPROVALS: ${EVA_TOOL_APPROVALS:-false}
       EVA_MINIAPP_JOURNAL_V2: ${EVA_MINIAPP_JOURNAL_V2:-false}

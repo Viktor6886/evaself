@@ -3,9 +3,28 @@
 Оперативное состояние работы. Единственный источник истины о том, где работа
 остановилась. Агент читает этот файл первым и обновляет его после каждого шага.
 
-## OSINT, batch OSINT-2: osint-worker — 2026-09-25
+## OSINT, batch OSINT-3: оркестратор, задания, хранение — 2026-09-26
 
 Ветка: `claude/eva-audio-recognition-summary-5f5nd2`. Статус: в работе.
+
+- миграция `085_osint_subject` (субъект исследования) с обратной;
+- сборщики `src/osint/collectors.ts`: `maigret` (osint-worker) и
+  `web_search` (SearXNG + Crawl4AI, цитата-доказательство), без модели;
+- `OsintOrchestrator`: очередь по глубине, бюджет, отмена, повтор без
+  двойной работы; решение о связи — через resolver;
+- `PgOsintStore` и `OsintService`: создание с целью, лимитом,
+  идемпотентностью и аудитом; статус, отмена, удаление с осиротевшими;
+- задание `osint_investigation` в очереди `research`, политика хранения
+  `osint_investigations`, флаги `EVA_OSINT_*` (выключены);
+- проверки: `test/osint-orchestrator.test.ts`,
+  `scripts/ci/test-osint-repository.mjs` на настоящей базе.
+
+Следующий: OSINT-4 — SpiderFoot (пассивный), theHarvester, RDAP, RIPEstat,
+DNS, CT.
+
+## OSINT, batch OSINT-2: osint-worker — 2026-09-25 — выполнен (#362)
+
+Ветка: `claude/eva-audio-recognition-summary-5f5nd2`.
 
 - сервис `osint-worker/` (FastAPI): Maigret, проверка профилей правилами
   WhatsMyName и Sherlock, сравнение nomenklatura; SSRF-защита с повторной

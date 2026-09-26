@@ -241,6 +241,65 @@ export const RETENTION_QUERIES: Record<string, ClassQueries> = {
         )`,
     ],
   },
+  // Данные о третьих лицах не хранятся дольше, чем нужны. Удаляется
+  // завершённое исследование целиком — источники, доказательства,
+  // утверждения и прогоны уходят каскадом, — а затем сущности и
+  // идентификаторы, которые больше ни одному исследованию не нужны.
+  // Идущее исследование не трогается.
+  osint_investigations: {
+    count: [
+      `-- tenant: system — общесистемное применение политики хранения
+       SELECT count(*)::int AS value FROM osint_investigations
+        WHERE created_at < now() - make_interval(days => $1)
+          AND status IN ('completed', 'failed', 'cancelled')`,
+      // Осиротевшие строки считаются отдельно: иначе остаток, не
+      // вычищенный за один заход, больше никогда не попал бы под политику —
+      // все исследования уже удалены, и класс выглядел бы пустым.
+      `-- tenant: system — осиротевшие сущности после удаления исследований
+       SELECT count(*)::int AS value FROM osint_entities e
+        WHERE e.created_at < now() - make_interval(days => $1)
+          AND NOT EXISTS (SELECT 1 FROM osint_investigation_entities ie
+                           WHERE ie.entity_id = e.id AND ie.user_id = e.user_id)`,
+      `-- tenant: system — осиротевшие идентификаторы после удаления исследований
+       SELECT count(*)::int AS value FROM osint_identifiers i
+        WHERE i.first_seen < now() - make_interval(days => $1)
+          AND NOT EXISTS (SELECT 1 FROM osint_entity_identifiers ei
+                           WHERE ei.identifier_id = i.id AND ei.user_id = i.user_id)
+          AND NOT EXISTS (SELECT 1 FROM osint_frontier f
+                           WHERE f.identifier_id = i.id AND f.user_id = i.user_id)`,
+    ],
+    apply: [
+      `-- tenant: system — общесистемное применение политики хранения
+       DELETE FROM osint_investigations
+        WHERE id IN (
+          SELECT id FROM osint_investigations
+           WHERE created_at < now() - make_interval(days => $1)
+             AND status IN ('completed', 'failed', 'cancelled')
+           ORDER BY created_at
+           LIMIT $2
+        )`,
+      `-- tenant: system — осиротевшие сущности после удаления исследований
+       DELETE FROM osint_entities
+        WHERE id IN (
+          SELECT e.id FROM osint_entities e
+           WHERE e.created_at < now() - make_interval(days => $1)
+             AND NOT EXISTS (SELECT 1 FROM osint_investigation_entities ie
+                              WHERE ie.entity_id = e.id AND ie.user_id = e.user_id)
+           LIMIT $2
+        )`,
+      `-- tenant: system — осиротевшие идентификаторы после удаления исследований
+       DELETE FROM osint_identifiers
+        WHERE id IN (
+          SELECT i.id FROM osint_identifiers i
+           WHERE i.first_seen < now() - make_interval(days => $1)
+             AND NOT EXISTS (SELECT 1 FROM osint_entity_identifiers ei
+                              WHERE ei.identifier_id = i.id AND ei.user_id = i.user_id)
+             AND NOT EXISTS (SELECT 1 FROM osint_frontier f
+                              WHERE f.identifier_id = i.id AND f.user_id = i.user_id)
+           LIMIT $2
+        )`,
+    ],
+  },
   metrics_aggregated: {
     count: [`-- tenant: system — общесистемное применение политики хранения
             SELECT count(*)::int AS value FROM job_mirror_samples
