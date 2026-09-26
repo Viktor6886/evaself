@@ -44,6 +44,7 @@ import { SearxCrawlAdapters } from "../research/adapters.js";
 import { UsernameProfilesCollector, WebSearchCollector } from "../osint/collectors.js";
 import { HarvesterCollector, InfrastructureCollector, SpiderfootCollector } from "../osint/infra-collectors.js";
 import { HarvesterClient, SpiderfootClient } from "../osint/service-clients.js";
+import { EgrulCollector } from "../osint/registry-collectors.js";
 import { OSINT_JOB_TIMING, OsintJobWorker } from "../osint/job.js";
 import { OSINT_JOB_TYPE } from "../osint/service.js";
 import { OsintWorkerClient } from "../osint/worker-client.js";
@@ -138,6 +139,9 @@ export function buildJobLayer(
       // Реестры и журналы — первыми: они дешёвые и дают следы (адреса,
       // AS, организацию), по которым идут остальные сборщики.
       new InfrastructureCollector(worker),
+      // ЕГРЮЛ/ЕГРИП — официальный реестр, но за своим флагом: контракт
+      // публичного сервиса ФНС сверяется на развёртывании.
+      ...(config.osintRuRegistriesEnabled ? [new EgrulCollector(worker)] : []),
       new HarvesterCollector(new HarvesterClient({ baseUrl: config.osintHarvesterUrl, ...services })),
       new SpiderfootCollector(new SpiderfootClient({ baseUrl: config.osintSpiderfootUrl, ...services })),
       new UsernameProfilesCollector(worker, { topSites: 300 }),

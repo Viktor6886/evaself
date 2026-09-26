@@ -23,6 +23,7 @@ import { OsintService } from "../../eva-agent-service/dist/osint/service.js";
 import { PgOsintStore } from "../../eva-agent-service/dist/osint/repository.js";
 import { OsintOrchestrator } from "../../eva-agent-service/dist/osint/orchestrator.js";
 import { OsintJobWorker } from "../../eva-agent-service/dist/osint/job.js";
+import { EgrulCollector } from "../../eva-agent-service/dist/osint/registry-collectors.js";
 import { structuredEvidence } from "../../eva-agent-service/dist/osint/evidence.js";
 import { RETENTION_QUERIES } from "../../eva-agent-service/dist/retention/service.js";
 
@@ -254,6 +255,34 @@ try {
   assert(/Источников: 2, найденных аккаунтов: 2/.test(notices[0].payload.text), "счётчики уведомления взяты из графа");
   assert(!/ci_osint_user|ci@example/.test(notices[0].payload.text), "в уведомлении нет идентификаторов");
   await pool.query(`DELETE FROM telegram_outbox WHERE idempotency_key = $1 AND user_id = $2`, [doneKey, first]);
+
+  // ------------------------------------------------------------------
+  // Реестр о субъекте-организации
+  // ------------------------------------------------------------------
+  // Исследование организации по ИНН: запись ЕГРЮЛ ложится на сам
+  // субъект (тот же идентификатор), а не заводит вторую организацию.
+  const company = await service.create({
+    userId: second, query: "CI: проверка контрагента", purpose: "Проверка контрагента в CI",
+    subject: "organization", seeds: [{ type: "tax_id", value: "7707083893" }], idempotencyKey: "ci-osint-key-0005",
+  });
+  const registry = new EgrulCollector({
+    egrul: async () => ({
+      collector: "egrul", status: "ok", requests: 2, sourceUrl: "https://egrul.nalog.ru/", degradedReason: null,
+      data: { records: [{
+        kind: "organization", name: "CI ORGANIZATION", inn: "7707083893", ogrn: "1027700132195",
+        registered: "2002-08-16", terminated: null, region: null, address: null, head: null,
+      }] },
+    }),
+  });
+  const companySummary = await new OsintOrchestrator(new PgOsintStore(db, second, company.id), [registry])
+    .run(new AbortController().signal);
+  assert(companySummary.status === "completed", "исследование организации по реестру завершено");
+  assert(await count(
+    `SELECT count(*) FROM osint_investigation_entities ie JOIN osint_entities e ON e.id = ie.entity_id AND e.user_id = ie.user_id
+      WHERE ie.investigation_id = $1 AND ie.user_id = $2 AND e.schema = 'Organization'`, [company.id, second]) === 1,
+    "запись реестра не заводит вторую организацию рядом с субъектом");
+  const companyReport = await service.report(second, company.id);
+  assert(companyReport.subject?.properties?.ogrnCode?.[0] === "1027700132195", "сведения реестра видны у субъекта в отчёте");
 
   // ------------------------------------------------------------------
   // Удаление и хранение

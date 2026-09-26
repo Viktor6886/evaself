@@ -24,7 +24,13 @@ export interface OsintReport {
   purpose: string;
   createdAt: string;
   completedAt: string | null;
-  subject: { caption: string; schema: string; identifiers: Array<{ type: string; value: string }> } | null;
+  subject: {
+    caption: string;
+    schema: string;
+    identifiers: Array<{ type: string; value: string }>;
+    /** Свойства субъекта из источников (реестр о субъекте-организации). */
+    properties: Record<string, string[]>;
+  } | null;
   accounts: Array<{
     url: string;
     confidence: number;
@@ -143,18 +149,20 @@ export class OsintReportBuilder {
         match: matchOf(entity.id),
       };
     });
+    const propertiesOf = (entityId: string): Record<string, string[]> => {
+      const properties: Record<string, string[]> = {};
+      for (const claim of claimsBy.get(entityId) ?? []) {
+        const values = properties[claim.property] ?? [];
+        if (!values.includes(claim.value) && values.length < 20) values.push(claim.value);
+        properties[claim.property] = values;
+      }
+      return properties;
+    };
     const infrastructure = entities
-      .filter((entity) => entity.schema.startsWith("eva:") || (entity.id !== subjectId && entity.schema === "Organization"))
+      .filter((entity) => entity.schema.startsWith("eva:")
+        || (entity.id !== subjectId && (entity.schema === "Organization" || entity.schema === "LegalEntity")))
       .slice(0, LIMIT.entities)
-      .map((entity) => {
-        const properties: Record<string, string[]> = {};
-        for (const claim of claimsBy.get(entity.id) ?? []) {
-          const values = properties[claim.property] ?? [];
-          if (!values.includes(claim.value) && values.length < 20) values.push(claim.value);
-          properties[claim.property] = values;
-        }
-        return { schema: entity.schema, caption: entity.caption, properties };
-      });
+      .map((entity) => ({ schema: entity.schema, caption: entity.caption, properties: propertiesOf(entity.id) }));
 
     const externalRequests = runs.reduce((sum, run) => sum + run.requests, 0);
     const maxExternalRequests = typeof investigation.budget?.maxExternalRequests === "number"
@@ -170,6 +178,7 @@ export class OsintReportBuilder {
         caption: subject.caption,
         schema: subject.schema,
         identifiers: identifiersOf(subject).map((item) => ({ type: String(item.type), value: String(item.value) })),
+        properties: propertiesOf(subject.id),
       } : null,
       accounts,
       infrastructure,
@@ -218,6 +227,9 @@ export function renderReport(report: OsintReport, maxLength = 6_000): string {
   lines.push(`Исследование ${report.id}: ${report.status}.`);
   if (report.subject) {
     lines.push(`Субъект: ${report.subject.caption} (${report.subject.identifiers.map((item) => `${item.type}: ${item.value}`).join("; ")}).`);
+    const props = Object.entries(report.subject.properties).slice(0, 12)
+      .map(([key, values]) => `${key}: ${values.slice(0, 5).join(", ")}`);
+    if (props.length > 0) lines.push(`Сведения о субъекте из источников: ${props.join("; ")}.`);
   }
   if (report.accounts.length > 0) {
     lines.push("", "Аккаунты (принадлежность субъекту НЕ установлена, если не сказано иное):");

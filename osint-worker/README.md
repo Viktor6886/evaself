@@ -35,6 +35,8 @@
 - `POST /v1/infra/ripestat` `{kind: ip|asn, value}` — RIPEstat.
 - `POST /v1/infra/certificates` `{domain}` — имена из журналов CT (crt.sh).
 - `POST /v1/infra/dns` `{domain}` — записи A, AAAA, CNAME, MX, NS, TXT, SOA.
+- `POST /v1/registry/egrul` `{kind: tax_id|registration_number|organization, value}` —
+  поиск ЕГРЮЛ/ЕГРИП ФНС; капча — деградация, без обхода.
 - `POST /v1/match/compare` `{left, right}` — признаки nomenklatura для
   двух сущностей FtM (Person, Organization, Company, LegalEntity,
   PublicBody, UserAccount).

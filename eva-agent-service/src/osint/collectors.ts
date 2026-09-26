@@ -72,8 +72,10 @@ export type Finding =
   | {
     kind: "entity";
     evidence: Evidence;
-    schema: "eva:Domain" | "eva:IPAddress" | "eva:Network" | "Organization";
+    schema: "eva:Domain" | "eva:IPAddress" | "eva:Network" | "Organization" | "LegalEntity";
     identifier: NormalizedIdentifier;
+    /** Подпись новой сущности; без неё — значение идентификатора. */
+    caption?: string;
     properties: Array<{ property: string; value: string }>;
   }
   /**

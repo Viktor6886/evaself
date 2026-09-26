@@ -100,6 +100,8 @@ export interface OsintWorkerOptions {
   fetcher?: typeof fetch;
 }
 
+/** Срок поиска в реестре: общий срок worker (120 с) плюс запас на сеть. */
+export const REGISTRY_TIMEOUT_MS = 135_000;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_SCAN_TIMEOUT_MS = 200_000;
 const VERIFICATION_STATUSES: readonly VerificationStatus[] = ["found", "not_found", "unknown", "skipped", "degraded"];
@@ -225,6 +227,18 @@ export class OsintWorkerClient extends OsintHttpClient {
   /** Записи DNS домена через резолвер. */
   async dns(domain: string): Promise<InfraResult> {
     return parseInfra(await this.call("POST", "/v1/infra/dns", { domain }, { timeoutMs: this.timeoutMs, retry: true }));
+  }
+
+  /**
+   * ЕГРЮЛ/ЕГРИП: публичный поиск ФНС по ИНН, ОГРН или наименованию.
+   * Не повторяется при сбое: ФНС отвечает на частые запросы капчей, и
+   * повтор скорее её вызовет, чем получит ответ.
+   */
+  async egrul(kind: "tax_id" | "registration_number" | "organization", value: string): Promise<InfraResult> {
+    // Поиск в ФНС — несколько запросов подряд с паузами, а не один: у
+    // worker на него общий срок REGISTRY_DEADLINE, клиент ждёт чуть дольше,
+    // чтобы деградацию по сроку вернул worker, а не обрыв соединения.
+    return parseInfra(await this.call("POST", "/v1/registry/egrul", { kind, value }, { timeoutMs: REGISTRY_TIMEOUT_MS, retry: false }));
   }
 
   async health(): Promise<{ rules: Record<VerifierSource, number> }> {

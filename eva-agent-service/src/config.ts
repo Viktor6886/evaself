@@ -178,6 +178,11 @@ export interface Config {
   /** Сколько исследований пользователь может начать за сутки. */
   osintDailyLimit: number;
   /**
+   * Реестры РФ (ЕГРЮЛ/ЕГРИП) в OSINT. Отдельный флаг: контракт сервиса ФНС
+   * сверяется на развёртывании, до этого сборщик не регистрируется.
+   */
+  osintRuRegistriesEnabled: boolean;
+  /**
    * Проверка контракта Letta на живом развёртывании.
    *
    * Contract-тесты доказывают контракт на сборке. Флаг включает ту же
@@ -458,6 +463,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     osintSpiderfootUrl: str("EVA_OSINT_SPIDERFOOT_URL", "http://osint-spiderfoot:8097"),
     osintWorkerToken: str("OSINT_WORKER_TOKEN"),
     osintDailyLimit: clampedInt("EVA_OSINT_DAILY_LIMIT", 3, 1, 50),
+    osintRuRegistriesEnabled: bool("EVA_OSINT_RU_REGISTRIES", false),
     lettaContractVerify: bool("EVA_LETTA_CONTRACT_VERIFY", false),
     personaSyncTurnTimeoutMs: clampedInt("EVA_PERSONA_SYNC_TURN_TIMEOUT_MS", 3_000, 250, 15_000),
     checkinMorningHour: clampedInt("EVA_CHECKIN_MORNING_HOUR", 9, 5, 12),
