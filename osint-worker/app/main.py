@@ -25,6 +25,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from . import matching
+from .infra import InfraCollector, InvalidTarget, normalize_asn, normalize_domain, normalize_ip
 from .limits import CircuitBreaker, DomainGate
 from .maigret_scan import scan_username
 from .site_rules import ProfileVerifier, load_sherlock, load_whatsmyname
@@ -55,6 +56,7 @@ SITE_TIMEOUT = _bounded("OSINT_SITE_TIMEOUT_SECONDS", 6, 1, 30)
 SCAN_DEADLINE = _bounded("OSINT_SCAN_DEADLINE_SECONDS", 180, 10, 900)
 MAX_CONNECTIONS = int(_bounded("OSINT_MAX_CONNECTIONS", 20, 1, 100))
 PER_DOMAIN = int(_bounded("OSINT_PER_DOMAIN_CONCURRENCY", 2, 1, 10))
+INFRA_TIMEOUT = _bounded("OSINT_INFRA_TIMEOUT_SECONDS", 45, 5, 120)
 DATASETS = Path(os.environ.get("OSINT_DATASETS_DIR", "/app/datasets"))
 
 # Та же форма, что у normalizeUsername в eva-agent-service: имя, которое
@@ -75,6 +77,7 @@ def _error_body(code: str, message: str, retryable: bool = False) -> dict:
 
 class State:
     verifier: ProfileVerifier | None = None
+    infra: InfraCollector | None = None
     client: httpx.AsyncClient | None = None
 
 
@@ -104,6 +107,14 @@ async def lifespan(_app: FastAPI):
         gate=DomainGate(total=MAX_CONNECTIONS, per_domain=PER_DOMAIN),
         breaker=CircuitBreaker(),
         timeout_seconds=SITE_TIMEOUT,
+    )
+    # Реестры и журналы сертификатов отвечают медленнее профилей: crt.sh
+    # на крупном домене отдаёт ответ за десятки секунд.
+    state.infra = InfraCollector(
+        state.client,
+        gate=DomainGate(total=MAX_CONNECTIONS, per_domain=PER_DOMAIN),
+        breaker=CircuitBreaker(),
+        timeout_seconds=INFRA_TIMEOUT,
     )
     try:
         yield
@@ -192,3 +203,53 @@ async def compare(request: CompareRequest) -> dict:
         return matching.compare(request.left, request.right)
     except matching.InvalidEntity as error:
         raise HTTPException(status_code=400, detail=_error_body("invalid_entity", str(error))) from error
+
+
+class DomainRequest(BaseModel):
+    domain: str = Field(min_length=4, max_length=253)
+
+
+class RdapRequest(BaseModel):
+    kind: str = Field(pattern="^(domain|ip|asn)$")
+    value: str = Field(min_length=1, max_length=253)
+
+
+class NetworkRequest(BaseModel):
+    kind: str = Field(pattern="^(ip|asn)$")
+    value: str = Field(min_length=1, max_length=64)
+
+
+def _target(kind: str, value: str) -> str:
+    try:
+        if kind == "domain":
+            return normalize_domain(value)
+        if kind == "ip":
+            return normalize_ip(value)
+        return str(normalize_asn(value))
+    except InvalidTarget as error:
+        detail = _error_body("invalid_target", f"{kind} has an unsupported form")
+        raise HTTPException(status_code=400, detail=detail) from error
+
+
+@app.post("/v1/infra/rdap", dependencies=[Depends(require_token)])
+async def rdap(request: RdapRequest) -> dict:
+    assert state.infra is not None
+    return (await state.infra.rdap(request.kind, _target(request.kind, request.value))).to_dict()
+
+
+@app.post("/v1/infra/ripestat", dependencies=[Depends(require_token)])
+async def ripestat(request: NetworkRequest) -> dict:
+    assert state.infra is not None
+    return (await state.infra.ripestat(request.kind, _target(request.kind, request.value))).to_dict()
+
+
+@app.post("/v1/infra/certificates", dependencies=[Depends(require_token)])
+async def certificates(request: DomainRequest) -> dict:
+    assert state.infra is not None
+    return (await state.infra.certificates(_target("domain", request.domain))).to_dict()
+
+
+@app.post("/v1/infra/dns", dependencies=[Depends(require_token)])
+async def dns_records(request: DomainRequest) -> dict:
+    assert state.infra is not None
+    return (await state.infra.dns(_target("domain", request.domain))).to_dict()

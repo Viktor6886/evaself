@@ -5,3 +5,4 @@ pydantic==2.13.5
 followthemoney==4.11.0
 nomenklatura==4.17.0
 maigret==0.6.6
+dnspython==2.8.0

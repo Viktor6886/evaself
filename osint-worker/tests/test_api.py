@@ -62,3 +62,17 @@ def test_compare_endpoint_returns_features(monkeypatch):
     assert response.status_code == 200
     assert any(feature["name"] == "name_match" for feature in response.json()["features"])
     assert bad.status_code == 400
+
+
+def test_infra_endpoints_refuse_private_targets(monkeypatch):
+    main = _app(monkeypatch)
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/v1/infra/rdap",
+            json={"kind": "ip", "value": "10.0.0.1"},
+            headers={"X-Osint-Key": "secret"},
+        )
+        unauthorized = client.post("/v1/infra/dns", json={"domain": "example.com"})
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_target"
+    assert unauthorized.status_code == 401
