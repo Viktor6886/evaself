@@ -199,6 +199,21 @@ try {
   assert(await count(`SELECT count(*) FROM audit_log WHERE target = $1 AND operation = 'osint.investigation.view'`, [created.id]) >= 1,
     "просмотр статуса записан в аудит");
 
+  // Отчёт, список и поиск — по настоящим запросам и только своё.
+  const report = await service.report(first, created.id);
+  assert(report && report.status === "completed" && report.accounts.some((item) => item.url === "https://site.example/ci_osint_user"),
+    "отчёт собирает найденные профили");
+  assert(report.accounts.every((item) => !item.match || !["confirmed", "probable"].includes(item.match.status))
+    && report.limitations.some((note) => note.includes("не подтверждены")), "отчёт не объявляет профиль принадлежащим субъекту");
+  assert(await service.report(second, created.id) === null, "второй пользователь не получает чужой отчёт");
+  assert((await service.list(first)).some((item) => item.id === created.id), "исследование есть в списке владельца");
+  assert(!(await service.list(second)).some((item) => item.id === created.id), "чужого исследования нет в списке");
+  assert((await service.search(first, "ci_osint_user")).length >= 1, "поиск находит собранное");
+  assert((await service.search(second, "ci_osint_user")).length === 0, "поиск не видит чужое");
+  assert((await service.search(first, "100%_")).length === 0, "шаблонные символы LIKE экранированы");
+  assert(await count(`SELECT count(*) FROM audit_log WHERE target = $1 AND operation = 'osint.investigation.report'`, [created.id]) >= 1,
+    "просмотр отчёта записан в аудит");
+
   // Сущность, найденная в двух исследованиях, — одна строка.
   const second_ = (await pool.query(`SELECT id FROM osint_investigations WHERE user_id = $1 AND idempotency_key = 'ci-osint-key-0002'`, [first])).rows[0].id;
   await new OsintOrchestrator(new PgOsintStore(db, first, second_), [profileCollector([]), quiet]).run(new AbortController().signal);

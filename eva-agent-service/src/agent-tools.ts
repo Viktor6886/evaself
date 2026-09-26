@@ -18,6 +18,8 @@ import { turnOf } from "./turns/turn-context.js";
 import { TaskToolFactory } from "./tools/task-tools.js";
 import { SubscriptionStatusService } from "./subscriptions/status-service.js";
 import { SubscriptionToolFactory } from "./subscriptions/subscription-tools.js";
+import { OsintToolFactory } from "./osint/tools.js";
+import type { OsintService } from "./osint/service.js";
 import type { McpHttpInvoker, McpServerPolicyRepository } from "./tools/mcp.js";
 import type { MandatoryApprovalCategory, ToolRisk } from "./tools/approvals.js";
 import {
@@ -56,6 +58,7 @@ export class AgentToolFactory {
   private readonly tasks: TaskToolFactory;
   private readonly subscriptions: SubscriptionToolFactory;
   private readonly dynamicTools = new Map<string, AnyAgentTool[]>();
+  private osint?: OsintToolFactory;
   private readonly vectorGoalsEnabled: boolean;
   private approvalCompletion?: (input: { userId: number; conversationId: string; toolName: string; args: unknown; outcome: "executed" | "failed" }) => Promise<unknown>;
   private readonly runtimeContexts = new Map<
@@ -95,6 +98,15 @@ export class AgentToolFactory {
     this.approvalCompletion = callback;
   }
 
+  /**
+   * OSINT подключается после сборки: сервис существует, только когда
+   * включён флаг и есть слой заданий. Без него инструментов нет вовсе —
+   * модели незачем видеть то, что заведомо откажет.
+   */
+  setOsint(service: OsintService): void {
+    this.osint = new OsintToolFactory(service);
+  }
+
   forConversation(conversationId: string): AnyAgentTool[] {
     const tool = this.builder(conversationId);
     return [
@@ -107,6 +119,7 @@ export class AgentToolFactory {
       // Статус подписки — безопасное чтение владельца conversation. Он
       // нужен Еве независимо от rollout-флага покупки/апгрейда тарифов.
       ...this.subscriptions.build(tool),
+      ...(this.osint?.build(tool) ?? []),
       ...(this.dynamicTools.get(conversationId) ?? []),
     ];
   }
@@ -391,12 +404,22 @@ const TOOL_RISK: Readonly<Record<string, ToolRisk>> = Object.freeze({
   upsert_goal: "sensitive_write",
   confirm_goal: "sensitive_write",
   upsert_goal_result: "sensitive_write",
+  // Исследование третьего лица — не обычная запись: человек подтверждает
+  // его явно, даже если модель поняла просьбу правильно.
+  osint_investigate: "sensitive_write",
+  osint_get_status: "read",
+  osint_get_report: "read",
+  osint_list: "read",
+  osint_search_entity: "read",
+  osint_cancel: "low_risk_write",
+  osint_delete: "destructive",
 });
 
 const TOOL_APPROVAL_CATEGORY: Readonly<Record<string, MandatoryApprovalCategory>> = Object.freeze({
   delete_notes: "data_deletion",
   delete_budget_records: "data_deletion",
   delete_tasks: "data_deletion",
+  osint_delete: "data_deletion",
 });
 
 export function toolRisk(name: string): ToolRisk {

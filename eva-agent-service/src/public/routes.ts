@@ -11,6 +11,7 @@ import {
   MIN_WINDOW_MINUTES,
 } from "../jobs/proactive/windows.js";
 import type { ConversationService } from "./conversation-service.js";
+import { registerOsintPublicRoutes, type OsintPublic } from "./osint-routes.js";
 import {
   type TelegramWebAppUser,
   verifyTelegramWebAppInitData,
@@ -807,6 +808,7 @@ export function registerPublicRoutes(
     rateLimiter?: RateLimiter;
     approvals?: { decide(input: { telegramId: number; sdkRequestId: string; decision: "allow" | "deny" }): Promise<unknown> };
     knowledgeResearch?: KnowledgeResearchPublic;
+    osint?: OsintPublic;
     /**
      * Подписка в Mini App. Отсутствует — раздел честно говорит, что
      * оплата не настроена, вместо кнопки, которая ничего не делает.
@@ -1071,6 +1073,7 @@ export function registerPublicRoutes(
     publicApp.get("/research/:id",async(request)=>{if(!input.knowledgeResearch)throw badRequest("Исследования отключены");return await input.knowledgeResearch.researchStatus(publicUser(request).id,String((request.params as {id?:string}).id??""));});
     publicApp.get("/research/:id/report",async(request)=>{if(!input.knowledgeResearch)throw badRequest("Исследования отключены");return await input.knowledgeResearch.researchReport(publicUser(request).id,String((request.params as {id?:string}).id??""));});
     publicApp.post("/research/:id/cancel",async(request)=>{if(!input.knowledgeResearch)throw badRequest("Исследования отключены");return await input.knowledgeResearch.researchCancel(publicUser(request).id,String((request.params as {id?:string}).id??""));});
+    registerOsintPublicRoutes(publicApp, input.osint, (request) => publicUser(request as FastifyRequest).id);
 
     // ---- Контроль памяти (шаг 16) ---------------------------------
     //

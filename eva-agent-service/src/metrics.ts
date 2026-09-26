@@ -17,6 +17,7 @@ import { monitorEventLoopDelay, type IntervalHistogram } from "node:perf_hooks";
 import type { Database } from "./db.js";
 import { genderFixStats } from "./i18n/eva-gender.js";
 import { deliveryStats, jobStats, providerStats } from "./metrics-queries.js";
+import { osintStats } from "./osint/metrics.js";
 import { runtimeContextSizeStats } from "./runtime/runtime-context.js";
 import type { TurnClass } from "./turns/semaphores.js";
 import { TURN_STATES } from "./turns/states.js";
@@ -414,6 +415,24 @@ export class MetricsCollector {
           labels: { outcome },
           value,
         })),
+      },
+      {
+        name: "eva_osint_investigations_total",
+        help: "OSINT-исследования по исходу. Без запросов и идентификаторов.",
+        type: "counter",
+        values: osintStats().investigations.map(({ outcome, value }) => ({ labels: { outcome }, value })),
+      },
+      {
+        name: "eva_osint_collector_runs_total",
+        help: "Прогоны сборщиков OSINT по сборщику и статусу.",
+        type: "counter",
+        values: osintStats().runs.map(({ collector, status, value }) => ({ labels: { collector, status }, value })),
+      },
+      {
+        name: "eva_osint_external_requests_total",
+        help: "Внешние запросы сборщиков OSINT.",
+        type: "counter",
+        values: osintStats().requests.map(({ collector, value }) => ({ labels: { collector }, value })),
       },
       {
         name: "eva_retention_policy_seconds",

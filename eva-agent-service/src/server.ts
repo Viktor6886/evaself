@@ -31,6 +31,7 @@ import {
   registerPublicRoutes,
   type KnowledgeResearchPublic,
 } from "./public/routes.js";
+import type { OsintPublic } from "./public/osint-routes.js";
 import {
   clientAddress,
   enforceRateLimit,
@@ -77,6 +78,7 @@ export interface Services {
   approvals?: { decideByTelegram(input: { telegramId: number; sdkRequestId: string; decision: "allow" | "deny" }): Promise<unknown> };
   /** Просмотр, подтверждение, исправление и удаление памяти из Mini App. */
   knowledgeResearch?: KnowledgeResearchPublic;
+  osint?: OsintPublic;
   /**
    * Имена продуктовых инструментов Evaself. Готовность проверяет, что
    * они действительно доступны runtime, а не только зарегистрированы.
@@ -234,6 +236,7 @@ export function buildServer(services: Services): FastifyInstance {
     rateLimiter,
     ...(services.approvals ? { approvals: { decide: async (input) => await services.approvals!.decideByTelegram(input) } } : {}),
     ...(services.knowledgeResearch ? { knowledgeResearch: services.knowledgeResearch } : {}),
+    ...(services.osint ? { osint: services.osint } : {}),
     // Подписка в Mini App: тот же прайс и тот же счёт, что в чате.
     // Ссылку на счёт делает Bot API — Mini App открывает её, не выходя
     // из приложения, и платёж дальше идёт обычным путём.
