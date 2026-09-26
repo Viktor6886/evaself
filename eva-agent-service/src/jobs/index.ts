@@ -20,6 +20,7 @@ import type { Logger } from "../logger.js";
 import type { ConversationPurposeService } from "../conversations/purpose-service.js";
 import type { OutboxDelivery } from "../delivery/outbox.js";
 import type { LettaService } from "../letta.js";
+import type { TelegramClient } from "../telegram.js";
 import type { RuntimeContextBuilder } from "../runtime/runtime-context.js";
 import type { UserTurnLock } from "../turns/user-turn-lock.js";
 import { BullMqJobDriver } from "./bullmq-driver.js";
@@ -46,8 +47,11 @@ import { HarvesterCollector, InfrastructureCollector, SpiderfootCollector } from
 import { HarvesterClient, SpiderfootClient } from "../osint/service-clients.js";
 import { EgrulCollector } from "../osint/registry-collectors.js";
 import { OSINT_JOB_TIMING, OsintJobWorker, osintCollectorEnabled } from "../osint/job.js";
+import { LettaOsintNarrator } from "../osint/narrator.js";
 import { OSINT_JOB_TYPE } from "../osint/service.js";
 import { OsintWorkerClient } from "../osint/worker-client.js";
+import { jobProcessor } from "./consumer.js";
+import type { JobQueueName } from "./queue-registry.js";
 import { KnowledgeIngestWorker, KNOWLEDGE_INGEST_JOB } from "../knowledge/lifecycle.js";
 import { LlmRouterClient } from "../router/client.js";
 import { execFile } from "node:child_process";
@@ -92,6 +96,12 @@ export interface JobLayerDeps {
   initiative?: { tick(options?: { runId?: string; signal?: AbortSignal }): Promise<unknown> } | null;
   /** Действующие значения настроек: сроки хранения приходят оттуда. */
   settings?: () => Record<string, unknown>;
+  /**
+   * Отправка текста Евы тем же путём, что её ответы: разметка Telegram,
+   * деление длинного текста, durable outbox. Без него итог исследования
+   * приходит шаблоном.
+   */
+  telegram?: Pick<TelegramClient, "withDeliveryContext" | "sendMessage">;
 }
 
 export function buildJobLayer(
@@ -110,6 +120,13 @@ export function buildJobLayer(
     batchSize: config.jobOutboxBatchSize,
     pollMs: config.jobOutboxPollMs,
   });
+  /**
+   * Очереди, которые этот процесс исполняет, и сколько заданий каждой
+   * идёт одновременно. Очередь попадает сюда вместе с обработчиками,
+   * которые в ней живут: потребитель без обработчика отправлял бы
+   * задания в DLQ с `job_handler_missing`.
+   */
+  const consumed = new Map<JobQueueName, number>();
   if (config.knowledgeUploadsEnabled) {
     const router = new LlmRouterClient(config.routerUrl, config.routerApiKey);
     const knowledge = new KnowledgeIngestWorker(db,{tempRoot:"/tmp",embed:(text,signal)=>router.embed(text,signal),scan:async(path)=>await new Promise<"clean"|"infected"|"unavailable">(resolve=>execFile("clamscan",["--no-summary",path],error=>{const code=(error as unknown as {code?:number})?.code;resolve(!error?"clean":code===1?"infected":"unavailable");}))});
@@ -149,9 +166,20 @@ export function buildJobLayer(
     ], {
       enabled: () => config.osintEnabled,
       collectorEnabled: (name) => osintCollectorEnabled(config, name),
-    });
+    }, deps.telegram ? {
+      // Итог рассказывает сама Ева, как только исследование готово, —
+      // человеку не нужно писать ей, чтобы узнать результат.
+      narrator: new LettaOsintNarrator(db, deps.letta, deps.runtimeContext, deps.lock),
+      send: async (chatId, text, deliveryKey) => {
+        const telegram = deps.telegram!;
+        await telegram.withDeliveryContext(deliveryKey, async () => await telegram.sendMessage(chatId, text), "reminder");
+      },
+    } : null);
     registry.queue("research");
     runtime.register(OSINT_JOB_TYPE, async (context) => await osint.run(context), OSINT_JOB_TIMING);
+    // Два исследования одновременно: сборщики ходят во внешние сервисы
+    // со своими лимитами, и третье только поделило бы их на троих.
+    consumed.set("research", 2);
   }
 
   // Сверки обслуживания переносятся первыми: они ничего не отправляют
@@ -255,8 +283,14 @@ export function buildJobLayer(
         handlers: runtime.registeredTypes,
       });
       outbox.start();
+      const processor = jobProcessor(runtime);
+      for (const [queue, concurrency] of consumed) registry.consume(queue, processor, concurrency);
     },
     async stop(drainMs: number): Promise<void> {
+      // Сначала перестаём брать новые задания: иначе во время ожидания
+      // активных потребитель брал бы следующие, а остановленный runtime
+      // возвращал бы их повтором и тратил на это попытки.
+      await registry.pauseConsumers();
       outbox.stop();
       // `runtime.stop` закрывает очереди реестра сам; соединения
       // драйвера отпускаются после него, чтобы закрытие очередей успело

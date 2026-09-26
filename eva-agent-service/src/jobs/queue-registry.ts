@@ -102,12 +102,39 @@ export interface JobQueueHandle {
   close(): Promise<void>;
 }
 
+/**
+ * Обработчик задания очереди: данные задания и сколько попыток уже
+ * израсходовано. Бросок означает «повторить», обычный возврат — «задание
+ * закрыто», чем бы оно ни кончилось.
+ */
+export type JobProcessor = (data: unknown, attemptsMade: number) => Promise<void>;
+
+/** Потребитель очереди: берёт задания и отдаёт их обработчику. */
+export interface JobConsumerHandle {
+  readonly name: JobQueueName;
+  /** Перестать брать новые задания, не дожидаясь начатых. */
+  pause(): Promise<void>;
+  /** Закрыть потребителя; начатые задания к этому моменту уже остановлены. */
+  close(): Promise<void>;
+}
+
 export interface JobQueueDriver {
   open(name: JobQueueName, prefix: string): JobQueueHandle;
+  /**
+   * Завести потребителя очереди. Необязателен: тестовые драйверы
+   * исполняют задания напрямую через `JobRuntime.execute`.
+   */
+  consume?(
+    name: JobQueueName,
+    prefix: string,
+    processor: JobProcessor,
+    options: { concurrency: number; onError: (error: unknown) => void },
+  ): JobConsumerHandle;
 }
 
 export class QueueRegistry {
   private readonly queues = new Map<JobQueueName, JobQueueHandle>();
+  private readonly consumers = new Map<JobQueueName, JobConsumerHandle>();
   private closed = false;
 
   constructor(
@@ -138,6 +165,44 @@ export class QueueRegistry {
     return handle;
   }
 
+  /**
+   * Завести потребителя очереди класса. Потребитель на класс — один,
+   * как и сама очередь; повторный вызов возвращает того же.
+   *
+   * Без потребителя задание, поставленное публикатором, лежит в Valkey
+   * вечно: постановка есть, исполнения нет.
+   */
+  consume(name: string, processor: JobProcessor, concurrency: number): JobConsumerHandle | null {
+    const queue = this.queue(name);
+    const existing = this.consumers.get(queue.name);
+    if (existing) return existing;
+    if (!this.driver.consume) return null;
+    const handle = this.driver.consume(queue.name, this.prefix, processor, {
+      concurrency: Math.max(1, Math.floor(concurrency)),
+      // Отказ соединения потребителя — не отказ задания: BullMQ сам
+      // переподключается, а журналу хватает имени ошибки.
+      onError: (error) => this.logger.warn("Потребитель очереди заданий: ошибка", {
+        queue: queue.name,
+        code: error instanceof Error ? error.name : "unknown_error",
+      }),
+    });
+    this.consumers.set(queue.name, handle);
+    this.logger.info("Потребитель очереди заданий запущен", { queue: queue.name, concurrency });
+    return handle;
+  }
+
+  /** Очереди, у которых есть потребитель. */
+  get consumedQueues(): JobQueueName[] {
+    return [...this.consumers.keys()];
+  }
+
+  /** Перестать брать новые задания: первая ступень остановки. */
+  async pauseConsumers(): Promise<void> {
+    await Promise.all([...this.consumers.values()].map(async (handle) => {
+      await handle.pause().catch(() => undefined);
+    }));
+  }
+
   /** Уже открытые очереди. Реестр не открывает их заранее — только по требованию. */
   get openQueues(): JobQueueName[] {
     return [...this.queues.keys()];
@@ -149,6 +214,19 @@ export class QueueRegistry {
    */
   async close(): Promise<void> {
     this.closed = true;
+    // Потребители закрываются раньше очередей: закрытый потребитель
+    // больше не возьмёт задание из очереди, которую сейчас закроют.
+    await Promise.all([...this.consumers.values()].map(async (handle) => {
+      try {
+        await handle.close();
+      } catch (error) {
+        this.logger.warn("Потребитель очереди заданий не закрылся", {
+          queue: handle.name,
+          code: error instanceof Error ? error.name : "unknown_error",
+        });
+      }
+    }));
+    this.consumers.clear();
     const closing = [...this.queues.values()].map(async (handle) => {
       try {
         await handle.close();

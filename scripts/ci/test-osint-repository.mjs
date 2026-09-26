@@ -261,6 +261,35 @@ try {
   assert(!/ci_osint_user|ci@example/.test(notices[0].payload.text), "в уведомлении нет идентификаторов");
   await pool.query(`DELETE FROM telegram_outbox WHERE idempotency_key = $1 AND user_id = $2`, [doneKey, first]);
 
+  // Итог рассказывает Ева: пересказ уходит тем же путём, что её ответы,
+  // повтор задания второго хода не запускает, а сбой пересказа — не
+  // молчание, а шаблон со счётчиками.
+  const sent = [];
+  const narrations = [];
+  const announcer = (narrate) => ({
+    narrator: { narrate: async (input) => { narrations.push(input.investigationId); return await narrate(); } },
+    send: async (chatId, text, key) => {
+      sent.push({ chatId, text, key });
+      await pool.query(
+        `INSERT INTO telegram_outbox (idempotency_key, user_id, chat_id, telegram_method, payload, priority)
+         VALUES ($1, $2, $3, 'sendMessage', $4::jsonb, 30)`,
+        [`${key}:000:sendMessage`, first, chatId, JSON.stringify({ chat_id: chatId, text })],
+      );
+    },
+  });
+  const flagsOn = { enabled: () => true, collectorEnabled: () => true };
+  const narrated = announcer(async () => "Готово: нашла два профиля, но что они его — не установлено.");
+  await new OsintJobWorker(db, [quiet], flagsOn, narrated).run(job(db));
+  await new OsintJobWorker(db, [quiet], flagsOn, narrated).run(job(db));
+  assert(narrations.length === 1 && narrations[0] === created.id, "пересказ запрошен один раз и по своему исследованию");
+  assert(sent.length === 1 && sent[0].key === doneKey && /нашла два профиля/.test(sent[0].text),
+    "человек получает пересказ Евы, а не шаблон");
+  await pool.query(`DELETE FROM telegram_outbox WHERE idempotency_key LIKE $1 AND user_id = $2`, [`${doneKey}%`, first]);
+  sent.length = 0;
+  await new OsintJobWorker(db, [quiet], flagsOn, announcer(async () => { throw new Error("letta down"); })).run(job(db));
+  assert(sent.length === 1 && /Источников: 2/.test(sent[0].text), "сбой пересказа — шаблон со счётчиками");
+  await pool.query(`DELETE FROM telegram_outbox WHERE idempotency_key LIKE $1 AND user_id = $2`, [`${doneKey}%`, first]);
+
   // ------------------------------------------------------------------
   // Реестр о субъекте-организации
   // ------------------------------------------------------------------
