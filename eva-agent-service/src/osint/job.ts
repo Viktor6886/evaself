@@ -15,6 +15,7 @@ import type { JobContext } from "../jobs/runtime.js";
 import type { JobTimingPolicy } from "../jobs/policy.js";
 import type { Collector } from "./collectors.js";
 import { recordOsint } from "./metrics.js";
+import type { OsintNarrator } from "./narrator.js";
 import { OsintOrchestrator } from "./orchestrator.js";
 import { PgOsintStore, type Queryable } from "./repository.js";
 
@@ -86,6 +87,16 @@ export function osintCollectorEnabled(flags: OsintCollectorFlags, name: string):
   }
 }
 
+/**
+ * Как итог доходит до человека, когда рядом есть Letta и клиент Telegram:
+ * пересказ Евы и отправка через тот же путь, что у её ответов (разметка,
+ * деление длинного текста, durable outbox).
+ */
+export interface OsintAnnouncer {
+  narrator: OsintNarrator;
+  send(chatId: number, text: string, deliveryKey: string): Promise<void>;
+}
+
 export class OsintJobWorker {
   constructor(
     private readonly db: OsintJobDatabase,
@@ -94,6 +105,7 @@ export class OsintJobWorker {
       enabled: () => boolean;
       collectorEnabled: (name: string) => boolean;
     } = { enabled: () => true, collectorEnabled: () => true },
+    private readonly announcer: OsintAnnouncer | null = null,
   ) {}
 
   /**
@@ -102,7 +114,7 @@ export class OsintJobWorker {
    * заход после сбоя пропускает уже сделанные прогоны, и его итог сказал
    * бы «ничего не найдено» о том, что нашёл первый.
    */
-  private async notify(userId: number, investigationId: string): Promise<void> {
+  private async notify(userId: number, investigationId: string, context: JobContext): Promise<void> {
     const { rows: [user] } = await this.db.query<{ telegram_id: string | number }>(
       `SELECT telegram_id FROM users WHERE id = $1`,
       [userId],
@@ -124,6 +136,33 @@ export class OsintJobWorker {
       [investigationId, userId],
     );
     const chatId = Number(user.telegram_id);
+    const deliveryKey = `osint-done:${investigationId}`;
+    if (this.announcer) {
+      // Повтор задания после отправленного итога второго хода не
+      // запускает: ход Letta стоит денег и написал бы человеку дважды.
+      // Поиск по чату, а не по user_id: ответы Евы (и этот пересказ)
+      // пишутся в outbox без владельца, и проверка по user_id не видела бы
+      // уже поставленное сообщение.
+      const { rows: sent } = await this.db.query(
+        `-- tenant: by chat_id — чат владельца исследования; строки ответов Евы пишутся без user_id
+         SELECT 1 FROM telegram_outbox WHERE chat_id = $1 AND idempotency_key LIKE $2 LIMIT 1`,
+        [chatId, `${deliveryKey}%`],
+      );
+      if (sent.length > 0) return;
+      let text: string | null = null;
+      try {
+        text = await this.announcer.narrator.narrate({ userId, investigationId, signal: context.signal });
+      } catch (error) {
+        // Пересказ не удался — человек всё равно узнаёт, что готово:
+        // шаблон со счётчиками, а отчёт Ева покажет по просьбе.
+        context.logger.warn("OSINT-исследование: пересказ Евы не удался", {
+          investigationId,
+          code: error instanceof Error ? error.name : "unknown_error",
+        });
+      }
+      await this.announcer.send(chatId, text ?? completionText(counts!), deliveryKey);
+      return;
+    }
     await this.db.query(
       `INSERT INTO telegram_outbox (idempotency_key, user_id, chat_id, telegram_method, payload, priority)
        VALUES ($1, $2, $3, 'sendMessage', $4::jsonb, $5)
@@ -195,7 +234,7 @@ export class OsintJobWorker {
       // Вне перехвата выше: сбой постановки уведомления — повод повторить
       // задание, а не «отменённое исследование», каким его счёл бы
       // перехват по статусу, уже не равному processing.
-      if (completed) await this.notify(userId, investigationId);
+      if (completed) await this.notify(userId, investigationId, context);
     });
   }
 }

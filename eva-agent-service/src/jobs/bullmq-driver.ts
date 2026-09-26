@@ -16,12 +16,14 @@
  * ошибку вызова.
  */
 
-import { Queue } from "bullmq";
+import { Queue, Worker } from "bullmq";
 import type { Redis } from "ioredis";
 
 import type {
   JobAddOptions,
   JobAddResult,
+  JobConsumerHandle,
+  JobProcessor,
   JobQueueDriver,
   JobQueueHandle,
   JobQueueName,
@@ -98,6 +100,39 @@ class BullQueueHandle implements JobQueueHandle {
   }
 }
 
+class BullConsumerHandle implements JobConsumerHandle {
+  private readonly worker: Worker;
+
+  constructor(
+    readonly name: JobQueueName,
+    connection: Redis,
+    prefix: string,
+    processor: JobProcessor,
+    options: { concurrency: number; onError: (error: unknown) => void },
+  ) {
+    this.worker = new Worker(
+      name,
+      async (job) => await processor(job.data, job.attemptsMade),
+      { connection, prefix, concurrency: options.concurrency },
+    );
+    // Без слушателя `error` событие EventEmitter бросает и роняет процесс:
+    // обрыв соединения с Valkey убивал бы весь сервис.
+    this.worker.on("error", options.onError);
+  }
+
+  async pause(): Promise<void> {
+    await this.worker.pause(true);
+  }
+
+  async close(): Promise<void> {
+    // Принудительно: закрытие идёт после ожидания `JobRuntime.stop`, и
+    // задание, не отпустившее работу к этому сроку, иначе держало бы
+    // остановку сколько угодно. Брошенное задание BullMQ вернёт как
+    // зависшее, а аренда в журнале запусков не даст выполнить его дважды.
+    await this.worker.close(true);
+  }
+}
+
 export class BullMqJobDriver implements JobQueueDriver {
   private readonly connections: Redis[] = [];
 
@@ -107,6 +142,21 @@ export class BullMqJobDriver implements JobQueueDriver {
     const connection = this.redis.duplicate({ maxRetriesPerRequest: null });
     this.connections.push(connection);
     return new BullQueueHandle(name, connection, prefix);
+  }
+
+  /**
+   * Потребитель получает своё соединение: блокирующее ожидание задания
+   * занимает его целиком (см. комментарий в начале файла).
+   */
+  consume(
+    name: JobQueueName,
+    prefix: string,
+    processor: JobProcessor,
+    options: { concurrency: number; onError: (error: unknown) => void },
+  ): JobConsumerHandle {
+    const connection = this.redis.duplicate({ maxRetriesPerRequest: null });
+    this.connections.push(connection);
+    return new BullConsumerHandle(name, connection, prefix, processor, options);
   }
 
   /** Соединения закрываются после очередей: очередь закрывает свои команды сама. */

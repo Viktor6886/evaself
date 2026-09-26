@@ -51,6 +51,7 @@
 | Компонент | Назначение | Путь |
 |---|---|---|
 | Queue registry/driver | Единая точка BullMQ | `src/jobs/queue-registry.ts`, `src/jobs/bullmq-driver.ts` |
+| Потребитель очередей | Worker BullMQ поверх `JobRuntime.execute`; запущен для `research`, у `memory`, `proactive`, `maintenance` потребителя пока нет | `src/jobs/consumer.ts`, `QueueRegistry.consume` |
 | Job outbox/runs | Транзакционная публикация и журнал запусков | `src/jobs/job-outbox.ts`, `src/jobs/job-runs.ts` |
 | Runtime/policy | Таймауты, отмена, retry, DLQ | `src/jobs/runtime.ts`, `src/jobs/policy.ts` |
 | Schedules | Канонические расписания в PostgreSQL | `src/jobs/schedules.ts` |
@@ -95,6 +96,7 @@ BullMQ не обрабатывает интерактивный ход и не �
 | Каналы | Связь внешнего сообщения с внутренним пользователем | `src/channels/channel-links.ts` |
 | OSINT (фундамент) | Доменный слой исследования открытых источников: нормализация идентификаторов, доказательства, уверенность, детерминированное тождество, противоречия; схема `osint_*`. Сборщиков и инструментов пока нет — `docs/OSINT.md` | `src/osint/`, `postgres/migrations/084_osint_foundation.sql` |
 | osint-worker | Python-сервис сборщиков OSINT (Maigret, проверка правилами WhatsMyName/Sherlock, nomenklatura) в сети `tools`, профиль `osint`; клиент и перевод ответов в домен — `worker-client.ts`, `worker-mapping.ts` (runtime подключает OSINT-3) | `osint-worker/`, `src/osint/worker-client.ts`, `src/osint/worker-mapping.ts` |
+| Пересказ итога OSINT | Служебный ход Евы в основном диалоге по завершении исследования | `src/osint/narrator.ts` |
 | OSINT-исследование | Создание (цель, лимит, идемпотентность, аудит), оркестратор с очередью по глубине и бюджетом, сборщики `maigret` и `web_search`, хранилище в PostgreSQL, задание `osint_investigation` (очередь `research`), политика хранения `osint_investigations`; флаг `EVA_OSINT_ENABLED` выключен | `src/osint/service.ts`, `orchestrator.ts`, `collectors.ts`, `repository.ts`, `job.ts`, `postgres/migrations/085_osint_subject.sql` |
 | OSINT: инфраструктура | Сборщики `infrastructure` (RDAP, RIPEstat, crt.sh, DNS через osint-worker), `theharvester` (контейнер osint-harvester, GPL-2.0), `spiderfoot` (контейнер osint-spiderfoot, закрытый список модулей) | `src/osint/infra-collectors.ts`, `service-clients.ts`, `osint-worker/app/infra.py`, `osint-harvester/`, `osint-spiderfoot/` |
 | OSINT: инструменты и отчёт | Инструменты Евы `osint_*` (регистрируются при `EVA_OSINT_ENABLED`), детерминированный отчёт с ограничениями, список и поиск с аудитом, уведомление через `telegram_outbox`, API Mini App (чтение/отмена/удаление), метрики `eva_osint_*` | `src/osint/tools.ts`, `report.ts`, `metrics.ts`, `src/public/osint-routes.ts` |
