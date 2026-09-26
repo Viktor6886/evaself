@@ -122,15 +122,17 @@ export class OsintService {
     const budget = mode === "deep" ? DEEP_BUDGET : DEFAULT_BUDGET;
     const outcome = await this.db.withUserScope({ userId: input.userId, label: "osint.create", inherit: true }, async () =>
       await this.db.transaction(async (client) => {
+        // Всё — под блокировкой строки пользователя: два одновременных
+        // запроса с тем же ключом получают одно исследование, а не отказ
+        // по лимиту или уникальному ключу, и не проходят оба на последнем
+        // месте лимита.
+        await client.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [input.userId]);
         const existing = await client.query<{ id: string }>(
           `SELECT id FROM osint_investigations WHERE user_id = $1 AND idempotency_key = $2`,
           [input.userId, input.idempotencyKey],
         );
         if (existing.rows[0]) return { id: existing.rows[0].id, created: false };
 
-        // Лимит считается под блокировкой строки пользователя: два
-        // одновременных запроса не проходят оба на последнем месте.
-        await client.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [input.userId]);
         const { rows: [usage] } = await client.query<{ count: number }>(
           `SELECT count(*)::int AS count FROM osint_investigations
             WHERE user_id = $1 AND created_at > now() - interval '24 hours'`,
@@ -260,6 +262,8 @@ export class OsintService {
              WHERE investigation_id = $1 AND user_id = $2) AS requests`,
         [id, userId],
       );
+      // Просмотр данных о третьих лицах — тоже событие аудита.
+      await audit(this.db, "osint.investigation.view", id, { user_id: userId });
       const { rows: runRows } = await this.db.query<{ status: string; count: number }>(
         `SELECT status, count(*)::int AS count FROM osint_collector_runs
           WHERE investigation_id = $1 AND user_id = $2 GROUP BY status`,

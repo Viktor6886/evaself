@@ -83,6 +83,7 @@ function profileCollector(calls) {
   return {
     name: "maigret",
     accepts: (type) => type === "username",
+    reserve: (remaining) => Math.min(remaining, 12),
     collect: async ({ target }) => {
       calls.push(target.normalized);
       const url = `https://site.example/${target.normalized}`;
@@ -140,7 +141,13 @@ try {
                         AND NOT params_redacted_json::text LIKE '%ci_osint_user%'`, [created.id]) === 1,
     "создание записано в аудит без значений идентификаторов");
 
-  await service.create(input(first, "ci-osint-key-0002"));
+  // Два одновременных запроса с одним ключом получают одно исследование,
+  // а не отказ по лимиту или по уникальному ключу.
+  const [left, right] = await Promise.all([
+    service.create(input(first, "ci-osint-key-0002")),
+    service.create(input(first, "ci-osint-key-0002")),
+  ]);
+  assert(left.id === right.id && left.created !== right.created, "одновременные запросы с одним ключом дают одно исследование");
   await rejects(service.create(input(first, "ci-osint-key-0003")), "osint_daily_limit", "дневной лимит не пропускает третье исследование");
 
   // ------------------------------------------------------------------
@@ -160,6 +167,7 @@ try {
   const aborting = {
     name: "web_search",
     accepts: (type) => type === "email",
+    reserve: () => 1,
     collect: async () => {
       controller.abort();
       const error = new Error("aborted");
@@ -175,7 +183,7 @@ try {
   }
   assert(aborted, "первый заход оборван посреди работы");
 
-  const quiet = { name: "web_search", accepts: (type) => type === "email", collect: async () => ({ status: "succeeded", externalRequests: 1, sources: [] }) };
+  const quiet = { name: "web_search", accepts: (type) => type === "email", reserve: () => 1, collect: async () => ({ status: "succeeded", externalRequests: 1, sources: [] }) };
   const summary = await new OsintOrchestrator(store, [profileCollector(calls), quiet]).run(new AbortController().signal);
   assert(summary.status === "completed", "второй заход завершает исследование");
   assert(calls.filter((name) => name === "ci_osint_user").length === 1, "завершённый прогон по той же цели не повторяется");
@@ -188,6 +196,8 @@ try {
     "совпадение ника не объявлено тождеством");
   const status = await service.status(first, created.id);
   assert(status.status === "completed" && status.externalRequests === 25, "статус и счётчик запросов сходятся");
+  assert(await count(`SELECT count(*) FROM audit_log WHERE target = $1 AND operation = 'osint.investigation.view'`, [created.id]) >= 1,
+    "просмотр статуса записан в аудит");
 
   // Сущность, найденная в двух исследованиях, — одна строка.
   const second_ = (await pool.query(`SELECT id FROM osint_investigations WHERE user_id = $1 AND idempotency_key = 'ci-osint-key-0002'`, [first])).rows[0].id;
@@ -210,11 +220,25 @@ try {
   await pool.query(`UPDATE osint_investigations SET created_at = now() - interval '400 days', status = 'processing' WHERE id = $1 AND user_id = $2`, [running.id, second]);
   await pool.query(`UPDATE osint_entities SET created_at = now() - interval '400 days' WHERE user_id = ANY($1)`, [[first, second]]);
   await pool.query(`UPDATE osint_identifiers SET first_seen = now() - interval '400 days' WHERE user_id = ANY($1)`, [[first, second]]);
+  const eligible = async () => {
+    let total = 0;
+    for (const sql of RETENTION_QUERIES.osint_investigations.count) total += Number((await pool.query(sql, [90])).rows[0].value);
+    return total;
+  };
+  assert(await eligible() > 0, "хранение видит старые исследования");
   for (const sql of RETENTION_QUERIES.osint_investigations.apply) await pool.query(sql, [90, 1000]);
   assert(await count(`SELECT count(*) FROM osint_investigations WHERE user_id = $1`, [first]) === 0, "хранение удаляет старые завершённые исследования");
   assert(await count(`SELECT count(*) FROM osint_entities WHERE user_id = $1`, [first]) === 0, "и осиротевшие сущности вместе с ними");
   assert(await count(`SELECT count(*) FROM osint_investigations WHERE id = $1`, [running.id]) === 1, "идущее исследование хранение не трогает");
   assert(await count(`SELECT count(*) FROM osint_entities WHERE user_id = $1`, [second]) > 0, "его сущности тоже остаются");
+  // Осиротевшая сущность без единого исследования всё равно считается:
+  // иначе остаток после прерванной очистки не удалился бы никогда.
+  const orphanId = (await pool.query(
+    `INSERT INTO osint_entities (id, user_id, schema, caption, created_at)
+     VALUES (gen_random_uuid(), $1, 'Person', 'orphan', now() - interval '400 days') RETURNING id`, [first])).rows[0].id;
+  assert(await eligible() >= 1, "осиротевшая сущность попадает в подсчёт хранения");
+  for (const sql of RETENTION_QUERIES.osint_investigations.apply) await pool.query(sql, [90, 1000]);
+  assert(await count(`SELECT count(*) FROM osint_entities WHERE id = $1`, [orphanId]) === 0, "и удаляется следующим заходом");
 } finally {
   await pool.query(`DELETE FROM osint_investigations WHERE user_id IN (SELECT id FROM users WHERE telegram_id = ANY($1))`, [TELEGRAM_IDS]);
   await pool.query(`DELETE FROM osint_entities WHERE user_id IN (SELECT id FROM users WHERE telegram_id = ANY($1))`, [TELEGRAM_IDS]);

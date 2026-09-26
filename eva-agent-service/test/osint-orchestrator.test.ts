@@ -43,6 +43,7 @@ class MemoryStore implements OsintStore {
   matches: Array<{ left: string; right: string; status: string }> = [];
   subject = "subject";
   budget = { ...DEFAULT_BUDGET };
+  startedAt: number | null = null;
   private seq = 0;
 
   seed(type: string, normalized: string, depth = 0): string {
@@ -58,8 +59,9 @@ class MemoryStore implements OsintStore {
   async begin() {
     if (!["queued", "processing"].includes(this.status)) return null;
     this.status = "processing";
+    this.startedAt ??= Date.now();
     for (const item of this.frontier.values()) if (item.status === "processing") item.status = "pending";
-    return { budget: this.budget, subjectEntityId: this.subject };
+    return { budget: this.budget, subjectEntityId: this.subject, startedAt: this.startedAt };
   }
   async isCancelled() { return this.status !== "processing"; }
   async counters() {
@@ -132,6 +134,7 @@ function collector(name: string, types: string[], output: (target: FrontierItem,
     name,
     calls,
     accepts: (type) => types.includes(type),
+    reserve: (remaining) => Math.min(remaining, 20),
     collect: async ({ target, remainingRequests }) => {
       calls.push(target);
       return output(target, remainingRequests);
@@ -220,7 +223,7 @@ test("бюджет внешних запросов останавливает и
 test("отказ сборщика — отказ прогона, исследование продолжается", async () => {
   const store = new MemoryStore();
   store.seed("username", "alice");
-  const broken: Collector = { name: "broken", accepts: () => true, collect: async () => { throw new Error("boom"); } };
+  const broken: Collector = { name: "broken", accepts: () => true, reserve: (remaining) => Math.min(remaining, 7), collect: async () => { throw new Error("boom"); } };
   const web = collector("web_search", ["username"], () => ({
     status: "degraded", degradedReason: "captcha", externalRequests: 2, sources: [],
   }));
@@ -229,6 +232,8 @@ test("отказ сборщика — отказ прогона, исследо�
   assert.equal(summary.failedRuns, 1);
   assert.equal(summary.degradedRuns, 1);
   assert.equal(web.calls.length, 1);
+  // Упавший прогон списывает свою верхнюю границу, а не ноль.
+  assert.equal(summary.externalRequests, 7 + 2);
 });
 
 test("повтор после сбоя не запускает завершённые прогоны второй раз", async () => {
@@ -243,6 +248,7 @@ test("повтор после сбоя не запускает завершён�
     name: "web_search",
     calls: 0,
     accepts: (type) => type === "email",
+    reserve: () => 1,
     collect: async () => {
       mail.calls += 1;
       if (crash) {
@@ -270,6 +276,17 @@ test("повтор после сбоя не запускает завершён�
   assert.equal(summary.status, "completed");
   assert.equal(profiles.calls.length, 1);
   assert.equal(mail.calls, 2);
+});
+
+test("повтор задания не получает второй срок: время считается от первого захода", async () => {
+  const store = new MemoryStore();
+  store.seed("username", "alice");
+  store.status = "processing";
+  store.startedAt = Date.now() - DEFAULT_BUDGET.maxRuntimeMs - 1;
+  const profiles = collector("maigret", ["username"], () => ({ status: "succeeded", externalRequests: 1, sources: [] }));
+  const summary = await new OsintOrchestrator(store, [profiles]).run(new AbortController().signal);
+  assert.equal(summary.stoppedBy, "budget_runtime");
+  assert.equal(profiles.calls.length, 0);
 });
 
 test("отменённое исследование не продолжается", async () => {
@@ -321,6 +338,7 @@ test("username-сборщик сводит скан с проверкой и н�
     remainingRequests: 50,
   });
   assert.equal(calls[0]!.topSites, 50);
+  // 40 сайтов скана + 1 проверка; на проверку оставалось 10 — хватило.
   assert.equal(output.externalRequests, 41);
   const accountFinding = output.sources[0]!.findings.find((finding) => finding.kind === "account")!;
   assert.deepEqual((accountFinding as { confirmedBy: string[] }).confirmedBy, ["maigret", "whatsmyname"]);
@@ -348,6 +366,31 @@ function web(pages: Record<string, string>, results: string[]) {
     },
   };
 }
+
+test("проверка профилей не выходит за остаток бюджета по обоим наборам правил", async () => {
+  const verifyCalls: Array<{ hosts: string[]; sources: readonly string[] }> = [];
+  const hosts = ["a", "b", "c"].map((name) => `https://${name}.example/alice`);
+  const underTest = new UsernameProfilesCollector({
+    scanUsername: async () => ({
+      collector: "maigret", username: "alice", status: "ok", checked: 45, degraded: {},
+      found: hosts.map((url) => ({ site: url, url, tags: [], httpStatus: 200, ids: {}, discoveredUsernames: [], discoveredLinks: [] })),
+    }),
+    verifyProfiles: async (_username: string, list: string[], sources: readonly string[]) => {
+      verifyCalls.push({ hosts: list, sources });
+      return list.flatMap((host) => sources.map((source) => ({
+        source, site: host, profileUrl: `https://${host}/alice`, status: "found", reason: null,
+      })));
+    },
+  } as never, { topSites: 300 });
+  const output = await underTest.collect({
+    target: { identifierId: "i", type: "username", normalized: "alice", depth: 0 },
+    signal: signal(),
+    remainingRequests: 50,
+  });
+  // Остаток после скана — 5 запросов: два хоста по два набора правил.
+  assert.equal(verifyCalls[0]!.hosts.length, 2);
+  assert.ok(output.externalRequests <= 50);
+});
 
 test("веб-поиск берёт в источники только страницы с упоминанием и цитирует их дословно", async () => {
   const access = web({

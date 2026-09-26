@@ -36,12 +36,12 @@ export class PgOsintStore implements OsintStore {
     private readonly investigationId: string,
   ) {}
 
-  async begin(): Promise<{ budget: InvestigationBudget; subjectEntityId: string | null } | null> {
-    const { rows } = await this.db.query<{ budget: InvestigationBudget; subject_entity_id: string | null }>(
+  async begin(): Promise<{ budget: InvestigationBudget; subjectEntityId: string | null; startedAt: number } | null> {
+    const { rows } = await this.db.query<{ budget: InvestigationBudget; subject_entity_id: string | null; started_at: Date }>(
       `UPDATE osint_investigations
           SET status = 'processing', started_at = coalesce(started_at, now()), updated_at = now()
         WHERE id = $1 AND user_id = $2 AND status IN ('queued', 'processing')
-        RETURNING budget, subject_entity_id`,
+        RETURNING budget, subject_entity_id, started_at`,
       [this.investigationId, this.userId],
     );
     const row = rows[0];
@@ -53,7 +53,7 @@ export class PgOsintStore implements OsintStore {
         WHERE investigation_id = $1 AND user_id = $2 AND status = 'processing'`,
       [this.investigationId, this.userId],
     );
-    return { budget: row.budget, subjectEntityId: row.subject_entity_id };
+    return { budget: row.budget, subjectEntityId: row.subject_entity_id, startedAt: new Date(row.started_at).getTime() };
   }
 
   async isCancelled(): Promise<boolean> {

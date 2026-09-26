@@ -78,8 +78,12 @@ export interface CollectorOutput {
 export interface Collector {
   readonly name: string;
   accepts(type: IdentifierType): boolean;
+  /** Сколько внешних запросов прогон может сделать при таком остатке бюджета — верхняя граница. */
+  reserve(remainingRequests: number): number;
   collect(context: CollectorContext): Promise<CollectorOutput>;
 }
+
+const VERIFIER_SOURCES = ["whatsmyname", "sherlock"] as const;
 
 const skipped = (errorCode: string): CollectorOutput => ({ status: "skipped", errorCode, externalRequests: 0, sources: [] });
 
@@ -110,6 +114,10 @@ export class UsernameProfilesCollector implements Collector {
     return type === "username";
   }
 
+  reserve(remainingRequests: number): number {
+    return Math.max(0, remainingRequests);
+  }
+
   async collect({ target, signal, remainingRequests }: CollectorContext): Promise<CollectorOutput> {
     signal.throwIfAborted();
     // Скан меньше десятка сайтов ничего не говорит, а верхнюю границу
@@ -124,10 +132,13 @@ export class UsernameProfilesCollector implements Collector {
     }))];
     let verifications: Awaited<ReturnType<OsintWorkerClient["verifyProfiles"]>> = [];
     let verifyFailed = false;
-    if (hosts.length > 0 && remainingRequests - requests >= hosts.length) {
+    // Проверка стоит запрос на каждый набор правил на каждый хост: хостов
+    // берётся столько, сколько помещается в остаток по обоим наборам.
+    const verifiable = hosts.slice(0, Math.floor((remainingRequests - requests) / VERIFIER_SOURCES.length));
+    if (verifiable.length > 0) {
       signal.throwIfAborted();
       try {
-        verifications = await this.worker.verifyProfiles(target.normalized, hosts);
+        verifications = await this.worker.verifyProfiles(target.normalized, verifiable, VERIFIER_SOURCES);
         requests += verifications.length;
       } catch {
         // Проверка — второе мнение. Без неё находки Maigret остаются
@@ -269,6 +280,10 @@ export class WebSearchCollector implements Collector {
   accepts(type: IdentifierType): boolean {
     return ["name", "username", "email", "phone", "organization", "domain", "tax_id", "registration_number"]
       .includes(type);
+  }
+
+  reserve(remainingRequests: number): number {
+    return Math.max(0, Math.min(remainingRequests, this.limits.queriesPerIdentifier + this.limits.pagesPerIdentifier));
   }
 
   async collect({ target, signal, remainingRequests }: CollectorContext): Promise<CollectorOutput> {

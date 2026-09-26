@@ -37,8 +37,12 @@ export interface RunResult {
 
 /** Хранилище одного исследования. Реализация — `repository.ts`. */
 export interface OsintStore {
-  /** Взять исследование в работу. `null` — отменено или уже завершено. */
-  begin(): Promise<{ budget: InvestigationBudget; subjectEntityId: string | null } | null>;
+  /**
+   * Взять исследование в работу. `null` — отменено или уже завершено.
+   * `startedAt` — начало первого захода: срок бюджета не обновляется
+   * повтором задания.
+   */
+  begin(): Promise<{ budget: InvestigationBudget; subjectEntityId: string | null; startedAt: number } | null>;
   isCancelled(): Promise<boolean>;
   counters(): Promise<{ externalRequests: number; identifiers: number; entities: number }>;
   nextFrontier(maxDepth: number): Promise<FrontierItem | null>;
@@ -122,7 +126,9 @@ export class OsintOrchestrator {
     if (!state) return { ...summary, status: "not_runnable" };
     const { budget, subjectEntityId } = state;
     const now = this.options.now ?? Date.now;
-    const deadline = now() + budget.maxRuntimeMs;
+    // Срок считается от первого захода: повтор задания после сбоя не
+    // получает второй полный бюджет времени.
+    const deadline = state.startedAt + budget.maxRuntimeMs;
 
     for (;;) {
       signal.throwIfAborted();
@@ -164,7 +170,14 @@ export class OsintOrchestrator {
           const raw = (error as { code?: unknown } | null)?.code;
           const code = typeof raw === "string" && /^[a-z0-9_]{3,64}$/.test(raw) ? raw : "osint_collector_error";
           summary.failedRuns += 1;
-          await this.store.finishRun(runId, { status: "failed", errorCode: code, externalRequests: 0 });
+          // Сколько запросов успел сделать упавший сборщик, неизвестно.
+          // Списывается его верхняя граница: иначе каждый следующий шаг
+          // видел бы нетронутый бюджет, и отказы тратили бы его бесконечно.
+          await this.store.finishRun(runId, {
+            status: "failed",
+            errorCode: code,
+            externalRequests: collector.reserve(remaining),
+          });
           continue;
         }
         const saved = await this.persist(collector.name, runId, item, output, subjectEntityId, budget);
