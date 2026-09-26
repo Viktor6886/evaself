@@ -98,6 +98,7 @@ BullMQ не обрабатывает интерактивный ход и не �
 | OSINT-исследование | Создание (цель, лимит, идемпотентность, аудит), оркестратор с очередью по глубине и бюджетом, сборщики `maigret` и `web_search`, хранилище в PostgreSQL, задание `osint_investigation` (очередь `research`), политика хранения `osint_investigations`; флаг `EVA_OSINT_ENABLED` выключен | `src/osint/service.ts`, `orchestrator.ts`, `collectors.ts`, `repository.ts`, `job.ts`, `postgres/migrations/085_osint_subject.sql` |
 | OSINT: инфраструктура | Сборщики `infrastructure` (RDAP, RIPEstat, crt.sh, DNS через osint-worker), `theharvester` (контейнер osint-harvester, GPL-2.0), `spiderfoot` (контейнер osint-spiderfoot, закрытый список модулей) | `src/osint/infra-collectors.ts`, `service-clients.ts`, `osint-worker/app/infra.py`, `osint-harvester/`, `osint-spiderfoot/` |
 | OSINT: инструменты и отчёт | Инструменты Евы `osint_*` (регистрируются при `EVA_OSINT_ENABLED`), детерминированный отчёт с ограничениями, список и поиск с аудитом, уведомление через `telegram_outbox`, API Mini App (чтение/отмена/удаление), метрики `eva_osint_*` | `src/osint/tools.ts`, `report.ts`, `metrics.ts`, `src/public/osint-routes.ts` |
+| OSINT: реестры РФ | Сборщик `egrul` (публичный поиск ЕГРЮЛ/ЕГРИП ФНС через osint-worker), флаг `EVA_OSINT_RU_REGISTRIES`; «Прозрачный бизнес», ЕФРСБ, арбитраж не подключены | `src/osint/registry-collectors.ts`, `osint-worker/app/registries.py` |
 
 ## Администрирование и инфраструктура
 

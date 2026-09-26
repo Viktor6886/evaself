@@ -47,7 +47,7 @@ function harness() {
 const REPORT = {
   id: ID, status: "completed", mode: "standard", purpose: "проверка контрагента",
   createdAt: "2026-09-26T00:00:00.000Z", completedAt: "2026-09-26T00:10:00.000Z",
-  subject: { caption: "alice", schema: "Person", identifiers: [{ type: "username", value: "alice" }] },
+  subject: { caption: "alice", schema: "Person", identifiers: [{ type: "username", value: "alice" }], properties: {} },
   accounts: [{ url: "https://github.com/alice", confidence: 0.6, collectors: ["maigret"], claims: [], match: null }],
   infrastructure: [{ schema: "eva:Domain", caption: "example.com", properties: { registrar: ["Example Registrar"] } }],
   mentions: [{ url: "https://example.com/a", quote: "alice пишет о проекте" }],

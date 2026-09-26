@@ -28,6 +28,7 @@ from . import matching
 from .infra import InfraCollector, InvalidTarget, normalize_asn, normalize_domain, normalize_ip
 from .limits import CircuitBreaker, DomainGate
 from .maigret_scan import scan_username
+from .registries import EgrulRegistry, InvalidQuery
 from .site_rules import ProfileVerifier, load_sherlock, load_whatsmyname
 
 SERVICE_TOKEN = os.environ.get("OSINT_WORKER_TOKEN", "").strip()
@@ -78,6 +79,7 @@ def _error_body(code: str, message: str, retryable: bool = False) -> dict:
 class State:
     verifier: ProfileVerifier | None = None
     infra: InfraCollector | None = None
+    egrul: EgrulRegistry | None = None
     client: httpx.AsyncClient | None = None
 
 
@@ -113,6 +115,14 @@ async def lifespan(_app: FastAPI):
     state.infra = InfraCollector(
         state.client,
         gate=DomainGate(total=MAX_CONNECTIONS, per_domain=PER_DOMAIN),
+        breaker=CircuitBreaker(),
+        timeout_seconds=INFRA_TIMEOUT,
+    )
+    # ФНС встречает частые запросы капчей: к её сервису — один запрос за
+    # раз, темп задаёт сам EgrulRegistry.
+    state.egrul = EgrulRegistry(
+        state.client,
+        gate=DomainGate(total=MAX_CONNECTIONS, per_domain=1),
         breaker=CircuitBreaker(),
         timeout_seconds=INFRA_TIMEOUT,
     )
@@ -253,3 +263,18 @@ async def certificates(request: DomainRequest) -> dict:
 async def dns_records(request: DomainRequest) -> dict:
     assert state.infra is not None
     return (await state.infra.dns(_target("domain", request.domain))).to_dict()
+
+
+class RegistryRequest(BaseModel):
+    kind: str = Field(pattern="^(tax_id|registration_number|organization)$")
+    value: str = Field(min_length=3, max_length=200)
+
+
+@app.post("/v1/registry/egrul", dependencies=[Depends(require_token)])
+async def egrul(request: RegistryRequest) -> dict:
+    assert state.egrul is not None
+    try:
+        return (await state.egrul.search(request.kind, request.value)).to_dict()
+    except InvalidQuery as error:
+        detail = _error_body("invalid_target", f"{request.kind} has an unsupported form")
+        raise HTTPException(status_code=400, detail=detail) from error

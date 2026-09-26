@@ -285,7 +285,7 @@ export class OsintOrchestrator {
     // Новая сущность сверх бюджета не заводится; уже известная —
     // дополняется, она бюджет не расходует.
     const entity = await this.store.upsertEntity(
-      finding.schema, finding.identifier.normalized, identifierId, counters.entities < budget.maxEntities);
+      finding.schema, finding.caption ?? finding.identifier.normalized, identifierId, counters.entities < budget.maxEntities);
     if (!entity) return null;
     const { entityId } = entity;
     const quality = SOURCE_TIER_QUALITY[source.tier];

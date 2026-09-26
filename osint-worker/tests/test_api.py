@@ -76,3 +76,24 @@ def test_infra_endpoints_refuse_private_targets(monkeypatch):
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "invalid_target"
     assert unauthorized.status_code == 401
+
+
+def test_registry_endpoint_validates_before_any_request(monkeypatch):
+    main = _app(monkeypatch)
+    with TestClient(main.app) as client:
+        bad_checksum = client.post(
+            "/v1/registry/egrul",
+            json={"kind": "tax_id", "value": "7707083894"},
+            headers={"X-Osint-Key": "secret"},
+        )
+        person_name = client.post(
+            "/v1/registry/egrul",
+            json={"kind": "name", "value": "Иванов Иван"},
+            headers={"X-Osint-Key": "secret"},
+        )
+        unauthorized = client.post("/v1/registry/egrul", json={"kind": "tax_id", "value": "7707083893"})
+    assert bad_checksum.status_code == 400
+    assert bad_checksum.json()["error"]["code"] == "invalid_target"
+    # Поиск ИП по ФИО не поддерживается: однофамильцы — не след.
+    assert person_name.status_code == 422
+    assert unauthorized.status_code == 401

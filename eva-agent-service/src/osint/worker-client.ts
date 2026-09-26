@@ -227,6 +227,15 @@ export class OsintWorkerClient extends OsintHttpClient {
     return parseInfra(await this.call("POST", "/v1/infra/dns", { domain }, { timeoutMs: this.timeoutMs, retry: true }));
   }
 
+  /**
+   * ЕГРЮЛ/ЕГРИП: публичный поиск ФНС по ИНН, ОГРН или наименованию.
+   * Не повторяется при сбое: ФНС отвечает на частые запросы капчей, и
+   * повтор скорее её вызовет, чем получит ответ.
+   */
+  async egrul(kind: "tax_id" | "registration_number" | "organization", value: string): Promise<InfraResult> {
+    return parseInfra(await this.call("POST", "/v1/registry/egrul", { kind, value }, { timeoutMs: this.timeoutMs, retry: false }));
+  }
+
   async health(): Promise<{ rules: Record<VerifierSource, number> }> {
     const body = await this.call("GET", "/health", undefined, { timeoutMs: this.timeoutMs, retry: true });
     const rules = record(record(body).rules);
