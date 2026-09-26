@@ -74,7 +74,35 @@ OpenAI-совместимых провайдеров, панель и метри
   адаптере `openai-compatible`, проверке `/models` и embeddings; failover,
   probe, ротация ключей, breaker, лимиты и зрение не тронуты. Панель:
   выбор шаблона в форме провайдера.
-- [ ] 8. Панель, метрики, документация
+- [x] 8. Панель, метрики, документация: раздел «Инструменты»
+  (`/admin/tools`: каталог, отклонённые имена, MCP discovery с повторным
+  опросом, браузер и его сессии без адресов, субагенты, задержка) через
+  `GET /v1/tools/catalog` и `POST /v1/tools/mcp/:name/discover`; метрики
+  `eva_tool_*`, `eva_mcp_discovery_*`, `eva_browser_*`, `eva_delegation_*`;
+  `docs/TOOLS.md`, обновлены ARCHITECTURE, letta-native, SECURITY,
+  IMPLEMENTATION_STATE, llm-router, CHANGELOG, таблица тестов подсистемы.
+
+Проверки (2026-09-26):
+
+```
+eva-agent-service: npm test → PASS (1475 из 1483, 8 skip — прежние, нужен PostgreSQL)
+eva-agent-service: npm run typecheck → PASS
+eva-agent-service: npm run lint → PASS
+browser-service: npm test → PASS (11); npm run typecheck → PASS
+browser-service: тесты в образе mcr.microsoft.com/playwright:v1.63.0-noble → PASS (11)
+browser-service: рантайм read-only, cap_drop ALL, pwuser — Chromium стартует, 401 без ключа, метаданные облака и loopback → 403
+admin-ui: npm test → PASS (124)
+make validate → PASS (первый прогон — 1 отказ до загрузки образов, повторные — PASS)
+make test → не выполнен до конца: сборка образа упирается в apt (HTTP 403 от deb.debian.org в песочнице)
+media-service pytest (вне образа) → 141 PASS, 8 skip, 1 FAIL: нет ffprobe в песочнице
+python3 scripts/ci/assert-*.py (tenant-scope, env-plumbing, admin-route-access, frontend-routes, doc-paths) → PASS
+bash scripts/ci/test-changed-scope.sh → PASS
+```
+
+Rollout: всё за флагами, выключено по умолчанию (`EVA_TOOL_SEARCH`,
+`EVA_BROWSER_ENABLED` + профиль `browser`, `EVA_DELEGATION_ENABLED`).
+Rollback: выключить флаг и `docker compose up -d eva-agent-service`;
+миграций нет.
 
 Эквиваленты проверены: реестра инструментов и каталога не было —
 инструменты собирались списком в `AgentToolFactory.forConversation`;

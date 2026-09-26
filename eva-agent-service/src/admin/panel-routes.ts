@@ -28,6 +28,7 @@ import type { FastifyInstance } from "fastify";
 import type { AdminAgentService } from "./agent-admin-service.js";
 import type { HealthService } from "./health-service.js";
 import type { LettaConsoleService } from "./letta-console-service.js";
+import type { ToolCatalogAdminService } from "./tool-catalog-service.js";
 import { PersonaAdminService } from "./persona-admin-service.js";
 import type { SubscriptionAdminService, SubscriptionActor } from "./subscription-service.js";
 import { adminBadRequest } from "./errors.js";
@@ -37,6 +38,8 @@ export interface PanelRouteContext {
   subscriptions: SubscriptionAdminService;
   persona: PersonaAdminService;
   letta: LettaConsoleService;
+  /** Каталог инструментов, MCP, браузер и субагенты. */
+  tools?: ToolCatalogAdminService;
   health: HealthService;
   /** Кто выполняет действие. Идентификатор администратора либо null. */
   actorId(request: unknown): string | null;
@@ -335,6 +338,25 @@ export function registerPanelRoutes(app: FastifyInstance, ctx: PanelRouteContext
     });
     return result;
   });
+
+  // -------------------------------------------------------------------
+  // Инструменты: каталог, MCP discovery, браузер, субагенты
+  // -------------------------------------------------------------------
+  if (ctx.tools) {
+    const tools = ctx.tools;
+    app.get("/api/admin/v1/panel/tools", {
+      config: { roles: ["owner", "admin", "operator", "viewer"] },
+    }, async () => await tools.overview());
+
+    app.post("/api/admin/v1/panel/tools/mcp/:name/discover", {
+      config: { roles: ["owner", "admin", "operator"] },
+    }, async (request) => {
+      const name = String((request.params as { name?: string }).name ?? "");
+      const result = await tools.discover(name);
+      await ctx.audit(request, { action: "mcp_discover", mcp_server: name });
+      return result;
+    });
+  }
 
   // -------------------------------------------------------------------
   // Letta

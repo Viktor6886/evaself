@@ -52,7 +52,15 @@ node --test --experimental-strip-types test/*.test.ts        # full regression
 | `package.json` (версии `@letta-ai/*`) | `letta-contract.test.ts` |
 | `src/runtime/runtime-context.ts` | `runtime.test.ts` |
 | `src/conversations/purpose-service.ts` | `conversations.test.ts` |
-| `src/tools/`, `src/agent-tools.ts` | `agent-tools.test.ts` |
+| `src/tools/`, `src/agent-tools.ts` | `agent-tools.test.ts`, `tool-registry.test.ts` |
+| `src/tools/registry.ts`, `tool-search.ts`, `bridge-tools.ts`, `tool-executor.ts`, `session-permission.ts` | `tool-registry.test.ts`, `session-recovery.test.ts` |
+| `src/tools/tool-hooks.ts`, `standard-hooks.ts`, `tool-metrics.ts` | `tool-hooks.test.ts`, `metrics.test.ts` |
+| `src/tools/mcp.ts`, `mcp-discovery.ts` | `mcp-discovery.test.ts`, `agent-tools.test.ts` |
+| `src/tools/catalog-routes.ts`, `src/admin/tool-catalog-service.ts` | `tool-catalog.test.ts`, `tools-page.test.mjs` в `admin-ui` |
+| `src/browser/` | `browser-tools.test.ts` (сам сервис — `npm test` в `browser-service`) |
+| `src/letta/subagents.ts`, `src/research/delegation.ts` | `delegation.test.ts`, `letta-contract.test.ts` |
+| `src/router/provider-manifests.ts`, `src/router/adapters/openai.ts` | `provider-manifests.test.ts`, `llm-router.test.ts`, `provider-editor.test.mjs` в `admin-ui` |
+| `src/letta/skills-audit.ts`, `../skills/` | `skills-audit.test.ts`, `runtime.test.ts` |
 | `src/crisis.ts` | `crisis.test.ts` |
 | `src/payments/stars.ts`, `src/payments/grant.ts` | `stars-payments.test.ts`, `subscription-lifecycle.test.ts` |
 | `src/profile/` | `profile.test.ts` |

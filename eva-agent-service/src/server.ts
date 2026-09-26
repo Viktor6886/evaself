@@ -48,6 +48,7 @@ import type { TurnSemaphores } from "./turns/semaphores.js";
 import type { RuntimeContextBuilder } from "./runtime/runtime-context.js";
 import type { CanonicalContextStore } from "./runtime/canonical-context.js";
 import { registerCanonicalRoutes } from "./runtime/canonical-routes.js";
+import { registerToolCatalogRoutes, type ToolCatalogContext } from "./tools/catalog-routes.js";
 import type { PrefixInput } from "./letta/prefix-size.js";
 import type { PersonaSyncResult } from "./letta/persona-sync.js";
 import { webhookSecretMatches } from "./telegram.js";
@@ -103,6 +104,8 @@ export interface Services {
   observability?: {
     bufferStats(): { buffered: number; dropped: number };
   };
+  /** Каталог инструментов, MCP discovery, браузер и делегирование для панели. */
+  toolCatalog?: ToolCatalogContext;
 }
 
 function constantTimeEquals(a: string, b: string): boolean {
@@ -283,6 +286,8 @@ export function buildServer(services: Services): FastifyInstance {
     rateLimiter,
   });
 
+  if (services.toolCatalog) registerToolCatalogRoutes(app, services.toolCatalog);
+
   // Канонические источники личности Евы. Регистрируются, только когда
   // владелец текстов передан: без реестра артефактов править нечего, а
   // маршрут, отвечающий 500, хуже отсутствующего.
@@ -324,6 +329,9 @@ export function buildServer(services: Services): FastifyInstance {
     turnLifecycleEnabled: config.turnLifecycleEnabled,
     ...(services.observability
       ? { telemetryBuffer: () => services.observability!.bufferStats() }
+      : {}),
+    ...(services.toolCatalog
+      ? { delegation: () => services.toolCatalog!.delegation.runner.activity() }
       : {}),
   });
   app.addHook("onClose", async () => metrics.stop());

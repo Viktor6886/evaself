@@ -25,6 +25,7 @@ import type { AdminAgentService } from "./agent-admin-service.js";
 import type { SubscriptionAdminService } from "./subscription-service.js";
 import type { PersonaAdminService } from "./persona-admin-service.js";
 import type { LettaConsoleService } from "./letta-console-service.js";
+import type { ToolCatalogAdminService } from "./tool-catalog-service.js";
 import type { ToolApprovalService } from "./tool-approvals.js";
 import type { TurnOperationsService } from "./turn-operations.js";
 import type { McpServerPolicyRepository } from "../tools/mcp.js";
@@ -126,6 +127,7 @@ export interface AdminServerServices {
     subscriptions: SubscriptionAdminService;
     persona: PersonaAdminService;
     letta: LettaConsoleService;
+    tools?: ToolCatalogAdminService;
   };
   events: Redis;
   logger: Logger;

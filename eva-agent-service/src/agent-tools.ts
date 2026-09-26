@@ -38,6 +38,8 @@ import { neutralizeUntrusted, untrustedResult } from "./tools/untrusted.js";
 import type { McpDiscovery } from "./tools/mcp-discovery.js";
 import type { ToolBuilder } from "./tools/tool-kit.js";
 
+const CATALOG_CONVERSATION = "admin:tool-catalog";
+
 export class AgentToolFactory {
   private readonly core: CoreToolFactory;
   private readonly profile: ProfileToolFactory;
@@ -187,6 +189,20 @@ export class AgentToolFactory {
   /** Снимок каталога для панели и готовности: имена и происхождение, без схем. */
   assembly(conversationId: string): ToolAssembly {
     return this.registry.assemble(conversationId);
+  }
+
+  /**
+   * Каталог для панели: тот же реестр, что у сессий, с инструментами MCP
+   * по текущим политикам и discovery. Служебный conversation каталога
+   * ни с кем не связан и хода не открывает.
+   */
+  async catalogSnapshot(): Promise<ToolAssembly> {
+    await this.loadMcpTools(CATALOG_CONVERSATION);
+    try {
+      return this.registry.assemble(CATALOG_CONVERSATION);
+    } finally {
+      this.mcpTools.delete(CATALOG_CONVERSATION);
+    }
   }
 
   /**

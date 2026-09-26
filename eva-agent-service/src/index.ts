@@ -722,6 +722,14 @@ async function main(): Promise<void> {
     },
     ...(knowledgeResearch ? { knowledgeResearch } : {}),
     ...(osintPublic ? { osint: osintPublic } : {}),
+    toolCatalog: {
+      factory: toolFactory,
+      hooks: toolHooks.names,
+      latency: toolLatency,
+      ...(mcpPolicies && mcpDiscovery ? { mcp: { policies: mcpPolicies, discovery: mcpDiscovery } } : {}),
+      browser: { enabled: () => config.browserEnabled, client: browserClient },
+      delegation: { enabled: () => config.delegationEnabled, runner: subagents },
+    },
   });
 
   await app.listen({ port: config.port, host: config.host });
