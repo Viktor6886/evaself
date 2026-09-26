@@ -198,6 +198,8 @@ export interface Config {
    * Выключен по умолчанию — тогда они регистрируются напрямую, как раньше.
    */
   toolSearchEnabled: boolean;
+  /** Как долго список инструментов MCP-сервера считается свежим. */
+  mcpDiscoveryTtlMs: number;
   /**
    * Проверка контракта Letta на живом развёртывании.
    *
@@ -486,6 +488,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     osintCollectorHarvester: bool("EVA_OSINT_COLLECTOR_HARVESTER", true),
     osintCollectorSpiderfoot: bool("EVA_OSINT_COLLECTOR_SPIDERFOOT", true),
     toolSearchEnabled: bool("EVA_TOOL_SEARCH", false),
+    mcpDiscoveryTtlMs: clampedInt("EVA_MCP_DISCOVERY_TTL_MS", 300_000, 30_000, 3_600_000),
     lettaContractVerify: bool("EVA_LETTA_CONTRACT_VERIFY", false),
     personaSyncTurnTimeoutMs: clampedInt("EVA_PERSONA_SYNC_TURN_TIMEOUT_MS", 3_000, 250, 15_000),
     checkinMorningHour: clampedInt("EVA_CHECKIN_MORNING_HOUR", 9, 5, 12),

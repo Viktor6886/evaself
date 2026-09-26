@@ -325,7 +325,13 @@ test("admin-created enabled MCP policy becomes a live allowlisted SDK tool and i
   await policies.setEnabled("knowledge", true);
   const calls: unknown[] = [];
   const effects = { strict: true, begin: async () => ({ action: "execute", attempt: 1 }), succeed: async () => {}, fail: async () => {} };
-  const factory = new AgentToolFactory({ vectorGoalsEnabled: false } as never, db as never, {} as never, silentLogger, undefined, undefined, effects as never, { policies, invoker: { invokeServer: async (...args: unknown[]) => { calls.push(args); return { hits: 1 }; } } as never });
+  const factory = new AgentToolFactory({ vectorGoalsEnabled: false } as never, db as never, {} as never, silentLogger, undefined, undefined, effects as never, {
+    policies,
+    invoker: { invokeServer: async (...args: unknown[]) => { calls.push(args); return { hits: 1 }; } } as never,
+    // Схему инструмента объявляет сервер (tools/list); без discovery
+    // MCP-инструментов нет вовсе.
+    discovery: { effective: async () => [{ name: "search", description: "Search", inputSchema: { type: "object" } }], retain: () => {} } as never,
+  });
   const runtime = await factory.sessionRuntime("conv-1");
   assert.equal(runtime.userId, RUNTIME.userId);
   const live = factory.forConversation("conv-1").find((tool) => tool.name === "mcp__knowledge__search");

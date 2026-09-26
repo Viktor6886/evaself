@@ -164,7 +164,17 @@ function mcpHarness(options: { gate?: "allow" | "deny" | "approval_missing"; pur
   const factory = new AgentToolFactory(
     { vectorGoalsEnabled: false, toolSearchEnabled: true } as never,
     db as never, {} as never, silentLogger, undefined, undefined, effects as never,
-    { policies: policies as never, invoker: { invokeServer: async (...args: unknown[]) => { calls.push(args); return { deleted: true }; } } as never },
+    {
+      policies: policies as never,
+      invoker: { invokeServer: async (...args: unknown[]) => { calls.push(args); return { deleted: true }; } } as never,
+      discovery: {
+        effective: async () => [{
+          name: "delete_contact", description: "Delete a CRM contact by id",
+          inputSchema: { type: "object", properties: { id: { type: "integer" } }, required: ["id"] },
+        }],
+        retain: () => {},
+      } as never,
+    },
   );
   factory.setApprovalCompletionCallback(async (input) => { completions.push(input); });
   if (options.gate) factory.setExecutionGate(async () => options.gate!);

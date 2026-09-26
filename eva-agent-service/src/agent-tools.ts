@@ -34,7 +34,8 @@ import {
   type ExecutionGate,
 } from "./tools/tool-executor.js";
 import type { ToolHookChain } from "./tools/tool-hooks.js";
-import { untrustedResult } from "./tools/untrusted.js";
+import { neutralizeUntrusted, untrustedResult } from "./tools/untrusted.js";
+import type { McpDiscovery } from "./tools/mcp-discovery.js";
 import type { ToolBuilder } from "./tools/tool-kit.js";
 
 export class AgentToolFactory {
@@ -68,7 +69,12 @@ export class AgentToolFactory {
      * работают ровно как раньше.
      */
     effects?: EffectJournal,
-    private readonly mcp?: { policies: McpServerPolicyRepository; invoker: Pick<McpHttpInvoker, "invokeServer"> },
+    private readonly mcp?: {
+      policies: Pick<McpServerPolicyRepository, "listEnabled">;
+      invoker: Pick<McpHttpInvoker, "invokeServer">;
+      /** Без обнаружения MCP-инструментов нет: схема и имя берутся только у сервера. */
+      discovery?: Pick<McpDiscovery, "effective" | "retain">;
+    },
     /** Наблюдатель рантайма для самопроверки. Без него инструмент честно откажет. */
     observer?: RuntimeObserver,
     private readonly runtimeInvalidator?: { invalidate(userId: number): void },
@@ -204,29 +210,42 @@ export class AgentToolFactory {
     return specs;
   }
 
+  /**
+   * Инструменты MCP для conversation: объявленные сервером (`tools/list`)
+   * и разрешённые администратором. Имя, описание и схема — от сервера;
+   * описание обезвреживается, потому что модель читает его как часть
+   * инструкций. Без обнаружения набор пуст: инструмент со схемой «любой
+   * объект» модель вызывала вслепую.
+   */
   private async loadMcpTools(conversationId: string): Promise<void> {
-    if (!this.mcp) { this.mcpTools.delete(conversationId); return; }
-    const tools: RegisteredTool[] = [];
-    for (const { name: serverName, policy } of await this.mcp.policies.listEnabled()) {
-      for (const remoteName of policy.allowedTools) {
-        tools.push({
-          name: `mcp__${serverName}__${remoteName}`,
-          label: remoteName,
-          description: `Allowlisted MCP tool ${remoteName} on ${serverName}`,
-          parameters: { type: "object", additionalProperties: true },
-          source: "mcp",
-          group: `mcp:${serverName}`,
-          exposure: "deferred",
-          // Ответ MCP-сервера пишет третья сторона: модель получает его
-          // в конверте недоверенного содержимого.
-          execute: async (args) => untrustedResult(
-            `mcp:${serverName}`,
-            await this.mcp!.invoker.invokeServer(serverName, remoteName, args),
-          ),
+    if (!this.mcp?.discovery) { this.mcpTools.delete(conversationId); return; }
+    const discovery = this.mcp.discovery;
+    const enabled = await this.mcp.policies.listEnabled();
+    discovery.retain(enabled.map(({ name }) => name));
+    const perServer = await Promise.all(enabled.map(async ({ name: serverName, policy }) => {
+      const discovered = await discovery.effective(serverName, policy).catch((error: unknown) => {
+        this.logger.warn("MCP-инструменты сервера недоступны", {
+          server: serverName, code: error instanceof Error ? error.name : "unknown_error",
         });
-      }
-    }
-    this.mcpTools.set(conversationId, tools);
+        return [];
+      });
+      return discovered.map((remote): RegisteredTool => ({
+        name: `mcp__${serverName}__${remote.name}`,
+        label: remote.name,
+        description: neutralizeUntrusted(`[MCP ${serverName}] ${remote.description || remote.name}`),
+        parameters: neutralizeUntrusted(remote.inputSchema),
+        source: "mcp",
+        group: `mcp:${serverName}`,
+        exposure: "deferred",
+        // Ответ MCP-сервера пишет третья сторона: модель получает его
+        // в конверте недоверенного содержимого.
+        execute: async (args) => untrustedResult(
+          `mcp:${serverName}`,
+          await this.mcp!.invoker.invokeServer(serverName, remote.name, args),
+        ),
+      }));
+    }));
+    this.mcpTools.set(conversationId, perServer.flat());
   }
 
   private async context(conversationId: string): Promise<AgentRuntimeContext> {

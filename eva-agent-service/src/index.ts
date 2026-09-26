@@ -76,6 +76,8 @@ import { currentTurn } from "./turns/turn-context.js";
 import { ApprovalService } from "./tools/approvals.js";
 import { loadMasterKey, SecretStore } from "./admin/secret-store.js";
 import { McpHttpInvoker, McpServerPolicyRepository } from "./tools/mcp.js";
+import { McpDiscovery } from "./tools/mcp-discovery.js";
+import { recordMcpDiscovery } from "./tools/tool-metrics.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -296,7 +298,13 @@ async function main(): Promise<void> {
   const mcpInvoker = masterKey && mcpPolicies ? new McpHttpInvoker({
     policies: mcpPolicies,
     secrets: new SecretStore({ masterKey, pool: db as never }),
-    audit: { record: async (entry) => { await db.query(`INSERT INTO audit_log (actor, operation, target, params_redacted_json, result, request_id, duration_ms) VALUES ('eva-agent-service',$1,$2,$3::jsonb,$4,$5,$6)`, [String(entry.operation), String(entry.server ?? "mcp"), JSON.stringify({ tool: entry.tool, stage: entry.stage }), entry.ok ? "success" : "failure", crypto.randomUUID(), Number(entry.duration_ms ?? 0)]); } },
+    audit: { record: async (entry) => { await db.query(`INSERT INTO audit_log (actor, operation, target, params_redacted_json, result, request_id, duration_ms) VALUES ('eva-agent-service',$1,$2,$3::jsonb,$4,$5,$6)`, [String(entry.operation), String(entry.server ?? "mcp"), JSON.stringify({ tool: entry.tool, stage: entry.stage, ...(entry.count !== undefined ? { count: entry.count } : {}) }), entry.ok ? "success" : "failure", crypto.randomUUID(), Number(entry.duration_ms ?? 0)]); } },
+  }) : undefined;
+  const mcpDiscovery = mcpInvoker ? new McpDiscovery({
+    invoker: mcpInvoker,
+    ttlMs: config.mcpDiscoveryTtlMs,
+    logger,
+    onResult: (outcome, durationMs) => recordMcpDiscovery(outcome, durationMs),
   }) : undefined;
   const toolFactory = new AgentToolFactory(
     config,
@@ -306,7 +314,7 @@ async function main(): Promise<void> {
     profile,
     goals,
     effects,
-    mcpPolicies && mcpInvoker ? { policies: mcpPolicies, invoker: mcpInvoker } : undefined,
+    mcpPolicies && mcpInvoker ? { policies: mcpPolicies, invoker: mcpInvoker, ...(mcpDiscovery ? { discovery: mcpDiscovery } : {}) } : undefined,
     // Самопроверка смотрит на уже собранные факты сессии SDK. Состав
     // legacy blocks через HTTP не запрашивается: App Server WebSocket-only.
     {
