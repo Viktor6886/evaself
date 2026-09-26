@@ -189,6 +189,16 @@ const CAPABILITIES = [
     check: "method",
   },
   {
+    // Рабочий агент делегирования (`letta/subagents.ts`): скрытый агент
+    // без MemFS и навыков получает новую сессию с точным набором
+    // инструментов и удаляется после работы.
+    id: "session.create",
+    title: "Новая сессия рабочего агента",
+    surface: "agent-sdk",
+    path: "createSession",
+    check: "method",
+  },
+  {
     id: "turn.send",
     title: "Отправка сообщения в ход",
     surface: "session",

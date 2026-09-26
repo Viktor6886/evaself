@@ -163,6 +163,27 @@ export class AgentToolFactory {
     ];
   }
 
+  /**
+   * Инструменты рабочего агента делегирования (`letta/subagents.ts`).
+   *
+   * Только чтение, и это проверка, а не договорённость: имя проходит,
+   * лишь если его риск — `read`. Владелец — тот, кто заказал работу, и
+   * выполнение идёт той же цепочкой с его областью арендатора и его
+   * квотами. Conversation рабочего агента служебный и в продуктовой
+   * таблице не записан, поэтому владелец передаётся явно.
+   */
+  forDelegation(input: {
+    conversationId: string;
+    runtime: AgentRuntimeContext;
+    toolNames: readonly string[];
+  }): AnyAgentTool[] {
+    const allowed = input.toolNames.filter((name) => toolRisk(name) === "read");
+    const assembly = this.registry.assemble(input.conversationId);
+    return [...assembly.direct, ...assembly.deferred]
+      .filter((tool) => allowed.includes(tool.name))
+      .map((tool) => this.executor.agentTool(input.conversationId, tool, { runtime: input.runtime, allowedTools: allowed }));
+  }
+
   /** Снимок каталога для панели и готовности: имена и происхождение, без схем. */
   assembly(conversationId: string): ToolAssembly {
     return this.registry.assemble(conversationId);
@@ -297,6 +318,11 @@ const TOOL_RISK: Readonly<Record<string, ToolRisk>> = Object.freeze({
   // наблюдаемые факты. Спрашивать за неё подтверждение значило бы
   // требовать разрешения на вопрос «что у меня с памятью».
   inspect_eva_runtime: "read",
+  // Поиск и чтение страниц ничего не меняют ни у человека, ни снаружи:
+  // тратят только квоту поиска. Для делегирования это важно — рабочему
+  // агенту исследования достаются инструменты с риском `read`.
+  web_search: "read",
+  web_read: "read",
   get_subscription_status: "read",
   knowledge_search: "read",
   get_goal_program_context: "read",

@@ -80,6 +80,8 @@ export interface JobLayer {
  * (требование 9 шага 8).
  */
 export interface JobLayerDeps {
+  /** Исследование субагентами Letta; без него работает конвейер. */
+  researchDelegation?: NonNullable<ConstructorParameters<typeof ResearchJobWorker>[2]["delegation"]>;
   letta: LettaService;
   purposes: ConversationPurposeService;
   runtimeContext: RuntimeContextBuilder;
@@ -140,6 +142,7 @@ export function buildJobLayer(
       crawlUrl: config.crawl4aiUrl,
       crawlToken: config.crawl4aiToken,
       router: new LlmRouterClient(config.routerUrl, config.routerApiKey),
+      ...(deps.researchDelegation ? { delegation: deps.researchDelegation } : {}),
     });
     registry.queue("research");
     runtime.register("research_run", async (context) => await research.run(context));

@@ -80,6 +80,8 @@ import { McpDiscovery } from "./tools/mcp-discovery.js";
 import { recordMcpDiscovery } from "./tools/tool-metrics.js";
 import { BrowserServiceClient } from "./browser/client.js";
 import { BrowserToolSource } from "./browser/tools.js";
+import { LettaSubagentRunner } from "./letta/subagents.js";
+import { DELEGATION_TOOLS, DelegatedResearch } from "./research/delegation.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -536,8 +538,41 @@ async function main(): Promise<void> {
   // Слой фоновых заданий. Ступень переноса решает, кто ведёт напоминания
   // и heartbeat: пока идёт зеркало — старые интервалы, после снятия
   // зеркала — очередь, и тогда интервалы не запускаются вовсе.
+  // Субагенты Letta для исследования. Раннер один на процесс: предел
+  // параллельности общий для всех заданий, App Server у них один.
+  const subagents = new LettaSubagentRunner({
+    client: () => letta.delegationClient(),
+    maxParallel: config.delegationMaxParallel,
+    timeoutMs: config.delegationTimeoutMs,
+    logger,
+    model: () => config.delegationModel || null,
+  });
+  if (config.delegationEnabled) {
+    void subagents.sweepOrphans().catch((error: unknown) => logger.warn("Очистка рабочих агентов не выполнена", {
+      code: error instanceof Error ? error.name : "unknown_error",
+    }));
+  }
+  const researchDelegation = {
+    enabled: () => config.delegationEnabled,
+    create: async (input: { userId: number; conversationId: string; requestId: string }) => {
+      const runtime = await db.getAgentRuntimeContext(input.conversationId);
+      if (!runtime || runtime.userId !== input.userId) throw new Error("research_runtime_missing");
+      const workerConversation = `delegation:${input.requestId}`;
+      return new DelegatedResearch({
+        runner: subagents,
+        tools: (role) => toolFactory.forDelegation({ conversationId: workerConversation, runtime, toolNames: DELEGATION_TOOLS[role] }),
+        limits: {
+          maxSources: Number(process.env.EVA_RESEARCH_MAX_SOURCES ?? 12),
+          maxPagesPerDomain: Number(process.env.EVA_RESEARCH_MAX_PAGES_DOMAIN ?? 2),
+          maxWebAgents: config.delegationMaxParallel,
+          maxFactsPerAgent: 12,
+        },
+      });
+    },
+  };
   const jobs = config.bullmqJobsEnabled
     ? buildJobLayer(config, db, redis, logger, {
+      researchDelegation,
       letta,
       purposes,
       runtimeContext,

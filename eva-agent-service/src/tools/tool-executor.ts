@@ -108,12 +108,22 @@ export interface ToolInvocation {
    * продуктовой таблице его нет, а владелец известен заданию.
    */
   runtime?: AgentRuntimeContext;
+  /**
+   * Точный набор вместо политики назначения conversation. Нужен рабочему
+   * агенту делегирования: его набор задаёт задание, и он уже политики
+   * назначения — только чтение.
+   */
+  allowedTools?: readonly string[];
 }
 
 export class ToolExecutor {
   constructor(private readonly deps: ToolExecutorDependencies) {}
 
-  agentTool(conversationId: string, tool: RegisteredTool, runtime?: AgentRuntimeContext): AnyAgentTool {
+  agentTool(
+    conversationId: string,
+    tool: RegisteredTool,
+    options: { runtime?: AgentRuntimeContext; allowedTools?: readonly string[] } = {},
+  ): AnyAgentTool {
     return {
       name: tool.name,
       label: tool.label,
@@ -121,7 +131,8 @@ export class ToolExecutor {
       parameters: tool.parameters,
       execute: async (toolCallId: string, rawArgs: unknown) => await this.run({
         conversationId, tool, rawArgs, toolCallId: String(toolCallId ?? ""),
-        ...(runtime ? { runtime } : {}),
+        ...(options.runtime ? { runtime: options.runtime } : {}),
+        ...(options.allowedTools ? { allowedTools: options.allowedTools } : {}),
       }),
     } as AnyAgentTool;
   }
@@ -146,7 +157,9 @@ export class ToolExecutor {
       // объявлен один раз в purpose-service и записан вместе с самой
       // conversation, поэтому проверка идёт по нему, а не по имени.
       // Через мост проверяются оба имени: и сам мост, и инструмент.
-      const policy = purposePolicy(runtime.purpose as ConversationPurpose);
+      const policy = invocation.allowedTools
+        ? { allowedTools: [...invocation.allowedTools], deniedTools: null }
+        : purposePolicy(runtime.purpose as ConversationPurpose);
       for (const name of invocation.via ? [invocation.via, tool.name] : [tool.name]) {
         if ((policy.allowedTools !== null && !policy.allowedTools.includes(name)) || policy.deniedTools?.includes(name)) {
           throw new Error(`Инструмент ${name} недоступен в служебном conversation purpose=${runtime.purpose}`);

@@ -209,6 +209,17 @@ export interface Config {
   /** Общий секрет browser-service (заголовок X-Browser-Key). */
   browserServiceToken: string;
   /**
+   * Исследование субагентами Letta (`research/delegation.ts`). Выключено
+   * по умолчанию; работает только вместе с EVA_RESEARCH_ORCHESTRATOR.
+   */
+  delegationEnabled: boolean;
+  /** Сколько субагентов процесс держит одновременно. */
+  delegationMaxParallel: number;
+  /** Предел одного задания субагента. */
+  delegationTimeoutMs: number;
+  /** Модель субагентов; пусто — модель Евы по умолчанию. */
+  delegationModel: string;
+  /**
    * Проверка контракта Letta на живом развёртывании.
    *
    * Contract-тесты доказывают контракт на сборке. Флаг включает ту же
@@ -500,6 +511,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     browserEnabled: bool("EVA_BROWSER_ENABLED", false),
     browserServiceUrl: str("EVA_BROWSER_SERVICE_URL", "http://browser-service:8098"),
     browserServiceToken: str("BROWSER_SERVICE_TOKEN"),
+    delegationEnabled: bool("EVA_DELEGATION_ENABLED", false),
+    delegationMaxParallel: clampedInt("EVA_DELEGATION_MAX_PARALLEL", 3, 1, 8),
+    delegationTimeoutMs: clampedInt("EVA_DELEGATION_TIMEOUT_MS", 180_000, 10_000, 900_000),
+    delegationModel: str("EVA_DELEGATION_MODEL"),
     lettaContractVerify: bool("EVA_LETTA_CONTRACT_VERIFY", false),
     personaSyncTurnTimeoutMs: clampedInt("EVA_PERSONA_SYNC_TURN_TIMEOUT_MS", 3_000, 250, 15_000),
     checkinMorningHour: clampedInt("EVA_CHECKIN_MORNING_HOUR", 9, 5, 12),
@@ -656,6 +671,9 @@ export function configWarnings(config: Config): string[] {
   }
   if (config.telegramBotToken && !config.telegramWebhookSecret) {
     warnings.push("EVA_TELEGRAM_WEBHOOK_SECRET пуст — webhook Telegram будет отклонять все запросы");
+  }
+  if (config.delegationEnabled && !config.researchOrchestratorEnabled) {
+    warnings.push("EVA_DELEGATION_ENABLED включён, а EVA_RESEARCH_ORCHESTRATOR выключен: исследований, которые можно делегировать, нет");
   }
   if (config.browserEnabled && !config.browserServiceToken) {
     warnings.push("EVA_BROWSER_ENABLED включён, а BROWSER_SERVICE_TOKEN пуст: browser-service отклонит все вызовы");
