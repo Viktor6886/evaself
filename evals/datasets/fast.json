@@ -115,6 +115,15 @@
       "input": "давай пока не будем",
       "operation": "work_continuity_protocol",
       "assertion": "operation"
+    },
+    {
+      "id": "osint-boundaries",
+      "suite": "osint",
+      "lane": "mock",
+      "tenant": "t2",
+      "input": "проверь компанию по домену",
+      "operation": "osint_boundaries",
+      "assertion": "operation"
     }
   ]
 }

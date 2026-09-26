@@ -23,6 +23,8 @@ import type { JobRunJournal } from "../jobs/job-runs.js";
 import { SOURCE_TIER_QUALITY } from "./confidence.js";
 import { canonicalJson, structuredEvidence } from "./evidence.js";
 import { normalizeIdentifier, type NormalizedIdentifier } from "./identifiers.js";
+import { recordOsint } from "./metrics.js";
+import { OsintReportBuilder, type OsintReport } from "./report.js";
 import { linkIdentifier, upsertIdentifier, type Queryable } from "./repository.js";
 import { DEFAULT_BUDGET, isIdentifierType, type IdentifierType, type InvestigationBudget } from "./types.js";
 
@@ -181,6 +183,7 @@ export class OsintService {
         });
         return { id, created: true };
       }));
+    if (outcome.created) recordOsint("investigation", "created");
     return outcome;
   }
 
@@ -283,6 +286,78 @@ export class OsintService {
         entities: counts!.entities,
         externalRequests: counts!.requests,
       };
+    });
+  }
+
+  /** Последние исследования пользователя: id, статус и начало запроса. */
+  async list(userId: number, limit = 20): Promise<Array<{ id: string; status: string; mode: string; query: string; createdAt: string }>> {
+    return await this.db.withUserScope({ userId, label: "osint.list", inherit: true }, async () => {
+      const { rows } = await this.db.query<{ id: string; status: string; mode: string; query: string; created_at: Date }>(
+        `SELECT id, status, mode, query, created_at FROM osint_investigations
+          WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2`,
+        [userId, Math.min(Math.max(limit, 1), 50)],
+      );
+      // Начало запроса может называть третье лицо: список — такое же
+      // чтение истории исследований, как статус и отчёт.
+      await audit(this.db, "osint.investigation.list", "investigations", { user_id: userId, results: rows.length });
+      return rows.map((row) => ({
+        id: row.id,
+        status: row.status,
+        mode: row.mode,
+        query: row.query.slice(0, 160),
+        createdAt: new Date(row.created_at).toISOString(),
+      }));
+    });
+  }
+
+  /**
+   * Отчёт с записью в аудит. Отчёт о третьих лицах — чтение, которое
+   * должно оставлять след так же, как запуск исследования.
+   */
+  async report(userId: number, id: string): Promise<OsintReport | null> {
+    return await this.db.withUserScope({ userId, label: "osint.report", inherit: true }, async () => {
+      const report = await new OsintReportBuilder(this.db).build(userId, id);
+      if (report) await audit(this.db, "osint.investigation.report", id, { user_id: userId });
+      return report;
+    });
+  }
+
+  /**
+   * Поиск по уже собранному графу пользователя: по значению идентификатора
+   * или подписи сущности. Нового сбора не запускает.
+   */
+  async search(userId: number, text: string): Promise<Array<{
+    entityId: string; schema: string; caption: string; identifiers: Array<{ type: string; value: string }>;
+  }>> {
+    const needle = text.trim().toLowerCase();
+    if (needle.length < 3 || needle.length > 200) {
+      throw invalid("osint_search_invalid", "Поисковая строка — от 3 до 200 знаков");
+    }
+    const pattern = `%${needle.replace(/[\\%_]/g, (char) => `\\${char}`)}%`;
+    return await this.db.withUserScope({ userId, label: "osint.search", inherit: true }, async () => {
+      const { rows } = await this.db.query<{ id: string; schema: string; caption: string; identifiers: Array<{ type: string; value: string }> | null }>(
+        `SELECT e.id, e.schema, e.caption,
+                (SELECT json_agg(DISTINCT jsonb_build_object('type', i2.type, 'value', i2.normalized_value))
+                   FROM osint_entity_identifiers ei2
+                   JOIN osint_identifiers i2 ON i2.id = ei2.identifier_id AND i2.user_id = ei2.user_id
+                  WHERE ei2.entity_id = e.id AND ei2.user_id = $1) AS identifiers
+           FROM osint_entities e
+          WHERE e.user_id = $1
+            AND (lower(e.caption) LIKE $2
+                 OR EXISTS (SELECT 1 FROM osint_entity_identifiers ei
+                              JOIN osint_identifiers i ON i.id = ei.identifier_id AND i.user_id = ei.user_id
+                             WHERE ei.entity_id = e.id AND ei.user_id = $1 AND lower(i.normalized_value) LIKE $2))
+          ORDER BY e.updated_at DESC
+          LIMIT 20`,
+        [userId, pattern],
+      );
+      await audit(this.db, "osint.entity.search", "graph", { user_id: userId, results: rows.length });
+      return rows.map((row) => ({
+        entityId: row.id,
+        schema: row.schema,
+        caption: row.caption,
+        identifiers: (row.identifiers ?? []).slice(0, 20),
+      }));
     });
   }
 

@@ -42,6 +42,7 @@ import { badRequest, explainFailure, notFound } from "./errors.js";
 import { EvaWorkflow } from "./eva-workflow.js";
 import { GoalService } from "./goals/goal-service.js";
 import { buildJobLayer } from "./jobs/index.js";
+import { OsintService } from "./osint/service.js";
 import { KnowledgeUploadService } from "./knowledge/lifecycle.js";
 import { ResearchEnqueuer } from "./research/enqueue.js";
 import { buildObservability } from "./observability/index.js";
@@ -535,6 +536,20 @@ async function main(): Promise<void> {
   // lookup and therefore runs in an explicitly named system scope; every
   // subsequent user-table operation binds the resolved owner.
   const internalUser = async(telegramId:number)=>await db.withSystemScope("verified-identity.resolve",async()=>{const{rows}=await db.query<{id:string}>("SELECT id FROM users WHERE telegram_id=$1",[telegramId]);if(!rows[0])throw new Error("user_missing");return Number(rows[0].id);},{inherit:true});
+  // OSINT существует, только когда флаг включён и есть слой заданий:
+  // исследование — фоновая работа очереди `research`, без неё оно не
+  // выполнится, и инструменты модели были бы обещанием впустую.
+  const osint = jobs && config.osintEnabled
+    ? new OsintService(db, jobs.outbox, jobs.runs, { enabled: true, dailyLimit: config.osintDailyLimit })
+    : null;
+  if (osint) toolFactory.setOsint(osint);
+  const osintPublic = osint ? {
+    list:async(t:number)=>await osint.list(await internalUser(t)),
+    status:async(t:number,id:string)=>await osint.status(await internalUser(t),id),
+    report:async(t:number,id:string)=>await osint.report(await internalUser(t),id),
+    cancel:async(t:number,id:string)=>await osint.cancel(await internalUser(t),id),
+    delete:async(t:number,id:string)=>await osint.delete(await internalUser(t),id),
+  } : undefined;
   const knowledgeResearch = knowledgeUploads || research ? {
     upload:async(t:number,x:{name:string;mime:string;stream:import("node:stream").Readable;truncated:()=>boolean})=>{if(!knowledgeUploads)throw new Error("knowledge_disabled");return await knowledgeUploads.createFromStream(t,x);},
     uploadStatus:async(t:number,id:string)=>await knowledgeUploads?.status(t,id),
@@ -625,6 +640,7 @@ async function main(): Promise<void> {
       },
     },
     ...(knowledgeResearch ? { knowledgeResearch } : {}),
+    ...(osintPublic ? { osint: osintPublic } : {}),
   });
 
   await app.listen({ port: config.port, host: config.host });

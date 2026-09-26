@@ -56,6 +56,14 @@ export class PgOsintStore implements OsintStore {
     return { budget: row.budget, subjectEntityId: row.subject_entity_id, startedAt: new Date(row.started_at).getTime() };
   }
 
+  async status(): Promise<string | null> {
+    const { rows } = await this.db.query<{ status: string }>(
+      `SELECT status FROM osint_investigations WHERE id = $1 AND user_id = $2`,
+      [this.investigationId, this.userId],
+    );
+    return rows[0]?.status ?? null;
+  }
+
   async isCancelled(): Promise<boolean> {
     const { rows } = await this.db.query<{ status: string }>(
       `SELECT status FROM osint_investigations WHERE id = $1 AND user_id = $2`,

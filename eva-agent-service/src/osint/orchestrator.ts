@@ -116,7 +116,11 @@ export class OsintOrchestrator {
   constructor(
     private readonly store: OsintStore,
     private readonly collectors: readonly Collector[],
-    private readonly options: { now?: () => number } = {},
+    private readonly options: {
+      now?: () => number;
+      /** Наблюдатель прогонов для метрик: сборщик, статус, запросы. Без данных. */
+      onRun?: (collector: string, status: string, externalRequests: number) => void;
+    } = {},
   ) {}
 
   async run(signal: AbortSignal): Promise<InvestigationSummary> {
@@ -188,6 +192,7 @@ export class OsintOrchestrator {
             errorCode: code,
             externalRequests: collector.reserve(remaining),
           });
+          this.options.onRun?.(collector.name, "failed", collector.reserve(remaining));
           continue;
         }
         const saved = await this.persist(collector.name, runId, item, output, subjectEntityId, budget);
@@ -202,6 +207,7 @@ export class OsintOrchestrator {
           ...(output.errorCode ? { errorCode: output.errorCode } : {}),
           externalRequests: output.externalRequests,
         });
+        this.options.onRun?.(collector.name, output.status, output.externalRequests);
       }
       await this.store.finishFrontier(item.identifierId, applicable.length > 0 ? "done" : "skipped");
     }
