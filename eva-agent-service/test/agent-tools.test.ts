@@ -331,7 +331,12 @@ test("admin-created enabled MCP policy becomes a live allowlisted SDK tool and i
   const live = factory.forConversation("conv-1").find((tool) => tool.name === "mcp__knowledge__search");
   assert.ok(live);
   const executed = await runInTurn({ runId: "11111111-1111-1111-1111-111111111111", recorded: true, isCancelled: async () => false }, async () => await live.execute("call-1", { q: "safe" }));
-  assert.deepEqual(executed.details, { hits: 1 });
+  // Ответ MCP-сервера — данные третьей стороны: модель получает его в
+  // конверте недоверенного содержимого, а не как собственный вывод.
+  const details = executed.details as { untrusted?: boolean; source?: string; data?: unknown };
+  assert.equal(details.untrusted, true);
+  assert.equal(details.source, "mcp:knowledge");
+  assert.deepEqual(details.data, { hits: 1 });
   assert.deepEqual(calls, [["knowledge", "search", { q: "safe" }]]);
 });
 

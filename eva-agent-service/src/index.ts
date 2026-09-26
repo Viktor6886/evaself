@@ -11,6 +11,7 @@ import { Redis } from "ioredis";
 
 import { applyManagedRuntimeConfig, importEnvironmentOsintSettings } from "./admin/managed-runtime-config.js";
 import { AgentToolFactory, isHostExecutionTool, toolApprovalCategory, toolRisk } from "./agent-tools.js";
+import { sessionPermission } from "./tools/session-permission.js";
 import { BackgroundRuntime } from "./background.js";
 import {
   configWarnings,
@@ -316,6 +317,11 @@ async function main(): Promise<void> {
     runtimeContext,
   );
   toolFactory.setApprovalCompletionCallback(async (execution) => await approvals.completeApprovedExecution(execution));
+  toolFactory.setExecutionGate(async (input) => await approvals.authorizeExecution({
+    ...input,
+    risk: toolRisk(input.toolName),
+    category: toolApprovalCategory(input.toolName),
+  }));
   letta.setToolFactory((conversationId) => toolFactory.forConversation(conversationId));
   // Что увидит модель, решает Letta. Отсюда приходит только подтверждение
   // действия человеком: у него есть владелец и чат, которых SDK не знает.
@@ -332,19 +338,11 @@ async function main(): Promise<void> {
       // человека нет: подтверждение там не спрашивается, а отказывается.
       unattended: runtime.purpose === "task_action" || runtime.purpose === "initiative",
     });
-    return async (toolName, toolInput, context) => {
-      // Оболочка и произвольная запись в файловую систему хоста —
-      // граница детерминированная, а не предмет подтверждения: за
-      // пределами продуктовых сценариев подтверждать такой вызов
-      // человеку в чате нечем. Проверка стоит до подтверждений
-      // намеренно: при выключенном флаге подтверждений граница обязана
-      // остаться.
-      if (isHostExecutionTool(toolName)) {
-        logger.warn("вызов инструмента выполнения отклонён", { tool: toolName, conversationId });
-        return { behavior: "deny", message: "Инструмент недоступен агенту Евы", interrupt: false };
-      }
-      return await approve(toolName, toolInput, context);
-    };
+    return sessionPermission({
+      approve,
+      isHostExecutionTool,
+      onHostExecutionDenied: (tool) => logger.warn("вызов инструмента выполнения отклонён", { tool, conversationId }),
+    });
   });
   void approvals.recoverPendingApprovals(async (conversationId) => {
     await letta.recoverConversationApprovals(conversationId);
