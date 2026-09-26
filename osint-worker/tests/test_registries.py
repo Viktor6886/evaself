@@ -206,3 +206,35 @@ async def test_rows_are_capped():
     async with client:
         result = await registry.search("organization", "Сбербанк")
     assert len(result.data["records"]) == 10
+
+
+async def test_rows_in_unknown_form_are_unavailable_not_empty():
+    def handler(request):
+        if request.method == "POST":
+            return httpx.Response(200, json={"t": TOKEN})
+        return httpx.Response(200, json={"rows": [{"inn": "7707083893", "title": "новый формат"}]})
+
+    registry, client, _ = _registry(handler)
+    async with client:
+        result = await registry.search("tax_id", "7707083893")
+    assert result.status == "degraded" and result.degraded_reason == "unavailable"
+
+
+async def test_whole_search_has_a_deadline(monkeypatch):
+    import asyncio
+
+    import app.registries as registries
+
+    monkeypatch.setattr(registries, "REGISTRY_DEADLINE_SECONDS", 0.05)
+
+    def handler(request):
+        if request.method == "POST":
+            return httpx.Response(200, json={"t": TOKEN})
+        return httpx.Response(200, json={"status": "wait"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    # Настоящая пауза между опросами: срок истекает посреди ожидания.
+    registry = EgrulRegistry(client, resolver=public_resolver, sleep=lambda _seconds: asyncio.sleep(10))
+    async with client:
+        result = await registry.search("tax_id", "7707083893")
+    assert result.status == "degraded" and result.degraded_reason == "timeout"

@@ -116,7 +116,7 @@ export class EgrulCollector implements Collector {
     const found = records(result.data.records);
     const evidence = structuredEvidence({ collector: "egrul", query: query.kind, records: found });
     const findings: Finding[] = [];
-    for (const record of found) findings.push(...this.findings(record, evidence));
+    for (const record of found) findings.push(...this.findings(record, evidence, query));
     return {
       status: result.status === "degraded" ? "degraded" : "succeeded",
       ...(result.degradedReason ? { degradedReason: result.degradedReason } : {}),
@@ -133,10 +133,20 @@ export class EgrulCollector implements Collector {
     };
   }
 
-  private findings(record: RegistryRecord, evidence: Finding["evidence"]): Finding[] {
+  private findings(
+    record: RegistryRecord,
+    evidence: Finding["evidence"],
+    query: { kind: RegistryKind; value: string },
+  ): Finding[] {
     const inn = record.inn ? normalizeIdentifier("tax_id", record.inn, { country: "RU" }) : null;
     const ogrn = record.ogrn ? normalizeIdentifier("registration_number", record.ogrn, { country: "RU" }) : null;
-    const key: NormalizedIdentifier | null = inn ?? ogrn;
+    // Ключ — номер, по которому искали, если запись его содержит: субъект
+    // заведён именно с ним, и по другому номеру сущность субъекта не
+    // нашлась бы — рядом появился бы её двойник.
+    const queried = query.kind === "registration_number" && ogrn?.normalized === query.value ? ogrn
+      : query.kind === "tax_id" && inn?.normalized === query.value ? inn
+        : null;
+    const key: NormalizedIdentifier | null = queried ?? inn ?? ogrn;
     if (!key) return [];
     const organization = record.kind === "organization";
     const entity: EntityFinding = {

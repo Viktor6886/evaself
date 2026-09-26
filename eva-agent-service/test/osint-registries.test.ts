@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { EGRUL_BOUND, EgrulCollector } from "../dist/osint/registry-collectors.js";
-import { OsintWorkerClient } from "../dist/osint/worker-client.js";
+import { OsintWorkerClient, REGISTRY_TIMEOUT_MS } from "../dist/osint/worker-client.js";
 import { renderReport } from "../dist/osint/report.js";
 import type { CollectorOutput, Finding } from "../dist/osint/collectors.js";
 
@@ -67,6 +67,19 @@ test("ИНН: организация с реестровыми свойства�
     [["registration_number", "1027700132195", false]]);
   // ФИО руководителя — свойство, а не новый след.
   assert.equal(discovered.some((item) => item.kind === "discovered" && item.identifier.type === "name"), false);
+});
+
+test("ОГРН: ключ — номер, по которому искали, ИНН запоминается за сущностью", async () => {
+  const { client } = worker([ORGANIZATION]);
+  const output = await new EgrulCollector(client as never)
+    .collect({ target: target("registration_number", "1027700132195"), signal: signal(), remainingRequests: 100 });
+  const entity = findings(output).find((item) => item.kind === "entity");
+  // Субъект заведён с ОГРН: ключом-ИНН сущность субъекта не нашлась бы.
+  assert.ok(entity?.kind === "entity" && entity.identifier.type === "registration_number"
+    && entity.identifier.normalized === "1027700132195");
+  const discovered = findings(output).filter((item) => item.kind === "discovered");
+  assert.deepEqual(discovered.map((item) => item.kind === "discovered" && [item.identifier.type, item.identifier.normalized, item.owner, item.expand]),
+    [["tax_id", "7707083893", "1027700132195", false]]);
 });
 
 test("ИП: LegalEntity без адреса, прекращённая деятельность видна", async () => {
@@ -134,6 +147,8 @@ test("клиент worker: путь, тело и отказ от повтора"
   await assert.rejects(new OsintWorkerClient({ baseUrl: "http://w", token: "k", fetcher }).egrul("tax_id", "7707083893"));
   // Повтор скорее вызвал бы капчу ФНС, чем получил ответ.
   assert.equal(calls, 1);
+  // Многошаговый поиск ждёт дольше общего срока worker (120 с).
+  assert.ok(REGISTRY_TIMEOUT_MS > 120_000);
 });
 
 test("отчёт показывает сведения реестра о самом субъекте", () => {

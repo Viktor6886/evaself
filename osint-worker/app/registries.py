@@ -45,6 +45,10 @@ POLL_DELAY_SECONDS = 1.0
 # встречает капчей, и вежливый темп дешевле деградации.
 MIN_INTERVAL_SECONDS = 1.0
 MAX_JSON_BYTES = 1024 * 1024
+# Общий срок одного поиска: POST, до четырёх опросов и паузы между ними.
+# Клиент в eva-agent-service ждёт чуть дольше, чтобы срок истекал здесь и
+# возвращался деградацией, а не обрывом соединения.
+REGISTRY_DEADLINE_SECONDS = 120.0
 
 INN = re.compile(r"^\d{10}$|^\d{12}$")
 OGRN = re.compile(r"^\d{13}$|^\d{15}$")
@@ -150,8 +154,12 @@ def parse_row(row: dict[str, Any]) -> dict[str, Any] | None:
 def parse_rows(payload: Any) -> list[dict[str, Any]]:
     if not isinstance(payload, dict) or not isinstance(payload.get("rows"), list):
         raise SourceFailure("unavailable")
-    records = [parse_row(row) for row in payload["rows"] if isinstance(row, dict)]
-    return [record for record in records if record][:MAX_ROWS]
+    records = [record for record in (parse_row(row) for row in payload["rows"] if isinstance(row, dict)) if record]
+    # Строки есть, но ни одна не разобрана — изменился формат ответа, а не
+    # «записи нет»: пустой результат сказал бы неправду.
+    if payload["rows"] and not records:
+        raise SourceFailure("unavailable")
+    return records[:MAX_ROWS]
 
 
 @dataclass
@@ -260,27 +268,33 @@ class EgrulRegistry:
         query = normalize_query(kind, value)
         requests = [0]
         try:
-            started = await self._request(
-                "POST",
-                EGRUL,
-                requests,
-                {"vyp3CaptchaToken": "", "page": "", "query": query, "region": "", "PreventChromeAutocomplete": ""},
-            )
-            token = started.get("t") if isinstance(started, dict) else None
-            if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_=-]{8,256}", token):
-                raise SourceFailure("unavailable")
-            url = f"{EGRUL}search-result/{token}"
-            payload: Any = None
-            for attempt in range(MAX_POLLS + 1):
-                payload = await self._request("GET", url, requests)
-                if not (isinstance(payload, dict) and payload.get("status") == "wait"):
-                    break
-                if attempt == MAX_POLLS:
-                    raise SourceFailure("timeout")
-                await self.sleep(POLL_DELAY_SECONDS)
-            records = parse_rows(payload)
+            async with asyncio.timeout(REGISTRY_DEADLINE_SECONDS):
+                records = await self._search(query, requests)
+        except TimeoutError:
+            return RegistryResult("egrul", "degraded", requests[0], None, {}, "timeout")
         except SourceFailure as failure:
             return RegistryResult("egrul", "degraded", requests[0], None, {}, failure.reason)
         # Адрес результата — страница поиска, а не токен: токен живёт
         # минуты, и ссылка на него в отчёте вела бы в никуда.
         return RegistryResult("egrul", "ok", requests[0], EGRUL, {"query_kind": kind, "records": records})
+
+    async def _search(self, query: str, requests: list[int]) -> list[dict[str, Any]]:
+        started = await self._request(
+            "POST",
+            EGRUL,
+            requests,
+            {"vyp3CaptchaToken": "", "page": "", "query": query, "region": "", "PreventChromeAutocomplete": ""},
+        )
+        token = started.get("t") if isinstance(started, dict) else None
+        if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_=-]{8,256}", token):
+            raise SourceFailure("unavailable")
+        url = f"{EGRUL}search-result/{token}"
+        payload: Any = None
+        for attempt in range(MAX_POLLS + 1):
+            payload = await self._request("GET", url, requests)
+            if not (isinstance(payload, dict) and payload.get("status") == "wait"):
+                break
+            if attempt == MAX_POLLS:
+                raise SourceFailure("timeout")
+            await self.sleep(POLL_DELAY_SECONDS)
+        return parse_rows(payload)
