@@ -162,7 +162,10 @@ export function buildJobLayer(
       new HarvesterCollector(new HarvesterClient({ baseUrl: config.osintHarvesterUrl, ...services })),
       new SpiderfootCollector(new SpiderfootClient({ baseUrl: config.osintSpiderfootUrl, ...services })),
       new UsernameProfilesCollector(worker, { topSites: 300 }),
-      new WebSearchCollector(web, { queriesPerIdentifier: 3, pagesPerIdentifier: 4, maxPageBytes: 512_000 }),
+      // Запросов на идентификатор столько, чтобы прошли все записи номера
+      // или имени и поиск по открытым страницам соцсетей; страниц — только
+      // те, чей сниппет не показал искомого.
+      new WebSearchCollector(web, { queriesPerIdentifier: 12, pagesPerIdentifier: 6, maxPageBytes: 512_000 }),
     ], {
       enabled: () => config.osintEnabled,
       collectorEnabled: (name) => osintCollectorEnabled(config, name),

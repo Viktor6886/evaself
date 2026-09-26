@@ -26,7 +26,7 @@ import { claimStatus, SOURCE_TIER_QUALITY } from "./confidence.js";
 import type { Collector, CollectedSource, CollectorOutput, Finding, FrontierItem } from "./collectors.js";
 import { normalizeIdentifier, type NormalizedIdentifier } from "./identifiers.js";
 import { decideMatch, type MatchDecision, type MatchFeature } from "./resolver.js";
-import type { ClaimStatus, CollectorStatus, DegradedReason, Evidence, InvestigationBudget } from "./types.js";
+import type { ClaimStatus, CollectorStatus, DegradedReason, Evidence, InvestigationBudget, SearchContext } from "./types.js";
 
 export interface RunResult {
   status: Extract<CollectorStatus, "succeeded" | "degraded" | "failed" | "skipped">;
@@ -42,7 +42,13 @@ export interface OsintStore {
    * `startedAt` — начало первого захода: срок бюджета не обновляется
    * повтором задания.
    */
-  begin(): Promise<{ budget: InvestigationBudget; subjectEntityId: string | null; startedAt: number } | null>;
+  begin(): Promise<{
+    budget: InvestigationBudget;
+    subjectEntityId: string | null;
+    startedAt: number;
+    /** Город и место работы из просьбы человека, если были. */
+    searchContext?: SearchContext;
+  } | null>;
   isCancelled(): Promise<boolean>;
   counters(): Promise<{ externalRequests: number; identifiers: number; entities: number }>;
   nextFrontier(maxDepth: number): Promise<FrontierItem | null>;
@@ -139,6 +145,7 @@ export class OsintOrchestrator {
     const state = await this.store.begin();
     if (!state) return { ...summary, status: "not_runnable" };
     const { budget, subjectEntityId } = state;
+    const context = state.searchContext ?? {};
     const now = this.options.now ?? Date.now;
     // Срок считается от первого захода: повтор задания после сбоя не
     // получает второй полный бюджет времени.
@@ -177,7 +184,7 @@ export class OsintOrchestrator {
         summary.runs += 1;
         let output: CollectorOutput;
         try {
-          output = await collector.collect({ target: item, signal, remainingRequests: remaining });
+          output = await collector.collect({ target: item, signal, remainingRequests: remaining, context });
         } catch (error) {
           if (signal.aborted) throw error;
           // Сбой одного сборщика — отказ этого прогона, а не исследования.

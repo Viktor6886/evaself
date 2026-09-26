@@ -80,7 +80,9 @@ export class OsintToolFactory {
               value: text("Значение как его дал пользователь."),
             }, ["type", "value"]),
           },
-          mode: { type: "string", enum: ["standard", "deep"], description: "deep — глубже и дольше; только если пользователь просит подробнее." },
+          mode: { type: "string", enum: ["standard", "deep"], description: "deep — глубже и дольше; если пользователь просит подробнее или «максимум»." },
+          city: text("Необязательно: город, если человек его назвал. Сильно сужает поиск по имени."),
+          workplace: text("Необязательно: место работы или учёбы, если человек его назвал."),
         }, ["query", "purpose", "subject", "seeds"]),
         async (args, runtime: AgentRuntimeContext, toolCallId) => {
           const subject = args.subject === "organization" ? "organization" : "person";
@@ -92,6 +94,7 @@ export class OsintToolFactory {
             subject,
             seeds: seedsOf(args),
             mode: args.mode === "deep" ? "deep" : "standard",
+            context: { city: optionalString(args, "city", 100), organization: optionalString(args, "workplace", 100) },
             // Один вызов инструмента — одно исследование: повтор хода
             // после сбоя вернёт то же исследование, а не второе.
             idempotencyKey: toolIdempotencyKey(runtime.conversationId, toolCallId),

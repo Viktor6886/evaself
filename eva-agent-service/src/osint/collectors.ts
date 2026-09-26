@@ -19,7 +19,7 @@ import { canonicalizeUrl } from "../research/orchestrator.js";
 import { sha256, quoteEvidence, structuredEvidence } from "./evidence.js";
 import { normalizeIdentifier, type NormalizedIdentifier } from "./identifiers.js";
 import { personNameVariants, phoneVariants, searchQueries } from "./planning.js";
-import type { CollectorStatus, DegradedReason, Evidence, IdentifierType, SourceTier } from "./types.js";
+import type { CollectorStatus, DegradedReason, Evidence, IdentifierType, SearchContext, SourceTier } from "./types.js";
 import { mergeProfileObservations, type ProfileCollector } from "./worker-mapping.js";
 import type { OsintWorkerClient } from "./worker-client.js";
 
@@ -36,6 +36,8 @@ export interface CollectorContext {
   signal: AbortSignal;
   /** Сколько внешних запросов ещё разрешает бюджет исследования. */
   remainingRequests: number;
+  /** Город и место работы из просьбы человека: сужают поиск по имени. */
+  context?: SearchContext;
 }
 
 /** Страница или ответ API с тем, что в нём найдено. */
@@ -232,7 +234,8 @@ export class UsernameProfilesCollector implements Collector {
 
 /** Поиск и чтение через SearXNG и Crawl4AI (`research/adapters.ts`). */
 export interface WebAccess {
-  search(query: string, signal: AbortSignal): Promise<Array<{ url: string; title: string }>>;
+  /** `snippet` — фрагмент страницы из выдачи, если поисковик его дал. */
+  search(query: string, signal: AbortSignal): Promise<Array<{ url: string; title: string; snippet?: string }>>;
   read(url: string, signal: AbortSignal, maxBytes: number): Promise<{ url: string; content: string; title: string }>;
 }
 
@@ -305,24 +308,38 @@ export class WebSearchCollector implements Collector {
     return Math.max(0, Math.min(remainingRequests, this.limits.queriesPerIdentifier + this.limits.pagesPerIdentifier));
   }
 
-  async collect({ target, signal, remainingRequests }: CollectorContext): Promise<CollectorOutput> {
-    const queries = searchQueries({ type: target.type, raw: target.normalized, normalized: target.normalized })
+  async collect({ target, signal, remainingRequests, context }: CollectorContext): Promise<CollectorOutput> {
+    const queries = searchQueries({ type: target.type, raw: target.normalized, normalized: target.normalized }, context ?? {})
       .slice(0, Math.max(0, Math.min(this.limits.queriesPerIdentifier, remainingRequests - 1)));
     if (queries.length === 0) return skipped("osint_budget_exhausted");
+    const variants = mentionVariants(target);
     let requests = 0;
     let failures = 0;
-    const candidates: string[] = [];
-    const seen = new Set<string>();
+    // Порядок вставки — порядок выдачи: страницы читаются от лучших.
+    const candidates = new Set<string>();
+    const recorded = new Set<string>();
+    const sources: CollectedSource[] = [];
     for (const query of queries) {
       signal.throwIfAborted();
       requests += 1;
       try {
         for (const result of await this.web.search(query, signal)) {
           const canonical = canonicalizeUrl(result.url);
-          if (canonical && !seen.has(canonical)) {
-            seen.add(canonical);
-            candidates.push(canonical);
+          if (!canonical || recorded.has(canonical)) continue;
+          // Сниппет выдачи с искомой строкой — уже находка: страницы
+          // соцсетей без браузера часто не читаются, а поисковик их
+          // текст видел. Доказательство — цитата из самого сниппета.
+          // Та же страница в выдаче другого запроса может прийти с другим
+          // сниппетом — поэтому кандидат проверяется снова.
+          const snippet = [result.title, result.snippet ?? ""].join("\n").trim();
+          const evidence = mentionQuote(snippet, variants);
+          if (evidence) {
+            recorded.add(canonical);
+            candidates.delete(canonical);
+            sources.push(this.source(canonical, snippet, target, evidence));
+            continue;
           }
+          candidates.add(canonical);
         }
       } catch (error) {
         if (signal.aborted) throw error;
@@ -333,9 +350,7 @@ export class WebSearchCollector implements Collector {
       return { status: "degraded", degradedReason: "unavailable", externalRequests: requests, sources: [] };
     }
 
-    const pages = candidates.slice(0, Math.max(0, Math.min(this.limits.pagesPerIdentifier, remainingRequests - requests)));
-    const variants = mentionVariants(target);
-    const sources: CollectedSource[] = [];
+    const pages = [...candidates].slice(0, Math.max(0, Math.min(this.limits.pagesPerIdentifier, remainingRequests - requests)));
     let readFailures = 0;
     for (const url of pages) {
       signal.throwIfAborted();
@@ -350,29 +365,35 @@ export class WebSearchCollector implements Collector {
       }
       const evidence = mentionQuote(content, variants);
       if (!evidence) continue;
-      const findings: Finding[] = [{ kind: "mention", evidence }];
-      if (EXPANDING_TYPES.has(target.type)) {
-        // Страница, которая сама является профилем и называет искомую
-        // почту или телефон, — след, по которому стоит пойти дальше.
-        const profile = normalizeIdentifier("social_account", url);
-        if (profile) findings.push({ kind: "discovered", evidence, identifier: profile });
-      }
-      sources.push({
-        locator: url,
-        canonicalUrl: url,
-        domain: hostOf(url),
-        tier: "unknown",
-        retrievedAt: this.now().toISOString(),
-        contentHash: sha256(content),
-        findings,
-      });
+      sources.push(this.source(url, content, target, evidence));
     }
-    const degraded = failures > 0 || (pages.length > 0 && readFailures === pages.length);
+    // Нечитаемые страницы при найденном в выдаче — не деградация: то,
+    // что искали, найдено, а страницы-кандидаты были лишь догадкой.
+    const degraded = failures > 0 || (sources.length === 0 && pages.length > 0 && readFailures === pages.length);
     return {
       status: degraded ? "degraded" : "succeeded",
       ...(degraded ? { degradedReason: "unavailable" as const } : {}),
       externalRequests: requests,
       sources,
+    };
+  }
+
+  private source(url: string, text: string, target: FrontierItem, evidence: Evidence): CollectedSource {
+    const findings: Finding[] = [{ kind: "mention", evidence }];
+    if (EXPANDING_TYPES.has(target.type)) {
+      // Страница, которая сама является профилем и называет искомую
+      // почту или телефон, — след, по которому стоит пойти дальше.
+      const profile = normalizeIdentifier("social_account", url);
+      if (profile) findings.push({ kind: "discovered", evidence, identifier: profile });
+    }
+    return {
+      locator: url,
+      canonicalUrl: url,
+      domain: hostOf(url),
+      tier: "unknown",
+      retrievedAt: this.now().toISOString(),
+      contentHash: sha256(text),
+      findings,
     };
   }
 }
