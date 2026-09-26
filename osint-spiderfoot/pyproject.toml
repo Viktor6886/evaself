@@ -1,0 +1,13 @@
+# Lint configuration for osint-spiderfoot: the same defect-catching rules as
+# media-service. Formatting is not enforced.
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "B", "UP", "SIM", "I"]
+# FastAPI's `Depends(...)` in default arguments.
+ignore = ["B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]
