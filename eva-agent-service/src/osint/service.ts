@@ -78,6 +78,9 @@ export interface InvestigationStatus {
 
 const invalid = (code: string, message: string) => new EvaError(message, { code, statusCode: 400 });
 
+/** Метрика тарифа: сколько исследований доступно за период. */
+export const OSINT_QUOTA_METRIC = "osint";
+
 export class OsintService {
   constructor(
     private readonly db: OsintDatabase,
@@ -146,6 +149,20 @@ export class OsintService {
           });
         }
 
+        // Квота тарифа — метрика `osint` в `quotas`, как у поиска и
+        // документов. Проверка и списание — в этой же транзакции под
+        // блокировкой пользователя: два одновременных запроса не проходят
+        // оба на последнем исследовании тарифа.
+        const { rows: quota } = await client.query<{ remaining: string | number | null }>(
+          `SELECT remaining FROM v_quota_status WHERE user_id = $1 AND metric = $2`,
+          [input.userId, OSINT_QUOTA_METRIC],
+        );
+        if (quota.some((row) => row.remaining !== null && Number(row.remaining) <= 0)) {
+          throw new EvaError("Лимит OSINT-исследований по тарифу исчерпан", {
+            code: "osint_quota_exhausted", statusCode: 429, retryable: false,
+          });
+        }
+
         const id = randomUUID();
         await client.query(
           `INSERT INTO osint_investigations
@@ -175,6 +192,20 @@ export class OsintService {
           source: "user",
           privacy: "restricted",
         });
+        // Расход — сразу во все периоды, как `Database.incrementUsage`:
+        // тариф может ограничивать и сутки, и месяц.
+        await client.query(
+          `INSERT INTO usage_counters (user_id, metric, period, period_start, used)
+           SELECT $1, $2, p.period, p.start, 1
+             FROM (VALUES
+               ('day', (now() AT TIME ZONE 'UTC')::date),
+               ('week', date_trunc('week', (now() AT TIME ZONE 'UTC')::date)::date),
+               ('month', date_trunc('month', (now() AT TIME ZONE 'UTC')::date)::date)
+             ) AS p(period, start)
+           ON CONFLICT (user_id, metric, period, period_start) DO UPDATE
+             SET used = usage_counters.used + 1, updated_at = now()`,
+          [input.userId, OSINT_QUOTA_METRIC],
+        );
         await audit(client, "osint.investigation.create", id, {
           user_id: input.userId,
           mode,

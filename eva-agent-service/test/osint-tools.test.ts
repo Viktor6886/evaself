@@ -110,19 +110,24 @@ test("риски: запуск и удаление требуют подтвер
   assert.equal(toolRisk("osint_cancel"), "low_risk_write");
 });
 
-test("без сервиса OSINT инструментов в наборе нет, с ним — есть", () => {
+test("инструменты OSINT — только при сервисе и включённом флаге, флаг читается на лету", () => {
   const db = { query: async () => ({ rows: [], rowCount: 0 }) };
   const silent = { debug() {}, info() {}, warn() {}, error() {} };
-  const factory = new AgentToolFactory({ vectorGoalsEnabled: false } as never, db as never, {} as never, silent);
-  const before = factory.forConversation("conv-1").map((tool) => tool.name);
-  assert.equal(before.some((name) => name.startsWith("osint_")), false);
+  const config = { vectorGoalsEnabled: false, osintEnabled: true };
+  const factory = new AgentToolFactory(config as never, db as never, {} as never, silent);
+  const names = () => factory.forConversation("conv-1").map((tool) => tool.name);
+  const before = names();
+  assert.equal(before.some((name) => name.startsWith("osint_")), false, "без сервиса инструментов нет");
   factory.setOsint({} as never);
-  const after = factory.forConversation("conv-1").map((tool) => tool.name);
+  const after = names();
   for (const name of ["osint_investigate", "osint_get_status", "osint_get_report", "osint_list", "osint_search_entity", "osint_cancel", "osint_delete"]) {
     assert.ok(after.includes(name), name);
   }
   // Остальные инструменты на месте: OSINT добавляется, а не вытесняет.
   for (const name of before) assert.ok(after.includes(name), name);
+  // Выключатель в панели меняет config без перезапуска.
+  config.osintEnabled = false;
+  assert.equal(names().some((name) => name.startsWith("osint_")), false, "выключенный флаг убирает инструменты");
 });
 
 test("отчёт текстом: ограничения всегда есть, принадлежность не утверждается", () => {

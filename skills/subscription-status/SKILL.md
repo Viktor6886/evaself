@@ -17,7 +17,7 @@ description: Точный ответ о подписке текущего пол
    нет, и используй `free_messages` и строки `quotas` для бесплатного доступа.
 3. Для сообщений выбери строки `quotas` с `metric=messages`, а для других
    возможностей — строку нужной метрики: `documents`, `images`,
-   `web_search`, `voice_in`, `voice_out`, `voice_minutes` или
+   `web_search`, `osint`, `voice_in`, `voice_out`, `voice_minutes` или
    `messages_out`. Учитывай запрошенный `period`: `day`, `week` или
    `month`. Назови `remaining`, а при `unlimited=true` — что ограничений
    нет. Если метрика или период не настроены, так и скажи, не подменяй их.

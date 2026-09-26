@@ -25,13 +25,28 @@ function boolean(value: unknown, fallback: boolean): boolean {
  */
 type LiveSettings = Pick<
   Config,
-  "audioFileTranscriptsEnabled" | "telegramStreamMode" | "telegramTypingSpeed"
+  | "audioFileTranscriptsEnabled" | "telegramStreamMode" | "telegramTypingSpeed"
+  | "osintEnabled" | "osintRuRegistriesEnabled" | "osintDailyLimit"
+  | "osintCollectorMaigret" | "osintCollectorWeb" | "osintCollectorInfrastructure"
+  | "osintCollectorHarvester" | "osintCollectorSpiderfoot"
 >;
+/** Флаги OSINT: ключ панели → поле конфигурации. Все читаются на каждом ходе и задании. */
+const OSINT_FLAGS: Array<[string, keyof LiveSettings]> = [
+  ["runtime.osint_enabled", "osintEnabled"],
+  ["runtime.osint_ru_registries", "osintRuRegistriesEnabled"],
+  ["runtime.osint_collector_maigret", "osintCollectorMaigret"],
+  ["runtime.osint_collector_web", "osintCollectorWeb"],
+  ["runtime.osint_collector_infrastructure", "osintCollectorInfrastructure"],
+  ["runtime.osint_collector_theharvester", "osintCollectorHarvester"],
+  ["runtime.osint_collector_spiderfoot", "osintCollectorSpiderfoot"],
+];
 const bootstrapLiveSettings = new WeakMap<Config, LiveSettings>();
 const LIVE_SETTING_FIELDS: Array<[string, keyof LiveSettings]> = [
   ["runtime.audio_file_transcripts", "audioFileTranscriptsEnabled"],
   ["runtime.telegram_stream_mode", "telegramStreamMode"],
   ["runtime.telegram_typing_speed", "telegramTypingSpeed"],
+  ...OSINT_FLAGS,
+  ["runtime.osint_daily_limit", "osintDailyLimit"],
 ];
 
 /** Apply PostgreSQL settings over bootstrap environment values. */
@@ -44,6 +59,14 @@ export async function applyManagedRuntimeConfig(
       audioFileTranscriptsEnabled: config.audioFileTranscriptsEnabled,
       telegramStreamMode: config.telegramStreamMode,
       telegramTypingSpeed: config.telegramTypingSpeed,
+      osintEnabled: config.osintEnabled,
+      osintRuRegistriesEnabled: config.osintRuRegistriesEnabled,
+      osintDailyLimit: config.osintDailyLimit,
+      osintCollectorMaigret: config.osintCollectorMaigret,
+      osintCollectorWeb: config.osintCollectorWeb,
+      osintCollectorInfrastructure: config.osintCollectorInfrastructure,
+      osintCollectorHarvester: config.osintCollectorHarvester,
+      osintCollectorSpiderfoot: config.osintCollectorSpiderfoot,
     });
   }
   const { rows } = await db.query<SettingRow>(
@@ -88,6 +111,22 @@ export async function applyManagedRuntimeConfig(
         break;
       case "runtime.telegram_typing_speed":
         config.telegramTypingSpeed = parseLiveTypingSpeed(value, config.telegramTypingSpeed);
+        break;
+      // OSINT: инструменты, сервис и задания читают флаги при каждом
+      // вызове, поэтому переключатель действует без перезапуска.
+      case "runtime.osint_enabled":
+      case "runtime.osint_ru_registries":
+      case "runtime.osint_collector_maigret":
+      case "runtime.osint_collector_web":
+      case "runtime.osint_collector_infrastructure":
+      case "runtime.osint_collector_theharvester":
+      case "runtime.osint_collector_spiderfoot": {
+        const field = OSINT_FLAGS.find(([key]) => key === row.key)![1];
+        (config as Record<keyof LiveSettings, unknown>)[field] = boolean(value, config[field] as boolean);
+        break;
+      }
+      case "runtime.osint_daily_limit":
+        config.osintDailyLimit = integer(value, config.osintDailyLimit);
         break;
       case "runtime.outbox_enabled":
         config.outboxEnabled = boolean(value, config.outboxEnabled);

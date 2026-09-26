@@ -183,6 +183,16 @@ export interface Config {
    */
   osintRuRegistriesEnabled: boolean;
   /**
+   * Отдельные сборщики OSINT. Включены по умолчанию: весь контур и так
+   * выключен `osintEnabled`, а эти флаги нужны, чтобы в панели отключить
+   * один источник, не выключая остальные.
+   */
+  osintCollectorMaigret: boolean;
+  osintCollectorWeb: boolean;
+  osintCollectorInfrastructure: boolean;
+  osintCollectorHarvester: boolean;
+  osintCollectorSpiderfoot: boolean;
+  /**
    * Проверка контракта Letta на живом развёртывании.
    *
    * Contract-тесты доказывают контракт на сборке. Флаг включает ту же
@@ -464,6 +474,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     osintWorkerToken: str("OSINT_WORKER_TOKEN"),
     osintDailyLimit: clampedInt("EVA_OSINT_DAILY_LIMIT", 3, 1, 50),
     osintRuRegistriesEnabled: bool("EVA_OSINT_RU_REGISTRIES", false),
+    osintCollectorMaigret: bool("EVA_OSINT_COLLECTOR_MAIGRET", true),
+    osintCollectorWeb: bool("EVA_OSINT_COLLECTOR_WEB", true),
+    osintCollectorInfrastructure: bool("EVA_OSINT_COLLECTOR_INFRASTRUCTURE", true),
+    osintCollectorHarvester: bool("EVA_OSINT_COLLECTOR_HARVESTER", true),
+    osintCollectorSpiderfoot: bool("EVA_OSINT_COLLECTOR_SPIDERFOOT", true),
     lettaContractVerify: bool("EVA_LETTA_CONTRACT_VERIFY", false),
     personaSyncTurnTimeoutMs: clampedInt("EVA_PERSONA_SYNC_TURN_TIMEOUT_MS", 3_000, 250, 15_000),
     checkinMorningHour: clampedInt("EVA_CHECKIN_MORNING_HOUR", 9, 5, 12),

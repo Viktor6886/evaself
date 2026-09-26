@@ -45,7 +45,7 @@ import { UsernameProfilesCollector, WebSearchCollector } from "../osint/collecto
 import { HarvesterCollector, InfrastructureCollector, SpiderfootCollector } from "../osint/infra-collectors.js";
 import { HarvesterClient, SpiderfootClient } from "../osint/service-clients.js";
 import { EgrulCollector } from "../osint/registry-collectors.js";
-import { OSINT_JOB_TIMING, OsintJobWorker } from "../osint/job.js";
+import { OSINT_JOB_TIMING, OsintJobWorker, osintCollectorEnabled } from "../osint/job.js";
 import { OSINT_JOB_TYPE } from "../osint/service.js";
 import { OsintWorkerClient } from "../osint/worker-client.js";
 import { KnowledgeIngestWorker, KNOWLEDGE_INGEST_JOB } from "../knowledge/lifecycle.js";
@@ -128,10 +128,12 @@ export function buildJobLayer(
     runtime.register("research_run", async (context) => await research.run(context));
   }
 
-  // OSINT-исследование: детерминированные сборщики без модели. Флаг
-  // выключен — обработчик не регистрируется, и задание этого типа,
-  // попавшее в очередь, уходит в dead letter, а не выполняется.
-  if (config.osintEnabled) {
+  // OSINT-исследование: детерминированные сборщики без модели.
+  // Обработчик регистрируется всегда: флаги переключаются в панели без
+  // перезапуска, и задание, поставленное при включённом флаге, не должно
+  // уйти в dead letter. Включён ли контур и каждый источник — решается
+  // в момент выполнения.
+  {
     const worker = new OsintWorkerClient({ baseUrl: config.osintWorkerUrl, token: config.osintWorkerToken });
     const web = new SearxCrawlAdapters(config.searxngUrl, config.crawl4aiUrl, { crawlToken: config.crawl4aiToken });
     const services = { token: config.osintWorkerToken };
@@ -139,14 +141,15 @@ export function buildJobLayer(
       // Реестры и журналы — первыми: они дешёвые и дают следы (адреса,
       // AS, организацию), по которым идут остальные сборщики.
       new InfrastructureCollector(worker),
-      // ЕГРЮЛ/ЕГРИП — официальный реестр, но за своим флагом: контракт
-      // публичного сервиса ФНС сверяется на развёртывании.
-      ...(config.osintRuRegistriesEnabled ? [new EgrulCollector(worker)] : []),
+      new EgrulCollector(worker),
       new HarvesterCollector(new HarvesterClient({ baseUrl: config.osintHarvesterUrl, ...services })),
       new SpiderfootCollector(new SpiderfootClient({ baseUrl: config.osintSpiderfootUrl, ...services })),
       new UsernameProfilesCollector(worker, { topSites: 300 }),
       new WebSearchCollector(web, { queriesPerIdentifier: 3, pagesPerIdentifier: 4, maxPageBytes: 512_000 }),
-    ]);
+    ], {
+      enabled: () => config.osintEnabled,
+      collectorEnabled: (name) => osintCollectorEnabled(config, name),
+    });
     registry.queue("research");
     runtime.register(OSINT_JOB_TYPE, async (context) => await osint.run(context), OSINT_JOB_TIMING);
   }

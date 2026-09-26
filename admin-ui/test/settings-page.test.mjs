@@ -87,4 +87,44 @@ describe("системные настройки", () => {
     assert.ok(saved, "сохранение не ушло на сервер");
     assert.equal(saved.body.settings["runtime.telegram_stream_mode"], "draft");
   });
+
+  test("OSINT — отдельный блок, включается списком и сохраняется общей кнопкой", async () => {
+    let enabled = false;
+    const payload = () => ({
+      ...settingsPayload("edit"),
+      settings: [
+        ...settingsPayload("edit").settings,
+        setting({
+          key: "runtime.osint_enabled", env: "EVA_OSINT_ENABLED", group: "osint",
+          title: "OSINT: исследования открытых источников", type: "boolean", default: false, value: enabled,
+        }),
+        setting({
+          key: "runtime.osint_collector_web", env: "EVA_OSINT_COLLECTOR_WEB", group: "osint",
+          title: "OSINT: веб-поиск упоминаний", type: "boolean", default: true, value: true,
+        }),
+      ],
+    });
+    const panel = await openPanel({
+      routes: {
+        "/settings": payload,
+        "PUT /settings": () => { enabled = true; return payload(); },
+      },
+    });
+    panels.push(panel);
+    const { page } = panel;
+    await page.evaluate(() => openPage("settings"));
+
+    const toggle = '#settings-form-osint select[data-key="runtime.osint_enabled"]';
+    await page.waitForSelector(toggle);
+    // В общем списке OSINT не дублируется.
+    assert.equal(await page.locator('#settings-form [data-key="runtime.osint_enabled"]').count(), 0);
+    assert.equal(await page.locator('#settings-form-osint [data-key="runtime.osint_collector_web"]').count(), 1);
+    await page.selectOption(toggle, "true");
+    await page.click("#save-settings");
+    const saved = await panel.waitForRequest(
+      (item) => item.method === "PUT" && item.path === "/settings",
+    );
+    assert.equal(saved.body.settings["runtime.osint_enabled"], true);
+    assert.equal(saved.body.settings["runtime.osint_collector_web"], true);
+  });
 });

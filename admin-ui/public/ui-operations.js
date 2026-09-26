@@ -129,8 +129,13 @@ async function loadSettings() {
   state.settingProfiles = payload.profiles || [];
   renderSettingProfiles();
 
-  const main = payload.settings.filter((item) => !item.advanced);
-  const advanced = payload.settings.filter((item) => item.advanced);
+  // OSINT — своим блоком: включение контура, источники и лимит читаются
+  // вместе, в общем списке их не найти.
+  const osint = payload.settings.filter((item) => item.group === "osint");
+  const general = payload.settings.filter((item) => item.group !== "osint");
+  const main = general.filter((item) => !item.advanced);
+  const advanced = general.filter((item) => item.advanced);
+  $("#settings-form-osint").innerHTML = osint.map(settingCard).join("");
   $("#settings-form").innerHTML = main.map(settingCard).join("");
   $("#settings-form-advanced").innerHTML = advanced.map(settingCard).join("");
   $("#advanced-count").textContent = advanced.length
