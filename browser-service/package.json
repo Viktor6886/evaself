@@ -1,0 +1,23 @@
+{
+  "name": "evaself-browser-service",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Изолированный браузер Евы: Playwright + Chromium, снимки доступности вместо HTML",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "playwright-core": "1.63.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.3",
+    "typescript": "5.9.3"
+  }
+}

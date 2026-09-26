@@ -344,6 +344,9 @@ services:
       EVA_OSINT_COLLECTOR_SPIDERFOOT: ${EVA_OSINT_COLLECTOR_SPIDERFOOT:-true}
       EVA_TOOL_SEARCH: ${EVA_TOOL_SEARCH:-false}
       EVA_MCP_DISCOVERY_TTL_MS: ${EVA_MCP_DISCOVERY_TTL_MS:-300000}
+      EVA_BROWSER_ENABLED: ${EVA_BROWSER_ENABLED:-false}
+      EVA_BROWSER_SERVICE_URL: ${EVA_BROWSER_SERVICE_URL:-http://browser-service:8098}
+      BROWSER_SERVICE_TOKEN: ${BROWSER_SERVICE_TOKEN:-}
       EVA_LETTA_CONTRACT_VERIFY: ${EVA_LETTA_CONTRACT_VERIFY:-false}
       EVA_TOOL_APPROVALS: ${EVA_TOOL_APPROVALS:-false}
       EVA_MINIAPP_JOURNAL_V2: ${EVA_MINIAPP_JOURNAL_V2:-false}
@@ -369,7 +372,7 @@ services:
       - letta_provider_config:/data/letta-config/providers
       - letta_app_server_data:/data/letta:rw
       - letta_llm_control:/data/llm-control
-    networks: [edge, data, agent, tools]
+    networks: [edge, data, agent, tools, browser]
     depends_on:
       postgres:
         condition: service_healthy
@@ -865,6 +868,48 @@ services:
       retries: 5
       start_period: 60s
 
+  # Браузер Евы (browser-service/README.md): Playwright + Chromium.
+  # Отдельная сеть `browser`, в которой кроме него только
+  # eva-agent-service: ни PostgreSQL, ни Valkey, ни Letta, ни сокета
+  # Docker. Выход в интернет — через проверяющий прокси внутри сервиса.
+  # Профиль browser: включается вместе с EVA_BROWSER_ENABLED.
+  browser-service:
+    <<: [*restart, *logging]
+    profiles: ["browser"]
+    build:
+      context: ./browser-service
+      target: runtime
+      args:
+        PLAYWRIGHT_BASE_IMAGE: ${PLAYWRIGHT_BASE_IMAGE}
+        PLAYWRIGHT_BASE_VERSION: ${PLAYWRIGHT_BASE_VERSION}
+    image: evaself/browser-service:0.1.0
+    container_name: evaself-browser-service
+    environment:
+      BROWSER_SERVICE_TOKEN: ${BROWSER_SERVICE_TOKEN:-}
+      EVA_ENV: ${EVA_ENV:-production}
+      TZ: ${TZ}
+      BROWSER_MAX_SESSIONS: ${BROWSER_MAX_SESSIONS:-8}
+      BROWSER_MAX_SESSIONS_PER_OWNER: ${BROWSER_MAX_SESSIONS_PER_OWNER:-2}
+      BROWSER_SESSION_IDLE_MS: ${BROWSER_SESSION_IDLE_MS:-300000}
+      BROWSER_SESSION_MAX_AGE_MS: ${BROWSER_SESSION_MAX_AGE_MS:-1800000}
+      BROWSER_OPERATION_TIMEOUT_MS: ${BROWSER_OPERATION_TIMEOUT_MS:-15000}
+      BROWSER_NAVIGATION_TIMEOUT_MS: ${BROWSER_NAVIGATION_TIMEOUT_MS:-20000}
+      BROWSER_SNAPSHOT_MAX_CHARS: ${BROWSER_SNAPSHOT_MAX_CHARS:-12000}
+    networks: [browser]
+    read_only: true
+    tmpfs: [/tmp]
+    shm_size: 1gb
+    mem_limit: 2g
+    pids_limit: 512
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8098/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
 # ---------------------------------------------------------------------
 # Segmented networks.
 #
@@ -876,6 +921,7 @@ services:
 #   data   PostgreSQL, Valkey and their clients
 #   agent  eva-agent-service <-> Letta App Server, nothing else
 #   tools  SearXNG, media-service, crawl4ai
+#   browser browser-service (Chromium) и его единственный клиент
 #
 # eva-agent-service is in every segment — the hub role the architecture
 # already gives it. admin-api and health-worker span edge/data/tools
@@ -895,6 +941,9 @@ networks:
     driver: bridge
   tools:
     name: evaself-tools
+    driver: bridge
+  browser:
+    name: evaself-browser
     driver: bridge
 
 volumes:

@@ -201,6 +201,14 @@ export interface Config {
   /** Как долго список инструментов MCP-сервера считается свежим. */
   mcpDiscoveryTtlMs: number;
   /**
+   * Браузер Евы (browser-service, профиль compose `browser`). Выключен по
+   * умолчанию: флаг включает человек вместе с профилем.
+   */
+  browserEnabled: boolean;
+  browserServiceUrl: string;
+  /** Общий секрет browser-service (заголовок X-Browser-Key). */
+  browserServiceToken: string;
+  /**
    * Проверка контракта Letta на живом развёртывании.
    *
    * Contract-тесты доказывают контракт на сборке. Флаг включает ту же
@@ -489,6 +497,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     osintCollectorSpiderfoot: bool("EVA_OSINT_COLLECTOR_SPIDERFOOT", true),
     toolSearchEnabled: bool("EVA_TOOL_SEARCH", false),
     mcpDiscoveryTtlMs: clampedInt("EVA_MCP_DISCOVERY_TTL_MS", 300_000, 30_000, 3_600_000),
+    browserEnabled: bool("EVA_BROWSER_ENABLED", false),
+    browserServiceUrl: str("EVA_BROWSER_SERVICE_URL", "http://browser-service:8098"),
+    browserServiceToken: str("BROWSER_SERVICE_TOKEN"),
     lettaContractVerify: bool("EVA_LETTA_CONTRACT_VERIFY", false),
     personaSyncTurnTimeoutMs: clampedInt("EVA_PERSONA_SYNC_TURN_TIMEOUT_MS", 3_000, 250, 15_000),
     checkinMorningHour: clampedInt("EVA_CHECKIN_MORNING_HOUR", 9, 5, 12),
@@ -645,6 +656,9 @@ export function configWarnings(config: Config): string[] {
   }
   if (config.telegramBotToken && !config.telegramWebhookSecret) {
     warnings.push("EVA_TELEGRAM_WEBHOOK_SECRET пуст — webhook Telegram будет отклонять все запросы");
+  }
+  if (config.browserEnabled && !config.browserServiceToken) {
+    warnings.push("EVA_BROWSER_ENABLED включён, а BROWSER_SERVICE_TOKEN пуст: browser-service отклонит все вызовы");
   }
   if (!config.mediaServiceToken) {
     warnings.push("MEDIA_SERVICE_TOKEN пуст — media-service принимает запросы без аутентификации");

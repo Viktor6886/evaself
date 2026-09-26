@@ -66,6 +66,9 @@ fi
 case ",$(get_env COMPOSE_PROFILES || true)," in
 *,osint,*) [ -n "$(get_env OSINT_WORKER_TOKEN || true)" ] || soft "OSINT_WORKER_TOKEN пуст — osint-worker не стартует в production" ;;
 esac
+case ",$(get_env COMPOSE_PROFILES || true)," in
+*,browser,*) [ -n "$(get_env BROWSER_SERVICE_TOKEN || true)" ] || soft "BROWSER_SERVICE_TOKEN пуст — browser-service не стартует в production" ;;
+esac
 [ -n "$(get_env MEDIA_ASR_BASE_URL || true)" ] || info "ASR not configured yet (voice messages will be refused politely)"
 
 # =====================================================================

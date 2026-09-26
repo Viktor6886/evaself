@@ -320,6 +320,16 @@ const TOOL_RISK: Readonly<Record<string, ToolRisk>> = Object.freeze({
   // (`unwrapBridgeCall`), а не по мосту.
   [TOOL_SEARCH_NAME]: "read",
   [TOOL_DESCRIBE_NAME]: "read",
+  // Браузер только читает: запросы с методом, отличным от GET, сервис
+  // браузера отменяет, в поля пароля и карты не вводит. Нажатие и ввод
+  // меняют лишь вкладку этого разговора — обычная запись без согласия.
+  browser_open: "read",
+  browser_snapshot: "read",
+  browser_scroll: "read",
+  browser_back: "read",
+  browser_close: "read",
+  browser_click: "low_risk_write",
+  browser_type: "low_risk_write",
 });
 
 const TOOL_APPROVAL_CATEGORY: Readonly<Record<string, MandatoryApprovalCategory>> = Object.freeze({

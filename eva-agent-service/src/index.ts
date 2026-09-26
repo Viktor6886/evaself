@@ -78,6 +78,8 @@ import { loadMasterKey, SecretStore } from "./admin/secret-store.js";
 import { McpHttpInvoker, McpServerPolicyRepository } from "./tools/mcp.js";
 import { McpDiscovery } from "./tools/mcp-discovery.js";
 import { recordMcpDiscovery } from "./tools/tool-metrics.js";
+import { BrowserServiceClient } from "./browser/client.js";
+import { BrowserToolSource } from "./browser/tools.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -324,6 +326,11 @@ async function main(): Promise<void> {
     },
     runtimeContext,
   );
+  // Браузер — отдельный источник реестра. Источник регистрируется
+  // всегда, а флаг проверяется при каждой сборке набора: выключенный
+  // браузер не даёт инструментов, не требуя перезапуска их потребителей.
+  const browserClient = new BrowserServiceClient({ baseUrl: config.browserServiceUrl, token: config.browserServiceToken });
+  toolFactory.registerSource(new BrowserToolSource({ enabled: () => config.browserEnabled, client: browserClient }));
   toolFactory.setApprovalCompletionCallback(async (execution) => await approvals.completeApprovedExecution(execution));
   toolFactory.setExecutionGate(async (input) => await approvals.authorizeExecution({
     ...input,

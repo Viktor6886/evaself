@@ -26,6 +26,8 @@ expect '.github/workflows/ci.yml' false false
 test "$(value 'osint-worker/app/main.py' osint)" = true
 test "$(value 'osint-spiderfoot/app/main.py' osint)" = true
 test "$(value 'media-service/app/main.py' osint)" = false
+test "$(value 'browser-service/src/sessions.ts' browser)" = true
+test "$(value 'eva-agent-service/src/browser/tools.ts' browser)" = false
 
 WORKFLOW="$ROOT/.github/workflows/ci.yml"
 grep -A30 '^  evals-fast:' "$WORKFLOW" | grep -q 'needs: changes'
