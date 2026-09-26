@@ -115,6 +115,18 @@ else
 	failures=$((failures + 1))
 fi
 
+echo "== pip-audit: osint-harvester"
+if with_retry 600 python3 -m pip_audit --strict --disable-pip --no-deps \
+	--requirement "$REPO_ROOT/osint-harvester/requirements.lock"; then
+	echo "  уязвимостей нет"
+elif [ $? -eq 124 ]; then
+	echo "::error::pip-audit не ответил за три попытки — аудит не выполнен"
+	failures=$((failures + 1))
+else
+	echo "::error::pip-audit нашёл уязвимости в osint-harvester"
+	failures=$((failures + 1))
+fi
+
 echo
 if [ "$failures" -gt 0 ]; then
 	echo "провалов аудита: $failures" >&2
