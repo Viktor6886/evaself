@@ -332,6 +332,8 @@ services:
       # включит флаг и профиль compose osint вместе.
       EVA_OSINT_ENABLED: ${EVA_OSINT_ENABLED:-false}
       EVA_OSINT_WORKER_URL: ${EVA_OSINT_WORKER_URL:-http://osint-worker:8095}
+      EVA_OSINT_HARVESTER_URL: ${EVA_OSINT_HARVESTER_URL:-http://osint-harvester:8096}
+      EVA_OSINT_SPIDERFOOT_URL: ${EVA_OSINT_SPIDERFOOT_URL:-http://osint-spiderfoot:8097}
       OSINT_WORKER_TOKEN: ${OSINT_WORKER_TOKEN}
       EVA_OSINT_DAILY_LIMIT: ${EVA_OSINT_DAILY_LIMIT:-3}
       EVA_LETTA_CONTRACT_VERIFY: ${EVA_LETTA_CONTRACT_VERIFY:-false}
@@ -732,6 +734,64 @@ services:
     security_opt: ["no-new-privileges:true"]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8095/health').status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # theHarvester (GPL-2.0-only) — отдельный контейнер, только пассивные
+  # источники без ключей (osint-harvester/README.md). Профиль osint.
+  osint-harvester:
+    <<: [*restart, *logging]
+    profiles: ["osint"]
+    build:
+      context: ./osint-harvester
+      target: runtime
+      args:
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE}
+        PYTHON_BASE_VERSION: ${PYTHON_BASE_VERSION}
+    image: evaself/osint-harvester:0.1.0
+    container_name: evaself-osint-harvester
+    environment:
+      OSINT_WORKER_TOKEN: ${OSINT_WORKER_TOKEN}
+      EVA_ENV: ${EVA_ENV:-production}
+      TZ: ${TZ}
+    networks: [tools]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8096/health').status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # SpiderFoot — закрытый список пассивных модулей, наружу только
+  # инфраструктурные события (osint-spiderfoot/README.md). Профиль osint.
+  osint-spiderfoot:
+    <<: [*restart, *logging]
+    profiles: ["osint"]
+    build:
+      context: ./osint-spiderfoot
+      target: runtime
+      args:
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE}
+        PYTHON_BASE_VERSION: ${PYTHON_BASE_VERSION}
+    image: evaself/osint-spiderfoot:0.1.0
+    container_name: evaself-osint-spiderfoot
+    environment:
+      OSINT_WORKER_TOKEN: ${OSINT_WORKER_TOKEN}
+      EVA_ENV: ${EVA_ENV:-production}
+      TZ: ${TZ}
+    networks: [tools]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8097/health').status==200 else 1)"]
       interval: 30s
       timeout: 5s
       retries: 5

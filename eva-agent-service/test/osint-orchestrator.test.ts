@@ -108,10 +108,16 @@ class MemoryStore implements OsintStore {
   async upsertIdentifier(identifier: { type: string; normalized: string }) {
     return this.identifierId(identifier.type, identifier.normalized);
   }
-  async upsertAccount(url: string) {
-    const created = !this.entities.has(url);
-    if (created) this.entities.set(url, `entity${++this.seq}`);
-    return { entityId: this.entities.get(url)!, created };
+  entitySchemas = new Map<string, string>();
+  async upsertEntity(schema: string, caption: string, _identifierId: string, allowCreate: boolean) {
+    const key = `${schema}:${caption}`;
+    const created = !this.entities.has(key);
+    if (created && !allowCreate) return null;
+    if (created) {
+      this.entities.set(key, `entity${++this.seq}`);
+      this.entitySchemas.set(key, schema);
+    }
+    return { entityId: this.entities.get(key)!, created };
   }
   async linkIdentifier(input: { entityId: string; identifierId: string; confidence: number }) { this.links.push(input); }
   async addClaim(input: { entityId: string; property: string; value: string; status: string }) { this.claims.push(input); }
@@ -161,7 +167,7 @@ const account = (url: string, discovered: string[] = []): CollectedSource => {
       properties: [{ property: "name", value: "Alice" }],
     },
     ...discovered.map((username) => ({
-      kind: "discovered" as const, evidence, accountUrl: url,
+      kind: "discovered" as const, evidence, owner: url,
       identifier: { type: "username" as const, raw: username, normalized: username },
     })),
   ]);
@@ -456,4 +462,50 @@ test("выключенный флаг не создаёт исследовани
   const service = new OsintService(db as never, { record: async () => { touched = true; } } as never, null, { enabled: false, dailyLimit: 3 });
   await assert.rejects(service.create(validInput), { code: "osint_disabled" });
   assert.equal(touched, false);
+});
+
+test("сущность из нескольких источников — одна; незапрошенное расширение не встаёт в очередь", async () => {
+  const store = new MemoryStore();
+  store.seed("domain", "example.com");
+  const evidence = structuredEvidence({ n: 1 });
+  const domainKey = { type: "domain" as const, raw: "example.com", normalized: "example.com" };
+  const infra = collector("infrastructure", ["domain"], () => ({
+    status: "succeeded",
+    externalRequests: 3,
+    sources: ["https://rdap.example/x", "https://crt.example/y"].map((locator, index) => ({
+      ...source(locator, [
+        { kind: "entity" as const, evidence: structuredEvidence({ index }), schema: "eva:Domain" as const, identifier: domainKey,
+          properties: [{ property: "registrar", value: "R" }] },
+        { kind: "discovered" as const, evidence, owner: "example.com", expand: false,
+          identifier: { type: "domain" as const, raw: `h${index}.example.com`, normalized: `h${index}.example.com` } },
+        { kind: "discovered" as const, evidence, owner: "example.com", expand: true,
+          identifier: { type: "ip" as const, raw: "93.184.216.34", normalized: "93.184.216.34" } },
+      ]),
+      tier: "official_registry" as const,
+    })),
+  }));
+  await new OsintOrchestrator(store, [infra]).run(new AbortController().signal);
+  assert.equal([...store.entitySchemas.values()].filter((schema) => schema === "eva:Domain").length, 1);
+  // Поддомены привязаны к домену, но в очереди только исходный домен и адрес.
+  assert.deepEqual([...store.frontier.keys()].map((id) => [...store.identifiers.values()].find((item) => item.id === id)!.normalized).sort(),
+    ["93.184.216.34", "example.com"]);
+  assert.ok(store.links.filter((link) => link.entityId === store.entities.get("eva:Domain:example.com")).length >= 3);
+  assert.ok(store.claims.some((claim) => claim.property === "registrar"));
+});
+
+test("бюджет сущностей: новая не заводится, известная дополняется", async () => {
+  const store = new MemoryStore();
+  store.budget = { ...DEFAULT_BUDGET, maxEntities: 1 };
+  store.seed("domain", "example.com");
+  const infra = collector("infrastructure", ["domain"], () => ({
+    status: "succeeded",
+    externalRequests: 1,
+    sources: [source("https://rdap.example/x", [
+      { kind: "entity", evidence: structuredEvidence({}), schema: "eva:Domain",
+        identifier: { type: "domain", raw: "example.com", normalized: "example.com" }, properties: [] },
+    ])],
+  }));
+  await new OsintOrchestrator(store, [infra]).run(new AbortController().signal);
+  // Счётчик уже учитывает субъекта: места для новой сущности нет.
+  assert.equal(store.entities.size, 0);
 });

@@ -53,7 +53,17 @@ export interface OsintStore {
   saveSource(collector: string, source: CollectedSource): Promise<string>;
   saveEvidence(sourceId: string, evidence: Evidence): Promise<string>;
   upsertIdentifier(identifier: NormalizedIdentifier): Promise<string>;
-  upsertAccount(url: string, identifierId: string): Promise<{ entityId: string; created: boolean }>;
+  /**
+   * Сущность схемы `schema`, ключ которой — идентификатор. Одна на
+   * пользователя. `allowCreate: false` — только найти существующую:
+   * бюджет сущностей исчерпан, а известная сущность его не расходует.
+   */
+  upsertEntity(
+    schema: string,
+    caption: string,
+    identifierId: string,
+    allowCreate: boolean,
+  ): Promise<{ entityId: string; created: boolean } | null>;
   linkIdentifier(input: {
     entityId: string;
     identifierId: string;
@@ -210,25 +220,31 @@ export class OsintOrchestrator {
   ): Promise<{ sources: number; accounts: number; discovered: number }> {
     let accounts = 0;
     let discovered = 0;
-    const accountsByUrl = new Map<string, string>();
+    // Ключ владельца (адрес аккаунта или значение идентификатора
+    // сущности) → id сущности в этом источнике.
+    const owners = new Map<string, string>();
     for (const source of output.sources) {
       const sourceId = await this.store.saveSource(collector, source);
       const quality = SOURCE_TIER_QUALITY[source.tier];
-      // Сначала аккаунты: найденный рядом идентификатор привязывается к
-      // своему профилю, если профиль из того же источника.
+      // Сначала аккаунты и сущности: найденный рядом идентификатор
+      // привязывается к своему владельцу из того же источника.
       const ordered = [...source.findings].sort((left, right) =>
-        Number(left.kind !== "account") - Number(right.kind !== "account"));
+        Number(left.kind === "discovered" || left.kind === "mention")
+          - Number(right.kind === "discovered" || right.kind === "mention"));
       for (const finding of ordered) {
         const evidenceId = await this.store.saveEvidence(sourceId, finding.evidence);
         if (finding.kind === "account") {
           const entityId = await this.saveAccount(collector, source, finding, evidenceId, subjectEntityId, target, budget);
           if (entityId) {
-            accountsByUrl.set(finding.url, entityId);
+            owners.set(finding.url, entityId);
             accounts += 1;
           }
+        } else if (finding.kind === "entity") {
+          const entityId = await this.saveEntity(collector, source, finding, evidenceId, budget);
+          if (entityId) owners.set(finding.identifier.normalized, entityId);
         } else if (finding.kind === "discovered") {
           const identifierId = await this.store.upsertIdentifier(finding.identifier);
-          const owner = finding.accountUrl ? accountsByUrl.get(finding.accountUrl) : undefined;
+          const owner = finding.owner ? owners.get(finding.owner) : undefined;
           if (owner) {
             await this.store.linkIdentifier({
               entityId: owner,
@@ -238,6 +254,7 @@ export class OsintOrchestrator {
               confidence: Math.min(quality, 0.6),
             });
           }
+          if (finding.expand === false) continue;
           const counters = await this.store.counters();
           const depth = target.depth + 1;
           if (depth <= budget.maxDepth && counters.identifiers < budget.maxIdentifiers
@@ -248,6 +265,39 @@ export class OsintOrchestrator {
       }
     }
     return { sources: output.sources.length, accounts, discovered };
+  }
+
+  private async saveEntity(
+    collector: string,
+    source: CollectedSource,
+    finding: Extract<Finding, { kind: "entity" }>,
+    evidenceId: string,
+    budget: InvestigationBudget,
+  ): Promise<string | null> {
+    const identifierId = await this.store.upsertIdentifier(finding.identifier);
+    const counters = await this.store.counters();
+    // Новая сущность сверх бюджета не заводится; уже известная —
+    // дополняется, она бюджет не расходует.
+    const entity = await this.store.upsertEntity(
+      finding.schema, finding.identifier.normalized, identifierId, counters.entities < budget.maxEntities);
+    if (!entity) return null;
+    const { entityId } = entity;
+    const quality = SOURCE_TIER_QUALITY[source.tier];
+    await this.store.linkIdentifier({ entityId, identifierId, evidenceId, collector, confidence: quality });
+    const sourceRef = [{ sourceTier: source.tier, sourceDomain: source.domain }];
+    for (const { property, value } of finding.properties) {
+      await this.store.addClaim({
+        entityId,
+        property,
+        value,
+        evidenceId,
+        collector,
+        confidence: quality,
+        status: claimStatus(sourceRef, false),
+        retrievedAt: source.retrievedAt,
+      });
+    }
+    return entityId;
   }
 
   private async saveAccount(
@@ -263,8 +313,10 @@ export class OsintOrchestrator {
     if (!identifier) return null;
     const identifierId = await this.store.upsertIdentifier(identifier);
     const counters = await this.store.counters();
-    if (counters.entities >= budget.maxEntities) return null;
-    const { entityId } = await this.store.upsertAccount(identifier.normalized, identifierId);
+    const entity = await this.store.upsertEntity(
+      "UserAccount", identifier.normalized, identifierId, counters.entities < budget.maxEntities);
+    if (!entity) return null;
+    const { entityId } = entity;
     await this.store.linkIdentifier({
       entityId,
       identifierId,

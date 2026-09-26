@@ -61,6 +61,29 @@ export interface WorkerComparison {
   features: WorkerFeature[];
 }
 
+/** Ответ инфраструктурного источника osint-worker. */
+export interface InfraResult {
+  collector: string;
+  status: "ok" | "degraded";
+  requests: number;
+  sourceUrl: string | null;
+  degradedReason: DegradedReason | null;
+  data: Record<string, unknown>;
+}
+
+export function parseInfra(raw: unknown): InfraResult {
+  const body = record(raw);
+  const reason = DEGRADED_REASONS.find((value) => value === body.degraded_reason) ?? null;
+  return {
+    collector: text(body.collector),
+    status: body.status === "degraded" ? "degraded" : "ok",
+    requests: count(body.requests),
+    sourceUrl: typeof body.source_url === "string" ? body.source_url : null,
+    degradedReason: reason,
+    data: record(body.data),
+  };
+}
+
 /** Сущность FollowTheMoney для сравнения: схема и свойства. */
 export interface FtmEntityInput {
   schema: "Person" | "Organization" | "Company" | "LegalEntity" | "PublicBody" | "UserAccount";
@@ -82,19 +105,126 @@ const DEFAULT_SCAN_TIMEOUT_MS = 200_000;
 const VERIFICATION_STATUSES: readonly VerificationStatus[] = ["found", "not_found", "unknown", "skipped", "degraded"];
 const DEGRADED_REASONS: readonly DegradedReason[] = ["rate_limited", "captcha", "timeout", "unavailable", "disabled"];
 
-export class OsintWorkerClient {
-  private readonly baseUrl: string;
-  private readonly token: string | null;
-  private readonly timeoutMs: number;
-  private readonly scanTimeoutMs: number;
+/**
+ * Общее у клиентов OSINT-сервисов: ключ, сроки, повтор чтений и перевод
+ * ответа в коды ошибок. Сервисов три (osint-worker, osint-harvester,
+ * osint-spiderfoot), и расхождение в обработке ключа или срока между ними
+ * было бы тем же дефектом, размноженным трижды.
+ */
+export class OsintHttpClient {
+  protected readonly baseUrl: string;
+  protected readonly token: string | null;
+  protected readonly timeoutMs: number;
+  protected readonly scanTimeoutMs: number;
   private readonly fetcher: typeof fetch;
 
-  constructor(options: OsintWorkerOptions) {
+  constructor(options: OsintWorkerOptions, private readonly service = "osint-worker") {
     this.baseUrl = options.baseUrl.replace(/\/+$/u, "");
     this.token = options.token?.trim() || null;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.scanTimeoutMs = options.scanTimeoutMs ?? DEFAULT_SCAN_TIMEOUT_MS;
     this.fetcher = options.fetcher ?? fetch;
+  }
+
+  protected async call(
+    method: "GET" | "POST",
+    path: string,
+    payload: unknown,
+    options: { timeoutMs: number; retry: boolean },
+  ): Promise<unknown> {
+    if (!this.token && path !== "/health") {
+      throw new EvaError(`OSINT_WORKER_TOKEN не задан (${this.service})`, { code: "osint_worker_not_configured", statusCode: 503 });
+    }
+    const attempts = options.retry ? 2 : 1;
+    let lastError: EvaError | null = null;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        return await this.once(method, path, payload, options.timeoutMs);
+      } catch (error) {
+        if (!(error instanceof EvaError) || !error.retryable) throw error;
+        lastError = error;
+      }
+    }
+    throw lastError!;
+  }
+
+  private async once(method: "GET" | "POST", path: string, payload: unknown, timeoutMs: number): Promise<unknown> {
+    const headers: Record<string, string> = {};
+    if (this.token) headers["X-Osint-Key"] = this.token;
+    if (payload !== undefined) headers["content-type"] = "application/json";
+    let response: Response;
+    try {
+      response = await this.fetcher(`${this.baseUrl}${path}`, {
+        method,
+        headers,
+        ...(payload !== undefined ? { body: JSON.stringify(payload) } : {}),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    } catch (error) {
+      const timeout = error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
+      throw new EvaError(timeout ? `${this.service} не ответил вовремя` : `${this.service} недоступен`, {
+        code: timeout ? "osint_worker_timeout" : "osint_worker_unavailable",
+        statusCode: 503,
+        retryable: true,
+      });
+    }
+    let body: unknown = null;
+    try {
+      body = await response.json();
+    } catch {
+      body = null;
+    }
+    if (response.ok) return body;
+    const workerCode = text(record(record(body).error).code) || null;
+    if (response.status === 401 || response.status === 403) {
+      throw new EvaError(`${this.service} отклонил ключ`, { code: "osint_worker_unauthorized", statusCode: 502 });
+    }
+    if (response.status === 400 || response.status === 422) {
+      throw new EvaError(`${this.service} отклонил запрос`, {
+        code: "osint_worker_rejected",
+        statusCode: 400,
+        details: { workerCode },
+      });
+    }
+    if (response.status === 504) {
+      throw new EvaError("скан не уложился в срок", {
+        code: "osint_worker_deadline",
+        statusCode: 504,
+        retryable: true,
+        details: { workerCode },
+      });
+    }
+    throw new EvaError(`${this.service} вернул HTTP ${response.status}`, {
+      code: "osint_worker_unavailable",
+      statusCode: 503,
+      retryable: response.status >= 500,
+    });
+  }
+}
+
+export class OsintWorkerClient extends OsintHttpClient {
+  constructor(options: OsintWorkerOptions) {
+    super(options, "osint-worker");
+  }
+
+  /** RDAP: регистрационные данные домена, сети или AS. Чтение — повторяется. */
+  async rdap(kind: "domain" | "ip" | "asn", value: string): Promise<InfraResult> {
+    return parseInfra(await this.call("POST", "/v1/infra/rdap", { kind, value }, { timeoutMs: this.timeoutMs, retry: true }));
+  }
+
+  /** RIPEstat: кто анонсирует сеть или кто держит AS. */
+  async ripestat(kind: "ip" | "asn", value: string): Promise<InfraResult> {
+    return parseInfra(await this.call("POST", "/v1/infra/ripestat", { kind, value }, { timeoutMs: this.timeoutMs, retry: true }));
+  }
+
+  /** Имена из журналов Certificate Transparency (crt.sh). */
+  async certificates(domain: string): Promise<InfraResult> {
+    return parseInfra(await this.call("POST", "/v1/infra/certificates", { domain }, { timeoutMs: this.timeoutMs, retry: true }));
+  }
+
+  /** Записи DNS домена через резолвер. */
+  async dns(domain: string): Promise<InfraResult> {
+    return parseInfra(await this.call("POST", "/v1/infra/dns", { domain }, { timeoutMs: this.timeoutMs, retry: true }));
   }
 
   async health(): Promise<{ rules: Record<VerifierSource, number> }> {
@@ -186,94 +316,20 @@ export class OsintWorkerClient {
     };
   }
 
-  private async call(
-    method: "GET" | "POST",
-    path: string,
-    payload: unknown,
-    options: { timeoutMs: number; retry: boolean },
-  ): Promise<unknown> {
-    if (!this.token && path !== "/health") {
-      throw new EvaError("OSINT_WORKER_TOKEN не задан", { code: "osint_worker_not_configured", statusCode: 503 });
-    }
-    const attempts = options.retry ? 2 : 1;
-    let lastError: EvaError | null = null;
-    for (let attempt = 0; attempt < attempts; attempt += 1) {
-      try {
-        return await this.once(method, path, payload, options.timeoutMs);
-      } catch (error) {
-        if (!(error instanceof EvaError) || !error.retryable) throw error;
-        lastError = error;
-      }
-    }
-    throw lastError!;
-  }
-
-  private async once(method: "GET" | "POST", path: string, payload: unknown, timeoutMs: number): Promise<unknown> {
-    const headers: Record<string, string> = {};
-    if (this.token) headers["X-Osint-Key"] = this.token;
-    if (payload !== undefined) headers["content-type"] = "application/json";
-    let response: Response;
-    try {
-      response = await this.fetcher(`${this.baseUrl}${path}`, {
-        method,
-        headers,
-        ...(payload !== undefined ? { body: JSON.stringify(payload) } : {}),
-        signal: AbortSignal.timeout(timeoutMs),
-      });
-    } catch (error) {
-      const timeout = error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
-      throw new EvaError(timeout ? "osint-worker не ответил вовремя" : "osint-worker недоступен", {
-        code: timeout ? "osint_worker_timeout" : "osint_worker_unavailable",
-        statusCode: 503,
-        retryable: true,
-      });
-    }
-    let body: unknown = null;
-    try {
-      body = await response.json();
-    } catch {
-      body = null;
-    }
-    if (response.ok) return body;
-    const workerCode = text(record(record(body).error).code) || null;
-    if (response.status === 401 || response.status === 403) {
-      throw new EvaError("osint-worker отклонил ключ", { code: "osint_worker_unauthorized", statusCode: 502 });
-    }
-    if (response.status === 400 || response.status === 422) {
-      throw new EvaError("osint-worker отклонил запрос", {
-        code: "osint_worker_rejected",
-        statusCode: 400,
-        details: { workerCode },
-      });
-    }
-    if (response.status === 504) {
-      throw new EvaError("скан не уложился в срок", {
-        code: "osint_worker_deadline",
-        statusCode: 504,
-        retryable: true,
-        details: { workerCode },
-      });
-    }
-    throw new EvaError(`osint-worker вернул HTTP ${response.status}`, {
-      code: "osint_worker_unavailable",
-      statusCode: 503,
-      retryable: response.status >= 500,
-    });
-  }
 }
 
-function record(value: unknown): Record<string, unknown> {
+export function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
-function list(value: unknown): unknown[] {
+export function list(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
-function text(value: unknown): string {
+export function text(value: unknown): string {
   return typeof value === "string" ? value : typeof value === "number" ? String(value) : "";
 }
 
-function count(value: unknown): number {
+export function count(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
 }

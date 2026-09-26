@@ -64,8 +64,25 @@ export type Finding =
     /** Свойства профиля в терминах FollowTheMoney (`name`, `username`). */
     properties: Array<{ property: string; value: string }>;
   }
-  /** Новый идентификатор для следующей итерации. `accountUrl` — чей он, если известно. */
-  | { kind: "discovered"; evidence: Evidence; identifier: NormalizedIdentifier; accountUrl?: string };
+  /**
+   * Инфраструктурная сущность — домен, IP-адрес, сеть — со свойствами из
+   * реестров. Ключ сущности — её идентификатор: один домен у одного
+   * пользователя — одна сущность, сколько бы сборщиков о нём ни сообщили.
+   */
+  | {
+    kind: "entity";
+    evidence: Evidence;
+    schema: "eva:Domain" | "eva:IPAddress" | "eva:Network" | "Organization";
+    identifier: NormalizedIdentifier;
+    properties: Array<{ property: string; value: string }>;
+  }
+  /**
+   * Новый идентификатор. `owner` — ключ аккаунта или сущности из того же
+   * источника, которому он принадлежит. `expand: false` — идентификатор
+   * запоминается, но в очередь расширения не встаёт (поддомены из
+   * журналов сертификатов: их сотни, и каждый не стоит отдельного шага).
+   */
+  | { kind: "discovered"; evidence: Evidence; identifier: NormalizedIdentifier; owner?: string; expand?: boolean };
 
 export interface CollectorOutput {
   status: Extract<CollectorStatus, "succeeded" | "degraded" | "failed" | "skipped">;
@@ -180,12 +197,12 @@ export class UsernameProfilesCollector implements Collector {
       for (const username of found?.discoveredUsernames ?? []) {
         const identifier = normalizeIdentifier("username", username);
         if (identifier && identifier.normalized !== target.normalized) {
-          findings.push({ kind: "discovered", evidence, identifier, accountUrl: profile.url });
+          findings.push({ kind: "discovered", evidence, identifier, owner: profile.url });
         }
       }
       for (const link of found?.discoveredLinks ?? []) {
         const identifier = normalizeIdentifier("social_account", link) ?? normalizeIdentifier("url", link);
-        if (identifier) findings.push({ kind: "discovered", evidence, identifier, accountUrl: profile.url });
+        if (identifier) findings.push({ kind: "discovered", evidence, identifier, owner: profile.url });
       }
       return {
         locator: profile.url,

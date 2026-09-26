@@ -177,24 +177,30 @@ export class PgOsintStore implements OsintStore {
     return await upsertIdentifier(this.db, this.userId, identifier);
   }
 
-  async upsertAccount(url: string, identifierId: string): Promise<{ entityId: string; created: boolean }> {
-    // Один профиль у одного пользователя — одна сущность, в каком бы
-    // исследовании он ни нашёлся.
+  async upsertEntity(
+    schema: string,
+    caption: string,
+    identifierId: string,
+    allowCreate: boolean,
+  ): Promise<{ entityId: string; created: boolean } | null> {
+    // Одна сущность на идентификатор у одного пользователя, в каком бы
+    // исследовании она ни нашлась.
     const existing = await this.db.query<{ id: string }>(
       `SELECT e.id FROM osint_entities e
          JOIN osint_entity_identifiers ei ON ei.entity_id = e.id AND ei.user_id = e.user_id
-        WHERE e.user_id = $1 AND e.schema = 'UserAccount' AND ei.identifier_id = $2
+        WHERE e.user_id = $1 AND e.schema = $2 AND ei.identifier_id = $3
         ORDER BY e.created_at
         LIMIT 1`,
-      [this.userId, identifierId],
+      [this.userId, schema, identifierId],
     );
     let entityId = existing.rows[0]?.id;
     const created = !entityId;
+    if (!entityId && !allowCreate) return null;
     if (!entityId) {
       entityId = randomUUID();
       await this.db.query(
-        `INSERT INTO osint_entities (id, user_id, schema, caption) VALUES ($1, $2, 'UserAccount', $3)`,
-        [entityId, this.userId, url.slice(0, 500)],
+        `INSERT INTO osint_entities (id, user_id, schema, caption) VALUES ($1, $2, $3, $4)`,
+        [entityId, this.userId, schema, caption.slice(0, 500)],
       );
     }
     await this.db.query(

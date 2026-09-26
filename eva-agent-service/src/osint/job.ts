@@ -19,13 +19,14 @@ import { PgOsintStore, type Queryable } from "./repository.js";
 /**
  * Сроки задания. Бюджет исследования — 15 минут работы; мягкий срок
  * задания чуть больше, чтобы оркестратор успел остановиться сам на
- * границе шага, а не был оборван посреди записи. Скан Maigret — самый
- * длинный внешний запрос — укладывается в `externalRequestTimeoutMs`.
+ * границе шага, а не был оборван посреди записи. Самый длинный внешний
+ * запрос — скан SpiderFoot (до 4,5 минуты с запасом на ответ) —
+ * укладывается в `externalRequestTimeoutMs`.
  */
 export const OSINT_JOB_TIMING: Partial<JobTimingPolicy> = {
   softTimeoutMs: 20 * 60_000,
   hardDeadlineMs: 25 * 60_000,
-  externalRequestTimeoutMs: 210_000,
+  externalRequestTimeoutMs: 280_000,
   leaseDurationMs: 120_000,
   leaseRenewIntervalMs: 30_000,
   maxAttempts: 2,

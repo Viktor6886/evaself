@@ -224,9 +224,10 @@ OSINT почти целиком состоит из персональных д�
 | Maigret 0.6.6 | MIT (проверено) | username → профили | 2 |
 | WhatsMyName, данные `062bcfe` | CC BY-SA 4.0 (проверено) | независимая проверка профиля | 2 |
 | Sherlock, данные `3760187` | MIT (проверено) | независимая проверка профиля | 2 |
-| SpiderFoot (только пассивные модули) | проверяется в своём batch | широкий пассивный сбор | 4 |
-| theHarvester | проверяется в своём batch | организация → домены, почта, хосты | 4 |
-| RDAP, RIPEstat, DNS, CT | открытые API | инфраструктура | 4 |
+| SpiderFoot, master `0f815a2` | MIT (проверено; релиз 4.0 — GPL-2.0) | пассивный DNS, реестры, репутация | 4 |
+| theHarvester 4.11.1 | GPL-2.0-only (проверено) — отдельный контейнер | домен → хосты, почта, адреса | 4 |
+| dnspython 2.8.0 | ISC (проверено) | записи DNS | 4 |
+| RDAP (IANA bootstrap), RIPEstat, crt.sh | открытые API | инфраструктура | 4 |
 | yente | отложен | fuzzy matching | позже |
 
 yente отложен по решению владельца: ему нужен Elasticsearch/OpenSearch
@@ -337,17 +338,58 @@ username, и username-ы, которые Maigret извлёк из найден�
 Инструментов Letta и API пока нет (OSINT-5): до них исследование создаётся
 только кодом, и флаг держится выключенным.
 
+## Инфраструктура (batch OSINT-4)
+
+Три новых сборщика, все без модели и без ключей:
+
+| Сборщик | Типы | Источник | Что даёт |
+|---|---|---|---|
+| `infrastructure` | домен, IP, AS | osint-worker: RDAP по IANA bootstrap, RIPEstat, crt.sh, DNS | сущности `eva:Domain`, `eva:IPAddress`, `eva:Network` со свойствами из реестров |
+| `theharvester` | домен | osint-harvester | хосты, адреса, почта, AS домена |
+| `spiderfoot` | домен, IP | osint-spiderfoot | пассивный DNS, реестры, репутационные списки |
+
+Ни один источник не обращается к исследуемому хосту: реестры, журналы
+сертификатов, пассивный DNS и резолвер.
+
+**Приватность.** Из RDAP берутся только организации: физическое лицо
+(vCard `kind: individual`) и скрытые регистратором записи не извлекаются.
+SpiderFoot отдаёт наружу только инфраструктурные события; имена людей,
+физические адреса, геоданные и сырые ответы реестров отбрасываются в
+контейнере. Модули и источники утечек (psbdmp, scylla, wikileaks,
+haveibeenpwned, dehashed, leakix, intelx, hudsonrock) запрещены явно,
+`sfp_whois`, `sfp_pgp` и `sfp_keybase` не включены: они приносят контакты
+людей.
+
+**Расширение.** Поддомены из журналов сертификатов, пассивного DNS и
+theHarvester запоминаются (привязаны к домену), но в очередь не встают:
+их сотни, и каждый не стоит отдельного шага. Публичные адреса, AS и почта
+встают — не больше 10 каждого вида за прогон. Адреса из частных и
+служебных диапазонов в очередь не попадают вовсе. Организация-регистрант
+идёт в веб-поиск.
+
+**Лицензии.** theHarvester — GPL-2.0-only: отдельный контейнер, обёртка
+`osint-harvester/app/main.py` под той же лицензией, Evaself обращается к
+нему только по HTTP. SpiderFoot взят из ветки master (MIT) по коммиту:
+релиз 4.0 выходил под GPL-2.0 и тянет `cryptography<4`. Пины upstream у
+обоих содержат версии с известными уязвимостями (aiohttp, ujson,
+cryptography, pyOpenSSL) — зависимости ставятся из своих lock-файлов с
+исправленными версиями, pip-audit проверяет их в CI. Стадия `test` каждого
+образа сверяет, что все разрешённые источники и модули существуют в
+закреплённой версии.
+
 ## Порядок ввода
 
 | Batch | Что входит |
 |---|---|
 | OSINT-1 (выполнен, #360) | доменный слой `src/osint/`, миграция 084, SQL-проверка границы арендатора, документ |
 | OSINT-2 (выполнен, #362) | `osint-worker` (Python, внутренняя сеть): FtM, nomenklatura, Maigret, WhatsMyName, Sherlock как проверка; типизированный клиент |
-| OSINT-3 (этот) | репозиторий, оркестратор, итеративное расширение, сборщик SearXNG + Crawl4AI на адаптерах `ResearchOrchestrator`, задания, отмена, идемпотентность, хранение и удаление, флаги |
-| OSINT-4 | SpiderFoot (пассивный профиль), theHarvester, RDAP, RIPEstat, DNS, CT |
+| OSINT-3 (выполнен, #363) | репозиторий, оркестратор, итеративное расширение, сборщик SearXNG + Crawl4AI на адаптерах `ResearchOrchestrator`, задания, отмена, идемпотентность, хранение и удаление, флаги |
+| OSINT-4 (этот) | SpiderFoot (закрытый список пассивных модулей), theHarvester, RDAP, RIPEstat, DNS, CT |
 | OSINT-5 | инструменты Letta (`osint_investigate`, `osint_get_status`, `osint_get_report`, `osint_expand`, `osint_search_entity`, `osint_explain_relationship`, `osint_cancel`), отчёт, API Mini App, метрики, evals |
 | OSINT-6 | реестры РФ (ЕГРЮЛ/ЕГРИП, Прозрачный бизнес, ЕФРСБ, арбитраж) через официальные API и выгрузки |
 | далее | IntelOwl, Amass, GHunt (опционально), Aleph/OpenAleph, yente |
 
 Флаги: `EVA_OSINT_ENABLED` (выключен), `EVA_OSINT_DAILY_LIMIT`,
-`EVA_OSINT_WORKER_URL`; osint-worker включается профилем compose `osint`.
+`EVA_OSINT_WORKER_URL`, `EVA_OSINT_HARVESTER_URL`, `EVA_OSINT_SPIDERFOOT_URL`;
+osint-worker, osint-harvester и osint-spiderfoot включаются профилем compose
+`osint`.

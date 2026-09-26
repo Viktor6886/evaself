@@ -170,7 +170,10 @@ export interface Config {
   osintEnabled: boolean;
   /** Адрес osint-worker во внутренней сети `tools`. */
   osintWorkerUrl: string;
-  /** Общий секрет с osint-worker (заголовок X-Osint-Key). */
+  /** theHarvester и SpiderFoot — отдельные контейнеры профиля `osint`. */
+  osintHarvesterUrl: string;
+  osintSpiderfootUrl: string;
+  /** Общий секрет OSINT-сервисов (заголовок X-Osint-Key). */
   osintWorkerToken: string;
   /** Сколько исследований пользователь может начать за сутки. */
   osintDailyLimit: number;
@@ -451,6 +454,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     researchOrchestratorEnabled: bool("EVA_RESEARCH_ORCHESTRATOR", false),
     osintEnabled: bool("EVA_OSINT_ENABLED", false),
     osintWorkerUrl: str("EVA_OSINT_WORKER_URL", "http://osint-worker:8095"),
+    osintHarvesterUrl: str("EVA_OSINT_HARVESTER_URL", "http://osint-harvester:8096"),
+    osintSpiderfootUrl: str("EVA_OSINT_SPIDERFOOT_URL", "http://osint-spiderfoot:8097"),
     osintWorkerToken: str("OSINT_WORKER_TOKEN"),
     osintDailyLimit: clampedInt("EVA_OSINT_DAILY_LIMIT", 3, 1, 50),
     lettaContractVerify: bool("EVA_LETTA_CONTRACT_VERIFY", false),
