@@ -338,6 +338,16 @@ try {
   await rejects(service.create(quotaInput("ci-osint-quota-02")), "osint_quota_exhausted", "исчерпанная квота тарифа не пропускает исследование");
   await pool.query(`DELETE FROM quotas WHERE metric = 'osint'`);
 
+  // Уточнение поиска: сохраняется очищенным и отдаётся сборщикам при
+  // взятии в работу; служебные символы поисковика до запроса не доходят.
+  const scoped = await new OsintService(db, outbox, null, { enabled: true, dailyLimit: 10 }).create(input(third, "ci-osint-key-0006", {
+    context: { city: 'Пермь site:"x"', organization: "  МАОУ СОШ № 101  " },
+  }));
+  const scopedState = await new PgOsintStore(db, third, scoped.id).begin();
+  assert(scopedState && scopedState.searchContext.city === "Пермь x" && scopedState.searchContext.organization === "МАОУ СОШ № 101",
+    "город и место работы доходят до сборщиков очищенными");
+  await service.cancel(third, scoped.id);
+
   // ------------------------------------------------------------------
   // Удаление и хранение
   // ------------------------------------------------------------------

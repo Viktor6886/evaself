@@ -20,7 +20,7 @@ import type { CollectedSource, FrontierItem } from "./collectors.js";
 import type { NormalizedIdentifier } from "./identifiers.js";
 import type { OsintStore, RunResult } from "./orchestrator.js";
 import type { MatchDecision } from "./resolver.js";
-import type { ClaimStatus, Evidence, IdentifierType, InvestigationBudget } from "./types.js";
+import type { ClaimStatus, Evidence, IdentifierType, InvestigationBudget, SearchContext } from "./types.js";
 
 export interface Queryable {
   query<T extends QueryResultRow = QueryResultRow>(
@@ -36,12 +36,22 @@ export class PgOsintStore implements OsintStore {
     private readonly investigationId: string,
   ) {}
 
-  async begin(): Promise<{ budget: InvestigationBudget; subjectEntityId: string | null; startedAt: number } | null> {
-    const { rows } = await this.db.query<{ budget: InvestigationBudget; subject_entity_id: string | null; started_at: Date }>(
+  async begin(): Promise<{
+    budget: InvestigationBudget;
+    subjectEntityId: string | null;
+    startedAt: number;
+    searchContext: SearchContext;
+  } | null> {
+    const { rows } = await this.db.query<{
+      budget: InvestigationBudget;
+      subject_entity_id: string | null;
+      started_at: Date;
+      search_context: SearchContext | null;
+    }>(
       `UPDATE osint_investigations
           SET status = 'processing', started_at = coalesce(started_at, now()), updated_at = now()
         WHERE id = $1 AND user_id = $2 AND status IN ('queued', 'processing')
-        RETURNING budget, subject_entity_id, started_at`,
+        RETURNING budget, subject_entity_id, started_at, search_context`,
       [this.investigationId, this.userId],
     );
     const row = rows[0];
@@ -53,7 +63,12 @@ export class PgOsintStore implements OsintStore {
         WHERE investigation_id = $1 AND user_id = $2 AND status = 'processing'`,
       [this.investigationId, this.userId],
     );
-    return { budget: row.budget, subjectEntityId: row.subject_entity_id, startedAt: new Date(row.started_at).getTime() };
+    return {
+      budget: row.budget,
+      subjectEntityId: row.subject_entity_id,
+      startedAt: new Date(row.started_at).getTime(),
+      searchContext: row.search_context ?? {},
+    };
   }
 
   async status(): Promise<string | null> {

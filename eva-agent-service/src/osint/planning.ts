@@ -15,7 +15,14 @@ import { parsePhoneNumberFromString } from "libphonenumber-js";
 
 import type { NormalizedIdentifier } from "./identifiers.js";
 
-export const MAX_QUERIES_PER_IDENTIFIER = 8;
+export const MAX_QUERIES_PER_IDENTIFIER = 12;
+
+/**
+ * Открытые страницы соцсетей, которые поисковики индексируют. Запрос с
+ * `site:` находит публичный профиль или пост там, где общий запрос
+ * тонет в тёзках. Закрытые профили поисковик не видит — и мы тоже.
+ */
+export const SOCIAL_SITES = ["vk.com", "ok.ru", "t.me"] as const;
 
 /** Транслитерация как в загранпаспорте РФ (ICAO Doc 9303). */
 const ICAO: Readonly<Record<string, string>> = {
@@ -91,7 +98,13 @@ export function phoneVariants(e164: string): string[] {
   const variants = [e164, phone.formatInternational(), national];
   // В России национальная запись уже начинается с восьмёрки; слитно
   // номер пишут в объявлениях: «89123456789».
-  if (phone.country === "RU") variants.push(`8${digits}`);
+  if (phone.country === "RU") {
+    variants.push(`8${digits}`);
+    // «8-912-485-88-18» и «912 485-88-18» — так номер пишут в
+    // объявлениях и на страницах контактов.
+    const groups = /^(\d{3})(\d{3})(\d{2})(\d{2})$/.exec(digits);
+    if (groups) variants.push(`8-${groups.slice(1).join("-")}`, `${groups[1]} ${groups[2]}-${groups[3]}-${groups[4]}`);
+  }
   return [...new Set(variants)];
 }
 
@@ -110,21 +123,43 @@ export function searchQueries(
   switch (identifier.type) {
     case "name": {
       const variants = personNameVariants(identifier.normalized);
-      queries = variants.map(quote);
       const full = variants[0];
-      if (full && context.city) queries.splice(1, 0, `${quote(full)} ${context.city}`);
-      if (full && context.organization) queries.splice(1, 0, `${quote(full)} ${quote(context.organization)}`);
+      // «Имя Фамилия» — форма, в которой человек подписан в соцсетях.
+      // Первый двухсловный вариант: у полного ФИО это «Иван Петров», у
+      // имени без отчества — сам ввод в том порядке, в каком его дали.
+      const short = variants.find((variant) => variant.split(" ").length === 2) ?? full;
+      queries = [];
+      // Уточнение из просьбы человека идёт первым: у распространённого
+      // имени без города выдача — чужие люди.
+      if (full && context.organization) queries.push(`${quote(full)} ${quote(context.organization)}`);
+      if (short && context.city) queries.push(`${quote(short)} ${context.city}`);
+      if (full && context.city && full !== short) queries.push(`${quote(full)} ${context.city}`);
+      queries.push(...variants.map(quote));
+      if (short) {
+        const where = context.city ? ` ${context.city}` : "";
+        for (const site of SOCIAL_SITES) queries.push(`${quote(short)}${where} site:${site}`);
+      }
       break;
     }
     case "username":
       queries = [quote(identifier.normalized), `${quote(identifier.normalized)} profile`];
       break;
-    case "email":
+    case "email": {
+      const local = identifier.normalized.split("@")[0] ?? "";
       queries = [quote(identifier.normalized), `${quote(identifier.normalized)} filetype:pdf`];
+      // Имя ящика часто совпадает с ником в соцсетях.
+      if (local.length >= 4) queries.push(...SOCIAL_SITES.map((site) => `${quote(local)} site:${site}`));
       break;
-    case "phone":
-      queries = phoneVariants(identifier.normalized).map(quote);
+    }
+    case "phone": {
+      const variants = phoneVariants(identifier.normalized);
+      queries = variants.map(quote);
+      // Слитная запись — та, что стоит в объявлениях и на страницах
+      // организаций; с ней же ищутся упоминания в соцсетях.
+      const compact = variants.find((variant) => /^8\d{10}$/.test(variant)) ?? variants[0];
+      if (compact) for (const site of SOCIAL_SITES) queries.push(`${quote(compact)} site:${site}`);
       break;
+    }
     case "domain":
       queries = [`site:${identifier.normalized}`, quote(identifier.normalized)];
       break;

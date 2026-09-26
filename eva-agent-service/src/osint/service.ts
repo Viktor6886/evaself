@@ -26,7 +26,7 @@ import { normalizeIdentifier, type NormalizedIdentifier } from "./identifiers.js
 import { recordOsint } from "./metrics.js";
 import { OsintReportBuilder, type OsintReport } from "./report.js";
 import { linkIdentifier, upsertIdentifier, type Queryable } from "./repository.js";
-import { DEFAULT_BUDGET, isIdentifierType, type IdentifierType, type InvestigationBudget } from "./types.js";
+import { DEFAULT_BUDGET, isIdentifierType, type IdentifierType, type InvestigationBudget, type SearchContext } from "./types.js";
 
 export const OSINT_JOB_TYPE = "osint_investigation";
 
@@ -57,6 +57,8 @@ export interface CreateInvestigationInput {
   subject: "person" | "organization";
   seeds: Array<{ type: string; value: string }>;
   mode?: "standard" | "deep";
+  /** Город и место работы из просьбы человека — сужают поиск по имени. */
+  context?: { city?: string | null; organization?: string | null };
   /** Повтор с тем же ключом возвращает то же исследование. */
   idempotencyKey: string;
 }
@@ -118,6 +120,21 @@ export class OsintService {
     return seeds;
   }
 
+  /**
+   * Уточнение поиска: короткий текст без кавычек и служебных символов
+   * поисковика — он встаёт в запрос как есть, и `site:` или `"` в нём
+   * переписали бы запрос.
+   */
+  static searchContext(raw: CreateInvestigationInput["context"]): SearchContext {
+    const clean = (value: string | null | undefined): string | undefined => {
+      const text = (value ?? "").replace(/["':()]|\bsite\b/giu, " ").replace(/\s+/g, " ").trim();
+      return text.length >= 2 && text.length <= 100 ? text : undefined;
+    };
+    const city = clean(raw?.city);
+    const organization = clean(raw?.organization);
+    return { ...(city ? { city } : {}), ...(organization ? { organization } : {}) };
+  }
+
   async create(input: CreateInvestigationInput): Promise<{ id: string; created: boolean }> {
     if (!this.options.enabled) {
       throw new EvaError("OSINT-исследования выключены", { code: "osint_disabled", statusCode: 403 });
@@ -125,6 +142,7 @@ export class OsintService {
     const seeds = OsintService.validate(input);
     const mode = input.mode ?? "standard";
     const budget = mode === "deep" ? DEEP_BUDGET : DEFAULT_BUDGET;
+    const searchContext = OsintService.searchContext(input.context);
     const outcome = await this.db.withUserScope({ userId: input.userId, label: "osint.create", inherit: true }, async () =>
       await this.db.transaction(async (client) => {
         // Всё — под блокировкой строки пользователя: два одновременных
@@ -166,10 +184,10 @@ export class OsintService {
         const id = randomUUID();
         await client.query(
           `INSERT INTO osint_investigations
-             (id, user_id, conversation_id, query, purpose, mode, status, budget, idempotency_key)
-           VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7::jsonb, $8)`,
+             (id, user_id, conversation_id, query, purpose, mode, status, budget, idempotency_key, search_context)
+           VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7::jsonb, $8, $9::jsonb)`,
           [id, input.userId, input.conversationId ?? null, input.query.trim(), input.purpose.trim(), mode,
-            JSON.stringify(budget), input.idempotencyKey],
+            JSON.stringify(budget), input.idempotencyKey, JSON.stringify(searchContext)],
         );
         const subjectId = await this.createSubject(client, input, id, seeds);
         await client.query(

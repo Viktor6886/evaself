@@ -428,6 +428,38 @@ test("веб-поиск укладывается в оставшийся бюд�
   assert.ok(output.externalRequests <= 3);
 });
 
+test("сниппет выдачи с упоминанием — находка без чтения страницы; город из просьбы уточняет запрос", async () => {
+  const queries: string[] = [];
+  const reads: string[] = [];
+  const access = {
+    search: async (query: string) => {
+      queries.push(query);
+      return [
+        { url: "https://vk.com/id1", title: "Иван Петров | ВКонтакте", snippet: "Иван Петров, Пермь. Школа № 101." },
+        { url: "https://other.example/x", title: "Другое", snippet: "ничего про него" },
+      ];
+    },
+    read: async (url: string) => {
+      reads.push(url);
+      throw new Error("js_required");
+    },
+  };
+  const output = await new WebSearchCollector(access, { queriesPerIdentifier: 3, pagesPerIdentifier: 2, maxPageBytes: 100_000 })
+    .collect({
+      target: { identifierId: "i", type: "name", normalized: "иван петров", depth: 0 },
+      signal: signal(),
+      remainingRequests: 100,
+      context: { city: "Пермь" },
+    });
+  assert.equal(queries[0], '"Иван Петров" Пермь', "город — в первом запросе");
+  assert.deepEqual(output.sources.map((item) => item.locator), ["https://vk.com/id1"]);
+  const quote = (output.sources[0]!.findings[0]!.evidence as { quote: string }).quote;
+  assert.ok(quote.includes("Иван Петров"), "цитата — из самого сниппета");
+  assert.ok(!reads.includes("https://vk.com/id1"), "страница с находкой в сниппете не читается повторно");
+  // Нечитаемые кандидаты при найденном в выдаче — не деградация.
+  assert.equal(output.status, "succeeded");
+});
+
 test("цитата — подстрока текста, а не пересказ", () => {
   const text = "x".repeat(500) + " Телефон +7 912 345-67-89 для связи " + "y".repeat(500);
   const evidence = mentionQuote(text, ["+7 912 345-67-89"]);

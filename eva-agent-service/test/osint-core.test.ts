@@ -94,7 +94,7 @@ test("варианты имени и телефона конечны и разу
   // «Имя Отчество Фамилия» распознаётся по отчеству.
   assert.ok(personNameVariants("иван сергеевич петров").includes("Петров И.С."));
   assert.deepEqual(phoneVariants("+79123456789"), [
-    "+79123456789", "+7 912 345 67 89", "8 (912) 345-67-89", "89123456789",
+    "+79123456789", "+7 912 345 67 89", "8 (912) 345-67-89", "89123456789", "8-912-345-67-89", "912 345-67-89",
   ]);
   const queries = searchQueries(
     { type: "name", raw: "x", normalized: "петров иван сергеевич" },
@@ -102,6 +102,13 @@ test("варианты имени и телефона конечны и разу
   );
   assert.ok(queries.length <= MAX_QUERIES_PER_IDENTIFIER);
   assert.ok(queries.includes('"Петров Иван Сергеевич" Пермь'));
+  // Уточнение идёт первым, открытые страницы соцсетей — с городом.
+  assert.equal(queries[0], '"Петров Иван Сергеевич" "Ромашка"');
+  assert.ok(queries.includes('"Иван Петров" Пермь site:vk.com'));
+  assert.ok(queries.includes('"Иван Петров" Пермь site:ok.ru'));
+  const phone = searchQueries({ type: "phone", raw: "x", normalized: "+79123456789" });
+  assert.ok(phone.includes('"8-912-345-67-89"') && phone.includes('"89123456789" site:vk.com'));
+  assert.ok(phone.length <= MAX_QUERIES_PER_IDENTIFIER);
 });
 
 test("доказательство: цитата обязана быть в источнике, отпечаток не зависит от порядка ключей", () => {

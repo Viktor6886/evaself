@@ -193,3 +193,13 @@ export const DEFAULT_BUDGET: InvestigationBudget = {
   maxRuntimeMs: 15 * 60_000,
   maxCostCents: 0,
 };
+
+/**
+ * Уточнение из просьбы человека: город и место работы. Сужает поиск по
+ * распространённому имени; сам по себе идентификатором не является и в
+ * граф не попадает.
+ */
+export interface SearchContext {
+  city?: string;
+  organization?: string;
+}

@@ -65,16 +65,25 @@ export class SearxCrawlAdapters {
     });
   }
 
-  async search(query: string, signal: AbortSignal): Promise<Array<{ url: string; title: string }>> {
+  async search(query: string, signal: AbortSignal): Promise<Array<{ url: string; title: string; snippet?: string }>> {
     signal.throwIfAborted();
     const url = new URL("search", this.searxUrl);
     url.searchParams.set("q", query);
     url.searchParams.set("format", "json");
+    // Кириллический запрос — русская выдача: без подсказки движки отдают
+    // англоязычных тёзок и пропускают ВКонтакте и Одноклассники.
+    if (/\p{Script=Cyrillic}/u.test(query)) url.searchParams.set("language", "ru");
     const response = await this.gateway.request(url.toString(), { signal });
     if (!response.ok) throw new Error("searx_search_failed");
-    const body = response.json<{ results?: Array<{ url?: string; title?: string }> }>();
+    const body = response.json<{ results?: Array<{ url?: string; title?: string; content?: string }> }>();
     return (body.results ?? []).flatMap((item) =>
-      item.url ? [{ url: item.url, title: item.title ?? item.url }] : []);
+      item.url
+        ? [{
+          url: item.url,
+          title: item.title ?? item.url,
+          ...(typeof item.content === "string" && item.content.trim() ? { snippet: item.content.slice(0, 2_000) } : {}),
+        }]
+        : []);
   }
 
   async read(url: string, signal: AbortSignal, maxBytes: number): Promise<{
