@@ -14,6 +14,7 @@ import type pg from "pg";
 
 import { adminBadRequest, AdminApiError } from "./errors.js";
 import { sanitizeParameters } from "./provider-safe.js";
+import { publicManifests, resolveOpenAiCompat } from "../router/provider-manifests.js";
 
 /** Поля llm_providers, которые роутер использует и админ может менять. */
 const NUMERIC_FIELDS = [
@@ -214,6 +215,11 @@ export class LlmRouterAdminService {
         return {
           ...row,
           additional_parameters: sanitizeParameters(row.additional_parameters),
+          // Какой манифест узнан у OpenAI-совместимого провайдера — явный
+          // или по адресу. Панели это нужно, чтобы показать шаблон.
+          manifest_id: row.protocol === "openai-compatible"
+            ? resolveOpenAiCompat(String(row.base_url ?? ""), (row.additional_parameters ?? {}) as Record<string, unknown>).manifestId
+            : null,
           routes: memberships,
           single_selected: singleId === id,
           status: providerStatus(row),
@@ -225,6 +231,7 @@ export class LlmRouterAdminService {
       })),
       recent_failures: recent.rows,
       routing_settings: settings,
+      manifests: publicManifests(),
     };
   }
 

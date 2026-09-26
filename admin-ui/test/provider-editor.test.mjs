@@ -300,3 +300,53 @@ test("ставка кэша уходит на сервер пустой, а не
     await panel.close();
   }
 });
+
+/**
+ * Шаблон OpenAI-совместимого провайдера. Манифест описывает провайдера
+ * данными в роутере; форма лишь подставляет протокол и адрес и
+ * записывает `provider_manifest` — отдельного поля хранения у шаблона нет.
+ */
+describe("шаблон провайдера", () => {
+  let panel;
+  after(async () => await panel?.close());
+
+  test("подставляет протокол и адрес и помнит манифест, адрес руками не затирается", async () => {
+    panel = await openPanel({ routes: {
+      ...ROUTES,
+      "/llm/state": {
+        providers: [], routes: [], recent_failures: [], routing_settings: { mode: "adaptive" },
+        manifests: [
+          { id: "openrouter", title: "OpenRouter", protocol: "openai-compatible", base_url: "https://openrouter.ai/api/v1", self_hosted: false, hints: {} },
+          { id: "deepseek", title: "DeepSeek", protocol: "openai-compatible", base_url: "https://api.deepseek.com/v1", self_hosted: false, hints: {} },
+        ],
+      },
+    } });
+    await panel.page.evaluate(() => openPage("ai"));
+    await panel.page.waitForFunction(() => document.querySelector("#page-ai").classList.contains("active"));
+    const result = await panel.page.evaluate(async () => {
+      openProviderEditor(null);
+      const form = document.querySelector("#provider-form");
+      const options = [...form.elements.manifest.options].map((option) => option.value);
+      form.elements.manifest.value = "openrouter";
+      form.elements.manifest.dispatchEvent(new Event("change"));
+      const first = { base: form.elements.base_url.value, name: form.elements.name.value, extra: JSON.parse(form.elements.additional_parameters.value) };
+      form.elements.manifest.value = "deepseek";
+      form.elements.manifest.dispatchEvent(new Event("change"));
+      const switched = form.elements.base_url.value;
+      form.elements.base_url.value = "https://my-proxy.example/v1";
+      form.elements.manifest.value = "openrouter";
+      form.elements.manifest.dispatchEvent(new Event("change"));
+      const kept = form.elements.base_url.value;
+      form.elements.manifest.value = "";
+      form.elements.manifest.dispatchEvent(new Event("change"));
+      return { options, first, switched, kept, cleared: JSON.parse(form.elements.additional_parameters.value) };
+    });
+    assert.deepEqual(result.options, ["", "openrouter", "deepseek"]);
+    assert.equal(result.first.base, "https://openrouter.ai/api/v1");
+    assert.equal(result.first.name, "OpenRouter");
+    assert.equal(result.first.extra.provider_manifest, "openrouter");
+    assert.equal(result.switched, "https://api.deepseek.com/v1", "адрес из другого шаблона заменяется");
+    assert.equal(result.kept, "https://my-proxy.example/v1", "адрес, введённый руками, не затирается");
+    assert.equal(result.cleared.provider_manifest, undefined);
+  });
+});

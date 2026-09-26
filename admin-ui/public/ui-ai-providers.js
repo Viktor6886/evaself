@@ -211,6 +211,44 @@ function shortMessage(message) {
   return first.length > 90 ? `${first.slice(0, 90)}…` : first;
 }
 
+/**
+ * Шаблоны OpenAI-совместимых провайдеров приходят из /llm/state вместе с
+ * провайдерами. Выбор шаблона подставляет протокол и адрес и записывает
+ * `provider_manifest` в additional_parameters — второго места, где
+ * хранится манифест, нет.
+ */
+function fillManifestSelect(form, provider) {
+  const select = form.elements.manifest;
+  if (!select) return;
+  const manifests = Array.isArray(state.router?.manifests) ? state.router.manifests : [];
+  select.innerHTML = '<option value="">Свой адрес, без шаблона</option>'
+    + manifests.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.title)}</option>`).join("");
+  select.value = provider?.additional_parameters?.provider_manifest || provider?.manifest_id || "";
+}
+
+function applyManifest(form) {
+  const manifests = Array.isArray(state.router?.manifests) ? state.router.manifests : [];
+  const chosen = manifests.find((item) => item.id === form.elements.manifest.value) || null;
+  let additional = {};
+  try {
+    additional = JSON.parse(form.elements.additional_parameters.value || "{}") || {};
+  } catch {
+    additional = {};
+  }
+  if (chosen) {
+    additional.provider_manifest = chosen.id;
+    form.elements.protocol.value = chosen.protocol;
+    const current = form.elements.base_url.value.trim();
+    // Адрес заменяется, только если он пуст или взят из другого шаблона:
+    // введённый руками адрес (прокси, свой регион) не затирается.
+    if (!current || manifests.some((item) => item.base_url === current)) form.elements.base_url.value = chosen.base_url;
+    if (!form.elements.name.value.trim()) form.elements.name.value = chosen.title;
+  } else {
+    delete additional.provider_manifest;
+  }
+  form.elements.additional_parameters.value = JSON.stringify(additional, null, 2);
+}
+
 function openProviderEditor(provider = null) {
   const form = $("#provider-form");
   form.reset();
@@ -235,6 +273,7 @@ function openProviderEditor(provider = null) {
     null,
     2,
   );
+  fillManifestSelect(form, provider);
 
   // Поля маршрутизации живут в таблице роутера, а не в
   // additional_parameters: подставляем их из /llm/state.
@@ -531,3 +570,5 @@ $("#providers-list").addEventListener("click", (event) => {
     ).catch(handleError);
   }
 });
+
+$("#provider-form").elements.manifest?.addEventListener("change", (event) => applyManifest(event.target.form));

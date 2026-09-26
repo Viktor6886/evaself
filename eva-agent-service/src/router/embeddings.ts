@@ -11,6 +11,7 @@
  * есть и адрес, и ключ, и таймаут.
  */
 
+import { openAiCompatHeaders, resolveOpenAiCompat } from "./provider-manifests.js";
 import type { ProviderProfile } from "./types.js";
 
 export interface EmbeddingProviderSource {
@@ -60,8 +61,11 @@ export class RouterEmbeddings {
       const response = await call(`${provider.base_url.replace(/\/$/, "")}/embeddings`, {
         method: "POST",
         headers: {
+          ...openAiCompatHeaders(
+            resolveOpenAiCompat(provider.base_url, { ...provider.generation_defaults, ...provider.additional_parameters }),
+            provider.api_key,
+          ),
           "content-type": "application/json",
-          authorization: `Bearer ${provider.api_key}`,
         },
         body: JSON.stringify({ model: this.options.model, input: texts }),
         signal: controller.signal,
