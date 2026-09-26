@@ -252,3 +252,10 @@ async def test_dns_records_are_collected_through_the_resolver():
     result = await collector.dns("example.com")
     assert result.status == "ok"
     assert result.data["records"] == {"A": ["93.184.216.34"], "MX": ["10 mail.example.com."], "TXT": ["v=spf1 -all"]}
+
+
+def test_registry_without_https_is_not_used():
+    from app.infra import _https
+
+    assert _https(["http://rdap.example/", "https://rdap.example/"]) == "https://rdap.example/"
+    assert _https(["http://rdap.example/"]) is None

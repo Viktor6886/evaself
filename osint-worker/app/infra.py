@@ -342,8 +342,9 @@ class InfraCollector:
             for entries, urls in services:
                 for entry in entries:
                     network = ipaddress.ip_network(entry, strict=False)
-                    if address in network and urls and (best is None or network.prefixlen > best[0]):
-                        best = (network.prefixlen, _https(urls))
+                    secure = _https(urls) if urls else None
+                    if address in network and secure and (best is None or network.prefixlen > best[0]):
+                        best = (network.prefixlen, secure)
             return best[1] if best else None
         services = await self._servers("asn", requests)
         asn = int(value)
@@ -424,6 +425,7 @@ class InfraCollector:
         return InfraResult("dns", status, 7, None, {"records": records}, "timeout" if status == "degraded" else None)
 
 
-def _https(urls: list[str]) -> str:
+def _https(urls: list[str]) -> str | None:
+    """Адрес реестра только по https: регистрационные данные не идут открытым каналом."""
     secure = [url for url in urls if isinstance(url, str) and url.startswith("https://")]
-    return (secure or urls)[0]
+    return secure[0] if secure else None
