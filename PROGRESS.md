@@ -5,7 +5,8 @@
 
 ## Инструменты, браузер и субагенты по мотивам Hermes Agent — 2026-09-26
 
-Ветка: `claude/evaself-architecture-improvements-3d7d2s`. Статус: в работе.
+Ветка: `claude/evaself-architecture-improvements-3d7d2s`. Статус: все восемь
+этапов выполнены и запушены; pull request не открывался (не запрошен).
 
 Задание: реестр инструментов с поиском (`tool_search`/`tool_describe`/
 `tool_call`), MCP discovery, изолированный browser-service, субагенты
@@ -98,6 +99,14 @@ media-service pytest (вне образа) → 141 PASS, 8 skip, 1 FAIL: нет 
 python3 scripts/ci/assert-*.py (tenant-scope, env-plumbing, admin-route-access, frontend-routes, doc-paths) → PASS
 bash scripts/ci/test-changed-scope.sh → PASS
 ```
+
+Независимое ревью (отдельный агент, Sonnet, по диффу без lock-файлов):
+1) все пункты задания выполнены — да; 2) «не делай» и инварианты не
+нарушены (обход подтверждений через `tool_call`, выход браузера в частные
+сети, инструменты записи у субагентов — нет) — да; 3) лишних изменений —
+нет. Блокирующих замечаний нет; два низких — классификация ошибок MCP по
+тексту сообщения (оставлено) и кэш DNS 30 с (не обход: прокси соединяется
+с проверенным и закэшированным IP).
 
 Rollout: всё за флагами, выключено по умолчанию (`EVA_TOOL_SEARCH`,
 `EVA_BROWSER_ENABLED` + профиль `browser`, `EVA_DELEGATION_ENABLED`).
