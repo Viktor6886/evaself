@@ -25,8 +25,19 @@ info "uptime:$(uptime -p 2>/dev/null | sed 's/^up//')"
 MEM_FREE="$(awk '/MemAvailable/ {printf "%d", $2/1024}' /proc/meminfo)"
 DISK_PCT="$(df --output=pcent / | tail -1 | tr -dc '0-9')"
 DISK_FREE="$(df -BG --output=avail / | tail -1 | tr -dc '0-9')"
+# Порог сравнивается в мегабайтах: `df -BG` округляет вверх, и 1,5 ГБ
+# выглядели бы как 2.
+DISK_FREE_MB="$(df -BM --output=avail / | tail -1 | tr -dc '0-9')"
 info "memory available: ${MEM_FREE} MB   root disk used: ${DISK_PCT}% (${DISK_FREE} GB free)"
-[ "$DISK_PCT" -lt 90 ] || critical "root filesystem is ${DISK_PCT}% full — run 'make disk-cleanup'"
+# Критично только то, что уже мешает работать: меньше 2 ГБ свободно или
+# 97% занято. 90% при десятке свободных гигабайт — повод почистить, а не
+# откатывать обновление: make update считает любую критическую проблему
+# поломкой кода и откатывает образы, хотя они тут ни при чём.
+if [ "$DISK_FREE_MB" -lt 2048 ] || [ "$DISK_PCT" -ge 97 ]; then
+	critical "root filesystem is ${DISK_PCT}% full (${DISK_FREE} GB free) — run 'make disk-cleanup'"
+elif [ "$DISK_PCT" -ge 90 ]; then
+	soft "root filesystem is ${DISK_PCT}% full (${DISK_FREE} GB free) — run 'make disk-cleanup'"
+fi
 [ "$MEM_FREE" -gt 300 ] || soft "less than 300 MB of memory available"
 
 # =====================================================================
