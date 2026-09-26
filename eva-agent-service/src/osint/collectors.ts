@@ -315,8 +315,9 @@ export class WebSearchCollector implements Collector {
     const variants = mentionVariants(target);
     let requests = 0;
     let failures = 0;
-    const candidates: string[] = [];
-    const seen = new Set<string>();
+    // Порядок вставки — порядок выдачи: страницы читаются от лучших.
+    const candidates = new Set<string>();
+    const recorded = new Set<string>();
     const sources: CollectedSource[] = [];
     for (const query of queries) {
       signal.throwIfAborted();
@@ -324,18 +325,21 @@ export class WebSearchCollector implements Collector {
       try {
         for (const result of await this.web.search(query, signal)) {
           const canonical = canonicalizeUrl(result.url);
-          if (!canonical || seen.has(canonical)) continue;
-          seen.add(canonical);
+          if (!canonical || recorded.has(canonical)) continue;
           // Сниппет выдачи с искомой строкой — уже находка: страницы
           // соцсетей без браузера часто не читаются, а поисковик их
           // текст видел. Доказательство — цитата из самого сниппета.
+          // Та же страница в выдаче другого запроса может прийти с другим
+          // сниппетом — поэтому кандидат проверяется снова.
           const snippet = [result.title, result.snippet ?? ""].join("\n").trim();
           const evidence = mentionQuote(snippet, variants);
           if (evidence) {
+            recorded.add(canonical);
+            candidates.delete(canonical);
             sources.push(this.source(canonical, snippet, target, evidence));
             continue;
           }
-          candidates.push(canonical);
+          candidates.add(canonical);
         }
       } catch (error) {
         if (signal.aborted) throw error;
@@ -346,7 +350,7 @@ export class WebSearchCollector implements Collector {
       return { status: "degraded", degradedReason: "unavailable", externalRequests: requests, sources: [] };
     }
 
-    const pages = candidates.slice(0, Math.max(0, Math.min(this.limits.pagesPerIdentifier, remainingRequests - requests)));
+    const pages = [...candidates].slice(0, Math.max(0, Math.min(this.limits.pagesPerIdentifier, remainingRequests - requests)));
     let readFailures = 0;
     for (const url of pages) {
       signal.throwIfAborted();

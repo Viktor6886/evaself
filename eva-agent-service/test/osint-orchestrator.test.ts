@@ -434,8 +434,12 @@ test("сниппет выдачи с упоминанием — находка �
   const access = {
     search: async (query: string) => {
       queries.push(query);
+      // Первый запрос отдаёт страницу без упоминания в сниппете, второй —
+      // ту же страницу с упоминанием: находка не должна потеряться.
       return [
-        { url: "https://vk.com/id1", title: "Иван Петров | ВКонтакте", snippet: "Иван Петров, Пермь. Школа № 101." },
+        queries.length === 1
+          ? { url: "https://vk.com/id1", title: "ВКонтакте", snippet: "страница" }
+          : { url: "https://vk.com/id1", title: "Иван Петров | ВКонтакте", snippet: "Иван Петров, Пермь. Школа № 101." },
         { url: "https://other.example/x", title: "Другое", snippet: "ничего про него" },
       ];
     },

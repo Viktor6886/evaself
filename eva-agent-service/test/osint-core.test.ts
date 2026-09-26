@@ -106,6 +106,8 @@ test("варианты имени и телефона конечны и разу
   assert.equal(queries[0], '"Петров Иван Сергеевич" "Ромашка"');
   assert.ok(queries.includes('"Иван Петров" Пермь site:vk.com'));
   assert.ok(queries.includes('"Иван Петров" Пермь site:ok.ru'));
+  // Соцсети не отрезаются лимитом: они в первых десяти даже при городе и месте работы.
+  assert.ok(queries.slice(0, 10).includes('"Иван Петров" Пермь site:t.me'));
   const phone = searchQueries({ type: "phone", raw: "x", normalized: "+79123456789" });
   assert.ok(phone.includes('"8-912-345-67-89"') && phone.includes('"89123456789" site:vk.com'));
   assert.ok(phone.length <= MAX_QUERIES_PER_IDENTIFIER);

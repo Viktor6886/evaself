@@ -165,7 +165,7 @@ export function buildJobLayer(
       // Запросов на идентификатор столько, чтобы прошли все записи номера
       // или имени и поиск по открытым страницам соцсетей; страниц — только
       // те, чей сниппет не показал искомого.
-      new WebSearchCollector(web, { queriesPerIdentifier: 10, pagesPerIdentifier: 6, maxPageBytes: 512_000 }),
+      new WebSearchCollector(web, { queriesPerIdentifier: 12, pagesPerIdentifier: 6, maxPageBytes: 512_000 }),
     ], {
       enabled: () => config.osintEnabled,
       collectorEnabled: (name) => osintCollectorEnabled(config, name),

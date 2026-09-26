@@ -134,11 +134,15 @@ export function searchQueries(
       if (full && context.organization) queries.push(`${quote(full)} ${quote(context.organization)}`);
       if (short && context.city) queries.push(`${quote(short)} ${context.city}`);
       if (full && context.city && full !== short) queries.push(`${quote(full)} ${context.city}`);
-      queries.push(...variants.map(quote));
+      // Открытые страницы соцсетей — сразу после основной формы: редкие
+      // формы (инициалы, латиница) при нехватке бюджета отрезаются первыми.
+      const [first, ...rest] = variants.map(quote);
+      if (first) queries.push(first);
       if (short) {
         const where = context.city ? ` ${context.city}` : "";
         for (const site of SOCIAL_SITES) queries.push(`${quote(short)}${where} site:${site}`);
       }
+      queries.push(...rest);
       break;
     }
     case "username":
