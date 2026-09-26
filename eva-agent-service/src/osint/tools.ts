@@ -24,7 +24,7 @@ import { IDENTIFIER_TYPES } from "./types.js";
 
 const investigationId = (args: JsonObject): string => {
   const id = requiredString(args, "investigation_id", 64);
-  if (!/^[0-9a-f-]{36}$/i.test(id)) throw new Error("investigation_id: ожидается идентификатор исследования");
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) throw new Error("investigation_id: ожидается идентификатор исследования");
   return id;
 };
 

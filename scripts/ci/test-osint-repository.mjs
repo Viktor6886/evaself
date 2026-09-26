@@ -22,6 +22,7 @@ import pg from "../../eva-agent-service/node_modules/pg/lib/index.js";
 import { OsintService } from "../../eva-agent-service/dist/osint/service.js";
 import { PgOsintStore } from "../../eva-agent-service/dist/osint/repository.js";
 import { OsintOrchestrator } from "../../eva-agent-service/dist/osint/orchestrator.js";
+import { OsintJobWorker } from "../../eva-agent-service/dist/osint/job.js";
 import { structuredEvidence } from "../../eva-agent-service/dist/osint/evidence.js";
 import { RETENTION_QUERIES } from "../../eva-agent-service/dist/retention/service.js";
 
@@ -211,6 +212,9 @@ try {
   assert((await service.search(first, "ci_osint_user")).length >= 1, "поиск находит собранное");
   assert((await service.search(second, "ci_osint_user")).length === 0, "поиск не видит чужое");
   assert((await service.search(first, "100%_")).length === 0, "шаблонные символы LIKE экранированы");
+  assert((await service.search(first, "CI_OSINT_USER")).length >= 1, "поиск не зависит от регистра");
+  assert(await count(`SELECT count(*) FROM audit_log WHERE operation = 'osint.investigation.list' AND params_redacted_json->>'user_id' = $1`, [String(first)]) >= 1,
+    "просмотр списка записан в аудит");
   assert(await count(`SELECT count(*) FROM audit_log WHERE target = $1 AND operation = 'osint.investigation.report'`, [created.id]) >= 1,
     "просмотр отчёта записан в аудит");
 
@@ -219,6 +223,37 @@ try {
   await new OsintOrchestrator(new PgOsintStore(db, first, second_), [profileCollector([]), quiet]).run(new AbortController().signal);
   assert(await count(`SELECT count(*) FROM osint_entities WHERE user_id = $1 AND schema = 'UserAccount' AND caption = 'https://site.example/ci_osint_user'`, [first]) === 1,
     "один профиль у одного пользователя — одна сущность");
+
+  // ------------------------------------------------------------------
+  // Уведомление о завершении
+  // ------------------------------------------------------------------
+  // Исследование уже завершено: заход после сбоя уведомления ничего не
+  // собирает, но сообщение ставит — со счётчиками из графа, а не нулями.
+  const job = (database) => ({
+    envelope: { payloadRef: created.id, userId: first },
+    signal: new AbortController().signal,
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+    attempt: 1,
+    timing: { maxAttempts: 2 },
+  });
+  const doneKey = `osint-done:${created.id}`;
+  await pool.query(`DELETE FROM telegram_outbox WHERE idempotency_key = $1 AND user_id = $2`, [doneKey, first]);
+  const failing = { ...db, query: (sql, values) => sql.includes("INSERT INTO telegram_outbox")
+    ? Promise.reject(new Error("outbox down")) : pool.query(sql, values) };
+  let retried = false;
+  try {
+    await new OsintJobWorker(failing, [quiet]).run(job(failing));
+  } catch {
+    retried = true;
+  }
+  assert(retried, "сбой постановки уведомления оставляет задание повторяемым");
+  await new OsintJobWorker(db, [quiet]).run(job(db));
+  await new OsintJobWorker(db, [quiet]).run(job(db));
+  const notices = (await pool.query(`SELECT payload FROM telegram_outbox WHERE idempotency_key = $1 AND user_id = $2`, [doneKey, first])).rows;
+  assert(notices.length === 1, "повтор ставит уведомление ровно один раз");
+  assert(/Источников: 2, найденных аккаунтов: 2/.test(notices[0].payload.text), "счётчики уведомления взяты из графа");
+  assert(!/ci_osint_user|ci@example/.test(notices[0].payload.text), "в уведомлении нет идентификаторов");
+  await pool.query(`DELETE FROM telegram_outbox WHERE idempotency_key = $1 AND user_id = $2`, [doneKey, first]);
 
   // ------------------------------------------------------------------
   // Удаление и хранение

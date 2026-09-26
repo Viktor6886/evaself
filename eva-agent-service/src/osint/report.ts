@@ -67,6 +67,10 @@ export class OsintReportBuilder {
                          'confidence', ei.confidence, 'collector', ei.collector))
                  FROM osint_entity_identifiers ei
                  JOIN osint_identifiers i ON i.id = ei.identifier_id AND i.user_id = ei.user_id
+                 -- Сущность бывает общей у нескольких исследований; в отчёт
+                 -- идут только связи, доказанные в этом.
+                 JOIN osint_evidence ev ON ev.id = ei.evidence_id AND ev.user_id = ei.user_id
+                                       AND ev.investigation_id = $1
                 WHERE ei.entity_id = e.id AND ei.user_id = $2) AS identifiers
          FROM osint_investigation_entities ie
          JOIN osint_entities e ON e.id = ie.entity_id AND e.user_id = ie.user_id

@@ -10,11 +10,12 @@
  * ни адресов найденных профилей.
  */
 
+import { PRIORITY_VALUE } from "../delivery/priority.js";
 import type { JobContext } from "../jobs/runtime.js";
 import type { JobTimingPolicy } from "../jobs/policy.js";
 import type { Collector } from "./collectors.js";
 import { recordOsint } from "./metrics.js";
-import { OsintOrchestrator, type InvestigationSummary } from "./orchestrator.js";
+import { OsintOrchestrator } from "./orchestrator.js";
 import { PgOsintStore, type Queryable } from "./repository.js";
 
 /**
@@ -43,7 +44,15 @@ export interface OsintJobDatabase extends Queryable {
  * идентификаторов, ни адресов — сообщение уходит в Telegram и хранится в
  * outbox, а подробности человек получает у Евы по запросу.
  */
-export function completionText(summary: InvestigationSummary): string {
+export interface CompletionCounts {
+  sources: number;
+  accounts: number;
+  discovered: number;
+  degradedRuns: number;
+  failedRuns: number;
+}
+
+export function completionText(summary: CompletionCounts): string {
   return [
     "OSINT-исследование завершено.",
     `Источников: ${summary.sources}, найденных аккаунтов: ${summary.accounts}, новых следов: ${summary.discovered}.`,
@@ -60,19 +69,42 @@ export class OsintJobWorker {
     private readonly collectors: readonly Collector[],
   ) {}
 
-  /** Уведомление через durable outbox Telegram; повтор задания второго не создаёт. */
-  private async notify(userId: number, investigationId: string, summary: InvestigationSummary): Promise<void> {
+  /**
+   * Уведомление через durable outbox Telegram; повтор задания второго не
+   * создаёт. Счётчики берутся из сохранённого графа, а не из итога захода:
+   * заход после сбоя пропускает уже сделанные прогоны, и его итог сказал
+   * бы «ничего не найдено» о том, что нашёл первый.
+   */
+  private async notify(userId: number, investigationId: string): Promise<void> {
     const { rows: [user] } = await this.db.query<{ telegram_id: string | number }>(
       `SELECT telegram_id FROM users WHERE id = $1`,
       [userId],
     );
     if (!user) return;
+    const { rows: [counts] } = await this.db.query<CompletionCounts>(
+      `SELECT
+         (SELECT count(*)::int FROM osint_sources
+           WHERE investigation_id = $1 AND user_id = $2 AND collector <> 'seed') AS sources,
+         (SELECT count(*)::int FROM osint_investigation_entities ie
+            JOIN osint_entities e ON e.id = ie.entity_id AND e.user_id = ie.user_id
+           WHERE ie.investigation_id = $1 AND ie.user_id = $2 AND e.schema = 'UserAccount') AS accounts,
+         (SELECT count(*)::int FROM osint_frontier
+           WHERE investigation_id = $1 AND user_id = $2 AND depth > 0) AS discovered,
+         (SELECT count(*)::int FROM osint_collector_runs
+           WHERE investigation_id = $1 AND user_id = $2 AND status = 'degraded') AS "degradedRuns",
+         (SELECT count(*)::int FROM osint_collector_runs
+           WHERE investigation_id = $1 AND user_id = $2 AND status = 'failed') AS "failedRuns"`,
+      [investigationId, userId],
+    );
     const chatId = Number(user.telegram_id);
     await this.db.query(
       `INSERT INTO telegram_outbox (idempotency_key, user_id, chat_id, telegram_method, payload, priority)
-       VALUES ($1, $2, $3, 'sendMessage', $4::jsonb, 0)
+       VALUES ($1, $2, $3, 'sendMessage', $4::jsonb, $5)
        ON CONFLICT (idempotency_key) DO NOTHING`,
-      [`osint-done:${investigationId}`, userId, chatId, JSON.stringify({ chat_id: chatId, text: completionText(summary) })],
+      // Сообщение человеку о фоновой работе — как напоминание: после ответов
+      // и команд, но не служебная отметка, которую можно опоздать отправить.
+      [`osint-done:${investigationId}`, userId, chatId, JSON.stringify({ chat_id: chatId, text: completionText(counts!) }),
+        PRIORITY_VALUE.reminder],
     );
   }
 
@@ -82,6 +114,7 @@ export class OsintJobWorker {
     if (!investigationId || userId === null) throw new Error("osint_job_invalid");
     await this.db.withUserScope({ userId, label: "osint.run" }, async () => {
       const store = new PgOsintStore(this.db, userId, investigationId);
+      let completed = false;
       try {
         const summary = await new OsintOrchestrator(store, this.collectors, {
           onRun: (collector, status, requests) => {
@@ -91,7 +124,11 @@ export class OsintJobWorker {
         }).run(context.signal);
         if (summary.status === "completed") {
           recordOsint("investigation", "completed");
-          await this.notify(userId, investigationId, summary);
+          completed = true;
+        } else if (summary.status === "not_runnable") {
+          // Повтор после сбоя уведомления: исследование уже завершено, а
+          // сообщения о нём может не быть. Ключ outbox не даст второго.
+          completed = await store.status() === "completed";
         } else if (summary.status === "cancelled") {
           recordOsint("investigation", "cancelled");
         }
@@ -119,6 +156,10 @@ export class OsintJobWorker {
         }
         throw error;
       }
+      // Вне перехвата выше: сбой постановки уведомления — повод повторить
+      // задание, а не «отменённое исследование», каким его счёл бы
+      // перехват по статусу, уже не равному processing.
+      if (completed) await this.notify(userId, investigationId);
     });
   }
 }

@@ -297,6 +297,9 @@ export class OsintService {
           WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2`,
         [userId, Math.min(Math.max(limit, 1), 50)],
       );
+      // Начало запроса может называть третье лицо: список — такое же
+      // чтение истории исследований, как статус и отчёт.
+      await audit(this.db, "osint.investigation.list", "investigations", { user_id: userId, results: rows.length });
       return rows.map((row) => ({
         id: row.id,
         status: row.status,
@@ -343,7 +346,7 @@ export class OsintService {
             AND (lower(e.caption) LIKE $2
                  OR EXISTS (SELECT 1 FROM osint_entity_identifiers ei
                               JOIN osint_identifiers i ON i.id = ei.identifier_id AND i.user_id = ei.user_id
-                             WHERE ei.entity_id = e.id AND ei.user_id = $1 AND i.normalized_value LIKE $2))
+                             WHERE ei.entity_id = e.id AND ei.user_id = $1 AND lower(i.normalized_value) LIKE $2))
           ORDER BY e.updated_at DESC
           LIMIT 20`,
         [userId, pattern],
