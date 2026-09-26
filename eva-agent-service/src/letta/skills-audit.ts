@@ -38,6 +38,7 @@ export const EVA_PROJECT_SKILLS = [
   "long-arc",
   "memory-hygiene",
   "motivational-interviewing",
+  "osint-research",
   "relationships-boundaries",
   "schema-therapy",
   "subscription-status",
