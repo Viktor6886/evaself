@@ -164,6 +164,17 @@ export interface Config {
   knowledgeUploadsEnabled: boolean;
   researchOrchestratorEnabled: boolean;
   /**
+   * OSINT-исследования (`docs/OSINT.md`). Выключены по умолчанию: флаг
+   * включает человек, и только вместе с профилем compose `osint`.
+   */
+  osintEnabled: boolean;
+  /** Адрес osint-worker во внутренней сети `tools`. */
+  osintWorkerUrl: string;
+  /** Общий секрет с osint-worker (заголовок X-Osint-Key). */
+  osintWorkerToken: string;
+  /** Сколько исследований пользователь может начать за сутки. */
+  osintDailyLimit: number;
+  /**
    * Проверка контракта Letta на живом развёртывании.
    *
    * Contract-тесты доказывают контракт на сборке. Флаг включает ту же
@@ -438,6 +449,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     jobsMirrorMode: bool("EVA_JOBS_MIRROR", true),
     knowledgeUploadsEnabled: bool("EVA_KNOWLEDGE_UPLOADS", false),
     researchOrchestratorEnabled: bool("EVA_RESEARCH_ORCHESTRATOR", false),
+    osintEnabled: bool("EVA_OSINT_ENABLED", false),
+    osintWorkerUrl: str("EVA_OSINT_WORKER_URL", "http://osint-worker:8095"),
+    osintWorkerToken: str("OSINT_WORKER_TOKEN"),
+    osintDailyLimit: clampedInt("EVA_OSINT_DAILY_LIMIT", 3, 1, 50),
     lettaContractVerify: bool("EVA_LETTA_CONTRACT_VERIFY", false),
     personaSyncTurnTimeoutMs: clampedInt("EVA_PERSONA_SYNC_TURN_TIMEOUT_MS", 3_000, 250, 15_000),
     checkinMorningHour: clampedInt("EVA_CHECKIN_MORNING_HOUR", 9, 5, 12),
