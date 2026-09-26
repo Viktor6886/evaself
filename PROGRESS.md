@@ -58,7 +58,13 @@ OpenAI-совместимых провайдеров, панель и метри
   `agent_tool_calls`, метрики, квоты-предохранители
   (`EVA_TOOL_CALLS_PER_TURN`, `EVA_BROWSER_OPS_PER_MINUTE`), трасса
   OpenTelemetry, задержка по инструментам. Установки хуков извне нет.
-- [ ] 6. Навыки: references/templates
+- [x] 6. Навыки: структура `SKILL.md` + `references/` + `templates/`,
+  правила в аудите навыков (≤ 200 строк, каждый файл упомянут, ссылки
+  целы, нет `scripts/` и встроенных команд оболочки) — сторожит
+  существующий `skills-audit.test.ts`; `relational-presence` (631 строка)
+  разнесён на `SKILL.md` (182) и пять файлов справки без потери текста;
+  заготовка `journaling-reflection/templates/period-review.md`. Роутера
+  навыков нет — выбирает Letta.
 - [ ] 7. Манифесты провайдеров
 - [ ] 8. Панель, метрики, документация
 

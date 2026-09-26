@@ -56,7 +56,33 @@ export interface SkillEntry {
   directory: string;
   /** Длина описания: по нему модель решает, открывать ли навык. */
   descriptionLength: number;
+  /** Строк в SKILL.md: столько модель читает при каждом открытии навыка. */
+  lines: number;
+  /** Справочные материалы (`references/`): читаются по ссылке из SKILL.md, когда нужны. */
+  references: string[];
+  /** Заготовки (`templates/`): формы ответа и структуры, которые навык предлагает заполнить. */
+  templates: string[];
 }
+
+/**
+ * Структура навыка:
+ *
+ *   skills/<навык>/
+ *   ├── SKILL.md      — коротко: когда открывать, что делать, границы
+ *   ├── references/   — большие материалы, читаются по ссылке при нужде
+ *   └── templates/    — заготовки ответа
+ *
+ * SKILL.md читается целиком при каждом открытии навыка, поэтому
+ * держится коротким, а объёмное уходит в `references/`. Каждый файл
+ * справки и заготовки упомянут в SKILL.md: неупомянутый модель не
+ * найдёт. Исполняемого в навыке нет — ни каталога `scripts/`, ни
+ * встроенных команд оболочки (`!`команда``, как в навыках Hermes):
+ * навык — текст, а не программа.
+ */
+export const MAX_SKILL_LINES = 200;
+const SKILL_SUBDIRECTORIES = new Set(["references", "templates"]);
+const INLINE_SHELL = /!`[^`\n]+`/u;
+const MATERIAL_LINK = /\b(references|templates)\/([A-Za-z0-9._-]+)/gu;
 
 export interface SkillProblem {
   skill: string;
@@ -140,9 +166,57 @@ export async function readProjectSkills(root: string): Promise<{
       problems.push({ skill: directory, reason: "нет description" });
       continue;
     }
-    skills.push({ name, directory, descriptionLength: description.length });
+    const structure = await readSkillStructure(join(root, directory), body);
+    for (const reason of structure.problems) problems.push({ skill: directory, reason });
+    skills.push({
+      name, directory, descriptionLength: description.length,
+      lines: body.split("\n").length, references: structure.references, templates: structure.templates,
+    });
   }
   return { available: true, skills, problems };
+}
+
+async function listFiles(directory: string): Promise<string[] | null> {
+  try {
+    return (await readdir(directory, { withFileTypes: true }))
+      .filter((entry) => entry.isFile())
+      .map((entry) => entry.name)
+      .sort();
+  } catch {
+    return null;
+  }
+}
+
+async function readSkillStructure(directory: string, body: string): Promise<{
+  references: string[];
+  templates: string[];
+  problems: string[];
+}> {
+  const problems: string[] = [];
+  const lines = body.split("\n").length;
+  if (lines > MAX_SKILL_LINES) {
+    problems.push(`SKILL.md длиннее ${MAX_SKILL_LINES} строк (${lines}): большие материалы — в references/`);
+  }
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    if (entry.name === "SKILL.md") continue;
+    if (entry.isDirectory() && SKILL_SUBDIRECTORIES.has(entry.name)) continue;
+    problems.push(entry.name === "scripts"
+      ? "каталог scripts/ запрещён: навык не исполняет код"
+      : `лишнее в каталоге навыка: ${entry.name} (разрешены references/ и templates/)`);
+  }
+  const references = await listFiles(join(directory, "references")) ?? [];
+  const templates = await listFiles(join(directory, "templates")) ?? [];
+  const texts = [body];
+  for (const file of references) texts.push(await readFile(join(directory, "references", file), "utf8"));
+  for (const file of templates) texts.push(await readFile(join(directory, "templates", file), "utf8"));
+  if (texts.some((text) => INLINE_SHELL.test(text))) {
+    problems.push("встроенная команда оболочки (!`…`) запрещена: навык не исполняет код");
+  }
+  const mentioned = new Set([...body.matchAll(MATERIAL_LINK)].map((match) => `${match[1]}/${match[2]}`));
+  const present = new Set([...references.map((file) => `references/${file}`), ...templates.map((file) => `templates/${file}`)]);
+  for (const link of mentioned) if (!present.has(link)) problems.push(`битая ссылка: ${link}`);
+  for (const file of present) if (!mentioned.has(file)) problems.push(`не упомянут в SKILL.md: ${file}`);
+  return { references, templates, problems };
 }
 
 /**
