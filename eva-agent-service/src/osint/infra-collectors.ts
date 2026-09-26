@@ -27,6 +27,13 @@ export const MAX_EXPANDED_PER_KIND = 10;
 /** Сколько поддоменов запоминается за один прогон. */
 export const MAX_REMEMBERED_HOSTS = 50;
 
+/**
+ * Верхняя граница запросов одного прогона по типу цели: DNS — семь
+ * типов записей, RDAP — файл bootstrap и сам ответ, журналы сертификатов
+ * и RIPEstat — по одному.
+ */
+export const INFRA_BOUND = { domain: 7 + 2 + 1, ip: 2 + 1, asn: 2 + 1 } as const;
+
 const TIER: Readonly<Record<string, SourceTier>> = {
   rdap: "official_registry",
   dns: "official_registry",
@@ -153,12 +160,15 @@ export class InfrastructureCollector implements Collector {
   }
 
   reserve(remainingRequests: number): number {
-    // Три-четыре запроса к реестрам плюс файлы bootstrap RDAP.
-    return Math.max(0, Math.min(remainingRequests, 8));
+    return Math.max(0, Math.min(remainingRequests, INFRA_BOUND.domain));
   }
 
   async collect({ target, signal, remainingRequests }: CollectorContext): Promise<CollectorOutput> {
-    if (remainingRequests < 4) return { status: "skipped", errorCode: "osint_budget_exhausted", externalRequests: 0, sources: [] };
+    // Прогон запускается, только если в остаток помещается его полная
+    // верхняя граница: запросы считаются после ответа, и начатый прогон
+    // уже не остановить на полпути по бюджету.
+    const bound = INFRA_BOUND[target.type as keyof typeof INFRA_BOUND] ?? INFRA_BOUND.domain;
+    if (remainingRequests < bound) return { status: "skipped", errorCode: "osint_budget_exhausted", externalRequests: 0, sources: [] };
     signal.throwIfAborted();
     if (target.type === "domain") return await this.domain(target.normalized, signal);
     if (target.type === "ip") return await this.address(target.normalized, signal);
@@ -374,7 +384,10 @@ export class SpiderfootCollector implements Collector {
     const evidence = structuredEvidence({
       collector: "spiderfoot", target: target.normalized, organizations: result.organizations, lei: result.lei,
       reputation: result.reputation, asns: result.asns, netblocks: result.netblocks,
-      hosts: result.hosts.slice(0, MAX_REMEMBERED_HOSTS), ips: result.ips,
+      // Доказательство обязано содержать всё, что из него выводится:
+      // и хосты, и домены, которые встанут идентификаторами.
+      hosts: result.hosts.slice(0, MAX_REMEMBERED_HOSTS), domains: result.domains.slice(0, MAX_REMEMBERED_HOSTS),
+      ips: result.ips,
     });
     const findings: Finding[] = key ? [
       entity(kind === "ip" ? "eva:IPAddress" : "eva:Domain", key, evidence, [

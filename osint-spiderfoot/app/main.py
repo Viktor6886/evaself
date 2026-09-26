@@ -89,7 +89,9 @@ ALLOWED_MODULES = (
 # покидает контейнер.
 EVENT_KINDS: dict[str, str] = {
     "Internet Name": "host",
-    "Co-Hosted Site": "host",
+    # Сайт на том же сервере — не часть исследуемого домена: на общем
+    # хостинге это чужие сайты. Отдельная группа, без привязки к домену.
+    "Co-Hosted Site": "cohost",
     "Domain Name": "domain",
     "IP Address": "ip",
     "IPv6 Address": "ip",
@@ -194,6 +196,7 @@ def parse_events(output: str) -> list[dict]:
 def summarize(events: list[dict]) -> dict:
     groups: dict[str, list] = {
         "hosts": [],
+        "cohosts": [],
         "domains": [],
         "ips": [],
         "asns": [],
@@ -222,6 +225,7 @@ def summarize(events: list[dict]) -> dict:
                 continue
         target = {
             "host": "hosts",
+            "cohost": "cohosts",
             "domain": "domains",
             "ip": "ips",
             "asn": "asns",

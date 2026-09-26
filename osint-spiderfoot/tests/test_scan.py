@@ -15,6 +15,7 @@ OUTPUT = "\n".join(
         '{"type": "Blacklisted IP Address", "data": "blocklist.de [93.184.216.34]", "module": "sfp_blocklistde", "source": "x"},',
         '{"type": "BGP AS Membership", "data": "15133", "module": "sfp_bgpview", "source": "x"},',
         '{"type": "Leak Site Content", "data": "dump", "module": "sfp_psbdmp", "source": "x"},',
+        '{"type": "Co-Hosted Site", "data": "unrelated-shop.org", "module": "sfp_robtex", "source": "x"},',
         '{"type": "Company Name", "data": "Example Inc", "module": "sfp_gleif", "source": "x"}',
     ]
 )
@@ -39,6 +40,8 @@ def test_only_infrastructure_events_leave_the_container(client):
     assert client.calls[0][0] == "example.com"
     assert body["ips"] == ["93.184.216.34"]
     assert body["hosts"] == ["www.example.com"]
+    # Сайт на общем хостинге — отдельно, не среди хостов домена.
+    assert body["cohosts"] == ["unrelated-shop.org"]
     assert body["asns"] == ["15133"]
     assert body["organizations"] == ["Example Inc"]
     assert body["reputation"][0]["module"] == "sfp_blocklistde"

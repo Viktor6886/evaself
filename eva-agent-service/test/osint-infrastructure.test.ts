@@ -13,6 +13,7 @@ import { test } from "node:test";
 import {
   HarvesterCollector,
   InfrastructureCollector,
+  INFRA_BOUND,
   MAX_EXPANDED_PER_KIND,
   SpiderfootCollector,
   isPublicIp,
@@ -130,6 +131,32 @@ test("SpiderFoot: репутация — свойство сущности, се
   const entity = findings(output).find((finding) => finding.kind === "entity");
   assert.ok(entity?.kind === "entity" && entity.properties.some((item) => item.property === "reputation"));
   assert.equal(discovered(output).find((item) => item.identifier.type === "cidr")?.expand, false);
+});
+
+test("инфраструктура не запускается, если полная граница прогона не помещается в остаток", async () => {
+  let calls = 0;
+  const counting = Object.fromEntries(Object.entries(worker).map(([name, fn]) => [name, async (...args: unknown[]) => {
+    calls += 1;
+    return await (fn as (...a: unknown[]) => unknown)(...args);
+  }]));
+  const collector = new InfrastructureCollector(counting as never);
+  const starved = await collector.collect({ target: target("domain", "example.com"), signal: signal(), remainingRequests: INFRA_BOUND.domain - 1 });
+  assert.equal(starved.status, "skipped");
+  assert.equal(calls, 0);
+  const address = await collector.collect({ target: target("ip", "93.184.216.34"), signal: signal(), remainingRequests: INFRA_BOUND.ip });
+  assert.notEqual(address.status, "skipped");
+  assert.ok(address.externalRequests <= INFRA_BOUND.ip);
+});
+
+test("SpiderFoot: найденные домены есть в доказательстве", async () => {
+  const output = await new SpiderfootCollector({
+    scan: async () => ({
+      status: "ok", modules: 28, hosts: [], domains: ["example.net"], ips: [], asns: [], netblocks: [],
+      organizations: [], lei: [], dns: [], reputation: [],
+    }),
+  } as never).collect({ target: target("domain", "example.com"), signal: signal(), remainingRequests: 100 });
+  const domain = discovered(output).find((item) => item.identifier.normalized === "example.net")!;
+  assert.ok(domain.evidence.kind === "structured" && JSON.stringify(domain.evidence.data).includes("example.net"));
 });
 
 test("сборщики не запускаются без бюджета", async () => {
