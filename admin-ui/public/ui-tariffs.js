@@ -70,6 +70,23 @@ function renderTariffPrices() {
     </div>`;
 }
 
+/**
+ * Период, к которому относятся пробные единицы расходника.
+ *
+ * Обычно это сутки. Но у расходника, чей лимит задан только на месяц
+ * (OSINT-исследования), суточной строки нет, и пробные живут в месячной:
+ * поле «Пробные» правит именно её, а сохранение не затирает её нулём.
+ */
+function trialPeriod(limits, plan, metric) {
+  const rows = limits.filter((row) => row.plan === plan && row.metric === metric);
+  for (const limited of [true, false]) {
+    for (const period of ["day", "week", "month"]) {
+      if (rows.some((row) => row.period === period && (!limited || row.limit_value >= 0))) return period;
+    }
+  }
+  return "day";
+}
+
 /** Лимиты: тариф × расходник × период, плюс пробные. */
 function renderTariffLimits() {
   const failure = tariffFailure("limits");
@@ -78,6 +95,7 @@ function renderTariffLimits() {
   const editable = tariffEditable();
   const limitOf = (plan, metric, period) =>
     data.limits.find((row) => row.plan === plan && row.metric === metric && row.period === period);
+  const freePeriod = (plan, metric) => trialPeriod(data.limits, plan, metric);
 
   $("#tariff-limits").innerHTML = data.plans.map((plan) => `
     <details class="advanced-block" ${plan === "plus" ? "open" : ""}>
@@ -87,7 +105,7 @@ function renderTariffLimits() {
       <div class="advanced-body">
         <div class="table-wrap"><table>
           <thead><tr><th>Расходник</th>${data.limit_periods.map((period) =>
-            `<th>${escapeHtml(PERIOD_TITLES[period] || period)}</th>`).join("")}<th>Пробные (сутки)</th></tr></thead>
+            `<th>${escapeHtml(PERIOD_TITLES[period] || period)}</th>`).join("")}<th>Пробные</th></tr></thead>
           <tbody>${data.metrics.map((entry) => `
             <tr>
               <td data-label="Расходник">${escapeHtml(entry.title)}</td>
@@ -103,9 +121,11 @@ function renderTariffLimits() {
               }).join("")}
               <td data-label="Пробные">
                 <input type="number" step="1" min="0" inputmode="numeric" class="tariff-limit-input"
-                  value="${escapeHtml(String((limitOf(plan, entry.metric, "day") || {}).free_value ?? 0))}"
+                  value="${escapeHtml(String((limitOf(plan, entry.metric, freePeriod(plan, entry.metric)) || {}).free_value ?? 0))}"
                   data-free-plan="${escapeHtml(plan)}" data-free-metric="${escapeHtml(entry.metric)}"
+                  data-free-period="${escapeHtml(freePeriod(plan, entry.metric))}"
                   ${editable ? "" : "disabled"}>
+                <small>${escapeHtml(PERIOD_TITLES[freePeriod(plan, entry.metric)] || "")}</small>
               </td>
             </tr>`).join("")}</tbody>
         </table></div>
@@ -150,6 +170,8 @@ async function saveTariffLimits(plan) {
       `[data-free-plan="${CSS.escape(plan)}"][data-free-metric="${CSS.escape(metric)}"]`,
     )?.value ?? 0,
   );
+  const existing = (metric, period) => state.tariffs.limits.find((row) => row.plan === plan
+    && row.metric === metric && row.period === period);
   const rows = inputs.map((input) => {
     const raw = input.value.trim();
     return {
@@ -158,8 +180,11 @@ async function saveTariffLimits(plan) {
       // Пустое поле означает «безлимит»: так его и записываем, а не
       // пропускаем — иначе снять лимит было бы нечем.
       limit_value: raw === "" ? -1 : Number(raw),
-      // Пробные заданы на сутки: их поле в таблице одно.
-      free_value: input.dataset.limitPeriod === "day" ? freeOf(input.dataset.limitMetric) : 0,
+      // Поле «Пробные» одно на расходник и относится к его основному
+      // периоду; остальные строки сохраняют то, что в них уже было.
+      free_value: input.dataset.limitPeriod === trialPeriod(state.tariffs.limits, plan, input.dataset.limitMetric)
+        ? freeOf(input.dataset.limitMetric)
+        : Number((existing(input.dataset.limitMetric, input.dataset.limitPeriod) || {}).free_value ?? 0),
     };
   });
 
@@ -173,7 +198,7 @@ async function saveTariffLimits(plan) {
     const title = (state.tariffs.metrics.find((item) => item.metric === bad.metric) || {}).title
       || bad.metric;
     toast(
-      `«${title}», сутки: пробных ${bad.free_value} при лимите ${bad.limit_value}.`
+      `«${title}», ${PERIOD_TITLES[bad.period] || bad.period}: пробных ${bad.free_value} при лимите ${bad.limit_value}.`
       + " Пробных не может быть больше лимита — иначе платить будет не за что.",
       true,
     );

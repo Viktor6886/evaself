@@ -1,6 +1,7 @@
 import type { Config } from "../config.js";
 import type { Database } from "../db.js";
 import { parseLiveStreamMode, parseLiveTypingSpeed } from "../telegram/live-pace.js";
+import { OSINT_SETTINGS } from "./settings-registry.js";
 
 interface SettingRow {
   key: string;
@@ -152,4 +153,48 @@ export async function applyManagedRuntimeConfig(
     }
   }
   return changed;
+}
+
+/** Ключ OSINT-настройки → поле конфигурации: единая таблица для импорта и применения. */
+const OSINT_FIELDS: ReadonlyMap<string, keyof LiveSettings> = new Map([
+  ...OSINT_FLAGS,
+  ["runtime.osint_daily_limit", "osintDailyLimit"],
+]);
+
+/**
+ * Перенос OSINT-настроек из окружения в панель.
+ *
+ * Ключи OSINT появились после того, как установка прошла первичный
+ * импорт окружения, и панель показывала бы для них значения по
+ * умолчанию. Установка, работающая с `EVA_OSINT_ENABLED=true`, выглядела
+ * бы выключенной, а первое же сохранение любой настройки записало бы
+ * показанное `false` и выключило бы работающий контур. Поэтому при старте
+ * значение окружения, отличное от умолчания, записывается в панель — если
+ * там ещё ничего нет. Значение панели не трогается никогда.
+ */
+export async function importEnvironmentOsintSettings(
+  config: Config,
+  db: Pick<Database, "query">,
+): Promise<string[]> {
+  const imported: string[] = [];
+  for (const definition of OSINT_SETTINGS) {
+    const field = OSINT_FIELDS.get(definition.key);
+    if (!field) continue;
+    const value = config[field];
+    if (value === definition.default) continue;
+    const { rowCount } = await db.query(
+      `INSERT INTO system_settings (key, value_json) VALUES ($1, $2::jsonb)
+       ON CONFLICT (key) DO NOTHING`,
+      [definition.key, JSON.stringify(value)],
+    );
+    if (rowCount) {
+      await db.query(
+        `INSERT INTO config_versions (scope, key, old_value_json, new_value_json)
+         VALUES ('environment', $1, NULL, $2::jsonb)`,
+        [definition.key, JSON.stringify(value)],
+      );
+      imported.push(definition.key);
+    }
+  }
+  return imported;
 }

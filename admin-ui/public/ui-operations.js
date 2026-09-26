@@ -320,7 +320,9 @@ document.addEventListener("change", (event) => {
 });
 $("#save-settings").addEventListener("click", () => saveSettings(false).catch(handleError));
 $("#save-restart").addEventListener("click", () => saveSettings(true).catch(handleError));
-$("#settings-form").addEventListener("click", (event) => {
+// Кнопка «По умолчанию» есть в каждом блоке настроек — общем, свёрнутом и
+// OSINT, — поэтому обработчик висит на всей странице, а не на одной форме.
+$("#page-settings").addEventListener("click", (event) => {
   const button = event.target.closest("[data-reset]");
   if (!button) return;
   const item = state.settings.find((setting) => setting.key === button.dataset.reset);

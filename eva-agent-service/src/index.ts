@@ -9,7 +9,7 @@
 
 import { Redis } from "ioredis";
 
-import { applyManagedRuntimeConfig } from "./admin/managed-runtime-config.js";
+import { applyManagedRuntimeConfig, importEnvironmentOsintSettings } from "./admin/managed-runtime-config.js";
 import { AgentToolFactory, isHostExecutionTool, toolApprovalCategory, toolRisk } from "./agent-tools.js";
 import { BackgroundRuntime } from "./background.js";
 import {
@@ -106,6 +106,10 @@ async function main(): Promise<void> {
   await db.connect();
   logger.info("PostgreSQL подключён");
   try {
+    // До применения настроек: панель должна увидеть значения окружения
+    // для ключей, которые появились после первичного импорта.
+    const importedOsint = await importEnvironmentOsintSettings(config, db);
+    if (importedOsint.length > 0) logger.info("OSINT-настройки перенесены из окружения в панель", { count: importedOsint.length });
     const managedKeys = await applyManagedRuntimeConfig(config, db);
     logger = createLogger(config.logLevel);
     logger.info("Настройки Config Service применены", { count: managedKeys.length });

@@ -119,6 +119,10 @@ describe("системные настройки", () => {
     // В общем списке OSINT не дублируется.
     assert.equal(await page.locator('#settings-form [data-key="runtime.osint_enabled"]').count(), 0);
     assert.equal(await page.locator('#settings-form-osint [data-key="runtime.osint_collector_web"]').count(), 1);
+    // «По умолчанию» работает и в блоке OSINT, а не только в общем списке.
+    await page.selectOption('#settings-form-osint select[data-key="runtime.osint_collector_web"]', "false");
+    await page.click('#settings-form-osint [data-reset="runtime.osint_collector_web"]');
+    assert.equal(await page.inputValue('#settings-form-osint select[data-key="runtime.osint_collector_web"]'), "true");
     await page.selectOption(toggle, "true");
     await page.click("#save-settings");
     const saved = await panel.waitForRequest(

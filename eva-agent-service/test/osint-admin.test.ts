@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { applyManagedRuntimeConfig } from "../dist/admin/managed-runtime-config.js";
+import { applyManagedRuntimeConfig, importEnvironmentOsintSettings } from "../dist/admin/managed-runtime-config.js";
 import { OSINT_SETTINGS, SETTINGS_REGISTRY, ALL_SETTINGS } from "../dist/admin/settings-registry.js";
 import { METRICS } from "../dist/admin/tariff-service.js";
 import { OsintJobWorker, osintCollectorEnabled } from "../dist/osint/job.js";
@@ -100,4 +100,28 @@ test("выключенный контур закрывает поставлен�
 test("метрика osint есть в тарифах панели", () => {
   assert.equal(OSINT_QUOTA_METRIC, "osint");
   assert.ok(METRICS.some((item) => item.metric === "osint"));
+});
+
+test("значение окружения, отличное от умолчания, переносится в панель, а значение панели не трогается", async () => {
+  const config = { ...FLAGS, osintEnabled: true, osintCollectorSpiderfoot: false } as Record<string, unknown>;
+  const existing = new Set(["runtime.osint_collector_spiderfoot"]);
+  const writes: Array<{ sql: string; values: unknown[] }> = [];
+  const db = {
+    query: async (sql: string, values: unknown[] = []) => {
+      writes.push({ sql, values });
+      if (sql.includes("INSERT INTO system_settings")) {
+        const key = String(values[0]);
+        return { rows: [], rowCount: existing.has(key) ? 0 : 1 };
+      }
+      return { rows: [], rowCount: 1 };
+    },
+  };
+  const imported = await importEnvironmentOsintSettings(config as never, db as never);
+  // Только отличное от умолчания; значение панели (spiderfoot) не перезаписано.
+  assert.deepEqual(imported, ["runtime.osint_enabled"]);
+  const settingsWrites = writes.filter((item) => item.sql.includes("INSERT INTO system_settings"));
+  assert.deepEqual(settingsWrites.map((item) => item.values[0]).sort(),
+    ["runtime.osint_collector_spiderfoot", "runtime.osint_enabled"]);
+  assert.ok(settingsWrites.every((item) => item.sql.includes("ON CONFLICT (key) DO NOTHING")));
+  assert.ok(writes.some((item) => item.sql.includes("config_versions") && item.values[0] === "runtime.osint_enabled"));
 });
