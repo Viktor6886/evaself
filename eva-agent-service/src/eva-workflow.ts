@@ -2092,6 +2092,7 @@ function quotaLabel(metric: string, period: string, language: SupportedLanguage)
         documents: "Documents",
         images: "Images",
         web_search: "Search",
+        osint: "OSINT research",
         tests: "Tests",
       }
     : {
@@ -2103,6 +2104,7 @@ function quotaLabel(metric: string, period: string, language: SupportedLanguage)
         documents: "Документы",
         images: "Изображения",
         web_search: "Поиск",
+        osint: "OSINT-исследования",
         tests: "Тесты",
       })[metric] ?? metric;
   const periodLabel = (language === "en"
@@ -2115,7 +2117,7 @@ function quotaLabel(metric: string, period: string, language: SupportedLanguage)
 function compareQuotas(left: unknown, right: unknown): number {
   const metricOrder = [
     "messages", "messages_out", "voice_in", "voice_minutes", "voice_out",
-    "documents", "images", "web_search", "tests",
+    "documents", "images", "web_search", "osint", "tests",
   ];
   const periodOrder = ["day", "week", "month", "total"];
   const a = left as Record<string, unknown>;

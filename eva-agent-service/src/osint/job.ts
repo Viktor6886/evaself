@@ -63,10 +63,37 @@ export function completionText(summary: CompletionCounts): string {
   ].filter(Boolean).join("\n");
 }
 
+/** Флаги панели, которые включают отдельные сборщики. */
+export interface OsintCollectorFlags {
+  osintRuRegistriesEnabled: boolean;
+  osintCollectorMaigret: boolean;
+  osintCollectorWeb: boolean;
+  osintCollectorInfrastructure: boolean;
+  osintCollectorHarvester: boolean;
+  osintCollectorSpiderfoot: boolean;
+}
+
+/** Включён ли сборщик. Неизвестное имя — включено: новый сборщик не должен молча пропадать. */
+export function osintCollectorEnabled(flags: OsintCollectorFlags, name: string): boolean {
+  switch (name) {
+    case "egrul": return flags.osintRuRegistriesEnabled;
+    case "maigret": return flags.osintCollectorMaigret;
+    case "web_search": return flags.osintCollectorWeb;
+    case "infrastructure": return flags.osintCollectorInfrastructure;
+    case "theharvester": return flags.osintCollectorHarvester;
+    case "spiderfoot": return flags.osintCollectorSpiderfoot;
+    default: return true;
+  }
+}
+
 export class OsintJobWorker {
   constructor(
     private readonly db: OsintJobDatabase,
     private readonly collectors: readonly Collector[],
+    private readonly flags: {
+      enabled: () => boolean;
+      collectorEnabled: (name: string) => boolean;
+    } = { enabled: () => true, collectorEnabled: () => true },
   ) {}
 
   /**
@@ -114,9 +141,18 @@ export class OsintJobWorker {
     if (!investigationId || userId === null) throw new Error("osint_job_invalid");
     await this.db.withUserScope({ userId, label: "osint.run" }, async () => {
       const store = new PgOsintStore(this.db, userId, investigationId);
+      // Контур выключили в панели после постановки задания: исследование
+      // закрывается с причиной, а не выполняется вопреки выключателю и не
+      // висит «в работе».
+      if (!this.flags.enabled()) {
+        await store.complete("cancelled", "osint_disabled");
+        recordOsint("investigation", "cancelled");
+        return;
+      }
+      const collectors = this.collectors.filter((collector) => this.flags.collectorEnabled(collector.name));
       let completed = false;
       try {
-        const summary = await new OsintOrchestrator(store, this.collectors, {
+        const summary = await new OsintOrchestrator(store, collectors, {
           onRun: (collector, status, requests) => {
             recordOsint("run", collector, status);
             recordOsint("requests", collector, requests);

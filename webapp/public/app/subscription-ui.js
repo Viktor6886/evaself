@@ -13,7 +13,8 @@
     { metric: "voice_minutes", label: "Голос", unit: "мин", core: true },
     { metric: "web_search", label: "Поиск в интернете", core: true },
     { metric: "documents", label: "Документы", secondary: true },
-    { metric: "images", label: "Изображения", secondary: true }
+    { metric: "images", label: "Изображения", secondary: true },
+    { metric: "osint", label: "OSINT-исследования", secondary: true }
   ];
 
   var PERIOD_LABELS = {

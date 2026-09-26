@@ -38,6 +38,7 @@ export const METRICS = [
   { metric: "images", title: "Изображения" },
   { metric: "documents", title: "Документы" },
   { metric: "web_search", title: "Поиск в интернете" },
+  { metric: "osint", title: "OSINT-исследования" },
 ] as const;
 
 export interface TariffLimit {

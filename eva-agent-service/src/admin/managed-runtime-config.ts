@@ -1,6 +1,7 @@
 import type { Config } from "../config.js";
 import type { Database } from "../db.js";
 import { parseLiveStreamMode, parseLiveTypingSpeed } from "../telegram/live-pace.js";
+import { OSINT_SETTINGS } from "./settings-registry.js";
 
 interface SettingRow {
   key: string;
@@ -25,13 +26,28 @@ function boolean(value: unknown, fallback: boolean): boolean {
  */
 type LiveSettings = Pick<
   Config,
-  "audioFileTranscriptsEnabled" | "telegramStreamMode" | "telegramTypingSpeed"
+  | "audioFileTranscriptsEnabled" | "telegramStreamMode" | "telegramTypingSpeed"
+  | "osintEnabled" | "osintRuRegistriesEnabled" | "osintDailyLimit"
+  | "osintCollectorMaigret" | "osintCollectorWeb" | "osintCollectorInfrastructure"
+  | "osintCollectorHarvester" | "osintCollectorSpiderfoot"
 >;
+/** Флаги OSINT: ключ панели → поле конфигурации. Все читаются на каждом ходе и задании. */
+const OSINT_FLAGS: Array<[string, keyof LiveSettings]> = [
+  ["runtime.osint_enabled", "osintEnabled"],
+  ["runtime.osint_ru_registries", "osintRuRegistriesEnabled"],
+  ["runtime.osint_collector_maigret", "osintCollectorMaigret"],
+  ["runtime.osint_collector_web", "osintCollectorWeb"],
+  ["runtime.osint_collector_infrastructure", "osintCollectorInfrastructure"],
+  ["runtime.osint_collector_theharvester", "osintCollectorHarvester"],
+  ["runtime.osint_collector_spiderfoot", "osintCollectorSpiderfoot"],
+];
 const bootstrapLiveSettings = new WeakMap<Config, LiveSettings>();
 const LIVE_SETTING_FIELDS: Array<[string, keyof LiveSettings]> = [
   ["runtime.audio_file_transcripts", "audioFileTranscriptsEnabled"],
   ["runtime.telegram_stream_mode", "telegramStreamMode"],
   ["runtime.telegram_typing_speed", "telegramTypingSpeed"],
+  ...OSINT_FLAGS,
+  ["runtime.osint_daily_limit", "osintDailyLimit"],
 ];
 
 /** Apply PostgreSQL settings over bootstrap environment values. */
@@ -44,6 +60,14 @@ export async function applyManagedRuntimeConfig(
       audioFileTranscriptsEnabled: config.audioFileTranscriptsEnabled,
       telegramStreamMode: config.telegramStreamMode,
       telegramTypingSpeed: config.telegramTypingSpeed,
+      osintEnabled: config.osintEnabled,
+      osintRuRegistriesEnabled: config.osintRuRegistriesEnabled,
+      osintDailyLimit: config.osintDailyLimit,
+      osintCollectorMaigret: config.osintCollectorMaigret,
+      osintCollectorWeb: config.osintCollectorWeb,
+      osintCollectorInfrastructure: config.osintCollectorInfrastructure,
+      osintCollectorHarvester: config.osintCollectorHarvester,
+      osintCollectorSpiderfoot: config.osintCollectorSpiderfoot,
     });
   }
   const { rows } = await db.query<SettingRow>(
@@ -89,6 +113,22 @@ export async function applyManagedRuntimeConfig(
       case "runtime.telegram_typing_speed":
         config.telegramTypingSpeed = parseLiveTypingSpeed(value, config.telegramTypingSpeed);
         break;
+      // OSINT: инструменты, сервис и задания читают флаги при каждом
+      // вызове, поэтому переключатель действует без перезапуска.
+      case "runtime.osint_enabled":
+      case "runtime.osint_ru_registries":
+      case "runtime.osint_collector_maigret":
+      case "runtime.osint_collector_web":
+      case "runtime.osint_collector_infrastructure":
+      case "runtime.osint_collector_theharvester":
+      case "runtime.osint_collector_spiderfoot": {
+        const field = OSINT_FLAGS.find(([key]) => key === row.key)![1];
+        (config as Record<keyof LiveSettings, unknown>)[field] = boolean(value, config[field] as boolean);
+        break;
+      }
+      case "runtime.osint_daily_limit":
+        config.osintDailyLimit = integer(value, config.osintDailyLimit);
+        break;
       case "runtime.outbox_enabled":
         config.outboxEnabled = boolean(value, config.outboxEnabled);
         break;
@@ -113,4 +153,48 @@ export async function applyManagedRuntimeConfig(
     }
   }
   return changed;
+}
+
+/** Ключ OSINT-настройки → поле конфигурации: единая таблица для импорта и применения. */
+const OSINT_FIELDS: ReadonlyMap<string, keyof LiveSettings> = new Map([
+  ...OSINT_FLAGS,
+  ["runtime.osint_daily_limit", "osintDailyLimit"],
+]);
+
+/**
+ * Перенос OSINT-настроек из окружения в панель.
+ *
+ * Ключи OSINT появились после того, как установка прошла первичный
+ * импорт окружения, и панель показывала бы для них значения по
+ * умолчанию. Установка, работающая с `EVA_OSINT_ENABLED=true`, выглядела
+ * бы выключенной, а первое же сохранение любой настройки записало бы
+ * показанное `false` и выключило бы работающий контур. Поэтому при старте
+ * значение окружения, отличное от умолчания, записывается в панель — если
+ * там ещё ничего нет. Значение панели не трогается никогда.
+ */
+export async function importEnvironmentOsintSettings(
+  config: Config,
+  db: Pick<Database, "query">,
+): Promise<string[]> {
+  const imported: string[] = [];
+  for (const definition of OSINT_SETTINGS) {
+    const field = OSINT_FIELDS.get(definition.key);
+    if (!field) continue;
+    const value = config[field];
+    if (value === definition.default) continue;
+    const { rowCount } = await db.query(
+      `INSERT INTO system_settings (key, value_json) VALUES ($1, $2::jsonb)
+       ON CONFLICT (key) DO NOTHING`,
+      [definition.key, JSON.stringify(value)],
+    );
+    if (rowCount) {
+      await db.query(
+        `INSERT INTO config_versions (scope, key, old_value_json, new_value_json)
+         VALUES ('environment', $1, NULL, $2::jsonb)`,
+        [definition.key, JSON.stringify(value)],
+      );
+      imported.push(definition.key);
+    }
+  }
+  return imported;
 }

@@ -9,7 +9,7 @@
 
 import { Redis } from "ioredis";
 
-import { applyManagedRuntimeConfig } from "./admin/managed-runtime-config.js";
+import { applyManagedRuntimeConfig, importEnvironmentOsintSettings } from "./admin/managed-runtime-config.js";
 import { AgentToolFactory, isHostExecutionTool, toolApprovalCategory, toolRisk } from "./agent-tools.js";
 import { BackgroundRuntime } from "./background.js";
 import {
@@ -106,6 +106,10 @@ async function main(): Promise<void> {
   await db.connect();
   logger.info("PostgreSQL подключён");
   try {
+    // До применения настроек: панель должна увидеть значения окружения
+    // для ключей, которые появились после первичного импорта.
+    const importedOsint = await importEnvironmentOsintSettings(config, db);
+    if (importedOsint.length > 0) logger.info("OSINT-настройки перенесены из окружения в панель", { count: importedOsint.length });
     const managedKeys = await applyManagedRuntimeConfig(config, db);
     logger = createLogger(config.logLevel);
     logger.info("Настройки Config Service применены", { count: managedKeys.length });
@@ -124,8 +128,17 @@ async function main(): Promise<void> {
   const configEvents = redis.duplicate();
   configEvents.on("error", () => logger.warn("Канал Config Service временно недоступен"));
   await configEvents.subscribe("eva.config.changed");
+  // Набор инструментов фиксируется при открытии сессии Letta. Когда в
+  // панели включают или выключают OSINT, открытые сессии закрываются —
+  // занятая ходом закроется после него, — и следующий ход видит новый
+  // набор. Letta создаётся ниже, поэтому ссылка заполняется позже.
+  let onOsintToggle: () => void = () => undefined;
   configEvents.on("message", (_channel, message) => {
+    const osintBefore = config.osintEnabled;
     void applyManagedRuntimeConfig(config, db)
+      .then(() => {
+        if (config.osintEnabled !== osintBefore) onOsintToggle();
+      })
       .then(() => logger.info("Кеш Config Service обновлён", {
         event: (() => {
           try {
@@ -171,6 +184,7 @@ async function main(): Promise<void> {
     });
   }
   const letta = new LettaService(config, logger, persona, systemPrompt);
+  onOsintToggle = () => letta.closeAllSessions();
   {
     // Сверка установленного пакета Letta с проверенной матрицей.
     // Расхождение попадает в журнал всегда — молча ехать на непроверенной
@@ -536,11 +550,15 @@ async function main(): Promise<void> {
   // lookup and therefore runs in an explicitly named system scope; every
   // subsequent user-table operation binds the resolved owner.
   const internalUser = async(telegramId:number)=>await db.withSystemScope("verified-identity.resolve",async()=>{const{rows}=await db.query<{id:string}>("SELECT id FROM users WHERE telegram_id=$1",[telegramId]);if(!rows[0])throw new Error("user_missing");return Number(rows[0].id);},{inherit:true});
-  // OSINT существует, только когда флаг включён и есть слой заданий:
-  // исследование — фоновая работа очереди `research`, без неё оно не
-  // выполнится, и инструменты модели были бы обещанием впустую.
-  const osint = jobs && config.osintEnabled
-    ? new OsintService(db, jobs.outbox, jobs.runs, { enabled: true, dailyLimit: config.osintDailyLimit })
+  // OSINT существует, когда есть слой заданий: исследование — фоновая
+  // работа очереди `research`. Включён ли он и какой лимит — читается из
+  // конфигурации при каждом вызове: переключатель панели действует без
+  // перезапуска.
+  const osint = jobs
+    ? new OsintService(db, jobs.outbox, jobs.runs, {
+      get enabled() { return config.osintEnabled; },
+      get dailyLimit() { return config.osintDailyLimit; },
+    })
     : null;
   if (osint) toolFactory.setOsint(osint);
   const osintPublic = osint ? {

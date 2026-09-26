@@ -99,6 +99,7 @@ BullMQ не обрабатывает интерактивный ход и не �
 | OSINT: инфраструктура | Сборщики `infrastructure` (RDAP, RIPEstat, crt.sh, DNS через osint-worker), `theharvester` (контейнер osint-harvester, GPL-2.0), `spiderfoot` (контейнер osint-spiderfoot, закрытый список модулей) | `src/osint/infra-collectors.ts`, `service-clients.ts`, `osint-worker/app/infra.py`, `osint-harvester/`, `osint-spiderfoot/` |
 | OSINT: инструменты и отчёт | Инструменты Евы `osint_*` (регистрируются при `EVA_OSINT_ENABLED`), детерминированный отчёт с ограничениями, список и поиск с аудитом, уведомление через `telegram_outbox`, API Mini App (чтение/отмена/удаление), метрики `eva_osint_*` | `src/osint/tools.ts`, `report.ts`, `metrics.ts`, `src/public/osint-routes.ts` |
 | OSINT: реестры РФ | Сборщик `egrul` (публичный поиск ЕГРЮЛ/ЕГРИП ФНС через osint-worker), флаг `EVA_OSINT_RU_REGISTRIES`; «Прозрачный бизнес», ЕФРСБ, арбитраж не подключены | `src/osint/registry-collectors.ts`, `osint-worker/app/registries.py` |
+| OSINT: панель и тариф | Блок «OSINT» в настройках (`OSINT_SETTINGS`, ключи `runtime.osint_*`, применяются без перезапуска), метрика тарифа `osint` (миграция 086, списание в `OsintService.create`) | `src/admin/settings-registry.ts`, `managed-runtime-config.ts`, `src/osint/service.ts`, `src/osint/job.ts`, `postgres/migrations/086_osint_quota.sql` |
 
 ## Администрирование и инфраструктура
 

@@ -555,6 +555,19 @@
           </div>
           <form id="settings-form-advanced" class="settings-grid" hidden></form>
 
+          <!-- OSINT: включение контура, источники и суточный предел. Лимит
+               исследований по тарифу — в разделе «Тарифы», метрика
+               «OSINT-исследования». -->
+          <section class="card router-card" id="osint-settings-card">
+            <div class="section-heading">
+              <div>
+                <h3>OSINT — исследование открытых источников</h3>
+                <p class="block-caption">Переключатели действуют без перезапуска и сохраняются общей кнопкой «Сохранить». Контейнеры источников запускаются на сервере профилем compose <code>osint</code> (COMPOSE_PROFILES=osint и OSINT_WORKER_TOKEN в .env); без них включённый источник помечается в отчёте как не ответивший. Сколько исследований даёт тариф — в разделе «Тарифы».</p>
+              </div>
+            </div>
+            <form id="settings-form-osint" class="settings-grid"></form>
+          </section>
+
           <!-- Предпросмотр политик хранения: что и когда будет удалено.
                Показывается рядом со сроками, потому что читать их
                осмысленно только вместе с последствиями. -->

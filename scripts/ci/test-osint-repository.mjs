@@ -68,7 +68,7 @@ async function rejects(promise, code, message) {
   assert(false, message);
 }
 
-const TELEGRAM_IDS = [-90530001, -90530002];
+const TELEGRAM_IDS = [-90530001, -90530002, -90530003];
 const user = async (telegramId) => Number((await pool.query(
   `INSERT INTO users(telegram_id, first_name, timezone)
    VALUES ($1, 'OSINT CI', 'UTC')
@@ -122,6 +122,11 @@ const input = (userId, key, extra = {}) => ({
   idempotencyKey: key,
   ...extra,
 });
+
+// Квота тарифа проверяется отдельно ниже; основной сценарий идёт без неё,
+// чтобы лимит тарифа не смешивался с суточным пределом.
+const savedQuotas = (await pool.query(`SELECT plan, period, limit_value, free_value FROM quotas WHERE metric = 'osint'`)).rows;
+await pool.query(`DELETE FROM quotas WHERE metric = 'osint'`);
 
 try {
   const [first, second] = [await user(TELEGRAM_IDS[0]), await user(TELEGRAM_IDS[1])];
@@ -285,6 +290,25 @@ try {
   assert(companyReport.subject?.properties?.ogrnCode?.[0] === "1027700132195", "сведения реестра видны у субъекта в отчёте");
 
   // ------------------------------------------------------------------
+  // Квота тарифа
+  // ------------------------------------------------------------------
+  const third = await user(TELEGRAM_IDS[2]);
+  await pool.query(
+    `INSERT INTO quotas (plan, metric, period, limit_value, free_value, description)
+     VALUES ('free', 'osint', 'month', 1, 0, 'CI') ON CONFLICT (plan, metric, period) DO UPDATE SET limit_value = 1`,
+  );
+  const quotaInput = (key) => ({ ...input(third, key), seeds: [{ type: "username", value: "ci_osint_quota" }] });
+  const allowed = await service.create(quotaInput("ci-osint-quota-01"));
+  assert(allowed.created, "первое исследование в пределах тарифа создаётся");
+  assert(await count(`SELECT used AS count FROM usage_counters WHERE user_id = $1 AND metric = 'osint' AND period = 'month'`, [third]) === 1,
+    "исследование списано в расход тарифа");
+  assert((await service.create(quotaInput("ci-osint-quota-01"))).id === allowed.id, "повтор с тем же ключом не списывает второй раз");
+  assert(await count(`SELECT used AS count FROM usage_counters WHERE user_id = $1 AND metric = 'osint' AND period = 'month'`, [third]) === 1,
+    "повтор не увеличил расход");
+  await rejects(service.create(quotaInput("ci-osint-quota-02")), "osint_quota_exhausted", "исчерпанная квота тарифа не пропускает исследование");
+  await pool.query(`DELETE FROM quotas WHERE metric = 'osint'`);
+
+  // ------------------------------------------------------------------
   // Удаление и хранение
   // ------------------------------------------------------------------
   assert(await service.delete(first, created.id), "владелец удаляет исследование");
@@ -319,6 +343,13 @@ try {
   for (const sql of RETENTION_QUERIES.osint_investigations.apply) await pool.query(sql, [90, 1000]);
   assert(await count(`SELECT count(*) FROM osint_entities WHERE id = $1`, [orphanId]) === 0, "и удаляется следующим заходом");
 } finally {
+  await pool.query(`DELETE FROM quotas WHERE metric = 'osint'`);
+  for (const row of savedQuotas) {
+    await pool.query(
+      `INSERT INTO quotas (plan, metric, period, limit_value, free_value, description) VALUES ($1, 'osint', $2, $3, $4, 'OSINT-исследования')`,
+      [row.plan, row.period, row.limit_value, row.free_value],
+    );
+  }
   await pool.query(`DELETE FROM osint_investigations WHERE user_id IN (SELECT id FROM users WHERE telegram_id = ANY($1))`, [TELEGRAM_IDS]);
   await pool.query(`DELETE FROM osint_entities WHERE user_id IN (SELECT id FROM users WHERE telegram_id = ANY($1))`, [TELEGRAM_IDS]);
   await pool.query(`DELETE FROM osint_identifiers WHERE user_id IN (SELECT id FROM users WHERE telegram_id = ANY($1))`, [TELEGRAM_IDS]);

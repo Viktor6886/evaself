@@ -99,8 +99,8 @@ export class AgentToolFactory {
   }
 
   /**
-   * OSINT подключается после сборки: сервис существует, только когда
-   * включён флаг и есть слой заданий. Без него инструментов нет вовсе —
+   * OSINT подключается после сборки: сервис существует, когда есть слой
+   * заданий. Инструменты попадают в набор, только пока флаг включён, —
    * модели незачем видеть то, что заведомо откажет.
    */
   setOsint(service: OsintService): void {
@@ -119,7 +119,7 @@ export class AgentToolFactory {
       // Статус подписки — безопасное чтение владельца conversation. Он
       // нужен Еве независимо от rollout-флага покупки/апгрейда тарифов.
       ...this.subscriptions.build(tool),
-      ...(this.osint?.build(tool) ?? []),
+      ...(this.osint && this.config.osintEnabled ? this.osint.build(tool) : []),
       ...(this.dynamicTools.get(conversationId) ?? []),
     ];
   }

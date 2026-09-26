@@ -20,11 +20,14 @@ const TARIFFS = {
     { metric: "messages", title: "Сообщения человека" },
     { metric: "messages_out", title: "Ответы Евы" },
     { metric: "voice_out", title: "Озвученные ответы" },
+    { metric: "osint", title: "OSINT-исследования" },
   ],
   limits: [
     { plan: "plus", metric: "messages", period: "day", limit_value: 200, free_value: 10 },
     { plan: "plus", metric: "messages", period: "month", limit_value: 4000, free_value: 0 },
     { plan: "max", metric: "messages", period: "day", limit_value: -1, free_value: 0 },
+    // Лимит только на месяц: пробные живут в месячной строке.
+    { plan: "plus", metric: "osint", period: "month", limit_value: 10, free_value: 1 },
   ],
   prices: [
     { plan: "plus", period: "week", stars: 150, enabled: true, updated_at: "2026-08-27T10:00:00Z" },
@@ -123,6 +126,13 @@ describe("вкладка тарифов", () => {
     const week = saved.find(
       (item) => item.body.metric === "messages" && item.body.period === "week");
     assert.equal(week.body.free_value, 0);
+    // У расходника с лимитом только на месяц пробные относятся к месячной
+    // строке: сохранение их не обнуляет.
+    const osintMonth = saved.find((item) => item.body.metric === "osint" && item.body.period === "month");
+    assert.equal(osintMonth.body.limit_value, 10);
+    assert.equal(osintMonth.body.free_value, 1, "месячные пробные затёрты нулём");
+    const osintDay = saved.find((item) => item.body.metric === "osint" && item.body.period === "day");
+    assert.equal(osintDay.body.free_value, 0);
   });
 
   test("читающая роль не получает ни одной кнопки сохранения", async () => {
