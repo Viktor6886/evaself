@@ -121,7 +121,9 @@ Rollback: выключить флаг и `docker compose up -d eva-agent-service
 ### Перепроверка и доработки — 2026-09-27
 
 - [x] Учёт исходов: вызов, отклонённый до выполнения (запрет, нет
-  согласия, отказ хука), считается `failed`, а не `executed`; у
+  согласия, отказ хука, отменённый ход, прежняя неудачная попытка),
+  закрывает согласие как `failed`, а не `executed`; повтор, заставший
+  тот же вызов ещё идущим, согласие не забирает (по замечанию ревью); у
   делегирования своя квота (×4 от лимита хода); ответ MCP в контекст —
   не больше 20 000 знаков с пометкой `truncated`.
 - [x] `letta.ts`: разрешение allowlist фоновой задачи отдавало
@@ -144,7 +146,7 @@ Rollback: выключить флаг и `docker compose up -d eva-agent-service
 Проверки (2026-09-27):
 
 ```
-eva-agent-service: npm test → PASS (1490 из 1498, 8 skip — нужен PostgreSQL)
+eva-agent-service: npm test → PASS (1491 из 1499, 8 skip — нужен PostgreSQL)
 eva-agent-service: npm run typecheck → PASS
 eva-agent-service: npm run lint → PASS
 admin-ui: npm test → PASS (124; EVA_CHROMIUM_PATH — Chromium песочницы)
@@ -153,6 +155,12 @@ make test → не выполнен: сборка образа eva-agent-service
 python3 scripts/ci/assert-{tenant-scope,env-plumbing,admin-route-access,frontend-routes,doc-paths,down-migrations,allowed-updates,live-css,single-admin-domain}.py → PASS
 assert-caddy-*.py → проверяются make validate через caddy adapt (PASS)
 ```
+
+Независимое ревью (отдельный агент, Sonnet, дифф f91ff88..a99362c): 1) все
+цели выполнены и покрыты тестами — да; 2) инварианты и «не делай» — да;
+3) лишних изменений — нет. Низкое замечание об отмене и повторе из журнала
+эффектов исправлено следующим коммитом; `JSON.stringify(...) ?? ""` оставлен —
+для `undefined` он и правда возвращает `undefined`.
 
 Эквиваленты: потребитель — существующий `QueueRegistry.consume`, новых
 очередей нет; навык — новый каталог, пересечения с `osint-research` нет

@@ -146,10 +146,15 @@ export class ToolExecutor {
     let executionUserId: number | undefined;
     let info: ToolCallInfo | undefined;
     let completionAttempted = false;
-    // Отказ проверки согласия или хука — не выполнение: согласие, если
-    // оно было выдано, закрывается как несостоявшееся, а не как
-    // исполненное действие.
-    let refusedBeforeExecution = false;
+    // Чем закрывается выданное согласие. Отказ проверки согласия или
+    // хука, отменённый ход и прежняя неудачная попытка — не выполнение:
+    // согласие закрывается как несостоявшееся. Повтор, который застал
+    // тот же вызов ещё идущим, не закрывает ничего: исход запишет вызов,
+    // который действительно выполняется, а первая запись забирает
+    // согласие себе.
+    // Приведение, а не аннотация: присваивания идут внутри `call`, и без
+    // него TypeScript сузил бы тип до начального "executed".
+    let settlement = "executed" as "executed" | "failed" | "owned_elsewhere";
     // Вызов вынесен в отдельную функцию, чтобы ранний выход —
     // отменённый ход, повтор из журнала — проходил через тот же учёт
     // исхода, что и обычное выполнение.
@@ -191,11 +196,11 @@ export class ToolExecutor {
           ? await gate({ userId: runtime.userId, conversationId, toolName: tool.name, args: invocation.rawArgs })
           : "allow";
         if (verdict === "deny") {
-          refusedBeforeExecution = true;
+          settlement = "failed";
           return toolResult({ ok: false, error: `Вызов ${tool.name} запрещён политикой подтверждений` });
         }
         if (verdict === "approval_missing") {
-          refusedBeforeExecution = true;
+          settlement = "failed";
           return toolResult({
             ok: false,
             error: `Действие ${tool.name} требует согласия человека, а согласия на этот вызов нет. `
@@ -205,7 +210,10 @@ export class ToolExecutor {
       }
       // Барьер отмены перед побочным эффектом. Отменённый ход не
       // должен делать того, что потом нельзя отменить.
-      if (turn && await turn.isCancelled()) return toolResult({ ok: false, error: "ход отменён" });
+      if (turn && await turn.isCancelled()) {
+        settlement = "failed";
+        return toolResult({ ok: false, error: "ход отменён" });
+      }
       // Побочный эффект выполняется не более одного раза на вызов.
       // Ключ детерминированный, поэтому повтор хода после сбоя
       // возвращает прежний результат, а не делает действие второй раз.
@@ -223,6 +231,7 @@ export class ToolExecutor {
         });
         if (decision.action === "replay") return toolResult(decision.result);
         if (decision.action === "skip") {
+          settlement = decision.reason === "in_flight" ? "owned_elsewhere" : "failed";
           return toolResult({
             ok: false,
             error: decision.reason === "in_flight"
@@ -233,7 +242,7 @@ export class ToolExecutor {
       }
       const denied = await this.deps.hooks?.before(info);
       if (denied) {
-        refusedBeforeExecution = true;
+        settlement = "failed";
         if (key && effects) await effects.fail(key, runtime.userId, "hook_denied", true);
         return toolResult({ ok: false, error: denied });
       }
@@ -262,11 +271,11 @@ export class ToolExecutor {
     };
     try {
       const called = await call();
-      if (executionUserId !== undefined) {
+      if (executionUserId !== undefined && settlement !== "owned_elsewhere") {
         completionAttempted = true;
         await this.recordOutcome({
           userId: executionUserId, conversationId, toolName: tool.name, args: invocation.rawArgs,
-          outcome: refusedBeforeExecution ? "failed" : "executed",
+          outcome: settlement,
         });
       }
       return called;

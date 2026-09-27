@@ -159,3 +159,29 @@ test("отказ хука закрывает согласие как несос�
   for (let index = 0; index < 8; index += 1) assert.equal(delegated(), undefined, `вызов ${index + 1}`);
   assert.match((delegated() as { deny: string }).deny, /Предел/);
 });
+
+test("согласие: отмена и прежний отказ — failed, идущий повтор не забирает согласие себе", async () => {
+  const scenario = async (decision: Record<string, unknown>, cancelled = false) => {
+    const completions: string[] = [];
+    let executed = false;
+    const executor = new ToolExecutor({
+      db: { withUserScope: async (_scope: unknown, work: () => Promise<unknown>) => await work() } as never,
+      logger,
+      effects: { begin: async () => decision, succeed: async () => {}, fail: async () => {} } as never,
+      context: async () => RUNTIME as never,
+      riskFor: () => "read",
+      approvalCompletion: () => async (input: { outcome: string }) => { completions.push(input.outcome); },
+    } as never);
+    const tool = { name: "get_notes", source: "product", group: "product", execute: async () => { executed = true; return {}; } };
+    await runInTurn({ ...TURN, isCancelled: async () => cancelled } as never, async () =>
+      await executor.run({ conversationId: "conv-1", tool: tool as never, rawArgs: {}, toolCallId: "call-1" }));
+    return { completions, executed };
+  };
+  assert.deepEqual(await scenario({ action: "execute", attempt: 1 }), { completions: ["executed"], executed: true });
+  assert.deepEqual(await scenario({ action: "execute", attempt: 1 }, true), { completions: ["failed"], executed: false });
+  assert.deepEqual(await scenario({ action: "skip", reason: "not_retryable", errorCode: "x" }), { completions: ["failed"], executed: false });
+  // Исход запишет вызов, который действительно идёт.
+  assert.deepEqual(await scenario({ action: "skip", reason: "in_flight", errorCode: null }), { completions: [], executed: false });
+  // Повтор из журнала — действие уже состоялось.
+  assert.deepEqual(await scenario({ action: "replay", result: { ok: true } }), { completions: ["executed"], executed: false });
+});
