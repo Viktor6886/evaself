@@ -95,6 +95,47 @@ async def to_asr_wav(source: Path, destination: Path) -> Path:
     return destination
 
 
+async def split_to_asr_wav(
+    source: Path,
+    directory: Path,
+    segment_seconds: float = 480.0,
+) -> list[Path]:
+    """Нарезать запись на WAV 16 кГц моно ограниченной длины для распознавания.
+
+    Сжатый MP3 длиной в час превращается в PCM WAV на сотню мегабайт, а
+    провайдеры распознавания принимают файл до 25 МБ. Кусок фиксированной
+    длительности держит каждый запрос ниже этого предела. Предел общей
+    длительности записи проверяет вызывающий — отдельно.
+    """
+    if segment_seconds <= 0:
+        raise MediaError("длина куска для распознавания должна быть положительной")
+
+    directory.mkdir(parents=True, exist_ok=True)
+    pattern = directory / "part-%05d.wav"
+    code, _stdout, stderr = await _run(
+        FFMPEG,
+        "-hide_banner", "-loglevel", "error",
+        "-y",
+        "-i", str(source),
+        "-map", "0:a:0",
+        "-vn",
+        "-ac", "1",
+        "-ar", str(ASR_SAMPLE_RATE),
+        "-c:a", "pcm_s16le",
+        "-f", "segment",
+        "-segment_time", str(segment_seconds),
+        "-reset_timestamps", "1",
+        str(pattern),
+        timeout=900,
+    )
+    parts = sorted(directory.glob("part-*.wav"))
+    if code != 0 or not parts:
+        raise MediaError(
+            "не удалось нарезать запись на части",
+            details=stderr.decode(errors="replace")[:500],
+        )
+    return parts
+
 async def make_test_tone(destination: Path, seconds: float = 1.0) -> Path:
     """Короткий корректный WAV для проверки тракта распознавания.
 

@@ -606,6 +606,25 @@ def build_with_keys(tmp_path, adapters, keys, **route_overrides):
     return SttRoutingService(runtime, FakeRegistry(adapters), TranscriptCache())
 
 
+def test_runtime_accepts_separate_telegram_audio_route(tmp_path):
+    runtime = SttRuntime(tmp_path / "audio-route.json")
+    applied = runtime.apply({
+        "version": 1,
+        "configs": [{
+            "id": "primary", "name": "Основной", "provider": "alpha", "mode": "batch",
+            "base_url": "https://alpha.example", "model": "m1", "params": {}, "secret": "k",
+        }],
+        "routes": [{
+            "use_case": "telegram_audio", "chain": ["primary"], "enabled": True,
+            "rotation_enabled": True, "timeout_ms": 120000, "max_audio_seconds": 7200,
+        }],
+    })
+    assert applied["applied"], applied
+    route = runtime.route("telegram_audio")
+    assert route is not None
+    assert route.max_audio_seconds == 7200
+
+
 KEYS = [
     {"id": "k1", "label": "Ключ 1", "secret": "key-one"},
     {"id": "k2", "label": "Ключ 2", "secret": "key-two"},
