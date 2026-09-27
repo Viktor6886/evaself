@@ -594,6 +594,8 @@ async function runTelegramTurn(
     docxFails?: boolean;
     /** Свой сервер Bot API вместо облачного. */
     telegramApiBaseUrl?: string;
+    /** EVA_AGENT_LOCK_TTL: срок аренды хода, секунды. */
+    lockTtlSeconds?: number;
     /** Вложение вместо обычного текста. */
     attachment?: {
       message: Record<string, unknown>;
@@ -879,7 +881,7 @@ async function runTelegramTurn(
   const workflow = new EvaWorkflow(
     {
       typingIntervalMs: 4000,
-      lockTtlSeconds: 180,
+      lockTtlSeconds: options.lockTtlSeconds ?? 180,
       mediaServiceUrl: "http://media-service:8090",
       // Домен Mini App: пусто — установка без приложения, и кнопке на
       // него взяться неоткуда.
@@ -1725,6 +1727,28 @@ test("свой сервер Bot API снимает облачный предел
     },
   });
   assert.equal(probe.transcribed.length, 1, "файл со своего сервера Bot API отклонён облачным пределом");
+});
+
+test("аренда хода продлевается, пока ход жив, и перестаёт после него", async () => {
+  const store = new TurnStore();
+  const turns = lifecycle(store);
+  const leases: number[] = [];
+  const originalLease = turns.lease.bind(turns);
+  turns.lease = async (handle, owner, seconds) => {
+    leases.push(Date.now());
+    await originalLease(handle, owner, seconds);
+  };
+  // Срок аренды — 3 с: продление раз в секунду. Распознавание идёт 2,3 с,
+  // дольше одного периода, как часовая запись дольше EVA_AGENT_LOCK_TTL.
+  await runTelegramTurn(turns, {
+    lockTtlSeconds: 3,
+    sttMs: 2_300,
+    attachment: { message: { voice: { file_id: "v-long", file_unique_id: "v-long" } }, bytes: PNG_BYTES },
+  });
+  assert.ok(leases.length >= 3, `аренда не продлевалась: ${leases.length} раз`);
+  const after = leases.length;
+  await new Promise((resolve) => setTimeout(resolve, 1_300));
+  assert.equal(leases.length, after, "аренду продлевают после конца хода");
 });
 
 test("медленный ASR редактирует один статус в transcript без record_voice", async () => {

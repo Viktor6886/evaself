@@ -580,6 +580,7 @@ export class EvaWorkflow {
       });
     }
     await this.moveTurn(turnHandle, "queued");
+    let leaseRenewal: ReturnType<typeof setInterval> | null = null;
     try {
       const measured = await this.db.withQueryMetrics(async () =>
         await this.queue.run(update.telegramId, async (): Promise<InboxResult> => {
@@ -590,6 +591,17 @@ export class EvaWorkflow {
           await this.turns.recordWait(turnHandle, metrics.queue_wait_ms);
           await this.turns.transition(turnHandle, "claimed");
           await this.turns.lease(turnHandle, LEASE_OWNER, this.config.lockTtlSeconds);
+          // Аренда продлевается, пока ход жив. Разовая аренда на
+          // EVA_AGENT_LOCK_TTL истекала посреди долгого хода — распознавания
+          // часовой записи или длинного хода модели, — и восстановление
+          // принимало живой ход за брошенный и запускало его второй раз.
+          const renewEveryMs = Math.max(1, Math.floor(this.config.lockTtlSeconds / 3)) * 1000;
+          const turns = this.turns;
+          const handle = turnHandle;
+          leaseRenewal = setInterval(() => {
+            void turns.lease(handle, LEASE_OWNER, this.config.lockTtlSeconds);
+          }, renewEveryMs);
+          leaseRenewal.unref?.();
         }
         // Ход целиком идёт в области своего пользователя: всё, что
         // выполнится внутри — контекст, инструменты, память, доставка —
@@ -1334,6 +1346,7 @@ export class EvaWorkflow {
       });
       throw error;
     } finally {
+      if (leaseRenewal) clearInterval(leaseRenewal);
       live.current?.stop();
       action.current?.stop();
       const delivery = this.telegram.getDeliveryMetrics();

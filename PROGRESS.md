@@ -22,7 +22,9 @@
 - [x] Навык `user-materials`, правило о материалах в `memory-hygiene`,
   поправка `audio-transcripts`, `docs/stt.md`.
 - [x] Сверх ветки: предел 20 МБ только у облачного Bot API; запись длиннее
-  остатка минут не распознаётся.
+  остатка минут не распознаётся; аренда хода продлевается, пока ход жив
+  (разовая аренда на EVA_AGENT_LOCK_TTL истекала посреди долгого хода, и
+  при EVA_TURN_RECOVERY живой ход считался брошенным).
 - Не перенесено как есть: включение `EVA_KNOWLEDGE_UPLOADS` по умолчанию
   (eb82586) — флаги по правилам проекта выключены, включает человек.
   Пределы media-service 200 МБ / 7200 с — только в `.env.example` для новых
@@ -31,8 +33,10 @@
 Проверки (2026-09-27):
 
 ```
-eva-agent-service: npm test → PASS (1506, 0 fail, 8 skip — нужен PostgreSQL)
+eva-agent-service: npm test → PASS (1507, 0 fail, 8 skip — нужен PostgreSQL)
 eva-agent-service: npm run typecheck → PASS; npm run lint → PASS
+admin-ui: stt-page.test.mjs → PASS (24)
+make validate → PASS
 media-service: pytest → PASS (154, ffmpeg 7.1); ruff → PASS
 миграции на PostgreSQL 17 (pgvector 0.8.5): 3 прогона, откат и повтор → PASS; копия цепочки 088 → PASS
 python3 scripts/ci/assert-tenant-scope.py → PASS
