@@ -12,8 +12,8 @@
 | Компонент | Версия | Лицензия | Роль |
 |---|---|---|---|
 | Maigret | 0.6.6 | MIT | поиск аккаунтов по username |
-| WhatsMyName (данные) | `062bcfe` | CC BY-SA 4.0 | независимая проверка профиля |
-| Sherlock (данные) | `3760187` | MIT | независимая проверка профиля |
+| WhatsMyName (данные) | `062bcfe` | CC BY-SA 4.0 | независимый поиск и проверка профилей |
+| Sherlock (данные) | `3760187` | MIT | независимый поиск и проверка профилей |
 | FollowTheMoney | 4.11.0 | MIT | модель сущностей |
 | nomenklatura | 4.17.0 | MIT | признаки сходства (`LogicV2`) |
 | dnspython | 2.8.0 | ISC | записи DNS |
@@ -27,7 +27,7 @@
 (`OSINT_WORKER_TOKEN`). Ошибка — `{"error": {code, message, retryable}}`.
 
 - `GET /health` — число загруженных правил.
-- `POST /v1/username/scan` `{username, top_sites?}` — Maigret.
+- `POST /v1/username/scan` `{username, top_sites?, rule_requests?: 0…100}` — Maigret и независимые правила WhatsMyName/Sherlock. Ответ дополнен `verifications` и `verification_requests`; находки второго сборщика сохраняются при отказе первого.
 - `POST /v1/username/verify` `{username, hosts[≤100], sources[]}` —
   проверка профилей правилами WhatsMyName/Sherlock.
 - `POST /v1/infra/rdap` `{kind: domain|ip|asn, value}` — RDAP через IANA

@@ -37,6 +37,8 @@ export interface WorkerScanResult {
   checked: number;
   found: WorkerFoundProfile[];
   degraded: Partial<Record<DegradedReason, number>>;
+  verifications?: WorkerVerification[];
+  verificationRequests?: number;
 }
 
 export type VerificationStatus = "found" | "not_found" | "unknown" | "skipped" | "degraded";
@@ -132,7 +134,7 @@ export class OsintHttpClient {
     method: "GET" | "POST",
     path: string,
     payload: unknown,
-    options: { timeoutMs: number; retry: boolean },
+    options: { timeoutMs: number; retry: boolean; signal?: AbortSignal },
   ): Promise<unknown> {
     if (!this.token && path !== "/health") {
       throw new EvaError(`OSINT_WORKER_TOKEN не задан (${this.service})`, { code: "osint_worker_not_configured", statusCode: 503 });
@@ -141,8 +143,10 @@ export class OsintHttpClient {
     let lastError: EvaError | null = null;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       try {
-        return await this.once(method, path, payload, options.timeoutMs);
+        options.signal?.throwIfAborted();
+        return await this.once(method, path, payload, options.timeoutMs, options.signal);
       } catch (error) {
+        options.signal?.throwIfAborted();
         if (!(error instanceof EvaError) || !error.retryable) throw error;
         lastError = error;
       }
@@ -150,7 +154,7 @@ export class OsintHttpClient {
     throw lastError!;
   }
 
-  private async once(method: "GET" | "POST", path: string, payload: unknown, timeoutMs: number): Promise<unknown> {
+  private async once(method: "GET" | "POST", path: string, payload: unknown, timeoutMs: number, signal?: AbortSignal): Promise<unknown> {
     const headers: Record<string, string> = {};
     if (this.token) headers["X-Osint-Key"] = this.token;
     if (payload !== undefined) headers["content-type"] = "application/json";
@@ -160,7 +164,7 @@ export class OsintHttpClient {
         method,
         headers,
         ...(payload !== undefined ? { body: JSON.stringify(payload) } : {}),
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
       });
     } catch (error) {
       const timeout = error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
@@ -252,12 +256,13 @@ export class OsintWorkerClient extends OsintHttpClient {
    * сайтам, и повтор удвоил бы нагрузку на них. Повтор — решение
    * оркестратора с его бюджетом.
    */
-  async scanUsername(username: string, options: { topSites?: number } = {}): Promise<WorkerScanResult> {
+  async scanUsername(username: string, options: { topSites?: number; ruleRequests?: number; signal?: AbortSignal } = {}): Promise<WorkerScanResult> {
     const body = record(await this.call(
       "POST",
       "/v1/username/scan",
-      { username, ...(options.topSites ? { top_sites: options.topSites } : {}) },
-      { timeoutMs: this.scanTimeoutMs, retry: false },
+      { username, ...(options.topSites ? { top_sites: options.topSites } : {}),
+        ...(options.ruleRequests !== undefined ? { rule_requests: options.ruleRequests } : {}) },
+      { timeoutMs: this.scanTimeoutMs, retry: false, ...(options.signal ? { signal: options.signal } : {}) },
     ));
     const degraded: Partial<Record<DegradedReason, number>> = {};
     for (const [reason, value] of Object.entries(record(body.degraded))) {
@@ -281,6 +286,8 @@ export class OsintWorkerClient extends OsintHttpClient {
         };
       }).filter((profile) => profile.site && profile.url),
       degraded,
+      verifications: parseVerifications(body.verifications),
+      verificationRequests: count(body.verification_requests),
     };
   }
 
@@ -296,19 +303,7 @@ export class OsintWorkerClient extends OsintHttpClient {
       { username, hosts: [...new Set(hosts)].slice(0, 100), sources },
       { timeoutMs: this.timeoutMs, retry: true },
     ));
-    return list(body.results).flatMap((raw) => {
-      const item = record(raw);
-      const source = item.source === "whatsmyname" || item.source === "sherlock" ? item.source : null;
-      const status = VERIFICATION_STATUSES.find((value) => value === item.status);
-      if (!source || !status) return [];
-      return [{
-        source,
-        site: text(item.site),
-        profileUrl: text(item.profile_url),
-        status,
-        reason: typeof item.reason === "string" ? item.reason : null,
-      }];
-    });
+    return parseVerifications(body.results);
   }
 
   /** Признаки сходства nomenklatura. Вычисление без побочных эффектов — повторяется. */
@@ -346,4 +341,20 @@ export function text(value: unknown): string {
 
 export function count(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
+}
+
+function parseVerifications(rawResults: unknown): WorkerVerification[] {
+  return list(rawResults).flatMap((raw) => {
+    const item = record(raw);
+    const source = item.source === "whatsmyname" || item.source === "sherlock" ? item.source : null;
+    const status = VERIFICATION_STATUSES.find((value) => value === item.status);
+    if (!source || !status) return [];
+    return [{
+      source,
+      site: text(item.site),
+      profileUrl: text(item.profile_url),
+      status,
+      reason: typeof item.reason === "string" ? item.reason : null,
+    }];
+  });
 }

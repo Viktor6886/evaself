@@ -97,3 +97,69 @@ def test_registry_endpoint_validates_before_any_request(monkeypatch):
     # Поиск ИП по ФИО не поддерживается: однофамильцы — не след.
     assert person_name.status_code == 422
     assert unauthorized.status_code == 401
+
+
+@pytest.mark.parametrize("failure", [TimeoutError(), RuntimeError("private username")])
+def test_scan_preserves_independent_findings_when_maigret_fails(monkeypatch, failure):
+    from app.site_rules import Verification
+
+    main = _app(monkeypatch)
+
+    async def broken(*args, **kwargs):
+        raise failure
+
+    async def discover(username, limit, deadline):
+        assert limit == 10
+        return [Verification("sherlock", "GitHub", "https://github.com/alice", "found")], 1
+
+    monkeypatch.setattr(main, "scan_username", broken)
+    with TestClient(main.app) as client:
+        monkeypatch.setattr(main.state.verifier, "discover", discover)
+        response = client.post(
+            "/v1/username/scan",
+            json={"username": "alice", "top_sites": 20, "rule_requests": 10},
+            headers={"X-Osint-Key": "secret"},
+        )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "degraded"
+    assert data["checked"] == 20
+    assert data["verification_requests"] == 1
+    assert data["verifications"][0]["status"] == "found"
+    assert "private username" not in response.text
+
+
+def test_scan_rejects_unbounded_independent_requests(monkeypatch):
+    main = _app(monkeypatch)
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/v1/username/scan", json={"username": "alice", "rule_requests": 101}, headers={"X-Osint-Key": "secret"}
+        )
+    assert response.status_code == 422
+
+
+def test_scan_preserves_maigret_findings_when_independent_rules_fail(monkeypatch):
+    from app.maigret_scan import FoundProfile, ScanResult
+
+    main = _app(monkeypatch)
+
+    async def found(*args, **kwargs):
+        return ScanResult("alice", "ok", 10, [FoundProfile("GitHub", "https://github.com/alice", [], 200)], {})
+
+    async def broken(*args, **kwargs):
+        raise RuntimeError("private username")
+
+    monkeypatch.setattr(main, "scan_username", found)
+    with TestClient(main.app) as client:
+        monkeypatch.setattr(main.state.verifier, "discover", broken)
+        response = client.post(
+            "/v1/username/scan",
+            json={"username": "alice", "top_sites": 10, "rule_requests": 5},
+            headers={"X-Osint-Key": "secret"},
+        )
+    data = response.json()
+    assert data["status"] == "degraded"
+    assert data["found"][0]["url"] == "https://github.com/alice"
+    assert data["verification_requests"] == 5
+    assert data["degraded"] == {"unavailable": 1}
+    assert "private username" not in response.text

@@ -174,11 +174,25 @@ export class OsintOrchestrator {
         break;
       }
       summary.processed += 1;
-      const applicable = this.collectors.filter((collector) => collector.accepts(item.type));
+      // Веб — базовое покрытие для каждой цели. Медленный скан/его
+      // отказ не должен лишать исследование обычной поисковой выдачи.
+      const applicable = this.collectors.filter((collector) => collector.accepts(item.type))
+        .sort((a, b) => Number(b.name === "web_search") - Number(a.name === "web_search"));
       for (const collector of applicable) {
         signal.throwIfAborted();
+        if (await this.store.isCancelled()) {
+          return { ...summary, status: "cancelled", stoppedBy: "cancelled" };
+        }
+        if (now() >= deadline) {
+          summary.stoppedBy = "budget_runtime";
+          break;
+        }
         const used = (await this.store.counters()).externalRequests;
         const remaining = budget.maxExternalRequests - used;
+        if (remaining <= 0) {
+          summary.stoppedBy = "budget_requests";
+          break;
+        }
         const runId = await this.store.startRun(collector.name, item.identifierId);
         if (!runId) continue;
         summary.runs += 1;
@@ -217,6 +231,7 @@ export class OsintOrchestrator {
         this.options.onRun?.(collector.name, output.status, output.externalRequests);
       }
       await this.store.finishFrontier(item.identifierId, applicable.length > 0 ? "done" : "skipped");
+      if (summary.stoppedBy) break;
     }
     summary.externalRequests = (await this.store.counters()).externalRequests;
     await this.store.complete("completed");
@@ -334,7 +349,7 @@ export class OsintOrchestrator {
       entityId,
       identifierId,
       evidenceId,
-      collector,
+      collector: finding.confirmedBy[0] ?? collector,
       confidence: accountConfidence(finding),
     });
     const sourceRef = [{ sourceTier: source.tier, sourceDomain: source.domain }];

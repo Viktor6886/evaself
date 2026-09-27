@@ -3,7 +3,7 @@ import pytest
 
 from app.limits import CircuitBreaker
 from app.netguard import FetchResult
-from app.site_rules import ProfileVerifier, evaluate, load_sherlock, load_whatsmyname
+from app.site_rules import ProfileVerifier, SiteRule, evaluate, load_sherlock, load_whatsmyname
 from tests.conftest import public_resolver
 
 
@@ -103,3 +103,82 @@ async def test_hosts_are_matched_without_www_and_case(fixtures, hosts):
     async with client:
         results = await verifier.verify("alice", {h.lower() for h in hosts}, {"whatsmyname"})
     assert [r.status for r in results] == ["not_found"]
+
+
+async def test_discovery_finds_profiles_without_maigret_and_caps_http_requests():
+    calls = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(200, text="profile")
+
+    rules = [
+        SiteRule(
+            "sherlock",
+            f"GitHub{i}",
+            "https://github.com/{account}",
+            "https://github.com/{account}",
+            error_type="status_code",
+        )
+        for i in range(5)
+    ]
+    # Этот хост не входит в список публичных площадок независимого поиска.
+    rules.append(
+        SiteRule(
+            "sherlock",
+            "Unknown",
+            "https://other.example/{account}",
+            "https://other.example/{account}",
+            error_type="status_code",
+        )
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        verifier = ProfileVerifier(rules, client=client, resolver=public_resolver)
+        found, requests = await verifier.discover("alice", limit=2, deadline=1)
+    assert requests == len(calls) == 2
+    assert all(item.status == "found" for item in found)
+    assert all(item.profile_url == "https://github.com/alice" for item in found)
+
+
+async def test_discovery_does_not_follow_redirects_or_claim_login_as_a_profile():
+    calls = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(302, headers={"location": "https://github.com/login"})
+
+    rule = SiteRule(
+        "sherlock", "GitHub", "https://github.com/{account}", "https://github.com/{account}", error_type="status_code"
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        verifier = ProfileVerifier([rule], client=client, resolver=public_resolver)
+        results, requests = await verifier.discover("alice", limit=10, deadline=1)
+    assert requests == len(calls) == 1
+    assert results[0].status == "unknown"
+
+
+async def test_discovery_deadline_retains_completed_results_and_cancels_pending(monkeypatch):
+    import asyncio
+
+    from app.site_rules import Verification
+
+    def rule(name):
+        return SiteRule("sherlock", name, "https://github.com/{account}", "https://github.com/{account}")
+
+    cancelled = asyncio.Event()
+
+    async def check(site, username, **kwargs):
+        if site.name == "Fast":
+            return Verification("sherlock", site.name, "https://github.com/alice", "found")
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    async with httpx.AsyncClient() as client:
+        verifier = ProfileVerifier([rule("Fast"), rule("Slow")], client=client)
+        monkeypatch.setattr(verifier, "_check", check)
+        results, requests = await verifier.discover("alice", limit=2, deadline=0.02)
+    assert requests == 2
+    assert [(item.site, item.status) for item in results] == [("Fast", "found"), ("Slow", "degraded")]
+    assert cancelled.is_set()

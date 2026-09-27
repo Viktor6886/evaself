@@ -98,10 +98,10 @@ export class OsintReportBuilder {
       [id, userId],
     );
     const { rows: runs } = await this.db.query<{ collector: string; status: string; reason: string | null; count: number; requests: number }>(
-      `SELECT collector, status, degraded_reason AS reason, count(*)::int AS count,
+      `SELECT collector, status, coalesce(degraded_reason, error_code) AS reason, count(*)::int AS count,
               coalesce(sum(external_requests), 0)::int AS requests
          FROM osint_collector_runs WHERE investigation_id = $1 AND user_id = $2
-        GROUP BY collector, status, degraded_reason
+        GROUP BY collector, status, coalesce(degraded_reason, error_code)
         ORDER BY collector, status`,
       [id, userId],
     );
@@ -203,6 +203,9 @@ function limitations(
   if (status === "queued" || status === "processing") notes.push("Исследование ещё идёт: отчёт неполный.");
   if (status === "cancelled") notes.push("Исследование отменено: собрано не всё.");
   if (status === "failed") notes.push("Исследование завершилось сбоем: собрано не всё.");
+  if (status === "completed" && !runs.some((run) => ["succeeded", "degraded", "failed"].includes(run.status))) {
+    notes.push("Ни один сборщик не выполнил поиск: проверьте включённые источники и поддерживаемый тип исходных данных.");
+  }
   const degraded = runs.filter((run) => run.status === "degraded" || run.status === "failed");
   if (degraded.length > 0) {
     const names = [...new Set(degraded.map((run) => run.reason ? `${run.collector} (${run.reason})` : run.collector))];
@@ -231,6 +234,7 @@ export function renderReport(report: OsintReport, maxLength = 6_000): string {
       .map(([key, values]) => `${key}: ${values.slice(0, 5).join(", ")}`);
     if (props.length > 0) lines.push(`Сведения о субъекте из источников: ${props.join("; ")}.`);
   }
+  lines.push("", "Ограничения:", ...report.limitations.map((note) => `- ${note}`));
   if (report.accounts.length > 0) {
     lines.push("", "Аккаунты (принадлежность субъекту НЕ установлена, если не сказано иное):");
     for (const account of report.accounts) {
@@ -254,7 +258,6 @@ export function renderReport(report: OsintReport, maxLength = 6_000): string {
   if (report.discovered.length > 0) {
     lines.push("", `Найдено новых идентификаторов: ${report.discovered.length}.`);
   }
-  lines.push("", "Ограничения:", ...report.limitations.map((note) => `- ${note}`));
   const text = lines.join("\n");
   return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
 }

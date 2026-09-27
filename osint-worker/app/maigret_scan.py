@@ -25,7 +25,7 @@ from typing import Any
 
 from .limits import classify_failure
 
-EXCLUDED_TAGS = ("dating", "erotic", "porn", "webcam", "medicine", "religion", "geosocial")
+EXCLUDED_TAGS = ("dating", "erotic", "porn", "webcam", "medicine", "religion", "political", "geosocial")
 
 MAX_DISCOVERED_PER_PROFILE = 20
 
@@ -137,27 +137,41 @@ async def scan_username(
 
         search = maigret_search
     db = database or _load_database()
-    sites = db.ranked_sites_dict(top=top_sites, excluded_tags=list(EXCLUDED_TAGS), id_type="username")
+    ranked = db.ranked_sites_dict(top=top_sites, excluded_tags=list(EXCLUDED_TAGS), id_type="username", disabled=False)
+    # Maigret 0.6.6 добавляет зеркала сверх top. Отключённые upstream
+    # сайты не должны занимать лимит, зеркала не должны его превышать.
+    sites = dict(list(ranked.items())[:top_sites])
     logger = logging.getLogger("maigret")
     logger.setLevel(logging.WARNING)
-    results = await asyncio.wait_for(
-        search(
-            username=username,
-            site_dict=sites,
-            logger=logger,
-            timeout=site_timeout,
-            is_parsing_enabled=True,
-            max_connections=max_connections,
-            no_progressbar=True,
-            retries=0,
-            # Обход защиты сайтов запрещён: никаких cloudflare_bypass,
-            # прокси и Tor.
-            cloudflare_bypass=None,
-            proxy=None,
-            tor_proxy=None,
-            i2p_proxy=None,
-            check_domains=False,
-        ),
-        timeout=deadline,
-    )
+    partial: dict[str, dict[str, Any]] = {}
+    try:
+        results = await asyncio.wait_for(
+            search(
+                username=username,
+                output_container=partial,
+                site_dict=sites,
+                logger=logger,
+                timeout=site_timeout,
+                is_parsing_enabled=True,
+                max_connections=max_connections,
+                no_progressbar=True,
+                retries=0,
+                # Обход защиты сайтов запрещён: никаких cloudflare_bypass,
+                # прокси и Tor.
+                cloudflare_bypass=None,
+                proxy=None,
+                tor_proxy=None,
+                i2p_proxy=None,
+                check_domains=False,
+            ),
+            timeout=deadline,
+        )
+    except TimeoutError:
+        # API output_container сохраняет завершённые проверки до общего
+        # таймаута. Раньше весь скан вместе с находками терялся.
+        result = parse_results(username, partial)
+        result.checked = len(sites)
+        result.status = "degraded"
+        result.degraded["timeout"] = result.degraded.get("timeout", 0) + 1
+        return result
     return parse_results(username, results)
