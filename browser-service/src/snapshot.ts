@@ -18,6 +18,8 @@
 
 import type { Page } from "playwright-core";
 
+import { isSensitiveField } from "./sensitive-field.js";
+
 export interface PageSnapshot {
   url: string;
   title: string;
@@ -49,19 +51,17 @@ const MAX_FIELDS_CHECKED = 50;
 /**
  * Скрыть значения полей, которые нельзя показывать модели: пароли,
  * одноразовые коды, номера карт. Роль `textbox` у них та же, что у
- * обычного поля, поэтому тип спрашивается у самого элемента.
+ * обычного поля, поэтому признаки спрашиваются у самого элемента — тем
+ * же правилом, что закрывает такие поля для ввода.
  */
 export async function redactSensitiveFields(page: Page, snapshot: string, timeoutMs: number): Promise<string> {
   const candidates = [...snapshot.matchAll(FIELD_WITH_VALUE)].slice(0, MAX_FIELDS_CHECKED);
   const sensitive = new Set<string>();
   await Promise.all(candidates.map(async (match) => {
     const ref = match[2]!;
-    const hidden = await page.locator(`aria-ref=${ref}`).evaluate((element) => {
-      const input = element as { type?: string; autocomplete?: string };
-      const type = String(input.type ?? "").toLowerCase();
-      const autocomplete = String(input.autocomplete ?? "").toLowerCase();
-      return type === "password" || /cc-|one-time-code|current-password|new-password/.test(autocomplete);
-    }, undefined, { timeout: timeoutMs }).catch(() => true);
+    const hidden = await page.locator(`aria-ref=${ref}`)
+      .evaluate(isSensitiveField, undefined, { timeout: timeoutMs })
+      .catch(() => true);
     if (hidden) sensitive.add(ref);
   }));
   if (!sensitive.size) return snapshot;

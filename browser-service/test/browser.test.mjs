@@ -52,6 +52,9 @@ before(async () => {
         <form action="/search" method="get"><input name="q" aria-label="Поиск"><button>Найти</button></form>
         <form action="/submit" method="post"><input name="c" aria-label="Комментарий"><button>Отправить</button></form>
         <input type="password" aria-label="Пароль" value="hunter2-secret">
+        <input type="text" name="otp" aria-label="Код" value="482913">
+        <label>Номер карты <input type="text" name="field7" value="4111 1111 1111 1111"></label>
+        <input type="text" name="cardNumber" aria-label="Реквизиты">
         <p>Ключ на экране: sk-abcdefghijklmnopqrstuvwxyz123456</p>
         <img src="http://evil.test:${port}/steal.png" alt="">`));
     } else if (path === "/second") {
@@ -133,6 +136,13 @@ test("отправка POST-формы и ввод в поле пароля не
   const reopened = await sessions.open("session-0001", OWNER, `http://site.test:${port}/`);
   const password = /textbox "Пароль" \[ref=([a-z0-9]+)\]/.exec(reopened.snapshot)[1];
   await assert.rejects(sessions.type("session-0001", OWNER, password, "x", false), { code: "sensitive_field" });
+  // Код и карта без type=password и autocomplete опознаются по имени и подписи.
+  for (const label of ["Код", "Номер карты", "Реквизиты"]) {
+    const ref = new RegExp(`textbox "${label}" \\[ref=([a-z0-9]+)\\]`).exec(reopened.snapshot)[1];
+    await assert.rejects(sessions.type("session-0001", OWNER, ref, "1234", false), { code: "sensitive_field" }, label);
+  }
+  assert.ok(!reopened.snapshot.includes("482913"), "одноразовый код не показан модели");
+  assert.ok(!reopened.snapshot.includes("4111 1111"), "номер карты не показан модели");
   await assert.rejects(sessions.click("session-0001", OWNER, "e99999"), { code: "invalid_ref" });
 });
 

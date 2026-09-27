@@ -12,7 +12,7 @@ import { test } from "node:test";
 import { AgentToolFactory, isHostExecutionTool, toolRisk } from "../dist/agent-tools.js";
 import { ApprovalService, fingerprintApprovalArguments } from "../dist/tools/approvals.js";
 import { unwrapBridgeCall, validateArguments } from "../dist/tools/bridge-tools.js";
-import { ToolRegistry } from "../dist/tools/registry.js";
+import { ToolRegistry, directAlias } from "../dist/tools/registry.js";
 import { sessionPermission } from "../dist/tools/session-permission.js";
 import { buildIndex, catalogListing, searchCatalog, stem } from "../dist/tools/tool-search.js";
 import { runInTurn } from "../dist/turns/turn-context.js";
@@ -100,6 +100,28 @@ test("реестр: мосты зарезервированы, одноимён�
   assembly = registry.assemble("conv-1");
   assert.deepEqual(assembly.deferred.map((item) => item.name), ["mcp__x__ok"]);
   assert.equal(assembly.deferred[0]?.exposure, "deferred");
+});
+
+test("реестр: MCP-имя с точкой или длиннее 64 знаков без поиска получает псевдоним, а не выпадает", async () => {
+  let search = false;
+  const calls: string[] = [];
+  const tool = (name: string) => ({ ...registered(name, "mcp", "deferred"), execute: async () => { calls.push(name); return { ok: true }; } });
+  const long = `mcp__server__${"very_long_tool_name_".repeat(4)}`;
+  const registry = new ToolRegistry({ toolSearchEnabled: () => search });
+  registry.register({ id: "mcp", tools: () => [tool("mcp__x__search.issues"), tool("mcp__x__search_issues"), tool(long)] });
+
+  const direct = registry.assemble("conv-1").direct;
+  assert.equal(direct.length, 3, "ни один инструмент не выпал");
+  assert.ok(direct.every((item) => /^[A-Za-z0-9_-]{1,64}$/.test(item.name)), direct.map((item) => item.name).join(", "));
+  assert.equal(new Set(direct.map((item) => item.name)).size, 3, "a.b и a_b — разные псевдонимы");
+  assert.ok(direct.some((item) => item.name === "mcp__x__search_issues"), "допустимое имя не меняется");
+  assert.equal(directAlias("mcp__x__search.issues"), directAlias("mcp__x__search.issues"), "псевдоним устойчив между ходами");
+  // Вызов по псевдониму исполняет настоящий инструмент.
+  await direct.find((item) => item.name.startsWith("mcp__x__search_issues_"))!.execute({}, {} as never);
+  assert.deepEqual(calls, ["mcp__x__search.issues"]);
+
+  search = true;
+  assert.deepEqual(registry.assemble("conv-1").deferred.map((item) => item.name).sort(), [long, "mcp__x__search.issues", "mcp__x__search_issues"].sort());
 });
 
 test("разворот моста: цель и её аргументы, мост без цели — отказ", () => {

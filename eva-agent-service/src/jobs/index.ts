@@ -40,7 +40,7 @@ import { JobRunJournal } from "./job-runs.js";
 import { QueueRegistry } from "./queue-registry.js";
 import { JobRuntime } from "./runtime.js";
 import { JobScheduleRegistry } from "./schedules.js";
-import { ResearchJobWorker } from "../research/worker.js";
+import { ResearchJobWorker, researchJobTiming } from "../research/worker.js";
 import { SearxCrawlAdapters } from "../research/adapters.js";
 import { UsernameProfilesCollector, WebSearchCollector } from "../osint/collectors.js";
 import { HarvesterCollector, InfrastructureCollector, SpiderfootCollector } from "../osint/infra-collectors.js";
@@ -156,7 +156,13 @@ export function buildJobLayer(
       ...(deps.researchDelegation ? { delegation: deps.researchDelegation } : {}),
     });
     registry.queue("research");
-    runtime.register("research_run", async (context) => await research.run(context));
+    // Субагентам нужен свой бюджет сверх срока конвейера — иначе сигнал
+    // задания обрывает их раньше, чем успевает запасной конвейер.
+    runtime.register(
+      "research_run",
+      async (context) => await research.run(context),
+      deps.researchDelegation?.enabled() ? researchJobTiming(config.delegationTimeoutMs) : {},
+    );
   }
 
   // OSINT-исследование: детерминированные сборщики без модели.

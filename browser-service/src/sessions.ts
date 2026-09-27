@@ -27,6 +27,7 @@ import { chromium, type Browser, type BrowserContext, type Page, type Route } fr
 import type { BrowserServiceConfig } from "./config.js";
 import type { EgressPolicy } from "./egress.js";
 import { takeSnapshot, type PageSnapshot } from "./snapshot.js";
+import { isSensitiveField } from "./sensitive-field.js";
 
 export type BrowserErrorCode =
   | "blocked_url" | "invalid_ref" | "timeout" | "session_limit" | "not_found" | "forbidden"
@@ -155,12 +156,7 @@ export class SessionManager {
       const locator = await this.element(session.page, target);
       let sensitive: boolean;
       try {
-        sensitive = await locator.evaluate((element) => {
-          const input = element as { type?: string; autocomplete?: string };
-          const type = String(input.type ?? "").toLowerCase();
-          const autocomplete = String(input.autocomplete ?? "").toLowerCase();
-          return type === "password" || type === "file" || /cc-|one-time-code|current-password|new-password/.test(autocomplete);
-        }, undefined, { timeout: this.config.operationTimeoutMs });
+        sensitive = await locator.evaluate(isSensitiveField, undefined, { timeout: this.config.operationTimeoutMs });
       } catch (error) {
         throw actionError(error);
       }
