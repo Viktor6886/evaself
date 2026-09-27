@@ -1,4 +1,5 @@
 import type { Database } from "../db.js";
+import { currentScope, TenantViolationError } from "../tenancy/scope.js";
 
 export type MessageUsageMetric = "messages" | "messages_out";
 
@@ -63,6 +64,17 @@ export async function recordMessageUsageBatch(
       metadata: input.metadata ?? {},
     };
   });
+
+  // `inherit` продолжает любую открытую область, а проверка SQL владельца
+  // строк из `jsonb_to_recordset` не видит. Поэтому совпадение с
+  // областью чужого хода проверяется здесь: расход не пишется на
+  // человека, чей ход сейчас идёт, если batch принадлежит другому.
+  const ambient = currentScope();
+  if (ambient?.kind === "user" && ambient.userId !== null && ambient.userId !== userId) {
+    throw new TenantViolationError(
+      `Учёт расхода внутри области другого пользователя (область «${ambient.label}»)`,
+    );
+  }
 
   return await db.withUserScope(
     { userId, label: "subscriptions.usage_ledger", inherit: true },

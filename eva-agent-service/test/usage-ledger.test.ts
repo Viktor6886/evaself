@@ -149,3 +149,19 @@ test("invalid usage amount is rejected before SQL", async () => {
     /amount/,
   );
 });
+
+test("usage batch refuses to run inside another user's ambient scope", async () => {
+  const { runInScope, userScope } = await import("../dist/tenancy/scope.js");
+  const { db, calls } = fakeLedgerDb();
+  const input = { userId: 7, metric: "messages" as const, source: "telegram_user", idempotencyKey: "scope:1" };
+  // Ход человека 5: расход человека 7 внутри него — нарушение границы,
+  // которое проверка SQL для jsonb_to_recordset не увидела бы.
+  await assert.rejects(
+    runInScope(userScope({ userId: 5, label: "telegram.turn" }), async () => await recordMessageUsageBatch(db, [input])),
+    { name: "TenantViolationError" },
+  );
+  assert.equal(calls.length, 0, "чужой расход не дошёл до базы");
+  // Тот же человек и отсутствие области — как прежде.
+  assert.equal(await runInScope(userScope({ userId: 7, label: "telegram.turn" }), async () => await recordMessageUsageBatch(db, [input])), 1);
+  assert.equal(await recordMessageUsageBatch(db, [{ ...input, idempotencyKey: "scope:2" }]), 1);
+});
