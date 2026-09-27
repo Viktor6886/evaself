@@ -69,7 +69,7 @@
 | Компонент | Назначение | Путь |
 |---|---|---|
 | Queue registry/driver | Единая точка BullMQ | `src/jobs/queue-registry.ts`, `src/jobs/bullmq-driver.ts` |
-| Потребитель очередей | Worker BullMQ поверх `JobRuntime.execute`; запущен для `research`, у `memory`, `proactive`, `maintenance` потребителя пока нет | `src/jobs/consumer.ts`, `QueueRegistry.consume` |
+| Потребитель очередей | Worker BullMQ поверх `JobRuntime.execute`; запускается для каждой очереди, в которой зарегистрированы обработчики: `research` (всегда, 2), `memory` (загрузки базы знаний, 1), `maintenance` (1), `proactive` (по месту на вид). Инвариант проверяет `job-consumer.test.ts` | `src/jobs/consumer.ts`, `QueueRegistry.consume`, `src/jobs/index.ts` |
 | Job outbox/runs | Транзакционная публикация и журнал запусков | `src/jobs/job-outbox.ts`, `src/jobs/job-runs.ts` |
 | Runtime/policy | Таймауты, отмена, retry, DLQ | `src/jobs/runtime.ts`, `src/jobs/policy.ts` |
 | Schedules | Канонические расписания в PostgreSQL | `src/jobs/schedules.ts` |

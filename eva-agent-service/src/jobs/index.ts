@@ -51,7 +51,7 @@ import { LettaOsintNarrator } from "../osint/narrator.js";
 import { OSINT_JOB_TYPE } from "../osint/service.js";
 import { OsintWorkerClient } from "../osint/worker-client.js";
 import { jobProcessor } from "./consumer.js";
-import type { JobQueueName } from "./queue-registry.js";
+import type { JobQueueDriver, JobQueueName } from "./queue-registry.js";
 import { KnowledgeIngestWorker, KNOWLEDGE_INGEST_JOB } from "../knowledge/lifecycle.js";
 import { LlmRouterClient } from "../router/client.js";
 import { execFile } from "node:child_process";
@@ -99,6 +99,12 @@ export interface JobLayerDeps {
   /** Действующие значения настроек: сроки хранения приходят оттуда. */
   settings?: () => Record<string, unknown>;
   /**
+   * Драйвер очередей. В сервисе — BullMQ поверх того же Valkey; подмена
+   * нужна проверке «у каждой очереди с обработчиками есть потребитель»,
+   * которой иначе понадобился бы живой Valkey.
+   */
+  driver?: JobQueueDriver;
+  /**
    * Отправка текста Евы тем же путём, что её ответы: разметка Telegram,
    * деление длинного текста, durable outbox. Без него итог исследования
    * приходит шаблоном.
@@ -113,7 +119,8 @@ export function buildJobLayer(
   logger: Logger,
   deps: JobLayerDeps,
 ): JobLayer {
-  const driver = new BullMqJobDriver(redis);
+  const bull = deps.driver ? null : new BullMqJobDriver(redis);
+  const driver: JobQueueDriver = deps.driver ?? bull!;
   const registry = new QueueRegistry(driver, logger);
   const runs = new JobRunJournal(db, logger);
   const runtime = new JobRuntime(db, registry, runs, logger);
@@ -134,6 +141,10 @@ export function buildJobLayer(
     const knowledge = new KnowledgeIngestWorker(db,{tempRoot:"/tmp",embed:(text,signal)=>router.embed(text,signal),scan:async(path)=>await new Promise<"clean"|"infected"|"unavailable">(resolve=>execFile("clamscan",["--no-summary",path],error=>{const code=(error as unknown as {code?:number})?.code;resolve(!error?"clean":code===1?"infected":"unavailable");}))});
     registry.queue("memory");
     runtime.register(KNOWLEDGE_INGEST_JOB,async(context)=>await knowledge.run(context));
+    // Без потребителя загрузка навсегда оставалась `queued`: публикатор
+    // ставил задание в Valkey, а забирать его было некому. По одному:
+    // антивирус и эмбеддинги тяжёлые, а загрузки редки.
+    consumed.set("memory", 1);
   }
 
   if (config.researchOrchestratorEnabled) {
@@ -212,6 +223,9 @@ export function buildJobLayer(
         affected: report.classes.reduce((sum, item) => sum + item.affected, 0),
       });
     });
+    // Сверка и хранение идут маленькими пакетами одна за другой: второе
+    // параллельное задание только спорило бы с первым за те же строки.
+    consumed.set("maintenance", 1);
   }
 
   const stage = proactiveStage({
@@ -257,6 +271,11 @@ export function buildJobLayer(
         await runner.tick(kind, { runId: context.runId, signal: context.signal });
       });
     }
+    // По заданию на вид: заход check-in с ходами Евы длится минуты, и
+    // напоминание, которое стоит раз в минуту, не должно ждать его в
+    // очереди. Повтор одного вида ловят слот в `proactive_messages` и
+    // блокировка человека.
+    consumed.set("proactive", kinds.length);
   }
 
   // Окна инициативы регистрируются только там, где старые интервалы уже
@@ -268,6 +287,9 @@ export function buildJobLayer(
     runtime.register("proactive_initiative", async (context) => {
       await initiative.tick({ runId: context.runId, signal: context.signal });
     });
+    // Ступень `queue` бывает только при включённой очереди proactive, и
+    // окно инициативы получает в ней своё место рядом с остальными видами.
+    consumed.set("proactive", (consumed.get("proactive") ?? 0) + 1);
   }
 
   return {
@@ -302,7 +324,7 @@ export function buildJobLayer(
       // драйвера отпускаются после него, чтобы закрытие очередей успело
       // отправить свои команды.
       await runtime.stop(drainMs);
-      driver.disconnect();
+      bull?.disconnect();
     },
   };
 }

@@ -90,3 +90,53 @@ test("реестр: драйвер без потребителя — очере�
   assert.equal(registry.consume("research", async () => {}, 1), null);
   assert.deepEqual(registry.openQueues, ["research"]);
 });
+
+/**
+ * Обработчик без потребителя — задание, которое никто не заберёт. Так
+ * было с OSINT (#371), и так же оставались `queued` загрузки в базу
+ * знаний: публикатор ставил их в очередь `memory`, а слушала сервис одна
+ * `research`.
+ */
+async function layerConsumers(flags: Record<string, boolean>, initiative = false) {
+  const { buildJobLayer } = await import("../dist/jobs/index.js");
+  const driver = fakeDriver(true);
+  const db = {
+    query: async () => ({ rows: [], rowCount: 0 }),
+    withSystemScope: async (_label: string, run: () => Promise<unknown>) => await run(),
+    withUserScope: async (_scope: unknown, run: () => Promise<unknown>) => await run(),
+    transaction: async (run: (client: unknown) => Promise<unknown>) => await run({ query: async () => ({ rows: [], rowCount: 0 }) }),
+  };
+  const config = {
+    jobOutboxBatchSize: 10, jobOutboxPollMs: 60_000, routerUrl: "http://router.invalid", routerApiKey: "",
+    searxngUrl: "http://searx.invalid", crawl4aiUrl: "http://crawl.invalid", crawl4aiToken: "", osintWorkerUrl: "http://osint.invalid", osintWorkerToken: "",
+    osintHarvesterUrl: "http://harvester.invalid", osintSpiderfootUrl: "http://spiderfoot.invalid", osintEnabled: false, retentionEnforcementEnabled: false,
+    jobsMirrorMode: false, checkinMorningHour: 9, checkinEveningHour: 21,
+    knowledgeUploadsEnabled: false, researchOrchestratorEnabled: false,
+    bullmqMaintenanceEnabled: false, bullmqProactiveEnabled: false,
+    ...flags,
+  };
+  const layer = buildJobLayer(config as never, db as never, {} as never, logger as never, {
+    letta: {} as never, purposes: {} as never, runtimeContext: {} as never, lock: {} as never, outbox: {} as never,
+    driver: driver as never,
+    ...(initiative ? { initiative: { tick: async () => undefined } } : {}),
+  });
+  await layer.start();
+  await layer.stop(0);
+  return driver.events.filter((event) => event.startsWith("consume:")).sort();
+}
+
+test("слой заданий: у каждой очереди с обработчиками есть потребитель", async () => {
+  assert.deepEqual(await layerConsumers({}), ["consume:research:evaself:bullmq:2"], "OSINT регистрируется всегда");
+  assert.deepEqual(await layerConsumers({
+    knowledgeUploadsEnabled: true, bullmqMaintenanceEnabled: true, bullmqProactiveEnabled: true,
+  }, true), [
+    "consume:maintenance:evaself:bullmq:1",
+    "consume:memory:evaself:bullmq:1",
+    // Четыре вида инициативы плюс окно — каждому своё место.
+    "consume:proactive:evaself:bullmq:5",
+    "consume:research:evaself:bullmq:2",
+  ]);
+  // Ступень зеркала: окно инициативы не регистрируется, и места ему нет.
+  assert.ok((await layerConsumers({ bullmqProactiveEnabled: true, jobsMirrorMode: true }, true))
+    .includes("consume:proactive:evaself:bullmq:4"));
+});
