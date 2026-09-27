@@ -138,6 +138,10 @@ export function searchQueries(
       // формы (инициалы, латиница) при нехватке бюджета отрезаются первыми.
       const [first, ...rest] = variants.map(quote);
       if (first) queries.push(first);
+      // Поисковики по-разному поддерживают точную фразу; широкий запрос
+      // нужен до site:-вариантов, иначе бюджет снова уходит на пустоту.
+      if (short) queries.push([short, context.city].filter(Boolean).join(" "));
+      if (full && full !== short) queries.push(full);
       if (short) {
         const where = context.city ? ` ${context.city}` : "";
         for (const site of SOCIAL_SITES) queries.push(`${quote(short)}${where} site:${site}`);
@@ -146,18 +150,18 @@ export function searchQueries(
       break;
     }
     case "username":
-      queries = [quote(identifier.normalized), `${quote(identifier.normalized)} profile`];
+      queries = [quote(identifier.normalized), identifier.normalized, `${quote(identifier.normalized)} profile`];
       break;
     case "email": {
       const local = identifier.normalized.split("@")[0] ?? "";
-      queries = [quote(identifier.normalized), `${quote(identifier.normalized)} filetype:pdf`];
+      queries = [quote(identifier.normalized), identifier.normalized, `${quote(identifier.normalized)} filetype:pdf`];
       // Имя ящика часто совпадает с ником в соцсетях.
       if (local.length >= 4) queries.push(...SOCIAL_SITES.map((site) => `${quote(local)} site:${site}`));
       break;
     }
     case "phone": {
       const variants = phoneVariants(identifier.normalized);
-      queries = variants.map(quote);
+      queries = [quote(identifier.normalized), identifier.normalized, ...variants.map(quote)];
       // Слитная запись — та, что стоит в объявлениях и на страницах
       // организаций; с ней же ищутся упоминания в соцсетях.
       const compact = variants.find((variant) => /^8\d{10}$/.test(variant)) ?? variants[0];

@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import secrets
@@ -27,7 +28,7 @@ from pydantic import BaseModel, Field
 from . import matching
 from .infra import InfraCollector, InvalidTarget, normalize_asn, normalize_domain, normalize_ip
 from .limits import CircuitBreaker, DomainGate
-from .maigret_scan import scan_username
+from .maigret_scan import ScanResult, scan_username
 from .registries import EgrulRegistry, InvalidQuery
 from .site_rules import ProfileVerifier, load_sherlock, load_whatsmyname
 
@@ -156,6 +157,7 @@ async def health() -> dict:
 class ScanRequest(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     top_sites: int | None = Field(default=None, ge=10, le=1500)
+    rule_requests: int = Field(default=0, ge=0, le=100)
 
 
 def _username(value: str) -> str:
@@ -168,20 +170,50 @@ def _username(value: str) -> str:
 @app.post("/v1/username/scan", dependencies=[Depends(require_token)])
 async def scan(request: ScanRequest) -> dict:
     username = _username(request.username)
-    try:
-        result = await scan_username(
-            username,
-            top_sites=min(request.top_sites or TOP_SITES_DEFAULT, 1500),
-            site_timeout=SITE_TIMEOUT,
-            deadline=SCAN_DEADLINE,
-            max_connections=MAX_CONNECTIONS,
-        )
-    except TimeoutError as error:
-        raise HTTPException(
-            status_code=504,
-            detail=_error_body("scan_deadline", "the scan did not finish in time", retryable=True),
-        ) from error
-    return {"collector": "maigret", **result.to_dict()}
+    top_sites = min(request.top_sites or TOP_SITES_DEFAULT, 1500)
+
+    async def maigret_result() -> ScanResult:
+        try:
+            return await scan_username(
+                username,
+                top_sites=top_sites,
+                site_timeout=SITE_TIMEOUT,
+                deadline=SCAN_DEADLINE,
+                max_connections=MAX_CONNECTIONS,
+            )
+        except Exception as error:
+            # Независимый сборщик отдаст свои находки даже при отказе
+            # Maigret. Исключение/PII не попадает ни в ответ, ни в логи.
+            reason = "timeout" if isinstance(error, TimeoutError) else "unavailable"
+            return ScanResult(username, "degraded", top_sites, [], {reason: 1})
+
+    async def rules_result():
+        assert state.verifier is not None
+        try:
+            return await state.verifier.discover(username, request.rule_requests, SCAN_DEADLINE)
+        except Exception:
+            # Отказ второго сборщика также не выбрасывает находки первого.
+            return [], request.rule_requests
+
+    # Один общий срок: нельзя сначала потратить 180 с на Maigret, а
+    # затем потерять все находки второго сборщика из-за таймаута клиента.
+    result, (verifications, requests) = await asyncio.gather(maigret_result(), rules_result())
+    for verification in verifications:
+        if verification.status in {"degraded", "unknown"}:
+            reason = verification.reason
+            if reason not in {"timeout", "captcha", "rate_limited", "unavailable", "disabled"}:
+                reason = "unavailable"
+            result.degraded[reason] = result.degraded.get(reason, 0) + 1
+    if request.rule_requests and not verifications:
+        result.degraded["unavailable" if requests else "disabled"] = 1
+    if result.degraded:
+        result.status = "degraded"
+    return {
+        "collector": "maigret",
+        **result.to_dict(),
+        "verifications": [verification.__dict__ for verification in verifications],
+        "verification_requests": requests,
+    }
 
 
 class VerifyRequest(BaseModel):

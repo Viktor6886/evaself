@@ -95,8 +95,8 @@ function add(list: ProfileCollector[], collector: ProfileCollector): void {
  *
  * Профили сопоставляются по хосту: адрес проверки у наборов правил может
  * отличаться от адреса профиля (API против страницы), а сайт один.
- * Проверка без находки Maigret профилем не становится: её дело —
- * подтверждать или опровергать.
+ * Положительное правило WhatsMyName/Sherlock само является находкой.
+ * Отрицательное или неопределённое правило новой находки не создаёт.
  */
 export function mergeProfileObservations(
   scan: WorkerScanResult,
@@ -140,10 +140,15 @@ export function mergeProfileObservations(
     }
   }
 
-  for (const verification of verifications) {
+  for (const verification of [...verifications].sort((a, b) => Number(b.status === "found") - Number(a.status === "found"))) {
     const url = canonicalizeUrl(verification.profileUrl);
     if (!url) continue;
-    const profile = profiles.get(hostOf(url));
+    const host = hostOf(url);
+    let profile = profiles.get(host);
+    if (!profile && verification.status === "found") {
+      profile = { site: verification.site, url, host, confirmedBy: [], contradictedBy: [], unverifiedBy: [], tags: [] };
+      profiles.set(host, profile);
+    }
     if (!profile) continue;
     if (verification.status === "found") add(profile.confirmedBy, verification.source);
     else if (verification.status === "not_found") add(profile.contradictedBy, verification.source);

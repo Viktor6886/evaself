@@ -322,30 +322,32 @@ test("уверенность в аккаунте растёт с независ�
 const signal = () => new AbortController().signal;
 
 test("username-сборщик сводит скан с проверкой и не тратит больше бюджета", async () => {
-  const calls: Array<{ topSites?: number }> = [];
+  const calls: Array<{ topSites?: number; ruleRequests?: number }> = [];
   const collectorUnderTest = new UsernameProfilesCollector({
-    scanUsername: async (_username: string, options: { topSites?: number }) => {
+    scanUsername: async (_username: string, options: { topSites?: number; ruleRequests?: number }) => {
       calls.push(options);
       return {
-        collector: "maigret", username: "alice", status: "ok", checked: 40, degraded: {},
+        collector: "maigret", username: "alice", status: "ok", checked: options.topSites!, degraded: {},
+        verificationRequests: 1,
+        verifications: [
+          { source: "whatsmyname", site: "GitHub", profileUrl: "https://github.com/alice", status: "found", reason: null },
+        ],
         found: [{
           site: "GitHub", url: "https://github.com/alice", tags: [], httpStatus: 200,
           ids: { fullname: "Alice A." }, discoveredUsernames: ["alice_dev"], discoveredLinks: [],
         }],
       };
     },
-    verifyProfiles: async () => [
-      { source: "whatsmyname", site: "GitHub", profileUrl: "https://github.com/alice", status: "found", reason: null },
-    ],
   } as never, { topSites: 300 });
   const output = await collectorUnderTest.collect({
     target: { identifierId: "i", type: "username", normalized: "alice", depth: 0 },
     signal: signal(),
     remainingRequests: 50,
   });
-  assert.equal(calls[0]!.topSites, 50);
-  // 40 сайтов скана + 1 проверка; на проверку оставалось 10 — хватило.
-  assert.equal(output.externalRequests, 41);
+  assert.ok(calls[0]!.topSites! >= 10);
+  assert.ok(calls[0]!.ruleRequests! > 0, "у независимого поиска есть собственный бюджет");
+  assert.ok(calls[0]!.topSites! + calls[0]!.ruleRequests! < 50, "остался бюджет на другие цели");
+  assert.equal(output.externalRequests, calls[0]!.topSites! + 1);
   const accountFinding = output.sources[0]!.findings.find((finding) => finding.kind === "account")!;
   assert.deepEqual((accountFinding as { confirmedBy: string[] }).confirmedBy, ["maigret", "whatsmyname"]);
   assert.deepEqual((accountFinding as { properties: unknown[] }).properties, [{ property: "name", value: "Alice A." }]);
@@ -373,29 +375,28 @@ function web(pages: Record<string, string>, results: string[]) {
   };
 }
 
-test("проверка профилей не выходит за остаток бюджета по обоим наборам правил", async () => {
-  const verifyCalls: Array<{ hosts: string[]; sources: readonly string[] }> = [];
-  const hosts = ["a", "b", "c"].map((name) => `https://${name}.example/alice`);
+test("независимый поиск возвращает профиль при пустом Maigret и соблюдает бюджет", async () => {
+  let reserved = 0;
   const underTest = new UsernameProfilesCollector({
-    scanUsername: async () => ({
-      collector: "maigret", username: "alice", status: "ok", checked: 45, degraded: {},
-      found: hosts.map((url) => ({ site: url, url, tags: [], httpStatus: 200, ids: {}, discoveredUsernames: [], discoveredLinks: [] })),
-    }),
-    verifyProfiles: async (_username: string, list: string[], sources: readonly string[]) => {
-      verifyCalls.push({ hosts: list, sources });
-      return list.flatMap((host) => sources.map((source) => ({
-        source, site: host, profileUrl: `https://${host}/alice`, status: "found", reason: null,
-      })));
+    scanUsername: async (_username, options) => {
+      reserved = options!.topSites! + options!.ruleRequests!;
+      return {
+        collector: "maigret", username: "alice", status: "degraded", checked: options!.topSites!,
+        degraded: { timeout: 1 }, found: [], verificationRequests: options!.ruleRequests!,
+        verifications: [{ source: "sherlock", site: "GitHub", profileUrl: "https://github.com/alice", status: "found", reason: null }],
+      };
     },
-  } as never, { topSites: 300 });
-  const output = await underTest.collect({
-    target: { identifierId: "i", type: "username", normalized: "alice", depth: 0 },
-    signal: signal(),
-    remainingRequests: 50,
   });
-  // Остаток после скана — 5 запросов: два хоста по два набора правил.
-  assert.equal(verifyCalls[0]!.hosts.length, 2);
-  assert.ok(output.externalRequests <= 50);
+  const output = await underTest.collect({
+    target: { identifierId: "i", type: "username", normalized: "alice", depth: 0 }, signal: signal(), remainingRequests: 50,
+  });
+  assert.equal(output.externalRequests, reserved);
+  assert.ok(reserved <= underTest.reserve(50) && reserved < 50);
+  assert.equal(output.status, "degraded");
+  assert.equal(output.sources[0]!.canonicalUrl, "https://github.com/alice");
+  const finding = output.sources[0]!.findings[0]!;
+  assert.ok(finding.kind === "account");
+  assert.deepEqual(finding.confirmedBy, ["sherlock"]);
 });
 
 test("веб-поиск берёт в источники только страницы с упоминанием и цитирует их дословно", async () => {
@@ -544,4 +545,54 @@ test("бюджет сущностей: новая не заводится, из�
   await new OsintOrchestrator(store, [infra]).run(new AbortController().signal);
   // Счётчик уже учитывает субъекта: места для новой сущности нет.
   assert.equal(store.entities.size, 0);
+});
+
+
+test("веб работает раньше отказавшего Maigret и сохраняет упоминания", async () => {
+  const store = new MemoryStore();
+  store.seed("username", "alice");
+  const order: string[] = [];
+  const profiles: Collector = {
+    name: "maigret", accepts: () => true, reserve: (remaining) => remaining,
+    collect: async () => { order.push("maigret"); throw new Error("worker down"); },
+  };
+  const webCollector: Collector = {
+    name: "web_search", accepts: () => true, reserve: () => 1,
+    collect: async () => {
+      order.push("web");
+      return { status: "succeeded", externalRequests: 1, sources: [account("https://github.com/alice")] };
+    },
+  };
+  const summary = await new OsintOrchestrator(store, [profiles, webCollector]).run(signal());
+  assert.deepEqual(order, ["web", "maigret"]);
+  assert.equal(summary.accounts, 1);
+  assert.equal(summary.failedRuns, 1);
+});
+
+test("бюджет и отмена проверяются между сборщиками одной цели", async () => {
+  for (const stop of ["budget", "time", "cancel"]) {
+    const store = new MemoryStore();
+    store.seed("username", "alice");
+    let now = Date.now();
+    const first = collector("first", ["username"], () => {
+      if (stop === "time") now += DEFAULT_BUDGET.maxRuntimeMs + 1;
+      if (stop === "cancel") store.status = "cancelled";
+      return { status: "succeeded", externalRequests: stop === "budget" ? 200 : 1, sources: [] };
+    });
+    const second = collector("second", ["username"], () => { throw new Error("must not run"); });
+    const summary = await new OsintOrchestrator(store, [first, second], { now: () => now }).run(signal());
+    assert.equal(second.calls.length, 0);
+    assert.equal(summary.stoppedBy, stop === "budget" ? "budget_requests" : stop === "time" ? "budget_runtime" : "cancelled");
+  }
+});
+
+test("найденный профиль читается и его ник доходит до сканера", async () => {
+  const store = new MemoryStore();
+  store.seed("email", "alice@example.com");
+  const access = web({ "https://github.com/alice": "Alice — contact alice@example.com" }, ["https://github.com/alice"]);
+  const webCollector = new WebSearchCollector(access, { queriesPerIdentifier: 1, pagesPerIdentifier: 1, maxPageBytes: 10000 });
+  const profiles = collector("maigret", ["username"], () => ({ status: "succeeded", externalRequests: 1, sources: [] }));
+  await new OsintOrchestrator(store, [profiles, webCollector]).run(signal());
+  assert.deepEqual(profiles.calls.map((item) => item.normalized), ["alice"]);
+  assert.ok(access.reads.includes("https://github.com/alice"));
 });

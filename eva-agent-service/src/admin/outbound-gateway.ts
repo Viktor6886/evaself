@@ -95,7 +95,9 @@ export class OutboundGateway {
         method,
         body,
         redirect: "manual",
-        signal: AbortSignal.timeout(this.timeoutMs),
+        signal: init.signal
+          ? AbortSignal.any([init.signal, AbortSignal.timeout(this.timeoutMs)])
+          : AbortSignal.timeout(this.timeoutMs),
       });
       if ([301, 302, 303, 307, 308].includes(response.status)) {
         if (redirect === 3) {

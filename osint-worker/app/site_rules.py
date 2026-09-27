@@ -107,7 +107,7 @@ def load_sherlock(path: Path) -> list[SiteRule]:
     data = json.loads(path.read_text(encoding="utf-8"))
     rules: list[SiteRule] = []
     for name, site in data.items():
-        if name.startswith("$") or not isinstance(site, dict):
+        if name.startswith("$") or not isinstance(site, dict) or site.get("isNSFW") is True:
             continue
         url = site.get("url")
         error_type = site.get("errorType")
@@ -198,7 +198,79 @@ class ProfileVerifier:
         rules = self.rules_for_hosts({normalize_host(f"https://{h}") for h in hosts}, sources)
         return list(await asyncio.gather(*(self._check(rule, username) for rule in rules)))
 
-    async def _check(self, rule: SiteRule, username: str) -> Verification:
+    async def discover(self, username: str, limit: int, deadline: float) -> tuple[list[Verification], int]:
+        """Независимый поиск: Maigret не определяет, какие профили существуют.
+
+        Открытые социальные/профессиональные площадки идут первыми; один
+        запрос на правило, без редиректов. Так бюджет HTTP соблюдается и
+        логин/редирект не превращается в ложный найденный профиль.
+        """
+        hosts = (
+            "github.com",
+            "gitlab.com",
+            "vk.com",
+            "t.me",
+            "ok.ru",
+            "habr.com",
+            "reddit.com",
+            "medium.com",
+            "dev.to",
+            "keybase.io",
+            "hub.docker.com",
+            "codeberg.org",
+            "huggingface.co",
+            "kaggle.com",
+            "stackoverflow.com",
+            "linkedin.com",
+            "youtube.com",
+            "instagram.com",
+            "pinterest.com",
+            "soundcloud.com",
+            "vimeo.com",
+            "flickr.com",
+            "behance.net",
+            "dribbble.com",
+            "replit.com",
+            "bitbucket.org",
+            "sourceforge.net",
+            "npmjs.com",
+            "pypi.org",
+            "twitch.tv",
+            "x.com",
+            "twitter.com",
+            "facebook.com",
+            "tiktok.com",
+        )
+        ranks = {host: index for index, host in enumerate(hosts)}
+        rules = sorted(
+            (rule for rule in self.rules if rule.host in ranks and rule.username_for(username)),
+            key=lambda rule: (ranks[rule.host], rule.source, rule.name),
+        )[: max(0, min(limit, 100))]
+        if not rules:
+            return [], 0
+        tasks = [asyncio.create_task(self._check(rule, username, max_redirects=0)) for rule in rules]
+        try:
+            done, pending = await asyncio.wait(tasks, timeout=deadline)
+            results = []
+            for rule, task in zip(rules, tasks, strict=True):
+                if task in done and not task.cancelled() and task.exception() is None:
+                    results.append(task.result())
+                else:
+                    reason = "timeout" if task in pending else "unavailable"
+                    results.append(
+                        Verification(
+                            rule.source, rule.name, rule.profile_url.replace("{account}", username), "degraded", reason
+                        )
+                    )
+            # В том числе незавершённые попытки списываются консервативно.
+            return results, len(rules)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _check(self, rule: SiteRule, username: str, *, max_redirects: int = 3) -> Verification:
         account = rule.username_for(username)
         if account is None:
             return Verification(rule.source, rule.name, "", "skipped", "username_not_allowed")
@@ -217,6 +289,7 @@ class ProfileVerifier:
                     headers=rule.headers or None,
                     content=rule.body.replace("{account}", account) if rule.body else None,
                     resolver=self.resolver,
+                    max_redirects=max_redirects,
                 ),
                 self.timeout,
             )
@@ -228,11 +301,13 @@ class ProfileVerifier:
         except (TimeoutError, httpx.TimeoutException):
             self.breaker.record(domain, "timeout")
             return Verification(rule.source, rule.name, profile, "degraded", "timeout")
-        except httpx.HTTPError:
+        except (httpx.HTTPError, OSError):
             self.breaker.record(domain, "unavailable")
             return Verification(rule.source, rule.name, profile, "degraded", "unavailable")
         failure = classify_failure(result.status, result.text)
         self.breaker.record(domain, failure)
         if failure:
             return Verification(rule.source, rule.name, profile, "degraded", failure)
+        if 300 <= result.status < 400:
+            return Verification(rule.source, rule.name, profile, "unknown", "redirect")
         return Verification(rule.source, rule.name, profile, evaluate(rule, result))
