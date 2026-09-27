@@ -572,7 +572,7 @@ test("веб работает раньше отказавшего Maigret и с�
 test("бюджет и отмена проверяются между сборщиками одной цели", async () => {
   for (const stop of ["budget", "time", "cancel"]) {
     const store = new MemoryStore();
-    store.seed("username", "alice");
+    const identifierId = store.seed("username", "alice");
     let now = Date.now();
     const first = collector("first", ["username"], () => {
       if (stop === "time") now += DEFAULT_BUDGET.maxRuntimeMs + 1;
@@ -583,6 +583,8 @@ test("бюджет и отмена проверяются между сборщ�
     const summary = await new OsintOrchestrator(store, [first, second], { now: () => now }).run(signal());
     assert.equal(second.calls.length, 0);
     assert.equal(summary.stoppedBy, stop === "budget" ? "budget_requests" : stop === "time" ? "budget_runtime" : "cancelled");
+    if (stop !== "cancel") assert.deepEqual(
+      [store.status, store.frontier.get(identifierId)?.status], ["completed", "done"]);
   }
 });
 

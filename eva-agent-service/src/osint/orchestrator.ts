@@ -151,7 +151,7 @@ export class OsintOrchestrator {
     // получает второй полный бюджет времени.
     const deadline = state.startedAt + budget.maxRuntimeMs;
 
-    investigation: for (;;) {
+    for (;;) {
       signal.throwIfAborted();
       if (await this.store.isCancelled()) {
         summary.status = "cancelled";
@@ -185,13 +185,13 @@ export class OsintOrchestrator {
         }
         if (now() >= deadline) {
           summary.stoppedBy = "budget_runtime";
-          break investigation;
+          break;
         }
         const used = (await this.store.counters()).externalRequests;
         const remaining = budget.maxExternalRequests - used;
         if (remaining <= 0) {
           summary.stoppedBy = "budget_requests";
-          break investigation;
+          break;
         }
         const runId = await this.store.startRun(collector.name, item.identifierId);
         if (!runId) continue;
@@ -231,6 +231,7 @@ export class OsintOrchestrator {
         this.options.onRun?.(collector.name, output.status, output.externalRequests);
       }
       await this.store.finishFrontier(item.identifierId, applicable.length > 0 ? "done" : "skipped");
+      if (summary.stoppedBy) break;
     }
     summary.externalRequests = (await this.store.counters()).externalRequests;
     await this.store.complete("completed");
