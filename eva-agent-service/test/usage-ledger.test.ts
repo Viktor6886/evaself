@@ -101,9 +101,12 @@ test("outbound automatic messages use the same accounting path", async () => {
   assert.equal(event.metric, "messages_out");
   assert.equal(event.source, "scheduled_task");
   assert.equal(event.idempotency_key, "task:9:1720000000000:result:usage");
+  // inherit: вызов изнутри хода того же человека продолжает его область,
+  // а фоновая доставка без области получает свою — как у помощников db.ts.
   assert.deepEqual(scopes, [{
     userId: 7,
     label: "subscriptions.usage_ledger",
+    inherit: true,
   }], "фоновые сообщения обязаны входить в tenant scope владельца");
 });
 
