@@ -22,6 +22,7 @@ import { AdminAgentService } from "./agent-admin-service.js";
 import { SubscriptionAdminService } from "./subscription-service.js";
 import { PersonaAdminService } from "./persona-admin-service.js";
 import { LettaConsoleService } from "./letta-console-service.js";
+import { ToolCatalogAdminService } from "./tool-catalog-service.js";
 import { ToolApprovalService } from "./tool-approvals.js";
 import { McpServerPolicyRepository } from "../tools/mcp.js";
 import { TurnOperationsService } from "./turn-operations.js";
@@ -228,6 +229,7 @@ async function main(): Promise<void> {
       subscriptions: new SubscriptionAdminService(pool),
       persona: new PersonaAdminService(agentClient),
       letta: new LettaConsoleService(agentClient),
+      tools: new ToolCatalogAdminService(agentClient),
     },
     crud: {
       directory,

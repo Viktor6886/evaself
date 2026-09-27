@@ -10,9 +10,28 @@ import {
   parseQueries,
 } from "./schema.js";
 import { SearxCrawlAdapters, ResearchRepository } from "./adapters.js";
-import { ResearchOrchestrator } from "./orchestrator.js";
+import { ResearchOrchestrator, type ResearchReport } from "./orchestrator.js";
+import type { DelegatedResearch } from "./delegation.js";
 
 export class ResearchJobWorker {
+  /**
+   * Исследование субагентами, если оно включено. Ничего не нашедшее
+   * делегирование (`DelegationError`) и недоступный Letta уступают
+   * конвейеру: человек получает отчёт, а не отказ. Отмена задания —
+   * не повод начинать сначала другим способом.
+   */
+  private async delegated(input: { userId: number; conversationId: string; query: string; requestId: string; signal: AbortSignal }): Promise<ResearchReport | null> {
+    const delegation = this.options.delegation;
+    if (!delegation?.enabled()) return null;
+    try {
+      const research = await delegation.create({ userId: input.userId, conversationId: input.conversationId, requestId: input.requestId });
+      return await research.run({ userId: input.userId, conversationId: input.conversationId, query: input.query, reportId: input.requestId, signal: input.signal });
+    } catch (error) {
+      if (input.signal.aborted) throw error;
+      return null;
+    }
+  }
+
   constructor(
     private readonly db: Database,
     _outbox: unknown,
@@ -22,6 +41,14 @@ export class ResearchJobWorker {
       /** Токен Crawl4AI: без него сервис отвечает отказом на каждое чтение. */
       crawlToken?: string;
       router: LlmRouterClient;
+      /**
+       * Исследование субагентами Letta (`./delegation.ts`). Флаг
+       * спрашивается на каждом задании; выключен — работает конвейер.
+       */
+      delegation?: {
+        enabled(): boolean;
+        create(input: { userId: number; conversationId: string; requestId: string }): Promise<DelegatedResearch>;
+      };
     },
   ) {}
   async run(context: JobContext): Promise<void> {
@@ -75,7 +102,8 @@ export class ResearchJobWorker {
         maxPageBytes: Number(process.env.EVA_RESEARCH_MAX_PAGE_BYTES ?? 512_000),
         maxConcurrency: Number(process.env.EVA_RESEARCH_CONCURRENCY ?? 4),
       });
-      const report=await orchestrator.run({userId,conversationId:row.conversation_id,query:row.query,signal:context.signal,reportId:requestId});
+      const report=await this.delegated({userId,conversationId:row.conversation_id,query:row.query,requestId,signal:context.signal})
+        ?? await orchestrator.run({userId,conversationId:row.conversation_id,query:row.query,signal:context.signal,reportId:requestId});
       const repository=new ResearchRepository(this.db);await this.db.transaction(async client=>await repository.saveWithCompletion(client,reportResult??report,{requestId,chatId:Number(row.chat_id)}));
     }); } catch(error) {
       const cancelled=context.signal.aborted;

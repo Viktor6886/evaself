@@ -18,6 +18,7 @@ import type { Database } from "./db.js";
 import { genderFixStats } from "./i18n/eva-gender.js";
 import { deliveryStats, jobStats, providerStats } from "./metrics-queries.js";
 import { osintStats } from "./osint/metrics.js";
+import { toolMetrics } from "./tools/tool-metrics.js";
 import { runtimeContextSizeStats } from "./runtime/runtime-context.js";
 import type { TurnClass } from "./turns/semaphores.js";
 import { TURN_STATES } from "./turns/states.js";
@@ -64,6 +65,8 @@ export interface MetricsSources {
   telemetryBuffer?: () => { buffered: number; dropped: number };
   /** Сроки хранения по классам данных: секунды. Заполняет шаг 10. */
   retentionPolicies?: () => Record<string, number>;
+  /** Сколько субагентов работает и ждёт очереди прямо сейчас. */
+  delegation?: () => { active: number; queued: number };
 }
 
 interface Sample {
@@ -93,6 +96,66 @@ function render(samples: Sample[]): string {
     }
   }
   return `${lines.join("\n")}\n`;
+}
+
+/**
+ * Инструменты: вызовы по источнику, пути и исходу, поиск по каталогу,
+ * обнаружение MCP, операции браузера, делегирование. Метки — закрытые
+ * наборы; имён инструментов, адресов и запросов в метриках нет.
+ */
+function toolSamples(delegation: { active: number; queued: number } | null): Sample[] {
+  const tools = toolMetrics();
+  const sums = <T extends { count: number; sum: number; max: number }>(
+    base: string, help: string, rows: T[], labels: (row: T) => Record<string, string>,
+  ): Sample[] => [
+    { name: `${base}_ms_sum`, help: `${help}: сумма, мс.`, type: "counter", values: rows.map((row) => ({ labels: labels(row), value: row.sum })) },
+    { name: `${base}_ms_count`, help: `${help}: число.`, type: "counter", values: rows.map((row) => ({ labels: labels(row), value: row.count })) },
+    { name: `${base}_ms_max`, help: `${help}: максимум с запуска, мс.`, type: "gauge", values: rows.map((row) => ({ labels: labels(row), value: row.max })) },
+  ];
+  return [
+    {
+      name: "eva_tool_calls_total",
+      help: "Вызовы инструментов по источнику, пути (direct, bridge, delegation) и исходу. Без аргументов.",
+      type: "counter",
+      values: tools.calls.map(({ source, path, outcome, value }) => ({ labels: { source, path, outcome }, value })),
+    },
+    ...sums("eva_tool_call_duration", "Длительность вызова инструмента", tools.callDurations, (row) => ({ source: row.source })),
+    {
+      name: "eva_tool_search_total",
+      help: "Запросы tool_search: нашлось или пусто. Без текста запроса.",
+      type: "counter",
+      values: tools.searches.map(({ outcome, value }) => ({ labels: { outcome }, value })),
+    },
+    {
+      name: "eva_mcp_discovery_total",
+      help: "Опросы tools/list MCP-серверов по исходу.",
+      type: "counter",
+      values: tools.mcpDiscovery.map(({ outcome, value }) => ({ labels: { outcome }, value })),
+    },
+    ...sums("eva_mcp_discovery_duration", "Длительность MCP discovery", [tools.mcpDiscoveryDuration], () => ({})),
+    {
+      name: "eva_browser_operations_total",
+      help: "Операции браузера по виду и исходу (ok, error, blocked). Без адресов.",
+      type: "counter",
+      values: tools.browser.map(({ operation, outcome, value }) => ({ labels: { operation, outcome }, value })),
+    },
+    ...sums("eva_browser_operation_duration", "Длительность операции браузера", tools.browserDurations, (row) => ({ operation: row.operation })),
+    {
+      name: "eva_delegation_runs_total",
+      help: "Задания субагентов Letta по роли и исходу.",
+      type: "counter",
+      values: tools.delegation.map(({ role, outcome, value }) => ({ labels: { role, outcome }, value })),
+    },
+    ...sums("eva_delegation_duration", "Длительность задания субагента", tools.delegationDurations, (row) => ({ role: row.role })),
+    {
+      name: "eva_delegation_subagents",
+      help: "Субагенты сейчас: работают и ждут очереди.",
+      type: "gauge",
+      values: delegation
+        ? [{ labels: { state: "active" }, value: delegation.active }, { labels: { state: "queued" }, value: delegation.queued }]
+        : [],
+    },
+  ];
 }
 
 function number(value: unknown): number {
@@ -434,6 +497,7 @@ export class MetricsCollector {
         type: "counter",
         values: osintStats().requests.map(({ collector, value }) => ({ labels: { collector }, value })),
       },
+      ...toolSamples(this.sources.delegation?.() ?? null),
       {
         name: "eva_retention_policy_seconds",
         help: "Действующий срок хранения по классу данных.",

@@ -1398,18 +1398,20 @@ test("отменённый ход не выполняет побочный эф�
     undefined,
     journal(db),
   );
-  const builder = (factory as unknown as {
-    builder: (id: string) => (
-      name: string,
-      label: string,
-      description: string,
-      parameters: unknown,
-      execute: () => Promise<unknown>,
-    ) => { execute: (id: string, args: unknown) => Promise<unknown> };
-  }).builder("conv-1");
-  const tool = builder("save_task", "Задача", "", {}, async () => {
-    executed += 1;
-    return { task_id: 1 };
+  // Цепочка выполнения — общая для всех путей вызова (`ToolExecutor`);
+  // инструмент собирается ею, как фабрика собирает продуктовые.
+  const executor = (factory as unknown as {
+    executor: {
+      agentTool: (id: string, spec: Record<string, unknown>) => { execute: (id: string, args: unknown) => Promise<unknown> };
+    };
+  }).executor;
+  const tool = executor.agentTool("conv-1", {
+    name: "save_task", label: "Задача", description: "", parameters: {},
+    source: "product", group: "product", exposure: "direct",
+    execute: async () => {
+      executed += 1;
+      return { task_id: 1 };
+    },
   });
 
   // Ход отменён — инструмент не должен ничего сделать.

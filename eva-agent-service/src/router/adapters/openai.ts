@@ -16,6 +16,7 @@ import { ProviderError } from "../types.js";
 import { mergeProviderState, pickProviderState } from "../content.js";
 import { ReasoningStripper, stripReasoning } from "../normalize.js";
 import { classifyHttp, objectParameter, parameterValue, providerParameters, providerUrl, readSse } from "./shared.js";
+import { openAiCompatHeaders, resolveOpenAiCompat } from "../provider-manifests.js";
 
 interface OpenAiChoiceMessage extends Record<string, unknown> {
   content?: string | null;
@@ -102,9 +103,13 @@ function buildBody(provider: ProviderProfile, request: LlmRequest, stream: boole
     "contents", "generationConfig", "input", "max_output_tokens", "response_format",
     "systemInstruction", "tools",
   ]);
+  // Явный параметр провайдера главнее манифеста; без того и другого —
+  // `max_tokens`, как было всегда.
   const completionBudget = Object.hasOwn(parameters, "max_completion_tokens")
     ? "max_completion_tokens"
-    : "max_tokens";
+    : Object.hasOwn(parameters, "max_tokens")
+      ? "max_tokens"
+      : compatOf(provider).budgetField ?? "max_tokens";
   delete parameters.max_tokens;
   delete parameters.max_completion_tokens;
   const body: Record<string, unknown> = {
@@ -155,9 +160,11 @@ async function post(
     response = await (provider.fetcher ?? fetch)(url, {
       method: "POST",
       headers: {
+        // Заголовок ключа и постоянные заголовки — из манифеста
+        // провайдера; без манифеста — `Authorization: Bearer`, как раньше.
+        ...openAiCompatHeaders(compatOf(provider), provider.api_key),
         "content-type": "application/json",
         accept: stream ? "text/event-stream" : "application/json",
-        authorization: `Bearer ${provider.api_key}`,
       },
       body: JSON.stringify(buildBody(provider, request, stream)),
       signal,
@@ -175,6 +182,10 @@ async function post(
     );
   }
   return response;
+}
+
+function compatOf(provider: ProviderProfile) {
+  return resolveOpenAiCompat(provider.base_url, { ...provider.generation_defaults, ...provider.additional_parameters });
 }
 
 function extractMessage(raw: string): string {

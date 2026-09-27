@@ -48,6 +48,7 @@
         <button data-page="agents" class="nav-item"><span>❂</span>Агенты</button>
         <button data-page="persona" class="nav-item"><span>✎</span>Персона и промпт</button>
         <button data-page="letta" class="nav-item"><span>⌬</span>Letta</button>
+        <button data-page="tools" class="nav-item"><span>⚙</span>Инструменты</button>
         <div class="nav-caption">Модели и медиа</div>
         <button data-page="ai" class="nav-item"><span>✦</span>Искусственный интеллект</button>
         <button data-page="stt" class="nav-item"><span>◎</span>Распознавание речи</button>
@@ -170,6 +171,10 @@
                    среди них терялись те четыре, без которых не
                    заработает ничего. -->
               <label class="span-2">Название<input name="name" required maxlength="120" placeholder="Например: OpenRouter"></label>
+              <!-- Манифест OpenAI-совместимого провайдера: адрес, заголовок
+                   ключа и служебные заголовки описаны данными в роутере, и
+                   новый совместимый провайдер не требует отдельного адаптера. -->
+              <label class="span-2">Шаблон провайдера<select name="manifest"><option value="">Свой адрес, без шаблона</option></select><small>Подставит протокол и Base URL и запомнит манифест провайдера. Провайдер с тем же API, которого нет в списке, заводится без шаблона; нестандартный заголовок ключа задаётся в additional_parameters.openai_compat.</small></label>
               <!-- Список повторяет адаптеры роутера. Их четыре, а
                    предлагалось два: Gemini и Responses завести из панели
                    было нельзя вовсе, хотя схема их принимает и адаптеры
@@ -926,6 +931,54 @@
              панели, ролями, sudo и аудитом. Ключ Agent Runtime остаётся
              у admin-api и в браузер не попадает.
              ============================================================ -->
+        <!-- Инструменты Евы: единый реестр, поиск по каталогу, MCP discovery,
+             браузер и субагенты. Только метаданные — ни аргументов вызовов,
+             ни адресов страниц, ни текста людей здесь нет. -->
+        <section id="page-tools" class="page">
+          <div class="page-heading">
+            <div><p class="eyebrow">ИНСТРУМЕНТЫ ЕВЫ</p><h2>Инструменты</h2><p>Что зарегистрировано в Letta напрямую, что Ева находит поиском (tool_search), состояние MCP-серверов, браузера и субагентов. Какой инструмент вызвать, решает Letta.</p></div>
+            <div class="heading-actions"><button id="reload-tools" class="button ghost">Обновить</button></div>
+          </div>
+
+          <div id="tools-summary" class="host-bar"></div>
+
+          <section class="card table-card">
+            <div class="section-heading"><div><h3>Каталог инструментов</h3><p class="block-caption">Прямые — с полной схемой в каждом ходе. Отложенные — в каталоге за tool_search / tool_describe / tool_call, с теми же подтверждениями и проверками.</p></div></div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Инструмент</th><th>Источник</th><th>Видимость</th><th>Риск</th><th>Согласие</th></tr></thead>
+                <tbody id="tools-catalog-body"></tbody>
+              </table>
+            </div>
+            <div id="tools-rejected"></div>
+          </section>
+
+          <section class="card router-card">
+            <div class="section-heading"><div><h3>MCP-серверы</h3><p class="block-caption">Действующие инструменты — объявленные сервером в tools/list и разрешённые политикой. Шаблон «*» запрещён.</p></div></div>
+            <div id="tools-mcp"></div>
+          </section>
+
+          <section class="card router-card">
+            <div class="section-heading"><div><h3>Браузер</h3><p class="block-caption">Изолированный browser-service: только чтение, защита от SSRF, пределы сессий. Сессии — псевдонимы, без адресов страниц.</p></div></div>
+            <div id="tools-browser"></div>
+          </section>
+
+          <section class="card router-card">
+            <div class="section-heading"><div><h3>Субагенты Letta</h3><p class="block-caption">Рабочие агенты исследования: скрытые, без памяти и навыков, только чтение, удаляются после задания.</p></div></div>
+            <div id="tools-delegation"></div>
+          </section>
+
+          <section class="card table-card">
+            <div class="section-heading"><div><h3>Задержка инструментов</h3><p class="block-caption">Последние вызовы процесса по хукам: число, отказы, p50, p95 и максимум.</p></div></div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Инструмент</th><th>Источник</th><th>Вызовов</th><th>Отказов</th><th>p50</th><th>p95</th><th>max</th></tr></thead>
+                <tbody id="tools-latency-body"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
         <section id="page-letta" class="page">
           <div class="page-heading">
             <div><p class="eyebrow">КОГНИТИВНЫЙ RUNTIME</p><h2>Letta</h2><p>App Server наружу не публикуется. Всё, что видно здесь, панель читает через eva-agent-service.</p></div>
@@ -1106,6 +1159,7 @@
   <script src="./ui-agents.js" defer></script>
   <script src="./ui-persona.js" defer></script>
   <script src="./ui-letta.js" defer></script>
+  <script src="./ui-tools.js" defer></script>
   <script src="./ui-monitoring.js" defer></script>
   <script src="./ui-media.js" defer></script>
   <script src="./ui-stt.js" defer></script>

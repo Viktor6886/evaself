@@ -89,10 +89,50 @@ SELECT date_trunc('minute', started_at) AS minute,
 
 Одно сообщение человека — это несколько строк: каждый вызов инструмента идёт к модели отдельным запросом со всем контекстом.
 
+## Манифесты OpenAI-совместимых провайдеров
+
+Провайдер с API `/chat/completions` описывается данными, а не отдельным
+адаптером (`src/router/provider-manifests.ts`): адрес, хосты для
+узнавания, заголовок ключа, несекретные служебные заголовки, поле бюджета
+ответа, подсказки о возможностях для формы панели. Встроены OpenAI,
+OpenRouter, DeepSeek, Groq, Mistral, Together, Fireworks, xAI, Cerebras,
+Moonshot, DashScope, Nebius, Ollama, vLLM и LM Studio.
+
+Манифест выбирается так: явный `additional_parameters.provider_manifest`
+→ узнанный по хосту Base URL → общий OpenAI-совместимый. Поверх —
+переопределения провайдера:
+
+```json
+{
+  "provider_manifest": "openrouter",
+  "openai_compat": {
+    "auth_header": "api-key",
+    "auth_scheme": "none",
+    "headers": { "HTTP-Referer": "https://eva.example" },
+    "budget_field": "max_completion_tokens"
+  }
+}
+```
+
+Так новый совместимый провайдер подключается из панели без нового файла
+адаптера. Секретные и служебные заголовки (`Authorization`, `Cookie`,
+`*api-key*`, `content-type`…) в постоянных заголовках запрещены: при
+сохранении — отказом, при запросе — отбрасыванием. Ключ всегда берётся из
+поля API Key провайдера, поэтому ротация ключей работает и с манифестом.
+Настройки манифеста в тело запроса не попадают.
+
+Роутер при этом не заменяется. Манифест читают адаптер
+`openai-compatible`, проверка `/models` и embeddings; failover, capability
+probe, ротация ключей, breaker, лимиты и зрение работают как прежде.
+Возможности модели манифест не объявляет — их доказывает probe. Без
+манифеста поведение прежнее: `Authorization: Bearer` и `max_tokens`. В
+форме провайдера панели — выбор шаблона: он подставляет протокол и адрес
+и записывает `provider_manifest`.
+
 ## Проверка
 
 ```bash
 cd eva-agent-service
 npm run build
-npx node --test --experimental-strip-types test/llm-router.test.ts
+npx node --test --experimental-strip-types test/llm-router.test.ts test/provider-manifests.test.ts
 ```

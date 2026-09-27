@@ -15,6 +15,7 @@
 | Runtime context | Время, профиль, подписка, цели, курсор программы, ближайшие задачи и собственные сообщения Евы с прошлой реплики человека | `src/runtime/runtime-context.ts` |
 | Предел контекста | Две разные величины под одним числом `default_context_window`: безопасность (`safeContextWindow` — сколько примет самая слабая включённая модель) и бюджет (`contextLimit` — сколько контекста мы согласны оплачивать в каждом шаге). Обе — ПОЛНОЕ окно вместе с постоянным префиксом: Letta получает это число как `context_window_limit` и меряет им весь собранный контекст. Бюджет предел только опускает | `src/letta/context-window.ts`, `src/sdk-settings.ts` |
 | Непрерывность работы | ACTIVE OBJECTIVE/TURN OBJECTIVE и чекпойнт ACTIVE WORK в `current_state` | `src/letta/memory-blocks.ts`, `library/persona/eva.md` |
+| Аудит навыков | Что видит нативный механизм навыков и структура `SKILL.md` + `references/` + `templates/`: ≤ 200 строк, каждый файл упомянут, без `scripts/` и встроенных команд оболочки | `src/letta/skills-audit.ts`, `../skills/README.md` |
 
 Граница ответственности: [letta-native.md](letta-native.md).
 
@@ -27,7 +28,24 @@
 | User turn lock | FIFO и renewable lock на пользователя | `src/turns/user-turn-lock.ts` |
 | Effect journal | Идемпотентность побочных действий | `src/turns/effect-journal.ts` |
 | Recovery | Возобновление прерванных ходов | `src/turns/recovery.ts` |
-| Approvals | Подтверждение опасных tool calls | `src/tools/approvals.ts` |
+| Approvals | Подтверждение опасных tool calls; для `tool_call` — по настоящему инструменту и повторно при выполнении (`authorizeExecution`) | `src/tools/approvals.ts`, `src/tools/session-permission.ts` |
+
+## Инструменты
+
+Подробно: [TOOLS.md](TOOLS.md).
+
+| Компонент | Назначение | Путь |
+|---|---|---|
+| Реестр инструментов | Источники по старшинству (продукт, MCP, браузер), резерв имён мостов, отказ при коллизии, прямая или отложенная видимость | `src/tools/registry.ts`, `src/agent-tools.ts` |
+| Цепочка выполнения | Одна на прямой вызов, мост и делегирование: область арендатора → риск → подтверждение → журнал эффектов → хуки → выполнение | `src/tools/tool-executor.ts` |
+| Поиск инструментов | `tool_search` / `tool_describe` / `tool_call`, BM25 с допуском по редкому слову; флаг `EVA_TOOL_SEARCH` | `src/tools/tool-search.ts`, `src/tools/bridge-tools.ts` |
+| Хуки инструментов | `before/after/onError/onDenied`: квота, аудит (`agent_tool_calls`), метрики, трасса, задержка; только метаданные | `src/tools/tool-hooks.ts`, `src/tools/standard-hooks.ts`, `src/tools/tool-metrics.ts` |
+| MCP discovery | Streamable HTTP (сессия, SSE), `tools/list`, действующий набор = объявленное ∩ разрешённое, кэш `EVA_MCP_DISCOVERY_TTL_MS` | `src/tools/mcp.ts`, `src/tools/mcp-discovery.ts` |
+| Недоверенный результат | Конверт «данные, не инструкции» для MCP и браузера, обезвреживание описаний | `src/tools/untrusted.ts` |
+| Браузер | `browser-service` (Playwright + Chromium, сеть `browser`, профиль `browser`) и 7 отложенных инструментов с HMAC-псевдонимами; флаг `EVA_BROWSER_ENABLED` | `browser-service/`, `src/browser/` |
+| Субагенты Letta | Скрытый рабочий агент на задание: без MemFS и навыков, точный набор инструментов, срок, отмена, параллельность, удаление, очистка по тегу | `src/letta/subagents.ts` |
+| Исследование субагентами | research + document → web → проверка цитат → synthesis; флаг `EVA_DELEGATION_ENABLED`, уступает конвейеру | `src/research/delegation.ts`, `src/research/worker.ts` |
+| Каталог для панели | `GET /v1/tools/catalog`, `POST /v1/tools/mcp/:name/discover`; раздел «Инструменты» | `src/tools/catalog-routes.ts`, `src/admin/tool-catalog-service.ts`, `admin-ui/public/ui-tools.js` |
 
 ## Telegram ingress и delivery
 
@@ -51,7 +69,7 @@
 | Компонент | Назначение | Путь |
 |---|---|---|
 | Queue registry/driver | Единая точка BullMQ | `src/jobs/queue-registry.ts`, `src/jobs/bullmq-driver.ts` |
-| Потребитель очередей | Worker BullMQ поверх `JobRuntime.execute`; запущен для `research`, у `memory`, `proactive`, `maintenance` потребителя пока нет | `src/jobs/consumer.ts`, `QueueRegistry.consume` |
+| Потребитель очередей | Worker BullMQ поверх `JobRuntime.execute`; запускается для каждой очереди, в которой зарегистрированы обработчики: `research` (всегда, 2), `memory` (загрузки базы знаний, 1), `maintenance` (1), `proactive` (по месту на вид). Инвариант проверяет `job-consumer.test.ts` | `src/jobs/consumer.ts`, `QueueRegistry.consume`, `src/jobs/index.ts` |
 | Job outbox/runs | Транзакционная публикация и журнал запусков | `src/jobs/job-outbox.ts`, `src/jobs/job-runs.ts` |
 | Runtime/policy | Таймауты, отмена, retry, DLQ | `src/jobs/runtime.ts`, `src/jobs/policy.ts` |
 | Schedules | Канонические расписания в PostgreSQL | `src/jobs/schedules.ts` |
@@ -68,6 +86,7 @@ BullMQ не обрабатывает интерактивный ход и не �
 | Компонент | Назначение | Путь |
 |---|---|---|
 | LLM Router | Единственный выход к моделям и failover chains | `src/router/` |
+| Манифесты провайдеров | OpenAI-совместимые провайдеры данными: адрес, заголовок ключа, служебные заголовки, поле бюджета; `provider_manifest` и `openai_compat` в `additional_parameters`; шаблон в форме панели | `src/router/provider-manifests.ts` |
 | Capability probe | Проверка возможностей модели до активации. Четыре исхода: `ok`, `limited`, `config_error`, `unavailable`. Обязательны только ответ, вызов инструмента и приём его результата; поток, изображения и строгий JSON — необязательные и закрывают лишь соответствующие маршруты. Выясненное сохраняется в `supports_*` и решает отбор в `router/chain.ts` | `src/llm/capability-probe.ts` |
 | Vision check | Проверка маршрута изображения | `src/llm/vision-check.ts` |
 | Состояние роутера для панели | Единый view-model провайдера для `/admin/ai`: конфигурация, возможности, членство в маршрутах (`code`, `title`, `position`), breaker, расход и один операционный статус `providerStatus()`. Секреты и API key через него не проходят. Клиент ничего не досчитывает и второго запроса за провайдерами не делает | `src/admin/llm-router-service.ts` |

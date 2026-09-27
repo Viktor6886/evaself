@@ -41,6 +41,7 @@ import { missingCapabilities } from "./letta/capabilities.js";
 import { feminizeSelfReference } from "./i18n/eva-gender.js";
 import { FINISH_REPLY_PROMPT, FINISHING_TOOL_REFUSAL, recoverableEmptyStop } from "./letta/empty-reply.js";
 import { type AgentToolCall, collectToolCalls } from "./letta/tool-calls.js";
+import type { DelegationClient } from "./letta/subagents.js";
 import {
   evaluateReadiness,
   type ObservedRuntime,
@@ -628,6 +629,21 @@ export class LettaService {
   /** Что процесс считает каноническим прямо сейчас. Только для диагностики. */
   canonicalContext(): { persona: string; systemPrompt: string } {
     return { persona: this.persona, systemPrompt: this.systemPrompt };
+  }
+
+  /**
+   * Узкий доступ к Agent SDK для рабочих агентов делегирования
+   * (`letta/subagents.ts`). Клиент берётся при каждом вызове: после
+   * `resetClient()` рабочие агенты идут через новый.
+   */
+  delegationClient(): DelegationClient {
+    return {
+      createAgent: async (options) => await this.client.createAgent(options),
+      createSession: (agentId, options) => this.client.createSession(agentId, options),
+      deleteAgent: async (agentId) => { await this.client.agents.delete(agentId); },
+      listAgents: async (options) => (await this.client.agents.list(options as never)) as unknown[],
+      defaultModel: () => this.defaultModel ?? null,
+    };
   }
 
   setToolFactory(factory: (conversationId: string) => AnyAgentTool[]): void {
@@ -1534,8 +1550,12 @@ export class LettaService {
     await this.ensureContextWindow(conversationId);
     const pooled = await this.acquirePooled(conversationId, options.allowedTools === undefined ? undefined : {
       allowedTools: options.allowedTools,
+      // Разрешение без `updatedInput`. Harness Letta Code подставляет
+      // `updated_input` вместо аргументов вызова, если оно задано, а `{}`
+      // для него — заданное значение: разрешённый инструмент получал
+      // пустые аргументы.
       canUseTool: options.canUseTool ?? ((toolName) => options.allowedTools!.includes(toolName)
-        ? { behavior: "allow", updatedInput: {} }
+        ? { behavior: "allow" }
         : { behavior: "deny", message: `Tool ${toolName} is outside the job allowlist` }),
     });
     const sessionAcquireMs = Date.now() - startedAt;

@@ -3,6 +3,169 @@
 Оперативное состояние работы. Единственный источник истины о том, где работа
 остановилась. Агент читает этот файл первым и обновляет его после каждого шага.
 
+## Инструменты, браузер и субагенты по мотивам Hermes Agent — 2026-09-26
+
+Ветка: `claude/evaself-architecture-improvements-3d7d2s`. Статус: все восемь
+этапов выполнены и запушены; pull request не открывался (не запрошен).
+
+Задание: реестр инструментов с поиском (`tool_search`/`tool_describe`/
+`tool_call`), MCP discovery, изолированный browser-service, субагенты
+Letta для исследования, хуки инструментов, структура навыков, манифесты
+OpenAI-совместимых провайдеров, панель и метрики. Letta остаётся
+единственным runtime: из Hermes переносятся решения, а не его цикл,
+память, контекст или сессии.
+
+- [x] 1. Реестр инструментов и поиск: `src/tools/registry.ts`,
+  `tool-search.ts` (BM25, допуск по редкому слову), `bridge-tools.ts`,
+  общая цепочка `tool-executor.ts` (область арендатора → риск →
+  подтверждение → журнал эффектов → хуки → выполнение), разворот моста
+  в `canUseTool` (`session-permission.ts`), проверка согласия при
+  выполнении (`ApprovalService.authorizeExecution`). Флаг `EVA_TOOL_SEARCH`.
+- [x] 2. MCP discovery: `McpHttpInvoker` говорит по Streamable HTTP
+  (`initialize`, `Mcp-Session-Id`, SSE, переоткрытие истёкшей сессии,
+  сервер без рукопожатия — как прежде), `listTools` со страницами;
+  `mcp-discovery.ts` — кэш со сроком `EVA_MCP_DISCOVERY_TTL_MS`,
+  действующий набор = объявленное ∩ разрешённое, `*` запрещён; имя,
+  описание и схема — от сервера, описание обезвреживается; без discovery
+  MCP-инструментов нет. Хранилища не заводилось: результат —
+  восстановимое состояние процесса.
+- [x] 3. browser-service: новый сервис `browser-service/` (Playwright
+  1.63 + Chromium, образ Playwright того же тега), снимки доступности
+  `mode: "ai"` со ссылками `[ref=eN]` вместо HTML, листание длинного
+  снимка по `offset`; SSRF — проверка каждого запроса и проверяющий
+  прокси, соединяющийся с проверенным IP (DNS rebinding не проходит);
+  только чтение (не-GET отменяются), поля пароля/кода/карты скрыты и
+  закрыты для ввода, секреты на странице маскируются; пределы сессий,
+  простой, возраст, таймауты; отдельная сеть `browser`, профиль compose
+  `browser`, флаг `EVA_BROWSER_ENABLED`. В eva-agent-service —
+  `src/browser/` (клиент с HMAC-псевдонимами, 7 отложенных инструментов,
+  ответ — в конверте недоверенного содержимого). CI: job `browser-service`.
+- [x] 4. Субагенты Letta для исследования: `src/letta/subagents.ts` —
+  скрытый рабочий агент Agent SDK на задание (без MemFS, навыков,
+  серверных инструментов; точный `allowedTools`, `canUseTool` отклоняет
+  всё сверх набора, сессия `stateless`), срок, отмена, общий предел
+  параллельности, удаление после работы и очистка забытых по тегу;
+  `src/research/delegation.ts` — research + document → web (параллельно)
+  → проверка цитат по «книге доказательств» (только текст, который
+  Evaself сам получил для субагента) → synthesis; инструменты — только
+  риск `read`, от имени заказчика (`forDelegation`). Флаг
+  `EVA_DELEGATION_ENABLED`; ничего не нашедшее делегирование уступает
+  прежнему конвейеру. Возможности SDK 0.7.1 проверены — обновление
+  Letta не понадобилось; `createSession` добавлен в матрицу контракта.
+- [x] 5. Хуки инструментов: `beforeToolCall` / `afterToolCall` /
+  `onToolError` (+ `onToolDenied`) в общей цепочке после журнала
+  эффектов и перед выполнением; хуки видят только метаданные.
+  `standard-hooks.ts`: аудит моста и делегирования в существующую
+  `agent_tool_calls`, метрики, квоты-предохранители
+  (`EVA_TOOL_CALLS_PER_TURN`, `EVA_BROWSER_OPS_PER_MINUTE`), трасса
+  OpenTelemetry, задержка по инструментам. Установки хуков извне нет.
+- [x] 6. Навыки: структура `SKILL.md` + `references/` + `templates/`,
+  правила в аудите навыков (≤ 200 строк, каждый файл упомянут, ссылки
+  целы, нет `scripts/` и встроенных команд оболочки) — сторожит
+  существующий `skills-audit.test.ts`; `relational-presence` (631 строка)
+  разнесён на `SKILL.md` (182) и пять файлов справки без потери текста;
+  заготовка `journaling-reflection/templates/period-review.md`. Роутера
+  навыков нет — выбирает Letta.
+- [x] 7. Манифесты провайдеров: `src/router/provider-manifests.ts` —
+  15 OpenAI-совместимых провайдеров данными (адрес, хосты, заголовок
+  ключа, служебные заголовки, поле бюджета, подсказки), узнавание по
+  адресу или `provider_manifest`, переопределения
+  `additional_parameters.openai_compat` для нового провайдера без
+  адаптера; секретные и служебные заголовки отклоняются. Применяется в
+  адаптере `openai-compatible`, проверке `/models` и embeddings; failover,
+  probe, ротация ключей, breaker, лимиты и зрение не тронуты. Панель:
+  выбор шаблона в форме провайдера.
+- [x] 8. Панель, метрики, документация: раздел «Инструменты»
+  (`/admin/tools`: каталог, отклонённые имена, MCP discovery с повторным
+  опросом, браузер и его сессии без адресов, субагенты, задержка) через
+  `GET /v1/tools/catalog` и `POST /v1/tools/mcp/:name/discover`; метрики
+  `eva_tool_*`, `eva_mcp_discovery_*`, `eva_browser_*`, `eva_delegation_*`;
+  `docs/TOOLS.md`, обновлены ARCHITECTURE, letta-native, SECURITY,
+  IMPLEMENTATION_STATE, llm-router, CHANGELOG, таблица тестов подсистемы.
+
+Проверки (2026-09-26):
+
+```
+eva-agent-service: npm test → PASS (1475 из 1483, 8 skip — прежние, нужен PostgreSQL)
+eva-agent-service: npm run typecheck → PASS
+eva-agent-service: npm run lint → PASS
+browser-service: npm test → PASS (11); npm run typecheck → PASS
+browser-service: тесты в образе mcr.microsoft.com/playwright:v1.63.0-noble → PASS (11)
+browser-service: рантайм read-only, cap_drop ALL, pwuser — Chromium стартует, 401 без ключа, метаданные облака и loopback → 403
+admin-ui: npm test → PASS (124)
+make validate → PASS (первый прогон — 1 отказ до загрузки образов, повторные — PASS)
+make test → не выполнен до конца: сборка образа упирается в apt (HTTP 403 от deb.debian.org в песочнице)
+media-service pytest (вне образа) → 141 PASS, 8 skip, 1 FAIL: нет ffprobe в песочнице
+python3 scripts/ci/assert-*.py (tenant-scope, env-plumbing, admin-route-access, frontend-routes, doc-paths) → PASS
+bash scripts/ci/test-changed-scope.sh → PASS
+```
+
+Независимое ревью (отдельный агент, Sonnet, по диффу без lock-файлов):
+1) все пункты задания выполнены — да; 2) «не делай» и инварианты не
+нарушены (обход подтверждений через `tool_call`, выход браузера в частные
+сети, инструменты записи у субагентов — нет) — да; 3) лишних изменений —
+нет. Блокирующих замечаний нет; два низких — классификация ошибок MCP по
+тексту сообщения (оставлено) и кэш DNS 30 с (не обход: прокси соединяется
+с проверенным и закэшированным IP).
+
+Rollout: всё за флагами, выключено по умолчанию (`EVA_TOOL_SEARCH`,
+`EVA_BROWSER_ENABLED` + профиль `browser`, `EVA_DELEGATION_ENABLED`).
+Rollback: выключить флаг и `docker compose up -d eva-agent-service`;
+миграций нет.
+
+Эквиваленты проверены: реестра инструментов и каталога не было —
+инструменты собирались списком в `AgentToolFactory.forConversation`;
+цепочка выполнения жила в его приватном `builder` и вынесена без
+изменения порядка; аудит вызовов — существующая `agent_tool_calls`.
+
+### Перепроверка и доработки — 2026-09-27
+
+- [x] Учёт исходов: вызов, отклонённый до выполнения (запрет, нет
+  согласия, отказ хука, отменённый ход, прежняя неудачная попытка),
+  закрывает согласие как `failed`, а не `executed`; повтор, заставший
+  тот же вызов ещё идущим, согласие не забирает (по замечанию ревью); у
+  делегирования своя квота (×4 от лимита хода); ответ MCP в контекст —
+  не больше 20 000 знаков с пометкой `truncated`.
+- [x] `letta.ts`: разрешение allowlist фоновой задачи отдавало
+  `updatedInput: {}`, и harness Letta Code подставлял пустые аргументы
+  вместо настоящих (скрытая ошибка — сегодня allowlist никто не
+  передаёт). Тест на регрессию.
+- [x] Слой заданий: потребитель у каждой очереди с обработчиками —
+  загрузки базы знаний (`memory`) при включённом флаге навсегда
+  оставались `queued`; так же без потребителя стояли `maintenance` и
+  `proactive`. Под теми же флагами, по умолчанию поведение прежнее;
+  инвариант проверяет `job-consumer.test.ts` через подменный драйвер.
+- [x] Навык `web-research` (+ `references/source-checking.md`): порядок
+  web_search → web_read → браузер → tool_search, ответ со ссылкой из
+  результата инструмента, расхождение источников вслух, текст страницы —
+  данные. В персоне — одна строка-указатель.
+- [x] `web_search`: заголовки, сниппеты и прямые ответы обезврежены
+  (`neutralizeUntrusted`), сниппет ≤ 500 знаков, результат без http(s)
+  отброшен.
+
+Проверки (2026-09-27):
+
+```
+eva-agent-service: npm test → PASS (1491 из 1499, 8 skip — нужен PostgreSQL)
+eva-agent-service: npm run typecheck → PASS
+eva-agent-service: npm run lint → PASS
+admin-ui: npm test → PASS (124; EVA_CHROMIUM_PATH — Chromium песочницы)
+make validate → PASS
+make test → не выполнен: сборка образа eva-agent-service упирается в apt (HTTP 403 от deb.debian.org — сетевая политика песочницы); те же тесты прогнаны напрямую
+python3 scripts/ci/assert-{tenant-scope,env-plumbing,admin-route-access,frontend-routes,doc-paths,down-migrations,allowed-updates,live-css,single-admin-domain}.py → PASS
+assert-caddy-*.py → проверяются make validate через caddy adapt (PASS)
+```
+
+Независимое ревью (отдельный агент, Sonnet, дифф f91ff88..a99362c): 1) все
+цели выполнены и покрыты тестами — да; 2) инварианты и «не делай» — да;
+3) лишних изменений — нет. Низкое замечание об отмене и повторе из журнала
+эффектов исправлено следующим коммитом; `JSON.stringify(...) ?? ""` оставлен —
+для `undefined` он и правда возвращает `undefined`.
+
+Эквиваленты: потребитель — существующий `QueueRegistry.consume`, новых
+очередей нет; навык — новый каталог, пересечения с `osint-research` нет
+(сведения о людях — туда, указано в описании).
+
 ## OSINT: надёжность поиска и независимые сборщики — 2026-09-26
 
 Ветка: `fix/osint-search-reliability`.

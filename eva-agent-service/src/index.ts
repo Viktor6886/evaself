@@ -11,6 +11,7 @@ import { Redis } from "ioredis";
 
 import { applyManagedRuntimeConfig, importEnvironmentOsintSettings } from "./admin/managed-runtime-config.js";
 import { AgentToolFactory, isHostExecutionTool, toolApprovalCategory, toolRisk } from "./agent-tools.js";
+import { sessionPermission } from "./tools/session-permission.js";
 import { BackgroundRuntime } from "./background.js";
 import {
   configWarnings,
@@ -75,6 +76,14 @@ import { currentTurn } from "./turns/turn-context.js";
 import { ApprovalService } from "./tools/approvals.js";
 import { loadMasterKey, SecretStore } from "./admin/secret-store.js";
 import { McpHttpInvoker, McpServerPolicyRepository } from "./tools/mcp.js";
+import { McpDiscovery } from "./tools/mcp-discovery.js";
+import { recordMcpDiscovery } from "./tools/tool-metrics.js";
+import { ToolHookChain } from "./tools/tool-hooks.js";
+import { ToolLatencyTracker, auditHook, metricsHook, quotaHook, tracingHook } from "./tools/standard-hooks.js";
+import { BrowserServiceClient } from "./browser/client.js";
+import { BrowserToolSource } from "./browser/tools.js";
+import { LettaSubagentRunner } from "./letta/subagents.js";
+import { DELEGATION_TOOLS, DelegatedResearch } from "./research/delegation.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -295,8 +304,25 @@ async function main(): Promise<void> {
   const mcpInvoker = masterKey && mcpPolicies ? new McpHttpInvoker({
     policies: mcpPolicies,
     secrets: new SecretStore({ masterKey, pool: db as never }),
-    audit: { record: async (entry) => { await db.query(`INSERT INTO audit_log (actor, operation, target, params_redacted_json, result, request_id, duration_ms) VALUES ('eva-agent-service',$1,$2,$3::jsonb,$4,$5,$6)`, [String(entry.operation), String(entry.server ?? "mcp"), JSON.stringify({ tool: entry.tool, stage: entry.stage }), entry.ok ? "success" : "failure", crypto.randomUUID(), Number(entry.duration_ms ?? 0)]); } },
+    audit: { record: async (entry) => { await db.query(`INSERT INTO audit_log (actor, operation, target, params_redacted_json, result, request_id, duration_ms) VALUES ('eva-agent-service',$1,$2,$3::jsonb,$4,$5,$6)`, [String(entry.operation), String(entry.server ?? "mcp"), JSON.stringify({ tool: entry.tool, stage: entry.stage, ...(entry.count !== undefined ? { count: entry.count } : {}) }), entry.ok ? "success" : "failure", crypto.randomUUID(), Number(entry.duration_ms ?? 0)]); } },
   }) : undefined;
+  const mcpDiscovery = mcpInvoker ? new McpDiscovery({
+    invoker: mcpInvoker,
+    ttlMs: config.mcpDiscoveryTtlMs,
+    logger,
+    onResult: (outcome, durationMs) => recordMcpDiscovery(outcome, durationMs),
+  }) : undefined;
+  // Хуки инструментов — фиксированный список наблюдателей, собранный
+  // здесь. Установки хуков извне нет: это не система плагинов.
+  const toolLatency = new ToolLatencyTracker();
+  const toolQuota = quotaHook({ perTurn: config.toolCallsPerTurn, browserPerMinute: config.browserOpsPerMinute });
+  const toolHooks = new ToolHookChain([
+    toolQuota,
+    auditHook(db),
+    metricsHook(),
+    tracingHook(),
+    toolLatency.hook(),
+  ], logger);
   const toolFactory = new AgentToolFactory(
     config,
     db,
@@ -305,7 +331,7 @@ async function main(): Promise<void> {
     profile,
     goals,
     effects,
-    mcpPolicies && mcpInvoker ? { policies: mcpPolicies, invoker: mcpInvoker } : undefined,
+    mcpPolicies && mcpInvoker ? { policies: mcpPolicies, invoker: mcpInvoker, ...(mcpDiscovery ? { discovery: mcpDiscovery } : {}) } : undefined,
     // Самопроверка смотрит на уже собранные факты сессии SDK. Состав
     // legacy blocks через HTTP не запрашивается: App Server WebSocket-only.
     {
@@ -314,8 +340,19 @@ async function main(): Promise<void> {
       agentOf: async (userId: number) => await db.agentIdOfUser(userId),
     },
     runtimeContext,
+    toolHooks,
   );
+  // Браузер — отдельный источник реестра. Источник регистрируется
+  // всегда, а флаг проверяется при каждой сборке набора: выключенный
+  // браузер не даёт инструментов, не требуя перезапуска их потребителей.
+  const browserClient = new BrowserServiceClient({ baseUrl: config.browserServiceUrl, token: config.browserServiceToken });
+  toolFactory.registerSource(new BrowserToolSource({ enabled: () => config.browserEnabled, client: browserClient }));
   toolFactory.setApprovalCompletionCallback(async (execution) => await approvals.completeApprovedExecution(execution));
+  toolFactory.setExecutionGate(async (input) => await approvals.authorizeExecution({
+    ...input,
+    risk: toolRisk(input.toolName),
+    category: toolApprovalCategory(input.toolName),
+  }));
   letta.setToolFactory((conversationId) => toolFactory.forConversation(conversationId));
   // Что увидит модель, решает Letta. Отсюда приходит только подтверждение
   // действия человеком: у него есть владелец и чат, которых SDK не знает.
@@ -332,19 +369,11 @@ async function main(): Promise<void> {
       // человека нет: подтверждение там не спрашивается, а отказывается.
       unattended: runtime.purpose === "task_action" || runtime.purpose === "initiative",
     });
-    return async (toolName, toolInput, context) => {
-      // Оболочка и произвольная запись в файловую систему хоста —
-      // граница детерминированная, а не предмет подтверждения: за
-      // пределами продуктовых сценариев подтверждать такой вызов
-      // человеку в чате нечем. Проверка стоит до подтверждений
-      // намеренно: при выключенном флаге подтверждений граница обязана
-      // остаться.
-      if (isHostExecutionTool(toolName)) {
-        logger.warn("вызов инструмента выполнения отклонён", { tool: toolName, conversationId });
-        return { behavior: "deny", message: "Инструмент недоступен агенту Евы", interrupt: false };
-      }
-      return await approve(toolName, toolInput, context);
-    };
+    return sessionPermission({
+      approve,
+      isHostExecutionTool,
+      onHostExecutionDenied: (tool) => logger.warn("вызов инструмента выполнения отклонён", { tool, conversationId }),
+    });
   });
   void approvals.recoverPendingApprovals(async (conversationId) => {
     await letta.recoverConversationApprovals(conversationId);
@@ -523,8 +552,41 @@ async function main(): Promise<void> {
   // Слой фоновых заданий. Ступень переноса решает, кто ведёт напоминания
   // и heartbeat: пока идёт зеркало — старые интервалы, после снятия
   // зеркала — очередь, и тогда интервалы не запускаются вовсе.
+  // Субагенты Letta для исследования. Раннер один на процесс: предел
+  // параллельности общий для всех заданий, App Server у них один.
+  const subagents = new LettaSubagentRunner({
+    client: () => letta.delegationClient(),
+    maxParallel: config.delegationMaxParallel,
+    timeoutMs: config.delegationTimeoutMs,
+    logger,
+    model: () => config.delegationModel || null,
+  });
+  if (config.delegationEnabled) {
+    void subagents.sweepOrphans().catch((error: unknown) => logger.warn("Очистка рабочих агентов не выполнена", {
+      code: error instanceof Error ? error.name : "unknown_error",
+    }));
+  }
+  const researchDelegation = {
+    enabled: () => config.delegationEnabled,
+    create: async (input: { userId: number; conversationId: string; requestId: string }) => {
+      const runtime = await db.getAgentRuntimeContext(input.conversationId);
+      if (!runtime || runtime.userId !== input.userId) throw new Error("research_runtime_missing");
+      const workerConversation = `delegation:${input.requestId}`;
+      return new DelegatedResearch({
+        runner: subagents,
+        tools: (role) => toolFactory.forDelegation({ conversationId: workerConversation, runtime, toolNames: DELEGATION_TOOLS[role] }),
+        limits: {
+          maxSources: Number(process.env.EVA_RESEARCH_MAX_SOURCES ?? 12),
+          maxPagesPerDomain: Number(process.env.EVA_RESEARCH_MAX_PAGES_DOMAIN ?? 2),
+          maxWebAgents: config.delegationMaxParallel,
+          maxFactsPerAgent: 12,
+        },
+      });
+    },
+  };
   const jobs = config.bullmqJobsEnabled
     ? buildJobLayer(config, db, redis, logger, {
+      researchDelegation,
       letta,
       purposes,
       runtimeContext,
@@ -660,6 +722,14 @@ async function main(): Promise<void> {
     },
     ...(knowledgeResearch ? { knowledgeResearch } : {}),
     ...(osintPublic ? { osint: osintPublic } : {}),
+    toolCatalog: {
+      factory: toolFactory,
+      hooks: toolHooks.names,
+      latency: toolLatency,
+      ...(mcpPolicies && mcpDiscovery ? { mcp: { policies: mcpPolicies, discovery: mcpDiscovery } } : {}),
+      browser: { enabled: () => config.browserEnabled, client: browserClient },
+      delegation: { enabled: () => config.delegationEnabled, runner: subagents },
+    },
   });
 
   await app.listen({ port: config.port, host: config.host });

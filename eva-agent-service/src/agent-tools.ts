@@ -1,7 +1,6 @@
 import type { AnyAgentTool } from "@letta-ai/letta-agent-sdk";
 
 import type { Config } from "./config.js";
-import { purposePolicy, type ConversationPurpose } from "./conversations/purpose-service.js";
 import type { AgentRuntimeContext, Database } from "./db.js";
 import { GoalToolFactory } from "./goals/goal-tools.js";
 import { GoalProgramToolFactory } from "./goals/goal-program-tools.js";
@@ -11,10 +10,8 @@ import type { Logger } from "./logger.js";
 import { ProfileToolFactory } from "./profile/profile-tools.js";
 import { UserProfileService } from "./profile/profile-service.js";
 import type { TelegramClient } from "./telegram.js";
-import { currentScope } from "./tenancy/index.js";
 import { CoreToolFactory, type RuntimeObserver } from "./tools/core-tools.js";
-import { EffectJournal, effectKey } from "./turns/effect-journal.js";
-import { turnOf } from "./turns/turn-context.js";
+import { EffectJournal } from "./turns/effect-journal.js";
 import { TaskToolFactory } from "./tools/task-tools.js";
 import { SubscriptionStatusService } from "./subscriptions/status-service.js";
 import { SubscriptionToolFactory } from "./subscriptions/subscription-tools.js";
@@ -22,33 +19,26 @@ import { OsintToolFactory } from "./osint/tools.js";
 import type { OsintService } from "./osint/service.js";
 import type { McpHttpInvoker, McpServerPolicyRepository } from "./tools/mcp.js";
 import type { MandatoryApprovalCategory, ToolRisk } from "./tools/approvals.js";
+import { bridgeTools } from "./tools/bridge-tools.js";
 import {
-  asObject,
-  type JsonObject,
-  type ToolBuilder,
-  withToolTurn,
-} from "./tools/tool-kit.js";
+  TOOL_CALL_NAME,
+  TOOL_DESCRIBE_NAME,
+  TOOL_SEARCH_NAME,
+  ToolRegistry,
+  type RegisteredTool,
+  type ToolAssembly,
+} from "./tools/registry.js";
+import {
+  ToolExecutor,
+  type ApprovalCompletion,
+  type ExecutionGate,
+} from "./tools/tool-executor.js";
+import type { ToolHookChain } from "./tools/tool-hooks.js";
+import { neutralizeUntrusted, untrustedResult } from "./tools/untrusted.js";
+import type { McpDiscovery } from "./tools/mcp-discovery.js";
+import type { ToolBuilder } from "./tools/tool-kit.js";
 
-const CONTEXT_MUTATING_TOOLS = new Set([
-  "update_response_mode",
-  "update_llm_quality_mode",
-  "upsert_user_profile_field",
-  "confirm_user_profile_field",
-  "decline_user_profile_field",
-  "mark_profile_field_asked",
-  "upsert_goal",
-  "confirm_goal",
-  "upsert_goal_result",
-  "record_work_block",
-  "record_goal_review",
-  "update_goal_program",
-  "save_task",
-  "save_tasks_bulk",
-  "update_task",
-  "mark_task_completed",
-  "snooze_task_reminder",
-  "delete_tasks",
-]);
+const CATALOG_CONVERSATION = "admin:tool-catalog";
 
 export class AgentToolFactory {
   private readonly core: CoreToolFactory;
@@ -57,10 +47,13 @@ export class AgentToolFactory {
   private readonly goalPrograms: GoalProgramToolFactory;
   private readonly tasks: TaskToolFactory;
   private readonly subscriptions: SubscriptionToolFactory;
-  private readonly dynamicTools = new Map<string, AnyAgentTool[]>();
+  private readonly mcpTools = new Map<string, RegisteredTool[]>();
   private osint?: OsintToolFactory;
   private readonly vectorGoalsEnabled: boolean;
-  private approvalCompletion?: (input: { userId: number; conversationId: string; toolName: string; args: unknown; outcome: "executed" | "failed" }) => Promise<unknown>;
+  private approvalCompletion?: ApprovalCompletion;
+  private executionGate?: ExecutionGate;
+  private readonly executor: ToolExecutor;
+  readonly registry: ToolRegistry;
   private readonly runtimeContexts = new Map<
     string,
     { expiresAt: number; value: Promise<AgentRuntimeContext> }
@@ -77,11 +70,17 @@ export class AgentToolFactory {
      * Журнал побочных эффектов. Необязателен: без него инструменты
      * работают ровно как раньше.
      */
-    private readonly effects?: EffectJournal,
-    private readonly mcp?: { policies: McpServerPolicyRepository; invoker: Pick<McpHttpInvoker, "invokeServer"> },
+    effects?: EffectJournal,
+    private readonly mcp?: {
+      policies: Pick<McpServerPolicyRepository, "listEnabled">;
+      invoker: Pick<McpHttpInvoker, "invokeServer">;
+      /** Без обнаружения MCP-инструментов нет: схема и имя берутся только у сервера. */
+      discovery?: Pick<McpDiscovery, "effective" | "retain">;
+    },
     /** Наблюдатель рантайма для самопроверки. Без него инструмент честно откажет. */
     observer?: RuntimeObserver,
     private readonly runtimeInvalidator?: { invalidate(userId: number): void },
+    hooks?: ToolHookChain,
   ) {
     this.vectorGoalsEnabled = config.vectorGoalsEnabled !== false;
     this.core = new CoreToolFactory(config, db, telegram, undefined, observer);
@@ -92,10 +91,38 @@ export class AgentToolFactory {
     this.goalPrograms = new GoalProgramToolFactory(new GoalProgramService(db));
     this.tasks = new TaskToolFactory(db);
     this.subscriptions = new SubscriptionToolFactory(new SubscriptionStatusService(db));
+    this.executor = new ToolExecutor({
+      db,
+      logger,
+      ...(effects ? { effects } : {}),
+      context: async (conversationId) => await this.context(conversationId),
+      onContextMutation: (conversationId, userId) => {
+        this.invalidate(conversationId);
+        this.runtimeInvalidator?.invalidate(userId);
+      },
+      riskFor: toolRisk,
+      approvalCompletion: () => this.approvalCompletion,
+      gate: () => this.executionGate,
+      ...(hooks ? { hooks } : {}),
+    });
+    // Порядок регистрации — порядок старшинства при коллизии имён:
+    // продуктовые инструменты первыми, их не подменит одноимённый MCP.
+    this.registry = new ToolRegistry({ toolSearchEnabled: () => config.toolSearchEnabled === true });
+    this.registry.register({ id: "product", tools: () => this.productTools() });
+    this.registry.register({ id: "mcp", tools: (conversationId) => this.mcpTools.get(conversationId) ?? [] });
   }
 
-  setApprovalCompletionCallback(callback: (input: { userId: number; conversationId: string; toolName: string; args: unknown; outcome: "executed" | "failed" }) => Promise<unknown>): void {
+  setApprovalCompletionCallback(callback: ApprovalCompletion): void {
     this.approvalCompletion = callback;
+  }
+
+  /**
+   * Проверка согласия при выполнении вызова через `tool_call`. Вторая,
+   * независимая от `canUseTool` граница: мост не выполнит инструмент,
+   * требующий согласия, без записанного согласия на этот вызов.
+   */
+  setExecutionGate(gate: ExecutionGate): void {
+    this.executionGate = gate;
   }
 
   /**
@@ -107,21 +134,75 @@ export class AgentToolFactory {
     this.osint = new OsintToolFactory(service);
   }
 
+  /** Дополнительный источник инструментов: браузер. Регистрируется кодом сервиса. */
+  registerSource(provider: Parameters<ToolRegistry["register"]>[0]): void {
+    this.registry.register(provider);
+  }
+
+  /**
+   * Инструменты сессии SDK.
+   *
+   * Продуктовые инструменты регистрируются полной схемой, как раньше.
+   * Отложенные — MCP и браузер при включённом поиске инструментов —
+   * попадают в каталог, и модель видит вместо них три моста. Мосты
+   * появляются, только если каталог не пуст: искать в пустом незачем.
+   */
   forConversation(conversationId: string): AnyAgentTool[] {
-    const tool = this.builder(conversationId);
+    const assembly = this.registry.assemble(conversationId);
+    const tools = assembly.direct.map((tool) => this.executor.agentTool(conversationId, tool));
+    if (assembly.deferred.length === 0) return tools;
+    const bridge = bridgeTools({
+      conversationId,
+      executor: this.executor,
+      catalog: () => this.registry.assemble(conversationId).deferred,
+      directNames: () => new Set(this.registry.assemble(conversationId).direct.map((tool) => tool.name)),
+    });
     return [
-      ...this.core.build(tool),
-      ...this.profile.build(tool),
-      ...(this.vectorGoalsEnabled
-        ? [...this.goals.build(tool), ...this.goalPrograms.build(tool)]
-        : []),
-      ...this.tasks.build(tool),
-      // Статус подписки — безопасное чтение владельца conversation. Он
-      // нужен Еве независимо от rollout-флага покупки/апгрейда тарифов.
-      ...this.subscriptions.build(tool),
-      ...(this.osint && this.config.osintEnabled ? this.osint.build(tool) : []),
-      ...(this.dynamicTools.get(conversationId) ?? []),
+      ...tools,
+      this.executor.agentTool(conversationId, bridge.search),
+      this.executor.agentTool(conversationId, bridge.describe),
+      bridge.call,
     ];
+  }
+
+  /**
+   * Инструменты рабочего агента делегирования (`letta/subagents.ts`).
+   *
+   * Только чтение, и это проверка, а не договорённость: имя проходит,
+   * лишь если его риск — `read`. Владелец — тот, кто заказал работу, и
+   * выполнение идёт той же цепочкой с его областью арендатора и его
+   * квотами. Conversation рабочего агента служебный и в продуктовой
+   * таблице не записан, поэтому владелец передаётся явно.
+   */
+  forDelegation(input: {
+    conversationId: string;
+    runtime: AgentRuntimeContext;
+    toolNames: readonly string[];
+  }): AnyAgentTool[] {
+    const allowed = input.toolNames.filter((name) => toolRisk(name) === "read");
+    const assembly = this.registry.assemble(input.conversationId);
+    return [...assembly.direct, ...assembly.deferred]
+      .filter((tool) => allowed.includes(tool.name))
+      .map((tool) => this.executor.agentTool(input.conversationId, tool, { runtime: input.runtime, allowedTools: allowed }));
+  }
+
+  /** Снимок каталога для панели и готовности: имена и происхождение, без схем. */
+  assembly(conversationId: string): ToolAssembly {
+    return this.registry.assemble(conversationId);
+  }
+
+  /**
+   * Каталог для панели: тот же реестр, что у сессий, с инструментами MCP
+   * по текущим политикам и discovery. Служебный conversation каталога
+   * ни с кем не связан и хода не открывает.
+   */
+  async catalogSnapshot(): Promise<ToolAssembly> {
+    await this.loadMcpTools(CATALOG_CONVERSATION);
+    try {
+      return this.registry.assemble(CATALOG_CONVERSATION);
+    } finally {
+      this.mcpTools.delete(CATALOG_CONVERSATION);
+    }
   }
 
   /**
@@ -137,203 +218,71 @@ export class AgentToolFactory {
     return await this.context(conversationId);
   }
 
-  private builder(conversationId: string): ToolBuilder {
-    return (
-      name: string,
-      label: string,
-      description: string,
-      parameters: JsonObject,
-      execute: (
-        args: JsonObject,
-        runtime: AgentRuntimeContext,
-        toolCallId: string,
-      ) => Promise<unknown>,
-    ): AnyAgentTool => {
-      return ({
-      name,
-      label,
-      description,
-      parameters,
-      execute: async (toolCallId, rawArgs) => {
-        // Affinity фиксируется в момент входа callback, до любого await.
-        // Иначе чтение runtime даёт следующему ходу время заменить scope.
-        const turn = turnOf(conversationId);
-        let executionUserId: number | undefined;
-        let approvalCompletionAttempted = false;
-        // Вызов вынесен в отдельную функцию, чтобы ранний выход —
-        // отменённый ход, повтор из журнала — проходил через тот же учёт
-        // исхода, что и обычное выполнение.
-        const call = async (): Promise<ReturnType<typeof result>> => {
-          const runtime = await this.context(conversationId);
-          executionUserId = runtime.userId;
-          // Служебная conversation — не разговор с человеком. Её
-          // назначение перечисляет, что в ней вообще позволено; список
-          // объявлен один раз в purpose-service и записан вместе с самой
-          // conversation, поэтому проверка идёт по нему, а не по имени.
-          const policy = purposePolicy(runtime.purpose as ConversationPurpose);
-          if (
-            (policy.allowedTools !== null && !policy.allowedTools.includes(name))
-            || policy.deniedTools?.includes(name)
-          ) {
-            throw new Error(
-              `Инструмент ${name} недоступен в служебном conversation purpose=${runtime.purpose}`,
-            );
-          }
-          // Владельцем хода инструмент считает только каноническую
-          // запись conversation. Аргументы модели на выбор пользователя
-          // не влияют, а расхождение с уже открытой областью — признак
-          // перепутанного conversation, и работа останавливается.
-          const ambient = currentScope();
-          if (
-            ambient?.kind === "user" &&
-            ambient.userId !== null &&
-            ambient.userId !== runtime.userId
-          ) {
-            throw new Error(
-              `Conversation принадлежит другому пользователю, чем текущий ход`,
-            );
-          }
-          // Побочный эффект выполняется не более одного раза на вызов.
-          // Ключ детерминированный, поэтому повтор хода после сбоя
-          // возвращает прежний результат, а не делает действие второй раз.
-          // Ход берётся и по контексту, и по conversation: инструменты
-          // регистрируются при открытии сессии, и до их вызова из
-          // обработчика сокета SDK AsyncLocalStorage не дотягивается.
-          // Без этого журнал побочных эффектов оставался бы выключенным:
-          // без хода нет ни ключа, ни барьера отмены.
-          // Барьер отмены перед побочным эффектом. Отменённый ход не
-          // должен делать того, что потом нельзя отменить: генерацию мы
-          // остановим, а созданную задачу или отправленное сообщение —
-          // уже нет.
-          if (turn && await turn.isCancelled()) {
-            return result({ ok: false, error: "ход отменён" });
-          }
-          const key = turn?.recorded && String(toolCallId ?? "").trim()
-            ? effectKey(turn.runId, String(toolCallId), name)
-            : null;
-          if (key && this.effects) {
-            const decision = await this.effects.begin({
-              key,
-              runId: turn!.runId,
-              userId: runtime.userId,
-              toolName: name,
-              toolCallId: String(toolCallId ?? "no-call-id"),
-            });
-            if (decision.action === "replay") return result(decision.result);
-            if (decision.action === "skip") {
-              return result({
-                ok: false,
-                error: decision.reason === "in_flight"
-                  ? "этот вызов уже выполняется"
-                  : `предыдущая попытка отказала: ${decision.errorCode ?? "неизвестно"}`,
-              });
-            }
-          }
-
-          let output: unknown;
-          try {
-            output = await this.db.withUserScope(
-              {
-                userId: runtime.userId,
-                telegramId: runtime.telegramId,
-                label: `tool:${name}`,
-              },
-              async () => await execute(
-                asObject(rawArgs), withToolTurn(runtime, turn), String(toolCallId ?? ""),
-              ),
-            );
-          } catch (error) {
-            if (key && this.effects) {
-              await this.effects.fail(
-                key,
-                runtime.userId,
-                error instanceof Error ? error.name : "unknown_error",
-                // Индивидуальная политика: повторять можно то, что
-                // сорвалось по дороге, а не то, что модель попросила
-                // неправильно.
-                !(error instanceof Error && error.name === "TypeError"),
-              );
-            }
-            throw error;
-          }
-          if (key && this.effects) await this.effects.succeed(key, runtime.userId, output);
-          if (CONTEXT_MUTATING_TOOLS.has(name)) {
-            this.invalidate(conversationId);
-            this.runtimeInvalidator?.invalidate(runtime.userId);
-          }
-          return result(output);
-        };
-        try {
-          const called = await call();
-          if (executionUserId !== undefined) {
-            approvalCompletionAttempted = true;
-            await this.recordOutcome({ userId: executionUserId, conversationId, toolName: name, args: rawArgs, outcome: "executed" });
-          }
-          return called;
-        } catch (error) {
-          if (executionUserId !== undefined && !approvalCompletionAttempted) {
-            approvalCompletionAttempted = true;
-            await this.recordOutcome({ userId: executionUserId, conversationId, toolName: name, args: rawArgs, outcome: "failed" });
-          }
-          const message = error instanceof Error ? error.message : String(error);
-          this.logger.warn("Инструмент Agent SDK завершился ошибкой", {
-            tool: name,
-            conversationId,
-            message,
-          });
-          return result({ ok: false, error: message });
-        }
-      },
-    });
+  /**
+   * Продуктовые инструменты. Фабрики строят их прежним `ToolBuilder`;
+   * здесь он лишь собирает описания в реестр — выполнение идёт через
+   * общую цепочку `ToolExecutor`.
+   */
+  private productTools(): RegisteredTool[] {
+    const specs: RegisteredTool[] = [];
+    const collect: ToolBuilder = (name, label, description, parameters, execute) => {
+      const spec: RegisteredTool = {
+        name, label, description, parameters, execute,
+        source: "product", group: "product", exposure: "direct",
+      };
+      specs.push(spec);
+      return spec as unknown as AnyAgentTool;
     };
+    this.core.build(collect);
+    this.profile.build(collect);
+    if (this.vectorGoalsEnabled) {
+      this.goals.build(collect);
+      this.goalPrograms.build(collect);
+    }
+    this.tasks.build(collect);
+    // Статус подписки — безопасное чтение владельца conversation. Он
+    // нужен Еве независимо от rollout-флага покупки/апгрейда тарифов.
+    this.subscriptions.build(collect);
+    if (this.osint && this.config.osintEnabled) this.osint.build(collect);
+    return specs;
   }
 
   /**
-   * Учёт исхода вызова: закрытие выданного подтверждения.
-   *
-   * Учёт идёт после того, как побочный эффект уже случился, поэтому его
-   * отказ не становится отказом инструмента: модель получила бы ошибку на
-   * выполненном действии и позвала бы инструмент второй раз. По той же
-   * причине отказ учёта не подменяет собой исходную ошибку инструмента —
-   * иначе настоящая причина отказа не доходит ни до модели, ни в журнал.
+   * Инструменты MCP для conversation: объявленные сервером (`tools/list`)
+   * и разрешённые администратором. Имя, описание и схема — от сервера;
+   * описание обезвреживается, потому что модель читает его как часть
+   * инструкций. Без обнаружения набор пуст: инструмент со схемой «любой
+   * объект» модель вызывала вслепую.
    */
-  private async recordOutcome(input: {
-    userId: number;
-    conversationId: string;
-    toolName: string;
-    args: unknown;
-    outcome: "executed" | "failed";
-  }): Promise<void> {
-    const record = async (stage: string, work: () => Promise<unknown>): Promise<void> => {
-      try {
-        await work();
-      } catch (error) {
-        this.logger.warn("Учёт исхода инструмента не выполнен", {
-          tool: input.toolName,
-          conversationId: input.conversationId,
-          stage,
-          message: error instanceof Error ? error.message : String(error),
-        });
-      }
-    };
-    await record("approval", async () => await this.approvalCompletion?.({
-      userId: input.userId, conversationId: input.conversationId,
-      toolName: input.toolName, args: input.args, outcome: input.outcome,
-    }));
-  }
-
   private async loadMcpTools(conversationId: string): Promise<void> {
-    if (!this.mcp) { this.dynamicTools.delete(conversationId); return; }
-    const builder = this.builder(conversationId);
-    const tools: AnyAgentTool[] = [];
-    for (const { name: serverName, policy } of await this.mcp.policies.listEnabled()) {
-      for (const remoteName of policy.allowedTools) {
-        tools.push(builder(`mcp__${serverName}__${remoteName}`, remoteName,
-          `Allowlisted MCP tool ${remoteName} on ${serverName}`, { type: "object", additionalProperties: true },
-          async (args) => await this.mcp!.invoker.invokeServer(serverName, remoteName, args)));
-      }
-    }
-    this.dynamicTools.set(conversationId, tools);
+    if (!this.mcp?.discovery) { this.mcpTools.delete(conversationId); return; }
+    const discovery = this.mcp.discovery;
+    const enabled = await this.mcp.policies.listEnabled();
+    discovery.retain(enabled.map(({ name }) => name));
+    const perServer = await Promise.all(enabled.map(async ({ name: serverName, policy }) => {
+      const discovered = await discovery.effective(serverName, policy).catch((error: unknown) => {
+        this.logger.warn("MCP-инструменты сервера недоступны", {
+          server: serverName, code: error instanceof Error ? error.name : "unknown_error",
+        });
+        return [];
+      });
+      return discovered.map((remote): RegisteredTool => ({
+        name: `mcp__${serverName}__${remote.name}`,
+        label: remote.name,
+        description: neutralizeUntrusted(`[MCP ${serverName}] ${remote.description || remote.name}`),
+        parameters: neutralizeUntrusted(remote.inputSchema),
+        source: "mcp",
+        group: `mcp:${serverName}`,
+        exposure: "deferred",
+        // Ответ MCP-сервера пишет третья сторона: модель получает его
+        // в конверте недоверенного содержимого.
+        execute: async (args) => untrustedResult(
+          `mcp:${serverName}`,
+          await this.mcp!.invoker.invokeServer(serverName, remote.name, args),
+        ),
+      }));
+    }));
+    this.mcpTools.set(conversationId, perServer.flat());
   }
 
   private async context(conversationId: string): Promise<AgentRuntimeContext> {
@@ -363,16 +312,6 @@ export class AgentToolFactory {
   }
 }
 
-function result(value: unknown) {
-  const serialized =
-    typeof value === "string" ? value : JSON.stringify(value, null, 2);
-  return {
-    content: [{ type: "text" as const, text: serialized }],
-    details: value,
-  };
-}
-
-
 /**
  * Последствие вызова — для подтверждения действия человеком.
  *
@@ -395,6 +334,11 @@ const TOOL_RISK: Readonly<Record<string, ToolRisk>> = Object.freeze({
   // наблюдаемые факты. Спрашивать за неё подтверждение значило бы
   // требовать разрешения на вопрос «что у меня с памятью».
   inspect_eva_runtime: "read",
+  // Поиск и чтение страниц ничего не меняют ни у человека, ни снаружи:
+  // тратят только квоту поиска. Для делегирования это важно — рабочему
+  // агенту исследования достаются инструменты с риском `read`.
+  web_search: "read",
+  web_read: "read",
   get_subscription_status: "read",
   knowledge_search: "read",
   get_goal_program_context: "read",
@@ -413,6 +357,21 @@ const TOOL_RISK: Readonly<Record<string, ToolRisk>> = Object.freeze({
   osint_search_entity: "read",
   osint_cancel: "low_risk_write",
   osint_delete: "destructive",
+  // Мосты к отложенным инструментам сами ничего не меняют. Риск вызова
+  // через `tool_call` считается по настоящему инструменту
+  // (`unwrapBridgeCall`), а не по мосту.
+  [TOOL_SEARCH_NAME]: "read",
+  [TOOL_DESCRIBE_NAME]: "read",
+  // Браузер только читает: запросы с методом, отличным от GET, сервис
+  // браузера отменяет, в поля пароля и карты не вводит. Нажатие и ввод
+  // меняют лишь вкладку этого разговора — обычная запись без согласия.
+  browser_open: "read",
+  browser_snapshot: "read",
+  browser_scroll: "read",
+  browser_back: "read",
+  browser_close: "read",
+  browser_click: "low_risk_write",
+  browser_type: "low_risk_write",
 });
 
 const TOOL_APPROVAL_CATEGORY: Readonly<Record<string, MandatoryApprovalCategory>> = Object.freeze({
@@ -426,6 +385,9 @@ export function toolRisk(name: string): ToolRisk {
   // Инструмент MCP-сервера обращается к чужой системе, и её последствие
   // отсюда не видно: он всегда идёт через подтверждение.
   if (name.startsWith("mcp__")) return "external_side_effect";
+  // Мост без развёрнутой цели оценивается по худшему случаю: если
+  // разворот где-то не случился, подтверждение спросится, а не пропустится.
+  if (name === TOOL_CALL_NAME) return "destructive";
   return TOOL_RISK[name] ?? "low_risk_write";
 }
 

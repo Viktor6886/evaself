@@ -209,3 +209,35 @@ test("/metrics закрыт тем же внутренним ключом, чт�
     await app.close();
   }
 });
+
+test("инструменты в /metrics: вызовы, поиск, MCP, браузер и субагенты — без имён и адресов", async () => {
+  const { recordToolCall, recordToolSearch, recordMcpDiscovery, recordBrowserOperation, recordDelegation, resetToolMetrics } =
+    await import("../dist/tools/tool-metrics.js");
+  resetToolMetrics();
+  recordToolCall("mcp", "bridge", "ok", 120);
+  recordToolCall("product", "direct", "error", 30);
+  recordToolSearch("hit");
+  recordToolSearch("empty");
+  recordMcpDiscovery("ok", 250);
+  recordBrowserOperation("open", "blocked", 15);
+  recordDelegation("web", "completed", 9_000);
+  const text = await new MetricsCollector({
+    db: withTenantScopes({ query: async (sql: string) => await CANNED(sql) }) as never,
+    sessions: () => ({ active: 0, idle: 0 }),
+    locks: () => ({ held: 0, queued: 0 }),
+    poolStats: () => ({ total: 1, idle: 1, waiting: 0 }),
+    version: "0.3.0",
+    turnLifecycleEnabled: true,
+    delegation: () => ({ active: 2, queued: 1 }),
+  }).render();
+  assert.match(text, /eva_tool_calls_total\{source="mcp",path="bridge",outcome="ok"\} 1/);
+  assert.match(text, /eva_tool_calls_total\{source="product",path="direct",outcome="error"\} 1/);
+  assert.match(text, /eva_tool_call_duration_ms_sum\{source="mcp"\} 120/);
+  assert.match(text, /eva_tool_search_total\{outcome="empty"\} 1/);
+  assert.match(text, /eva_mcp_discovery_total\{outcome="ok"\} 1/);
+  assert.match(text, /eva_browser_operations_total\{operation="open",outcome="blocked"\} 1/);
+  assert.match(text, /eva_delegation_runs_total\{role="web",outcome="completed"\} 1/);
+  assert.match(text, /eva_delegation_subagents\{state="active"\} 2/);
+  assert.doesNotMatch(text, /mcp__|https?:\/\//, "ни имён MCP-инструментов, ни адресов");
+  resetToolMetrics();
+});

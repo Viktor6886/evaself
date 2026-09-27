@@ -89,6 +89,7 @@ for line in problems:
 
 audit_npm eva-agent-service
 audit_npm admin-ui
+audit_npm browser-service
 
 echo "== pip-audit: media-service"
 if with_retry 600 python3 -m pip_audit --strict --requirement "$REPO_ROOT/media-service/requirements.txt"; then

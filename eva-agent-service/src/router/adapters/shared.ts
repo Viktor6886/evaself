@@ -29,6 +29,9 @@ const TRANSPORT_KEYS: ReadonlySet<string> = new Set([
   // Кэш промпта — свойство обращения, а не параметр вывода. Провайдеру
   // эти ключи отправлять нельзя: строгий разбор тела ответит 400.
   "prompt_cache", "prompt_cache_ttl",
+  // Манифест провайдера — как к нему обращаться, а не что просить у
+  // модели (`../provider-manifests.ts`).
+  "provider_manifest", "openai_compat",
 ]);
 
 /**

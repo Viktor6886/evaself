@@ -140,3 +140,54 @@ test("знаменатель «нашли N из M» приходит из ка�
   );
   assert.match(doctor, /skills\.get\("expected"\)/);
 });
+
+test("структура навыка: короткий SKILL.md, справка и заготовки по ссылке, ничего исполняемого", async () => {
+  const root = await catalog({
+    good: `${skill("good")}\nПодробности — \`references/detail.md\`, заготовка — \`templates/form.md\`.\n`,
+    long: `${skill("long")}${"строка\n".repeat(260)}`,
+    orphan: skill("orphan"),
+    broken: `${skill("broken")}\nСм. references/missing.md\n`,
+    shell: `${skill("shell")}\nТекущая дата: !\`date\`\n`,
+    scripted: skill("scripted"),
+  });
+  await mkdir(join(root, "good", "references"), { recursive: true });
+  await mkdir(join(root, "good", "templates"), { recursive: true });
+  await writeFile(join(root, "good", "references", "detail.md"), "# Подробно\n", "utf8");
+  await writeFile(join(root, "good", "templates", "form.md"), "# Форма\n", "utf8");
+  await mkdir(join(root, "orphan", "references"), { recursive: true });
+  await writeFile(join(root, "orphan", "references", "forgotten.md"), "# Никто не найдёт\n", "utf8");
+  await mkdir(join(root, "scripted", "scripts"), { recursive: true });
+  await writeFile(join(root, "scripted", "notes.txt"), "x", "utf8");
+
+  const found = await readProjectSkills(root);
+  const good = found.skills.find((entry) => entry.name === "good")!;
+  assert.deepEqual(good.references, ["detail.md"]);
+  assert.deepEqual(good.templates, ["form.md"]);
+  const reasons = (name: string) => found.problems.filter((problem) => problem.skill === name).map((problem) => problem.reason);
+  assert.deepEqual(reasons("good"), []);
+  assert.match(reasons("long")[0]!, /длиннее 200 строк/);
+  assert.deepEqual(reasons("orphan"), ["не упомянут в SKILL.md: references/forgotten.md"]);
+  assert.deepEqual(reasons("broken"), ["битая ссылка: references/missing.md"]);
+  assert.match(reasons("shell")[0]!, /встроенная команда оболочки/);
+  assert.deepEqual(reasons("scripted").sort(), [
+    "каталог scripts/ запрещён: навык не исполняет код",
+    "лишнее в каталоге навыка: notes.txt (разрешены references/ и templates/)",
+  ]);
+});
+
+test("длинный навык разнесён по справке без потери текста", async (context) => {
+  const found = await readProjectSkills(REPO_SKILLS);
+  if (!found.available) {
+    context.skip("каталог навыков вне образа; проверяется на репозитории");
+    return;
+  }
+  const presence = found.skills.find((entry) => entry.name === "relational-presence");
+  assert.ok(presence && presence.lines <= 200, "SKILL.md короткий");
+  assert.ok(presence.references.length >= 4);
+  const journaling = found.skills.find((entry) => entry.name === "journaling-reflection");
+  assert.deepEqual(journaling?.templates, ["period-review.md"]);
+  // Границы привязанности читаются при каждом открытии навыка, а не по ссылке.
+  const body = readFileSync(join(REPO_SKILLS, "relational-presence", "SKILL.md"), "utf8");
+  assert.match(body, /Запрещённые способы удержания/);
+  assert.ok(existsSync(join(REPO_SKILLS, "relational-presence", "references", "quality-check.md")));
+});

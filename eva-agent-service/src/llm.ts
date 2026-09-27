@@ -22,6 +22,7 @@ import {
   type CapabilityProbeResult,
   type ProbeStatus,
 } from "./llm/capability-probe.js";
+import { openAiCompatHeaders, resolveOpenAiCompat, validateOpenAiCompat } from "./router/provider-manifests.js";
 
 export interface LlmProviderInput {
   name: string;
@@ -223,7 +224,7 @@ export async function probeGeminiProvider(
 }
 
 export async function probeOpenAiProvider(
-  input: { baseUrl: string; apiKey: string; timeoutMs: number },
+  input: { baseUrl: string; apiKey: string; timeoutMs: number; headers?: Record<string, string> },
   fetcher: typeof fetch = fetch,
 ): Promise<ProviderProbe> {
   const controller = new AbortController();
@@ -233,10 +234,10 @@ export async function probeOpenAiProvider(
   try {
     const response = await fetcher(modelsUrl, {
       method: "GET",
-      headers: {
-        Accept: "application/json",
-        Authorization: `Bearer ${input.apiKey}`,
-      },
+      // Заголовок ключа — по манифесту провайдера, если его передали.
+      headers: input.headers
+        ? { ...input.headers, Accept: "application/json" }
+        : { Accept: "application/json", Authorization: `Bearer ${input.apiKey}` },
       signal: controller.signal,
     });
 
@@ -341,7 +342,10 @@ export class LlmManager {
     this.probeProvider = overrides.probeProvider
       ?? ((provider, apiKey) => provider.protocol === "openai-compatible"
         || provider.protocol === "openai-responses"
-        ? probeOpenAiProvider({ baseUrl: provider.base_url, apiKey, timeoutMs: this.config.llmProbeTimeoutMs })
+        ? probeOpenAiProvider({
+          baseUrl: provider.base_url, apiKey, timeoutMs: this.config.llmProbeTimeoutMs,
+          headers: openAiCompatHeaders(resolveOpenAiCompat(provider.base_url, provider.additional_parameters ?? {}), apiKey),
+        })
         : provider.protocol === "gemini-compatible"
         ? probeGeminiProvider({ baseUrl: provider.base_url, apiKey, timeoutMs: this.config.llmProbeTimeoutMs })
         : Promise.resolve({
@@ -1205,6 +1209,8 @@ function validateInput(raw: LlmProviderInput, requireKey: boolean) {
   if (!additional || Array.isArray(additional) || typeof additional !== "object") {
     throw badRequest("additional_parameters должен быть JSON-объектом");
   }
+  const compatProblem = validateOpenAiCompat(additional as Record<string, unknown>);
+  if (compatProblem) throw badRequest(compatProblem);
 
   return {
     name,

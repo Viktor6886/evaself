@@ -84,6 +84,7 @@ jobs:
       prompt_only: ${{ steps.detect.outputs.prompt_only }}
       media: ${{ steps.detect.outputs.media }}
       osint: ${{ steps.detect.outputs.osint }}
+      browser: ${{ steps.detect.outputs.browser }}
       adminui: ${{ steps.detect.outputs.adminui }}
       webapp: ${{ steps.detect.outputs.webapp }}
     steps:
@@ -1144,6 +1145,76 @@ jobs:
       - name: osint-worker не затронут
         if: needs.changes.outputs.osint != 'true'
         run: echo "osint-worker/ не изменялся — проверять нечего"
+
+  # ===================================================================
+  # browser-service
+  # ===================================================================
+  # Тесты идут в стадии test образа: настоящий Chromium образа
+  # Playwright, настоящий прокси, локальный сайт. Там же проверяется, что
+  # рантайм без BROWSER_SERVICE_TOKEN в production не стартует, а с ним
+  # отвечает на /health и не пускает без ключа.
+  browser-service:
+    name: browser-service (Playwright, в образе)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    needs: changes
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+        if: needs.changes.outputs.browser == 'true'
+
+      - name: Typecheck and tests (docker build --target test)
+        if: needs.changes.outputs.browser == 'true'
+        run: |
+          . ./versions.env
+          docker buildx build --load --target test -t evaself/browser-service:test \
+            --cache-from type=gha,scope=browser --cache-to type=gha,mode=max,scope=browser \
+            --build-arg PLAYWRIGHT_BASE_IMAGE="$PLAYWRIGHT_BASE_IMAGE" \
+            --build-arg PLAYWRIGHT_BASE_VERSION="$PLAYWRIGHT_BASE_VERSION" browser-service
+
+      - name: Runtime image refuses to start without a token and guards its API
+        if: needs.changes.outputs.browser == 'true'
+        run: |
+          . ./versions.env
+          docker buildx build --load --target runtime -t evaself/browser-service:ci \
+            --cache-from type=gha,scope=browser \
+            --build-arg PLAYWRIGHT_BASE_IMAGE="$PLAYWRIGHT_BASE_IMAGE" \
+            --build-arg PLAYWRIGHT_BASE_VERSION="$PLAYWRIGHT_BASE_VERSION" browser-service
+          if docker run --rm -e EVA_ENV=production evaself/browser-service:ci \
+            node -e 'import("./dist/config.js").then(m => m.loadConfig())' 2>/dev/null; then
+            echo "::error::browser-service принял production без BROWSER_SERVICE_TOKEN"; exit 1
+          fi
+          docker run -d --name browser --read-only --tmpfs /tmp --shm-size 1g --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            -e EVA_ENV=production -e BROWSER_SERVICE_TOKEN=ci-token-0123456789abcdef evaself/browser-service:ci
+          ready=false
+          for _ in $(seq 1 30); do
+            if docker exec browser node -e "fetch('http://127.0.0.1:8098/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"; then
+              ready=true; break
+            fi
+            sleep 2
+          done
+          if [ "$ready" != true ]; then
+            docker logs browser 2>&1 | tail -30
+            echo "::error::browser-service не ответил на /health"; exit 1
+          fi
+          docker exec browser node -e "
+            fetch('http://127.0.0.1:8098/v1/sessions').then(async (r) => {
+              if (r.status !== 401) { console.error('без ключа ответ', r.status); process.exit(1); }
+              const blocked = await fetch('http://127.0.0.1:8098/v1/sessions/ci-session-1/open', {
+                method: 'POST',
+                headers: { 'x-browser-key': 'ci-token-0123456789abcdef', 'content-type': 'application/json' },
+                body: JSON.stringify({ owner: 'ci-owner-0001', url: 'http://169.254.169.254/latest/meta-data' }),
+              });
+              const body = await blocked.json();
+              if (blocked.status !== 403 || body.error !== 'blocked_url') { console.error('SSRF', blocked.status, body); process.exit(1); }
+              console.log('browser-service runtime: ok');
+            }).catch((e) => { console.error(e); process.exit(1); });"
+          docker rm -f browser >/dev/null
+
+      - name: browser-service не затронут
+        if: needs.changes.outputs.browser != 'true'
+        run: echo "browser-service/ не изменялся — проверять нечего"
 
   # ===================================================================
   # osint-harvester и osint-spiderfoot

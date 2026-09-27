@@ -74,6 +74,8 @@ export interface ResearchIssues {
   searchFailed: number;
   readFailed: number;
   extractFailed: number;
+  /** Факты субагентов, чью цитату или адрес не удалось подтвердить. */
+  unverified?: number;
 }
 
 export interface ResearchReport {
@@ -87,6 +89,8 @@ export interface ResearchReport {
   checkedAt: string;
   memoryWritten: false;
   issues: ResearchIssues;
+  /** Как собран отчёт: конвейером или субагентами Letta. */
+  method?: "pipeline" | "delegated";
 }
 
 interface Dependencies {

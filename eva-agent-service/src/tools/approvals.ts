@@ -380,6 +380,37 @@ export class ApprovalService {
     });
   }
 
+  /**
+   * Проверка согласия в момент выполнения вызова через мост `tool_call`.
+   *
+   * Подтверждение обычного вызова спрашивает SDK до выполнения. Мост
+   * добавляет вторую, независимую границу: инструмент, требующий
+   * согласия, выполняется только при записанном согласии на этот
+   * инструмент с этими аргументами в этом conversation. Если запрос
+   * согласия по какой-то причине не состоялся, мост откажет, а не
+   * выполнит действие молча.
+   */
+  async authorizeExecution(input: {
+    userId: number; conversationId: string; toolName: string; args: unknown;
+    risk: ToolRisk; category?: MandatoryApprovalCategory;
+  }): Promise<"allow" | "deny" | "approval_missing"> {
+    if (!this.enabled) return "allow";
+    const policy = await this.evaluatePolicy({
+      userId: input.userId, toolName: input.toolName, risk: input.risk, sessionId: null,
+      actorAllowed: true, toolAllowed: true, category: input.category,
+    });
+    if (policy !== "approval_required") return policy;
+    const approved = await this.scoped(input.userId, async () => await this.db.query(
+      `SELECT 1 FROM tool_approvals
+        WHERE user_id = $1 AND conversation_id = $2 AND tool_name = $3
+          AND argument_fingerprint = $4
+          AND status IN ('approved_once', 'approved_session')
+        LIMIT 1`,
+      [input.userId, input.conversationId, input.toolName, fingerprintApprovalArguments(input.args)],
+    ));
+    return approved.rows.length > 0 ? "allow" : "approval_missing";
+  }
+
   async sdkDecision(userId: number, sdkRequestId: string): Promise<ApprovalDecision | null> {
     const row = await this.lookup(userId, sdkRequestId);
     if (!row || row.status === "pending") return null;
