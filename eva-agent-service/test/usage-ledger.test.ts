@@ -17,7 +17,15 @@ interface LedgerEvent {
 
 function fakeLedgerDb(seen = new Set<string>()) {
   const calls: Array<{ sql: string; values: unknown[]; events: LedgerEvent[] }> = [];
+  const scopes: Array<{ userId?: number; label?: string }> = [];
   const db = {
+    async withUserScope<T>(
+      scope: { userId?: number; label?: string },
+      work: () => Promise<T>,
+    ): Promise<T> {
+      scopes.push(scope);
+      return await work();
+    },
     async query(sql: string, values: unknown[]) {
       const events = JSON.parse(String(values[0] ?? "[]")) as LedgerEvent[];
       calls.push({ sql, values, events });
@@ -30,7 +38,7 @@ function fakeLedgerDb(seen = new Set<string>()) {
       return { rows: [{ recorded: String(recorded) }], rowCount: 1 };
     },
   } as unknown as Database;
-  return { db, calls };
+  return { db, calls, scopes };
 }
 
 test("message usage is idempotent by stable event key", async () => {
@@ -78,7 +86,7 @@ test("aggregated user messages are written in one atomic batch", async () => {
 });
 
 test("outbound automatic messages use the same accounting path", async () => {
-  const { db, calls } = fakeLedgerDb();
+  const { db, calls, scopes } = fakeLedgerDb();
   const recorded = await recordMessageUsage(db, {
     userId: 7,
     metric: "messages_out",
@@ -93,6 +101,13 @@ test("outbound automatic messages use the same accounting path", async () => {
   assert.equal(event.metric, "messages_out");
   assert.equal(event.source, "scheduled_task");
   assert.equal(event.idempotency_key, "task:9:1720000000000:result:usage");
+  // inherit: вызов изнутри хода того же человека продолжает его область,
+  // а фоновая доставка без области получает свою — как у помощников db.ts.
+  assert.deepEqual(scopes, [{
+    userId: 7,
+    label: "subscriptions.usage_ledger",
+    inherit: true,
+  }], "фоновые сообщения обязаны входить в tenant scope владельца");
 });
 
 test("one usage batch cannot mix users", async () => {
@@ -117,7 +132,12 @@ test("one usage batch cannot mix users", async () => {
 });
 
 test("invalid usage amount is rejected before SQL", async () => {
-  const db = { async query() { throw new Error("must not query"); } } as unknown as Database;
+  const db = {
+    async withUserScope<T>(_scope: unknown, work: () => Promise<T>): Promise<T> {
+      return await work();
+    },
+    async query() { throw new Error("must not query"); },
+  } as unknown as Database;
   await assert.rejects(
     recordMessageUsage(db, {
       userId: 1,
@@ -128,4 +148,20 @@ test("invalid usage amount is rejected before SQL", async () => {
     }),
     /amount/,
   );
+});
+
+test("usage batch refuses to run inside another user's ambient scope", async () => {
+  const { runInScope, userScope } = await import("../dist/tenancy/scope.js");
+  const { db, calls } = fakeLedgerDb();
+  const input = { userId: 7, metric: "messages" as const, source: "telegram_user", idempotencyKey: "scope:1" };
+  // Ход человека 5: расход человека 7 внутри него — нарушение границы,
+  // которое проверка SQL для jsonb_to_recordset не увидела бы.
+  await assert.rejects(
+    runInScope(userScope({ userId: 5, label: "telegram.turn" }), async () => await recordMessageUsageBatch(db, [input])),
+    { name: "TenantViolationError" },
+  );
+  assert.equal(calls.length, 0, "чужой расход не дошёл до базы");
+  // Тот же человек и отсутствие области — как прежде.
+  assert.equal(await runInScope(userScope({ userId: 7, label: "telegram.turn" }), async () => await recordMessageUsageBatch(db, [input])), 1);
+  assert.equal(await recordMessageUsageBatch(db, [{ ...input, idempotencyKey: "scope:2" }]), 1);
 });
