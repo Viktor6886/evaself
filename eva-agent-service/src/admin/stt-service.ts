@@ -33,7 +33,7 @@ import {
 } from "./errors.js";
 import type { SecretStore } from "./secret-store.js";
 
-export const STT_USE_CASES = ["telegram_voice", "webapp_voice_message", "webapp_live"] as const;
+export const STT_USE_CASES = ["telegram_voice", "telegram_audio", "webapp_voice_message", "webapp_live"] as const;
 export type SttUseCase = (typeof STT_USE_CASES)[number];
 
 export const STT_PROVIDERS = [
