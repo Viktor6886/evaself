@@ -1,6 +1,7 @@
 import type { Database } from "../db.js";
 
 import type { JobContext } from "../jobs/runtime.js";
+import { QUEUE_TIMING, type JobTimingPolicy } from "../jobs/policy.js";
 import type { LlmRouterClient } from "../router/client.js";
 import { structuredStrict } from "../knowledge/structured-output.js";
 import {
@@ -13,6 +14,66 @@ import { SearxCrawlAdapters, ResearchRepository } from "./adapters.js";
 import { ResearchOrchestrator, type ResearchReport } from "./orchestrator.js";
 import type { DelegatedResearch } from "./delegation.js";
 
+/**
+ * Срок, который конвейер исследования получал один, — мягкий срок класса
+ * research. После неудачного делегирования он должен остаться целиком.
+ */
+export const RESEARCH_PIPELINE_RESERVE_MS = QUEUE_TIMING.research.softTimeoutMs;
+/** Меньше этого субагенты не успеют ни одной фазы — делегирование пропускается. */
+const MIN_DELEGATION_BUDGET_MS = 30_000;
+/** Последовательные фазы делегирования: поиск ∥ документы → страницы → сводка. */
+const DELEGATION_PHASES = 3;
+/** Зазор между мягким сроком и жёстким дедлайном класса. */
+const HARD_DEADLINE_MARGIN_MS = 60_000;
+
+/**
+ * Сроки задания исследования при включённом делегировании.
+ *
+ * Мягкий срок класса research рассчитан на конвейер. На том же сроке
+ * субагенты с тремя последовательными фазами обрывались сигналом
+ * задания раньше, чем запускался запасной конвейер, и исследование
+ * кончалось отменой вместо отчёта. Поэтому срок задания — конвейер плюс
+ * бюджет делегирования, а бюджет ограничен так, чтобы мягкий срок
+ * остался раньше жёсткого дедлайна.
+ */
+export function researchJobTiming(delegationTimeoutMs: number): Partial<JobTimingPolicy> {
+  const base = QUEUE_TIMING.research;
+  const budget = Math.min(
+    DELEGATION_PHASES * delegationTimeoutMs,
+    base.hardDeadlineMs - base.softTimeoutMs - HARD_DEADLINE_MARGIN_MS,
+  );
+  return { softTimeoutMs: base.softTimeoutMs + budget };
+}
+
+/**
+ * Выполнить работу в своём бюджете внутри срока задания.
+ *
+ * Свой срок истёк или работа отказала — `null`, и вызывающий переходит к
+ * запасному пути. Прерван сам сигнал задания (отмена, потеря аренды,
+ * дедлайн) — отказ пробрасывается: начинать сначала другим способом
+ * работу, которую отменили, нельзя.
+ */
+export async function withinBudget<T>(
+  signal: AbortSignal,
+  budgetMs: number,
+  work: (signal: AbortSignal) => Promise<T>,
+): Promise<T | null> {
+  const own = new AbortController();
+  const follow = () => own.abort(signal.reason);
+  if (signal.aborted) follow();
+  else signal.addEventListener("abort", follow, { once: true });
+  const timer = setTimeout(() => own.abort(new Error("delegation_budget_exceeded")), budgetMs);
+  try {
+    return await work(own.signal);
+  } catch (error) {
+    if (signal.aborted) throw error;
+    return null;
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener("abort", follow);
+  }
+}
+
 export class ResearchJobWorker {
   /**
    * Исследование субагентами, если оно включено. Ничего не нашедшее
@@ -20,16 +81,17 @@ export class ResearchJobWorker {
    * конвейеру: человек получает отчёт, а не отказ. Отмена задания —
    * не повод начинать сначала другим способом.
    */
-  private async delegated(input: { userId: number; conversationId: string; query: string; requestId: string; signal: AbortSignal }): Promise<ResearchReport | null> {
+  private async delegated(input: { userId: number; conversationId: string; query: string; requestId: string; signal: AbortSignal; timing: JobTimingPolicy }): Promise<ResearchReport | null> {
     const delegation = this.options.delegation;
     if (!delegation?.enabled()) return null;
-    try {
+    // Делегированию — всё, что задание получило сверх срока конвейера:
+    // конвейер обязан успеть и после неудачного делегирования.
+    const budgetMs = input.timing.softTimeoutMs - RESEARCH_PIPELINE_RESERVE_MS;
+    if (budgetMs < MIN_DELEGATION_BUDGET_MS) return null;
+    return await withinBudget(input.signal, budgetMs, async (signal) => {
       const research = await delegation.create({ userId: input.userId, conversationId: input.conversationId, requestId: input.requestId });
-      return await research.run({ userId: input.userId, conversationId: input.conversationId, query: input.query, reportId: input.requestId, signal: input.signal });
-    } catch (error) {
-      if (input.signal.aborted) throw error;
-      return null;
-    }
+      return await research.run({ userId: input.userId, conversationId: input.conversationId, query: input.query, reportId: input.requestId, signal });
+    });
   }
 
   constructor(
@@ -102,7 +164,7 @@ export class ResearchJobWorker {
         maxPageBytes: Number(process.env.EVA_RESEARCH_MAX_PAGE_BYTES ?? 512_000),
         maxConcurrency: Number(process.env.EVA_RESEARCH_CONCURRENCY ?? 4),
       });
-      const report=await this.delegated({userId,conversationId:row.conversation_id,query:row.query,requestId,signal:context.signal})
+      const report=await this.delegated({userId,conversationId:row.conversation_id,query:row.query,requestId,signal:context.signal,timing:context.timing})
         ?? await orchestrator.run({userId,conversationId:row.conversation_id,query:row.query,signal:context.signal,reportId:requestId});
       const repository=new ResearchRepository(this.db);await this.db.transaction(async client=>await repository.saveWithCompletion(client,reportResult??report,{requestId,chatId:Number(row.chat_id)}));
     }); } catch(error) {

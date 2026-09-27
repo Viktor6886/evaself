@@ -18,6 +18,8 @@
  * инструменты.
  */
 
+import { createHash } from "node:crypto";
+
 import type { AgentRuntimeContext } from "../db.js";
 import type { JsonObject } from "./tool-kit.js";
 
@@ -64,6 +66,23 @@ export const BRIDGE_TOOL_NAMES: ReadonlySet<string> = new Set([
  */
 const DIRECT_NAME = /^[A-Za-z0-9_-]{1,64}$/;
 const DEFERRED_NAME = /^[A-Za-z0-9_.-]{1,128}$/;
+
+/**
+ * Имя отложенного инструмента, выставленного прямо (поиск выключен).
+ *
+ * MCP разрешает в имени точку, а приставка `mcp__<сервер>__` уводит
+ * длинное имя за 64 знака — такой инструмент провайдер не примет
+ * функцией, и без псевдонима он молча выпадал из сессии. Обратное
+ * отображение не нужно: вызов исполняет замыкание инструмента, которое
+ * знает настоящее имя. Хеш полного имени держит псевдонимы `a.b` и `a_b`
+ * разными.
+ */
+export function directAlias(name: string): string {
+  if (DIRECT_NAME.test(name)) return name;
+  const safe = name.replace(/[^A-Za-z0-9_-]/g, "_");
+  const suffix = createHash("sha256").update(name).digest("hex").slice(0, 8);
+  return `${safe.slice(0, 64 - suffix.length - 1)}_${suffix}`;
+}
 
 export interface ToolSourceProvider {
   /** Имя источника: одно на реестр. */
@@ -118,11 +137,15 @@ export class ToolRegistry {
         const reject = (reason: RejectedTool["reason"]) =>
           assembly.rejected.push({ name: tool.name, source: tool.source, reason });
         if (BRIDGE_TOOL_NAMES.has(tool.name) && tool.source !== "bridge") { reject("reserved_name"); continue; }
-        if (!(exposure === "direct" ? DIRECT_NAME : DEFERRED_NAME).test(tool.name)) { reject("invalid_name"); continue; }
-        if (names.has(tool.name)) { reject("duplicate_name"); continue; }
-        names.add(tool.name);
+        // Отложенный инструмент проверяется по правилам отложенного имени
+        // в любом режиме; выставленный прямо получает псевдоним функции.
+        const deferredByNature = tool.exposure === "deferred";
+        if (!(deferredByNature ? DEFERRED_NAME : DIRECT_NAME).test(tool.name)) { reject("invalid_name"); continue; }
+        const name = deferredByNature && exposure === "direct" ? directAlias(tool.name) : tool.name;
+        if (names.has(name)) { reject("duplicate_name"); continue; }
+        names.add(name);
         (exposure === "deferred" ? assembly.deferred : assembly.direct).push(
-          exposure === tool.exposure ? tool : { ...tool, exposure },
+          exposure === tool.exposure ? tool : { ...tool, name, exposure },
         );
       }
     }

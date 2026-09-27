@@ -229,3 +229,30 @@ test("без проверенных фактов — отказ, чтобы за
   assert.equal(extractJson("ответ: {\"a\": 1} конец")?.a, 1);
   assert.equal(extractJson("нет json"), null);
 });
+
+test("делегированию — свой бюджет: его срок уступает конвейеру, отмена задания — нет", async () => {
+  const { withinBudget, researchJobTiming, RESEARCH_PIPELINE_RESERVE_MS } = await import("../dist/research/worker.js");
+  const { timingFor } = await import("../dist/jobs/policy.js");
+  const hang = (signal: AbortSignal) => new Promise<never>((_resolve, reject) => {
+    signal.addEventListener("abort", () => reject(signal.reason as Error), { once: true });
+  });
+
+  // Истёк бюджет делегирования — null, а сигнал задания цел: конвейеру есть когда работать.
+  const job = new AbortController();
+  assert.equal(await withinBudget(job.signal, 20, hang), null);
+  assert.equal(job.signal.aborted, false);
+  // Делегирование ничего не нашло — тоже запасной путь.
+  assert.equal(await withinBudget(job.signal, 1_000, async () => { throw new DelegationError("no_facts"); }), null);
+  assert.equal(await withinBudget(job.signal, 1_000, async () => "отчёт"), "отчёт");
+  // Отменённое задание не начинают сначала другим способом.
+  const cancelled = new AbortController();
+  const running = withinBudget(cancelled.signal, 60_000, hang);
+  cancelled.abort(new Error("job_cancelled"));
+  await assert.rejects(running, /job_cancelled/);
+
+  // Срок задания: конвейер плюс три фазы субагентов, мягкий срок раньше жёсткого.
+  const defaults = researchJobTiming(180_000);
+  assert.equal(defaults.softTimeoutMs, RESEARCH_PIPELINE_RESERVE_MS + 420_000, "бюджет упирается в жёсткий дедлайн");
+  assert.doesNotThrow(() => timingFor("research", defaults));
+  assert.equal(researchJobTiming(20_000).softTimeoutMs, RESEARCH_PIPELINE_RESERVE_MS + 60_000);
+});
