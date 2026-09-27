@@ -491,6 +491,12 @@ const SHADOW_BUDGET_MS = 250;
 
 interface WorkflowProbe {
   sent: string[];
+  /** Файлы, отправленные человеку документом. */
+  documents: Array<{ filename: string; caption?: string; mimeType?: string; bytes: number }>;
+  /** Запросы DOCX расшифровки к media-service. */
+  docxRequests: Array<Record<string, unknown>>;
+  /** Что ушло в базу знаний. */
+  knowledgeUploads: Array<{ telegramId: number; name: string; mime: string; idempotencyKey?: string }>;
   /** Какой вид сообщения назван контексту. */
   messageSources: Array<string | undefined>;
   result: unknown;
@@ -582,6 +588,12 @@ async function runTelegramTurn(
     stt?: boolean;
     /** Флаг EVA_AUDIO_FILE_TRANSCRIPTS. */
     audioFileTranscripts?: boolean;
+    /** Приём в базу знаний включён (EVA_KNOWLEDGE_UPLOADS). */
+    knowledge?: boolean;
+    /** media-service не собирает DOCX. */
+    docxFails?: boolean;
+    /** Свой сервер Bot API вместо облачного. */
+    telegramApiBaseUrl?: string;
     /** Вложение вместо обычного текста. */
     attachment?: {
       message: Record<string, unknown>;
@@ -599,6 +611,9 @@ async function runTelegramTurn(
   const recordedMessageAt: Array<Date | null> = [];
   /** С каким пределом ходили за файлом. */
   const downloadLimits: Array<number | null> = [];
+  const documents: WorkflowProbe["documents"] = [];
+  const docxRequests: WorkflowProbe["docxRequests"] = [];
+  const knowledgeUploads: WorkflowProbe["knowledgeUploads"] = [];
   /** Что именно ушло в Letta: строка или список частей. */
   const lettaMessages: unknown[] = [];
   /** Какой вид сообщения назван контексту. */
@@ -749,6 +764,11 @@ async function runTelegramTurn(
       if (options.voiceSendFails) throw new Error("Telegram отклонил голосовое сообщение");
       order.push("voice");
     },
+    sendDocument: async (
+      _chatId: number, bytes: Uint8Array, filename: string, sendOptions: { caption?: string; mimeType?: string } = {},
+    ) => {
+      documents.push({ filename, caption: sendOptions.caption, mimeType: sendOptions.mimeType, bytes: bytes.length });
+    },
     sendPlainMessage: async (_chatId: number, text: string) => {
       sent.push(text);
       return [{ message_id: 7_001 }];
@@ -865,6 +885,7 @@ async function runTelegramTurn(
       // него взяться неоткуда.
       domains: { app: options.appDomain ?? "" },
       audioFileTranscriptsEnabled: options.audioFileTranscripts ?? false,
+      ...(options.telegramApiBaseUrl ? { telegramApiBaseUrl: options.telegramApiBaseUrl } : {}),
     } as never,
     db as never,
     letta as never,
@@ -896,12 +917,28 @@ async function runTelegramTurn(
     { notifyMessages: async (telegramId: number) => { quotaNotifications.push(telegramId); } } as never,
   );
 
+  if (options.knowledge) {
+    workflow.setKnowledgeUploadService({
+      createFromStream: async (telegramId: number, input: { name: string; mime: string; stream: AsyncIterable<unknown>; idempotencyKey?: string }) => {
+        for await (const _chunk of input.stream) { /* поток дочитывается, как настоящим приёмом */ }
+        knowledgeUploads.push({ telegramId, name: input.name, mime: input.mime, idempotencyKey: input.idempotencyKey });
+        return { id: "upload-1", status: "queued" };
+      },
+    } as never);
+  }
+
   // Поддельный media-service: синтез занимает время, как настоящий, а
   // распознавание отвечает готовой расшифровкой.
   const originalFetch = globalThis.fetch;
   const transcribed: string[] = [];
   if (options.attachment || options.stt) {
     globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      if (String(input).includes("/transcript/docx")) {
+        docxRequests.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+        return options.docxFails
+          ? new Response("нет места", { status: 500 })
+          : new Response(new Uint8Array([80, 75, 3, 4, 1, 2]), { status: 200 });
+      }
       if (!String(input).includes("/stt/transcribe")) return await originalFetch(input as never, init);
       transcribed.push(String(init?.body ?? ""));
       if (options.sttMs) await new Promise((resolve) => setTimeout(resolve, options.sttMs));
@@ -954,6 +991,9 @@ async function runTelegramTurn(
   }
   return {
     sent,
+    documents,
+    docxRequests,
+    knowledgeUploads,
     order,
     result,
     elapsedMs: performance.now() - started,
@@ -1571,6 +1611,120 @@ test("аудиофайл больше 20 МБ получает понятный 
   assert.match(probe.sent.join("\n"), /20 МБ/);
   assert.deepEqual(probe.lettaMessages, []);
   assert.deepEqual(probe.result, { status: "ignored" });
+});
+
+test("аудиофайл с флагом: свой сценарий распознавания, DOCX человеку и расшифровка в базу знаний", async () => {
+  const probe = await runTelegramTurn(undefined, {
+    audioFileTranscripts: true,
+    knowledge: true,
+    // Статус показывается, только если распознавание дольше 600 мс.
+    sttMs: 650,
+    attachment: {
+      message: {
+        audio: { file_id: "mp3-docx", file_unique_id: "u-docx", file_name: "встреча: итоги?.mp3", mime_type: "audio/mpeg", file_size: 100, duration: 12 },
+      },
+      bytes: PNG_BYTES,
+    },
+  });
+  assert.equal(probe.transcribed.length, 1);
+  assert.equal(JSON.parse(probe.transcribed[0]!).use_case, "telegram_audio", "аудиофайл ушёл сценарием голосовых");
+  assert.equal(probe.docxRequests.length, 1);
+  assert.equal(probe.docxRequests[0]!.text, "расшифровка присланной записи");
+  assert.equal(probe.docxRequests[0]!.source_name, "встреча: итоги?.mp3");
+  assert.deepEqual(probe.documents.map((item) => item.filename), ["встреча_ итоги_ — расшифровка.docx"]);
+  assert.match(probe.documents[0]!.mimeType ?? "", /wordprocessingml/);
+  assert.deepEqual(probe.knowledgeUploads.map((item) => [item.name, item.idempotencyKey]), [
+    ["встреча_ итоги_ — расшифровка.docx", "telegram-audio:3001"],
+  ]);
+  const wrapped = probe.wrapped[0] ?? "";
+  assert.match(wrapped, /отправлена человеку файлом DOCX/);
+  assert.match(wrapped, /knowledge_search/);
+  assert.match(probe.sent.join("\n"), /полный текст в файле ниже/);
+});
+
+test("без приёма в базу знаний DOCX всё равно уходит, а сбой DOCX не срывает ход", async () => {
+  const withoutKnowledge = await runTelegramTurn(undefined, {
+    audioFileTranscripts: true,
+    attachment: { message: { audio: { file_id: "mp3-a", file_name: "a.mp3", file_size: 100 } }, bytes: PNG_BYTES },
+  });
+  assert.equal(withoutKnowledge.documents.length, 1);
+  assert.deepEqual(withoutKnowledge.knowledgeUploads, []);
+  assert.doesNotMatch(withoutKnowledge.wrapped[0] ?? "", /knowledge_search/);
+
+  const broken = await runTelegramTurn(undefined, {
+    audioFileTranscripts: true,
+    knowledge: true,
+    docxFails: true,
+    attachment: { message: { audio: { file_id: "mp3-b", file_name: "b.mp3", file_size: 100 } }, bytes: PNG_BYTES },
+  });
+  assert.deepEqual(broken.documents, []);
+  assert.deepEqual(broken.knowledgeUploads, [], "без DOCX в базу знаний сохранять нечего");
+  const wrapped = broken.wrapped[0] ?? "";
+  assert.match(wrapped, /расшифровка присланной записи/, "расшифровка должна дойти до Евы и без DOCX");
+  assert.doesNotMatch(wrapped, /Хранение:/);
+  assert.equal(broken.lettaMessages.length, 1);
+});
+
+test("голосовое и аудиофайл без флага распознаются сценарием голосовых и без DOCX", async () => {
+  for (const [message, flag] of [
+    [{ voice: { file_id: "v-1", file_unique_id: "v-1" } }, true],
+    [{ audio: { file_id: "mp3-off-2", file_name: "лекция.mp3", file_size: 100 } }, false],
+  ] as const) {
+    const probe = await runTelegramTurn(undefined, {
+      audioFileTranscripts: flag,
+      knowledge: true,
+      attachment: { message, bytes: PNG_BYTES },
+    });
+    assert.equal(JSON.parse(probe.transcribed[0]!).use_case, "telegram_voice");
+    assert.deepEqual(probe.documents, []);
+    assert.deepEqual(probe.docxRequests, []);
+    assert.deepEqual(probe.knowledgeUploads, []);
+  }
+});
+
+test("запись длиннее оставшихся минут не уходит на распознавание", async () => {
+  const store = new TurnStore();
+  const probe = await runTelegramTurn(lifecycle(store), {
+    audioFileTranscripts: true,
+    quota: [
+      { metric: "messages", remaining: 10 },
+      { metric: "voice_minutes", remaining: 3 },
+    ],
+    attachment: {
+      message: { audio: { file_id: "mp3-long", file_name: "лекция.mp3", file_size: 100, duration: 600 } },
+      bytes: PNG_BYTES,
+    },
+  });
+  assert.deepEqual(probe.result, { status: "ignored" });
+  assert.equal(probe.transcribed.length, 0, "десятиминутная запись ушла на распознавание при трёх минутах");
+  assert.match(probe.sent.join("\n"), /длиннее, чем осталось минут/);
+  assert.equal([...store.rows.values()][0]!.cancel_reason, "quota_voice");
+
+  // Запись, которая помещается в остаток, проходит как раньше.
+  const fits = await runTelegramTurn(undefined, {
+    audioFileTranscripts: true,
+    quota: [
+      { metric: "messages", remaining: 10 },
+      { metric: "voice_minutes", remaining: 3 },
+    ],
+    attachment: {
+      message: { audio: { file_id: "mp3-short", file_name: "a.mp3", file_size: 100, duration: 120 } },
+      bytes: PNG_BYTES,
+    },
+  });
+  assert.equal(fits.transcribed.length, 1);
+});
+
+test("свой сервер Bot API снимает облачный предел 20 МБ", async () => {
+  const probe = await runTelegramTurn(undefined, {
+    audioFileTranscripts: true,
+    telegramApiBaseUrl: "http://telegram-bot-api:8081",
+    attachment: {
+      message: { audio: { file_id: "big-local", file_name: "подкаст.mp3", file_size: 150 * 1024 * 1024 } },
+      bytes: PNG_BYTES,
+    },
+  });
+  assert.equal(probe.transcribed.length, 1, "файл со своего сервера Bot API отклонён облачным пределом");
 });
 
 test("медленный ASR редактирует один статус в transcript без record_voice", async () => {

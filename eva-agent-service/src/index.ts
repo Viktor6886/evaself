@@ -608,6 +608,9 @@ async function main(): Promise<void> {
     : null;
 
   const knowledgeUploads = jobs && config.knowledgeUploadsEnabled ? new KnowledgeUploadService(db,jobs.outbox,"/data/knowledge-uploads") : null;
+  // Расшифровка аудиофайла сохраняется тем же приёмом, что документ из
+  // Mini App: одно хранилище и один поиск на все материалы человека.
+  workflow.setKnowledgeUploadService(knowledgeUploads);
   const research = jobs && config.researchOrchestratorEnabled ? new ResearchEnqueuer(db,jobs.outbox,jobs.runs) : null;
   // Telegram id is a verified identity key. Resolution is the only cross-user
   // lookup and therefore runs in an explicitly named system scope; every
