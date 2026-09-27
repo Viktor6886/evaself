@@ -3,6 +3,41 @@
 Оперативное состояние работы. Единственный источник истины о том, где работа
 остановилась. Агент читает этот файл первым и обновляет его после каждого шага.
 
+## Перенос функций ветки codex/audio-transcript-docx — 2026-09-27
+
+Ветка: `claude/evaself-architecture-improvements-3d7d2s`. Статус: реализация
+и локальные проверки завершены; PR, CI и независимое ревью.
+
+Все функции ветки перенесены поверх реализации аудиофайлов из #352; новое
+для пользователя работает только при `EVA_AUDIO_FILE_TRANSCRIPTS`.
+
+- [x] media-service: нарезка длинной записи (`split_to_asr_wav`,
+  `MEDIA_ASR_CHUNK_SECONDS`), предел сценария по всей записи,
+  `POST /transcript/docx`, `EVA_TELEGRAM_API_BASE_URL` для скачивания.
+- [x] Сценарий STT `telegram_audio`: миграция 088 (номер 084 в main занят
+  OSINT) с копией цепочки голосовых, панель и admin-api.
+- [x] Агент: аудиофайл распознаётся сценарием `telegram_audio`; DOCX
+  человеку через outbox (`sendDocument`); при `EVA_KNOWLEDGE_UPLOADS` —
+  в базу знаний прежним приёмом, идемпотентно по апдейту.
+- [x] Навык `user-materials`, правило о материалах в `memory-hygiene`,
+  поправка `audio-transcripts`, `docs/stt.md`.
+- [x] Сверх ветки: предел 20 МБ только у облачного Bot API; запись длиннее
+  остатка минут не распознаётся.
+- Не перенесено как есть: включение `EVA_KNOWLEDGE_UPLOADS` по умолчанию
+  (eb82586) — флаги по правилам проекта выключены, включает человек.
+  Пределы media-service 200 МБ / 7200 с — только в `.env.example` для новых
+  установок, существующие `.env` не меняются.
+
+Проверки (2026-09-27):
+
+```
+eva-agent-service: npm test → PASS (1506, 0 fail, 8 skip — нужен PostgreSQL)
+eva-agent-service: npm run typecheck → PASS; npm run lint → PASS
+media-service: pytest → PASS (154, ffmpeg 7.1); ruff → PASS
+миграции на PostgreSQL 17 (pgvector 0.8.5): 3 прогона, откат и повтор → PASS; копия цепочки 088 → PASS
+python3 scripts/ci/assert-tenant-scope.py → PASS
+```
+
 ## Инструменты, браузер и субагенты по мотивам Hermes Agent — 2026-09-26
 
 Ветка: `claude/evaself-architecture-improvements-3d7d2s`. Статус: **выполнен**.
