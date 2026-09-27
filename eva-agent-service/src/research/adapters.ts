@@ -56,6 +56,7 @@ export class SearxCrawlAdapters {
     this.gateway = options.gateway ?? new OutboundGateway({
       allowlist: [new URL(searxUrl).hostname, new URL(crawlUrl).hostname],
       maxBodyBytes: 4 * 1024 * 1024,
+      timeoutMs: 20_000,
     });
     this.reader = options.reader ?? new Crawl4aiReader({
       baseUrl: crawlUrl,
@@ -66,24 +67,41 @@ export class SearxCrawlAdapters {
   }
 
   async search(query: string, signal: AbortSignal): Promise<Array<{ url: string; title: string; snippet?: string }>> {
+    return (await this.searchWithDiagnostics(query, signal)).results;
+  }
+
+  async searchWithDiagnostics(query: string, signal: AbortSignal): Promise<{
+    results: Array<{ url: string; title: string; snippet?: string }>;
+    unresponsiveEngines: string[];
+  }> {
     signal.throwIfAborted();
-    const url = new URL("search", this.searxUrl);
+    const url = new URL(`${this.searxUrl.replace(/\/+$/, "")}/search`);
     url.searchParams.set("q", query);
     url.searchParams.set("format", "json");
-    // Кириллический запрос — русская выдача: без подсказки движки отдают
-    // англоязычных тёзок и пропускают ВКонтакте и Одноклассники.
-    if (/\p{Script=Cyrillic}/u.test(query)) url.searchParams.set("language", "ru");
-    const response = await this.gateway.request(url.toString(), { signal });
+    // Как у обычного поиска: язык определяет SearXNG (default_lang=auto).
+    // Жёсткий language=ru отрезал редкие запросы и латинские профили.
+    const response = await this.gateway.request(url.toString(), {
+      signal,
+      headers: { accept: "application/json", "user-agent": "Evaself/1.0 (self-hosted)" },
+    });
     if (!response.ok) throw new Error("searx_search_failed");
-    const body = response.json<{ results?: Array<{ url?: string; title?: string; content?: string }> }>();
-    return (body.results ?? []).flatMap((item) =>
-      item.url
-        ? [{
-          url: item.url,
-          title: item.title ?? item.url,
-          ...(typeof item.content === "string" && item.content.trim() ? { snippet: item.content.slice(0, 2_000) } : {}),
-        }]
-        : []);
+    const body = response.json<{
+      results?: Array<{ url?: string; title?: string; content?: string }>;
+      unresponsive_engines?: Array<[string, string] | string>;
+    }>();
+    if (!body || !Array.isArray(body.results)) throw new Error("searx_invalid_response");
+    return {
+      results: body.results.flatMap((item) =>
+        typeof item?.url === "string"
+          ? [{
+            url: item.url,
+            title: typeof item.title === "string" ? item.title : item.url,
+            ...(typeof item.content === "string" && item.content.trim() ? { snippet: item.content.slice(0, 2_000) } : {}),
+          }]
+          : []),
+      unresponsiveEngines: (body.unresponsive_engines ?? [])
+        .map((item) => Array.isArray(item) ? item.join(": ") : String(item)).slice(0, 20),
+    };
   }
 
   async read(url: string, signal: AbortSignal, maxBytes: number): Promise<{

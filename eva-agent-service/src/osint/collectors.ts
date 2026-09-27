@@ -104,8 +104,6 @@ export interface Collector {
   collect(context: CollectorContext): Promise<CollectorOutput>;
 }
 
-const VERIFIER_SOURCES = ["whatsmyname", "sherlock"] as const;
-
 const skipped = (errorCode: string): CollectorOutput => ({ status: "skipped", errorCode, externalRequests: 0, sources: [] });
 
 function hostOf(url: string): string {
@@ -127,7 +125,7 @@ export class UsernameProfilesCollector implements Collector {
   readonly name = "maigret";
 
   constructor(
-    private readonly worker: Pick<OsintWorkerClient, "scanUsername" | "verifyProfiles">,
+    private readonly worker: Pick<OsintWorkerClient, "scanUsername">,
     private readonly options: { topSites: number; now?: () => Date } = { topSites: 300 },
   ) {}
 
@@ -136,37 +134,20 @@ export class UsernameProfilesCollector implements Collector {
   }
 
   reserve(remainingRequests: number): number {
-    return Math.max(0, remainingRequests);
+    // Один ник не забирает весь бюджет у остальных исходных данных и
+    // найденных ссылок; ошибка воркера списывает ту же верхнюю границу.
+    return Math.max(0, Math.min(this.options.topSites + 100, Math.floor(remainingRequests * 0.75)));
   }
 
   async collect({ target, signal, remainingRequests }: CollectorContext): Promise<CollectorOutput> {
     signal.throwIfAborted();
-    // Скан меньше десятка сайтов ничего не говорит, а верхнюю границу
-    // держит бюджет: одна проверка сайта — один внешний запрос.
-    const topSites = Math.min(this.options.topSites, remainingRequests);
+    const allowance = this.reserve(remainingRequests);
+    const topSites = Math.min(this.options.topSites, Math.floor(allowance * 0.7));
     if (topSites < 10) return skipped("osint_budget_exhausted");
-    const scan = await this.worker.scanUsername(target.normalized, { topSites });
-    let requests = scan.checked;
-    const hosts = [...new Set(scan.found.flatMap((profile) => {
-      const url = canonicalizeUrl(profile.url);
-      return url ? [hostOf(url)] : [];
-    }))];
-    let verifications: Awaited<ReturnType<OsintWorkerClient["verifyProfiles"]>> = [];
-    let verifyFailed = false;
-    // Проверка стоит запрос на каждый набор правил на каждый хост: хостов
-    // берётся столько, сколько помещается в остаток по обоим наборам.
-    const verifiable = hosts.slice(0, Math.floor((remainingRequests - requests) / VERIFIER_SOURCES.length));
-    if (verifiable.length > 0) {
-      signal.throwIfAborted();
-      try {
-        verifications = await this.worker.verifyProfiles(target.normalized, verifiable, VERIFIER_SOURCES);
-        requests += verifications.length;
-      } catch {
-        // Проверка — второе мнение. Без неё находки Maigret остаются
-        // находками одного сборщика, а не исчезают.
-        verifyFailed = true;
-      }
-    }
+    const ruleRequests = Math.min(100, allowance - topSites);
+    const scan = await this.worker.scanUsername(target.normalized, { topSites, ruleRequests, signal });
+    const requests = scan.checked + (scan.verificationRequests ?? 0);
+    const verifications = scan.verifications ?? [];
     const merged = mergeProfileObservations(scan, verifications);
     const retrievedAt = (this.options.now?.() ?? new Date()).toISOString();
     const byHost = new Map(scan.found.map((profile) => {
@@ -181,7 +162,7 @@ export class UsernameProfilesCollector implements Collector {
         return property && text && text.length <= 200 ? [{ property, value: text }] : [];
       });
       const evidence = structuredEvidence({
-        collector: "maigret",
+        collector: found ? "maigret" : profile.confirmedBy[0],
         site: profile.site,
         url: profile.url,
         httpStatus: found?.httpStatus ?? null,
@@ -220,11 +201,9 @@ export class UsernameProfilesCollector implements Collector {
         findings,
       };
     });
-    const degradedReason = verifyFailed
-      ? "unavailable"
-      : (Object.keys(scan.degraded)[0] as DegradedReason | undefined);
+    const degradedReason = Object.keys(scan.degraded)[0] as DegradedReason | undefined;
     return {
-      status: scan.status === "degraded" || verifyFailed ? "degraded" : "succeeded",
+      status: scan.status === "degraded" ? "degraded" : "succeeded",
       ...(degradedReason ? { degradedReason } : {}),
       externalRequests: requests,
       sources,
@@ -236,6 +215,10 @@ export class UsernameProfilesCollector implements Collector {
 export interface WebAccess {
   /** `snippet` — фрагмент страницы из выдачи, если поисковик его дал. */
   search(query: string, signal: AbortSignal): Promise<Array<{ url: string; title: string; snippet?: string }>>;
+  searchWithDiagnostics?(query: string, signal: AbortSignal): Promise<{
+    results: Array<{ url: string; title: string; snippet?: string }>;
+    unresponsiveEngines: string[];
+  }>;
   read(url: string, signal: AbortSignal, maxBytes: number): Promise<{ url: string; content: string; title: string }>;
 }
 
@@ -268,14 +251,20 @@ export function mentionVariants(target: Pick<FrontierItem, "type" | "normalized"
  * текста — `quoteEvidence` это перепроверяет.
  */
 export function mentionQuote(content: string, variants: readonly string[]): Evidence | null {
-  const lowered = content.toLocaleLowerCase("ru");
   for (const variant of variants) {
-    const needle = variant.toLocaleLowerCase("ru");
-    if (needle.length < 3) continue;
-    const index = lowered.indexOf(needle);
-    if (index < 0) continue;
-    const start = Math.max(0, index - QUOTE_CONTEXT);
-    const end = Math.min(content.length, index + needle.length + QUOTE_CONTEXT);
+    if (variant.length < 3) continue;
+    const escaped = variant.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    // Только различия записи: не fuzzy matching и не перестановка цифр.
+    // Матч идёт по исходному тексту, поэтому цитата остаётся дословной.
+    const phone = /^[+\d\s().-]+$/.test(variant) && variant.replace(/\D/g, "").length >= 10;
+    const pattern = phone
+      ? variant.replace(/\D/g, "").split("").join("[\\s().\\-–—]*")
+      : escaped.replace(/[её]/giu, "[её]").replace(/\s+/g, "\\s+");
+    const expression = new RegExp(`(?<![\\p{L}\\p{N}_])${pattern}(?![\\p{L}\\p{N}_])`, "iu");
+    const match = expression.exec(content);
+    if (!match) continue;
+    const start = Math.max(0, match.index - QUOTE_CONTEXT);
+    const end = Math.min(content.length, match.index + match[0].length + QUOTE_CONTEXT);
     const evidence = quoteEvidence(content.slice(start, end), content);
     if (evidence) return evidence;
   }
@@ -300,7 +289,7 @@ export class WebSearchCollector implements Collector {
   ) {}
 
   accepts(type: IdentifierType): boolean {
-    return ["name", "username", "email", "phone", "organization", "domain", "tax_id", "registration_number"]
+    return ["name", "username", "email", "phone", "organization", "domain", "tax_id", "registration_number", "url", "social_account", "document"]
       .includes(type);
   }
 
@@ -309,8 +298,11 @@ export class WebSearchCollector implements Collector {
   }
 
   async collect({ target, signal, remainingRequests, context }: CollectorContext): Promise<CollectorOutput> {
+    if (["url", "social_account", "document"].includes(target.type)) {
+      return this.collectPage(target, signal, remainingRequests);
+    }
     const queries = searchQueries({ type: target.type, raw: target.normalized, normalized: target.normalized }, context ?? {})
-      .slice(0, Math.max(0, Math.min(this.limits.queriesPerIdentifier, remainingRequests - 1)));
+      .slice(0, Math.max(0, Math.min(this.limits.queriesPerIdentifier, remainingRequests)));
     if (queries.length === 0) return skipped("osint_budget_exhausted");
     const variants = mentionVariants(target);
     let requests = 0;
@@ -323,7 +315,11 @@ export class WebSearchCollector implements Collector {
       signal.throwIfAborted();
       requests += 1;
       try {
-        for (const result of await this.web.search(query, signal)) {
+        const page = this.web.searchWithDiagnostics
+          ? await this.web.searchWithDiagnostics(query, signal)
+          : { results: await this.web.search(query, signal), unresponsiveEngines: [] };
+        if (page.unresponsiveEngines.length > 0) failures += 1;
+        for (const result of page.results) {
           const canonical = canonicalizeUrl(result.url);
           if (!canonical || recorded.has(canonical)) continue;
           // Сниппет выдачи с искомой строкой — уже находка: страницы
@@ -346,7 +342,7 @@ export class WebSearchCollector implements Collector {
         failures += 1;
       }
     }
-    if (failures === queries.length) {
+    if (failures === queries.length && sources.length === 0 && candidates.size === 0) {
       return { status: "degraded", degradedReason: "unavailable", externalRequests: requests, sources: [] };
     }
 
@@ -376,6 +372,33 @@ export class WebSearchCollector implements Collector {
       externalRequests: requests,
       sources,
     };
+  }
+
+  private async collectPage(target: FrontierItem, signal: AbortSignal, remaining: number): Promise<CollectorOutput> {
+    if (remaining < 1) return skipped("osint_budget_exhausted");
+    const url = canonicalizeUrl(target.normalized);
+    if (!url) return skipped("osint_unsupported_url");
+    signal.throwIfAborted();
+    try {
+      const page = await this.web.read(url, signal, this.limits.maxPageBytes);
+      const evidence = quoteEvidence(page.content.slice(0, 500), page.content);
+      if (!evidence) return { status: "succeeded", externalRequests: 1, sources: [] };
+      const source = this.source(url, page.content, target, evidence);
+      // Из известного профиля извлекается только его собственный ник,
+      // а не все имена и контакты посетителей/комментаторов страницы.
+      if (normalizeIdentifier("social_account", url)) {
+        const parsed = new URL(url);
+        const handle = parsed.pathname.split("/").filter(Boolean).at(-1)?.replace(/^@/, "") ?? "";
+        const identifier = normalizeIdentifier("username", handle);
+        if (identifier && !/^\d+$|^id\d+$/.test(handle)) {
+          source.findings.push({ kind: "discovered", identifier, evidence });
+        }
+      }
+      return { status: "succeeded", externalRequests: 1, sources: [source] };
+    } catch (error) {
+      if (signal.aborted) throw error;
+      return { status: "degraded", degradedReason: "unavailable", externalRequests: 1, sources: [] };
+    }
   }
 
   private source(url: string, text: string, target: FrontierItem, evidence: Evidence): CollectedSource {

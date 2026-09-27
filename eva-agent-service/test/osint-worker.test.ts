@@ -196,10 +196,10 @@ test("находка Maigret сводится с независимыми про
     { source: "sherlock", site: "GitHub", profileUrl: "https://www.github.com/alice", status: "found", reason: null },
     { source: "sherlock", site: "Forum", profileUrl: "https://forum.example/u/alice", status: "not_found", reason: null },
     { source: "whatsmyname", site: "Forum", profileUrl: "https://forum.example/u/alice", status: "degraded", reason: "captcha" },
-    // Проверка без находки Maigret профилем не становится.
+    // Независимая положительная проверка тоже является находкой.
     { source: "whatsmyname", site: "Other", profileUrl: "https://other.example/alice", status: "found", reason: null },
   ]);
-  assert.deepEqual(observations.profiles.map((p) => p.host), ["forum.example", "github.com"]);
+  assert.deepEqual(observations.profiles.map((p) => p.host), ["forum.example", "github.com", "other.example"]);
   const [forum, github] = observations.profiles;
   assert.deepEqual(github!.confirmedBy, ["maigret", "whatsmyname", "sherlock"]);
   assert.deepEqual(forum!.confirmedBy, ["maigret"]);
@@ -214,4 +214,27 @@ test("новые идентификаторы дедуплицируются, и
   assert.equal(pairs.some((pair) => pair === "username:alice"), false);
   assert.equal(pairs.some((pair) => pair.includes("github.com/alice")), false);
   assert.equal(pairs.some((pair) => pair.includes("alice.example")), true);
+});
+
+
+test("независимый результат и его расход не теряются в HTTP-клиенте", async () => {
+  const calls: Call[] = [];
+  const client = new OsintWorkerClient({ baseUrl: "http://w", token: "t", fetcher: fakeFetch([json(200, {
+    collector: "maigret", username: "alice", status: "degraded", checked: 20, found: [], degraded: { timeout: 1 },
+    verification_requests: 10,
+    verifications: [{ source: "sherlock", site: "GitHub", profile_url: "https://github.com/alice", status: "found" }],
+  })], calls) });
+  const result = await client.scanUsername("alice", { topSites: 20, ruleRequests: 10 });
+  assert.deepEqual(JSON.parse(String(calls[0]!.init.body)), { username: "alice", top_sites: 20, rule_requests: 10 });
+  assert.equal(result.verificationRequests, 10);
+  assert.equal(result.verifications?.[0]?.source, "sherlock");
+  const merged = mergeProfileObservations(result, result.verifications);
+  assert.deepEqual(merged.profiles[0]?.confirmedBy, ["sherlock"]);
+});
+
+test("отмена до скана не отправляет запрос воркеру", async () => {
+  const calls: Call[] = [];
+  const client = new OsintWorkerClient({ baseUrl: "http://w", token: "t", fetcher: fakeFetch([], calls) });
+  await assert.rejects(client.scanUsername("alice", { signal: AbortSignal.abort() }), { name: "AbortError" });
+  assert.equal(calls.length, 0);
 });
