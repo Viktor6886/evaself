@@ -5,7 +5,8 @@
  * резервному провайдеру. Модель всё равно срывается на коротких
  * служебных репликах — «понял», «готов», «сделал», — и человек видит,
  * что собеседница путает собственный род. Четвёртая формулировка того же
- * правила эту вероятность не обнуляет; обнуляет её правка на выходе.
+ * правила эту вероятность не обнуляет; известные случаи исправляет
+ * правка на выходе. Это осторожная эвристика, а не полный разбор языка.
  *
  * Это не второй когнитивный контур. Здесь не выбирается, что сказать, и
  * не переписывается смысл: приводится согласование по роду там, где
@@ -191,10 +192,27 @@ const FILLERS = new Set([
   "немного", "немножко", "чуть", "слегка", "совсем", "так", "всегда",
   "никогда", "опять", "снова", "теперь", "сегодня", "вчера", "раньше",
   "действительно", "искренне", "сильно", "обязательно", "рядом",
+  "внимательно", "полностью", "вполне", "недавно", "всё-таки", "все-таки",
 ]);
 
-/** Сколько служебных слов допускается между «я» и сказуемым. */
+/** Сколько служебных слов допускается при согласовании обращения «ты». */
 const MAX_FILLERS = 3;
+
+/** Длинные вводные допустимы только после явного первого лица. */
+const MAX_SELF_FILLERS = 12;
+
+/** Эти формы однозначно задают первое лицо и могут начать ряд сказуемых. */
+const FIRST_PERSON = new Set([
+  "могу", "понимаю", "знаю", "помню", "вижу", "хочу", "думаю", "считаю",
+  "постараюсь", "буду",
+]);
+
+/** Модификаторы сказуемого; не содержат местоимений и чужого подлежащего. */
+const PREDICATE_MODIFIERS = new Set([
+  "бы", "не", "уже", "ещё", "еще", "тоже", "также", "сейчас", "пока",
+  "просто", "очень", "совсем", "вполне", "немного", "сразу", "точно",
+  "внимательно", "полностью", "действительно", "искренне", "всегда",
+]);
 
 /**
  * Короткие реплики, которые Ева говорит о себе без подлежащего.
@@ -213,6 +231,7 @@ const OPENERS = new Set([
   // подлежащим — «ты был», «он ответил».
   "был", "решил", "ответил", "спросил", "уточнил", "написал", "собрал",
   "перечитал", "почувствовал", "рассказал", "поправился", "ошибся",
+  "должен", "вынужден", "благодарен", "признателен", "убеждён", "убежден",
 ]);
 
 /**
@@ -329,7 +348,8 @@ function isSelfContinuation(word: string, next: string): boolean {
   const lower = word.toLocaleLowerCase("ru");
   // «…, и пришёл он»: подлежащее за сказуемым — чужое, даже когда
   // форма нерегулярная и в общем правиле не проверяется.
-  if (next && (SUBJECT_PRONOUNS.has(next.toLocaleLowerCase("ru"))
+  if (next && (next.toLocaleLowerCase("ru") === "ли"
+    || SUBJECT_PRONOUNS.has(next.toLocaleLowerCase("ru"))
     || next[0] !== next[0]!.toLocaleLowerCase("ru"))) return false;
   if (IRREGULAR.has(lower) || isSelfPastPredicate(word, next)) return true;
   return /лся$/u.test(lower) && isSelfPastPredicate(word.slice(0, -2), next);
@@ -420,6 +440,7 @@ export function feminineForm(word: string): string | null {
 
 /** Заглавная буква оригинала переносится на исправленную форму. */
 function matchCase(original: string, replacement: string): string {
+  if (original === original.toLocaleUpperCase("ru")) return replacement.toLocaleUpperCase("ru");
   const first = original[0] ?? "";
   return first !== first.toLocaleLowerCase("ru")
     ? replacement[0]!.toLocaleUpperCase("ru") + replacement.slice(1)
@@ -456,7 +477,19 @@ export function masculineForm(word: string): string | null {
  * Внутри кавычек и кода могут стоять слова человека — там род не наш.
  * Блоки кода идут первыми: внутри них кавычки не кавычки.
  */
-const SKIPPED = /```[\s\S]*?```|`[^`\n]*`|«[^»]*»|"[^"\n]*"|“[^”]*”/gu;
+// Открытые цитаты и код защищены и до прихода закрывающего чанка.
+const SKIPPED = /(?<fence>`{3,}|~{3,})[\s\S]*?(?:\k<fence>|(?![\s\S]))|(?<ticks>`+)[^\n]*?(?:\k<ticks>|(?=\n)|$)|«[^»]*(?:»|(?![\s\S]))|"[^"\n]*(?:"|(?=\n)|$)|“[^”]*(?:”|(?![\s\S]))|^[ \t]*>[^\n]*|\]\([^\n)]*\)|https?:\/\/[^\s<>]+/gmu;
+
+/**
+ * Разметка не является границей сказуемого: «я **готов**».
+ * Смещения сохраняются, а правки применяются к оригиналу, включая Markdown.
+ * Внутренние подчёркивания идентификаторов не считаются оформлением.
+ */
+function grammarView(text: string): string {
+  return text
+    .replace(/(?<![\p{L}\p{N}*_~])[*_~]+|[*_~]+(?![\p{L}\p{N}*_~])/gu, (mark) => " ".repeat(mark.length))
+    .replace(/^[ \t]*(?:#{1,6}|[-+*]|\d+[.)])[ \t]+/gmu, (mark) => " ".repeat(mark.length));
+}
 
 /*
  * Отдельно стоящее «я».
@@ -477,7 +510,7 @@ const NEXT_WORD = /[\s,—-]*([а-яёА-ЯЁ-]+)/yu;
  * этого отбрасывается предложение-вопрос: «Понял?» и «Готов ли ты?»
  * обращены к человеку, и род в них не её.
  */
-const OPENER = /(^|[.!?\n]\s*)([А-ЯЁа-яё]+)/gu;
+const OPENER = /(^[ \t]*|[.!?\n]\s*)([А-ЯЁа-яё]+)/gu;
 
 /** Продолжение однородного ряда: «, записала», « и решила». */
 const SERIES = /[\s,]*(?:и[\s]+)?([а-яёА-ЯЁ-]+)/yu;
@@ -499,7 +532,9 @@ interface Edit { from: number; to: number; text: string; was: string }
  * возвращается ровно та же строка.
  */
 export function feminizeSelfReference(input: string): GenderFix {
+  const original = input;
   const spans = protectedSpans(input);
+  input = grammarView(input);
   const guarded = (index: number) => spans.some(([from, to]) => index >= from && index < to);
   const handedOver = (index: number) => {
     const before = input.slice(Math.max(0, index - 48), index);
@@ -509,6 +544,7 @@ export function feminizeSelfReference(input: string): GenderFix {
   // менять строку на ходу значит сдвигать смещения следующих совпадений.
   const edits: Edit[] = [];
   const add = (from: number, word: string): boolean => {
+    if (guarded(from)) return false;
     // «Канал», «файл» — существительные на «-л»: их род не Евы.
     const lowerWord = word.toLocaleLowerCase("ru");
     if (NOUNS_LIKE_PAST.has(lowerWord) || /йл$/u.test(lowerWord)) return false;
@@ -531,7 +567,8 @@ export function feminizeSelfReference(input: string): GenderFix {
       // сказуемым подлежащего не меняет — сказуемое за ней то же.
       // Только внутри той же группы сказуемого: за запятой «не» открывает
       // косвенный вопрос — «я подумала, не пришёл ли поезд».
-      if (/^(?:бы|не)$/iu.test(following) && /^\s+$/u.test(next[0].slice(0, next[0].length - following.length))) {
+      if (PREDICATE_MODIFIERS.has(following.toLocaleLowerCase("ru"))
+        && /^\s+$/u.test(next[0].slice(0, next[0].length - following.length))) {
         cursor = next.index + next[0].length;
         continue;
       }
@@ -542,8 +579,11 @@ export function feminizeSelfReference(input: string): GenderFix {
       const joined = /[,и]/u.test(next[0].slice(0, next[0].length - following.length));
       const lower = following.toLocaleLowerCase("ru");
       const afterWord = /^\s*([А-ЯЁа-яё-]+)/u.exec(input.slice(at + following.length))?.[1] ?? "";
-      const allowed = IRREGULAR.has(lower) || (joined && isSelfContinuation(following, afterWord));
-      if (!allowed || guarded(at) || !add(at, following)) break;
+      const feminine = isFeminineSelf(following, afterWord);
+      const allowed = (!joined && IRREGULAR.has(lower))
+        || (joined && isSelfContinuation(following, afterWord));
+      if ((!allowed && !feminine) || guarded(at)) break;
+      add(at, following);
       cursor = next.index + next[0].length;
     }
   };
@@ -556,7 +596,7 @@ export function feminizeSelfReference(input: string): GenderFix {
    * «что», имя, тире, — или после союза стоит не сказуемое: дальше
    * подлежащее уже может быть чужим, и угадывать его нельзя.
    */
-  const continueClause = (from: number): void => {
+  const continueClause = (from: number, conjunctionOnly = false): void => {
     const stop = /[.!?…\n]/u.exec(input.slice(from));
     const end = stop ? from + stop.index : input.length;
     const segment = input.slice(from, end);
@@ -567,21 +607,29 @@ export function feminizeSelfReference(input: string): GenderFix {
       const punctuation = token[1];
       if (punctuation) {
         if (punctuation !== ",") return;
+        // После «знаю/вижу» запятая часто начинает косвенный вопрос:
+        // «я знаю, готов результат или нет». Нужен явный союз.
+        if (conjunctionOnly && !/^\s*(?:и|но)\s/u.test(segment.slice((token.index ?? 0) + 1))) return;
         joined = true;
         continue;
       }
       const word = token[2] ?? "";
       const lower = word.toLocaleLowerCase("ru");
-      if (lower === "и") {
+      if (lower === "и" || lower === "но") {
         joined = true;
         continue;
       }
+      if (joined && PREDICATE_MODIFIERS.has(lower)) continue;
       if (CLAUSE_BREAKERS.has(lower) || SUBJECT_PRONOUNS.has(lower)) return;
       if (!joined) continue;
       const next = tokens[index + 1]?.[2] ?? "";
       const at = from + (token.index ?? 0);
       if (guarded(at)) return;
-      const lowerIsSelf = isSelfContinuation(word, next);
+      // После настоящего времени однородный ряд может состоять из
+      // дополнений: «вижу план и хороший результат», «знаю правило и
+      // один пример». Полные прилагательные и определители не правим.
+      if (conjunctionOnly && /(?:ый|ий|ой)$|^(?:один|сам|мужчина|парень)$/u.test(lower)) return;
+      const lowerIsSelf = isSelfContinuation(word, next) || isFeminineSelf(word, next);
       if (!lowerIsSelf) return;
       // «…, и объяснил её врач»: подлежащее после дополнения.
       const rest = segment.slice((token.index ?? 0) + word.length).split(/[,;:—–]/u)[0] ?? "";
@@ -594,18 +642,18 @@ export function feminizeSelfReference(input: string): GenderFix {
   for (const match of input.matchAll(STANDALONE_I)) {
     const start = match.index ?? 0;
     if (guarded(start) || handedOver(start)) continue;
-    // За «я» может стоять пара служебных слов — «я уже», «я не», «я
-    // тебе». Дальше второго служебного слова подлежащее обычно уже
-    // другое, и угадывать не нужно.
+    // Ищем только через известные вводные; неизвестное слово, в том
+    // числе чужое подлежащее, останавливает разбор.
     let cursor = start + match[0].length;
     let possessive = false;
-    for (let step = 0; step <= MAX_FILLERS; step += 1) {
+    for (let step = 0; step <= MAX_SELF_FILLERS; step += 1) {
       NEXT_WORD.lastIndex = cursor;
       const next = NEXT_WORD.exec(input);
       if (!next) break;
       const word = next[1] ?? "";
       const wordAt = next.index + next[0].length - word.length;
-      if (step < MAX_FILLERS && FILLERS.has(word.toLocaleLowerCase("ru"))) {
+      if (guarded(wordAt)) break;
+      if (step < MAX_SELF_FILLERS && FILLERS.has(word.toLocaleLowerCase("ru"))) {
         possessive = POSSESSIVE_FILLERS.has(word.toLocaleLowerCase("ru"));
         cursor = next.index + next[0].length;
         continue;
@@ -616,38 +664,43 @@ export function feminizeSelfReference(input: string): GenderFix {
       const afterWord = /^\s*([А-ЯЁа-яё-]+)/u.exec(input.slice(wordAt + word.length))?.[1] ?? "";
       if (possessive && !IRREGULAR.has(word.toLocaleLowerCase("ru"))
         && !isSelfPastPredicate(word, afterWord)) break;
-      if (!add(wordAt, word) && !isFeminineSelf(word, afterWord)) break;
-      continueClause(wordAt + word.length);
+      const firstPerson = FIRST_PERSON.has(word.toLocaleLowerCase("ru"));
+      if (!add(wordAt, word) && !isFeminineSelf(word, afterWord) && !firstPerson) break;
+      continueClause(wordAt + word.length, firstPerson);
       // «Я подумала и решил» — половина исправленного хуже, чем ничего:
       // в одном предложении оказывалось два рода. Ряд продолжается,
       // пока следующее слово само поддаётся правилу; чужое подлежащее
       // его обрывает — «я спросил, он ответил» доходит до «он», и
       // править там нечего.
-      continueSeries(wordAt + word.length);
+      // «Я вижу хороший результат» — дополнение, не речь о себе.
+      // Непосредственное согласование нужно лишь связке «буду рада».
+      if (!firstPerson || word.toLocaleLowerCase("ru") === "буду") {
+        continueSeries(wordAt + word.length);
+      }
       break;
     }
   }
 
   for (const match of input.matchAll(OPENER)) {
     const start = match.index ?? 0;
-    if (guarded(start) || handedOver(start)) continue;
     const [, lead = "", opening = ""] = match;
     let word = opening;
     let wordAt = start + lead.length;
-    // «Потом написал план»: наречие перед сказуемым о себе.
-    if (LEADING_ADVERBS.has(opening.toLocaleLowerCase("ru"))) {
-      const shifted = /^(\s+)([А-ЯЁа-яё]+)/u.exec(input.slice(wordAt + opening.length));
-      if (!shifted) continue;
-      wordAt += opening.length + shifted[1]!.length;
+    if (guarded(wordAt) || handedOver(wordAt)) continue;
+    // «Да, уже проверил», «Пока не уверен»: несколько вводных подряд.
+    for (let step = 0; step < MAX_SELF_FILLERS; step += 1) {
+      const lower = word.toLocaleLowerCase("ru");
+      const rest = input.slice(wordAt + word.length);
+      const shifted = LEADING_INTERJECTIONS.has(lower) && /^\s*,/u.test(rest)
+        ? /^(\s*,\s*)([А-ЯЁа-яё]+)/u.exec(rest)
+        : (LEADING_ADVERBS.has(lower) || PREDICATE_MODIFIERS.has(lower))
+          ? /^(\s+)([А-ЯЁа-яё]+)/u.exec(rest)
+          : null;
+      if (!shifted) break;
+      wordAt += word.length + shifted[1]!.length;
       word = shifted[2]!;
-    } else if (LEADING_INTERJECTIONS.has(opening.toLocaleLowerCase("ru"))) {
-      // «Хорошо, записал»: сказуемое стоит за запятой.
-      const shifted = /^(,\s*)([А-ЯЁа-яё]+)/u.exec(input.slice(wordAt + opening.length));
-      if (shifted) {
-        wordAt += opening.length + shifted[1]!.length;
-        word = shifted[2]!;
-      }
     }
+    if (guarded(wordAt)) continue;
     // Заголовок или определение («Сигнал — это…», «Итог:») — не реплика.
     const after = input.slice(wordAt + word.length);
     if (/^\s*[—:–-]/u.test(after)) continue;
@@ -666,34 +719,19 @@ export function feminizeSelfReference(input: string): GenderFix {
     if (sentenceEnd(input, wordAt) === "?") continue;
     if (!add(wordAt, word) && !feminine) continue;
     continueClause(wordAt + word.length);
-    // «Понял, записал», «Был рад» — тот же ряд коротких реплик о себе.
-    // Продолжение берётся только из закрытого списка: за запятой может
-    // стоять что угодно, и угадывать здесь нельзя.
-    let cursor = wordAt + word.length;
-    for (;;) {
-      SERIES.lastIndex = cursor;
-      const next = SERIES.exec(input);
-      const following = next?.[1] ?? "";
-      const afterNext = input.slice(next ? next.index + next[0].length : 0);
-      const nextFollowing = /^\s*([А-ЯЁа-яё-]+)/u.exec(afterNext)?.[1] ?? "";
-      const safe = IRREGULAR.has(following.toLocaleLowerCase("ru"))
-        || isSelfPastPredicate(following, nextFollowing);
-      if (!next || !safe) break;
-      if (!add(next.index + next[0].length - following.length, following)) break;
-      cursor = next.index + next[0].length;
-    }
+    continueSeries(wordAt + word.length);
   }
 
-  if (edits.length === 0) return { text: input, corrections: [] };
+  if (edits.length === 0) return { text: original, corrections: [] };
   edits.sort((left, right) => left.from - right.from);
   let text = "";
   let cursor = 0;
   for (const edit of edits) {
-    text += input.slice(cursor, edit.from) + edit.text;
+    text += original.slice(cursor, edit.from) + edit.text;
     cursor = edit.to;
   }
   return {
-    text: text + input.slice(cursor),
+    text: text + original.slice(cursor),
     corrections: edits.map((edit) => pair(edit.was, edit.text)),
   };
 }
