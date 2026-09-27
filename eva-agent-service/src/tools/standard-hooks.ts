@@ -68,7 +68,17 @@ export function metricsHook(): ToolHooks {
  * Счётчики в памяти процесса: это восстановимое операционное состояние,
  * потеря которого означает лишь обнулённый предохранитель.
  */
-export function quotaHook(options: { perTurn: number; browserPerMinute: number; now?: () => number }): ToolHooks & {
+export function quotaHook(options: {
+  perTurn: number;
+  browserPerMinute: number;
+  /**
+   * Предел одного делегированного исследования. Субагентов несколько, и
+   * каждый законно читает свою пачку страниц: общий с ходом предел
+   * обрывал бы исследование на середине.
+   */
+  perDelegation?: number;
+  now?: () => number;
+}): ToolHooks & {
   usage(): { turns: number; users: number };
 } {
   const now = options.now ?? Date.now;
@@ -94,8 +104,9 @@ export function quotaHook(options: { perTurn: number; browserPerMinute: number; 
         entry.count += 1;
         entry.seenAt = at;
         turns.set(key, entry);
-        if (entry.count > options.perTurn) {
-          return { deny: `Предел вызовов инструментов за один ход (${options.perTurn}) исчерпан. Остановись и ответь тем, что уже известно.` };
+        const limit = call.path === "delegation" ? options.perDelegation ?? options.perTurn * 4 : options.perTurn;
+        if (entry.count > limit) {
+          return { deny: `Предел вызовов инструментов за один ход (${limit}) исчерпан. Остановись и ответь тем, что уже известно.` };
         }
       }
       if (call.source === "browser") {

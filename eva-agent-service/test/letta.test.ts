@@ -446,6 +446,38 @@ test("служебные события потока не показываютс
   assert.equal(result.reply, "Я рядом.");
 });
 
+test("allowlist фоновой задачи разрешает вызов без подмены аргументов", async () => {
+  // Harness Letta Code подставляет `updated_input` вместо аргументов вызова,
+  // если оно задано: пустой объект в ответе разрешения стирал аргументы
+  // разрешённого инструмента.
+  const service = new LettaService({
+    appServerUrl: "ws://example.invalid/ws", appServerToken: "", appServerRequestTimeoutMs: 1000,
+    model: "", sessionPoolSize: 5, sessionIdleMs: 1000, turnTimeoutMs: 5000,
+  } as never, { debug() {}, info() {}, warn() {}, error() {} }, "persona", SYSTEM_PROMPT);
+  let opened: Record<string, unknown> = {};
+  (service as unknown as { client: { resumeSession(id: string, options: Record<string, unknown>): unknown } }).client = {
+    resumeSession: (_id, options) => {
+      opened = options;
+      return {
+        bootstrapState: async () => ({}),
+        recoverPendingApprovals: async () => ({ recovered: false }),
+        send: async () => undefined,
+        stream: () => [{ type: "result", stopReason: "end_turn" }][Symbol.iterator](),
+        close() {},
+        agentId: "agent-1",
+        conversationId: "conv-1",
+      };
+    },
+  };
+
+  await service.runTurn("conv-1", "задача", { allowedTools: ["list_goals"] });
+  const canUseTool = opened.canUseTool as (name: string, args: unknown, context: unknown) => Promise<Record<string, unknown>> | Record<string, unknown>;
+  const allowed = await canUseTool("list_goals", { status: "active" }, {});
+  assert.deepEqual(allowed, { behavior: "allow" });
+  const denied = await canUseTool("delete_tasks", {}, {});
+  assert.equal(denied.behavior, "deny");
+});
+
 test("ход без текста не выдумывает время первого среза", async () => {
   const service = new LettaService({
     appServerUrl: "ws://example.invalid/ws", appServerToken: "", appServerRequestTimeoutMs: 1000,

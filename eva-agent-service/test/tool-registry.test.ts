@@ -266,3 +266,14 @@ test("проверка согласия при выполнении: чтени�
   assert.equal(await service.authorizeExecution({ ...base, risk: "external_side_effect" }), "allow");
   assert.equal(await new ApprovalService(db as never, false).authorizeExecution({ ...base, risk: "destructive" }), "allow");
 });
+
+test("ответ внешнего источника в контексте модели ограничен по размеру", async () => {
+  const { untrustedResult, UNTRUSTED_MAX_CHARS } = await import("../dist/tools/untrusted.js");
+  const small = untrustedResult("mcp:x", { a: 1 });
+  assert.deepEqual(small.data, { a: 1 });
+  assert.equal(small.truncated, undefined);
+  const big = untrustedResult("mcp:x", { text: "я".repeat(UNTRUSTED_MAX_CHARS * 2) });
+  assert.equal(typeof big.data, "string");
+  assert.equal((big.data as string).length, UNTRUSTED_MAX_CHARS);
+  assert.ok(big.truncated!.totalChars > UNTRUSTED_MAX_CHARS);
+});

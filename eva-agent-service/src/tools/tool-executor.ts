@@ -146,6 +146,10 @@ export class ToolExecutor {
     let executionUserId: number | undefined;
     let info: ToolCallInfo | undefined;
     let completionAttempted = false;
+    // Отказ проверки согласия или хука — не выполнение: согласие, если
+    // оно было выдано, закрывается как несостоявшееся, а не как
+    // исполненное действие.
+    let refusedBeforeExecution = false;
     // Вызов вынесен в отдельную функцию, чтобы ранний выход —
     // отменённый ход, повтор из журнала — проходил через тот же учёт
     // исхода, что и обычное выполнение.
@@ -186,8 +190,12 @@ export class ToolExecutor {
         const verdict = gate
           ? await gate({ userId: runtime.userId, conversationId, toolName: tool.name, args: invocation.rawArgs })
           : "allow";
-        if (verdict === "deny") return toolResult({ ok: false, error: `Вызов ${tool.name} запрещён политикой подтверждений` });
+        if (verdict === "deny") {
+          refusedBeforeExecution = true;
+          return toolResult({ ok: false, error: `Вызов ${tool.name} запрещён политикой подтверждений` });
+        }
         if (verdict === "approval_missing") {
+          refusedBeforeExecution = true;
           return toolResult({
             ok: false,
             error: `Действие ${tool.name} требует согласия человека, а согласия на этот вызов нет. `
@@ -225,6 +233,7 @@ export class ToolExecutor {
       }
       const denied = await this.deps.hooks?.before(info);
       if (denied) {
+        refusedBeforeExecution = true;
         if (key && effects) await effects.fail(key, runtime.userId, "hook_denied", true);
         return toolResult({ ok: false, error: denied });
       }
@@ -255,7 +264,10 @@ export class ToolExecutor {
       const called = await call();
       if (executionUserId !== undefined) {
         completionAttempted = true;
-        await this.recordOutcome({ userId: executionUserId, conversationId, toolName: tool.name, args: invocation.rawArgs, outcome: "executed" });
+        await this.recordOutcome({
+          userId: executionUserId, conversationId, toolName: tool.name, args: invocation.rawArgs,
+          outcome: refusedBeforeExecution ? "failed" : "executed",
+        });
       }
       return called;
     } catch (error) {

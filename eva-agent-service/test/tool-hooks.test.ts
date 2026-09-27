@@ -137,3 +137,25 @@ test("метрики и задержка считают исходы; трасс
   tracing.beforeToolCall!(call);
   tracing.afterToolCall!(call, { durationMs: 1, refused: false });
 });
+
+test("отказ хука закрывает согласие как несостоявшееся, делегированию — свой предел", async () => {
+  const completions: string[] = [];
+  const executor = new ToolExecutor({
+    db: { withUserScope: async (_scope: unknown, work: () => Promise<unknown>) => await work() } as never,
+    logger,
+    context: async () => RUNTIME as never,
+    riskFor: () => "read",
+    approvalCompletion: () => async (input: { outcome: string }) => { completions.push(input.outcome); },
+    hooks: new ToolHookChain([{ name: "quota", beforeToolCall: () => ({ deny: "квота" }) }], logger),
+  } as never);
+  let executed = false;
+  const tool = { name: "get_notes", source: "product", group: "product", execute: async () => { executed = true; return {}; } };
+  await executor.run({ conversationId: "conv-1", tool: tool as never, rawArgs: {}, toolCallId: "call-1" });
+  assert.equal(executed, false);
+  assert.deepEqual(completions, ["failed"]);
+
+  const quota = quotaHook({ perTurn: 2, browserPerMinute: 100 });
+  const delegated = () => quota.beforeToolCall!(info({ path: "delegation", source: "product", name: "web_read", runId: null, conversationId: "delegation:r1" }));
+  for (let index = 0; index < 8; index += 1) assert.equal(delegated(), undefined, `вызов ${index + 1}`);
+  assert.match((delegated() as { deny: string }).deny, /Предел/);
+});

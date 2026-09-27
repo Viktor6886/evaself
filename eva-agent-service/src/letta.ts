@@ -1550,8 +1550,12 @@ export class LettaService {
     await this.ensureContextWindow(conversationId);
     const pooled = await this.acquirePooled(conversationId, options.allowedTools === undefined ? undefined : {
       allowedTools: options.allowedTools,
+      // Разрешение без `updatedInput`. Harness Letta Code подставляет
+      // `updated_input` вместо аргументов вызова, если оно задано, а `{}`
+      // для него — заданное значение: разрешённый инструмент получал
+      // пустые аргументы.
       canUseTool: options.canUseTool ?? ((toolName) => options.allowedTools!.includes(toolName)
-        ? { behavior: "allow", updatedInput: {} }
+        ? { behavior: "allow" }
         : { behavior: "deny", message: `Tool ${toolName} is outside the job allowlist` }),
     });
     const sessionAcquireMs = Date.now() - startedAt;

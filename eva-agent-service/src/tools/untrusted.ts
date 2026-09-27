@@ -44,11 +44,29 @@ function neutralize(value: unknown, depth: number): unknown {
     .map(([key, item]) => [key, neutralize(item, depth + 1)]));
 }
 
-export function untrustedResult(source: string, data: unknown): {
+/**
+ * Сколько знаков чужого ответа уходит в контекст модели. Политика MCP
+ * разрешает ответ до четырёх мегабайт — столько в контекст хода не
+ * помещается, а то, что помещается, вытесняет историю разговора.
+ * Предел тот же, что у `web_read`.
+ */
+export const UNTRUSTED_MAX_CHARS = 20_000;
+
+export function untrustedResult(source: string, data: unknown, maxChars = UNTRUSTED_MAX_CHARS): {
   untrusted: true;
   notice: string;
   source: string;
   data: unknown;
+  truncated?: { shownChars: number; totalChars: number };
 } {
-  return { untrusted: true, notice: UNTRUSTED_NOTICE, source, data: neutralize(data, 0) };
+  const clean = neutralize(data, 0);
+  const serialized = typeof clean === "string" ? clean : JSON.stringify(clean) ?? "";
+  if (serialized.length <= maxChars) return { untrusted: true, notice: UNTRUSTED_NOTICE, source, data: clean };
+  return {
+    untrusted: true,
+    notice: UNTRUSTED_NOTICE,
+    source,
+    data: serialized.slice(0, maxChars),
+    truncated: { shownChars: maxChars, totalChars: serialized.length },
+  };
 }
