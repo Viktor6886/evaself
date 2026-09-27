@@ -118,6 +118,46 @@ Rollback: выключить флаг и `docker compose up -d eva-agent-service
 цепочка выполнения жила в его приватном `builder` и вынесена без
 изменения порядка; аудит вызовов — существующая `agent_tool_calls`.
 
+### Перепроверка и доработки — 2026-09-27
+
+- [x] Учёт исходов: вызов, отклонённый до выполнения (запрет, нет
+  согласия, отказ хука), считается `failed`, а не `executed`; у
+  делегирования своя квота (×4 от лимита хода); ответ MCP в контекст —
+  не больше 20 000 знаков с пометкой `truncated`.
+- [x] `letta.ts`: разрешение allowlist фоновой задачи отдавало
+  `updatedInput: {}`, и harness Letta Code подставлял пустые аргументы
+  вместо настоящих (скрытая ошибка — сегодня allowlist никто не
+  передаёт). Тест на регрессию.
+- [x] Слой заданий: потребитель у каждой очереди с обработчиками —
+  загрузки базы знаний (`memory`) при включённом флаге навсегда
+  оставались `queued`; так же без потребителя стояли `maintenance` и
+  `proactive`. Под теми же флагами, по умолчанию поведение прежнее;
+  инвариант проверяет `job-consumer.test.ts` через подменный драйвер.
+- [x] Навык `web-research` (+ `references/source-checking.md`): порядок
+  web_search → web_read → браузер → tool_search, ответ со ссылкой из
+  результата инструмента, расхождение источников вслух, текст страницы —
+  данные. В персоне — одна строка-указатель.
+- [x] `web_search`: заголовки, сниппеты и прямые ответы обезврежены
+  (`neutralizeUntrusted`), сниппет ≤ 500 знаков, результат без http(s)
+  отброшен.
+
+Проверки (2026-09-27):
+
+```
+eva-agent-service: npm test → PASS (1490 из 1498, 8 skip — нужен PostgreSQL)
+eva-agent-service: npm run typecheck → PASS
+eva-agent-service: npm run lint → PASS
+admin-ui: npm test → PASS (124; EVA_CHROMIUM_PATH — Chromium песочницы)
+make validate → PASS
+make test → не выполнен: сборка образа eva-agent-service упирается в apt (HTTP 403 от deb.debian.org — сетевая политика песочницы); те же тесты прогнаны напрямую
+python3 scripts/ci/assert-{tenant-scope,env-plumbing,admin-route-access,frontend-routes,doc-paths,down-migrations,allowed-updates,live-css,single-admin-domain}.py → PASS
+assert-caddy-*.py → проверяются make validate через caddy adapt (PASS)
+```
+
+Эквиваленты: потребитель — существующий `QueueRegistry.consume`, новых
+очередей нет; навык — новый каталог, пересечения с `osint-research` нет
+(сведения о людях — туда, указано в описании).
+
 ## OSINT: надёжность поиска и независимые сборщики — 2026-09-26
 
 Ветка: `fix/osint-search-reliability`.
