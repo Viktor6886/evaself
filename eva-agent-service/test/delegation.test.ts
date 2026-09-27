@@ -231,7 +231,7 @@ test("без проверенных фактов — отказ, чтобы за
 });
 
 test("делегированию — свой бюджет: его срок уступает конвейеру, отмена задания — нет", async () => {
-  const { withinBudget, researchJobTiming, RESEARCH_PIPELINE_RESERVE_MS } = await import("../dist/research/worker.js");
+  const { withinBudget, researchJobTiming, delegationBudgetMs, RESEARCH_PIPELINE_RESERVE_MS, PIPELINE_HEADROOM_MS } = await import("../dist/research/worker.js");
   const { timingFor } = await import("../dist/jobs/policy.js");
   const hang = (signal: AbortSignal) => new Promise<never>((_resolve, reject) => {
     signal.addEventListener("abort", () => reject(signal.reason as Error), { once: true });
@@ -250,9 +250,22 @@ test("делегированию — свой бюджет: его срок ус
   cancelled.abort(new Error("job_cancelled"));
   await assert.rejects(running, /job_cancelled/);
 
-  // Срок задания: конвейер плюс три фазы субагентов, мягкий срок раньше жёсткого.
+  // Срок задания: конвейер, запас и три фазы субагентов; мягкий срок раньше жёсткого.
   const defaults = researchJobTiming(180_000);
-  assert.equal(defaults.softTimeoutMs, RESEARCH_PIPELINE_RESERVE_MS + 420_000, "бюджет упирается в жёсткий дедлайн");
+  assert.equal(defaults.softTimeoutMs, RESEARCH_PIPELINE_RESERVE_MS + PIPELINE_HEADROOM_MS + 400_000, "бюджет упирается в жёсткий дедлайн");
   assert.doesNotThrow(() => timingFor("research", defaults));
-  assert.equal(researchJobTiming(20_000).softTimeoutMs, RESEARCH_PIPELINE_RESERVE_MS + 60_000);
+  assert.equal(researchJobTiming(20_000).softTimeoutMs, RESEARCH_PIPELINE_RESERVE_MS + PIPELINE_HEADROOM_MS + 60_000);
+
+  // Бюджет — от оставшегося времени: задание начато в t0, делегирование — через 5 с.
+  // Израсходовав бюджет целиком, делегирование оставляет конвейеру его срок и запас,
+  // и свой таймер конвейера (заводится после делегирования) истекает раньше таймера задания.
+  const t0 = 1_000_000;
+  const softDeadlineAt = t0 + defaults.softTimeoutMs!;
+  const startedAt = t0 + 5_000;
+  const budget = delegationBudgetMs(softDeadlineAt, startedAt);
+  assert.equal(budget, 395_000);
+  const pipelineStartsAt = startedAt + budget;
+  assert.ok(pipelineStartsAt + RESEARCH_PIPELINE_RESERVE_MS < softDeadlineAt, "таймер задания не обрывает конвейер");
+  // Без делегирования срок задания прежний, и бюджета нет.
+  assert.ok(delegationBudgetMs(t0 + RESEARCH_PIPELINE_RESERVE_MS, t0) < 0);
 });

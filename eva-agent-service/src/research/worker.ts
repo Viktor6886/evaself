@@ -25,6 +25,13 @@ const MIN_DELEGATION_BUDGET_MS = 30_000;
 const DELEGATION_PHASES = 3;
 /** Зазор между мягким сроком и жёстким дедлайном класса. */
 const HARD_DEADLINE_MARGIN_MS = 60_000;
+/**
+ * Запас сверх срока конвейера. Таймер задания заведён до чтения запроса
+ * и создания субагентов, а свой таймер конвейер заводит только после
+ * делегирования; без запаса таймер задания срабатывал первым и обрывал
+ * конвейер у самого конца его срока. Сюда же входит сохранение отчёта.
+ */
+export const PIPELINE_HEADROOM_MS = 20_000;
 
 /**
  * Сроки задания исследования при включённом делегировании.
@@ -40,9 +47,18 @@ export function researchJobTiming(delegationTimeoutMs: number): Partial<JobTimin
   const base = QUEUE_TIMING.research;
   const budget = Math.min(
     DELEGATION_PHASES * delegationTimeoutMs,
-    base.hardDeadlineMs - base.softTimeoutMs - HARD_DEADLINE_MARGIN_MS,
+    base.hardDeadlineMs - base.softTimeoutMs - PIPELINE_HEADROOM_MS - HARD_DEADLINE_MARGIN_MS,
   );
-  return { softTimeoutMs: base.softTimeoutMs + budget };
+  return { softTimeoutMs: base.softTimeoutMs + PIPELINE_HEADROOM_MS + budget };
+}
+
+/**
+ * Бюджет делегирования — от времени, которое заданию действительно
+ * осталось, а не от номинального срока: после него конвейеру должны
+ * остаться его срок и запас.
+ */
+export function delegationBudgetMs(softDeadlineAt: number, now = Date.now()): number {
+  return softDeadlineAt - now - RESEARCH_PIPELINE_RESERVE_MS - PIPELINE_HEADROOM_MS;
 }
 
 /**
@@ -81,12 +97,12 @@ export class ResearchJobWorker {
    * конвейеру: человек получает отчёт, а не отказ. Отмена задания —
    * не повод начинать сначала другим способом.
    */
-  private async delegated(input: { userId: number; conversationId: string; query: string; requestId: string; signal: AbortSignal; timing: JobTimingPolicy }): Promise<ResearchReport | null> {
+  private async delegated(input: { userId: number; conversationId: string; query: string; requestId: string; signal: AbortSignal; softDeadlineAt: number }): Promise<ResearchReport | null> {
     const delegation = this.options.delegation;
     if (!delegation?.enabled()) return null;
     // Делегированию — всё, что задание получило сверх срока конвейера:
     // конвейер обязан успеть и после неудачного делегирования.
-    const budgetMs = input.timing.softTimeoutMs - RESEARCH_PIPELINE_RESERVE_MS;
+    const budgetMs = delegationBudgetMs(input.softDeadlineAt);
     if (budgetMs < MIN_DELEGATION_BUDGET_MS) return null;
     return await withinBudget(input.signal, budgetMs, async (signal) => {
       const research = await delegation.create({ userId: input.userId, conversationId: input.conversationId, requestId: input.requestId });
@@ -114,6 +130,9 @@ export class ResearchJobWorker {
     },
   ) {}
   async run(context: JobContext): Promise<void> {
+    // Таймер задания заведён перед вызовом обработчика: отсчёт отсюда
+    // отстаёт от него на миллисекунды, их покрывает запас конвейера.
+    const softDeadlineAt = Date.now() + context.timing.softTimeoutMs;
     const requestId = context.envelope.payloadRef;
     const userId = context.envelope.userId;
     if (!requestId || userId === null) throw new Error("research_request_invalid");
@@ -164,7 +183,7 @@ export class ResearchJobWorker {
         maxPageBytes: Number(process.env.EVA_RESEARCH_MAX_PAGE_BYTES ?? 512_000),
         maxConcurrency: Number(process.env.EVA_RESEARCH_CONCURRENCY ?? 4),
       });
-      const report=await this.delegated({userId,conversationId:row.conversation_id,query:row.query,requestId,signal:context.signal,timing:context.timing})
+      const report=await this.delegated({userId,conversationId:row.conversation_id,query:row.query,requestId,signal:context.signal,softDeadlineAt})
         ?? await orchestrator.run({userId,conversationId:row.conversation_id,query:row.query,signal:context.signal,reportId:requestId});
       const repository=new ResearchRepository(this.db);await this.db.transaction(async client=>await repository.saveWithCompletion(client,reportResult??report,{requestId,chatId:Number(row.chat_id)}));
     }); } catch(error) {
