@@ -44,6 +44,7 @@ export const EVA_PROJECT_SKILLS = [
   "subscription-status",
   "therapeutic-conversation",
   "relational-presence",
+  "web-research",
 ] as const;
 
 /** Источники, состав которых на установленных версиях не перечисляется. */
