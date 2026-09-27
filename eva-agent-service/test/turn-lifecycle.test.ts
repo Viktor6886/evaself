@@ -525,6 +525,8 @@ interface WorkflowProbe {
   downloadLimits: Array<number | null>;
   /** Запросы распознавания речи. */
   transcribed: string[];
+  /** Тексты, переданные на озвучивание. */
+  synthesized: string[];
   /** Готовый текст хода вместе с вложениями. */
   wrapped: string[];
   /** После какого успешного расхода проверили переход квоты в ноль. */
@@ -900,6 +902,7 @@ async function runTelegramTurn(
   // распознавание отвечает готовой расшифровкой.
   const originalFetch = globalThis.fetch;
   const transcribed: string[] = [];
+  const synthesized: string[] = [];
   if (options.attachment || options.stt) {
     globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
       if (!String(input).includes("/stt/transcribe")) return await originalFetch(input as never, init);
@@ -914,8 +917,9 @@ async function runTelegramTurn(
     }) as typeof fetch;
   }
   if (options.responseMode === "voice" || options.responseMode === "both") {
-    globalThis.fetch = (async (input: unknown) => {
-      if (!String(input).includes("/tts")) return await originalFetch(input as never);
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      if (!String(input).includes("/tts")) return await originalFetch(input as never, init);
+      synthesized.push((JSON.parse(String(init?.body)) as { text: string }).text);
       await new Promise((resolve) => setTimeout(resolve, options.synthesisMs ?? 20));
       synthesis.done = true;
       return options.synthesisFails
@@ -969,6 +973,7 @@ async function runTelegramTurn(
     lettaMessages,
     downloadLimits,
     transcribed,
+    synthesized,
     messageSources,
     wrapped,
     markups,
@@ -1950,6 +1955,27 @@ test("ошибочный род не показывается даже в рас
     `в поток попала неверная форма: ${probe.shown.join(" | ")}`,
   );
   assert.match(probe.shown.at(-1) ?? "", /Я поняла\. Ты устал\?/u);
+});
+
+test("Markdown и составное сказуемое исправляются в потоке, доставке и озвучке", async () => {
+  const probe = await runTelegramTurn(undefined, {
+    responseMode: "both",
+    userGender: "masculine",
+    deltas: [["**Понял**. ", true], ["Я был бы очень рад помочь. ", false], ["Ты готов?", false]],
+  });
+  const expected = "**Поняла**. Я была бы очень рада помочь. Ты готов?";
+  assert.equal(probe.shown.at(-1), expected);
+  assert.equal(probe.sent.at(-1), expected);
+  assert.ok(probe.shown.every((text) => !/(?:Понял(?=\*)|был(?=\s)|рад(?=\s))/u.test(text)));
+  assert.deepEqual(probe.synthesized, ["Поняла. Я была бы очень рада помочь. Ты готов?"]);
+});
+
+test("потоковая цитата остаётся мужской, а следующий ответ Евы — женским", async () => {
+  const probe = await runTelegramTurn(undefined, {
+    deltas: [["Ты написал: «Я **понял**", true], [" и записал».\n\n- Проверил файл.", false]],
+  });
+  assert.equal(probe.shown[0], "Ты написал: «Я **понял**");
+  assert.equal(probe.sent.at(-1), "Ты написал: «Я **понял** и записал».\n\n- Проверила файл.");
 });
 
 test("/balance различает суточную, недельную и месячную квоты", async () => {
