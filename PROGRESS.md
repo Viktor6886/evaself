@@ -5,8 +5,10 @@
 
 ## Инструменты, браузер и субагенты по мотивам Hermes Agent — 2026-09-26
 
-Ветка: `claude/evaself-architecture-improvements-3d7d2s`. Статус: все восемь
-этапов выполнены и запушены; pull request не открывался (не запрошен).
+Ветка: `claude/evaself-architecture-improvements-3d7d2s`. Статус: **выполнен**.
+PR: https://github.com/Viktor6886/evaself/pull/374 (восемь этапов и
+перепроверка), https://github.com/Viktor6886/evaself/pull/375 (замечания
+Codex к #374). CI на обоих зелёный, прогон `main` после #374 — зелёный.
 
 Задание: реестр инструментов с поиском (`tool_search`/`tool_describe`/
 `tool_call`), MCP discovery, изолированный browser-service, субагенты
