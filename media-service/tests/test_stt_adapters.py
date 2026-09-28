@@ -557,3 +557,57 @@ def test_google_zero_confidence_is_not_reported(client):
     payload = {"results": [{"alternatives": [{"transcript": "текст", "confidence": 0.0}]}]}
     result = adapter._normalize(payload, config, 100, None, "")
     assert result.confidence is None
+
+
+@pytest.mark.asyncio
+async def test_deepgram_diarization_requests_utterances(mock_provider, client, audio):
+    """Без utterances=true Deepgram не присылает реплик, и разделение голосов пропадало."""
+    mock_provider.body = {
+        "results": {
+            "channels": [{"alternatives": [{
+                "transcript": "Привет. Здравствуйте.",
+                "words": [
+                    {"word": "привет", "punctuated_word": "Привет.", "start": 0.1, "end": 0.5, "speaker": 0},
+                    {"word": "здравствуйте", "punctuated_word": "Здравствуйте.", "start": 0.9, "end": 1.6,
+                     "speaker": 1},
+                ],
+            }]}],
+            "utterances": [
+                {"transcript": "Привет.", "start": 0.1, "end": 0.5, "speaker": 0},
+                {"transcript": "Здравствуйте.", "start": 0.9, "end": 1.6, "speaker": 1},
+            ],
+        },
+    }
+    adapter = DeepgramAdapter(client)
+    result = await adapter.transcribe(deepgram_config(mock_provider.base_url, diarize=True), audio, {})
+
+    sent = mock_provider.requests[0]["query"]
+    assert sent["diarize"] == "true"
+    assert sent["utterances"] == "true"
+    assert [segment.speaker for segment in result.segments] == ["speaker_0", "speaker_1"]
+    assert [word.speaker for word in result.words] == ["speaker_0", "speaker_1"]
+
+
+@pytest.mark.asyncio
+async def test_deepgram_without_diarization_does_not_ask_for_utterances(mock_provider, client, audio):
+    mock_provider.body = DEEPGRAM_OK
+    await DeepgramAdapter(client).transcribe(deepgram_config(mock_provider.base_url), audio, {})
+    assert "utterances" not in mock_provider.requests[0]["query"]
+
+
+def test_google_words_carry_speaker_labels(client):
+    adapter = GoogleSttAdapter(client)
+    config = SttResolvedConfig(
+        config_id="cfg-g", name="Google", provider="google", mode="batch",
+        base_url="https://speech.googleapis.com", model="chirp_2",
+        params={"diarization": True}, secret="{}",
+    )
+    payload = {"results": [{"alternatives": [{
+        "transcript": "Да нет",
+        "words": [
+            {"word": "Да", "startOffset": "0.1s", "endOffset": "0.3s", "speakerLabel": "1"},
+            {"word": "нет", "startOffset": "0.5s", "endOffset": "0.8s", "speakerLabel": "2"},
+        ],
+    }]}]}
+    result = adapter._normalize(payload, config, 10, None, "")
+    assert [word.speaker for word in result.words] == ["speaker_1", "speaker_2"]

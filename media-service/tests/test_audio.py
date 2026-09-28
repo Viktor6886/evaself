@@ -18,6 +18,7 @@ from app.audio import (
     convert,
     probe,
     split_to_asr_wav,
+    split_with_overlap,
     to_asr_wav,
     to_telegram_voice,
 )
@@ -146,3 +147,26 @@ def test_raw_pcm_read_as_a_container_is_refused(raw_pcm, tmp_path):
     """
     with pytest.raises(MediaError):
         asyncio.run(to_telegram_voice(raw_pcm, tmp_path / "voice.ogg"))
+
+
+def test_split_with_overlap_shares_the_boundary(tmp_path):
+    source = tmp_path / "long.wav"
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+         "-i", "sine=frequency=330:duration=25", "-ac", "1", "-ar", "16000", str(source)],
+        check=True,
+    )
+    parts = asyncio.run(split_with_overlap(source, tmp_path / "parts", 10.0, 2.0, 25.0))
+    durations = [asyncio.run(probe(part))["duration_seconds"] for part in parts]
+    # Части начинаются в 0, 8 и 16 секунд: 10 + 10 + 9, общий отрезок — 2 с.
+    assert len(parts) == 3
+    assert durations[0] == pytest.approx(10.0, abs=0.05)
+    assert durations[1] == pytest.approx(10.0, abs=0.05)
+    assert durations[2] == pytest.approx(9.0, abs=0.05)
+
+
+def test_parts_never_exceed_twenty_megabytes():
+    from app.main import ASR_CHUNK_SECONDS, MAX_PART_BYTES
+
+    # PCM 16 кГц моно — 32 000 байт в секунду плюс заголовок WAV.
+    assert ASR_CHUNK_SECONDS * 32000 + 44 <= MAX_PART_BYTES == 20 * 1024 * 1024

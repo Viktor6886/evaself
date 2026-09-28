@@ -35,10 +35,12 @@ from .audio import (
     make_test_tone,
     probe,
     split_to_asr_wav,
+    split_with_overlap,
     to_asr_wav,
     to_telegram_voice,
 )
-from .docx import DOCX_MIME, build_transcript_docx
+from .dialogue import Part, dialogue_text, layout, overlap_seconds, plain_text, stitch, wants_speakers
+from .docx import DOCX_MIME, build_text_docx, build_transcript_docx
 from .runtime_config import RuntimeConfig
 from .stt import (
     SttAudioInput,
@@ -49,6 +51,7 @@ from .stt import (
     SttRuntime,
     max_chunk_seconds,
 )
+from .telegram_files import fetch_telegram_file
 
 VERSION = "0.1.0"
 
@@ -56,12 +59,17 @@ log = logging.getLogger("media")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
 WORK_DIR = Path(os.environ.get("MEDIA_WORK_DIR", "/data/media"))
-MAX_UPLOAD_BYTES = int(os.environ.get("MEDIA_MAX_UPLOAD_MB", "200")) * 1024 * 1024
+MAX_UPLOAD_BYTES = int(os.environ.get("MEDIA_MAX_UPLOAD_MB", "350")) * 1024 * 1024
 MAX_AUDIO_SECONDS = int(os.environ.get("MEDIA_MAX_AUDIO_SECONDS", "7200"))
-# Десять минут PCM 16 кГц моно — около 19,2 МБ. Кусок ограничен сверху,
-# чтобы случайное значение в окружении не вернуло запрос больше 25 МБ,
-# который провайдеры в духе Whisper не принимают.
-ASR_CHUNK_SECONDS = max(30, min(int(os.environ.get("MEDIA_ASR_CHUNK_SECONDS", "480")), 600))
+# Часть записи для распознавания — не больше 20 МБ: PCM 16 кГц моно идёт
+# 32 000 байт в секунду, и 20 МБ — это 655 секунд. Кусок ограничен ещё и
+# десятью минутами (около 19,2 МБ), чтобы случайное значение в окружении
+# не вернуло запрос больше, чем принимают провайдеры в духе Whisper.
+MAX_PART_BYTES = 20 * 1024 * 1024
+MAX_PART_SECONDS = (MAX_PART_BYTES - 44) // 32000
+ASR_CHUNK_SECONDS = max(
+    30, min(int(os.environ.get("MEDIA_ASR_CHUNK_SECONDS", "480")), 600, MAX_PART_SECONDS)
+)
 TMP_TTL_SECONDS = int(os.environ.get("MEDIA_TMP_TTL_SECONDS", "900"))
 
 ASR_BASE_URL = os.environ.get("MEDIA_ASR_BASE_URL", "").rstrip("/")
@@ -240,6 +248,20 @@ class TranscriptDocxRequest(BaseModel):
     duration_seconds: float | None = Field(default=None, ge=0, le=MAX_AUDIO_SECONDS)
 
 
+class DocumentDocxRequest(BaseModel):
+    """Документ, который составила Ева: тезисы, конспект, переработанная расшифровка."""
+
+    title: str = Field(min_length=1, max_length=300)
+    content: str = Field(min_length=1, max_length=2_000_000)
+
+
+class TelegramFileRequest(BaseModel):
+    """Файл Telegram для агента, когда его отдаёт только свой сервер Bot API."""
+
+    file_id: str = Field(min_length=1, max_length=512)
+    max_bytes: int = Field(gt=0)
+
+
 # Форматы ответа синтеза и расширение файла для каждого. Список
 # закрытый: значение уходит провайдеру как есть, а произвольная строка
 # из панели превратилась бы в его 400 вместо нашей понятной ошибки.
@@ -330,6 +352,53 @@ async def transcript_docx(payload: TranscriptDocxRequest):
         filename="transcript.docx",
         background=_cleanup_task(work),
     )
+
+@app.post("/document/docx", dependencies=[Depends(require_service_token)])
+async def document_docx(payload: DocumentDocxRequest):
+    """Документ Евы в DOCX: заголовки, пункты, выделение; файлы удаляются после отправки."""
+    workspace = Workspace(WORK_DIR)
+    work = workspace.__enter__()
+    target = work / "document.docx"
+    try:
+        build_text_docx(target, title=payload.title, content=payload.content)
+    except Exception:  # noqa: BLE001 - подробности сбоя наружу не уходят
+        workspace.__exit__(None, None, None)
+        log.exception("document DOCX rendering failed")
+        return _error("document_docx_failed", "не удалось сформировать DOCX", 500)
+    return FileResponse(
+        target,
+        media_type=DOCX_MIME,
+        filename="document.docx",
+        background=_cleanup_task(work),
+    )
+
+
+@app.post("/telegram/file", dependencies=[Depends(require_service_token)])
+async def telegram_file(payload: TelegramFileRequest):
+    """Файл Telegram агенту — изображение или документ от своего сервера Bot API.
+
+    Свой сервер отдаёт файл только путём на диске, а диск смонтирован
+    одному media-service: так у агента нет доступа к чужим файлам на томе,
+    а оригинал удаляется сразу после чтения.
+    """
+    if not telegram_token():
+        return _error("telegram_not_configured", "EVA_TELEGRAM_BOT_TOKEN is not set", 503)
+    limit = min(payload.max_bytes, MAX_UPLOAD_BYTES)
+    workspace = Workspace(WORK_DIR)
+    work = workspace.__enter__()
+    try:
+        source = await _download_telegram_file(payload.file_id, work, limit)
+    except MediaError as exc:
+        workspace.__exit__(None, None, None)
+        status = 413 if "size limit" in exc.message else 502
+        return _error("telegram_download_failed", exc.message, status, details=exc.details)
+    return FileResponse(
+        source,
+        media_type="application/octet-stream",
+        headers={"x-telegram-file-name": source.name.encode("ascii", "ignore").decode() or "file"},
+        background=_cleanup_task(work),
+    )
+
 
 # =====================================================================
 # transcription
@@ -608,8 +677,17 @@ async def _route_transcription(
     provider_limit = max_chunk_seconds(route.usable_chain) if route else None
     if provider_limit is not None:
         chunk_seconds = min(chunk_seconds, provider_limit)
+    # Разделение говорящих включено — части режутся с перекрытием, чтобы
+    # сшить «Голос 1» одной части с тем же голосом в следующей.
+    speakers = bool(route) and wants_speakers(route.usable_chain)
+    overlap = overlap_seconds(chunk_seconds) if speakers and info["duration_seconds"] > chunk_seconds else 0.0
     try:
-        chunks = await split_to_asr_wav(source, work / "asr-parts", chunk_seconds)
+        if overlap:
+            chunks = await split_with_overlap(
+                source, work / "asr-parts", chunk_seconds, overlap, info["duration_seconds"]
+            )
+        else:
+            chunks = await split_to_asr_wav(source, work / "asr-parts", chunk_seconds)
     except MediaError as exc:
         return _error("stt_audio_invalid", exc.message, 422, details=exc.details)
 
@@ -623,7 +701,10 @@ async def _route_transcription(
                 mime_type="audio/wav",
                 filename=wav.name,
             )
-            chunk_key = f"{idempotency_key}:part:{index:05d}" if idempotency_key else None
+            # Часть с перекрытием — другой звук, чем без него: ключ разный,
+            # иначе кэш вернул бы расшифровку другой нарезки.
+            suffix = f":o{round(overlap * 1000)}" if overlap else ""
+            chunk_key = f"{idempotency_key}:part:{index:05d}{suffix}" if idempotency_key else None
             outcomes.append(
                 await STT_ROUTER.transcribe(
                     use_case, audio, language=language, idempotency_key=chunk_key
@@ -645,10 +726,28 @@ async def _route_transcription(
         return _error("stt_transcription_failed", "распознавание не вернуло частей", 502)
 
     first = outcomes[0].result
-    texts = [item.result.text.strip() for item in outcomes if item.result.text.strip()]
+    placement = layout(len(outcomes), chunk_seconds, overlap)
+    parts = [
+        Part(
+            result=item.result,
+            offset_ms=offset,
+            keep_from_ms=keep_from,
+            keep_until_ms=keep_until,
+            overlap=shared,
+        )
+        for item, (offset, keep_from, keep_until, shared) in zip(outcomes, placement, strict=True)
+    ]
+    turns = stitch(parts) if speakers else None
+    if turns:
+        text = dialogue_text(turns)
+    else:
+        texts = [plain_text(part) if overlap else part.result.text.strip() for part in parts]
+        text = "\n\n".join(item for item in texts if item)
     payload = first.as_dict()
-    payload["text"] = "\n\n".join(texts)
+    payload["text"] = text
     payload["duration_ms"] = round(info["duration_seconds"] * 1000)
+    if turns:
+        payload["speakers"] = len({turn.speaker for turn in turns})
     if len(outcomes) > 1:
         payload.pop("words", None)
         payload.pop("segments", None)
@@ -1149,31 +1248,8 @@ async def _save_upload(upload: UploadFile, work: Path) -> Path:
     return target
 
 
-async def _download_telegram_file(file_id: str, work: Path) -> Path:
-    meta = await app.state.http.get(
-        f"{TELEGRAM_API}/bot{telegram_token()}/getFile", params={"file_id": file_id}
+async def _download_telegram_file(file_id: str, work: Path, max_bytes: int = 0) -> Path:
+    """Файл по file_id: HTTP облачного Bot API или диск своего сервера (telegram_files)."""
+    return await fetch_telegram_file(
+        app.state.http, TELEGRAM_API, telegram_token(), file_id, work, max_bytes or MAX_UPLOAD_BYTES
     )
-    if meta.status_code >= 400:
-        raise MediaError("getFile failed", details=meta.text[:300])
-
-    body = meta.json()
-    if not body.get("ok"):
-        raise MediaError("getFile returned ok=false", details=str(body)[:300])
-
-    file_path = body["result"]["file_path"]
-    target = work / Path(file_path).name
-
-    async with app.state.http.stream(
-        "GET", f"{TELEGRAM_API}/file/bot{telegram_token()}/{file_path}"
-    ) as stream:
-        if stream.status_code >= 400:
-            raise MediaError(f"file download returned {stream.status_code}")
-        written = 0
-        with target.open("wb") as handle:
-            async for chunk in stream.aiter_bytes():
-                written += len(chunk)
-                if written > MAX_UPLOAD_BYTES:
-                    raise MediaError("Telegram file exceeds the configured size limit")
-                handle.write(chunk)
-
-    return target
