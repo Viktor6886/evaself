@@ -11,7 +11,9 @@ from __future__ import annotations
 import httpx
 
 from .adapters.deepgram import DeepgramAdapter
+from .adapters.google import MAX_WAV_SECONDS as GOOGLE_MAX_WAV_SECONDS
 from .adapters.google import GoogleSttAdapter
+from .adapters.google_ai_studio import MAX_WAV_SECONDS as GEMINI_MAX_WAV_SECONDS
 from .adapters.google_ai_studio import GoogleAiStudioAdapter
 from .adapters.openai_compatible import (
     OPENAI_SCHEMA,
@@ -22,6 +24,23 @@ from .errors import STT_CONFIG_INVALID, SttError
 from .types import SttProviderAdapter, SttResolvedConfig, ValidationResult
 
 PROVIDER_CODES = ("deepgram", "google_ai_studio", "openai", "google", "openrouter")
+
+# Самая длинная часть WAV, которую провайдер принимает одним запросом.
+# Провайдера без записи здесь ограничивает только общая длина части.
+MAX_WAV_SECONDS = {
+    "google": GOOGLE_MAX_WAV_SECONDS,
+    "google_ai_studio": GEMINI_MAX_WAV_SECONDS,
+}
+
+
+def max_chunk_seconds(chain: list[SttResolvedConfig]) -> int | None:
+    """Длина части, которую примет любой провайдер цепочки.
+
+    Часть уходит основному, а при отказе — резерву: если она подходит
+    только основному, резерв на ней упадёт с неповторяемой ошибкой.
+    """
+    limits = [MAX_WAV_SECONDS[config.provider] for config in chain if config.provider in MAX_WAV_SECONDS]
+    return min(limits) if limits else None
 
 
 class SttProviderRegistry:

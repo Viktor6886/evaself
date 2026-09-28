@@ -1,7 +1,7 @@
 """Распознавание речи: реестр провайдеров, маршрутизация, адаптеры."""
 
 from .errors import USER_FACING_MESSAGE, SttError
-from .registry import PROVIDER_CODES, SttProviderRegistry
+from .registry import PROVIDER_CODES, SttProviderRegistry, max_chunk_seconds
 from .routing import SttRoutingService, TranscriptCache, TranscriptionOutcome
 from .runtime import USE_CASES, SttRuntime
 from .types import SttAudioInput, SttResolvedConfig, SttResult
@@ -19,4 +19,5 @@ __all__ = [
     "SttRuntime",
     "TranscriptCache",
     "TranscriptionOutcome",
+    "max_chunk_seconds",
 ]

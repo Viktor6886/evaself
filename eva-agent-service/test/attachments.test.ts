@@ -337,4 +337,9 @@ test("минуты распознавания, известные до него,
     part("audio_file", { audio: { file_id: "a", duration: 45 } }),
     part("audio_file", { document: { file_id: "d" } }),
   ]), 2, "длительность документа неизвестна и не считается");
+  // Списание — по каждой записи с округлением вверх: две по 30 секунд — две минуты.
+  assert.equal(speechMinutesKnown([
+    part("voice", { voice: { file_id: "a", duration: 30 } }),
+    part("voice", { voice: { file_id: "b", duration: 30 } }),
+  ]), 2);
 });

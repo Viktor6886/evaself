@@ -47,6 +47,7 @@ from .stt import (
     SttResolvedConfig,
     SttRoutingService,
     SttRuntime,
+    max_chunk_seconds,
 )
 
 VERSION = "0.1.0"
@@ -458,6 +459,10 @@ class SttTranscribeRequest(BaseModel):
     # Ключ идемпотентности. Для Telegram — file_unique_id: он не меняется
     # при повторной доставке апдейта, в отличие от file_id.
     idempotency_key: str | None = None
+    # Сколько секунд речи ещё оплачено. Агент передаёт его, когда
+    # длительность заранее неизвестна (звук, присланный документом):
+    # запись длиннее отклоняется до распознавания.
+    max_seconds: float | None = Field(default=None, ge=0)
 
 
 @app.get("/stt/provider-schemas", dependencies=[Depends(require_service_token)])
@@ -525,7 +530,12 @@ async def stt_transcribe(payload: SttTranscribeRequest):
         except MediaError as exc:
             return _error("telegram_download_failed", exc.message, 502, details=exc.details)
         return await _route_transcription(
-            source, work, payload.use_case, payload.language, payload.idempotency_key
+            source,
+            work,
+            payload.use_case,
+            payload.language,
+            payload.idempotency_key,
+            max_seconds=payload.max_seconds,
         )
 
 
@@ -555,6 +565,8 @@ async def _route_transcription(
     use_case: str,
     language: str | None,
     idempotency_key: str | None,
+    *,
+    max_seconds: float | None = None,
 ):
     """Проверить файл, нарезать длинную запись, распознать части по порядку."""
     try:
@@ -567,6 +579,14 @@ async def _route_transcription(
         return _error(
             "stt_audio_too_long",
             f"запись длиной {info['duration_seconds']:.0f} с превышает предел {MAX_AUDIO_SECONDS} с",
+            413,
+        )
+
+    if max_seconds is not None and info["duration_seconds"] > max_seconds:
+        return _error(
+            "stt_audio_over_budget",
+            f"запись длиной {info['duration_seconds']:.0f} с длиннее оплаченного остатка "
+            f"{max_seconds:.0f} с",
             413,
         )
 
@@ -583,6 +603,11 @@ async def _route_transcription(
     # транспорта; если администратор задал общий предел меньше куска,
     # кусок не может быть длиннее него.
     chunk_seconds = max(10, min(ASR_CHUNK_SECONDS, route_limit or ASR_CHUNK_SECONDS))
+    # Часть должна пройти у каждого провайдера цепочки: Google принимает
+    # синхронно около минуты, Gemini — 14 МБ на запрос.
+    provider_limit = max_chunk_seconds(route.usable_chain) if route else None
+    if provider_limit is not None:
+        chunk_seconds = min(chunk_seconds, provider_limit)
     try:
         chunks = await split_to_asr_wav(source, work / "asr-parts", chunk_seconds)
     except MediaError as exc:
