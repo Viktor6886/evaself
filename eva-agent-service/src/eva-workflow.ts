@@ -1878,12 +1878,14 @@ export class EvaWorkflow {
         ).then((sent) => telegramMessageIdOf(sent[sent.length - 1])).catch(() => null);
       }, 600);
       statusTimer.unref?.();
-      // Длительность звука, присланного документом, Telegram не сообщает,
-      // и гейт хода не мог сверить её с остатком минут. Остаток уходит в
-      // media-service: он измерит запись и откажет до распознавания, а не
-      // после двух часов оплаченного STT.
-      const reportedSeconds = Number((message.voice ?? message.audio)?.duration ?? 0);
-      const maxSeconds = reportedSeconds > 0 ? null : await this.voiceBudgetSeconds(update.telegramId);
+      // Остаток минут уходит в media-service с каждой записью: он измерит
+      // её и откажет до распознавания, а не после оплаченного STT. Гейт
+      // хода этого не заменяет: длительность звука, присланного
+      // документом, Telegram не сообщает, а в склеенном ходе такая запись
+      // может съесть остаток раньше голосового, которое гейт уже пропустил.
+      // Части распознаются по очереди, и каждая списывается сразу, поэтому
+      // остаток, прочитанный здесь, уже учитывает предыдущие.
+      const maxSeconds = await this.voiceBudgetSeconds(update.telegramId);
       let transcription;
       try {
         transcription = await this.transcribeVoice(

@@ -606,7 +606,7 @@ async def _route_transcription(
     # Часть должна пройти у каждого провайдера цепочки: Google принимает
     # синхронно около минуты, Gemini — 14 МБ на запрос.
     provider_limit = max_chunk_seconds(route.usable_chain) if route else None
-    if provider_limit:
+    if provider_limit is not None:
         chunk_seconds = min(chunk_seconds, provider_limit)
     try:
         chunks = await split_to_asr_wav(source, work / "asr-parts", chunk_seconds)

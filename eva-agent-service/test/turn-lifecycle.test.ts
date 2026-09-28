@@ -1729,7 +1729,7 @@ test("запись длиннее оставшихся минут не уход�
   assert.equal(fits.transcribed.length, 1);
 });
 
-test("звук документом без длительности распознаётся в пределах остатка минут", async () => {
+test("каждая запись распознаётся в пределах остатка минут, прочитанного перед ней", async () => {
   // Telegram не сообщает длительность документа: гейт хода её не знает.
   // Остаток уходит в media-service, и тот отказывает до распознавания.
   const store = new TurnStore();
@@ -1753,7 +1753,8 @@ test("звук документом без длительности распоз
   assert.equal(probe.prompts.length, 0, "ход дошёл до Евы без расшифровки");
   assert.equal([...store.rows.values()][0]!.cancel_reason, "quota_voice");
 
-  // Длительность известна — предел уже проверен гейтом и не передаётся.
+  // Длительность известна — остаток всё равно передаётся: в склеенном
+  // ходе запись без длительности могла съесть его раньше.
   const known = await runTelegramTurn(undefined, {
     quota: [
       { metric: "messages", remaining: 10 },
@@ -1765,7 +1766,17 @@ test("звук документом без длительности распоз
     },
   });
   assert.equal(known.transcribed.length, 1);
-  assert.equal((JSON.parse(known.transcribed[0]!) as { max_seconds?: number }).max_seconds, undefined);
+  assert.equal((JSON.parse(known.transcribed[0]!) as { max_seconds?: number }).max_seconds, 120);
+
+  // Без конечного лимита минут предела нет.
+  const unlimited = await runTelegramTurn(undefined, {
+    attachment: {
+      message: { voice: { file_id: "v-free", duration: 30 } },
+      bytes: PNG_BYTES,
+    },
+  });
+  assert.equal(unlimited.transcribed.length, 1);
+  assert.equal((JSON.parse(unlimited.transcribed[0]!) as { max_seconds?: number }).max_seconds, undefined);
 });
 
 test("свой сервер Bot API снимает облачный предел 20 МБ", async () => {
