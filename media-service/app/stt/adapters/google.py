@@ -480,11 +480,15 @@ class GoogleSttAdapter:
                     continue
                 start_ms = _duration_to_ms(raw.get("startOffset"))
                 end_ms = _duration_to_ms(raw.get("endOffset"))
+                # При diarizationConfig у слова есть speakerLabel; реплики
+                # по говорящим собираются из слов (app/dialogue.py).
+                label = str(raw.get("speakerLabel") or "").strip()
                 words.append(SttWord(
                     text=str(raw.get("word") or ""),
                     start_ms=start_ms,
                     end_ms=end_ms,
                     confidence=_as_float(raw.get("confidence")),
+                    speaker=f"speaker_{label}" if label else None,
                 ))
                 if start_ms is not None:
                     starts.append(start_ms)

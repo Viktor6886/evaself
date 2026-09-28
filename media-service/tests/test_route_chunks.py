@@ -21,7 +21,7 @@ from app.stt.adapters.google_ai_studio import MAX_INLINE_BYTES
 
 
 def _config(provider: str) -> SimpleNamespace:
-    return SimpleNamespace(provider=provider)
+    return SimpleNamespace(provider=provider, params={})
 
 
 def test_chunk_fits_every_provider_of_the_chain():
@@ -95,3 +95,51 @@ def test_budget_is_optional_for_old_agents():
     assert request.max_seconds is None
     with pytest.raises(ValueError):
         main.SttTranscribeRequest(use_case="telegram_audio", file_id="f", max_seconds=-1)
+
+
+class _SpeakerRouter:
+    """Провайдер с разделением голосов: во второй части метки наоборот."""
+
+    def __init__(self) -> None:
+        self.keys: list[str | None] = []
+
+    async def transcribe(self, use_case, audio, *, language=None, idempotency_key=None):
+        from app.stt.types import SttResult, SttSegment
+
+        self.keys.append(idempotency_key)
+        if len(self.keys) == 1:
+            segments = [
+                SttSegment(text="Добрый день.", start_ms=0, end_ms=800, speaker="speaker_0"),
+                SttSegment(text="Здравствуйте.", start_ms=1300, end_ms=1900, speaker="speaker_1"),
+            ]
+        else:
+            segments = [
+                SttSegment(text="Здравствуйте.", start_ms=0, end_ms=233, speaker="speaker_0"),
+                SttSegment(text="Перейдём к делу.", start_ms=500, end_ms=1300, speaker="speaker_1"),
+            ]
+        result = SttResult(
+            text=" ".join(segment.text for segment in segments), provider="deepgram",
+            model="nova-3", latency_ms=1, segments=segments,
+        )
+        return SimpleNamespace(result=result, used_fallback=False, from_cache=False, attempts=[])
+
+
+def test_route_with_diarization_returns_a_stitched_dialogue(tone, tmp_path, monkeypatch):
+    runtime = _Runtime(["deepgram"])
+    runtime._route.usable_chain[0].params = {"diarize": True}
+    router = _SpeakerRouter()
+    monkeypatch.setattr(main, "STT_RUNTIME", runtime)
+    monkeypatch.setattr(main, "STT_ROUTER", router)
+    # Части по 2 с на трёхсекундной записи: две части с общим отрезком.
+    monkeypatch.setattr(main, "max_chunk_seconds", lambda chain: 2)
+    body = asyncio.run(main._route_transcription(tone, tmp_path, "telegram_audio", "ru", "file-1"))
+
+    assert body["chunk_count"] == 2
+    assert body["speakers"] == 2
+    assert body["text"] == (
+        "Голос 1: Добрый день.\n\n"
+        "Голос 2: Здравствуйте.\n\n"
+        "Голос 1: Перейдём к делу."
+    )
+    # Нарезка с перекрытием — свой ключ кэша.
+    assert router.keys == ["file-1:part:00000:o333", "file-1:part:00001:o333"]

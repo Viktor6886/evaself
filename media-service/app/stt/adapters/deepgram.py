@@ -190,6 +190,11 @@ class DeepgramAdapter:
         # keyterm повторяется, а не передаётся массивом.
         for term in params.get("keyterms") or []:
             query.append(("keyterm", str(term)))
+        # Разделение говорящих без utterances возвращает метку только у
+        # слов, а реплики (`results.utterances`) Deepgram присылает лишь по
+        # этому параметру. Без него разбор ниже всегда видел пустой список.
+        if params.get("diarize") and config.mode != "streaming":
+            query.append(("utterances", "true"))
         return query
 
     async def transcribe(
@@ -281,11 +286,13 @@ class DeepgramAdapter:
         for raw in alternative.get("words") or []:
             if not isinstance(raw, dict):
                 continue
+            word_speaker = raw.get("speaker")
             words.append(SttWord(
                 text=str(raw.get("punctuated_word") or raw.get("word") or ""),
                 start_ms=_seconds_to_ms(raw.get("start")),
                 end_ms=_seconds_to_ms(raw.get("end")),
                 confidence=_as_float(raw.get("confidence")),
+                speaker=None if word_speaker is None else f"speaker_{word_speaker}",
             ))
 
         segments: list[SttSegment] = []

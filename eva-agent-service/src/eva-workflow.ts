@@ -54,6 +54,7 @@ import {
 import type { StarsPayments } from "./payments/stars.js";
 import type { QuotaExhaustionNotifier } from "./subscriptions/quota-exhaustion-notifier.js";
 import { quotaAllowsAmount, quotaExhausted, quotaRemaining } from "./subscriptions/quota-policy.js";
+import { WorkDocuments } from "./documents/work-documents.js";
 import type { KnowledgeUploadService } from "./knowledge/lifecycle.js";
 import { recordMessageUsage, recordMessageUsageBatch } from "./subscriptions/usage-ledger.js";
 import { speechTextFromReply } from "./telegram-format.js";
@@ -166,6 +167,8 @@ export class EvaWorkflow {
   private readonly taskEvents: TaskEventService;
   /** Разбор вложений: общий с приёмом в базу знаний. */
   private readonly attachments: TelegramAttachmentReader;
+  /** Полная расшифровка на сутки: по ней Ева переделывает документ. */
+  private readonly workDocuments: WorkDocuments;
   /**
    * Приём в базу знаний. Появляется после сборки слоя заданий и только
    * при EVA_KNOWLEDGE_UPLOADS: расшифровка аудиофайла сохраняется тем же
@@ -226,8 +229,9 @@ export class EvaWorkflow {
     private readonly quotaExhaustion?: QuotaExhaustionNotifier,
   ) {
     this.taskEvents = new TaskEventService(db);
+    this.workDocuments = new WorkDocuments(db);
     this.attachments = new TelegramAttachmentReader(telegram, {
-      audioBytes: audioFileLimitBytes(config.telegramApiBaseUrl),
+      audioBytes: audioFileLimitBytes(config.telegramApiBaseUrl, config.audioFileMaxMb),
     });
   }
 
@@ -2021,8 +2025,23 @@ export class EvaWorkflow {
     file: TelegramFile,
     transcription: { text: string; durationSeconds: number },
     english: boolean,
-  ): Promise<{ documentSent: boolean; knowledgeSaved: boolean }> {
+  ): Promise<{ documentSent: boolean; knowledgeSaved: boolean; stored: boolean }> {
     const sourceName = (file.file_name ?? file.title ?? "audio").slice(0, 200);
+    // Полный текст — раньше DOCX: даже если файл не соберётся, Ева сутки
+    // может перечитать расшифровку и прислать её переделанной.
+    let stored = false;
+    try {
+      stored = (await this.workDocuments.saveTranscript(update.telegramId, {
+        title: `${english ? "Transcript" : "Расшифровка"}: ${sourceName}`,
+        content: transcription.text,
+        sourceName,
+        idempotencyKey: `telegram-audio:${update.updateId}`,
+      })) !== null;
+    } catch (error) {
+      this.logger.warn("Расшифровка не сохранена на сутки", {
+        code: error instanceof Error ? error.name : "unknown_error",
+      });
+    }
     // Имя файла человеку: без расширения исходника, без символов, которые
     // не пропустит файловая система, и без управляющих.
     const base = [...sourceName.replace(/\.[^.]+$/u, "")]
@@ -2053,7 +2072,7 @@ export class EvaWorkflow {
       this.logger.warn("DOCX расшифровки не собран", {
         code: error instanceof Error ? error.message.slice(0, 40) : "unknown_error",
       });
-      return { documentSent: false, knowledgeSaved: false };
+      return { documentSent: false, knowledgeSaved: false, stored };
     }
 
     let knowledgeSaved = false;
@@ -2086,7 +2105,7 @@ export class EvaWorkflow {
         code: error instanceof Error ? error.name : "unknown_error",
       });
     }
-    return { documentSent, knowledgeSaved };
+    return { documentSent, knowledgeSaved, stored };
   }
 
   /**

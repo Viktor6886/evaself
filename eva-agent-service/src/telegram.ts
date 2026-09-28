@@ -350,6 +350,8 @@ export function nextLivePrefix(
 
 export class TelegramClient implements OutboxTransport {
   private token: string;
+  /** media-service: через него агент читает файлы своего сервера Bot API. */
+  private readonly media: { url: string; token: string };
   private readonly baseUrl: string;
   private readonly logger: Logger;
   private readonly db: Database | null;
@@ -385,6 +387,10 @@ export class TelegramClient implements OutboxTransport {
   constructor(config: Config, logger: Logger, db?: Database) {
     this.token = config.telegramBotToken;
     this.baseUrl = config.telegramApiBaseUrl.replace(/\/+$/, "");
+    this.media = {
+      url: (config.mediaServiceUrl ?? "").replace(/\/+$/, ""),
+      token: config.mediaServiceToken ?? "",
+    };
     this.logger = logger;
     this.db = db ?? null;
     this.stickerCatalog = config.telegramStickerCatalog;
@@ -1381,7 +1387,21 @@ export class TelegramClient implements OutboxTransport {
     if (!file.file_path) throw new Error("Telegram getFile не вернул file_path");
     if ((file.file_size ?? 0) > limit) throw new TelegramFileTooLarge(file.file_size ?? 0, limit);
 
-    const response = await fetch(`${this.baseUrl}/file/bot${this.token}/${file.file_path}`);
+    // Свой сервер Bot API в локальном режиме отдаёт путь на своём диске и
+    // по HTTP файлы не раздаёт. Диск смонтирован одному media-service: он
+    // и забирает файл, и удаляет оригинал после чтения.
+    const local = file.file_path.startsWith("/");
+    const response = local
+      ? await fetch(`${this.media.url}/telegram/file`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(this.media.token ? { "x-media-key": this.media.token } : {}),
+        },
+        body: JSON.stringify({ file_id: fileId, max_bytes: limit }),
+      })
+      : await fetch(`${this.baseUrl}/file/bot${this.token}/${file.file_path}`);
+    if (local && response.status === 413) throw new TelegramFileTooLarge(file.file_size ?? limit + 1, limit);
     if (!response.ok) throw new Error(`Telegram file download: HTTP ${response.status}`);
     const declared = Number(response.headers.get("content-length") ?? 0);
     if (Number.isFinite(declared) && declared > limit) throw new TelegramFileTooLarge(declared, limit);
@@ -1409,8 +1429,10 @@ export class TelegramClient implements OutboxTransport {
     }
     return {
       bytes,
-      path: file.file_path,
-      contentType: response.headers.get("content-type"),
+      path: local ? file.file_path.split("/").at(-1) ?? "file" : file.file_path,
+      // Тип локального файла media-service не знает: его определяют по
+      // содержимому и имени, как и у облачного ответа без заголовка.
+      contentType: local ? null : response.headers.get("content-type"),
     };
   }
 

@@ -3,6 +3,56 @@
 Оперативное состояние работы. Единственный источник истины о том, где работа
 остановилась. Агент читает этот файл первым и обновляет его после каждого шага.
 
+## Аудиофайлы до 350 МБ, голоса в диалоге, переделка документа — 2026-09-28
+
+Ветка: `claude/evaself-architecture-improvements-3d7d2s`. Статус: выполнен,
+PR [#385](https://github.com/Viktor6886/evaself/pull/385): CI зелёный,
+независимое ревью — три «да», замечания Codex исправлены.
+
+Задание человека: файл до 350 МБ в Telegram → части не больше 20 МБ →
+распознавание → сшитый DOCX в чат; «сделай тезисами» — Ева переделывает и
+присылает новым файлом; диалог размечен «Голос 1, 2, 3»; аудио удаляется
+после отправки, DOCX — через сутки.
+
+- [x] Свой сервер Bot API (профиль `bot-api`, `telegram-bot-api/Dockerfile`,
+  `scripts/telegram-local-bot-api.sh`, `docs/telegram-bot-api.md`):
+  облачный отдаёт ботам только до 20 МБ. Прежнее скачивание по
+  `/file/bot…` со своим сервером не работало вовсе — он отдаёт путь на
+  диске. media-service забирает файл с общего тома и удаляет оригинал;
+  агент читает файлы через `POST /telegram/file`.
+- [x] Пределы: `EVA_AUDIO_FILE_MAX_MB=350`, `MEDIA_MAX_UPLOAD_MB=350`;
+  часть — не больше 20 МБ (`MAX_PART_BYTES`, тест).
+- [x] Голоса: Deepgram запрашивает `utterances` (без них реплик не было),
+  слова Deepgram и Google несут метку; перекрытие частей и сшивка голосов
+  (`media-service/app/dialogue.py`); DOCX с жирной меткой говорящего.
+- [x] Документы на сутки: миграция 089 `work_documents` (проверка
+  эквивалента — в заголовке), `document_read` / `document_send` под
+  `EVA_AUDIO_FILE_TRANSCRIPTS`, `POST /document/docx`; удаление по сроку —
+  таймер агента, байты DOCX — из outbox после доставки.
+- [x] Навыки `audio-transcripts`, `user-materials`.
+
+Проверки (2026-09-28):
+
+```
+eva-agent-service: npm test → PASS (1592, 0 fail, 8 skip — нужен PostgreSQL); typecheck, lint → PASS
+media-service: pytest → PASS (178, ffmpeg 7.1 static); ruff → PASS
+make validate → PASS
+python3 scripts/ci/assert-tenant-scope.py, assert-env-plumbing.py, assert-doc-paths.py, assert-down-migrations.py → PASS
+миграции на PostgreSQL 17 (pgvector 0.8.5): 3 прогона, откат и повтор 089 → PASS
+SQL work_documents и вычистка DOCX в outbox на настоящей базе → PASS
+telegram-bot-api: образ собран, сервер стартует под uid 10002, порт 8081 → PASS
+```
+
+Замечания Codex к #385: байты DOCX вычищаются и при переводе в `dead` по
+истечении аренды воркера (общий запрос для обеих выборок outbox); копия
+файла своего сервера Bot API идёт в рабочем потоке, не останавливая
+media-service. Оба теста падают без правки.
+
+Длина записи по-прежнему ограничена двумя часами (`MEDIA_MAX_AUDIO_SECONDS`,
+предел сценария `telegram_audio` в панели) и остатком минут тарифа.
+Включить свой сервер Bot API может только человек: нужны `api_id` и
+`api_hash` с my.telegram.org и выход бота из облака (`logOut`).
+
 ## Замечания ревью к переносу аудиофайлов (#379) — 2026-09-28
 
 Ветка: `claude/evaself-architecture-improvements-3d7d2s`. Статус: выполнен,

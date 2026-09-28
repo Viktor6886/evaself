@@ -143,6 +143,10 @@ class SttWord:
     start_ms: int | None = None
     end_ms: int | None = None
     confidence: float | None = None
+    # Метка говорящего, если провайдер разделял голоса. Своя у каждого
+    # запроса: «speaker_0» одной части записи — не обязательно тот же
+    # человек в следующей (сшивка — app/dialogue.py).
+    speaker: str | None = None
 
     def as_dict(self) -> dict:
         out: dict = {"text": self.text}
@@ -152,6 +156,8 @@ class SttWord:
             out["end_ms"] = self.end_ms
         if self.confidence is not None:
             out["confidence"] = self.confidence
+        if self.speaker is not None:
+            out["speaker"] = self.speaker
         return out
 
 

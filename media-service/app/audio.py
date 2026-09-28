@@ -136,6 +136,59 @@ async def split_to_asr_wav(
         )
     return parts
 
+async def split_with_overlap(
+    source: Path,
+    directory: Path,
+    part_seconds: float,
+    overlap_seconds: float,
+    duration_seconds: float,
+) -> list[Path]:
+    """Нарезать запись на части WAV 16 кГц моно с общим отрезком между соседними.
+
+    Часть i начинается в i·(P − O) и длится P. Перекрытие нужно, чтобы
+    сопоставить говорящих соседних частей (app/dialogue.py); сегментный
+    муксер ffmpeg перекрытий не умеет, поэтому каждая часть вырезается
+    своим вызовом. Поиск по входу при перекодировании точен до отсчёта.
+    """
+    step = part_seconds - overlap_seconds
+    if step <= 0:
+        raise MediaError("перекрытие частей не меньше самой части")
+    directory.mkdir(parents=True, exist_ok=True)
+    parts: list[Path] = []
+    index = 0
+    while True:
+        start = index * step
+        # Хвост короче перекрытия уже целиком в предыдущей части.
+        if index > 0 and start + overlap_seconds >= duration_seconds:
+            break
+        target = directory / f"part-{index:05d}.wav"
+        code, _stdout, stderr = await _run(
+            FFMPEG,
+            "-hide_banner", "-loglevel", "error",
+            "-y",
+            "-ss", f"{start:.3f}",
+            "-t", f"{part_seconds:.3f}",
+            "-i", str(source),
+            "-map", "0:a:0",
+            "-vn",
+            "-ac", "1",
+            "-ar", str(ASR_SAMPLE_RATE),
+            "-c:a", "pcm_s16le",
+            str(target),
+            timeout=300,
+        )
+        if code != 0 or not target.exists():
+            raise MediaError(
+                "не удалось нарезать запись на части",
+                details=stderr.decode(errors="replace")[:500],
+            )
+        parts.append(target)
+        index += 1
+        if start + part_seconds >= duration_seconds:
+            break
+    return parts
+
+
 async def make_test_tone(destination: Path, seconds: float = 1.0) -> Path:
     """Короткий корректный WAV для проверки тракта распознавания.
 

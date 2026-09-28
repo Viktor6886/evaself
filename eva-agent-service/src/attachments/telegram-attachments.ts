@@ -66,13 +66,17 @@ export const DEFAULT_ATTACHMENT_LIMITS: AttachmentLimits = {
  *
  * Облачный Bot API отдаёт ботам файлы до 20 МБ — это час-полтора сжатой
  * речи, и запись больше этого нечего и начинать распознавать. Свой
- * сервер Bot API (`EVA_TELEGRAM_API_BASE_URL`) отдаёт до 2 ГБ; тогда
- * предел — у media-service (MEDIA_MAX_UPLOAD_MB), и отказ придёт от него.
+ * сервер Bot API (`EVA_TELEGRAM_API_BASE_URL`, docs/telegram-bot-api.md)
+ * отдаёт файлы любого размера; предел тогда задаёт установка —
+ * `EVA_AUDIO_FILE_MAX_MB`, по умолчанию 350 МБ.
  */
-export function audioFileLimitBytes(telegramApiBaseUrl: string | undefined): number {
+export function audioFileLimitBytes(
+  telegramApiBaseUrl: string | undefined,
+  maxMegabytes = 350,
+): number {
   const url = (telegramApiBaseUrl ?? "").trim();
   const cloud = url === "" || /^https:\/\/api\.telegram\.org\/?$/i.test(url);
-  return (cloud ? 20 : 2_000) * 1024 * 1024;
+  return (cloud ? 20 : Math.max(1, maxMegabytes)) * 1024 * 1024;
 }
 
 /**
@@ -232,7 +236,7 @@ export function audioFileTranscript(
   transcript: string,
   durationSeconds: number,
   limits: Pick<AttachmentLimits, "documentCharacters"> = DEFAULT_ATTACHMENT_LIMITS,
-  archive: { documentSent?: boolean; knowledgeSaved?: boolean } = {},
+  archive: { documentSent?: boolean; knowledgeSaved?: boolean; stored?: boolean } = {},
 ): string {
   const name = (file.file_name ?? file.title ?? "аудио").slice(0, 200);
   const cut = transcript.length > limits.documentCharacters;
@@ -242,6 +246,11 @@ export function audioFileTranscript(
     ...(archive.documentSent ? ["полная расшифровка отправлена человеку файлом DOCX"] : []),
     ...(archive.knowledgeSaved
       ? ["она сохранена в базе знаний человека — позже по записи ищи через knowledge_search"]
+      : []),
+    // Ход несёт расшифровку обрезанной; полный текст — только здесь.
+    ...(archive.stored
+      ? ["полный текст хранится сутки: перечитывай его document_read, "
+        + "переделанный документ (тезисы, конспект, протокол) присылай document_send"]
       : []),
   ];
   return [
