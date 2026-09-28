@@ -70,6 +70,21 @@ const INFINITIVE_LINKS = new Set(["быть", "стать", "оставатьс�
 /** Кто может говорить перед «быть»: только сама Ева. */
 const SELF_MARKERS = new Set(["я", "мне", "буду", "хочу", "могу", "постараюсь", "стану"]);
 
+/**
+ * Слово, которому подчиняется «быть …»: роль тогда — того же лица.
+ * «Я рада быть твоей подругой», но «я помогу тебе стать хорошим
+ * помощником» — роль человека, и «я попрошу его быть наставником» — чужая.
+ */
+const SELF_CONTROLLERS = new Set([
+  "рада", "рад", "счастлива", "счастлив", "готова", "готов", "хочу", "хотела", "хотел",
+  "хотелось", "могу", "могла", "мог", "буду", "постараюсь", "стараюсь", "люблю",
+  "продолжу", "продолжаю", "должна", "должен", "согласна", "согласен", "попробую",
+  "нравится", "приятно", "важно",
+]);
+
+/** Между управляющим словом и «быть» — только частицы и наречия. */
+const CONTROL_FILLERS = new Set(["бы", "не", "очень", "всегда", "просто", "снова", "и", "дальше", "ещё", "еще"]);
+
 /** Чужое подлежащее между первым лицом и связкой: «я хочу, чтобы он был…». */
 const OTHER_SUBJECTS = new Set(["ты", "вы", "он", "она", "они", "мы", "оно"]);
 
@@ -230,6 +245,9 @@ export function selfRoleEdits(
       const words = clause.toLocaleLowerCase("ru").split(/[^а-яё-]+/u).filter(Boolean);
       const self = words.findLastIndex((word) => SELF_MARKERS.has(word));
       if (self < 0 || words.slice(self).some((word) => OTHER_SUBJECTS.has(word))) continue;
+      let head = words.length - 1;
+      while (head > self && CONTROL_FILLERS.has(words[head]!)) head -= 1;
+      if (!SELF_CONTROLLERS.has(words[head] ?? "")) continue;
     } else if (!FIRST_PERSON_LINKS.has(link)) {
       continue;
     }

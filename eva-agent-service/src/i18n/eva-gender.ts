@@ -50,6 +50,8 @@ import {
   REPORTED_SPEECH,
   USER_FILLERS,
   USER_QUESTION_OPENERS,
+  SELF_FOLLOWERS,
+  INFINITIVE,
 } from "./eva-gender-lexicon.js";
 import { selfRoleEdits } from "./eva-self-role.js";
 
@@ -168,6 +170,36 @@ function isFeminineSelf(word: string, next: string): boolean {
   const masculine = masculineForm(word);
   if (!masculine) return false;
   return OPENERS.has(masculine.toLocaleLowerCase("ru")) || isSelfPastPredicate(masculine, next);
+}
+
+/**
+ * «Сам» и «один» после «я» — о Еве, когда за ними её сказуемое, частица,
+ * местоимение или конец группы: «я сама не знаю», «я одна справлюсь»,
+ * «я сам.». Перед существительным — о нём: «один раз», «сам процесс».
+ */
+function determinerAgrees(rest: string): boolean {
+  if (/^\s*(?:[.!?…,;:)—–]|$)/u.test(rest)) return true;
+  const [, next = "", after = ""] = /^\s*([А-ЯЁа-яё-]+)(?:\s+([А-ЯЁа-яё-]+))?/u.exec(rest) ?? [];
+  const lower = next.toLocaleLowerCase("ru");
+  if (SELF_FOLLOWERS.has(lower) || FIRST_PERSON.has(lower)) return true;
+  // Первое лицо настоящего и будущего: «справлюсь», «проверю», «пойду».
+  if (/(?:ю|у|юсь|усь)$/u.test(lower)) return true;
+  if (IRREGULAR.has(lower) && !describesOther(lower) && !DETERMINERS.has(lower)) return true;
+  return isSelfPastPredicate(next, after) || isFeminineSelf(next, after);
+}
+
+/** Краткое прилагательное или причастие, а не глагол: «готов», «рад», «уверен». */
+function isShortForm(word: string): boolean {
+  const lower = word.toLocaleLowerCase("ru");
+  const known = IRREGULAR.has(lower) || REVERSE_IRREGULAR.has(lower);
+  return known && !describesOther(lower) && !DETERMINERS.has(lower)
+    && !/(?:[лгзк]|ла|ся|сь)$/u.test(lower);
+}
+
+/** За краткой формой — её дополнение, а не подлежащее: «готова помочь», «рада за тебя». */
+function shortFormIsSelf(following: string): boolean {
+  const lower = following.toLocaleLowerCase("ru");
+  return !lower || SELF_FOLLOWERS.has(lower) || INFINITIVE.test(lower);
 }
 
 const CLAUSE_TOKEN = /([,—–:;(])|([а-яёА-ЯЁ-]+)/gu;
@@ -425,8 +457,11 @@ export function feminizeSelfReference(input: string): GenderFix {
       }
       // «Я сама не уверена», «я одна не справлюсь»: определитель при «я»
       // согласуется с Евой, а сказуемое стоит дальше.
+      // «Я один раз попробовала», «я сам процесс проверила»: перед
+      // существительным определитель — о нём, и род его; разбор идёт
+      // дальше, к сказуемому.
       if (step < MAX_SELF_FILLERS && (DETERMINERS.has(lowerWord) || lowerWord === "сама" || lowerWord === "одна")) {
-        add(wordAt, word, true);
+        if (determinerAgrees(input.slice(wordAt + word.length))) add(wordAt, word, true);
         previous = lowerWord;
         cursor = next.index + next[0].length;
         continue;
@@ -480,6 +515,9 @@ export function feminizeSelfReference(input: string): GenderFix {
     // Подлежащее после глагола стоит без запятой: «Сделал он». После
     // запятой начинается другое: «Проверила, всё ли работает».
     const following = /^\s*([А-ЯЁа-яё-]+)/u.exec(after)?.[1] ?? "";
+    // «Готов отчёт», «Не готов сервер»: краткая форма без «я» — о Еве,
+    // только когда за ней не стоит её собственное подлежащее.
+    if (isShortForm(word) && !shortFormIsSelf(following)) continue;
     const feminine = isFeminineSelf(word, following);
     if (!feminine && !isSelfPastPredicate(word, following)) continue;
     // «Получил ответ пользователь»: подлежащее после дополнения.
