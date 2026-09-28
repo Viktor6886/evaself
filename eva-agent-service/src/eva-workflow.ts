@@ -53,7 +53,7 @@ import {
 } from "./i18n/eva-gender.js";
 import type { StarsPayments } from "./payments/stars.js";
 import type { QuotaExhaustionNotifier } from "./subscriptions/quota-exhaustion-notifier.js";
-import { quotaAllowsAmount, quotaExhausted } from "./subscriptions/quota-policy.js";
+import { quotaAllowsAmount, quotaExhausted, quotaRemaining } from "./subscriptions/quota-policy.js";
 import type { KnowledgeUploadService } from "./knowledge/lifecycle.js";
 import { recordMessageUsage, recordMessageUsageBatch } from "./subscriptions/usage-ledger.js";
 import { speechTextFromReply } from "./telegram-format.js";
@@ -76,7 +76,7 @@ import {
  * Техническая причина остаётся в message и уходит только в лог.
  */
 export class VoiceTranscriptionError extends Error {
-  constructor(reason: string, readonly reported = false) {
+  constructor(reason: string, readonly reported = false, readonly code?: string) {
     super(reason);
     this.name = "VoiceTranscriptionError";
   }
@@ -762,10 +762,14 @@ export class EvaWorkflow {
           // просто этим сообщением. Технический текст провайдера сюда
           // не попадает, он остался в логе.
           if (error instanceof VoiceTranscriptionError) {
+            const overBudget = error.code === STT_OVER_BUDGET;
             if (!error.reported) {
-              await this.telegram.sendMessage(update.chatId, t(language, "voiceFailed"));
+              await this.telegram.sendMessage(
+                update.chatId,
+                t(language, overBudget ? "voiceQuotaTooShort" : "voiceFailed"),
+              );
             }
-            await this.stopTurn(turnHandle, "voice_transcription_failed");
+            await this.stopTurn(turnHandle, overBudget ? "quota_voice" : "voice_transcription_failed");
             return { status: "ignored" };
           }
           // Вложение, которое не прочиталось, — это ответ человеку, а не
@@ -1716,11 +1720,18 @@ export class EvaWorkflow {
     }
   }
 
+  /** Сколько секунд речи ещё помещается в квоту минут; null — без предела. */
+  private async voiceBudgetSeconds(telegramId: number): Promise<number | null> {
+    const remaining = quotaRemaining(await this.db.getQuotaStatus(telegramId), "voice_minutes");
+    return remaining === null ? null : remaining * 60;
+  }
+
   private async transcribeVoice(
     useCase: "telegram_voice" | "telegram_audio" | "webapp_voice_message",
     fileId: string,
     idempotencyKey: string | null,
     language: string,
+    maxSeconds: number | null = null,
   ): Promise<{
     text: string;
     durationSeconds: number;
@@ -1744,6 +1755,7 @@ export class EvaWorkflow {
             file_id: fileId,
             language,
             idempotency_key: idempotencyKey,
+            ...(maxSeconds === null ? {} : { max_seconds: maxSeconds }),
           }),
           // Двухчасовая запись распознаётся полутора десятками частей
           // подряд: пяти минут голосового ей не хватит.
@@ -1780,7 +1792,11 @@ export class EvaWorkflow {
         error_code: body.error?.code ?? `http_${response.status}`,
         message: body.error?.message?.slice(0, 200),
       });
-      throw new VoiceTranscriptionError(body.error?.message ?? `HTTP ${response.status}`);
+      throw new VoiceTranscriptionError(
+        body.error?.message ?? `HTTP ${response.status}`,
+        false,
+        body.error?.code,
+      );
     }
     if (!body.text?.trim()) {
       // Пустая расшифровка — это не сбой тракта, а тишина в записи.
@@ -1862,6 +1878,12 @@ export class EvaWorkflow {
         ).then((sent) => telegramMessageIdOf(sent[sent.length - 1])).catch(() => null);
       }, 600);
       statusTimer.unref?.();
+      // Длительность звука, присланного документом, Telegram не сообщает,
+      // и гейт хода не мог сверить её с остатком минут. Остаток уходит в
+      // media-service: он измерит запись и откажет до распознавания, а не
+      // после двух часов оплаченного STT.
+      const reportedSeconds = Number((message.voice ?? message.audio)?.duration ?? 0);
+      const maxSeconds = reportedSeconds > 0 ? null : await this.voiceBudgetSeconds(update.telegramId);
       let transcription;
       try {
         transcription = await this.transcribeVoice(
@@ -1875,15 +1897,19 @@ export class EvaWorkflow {
           // дважды.
           file.file_unique_id ?? null,
           message.from?.language_code ?? "ru",
+          maxSeconds,
         );
       } catch (error) {
         settled = true;
         clearTimeout(statusTimer);
         const statusId = status.promise ? await status.promise.catch(() => null) : null;
         if (statusId !== null) {
-          const failureText = asFile
-            ? english ? "I could not transcribe that audio file." : "Не удалось распознать аудиофайл."
-            : english ? "I could not transcribe that voice message." : "Не удалось распознать голосовое.";
+          const overBudget = error instanceof VoiceTranscriptionError && error.code === STT_OVER_BUDGET;
+          const failureText = overBudget
+            ? t(english ? "en" : "ru", "voiceQuotaTooShort")
+            : asFile
+              ? english ? "I could not transcribe that audio file." : "Не удалось распознать аудиофайл."
+              : english ? "I could not transcribe that voice message." : "Не удалось распознать голосовое.";
           const edited = await this.telegram.editPlainMessage(
             update.chatId,
             statusId,
@@ -1895,6 +1921,7 @@ export class EvaWorkflow {
           throw new VoiceTranscriptionError(
             error instanceof Error ? error.message : "transcription_failed",
             true,
+            overBudget ? STT_OVER_BUDGET : undefined,
           );
         }
         throw error;
@@ -2145,19 +2172,24 @@ function isSpeech(kind: NormalizedUpdate["kind"]): boolean {
 
 const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
+/** Код media-service: запись длиннее переданного остатка минут. */
+const STT_OVER_BUDGET = "stt_audio_over_budget";
+
 /**
  * Минуты распознавания, известные до него: Telegram сообщает
  * длительность голосового и аудиофайла. У звука, присланного документом,
  * длительности нет — такие части не считаются, их спишет само распознавание.
  */
 export function speechMinutesKnown(parts: Array<Pick<NormalizedUpdate, "kind" | "message">>): number {
-  let seconds = 0;
+  // Списание идёт по каждой записи отдельно и с округлением вверх до
+  // минуты: два голосовых по 30 секунд стоят две минуты, а не одну.
+  let minutes = 0;
   for (const part of parts) {
     if (!isSpeech(part.kind)) continue;
     const duration = Number((part.message.voice ?? part.message.audio)?.duration ?? 0);
-    if (Number.isFinite(duration) && duration > 0) seconds += duration;
+    if (Number.isFinite(duration) && duration > 0) minutes += Math.max(1, Math.ceil(duration / 60));
   }
-  return seconds > 0 ? Math.ceil(seconds / 60) : 0;
+  return minutes;
 }
 
 export function normalizeUpdate(

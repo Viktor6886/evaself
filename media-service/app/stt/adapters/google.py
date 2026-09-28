@@ -68,6 +68,11 @@ REQUIRED_CREDENTIAL_FIELDS = (
     "type", "project_id", "private_key", "client_email", "token_uri",
 )
 
+# Синхронный recognize принимает около минуты звука и не больше 10 МБ.
+# Длинная запись режется на части не длиннее этого: 55 секунд PCM 16 кГц
+# моно — около 1,8 МБ, с запасом на обе границы.
+MAX_WAV_SECONDS = 55
+
 CAPABILITIES = SttCapabilities(
     batch=True,
     streaming=True,
