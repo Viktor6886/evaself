@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 from pathlib import Path
@@ -48,7 +49,12 @@ async def fetch_telegram_file(
         raise MediaError("getFile не вернул file_path")
 
     if file_path.startswith("/"):
-        return take_local_file(Path(file_path), work, max_bytes, root=local_root or LOCAL_FILES_DIR)
+        # Копия до 350 МБ между томами — секунды блокирующего ввода-вывода.
+        # В потоке: иначе на это время встал бы весь сервис, вместе с
+        # проверкой здоровья и чужими распознаваниями.
+        return await asyncio.to_thread(
+            take_local_file, Path(file_path), work, max_bytes, root=local_root or LOCAL_FILES_DIR
+        )
 
     target = work / Path(file_path).name
     async with http.stream("GET", f"{api_base}/file/bot{token}/{file_path}") as stream:

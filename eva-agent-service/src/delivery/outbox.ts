@@ -309,19 +309,7 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
     const busy = [...this.busy];
     return await this.db.withSystemScope("telegram.outbox.claim.batch", async () =>
       await this.db.transaction(async (client) => {
-        await client.query(
-          `
-            -- tenant: system — durable delivery: строки берутся по id и аренде воркера, а не по запросу пользователя
-            UPDATE telegram_outbox
-              SET status = 'dead',
-                  last_error = COALESCE(last_error, 'worker lease expired after final attempt'),
-                  locked_at = NULL,
-                  locked_by = NULL
-            WHERE status = 'sending'
-              AND attempts >= $2
-              AND locked_at < now() - make_interval(secs => $1)`,
-          [Math.max(30, this.options.leaseSeconds), Math.max(1, this.options.maxAttempts)],
-        );
+        await this.expireFinalLeases(client);
         const { rows } = await client.query<OutboxRow & { priority: number }>(
           `
             -- tenant: system — durable delivery: строки берутся по id и аренде воркера, а не по запросу пользователя
@@ -422,25 +410,35 @@ export class PostgresTelegramOutbox implements OutboxDelivery {
     }
   }
 
+  /**
+   * Строка, чей воркер пропал на последней попытке, становится `dead` —
+   * одним запросом для обеих выборок: разойдись они, одна из них хранила
+   * бы байты недоставленного DOCX весь срок хранения очереди.
+   */
+  private async expireFinalLeases(client: { query: Database["query"] }): Promise<void> {
+    await client.query(
+      `
+        -- tenant: system — durable delivery: строки берутся по id и аренде воркера, а не по запросу пользователя
+        UPDATE telegram_outbox
+          SET status = 'dead',
+              last_error = COALESCE(last_error, 'worker lease expired after final attempt'),
+              -- Окончательно не доставленный файл повторно не отправится;
+              -- текст документа сутки лежит в work_documents.
+              payload = CASE WHEN telegram_method = 'sendDocument'
+                THEN payload - 'document_base64' ELSE payload END,
+              locked_at = NULL,
+              locked_by = NULL
+        WHERE status = 'sending'
+          AND attempts >= $2
+          AND locked_at < now() - make_interval(secs => $1)`,
+      [Math.max(30, this.options.leaseSeconds), Math.max(1, this.options.maxAttempts)],
+    );
+  }
+
   private async claimNext(): Promise<OutboxRow | null> {
     return await this.db.withSystemScope("telegram.outbox.worker", async () =>
       await this.db.transaction(async (client) => {
-      await client.query(
-        `
-          -- tenant: system — durable delivery: строки берутся по id и аренде воркера, а не по запросу пользователя
-          UPDATE telegram_outbox
-            SET status = 'dead',
-                last_error = COALESCE(last_error, 'worker lease expired after final attempt'),
-                locked_at = NULL,
-                locked_by = NULL
-          WHERE status = 'sending'
-            AND attempts >= $2
-            AND locked_at < now() - make_interval(secs => $1)`,
-        [
-          Math.max(30, this.options.leaseSeconds),
-          Math.max(1, this.options.maxAttempts),
-        ],
-      );
+      await this.expireFinalLeases(client);
       const { rows } = await client.query<OutboxRow>(
         `
           -- tenant: system — durable delivery: строки берутся по id и аренде воркера, а не по запросу пользователя

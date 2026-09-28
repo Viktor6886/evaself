@@ -72,3 +72,41 @@ def test_absolute_file_path_from_get_file_is_read_from_disk(tmp_path: Path):
     # Скачивания по /file/ нет: локальный сервер файлы по HTTP не раздаёт.
     assert requested == ["/botTOKEN/getFile"]
     assert not original.exists()
+
+
+def test_local_copy_does_not_stall_the_event_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Пока копируется большая запись, сервис отвечает на другие запросы.
+
+    Копия ждёт сигнала от соседней корутины. Если бы копирование шло в
+    самом цикле событий, корутина не получила бы хода и копия упала бы по
+    сроку ожидания — это и был бы вставший сервис.
+    """
+    import threading
+
+    from app import telegram_files
+
+    released = threading.Event()
+
+    def slow_take(path: Path, work: Path, max_bytes: int, *, root: Path) -> Path:
+        assert released.wait(timeout=5), "цикл событий стоял, пока шло копирование"
+        return work / path.name
+
+    monkeypatch.setattr(telegram_files, "take_local_file", slow_take)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=json.dumps(
+            {"ok": True, "result": {"file_id": "f", "file_path": "/var/lib/telegram-bot-api/a.mp3"}}
+        ))
+
+    async def neighbour() -> None:
+        released.set()
+
+    async def run() -> Path:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            copy, _ = await asyncio.gather(
+                fetch_telegram_file(http, "http://telegram-bot-api:8081", "TOKEN", "f", tmp_path, 1024),
+                neighbour(),
+            )
+            return copy
+
+    assert asyncio.run(run()) == tmp_path / "a.mp3"

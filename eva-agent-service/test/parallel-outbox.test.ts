@@ -90,6 +90,8 @@ interface OutboxRecord {
   priority: number;
   available_at: number;
   locked_by: string | null;
+  /** Аренда воркера истекла: сам воркер пропал, строку никто не завершит. */
+  lease_expired?: boolean;
 }
 
 interface Probe {
@@ -102,7 +104,18 @@ function outboxHarness(probe: Probe, options: Record<string, unknown> = {}) {
   const query = async (sql: string, values: unknown[] = []): Promise<{ rows: unknown[] }> => {
     const text = sql.replace(/--[^\n]*/g, " ").replace(/\s+/g, " ").trim();
 
-    if (text.startsWith("UPDATE telegram_outbox SET status = 'dead'")) return { rows: [] };
+    if (text.startsWith("UPDATE telegram_outbox SET status = 'dead'")) {
+      for (const row of probe.rows) {
+        if (row.status !== "sending" || row.attempts < Number(values[1]) || !row.lease_expired) continue;
+        row.status = "dead";
+        row.locked_by = null;
+        // Повторяет вычистку байтов файла из настоящего запроса, если она там есть.
+        if (text.includes("payload - 'document_base64'") && row.telegram_method === "sendDocument") {
+          delete row.payload.document_base64;
+        }
+      }
+      return { rows: [] };
+    }
 
     if (text.includes("SELECT t.id, t.telegram_method")) {
       const busy = new Set((values[3] as string[]).map(String));
@@ -466,4 +479,33 @@ test("байты доставленного DOCX не остаются в оче
   assert.equal(document.payload.document_base64, undefined, "файл остался в очереди после доставки");
   assert.equal(document.payload.filename, "тезисы.docx");
   assert.equal(probe.rows.find((item) => item.id === "2")!.payload.text, "Готово");
+});
+
+test("байты DOCX вычищаются и тогда, когда воркер пропал на последней попытке", async () => {
+  const probe: Probe = {
+    now: 1000,
+    sent: [],
+    rows: [
+      row({
+        id: "1", chat_id: "100", telegram_method: "sendDocument", status: "sending",
+        attempts: 5, locked_by: "пропавший", lease_expired: true,
+        payload: { chat_id: 100, document_base64: "UEsDBA==", filename: "тезисы.docx" },
+      }),
+      row({
+        id: "2", chat_id: "200", status: "sending", attempts: 5, locked_by: "пропавший",
+        lease_expired: true, payload: { chat_id: 200, text: "Готово" },
+      }),
+    ],
+  };
+  const outbox = outboxHarness(probe, { maxAttempts: 5, parallel: { concurrency: 2, limits: null } });
+  await outbox.tick();
+
+  const document = probe.rows.find((item) => item.id === "1")!;
+  assert.equal(document.status, "dead");
+  assert.equal(document.payload.document_base64, undefined, "файл остался в очереди после истечения аренды");
+  assert.equal(document.payload.filename, "тезисы.docx");
+  const message = probe.rows.find((item) => item.id === "2")!;
+  assert.equal(message.status, "dead");
+  assert.equal(message.payload.text, "Готово");
+  assert.equal(probe.sent.length, 0);
 });
