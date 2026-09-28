@@ -25,6 +25,8 @@
  *  - слово, для которого нет надёжного правила, остаётся как есть.
  */
 
+import { selfRoleEdits } from "./eva-self-role.js";
+
 /** Формы, которые не выводятся из окончания: их проще перечислить. */
 const IRREGULAR = new Map<string, string>([
   ["рад", "рада"],
@@ -68,6 +70,30 @@ const IRREGULAR = new Map<string, string>([
   ["польщен", "польщена"],
   ["обеспокоен", "обеспокоена"],
   ["внимателен", "внимательна"],
+  ["недоволен", "недовольна"],
+  ["осторожен", "осторожна"],
+  ["честен", "честна"],
+  ["откровенен", "откровенна"],
+  ["горд", "горда"],
+  ["полон", "полна"],
+  ["знаком", "знакома"],
+  ["поражён", "поражена"],
+  ["поражен", "поражена"],
+  ["потрясён", "потрясена"],
+  ["потрясен", "потрясена"],
+  ["растерян", "растеряна"],
+  ["вдохновлён", "вдохновлена"],
+  ["вдохновлен", "вдохновлена"],
+  ["очарован", "очарована"],
+  ["расположен", "расположена"],
+  // О себе как о программе: «я не обучена», «я создана, чтобы…».
+  ["обучен", "обучена"],
+  ["запрограммирован", "запрограммирована"],
+  ["разработан", "разработана"],
+  ["предназначен", "предназначена"],
+  ["ограничен", "ограничена"],
+  ["лишён", "лишена"],
+  ["лишен", "лишена"],
   ["сам", "сама"],
   ["один", "одна"],
   // Прошедшее время, которое из окончания не выводится.
@@ -193,6 +219,9 @@ const FILLERS = new Set([
   "никогда", "опять", "снова", "теперь", "сегодня", "вчера", "раньше",
   "действительно", "искренне", "сильно", "обязательно", "рядом",
   "внимательно", "полностью", "вполне", "недавно", "всё-таки", "все-таки",
+  // «Я неправильно понял», «я не до конца понял», «я хорошо запомнил».
+  "правильно", "неправильно", "верно", "неверно", "плохо", "хорошо", "до",
+  "конца",
 ]);
 
 /** Сколько служебных слов допускается при согласовании обращения «ты». */
@@ -286,6 +315,32 @@ const ANIMATE_SUBJECTS = new Set([
   "профессор", "декан", "курьер", "сосед", "партнёр", "партнер", "заказчик",
 ]);
 
+/**
+ * Слова словаря, которые о Еве не бывают сказуемым.
+ *
+ * Полные прилагательные и «мужчина», «парень» в словаре ради обращения к
+ * человеку. У Евы за сказуемым они — определение чужого слова: «нашла
+ * хороший вариант», «я не мужчина и не женщина». Правка превращала их в
+ * «хорошая вариант» и «не женщина и не женщина».
+ */
+function describesOther(lower: string): boolean {
+  return /(?:ый|ий|ой)$/u.test(lower) || lower === "мужчина" || lower === "парень";
+}
+
+/**
+ * «Сам» и «один» согласуются с Евой только рядом с «я» или связкой:
+ * «я сама», «была одна». За другим глаголом они относятся к дополнению:
+ * «увидела сам процесс», «выбрала один путь».
+ */
+const DETERMINERS = new Set(["сам", "один"]);
+
+/** Связки: именная часть за ними — о подлежащем. «Была рада». */
+const COPULAS = new Set([
+  "был", "была", "буду", "стал", "стала", "стану", "остался", "осталась",
+  "останусь", "остаюсь", "оказался", "оказалась", "казался", "казалась",
+  "являюсь", "становлюсь",
+]);
+
 /** Притяжательные по форме слова: за ними может стоять существительное. */
 const POSSESSIVE_FILLERS = new Set(["его", "её", "ее", "их"]);
 
@@ -346,6 +401,7 @@ export function isSelfPastPredicate(word: string, next: string): boolean {
  */
 function isSelfContinuation(word: string, next: string): boolean {
   const lower = word.toLocaleLowerCase("ru");
+  if (describesOther(lower) || DETERMINERS.has(lower)) return false;
   // «…, и пришёл он»: подлежащее за сказуемым — чужое, даже когда
   // форма нерегулярная и в общем правиле не проверяется.
   if (next && (next.toLocaleLowerCase("ru") === "ли"
@@ -543,11 +599,13 @@ export function feminizeSelfReference(input: string): GenderFix {
   // Правки собираются по исходному тексту и применяются одной сборкой:
   // менять строку на ходу значит сдвигать смещения следующих совпадений.
   const edits: Edit[] = [];
-  const add = (from: number, word: string): boolean => {
+  const add = (from: number, word: string, complement = false): boolean => {
     if (guarded(from)) return false;
     // «Канал», «файл» — существительные на «-л»: их род не Евы.
     const lowerWord = word.toLocaleLowerCase("ru");
     if (NOUNS_LIKE_PAST.has(lowerWord) || /йл$/u.test(lowerWord)) return false;
+    if (describesOther(lowerWord)) return false;
+    if (DETERMINERS.has(lowerWord) && !complement) return false;
     const fixed = feminineForm(word);
     if (!fixed || fixed === word) return false;
     if (edits.some((edit) => edit.from === from)) return false;
@@ -558,6 +616,9 @@ export function feminizeSelfReference(input: string): GenderFix {
   /** Однородные сказуемые того же подлежащего: «подумала и решила». */
   const continueSeries = (from: number): void => {
     let cursor = from;
+    // Сказуемое, за которым стоит следующее слово: от него зависит,
+    // согласуется ли слово вплотную за ним.
+    let last = (/([А-ЯЁа-яё-]+)\s*$/u.exec(input.slice(0, from))?.[1] ?? "").toLocaleLowerCase("ru");
     for (;;) {
       SERIES.lastIndex = cursor;
       const next = SERIES.exec(input);
@@ -580,10 +641,16 @@ export function feminizeSelfReference(input: string): GenderFix {
       const lower = following.toLocaleLowerCase("ru");
       const afterWord = /^\s*([А-ЯЁа-яё-]+)/u.exec(input.slice(at + following.length))?.[1] ?? "";
       const feminine = isFeminineSelf(following, afterWord);
-      const allowed = (!joined && IRREGULAR.has(lower))
-        || (joined && isSelfContinuation(following, afterWord));
+      // Вплотную за связкой — её именная часть: «была рада», «была одна».
+      // За другим глаголом — только «сам» и «один» в конце группы:
+      // «сделала сама.», но не «увидела сам процесс».
+      const closing = /^\s*(?:[.!?…,;:)]|$)/u.test(input.slice(at + following.length));
+      const complement = !joined && IRREGULAR.has(lower)
+        && (COPULAS.has(last) || (DETERMINERS.has(lower) && closing));
+      const allowed = complement || (joined && isSelfContinuation(following, afterWord));
       if ((!allowed && !feminine) || guarded(at)) break;
-      add(at, following);
+      add(at, following, complement);
+      last = lower;
       cursor = next.index + next[0].length;
     }
   };
@@ -646,6 +713,7 @@ export function feminizeSelfReference(input: string): GenderFix {
     // числе чужое подлежащее, останавливает разбор.
     let cursor = start + match[0].length;
     let possessive = false;
+    let previous = "";
     for (let step = 0; step <= MAX_SELF_FILLERS; step += 1) {
       NEXT_WORD.lastIndex = cursor;
       const next = NEXT_WORD.exec(input);
@@ -653,8 +721,20 @@ export function feminizeSelfReference(input: string): GenderFix {
       const word = next[1] ?? "";
       const wordAt = next.index + next[0].length - word.length;
       if (guarded(wordAt)) break;
-      if (step < MAX_SELF_FILLERS && FILLERS.has(word.toLocaleLowerCase("ru"))) {
-        possessive = POSSESSIVE_FILLERS.has(word.toLocaleLowerCase("ru"));
+      const lowerWord = word.toLocaleLowerCase("ru");
+      // «Я вот что подумал»: «что» после «вот» — не придаточное.
+      const filler = FILLERS.has(lowerWord) || (lowerWord === "что" && previous === "вот");
+      if (step < MAX_SELF_FILLERS && filler) {
+        possessive = POSSESSIVE_FILLERS.has(lowerWord);
+        previous = lowerWord;
+        cursor = next.index + next[0].length;
+        continue;
+      }
+      // «Я сама не уверена», «я одна не справлюсь»: определитель при «я»
+      // согласуется с Евой, а сказуемое стоит дальше.
+      if (step < MAX_SELF_FILLERS && (DETERMINERS.has(lowerWord) || lowerWord === "сама" || lowerWord === "одна")) {
+        add(wordAt, word, true);
+        previous = lowerWord;
         cursor = next.index + next[0].length;
         continue;
       }
@@ -720,6 +800,11 @@ export function feminizeSelfReference(input: string): GenderFix {
     if (!add(wordAt, word) && !feminine) continue;
     continueClause(wordAt + word.length);
     continueSeries(wordAt + word.length);
+  }
+
+  // «Я — твой помощник»: роль, которой Ева себя называет, без глагола.
+  for (const edit of selfRoleEdits(input, guarded, handedOver)) {
+    if (!edits.some((other) => other.from < edit.to && edit.from < other.to)) edits.push(edit);
   }
 
   if (edits.length === 0) return { text: original, corrections: [] };
