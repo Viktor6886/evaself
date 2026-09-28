@@ -6,7 +6,8 @@
 ## Аудиофайлы до 350 МБ, голоса в диалоге, переделка документа — 2026-09-28
 
 Ветка: `claude/evaself-architecture-improvements-3d7d2s`. Статус: выполнен,
-PR [#381](https://github.com/Viktor6886/evaself/pull/381) влит (65861f0).
+PR [#385](https://github.com/Viktor6886/evaself/pull/385): CI зелёный,
+независимое ревью — три «да», замечания Codex исправлены.
 
 Задание человека: файл до 350 МБ в Telegram → части не больше 20 МБ →
 распознавание → сшитый DOCX в чат; «сделай тезисами» — Ева переделывает и
@@ -33,14 +34,19 @@ PR [#381](https://github.com/Viktor6886/evaself/pull/381) влит (65861f0).
 Проверки (2026-09-28):
 
 ```
-eva-agent-service: npm test → PASS (1591, 0 fail, 8 skip — нужен PostgreSQL); typecheck, lint → PASS
-media-service: pytest → PASS (177, ffmpeg 7.1 static); ruff → PASS
+eva-agent-service: npm test → PASS (1592, 0 fail, 8 skip — нужен PostgreSQL); typecheck, lint → PASS
+media-service: pytest → PASS (178, ffmpeg 7.1 static); ruff → PASS
 make validate → PASS
 python3 scripts/ci/assert-tenant-scope.py, assert-env-plumbing.py, assert-doc-paths.py, assert-down-migrations.py → PASS
 миграции на PostgreSQL 17 (pgvector 0.8.5): 3 прогона, откат и повтор 089 → PASS
 SQL work_documents и вычистка DOCX в outbox на настоящей базе → PASS
 telegram-bot-api: образ собран, сервер стартует под uid 10002, порт 8081 → PASS
 ```
+
+Замечания Codex к #385: байты DOCX вычищаются и при переводе в `dead` по
+истечении аренды воркера (общий запрос для обеих выборок outbox); копия
+файла своего сервера Bot API идёт в рабочем потоке, не останавливая
+media-service. Оба теста падают без правки.
 
 Длина записи по-прежнему ограничена двумя часами (`MEDIA_MAX_AUDIO_SECONDS`,
 предел сценария `telegram_audio` в панели) и остатком минут тарифа.
