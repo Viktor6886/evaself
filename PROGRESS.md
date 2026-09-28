@@ -5,8 +5,8 @@
 
 ## Замечания ревью к переносу аудиофайлов (#379) — 2026-09-28
 
-Ветка: `claude/evaself-architecture-improvements-3d7d2s`. Статус: реализация
-и локальные проверки завершены; PR, CI и независимое ревью.
+Ветка: `claude/evaself-architecture-improvements-3d7d2s`. Статус: выполнен,
+PR [#381](https://github.com/Viktor6886/evaself/pull/381) влит (65861f0).
 
 Замечания Codex к #379 пришли после мержа; проверены по коду и
 воспроизведены:
