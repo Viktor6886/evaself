@@ -38,6 +38,8 @@
 eva-agent-service: npm test → PASS (1553, 0 fail, 8 skip — нужен PostgreSQL)
 eva-agent-service: npm run typecheck → PASS; npm run lint → PASS
 test/eva-*.test.ts, letta, turn-lifecycle, persona-ux → PASS (197)
+make validate → PASS
+python3 scripts/ci/assert-tenant-scope.py → PASS
 ```
 
 ## Перенос функций ветки codex/audio-transcript-docx — 2026-09-27
