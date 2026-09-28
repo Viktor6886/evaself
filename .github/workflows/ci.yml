@@ -1348,6 +1348,15 @@ jobs:
             --build-arg CADDY_IMAGE="$CADDY_IMAGE" --build-arg CADDY_VERSION="$CADDY_VERSION" admin-ui
           docker build -t evaself/backup-service:ci \
             --build-arg POSTGRES_IMAGE="$POSTGRES_IMAGE" --build-arg POSTGRES_VERSION="$POSTGRES_VERSION" backup-service
+          docker build -t evaself/telegram-bot-api:ci \
+            --build-arg TELEGRAM_BOT_API_IMAGE="$TELEGRAM_BOT_API_IMAGE" \
+            --build-arg TELEGRAM_BOT_API_VERSION="$TELEGRAM_BOT_API_VERSION" telegram-bot-api
+          # Сервер Bot API обязан работать под uid media-service: TDLib
+          # создаёт файлы 0600, и иначе media-service не прочитает и не
+          # удалит скачанную запись.
+          docker run --rm --entrypoint id evaself/telegram-bot-api:ci telegram-bot-api \
+            | grep -q '^uid=10002(telegram-bot-api) gid=10002'
+          docker run --rm --entrypoint id evaself/media-service:ci | grep -q '^uid=10002'
 
       - name: The App Server image really serves the App Server
         if: needs.changes.outputs.docs_only != 'true'

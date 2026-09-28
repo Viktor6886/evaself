@@ -191,3 +191,18 @@ test("имя файла без символов, которых не пропу�
   assert.equal(docxFilename("   "), "document.docx");
   assert.equal(docxFilename("я".repeat(300)).length, 155);
 });
+
+test("запросы документов проходят живую границу арендатора", async () => {
+  const { withTenantScopes } = await import("./tenant-scope-helper.ts");
+  const db = fakeDb();
+  const guarded = withTenantScopes({
+    query: db.query.bind(db),
+    transaction: async <T>(work: (client: { query: typeof db.query }) => Promise<T>) => await work({ query: db.query }),
+  });
+  const store = new WorkDocuments(guarded as never);
+  await store.save(7, { kind: "document", title: "Т", content: "x", idempotencyKey: "k" });
+  await store.latest(7);
+  await store.list(7);
+  await store.saveTranscript(42, { title: "Р", content: "y", sourceName: null, idempotencyKey: "u" });
+  await store.purgeExpired();
+});

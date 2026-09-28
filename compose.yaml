@@ -327,6 +327,7 @@ services:
       EVA_BULLMQ_PROACTIVE: ${EVA_BULLMQ_PROACTIVE:-false}
       EVA_JOBS_MIRROR: ${EVA_JOBS_MIRROR:-true}
       EVA_KNOWLEDGE_UPLOADS: ${EVA_KNOWLEDGE_UPLOADS:-false}
+      EVA_AUDIO_FILE_MAX_MB: ${EVA_AUDIO_FILE_MAX_MB:-350}
       EVA_RESEARCH_ORCHESTRATOR: ${EVA_RESEARCH_ORCHESTRATOR:-false}
       # OSINT-исследования (docs/OSINT.md): выключены, пока человек не
       # включит флаг и профиль compose osint вместе.
@@ -699,7 +700,7 @@ services:
       MEDIA_TTS_API_KEY: ${MEDIA_TTS_API_KEY}
       MEDIA_TTS_MODEL: ${MEDIA_TTS_MODEL}
       MEDIA_TTS_VOICE: ${MEDIA_TTS_VOICE}
-      MEDIA_MAX_UPLOAD_MB: ${MEDIA_MAX_UPLOAD_MB}
+      MEDIA_MAX_UPLOAD_MB: ${MEDIA_MAX_UPLOAD_MB:-350}
       MEDIA_MAX_AUDIO_SECONDS: ${MEDIA_MAX_AUDIO_SECONDS}
       MEDIA_ASR_CHUNK_SECONDS: ${MEDIA_ASR_CHUNK_SECONDS:-480}
       MEDIA_TMP_TTL_SECONDS: ${MEDIA_TMP_TTL_SECONDS}
@@ -712,12 +713,50 @@ services:
       # Тот же сервер Bot API, что у агента: файлы больше 20 МБ отдаёт
       # только свой сервер, и скачивать их media-service должен оттуда же.
       EVA_TELEGRAM_API_BASE_URL: ${EVA_TELEGRAM_API_BASE_URL:-https://api.telegram.org}
+      # Диск своего сервера Bot API: в локальном режиме он отдаёт файл
+      # путём на этом диске, media-service забирает его и удаляет оригинал.
+      EVA_TELEGRAM_LOCAL_FILES_DIR: /var/lib/telegram-bot-api
       TZ: ${TZ}
     volumes:
       - eva_media_shared:/data/media
+      # Том пуст, пока профиль bot-api не включён. Смонтирован только
+      # сюда: агент читает файлы своего сервера через media-service.
+      - telegram_bot_api_data:/var/lib/telegram-bot-api
     networks: [tools]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8090/health').status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # Свой сервер Telegram Bot API (docs/telegram-bot-api.md). Облачный Bot
+  # API отдаёт ботам файлы только до 20 МБ; свой в локальном режиме —
+  # любого размера, путём на своём диске. Профиль bot-api: по умолчанию
+  # сервис не собирается и не запускается. Включает человек —
+  # scripts/telegram-local-bot-api.sh enable, с ключами my.telegram.org.
+  # Портов наружу нет: к нему обращаются eva-agent-service и media-service.
+  telegram-bot-api:
+    <<: [*restart, *logging]
+    profiles: ["bot-api"]
+    build:
+      context: ./telegram-bot-api
+      args:
+        TELEGRAM_BOT_API_IMAGE: ${TELEGRAM_BOT_API_IMAGE}
+        TELEGRAM_BOT_API_VERSION: ${TELEGRAM_BOT_API_VERSION}
+    image: evaself/telegram-bot-api:${TELEGRAM_BOT_API_VERSION}
+    container_name: evaself-telegram-bot-api
+    environment:
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
+      # Локальный режим: файлы любого размера, путь к ним — в getFile.
+      TELEGRAM_LOCAL: "1"
+      TZ: ${TZ}
+    volumes:
+      - telegram_bot_api_data:/var/lib/telegram-bot-api
+    networks: [tools]
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "8081"]
       interval: 30s
       timeout: 5s
       retries: 5
@@ -977,6 +1016,8 @@ volumes:
     name: evaself_searxng_cache
   eva_media_shared:
     name: evaself_media_shared
+  telegram_bot_api_data:
+    name: evaself_telegram_bot_api_data
   backup_work:
     name: evaself_backup_work
   # Том Uptime Kuma. Сам сервис выведен из эксплуатации вместе со

@@ -102,6 +102,7 @@ export const TENANT_TABLES: Readonly<Record<string, readonly string[]>> = {
   user_strategies: ["user_id"],
   users: ["id", "telegram_id"],
   work_blocks: ["user_id"],
+  work_documents: ["user_id"],
   // Представления читаются как обычные пользовательские источники.
   v_agent_runtime: ["telegram_id"],
   v_crisis_open: ["user_id", "telegram_id"],
