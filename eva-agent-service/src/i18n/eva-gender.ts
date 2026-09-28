@@ -158,8 +158,13 @@ function isFeminineSelf(word: string, next: string): boolean {
   if (!/(?:ла|лась)$/u.test(lower) && !REVERSE_IRREGULAR.has(lower)) return false;
   // «Была весна, и запел скворец»: безличная связка — не Ева о себе.
   // Опорой она становится, только когда за ней стоит её сказуемое:
-  // «Была рада помочь».
-  if (lower === "была") return REVERSE_IRREGULAR.has(next.toLocaleLowerCase("ru"));
+  // «Была рада помочь» — или то же сказуемое, сорвавшееся в мужской род:
+  // «Я была рад». Прилагательное и «один» сюда не входят: «была один раз».
+  if (lower === "была") {
+    const lowerNext = next.toLocaleLowerCase("ru");
+    return REVERSE_IRREGULAR.has(lowerNext)
+      || (IRREGULAR.has(lowerNext) && !describesOther(lowerNext) && !DETERMINERS.has(lowerNext));
+  }
   const masculine = masculineForm(word);
   if (!masculine) return false;
   return OPENERS.has(masculine.toLocaleLowerCase("ru")) || isSelfPastPredicate(masculine, next);
