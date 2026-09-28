@@ -56,7 +56,7 @@
 | Telegram limits | `retry_after` и распределённые лимиты | `src/delivery/telegram-limits.ts` |
 | Интерактивные элементы | Кнопки и опросы | `src/telegram/inline-choices.ts`, `src/telegram/polls.ts` |
 | Live message | Показ streaming-ответа одним редактируемым сообщением | Telegram client runtime |
-| Женский род | Детерминированная правка речи Евы о себе на выходе; правило персоны перестаёт быть вероятностью | `src/i18n/eva-gender.ts` |
+| Женский род | Детерминированная правка речи Евы о себе на выходе: сказуемое, роль («твоя помощница», «буду твоей собеседницей»), разметка и поток; слова для обращения к человеку у Евы не трогаются | `src/i18n/eva-gender.ts` (разбор), `src/i18n/eva-self-role.ts` (роль), `src/i18n/eva-gender-lexicon.ts` (словари) |
 | Оплата звёздами | Счёт, проверка до и после списания, один незавершённый checkout, запрет повтора/понижения, суммирование срока и взвешивание квот при повышении, идемпотентная выдача доступа с durable retry, восстановление неприменённых платежей и возврат — в тех же `payments`, `payment_intents`, `subscriptions` | `src/payments/stars.ts`, `src/payments/grant.ts`, `src/delivery/inbox.ts` |
 | Самопознание в Mini App | Основная навигация вместо «Диалог»; четыре темы саморефлексии через существующий handoff. Опросники ещё недоступны | `webapp/public/app/discovery.js`, `discovery.css`, `theme.css` |
 | Подписка в Mini App | Тарифы и оплата внутри приложения: тот же прайс и тот же счёт, что в чате | `src/public/routes.ts`, `webapp/public/app/app.js` |
