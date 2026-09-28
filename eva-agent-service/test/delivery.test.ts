@@ -314,3 +314,38 @@ test("документ человеку идёт через outbox и доста
   assert.equal(file.size, 4);
   assert.equal(seen[0]!.form.get("caption"), "Расшифровка аудиозаписи");
 });
+
+
+test("свой сервер Bot API: файл по пути на его диске читается через media-service", async () => {
+  const telegram = new TelegramClient({
+    telegramBotToken: "token",
+    telegramApiBaseUrl: "http://telegram-bot-api:8081",
+    mediaServiceUrl: "http://media-service:8090/",
+    mediaServiceToken: "media-key",
+  } as never, logger);
+  const originalFetch = globalThis.fetch;
+  const calls: Array<{ url: string; body: string; key: string | null }> = [];
+  globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+    const headers = new Headers(init?.headers);
+    calls.push({ url: String(url), body: String(init?.body ?? ""), key: headers.get("x-media-key") });
+    if (String(url).endsWith("/getFile")) {
+      return new Response(JSON.stringify({
+        ok: true,
+        result: { file_id: "f", file_size: 4, file_path: "/var/lib/telegram-bot-api/token/photos/file_3.jpg" },
+      }), { status: 200 });
+    }
+    return new Response(new Uint8Array([255, 216, 255, 224]), { status: 200 });
+  }) as typeof fetch;
+  try {
+    const file = await telegram.downloadFile("f", { maxBytes: 1024 });
+    assert.deepEqual([...file.bytes], [255, 216, 255, 224]);
+    assert.equal(file.path, "file_3.jpg");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  // Скачивания с сервера Bot API по /file/ нет: он файлы не раздаёт.
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1]!.url, "http://media-service:8090/telegram/file");
+  assert.deepEqual(JSON.parse(calls[1]!.body), { file_id: "f", max_bytes: 1024 });
+  assert.equal(calls[1]!.key, "media-key");
+});

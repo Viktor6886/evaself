@@ -16,6 +16,8 @@ import { TaskToolFactory } from "./tools/task-tools.js";
 import { SubscriptionStatusService } from "./subscriptions/status-service.js";
 import { SubscriptionToolFactory } from "./subscriptions/subscription-tools.js";
 import { OsintToolFactory } from "./osint/tools.js";
+import { DocumentToolFactory, mediaDocumentDelivery } from "./documents/document-tools.js";
+import { WorkDocuments } from "./documents/work-documents.js";
 import type { OsintService } from "./osint/service.js";
 import type { McpHttpInvoker, McpServerPolicyRepository } from "./tools/mcp.js";
 import type { MandatoryApprovalCategory, ToolRisk } from "./tools/approvals.js";
@@ -47,6 +49,7 @@ export class AgentToolFactory {
   private readonly goalPrograms: GoalProgramToolFactory;
   private readonly tasks: TaskToolFactory;
   private readonly subscriptions: SubscriptionToolFactory;
+  private readonly documents: DocumentToolFactory;
   private readonly mcpTools = new Map<string, RegisteredTool[]>();
   private osint?: OsintToolFactory;
   private readonly vectorGoalsEnabled: boolean;
@@ -91,6 +94,14 @@ export class AgentToolFactory {
     this.goalPrograms = new GoalProgramToolFactory(new GoalProgramService(db));
     this.tasks = new TaskToolFactory(db);
     this.subscriptions = new SubscriptionToolFactory(new SubscriptionStatusService(db));
+    this.documents = new DocumentToolFactory(
+      new WorkDocuments(db),
+      mediaDocumentDelivery({
+        mediaServiceUrl: config.mediaServiceUrl,
+        mediaServiceToken: config.mediaServiceToken,
+        telegram,
+      }),
+    );
     this.executor = new ToolExecutor({
       db,
       logger,
@@ -244,6 +255,9 @@ export class AgentToolFactory {
     // нужен Еве независимо от rollout-флага покупки/апгрейда тарифов.
     this.subscriptions.build(collect);
     if (this.osint && this.config.osintEnabled) this.osint.build(collect);
+    // Документы на сутки появляются вместе с расшифровкой аудиофайла
+    // документом: без флага их нечем наполнить.
+    if (this.config.audioFileTranscriptsEnabled) this.documents.build(collect);
     return specs;
   }
 
@@ -341,6 +355,11 @@ const TOOL_RISK: Readonly<Record<string, ToolRisk>> = Object.freeze({
   web_read: "read",
   get_subscription_status: "read",
   knowledge_search: "read",
+  // Чтение своей расшифровки ничего не меняет. Документ файлом уходит в
+  // тот же чат, где идёт разговор, — обычная запись без согласия, как
+  // ответ сообщением.
+  document_read: "read",
+  document_send: "low_risk_write",
   get_goal_program_context: "read",
   upsert_user_profile_field: "sensitive_write",
   confirm_user_profile_field: "sensitive_write",

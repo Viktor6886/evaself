@@ -882,3 +882,22 @@ test("отказ движков внутри одного набора не го
     harnessed.restore();
   }
 });
+
+test("документы на сутки появляются с приёмом аудиофайлов и ничего не спрашивают", async () => {
+  const names = (enabled: boolean) => {
+    const factory = new AgentToolFactory(
+      { vectorGoalsEnabled: false, audioFileTranscriptsEnabled: enabled, mediaServiceUrl: "http://media", mediaServiceToken: "" } as never,
+      {} as never,
+      {} as never,
+      silentLogger,
+    );
+    return factory.assembly("conv-docs").direct.map((tool) => tool.name);
+  };
+  assert.ok(names(true).includes("document_read"));
+  assert.ok(names(true).includes("document_send"));
+  assert.ok(!names(false).includes("document_read"), "инструмент без флага: документов нечем наполнить");
+  // Чтение своей расшифровки — чтение; файл в свой же чат — обычная запись.
+  assert.equal(toolRisk("document_read"), "read");
+  assert.equal(toolRisk("document_send"), "low_risk_write");
+  assert.equal(toolApprovalCategory("document_send"), undefined);
+});

@@ -324,7 +324,10 @@ test("предел аудиофайла зависит от сервера Bot A
   assert.equal(audioFileLimitBytes("https://api.telegram.org"), 20 * 1024 * 1024);
   assert.equal(audioFileLimitBytes("https://api.telegram.org/"), 20 * 1024 * 1024);
   assert.equal(audioFileLimitBytes(undefined), 20 * 1024 * 1024);
-  assert.equal(audioFileLimitBytes("http://telegram-bot-api:8081"), 2_000 * 1024 * 1024);
+  assert.equal(audioFileLimitBytes("http://telegram-bot-api:8081"), 350 * 1024 * 1024);
+  assert.equal(audioFileLimitBytes("http://telegram-bot-api:8081", 500), 500 * 1024 * 1024);
+  // Облачный предел не поднимается настройкой: больше 20 МБ Telegram не отдаст.
+  assert.equal(audioFileLimitBytes("https://api.telegram.org", 350), 20 * 1024 * 1024);
 });
 
 test("минуты распознавания, известные до него, считаются по окну", async () => {

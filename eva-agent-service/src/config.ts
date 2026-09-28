@@ -274,6 +274,12 @@ export interface Config {
    */
   audioFileTranscriptsEnabled: boolean;
   /**
+   * Предел аудиофайла, МБ, когда его отдаёт свой сервер Bot API.
+   * Облачный Bot API отдаёт ботам не больше 20 МБ, и этот предел там не
+   * действует. Распознаёт запись media-service частями не больше 20 МБ.
+   */
+  audioFileMaxMb: number;
+  /**
    * Как показывается ответ, пока Ева пишет: правкой сообщения (`edit`)
    * или черновиком бота (`draft`, сообщение человека уходит вверх, но
    * клиент Telegram на это время занимает кнопку отправки).
@@ -536,6 +542,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     toolApprovalsEnabled: bool("EVA_TOOL_APPROVALS", false),
     miniAppJournalEnabled: bool("EVA_MINIAPP_JOURNAL_V2", false),
     audioFileTranscriptsEnabled: bool("EVA_AUDIO_FILE_TRANSCRIPTS", false),
+    audioFileMaxMb: clampedInt("EVA_AUDIO_FILE_MAX_MB", 350, 1, 2_000),
     telegramStreamMode: parseLiveStreamMode(str("EVA_TELEGRAM_STREAM_MODE", "edit")),
     telegramTypingSpeed: parseLiveTypingSpeed(str("EVA_TELEGRAM_TYPING_SPEED", "calm")),
     journalVoiceRetentionDays: clampedInt(

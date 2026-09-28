@@ -495,6 +495,8 @@ interface WorkflowProbe {
   documents: Array<{ filename: string; caption?: string; mimeType?: string; bytes: number }>;
   /** Запросы DOCX расшифровки к media-service. */
   docxRequests: Array<Record<string, unknown>>;
+  /** Расшифровки, сохранённые на сутки: заголовок и текст. */
+  workDocuments: Array<{ title: string; content: string }>;
   /** Что ушло в базу знаний. */
   knowledgeUploads: Array<{ telegramId: number; name: string; mime: string; idempotencyKey?: string }>;
   /** Какой вид сообщения назван контексту. */
@@ -619,6 +621,7 @@ async function runTelegramTurn(
   const downloadLimits: Array<number | null> = [];
   const documents: WorkflowProbe["documents"] = [];
   const docxRequests: WorkflowProbe["docxRequests"] = [];
+  const workDocuments: WorkflowProbe["workDocuments"] = [];
   const knowledgeUploads: WorkflowProbe["knowledgeUploads"] = [];
   /** Что именно ушло в Letta: строка или список частей. */
   const lettaMessages: unknown[] = [];
@@ -653,6 +656,10 @@ async function runTelegramTurn(
       issuedTokens.push(input);
     },
     query: async (sql: string, values: unknown[] = []) => {
+      if (sql.includes("INSERT INTO work_documents")) {
+        workDocuments.push({ title: String(values[2]), content: String(values[3]) });
+        return { rows: [{ id: `doc-${workDocuments.length}` }] };
+      }
       if (sql.includes("INSERT INTO usage_events")) {
         const events = JSON.parse(String(values[0] ?? "[]")) as Array<{ metric?: string }>;
         if (options.usageFails && events.some((event) => event.metric === "messages")) {
@@ -1006,6 +1013,7 @@ async function runTelegramTurn(
     sent,
     documents,
     docxRequests,
+    workDocuments,
     knowledgeUploads,
     order,
     result,
@@ -1653,6 +1661,12 @@ test("аудиофайл с флагом: свой сценарий распоз
   const wrapped = probe.wrapped[0] ?? "";
   assert.match(wrapped, /отправлена человеку файлом DOCX/);
   assert.match(wrapped, /knowledge_search/);
+  // Полный текст — на сутки: по нему Ева переделывает документ.
+  assert.deepEqual(probe.workDocuments, [
+    { title: "Расшифровка: встреча: итоги?.mp3", content: "расшифровка присланной записи" },
+  ]);
+  assert.match(wrapped, /document_read/);
+  assert.match(wrapped, /document_send/);
   assert.match(probe.sent.join("\n"), /полный текст в файле ниже/);
 });
 
@@ -1675,7 +1689,12 @@ test("без приёма в базу знаний DOCX всё равно ухо
   assert.deepEqual(broken.knowledgeUploads, [], "без DOCX в базу знаний сохранять нечего");
   const wrapped = broken.wrapped[0] ?? "";
   assert.match(wrapped, /расшифровка присланной записи/, "расшифровка должна дойти до Евы и без DOCX");
-  assert.doesNotMatch(wrapped, /Хранение:/);
+  // Ход не утверждает того, чего не было: файла человек не получил.
+  assert.doesNotMatch(wrapped, /файлом DOCX/);
+  assert.doesNotMatch(wrapped, /knowledge_search/);
+  // А текст сохранён раньше DOCX и сутки доступен для переделки.
+  assert.equal(broken.workDocuments.length, 1);
+  assert.match(wrapped, /document_read/);
   assert.equal(broken.lettaMessages.length, 1);
 });
 

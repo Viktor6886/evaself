@@ -163,7 +163,13 @@ function outboxHarness(probe: Probe, options: Record<string, unknown> = {}) {
 
     if (text.startsWith("UPDATE telegram_outbox SET status = 'sent'")) {
       const row = probe.rows.find((item) => item.id === String(values[0]));
-      if (row) row.status = "sent";
+      if (row) {
+        row.status = "sent";
+        // Повторяет вычистку байтов файла из настоящего запроса, если она там есть.
+        if (text.includes("payload - 'document_base64'") && row.telegram_method === "sendDocument") {
+          delete row.payload.document_base64;
+        }
+      }
       return { rows: [] };
     }
 
@@ -436,4 +442,28 @@ test("ошибка доставки не запускает повторный �
   assert.ok(!/runTurn|eva-workflow|letta/i.test(source), "outbox знает о ходе");
   assert.equal(probe.rows[0]!.status, "retry");
   assert.equal(probe.sent.length, 0);
+});
+
+
+test("байты доставленного DOCX не остаются в очереди, остальные сообщения не трогаются", async () => {
+  const probe: Probe = {
+    now: 1000,
+    sent: [],
+    rows: [
+      row({
+        id: "1", chat_id: "100", telegram_method: "sendDocument",
+        payload: { chat_id: 100, document_base64: "UEsDBA==", filename: "тезисы.docx" },
+      }),
+      row({ id: "2", chat_id: "200", payload: { chat_id: 200, text: "Готово" } }),
+    ],
+  };
+  const outbox = outboxHarness(probe, { parallel: { concurrency: 2, limits: null } });
+  await outbox.tick();
+
+  assert.equal(probe.sent.length, 2);
+  const document = probe.rows.find((item) => item.id === "1")!;
+  assert.equal(document.status, "sent");
+  assert.equal(document.payload.document_base64, undefined, "файл остался в очереди после доставки");
+  assert.equal(document.payload.filename, "тезисы.docx");
+  assert.equal(probe.rows.find((item) => item.id === "2")!.payload.text, "Готово");
 });

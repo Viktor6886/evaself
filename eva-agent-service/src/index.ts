@@ -52,6 +52,7 @@ import { LlmManager } from "./llm.js";
 import { createLogger } from "./logger.js";
 import { StarsPayments } from "./payments/stars.js";
 import { SubscriptionExpiryNotifier } from "./subscriptions/expiry-notifier.js";
+import { WorkDocuments } from "./documents/work-documents.js";
 import { QuotaExhaustionNotifier } from "./subscriptions/quota-exhaustion-notifier.js";
 import { UserProfileService } from "./profile/profile-service.js";
 import { ValkeyRateLimiter } from "./public/rate-limit.js";
@@ -511,6 +512,7 @@ async function main(): Promise<void> {
     config.turnRecoveryEnabled,
   );
   let recoveryTimer: NodeJS.Timeout | null = null;
+  let documentsTimer: NodeJS.Timeout | null = null;
 
   const purposes = new ConversationPurposeService(db, letta, logger);
 
@@ -749,6 +751,21 @@ async function main(): Promise<void> {
     recoveryTimer = setInterval(() => void recovery.sweep(), config.turnRecoveryIntervalMs);
     recoveryTimer.unref();
   }
+  // Документы на сутки удаляются по сроку. Единственный механизм для этой
+  // цели, и работает независимо от флагов: включённый однажды приём
+  // аудиофайлов мог оставить документы, которые после выключения флага
+  // иначе лежали бы вечно. Запрос по индексу срока и дешёвый.
+  const workDocuments = new WorkDocuments(db);
+  const purgeDocuments = () => void workDocuments.purgeExpired().then((deleted) => {
+    if (deleted > 0) logger.info("Документы на сутки удалены по сроку", { deleted });
+  }).catch((error: unknown) => {
+    logger.warn("Документы на сутки не удалены", {
+      code: error instanceof Error ? error.name : "unknown_error",
+    });
+  });
+  purgeDocuments();
+  documentsTimer = setInterval(purgeDocuments, 15 * 60_000);
+  documentsTimer.unref();
 
 
   background.start(jobs ? jobs.legacySchedulerActive : true);
@@ -798,6 +815,7 @@ async function main(): Promise<void> {
       background.stop();
       subscriptionExpiryNotifier.stop();
       if (recoveryTimer) clearInterval(recoveryTimer);
+      if (documentsTimer) clearInterval(documentsTimer);
       dispatcher.stop();
       inboxWorker.stop();
       if (config.outboxEnabled) outbox.stop();
