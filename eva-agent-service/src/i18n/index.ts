@@ -26,6 +26,9 @@ const ru = {
   openSubscriptionApp: "Тарифы и оплата",
   voiceQuotaEnded:
     "Лимит распознавания голоса закончился. Можно продолжить текстом.",
+  voiceQuotaTooShort:
+    "Запись длиннее, чем осталось минут распознавания. Можно прислать запись покороче"
+    + " или продолжить текстом; сколько минут осталось, покажет /balance.",
   // Не «отправь ещё раз»: действия хода уже выполнены, и повтор того же
   // сообщения создаёт те же задачи второй раз. «Продолжи» опирается на
   // историю conversation, где всё сделанное уже лежит.
@@ -100,6 +103,9 @@ const en: Record<keyof typeof ru, string> = {
   openSubscriptionApp: "Plans and payment",
   voiceQuotaEnded:
     "Your voice transcription allowance is used up. You can continue with text.",
+  voiceQuotaTooShort:
+    "This recording is longer than the transcription minutes you have left. Send a shorter"
+    + " one or continue with text; /balance shows how many minutes remain.",
   emptyReply: "I did not manage to put the reply into words. Write “continue” and I will tell you what I did.",
   start:
     "Hi! I’m Eva, a companion and self-discovery assistant. I keep important context on your server. Tell me what is on your mind right now.",

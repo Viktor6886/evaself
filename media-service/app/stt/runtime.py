@@ -32,7 +32,7 @@ from .types import SttKey, SttResolvedConfig
 
 log = logging.getLogger("media.stt")
 
-USE_CASES = ("telegram_voice", "webapp_voice_message", "webapp_live")
+USE_CASES = ("telegram_voice", "telegram_audio", "webapp_voice_message", "webapp_live")
 
 
 @dataclass

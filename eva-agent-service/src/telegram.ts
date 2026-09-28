@@ -1171,6 +1171,36 @@ export class TelegramClient implements OutboxTransport {
     });
   }
 
+  /**
+   * Файл человеку — через тот же durable outbox, что и голосовое: при
+   * сбое сети он доедет повтором, а повтор хода не отправит его дважды.
+   */
+  async sendDocument(
+    chatId: number,
+    document: Uint8Array,
+    filename: string,
+    options: { caption?: string; mimeType?: string } = {},
+  ): Promise<void> {
+    const caption = options.caption?.trim().slice(0, 1024);
+    const mimeType = options.mimeType ?? "application/octet-stream";
+    if (this.outbox) {
+      await this.dispatch("sendDocument", chatId, {
+        chat_id: chatId,
+        document_base64: Buffer.from(document).toString("base64"),
+        filename,
+        mime_type: mimeType,
+        ...(caption ? { caption } : {}),
+      });
+      return;
+    }
+    const started = performance.now();
+    try {
+      await this.sendDocumentDirect(chatId, document, filename, mimeType, caption);
+    } finally {
+      this.addDeliveryMetrics({ telegramSendMs: elapsed(started) });
+    }
+  }
+
   async sendVoice(chatId: number, audio: Uint8Array, filename = "eva.ogg"): Promise<void> {
     if (this.outbox) {
       await this.dispatch("sendVoice", chatId, {
@@ -1266,6 +1296,20 @@ export class TelegramClient implements OutboxTransport {
         }
       }
     }
+    if (method === "sendDocument" && typeof payload.document_base64 === "string") {
+      const encoded = payload.document_base64;
+      if (!encoded) throw new Error("Telegram outbox: отсутствуют данные документа");
+      const chatId = Number(payload.chat_id);
+      if (!Number.isSafeInteger(chatId)) throw new Error("Telegram outbox: неверный chat_id");
+      await this.sendDocumentDirect(
+        chatId,
+        new Uint8Array(Buffer.from(encoded, "base64")),
+        typeof payload.filename === "string" ? payload.filename : "document",
+        typeof payload.mime_type === "string" ? payload.mime_type : "application/octet-stream",
+        typeof payload.caption === "string" ? payload.caption : undefined,
+      );
+      return {};
+    }
     if (method === "sendVoice") {
       const encoded = typeof payload.audio_base64 === "string" ? payload.audio_base64 : "";
       if (!encoded) throw new Error("Telegram outbox: отсутствуют данные голосового сообщения");
@@ -1279,6 +1323,25 @@ export class TelegramClient implements OutboxTransport {
       return {};
     }
     return await this.call(method, apiPayload);
+  }
+
+  private async sendDocumentDirect(
+    chatId: number,
+    document: Uint8Array,
+    filename: string,
+    mimeType: string,
+    caption?: string,
+  ): Promise<void> {
+    this.assertConfigured();
+    const form = new FormData();
+    form.set("chat_id", String(chatId));
+    form.set("document", new Blob([document], { type: mimeType }), filename);
+    if (caption) form.set("caption", caption);
+    const response = await fetch(`${this.baseUrl}/bot${this.token}/sendDocument`, {
+      method: "POST",
+      body: form,
+    });
+    await this.parseResponse(response, "sendDocument");
   }
 
   private async sendVoiceDirect(

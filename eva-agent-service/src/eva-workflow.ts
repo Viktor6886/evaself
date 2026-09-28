@@ -1,3 +1,5 @@
+import { Readable } from "node:stream";
+
 import type { Config } from "./config.js";
 import { type CrisisMonitor, safetyDirective } from "./crisis.js";
 import type { AgentLinkRow, Database, SttUsageAttempt, UserRow } from "./db.js";
@@ -35,6 +37,7 @@ import {
   type TurnLinks,
 } from "./turns/turn-lifecycle.js";
 import {
+  type TelegramFile,
   type TelegramLiveMessage,
   type TelegramMessage,
   type TelegramUpdate,
@@ -51,11 +54,13 @@ import {
 import type { StarsPayments } from "./payments/stars.js";
 import type { QuotaExhaustionNotifier } from "./subscriptions/quota-exhaustion-notifier.js";
 import { quotaAllowsAmount, quotaExhausted } from "./subscriptions/quota-policy.js";
+import type { KnowledgeUploadService } from "./knowledge/lifecycle.js";
 import { recordMessageUsage, recordMessageUsageBatch } from "./subscriptions/usage-ledger.js";
 import { speechTextFromReply } from "./telegram-format.js";
 import {
   AttachmentError,
   TelegramAttachmentReader,
+  audioFileLimitBytes,
   audioFileOf,
   audioFileTranscript,
   imageFileOf,
@@ -161,6 +166,13 @@ export class EvaWorkflow {
   private readonly taskEvents: TaskEventService;
   /** Разбор вложений: общий с приёмом в базу знаний. */
   private readonly attachments: TelegramAttachmentReader;
+  /**
+   * Приём в базу знаний. Появляется после сборки слоя заданий и только
+   * при EVA_KNOWLEDGE_UPLOADS: расшифровка аудиофайла сохраняется тем же
+   * путём, что загруженный документ, — второго хранилища и второго
+   * поиска у неё нет.
+   */
+  private knowledgeUploads: Pick<KnowledgeUploadService, "createFromStream"> | null = null;
   constructor(
     private readonly config: Config,
     private readonly db: Database,
@@ -214,7 +226,13 @@ export class EvaWorkflow {
     private readonly quotaExhaustion?: QuotaExhaustionNotifier,
   ) {
     this.taskEvents = new TaskEventService(db);
-    this.attachments = new TelegramAttachmentReader(telegram);
+    this.attachments = new TelegramAttachmentReader(telegram, {
+      audioBytes: audioFileLimitBytes(config.telegramApiBaseUrl),
+    });
+  }
+
+  setKnowledgeUploadService(service: Pick<KnowledgeUploadService, "createFromStream"> | null): void {
+    this.knowledgeUploads = service;
   }
 
   /**
@@ -562,6 +580,7 @@ export class EvaWorkflow {
       });
     }
     await this.moveTurn(turnHandle, "queued");
+    let leaseRenewal: ReturnType<typeof setInterval> | null = null;
     try {
       const measured = await this.db.withQueryMetrics(async () =>
         await this.queue.run(update.telegramId, async (): Promise<InboxResult> => {
@@ -572,6 +591,17 @@ export class EvaWorkflow {
           await this.turns.recordWait(turnHandle, metrics.queue_wait_ms);
           await this.turns.transition(turnHandle, "claimed");
           await this.turns.lease(turnHandle, LEASE_OWNER, this.config.lockTtlSeconds);
+          // Аренда продлевается, пока ход жив. Разовая аренда на
+          // EVA_AGENT_LOCK_TTL истекала посреди долгого хода — распознавания
+          // часовой записи или длинного хода модели, — и восстановление
+          // принимало живой ход за брошенный и запускало его второй раз.
+          const renewEveryMs = Math.max(1, Math.floor(this.config.lockTtlSeconds / 3)) * 1000;
+          const turns = this.turns;
+          const handle = turnHandle;
+          leaseRenewal = setInterval(() => {
+            void turns.lease(handle, LEASE_OWNER, this.config.lockTtlSeconds);
+          }, renewEveryMs);
+          leaseRenewal.unref?.();
         }
         // Ход целиком идёт в области своего пользователя: всё, что
         // выполнится внутри — контекст, инструменты, память, доставка —
@@ -687,10 +717,15 @@ export class EvaWorkflow {
           return { status: "ignored" };
         }
         if (parts.some((part) => isSpeech(part.kind))) {
-          if (quotaExhausted(quota, "voice_minutes")) {
+          // Длительность голосового и аудиофайла Telegram сообщает заранее.
+          // Двухчасовая запись при пяти оставшихся минутах распознавалась
+          // бы целиком за деньги установки и списывала бы минуты в минус.
+          const knownMinutes = speechMinutesKnown(parts);
+          const exhausted = quotaExhausted(quota, "voice_minutes");
+          if (exhausted || (knownMinutes > 0 && !quotaAllowsAmount(quota, "voice_minutes", knownMinutes))) {
             await this.telegram.sendMessage(
               update.chatId,
-              t(language, "voiceQuotaEnded"),
+              t(language, exhausted ? "voiceQuotaEnded" : "voiceQuotaTooShort"),
             );
             // Голосовые части выпадают, текстовые остаются. Прекратить
             // ход целиком значило бы потерять текст, который человек
@@ -1311,6 +1346,7 @@ export class EvaWorkflow {
       });
       throw error;
     } finally {
+      if (leaseRenewal) clearInterval(leaseRenewal);
       live.current?.stop();
       action.current?.stop();
       const delivery = this.telegram.getDeliveryMetrics();
@@ -1681,7 +1717,7 @@ export class EvaWorkflow {
   }
 
   private async transcribeVoice(
-    useCase: "telegram_voice" | "webapp_voice_message",
+    useCase: "telegram_voice" | "telegram_audio" | "webapp_voice_message",
     fileId: string,
     idempotencyKey: string | null,
     language: string,
@@ -1709,7 +1745,9 @@ export class EvaWorkflow {
             language,
             idempotency_key: idempotencyKey,
           }),
-          signal: AbortSignal.timeout(5 * 60_000),
+          // Двухчасовая запись распознаётся полутора десятками частей
+          // подряд: пяти минут голосового ей не хватит.
+          signal: AbortSignal.timeout(useCase === "telegram_audio" ? 30 * 60_000 : 5 * 60_000),
         },
       );
     } catch (error) {
@@ -1827,7 +1865,9 @@ export class EvaWorkflow {
       let transcription;
       try {
         transcription = await this.transcribeVoice(
-          "telegram_voice",
+          // У аудиофайла свой сценарий: свой срок и предел длительности,
+          // которые не подходят голосовым.
+          asFile ? "telegram_audio" : "telegram_voice",
           file.file_id,
           // file_unique_id не меняется при повторной доставке апдейта, в
           // отличие от file_id. Telegram повторяет доставку при таймауте
@@ -1874,12 +1914,18 @@ export class EvaWorkflow {
       }
       const statusId = status.promise ? await status.promise.catch(() => null) : null;
       if (asFile) {
-        // Сырую расшифровку файла человеку не повторяем: длинная запись
-        // заняла бы десяток сообщений, а исправленный текст и краткое
-        // содержание сейчас напишет Ева.
+        // Сырую расшифровку файла в чат не повторяем: длинная запись
+        // заняла бы десяток сообщений. Полный текст уходит человеку
+        // файлом DOCX и, если приём включён, в базу знаний; исправленный
+        // текст и краткое содержание сейчас напишет Ева.
+        const archive = await this.archiveAudioTranscript(update, file, transcription, english);
         const done = english
-          ? "🎧 Transcribed. Fixing recognition errors and writing a summary…"
-          : "🎧 Расшифровала. Исправляю ошибки распознавания и готовлю краткое содержание…";
+          ? (archive.documentSent
+            ? "🎧 Transcribed — the full transcript is in the file below. Fixing recognition errors and writing a summary…"
+            : "🎧 Transcribed. Fixing recognition errors and writing a summary…")
+          : (archive.documentSent
+            ? "🎧 Расшифровала — полный текст в файле ниже. Исправляю ошибки распознавания и готовлю краткое содержание…"
+            : "🎧 Расшифровала. Исправляю ошибки распознавания и готовлю краткое содержание…");
         if (statusId !== null) {
           await this.telegram.editPlainMessage(update.chatId, statusId, done).catch(() => undefined);
         }
@@ -1887,7 +1933,7 @@ export class EvaWorkflow {
           text: caption,
           images: [],
           attachments: [
-            audioFileTranscript(file, transcription.text, transcription.durationSeconds),
+            audioFileTranscript(file, transcription.text, transcription.durationSeconds, undefined, archive),
           ],
         };
       }
@@ -1927,6 +1973,91 @@ export class EvaWorkflow {
     }
 
     throw new Error("Неподдерживаемый тип сообщения");
+  }
+
+  /**
+   * Расшифровка аудиофайла человеку и в базу знаний.
+   *
+   * DOCX собирает media-service. Файл уходит человеку через durable
+   * outbox, а при включённом приёме — в базу знаний тем же путём, что
+   * загруженный документ: позже Ева найдёт запись через knowledge_search,
+   * а человек увидит её в списке материалов. Ключ идемпотентности — номер
+   * апдейта: повтор того же хода не заводит вторую копию.
+   *
+   * Сбой любой из частей не срывает ход: расшифровка всё равно уходит Еве
+   * вложением, а ход узнаёт, что именно сохранить не удалось.
+   */
+  private async archiveAudioTranscript(
+    update: NormalizedUpdate,
+    file: TelegramFile,
+    transcription: { text: string; durationSeconds: number },
+    english: boolean,
+  ): Promise<{ documentSent: boolean; knowledgeSaved: boolean }> {
+    const sourceName = (file.file_name ?? file.title ?? "audio").slice(0, 200);
+    // Имя файла человеку: без расширения исходника, без символов, которые
+    // не пропустит файловая система, и без управляющих.
+    const base = [...sourceName.replace(/\.[^.]+$/u, "")]
+      .map((char) => (char.charCodeAt(0) < 32 || '\\/:*?"<>|'.includes(char) ? "_" : char))
+      .join("")
+      .trim() || "audio";
+    const filename = `${base.slice(0, 150)} — ${english ? "transcript" : "расшифровка"}.docx`;
+    let bytes: Uint8Array;
+    try {
+      const response = await fetch(
+        `${this.config.mediaServiceUrl.replace(/\/+$/, "")}/transcript/docx`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", ...this.mediaHeaders() },
+          body: JSON.stringify({
+            title: `${english ? "Transcript" : "Расшифровка"}: ${sourceName}`,
+            text: transcription.text,
+            source_name: sourceName,
+            language: english ? "en" : "ru",
+            duration_seconds: transcription.durationSeconds,
+          }),
+          signal: AbortSignal.timeout(60_000),
+        },
+      );
+      if (!response.ok) throw new Error(`http_${response.status}`);
+      bytes = new Uint8Array(await response.arrayBuffer());
+    } catch (error) {
+      this.logger.warn("DOCX расшифровки не собран", {
+        code: error instanceof Error ? error.message.slice(0, 40) : "unknown_error",
+      });
+      return { documentSent: false, knowledgeSaved: false };
+    }
+
+    let knowledgeSaved = false;
+    if (this.knowledgeUploads) {
+      try {
+        await this.knowledgeUploads.createFromStream(update.telegramId, {
+          name: filename,
+          mime: DOCX_MIME,
+          stream: Readable.from([Buffer.from(bytes)]),
+          truncated: () => false,
+          idempotencyKey: `telegram-audio:${update.updateId}`,
+        });
+        knowledgeSaved = true;
+      } catch (error) {
+        this.logger.warn("Расшифровка не сохранена в базе знаний", {
+          code: error instanceof Error ? error.message.slice(0, 40) : "unknown_error",
+        });
+      }
+    }
+
+    let documentSent = false;
+    try {
+      await this.telegram.sendDocument(update.chatId, bytes, filename, {
+        caption: english ? "Audio transcript" : "Расшифровка аудиозаписи",
+        mimeType: DOCX_MIME,
+      });
+      documentSent = true;
+    } catch (error) {
+      this.logger.warn("DOCX расшифровки не отправлен", {
+        code: error instanceof Error ? error.name : "unknown_error",
+      });
+    }
+    return { documentSent, knowledgeSaved };
   }
 
   /**
@@ -2010,6 +2141,23 @@ function isPaymentUpdate(update: TelegramUpdate): boolean {
 /** Речь, которую распознаёт STT и за которую списываются минуты. */
 function isSpeech(kind: NormalizedUpdate["kind"]): boolean {
   return kind === "voice" || kind === "audio_file";
+}
+
+const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
+/**
+ * Минуты распознавания, известные до него: Telegram сообщает
+ * длительность голосового и аудиофайла. У звука, присланного документом,
+ * длительности нет — такие части не считаются, их спишет само распознавание.
+ */
+export function speechMinutesKnown(parts: Array<Pick<NormalizedUpdate, "kind" | "message">>): number {
+  let seconds = 0;
+  for (const part of parts) {
+    if (!isSpeech(part.kind)) continue;
+    const duration = Number((part.message.voice ?? part.message.audio)?.duration ?? 0);
+    if (Number.isFinite(duration) && duration > 0) seconds += duration;
+  }
+  return seconds > 0 ? Math.ceil(seconds / 60) : 0;
 }
 
 export function normalizeUpdate(

@@ -276,3 +276,41 @@ test("Telegram 400 preserves safe error_code and description", async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+test("документ человеку идёт через outbox и доставляется файлом multipart", async () => {
+  const envelopes: OutboxEnvelope[] = [];
+  const telegram = new TelegramClient({
+    telegramBotToken: "token",
+    telegramApiBaseUrl: "https://api.telegram.invalid",
+  } as never, logger);
+  telegram.setOutbox({ send: async (envelope) => { envelopes.push(envelope); return { queued: true }; } });
+  await telegram.withDeliveryContext("telegram-update:77", async () => {
+    await telegram.sendDocument(123, new Uint8Array([80, 75, 3, 4]), "встреча — расшифровка.docx", {
+      caption: "Расшифровка аудиозаписи",
+      mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    });
+  });
+  assert.equal(envelopes.length, 1);
+  assert.equal(envelopes[0]!.method, "sendDocument");
+  assert.equal(envelopes[0]!.idempotencyKey, "telegram-update:77:000:sendDocument");
+  const payload = envelopes[0]!.payload as Record<string, unknown>;
+  assert.equal(payload.document_base64, Buffer.from([80, 75, 3, 4]).toString("base64"));
+
+  // Доставка из outbox: файл уходит формой, а не JSON с base64.
+  const originalFetch = globalThis.fetch;
+  const seen: Array<{ url: string; form: FormData }> = [];
+  globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+    seen.push({ url: String(url), form: init?.body as FormData });
+    return new Response(JSON.stringify({ ok: true, result: {} }), { status: 200 });
+  }) as typeof fetch;
+  try {
+    await telegram.deliver("sendDocument", payload);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.match(seen[0]!.url, /\/bottoken\/sendDocument$/);
+  const file = seen[0]!.form.get("document") as File;
+  assert.equal(file.name, "встреча — расшифровка.docx");
+  assert.equal(file.size, 4);
+  assert.equal(seen[0]!.form.get("caption"), "Расшифровка аудиозаписи");
+});

@@ -62,6 +62,20 @@ export const DEFAULT_ATTACHMENT_LIMITS: AttachmentLimits = {
 };
 
 /**
+ * Предел аудиофайла по серверу Bot API.
+ *
+ * Облачный Bot API отдаёт ботам файлы до 20 МБ — это час-полтора сжатой
+ * речи, и запись больше этого нечего и начинать распознавать. Свой
+ * сервер Bot API (`EVA_TELEGRAM_API_BASE_URL`) отдаёт до 2 ГБ; тогда
+ * предел — у media-service (MEDIA_MAX_UPLOAD_MB), и отказ придёт от него.
+ */
+export function audioFileLimitBytes(telegramApiBaseUrl: string | undefined): number {
+  const url = (telegramApiBaseUrl ?? "").trim();
+  const cloud = url === "" || /^https:\/\/api\.telegram\.org\/?$/i.test(url);
+  return (cloud ? 20 : 2_000) * 1024 * 1024;
+}
+
+/**
  * Звук, присланный файлом. Распознаёт media-service через ffmpeg, так
  * что список — это то, что люди действительно присылают, а не то, что
  * умеет декодер.
@@ -162,9 +176,12 @@ export class TelegramAttachmentReader {
    */
   audioFile(file: TelegramFile): TelegramFile {
     if ((file.file_size ?? 0) > this.limits.audioBytes) {
+      const megabytes = Math.round(this.limits.audioBytes / (1024 * 1024));
       throw new AttachmentError(
         "attachment_too_large",
-        "Аудиофайл больше 20 МБ: Telegram не отдаёт ботам файлы такого размера. Пришли запись покороче или сожми её.",
+        megabytes === 20
+          ? "Аудиофайл больше 20 МБ: Telegram не отдаёт ботам файлы такого размера. Пришли запись покороче или сожми её."
+          : `Аудиофайл больше ${megabytes} МБ. Пришли запись покороче или сожми её.`,
       );
     }
     return file;
@@ -215,13 +232,23 @@ export function audioFileTranscript(
   transcript: string,
   durationSeconds: number,
   limits: Pick<AttachmentLimits, "documentCharacters"> = DEFAULT_ATTACHMENT_LIMITS,
+  archive: { documentSent?: boolean; knowledgeSaved?: boolean } = {},
 ): string {
   const name = (file.file_name ?? file.title ?? "аудио").slice(0, 200);
   const cut = transcript.length > limits.documentCharacters;
+  // Где лежит полный текст — факт хода: без него Ева не знает, что
+  // человек уже получил файл и что по записи можно искать позже.
+  const where = [
+    ...(archive.documentSent ? ["полная расшифровка отправлена человеку файлом DOCX"] : []),
+    ...(archive.knowledgeSaved
+      ? ["она сохранена в базе знаний человека — позже по записи ищи через knowledge_search"]
+      : []),
+  ];
   return [
     `Аудиофайл: ${name}`,
     `Длительность: ${formatDuration(durationSeconds)}`,
     "Расшифровка распознавания речи, без правки: возможны ошибки в словах, именах и знаках препинания.",
+    ...(where.length ? [`Хранение: ${where.join("; ")}.`] : []),
     ...(cut ? ["Расшифровка длиннее допустимого и обрезана по концу."] : []),
     sanitizeUntrustedContent(transcript.slice(0, limits.documentCharacters)),
   ].join("\n");

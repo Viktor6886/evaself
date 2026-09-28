@@ -317,3 +317,24 @@ test("вложением битый файл до Евы не доходит", a
     (error: unknown) => error instanceof AttachmentError || error instanceof Error,
   );
 });
+
+
+test("предел аудиофайла зависит от сервера Bot API", async () => {
+  const { audioFileLimitBytes } = await import("../dist/attachments/telegram-attachments.js");
+  assert.equal(audioFileLimitBytes("https://api.telegram.org"), 20 * 1024 * 1024);
+  assert.equal(audioFileLimitBytes("https://api.telegram.org/"), 20 * 1024 * 1024);
+  assert.equal(audioFileLimitBytes(undefined), 20 * 1024 * 1024);
+  assert.equal(audioFileLimitBytes("http://telegram-bot-api:8081"), 2_000 * 1024 * 1024);
+});
+
+test("минуты распознавания, известные до него, считаются по окну", async () => {
+  const { speechMinutesKnown } = await import("../dist/eva-workflow.js");
+  const part = (kind: string, message: Record<string, unknown>) => ({ kind, message }) as never;
+  assert.equal(speechMinutesKnown([part("text", { text: "a" })]), 0);
+  assert.equal(speechMinutesKnown([part("voice", { voice: { file_id: "v", duration: 61 } })]), 2);
+  assert.equal(speechMinutesKnown([
+    part("voice", { voice: { file_id: "v", duration: 30 } }),
+    part("audio_file", { audio: { file_id: "a", duration: 45 } }),
+    part("audio_file", { document: { file_id: "d" } }),
+  ]), 2, "длительность документа неизвестна и не считается");
+});

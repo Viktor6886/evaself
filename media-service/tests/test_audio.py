@@ -17,6 +17,7 @@ from app.audio import (
     MediaError,
     convert,
     probe,
+    split_to_asr_wav,
     to_asr_wav,
     to_telegram_voice,
 )
@@ -60,6 +61,18 @@ def test_opus_is_converted_to_asr_ready_wav(telegram_voice, tmp_path):
     assert info["channels"] == 1
     assert 2.5 < info["duration_seconds"] < 3.5
 
+
+def test_long_audio_is_split_into_bounded_asr_wavs(telegram_voice, tmp_path):
+    parts = asyncio.run(
+        split_to_asr_wav(telegram_voice, tmp_path / "parts", segment_seconds=1.0)
+    )
+    assert len(parts) >= 3
+    for part in parts:
+        info = asyncio.run(probe(part))
+        assert info["audio_codec"] == "pcm_s16le"
+        assert int(info["sample_rate"]) == ASR_SAMPLE_RATE
+        assert info["channels"] == 1
+        assert 0 < info["duration_seconds"] <= 1.2
 
 def test_wav_is_re_encoded_as_a_telegram_voice_note(telegram_voice, tmp_path):
     wav = asyncio.run(to_asr_wav(telegram_voice, tmp_path / "asr.wav"))

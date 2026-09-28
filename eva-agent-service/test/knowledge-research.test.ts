@@ -107,3 +107,50 @@ test("отказ исследования приходит структурир�
   assert.equal(body.error?.code, "research_query_invalid");
   await app.close();
 });
+
+test("загрузка с ключом идемпотентности: повтор хода возвращает ту же загрузку", async () => {
+  const { KnowledgeUploadService } = await import("../dist/knowledge/lifecycle.js");
+  const { Readable } = await import("node:stream");
+  const root = await mkdtemp(join(tmpdir(), "knowledge-idem-"));
+  const rows = new Map<string, { id: string; status: string }>();
+  const inserts: string[] = [];
+  const jobs: unknown[] = [];
+  const query = async (sql: string, params: unknown[] = []) => {
+    if (sql.includes("FROM users")) return { rows: [{ id: "7" }] };
+    if (sql.includes("SELECT id,status FROM knowledge_uploads")) {
+      const row = rows.get(String(params[0]));
+      return { rows: row && params[1] === 7 ? [row] : [] };
+    }
+    if (sql.startsWith("INSERT INTO knowledge_uploads")) {
+      inserts.push(String(params[0]));
+      rows.set(String(params[0]), { id: String(params[0]), status: "queued" });
+      return { rows: [] };
+    }
+    return { rows: [] };
+  };
+  const db = {
+    query,
+    withSystemScope: async (_label: string, work: () => Promise<unknown>) => await work(),
+    withUserScope: async (_scope: unknown, work: () => Promise<unknown>) => await work(),
+    transaction: async (work: (client: unknown) => Promise<unknown>) => await work({ query }),
+  };
+  const service = new KnowledgeUploadService(db as never, { record: async (_client: unknown, envelope: unknown) => { jobs.push(envelope); } } as never, root);
+  const upload = async (idempotencyKey?: string) => await service.createFromStream(42, {
+    name: "встреча — расшифровка.docx",
+    mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    stream: Readable.from([Buffer.from("PK docx bytes")]),
+    ...(idempotencyKey ? { idempotencyKey } : {}),
+  });
+
+  const first = await upload("telegram-audio:3001");
+  const replay = await upload("telegram-audio:3001");
+  assert.equal(replay.id, first.id, "повтор хода завёл вторую загрузку");
+  assert.match(first.id, /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.equal(inserts.length, 1);
+  assert.equal(jobs.length, 1, "задание приёма поставлено дважды");
+  const other = await upload("telegram-audio:3002");
+  assert.notEqual(other.id, first.id);
+  const plain = await upload();
+  assert.notEqual(plain.id, first.id);
+  assert.equal(inserts.length, 3);
+});

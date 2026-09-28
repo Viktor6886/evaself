@@ -11,12 +11,27 @@ import { DocumentIngestor, type KnowledgeChunk } from "./ingestion.js";
 export const KNOWLEDGE_INGEST_JOB = "knowledge_ingest";
 const ALLOWED = new Set(["text/plain","text/markdown","application/json","text/html","application/pdf","application/vnd.openxmlformats-officedocument.wordprocessingml.document"]);
 
+/** UUID из ключа идемпотентности: один и тот же ключ человека — одна загрузка. */
+function stableUploadId(userId:number,key:string):string{
+  const hex=createHash("sha256").update(`knowledge-upload:${userId}:${key}`).digest("hex");
+  // Версия 5 и вариант RFC 4122: строка остаётся корректным uuid для колонки.
+  return `${hex.slice(0,8)}-${hex.slice(8,12)}-5${hex.slice(13,16)}-${((parseInt(hex.slice(16,18),16)&0x3f)|0x80).toString(16).padStart(2,"0")}${hex.slice(18,20)}-${hex.slice(20,32)}`;
+}
+
 export class KnowledgeUploadService {
   constructor(private readonly db: Database, private readonly jobs: JobOutbox, private readonly root: string, private readonly maxBytes=10*1024*1024) {}
   private async internalUser(telegramId:number):Promise<number>{return await this.db.withSystemScope("verified-identity.resolve",async()=>{const {rows}=await this.db.query<{id:string}>("SELECT id FROM users WHERE telegram_id=$1",[telegramId]);if(!rows[0])throw new Error("upload_user_missing");return Number(rows[0].id);},{inherit:true});}
-  async createFromStream(telegramId:number,input:{name:string;mime:string;stream:Readable;truncated?:()=>boolean}):Promise<{id:string;status:string}>{
+  /**
+   * Загрузка в базу знаний. `idempotencyKey` нужен загрузкам, которые
+   * делает сервер, а не человек: повтор того же хода (например, архив
+   * расшифровки аудиофайла) возвращает уже созданную загрузку, а не
+   * заводит вторую копию того же материала.
+   */
+  async createFromStream(telegramId:number,input:{name:string;mime:string;stream:Readable;truncated?:()=>boolean;idempotencyKey?:string}):Promise<{id:string;status:string}>{
     const userId=await this.internalUser(telegramId); if(!ALLOWED.has(input.mime))throw new Error("document_type_unsupported");
-    const id=randomUUID(); const dir=resolve(this.root,String(userId)); await mkdir(dir,{recursive:true,mode:0o700});const path=join(dir,id);const hash=createHash("sha256");let size=0;const file=await open(path,"wx",0o600);
+    const id=input.idempotencyKey?stableUploadId(userId,input.idempotencyKey):randomUUID();
+    if(input.idempotencyKey){const existing=await this.db.withUserScope({userId,label:"knowledge.upload.replay",inherit:true},async()=>await this.db.query<{id:string;status:string}>("SELECT id,status FROM knowledge_uploads WHERE id=$1 AND user_id=$2",[id,userId]));if(existing.rows[0])return {id:existing.rows[0].id,status:existing.rows[0].status};}
+    const dir=resolve(this.root,String(userId)); await mkdir(dir,{recursive:true,mode:0o700});const path=join(dir,id);const hash=createHash("sha256");let size=0;const file=await open(path,"wx",0o600);
     try { for await(const value of input.stream){const chunk=Buffer.isBuffer(value)?value:Buffer.from(value);size+=chunk.length;if(size>this.maxBytes)throw new Error("document_too_large");hash.update(chunk);await file.write(chunk);}await file.sync();await file.close();if(size===0||input.truncated?.())throw new Error(size===0?"document_empty":"document_too_large");
       return await this.db.withUserScope({userId,label:"knowledge.upload",inherit:true},async()=>await this.db.transaction(async client=>{await client.query("INSERT INTO knowledge_uploads(id,user_id,name,mime,size_bytes,content_hash,storage_path,status) VALUES($1,$2,$3,$4,$5,$6,$7,'queued')",[id,userId,input.name,input.mime,size,hash.digest("hex"),path]);await this.jobs.record(client,{type:KNOWLEDGE_INGEST_JOB,queue:"memory",userId,traceId:id,correlationId:id,idempotencyKey:jobIdempotencyKey({type:KNOWLEDGE_INGEST_JOB,userId,discriminator:id}),payloadRef:id,payload:{upload_id:id},deadlineMs:10*60_000,timezone:"UTC",source:"user",privacy:"restricted"});return{id,status:"queued"};}));
     } catch(error){await file.close().catch(()=>undefined);await rm(path,{force:true});throw error;}

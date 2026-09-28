@@ -701,6 +701,7 @@ services:
       MEDIA_TTS_VOICE: ${MEDIA_TTS_VOICE}
       MEDIA_MAX_UPLOAD_MB: ${MEDIA_MAX_UPLOAD_MB}
       MEDIA_MAX_AUDIO_SECONDS: ${MEDIA_MAX_AUDIO_SECONDS}
+      MEDIA_ASR_CHUNK_SECONDS: ${MEDIA_ASR_CHUNK_SECONDS:-480}
       MEDIA_TMP_TTL_SECONDS: ${MEDIA_TMP_TTL_SECONDS}
       MEDIA_SERVICE_TOKEN: ${MEDIA_SERVICE_TOKEN}
       # Без EVA_ENV сервис считает себя production и отказывается стартовать
@@ -708,6 +709,9 @@ services:
       # ASR/TTS, а в сети compose его может вызвать любой контейнер.
       EVA_ENV: ${EVA_ENV:-production}
       EVA_TELEGRAM_BOT_TOKEN: ${EVA_TELEGRAM_BOT_TOKEN}
+      # Тот же сервер Bot API, что у агента: файлы больше 20 МБ отдаёт
+      # только свой сервер, и скачивать их media-service должен оттуда же.
+      EVA_TELEGRAM_API_BASE_URL: ${EVA_TELEGRAM_API_BASE_URL:-https://api.telegram.org}
       TZ: ${TZ}
     volumes:
       - eva_media_shared:/data/media
