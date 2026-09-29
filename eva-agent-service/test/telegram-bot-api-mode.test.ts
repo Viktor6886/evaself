@@ -22,7 +22,8 @@ import { auditParams } from "../dist/admin/redactor.js";
 import { SecretStore } from "../dist/admin/secret-store.js";
 import { containerNameOf, SERVICE_BY_ID } from "../dist/admin/service-catalog.js";
 import { modeOf, TelegramBotApiModeService } from "../dist/admin/telegram-bot-api-mode.js";
-import { setEnvValues, telegramApiCredentials } from "../dist/admin/updater-env.js";
+import { runAdminBootstrap } from "../dist/admin/bootstrap.js";
+import { readEnvValues, setEnvValues, telegramApiCredentials } from "../dist/admin/updater-env.js";
 
 const API_ID = "1234567";
 const API_HASH = "0123456789abcdef0123456789abcdef";
@@ -37,6 +38,8 @@ function harness(options: {
   token?: string | null;
   fetcher?: typeof fetch;
   updaterError?: Error;
+  /** Упасть только на этом шаге: prepare, apply или cloud. */
+  failStep?: string;
   container?: Record<string, unknown> | Error;
 } = {}) {
   const events: string[] = [];
@@ -62,13 +65,14 @@ function harness(options: {
     } as never,
     updater: {
       call: async (command: string, params: Record<string, unknown> = {}, timeoutMs?: number) => {
-        events.push(`updater:${command}`);
-        calls.push({ command, params, timeoutMs });
         if (command === "get_service_status") {
           if (options.container instanceof Error) throw options.container;
           return options.container ?? { exists: false, running: false, health: null };
         }
-        if (options.updaterError) throw options.updaterError;
+        const step = String(params.stage ?? params.mode);
+        events.push(`updater:${step}`);
+        calls.push({ command, params, timeoutMs });
+        if (options.updaterError && (!options.failStep || options.failStep === step)) throw options.updaterError;
         return { completed: true };
       },
     } as never,
@@ -107,38 +111,58 @@ test("недоступный сервис операций не ломает р�
   assert.equal(status.credentials.api_id, API_ID);
 });
 
-test("бот выходит из облака раньше, чем начинается переезд", async () => {
+test("сервер поднимается и принимает бота раньше, чем бот выходит из облака", async () => {
   const { service, events, calls } = harness();
   const result = await service.switchMode("local");
   assert.deepEqual(result, { mode: "local", admin_restart_scheduled: true });
-  assert.deepEqual(events, ["fetch:https://api.telegram.org/bot<token>/logOut", "updater:switch_telegram_bot_api"]);
-  assert.deepEqual(calls[0]!.params, { mode: "local", api_id: API_ID, api_hash: API_HASH });
+  assert.deepEqual(events, [
+    "updater:prepare",
+    "fetch:https://api.telegram.org/bot<token>/logOut",
+    "updater:apply",
+  ]);
+  assert.deepEqual(calls[0]!.params, { mode: "local", stage: "prepare", api_id: API_ID, api_hash: API_HASH });
+  // Режим пишется в .env только вторым шагом, и ключи ему уже не нужны.
+  assert.deepEqual(calls[1]!.params, { mode: "local", stage: "apply" });
   // Сборка образа и подъём трёх сервисов не укладываются в обычные 35 секунд.
-  assert.ok((calls[0]!.timeoutMs ?? 0) >= 5 * 60_000);
+  assert.ok(calls.every((call) => (call.timeoutMs ?? 0) >= 5 * 60_000));
 });
 
-test("без ответа облака переезд не начинается", async () => {
-  const { service, calls } = harness({
+test("свой сервер не поднялся или сервис операций недоступен — бот остаётся в облаке", async () => {
+  const { service, events } = harness({
+    updaterError: new Error("Сервис безопасного перезапуска недоступен"),
+    failStep: "prepare",
+  });
+  await assert.rejects(() => service.switchMode("local"), /бот остался в облаке/);
+  assert.deepEqual(events, ["updater:prepare"], "бот выведен из облака без готового сервера");
+});
+
+test("без ответа облака режим не переключается", async () => {
+  const { service, events } = harness({
     fetcher: (async () => { throw new TypeError("fetch failed"); }) as typeof fetch,
   });
   await assert.rejects(() => service.switchMode("local"), /не ответил на выход бота/);
-  assert.equal(calls.length, 0, "переезд начат без выхода из облака");
+  assert.deepEqual(events, ["updater:prepare"], "режим переключён без выхода из облака");
 });
 
 test("отказ облака в logOut — бот уже вышел — переезду не мешает, токена в журнале нет", async () => {
-  const { service, calls, warnings } = harness({
+  const { service, events, warnings } = harness({
     fetcher: (async () => new Response(JSON.stringify({ ok: false, description: "Unauthorized" }), { status: 401 })) as typeof fetch,
   });
   await service.switchMode("local");
-  assert.equal(calls.length, 1);
+  assert.deepEqual(events, ["updater:prepare", "updater:apply"]);
   assert.equal(warnings.length, 1);
   assert.ok(!JSON.stringify(warnings).includes(TOKEN));
+});
+
+test("отказ после выхода из облака называет, что сервер уже поднят и переход можно повторить", async () => {
+  const { service } = harness({ updaterError: new Error("compose up failed"), failStep: "apply" });
+  await assert.rejects(() => service.switchMode("local"), /Бот вышел из облака.*повторите переход/);
 });
 
 test("на своём сервере повторное включение применяет ключи без выхода из облака", async () => {
   const { service, events } = harness({ baseUrl: "http://telegram-bot-api:8081" });
   await service.switchMode("local");
-  assert.deepEqual(events, ["updater:switch_telegram_bot_api"]);
+  assert.deepEqual(events, ["updater:prepare", "updater:apply"]);
 });
 
 test("без ключей или токена переезд не начинается и из облака бот не выходит", async () => {
@@ -152,7 +176,7 @@ test("без ключей или токена переезд не начинае
 test("возврат в облако не трогает ни ключи, ни токен", async () => {
   const { service, events, calls } = harness({ baseUrl: "http://telegram-bot-api:8081" });
   await service.switchMode("cloud");
-  assert.deepEqual(events, ["updater:switch_telegram_bot_api"]);
+  assert.deepEqual(events, ["updater:cloud"]);
   assert.deepEqual(calls[0]!.params, { mode: "cloud" });
 });
 
@@ -167,7 +191,7 @@ test("отказ скрипта доходит до панели без знач
   });
   await assert.rejects(
     () => service.switchMode("local"),
-    (error: Error) => /Переключение не завершено/.test(error.message) && !error.message.includes(API_HASH),
+    (error: Error) => /не принял новые ключи/.test(error.message) && !error.message.includes(API_HASH),
   );
 });
 
@@ -189,6 +213,67 @@ test(".env меняется только в разрешённых ключах,
   );
   await assert.rejects(() => setEnvValues(file, { DOMAIN: "evil.test" }), /панелью не меняется/);
   await assert.rejects(() => setEnvValues(file, { TELEGRAM_API_ID: "1\nDOMAIN=evil" }), /перевод строки/);
+  // Прежние значения читаются для отката, если новые ключи не подойдут.
+  assert.deepEqual(
+    await readEnvValues(file, ["TELEGRAM_API_ID", "EVA_TELEGRAM_API_BASE_URL"]),
+    { TELEGRAM_API_ID: API_ID, EVA_TELEGRAM_API_BASE_URL: "" },
+  );
+});
+
+/** Пул для bootstrap: одна транзакция, маркер схемы и то, что записано. */
+function bootstrapPool(schema: number | null) {
+  const imported: string[] = [];
+  let marker: unknown = schema === null ? null : { completed: true, schema };
+  const query = async (sql: string, values: unknown[] = []) => {
+    if (sql.includes("SELECT value_json FROM system_settings")) {
+      return { rows: marker === null ? [] : [{ value_json: marker }], rowCount: marker === null ? 0 : 1 };
+    }
+    if (sql.includes("count(*)::text AS count FROM admin_users")) return { rows: [{ count: "1" }], rowCount: 1 };
+    if (sql.includes("INSERT INTO secret_records")) {
+      imported.push(String(values[0]));
+      return { rows: [], rowCount: 1 };
+    }
+    if (sql.includes("'admin.bootstrap.env_import'")) {
+      marker = { completed: true, schema: values[0] };
+      return { rows: [], rowCount: 1 };
+    }
+    if (sql.includes("INSERT INTO system_settings")) {
+      imported.push(String(values[0]));
+      return { rows: [], rowCount: 1 };
+    }
+    return { rows: [], rowCount: 0 };
+  };
+  return {
+    imported,
+    marker: () => marker,
+    pool: { query, connect: async () => ({ query, release: () => undefined }) },
+  };
+}
+
+test("обновлённая установка догружает из .env только ключи Telegram API, и один раз", async () => {
+  const env = {
+    TELEGRAM_API_ID: API_ID,
+    TELEGRAM_API_HASH: API_HASH,
+    DOMAIN: "eva.test",
+    MEDIA_ASR_API_KEY: "asr-key-value",
+  };
+  const upgraded = bootstrapPool(2);
+  const secrets = new SecretStore({ masterKey: Buffer.alloc(32, 5), pool: upgraded.pool as never });
+  await runAdminBootstrap(upgraded.pool as never, secrets, env);
+  assert.deepEqual(upgraded.imported.sort(), ["bootstrap.env.telegram.api.id", "sec_telegram_api_hash"]);
+  assert.deepEqual(upgraded.marker(), { completed: true, schema: 3 });
+
+  // Повтор уже ничего не импортирует: удалённое в панели не возвращается.
+  const again = await runAdminBootstrap(upgraded.pool as never, secrets, env);
+  assert.equal(again.alreadyCompleted, true);
+  assert.equal(upgraded.imported.length, 2);
+
+  // Новая установка берёт всё, как и прежде.
+  const fresh = bootstrapPool(null);
+  await runAdminBootstrap(fresh.pool as never, secrets, env);
+  assert.ok(fresh.imported.includes("bootstrap.env.domain"));
+  assert.ok(fresh.imported.includes("sec_media_asr_api_key"));
+  assert.ok(fresh.imported.includes("sec_telegram_api_hash"));
 });
 
 test("сервис операций сам проверяет ключи перед записью в .env", () => {

@@ -57,6 +57,25 @@ export async function setEnvValues(file: string, values: Record<string, string>)
   return { replaced };
 }
 
+/** Текущие значения ключей `.env`; отсутствующий ключ — пустая строка. */
+export async function readEnvValues(file: string, keys: readonly string[]): Promise<Record<string, string>> {
+  const wanted = new Set(keys);
+  const values: Record<string, string> = Object.fromEntries(keys.map((key) => [key, ""]));
+  let text: string;
+  try {
+    text = await readFile(file, "utf8");
+  } catch {
+    throw new Error(".env не найден: установка не настроена");
+  }
+  for (const line of text.split("\n")) {
+    const index = line.indexOf("=");
+    if (index < 0) continue;
+    const key = line.slice(0, index).trim();
+    if (wanted.has(key)) values[key] = line.slice(index + 1).replace(/\r$/u, "");
+  }
+  return values;
+}
+
 /**
  * Ключи приложения my.telegram.org для своего сервера Bot API.
  *

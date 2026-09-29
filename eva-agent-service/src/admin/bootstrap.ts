@@ -57,6 +57,23 @@ const SECRET_USED_BY: Record<string, string[]> = {
   TELEGRAM_API_HASH: ["telegram-bot-api"],
 };
 
+/**
+ * Версия импорта окружения. Полный импорт выполняется один раз за жизнь
+ * установки; повторять его на обновлённой нельзя — вернулось бы всё, что
+ * администратор с тех пор удалил в панели.
+ */
+const IMPORT_SCHEMA = 3;
+
+/**
+ * Переменные, которые импорт научился брать после схемы 2, по схеме
+ * появления. Обновлённая установка догружает только их и только один
+ * раз: иначе ключи, вписанные в .env по прежней инструкции, в панели не
+ * появились бы, и API Hash пришлось бы вводить заново.
+ */
+const IMPORTED_SINCE: Readonly<Record<number, readonly string[]>> = {
+  3: ["TELEGRAM_API_ID", "TELEGRAM_API_HASH"],
+};
+
 function secretRef(name: string): string {
   return `sec_${name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "")}`;
 }
@@ -163,10 +180,16 @@ async function bootstrapTransaction(
       !Array.isArray(markerValue)
       ? Number((markerValue as { schema?: unknown }).schema ?? 0)
       : 0;
-    if (markerSchema >= 2) {
+    if (markerSchema >= IMPORT_SCHEMA) {
       await client.query("COMMIT");
       return { alreadyCompleted: true, ownerCreated, settingsImported: 0, secretsImported: 0 };
     }
+    // Полный импорт уже был — догружаются только переменные новых схем.
+    const onlyNames = markerSchema >= 2
+      ? new Set(Object.entries(IMPORTED_SINCE)
+        .filter(([schema]) => Number(schema) > markerSchema)
+        .flatMap(([, names]) => names))
+      : null;
 
     let settingsImported = 0;
     let secretsImported = 0;
@@ -174,6 +197,7 @@ async function bootstrapTransaction(
     for (const [name, rawValue] of Object.entries(env).sort(([a], [b]) => a.localeCompare(b))) {
       const value = rawValue?.trim() ?? "";
       if (!value || EXCLUDED.has(name)) continue;
+      if (onlyNames && !onlyNames.has(name)) continue;
       if (SECRET_NAME.test(name)) {
         const ref = secretRef(name);
         const envelope = secretStore.seal(value);
@@ -216,10 +240,11 @@ async function bootstrapTransaction(
     await client.query(
       `INSERT INTO system_settings (key, value_json)
        VALUES ('admin.bootstrap.env_import',
-               jsonb_build_object('completed', true, 'schema', 2, 'source', 'environment'))
+               jsonb_build_object('completed', true, 'schema', $1::int, 'source', 'environment'))
        ON CONFLICT (key) DO UPDATE SET
          value_json = EXCLUDED.value_json,
          updated_at = now()`,
+      [IMPORT_SCHEMA],
     );
     await client.query("COMMIT");
     return { alreadyCompleted: false, ownerCreated, settingsImported, secretsImported };

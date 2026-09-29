@@ -95,6 +95,14 @@ export class TelegramBotApiModeService {
   /**
    * Переключить сервер Bot API.
    *
+   * Переезд — три шага в таком порядке, чтобы отказ на любом не оставил
+   * бота без связи:
+   *  1. свой сервер поднимается с ключами и принимает бота (`getMe`) —
+   *     бот ещё в облаке и отвечает, а заодно проверено, что сервис
+   *     операций жив;
+   *  2. бот выходит из облака (`logOut`);
+   *  3. режим попадает в `.env`, клиенты пересоздаются.
+   *
    * «local» при уже своём сервере — не ошибка: так применяются новые
    * ключи, и выход из облака тогда не повторяется. После ответа admin-api
    * пересоздаётся — панель на несколько секунд потеряет связь.
@@ -102,22 +110,40 @@ export class TelegramBotApiModeService {
   async switchMode(input: unknown): Promise<{ mode: BotApiMode; admin_restart_scheduled: boolean }> {
     if (input !== "local" && input !== "cloud") throw adminBadRequest("Режим — local или cloud");
     const mode: BotApiMode = input;
-    const current = modeOf(this.options.baseUrl);
 
-    const params: Record<string, unknown> = { mode };
-    if (mode === "local") {
-      const apiId = await this.apiId();
-      const apiHash = await this.options.secrets.get(TELEGRAM_API_HASH_SECRET);
-      if (!apiId || !apiHash) {
-        throw adminBadRequest("Сначала сохраните API ID и API Hash с my.telegram.org");
-      }
-      const token = await this.options.secrets.get(BOT_TOKEN_SECRET);
-      if (!token) throw adminBadRequest("Токен бота не задан: без него бота не перевести");
-      if (current === "cloud") await this.logOutFromCloud(token);
-      params.api_id = apiId;
-      params.api_hash = apiHash;
+    if (mode === "cloud") {
+      await this.updaterStep({ mode }, "Возврат в облако не завершён");
+      this.options.logger.info("Telegram: бот возвращён в облачный Bot API");
+      return { mode, admin_restart_scheduled: true };
     }
 
+    const apiId = await this.apiId();
+    const apiHash = await this.options.secrets.get(TELEGRAM_API_HASH_SECRET);
+    if (!apiId || !apiHash) {
+      throw adminBadRequest("Сначала сохраните API ID и API Hash с my.telegram.org");
+    }
+    const token = await this.options.secrets.get(BOT_TOKEN_SECRET);
+    if (!token) throw adminBadRequest("Токен бота не задан: без него бота не перевести");
+    const fromCloud = modeOf(this.options.baseUrl) === "cloud";
+
+    await this.updaterStep(
+      { mode, stage: "prepare", api_id: apiId, api_hash: apiHash },
+      fromCloud
+        ? "Свой сервер Bot API не поднялся — бот остался в облаке, ничего не переключено"
+        : "Свой сервер Bot API не принял новые ключи — возвращены прежние",
+    );
+    if (fromCloud) await this.logOutFromCloud(token);
+    await this.updaterStep(
+      { mode, stage: "apply" },
+      fromCloud
+        ? "Бот вышел из облака, но переключение не завершено — свой сервер уже поднят, повторите переход"
+        : "Переключение не завершено",
+    );
+    this.options.logger.info("Telegram: бот работает через свой сервер Bot API");
+    return { mode, admin_restart_scheduled: true };
+  }
+
+  private async updaterStep(params: Record<string, unknown>, failure: string): Promise<void> {
     try {
       await this.options.updater.call("switch_telegram_bot_api", params, SWITCH_TIMEOUT_MS);
     } catch (error) {
@@ -127,12 +153,10 @@ export class TelegramBotApiModeService {
       const message = error instanceof Error ? error.message : "Операция не выполнена";
       throw new AdminApiError(
         "telegram_bot_api_switch_failed",
-        `Переключение не завершено: ${globalSecretRedactor.redactText(message).slice(0, 400)}`,
+        `${failure}: ${globalSecretRedactor.redactText(message).slice(0, 600)}`,
         502,
       );
     }
-    this.options.logger.info("Telegram: сервер Bot API переключён", { mode });
-    return { mode, admin_restart_scheduled: true };
   }
 
   /**
@@ -155,7 +179,7 @@ export class TelegramBotApiModeService {
     } catch {
       throw adminBadRequest(
         "Облачный Bot API не ответил на выход бота (logOut). Без него Telegram не гарантирует "
-        + "доставку сообщений на свой сервер, поэтому переключение не начато — повторите позже.",
+        + "доставку сообщений на свой сервер, поэтому бот остался в облаке — повторите позже.",
       );
     }
     const body = await response.json().catch(() => null) as { ok?: boolean } | null;

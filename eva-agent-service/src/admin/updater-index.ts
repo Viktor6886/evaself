@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 
 import { globalSecretRedactor } from "./redactor.js";
 import { containerNameOf } from "./service-catalog.js";
-import { setEnvValues, telegramApiCredentials } from "./updater-env.js";
+import { readEnvValues, setEnvValues, telegramApiCredentials } from "./updater-env.js";
 
 const execFileAsync = promisify(execFile);
 const dockerSocket = process.env.DOCKER_HOST_SOCKET ?? "/var/run/docker.sock";
@@ -297,8 +297,14 @@ async function setTelegramToken(value: unknown) {
  *
  * Работу делает тот же скрипт, что человек запускает на сервере
  * (`scripts/telegram-local-bot-api.sh`): два пути переключения разошлись
- * бы на первой же правке. Выход из облака (`logOut`) до этого вызова
- * делает admin-api — у updater нет ни curl, ни выхода к Telegram.
+ * бы на первой же правке.
+ *
+ * Переезд — два шага, между которыми admin-api выводит бота из облака
+ * (`logOut`; у updater нет выхода к Telegram):
+ *  - `prepare` поднимает свой сервер с ключами и ждёт, пока тот примет
+ *    бота. Бот ещё в облаке, режим в `.env` не тронут — отказ здесь
+ *    ничего не ломает, а ключи в `.env` возвращаются прежние;
+ *  - `apply` пишет режим в `.env` и пересоздаёт клиентов.
  *
  * admin-api тоже читает адрес Bot API из окружения, но пересоздать его
  * скрипт не может: admin-api ждёт ответа этой самой операции, и
@@ -306,21 +312,43 @@ async function setTelegramToken(value: unknown) {
  * как рестарт admin-api из панели.
  */
 async function switchTelegramBotApi(params: Record<string, unknown>) {
+  const script = "telegram-local-bot-api.sh";
+  const envFile = path.join(projectDir, ".env");
   const mode = params.mode;
-  if (mode !== "local" && mode !== "cloud") throw new Error("режим — local или cloud");
-  if (mode === "local") {
+  const stage = params.stage;
+
+  if (mode === "local" && stage === "prepare") {
     const { apiId, apiHash } = telegramApiCredentials(params);
-    await setEnvValues(path.join(projectDir, ".env"), {
-      TELEGRAM_API_ID: apiId,
-      TELEGRAM_API_HASH: apiHash,
-    });
+    const previous = await readEnvValues(envFile, [
+      "TELEGRAM_API_ID", "TELEGRAM_API_HASH", "EVA_TELEGRAM_API_BASE_URL",
+    ]);
+    await setEnvValues(envFile, { TELEGRAM_API_ID: apiId, TELEGRAM_API_HASH: apiHash });
+    try {
+      return { ...(await runFixedScript(script, ["prepare"])), mode, stage };
+    } catch (error) {
+      // Новые ключи не подошли. Возвращаем прежние, а если бот уже
+      // работал через свой сервер — поднимаем его с ними обратно: иначе
+      // опечатка в ключе оставила бы Еву без связи.
+      await setEnvValues(envFile, {
+        TELEGRAM_API_ID: previous.TELEGRAM_API_ID ?? "",
+        TELEGRAM_API_HASH: previous.TELEGRAM_API_HASH ?? "",
+      });
+      const wasLocal = Boolean(previous.EVA_TELEGRAM_API_BASE_URL)
+        && previous.EVA_TELEGRAM_API_BASE_URL !== "https://api.telegram.org";
+      if (wasLocal && previous.TELEGRAM_API_ID && previous.TELEGRAM_API_HASH) {
+        await runFixedScript(script, ["prepare"]).catch(() => undefined);
+      }
+      throw error;
+    }
   }
-  const result = await runFixedScript(
-    "telegram-local-bot-api.sh",
-    [mode === "local" ? "enable" : "disable"],
-  );
+
+  const args = mode === "local" && stage === "apply"
+    ? ["enable"]
+    : mode === "cloud" ? ["disable"] : null;
+  if (!args) throw new Error("режим — local (prepare или apply) или cloud");
+  const result = await runFixedScript(script, args);
   setTimeout(() => {
-    void runFixedScript("telegram-local-bot-api.sh", ["recreate-admin"]).catch(() => {});
+    void runFixedScript(script, ["recreate-admin"]).catch(() => {});
   }, 1_500);
   return { ...result, mode, admin_restart_scheduled: true };
 }
