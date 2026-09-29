@@ -5,7 +5,8 @@
 
 ## База знаний на Qdrant — K1: инвариант, служба, клиент — 2026-09-29
 
-Ветка: `claude/evaself-architecture-improvements-3d7d2s`. Статус: в работе.
+Ветка: `claude/evaself-architecture-improvements-3d7d2s`. Статус: выполнен,
+PR [#388](https://github.com/Viktor6886/evaself/pull/388) влит (69c1196).
 
 Задание человека: полноценное векторное хранилище Qdrant с управлением из
 панели — личные базы и общая база администратора, эмбеддинги от разных
@@ -23,7 +24,9 @@
   хранилище, метрики `eva_qdrant_*`; каталог служб панели.
 - [x] Проверки: `test/qdrant-vector-store.test.ts`, `test/metrics.test.ts`,
   `scripts/ci/test-qdrant.mjs` на настоящем Qdrant в CI.
-- [ ] PR, ревью, CI, мерж.
+- [x] PR #388: независимое ревью — три «да», девять замечаний minor
+  разобраны; два замечания Codex исправлены (отмена хода —
+  `qdrant_cancelled`, Qdrant в `doctor.sh`); CI зелёный.
 
 Rollback: revert PR. Поиск не менялся, флагов нет; служба `qdrant`
 удаляется `docker compose rm -s -f qdrant`, том — только с разрешения.
