@@ -5,8 +5,9 @@
 
 ## Ключи Telegram API и свой сервер Bot API из панели — 2026-09-29
 
-Ветка: `claude/evaself-architecture-improvements-3d7d2s`. Статус: PR, CI и
-независимое ревью.
+Ветка: `claude/evaself-architecture-improvements-3d7d2s`. Статус: выполнен,
+PR [#386](https://github.com/Viktor6886/evaself/pull/386) влит (0baebc9), CI на
+`main` зелёный.
 
 Задание человека: вводить `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` и включать
 `EVA_AUDIO_FILE_TRANSCRIPTS` в веб-панели, в разделе распознавания речи,
