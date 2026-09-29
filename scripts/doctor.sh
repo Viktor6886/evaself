@@ -75,7 +75,11 @@ esac
 # =====================================================================
 step "Containers"
 # =====================================================================
-EXPECTED=(caddy postgres valkey eva-agent-service llm-router admin-api admin-ui letta-app-server webapp searxng crawl4ai media-service backup-service)
+# qdrant — критично, хотя диалог без него работает (поиск уходит в
+# PostgreSQL): update.sh по этой проверке решает, принять обновление или
+# откатить, и обновление, после которого индекс не поднялся, — поломка.
+# Его healthcheck и есть /readyz, отдельная проба не нужна.
+EXPECTED=(caddy postgres valkey eva-agent-service llm-router admin-api admin-ui letta-app-server webapp searxng crawl4ai media-service backup-service qdrant)
 for svc in "${EXPECTED[@]}"; do
 	cid="$(compose ps -q "$svc" 2>/dev/null)"
 	if [ -z "$cid" ]; then
