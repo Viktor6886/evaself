@@ -21,6 +21,8 @@ import type { AgentDirectoryService } from "./agent-directory.js";
 import { registerArtifactRoutes } from "./artifact-routes.js";
 import { registerCrudRoutes } from "./crud-routes.js";
 import { registerPanelRoutes } from "./panel-routes.js";
+import type { TelegramBotApiModeService } from "./telegram-bot-api-mode.js";
+import { registerTelegramBotApiRoutes } from "./telegram-bot-api-routes.js";
 import type { AdminAgentService } from "./agent-admin-service.js";
 import type { SubscriptionAdminService } from "./subscription-service.js";
 import type { PersonaAdminService } from "./persona-admin-service.js";
@@ -94,6 +96,8 @@ export interface AdminServerServices {
   };
   securityAudit?: SecurityAuditService;
   telegramTokens?: TelegramTokenService;
+  /** Облачный или свой сервер Bot API (раздел «Распознавание речи»). */
+  telegramBotApi?: TelegramBotApiModeService;
   tariffs?: TariffService;
   /**
    * Возврат звёзд. Отсутствует — маршрут отвечает отказом, а не делает
@@ -540,6 +544,10 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
         await services.audit.annotate(context.audit.id, details);
       },
     });
+  }
+
+  if (services.telegramBotApi) {
+    registerTelegramBotApiRoutes(app, services.telegramBotApi);
   }
 
   // Разделы единой панели. Регистрируются всегда: домен один, панель

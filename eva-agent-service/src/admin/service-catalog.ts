@@ -155,6 +155,19 @@ export const SERVICES: readonly ServiceDefinition[] = [
     container: "backup-service",
     restartable: true,
   },
+  {
+    // Профиль compose `bot-api`: контейнера нет, пока человек не перевёл
+    // бота на свой сервер из раздела «Распознавание речи». Без записи в
+    // каталоге сервис операций не знал бы цели и панель не могла бы
+    // показать, поднят ли сервер.
+    id: "telegram-bot-api",
+    title: "Свой сервер Telegram Bot API",
+    purpose: "Файлы из Telegram больше 20 МБ",
+    group: "infrastructure",
+    container: "telegram-bot-api",
+    optional: true,
+    restartable: true,
+  },
 ] as const;
 
 export const INTEGRATIONS: readonly IntegrationDefinition[] = [

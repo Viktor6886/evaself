@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 
 import { globalSecretRedactor } from "./redactor.js";
 import { containerNameOf } from "./service-catalog.js";
+import { setEnvValues, telegramApiCredentials } from "./updater-env.js";
 
 const execFileAsync = promisify(execFile);
 const dockerSocket = process.env.DOCKER_HOST_SOCKET ?? "/var/run/docker.sock";
@@ -281,41 +282,47 @@ async function serviceLogs(service: unknown, rawTail: unknown) {
  * продолжают уходить прежним токеном. Со стороны это выглядит так, будто
  * новый бот пересылает сообщения старому.
  *
- * Правка ровно того же вида, что делает set_env установщика: строка с
- * этим ключом заменяется целиком, остальные не трогаются, а если ключа
- * не было — он дописывается.
+ * Правку делает `setEnvValues` (updater-env.ts) — того же вида, что
+ * set_env установщика.
  */
 async function setTelegramToken(value: unknown) {
   const token = typeof value === "string" ? value.trim() : "";
   if (!token) throw new Error("токен бота не может быть пустым");
-  // Перевод строки разорвал бы .env на две записи, и вторая половина
-  // стала бы мусорной переменной окружения.
-  if (/[\r\n]/.test(token)) throw new Error("токен бота не должен содержать перевод строки");
+  const { replaced } = await setEnvValues(path.join(projectDir, ".env"), { EVA_TELEGRAM_BOT_TOKEN: token });
+  return { configured: true, replaced: replaced.length > 0 };
+}
 
-  const file = path.join(projectDir, ".env");
-  let lines: string[] = [];
-  try {
-    lines = (await readFile(file, "utf8")).split("\n");
-  } catch {
-    throw new Error(".env не найден: установка не настроена");
+/**
+ * Перевести бота на свой сервер Bot API или вернуть в облако.
+ *
+ * Работу делает тот же скрипт, что человек запускает на сервере
+ * (`scripts/telegram-local-bot-api.sh`): два пути переключения разошлись
+ * бы на первой же правке. Выход из облака (`logOut`) до этого вызова
+ * делает admin-api — у updater нет ни curl, ни выхода к Telegram.
+ *
+ * admin-api тоже читает адрес Bot API из окружения, но пересоздать его
+ * скрипт не может: admin-api ждёт ответа этой самой операции, и
+ * пересоздание оборвало бы её посередине. Поэтому — после ответа, так же
+ * как рестарт admin-api из панели.
+ */
+async function switchTelegramBotApi(params: Record<string, unknown>) {
+  const mode = params.mode;
+  if (mode !== "local" && mode !== "cloud") throw new Error("режим — local или cloud");
+  if (mode === "local") {
+    const { apiId, apiHash } = telegramApiCredentials(params);
+    await setEnvValues(path.join(projectDir, ".env"), {
+      TELEGRAM_API_ID: apiId,
+      TELEGRAM_API_HASH: apiHash,
+    });
   }
-  const key = "EVA_TELEGRAM_BOT_TOKEN";
-  let replaced = false;
-  const out = lines.map((line) => {
-    if (line.split("=", 1)[0]?.trim() !== key) return line;
-    replaced = true;
-    return `${key}=${token}`;
-  });
-  if (!replaced) {
-    // Пустая последняя строка — обычный хвост файла; дописываем в неё,
-    // чтобы не плодить пустых строк при каждой смене бота.
-    if (out.length && out[out.length - 1] === "") out[out.length - 1] = `${key}=${token}`;
-    else out.push(`${key}=${token}`);
-    out.push("");
-  }
-  await writeFile(file, out.join("\n"), { encoding: "utf8", mode: 0o600 });
-  await chmod(file, 0o600);
-  return { configured: true, replaced };
+  const result = await runFixedScript(
+    "telegram-local-bot-api.sh",
+    [mode === "local" ? "enable" : "disable"],
+  );
+  setTimeout(() => {
+    void runFixedScript("telegram-local-bot-api.sh", ["recreate-admin"]).catch(() => {});
+  }, 1_500);
+  return { ...result, mode, admin_restart_scheduled: true };
 }
 
 async function setBackupPassword(value: unknown) {
@@ -412,13 +419,18 @@ async function listBackups() {
   return items.sort((left, right) => right.created_at.localeCompare(left.created_at));
 }
 
-async function runFixedScript(name: "backup.sh" | "update.sh", args: string[] = []) {
+async function runFixedScript(
+  name: "backup.sh" | "update.sh" | "telegram-local-bot-api.sh",
+  args: string[] = [],
+) {
   const script = path.join(projectDir, "scripts", name);
   const temporaryRoot = path.join(backupDir, ".updater-tmp");
   await mkdir(temporaryRoot, { recursive: true, mode: 0o700 });
   const { stdout } = await execFileAsync(script, args, {
     cwd: projectDir,
-    timeout: name === "update.sh" ? 30 * 60_000 : 15 * 60_000,
+    // Переключение Bot API собирает образ поверх официального и поднимает
+    // три сервиса: минуты, а не полчаса, как у обновления.
+    timeout: name === "update.sh" ? 30 * 60_000 : name === "backup.sh" ? 15 * 60_000 : 10 * 60_000,
     maxBuffer: 1024 * 1024,
     env: {
       ...process.env,
@@ -566,7 +578,7 @@ const UPDATER_COMMANDS = [
   "get_service_status", "start_service", "stop_service", "restart_service",
   "get_service_logs", "set_backup_password", "set_telegram_token", "host_metrics",
   "list_backups", "create_backup", "get_update_info", "check_update",
-  "pull_and_up", "handoff_update",
+  "pull_and_up", "handoff_update", "switch_telegram_bot_api",
 ] as const;
 
 async function dispatch(command: string, params: Record<string, unknown>) {
@@ -599,6 +611,8 @@ async function dispatch(command: string, params: Record<string, unknown>) {
       return await runFixedScript("update.sh");
     case "handoff_update":
       return await handoffUpdate();
+    case "switch_telegram_bot_api":
+      return await switchTelegramBotApi(params);
     default:
       throw new Error("Команда отсутствует в разрешённом контракте");
   }

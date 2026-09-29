@@ -30,6 +30,7 @@ import { DeleteGuard } from "../letta/delete-guard.js";
 import { adminBadRequest } from "./errors.js";
 import { createTelegramBotApi } from "./telegram-bot-api.js";
 import { TariffService } from "./tariff-service.js";
+import { TelegramBotApiModeService } from "./telegram-bot-api-mode.js";
 import { createTelegramRuntimeApply, TelegramTokenService } from "./telegram-token-service.js";
 import { SecurityAuditService } from "./security-audit.js";
 import { RetentionService } from "../retention/service.js";
@@ -192,6 +193,15 @@ async function main(): Promise<void> {
     config,
     secrets,
     telegramTokens,
+    // Облако или свой сервер Bot API. Режим admin-api знает по своему же
+    // окружению: после переключения его пересоздают с новым адресом.
+    telegramBotApi: new TelegramBotApiModeService({
+      pool,
+      secrets,
+      updater: new UpdaterClient(),
+      baseUrl: process.env.EVA_TELEGRAM_API_BASE_URL ?? "https://api.telegram.org",
+      logger,
+    }),
     tariffs,
     // Возврат звёзд идёт активным токеном бота: тем же, которым счёт
     // был выставлен. Токен берётся из хранилища секретов в момент

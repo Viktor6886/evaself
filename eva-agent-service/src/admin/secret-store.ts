@@ -52,6 +52,9 @@ const KNOWN_SECRETS: Readonly<Record<string, string[]>> = {
   sec_eva_db_readonly_password: ["postgres"],
   sec_letta_db_password: ["postgres", "app-server"],
   sec_valkey_password: ["valkey", "agent-runtime", "admin-api"],
+  // Ключ приложения my.telegram.org: читает только свой сервер Bot API,
+  // и доходит он до него через `.env` при переключении из панели.
+  sec_telegram_api_hash: ["telegram-bot-api"],
 };
 
 /**

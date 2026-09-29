@@ -1,5 +1,5 @@
 const SENSITIVE_KEY =
-  /(authorization|cookie|password|passwd|secret|token|api[_-]?key|credential|ciphertext|nonce|auth[_-]?tag|master[_-]?key)/i;
+  /(authorization|cookie|password|passwd|secret|token|api[_-]?key|api[_-]?hash|credential|ciphertext|nonce|auth[_-]?tag|master[_-]?key)/i;
 
 const AUTHORIZATION_VALUE = /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/gi;
 

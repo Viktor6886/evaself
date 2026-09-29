@@ -35,6 +35,12 @@ export interface IntegrationField {
   ref: string;
   required: boolean;
   placeholder?: string;
+  /**
+   * Допустимый вид значения — регулярное выражение целиком, без якорей.
+   * Строкой, а не RegExp: поле уходит в панель, и та ставит его в
+   * атрибут `pattern` того же поля ввода.
+   */
+  pattern?: string;
   options?: Array<{
     value: string;
     title: string;
@@ -104,6 +110,10 @@ export const TTS_PROVIDER_PRESETS: Record<
     response_format: "mp3",
   },
 };
+
+/** Ключи приложения Telegram для своего сервера Bot API (docs/telegram-bot-api.md). */
+export const TELEGRAM_API_ID_SETTING = "bootstrap.env.telegram.api.id";
+export const TELEGRAM_API_HASH_SECRET = "sec_telegram_api_hash";
 
 const setting = (
   name: string,
@@ -217,7 +227,8 @@ const FORMS: Record<string, IntegrationForm> = {
   },
   telegram: {
     restartService: "eva-agent-service",
-    note: "Смена токена бота требует переустановки webhook.",
+    note: "Смена токена бота требует переустановки webhook. API ID и API Hash применяются "
+      + "кнопкой «Перейти на свой сервер» в разделе «Распознавание речи → Файлы из Telegram».",
     fields: [
       setting("api_base_url", "bootstrap.env.eva.telegram.api.base.url", "Base URL",
         "Адрес Bot API; менять только для собственного Bot API Server", {
@@ -226,6 +237,19 @@ const FORMS: Record<string, IntegrationForm> = {
       secret("bot_token", "sec_eva_telegram_bot_token", "Bot Token", "Токен от BotFather"),
       setting("owner_id", "bootstrap.env.owner.telegram.id", "Telegram ID владельца",
         "Кому уходят критические уведомления", { required: true }),
+      // Ключи приложения с my.telegram.org нужны только своему серверу
+      // Bot API: облачный отдаёт боту файлы до 20 МБ, свой — любые.
+      // Бот по-прежнему работает своим токеном, это не вход в аккаунт.
+      setting("api_id", TELEGRAM_API_ID_SETTING, "API ID",
+        "Для своего сервера Bot API (файлы больше 20 МБ): my.telegram.org → API development tools", {
+          placeholder: "1234567", pattern: "[0-9]{1,12}",
+        }),
+      {
+        ...secret("api_hash", TELEGRAM_API_HASH_SECRET, "API Hash",
+          "Пара к API ID с той же страницы: 32 символа 0–9 и a–f"),
+        required: false,
+        pattern: "[0-9a-fA-F]{32}",
+      },
     ],
   },
 };
@@ -398,6 +422,11 @@ export class IntegrationConfigService {
         throw adminBadRequest(`${field.title}: ожидается строка`);
       }
       const value = (raw ?? "").trim();
+      // Формат проверяется до записи, у секрета тоже: опечатка в ключе
+      // иначе всплыла бы только отказом сервиса, который его читает.
+      if (value && field.pattern && !new RegExp(`^(?:${field.pattern})$`).test(value)) {
+        throw adminBadRequest(`${field.title}: неверный формат. ${field.hint}`);
+      }
 
       if (field.kind === "secret") {
         if (!value) continue;

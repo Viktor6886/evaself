@@ -17,7 +17,8 @@ export type UpdaterCommand =
   | "get_update_info"
   | "check_update"
   | "pull_and_up"
-  | "handoff_update";
+  | "handoff_update"
+  | "switch_telegram_bot_api";
 
 export interface UpdaterResponse<T = unknown> {
   id: string;
