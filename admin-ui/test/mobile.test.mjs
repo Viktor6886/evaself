@@ -246,7 +246,8 @@ describe("панель на телефоне", () => {
       const box = node.getBoundingClientRect();
       return { right: box.right, height: box.height };
     }));
-    assert.equal(tabs.length, 3);
+    // Конфигурации, маршрутизация, статистика и файлы из Telegram.
+    assert.equal(tabs.length, 4);
     for (const tab of tabs) {
       assert.ok(tab.right <= PHONE.width + 1, "вкладка не должна выходить за экран");
       // Палец — не мышь: ниже сорока пикселей начинаются промахи.
