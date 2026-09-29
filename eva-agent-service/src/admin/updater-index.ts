@@ -336,7 +336,15 @@ async function switchTelegramBotApi(params: Record<string, unknown>) {
       const wasLocal = Boolean(previous.EVA_TELEGRAM_API_BASE_URL)
         && previous.EVA_TELEGRAM_API_BASE_URL !== "https://api.telegram.org";
       if (wasLocal && previous.TELEGRAM_API_ID && previous.TELEGRAM_API_HASH) {
-        await runFixedScript(script, ["prepare"]).catch(() => undefined);
+        try {
+          await runFixedScript(script, ["prepare"]);
+        } catch (restoreError) {
+          // Молчать нельзя: панель сказала бы «возвращены прежние», а
+          // свой сервер лежит, и Ева без связи.
+          const reason = restoreError instanceof Error ? restoreError.message : String(restoreError);
+          throw new Error(`${error instanceof Error ? error.message : String(error)}; `
+            + `с прежними ключами свой сервер тоже не поднялся: ${reason}`);
+        }
       }
       throw error;
     }
