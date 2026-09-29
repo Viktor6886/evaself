@@ -25,7 +25,7 @@ const SAFE_EXTRA_SETTINGS = new Set([
   "EVA_LLM_CONTEXT_WINDOW", "EVA_LLM_ADDITIONAL_PARAMETERS", "EVA_LLM_PROBE_TIMEOUT_MS",
   "EVA_EMBEDDING_BASE_URL", "EVA_EMBEDDING_MODEL", "EVA_EMBEDDING_DIM",
   "EVA_TELEGRAM_API_BASE_URL", "EVA_TELEGRAM_WEBAPP_MAX_AGE_SECONDS",
-  "OWNER_TELEGRAM_ID",
+  "OWNER_TELEGRAM_ID", "TELEGRAM_API_ID",
   "SEARXNG_BASE_URL", "MEDIA_ASR_BASE_URL", "MEDIA_ASR_MODEL",
   "MEDIA_TTS_BASE_URL", "MEDIA_TTS_MODEL", "MEDIA_TTS_VOICE",
   "MEDIA_MAX_UPLOAD_MB", "MEDIA_MAX_AUDIO_SECONDS", "MEDIA_TMP_TTL_SECONDS",
@@ -54,6 +54,24 @@ const SECRET_USED_BY: Record<string, string[]> = {
   EVA_DB_READONLY_PASSWORD: ["postgres"],
   LETTA_DB_PASSWORD: ["postgres", "app-server"],
   VALKEY_PASSWORD: ["valkey", "agent-runtime", "admin-api"],
+  TELEGRAM_API_HASH: ["telegram-bot-api"],
+};
+
+/**
+ * Версия импорта окружения. Полный импорт выполняется один раз за жизнь
+ * установки; повторять его на обновлённой нельзя — вернулось бы всё, что
+ * администратор с тех пор удалил в панели.
+ */
+const IMPORT_SCHEMA = 3;
+
+/**
+ * Переменные, которые импорт научился брать после схемы 2, по схеме
+ * появления. Обновлённая установка догружает только их и только один
+ * раз: иначе ключи, вписанные в .env по прежней инструкции, в панели не
+ * появились бы, и API Hash пришлось бы вводить заново.
+ */
+const IMPORTED_SINCE: Readonly<Record<number, readonly string[]>> = {
+  3: ["TELEGRAM_API_ID", "TELEGRAM_API_HASH"],
 };
 
 function secretRef(name: string): string {
@@ -162,10 +180,16 @@ async function bootstrapTransaction(
       !Array.isArray(markerValue)
       ? Number((markerValue as { schema?: unknown }).schema ?? 0)
       : 0;
-    if (markerSchema >= 2) {
+    if (markerSchema >= IMPORT_SCHEMA) {
       await client.query("COMMIT");
       return { alreadyCompleted: true, ownerCreated, settingsImported: 0, secretsImported: 0 };
     }
+    // Полный импорт уже был — догружаются только переменные новых схем.
+    const onlyNames = markerSchema >= 2
+      ? new Set(Object.entries(IMPORTED_SINCE)
+        .filter(([schema]) => Number(schema) > markerSchema)
+        .flatMap(([, names]) => names))
+      : null;
 
     let settingsImported = 0;
     let secretsImported = 0;
@@ -173,6 +197,7 @@ async function bootstrapTransaction(
     for (const [name, rawValue] of Object.entries(env).sort(([a], [b]) => a.localeCompare(b))) {
       const value = rawValue?.trim() ?? "";
       if (!value || EXCLUDED.has(name)) continue;
+      if (onlyNames && !onlyNames.has(name)) continue;
       if (SECRET_NAME.test(name)) {
         const ref = secretRef(name);
         const envelope = secretStore.seal(value);
@@ -215,10 +240,11 @@ async function bootstrapTransaction(
     await client.query(
       `INSERT INTO system_settings (key, value_json)
        VALUES ('admin.bootstrap.env_import',
-               jsonb_build_object('completed', true, 'schema', 2, 'source', 'environment'))
+               jsonb_build_object('completed', true, 'schema', $1::int, 'source', 'environment'))
        ON CONFLICT (key) DO UPDATE SET
          value_json = EXCLUDED.value_json,
          updated_at = now()`,
+      [IMPORT_SCHEMA],
     );
     await client.query("COMMIT");
     return { alreadyCompleted: false, ownerCreated, settingsImported, secretsImported };

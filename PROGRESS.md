@@ -3,6 +3,58 @@
 Оперативное состояние работы. Единственный источник истины о том, где работа
 остановилась. Агент читает этот файл первым и обновляет его после каждого шага.
 
+## Ключи Telegram API и свой сервер Bot API из панели — 2026-09-29
+
+Ветка: `claude/evaself-architecture-improvements-3d7d2s`. Статус: PR, CI и
+независимое ревью.
+
+Задание человека: вводить `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` и включать
+`EVA_AUDIO_FILE_TRANSCRIPTS` в веб-панели, в разделе распознавания речи,
+а не в `.env`.
+
+- [x] Вкладка «Распознавание речи → Файлы из Telegram»
+  (`admin-ui/public/ui-stt-telegram.js`): флаг — общей настройкой
+  `runtime.audio_file_transcripts`, ключи — формой интеграции Telegram,
+  переход на свой сервер и возврат — кнопкой с подтверждением.
+- [x] Ключи: API ID — `system_settings`, API Hash — Secret Store; формат
+  проверяется до записи; `api_hash` вычищается из аудита; bootstrap
+  импортирует их из `.env`.
+- [x] `TelegramBotApiModeService` и маршруты `GET /telegram/bot-api`,
+  `POST /telegram/bot-api/mode` (отдельный модуль, не `server.ts`):
+  `logOut` из облака до переезда, без ответа облака переезд не начинается.
+- [x] updater: `switch_telegram_bot_api` — ключи в `.env` только
+  разрешёнными ключами (`updater-env.ts`), тот же скрипт, что руками;
+  admin-api пересоздаётся после ответа. Скрипт при возврате удаляет
+  контейнер, а не только останавливает.
+- [x] Каталог служб: необязательная цель `telegram-bot-api`.
+- [x] Порядок переезда (замечания Codex к #386): свой сервер поднимается
+  и отвечает на `getMe` этим ботом, пока бот ещё в облаке и `.env` режима
+  не тронут (`prepare`); затем `logOut`; затем режим в `.env` и
+  пересоздание клиентов (`apply`). Отказ сервера возвращает прежние ключи
+  в `.env`. Агент ставит webhook один раз при старте — без барьера бот,
+  уже вышедший из облака, мог остаться без вебхука.
+- [x] bootstrap: обновлённая установка один раз догружает из `.env`
+  только `TELEGRAM_API_ID`/`TELEGRAM_API_HASH` (схема импорта 3); полный
+  импорт не повторяется, чтобы не вернуть удалённое в панели.
+
+Проверка эквивалента (правило 20): новой таблицы нет; ключи — в
+существующей форме интеграции Telegram; переключение — существующий
+скрипт через существующий сервис операций. Новые модули:
+`telegram-bot-api-mode.ts` (у TelegramTokenService другое назначение —
+какой бот, а не через какой сервер), `telegram-bot-api-routes.ts` (вынос
+из `server.ts`, 1480 строк), `updater-env.ts` (общая запись `.env` для
+токена и ключей).
+
+Проверки (2026-09-29):
+
+```
+eva-agent-service: npm test → PASS (1611, 0 fail, 8 skip); typecheck, lint → PASS
+admin-ui: node --test test/*.test.mjs → PASS (128)
+assert-admin-route-access, assert-tenant-scope, assert-env-plumbing, assert-doc-paths → PASS
+make validate (с shellcheck 0.11) → PASS
+все шаги «Static checks» из CI (assert-*, node --check, test-*.sh) → PASS
+```
+
 ## Аудиофайлы до 350 МБ, голоса в диалоге, переделка документа — 2026-09-28
 
 Ветка: `claude/evaself-architecture-improvements-3d7d2s`. Статус: выполнен,

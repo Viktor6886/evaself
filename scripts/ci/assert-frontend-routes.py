@@ -53,6 +53,9 @@ ROUTE_FILES = [
     ("eva-agent-service/src/admin/panel-routes.ts", "/api/admin/v1"),
     ("eva-agent-service/src/admin/crud-routes.ts", "/api/admin/v1"),
     ("eva-agent-service/src/admin/artifact-routes.ts", "/api/admin/v1"),
+    # Переключение сервера Bot API — тоже отдельный модуль, вынесенный из
+    # admin/server.ts ради его размера.
+    ("eva-agent-service/src/admin/telegram-bot-api-routes.ts", "/api/admin/v1"),
 ]
 
 ROUTE_RE = re.compile(
