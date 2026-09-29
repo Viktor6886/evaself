@@ -13,6 +13,10 @@ Rules that matter:
     suffixed.
   * PostgreSQL never crosses a major version automatically. A major
     upgrade needs a dump/restore and is the operator's decision.
+  * Qdrant takes patch releases only. Its storage is guaranteed to open
+    only on the next minor version, so a jump over several minors could
+    leave the index unreadable; a minor upgrade is a release of this
+    repository, step by step.
 """
 
 from __future__ import annotations
@@ -35,6 +39,7 @@ TRACKED = [
     ("LETTA", "LETTA_IMAGE", "LETTA_VERSION"),
     ("SEARXNG", "SEARXNG_IMAGE", "SEARXNG_VERSION"),
     ("CRAWL4AI", "CRAWL4AI_IMAGE", "CRAWL4AI_VERSION"),
+    ("QDRANT", "QDRANT_IMAGE", "QDRANT_VERSION"),
 ]
 
 BAD_TAG = re.compile(
@@ -78,7 +83,8 @@ def fetch_tags(image: str, pages: int = 3) -> list[str]:
 
 def version_key(tag: str):
     """Sortable key for a tag; None when it is not a comparable version."""
-    core = tag.split("-", 1)[0]
+    # Qdrant и многие другие ставят перед номером «v»: v1.19.1.
+    core = tag.split("-", 1)[0].removeprefix("v")
     parts = core.split(".")
     if not parts or not parts[0].isdigit():
         return None
@@ -91,11 +97,11 @@ def version_key(tag: str):
 
 
 def same_shape(candidate: str, current: str) -> bool:
-    """Keep the tag's flavour: -alpine stays -alpine, pg17 stays pg17."""
+    """Keep the tag's flavour: -alpine stays -alpine, pg17 stays pg17, v1.2 stays v1.2."""
     def suffix(tag: str) -> str:
         head, _, rest = tag.partition("-")
         return rest
-    return suffix(candidate) == suffix(current)
+    return suffix(candidate) == suffix(current) and candidate.startswith("v") == current.startswith("v")
 
 
 def postgres_major(tag: str) -> str | None:
@@ -144,6 +150,11 @@ def main() -> int:
         # "17.10-trixie".
         if label == "POSTGRES" and status == "update":
             if postgres_major(current) != postgres_major(latest):
+                print(f"{version_key_name}\t{current}\t{latest}\tpinned-major")
+                continue
+
+        if label == "QDRANT" and status == "update":
+            if (version_key(current) or ())[:2] != (version_key(latest) or ())[:2]:
                 print(f"{version_key_name}\t{current}\t{latest}\tpinned-major")
                 continue
 

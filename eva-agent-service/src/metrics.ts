@@ -17,6 +17,7 @@ import { monitorEventLoopDelay, type IntervalHistogram } from "node:perf_hooks";
 import type { Database } from "./db.js";
 import { genderFixStats } from "./i18n/eva-gender.js";
 import { deliveryStats, jobStats, providerStats } from "./metrics-queries.js";
+import { knowledgeMetrics } from "./knowledge/metrics.js";
 import { osintStats } from "./osint/metrics.js";
 import { toolMetrics } from "./tools/tool-metrics.js";
 import { runtimeContextSizeStats } from "./runtime/runtime-context.js";
@@ -155,6 +156,25 @@ function toolSamples(delegation: { active: number; queued: number } | null): Sam
         ? [{ labels: { state: "active" }, value: delegation.active }, { labels: { state: "queued" }, value: delegation.queued }]
         : [],
     },
+  ];
+}
+
+/**
+ * База знаний: вызовы Qdrant по операции и этапы поиска (эмбеддинг,
+ * reranker). Задержки — сумма, число и максимум, как у инструментов;
+ * отказы — отдельным счётчиком. Ни запросов, ни документов в метках нет.
+ */
+function knowledgeSamples(): Sample[] {
+  const { qdrant, stages } = knowledgeMetrics();
+  const timings = (base: string, help: string, rows: typeof qdrant, label: string): Sample[] => [
+    { name: `${base}_latency_ms_sum`, help: `${help}: сумма задержек, мс.`, type: "counter", values: rows.map((row) => ({ labels: { [label]: row.name }, value: row.sum })) },
+    { name: `${base}_latency_ms_count`, help: `${help}: число вызовов.`, type: "counter", values: rows.map((row) => ({ labels: { [label]: row.name }, value: row.count })) },
+    { name: `${base}_latency_ms_max`, help: `${help}: максимум с запуска, мс.`, type: "gauge", values: rows.map((row) => ({ labels: { [label]: row.name }, value: row.max })) },
+    { name: `${base}_errors_total`, help: `${help}: отказы.`, type: "counter", values: rows.map((row) => ({ labels: { [label]: row.name }, value: row.errors })) },
+  ];
+  return [
+    ...timings("eva_qdrant", "Вызовы Qdrant по операции (search, upsert, delete, count, admin, health)", qdrant, "operation"),
+    ...timings("eva_knowledge_stage", "Этапы базы знаний (embedding, rerank)", stages, "stage"),
   ];
 }
 
@@ -498,6 +518,7 @@ export class MetricsCollector {
         values: osintStats().requests.map(({ collector, value }) => ({ labels: { collector }, value })),
       },
       ...toolSamples(this.sources.delegation?.() ?? null),
+      ...knowledgeSamples(),
       {
         name: "eva_retention_policy_seconds",
         help: "Действующий срок хранения по классу данных.",

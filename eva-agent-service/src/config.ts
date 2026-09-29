@@ -78,6 +78,13 @@ export interface Config {
   crawl4aiUrl: string;
   /** Токен Crawl4AI: без него сервис отвечает отказом на каждое чтение. */
   crawl4aiToken: string;
+  /**
+   * Векторный индекс базы знаний (docs/knowledge-base.md). Без ключа
+   * индекс не используется вовсе: Qdrant без ключа открыт всей сети, и
+   * ходить в него так — значит мириться с этим.
+   */
+  qdrantUrl: string;
+  qdrantApiKey: string;
   schedulerIntervalMs: number;
   heartbeatIntervalMs: number;
   /** Ева пишет первой в окна, которые выбрал человек. */
@@ -448,6 +455,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     searxngUrl: str("SEARXNG_BASE_URL", "http://searxng:8080/"),
     crawl4aiUrl: str("CRAWL4AI_BASE_URL", "http://crawl4ai:11235/"),
     crawl4aiToken: str("CRAWL4AI_API_TOKEN"),
+    qdrantUrl: str("EVA_QDRANT_URL", "http://qdrant:6333"),
+    qdrantApiKey: str("QDRANT_API_KEY"),
     schedulerIntervalMs: int("EVA_SCHEDULER_INTERVAL_MS", 30_000),
     heartbeatIntervalMs: int("EVA_HEARTBEAT_INTERVAL_MS", 10 * 60_000),
     proactiveInitiativeEnabled: bool("EVA_PROACTIVE_INITIATIVE", false),

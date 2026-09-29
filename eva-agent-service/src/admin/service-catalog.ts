@@ -148,6 +148,17 @@ export const SERVICES: readonly ServiceDefinition[] = [
     restartable: true,
   },
   {
+    // Векторный индекс базы знаний. Производный: без него поиск идёт по
+    // PostgreSQL (degraded), а потерянный индекс перестраивается из него.
+    id: "qdrant",
+    title: "Qdrant",
+    purpose: "Векторный индекс базы знаний",
+    group: "storage",
+    container: "qdrant",
+    healthUrl: "http://qdrant:6333/readyz",
+    restartable: true,
+  },
+  {
     id: "backup-service",
     title: "Backup Service",
     purpose: "Версионные дампы PostgreSQL",
