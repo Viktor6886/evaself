@@ -77,6 +77,16 @@ assert.equal(privateInfo.result.config.hnsw_config.m, 0, "у личной баз
 assert.equal(privateInfo.result.payload_schema.user_id.params?.is_tenant, true, "user_id должен быть полем-арендатором");
 await assert.rejects(() => store.ensureSpace(space(1, 5)), /vector_space_mismatch/);
 
+// Оборванное создание: коллекция есть, индексов нет. Повторный
+// ensureSpace достраивает индекс владельца, а не молча принимает её.
+await client.createCollection(knowledgeCollection("private", 9), { size: 4, distance: "Cosine", hnsw: { m: 0, payload_m: 16 }, indexes: [] });
+await client.createCollection(knowledgeCollection("global", 9), { size: 4, distance: "Cosine", indexes: [] });
+await store.ensureSpace(space(9));
+const repaired = await raw("GET", `/collections/${knowledgeCollection("private", 9)}`);
+assert.equal(repaired.result.payload_schema.user_id?.params?.is_tenant, true, "индекс владельца не достроен");
+assert.ok(repaired.result.payload_schema.document_id, "индекс документа не достроен");
+await store.dropVersion(9);
+
 // Точки двух людей. Точка человека 8 ближе к запросу, чем любая точка
 // человека 7, — поиск человека 7 всё равно не должен её увидеть.
 await store.upsert("private", space(1), [
@@ -146,7 +156,7 @@ await store.activate(2);
 assert.deepEqual(await store.activeVersions(), { private: 2, global: 2 });
 assert.deepEqual((await store.searchPrivate(7, [1, 0, 0], { limit: 5 })).map((hit) => hit.payload.embedding_version), [2]);
 await assert.rejects(() => store.dropVersion(2), /vector_version_active/);
-assert.equal((await store.describe(1)).private.pointsCount, 1, "прежняя версия хранится для отката");
+assert.equal(await store.countPoints("private", 1), 1, "прежняя версия хранится для отката");
 
 // Откат — тот же перевод alias назад.
 await store.activate(1);

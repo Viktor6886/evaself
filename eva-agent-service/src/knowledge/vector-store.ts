@@ -99,6 +99,12 @@ function assertUserId(userId: number): string {
   return String(userId);
 }
 
+/** Поля payload точки — ровно эти и никаких других (docs/knowledge-base.md). */
+const PAYLOAD_FIELDS = [
+  "chunk_id", "document_id", "user_id", "collection_id", "page_start", "page_end",
+  "section", "mime", "embedding_model", "embedding_version", "created_at",
+] as const satisfies ReadonlyArray<keyof KnowledgePointPayload>;
+
 function assertVector(vector: number[], dimension?: number): void {
   if (!vector.length || vector.some((value) => !Number.isFinite(value))) throw new Error("embedding_vector_invalid");
   if (dimension !== undefined && vector.length !== dimension) throw new Error("embedding_dimension_invalid");
@@ -146,17 +152,26 @@ export class KnowledgeVectorStore {
    *
    * Коллекция с той же версией, но другой размерностью — это чужое
    * пространство векторов, и писать в неё нельзя: отказ, а не пересоздание.
+   *
+   * Создание коллекции и её индексов — несколько вызовов. Оборвавшееся
+   * посередине оставило бы личную коллекцию без индекса `user_id`, и с
+   * `m=0` каждый поиск стал бы полным перебором; поэтому недостающие
+   * индексы достраиваются и у существующей коллекции.
    */
   async ensureSpace(space: EmbeddingSpace, tuning: VectorIndexTuning = {}): Promise<void> {
     for (const scope of ["private", "global"] as const) {
       const name = knowledgeCollection(scope, space.version);
+      const spec = collectionSpec(scope, space, tuning);
       const info = await this.client.collectionInfo(name);
       if (!info) {
-        await this.client.createCollection(name, collectionSpec(scope, space, tuning));
+        await this.client.createCollection(name, spec);
         continue;
       }
       if (info.size !== space.dimension || info.distance !== space.distance) {
         throw new Error("vector_space_mismatch");
+      }
+      for (const index of spec.indexes) {
+        if (!info.indexedFields.includes(index.field)) await this.client.createPayloadIndex(name, index);
       }
     }
   }
@@ -205,11 +220,15 @@ export class KnowledgeVectorStore {
   async upsert(scope: KnowledgeScope, space: EmbeddingSpace, points: KnowledgeVectorPoint[], signal?: AbortSignal): Promise<void> {
     for (const point of points) {
       assertVector(point.vector, space.dimension);
-      if (!Number.isSafeInteger(point.chunkId) || point.chunkId <= 0) throw new Error("knowledge_chunk_invalid");
+      if (!Number.isSafeInteger(point.chunkId) || point.chunkId <= 0 || point.payload.chunk_id !== point.chunkId) {
+        throw new Error("knowledge_chunk_invalid");
+      }
       if (point.payload.embedding_version !== space.version) throw new Error("vector_space_mismatch");
       // Точка личной базы без владельца нашлась бы у всех, общей с
       // владельцем — только у него. И то и другое — ошибка вызывающего.
-      if (scope === "private" && (point.payload.user_id === null || point.payload.collection_id !== null)) {
+      // Владелец — строка id из PostgreSQL: другая форма не совпала бы с
+      // фильтром поиска, и точка пропала бы молча.
+      if (scope === "private" && (!/^[1-9][0-9]{0,15}$/u.test(point.payload.user_id ?? "") || point.payload.collection_id !== null)) {
         throw new Error("knowledge_scope_invalid");
       }
       if (scope === "global" && (point.payload.user_id !== null || !point.payload.collection_id)) {
@@ -218,11 +237,21 @@ export class KnowledgeVectorStore {
     }
     await this.client.upsert(
       knowledgeCollection(scope, space.version),
-      points.map((point) => ({ id: point.chunkId, vector: point.vector, payload: { ...point.payload } })),
+      // Payload собирается по списку полей, а не копией объекта: лишнее
+      // поле вызывающего (например, текст фрагмента) в индекс не уйдёт.
+      points.map((point) => ({
+        id: point.chunkId,
+        vector: point.vector,
+        payload: Object.fromEntries(PAYLOAD_FIELDS.map((field) => [field, point.payload[field] ?? null])),
+      })),
       signal,
     );
   }
 
+  /**
+   * Удалить точки документов. Владельца здесь не проверить: id документов
+   * вызывающий берёт из PostgreSQL, где владелец уже проверен.
+   */
   async deleteDocuments(scope: KnowledgeScope, version: number, documentIds: string[]): Promise<void> {
     if (!documentIds.length) return;
     await this.client.deletePoints(knowledgeCollection(scope, version), {
@@ -290,6 +319,7 @@ export class KnowledgeVectorStore {
 
   private async search(scope: KnowledgeScope, vector: number[], filter: QdrantFilter, options: SearchOptions): Promise<VectorHit[]> {
     const target = options.version === undefined ? KNOWLEDGE_ALIAS[scope] : knowledgeCollection(scope, options.version);
+    if (!Number.isFinite(options.limit)) throw new Error("knowledge_limit_invalid");
     const limit = Math.min(Math.max(Math.floor(options.limit), 1), 200);
     let hits;
     try {

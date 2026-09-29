@@ -22,6 +22,8 @@ export type QdrantDistance = "Cosine" | "Dot" | "Euclid";
 export type QdrantErrorCode =
   | "qdrant_unavailable"
   | "qdrant_timeout"
+  /** Вызов отменил сам вызывающий: ход отменён, ждать и повторять нечего. */
+  | "qdrant_cancelled"
   | "qdrant_unauthorized"
   | "qdrant_not_found"
   | "qdrant_bad_request"
@@ -91,11 +93,14 @@ export interface QdrantCollectionSpec {
 
 export interface QdrantCollectionInfo {
   status: string;
+  /** Приблизительное число точек — для статистики; точное — `count()`. */
   pointsCount: number;
   indexedVectorsCount: number;
   segmentsCount: number;
   size: number | null;
   distance: QdrantDistance | null;
+  /** Поля с payload-индексом. */
+  indexedFields: string[];
 }
 
 export interface QdrantClientOptions {
@@ -163,6 +168,7 @@ export class QdrantClient {
     const vectors = ((result.config as Record<string, unknown> | undefined)?.params as Record<string, unknown> | undefined)
       ?.vectors as { size?: unknown; distance?: unknown } | undefined;
     const number = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) ? value : 0);
+    const schema = result.payload_schema;
     return {
       status: String(result.status ?? "unknown"),
       pointsCount: number(result.points_count),
@@ -172,6 +178,7 @@ export class QdrantClient {
       distance: vectors?.distance === "Cosine" || vectors?.distance === "Dot" || vectors?.distance === "Euclid"
         ? vectors.distance
         : null,
+      indexedFields: schema && typeof schema === "object" ? Object.keys(schema) : [],
     };
   }
 
@@ -186,16 +193,19 @@ export class QdrantClient {
         on_disk_payload: spec.onDiskPayload ?? true,
       },
     });
-    for (const index of spec.indexes) {
-      await this.request("admin", `/collections/${encodeURIComponent(name)}/index?wait=true`, {
-        method: "PUT",
-        timeoutMs: WRITE_TIMEOUT_MS,
-        body: {
-          field_name: index.field,
-          field_schema: index.tenant ? { type: index.schema, is_tenant: true } : index.schema,
-        },
-      });
-    }
+    for (const index of spec.indexes) await this.createPayloadIndex(name, index);
+  }
+
+  /** Payload-индекс поля. Повтор для существующего индекса безвреден. */
+  async createPayloadIndex(collection: string, index: QdrantPayloadIndex): Promise<void> {
+    await this.request("admin", `/collections/${encodeURIComponent(collection)}/index?wait=true`, {
+      method: "PUT",
+      timeoutMs: WRITE_TIMEOUT_MS,
+      body: {
+        field_name: index.field,
+        field_schema: index.tenant ? { type: index.schema, is_tenant: true } : index.schema,
+      },
+    });
   }
 
   async deleteCollection(name: string): Promise<void> {
@@ -358,15 +368,24 @@ export class QdrantClient {
     options: CallOptions = {},
     raw = false,
   ): Promise<T> {
+    // Ход уже отменён: запрос не отправляется и в метрики не попадает —
+    // это не вызов Qdrant и не его отказ.
+    if (options.signal?.aborted) throw new QdrantError("qdrant_cancelled", null, "Вызов Qdrant отменён");
     const started = Date.now();
     const controller = new AbortController();
     const timeoutMs = options.timeoutMs ?? this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     const onAbort = (): void => controller.abort();
     options.signal?.addEventListener("abort", onAbort, { once: true });
+    const interrupted = (): QdrantError => options.signal?.aborted
+      ? new QdrantError("qdrant_cancelled", null, "Вызов Qdrant отменён")
+      : controller.signal.aborted
+        ? new QdrantError("qdrant_timeout", null, `Qdrant не ответил за ${timeoutMs} мс`)
+        : new QdrantError("qdrant_unavailable", null, "Qdrant недоступен");
     let failed = true;
     try {
       let response: Response;
+      let text: string;
       try {
         response = await this.call(`${this.base}${path}`, {
           method: options.method ?? "GET",
@@ -377,14 +396,14 @@ export class QdrantClient {
           ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
           signal: controller.signal,
         });
+        // Тело читается под тем же таймаутом: оборванное чтение — тот же
+        // отказ сервиса, а не сырой AbortError мимо degraded.
+        text = await response.text();
       } catch {
         // Текст исключения fetch не пересказывается: в нём бывает адрес,
         // а значения ключа — никогда, но и адрес журналу не нужен.
-        throw controller.signal.aborted && !options.signal?.aborted
-          ? new QdrantError("qdrant_timeout", null, `Qdrant не ответил за ${timeoutMs} мс`)
-          : new QdrantError("qdrant_unavailable", null, "Qdrant недоступен");
+        throw interrupted();
       }
-      const text = await response.text();
       if (!response.ok) {
         // Описание отказа Qdrant полезно администратору («Vector dimension
         // error: expected dim: 4, got 3») и не содержит ни ключа, ни текста

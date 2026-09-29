@@ -246,3 +246,94 @@ test("описание отказа Qdrant доходит до вызывающ�
     (error: QdrantError) => /expected dim: 4/.test(error.message) && !error.message.includes("secret-key"),
   );
 });
+
+test("payload собирается по списку полей: лишнее поле вызывающего в индекс не уходит", async () => {
+  const { calls, store } = fakeQdrant({ "PUT /collections/eva_knowledge_private_v1/points": () => ({ result: {} }) });
+  const withText = point(5, "private", { content: "текст фрагмента" }) as ReturnType<typeof point>;
+  await store.upsert("private", SPACE, [withText]);
+  const sent = calls[0]!.body.points[0].payload;
+  assert.equal(sent.content, undefined);
+  assert.deepEqual(Object.keys(sent).sort(), [
+    "chunk_id", "collection_id", "created_at", "document_id", "embedding_model", "embedding_version",
+    "mime", "page_end", "page_start", "section", "user_id",
+  ]);
+});
+
+test("точка с чужим chunk_id или владельцем не той формы отклоняется до Qdrant", async () => {
+  const { calls, store } = fakeQdrant({});
+  await assert.rejects(() => store.upsert("private", SPACE, [point(5, "private", { chunk_id: 6 })]), /knowledge_chunk_invalid/);
+  for (const owner of ["", "abc", "07", "-7"]) {
+    await assert.rejects(() => store.upsert("private", SPACE, [point(5, "private", { user_id: owner })]), /knowledge_scope_invalid/);
+  }
+  assert.equal(calls.length, 0);
+});
+
+test("оборванное создание коллекции: недостающий индекс владельца достраивается", async () => {
+  const info = (fields: string[]) => ({
+    status: "green",
+    points_count: 0,
+    config: { params: { vectors: { size: 3, distance: "Cosine" } } },
+    payload_schema: Object.fromEntries(fields.map((field) => [field, { data_type: "keyword" }])),
+  });
+  const { calls, store } = fakeQdrant({
+    "GET /collections/eva_knowledge_private_v1": () => ({ result: info([]) }),
+    "GET /collections/eva_knowledge_global_v1": () => ({ result: info(["collection_id", "document_id"]) }),
+    "PUT /collections/eva_knowledge_private_v1/index": () => ({ result: {} }),
+  });
+  await store.ensureSpace(SPACE);
+  const indexes = calls.filter((call) => call.method === "PUT").map((call) => [call.path, call.body.field_name]);
+  assert.deepEqual(indexes, [
+    ["/collections/eva_knowledge_private_v1/index?wait=true", "user_id"],
+    ["/collections/eva_knowledge_private_v1/index?wait=true", "document_id"],
+  ]);
+  assert.deepEqual(calls.find((call) => call.body?.field_name === "user_id")!.body.field_schema, { type: "keyword", is_tenant: true });
+});
+
+test("отменённый заранее вызов не уходит в Qdrant и отличим от сбоя", async () => {
+  const { calls, client } = fakeQdrant({ "POST /collections/x/points/count": () => ({ result: { count: 1 } }) });
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    () => client.query("x", [1], { limit: 1, signal: controller.signal }),
+    (error: QdrantError) => error.code === "qdrant_cancelled" && !error.transient,
+  );
+  assert.equal(calls.length, 0);
+});
+
+test("таймаут при чтении тела ответа — тот же отказ сервиса, а не сырой AbortError", async () => {
+  const client = new QdrantClient({
+    url: "http://qdrant:6333",
+    apiKey: "k",
+    timeoutMs: 20,
+    fetch: (async (_url: string, init: RequestInit) => ({
+      ok: true,
+      status: 200,
+      text: () => new Promise<string>((_resolve, reject) => {
+        init.signal!.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+      }),
+    })) as unknown as typeof fetch,
+  });
+  await assert.rejects(() => client.count("x"), (error: QdrantError) => error instanceof QdrantError && error.code === "qdrant_timeout");
+});
+
+test("нечисловой limit поиска — ошибка вызывающего, а не запрос с null", async () => {
+  const { calls, store } = fakeQdrant({});
+  await assert.rejects(() => store.searchPrivate(7, [0.1, 0.2, 0.3], { limit: Number.NaN }), /knowledge_limit_invalid/);
+  assert.equal(calls.length, 0);
+});
+
+test("отмена хода во время вызова — qdrant_cancelled, а не недоступность", async () => {
+  const controller = new AbortController();
+  const client = new QdrantClient({
+    url: "http://qdrant:6333",
+    apiKey: "k",
+    fetch: ((_url: string, init: RequestInit) => new Promise((_resolve, reject) => {
+      init.signal!.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+      controller.abort();
+    })) as typeof fetch,
+  });
+  await assert.rejects(
+    () => client.query("x", [1], { limit: 1, signal: controller.signal }),
+    (error: QdrantError) => error.code === "qdrant_cancelled",
+  );
+});
