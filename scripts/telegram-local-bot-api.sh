@@ -59,6 +59,22 @@ require_bot_token() {
 	[ -n "${EVA_TELEGRAM_BOT_TOKEN:-}" ] || die "EVA_TELEGRAM_BOT_TOKEN не задан: сначала make configure"
 }
 
+# Агент ставит webhook один раз, при старте. Если свой сервер к этому
+# моменту ещё не принял бота, вебхук не встанет, а из облака бот уже
+# вышел — Ева замолчит. Поэтому клиенты пересоздаются только после того,
+# как свой сервер ответил на getMe этим самым ботом.
+wait_for_local_bot() {
+	for _ in $(seq 1 45); do
+		if compose exec -T telegram-bot-api \
+			wget -qO- "http://127.0.0.1:8081/bot${EVA_TELEGRAM_BOT_TOKEN}/getMe" 2>/dev/null \
+			| grep -q '"ok":true'; then
+			return 0
+		fi
+		sleep 2
+	done
+	return 1
+}
+
 case "${1:-status}" in
 	status)
 		step "Сервер Telegram Bot API"
@@ -97,7 +113,13 @@ case "${1:-status}" in
 		set_env COMPOSE_PROFILES "$(profiles_with)"
 		set_env EVA_TELEGRAM_API_BASE_URL "$LOCAL_URL"
 		load_env
-		compose up -d --build telegram-bot-api
+		# Сборка без вывода: из панели скрипт запускает сервис операций, и
+		# журнал сборки переполнил бы его буфер. Отказ всё равно виден кодом.
+		compose build --quiet telegram-bot-api
+		compose up -d telegram-bot-api
+		wait_for_local_bot \
+			|| die "свой сервер Bot API не принял бота за полторы минуты — агент не перезапущен; проверьте API ID и API Hash и журнал: docker compose logs telegram-bot-api"
+		ok "свой сервер Bot API принял бота"
 		# Агент при старте сам ставит webhook — уже через свой сервер.
 		compose up -d "${CLIENTS[@]}"
 		ok "свой сервер Bot API включён: аудиофайлы до ${EVA_AUDIO_FILE_MAX_MB:-350} МБ"
