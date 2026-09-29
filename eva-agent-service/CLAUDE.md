@@ -38,6 +38,9 @@ node --test --experimental-strip-types test/*.test.ts        # full regression
 | `src/jobs/proactive/`, `agent-job.ts`, `maintenance.ts`, `mirror.ts` | `jobs-proactive.test.ts` |
 | `src/background.ts`, `src/time/cron.ts` | `runtime.test.ts`, `conversations.test.ts` |
 | `src/router/` | `llm-router.test.ts`, `managed-routing.test.ts`, `llm.test.ts`, `llm-reasoning.test.ts` |
+| `src/router/embeddings.ts`, `embedding-service.ts`, `embedding-versions.ts`, `client.ts` | `router-embeddings.test.ts`, `knowledge-embeddings.test.ts` |
+| `src/knowledge/qdrant-client.ts`, `vector-store.ts`, `metrics.ts` | `qdrant-vector-store.test.ts`, `metrics.test.ts` (настоящий Qdrant — `scripts/ci/test-qdrant.mjs`) |
+| `src/admin/knowledge-*.ts`, `src/knowledge/routes.ts` | `knowledge-embeddings.test.ts` |
 | `src/letta.ts` | `letta.test.ts`, `letta-contract.test.ts` |
 | `src/letta/capabilities.ts` | `letta-contract.test.ts` |
 | `src/letta/readiness.ts` | `readiness.test.ts` |

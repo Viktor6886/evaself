@@ -15,6 +15,8 @@ import { ValkeyRouterLimits } from "./limits.js";
 import { createRouterServer } from "./server.js";
 import { RouterStore } from "./store.js";
 import { RouterEmbeddings } from "./embeddings.js";
+import { EmbeddingService } from "./embedding-service.js";
+import { EmbeddingVersionStore } from "./embedding-versions.js";
 import { buildObservabilityFrom } from "../observability/index.js";
 
 const { Pool } = pg;
@@ -127,11 +129,14 @@ async function main(): Promise<void> {
     }) : undefined,
   });
 
-  const embeddings = new RouterEmbeddings({ providers: () => store.providers() }, {
-    model: process.env.EVA_EMBEDDING_MODEL ?? "text-embedding-3-small",
-    dimension: 1536,
-  });
-  const app = createRouterServer({ router, store, logger, apiKey, embed: (texts) => embeddings.embed(texts) });
+  const embeddings = new EmbeddingService(
+    new RouterEmbeddings({ providers: () => store.providers() }, {
+      model: process.env.EVA_EMBEDDING_MODEL ?? "text-embedding-3-small",
+      dimension: 1536,
+    }),
+    new EmbeddingVersionStore(pool),
+  );
+  const app = createRouterServer({ router, store, logger, apiKey, embeddings });
   const port = intFromEnv("EVA_ROUTER_PORT", 8073);
   await app.listen({ host: process.env.EVA_ROUTER_BIND ?? "0.0.0.0", port });
   logger.info("LLM Router запущен", { port });

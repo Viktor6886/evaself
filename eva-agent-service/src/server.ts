@@ -49,6 +49,8 @@ import type { RuntimeContextBuilder } from "./runtime/runtime-context.js";
 import type { CanonicalContextStore } from "./runtime/canonical-context.js";
 import { registerCanonicalRoutes } from "./runtime/canonical-routes.js";
 import { registerToolCatalogRoutes, type ToolCatalogContext } from "./tools/catalog-routes.js";
+import { registerKnowledgeRoutes } from "./knowledge/routes.js";
+import { LlmRouterClient } from "./router/client.js";
 import type { PrefixInput } from "./letta/prefix-size.js";
 import type { PersonaSyncResult } from "./letta/persona-sync.js";
 import { webhookSecretMatches } from "./telegram.js";
@@ -287,6 +289,9 @@ export function buildServer(services: Services): FastifyInstance {
   });
 
   if (services.toolCatalog) registerToolCatalogRoutes(app, services.toolCatalog);
+
+  // База знаний: проверка модели эмбеддингов идёт через роутер агента.
+  registerKnowledgeRoutes(app, { router: new LlmRouterClient(config.routerUrl, config.routerApiKey) });
 
   // Канонические источники личности Евы. Регистрируются, только когда
   // владелец текстов передан: без реестра артефактов править нечего, а

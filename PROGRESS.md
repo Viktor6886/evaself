@@ -3,6 +3,35 @@
 Оперативное состояние работы. Единственный источник истины о том, где работа
 остановилась. Агент читает этот файл первым и обновляет его после каждого шага.
 
+## База знаний на Qdrant — K2: схема, версии эмбеддингов, Router — 2026-09-29
+
+Ветка: `claude/evaself-architecture-improvements-3d7d2s`. Статус: в работе.
+
+Второй batch плана `docs/knowledge-base.md`: всё, из чего индексация (K3)
+строит индекс, — в PostgreSQL; векторы — через LLM Router по версии.
+
+- [x] Миграция 090: `knowledge_collections`, `knowledge_embedding_versions`
+  (одна активная, провайдер под индексом не удаляется), состояние индекса
+  документа, место фрагмента в документе, вектор pgvector необязателен.
+- [x] Миграция 091 (`CONCURRENTLY`): FTS `russian`, pg_trgm по тексту и
+  названию. `scripts/ci/test-knowledge-schema.sql` в CI; цикл down/up
+  проверен локально на PostgreSQL 17.
+- [x] Router: `eva/embeddings@v<N>` с запасным провайдером,
+  `/embeddings/probe`; коды отказов без текста провайдера.
+  `LlmRouterClient.embedMany` — пачки до 64, проверка размерности.
+- [x] Панель: `GET/POST /api/admin/v1/knowledge/embeddings[/probe|/versions]`,
+  удаление черновика; проверка модели — через агента
+  (`/v1/knowledge/embeddings/probe`).
+- [ ] PR, ревью, CI, мерж.
+
+Настройки `knowledge.*` перенесены в K3: их первый потребитель — индексация.
+
+Rollback: revert PR и `down/091`, `down/090` (строки документов и
+фрагментов остаются; NOT NULL вектора возвращается, только если все
+фрагменты его имеют).
+
+NEXT: K3 — индексация в Qdrant.
+
 ## База знаний на Qdrant — K1: инвариант, служба, клиент — 2026-09-29
 
 Ветка: `claude/evaself-architecture-improvements-3d7d2s`. Статус: выполнен,
