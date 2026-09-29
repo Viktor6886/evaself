@@ -467,6 +467,15 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
+      # Версия — из versions.env; шаг ниже сверяет их, чтобы CI не проверял
+      # не тот Qdrant, что уходит в production. Healthcheck не задан: в
+      # образе нет curl, а готовности ждёт сам test-qdrant.mjs.
+      qdrant:
+        image: qdrant/qdrant:v1.19.1-unprivileged
+        ports: ["6333:6333"]
+        env:
+          QDRANT__SERVICE__API_KEY: ci-qdrant-key
+          QDRANT__TELEMETRY_DISABLED: "true"
     env:
       EVA_PROFILE_COMPLETION_ENABLED: "true"
       EVA_VECTOR_GOALS_ENABLED: "true"
@@ -501,6 +510,12 @@ jobs:
 
       - name: Distributed limits execute atomically on Valkey
         run: node ../scripts/ci/test-distributed-limits.mjs
+
+      - name: Knowledge vector index on a real Qdrant
+        run: |
+          grep -qx 'QDRANT_VERSION=v1.19.1-unprivileged' ../versions.env \
+            || { echo "CI service qdrant must match QDRANT_VERSION in versions.env"; exit 1; }
+          node ../scripts/ci/test-qdrant.mjs
 
       - name: The SDK is the official one, and it is actually used
         run: node ../scripts/verify-agent-sdk.mjs .

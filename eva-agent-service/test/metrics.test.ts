@@ -241,3 +241,21 @@ test("инструменты в /metrics: вызовы, поиск, MCP, бра�
   assert.doesNotMatch(text, /mcp__|https?:\/\//, "ни имён MCP-инструментов, ни адресов");
   resetToolMetrics();
 });
+
+test("база знаний в /metrics: вызовы Qdrant и этапы — по операции, без запросов и документов", async () => {
+  const { recordQdrantCall, recordKnowledgeStage, resetKnowledgeMetrics } = await import("../dist/knowledge/metrics.js");
+  resetKnowledgeMetrics();
+  recordQdrantCall("search", 12, false);
+  recordQdrantCall("search", 30, true);
+  recordQdrantCall("upsert", 200, false);
+  recordKnowledgeStage("embedding", 80, false);
+  const text = await collector(CANNED).render();
+  assert.match(text, /eva_qdrant_latency_ms_sum\{operation="search"\} 42/);
+  assert.match(text, /eva_qdrant_latency_ms_count\{operation="search"\} 2/);
+  assert.match(text, /eva_qdrant_latency_ms_max\{operation="upsert"\} 200/);
+  assert.match(text, /eva_qdrant_errors_total\{operation="search"\} 1/);
+  assert.match(text, /eva_qdrant_errors_total\{operation="upsert"\} 0/);
+  assert.match(text, /eva_knowledge_stage_latency_ms_count\{stage="embedding"\} 1/);
+  assert.match(text, /eva_knowledge_stage_errors_total\{stage="rerank"\} 0/);
+  resetKnowledgeMetrics();
+});

@@ -257,6 +257,8 @@ EVA_TELEGRAM_WEBHOOK_SECRET="$(keep_or_generate EVA_TELEGRAM_WEBHOOK_SECRET)"
 MEDIA_SERVICE_TOKEN="$(keep_or_generate MEDIA_SERVICE_TOKEN)"
 OSINT_WORKER_TOKEN="$(keep_or_generate OSINT_WORKER_TOKEN)"
 BROWSER_SERVICE_TOKEN="$(keep_or_generate BROWSER_SERVICE_TOKEN)"
+# Ключ Qdrant: индекс базы знаний без него открыт всей сети vector.
+QDRANT_API_KEY="$(keep_or_generate QDRANT_API_KEY)"
 # Ключ шифрования API key в таблице llm_providers также постоянный:
 # его потеря сделает сохранённые ключи нечитаемыми.
 LLM_CONFIG_ENCRYPTION_KEY="$(keep_or_generate LLM_CONFIG_ENCRYPTION_KEY)"
@@ -337,6 +339,7 @@ set_env SEARXNG_SECRET      "$SEARXNG_SECRET"
 set_env MEDIA_SERVICE_TOKEN "$MEDIA_SERVICE_TOKEN"
 set_env OSINT_WORKER_TOKEN "$OSINT_WORKER_TOKEN"
 set_env BROWSER_SERVICE_TOKEN "$BROWSER_SERVICE_TOKEN"
+set_env QDRANT_API_KEY "$QDRANT_API_KEY"
 set_env CRAWL4AI_API_TOKEN "$CRAWL4AI_API_TOKEN"
 set_env COMPOSE_PROFILES   "$PROFILES"
 set_env TZ              "$TZ_VALUE"

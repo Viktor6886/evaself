@@ -3,6 +3,34 @@
 Оперативное состояние работы. Единственный источник истины о том, где работа
 остановилась. Агент читает этот файл первым и обновляет его после каждого шага.
 
+## База знаний на Qdrant — K1: инвариант, служба, клиент — 2026-09-29
+
+Ветка: `claude/evaself-architecture-improvements-3d7d2s`. Статус: в работе.
+
+Задание человека: полноценное векторное хранилище Qdrant с управлением из
+панели — личные базы и общая база администратора, эмбеддинги от разных
+провайдеров, режимы поиска, выключатель, массовая загрузка. Запрет Qdrant
+снят решением владельца; PostgreSQL остаётся источником истины. План —
+восемь batch K1–K8, `docs/knowledge-base.md`.
+
+- [x] Инвариант 14 и список запрещённого в `CLAUDE.md`: Qdrant —
+  производный индекс, не память агента и не второй RAG-контур.
+- [x] Служба `qdrant` (`versions.env`, образ `-unprivileged`): том,
+  внутренняя сеть `evaself-vector` без портов, ключ от установщика,
+  healthcheck `/readyz`, лимит памяти; том вне backup.
+- [x] `src/knowledge/qdrant-client.ts`, `vector-store.ts`, `metrics.ts`:
+  коллекции по версиям за alias, фильтр владельца строит только
+  хранилище, метрики `eva_qdrant_*`; каталог служб панели.
+- [x] Проверки: `test/qdrant-vector-store.test.ts`, `test/metrics.test.ts`,
+  `scripts/ci/test-qdrant.mjs` на настоящем Qdrant в CI.
+- [ ] PR, ревью, CI, мерж.
+
+Rollback: revert PR. Поиск не менялся, флагов нет; служба `qdrant`
+удаляется `docker compose rm -s -f qdrant`, том — только с разрешения.
+
+NEXT: K2 — схема PostgreSQL, настройки `knowledge.*`, эмбеддинги пачками
+через Router по версии.
+
 ## Ключи Telegram API и свой сервер Bot API из панели — 2026-09-29
 
 Ветка: `claude/evaself-architecture-improvements-3d7d2s`. Статус: выполнен,

@@ -150,6 +150,38 @@ services:
     environment:
       VALKEY_PASSWORD: ${VALKEY_PASSWORD}
 
+  # Векторный индекс базы знаний (docs/knowledge-base.md). Производный:
+  # канонические документы, фрагменты и права живут в PostgreSQL, и индекс
+  # целиком перестраивается из них командой «Перестроить индекс» в панели.
+  # Наружу не публикуется; своя сеть `vector` без выхода в интернет, в ней
+  # только те, кто индексирует и ищет. Доступ — по QDRANT_API_KEY; без ключа
+  # отвечают лишь /healthz и /readyz, ими и пользуется healthcheck.
+  qdrant:
+    <<: [*restart, *logging]
+    image: ${QDRANT_IMAGE}:${QDRANT_VERSION}
+    container_name: evaself-qdrant
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY}
+      QDRANT__TELEMETRY_DISABLED: "true"
+      # Встроенная веб-консоль Qdrant не нужна: управление — в панели Evaself.
+      QDRANT__SERVICE__ENABLE_STATIC_CONTENT: "false"
+      # Снимки — внутри того же тома: один том на всё состояние индекса.
+      QDRANT__STORAGE__SNAPSHOTS_PATH: /qdrant/storage/snapshots
+      TZ: ${TZ}
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks: [vector]
+    mem_limit: ${QDRANT_MEM_LIMIT:-2g}
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      # В образе нет curl и wget; bash есть, и /dev/tcp хватает для /readyz.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/6333 && printf 'GET /readyz HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && timeout 3 grep -q '200 OK' <&3"]
+      interval: 20s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
   # ===================================================================
   # AGENT LAYER
   # ===================================================================
@@ -294,6 +326,8 @@ services:
       SEARXNG_BASE_URL: http://searxng:8080/
       CRAWL4AI_BASE_URL: ${CRAWL4AI_BASE_URL:-http://crawl4ai:11235/}
       CRAWL4AI_API_TOKEN: ${CRAWL4AI_API_TOKEN}
+      EVA_QDRANT_URL: ${EVA_QDRANT_URL:-http://qdrant:6333}
+      QDRANT_API_KEY: ${QDRANT_API_KEY}
       EVA_SCHEDULER_INTERVAL_MS: ${EVA_SCHEDULER_INTERVAL_MS:-30000}
       EVA_HEARTBEAT_INTERVAL_MS: ${EVA_HEARTBEAT_INTERVAL_MS:-600000}
       EVA_PROACTIVE_INITIATIVE: ${EVA_PROACTIVE_INITIATIVE:-false}
@@ -379,7 +413,7 @@ services:
       - letta_provider_config:/data/letta-config/providers
       - letta_app_server_data:/data/letta:rw
       - letta_llm_control:/data/llm-control
-    networks: [edge, data, agent, tools, browser]
+    networks: [edge, data, agent, tools, browser, vector]
     depends_on:
       postgres:
         condition: service_healthy
@@ -387,6 +421,11 @@ services:
         condition: service_healthy
       letta-app-server:
         condition: service_started
+      # Только started и не required: без Qdrant база знаний уходит в
+      # поиск PostgreSQL (degraded), а диалог Евы не должен ждать индекс.
+      qdrant:
+        condition: service_started
+        required: false
       # Через роутер идёт каждый ход Евы, поэтому он должен стартовать
       # раньше. Именно service_started, а не service_healthy: нездоровый
       # роутер иначе не дал бы агенту подняться вообще, превратив
@@ -485,6 +524,10 @@ services:
       DOMAIN_API: ${DOMAIN_API}
       EVA_TELEGRAM_WEBHOOK_SECRET: ${EVA_TELEGRAM_WEBHOOK_SECRET}
       EVA_TELEGRAM_API_BASE_URL: ${EVA_TELEGRAM_API_BASE_URL:-https://api.telegram.org}
+      # База знаний в панели: статистика индекса, диагностика поиска и
+      # перестройка идут в тот же Qdrant, что и у агента.
+      EVA_QDRANT_URL: ${EVA_QDRANT_URL:-http://qdrant:6333}
+      QDRANT_API_KEY: ${QDRANT_API_KEY}
     command: ["node", "dist/admin/index.js"]
     volumes:
       - type: bind
@@ -494,7 +537,7 @@ services:
         bind:
           create_host_path: false
       - admin_updater_socket:/run/evaself-updater
-    networks: [edge, data, tools]
+    networks: [edge, data, tools, vector]
     depends_on:
       admin-bootstrap:
         condition: service_completed_successfully
@@ -568,7 +611,7 @@ services:
     command: ["node", "dist/admin/health-worker-index.js"]
     volumes:
       - admin_updater_socket:/run/evaself-updater
-    networks: [edge, data, tools]
+    networks: [edge, data, tools, vector]
     depends_on:
       postgres:
         condition: service_healthy
@@ -971,6 +1014,7 @@ services:
 #   agent  eva-agent-service <-> Letta App Server, nothing else
 #   tools  SearXNG, media-service, crawl4ai
 #   browser browser-service (Chromium) и его единственный клиент
+#   vector  Qdrant, eva-agent-service, admin-api, health-worker (internal)
 #
 # eva-agent-service is in every segment — the hub role the architecture
 # already gives it. admin-api and health-worker span edge/data/tools
@@ -994,6 +1038,12 @@ networks:
   browser:
     name: evaself-browser
     driver: bridge
+  # Qdrant и только те, кто индексирует и ищет: агент, панель и её
+  # проверка здоровья. internal: индексу незачем выходить в интернет.
+  vector:
+    name: evaself-vector
+    driver: bridge
+    internal: true
 
 volumes:
   postgres_data:
@@ -1018,6 +1068,10 @@ volumes:
     name: evaself_media_shared
   telegram_bot_api_data:
     name: evaself_telegram_bot_api_data
+  # Индекс Qdrant. Производный: потеря тома — это перестройка из
+  # PostgreSQL, а не потеря данных. В backup не входит намеренно.
+  qdrant_data:
+    name: evaself_qdrant_data
   backup_work:
     name: evaself_backup_work
   # Том Uptime Kuma. Сам сервис выведен из эксплуатации вместе со

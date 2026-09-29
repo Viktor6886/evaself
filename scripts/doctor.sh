@@ -63,6 +63,7 @@ else
 	info "Telegram stickers: legacy file_id overrides configured; local assets remain fallback"
 fi
 [ -n "$(get_env MEDIA_SERVICE_TOKEN || true)" ] || soft "MEDIA_SERVICE_TOKEN пуст — media-service принимает запросы без аутентификации"
+[ -n "$(get_env QDRANT_API_KEY || true)" ] || soft "QDRANT_API_KEY пуст — индекс базы знаний не используется, поиск идёт по PostgreSQL"
 case ",$(get_env COMPOSE_PROFILES || true)," in
 *,osint,*) [ -n "$(get_env OSINT_WORKER_TOKEN || true)" ] || soft "OSINT_WORKER_TOKEN пуст — osint-worker не стартует в production" ;;
 esac

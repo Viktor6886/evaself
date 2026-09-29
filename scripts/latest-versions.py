@@ -35,6 +35,7 @@ TRACKED = [
     ("LETTA", "LETTA_IMAGE", "LETTA_VERSION"),
     ("SEARXNG", "SEARXNG_IMAGE", "SEARXNG_VERSION"),
     ("CRAWL4AI", "CRAWL4AI_IMAGE", "CRAWL4AI_VERSION"),
+    ("QDRANT", "QDRANT_IMAGE", "QDRANT_VERSION"),
 ]
 
 BAD_TAG = re.compile(
@@ -78,7 +79,8 @@ def fetch_tags(image: str, pages: int = 3) -> list[str]:
 
 def version_key(tag: str):
     """Sortable key for a tag; None when it is not a comparable version."""
-    core = tag.split("-", 1)[0]
+    # Qdrant и многие другие ставят перед номером «v»: v1.19.1.
+    core = tag.split("-", 1)[0].removeprefix("v")
     parts = core.split(".")
     if not parts or not parts[0].isdigit():
         return None
