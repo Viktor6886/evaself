@@ -318,7 +318,9 @@ function safeCeil(value: number): number {
     throw new Error("Смешанная квота вышла за безопасные границы");
   }
   // Погрешность плавающей точки у целого значения — не лишняя единица
-  // квоты: 175.00000000000003 — это 175, а не 176.
+  // квоты: 200.00000000000003 — это 200, а не 201. Допуск — несколько
+  // ulp, не больше: настоящее значение чуть выше целого (остаток «7 дней
+  // без 1 мс») обязано округлиться вверх, и допуск вроде 1e-9 его съедал.
   const nearest = Math.round(value);
-  return Math.abs(value - nearest) <= 1e-9 * Math.max(1, nearest) ? nearest : Math.ceil(value);
+  return Math.abs(value - nearest) <= Number.EPSILON * 8 * Math.max(1, nearest) ? nearest : Math.ceil(value);
 }

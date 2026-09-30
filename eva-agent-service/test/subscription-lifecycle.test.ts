@@ -149,6 +149,35 @@ test("равные квоты смешиваются в ту же квоту п�
   }
 });
 
+test("значение чуть выше целого округляется вверх: единица квоты не теряется", async (t) => {
+  // 7 в день ещё «7 дней без 1 мс» и 19 в день на 7 новых дней: точное
+  // среднее — чуть больше 13, и ceil — 14. Слишком широкий допуск на
+  // погрешность плавающей точки снимал бы эту долю и давал 13.
+  t.mock.timers.enable({ apis: ["Date"], now: Date.UTC(2026, 8, 30, 3, 5, 0) });
+  const end = new Date(Date.now() + 7 * 86_400_000 - 1);
+  const calls: Array<{ sql: string; values: unknown[] }> = [];
+  const client = {
+    async query(sql: string, values: unknown[] = []) {
+      calls.push({ sql, values });
+      if (sql.includes("INSERT INTO payments")) return { rows: [{ id: "pay-edge" }] };
+      if (sql.includes("FROM subscriptions")) return { rows: [{
+        id: "sub-plus", plan: "plus", status: "active", source: "payment", current_period_end: end,
+      }] };
+      if (sql.includes("COALESCE(sq.limit_value")) return { rows: [{ metric: "messages", period: "day", limit_value: "7" }] };
+      if (sql.includes("FROM quotas WHERE plan")) return { rows: [{ metric: "messages", period: "day", limit_value: "19" }] };
+      if (sql.includes("INSERT INTO subscriptions")) return { rows: [{ id: "sub-edge" }] };
+      return { rows: [] };
+    },
+  };
+  await grantPaidAccess(client as never, {
+    userId: "7", provider: "telegram_stars", paymentId: "edge", raw: {},
+  }, {
+    plan: "max", amountMinor: 700, durationDays: 7, currency: "XTR",
+  }, { subscriptionLifecycleEnabled: true });
+  const snapshot = calls.find((call) => call.sql.includes("INSERT INTO subscription_quota_limits"));
+  assert.equal(snapshot?.values[4], 14);
+});
+
 test("платный апгрейд не превращает прежний бессрочный тариф в новый бессрочный", async () => {
   const calls: Array<{ sql: string; values: unknown[] }> = [];
   const client = {
