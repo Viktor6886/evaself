@@ -152,6 +152,29 @@ assert.deepEqual(
 // Удаление: документа, отдельных фрагментов и всей личной базы человека.
 await store.deleteDocuments("private", 1, ["doc-7b"]);
 assert.deepEqual((await store.searchPrivate(7, [0, 1, 0, 0], { limit: 10 })).map((hit) => hit.chunkId).sort(), [101, 102]);
+// Qdrant ещё отдаёт в facet удалённое значение со счётом 0 — для сверки
+// удалённого документа в индексе нет, иначе он был бы сиротой навсегда.
+assert.ok(!(await store.documentPointCounts("private", 1, 100)).has("doc-7b"), "удалённый документ всё ещё в facet");
+
+// Удаление с владельцем: чужой владелец не снимает точки документа.
+await store.deleteDocuments("private", 1, ["doc-7a"], 8);
+assert.equal((await store.documentPoints("private", 1, "doc-7a")), 2, "владелец 8 снял точки человека 7");
+
+// Векторы точек по id — для переиспользования в новой версии документа;
+// несуществующего id в ответе нет.
+const vectors = await store.vectorsOf("private", 1, [101, 424242]);
+assert.deepEqual([...vectors.keys()], [101]);
+assert.equal(vectors.get(101).length, 4);
+
+// Точка чужой версии в коллекции версии снимается сверкой.
+await store.upsert("private", space(1), [point(105, [0, 0, 1, 0], { user: "7", document: "doc-7c" })]);
+await client.upsert(knowledgeCollection("private", 1), [{
+  id: 106, vector: [0, 0, 0, 1],
+  payload: { chunk_id: 106, document_id: "doc-7c", user_id: "7", collection_id: null, embedding_version: 5 },
+}]);
+assert.equal(await store.removeForeignVersion("private", 1), 1);
+assert.equal(await store.documentPoints("private", 1, "doc-7c"), 1);
+await store.deleteDocuments("private", 1, ["doc-7c"], 7);
 await store.deleteChunks("private", 1, [102]);
 await store.deleteUser(1, 8);
 assert.deepEqual((await store.searchPrivate(8, [1, 0, 0, 0], { limit: 10 })), []);

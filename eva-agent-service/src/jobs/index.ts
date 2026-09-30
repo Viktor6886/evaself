@@ -52,8 +52,14 @@ import { OSINT_JOB_TYPE } from "../osint/service.js";
 import { OsintWorkerClient } from "../osint/worker-client.js";
 import { jobProcessor } from "./consumer.js";
 import type { JobQueueDriver, JobQueueName } from "./queue-registry.js";
-import { KnowledgeIngestWorker, KNOWLEDGE_INGEST_JOB } from "../knowledge/lifecycle.js";
-import { KNOWLEDGE_INDEX_JOB, KnowledgeIndexer, knowledgeIndexScheduler } from "../knowledge/indexer.js";
+import { KnowledgeIngestWorker, KNOWLEDGE_INGEST_JOB, KNOWLEDGE_INGEST_TIMING } from "../knowledge/lifecycle.js";
+import { KNOWLEDGE_INDEX_JOB, KNOWLEDGE_INDEX_TIMING, KnowledgeIndexer, knowledgeIndexScheduler } from "../knowledge/indexer.js";
+import {
+  KNOWLEDGE_MAINTENANCE_TIMING,
+  KNOWLEDGE_REBUILD_JOB,
+  KNOWLEDGE_RECONCILE_JOB,
+  KnowledgeMaintenance,
+} from "../knowledge/maintenance.js";
 import { QdrantClient } from "../knowledge/qdrant-client.js";
 import { KnowledgeVectorStore } from "../knowledge/vector-store.js";
 import { LlmRouterClient } from "../router/client.js";
@@ -142,29 +148,51 @@ export function buildJobLayer(
   if (config.knowledgeUploadsEnabled) {
     const router = new LlmRouterClient(config.routerUrl, config.routerApiKey);
     // Индексация в Qdrant (docs/knowledge-base.md): без ключа Qdrant не
-    // используется вовсе, и задания не ставятся.
-    const indexEnabled = (): boolean => config.knowledgeIndexEnabled && Boolean(config.qdrantApiKey);
+    // используется вовсе, и задания индексации новых документов не ставятся.
+    // Задания удаления ставятся всегда: исходный файл удалённого документа
+    // снимается и без Qdrant.
+    const configured = (): boolean => Boolean(config.qdrantApiKey);
+    const indexEnabled = (): boolean => config.knowledgeIndexEnabled && configured();
+    const uploadsRoot = "/data/knowledge-uploads";
+    const scheduler = knowledgeIndexScheduler(outbox, indexEnabled);
     const knowledge = new KnowledgeIngestWorker(db, {
       tempRoot: "/tmp",
       embed: (text, signal) => router.embed(text, signal),
       embedBatch: (texts, signal) => router.embedLegacyMany(texts, signal),
       embedBatchSize: () => config.knowledgeEmbeddingBatch,
       chunking: () => ({ size: config.knowledgeChunkSize, overlap: config.knowledgeChunkOverlap }),
-      index: knowledgeIndexScheduler(outbox, indexEnabled),
+      index: scheduler,
       scan: async (path) => await new Promise<"clean" | "infected" | "unavailable">((resolve) => execFile("clamscan", ["--no-summary", path], (error) => {
         const code = (error as unknown as { code?: number })?.code;
         resolve(!error ? "clean" : code === 1 ? "infected" : "unavailable");
       })),
     });
-    const indexer = new KnowledgeIndexer(
-      db,
-      router,
-      new KnowledgeVectorStore(new QdrantClient({ url: config.qdrantUrl || "http://qdrant:6333", apiKey: config.qdrantApiKey ?? "" })),
-      { enabled: indexEnabled, batchSize: () => config.knowledgeEmbeddingBatch },
-    );
+    const store = new KnowledgeVectorStore(new QdrantClient({ url: config.qdrantUrl || "http://qdrant:6333", apiKey: config.qdrantApiKey ?? "" }));
+    const indexer = new KnowledgeIndexer(db, router, store, {
+      enabled: indexEnabled,
+      configured,
+      batchSize: () => config.knowledgeEmbeddingBatch,
+      uploadsRoot,
+      jobs: scheduler,
+    });
+    const maintenance = new KnowledgeMaintenance(db, store, indexer, {
+      enabled: indexEnabled,
+      configured,
+      uploadsRoot,
+      outbox,
+      index: scheduler,
+    });
     registry.queue("memory");
-    runtime.register(KNOWLEDGE_INGEST_JOB,async(context)=>await knowledge.run(context));
-    runtime.register(KNOWLEDGE_INDEX_JOB, async (context) => { await indexer.run(context); });
+    runtime.register(KNOWLEDGE_INGEST_JOB, async (context) => await knowledge.run(context), KNOWLEDGE_INGEST_TIMING);
+    runtime.register(KNOWLEDGE_INDEX_JOB, async (context) => { await indexer.run(context); }, KNOWLEDGE_INDEX_TIMING);
+    runtime.register(KNOWLEDGE_REBUILD_JOB, async (context) => {
+      const result = await maintenance.rebuild(context);
+      logger.info("Перестройка индекса базы знаний: порция", { status: result.status, processed: result.processed });
+    }, KNOWLEDGE_MAINTENANCE_TIMING);
+    runtime.register(KNOWLEDGE_RECONCILE_JOB, async (context) => {
+      const report = await maintenance.reconcile(context.signal);
+      logger.info("Сверка индекса базы знаний", { ...report });
+    }, KNOWLEDGE_MAINTENANCE_TIMING);
     // Без потребителя загрузка навсегда оставалась `queued`: публикатор
     // ставил задание в Valkey, а забирать его было некому. По одному:
     // антивирус и эмбеддинги тяжёлые, а загрузки редки.

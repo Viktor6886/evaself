@@ -13,6 +13,9 @@ import { IntegrationConfigService } from "./integration-config-service.js";
 import { LlmRouterAdminService } from "./llm-router-service.js";
 import { InternalAgentClient, ProviderService } from "./provider-service.js";
 import { KnowledgeEmbeddingService } from "./knowledge-embedding-service.js";
+import { KnowledgeDocumentsService } from "./knowledge-documents-service.js";
+import { QdrantClient } from "../knowledge/qdrant-client.js";
+import { KnowledgeVectorStore } from "../knowledge/vector-store.js";
 import { HttpMediaSttClient, SttAdminService } from "./stt-service.js";
 import { OutboundGateway } from "./outbound-gateway.js";
 import { buildAdminServer } from "./server.js";
@@ -205,6 +208,21 @@ async function main(): Promise<void> {
     }),
     // База знаний: версии эмбеддингов и проверка модели через агента.
     knowledge: new KnowledgeEmbeddingService(pool, agentClient),
+    // Общая база: файлы — на тот же том, что у агента; разбор и индекс
+    // делает агент по заданиям. Qdrant нужен панели только для счётчиков
+    // точек и включения версии; без ключа его нет.
+    knowledgeDocuments: new KnowledgeDocumentsService(pool, {
+      uploadsRoot: "/data/knowledge-uploads",
+      // Тот же флаг, что включает разбор у агента: без исполнителя
+      // загрузка общей базы отказывает сразу, а не висит «в очереди».
+      uploadsEnabled: ["1", "true", "yes", "on"].includes(String(process.env.EVA_KNOWLEDGE_UPLOADS ?? "").toLowerCase()),
+      store: process.env.QDRANT_API_KEY
+        ? new KnowledgeVectorStore(new QdrantClient({
+          url: process.env.EVA_QDRANT_URL || "http://qdrant:6333",
+          apiKey: process.env.QDRANT_API_KEY,
+        }))
+        : null,
+    }),
     tariffs,
     // Возврат звёзд идёт активным токеном бота: тем же, которым счёт
     // был выставлен. Токен берётся из хранилища секретов в момент

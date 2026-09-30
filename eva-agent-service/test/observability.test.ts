@@ -325,6 +325,9 @@ test("аудит кардинальности: в метках нет значе
     // База знаний: операция Qdrant (шесть) и этап поиска (два) — тоже
     // заданы кодом, `src/knowledge/metrics.ts`.
     "operation", "stage",
+    // Индекс базы знаний: область — private или global, `version` — номер
+    // версии индекса (v1, v2…), их единицы, `src/knowledge/metrics.ts`.
+    "scope",
   ]);
   for (const [name, value] of pairs) {
     assert.ok(allowedLabels.has(name!.trim()), `метка ${name} не входит в разрешённый словарь`);

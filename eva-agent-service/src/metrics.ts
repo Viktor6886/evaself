@@ -16,8 +16,8 @@ import { monitorEventLoopDelay, type IntervalHistogram } from "node:perf_hooks";
 
 import type { Database } from "./db.js";
 import { genderFixStats } from "./i18n/eva-gender.js";
-import { deliveryStats, jobStats, providerStats } from "./metrics-queries.js";
-import { knowledgeMetrics } from "./knowledge/metrics.js";
+import { deliveryStats, jobStats, knowledgeIndexStats, providerStats } from "./metrics-queries.js";
+import { knowledgeIndexMetrics, knowledgeMetrics } from "./knowledge/metrics.js";
 import { osintStats } from "./osint/metrics.js";
 import { toolMetrics } from "./tools/tool-metrics.js";
 import { runtimeContextSizeStats } from "./runtime/runtime-context.js";
@@ -178,6 +178,49 @@ function knowledgeSamples(): Sample[] {
   ];
 }
 
+/**
+ * Индекс базы знаний: состояние документов и отставание — из PostgreSQL;
+ * точки в Qdrant — по последней сверке; прогресс построения версии — по
+ * последней порции перестройки; итоги сверок. Метки — область (две),
+ * версия индекса (единицы) и исход сверки (шесть): число рядов не зависит
+ * от числа людей и документов.
+ */
+function knowledgeIndexSamples(stats: { byState: Record<string, number>; lagSeconds: number }): Sample[] {
+  const index = knowledgeIndexMetrics();
+  return [
+    {
+      name: "eva_knowledge_documents",
+      help: "Документы базы знаний по состоянию векторного индекса.",
+      type: "gauge",
+      values: Object.entries(stats.byState).map(([state, value]) => ({ labels: { state }, value })),
+    },
+    {
+      name: "eva_knowledge_indexing_lag_seconds",
+      help: "Сколько ждёт индексации самый старый документ из очереди, секунды.",
+      type: "gauge",
+      values: [{ value: Math.round(stats.lagSeconds) }],
+    },
+    {
+      name: "eva_knowledge_points",
+      help: "Точек в коллекциях Qdrant по области и версии — по последней сверке.",
+      type: "gauge",
+      values: index.points.map((row) => ({ labels: { scope: row.scope, version: `v${row.version}` }, value: row.value })),
+    },
+    {
+      name: "eva_knowledge_rebuild_progress",
+      help: "Доля построенного индекса версии (0–1) — по последней порции перестройки.",
+      type: "gauge",
+      values: index.rebuild.map((row) => ({ labels: { version: `v${row.version}` }, value: row.value })),
+    },
+    {
+      name: "eva_knowledge_reconcile_total",
+      help: "Сверки PostgreSQL ↔ Qdrant и их находки: прогоны, точки чужой версии, неполные документы, сироты, перестройки, файлы.",
+      type: "counter",
+      values: Object.entries(index.reconcile).map(([outcome, value]) => ({ labels: { outcome }, value })),
+    },
+  ];
+}
+
 function number(value: unknown): number {
   // Драйвер отдаёт bigint и numeric строкой: без приведения в выдачу
   // ушло бы NaN, а Prometheus молча выбросил бы всю метрику.
@@ -219,6 +262,7 @@ export class MetricsCollector {
     const jobs = await jobStats(this.sources.db);
     const providers = await providerStats(this.sources.db);
     const delivery = await deliveryStats(this.sources.db);
+    const knowledgeIndex = await knowledgeIndexStats(this.sources.db);
     const telemetry = this.sources.telemetryBuffer?.() ?? { buffered: 0, dropped: 0 };
     const contextSize = runtimeContextSizeStats();
     const genderFix = genderFixStats();
@@ -519,6 +563,7 @@ export class MetricsCollector {
       },
       ...toolSamples(this.sources.delegation?.() ?? null),
       ...knowledgeSamples(),
+      ...knowledgeIndexSamples(knowledgeIndex),
       {
         name: "eva_retention_policy_seconds",
         help: "Действующий срок хранения по классу данных.",
