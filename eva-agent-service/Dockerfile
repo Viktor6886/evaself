@@ -60,8 +60,8 @@ COPY --from=build /app/assets ./assets
 COPY --from=build /app/package.json ./package.json
 COPY docker-entrypoint.sh /usr/local/bin/evaself-entrypoint
 
-RUN mkdir -p /data/letta-config/providers /data/llm-control \
- && chown -R node:node /data/letta-config /data/llm-control \
+RUN mkdir -p /data/letta-config/providers /data/llm-control /data/knowledge-uploads \
+ && chown -R node:node /data/letta-config /data/llm-control /data/knowledge-uploads \
  && chmod 0755 /usr/local/bin/evaself-entrypoint
 
 # Выделенная группа для Unix-сокета updater. Сокет создаёт eva-updater

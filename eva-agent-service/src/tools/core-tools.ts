@@ -11,7 +11,7 @@ import {
   type TelegramClient,
 } from "../telegram.js";
 import { Crawl4aiReader, WebReadError } from "./web-read.js";
-import { neutralizeUntrusted } from "./untrusted.js";
+import { neutralizeUntrusted, UNTRUSTED_NOTICE } from "./untrusted.js";
 import { KnowledgeSearch } from "../knowledge/search.js";
 import { inspectRuntime, type InspectionInput } from "../letta/runtime-inspection.js";
 import {
@@ -537,15 +537,21 @@ export class CoreToolFactory {
             requiredString(args, "query", 1_000),
             { limit: optionalInteger(args, "limit") ?? 5 },
           );
+          // Фрагменты — текст документов, а не инструкции. Конверт
+          // надевается здесь, при выдаче модели: в самих фрагментах его
+          // нет, чтобы нарезка сохраняла заголовки и абзацы.
           return {
             ok: true,
             degraded: found.degraded,
-            results: found.hits.map((hit) => ({
+            untrusted: true,
+            notice: UNTRUSTED_NOTICE,
+            source: "knowledge_base",
+            results: neutralizeUntrusted(found.hits.map((hit) => ({
               document: hit.documentName,
               ordinal: hit.ordinal,
               matched: hit.matched,
               content: hit.content,
-            })),
+            }))),
           };
         },
       ),

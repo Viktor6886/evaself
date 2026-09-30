@@ -53,6 +53,9 @@ import { OsintWorkerClient } from "../osint/worker-client.js";
 import { jobProcessor } from "./consumer.js";
 import type { JobQueueDriver, JobQueueName } from "./queue-registry.js";
 import { KnowledgeIngestWorker, KNOWLEDGE_INGEST_JOB } from "../knowledge/lifecycle.js";
+import { KNOWLEDGE_INDEX_JOB, KnowledgeIndexer, knowledgeIndexScheduler } from "../knowledge/indexer.js";
+import { QdrantClient } from "../knowledge/qdrant-client.js";
+import { KnowledgeVectorStore } from "../knowledge/vector-store.js";
 import { LlmRouterClient } from "../router/client.js";
 import { execFile } from "node:child_process";
 
@@ -138,9 +141,29 @@ export function buildJobLayer(
   const consumed = new Map<JobQueueName, number>();
   if (config.knowledgeUploadsEnabled) {
     const router = new LlmRouterClient(config.routerUrl, config.routerApiKey);
-    const knowledge = new KnowledgeIngestWorker(db,{tempRoot:"/tmp",embed:(text,signal)=>router.embed(text,signal),scan:async(path)=>await new Promise<"clean"|"infected"|"unavailable">(resolve=>execFile("clamscan",["--no-summary",path],error=>{const code=(error as unknown as {code?:number})?.code;resolve(!error?"clean":code===1?"infected":"unavailable");}))});
+    // Индексация в Qdrant (docs/knowledge-base.md): без ключа Qdrant не
+    // используется вовсе, и задания не ставятся.
+    const indexEnabled = (): boolean => config.knowledgeIndexEnabled && Boolean(config.qdrantApiKey);
+    const knowledge = new KnowledgeIngestWorker(db, {
+      tempRoot: "/tmp",
+      embed: (text, signal) => router.embed(text, signal),
+      embedBatch: (texts, signal) => router.embedLegacyMany(texts, signal),
+      chunking: () => ({ size: config.knowledgeChunkSize, overlap: config.knowledgeChunkOverlap }),
+      index: knowledgeIndexScheduler(outbox, indexEnabled),
+      scan: async (path) => await new Promise<"clean" | "infected" | "unavailable">((resolve) => execFile("clamscan", ["--no-summary", path], (error) => {
+        const code = (error as unknown as { code?: number })?.code;
+        resolve(!error ? "clean" : code === 1 ? "infected" : "unavailable");
+      })),
+    });
+    const indexer = new KnowledgeIndexer(
+      db,
+      router,
+      new KnowledgeVectorStore(new QdrantClient({ url: config.qdrantUrl || "http://qdrant:6333", apiKey: config.qdrantApiKey ?? "" })),
+      { enabled: indexEnabled, batchSize: () => config.knowledgeEmbeddingBatch },
+    );
     registry.queue("memory");
     runtime.register(KNOWLEDGE_INGEST_JOB,async(context)=>await knowledge.run(context));
+    runtime.register(KNOWLEDGE_INDEX_JOB, async (context) => { await indexer.run(context); });
     // Без потребителя загрузка навсегда оставалась `queued`: публикатор
     // ставил задание в Valkey, а забирать его было некому. По одному:
     // антивирус и эмбеддинги тяжёлые, а загрузки редки.

@@ -259,6 +259,20 @@ export class KnowledgeVectorStore {
     });
   }
 
+  /**
+   * Снять точки документа, которых больше нет среди его фрагментов. Сначала
+   * пишутся новые точки, потом снимаются лишние: документ не бывает
+   * «пустым» в индексе посреди переиндексации.
+   */
+  async pruneDocument(scope: KnowledgeScope, version: number, documentId: string, keepChunkIds: number[]): Promise<void> {
+    await this.client.deletePoints(knowledgeCollection(scope, version), {
+      filter: {
+        must: [{ key: "document_id", match: { value: documentId } }],
+        ...(keepChunkIds.length ? { must_not: [{ has_id: keepChunkIds }] } : {}),
+      },
+    });
+  }
+
   /** Удалить точки фрагментов по id — для точек-сирот, найденных сверкой. */
   async deleteChunks(scope: KnowledgeScope, version: number, chunkIds: number[]): Promise<void> {
     if (!chunkIds.length) return;

@@ -88,6 +88,9 @@ dump_volume() {
 dump_volume evaself_letta_app_server_data letta_app_server_data.tar.gz
 dump_volume evaself_letta_provider_config letta_provider_config.tar.gz
 dump_volume evaself_caddy_data  caddy_data.tar.gz
+# Исходные документы базы знаний. Том Qdrant не сохраняется: индекс
+# производный и перестраивается из PostgreSQL (docs/knowledge-base.md).
+dump_volume evaself_knowledge_files knowledge_files.tar.gz
 
 # ---------------------------------------------------------------------
 # 3. Agent / conversation inventory

@@ -204,3 +204,91 @@ export async function extractDocumentText(
   if (pages.length > limits.pages) throw new Error("document_pages_exceeded");
   return pages;
 }
+
+/** Документ с сохранённой структурой — для нарезки базы знаний. */
+export interface DocumentOutline {
+  /** Текст по страницам; заголовки — строками markdown `#`. */
+  pages: string[];
+  /** Номера страниц настоящие (PDF, текст с разрывами) или их нет (DOCX, HTML). */
+  paged: boolean;
+}
+
+const HTML_ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: "\"", apos: "'", nbsp: " " };
+
+function decodeEntities(text: string): string {
+  return text.replace(/&(#x[0-9a-f]{1,6}|#[0-9]{1,7}|[a-z]{2,6});/giu, (whole, name: string) => {
+    if (name.startsWith("#x") || name.startsWith("#X")) {
+      const code = Number.parseInt(name.slice(2), 16);
+      return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : " ";
+    }
+    if (name.startsWith("#")) {
+      const code = Number.parseInt(name.slice(1), 10);
+      return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : " ";
+    }
+    return HTML_ENTITIES[name.toLowerCase()] ?? whole;
+  });
+}
+
+/**
+ * Вырезать то, чего человек не видит: скрипты, стили, формы, комментарии и
+ * скрытые элементы. Встречается и в markdown, и в «простом» тексте.
+ */
+export function stripHiddenMarkup(text: string): string {
+  return text
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/giu, " ")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/giu, " ")
+    .replace(/<form\b[^>]*>[\s\S]*?<\/form>/giu, " ")
+    .replace(/<!--[\s\S]*?-->/gu, " ")
+    .replace(/<([a-z0-9]+)\b[^>]*(?:\bhidden\b|aria-hidden\s*=\s*["']?true|style\s*=\s*["'][^"']*(?:display\s*:\s*none|visibility\s*:\s*hidden))[^>]*>[\s\S]*?<\/\1>/giu, " ");
+}
+
+/**
+ * HTML → строки с заголовками `#`. Скрытое, скрипты и формы вырезаются
+ * до того, как текст станет фрагментом: невидимый человеку текст — любимое
+ * место для инструкций, адресованных модели.
+ */
+export function htmlToOutline(html: string): string {
+  const stripTags = (value: string): string => value.replace(/<[^>]+>/gu, " ");
+  let text = stripHiddenMarkup(html);
+  text = text.replace(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/giu, (_whole, level: string, inner: string) =>
+    `\n\n${"#".repeat(Number(level))} ${stripTags(inner).replace(/\s+/gu, " ").trim()}\n\n`);
+  text = text
+    .replace(/<li\b[^>]*>/giu, "\n- ")
+    .replace(/<br\s*\/?>/giu, "\n")
+    .replace(/<\/(?:p|div|li|tr|table|ul|ol|section|article|blockquote|header|footer|main)>/giu, "\n\n");
+  text = decodeEntities(stripTags(text));
+  return text
+    .split("\n")
+    .map((line) => line.replace(/[ \t\u00a0]+/gu, " ").trim())
+    .join("\n")
+    .replace(/\n{3,}/gu, "\n\n")
+    .trim();
+}
+
+/**
+ * Разобрать файл с сохранением структуры: заголовки DOCX и HTML, страницы
+ * PDF. Проверки типа, размера и zip-бомбы — те же, что у
+ * `extractDocumentText`: он же и выполняет их первым.
+ */
+export async function extractDocumentOutline(
+  buffer: Buffer,
+  mime: string,
+  limits: DocumentLimits = DEFAULT_DOCUMENT_LIMITS,
+): Promise<DocumentOutline> {
+  const pages = await extractDocumentText(buffer, mime, limits);
+  if (mime === DOCX_MIME) {
+    // Сырой текст DOCX теряет заголовки; HTML того же разбора их хранит.
+    let html: string;
+    try {
+      const result = await mammoth.convertToHtml({ buffer });
+      if (result.messages.some((message) => message.type === "error")) throw new Error();
+      html = result.value;
+    } catch {
+      throw new Error("document_docx_xml_invalid");
+    }
+    return { pages: [htmlToOutline(html)], paged: false };
+  }
+  if (mime === "text/html") return { pages: pages.map(htmlToOutline), paged: false };
+  if (mime === "application/pdf") return { pages, paged: true };
+  return { pages: pages.map(stripHiddenMarkup), paged: pages.length > 1 };
+}

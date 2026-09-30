@@ -167,6 +167,7 @@ restore_volume() {
 restore_volume letta_app_server_data.tar.gz evaself_letta_app_server_data
 restore_volume letta_provider_config.tar.gz evaself_letta_provider_config
 restore_volume caddy_data.tar.gz  evaself_caddy_data
+restore_volume knowledge_files.tar.gz evaself_knowledge_files
 
 # ---------------------------------------------------------------------
 # 5. databases

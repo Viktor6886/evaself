@@ -1,7 +1,7 @@
 import type { Config } from "../config.js";
 import type { Database } from "../db.js";
 import { parseLiveStreamMode, parseLiveTypingSpeed } from "../telegram/live-pace.js";
-import { OSINT_SETTINGS } from "./settings-registry.js";
+import { KNOWLEDGE_SETTINGS, OSINT_SETTINGS, type SettingDefinition } from "./settings-registry.js";
 
 interface SettingRow {
   key: string;
@@ -30,7 +30,15 @@ type LiveSettings = Pick<
   | "osintEnabled" | "osintRuRegistriesEnabled" | "osintDailyLimit"
   | "osintCollectorMaigret" | "osintCollectorWeb" | "osintCollectorInfrastructure"
   | "osintCollectorHarvester" | "osintCollectorSpiderfoot"
+  | "knowledgeIndexEnabled" | "knowledgeChunkSize" | "knowledgeChunkOverlap" | "knowledgeEmbeddingBatch"
 >;
+/** База знаний: ключ панели → поле конфигурации. Задания читают их при каждом запуске. */
+const KNOWLEDGE_FIELDS: Array<[string, keyof LiveSettings]> = [
+  ["runtime.knowledge_index_enabled", "knowledgeIndexEnabled"],
+  ["runtime.knowledge_chunk_size", "knowledgeChunkSize"],
+  ["runtime.knowledge_chunk_overlap", "knowledgeChunkOverlap"],
+  ["runtime.knowledge_embedding_batch", "knowledgeEmbeddingBatch"],
+];
 /** Флаги OSINT: ключ панели → поле конфигурации. Все читаются на каждом ходе и задании. */
 const OSINT_FLAGS: Array<[string, keyof LiveSettings]> = [
   ["runtime.osint_enabled", "osintEnabled"],
@@ -48,6 +56,7 @@ const LIVE_SETTING_FIELDS: Array<[string, keyof LiveSettings]> = [
   ["runtime.telegram_typing_speed", "telegramTypingSpeed"],
   ...OSINT_FLAGS,
   ["runtime.osint_daily_limit", "osintDailyLimit"],
+  ...KNOWLEDGE_FIELDS,
 ];
 
 /** Apply PostgreSQL settings over bootstrap environment values. */
@@ -68,6 +77,10 @@ export async function applyManagedRuntimeConfig(
       osintCollectorInfrastructure: config.osintCollectorInfrastructure,
       osintCollectorHarvester: config.osintCollectorHarvester,
       osintCollectorSpiderfoot: config.osintCollectorSpiderfoot,
+      knowledgeIndexEnabled: config.knowledgeIndexEnabled,
+      knowledgeChunkSize: config.knowledgeChunkSize,
+      knowledgeChunkOverlap: config.knowledgeChunkOverlap,
+      knowledgeEmbeddingBatch: config.knowledgeEmbeddingBatch,
     });
   }
   const { rows } = await db.query<SettingRow>(
@@ -129,6 +142,19 @@ export async function applyManagedRuntimeConfig(
       case "runtime.osint_daily_limit":
         config.osintDailyLimit = integer(value, config.osintDailyLimit);
         break;
+      // База знаний: индексация читает флаг и нарезку при каждом задании.
+      case "runtime.knowledge_index_enabled":
+        config.knowledgeIndexEnabled = boolean(value, config.knowledgeIndexEnabled);
+        break;
+      case "runtime.knowledge_chunk_size":
+        config.knowledgeChunkSize = integer(value, config.knowledgeChunkSize);
+        break;
+      case "runtime.knowledge_chunk_overlap":
+        config.knowledgeChunkOverlap = integer(value, config.knowledgeChunkOverlap);
+        break;
+      case "runtime.knowledge_embedding_batch":
+        config.knowledgeEmbeddingBatch = integer(value, config.knowledgeEmbeddingBatch);
+        break;
       case "runtime.outbox_enabled":
         config.outboxEnabled = boolean(value, config.outboxEnabled);
         break;
@@ -176,9 +202,30 @@ export async function importEnvironmentOsintSettings(
   config: Config,
   db: Pick<Database, "query">,
 ): Promise<string[]> {
+  return await importEnvironmentSettings(config, db, OSINT_SETTINGS, OSINT_FIELDS);
+}
+
+/**
+ * Перенос настроек базы знаний из окружения в панель — по той же причине,
+ * что и OSINT: ключи появились после первичного импорта, и установка с
+ * `EVA_KNOWLEDGE_INDEX=true` выглядела бы в панели выключенной.
+ */
+export async function importEnvironmentKnowledgeSettings(
+  config: Config,
+  db: Pick<Database, "query">,
+): Promise<string[]> {
+  return await importEnvironmentSettings(config, db, KNOWLEDGE_SETTINGS, new Map(KNOWLEDGE_FIELDS));
+}
+
+async function importEnvironmentSettings(
+  config: Config,
+  db: Pick<Database, "query">,
+  definitions: readonly SettingDefinition[],
+  fields: ReadonlyMap<string, keyof LiveSettings>,
+): Promise<string[]> {
   const imported: string[] = [];
-  for (const definition of OSINT_SETTINGS) {
-    const field = OSINT_FIELDS.get(definition.key);
+  for (const definition of definitions) {
+    const field = fields.get(definition.key);
     if (!field) continue;
     const value = config[field];
     if (value === definition.default) continue;
