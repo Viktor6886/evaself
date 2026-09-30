@@ -21,7 +21,7 @@
  * из аргументов модели, Telegram или браузера.
  */
 
-import { QdrantClient, QdrantError, type QdrantCollectionSpec, type QdrantDistance, type QdrantFilter } from "./qdrant-client.js";
+import { QdrantClient, QdrantError, type QdrantCollectionSpec, type QdrantCondition, type QdrantDistance, type QdrantFilter } from "./qdrant-client.js";
 
 export type KnowledgeScope = "private" | "global";
 
@@ -249,14 +249,20 @@ export class KnowledgeVectorStore {
   }
 
   /**
-   * Удалить точки документов. Владельца здесь не проверить: id документов
-   * вызывающий берёт из PostgreSQL, где владелец уже проверен.
+   * Удалить точки документов. Id документов вызывающий берёт из
+   * PostgreSQL, где владелец уже проверен. Документ, которого в
+   * PostgreSQL уже нет, проверить негде — тогда владелец личной базы
+   * передаётся явно и входит в фильтр: задание с чужим владельцем не
+   * снимет чужие точки.
    */
-  async deleteDocuments(scope: KnowledgeScope, version: number, documentIds: string[]): Promise<void> {
+  async deleteDocuments(scope: KnowledgeScope, version: number, documentIds: string[], owner?: number): Promise<void> {
     if (!documentIds.length) return;
-    await this.client.deletePoints(knowledgeCollection(scope, version), {
-      filter: { must: [{ key: "document_id", match: { any: documentIds } }] },
-    });
+    const must: QdrantCondition[] = [{ key: "document_id", match: { any: documentIds } }];
+    if (owner !== undefined) {
+      if (scope !== "private") throw new Error("knowledge_scope_invalid");
+      must.push({ key: "user_id", match: { value: assertUserId(owner) } });
+    }
+    await this.client.deletePoints(knowledgeCollection(scope, version), { filter: { must } });
   }
 
   /**
@@ -307,9 +313,33 @@ export class KnowledgeVectorStore {
     return await this.client.count(knowledgeCollection(scope, version));
   }
 
+  /** Точек одного документа в версии: перестройка пропускает полные. */
+  async documentPoints(scope: KnowledgeScope, version: number, documentId: string): Promise<number> {
+    return await this.client.count(knowledgeCollection(scope, version), { must: [{ key: "document_id", match: { value: documentId } }] });
+  }
+
   /** Точек по документам — для сверки с числом фрагментов в PostgreSQL. */
   async documentPointCounts(scope: KnowledgeScope, version: number, limit: number): Promise<Map<string, number>> {
     return await this.client.facet(knowledgeCollection(scope, version), "document_id", { limit });
+  }
+
+  /** Векторы фрагментов в коллекции версии — для повторного использования (см. `QdrantClient.retrieveVectors`). */
+  async vectorsOf(scope: KnowledgeScope, version: number, chunkIds: number[], signal?: AbortSignal): Promise<Map<number, number[]>> {
+    const found = await this.client.retrieveVectors(knowledgeCollection(scope, version), chunkIds, signal);
+    return new Map([...found].map(([id, vector]) => [Number(id), vector]));
+  }
+
+  /**
+   * Снять точки чужой версии: в коллекцию версии N попала точка с другой
+   * `embedding_version` — её вектор из другого пространства и искать по
+   * нему нельзя. Возвращает, сколько таких было.
+   */
+  async removeForeignVersion(scope: KnowledgeScope, version: number): Promise<number> {
+    const collection = knowledgeCollection(scope, version);
+    const filter: QdrantFilter = { must_not: [{ key: "embedding_version", match: { value: version } }] };
+    const foreign = await this.client.count(collection, filter);
+    if (foreign > 0) await this.client.deletePoints(collection, { filter });
+    return foreign;
   }
 
   /** Страница точек без векторов — для поиска сирот. */

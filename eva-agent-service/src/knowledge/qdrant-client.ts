@@ -352,6 +352,29 @@ export class QdrantClient {
     return { points, next: typeof next === "number" || typeof next === "string" ? next : null };
   }
 
+  /**
+   * Векторы точек по id. Новая версия документа большей частью повторяет
+   * прежнюю, и векторы неизменённых фрагментов берутся отсюда, а не
+   * считаются у провайдера заново. Точек, которых нет, в ответе нет.
+   */
+  async retrieveVectors(collection: string, ids: Array<number | string>, signal?: AbortSignal): Promise<Map<string, number[]>> {
+    const vectors = new Map<string, number[]>();
+    if (!ids.length) return vectors;
+    const result = await this.request<Array<{ id?: unknown; vector?: unknown }>>(
+      "count",
+      `/collections/${encodeURIComponent(collection)}/points`,
+      { method: "POST", body: { ids, with_payload: false, with_vector: true }, signal },
+    );
+    for (const point of Array.isArray(result) ? result : []) {
+      const vector = point.vector;
+      if ((typeof point.id === "number" || typeof point.id === "string")
+        && Array.isArray(vector) && vector.length > 0 && vector.every((value) => typeof value === "number" && Number.isFinite(value))) {
+        vectors.set(String(point.id), vector as number[]);
+      }
+    }
+    return vectors;
+  }
+
   /** Снимок коллекции внутри тома Qdrant: быстрое восстановление, не замена перестройки. */
   async createSnapshot(collection: string): Promise<string> {
     const result = await this.request<{ name?: unknown }>("admin", `/collections/${encodeURIComponent(collection)}/snapshots?wait=true`, {
