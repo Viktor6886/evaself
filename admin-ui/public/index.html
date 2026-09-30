@@ -705,9 +705,8 @@
              администратора и оплата всегда названы по имени: в них разная
              цена ошибки, и путать их нельзя.
              ============================================================ -->
-        <!-- Тарифы. Лимиты живут в quotas, расход — в usage_counters;
-             обе таблицы были до тарификации. Здесь их правят и смотрят,
-             а не дублируют. -->
+        <!-- База знаний: общая база для всех пользователей (K5a). Личные
+             базы людей здесь видны только числами. -->
         <section id="page-knowledge" class="page">
           <div class="page-heading">
             <div><p class="eyebrow">ОБЩАЯ БАЗА</p><h2>База знаний</h2><p>Документы, которые Ева может найти для всех пользователей: методички, регламенты, FAQ. Личные документы людей здесь не видны — только их число.</p></div>
@@ -733,7 +732,7 @@
             </div>
             <div class="knowledge-drop" id="knowledge-drop">
               <label>Коллекция <select id="knowledge-upload-collection" aria-label="Коллекция для загрузки"></select></label>
-              <input type="file" id="knowledge-file" multiple hidden accept=".pdf,.docx,.txt,.md,.markdown,.html,.htm,.json">
+              <input type="file" id="knowledge-file" multiple hidden>
               <button class="button" id="knowledge-upload-button" type="button">Выбрать файлы</button>
               <span class="block-caption">или перетащите их сюда</span>
               <p id="knowledge-upload-progress" class="block-caption" aria-live="polite"></p>
@@ -766,6 +765,7 @@
               <button class="button tiny danger" id="knowledge-bulk-delete" type="button" disabled>Удалить</button>
             </div>
             <div id="knowledge-documents"></div>
+            <button class="button ghost" id="knowledge-more" type="button" hidden>Показать ещё</button>
           </section>
 
           <section class="card">
@@ -779,6 +779,9 @@
           </section>
         </section>
 
+        <!-- Тарифы. Лимиты живут в quotas, расход — в usage_counters;
+             обе таблицы были до тарификации. Здесь их правят и смотрят,
+             а не дублируют. -->
         <section id="page-tariffs" class="page">
           <div class="page-heading">
             <div><p class="eyebrow">ТАРИФИКАЦИЯ</p><h2>Тарифы</h2><p>Сколько положено на каждом тарифе и сколько стоит подписка. Значения применяются ко всем сразу.</p></div>

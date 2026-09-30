@@ -51,40 +51,65 @@ function knowledgeEditable() {
   return ["owner", "admin"].includes(state.me?.role);
 }
 
+/** Документов на страницу и предел списка: дальше — фильтр или поиск. */
+const KNOWLEDGE_PAGE = 50;
+const KNOWLEDGE_PAGE_MAX = 200;
+
 async function loadKnowledge() {
-  state.knowledge = state.knowledge || { collection: "", filter: "", selected: new Set() };
+  state.knowledge = state.knowledge || { collection: "", uploadTarget: "", filter: "", selected: new Set(), limit: KNOWLEDGE_PAGE };
   const k = state.knowledge;
-  const query = new URLSearchParams();
+  const query = new URLSearchParams({ limit: String(k.limit) });
   if (k.collection) query.set("collection_id", k.collection);
   if (k.filter) query.set("index_status", k.filter);
   if (k.search) query.set("q", k.search);
   const uploadsQuery = new URLSearchParams(k.collection ? { collection_id: k.collection } : {});
-  const [collections, documents, uploads, index] = await Promise.all([
+  // Каждый запрос сам по себе: недоступное состояние индекса не должно
+  // прятать коллекции и документы. Без коллекций раздел бесполезен —
+  // их отказ, как и истёкшая сессия, идёт обычной ошибкой.
+  const [collections, documents, uploads, index] = await Promise.allSettled([
     request("/knowledge/collections"),
     request(`/knowledge/documents?${query}`),
     request(`/knowledge/uploads?${uploadsQuery}`),
     request("/knowledge/index"),
   ]);
-  k.collections = collections.payload.collections || [];
-  k.documents = documents.payload.documents || [];
-  k.total = documents.payload.total || 0;
-  k.uploads = uploads.payload.uploads || [];
-  k.index = index.payload;
+  const expired = [collections, documents, uploads, index].find((item) => item.status === "rejected" && item.reason?.status === 401);
+  if (expired) throw expired.reason;
+  if (collections.status === "rejected") throw collections.reason;
+  k.collections = collections.value.payload.collections || [];
+  k.failed = { documents: documents.status === "rejected", uploads: uploads.status === "rejected", index: index.status === "rejected" };
+  if (!k.failed.documents) {
+    k.documents = documents.value.payload.documents || [];
+    k.total = documents.value.payload.total || 0;
+  }
+  if (!k.failed.uploads) k.uploads = uploads.value.payload.uploads || [];
+  if (!k.failed.index) k.index = index.value.payload;
   if (k.collection && !k.collections.some((item) => item.id === k.collection)) k.collection = "";
   renderKnowledge();
   scheduleKnowledgeRefresh();
 }
 
-/** Пока есть незавершённые загрузки или индексация — обновлять раз в 5 секунд. */
+/**
+ * Обновлять раз в 5 секунд, только пока что-то действительно идёт:
+ * разбор загрузки, индексация документа, построение версии. «Ждёт
+ * индексации» при выключенном индексе не меняется само — по нему не
+ * опрашиваем. Вкладка в фоне не опрашивает вовсе.
+ */
 function scheduleKnowledgeRefresh() {
   clearTimeout(scheduleKnowledgeRefresh.timer);
   const k = state.knowledge;
   const busy = (k.uploads || []).some((item) => ["queued", "processing"].includes(item.status))
-    || (k.documents || []).some((item) => ["pending", "indexing"].includes(item.index_status));
+    || (k.documents || []).some((item) => item.index_status === "indexing")
+    || (k.index?.versions || []).some((item) => item.building);
   if (!busy) return;
   scheduleKnowledgeRefresh.timer = setTimeout(() => {
-    if (state.page === "knowledge") loadKnowledge().catch(() => {});
+    if (state.page !== "knowledge") return;
+    if (document.hidden) { scheduleKnowledgeRefresh(); return; }
+    loadKnowledge().catch(() => {});
   }, 5_000);
+}
+
+function knowledgeUnavailable(what) {
+  return `<p class="warn-value">${what} сейчас недоступны — нажмите «Обновить» позже.</p>`;
 }
 
 function renderKnowledge() {
@@ -127,15 +152,24 @@ function renderKnowledgeCollections() {
   const select = $("#knowledge-collection-select");
   select.innerHTML = `<option value="">Все коллекции</option>${rows.map((item) =>
     `<option value="${escapeHtml(item.id)}" ${item.id === k.collection ? "selected" : ""}>${escapeHtml(item.title)}</option>`).join("")}`;
+  // Коллекция загрузки — выбор администратора, а не фильтр списка: она
+  // переживает перерисовку (после каждой загрузки и при опросе), иначе
+  // следующий файл ушёл бы в первую коллекцию общей базы, видную всем.
+  const chosen = [k.uploadTarget, k.collection].find((id) => id && rows.some((item) => item.id === id)) || rows[0]?.id || "";
+  k.uploadTarget = chosen;
   const target = $("#knowledge-upload-collection");
   target.innerHTML = rows.length
-    ? rows.map((item) => `<option value="${escapeHtml(item.id)}" ${item.id === k.collection ? "selected" : ""}>${escapeHtml(item.title)}</option>`).join("")
+    ? rows.map((item) => `<option value="${escapeHtml(item.id)}" ${item.id === chosen ? "selected" : ""}>${escapeHtml(item.title)}</option>`).join("")
     : '<option value="">Сначала создайте коллекцию</option>';
   $("#knowledge-upload").hidden = !editable;
   $("#knowledge-upload-button").disabled = !rows.length;
 }
 
 function renderKnowledgeUploads() {
+  if (state.knowledge.failed?.uploads) {
+    $("#knowledge-uploads").innerHTML = knowledgeUnavailable("Загрузки");
+    return;
+  }
   const rows = (state.knowledge.uploads || []).slice(0, 30);
   const titles = new Map((state.knowledge.collections || []).map((item) => [item.id, item.title]));
   $("#knowledge-uploads").innerHTML = rows.length ? `<div class="table-wrap"><table>
@@ -158,10 +192,16 @@ function renderKnowledgeUploads() {
 function renderKnowledgeDocuments() {
   const k = state.knowledge;
   const editable = knowledgeEditable();
+  if (k.failed?.documents) {
+    $("#knowledge-documents").innerHTML = knowledgeUnavailable("Документы");
+    $("#knowledge-more").hidden = true;
+    return;
+  }
+  k.documents = k.documents || [];
   const titles = new Map((k.collections || []).map((item) => [item.id, item.title]));
   k.selected = new Set([...k.selected].filter((id) => k.documents.some((doc) => doc.id === id)));
   $("#knowledge-documents").innerHTML = k.documents.length ? `
-    <p class="block-caption">Показано ${k.documents.length} из ${k.total}.</p>
+    <p class="block-caption">Показано ${k.documents.length} из ${k.total}.${k.total > k.documents.length && k.limit >= KNOWLEDGE_PAGE_MAX ? " Остальные — через коллекцию, состояние или поиск." : ""}</p>
     <div class="table-wrap"><table>
       <thead><tr>
         ${editable ? '<th><input type="checkbox" id="knowledge-select-all" aria-label="Выбрать все"></th>' : ""}
@@ -179,6 +219,7 @@ function renderKnowledgeDocuments() {
           <td>${localDate(doc.updated_at)}</td>
         </tr>`).join("")}
       </tbody></table></div>` : '<p class="knowledge-empty">Документов нет. Загрузите файлы в коллекцию выше.</p>';
+  $("#knowledge-more").hidden = !(k.total > k.documents.length && k.limit < KNOWLEDGE_PAGE_MAX);
   $("#knowledge-bulk").hidden = !editable || !k.documents.length;
   $("#knowledge-bulk-count").textContent = k.selected.size ? `Выбрано: ${k.selected.size}` : "Ничего не выбрано";
   $("#knowledge-bulk-delete").disabled = !k.selected.size;
@@ -186,6 +227,10 @@ function renderKnowledgeDocuments() {
 }
 
 function renderKnowledgeIndex() {
+  if (state.knowledge.failed?.index) {
+    $("#knowledge-index").innerHTML = knowledgeUnavailable("Сведения об индексе");
+    return;
+  }
   const index = state.knowledge.index || {};
   const scopes = index.scopes || {};
   const scope = (name, title) => {
@@ -281,14 +326,28 @@ function bindKnowledge() {
   $("#reload-knowledge").addEventListener("click", () => loadKnowledge().catch(handleError));
   $("#knowledge-collection-select").addEventListener("change", (event) => {
     state.knowledge.collection = event.target.value;
+    // Выбрали коллекцию в списке — в неё же удобно и загружать; «Все
+    // коллекции» выбор загрузки не трогает.
+    if (event.target.value) state.knowledge.uploadTarget = event.target.value;
+    state.knowledge.limit = KNOWLEDGE_PAGE;
     loadKnowledge().catch(handleError);
   });
+  $("#knowledge-upload-collection").addEventListener("change", (event) => {
+    state.knowledge.uploadTarget = event.target.value;
+  });
+  $("#knowledge-more").addEventListener("click", () => {
+    state.knowledge.limit = Math.min(state.knowledge.limit + KNOWLEDGE_PAGE, KNOWLEDGE_PAGE_MAX);
+    loadKnowledge().catch(handleError);
+  });
+  $("#knowledge-file").accept = KNOWLEDGE_ACCEPT;
   $("#knowledge-status-filter").addEventListener("change", (event) => {
     state.knowledge.filter = event.target.value;
+    state.knowledge.limit = KNOWLEDGE_PAGE;
     loadKnowledge().catch(handleError);
   });
   $("#knowledge-search").addEventListener("change", (event) => {
     state.knowledge.search = event.target.value.trim();
+    state.knowledge.limit = KNOWLEDGE_PAGE;
     loadKnowledge().catch(handleError);
   });
   $("#knowledge-upload-button").addEventListener("click", () => $("#knowledge-file").click());

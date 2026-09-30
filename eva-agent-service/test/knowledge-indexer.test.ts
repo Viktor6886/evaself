@@ -361,7 +361,8 @@ const EXISTING = "7a6b5c4d-3e2f-4a1b-8c9d-0e1f2a3b4c5d";
 
 interface IngestSetup {
   userId: number | null;
-  upload?: Record<string, unknown>;
+  /** null — записи приёма нет: человек очистил базу, пока задание ждало. */
+  upload?: Record<string, unknown> | null;
   duplicate?: string | null;
   previous?: { id: string; revision: number } | null;
   enabled?: boolean;
@@ -376,7 +377,7 @@ async function ingest(setup: IngestSetup) {
     collection_id: setup.userId === null ? "col-1" : null, replaces_document_id: null, ...setup.upload,
   };
   const { db, queries } = guardedDb((sql, params) => {
-    if (/SELECT storage_path/u.test(sql)) return { rows: [upload] };
+    if (/SELECT storage_path/u.test(sql)) return { rows: setup.upload === null ? [] : [upload] };
     if (/SELECT id FROM knowledge_documents/u.test(sql)) return { rows: setup.duplicate ? [{ id: setup.duplicate }] : [] };
     if (/SELECT id,revision FROM knowledge_documents/u.test(sql)) return { rows: setup.previous ? [setup.previous] : [] };
     if (/^\s*DELETE FROM knowledge_documents/u.test(sql)) return { rows: (params[0] as string[]).map((id) => ({ id })) };
@@ -472,6 +473,14 @@ test("повтор уже принятой загрузки ничего не д
   assert.ok(!replay.queries.some((item) => /^(INSERT|UPDATE|DELETE)/u.test(item.sql)));
 
   await assert.rejects(() => ingest({ userId: 7, upload: { storage_path: "/nonexistent/секрет договора.pdf" } }));
+});
+
+test("записи приёма нет — задание завершается без ошибки и ничего не пишет", async () => {
+  // Раньше здесь был отказ `knowledge_upload_missing`: задание повторялось
+  // до конца попыток и уходило в DLQ, хотя разбирать уже нечего.
+  const cleared = await ingest({ userId: 7, upload: null });
+  assert.ok(!cleared.queries.some((item) => /^(INSERT|UPDATE|DELETE)/u.test(item.sql)));
+  assert.deepEqual(cleared.scheduled, []);
 });
 
 test("после отказа коллекция проверяется заново: потерянный том не ломает индексацию до рестарта", async () => {

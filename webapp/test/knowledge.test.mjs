@@ -116,12 +116,37 @@ test("очистка базы — только после подтвержден
   }
 });
 
-test("документов больше, чем в списке — это видно", async () => {
+test("документов больше, чем в списке — это видно, и подтверждение очистки называет все", async () => {
   const app = await openApp({ routes: { "/public/knowledge": { ...ENABLED, total: 350 } } });
   try {
     await app.openScreen("knowledge");
     await app.page.waitForSelector("[data-knowledge-document]");
     assert.match(await app.page.textContent("#knowledge-content"), /показаны 2 из 350/u);
+    await app.page.click("#knowledge-clear");
+    await app.page.waitForSelector("#confirm-dialog[open]");
+    assert.match(await app.page.textContent("#confirm-dialog"), /\(350\)/u, "подтверждение называет не все документы");
+  } finally {
+    await app.close();
+  }
+});
+
+test("неудавшаяся загрузка — понятная причина, а не код; удалённый документ — «уже удалён»", async () => {
+  const failed = { id: "0d000000-0000-4000-8000-00000000000d", name: "Скан.pdf", size_bytes: 1024, status: "failed", outcome: null,
+    error_code: "document_pdf_malformed_or_encrypted", created_at: "2026-08-14T08:50:00.000Z" };
+  const app = await openApp({ routes: {
+    "/public/knowledge": { ...ENABLED, uploads: [...UPLOADS, failed] },
+    "DELETE /public/knowledge/documents/0a000000-0000-4000-8000-00000000000a": { __status: 404, __body: { error: { code: "not_found", message: "Документ не найден" } } },
+  } });
+  try {
+    await app.openScreen("knowledge");
+    await app.page.waitForSelector("[data-knowledge-document]");
+    const text = await app.page.textContent("#knowledge-content");
+    assert.match(text, /PDF повреждён или защищён паролем/u);
+    assert.doesNotMatch(text, /document_pdf_malformed/u);
+    await app.page.click('[data-knowledge-delete="0a000000-0000-4000-8000-00000000000a"]');
+    await app.page.waitForSelector("#confirm-dialog[open]");
+    await app.page.click("#confirm-accept");
+    await app.page.waitForFunction(() => /уже удалён/u.test(document.body.textContent || ""));
   } finally {
     await app.close();
   }

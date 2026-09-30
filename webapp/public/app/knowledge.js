@@ -31,7 +31,40 @@
     json: "application/json",
   };
 
-  const state = { enabled: null, documents: [], total: 0, uploads: [], timer: null, uploading: false };
+  /**
+   * Причины отказа загрузки: сервер отдаёт короткий код, человеку нужна
+   * фраза. Незнакомый код — общая фраза, а не код.
+   */
+  const REASONS = {
+    document_empty: "файл пустой",
+    document_too_large: "файл больше 10 МБ",
+    document_type_unsupported: "такой формат пока не принимается",
+    document_mime_mismatch: "содержимое не совпадает с форматом файла",
+    document_pdf_malformed_or_encrypted: "PDF повреждён или защищён паролем",
+    document_docx_malformed: "файл DOCX повреждён",
+    document_docx_xml_invalid: "файл DOCX повреждён",
+    document_html_invalid: "не удалось прочитать HTML",
+    document_json_invalid: "не удалось прочитать JSON",
+    document_pages_exceeded: "в документе слишком много страниц",
+    document_paragraphs_exceeded: "в документе слишком много текста",
+    document_sections_exceeded: "в документе слишком много разделов",
+    document_replaces_missing: "обновляемого документа больше нет",
+    document_replaces_invalid: "обновляемого документа больше нет",
+    document_antivirus_infected: "антивирус нашёл угрозу",
+    document_antivirus_unavailable: "антивирус недоступен, попробуй позже",
+    cancelled: "загрузка отменена",
+  };
+
+  const state = { enabled: null, documents: [], total: 0, uploads: [], timer: null, uploading: false, picking: false };
+
+  function reasonOf(code, fallback = "не удалось разобрать файл") {
+    return REASONS[code] || fallback;
+  }
+
+  function errorText(error) {
+    const code = String(error?.message || "");
+    return REASONS[code] || app().friendlyError(error);
+  }
 
   /** Включена ли функция; кнопка в меню показывается только при «да». */
   async function probe() {
@@ -93,6 +126,9 @@
     if (!busy()) return;
     state.timer = setTimeout(async () => {
       if (document.querySelector('[data-screen="knowledge"]')?.hidden) return;
+      // Открыт системный выбор файла: перерисовка заменила бы скрытое поле,
+      // и на части WebView выбранный файл уже некуда было бы вернуть.
+      if (state.picking) { schedule(); return; }
       await refresh();
       paint();
     }, 4_000);
@@ -124,7 +160,7 @@
     host.innerHTML = `
       <section class="knowledge-intro">
         <p>Загрузи свои документы — договоры, заметки, методички. Ева найдёт в них нужное, когда ты спросишь.</p>
-        <p class="knowledge-hint">PDF, DOCX, TXT, Markdown, HTML — до 10 МБ. Документы видишь только ты.</p>
+        <p class="knowledge-hint">PDF, DOCX, TXT, Markdown, HTML, JSON — до 10 МБ. Документы видишь только ты.</p>
         <input type="file" id="knowledge-file" accept="${ACCEPT}" multiple hidden>
         <button class="primary-action" id="knowledge-upload" type="button" ${state.uploading ? "disabled" : ""}>
           ${state.uploading ? "Загружаю…" : "Загрузить документ"}
@@ -136,7 +172,8 @@
           const status = uploadStatus(upload);
           return `<article class="knowledge-item" data-knowledge-upload="${escapeAttr(upload.id)}">
             <div class="knowledge-copy"><strong>${escapeHtml(upload.name)}</strong>
-              <small>${size(upload.size_bytes)} · ${escapeHtml(formatDate(upload.created_at))}</small></div>
+              <small>${size(upload.size_bytes)} · ${escapeHtml(formatDate(upload.created_at))}</small>
+              ${["failed", "cancelled"].includes(upload.status) ? `<small class="knowledge-reason">${escapeHtml(reasonOf(upload.error_code))}</small>` : ""}</div>
             <span class="knowledge-status is-${status.tone}">${escapeHtml(status.label)}</span>
           </article>`;
         }).join("")}
@@ -162,14 +199,22 @@
     schedule();
   }
 
+  function pick(input) {
+    state.picking = true;
+    // Окно выбора закрылось без файла: `change` не придёт, придёт фокус.
+    window.addEventListener("focus", () => setTimeout(() => { state.picking = false; }, 500), { once: true });
+    input.click();
+  }
+
   function bind(host) {
     const input = host.querySelector("#knowledge-file");
     host.querySelector("#knowledge-upload")?.addEventListener("click", () => {
       input.dataset.replace = "";
       input.multiple = true;
-      input.click();
+      pick(input);
     });
     input?.addEventListener("change", () => {
+      state.picking = false;
       const files = [...(input.files || [])];
       const replace = input.dataset.replace || "";
       input.value = "";
@@ -179,7 +224,7 @@
       button.addEventListener("click", () => {
         input.dataset.replace = button.dataset.knowledgeReplace;
         input.multiple = false;
-        input.click();
+        pick(input);
       });
     });
     host.querySelectorAll("[data-knowledge-delete]").forEach((button) => {
@@ -212,7 +257,7 @@
           });
           accepted += 1;
         } catch (error) {
-          app().toast(`${file.name}: ${app().friendlyError(error)}`, true);
+          app().toast(`${file.name}: ${errorText(error)}`, true);
         }
       }
       if (accepted) app().toast(accepted === 1 ? "Документ принят — Ева его разбирает" : `Принято документов: ${accepted}`);
@@ -234,7 +279,9 @@
       await app().api(`/public/knowledge/documents/${encodeURIComponent(id)}`, { method: "DELETE" });
       app().toast("Документ удалён");
     } catch (error) {
-      app().toast(app().friendlyError(error), true);
+      // 404 здесь — документа уже нет (удалён в другом окне или очисткой),
+      // а не «функция не подключена».
+      app().toast(error?.status === 404 ? "Документ уже удалён" : app().friendlyError(error), true);
     }
     await refresh();
     paint();
@@ -243,7 +290,8 @@
   async function clear() {
     const confirmed = await app().confirmDanger({
       title: "Очистить базу знаний?",
-      detail: `Все документы (${state.documents.length}) будут удалены. Это нельзя отменить.`,
+      // Очистка удаляет все документы, а не только показанные в списке.
+      detail: `Все документы (${state.total}) будут удалены. Это нельзя отменить.`,
       confirmLabel: "Очистить",
     });
     if (!confirmed) return;

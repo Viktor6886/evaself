@@ -15,8 +15,9 @@ body.has-knowledge .bottom-nav{grid-template-columns:repeat(5,minmax(0,1fr))!imp
 .knowledge-status.is-ok{color:var(--accent);background:var(--accent-soft)}
 .knowledge-status.is-error{color:var(--danger);background:color-mix(in srgb,var(--danger) 12%,transparent)}
 .knowledge-actions{grid-column:1 / -1;display:flex;gap:12px;align-items:center;justify-content:flex-end;flex-wrap:wrap}
-.knowledge-actions .secondary-action{min-height:36px;padding:6px 12px}
-.danger-link{border:0;background:transparent;color:var(--danger);font:inherit;min-height:36px;padding:6px 4px;cursor:pointer}
+.knowledge-actions .secondary-action{min-height:44px;padding:8px 14px}
+.danger-link{border:0;background:transparent;color:var(--danger);font:inherit;min-height:44px;padding:8px 6px;cursor:pointer}
+.knowledge-copy .knowledge-reason{color:var(--danger)}
 .knowledge-clear{justify-self:center;margin:12px auto 24px;display:block}
 /* Пять кнопок на самом узком телефоне: подпись «База знаний» помещается
    только чуть меньшим шрифтом — меньше всех остальных не делаем. */

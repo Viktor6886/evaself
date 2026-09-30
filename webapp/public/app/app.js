@@ -107,7 +107,7 @@
       state.journalEnabled = Boolean(await window.EvaJournal?.probe?.());
       document.getElementById("journal-add-top").hidden = !state.journalEnabled;
       // Вкладка «База знаний» появляется, только если сервер её включил.
-      // Проба не держит запуск: отказ означает «вкладки нет».
+      // Отказ пробы запуск не прерывает: он означает «вкладки нет».
       await window.EvaKnowledge?.probe?.().catch(() => undefined);
       // Окна инициативы подгружаются вместе с остальным профилем, чтобы
       // строка настроек сразу показывала выбранное, а не «Открыть».

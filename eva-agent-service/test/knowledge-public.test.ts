@@ -10,6 +10,7 @@
  */
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -266,15 +267,40 @@ test("очистка: порциями до конца, неудавшиеся �
       remaining.splice(0, ids.length);
       return { rows: ids.map((id) => ({ id })) };
     }
-    if (sql.startsWith("DELETE FROM knowledge_uploads WHERE user_id=$1 AND status IN")) return { rows: [{ id: failed }] };
+    if (sql.startsWith("SELECT id FROM knowledge_uploads WHERE user_id=$1 AND status IN")) return { rows: [{ id: failed }] };
+    if (sql.startsWith("DELETE FROM knowledge_uploads WHERE id=$1")) {
+      // Строка удаляется только после файла: к этому моменту его уже нет.
+      filePresentAtRowDelete = existsSync(join(root, String(INTERNAL), failed));
+    }
     return undefined;
   });
+  let filePresentAtRowDelete: boolean | null = null;
   const box = outbox();
   const service = new KnowledgeUploadService(db as never, { record: box.record(queries) } as never, root);
   assert.deepEqual(await service.clear(USER.id), { deleted: 501 });
   assert.equal(queries.filter((query) => query.sql.startsWith("DELETE FROM knowledge_documents")).length, 2);
   assert.equal(box.jobs.length, 501);
   assert.deepEqual(await readdir(join(root, String(INTERNAL))), [], "файл неудавшейся загрузки остался");
+  assert.equal(filePresentAtRowDelete, false, "строка приёма удалена раньше файла");
+  const rowDelete = queries.find((query) => query.sql.startsWith("DELETE FROM knowledge_uploads WHERE id=$1"))!;
+  assert.deepEqual(rowDelete.params, [failed, INTERNAL]);
+});
+
+test("очистка: файл не удалился — строка приёма остаётся для следующей очистки", async () => {
+  const root = await mkdtemp(join(tmpdir(), "eva-knowledge-clear-fail-"));
+  const failed = "0e000000-0000-4000-8000-00000000000e";
+  // Вместо файла — непустой каталог: `rm` без recursive откажет.
+  await mkdir(join(root, String(INTERNAL), failed, "inner"), { recursive: true });
+  const { db, queries } = guardedDb((sql) => {
+    const user = resolveUser(sql);
+    if (user) return user;
+    if (sql.startsWith("SELECT id FROM knowledge_uploads WHERE user_id=$1 AND status IN")) return { rows: [{ id: failed }] };
+    return undefined;
+  });
+  const box = outbox();
+  const service = new KnowledgeUploadService(db as never, { record: box.record(queries) } as never, root);
+  await assert.rejects(() => service.clear(USER.id));
+  assert.ok(!queries.some((query) => query.sql.startsWith("DELETE FROM knowledge_uploads")), "строка удалена, хотя файл остался");
 });
 
 test("загрузка новой версии: только своего документа, id — в записи приёма", async () => {

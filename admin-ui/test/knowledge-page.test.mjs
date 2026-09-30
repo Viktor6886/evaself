@@ -140,3 +140,64 @@ test("на телефоне раздел без горизонтальной п�
     await panel.close();
   }
 });
+
+const SECOND = { ...COLLECTION, id: "2c000000-0000-4000-8000-000000000002", code: "rules", title: "Регламенты", documents: 0, indexed: 0, failed: 0 };
+
+test("выбранная коллекция загрузки переживает перерисовку, и следующий файл уходит в неё", async () => {
+  const panel = await openPanel({
+    routes: { ...ROUTES, "/knowledge/collections": { collections: [COLLECTION, SECOND] }, "POST /knowledge/uploads": { id: "u1", status: "queued" } },
+  });
+  try {
+    await panel.page.click('[data-page="knowledge"]');
+    await panel.page.waitForSelector("#knowledge-upload-button:not([disabled])");
+    await panel.page.selectOption("#knowledge-upload-collection", SECOND.id);
+    // Перерисовка: «Обновить» — то же, что опрос и перезагрузка после файла.
+    await panel.page.click("#reload-knowledge");
+    await panel.waitForRequest((item) => item.path === "/knowledge/collections" && panel.countTo("/knowledge/collections") >= 2);
+    await panel.page.waitForTimeout(100);
+    assert.equal(await panel.page.inputValue("#knowledge-upload-collection"), SECOND.id);
+
+    const uploads = [];
+    panel.page.on("request", (req) => {
+      if (req.method() === "POST" && req.url().includes("/knowledge/uploads")) uploads.push(req.url());
+    });
+    await panel.page.setInputFiles("#knowledge-file", [
+      { name: "первый.md", mimeType: "text/markdown", buffer: Buffer.from("# 1") },
+    ]);
+    await panel.page.waitForFunction(() => /Принято 1 из 1/.test(document.getElementById("knowledge-upload-progress")?.textContent || ""));
+    await panel.page.setInputFiles("#knowledge-file", [
+      { name: "второй.md", mimeType: "text/markdown", buffer: Buffer.from("# 2") },
+    ]);
+    await panel.page.waitForFunction(() => /второй|Принято 1 из 1/.test(document.getElementById("knowledge-upload-progress")?.textContent || ""));
+    await panel.page.waitForTimeout(200);
+    assert.equal(uploads.length, 2);
+    for (const url of uploads) assert.match(url, new RegExp(`collection_id=${SECOND.id}`), "файл ушёл не в выбранную коллекцию");
+  } finally {
+    await panel.close();
+  }
+});
+
+test("недоступное состояние индекса не прячет коллекции и документы", async () => {
+  const panel = await openPanel({ routes: { ...ROUTES, "/knowledge/index": { __status: 503, __body: { error: { code: "unavailable", message: "нет" } } } } });
+  try {
+    await panel.page.click('[data-page="knowledge"]');
+    await panel.page.waitForSelector("[data-document-row]");
+    assert.match(await panel.page.textContent("#knowledge-collections"), /FAQ/);
+    assert.match(await panel.page.textContent("#knowledge-index"), /недоступны/);
+  } finally {
+    await panel.close();
+  }
+});
+
+test("«Показать ещё» запрашивает следующую порцию документов", async () => {
+  const panel = await openPanel({ routes: { ...ROUTES, "/knowledge/documents": { documents: DOCS, total: 120 } } });
+  try {
+    await panel.page.click('[data-page="knowledge"]');
+    await panel.page.waitForSelector("#knowledge-more:not([hidden])");
+    await panel.page.click("#knowledge-more");
+    const request = await panel.waitForRequest((item) => item.path === "/knowledge/documents" && /limit=100/.test(item.search));
+    assert.ok(request);
+  } finally {
+    await panel.close();
+  }
+});

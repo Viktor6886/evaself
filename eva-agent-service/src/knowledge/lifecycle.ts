@@ -136,7 +136,7 @@ export class KnowledgeUploadService {
       );
       const total=await this.db.query<{total:string}>("SELECT count(*) AS total FROM knowledge_documents WHERE user_id=$1",[userId]);
       const uploads=await this.db.query(
-        `SELECT id,name,size_bytes,status,outcome,error_code,document_id,created_at
+        `SELECT id,name,size_bytes,status,outcome,error_code,created_at
            FROM knowledge_uploads
           WHERE user_id=$1
           ORDER BY created_at DESC
@@ -177,11 +177,17 @@ export class KnowledgeUploadService {
         deleted+=removed.length;
         if(!removed.length)break;
       }
+      // Сначала файл, потом строка: не удалился файл — строка остаётся, и
+      // следующая очистка его найдёт. Наоборот файл с личными данными
+      // остался бы без записи, по которой его можно найти.
       const failed=await this.db.query<{id:string}>(
-        "DELETE FROM knowledge_uploads WHERE user_id=$1 AND status IN ('failed','cancelled') RETURNING id",
+        "SELECT id FROM knowledge_uploads WHERE user_id=$1 AND status IN ('failed','cancelled')",
         [userId],
       );
-      for(const row of failed.rows)await rm(knowledgeUploadPath(this.root,owner,row.id),{force:true});
+      for(const row of failed.rows){
+        await rm(knowledgeUploadPath(this.root,owner,row.id),{force:true});
+        await this.db.query("DELETE FROM knowledge_uploads WHERE id=$1 AND user_id=$2 AND status IN ('failed','cancelled')",[row.id,userId]);
+      }
       return{deleted};
     });
   }
