@@ -5,7 +5,8 @@
 
 ## База знаний на Qdrant — K2: схема, версии эмбеддингов, Router — 2026-09-29
 
-Ветка: `claude/evaself-architecture-improvements-3d7d2s`. Статус: в работе.
+Ветка: `claude/evaself-architecture-improvements-3d7d2s`. Статус: выполнен,
+PR [#390](https://github.com/Viktor6886/evaself/pull/390) влит (6b85c1e).
 
 Второй batch плана `docs/knowledge-base.md`: всё, из чего индексация (K3)
 строит индекс, — в PostgreSQL; векторы — через LLM Router по версии.
@@ -22,7 +23,10 @@
 - [x] Панель: `GET/POST /api/admin/v1/knowledge/embeddings[/probe|/versions]`,
   удаление черновика; проверка модели — через агента
   (`/v1/knowledge/embeddings/probe`).
-- [ ] PR, ревью, CI, мерж.
+- [x] PR #390: независимое ревью — три «да»; исправлены запасной провайдер
+  (RESTRICT вместо SET NULL), номера версий (последовательность),
+  удаление без гонки, `embedMany` с нечисловой пачкой; замечание Codex —
+  неизвестное имя модели теперь 400, а не прежняя цель. CI зелёный.
 
 Настройки `knowledge.*` перенесены в K3: их первый потребитель — индексация.
 
