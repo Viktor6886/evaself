@@ -100,6 +100,7 @@ BullMQ не обрабатывает интерактивный ход и не �
 | Документы на сутки | Полная расшифровка и документы Евы (`work_documents`, миграция 089); инструменты `document_read`, `document_send` под `EVA_AUDIO_FILE_TRANSCRIPTS`; удаление по сроку — таймер агента, байты DOCX — из outbox после доставки | `src/documents/work-documents.ts`, `src/documents/document-tools.ts` |
 | Documents | Извлечение текста из поддерживаемых форматов | `src/knowledge/document-text.ts` |
 | Knowledge search | Tenant-scoped FTS/pgvector поиск по документам | `src/knowledge/search.ts` |
+| Версии эмбеддингов базы знаний | `knowledge_embedding_versions` (миграция 090): провайдер реестра Router, модель, размерность, запасной провайдер; роутер считает `eva/embeddings@v<N>` с переходом на запасного, `LlmRouterClient.embedMany` — пачками; «Проверить модель» — `/embeddings/probe` через агента; панель заводит версию только после удачной проверки | `src/router/embedding-service.ts`, `src/router/embedding-versions.ts`, `src/admin/knowledge-embedding-service.ts`, `src/admin/knowledge-routes.ts` |
 | Векторный индекс Qdrant | Производный индекс базы знаний (инвариант 14): коллекции `eva_knowledge_{private,global}_v<N>` за alias, личная — арендатор `user_id`; фильтр владельца строит только `KnowledgeVectorStore`; клиент с таймаутом и кодами отказа, метрики `eva_qdrant_*`. Пока не подключён к поиску: поиск — PostgreSQL (план K2–K8) | `src/knowledge/qdrant-client.ts`, `src/knowledge/vector-store.ts`, `docs/knowledge-base.md` |
 
 ## Продуктовые сервисы

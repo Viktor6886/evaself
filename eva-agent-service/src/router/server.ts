@@ -14,6 +14,8 @@ import Fastify from "fastify";
 import type { FastifyInstance, FastifyPluginAsync, FastifyReply } from "fastify";
 
 import type { Logger } from "../logger.js";
+import { EmbeddingError } from "./embeddings.js";
+import { EmbeddingRequestError, type EmbeddingService } from "./embedding-service.js";
 import { LlmRouter, NoProviderAvailable } from "./router.js";
 import { containsImage, parseContent, pickProviderState } from "./content.js";
 import { extractRoutingMarker, type RoutingMarkerClaims } from "./routing-marker.js";
@@ -30,8 +32,11 @@ export interface RouterServerInput {
   store: RouterStore;
   logger: Logger;
   apiKey: string;
-  embed?: (texts: string[]) => Promise<number[][]>;
+  embeddings?: EmbeddingService;
 }
+
+/** Больше за один запрос не принимается: пачку дробит вызывающий. */
+const EMBEDDING_BATCH_LIMIT = 64;
 
 
 export function createRouterServer(input: RouterServerInput): FastifyInstance {
@@ -118,13 +123,68 @@ export function createRouterServer(input: RouterServerInput): FastifyInstance {
     };
   });
 
+  /**
+   * Векторы: `model` — `eva/embeddings` (прежняя цель) или
+   * `eva/embeddings@v<N>` (версия базы знаний, docs/knowledge-base.md).
+   * Отказ провайдера — 502 с кодом, без текста его ответа.
+   */
   app.post("/embeddings", async (request, reply) => {
-    if (!input.embed) return reply.code(503).send({ error: { message: "embeddings route is not configured", type: "service_unavailable" } });
-    const body = request.body as { input?: unknown };
+    const embeddings = input.embeddings;
+    if (!embeddings) return reply.code(503).send({ error: { message: "embeddings route is not configured", type: "service_unavailable" } });
+    const body = request.body as { input?: unknown; model?: unknown };
     const texts = typeof body?.input === "string" ? [body.input] : Array.isArray(body?.input) && body.input.every(x => typeof x === "string") ? body.input as string[] : null;
-    if (!texts || texts.length > 64) return reply.code(400).send({ error: { message: "input must be a string or up to 64 strings", type: "invalid_request_error" } });
-    const vectors = await input.embed(texts);
-    return { object:"list", data:vectors.map((embedding,index)=>({object:"embedding",index,embedding})) };
+    if (!texts || texts.length > EMBEDDING_BATCH_LIMIT) {
+      return reply.code(400).send({ error: { message: `input must be a string or up to ${EMBEDDING_BATCH_LIMIT} strings`, type: "invalid_request_error" } });
+    }
+    try {
+      const result = await embeddings.embed(body.model, texts);
+      return {
+        object: "list",
+        model: result.model,
+        dimension: result.dimension,
+        fallback: result.fallback,
+        data: result.vectors.map((embedding, index) => ({ object: "embedding", index, embedding })),
+      };
+    } catch (error) {
+      if (error instanceof EmbeddingRequestError) {
+        const status = error.code === "embedding_model_unknown" ? 400 : error.code === "embedding_version_unknown" ? 404 : 409;
+        return reply.code(status).send({ error: { message: error.message, type: error.code } });
+      }
+      if (error instanceof EmbeddingError) {
+        return reply.code(502).send({ error: { message: error.message, type: error.code } });
+      }
+      throw error;
+    }
+  });
+
+  /**
+   * «Проверить модель»: вектор фиксированной строки, размерность и
+   * задержка; с `compare` — то же ли пространство у второго провайдера.
+   * Отказ провайдера — не ошибка запроса, а ответ проверки.
+   */
+  app.post("/embeddings/probe", async (request, reply) => {
+    const embeddings = input.embeddings;
+    if (!embeddings) return reply.code(503).send({ error: { message: "embeddings route is not configured", type: "service_unavailable" } });
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const text = (value: unknown, max: number): string | null =>
+      typeof value === "string" && value.trim() && value.length <= max ? value.trim() : null;
+    const providerId = text(body.provider_id, 64);
+    const model = text(body.model, 200);
+    const dimension = body.dimension === undefined || body.dimension === null ? null : Number(body.dimension);
+    const compare = body.compare && typeof body.compare === "object" ? body.compare as Record<string, unknown> : null;
+    const compareProvider = compare ? text(compare.provider_id, 64) : null;
+    const compareModel = compare ? text(compare.model, 200) : null;
+    if (!providerId || !model || (dimension !== null && (!Number.isInteger(dimension) || dimension < 8 || dimension > 8192))
+      || (compare && (!compareProvider || !compareModel))) {
+      return reply.code(400).send({ error: { message: "provider_id, model, dimension (8–8192) и compare{provider_id, model} заданы неверно", type: "invalid_request_error" } });
+    }
+    return await embeddings.probe({
+      providerId,
+      model,
+      dimension,
+      requestDimensions: body.request_dimensions === true,
+      compare: compareProvider && compareModel ? { providerId: compareProvider, model: compareModel } : null,
+    });
   });
 
   /**

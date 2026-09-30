@@ -23,6 +23,8 @@ import { registerCrudRoutes } from "./crud-routes.js";
 import { registerPanelRoutes } from "./panel-routes.js";
 import type { TelegramBotApiModeService } from "./telegram-bot-api-mode.js";
 import { registerTelegramBotApiRoutes } from "./telegram-bot-api-routes.js";
+import type { KnowledgeEmbeddingService } from "./knowledge-embedding-service.js";
+import { registerKnowledgeRoutes } from "./knowledge-routes.js";
 import type { AdminAgentService } from "./agent-admin-service.js";
 import type { SubscriptionAdminService } from "./subscription-service.js";
 import type { PersonaAdminService } from "./persona-admin-service.js";
@@ -98,6 +100,7 @@ export interface AdminServerServices {
   telegramTokens?: TelegramTokenService;
   /** Облачный или свой сервер Bot API (раздел «Распознавание речи»). */
   telegramBotApi?: TelegramBotApiModeService;
+  knowledge?: KnowledgeEmbeddingService;
   tariffs?: TariffService;
   /**
    * Возврат звёзд. Отсутствует — маршрут отвечает отказом, а не делает
@@ -546,6 +549,7 @@ export function buildAdminServer(services: AdminServerServices): FastifyInstance
     });
   }
 
+  if (services.knowledge) registerKnowledgeRoutes(app, services.knowledge);
   if (services.telegramBotApi) {
     registerTelegramBotApiRoutes(app, services.telegramBotApi);
   }
