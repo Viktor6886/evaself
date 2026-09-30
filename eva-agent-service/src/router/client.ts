@@ -73,7 +73,8 @@ export class LlmRouterClient {
    */
   async embedMany(texts: readonly string[], options: EmbedManyOptions): Promise<number[][]> {
     if (!Number.isSafeInteger(options.version) || options.version < 1) throw new Error("embedding_version_invalid");
-    const size = Math.min(Math.max(Math.floor(options.batchSize ?? 32), 1), ROUTER_EMBEDDING_BATCH_LIMIT);
+    const requested = options.batchSize !== undefined && Number.isFinite(options.batchSize) ? Math.floor(options.batchSize) : 32;
+    const size = Math.min(Math.max(requested, 1), ROUTER_EMBEDDING_BATCH_LIMIT);
     const vectors: number[][] = [];
     for (let start = 0; start < texts.length; start += size) {
       const batch = texts.slice(start, start + size);
@@ -96,6 +97,9 @@ export class LlmRouterClient {
         recordKnowledgeStage("embedding", Date.now() - started, failed);
       }
     }
+    // Последняя граница: вектор на каждый текст, иначе порядок уже не
+    // сопоставить с фрагментами.
+    if (vectors.length !== texts.length) throw new Error("embedding_incomplete");
     return vectors;
   }
 

@@ -42,6 +42,7 @@ ALTER TABLE knowledge_documents
     DROP COLUMN IF EXISTS index_status,
     DROP COLUMN IF EXISTS collection_id;
 
+DROP SEQUENCE IF EXISTS knowledge_embedding_version_seq;
 DROP TABLE IF EXISTS knowledge_embedding_versions;
 DROP TABLE IF EXISTS knowledge_collections;
 

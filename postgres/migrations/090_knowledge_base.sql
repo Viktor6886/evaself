@@ -57,7 +57,9 @@ CREATE TABLE IF NOT EXISTS knowledge_embedding_versions (
     request_dimensions   boolean     NOT NULL DEFAULT false,
     -- Запасной провайдер обязан давать то же пространство: ту же модель у
     -- другого поставщика. Совместимость проверяет «Проверить модель».
-    fallback_provider_id uuid        REFERENCES llm_providers (id) ON DELETE SET NULL,
+    -- RESTRICT, а не SET NULL: запасной задаётся вместе с моделью (CHECK
+    -- ниже), и молча снять его значило бы оставить версию без резерва.
+    fallback_provider_id uuid        REFERENCES llm_providers (id) ON DELETE RESTRICT,
     fallback_model       text        CHECK (fallback_model IS NULL OR length(fallback_model) BETWEEN 1 AND 200),
     -- Граф HNSW фиксируется при построении версии («Дополнительно»).
     hnsw_m               integer     NOT NULL DEFAULT 16 CHECK (hnsw_m BETWEEN 4 AND 128),
@@ -81,6 +83,12 @@ CREATE TABLE IF NOT EXISTS knowledge_embedding_versions (
 
 CREATE UNIQUE INDEX IF NOT EXISTS knowledge_embedding_versions_one_active
     ON knowledge_embedding_versions ((true)) WHERE status = 'active';
+
+-- Номера версий не переиспользуются: версия — имя коллекций Qdrant
+-- (`eva_knowledge_*_v<N>`) и ключ кэша в роутере, и удалённый черновик не
+-- должен отдать свой номер другой модели. `max(version) + 1` отдал бы.
+CREATE SEQUENCE IF NOT EXISTS knowledge_embedding_version_seq
+    OWNED BY knowledge_embedding_versions.version;
 
 -- ---------------------------------------------------------------------
 -- Документ: коллекция общей базы и состояние векторного индекса.

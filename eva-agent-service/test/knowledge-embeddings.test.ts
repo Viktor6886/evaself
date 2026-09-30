@@ -101,6 +101,7 @@ interface VersionRow extends Record<string, unknown> { version: number; status: 
 function adminService(probe: Record<string, unknown>) {
   const versions: VersionRow[] = [];
   const probes: unknown[] = [];
+  let sequence = 0;
   const statements: string[] = [];
   const providers = [
     { id: "p1", name: "OpenRouter", model: "openai/gpt-5" },
@@ -110,7 +111,9 @@ function adminService(probe: Record<string, unknown>) {
     statements.push(sql.replace(/\s+/gu, " ").trim());
     if (/FROM llm_providers/u.test(sql)) return { rows: providers };
     if (/INSERT INTO knowledge_embedding_versions/u.test(sql)) {
-      const version = versions.reduce((max, row) => Math.max(max, row.version), 0) + 1;
+      assert.match(sql, /nextval\('knowledge_embedding_version_seq'\)/u);
+      sequence += 1;
+      const version = sequence;
       versions.push({
         version, provider_id: params[0], provider_name: "OpenRouter", model: params[1], dimension: params[2], distance: params[3],
         request_dimensions: params[4], fallback_provider_id: params[5], fallback_provider_name: params[5] ? "Jina" : null,
@@ -124,13 +127,14 @@ function adminService(probe: Record<string, unknown>) {
     }
     if (/DELETE FROM knowledge_embedding_versions/u.test(sql)) {
       const index = versions.findIndex((row) => row.version === params[0] && ["draft", "failed"].includes(row.status));
-      if (index >= 0) versions.splice(index, 1);
-      return { rows: [] };
+      if (index < 0) return { rows: [] };
+      versions.splice(index, 1);
+      return { rows: [{ version: params[0] }] };
     }
     if (/FROM knowledge_embedding_versions v/u.test(sql)) return { rows: [...versions].sort((a, b) => b.version - a.version) };
     return { rows: [] };
   };
-  const pool = { query, connect: async () => ({ query, release() {} }) };
+  const pool = { query };
   const agent = { request: async (path: string, init?: RequestInit) => { probes.push({ path, body: JSON.parse(String(init?.body)) }); return probe; } };
   return { service: new KnowledgeEmbeddingService(pool as never, agent as never), versions, probes, statements };
 }
@@ -194,12 +198,14 @@ test("провайдер вне реестра, неверная модель и
   assert.equal(probes.length, 0);
 });
 
-test("номер версии берётся под блокировкой таблицы", async () => {
+test("номер версии — из последовательности: номер удалённого черновика не достаётся новой модели", async () => {
   const { service, statements } = adminService({ ok: true, dimension: 8, latency_ms: 1 });
-  await service.createVersion({ provider_id: "p1", model: "m" });
-  const lock = statements.findIndex((sql) => sql.startsWith("LOCK TABLE knowledge_embedding_versions"));
-  const insert = statements.findIndex((sql) => sql.startsWith("INSERT INTO knowledge_embedding_versions"));
-  assert.ok(lock >= 0 && lock < insert);
+  const first = await service.createVersion({ provider_id: "p1", model: "m" });
+  await service.deleteVersion(String(first.version));
+  const second = await service.createVersion({ provider_id: "p1", model: "other" });
+  assert.equal(first.version, 1);
+  assert.equal(second.version, 2);
+  assert.ok(statements.every((sql) => !/max\(version\)/u.test(sql)));
 });
 
 test("удалить можно только черновик или неудавшуюся версию", async () => {
@@ -224,4 +230,28 @@ test("обзор: активная версия и провайдеры без �
     { id: "p2", name: "Jina", chat_model: "jina-chat" },
   ]);
   assert.doesNotMatch(JSON.stringify(overview), /api_key|base_url/u);
+});
+
+test("embedMany: нечисловой размер пачки — пачка по умолчанию, а не пустой ответ", async () => {
+  const { calls, client } = router((body) => answer(body.input, 4));
+  const vectors = await client.embedMany(["a", "b", "c"], { version: 1, dimension: 4, batchSize: Number.NaN });
+  assert.equal(vectors.length, 3);
+  assert.equal(calls.length, 1);
+});
+
+test("маршруты панели объявляют роли; изменение версий — под sudo", async () => {
+  const { registerKnowledgeRoutes: registerAdminRoutes } = await import("../dist/admin/knowledge-routes.js");
+  const declared = new Map<string, { roles?: string[]; sudoScope?: string }>();
+  const app = Fastify();
+  app.addHook("onRoute", (route) => {
+    declared.set(`${String(route.method)} ${route.url}`, (route.config ?? {}) as { roles?: string[]; sudoScope?: string });
+  });
+  registerAdminRoutes(app, {} as never);
+  await app.ready();
+  assert.deepEqual(declared.get("GET /api/admin/v1/knowledge/embeddings")?.roles, ["owner", "admin", "operator", "viewer"]);
+  assert.deepEqual(declared.get("POST /api/admin/v1/knowledge/embeddings/probe")?.roles, ["owner", "admin"]);
+  for (const key of ["POST /api/admin/v1/knowledge/embeddings/versions", "DELETE /api/admin/v1/knowledge/embeddings/versions/:version"]) {
+    assert.deepEqual(declared.get(key)?.roles, ["owner", "admin"], key);
+    assert.equal(declared.get(key)?.sudoScope, "settings:write", key);
+  }
 });

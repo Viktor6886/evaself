@@ -78,7 +78,7 @@ function integer(value: unknown, field: string, min: number, max: number, fallba
 
 export class KnowledgeEmbeddingService {
   constructor(
-    private readonly pool: Pick<pg.Pool, "query" | "connect">,
+    private readonly pool: Pick<pg.Pool, "query">,
     private readonly agent: Pick<InternalAgentClient, "request">,
   ) {}
 
@@ -132,35 +132,24 @@ export class KnowledgeEmbeddingService {
       }
     }
 
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      // Номер версии — следующий по порядку; два одновременных создания
-      // не должны получить один номер.
-      await client.query("LOCK TABLE knowledge_embedding_versions IN SHARE ROW EXCLUSIVE MODE");
-      const { rows } = await client.query<{ version: number }>(
-        `INSERT INTO knowledge_embedding_versions
-           (version, provider_id, model, dimension, distance, request_dimensions,
-            fallback_provider_id, fallback_model, hnsw_m, hnsw_ef_construct, on_disk, status)
-         SELECT COALESCE(max(version), 0) + 1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'draft'
-           FROM knowledge_embedding_versions
-         RETURNING version`,
-        [
-          probeInput.provider_id, probeInput.model, dimension, distance, probeInput.request_dimensions,
-          probeInput.compare?.provider_id ?? null, probeInput.compare?.model ?? null,
-          hnswM, efConstruct, onDisk,
-        ],
-      );
-      await client.query("COMMIT");
-      const created = (await this.versions()).find((row) => row.version === rows[0]!.version);
-      if (!created) throw adminNotFound("Версия эмбеддингов не найдена");
-      return created;
-    } catch (error) {
-      await client.query("ROLLBACK").catch(() => undefined);
-      throw error;
-    } finally {
-      client.release();
-    }
+    // Номер — из последовательности: одновременные создания получают
+    // разные номера, а номер удалённого черновика не достаётся другой
+    // модели (он — имя коллекций Qdrant и ключ кэша в роутере).
+    const { rows } = await this.pool.query<{ version: number }>(
+      `INSERT INTO knowledge_embedding_versions
+         (version, provider_id, model, dimension, distance, request_dimensions,
+          fallback_provider_id, fallback_model, hnsw_m, hnsw_ef_construct, on_disk, status)
+       VALUES (nextval('knowledge_embedding_version_seq'), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'draft')
+       RETURNING version`,
+      [
+        probeInput.provider_id, probeInput.model, dimension, distance, probeInput.request_dimensions,
+        probeInput.compare?.provider_id ?? null, probeInput.compare?.model ?? null,
+        hnswM, efConstruct, onDisk,
+      ],
+    );
+    const created = (await this.versions()).find((row) => row.version === Number(rows[0]!.version));
+    if (!created) throw adminNotFound("Версия эмбеддингов не найдена");
+    return created;
   }
 
   /**
@@ -171,19 +160,19 @@ export class KnowledgeEmbeddingService {
   async deleteVersion(value: unknown): Promise<{ deleted: number }> {
     const version = integer(value, "version", 1, 999_999, null);
     if (version === null) throw adminBadRequest("Номер версии обязателен", { field: "version" });
+    // Условие статуса — в самом DELETE: версия, которую между проверкой и
+    // удалением успели начать строить, не удаляется.
+    const deleted = await this.pool.query<{ version: number }>(
+      "DELETE FROM knowledge_embedding_versions WHERE version = $1 AND status IN ('draft', 'failed') RETURNING version",
+      [version],
+    );
+    if (deleted.rows[0]) return { deleted: version };
     const { rows } = await this.pool.query<{ status: string }>(
       "SELECT status FROM knowledge_embedding_versions WHERE version = $1",
       [version],
     );
     if (!rows[0]) throw adminNotFound("Версия эмбеддингов не найдена");
-    if (rows[0].status !== "draft" && rows[0].status !== "failed") {
-      throw adminConflict("Удалить можно только версию-черновик или неудавшуюся: у остальных есть индекс", { status: rows[0].status });
-    }
-    await this.pool.query(
-      "DELETE FROM knowledge_embedding_versions WHERE version = $1 AND status IN ('draft', 'failed')",
-      [version],
-    );
-    return { deleted: version };
+    throw adminConflict("Удалить можно только версию-черновик или неудавшуюся: у остальных есть индекс", { status: rows[0].status });
   }
 
   private async probeInput(body: unknown): Promise<ProbeInput> {

@@ -85,6 +85,29 @@ BEGIN
   END;
 END $$;
 
+-- Запасного провайдера версии тоже не удалить: версия без резерва,
+-- снятого молча, — это отказ поиска при первом сбое основного.
+INSERT INTO knowledge_embedding_versions (version, provider_id, model, dimension, fallback_provider_id, fallback_model)
+VALUES (4, '00000000-0000-0000-0000-00000000e001', 'bge-m3', 1024, '00000000-0000-0000-0000-00000000e002', 'baai/bge-m3');
+
+DO $$
+BEGIN
+  BEGIN
+    DELETE FROM llm_providers WHERE id = '00000000-0000-0000-0000-00000000e002';
+    RAISE EXCEPTION 'удалился запасной провайдер версии';
+  EXCEPTION WHEN foreign_key_violation THEN NULL;
+  END;
+END $$;
+
+-- Номер версии выдаёт последовательность: выданный не повторяется.
+DO $$
+DECLARE first bigint; second bigint;
+BEGIN
+  first := nextval('knowledge_embedding_version_seq');
+  second := nextval('knowledge_embedding_version_seq');
+  IF second <= first THEN RAISE EXCEPTION 'последовательность версий не растёт'; END IF;
+END $$;
+
 -- Провайдера, на котором стоит индекс, не удалить.
 DO $$
 BEGIN
