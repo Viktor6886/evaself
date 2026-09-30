@@ -118,6 +118,37 @@ test("fail-safe понижения сохраняет и имя, и квоты �
   assert.equal(snapshot?.values[4], 200);
 });
 
+test("равные квоты смешиваются в ту же квоту при любом остатке дней", async (t) => {
+  // Остаток «10 дней без 7 мс» давал 200.00000000000003, и ceil выдавал
+  // 201: тест выше падал, когда между его Date.now() и расчётом
+  // проходило именно столько миллисекунд. Часы здесь стоят, и остаток
+  // задан точно.
+  t.mock.timers.enable({ apis: ["Date"], now: Date.UTC(2026, 8, 30, 3, 5, 0) });
+  for (const elapsedMs of [0, 7, 12, 14, 24, 30]) {
+    const end = new Date(Date.now() + 10 * 86_400_000 - elapsedMs);
+    const calls: Array<{ sql: string; values: unknown[] }> = [];
+    const client = {
+      async query(sql: string, values: unknown[] = []) {
+        calls.push({ sql, values });
+        if (sql.includes("INSERT INTO payments")) return { rows: [{ id: `pay-${elapsedMs}` }] };
+        if (sql.includes("FROM subscriptions")) return { rows: [{
+          id: "sub-max", plan: "max", status: "active", source: "payment", current_period_end: end,
+        }] };
+        if (sql.includes("FROM quotas")) return { rows: [{ metric: "messages", period: "day", limit_value: "200" }] };
+        if (sql.includes("INSERT INTO subscriptions")) return { rows: [{ id: "sub-next" }] };
+        return { rows: [] };
+      },
+    };
+    await grantPaidAccess(client as never, {
+      userId: "7", provider: "telegram_stars", paymentId: `renew-${elapsedMs}`, raw: {},
+    }, {
+      plan: "max", amountMinor: 700, durationDays: 30, currency: "XTR",
+    }, { subscriptionLifecycleEnabled: true });
+    const snapshot = calls.find((call) => call.sql.includes("INSERT INTO subscription_quota_limits"));
+    assert.equal(snapshot?.values[4], 200, `остаток 10 дней без ${elapsedMs} мс`);
+  }
+});
+
 test("платный апгрейд не превращает прежний бессрочный тариф в новый бессрочный", async () => {
   const calls: Array<{ sql: string; values: unknown[] }> = [];
   const client = {
