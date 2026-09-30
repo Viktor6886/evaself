@@ -318,7 +318,10 @@ export class QdrantClient {
     );
     const map = new Map<string, number>();
     for (const hit of result?.hits ?? []) {
-      if ((typeof hit.value === "string" || typeof hit.value === "number") && typeof hit.count === "number") {
+      // Qdrant 1.19 после удаления точек ещё отдаёт значение со счётом 0.
+      // Для сверки это не документ в индексе: иначе удалённый документ
+      // находился бы сиротой на каждом проходе.
+      if ((typeof hit.value === "string" || typeof hit.value === "number") && typeof hit.count === "number" && hit.count > 0) {
         map.set(String(hit.value), hit.count);
       }
     }
@@ -350,6 +353,29 @@ export class QdrantClient {
         : []);
     const next = result?.next_page_offset;
     return { points, next: typeof next === "number" || typeof next === "string" ? next : null };
+  }
+
+  /**
+   * Векторы точек по id. Новая версия документа большей частью повторяет
+   * прежнюю, и векторы неизменённых фрагментов берутся отсюда, а не
+   * считаются у провайдера заново. Точек, которых нет, в ответе нет.
+   */
+  async retrieveVectors(collection: string, ids: Array<number | string>, signal?: AbortSignal): Promise<Map<string, number[]>> {
+    const vectors = new Map<string, number[]>();
+    if (!ids.length) return vectors;
+    const result = await this.request<Array<{ id?: unknown; vector?: unknown }>>(
+      "count",
+      `/collections/${encodeURIComponent(collection)}/points`,
+      { method: "POST", body: { ids, with_payload: false, with_vector: true }, signal },
+    );
+    for (const point of Array.isArray(result) ? result : []) {
+      const vector = point.vector;
+      if ((typeof point.id === "number" || typeof point.id === "string")
+        && Array.isArray(vector) && vector.length > 0 && vector.every((value) => typeof value === "number" && Number.isFinite(value))) {
+        vectors.set(String(point.id), vector as number[]);
+      }
+    }
+    return vectors;
   }
 
   /** Снимок коллекции внутри тома Qdrant: быстрое восстановление, не замена перестройки. */

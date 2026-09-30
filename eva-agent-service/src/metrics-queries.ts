@@ -186,3 +186,43 @@ export async function deliveryStats(db: Database): Promise<{
     return empty;
   }
 }
+
+/**
+ * Индексация базы знаний: сколько документов в каком состоянии индекса и
+ * как давно ждёт самый старый из очереди (`knowledge_indexing_lag`).
+ * Растущее отставание при пустой очереди заданий — повод для сверки;
+ * рост `failed` — провайдер эмбеддингов или Qdrant. Только счётчики, без
+ * названий документов и владельцев.
+ */
+export async function knowledgeIndexStats(db: Database): Promise<{
+  byState: Record<string, number>;
+  lagSeconds: number;
+}> {
+  const empty = { byState: {}, lagSeconds: 0 };
+  try {
+    return await db.withSystemScope(
+      "metrics.knowledge",
+      async () => {
+        const { rows } = await db.query<{ index_status: string; total: string; lag: string }>(
+          `SELECT index_status, count(*) AS total,
+                  COALESCE(EXTRACT(EPOCH FROM now() - min(updated_at)
+                    FILTER (WHERE index_status IN ('pending', 'indexing'))), 0) AS lag
+             FROM knowledge_documents
+             -- tenant: system — счётчики индекса по всем базам, ни одной строки данных наружу
+            WHERE status = 'ready' AND (user_id IS NOT NULL OR product_verified)
+            GROUP BY index_status`,
+        );
+        const byState: Record<string, number> = { pending: 0, indexing: 0, ready: 0, failed: 0 };
+        let lagSeconds = 0;
+        for (const row of rows) {
+          byState[row.index_status] = number(row.total);
+          lagSeconds = Math.max(lagSeconds, number(row.lag));
+        }
+        return { byState, lagSeconds };
+      },
+      { crossUser: true },
+    );
+  } catch {
+    return empty;
+  }
+}

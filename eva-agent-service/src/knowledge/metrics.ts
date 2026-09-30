@@ -42,6 +42,42 @@ export function recordKnowledgeStage(stage: KnowledgeTimedStage, ms: number, fai
   add(stages.get(stage)!, ms, failed);
 }
 
+/** Точек в коллекциях по области и версии — по последней сверке. */
+const points = new Map<string, { scope: string; version: number; value: number }>();
+/** Доля построенного индекса версии — по последней порции перестройки. */
+const rebuild = new Map<number, number>();
+/** Итоги сверок: что нашлось и что с этим сделано. */
+const reconcile = { runs: 0, foreign: 0, scheduled: 0, orphans: 0, rebuilds: 0, files: 0 };
+
+export function setKnowledgePoints(scope: "private" | "global", version: number, value: number): void {
+  points.set(`${scope}:${version}`, { scope, version, value });
+}
+
+export function setKnowledgeRebuildProgress(version: number, ratio: number): void {
+  rebuild.set(version, Math.max(0, Math.min(1, ratio)));
+}
+
+export function recordKnowledgeReconcile(report: { foreign: number; scheduled: number; orphans: number; rebuilds: number; files: number }): void {
+  reconcile.runs += 1;
+  reconcile.foreign += report.foreign;
+  reconcile.scheduled += report.scheduled;
+  reconcile.orphans += report.orphans;
+  reconcile.rebuilds += report.rebuilds;
+  reconcile.files += report.files;
+}
+
+export function knowledgeIndexMetrics(): {
+  points: Array<{ scope: string; version: number; value: number }>;
+  rebuild: Array<{ version: number; value: number }>;
+  reconcile: typeof reconcile;
+} {
+  return {
+    points: [...points.values()],
+    rebuild: [...rebuild].map(([version, value]) => ({ version, value })),
+    reconcile: { ...reconcile },
+  };
+}
+
 export interface KnowledgeTimingRow extends Timing {
   name: string;
 }
@@ -56,4 +92,7 @@ export function knowledgeMetrics(): { qdrant: KnowledgeTimingRow[]; stages: Know
 /** Только для тестов: счётчики модуля живут всё время процесса. */
 export function resetKnowledgeMetrics(): void {
   for (const timing of [...qdrant.values(), ...stages.values()]) Object.assign(timing, empty());
+  points.clear();
+  rebuild.clear();
+  Object.assign(reconcile, { runs: 0, foreign: 0, scheduled: 0, orphans: 0, rebuilds: 0, files: 0 });
 }

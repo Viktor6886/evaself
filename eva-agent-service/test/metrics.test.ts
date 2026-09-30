@@ -259,3 +259,30 @@ test("база знаний в /metrics: вызовы Qdrant и этапы — �
   assert.match(text, /eva_knowledge_stage_errors_total\{stage="rerank"\} 0/);
   resetKnowledgeMetrics();
 });
+
+test("индекс базы знаний в /metrics: состояния, отставание, точки, прогресс, сверки — числами, без документов", async () => {
+  const { recordKnowledgeReconcile, resetKnowledgeMetrics, setKnowledgePoints, setKnowledgeRebuildProgress } = await import("../dist/knowledge/metrics.js");
+  resetKnowledgeMetrics();
+  setKnowledgePoints("private", 2, 1234);
+  setKnowledgePoints("global", 2, 56);
+  setKnowledgeRebuildProgress(3, 0.25);
+  recordKnowledgeReconcile({ foreign: 1, scheduled: 4, orphans: 2, rebuilds: 0, files: 3 });
+  const text = await collector(async (sql) => /GROUP BY index_status/u.test(sql)
+    ? { rows: [
+      { index_status: "ready", total: "10", lag: "0" },
+      { index_status: "pending", total: "2", lag: "125.7" },
+      { index_status: "failed", total: "1", lag: "0" },
+    ] }
+    : await CANNED(sql)).render();
+  assert.match(text, /eva_knowledge_documents\{state="ready"\} 10/);
+  assert.match(text, /eva_knowledge_documents\{state="pending"\} 2/);
+  assert.match(text, /eva_knowledge_documents\{state="indexing"\} 0/);
+  assert.match(text, /eva_knowledge_documents\{state="failed"\} 1/);
+  assert.match(text, /eva_knowledge_indexing_lag_seconds 126/);
+  assert.match(text, /eva_knowledge_points\{scope="private",version="v2"\} 1234/);
+  assert.match(text, /eva_knowledge_rebuild_progress\{version="v3"\} 0.25/);
+  assert.match(text, /eva_knowledge_reconcile_total\{outcome="runs"\} 1/);
+  assert.match(text, /eva_knowledge_reconcile_total\{outcome="orphans"\} 2/);
+  assert.match(text, /# TYPE eva_knowledge_reconcile_total counter/);
+  resetKnowledgeMetrics();
+});

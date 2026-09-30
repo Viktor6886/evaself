@@ -81,6 +81,39 @@ export interface JobOutboxOptions {
   pollMs?: number;
 }
 
+/**
+ * Запись намерения без публикатора: её делают и процессы, которые
+ * очередей не держат (admin-api ставит перестройку индекса и удаление
+ * документов общей базы). Публикует задание публикатор агента — он
+ * читает `job_outbox`, кто бы строку ни записал.
+ */
+export async function recordJobIntent(client: JobOutboxClient, intent: JobIntent): Promise<JobRecordResult> {
+  const envelope = buildJobEnvelope(intent);
+  const { rows } = await client.query<{ idempotency_key: string; inserted: boolean }>(
+    `INSERT INTO job_outbox (
+       idempotency_key, queue, job_type, schema_version, user_id,
+       envelope, dedup_key, trace_id, available_at
+     ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, COALESCE($9::timestamptz, now()))
+     ON CONFLICT (idempotency_key) DO NOTHING
+     RETURNING idempotency_key, true AS inserted`,
+    [
+      envelope.idempotencyKey,
+      envelope.queue,
+      envelope.type,
+      envelope.schemaVersion,
+      envelope.userId,
+      JSON.stringify(envelope),
+      envelope.dedupKey,
+      envelope.traceId,
+      intent.availableAt ? intent.availableAt.toISOString() : null,
+    ],
+  );
+  return {
+    idempotencyKey: envelope.idempotencyKey,
+    duplicate: rows.length === 0,
+  };
+}
+
 export class JobOutbox {
   private readonly batchSize: number;
   private readonly leaseSeconds: number;
@@ -149,30 +182,7 @@ export class JobOutbox {
    * транзакцию. Запись без объявленной области отклонит граница.
    */
   async record(client: JobOutboxClient, intent: JobIntent): Promise<JobRecordResult> {
-    const envelope = buildJobEnvelope(intent);
-    const { rows } = await client.query<{ idempotency_key: string; inserted: boolean }>(
-      `INSERT INTO job_outbox (
-         idempotency_key, queue, job_type, schema_version, user_id,
-         envelope, dedup_key, trace_id, available_at
-       ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, COALESCE($9::timestamptz, now()))
-       ON CONFLICT (idempotency_key) DO NOTHING
-       RETURNING idempotency_key, true AS inserted`,
-      [
-        envelope.idempotencyKey,
-        envelope.queue,
-        envelope.type,
-        envelope.schemaVersion,
-        envelope.userId,
-        JSON.stringify(envelope),
-        envelope.dedupKey,
-        envelope.traceId,
-        intent.availableAt ? intent.availableAt.toISOString() : null,
-      ],
-    );
-    return {
-      idempotencyKey: envelope.idempotencyKey,
-      duplicate: rows.length === 0,
-    };
+    return await recordJobIntent(client, intent);
   }
 
   /**

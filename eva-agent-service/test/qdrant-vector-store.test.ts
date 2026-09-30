@@ -337,3 +337,42 @@ test("отмена хода во время вызова — qdrant_cancelled, �
     (error: QdrantError) => error.code === "qdrant_cancelled",
   );
 });
+
+test("точки по документам: значение со счётом 0 (удалённый документ) не считается документом индекса", async () => {
+  const { store } = fakeQdrant({
+    "POST /collections/eva_knowledge_private_v1/facet": () => ({
+      result: { hits: [{ value: "doc-a", count: 3 }, { value: "doc-deleted", count: 0 }] },
+    }),
+  });
+  assert.deepEqual(Object.fromEntries(await store.documentPointCounts("private", 1, 100)), { "doc-a": 3 });
+});
+
+test("удаление документа без строки в PostgreSQL: владелец личной базы входит в фильтр", async () => {
+  const { calls, store } = fakeQdrant({ "POST /collections/eva_knowledge_private_v1/points/delete": () => ({ result: {} }) });
+  await store.deleteDocuments("private", 1, ["doc-a"], 7);
+  assert.deepEqual(calls[0]!.body, {
+    filter: { must: [{ key: "document_id", match: { any: ["doc-a"] } }, { key: "user_id", match: { value: "7" } }] },
+  });
+  await assert.rejects(() => store.deleteDocuments("global", 1, ["doc-a"], 7), /knowledge_scope_invalid/u);
+  await assert.rejects(() => store.deleteDocuments("private", 1, ["doc-a"], 0), /knowledge_user_invalid/u);
+});
+
+test("векторы по id: только найденные и только числовые; чужая версия снимается по фильтру", async () => {
+  const { calls, store } = fakeQdrant({
+    "POST /collections/eva_knowledge_private_v1/points": () => ({
+      result: [{ id: 11, vector: [0.1, 0.2, 0.3] }, { id: 12, vector: { named: [1] } }, { id: 13, vector: [0.1, "x"] }],
+    }),
+    "POST /collections/eva_knowledge_global_v2/points/count": () => ({ result: { count: 2 } }),
+    "POST /collections/eva_knowledge_global_v2/points/delete": () => ({ result: {} }),
+  });
+  const vectors = await store.vectorsOf("private", 1, [11, 12, 13, 14]);
+  assert.deepEqual([...vectors], [[11, [0.1, 0.2, 0.3]]]);
+  assert.deepEqual(calls[0]!.body, { ids: [11, 12, 13, 14], with_payload: false, with_vector: true });
+
+  assert.equal(await store.removeForeignVersion("global", 2), 2);
+  const filter = { must_not: [{ key: "embedding_version", match: { value: 2 } }] };
+  assert.deepEqual(calls.slice(1).map((call) => [call.path.split("?")[0], call.body]), [
+    ["/collections/eva_knowledge_global_v2/points/count", { exact: true, filter }],
+    ["/collections/eva_knowledge_global_v2/points/delete", { filter }],
+  ]);
+});
