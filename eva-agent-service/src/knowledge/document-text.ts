@@ -14,6 +14,7 @@
 import { fileTypeFromBuffer } from "file-type";
 import mammoth from "mammoth";
 import { PDFParse } from "pdf-parse";
+import JSZip from "jszip";
 import yauzl from "yauzl";
 
 export const DOCX_MIME =
@@ -229,40 +230,129 @@ function decodeEntities(text: string): string {
   });
 }
 
+/** Нижний регистр только ASCII: длина строки не меняется, индексы совпадают. */
+function asciiLower(text: string): string {
+  return text.replace(/[A-Z]+/gu, (part) => part.toLowerCase());
+}
+
+/** Элементы, чьё содержимое человек не видит. */
+const INVISIBLE_ELEMENTS = new Set(["script", "style", "form", "template", "noscript"]);
+const HIDDEN_ATTRIBUTE = /(?:^|\s)hidden(?:\s|=|\/|$)|aria-hidden\s*=\s*["']?true|display\s*:\s*none|visibility\s*:\s*hidden/u;
+/** Длиннее — не тег, а мусор: регулярки по нему не гоняются. */
+const MAX_TAG = 4096;
+
+/**
+ * Один проход по HTML: невидимое вырезается, заголовки `<h1>…<h6>`
+ * становятся строками `#`. Сканер на `indexOf`, а не регулярки с `[\s\S]*?`:
+ * незакрытый тег, повторённый в десятимегабайтном файле, превращал такую
+ * регулярку в квадратичный перебор и останавливал процесс на часы.
+ */
+function scanMarkup(text: string, headings: boolean): string {
+  const lower = asciiLower(text);
+  let out = "";
+  let position = 0;
+  while (position < text.length) {
+    const open = lower.indexOf("<", position);
+    if (open < 0) break;
+    if (lower.startsWith("<!--", open)) {
+      out += `${text.slice(position, open)} `;
+      const end = lower.indexOf("-->", open + 4);
+      position = end < 0 ? text.length : end + 3;
+      continue;
+    }
+    const close = lower.indexOf(">", open + 1);
+    // Закрывающей скобки дальше нет — полных тегов больше не будет.
+    if (close < 0) break;
+    const tag = close - open > MAX_TAG ? "" : lower.slice(open + 1, close);
+    const name = /^[a-z][a-z0-9]*/u.exec(tag)?.[0] ?? "";
+    const selfClosing = tag.endsWith("/");
+    const invisible = name !== "" && !selfClosing && (INVISIBLE_ELEMENTS.has(name) || HIDDEN_ATTRIBUTE.test(tag));
+    const heading = headings && !invisible && /^h[1-6]$/u.test(name);
+    if (!invisible && !heading) {
+      out += text.slice(position, close + 1);
+      position = close + 1;
+      continue;
+    }
+    out += text.slice(position, open);
+    const end = lower.indexOf(`</${name}`, close + 1);
+    const after = end < 0 ? text.length : lower.indexOf(">", end);
+    if (heading) {
+      const inner = scanMarkup(text.slice(close + 1, end < 0 ? text.length : end), false)
+        .replace(/<[^<>]*>/gu, " ").replace(/\s+/gu, " ").trim();
+      out += `\n\n${"#".repeat(Number(name.slice(1)))} ${inner}\n\n`;
+    } else {
+      // Незакрытый невидимый элемент скрывает всё до конца: безопаснее
+      // потерять хвост битого файла, чем отдать модели спрятанное.
+      out += " ";
+    }
+    position = end < 0 || after < 0 ? text.length : after + 1;
+  }
+  return out + text.slice(position);
+}
+
 /**
  * Вырезать то, чего человек не видит: скрипты, стили, формы, комментарии и
  * скрытые элементы. Встречается и в markdown, и в «простом» тексте.
  */
 export function stripHiddenMarkup(text: string): string {
-  return text
-    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/giu, " ")
-    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/giu, " ")
-    .replace(/<form\b[^>]*>[\s\S]*?<\/form>/giu, " ")
-    .replace(/<!--[\s\S]*?-->/gu, " ")
-    .replace(/<([a-z0-9]+)\b[^>]*(?:\bhidden\b|aria-hidden\s*=\s*["']?true|style\s*=\s*["'][^"']*(?:display\s*:\s*none|visibility\s*:\s*hidden))[^>]*>[\s\S]*?<\/\1>/giu, " ");
+  return scanMarkup(text, false);
 }
 
-/**
- * HTML → строки с заголовками `#`. Скрытое, скрипты и формы вырезаются
- * до того, как текст станет фрагментом: невидимый человеку текст — любимое
- * место для инструкций, адресованных модели.
- */
+/** HTML → строки с заголовками `#`, без невидимого и без тегов. */
 export function htmlToOutline(html: string): string {
-  const stripTags = (value: string): string => value.replace(/<[^>]+>/gu, " ");
-  let text = stripHiddenMarkup(html);
-  text = text.replace(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/giu, (_whole, level: string, inner: string) =>
-    `\n\n${"#".repeat(Number(level))} ${stripTags(inner).replace(/\s+/gu, " ").trim()}\n\n`);
+  let text = scanMarkup(html, true);
+  // `[^<>]*` вместо `[^>]*`: попытка совпадения обрывается на следующем `<`,
+  // и незакрытые теги не дают квадратичного перебора.
   text = text
-    .replace(/<li\b[^>]*>/giu, "\n- ")
-    .replace(/<br\s*\/?>/giu, "\n")
-    .replace(/<\/(?:p|div|li|tr|table|ul|ol|section|article|blockquote|header|footer|main)>/giu, "\n\n");
-  text = decodeEntities(stripTags(text));
-  return text
+    .replace(/<li\b[^<>]*>/giu, "\n- ")
+    .replace(/<br\b[^<>]*>/giu, "\n")
+    .replace(/<\/(?:p|div|li|tr|table|ul|ol|section|article|blockquote|header|footer|main)\s*>/giu, "\n\n")
+    .replace(/<[^<>]*>/gu, " ");
+  return decodeEntities(text)
     .split("\n")
     .map((line) => line.replace(/[ \t\u00a0]+/gu, " ").trim())
     .join("\n")
     .replace(/\n{3,}/gu, "\n\n")
     .trim();
+}
+
+/**
+ * Снять скрытые runs DOCX (`<w:vanish/>`): Word их не показывает, а
+ * mammoth отдаёт как обычный текст — удобное место для инструкций,
+ * адресованных модели. `w:val="0"`/`"false"` — свойство выключено.
+ */
+export function stripHiddenRuns(xml: string): string {
+  let out = "";
+  let position = 0;
+  const hidden = /<w:vanish(?:\s+w:val="(?:1|true|on)")?\s*\/>|<w:specVanish(?:\s+w:val="(?:1|true|on)")?\s*\/>/u;
+  while (position < xml.length) {
+    let open = xml.indexOf("<w:r", position);
+    // `<w:rPr`, `<w:rFonts` — не run: у run сразу `>` или пробел.
+    while (open >= 0 && !/[\s>]/u.test(xml[open + 4] ?? "")) open = xml.indexOf("<w:r", open + 4);
+    if (open < 0) break;
+    const end = xml.indexOf("</w:r>", open);
+    if (end < 0) break;
+    const run = xml.slice(open, end + 6);
+    const propertiesStart = run.indexOf("<w:rPr>");
+    const propertiesEnd = propertiesStart < 0 ? -1 : run.indexOf("</w:rPr>", propertiesStart);
+    const properties = propertiesEnd < 0 ? "" : run.slice(propertiesStart, propertiesEnd);
+    out += xml.slice(position, open);
+    if (!hidden.test(properties)) out += run;
+    position = end + 6;
+  }
+  return out + xml.slice(position);
+}
+
+async function withoutHiddenRuns(buffer: Buffer): Promise<Buffer> {
+  // Размеры архива уже проверены validateDocx: распаковка ограничена.
+  const zip = await JSZip.loadAsync(buffer);
+  const entry = zip.file("word/document.xml");
+  if (!entry) throw new Error("document_docx_malformed");
+  const xml = await entry.async("string");
+  const cleaned = stripHiddenRuns(xml);
+  if (cleaned === xml) return buffer;
+  zip.file("word/document.xml", cleaned);
+  return await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
 }
 
 /**
@@ -280,7 +370,7 @@ export async function extractDocumentOutline(
     // Сырой текст DOCX теряет заголовки; HTML того же разбора их хранит.
     let html: string;
     try {
-      const result = await mammoth.convertToHtml({ buffer });
+      const result = await mammoth.convertToHtml({ buffer: await withoutHiddenRuns(buffer) });
       if (result.messages.some((message) => message.type === "error")) throw new Error();
       html = result.value;
     } catch {
@@ -290,5 +380,11 @@ export async function extractDocumentOutline(
   }
   if (mime === "text/html") return { pages: pages.map(htmlToOutline), paged: false };
   if (mime === "application/pdf") return { pages, paged: true };
-  return { pages: pages.map(stripHiddenMarkup), paged: pages.length > 1 };
+  if (mime === "application/json") return { pages, paged: false };
+  // Markdown и текст: невидимое вырезается, остальные теги снимаются, как
+  // и прежде, — в поиске от них проку нет.
+  return {
+    pages: pages.map((page) => stripHiddenMarkup(page).replace(/<[^<>]*>/gu, " ")),
+    paged: pages.length > 1,
+  };
 }

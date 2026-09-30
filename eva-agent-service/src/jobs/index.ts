@@ -148,6 +148,7 @@ export function buildJobLayer(
       tempRoot: "/tmp",
       embed: (text, signal) => router.embed(text, signal),
       embedBatch: (texts, signal) => router.embedLegacyMany(texts, signal),
+      embedBatchSize: () => config.knowledgeEmbeddingBatch,
       chunking: () => ({ size: config.knowledgeChunkSize, overlap: config.knowledgeChunkOverlap }),
       index: knowledgeIndexScheduler(outbox, indexEnabled),
       scan: async (path) => await new Promise<"clean" | "infected" | "unavailable">((resolve) => execFile("clamscan", ["--no-summary", path], (error) => {

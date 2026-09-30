@@ -142,7 +142,15 @@ export class KnowledgeIndexer {
     try {
       for (const version of versions) {
         signal?.throwIfAborted();
-        await this.indexVersion(version, scope, document, chunks, signal);
+        try {
+          await this.indexVersion(version, scope, document, chunks, signal);
+        } catch (error) {
+          // Коллекцию могли потерять (том Qdrant пересоздан без перезапуска
+          // сервиса): при следующей попытке она создаётся заново, а не
+          // считается существующей до рестарта.
+          this.ensured.delete(version.version);
+          throw error;
+        }
       }
     } catch (error) {
       await this.mark(documentId, userId, "failed", null, errorCode(error)).catch(() => undefined);

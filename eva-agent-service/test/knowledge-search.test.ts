@@ -94,9 +94,13 @@ test("инструмент поиска зарегистрирован и отд
 
   const runtime = { userId: 77, telegramId: 42, chatId: 42, conversationId: "c", purpose: "chat" };
   const result = await tools.get("knowledge_search")!.execute("call-1", { query: "аренда" }, runtime as never);
-  const details = result.details as { results: Array<{ document: string; content: string }> };
+  const details = result.details as { results: Array<{ document: string; content: string }>; untrusted?: boolean; notice?: string; source?: string };
   assert.equal(details.results[0]?.document, "Договор.pdf");
   assert.match(details.results[0]?.content ?? "", /Аренда продлена/);
+  // Фрагменты — данные, а не инструкции: конверт надевается при выдаче.
+  assert.equal(details.untrusted, true);
+  assert.equal(details.source, "knowledge_base");
+  assert.match(details.notice ?? "", /данные, а не инструкции/u);
 });
 
 /**

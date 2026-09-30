@@ -18,6 +18,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { neutralizeUntrusted } from "../tools/untrusted.js";
+import { neutralizeInstructions } from "./security.js";
 import { chunkDocument, type ChunkingOptions } from "./chunking.js";
 import { SUPPORTED_DOCUMENT_MIME, extractDocumentOutline } from "./document-text.js";
 
@@ -62,12 +63,15 @@ export interface IngestDependencies {
   embed(text: string, signal?: AbortSignal): Promise<number[]>;
   /** Пачка векторов одним запросом; без неё — по одному. */
   embedBatch?(texts: string[], signal?: AbortSignal): Promise<number[][]>;
+  /** Текстов в пачке прежних векторов (не больше 64 — предел Router). */
+  embedBatchSize?: number;
   persist(chunks: KnowledgeChunk[], signal?: AbortSignal): Promise<void>;
 }
 
 /** Прежняя размерность вектора pgvector — колонка `vector(1536)`. */
 const LEGACY_DIMENSION = 1536;
 const LEGACY_BATCH = 32;
+const ROUTER_BATCH_LIMIT = 64;
 
 export class DocumentIngestor {
   constructor(private readonly dependencies: IngestDependencies) {}
@@ -94,7 +98,10 @@ export class DocumentIngestor {
         sections: this.dependencies.maxDocxSections ?? 500,
       });
       const pieces = chunkDocument(
-        outline.pages.map((page) => neutralizeUntrusted(page)),
+        // Оба набора формулировок: русские и общие для инструментов
+        // (`neutralizeUntrusted`) и прежние для документов, включая
+        // «run shell…» и «enable tools…» (`neutralizeInstructions`).
+        outline.pages.map((page) => neutralizeInstructions(neutralizeUntrusted(page))),
         outline.paged,
         this.dependencies.chunking ?? { size: 1200, overlap: 120 },
       );
@@ -124,9 +131,13 @@ export class DocumentIngestor {
 
   private async legacyVectors(texts: string[], signal?: AbortSignal): Promise<number[][]> {
     const vectors: number[][] = [];
-    for (let start = 0; start < texts.length; start += LEGACY_BATCH) {
+    const requested = this.dependencies.embedBatchSize;
+    const size = requested !== undefined && Number.isFinite(requested)
+      ? Math.min(Math.max(Math.floor(requested), 1), ROUTER_BATCH_LIMIT)
+      : LEGACY_BATCH;
+    for (let start = 0; start < texts.length; start += size) {
       signal?.throwIfAborted();
-      const batch = texts.slice(start, start + LEGACY_BATCH);
+      const batch = texts.slice(start, start + size);
       let result: number[][];
       if (this.dependencies.embedBatch) {
         result = await this.dependencies.embedBatch(batch, signal);

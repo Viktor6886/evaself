@@ -46,6 +46,8 @@ export interface KnowledgeIngestOptions {
   scan(path: string, signal?: AbortSignal): Promise<import("./ingestion.js").AntivirusResult>;
   embed(text: string, signal?: AbortSignal): Promise<number[]>;
   embedBatch?(texts: string[], signal?: AbortSignal): Promise<number[][]>;
+  /** Размер пачки эмбеддингов — та же настройка, что у индексации. */
+  embedBatchSize?(): number;
   /** Нарезка читается при каждом задании: панель меняет её без перезапуска. */
   chunking?(): ChunkingOptions;
   /**
@@ -83,6 +85,7 @@ export class KnowledgeIngestWorker {
           scan: this.options.scan,
           embed: this.options.embed,
           ...(this.options.embedBatch ? { embedBatch: this.options.embedBatch } : {}),
+          ...(this.options.embedBatchSize ? { embedBatchSize: this.options.embedBatchSize() } : {}),
           ...(this.options.chunking ? { chunking: this.options.chunking() } : {}),
           persist: async (items) => { chunks.push(...items); },
         });

@@ -235,3 +235,19 @@ test("загрузка: фрагменты со структурой и зада
     assert.deepEqual(scheduled, enabled ? [{ input: { documentId: "up-1", userId: 7, reason: "ingest" }, inTransaction: true }] : []);
   }
 });
+
+test("после отказа коллекция проверяется заново: потерянный том не ломает индексацию до рестарта", async () => {
+  const { db } = fakeDb({ versions: [VERSION], document: PRIVATE_DOC, chunks: CHUNKS });
+  let ensured = 0;
+  let failUpsert = true;
+  const store = {
+    ensureSpace: async () => { ensured += 1; },
+    upsert: async () => { if (failUpsert) throw Object.assign(new Error("not found"), { code: "qdrant_not_found" }); },
+    pruneDocument: async () => undefined,
+  };
+  const indexer = new KnowledgeIndexer(db as never, router().router as never, store as never, options());
+  await assert.rejects(() => indexer.index("doc-1", 7));
+  failUpsert = false;
+  await indexer.index("doc-1", 7);
+  assert.equal(ensured, 2, "после отказа ensureSpace должен выполниться снова");
+});
