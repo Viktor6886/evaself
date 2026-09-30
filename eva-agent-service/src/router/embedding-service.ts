@@ -47,8 +47,11 @@ export type ProbeResult =
   }
   | { ok: false; error_code: string; message: string };
 
+/** Прежняя цель: только это имя или отсутствие поля `model`. */
+const LEGACY_MODEL = "eva/embeddings";
+
 export class EmbeddingRequestError extends Error {
-  constructor(readonly code: "embedding_version_unknown" | "embedding_version_unusable", message: string) {
+  constructor(readonly code: "embedding_model_unknown" | "embedding_version_unknown" | "embedding_version_unusable", message: string) {
     super(message);
     this.name = "EmbeddingRequestError";
   }
@@ -79,9 +82,18 @@ export class EmbeddingService {
     private readonly now: () => number = Date.now,
   ) {}
 
-  /** `model` из запроса: прежнее имя или версия базы знаний. */
+  /**
+   * `model` из запроса: прежнее имя или версия базы знаний.
+   *
+   * Любое другое имя — отказ, а не прежняя цель: опечатка в номере версии
+   * («@v0», «@v3;») дала бы векторы чужого пространства, и при той же
+   * размерности их не отличила бы уже никакая проверка.
+   */
   async embed(model: unknown, texts: string[], signal?: AbortSignal): Promise<EmbeddingResult> {
     const version = embeddingVersionOf(model);
+    if (version === null && model !== undefined && model !== null && model !== LEGACY_MODEL) {
+      throw new EmbeddingRequestError("embedding_model_unknown", "Модель embeddings: eva/embeddings или eva/embeddings@v<N>");
+    }
     if (version === null) {
       return {
         vectors: await this.embeddings.embed(texts, signal),

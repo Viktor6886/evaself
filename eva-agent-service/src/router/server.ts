@@ -147,7 +147,8 @@ export function createRouterServer(input: RouterServerInput): FastifyInstance {
       };
     } catch (error) {
       if (error instanceof EmbeddingRequestError) {
-        return reply.code(error.code === "embedding_version_unknown" ? 404 : 409).send({ error: { message: error.message, type: error.code } });
+        const status = error.code === "embedding_model_unknown" ? 400 : error.code === "embedding_version_unknown" ? 404 : 409;
+        return reply.code(status).send({ error: { message: error.message, type: error.code } });
       }
       if (error instanceof EmbeddingError) {
         return reply.code(502).send({ error: { message: error.message, type: error.code } });

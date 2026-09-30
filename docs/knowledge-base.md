@@ -113,6 +113,7 @@ Qdrant нет: он читается из PostgreSQL по `chunk_id`. Храни
 |---|---|
 | `eva/embeddings` | прежняя цель: `EVA_EMBEDDING_MODEL`, 1536, вектор pgvector |
 | `eva/embeddings@v<N>` | версия N: её провайдер, модель, размерность; при отказе — запасной провайдер той же версии |
+| любое другое | отказ 400 `embedding_model_unknown`: опечатка в номере версии не должна давать векторы чужого пространства |
 
 - Провайдеры — из реестра Router (OpenRouter, OpenAI, Gemini, Mistral, Jina,
   Voyage, свой): нужен OpenAI-совместимый `/embeddings`. Ключ и адрес не

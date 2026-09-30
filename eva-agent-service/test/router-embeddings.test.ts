@@ -301,3 +301,23 @@ test("отсутствие версии не кэшируется: заведё�
   const result = await service.embed("eva/embeddings@v2", ["a"]);
   assert.equal(result.model, "eva/embeddings@v2");
 });
+
+test("неизвестное имя модели — отказ, а не прежняя цель: опечатка в версии не даёт чужих векторов", async () => {
+  const { fetcher, sent } = upstream(() => ok(vectors(1, 1536)));
+  const service = new EmbeddingService(embeddings(fetcher), versionStore({}).store);
+  for (const model of ["eva/embeddings@v0", "eva/embeddings@v3; drop", "text-embedding-3-small", "", 42]) {
+    await assert.rejects(() => service.embed(model, ["a"]), (error: Error & { code?: string }) => error.code === "embedding_model_unknown");
+  }
+  assert.equal(sent.length, 0);
+  // Прежние вызовы: точное имя и запрос без поля model.
+  assert.equal((await service.embed("eva/embeddings", ["a"])).dimension, 1536);
+  assert.equal((await service.embed(undefined, ["a"])).dimension, 1536);
+
+  const app = routerApp(service);
+  const response = await app.inject({
+    method: "POST", url: "/embeddings", headers: { authorization: "Bearer router-key" },
+    payload: { model: "eva/embeddings@v0", input: ["a"] },
+  });
+  assert.equal(response.statusCode, 400);
+  assert.equal(response.json().error.type, "embedding_model_unknown");
+});
