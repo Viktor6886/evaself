@@ -284,9 +284,12 @@ async function blendQuotaLimits(
     } else {
       const periodDays = PERIOD_DAYS[period];
       if (!periodDays) continue;
-      const dailyCapacity = (oldLimit / periodDays) * previousDays
-        + (targetLimit / periodDays) * targetDays;
-      limitValue = safeCeil((dailyCapacity / totalDays) * periodDays);
+      // Средневзвешенное по дням, записанное как «прежний лимит плюс доля
+      // разницы». Математически это то же самое, что
+      // (old·p + target·t) / (p + t), но при равных лимитах разница —
+      // ровно ноль, а не 200.00000000000003 от плавающей точки, которое
+      // `ceil` превращал в 201.
+      limitValue = safeCeil(oldLimit + (targetLimit - oldLimit) * (targetDays / totalDays));
     }
     result.push({ metric, period, limitValue, unlimitedFrom });
   }
@@ -314,5 +317,10 @@ function safeCeil(value: number): number {
   if (!Number.isFinite(value) || value < 0 || value > Number.MAX_SAFE_INTEGER) {
     throw new Error("Смешанная квота вышла за безопасные границы");
   }
-  return Math.ceil(value);
+  // Погрешность плавающей точки у целого значения — не лишняя единица
+  // квоты: 200.00000000000003 — это 200, а не 201. Допуск — несколько
+  // ulp, не больше: настоящее значение чуть выше целого (остаток «7 дней
+  // без 1 мс») обязано округлиться вверх, и допуск вроде 1e-9 его съедал.
+  const nearest = Math.round(value);
+  return Math.abs(value - nearest) <= Number.EPSILON * 8 * Math.max(1, nearest) ? nearest : Math.ceil(value);
 }
