@@ -9,7 +9,7 @@
 
 import { Redis } from "ioredis";
 
-import { applyManagedRuntimeConfig, importEnvironmentOsintSettings } from "./admin/managed-runtime-config.js";
+import { applyManagedRuntimeConfig, importEnvironmentKnowledgeSettings, importEnvironmentOsintSettings } from "./admin/managed-runtime-config.js";
 import { AgentToolFactory, isHostExecutionTool, toolApprovalCategory, toolRisk } from "./agent-tools.js";
 import { sessionPermission } from "./tools/session-permission.js";
 import { BackgroundRuntime } from "./background.js";
@@ -120,6 +120,8 @@ async function main(): Promise<void> {
     // для ключей, которые появились после первичного импорта.
     const importedOsint = await importEnvironmentOsintSettings(config, db);
     if (importedOsint.length > 0) logger.info("OSINT-настройки перенесены из окружения в панель", { count: importedOsint.length });
+    const importedKnowledge = await importEnvironmentKnowledgeSettings(config, db);
+    if (importedKnowledge.length > 0) logger.info("Настройки базы знаний перенесены из окружения в панель", { count: importedKnowledge.length });
     const managedKeys = await applyManagedRuntimeConfig(config, db);
     logger = createLogger(config.logLevel);
     logger.info("Настройки Config Service применены", { count: managedKeys.length });

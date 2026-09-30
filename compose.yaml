@@ -361,6 +361,10 @@ services:
       EVA_BULLMQ_PROACTIVE: ${EVA_BULLMQ_PROACTIVE:-false}
       EVA_JOBS_MIRROR: ${EVA_JOBS_MIRROR:-true}
       EVA_KNOWLEDGE_UPLOADS: ${EVA_KNOWLEDGE_UPLOADS:-false}
+      EVA_KNOWLEDGE_INDEX: ${EVA_KNOWLEDGE_INDEX:-false}
+      EVA_KNOWLEDGE_CHUNK_SIZE: ${EVA_KNOWLEDGE_CHUNK_SIZE:-1200}
+      EVA_KNOWLEDGE_CHUNK_OVERLAP: ${EVA_KNOWLEDGE_CHUNK_OVERLAP:-150}
+      EVA_KNOWLEDGE_EMBEDDING_BATCH: ${EVA_KNOWLEDGE_EMBEDDING_BATCH:-32}
       EVA_AUDIO_FILE_MAX_MB: ${EVA_AUDIO_FILE_MAX_MB:-350}
       EVA_RESEARCH_ORCHESTRATOR: ${EVA_RESEARCH_ORCHESTRATOR:-false}
       # OSINT-исследования (docs/OSINT.md): выключены, пока человек не
@@ -413,6 +417,10 @@ services:
       - letta_provider_config:/data/letta-config/providers
       - letta_app_server_data:/data/letta:rw
       - letta_llm_control:/data/llm-control
+      # Исходные файлы загрузок базы знаний. Постоянный том: без него файлы
+      # пропадали при пересоздании контейнера, а новая нарезка (другая длина
+      # фрагмента) и перестройка индекса начинаются с исходного документа.
+      - knowledge_files:/data/knowledge-uploads
     networks: [edge, data, agent, tools, browser, vector]
     depends_on:
       postgres:
@@ -1060,6 +1068,10 @@ volumes:
     name: evaself_letta_provider_config
   letta_llm_control:
     name: evaself_letta_llm_control
+  # Исходные документы базы знаний людей и администратора. В backup
+  # входят: это данные людей, а не производный индекс.
+  knowledge_files:
+    name: evaself_knowledge_files
   admin_updater_socket:
     name: evaself_admin_updater_socket
   searxng_cache:

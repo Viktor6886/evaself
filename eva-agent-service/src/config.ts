@@ -169,6 +169,17 @@ export interface Config {
   jobsMirrorMode: boolean;
   /** Универсальный фоновый ход агента (рефлексия, отчёты, исследования). */
   knowledgeUploadsEnabled: boolean;
+  /**
+   * Индексация базы знаний в Qdrant (docs/knowledge-base.md). Выключена по
+   * умолчанию: поиск идёт по PostgreSQL, пока его не переключат (K4, K8).
+   * Панель меняет её без перезапуска — задание читает флаг при каждом запуске.
+   */
+  knowledgeIndexEnabled: boolean;
+  /** Нарезка документа: длина фрагмента и перекрытие соседних, в знаках. */
+  knowledgeChunkSize: number;
+  knowledgeChunkOverlap: number;
+  /** Текстов в одном запросе эмбеддингов (не больше 64 — предел Router). */
+  knowledgeEmbeddingBatch: number;
   researchOrchestratorEnabled: boolean;
   /**
    * OSINT-исследования (`docs/OSINT.md`). Выключены по умолчанию: флаг
@@ -512,6 +523,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     // писать людям параллельно со старым интервалом.
     jobsMirrorMode: bool("EVA_JOBS_MIRROR", true),
     knowledgeUploadsEnabled: bool("EVA_KNOWLEDGE_UPLOADS", false),
+    knowledgeIndexEnabled: bool("EVA_KNOWLEDGE_INDEX", false),
+    knowledgeChunkSize: int("EVA_KNOWLEDGE_CHUNK_SIZE", 1200),
+    knowledgeChunkOverlap: int("EVA_KNOWLEDGE_CHUNK_OVERLAP", 150),
+    knowledgeEmbeddingBatch: int("EVA_KNOWLEDGE_EMBEDDING_BATCH", 32),
     researchOrchestratorEnabled: bool("EVA_RESEARCH_ORCHESTRATOR", false),
     osintEnabled: bool("EVA_OSINT_ENABLED", false),
     osintWorkerUrl: str("EVA_OSINT_WORKER_URL", "http://osint-worker:8095"),

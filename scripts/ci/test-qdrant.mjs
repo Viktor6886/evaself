@@ -139,6 +139,16 @@ do {
 } while (offset !== null);
 assert.deepEqual(pages.sort((a, b) => a - b), [101, 102, 103, 201]);
 
+// Переиндексация документа: лишние точки (фрагментов больше нет) снимаются,
+// нужные остаются, чужие документы не задеты.
+await store.upsert("private", space(1), [point(104, [0.2, 0.2, 0.2, 0.2], { user: "7", document: "doc-7a" })]);
+await store.pruneDocument("private", 1, "doc-7a", [101, 102]);
+assert.deepEqual(
+  Object.fromEntries(await store.documentPointCounts("private", 1, 100)),
+  { "doc-7a": 2, "doc-7b": 1, "doc-8a": 1 },
+  "pruneDocument снял не то",
+);
+
 // Удаление: документа, отдельных фрагментов и всей личной базы человека.
 await store.deleteDocuments("private", 1, ["doc-7b"]);
 assert.deepEqual((await store.searchPrivate(7, [0, 1, 0, 0], { limit: 10 })).map((hit) => hit.chunkId).sort(), [101, 102]);

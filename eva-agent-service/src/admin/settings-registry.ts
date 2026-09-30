@@ -604,9 +604,79 @@ export const OSINT_SETTINGS: readonly SettingDefinition[] = [
   },
 ];
 
+/**
+ * База знаний (docs/knowledge-base.md). Индексация в Qdrant и нарезка
+ * документов; поиск переключается отдельно (K4). Все читаются при каждом
+ * задании, поэтому действуют без перезапуска.
+ */
+export const KNOWLEDGE_SETTINGS: readonly SettingDefinition[] = [
+  {
+    key: "runtime.knowledge_index_enabled",
+    env: "EVA_KNOWLEDGE_INDEX",
+    title: "База знаний: индексация в Qdrant",
+    group: "knowledge",
+    type: "boolean",
+    default: false,
+    required: true,
+    requires_restart: false,
+    description: "Векторы новых и изменённых документов считаются через LLM Router и записываются в Qdrant — в индекс активной или строящейся версии эмбеддингов. Поиск по базе знаний от флага не зависит: он переключается отдельно",
+    affects: ["agent-runtime"],
+    recommended: "Включайте после того, как заведена версия эмбеддингов («Проверить модель») и в .env задан QDRANT_API_KEY. Выключение останавливает индексацию, ничего не удаляя.",
+  },
+  {
+    key: "runtime.knowledge_chunk_size",
+    env: "EVA_KNOWLEDGE_CHUNK_SIZE",
+    title: "База знаний: длина фрагмента, знаков",
+    group: "knowledge",
+    type: "integer",
+    default: 1200,
+    min: 300,
+    max: 4000,
+    required: true,
+    requires_restart: false,
+    description: "Документ режется по заголовкам и абзацам на фрагменты не длиннее этой величины. Действует на документы, загруженные после изменения",
+    affects: ["agent-runtime"],
+    recommended: "1200. Короче — точнее попадание, но меньше контекста в каждом фрагменте; длиннее — наоборот.",
+    advanced: true,
+  },
+  {
+    key: "runtime.knowledge_chunk_overlap",
+    env: "EVA_KNOWLEDGE_CHUNK_OVERLAP",
+    title: "База знаний: перекрытие фрагментов, знаков",
+    group: "knowledge",
+    type: "integer",
+    default: 150,
+    min: 0,
+    max: 800,
+    required: true,
+    requires_restart: false,
+    description: "Сколько знаков конца фрагмента повторяется в начале следующего, чтобы мысль на стыке не терялась. Меньше длины фрагмента",
+    affects: ["agent-runtime"],
+    recommended: "150 — около двух предложений.",
+    advanced: true,
+  },
+  {
+    key: "runtime.knowledge_embedding_batch",
+    env: "EVA_KNOWLEDGE_EMBEDDING_BATCH",
+    title: "База знаний: фрагментов на запрос эмбеддингов",
+    group: "knowledge",
+    type: "integer",
+    default: 32,
+    min: 1,
+    max: 64,
+    required: true,
+    requires_restart: false,
+    description: "Сколько фрагментов уходит провайдеру эмбеддингов одним запросом",
+    affects: ["agent-runtime"],
+    recommended: "32. Уменьшайте, если провайдер отвечает 413 или ограничивает частоту; больше 64 Router не принимает.",
+    advanced: true,
+  },
+];
+
 export const ALL_SETTINGS: readonly SettingDefinition[] = [
   ...SETTINGS_REGISTRY,
   ...OSINT_SETTINGS,
+  ...KNOWLEDGE_SETTINGS,
   ...RETENTION_SETTINGS,
 ];
 

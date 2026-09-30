@@ -65,6 +65,26 @@ export class LlmRouterClient {
   }
 
   /**
+   * Прежние векторы pgvector (1536) пачкой одним запросом — вместо запроса
+   * на каждый фрагмент. Не больше 64 текстов: столько принимает роутер.
+   */
+  async embedLegacyMany(texts: readonly string[], signal?: AbortSignal): Promise<number[][]> {
+    if (!texts.length) return [];
+    if (texts.length > ROUTER_EMBEDDING_BATCH_LIMIT) throw new Error("embedding_batch_too_large");
+    const body = await this.request("/embeddings", { model: "eva/embeddings", input: texts }, signal);
+    const data: unknown = body.data;
+    if (!Array.isArray(data) || data.length !== texts.length) throw new Error("embedding_incomplete");
+    return data.map((item, index) => {
+      const vector: unknown = (item as { embedding?: unknown; index?: unknown }).embedding;
+      if ((item as { index?: unknown }).index !== index || !Array.isArray(vector) || vector.length !== 1536
+        || vector.some((value) => typeof value !== "number")) {
+        throw new Error("LLM Router embeddings invalid");
+      }
+      return vector as number[];
+    });
+  }
+
+  /**
    * Векторы многих текстов версии эмбеддингов, пачками.
    *
    * Порядок ответа — порядок текстов; неполный ответ или вектор чужой

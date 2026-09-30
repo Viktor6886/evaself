@@ -6,7 +6,9 @@ import type { JobOutbox } from "../jobs/job-outbox.js";
 import { jobIdempotencyKey } from "../jobs/job-outbox.js";
 import type { JobContext } from "../jobs/runtime.js";
 import type { Readable } from "node:stream";
+import type { ChunkingOptions } from "./chunking.js";
 import { DocumentIngestor, type KnowledgeChunk } from "./ingestion.js";
+import type { KnowledgeIndexScheduler } from "./indexer.js";
 
 export const KNOWLEDGE_INGEST_JOB = "knowledge_ingest";
 const ALLOWED = new Set(["text/plain","text/markdown","application/json","text/html","application/pdf","application/vnd.openxmlformats-officedocument.wordprocessingml.document"]);
@@ -39,10 +41,87 @@ export class KnowledgeUploadService {
   async status(telegramId:number,id:string){const userId=await this.internalUser(telegramId);const {rows}=await this.db.withUserScope({userId,label:"knowledge.status",inherit:true},async()=>await this.db.query("SELECT id,name,mime,size_bytes,status,error_code,document_id,created_at,completed_at FROM knowledge_uploads WHERE id=$1 AND user_id=$2",[id,userId]));return rows[0]??null;}
 }
 
+export interface KnowledgeIngestOptions {
+  tempRoot: string;
+  scan(path: string, signal?: AbortSignal): Promise<import("./ingestion.js").AntivirusResult>;
+  embed(text: string, signal?: AbortSignal): Promise<number[]>;
+  embedBatch?(texts: string[], signal?: AbortSignal): Promise<number[][]>;
+  /** Размер пачки эмбеддингов — та же настройка, что у индексации. */
+  embedBatchSize?(): number;
+  /** Нарезка читается при каждом задании: панель меняет её без перезапуска. */
+  chunking?(): ChunkingOptions;
+  /**
+   * Индексация в Qdrant: задание пишется в той же транзакции, что и
+   * фрагменты. Упади процесс между COMMIT и постановкой в очередь — задание
+   * всё равно в `job_outbox`, и публикатор его отправит.
+   */
+  index?: KnowledgeIndexScheduler;
+}
+
 export class KnowledgeIngestWorker {
-  constructor(private readonly db:Database,private readonly options:{tempRoot:string;scan(path:string,signal?:AbortSignal):Promise<import("./ingestion.js").AntivirusResult>;embed(text:string,signal?:AbortSignal):Promise<number[]>}){}
-  async run(context:JobContext):Promise<void>{const id=context.envelope.payloadRef,userId=context.envelope.userId;if(!id||userId===null)throw new Error("knowledge_upload_invalid");let path:string|undefined;
-    try{await this.db.withUserScope({userId,label:"knowledge.ingest",inherit:true},async()=>{const {rows}=await this.db.query<{storage_path:string;name:string;mime:string;status:string}>("SELECT storage_path,name,mime,status FROM knowledge_uploads WHERE id=$1 AND user_id=$2 FOR UPDATE",[id,userId]);const row=rows[0];if(!row)throw new Error("knowledge_upload_missing");path=row.storage_path;if(context.signal.aborted){await this.db.query("UPDATE knowledge_uploads SET status='cancelled',completed_at=now() WHERE id=$1 AND user_id=$2",[id,userId]);return;}await this.db.query("UPDATE knowledge_uploads SET status='processing',started_at=now() WHERE id=$1 AND user_id=$2",[id,userId]);const bytes=await readFile(path);const chunks:KnowledgeChunk[]=[];const ingestor=new DocumentIngestor({tempRoot:this.options.tempRoot,scan:this.options.scan,embed:this.options.embed,persist:async c=>{chunks.push(...c); return;}});await ingestor.ingest({documentId:id,userId,name:row.name,mime:row.mime,bytes},context.signal);await this.db.transaction(async client=>{await client.query("INSERT INTO knowledge_documents(id,user_id,name,mime,content_hash,status) SELECT id,user_id,name,mime,content_hash,'ready' FROM knowledge_uploads WHERE id=$1 AND user_id=$2",[id,userId]);for(const chunk of chunks)await client.query("INSERT INTO knowledge_chunks(document_id,user_id,product_verified,ordinal,content,content_hash,embedding,embedding_model) VALUES($1,$2,false,$3,$4,$5,$6::vector,$7)",[id,userId,chunk.ordinal,chunk.content,createHash("sha256").update(chunk.content).digest("hex"),`[${chunk.embedding.join(",")}]`,`router`]);await client.query("UPDATE knowledge_uploads SET status='ready',document_id=$1,completed_at=now() WHERE id=$1 AND user_id=$2",[id,userId]);});});
-    }catch(error){const cancelled=context.signal.aborted;await this.db.withUserScope({userId,label:"knowledge.terminal",inherit:true},async()=>await this.db.query("UPDATE knowledge_uploads SET status=$3,error_code=$4,completed_at=now() WHERE id=$1 AND user_id=$2",[id,userId,cancelled?"cancelled":"failed",cancelled?"cancelled":error instanceof Error?error.message:"unknown"])).catch(()=>undefined);throw error;}
+  constructor(private readonly db: Database, private readonly options: KnowledgeIngestOptions) {}
+
+  async run(context: JobContext): Promise<void> {
+    const id = context.envelope.payloadRef;
+    const userId = context.envelope.userId;
+    if (!id || userId === null) throw new Error("knowledge_upload_invalid");
+    try {
+      await this.db.withUserScope({ userId, label: "knowledge.ingest", inherit: true }, async () => {
+        const { rows } = await this.db.query<{ storage_path: string; name: string; mime: string; status: string }>(
+          "SELECT storage_path,name,mime,status FROM knowledge_uploads WHERE id=$1 AND user_id=$2 FOR UPDATE",
+          [id, userId],
+        );
+        const row = rows[0];
+        if (!row) throw new Error("knowledge_upload_missing");
+        if (context.signal.aborted) {
+          await this.db.query("UPDATE knowledge_uploads SET status='cancelled',completed_at=now() WHERE id=$1 AND user_id=$2", [id, userId]);
+          return;
+        }
+        await this.db.query("UPDATE knowledge_uploads SET status='processing',started_at=now() WHERE id=$1 AND user_id=$2", [id, userId]);
+        const bytes = await readFile(row.storage_path);
+        const chunks: KnowledgeChunk[] = [];
+        const ingestor = new DocumentIngestor({
+          tempRoot: this.options.tempRoot,
+          scan: this.options.scan,
+          embed: this.options.embed,
+          ...(this.options.embedBatch ? { embedBatch: this.options.embedBatch } : {}),
+          ...(this.options.embedBatchSize ? { embedBatchSize: this.options.embedBatchSize() } : {}),
+          ...(this.options.chunking ? { chunking: this.options.chunking() } : {}),
+          persist: async (items) => { chunks.push(...items); },
+        });
+        await ingestor.ingest({ documentId: id, userId, name: row.name, mime: row.mime, bytes }, context.signal);
+        await this.db.transaction(async (client) => {
+          await client.query(
+            `INSERT INTO knowledge_documents(id,user_id,name,mime,content_hash,status,size_bytes,chunk_count)
+             SELECT id,user_id,name,mime,content_hash,'ready',size_bytes,$3
+               FROM knowledge_uploads WHERE id=$1 AND user_id=$2`,
+            [id, userId, chunks.length],
+          );
+          for (const chunk of chunks) {
+            await client.query(
+              `INSERT INTO knowledge_chunks(document_id,user_id,product_verified,ordinal,content,content_hash,embedding,embedding_model,
+                                            page_start,page_end,section,subsection,heading,token_count)
+               VALUES($1,$2,false,$3,$4,$5,$6::vector,$7,$8,$9,$10,$11,$12,$13)`,
+              [
+                id, userId, chunk.ordinal, chunk.content, chunk.contentHash, `[${chunk.embedding.join(",")}]`, "router",
+                chunk.pageStart, chunk.pageEnd, chunk.section, chunk.subsection, chunk.heading, chunk.tokenCount,
+              ],
+            );
+          }
+          if (this.options.index?.enabled()) {
+            await this.options.index.schedule(client, { documentId: id, userId, reason: "ingest" });
+          }
+          await client.query("UPDATE knowledge_uploads SET status='ready',document_id=$1,completed_at=now() WHERE id=$1 AND user_id=$2", [id, userId]);
+        });
+      });
+    } catch (error) {
+      const cancelled = context.signal.aborted;
+      await this.db.withUserScope({ userId, label: "knowledge.terminal", inherit: true }, async () =>
+        await this.db.query(
+          "UPDATE knowledge_uploads SET status=$3,error_code=$4,completed_at=now() WHERE id=$1 AND user_id=$2",
+          [id, userId, cancelled ? "cancelled" : "failed", cancelled ? "cancelled" : error instanceof Error ? error.message : "unknown"],
+        )).catch(() => undefined);
+      throw error;
+    }
   }
 }
