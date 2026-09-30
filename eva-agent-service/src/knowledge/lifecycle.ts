@@ -94,7 +94,12 @@ export class KnowledgeUploadService {
         // Новая версия — только своего документа: чужой id не отличается
         // здесь от несуществующего, и ни тот, ни другой не принимается.
         if(replaces!==null){const own=await client.query("SELECT id FROM knowledge_documents WHERE id=$1 AND user_id=$2 FOR SHARE",[replaces,userId]);if(!own.rows[0])throw new Error("document_replaces_missing");}
-        await client.query("INSERT INTO knowledge_uploads(id,user_id,name,mime,size_bytes,content_hash,storage_path,status,replaces_document_id) VALUES($1,$2,$3,$4,$5,$6,$7,'queued',$8)",[id,userId,input.name,input.mime,size,hash.digest("hex"),path,replaces]);await recordKnowledgeIngest(this.jobs,client,{uploadId:id,userId});return{id,status:"queued"};}));
+        // Колонка замены (миграция 092) называется, только когда замена
+        // есть: обычная загрузка остаётся той же вставкой, что и раньше.
+        const values=[id,userId,input.name,input.mime,size,hash.digest("hex"),path];
+        if(replaces===null)await client.query("INSERT INTO knowledge_uploads(id,user_id,name,mime,size_bytes,content_hash,storage_path,status) VALUES($1,$2,$3,$4,$5,$6,$7,'queued')",values);
+        else await client.query("INSERT INTO knowledge_uploads(id,user_id,name,mime,size_bytes,content_hash,storage_path,status,replaces_document_id) VALUES($1,$2,$3,$4,$5,$6,$7,'queued',$8)",[...values,replaces]);
+        await recordKnowledgeIngest(this.jobs,client,{uploadId:id,userId});return{id,status:"queued"};}));
     } catch(error){await file.close().catch(()=>undefined);await rm(path,{force:true});throw error;}
   }
   /**
