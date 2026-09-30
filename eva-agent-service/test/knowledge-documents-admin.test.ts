@@ -88,7 +88,8 @@ test("коллекции: код проверяется, повтор кода �
       const inserted = queries.filter((query) => query.sql.startsWith("INSERT INTO knowledge_collections")).at(-1);
       return { rows: [{ ...COLLECTION_ROW, id: inserted?.params[0] ?? COLLECTION }] };
     }
-    if (sql.startsWith("SELECT count(*) AS total FROM knowledge_documents")) return { rows: [{ total: "2" }] };
+    if (sql.startsWith("SELECT id FROM knowledge_collections")) return { rows: [{ id: COLLECTION }] };
+    if (sql.startsWith("SELECT (SELECT count(*) FROM knowledge_documents")) return { rows: [{ documents: "2", uploads: "0" }] };
     return undefined;
   });
   const service = new KnowledgeDocumentsService(pool as never, { uploadsRoot: "/nonexistent", store: null, uploadsEnabled: true });
@@ -109,6 +110,37 @@ test("коллекции: код проверяется, повтор кода �
     await assert.rejects(() => service.deleteCollection(COLLECTION), (error: { statusCode?: number; details?: unknown }) =>
       error.statusCode === 409);
     assert.ok(!queries.some((query) => query.sql.startsWith("DELETE FROM knowledge_collections")));
+  });
+});
+
+test("удаление коллекции: под блокировкой строки; неразобранная загрузка тоже не даёт удалить", async () => {
+  let counts = { documents: "0", uploads: "1" };
+  let exists = true;
+  const { pool, queries } = fakePool((sql) => {
+    if (sql.startsWith("SELECT id FROM knowledge_collections")) return { rows: exists ? [{ id: COLLECTION }] : [] };
+    if (sql.startsWith("SELECT (SELECT count(*) FROM knowledge_documents")) return { rows: [counts] };
+    return undefined;
+  });
+  const service = new KnowledgeDocumentsService(pool as never, { uploadsRoot: "/nonexistent", store: null, uploadsEnabled: true });
+  await asAdmin(async () => {
+    // Загрузка ещё не создала документ: документов ноль, но удалять нельзя.
+    await assert.rejects(() => service.deleteCollection(COLLECTION), (error: { statusCode?: number; details?: { uploads?: number } }) =>
+      error.statusCode === 409 && error.details?.uploads === 1);
+    const count = queries.find((query) => query.sql.startsWith("SELECT (SELECT count(*)"))!;
+    assert.match(count.sql, /FROM knowledge_uploads .*status IN \('queued', 'processing'\)/u);
+    assert.ok(!queries.some((query) => query.sql.startsWith("DELETE FROM knowledge_collections")));
+    assert.equal(queries.at(-1)?.sql, "ROLLBACK");
+
+    counts = { documents: "0", uploads: "0" };
+    queries.length = 0;
+    assert.deepEqual(await service.deleteCollection(COLLECTION), { deleted: COLLECTION });
+    // Блокировка — первой, подсчёт и удаление — в той же транзакции после неё.
+    assert.deepEqual(queries.map((query) => query.sql.split(" ").slice(0, 2).join(" ")),
+      ["BEGIN", "SELECT id", "SELECT (SELECT", "DELETE FROM", "COMMIT"]);
+    assert.match(queries[1]!.sql, /FOR UPDATE$/u);
+
+    exists = false;
+    await assert.rejects(() => service.deleteCollection(COLLECTION), (error: { statusCode?: number }) => error.statusCode === 404);
   });
 });
 
@@ -140,8 +172,11 @@ test("загрузка в общую базу: файл на томе, запи�
 test("загрузка: неверный формат, пустой и слишком большой файл, чужая коллекция — отказ без файла на томе", async () => {
   const root = await mkdtemp(join(tmpdir(), "eva-admin-upload-"));
   let collectionExists = true;
-  const { pool, queries } = fakePool((sql) =>
-    sql.startsWith("SELECT 1 FROM knowledge_collections") ? { rows: collectionExists ? [{ "?column?": 1 }] : [] } : undefined);
+  let insertError: Error | undefined;
+  const { pool, queries } = fakePool((sql) => {
+    if (sql.startsWith("INSERT INTO knowledge_uploads")) return insertError;
+    return sql.startsWith("SELECT 1 FROM knowledge_collections") ? { rows: collectionExists ? [{ "?column?": 1 }] : [] } : undefined;
+  });
   const service = new KnowledgeDocumentsService(pool as never, { uploadsRoot: root, store: null, uploadsEnabled: true });
   const upload = (input: Partial<Parameters<KnowledgeDocumentsService["upload"]>[0]>) => asAdmin(async () => await service.upload({
     collectionId: COLLECTION, name: "файл.txt", mime: "text/plain", stream: Readable.from([Buffer.from("текст")]), ...input,
@@ -153,8 +188,20 @@ test("загрузка: неверный формат, пустой и слиш�
   await assert.rejects(() => upload({ truncated: () => true }), /10 МБ/u);
   collectionExists = false;
   await assert.rejects(() => upload({}), (error: { statusCode?: number }) => error.statusCode === 404);
+  collectionExists = true;
+  // Коллекцию удалили, пока читался файл, или заменяемого документа нет:
+  // внешний ключ записи приёма — 404, а не сбой сервера.
+  insertError = Object.assign(new Error("fk"), { code: "23503", constraint: "knowledge_uploads_collection_id_fkey" });
+  await assert.rejects(() => upload({}), (error: { statusCode?: number; message?: string }) =>
+    error.statusCode === 404 && /Коллекция/u.test(String(error.message)));
+  insertError = Object.assign(new Error("fk"), { code: "23503", constraint: "knowledge_uploads_replaces_document_id_fkey" });
+  await assert.rejects(() => upload({ replaces: DOC_A }), (error: { statusCode?: number; message?: string }) =>
+    error.statusCode === 404 && /Заменяемый/u.test(String(error.message)));
   assert.deepEqual(await readdir(join(root, "global")).catch(() => []), [], "недопринятые файлы удалены");
-  assert.ok(!queries.some((query) => query.sql.startsWith("INSERT INTO knowledge_uploads")));
+  // Запись приёма пытались вставить только в двух случаях с внешним ключом,
+  // и обе транзакции откатились: ни записи, ни задания.
+  assert.equal(queries.filter((query) => query.sql.startsWith("INSERT INTO knowledge_uploads")).length, 2);
+  assert.ok(!queries.some((query) => query.sql === "COMMIT" || query.sql.startsWith("INSERT INTO job_outbox")));
 });
 
 test("загрузка при выключенном разборе у агента — сразу отказ, файл не пишется, поток дочитан", async () => {

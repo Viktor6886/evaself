@@ -220,25 +220,32 @@ export class KnowledgeDocumentsService {
    */
   async deleteCollection(id: unknown): Promise<{ deleted: string }> {
     const collectionId = uuid(id, "id");
-    const { rows } = await this.pool.query<{ total: string }>(
-      `SELECT count(*) AS total FROM knowledge_documents
-        -- tenant: system — документы общей базы в коллекции
-        WHERE collection_id = $1 AND user_id IS NULL`,
-      [collectionId],
-    );
-    const documents = Number(rows[0]?.total ?? 0);
-    if (documents > 0) throw adminConflict("В коллекции есть документы: сначала удалите их", { documents });
-    let deleted;
-    try {
-      deleted = await this.pool.query("DELETE FROM knowledge_collections WHERE id = $1 RETURNING id", [collectionId]);
-    } catch (error) {
-      // Документ успели загрузить между подсчётом и удалением: внешний
-      // ключ документа не даёт удалить коллекцию.
-      if ((error as { code?: unknown }).code === "23503") throw adminConflict("В коллекции есть документы: сначала удалите их");
-      throw error;
-    }
-    if (!deleted.rows[0]) throw adminNotFound("Коллекция не найдена");
-    return { deleted: collectionId };
+    return await this.transaction(async (client) => {
+      // Строка коллекции заперта до конца транзакции. Запись загрузки и
+      // документа ссылается на неё внешним ключом и ждёт этой блокировки,
+      // поэтому между подсчётом и удалением в коллекцию ничего не попадёт,
+      // а загрузка, начатая раньше, уже видна в подсчёте.
+      const locked = await client.query("SELECT id FROM knowledge_collections WHERE id = $1 FOR UPDATE", [collectionId]);
+      if (!locked.rows[0]) throw adminNotFound("Коллекция не найдена");
+      const { rows } = await client.query<{ documents: string; uploads: string }>(
+        `SELECT
+           (SELECT count(*) FROM knowledge_documents
+             -- tenant: system — документы общей базы в коллекции
+             WHERE collection_id = $1 AND user_id IS NULL) AS documents,
+           (SELECT count(*) FROM knowledge_uploads
+             -- tenant: system — неразобранные загрузки общей базы в коллекции
+             WHERE collection_id = $1 AND user_id IS NULL AND status IN ('queued', 'processing')) AS uploads`,
+        [collectionId],
+      );
+      const documents = Number(rows[0]?.documents ?? 0);
+      if (documents > 0) throw adminConflict("В коллекции есть документы: сначала удалите их", { documents });
+      // Неразобранная загрузка ещё создаст документ; удали коллекцию сейчас —
+      // каскад снял бы запись приёма, и файл остался бы на томе без неё.
+      const uploads = Number(rows[0]?.uploads ?? 0);
+      if (uploads > 0) throw adminConflict("В коллекцию идёт загрузка: дождитесь её разбора", { uploads });
+      await client.query("DELETE FROM knowledge_collections WHERE id = $1", [collectionId]);
+      return { deleted: collectionId };
+    });
   }
 
   private async collection(id: string): Promise<KnowledgeCollectionView> {
@@ -377,12 +384,22 @@ export class KnowledgeDocumentsService {
       if (size === 0) throw adminBadRequest("Файл пустой", { field: "file" });
       if (input.truncated?.()) throw adminBadRequest("Файл больше 10 МБ", { field: "file" });
       await this.transaction(async (client) => {
-        await client.query(
-          `INSERT INTO knowledge_uploads
-             (id, user_id, collection_id, replaces_document_id, name, mime, size_bytes, content_hash, storage_path, status)
-           VALUES ($1, NULL, $2, $3, $4, $5, $6, $7, $8, 'queued')`,
-          [id, collectionId, replaces, name, input.mime, size, hash.digest("hex"), path],
-        );
+        try {
+          await client.query(
+            `INSERT INTO knowledge_uploads
+               (id, user_id, collection_id, replaces_document_id, name, mime, size_bytes, content_hash, storage_path, status)
+             VALUES ($1, NULL, $2, $3, $4, $5, $6, $7, $8, 'queued')`,
+            [id, collectionId, replaces, name, input.mime, size, hash.digest("hex"), path],
+          );
+        } catch (error) {
+          // Коллекцию удалили, пока читался файл, или заменяемого документа
+          // нет: это отказ по данным запроса, а не сбой сервера.
+          if ((error as { code?: unknown }).code !== "23503") throw error;
+          const constraint = String((error as { constraint?: unknown }).constraint ?? "");
+          throw constraint.includes("replaces")
+            ? adminNotFound("Заменяемый документ не найден")
+            : adminNotFound("Коллекция не найдена");
+        }
         await recordKnowledgeIngest(outbox, client, { uploadId: id, userId: null });
       });
       return { id, status: "queued" };

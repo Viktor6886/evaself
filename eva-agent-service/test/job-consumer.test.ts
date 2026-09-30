@@ -126,7 +126,12 @@ async function layerConsumers(flags: Record<string, boolean>, initiative = false
 }
 
 test("слой заданий: у каждой очереди с обработчиками есть потребитель", async () => {
-  assert.deepEqual(await layerConsumers({}), ["consume:research:evaself:bullmq:2"], "OSINT регистрируется всегда");
+  // Удаление, переиндексация и сверка базы знаний ставятся и при
+  // выключенных загрузках — их очередь потребляется всегда.
+  assert.deepEqual(await layerConsumers({}), [
+    "consume:memory:evaself:bullmq:1",
+    "consume:research:evaself:bullmq:2",
+  ], "OSINT и обслуживание базы знаний регистрируются всегда");
   assert.deepEqual(await layerConsumers({
     knowledgeUploadsEnabled: true, bullmqMaintenanceEnabled: true, bullmqProactiveEnabled: true,
   }, true), [
