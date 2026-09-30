@@ -20,6 +20,7 @@ const LOADERS = {
   persona: loadPersona,
   letta: loadLetta,
   tools: loadTools,
+  knowledge: loadKnowledge,
   monitoring: loadMonitoring,
   settings: loadSettings,
   security: loadSecrets,

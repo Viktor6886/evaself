@@ -8,9 +8,9 @@ import type { JobTimingPolicy } from "../jobs/policy.js";
 import type { JobContext } from "../jobs/runtime.js";
 import type { Readable } from "node:stream";
 import type { ChunkingOptions } from "./chunking.js";
-import { deleteKnowledgeDocuments, isKnowledgeId, knowledgeOwner, type KnowledgeOwner } from "./documents.js";
+import { deleteKnowledgeDocuments, isKnowledgeId, knowledgeOwner, knowledgeUploadPath, type KnowledgeOwner } from "./documents.js";
 import { DocumentIngestor, type KnowledgeChunk } from "./ingestion.js";
-import { errorCode, type KnowledgeIndexScheduler } from "./indexer.js";
+import { errorCode, knowledgeIndexScheduler, type KnowledgeIndexScheduler } from "./indexer.js";
 
 export const KNOWLEDGE_INGEST_JOB = "knowledge_ingest";
 /** Что принимается в базу знаний: и в личную (Mini App, Telegram), и в общую (панель). */
@@ -54,8 +54,28 @@ function stableUploadId(userId:number,key:string):string{
   return `${hex.slice(0,8)}-${hex.slice(8,12)}-5${hex.slice(13,16)}-${((parseInt(hex.slice(16,18),16)&0x3f)|0x80).toString(16).padStart(2,"0")}${hex.slice(18,20)}-${hex.slice(20,32)}`;
 }
 
+/** Документов в списке Mini App и в одной порции очистки. */
+const OVERVIEW_LIMIT = 200;
+const CLEAR_BATCH = 500;
+
+/**
+ * Состояние документа для человека. Индекс Qdrant выключен — поиск идёт по
+ * PostgreSQL, и разобранный документ уже готов; включён — документ готов,
+ * когда проиндексирован.
+ */
+export type KnowledgeDocumentState = "ready" | "indexing" | "failed";
+
+export function knowledgeDocumentState(indexStatus: string, indexing: boolean): KnowledgeDocumentState {
+  if (!indexing || indexStatus === "ready") return "ready";
+  return indexStatus === "failed" ? "failed" : "indexing";
+}
+
 export class KnowledgeUploadService {
-  constructor(private readonly db: Database, private readonly jobs: JobOutbox, private readonly root: string, private readonly maxBytes=10*1024*1024) {}
+  /** Задания синхронизации удалённых документов: удаление ставится всегда. */
+  private readonly documentJobs: KnowledgeIndexScheduler;
+  constructor(private readonly db: Database, private readonly jobs: JobOutbox, private readonly root: string, private readonly maxBytes=10*1024*1024, private readonly indexEnabled: () => boolean = () => false) {
+    this.documentJobs = knowledgeIndexScheduler(jobs, () => true);
+  }
   private async internalUser(telegramId:number):Promise<number>{return await this.db.withSystemScope("verified-identity.resolve",async()=>{const {rows}=await this.db.query<{id:string}>("SELECT id FROM users WHERE telegram_id=$1",[telegramId]);if(!rows[0])throw new Error("upload_user_missing");return Number(rows[0].id);},{inherit:true});}
   /**
    * Загрузка в базу знаний. `idempotencyKey` нужен загрузкам, которые
@@ -63,13 +83,23 @@ export class KnowledgeUploadService {
    * расшифровки аудиофайла) возвращает уже созданную загрузку, а не
    * заводит вторую копию того же материала.
    */
-  async createFromStream(telegramId:number,input:{name:string;mime:string;stream:Readable;truncated?:()=>boolean;idempotencyKey?:string}):Promise<{id:string;status:string}>{
+  async createFromStream(telegramId:number,input:{name:string;mime:string;stream:Readable;truncated?:()=>boolean;idempotencyKey?:string;replaces?:string}):Promise<{id:string;status:string}>{
     const userId=await this.internalUser(telegramId); if(!ALLOWED.has(input.mime))throw new Error("document_type_unsupported");
+    const replaces=input.replaces??null; if(replaces!==null&&!isKnowledgeId(replaces))throw new Error("document_replaces_invalid");
     const id=input.idempotencyKey?stableUploadId(userId,input.idempotencyKey):randomUUID();
     if(input.idempotencyKey){const existing=await this.db.withUserScope({userId,label:"knowledge.upload.replay",inherit:true},async()=>await this.db.query<{id:string;status:string}>("SELECT id,status FROM knowledge_uploads WHERE id=$1 AND user_id=$2",[id,userId]));if(existing.rows[0])return {id:existing.rows[0].id,status:existing.rows[0].status};}
     const dir=resolve(this.root,String(userId)); await mkdir(dir,{recursive:true,mode:0o700});const path=join(dir,id);const hash=createHash("sha256");let size=0;const file=await open(path,"wx",0o600);
     try { for await(const value of input.stream){const chunk=Buffer.isBuffer(value)?value:Buffer.from(value);size+=chunk.length;if(size>this.maxBytes)throw new Error("document_too_large");hash.update(chunk);await file.write(chunk);}await file.sync();await file.close();if(size===0||input.truncated?.())throw new Error(size===0?"document_empty":"document_too_large");
-      return await this.db.withUserScope({userId,label:"knowledge.upload",inherit:true},async()=>await this.db.transaction(async client=>{await client.query("INSERT INTO knowledge_uploads(id,user_id,name,mime,size_bytes,content_hash,storage_path,status) VALUES($1,$2,$3,$4,$5,$6,$7,'queued')",[id,userId,input.name,input.mime,size,hash.digest("hex"),path]);await recordKnowledgeIngest(this.jobs,client,{uploadId:id,userId});return{id,status:"queued"};}));
+      return await this.db.withUserScope({userId,label:"knowledge.upload",inherit:true},async()=>await this.db.transaction(async client=>{
+        // Новая версия — только своего документа: чужой id не отличается
+        // здесь от несуществующего, и ни тот, ни другой не принимается.
+        if(replaces!==null){const own=await client.query("SELECT id FROM knowledge_documents WHERE id=$1 AND user_id=$2 FOR SHARE",[replaces,userId]);if(!own.rows[0])throw new Error("document_replaces_missing");}
+        // Колонка замены (миграция 092) называется, только когда замена
+        // есть: обычная загрузка остаётся той же вставкой, что и раньше.
+        const values=[id,userId,input.name,input.mime,size,hash.digest("hex"),path];
+        if(replaces===null)await client.query("INSERT INTO knowledge_uploads(id,user_id,name,mime,size_bytes,content_hash,storage_path,status) VALUES($1,$2,$3,$4,$5,$6,$7,'queued')",values);
+        else await client.query("INSERT INTO knowledge_uploads(id,user_id,name,mime,size_bytes,content_hash,storage_path,status,replaces_document_id) VALUES($1,$2,$3,$4,$5,$6,$7,'queued',$8)",[...values,replaces]);
+        await recordKnowledgeIngest(this.jobs,client,{uploadId:id,userId});return{id,status:"queued"};}));
     } catch(error){await file.close().catch(()=>undefined);await rm(path,{force:true});throw error;}
   }
   /**
@@ -87,6 +117,79 @@ export class KnowledgeUploadService {
       [id,userId],
     ));
     return rows[0]??null;
+  }
+  /**
+   * Своя база в Mini App: документы с понятным человеку состоянием и
+   * последние загрузки. Внутренние коды индекса наружу не отдаются.
+   */
+  async overview(telegramId:number){
+    const userId=await this.internalUser(telegramId);
+    const indexing=this.indexEnabled();
+    return await this.db.withUserScope({userId,label:"knowledge.overview",inherit:true},async()=>{
+      const documents=await this.db.query<{id:string;name:string;mime:string;size_bytes:string|null;chunk_count:number;index_status:string;revision:number;source:string;created_at:Date;updated_at:Date}>(
+        `SELECT id,name,mime,size_bytes,chunk_count,index_status,revision,source,created_at,updated_at
+           FROM knowledge_documents
+          WHERE user_id=$1
+          ORDER BY created_at DESC
+          LIMIT ${OVERVIEW_LIMIT}`,
+        [userId],
+      );
+      const total=await this.db.query<{total:string}>("SELECT count(*) AS total FROM knowledge_documents WHERE user_id=$1",[userId]);
+      const uploads=await this.db.query(
+        `SELECT id,name,size_bytes,status,outcome,error_code,created_at
+           FROM knowledge_uploads
+          WHERE user_id=$1
+          ORDER BY created_at DESC
+          LIMIT 20`,
+        [userId],
+      );
+      return {
+        documents:documents.rows.map(({index_status,size_bytes,...row})=>({...row,size_bytes:size_bytes===null?null:Number(size_bytes),state:knowledgeDocumentState(index_status,indexing)})),
+        total:Number(total.rows[0]?.total??0),
+        uploads:uploads.rows,
+      };
+    });
+  }
+  /** Удалить свой документ: PostgreSQL сразу, файл и точки Qdrant — заданием. */
+  async remove(telegramId:number,documentId:string):Promise<{deleted:boolean}>{
+    if(!isKnowledgeId(documentId))return{deleted:false};
+    const userId=await this.internalUser(telegramId);
+    const removed=await this.db.withUserScope({userId,label:"knowledge.delete",inherit:true},async()=>await this.db.transaction(async client=>
+      await deleteKnowledgeDocuments(client,knowledgeOwner(userId),[documentId],this.documentJobs)));
+    return{deleted:removed.length>0};
+  }
+  /**
+   * Очистить свою базу: все документы и неудавшиеся загрузки вместе с их
+   * файлами. Загрузка, которая ещё разбирается, остаётся: её документ
+   * появится после очистки, и человек увидит его в списке.
+   */
+  async clear(telegramId:number):Promise<{deleted:number}>{
+    const userId=await this.internalUser(telegramId);
+    const owner=knowledgeOwner(userId);
+    return await this.db.withUserScope({userId,label:"knowledge.clear",inherit:true},async()=>{
+      let deleted=0;
+      // Порциями: у человека могут быть тысячи документов, а одна
+      // транзакция на всё держала бы блокировки и задания до конца.
+      for(;;){
+        const {rows}=await this.db.query<{id:string}>(`SELECT id FROM knowledge_documents WHERE user_id=$1 ORDER BY id LIMIT ${CLEAR_BATCH}`,[userId]);
+        if(!rows.length)break;
+        const removed=await this.db.transaction(async client=>await deleteKnowledgeDocuments(client,owner,rows.map(row=>row.id),this.documentJobs));
+        deleted+=removed.length;
+        if(!removed.length)break;
+      }
+      // Сначала файл, потом строка: не удалился файл — строка остаётся, и
+      // следующая очистка его найдёт. Наоборот файл с личными данными
+      // остался бы без записи, по которой его можно найти.
+      const failed=await this.db.query<{id:string}>(
+        "SELECT id FROM knowledge_uploads WHERE user_id=$1 AND status IN ('failed','cancelled')",
+        [userId],
+      );
+      for(const row of failed.rows){
+        await rm(knowledgeUploadPath(this.root,owner,row.id),{force:true});
+        await this.db.query("DELETE FROM knowledge_uploads WHERE id=$1 AND user_id=$2 AND status IN ('failed','cancelled')",[row.id,userId]);
+      }
+      return{deleted};
+    });
   }
 }
 
@@ -167,7 +270,9 @@ export class KnowledgeIngestWorker {
 
   private async ingest(id: string, owner: KnowledgeOwner, signal: AbortSignal): Promise<void> {
     const upload = await this.upload(id, owner);
-    if (!upload) throw new Error("knowledge_upload_missing");
+    // Записи приёма нет — человек очистил базу, пока задание ждало
+    // повтора: разбирать нечего, и повторять задание незачем.
+    if (!upload) return;
     // Повтор задания после удачного приёма: документ уже заведён.
     if (upload.status === "ready") return;
     if (signal.aborted) {
