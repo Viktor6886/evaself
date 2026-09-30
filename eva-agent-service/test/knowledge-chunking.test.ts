@@ -136,3 +136,22 @@ test("markdown и текст: страницы по разрыву \\f, скры
   assert.deepEqual(chunks.map((chunk) => [chunk.section, chunk.pageStart]), [["Раз", 1], ["Два", 2]]);
   assert.doesNotMatch(chunks[1]!.content, /тайное/u);
 });
+
+test("«слово» длиннее фрагмента (base64, JSON, адрес) режется на куски без потерь", () => {
+  const token = Array.from({ length: 1000 }, (_, index) => String.fromCharCode(97 + (index % 26))).join("");
+  const chunks = chunkDocument([`Данные: ${token} конец.`], false, { size: 200, overlap: 0 });
+  assert.ok(chunks.every((chunk) => chunk.content.length <= 200));
+  assert.equal(chunks.map((chunk) => chunk.content).join("").replace(/\s+/gu, ""), `Данные:${token}конец.`);
+});
+
+test("перекрытие с предыдущей страницы входит в диапазон страниц фрагмента", () => {
+  const page1 = Array.from({ length: 6 }, (_, index) => `Первая страница, предложение ${index}.`).join(" ");
+  const page2 = Array.from({ length: 6 }, (_, index) => `Вторая страница, предложение ${index}.`).join(" ");
+  const chunks = chunkDocument([`# Раздел\n${page1}`, page2], true, { size: 260, overlap: 60 });
+  const crossing = chunks.find((chunk) => chunk.content.includes("Первая страница") && chunk.content.includes("Вторая страница"));
+  assert.ok(crossing, "нет фрагмента с перекрытием через страницу");
+  assert.equal(crossing!.pageStart, 1);
+  assert.equal(crossing!.pageEnd, 2);
+  // Фрагмент только со второй страницы по-прежнему начинается со второй.
+  assert.ok(chunks.filter((chunk) => !chunk.content.includes("Первая")).every((chunk) => chunk.pageStart === 2));
+});

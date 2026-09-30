@@ -103,13 +103,26 @@ function splitLong(text: string, size: number): string[] {
       return;
     }
     // Одно «предложение» длиннее фрагмента (таблица, перечень без точек):
-    // режется по словам.
+    // режется по словам, а «слово» длиннее фрагмента (base64, минифицированный
+    // JSON, длинный адрес) — на куски подряд: отбросить остаток значило бы
+    // молча потерять часть документа.
     for (const word of piece.split(/(\s+)/u)) {
       if ((current + word).length > size && current.trim()) {
         parts.push(current.trim());
         current = "";
       }
-      current += word.length > size ? word.slice(0, size) : word;
+      if (word.length <= size) {
+        current += word;
+        continue;
+      }
+      for (let start = 0; start < word.length; start += size) {
+        const slice = word.slice(start, start + size);
+        if (current.trim() && (current + slice).length > size) {
+          parts.push(current.trim());
+          current = "";
+        }
+        current += slice;
+      }
     }
   };
   for (const sentence of sentences) push(sentence);
@@ -176,6 +189,8 @@ export function chunkDocument(pages: readonly string[], paged: boolean, options:
     let pageStart: number | null = null;
     let pageEnd: number | null = null;
     let previous = "";
+    /** Страница конца предыдущего фрагмента — откуда взято перекрытие. */
+    let previousPage: number | null = null;
     const flush = (): void => {
       const content = text.trim();
       if (content) {
@@ -191,6 +206,7 @@ export function chunkDocument(pages: readonly string[], paged: boolean, options:
           tokenCount: Math.ceil(content.length / 4),
         });
         previous = content;
+        previousPage = pageEnd;
       }
       text = "";
       pageStart = null;
@@ -199,7 +215,15 @@ export function chunkDocument(pages: readonly string[], paged: boolean, options:
     const append = (piece: string, page: number | null): void => {
       if (!text && previous && overlap > 0) {
         const carried = tail(previous, overlap);
-        if (carried && carried.length + 1 + piece.length <= size) text = `${carried} `;
+        if (carried && carried.length + 1 + piece.length <= size) {
+          text = `${carried} `;
+          // Перекрытие — текст конца предыдущего фрагмента: его страница
+          // входит в диапазон, иначе ссылка на источник вела бы не туда.
+          if (previousPage !== null) {
+            pageStart = previousPage;
+            pageEnd = previousPage;
+          }
+        }
       }
       text = text ? `${text}${/\s$/u.test(text) ? "" : "\n\n"}${piece}` : piece;
       if (page !== null) {
