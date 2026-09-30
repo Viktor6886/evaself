@@ -1289,3 +1289,23 @@ body.editor-open { overflow: hidden; }
   .tariff-field small { display: none; }
   .tariff-limit-input { max-width: none; }
 }
+
+/* База знаний: общая база для всех пользователей. */
+.knowledge-empty { margin: 8px 0; color: var(--muted); }
+.knowledge-drop { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 8px 0 16px; padding: 16px; border: 1px dashed var(--line); border-radius: 12px; }
+.knowledge-drop.dragging { border-color: var(--green); background: rgba(91,234,154,.06); }
+.knowledge-drop label { display: flex; align-items: center; gap: 8px; }
+.knowledge-toolbar { display: flex; flex-wrap: wrap; gap: 10px; margin: 8px 0 12px; }
+.knowledge-toolbar select, .knowledge-toolbar input { min-width: 180px; }
+.knowledge-bulk { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 0 0 10px; }
+.knowledge-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin: 8px 0 16px; }
+.knowledge-metric { display: grid; gap: 4px; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+.knowledge-metric strong { font-size: 24px; }
+.knowledge-metric small { color: var(--muted); }
+.knowledge-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+@media (max-width: 720px) {
+  .knowledge-toolbar select, .knowledge-toolbar input { min-width: 0; width: 100%; min-height: 44px; }
+  .knowledge-drop { flex-direction: column; align-items: stretch; }
+  .knowledge-drop label { flex-direction: column; align-items: stretch; }
+  .knowledge-drop select { min-height: 44px; }
+}

@@ -49,6 +49,7 @@
         <button data-page="persona" class="nav-item"><span>✎</span>Персона и промпт</button>
         <button data-page="letta" class="nav-item"><span>⌬</span>Letta</button>
         <button data-page="tools" class="nav-item"><span>⚙</span>Инструменты</button>
+        <button data-page="knowledge" class="nav-item"><span>▤</span>База знаний</button>
         <div class="nav-caption">Модели и медиа</div>
         <button data-page="ai" class="nav-item"><span>✦</span>Искусственный интеллект</button>
         <button data-page="stt" class="nav-item"><span>◎</span>Распознавание речи</button>
@@ -707,6 +708,77 @@
         <!-- Тарифы. Лимиты живут в quotas, расход — в usage_counters;
              обе таблицы были до тарификации. Здесь их правят и смотрят,
              а не дублируют. -->
+        <section id="page-knowledge" class="page">
+          <div class="page-heading">
+            <div><p class="eyebrow">ОБЩАЯ БАЗА</p><h2>База знаний</h2><p>Документы, которые Ева может найти для всех пользователей: методички, регламенты, FAQ. Личные документы людей здесь не видны — только их число.</p></div>
+            <button id="reload-knowledge" class="button ghost">Обновить</button>
+          </div>
+
+          <section class="card">
+            <div class="section-heading">
+              <div>
+                <h3>Коллекции</h3>
+                <p class="block-caption">Логические папки общей базы. Выключенная коллекция не участвует в поиске, но её документы и векторы сохраняются. Удалить можно только пустую.</p>
+              </div>
+            </div>
+            <div id="knowledge-collections"></div>
+          </section>
+
+          <section class="card" id="knowledge-upload">
+            <div class="section-heading">
+              <div>
+                <h3>Загрузка</h3>
+                <p class="block-caption">PDF, DOCX, TXT, Markdown, HTML, JSON — до 10 МБ каждый. Тот же файл второй раз не добавится («дубликат»), файл с тем же именем в коллекции станет новой версией документа.</p>
+              </div>
+            </div>
+            <div class="knowledge-drop" id="knowledge-drop">
+              <label>Коллекция <select id="knowledge-upload-collection" aria-label="Коллекция для загрузки"></select></label>
+              <input type="file" id="knowledge-file" multiple hidden accept=".pdf,.docx,.txt,.md,.markdown,.html,.htm,.json">
+              <button class="button" id="knowledge-upload-button" type="button">Выбрать файлы</button>
+              <span class="block-caption">или перетащите их сюда</span>
+              <p id="knowledge-upload-progress" class="block-caption" aria-live="polite"></p>
+            </div>
+            <h4>Последние загрузки</h4>
+            <div id="knowledge-uploads"></div>
+          </section>
+
+          <section class="card">
+            <div class="section-heading">
+              <div>
+                <h3>Документы</h3>
+                <p class="block-caption">Разбор и индексация идут в фоне; список обновляется сам, пока они не закончатся.</p>
+              </div>
+            </div>
+            <div class="knowledge-toolbar">
+              <select id="knowledge-collection-select" aria-label="Коллекция"></select>
+              <select id="knowledge-status-filter" aria-label="Состояние индекса">
+                <option value="">Любое состояние</option>
+                <option value="ready">Готов</option>
+                <option value="pending">Ждёт индексации</option>
+                <option value="indexing">Индексируется</option>
+                <option value="failed">Ошибка индексации</option>
+              </select>
+              <input id="knowledge-search" type="search" placeholder="Поиск по названию" aria-label="Поиск по названию">
+            </div>
+            <div class="knowledge-bulk" id="knowledge-bulk" hidden>
+              <span id="knowledge-bulk-count">Ничего не выбрано</span>
+              <button class="button tiny ghost" id="knowledge-bulk-reindex" type="button" disabled>Переиндексировать</button>
+              <button class="button tiny danger" id="knowledge-bulk-delete" type="button" disabled>Удалить</button>
+            </div>
+            <div id="knowledge-documents"></div>
+          </section>
+
+          <section class="card">
+            <div class="section-heading">
+              <div>
+                <h3>Векторный индекс</h3>
+                <p class="block-caption">Qdrant — производный индекс: он целиком перестраивается из PostgreSQL. Первое построение и «Перестроить» идут в фоне порциями; поиск по включённой версии при этом не прерывается.</p>
+              </div>
+            </div>
+            <div id="knowledge-index"></div>
+          </section>
+        </section>
+
         <section id="page-tariffs" class="page">
           <div class="page-heading">
             <div><p class="eyebrow">ТАРИФИКАЦИЯ</p><h2>Тарифы</h2><p>Сколько положено на каждом тарифе и сколько стоит подписка. Значения применяются ко всем сразу.</p></div>
@@ -1162,6 +1234,7 @@
   <script src="./ui-persona.js" defer></script>
   <script src="./ui-letta.js" defer></script>
   <script src="./ui-tools.js" defer></script>
+  <script src="./ui-knowledge.js" defer></script>
   <script src="./ui-monitoring.js" defer></script>
   <script src="./ui-media.js" defer></script>
   <script src="./ui-stt.js" defer></script>

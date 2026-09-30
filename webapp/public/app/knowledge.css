@@ -1,0 +1,23 @@
+/* Вкладка «База знаний»: личные документы. Пятая кнопка меню появляется,
+   только когда функция включена (body.has-knowledge). */
+body.has-knowledge .bottom-nav{grid-template-columns:repeat(5,minmax(0,1fr))!important}
+/* ui-v12 даёт кнопкам меню display:grid!important — без этого правила
+   атрибут hidden не скрыл бы вкладку выключенной функции. */
+.bottom-nav .nav-item[hidden]{display:none!important}
+.knowledge-intro{display:grid;gap:10px;padding:16px;border-radius:16px;background:var(--surface)}
+.knowledge-intro p{margin:0;color:var(--text);line-height:1.4;overflow-wrap:anywhere}
+.knowledge-intro .knowledge-hint{color:var(--muted);font-size:13px}
+.knowledge-item{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px 10px;align-items:center;padding:12px 14px;border-radius:14px;background:var(--surface)}
+.knowledge-copy{min-width:0;display:grid;gap:2px}
+.knowledge-copy strong{overflow-wrap:anywhere;font-weight:600}
+.knowledge-copy small{color:var(--muted)}
+.knowledge-status{font-size:12px;padding:3px 8px;border-radius:999px;white-space:nowrap;background:var(--surface-soft);color:var(--muted)}
+.knowledge-status.is-ok{color:var(--accent);background:var(--accent-soft)}
+.knowledge-status.is-error{color:var(--danger);background:color-mix(in srgb,var(--danger) 12%,transparent)}
+.knowledge-actions{grid-column:1 / -1;display:flex;gap:12px;align-items:center;justify-content:flex-end;flex-wrap:wrap}
+.knowledge-actions .secondary-action{min-height:36px;padding:6px 12px}
+.danger-link{border:0;background:transparent;color:var(--danger);font:inherit;min-height:36px;padding:6px 4px;cursor:pointer}
+.knowledge-clear{justify-self:center;margin:12px auto 24px;display:block}
+/* Пять кнопок на самом узком телефоне: подпись «База знаний» помещается
+   только чуть меньшим шрифтом — меньше всех остальных не делаем. */
+@media (max-width:359px){body.has-knowledge .nav-item b{font-size:9.5px!important;letter-spacing:-.15px}}

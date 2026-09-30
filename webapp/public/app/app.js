@@ -106,6 +106,9 @@
 
       state.journalEnabled = Boolean(await window.EvaJournal?.probe?.());
       document.getElementById("journal-add-top").hidden = !state.journalEnabled;
+      // Вкладка «База знаний» появляется, только если сервер её включил.
+      // Проба не держит запуск: отказ означает «вкладки нет».
+      await window.EvaKnowledge?.probe?.().catch(() => undefined);
       // Окна инициативы подгружаются вместе с остальным профилем, чтобы
       // строка настроек сразу показывала выбранное, а не «Открыть».
       // Отказ не мешает запуску: раздел просто откроется пустым.
@@ -662,6 +665,7 @@
 
     target.querySelector(".scroll-content")?.scrollTo?.(0, 0);
     if (screen === "journal") void window.EvaJournal?.render?.();
+    if (screen === "knowledge") void window.EvaKnowledge?.render?.();
     if (screen === "development") renderDevelopment();
     if (screen === "profile") renderProfile();
     if (screen === "discovery") renderDiscovery();
@@ -1719,6 +1723,7 @@
       sprout: '<path d="M18 32V17M18 20C9 18 8 10 9 5c8 1 12 7 9 15Zm0-4c8-2 11-8 10-13-8 1-13 7-10 13Z"/>',
       user: '<circle cx="18" cy="10" r="6"/><path d="M6 33c1-10 5-15 12-15s11 5 12 15"/>',
       note: '<path d="M8 4h21l5 5v25H8Z"/><path d="M29 4v6h6M13 16h16M13 22h16M13 28h10"/>',
+      book: '<path d="M18 9c-4-3-9-4-14-3v24c5-1 10 0 14 3 4-3 9-4 14-3V6c-5-1-10 0-14 3Z"/><path d="M18 9v24"/>',
       card: '<rect x="4" y="8" width="32" height="23" rx="4"/><path d="M4 15h32M9 25h8"/>',
       voice: '<rect x="13" y="4" width="12" height="21" rx="6"/><path d="M8 18c0 7 5 11 11 11s11-4 11-11M19 29v6M13 35h12"/>',
       shield: '<path d="M18 3 32 8v10c0 9-6 14-14 17C10 32 4 27 4 18V8Z"/><path d="m11 19 5 5 10-11"/>',
