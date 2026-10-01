@@ -199,8 +199,11 @@ export class TaskEventService {
 
   async snooze(userId: number, taskId: number, until: Date): Promise<Record<string, unknown> | null> {
     const { rows } = await this.db.query<Record<string, unknown>>(
+      // Перенести напоминание — значит попросить его: выключенные
+      // напоминания задачи включаются вместе с новым временем.
       `UPDATE tasks SET status=CASE WHEN status='done' THEN 'open' ELSE status END,
-              completed_at=NULL, remind_at=$3, next_run_at=$3, locked_at=NULL
+              completed_at=NULL, remind_at=$3, next_run_at=$3, locked_at=NULL,
+              reminders_enabled=true
         WHERE id=$1 AND user_id=$2 RETURNING *`,
       [taskId, userId, until.toISOString()],
     );
@@ -234,6 +237,9 @@ export class TaskEventService {
           -- перечислять исключения значит разойтись с ним на первом же
           -- новом статусе (в схеме, к слову, «canceled» с одной «l»).
           AND t.status IN ('open', 'in_progress')
+          -- Задача с выключенными напоминаниями ближайшим напоминанием
+          -- не считается: планировщик её не тронет.
+          AND t.reminders_enabled
           AND COALESCE(t.next_run_at, t.remind_at, t.due_at) > now()
         ORDER BY COALESCE(t.next_run_at, t.remind_at, t.due_at)
         LIMIT 3`,

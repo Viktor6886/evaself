@@ -37,12 +37,15 @@ node --test --experimental-strip-types test/*.test.ts        # full regression
 | `src/jobs/` (слой) | `jobs-foundation.test.ts` |
 | `src/jobs/proactive/`, `agent-job.ts`, `maintenance.ts`, `mirror.ts` | `jobs-proactive.test.ts` |
 | `src/background.ts`, `src/time/cron.ts` | `runtime.test.ts`, `conversations.test.ts` |
+| `src/tools/task-tools.ts`, выборки задач планировщика | `task-reminders.test.ts`, `task-bulk-regression.test.ts`, `agent-tools.test.ts` |
 | `src/router/` | `llm-router.test.ts`, `managed-routing.test.ts`, `llm.test.ts`, `llm-reasoning.test.ts` |
 | `src/router/embeddings.ts`, `embedding-service.ts`, `embedding-versions.ts`, `client.ts` | `router-embeddings.test.ts`, `knowledge-embeddings.test.ts` |
 | `src/knowledge/qdrant-client.ts`, `vector-store.ts`, `metrics.ts` | `qdrant-vector-store.test.ts`, `metrics.test.ts` (настоящий Qdrant — `scripts/ci/test-qdrant.mjs`) |
-| `src/admin/knowledge-*.ts`, `src/knowledge/routes.ts` | `knowledge-embeddings.test.ts` |
+| `src/admin/knowledge-*.ts`, `src/knowledge/routes.ts` | `knowledge-embeddings.test.ts`, `knowledge-documents-admin.test.ts` |
+| `src/knowledge/maintenance.ts`, `documents.ts` | `knowledge-maintenance.test.ts`, `knowledge-indexer.test.ts` |
 | `src/knowledge/chunking.ts`, `document-text.ts` (структура) | `knowledge-chunking.test.ts`, `attachments.test.ts` |
-| `src/knowledge/indexer.ts`, `lifecycle.ts`, `ingestion.ts` | `knowledge-indexer.test.ts`, `knowledge-research.test.ts` |
+| `src/knowledge/indexer.ts`, `lifecycle.ts`, `ingestion.ts` | `knowledge-indexer.test.ts`, `knowledge-research.test.ts`, `knowledge-public.test.ts` |
+| `src/public/knowledge-routes.ts` | `knowledge-public.test.ts` |
 | `src/letta.ts` | `letta.test.ts`, `letta-contract.test.ts` |
 | `src/letta/capabilities.ts` | `letta-contract.test.ts` |
 | `src/letta/readiness.ts` | `readiness.test.ts` |

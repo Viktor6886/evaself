@@ -611,7 +611,11 @@ async function main(): Promise<void> {
     })
     : null;
 
-  const knowledgeUploads = jobs && config.knowledgeUploadsEnabled ? new KnowledgeUploadService(db,jobs.outbox,"/data/knowledge-uploads") : null;
+  // Состояние документа в Mini App зависит от того, включён ли индекс
+  // Qdrant: переключатель панели читается при каждом запросе.
+  const knowledgeUploads = jobs && config.knowledgeUploadsEnabled
+    ? new KnowledgeUploadService(db,jobs.outbox,"/data/knowledge-uploads",undefined,()=>config.knowledgeIndexEnabled&&Boolean(config.qdrantApiKey))
+    : null;
   // Расшифровка аудиофайла сохраняется тем же приёмом, что документ из
   // Mini App: одно хранилище и один поиск на все материалы человека.
   workflow.setKnowledgeUploadService(knowledgeUploads);
@@ -639,7 +643,7 @@ async function main(): Promise<void> {
     delete:async(t:number,id:string)=>await osint.delete(await internalUser(t),id),
   } : undefined;
   const knowledgeResearch = knowledgeUploads || research ? {
-    upload:async(t:number,x:{name:string;mime:string;stream:import("node:stream").Readable;truncated:()=>boolean})=>{if(!knowledgeUploads)throw new Error("knowledge_disabled");return await knowledgeUploads.createFromStream(t,x);},
+    upload:async(t:number,x:{name:string;mime:string;stream:import("node:stream").Readable;truncated:()=>boolean;replaces?:string})=>{if(!knowledgeUploads)throw new Error("knowledge_disabled");return await knowledgeUploads.createFromStream(t,x);},
     uploadStatus:async(t:number,id:string)=>await knowledgeUploads?.status(t,id),
     // Диалог исследования открывает сервер, а не браузер.
     //
@@ -728,6 +732,7 @@ async function main(): Promise<void> {
       },
     },
     ...(knowledgeResearch ? { knowledgeResearch } : {}),
+    ...(knowledgeUploads ? { knowledgeDocuments: knowledgeUploads } : {}),
     ...(osintPublic ? { osint: osintPublic } : {}),
     toolCatalog: {
       factory: toolFactory,

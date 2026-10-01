@@ -12,6 +12,7 @@
   <link rel="stylesheet" href="/app/ui-v12.css?v=20260913-ui-v13-fix1">
   <link rel="stylesheet" href="/app/ui-v13.css?v=20260913-ui-v13-fix2">
   <link rel="stylesheet" href="/app/subscription-ui.css?v=20260913-subscription-v1">
+  <link rel="stylesheet" href="/app/knowledge.css?v=20260930-knowledge-v1">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -117,6 +118,11 @@
         </nav>
       </section>
 
+      <section class="screen inner-screen" data-screen="knowledge" hidden>
+        <header class="screen-header ios-clean-header"><div><h1>База знаний</h1></div></header>
+        <div class="scroll-content" id="knowledge-content"></div>
+      </section>
+
       <section class="screen inner-screen" data-screen="profile" hidden>
         <header class="screen-header ios-clean-header"><div><h1>Профиль</h1></div></header>
         <div class="scroll-content" id="profile-content"></div>
@@ -128,6 +134,7 @@
       <button class="nav-item" data-target="discovery" type="button"><span data-icon="brain"></span><b>Тесты</b></button>
       <button class="nav-item" id="journal-nav" data-target="journal" type="button"><span data-icon="note"></span><b>Дневник</b></button>
       <button class="nav-item ui-development-nav" data-target="development" type="button" hidden><span data-icon="sprout"></span><b>Рост</b></button>
+      <button class="nav-item" id="knowledge-nav" data-target="knowledge" type="button" aria-label="База знаний" hidden><span data-icon="book"></span><b>База знаний</b></button>
       <button class="nav-item" data-target="profile" type="button"><span data-icon="user"></span><b>Профиль</b></button>
     </nav>
 
@@ -143,6 +150,7 @@
   <script src="/app/journal.js?v=20260906-discovery-v18"></script>
   <script src="/app/initiative.js?v=20260906-discovery-v18"></script>
   <script src="/app/discovery.js?v=20260906-discovery-v18"></script>
+  <script src="/app/knowledge.js?v=20260930-knowledge-v1"></script>
   <script src="/app/app.js?v=20260906-discovery-v18"></script>
   <script src="/app/ui-v12.js?v=20260913-ui-v13-fix1"></script>
   <script src="/app/subscription-ui.js?v=20260914-subscription-v2"></script>

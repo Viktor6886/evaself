@@ -11,6 +11,7 @@ import {
   MIN_WINDOW_MINUTES,
 } from "../jobs/proactive/windows.js";
 import type { ConversationService } from "./conversation-service.js";
+import { registerKnowledgePublicRoutes, type KnowledgeDocumentsPublic } from "./knowledge-routes.js";
 import { registerOsintPublicRoutes, type OsintPublic } from "./osint-routes.js";
 import {
   type TelegramWebAppUser,
@@ -789,7 +790,7 @@ export class PublicRepository implements PublicDataSource {
 }
 
 export interface KnowledgeResearchPublic {
-  upload(telegramId:number,input:{name:string;mime:string;stream:import("node:stream").Readable;truncated:()=>boolean}):Promise<unknown>;
+  upload(telegramId:number,input:{name:string;mime:string;stream:import("node:stream").Readable;truncated:()=>boolean;replaces?:string}):Promise<unknown>;
   uploadStatus(telegramId:number,id:string):Promise<unknown>;
   researchCreate(telegramId:number,input:Record<string,unknown>):Promise<unknown>;
   researchStatus(telegramId:number,id:string):Promise<unknown>;
@@ -808,6 +809,8 @@ export function registerPublicRoutes(
     rateLimiter?: RateLimiter;
     approvals?: { decide(input: { telegramId: number; sdkRequestId: string; decision: "allow" | "deny" }): Promise<unknown> };
     knowledgeResearch?: KnowledgeResearchPublic;
+    /** Своя база знаний в Mini App; нет — функция выключена, вкладка скрыта. */
+    knowledgeDocuments?: KnowledgeDocumentsPublic;
     osint?: OsintPublic;
     /**
      * Подписка в Mini App. Отсутствует — раздел честно говорит, что
@@ -1065,7 +1068,10 @@ export function registerPublicRoutes(
       try { part=await request.file({limits:{files:1,fields:0,parts:1,fileSize:10*1024*1024}}); }
       catch { throw badRequest("Некорректный multipart документ"); }
       if(!part||part.fieldname!=="file"||!part.filename||!part.mimetype)throw badRequest("Ожидается единственный файл в поле file");
-      try{return await input.knowledgeResearch.upload(publicUser(request).id,{name:part.filename,mime:part.mimetype,stream:part.file,truncated:()=>part.file.truncated});}
+      // Новая версия своего документа: id заменяемого — в строке запроса,
+      // потому что полей формы, кроме файла, маршрут не принимает.
+      const replaces=(request.query as {replaces?:unknown}|undefined)?.replaces;
+      try{return await input.knowledgeResearch.upload(publicUser(request).id,{name:part.filename,mime:part.mimetype,stream:part.file,truncated:()=>part.file.truncated,...(typeof replaces==="string"&&replaces?{replaces}:{})});}
       catch(error){throw badRequest(error instanceof Error?error.message:"Некорректный документ");}
     });
     publicApp.get("/knowledge/uploads/:id",async(request)=>{if(!input.knowledgeResearch)throw badRequest("Загрузка знаний отключена");return await input.knowledgeResearch.uploadStatus(publicUser(request).id,String((request.params as {id?:string}).id??""));});
@@ -1073,6 +1079,7 @@ export function registerPublicRoutes(
     publicApp.get("/research/:id",async(request)=>{if(!input.knowledgeResearch)throw badRequest("Исследования отключены");return await input.knowledgeResearch.researchStatus(publicUser(request).id,String((request.params as {id?:string}).id??""));});
     publicApp.get("/research/:id/report",async(request)=>{if(!input.knowledgeResearch)throw badRequest("Исследования отключены");return await input.knowledgeResearch.researchReport(publicUser(request).id,String((request.params as {id?:string}).id??""));});
     publicApp.post("/research/:id/cancel",async(request)=>{if(!input.knowledgeResearch)throw badRequest("Исследования отключены");return await input.knowledgeResearch.researchCancel(publicUser(request).id,String((request.params as {id?:string}).id??""));});
+    registerKnowledgePublicRoutes(publicApp, input.knowledgeDocuments, (request) => publicUser(request as FastifyRequest).id);
     registerOsintPublicRoutes(publicApp, input.osint, (request) => publicUser(request as FastifyRequest).id);
 
     // ---- Контроль памяти (шаг 16) ---------------------------------

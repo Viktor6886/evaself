@@ -46,7 +46,12 @@ export function buildChain(input: ChainInput): BuiltChain {
   const rejected: RejectedEntry[] = [];
   let primary: ProviderProfile | null = null;
 
-  const needed = estimateTokens(input.request);
+  // Вход считается один раз, ответ — по каждому провайдеру: ему уйдёт не
+  // запрошенный бюджет, а не больше его потолка (`normalizeForProvider`).
+  // Letta Code просит до 32 000 токенов ответа; мерь окно по сырому
+  // числу — провайдер с окном впритык выпадал бы из цепочки, хотя
+  // получил бы свои 4096.
+  const inputTokens = estimateTokens({ ...input.request, max_tokens: 0 });
 
   input.providerIds.forEach((id, position) => {
     const provider = input.providers.get(id);
@@ -54,6 +59,7 @@ export function buildChain(input: ChainInput): BuiltChain {
     if (!provider) return;
     if (position === 0) primary = provider;
 
+    const needed = inputTokens + Math.min(Math.max(1, input.request.max_tokens), provider.max_output_tokens);
     const incompatible = incompatibility(provider, input.route, input.request, needed);
     if (incompatible) {
       rejected.push({ provider, reason: "incompatible", detail: incompatible });

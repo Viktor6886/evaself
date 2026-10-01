@@ -1,11 +1,13 @@
 -- =====================================================================
--- Схема базы знаний (миграции 090–091) — на настоящем PostgreSQL.
+-- Схема базы знаний (миграции 090–092) — на настоящем PostgreSQL.
 --
 -- Правила, которые держит сама схема и которые не проверить на фейках:
 -- коллекция бывает только у документа общей базы, активная версия
 -- эмбеддингов одна, запасной провайдер задаётся вместе с моделью,
 -- провайдера под индексом не удалить, русская морфология находит слово
--- в другой форме, а триграммы — фамилию с опечаткой.
+-- в другой форме, а триграммы — фамилию с опечаткой; загрузка — либо
+-- человека, либо в коллекцию общей базы, а исход загрузки — из
+-- закрытого списка (092).
 --
 -- Скрипт ничего не оставляет после себя: всё в транзакции с ROLLBACK.
 -- =====================================================================
@@ -169,6 +171,46 @@ BEGIN
     WHERE c.relname = name AND i.indisvalid
   );
   IF missing IS NOT NULL THEN RAISE EXCEPTION 'нет валидных индексов: %', missing; END IF;
+END $$;
+
+-- 092: загрузка принадлежит либо человеку, либо коллекции общей базы.
+INSERT INTO knowledge_uploads (id, user_id, collection_id, name, mime, size_bytes, content_hash, storage_path, status, outcome)
+VALUES
+  ('00000000-0000-0000-0000-0000000a0001', 910001, NULL, 'личное.md', 'text/markdown', 10, 'h2', '/data/knowledge-uploads/910001/a1', 'ready', 'new'),
+  ('00000000-0000-0000-0000-0000000a0002', NULL, '00000000-0000-0000-0000-0000000c0001', 'FAQ.md', 'text/markdown', 10, 'h1', '/data/knowledge-uploads/global/a2', 'ready', 'duplicate');
+
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO knowledge_uploads (id, user_id, collection_id, name, mime, size_bytes, content_hash, storage_path, status)
+    VALUES ('00000000-0000-0000-0000-0000000a0003', NULL, NULL, 'ничей.md', 'text/markdown', 1, 'h', '/x', 'queued');
+    RAISE EXCEPTION 'загрузка без владельца и без коллекции принята';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+  BEGIN
+    INSERT INTO knowledge_uploads (id, user_id, collection_id, name, mime, size_bytes, content_hash, storage_path, status)
+    VALUES ('00000000-0000-0000-0000-0000000a0004', 910001, '00000000-0000-0000-0000-0000000c0001', 'и то и другое.md', 'text/markdown', 1, 'h', '/x', 'queued');
+    RAISE EXCEPTION 'личная загрузка в коллекции общей базы принята';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+  BEGIN
+    UPDATE knowledge_uploads SET outcome = 'guess' WHERE id = '00000000-0000-0000-0000-0000000a0001';
+    RAISE EXCEPTION 'исход загрузки вне списка принят';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+END $$;
+
+-- Начало построения версии и выключенное расписание сверки.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                 WHERE table_name = 'knowledge_embedding_versions' AND column_name = 'build_started_at') THEN
+    RAISE EXCEPTION 'нет knowledge_embedding_versions.build_started_at';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM job_schedules
+                 WHERE code = 'knowledge_reconcile' AND queue = 'memory' AND NOT enabled) THEN
+    RAISE EXCEPTION 'расписание сверки базы знаний не заведено выключенным';
+  END IF;
 END $$;
 
 ROLLBACK;
