@@ -322,10 +322,30 @@ interface OpenAiIn {
   tools?: unknown;
   temperature?: unknown;
   max_tokens?: unknown;
+  max_completion_tokens?: unknown;
   stream?: unknown;
   response_format?: { type?: unknown; json_schema?: unknown } | null;
   metadata?: { request_id?: unknown; user_id?: unknown; agent_id?: unknown; sensitive?: unknown };
   user?: unknown;
+}
+
+/**
+ * Бюджет ответа из запроса.
+ *
+ * Нынешний OpenAI API называет его `max_completion_tokens`, и так его шлёт
+ * Letta Code для нашего адреса: `max_tokens` она отдаёт только узкому
+ * списку провайдеров. Читалось одно `max_tokens`, и каждый ход Евы молча
+ * получал умолчание в 2000 токенов. У рассуждающей модели размышление
+ * входит в этот бюджет и съедало его целиком — ход кончался
+ * `max_tokens_exceeded` без единого слова человеку. Оба поля — новое
+ * главнее, как у самого OpenAI; без них — прежнее умолчание. Потолок
+ * провайдера накладывает `normalizeForProvider`.
+ */
+function outputBudget(body: OpenAiIn): number {
+  for (const value of [body.max_completion_tokens, body.max_tokens]) {
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) return Math.floor(value);
+  }
+  return 2_000;
 }
 
 export function fromOpenAi(raw: unknown, markerSecret = ""): LlmRequest {
@@ -408,9 +428,7 @@ export function fromOpenAi(raw: unknown, markerSecret = ""): LlmRequest {
     system_prompt: systemPrompt,
     tools,
     temperature: typeof body.temperature === "number" ? body.temperature : 0.7,
-    max_tokens: typeof body.max_tokens === "number" && body.max_tokens > 0
-      ? Math.floor(body.max_tokens)
-      : 2_000,
+    max_tokens: outputBudget(body),
     stream: body.stream === true,
     response_format: body.response_format?.type === "json_object"
       ? { type: "json_object" }

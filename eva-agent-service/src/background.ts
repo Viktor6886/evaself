@@ -195,6 +195,9 @@ export class BackgroundRuntime {
            JOIN agent_links a
              ON a.user_id = t.user_id AND a.kind = 'eva' AND a.status = 'active'
           WHERE t.status IN ('open', 'in_progress')
+            -- Выключенные напоминания: задача остаётся в списке, но сама
+            -- не напоминает и по расписанию не выполняется.
+            AND t.reminders_enabled
             AND a.conversation_id IS NOT NULL
             AND COALESCE(t.next_run_at, t.remind_at, t.due_at) <= now()
             AND (t.last_run_at IS NULL
@@ -395,6 +398,9 @@ export class BackgroundRuntime {
            ) tu ON true
            LEFT JOIN goals g ON g.id = t.goal_id AND g.user_id = t.user_id
           WHERE t.status IN ('open', 'in_progress')
+            -- Выключенные напоминания: задача остаётся в списке, но сама
+            -- не напоминает и по расписанию не выполняется.
+            AND t.reminders_enabled
             AND a.conversation_id IS NOT NULL
             AND COALESCE(t.next_run_at, t.remind_at, t.due_at) <= now()
             AND (t.last_run_at IS NULL OR t.last_run_at < COALESCE(t.next_run_at, t.remind_at, t.due_at))
