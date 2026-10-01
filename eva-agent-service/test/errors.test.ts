@@ -69,6 +69,12 @@ test("владелец получает причину словами, а не �
   assert.match(explained, /История диалога переросла окно модели/);
 });
 
+test("обрыв по лимиту вывода объясняется словами и называет, где его поднять", () => {
+  const explained = explainFailure("running a turn: Unexpected stop reason: max_tokens_exceeded")!;
+  assert.match(explained, /не уместился в лимит вывода/);
+  assert.match(explained, /Max выходных токенов/);
+});
+
 test("незнакомая ошибка объяснения не выдумывает", () => {
   assert.equal(explainFailure("connect ECONNREFUSED 10.0.0.5:8283"), null);
   assert.equal(explainFailure(""), null);

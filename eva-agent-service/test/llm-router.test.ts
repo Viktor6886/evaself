@@ -283,6 +283,25 @@ test("запрос, не помещающийся в окно, отсекает�
   assert.match(chain.rejected[0].detail, /не помещается/);
 });
 
+test("окно меряется по бюджету, который провайдер действительно получит", () => {
+  // Letta Code просит до 32 000 токенов ответа, а провайдер отдаст не
+  // больше своего потолка. Мерь окно по сырому числу — провайдер с
+  // окном впритык выпадал бы из цепочки, хотя запрос в него помещается.
+  const tight = provider({ id: "t", name: "tight", context_window: 65_536, max_output_tokens: 4_096 });
+  const big = request({ max_tokens: 32_000, messages: [{ role: "user", content: "я".repeat(80_000) }] });
+  const chain = buildChain({
+    route: ROUTE, request: big, providerIds: ["t"],
+    providers: new Map([["t", tight]]), breakers: new Map(), now: new Date(),
+  });
+  assert.equal(chain.usable.length, 1, chain.rejected[0]?.detail);
+  // Гигантский бюджет по-прежнему не исключает никого: его режет потолок.
+  const huge = buildChain({
+    route: ROUTE, request: request({ max_tokens: 1_000_000_000 }), providerIds: ["t"],
+    providers: new Map([["t", tight]]), breakers: new Map(), now: new Date(),
+  });
+  assert.equal(huge.usable.length, 1);
+});
+
 test("открытый breaker исключает провайдера, пока не вышла выдержка", () => {
   const p = provider({ id: "a", name: "primary" });
   const future = new Date(Date.now() + 60_000);
@@ -419,6 +438,26 @@ test("имя модели разворачивается в маршрут, ве
   assert.equal(parsed.system_prompt, "Ты — Ева.");
   assert.equal(parsed.messages.length, 1);
   assert.equal(parsed.tools[0]?.name, "save");
+});
+
+/**
+ * Бюджет ответа приходит в `max_completion_tokens`.
+ *
+ * Так его называет нынешний OpenAI API, и именно так его шлёт Letta Code
+ * для нашего адреса: поле `max_tokens` она отдаёт только узкому списку
+ * провайдеров. Роутер читал одно `max_tokens` и молча подставлял 2000 —
+ * у рассуждающей модели размышление съедало их целиком, и ход кончался
+ * `max_tokens_exceeded`.
+ */
+test("бюджет ответа читается из max_completion_tokens, а не подменяется умолчанием", () => {
+  const messages = [{ role: "user", content: "x" }];
+  assert.equal(fromOpenAi({ messages, max_completion_tokens: 32_000 }).max_tokens, 32_000);
+  assert.equal(fromOpenAi({ messages, max_tokens: 1_500 }).max_tokens, 1_500);
+  // Оба поля: новое название главнее, как у самого OpenAI.
+  assert.equal(fromOpenAi({ messages, max_tokens: 1_500, max_completion_tokens: 32_000 }).max_tokens, 32_000);
+  // Мусор в одном поле не отменяет другое.
+  assert.equal(fromOpenAi({ messages, max_tokens: 1_500, max_completion_tokens: "много" }).max_tokens, 1_500);
+  assert.equal(fromOpenAi({ messages }).max_tokens, 2_000, "без бюджета — прежнее умолчание");
 });
 
 test("неизвестное имя модели уходит в маршрут chat, пустой запрос отвергается", () => {
@@ -991,6 +1030,184 @@ test("streaming honors short Retry-After and falls back immediately for a long o
   assert.deepEqual(long.calls.map((call) => call.provider), ["primary", "backup"]);
 });
 
+/**
+ * Поток, ушедший в рассуждение до первого слова.
+ *
+ * Рассуждающая модель тратит бюджет на ход мыслей; кончился он раньше
+ * ответа — провайдер закрывает поток с `finish_reason=length` и пустым
+ * content. Letta Code такой исход превращает в `max_tokens_exceeded`, и
+ * человек видел отказ. Человеку ещё ничего не ушло, поэтому тот же
+ * провайдер получает повтор с бо́льшим бюджетом — как в непотоковом пути.
+ */
+function reasoningUntil(threshold: number, budgets: number[]) {
+  return {
+    complete: () => Promise.reject(new Error("не используется")),
+    stream: async function* (_n, req) {
+      budgets.push(req.max_tokens);
+      yield { type: "provider_state", state: { reasoning: `думаю при ${req.max_tokens}` } };
+      if (req.max_tokens < threshold) {
+        yield { type: "done", response: { ...ok(""), finish_reason: "length", usage: { tokens_in: 10, tokens_out: req.max_tokens } } };
+        return;
+      }
+      const response = ok("готово");
+      yield { type: "text", delta: response.content };
+      yield { type: "done", response };
+    },
+  };
+}
+
+test("streaming: ответ, съеденный рассуждением, повторяется тому же провайдеру с бо́льшим бюджетом", async () => {
+  const budgets: number[] = [];
+  const { router, calls, store } = harness(
+    [provider({ id: "a", name: "primary", max_output_tokens: 16_384 }), provider({ id: "b", name: "backup" })],
+    { primary: reasoningUntil(4_000, budgets), backup: always(() => Promise.resolve(ok("резерв"))) },
+  );
+  const spent: number[] = [];
+  const addSpend = store.addSpend.bind(store);
+  store.addSpend = (id, usage) => { spent.push(usage.tokens_out); return addSpend(id, usage); };
+  const chunks = [];
+  for await (const chunk of router.stream(request({ stream: true, max_tokens: 2_000 }))) chunks.push(chunk);
+
+  assert.deepEqual(calls.map((call) => call.provider), ["primary", "primary"], "резерв не нужен: провайдер исправен");
+  assert.equal(budgets[0], 2_000);
+  assert.ok(budgets[1]! >= 4_000 && budgets[1]! <= 16_384, `повтор с запасом в пределах потолка, получил ${budgets[1]}`);
+  assert.equal(chunks.filter((c) => c.type === "text").map((c) => c.delta).join(""), "готово");
+  const done = chunks.filter((c) => c.type === "done");
+  assert.equal(done.length, 1, "ровно один финальный ответ");
+  assert.equal(done[0].response.finish_reason, "stop");
+  // Состояние первой, брошенной попытки наружу не ушло: Letta получила
+  // рассуждение только того ответа, который и вернула человеку.
+  const states = chunks.filter((c) => c.type === "provider_state").map((c) => c.state.reasoning);
+  assert.ok(!states.includes("думаю при 2000"), `ушло состояние брошенной попытки: ${states.join()}`);
+  // Потраченные на рассуждение токены учтены: их провайдер списал.
+  assert.deepEqual(spent, [2_000, 5], "расход брошенной попытки не учтён");
+});
+
+test("streaming: бюджет упёрся в потолок провайдера — исход отдаётся как есть, без бесконечного цикла", async () => {
+  const budgets: number[] = [];
+  const { router } = harness(
+    [provider({ id: "a", name: "primary", max_output_tokens: 4_096 })],
+    { primary: reasoningUntil(1_000_000, budgets) },
+  );
+  const chunks = [];
+  for await (const chunk of router.stream(request({ stream: true, max_tokens: 2_000 }))) chunks.push(chunk);
+  assert.ok(budgets.every((budget) => budget <= 4_096), `вышли за потолок: ${budgets.join()}`);
+  assert.ok(budgets.length >= 2 && budgets.length < 10, `попыток: ${budgets.length}`);
+  const done = chunks.filter((c) => c.type === "done");
+  assert.equal(done.length, 1);
+  assert.equal(done[0].response.finish_reason, "length", "честный исход, а не выдуманный ответ");
+});
+
+test("streaming: пустой поток (Anthropic, Gemini бросают empty_response) тоже повторяется с запасом, а не уходит на резерв", async () => {
+  // Адаптеры Anthropic и Gemini не отдают done с length на ответе из одних
+  // размышлений — они бросают empty_response. Правило то же, что в
+  // непотоковом пути: сначала запас тому же провайдеру.
+  const budgets: number[] = [];
+  const { router, calls } = harness(
+    [provider({ id: "a", name: "primary", max_output_tokens: 16_384 }), provider({ id: "b", name: "backup" })],
+    {
+      primary: {
+        complete: () => Promise.reject(new Error("не используется")),
+        stream: async function* (_n, req) {
+          budgets.push(req.max_tokens);
+          yield { type: "provider_state", state: { thinking_blocks: [{ thinking: "..." }] } };
+          if (req.max_tokens < 4_000) {
+            throw new ProviderError("поток закончился без содержимого", "empty_response", { retryable: true });
+          }
+          const response = ok("готово");
+          yield { type: "text", delta: response.content };
+          yield { type: "done", response };
+        },
+      },
+      backup: always(() => Promise.resolve(ok("резерв"))),
+    },
+  );
+  const chunks = [];
+  for await (const chunk of router.stream(request({ stream: true, max_tokens: 2_000 }))) chunks.push(chunk);
+  assert.deepEqual(calls.map((call) => call.provider), ["primary", "primary"]);
+  assert.ok(budgets[1]! > budgets[0]!);
+  assert.equal(chunks.filter((c) => c.type === "text").map((c) => c.delta).join(""), "готово");
+});
+
+test("streaming: поднятый бюджет переживает повтор по лимиту запросов", async () => {
+  const budgets: number[] = [];
+  let calls429 = 0;
+  const { router } = harness([provider({ id: "a", name: "primary", max_output_tokens: 16_384, max_retries: 2 })], {
+    primary: {
+      complete: () => Promise.reject(new Error("не используется")),
+      stream: async function* (_n, req) {
+        budgets.push(req.max_tokens);
+        if (req.max_tokens < 4_000) {
+          yield { type: "done", response: { ...ok(""), finish_reason: "length" } };
+          return;
+        }
+        if (calls429 === 0) {
+          calls429 += 1;
+          throw new ProviderError("429", "rate_limited", { retryable: true, httpStatus: 429, retryAfterMs: 10 });
+        }
+        const response = ok("готово");
+        yield { type: "text", delta: response.content };
+        yield { type: "done", response };
+      },
+    },
+  }, undefined, { maxRetryAfterMs: 5_000 });
+  const chunks = [];
+  for await (const chunk of router.stream(request({ stream: true, max_tokens: 2_000 }))) chunks.push(chunk);
+  assert.equal(budgets.length, 3);
+  assert.equal(budgets[2], budgets[1], `повтор после 429 вернул прежний бюджет: ${budgets.join()}`);
+  assert.equal(chunks.filter((c) => c.type === "text").map((c) => c.delta).join(""), "готово");
+});
+
+test("streaming: вызов инструмента, оборванный по длине, не повторяется", async () => {
+  const budgets: number[] = [];
+  const { router } = harness([provider({ id: "a", name: "primary", max_output_tokens: 16_384 })], {
+    primary: {
+      complete: () => Promise.reject(new Error("не используется")),
+      stream: async function* (_n, req) {
+        budgets.push(req.max_tokens);
+        const call = { id: "c1", name: "save_task", arguments: "{\"title\":" };
+        yield { type: "tool_call", call };
+        yield { type: "done", response: { ...ok(""), tool_calls: [call], finish_reason: "length" } };
+      },
+    },
+  });
+  for await (const _chunk of router.stream(request({ stream: true, max_tokens: 2_000 }))) { /* дочитать */ }
+  assert.equal(budgets.length, 1, "вызов уже ушёл наверх — второй ответ запрещён");
+});
+
+test("streaming: проба после выдержки breaker тоже повторяет ответ, съеденный рассуждением", async () => {
+  const budgets: number[] = [];
+  const p = provider({ id: "a", name: "primary", max_output_tokens: 16_384 });
+  const { router, store } = harness([p], { primary: reasoningUntil(4_000, budgets) });
+  store.breakerRows.set(breakerKey("a", "model-a"), {
+    provider_id: "a", model: "model-a", state: "open", consecutive_errors: 3, pinned_out: false,
+    first_error_at: new Date(), opened_at: new Date(), probe_after: new Date(Date.now() - 1_000),
+    last_error_code: "quota_exhausted", last_success_at: null,
+  });
+  const chunks = [];
+  for await (const chunk of router.stream(request({ stream: true, max_tokens: 2_000 }))) chunks.push(chunk);
+  assert.equal(chunks.filter((c) => c.type === "text").map((c) => c.delta).join(""), "готово");
+  assert.equal(budgets.length, 2);
+  assert.equal(store.breakerRows.get(breakerKey("a", "model-a")).state, "closed", "проба закрыла breaker");
+});
+
+test("streaming: обрыв по длине после начала ответа не повторяется", async () => {
+  const budgets: number[] = [];
+  const { router } = harness([provider({ id: "a", name: "primary", max_output_tokens: 16_384 })], {
+    primary: {
+      complete: () => Promise.reject(new Error("не используется")),
+      stream: async function* (_n, req) {
+        budgets.push(req.max_tokens);
+        yield { type: "text", delta: "длинный ответ, который не уместился" };
+        yield { type: "done", response: { ...ok("длинный ответ, который не уместился"), finish_reason: "length" } };
+      },
+    },
+  });
+  const chunks = [];
+  for await (const chunk of router.stream(request({ stream: true, max_tokens: 2_000 }))) chunks.push(chunk);
+  assert.equal(budgets.length, 1, "часть ответа уже у человека — второй ответ запрещён");
+});
+
 test("streaming: обрыв после первого фрагмента не порождает второй ответ", async () => {
   const { router } = harness(
     [provider({ id: "a", name: "primary" }), provider({ id: "b", name: "backup" })],
@@ -1126,7 +1343,7 @@ test("параллельные запросы упираются в max_concurre
  * одной модели — активация провайдера падала с «lmstudio/eva/chat не
  * появилась в каталоге», перечисляя встроенные модели и ни одной своей.
  */
-function surface() {
+function surface(seen: Array<{ max_tokens: number }> = []) {
   const routes = new Map([["chat", { code: "chat" }], ["deep", { code: "deep" }]]);
   return createRouterServer({
     apiKey: "test-key",
@@ -1137,13 +1354,16 @@ function surface() {
       breakers: async () => new Map(),
     },
     router: {
-      complete: async () => ({
-        response: {
-          content: "ok", tool_calls: [], finish_reason: "stop",
-          usage: { tokens_in: 1, tokens_out: 1 }, model: "eva/chat",
-        },
-        request_id: "r1", provider_name: "primary", switches: 0,
-      }),
+      complete: async (request) => {
+        seen.push(request);
+        return {
+          response: {
+            content: "ok", tool_calls: [], finish_reason: "stop",
+            usage: { tokens_in: 1, tokens_out: 1 }, model: "eva/chat",
+          },
+          request_id: "r1", provider_name: "primary", switches: 0,
+        };
+      },
       stream: async function* () { throw new Error("не используется"); },
     },
   });
@@ -1178,6 +1398,25 @@ test("завершения принимаются по обоим путям", a
       });
       assert.equal(response.statusCode, 200, `${path} должен отвечать`);
     }
+  } finally {
+    await app.close();
+  }
+});
+
+test("бюджет из max_completion_tokens доходит до роутера через HTTP", async () => {
+  // Так запрос шлёт коннектор LM Studio в Letta Code: поле max_tokens он
+  // не заполняет вовсе.
+  const seen: Array<{ max_tokens: number }> = [];
+  const app = surface(seen);
+  await app.ready();
+  try {
+    const response = await app.inject({
+      method: "POST", url: "/v1/chat/completions",
+      headers: { authorization: "Bearer test-key", "content-type": "application/json" },
+      payload: { model: "eva/chat", messages: [{ role: "user", content: "x" }], max_completion_tokens: 32_000 },
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(seen[0]?.max_tokens, 32_000);
   } finally {
     await app.close();
   }
