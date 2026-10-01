@@ -283,6 +283,25 @@ test("запрос, не помещающийся в окно, отсекает�
   assert.match(chain.rejected[0].detail, /не помещается/);
 });
 
+test("окно меряется по бюджету, который провайдер действительно получит", () => {
+  // Letta Code просит до 32 000 токенов ответа, а провайдер отдаст не
+  // больше своего потолка. Мерь окно по сырому числу — провайдер с
+  // окном впритык выпадал бы из цепочки, хотя запрос в него помещается.
+  const tight = provider({ id: "t", name: "tight", context_window: 65_536, max_output_tokens: 4_096 });
+  const big = request({ max_tokens: 32_000, messages: [{ role: "user", content: "я".repeat(80_000) }] });
+  const chain = buildChain({
+    route: ROUTE, request: big, providerIds: ["t"],
+    providers: new Map([["t", tight]]), breakers: new Map(), now: new Date(),
+  });
+  assert.equal(chain.usable.length, 1, chain.rejected[0]?.detail);
+  // Гигантский бюджет по-прежнему не исключает никого: его режет потолок.
+  const huge = buildChain({
+    route: ROUTE, request: request({ max_tokens: 1_000_000_000 }), providerIds: ["t"],
+    providers: new Map([["t", tight]]), breakers: new Map(), now: new Date(),
+  });
+  assert.equal(huge.usable.length, 1);
+});
+
 test("открытый breaker исключает провайдера, пока не вышла выдержка", () => {
   const p = provider({ id: "a", name: "primary" });
   const future = new Date(Date.now() + 60_000);
@@ -1077,6 +1096,68 @@ test("streaming: бюджет упёрся в потолок провайдер�
   const done = chunks.filter((c) => c.type === "done");
   assert.equal(done.length, 1);
   assert.equal(done[0].response.finish_reason, "length", "честный исход, а не выдуманный ответ");
+});
+
+test("streaming: поднятый бюджет переживает повтор по лимиту запросов", async () => {
+  const budgets: number[] = [];
+  let calls429 = 0;
+  const { router } = harness([provider({ id: "a", name: "primary", max_output_tokens: 16_384, max_retries: 2 })], {
+    primary: {
+      complete: () => Promise.reject(new Error("не используется")),
+      stream: async function* (_n, req) {
+        budgets.push(req.max_tokens);
+        if (req.max_tokens < 4_000) {
+          yield { type: "done", response: { ...ok(""), finish_reason: "length" } };
+          return;
+        }
+        if (calls429 === 0) {
+          calls429 += 1;
+          throw new ProviderError("429", "rate_limited", { retryable: true, httpStatus: 429, retryAfterMs: 10 });
+        }
+        const response = ok("готово");
+        yield { type: "text", delta: response.content };
+        yield { type: "done", response };
+      },
+    },
+  }, undefined, { maxRetryAfterMs: 5_000 });
+  const chunks = [];
+  for await (const chunk of router.stream(request({ stream: true, max_tokens: 2_000 }))) chunks.push(chunk);
+  assert.equal(budgets.length, 3);
+  assert.equal(budgets[2], budgets[1], `повтор после 429 вернул прежний бюджет: ${budgets.join()}`);
+  assert.equal(chunks.filter((c) => c.type === "text").map((c) => c.delta).join(""), "готово");
+});
+
+test("streaming: вызов инструмента, оборванный по длине, не повторяется", async () => {
+  const budgets: number[] = [];
+  const { router } = harness([provider({ id: "a", name: "primary", max_output_tokens: 16_384 })], {
+    primary: {
+      complete: () => Promise.reject(new Error("не используется")),
+      stream: async function* (_n, req) {
+        budgets.push(req.max_tokens);
+        const call = { id: "c1", name: "save_task", arguments: "{\"title\":" };
+        yield { type: "tool_call", call };
+        yield { type: "done", response: { ...ok(""), tool_calls: [call], finish_reason: "length" } };
+      },
+    },
+  });
+  for await (const _chunk of router.stream(request({ stream: true, max_tokens: 2_000 }))) { /* дочитать */ }
+  assert.equal(budgets.length, 1, "вызов уже ушёл наверх — второй ответ запрещён");
+});
+
+test("streaming: проба после выдержки breaker тоже повторяет ответ, съеденный рассуждением", async () => {
+  const budgets: number[] = [];
+  const p = provider({ id: "a", name: "primary", max_output_tokens: 16_384 });
+  const { router, store } = harness([p], { primary: reasoningUntil(4_000, budgets) });
+  store.breakerRows.set(breakerKey("a", "model-a"), {
+    provider_id: "a", model: "model-a", state: "open", consecutive_errors: 3, pinned_out: false,
+    first_error_at: new Date(), opened_at: new Date(), probe_after: new Date(Date.now() - 1_000),
+    last_error_code: "quota_exhausted", last_success_at: null,
+  });
+  const chunks = [];
+  for await (const chunk of router.stream(request({ stream: true, max_tokens: 2_000 }))) chunks.push(chunk);
+  assert.equal(chunks.filter((c) => c.type === "text").map((c) => c.delta).join(""), "готово");
+  assert.equal(budgets.length, 2);
+  assert.equal(store.breakerRows.get(breakerKey("a", "model-a")).state, "closed", "проба закрыла breaker");
 });
 
 test("streaming: обрыв по длине после начала ответа не повторяется", async () => {

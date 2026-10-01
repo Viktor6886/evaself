@@ -852,7 +852,11 @@ export class LlmRouter {
             this.options.retryAfterJitterMs ?? DEFAULT_OPTIONS.retryAfterJitterMs!,
           ));
           await this.sleep(delay);
-          streamEntries.splice(entryIndex + 1, 0, { entry, attempt: attempt + 1 });
+          // Поднятый после рассуждения бюджет переживает повтор по лимиту:
+          // иначе повтор снова упёрся бы в тот же потолок рассуждения.
+          streamEntries.splice(entryIndex + 1, 0, {
+            entry, attempt: attempt + 1, ...(maxTokens === undefined ? {} : { maxTokens }),
+          });
           continue providerLoop;
         }
         await this.store.recordFailure(
@@ -1138,13 +1142,6 @@ const DEFAULT_ROUTING_SETTINGS: RoutingSettings = {
   single_failover_enabled: false,
 };
 
-/**
- * Насколько захват пробы считается действующим.
- *
- * Аренда обязана пережить сам запрос, иначе второй ход отберёт пробу у
- * первого, пока тот ещё ждёт ответа. Запас вдвое покрывает и повтор
- * после HTTP 400, и наращивание бюджета.
- */
 /** Ответ без единого слова и вызова, оборванный по длине: бюджет съело рассуждение. */
 function answerlessTruncation(response: LlmResponse): boolean {
   return response.finish_reason === "length"
@@ -1152,6 +1149,13 @@ function answerlessTruncation(response: LlmResponse): boolean {
     && response.tool_calls.length === 0;
 }
 
+/**
+ * Насколько захват пробы считается действующим.
+ *
+ * Аренда обязана пережить сам запрос, иначе второй ход отберёт пробу у
+ * первого, пока тот ещё ждёт ответа. Запас вдвое покрывает и повтор
+ * после HTTP 400, и наращивание бюджета.
+ */
 function probeLeaseMs(provider: ProviderProfile): number {
   return Math.max(60_000, provider.request_timeout_ms * 2);
 }
