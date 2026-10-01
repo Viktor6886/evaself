@@ -116,7 +116,7 @@ BullMQ не обрабатывает интерактивный ход и не �
 | Профиль | Поля профиля и подтверждения | `src/profile/profile-service.ts` |
 | Цели | Цели, результаты и рабочие блоки | `src/goals/goal-service.ts` |
 | Курсор программ | Где человек внутри длинной guided-программы; не дублирует VECTOR-Action | `src/goals/goal-program-service.ts`, `src/goals/goal-program-tools.ts` |
-| Задачи | Напоминания, отложенные действия и события | `src/tasks/task-event-service.ts`, `src/tasks/task-run.ts`, `src/tasks/task-runner.ts` |
+| Задачи | Напоминания, отложенные действия и события; напоминания задачи выключаются отдельно от неё (`tasks.reminders_enabled`, миграция 093, инструмент `set_task_reminders`) — все выборки планировщика его учитывают; `get_tasks` отдаёт компактные строки постранично (`offset`, `total`, `next_offset`), страница укладывается в предел ответа инструмента Letta Code | `src/tasks/task-event-service.ts`, `src/tasks/task-run.ts`, `src/tasks/task-runner.ts`, `src/tools/task-tools.ts` |
 | Отложенное действие | `tasks.kind='action'`: в назначенное время Ева выполняет задачу сама в conversation назначения `task_action` и отдаёт результат; попытки ограничены, суточный потолок действий — 20 | `src/tasks/task-run.ts`, `src/tasks/task-runner.ts`, `src/conversations/purpose-service.ts` |
 | Платежи | Telegram Stars, intents и выдача подписки | `src/payments/stars.ts`, `src/payments/grant.ts` |
 | Статус подписки | Read-only инструмент и навык текущего пользователя: тариф, срок, дни и остатки суточной/недельной/месячной квоты; модель не принимает ID и не может менять данные | `src/subscriptions/status-service.ts`, `src/subscriptions/subscription-tools.ts`, `../skills/subscription-status/SKILL.md` |

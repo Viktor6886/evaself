@@ -37,6 +37,7 @@ node --test --experimental-strip-types test/*.test.ts        # full regression
 | `src/jobs/` (слой) | `jobs-foundation.test.ts` |
 | `src/jobs/proactive/`, `agent-job.ts`, `maintenance.ts`, `mirror.ts` | `jobs-proactive.test.ts` |
 | `src/background.ts`, `src/time/cron.ts` | `runtime.test.ts`, `conversations.test.ts` |
+| `src/tools/task-tools.ts`, выборки задач планировщика | `task-reminders.test.ts`, `task-bulk-regression.test.ts`, `agent-tools.test.ts` |
 | `src/router/` | `llm-router.test.ts`, `managed-routing.test.ts`, `llm.test.ts`, `llm-reasoning.test.ts` |
 | `src/router/embeddings.ts`, `embedding-service.ts`, `embedding-versions.ts`, `client.ts` | `router-embeddings.test.ts`, `knowledge-embeddings.test.ts` |
 | `src/knowledge/qdrant-client.ts`, `vector-store.ts`, `metrics.ts` | `qdrant-vector-store.test.ts`, `metrics.test.ts` (настоящий Qdrant — `scripts/ci/test-qdrant.mjs`) |

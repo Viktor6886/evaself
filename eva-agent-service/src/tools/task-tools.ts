@@ -91,9 +91,23 @@ export class TaskToolFactory {
       tool(
         "get_tasks",
         "Получить задачи",
-        "Возвращает задачи текущего пользователя.",
+        "Возвращает задачи текущего пользователя постранично: total — сколько их всего, "
+        + "next_offset — с какого места просить следующую страницу (null — это была последняя). "
+        + "Чтобы пройти все задачи, вызывай с offset=next_offset, пока он не станет null.",
         listSchema(),
         list,
+      ),
+      tool(
+        "set_task_reminders",
+        "Включить или выключить напоминания задач",
+        "Выключает или включает напоминания у задач, не трогая сами задачи: они остаются "
+        + "в списке со своими сроками. Выключенная задача не напоминает и по расписанию "
+        + "не выполняется; включённая возвращается к прежнему расписанию. До 100 задач за вызов.",
+        objectSchema({
+          ids: { type: "array", items: { type: "integer" }, minItems: 1, maxItems: 100 },
+          enabled: boolean("true — напоминать, false — не напоминать"),
+        }, ["ids", "enabled"]),
+        async (args, runtime) => await this.setReminders(args, runtime),
       ),
       tool(
         "get_recent_reminders",
@@ -404,19 +418,89 @@ export class TaskToolFactory {
     };
   }
 
+  /**
+   * Страница задач.
+   *
+   * Полные строки (`SELECT *`) и потолок в 100 без смещения не давали
+   * пройти большой список: сотня строк со всеми колонками — около
+   * восьмидесяти тысяч знаков, а Letta Code обрезает ответ инструмента на
+   * 32 000, и список обрывался на середине. Задачи дальше сотой были
+   * недоступны вовсе. Теперь строки компактные, страница сама
+   * укорачивается до бюджета знаков, а `next_offset` говорит, откуда
+   * продолжать. Порядок однозначен до `id`: иначе соседние страницы
+   * могли бы повторить или пропустить задачу.
+   */
   private async list(args: JsonObject, runtime: AgentRuntimeContext): Promise<unknown> {
-    const { rows } = await this.db.query(
-      `SELECT * FROM tasks
+    const status = optionalString(args, "status", 30);
+    const limit = Math.min(Math.max(optionalInteger(args, "limit") ?? 50, 1), 100);
+    const offset = Math.min(Math.max(optionalInteger(args, "offset") ?? 0, 0), 1_000_000);
+    const withDescription = args.include_description === true;
+    const { rows } = await this.db.query<TaskListRow>(
+      `SELECT id, title, status, kind, priority, due_at, remind_at, next_run_at,
+              cron_expression, repeat_enabled, reminders_enabled, goal_id,
+              ${withDescription ? `left(description, ${DESCRIPTION_PREVIEW})` : "NULL::text"} AS description
+         FROM tasks
         WHERE user_id = $1 AND ($2::text IS NULL OR status = $2)
-        ORDER BY COALESCE(next_run_at, remind_at, due_at) NULLS LAST, created_at DESC
-        LIMIT $3`,
-      [
-        runtime.userId,
-        optionalString(args, "status", 30),
-        Math.min(Math.max(optionalInteger(args, "limit") ?? 30, 1), 100),
-      ],
+        ORDER BY COALESCE(next_run_at, remind_at, due_at) NULLS LAST, created_at DESC, id DESC
+        LIMIT $3 OFFSET $4`,
+      [runtime.userId, status, limit, offset],
     );
-    return { ok: true, tasks: rows };
+    const counted = await this.db.query<{ total: string }>(
+      "SELECT count(*) AS total FROM tasks WHERE user_id = $1 AND ($2::text IS NULL OR status = $2)",
+      [runtime.userId, status],
+    );
+    const total = Number(counted.rows[0]?.total ?? 0);
+    const page = { ok: true, total, offset, returned: 0, next_offset: null as number | null, tasks: [] as Record<string, unknown>[] };
+    for (const row of rows.map(compactTask)) {
+      page.tasks.push(row);
+      page.returned = page.tasks.length;
+      page.next_offset = offset + page.tasks.length;
+      // Меряется ровно то, что уйдёт модели: `toolResult` сериализует с
+      // отступами. Хотя бы одна задача уходит всегда, иначе next_offset
+      // не сдвинулся бы.
+      if (page.tasks.length > 1 && JSON.stringify(page, null, 2).length > TASK_PAGE_CHARS) {
+        page.tasks.pop();
+        break;
+      }
+    }
+    page.returned = page.tasks.length;
+    const next = offset + page.tasks.length;
+    page.next_offset = next < total && page.tasks.length > 0 ? next : null;
+    return page;
+  }
+
+  /**
+   * Напоминания задач — отдельно от самих задач. Раньше погасить
+   * напоминание можно было только закрыв или удалив задачу: даже без
+   * времени напоминания срок сам приводил к напоминанию.
+   */
+  private async setReminders(args: JsonObject, runtime: AgentRuntimeContext): Promise<unknown> {
+    if (typeof args.enabled !== "boolean") throw new Error("enabled должен быть true или false");
+    const enabled = args.enabled;
+    const ids = Array.isArray(args.ids)
+      ? [...new Set(args.ids.map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))].slice(0, 100)
+      : [];
+    if (ids.length === 0) throw new Error("ids: нужен хотя бы один ID задачи");
+    const changed = await this.db.transaction(async (client) => {
+      const { rows } = await client.query<{ id: string }>(
+        `UPDATE tasks SET reminders_enabled = $3, locked_at = NULL
+          WHERE user_id = $1 AND id = ANY($2::bigint[]) AND reminders_enabled IS DISTINCT FROM $3
+          RETURNING id`,
+        [runtime.userId, ids, enabled],
+      );
+      return rows.map((row) => Number(row.id));
+    });
+    for (const taskId of changed) {
+      await this.events.record({
+        userId: runtime.userId,
+        taskId,
+        eventType: "updated",
+        metadata: { reminders_enabled: enabled },
+      });
+    }
+    // Ответ компактный: числа и id, без строк задач — на сотне задач
+    // полные строки снова упёрлись бы в предел ответа инструмента.
+    return { ok: true, enabled, changed: changed.length, task_ids: changed };
   }
 
   private async update(
@@ -521,8 +605,59 @@ function taskSchema(): JsonObject {
 function listSchema(): JsonObject {
   return objectSchema({
     status: { type: "string", enum: ["open", "in_progress", "done", "canceled"] },
-    limit: integer("Количество, максимум 100"),
+    limit: integer("Задач на странице, максимум 100; по умолчанию 50"),
+    offset: integer("С какой задачи начать: next_offset из прошлого ответа"),
+    include_description: boolean("Добавить начало описания задачи"),
   });
+}
+
+/** Знаков описания в списке: начало, по которому задачу узнают, а не весь текст. */
+const DESCRIPTION_PREVIEW = 200;
+
+/**
+ * Бюджет страницы в знаках ответа инструмента. Letta Code обрезает ответ
+ * на 32 000 знаках; запас оставлен на её собственную обёртку.
+ */
+const TASK_PAGE_CHARS = 28_000;
+
+interface TaskListRow {
+  id: string | number;
+  title: string;
+  status: string;
+  kind: string;
+  priority: number;
+  due_at: Date | null;
+  remind_at: Date | null;
+  next_run_at: Date | null;
+  cron_expression: string | null;
+  repeat_enabled: boolean;
+  reminders_enabled: boolean;
+  goal_id: string | number | null;
+  description: string | null;
+}
+
+/** Только то, что нужно, чтобы узнать задачу и её расписание. Пустые поля не выводятся. */
+function compactTask(row: TaskListRow): Record<string, unknown> {
+  const iso = (value: Date | null) => value ? new Date(value).toISOString() : null;
+  const entry: Record<string, unknown> = {
+    id: Number(row.id),
+    title: row.title,
+    status: row.status,
+    kind: row.kind,
+    priority: row.priority,
+    reminders_enabled: row.reminders_enabled,
+  };
+  const optional: Record<string, unknown> = {
+    due_at: iso(row.due_at),
+    remind_at: iso(row.remind_at),
+    next_run_at: iso(row.next_run_at),
+    cron: row.cron_expression,
+    repeat: row.repeat_enabled || null,
+    goal_id: row.goal_id === null ? null : Number(row.goal_id),
+    description: row.description,
+  };
+  for (const [key, value] of Object.entries(optional)) if (value !== null && value !== undefined && value !== "") entry[key] = value;
+  return entry;
 }
 
 function updateSchema(title: string, description: string, due: string): JsonObject {
