@@ -32,6 +32,12 @@ Route задаётся детерминированно из:
 
 Распределённые RPM, TPM и inflight limits координируются через Valkey; канонические chains и breaker state находятся в PostgreSQL.
 
+## Бюджет ответа
+
+Бюджет берётся из `max_completion_tokens`, а без него из `max_tokens`; без обоих полей действует 2000. Именно `max_completion_tokens` шлёт коннектор LM Studio в Letta Code, через который App Server ходит в Router. Сверху бюджет ограничивает «Max выходных токенов» провайдера (`max_output_tokens`).
+
+У рассуждающей модели размышление входит в бюджет. Если оно съело бюджет до первого слова, ответ приходит пустым: непотоковый ответ без содержимого, поток с `finish_reason=length`. Тогда тот же провайдер получает повтор с бюджетом вчетверо больше, но не выше его потолка. В потоке так можно, пока человеку не ушло ни слова. Если и на потолке ответа нет, исход отдаётся как есть: Letta останавливает ход с `max_tokens_exceeded`, а владелец получает объяснение — поднять «Max выходных токенов» или снизить уровень reasoning.
+
 ## Telemetry
 
 `llm_requests` хранит requested/actual route, purpose, correlation ID, provider, model, status, latency и usage. Prompt, response, документы, memory и reasoning не сохраняются.

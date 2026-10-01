@@ -658,18 +658,22 @@ export class LlmRouter {
     let switches = 0;
     let lastError: ProviderError | null = null;
 
-    const streamEntries = chain.usable.map((entry) => ({ entry, attempt: 1 }));
+    // `maxTokens` — бюджет повтора, поднятый после ответа, целиком ушедшего
+    // в рассуждение (см. ниже); у обычной попытки его нет.
+    const streamEntries: Array<{ entry: (typeof chain.usable)[number]; attempt: number; maxTokens?: number }> =
+      chain.usable.map((entry) => ({ entry, attempt: 1 }));
     providerLoop: for (let entryIndex = 0; entryIndex < streamEntries.length; entryIndex += 1) {
-      const { entry, attempt } = streamEntries[entryIndex]!;
+      const { entry, attempt, maxTokens } = streamEntries[entryIndex]!;
       const attemptRequest = routed.settings.mode === "single"
         && entry.provider.id !== routed.settings.single_provider_id
         ? { ...request, metadata: { ...request.metadata, single_failover_used: true } }
         : request;
       const { provider } = entry;
-      const prepared = withBackupDirective(
+      const normalized = withBackupDirective(
         normalizeForProvider(attemptRequest, provider),
         entry.position > 0,
       );
+      const prepared = maxTokens === undefined ? normalized : { ...normalized, max_tokens: maxTokens };
       const estimated = estimateTokens(prepared);
 
       const gate = await this.gate(provider);
@@ -788,6 +792,25 @@ export class LlmRouter {
             await this.log(provider, attemptRequest, chain.primary?.id ?? null, {
               started, attempts: attempt, switches, response: chunk.response, streamed: true,
             });
+            // Бюджет кончился на рассуждении, до первого слова: провайдер
+            // закрыл поток по длине с пустым ответом. Отдать это наверх —
+            // значит закончить ход Letta `max_tokens_exceeded`. Человеку
+            // ещё ничего не ушло, и состояние этой попытки придержано в
+            // pendingState, поэтому повтор тому же провайдеру с запасом
+            // незаметен — как в непотоковом пути. Запас кончился (потолок
+            // провайдера) — исход отдаётся как есть.
+            if (!emitted && answerlessTruncation(chunk.response)) {
+              const raised = raiseOutputBudget(prepared, provider);
+              if (raised) {
+                this.logger.info("LLM Router: ответ ушёл в рассуждение, повтор с увеличенным output budget", {
+                  request_id: request.metadata.request_id,
+                  provider: provider.name,
+                  max_tokens: raised.max_tokens,
+                });
+                streamEntries.splice(entryIndex + 1, 0, { entry, attempt, maxTokens: raised.max_tokens });
+                continue providerLoop;
+              }
+            }
           }
           yield chunk;
         }
@@ -1122,6 +1145,13 @@ const DEFAULT_ROUTING_SETTINGS: RoutingSettings = {
  * первого, пока тот ещё ждёт ответа. Запас вдвое покрывает и повтор
  * после HTTP 400, и наращивание бюджета.
  */
+/** Ответ без единого слова и вызова, оборванный по длине: бюджет съело рассуждение. */
+function answerlessTruncation(response: LlmResponse): boolean {
+  return response.finish_reason === "length"
+    && !response.content.trim()
+    && response.tool_calls.length === 0;
+}
+
 function probeLeaseMs(provider: ProviderProfile): number {
   return Math.max(60_000, provider.request_timeout_ms * 2);
 }
