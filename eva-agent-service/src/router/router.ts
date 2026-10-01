@@ -841,6 +841,22 @@ export class LlmRouter {
           });
           throw error;
         }
+        // Пустой поток до первого слова. Адаптеры Anthropic и Gemini на
+        // ответе из одних размышлений бросают empty_response, а не отдают
+        // done с length. Правило то же, что в непотоковом пути: сначала
+        // запас тому же провайдеру, и только потом резерв.
+        if (error.reason === "empty_response") {
+          const raised = raiseOutputBudget(prepared, provider);
+          if (raised) {
+            this.logger.info("LLM Router: пустой поток, повтор с увеличенным output budget", {
+              request_id: request.metadata.request_id,
+              provider: provider.name,
+              max_tokens: raised.max_tokens,
+            });
+            streamEntries.splice(entryIndex + 1, 0, { entry, attempt, maxTokens: raised.max_tokens });
+            continue providerLoop;
+          }
+        }
         if (
           error.reason === "rate_limited" &&
           error.retryAfterMs !== null &&

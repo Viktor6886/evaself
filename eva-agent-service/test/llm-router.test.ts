@@ -1098,6 +1098,37 @@ test("streaming: бюджет упёрся в потолок провайдер�
   assert.equal(done[0].response.finish_reason, "length", "честный исход, а не выдуманный ответ");
 });
 
+test("streaming: пустой поток (Anthropic, Gemini бросают empty_response) тоже повторяется с запасом, а не уходит на резерв", async () => {
+  // Адаптеры Anthropic и Gemini не отдают done с length на ответе из одних
+  // размышлений — они бросают empty_response. Правило то же, что в
+  // непотоковом пути: сначала запас тому же провайдеру.
+  const budgets: number[] = [];
+  const { router, calls } = harness(
+    [provider({ id: "a", name: "primary", max_output_tokens: 16_384 }), provider({ id: "b", name: "backup" })],
+    {
+      primary: {
+        complete: () => Promise.reject(new Error("не используется")),
+        stream: async function* (_n, req) {
+          budgets.push(req.max_tokens);
+          yield { type: "provider_state", state: { thinking_blocks: [{ thinking: "..." }] } };
+          if (req.max_tokens < 4_000) {
+            throw new ProviderError("поток закончился без содержимого", "empty_response", { retryable: true });
+          }
+          const response = ok("готово");
+          yield { type: "text", delta: response.content };
+          yield { type: "done", response };
+        },
+      },
+      backup: always(() => Promise.resolve(ok("резерв"))),
+    },
+  );
+  const chunks = [];
+  for await (const chunk of router.stream(request({ stream: true, max_tokens: 2_000 }))) chunks.push(chunk);
+  assert.deepEqual(calls.map((call) => call.provider), ["primary", "primary"]);
+  assert.ok(budgets[1]! > budgets[0]!);
+  assert.equal(chunks.filter((c) => c.type === "text").map((c) => c.delta).join(""), "готово");
+});
+
 test("streaming: поднятый бюджет переживает повтор по лимиту запросов", async () => {
   const budgets: number[] = [];
   let calls429 = 0;
