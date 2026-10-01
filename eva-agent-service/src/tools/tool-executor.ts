@@ -53,6 +53,7 @@ export const CONTEXT_MUTATING_TOOLS: ReadonlySet<string> = new Set([
   "update_task",
   "mark_task_completed",
   "snooze_task_reminder",
+  "set_task_reminders",
   "delete_tasks",
 ]);
 

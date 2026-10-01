@@ -376,6 +376,22 @@ test("уже выполненный срок не выполняется вто�
   assert.equal(updates(db).length, 1, "срок сдвинут, работа не повторена");
 });
 
+test("задача, у которой выключили напоминания после захвата, не выполняется", async () => {
+  // Выборка взяла задачу, и она ждёт исполнителя; тем временем человек
+  // выключил её напоминания. Перед ходом признак перечитывается.
+  const db = fakeDb((sql) => (sql.includes("SELECT reminders_enabled FROM tasks") ? [{ reminders_enabled: false }] : null));
+  const { runner, turns, sent } = harness({ db });
+  await runner.execute(taskRow() as never);
+
+  assert.equal(turns.length, 0, "ход не начался");
+  assert.equal(sent.length, 0, "человеку ничего не ушло");
+  assert.equal(events(db).length, 0);
+  const released = updates(db);
+  assert.equal(released.length, 1);
+  assert.match(released[0]!.sql, /locked_at = NULL/u, "захват снят, а срок и попытки не тронуты");
+  assert.deepEqual(released[0]!.values, ["11", "7"]);
+});
+
 test("в conversation выполнения задачи инструменты не сужены, а профиль защищён", () => {
   const policy = purposePolicy("task_action");
   assert.equal(policy.allowedTools, null);

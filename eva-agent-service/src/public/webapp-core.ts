@@ -196,7 +196,7 @@ export function registerWebappCoreRoutes(
         const view = queryString(request, "view") ?? "all";
         const { rows } = await input.db.query(
           `SELECT id::text, title, description, status, priority, due_at, remind_at,
-                  completed_at, cron_expression, repeat_enabled, timezone,
+                  completed_at, cron_expression, repeat_enabled, reminders_enabled, timezone,
                   goal_id::text, goal_result_id::text, work_block_id::text,
                   estimated_minutes, energy_required, created_at, updated_at
              FROM tasks
@@ -205,7 +205,7 @@ export function registerWebappCoreRoutes(
               AND ($2::text = 'all'
                 OR ($2 = 'open' AND status IN ('open', 'in_progress'))
                 OR ($2 = 'done' AND status = 'done')
-                OR ($2 = 'reminders' AND remind_at IS NOT NULL))
+                OR ($2 = 'reminders' AND remind_at IS NOT NULL AND reminders_enabled))
             ORDER BY
               CASE status WHEN 'in_progress' THEN 0 WHEN 'open' THEN 1 ELSE 2 END,
               COALESCE(next_run_at, remind_at, due_at, created_at), id
@@ -623,7 +623,7 @@ async function dashboard(db: Database, user: OwnedUser): Promise<Record<string, 
     automaticFocusCandidates(db, user),
     db.query(
       `SELECT id::text, title, description, status, priority, due_at, remind_at,
-              completed_at, cron_expression, repeat_enabled, timezone,
+              completed_at, cron_expression, repeat_enabled, reminders_enabled, timezone,
               goal_id::text, goal_result_id::text, work_block_id::text,
               estimated_minutes, energy_required, created_at, updated_at
          FROM tasks
@@ -645,7 +645,7 @@ async function dashboard(db: Database, user: OwnedUser): Promise<Record<string, 
          (SELECT count(*) FROM tasks WHERE user_id = $1 AND status IN ('open','in_progress')
             AND COALESCE(due_at, remind_at) IS NOT NULL
             AND (COALESCE(due_at, remind_at) AT TIME ZONE $2)::date = (now() AT TIME ZONE $2)::date) AS today_tasks,
-         (SELECT count(*) FROM tasks WHERE user_id = $1 AND status IN ('open','in_progress') AND remind_at IS NOT NULL) AS reminders,
+         (SELECT count(*) FROM tasks WHERE user_id = $1 AND status IN ('open','in_progress') AND remind_at IS NOT NULL AND reminders_enabled) AS reminders,
          (SELECT count(*) FROM eva_notes WHERE user_id = $1) AS notes,
          (SELECT count(*) FROM eva_decisions WHERE user_id = $1 AND status IN ('open','review')) AS open_decisions`,
       [user.id, user.timezone],
@@ -697,7 +697,9 @@ async function dashboard(db: Database, user: OwnedUser): Promise<Record<string, 
   const mainFocus = manual ?? candidates[0] ?? fallbackFocus();
   const tasks = taskData.rows as Array<Record<string, unknown>>;
   const nextReminder = tasks
-    .filter((task) => task.remind_at && !["done", "completed", "canceled"].includes(String(task.status)))
+    // Выключенное напоминание не наступит — ближайшим его не показываем.
+    .filter((task) => task.remind_at && task.reminders_enabled !== false
+      && !["done", "completed", "canceled"].includes(String(task.status)))
     .sort((a, b) => new Date(String(a.remind_at)).getTime() - new Date(String(b.remind_at)).getTime())[0] ?? null;
   const countRow = counts.rows[0];
   const budgetRows = budget.rows as Array<Record<string, unknown>>;

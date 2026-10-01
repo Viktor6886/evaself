@@ -242,6 +242,9 @@ export class ProactiveSelection {
            ${CANDIDATE_JOINS}
            LEFT JOIN goals g ON g.id = task.goal_id AND g.user_id = task.user_id
           WHERE task.status IN ('open', 'in_progress')
+            -- Выключенные напоминания: задача остаётся в списке, но сама
+            -- не напоминает и по расписанию не выполняется.
+            AND task.reminders_enabled
             AND a.conversation_id IS NOT NULL
             AND COALESCE(task.next_run_at, task.remind_at, task.due_at) <= now()
             AND (task.last_run_at IS NULL
