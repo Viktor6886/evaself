@@ -171,6 +171,18 @@ export class ScheduledTaskRunner {
   ): Promise<void> {
     const doneEvent = kind === "action" ? "action_done" : "reminder_sent";
     try {
+      // Задачу взяли в работу раньше, чем человек выключил её напоминания:
+      // захват лежит в очереди исполнителя минуты. Признак перечитывается
+      // прямо перед ходом, и выключенная задача не напоминает и не
+      // выполняется; захват снимается, выборка её больше не возьмёт.
+      const current = await this.db.query<{ reminders_enabled: boolean }>(
+        "SELECT reminders_enabled FROM tasks WHERE id=$1 AND user_id=$2",
+        [task.id, task.user_id],
+      );
+      if (current.rows[0]?.reminders_enabled === false) {
+        await this.db.query("UPDATE tasks SET locked_at = NULL WHERE id=$1 AND user_id=$2", [task.id, task.user_id]);
+        return;
+      }
       const delivered = await this.db.query(
         `SELECT 1 FROM task_events
           WHERE user_id=$3 AND task_id=$1

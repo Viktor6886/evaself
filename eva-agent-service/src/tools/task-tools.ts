@@ -91,9 +91,9 @@ export class TaskToolFactory {
       tool(
         "get_tasks",
         "Получить задачи",
-        "Возвращает задачи текущего пользователя постранично: total — сколько их всего, "
-        + "next_offset — с какого места просить следующую страницу (null — это была последняя). "
-        + "Чтобы пройти все задачи, вызывай с offset=next_offset, пока он не станет null.",
+        "Возвращает задачи текущего пользователя. По умолчанию — ближайшие по расписанию, "
+        + "одной страницей; total — сколько задач всего. Весь список: order=id, затем "
+        + "after_id=next_after_id из прошлого ответа, пока next_after_id не станет null.",
         listSchema(),
         list,
       ),
@@ -102,7 +102,10 @@ export class TaskToolFactory {
         "Включить или выключить напоминания задач",
         "Выключает или включает напоминания у задач, не трогая сами задачи: они остаются "
         + "в списке со своими сроками. Выключенная задача не напоминает и по расписанию "
-        + "не выполняется; включённая возвращается к прежнему расписанию. До 100 задач за вызов.",
+        + "не выполняется; включённая возвращается к расписанию. Срок, прошедший пока "
+        + "напоминания были выключены, задним числом не срабатывает: повторяющаяся задача "
+        + "продолжит со следующего раза, разовые вернутся в overdue_ids — им нужно новое "
+        + "время через snooze_task_reminder. До 100 задач за вызов.",
         objectSchema({
           ids: { type: "array", items: { type: "integer" }, minItems: 1, maxItems: 100 },
           enabled: boolean("true — напоминать, false — не напоминать"),
@@ -419,88 +422,165 @@ export class TaskToolFactory {
   }
 
   /**
-   * Страница задач.
+   * Список задач.
    *
-   * Полные строки (`SELECT *`) и потолок в 100 без смещения не давали
-   * пройти большой список: сотня строк со всеми колонками — около
-   * восьмидесяти тысяч знаков, а Letta Code обрезает ответ инструмента на
-   * 32 000, и список обрывался на середине. Задачи дальше сотой были
-   * недоступны вовсе. Теперь строки компактные, страница сама
-   * укорачивается до бюджета знаков, а `next_offset` говорит, откуда
-   * продолжать. Порядок однозначен до `id`: иначе соседние страницы
-   * могли бы повторить или пропустить задачу.
+   * Полные строки (`SELECT *`) и потолок в 100 без продолжения не давали
+   * пройти большой список: сотня строк со всеми колонками намного длиннее
+   * 32 000 знаков, на которых Letta Code обрезает ответ инструмента, и
+   * список обрывался на середине; задачи дальше сотой были недоступны.
+   *
+   * Два порядка. По расписанию — ближайшие задачи, одной страницей: это
+   * ответ на «что у меня дальше». По id — весь список страницами с
+   * курсором `after_id`. Курсор держится за неизменяемый id: смещение по
+   * сроку плыло бы, стоит планировщику сдвинуть `next_run_at` или
+   * человеку завести задачу между страницами, — задача повторилась бы или
+   * пропала. Страница сама укорачивается до бюджета знаков ответа.
    */
   private async list(args: JsonObject, runtime: AgentRuntimeContext): Promise<unknown> {
     const status = optionalString(args, "status", 30);
     const limit = Math.min(Math.max(optionalInteger(args, "limit") ?? 50, 1), 100);
-    const offset = Math.min(Math.max(optionalInteger(args, "offset") ?? 0, 0), 1_000_000);
+    const byId = args.order === "id";
+    const afterId = byId ? Math.max(optionalInteger(args, "after_id") ?? 0, 0) : 0;
     const withDescription = args.include_description === true;
     const { rows } = await this.db.query<TaskListRow>(
-      `SELECT id, title, status, kind, priority, due_at, remind_at, next_run_at,
+      `SELECT id, left(title, ${TITLE_PREVIEW}) AS title, status, kind, priority, due_at, remind_at, next_run_at,
               cron_expression, repeat_enabled, reminders_enabled, goal_id,
               ${withDescription ? `left(description, ${DESCRIPTION_PREVIEW})` : "NULL::text"} AS description
          FROM tasks
-        WHERE user_id = $1 AND ($2::text IS NULL OR status = $2)
-        ORDER BY COALESCE(next_run_at, remind_at, due_at) NULLS LAST, created_at DESC, id DESC
-        LIMIT $3 OFFSET $4`,
-      [runtime.userId, status, limit, offset],
+        WHERE user_id = $1 AND ($2::text IS NULL OR status = $2) AND id > $4
+        ORDER BY ${byId ? "id" : "COALESCE(next_run_at, remind_at, due_at) NULLS LAST, created_at DESC, id DESC"}
+        LIMIT $3`,
+      // Одна строка сверх страницы — признак, что продолжение есть.
+      [runtime.userId, status, limit + 1, afterId],
     );
     const counted = await this.db.query<{ total: string }>(
       "SELECT count(*) AS total FROM tasks WHERE user_id = $1 AND ($2::text IS NULL OR status = $2)",
       [runtime.userId, status],
     );
     const total = Number(counted.rows[0]?.total ?? 0);
-    const page = { ok: true, total, offset, returned: 0, next_offset: null as number | null, tasks: [] as Record<string, unknown>[] };
-    for (const row of rows.map(compactTask)) {
+    const page = {
+      ok: true,
+      order: byId ? "id" : "schedule",
+      total,
+      returned: 0,
+      next_after_id: null as number | null,
+      tasks: [] as Record<string, unknown>[],
+    };
+    const candidates = rows.slice(0, limit).map(compactTask);
+    for (const row of candidates) {
       page.tasks.push(row);
       page.returned = page.tasks.length;
-      page.next_offset = offset + page.tasks.length;
       // Меряется ровно то, что уйдёт модели: `toolResult` сериализует с
-      // отступами. Хотя бы одна задача уходит всегда, иначе next_offset
-      // не сдвинулся бы.
+      // отступами. Хотя бы одна задача уходит всегда, иначе курсор не
+      // сдвинулся бы.
       if (page.tasks.length > 1 && JSON.stringify(page, null, 2).length > TASK_PAGE_CHARS) {
         page.tasks.pop();
         break;
       }
     }
     page.returned = page.tasks.length;
-    const next = offset + page.tasks.length;
-    page.next_offset = next < total && page.tasks.length > 0 ? next : null;
-    return page;
+    const more = rows.length > limit || page.tasks.length < candidates.length;
+    if (byId) {
+      const last = page.tasks.at(-1);
+      page.next_after_id = more && last ? Number(last.id) : null;
+    }
+    return {
+      ...page,
+      ...(!byId && total > page.returned
+        ? { note: "Это ближайшие задачи. Весь список — order=id и after_id=next_after_id, пока он не станет null." }
+        : {}),
+    };
   }
 
   /**
    * Напоминания задач — отдельно от самих задач. Раньше погасить
    * напоминание можно было только закрыв или удалив задачу: даже без
    * времени напоминания срок сам приводил к напоминанию.
+   *
+   * Срок, прошедший пока напоминания были выключены, при включении
+   * задним числом не срабатывает: иначе включение сотни задач сразу
+   * отправило бы сотню напоминаний, а просроченное действие закрылось бы
+   * сообщением «не получилось». Повторяющаяся задача продолжает со
+   * следующего раза, у разовой этот срок считается прошедшим, и её id
+   * возвращаются в `overdue_ids` — новое время назначает
+   * `snooze_task_reminder`.
+   *
+   * Изменение, сдвиг и события — одна транзакция: история задачи не
+   * расходится с её состоянием. Захват планировщика (`locked_at`) не
+   * трогается: уже взятую задачу исполнитель перепроверяет сам.
    */
   private async setReminders(args: JsonObject, runtime: AgentRuntimeContext): Promise<unknown> {
     if (typeof args.enabled !== "boolean") throw new Error("enabled должен быть true или false");
     const enabled = args.enabled;
     const ids = Array.isArray(args.ids)
-      ? [...new Set(args.ids.map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))].slice(0, 100)
+      ? [...new Set(args.ids.filter((id): id is number => typeof id === "number" && Number.isSafeInteger(id) && id > 0))]
       : [];
-    if (ids.length === 0) throw new Error("ids: нужен хотя бы один ID задачи");
-    const changed = await this.db.transaction(async (client) => {
-      const { rows } = await client.query<{ id: string }>(
-        `UPDATE tasks SET reminders_enabled = $3, locked_at = NULL
+    if (ids.length === 0) throw new Error("ids: нужен хотя бы один целый ID задачи");
+    if (ids.length > 100) throw new Error("ids: не больше 100 задач за вызов");
+    const now = new Date();
+    const result = await this.db.transaction(async (client) => {
+      const { rows } = await client.query<{
+        id: string;
+        cron_expression: string | null;
+        repeat_enabled: boolean;
+        timezone: string | null;
+        scheduled_at: Date | null;
+        last_run_at: Date | null;
+      }>(
+        `UPDATE tasks SET reminders_enabled = $3
           WHERE user_id = $1 AND id = ANY($2::bigint[]) AND reminders_enabled IS DISTINCT FROM $3
-          RETURNING id`,
+          RETURNING id, cron_expression, repeat_enabled, timezone,
+                    COALESCE(next_run_at, remind_at, due_at) AS scheduled_at, last_run_at`,
         [runtime.userId, ids, enabled],
       );
-      return rows.map((row) => Number(row.id));
+      const overdue: number[] = [];
+      for (const row of enabled ? rows : []) {
+        const scheduled = row.scheduled_at ? new Date(row.scheduled_at) : null;
+        if (!scheduled || scheduled > now) continue;
+        if (row.last_run_at && new Date(row.last_run_at) >= scheduled) continue;
+        const id = Number(row.id);
+        if (row.repeat_enabled && row.cron_expression) {
+          const next = nextCronDate(row.cron_expression, row.timezone ?? runtime.timezone, now);
+          await client.query(
+            "UPDATE tasks SET next_run_at = $3 WHERE id = $1 AND user_id = $2",
+            [id, runtime.userId, next.toISOString()],
+          );
+        } else {
+          // Срок прошёл, пока напоминания были выключены: этот раз
+          // считается состоявшимся, как после отправленного напоминания.
+          await client.query(
+            "UPDATE tasks SET last_run_at = $3 WHERE id = $1 AND user_id = $2",
+            [id, runtime.userId, scheduled.toISOString()],
+          );
+          overdue.push(id);
+        }
+      }
+      const changed = rows.map((row) => Number(row.id)).sort((a, b) => a - b);
+      if (changed.length > 0) {
+        await client.query(
+          `INSERT INTO task_events (user_id, task_id, event_type, metadata)
+           SELECT $1, changed.id, 'updated',
+                  jsonb_build_object('reminders_enabled', $3::boolean, 'overdue', changed.id = ANY($4::bigint[]))
+             FROM unnest($2::bigint[]) AS changed(id)`,
+          [runtime.userId, changed, enabled, overdue],
+        );
+      }
+      return { changed, overdue };
     });
-    for (const taskId of changed) {
-      await this.events.record({
-        userId: runtime.userId,
-        taskId,
-        eventType: "updated",
-        metadata: { reminders_enabled: enabled },
-      });
-    }
     // Ответ компактный: числа и id, без строк задач — на сотне задач
     // полные строки снова упёрлись бы в предел ответа инструмента.
-    return { ok: true, enabled, changed: changed.length, task_ids: changed };
+    return {
+      ok: true,
+      enabled,
+      changed: result.changed.length,
+      task_ids: result.changed,
+      ...(result.overdue.length > 0
+        ? {
+          overdue_ids: result.overdue.sort((a, b) => a - b),
+          note: "Срок этих разовых задач прошёл, пока напоминания были выключены: задним числом они не сработают. Новое время — snooze_task_reminder.",
+        }
+        : {}),
+    };
   }
 
   private async update(
@@ -606,13 +686,25 @@ function listSchema(): JsonObject {
   return objectSchema({
     status: { type: "string", enum: ["open", "in_progress", "done", "canceled"] },
     limit: integer("Задач на странице, максимум 100; по умолчанию 50"),
-    offset: integer("С какой задачи начать: next_offset из прошлого ответа"),
+    order: {
+      type: "string",
+      enum: ["schedule", "id"],
+      description: "schedule — ближайшие по расписанию (по умолчанию); id — весь список страницами",
+    },
+    after_id: integer("Только для order=id: next_after_id из прошлого ответа"),
     include_description: boolean("Добавить начало описания задачи"),
   });
 }
 
 /** Знаков описания в списке: начало, по которому задачу узнают, а не весь текст. */
 const DESCRIPTION_PREVIEW = 200;
+
+/**
+ * Знаков названия в списке. Инструменты и Mini App пишут до 500, но
+ * колонка не ограничена: одно огромное название иначе вынесло бы
+ * страницу за предел ответа.
+ */
+const TITLE_PREVIEW = 500;
 
 /**
  * Бюджет страницы в знаках ответа инструмента. Letta Code обрезает ответ
