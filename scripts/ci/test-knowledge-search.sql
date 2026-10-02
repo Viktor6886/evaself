@@ -1,50 +1,72 @@
 -- =====================================================================
--- Гибридный поиск по базе знаний — на настоящем PostgreSQL.
+-- Поиск по базе знаний — на настоящем PostgreSQL.
 --
--- Поддельная база в тестах TypeScript проверяет форму запроса и слияние
--- рангов, но не сам SQL: ни `websearch_to_tsquery`, ни оператор `<=>`
--- pgvector, ни FULL OUTER JOIN двух половин поиска. Здесь проверяется
--- именно запрос — и главное в нём: чужой документ не находится никогда.
+-- Поддельная база в тестах TypeScript проверяет форму запросов, слияние
+-- рангов и границу арендатора, но не сам SQL: ни `websearch_to_tsquery`
+-- с русской морфологией, ни триграммный `<%` с порогом сеанса, ни
+-- оператор `<=>` pgvector. Здесь — те же запросы, что в
+-- `src/knowledge/search.ts` (прежний поиск) и `search-queries.ts`
+-- (конвейер K4), с подставленными параметрами. Главное в них: чужой
+-- документ и выключенная коллекция не находятся никогда.
 --
--- Скрипт ничего не оставляет после себя: работает во временных копиях
--- таблиц и падает с ошибкой, если правило нарушено.
+-- Скрипт ничего не оставляет после себя: всё в транзакции с ROLLBACK.
 -- =====================================================================
 
 BEGIN;
 
-CREATE TEMP TABLE search_documents (LIKE knowledge_documents INCLUDING ALL) ON COMMIT DROP;
-CREATE TEMP TABLE search_chunks (LIKE knowledge_chunks INCLUDING ALL) ON COMMIT DROP;
+INSERT INTO users (id, telegram_id) VALUES (920100, 920100), (920200, 920200);
+
+INSERT INTO knowledge_collections (id, code, title, enabled)
+VALUES
+  ('c1111111-0000-0000-0000-000000000001', 'ci-search-on', 'Включённая', true),
+  ('c1111111-0000-0000-0000-000000000002', 'ci-search-off', 'Выключенная', false);
 
 -- Документ либо принадлежит человеку, либо входит в общую базу знаний:
 -- схема требует этого ограничением `(user_id IS NOT NULL) <> product_verified`.
-INSERT INTO search_documents (id, user_id, product_verified, name, mime, content_hash, status)
+INSERT INTO knowledge_documents (id, user_id, product_verified, collection_id, name, mime, content_hash, status)
 VALUES
-  ('11111111-1111-1111-1111-111111111111', 100, false, 'Мой договор.pdf', 'application/pdf', 'h1', 'ready'),
-  ('22222222-2222-2222-2222-222222222222', 200, false, 'Чужой договор.pdf', 'application/pdf', 'h2', 'ready'),
-  ('33333333-3333-3333-3333-333333333333', NULL, true, 'Справочник Евы.md', 'text/markdown', 'h3', 'ready');
+  ('11111111-1111-1111-1111-111111111111', 920100, false, NULL, 'Мой договор.pdf', 'application/pdf', 'h1', 'ready'),
+  ('22222222-2222-2222-2222-222222222222', 920200, false, NULL, 'Чужой договор.pdf', 'application/pdf', 'h2', 'ready'),
+  ('33333333-3333-3333-3333-333333333333', NULL, true, 'c1111111-0000-0000-0000-000000000001', 'Справочник Евы.md', 'text/markdown', 'h3', 'ready'),
+  ('44444444-4444-4444-4444-444444444444', NULL, true, 'c1111111-0000-0000-0000-000000000002', 'Скрытая коллекция.md', 'text/markdown', 'h4', 'ready');
 
 -- Векторы простые и различимые: важна не близость сама по себе, а то,
--- что она вообще участвует в отборе.
-INSERT INTO search_chunks
-  (document_id, user_id, product_verified, ordinal, content, content_hash, embedding, embedding_model)
+-- что она вообще участвует в отборе. Фрагмент без вектора (новые векторы
+-- живут в Qdrant) в векторный список попадать не должен.
+INSERT INTO knowledge_chunks
+  (document_id, user_id, product_verified, ordinal, content, content_hash, embedding, embedding_model, page_start, page_end, section)
 VALUES
-  ('11111111-1111-1111-1111-111111111111', 100, false, 0,
-   'Аренда квартиры продлена до марта', 'c1',
-   ('[' || 1 || repeat(',0', 1535) || ']')::vector, 'router'),
-  ('22222222-2222-2222-2222-222222222222', 200, false, 0,
-   'Аренда склада продлена до марта', 'c2',
-   ('[' || 1 || repeat(',0', 1535) || ']')::vector, 'router'),
+  ('11111111-1111-1111-1111-111111111111', 920100, false, 0,
+   'Договоры аренды продлены до марта. Арендатор Иванов обслуживает станцию Р-168-5УН.', 'c1',
+   ('[' || 1 || repeat(',0', 1535) || ']')::vector, 'router', 4, 4, '2. Оплата'),
+  ('11111111-1111-1111-1111-111111111111', 920100, false, 1,
+   'Штраф за просрочку платежа — один процент в день.', 'c1b',
+   NULL, 'qdrant', 5, 5, '2. Оплата'),
+  ('22222222-2222-2222-2222-222222222222', 920200, false, 0,
+   'Договор аренды склада: Иванов, станция Р-168-5УН.', 'c2',
+   ('[' || 1 || repeat(',0', 1535) || ']')::vector, 'router', 1, 1, NULL),
   ('33333333-3333-3333-3333-333333333333', NULL, true, 0,
-   'Общая заметка про аренду в базе знаний', 'c3',
-   ('[' || 0.9 || repeat(',0', 1535) || ']')::vector, 'router');
+   'Общая заметка: аренда оформляется договором.', 'c3',
+   ('[' || 0.9 || repeat(',0', 1535) || ']')::vector, 'router', NULL, NULL, NULL),
+  ('44444444-4444-4444-4444-444444444444', NULL, true, 0,
+   'Скрытая коллекция: договор аренды и Иванов.', 'c4',
+   ('[' || 1 || repeat(',0', 1535) || ']')::vector, 'router', NULL, NULL, NULL);
 
--- Тот же запрос, что и в KnowledgeSearch, поверх временных копий.
-CREATE TEMP VIEW search_probe AS
-WITH ask AS (SELECT websearch_to_tsquery('simple', 'аренда') AS tsq),
+-- ---------------------------------------------------------------------
+-- Прежний поиск (режим legacy): человек 920100, обе базы включены.
+-- ---------------------------------------------------------------------
+CREATE TEMP VIEW legacy_probe AS
+WITH ask AS (
+  SELECT websearch_to_tsquery('simple', 'аренды') AS tsq
+),
 visible AS (
   SELECT c.id, c.document_id, c.ordinal, c.content, c.embedding
-    FROM search_chunks c
-   WHERE c.user_id = 100 OR c.product_verified
+    FROM knowledge_chunks c
+    JOIN knowledge_documents d
+      ON d.id = c.document_id AND (d.user_id = 920100 OR d.product_verified)
+    LEFT JOIN knowledge_collections k ON k.id = d.collection_id
+   WHERE (c.user_id = 920100 AND true)
+      OR (c.product_verified AND true AND COALESCE(k.enabled, true))
 ),
 fts AS (
   SELECT v.id,
@@ -59,6 +81,7 @@ vec AS (
   SELECT v.id,
          row_number() OVER (ORDER BY v.embedding <=> ('[' || 1 || repeat(',0', 1535) || ']')::vector, v.id) AS position
     FROM visible v
+   WHERE v.embedding IS NOT NULL
    ORDER BY v.embedding <=> ('[' || 1 || repeat(',0', 1535) || ']')::vector
    LIMIT 5
 ),
@@ -72,32 +95,159 @@ fused AS (
          END AS matched
     FROM fts FULL OUTER JOIN vec ON vec.id = fts.id
 )
-SELECT d.name AS document_name, c.content, fused.score, fused.matched
+SELECT d.name AS document_name, c.ordinal, c.content, fused.score, fused.matched
   FROM fused
-  JOIN search_chunks c ON c.id = fused.id
-  JOIN search_documents d ON d.id = c.document_id
- WHERE c.user_id = 100 OR c.product_verified
+  JOIN knowledge_chunks c ON c.id = fused.id
+  JOIN knowledge_documents d
+    ON d.id = c.document_id AND (d.user_id = 920100 OR d.product_verified)
+ WHERE c.user_id = 920100 OR c.product_verified
  ORDER BY fused.score DESC, c.document_id, c.ordinal;
 
 DO $$
 DECLARE
   found integer;
-  alien integer;
+  leaked integer;
   hybrid integer;
 BEGIN
-  SELECT count(*) INTO found FROM search_probe;
+  SELECT count(*) INTO found FROM legacy_probe;
   IF found <> 2 THEN
-    RAISE EXCEPTION 'ожидались свой документ и общая заметка, найдено %', found;
+    RAISE EXCEPTION 'прежний поиск: ожидались свой документ и общая заметка, найдено %', found;
   END IF;
-
-  SELECT count(*) INTO alien FROM search_probe WHERE document_name = 'Чужой договор.pdf';
-  IF alien <> 0 THEN
-    RAISE EXCEPTION 'поиск отдал документ другого человека';
+  SELECT count(*) INTO leaked FROM legacy_probe
+   WHERE document_name IN ('Чужой договор.pdf', 'Скрытая коллекция.md');
+  IF leaked <> 0 THEN
+    RAISE EXCEPTION 'прежний поиск отдал чужой документ или выключенную коллекцию';
   END IF;
-
-  SELECT count(*) INTO hybrid FROM search_probe WHERE matched = 'both';
+  SELECT count(*) INTO hybrid FROM legacy_probe WHERE matched = 'both';
   IF hybrid < 1 THEN
-    RAISE EXCEPTION 'ни один фрагмент не нашёлся обоими способами: половина поиска не работает';
+    RAISE EXCEPTION 'прежний поиск: ни один фрагмент не нашёлся обоими способами';
+  END IF;
+END $$;
+
+-- ---------------------------------------------------------------------
+-- Конвейер K4: лексическая половина — русская морфология и триграммы.
+-- ---------------------------------------------------------------------
+-- Порог задаётся на транзакцию, как в `lexicalCandidates`: оператор `<%`
+-- читает его из настройки сеанса.
+SET LOCAL pg_trgm.word_similarity_threshold = 0.5;
+
+CREATE TEMP TABLE probe_lexical (label text, signal text, document_name text, ordinal integer) ON COMMIT DROP;
+
+-- Морфология: «договор» находит «Договоры», «аренда» — «аренды».
+INSERT INTO probe_lexical
+WITH ask AS (SELECT websearch_to_tsquery('russian', 'договор аренда') AS tsq),
+fts AS (
+  SELECT c.id, ts_rank_cd(to_tsvector('russian', c.content), ask.tsq) AS score
+    FROM knowledge_chunks c
+    JOIN knowledge_documents d
+      ON d.id = c.document_id AND (d.user_id = 920100 OR d.product_verified)
+    LEFT JOIN knowledge_collections k ON k.id = d.collection_id
+   CROSS JOIN ask
+   WHERE to_tsvector('russian', c.content) @@ ask.tsq
+     AND ((c.user_id = 920100 AND true) OR (c.product_verified AND true AND COALESCE(k.enabled, true)))
+   ORDER BY score DESC, c.id
+   LIMIT 30
+)
+SELECT 'morphology', 'fts', d.name, c.ordinal
+  FROM fts JOIN knowledge_chunks c ON c.id = fts.id JOIN knowledge_documents d ON d.id = c.document_id;
+
+-- Опечатка в фамилии и обозначение техники: только триграммы.
+INSERT INTO probe_lexical
+WITH trgm AS (
+  SELECT c.id, (word_similarity('Иваноф', c.content) + word_similarity('Р-168-5УН', c.content)) AS score
+    FROM knowledge_chunks c
+    JOIN knowledge_documents d
+      ON d.id = c.document_id AND (d.user_id = 920100 OR d.product_verified)
+    LEFT JOIN knowledge_collections k ON k.id = d.collection_id
+   WHERE ('Иваноф' <% c.content OR 'Р-168-5УН' <% c.content)
+     AND ((c.user_id = 920100 AND true) OR (c.product_verified AND true AND COALESCE(k.enabled, true)))
+   ORDER BY score DESC, c.id
+   LIMIT 30
+)
+SELECT 'trigram', 'trgm', d.name, c.ordinal
+  FROM trgm JOIN knowledge_chunks c ON c.id = trgm.id JOIN knowledge_documents d ON d.id = c.document_id;
+
+-- Личная база выключена в поиске: свой документ не находится, общий — да.
+INSERT INTO probe_lexical
+WITH ask AS (SELECT websearch_to_tsquery('russian', 'аренда') AS tsq),
+fts AS (
+  SELECT c.id, ts_rank_cd(to_tsvector('russian', c.content), ask.tsq) AS score
+    FROM knowledge_chunks c
+    JOIN knowledge_documents d
+      ON d.id = c.document_id AND (d.user_id = 920100 OR d.product_verified)
+    LEFT JOIN knowledge_collections k ON k.id = d.collection_id
+   CROSS JOIN ask
+   WHERE to_tsvector('russian', c.content) @@ ask.tsq
+     AND ((c.user_id = 920100 AND false) OR (c.product_verified AND true AND COALESCE(k.enabled, true)))
+   ORDER BY score DESC, c.id
+   LIMIT 30
+)
+SELECT 'private_off', 'fts', d.name, c.ordinal
+  FROM fts JOIN knowledge_chunks c ON c.id = fts.id JOIN knowledge_documents d ON d.id = c.document_id;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM probe_lexical WHERE label = 'morphology' AND document_name = 'Мой договор.pdf') THEN
+    RAISE EXCEPTION 'морфология: «договор аренда» не нашёл «Договоры аренды»';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM probe_lexical WHERE label = 'trigram' AND document_name = 'Мой договор.pdf') THEN
+    RAISE EXCEPTION 'триграммы: опечатка в фамилии и обозначение не нашлись';
+  END IF;
+  IF EXISTS (SELECT 1 FROM probe_lexical WHERE document_name IN ('Чужой договор.pdf', 'Скрытая коллекция.md')) THEN
+    RAISE EXCEPTION 'лексический поиск отдал чужой документ или выключенную коллекцию';
+  END IF;
+  IF EXISTS (SELECT 1 FROM probe_lexical WHERE label = 'private_off' AND document_name = 'Мой договор.pdf')
+     OR NOT EXISTS (SELECT 1 FROM probe_lexical WHERE label = 'private_off' AND document_name = 'Справочник Евы.md') THEN
+    RAISE EXCEPTION 'переключатель личной базы не действует';
+  END IF;
+END $$;
+
+-- ---------------------------------------------------------------------
+-- Конвейер K4: векторная половина на pgvector, чтение по id, соседи.
+-- ---------------------------------------------------------------------
+DO $$
+DECLARE
+  vector_ids bigint[];
+  hydrated integer;
+  neighbor text;
+BEGIN
+  SELECT array_agg(id ORDER BY position) INTO vector_ids FROM (
+    SELECT c.id, row_number() OVER (ORDER BY c.embedding <=> ('[' || 1 || repeat(',0', 1535) || ']')::vector, c.id) AS position
+      FROM knowledge_chunks c
+      JOIN knowledge_documents d
+        ON d.id = c.document_id AND (d.user_id = 920100 OR d.product_verified)
+      LEFT JOIN knowledge_collections k ON k.id = d.collection_id
+     WHERE c.embedding IS NOT NULL
+       AND ((c.user_id = 920100 AND true) OR (c.product_verified AND true AND COALESCE(k.enabled, true)))
+     ORDER BY c.embedding <=> ('[' || 1 || repeat(',0', 1535) || ']')::vector, c.id
+     LIMIT 30
+  ) ranked;
+  IF coalesce(array_length(vector_ids, 1), 0) <> 2 THEN
+    RAISE EXCEPTION 'pgvector: ожидались два фрагмента с вектором (свой и общий), найдено %', coalesce(array_length(vector_ids, 1), 0);
+  END IF;
+
+  -- Чтение по id перепроверяет видимость: id чужого фрагмента и
+  -- выключенной коллекции, пришедшие из индекса, не читаются.
+  SELECT count(*) INTO hydrated
+    FROM knowledge_chunks c
+    JOIN knowledge_documents d
+      ON d.id = c.document_id AND (d.user_id = 920100 OR d.product_verified)
+    LEFT JOIN knowledge_collections k ON k.id = d.collection_id
+   WHERE c.id = ANY(ARRAY(SELECT id FROM knowledge_chunks WHERE content_hash IN ('c1', 'c2', 'c3', 'c4')))
+     AND ((c.user_id = 920100 AND true) OR (c.product_verified AND true AND COALESCE(k.enabled, true)));
+  IF hydrated <> 2 THEN
+    RAISE EXCEPTION 'чтение по id отдало % фрагментов вместо двух: видимость не перепроверена', hydrated;
+  END IF;
+
+  -- Сосед — ordinal ± 1 того же документа, и только видимого.
+  SELECT c.content INTO neighbor
+    FROM knowledge_chunks c
+    JOIN unnest(ARRAY['11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222']::uuid[], ARRAY[1, 1]::integer[])
+         AS want(document_id, ordinal)
+      ON want.document_id = c.document_id AND want.ordinal = c.ordinal
+   WHERE c.user_id = 920100 OR c.product_verified;
+  IF neighbor IS NULL OR neighbor NOT LIKE 'Штраф%' THEN
+    RAISE EXCEPTION 'соседний фрагмент своего документа не найден';
   END IF;
 END $$;
 

@@ -52,7 +52,9 @@ node --test --experimental-strip-types test/*.test.ts        # full regression
 | `src/letta.ts`, `src/letta/persona-sync.ts` | `persona-sync.test.ts`, `canonical-context-architecture.test.ts` |
 | `src/llm.ts`, `src/llm/capability-probe.ts` | `capability-probe.test.ts`, `llm.test.ts` |
 | `src/llm/vision-check.ts` | `vision-check.test.ts`, `media-page.test.mjs` в `admin-ui` |
-| `src/knowledge/search.ts`, `document-text.ts` | `knowledge-search.test.ts`, `attachments.test.ts` |
+| `src/knowledge/search.ts`, `document-text.ts` | `knowledge-search.test.ts`, `knowledge-search-pipeline.test.ts`, `attachments.test.ts` |
+| `src/knowledge/search-fusion.ts`, `search-queries.ts`, `search-settings.ts` | `knowledge-search-fusion.test.ts`, `knowledge-search-pipeline.test.ts`, `knowledge-search-settings.test.ts` (настоящий PostgreSQL — `scripts/ci/test-knowledge-search.sql`) |
+| `src/router/rerank.ts`, `client.ts` (`rerank`) | `router-rerank.test.ts` |
 | `src/attachments/` | `attachments.test.ts`, `turn-lifecycle.test.ts` |
 | `src/letta/persona-sync.ts` | `persona-sync.test.ts` |
 | `src/letta/reasoning-tier.ts` | `letta.test.ts`, `sdk-settings.test.ts` |

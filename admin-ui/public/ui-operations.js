@@ -117,7 +117,9 @@ function inputFor(setting) {
     return `<select data-key="${escapeHtml(setting.key)}">${setting.presets.map((preset) => `<option value="${escapeHtml(String(preset.value))}"${setting.value === preset.value ? " selected" : ""}>${escapeHtml(preset.title)}</option>`).join("")}</select>`;
   }
   const type = setting.type === "integer" ? "number" : "text";
-  return `<input data-key="${escapeHtml(setting.key)}" type="${type}" value="${escapeHtml(setting.value)}"${setting.min !== undefined ? ` min="${setting.min}"` : ""}${setting.max !== undefined ? ` max="${setting.max}"` : ""} required>`;
+  // Необязательное поле (провайдер reranker базы знаний) бывает пустым:
+  // с `required` оно светилось бы ошибкой, хотя сервис пустое принимает.
+  return `<input data-key="${escapeHtml(setting.key)}" type="${type}" value="${escapeHtml(setting.value ?? "")}"${setting.min !== undefined ? ` min="${setting.min}"` : ""}${setting.max !== undefined ? ` max="${setting.max}"` : ""}${setting.required === false ? "" : " required"}>`;
 }
 
 async function loadSettings() {
