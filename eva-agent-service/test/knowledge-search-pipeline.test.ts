@@ -53,7 +53,8 @@ const CHUNKS: Record<string, Record<string, unknown>> = {
 
 interface Lists {
   fts?: string[];
-  trgm?: string[];
+  /** "timeout" — запрос триграмм отменён по statement_timeout. */
+  trgm?: string[] | "timeout";
   pgvector?: string[];
 }
 
@@ -61,10 +62,11 @@ function searchDb(lists: Lists, neighbors: Array<Record<string, unknown>> = [], 
   return guardedDb((sql, values) => {
     if (sql.includes("SET LOCAL")) return [];
     if (sql.includes("websearch_to_tsquery('russian'")) {
-      return [
-        ...(lists.fts ?? []).map((id, index) => ({ signal: "fts", id, score: 1 - index / 10 })),
-        ...(sql.includes("trgm AS") ? (lists.trgm ?? []).map((id, index) => ({ signal: "trgm", id, score: 0.9 - index / 10 })) : []),
-      ];
+      return (lists.fts ?? []).map((id, index) => ({ signal: "fts", id, score: 1 - index / 10 }));
+    }
+    if (sql.includes("trgm_text AS")) {
+      if (lists.trgm === "timeout") throw Object.assign(new Error("canceling statement due to statement timeout"), { code: "57014" });
+      return (lists.trgm ?? []).map((id, index) => ({ signal: "trgm", id, score: 0.9 - index / 10 }));
     }
     if (sql.includes("1 - (c.embedding <=>")) return (lists.pgvector ?? []).map((id, index) => ({ id, score: 0.95 - index / 10 }));
     if (sql.includes("c.id = ANY($4::bigint[])")) {
@@ -120,19 +122,23 @@ test("гибрид: вектор, морфология и триграммы с�
   assert.deepEqual(fine.scores, { rrf: 1 / 61 + 1 / 62, vector: 0.95, vectorRank: 1, fts: 0.9, ftsRank: 2 });
 
   // Область, переключатели и обозначения из запроса — в параметрах.
-  const lexical = db.queries.find((entry) => entry.sql.includes("websearch_to_tsquery('russian'"))!;
-  assert.deepEqual(lexical.values.slice(0, 3), [77, true, true]);
-  assert.deepEqual(lexical.values.slice(5), ["Иванов", "Р-168-5УН"]);
+  const words = db.queries.find((entry) => entry.sql.includes("websearch_to_tsquery('russian'"))!;
+  assert.deepEqual(words.values, [77, true, true, "штраф Иванов Р-168-5УН", 30]);
+  // Строгий запрос по словам и запасной — любое из слов.
+  assert.match(words.sql, /plainto_tsquery\('russian', \$4\)/);
+  assert.match(words.sql, /NOT EXISTS \(SELECT 1 FROM fts_strict\)/);
+  const lexical = db.queries.find((entry) => entry.sql.includes("trgm_text AS"))!;
+  // Текста запроса у триграмм нет: $4 — сколько кандидатов, слова — с $5.
+  assert.deepEqual(lexical.values, [77, true, true, 30, "Иванов", "Р-168-5УН"]);
   // Фамилия или номер бывают только в имени файла: триграммы сравнивают и
   // название документа — отдельной веткой. Одно OR по столбцам двух таблиц
   // индексы 091 не использует, и план становится полным перебором.
-  assert.match(lexical.sql, /trgm_text AS[\s\S]*\$6 <% c\.content/);
-  assert.match(lexical.sql, /trgm_name AS[\s\S]*\$6 <% d\.name/);
+  assert.match(lexical.sql, /trgm_text AS[\s\S]*\$5 <% c\.content/);
+  assert.match(lexical.sql, /trgm_name AS[\s\S]*\$5 <% d\.name/);
   assert.doesNotMatch(lexical.sql, /<% c\.content OR \$\d+ <% d\.name/);
-  // Строгий запрос по словам и запасной — любое из слов.
-  assert.match(lexical.sql, /plainto_tsquery\('russian', \$4\)/);
-  assert.match(lexical.sql, /NOT EXISTS \(SELECT 1 FROM fts_strict\)/);
   assert.ok(db.queries.some((entry) => entry.sql.includes("SET LOCAL pg_trgm.word_similarity_threshold")));
+  // Частое слово не держит ход: у триграмм своя граница времени.
+  assert.ok(db.queries.some((entry) => /SET LOCAL statement_timeout = \d+/.test(entry.sql)));
 });
 
 test("лексический режим без вектора; личная база выключена — в запросах её нет", async () => {
@@ -256,6 +262,15 @@ test("найденное сверх бюджета считается, а не �
   } finally {
     for (const id of ["11", "12", "13", "14", "15"]) delete CHUNKS[id];
   }
+});
+
+test("триграммы по частому слову не уложились в срок — остаются слова FTS", async () => {
+  const found = await new KnowledgeSearch(searchDb({ fts: ["1"], trgm: "timeout" }) as never, embed, {
+    settings: settings({ mode: "lexical" }),
+  }).search(77, "штраф Иванов");
+  assert.deepEqual(found.hits.map((hit) => hit.matched), ["fts"]);
+  assert.equal(found.degraded, false);
+  assert.equal(found.diagnostics?.trigram, "timeout");
 });
 
 test("отменённый ход не превращается в degraded", async () => {

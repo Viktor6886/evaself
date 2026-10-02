@@ -4,8 +4,8 @@
 // PostgreSQL, а настоящего PostgreSQL в job агента нет. Ручная копия
 // запроса расходилась с кодом незаметно: правка кода меняла план, а тест
 // проверял старый текст. Поэтому блок между маркерами строится из
-// собранного `search-queries.js` с подставленными параметрами, а CI
-// (`--check`) сверяет его с кодом.
+// собранного `search-queries.js`: тот же текст запроса и те же параметры
+// через PREPARE/EXECUTE, а CI (`--check`) сверяет блок с кодом.
 //
 //   node ../scripts/ci/gen-knowledge-search-probes.mjs          переписать блок
 //   node ../scripts/ci/gen-knowledge-search-probes.mjs --check  сверить
@@ -27,9 +27,10 @@ const PROBES = [
   ["private_off", "аренда", [], false],
 ];
 
-let captured = null;
+// Слова и триграммы — два запроса: каждый становится своей вставкой.
+let captured = [];
 const capture = async (sql, values) => {
-  if (!sql.startsWith("SET")) captured = [sql, values];
+  if (!sql.startsWith("SET")) captured.push([sql, values]);
   return { rows: [] };
 };
 const db = {
@@ -40,24 +41,30 @@ const db = {
 
 const literal = (value) => typeof value === "string" ? `'${value.replaceAll("'", "''")}'` : String(value);
 
+// Запрос уходит в PostgreSQL как есть — подготовленным, с параметрами:
+// так ловятся и ошибки, которых не видно при подстановке литералов
+// (параметр, чей тип не определить, несовпадение типов).
 const blocks = [];
+let number = 0;
 for (const [label, query, terms, privateEnabled] of PROBES) {
+  captured = [];
   await lexicalCandidates(db, { userId: 920100, privateEnabled, globalEnabled: true }, query, terms, 30);
-  const [sql, values] = captured;
-  const body = sql
-    .replace(/\$(\d+)(?!\d)/g, (_, index) => literal(values[Number(index) - 1]))
-    .split("\n")
-    .map((line) => line.replace(/^ {7}/, ""))
-    .join("\n  ");
-  blocks.push(`-- ${label}: «${query}»${terms.length ? `, триграммы: ${terms.join(", ")}` : ""}${privateEnabled ? "" : ", личная база выключена"}
+  for (const [sql, values] of captured) {
+    number += 1;
+    const name = `probe_${number}`;
+    const body = sql.split("\n").map((line) => line.replace(/^ {7}/, "")).join("\n  ");
+    blocks.push(`-- ${label}: «${query}»${terms.length ? `, триграммы: ${terms.join(", ")}` : ""}${privateEnabled ? "" : ", личная база выключена"}
+PREPARE ${name} AS
+  ${body};
+CREATE TEMP TABLE ${name}_rows ON COMMIT DROP AS EXECUTE ${name}(${values.map(literal).join(", ")});
 INSERT INTO probe_lexical
 SELECT '${label}', q.signal, d.name, c.ordinal
-  FROM (
-  ${body}
-  ) q
+  FROM ${name}_rows q
   JOIN knowledge_chunks c ON c.id = q.id::bigint
   JOIN knowledge_documents d ON d.id = c.document_id;
+DEALLOCATE ${name};
 `);
+  }
 }
 
 const generated = `${BEGIN}\n${blocks.join("\n")}${END}`;

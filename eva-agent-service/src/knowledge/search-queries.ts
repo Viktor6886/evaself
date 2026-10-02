@@ -22,6 +22,8 @@ export interface SearchScope {
 
 /** Порог сходства триграмм для `<%`: 0,5 ловит одну опечатку в слове из шести букв. */
 export const TRIGRAM_THRESHOLD = 0.5;
+/** Граница времени запроса триграмм, мс: дольше — частое слово, и хватит слов FTS. */
+export const TRIGRAM_TIMEOUT_MS = 2_000;
 
 const scopeValues = (scope: SearchScope): unknown[] => [scope.userId, scope.privateEnabled, scope.globalEnabled];
 
@@ -62,7 +64,8 @@ export interface NeighborRow {
  * работает только с оператором.
  *
  * Ранг каждого списка считается здесь, по оценке: порядок строк
- * `UNION ALL` стандарт не гарантирует.
+ * `UNION ALL` стандарт не гарантирует. Запрос триграмм дольше своей
+ * границы отменяется — остаются слова FTS (`trigramTimedOut`).
  */
 export async function lexicalCandidates(
   db: Database,
@@ -70,31 +73,37 @@ export async function lexicalCandidates(
   query: string,
   terms: readonly string[],
   limit: number,
-): Promise<{ fts: ScoredRow[]; trgm: ScoredRow[] }> {
-  const sql = terms.length
-    ? `WITH ${ASK_CTE},
-       ${FTS_CTE},
-       ${trigramCte(terms.length)}
-       SELECT 'fts' AS signal, id::text AS id, score FROM fts
-       UNION ALL
-       SELECT 'trgm' AS signal, id::text AS id, score FROM trgm`
-    : `WITH ${ASK_CTE},
+): Promise<{ fts: ScoredRow[]; trgm: ScoredRow[]; trigramTimedOut: boolean }> {
+  const base = [...scopeValues(scope), query, limit];
+  const ftsSql = `WITH ${ASK_CTE},
        ${FTS_CTE}
        SELECT 'fts' AS signal, id::text AS id, score FROM fts`;
-  const values = [...scopeValues(scope), query, limit, ...terms];
-  const { rows } = await db.withUserScope(
+  // Триграммы — отдельным запросом со своей границей времени: частое
+  // слово совпадает с большой частью базы, и `word_similarity` по каждой
+  // строке занимает секунды. Слова FTS при этом уже найдены.
+  const trigramSql = terms.length
+    ? `WITH ${trigramCte(terms.length)}
+       SELECT 'trgm' AS signal, id::text AS id, score FROM trgm`
+    : "";
+  const [fts, trigram] = await db.withUserScope(
     { userId: scope.userId, label: "knowledge.search.lexical", inherit: true },
-    async () => terms.length
-      ? await db.transaction(async (client) => {
-        await client.query(`SET LOCAL pg_trgm.word_similarity_threshold = ${TRIGRAM_THRESHOLD}`);
-        return await client.query<ScoredRow>(sql, values);
-      })
-      : await db.query<ScoredRow>(sql, values),
+    async () => await Promise.all([
+      db.query<ScoredRow>(ftsSql, base),
+      terms.length
+        ? db.transaction(async (client) => {
+          await client.query(`SET LOCAL pg_trgm.word_similarity_threshold = ${TRIGRAM_THRESHOLD}`);
+          await client.query(`SET LOCAL statement_timeout = ${TRIGRAM_TIMEOUT_MS}`);
+          return await client.query<ScoredRow>(trigramSql, [...scopeValues(scope), limit, ...terms]);
+        }).catch((error: unknown) => {
+          if ((error as { code?: unknown }).code === "57014") return null;
+          throw error;
+        })
+        : { rows: [] as ScoredRow[] },
+    ]),
   );
-  const ranked = (signal: string): ScoredRow[] => rows
-    .filter((row) => row.signal === signal)
+  const ranked = (rows: readonly ScoredRow[]): ScoredRow[] => [...rows]
     .sort((a, b) => Number(b.score) - Number(a.score) || compareIds(a.id, b.id));
-  return { fts: ranked("fts"), trgm: ranked("trgm") };
+  return { fts: ranked(fts.rows), trgm: ranked(trigram?.rows ?? []), trigramTimedOut: trigram === null };
 }
 
 function compareIds(a: string, b: string): number {
@@ -112,25 +121,35 @@ const ASK_CTE = `ask AS (
                 regexp_replace(plainto_tsquery('russian', $4)::text, ' & ', ' | ', 'g')::tsquery AS anyq
        )`;
 
-/** Сколько фрагментов с любым из слов оценивать в запасном запросе: ранг пересчитывает текст. */
-const LOOSE_SAMPLE = 1_000;
+/**
+ * Сколько совпавших фрагментов оценивать. `ts_rank_cd` разбирает текст
+ * каждой строки, а частое слово совпадает с большей частью базы: на
+ * 60 000 фрагментов оценка всех совпадений занимала шесть секунд.
+ * Выборка ограничивает время, а частое слово и так мало что различает —
+ * остальное решают вектор, триграммы и reranker.
+ */
+const RANK_SAMPLE = 2_000;
 
 /**
  * Русская морфология: $4 — запрос, $5 — сколько кандидатов. Запасной
  * запрос выполняется, только если строгий пуст (условие одноразового
- * плана), и оценивает ограниченную выборку: частое слово совпадает с
- * большей частью базы, а `ts_rank_cd` разбирает текст каждой строки.
+ * плана).
  */
 const FTS_CTE = `fts_strict AS (
-         SELECT c.id, 1 + ts_rank_cd(to_tsvector('russian', c.content), ask.tsq) AS score
-           FROM knowledge_chunks c
-           JOIN knowledge_documents d
-             ON d.id = c.document_id AND (d.user_id = $1 OR d.product_verified)
-           LEFT JOIN knowledge_collections k ON k.id = d.collection_id
+         SELECT sample.id, 1 + ts_rank_cd(to_tsvector('russian', sample.content), ask.tsq) AS score
+           FROM (
+             SELECT c.id, c.content
+               FROM knowledge_chunks c
+               JOIN knowledge_documents d
+                 ON d.id = c.document_id AND (d.user_id = $1 OR d.product_verified)
+               LEFT JOIN knowledge_collections k ON k.id = d.collection_id
+              CROSS JOIN ask
+              WHERE to_tsvector('russian', c.content) @@ ask.tsq
+                AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, true)))
+              LIMIT ${RANK_SAMPLE}
+           ) sample
           CROSS JOIN ask
-          WHERE to_tsvector('russian', c.content) @@ ask.tsq
-            AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, true)))
-          ORDER BY score DESC, c.id
+          ORDER BY score DESC, sample.id
           LIMIT $5
        ),
        fts_loose AS (
@@ -145,7 +164,7 @@ const FTS_CTE = `fts_strict AS (
               WHERE NOT EXISTS (SELECT 1 FROM fts_strict)
                 AND to_tsvector('russian', c.content) @@ ask.anyq
                 AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, true)))
-              LIMIT ${LOOSE_SAMPLE}
+              LIMIT ${RANK_SAMPLE}
            ) sample
           CROSS JOIN ask
           ORDER BY score DESC, sample.id
@@ -158,7 +177,9 @@ const FTS_CTE = `fts_strict AS (
        )`;
 
 /**
- * Триграммы: слова запроса — параметры с $6. Две ветки, каждая на своём
+ * Триграммы: $4 — сколько кандидатов, слова запроса — параметры с $5
+ * (текста запроса здесь нет: неиспользованный параметр PostgreSQL не
+ * принимает — его тип не определить). Две ветки, каждая на своём
  * индексе 091: по тексту фрагмента и по названию документа — фамилия или
  * номер бывают только в имени файла («Иванов — договор.pdf»). Одно `OR`
  * по столбцам двух таблиц индексы не использует: план — полный перебор
@@ -167,7 +188,7 @@ const FTS_CTE = `fts_strict AS (
  * совпадения по тексту. Чем больше слов совпало и чем точнее, тем выше.
  */
 function trigramCte(count: number): string {
-  const terms = Array.from({ length: count }, (_, index) => `$${index + 6}`);
+  const terms = Array.from({ length: count }, (_, index) => `$${index + 5}`);
   const similarity = (column: string): string => terms.map((term) => `word_similarity(${term}, ${column})`).join(" + ");
   const matches = (column: string): string => terms.map((term) => `${term} <% ${column}`).join(" OR ");
   return `trgm_text AS (
@@ -179,7 +200,7 @@ function trigramCte(count: number): string {
           WHERE (${matches("c.content")})
             AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, true)))
           ORDER BY score DESC, c.id
-          LIMIT $5
+          LIMIT $4
        ),
        trgm_name AS (
          SELECT first.id, (${similarity("d.name")}) AS score
@@ -196,14 +217,14 @@ function trigramCte(count: number): string {
           WHERE (${matches("d.name")})
             AND (d.user_id = $1 OR d.product_verified)
           ORDER BY score DESC, d.id
-          LIMIT $5
+          LIMIT $4
        ),
        trgm AS (
          SELECT id, max(score) AS score
            FROM (SELECT id, score FROM trgm_text UNION ALL SELECT id, score FROM trgm_name) found
           GROUP BY id
           ORDER BY score DESC, id
-          LIMIT $5
+          LIMIT $4
        )`;
 }
 

@@ -107,6 +107,8 @@ export interface KnowledgeSearchResult {
     vectorBackend: KnowledgeVectorBackend | null;
     rerank: "off" | "ok" | "failed";
     candidates: number;
+    /** Запрос триграмм не уложился в свою границу времени: остались слова FTS. */
+    trigram?: "timeout";
     timings: Partial<Record<"vector" | "lexical" | "rerank" | "total", number>>;
   };
 }
@@ -322,13 +324,13 @@ export class KnowledgeSearch {
 
     const [vector, lexical] = await Promise.all([
       wantsVector ? this.timed("vector", timings, () => this.vectorList(settings.vectorBackend, scope, clean, options.signal)) : null,
-      wantsLexical ? this.timed("lexical", timings, () => this.lexicalLists(scope, clean)) : [],
+      wantsLexical ? this.timed("lexical", timings, () => this.lexicalLists(scope, clean)) : null,
     ]);
     const degraded = vector !== null && !vector.ok;
     // Векторный режим без вектора — те же слова, что и при отказе в
     // гибридном: человек получает найденное, а не пустоту.
     const words = degraded && !wantsLexical ? await this.timed("lexical", timings, () => this.lexicalLists(scope, clean)) : lexical;
-    const lists = [...(vector?.ok ? [vector.list] : []), ...words];
+    const lists = [...(vector?.ok ? [vector.list] : []), ...(words?.lists ?? [])];
 
     const fused = fuseRankedLists(lists).slice(0, HYDRATE_LIMIT);
     const rows = new Map((await hydrateChunks(this.db, scope, fused.map((item) => item.id))).map((row) => [row.id, row]));
@@ -429,14 +431,15 @@ export class KnowledgeSearch {
         vectorBackend: wantsVector ? settings.vectorBackend : null,
         rerank,
         candidates: candidates.length,
+        ...(words?.trigramTimedOut ? { trigram: "timeout" as const } : {}),
         timings,
       },
     };
   }
 
-  private async lexicalLists(scope: SearchScope, clean: string): Promise<RankedList[]> {
+  private async lexicalLists(scope: SearchScope, clean: string): Promise<{ lists: RankedList[]; trigramTimedOut: boolean }> {
     const found = await lexicalCandidates(this.db, scope, clean, trigramTerms(clean), CANDIDATES);
-    return [toList("fts", found.fts), toList("trgm", found.trgm)];
+    return { lists: [toList("fts", found.fts), toList("trgm", found.trgm)], trigramTimedOut: found.trigramTimedOut };
   }
 
   /**
