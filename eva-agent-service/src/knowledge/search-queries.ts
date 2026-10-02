@@ -108,18 +108,23 @@ const FTS_CTE = `fts AS (
        )`;
 
 /**
- * Триграммы: слова запроса — параметры с $6. Чем больше слов совпало и
- * чем точнее, тем выше: сходства складываются.
+ * Триграммы: слова запроса — параметры с $6. Слово сравнивается и с
+ * текстом фрагмента, и с названием документа (индекс 091 по
+ * `knowledge_documents.name`): фамилия или номер бывают только в имени
+ * файла («Иванов — договор.pdf»). Чем больше слов совпало и чем точнее,
+ * тем выше: сходства складываются, у каждого слова — лучшее из двух.
  */
 function trigramCte(count: number): string {
   const terms = Array.from({ length: count }, (_, index) => `$${index + 6}`);
+  const score = terms.map((term) => `GREATEST(word_similarity(${term}, c.content), word_similarity(${term}, d.name))`).join(" + ");
+  const match = terms.map((term) => `${term} <% c.content OR ${term} <% d.name`).join(" OR ");
   return `trgm AS (
-         SELECT c.id, (${terms.map((term) => `word_similarity(${term}, c.content)`).join(" + ")}) AS score
+         SELECT c.id, (${score}) AS score
            FROM knowledge_chunks c
            JOIN knowledge_documents d
              ON d.id = c.document_id AND (d.user_id = $1 OR d.product_verified)
            LEFT JOIN knowledge_collections k ON k.id = d.collection_id
-          WHERE (${terms.map((term) => `${term} <% c.content`).join(" OR ")})
+          WHERE (${match})
             AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, true)))
           ORDER BY score DESC, c.id
           LIMIT $5

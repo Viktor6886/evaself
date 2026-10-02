@@ -125,6 +125,20 @@ test("индекс ещё не включали — поиск пуст, а не
   assert.deepEqual(await store.searchPrivate(7, [0.1, 0.2, 0.3], { limit: 5 }), []);
 });
 
+test("коллекции явно названной версии нет — отказ, а не пустой ответ", async () => {
+  // PostgreSQL называет версию активной, а коллекцию потеряли: «ничего не
+  // нашлось» скрыло бы потерянный индекс, поиск обязан уйти в degraded.
+  const { store } = fakeQdrant({});
+  await assert.rejects(
+    () => store.searchPrivate(7, [0.1, 0.2, 0.3], { limit: 5, version: 3 }),
+    (error: unknown) => error instanceof QdrantError && error.code === "qdrant_not_found",
+  );
+  await assert.rejects(
+    () => store.searchGlobal([0.1, 0.2, 0.3], ["col-a"], { limit: 5, version: 3 }),
+    (error: unknown) => error instanceof QdrantError && error.code === "qdrant_not_found",
+  );
+});
+
 test("запись: id точки — id фрагмента, область и пространство векторов проверяются", async () => {
   const { calls, store } = fakeQdrant({ "PUT /collections/eva_knowledge_private_v1/points": () => ({ result: {} }) });
   await store.upsert("private", SPACE, [point(42, "private")]);

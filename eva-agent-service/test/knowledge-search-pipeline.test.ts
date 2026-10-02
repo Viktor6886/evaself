@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { KnowledgeSearch } from "../dist/knowledge/search.js";
-import { QdrantError } from "../dist/knowledge/qdrant-client.js";
+import { QdrantClient, QdrantError } from "../dist/knowledge/qdrant-client.js";
+import { KnowledgeVectorStore } from "../dist/knowledge/vector-store.js";
 import { knowledgeSearchMetrics, resetKnowledgeMetrics } from "../dist/knowledge/metrics.js";
 import { assertQueryAllowed, currentScope, runInScope, userScope } from "../dist/tenancy/index.js";
 import { CoreToolFactory } from "../dist/tools/core-tools.js";
@@ -122,6 +123,9 @@ test("гибрид: вектор, морфология и триграммы с�
   const lexical = db.queries.find((entry) => entry.sql.includes("websearch_to_tsquery('russian'"))!;
   assert.deepEqual(lexical.values.slice(0, 3), [77, true, true]);
   assert.deepEqual(lexical.values.slice(5), ["Иванов", "Р-168-5УН"]);
+  // Фамилия или номер бывают только в имени файла: триграммы сравнивают и название документа.
+  assert.match(lexical.sql, /\$6 <% d\.name/);
+  assert.match(lexical.sql, /GREATEST\(word_similarity\(\$6, c\.content\), word_similarity\(\$6, d\.name\)\)/);
   assert.ok(db.queries.some((entry) => entry.sql.includes("SET LOCAL pg_trgm.word_similarity_threshold")));
 });
 
@@ -178,6 +182,21 @@ test("отказ Qdrant или эмбеддингов — поиск слова�
   }).search(77, "штраф");
   assert.equal(hybrid.degraded, true);
   assert.deepEqual(hybrid.hits.map((hit) => hit.matched), ["fts"]);
+
+  // Версия активна в PostgreSQL, а коллекции в Qdrant нет (потеряна, не
+  // восстановлена): это отказ, а не «ничего не нашлось».
+  const lost = new KnowledgeVectorStore(new QdrantClient({
+    url: "http://qdrant.test",
+    apiKey: "k",
+    fetch: (async () => new Response(JSON.stringify({ status: { error: "Not found: Collection `eva_knowledge_private_v3` doesn't exist!" } }), { status: 404 })) as typeof fetch,
+  }));
+  const missing = await new KnowledgeSearch(searchDb({ fts: ["1"] }) as never, embed, {
+    settings: settings({ vectorBackend: "qdrant" }),
+    vectors: lost,
+    embedVersion: async () => [1, 0, 0, 0],
+  }).search(77, "штраф");
+  assert.equal(missing.degraded, true);
+  assert.deepEqual(missing.hits.map((hit) => hit.matched), ["fts"]);
 
   // Векторный режим без вектора — те же слова, а не пустота.
   const db = searchDb({ fts: ["1"] });

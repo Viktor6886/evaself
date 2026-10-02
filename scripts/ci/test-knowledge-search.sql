@@ -28,7 +28,9 @@ VALUES
   ('11111111-1111-1111-1111-111111111111', 920100, false, NULL, 'Мой договор.pdf', 'application/pdf', 'h1', 'ready'),
   ('22222222-2222-2222-2222-222222222222', 920200, false, NULL, 'Чужой договор.pdf', 'application/pdf', 'h2', 'ready'),
   ('33333333-3333-3333-3333-333333333333', NULL, true, 'c1111111-0000-0000-0000-000000000001', 'Справочник Евы.md', 'text/markdown', 'h3', 'ready'),
-  ('44444444-4444-4444-4444-444444444444', NULL, true, 'c1111111-0000-0000-0000-000000000002', 'Скрытая коллекция.md', 'text/markdown', 'h4', 'ready');
+  ('44444444-4444-4444-4444-444444444444', NULL, true, 'c1111111-0000-0000-0000-000000000002', 'Скрытая коллекция.md', 'text/markdown', 'h4', 'ready'),
+  -- Фамилия только в имени файла, в тексте её нет.
+  ('55555555-5555-5555-5555-555555555555', 920100, false, NULL, 'Петров — расписка.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'h5', 'ready');
 
 -- Векторы простые и различимые: важна не близость сама по себе, а то,
 -- что она вообще участвует в отборе. Фрагмент без вектора (новые векторы
@@ -50,7 +52,10 @@ VALUES
    ('[' || 0.9 || repeat(',0', 1535) || ']')::vector, 'router', NULL, NULL, NULL),
   ('44444444-4444-4444-4444-444444444444', NULL, true, 0,
    'Скрытая коллекция: договор аренды и Иванов.', 'c4',
-   ('[' || 1 || repeat(',0', 1535) || ']')::vector, 'router', NULL, NULL, NULL);
+   ('[' || 1 || repeat(',0', 1535) || ']')::vector, 'router', NULL, NULL, NULL),
+  ('55555555-5555-5555-5555-555555555555', 920100, false, 0,
+   'Получил сумму полностью, претензий не имею.', 'c5',
+   NULL, 'qdrant', NULL, NULL, NULL);
 
 -- ---------------------------------------------------------------------
 -- Прежний поиск (режим legacy): человек 920100, обе базы включены.
@@ -151,20 +156,38 @@ fts AS (
 SELECT 'morphology', 'fts', d.name, c.ordinal
   FROM fts JOIN knowledge_chunks c ON c.id = fts.id JOIN knowledge_documents d ON d.id = c.document_id;
 
--- Опечатка в фамилии и обозначение техники: только триграммы.
+-- Опечатка в фамилии и обозначение техники: только триграммы. Слово
+-- сравнивается и с текстом, и с названием документа.
 INSERT INTO probe_lexical
 WITH trgm AS (
-  SELECT c.id, (word_similarity('Иваноф', c.content) + word_similarity('Р-168-5УН', c.content)) AS score
+  SELECT c.id, (GREATEST(word_similarity('Иваноф', c.content), word_similarity('Иваноф', d.name))
+              + GREATEST(word_similarity('Р-168-5УН', c.content), word_similarity('Р-168-5УН', d.name))) AS score
     FROM knowledge_chunks c
     JOIN knowledge_documents d
       ON d.id = c.document_id AND (d.user_id = 920100 OR d.product_verified)
     LEFT JOIN knowledge_collections k ON k.id = d.collection_id
-   WHERE ('Иваноф' <% c.content OR 'Р-168-5УН' <% c.content)
+   WHERE ('Иваноф' <% c.content OR 'Иваноф' <% d.name OR 'Р-168-5УН' <% c.content OR 'Р-168-5УН' <% d.name)
      AND ((c.user_id = 920100 AND true) OR (c.product_verified AND true AND COALESCE(k.enabled, true)))
    ORDER BY score DESC, c.id
    LIMIT 30
 )
 SELECT 'trigram', 'trgm', d.name, c.ordinal
+  FROM trgm JOIN knowledge_chunks c ON c.id = trgm.id JOIN knowledge_documents d ON d.id = c.document_id;
+
+-- Фамилия только в названии документа.
+INSERT INTO probe_lexical
+WITH trgm AS (
+  SELECT c.id, GREATEST(word_similarity('Петрову', c.content), word_similarity('Петрову', d.name)) AS score
+    FROM knowledge_chunks c
+    JOIN knowledge_documents d
+      ON d.id = c.document_id AND (d.user_id = 920100 OR d.product_verified)
+    LEFT JOIN knowledge_collections k ON k.id = d.collection_id
+   WHERE ('Петрову' <% c.content OR 'Петрову' <% d.name)
+     AND ((c.user_id = 920100 AND true) OR (c.product_verified AND true AND COALESCE(k.enabled, true)))
+   ORDER BY score DESC, c.id
+   LIMIT 30
+)
+SELECT 'name', 'trgm', d.name, c.ordinal
   FROM trgm JOIN knowledge_chunks c ON c.id = trgm.id JOIN knowledge_documents d ON d.id = c.document_id;
 
 -- Личная база выключена в поиске: свой документ не находится, общий — да.
@@ -192,6 +215,9 @@ BEGIN
   END IF;
   IF NOT EXISTS (SELECT 1 FROM probe_lexical WHERE label = 'trigram' AND document_name = 'Мой договор.pdf') THEN
     RAISE EXCEPTION 'триграммы: опечатка в фамилии и обозначение не нашлись';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM probe_lexical WHERE label = 'name' AND document_name = 'Петров — расписка.docx') THEN
+    RAISE EXCEPTION 'триграммы: фамилия из названия документа не нашлась';
   END IF;
   IF EXISTS (SELECT 1 FROM probe_lexical WHERE document_name IN ('Чужой договор.pdf', 'Скрытая коллекция.md')) THEN
     RAISE EXCEPTION 'лексический поиск отдал чужой документ или выключенную коллекцию';
