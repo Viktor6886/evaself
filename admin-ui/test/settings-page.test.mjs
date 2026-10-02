@@ -131,4 +131,34 @@ describe("системные настройки", () => {
     assert.equal(saved.body.settings["runtime.osint_enabled"], true);
     assert.equal(saved.body.settings["runtime.osint_collector_web"], true);
   });
+
+  test("необязательное пустое поле не помечено ошибкой и сохраняется пустым", async () => {
+    const payload = () => ({
+      ...settingsPayload("edit"),
+      settings: [
+        ...settingsPayload("edit").settings,
+        setting({
+          key: "runtime.knowledge_rerank_provider", env: "EVA_KNOWLEDGE_RERANK_PROVIDER", group: "knowledge",
+          title: "База знаний: провайдер reranker (id)", type: "string", default: "", value: "", required: false,
+        }),
+        setting({
+          key: "runtime.timezone", env: "EVA_DEFAULT_TIMEZONE",
+          title: "Часовой пояс", type: "string", default: "Europe/Moscow", value: "Europe/Moscow",
+        }),
+      ],
+    });
+    const panel = await openPanel({ routes: { "/settings": payload, "PUT /settings": payload } });
+    panels.push(panel);
+    const { page } = panel;
+    await page.evaluate(() => openPage("settings"));
+
+    const optional = 'input[data-key="runtime.knowledge_rerank_provider"]';
+    await page.waitForSelector(optional);
+    assert.equal(await page.$eval(optional, (node) => node.required), false);
+    assert.equal(await page.$eval(optional, (node) => node.matches(":invalid")), false);
+    assert.equal(await page.$eval('input[data-key="runtime.timezone"]', (node) => node.required), true);
+    await page.click("#save-settings");
+    const saved = await panel.waitForRequest((item) => item.method === "PUT" && item.path === "/settings");
+    assert.equal(saved.body.settings["runtime.knowledge_rerank_provider"], "");
+  });
 });

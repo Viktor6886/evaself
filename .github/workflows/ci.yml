@@ -508,6 +508,11 @@ jobs:
       - name: Unit tests
         run: node --test --experimental-strip-types test/*.test.ts
 
+      # SQL-тест поиска (job миграций, настоящий PostgreSQL) держит копию
+      # запросов: здесь она сверяется с собранным кодом.
+      - name: Knowledge search SQL test matches the query builder
+        run: node ../scripts/ci/gen-knowledge-search-probes.mjs --check
+
       - name: Distributed limits execute atomically on Valkey
         run: node ../scripts/ci/test-distributed-limits.mjs
 

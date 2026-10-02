@@ -376,8 +376,11 @@ export class KnowledgeVectorStore {
       });
     } catch (error) {
       // Alias ещё не создан — индекс не включали: это пустой ответ, а не
-      // авария. Остальные отказы вызывающий превращает в degraded.
-      if (error instanceof QdrantError && error.code === "qdrant_not_found") return [];
+      // авария. Явно названной версии без коллекции быть не должно: её
+      // назвал PostgreSQL, а коллекцию потеряли или ещё не восстановили —
+      // это отказ, и вызывающий превращает его в degraded, а не в
+      // «ничего не нашлось». Остальные отказы — так же.
+      if (error instanceof QdrantError && error.code === "qdrant_not_found" && options.version === undefined) return [];
       throw error;
     }
     return hits.flatMap((hit) => {
