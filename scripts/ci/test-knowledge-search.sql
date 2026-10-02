@@ -55,6 +55,9 @@ VALUES
    ('[' || 1 || repeat(',0', 1535) || ']')::vector, 'router', NULL, NULL, NULL),
   ('55555555-5555-5555-5555-555555555555', 920100, false, 0,
    'Получил сумму полностью, претензий не имею.', 'c5',
+   NULL, 'qdrant', NULL, NULL, NULL),
+  ('55555555-5555-5555-5555-555555555555', 920100, false, 1,
+   'Подпись и дата.', 'c5b',
    NULL, 'qdrant', NULL, NULL, NULL);
 
 -- ---------------------------------------------------------------------
@@ -138,75 +141,323 @@ SET LOCAL pg_trgm.word_similarity_threshold = 0.5;
 
 CREATE TEMP TABLE probe_lexical (label text, signal text, document_name text, ordinal integer) ON COMMIT DROP;
 
--- Морфология: «договор» находит «Договоры», «аренда» — «аренды».
+-- Запросы — те же, что строит `lexicalCandidates`, с подставленными
+-- параметрами; CI сверяет блок с кодом.
+-- >>> сгенерировано scripts/ci/gen-knowledge-search-probes.mjs — не править руками
+-- morphology: «договор аренда»
 INSERT INTO probe_lexical
-WITH ask AS (SELECT websearch_to_tsquery('russian', 'договор аренда') AS tsq),
-fts AS (
-  SELECT c.id, ts_rank_cd(to_tsvector('russian', c.content), ask.tsq) AS score
-    FROM knowledge_chunks c
-    JOIN knowledge_documents d
-      ON d.id = c.document_id AND (d.user_id = 920100 OR d.product_verified)
-    LEFT JOIN knowledge_collections k ON k.id = d.collection_id
-   CROSS JOIN ask
-   WHERE to_tsvector('russian', c.content) @@ ask.tsq
-     AND ((c.user_id = 920100 AND true) OR (c.product_verified AND true AND COALESCE(k.enabled, true)))
-   ORDER BY score DESC, c.id
-   LIMIT 30
-)
-SELECT 'morphology', 'fts', d.name, c.ordinal
-  FROM fts JOIN knowledge_chunks c ON c.id = fts.id JOIN knowledge_documents d ON d.id = c.document_id;
+SELECT 'morphology', q.signal, d.name, c.ordinal
+  FROM (
+  WITH ask AS (
+    SELECT websearch_to_tsquery('russian', 'договор аренда') AS tsq,
+           regexp_replace(plainto_tsquery('russian', 'договор аренда')::text, ' & ', ' | ', 'g')::tsquery AS anyq
+  ),
+  fts_strict AS (
+    SELECT c.id, 1 + ts_rank_cd(to_tsvector('russian', c.content), ask.tsq) AS score
+      FROM knowledge_chunks c
+      JOIN knowledge_documents d
+        ON d.id = c.document_id AND (d.user_id = 920100 OR d.product_verified)
+      LEFT JOIN knowledge_collections k ON k.id = d.collection_id
+     CROSS JOIN ask
+     WHERE to_tsvector('russian', c.content) @@ ask.tsq
+       AND ((c.user_id = 920100 AND true::boolean) OR (c.product_verified AND true::boolean AND COALESCE(k.enabled, true)))
+     ORDER BY score DESC, c.id
+     LIMIT 30
+  ),
+  fts_loose AS (
+    SELECT sample.id, ts_rank_cd(to_tsvector('russian', sample.content), ask.anyq) AS score
+      FROM (
+        SELECT c.id, c.content
+          FROM knowledge_chunks c
+          JOIN knowledge_documents d
+            ON d.id = c.document_id AND (d.user_id = 920100 OR d.product_verified)
+          LEFT JOIN knowledge_collections k ON k.id = d.collection_id
+         CROSS JOIN ask
+         WHERE NOT EXISTS (SELECT 1 FROM fts_strict)
+           AND to_tsvector('russian', c.content) @@ ask.anyq
+           AND ((c.user_id = 920100 AND true::boolean) OR (c.product_verified AND true::boolean AND COALESCE(k.enabled, true)))
+         LIMIT 1000
+      ) sample
+     CROSS JOIN ask
+     ORDER BY score DESC, sample.id
+     LIMIT 30
+  ),
+  fts AS (
+    SELECT id, score FROM fts_strict
+    UNION ALL
+    SELECT id, score FROM fts_loose
+  )
+  SELECT 'fts' AS signal, id::text AS id, score FROM fts
+  ) q
+  JOIN knowledge_chunks c ON c.id = q.id::bigint
+  JOIN knowledge_documents d ON d.id = c.document_id;
 
--- Опечатка в фамилии и обозначение техники: только триграммы. Слово
--- сравнивается и с текстом, и с названием документа.
+-- question: «какие сроки оплаты по договору квартиры»
 INSERT INTO probe_lexical
-WITH trgm AS (
-  SELECT c.id, (GREATEST(word_similarity('Иваноф', c.content), word_similarity('Иваноф', d.name))
-              + GREATEST(word_similarity('Р-168-5УН', c.content), word_similarity('Р-168-5УН', d.name))) AS score
-    FROM knowledge_chunks c
-    JOIN knowledge_documents d
-      ON d.id = c.document_id AND (d.user_id = 920100 OR d.product_verified)
-    LEFT JOIN knowledge_collections k ON k.id = d.collection_id
-   WHERE ('Иваноф' <% c.content OR 'Иваноф' <% d.name OR 'Р-168-5УН' <% c.content OR 'Р-168-5УН' <% d.name)
-     AND ((c.user_id = 920100 AND true) OR (c.product_verified AND true AND COALESCE(k.enabled, true)))
-   ORDER BY score DESC, c.id
-   LIMIT 30
-)
-SELECT 'trigram', 'trgm', d.name, c.ordinal
-  FROM trgm JOIN knowledge_chunks c ON c.id = trgm.id JOIN knowledge_documents d ON d.id = c.document_id;
+SELECT 'question', q.signal, d.name, c.ordinal
+  FROM (
+  WITH ask AS (
+    SELECT websearch_to_tsquery('russian', 'какие сроки оплаты по договору квартиры') AS tsq,
+           regexp_replace(plainto_tsquery('russian', 'какие сроки оплаты по договору квартиры')::text, ' & ', ' | ', 'g')::tsquery AS anyq
+  ),
+  fts_strict AS (
+    SELECT c.id, 1 + ts_rank_cd(to_tsvector('russian', c.content), ask.tsq) AS score
+      FROM knowledge_chunks c
+      JOIN knowledge_documents d
+        ON d.id = c.document_id AND (d.user_id = 920100 OR d.product_verified)
+      LEFT JOIN knowledge_collections k ON k.id = d.collection_id
+     CROSS JOIN ask
+     WHERE to_tsvector('russian', c.content) @@ ask.tsq
+       AND ((c.user_id = 920100 AND true::boolean) OR (c.product_verified AND true::boolean AND COALESCE(k.enabled, true)))
+     ORDER BY score DESC, c.id
+     LIMIT 30
+  ),
+  fts_loose AS (
+    SELECT sample.id, ts_rank_cd(to_tsvector('russian', sample.content), ask.anyq) AS score
+      FROM (
+        SELECT c.id, c.content
+          FROM knowledge_chunks c
+          JOIN knowledge_documents d
+            ON d.id = c.document_id AND (d.user_id = 920100 OR d.product_verified)
+          LEFT JOIN knowledge_collections k ON k.id = d.collection_id
+         CROSS JOIN ask
+         WHERE NOT EXISTS (SELECT 1 FROM fts_strict)
+           AND to_tsvector('russian', c.content) @@ ask.anyq
+           AND ((c.user_id = 920100 AND true::boolean) OR (c.product_verified AND true::boolean AND COALESCE(k.enabled, true)))
+         LIMIT 1000
+      ) sample
+     CROSS JOIN ask
+     ORDER BY score DESC, sample.id
+     LIMIT 30
+  ),
+  fts AS (
+    SELECT id, score FROM fts_strict
+    UNION ALL
+    SELECT id, score FROM fts_loose
+  )
+  SELECT 'fts' AS signal, id::text AS id, score FROM fts
+  ) q
+  JOIN knowledge_chunks c ON c.id = q.id::bigint
+  JOIN knowledge_documents d ON d.id = c.document_id;
 
--- Фамилия только в названии документа.
+-- trigram: «Иваноф Р-168-5УН», триграммы: Иваноф, Р-168-5УН
 INSERT INTO probe_lexical
-WITH trgm AS (
-  SELECT c.id, GREATEST(word_similarity('Петрову', c.content), word_similarity('Петрову', d.name)) AS score
-    FROM knowledge_chunks c
-    JOIN knowledge_documents d
-      ON d.id = c.document_id AND (d.user_id = 920100 OR d.product_verified)
-    LEFT JOIN knowledge_collections k ON k.id = d.collection_id
-   WHERE ('Петрову' <% c.content OR 'Петрову' <% d.name)
-     AND ((c.user_id = 920100 AND true) OR (c.product_verified AND true AND COALESCE(k.enabled, true)))
-   ORDER BY score DESC, c.id
-   LIMIT 30
-)
-SELECT 'name', 'trgm', d.name, c.ordinal
-  FROM trgm JOIN knowledge_chunks c ON c.id = trgm.id JOIN knowledge_documents d ON d.id = c.document_id;
+SELECT 'trigram', q.signal, d.name, c.ordinal
+  FROM (
+  WITH ask AS (
+    SELECT websearch_to_tsquery('russian', 'Иваноф Р-168-5УН') AS tsq,
+           regexp_replace(plainto_tsquery('russian', 'Иваноф Р-168-5УН')::text, ' & ', ' | ', 'g')::tsquery AS anyq
+  ),
+  fts_strict AS (
+    SELECT c.id, 1 + ts_rank_cd(to_tsvector('russian', c.content), ask.tsq) AS score
+      FROM knowledge_chunks c
+      JOIN knowledge_documents d
+        ON d.id = c.document_id AND (d.user_id = 920100 OR d.product_verified)
+      LEFT JOIN knowledge_collections k ON k.id = d.collection_id
+     CROSS JOIN ask
+     WHERE to_tsvector('russian', c.content) @@ ask.tsq
+       AND ((c.user_id = 920100 AND true::boolean) OR (c.product_verified AND true::boolean AND COALESCE(k.enabled, true)))
+     ORDER BY score DESC, c.id
+     LIMIT 30
+  ),
+  fts_loose AS (
+    SELECT sample.id, ts_rank_cd(to_tsvector('russian', sample.content), ask.anyq) AS score
+      FROM (
+        SELECT c.id, c.content
+          FROM knowledge_chunks c
+          JOIN knowledge_documents d
+            ON d.id = c.document_id AND (d.user_id = 920100 OR d.product_verified)
+          LEFT JOIN knowledge_collections k ON k.id = d.collection_id
+         CROSS JOIN ask
+         WHERE NOT EXISTS (SELECT 1 FROM fts_strict)
+           AND to_tsvector('russian', c.content) @@ ask.anyq
+           AND ((c.user_id = 920100 AND true::boolean) OR (c.product_verified AND true::boolean AND COALESCE(k.enabled, true)))
+         LIMIT 1000
+      ) sample
+     CROSS JOIN ask
+     ORDER BY score DESC, sample.id
+     LIMIT 30
+  ),
+  fts AS (
+    SELECT id, score FROM fts_strict
+    UNION ALL
+    SELECT id, score FROM fts_loose
+  ),
+  trgm_text AS (
+    SELECT c.id, (word_similarity('Иваноф', c.content) + word_similarity('Р-168-5УН', c.content)) AS score
+      FROM knowledge_chunks c
+      JOIN knowledge_documents d
+        ON d.id = c.document_id AND (d.user_id = 920100 OR d.product_verified)
+      LEFT JOIN knowledge_collections k ON k.id = d.collection_id
+     WHERE ('Иваноф' <% c.content OR 'Р-168-5УН' <% c.content)
+       AND ((c.user_id = 920100 AND true::boolean) OR (c.product_verified AND true::boolean AND COALESCE(k.enabled, true)))
+     ORDER BY score DESC, c.id
+     LIMIT 30
+  ),
+  trgm_name AS (
+    SELECT first.id, (word_similarity('Иваноф', d.name) + word_similarity('Р-168-5УН', d.name)) AS score
+      FROM knowledge_documents d
+      LEFT JOIN knowledge_collections k ON k.id = d.collection_id
+     CROSS JOIN LATERAL (
+       SELECT c.id
+         FROM knowledge_chunks c
+        WHERE c.document_id = d.id
+          AND ((c.user_id = 920100 AND true::boolean) OR (c.product_verified AND true::boolean AND COALESCE(k.enabled, true)))
+        ORDER BY c.ordinal
+        LIMIT 1
+     ) first
+     WHERE ('Иваноф' <% d.name OR 'Р-168-5УН' <% d.name)
+       AND (d.user_id = 920100 OR d.product_verified)
+     ORDER BY score DESC, d.id
+     LIMIT 30
+  ),
+  trgm AS (
+    SELECT id, max(score) AS score
+      FROM (SELECT id, score FROM trgm_text UNION ALL SELECT id, score FROM trgm_name) found
+     GROUP BY id
+     ORDER BY score DESC, id
+     LIMIT 30
+  )
+  SELECT 'fts' AS signal, id::text AS id, score FROM fts
+  UNION ALL
+  SELECT 'trgm' AS signal, id::text AS id, score FROM trgm
+  ) q
+  JOIN knowledge_chunks c ON c.id = q.id::bigint
+  JOIN knowledge_documents d ON d.id = c.document_id;
 
--- Личная база выключена в поиске: свой документ не находится, общий — да.
+-- name: «Петрову», триграммы: Петрову
 INSERT INTO probe_lexical
-WITH ask AS (SELECT websearch_to_tsquery('russian', 'аренда') AS tsq),
-fts AS (
-  SELECT c.id, ts_rank_cd(to_tsvector('russian', c.content), ask.tsq) AS score
-    FROM knowledge_chunks c
-    JOIN knowledge_documents d
-      ON d.id = c.document_id AND (d.user_id = 920100 OR d.product_verified)
-    LEFT JOIN knowledge_collections k ON k.id = d.collection_id
-   CROSS JOIN ask
-   WHERE to_tsvector('russian', c.content) @@ ask.tsq
-     AND ((c.user_id = 920100 AND false) OR (c.product_verified AND true AND COALESCE(k.enabled, true)))
-   ORDER BY score DESC, c.id
-   LIMIT 30
-)
-SELECT 'private_off', 'fts', d.name, c.ordinal
-  FROM fts JOIN knowledge_chunks c ON c.id = fts.id JOIN knowledge_documents d ON d.id = c.document_id;
+SELECT 'name', q.signal, d.name, c.ordinal
+  FROM (
+  WITH ask AS (
+    SELECT websearch_to_tsquery('russian', 'Петрову') AS tsq,
+           regexp_replace(plainto_tsquery('russian', 'Петрову')::text, ' & ', ' | ', 'g')::tsquery AS anyq
+  ),
+  fts_strict AS (
+    SELECT c.id, 1 + ts_rank_cd(to_tsvector('russian', c.content), ask.tsq) AS score
+      FROM knowledge_chunks c
+      JOIN knowledge_documents d
+        ON d.id = c.document_id AND (d.user_id = 920100 OR d.product_verified)
+      LEFT JOIN knowledge_collections k ON k.id = d.collection_id
+     CROSS JOIN ask
+     WHERE to_tsvector('russian', c.content) @@ ask.tsq
+       AND ((c.user_id = 920100 AND true::boolean) OR (c.product_verified AND true::boolean AND COALESCE(k.enabled, true)))
+     ORDER BY score DESC, c.id
+     LIMIT 30
+  ),
+  fts_loose AS (
+    SELECT sample.id, ts_rank_cd(to_tsvector('russian', sample.content), ask.anyq) AS score
+      FROM (
+        SELECT c.id, c.content
+          FROM knowledge_chunks c
+          JOIN knowledge_documents d
+            ON d.id = c.document_id AND (d.user_id = 920100 OR d.product_verified)
+          LEFT JOIN knowledge_collections k ON k.id = d.collection_id
+         CROSS JOIN ask
+         WHERE NOT EXISTS (SELECT 1 FROM fts_strict)
+           AND to_tsvector('russian', c.content) @@ ask.anyq
+           AND ((c.user_id = 920100 AND true::boolean) OR (c.product_verified AND true::boolean AND COALESCE(k.enabled, true)))
+         LIMIT 1000
+      ) sample
+     CROSS JOIN ask
+     ORDER BY score DESC, sample.id
+     LIMIT 30
+  ),
+  fts AS (
+    SELECT id, score FROM fts_strict
+    UNION ALL
+    SELECT id, score FROM fts_loose
+  ),
+  trgm_text AS (
+    SELECT c.id, (word_similarity('Петрову', c.content)) AS score
+      FROM knowledge_chunks c
+      JOIN knowledge_documents d
+        ON d.id = c.document_id AND (d.user_id = 920100 OR d.product_verified)
+      LEFT JOIN knowledge_collections k ON k.id = d.collection_id
+     WHERE ('Петрову' <% c.content)
+       AND ((c.user_id = 920100 AND true::boolean) OR (c.product_verified AND true::boolean AND COALESCE(k.enabled, true)))
+     ORDER BY score DESC, c.id
+     LIMIT 30
+  ),
+  trgm_name AS (
+    SELECT first.id, (word_similarity('Петрову', d.name)) AS score
+      FROM knowledge_documents d
+      LEFT JOIN knowledge_collections k ON k.id = d.collection_id
+     CROSS JOIN LATERAL (
+       SELECT c.id
+         FROM knowledge_chunks c
+        WHERE c.document_id = d.id
+          AND ((c.user_id = 920100 AND true::boolean) OR (c.product_verified AND true::boolean AND COALESCE(k.enabled, true)))
+        ORDER BY c.ordinal
+        LIMIT 1
+     ) first
+     WHERE ('Петрову' <% d.name)
+       AND (d.user_id = 920100 OR d.product_verified)
+     ORDER BY score DESC, d.id
+     LIMIT 30
+  ),
+  trgm AS (
+    SELECT id, max(score) AS score
+      FROM (SELECT id, score FROM trgm_text UNION ALL SELECT id, score FROM trgm_name) found
+     GROUP BY id
+     ORDER BY score DESC, id
+     LIMIT 30
+  )
+  SELECT 'fts' AS signal, id::text AS id, score FROM fts
+  UNION ALL
+  SELECT 'trgm' AS signal, id::text AS id, score FROM trgm
+  ) q
+  JOIN knowledge_chunks c ON c.id = q.id::bigint
+  JOIN knowledge_documents d ON d.id = c.document_id;
+
+-- private_off: «аренда», личная база выключена
+INSERT INTO probe_lexical
+SELECT 'private_off', q.signal, d.name, c.ordinal
+  FROM (
+  WITH ask AS (
+    SELECT websearch_to_tsquery('russian', 'аренда') AS tsq,
+           regexp_replace(plainto_tsquery('russian', 'аренда')::text, ' & ', ' | ', 'g')::tsquery AS anyq
+  ),
+  fts_strict AS (
+    SELECT c.id, 1 + ts_rank_cd(to_tsvector('russian', c.content), ask.tsq) AS score
+      FROM knowledge_chunks c
+      JOIN knowledge_documents d
+        ON d.id = c.document_id AND (d.user_id = 920100 OR d.product_verified)
+      LEFT JOIN knowledge_collections k ON k.id = d.collection_id
+     CROSS JOIN ask
+     WHERE to_tsvector('russian', c.content) @@ ask.tsq
+       AND ((c.user_id = 920100 AND false::boolean) OR (c.product_verified AND true::boolean AND COALESCE(k.enabled, true)))
+     ORDER BY score DESC, c.id
+     LIMIT 30
+  ),
+  fts_loose AS (
+    SELECT sample.id, ts_rank_cd(to_tsvector('russian', sample.content), ask.anyq) AS score
+      FROM (
+        SELECT c.id, c.content
+          FROM knowledge_chunks c
+          JOIN knowledge_documents d
+            ON d.id = c.document_id AND (d.user_id = 920100 OR d.product_verified)
+          LEFT JOIN knowledge_collections k ON k.id = d.collection_id
+         CROSS JOIN ask
+         WHERE NOT EXISTS (SELECT 1 FROM fts_strict)
+           AND to_tsvector('russian', c.content) @@ ask.anyq
+           AND ((c.user_id = 920100 AND false::boolean) OR (c.product_verified AND true::boolean AND COALESCE(k.enabled, true)))
+         LIMIT 1000
+      ) sample
+     CROSS JOIN ask
+     ORDER BY score DESC, sample.id
+     LIMIT 30
+  ),
+  fts AS (
+    SELECT id, score FROM fts_strict
+    UNION ALL
+    SELECT id, score FROM fts_loose
+  )
+  SELECT 'fts' AS signal, id::text AS id, score FROM fts
+  ) q
+  JOIN knowledge_chunks c ON c.id = q.id::bigint
+  JOIN knowledge_documents d ON d.id = c.document_id;
+-- <<< конец сгенерированного блока
 
 DO $$
 BEGIN
@@ -216,8 +467,18 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM probe_lexical WHERE label = 'trigram' AND document_name = 'Мой договор.pdf') THEN
     RAISE EXCEPTION 'триграммы: опечатка в фамилии и обозначение не нашлись';
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM probe_lexical WHERE label = 'name' AND document_name = 'Петров — расписка.docx') THEN
+  IF NOT EXISTS (SELECT 1 FROM probe_lexical WHERE label = 'name' AND document_name = 'Петров — расписка.docx' AND ordinal = 0) THEN
     RAISE EXCEPTION 'триграммы: фамилия из названия документа не нашлась';
+  END IF;
+  -- Документ, найденный по названию, — одним первым фрагментом: иначе все
+  -- его фрагменты с одной оценкой вытеснили бы совпадения по тексту.
+  IF (SELECT count(*) FROM probe_lexical WHERE label = 'name' AND document_name = 'Петров — расписка.docx') <> 1 THEN
+    RAISE EXCEPTION 'триграммы: документ, найденный по названию, отдан не одним фрагментом';
+  END IF;
+  -- Длинный вопрос: все слова сразу не встречаются, запасной запрос
+  -- находит по любому из них.
+  IF NOT EXISTS (SELECT 1 FROM probe_lexical WHERE label = 'question' AND document_name = 'Мой договор.pdf') THEN
+    RAISE EXCEPTION 'длинный вопрос не нашёл ничего: запасной запрос по любому слову не сработал';
   END IF;
   IF EXISTS (SELECT 1 FROM probe_lexical WHERE document_name IN ('Чужой договор.pdf', 'Скрытая коллекция.md')) THEN
     RAISE EXCEPTION 'лексический поиск отдал чужой документ или выключенную коллекцию';

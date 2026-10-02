@@ -9,10 +9,12 @@
  *
  * Протокол — общий у Jina, Cohere, Voyage, vLLM и совместимых:
  * `POST {base_url}/rerank` с `{model, query, documents}`. Ответ бывает
- * `{results: [...]}` (Jina, Cohere), `{data: [...]}` (Voyage) или массивом
- * (Text Embeddings Inference); у элемента — `index` и `relevance_score`
- * или `score`. `top_n` не передаётся: Voyage называет его иначе, а оценки
- * нужны всем кандидатам — порядок выбирает вызывающий.
+ * `{results: [...]}` (Jina, Cohere, vLLM) или `{data: [...]}` (Voyage);
+ * массив без обёртки тоже принимается. У элемента — `index` и
+ * `relevance_score` или `score`. `top_n` не передаётся: Voyage называет
+ * его иначе, а оценки нужны всем кандидатам — порядок выбирает
+ * вызывающий. Text Embeddings Inference ждёт `texts` вместо `documents`
+ * и напрямую не подходит.
  */
 
 import { openAiCompatHeaders, resolveOpenAiCompat } from "./provider-manifests.js";
@@ -141,7 +143,13 @@ export class RouterReranker {
           await response.body?.cancel().catch(() => undefined);
           throw fail(codeForStatus(response.status), `HTTP ${response.status}`);
         }
-        payload = await response.json();
+        const body = await response.text();
+        try {
+          payload = JSON.parse(body);
+        } catch {
+          // Ответ пришёл, но не JSON: это неверный ответ, а не недоступность.
+          throw fail("rerank_invalid");
+        }
       } catch (error) {
         if (error instanceof RerankError) throw error;
         if (signal?.aborted) throw error;

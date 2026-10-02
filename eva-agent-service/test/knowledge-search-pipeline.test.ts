@@ -57,7 +57,7 @@ interface Lists {
   pgvector?: string[];
 }
 
-function searchDb(lists: Lists, neighbors: Array<Record<string, unknown>> = []) {
+function searchDb(lists: Lists, neighbors: Array<Record<string, unknown>> = [], options: { distance?: string } = {}) {
   return guardedDb((sql, values) => {
     if (sql.includes("SET LOCAL")) return [];
     if (sql.includes("websearch_to_tsquery('russian'")) {
@@ -71,7 +71,7 @@ function searchDb(lists: Lists, neighbors: Array<Record<string, unknown>> = []) 
       return (values[3] as string[]).flatMap((id) => (CHUNKS[id] ? [CHUNKS[id]!] : []));
     }
     if (sql.includes("unnest($2::uuid[]")) return neighbors;
-    if (sql.includes("FROM knowledge_embedding_versions")) return [{ version: 3, dimension: 4 }];
+    if (sql.includes("FROM knowledge_embedding_versions")) return [{ version: 3, dimension: 4, distance: options.distance ?? "Cosine" }];
     if (sql.includes("FROM knowledge_collections")) return [{ id: "col-1" }];
     throw new Error(`неожиданный запрос: ${sql.slice(0, 60)}`);
   });
@@ -123,9 +123,15 @@ test("гибрид: вектор, морфология и триграммы с�
   const lexical = db.queries.find((entry) => entry.sql.includes("websearch_to_tsquery('russian'"))!;
   assert.deepEqual(lexical.values.slice(0, 3), [77, true, true]);
   assert.deepEqual(lexical.values.slice(5), ["Иванов", "Р-168-5УН"]);
-  // Фамилия или номер бывают только в имени файла: триграммы сравнивают и название документа.
-  assert.match(lexical.sql, /\$6 <% d\.name/);
-  assert.match(lexical.sql, /GREATEST\(word_similarity\(\$6, c\.content\), word_similarity\(\$6, d\.name\)\)/);
+  // Фамилия или номер бывают только в имени файла: триграммы сравнивают и
+  // название документа — отдельной веткой. Одно OR по столбцам двух таблиц
+  // индексы 091 не использует, и план становится полным перебором.
+  assert.match(lexical.sql, /trgm_text AS[\s\S]*\$6 <% c\.content/);
+  assert.match(lexical.sql, /trgm_name AS[\s\S]*\$6 <% d\.name/);
+  assert.doesNotMatch(lexical.sql, /<% c\.content OR \$\d+ <% d\.name/);
+  // Строгий запрос по словам и запасной — любое из слов.
+  assert.match(lexical.sql, /plainto_tsquery\('russian', \$4\)/);
+  assert.match(lexical.sql, /NOT EXISTS \(SELECT 1 FROM fts_strict\)/);
   assert.ok(db.queries.some((entry) => entry.sql.includes("SET LOCAL pg_trgm.word_similarity_threshold")));
 });
 
@@ -205,6 +211,51 @@ test("отказ Qdrant или эмбеддингов — поиск слова�
   }).search(77, "штраф");
   assert.equal(vectorOnly.degraded, true);
   assert.deepEqual(vectorOnly.hits.map((hit) => hit.ordinal), [4]);
+});
+
+test("зависший провайдер эмбеддингов не держит ход: по истечении срока — слова и degraded", async () => {
+  const hanging = (_text: string, signal?: AbortSignal) => new Promise<number[]>((_resolve, reject) => {
+    signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+  });
+  const started = Date.now();
+  const found = await new KnowledgeSearch(searchDb({ fts: ["1"] }) as never, hanging, {
+    settings: settings(),
+    vectorTimeoutMs: 30,
+  }).search(77, "штраф");
+  assert.equal(found.degraded, true);
+  assert.deepEqual(found.hits.map((hit) => hit.matched), ["fts"]);
+  assert.ok(Date.now() - started < 2_000, "поиск ждал провайдера дольше своей границы");
+});
+
+test("Qdrant с мерой Euclid: меньшее расстояние — ближе", async () => {
+  const vectors = {
+    searchPrivate: async () => [{ chunkId: 1, documentId: "doc-a", score: 0.2, payload: {} }],
+    searchGlobal: async () => [{ chunkId: 3, documentId: "doc-g", score: 1.7, payload: {} }],
+  };
+  const found = await new KnowledgeSearch(searchDb({}, [], { distance: "Euclid" }) as never, embed, {
+    settings: settings({ mode: "vector", vectorBackend: "qdrant" }),
+    vectors: vectors as never,
+    embedVersion: async () => [1, 0, 0, 0],
+  }).search(77, "аренда");
+  assert.deepEqual(found.hits.map((hit) => hit.documentName), ["Договор.pdf", "Справочник.md"]);
+});
+
+test("найденное сверх бюджета считается, а не пропадает молча", async () => {
+  const long = (id: string, ordinal: number) => ({
+    ...CHUNKS["1"], id, ordinal, content: `${"Штраф. ".repeat(250)}${id}`, content_hash: `long-${id}`, document_id: `doc-${id}`,
+  });
+  for (const id of ["11", "12", "13", "14", "15"]) CHUNKS[id] = long(id, 1);
+  try {
+    const db = searchDb({ fts: ["11", "12", "13", "14", "15"] });
+    const search = new KnowledgeSearch(db as never, embed, { settings: settings({ mode: "lexical", neighbors: 0 }) });
+    const found = await search.search(77, "штраф", { limit: 5 });
+    assert.ok(found.omitted && found.omitted > 0, "ничего не отброшено, хотя пять фрагментов по 1750 знаков не помещаются");
+    assert.equal(found.hits.length + found.omitted!, 5);
+    const details = await callTool(search, "штраф");
+    assert.equal(details.omitted_results, found.omitted);
+  } finally {
+    for (const id of ["11", "12", "13", "14", "15"]) delete CHUNKS[id];
+  }
 });
 
 test("отменённый ход не превращается в degraded", async () => {

@@ -46,6 +46,7 @@ import {
   lexicalCandidates,
   neighborChunks,
   pgvectorCandidates,
+  type ActiveVersion,
   type ChunkRow,
   type SearchScope,
 } from "./search-queries.js";
@@ -98,6 +99,8 @@ export interface KnowledgeSearchResult {
   degraded: boolean;
   /** Поиск выключен в панели: ничего не искалось. */
   disabled?: boolean;
+  /** Найдено больше, чем поместилось в бюджет ответа. */
+  omitted?: number;
   mode?: KnowledgeSearchMode;
   /** Конвейер K4: что было на этапах — для диагностики и метрик. */
   diagnostics?: {
@@ -123,6 +126,8 @@ export interface KnowledgeSearchDeps {
   /** Индекс Qdrant; null — не настроен (нет `QDRANT_API_KEY`). */
   vectors?: KnowledgeVectorStore | null;
   rerank?: (request: RerankRequest, signal?: AbortSignal) => Promise<Array<number | null>>;
+  /** Граница времени векторной половины; по умолчанию 8 с. */
+  vectorTimeoutMs?: number;
 }
 
 interface HitRow {
@@ -148,6 +153,8 @@ const RERANK_TIMEOUT_MS = 4_000;
 const MAX_FINAL = 10;
 /** Активная версия и коллекции меняются редко: перечитываются раз в 30 секунд. */
 const CATALOG_TTL_MS = 30_000;
+/** Векторная половина в интерактивном ходе: вектор запроса и поиск по индексу. */
+const VECTOR_TIMEOUT_MS = 8_000;
 /** Теневых поисков одновременно — больше не нужно: это выборка для сравнения. */
 const SHADOW_CONCURRENCY = 2;
 const SHADOW_TIMEOUT_MS = 10_000;
@@ -159,7 +166,7 @@ type VectorOutcome =
   | { ok: false };
 
 export class KnowledgeSearch {
-  private catalog: { at: number; version: { version: number; dimension: number } | null; collections: string[] } | null = null;
+  private catalog: { at: number; version: ActiveVersion | null; collections: string[] } | null = null;
   private shadowRunning = 0;
 
   constructor(
@@ -368,11 +375,13 @@ export class KnowledgeSearch {
     const neighbors = depth > 0 && final.length
       ? await neighborChunks(this.db, scope.userId, neighborKeys(final, depth))
       : [];
+    // Источник и раздел уходят модели вместе с текстом — их длина входит в бюджет.
     const passages = assemblePassages(
       final,
       neighbors.map((row) => ({ documentId: row.document_id, ordinal: Number(row.ordinal), content: row.content })),
-      { depth },
+      { depth, overhead: (hit) => sourceOverhead(hit.row) },
     );
+    const omitted = final.length - passages.length;
 
     if (settings.shadow) {
       this.shadow(scope, clean, vector?.ok ? { backend: settings.vectorBackend, ids: vector.list.ids } : null);
@@ -415,6 +424,7 @@ export class KnowledgeSearch {
       }),
       degraded,
       mode: settings.mode,
+      ...(omitted > 0 ? { omitted } : {}),
       diagnostics: {
         vectorBackend: wantsVector ? settings.vectorBackend : null,
         rerank,
@@ -432,14 +442,22 @@ export class KnowledgeSearch {
   /**
    * Векторный список из выбранного источника. Отказ — `ok: false`, а не
    * исключение: вызывающий переходит на слова. Отмена хода — исключение:
-   * повторять и подменять нечего.
+   * повторять и подменять нечего. Своя граница времени: зависший провайдер
+   * эмбеддингов держал бы весь ход до таймаута провайдера, а слова уже
+   * найдены.
    */
   private async vectorList(
     backend: KnowledgeVectorBackend,
     scope: SearchScope,
     clean: string,
-    signal?: AbortSignal,
+    turn?: AbortSignal,
   ): Promise<VectorOutcome> {
+    // Обычный таймер, а не `AbortSignal.timeout`: тот не держит цикл
+    // событий, и срок мог бы не наступить вовсе. Снимается в finally.
+    const expiry = new AbortController();
+    const timer = setTimeout(() => expiry.abort(new Error("knowledge_vector_timeout")), this.deps.vectorTimeoutMs ?? VECTOR_TIMEOUT_MS);
+    const deadline = expiry.signal;
+    const signal = turn ? AbortSignal.any([turn, deadline]) : deadline;
     try {
       if (backend === "pgvector") {
         if (!this.embed) return { ok: false };
@@ -455,7 +473,7 @@ export class KnowledgeSearch {
       if (!catalog.version) return { ok: false };
       const version = catalog.version;
       // Задержку эмбеддинга версии пишет клиент роутера (`embedMany`).
-      const vector = await this.deps.embedVersion(clean, version, signal);
+      const vector = await this.deps.embedVersion(clean, { version: version.version, dimension: version.dimension }, signal);
       // Версия называется явно, а не через alias: вектор запроса посчитан
       // моделью этой версии, и искать им в другом пространстве нельзя.
       const options = { limit: CANDIDATES, version: version.version, ...(signal ? { signal } : {}) };
@@ -464,8 +482,10 @@ export class KnowledgeSearch {
         scope.globalEnabled ? store.searchGlobal(vector, catalog.collections, options) : [],
       ]);
       // Обе коллекции — одной версии и одной меры близости: оценки
-      // сравнимы и сливаются сортировкой.
-      const hits = [...mine, ...shared].sort((a, b) => b.score - a.score).slice(0, CANDIDATES);
+      // сравнимы и сливаются сортировкой. У Euclid оценка — расстояние:
+      // ближе — меньше.
+      const order = version.distance === "Euclid" ? 1 : -1;
+      const hits = [...mine, ...shared].sort((a, b) => order * (a.score - b.score)).slice(0, CANDIDATES);
       return {
         ok: true,
         list: {
@@ -475,8 +495,13 @@ export class KnowledgeSearch {
         },
       };
     } catch (error) {
-      if (signal?.aborted || (error instanceof QdrantError && error.code === "qdrant_cancelled")) throw error;
+      // Отменён ход — исключение. Своя граница времени — отказ половины:
+      // Qdrant называет её тоже `qdrant_cancelled`, поэтому решает сигнал хода.
+      if (turn?.aborted) throw error;
+      if (error instanceof QdrantError && error.code === "qdrant_cancelled" && !deadline.aborted) throw error;
       return { ok: false };
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -538,7 +563,13 @@ export class KnowledgeSearch {
       const outcome = await this.vectorList(backend, scope, clean, signal);
       return outcome.ok ? outcome.list.ids : null;
     };
-    void Promise.all([listOf("pgvector"), listOf("qdrant")])
+    // allSettled, а не all: счётчик одновременных сравнений снимается,
+    // когда закончились оба поиска, а не при первом отказе.
+    void Promise.allSettled([listOf("pgvector"), listOf("qdrant")])
+      .then(([left, right]) => [
+        left.status === "fulfilled" ? left.value : null,
+        right.status === "fulfilled" ? right.value : null,
+      ])
       .then(([pgvector, qdrant]) => {
         if (!pgvector || !qdrant) {
           recordKnowledgeShadow("error");
@@ -578,6 +609,12 @@ function signalScores(
     [signal]: hit.scores[signal],
     [`${signal}Rank`]: hit.ranks[signal],
   } as Partial<KnowledgeHitScores>;
+}
+
+/** Сколько знаков ответа занимает источник фрагмента: название, страницы, путь разделов и имена полей. */
+function sourceOverhead(row: ChunkRow): number {
+  const section = sectionPathOf({ section: row.section, subsection: row.subsection, heading: row.heading }) ?? "";
+  return 2 * row.document_name.length + section.length * 2 + 80;
 }
 
 /** Текст кандидата для reranker: путь заголовков несёт смысл, которого нет в абзаце. */

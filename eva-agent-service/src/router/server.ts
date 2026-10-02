@@ -211,7 +211,7 @@ export function createRouterServer(input: RouterServerInput): FastifyInstance {
       : null;
     if (!providerId || !model || !query || !documents) {
       return reply.code(400).send({ error: {
-        message: `provider_id, model, query (до ${RERANK_QUERY_CHARS} знаков) и documents (1–${RERANK_DOCUMENT_LIMIT} строк до ${RERANK_DOCUMENT_CHARS} знаков) заданы неверно`,
+        message: `provider_id, model, query (до ${RERANK_QUERY_CHARS} знаков) и documents (от 1 до ${RERANK_DOCUMENT_LIMIT} строк, каждая до ${RERANK_DOCUMENT_CHARS} знаков) заданы неверно`,
         type: "invalid_request_error",
       } });
     }

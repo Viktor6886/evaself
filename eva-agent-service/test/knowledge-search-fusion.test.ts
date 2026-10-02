@@ -51,11 +51,18 @@ test("перекрытие соседних фрагментов находит�
 
 test("ответ собирается в бюджете: найденные целиком, последний укорачивается, соседи — из остатка", () => {
   const hit = (ordinal: number, length: number, documentId = "D") => ({ documentId, ordinal, content: "х".repeat(length) });
-  // Пять фрагментов по 1400 знаков в 6000 не помещаются: пятый укорочен.
+  // Четыре фрагмента по 1400 знаков в 5000 не помещаются: четвёртый
+  // укорочен, пятый не попадает вовсе.
   const passages = assemblePassages([hit(1, 1_400), hit(5, 1_400), hit(9, 1_400), hit(13, 1_400), hit(17, 1_400)], [], { depth: 1 });
-  assert.equal(passages.length, 5);
-  assert.equal(passages[4]!.truncated, true);
+  assert.equal(KNOWLEDGE_RESULT_CHARS, 5_000);
+  assert.equal(passages.length, 4);
+  assert.equal(passages[3]!.truncated, true);
   assert.equal(passages.reduce((sum, passage) => sum + passage.content.length, 0), KNOWLEDGE_RESULT_CHARS);
+  // Источник и раздел уходят модели вместе с текстом и входят в бюджет.
+  const withSource = assemblePassages([hit(1, 1_400), hit(5, 1_400), hit(9, 1_400)], [], { budget: 2_900, depth: 0, overhead: () => 100 });
+  assert.equal(withSource.length, 2);
+  assert.equal(withSource[1]!.truncated, true);
+  assert.equal(withSource.reduce((sum, passage) => sum + passage.content.length + 100, 0), 2_900);
   // Остаток меньше 400 знаков — обрывок не добавляется.
   const tight = assemblePassages([hit(1, 1_000), hit(3, 1_000)], [], { budget: 1_300, depth: 0 });
   assert.equal(tight.length, 1);

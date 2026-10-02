@@ -110,7 +110,7 @@ export class CoreToolFactory {
         vectors,
         ...(router ? {
           embedVersion: async (text: string, version: { version: number; dimension: number }, signal?: AbortSignal) =>
-            (await router.embedMany([text], { ...version, ...(signal ? { signal } : {}) }))[0]!,
+            (await router.embedMany([text], { version: version.version, dimension: version.dimension, ...(signal ? { signal } : {}) }))[0]!,
           rerank: async (request: Parameters<LlmRouterClient["rerank"]>[0], signal?: AbortSignal) => await router.rerank(request, signal),
         } : {}),
       });
@@ -566,7 +566,7 @@ export class CoreToolFactory {
         objectSchema(
           {
             query: text("Что искать: вопрос или ключевые слова"),
-            limit: integer("Сколько фрагментов вернуть, максимум 20"),
+            limit: integer("Сколько фрагментов вернуть, по умолчанию 5, максимум 10; ответ ограничен ~2000 токенов"),
           },
           ["query"],
         ),
@@ -588,6 +588,8 @@ export class CoreToolFactory {
             untrusted: true,
             notice: UNTRUSTED_NOTICE,
             source: "knowledge_base",
+            // Найдено больше, чем поместилось: модель может сузить запрос.
+            ...(found.omitted ? { omitted_results: found.omitted } : {}),
             results: neutralizeUntrusted(found.hits.map(knowledgeResult)),
           };
         },

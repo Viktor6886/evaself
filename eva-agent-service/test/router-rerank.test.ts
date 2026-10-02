@@ -70,6 +70,9 @@ test("отказ — код без текста ответа; неизвестн
       return true;
     });
   }
+  const garbage = reranker(() => new Response(`<html>${echo}</html>`, { status: 200 }));
+  await assert.rejects(garbage.reranker.rerank({ providerId: "jina", model: "m" }, "q", ["a"]), (error: unknown) =>
+    error instanceof RerankError && error.code === "rerank_invalid" && !error.message.includes(echo));
   const network = reranker(() => new Error(`connect ECONNREFUSED ${echo}`));
   await assert.rejects(network.reranker.rerank({ providerId: "jina", model: "m" }, "q", ["a"]), (error: unknown) =>
     error instanceof RerankError && error.code === "rerank_unavailable" && !error.message.includes(echo));

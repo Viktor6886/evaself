@@ -8,12 +8,13 @@
 export const RRF_K = 60;
 
 /**
- * Бюджет ответа поиска — около 2000 токенов (корневой `CLAUDE.md`,
- * «Бюджеты»). Считается в знаках: около трёх знаков русского текста на
- * токен у современных токенизаторов. Этого хватает на пять фрагментов
- * длины по умолчанию (1200 знаков); соседние добавляются из остатка.
+ * Бюджет ответа поиска — до 2000 токенов (корневой `CLAUDE.md`,
+ * «Бюджеты»). Считается в знаках с запасом: у кириллицы бывает и 2,5
+ * знака на токен. Источник и раздел каждого фрагмента входят в бюджет.
+ * Хватает на три-четыре фрагмента длины по умолчанию (1200 знаков);
+ * соседние добавляются из остатка.
  */
-export const KNOWLEDGE_RESULT_CHARS = 6_000;
+export const KNOWLEDGE_RESULT_CHARS = 5_000;
 
 /** Меньше этого остаток не режется в отдельный кусок: обрывок без смысла хуже, чем ничего. */
 const MIN_TRUNCATED_CHARS = 400;
@@ -147,18 +148,19 @@ function cut(text: string, max: number, from: "start" | "end"): string {
 export function assemblePassages<T extends PassageHit>(
   hits: readonly T[],
   neighbors: readonly Neighbor[],
-  options: { budget?: number; depth: number },
+  options: { budget?: number; depth: number; overhead?: (hit: T) => number },
 ): Passage<T>[] {
   let left = options.budget ?? KNOWLEDGE_RESULT_CHARS;
   const passages: Passage<T>[] = [];
   for (const hit of hits) {
-    if (hit.content.length <= left) {
+    const overhead = Math.max(0, options.overhead?.(hit) ?? 0);
+    if (hit.content.length + overhead <= left) {
       passages.push({ hit, content: hit.content, truncated: false });
-      left -= hit.content.length;
+      left -= hit.content.length + overhead;
       continue;
     }
-    if (left >= MIN_TRUNCATED_CHARS) {
-      passages.push({ hit, content: cut(hit.content, left, "start"), truncated: true });
+    if (left - overhead >= MIN_TRUNCATED_CHARS) {
+      passages.push({ hit, content: cut(hit.content, left - overhead, "start"), truncated: true });
     }
     left = 0;
     break;
@@ -189,9 +191,10 @@ export function assemblePassages<T extends PassageHit>(
           : neighbor.content.slice(overlapLength(chain.last, neighbor.content));
         text = text.trim();
         if (!text) continue;
-        if (text.length > left) text = cut(text, left, side === "before" ? "end" : "start");
+        // Разделитель «\n\n» между соседом и найденным тоже уходит модели.
+        if (text.length + 2 > left) text = cut(text, left - 2, side === "before" ? "end" : "start");
         used.add(id);
-        left -= text.length;
+        left -= text.length + 2;
         if (side === "before") {
           chain.before.unshift(text);
           chain.first = neighbor.content;
