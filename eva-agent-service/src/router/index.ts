@@ -17,6 +17,7 @@ import { RouterStore } from "./store.js";
 import { RouterEmbeddings } from "./embeddings.js";
 import { EmbeddingService } from "./embedding-service.js";
 import { EmbeddingVersionStore } from "./embedding-versions.js";
+import { RouterReranker } from "./rerank.js";
 import { buildObservabilityFrom } from "../observability/index.js";
 
 const { Pool } = pg;
@@ -136,7 +137,8 @@ async function main(): Promise<void> {
     }),
     new EmbeddingVersionStore(pool),
   );
-  const app = createRouterServer({ router, store, logger, apiKey, embeddings });
+  const reranker = new RouterReranker({ providers: () => store.providers() });
+  const app = createRouterServer({ router, store, logger, apiKey, embeddings, reranker });
   const port = intFromEnv("EVA_ROUTER_PORT", 8073);
   await app.listen({ host: process.env.EVA_ROUTER_BIND ?? "0.0.0.0", port });
   logger.info("LLM Router запущен", { port });
