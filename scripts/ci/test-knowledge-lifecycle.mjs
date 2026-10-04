@@ -6,11 +6,13 @@
  * это отдельный canary с настроенным LLM, см. docs/knowledge-base.md.
  */
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
+import { promisify } from "node:util";
 
 import pg from "../../eva-agent-service/node_modules/pg/lib/index.js";
 import { Database } from "../../eva-agent-service/dist/db.js";
@@ -36,6 +38,9 @@ import { recordJobIntent } from "../../eva-agent-service/dist/jobs/job-outbox.js
 assert.equal(process.env.KNOWLEDGE_INTEGRATION_TEST, "true", "только изолированная CI-база");
 const connectionString = process.env.DATABASE_URL;
 assert.ok(connectionString, "нужен DATABASE_URL изолированной базы");
+const qdrantContainer = process.env.QDRANT_TEST_CONTAINER;
+assert.match(qdrantContainer ?? "", /^[a-f0-9]{12,64}$/u, "нужен id контейнера Qdrant только этой CI-job");
+const docker = promisify(execFile);
 const raw = new pg.Pool({ connectionString });
 const pool = guardPool(raw);
 const db = new Database(connectionString);
@@ -184,13 +189,24 @@ try {
 
   const { private: privateInfo, global: globalInfo } = await store.describe(first.version);
   assert.equal(privateInfo.size, 8); assert.equal(globalInfo.size, 8);
+  // Приостанавливается только service-контейнер изолированной CI-job.
+  // Запрос идёт настоящим клиентом и получает реальный network timeout.
+  await docker("docker", ["pause", qdrantContainer], { timeout: 20_000 });
+  try {
+    const unavailable = await tool.execute({ query }, { userId: ownUsers[0] });
+    assert.equal(unavailable.degraded, true);
+    assert.ok(unavailable.results.some((hit) => hit.content.includes("маленький первый шаг")));
+  } finally {
+    await docker("docker", ["unpause", qdrantContainer], { timeout: 20_000 });
+  }
+  assert.equal((await search.search(ownUsers[0], question)).degraded, false, "после восстановления Qdrant снова используется");
   // Удаляем производную коллекцию активной версии, PostgreSQL цел.
   // Это реальный отказ Qdrant, а не заранее подставленный degraded.
   await qdrant.deleteCollection(`eva_knowledge_global_v${first.version}`);
   const fallback = await tool.execute({ query }, { userId: ownUsers[0] });
   assert.equal(fallback.degraded, true);
   assert.ok(fallback.results.some((hit) => hit.content.includes("маленький первый шаг")));
-  console.log("PASS: registry/probe/persist/build/outbox/first activation/K7/rollback/semantic tool/citations/tenant hydration/disabled collection/real Qdrant fallback");
+  console.log("PASS: registry/probe/persist/build/outbox/first activation/K7/rollback/semantic tool/citations/tenant hydration/disabled collection/paused Qdrant fallback/recovery/missing collection fallback");
   console.log("Embedding upstream and AV are fixtures; autonomous Letta tool choice and final prose require the documented live canary.");
 } finally {
   await admin(async () => {

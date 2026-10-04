@@ -971,6 +971,7 @@ jobs:
         env:
           KNOWLEDGE_INTEGRATION_TEST: "true"
           DATABASE_URL: postgresql://postgres:ci@localhost:5432/eva
+          QDRANT_TEST_CONTAINER: ${{ job.services.qdrant.id }}
         run: node scripts/ci/test-knowledge-lifecycle.mjs
 
       # Повтор задания OSINT после сбоя держится на `ON CONFLICT` по
