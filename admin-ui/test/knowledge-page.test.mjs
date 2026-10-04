@@ -399,6 +399,25 @@ test("Qdrant нельзя включить без активного индек�
   } finally { await failed.close(); }
 });
 
+test("отказ Qdrant не мешает выключить поиск и приостановить индексацию", async () => {
+  const panel = await openPanel({ routes: { ...ROUTES, ...ACTIVE_ROUTES,
+    "/settings": { ...SETTINGS, settings: SETTINGS.settings.map((s) => ({ ...s, value: RECOMMENDED[s.key] })) },
+    "/knowledge/index": { ...ACTIVE_ROUTES["/knowledge/index"], qdrant_status: "unavailable", aliases: null, aliases_match_active: null },
+    "PUT /settings": { saved: true },
+  } });
+  try {
+    await enterKnowledge(panel);
+    assert.equal(await panel.page.isDisabled("#knowledge-use-qdrant"), true);
+    await panel.page.selectOption('[data-knowledge-setting="runtime.knowledge_search_enabled"]', "false");
+    await panel.page.selectOption('[data-knowledge-setting="runtime.knowledge_index_enabled"]', "false");
+    await panel.page.click("#knowledge-runtime-save");
+    const saved = await panel.waitForRequest((r) => r.path === "/settings" && r.method === "PUT");
+    assert.deepEqual(saved.body, { settings: { ...RECOMMENDED, "runtime.knowledge_search_enabled": false, "runtime.knowledge_index_enabled": false } });
+    assert.equal(panel.requests.filter((r) => r.path.endsWith("/activate")).length, 0);
+    assert.deepEqual(panel.errors, []);
+  } finally { await panel.close(); }
+});
+
 test("недоступный реестр или выключенная загрузка видны; читающая роль не получает формы настройки", async () => {
   const panel = await openPanel({ routes: { ...ROUTES,
     "/knowledge/embeddings": { __status: 503, __body: { error: { message: "Router недоступен" } } },

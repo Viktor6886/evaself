@@ -143,9 +143,15 @@ function renderKnowledgeRuntime() {
   </form>` : knowledgeUnavailable("Настройки поиска");
 }
 
-async function saveKnowledgeRuntime(settings) {
+async function saveKnowledgeRuntime(settings, verify = false) {
   const k = state.knowledge;
-  if (settings["runtime.knowledge_vector_backend"] === "qdrant") {
+  const previous = Object.fromEntries((k.runtime?.settings || []).map((s) => [s.key, s.value]));
+  const usesQdrant = (s) => s["runtime.knowledge_search_enabled"] === true
+    && ["hybrid", "vector"].includes(s["runtime.knowledge_search_mode"]) && s["runtime.knowledge_vector_backend"] === "qdrant";
+  // Отказ индекса не мешает выключить поиск/индексацию или изменить
+  // уже действующие параметры. Проверка нужна при включении Qdrant.
+  if (settings["runtime.knowledge_vector_backend"] === "qdrant"
+    && (verify || previous["runtime.knowledge_vector_backend"] !== "qdrant" || usesQdrant(settings) && !usesQdrant(previous))) {
     if (!knowledgeQdrantReady()) throw new Error("Сначала постройте и активируйте исправную версию Qdrant");
     // Повторная серверная проверка непосредственно перед включением:
     // готовность не доверяется DOM, счётчику точек или старому overview.
@@ -197,7 +203,7 @@ function bindKnowledgeEmbeddings() {
       }).finally(() => { k.embeddingBusy = false; button.disabled = false; renderKnowledgeProbe(); });
     } else if (button?.id === "knowledge-use-qdrant" && !button.disabled) {
       button.disabled = true;
-      saveKnowledgeRuntime(KNOWLEDGE_RECOMMENDED).catch(handleError).finally(() => { button.disabled = false; });
+      saveKnowledgeRuntime(KNOWLEDGE_RECOMMENDED, true).catch(handleError).finally(() => { button.disabled = false; });
     }
   });
   page.addEventListener("submit", (event) => {
