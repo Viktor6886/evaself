@@ -182,7 +182,7 @@ try {
   await admin(async () => await documents.activate(first.version, { expected_active_version: second.version }));
   assert.deepEqual(await store.activeVersions(), { private: first.version, global: first.version });
 
-  const [privateInfo, globalInfo] = await Promise.all([qdrant.collection(`eva_knowledge_private_v${first.version}`), qdrant.collection(`eva_knowledge_global_v${first.version}`)]);
+  const { private: privateInfo, global: globalInfo } = await store.describe(first.version);
   assert.equal(privateInfo.size, 8); assert.equal(globalInfo.size, 8);
   // Удаляем производную коллекцию активной версии, PostgreSQL цел.
   // Это реальный отказ Qdrant, а не заранее подставленный degraded.

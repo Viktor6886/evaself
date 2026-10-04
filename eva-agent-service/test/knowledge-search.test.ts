@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 
 import { KnowledgeSearch } from "../dist/knowledge/search.js";
 import { CoreToolFactory } from "../dist/tools/core-tools.js";
 
-test("persona и user-materials требуют semantic retrieval по психологии, источники и игнорирование инъекций", () => {
+test("persona и user-materials требуют semantic retrieval по психологии, источники и игнорирование инъекций", {
+  skip: !existsSync(new URL("../../CLAUDE.md", import.meta.url)) && "repository persona/skills are outside the service Docker build context",
+}, () => {
   const persona = readFileSync(new URL("../../library/persona/eva.md", import.meta.url), "utf8");
   const skill = readFileSync(new URL("../../skills/user-materials/SKILL.md", import.meta.url), "utf8");
   assert.match(persona, /сначала используй `knowledge_search`/u);

@@ -13,9 +13,7 @@
 -- =====================================================================
 
 BEGIN;
-
 INSERT INTO users (id, telegram_id) VALUES (920100, 920100), (920200, 920200);
-
 INSERT INTO knowledge_collections (id, code, title, enabled)
 VALUES
   ('c1111111-0000-0000-0000-000000000001', 'ci-search-on', 'Включённая', true),
@@ -30,7 +28,8 @@ VALUES
   ('33333333-3333-3333-3333-333333333333', NULL, true, 'c1111111-0000-0000-0000-000000000001', 'Справочник Евы.md', 'text/markdown', 'h3', 'ready'),
   ('44444444-4444-4444-4444-444444444444', NULL, true, 'c1111111-0000-0000-0000-000000000002', 'Скрытая коллекция.md', 'text/markdown', 'h4', 'ready'),
   -- Фамилия только в имени файла, в тексте её нет.
-  ('55555555-5555-5555-5555-555555555555', 920100, false, NULL, 'Петров — расписка.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'h5', 'ready');
+  ('55555555-5555-5555-5555-555555555555', 920100, false, NULL, 'Петров — расписка.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'h5', 'ready'),
+  ('66666666-6666-6666-6666-666666666666', NULL, true, NULL, 'Без коллекции.md', 'text/markdown', 'h6', 'ready');
 
 -- Векторы простые и различимые: важна не близость сама по себе, а то,
 -- что она вообще участвует в отборе. Фрагмент без вектора (новые векторы
@@ -58,7 +57,10 @@ VALUES
    NULL, 'qdrant', NULL, NULL, NULL),
   ('55555555-5555-5555-5555-555555555555', 920100, false, 1,
    'Подпись и дата.', 'c5b',
-   NULL, 'qdrant', NULL, NULL, NULL);
+   NULL, 'qdrant', NULL, NULL, NULL),
+  ('66666666-6666-6666-6666-666666666666', NULL, true, 0,
+   'Договор аренды: Иванов, станция Р-168-5УН.', 'c6',
+   ('[' || 1 || repeat(',0', 1535) || ']')::vector, 'router', NULL, NULL, NULL);
 
 -- ---------------------------------------------------------------------
 -- Прежний поиск (режим legacy): человек 920100, обе базы включены.
@@ -74,7 +76,7 @@ visible AS (
       ON d.id = c.document_id AND (d.user_id = 920100 OR d.product_verified)
     LEFT JOIN knowledge_collections k ON k.id = d.collection_id
    WHERE (c.user_id = 920100 AND true)
-      OR (c.product_verified AND true AND COALESCE(k.enabled, true))
+      OR (c.product_verified AND true AND COALESCE(k.enabled, false))
 ),
 fts AS (
   SELECT v.id,
@@ -122,9 +124,9 @@ BEGIN
     RAISE EXCEPTION 'прежний поиск: ожидались свой документ и общая заметка, найдено %', found;
   END IF;
   SELECT count(*) INTO leaked FROM legacy_probe
-   WHERE document_name IN ('Чужой договор.pdf', 'Скрытая коллекция.md');
+   WHERE document_name IN ('Чужой договор.pdf', 'Скрытая коллекция.md', 'Без коллекции.md');
   IF leaked <> 0 THEN
-    RAISE EXCEPTION 'прежний поиск отдал чужой документ или выключенную коллекцию';
+    RAISE EXCEPTION 'прежний поиск отдал чужой документ или общую базу вне включённой коллекции';
   END IF;
   SELECT count(*) INTO hybrid FROM legacy_probe WHERE matched = 'both';
   IF hybrid < 1 THEN
@@ -160,7 +162,7 @@ PREPARE probe_1 AS
           LEFT JOIN knowledge_collections k ON k.id = d.collection_id
          CROSS JOIN ask
          WHERE to_tsvector('russian', c.content) @@ ask.tsq
-           AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, true)))
+           AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, false)))
          LIMIT 2000
       ) sample
      CROSS JOIN ask
@@ -178,7 +180,7 @@ PREPARE probe_1 AS
          CROSS JOIN ask
          WHERE NOT EXISTS (SELECT 1 FROM fts_strict)
            AND to_tsvector('russian', c.content) @@ ask.anyq
-           AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, true)))
+           AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, false)))
          LIMIT 2000
       ) sample
      CROSS JOIN ask
@@ -215,7 +217,7 @@ PREPARE probe_2 AS
           LEFT JOIN knowledge_collections k ON k.id = d.collection_id
          CROSS JOIN ask
          WHERE to_tsvector('russian', c.content) @@ ask.tsq
-           AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, true)))
+           AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, false)))
          LIMIT 2000
       ) sample
      CROSS JOIN ask
@@ -233,7 +235,7 @@ PREPARE probe_2 AS
          CROSS JOIN ask
          WHERE NOT EXISTS (SELECT 1 FROM fts_strict)
            AND to_tsvector('russian', c.content) @@ ask.anyq
-           AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, true)))
+           AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, false)))
          LIMIT 2000
       ) sample
      CROSS JOIN ask
@@ -270,7 +272,7 @@ PREPARE probe_3 AS
           LEFT JOIN knowledge_collections k ON k.id = d.collection_id
          CROSS JOIN ask
          WHERE to_tsvector('russian', c.content) @@ ask.tsq
-           AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, true)))
+           AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, false)))
          LIMIT 2000
       ) sample
      CROSS JOIN ask
@@ -288,7 +290,7 @@ PREPARE probe_3 AS
          CROSS JOIN ask
          WHERE NOT EXISTS (SELECT 1 FROM fts_strict)
            AND to_tsvector('russian', c.content) @@ ask.anyq
-           AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, true)))
+           AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, false)))
          LIMIT 2000
       ) sample
      CROSS JOIN ask
@@ -318,7 +320,7 @@ PREPARE probe_4 AS
         ON d.id = c.document_id AND (d.user_id = $1 OR d.product_verified)
       LEFT JOIN knowledge_collections k ON k.id = d.collection_id
      WHERE ($5 <% c.content OR $6 <% c.content)
-       AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, true)))
+       AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, false)))
      ORDER BY score DESC, c.id
      LIMIT $4
   ),
@@ -330,7 +332,7 @@ PREPARE probe_4 AS
        SELECT c.id
          FROM knowledge_chunks c
         WHERE c.document_id = d.id
-          AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, true)))
+          AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, false)))
         ORDER BY c.ordinal
         LIMIT 1
      ) first
@@ -371,7 +373,7 @@ PREPARE probe_5 AS
           LEFT JOIN knowledge_collections k ON k.id = d.collection_id
          CROSS JOIN ask
          WHERE to_tsvector('russian', c.content) @@ ask.tsq
-           AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, true)))
+           AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, false)))
          LIMIT 2000
       ) sample
      CROSS JOIN ask
@@ -389,7 +391,7 @@ PREPARE probe_5 AS
          CROSS JOIN ask
          WHERE NOT EXISTS (SELECT 1 FROM fts_strict)
            AND to_tsvector('russian', c.content) @@ ask.anyq
-           AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, true)))
+           AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, false)))
          LIMIT 2000
       ) sample
      CROSS JOIN ask
@@ -419,7 +421,7 @@ PREPARE probe_6 AS
         ON d.id = c.document_id AND (d.user_id = $1 OR d.product_verified)
       LEFT JOIN knowledge_collections k ON k.id = d.collection_id
      WHERE ($5 <% c.content)
-       AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, true)))
+       AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, false)))
      ORDER BY score DESC, c.id
      LIMIT $4
   ),
@@ -431,7 +433,7 @@ PREPARE probe_6 AS
        SELECT c.id
          FROM knowledge_chunks c
         WHERE c.document_id = d.id
-          AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, true)))
+          AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, false)))
         ORDER BY c.ordinal
         LIMIT 1
      ) first
@@ -472,7 +474,7 @@ PREPARE probe_7 AS
           LEFT JOIN knowledge_collections k ON k.id = d.collection_id
          CROSS JOIN ask
          WHERE to_tsvector('russian', c.content) @@ ask.tsq
-           AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, true)))
+           AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, false)))
          LIMIT 2000
       ) sample
      CROSS JOIN ask
@@ -490,7 +492,7 @@ PREPARE probe_7 AS
          CROSS JOIN ask
          WHERE NOT EXISTS (SELECT 1 FROM fts_strict)
            AND to_tsvector('russian', c.content) @@ ask.anyq
-           AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, true)))
+           AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, false)))
          LIMIT 2000
       ) sample
      CROSS JOIN ask
@@ -533,8 +535,8 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM probe_lexical WHERE label = 'question' AND document_name = 'Мой договор.pdf') THEN
     RAISE EXCEPTION 'длинный вопрос не нашёл ничего: запасной запрос по любому слову не сработал';
   END IF;
-  IF EXISTS (SELECT 1 FROM probe_lexical WHERE document_name IN ('Чужой договор.pdf', 'Скрытая коллекция.md')) THEN
-    RAISE EXCEPTION 'лексический поиск отдал чужой документ или выключенную коллекцию';
+  IF EXISTS (SELECT 1 FROM probe_lexical WHERE document_name IN ('Чужой договор.pdf', 'Скрытая коллекция.md', 'Без коллекции.md')) THEN
+    RAISE EXCEPTION 'лексический поиск отдал чужой документ или общую базу вне включённой коллекции';
   END IF;
   IF EXISTS (SELECT 1 FROM probe_lexical WHERE label = 'private_off' AND document_name = 'Мой договор.pdf')
      OR NOT EXISTS (SELECT 1 FROM probe_lexical WHERE label = 'private_off' AND document_name = 'Справочник Евы.md') THEN
@@ -550,6 +552,7 @@ DECLARE
   vector_ids bigint[];
   hydrated integer;
   neighbor text;
+  neighbor_count integer;
 BEGIN
   SELECT array_agg(id ORDER BY position) INTO vector_ids FROM (
     SELECT c.id, row_number() OVER (ORDER BY c.embedding <=> ('[' || 1 || repeat(',0', 1535) || ']')::vector, c.id) AS position
@@ -558,7 +561,7 @@ BEGIN
         ON d.id = c.document_id AND (d.user_id = 920100 OR d.product_verified)
       LEFT JOIN knowledge_collections k ON k.id = d.collection_id
      WHERE c.embedding IS NOT NULL
-       AND ((c.user_id = 920100 AND true) OR (c.product_verified AND true AND COALESCE(k.enabled, true)))
+       AND ((c.user_id = 920100 AND true) OR (c.product_verified AND true AND COALESCE(k.enabled, false)))
      ORDER BY c.embedding <=> ('[' || 1 || repeat(',0', 1535) || ']')::vector, c.id
      LIMIT 30
   ) ranked;
@@ -573,21 +576,24 @@ BEGIN
     JOIN knowledge_documents d
       ON d.id = c.document_id AND (d.user_id = 920100 OR d.product_verified)
     LEFT JOIN knowledge_collections k ON k.id = d.collection_id
-   WHERE c.id = ANY(ARRAY(SELECT id FROM knowledge_chunks WHERE content_hash IN ('c1', 'c2', 'c3', 'c4')))
-     AND ((c.user_id = 920100 AND true) OR (c.product_verified AND true AND COALESCE(k.enabled, true)));
+   WHERE c.id = ANY(ARRAY(SELECT id FROM knowledge_chunks WHERE content_hash IN ('c1', 'c2', 'c3', 'c4', 'c6')))
+     AND ((c.user_id = 920100 AND true) OR (c.product_verified AND true AND COALESCE(k.enabled, false)));
   IF hydrated <> 2 THEN
     RAISE EXCEPTION 'чтение по id отдало % фрагментов вместо двух: видимость не перепроверена', hydrated;
   END IF;
 
   -- Сосед — ordinal ± 1 того же документа, и только видимого.
-  SELECT c.content INTO neighbor
+  SELECT count(*), max(c.content) INTO neighbor_count, neighbor
     FROM knowledge_chunks c
-    JOIN unnest(ARRAY['11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222']::uuid[], ARRAY[1, 1]::integer[])
+    JOIN unnest(ARRAY['11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '44444444-4444-4444-4444-444444444444', '66666666-6666-6666-6666-666666666666']::uuid[], ARRAY[1, 0, 0, 0]::integer[])
          AS want(document_id, ordinal)
       ON want.document_id = c.document_id AND want.ordinal = c.ordinal
-   WHERE c.user_id = 920100 OR c.product_verified;
-  IF neighbor IS NULL OR neighbor NOT LIKE 'Штраф%' THEN
-    RAISE EXCEPTION 'соседний фрагмент своего документа не найден';
+    JOIN knowledge_documents d
+      ON d.id = c.document_id AND (d.user_id = 920100 OR d.product_verified)
+    LEFT JOIN knowledge_collections k ON k.id = d.collection_id
+   WHERE (c.user_id = 920100 AND true) OR (c.product_verified AND true AND COALESCE(k.enabled, false));
+  IF neighbor_count <> 1 OR neighbor IS NULL OR neighbor NOT LIKE 'Штраф%' THEN
+    RAISE EXCEPTION 'соседи: найдено % фрагментов вместо одного видимого личного', neighbor_count;
   END IF;
 END $$;
 

@@ -308,7 +308,7 @@ export class KnowledgeSearch {
 
     const depth = settings.neighbors;
     const neighbors = depth > 0 && final.length
-      ? await neighborChunks(this.db, scope.userId, neighborKeys(final, depth))
+      ? await neighborChunks(this.db, scope, neighborKeys(final, depth))
       : [];
     // Источник и раздел уходят модели вместе с текстом — их длина входит в бюджет.
     const passages = assemblePassages(

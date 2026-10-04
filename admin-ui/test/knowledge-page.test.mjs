@@ -234,13 +234,13 @@ test("embedding: реестр провайдеров и активная мод�
   try {
     await enterKnowledge(panel);
     assert.equal(panel.countTo("/knowledge/embeddings"), 1);
-    assert.deepEqual(await panel.page.locator('[name="provider_id"] option').allTextContents(), ["Выберите провайдера", "OpenRouter", "Jina"]);
+    assert.deepEqual(await panel.page.locator('#knowledge-embedding-form [name="provider_id"] option').allTextContents(), ["Выберите провайдера", "OpenRouter", "Jina"]);
     const active = await panel.page.textContent("#knowledge-active-embedding");
     for (const text of ["v2", "OpenRouter", "bge-m3", "1024", "активен"]) assert.ok(active.includes(text));
     assert.match(await panel.page.textContent("#knowledge-status"), /pgvector \(режим legacy\)/);
-    assert.equal(await panel.page.locator('[name="api_key"], [name="base_url"]').count(), 0);
-    assert.equal(await panel.page.inputValue('[name="model"]'), "bge-m3");
-    assert.equal(await panel.page.inputValue('[name="dimension"]'), "1024");
+    assert.equal(await panel.page.locator('#knowledge-embedding-form [name="api_key"], #knowledge-embedding-form [name="base_url"]').count(), 0);
+    assert.equal(await panel.page.inputValue('#knowledge-embedding-form [name="model"]'), "bge-m3");
+    assert.equal(await panel.page.inputValue('#knowledge-embedding-form [name="dimension"]'), "1024");
     assert.deepEqual(panel.errors, []);
   } finally { await panel.close(); }
 });
@@ -252,8 +252,8 @@ test("embedding: проверка показывает размерность и
   try {
     await enterKnowledge(panel);
     await panel.page.selectOption("#knowledge-embedding-configuration", "");
-    await panel.page.selectOption('[name="provider_id"]', "p2");
-    await panel.page.fill('[name="model"]', "jina-embeddings-v3");
+    await panel.page.selectOption('#knowledge-embedding-form [name="provider_id"]', "p2");
+    await panel.page.fill('#knowledge-embedding-form [name="model"]', "jina-embeddings-v3");
     assert.equal(await panel.page.isDisabled("#knowledge-embedding-save"), true);
     await panel.page.click("#knowledge-embedding-probe");
     await panel.page.waitForSelector("#knowledge-embedding-save:not([disabled])");
@@ -262,7 +262,7 @@ test("embedding: проверка показывает размерность и
     const request = await panel.waitForRequest((r) => r.path === "/knowledge/embeddings/probe");
     assert.deepEqual(request.body, { provider_id: "p2", model: "jina-embeddings-v3", dimension: null, request_dimensions: false,
       distance: "Cosine", hnsw_m: 16, hnsw_ef_construct: 100, on_disk: false, fallback_provider_id: null, fallback_model: null });
-    await panel.page.fill('[name="model"]', "other-model");
+    await panel.page.fill('#knowledge-embedding-form [name="model"]', "other-model");
     assert.equal(await panel.page.isDisabled("#knowledge-embedding-save"), true);
     assert.equal(panel.countTo("/knowledge/embeddings/versions"), 0);
   } finally { await panel.close(); }
@@ -297,8 +297,8 @@ test("embedding: версия сохраняется серверно, восс�
   try {
     await enterKnowledge(panel);
     await panel.page.selectOption("#knowledge-embedding-configuration", "");
-    await panel.page.selectOption('[name="provider_id"]', "p2");
-    await panel.page.fill('[name="model"]', "jina-embeddings-v3");
+    await panel.page.selectOption('#knowledge-embedding-form [name="provider_id"]', "p2");
+    await panel.page.fill('#knowledge-embedding-form [name="model"]', "jina-embeddings-v3");
     await panel.page.click("#knowledge-embedding-probe");
     await panel.page.waitForSelector("#knowledge-embedding-save:not([disabled])");
     await panel.page.click("#knowledge-embedding-save");
@@ -309,9 +309,9 @@ test("embedding: версия сохраняется серверно, восс�
     assert.equal(await panel.page.locator('[data-version-activate="3"]').count(), 0, "черновик не активируется");
     await panel.page.reload();
     await enterKnowledge(panel);
-    assert.equal(await panel.page.inputValue('[name="provider_id"]'), "p2");
-    assert.equal(await panel.page.inputValue('[name="model"]'), "jina-embeddings-v3");
-    assert.equal(await panel.page.inputValue('[name="dimension"]'), "768");
+    assert.equal(await panel.page.inputValue('#knowledge-embedding-form [name="provider_id"]'), "p2");
+    assert.equal(await panel.page.inputValue('#knowledge-embedding-form [name="model"]'), "jina-embeddings-v3");
+    assert.equal(await panel.page.inputValue('#knowledge-embedding-form [name="dimension"]'), "768");
     assert.equal(await panel.page.isDisabled("#knowledge-embedding-save"), true, "повторная проверка перед новой версией");
     assert.equal(await panel.page.isDisabled("#knowledge-embedding-probe"), false);
     await panel.page.click('[data-version-build="3"]');
