@@ -146,6 +146,13 @@ try {
   assert.ok(parsed.rows.length);
   assert.ok(parsed.rows.every((c) => c.embedding === null));
   assert.equal((await indexer.run(await job("knowledge_index", uploaded.id))).status, "ready");
+  // Исторический общий материал без коллекции не должен появляться
+  // в поиске, ломать full rebuild или занижать прогресс готового индекса.
+  const unscoped = randomUUID(); ownDocuments.push(unscoped);
+  await admin(async () => {
+    await pool.query("INSERT INTO knowledge_documents(id,user_id,product_verified,name,mime,content_hash,status,chunk_count) VALUES($1,NULL,true,'Без коллекции CI','text/plain','ci-unscoped','ready',1)", [unscoped]);
+    await pool.query("INSERT INTO knowledge_chunks(document_id,user_id,product_verified,ordinal,content,content_hash,embedding,embedding_model) VALUES($1,NULL,true,0,'Прокрастинация: скрытый материал без коллекции','ci-unscoped',NULL,'router')", [unscoped]);
+  });
   for (const telegram of [-96200001, -96200002]) {
     ownUsers.push(Number((await admin(async () => await pool.query("INSERT INTO users(telegram_id, first_name) VALUES ($1, 'CI') RETURNING id", [telegram]))).rows[0].id));
   }
@@ -155,10 +162,13 @@ try {
     await pool.query("INSERT INTO knowledge_chunks(document_id,user_id,product_verified,ordinal,content,content_hash,embedding,embedding_model) VALUES($1,$2,false,0,'Прокрастинация: чужой секрет CI','ci-foreign',NULL,'router')", [foreignDoc, ownUsers[1]]);
   });
   await indexer.index(foreignDoc, ownUsers[1]);
+  const indexOverview = await admin(async () => await documents.indexOverview());
+  assert.equal(indexOverview.scopes.global.documents, 1);
+  assert.equal(indexOverview.versions.find((v) => v.version === first.version).progress, 1);
   const answer = await tool.execute({ query, user_id: ownUsers[1] }, { userId: ownUsers[0] });
   assert.equal(answer.untrusted, true); assert.equal(answer.degraded, false);
   assert.ok(answer.results.some((hit) => hit.document === "Саморегуляция.md" && hit.base === "shared" && hit.cite.includes("Прокрастинация")));
-  assert.ok(answer.results.every((hit) => hit.document !== "Чужой документ CI"));
+  assert.ok(answer.results.every((hit) => !["Чужой документ CI", "Без коллекции CI"].includes(hit.document)));
   // Id Qdrant не разрешает чтение: поддельный payload владельца не
   // проведёт чужой фрагмент через гидратацию PostgreSQL.
   const foreignPoint = (await store.scrollPoints("private", first.version, null, 256)).points[0];

@@ -54,7 +54,7 @@ export class KnowledgeIndexService {
                 FILTER (WHERE index_status IN ('pending', 'indexing'))), 0) AS lag_seconds
          FROM knowledge_documents
          -- tenant: system — счётчики по всем базам; ни названий, ни владельцев наружу
-        WHERE status = 'ready' AND (user_id IS NOT NULL OR product_verified)
+        WHERE status = 'ready' AND (user_id IS NOT NULL OR (product_verified AND collection_id IS NOT NULL))
         GROUP BY 1, 2`,
     );
     const empty = () => ({ documents: 0, chunks: 0, lag_seconds: 0, by_status: {} as Record<string, number> });

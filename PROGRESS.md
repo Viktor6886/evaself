@@ -5,7 +5,8 @@
 
 ## База знаний: embedding WebUI, K7 и предметные знания Евы — 2026-10-04
 
-Ветка: `batch/knowledge-source`. Статус: реализация на проверке; production
+Ветка: `batch/knowledge-source`, PR [#406](https://github.com/Viktor6886/evaself/pull/406).
+Статус: реализация на итоговой проверке; production
 настройки и провайдеры не изменялись. Новых миграций нет.
 
 - [x] Аудит существующего индекса, поиска, Router, admin API, UI, persona и
@@ -22,11 +23,14 @@
   retrieval по психологии/релевантным знаниям, источники, untrusted data.
 - [x] Расширены прежние backend/UI-тесты, добавлены негативные проверки
   полноты и интеграция lifecycle на настоящих PG/Qdrant в существующий CI.
-- [x] Локально: 45 тестов validation/vector/fusion/settings прошли, SQL
+- [x] Общие материалы без коллекции скрыты во всех ветках поиска,
+  гидратации и соседях, не ломают rebuild/reconcile и прогресс индекса.
+- [x] Локально: 53 теста maintenance/validation/vector/fusion/settings прошли, SQL
   генератор совпадает (5 проб), tenant/admin route guards проходят.
 - [ ] Полная сборка/линт/типы, regression и Chromium — результат CI.
 - [ ] Live canary Letta с реальным embedding provider/model и естественным
   ответом: нужна работающая установка; fixture его не заменяет.
+- [ ] Независимое ревью по CLAUDE.md перед merge; PR остаётся draft.
 
 Описание эксплуатации и границ: `docs/knowledge-operations.md`.
 K5 диагностический поиск/статистика и K8 production-замеры не объявляются

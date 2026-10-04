@@ -254,7 +254,7 @@ export class KnowledgeMaintenance {
                   (index_status IN ('pending', 'indexing') AND updated_at > now() - interval '30 minutes') AS busy
              FROM knowledge_documents
              -- tenant: system — сверка индекса общей базы
-            WHERE user_id IS NULL AND product_verified AND status = 'ready'`,
+            WHERE user_id IS NULL AND product_verified AND status = 'ready' AND collection_id IS NOT NULL`,
     ), { crossUser: true });
     return new Map(rows.map((row) => [String(row.id), {
       chunks: Number(row.chunk_count),
@@ -272,7 +272,7 @@ export class KnowledgeMaintenance {
             WHERE user_id IS NOT NULL`
         : `SELECT count(*) AS total FROM knowledge_documents
             -- tenant: system — счётчик документов общей базы
-            WHERE user_id IS NULL`,
+            WHERE user_id IS NULL AND product_verified AND collection_id IS NOT NULL`,
     ), { crossUser: true });
     return { size: Number(rows[0]?.total ?? 0) };
   }
@@ -467,7 +467,7 @@ export class KnowledgeMaintenance {
       `SELECT id, user_id, chunk_count
          FROM knowledge_documents
          -- tenant: system — перестройка индекса проходит все документы, наружу ничего не отдаёт
-        WHERE status = 'ready' AND (user_id IS NOT NULL OR product_verified)
+        WHERE status = 'ready' AND (user_id IS NOT NULL OR (product_verified AND collection_id IS NOT NULL))
           AND ($1::uuid IS NULL OR id > $1::uuid)
         ORDER BY id
         LIMIT ${REBUILD_PAGE}`,
@@ -483,7 +483,7 @@ export class KnowledgeMaintenance {
         `SELECT COALESCE(sum(chunk_count), 0) AS total
            FROM knowledge_documents
            -- tenant: system — счётчик фрагментов всех баз для прогресса перестройки
-          WHERE status = 'ready' AND (user_id IS NOT NULL OR product_verified)`,
+          WHERE status = 'ready' AND (user_id IS NOT NULL OR (product_verified AND collection_id IS NOT NULL))`,
       ), { crossUser: true });
       const total = Number(rows[0]?.total ?? 0);
       const points = (await this.store.countPoints("private", version)) + (await this.store.countPoints("global", version));
