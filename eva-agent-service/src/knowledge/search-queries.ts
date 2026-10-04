@@ -13,6 +13,7 @@
  */
 
 import type { Database } from "../db.js";
+import { RRF_K } from "./search-fusion.js";
 
 export interface SearchScope {
   userId: number;
@@ -334,4 +335,79 @@ export async function enabledCollections(db: Database): Promise<string[]> {
       WHERE enabled`,
   );
   return rows.map((row) => row.id);
+}
+
+/** Прежний SQL-поиск, вынесен без изменения в общий модуль запросов. */
+export interface LegacyHitRow {
+  document_id: string;
+  document_name: string;
+  ordinal: number;
+  content: string;
+  score: string | number;
+  matched: string;
+}
+
+export async function legacyCandidates(
+  db: Database, scope: SearchScope, clean: string, limit: number, vector: string | null,
+): Promise<LegacyHitRow[]> {
+  const { rows } = await db.withUserScope(
+    { userId: scope.userId, label: "knowledge.search", inherit: true },
+    async () => await db.query<LegacyHitRow>(
+      `WITH ask AS (
+         SELECT websearch_to_tsquery('simple', $2) AS tsq
+       ),
+       visible AS (
+         SELECT c.id, c.document_id, c.ordinal, c.content, c.embedding
+           FROM knowledge_chunks c
+           JOIN knowledge_documents d
+             ON d.id = c.document_id AND (d.user_id = $1 OR d.product_verified)
+           LEFT JOIN knowledge_collections k ON k.id = d.collection_id
+          WHERE (c.user_id = $1 AND $6::boolean)
+             OR (c.product_verified AND $7::boolean AND COALESCE(k.enabled, true))
+       ),
+       fts AS (
+         SELECT v.id,
+                row_number() OVER (
+                  ORDER BY ts_rank(to_tsvector('simple', v.content), ask.tsq) DESC, v.id
+                ) AS position
+           FROM visible v, ask
+          WHERE to_tsvector('simple', v.content) @@ ask.tsq
+          LIMIT $3
+       ),
+       vec AS (
+         SELECT v.id,
+                row_number() OVER (ORDER BY v.embedding <=> $4::vector, v.id) AS position
+           FROM visible v
+          WHERE $4::vector IS NOT NULL AND v.embedding IS NOT NULL
+          ORDER BY v.embedding <=> $4::vector
+          LIMIT $3
+       ),
+       fused AS (
+         SELECT COALESCE(fts.id, vec.id) AS id,
+                COALESCE(1.0 / ($5 + fts.position), 0)
+                  + COALESCE(1.0 / ($5 + vec.position), 0) AS score,
+                CASE
+                  WHEN fts.id IS NOT NULL AND vec.id IS NOT NULL THEN 'both'
+                  WHEN fts.id IS NOT NULL THEN 'fts'
+                  ELSE 'vector'
+                END AS matched
+           FROM fts FULL OUTER JOIN vec ON vec.id = fts.id
+       )
+       SELECT c.document_id,
+              d.name AS document_name,
+              c.ordinal,
+              c.content,
+              fused.score,
+              fused.matched
+         FROM fused
+         JOIN knowledge_chunks c ON c.id = fused.id
+         JOIN knowledge_documents d
+           ON d.id = c.document_id AND (d.user_id = $1 OR d.product_verified)
+        WHERE c.user_id = $1 OR c.product_verified
+        ORDER BY fused.score DESC, c.document_id, c.ordinal
+        LIMIT $3`,
+      [scope.userId, clean, limit, vector, RRF_K, scope.privateEnabled, scope.globalEnabled],
+    ),
+  );
+  return rows;
 }

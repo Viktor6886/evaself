@@ -204,6 +204,31 @@ test("активную версию удалить нельзя", async () => {
   await assert.rejects(() => store.dropVersion(3), /vector_version_active/);
 });
 
+test("компенсация первой активации удаляет оба наших alias атомарно, чужие сохраняет", async () => {
+  const { calls, store } = fakeQdrant({
+    "GET /aliases": () => ({ result: { aliases: [
+      { alias_name: "eva_knowledge_private", collection_name: "eva_knowledge_private_v2" },
+      { alias_name: "eva_knowledge_global", collection_name: "eva_knowledge_global_v2" },
+      { alias_name: "other", collection_name: "other_v1" },
+    ] } }),
+    "POST /collections/aliases": () => ({ result: true }),
+  });
+  await store.activate(null);
+  assert.deepEqual(calls[1]!.body.actions, [
+    { delete_alias: { alias_name: "eva_knowledge_private" } },
+    { delete_alias: { alias_name: "eva_knowledge_global" } },
+  ]);
+});
+
+test("проверка версии scroll читает лишь метаданные без текста и векторов, сохраняет cursor", async () => {
+  const { calls, store } = fakeQdrant({
+    "POST /collections/eva_knowledge_private_v2/points/scroll": () => ({ result: { points: [], next_page_offset: 21 } }),
+  });
+  assert.deepEqual(await store.scrollPoints("private", 2, 11, 256), { points: [], next: 21 });
+  assert.deepEqual(calls[0]!.body, { limit: 256, offset: 11, with_vector: false,
+    with_payload: ["chunk_id", "document_id", "user_id", "collection_id", "embedding_model", "embedding_version"] });
+});
+
 test("отказы Qdrant различимы: недоступен, таймаут, ключ, сервер", async () => {
   const cases: Array<[() => Response | Error, string]> = [
     [() => new TypeError("fetch failed"), "qdrant_unavailable"],

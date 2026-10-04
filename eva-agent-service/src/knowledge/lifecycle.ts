@@ -211,6 +211,8 @@ export interface KnowledgeIngestOptions {
   embedBatch?(texts: string[], signal?: AbortSignal): Promise<number[][]>;
   /** Размер пачки эмбеддингов — та же настройка, что у индексации. */
   embedBatchSize?(): number;
+  /** Считать ли старые векторы pgvector; false при hybrid/vector + qdrant. */
+  legacyEmbeddings?(): boolean;
   /** Нарезка читается при каждом задании: панель меняет её без перезапуска. */
   chunking?(): ChunkingOptions;
   /**
@@ -298,6 +300,7 @@ export class KnowledgeIngestWorker {
       tempRoot: this.options.tempRoot,
       scan: this.options.scan,
       embed: this.options.embed,
+      legacyEmbeddings: this.options.legacyEmbeddings?.() ?? true,
       ...(this.options.embedBatch ? { embedBatch: this.options.embedBatch } : {}),
       ...(this.options.embedBatchSize ? { embedBatchSize: this.options.embedBatchSize() } : {}),
       ...(this.options.chunking ? { chunking: this.options.chunking() } : {}),
@@ -373,7 +376,8 @@ export class KnowledgeIngestWorker {
                                       page_start,page_end,section,subsection,heading,token_count)
          VALUES($1,$2,$3,$4,$5,$6,$7::vector,$8,$9,$10,$11,$12,$13,$14)`,
         [
-          id, userId, userId === null, chunk.ordinal, chunk.content, chunk.contentHash, `[${chunk.embedding.join(",")}]`, "router",
+          id, userId, userId === null, chunk.ordinal, chunk.content, chunk.contentHash,
+          chunk.embedding ? `[${chunk.embedding.join(",")}]` : null, "router",
           chunk.pageStart, chunk.pageEnd, chunk.section, chunk.subsection, chunk.heading, chunk.tokenCount,
         ],
       );

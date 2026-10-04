@@ -171,10 +171,10 @@ export class RouterEmbeddings {
         if (vector.length !== dimension) {
           throw fail("embedding_dimension_mismatch", `ожидалось ${dimension}, пришло ${vector.length}`);
         }
-        if (index < 0 || index >= texts.length) throw fail("embedding_incomplete");
+        if (!Number.isInteger(index) || index < 0 || index >= texts.length || vectors[index] !== undefined) throw fail("embedding_incomplete");
         vectors[index] = vector as number[];
       });
-      if (vectors.some((vector) => !vector)) throw fail("embedding_incomplete");
+      if (Array.from(vectors).some((vector) => !vector)) throw fail("embedding_incomplete");
       return vectors;
     } finally {
       clearTimeout(timeout);

@@ -97,10 +97,11 @@ export async function scheduleKnowledgeRebuild(
 }
 
 /**
- * Начать построение или перестройку версии: черновик и неудавшаяся
+ * Начать построение или перестройку версии: черновик, выведенная и неудавшаяся
  * становятся `building`, готовая и активная сохраняют статус (поиск на
  * активной продолжается). Новая отметка начала делает устаревшими
- * задания прежней перестройки. null — версии нет или её уже вывели.
+ * задания прежней перестройки. Выведенная версия перестраивается перед
+ * откатом, если со времени вывода изменились документы. null — версии нет.
  */
 export async function startKnowledgeRebuild(
   outbox: OutboxRecord,
@@ -111,8 +112,8 @@ export async function startKnowledgeRebuild(
   const { rows } = await client.query<{ status: string; started: string }>(
     `UPDATE knowledge_embedding_versions
         SET build_started_at = clock_timestamp(), error_code = NULL,
-            status = CASE WHEN status IN ('draft', 'failed') THEN 'building' ELSE status END
-      WHERE version = $1 AND status IN ('draft', 'failed', 'building', 'ready', 'active')
+            status = CASE WHEN status IN ('draft', 'failed', 'retired') THEN 'building' ELSE status END
+      WHERE version = $1 AND status IN ('draft', 'failed', 'building', 'ready', 'active', 'retired')
       RETURNING status, (extract(epoch FROM build_started_at) * 1000)::bigint AS started`,
     [version],
   );

@@ -28,7 +28,7 @@ export function embeddingVersionOf(model: unknown): number | null {
   return match ? Number(match[1]) : null;
 }
 
-/** Версии меняются редко, а индексация спрашивает их на каждую пачку. */
+/** Пространство версии неизменно; статус при K7 меняется сразу. */
 const CACHE_TTL_MS = 30_000;
 
 export class EmbeddingVersionStore {
@@ -38,7 +38,14 @@ export class EmbeddingVersionStore {
 
   async get(version: number): Promise<EmbeddingVersion | null> {
     const cached = this.cache.get(version);
-    if (cached && Date.now() - cached.at < CACHE_TTL_MS) return cached.row;
+    if (cached && Date.now() - cached.at < CACHE_TTL_MS) {
+      // Кэшируется конфигурация пространства, но не разрешение считать.
+      const { rows } = await this.pool.query<{ status: string }>(
+        "SELECT status FROM knowledge_embedding_versions WHERE version = $1", [version],
+      );
+      if (!rows[0]) { this.cache.delete(version); return null; }
+      return { ...cached.row, status: rows[0].status };
+    }
     const { rows } = await this.pool.query<{
       version: number;
       provider_id: string;
