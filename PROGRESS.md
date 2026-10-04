@@ -6,7 +6,8 @@
 ## База знаний: embedding WebUI, K7 и предметные знания Евы — 2026-10-04
 
 Ветка: `batch/knowledge-source`, PR [#406](https://github.com/Viktor6886/evaself/pull/406).
-Статус: реализация на итоговой проверке; production
+Статус: реализация прошла проверки сервиса, UI и PG/Qdrant-интеграцию;
+ожидает независимого ревью и live canary. Production
 настройки и провайдеры не изменялись. Новых миграций нет.
 
 - [x] Аудит существующего индекса, поиска, Router, admin API, UI, persona и
@@ -27,7 +28,11 @@
   гидратации и соседях, не ломают rebuild/reconcile и прогресс индекса.
 - [x] Локально: 53 теста maintenance/validation/vector/fusion/settings прошли, SQL
   генератор совпадает (5 проб), tenant/admin route guards проходят.
-- [ ] Полная сборка/линт/типы, regression и Chromium — результат CI.
+- [x] Сборка/линт/типы и regression в CI: backend 1807 PASS / 8 SKIP /
+  0 FAIL (1815 всего); Chromium 147 PASS / 0 FAIL. Интеграция PG/Qdrant
+  включает pause/unpause сервиса, lexical fallback и восстановление.
+  Измеренный commit: `4ed0f4e3652c8a657c7bb6424c0e0e23737f898d`,
+  [CI #1052](https://github.com/Viktor6886/evaself/actions/runs/37226119124).
 - [ ] Live canary Letta с реальным embedding provider/model и естественным
   ответом: нужна работающая установка; fixture его не заменяет.
 - [ ] Независимое ревью по CLAUDE.md перед merge; PR остаётся draft.

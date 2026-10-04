@@ -162,3 +162,27 @@ K8 (теневые замеры качества, нагрузка и production
 доступ. Для использования прежних материалов без коллекции загрузите
 их в включённую коллекцию через существующий административный экран.
 Такие материалы не участвуют в перестройке, сверке и её прогрессе.
+
+## Проверки изменения
+
+На commit `4ed0f4e3652c8a657c7bb6424c0e0e23737f898d` в
+[CI #1052](https://github.com/Viktor6886/evaself/actions/runs/37226119124):
+
+- Backend: build/lint/typecheck — PASS; 1815 тестов, 1807 PASS,
+  8 штатных SKIP, 0 FAIL.
+- Admin UI в Chromium: 147 тестов, 147 PASS, 0 FAIL, включая reload
+  редактора и управление при отказе Qdrant; прежний test/harness
+  повторяет Caddy SPA fallback для адресов разделов.
+- Настоящие PostgreSQL 17/Qdrant 1.19: lifecycle и K7, поддельный tenant
+  payload, выключенная/отсутствующая коллекция, полный rebuild при общем
+  документе без коллекции, pause/unpause Qdrant, lexical fallback и
+  восстановление векторного поиска — PASS.
+- SQL generated probes, tenant/admin guards, отдельная Qdrant-интеграция
+  и Full release evals — PASS. Локально 53 targeted теста — PASS.
+
+Реальный provider/model и runtime работающей установки не менялись:
+доступна проверка репозитория и CI, но доступа к её Router/Letta/PG нет.
+Live canary из раздела выше остаётся невыполненной; draft PR
+[#406](https://github.com/Viktor6886/evaself/pull/406) требует независимого
+ревью согласно корневому CLAUDE.md. Проверки fixture не означают проверки
+автономного выбора инструмента и естественного ответа реальной LLM.
