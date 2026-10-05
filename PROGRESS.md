@@ -5,7 +5,8 @@
 
 ## База знаний: включение загрузки файлов из панели — 2026-10-05
 
-Ветка: `batch/knowledge-uploads`. Исправление неактивной кнопки загрузки по
+Ветка: `batch/knowledge-uploads`, PR [#408](https://github.com/Viktor6886/evaself/pull/408).
+Исправление неактивной кнопки загрузки по
 обращению владельца. Статус: реализовано, локальные targeted/full regression
 и PG/Qdrant-интеграция PASS. Production не изменялся; CI и ревью — в PR.
 
@@ -23,7 +24,8 @@
 - [x] Full backend: 1819 всего, 1811 PASS, 8 штатных SKIP, 0 FAIL.
 - [x] Full UI: 150 PASS, 0 FAIL; PG/Qdrant: сохранённый флаг, загрузка,
   lifecycle/K7/tenant isolation и настоящий pause/fallback/recovery PASS.
-- [ ] CI в pull request.
+- CI: обязательные проверки и фактическое заключение GitHub Actions —
+  в [PR #408](https://github.com/Viktor6886/evaself/pull/408).
 - [ ] Независимое ревью перед merge по CLAUDE.md; обновление работающей
   установки и включение флага остаются действиями администратора.
 
