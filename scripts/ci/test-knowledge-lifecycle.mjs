@@ -32,6 +32,7 @@ import { KnowledgeIngestWorker } from "../../eva-agent-service/dist/knowledge/li
 import { KnowledgeIndexer, knowledgeIndexScheduler } from "../../eva-agent-service/dist/knowledge/indexer.js";
 import { KnowledgeMaintenance } from "../../eva-agent-service/dist/knowledge/maintenance.js";
 import { KnowledgeSearch } from "../../eva-agent-service/dist/knowledge/search.js";
+import { withKnowledgeIndexWrite } from "../../eva-agent-service/dist/knowledge/version-validation.js";
 import { CoreToolFactory } from "../../eva-agent-service/dist/tools/core-tools.js";
 import { recordJobIntent } from "../../eva-agent-service/dist/jobs/job-outbox.js";
 
@@ -58,10 +59,12 @@ const admin = async (work) => await runInScope(adminScope({ actor: "ci", role: "
 const outbox = { record: recordJobIntent };
 const indexJobs = knowledgeIndexScheduler(outbox, () => true);
 
+let beforeEmbeddingResponse = async () => {};
 const fixtureFetch = async (_url, init) => {
   const body = JSON.parse(init.body);
   const dimension = body.model === "ci-psychology-8" ? 8 : body.model === "ci-psychology-12" ? 12 : 0;
   assert.ok(dimension, "используется модель конкретной версии");
+  await beforeEmbeddingResponse();
   return new Response(JSON.stringify({ data: body.input.map((_text, index) => ({ index,
     embedding: Array.from({ length: dimension }, (_, i) => i === (dimension === 8 ? 0 : 1) ? 1 : 0),
   })) }));
@@ -165,6 +168,17 @@ try {
   const indexOverview = await admin(async () => await documents.indexOverview());
   assert.equal(indexOverview.scopes.global.documents, 1);
   assert.equal(indexOverview.versions.find((v) => v.version === first.version).progress, 1);
+  const racedDoc = randomUUID(); ownDocuments.push(racedDoc);
+  await admin(async () => {
+    await pool.query("INSERT INTO knowledge_documents(id,user_id,name,mime,content_hash,status,chunk_count) VALUES($1,$2,'Удаление во время embeddings','text/plain','ci-race','ready',1)", [racedDoc, ownUsers[0]]);
+    await pool.query("INSERT INTO knowledge_chunks(document_id,user_id,product_verified,ordinal,content,content_hash,embedding,embedding_model) VALUES($1,$2,false,0,'Прокрастинация: гонка удаления CI','ci-race',NULL,'router')", [racedDoc, ownUsers[0]]);
+  });
+  beforeEmbeddingResponse = async () => {
+    beforeEmbeddingResponse = async () => {};
+    await admin(async () => await pool.query("DELETE FROM knowledge_documents WHERE id=$1 AND user_id=$2", [racedDoc, ownUsers[0]]));
+  };
+  await assert.rejects(() => indexer.index(racedDoc, ownUsers[0]), /knowledge_document_changed/u);
+  assert.equal(await store.documentPoints("private", first.version, racedDoc), 0, "устаревшая загрузка не создала точки-сироты");
   const answer = await tool.execute({ query, user_id: ownUsers[1] }, { userId: ownUsers[0] });
   assert.equal(answer.untrusted, true); assert.equal(answer.degraded, false);
   assert.ok(answer.results.some((hit) => hit.document === "Саморегуляция.md" && hit.base === "shared" && hit.cite.includes("Прокрастинация")));
@@ -199,6 +213,18 @@ try {
 
   const { private: privateInfo, global: globalInfo } = await store.describe(first.version);
   assert.equal(privateInfo.size, 8); assert.equal(globalInfo.size, 8);
+  let releaseWriter;
+  let writerEntered;
+  const released = new Promise((resolve) => { releaseWriter = resolve; });
+  const entered = new Promise((resolve) => { writerEntered = resolve; });
+  const writer = withKnowledgeIndexWrite(db, async () => { writerEntered(); await released; });
+  await entered;
+  try {
+    await assert.rejects(() => admin(async () => await documents.activate(first.version, { verify_only: true })),
+      (error) => error.statusCode === 409 && error.details?.code === "knowledge_activation_busy");
+    assert.deepEqual(await store.activeVersions(), { private: first.version, global: first.version });
+  } finally { releaseWriter(); await writer; }
+  await admin(async () => await documents.activate(first.version, { verify_only: true }));
   // Приостанавливается только service-контейнер изолированной CI-job.
   // Запрос идёт настоящим клиентом и получает реальный network timeout.
   await docker("docker", ["pause", qdrantContainer], { timeout: 20_000 });

@@ -225,6 +225,9 @@ export class KnowledgeIndexService {
         if (canonical === number) return { version: number, status: "active" };
       }
       if (error instanceof KnowledgeVersionError) throw adminConflict(error.message, { code: error.code });
+      if (error && typeof error === "object" && "code" in error && error.code === "55P03") {
+        throw adminConflict("Индекс или документы сейчас изменяются. Дождитесь завершения записи и повторите активацию.", { code: "knowledge_activation_busy" });
+      }
       if (error instanceof QdrantError) throw adminConflict("Qdrant недоступен: версия не переключена, поиск продолжает работать с lexical fallback.", { code: error.code });
       throw error;
     }

@@ -34,6 +34,7 @@ import type { JobContext } from "../jobs/runtime.js";
 import { isKnowledgeId } from "./documents.js";
 import { errorCode, type KnowledgeIndexer, type KnowledgeIndexScheduler } from "./indexer.js";
 import { recordKnowledgeReconcile, setKnowledgePoints, setKnowledgeRebuildProgress } from "./metrics.js";
+import { withKnowledgeIndexWrite } from "./version-validation.js";
 import { QdrantError } from "./qdrant-client.js";
 import type { KnowledgeScope, KnowledgeVectorStore } from "./vector-store.js";
 
@@ -207,7 +208,7 @@ export class KnowledgeMaintenance {
       if (version.building) continue;
       for (const scope of ["private", "global"] as const) {
         signal?.throwIfAborted();
-        report.foreign += await this.store.removeForeignVersion(scope, version.version);
+        report.foreign += await withKnowledgeIndexWrite(this.db, async () => await this.store.removeForeignVersion(scope, version.version));
         // Сначала Qdrant, потом PostgreSQL: точки пишутся только после
         // COMMIT документа, поэтому документ, точки которого уже видны,
         // обязательно найдётся и в PostgreSQL — если его не удалили.
@@ -216,7 +217,7 @@ export class KnowledgeMaintenance {
         const documents = await this.documents(scope);
         const orphans = [...points.keys()].filter((id) => !documents.has(id));
         for (let start = 0; start < orphans.length; start += 256) {
-          await this.store.deleteDocuments(scope, version.version, orphans.slice(start, start + 256));
+          await withKnowledgeIndexWrite(this.db, async () => await this.store.deleteDocuments(scope, version.version, orphans.slice(start, start + 256)));
         }
         report.orphans += orphans.length;
         for (const [id, document] of documents) {
