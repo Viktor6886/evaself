@@ -29,6 +29,11 @@ test("ingestion rejects type size and AV failure and always cleans temp", async 
   await assert.rejects(ingestor.ingest({ userId: 1, name: "x.txt", mime: "text/plain", bytes: Buffer.from("12345") }), /too_large/);
   const av = new DocumentIngestor({ ...dependencies, tempRoot: root, scan: async () => "infected" as const });
   await assert.rejects(av.ingest({ userId: 1, name: "x.txt", mime: "text/plain", bytes: Buffer.from("x") }), /antivirus/);
+  let persisted = false;
+  const unavailable = new DocumentIngestor({ ...dependencies, tempRoot: root, scan: async () => "unavailable" as const,
+    embed: async () => { throw new Error("не должен вызываться"); }, persist: async () => { persisted = true; } });
+  await assert.rejects(unavailable.ingest({ userId: 1, name: "x.txt", mime: "text/plain", bytes: Buffer.from("x") }), /document_antivirus_unavailable/u);
+  assert.equal(persisted, false);
   assert.deepEqual(await readdir(root), []);
 });
 

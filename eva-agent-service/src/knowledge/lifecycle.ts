@@ -5,6 +5,7 @@ import type { Database } from "../db.js";
 import type { JobOutbox, JobOutboxClient } from "../jobs/job-outbox.js";
 import { jobIdempotencyKey } from "../jobs/job-outbox.js";
 import type { JobTimingPolicy } from "../jobs/policy.js";
+import type { JobEnvelope } from "../jobs/envelope.js";
 import type { JobContext } from "../jobs/runtime.js";
 import type { Readable } from "node:stream";
 import type { ChunkingOptions } from "./chunking.js";
@@ -260,6 +261,56 @@ type IngestOutcome = { kind: "duplicate"; documentId: string } | { kind: "new" |
  */
 export class KnowledgeIngestWorker {
   constructor(private readonly db: Database, private readonly options: KnowledgeIngestOptions) {}
+
+  /** Отказ до запуска обработчика: только последняя попытка и незавершённая загрузка. */
+  async reject(envelope: JobEnvelope, code: string): Promise<void> {
+    if (!isKnowledgeId(envelope.payloadRef)) return;
+    const owner = knowledgeOwner(envelope.userId);
+    await this.scoped(owner, async () => await this.db.query(
+      `UPDATE knowledge_uploads u
+          -- tenant: system — владелец проверен в scoped и условии user_id
+          SET status='failed', error_code=$4, completed_at=now()
+        WHERE u.id=$1 AND ${owner.kind === "user" ? "u.user_id=$2" : "u.user_id IS NULL AND $2::bigint IS NULL"}
+          AND u.status IN ('queued','processing')
+          AND $3 = (
+            SELECT o.idempotency_key FROM job_outbox o
+             WHERE o.job_type=$5 AND o.envelope->>'payloadRef'=$1::text
+               AND ${owner.kind === "user" ? "o.user_id=$2" : "o.user_id IS NULL"}
+             ORDER BY o.created_at DESC, o.id DESC LIMIT 1
+          )`,
+      [envelope.payloadRef, envelope.userId, envelope.idempotencyKey, code, KNOWLEDGE_INGEST_JOB],
+    ));
+  }
+
+  /** Старые очереди уже могли закрыть задание: восстановить доступность кнопки повтора. */
+  async recoverExpiredUploads(): Promise<number> {
+    return await this.db.withSystemScope("knowledge.ingest.recover", async () => {
+      const { rows } = await this.db.query<{ id: string }>(
+        `UPDATE knowledge_uploads u
+            -- tenant: system — recovery всех владельцев, без чтения содержимого
+            SET status='failed', completed_at=now(),
+                error_code=CASE WHEN o.status='dead' THEN COALESCE(o.error_code,'knowledge_ingest_rejected')
+                               ELSE 'job_deadline_exceeded' END
+           FROM (
+             SELECT DISTINCT ON (user_id, envelope->>'payloadRef')
+                    user_id, envelope, idempotency_key, status, error_code
+               FROM job_outbox WHERE job_type=$1
+              ORDER BY user_id, envelope->>'payloadRef', created_at DESC, id DESC
+           ) o
+          WHERE u.id::text=o.envelope->>'payloadRef'
+            AND u.user_id IS NOT DISTINCT FROM o.user_id
+            AND u.status IN ('queued','processing')
+            AND (o.status='dead' OR (o.envelope->>'deadlineAt')::timestamptz <= now())
+            AND NOT EXISTS (
+              SELECT 1 FROM job_runs r WHERE r.job_id=o.idempotency_key
+                AND r.status='running' AND r.lease_until > now()
+            )
+          RETURNING u.id`,
+        [KNOWLEDGE_INGEST_JOB],
+      );
+      return rows.length;
+    }, { crossUser: true });
+  }
 
   async run(context: JobContext): Promise<void> {
     const id = context.envelope.payloadRef;

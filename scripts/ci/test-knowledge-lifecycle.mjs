@@ -30,7 +30,7 @@ import { EmbeddingService } from "../../eva-agent-service/dist/router/embedding-
 import { LlmRouterClient } from "../../eva-agent-service/dist/router/client.js";
 import { QdrantClient } from "../../eva-agent-service/dist/knowledge/qdrant-client.js";
 import { KnowledgeVectorStore } from "../../eva-agent-service/dist/knowledge/vector-store.js";
-import { KnowledgeIngestWorker } from "../../eva-agent-service/dist/knowledge/lifecycle.js";
+import { KnowledgeIngestWorker, KnowledgeUploadService } from "../../eva-agent-service/dist/knowledge/lifecycle.js";
 import { KnowledgeIndexer, knowledgeIndexScheduler } from "../../eva-agent-service/dist/knowledge/indexer.js";
 import { KnowledgeMaintenance } from "../../eva-agent-service/dist/knowledge/maintenance.js";
 import { KnowledgeSearch } from "../../eva-agent-service/dist/knowledge/search.js";
@@ -160,7 +160,27 @@ try {
   ownDocuments.push(uploaded.id);
   const worker = new KnowledgeIngestWorker(db, { tempRoot: root, scan: async () => "clean", legacyEmbeddings: () => false,
     embed: async () => { throw new Error("legacy embedding не нужен Qdrant"); }, index: indexJobs });
+  // Старый consumer закрывал просроченное задание, оставляя queued в PG.
+  // Recovery возвращает кнопку повтора, а запоздалый отказ старого задания
+  // не портит новый retry и уже готовый документ.
+  const expired = (await job("knowledge_ingest", uploaded.id)).envelope;
+  expired.deadlineAt = new Date(Date.now() - 60_000).toISOString();
+  await admin(async () => await pool.query("UPDATE job_outbox SET envelope=$2::jsonb WHERE idempotency_key=$1",
+    [expired.idempotencyKey, JSON.stringify(expired)]));
+  assert.equal(await worker.recoverExpiredUploads(), 1);
+  const uploadState = async () => (await admin(async () => await pool.query(
+    "SELECT status,error_code FROM knowledge_uploads WHERE id=$1 AND user_id IS NULL", [uploaded.id]))).rows[0];
+  assert.deepEqual(await uploadState(), { status: "failed", error_code: "job_deadline_exceeded" });
+  await admin(async () => await documents.retryUpload(uploaded.id));
+  await worker.reject(expired, "job_deadline_exceeded");
+  assert.equal((await uploadState()).status, "queued", "старое задание не меняет новый retry");
+  assert.equal(await worker.recoverExpiredUploads(), 0, "новая попытка ещё не просрочена");
+  await worker.reject((await job("knowledge_ingest", uploaded.id)).envelope, "job_deadline_exceeded");
+  assert.equal((await uploadState()).status, "failed", "отказ до handler становится виден в панели");
+  await admin(async () => await documents.retryUpload(uploaded.id));
   await worker.run(await job("knowledge_ingest", uploaded.id));
+  await worker.reject((await job("knowledge_ingest", uploaded.id)).envelope, "job_deadline_exceeded");
+  assert.equal((await uploadState()).status, "ready", "поздний отказ не портит готовый документ");
   const parsed = await admin(async () => await pool.query("SELECT content, embedding FROM knowledge_chunks WHERE document_id = $1 -- tenant: system — фрагменты только CI-загрузки", [uploaded.id]));
   assert.ok(parsed.rows.length);
   assert.ok(parsed.rows.every((c) => c.embedding === null));
@@ -175,6 +195,30 @@ try {
   for (const telegram of [-96200001, -96200002]) {
     ownUsers.push(Number((await admin(async () => await pool.query("INSERT INTO users(telegram_id, first_name) VALUES ($1, 'CI') RETURNING id", [telegram]))).rows[0].id));
   }
+  const privateUpload = await new KnowledgeUploadService(db, outbox, root).createFromStream(-96200001, {
+    name: "Recovery tenant.txt", mime: "text/plain", stream: Readable.from([Buffer.from("Private recovery fixture")]),
+  });
+  ownDocuments.push(privateUpload.id);
+  const privateEnvelope = (await job("knowledge_ingest", privateUpload.id)).envelope;
+  const privateState = async () => (await admin(async () => await pool.query(
+    "SELECT status FROM knowledge_uploads WHERE id=$1 AND user_id=$2", [privateUpload.id, ownUsers[0]]))).rows[0].status;
+  await worker.reject({ ...privateEnvelope, userId: ownUsers[1] }, "job_deadline_exceeded");
+  assert.equal(await privateState(), "queued", "подмена владельца не меняет чужую загрузку");
+  privateEnvelope.deadlineAt = new Date(Date.now() - 60_000).toISOString();
+  await admin(async () => {
+    await pool.query("UPDATE job_outbox SET envelope=$2::jsonb WHERE idempotency_key=$1", [privateEnvelope.idempotencyKey, JSON.stringify(privateEnvelope)]);
+    await pool.query(`INSERT INTO job_runs(run_id,job_id,queue,job_type,schema_version,user_id,payload_checksum,status,lease_until,timezone)
+      VALUES($1,$2,'memory','knowledge_ingest',1,$3,'ci','running',now()+interval '5 minutes','UTC')`,
+    [randomUUID(), privateEnvelope.idempotencyKey, ownUsers[0]]);
+  });
+  assert.equal(await worker.recoverExpiredUploads(), 0, "действующая аренда защищает работу другой реплики");
+  await admin(async () => await pool.query("DELETE FROM job_runs WHERE job_id=$1 AND user_id=$2", [privateEnvelope.idempotencyKey, ownUsers[0]]));
+  assert.equal(await worker.recoverExpiredUploads(), 1);
+  assert.equal(await privateState(), "failed");
+  // Проверяется и пользовательская область reject, не только системная.
+  await admin(async () => await pool.query("UPDATE knowledge_uploads SET status='queued' WHERE id=$1 AND user_id=$2", [privateUpload.id, ownUsers[0]]));
+  await worker.reject(privateEnvelope, "job_deadline_exceeded");
+  assert.equal(await privateState(), "failed");
   const foreignDoc = randomUUID(); ownDocuments.push(foreignDoc);
   await admin(async () => {
     await pool.query("INSERT INTO knowledge_documents(id,user_id,name,mime,content_hash,status,chunk_count) VALUES($1,$2,'Чужой документ CI','text/plain','ci-foreign','ready',1)", [foreignDoc, ownUsers[1]]);

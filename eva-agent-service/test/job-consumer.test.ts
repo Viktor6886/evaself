@@ -38,6 +38,32 @@ test("processor: повторяемый отказ — бросок, остал�
   assert.deepEqual(attempts, [1, 2, 3, 1]);
 });
 
+test("processor: отказ до обработчика обновляет бизнес-статус; ошибка записи повторяется", async () => {
+  const data = { upload: "id" };
+  const outcomes = [
+    { status: "failed", runId: null, code: "job_deadline_exceeded", failureClass: "permanent", retry: false },
+    { status: "failed", runId: "ran", code: "Error", failureClass: "transient", retry: false },
+    { status: "failed", runId: null, code: "job_runtime_stopping", failureClass: "transient", retry: true },
+  ];
+  const rejected: unknown[] = [];
+  const processor = jobProcessor({ execute: async () => outcomes.shift() as never }, async (value, code) => {
+    rejected.push({ value, code });
+  });
+  await processor(data, 0);
+  await processor(data, 4);
+  await assert.rejects(processor(data, 0), JobRetryError);
+  assert.deepEqual(rejected, [{ value: data, code: "job_deadline_exceeded" }]);
+
+  let writes = 0;
+  const retry = jobProcessor({ execute: async () => ({ status: "failed", runId: null,
+    code: "job_deadline_exceeded", failureClass: "permanent", retry: false }) }, async () => {
+    if (++writes === 1) throw new Error("database unavailable");
+  });
+  await assert.rejects(retry(data, 0), /database unavailable/u);
+  await retry(data, 1);
+  assert.equal(writes, 2);
+});
+
 function fakeDriver(withConsumer: boolean) {
   const events: string[] = [];
   const driver = {
