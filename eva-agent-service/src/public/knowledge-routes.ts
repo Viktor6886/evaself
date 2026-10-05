@@ -3,8 +3,8 @@
  * удаление одного документа и очистка всей базы (docs/knowledge-base.md, K5a).
  *
  * Загрузка файла — прежний маршрут `POST /knowledge/uploads` в `routes.ts`.
- * Сервиса нет — функция выключена (EVA_KNOWLEDGE_UPLOADS), и `GET /knowledge`
- * отвечает `enabled: false`: по нему Mini App прячет вкладку.
+ * Сервиса нет или приём файлов выключен — `GET /knowledge` отвечает
+ * `enabled: false`: по нему Mini App прячет вкладку.
  */
 
 import type { FastifyInstance } from "fastify";
@@ -13,6 +13,7 @@ import { badRequest, notFound } from "../errors.js";
 
 /** Операции по telegram id; сопоставление с внутренним пользователем — у сервиса. */
 export interface KnowledgeDocumentsPublic {
+  enabled?(): boolean;
   overview(telegramId: number): Promise<{ documents: unknown[]; total: number; uploads: unknown[] }>;
   remove(telegramId: number, documentId: string): Promise<{ deleted: boolean }>;
   clear(telegramId: number): Promise<{ deleted: number }>;
@@ -29,11 +30,11 @@ export function registerKnowledgePublicRoutes(
   telegramIdOf: (request: unknown) => number,
 ): void {
   const service = (): KnowledgeDocumentsPublic => {
-    if (!knowledge) throw badRequest("Загрузка знаний отключена");
+    if (!knowledge || knowledge.enabled?.() === false) throw badRequest("Загрузка знаний отключена");
     return knowledge;
   };
   publicApp.get("/knowledge", async (request) => {
-    if (!knowledge) return { enabled: false, documents: [], total: 0, uploads: [] };
+    if (!knowledge || knowledge.enabled?.() === false) return { enabled: false, documents: [], total: 0, uploads: [] };
     return { enabled: true, max_bytes: KNOWLEDGE_PUBLIC_MAX_BYTES, ...(await knowledge.overview(telegramIdOf(request))) };
   });
   publicApp.delete("/knowledge/documents/:id", async (request) => {

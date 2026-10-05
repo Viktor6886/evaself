@@ -542,8 +542,9 @@ services:
       DOMAIN_API: ${DOMAIN_API}
       EVA_TELEGRAM_WEBHOOK_SECRET: ${EVA_TELEGRAM_WEBHOOK_SECRET}
       EVA_TELEGRAM_API_BASE_URL: ${EVA_TELEGRAM_API_BASE_URL:-https://api.telegram.org}
-      # Загрузка в общую базу знаний: без разбора у агента (тот же флаг)
-      # файл навсегда остался бы «в очереди», и панель отказывает сразу.
+      # Bootstrap приёма файлов: настройка панели в PostgreSQL имеет приоритет.
+      # Без слоя заданий агент не разбирает файлы; панель объясняет отказ.
+      EVA_BULLMQ_JOBS: ${EVA_BULLMQ_JOBS:-false}
       EVA_KNOWLEDGE_UPLOADS: ${EVA_KNOWLEDGE_UPLOADS:-false}
       # База знаний в панели: статистика индекса, диагностика поиска и
       # перестройка идут в тот же Qdrant, что и у агента.

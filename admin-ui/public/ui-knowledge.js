@@ -167,7 +167,30 @@ function renderKnowledgeCollections() {
     ? rows.map((item) => `<option value="${escapeHtml(item.id)}" ${item.id === chosen ? "selected" : ""}>${escapeHtml(item.title)}</option>`).join("")
     : '<option value="">Сначала создайте коллекцию</option>';
   $("#knowledge-upload").hidden = !editable;
-  $("#knowledge-upload-button").disabled = !rows.length || k.index?.uploads_enabled === false;
+  renderKnowledgeUploadAccess();
+}
+
+/** Причина отказа видна рядом с выбором файла, в том числе на телефоне. */
+function renderKnowledgeUploadAccess() {
+  const k = state.knowledge;
+  const setting = k.runtime?.settings?.find((s) => s.key === "runtime.knowledge_uploads_enabled");
+  const known = !k.failed?.index && typeof k.index?.uploads_enabled === "boolean";
+  const enabled = known && k.index.uploads_enabled;
+  const worker = k.index?.uploads_worker_enabled !== false;
+  const message = k.uploadSettingsBusy ? "Сохраняем настройку загрузки…"
+    : !known ? "Не удалось проверить доступность загрузки. Нажмите «Обновить»."
+    : !worker ? "Обработка файлов выключена. Включите EVA_BULLMQ_JOBS и перезапустите сервис агента и admin-api."
+    : !enabled && (!setting || k.failed?.settings) ? "Загрузка файлов выключена; настройка для включения недоступна. Нажмите «Обновить»."
+    : !enabled ? "Загрузка файлов выключена. Нажмите «Включить загрузку» — настройка сохранится на сервере."
+    : !k.collections.length ? "Сначала создайте коллекцию выше, затем выберите файлы."
+    : "Загрузка включена. Файлы будут разобраны в фоне; состояние появится в списке ниже.";
+  $("#knowledge-upload-availability").textContent = message;
+  $("#knowledge-upload-button").disabled = !knowledgeEditable() || !enabled || !k.collections.length || !!k.uploadSettingsBusy;
+  $("#knowledge-file").disabled = $("#knowledge-upload-button").disabled;
+  const toggle = $("#knowledge-upload-toggle");
+  toggle.hidden = !knowledgeEditable() || !setting || k.failed?.settings;
+  toggle.textContent = enabled ? "Выключить загрузку" : "Включить загрузку";
+  toggle.disabled = !known || !worker || !k.runtime?.etag || !!k.uploadSettingsBusy;
 }
 
 function renderKnowledgeUploads() {
@@ -290,8 +313,8 @@ function knowledgeMime(file) {
  * почему. Разбор всё равно идёт на сервере по очереди заданий.
  */
 async function uploadKnowledgeFiles(files) {
-  if (state.knowledge.index?.uploads_enabled === false) {
-    toast("Загрузка документов выключена (EVA_KNOWLEDGE_UPLOADS)", true);
+  if ($("#knowledge-upload-button").disabled) {
+    toast($("#knowledge-upload-availability").textContent, true);
     return;
   }
   const collection = $("#knowledge-upload-collection").value;
@@ -364,6 +387,21 @@ function bindKnowledge() {
     loadKnowledge().catch(handleError);
   });
   $("#knowledge-upload-button").addEventListener("click", () => $("#knowledge-file").click());
+  $("#knowledge-upload-toggle").addEventListener("click", async () => {
+    const k = state.knowledge;
+    if ($("#knowledge-upload-toggle").disabled) return;
+    const enabled = k.index?.uploads_enabled === true;
+    k.uploadSettingsBusy = true;
+    renderKnowledgeUploadAccess();
+    try {
+      await saveKnowledgeRuntime({ "runtime.knowledge_uploads_enabled": !enabled });
+    } catch (error) {
+      handleError(error);
+    } finally {
+      k.uploadSettingsBusy = false;
+      renderKnowledgeUploadAccess();
+    }
+  });
   $("#knowledge-file").addEventListener("change", (event) => {
     const files = event.target.files;
     if (files?.length) uploadKnowledgeFiles(files).catch(handleError).finally(() => { event.target.value = ""; });

@@ -83,6 +83,43 @@ test("выключенная функция: GET /knowledge — enabled:false, �
   }
 });
 
+test("живой флаг скрывает и открывает Mini App без пересоздания сервиса", async () => {
+  const calls: string[] = [];
+  let enabled = false;
+  const fastify = app({ knowledgeDocuments: { ...documents(calls), enabled: () => enabled } });
+  try {
+    const overview = async () => (await fastify.inject({ method: "GET", url: "/public/knowledge", headers: signed })).json();
+    assert.equal((await overview()).enabled, false);
+    assert.deepEqual(calls, []);
+    enabled = true;
+    assert.equal((await overview()).enabled, true);
+    assert.deepEqual(calls, [`overview:${USER.id}`]);
+    enabled = false;
+    assert.equal((await overview()).enabled, false);
+    assert.equal((await fastify.inject({ method: "DELETE", url: `/public/knowledge/documents/${DOC}`, headers: signed })).statusCode, 400);
+    assert.deepEqual(calls, [`overview:${USER.id}`]);
+  } finally { await fastify.close(); }
+});
+
+test("личная загрузка проверяет живой флаг до tenant lookup и записи файла", async () => {
+  const root = await mkdtemp(join(tmpdir(), "eva-private-upload-live-"));
+  const { db, queries } = guardedDb((sql) => sql.includes("FROM users") ? { rows: [{ id: "7" }] } : undefined);
+  const box = outbox();
+  let enabled = false;
+  const service = new KnowledgeUploadService(db as never, { record: box.record(queries) } as never, root, undefined, () => false, () => enabled);
+  const upload = async () => await service.createFromStream(USER.id, { name: "личное.md", mime: "text/markdown", stream: Readable.from([Buffer.from("Личная заметка")]) });
+  assert.equal(service.enabled(), false);
+  await assert.rejects(upload, /knowledge_disabled/u);
+  assert.deepEqual(queries, []);
+  assert.deepEqual(await readdir(root), []);
+  enabled = true;
+  assert.equal((await upload()).status, "queued");
+  assert.equal(box.jobs.length, 1);
+  enabled = false;
+  await assert.rejects(upload, /knowledge_disabled/u);
+  assert.equal(box.jobs.length, 1);
+});
+
 test("без подписи — 401, до сервиса запрос не доходит", async () => {
   const calls: string[] = [];
   const fastify = app({ knowledgeDocuments: documents(calls) });

@@ -613,8 +613,10 @@ async function main(): Promise<void> {
 
   // Состояние документа в Mini App зависит от того, включён ли индекс
   // Qdrant: переключатель панели читается при каждом запросе.
-  const knowledgeUploads = jobs && config.knowledgeUploadsEnabled
-    ? new KnowledgeUploadService(db,jobs.outbox,"/data/knowledge-uploads",undefined,()=>config.knowledgeIndexEnabled&&Boolean(config.qdrantApiKey))
+  // Сервис существует вместе с очередью; приём проверяет живую настройку
+  // на каждом запросе, поэтому включение из панели не требует перезапуска.
+  const knowledgeUploads = jobs
+    ? new KnowledgeUploadService(db,jobs.outbox,"/data/knowledge-uploads",undefined,()=>config.knowledgeIndexEnabled&&Boolean(config.qdrantApiKey),()=>config.knowledgeUploadsEnabled)
     : null;
   // Расшифровка аудиофайла сохраняется тем же приёмом, что документ из
   // Mini App: одно хранилище и один поиск на все материалы человека.

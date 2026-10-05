@@ -611,6 +611,19 @@ export const OSINT_SETTINGS: readonly SettingDefinition[] = [
  */
 export const KNOWLEDGE_SETTINGS: readonly SettingDefinition[] = [
   {
+    key: "runtime.knowledge_uploads_enabled",
+    env: "EVA_KNOWLEDGE_UPLOADS",
+    title: "База знаний: загрузка файлов",
+    group: "knowledge",
+    type: "boolean",
+    default: false,
+    required: true,
+    requires_restart: false,
+    description: "Приём файлов в личную и общую базу знаний. Уже принятые файлы продолжают обрабатываться после выключения. Настройка сохраняется в PostgreSQL и действует без перезапуска",
+    affects: ["agent-runtime", "admin-api"],
+    recommended: "Включите в разделе «База знаний», когда нужна загрузка документов. Обработчик фоновых заданий EVA_BULLMQ_JOBS должен быть включён; Qdrant для приёма файлов не требуется.",
+  },
+  {
     key: "runtime.knowledge_index_enabled",
     env: "EVA_KNOWLEDGE_INDEX",
     title: "База знаний: индексация в Qdrant",
