@@ -1303,6 +1303,14 @@ body.editor-open { overflow: hidden; }
 .knowledge-metric strong { font-size: 24px; }
 .knowledge-metric small { color: var(--muted); }
 .knowledge-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+.knowledge-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: 12px; margin: 12px 0; }
+.knowledge-fields label { min-width: 0; }
+.knowledge-fields input:not([type="checkbox"]), .knowledge-fields select, #knowledge-embedding-configuration { width: 100%; min-height: 44px; }
+.knowledge-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: 12px; }
+.knowledge-summary dt { color: var(--muted); font-size: 12px; }
+.knowledge-summary dd { margin: 4px 0 0; overflow-wrap: anywhere; }
+.knowledge-advanced { margin-top: 12px; }
+.knowledge-advanced summary { cursor: pointer; padding: 12px 0; }
 @media (max-width: 720px) {
   .knowledge-toolbar select, .knowledge-toolbar input { min-width: 0; width: 100%; min-height: 44px; }
   .knowledge-drop { flex-direction: column; align-items: stretch; }

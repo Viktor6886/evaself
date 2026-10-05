@@ -221,3 +221,26 @@ test("загрузка: формулировки команд модели об�
   assert.deepEqual([...new Set(persisted.map((chunk) => chunk.section))], ["Раздел", "Другой"]);
   assert.ok(batches.every((size) => size <= 2), "размер пачки прежних векторов берётся из настройки");
 });
+
+test("Qdrant: разбор книги не зависит от прежней модели pgvector, текст и структура сохраняются", async () => {
+  const { DocumentIngestor } = await import("../dist/knowledge/ingestion.js");
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const directory = await mkdtemp(join(tmpdir(), "eva-qdrant-ingest-"));
+  const persisted: Array<{ content: string; embedding: number[] | null; section: string | null; userId: number | null; productVerified: boolean }> = [];
+  try {
+    const ingestor = new DocumentIngestor({
+      tempRoot: directory, legacyEmbeddings: false, scan: async () => "clean",
+      embed: async () => { throw new Error("legacy должен не вызываться"); },
+      embedBatch: async () => { throw new Error("legacy batch должен не вызываться"); },
+      persist: async (chunks) => { persisted.push(...chunks); },
+    });
+    await ingestor.ingest({ userId: null, verifiedProduct: true, name: "Психология.md", mime: "text/markdown",
+      bytes: Buffer.from("# Прокрастинация\nОткладывание сложных задач может помогать избегать неприятных эмоций.") });
+    assert.ok(persisted.length > 0);
+    assert.ok(persisted.every((c) => c.embedding === null && c.userId === null && c.productVerified));
+    assert.match(persisted[0]!.content, /избегать неприятных эмоций/u);
+    assert.equal(persisted[0]!.section, "Прокрастинация");
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

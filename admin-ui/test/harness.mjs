@@ -1,7 +1,7 @@
 /**
  * Общая обвязка браузерных тестов панели.
  *
- * Страница открывается по file://, а весь административный API
+ * Страница открывается по HTTP, а весь административный API
  * перехватывается: тесты проверяют поведение интерфейса, а не сервер, и
  * не должны зависеть от поднятой базы.
  *
@@ -41,7 +41,9 @@ const CONTENT_TYPES = {
 async function servePublic() {
   const server = http.createServer(async (request, response) => {
     const url = new URL(request.url, "http://127.0.0.1");
-    const name = url.pathname === "/" ? "/index.html" : url.pathname;
+    // Разделы панели меняют URL через pushState. При reload Caddy
+    // отдаёт index.html (try_files); стенд должен вести себя так же.
+    const name = !path.extname(url.pathname) ? "/index.html" : url.pathname;
     // Ходить выше каталога статики нельзя даже в тесте.
     const target = path.join(PUBLIC_DIR, path.normalize(name).replace(/^(\.\.[/\\])+/, ""));
     if (!target.startsWith(PUBLIC_DIR)) {
@@ -248,4 +250,3 @@ export async function openPanel({ routes = {}, role = "owner", viewport = null }
     },
   };
 }
-

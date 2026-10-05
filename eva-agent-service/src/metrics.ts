@@ -17,7 +17,7 @@ import { monitorEventLoopDelay, type IntervalHistogram } from "node:perf_hooks";
 import type { Database } from "./db.js";
 import { genderFixStats } from "./i18n/eva-gender.js";
 import { deliveryStats, jobStats, knowledgeIndexStats, providerStats } from "./metrics-queries.js";
-import { knowledgeIndexMetrics, knowledgeMetrics } from "./knowledge/metrics.js";
+import { knowledgeIndexMetrics, knowledgeMetrics, knowledgeSearchMetrics } from "./knowledge/metrics.js";
 import { osintStats } from "./osint/metrics.js";
 import { toolMetrics } from "./tools/tool-metrics.js";
 import { runtimeContextSizeStats } from "./runtime/runtime-context.js";
@@ -172,9 +172,34 @@ function knowledgeSamples(): Sample[] {
     { name: `${base}_latency_ms_max`, help: `${help}: максимум с запуска, мс.`, type: "gauge", values: rows.map((row) => ({ labels: { [label]: row.name }, value: row.max })) },
     { name: `${base}_errors_total`, help: `${help}: отказы.`, type: "counter", values: rows.map((row) => ({ labels: { [label]: row.name }, value: row.errors })) },
   ];
+  const search = knowledgeSearchMetrics();
   return [
     ...timings("eva_qdrant", "Вызовы Qdrant по операции (search, upsert, delete, count, admin, health)", qdrant, "operation"),
-    ...timings("eva_knowledge_stage", "Этапы базы знаний (embedding, rerank)", stages, "stage"),
+    ...timings("eva_knowledge_stage", "Этапы базы знаний (embedding, rerank, search, vector, lexical, shadow)", stages, "stage"),
+    {
+      name: "eva_knowledge_search_total",
+      help: "Поиски по базе знаний по режиму и исходу (ok, empty, degraded, disabled).",
+      type: "counter",
+      values: search.searches.map(({ mode, outcome, value }) => ({ labels: { mode, outcome }, value })),
+    },
+    {
+      name: "eva_knowledge_shadow_total",
+      help: "Теневые сравнения pgvector и Qdrant по исходу.",
+      type: "counter",
+      values: search.shadow.outcomes.map(({ outcome, value }) => ({ labels: { outcome }, value })),
+    },
+    {
+      name: "eva_knowledge_shadow_overlap_sum",
+      help: "Теневое сравнение: сумма долей совпадения первых десяти результатов (среднее — sum/count).",
+      type: "counter",
+      values: [{ value: search.shadow.overlapSum }],
+    },
+    {
+      name: "eva_knowledge_shadow_overlap_count",
+      help: "Теневое сравнение: число сравнений с долей совпадения.",
+      type: "counter",
+      values: [{ value: search.shadow.overlapCount }],
+    },
   ];
 }
 

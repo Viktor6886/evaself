@@ -101,5 +101,5 @@ export function registerKnowledgeDocumentRoutes(app: FastifyInstance, service: K
   app.post("/api/admin/v1/knowledge/embeddings/versions/:version/build", { config: { roles: ["owner", "admin"], tenantAccess: "cross-user", sudoScope: "settings:write" } }, async (request, reply) =>
     reply.code(202).send(await service.build(param(request, "version"), request.body)));
   app.post("/api/admin/v1/knowledge/embeddings/versions/:version/activate", { config: { roles: ["owner", "admin"], tenantAccess: "cross-user", sudoScope: "settings:write" } }, async (request) =>
-    await service.activate(param(request, "version")));
+    await service.activate(param(request, "version"), request.body));
 }

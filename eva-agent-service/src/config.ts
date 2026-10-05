@@ -5,6 +5,12 @@
 import { parseLiveStreamMode, parseLiveTypingSpeed } from "./telegram/live-pace.js";
 import { globalSecretRedactor } from "./admin/redactor.js";
 import { inspectStickerCatalog } from "./telegram/stickers.js";
+import {
+  parseKnowledgeSearchMode,
+  parseKnowledgeVectorBackend,
+  type KnowledgeSearchMode,
+  type KnowledgeVectorBackend,
+} from "./knowledge/search-settings.js";
 
 export interface Config {
   port: number;
@@ -180,6 +186,23 @@ export interface Config {
   knowledgeChunkOverlap: number;
   /** Текстов в одном запросе эмбеддингов (не больше 64 — предел Router). */
   knowledgeEmbeddingBatch: number;
+  /**
+   * Поиск по базе знаний (docs/knowledge-base.md, «Поиск (K4)»). Панель
+   * меняет их без перезапуска: поиск читает их при каждом вызове.
+   * Умолчания — прежнее поведение (`legacy`, pgvector).
+   */
+  knowledgeSearchEnabled: boolean;
+  knowledgeSearchMode: KnowledgeSearchMode;
+  knowledgeVectorBackend: KnowledgeVectorBackend;
+  knowledgeSearchShadow: boolean;
+  knowledgePrivateEnabled: boolean;
+  knowledgeGlobalEnabled: boolean;
+  knowledgeRerankEnabled: boolean;
+  /** Провайдер reranker из реестра Router (id) и его модель. */
+  knowledgeRerankProvider: string;
+  knowledgeRerankModel: string;
+  /** Соседних фрагментов с каждой стороны найденного, 0–2. */
+  knowledgeContextNeighbors: number;
   researchOrchestratorEnabled: boolean;
   /**
    * OSINT-исследования (`docs/OSINT.md`). Выключены по умолчанию: флаг
@@ -527,6 +550,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     knowledgeChunkSize: int("EVA_KNOWLEDGE_CHUNK_SIZE", 1200),
     knowledgeChunkOverlap: int("EVA_KNOWLEDGE_CHUNK_OVERLAP", 150),
     knowledgeEmbeddingBatch: int("EVA_KNOWLEDGE_EMBEDDING_BATCH", 32),
+    knowledgeSearchEnabled: bool("EVA_KNOWLEDGE_SEARCH", true),
+    knowledgeSearchMode: parseKnowledgeSearchMode(str("EVA_KNOWLEDGE_SEARCH_MODE", "legacy"), "legacy"),
+    knowledgeVectorBackend: parseKnowledgeVectorBackend(str("EVA_KNOWLEDGE_VECTOR_BACKEND", "pgvector"), "pgvector"),
+    knowledgeSearchShadow: bool("EVA_KNOWLEDGE_SEARCH_SHADOW", false),
+    knowledgePrivateEnabled: bool("EVA_KNOWLEDGE_PRIVATE", true),
+    knowledgeGlobalEnabled: bool("EVA_KNOWLEDGE_GLOBAL", true),
+    knowledgeRerankEnabled: bool("EVA_KNOWLEDGE_RERANK", false),
+    knowledgeRerankProvider: str("EVA_KNOWLEDGE_RERANK_PROVIDER"),
+    knowledgeRerankModel: str("EVA_KNOWLEDGE_RERANK_MODEL"),
+    knowledgeContextNeighbors: clampedInt("EVA_KNOWLEDGE_CONTEXT_NEIGHBORS", 1, 0, 2),
     researchOrchestratorEnabled: bool("EVA_RESEARCH_ORCHESTRATOR", false),
     osintEnabled: bool("EVA_OSINT_ENABLED", false),
     osintWorkerUrl: str("EVA_OSINT_WORKER_URL", "http://osint-worker:8095"),

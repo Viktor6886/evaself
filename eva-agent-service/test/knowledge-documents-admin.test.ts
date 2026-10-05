@@ -21,6 +21,7 @@ import Fastify from "fastify";
 
 import { KnowledgeDocumentsService, KNOWLEDGE_ADMIN_MAX_BYTES } from "../dist/admin/knowledge-documents-service.js";
 import { registerKnowledgeDocumentRoutes } from "../dist/admin/knowledge-routes.js";
+import { QdrantError } from "../dist/knowledge/qdrant-client.js";
 import { adminScope, assertQueryAllowed, runInScope } from "../dist/tenancy/scope.js";
 
 interface Query { sql: string; params: unknown[]; inTransaction: boolean }
@@ -283,29 +284,119 @@ test("построение версии: без Qdrant — отказ; черн�
   ]);
 });
 
-test("включение версии: только первая и только построенная; сначала alias, потом строка", async () => {
+function activationScenario(input: { active?: number; status?: string; unbuilt?: boolean; failure?: string } = {}) {
   const order: string[] = [];
-  let rows: Array<{ version: number; status: string }> = [];
-  const { pool } = fakePool((sql) => {
-    if (sql.startsWith("SELECT version, status FROM knowledge_embedding_versions")) return { rows };
-    if (sql.startsWith("UPDATE knowledge_embedding_versions")) {
-      order.push("update");
-      return { rows: [{ version: 2 }] };
+  const row = (version: number, status: string) => ({ version, status, model: `model-${version}`, dimension: 8, distance: "Cosine",
+    built_at: input.unbuilt ? null : new Date("2026-09-30T10:00:00Z"), build_started_at: null, error_code: null });
+  let versions = [row(2, input.status ?? "ready"), ...(input.active ? [row(input.active, "active")] : [])];
+  let snapshot: typeof versions | null = null;
+  let commitFailed = false;
+  let alias: number | null = input.active ?? null;
+  let attempts = 0;
+  const { pool, queries } = fakePool((sql, params) => {
+    if (sql === "BEGIN") snapshot = versions.map((v) => ({ ...v }));
+    if (sql === "ROLLBACK" && snapshot) versions = snapshot;
+    if (sql === "COMMIT") {
+      order.push("commit");
+      if (["commit", "ambiguous"].includes(input.failure ?? "") && !commitFailed) {
+        commitFailed = true;
+        if (input.failure === "ambiguous") snapshot = null;
+        return new Error("connection lost");
+      }
+      snapshot = null;
+    }
+    if (sql.startsWith("SELECT version FROM knowledge_embedding_versions")) return { rows: versions.filter((v) => v.status === "active") };
+    if (sql.startsWith("SELECT version, model")) return { rows: versions.filter((v) => v.version === params[0] || v.status === "active") };
+    if (sql.startsWith("SELECT count(*)")) return { rows: [{ total: "0" }] };
+    if (sql.startsWith("UPDATE knowledge_embedding_versions SET status = 'retired'")) {
+      order.push("retire");
+      versions.filter((v) => v.status === "active" && v.version !== params[0]).forEach((v) => { v.status = "retired"; });
+    }
+    if (sql.startsWith("UPDATE knowledge_embedding_versions SET status = 'active'")) {
+      order.push("activate");
+      if (input.failure === "db") return new Error("write failed");
+      const v = versions.find((v) => v.version === params[0]);
+      if (v) v.status = "active";
+      return { rows: v ? [{ version: v.version }] : [] };
     }
     return undefined;
   });
-  const store = { activate: async (version: number) => { order.push(`alias:${version}`); }, countPoints: async () => 0 };
-  const service = new KnowledgeDocumentsService(pool as never, { uploadsRoot: "/nonexistent", store, uploadsEnabled: true });
-  await asAdmin(async () => {
-    rows = [{ version: 1, status: "active" }, { version: 2, status: "ready" }];
-    await assert.rejects(() => service.activate(2), /смену модели/u);
-    rows = [{ version: 2, status: "building" }];
-    await assert.rejects(() => service.activate(2), /построенную/u);
-    assert.deepEqual(order, []);
-    rows = [{ version: 2, status: "ready" }];
-    assert.deepEqual(await service.activate(2), { version: 2, status: "active" });
-    assert.deepEqual(order, ["alias:2", "update"]);
-  });
+  const store = {
+    ready: async () => true, activeVersions: async () => ({ private: alias, global: alias }), countPoints: async () => 0,
+    describe: async () => {
+      order.push("validate");
+      assert.equal(queries.at(-1)?.sql, "LOCK TABLE knowledge_documents, knowledge_chunks IN SHARE MODE");
+      return { private: { size: 8, distance: "Cosine", status: "green" }, global: { size: 8, distance: "Cosine", status: "green" } };
+    },
+    scrollPoints: async () => ({ points: [], next: null }),
+    activate: async (version: number | null) => {
+      order.push(`alias:${version}`); attempts += 1; alias = version;
+      if ((input.failure === "alias" && attempts === 1) || input.failure === "recovery") {
+        throw new QdrantError("qdrant_unavailable", null, "request timed out after applying");
+      }
+    },
+  };
+  return { service: new KnowledgeDocumentsService(pool as never, { uploadsRoot: "/nonexistent", store: store as never, uploadsEnabled: true }),
+    versions: () => versions, alias: () => alias, order, queries };
+}
+
+test("первая активация: полная проверка под блокировкой, aliases перед строкой, всё в транзакции", async () => {
+  const scenario = activationScenario();
+  assert.deepEqual(await asAdmin(async () => await scenario.service.activate(2)), { version: 2, status: "active" });
+  assert.deepEqual(scenario.order, ["validate", "alias:2", "retire", "activate", "commit"]);
+  assert.ok(scenario.queries.find((q) => q.sql.includes("pg_advisory_xact_lock"))?.inTransaction);
+  assert.ok(scenario.queries.filter((q) => q.sql.startsWith("UPDATE")).every((q) => q.inTransaction));
+});
+
+test("K7: смена активной версии и откат переводят предыдущую в retired, сохраняя её пространство", async () => {
+  for (const status of ["ready", "retired"]) {
+    const scenario = activationScenario({ active: 1, status });
+    const original = scenario.versions().map((v) => [v.version, v.model, v.dimension]);
+    assert.deepEqual(await asAdmin(async () => await scenario.service.activate(2, { expected_active_version: 1 })), { version: 2, status: "active" });
+    assert.equal(scenario.alias(), 2);
+    assert.deepEqual(scenario.versions().map((v) => [v.version, v.status]), [[2, "active"], [1, "retired"]]);
+    assert.deepEqual(scenario.versions().map((v) => [v.version, v.model, v.dimension]), original);
+    assert.ok(scenario.order.indexOf("retire") < scenario.order.indexOf("activate"));
+  }
+});
+
+test("K7: draft, building, failed и ready без built_at не меняют aliases", async () => {
+  for (const input of [{ status: "draft" }, { status: "building" }, { status: "failed" }, { unbuilt: true }]) {
+    const scenario = activationScenario({ active: 1, ...input });
+    await assert.rejects(() => asAdmin(async () => await scenario.service.activate(2)), /полностью построенную/u);
+    assert.equal(scenario.alias(), 1);
+    assert.deepEqual(scenario.order, []);
+    assert.equal(scenario.queries.at(-1)?.sql, "ROLLBACK");
+  }
+});
+
+test("K7: stale UI и verify_only не переключают другую активную модель", async () => {
+  for (const body of [{ verify_only: true }, { expected_active_version: 3 }]) {
+    const scenario = activationScenario({ active: 1 });
+    await assert.rejects(() => asAdmin(async () => await scenario.service.activate(2, body)), /изменилась/u);
+    assert.equal(scenario.alias(), 1);
+    assert.deepEqual(scenario.order, []);
+  }
+});
+
+test("K7: ошибки aliases, SQL и COMMIT восстанавливают aliases по канонической версии", async () => {
+  for (const active of [undefined, 1]) for (const failure of ["alias", "db", "commit"]) {
+    const scenario = activationScenario({ active, failure });
+    await assert.rejects(() => asAdmin(async () => await scenario.service.activate(2)));
+    assert.equal(scenario.alias(), active ?? null, `${failure}: первая активация очищает только наши aliases`);
+    assert.equal(scenario.versions().find((v) => v.version === 2)?.status, "ready");
+    assert.equal(scenario.versions().find((v) => v.status === "active")?.version, active);
+    assert.ok(scenario.order.includes(`alias:${active ?? null}`));
+  }
+});
+
+test("K7: неоднозначный COMMIT читается заново; отказ восстановления сообщается явно", async () => {
+  const committed = activationScenario({ active: 1, failure: "ambiguous" });
+  assert.deepEqual(await asAdmin(async () => await committed.service.activate(2)), { version: 2, status: "active" });
+  assert.equal(committed.alias(), 2);
+  const broken = activationScenario({ active: 1, failure: "recovery" });
+  await assert.rejects(() => asAdmin(async () => await broken.service.activate(2)),
+    (error: { statusCode?: number; details?: { code?: string } }) => error.statusCode === 409 && error.details?.code === "knowledge_alias_recovery_required");
 });
 
 test("состояние индекса: личные базы — только числа; Qdrant недоступен — прогресс неизвестен, а не ноль", async () => {
@@ -330,12 +421,16 @@ test("состояние индекса: личные базы — только 
   });
   const store = {
     activate: async () => undefined,
+    ready: async () => true,
+    activeVersions: async () => ({ private: 1, global: 1 }),
     countPoints: async (scope: string, version: number) => {
       if (version === 1) throw new Error("qdrant_unavailable");
       return scope === "private" ? 20 : 10;
     },
   };
-  const overview = await asAdmin(async () => await new KnowledgeDocumentsService(pool as never, { uploadsRoot: "/nonexistent", store, uploadsEnabled: true }).indexOverview());
+  const overview = await asAdmin(async () => await new KnowledgeDocumentsService(pool as never, { uploadsRoot: "/nonexistent", store: store as never, uploadsEnabled: true }).indexOverview());
+  assert.equal(overview.qdrant_status, "ready");
+  assert.equal(overview.aliases_match_active, true);
   assert.deepEqual(overview.scopes, {
     private: { documents: 4, chunks: 40, lag_seconds: 95, by_status: { ready: 3, pending: 1 } },
     global: { documents: 2, chunks: 20, lag_seconds: 0, by_status: { ready: 2 } },
