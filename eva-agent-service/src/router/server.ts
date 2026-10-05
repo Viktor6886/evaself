@@ -16,6 +16,7 @@ import type { FastifyInstance, FastifyPluginAsync, FastifyReply } from "fastify"
 import type { Logger } from "../logger.js";
 import { EmbeddingError } from "./embeddings.js";
 import { EmbeddingRequestError, type EmbeddingService } from "./embedding-service.js";
+import { RERANK_DOCUMENT_CHARS, RERANK_DOCUMENT_LIMIT, RERANK_QUERY_CHARS, RerankError, type RouterReranker } from "./rerank.js";
 import { LlmRouter, NoProviderAvailable } from "./router.js";
 import { containsImage, parseContent, pickProviderState } from "./content.js";
 import { extractRoutingMarker, type RoutingMarkerClaims } from "./routing-marker.js";
@@ -33,6 +34,7 @@ export interface RouterServerInput {
   logger: Logger;
   apiKey: string;
   embeddings?: EmbeddingService;
+  reranker?: RouterReranker;
 }
 
 /** Больше за один запрос не принимается: пачку дробит вызывающий. */
@@ -185,6 +187,41 @@ export function createRouterServer(input: RouterServerInput): FastifyInstance {
       requestDimensions: body.request_dimensions === true,
       compare: compareProvider && compareModel ? { providerId: compareProvider, model: compareModel } : null,
     });
+  });
+
+  /**
+   * Reranker базы знаний: оценка каждого кандидата по запросу
+   * (docs/knowledge-base.md, «Поиск (K4)»). Провайдер — из реестра по id,
+   * модель — из настроек поиска. Отказ провайдера — 502 с кодом, без
+   * текста его ответа.
+   */
+  app.post("/rerank", async (request, reply) => {
+    const reranker = input.reranker;
+    if (!reranker) return reply.code(503).send({ error: { message: "rerank route is not configured", type: "service_unavailable" } });
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const text = (value: unknown, max: number): string | null =>
+      typeof value === "string" && value.trim() && value.length <= max ? value.trim() : null;
+    const providerId = text(body.provider_id, 64);
+    const model = text(body.model, 200);
+    const query = text(body.query, RERANK_QUERY_CHARS);
+    const documents = Array.isArray(body.documents)
+      && body.documents.length >= 1 && body.documents.length <= RERANK_DOCUMENT_LIMIT
+      && body.documents.every((item) => typeof item === "string" && item.length <= RERANK_DOCUMENT_CHARS)
+      ? body.documents as string[]
+      : null;
+    if (!providerId || !model || !query || !documents) {
+      return reply.code(400).send({ error: {
+        message: `provider_id, model, query (до ${RERANK_QUERY_CHARS} знаков) и documents (от 1 до ${RERANK_DOCUMENT_LIMIT} строк, каждая до ${RERANK_DOCUMENT_CHARS} знаков) заданы неверно`,
+        type: "invalid_request_error",
+      } });
+    }
+    try {
+      const scores = await reranker.rerank({ providerId, model }, query, documents);
+      return { object: "list", model, results: scores.map((score, index) => ({ index, relevance_score: score })) };
+    } catch (error) {
+      if (error instanceof RerankError) return reply.code(502).send({ error: { message: error.message, type: error.code } });
+      throw error;
+    }
   });
 
   /**

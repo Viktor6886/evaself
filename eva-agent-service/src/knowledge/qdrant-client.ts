@@ -233,11 +233,11 @@ export class QdrantClient {
    * Удаление и создание идут одним списком действий: Qdrant применяет его
    * атомарно, и поиск не видит мгновения, когда alias не указывает никуда.
    */
-  async switchAliases(targets: Array<{ alias: string; collection: string }>, existing: ReadonlySet<string>): Promise<void> {
+  async switchAliases(targets: Array<{ alias: string; collection: string | null }>, existing: ReadonlySet<string>): Promise<void> {
     const actions: unknown[] = [];
     for (const target of targets) {
       if (existing.has(target.alias)) actions.push({ delete_alias: { alias_name: target.alias } });
-      actions.push({ create_alias: { collection_name: target.collection, alias_name: target.alias } });
+      if (target.collection !== null) actions.push({ create_alias: { collection_name: target.collection, alias_name: target.alias } });
     }
     if (!actions.length) return;
     await this.request("admin", "/collections/aliases", { method: "POST", body: { actions }, timeoutMs: WRITE_TIMEOUT_MS });

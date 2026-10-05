@@ -1,5 +1,6 @@
 /**
- * Метрики базы знаний: вызовы Qdrant, эмбеддинги, reranker, индексация.
+ * Метрики базы знаний: вызовы Qdrant, эмбеддинги, reranker, поиск,
+ * теневое сравнение, индексация.
  *
  * Счётчики живут в модуле, как у инструментов (`tools/tool-metrics.ts`):
  * клиенту Qdrant до сборщика метрик дела нет. Метки — закрытые наборы
@@ -9,7 +10,15 @@
 
 export type QdrantOperation = "search" | "upsert" | "delete" | "count" | "admin" | "health";
 
-export type KnowledgeTimedStage = "embedding" | "rerank";
+/**
+ * Этапы: `embedding`, `rerank` — вызовы моделей; `search` — поиск целиком,
+ * `vector` и `lexical` — его половины; `shadow` — теневое сравнение.
+ */
+export type KnowledgeTimedStage = "embedding" | "rerank" | "search" | "vector" | "lexical" | "shadow";
+
+export type KnowledgeSearchMetricMode = "legacy" | "hybrid" | "vector" | "lexical";
+export type KnowledgeSearchOutcome = "ok" | "empty" | "degraded" | "disabled";
+export type KnowledgeShadowOutcome = "ok" | "empty" | "error" | "skipped";
 
 interface Timing {
   count: number;
@@ -19,7 +28,10 @@ interface Timing {
 }
 
 const QDRANT_OPERATIONS: readonly QdrantOperation[] = ["search", "upsert", "delete", "count", "admin", "health"];
-const STAGES: readonly KnowledgeTimedStage[] = ["embedding", "rerank"];
+const STAGES: readonly KnowledgeTimedStage[] = ["embedding", "rerank", "search", "vector", "lexical", "shadow"];
+const SEARCH_MODES: readonly KnowledgeSearchMetricMode[] = ["legacy", "hybrid", "vector", "lexical"];
+const SEARCH_OUTCOMES: readonly KnowledgeSearchOutcome[] = ["ok", "empty", "degraded", "disabled"];
+const SHADOW_OUTCOMES: readonly KnowledgeShadowOutcome[] = ["ok", "empty", "error", "skipped"];
 
 const empty = (): Timing => ({ count: 0, errors: 0, sum: 0, max: 0 });
 
@@ -32,6 +44,47 @@ function add(timing: Timing, ms: number, failed: boolean): void {
   timing.sum += value;
   timing.max = Math.max(timing.max, value);
   if (failed) timing.errors += 1;
+}
+
+/** Поиски по режиму и исходу: 4 × 4 ряда, от людей и запросов не зависят. */
+const searches = new Map<string, number>(
+  SEARCH_MODES.flatMap((mode) => SEARCH_OUTCOMES.map((outcome) => [`${mode}:${outcome}`, 0] as [string, number])),
+);
+/** Теневые сравнения: исходы и сумма долей совпадения первых десяти. */
+const shadow = {
+  outcomes: new Map<KnowledgeShadowOutcome, number>(SHADOW_OUTCOMES.map((outcome) => [outcome, 0])),
+  overlapSum: 0,
+  overlapCount: 0,
+};
+
+export function recordKnowledgeSearch(mode: KnowledgeSearchMetricMode, outcome: KnowledgeSearchOutcome): void {
+  const key = `${mode}:${outcome}`;
+  if (searches.has(key)) searches.set(key, searches.get(key)! + 1);
+}
+
+export function recordKnowledgeShadow(outcome: KnowledgeShadowOutcome, overlap?: number): void {
+  shadow.outcomes.set(outcome, shadow.outcomes.get(outcome)! + 1);
+  if (overlap !== undefined && Number.isFinite(overlap)) {
+    shadow.overlapSum += Math.max(0, Math.min(1, overlap));
+    shadow.overlapCount += 1;
+  }
+}
+
+export function knowledgeSearchMetrics(): {
+  searches: Array<{ mode: string; outcome: string; value: number }>;
+  shadow: { outcomes: Array<{ outcome: string; value: number }>; overlapSum: number; overlapCount: number };
+} {
+  return {
+    searches: [...searches].map(([key, value]) => {
+      const [mode, outcome] = key.split(":") as [string, string];
+      return { mode, outcome, value };
+    }),
+    shadow: {
+      outcomes: [...shadow.outcomes].map(([outcome, value]) => ({ outcome, value })),
+      overlapSum: shadow.overlapSum,
+      overlapCount: shadow.overlapCount,
+    },
+  };
 }
 
 export function recordQdrantCall(operation: QdrantOperation, ms: number, failed: boolean): void {
@@ -92,6 +145,10 @@ export function knowledgeMetrics(): { qdrant: KnowledgeTimingRow[]; stages: Know
 /** Только для тестов: счётчики модуля живут всё время процесса. */
 export function resetKnowledgeMetrics(): void {
   for (const timing of [...qdrant.values(), ...stages.values()]) Object.assign(timing, empty());
+  for (const key of searches.keys()) searches.set(key, 0);
+  for (const outcome of shadow.outcomes.keys()) shadow.outcomes.set(outcome, 0);
+  shadow.overlapSum = 0;
+  shadow.overlapCount = 0;
   points.clear();
   rebuild.clear();
   Object.assign(reconcile, { runs: 0, foreign: 0, scheduled: 0, orphans: 0, rebuilds: 0, files: 0 });

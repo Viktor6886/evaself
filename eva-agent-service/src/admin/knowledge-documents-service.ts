@@ -25,7 +25,7 @@ import { recordJobIntent, type JobOutboxClient } from "../jobs/job-outbox.js";
 import { deleteKnowledgeDocuments, isKnowledgeId } from "../knowledge/documents.js";
 import { knowledgeIndexScheduler } from "../knowledge/indexer.js";
 import { KNOWLEDGE_UPLOAD_MIME, recordKnowledgeIngest } from "../knowledge/lifecycle.js";
-import { scheduleKnowledgeReconcile, startKnowledgeRebuild } from "../knowledge/maintenance.js";
+import { KnowledgeIndexService } from "./knowledge-index-service.js";
 import type { KnowledgeVectorStore } from "../knowledge/vector-store.js";
 import { adminBadRequest, adminConflict, adminNotFound } from "./errors.js";
 
@@ -65,7 +65,7 @@ export interface KnowledgeDocumentsOptions {
    */
   uploadsEnabled: boolean;
   /** Коллекции Qdrant; null — ключ Qdrant не задан. */
-  store: Pick<KnowledgeVectorStore, "activate" | "countPoints"> | null;
+  store: Pick<KnowledgeVectorStore, "activate" | "countPoints" | "ready" | "activeVersions" | "describe" | "scrollPoints"> | null;
   now?(): number;
 }
 
@@ -115,7 +115,11 @@ function limit(value: unknown, fallback: number, max: number): number {
 }
 
 export class KnowledgeDocumentsService {
-  constructor(private readonly pool: Pool, private readonly options: KnowledgeDocumentsOptions) {}
+  private readonly index: KnowledgeIndexService;
+
+  constructor(private readonly pool: Pool, private readonly options: KnowledgeDocumentsOptions) {
+    this.index = new KnowledgeIndexService(pool, options);
+  }
 
   private now(): number {
     return this.options.now?.() ?? Date.now();
@@ -459,140 +463,9 @@ export class KnowledgeDocumentsService {
     });
   }
 
-  // ------------------------------------------------------------------
-  // Индекс
-  // ------------------------------------------------------------------
-
-  /**
-   * Состояние индекса: документы по состоянию, отставание, версии с
-   * прогрессом построения. Личные базы — только счётчиками.
-   */
-  async indexOverview(): Promise<Record<string, unknown>> {
-    const { rows } = await this.pool.query<Record<string, unknown>>(
-      `SELECT CASE WHEN user_id IS NULL THEN 'global' ELSE 'private' END AS scope,
-              index_status,
-              count(*) AS documents,
-              COALESCE(sum(chunk_count), 0) AS chunks,
-              COALESCE(EXTRACT(EPOCH FROM now() - min(updated_at)
-                FILTER (WHERE index_status IN ('pending', 'indexing'))), 0) AS lag_seconds
-         FROM knowledge_documents
-         -- tenant: system — счётчики по всем базам; ни названий, ни владельцев наружу
-        WHERE status = 'ready' AND (user_id IS NOT NULL OR product_verified)
-        GROUP BY 1, 2`,
-    );
-    const empty = () => ({ documents: 0, chunks: 0, lag_seconds: 0, by_status: {} as Record<string, number> });
-    const scopes = { private: empty(), global: empty() };
-    for (const row of rows) {
-      const scope = scopes[row.scope === "global" ? "global" : "private"];
-      const documents = Number(row.documents);
-      scope.documents += documents;
-      scope.chunks += Number(row.chunks);
-      scope.lag_seconds = Math.max(scope.lag_seconds, Math.round(Number(row.lag_seconds)));
-      scope.by_status[String(row.index_status)] = documents;
-    }
-    // Сколько людей ведут личную базу — число, без их идентификаторов.
-    const owners = await this.pool.query<{ total: string }>(
-      `SELECT count(DISTINCT user_id) AS total FROM knowledge_documents
-        -- tenant: system — число людей с личной базой, без идентификаторов
-        WHERE user_id IS NOT NULL`,
-    );
-
-    const versions = await this.pool.query<Record<string, unknown>>(
-      `SELECT version, model, dimension, status, error_code, build_started_at, built_at, activated_at
-         FROM knowledge_embedding_versions
-        WHERE status IN ('building', 'ready', 'active', 'retired', 'failed')
-        ORDER BY version DESC`,
-    );
-    const totalChunks = scopes.private.chunks + scopes.global.chunks;
-    const store = this.options.store;
-    const viewed = [];
-    for (const row of versions.rows) {
-      const version = Number(row.version);
-      let points: number | null = null;
-      if (store && row.status !== "failed") {
-        try {
-          points = (await store.countPoints("private", version)) + (await store.countPoints("global", version));
-        } catch {
-          // Qdrant недоступен или коллекций нет — прогресс неизвестен, а не ноль.
-          points = null;
-        }
-      }
-      const started = row.build_started_at instanceof Date ? row.build_started_at.getTime() : null;
-      const built = row.built_at instanceof Date ? row.built_at.getTime() : null;
-      viewed.push({
-        version,
-        model: String(row.model),
-        dimension: Number(row.dimension),
-        status: String(row.status),
-        error_code: row.error_code ? String(row.error_code) : null,
-        building: started !== null && (built === null || started > built) && row.status !== "failed" && !row.error_code,
-        build_started_at: iso(row.build_started_at),
-        built_at: iso(row.built_at),
-        activated_at: iso(row.activated_at),
-        points,
-        progress: points === null ? null : totalChunks > 0 ? Math.min(points / totalChunks, 1) : 1,
-      });
-    }
-    return {
-      qdrant: store !== null,
-      uploads_enabled: this.options.uploadsEnabled,
-      private_owners: Number(owners.rows[0]?.total ?? 0),
-      scopes,
-      versions: viewed,
-    };
-  }
-
-  /** Построить версию (первый раз) или перестроить; `full` — переписать и полные документы. */
-  async build(version: unknown, body: unknown): Promise<{ version: number; status: string; started_at: string }> {
-    const number = Number(version);
-    if (!Number.isInteger(number) || number <= 0) throw adminBadRequest("Номер версии задан неверно", { field: "version" });
-    if (!this.options.store) throw adminConflict("QDRANT_API_KEY не задан: индексу негде жить");
-    const full = record(body).full === true;
-    const started = await this.transaction(async (client) => await startKnowledgeRebuild(outbox, client, number, full));
-    if (!started) throw adminConflict("Построить можно черновик, неудавшуюся, готовую или активную версию");
-    return { version: number, status: started.status, started_at: new Date(started.started).toISOString() };
-  }
-
-  /**
-   * Первая активация: поиск начинает смотреть на построенную версию.
-   * Переключение с одной активной на другую — смена модели (K7): там
-   * проверка полноты и качества и откат.
-   */
-  async activate(version: unknown): Promise<{ version: number; status: string }> {
-    const number = Number(version);
-    if (!Number.isInteger(number) || number <= 0) throw adminBadRequest("Номер версии задан неверно", { field: "version" });
-    const store = this.options.store;
-    if (!store) throw adminConflict("QDRANT_API_KEY не задан: индексу негде жить");
-    const { rows } = await this.pool.query<{ version: number; status: string }>(
-      "SELECT version, status FROM knowledge_embedding_versions WHERE version = $1 OR status = 'active'",
-      [number],
-    );
-    const target = rows.find((row) => Number(row.version) === number);
-    if (!target) throw adminNotFound("Версия эмбеддингов не найдена");
-    if (rows.some((row) => row.status === "active" && Number(row.version) !== number)) {
-      throw adminConflict("Активная версия уже есть: переключение — через смену модели");
-    }
-    if (target.status === "active") return { version: number, status: "active" };
-    if (target.status !== "ready") throw adminConflict("Включить можно только построенную версию", { status: target.status });
-    // Сначала alias, потом строка: упади запись после перевода — повтор
-    // активации найдёт версию `ready` и переведёт alias ещё раз (это
-    // идемпотентно), а не оставит поиск смотреть в пустоту.
-    await store.activate(number);
-    const updated = await this.pool.query(
-      `UPDATE knowledge_embedding_versions
-          SET status = 'active', activated_at = now()
-        WHERE version = $1 AND status = 'ready'
-          AND NOT EXISTS (SELECT 1 FROM knowledge_embedding_versions WHERE status = 'active')
-        RETURNING version`,
-      [number],
-    );
-    if (!updated.rows[0]) throw adminConflict("Версию успели изменить: обновите страницу");
-    return { version: number, status: "active" };
-  }
-
-  /** Сверка PostgreSQL ↔ Qdrant сейчас, не дожидаясь расписания. */
-  async reconcile(): Promise<{ scheduled: true }> {
-    await this.transaction(async (client) => await scheduleKnowledgeReconcile(outbox, client, this.now()));
-    return { scheduled: true };
-  }
+  /** Существующий индекс: тот же API, K7 и обслуживание вынесены рядом. */
+  async indexOverview() { return await this.index.indexOverview(); }
+  async build(version: unknown, body: unknown) { return await this.index.build(version, body); }
+  async activate(version: unknown, body?: unknown) { return await this.index.activate(version, body); }
+  async reconcile() { return await this.index.reconcile(); }
 }

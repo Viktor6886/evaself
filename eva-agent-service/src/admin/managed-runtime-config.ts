@@ -1,6 +1,7 @@
 import type { Config } from "../config.js";
 import type { Database } from "../db.js";
 import { parseLiveStreamMode, parseLiveTypingSpeed } from "../telegram/live-pace.js";
+import { parseKnowledgeSearchMode, parseKnowledgeVectorBackend } from "../knowledge/search-settings.js";
 import { KNOWLEDGE_SETTINGS, OSINT_SETTINGS, type SettingDefinition } from "./settings-registry.js";
 
 interface SettingRow {
@@ -31,13 +32,33 @@ type LiveSettings = Pick<
   | "osintCollectorMaigret" | "osintCollectorWeb" | "osintCollectorInfrastructure"
   | "osintCollectorHarvester" | "osintCollectorSpiderfoot"
   | "knowledgeIndexEnabled" | "knowledgeChunkSize" | "knowledgeChunkOverlap" | "knowledgeEmbeddingBatch"
+  | "knowledgeSearchEnabled" | "knowledgeSearchMode" | "knowledgeVectorBackend" | "knowledgeSearchShadow"
+  | "knowledgePrivateEnabled" | "knowledgeGlobalEnabled"
+  | "knowledgeRerankEnabled" | "knowledgeRerankProvider" | "knowledgeRerankModel" | "knowledgeContextNeighbors"
 >;
+/** Поиск по базе знаний: ключ панели → поле конфигурации. Поиск читает их при каждом вызове. */
+const KNOWLEDGE_SEARCH_BOOLEANS: Array<[string, keyof LiveSettings]> = [
+  ["runtime.knowledge_search_enabled", "knowledgeSearchEnabled"],
+  ["runtime.knowledge_search_shadow", "knowledgeSearchShadow"],
+  ["runtime.knowledge_private_enabled", "knowledgePrivateEnabled"],
+  ["runtime.knowledge_global_enabled", "knowledgeGlobalEnabled"],
+  ["runtime.knowledge_rerank_enabled", "knowledgeRerankEnabled"],
+];
+const KNOWLEDGE_SEARCH_FIELDS: Array<[string, keyof LiveSettings]> = [
+  ...KNOWLEDGE_SEARCH_BOOLEANS,
+  ["runtime.knowledge_search_mode", "knowledgeSearchMode"],
+  ["runtime.knowledge_vector_backend", "knowledgeVectorBackend"],
+  ["runtime.knowledge_rerank_provider", "knowledgeRerankProvider"],
+  ["runtime.knowledge_rerank_model", "knowledgeRerankModel"],
+  ["runtime.knowledge_context_neighbors", "knowledgeContextNeighbors"],
+];
 /** База знаний: ключ панели → поле конфигурации. Задания читают их при каждом запуске. */
 const KNOWLEDGE_FIELDS: Array<[string, keyof LiveSettings]> = [
   ["runtime.knowledge_index_enabled", "knowledgeIndexEnabled"],
   ["runtime.knowledge_chunk_size", "knowledgeChunkSize"],
   ["runtime.knowledge_chunk_overlap", "knowledgeChunkOverlap"],
   ["runtime.knowledge_embedding_batch", "knowledgeEmbeddingBatch"],
+  ...KNOWLEDGE_SEARCH_FIELDS,
 ];
 /** Флаги OSINT: ключ панели → поле конфигурации. Все читаются на каждом ходе и задании. */
 const OSINT_FLAGS: Array<[string, keyof LiveSettings]> = [
@@ -81,6 +102,16 @@ export async function applyManagedRuntimeConfig(
       knowledgeChunkSize: config.knowledgeChunkSize,
       knowledgeChunkOverlap: config.knowledgeChunkOverlap,
       knowledgeEmbeddingBatch: config.knowledgeEmbeddingBatch,
+      knowledgeSearchEnabled: config.knowledgeSearchEnabled,
+      knowledgeSearchMode: config.knowledgeSearchMode,
+      knowledgeVectorBackend: config.knowledgeVectorBackend,
+      knowledgeSearchShadow: config.knowledgeSearchShadow,
+      knowledgePrivateEnabled: config.knowledgePrivateEnabled,
+      knowledgeGlobalEnabled: config.knowledgeGlobalEnabled,
+      knowledgeRerankEnabled: config.knowledgeRerankEnabled,
+      knowledgeRerankProvider: config.knowledgeRerankProvider,
+      knowledgeRerankModel: config.knowledgeRerankModel,
+      knowledgeContextNeighbors: config.knowledgeContextNeighbors,
     });
   }
   const { rows } = await db.query<SettingRow>(
@@ -154,6 +185,31 @@ export async function applyManagedRuntimeConfig(
         break;
       case "runtime.knowledge_embedding_batch":
         config.knowledgeEmbeddingBatch = integer(value, config.knowledgeEmbeddingBatch);
+        break;
+      // Поиск по базе знаний читает настройки при каждом вызове.
+      case "runtime.knowledge_search_enabled":
+      case "runtime.knowledge_search_shadow":
+      case "runtime.knowledge_private_enabled":
+      case "runtime.knowledge_global_enabled":
+      case "runtime.knowledge_rerank_enabled": {
+        const field = KNOWLEDGE_SEARCH_BOOLEANS.find(([key]) => key === row.key)![1];
+        (config as Record<keyof LiveSettings, unknown>)[field] = boolean(value, config[field] as boolean);
+        break;
+      }
+      case "runtime.knowledge_search_mode":
+        config.knowledgeSearchMode = parseKnowledgeSearchMode(value, config.knowledgeSearchMode);
+        break;
+      case "runtime.knowledge_vector_backend":
+        config.knowledgeVectorBackend = parseKnowledgeVectorBackend(value, config.knowledgeVectorBackend);
+        break;
+      case "runtime.knowledge_rerank_provider":
+        if (typeof value === "string") config.knowledgeRerankProvider = value.trim().slice(0, 64);
+        break;
+      case "runtime.knowledge_rerank_model":
+        if (typeof value === "string") config.knowledgeRerankModel = value.trim().slice(0, 200);
+        break;
+      case "runtime.knowledge_context_neighbors":
+        config.knowledgeContextNeighbors = Math.min(Math.max(integer(value, config.knowledgeContextNeighbors), 0), 2);
         break;
       case "runtime.outbox_enabled":
         config.outboxEnabled = boolean(value, config.outboxEnabled);

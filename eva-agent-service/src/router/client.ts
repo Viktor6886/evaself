@@ -123,6 +123,41 @@ export class LlmRouterClient {
     return vectors;
   }
 
+  /**
+   * Оценки reranker по кандидатам — в порядке `documents`; `null` —
+   * кандидата провайдер не оценил. Задержка и отказы — метрика этапа
+   * `rerank`.
+   */
+  async rerank(
+    request: { providerId: string; model: string; query: string; documents: readonly string[] },
+    signal?: AbortSignal,
+  ): Promise<Array<number | null>> {
+    if (!request.documents.length) return [];
+    const started = Date.now();
+    let failed = true;
+    try {
+      const body = await this.request("/rerank", {
+        provider_id: request.providerId,
+        model: request.model,
+        query: request.query,
+        documents: request.documents,
+      }, signal);
+      const results: unknown = body.results;
+      if (!Array.isArray(results)) throw new Error("rerank_invalid");
+      const scores = new Array<number | null>(request.documents.length).fill(null);
+      for (const item of results) {
+        const { index, relevance_score: score } = (item ?? {}) as { index?: unknown; relevance_score?: unknown };
+        if (!Number.isSafeInteger(index) || (index as number) < 0 || (index as number) >= scores.length) throw new Error("rerank_invalid");
+        if (score !== null && (typeof score !== "number" || !Number.isFinite(score))) throw new Error("rerank_invalid");
+        scores[index as number] = score as number | null;
+      }
+      failed = false;
+      return scores;
+    } finally {
+      recordKnowledgeStage("rerank", Date.now() - started, failed);
+    }
+  }
+
   /** «Проверить модель»: размерность, задержка и совместимость запасного провайдера. */
   async probeEmbeddings(request: EmbeddingProbeRequest, signal?: AbortSignal): Promise<Record<string, unknown>> {
     return await this.request("/embeddings/probe", request, signal);

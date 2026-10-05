@@ -125,6 +125,20 @@ test("индекс ещё не включали — поиск пуст, а не
   assert.deepEqual(await store.searchPrivate(7, [0.1, 0.2, 0.3], { limit: 5 }), []);
 });
 
+test("коллекции явно названной версии нет — отказ, а не пустой ответ", async () => {
+  // PostgreSQL называет версию активной, а коллекцию потеряли: «ничего не
+  // нашлось» скрыло бы потерянный индекс, поиск обязан уйти в degraded.
+  const { store } = fakeQdrant({});
+  await assert.rejects(
+    () => store.searchPrivate(7, [0.1, 0.2, 0.3], { limit: 5, version: 3 }),
+    (error: unknown) => error instanceof QdrantError && error.code === "qdrant_not_found",
+  );
+  await assert.rejects(
+    () => store.searchGlobal([0.1, 0.2, 0.3], ["col-a"], { limit: 5, version: 3 }),
+    (error: unknown) => error instanceof QdrantError && error.code === "qdrant_not_found",
+  );
+});
+
 test("запись: id точки — id фрагмента, область и пространство векторов проверяются", async () => {
   const { calls, store } = fakeQdrant({ "PUT /collections/eva_knowledge_private_v1/points": () => ({ result: {} }) });
   await store.upsert("private", SPACE, [point(42, "private")]);
@@ -188,6 +202,31 @@ test("активную версию удалить нельзя", async () => {
     "GET /aliases": () => ({ result: { aliases: [{ alias_name: "eva_knowledge_global", collection_name: "eva_knowledge_global_v3" }] } }),
   });
   await assert.rejects(() => store.dropVersion(3), /vector_version_active/);
+});
+
+test("компенсация первой активации удаляет оба наших alias атомарно, чужие сохраняет", async () => {
+  const { calls, store } = fakeQdrant({
+    "GET /aliases": () => ({ result: { aliases: [
+      { alias_name: "eva_knowledge_private", collection_name: "eva_knowledge_private_v2" },
+      { alias_name: "eva_knowledge_global", collection_name: "eva_knowledge_global_v2" },
+      { alias_name: "other", collection_name: "other_v1" },
+    ] } }),
+    "POST /collections/aliases": () => ({ result: true }),
+  });
+  await store.activate(null);
+  assert.deepEqual(calls[1]!.body.actions, [
+    { delete_alias: { alias_name: "eva_knowledge_private" } },
+    { delete_alias: { alias_name: "eva_knowledge_global" } },
+  ]);
+});
+
+test("проверка версии scroll читает лишь метаданные без текста и векторов, сохраняет cursor", async () => {
+  const { calls, store } = fakeQdrant({
+    "POST /collections/eva_knowledge_private_v2/points/scroll": () => ({ result: { points: [], next_page_offset: 21 } }),
+  });
+  assert.deepEqual(await store.scrollPoints("private", 2, 11, 256), { points: [], next: 21 });
+  assert.deepEqual(calls[0]!.body, { limit: 256, offset: 11, with_vector: false,
+    with_payload: ["chunk_id", "document_id", "user_id", "collection_id", "embedding_model", "embedding_version"] });
 });
 
 test("отказы Qdrant различимы: недоступен, таймаут, ключ, сервер", async () => {
