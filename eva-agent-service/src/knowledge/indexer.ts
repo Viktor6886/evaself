@@ -267,7 +267,7 @@ export class KnowledgeIndexer {
     await withKnowledgeIndexWrite(this.db, async (client) => {
       signal?.throwIfAborted();
       const owner = knowledgeOwner(scope === "private" ? Number(document.user_id) : null);
-      const fresh = await this.scoped(owner, async () => await this.load(document.id, owner, client));
+      const fresh = await this.scoped(owner, async () => await this.load(document.id, owner, client), false);
       // Документ могли удалить или изменить, пока Router считал векторы.
       // Перечитываем на том же клиенте под SHARE lock; устаревшее задание
       // отдаётся на повтор и не создаёт точки-сироты после проверки K7.
@@ -454,10 +454,10 @@ export class KnowledgeIndexer {
    * без владельца: условие `user_id IS NULL` граница не считает
    * ограничением, и без `crossUser` она отвергла бы каждый запрос.
    */
-  private async scoped<T>(owner: KnowledgeOwner, work: () => Promise<T>): Promise<T> {
+  private async scoped<T>(owner: KnowledgeOwner, work: () => Promise<T>, inherit = true): Promise<T> {
     return owner.kind === "global"
       ? await this.db.withSystemScope("knowledge.index.global", work, { crossUser: true })
-      : await this.db.withUserScope({ userId: owner.userId, label: "knowledge.index", inherit: true }, work);
+      : await this.db.withUserScope({ userId: owner.userId, label: "knowledge.index", inherit }, work);
   }
 }
 
