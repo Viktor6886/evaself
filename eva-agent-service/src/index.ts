@@ -673,9 +673,11 @@ async function main(): Promise<void> {
         ...(typeof x.request_id==="string"?{requestId:x.request_id}:{}),
       })};
     },
-    researchStatus:async(t:number,id:string)=>await research?.status(await internalUser(t),id),
-    researchReport:async(t:number,id:string)=>await research?.report(await internalUser(t),id),
-    researchCancel:async(t:number,id:string)=>({cancelled:await research?.cancel(await internalUser(t),id)??false}),
+    // Сервис приёма теперь существует и при выключенном флаге. Наличие
+    // общего адаптера не означает, что отдельный контур исследований включён.
+    researchStatus:async(t:number,id:string)=>{if(!research)throw badRequest("Исследования отключены");return await research.status(await internalUser(t),id);},
+    researchReport:async(t:number,id:string)=>{if(!research)throw badRequest("Исследования отключены");return await research.report(await internalUser(t),id);},
+    researchCancel:async(t:number,id:string)=>{if(!research)throw badRequest("Исследования отключены");return {cancelled:await research.cancel(await internalUser(t),id)};},
   } : undefined;
 
   const app = buildServer({
