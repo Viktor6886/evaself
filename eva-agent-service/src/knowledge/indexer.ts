@@ -31,6 +31,7 @@ import { createHash } from "node:crypto";
 import { rm } from "node:fs/promises";
 
 import type { Database } from "../db.js";
+import { withKnowledgeIndexWrite } from "./version-validation.js";
 import type { JobOutbox } from "../jobs/job-outbox.js";
 import { jobIdempotencyKey } from "../jobs/job-outbox.js";
 import type { JobTimingPolicy } from "../jobs/policy.js";
@@ -114,6 +115,7 @@ interface DocumentRow {
   user_id: string | null;
   collection_id: string | null;
   mime: string;
+  status: string;
   created_at: Date | string;
   replaces_document_id: string | null;
 }
@@ -262,11 +264,21 @@ export class KnowledgeIndexer {
       };
       return { chunkId: Number(chunk.id), vector: vectors[index]!, payload };
     });
-    for (let start = 0; start < points.length; start += UPSERT_BATCH) {
+    await withKnowledgeIndexWrite(this.db, async (client) => {
       signal?.throwIfAborted();
-      await this.store.upsert(scope, space, points.slice(start, start + UPSERT_BATCH), signal);
-    }
-    await this.store.pruneDocument(scope, version.version, document.id, points.map((point) => point.chunkId));
+      const owner = knowledgeOwner(scope === "private" ? Number(document.user_id) : null);
+      const fresh = await this.scoped(owner, async () => await this.load(document.id, owner, client), false);
+      // Документ могли удалить или изменить, пока Router считал векторы.
+      // Перечитываем на том же клиенте под SHARE lock; устаревшее задание
+      // отдаётся на повтор и не создаёт точки-сироты после проверки K7.
+      if (!fresh || fresh.document.status !== "ready" || JSON.stringify(fresh.document) !== JSON.stringify(document)
+        || JSON.stringify(fresh.chunks) !== JSON.stringify(chunks)) throw new Error("knowledge_document_changed");
+      for (let start = 0; start < points.length; start += UPSERT_BATCH) {
+        signal?.throwIfAborted();
+        await this.store.upsert(scope, space, points.slice(start, start + UPSERT_BATCH), signal);
+      }
+      await this.store.pruneDocument(scope, version.version, document.id, points.map((point) => point.chunkId));
+    }, true);
     return texts.length - missing.length;
   }
 
@@ -318,7 +330,7 @@ export class KnowledgeIndexer {
     for (const version of versions) {
       signal?.throwIfAborted();
       try {
-        await this.store.deleteDocuments(scope, version.version, [documentId], owner.kind === "user" ? owner.userId : undefined);
+        await withKnowledgeIndexWrite(this.db, async () => await this.store.deleteDocuments(scope, version.version, [documentId], owner.kind === "user" ? owner.userId : undefined));
       } catch (error) {
         // Коллекции версии ещё нет (версия строится, документов не было) —
         // и точек в ней нет: снимать нечего. Прочие отказы — повтор.
@@ -345,34 +357,34 @@ export class KnowledgeIndexer {
     return rows;
   }
 
-  private async load(documentId: string, owner: KnowledgeOwner): Promise<{ document: DocumentRow; chunks: ChunkRow[]; previous: ChunkRow[] } | null> {
+  private async load(documentId: string, owner: KnowledgeOwner, source: Pick<Database, "query"> = this.db): Promise<{ document: DocumentRow; chunks: ChunkRow[]; previous: ChunkRow[] } | null> {
     const documents = owner.kind === "global"
-      ? await this.db.query<DocumentRow>(
-        `SELECT id, user_id, collection_id, mime, created_at, replaces_document_id
+      ? await source.query<DocumentRow>(
+        `SELECT id, user_id, collection_id, mime, status, created_at, replaces_document_id
            FROM knowledge_documents
            -- tenant: system — документ общей базы: владельца нет, доступ по коллекции
           WHERE id = $1 AND user_id IS NULL AND product_verified`,
         [documentId],
       )
-      : await this.db.query<DocumentRow>(
-        `SELECT id, user_id, collection_id, mime, created_at, replaces_document_id
+      : await source.query<DocumentRow>(
+        `SELECT id, user_id, collection_id, mime, status, created_at, replaces_document_id
            FROM knowledge_documents
           WHERE id = $1 AND user_id = $2`,
         [documentId, owner.userId],
       );
     const document = documents.rows[0];
     if (!document) return null;
-    const chunks = await this.chunks(document.id, owner);
+    const chunks = await this.chunks(document.id, owner, source);
     // Прежняя версия — только своя: чужой id в replaces_document_id не
     // найдётся в области владельца, и векторы чужого документа не
     // попадут в этот.
-    const previous = document.replaces_document_id ? await this.chunks(document.replaces_document_id, owner) : [];
+    const previous = document.replaces_document_id ? await this.chunks(document.replaces_document_id, owner, source) : [];
     return { document, chunks, previous };
   }
 
-  private async chunks(documentId: string, owner: KnowledgeOwner): Promise<ChunkRow[]> {
+  private async chunks(documentId: string, owner: KnowledgeOwner, source: Pick<Database, "query"> = this.db): Promise<ChunkRow[]> {
     const { rows } = owner.kind === "global"
-      ? await this.db.query<ChunkRow>(
+      ? await source.query<ChunkRow>(
         `SELECT id, content, section, subsection, heading, page_start, page_end
            FROM knowledge_chunks
            -- tenant: system — фрагменты документа общей базы, владельца нет
@@ -380,7 +392,7 @@ export class KnowledgeIndexer {
           ORDER BY ordinal`,
         [documentId],
       )
-      : await this.db.query<ChunkRow>(
+      : await source.query<ChunkRow>(
         `SELECT id, content, section, subsection, heading, page_start, page_end
            FROM knowledge_chunks
           WHERE document_id = $1 AND user_id = $2
@@ -442,10 +454,10 @@ export class KnowledgeIndexer {
    * без владельца: условие `user_id IS NULL` граница не считает
    * ограничением, и без `crossUser` она отвергла бы каждый запрос.
    */
-  private async scoped<T>(owner: KnowledgeOwner, work: () => Promise<T>): Promise<T> {
+  private async scoped<T>(owner: KnowledgeOwner, work: () => Promise<T>, inherit = true): Promise<T> {
     return owner.kind === "global"
       ? await this.db.withSystemScope("knowledge.index.global", work, { crossUser: true })
-      : await this.db.withUserScope({ userId: owner.userId, label: "knowledge.index", inherit: true }, work);
+      : await this.db.withUserScope({ userId: owner.userId, label: "knowledge.index", inherit }, work);
   }
 }
 

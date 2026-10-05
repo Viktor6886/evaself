@@ -109,7 +109,7 @@ const router = (dimension = 3) => {
   };
 };
 
-const PRIVATE_DOC = { id: "doc-1", user_id: "7", collection_id: null, mime: "application/pdf", created_at: new Date("2026-09-30T10:00:00Z") };
+const PRIVATE_DOC = { id: "doc-1", user_id: "7", collection_id: null, mime: "application/pdf", status: "ready", created_at: new Date("2026-09-30T10:00:00Z") };
 const CHUNKS = [
   { id: "11", content: "Аренда продлена.", section: "1. Аренда", subsection: null, heading: "1. Аренда", page_start: 1, page_end: 1 },
   { id: "12", content: "Пеня 0,1%.", section: "2. Оплата", subsection: "2.1 Штрафы", heading: "2.1 Штрафы", page_start: 2, page_end: 2 },
@@ -170,6 +170,34 @@ test("несколько версий: документ попадает в ка
   await indexer.index("doc-1", 7);
   assert.equal(calls.filter((call) => call.method === "ensureSpace").length, 2, "по одному разу на версию на процесс");
   assert.deepEqual(calls.filter((call) => call.method === "pruneDocument").map((call) => call.args[1]), [1, 2, 1, 2]);
+});
+
+test("после embeddings удалённый или изменённый документ не записывается; повторная tenant-проверка под общей блокировкой K7", async () => {
+  for (const change of ["deleted", "text", "metadata"] as const) {
+    const state = { versions: [VERSION], document: { ...PRIVATE_DOC } as Record<string, unknown> | null,
+      chunks: CHUNKS.map((c) => ({ ...c })) };
+    const { db, queries } = fakeDb(state);
+    const { calls, store } = fakeStore();
+    const embed = router();
+    const compute = embed.router.embedMany;
+    embed.router.embedMany = async (texts, configuration) => {
+      const vectors = await compute(texts, configuration);
+      if (change === "deleted") state.document = null;
+      // Новый SQL-снимок: драйвер PG возвращает новые объекты, а не
+      // изменяет ранее прочитанный массив индексатора в памяти.
+      if (change === "text") state.chunks = state.chunks.map((c, i) => i === 0 ? { ...c, content: "Новый материал" } : c);
+      if (change === "metadata") state.chunks = state.chunks.map((c, i) => i === 0 ? { ...c, page_start: 99 } : c);
+      return vectors;
+    };
+    await assert.rejects(() => new KnowledgeIndexer(db as never, embed.router as never, store as never, options()).index("doc-1", 7), /knowledge_document_changed/u);
+    assert.equal(calls.filter((c) => c.method === "upsert" || c.method === "pruneDocument").length, 0, change);
+    const fence = queries.find((q) => q.sql.includes("pg_advisory_xact_lock_shared"))!;
+    assert.ok(fence.inTransaction && fence.scope === "system:cross");
+    assert.match(fence.sql, /knowledge\.embedding\.activation/u);
+    assert.ok(queries.some((q) => q.sql.startsWith("LOCK TABLE knowledge_documents, knowledge_chunks") && q.inTransaction));
+    const fresh = queries.filter((q) => q.sql.includes("FROM knowledge_documents") && q.inTransaction);
+    assert.ok(fresh.length && fresh.every((q) => q.scope === "user:7" && q.params[1] === 7));
+  }
 });
 
 test("индексация выключена или версии нет — документ не трогается", async () => {

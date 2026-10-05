@@ -5,12 +5,28 @@
  * Текст и векторы для этого не нужны и наружу не выдаются.
  */
 import type pg from "pg";
+import type { Database } from "../db.js";
 
 import type { EmbeddingSpace, KnowledgeScope, KnowledgeVectorStore } from "./vector-store.js";
 
 type Store = Pick<KnowledgeVectorStore, "describe" | "scrollPoints" | "countPoints">;
 const PAGE = 256;
 const VALIDATION_MS = 60_000;
+
+/** Все записи точек согласованы с exclusive lock активации K7.
+ * Соединение удерживается только во время записи, не расчёта embeddings.
+ * При upsert канонические строки фиксируются до завершения Qdrant-записи.
+ */
+export async function withKnowledgeIndexWrite<T>(
+  db: Database, work: (client: pg.PoolClient) => Promise<T>, freezeCanonical = false,
+): Promise<T> {
+  return await db.withSystemScope("knowledge.index.write", async () => await db.transaction(async (client) => {
+    await client.query("SET LOCAL lock_timeout = '3s'");
+    await client.query("SELECT pg_advisory_xact_lock_shared(hashtext('knowledge.embedding.activation'))");
+    if (freezeCanonical) await client.query("LOCK TABLE knowledge_documents, knowledge_chunks IN SHARE MODE");
+    return await work(client);
+  }), { crossUser: true });
+}
 
 export class KnowledgeVersionError extends Error {
   constructor(readonly code: string, message: string) { super(message); }
