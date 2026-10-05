@@ -31,6 +31,7 @@ const UPLOADS = [
 ];
 const INDEX = {
   qdrant: true,
+  qdrant_status: "ready", aliases: { private: null, global: null }, aliases_match_active: true, uploads_enabled: true,
   private_owners: 3,
   scopes: {
     private: { documents: 7, chunks: 70, lag_seconds: 0, by_status: { ready: 7 } },
@@ -40,11 +41,32 @@ const INDEX = {
     build_started_at: "2026-09-30T09:00:00Z", built_at: "2026-09-30T09:10:00Z", activated_at: null, points: 82, progress: 1 }],
 };
 
+const PROVIDERS = [{ id: "p1", name: "OpenRouter", chat_model: "openai/gpt-5" }, { id: "p2", name: "Jina", chat_model: "jina-chat" }];
+const VERSION = { ...INDEX.versions[0], provider_id: "p1", provider_name: "OpenRouter", request_dimensions: false,
+  distance: "Cosine", hnsw_m: 16, hnsw_ef_construct: 100, on_disk: false, fallback_provider_id: null, fallback_model: null };
+const EMBEDDINGS = { providers: PROVIDERS, versions: [VERSION], active: null };
+const RECOMMENDED = {
+  "runtime.knowledge_index_enabled": true, "runtime.knowledge_search_enabled": true,
+  "runtime.knowledge_search_mode": "hybrid", "runtime.knowledge_vector_backend": "qdrant",
+  "runtime.knowledge_private_enabled": true, "runtime.knowledge_global_enabled": true,
+};
+const SETTINGS = { etag: '"kb-1"', settings: Object.entries(RECOMMENDED).map(([key, value]) => ({ key, title: key,
+  value: key.endsWith("search_mode") ? "legacy" : key.endsWith("vector_backend") ? "pgvector" : value,
+  presets: typeof value === "boolean" ? undefined : (key.endsWith("search_mode") ? ["legacy", "hybrid", "vector", "lexical"] : ["pgvector", "qdrant"]).map((v) => ({ value: v, title: v })),
+})) };
+const ACTIVE = { ...VERSION, status: "active", activated_at: "2026-09-30T10:00:00Z" };
+const ACTIVE_ROUTES = {
+  "/knowledge/embeddings": { ...EMBEDDINGS, active: 2, versions: [ACTIVE] },
+  "/knowledge/index": { ...INDEX, aliases: { private: 2, global: 2 }, versions: [ACTIVE] },
+};
+
 const ROUTES = {
   "/knowledge/collections": { collections: [COLLECTION] },
   "/knowledge/documents": { documents: DOCS, total: 2 },
   "/knowledge/uploads": { uploads: UPLOADS },
   "/knowledge/index": INDEX,
+  "/knowledge/embeddings": EMBEDDINGS,
+  "/settings": SETTINGS,
 };
 
 test("раздел показывает коллекции, документы со статусами, исход загрузок и счётчики личных баз", async () => {
@@ -64,7 +86,7 @@ test("раздел показывает коллекции, документы �
     assert.match(uploads, /document_empty/);
     const index = await panel.page.textContent("#knowledge-index");
     assert.match(index, /людей: 3/);
-    assert.match(index, /Включить поиск/);
+    assert.match(index, /Активировать/);
     assert.deepEqual(panel.errors, []);
   } finally {
     await panel.close();
@@ -200,4 +222,219 @@ test("«Показать ещё» запрашивает следующую по
   } finally {
     await panel.close();
   }
+});
+
+async function enterKnowledge(panel) {
+  await panel.page.click('[data-page="knowledge"]');
+  await panel.page.waitForSelector("#knowledge-embedding-form");
+}
+
+test("embedding: реестр провайдеров и активная модель видны на одном экране без секретов", async () => {
+  const panel = await openPanel({ routes: { ...ROUTES, ...ACTIVE_ROUTES } });
+  try {
+    await enterKnowledge(panel);
+    assert.equal(panel.countTo("/knowledge/embeddings"), 1);
+    assert.deepEqual(await panel.page.locator('#knowledge-embedding-form [name="provider_id"] option').allTextContents(), ["Выберите провайдера", "OpenRouter", "Jina"]);
+    const active = await panel.page.textContent("#knowledge-active-embedding");
+    for (const text of ["v2", "OpenRouter", "bge-m3", "1024", "активен"]) assert.ok(active.includes(text));
+    assert.match(await panel.page.textContent("#knowledge-status"), /pgvector \(режим legacy\)/);
+    assert.equal(await panel.page.locator('#knowledge-embedding-form [name="api_key"], #knowledge-embedding-form [name="base_url"]').count(), 0);
+    assert.equal(await panel.page.inputValue('#knowledge-embedding-form [name="model"]'), "bge-m3");
+    assert.equal(await panel.page.inputValue('#knowledge-embedding-form [name="dimension"]'), "1024");
+    assert.deepEqual(panel.errors, []);
+  } finally { await panel.close(); }
+});
+
+test("embedding: проверка показывает размерность и latency; изменение модели отменяет результат", async () => {
+  const panel = await openPanel({ routes: { ...ROUTES,
+    "POST /knowledge/embeddings/probe": { ok: true, dimension: 768, latency_ms: 73 },
+  } });
+  try {
+    await enterKnowledge(panel);
+    await panel.page.selectOption("#knowledge-embedding-configuration", "");
+    await panel.page.selectOption('#knowledge-embedding-form [name="provider_id"]', "p2");
+    await panel.page.fill('#knowledge-embedding-form [name="model"]', "jina-embeddings-v3");
+    assert.equal(await panel.page.isDisabled("#knowledge-embedding-save"), true);
+    await panel.page.click("#knowledge-embedding-probe");
+    await panel.page.waitForSelector("#knowledge-embedding-save:not([disabled])");
+    const result = await panel.page.textContent("#knowledge-embedding-probe-result");
+    assert.match(result, /Модель доступна.*768.*73 мс/);
+    const request = await panel.waitForRequest((r) => r.path === "/knowledge/embeddings/probe");
+    assert.deepEqual(request.body, { provider_id: "p2", model: "jina-embeddings-v3", dimension: null, request_dimensions: false,
+      distance: "Cosine", hnsw_m: 16, hnsw_ef_construct: 100, on_disk: false, fallback_provider_id: null, fallback_model: null });
+    await panel.page.fill('#knowledge-embedding-form [name="model"]', "other-model");
+    assert.equal(await panel.page.isDisabled("#knowledge-embedding-save"), true);
+    assert.equal(panel.countTo("/knowledge/embeddings/versions"), 0);
+  } finally { await panel.close(); }
+});
+
+test("embedding: читаемый отказ probe и несовместимый fallback не разрешают сохранить", async () => {
+  let answer = { ok: false, message: "Провайдер отклонил ключ", error_code: "embedding_auth" };
+  const panel = await openPanel({ routes: { ...ROUTES, "POST /knowledge/embeddings/probe": () => answer } });
+  try {
+    await enterKnowledge(panel);
+    await panel.page.click("#knowledge-embedding-probe");
+    await panel.page.waitForFunction(() => document.querySelector("#knowledge-embedding-probe-result").textContent.includes("отклонил ключ"));
+    assert.equal(await panel.page.isDisabled("#knowledge-embedding-save"), true);
+    answer = { ok: true, dimension: 1024, latency_ms: 9, compare: { ok: true, same_space: false } };
+    await panel.page.click("#knowledge-embedding-probe");
+    await panel.page.waitForFunction(() => document.querySelector("#knowledge-embedding-probe-result").textContent.includes("несовместим"));
+    assert.equal(await panel.page.isDisabled("#knowledge-embedding-save"), true);
+    assert.equal(panel.countTo("/knowledge/embeddings/versions"), 0);
+  } finally { await panel.close(); }
+});
+
+test("embedding: версия сохраняется серверно, восстанавливается после reload и строится через прежний маршрут", async () => {
+  let created = null;
+  const panel = await openPanel({ routes: { ...ROUTES,
+    "/knowledge/embeddings": () => ({ ...EMBEDDINGS, versions: created ? [created, VERSION] : [VERSION] }),
+    "/knowledge/index": () => ({ ...INDEX, versions: created ? [created, VERSION] : [VERSION] }),
+    "POST /knowledge/embeddings/probe": { ok: true, dimension: 768, latency_ms: 20 },
+    "POST /knowledge/embeddings/versions": () => (created = { ...VERSION, version: 3, provider_id: "p2", provider_name: "Jina", model: "jina-embeddings-v3", dimension: 768,
+      status: "draft", building: false, build_started_at: null, built_at: null, activated_at: null, points: null, progress: null }),
+    "POST /knowledge/embeddings/versions/3/build": { version: 3, status: "building" },
+  } });
+  try {
+    await enterKnowledge(panel);
+    await panel.page.selectOption("#knowledge-embedding-configuration", "");
+    await panel.page.selectOption('#knowledge-embedding-form [name="provider_id"]', "p2");
+    await panel.page.fill('#knowledge-embedding-form [name="model"]', "jina-embeddings-v3");
+    await panel.page.click("#knowledge-embedding-probe");
+    await panel.page.waitForSelector("#knowledge-embedding-save:not([disabled])");
+    await panel.page.click("#knowledge-embedding-save");
+    await panel.page.waitForSelector('[data-version-build="3"]');
+    const save = panel.requests.find((r) => r.path === "/knowledge/embeddings/versions");
+    assert.equal(save.body.provider_id, "p2");
+    assert.equal(save.body.model, "jina-embeddings-v3");
+    assert.equal(await panel.page.locator('[data-version-activate="3"]').count(), 0, "черновик не активируется");
+    await panel.page.reload();
+    await enterKnowledge(panel);
+    assert.equal(await panel.page.inputValue('#knowledge-embedding-form [name="provider_id"]'), "p2");
+    assert.equal(await panel.page.inputValue('#knowledge-embedding-form [name="model"]'), "jina-embeddings-v3");
+    assert.equal(await panel.page.inputValue('#knowledge-embedding-form [name="dimension"]'), "768");
+    assert.equal(await panel.page.isDisabled("#knowledge-embedding-save"), true, "повторная проверка перед новой версией");
+    assert.equal(await panel.page.isDisabled("#knowledge-embedding-probe"), false);
+    await panel.page.click('[data-version-build="3"]');
+    assert.equal(panel.countTo("/versions/3/build"), 0);
+    await panel.confirmAccept();
+    assert.equal(panel.countTo("/versions/3/build"), 1);
+    assert.deepEqual(panel.errors, []);
+  } finally { await panel.close(); }
+});
+
+test("embedding: первая активация требует подтверждения, незавершённую версию активировать нельзя", async () => {
+  const unfinished = { ...VERSION, version: 4, status: "ready", built_at: null, building: true };
+  const panel = await openPanel({ routes: { ...ROUTES,
+    "/knowledge/embeddings": { ...EMBEDDINGS, versions: [unfinished, VERSION] },
+    "/knowledge/index": { ...INDEX, versions: [unfinished, VERSION] },
+    "POST /knowledge/embeddings/versions/2/activate": { version: 2, status: "active" },
+  } });
+  try {
+    await enterKnowledge(panel);
+    assert.equal(await panel.page.locator('[data-version-activate="4"]').count(), 0);
+    await panel.page.click('[data-version-activate="2"]');
+    assert.equal(panel.countTo("/versions/2/activate"), 0);
+    await panel.confirmAccept();
+    assert.deepEqual(panel.requests.find((r) => r.path.endsWith("/2/activate")).body, { expected_active_version: null });
+    assert.equal(panel.requests.filter((r) => r.method === "PUT" && r.path === "/settings").length, 0, "активация не меняет режим поиска");
+  } finally { await panel.close(); }
+});
+
+test("embedding: смена модели и откат доступны только построенным версиям", async () => {
+  const ready = { ...VERSION, version: 3, model: "new-model" };
+  const retired = { ...VERSION, version: 1, status: "retired" };
+  const panel = await openPanel({ routes: { ...ROUTES, ...ACTIVE_ROUTES,
+    "/knowledge/embeddings": { ...EMBEDDINGS, active: 2, versions: [ready, ACTIVE, retired] },
+    "/knowledge/index": { ...ACTIVE_ROUTES["/knowledge/index"], versions: [ready, ACTIVE, retired] },
+    "POST /knowledge/embeddings/versions/3/activate": { version: 3, status: "active" },
+  } });
+  try {
+    await enterKnowledge(panel);
+    assert.match(await panel.page.textContent('[data-version-activate="3"]'), /Активировать новую модель/);
+    assert.match(await panel.page.textContent('[data-version-activate="1"]'), /Откатить/);
+    await panel.page.click('[data-version-activate="3"]');
+    await panel.confirmAccept();
+    assert.deepEqual(panel.requests.find((r) => r.path.endsWith("/3/activate")).body, { expected_active_version: 2 });
+  } finally { await panel.close(); }
+});
+
+test("hybrid + qdrant включается явно после серверной проверки; сохраняются все шесть настроек и etag", async () => {
+  const panel = await openPanel({ routes: { ...ROUTES, ...ACTIVE_ROUTES,
+    "POST /knowledge/embeddings/versions/2/activate": { version: 2, status: "active" }, "PUT /settings": { saved: true },
+  } });
+  try {
+    await enterKnowledge(panel);
+    assert.equal(panel.requests.filter((r) => r.method === "PUT").length, 0);
+    let etag;
+    panel.page.on("request", (r) => { if (r.method() === "PUT") etag = r.headers()["if-match"]; });
+    await panel.page.click("#knowledge-use-qdrant");
+    const saved = await panel.waitForRequest((r) => r.path === "/settings" && r.method === "PUT");
+    assert.deepEqual(saved.body, { settings: RECOMMENDED });
+    assert.equal(etag, SETTINGS.etag);
+    const verify = panel.requests.findIndex((r) => r.path.endsWith("/2/activate"));
+    assert.deepEqual(panel.requests[verify].body, { verify_only: true }, "проверка не переключит устаревшую версию");
+    assert.ok(verify < panel.requests.indexOf(saved));
+  } finally { await panel.close(); }
+});
+
+test("Qdrant нельзя включить без активного индекса или при отказе серверной проверки", async () => {
+  const panel = await openPanel({ routes: { ...ROUTES } });
+  try {
+    await enterKnowledge(panel);
+    assert.equal(await panel.page.isDisabled("#knowledge-use-qdrant"), true);
+    await panel.page.selectOption('[data-knowledge-setting="runtime.knowledge_vector_backend"]', "qdrant");
+    await panel.page.click("#knowledge-runtime-save");
+    await panel.page.waitForTimeout(100);
+    assert.equal(panel.requests.filter((r) => r.method === "PUT").length, 0);
+  } finally { await panel.close(); }
+  const failed = await openPanel({ routes: { ...ROUTES, ...ACTIVE_ROUTES,
+    "POST /knowledge/embeddings/versions/2/activate": { __status: 409, __body: { error: { message: "Индекс неполон" } } },
+  } });
+  try {
+    await enterKnowledge(failed);
+    await failed.page.click("#knowledge-use-qdrant");
+    await failed.waitForRequest((r) => r.path.endsWith("/2/activate"));
+    await failed.page.waitForTimeout(100);
+    assert.equal(failed.requests.filter((r) => r.method === "PUT").length, 0);
+  } finally { await failed.close(); }
+});
+
+test("отказ Qdrant не мешает выключить поиск и приостановить индексацию", async () => {
+  const panel = await openPanel({ routes: { ...ROUTES, ...ACTIVE_ROUTES,
+    "/settings": { ...SETTINGS, settings: SETTINGS.settings.map((s) => ({ ...s, value: RECOMMENDED[s.key] })) },
+    "/knowledge/index": { ...ACTIVE_ROUTES["/knowledge/index"], qdrant_status: "unavailable", aliases: null, aliases_match_active: null },
+    "PUT /settings": { saved: true },
+  } });
+  try {
+    await enterKnowledge(panel);
+    assert.equal(await panel.page.isDisabled("#knowledge-use-qdrant"), true);
+    await panel.page.selectOption('[data-knowledge-setting="runtime.knowledge_search_enabled"]', "false");
+    await panel.page.selectOption('[data-knowledge-setting="runtime.knowledge_index_enabled"]', "false");
+    await panel.page.click("#knowledge-runtime-save");
+    const saved = await panel.waitForRequest((r) => r.path === "/settings" && r.method === "PUT");
+    assert.deepEqual(saved.body, { settings: { ...RECOMMENDED, "runtime.knowledge_search_enabled": false, "runtime.knowledge_index_enabled": false } });
+    assert.equal(panel.requests.filter((r) => r.path.endsWith("/activate")).length, 0);
+    assert.deepEqual(panel.errors, []);
+  } finally { await panel.close(); }
+});
+
+test("недоступный реестр или выключенная загрузка видны; читающая роль не получает формы настройки", async () => {
+  const panel = await openPanel({ routes: { ...ROUTES,
+    "/knowledge/embeddings": { __status: 503, __body: { error: { message: "Router недоступен" } } },
+    "/knowledge/index": { ...INDEX, uploads_enabled: false },
+  } });
+  try {
+    await panel.page.click('[data-page="knowledge"]');
+    await panel.page.waitForSelector("[data-document-row]");
+    assert.match(await panel.page.textContent("#knowledge-embedding-editor"), /недоступны/);
+    assert.equal(await panel.page.isDisabled("#knowledge-upload-button"), true);
+    assert.equal(await panel.page.isDisabled("#knowledge-use-qdrant"), true);
+  } finally { await panel.close(); }
+  const reader = await openPanel({ role: "viewer", routes: { ...ROUTES, ...ACTIVE_ROUTES } });
+  try {
+    await reader.page.click('[data-page="knowledge"]');
+    await reader.page.waitForSelector("[data-document-row]");
+    assert.match(await reader.page.textContent("#knowledge-active-embedding"), /bge-m3/);
+    assert.equal(await reader.page.locator("#knowledge-embedding-form, #knowledge-runtime-form").count(), 0);
+  } finally { await reader.close(); }
 });

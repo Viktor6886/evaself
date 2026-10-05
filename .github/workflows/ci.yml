@@ -699,6 +699,14 @@ jobs:
     # трижды и прогоняют цикл down/up: предел оставлен с запасом.
     timeout-minutes: 30
     services:
+      # K7 проверяется вместе с настоящей схемой: полнота и COMMIT
+      # активной версии не проверяются одним fake-PG в unit-тестах.
+      qdrant:
+        image: qdrant/qdrant:v1.19.1-unprivileged
+        ports: ["6333:6333"]
+        env:
+          QDRANT__SERVICE__API_KEY: ci-qdrant-key
+          QDRANT__TELEMETRY_DISABLED: "true"
       postgres:
         image: pgvector/pgvector:0.8.5-pg17
         env:
@@ -958,6 +966,13 @@ jobs:
       # который ей напишут, и не покажет, что осталось после него.
       - name: "Дневник Mini App: удаление доходит до производных данных"
         run: node scripts/ci/test-journal-postgres.mjs
+
+      - name: "База знаний: lifecycle, K7, tenant isolation и degraded fallback на PostgreSQL + Qdrant"
+        env:
+          KNOWLEDGE_INTEGRATION_TEST: "true"
+          DATABASE_URL: postgresql://postgres:ci@localhost:5432/eva
+          QDRANT_TEST_CONTAINER: ${{ job.services.qdrant.id }}
+        run: node scripts/ci/test-knowledge-lifecycle.mjs
 
       # Повтор задания OSINT после сбоя держится на `ON CONFLICT` по
       # частичному индексу прогонов, очередь — на `SKIP LOCKED`, удаление —

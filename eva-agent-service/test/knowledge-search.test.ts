@@ -1,8 +1,22 @@
 import assert from "node:assert/strict";
+import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 
 import { KnowledgeSearch } from "../dist/knowledge/search.js";
 import { CoreToolFactory } from "../dist/tools/core-tools.js";
+
+test("persona и user-materials требуют semantic retrieval по психологии, источники и игнорирование инъекций", {
+  skip: !existsSync(new URL("../../CLAUDE.md", import.meta.url)) && "repository persona/skills are outside the service Docker build context",
+}, () => {
+  const persona = readFileSync(new URL("../../library/persona/eva.md", import.meta.url), "utf8");
+  const skill = readFileSync(new URL("../../skills/user-materials/SKILL.md", import.meta.url), "utf8");
+  assert.match(persona, /сначала используй `knowledge_search`/u);
+  assert.match(persona, /Перед психологическими[\s\S]*без упоминания документа/u);
+  assert.match(persona, /Приветствия, благодарности, эмоциональные реакции[\s\S]*поиска не требуют/u);
+  for (const pattern of [/личной или общей/u, /прокрастинация/u, /1–2 альтернативные/u, /untrusted data/u, /prompt injection/u,
+    /`base: personal`/u, /`base: shared`/u, /`cite`, `document`, `pages`, `section`/u, /собственные[\s\S]*знания/u]) assert.match(skill, pattern);
+  assert.ok(skill.split("\n").length <= 200, "навык остаётся коротким");
+});
 
 /** Тот же договор сборки инструмента, что и у Agent SDK, но без него. */
 const tool = (

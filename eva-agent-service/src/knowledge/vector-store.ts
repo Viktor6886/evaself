@@ -194,12 +194,14 @@ export class KnowledgeVectorStore {
   }
 
   /** Перевести обе alias на версию одним атомарным запросом. */
-  async activate(version: number): Promise<void> {
+  async activate(version: number | null): Promise<void> {
     const aliases = await this.client.aliases();
     await this.client.switchAliases(
       (["private", "global"] as const).map((scope) => ({
         alias: KNOWLEDGE_ALIAS[scope],
-        collection: knowledgeCollection(scope, version),
+        // null — компенсация неудавшейся первой активации: канонической
+        // версии ещё нет, поэтому снимаются только наши два alias.
+        collection: version === null ? null : knowledgeCollection(scope, version),
       })),
       new Set(aliases.keys()),
     );
@@ -311,6 +313,14 @@ export class KnowledgeVectorStore {
 
   async countPoints(scope: KnowledgeScope, version: number): Promise<number> {
     return await this.client.count(knowledgeCollection(scope, version));
+  }
+
+  /** Метаданные всех точек, без текста и векторов: проверка перед K7. */
+  async scrollPoints(scope: KnowledgeScope, version: number, offset: number | string | null, limit: number) {
+    return await this.client.scroll(knowledgeCollection(scope, version), {
+      limit, offset,
+      payload: ["chunk_id", "document_id", "user_id", "collection_id", "embedding_model", "embedding_version"],
+    });
   }
 
   /** Точек одного документа в версии: перестройка пропускает полные. */

@@ -97,10 +97,11 @@ export async function scheduleKnowledgeRebuild(
 }
 
 /**
- * Начать построение или перестройку версии: черновик и неудавшаяся
+ * Начать построение или перестройку версии: черновик, выведенная и неудавшаяся
  * становятся `building`, готовая и активная сохраняют статус (поиск на
  * активной продолжается). Новая отметка начала делает устаревшими
- * задания прежней перестройки. null — версии нет или её уже вывели.
+ * задания прежней перестройки. Выведенная версия перестраивается перед
+ * откатом, если со времени вывода изменились документы. null — версии нет.
  */
 export async function startKnowledgeRebuild(
   outbox: OutboxRecord,
@@ -111,8 +112,8 @@ export async function startKnowledgeRebuild(
   const { rows } = await client.query<{ status: string; started: string }>(
     `UPDATE knowledge_embedding_versions
         SET build_started_at = clock_timestamp(), error_code = NULL,
-            status = CASE WHEN status IN ('draft', 'failed') THEN 'building' ELSE status END
-      WHERE version = $1 AND status IN ('draft', 'failed', 'building', 'ready', 'active')
+            status = CASE WHEN status IN ('draft', 'failed', 'retired') THEN 'building' ELSE status END
+      WHERE version = $1 AND status IN ('draft', 'failed', 'building', 'ready', 'active', 'retired')
       RETURNING status, (extract(epoch FROM build_started_at) * 1000)::bigint AS started`,
     [version],
   );
@@ -253,7 +254,7 @@ export class KnowledgeMaintenance {
                   (index_status IN ('pending', 'indexing') AND updated_at > now() - interval '30 minutes') AS busy
              FROM knowledge_documents
              -- tenant: system — сверка индекса общей базы
-            WHERE user_id IS NULL AND product_verified AND status = 'ready'`,
+            WHERE user_id IS NULL AND product_verified AND status = 'ready' AND collection_id IS NOT NULL`,
     ), { crossUser: true });
     return new Map(rows.map((row) => [String(row.id), {
       chunks: Number(row.chunk_count),
@@ -271,7 +272,7 @@ export class KnowledgeMaintenance {
             WHERE user_id IS NOT NULL`
         : `SELECT count(*) AS total FROM knowledge_documents
             -- tenant: system — счётчик документов общей базы
-            WHERE user_id IS NULL`,
+            WHERE user_id IS NULL AND product_verified AND collection_id IS NOT NULL`,
     ), { crossUser: true });
     return { size: Number(rows[0]?.total ?? 0) };
   }
@@ -466,7 +467,7 @@ export class KnowledgeMaintenance {
       `SELECT id, user_id, chunk_count
          FROM knowledge_documents
          -- tenant: system — перестройка индекса проходит все документы, наружу ничего не отдаёт
-        WHERE status = 'ready' AND (user_id IS NOT NULL OR product_verified)
+        WHERE status = 'ready' AND (user_id IS NOT NULL OR (product_verified AND collection_id IS NOT NULL))
           AND ($1::uuid IS NULL OR id > $1::uuid)
         ORDER BY id
         LIMIT ${REBUILD_PAGE}`,
@@ -482,7 +483,7 @@ export class KnowledgeMaintenance {
         `SELECT COALESCE(sum(chunk_count), 0) AS total
            FROM knowledge_documents
            -- tenant: system — счётчик фрагментов всех баз для прогресса перестройки
-          WHERE status = 'ready' AND (user_id IS NOT NULL OR product_verified)`,
+          WHERE status = 'ready' AND (user_id IS NOT NULL OR (product_verified AND collection_id IS NOT NULL))`,
       ), { crossUser: true });
       const total = Number(rows[0]?.total ?? 0);
       const points = (await this.store.countPoints("private", version)) + (await this.store.countPoints("global", version));

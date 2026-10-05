@@ -3,6 +3,44 @@
 Оперативное состояние работы. Единственный источник истины о том, где работа
 остановилась. Агент читает этот файл первым и обновляет его после каждого шага.
 
+## База знаний: embedding WebUI, K7 и предметные знания Евы — 2026-10-04
+
+Ветка: `batch/knowledge-source`, PR [#406](https://github.com/Viktor6886/evaself/pull/406).
+Статус: реализация прошла проверки сервиса, UI и PG/Qdrant-интеграцию;
+ожидает независимого ревью и live canary. Production
+настройки и провайдеры не изменялись. Новых миграций нет.
+
+- [x] Аудит существующего индекса, поиска, Router, admin API, UI, persona и
+  user-materials; прежние компоненты переиспользованы.
+- [x] Редактор модели в разделе «База знаний»: registry/probe/save/build/
+  activate, конфигурация в knowledge_embedding_versions, восстановление
+  после reload, advanced отдельно, ключей в браузере нет.
+- [x] K7: проверка каждого id/tenant/model/dimension, SHARE lock канонических
+  данных, advisory lock переключения, атомарные Qdrant aliases, PG
+  retired/active, компенсация неоднозначного сбоя, проверяемый откат.
+- [x] Явное включение шести рекомендуемых runtime-параметров после серверной
+  проверки индекса; Qdrant не зависит от legacy embeddings при загрузке.
+- [x] Короткое правило persona, расширение существующего user-materials:
+  retrieval по психологии/релевантным знаниям, источники, untrusted data.
+- [x] Расширены прежние backend/UI-тесты, добавлены негативные проверки
+  полноты и интеграция lifecycle на настоящих PG/Qdrant в существующий CI.
+- [x] Общие материалы без коллекции скрыты во всех ветках поиска,
+  гидратации и соседях, не ломают rebuild/reconcile и прогресс индекса.
+- [x] Локально: 53 теста maintenance/validation/vector/fusion/settings прошли, SQL
+  генератор совпадает (5 проб), tenant/admin route guards проходят.
+- [x] Сборка/линт/типы и regression в CI: backend 1807 PASS / 8 SKIP /
+  0 FAIL (1815 всего); Chromium 147 PASS / 0 FAIL. Интеграция PG/Qdrant
+  включает pause/unpause сервиса, lexical fallback и восстановление.
+  Измеренный commit: `4ed0f4e3652c8a657c7bb6424c0e0e23737f898d`,
+  [CI #1052](https://github.com/Viktor6886/evaself/actions/runs/37226119124).
+- [ ] Live canary Letta с реальным embedding provider/model и естественным
+  ответом: нужна работающая установка; fixture его не заменяет.
+- [ ] Независимое ревью по CLAUDE.md перед merge; PR остаётся draft.
+
+Описание эксплуатации и границ: `docs/knowledge-operations.md`.
+K5 диагностический поиск/статистика и K8 production-замеры не объявляются
+завершёнными этим изменением.
+
 ## База знаний на Qdrant — K4: поиск — 2026-10-02
 
 Ветка: `claude/evaself-architecture-improvements-3d7d2s`. Статус: выполнен,

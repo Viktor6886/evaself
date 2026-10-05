@@ -164,6 +164,7 @@ export function buildJobLayer(
     tempRoot: "/tmp",
     embed: (text, signal) => router.embed(text, signal),
     embedBatch: (texts, signal) => router.embedLegacyMany(texts, signal),
+    legacyEmbeddings: () => config.knowledgeSearchMode === "legacy" || config.knowledgeVectorBackend !== "qdrant",
     embedBatchSize: () => config.knowledgeEmbeddingBatch,
     chunking: () => ({ size: config.knowledgeChunkSize, overlap: config.knowledgeChunkOverlap }),
     index: scheduler,

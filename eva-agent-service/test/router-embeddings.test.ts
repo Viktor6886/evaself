@@ -110,6 +110,14 @@ test("порядок векторов — по index ответа, а не по 
   assert.deepEqual(result.map((vector) => vector[0]), [1, 2]);
 });
 
+test("повторные, дробные и пропущенные индексы ответа не записывают вектор другого фрагмента", async () => {
+  for (const indices of [[0, 0], [0, 0.5], [1, 2]]) {
+    const { fetcher } = upstream(() => ok({ data: indices.map((index) => ({ index, embedding: [1, 0, 0, 0] })) }));
+    await assert.rejects(() => embeddings(fetcher).embedWith({ providerId: "a", model: "bge-m3", dimension: 4 }, ["a", "b"]),
+      (error: EmbeddingError) => error.code === "embedding_incomplete");
+  }
+});
+
 test("неполный ответ и чужая размерность — отказ, а не запись", async () => {
   const short = upstream(() => ok(vectors(1, 4)));
   await assert.rejects(
@@ -204,13 +212,27 @@ test("версия без запасного: отказ основного — 
   assert.equal(sent.length, before);
 });
 
-test("версии кэшируются: пачки индексации не ходят в PostgreSQL на каждый запрос", async () => {
+test("конфигурация версии кэшируется, статус перечитывается для безопасного переключения", async () => {
   const { fetcher } = upstream(() => ok(vectors(1, 4)));
   const counter = versionStore({ 2: VERSION_ROW });
   const service = new EmbeddingService(embeddings(fetcher), counter.store);
   await service.embed("eva/embeddings@v2", ["a"]);
   await service.embed("eva/embeddings@v2", ["b"]);
-  assert.equal(counter.queries(), 1);
+  assert.equal(counter.queries(), 2);
+});
+
+test("ready → retired → building → active видны Router сразу, без ожидания TTL", async () => {
+  const row = { ...VERSION_ROW, status: "ready" };
+  const { store } = versionStore({ 2: row });
+  const { fetcher } = upstream(() => ok(vectors(1, 4)));
+  const service = new EmbeddingService(embeddings(fetcher), store);
+  await service.embed("eva/embeddings@v2", ["a"]);
+  row.status = "retired";
+  await assert.rejects(() => service.embed("eva/embeddings@v2", ["a"]), /выведена/u);
+  for (const status of ["building", "active"]) {
+    row.status = status;
+    assert.equal((await service.embed("eva/embeddings@v2", ["a"])).vectors.length, 1);
+  }
 });
 
 test("проверка модели: своя строка, размерность из ответа, задержка", async () => {

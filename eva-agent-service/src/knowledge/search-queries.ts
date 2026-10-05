@@ -13,6 +13,7 @@
  */
 
 import type { Database } from "../db.js";
+import { RRF_K } from "./search-fusion.js";
 
 export interface SearchScope {
   userId: number;
@@ -145,7 +146,7 @@ const FTS_CTE = `fts_strict AS (
                LEFT JOIN knowledge_collections k ON k.id = d.collection_id
               CROSS JOIN ask
               WHERE to_tsvector('russian', c.content) @@ ask.tsq
-                AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, true)))
+                AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, false)))
               LIMIT ${RANK_SAMPLE}
            ) sample
           CROSS JOIN ask
@@ -163,7 +164,7 @@ const FTS_CTE = `fts_strict AS (
               CROSS JOIN ask
               WHERE NOT EXISTS (SELECT 1 FROM fts_strict)
                 AND to_tsvector('russian', c.content) @@ ask.anyq
-                AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, true)))
+                AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, false)))
               LIMIT ${RANK_SAMPLE}
            ) sample
           CROSS JOIN ask
@@ -198,7 +199,7 @@ function trigramCte(count: number): string {
              ON d.id = c.document_id AND (d.user_id = $1 OR d.product_verified)
            LEFT JOIN knowledge_collections k ON k.id = d.collection_id
           WHERE (${matches("c.content")})
-            AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, true)))
+            AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, false)))
           ORDER BY score DESC, c.id
           LIMIT $4
        ),
@@ -210,7 +211,7 @@ function trigramCte(count: number): string {
             SELECT c.id
               FROM knowledge_chunks c
              WHERE c.document_id = d.id
-               AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, true)))
+               AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, false)))
              ORDER BY c.ordinal
              LIMIT 1
           ) first
@@ -249,7 +250,7 @@ export async function pgvectorCandidates(
            ON d.id = c.document_id AND (d.user_id = $1 OR d.product_verified)
          LEFT JOIN knowledge_collections k ON k.id = d.collection_id
         WHERE c.embedding IS NOT NULL
-          AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, true)))
+          AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, false)))
         ORDER BY c.embedding <=> $4::vector, c.id
         LIMIT $5`,
       [...scopeValues(scope), `[${vector.join(",")}]`, limit],
@@ -276,7 +277,7 @@ export async function hydrateChunks(db: Database, scope: SearchScope, ids: reado
            ON d.id = c.document_id AND (d.user_id = $1 OR d.product_verified)
          LEFT JOIN knowledge_collections k ON k.id = d.collection_id
         WHERE c.id = ANY($4::bigint[])
-          AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, true)))`,
+          AND ((c.user_id = $1 AND $2::boolean) OR (c.product_verified AND $3::boolean AND COALESCE(k.enabled, false)))`,
       [...scopeValues(scope), ids],
     ),
   );
@@ -290,19 +291,21 @@ export async function hydrateChunks(db: Database, scope: SearchScope, ids: reado
  */
 export async function neighborChunks(
   db: Database,
-  userId: number,
+  scope: SearchScope,
   wanted: ReadonlyArray<{ documentId: string; ordinal: number }>,
 ): Promise<NeighborRow[]> {
   if (!wanted.length) return [];
   const { rows } = await db.withUserScope(
-    { userId, label: "knowledge.search.neighbors", inherit: true },
+    { userId: scope.userId, label: "knowledge.search.neighbors", inherit: true },
     async () => await db.query<NeighborRow>(
       `SELECT c.document_id::text AS document_id, c.ordinal, c.content
          FROM knowledge_chunks c
          JOIN unnest($2::uuid[], $3::integer[]) AS want(document_id, ordinal)
            ON want.document_id = c.document_id AND want.ordinal = c.ordinal
-        WHERE c.user_id = $1 OR c.product_verified`,
-      [userId, wanted.map((item) => item.documentId), wanted.map((item) => item.ordinal)],
+         JOIN knowledge_documents d ON d.id = c.document_id AND (d.user_id = $1 OR d.product_verified)
+         LEFT JOIN knowledge_collections k ON k.id = d.collection_id
+        WHERE (c.user_id = $1 AND $4::boolean) OR (c.product_verified AND $5::boolean AND COALESCE(k.enabled, false))`,
+      [scope.userId, wanted.map((item) => item.documentId), wanted.map((item) => item.ordinal), scope.privateEnabled, scope.globalEnabled],
     ),
   );
   return rows;
@@ -334,4 +337,79 @@ export async function enabledCollections(db: Database): Promise<string[]> {
       WHERE enabled`,
   );
   return rows.map((row) => row.id);
+}
+
+/** Прежний SQL-поиск, вынесен без изменения в общий модуль запросов. */
+export interface LegacyHitRow {
+  document_id: string;
+  document_name: string;
+  ordinal: number;
+  content: string;
+  score: string | number;
+  matched: string;
+}
+
+export async function legacyCandidates(
+  db: Database, scope: SearchScope, clean: string, limit: number, vector: string | null,
+): Promise<LegacyHitRow[]> {
+  const { rows } = await db.withUserScope(
+    { userId: scope.userId, label: "knowledge.search", inherit: true },
+    async () => await db.query<LegacyHitRow>(
+      `WITH ask AS (
+         SELECT websearch_to_tsquery('simple', $2) AS tsq
+       ),
+       visible AS (
+         SELECT c.id, c.document_id, c.ordinal, c.content, c.embedding
+           FROM knowledge_chunks c
+           JOIN knowledge_documents d
+             ON d.id = c.document_id AND (d.user_id = $1 OR d.product_verified)
+           LEFT JOIN knowledge_collections k ON k.id = d.collection_id
+          WHERE (c.user_id = $1 AND $6::boolean)
+             OR (c.product_verified AND $7::boolean AND COALESCE(k.enabled, false))
+       ),
+       fts AS (
+         SELECT v.id,
+                row_number() OVER (
+                  ORDER BY ts_rank(to_tsvector('simple', v.content), ask.tsq) DESC, v.id
+                ) AS position
+           FROM visible v, ask
+          WHERE to_tsvector('simple', v.content) @@ ask.tsq
+          LIMIT $3
+       ),
+       vec AS (
+         SELECT v.id,
+                row_number() OVER (ORDER BY v.embedding <=> $4::vector, v.id) AS position
+           FROM visible v
+          WHERE $4::vector IS NOT NULL AND v.embedding IS NOT NULL
+          ORDER BY v.embedding <=> $4::vector
+          LIMIT $3
+       ),
+       fused AS (
+         SELECT COALESCE(fts.id, vec.id) AS id,
+                COALESCE(1.0 / ($5 + fts.position), 0)
+                  + COALESCE(1.0 / ($5 + vec.position), 0) AS score,
+                CASE
+                  WHEN fts.id IS NOT NULL AND vec.id IS NOT NULL THEN 'both'
+                  WHEN fts.id IS NOT NULL THEN 'fts'
+                  ELSE 'vector'
+                END AS matched
+           FROM fts FULL OUTER JOIN vec ON vec.id = fts.id
+       )
+       SELECT c.document_id,
+              d.name AS document_name,
+              c.ordinal,
+              c.content,
+              fused.score,
+              fused.matched
+         FROM fused
+         JOIN knowledge_chunks c ON c.id = fused.id
+         JOIN knowledge_documents d
+           ON d.id = c.document_id AND (d.user_id = $1 OR d.product_verified)
+        WHERE c.user_id = $1 OR c.product_verified
+        ORDER BY fused.score DESC, c.document_id, c.ordinal
+        LIMIT $3`,
+      [scope.userId, clean, limit, vector, RRF_K, scope.privateEnabled, scope.globalEnabled],
+    ),
+  );
+  return rows;
 }

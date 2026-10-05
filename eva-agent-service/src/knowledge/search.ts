@@ -33,7 +33,6 @@ import {
   diversify,
   fuseRankedLists,
   pagesOf,
-  RRF_K,
   sectionPathOf,
   trigramTerms,
   type KnowledgeSignal,
@@ -43,6 +42,7 @@ import {
   activeEmbeddingVersion,
   enabledCollections,
   hydrateChunks,
+  legacyCandidates,
   lexicalCandidates,
   neighborChunks,
   pgvectorCandidates,
@@ -132,15 +132,6 @@ export interface KnowledgeSearchDeps {
   vectorTimeoutMs?: number;
 }
 
-interface HitRow {
-  document_id: string;
-  document_name: string;
-  ordinal: number;
-  content: string;
-  score: string | number;
-  matched: string;
-}
-
 /** Кандидатов от каждого способа: задание — «top 20–40» до слияния. */
 const CANDIDATES = 30;
 /** Сколько слитых кандидатов читать из PostgreSQL: с запасом на отсеянные. */
@@ -153,7 +144,7 @@ const RERANK_DOCUMENT_CHARS = 4_000;
 const RERANK_TIMEOUT_MS = 4_000;
 /** Итог конвейера — «final top 5–10». */
 const MAX_FINAL = 10;
-/** Активная версия и коллекции меняются редко: перечитываются раз в 30 секунд. */
+/** Коллекции кэшируются; гидратация повторно проверяет их видимость. */
 const CATALOG_TTL_MS = 30_000;
 /** Векторная половина в интерактивном ходе: вектор запроса и поиск по индексу. */
 const VECTOR_TIMEOUT_MS = 8_000;
@@ -168,7 +159,7 @@ type VectorOutcome =
   | { ok: false };
 
 export class KnowledgeSearch {
-  private catalog: { at: number; version: ActiveVersion | null; collections: string[] } | null = null;
+  private catalog: { at: number; collections: string[] } | null = null;
   private shadowRunning = 0;
 
   constructor(
@@ -233,65 +224,7 @@ export class KnowledgeSearch {
         vector = null;
       }
     }
-    const { rows } = await this.db.withUserScope(
-      { userId: scope.userId, label: "knowledge.search", inherit: true },
-      async () => await this.db.query<HitRow>(
-        `WITH ask AS (
-           SELECT websearch_to_tsquery('simple', $2) AS tsq
-         ),
-         visible AS (
-           SELECT c.id, c.document_id, c.ordinal, c.content, c.embedding
-             FROM knowledge_chunks c
-             JOIN knowledge_documents d
-               ON d.id = c.document_id AND (d.user_id = $1 OR d.product_verified)
-             LEFT JOIN knowledge_collections k ON k.id = d.collection_id
-            WHERE (c.user_id = $1 AND $6::boolean)
-               OR (c.product_verified AND $7::boolean AND COALESCE(k.enabled, true))
-         ),
-         fts AS (
-           SELECT v.id,
-                  row_number() OVER (
-                    ORDER BY ts_rank(to_tsvector('simple', v.content), ask.tsq) DESC, v.id
-                  ) AS position
-             FROM visible v, ask
-            WHERE to_tsvector('simple', v.content) @@ ask.tsq
-            LIMIT $3
-         ),
-         vec AS (
-           SELECT v.id,
-                  row_number() OVER (ORDER BY v.embedding <=> $4::vector, v.id) AS position
-             FROM visible v
-            WHERE $4::vector IS NOT NULL AND v.embedding IS NOT NULL
-            ORDER BY v.embedding <=> $4::vector
-            LIMIT $3
-         ),
-         fused AS (
-           SELECT COALESCE(fts.id, vec.id) AS id,
-                  COALESCE(1.0 / ($5 + fts.position), 0)
-                    + COALESCE(1.0 / ($5 + vec.position), 0) AS score,
-                  CASE
-                    WHEN fts.id IS NOT NULL AND vec.id IS NOT NULL THEN 'both'
-                    WHEN fts.id IS NOT NULL THEN 'fts'
-                    ELSE 'vector'
-                  END AS matched
-             FROM fts FULL OUTER JOIN vec ON vec.id = fts.id
-         )
-         SELECT c.document_id,
-                d.name AS document_name,
-                c.ordinal,
-                c.content,
-                fused.score,
-                fused.matched
-           FROM fused
-           JOIN knowledge_chunks c ON c.id = fused.id
-           JOIN knowledge_documents d
-             ON d.id = c.document_id AND (d.user_id = $1 OR d.product_verified)
-          WHERE c.user_id = $1 OR c.product_verified
-          ORDER BY fused.score DESC, c.document_id, c.ordinal
-          LIMIT $3`,
-        [scope.userId, clean, limit, vector, RRF_K, scope.privateEnabled, scope.globalEnabled],
-      ),
-    );
+    const rows = await legacyCandidates(this.db, scope, clean, limit, vector);
     return {
       hits: rows.map((row) => ({
         documentId: String(row.document_id),
@@ -375,7 +308,7 @@ export class KnowledgeSearch {
 
     const depth = settings.neighbors;
     const neighbors = depth > 0 && final.length
-      ? await neighborChunks(this.db, scope.userId, neighborKeys(final, depth))
+      ? await neighborChunks(this.db, scope, neighborKeys(final, depth))
       : [];
     // Источник и раздел уходят модели вместе с текстом — их длина входит в бюджет.
     const passages = assemblePassages(
@@ -508,13 +441,15 @@ export class KnowledgeSearch {
     }
   }
 
-  /** Активная версия и включённые коллекции — с коротким кэшем. */
-  private async catalogue(): Promise<NonNullable<KnowledgeSearch["catalog"]>> {
+  /** Версию перечитываем на каждый поиск: после K7 старое пространство не используется. */
+  private async catalogue(): Promise<{ version: ActiveVersion | null; collections: string[] }> {
     const now = Date.now();
-    if (this.catalog && now - this.catalog.at < CATALOG_TTL_MS) return this.catalog;
-    const [version, collections] = await Promise.all([activeEmbeddingVersion(this.db), enabledCollections(this.db)]);
-    this.catalog = { at: now, version, collections };
-    return this.catalog;
+    const [version, collections] = await Promise.all([
+      activeEmbeddingVersion(this.db),
+      this.catalog && now - this.catalog.at < CATALOG_TTL_MS ? this.catalog.collections : enabledCollections(this.db),
+    ]);
+    if (!this.catalog || now - this.catalog.at >= CATALOG_TTL_MS) this.catalog = { at: now, collections };
+    return { version, collections };
   }
 
   private async timedEmbedding<T>(work: () => Promise<T>): Promise<T> {

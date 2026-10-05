@@ -38,7 +38,7 @@ export interface KnowledgeChunk {
   ordinal: number;
   content: string;
   /** Вектор pgvector (1536): прежний поиск и откат, пока поиск не переключён. */
-  embedding: number[];
+  embedding: number[] | null;
   pageStart: number | null;
   pageEnd: number | null;
   section: string | null;
@@ -65,6 +65,8 @@ export interface IngestDependencies {
   embedBatch?(texts: string[], signal?: AbortSignal): Promise<number[][]>;
   /** Текстов в пачке прежних векторов (не больше 64 — предел Router). */
   embedBatchSize?: number;
+  /** Qdrant не зависит от старой модели pgvector; её колонка допускает NULL. */
+  legacyEmbeddings?: boolean;
   persist(chunks: KnowledgeChunk[], signal?: AbortSignal): Promise<void>;
 }
 
@@ -106,14 +108,15 @@ export class DocumentIngestor {
         this.dependencies.chunking ?? { size: 1200, overlap: 120 },
       );
 
-      const vectors = await this.legacyVectors(pieces.map((piece) => piece.content), signal);
+      const vectors = this.dependencies.legacyEmbeddings === false ? null
+        : await this.legacyVectors(pieces.map((piece) => piece.content), signal);
       const chunks: KnowledgeChunk[] = pieces.map((piece, index) => ({
         documentId: request.documentId,
         userId: request.userId,
         productVerified: request.verifiedProduct === true,
         ordinal: piece.ordinal,
         content: piece.content,
-        embedding: vectors[index]!,
+        embedding: vectors ? vectors[index]! : null,
         pageStart: piece.pageStart,
         pageEnd: piece.pageEnd,
         section: piece.section,
