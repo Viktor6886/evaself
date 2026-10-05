@@ -382,15 +382,16 @@ export function buildJobLayer(
       // Восстановление — по возможности и по отдельности: отказ одного не
       // отменяет другое и не оставляет процесс без публикатора и
       // потребителей, иначе «в очереди» осталось бы вообще всё.
-      for (const [message, recover] of [
-        ["Просроченные загрузки доступны для повтора", () => knowledge.recoverExpiredUploads()],
-        ["Незавершённые построения индекса доступны для повтора", () => maintenance.recoverStalledBuilds()],
+      for (const [recovery, message, recover] of [
+        ["uploads", "Просроченные загрузки доступны для повтора", () => knowledge.recoverExpiredUploads()],
+        ["builds", "Незавершённые построения индекса доступны для повтора", () => maintenance.recoverStalledBuilds()],
       ] as const) {
         try {
           const count = await recover();
           if (count) logger.warn(message, { count });
         } catch (error) {
           logger.warn("Восстановление заданий базы знаний не выполнено", {
+            recovery,
             code: error instanceof Error ? error.name : "unknown_error",
           });
         }
