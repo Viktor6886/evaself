@@ -13,6 +13,7 @@ import { IntegrationConfigService } from "./integration-config-service.js";
 import { LlmRouterAdminService } from "./llm-router-service.js";
 import { InternalAgentClient, ProviderService } from "./provider-service.js";
 import { KnowledgeEmbeddingService } from "./knowledge-embedding-service.js";
+import { readKnowledgeUploadsSetting } from "./managed-runtime-config.js";
 import { KnowledgeDocumentsService } from "./knowledge-documents-service.js";
 import { QdrantClient } from "../knowledge/qdrant-client.js";
 import { KnowledgeVectorStore } from "../knowledge/vector-store.js";
@@ -213,9 +214,11 @@ async function main(): Promise<void> {
     // точек и включения версии; без ключа его нет.
     knowledgeDocuments: new KnowledgeDocumentsService(pool, {
       uploadsRoot: "/data/knowledge-uploads",
-      // Тот же флаг, что включает разбор у агента: без исполнителя
-      // загрузка общей базы отказывает сразу, а не висит «в очереди».
-      uploadsEnabled: ["1", "true", "yes", "on"].includes(String(process.env.EVA_KNOWLEDGE_UPLOADS ?? "").toLowerCase()),
+      // Настройка панели действует без пересоздания admin-api. PostgreSQL
+      // имеет приоритет; окружение остаётся bootstrap при отсутствии строки.
+      uploadsEnabled: async () => await readKnowledgeUploadsSetting(pool,
+        ["1", "true", "yes", "on"].includes(String(process.env.EVA_KNOWLEDGE_UPLOADS ?? "").toLowerCase())),
+      uploadsWorkerEnabled: ["1", "true", "yes", "on"].includes(String(process.env.EVA_BULLMQ_JOBS ?? "").toLowerCase()),
       store: process.env.QDRANT_API_KEY
         ? new KnowledgeVectorStore(new QdrantClient({
           url: process.env.EVA_QDRANT_URL || "http://qdrant:6333",

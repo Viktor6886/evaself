@@ -58,7 +58,7 @@ function renderKnowledgeEmbedding() {
     ${field("Индексация", flag(knowledgeSetting("index_enabled")))}
     ${field("Режим поиска", mode)}${field("Источник векторов", source)}${field("Qdrant", qdrant)}
     ${field("Личная / общая база", `${flag(knowledgeSetting("private_enabled"))} / ${flag(knowledgeSetting("global_enabled"))}`)}
-    ${field("Загрузка документов", k.index?.uploads_enabled === undefined ? "неизвестно" : k.index.uploads_enabled ? "доступна" : "выключена (EVA_KNOWLEDGE_UPLOADS)")}
+    ${field("Загрузка документов", k.failed?.index || k.index?.uploads_enabled === undefined ? "неизвестно" : k.index.uploads_enabled ? "доступна" : k.index.uploads_worker_enabled === false ? "обработка файлов выключена" : "выключена — включите в блоке «Загрузка»")}
   </dl>${k.index?.aliases_match_active === false ? '<p class="warn-value">Aliases Qdrant расходятся с активной версией PostgreSQL. Повторите активацию текущей версии для восстановления. Поиск обращается к её физическим коллекциям.</p>' : ""}`;
   $("#knowledge-active-embedding").innerHTML = active ? `<dl class="knowledge-summary">
     ${field("Активная версия", `v${active.version}`)}${field("Провайдер", active.provider_name || active.provider_id)}

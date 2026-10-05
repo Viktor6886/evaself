@@ -73,9 +73,10 @@ export function knowledgeDocumentState(indexStatus: string, indexing: boolean): 
 export class KnowledgeUploadService {
   /** Задания синхронизации удалённых документов: удаление ставится всегда. */
   private readonly documentJobs: KnowledgeIndexScheduler;
-  constructor(private readonly db: Database, private readonly jobs: JobOutbox, private readonly root: string, private readonly maxBytes=10*1024*1024, private readonly indexEnabled: () => boolean = () => false) {
+  constructor(private readonly db: Database, private readonly jobs: JobOutbox, private readonly root: string, private readonly maxBytes=10*1024*1024, private readonly indexEnabled: () => boolean = () => false, private readonly uploadsEnabled: () => boolean = () => true) {
     this.documentJobs = knowledgeIndexScheduler(jobs, () => true);
   }
+  enabled(): boolean { return this.uploadsEnabled(); }
   private async internalUser(telegramId:number):Promise<number>{return await this.db.withSystemScope("verified-identity.resolve",async()=>{const {rows}=await this.db.query<{id:string}>("SELECT id FROM users WHERE telegram_id=$1",[telegramId]);if(!rows[0])throw new Error("upload_user_missing");return Number(rows[0].id);},{inherit:true});}
   /**
    * Загрузка в базу знаний. `idempotencyKey` нужен загрузкам, которые
@@ -84,6 +85,10 @@ export class KnowledgeUploadService {
    * заводит вторую копию того же материала.
    */
   async createFromStream(telegramId:number,input:{name:string;mime:string;stream:Readable;truncated?:()=>boolean;idempotencyKey?:string;replaces?:string}):Promise<{id:string;status:string}>{
+    if (!this.enabled()) {
+      input.stream.resume();
+      throw new Error("knowledge_disabled");
+    }
     const userId=await this.internalUser(telegramId); if(!ALLOWED.has(input.mime))throw new Error("document_type_unsupported");
     const replaces=input.replaces??null; if(replaces!==null&&!isKnowledgeId(replaces))throw new Error("document_replaces_invalid");
     const id=input.idempotencyKey?stableUploadId(userId,input.idempotencyKey):randomUUID();

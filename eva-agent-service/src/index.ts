@@ -613,8 +613,10 @@ async function main(): Promise<void> {
 
   // Состояние документа в Mini App зависит от того, включён ли индекс
   // Qdrant: переключатель панели читается при каждом запросе.
-  const knowledgeUploads = jobs && config.knowledgeUploadsEnabled
-    ? new KnowledgeUploadService(db,jobs.outbox,"/data/knowledge-uploads",undefined,()=>config.knowledgeIndexEnabled&&Boolean(config.qdrantApiKey))
+  // Сервис существует вместе с очередью; приём проверяет живую настройку
+  // на каждом запросе, поэтому включение из панели не требует перезапуска.
+  const knowledgeUploads = jobs
+    ? new KnowledgeUploadService(db,jobs.outbox,"/data/knowledge-uploads",undefined,()=>config.knowledgeIndexEnabled&&Boolean(config.qdrantApiKey),()=>config.knowledgeUploadsEnabled)
     : null;
   // Расшифровка аудиофайла сохраняется тем же приёмом, что документ из
   // Mini App: одно хранилище и один поиск на все материалы человека.
@@ -671,9 +673,11 @@ async function main(): Promise<void> {
         ...(typeof x.request_id==="string"?{requestId:x.request_id}:{}),
       })};
     },
-    researchStatus:async(t:number,id:string)=>await research?.status(await internalUser(t),id),
-    researchReport:async(t:number,id:string)=>await research?.report(await internalUser(t),id),
-    researchCancel:async(t:number,id:string)=>({cancelled:await research?.cancel(await internalUser(t),id)??false}),
+    // Сервис приёма теперь существует и при выключенном флаге. Наличие
+    // общего адаптера не означает, что отдельный контур исследований включён.
+    researchStatus:async(t:number,id:string)=>{if(!research)throw badRequest("Исследования отключены");return await research.status(await internalUser(t),id);},
+    researchReport:async(t:number,id:string)=>{if(!research)throw badRequest("Исследования отключены");return await research.report(await internalUser(t),id);},
+    researchCancel:async(t:number,id:string)=>{if(!research)throw badRequest("Исследования отключены");return {cancelled:await research.cancel(await internalUser(t),id)};},
   } : undefined;
 
   const app = buildServer({
