@@ -177,6 +177,14 @@ try {
   assert.equal(await worker.recoverExpiredUploads(), 0, "новая попытка ещё не просрочена");
   await worker.reject((await job("knowledge_ingest", uploaded.id)).envelope, "job_deadline_exceeded");
   assert.equal((await uploadState()).status, "failed", "отказ до handler становится виден в панели");
+  // Повтор, который публикатор так и не поставил в очередь (до исправления
+  // jobId так кончался каждый «Повторить»): recovery даёт понятный код.
+  await admin(async () => await documents.retryUpload(uploaded.id));
+  const unpublished = (await job("knowledge_ingest", uploaded.id)).envelope;
+  assert.ok(unpublished.idempotencyKey.split(":").length > 3, "ключ повтора несёт двоеточие в различителе");
+  await admin(async () => await pool.query("UPDATE job_outbox SET status='dead', error_code='Error' WHERE idempotency_key=$1", [unpublished.idempotencyKey]));
+  assert.equal(await worker.recoverExpiredUploads(), 1);
+  assert.deepEqual(await uploadState(), { status: "failed", error_code: "job_publish_failed" });
   await admin(async () => await documents.retryUpload(uploaded.id));
   await worker.run(await job("knowledge_ingest", uploaded.id));
   await worker.reject((await job("knowledge_ingest", uploaded.id)).envelope, "job_deadline_exceeded");
@@ -258,6 +266,21 @@ try {
   await admin(async () => await documents.updateCollection(collection.id, { enabled: true }));
 
   const second = await createVersion("ci-psychology-12");
+  // Построение, чья порция не попала в очередь (так кончалось каждое
+  // «Построить индекс» до исправления jobId): версия не «строится» вечно.
+  const secondState = async () => (await pool.query("SELECT status, error_code FROM knowledge_embedding_versions WHERE version=$1", [second.version])).rows[0];
+  await admin(async () => await documents.build(second.version, { full: true }));
+  const stalled = (await job("knowledge_rebuild", second.version)).envelope;
+  assert.ok(stalled.idempotencyKey.split(":").length > 3, "ключ порции несёт двоеточие в различителе");
+  assert.equal(await maintenance.recoverStalledBuilds(), 0, "живое построение не трогается");
+  await admin(async () => await pool.query("UPDATE job_outbox SET status='dead', error_code='Error' WHERE idempotency_key=$1", [stalled.idempotencyKey]));
+  assert.equal(await maintenance.recoverStalledBuilds(), 1);
+  assert.deepEqual(await secondState(), { status: "failed", error_code: "job_publish_failed" });
+  assert.equal((await admin(async () => await documents.indexOverview())).versions.find((v) => v.version === second.version).building, false,
+    "панель снова показывает кнопку построения");
+  await admin(async () => await documents.build(second.version, { full: true }));
+  await maintenance.rejectRebuild(stalled, "job_deadline_exceeded");
+  assert.deepEqual(await secondState(), { status: "building", error_code: null }, "отказ старой порции не трогает новое построение");
   await build(second.version);
   const switched = await Promise.allSettled([
     admin(async () => await documents.activate(second.version, { expected_active_version: first.version })),

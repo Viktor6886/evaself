@@ -35,6 +35,7 @@ node --test --experimental-strip-types test/*.test.ts        # full regression
 | `src/delivery/inbox.ts`, `dispatcher.ts`, `aggregator.ts` | `parallel-inbox.test.ts`, `delivery.test.ts` |
 | `src/delivery/outbox.ts`, `priority.ts`, `telegram-limits.ts`, `retry-after.ts` | `parallel-outbox.test.ts`, `step06-distributed-delivery.test.ts` |
 | `src/jobs/` (слой) | `jobs-foundation.test.ts` |
+| `src/jobs/bullmq-driver.ts`, `consumer.ts`, `index.ts` (обработка отказов) | `job-consumer.test.ts`, `jobs-foundation.test.ts` (настоящий BullMQ — `scripts/ci/test-bullmq-job-ids.mjs`) |
 | `src/jobs/proactive/`, `agent-job.ts`, `maintenance.ts`, `mirror.ts` | `jobs-proactive.test.ts` |
 | `src/background.ts`, `src/time/cron.ts` | `runtime.test.ts`, `conversations.test.ts` |
 | `src/tools/task-tools.ts`, выборки задач планировщика | `task-reminders.test.ts`, `task-bulk-regression.test.ts`, `agent-tools.test.ts` |
@@ -104,6 +105,8 @@ node --test --experimental-strip-types test/*.test.ts        # full regression
   `test-effect-journal.sql` — семантика `SKIP LOCKED`, `ON CONFLICT`,
   сравнение кортежей;
 - `scripts/ci/test-distributed-limits.mjs` — атомарность лимитов на Valkey;
+- `scripts/ci/test-bullmq-job-ids.mjs` — настоящий BullMQ принимает каждый jobId,
+  который публикует outbox (фейковый драйвер тестов принимает любой);
 - прогон миграций и цикл down/up;
 - smoke-стенд всего набора сервисов.
 

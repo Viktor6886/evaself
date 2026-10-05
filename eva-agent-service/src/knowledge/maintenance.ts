@@ -30,9 +30,10 @@ import type { Database } from "../db.js";
 import type { JobOutbox, JobOutboxClient } from "../jobs/job-outbox.js";
 import { jobIdempotencyKey } from "../jobs/job-outbox.js";
 import type { JobTimingPolicy } from "../jobs/policy.js";
+import type { JobEnvelope } from "../jobs/envelope.js";
 import type { JobContext } from "../jobs/runtime.js";
 import { isKnowledgeId } from "./documents.js";
-import { errorCode, type KnowledgeIndexer, type KnowledgeIndexScheduler } from "./indexer.js";
+import { errorCode, KNOWLEDGE_JOB_DEADLINE_MS, KNOWLEDGE_PUBLISH_FAILED, type KnowledgeIndexer, type KnowledgeIndexScheduler } from "./indexer.js";
 import { recordKnowledgeReconcile, setKnowledgePoints, setKnowledgeRebuildProgress } from "./metrics.js";
 import { withKnowledgeIndexWrite } from "./version-validation.js";
 import { QdrantError } from "./qdrant-client.js";
@@ -90,7 +91,7 @@ export async function scheduleKnowledgeRebuild(
       full: input.full,
       after: input.after,
     },
-    deadlineMs: 25 * 60_000,
+    deadlineMs: KNOWLEDGE_JOB_DEADLINE_MS,
     timezone: "UTC",
     source: "system",
     privacy: "standard",
@@ -134,7 +135,7 @@ export async function scheduleKnowledgeReconcile(outbox: OutboxRecord, client: J
     traceId: `reconcile-${requestedAt}`,
     idempotencyKey: jobIdempotencyKey({ type: KNOWLEDGE_RECONCILE_JOB, userId: null, discriminator: `manual:${requestedAt}` }),
     payload: {},
-    deadlineMs: 25 * 60_000,
+    deadlineMs: KNOWLEDGE_JOB_DEADLINE_MS,
     timezone: "UTC",
     source: "system",
     privacy: "standard",
@@ -342,6 +343,63 @@ export class KnowledgeMaintenance {
 
   private async startRebuild(client: JobOutboxClient, version: number, full: boolean): Promise<void> {
     await startKnowledgeRebuild(this.options.outbox, client, version, full);
+  }
+
+  /**
+   * Порция перестройки не дошла до обработчика: не попала в очередь или
+   * её срок истёк в очереди. Отмечается так же, как отказ последней
+   * попытки, и только текущее незавершённое построение. Без отметки версия
+   * навсегда оставалась «строится», а панель прячет кнопку построения у
+   * строящейся версии.
+   */
+  async rejectRebuild(envelope: JobEnvelope, code: string): Promise<void> {
+    const payload = envelope.payload as { version?: unknown; started?: unknown };
+    const version = Number(payload.version);
+    const started = Number(payload.started);
+    if (!Number.isSafeInteger(version) || version <= 0 || !Number.isSafeInteger(started)) return;
+    await this.db.withSystemScope("knowledge.rebuild", async () => await this.db.query(
+      `UPDATE knowledge_embedding_versions
+          SET error_code = $3,
+              status = CASE WHEN status = 'building' THEN 'failed' ELSE status END
+        WHERE version = $1 AND (extract(epoch FROM build_started_at) * 1000)::bigint = $2
+          AND (built_at IS NULL OR build_started_at > built_at)`,
+      [version, started, code],
+    ));
+  }
+
+  /**
+   * Построения, чья последняя порция уже не выполнится: строка outbox
+   * `dead` (задание не попало в очередь) или срок истёк, а действующей
+   * аренды нет. Получают код и кнопку «Перестроить» после перезапуска.
+   */
+  async recoverStalledBuilds(): Promise<number> {
+    const { rows } = await this.db.withSystemScope("knowledge.rebuild.recover", async () => await this.db.query<{ version: number }>(
+      `UPDATE knowledge_embedding_versions v
+          SET error_code = CASE WHEN o.status = 'dead' THEN $2::text ELSE 'job_deadline_exceeded' END,
+              status = CASE WHEN v.status = 'building' THEN 'failed' ELSE v.status END
+         FROM (
+           SELECT DISTINCT ON (envelope->'payload'->>'version')
+                  envelope, idempotency_key, status
+             FROM job_outbox
+             -- tenant: system — задания перестройки общие, владельца у них нет
+            WHERE job_type = $1 AND user_id IS NULL
+            ORDER BY envelope->'payload'->>'version', created_at DESC, id DESC
+         ) o
+        WHERE o.envelope->'payload'->>'version' = v.version::text
+          AND o.envelope->'payload'->>'started' = ((extract(epoch FROM v.build_started_at) * 1000)::bigint)::text
+          AND v.error_code IS NULL
+          AND (v.built_at IS NULL OR v.build_started_at > v.built_at)
+          AND (o.status = 'dead' OR (o.envelope->>'deadlineAt')::timestamptz <= now())
+          AND NOT EXISTS (
+            SELECT 1 FROM job_runs r
+             -- tenant: system — аренда задания перестройки без владельца
+             WHERE r.job_id = o.idempotency_key AND r.user_id IS NULL
+               AND r.status = 'running' AND r.lease_until > now()
+          )
+        RETURNING v.version`,
+      [KNOWLEDGE_REBUILD_JOB, KNOWLEDGE_PUBLISH_FAILED],
+    ), { crossUser: true });
+    return rows.length;
   }
 
   async rebuild(context: JobContext): Promise<{ status: "continued" | "done" | "stale"; processed: number }> {
