@@ -2,8 +2,14 @@ ARG NODE_BASE_IMAGE=node
 ARG NODE_BASE_VERSION=22.22-bookworm-slim
 ARG DOCKER_CLI_IMAGE=docker
 ARG DOCKER_CLI_VERSION=28.5.2-cli
+ARG CLAMAV_SIGNATURE_IMAGE=clamav/clamav:1.4.6@sha256:57deb108fc4c72778aa83eafbca7bb7153e28c3f57c005afd38d31f16da86f23
 
 FROM ${DOCKER_CLI_IMAGE}:${DOCKER_CLI_VERSION} AS docker-cli
+
+# Только подписанные базы, не демон и не библиотеки этого образа. Debian
+# ставит scanner без баз; freshclam при сборке/старте зависит от CDN,
+# который может отвечать 403. Первый документ должен проверяться offline.
+FROM --platform=linux/amd64 ${CLAMAV_SIGNATURE_IMAGE} AS clamav-signatures
 
 # ---------------------------------------------------------------------
 # Build stage: install everything, compile TypeScript, run the tests.
@@ -58,10 +64,11 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/assets ./assets
 COPY --from=build /app/package.json ./package.json
+COPY --from=clamav-signatures --chown=node:node /var/lib/clamav/ /var/lib/clamav/
 COPY docker-entrypoint.sh /usr/local/bin/evaself-entrypoint
 
 RUN mkdir -p /data/letta-config/providers /data/llm-control /data/knowledge-uploads \
- && chown -R node:node /data/letta-config /data/llm-control /data/knowledge-uploads \
+ && chown -R node:node /data/letta-config /data/llm-control /data/knowledge-uploads /var/lib/clamav \
  && chmod 0755 /usr/local/bin/evaself-entrypoint
 
 # Выделенная группа для Unix-сокета updater. Сокет создаёт eva-updater
@@ -77,7 +84,7 @@ EXPOSE 8070
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=5 \
     CMD node -e "fetch('http://127.0.0.1:'+(process.env.EVA_AGENT_PORT||8070)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/evaself-entrypoint"]
+ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/usr/local/bin/evaself-entrypoint"]
 CMD ["node", "dist/index.js"]
 
 # Docker CLI и Compose нужны только доверенному updater-процессу для

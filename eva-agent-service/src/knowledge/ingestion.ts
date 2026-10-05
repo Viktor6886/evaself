@@ -14,6 +14,7 @@
  * а с ними и разделов, после этого не оставалось.
  */
 
+import { execFile } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -49,6 +50,18 @@ export interface KnowledgeChunk {
 }
 
 export type AntivirusResult = "clean" | "infected" | "unavailable";
+
+/** ClamAV: отсутствие базы и ошибка scanner никогда не считаются чистым файлом. */
+export async function scanKnowledgeDocument(path: string, signal?: AbortSignal): Promise<AntivirusResult> {
+  signal?.throwIfAborted();
+  const result = await new Promise<AntivirusResult>((resolve) => {
+    execFile("clamscan", ["--no-summary", path], { signal, timeout: 60_000, killSignal: "SIGKILL" }, (error) => {
+      resolve(!error ? "clean" : error.code === 1 ? "infected" : "unavailable");
+    });
+  });
+  signal?.throwIfAborted();
+  return result;
+}
 
 export interface IngestDependencies {
   tempRoot: string;

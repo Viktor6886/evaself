@@ -253,6 +253,7 @@ services:
       args:
         NODE_BASE_IMAGE: ${NODE_BASE_IMAGE}
         NODE_BASE_VERSION: ${NODE_BASE_VERSION}
+        CLAMAV_SIGNATURE_IMAGE: ${CLAMAV_SIGNATURE_IMAGE}
     image: evaself/eva-agent-service:0.3.0
     container_name: evaself-eva-agent-service
     # The ONLY component that talks to the Letta App Server, and it does so
@@ -431,6 +432,7 @@ services:
       # пропадали при пересоздании контейнера, а новая нарезка (другая длина
       # фрагмента) и перестройка индекса начинаются с исходного документа.
       - knowledge_files:/data/knowledge-uploads
+      - clamav_signatures:/var/lib/clamav
     networks: [edge, data, agent, tools, browser, vector]
     depends_on:
       postgres:
@@ -466,6 +468,7 @@ services:
       args:
         NODE_BASE_IMAGE: ${NODE_BASE_IMAGE}
         NODE_BASE_VERSION: ${NODE_BASE_VERSION}
+        CLAMAV_SIGNATURE_IMAGE: ${CLAMAV_SIGNATURE_IMAGE}
     image: evaself/eva-agent-service:0.3.0
     container_name: evaself-admin-bootstrap
     restart: "no"
@@ -497,6 +500,7 @@ services:
       args:
         NODE_BASE_IMAGE: ${NODE_BASE_IMAGE}
         NODE_BASE_VERSION: ${NODE_BASE_VERSION}
+        CLAMAV_SIGNATURE_IMAGE: ${CLAMAV_SIGNATURE_IMAGE}
     image: evaself/eva-agent-service:0.3.0
     container_name: evaself-admin-api
     environment:
@@ -588,6 +592,7 @@ services:
       args:
         NODE_BASE_IMAGE: ${NODE_BASE_IMAGE}
         NODE_BASE_VERSION: ${NODE_BASE_VERSION}
+        CLAMAV_SIGNATURE_IMAGE: ${CLAMAV_SIGNATURE_IMAGE}
         DOCKER_CLI_IMAGE: ${DOCKER_CLI_IMAGE}
         DOCKER_CLI_VERSION: ${DOCKER_CLI_VERSION}
     image: evaself/eva-updater:0.1.0
@@ -624,6 +629,7 @@ services:
       args:
         NODE_BASE_IMAGE: ${NODE_BASE_IMAGE}
         NODE_BASE_VERSION: ${NODE_BASE_VERSION}
+        CLAMAV_SIGNATURE_IMAGE: ${CLAMAV_SIGNATURE_IMAGE}
     image: evaself/eva-agent-service:0.3.0
     container_name: evaself-health-worker
     environment:
@@ -671,6 +677,7 @@ services:
       args:
         NODE_BASE_IMAGE: ${NODE_BASE_IMAGE}
         NODE_BASE_VERSION: ${NODE_BASE_VERSION}
+        CLAMAV_SIGNATURE_IMAGE: ${CLAMAV_SIGNATURE_IMAGE}
     image: evaself/eva-agent-service:0.3.0
     container_name: evaself-llm-router
     environment:
@@ -1089,6 +1096,9 @@ volumes:
   # входят: это данные людей, а не производный индекс.
   knowledge_files:
     name: evaself_knowledge_files
+  # Восстановимый кэш антивирусных баз; исходных файлов в нём нет.
+  clamav_signatures:
+    name: evaself_clamav_signatures
   admin_updater_socket:
     name: evaself_admin_updater_socket
   searxng_cache:

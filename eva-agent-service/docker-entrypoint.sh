@@ -1,12 +1,19 @@
 #!/bin/sh
 set -eu
 
-# Signature refresh is a build/maintenance concern: service boot must work
-# offline with the image's existing database. Ingestion alone fails closed.
-if [ "${EVA_LANGCHAIN:-false}" = "true" ]; then
-	command -v clamscan >/dev/null 2>&1 || { echo "ClamAV scanner missing" >&2; exit 1; }
-	set -- $(find /var/lib/clamav -maxdepth 1 -type f \( -name '*.cvd' -o -name '*.cld' \) | wc -l)
-	[ "$1" -gt 0 ] || { echo "ClamAV signatures missing" >&2; exit 1; }
+# The image includes signatures; refreshing them never blocks service boot.
+# Only the agent worker maintains the shared cache, not every process using
+# this image. Foreground mode keeps freshclam in tini's signal process group.
+if [ "${1:-}" = "node" ] && [ "${2:-}" = "dist/index.js" ] &&
+	[ "${EVA_BULLMQ_JOBS:-true}" = "true" ]; then
+	if [ "$(id -u)" -eq 0 ]; then
+		chown node:node /var/lib/clamav
+		gosu node freshclam --daemon --foreground --checks=4 --quiet \
+			--config-file=/app/assets/freshclam.conf &
+	else
+		freshclam --daemon --foreground --checks=4 --quiet \
+			--config-file=/app/assets/freshclam.conf &
+	fi
 fi
 
 # Host key stays root-only. When an admin process needs it, copy it into the

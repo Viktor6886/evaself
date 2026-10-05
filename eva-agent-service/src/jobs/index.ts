@@ -53,6 +53,8 @@ import { OsintWorkerClient } from "../osint/worker-client.js";
 import { jobProcessor } from "./consumer.js";
 import type { JobQueueDriver, JobQueueName } from "./queue-registry.js";
 import { KnowledgeIngestWorker, KNOWLEDGE_INGEST_JOB, KNOWLEDGE_INGEST_TIMING } from "../knowledge/lifecycle.js";
+import { scanKnowledgeDocument } from "../knowledge/ingestion.js";
+import { parseJobEnvelope } from "./envelope.js";
 import { KNOWLEDGE_INDEX_JOB, KNOWLEDGE_INDEX_TIMING, KnowledgeIndexer, knowledgeIndexScheduler } from "../knowledge/indexer.js";
 import {
   KNOWLEDGE_MAINTENANCE_TIMING,
@@ -63,7 +65,6 @@ import {
 import { QdrantClient } from "../knowledge/qdrant-client.js";
 import { KnowledgeVectorStore } from "../knowledge/vector-store.js";
 import { LlmRouterClient } from "../router/client.js";
-import { execFile } from "node:child_process";
 
 export interface JobLayer {
   registry: QueueRegistry;
@@ -168,10 +169,7 @@ export function buildJobLayer(
     embedBatchSize: () => config.knowledgeEmbeddingBatch,
     chunking: () => ({ size: config.knowledgeChunkSize, overlap: config.knowledgeChunkOverlap }),
     index: scheduler,
-    scan: async (path) => await new Promise<"clean" | "infected" | "unavailable">((resolve) => execFile("clamscan", ["--no-summary", path], (error) => {
-      const code = (error as unknown as { code?: number })?.code;
-      resolve(!error ? "clean" : code === 1 ? "infected" : "unavailable");
-    })),
+    scan: scanKnowledgeDocument,
   });
   const store = new KnowledgeVectorStore(new QdrantClient({ url: config.qdrantUrl || "http://qdrant:6333", apiKey: config.qdrantApiKey ?? "" }));
   const indexer = new KnowledgeIndexer(db, router, store, {
@@ -368,13 +366,20 @@ export function buildJobLayer(
       // томом Valkey, должно вернуться раньше, чем слой начнёт работу.
       const summary = await schedules.reconcile();
       logger.info("Расписания заданий сверены", { ...summary });
+      const expiredUploads = await knowledge.recoverExpiredUploads();
+      if (expiredUploads) logger.warn("Просроченные загрузки доступны для повтора", { count: expiredUploads });
       logger.info("Ступень переноса проактивных задач", {
         stage,
         legacyScheduler: legacySchedulerActive(stage),
         handlers: runtime.registeredTypes,
       });
       outbox.start();
-      const processor = jobProcessor(runtime);
+      const processor = jobProcessor(runtime, async (data, code) => {
+        const parsed = parseJobEnvelope(data);
+        if (parsed.ok && parsed.envelope.type === KNOWLEDGE_INGEST_JOB) {
+          await knowledge.reject(parsed.envelope, code);
+        }
+      });
       for (const [queue, concurrency] of consumed) registry.consume(queue, processor, concurrency);
     },
     async stop(drainMs: number): Promise<void> {
