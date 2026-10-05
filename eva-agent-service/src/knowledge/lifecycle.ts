@@ -11,7 +11,7 @@ import type { Readable } from "node:stream";
 import type { ChunkingOptions } from "./chunking.js";
 import { deleteKnowledgeDocuments, isKnowledgeId, knowledgeOwner, knowledgeUploadPath, type KnowledgeOwner } from "./documents.js";
 import { DocumentIngestor, type KnowledgeChunk } from "./ingestion.js";
-import { errorCode, knowledgeIndexScheduler, type KnowledgeIndexScheduler } from "./indexer.js";
+import { errorCode, KNOWLEDGE_JOB_DEADLINE_MS, KNOWLEDGE_PUBLISH_FAILED, knowledgeIndexScheduler, type KnowledgeIndexScheduler } from "./indexer.js";
 
 export const KNOWLEDGE_INGEST_JOB = "knowledge_ingest";
 /** Что принимается в базу знаний: и в личную (Mini App, Telegram), и в общую (панель). */
@@ -41,7 +41,7 @@ export async function recordKnowledgeIngest(
     }),
     payloadRef: input.uploadId,
     payload: { upload_id: input.uploadId },
-    deadlineMs: 10 * 60_000,
+    deadlineMs: KNOWLEDGE_JOB_DEADLINE_MS,
     timezone: "UTC",
     source: input.userId === null ? "system" : "user",
     privacy: "restricted",
@@ -282,15 +282,18 @@ export class KnowledgeIngestWorker {
     ));
   }
 
-  /** Старые очереди уже могли закрыть задание: восстановить доступность кнопки повтора. */
+  /**
+   * Старые очереди уже могли закрыть задание: восстановить доступность
+   * кнопки повтора. `dead` в outbox ставит только публикатор — задание
+   * в очередь не попало.
+   */
   async recoverExpiredUploads(): Promise<number> {
     return await this.db.withSystemScope("knowledge.ingest.recover", async () => {
       const { rows } = await this.db.query<{ id: string }>(
         `UPDATE knowledge_uploads u
             -- tenant: system — recovery всех владельцев, без чтения содержимого
             SET status='failed', completed_at=now(),
-                error_code=CASE WHEN o.status='dead' THEN COALESCE(o.error_code,'knowledge_ingest_rejected')
-                               ELSE 'job_deadline_exceeded' END
+                error_code=CASE WHEN o.status='dead' THEN $2::text ELSE 'job_deadline_exceeded' END
            FROM (
              SELECT DISTINCT ON (user_id, envelope->>'payloadRef')
                     user_id, envelope, idempotency_key, status, error_code
@@ -306,7 +309,7 @@ export class KnowledgeIngestWorker {
                 AND r.status='running' AND r.lease_until > now()
             )
           RETURNING u.id`,
-        [KNOWLEDGE_INGEST_JOB],
+        [KNOWLEDGE_INGEST_JOB, KNOWLEDGE_PUBLISH_FAILED],
       );
       return rows.length;
     }, { crossUser: true });

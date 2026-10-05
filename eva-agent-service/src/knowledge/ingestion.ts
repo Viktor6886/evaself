@@ -51,11 +51,20 @@ export interface KnowledgeChunk {
 
 export type AntivirusResult = "clean" | "infected" | "unavailable";
 
+/**
+ * Предел одного запуска scanner. `clamscan` грузит всю базу сигнатур на
+ * каждый файл: на свободной машине это 25 секунд и около 1 ГБ памяти, на
+ * занятом сервере — в разы дольше. Минуты хватало не всегда, и чистый
+ * файл получал `document_antivirus_unavailable`. Пять минут оставляют
+ * разбору и векторам остаток мягкого срока задания (9 минут).
+ */
+export const KNOWLEDGE_SCAN_TIMEOUT_MS = 5 * 60_000;
+
 /** ClamAV: отсутствие базы и ошибка scanner никогда не считаются чистым файлом. */
 export async function scanKnowledgeDocument(path: string, signal?: AbortSignal): Promise<AntivirusResult> {
   signal?.throwIfAborted();
   const result = await new Promise<AntivirusResult>((resolve) => {
-    execFile("clamscan", ["--no-summary", path], { signal, timeout: 60_000, killSignal: "SIGKILL" }, (error) => {
+    execFile("clamscan", ["--no-summary", path], { signal, timeout: KNOWLEDGE_SCAN_TIMEOUT_MS, killSignal: "SIGKILL" }, (error) => {
       resolve(!error ? "clean" : error.code === 1 ? "infected" : "unavailable");
     });
   });

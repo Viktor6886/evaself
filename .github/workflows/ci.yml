@@ -516,6 +516,13 @@ jobs:
       - name: Distributed limits execute atomically on Valkey
         run: node ../scripts/ci/test-distributed-limits.mjs
 
+      # Unit-тесты подменяют очередь драйвером в памяти, который принимает
+      # любой jobId. Настоящий BullMQ отклонял ключи повтора загрузки,
+      # индексации, перестройки и сверки базы знаний: здесь их строят те
+      # же функции, что и в приложении.
+      - name: BullMQ accepts every job id the outbox publishes
+        run: node ../scripts/ci/test-bullmq-job-ids.mjs
+
       - name: Knowledge vector index on a real Qdrant
         run: |
           grep -qx 'QDRANT_VERSION=v1.19.1-unprivileged' ../versions.env \
