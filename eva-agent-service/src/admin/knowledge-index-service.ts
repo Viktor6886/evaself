@@ -120,7 +120,9 @@ export class KnowledgeIndexService {
       aliases,
       aliases_match_active: aliases ? aliases.private === (active ? Number(active.version) : null)
         && aliases.global === (active ? Number(active.version) : null) : null,
-      uploads_enabled: this.options.uploadsEnabled,
+      uploads_enabled: this.options.uploadsWorkerEnabled !== false
+        && (typeof this.options.uploadsEnabled === "function" ? await this.options.uploadsEnabled() : this.options.uploadsEnabled),
+      uploads_worker_enabled: this.options.uploadsWorkerEnabled !== false,
       private_owners: Number(owners.rows[0]?.total ?? 0),
       scopes,
       versions: viewed,

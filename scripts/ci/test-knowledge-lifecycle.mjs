@@ -21,6 +21,8 @@ import { guardPool } from "../../eva-agent-service/dist/tenancy/guarded-pool.js"
 import { adminScope, runInScope } from "../../eva-agent-service/dist/tenancy/scope.js";
 import { KnowledgeEmbeddingService } from "../../eva-agent-service/dist/admin/knowledge-embedding-service.js";
 import { KnowledgeDocumentsService } from "../../eva-agent-service/dist/admin/knowledge-documents-service.js";
+import { applyManagedRuntimeConfig, readKnowledgeUploadsSetting } from "../../eva-agent-service/dist/admin/managed-runtime-config.js";
+import { loadConfig } from "../../eva-agent-service/dist/config.js";
 import { RouterStore } from "../../eva-agent-service/dist/router/store.js";
 import { RouterEmbeddings } from "../../eva-agent-service/dist/router/embeddings.js";
 import { EmbeddingVersionStore } from "../../eva-agent-service/dist/router/embedding-versions.js";
@@ -81,7 +83,13 @@ const versions = new KnowledgeEmbeddingService(pool, { request: async (_path, in
   const b = JSON.parse(init.body);
   return await embedding.probe({ providerId: b.provider_id, model: b.model, dimension: b.dimension, requestDimensions: b.request_dimensions });
 } });
-const documents = new KnowledgeDocumentsService(pool, { uploadsRoot: root, store, uploadsEnabled: true });
+const uploadSettingKey = "runtime.knowledge_uploads_enabled";
+const originalUploadSetting = (await pool.query("SELECT value_json FROM system_settings WHERE key=$1", [uploadSettingKey])).rows[0];
+const uploadOptions = { uploadsRoot: root, store, uploadsEnabled: async () => await readKnowledgeUploadsSetting(pool, false), uploadsWorkerEnabled: true };
+const documents = new KnowledgeDocumentsService(pool, uploadOptions);
+async function setUploads(enabled) {
+  await pool.query("INSERT INTO system_settings(key,value_json) VALUES($1,$2::jsonb) ON CONFLICT(key) DO UPDATE SET value_json=EXCLUDED.value_json", [uploadSettingKey, JSON.stringify(enabled)]);
+}
 const indexer = new KnowledgeIndexer(db, router, store, { enabled: () => true, configured: () => true, batchSize: () => 32, uploadsRoot: root, jobs: indexJobs });
 const maintenance = new KnowledgeMaintenance(db, store, indexer, { enabled: () => true, configured: () => true, uploadsRoot: root, outbox, index: indexJobs });
 
@@ -139,6 +147,14 @@ try {
 
   const collection = await admin(async () => await documents.createCollection({ code: `ci-psych-${providerId.slice(0, 8)}`, title: "Психология CI" }));
   ownCollections.push(collection.id);
+  await setUploads(false);
+  assert.equal((await admin(async () => await documents.indexOverview())).uploads_enabled, false);
+  await assert.rejects(() => admin(async () => await documents.upload({ collectionId: collection.id, name: "непринято.md", mime: "text/markdown", stream: Readable.from([Buffer.from("флаг выключен")]) })), /Включить загрузку/u);
+  await setUploads(true);
+  assert.equal((await admin(async () => await new KnowledgeDocumentsService(pool, uploadOptions).indexOverview())).uploads_enabled, true, "перезапуск не потерял серверную настройку");
+  const runtime = loadConfig({ EVA_KNOWLEDGE_UPLOADS: "false" });
+  await applyManagedRuntimeConfig(runtime, db);
+  assert.equal(runtime.knowledgeUploadsEnabled, true, "агент продолжил использовать выключенный bootstrap");
   const uploaded = await admin(async () => await documents.upload({ collectionId: collection.id, name: "Саморегуляция.md", mime: "text/markdown",
     stream: Readable.from([Buffer.from("# Прокрастинация\nПрокрастинация — избегание сложных задач ради краткого облегчения неприятных эмоций. Помогают маленький первый шаг и доброжелательная оценка трудностей.")]) }));
   ownDocuments.push(uploaded.id);
@@ -242,9 +258,11 @@ try {
   const fallback = await tool.execute({ query }, { userId: ownUsers[0] });
   assert.equal(fallback.degraded, true);
   assert.ok(fallback.results.some((hit) => hit.content.includes("маленький первый шаг")));
-  console.log("PASS: registry/probe/persist/build/outbox/first activation/K7/rollback/semantic tool/citations/tenant hydration/disabled collection/paused Qdrant fallback/recovery/missing collection fallback");
+  console.log("PASS: registry/probe/persist/build/outbox/first activation/K7/rollback/upload setting persistence/live admission/semantic tool/citations/tenant hydration/disabled collection/paused Qdrant fallback/recovery/missing collection fallback");
   console.log("Embedding upstream and AV are fixtures; autonomous Letta tool choice and final prose require the documented live canary.");
 } finally {
+  if (originalUploadSetting) await setUploads(originalUploadSetting.value_json);
+  else await pool.query("DELETE FROM system_settings WHERE key=$1", [uploadSettingKey]);
   await admin(async () => {
     if (ownDocuments.length) {
       await pool.query("DELETE FROM knowledge_uploads WHERE id=ANY($1::uuid[]) -- tenant: system — только CI-загрузки", [ownDocuments]);

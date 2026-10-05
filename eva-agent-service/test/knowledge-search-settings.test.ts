@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { applyManagedRuntimeConfig, importEnvironmentKnowledgeSettings } from "../dist/admin/managed-runtime-config.js";
+import { applyManagedRuntimeConfig, importEnvironmentKnowledgeSettings, readKnowledgeUploadsSetting } from "../dist/admin/managed-runtime-config.js";
 import { KNOWLEDGE_SETTINGS } from "../dist/admin/settings-registry.js";
 import { loadConfig } from "../dist/config.js";
 import { knowledgeSearchSettings } from "../dist/knowledge/search-settings.js";
@@ -38,6 +38,43 @@ test("умолчания — прежний поиск: legacy, pgvector, без
   const mode = KNOWLEDGE_SETTINGS.find((item) => item.key === "runtime.knowledge_search_mode")!;
   assert.deepEqual(mode.presets?.map((preset) => preset.value), ["legacy", "hybrid", "vector", "lexical"]);
   assert.equal(mode.default, "legacy");
+});
+
+test("загрузка: каноническая настройка включает приём без перезапуска, переживает старт и откатывается к окружению", async () => {
+  const key = "runtime.knowledge_uploads_enabled";
+  const definition = KNOWLEDGE_SETTINGS.find((s) => s.key === key)!;
+  assert.equal(definition.env, "EVA_KNOWLEDGE_UPLOADS");
+  assert.equal(definition.default, false);
+  assert.equal(definition.requires_restart, false);
+  let rows: Array<{ key: string; value_json: unknown }> = [];
+  const db = { query: async () => ({ rows }) };
+  const config = loadConfig({ EVA_KNOWLEDGE_UPLOADS: "false" });
+  await applyManagedRuntimeConfig(config, db as never);
+  assert.equal(config.knowledgeUploadsEnabled, false);
+  assert.equal(await readKnowledgeUploadsSetting(db as never, false), false);
+  rows = [{ key, value_json: true }];
+  await applyManagedRuntimeConfig(config, db as never);
+  assert.equal(config.knowledgeUploadsEnabled, true);
+  assert.equal(await readKnowledgeUploadsSetting(db as never, false), true);
+  const restarted = loadConfig({ EVA_KNOWLEDGE_UPLOADS: "false" });
+  await applyManagedRuntimeConfig(restarted, db as never);
+  assert.equal(restarted.knowledgeUploadsEnabled, true, "настройка потерялась после старта процесса");
+  rows = [{ key, value_json: false }];
+  await applyManagedRuntimeConfig(config, db as never);
+  assert.equal(config.knowledgeUploadsEnabled, false);
+  assert.equal(await readKnowledgeUploadsSetting(db as never, true), false, "окружение перебило сохранённое false");
+  rows = [];
+  await applyManagedRuntimeConfig(config, db as never);
+  assert.equal(config.knowledgeUploadsEnabled, false);
+  assert.equal(await readKnowledgeUploadsSetting(db as never, true), true);
+  rows = [{ key, value_json: "true" }];
+  assert.equal(await readKnowledgeUploadsSetting(db as never, false), false, "строка ошибочно включила приём");
+  const inserted: unknown[][] = [];
+  await importEnvironmentKnowledgeSettings(loadConfig({ EVA_KNOWLEDGE_UPLOADS: "true" }), { query: async (sql: string, values: unknown[]) => {
+    if (sql.includes("INSERT INTO system_settings")) inserted.push(values);
+    return { rows: [], rowCount: 1 };
+  } } as never);
+  assert.deepEqual(inserted, [[key, "true"]]);
 });
 
 test("окружение: неизвестный режим — legacy, соседей не больше двух", () => {

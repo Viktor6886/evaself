@@ -741,10 +741,12 @@
                 <p class="block-caption">PDF, DOCX, TXT, Markdown, HTML, JSON — до 10 МБ каждый. Тот же файл второй раз не добавится («дубликат»), файл с тем же именем в коллекции станет новой версией документа.</p>
               </div>
             </div>
+            <p id="knowledge-upload-availability" class="block-caption" aria-live="polite"></p>
+            <button class="button ghost" id="knowledge-upload-toggle" type="button" hidden>Включить загрузку</button>
             <div class="knowledge-drop" id="knowledge-drop">
               <label>Коллекция <select id="knowledge-upload-collection" aria-label="Коллекция для загрузки"></select></label>
               <input type="file" id="knowledge-file" multiple hidden>
-              <button class="button" id="knowledge-upload-button" type="button">Выбрать файлы</button>
+              <button class="button" id="knowledge-upload-button" type="button" aria-describedby="knowledge-upload-availability" disabled>Выбрать файлы</button>
               <span class="block-caption">или перетащите их сюда</span>
               <p id="knowledge-upload-progress" class="block-caption" aria-live="polite"></p>
             </div>

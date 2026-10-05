@@ -31,7 +31,7 @@ type LiveSettings = Pick<
   | "osintEnabled" | "osintRuRegistriesEnabled" | "osintDailyLimit"
   | "osintCollectorMaigret" | "osintCollectorWeb" | "osintCollectorInfrastructure"
   | "osintCollectorHarvester" | "osintCollectorSpiderfoot"
-  | "knowledgeIndexEnabled" | "knowledgeChunkSize" | "knowledgeChunkOverlap" | "knowledgeEmbeddingBatch"
+  | "knowledgeUploadsEnabled" | "knowledgeIndexEnabled" | "knowledgeChunkSize" | "knowledgeChunkOverlap" | "knowledgeEmbeddingBatch"
   | "knowledgeSearchEnabled" | "knowledgeSearchMode" | "knowledgeVectorBackend" | "knowledgeSearchShadow"
   | "knowledgePrivateEnabled" | "knowledgeGlobalEnabled"
   | "knowledgeRerankEnabled" | "knowledgeRerankProvider" | "knowledgeRerankModel" | "knowledgeContextNeighbors"
@@ -54,6 +54,7 @@ const KNOWLEDGE_SEARCH_FIELDS: Array<[string, keyof LiveSettings]> = [
 ];
 /** База знаний: ключ панели → поле конфигурации. Задания читают их при каждом запуске. */
 const KNOWLEDGE_FIELDS: Array<[string, keyof LiveSettings]> = [
+  ["runtime.knowledge_uploads_enabled", "knowledgeUploadsEnabled"],
   ["runtime.knowledge_index_enabled", "knowledgeIndexEnabled"],
   ["runtime.knowledge_chunk_size", "knowledgeChunkSize"],
   ["runtime.knowledge_chunk_overlap", "knowledgeChunkOverlap"],
@@ -71,6 +72,15 @@ const OSINT_FLAGS: Array<[string, keyof LiveSettings]> = [
   ["runtime.osint_collector_spiderfoot", "osintCollectorSpiderfoot"],
 ];
 const bootstrapLiveSettings = new WeakMap<Config, LiveSettings>();
+
+/** Admin-api живёт отдельно от агента и читает канонический флаг при приёме файла. */
+export async function readKnowledgeUploadsSetting(db: Pick<Database, "query">, bootstrap: boolean): Promise<boolean> {
+  const { rows } = await db.query<{ value_json: unknown }>(
+    "SELECT value_json FROM system_settings WHERE key = $1", ["runtime.knowledge_uploads_enabled"],
+  );
+  return typeof rows[0]?.value_json === "boolean" ? rows[0].value_json : bootstrap;
+}
+
 const LIVE_SETTING_FIELDS: Array<[string, keyof LiveSettings]> = [
   ["runtime.audio_file_transcripts", "audioFileTranscriptsEnabled"],
   ["runtime.telegram_stream_mode", "telegramStreamMode"],
@@ -98,6 +108,7 @@ export async function applyManagedRuntimeConfig(
       osintCollectorInfrastructure: config.osintCollectorInfrastructure,
       osintCollectorHarvester: config.osintCollectorHarvester,
       osintCollectorSpiderfoot: config.osintCollectorSpiderfoot,
+      knowledgeUploadsEnabled: config.knowledgeUploadsEnabled,
       knowledgeIndexEnabled: config.knowledgeIndexEnabled,
       knowledgeChunkSize: config.knowledgeChunkSize,
       knowledgeChunkOverlap: config.knowledgeChunkOverlap,
@@ -173,7 +184,10 @@ export async function applyManagedRuntimeConfig(
       case "runtime.osint_daily_limit":
         config.osintDailyLimit = integer(value, config.osintDailyLimit);
         break;
-      // База знаний: индексация читает флаг и нарезку при каждом задании.
+      // Приём файлов читает флаг при каждом запросе, задания — при запуске.
+      case "runtime.knowledge_uploads_enabled":
+        config.knowledgeUploadsEnabled = boolean(value, config.knowledgeUploadsEnabled);
+        break;
       case "runtime.knowledge_index_enabled":
         config.knowledgeIndexEnabled = boolean(value, config.knowledgeIndexEnabled);
         break;

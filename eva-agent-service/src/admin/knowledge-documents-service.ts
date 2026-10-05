@@ -59,11 +59,12 @@ export interface KnowledgeDocumentsOptions {
   /** Том исходных файлов (`/data/knowledge-uploads`). */
   uploadsRoot: string;
   /**
-   * Разбирает ли агент загрузки (`EVA_KNOWLEDGE_UPLOADS`). Выключено —
-   * у задания разбора нет исполнителя, и принятый файл навсегда остался
-   * бы «в очереди»: загрузка отказывает сразу.
+   * Приём новых файлов. Callback читает настройку PostgreSQL на каждом
+   * запросе; boolean оставлен для прежних потребителей сервиса.
    */
-  uploadsEnabled: boolean;
+  uploadsEnabled: boolean | (() => Promise<boolean>);
+  /** Включён ли у агента слой заданий; иначе разбор некому исполнять. */
+  uploadsWorkerEnabled?: boolean;
   /** Коллекции Qdrant; null — ключ Qdrant не задан. */
   store: Pick<KnowledgeVectorStore, "activate" | "countPoints" | "ready" | "activeVersions" | "describe" | "scrollPoints"> | null;
   now?(): number;
@@ -353,7 +354,9 @@ export class KnowledgeDocumentsService {
     let replaces: string | null;
     let name: string;
     try {
-      if (!this.options.uploadsEnabled) throw adminConflict("Загрузка в базу знаний выключена (EVA_KNOWLEDGE_UPLOADS)");
+      if (this.options.uploadsWorkerEnabled === false) throw adminConflict("Обработка файлов выключена: включите EVA_BULLMQ_JOBS и перезапустите сервис агента");
+      const enabled = typeof this.options.uploadsEnabled === "function" ? await this.options.uploadsEnabled() : this.options.uploadsEnabled;
+      if (!enabled) throw adminConflict("Загрузка в базу знаний выключена. Нажмите «Включить загрузку» в разделе «База знаний» (EVA_KNOWLEDGE_UPLOADS)");
       collectionId = uuid(input.collectionId, "collection_id");
       replaces = input.replaces ? uuid(input.replaces, "replaces_document_id") : null;
       name = input.name.trim().slice(0, 255);

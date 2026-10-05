@@ -50,10 +50,11 @@ const RECOMMENDED = {
   "runtime.knowledge_search_mode": "hybrid", "runtime.knowledge_vector_backend": "qdrant",
   "runtime.knowledge_private_enabled": true, "runtime.knowledge_global_enabled": true,
 };
-const SETTINGS = { etag: '"kb-1"', settings: Object.entries(RECOMMENDED).map(([key, value]) => ({ key, title: key,
+const UPLOAD_SETTING = { key: "runtime.knowledge_uploads_enabled", title: "База знаний: загрузка файлов", value: true };
+const SETTINGS = { etag: '"kb-1"', settings: [UPLOAD_SETTING, ...Object.entries(RECOMMENDED).map(([key, value]) => ({ key, title: key,
   value: key.endsWith("search_mode") ? "legacy" : key.endsWith("vector_backend") ? "pgvector" : value,
   presets: typeof value === "boolean" ? undefined : (key.endsWith("search_mode") ? ["legacy", "hybrid", "vector", "lexical"] : ["pgvector", "qdrant"]).map((v) => ({ value: v, title: v })),
-})) };
+}))] };
 const ACTIVE = { ...VERSION, status: "active", activated_at: "2026-09-30T10:00:00Z" };
 const ACTIVE_ROUTES = {
   "/knowledge/embeddings": { ...EMBEDDINGS, active: 2, versions: [ACTIVE] },
@@ -115,6 +116,98 @@ test("загрузка: файлы уходят multipart в выбранную 
   } finally {
     await panel.close();
   }
+});
+
+test("загрузка включается на телефоне, кнопка открывает выбор файла; настройка переживает reload без Qdrant", async () => {
+  let enabled = false;
+  let version = 1;
+  const settings = () => ({ ...SETTINGS, etag: `"cfg-${version}"`, settings: SETTINGS.settings.map((s) =>
+    s.key === UPLOAD_SETTING.key ? { ...s, value: enabled } : s) });
+  const panel = await openPanel({ viewport: PHONE, routes: { ...ROUTES,
+    "/settings": settings,
+    "/knowledge/index": () => ({ ...INDEX, qdrant: false, qdrant_status: "not_configured", uploads_enabled: enabled, uploads_worker_enabled: true }),
+    "PUT /settings": () => {
+      const change = panel.requests.at(-1).body.settings;
+      assert.deepEqual(Object.keys(change), [UPLOAD_SETTING.key], "включение загрузки не меняет режим поиска");
+      enabled = change[UPLOAD_SETTING.key];
+      version += 1;
+      return settings();
+    },
+    "POST /knowledge/uploads": { id: "u1", status: "queued" },
+  } });
+  try {
+    await panel.page.evaluate(() => document.querySelector('[data-page="knowledge"]').click());
+    await panel.page.waitForSelector("#knowledge-upload-toggle:not([hidden])");
+    assert.equal(await panel.page.isDisabled("#knowledge-upload-button"), true);
+    assert.match(await panel.page.textContent("#knowledge-upload-availability"), /Загрузка файлов выключена/);
+    // Сервер входа выдаёт отдельную читаемую CSRF-cookie; мок /me её не ставит.
+    await panel.page.evaluate(() => { document.cookie = "eva_admin_csrf=test-csrf; Path=/; SameSite=Strict"; });
+    let headers;
+    panel.page.on("request", (r) => { if (r.method() === "PUT") headers = r.headers(); });
+    await panel.page.click("#knowledge-upload-toggle");
+    await panel.page.waitForSelector("#knowledge-upload-button:not([disabled])");
+    assert.equal(headers["if-match"], '"cfg-1"');
+    assert.equal(headers["x-csrf-token"], "test-csrf");
+    assert.equal(await panel.page.isDisabled("#knowledge-file"), false);
+    const chooserPromise = panel.page.waitForEvent("filechooser");
+    await panel.page.click("#knowledge-upload-button");
+    const chooser = await chooserPromise;
+    await chooser.setFiles({ name: "Психология.md", mimeType: "text/markdown", buffer: Buffer.from("# Прокрастинация\nСложную задачу можно разделить на шаги.") });
+    const upload = await panel.waitForRequest((r) => r.path === "/knowledge/uploads" && r.method === "POST");
+    assert.match(upload.search, new RegExp(`collection_id=${COLLECTION.id}`));
+    assert.match(upload.body, /Психология\.md/);
+    await panel.page.waitForFunction(() => /Принято 1 из 1/.test(document.querySelector("#knowledge-upload-progress")?.textContent));
+    await panel.page.reload();
+    await panel.page.waitForSelector("#knowledge-upload-button:not([disabled])");
+    assert.equal(await panel.page.textContent("#knowledge-upload-toggle"), "Выключить загрузку");
+    assert.match(await panel.page.textContent("#knowledge-upload-availability"), /Загрузка включена/);
+    await panel.page.click("#knowledge-upload-toggle");
+    await panel.page.waitForSelector("#knowledge-upload-button[disabled]");
+    assert.equal(enabled, false);
+    assert.deepEqual(panel.errors, []);
+  } finally { await panel.close(); }
+});
+
+test("причина блокировки видна рядом с кнопкой: нет коллекции, нет обработчика или статус недоступен", async () => {
+  for (const scenario of [
+    { routes: { "/knowledge/collections": { collections: [] } }, message: /Сначала создайте коллекцию/, toggleDisabled: false },
+    { routes: { "/knowledge/index": { ...INDEX, uploads_enabled: false, uploads_worker_enabled: false } }, message: /EVA_BULLMQ_JOBS/, toggleDisabled: true },
+    { routes: { "/knowledge/index": { __status: 503, __body: { error: { message: "недоступно" } } } }, message: /Нажмите «Обновить»/, toggleDisabled: true },
+    { routes: { "/knowledge/index": { ...INDEX, uploads_enabled: false }, "/settings": { __status: 503, __body: { error: { message: "недоступно" } } } }, message: /настройка для включения недоступна/, toggleDisabled: true },
+  ]) {
+    const panel = await openPanel({ routes: { ...ROUTES, ...scenario.routes } });
+    try {
+      await panel.page.click('[data-page="knowledge"]');
+      await panel.page.waitForSelector("#knowledge-embedding-form");
+      assert.equal(await panel.page.isDisabled("#knowledge-upload-button"), true);
+      assert.equal(await panel.page.isDisabled("#knowledge-file"), true);
+      assert.match(await panel.page.textContent("#knowledge-upload-availability"), scenario.message);
+      assert.equal(await panel.page.isDisabled("#knowledge-upload-toggle"), scenario.toggleDisabled);
+      assert.deepEqual(panel.errors, []);
+    } finally { await panel.close(); }
+  }
+});
+
+test("отказ сохранения не включает загрузку в DOM и не отправляет файлы перетаскиванием", async () => {
+  const panel = await openPanel({ routes: { ...ROUTES,
+    "/knowledge/index": { ...INDEX, uploads_enabled: false },
+    "PUT /settings": { __status: 409, __body: { error: { message: "Настройки изменены другим администратором" } } },
+  } });
+  try {
+    await panel.page.click('[data-page="knowledge"]');
+    await panel.page.waitForSelector("#knowledge-upload-toggle:not([hidden])");
+    await panel.page.click("#knowledge-upload-toggle");
+    await panel.waitForRequest((r) => r.path === "/settings" && r.method === "PUT");
+    await panel.page.waitForSelector("#knowledge-upload-toggle:not([disabled])");
+    assert.equal(await panel.page.isDisabled("#knowledge-upload-button"), true);
+    await panel.page.evaluate(() => {
+      const transfer = new DataTransfer();
+      transfer.items.add(new File(["# Психология"], "психология.md", { type: "text/markdown" }));
+      document.querySelector("#knowledge-drop").dispatchEvent(new DragEvent("drop", { bubbles: true, dataTransfer: transfer }));
+    });
+    assert.equal(panel.requests.filter((r) => r.path === "/knowledge/uploads" && r.method === "POST").length, 0);
+    assert.deepEqual(panel.errors, []);
+  } finally { await panel.close(); }
 });
 
 test("массовое удаление: только после подтверждения и только выбранные документы", async () => {
@@ -401,7 +494,7 @@ test("Qdrant нельзя включить без активного индек�
 
 test("отказ Qdrant не мешает выключить поиск и приостановить индексацию", async () => {
   const panel = await openPanel({ routes: { ...ROUTES, ...ACTIVE_ROUTES,
-    "/settings": { ...SETTINGS, settings: SETTINGS.settings.map((s) => ({ ...s, value: RECOMMENDED[s.key] })) },
+    "/settings": { ...SETTINGS, settings: SETTINGS.settings.map((s) => ({ ...s, value: RECOMMENDED[s.key] ?? s.value })) },
     "/knowledge/index": { ...ACTIVE_ROUTES["/knowledge/index"], qdrant_status: "unavailable", aliases: null, aliases_match_active: null },
     "PUT /settings": { saved: true },
   } });

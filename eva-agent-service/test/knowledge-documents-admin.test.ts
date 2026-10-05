@@ -219,6 +219,31 @@ test("загрузка при выключенном разборе у аген�
   assert.deepEqual(await readdir(root), []);
 });
 
+test("загрузка общей базы: живой флаг включает и выключает приём, разбор записан в прежний outbox", async () => {
+  const root = await mkdtemp(join(tmpdir(), "eva-admin-upload-live-"));
+  const { pool, queries } = fakePool((sql) => sql.startsWith("SELECT 1 FROM knowledge_collections") ? { rows: [{ "?column?": 1 }] } : undefined);
+  let enabled = false;
+  const service = new KnowledgeDocumentsService(pool as never, { uploadsRoot: root, store: null, uploadsEnabled: async () => enabled });
+  const upload = async () => await asAdmin(async () => await service.upload({ collectionId: COLLECTION,
+    name: "психология.md", mime: "text/markdown", stream: Readable.from([Buffer.from("# Прокрастинация\nОдин маленький шаг.")]) }));
+  assert.equal((await asAdmin(async () => await service.indexOverview())).uploads_enabled, false);
+  await assert.rejects(upload, /Включить загрузку/u);
+  enabled = true;
+  assert.equal((await asAdmin(async () => await service.indexOverview())).uploads_enabled, true);
+  const result = await upload();
+  assert.equal(result.status, "queued");
+  assert.deepEqual(jobs(queries).map((j) => [j.type, j.userId, j.inTransaction]), [["knowledge_ingest", null, true]]);
+  assert.equal((await readdir(join(root, "global"))).length, 1);
+  enabled = false;
+  await assert.rejects(upload, /Включить загрузку/u);
+  assert.equal((await readdir(join(root, "global"))).length, 1, "отказ записал ещё один файл");
+  const stopped = new KnowledgeDocumentsService(pool as never, { uploadsRoot: root, store: null, uploadsEnabled: async () => true, uploadsWorkerEnabled: false });
+  assert.equal((await asAdmin(async () => await stopped.indexOverview())).uploads_enabled, false);
+  await assert.rejects(() => asAdmin(async () => await stopped.upload({ collectionId: COLLECTION,
+    name: "x.md", mime: "text/markdown", stream: Readable.from([Buffer.from("x")]) })), /EVA_BULLMQ_JOBS/u);
+  assert.equal(jobs(queries).length, 1, "при выключенном обработчике появилось задание без исполнителя");
+});
+
 test("удаление и переиндексация: только общая база, задания в той же транзакции", async () => {
   const { pool, queries } = fakePool((sql, params) => {
     if (sql.startsWith("DELETE FROM knowledge_documents")) return { rows: (params[0] as string[]).filter((id) => id === DOC_A).map((id) => ({ id })) };
