@@ -183,8 +183,10 @@ test("после embeddings удалённый или изменённый до�
     embed.router.embedMany = async (texts, configuration) => {
       const vectors = await compute(texts, configuration);
       if (change === "deleted") state.document = null;
-      if (change === "text") state.chunks[0]!.content = "Новый материал";
-      if (change === "metadata") state.chunks[0]!.page_start = 99;
+      // Новый SQL-снимок: драйвер PG возвращает новые объекты, а не
+      // изменяет ранее прочитанный массив индексатора в памяти.
+      if (change === "text") state.chunks = state.chunks.map((c, i) => i === 0 ? { ...c, content: "Новый материал" } : c);
+      if (change === "metadata") state.chunks = state.chunks.map((c, i) => i === 0 ? { ...c, page_start: 99 } : c);
       return vectors;
     };
     await assert.rejects(() => new KnowledgeIndexer(db as never, embed.router as never, store as never, options()).index("doc-1", 7), /knowledge_document_changed/u);
