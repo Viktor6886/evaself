@@ -379,18 +379,21 @@ export function buildJobLayer(
       // томом Valkey, должно вернуться раньше, чем слой начнёт работу.
       const summary = await schedules.reconcile();
       logger.info("Расписания заданий сверены", { ...summary });
-      // Восстановление — по возможности: его отказ не должен оставить
-      // процесс без публикатора и потребителей, иначе «в очереди»
-      // осталось бы вообще всё.
-      try {
-        const expiredUploads = await knowledge.recoverExpiredUploads();
-        if (expiredUploads) logger.warn("Просроченные загрузки доступны для повтора", { count: expiredUploads });
-        const stalledBuilds = await maintenance.recoverStalledBuilds();
-        if (stalledBuilds) logger.warn("Незавершённые построения индекса доступны для повтора", { count: stalledBuilds });
-      } catch (error) {
-        logger.warn("Восстановление заданий базы знаний не выполнено", {
-          code: error instanceof Error ? error.name : "unknown_error",
-        });
+      // Восстановление — по возможности и по отдельности: отказ одного не
+      // отменяет другое и не оставляет процесс без публикатора и
+      // потребителей, иначе «в очереди» осталось бы вообще всё.
+      for (const [message, recover] of [
+        ["Просроченные загрузки доступны для повтора", () => knowledge.recoverExpiredUploads()],
+        ["Незавершённые построения индекса доступны для повтора", () => maintenance.recoverStalledBuilds()],
+      ] as const) {
+        try {
+          const count = await recover();
+          if (count) logger.warn(message, { count });
+        } catch (error) {
+          logger.warn("Восстановление заданий базы знаний не выполнено", {
+            code: error instanceof Error ? error.name : "unknown_error",
+          });
+        }
       }
       logger.info("Ступень переноса проактивных задач", {
         stage,

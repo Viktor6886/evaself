@@ -61,7 +61,7 @@ test("сроки базы знаний: очередь ждёт часами, sc
   // Полсотни файлов одной загрузки, по минуте на антивирус и разбор.
   assert.ok(KNOWLEDGE_JOB_DEADLINE_MS >= 50 * 60_000);
   assert.ok(KNOWLEDGE_JOB_DEADLINE_MS > KNOWLEDGE_INGEST_TIMING.hardDeadlineMs! && KNOWLEDGE_JOB_DEADLINE_MS > KNOWLEDGE_INDEX_TIMING.hardDeadlineMs!);
-  assert.ok(KNOWLEDGE_SCAN_TIMEOUT_MS > 60_000, "минуты на загрузку базы сигнатур мало");
+  assert.ok(KNOWLEDGE_SCAN_TIMEOUT_MS > 60_000, "запас на загрузку базы сигнатур больше минуты");
   assert.ok(KNOWLEDGE_SCAN_TIMEOUT_MS < KNOWLEDGE_INGEST_TIMING.softTimeoutMs!, "разбору и векторам остаётся время");
 });
 

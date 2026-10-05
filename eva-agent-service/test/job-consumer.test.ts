@@ -277,3 +277,39 @@ test("слой заданий: не дошедшие до обработчика
     await layer.stop(0);
   }
 });
+
+/**
+ * Восстановление при старте — по возможности и по отдельности: отказ
+ * восстановления загрузок не отменяет восстановление построений и не
+ * оставляет процесс без потребителей очередей.
+ */
+test("слой заданий: отказ одного восстановления не отменяет второе и запуск потребителей", async () => {
+  const { buildJobLayer } = await import("../dist/jobs/index.js");
+  const driver = fakeDriver(true);
+  const recovered: string[] = [];
+  const db = {
+    query: async (sql: string) => {
+      if (/UPDATE knowledge_uploads u/u.test(sql) && /FROM \(/u.test(sql)) throw new Error("database unavailable");
+      if (/UPDATE knowledge_embedding_versions v/u.test(sql)) recovered.push("builds");
+      return { rows: [], rowCount: 0 };
+    },
+    withSystemScope: async (_label: string, run: () => Promise<unknown>) => await run(),
+    withUserScope: async (_scope: unknown, run: () => Promise<unknown>) => await run(),
+    transaction: async (run: (client: unknown) => Promise<unknown>) => await run({ query: async () => ({ rows: [], rowCount: 0 }) }),
+  };
+  const warnings: string[] = [];
+  const layer = buildJobLayer({
+    jobOutboxBatchSize: 10, jobOutboxPollMs: 60_000, routerUrl: "http://router.invalid", routerApiKey: "",
+    searxngUrl: "http://searx.invalid", crawl4aiUrl: "http://crawl.invalid", crawl4aiToken: "", osintWorkerUrl: "http://osint.invalid", osintWorkerToken: "",
+    osintHarvesterUrl: "http://harvester.invalid", osintSpiderfootUrl: "http://spiderfoot.invalid", osintEnabled: false, retentionEnforcementEnabled: false,
+    jobsMirrorMode: false, checkinMorningHour: 9, checkinEveningHour: 21, knowledgeUploadsEnabled: true, researchOrchestratorEnabled: false,
+    bullmqMaintenanceEnabled: false, bullmqProactiveEnabled: false,
+  } as never, db as never, {} as never, { ...logger, warn: (message: string) => { warnings.push(message); } } as never, {
+    letta: {} as never, purposes: {} as never, runtimeContext: {} as never, lock: {} as never, outbox: {} as never, driver: driver as never,
+  });
+  await layer.start();
+  await layer.stop(0);
+  assert.deepEqual(recovered, ["builds"], "построения восстанавливаются и после отказа загрузок");
+  assert.ok(warnings.includes("Восстановление заданий базы знаний не выполнено"));
+  assert.ok(driver.events.includes("consume:memory:evaself:bullmq:1"), "потребители запущены");
+});
