@@ -270,7 +270,7 @@ test("документ без Qdrant показывает причину вме�
   const draft = { ...VERSION, status: "draft", built_at: null, points: null, progress: null };
   const counts = { ...INDEX.scopes, global: { documents: 1, chunks: 8, lag_seconds: 120, by_status: { pending: 1 } } };
   for (const scenario of [
-    { name: "индексация выключена", routes: { "/settings": indexOff }, reason: /индексация выключена/u, banner: /Включите «Индексацию»/u },
+    { name: "индексация выключена", routes: { "/settings": indexOff }, reason: /индексация выключена/u, banner: /Включите «База знаний: индексация в Qdrant»/u },
     { name: "нет модели", routes: { "/knowledge/embeddings": { ...EMBEDDINGS, versions: [draft] }, "/knowledge/index": { ...INDEX, scopes: counts, versions: [draft] } },
       reason: /нет построенной модели эмбеддингов/u, banner: /«Построить индекс» и «Активировать»/u },
     { name: "Qdrant не настроен", routes: { "/knowledge/index": { ...INDEX, qdrant: false, qdrant_status: "not_configured", scopes: counts } },

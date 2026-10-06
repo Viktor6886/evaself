@@ -148,6 +148,22 @@ test("фрагмент общей базы уходит модели без пр
   assert.doesNotMatch(JSON.stringify(reference), /Справочник/u);
 });
 
+test("фрагмент без признака базы уходит без происхождения: источник — только у своего документа", async () => {
+  // Сегодня признак ставят оба режима поиска; новый путь, который его
+  // забудет, не должен выдать модели название документа общей базы.
+  const search = { search: async () => ({ hits: [{ documentId: "doc-9", documentName: "Без признака.pdf", ordinal: 0,
+    content: "Текст фрагмента без признака базы", score: 1, matched: "fts" }], degraded: false, mode: "legacy" }) };
+  const factory = new CoreToolFactory({ routerUrl: "", routerApiKey: "" } as never, fakeDb([]) as never, {} as never, search as never);
+  const knowledge = factory.build(tool as never).find((entry) => entry.name === "knowledge_search")!;
+  const runtime = { userId: 77, telegramId: 42, chatId: 42, conversationId: "c", purpose: "chat" };
+  const details = (await knowledge.execute("call-3", { query: "текст" }, runtime as never)).details as { results: Array<Record<string, unknown>> };
+  assert.match(String(details.results[0]?.content), /Текст фрагмента без признака/u);
+  for (const key of ["document", "base", "cite", "pages", "section", "ordinal"]) {
+    assert.equal(key in details.results[0]!, false, `${key} выдаёт происхождение фрагмента`);
+  }
+  assert.doesNotMatch(JSON.stringify(details.results), /Без признака\.pdf/u);
+});
+
 /**
  * Загруженный документ находится инструментом.
  *

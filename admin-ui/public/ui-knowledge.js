@@ -127,7 +127,7 @@ function knowledgeIndexBlocker() {
   if (k.failed?.index || !k.index) return null;
   if (k.index.qdrant === false) return { reason: "Qdrant не настроен", hint: "Задайте QDRANT_API_KEY и перезапустите сервисы." };
   if (knowledgeSetting("index_enabled") === false) {
-    return { reason: "индексация выключена", hint: "Включите «Индексацию» в параметрах поиска выше и нажмите «Сверить с Qdrant сейчас»; если активной версии эмбеддингов нет — «Построить индекс» и «Активировать»." };
+    return { reason: "индексация выключена", hint: "Включите «База знаний: индексация в Qdrant» в параметрах поиска выше и нажмите «Сверить с Qdrant сейчас»; если активной версии эмбеддингов нет — «Построить индекс» и «Активировать»." };
   }
   const versions = knowledgeVersions();
   if (!versions.length && k.failed?.embeddings) return null;
