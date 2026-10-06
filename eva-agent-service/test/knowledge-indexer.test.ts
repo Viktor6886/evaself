@@ -371,7 +371,10 @@ test("перестройка одной версии: пишется тольк�
   assert.ok(!queries.some((query) => /^(UPDATE|DELETE) knowledge_documents|^DELETE FROM knowledge_documents/u.test(query.sql)));
 });
 
-test("перестройка активной версии: записанный документ готов, прежняя версия не снимается", async () => {
+test("перестройка активной версии: записанный документ готов, прежняя версия снимается", async () => {
+  // Замена, загруженная, пока индексировать было некуда: её собственное
+  // задание кончилось no_version, и прежнюю версию больше никто не снимет.
+  // Объяви перестройка новую готовой без этого — в поиске остались бы обе.
   const { db, queries } = fakeDb({
     versions: [VERSION],
     document: { ...PRIVATE_DOC, replaces_document_id: PREVIOUS },
@@ -383,7 +386,10 @@ test("перестройка активной версии: записанный
   const marks = queries.filter((query) => /^UPDATE knowledge_documents/u.test(query.sql));
   assert.equal(marks.length, 1, "только итоговая отметка: «indexing» и «failed» перестройка не ставит");
   assert.deepEqual(marks[0]!.params, ["doc-1", 7, "ready", 2, null]);
-  assert.ok(!queries.some((query) => /^DELETE FROM knowledge_documents/u.test(query.sql)), "прежнюю версию снимает задание самого документа");
+  const ready = queries.findIndex((query) => /^UPDATE knowledge_documents/u.test(query.sql));
+  const removal = queries.findIndex((query) => /^DELETE FROM knowledge_documents/u.test(query.sql));
+  assert.ok(removal > ready, "прежняя версия снимается после отметки новой");
+  assert.deepEqual(queries[removal]!.params, [[PREVIOUS], 7]);
 });
 
 test("планировщик: задание индексации без текста, ключ повтора — документ и причина", async () => {

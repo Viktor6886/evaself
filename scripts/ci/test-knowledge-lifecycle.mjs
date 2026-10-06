@@ -293,6 +293,12 @@ try {
     "SELECT index_status, indexed_version FROM knowledge_documents WHERE id=$1 AND user_id IS NULL", [id]))).rows[0];
   await admin(async () => await pool.query(
     "UPDATE knowledge_documents SET index_status='pending', indexed_version=NULL WHERE id=$1 AND user_id IS NULL", [uploaded.id]));
+  // Новая версия, чья прежняя ещё жива: прежнюю снимает задание индексации
+  // новой, поэтому активация ставит его, а не объявляет замену готовой.
+  const replacement = randomUUID(); ownDocuments.push(replacement);
+  await admin(async () => await pool.query(
+    "INSERT INTO knowledge_documents(id,user_id,product_verified,collection_id,name,mime,content_hash,status,chunk_count,replaces_document_id,source) VALUES($1,NULL,true,$2,'Саморегуляция v2.md','text/markdown','ci-replacement','ready',0,$3,'admin')",
+    [replacement, collection.id, uploaded.id]));
   const switched = await Promise.allSettled([
     admin(async () => await documents.activate(second.version, { expected_active_version: first.version })),
     admin(async () => await documents.activate(second.version, { expected_active_version: first.version })),
@@ -302,6 +308,10 @@ try {
   assert.deepEqual(await store.activeVersions(), { private: second.version, global: second.version });
   assert.deepEqual(await indexState(uploaded.id), { index_status: "ready", indexed_version: second.version }, "активация закрывает «ждёт индексации»");
   assert.equal((await indexState(unscoped)).index_status, "pending", "непроверенный материал не объявлен проиндексированным");
+  assert.equal((await indexState(replacement)).index_status, "pending", "замена с живой прежней версией не объявлена готовой");
+  assert.equal((await job("knowledge_index", replacement)).envelope.payload.reason.startsWith(`activate-${second.version}-`), true,
+    "замену доводит её задание индексации");
+  await admin(async () => await pool.query("DELETE FROM knowledge_documents WHERE id=$1 AND user_id IS NULL", [replacement]));
   assert.equal((await pool.query("SELECT status FROM knowledge_embedding_versions WHERE version=$1", [first.version])).rows[0].status, "retired");
   assert.equal((await search.search(ownUsers[0], question)).degraded, false, "новая модель видна сразу при другой размерности");
   await admin(async () => await documents.activate(first.version, { expected_active_version: second.version }));
