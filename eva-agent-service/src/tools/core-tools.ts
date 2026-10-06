@@ -73,7 +73,9 @@ export interface RuntimeObserver {
  * не говорит ни о «базе», ни о документах, которых человек не загружал.
  */
 function knowledgeResult(hit: KnowledgeHit): JsonObject {
-  const own = hit.base !== "shared";
+  // Источник — только у явно своего документа: фрагмент без признака
+  // уходит без происхождения, а не с названием документа общей базы.
+  const own = hit.base === "personal";
   return {
     ...(own ? {
       document: hit.documentName,

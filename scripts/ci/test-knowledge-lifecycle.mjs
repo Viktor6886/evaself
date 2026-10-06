@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -34,6 +34,7 @@ import { KnowledgeIngestWorker, KnowledgeUploadService } from "../../eva-agent-s
 import { KnowledgeIndexer, knowledgeIndexScheduler } from "../../eva-agent-service/dist/knowledge/indexer.js";
 import { KnowledgeMaintenance } from "../../eva-agent-service/dist/knowledge/maintenance.js";
 import { KnowledgeSearch } from "../../eva-agent-service/dist/knowledge/search.js";
+import { legacyCandidates } from "../../eva-agent-service/dist/knowledge/search-queries.js";
 import { withKnowledgeIndexWrite } from "../../eva-agent-service/dist/knowledge/version-validation.js";
 import { CoreToolFactory } from "../../eva-agent-service/dist/tools/core-tools.js";
 import { recordJobIntent } from "../../eva-agent-service/dist/jobs/job-outbox.js";
@@ -312,6 +313,20 @@ try {
   assert.equal((await job("knowledge_index", replacement)).envelope.payload.reason.startsWith(`activate-${second.version}-`), true,
     "замену доводит её задание индексации");
   await admin(async () => await pool.query("DELETE FROM knowledge_documents WHERE id=$1 AND user_id IS NULL", [replacement]));
+  // Прежний режим поиска отдаёт признак общей базы: по нему модель
+  // получает фрагмент без названия документа.
+  const legacy = await legacyCandidates(db, { userId: ownUsers[0], privateEnabled: true, globalEnabled: true }, "Прокрастинация", 10, null);
+  assert.ok(legacy.some((row) => row.document_id === uploaded.id && row.global === true), "legacy помечает фрагмент общей базы");
+  // «Удалить» у неудавшейся загрузки: запись и исходный файл; разобранную
+  // загрузку так не удалить — она уходит вместе со своим документом.
+  const doomed = await admin(async () => await documents.upload({ collectionId: collection.id, name: "Неудачная загрузка.txt", mime: "text/plain",
+    stream: Readable.from([Buffer.from("Загрузка, которая не разобралась")]) }));
+  ownDocuments.push(doomed.id);
+  await admin(async () => await pool.query("UPDATE knowledge_uploads SET status='failed', error_code='document_antivirus_unavailable' WHERE id=$1 AND user_id IS NULL", [doomed.id]));
+  await assert.rejects(() => admin(async () => await documents.deleteUpload(uploaded.id)), /неудавшуюся или отменённую/u);
+  assert.deepEqual(await admin(async () => await documents.deleteUpload(doomed.id)), { deleted: doomed.id });
+  assert.equal((await admin(async () => await pool.query("SELECT 1 FROM knowledge_uploads WHERE id=$1 AND user_id IS NULL", [doomed.id]))).rows.length, 0);
+  await assert.rejects(() => stat(join(root, "global", doomed.id)), { code: "ENOENT" }, "исходный файл удалён");
   assert.equal((await pool.query("SELECT status FROM knowledge_embedding_versions WHERE version=$1", [first.version])).rows[0].status, "retired");
   assert.equal((await search.search(ownUsers[0], question)).degraded, false, "новая модель видна сразу при другой размерности");
   await admin(async () => await documents.activate(first.version, { expected_active_version: second.version }));

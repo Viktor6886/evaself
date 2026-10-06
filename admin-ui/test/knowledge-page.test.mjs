@@ -287,7 +287,7 @@ test("документ без Qdrant показывает причину вме�
       if (scenario.reason) {
         assert.match(row, /не в Qdrant/u, scenario.name);
         assert.match(row, scenario.reason, scenario.name);
-        assert.match(row, /Ева уже находит документ без Qdrant/u, scenario.name);
+        assert.match(row, /поиск по словам работает и без Qdrant/u, scenario.name);
         assert.doesNotMatch(row, /ждёт индексации/u, scenario.name);
         assert.match(index, scenario.banner, scenario.name);
         assert.match(index, /не в Qdrant 1/u, scenario.name);
@@ -295,7 +295,7 @@ test("документ без Qdrant показывает причину вме�
       } else {
         assert.match(row, /ждёт индексации/u, "версия построена: документ действительно в очереди");
         assert.match(index, /в очереди 1/u);
-        assert.doesNotMatch(index, /Документы ищутся без Qdrant/u);
+        assert.doesNotMatch(index, /Документы не попадают в Qdrant/u);
       }
       assert.deepEqual(panel.errors, [], scenario.name);
     } finally {

@@ -119,8 +119,8 @@ function knowledgeUnavailable(what) {
 /**
  * Почему документы не попадают в Qdrant. Без ключа, при выключенной
  * индексации и без построенной модели задание индексации ничего не
- * делает, и «ждёт индексации» висело вечно — хотя Ева уже находит
- * документ поиском по PostgreSQL. null — индексировать есть куда.
+ * делает, и «ждёт индексации» висело вечно — хотя поиск по словам в
+ * PostgreSQL документ уже находил. null — индексировать есть куда.
  */
 function knowledgeIndexBlocker() {
   const k = state.knowledge;
@@ -253,7 +253,7 @@ function renderKnowledgeDocuments() {
   const blocker = knowledgeIndexBlocker();
   // «Ждёт индексации» — только когда индексация действительно впереди.
   const indexCell = (doc) => doc.index_status === "pending" && blocker
-    ? `<span class="status-pill state-yellow">не в Qdrant</span><br><small>${escapeHtml(blocker.reason)} — Ева уже находит документ без Qdrant</small>`
+    ? `<span class="status-pill state-yellow">не в Qdrant</span><br><small>${escapeHtml(blocker.reason)} — поиск по словам работает и без Qdrant</small>`
     : `<span class="status-pill ${doc.index_status === "failed" ? "state-red" : doc.index_status === "ready" ? "state-green" : "state-yellow"}">${escapeHtml(KNOWLEDGE_INDEX_STATUS[doc.index_status] || doc.index_status)}</span>
             ${doc.index_error ? `<br><small class="warn-value">${escapeHtml(doc.index_error)}</small>` : ""}`;
   $("#knowledge-documents").innerHTML = k.documents.length ? `
@@ -305,7 +305,7 @@ function renderKnowledgeIndex() {
   const hasActive = versions.some((item) => item.status === "active");
   $("#knowledge-index").innerHTML = `
     ${index.qdrant ? "" : '<p class="warn-value">QDRANT_API_KEY не задан: векторного индекса нет, поиск идёт по словам. Документы при этом принимаются и хранятся.</p>'}
-    ${blocker && index.qdrant ? `<p class="warn-value">Документы ищутся без Qdrant: ${escapeHtml(blocker.reason)}. ${escapeHtml(blocker.hint)}</p>` : ""}
+    ${blocker && index.qdrant ? `<p class="warn-value">Документы не попадают в Qdrant: ${escapeHtml(blocker.reason)}. ${escapeHtml(blocker.hint)}</p>` : ""}
     <div class="knowledge-metrics">
       ${scope("global", "Общая база")}
       ${scope("private", `Личные базы (людей: ${index.private_owners || 0})`)}
