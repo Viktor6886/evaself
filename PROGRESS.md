@@ -5,10 +5,12 @@
 
 ## База знаний: «Поиск по смыслу» тремя шагами — 2026-10-06
 
-Ветка: `ccr-6acef7a8-6js6nz`, PR — после открытия. Обращение владельца
+Ветка: `ccr-6acef7a8-6js6nz`, PR [#415](https://github.com/Viktor6886/evaself/pull/415). Обращение владельца
 после #413: половина кнопок неактивна, файл так и не попадает в Qdrant,
 интерфейс непоследовательный — администратор не поймёт, что нажимать.
-Статус: в работе — реализация и проверки готовы, дальше PR, ревью, CI.
+Статус: в работе — PR открыт, идут CI и ревью. Замечание Codex (P2):
+при выключенных личной и общей базах шаг «Включение» был отмечен, хотя
+сервер не ищет вовсе (`search.ts`), — исправлено, тест на прежнем коде → FAIL.
 
 - Серверная часть проверена сквозным сценарием на настоящих PostgreSQL,
   Qdrant, Redis с BullMQ и LLM Router (подделан только внешний провайдер
@@ -43,7 +45,7 @@
 Проверки:
 
 ```
-node --test test/*.test.mjs (admin-ui, Chromium) → PASS (158)
+node --test test/*.test.mjs (admin-ui, Chromium) → PASS (159)
 node --check admin-ui/public/*.js → PASS
 python3 scripts/ci/assert-live-css.py → PASS
 python3 scripts/ci/assert-frontend-routes.py → PASS

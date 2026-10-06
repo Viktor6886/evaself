@@ -285,6 +285,24 @@ test("«Включить поиск по смыслу» при включённ�
   } finally { await panel.close(); }
 });
 
+test("обе базы выключены — поиск не идёт: «Включение» не отмечено, кнопка возвращает все шесть настроек", async () => {
+  const scopesOff = { ...LIVE_SETTINGS, settings: LIVE_SETTINGS.settings.map((s) => /_(private|global)_enabled$/.test(s.key) ? { ...s, value: false } : s) };
+  const panel = await openPanel({ routes: { ...ROUTES, ...ACTIVE_ROUTES, "/settings": scopesOff,
+    "POST /knowledge/embeddings/versions/2/activate": { version: 2, status: "active" }, "PUT /settings": { saved: true },
+  } });
+  try {
+    await enterKnowledge(panel);
+    assert.equal(await stepState(panel, 3), "current");
+    const status = await panel.page.textContent("#knowledge-setup-status");
+    assert.doesNotMatch(status, /работает/, "сервер при выключенных базах не ищет вовсе");
+    assert.match(status, /не ищет в документах/);
+    await panel.page.click("#knowledge-use-qdrant");
+    const saved = await panel.waitForRequest((r) => r.path === "/settings" && r.method === "PUT");
+    assert.deepEqual(saved.body, { settings: RECOMMENDED });
+    assert.deepEqual(panel.errors, []);
+  } finally { await panel.close(); }
+});
+
 test("Qdrant нельзя включить без построенного индекса: ручной выбор объясняет причину, отказ проверки не меняет параметры", async () => {
   const panel = await openPanel({ routes: { ...ROUTES,
     "/knowledge/embeddings": { ...EMBEDDINGS, versions: [DRAFT] }, "/knowledge/index": { ...INDEX, versions: [DRAFT] } } });

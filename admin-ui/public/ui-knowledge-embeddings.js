@@ -48,9 +48,18 @@ function knowledgeQdrantReady() {
     && state.knowledge.index?.qdrant_status === "ready" && state.knowledge.index?.aliases_match_active === true);
 }
 
-/** Ева уже ищет через Qdrant: поиск включён, режим с векторами, источник — Qdrant. */
-function knowledgeSearchOnQdrant() {
+/**
+ * Поиск по базе вообще идёт: включён, и открыта хотя бы одна база. Без
+ * баз сервер отвечает «поиск выключен» при любом режиме и источнике.
+ */
+function knowledgeSearchEnabled() {
   return knowledgeSetting("search_enabled") === true
+    && (knowledgeSetting("private_enabled") === true || knowledgeSetting("global_enabled") === true);
+}
+
+/** Ева уже ищет через Qdrant: поиск идёт, режим с векторами, источник — Qdrant. */
+function knowledgeSearchOnQdrant() {
+  return knowledgeSearchEnabled()
     && ["hybrid", "vector"].includes(knowledgeSetting("search_mode"))
     && knowledgeSetting("vector_backend") === "qdrant";
 }
@@ -202,11 +211,12 @@ function renderKnowledgeSetup() {
     liveBody = `<p>${auto ? "Включится само, когда индекс построится." : "Станет доступно, когда индекс построится."}</p>`;
   }
   const working = !!active && knowledgeSearchOnQdrant() && knowledgeQdrantReady();
+  const meanwhile = knowledgeSearchEnabled() ? "Пока Ева ищет только по словам." : "Поиск по базе знаний выключен — Ева не ищет в документах.";
   status.innerHTML = working
     ? `<span class="status-pill state-green">работает</span> Ева ищет по словам и по смыслу.${setup.index === "off" ? " Новые документы в Qdrant не попадают — включите индексацию." : candidate ? " Новая модель готовится рядом." : ""}`
     : active && knowledgeSearchOnQdrant() ? '<span class="status-pill state-red">не работает</span> Qdrant недоступен или индекс расходится с базой — Ева ищет только по словам.'
-    : setup.index === "busy" ? '<span class="status-pill state-yellow">строится индекс</span> Пока Ева ищет по словам.'
-    : '<span class="status-pill state-yellow">не настроен</span> Пока Ева ищет только по словам.';
+    : setup.index === "busy" ? `<span class="status-pill state-yellow">строится индекс</span> ${meanwhile}`
+    : `<span class="status-pill state-yellow">не настроен</span> ${meanwhile}`;
   const states = { 1: [setup.model, modelBody], 2: [setup.index, indexBody], 3: [setup.live, liveBody] };
   for (const [n, [mode, body]] of Object.entries(states)) {
     const step = steps.querySelector(`[data-setup-step="${n}"]`);
