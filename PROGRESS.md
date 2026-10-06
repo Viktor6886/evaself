@@ -13,7 +13,9 @@ Qdrant. Статус: в работе — PR открыт. Независимо�
 Codex P1) и B2 (rollout советовал сверку там, где нужна перестройка)
 исправлены; учтены N1 (источник — только при `base: personal`), N3
 (навык не говорит о «базе»), N4 (legacy-SQL и удаление загрузки — в
-lifecycle на PostgreSQL), N5 (точные тексты панели); ревью дельты — в PR.
+lifecycle на PostgreSQL), N5 (точные тексты панели). Ревью дельты — три
+«да», блокирующих нет; учтены его необязательные замечания (тест
+fail-closed, точные названия в подсказке и runbook, окно сверки 30 мин).
 
 - Красный Static checks в #413 — не этого PR: новые уязвимости в
   зависимостях (`proxy-addr` critical, `Werkzeug` CVE-2026-102598).
@@ -48,8 +50,8 @@ lifecycle на PostgreSQL), N5 (точные тексты панели); рев�
   (`KnowledgeUploadService`, по `user_id`), для общей — нет; порядок тот
   же (файл, затем строка). Новых таблиц, очередей, сервисов, миграций нет.
 - Build/typecheck/lint, tenant/admin-route/env/doc-path/frontend-routes/
-  live-css guards, SQL-пробы поиска → PASS. Full backend: 1833 всего,
-  1825 PASS, 8 штатных SKIP, 0 FAIL. admin-ui: 152 → PASS.
+  live-css guards, SQL-пробы поиска → PASS. Full backend: 1834 всего,
+  1826 PASS, 8 штатных SKIP, 0 FAIL. admin-ui: 152 → PASS.
 - PG + Qdrant (`test-knowledge-lifecycle.mjs`) → PASS; новая проверка
   «активация закрывает «ждёт индексации»» без исправления → FAIL.
   Legacy-запрос на настоящем PostgreSQL отдаёт признак общей базы →
