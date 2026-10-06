@@ -347,6 +347,8 @@ export interface LegacyHitRow {
   content: string;
   score: string | number;
   matched: string;
+  /** Фрагмент общей базы: модели он отдаётся без происхождения. */
+  global: boolean;
 }
 
 export async function legacyCandidates(
@@ -400,7 +402,8 @@ export async function legacyCandidates(
               c.ordinal,
               c.content,
               fused.score,
-              fused.matched
+              fused.matched,
+              c.product_verified AS global
          FROM fused
          JOIN knowledge_chunks c ON c.id = fused.id
          JOIN knowledge_documents d

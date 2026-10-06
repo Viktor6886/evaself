@@ -249,8 +249,11 @@ try {
   assert.equal(await store.documentPoints("private", first.version, racedDoc), 0, "устаревшая загрузка не создала точки-сироты");
   const answer = await tool.execute({ query, user_id: ownUsers[1] }, { userId: ownUsers[0] });
   assert.equal(answer.untrusted, true); assert.equal(answer.degraded, false);
-  assert.ok(answer.results.some((hit) => hit.document === "Саморегуляция.md" && hit.base === "shared" && hit.cite.includes("Прокрастинация")));
+  // Общая база — справочные знания Евы: текст есть, происхождения нет.
+  assert.ok(answer.results.some((hit) => hit.content.includes("маленький первый шаг")
+    && !["document", "base", "cite", "pages", "section"].some((key) => key in hit)));
   assert.ok(answer.results.every((hit) => !["Чужой документ CI", "Без коллекции CI"].includes(hit.document)));
+  assert.ok(answer.results.every((hit) => !/чужой секрет CI|скрытый материал без коллекции/u.test(hit.content)));
   // Id Qdrant не разрешает чтение: поддельный payload владельца не
   // проведёт чужой фрагмент через гидратацию PostgreSQL.
   const foreignPoint = (await store.scrollPoints("private", first.version, null, 256)).points[0];
@@ -282,6 +285,14 @@ try {
   await maintenance.rejectRebuild(stalled, "job_deadline_exceeded");
   assert.deepEqual(await secondState(), { status: "building", error_code: null }, "отказ старой порции не трогает новое построение");
   await build(second.version);
+  // Документ, загруженный, пока индексировать было некуда, оставался
+  // «ждёт индексации» и после построения версии. Полная проверка при
+  // активации доказывает, что его векторы в Qdrant есть, — она и закрывает
+  // статус. Материал без коллекции проверку не проходит и готовым не становится.
+  const indexState = async (id) => (await admin(async () => await pool.query(
+    "SELECT index_status, indexed_version FROM knowledge_documents WHERE id=$1 AND user_id IS NULL", [id]))).rows[0];
+  await admin(async () => await pool.query(
+    "UPDATE knowledge_documents SET index_status='pending', indexed_version=NULL WHERE id=$1 AND user_id IS NULL", [uploaded.id]));
   const switched = await Promise.allSettled([
     admin(async () => await documents.activate(second.version, { expected_active_version: first.version })),
     admin(async () => await documents.activate(second.version, { expected_active_version: first.version })),
@@ -289,6 +300,8 @@ try {
   assert.equal(switched.filter((r) => r.status === "fulfilled").length, 1, "переключение сериализуется в PostgreSQL");
   assert.equal(switched.filter((r) => r.status === "rejected").length, 1, "устаревшее действие не проходит");
   assert.deepEqual(await store.activeVersions(), { private: second.version, global: second.version });
+  assert.deepEqual(await indexState(uploaded.id), { index_status: "ready", indexed_version: second.version }, "активация закрывает «ждёт индексации»");
+  assert.equal((await indexState(unscoped)).index_status, "pending", "непроверенный материал не объявлен проиндексированным");
   assert.equal((await pool.query("SELECT status FROM knowledge_embedding_versions WHERE version=$1", [first.version])).rows[0].status, "retired");
   assert.equal((await search.search(ownUsers[0], question)).degraded, false, "новая модель видна сразу при другой размерности");
   await admin(async () => await documents.activate(first.version, { expected_active_version: second.version }));

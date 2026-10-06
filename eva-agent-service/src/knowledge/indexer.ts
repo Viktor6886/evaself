@@ -167,6 +167,12 @@ export interface KnowledgeIndexerOptions {
 /** Только перечисленные версии — перестройка одной версии (`maintenance.ts`). */
 export interface KnowledgeIndexRequest {
   versions?: number[];
+  /**
+   * Перестраивается активная версия: записанный в неё документ найден
+   * поиском, и это видно в его состоянии. Отказ состояние не трогает —
+   * его отметит собственное задание документа.
+   */
+  markReady?: boolean;
 }
 
 export class KnowledgeIndexer {
@@ -235,6 +241,8 @@ export class KnowledgeIndexer {
     if (tracked) {
       await this.mark(documentId, owner, "ready", Math.max(...versions.map((row) => row.version)), null);
       if (document.replaces_document_id) await this.retire(document.replaces_document_id, owner);
+    } else if (request.markReady) {
+      await this.mark(documentId, owner, "ready", Math.max(...versions.map((row) => row.version)), null);
     }
     return { status: "ready", versions: versions.map((row) => row.version), chunks: chunks.length, reused };
   }

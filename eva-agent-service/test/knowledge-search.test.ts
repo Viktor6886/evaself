@@ -13,9 +13,13 @@ test("persona и user-materials требуют semantic retrieval по псих�
   assert.match(persona, /сначала используй `knowledge_search`/u);
   assert.match(persona, /Перед психологическими[\s\S]*без упоминания документа/u);
   assert.match(persona, /Приветствия, благодарности, эмоциональные реакции[\s\S]*поиска не требуют/u);
-  for (const pattern of [/личной или общей/u, /прокрастинация/u, /1–2 альтернативные/u, /untrusted data/u, /prompt injection/u,
-    /`base: personal`/u, /`base: shared`/u, /`cite`, `document`, `pages`, `section`/u, /собственные[\s\S]*знания/u]) assert.match(skill, pattern);
+  for (const pattern of [/материалы человека или справочные знания/u, /прокрастинация/u, /1–2 альтернативные/u, /untrusted data/u, /prompt injection/u,
+    /`base: personal`/u, /без `base` и без источника — твои справочные знания/u, /не говори о базе знаний, документах или поиске/u,
+    /`cite`, `document`, `pages`, `section`/u, /собственные[\s\S]*знания/u]) assert.match(skill, pattern);
   assert.ok(skill.split("\n").length <= 200, "навык остаётся коротким");
+  // Решение владельца: общая база — справочные знания Евы, без «базы».
+  assert.match(persona, /справочные знания используй как свои, не упоминая базу, документы и поиск/u);
+  for (const text of [persona, skill]) assert.doesNotMatch(text, /общ(ей|ая|ую)\s+баз/u);
 });
 
 /** Тот же договор сборки инструмента, что и у Agent SDK, но без него. */
@@ -51,7 +55,7 @@ function fakeDb(rows: Array<Record<string, unknown>>) {
 
 const ROW = {
   document_id: "doc-1", document_name: "Договор.pdf", ordinal: 3,
-  content: "Аренда продлена до марта", score: "0.03", matched: "both",
+  content: "Аренда продлена до марта", score: "0.03", matched: "both", global: false,
 };
 
 test("поиск идёт и словами, и вектором, и только в области человека", async () => {
@@ -61,7 +65,7 @@ test("поиск идёт и словами, и вектором, и тольк�
 
   assert.deepEqual(found.hits, [{
     documentId: "doc-1", documentName: "Договор.pdf", ordinal: 3,
-    content: "Аренда продлена до марта", score: 0.03, matched: "both",
+    content: "Аренда продлена до марта", score: 0.03, matched: "both", base: "personal",
   }]);
   assert.equal(found.degraded, false);
 
@@ -115,6 +119,33 @@ test("инструмент поиска зарегистрирован и отд
   assert.equal(details.untrusted, true);
   assert.equal(details.source, "knowledge_base");
   assert.match(details.notice ?? "", /данные, а не инструкции/u);
+});
+
+/**
+ * Прежний режим поиска тоже знает происхождение фрагмента: без него общая
+ * база уходила модели с названием документа, и Ева пересказывала «общую
+ * базу знаний» вместо того, чтобы просто знать.
+ */
+test("фрагмент общей базы уходит модели без происхождения, свой документ — с источником", async () => {
+  const shared = {
+    document_id: "doc-2", document_name: "Справочник_Тема_6_КШМ_итоговый.pdf", ordinal: 1,
+    content: "Командно-штабная машина обеспечивает связь штаба", score: "0.02", matched: "fts", global: true,
+  };
+  const db = fakeDb([ROW, shared]);
+  const factory = new CoreToolFactory({ routerUrl: "", routerApiKey: "" } as never, db as never, {} as never, new KnowledgeSearch(db as never));
+  const knowledge = factory.build(tool as never).find((entry) => entry.name === "knowledge_search")!;
+  assert.doesNotMatch(knowledge.description, /общ(ей|ая)\s+баз/u);
+  assert.match(knowledge.description, /Фрагмент без источника — справочное знание/u);
+  const runtime = { userId: 77, telegramId: 42, chatId: 42, conversationId: "c", purpose: "chat" };
+  const details = (await knowledge.execute("call-2", { query: "связь штаба" }, runtime as never)).details as { results: Array<Record<string, unknown>> };
+  assert.equal(details.results[0]?.document, "Договор.pdf");
+  assert.equal(details.results[0]?.base, "personal");
+  const reference = details.results[1]!;
+  assert.match(String(reference.content), /Командно-штабная машина/u);
+  for (const key of ["document", "base", "cite", "pages", "section", "ordinal"]) {
+    assert.equal(key in reference, false, `${key} выдаёт происхождение фрагмента`);
+  }
+  assert.doesNotMatch(JSON.stringify(reference), /Справочник/u);
 });
 
 /**

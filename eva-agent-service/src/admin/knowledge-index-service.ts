@@ -184,6 +184,20 @@ export class KnowledgeIndexService {
         await validateKnowledgeVersion(client, store, {
           version: number, model: target.model, dimension: Number(target.dimension), distance: target.distance,
         });
+        // Проверка выше доказала: каждый фрагмент каждого готового документа
+        // лежит в этой версии. Документ, которому векторы записало
+        // построение версии, а не его собственное задание, иначе навсегда
+        // оставался «ждёт индексации»: построение состояние документа не меняет.
+        // До переключения aliases: ожидание чужой блокировки строки
+        // кончается «повторите активацию», а не восстановлением Qdrant.
+        await client.query(
+          `UPDATE knowledge_documents
+              -- tenant: system — состояние индекса после полной проверки версии; наружу ничего
+              SET index_status = 'ready', indexed_version = $1, indexed_at = now(), index_error = NULL, updated_at = now()
+            WHERE status = 'ready' AND index_status <> 'ready'
+              AND (user_id IS NOT NULL OR (product_verified AND collection_id IS NOT NULL))`,
+          [number],
+        );
         aliasesAttempted = true; // timeout мог случиться уже после применения запроса
         await store.activate(number);
         if (target.status !== "active") {

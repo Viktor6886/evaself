@@ -11,7 +11,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -294,6 +294,30 @@ test("повтор загрузки: только неудавшаяся или 
   });
 });
 
+test("удаление загрузки: только неудавшаяся или отменённая — файл и запись одной транзакцией", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kb-admin-delete-"));
+  await mkdir(join(root, "global"), { recursive: true });
+  await writeFile(join(root, "global", DOC_A), "исходный файл");
+  let found = true;
+  const { pool, queries } = fakePool((sql) => sql.startsWith("SELECT id FROM knowledge_uploads") ? { rows: found ? [{ id: DOC_A }] : [] } : undefined);
+  const service = new KnowledgeDocumentsService(pool as never, { uploadsRoot: root, store: null, uploadsEnabled: true });
+  await asAdmin(async () => {
+    assert.deepEqual(await service.deleteUpload(DOC_A), { deleted: DOC_A });
+    const select = queries.find((query) => query.sql.startsWith("SELECT id FROM knowledge_uploads"))!;
+    assert.match(select.sql, /user_id IS NULL AND status IN \('failed', 'cancelled'\) FOR UPDATE/u);
+    const removed = queries.find((query) => query.sql.startsWith("DELETE FROM knowledge_uploads"))!;
+    assert.ok(select.inTransaction && removed.inTransaction);
+    assert.deepEqual(removed.params, [DOC_A]);
+    assert.deepEqual(await readdir(join(root, "global")), [], "исходный файл удалён");
+    found = false;
+    queries.length = 0;
+    await assert.rejects(() => service.deleteUpload(DOC_B), (error: { statusCode?: number }) => error.statusCode === 409);
+    assert.ok(!queries.some((query) => query.sql.startsWith("DELETE")), "идущая или готовая загрузка не удаляется");
+    assert.equal(queries.at(-1)?.sql, "ROLLBACK");
+    await assert.rejects(() => service.deleteUpload("../etc/passwd"), (error: { statusCode?: number }) => error.statusCode === 400);
+  });
+});
+
 test("построение версии: без Qdrant — отказ; черновик становится building, перестройка — заданием", async () => {
   const { pool, queries } = fakePool((sql) =>
     sql.startsWith("UPDATE knowledge_embedding_versions") ? { rows: [{ status: "building", started: "1727690000000" }] } : undefined);
@@ -337,6 +361,10 @@ function activationScenario(input: { active?: number; status?: string; unbuilt?:
       order.push("retire");
       versions.filter((v) => v.status === "active" && v.version !== params[0]).forEach((v) => { v.status = "retired"; });
     }
+    if (sql.startsWith("UPDATE knowledge_documents")) {
+      order.push("documents");
+      if (input.failure === "documents") return Object.assign(new Error("lock timeout"), { code: "55P03" });
+    }
     if (sql.startsWith("UPDATE knowledge_embedding_versions SET status = 'active'")) {
       order.push("activate");
       if (input.failure === "db") return new Error("write failed");
@@ -368,7 +396,13 @@ function activationScenario(input: { active?: number; status?: string; unbuilt?:
 test("первая активация: полная проверка под блокировкой, aliases перед строкой, всё в транзакции", async () => {
   const scenario = activationScenario();
   assert.deepEqual(await asAdmin(async () => await scenario.service.activate(2)), { version: 2, status: "active" });
-  assert.deepEqual(scenario.order, ["validate", "alias:2", "retire", "activate", "commit"]);
+  assert.deepEqual(scenario.order, ["validate", "documents", "alias:2", "retire", "activate", "commit"]);
+  // Проверка доказала полноту версии: документы, которые записало
+  // построение, а не их собственное задание, больше не «ждут индексации».
+  const documents = scenario.queries.find((q) => q.sql.startsWith("UPDATE knowledge_documents"))!;
+  assert.deepEqual(documents.params, [2]);
+  assert.match(documents.sql, /SET index_status = 'ready', indexed_version = \$1/u);
+  assert.match(documents.sql, /WHERE status = 'ready' AND index_status <> 'ready'/u);
   assert.ok(scenario.queries.find((q) => q.sql.includes("pg_advisory_xact_lock"))?.inTransaction);
   assert.ok(scenario.queries.filter((q) => q.sql.startsWith("UPDATE")).every((q) => q.inTransaction));
 });
@@ -402,6 +436,15 @@ test("K7: stale UI и verify_only не переключают другую ак�
     assert.equal(scenario.alias(), 1);
     assert.deepEqual(scenario.order, []);
   }
+});
+
+test("активация: занятая строка документа — «повторите», aliases не тронуты", async () => {
+  const scenario = activationScenario({ active: 1, failure: "documents" });
+  await assert.rejects(() => asAdmin(async () => await scenario.service.activate(2)), /повторите активацию/u);
+  assert.equal(scenario.alias(), 1);
+  assert.deepEqual(scenario.order, ["validate", "documents"]);
+  assert.equal(scenario.versions().find((v) => v.status === "active")?.version, 1);
+  assert.equal(scenario.queries.at(-1)?.sql, "ROLLBACK");
 });
 
 test("K7: ошибки aliases, SQL и COMMIT восстанавливают aliases по канонической версии", async () => {
