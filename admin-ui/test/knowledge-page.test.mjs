@@ -230,13 +230,87 @@ test("массовое удаление: только после подтвер�
   }
 });
 
+test("удаление одного документа и неудавшейся загрузки — только после подтверждения", async () => {
+  const failed = UPLOADS[1];
+  const panel = await openPanel({ routes: { ...ROUTES,
+    "POST /knowledge/documents/delete": { deleted: [DOCS[0].id] },
+    [`POST /knowledge/uploads/${failed.id}/delete`]: { deleted: failed.id },
+  } });
+  try {
+    await panel.page.click('[data-page="knowledge"]');
+    await panel.page.waitForSelector(`[data-document-delete="${DOCS[0].id}"]`);
+    assert.equal(await panel.page.locator(`[data-upload-delete="${UPLOADS[0].id}"]`).count(), 0, "разобранная загрузка удаляется вместе с документом");
+    await panel.page.click(`[data-document-delete="${DOCS[0].id}"]`);
+    await panel.page.waitForFunction(() => document.querySelector("#confirm-dialog")?.open === true);
+    assert.match(await panel.page.textContent("#confirm-description"), /Регламент\.pdf[\s\S]*Qdrant/u);
+    assert.equal(panel.countTo("/knowledge/documents/delete"), 0, "до подтверждения ничего не удаляется");
+    await panel.page.click('#confirm-form button[value="confirm"]');
+    const request = await panel.waitForRequest((item) => item.path === "/knowledge/documents/delete");
+    assert.deepEqual(request.body, { ids: [DOCS[0].id] });
+    await panel.page.waitForFunction(() => document.querySelector("#confirm-dialog")?.open === false);
+    await panel.page.click(`[data-upload-delete="${failed.id}"]`);
+    await panel.page.waitForFunction(() => document.querySelector("#confirm-dialog")?.open === true);
+    assert.equal(panel.countTo(`/knowledge/uploads/${failed.id}/delete`), 0);
+    await panel.page.click('#confirm-form button[value="confirm"]');
+    await panel.waitForRequest((item) => item.path === `/knowledge/uploads/${failed.id}/delete` && item.method === "POST");
+    assert.deepEqual(panel.errors, []);
+  } finally {
+    await panel.close();
+  }
+});
+
+/**
+ * «Ждёт индексации» без причины висело вечно: без Qdrant, при выключенной
+ * индексации и без построенной модели документ в индекс не попадёт, а Ева
+ * уже находит его поиском по PostgreSQL.
+ */
+test("документ без Qdrant показывает причину вместо вечного «ждёт индексации»", async () => {
+  const pending = { ...DOCS[0], id: "0e000000-0000-4000-8000-00000000000e", name: "Справочник.pdf", index_status: "pending", revision: 1 };
+  const indexOff = { ...SETTINGS, settings: SETTINGS.settings.map((item) => item.key === "runtime.knowledge_index_enabled" ? { ...item, value: false } : item) };
+  const draft = { ...VERSION, status: "draft", built_at: null, points: null, progress: null };
+  const counts = { ...INDEX.scopes, global: { documents: 1, chunks: 8, lag_seconds: 120, by_status: { pending: 1 } } };
+  for (const scenario of [
+    { name: "индексация выключена", routes: { "/settings": indexOff }, reason: /индексация выключена/u, banner: /Включите «База знаний: индексация в Qdrant»/u },
+    { name: "нет модели", routes: { "/knowledge/embeddings": { ...EMBEDDINGS, versions: [draft] }, "/knowledge/index": { ...INDEX, scopes: counts, versions: [draft] } },
+      reason: /нет построенной модели эмбеддингов/u, banner: /«Построить индекс» и «Активировать»/u },
+    { name: "Qdrant не настроен", routes: { "/knowledge/index": { ...INDEX, qdrant: false, qdrant_status: "not_configured", scopes: counts } },
+      reason: /Qdrant не настроен/u, banner: /QDRANT_API_KEY не задан/u },
+    { name: "индексировать есть куда", routes: {}, reason: null },
+  ]) {
+    const panel = await openPanel({ routes: { ...ROUTES, "/knowledge/documents": { documents: [pending], total: 1 },
+      "/knowledge/index": { ...INDEX, scopes: counts }, ...scenario.routes } });
+    try {
+      await panel.page.click('[data-page="knowledge"]');
+      await panel.page.waitForSelector(`[data-document-row="${pending.id}"]`);
+      const row = await panel.page.textContent(`[data-document-row="${pending.id}"]`);
+      const index = await panel.page.textContent("#knowledge-index");
+      if (scenario.reason) {
+        assert.match(row, /не в Qdrant/u, scenario.name);
+        assert.match(row, scenario.reason, scenario.name);
+        assert.match(row, /поиск по словам работает и без Qdrant/u, scenario.name);
+        assert.doesNotMatch(row, /ждёт индексации/u, scenario.name);
+        assert.match(index, scenario.banner, scenario.name);
+        assert.match(index, /не в Qdrant 1/u, scenario.name);
+        assert.doesNotMatch(index, /ждёт дольше всех/u, scenario.name);
+      } else {
+        assert.match(row, /ждёт индексации/u, "версия построена: документ действительно в очереди");
+        assert.match(index, /в очереди 1/u);
+        assert.doesNotMatch(index, /Документы не попадают в Qdrant/u);
+      }
+      assert.deepEqual(panel.errors, [], scenario.name);
+    } finally {
+      await panel.close();
+    }
+  }
+});
+
 test("читающая роль видит базу, но не может ничего загрузить или изменить", async () => {
   const panel = await openPanel({ role: "viewer", routes: ROUTES });
   try {
     await panel.page.click('[data-page="knowledge"]');
     await panel.page.waitForSelector("[data-document-row]");
     assert.equal(await panel.page.isVisible("#knowledge-upload"), false);
-    assert.equal(await panel.page.locator("[data-collection-delete], [data-document-select], [data-version-build], #knowledge-reconcile, #knowledge-collection-form").count(), 0);
+    assert.equal(await panel.page.locator("[data-collection-delete], [data-document-select], [data-document-delete], [data-upload-delete], [data-upload-retry], [data-version-build], #knowledge-reconcile, #knowledge-collection-form").count(), 0);
     assert.equal(await panel.page.isVisible("#knowledge-bulk"), false);
   } finally {
     await panel.close();

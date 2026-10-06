@@ -62,6 +62,7 @@ export function registerKnowledgeDocumentRoutes(app: FastifyInstance, service: K
 
   app.get("/api/admin/v1/knowledge/uploads", { config: { roles: ["owner", "admin", "operator", "viewer"], tenantAccess: "cross-user" } }, async (request) => ({ uploads: await service.uploads(request.query) }));
   app.post("/api/admin/v1/knowledge/uploads/:id/retry", { config: { roles: ["owner", "admin"], tenantAccess: "cross-user" } }, async (request) => await service.retryUpload(param(request, "id")));
+  app.post("/api/admin/v1/knowledge/uploads/:id/delete", { config: { roles: ["owner", "admin"], tenantAccess: "cross-user" } }, async (request) => await service.deleteUpload(param(request, "id")));
 
   // Загрузка файла — единственный маршрут панели с multipart: разбор
   // подключён только здесь, остальные маршруты по-прежнему принимают JSON

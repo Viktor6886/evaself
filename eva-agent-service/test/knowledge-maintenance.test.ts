@@ -268,7 +268,7 @@ test("перестройка: полные документы пропускаю
   }).rebuild(rebuildContext({ version: 2, started: 5_000, full: false, after: null }));
 
   assert.deepEqual(result, { status: "done", processed: 2 });
-  assert.deepEqual(indexed, [[B, 7, { versions: [2] }], [G, null, { versions: [2] }]]);
+  assert.deepEqual(indexed, [[B, 7, { versions: [2], markReady: false }], [G, null, { versions: [2], markReady: false }]]);
   // Коллекции создаются в начале перестройки: у пустой базы иначе их не
   // было бы вовсе, и включить готовую версию было бы нечем.
   const ensured = calls.filter((call) => call.method === "ensureSpace");
@@ -280,6 +280,25 @@ test("перестройка: полные документы пропускаю
   assert.deepEqual(done.params, [2, 5_000], "только та перестройка, что началась в этот момент");
   const page = queries.find((query) => /ORDER BY id/u.test(query.sql))!;
   assert.equal(page.scope, "system:cross");
+});
+
+/**
+ * Перестраивается активная версия: документ, записанный в неё, найден
+ * поиском, и его состояние это показывает. Строящаяся версия состояние
+ * документов не трогает — его выставит активация после полной проверки.
+ */
+test("перестройка активной версии отмечает документы готовыми, строящейся — нет", async () => {
+  const documents = [{ id: B, user_id: "7", chunk_count: 3 }];
+  for (const [status, markReady] of [["active", true], ["ready", false], ["building", false]] as const) {
+    const { db } = rebuildDb({ status, documents });
+    const indexed: unknown[] = [];
+    const indexer = { index: async (...args: unknown[]) => { indexed.push(args[3]); return { status: "ready" }; } };
+    const { store } = fakeStore({ points: { private: {} } });
+    await new KnowledgeMaintenance(db as never, store as never, indexer as never, {
+      enabled: () => true, configured: () => true, uploadsRoot: "/nonexistent", outbox: outboxLog().outbox, index: indexLog().index,
+    }).rebuild(rebuildContext({ version: 2, started: 5_000, full: true, after: null }));
+    assert.deepEqual(indexed, [{ versions: [2], markReady }], status);
+  }
 });
 
 test("перестройка: полная переиндексирует всё; кончилось время — продолжение с курсора отдельным заданием", async () => {

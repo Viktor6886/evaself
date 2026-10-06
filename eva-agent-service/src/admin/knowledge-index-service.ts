@@ -6,6 +6,7 @@
 import type pg from "pg";
 
 import { recordJobIntent, type JobOutboxClient } from "../jobs/job-outbox.js";
+import { knowledgeIndexScheduler } from "../knowledge/indexer.js";
 import { scheduleKnowledgeReconcile, startKnowledgeRebuild } from "../knowledge/maintenance.js";
 import { QdrantError, type QdrantDistance } from "../knowledge/qdrant-client.js";
 import { KnowledgeVersionError, validateKnowledgeVersion } from "../knowledge/version-validation.js";
@@ -13,6 +14,7 @@ import type { KnowledgeDocumentsOptions } from "./knowledge-documents-service.js
 import { adminBadRequest, adminConflict, adminNotFound } from "./errors.js";
 
 const outbox = { record: recordJobIntent };
+const documentJobs = knowledgeIndexScheduler(outbox, () => true);
 function iso(value: unknown): string | null {
   return value instanceof Date ? value.toISOString() : value ? String(value) : null;
 }
@@ -184,6 +186,38 @@ export class KnowledgeIndexService {
         await validateKnowledgeVersion(client, store, {
           version: number, model: target.model, dimension: Number(target.dimension), distance: target.distance,
         });
+        // Проверка выше доказала: каждый фрагмент каждого готового документа
+        // лежит в этой версии. Документ, которому векторы записало
+        // построение версии, а не его собственное задание, иначе навсегда
+        // оставался «ждёт индексации»: построение состояние документа не меняет.
+        // До переключения aliases: ожидание чужой блокировки строки
+        // кончается «повторите активацию», а не восстановлением Qdrant.
+        // Новая версия документа, чья прежняя ещё жива, готовой здесь не
+        // объявляется: прежнюю снимает её собственное задание индексации
+        // после записи новой, иначе в поиске остались бы обе.
+        const replacements = await client.query<{ id: string; user_id: string | null }>(
+          `SELECT d.id, d.user_id FROM knowledge_documents d
+             -- tenant: system — новые версии, ждущие снятия прежней; наружу ничего
+            WHERE d.status = 'ready' AND d.index_status <> 'ready'
+              AND (d.user_id IS NOT NULL OR (d.product_verified AND d.collection_id IS NOT NULL))
+              AND EXISTS (SELECT 1 FROM knowledge_documents p WHERE p.id = d.replaces_document_id)`,
+        );
+        for (const row of replacements.rows) {
+          await documentJobs.schedule(client as unknown as JobOutboxClient, {
+            documentId: String(row.id),
+            userId: row.user_id === null ? null : Number(row.user_id),
+            reason: `activate-${number}-${this.now()}`,
+          });
+        }
+        await client.query(
+          `UPDATE knowledge_documents d
+              -- tenant: system — состояние индекса после полной проверки версии; наружу ничего
+              SET index_status = 'ready', indexed_version = $1, indexed_at = now(), index_error = NULL, updated_at = now()
+            WHERE d.status = 'ready' AND d.index_status <> 'ready'
+              AND (d.user_id IS NOT NULL OR (d.product_verified AND d.collection_id IS NOT NULL))
+              AND NOT EXISTS (SELECT 1 FROM knowledge_documents p WHERE p.id = d.replaces_document_id)`,
+          [number],
+        );
         aliasesAttempted = true; // timeout мог случиться уже после применения запроса
         await store.activate(number);
         if (target.status !== "active") {

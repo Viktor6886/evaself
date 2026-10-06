@@ -412,9 +412,8 @@ test("knowledge_search: психологический запрос без на�
   const details = (await knowledge.execute("semantic", { query, user_id: 8 }, { userId: 77 } as never)).details as Record<string, any>;
   assert.deepEqual(calls, [[77, query, { limit: 5 }]]);
   assert.equal(details.untrusted, true);
-  assert.equal(details.results[0].base, "shared");
-  assert.equal(details.results[0].pages, "42");
-  assert.match(details.results[0].cite, /Психология саморегуляции/u);
+  // Общая база — справочные знания Евы: модели не отдаётся ни база, ни документ.
+  for (const key of ["base", "pages", "cite", "section", "document"]) assert.equal(key in details.results[0], false, key);
   assert.match(details.results[0].content, /Прокрастинация/u);
   assert.doesNotMatch(details.results[0].content, /previous instructions|system prompt/iu);
   assert.ok(details.notice);
