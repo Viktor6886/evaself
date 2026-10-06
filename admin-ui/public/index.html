@@ -713,15 +713,39 @@
             <button id="reload-knowledge" class="button ghost">Обновить</button>
           </div>
 
+          <!-- Поиск по смыслу настраивается здесь, тремя шагами по порядку;
+               форма модели — внутри первого шага. Версии и обслуживание
+               индекса — в блоке «Векторный индекс». -->
+          <section class="card" id="knowledge-setup-card">
+            <h3>Поиск по смыслу</h3>
+            <p class="block-caption">По словам Ева ищет всегда. Чтобы она находила нужное и по смыслу — когда в вопросе другие слова, — тексты документов превращаются в векторы и хранятся в Qdrant. Настраивается один раз, в три шага.</p>
+            <div id="knowledge-setup">
+              <div class="knowledge-setup-status" id="knowledge-setup-status" aria-live="polite"></div>
+              <ol class="knowledge-steps" id="knowledge-setup-steps" hidden>
+                <li class="knowledge-step" data-setup-step="1">
+                  <span class="knowledge-step-mark" aria-hidden="true">1</span>
+                  <div><strong>Модель эмбеддингов</strong><div data-step-body></div><div id="knowledge-embedding-editor" hidden></div></div>
+                </li>
+                <li class="knowledge-step" data-setup-step="2">
+                  <span class="knowledge-step-mark" aria-hidden="true">2</span>
+                  <div><strong>Индекс в Qdrant</strong><div data-step-body></div></div>
+                </li>
+                <li class="knowledge-step" data-setup-step="3">
+                  <span class="knowledge-step-mark" aria-hidden="true">3</span>
+                  <div><strong>Включение</strong><div data-step-body></div></div>
+                </li>
+              </ol>
+              <p class="block-caption" id="knowledge-setup-busy" aria-live="polite"></p>
+            </div>
+          </section>
           <section class="card">
             <h3>Состояние базы знаний</h3>
             <div id="knowledge-status" aria-live="polite"></div>
-            <div id="knowledge-runtime-editor"></div>
-          </section>
-          <section class="card">
-            <h3>Embedding-модель</h3>
-            <div id="knowledge-active-embedding" aria-live="polite"></div>
-            <div id="knowledge-embedding-editor"></div>
+            <div id="knowledge-active-embedding"></div>
+            <details class="knowledge-advanced" id="knowledge-manual">
+              <summary>Ручные настройки поиска</summary>
+              <div id="knowledge-runtime-editor"></div>
+            </details>
           </section>
 
           <section class="card">
@@ -785,7 +809,7 @@
             <div class="section-heading">
               <div>
                 <h3>Векторный индекс</h3>
-                <p class="block-caption">Qdrant — производный индекс: он целиком перестраивается из PostgreSQL. Первое построение и «Перестроить» идут в фоне порциями; поиск по включённой версии при этом не прерывается.</p>
+                <p class="block-caption">Версии модели и обслуживание индекса. Обычно здесь ничего делать не нужно: подключение — в блоке «Поиск по смыслу» вверху страницы. Qdrant — производный индекс: он целиком перестраивается из PostgreSQL, построение идёт в фоне порциями, поиск по включённой версии при этом не прерывается.</p>
               </div>
             </div>
             <div id="knowledge-index"></div>
