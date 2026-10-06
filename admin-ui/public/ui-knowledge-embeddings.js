@@ -10,6 +10,8 @@
  * от сохранения модели: версия оставалась черновиком, и в Qdrant не
  * попадало ничего. Ручные параметры поиска свёрнуты в «Состоянии базы
  * знаний», версии и обслуживание индекса — в блоке «Векторный индекс».
+ *
+ * Здесь — состояние шагов и их отрисовка; действия — в ui-knowledge-setup.js.
  */
 const KNOWLEDGE_RECOMMENDED = {
   "runtime.knowledge_index_enabled": true,
@@ -21,12 +23,35 @@ const KNOWLEDGE_RECOMMENDED = {
 };
 const KNOWLEDGE_VERSION_STATUS = { draft: "черновик (проверен)", building: "строится", ready: "готов", active: "активен", retired: "выведен, доступен откат", failed: "ошибка" };
 
-/** Отказы построения — словами администратора; прочие коды показываются как есть. */
+/** Отказы построения — словами администратора; код остаётся в скобках, прочие коды — как есть. */
 const KNOWLEDGE_BUILD_ERRORS = {
   knowledge_index_disabled: "индексация была выключена",
+  knowledge_index_failed: "ошибка индексации",
   job_publish_failed: "задание не попало в очередь",
   job_deadline_exceeded: "задание не дождалось очереди",
+  embedding_auth: "провайдер эмбеддингов отклонил ключ",
+  embedding_not_found: "провайдер не нашёл модель",
+  embedding_bad_request: "провайдер отклонил запрос",
+  embedding_rate_limited: "провайдер ограничил частоту запросов",
+  embedding_timeout: "провайдер не ответил вовремя",
+  embedding_unavailable: "провайдер эмбеддингов недоступен",
+  embedding_incomplete: "провайдер вернул неполный ответ",
+  embedding_dimension_mismatch: "модель вернула векторы другой размерности",
+  embedding_provider_missing: "провайдер модели выключен или удалён",
+  qdrant_unavailable: "Qdrant недоступен",
+  qdrant_timeout: "Qdrant не ответил вовремя",
+  qdrant_unauthorized: "Qdrant отклонил ключ",
+  qdrant_server_error: "ошибка на стороне Qdrant",
 };
+
+function knowledgeBuildError(code) {
+  return KNOWLEDGE_BUILD_ERRORS[code] ? `${KNOWLEDGE_BUILD_ERRORS[code]} (${code})` : code;
+}
+
+/** Попытка построения не удалась, но версия ещё строится: очередь повторит её сама. */
+function knowledgeBuildRetrying(version) {
+  return version?.status === "building" && !!version.error_code && version.error_code !== "knowledge_index_disabled";
+}
 
 function knowledgeVersions() {
   const k = state.knowledge;
@@ -40,12 +65,39 @@ function knowledgeSetting(key) {
   return state.knowledge.runtime?.settings?.find((s) => s.key === `runtime.knowledge_${key}`)?.value;
 }
 
-function knowledgeQdrantReady() {
-  if (state.knowledge.failed?.index || state.knowledge.failed?.embeddings || state.knowledge.failed?.settings) return false;
-  const active = knowledgeVersions().find((v) => v.status === "active");
-  return !!(active?.built_at && !active.building && !active.error_code
-    && typeof active.points === "number" && active.progress === 1
-    && state.knowledge.index?.qdrant_status === "ready" && state.knowledge.index?.aliases_match_active === true);
+function knowledgeActiveVersion() {
+  return knowledgeVersions().find((v) => v.status === "active") || null;
+}
+
+/**
+ * Qdrant обслуживает поиск по включённой версии: она построена и Qdrant
+ * доступен. Неполный индекс (новые документы ещё индексируются) поиску не
+ * мешает — недостающее Ева находит по словам; при расхождении aliases
+ * поиск идёт по физическим коллекциям версии из PostgreSQL.
+ */
+function knowledgeQdrantServing() {
+  const k = state.knowledge;
+  if (k.failed?.index || k.failed?.embeddings || k.failed?.settings) return false;
+  return !!knowledgeActiveVersion()?.built_at && k.index?.qdrant_status === "ready";
+}
+
+/**
+ * Почему Qdrant пока нельзя сделать источником поиска; null — можно.
+ * Полноту индекса проверяет сервер (`verify_only`) и сам называет, чего не
+ * хватает: счётчик точек в обзоре учитывает и документы, которые ещё
+ * индексируются, и отказ по нему звучал бы как «индекс не построен».
+ */
+function knowledgeQdrantBlocker() {
+  const k = state.knowledge;
+  if (k.failed?.index || k.failed?.embeddings || k.failed?.settings) return "Состояние индекса сейчас недоступно — нажмите «Обновить» и повторите.";
+  const active = knowledgeActiveVersion();
+  if (!active?.built_at) return "Сначала постройте и включите индекс в блоке «Поиск по смыслу» вверху страницы — тогда Qdrant станет источником векторов.";
+  if (active.building) return "Индекс перестраивается — Qdrant можно будет включить, когда построение закончится.";
+  if (active.error_code) return `Последнее построение индекса не удалось: ${knowledgeBuildError(active.error_code)}. Перестройте включённую версию в блоке «Векторный индекс».`;
+  if (k.index?.qdrant_status !== "ready") return "Qdrant сейчас недоступен — сделать его источником поиска нельзя.";
+  if (k.index?.aliases_match_active === false) return "Aliases Qdrant расходятся с включённой версией — нажмите «Восстановить aliases» в блоке «Векторный индекс».";
+  if (k.index?.aliases_match_active !== true) return "Qdrant не сообщил, на какую версию указывают aliases, — нажмите «Обновить» и повторите.";
+  return null;
 }
 
 /**
@@ -65,10 +117,13 @@ function knowledgeSearchOnQdrant() {
 }
 
 /**
- * Где сейчас настройка. `candidate` — самая новая ещё не включённая
- * версия (черновик, строится, построена или с ошибкой), `active` —
- * включённая. Состояние шага: done, current (ждёт кнопки), busy (идёт на
- * сервере), error, off (индексация выключена), todo (ждёт прошлого шага).
+ * Где сейчас настройка. `active` — включённая версия, `candidate` — самая
+ * новая версия новее неё (черновик, строится, построена или с ошибкой).
+ * Черновики и неудачи прошлых попыток, оставшиеся позади включённой, к
+ * настройке не относятся — они видны в «Векторном индексе». Состояние
+ * шага: done, current (ждёт кнопки), busy (идёт на сервере), error, off
+ * (индексация выключена), todo (ждёт прошлого шага); `retrying` — ошибка
+ * попытки, которую очередь ещё повторит.
  */
 function knowledgeSetup() {
   const k = state.knowledge;
@@ -76,7 +131,8 @@ function knowledgeSetup() {
   if (k.index.qdrant === false) return { blocker: "qdrant" };
   const versions = knowledgeVersions();
   const active = versions.find((v) => v.status === "active") || null;
-  const candidate = versions.filter((v) => ["draft", "building", "ready", "failed"].includes(v.status))
+  const candidate = versions.filter((v) => ["draft", "building", "ready", "failed"].includes(v.status)
+    && (!active || v.version > active.version))
     .sort((a, b) => b.version - a.version)[0] || null;
   const built = (v) => v.status === "ready" && !!v.built_at && !v.building && !v.error_code;
   let index = "todo";
@@ -98,6 +154,7 @@ function knowledgeSetup() {
     model: candidate || active ? "done" : "current",
     index,
     live,
+    retrying: index === "error" && knowledgeBuildRetrying(candidate),
   };
 }
 
@@ -166,11 +223,14 @@ function renderKnowledgeSetup() {
   const steps = $("#knowledge-setup-steps");
   const editable = knowledgeEditable();
   const setup = knowledgeSetup();
-  $("#knowledge-setup-busy").textContent = k.setupBusy || "";
+  // Живые области переписываются, только когда текст изменился: опрос раз
+  // в 5 секунд иначе заставлял бы экранного диктора повторять одно и то же.
+  const live = (node, html) => { if (node.renderedHtml !== html) { node.innerHTML = html; node.renderedHtml = html; } };
+  live($("#knowledge-setup-busy"), escapeHtml(k.setupBusy || ""));
   if (setup.blocker) {
     steps.hidden = true;
-    status.innerHTML = setup.blocker === "unknown" ? knowledgeUnavailable("Сведения о поиске по смыслу")
-      : '<p class="warn-value">Qdrant не подключён к серверу: задайте QDRANT_API_KEY в .env и выполните sudo make update. До этого Ева ищет только по словам.</p>';
+    live(status, setup.blocker === "unknown" ? knowledgeUnavailable("Сведения о поиске по смыслу")
+      : '<p class="warn-value">Qdrant не подключён к серверу: задайте QDRANT_API_KEY в .env и выполните sudo make update. До этого Ева ищет только по словам.</p>');
     return;
   }
   const { active, candidate } = setup;
@@ -188,10 +248,12 @@ function renderKnowledgeSetup() {
       <p class="block-caption">${auto ? "Оставьте страницу открытой — поиск по смыслу включится сам. Если закроете, вернитесь позже и нажмите «Включить поиск по смыслу»." : "Построение идёт на сервере — страницу можно закрыть и вернуться позже."}</p>`;
   } else if (setup.index === "done") {
     const v = candidate || active;
-    indexBody = `<p>✓ Построен${typeof v.points === "number" ? `: ${v.points} фрагментов в Qdrant` : ""}${active?.building && !candidate ? " · перестраивается" : ""}</p>`;
+    indexBody = `<p>✓ Построен${typeof v.points === "number" ? ` — фрагментов в Qdrant: ${v.points}` : ""}${active?.building && !candidate ? " · перестраивается" : ""}</p>`;
   } else if (setup.index === "error") {
-    const code = candidate.error_code || "build_failed";
-    indexBody = `<p class="warn-value">Построение не удалось: ${escapeHtml(KNOWLEDGE_BUILD_ERRORS[code] || code)}.</p>${button("knowledge-setup-build", "Построить заново")}`;
+    const reason = escapeHtml(knowledgeBuildError(candidate.error_code || "build_failed"));
+    indexBody = setup.retrying
+      ? `<p class="warn-value">Попытка построения не удалась: ${reason}. Сервер повторит её сам — можно подождать или начать заново.</p>${button("knowledge-setup-build", "Построить заново")}`
+      : `<p class="warn-value">Построение не удалось: ${reason}.</p>${button("knowledge-setup-build", "Построить заново")}`;
   } else if (setup.index === "current") {
     indexBody = `<p>Векторы всех документов посчитаются и запишутся в Qdrant${knowledgeSetting("index_enabled") === false ? "; индексация включится сама" : ""}.</p>${button("knowledge-setup-build", "Построить индекс")}`;
   } else if (setup.index === "off") {
@@ -201,35 +263,47 @@ function renderKnowledgeSetup() {
   }
   let liveBody;
   if (setup.live === "done") {
-    liveBody = knowledgeQdrantReady()
+    liveBody = knowledgeQdrantServing()
       ? "<p>✓ Включено: Ева ищет и по словам, и по смыслу.</p>"
-      : '<p class="warn-value">Включено, но Qdrant сейчас недоступен или индекс расходится с базой — Ева ищет только по словам. Подробности — в блоке «Векторный индекс».</p>';
+      : '<p class="warn-value">Включено, но Qdrant сейчас недоступен — Ева ищет только по словам. Подробности — в блоке «Векторный индекс».</p>';
   } else if (setup.live === "current") {
     const label = candidate && active ? "Переключить на новую модель" : "Включить поиск по смыслу";
     liveBody = `<p>${candidate && active ? "Новая модель построена. Прежняя работает, пока вы не переключите." : "Индекс готов. Включите — и Ева начнёт искать и по смыслу."}</p>${button("knowledge-use-qdrant", label)}`;
   } else {
     liveBody = `<p>${auto ? "Включится само, когда индекс построится." : "Станет доступно, когда индекс построится."}</p>`;
   }
-  const working = !!active && knowledgeSearchOnQdrant() && knowledgeQdrantReady();
+  const working = !!active && knowledgeSearchOnQdrant() && knowledgeQdrantServing();
   const meanwhile = knowledgeSearchEnabled() ? "Пока Ева ищет только по словам." : "Поиск по базе знаний выключен — Ева не ищет в документах.";
-  status.innerHTML = working
-    ? `<span class="status-pill state-green">работает</span> Ева ищет по словам и по смыслу.${setup.index === "off" ? " Новые документы в Qdrant не попадают — включите индексацию." : candidate ? " Новая модель готовится рядом." : ""}`
-    : active && knowledgeSearchOnQdrant() ? '<span class="status-pill state-red">не работает</span> Qdrant недоступен или индекс расходится с базой — Ева ищет только по словам.'
+  // Неполный индекс и расхождение aliases поиск не останавливают, но о
+  // них нужно знать: первое проходит само, второе чинит одна кнопка.
+  const notes = working ? [
+    typeof active.progress === "number" && active.progress < 1 ? "Часть документов ещё не в Qdrant — их Ева пока находит по словам." : "",
+    state.knowledge.index?.aliases_match_active === false ? "Aliases Qdrant расходятся с включённой версией — «Восстановить aliases» в блоке «Векторный индекс»." : "",
+    setup.index === "off" ? "Новые документы в Qdrant не попадают — включите индексацию." : candidate ? "Новая модель готовится рядом." : "",
+  ].filter(Boolean).map((note) => ` ${note}`).join("") : "";
+  live(status, working
+    ? `<span class="status-pill state-green">работает</span> Ева ищет по словам и по смыслу.${notes}`
+    : active && knowledgeSearchOnQdrant() ? '<span class="status-pill state-red">не работает</span> Qdrant сейчас недоступен — Ева ищет только по словам.'
     : setup.index === "busy" ? `<span class="status-pill state-yellow">строится индекс</span> ${meanwhile}`
-    : `<span class="status-pill state-yellow">не настроен</span> ${meanwhile}`;
+    : `<span class="status-pill state-yellow">не настроен</span> ${meanwhile}`);
   const states = { 1: [setup.model, modelBody], 2: [setup.index, indexBody], 3: [setup.live, liveBody] };
+  // Текущий шаг — первый не выполненный: для экранного диктора, который не видит цвета.
+  const current = Object.keys(states).find((n) => states[n][0] !== "done");
   for (const [n, [mode, body]] of Object.entries(states)) {
     const step = steps.querySelector(`[data-setup-step="${n}"]`);
     step.dataset.state = mode;
+    if (n === current) step.setAttribute("aria-current", "step");
+    else step.removeAttribute("aria-current");
     step.querySelector(".knowledge-step-mark").textContent = mode === "done" ? "✓" : n;
     step.querySelector("[data-step-body]").innerHTML = body;
   }
   steps.hidden = false;
   // Первая настройка доводится до конца сама: после «Подключить модель» и
-  // построения больше нечего решать. Смену модели включает человек.
-  if (auto && setup.index === "done" && !active && !k.setupBusy) {
+  // построения больше нечего решать. Смену модели включает человек. Пока
+  // очередь повторяет неудавшуюся попытку, ожидание не снимается.
+  if (auto && editable && setup.index === "done" && !active && !k.setupBusy) {
     queueMicrotask(() => knowledgeGoLive({ auto: true }));
-  } else if (auto && setup.index === "error") {
+  } else if (auto && setup.index === "error" && !setup.retrying) {
     k.setupAuto = null;
   }
 }
@@ -237,6 +311,8 @@ function renderKnowledgeSetup() {
 /**
  * Форма модели в первом шаге: при первой настройке открыта, потом — по
  * «Сменить модель». Без реестра провайдеров шаги скрыты вместе с ней.
+ * Опрос раз в 5 секунд форму не пересоздаёт: иначе поле теряло бы фокус
+ * посреди ввода, а «Дополнительно» сворачивалось.
  */
 function renderKnowledgeModelForm() {
   const k = state.knowledge;
@@ -246,12 +322,21 @@ function renderKnowledgeModelForm() {
   editor.hidden = !open;
   if (!open) {
     editor.innerHTML = "";
+    editor.dataset.form = "";
     return;
   }
   const providers = k.embeddings?.providers || [];
+  const key = JSON.stringify([!!setup.active, !!k.setupChangeModel, providers.map((p) => [p.id, p.name])]);
+  if (editor.dataset.form === key && $("#knowledge-embedding-form")) {
+    renderKnowledgeProbe();
+    return;
+  }
+  editor.dataset.form = key;
   if (!k.embeddingDraft) {
+    // Размерность прежней модели переносится, только если её задавали
+    // явно (dimensions провайдеру): другая модель узнаёт свою при проверке.
     const base = setup.candidate || setup.active;
-    k.embeddingDraft = base ? { ...base } : { provider_id: providers[0]?.id || "", model: "", dimension: null };
+    k.embeddingDraft = base ? { ...base, dimension: base.request_dimensions ? base.dimension : null } : { provider_id: providers[0]?.id || "", model: "", dimension: null };
   }
   const draft = k.embeddingDraft;
   const options = (selected, fallback = false) => `${fallback ? '<option value="">Не использовать</option>' : '<option value="">Выберите провайдера</option>'}${providers.map((p) =>
@@ -307,223 +392,4 @@ function renderKnowledgeRuntime() {
     <div class="knowledge-actions"><button class="button ghost" type="submit" id="knowledge-runtime-save">Сохранить параметры поиска</button></div>
     <p class="block-caption">Обычно трогать не нужно: поиск по смыслу включается в блоке «Поиск по смыслу» вверху. Qdrant как источник векторов можно выбрать только после того, как индекс построен и включён.</p>
   </form>` : knowledgeUnavailable("Настройки поиска");
-}
-
-async function saveKnowledgeRuntime(settings, verify = false, { quiet = false } = {}) {
-  const k = state.knowledge;
-  const previous = Object.fromEntries((k.runtime?.settings || []).map((s) => [s.key, s.value]));
-  const usesQdrant = (s) => s["runtime.knowledge_search_enabled"] === true
-    && ["hybrid", "vector"].includes(s["runtime.knowledge_search_mode"]) && s["runtime.knowledge_vector_backend"] === "qdrant";
-  // Отказ индекса не мешает выключить поиск/индексацию или изменить
-  // уже действующие параметры. Проверка нужна при включении Qdrant.
-  if (settings["runtime.knowledge_vector_backend"] === "qdrant"
-    && (verify || previous["runtime.knowledge_vector_backend"] !== "qdrant" || usesQdrant(settings) && !usesQdrant(previous))) {
-    // С кодом: без него общий обработчик принял бы отказ за поломку
-    // отрисовки и показал «Раздел не отрисовался» вместо причины.
-    if (!knowledgeQdrantReady()) {
-      throw Object.assign(new Error("Сначала постройте и включите индекс в блоке «Поиск по смыслу» вверху страницы — тогда Qdrant станет источником векторов."), { code: "knowledge_qdrant_not_ready" });
-    }
-    // Повторная серверная проверка непосредственно перед включением:
-    // готовность не доверяется DOM, счётчику точек или старому overview.
-    const active = knowledgeVersions().find((v) => v.status === "active");
-    await request(`/knowledge/embeddings/versions/${active.version}/activate`, { method: "POST", body: JSON.stringify({ verify_only: true }) });
-  }
-  await request("/settings", { method: "PUT", headers: { "If-Match": k.runtime.etag }, body: JSON.stringify({ settings }) });
-  if (!quiet) toast("Параметры базы знаний сохранены");
-  await loadKnowledge();
-}
-
-/** Построить версию; выключенную индексацию включить до этого, иначе построение остановится сразу. */
-async function knowledgeStartBuild(version) {
-  if (knowledgeSetting("index_enabled") === false) {
-    await saveKnowledgeRuntime({ "runtime.knowledge_index_enabled": true }, false, { quiet: true });
-  }
-  await request(`/knowledge/embeddings/versions/${encodeURIComponent(version)}/build`, { method: "POST", body: JSON.stringify({ full: true }) });
-}
-
-/** «Подключить модель»: проверка, версия и построение — одним нажатием. */
-async function knowledgeConnectModel() {
-  const k = state.knowledge;
-  const form = $("#knowledge-embedding-form");
-  if (k.embeddingBusy || !form.reportValidity()) return;
-  const input = knowledgeEmbeddingInput();
-  const fingerprint = JSON.stringify(input);
-  k.embeddingDraft = input;
-  k.embeddingBusy = "Проверяем модель…";
-  renderKnowledgeProbe();
-  let probe;
-  try {
-    probe = (await request("/knowledge/embeddings/probe", { method: "POST", body: fingerprint })).payload;
-  } catch (error) {
-    k.embeddingBusy = false;
-    if (error.status === 401) { handleError(error); return; }
-    k.embeddingProbe = { ok: false, message: error.message, fingerprint };
-    renderKnowledgeProbe();
-    return;
-  }
-  k.embeddingProbe = { ...probe, fingerprint };
-  if (!knowledgeProbePassed(probe)) {
-    k.embeddingBusy = false;
-    renderKnowledgeProbe();
-    return;
-  }
-  const first = !knowledgeVersions().some((v) => v.status === "active");
-  try {
-    k.embeddingBusy = "Сохраняем модель…";
-    renderKnowledgeProbe();
-    const { payload: version } = await request("/knowledge/embeddings/versions", { method: "POST", body: fingerprint });
-    k.embeddingBusy = "Запускаем построение индекса…";
-    renderKnowledgeProbe();
-    await knowledgeStartBuild(version.version);
-    if (first) k.setupAuto = version.version;
-    k.setupChangeModel = false;
-    k.embeddingDraft = null;
-    k.embeddingProbe = null;
-    toast(first
-      ? "Модель подключена, индекс строится. Поиск по смыслу включится сам, когда индекс будет готов."
-      : `Модель v${version.version} подключена, индекс строится. Когда он будет готов, нажмите «Переключить на новую модель».`);
-  } catch (error) {
-    handleError(error);
-  } finally {
-    k.embeddingBusy = false;
-  }
-  await loadKnowledge().catch(handleError);
-}
-
-/** Шаг 2: построить черновик или повторить неудавшееся построение. */
-async function knowledgeBuildCandidate() {
-  const k = state.knowledge;
-  const { candidate, active } = knowledgeSetup();
-  if (!candidate || k.setupBusy) return;
-  k.setupBusy = "Запускаем построение индекса…";
-  renderKnowledgeSetup();
-  try {
-    await knowledgeStartBuild(candidate.version);
-    if (!active) k.setupAuto = candidate.version;
-    toast(active ? "Индекс строится" : "Индекс строится. Поиск по смыслу включится сам, когда он будет готов.");
-  } catch (error) {
-    handleError(error);
-  } finally {
-    k.setupBusy = false;
-  }
-  await loadKnowledge().catch(handleError);
-}
-
-/** Шаг 3: включить построенную версию и сделать Qdrant источником поиска. */
-async function knowledgeGoLive({ auto = false } = {}) {
-  const k = state.knowledge;
-  if (k.setupBusy) return;
-  const setup = knowledgeSetup();
-  if (setup.blocker || setup.live !== "current") return;
-  const { candidate, active } = setup;
-  const run = async () => {
-    k.setupBusy = auto ? "Индекс построен — включаем поиск по смыслу…" : "Включаем поиск по смыслу…";
-    renderKnowledgeSetup();
-    try {
-      if (candidate) {
-        await request(`/knowledge/embeddings/versions/${encodeURIComponent(candidate.version)}/activate`, {
-          method: "POST", body: JSON.stringify({ expected_active_version: active?.version ?? null }),
-        });
-        // Готовность к Qdrant проверяется по свежему состоянию: точки,
-        // aliases и активная версия — после переключения, а не до.
-        await loadKnowledge();
-      }
-      if (!knowledgeSearchOnQdrant()) await saveKnowledgeRuntime(KNOWLEDGE_RECOMMENDED, true, { quiet: true });
-      toast(candidate && active ? `Ева перешла на модель v${candidate.version}` : "Поиск по смыслу включён: Ева ищет и по словам, и по смыслу");
-    } catch (error) {
-      handleError(error);
-    } finally {
-      k.setupBusy = false;
-      k.setupAuto = null;
-    }
-    await loadKnowledge().catch(handleError);
-  };
-  if (candidate && active && !auto) {
-    askConfirm({
-      eyebrow: "ПОИСК ПО СМЫСЛУ",
-      title: `Переключить Еву на модель v${candidate.version}?`,
-      description: "Сервер проверит каждый фрагмент по PostgreSQL и переключит индекс атомарно. Прежняя модель останется для отката в блоке «Векторный индекс».",
-      action: run,
-    });
-    return;
-  }
-  await run();
-}
-
-/** Индексация выключена при включённой модели: включить и доиндексировать пропущенное. */
-async function knowledgeEnableIndexing() {
-  const k = state.knowledge;
-  if (k.setupBusy) return;
-  k.setupBusy = "Включаем индексацию…";
-  renderKnowledgeSetup();
-  try {
-    await saveKnowledgeRuntime({ "runtime.knowledge_index_enabled": true }, false, { quiet: true });
-    await request("/knowledge/index/reconcile", { method: "POST" });
-    toast("Индексация включена: недостающие документы попадут в Qdrant в фоне");
-  } catch (error) {
-    handleError(error);
-  } finally {
-    k.setupBusy = false;
-  }
-  await loadKnowledge().catch(handleError);
-}
-
-function bindKnowledgeEmbeddings() {
-  const page = $("#page-knowledge");
-  page.addEventListener("input", (event) => {
-    if (!event.target.closest("#knowledge-embedding-form")) return;
-    state.knowledge.embeddingDraft = knowledgeEmbeddingInput();
-    state.knowledge.embeddingProbe = null;
-    renderKnowledgeProbe();
-  });
-  page.addEventListener("click", (event) => {
-    const button = event.target.closest("button");
-    if (!button || button.disabled) return;
-    const k = state.knowledge;
-    if (button.id === "knowledge-embedding-probe") {
-      const form = $("#knowledge-embedding-form");
-      if (!form.reportValidity() || k.embeddingBusy) return;
-      const input = knowledgeEmbeddingInput();
-      k.embeddingDraft = input;
-      const fingerprint = JSON.stringify(input);
-      k.embeddingBusy = "Проверяем модель…";
-      renderKnowledgeProbe();
-      request("/knowledge/embeddings/probe", { method: "POST", body: fingerprint }).then(({ payload }) => {
-        if (JSON.stringify(knowledgeEmbeddingInput()) === fingerprint) k.embeddingProbe = { ...payload, fingerprint };
-      }).catch((error) => {
-        k.embeddingProbe = { ok: false, message: error.message };
-        if (error.status === 401) handleError(error);
-      }).finally(() => { k.embeddingBusy = false; renderKnowledgeProbe(); });
-    } else if (button.id === "knowledge-setup-change") {
-      k.setupChangeModel = true;
-      k.embeddingDraft = null;
-      k.embeddingProbe = null;
-      renderKnowledgeEmbedding();
-    } else if (button.id === "knowledge-setup-cancel") {
-      k.setupChangeModel = false;
-      k.embeddingDraft = null;
-      k.embeddingProbe = null;
-      renderKnowledgeEmbedding();
-    } else if (button.id === "knowledge-setup-build") {
-      knowledgeBuildCandidate();
-    } else if (button.id === "knowledge-setup-indexing") {
-      knowledgeEnableIndexing();
-    } else if (button.id === "knowledge-use-qdrant") {
-      knowledgeGoLive();
-    }
-  });
-  page.addEventListener("submit", (event) => {
-    if (event.target.id === "knowledge-embedding-form") {
-      event.preventDefault();
-      knowledgeConnectModel();
-    } else if (event.target.id === "knowledge-runtime-form") {
-      event.preventDefault();
-      const values = {};
-      event.target.querySelectorAll("[data-knowledge-setting]").forEach((input) => {
-        const key = input.dataset.knowledgeSetting;
-        values[key] = typeof KNOWLEDGE_RECOMMENDED[key] === "boolean" ? input.value === "true" : input.value;
-      });
-      saveKnowledgeRuntime(values).catch(handleError);
-    }
-  });
 }

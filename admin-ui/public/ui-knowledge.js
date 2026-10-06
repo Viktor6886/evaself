@@ -94,7 +94,8 @@ async function loadKnowledge() {
 
 /**
  * Обновлять раз в 5 секунд, только пока что-то действительно идёт:
- * разбор загрузки, индексация документа, построение версии. «Ждёт
+ * разбор загрузки, индексация документа, построение версии — в том числе
+ * повтор неудавшейся попытки, который очередь сделает сама. «Ждёт
  * индексации» при выключенном индексе не меняется само — по нему не
  * опрашиваем. Вкладка в фоне не опрашивает вовсе.
  */
@@ -103,7 +104,7 @@ function scheduleKnowledgeRefresh() {
   const k = state.knowledge;
   const busy = (k.uploads || []).some((item) => ["queued", "processing"].includes(item.status))
     || (k.documents || []).some((item) => item.index_status === "indexing")
-    || (k.index?.versions || []).some((item) => item.building);
+    || (k.index?.versions || []).some((item) => item.building || knowledgeBuildRetrying(item));
   if (!busy) return;
   scheduleKnowledgeRefresh.timer = setTimeout(() => {
     if (state.page !== "knowledge") return;
