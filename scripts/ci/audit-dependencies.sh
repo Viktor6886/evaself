@@ -24,10 +24,23 @@ REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 #     versions.env, и правит их обе разом
 #     scripts/ci/sync-letta-versions.py; менять что-то одно здесь значит
 #     тихо развести версии образа и пакета.
+#
+#   @modelcontextprotocol/sdk (GHSA-6qxp-vccf-f47h, 2026-10-07)
+#     OAuth-клиент MCP мог отправить учётные данные серверу авторизации,
+#     который назвал MCP-сервер. Пакет приходит тем же путём:
+#     letta-agent-sdk -> letta-code, а letta-code закрепляет ровно 1.30.0
+#     (и в последней 0.34.4 тоже) и собирает его код внутрь letta.js.
+#     overrides в package.json уязвимого кода не меняет — он в сборке —
+#     и только заглушил бы аудит. Путь Евой не используется: MCP-серверы
+#     вызывает собственный клиент Evaself (src/tools/mcp.ts) — HTTP/SSE,
+#     секреты из Secret Store, без OAuth; MCP-клиент letta-code серверов
+#     не получает. Снять вместе с обновлением SDK, когда letta-code
+#     перейдёт на @modelcontextprotocol/sdk >= 1.31.0.
 ALLOWED_PACKAGES="
 sharp
 @letta-ai/letta-code
 @letta-ai/letta-agent-sdk
+@modelcontextprotocol/sdk
 "
 
 failures=0
