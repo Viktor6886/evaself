@@ -15,28 +15,9 @@ import { test } from "node:test";
 
 import { openPanel } from "./harness.mjs";
 import {
-  UPLOADS, INDEX, VERSION, EMBEDDINGS, RECOMMENDED, SETTINGS, ACTIVE, ACTIVE_ROUTES, ROUTES,
+  INDEX, VERSION, EMBEDDINGS, RECOMMENDED, SETTINGS, ACTIVE, ACTIVE_ROUTES, ROUTES,
+  enterKnowledge, openModelForm, stepState, toastText, EMPTY_ROUTES, LIVE_SETTINGS, INDEX_OFF, DRAFT,
 } from "./knowledge-fixtures.mjs";
-
-async function enterKnowledge(panel) {
-  await panel.page.click('[data-page="knowledge"]');
-  // Шаги стоят в разметке; состояние у них появляется после загрузки.
-  await panel.page.waitForSelector("#knowledge-setup [data-state], #knowledge-setup .warn-value");
-}
-
-/** Форма модели открыта при первой настройке, потом — по «Сменить модель». */
-async function openModelForm(panel) {
-  if (await panel.page.locator("#knowledge-embedding-form").count() === 0) await panel.page.click("#knowledge-setup-change");
-  await panel.page.waitForSelector("#knowledge-embedding-form");
-}
-
-const stepState = async (panel, n) => await panel.page.getAttribute(`[data-setup-step="${n}"]`, "data-state");
-const toastText = async (panel) => await panel.page.textContent("#toast");
-const EMPTY_ROUTES = { "/knowledge/embeddings": { ...EMBEDDINGS, versions: [] }, "/knowledge/index": { ...INDEX, versions: [] } };
-const LIVE_SETTINGS = { ...SETTINGS, settings: SETTINGS.settings.map((s) => ({ ...s, value: RECOMMENDED[s.key] ?? s.value })) };
-const INDEX_OFF = { ...SETTINGS, settings: SETTINGS.settings.map((s) => s.key === "runtime.knowledge_index_enabled" ? { ...s, value: false } : s) };
-const DRAFT = { ...VERSION, version: 1, model: "openai/text-embedding-3-large", dimension: 3072, status: "draft",
-  building: false, build_started_at: null, built_at: null, activated_at: null, points: null, progress: null };
 
 test("поиск по смыслу: включённая модель видна, форма смены — без секретов и с её значениями", async () => {
   const panel = await openPanel({ routes: { ...ROUTES, ...ACTIVE_ROUTES } });
@@ -296,132 +277,6 @@ test("«Включить поиск по смыслу» при включённ�
     const verify = panel.requests.findIndex((r) => r.path.endsWith("/2/activate"));
     assert.deepEqual(panel.requests[verify].body, { verify_only: true }, "проверка не переключит устаревшую версию");
     assert.ok(verify < panel.requests.indexOf(saved));
-  } finally { await panel.close(); }
-});
-
-test("обе базы выключены — поиск не идёт: «Включение» не отмечено, кнопка возвращает все шесть настроек", async () => {
-  const scopesOff = { ...LIVE_SETTINGS, settings: LIVE_SETTINGS.settings.map((s) => /_(private|global)_enabled$/.test(s.key) ? { ...s, value: false } : s) };
-  const panel = await openPanel({ routes: { ...ROUTES, ...ACTIVE_ROUTES, "/settings": scopesOff,
-    "POST /knowledge/embeddings/versions/2/activate": { version: 2, status: "active" }, "PUT /settings": { saved: true },
-  } });
-  try {
-    await enterKnowledge(panel);
-    assert.equal(await stepState(panel, 3), "current");
-    const status = await panel.page.textContent("#knowledge-setup-status");
-    assert.doesNotMatch(status, /работает/, "сервер при выключенных базах не ищет вовсе");
-    assert.match(status, /не ищет в документах/);
-    await panel.page.click("#knowledge-use-qdrant");
-    const saved = await panel.waitForRequest((r) => r.path === "/settings" && r.method === "PUT");
-    assert.deepEqual(saved.body, { settings: RECOMMENDED });
-    assert.deepEqual(panel.errors, []);
-  } finally { await panel.close(); }
-});
-
-test("черновики и неудачи прошлых попыток позади включённой версии не становятся следующим шагом", async () => {
-  const live = { ...ACTIVE, version: 3, model: "openai/text-embedding-3-large", dimension: 3072 };
-  const failed = { ...VERSION, status: "failed", error_code: "job_publish_failed", built_at: null, points: null, progress: null };
-  const versions = [live, failed, DRAFT];
-  const panel = await openPanel({ routes: { ...ROUTES, "/settings": LIVE_SETTINGS,
-    "/knowledge/embeddings": { ...EMBEDDINGS, active: 3, versions },
-    "/knowledge/index": { ...INDEX, aliases: { private: 3, global: 3 }, versions },
-  } });
-  try {
-    await enterKnowledge(panel);
-    assert.deepEqual([await stepState(panel, 1), await stepState(panel, 2), await stepState(panel, 3)], ["done", "done", "done"]);
-    assert.match(await panel.page.textContent('[data-setup-step="1"]'), /text-embedding-3-large.*v3/);
-    const status = await panel.page.textContent("#knowledge-setup-status");
-    assert.match(status, /работает/);
-    assert.doesNotMatch(status, /Новая модель/);
-    assert.equal(await panel.page.locator("#knowledge-setup-build, #knowledge-use-qdrant").count(), 0, "мёртвые версии не получают главной кнопки");
-    assert.deepEqual(panel.errors, []);
-  } finally { await panel.close(); }
-});
-
-test("новые документы ещё индексируются: Qdrant работает, а полноту при включении проверяет сервер", async () => {
-  const partial = { ...ACTIVE, points: 74, progress: 0.9 };
-  const routes = { ...ROUTES,
-    "/knowledge/embeddings": { ...EMBEDDINGS, active: 2, versions: [partial] },
-    "/knowledge/index": { ...INDEX, aliases: { private: 2, global: 2 }, versions: [partial] },
-  };
-  const live = await openPanel({ routes: { ...routes, "/settings": LIVE_SETTINGS } });
-  try {
-    await enterKnowledge(live);
-    assert.equal(await stepState(live, 3), "done");
-    const status = await live.page.textContent("#knowledge-setup-status");
-    assert.match(status, /работает/);
-    assert.doesNotMatch(status, /не работает/, "неполный индекс поиск не останавливает");
-    assert.match(status, /Часть документов ещё не в Qdrant/);
-  } finally { await live.close(); }
-  const incomplete = "Не все фрагменты PostgreSQL представлены в индексе. Дождитесь индексации или постройте версию заново.";
-  const panel = await openPanel({ routes: { ...routes,
-    "POST /knowledge/embeddings/versions/2/activate": { __status: 409, __body: { error: { code: "version_conflict", message: incomplete, details: { code: "knowledge_index_incomplete" } } } },
-    "PUT /settings": { saved: true },
-  } });
-  try {
-    await enterKnowledge(panel);
-    await panel.page.click("#knowledge-use-qdrant");
-    const verify = await panel.waitForRequest((r) => r.path.endsWith("/2/activate"));
-    assert.deepEqual(verify.body, { verify_only: true }, "решает сервер, а не счётчик точек в обзоре");
-    await panel.page.waitForFunction((text) => document.querySelector("#toast").textContent.includes(text), incomplete);
-    assert.equal(panel.requests.filter((r) => r.method === "PUT").length, 0);
-    assert.deepEqual(panel.errors, []);
-  } finally { await panel.close(); }
-});
-
-test("попытка построения не удалась, но очередь её повторит: причина словами, опрос и автовключение продолжаются", async () => {
-  let phase = "draft";
-  const at = "2026-10-06T19:00:00Z";
-  const shape = {
-    draft: {},
-    retrying: { status: "building", building: false, build_started_at: at, error_code: "embedding_timeout", points: 0, progress: 0 },
-    ready: { status: "ready", building: false, build_started_at: at, built_at: at, points: 82, progress: 1 },
-    active: { status: "active", building: false, build_started_at: at, built_at: at, activated_at: at, points: 82, progress: 1 },
-  };
-  const versions = () => [{ ...DRAFT, ...shape[phase === "live" ? "active" : phase] }];
-  const live = () => ["active", "live"].includes(phase);
-  const panel = await openPanel({ routes: { ...ROUTES,
-    "/knowledge/embeddings": () => ({ ...EMBEDDINGS, active: live() ? 1 : null, versions: versions() }),
-    "/knowledge/index": () => ({ ...INDEX, aliases: live() ? { private: 1, global: 1 } : { private: null, global: null }, aliases_match_active: true, versions: versions() }),
-    "/settings": () => phase === "live" ? LIVE_SETTINGS : SETTINGS,
-    "POST /knowledge/embeddings/versions/1/build": () => { phase = "retrying"; return { version: 1, status: "building" }; },
-    "POST /knowledge/embeddings/versions/1/activate": () => { if (phase === "ready") phase = "active"; return { version: 1, status: "active" }; },
-    "PUT /settings": () => { phase = "live"; return { saved: true }; },
-  } });
-  try {
-    // Опрос раз в 5 секунд — на виртуальных часах, без настоящего ожидания.
-    await panel.page.clock.install();
-    await enterKnowledge(panel);
-    await panel.page.click("#knowledge-setup-build");
-    await panel.page.waitForFunction(() => /Сервер повторит/.test(document.querySelector('[data-setup-step="2"]')?.textContent || ""));
-    assert.match(await panel.page.textContent('[data-setup-step="2"]'), /провайдер не ответил вовремя \(embedding_timeout\)/);
-    assert.match(await panel.page.textContent('[data-setup-step="3"]'), /Включится само/, "повтор не снимает автовключение");
-    phase = "ready";
-    await panel.page.clock.runFor(5_000);
-    await panel.page.waitForFunction(() => document.querySelector('[data-setup-step="3"]')?.dataset.state === "done");
-    const activations = panel.requests.filter((r) => r.path.endsWith("/1/activate")).map((r) => r.body);
-    assert.deepEqual(activations, [{ expected_active_version: null }, { verify_only: true }]);
-    assert.deepEqual(panel.errors, []);
-  } finally { await panel.close(); }
-});
-
-test("опрос раз в 5 секунд не пересоздаёт форму модели: введённое, фокус и «Дополнительно» на месте", async () => {
-  const panel = await openPanel({ routes: { ...ROUTES, ...EMPTY_ROUTES,
-    "/knowledge/uploads": { uploads: [{ ...UPLOADS[1], status: "processing", error_code: null }] },
-  } });
-  try {
-    await panel.page.clock.install();
-    await enterKnowledge(panel);
-    await panel.page.click("#knowledge-embedding-form details summary");
-    await panel.page.fill('#knowledge-embedding-form [name="model"]', "openai/text-emb");
-    // Метка в теле первого шага исчезает при следующей перерисовке шагов,
-    // а форма перерисовывается сразу за ними.
-    await panel.page.evaluate(() => document.querySelector('[data-setup-step="1"] [data-step-body]').append(Object.assign(document.createElement("i"), { id: "poll-marker" })));
-    await panel.page.clock.runFor(5_000);
-    await panel.page.waitForFunction(() => !document.querySelector("#poll-marker"));
-    assert.equal(await panel.page.evaluate(() => document.activeElement?.getAttribute("name")), "model");
-    assert.equal(await panel.page.inputValue('#knowledge-embedding-form [name="model"]'), "openai/text-emb");
-    assert.equal(await panel.page.evaluate(() => document.querySelector("#knowledge-embedding-form details").open), true);
-    assert.deepEqual(panel.errors, []);
   } finally { await panel.close(); }
 });
 

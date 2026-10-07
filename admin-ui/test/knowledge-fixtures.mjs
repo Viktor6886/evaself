@@ -1,6 +1,7 @@
 /**
  * Ответы API раздела «База знаний» для браузерных тестов панели: общие
- * для страницы документов и для «Поиска по смыслу».
+ * для страницы документов и для «Поиска по смыслу»; в конце — помощники
+ * тестов «Поиска по смыслу».
  */
 
 export const COLLECTION = { id: "1c000000-0000-4000-8000-000000000001", code: "faq", title: "FAQ", description: "Частые вопросы",
@@ -59,3 +60,25 @@ export const ROUTES = {
   "/knowledge/embeddings": EMBEDDINGS,
   "/settings": SETTINGS,
 };
+
+// «Поиск по смыслу»: вход в раздел, форма модели, состояние шагов.
+
+export async function enterKnowledge(panel) {
+  await panel.page.click('[data-page="knowledge"]');
+  // Шаги стоят в разметке; состояние у них появляется после загрузки.
+  await panel.page.waitForSelector("#knowledge-setup [data-state], #knowledge-setup .warn-value");
+}
+
+/** Форма модели открыта при первой настройке, потом — по «Сменить модель». */
+export async function openModelForm(panel) {
+  if (await panel.page.locator("#knowledge-embedding-form").count() === 0) await panel.page.click("#knowledge-setup-change");
+  await panel.page.waitForSelector("#knowledge-embedding-form");
+}
+
+export const stepState = async (panel, n) => await panel.page.getAttribute(`[data-setup-step="${n}"]`, "data-state");
+export const toastText = async (panel) => await panel.page.textContent("#toast");
+export const EMPTY_ROUTES = { "/knowledge/embeddings": { ...EMBEDDINGS, versions: [] }, "/knowledge/index": { ...INDEX, versions: [] } };
+export const LIVE_SETTINGS = { ...SETTINGS, settings: SETTINGS.settings.map((s) => ({ ...s, value: RECOMMENDED[s.key] ?? s.value })) };
+export const INDEX_OFF = { ...SETTINGS, settings: SETTINGS.settings.map((s) => s.key === "runtime.knowledge_index_enabled" ? { ...s, value: false } : s) };
+export const DRAFT = { ...VERSION, version: 1, model: "openai/text-embedding-3-large", dimension: 3072, status: "draft",
+  building: false, build_started_at: null, built_at: null, activated_at: null, points: null, progress: null };

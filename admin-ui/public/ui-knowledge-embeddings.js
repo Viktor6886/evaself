@@ -90,6 +90,7 @@ function knowledgeQdrantServing() {
 function knowledgeQdrantBlocker() {
   const k = state.knowledge;
   if (k.failed?.index || k.failed?.embeddings || k.failed?.settings) return "Состояние индекса сейчас недоступно — нажмите «Обновить» и повторите.";
+  if (k.index?.qdrant === false) return "Qdrant не подключён к серверу: задайте QDRANT_API_KEY в .env и выполните sudo make update.";
   const active = knowledgeActiveVersion();
   if (!active?.built_at) return "Сначала постройте и включите индекс в блоке «Поиск по смыслу» вверху страницы — тогда Qdrant станет источником векторов.";
   if (active.building) return "Индекс перестраивается — Qdrant можно будет включить, когда построение закончится.";
@@ -116,14 +117,28 @@ function knowledgeSearchOnQdrant() {
     && knowledgeSetting("vector_backend") === "qdrant";
 }
 
+/** Как Ева ищет, пока поиск по смыслу через Qdrant не включён: прежний режим — это ещё и pgvector. */
+function knowledgeMeanwhile() {
+  if (!knowledgeSearchEnabled()) return "Поиск по базе знаний выключен — Ева не ищет в документах.";
+  return knowledgeSetting("search_mode") === "lexical" ? "Пока Ева ищет только по словам." : "Пока поиск идёт по-старому: по словам и через pgvector.";
+}
+
+/** Перерисовать, только если содержимое изменилось: опрос раз в 5 секунд не сбивает фокус и экранного диктора. */
+function knowledgeRender(node, html) {
+  if (node.renderedHtml === html) return;
+  node.innerHTML = html;
+  node.renderedHtml = html;
+}
+
 /**
  * Где сейчас настройка. `active` — включённая версия, `candidate` — самая
- * новая версия новее неё (черновик, строится, построена или с ошибкой).
- * Черновики и неудачи прошлых попыток, оставшиеся позади включённой, к
- * настройке не относятся — они видны в «Векторном индексе». Состояние
- * шага: done, current (ждёт кнопки), busy (идёт на сервере), error, off
- * (индексация выключена), todo (ждёт прошлого шага); `retrying` — ошибка
- * попытки, которую очередь ещё повторит.
+ * новая версия новее всех, что уже включались (включённой и выведенных):
+ * черновик, строится, построена или с ошибкой. Черновики и неудачи
+ * прошлых попыток, оставшиеся позади, к настройке не относятся — они
+ * видны в «Векторном индексе». Состояние шага: done, current (ждёт
+ * кнопки), busy (идёт на сервере), error, off (индексация выключена), todo
+ * (ждёт прошлого шага или условия); `retrying` — ошибка попытки, которую
+ * очередь ещё повторит; `liveReason` — почему включение сейчас невозможно.
  */
 function knowledgeSetup() {
   const k = state.knowledge;
@@ -131,8 +146,10 @@ function knowledgeSetup() {
   if (k.index.qdrant === false) return { blocker: "qdrant" };
   const versions = knowledgeVersions();
   const active = versions.find((v) => v.status === "active") || null;
-  const candidate = versions.filter((v) => ["draft", "building", "ready", "failed"].includes(v.status)
-    && (!active || v.version > active.version))
+  // После отката включённая версия старше выведенной: всё, что старше
+  // выведенной, — тоже прошлое, а не следующий шаг.
+  const floor = Math.max(0, ...versions.filter((v) => ["active", "retired"].includes(v.status)).map((v) => v.version));
+  const candidate = versions.filter((v) => ["draft", "building", "ready", "failed"].includes(v.status) && v.version > floor)
     .sort((a, b) => b.version - a.version)[0] || null;
   const built = (v) => v.status === "ready" && !!v.built_at && !v.building && !v.error_code;
   let index = "todo";
@@ -144,9 +161,17 @@ function knowledgeSetup() {
   } else if (active) {
     index = knowledgeSetting("index_enabled") === false ? "off" : "done";
   }
-  const live = candidate ? (index === "done" ? "current" : "todo")
-    : active ? (knowledgeSearchOnQdrant() ? "done" : "current")
-    : "todo";
+  // Включение, которое сейчас откажет, кнопкой не предлагается: шаг
+  // говорит, чего ждёт.
+  let live = "todo";
+  let liveReason = null;
+  if (candidate && index === "done") {
+    liveReason = k.index.qdrant_status === "ready" ? null : "Qdrant сейчас недоступен — включить новую модель нельзя. Нажмите «Обновить», когда он вернётся.";
+    live = liveReason ? "error" : "current";
+  } else if (!candidate && active) {
+    liveReason = knowledgeSearchOnQdrant() ? null : knowledgeQdrantBlocker();
+    live = knowledgeSearchOnQdrant() ? "done" : !liveReason ? "current" : active.building ? "todo" : "error";
+  }
   return {
     blocker: null,
     active,
@@ -154,6 +179,7 @@ function knowledgeSetup() {
     model: candidate || active ? "done" : "current",
     index,
     live,
+    liveReason,
     retrying: index === "error" && knowledgeBuildRetrying(candidate),
   };
 }
@@ -187,18 +213,18 @@ function renderKnowledgeEmbedding() {
   const source = mode === "lexical" ? "FTS / pg_trgm" : mode === "legacy" ? "pgvector (режим legacy)" : backend;
   const flag = (value) => value === undefined ? "неизвестно" : value ? "включено" : "выключено";
   const qdrant = k.failed?.index ? "состояние недоступно" : { not_configured: "не настроен", ready: "доступен", unavailable: "недоступен — lexical fallback" }[k.index?.qdrant_status] || "неизвестно";
-  $("#knowledge-status").innerHTML = `<dl class="knowledge-summary">
+  knowledgeRender($("#knowledge-status"), `<dl class="knowledge-summary">
     ${field("Поиск по базе", flag(knowledgeSetting("search_enabled")))}
     ${field("Индексация", flag(knowledgeSetting("index_enabled")))}
     ${field("Режим поиска", mode)}${field("Источник векторов", source)}${field("Qdrant", qdrant)}
     ${field("Личная / общая база", `${flag(knowledgeSetting("private_enabled"))} / ${flag(knowledgeSetting("global_enabled"))}`)}
     ${field("Загрузка документов", k.failed?.index || k.index?.uploads_enabled === undefined ? "неизвестно" : k.index.uploads_enabled ? "доступна" : k.index.uploads_worker_enabled === false ? "обработка файлов выключена" : "выключена — включите в блоке «Загрузка»")}
-  </dl>${k.index?.aliases_match_active === false ? '<p class="warn-value">Aliases Qdrant расходятся с активной версией PostgreSQL. Повторите активацию текущей версии для восстановления. Поиск обращается к её физическим коллекциям.</p>' : ""}`;
+  </dl>${k.index?.aliases_match_active === false ? '<p class="warn-value">Aliases Qdrant расходятся с активной версией PostgreSQL. Повторите активацию текущей версии для восстановления. Поиск обращается к её физическим коллекциям.</p>' : ""}`);
   // Подробности включённой модели; что её нет, уже говорит «Поиск по смыслу».
-  $("#knowledge-active-embedding").innerHTML = active ? `<dl class="knowledge-summary">
+  knowledgeRender($("#knowledge-active-embedding"), active ? `<dl class="knowledge-summary">
     ${field("Модель поиска по смыслу", `v${active.version} · ${active.model} · ${active.dimension} · ${active.provider_name || active.provider_id}`)}
     ${field("Состояние модели", `${KNOWLEDGE_VERSION_STATUS[active.status]}${active.building ? " · перестраивается" : ""}`)}
-  </dl>` : "";
+  </dl>` : "");
   const editable = knowledgeEditable();
   $("#knowledge-runtime-editor").hidden = !editable;
   $("#knowledge-manual").hidden = !editable;
@@ -223,14 +249,11 @@ function renderKnowledgeSetup() {
   const steps = $("#knowledge-setup-steps");
   const editable = knowledgeEditable();
   const setup = knowledgeSetup();
-  // Живые области переписываются, только когда текст изменился: опрос раз
-  // в 5 секунд иначе заставлял бы экранного диктора повторять одно и то же.
-  const live = (node, html) => { if (node.renderedHtml !== html) { node.innerHTML = html; node.renderedHtml = html; } };
-  live($("#knowledge-setup-busy"), escapeHtml(k.setupBusy || ""));
+  knowledgeRender($("#knowledge-setup-busy"), escapeHtml(k.setupBusy || ""));
   if (setup.blocker) {
     steps.hidden = true;
-    live(status, setup.blocker === "unknown" ? knowledgeUnavailable("Сведения о поиске по смыслу")
-      : '<p class="warn-value">Qdrant не подключён к серверу: задайте QDRANT_API_KEY в .env и выполните sudo make update. До этого Ева ищет только по словам.</p>');
+    knowledgeRender(status, setup.blocker === "unknown" ? knowledgeUnavailable("Сведения о поиске по смыслу")
+      : `<p class="warn-value">Qdrant не подключён к серверу: задайте QDRANT_API_KEY в .env и выполните sudo make update. ${escapeHtml(knowledgeMeanwhile())}</p>`);
     return;
   }
   const { active, candidate } = setup;
@@ -269,19 +292,26 @@ function renderKnowledgeSetup() {
   } else if (setup.live === "current") {
     const label = candidate && active ? "Переключить на новую модель" : "Включить поиск по смыслу";
     liveBody = `<p>${candidate && active ? "Новая модель построена. Прежняя работает, пока вы не переключите." : "Индекс готов. Включите — и Ева начнёт искать и по смыслу."}</p>${button("knowledge-use-qdrant", label)}`;
+  } else if (setup.liveReason) {
+    liveBody = `<p${setup.live === "error" ? ' class="warn-value"' : ""}>${escapeHtml(setup.liveReason)}</p>`;
   } else {
     liveBody = `<p>${auto ? "Включится само, когда индекс построится." : "Станет доступно, когда индекс построится."}</p>`;
   }
   const working = !!active && knowledgeSearchOnQdrant() && knowledgeQdrantServing();
-  const meanwhile = knowledgeSearchEnabled() ? "Пока Ева ищет только по словам." : "Поиск по базе знаний выключен — Ева не ищет в документах.";
+  const meanwhile = escapeHtml(knowledgeMeanwhile());
+  const next = !candidate ? ""
+    : setup.index === "busy" ? "Новая модель строится рядом."
+    : setup.index === "error" ? "Построение новой модели не удалось — см. шаг «Индекс в Qdrant»."
+    : setup.index === "done" ? "Новая модель построена — переключите её в шаге «Включение»."
+    : "Новая модель ждёт построения.";
   // Неполный индекс и расхождение aliases поиск не останавливают, но о
   // них нужно знать: первое проходит само, второе чинит одна кнопка.
   const notes = working ? [
     typeof active.progress === "number" && active.progress < 1 ? "Часть документов ещё не в Qdrant — их Ева пока находит по словам." : "",
     state.knowledge.index?.aliases_match_active === false ? "Aliases Qdrant расходятся с включённой версией — «Восстановить aliases» в блоке «Векторный индекс»." : "",
-    setup.index === "off" ? "Новые документы в Qdrant не попадают — включите индексацию." : candidate ? "Новая модель готовится рядом." : "",
+    setup.index === "off" ? "Новые документы в Qdrant не попадают — включите индексацию." : next,
   ].filter(Boolean).map((note) => ` ${note}`).join("") : "";
-  live(status, working
+  knowledgeRender(status, working
     ? `<span class="status-pill state-green">работает</span> Ева ищет по словам и по смыслу.${notes}`
     : active && knowledgeSearchOnQdrant() ? '<span class="status-pill state-red">не работает</span> Qdrant сейчас недоступен — Ева ищет только по словам.'
     : setup.index === "busy" ? `<span class="status-pill state-yellow">строится индекс</span> ${meanwhile}`
@@ -295,7 +325,7 @@ function renderKnowledgeSetup() {
     if (n === current) step.setAttribute("aria-current", "step");
     else step.removeAttribute("aria-current");
     step.querySelector(".knowledge-step-mark").textContent = mode === "done" ? "✓" : n;
-    step.querySelector("[data-step-body]").innerHTML = body;
+    knowledgeRender(step.querySelector("[data-step-body]"), body);
   }
   steps.hidden = false;
   // Первая настройка доводится до конца сама: после «Подключить модель» и
@@ -364,7 +394,7 @@ function renderKnowledgeModelForm() {
         ${k.setupChangeModel ? '<button class="button ghost" id="knowledge-setup-cancel" type="button">Отмена</button>' : ""}
       </div>
       <p id="knowledge-embedding-probe-result" aria-live="polite"></p>
-      <p class="block-caption">${setup.active ? "Новая модель строит свой индекс рядом; Ева ищет по прежней, пока вы не переключите." : "«Подключить модель» проверит её на тестовой фразе, сохранит и сразу начнёт строить индекс."}</p>
+      <p class="block-caption">${setup.active ? "Новая модель строит свой индекс рядом; Ева ищет по прежней, пока вы не переключите." : "«Подключить модель» проверит её на тестовой фразе, сохранит и сразу начнёт строить индекс. Когда он будет готов, поиск по смыслу включится сам — с рекомендуемыми параметрами поиска."}</p>
       ${!providers.length ? '<p class="warn-value">В реестре Router нет включённых OpenAI-совместимых провайдеров. Добавьте провайдера в разделе «Искусственный интеллект».</p>' : ""}
     </form>`;
   renderKnowledgeProbe();
