@@ -117,10 +117,16 @@ function knowledgeSearchOnQdrant() {
     && knowledgeSetting("vector_backend") === "qdrant";
 }
 
-/** Как Ева ищет, пока поиск по смыслу через Qdrant не включён: прежний режим — это ещё и pgvector. */
+/**
+ * Как Ева ищет, пока поиск по смыслу через Qdrant не работает: прежний
+ * режим и источник pgvector — ещё и по векторам pgvector; у Qdrant без
+ * включённой версии векторной половины нет, остаются слова.
+ */
 function knowledgeMeanwhile() {
   if (!knowledgeSearchEnabled()) return "Поиск по базе знаний выключен — Ева не ищет в документах.";
-  return knowledgeSetting("search_mode") === "lexical" ? "Пока Ева ищет только по словам." : "Пока поиск идёт по-старому: по словам и через pgvector.";
+  const mode = knowledgeSetting("search_mode");
+  const pgvector = mode === "legacy" || ["hybrid", "vector"].includes(mode) && knowledgeSetting("vector_backend") === "pgvector";
+  return pgvector ? "Пока поиск идёт по-старому: по словам и через pgvector." : "Пока Ева ищет только по словам.";
 }
 
 /** Перерисовать, только если содержимое изменилось: опрос раз в 5 секунд не сбивает фокус и экранного диктора. */
@@ -166,7 +172,8 @@ function knowledgeSetup() {
   let live = "todo";
   let liveReason = null;
   if (candidate && index === "done") {
-    liveReason = k.index.qdrant_status === "ready" ? null : "Qdrant сейчас недоступен — включить новую модель нельзя. Нажмите «Обновить», когда он вернётся.";
+    liveReason = k.index.qdrant_status === "ready" ? null
+      : `Qdrant сейчас недоступен — ${active ? "переключить на новую модель" : "включить поиск по смыслу"} нельзя. Нажмите «Обновить», когда он вернётся.`;
     live = liveReason ? "error" : "current";
   } else if (!candidate && active) {
     liveReason = knowledgeSearchOnQdrant() ? null : knowledgeQdrantBlocker();

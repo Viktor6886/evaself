@@ -142,10 +142,19 @@ test("опрос раз в 5 секунд не пересоздаёт форму
     await panel.page.click("#knowledge-embedding-form details summary");
     await panel.page.fill('#knowledge-embedding-form [name="model"]', "openai/text-emb");
     // Метка в списке документов исчезает при следующей загрузке раздела:
-    // он перерисовывается всегда, а форма и шаги — в том же вызове.
-    await panel.page.evaluate(() => document.querySelector("#knowledge-documents").append(Object.assign(document.createElement("i"), { id: "poll-marker" })));
+    // он перерисовывается всегда, а форма и шаги — в том же вызове. Метки
+    // в неизменившихся статусе, сводке и теле шага должны пережить опрос.
+    await panel.page.evaluate(() => {
+      const mark = (selector, id) => document.querySelector(selector).append(Object.assign(document.createElement("i"), { id }));
+      mark("#knowledge-documents", "poll-marker");
+      mark("#knowledge-setup-status", "status-marker");
+      mark("#knowledge-status", "summary-marker");
+      mark('[data-setup-step="2"] [data-step-body]', "step-marker");
+    });
     await panel.page.clock.runFor(5_000);
     await panel.page.waitForFunction(() => !document.querySelector("#poll-marker"));
+    assert.deepEqual(await panel.page.evaluate(() => ["status-marker", "summary-marker", "step-marker"].filter((id) => !document.getElementById(id))), [],
+      "неизменившееся не перерисовывается: экранный диктор не повторяет, фокус не теряется");
     assert.equal(await panel.page.evaluate(() => document.activeElement?.getAttribute("name")), "model");
     assert.equal(await panel.page.inputValue('#knowledge-embedding-form [name="model"]'), "openai/text-emb");
     assert.equal(await panel.page.evaluate(() => document.querySelector("#knowledge-embedding-form details").open), true);
@@ -172,7 +181,7 @@ test("включить сейчас нельзя — шаг «Включение
   try {
     await enterKnowledge(switching);
     assert.equal(await stepState(switching, 3), "error");
-    assert.match(await switching.page.textContent('[data-setup-step="3"]'), /включить новую модель нельзя/);
+    assert.match(await switching.page.textContent('[data-setup-step="3"]'), /переключить на новую модель нельзя/);
     assert.equal(await switching.page.locator("#knowledge-use-qdrant").count(), 0);
   } finally { await switching.close(); }
 });
@@ -211,7 +220,9 @@ test("смена модели при выключенном поиске по с
 
 test("пока поиск по смыслу не включён, статус говорит, как Ева ищет сейчас: прежний режим — ещё и pgvector", async () => {
   const lexical = { ...SETTINGS, settings: SETTINGS.settings.map((s) => s.key.endsWith("search_mode") ? { ...s, value: "lexical" } : s) };
-  for (const [settings, expected] of [[SETTINGS, /по словам и через pgvector/], [lexical, /только по словам/]]) {
+  // Qdrant без включённой версии векторной половины не даёт — остаются слова.
+  const qdrantWithoutVersion = { ...SETTINGS, settings: SETTINGS.settings.map((s) => ({ ...s, value: RECOMMENDED[s.key] ?? s.value })) };
+  for (const [settings, expected] of [[SETTINGS, /по словам и через pgvector/], [lexical, /только по словам/], [qdrantWithoutVersion, /только по словам/]]) {
     const panel = await openPanel({ routes: { ...ROUTES, ...EMPTY_ROUTES, "/settings": settings } });
     try {
       await enterKnowledge(panel);
