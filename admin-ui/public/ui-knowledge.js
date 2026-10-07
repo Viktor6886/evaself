@@ -94,7 +94,8 @@ async function loadKnowledge() {
 
 /**
  * Обновлять раз в 5 секунд, только пока что-то действительно идёт:
- * разбор загрузки, индексация документа, построение версии. «Ждёт
+ * разбор загрузки, индексация документа, построение версии — в том числе
+ * повтор неудавшейся попытки, который очередь сделает сама. «Ждёт
  * индексации» при выключенном индексе не меняется само — по нему не
  * опрашиваем. Вкладка в фоне не опрашивает вовсе.
  */
@@ -103,7 +104,7 @@ function scheduleKnowledgeRefresh() {
   const k = state.knowledge;
   const busy = (k.uploads || []).some((item) => ["queued", "processing"].includes(item.status))
     || (k.documents || []).some((item) => item.index_status === "indexing")
-    || (k.index?.versions || []).some((item) => item.building);
+    || (k.index?.versions || []).some((item) => item.building || knowledgeBuildRetrying(item));
   if (!busy) return;
   scheduleKnowledgeRefresh.timer = setTimeout(() => {
     if (state.page !== "knowledge") return;
@@ -127,12 +128,12 @@ function knowledgeIndexBlocker() {
   if (k.failed?.index || !k.index) return null;
   if (k.index.qdrant === false) return { reason: "Qdrant не настроен", hint: "Задайте QDRANT_API_KEY и перезапустите сервисы." };
   if (knowledgeSetting("index_enabled") === false) {
-    return { reason: "индексация выключена", hint: "Включите «База знаний: индексация в Qdrant» в параметрах поиска выше и нажмите «Сверить с Qdrant сейчас»; если активной версии эмбеддингов нет — «Построить индекс» и «Активировать»." };
+    return { reason: "индексация выключена", hint: "Следующий шаг — кнопка в блоке «Поиск по смыслу» вверху страницы." };
   }
   const versions = knowledgeVersions();
   if (!versions.length && k.failed?.embeddings) return null;
   if (!versions.some((v) => ["building", "ready", "active"].includes(v.status))) {
-    return { reason: "нет построенной модели эмбеддингов", hint: "В блоке «Embedding-модель» проверьте и сохраните модель, затем «Построить индекс» и «Активировать»." };
+    return { reason: "нет построенной модели эмбеддингов", hint: "Следующий шаг — кнопка в блоке «Поиск по смыслу» вверху страницы." };
   }
   return null;
 }
@@ -320,14 +321,13 @@ function renderKnowledgeIndex() {
           <td>${item.progress === null || item.progress === undefined ? "—" : `${Math.round(item.progress * 100)}%`}</td>
           ${editable ? `<td class="row-actions">
             ${!item.building && ["draft", "building", "ready", "active", "retired", "failed"].includes(item.status)
-              ? `<button class="button tiny ghost" data-version-build="${item.version}" ${knowledgeSetting("index_enabled") === false ? "disabled" : ""}>${item.status === "draft" ? "Построить индекс" : item.status === "failed" ? "Построить заново" : "Перестроить"}</button>` : ""}
+              ? `<button class="button tiny ghost" data-version-build="${item.version}">${item.status === "draft" ? "Построить индекс" : item.status === "failed" ? "Построить заново" : "Перестроить"}</button>` : ""}
             ${["ready", "retired"].includes(item.status) && !item.building && item.built_at && !item.error_code
               ? `<button class="button tiny" data-version-activate="${item.version}">${item.status === "retired" ? "Откатить на эту версию" : hasActive ? "Активировать новую модель" : "Активировать"}</button>` : ""}
             ${item.status === "active" && index.aliases_match_active === false ? `<button class="button tiny" data-version-activate="${item.version}">Восстановить aliases</button>` : ""}
           </td>` : ""}
         </tr>`).join("")}
-      </tbody></table></div>` : '<p class="knowledge-empty">Версий эмбеддингов ещё нет: создайте её в блоке «Embedding-модель» выше.</p>'}
-    ${editable && knowledgeSetting("index_enabled") === false ? '<p class="warn-value">Для построения сначала включите индексацию в параметрах базы выше. Поиск на Qdrant включается отдельно после активации.</p>' : ""}
+      </tbody></table></div>` : '<p class="knowledge-empty">Версий модели ещё нет: подключите модель в блоке «Поиск по смыслу» вверху страницы.</p>'}
     ${editable ? '<div class="knowledge-actions"><button class="button ghost" id="knowledge-reconcile">Сверить с Qdrant сейчас</button></div>' : ""}`;
 }
 
@@ -551,9 +551,11 @@ function bindKnowledge() {
       askConfirm({
         eyebrow: "ИНДЕКС",
         title: `Перестроить индекс v${button.dataset.versionBuild}?`,
-        description: "Все документы этой версии переиндексируются из PostgreSQL в фоне, включая пересчёт векторов. Поиск по активной версии продолжает работать.",
+        description: `Все документы этой версии переиндексируются из PostgreSQL в фоне, включая пересчёт векторов. Поиск по активной версии продолжает работать.${knowledgeSetting("index_enabled") === false ? " Выключенная индексация включится." : ""}`,
         action: async () => {
-          await request(`/knowledge/embeddings/versions/${encodeURIComponent(button.dataset.versionBuild)}/build`, { method: "POST", body: JSON.stringify({ full: true }) });
+          // Как и шаги «Поиска по смыслу»: при выключенной индексации
+          // построение остановилось бы сразу, поэтому она включается до него.
+          await knowledgeStartBuild(button.dataset.versionBuild);
           toast("Построение поставлено в очередь");
           await loadKnowledge();
         },
@@ -563,7 +565,7 @@ function bindKnowledge() {
       askConfirm({
         eyebrow: "ИНДЕКС",
         title: `Активировать embedding-версию v${button.dataset.versionActivate}?`,
-        description: "Сервер проверит каждый фрагмент по PostgreSQL и переведёт оба Qdrant alias атомарно. Прежняя версия останется для проверяемого отката. Режим поиска меняется отдельно кнопкой «Включить Hybrid + Qdrant».",
+        description: "Сервер проверит каждый фрагмент по PostgreSQL и переведёт оба Qdrant alias атомарно. Прежняя версия останется для проверяемого отката. Режим поиска здесь не меняется — его включает шаг «Включение» в блоке «Поиск по смыслу».",
         action: async () => {
           await request(`/knowledge/embeddings/versions/${encodeURIComponent(button.dataset.versionActivate)}/activate`, {
             method: "POST", body: JSON.stringify({ expected_active_version: expectedActive }),
