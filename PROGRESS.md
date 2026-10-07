@@ -46,8 +46,12 @@ pgvector, а не «только по словам»); подпись формы
   GHSA-6qxp-vccf-f47h в `@modelcontextprotocol/sdk`, вшитом в
   `letta-code`; исправленного `letta-code` нет. Поимённое исключение
   (проект, пакет, advisory) — отдельным PR
-  [#416](https://github.com/Viktor6886/evaself/pull/416), затем `main`
-  вливается в ветку.
+  [#416](https://github.com/Viktor6886/evaself/pull/416) (ревью — три
+  «да», замечание Codex учтено; слит), `main` влит в ветку.
+- Stack smoke test на 4f1c638 упал до тестов: сборка образа App Server
+  не скачала заголовки Node.js с nodejs.org (`ECONNRESET`, сеть
+  раннера); на 9a88ec2 и c99944e тот же шаг проходил. Повтор — прогоном
+  после вливания `main`.
 
 - Серверная часть проверена разовым локальным сквозным прогоном (скрипт
   вне репозитория) на настоящих PostgreSQL, Qdrant, Redis с BullMQ и LLM
