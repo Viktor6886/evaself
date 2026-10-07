@@ -31,8 +31,9 @@ sharp
 "
 
 # Отдельные уязвимости, принятые поимённо: проект, пакет, advisory.
-# Уже принятое не прячет следующее: новая уязвимость того же пакета или
-# та же — в другом проекте снова валит сборку.
+# Уже принятое не прячет следующее: новая уязвимость того же пакета, та
+# же — в другом проекте или в пакете, ставшем прямой зависимостью
+# проекта, снова валит сборку.
 #
 #   eva-agent-service @modelcontextprotocol/sdk GHSA-6qxp-vccf-f47h
 #     (2026-10-07) OAuth-клиент MCP мог отправить учётные данные серверу
@@ -43,9 +44,9 @@ sharp
 #     меняет — он в сборке — и только заглушил бы аудит. Путь Евой не
 #     используется: MCP-серверы вызывает собственный клиент Evaself
 #     (src/tools/mcp.ts) — HTTP/SSE, секреты из Secret Store, без OAuth;
-#     MCP-клиент letta-code серверов не получает. Снять вместе с
-#     обновлением SDK, когда letta-code перейдёт на
-#     @modelcontextprotocol/sdk >= 1.31.0.
+#     MCP-клиент letta-code серверов не получает. Снимает тот, кто
+#     обновляет SDK (scripts/ci/sync-letta-versions.py), — когда
+#     letta-code перейдёт на @modelcontextprotocol/sdk >= 1.31.0.
 ALLOWED_ADVISORIES="
 eva-agent-service @modelcontextprotocol/sdk GHSA-6qxp-vccf-f47h
 "
@@ -99,12 +100,14 @@ for name, item in (data.get("vulnerabilities") or {}).items():
     if name in allowed:
         sys.stderr.write("  принято по списку исключений: %s (%s)\n" % (name, item.get("severity")))
         continue
-    # Поимённо принимается только запись, у которой каждая причина high и
-    # critical — собственное advisory из списка для этого проекта.
-    # Транзитивная причина (имя другого пакета) так не принимается.
+    # Поимённо принимается только транзитивный пакет, у которого каждая
+    # причина high и critical — собственное advisory из списка для этого
+    # проекта. Транзитивная причина (имя другого пакета) так не
+    # принимается; прямая зависимость — тоже: довод о чужой сборке к ней
+    # не относится.
     vias = item.get("via") or []
     serious = [via for via in vias if not isinstance(via, dict) or via.get("severity") in ("high", "critical")]
-    if serious and all(isinstance(via, dict) and (project, name, advisory_id(via)) in advisories for via in serious):
+    if not item.get("isDirect") and serious and all(isinstance(via, dict) and (project, name, advisory_id(via)) in advisories for via in serious):
         sys.stderr.write("  принято поимённо: %s (%s)\n" % (name, ", ".join(advisory_id(via) for via in serious)))
         continue
     problems.append("%s severity=%s fixAvailable=%s" % (name, item.get("severity"), item.get("fixAvailable")))
