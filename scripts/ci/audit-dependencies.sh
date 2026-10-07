@@ -24,23 +24,30 @@ REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 #     versions.env, и правит их обе разом
 #     scripts/ci/sync-letta-versions.py; менять что-то одно здесь значит
 #     тихо развести версии образа и пакета.
-#
-#   @modelcontextprotocol/sdk (GHSA-6qxp-vccf-f47h, 2026-10-07)
-#     OAuth-клиент MCP мог отправить учётные данные серверу авторизации,
-#     который назвал MCP-сервер. Пакет приходит тем же путём:
-#     letta-agent-sdk -> letta-code, а letta-code закрепляет ровно 1.30.0
-#     (и в последней 0.34.4 тоже) и собирает его код внутрь letta.js.
-#     overrides в package.json уязвимого кода не меняет — он в сборке —
-#     и только заглушил бы аудит. Путь Евой не используется: MCP-серверы
-#     вызывает собственный клиент Evaself (src/tools/mcp.ts) — HTTP/SSE,
-#     секреты из Secret Store, без OAuth; MCP-клиент letta-code серверов
-#     не получает. Снять вместе с обновлением SDK, когда letta-code
-#     перейдёт на @modelcontextprotocol/sdk >= 1.31.0.
 ALLOWED_PACKAGES="
 sharp
 @letta-ai/letta-code
 @letta-ai/letta-agent-sdk
-@modelcontextprotocol/sdk
+"
+
+# Отдельные уязвимости, принятые поимённо: проект, пакет, advisory.
+# Уже принятое не прячет следующее: новая уязвимость того же пакета или
+# та же — в другом проекте снова валит сборку.
+#
+#   eva-agent-service @modelcontextprotocol/sdk GHSA-6qxp-vccf-f47h
+#     (2026-10-07) OAuth-клиент MCP мог отправить учётные данные серверу
+#     авторизации, который назвал MCP-сервер. Пакет приходит тем же
+#     путём, что sharp: letta-agent-sdk -> letta-code, а letta-code
+#     закрепляет ровно 1.30.0 (и в последней 0.34.4 тоже) и собирает его
+#     код внутрь letta.js. overrides в package.json уязвимого кода не
+#     меняет — он в сборке — и только заглушил бы аудит. Путь Евой не
+#     используется: MCP-серверы вызывает собственный клиент Evaself
+#     (src/tools/mcp.ts) — HTTP/SSE, секреты из Secret Store, без OAuth;
+#     MCP-клиент letta-code серверов не получает. Снять вместе с
+#     обновлением SDK, когда letta-code перейдёт на
+#     @modelcontextprotocol/sdk >= 1.31.0.
+ALLOWED_ADVISORIES="
+eva-agent-service @modelcontextprotocol/sdk GHSA-6qxp-vccf-f47h
 "
 
 failures=0
@@ -74,17 +81,31 @@ audit_npm() {
 	[ -n "$report" ] || { echo "  пустой отчёт npm audit" >&2; failures=$((failures + 1)); return; }
 
 	local unexpected
-	unexpected="$(printf '%s' "$report" | ALLOWED="$ALLOWED_PACKAGES" python3 -c '
+	unexpected="$(printf '%s' "$report" | ALLOWED="$ALLOWED_PACKAGES" ADVISORIES="$ALLOWED_ADVISORIES" PROJECT="$dir" python3 -c '
 import json, os, sys
 
 allowed = {line.strip() for line in os.environ["ALLOWED"].splitlines() if line.strip()}
+advisories = {tuple(line.split()) for line in os.environ["ADVISORIES"].splitlines() if len(line.split()) == 3}
+project = os.environ["PROJECT"]
 data = json.load(sys.stdin)
 problems = []
+
+def advisory_id(via):
+    return str(via.get("url") or "").rstrip("/").rsplit("/", 1)[-1]
+
 for name, item in (data.get("vulnerabilities") or {}).items():
     if item.get("severity") not in ("high", "critical"):
         continue
     if name in allowed:
         sys.stderr.write("  принято по списку исключений: %s (%s)\n" % (name, item.get("severity")))
+        continue
+    # Поимённо принимается только запись, у которой каждая причина high и
+    # critical — собственное advisory из списка для этого проекта.
+    # Транзитивная причина (имя другого пакета) так не принимается.
+    vias = item.get("via") or []
+    serious = [via for via in vias if not isinstance(via, dict) or via.get("severity") in ("high", "critical")]
+    if serious and all(isinstance(via, dict) and (project, name, advisory_id(via)) in advisories for via in serious):
+        sys.stderr.write("  принято поимённо: %s (%s)\n" % (name, ", ".join(advisory_id(via) for via in serious)))
         continue
     problems.append("%s severity=%s fixAvailable=%s" % (name, item.get("severity"), item.get("fixAvailable")))
 for line in problems:
