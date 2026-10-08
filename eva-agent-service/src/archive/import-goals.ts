@@ -207,6 +207,7 @@ export async function applyTasks(ctx: ApplyContext, links: GoalLinks): Promise<{
   }
   // Повтор проверяется и считается один раз на выражение и пояс.
   const schedules = new Map<string, Date | Error>();
+  const frequent = new Map<string, boolean>();
   const schedule = (cron: string, zone: string, repeating: boolean): Date => {
     const id = `${zone} ${cron}`;
     let known = schedules.get(id);
@@ -223,7 +224,12 @@ export async function applyTasks(ctx: ApplyContext, links: GoalLinks): Promise<{
       schedules.set(id, known);
     }
     if (known instanceof Error) throw known;
-    if (repeating && repeatsTooOften(cron)) {
+    let often = frequent.get(cron);
+    if (often === undefined) {
+      often = repeatsTooOften(cron);
+      frequent.set(cron, often);
+    }
+    if (repeating && often) {
       throw new Error(`повтор чаще раза в ${MIN_REPEAT_MINUTES} минут из файла не загружается`);
     }
     return known;

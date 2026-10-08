@@ -254,7 +254,7 @@ test("JSON: варианты решения — длинный список от
 test("разбор: текст из `\\r` и управляющих символов через знак чистится линейно, не по совпадению за раз", async () => {
   // Регулярное выражение тратило на каждое совпадение до 90 нс: 250 ссылок
   // на одну такую строку держали сервис 5 секунд.
-  for (const filler of ["а\r", "а\u0001", "а\r\u0001\n"]) {
+  for (const filler of ["а\r", "а\u0001", "а\r\u0001\n", "\r"]) {
     const dense = filler.repeat(Math.floor(199_000 / filler.length));
     const notes = [["Заголовок", "Текст"], ...Array.from({ length: 250 }, (_, index) => [`Заметка ${index}`, dense])];
     let outcome: unknown = null;
@@ -270,9 +270,75 @@ test("разбор: текст из `\\r` и управляющих символ
     // остальных половина знаков уходит, и текст ложится в предел.
     if (!(outcome instanceof ArchiveRejected)) {
       const parsed = outcome as Awaited<ReturnType<typeof parseArchive>>;
-      const expected = filler === "а\r" ? 0 : 250;
+      const expected = filler === "а\r" || filler === "\r" ? 0 : 250;
       assert.equal(parsed.notes.length, expected, JSON.stringify(filler));
       if (expected > 0) assert.equal(parsed.notes[0]!.value.content, filler === "а\u0001" ? "а".repeat(99_500) : "а\n".repeat(49_750).trimEnd());
     }
   }
+});
+
+/**
+ * Самый длинный кусок работы без паузы для цикла событий — по процессору
+ * между соседними тиками `setImmediate`, а не по часам: соседи по CI на
+ * него не влияют.
+ */
+async function longestChunk(run: () => Promise<unknown>): Promise<number> {
+  let last = process.cpuUsage();
+  let longest = 0;
+  let running = true;
+  const measure = () => {
+    const spent = process.cpuUsage(last);
+    longest = Math.max(longest, (spent.user + spent.system) / 1000);
+    last = process.cpuUsage();
+  };
+  const tick = () => {
+    measure();
+    if (running) setImmediate(tick);
+  };
+  setImmediate(tick);
+  try {
+    await run();
+  } catch {
+    // Отказ файлу — тоже исход: важно, сколько работы прошло без пауз.
+  } finally {
+    running = false;
+  }
+  measure();
+  return longest;
+}
+
+test("цикл событий: дорогие строки не держат его дольше кванта — паузы по времени, а не по числу строк", async () => {
+  const lines = Array.from({ length: 50_000 }, (_, index) => `пункт ${index}`).join("\n");
+  const keys = `{${Array.from({ length: 3_999 }, (_, index) => `"k${index}":1`).join(",")}}`;
+  const cases: Record<string, ReturnType<typeof book>> = {
+    "текст из одних \\r": book({ name: "Заметки", rows: [["Заголовок", "Текст"], ...Array.from({ length: 250 }, (_, index) => [`Заметка ${index}`, "\r".repeat(199_000)])] }),
+    "списки по 50 000 строк": book({ name: "Цели", rows: [["Название", "Критерии успеха", "Ограничения"], ...Array.from({ length: 250 }, (_, index) => [`Цель ${index}`, lines, lines])] }),
+    "JSON на пределе значения": book({ name: "Цели", rows: [["Название", "Критерии успеха", "Ограничения"], ...Array.from({ length: 124 }, (_, index) => [`Цель ${index}`, keys, keys])] }),
+  };
+  for (const [name, input] of Object.entries(cases)) {
+    const longest = await longestChunk(async () => await preview(await parseArchive(input, { zone: ZONE })));
+    assert.ok(longest < 150, `${name}: ${Math.round(longest)} мс без паузы`);
+  }
+});
+
+test("анкета: ответ-JSON платит из бюджета файла и для уже принятого поля не разбирается", async () => {
+  // Объект на 1 336 ключей укладывается в 10 000 знаков ответа.
+  const object = `{${Array.from({ length: 1_336 }, (_, index) => `"${index.toString(36)}":1`).join(",")}}`;
+  assert.ok(object.length < 10_000);
+  const many = [["Код поля", "Ответ"], ...Array.from({ length: 2_400 }, () => ["quiet_hours", object])];
+  const error = await rejection(() => parseArchive(book({ name: "Анкета", rows: many }), { zone: ZONE }));
+  assert.match(error.message, /списков и вложенных значений/);
+
+  // В пределах бюджета: 300 строк одного поля — разбирается только первая.
+  const parsed = await parseArchive(book({ name: "Анкета", rows: many.slice(0, 301) }), { zone: ZONE });
+  const definitions = (sql: string) => sql.startsWith("SELECT field_key, value_type")
+    ? [{ field_key: "quiet_hours", value_type: "object", sensitivity: "normal", confirmation_required: false }]
+    : [];
+  let report: Awaited<ReturnType<typeof preview>> | null = null;
+  const spent = await cpuMs(async () => {
+    report = await preview(parsed, definitions);
+  });
+  const sheetReport = report!.sheets.find((item) => item.id === "questionnaire");
+  assert.deepEqual([sheetReport?.added, sheetReport?.existing], [1, 299]);
+  assert.ok(spent < 100, `${Math.round(spent)} мс процессора`);
 });

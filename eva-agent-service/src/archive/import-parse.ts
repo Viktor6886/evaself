@@ -15,7 +15,7 @@
 
 import { isValidIanaTimezone } from "../time/local-date-time.js";
 import {
-  CellError, date, dateTime, decimal, fold, integer, jsonValue, labelled, list,
+  CellError, date, dateTime, decimal, fold, integer, jsonStructure, jsonValue, labelled, list,
   requiredText, stringList, text, yesNo,
 } from "./format.js";
 import { Budget, columnsOf, getter, isEmptyRow, keyValues, type Get } from "./import-cells.js";
@@ -27,6 +27,7 @@ import {
   ArchiveRejected, type NorthImport, type Parsed, type ParsedArchive, type ProfileImport, type RowError,
 } from "./import-types.js";
 import type { ReadCell, ReadSheet, ReadWorkbook } from "./xlsx-reader.js";
+import { pacer } from "./pace.js";
 
 export { ARCHIVE_ROW_LIMIT, TEXT_BUDGET } from "./import-cells.js";
 
@@ -36,12 +37,9 @@ interface Context {
   errors: RowError[];
   warnings: string[];
   budget: Budget;
-  /** Пауза для цикла событий раз в `PACE_EVERY` строк. */
+  /** Пауза для цикла событий, как только подряд набежало `QUANTUM_MS`. */
   pace(): Promise<void>;
 }
-
-/** Столько строк разбор проходит подряд, не отдавая цикл событий. */
-const PACE_EVERY = 500;
 
 async function tableRows<T>(
   definition: ArchiveSheet,
@@ -243,17 +241,13 @@ export async function parseArchive(book: ReadWorkbook, options: { zone: string }
   const budget = new Budget();
   const spend = (structure: number) => budget.json(structure);
   const about = parseAbout(find("about").source, options.zone, budget);
-  let paced = 0;
   const context: Context = {
     date1904: book.date1904,
     zone: about.zone,
     errors: [],
     warnings: [],
     budget,
-    async pace() {
-      paced += 1;
-      if (paced % PACE_EVERY === 0) await new Promise<void>((resolve) => setImmediate(resolve));
-    },
+    pace: pacer(),
   };
   const when = { date1904: book.date1904, zone: about.zone };
   const parsed: ParsedArchive = {
@@ -303,9 +297,13 @@ export async function parseArchive(book: ReadWorkbook, options: { zone: string }
     // архив человека возвращался бы с «ошибками» в каждой такой строке.
     if (status !== null && status !== "candidate" && status !== "confirmed") return null;
     if (text(get("value"), 10_000) === null && status === null) return null;
+    const value = requiredText(get("value"), 10_000, "Ответ");
+    // Ответ-объект или список JSON разбирается при записи — и платит за
+    // это из того же бюджета файла, что и JSON листов.
+    if (value.startsWith("[") || value.startsWith("{")) spend(jsonStructure(value));
     return {
       field_key: key,
-      value: requiredText(get("value"), 10_000, "Ответ"),
+      value,
       // Подтверждённым ответ остаётся, только если человек подтвердил
       // его сам; всё остальное возвращается предположением.
       status: status === "confirmed" ? "confirmed" as const : "candidate" as const,

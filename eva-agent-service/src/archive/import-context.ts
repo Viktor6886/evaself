@@ -13,6 +13,7 @@
 import { createHash } from "node:crypto";
 
 import { CONTROL_CODES, EDGE_SPACE_CODES, cleanText, instantOf, wallClock } from "./format.js";
+import { pacer } from "./pace.js";
 import type { ParsedArchive, RowError } from "./import-types.js";
 import type { SheetId } from "./sheets.js";
 
@@ -48,8 +49,9 @@ export interface ApplyContext {
   /** Момент → стенные часы пояса файла. */
   wall(moment: Date | null): string | null;
   /**
-   * Пауза для цикла событий раз в `PACE_EVERY` строк: предпросмотр не
-   * ждёт базы, и без пауз десятки тысяч строк шли бы одним куском.
+   * Пауза для цикла событий, как только подряд набежало `QUANTUM_MS`:
+   * предпросмотр не ждёт базы, и без пауз десятки тысяч строк шли бы
+   * одним куском.
    */
   pace(): Promise<void>;
   /** Момент создания из файла; будущее — опечатка, а не история. */
@@ -60,7 +62,6 @@ export interface ApplyContext {
   run(sql: string, values: unknown[]): Promise<void>;
 }
 
-const PACE_EVERY = 500;
 const CACHE_LIMIT = 50_000;
 
 export function createContext(input: {
@@ -73,7 +74,6 @@ export function createContext(input: {
   const counters = new Map<SheetId, Counter>();
   const notices = new Map<string, number[]>();
   let simulated = 0;
-  let paced = 0;
   // Перевод времени между поясами — форматирование Intl, десятки
   // микросекунд; в файле одни и те же сроки повторяются.
   const instants = new Map<string, Date | null>();
@@ -116,10 +116,7 @@ export function createContext(input: {
       }
       return value;
     },
-    async pace() {
-      paced += 1;
-      if (paced % PACE_EVERY === 0) await new Promise<void>((resolve) => setImmediate(resolve));
-    },
+    pace: pacer(),
     createdAt(wall) {
       const value = instant(wall);
       return value && value.getTime() <= input.now.getTime() ? value.toISOString() : null;

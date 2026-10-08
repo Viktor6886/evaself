@@ -14,8 +14,11 @@
  * имён, кавычки обоих видов и календарь 1904 года.
  */
 
+import { StringDecoder } from "node:string_decoder";
+
 import yauzl from "yauzl";
 
+import { clock, pause } from "./pace.js";
 import { attribute, scanXml, XmlFormatError, type XmlToken } from "./xml-scan.js";
 
 export { decodeXml } from "./xml-scan.js";
@@ -118,10 +121,14 @@ function openZip(buffer: Buffer, limits: ReadLimits): Promise<OpenedZip> {
           read: async (name: string) => {
             const entry = entries.get(name);
             if (!entry) throw new WorkbookFormatError("xlsx_part_missing");
-            const bytes = await new Promise<Buffer>((done, failed) => {
+            // Текст раскодируется по мере распаковки, кусками: часть в
+            // десятки мегабайт, раскодированная целиком, — сотня
+            // миллисекунд без паузы для цикла событий.
+            const text = await new Promise<string>((done, failed) => {
               zip.openReadStream(entry.raw, (streamError, stream) => {
                 if (streamError || !stream) return failed(new WorkbookFormatError("xlsx_zip_malformed"));
-                const chunks: Buffer[] = [];
+                const decoder = new StringDecoder("utf8");
+                const pieces: string[] = [];
                 let size = 0;
                 stream.on("data", (chunk: Buffer) => {
                   size += chunk.length;
@@ -132,14 +139,16 @@ function openZip(buffer: Buffer, limits: ReadLimits): Promise<OpenedZip> {
                     failed(new WorkbookFormatError("xlsx_zip_bomb"));
                     return;
                   }
-                  chunks.push(chunk);
+                  pieces.push(decoder.write(chunk));
                 });
                 stream.on("error", () => failed(new WorkbookFormatError("xlsx_zip_malformed")));
-                stream.on("end", () => done(Buffer.concat(chunks)));
+                stream.on("end", () => {
+                  spent += size;
+                  pieces.push(decoder.end());
+                  done(pieces.join(""));
+                });
               });
             });
-            spent += bytes.length;
-            const text = bytes.toString("utf8");
             if (/<!DOCTYPE/i.test(text.slice(0, 2048))) throw new WorkbookFormatError("xlsx_doctype_forbidden");
             return text;
           },
@@ -150,44 +159,44 @@ function openZip(buffer: Buffer, limits: ReadLimits): Promise<OpenedZip> {
   });
 }
 
-/** Обратное к экранированию Excel `_xHHHH_` (так он пишет, например, `\r`). */
-function excelUnescape(text: string): string {
-  return text.includes("_x")
-    ? text.replace(/_x([0-9A-Fa-f]{4})_/g, (_, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)))
-    : text;
+const HEX4 = /^[0-9A-Fa-f]{4}$/;
+
+/**
+ * Обратное к экранированию Excel `_xHHHH_` (так он пишет, например, `\r`).
+ * Один проход по `_x`: регулярное выражение с функцией замены на тексте из
+ * одних экранирований тратило по полмикросекунды на каждое.
+ */
+export function excelUnescape(text: string): string {
+  let at = text.indexOf("_x");
+  if (at < 0) return text;
+  let out = "";
+  let last = 0;
+  while (at >= 0) {
+    const hex = text.slice(at + 2, at + 6);
+    if (text.charCodeAt(at + 6) === 0x5f && HEX4.test(hex)) {
+      out += text.slice(last, at) + String.fromCharCode(Number.parseInt(hex, 16));
+      last = at + 7;
+      at = text.indexOf("_x", last);
+    } else {
+      at = text.indexOf("_x", at + 1);
+    }
+  }
+  return out + text.slice(last);
 }
 
 /**
- * Разбор отдаёт управление циклу событий каждые столько токенов: большой
- * лист не должен замораживать остальные запросы сервиса.
- */
-const YIELD_EVERY = 20_000;
-const pause = () => new Promise<void>((resolve) => setImmediate(resolve));
-
-/**
- * Токены части книги. Перебор синхронный, а паузу делает вызывающий
- * (`pacer`): асинхронный генератор создавал по промису на каждый токен,
- * а под AsyncLocalStorage сервиса каждый промис ещё проходит через async
- * hooks — разбор большого листа становился в 2,5–10 раз дороже.
+ * Токены части книги. Перебор синхронный, а паузу по часам (`clock`)
+ * делает вызывающий: асинхронный генератор создавал по промису на каждый
+ * токен, а под AsyncLocalStorage сервиса каждый промис ещё проходит через
+ * async hooks — разбор большого листа становился в 2,5–10 раз дороже.
  */
 function* tokens(xml: string): Generator<XmlToken> {
   try {
     yield* scanXml(xml);
   } catch (error) {
-    if (error instanceof XmlFormatError) throw new WorkbookFormatError("xlsx_xml_malformed");
+    if (error instanceof XmlFormatError) throw new WorkbookFormatError(error.code);
     throw error;
   }
-}
-
-/** Счётчик токенов: `true` раз в `YIELD_EVERY` — пора отдать цикл событий. */
-function pacer(): () => boolean {
-  let count = 0;
-  return () => {
-    count += 1;
-    if (count < YIELD_EVERY) return false;
-    count = 0;
-    return true;
-  };
 }
 
 function joinPath(base: string, target: string): string {
@@ -207,7 +216,7 @@ function relsPath(part: string): string {
 
 async function relationships(xml: string): Promise<Array<{ id: string; type: string; target: string }>> {
   const found: Array<{ id: string; type: string; target: string }> = [];
-  const due = pacer();
+  const due = clock();
   for (const token of tokens(xml)) {
     if (due()) await pause();
     if (token.kind !== "open" || token.name !== "Relationship") continue;
@@ -226,7 +235,7 @@ async function workbookInfo(
 ): Promise<{ date1904: boolean; sheets: Array<{ name: string; relId: string | undefined }> }> {
   let date1904 = false;
   const sheets: Array<{ name: string; relId: string | undefined }> = [];
-  const due = pacer();
+  const due = clock();
   for (const token of tokens(xml)) {
     if (due()) await pause();
     if (token.kind !== "open") continue;
@@ -247,7 +256,7 @@ async function sharedStrings(xml: string, limits: ReadLimits): Promise<string[]>
   let item: string[] | null = null;
   let phonetic = 0;
   let text: string[] | null = null;
-  const due = pacer();
+  const due = clock();
   for (const token of tokens(xml)) {
     if (due()) await pause();
     if (token.kind === "text") {
@@ -380,7 +389,7 @@ async function parseSheet(xml: string, strings: readonly string[], limits: ReadL
     cell = null;
   };
 
-  const due = pacer();
+  const due = clock();
   for (const token of tokens(xml)) {
     if (due()) await pause();
     if (token.kind === "text") {

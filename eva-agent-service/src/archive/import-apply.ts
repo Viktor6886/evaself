@@ -224,6 +224,14 @@ async function applyQuestionnaire(ctx: ApplyContext): Promise<void> {
       ctx.errors.push({ sheet: sheet("questionnaire").name, row, message: `поле «${value.field_key}» Еве неизвестно` });
       continue;
     }
+    // Ответ уже есть — в базе или выше в этом же файле: разбирать его
+    // незачем. Иначе тысячи строк одного поля разбирали бы один и тот же
+    // JSON тысячи раз.
+    const empty = present.get(value.field_key);
+    if (empty === false) {
+      counter.existing += 1;
+      continue;
+    }
     let normalized: { text: string | null; json: unknown };
     try {
       const raw = value.field_key === "grammatical_gender" ? gender(value.value) : value.value;
@@ -240,11 +248,6 @@ async function applyQuestionnaire(ctx: ApplyContext): Promise<void> {
     // приходят предположением: подтверждает их человек в разговоре, а не
     // отметка в файле, который мог прийти не от него.
     const status = definition.confirmation_required || definition.sensitivity !== "normal" ? "candidate" : value.status;
-    const empty = present.get(value.field_key);
-    if (empty === false) {
-      counter.existing += 1;
-      continue;
-    }
     if (ctx.mode === "preview") {
       if (empty === undefined) counter.added += 1;
       else counter.filled += 1;

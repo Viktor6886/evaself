@@ -310,6 +310,23 @@ test("чтение: тысячи листов в книге отвергаютс
   await assert.rejects(readWorkbook(shared), (error: unknown) => error instanceof WorkbookFormatError && error.code === "xlsx_xml_malformed");
 });
 
+test("чтение: текстовый узел длиннее миллиона знаков и огромный атрибут отвергаются до раскодирования", async () => {
+  // Узел на десятки мегабайт раскодировался одним куском — секунды без
+  // паузы для цикла событий. Текст разнообразный, чтобы файл не сжимался
+  // как zip-бомба и дошёл до разбора.
+  let seed = 1;
+  const varied = Array.from({ length: 1_100_000 }, () => {
+    seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648;
+    return String.fromCharCode(0x430 + (seed % 32));
+  }).join("");
+  const text = await bookWithSheet(`<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>${varied}</t></is></c></row></sheetData></worksheet>`);
+  const spent = await cpuMs(() => assert.rejects(readWorkbook(text), (error: unknown) =>
+    error instanceof WorkbookFormatError && error.code === "xlsx_text_too_long"));
+  assert.ok(spent < 500, `${Math.round(spent)} мс процессора`);
+  const name = await bookWithSheets(`<sheet name="${"Л".repeat(100_000)}" r:id="rId1"/>`, `<Relationship Id="rId1" Type="x/worksheet" Target="s.xml"/>`, {});
+  await assert.rejects(readWorkbook(name), (error: unknown) => error instanceof WorkbookFormatError && error.code === "xlsx_xml_malformed");
+});
+
 test("чтение: `>` внутри значения атрибута и CDATA не ломают разбор", async () => {
   const bytes = await bookWithSheet(
     `<worksheet><sheetData><row r="1" note="a > b"><c r="A1" t="inlineStr"><is><t><![CDATA[<не тег> & текст]]></t></is></c></row></sheetData></worksheet>`,

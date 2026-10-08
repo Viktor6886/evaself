@@ -105,7 +105,9 @@ export const CONTROL_CODES: readonly number[] = [
   0xfffe, 0xffff,
 ];
 
-const EDGE = new Set(EDGE_SPACE_CODES);
+/** Пробел ли на краю — одно обращение к таблице по коду: строка из одних пробелов бывает длинной. */
+const EDGE = new Uint8Array(0x10000);
+for (const code of EDGE_SPACE_CODES) EDGE[code] = 1;
 /** Управляющий ли знак — одно обращение к таблице по коду. */
 const CONTROL = new Uint8Array(0x10000);
 for (const code of CONTROL_CODES) CONTROL[code] = 1;
@@ -132,7 +134,7 @@ function wellFormed(value: string): string {
  * на каждое совпадение в десять раз больше, а такой текст в файле стоит
  * копейки.
  */
-function scrub(value: string, lines: boolean): string {
+function scrubCodes(value: string, lines: boolean): string {
   const bytes = Buffer.from(value, "utf16le");
   const codes = bytes.byteOffset % 2 === 0
     ? new Uint16Array(bytes.buffer, bytes.byteOffset, bytes.length / 2)
@@ -158,6 +160,21 @@ function scrub(value: string, lines: boolean): string {
   return Buffer.from(codes.buffer, codes.byteOffset, size * 2).toString("utf16le");
 }
 
+const CONTROLS = new RegExp(controlClass, "g");
+
+/** Тот же результат регулярными выражениями — для машины с обратным порядком байтов. */
+function scrubPatterns(value: string, lines: boolean): string {
+  const withoutControls = value.replace(CONTROLS, "");
+  return lines ? withoutControls.replace(/\r\n?/g, "\n") : withoutControls;
+}
+
+/**
+ * `scrubCodes` читает байты UTF-16LE как массив 16-битных кодов, а это
+ * верно только на машине с прямым порядком байтов (x86, ARM).
+ */
+const LITTLE_ENDIAN = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
+const scrub = LITTLE_ENDIAN ? scrubCodes : scrubPatterns;
+
 /**
  * Текст в том виде, в каком его сравнивают и хранят: без управляющих
  * символов, с `\n` вместо `\r\n` и `\r`, без половин суррогатных пар и
@@ -168,8 +185,8 @@ export function cleanText(value: string): string {
   const text = wellFormed(NEEDS_SCRUB.test(value) ? scrub(value, true) : value);
   let start = 0;
   let end = text.length;
-  while (start < end && EDGE.has(text.charCodeAt(start))) start += 1;
-  while (end > start && EDGE.has(text.charCodeAt(end - 1))) end -= 1;
+  while (start < end && EDGE[text.charCodeAt(start)] === 1) start += 1;
+  while (end > start && EDGE[text.charCodeAt(end - 1)] === 1) end -= 1;
   return start === 0 && end === text.length ? text : text.slice(start, end);
 }
 
@@ -183,16 +200,22 @@ const MAX_JSON_DEPTH = 32;
  */
 export const MAX_JSON_STRUCTURE = 4_000;
 
-/**
- * JSON из ячейки: сначала счёт скобок и запятых (их число — в `spend`, в
- * бюджет разбора), потом `JSON.parse`. Не JSON — `undefined`.
- */
-export function parseJsonCell(value: string, name: string, spend: (structure: number) => void = () => undefined): unknown {
+/** Скобок `[`, `{` и запятых в тексте: столько объектов самое большее создаст `JSON.parse`. */
+export function jsonStructure(value: string): number {
   let structure = 0;
   for (let index = 0; index < value.length; index += 1) {
     const code = value.charCodeAt(index);
     if (code === 0x2c || code === 0x5b || code === 0x7b) structure += 1;
   }
+  return structure;
+}
+
+/**
+ * JSON из ячейки: сначала счёт скобок и запятых (их число — в `spend`, в
+ * бюджет разбора), потом `JSON.parse`. Не JSON — `undefined`.
+ */
+export function parseJsonCell(value: string, name: string, spend: (structure: number) => void = () => undefined): unknown {
+  const structure = jsonStructure(value);
   spend(structure);
   if (structure > MAX_JSON_STRUCTURE) throw new CellError(`«${name}»: слишком сложное значение`);
   try {
