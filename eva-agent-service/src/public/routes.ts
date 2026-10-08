@@ -11,6 +11,7 @@ import {
   MIN_WINDOW_MINUTES,
 } from "../jobs/proactive/windows.js";
 import type { ConversationService } from "./conversation-service.js";
+import { registerArchivePublicRoutes, type DataArchivePublic } from "./archive-routes.js";
 import { registerKnowledgePublicRoutes, type KnowledgeDocumentsPublic } from "./knowledge-routes.js";
 import { registerOsintPublicRoutes, type OsintPublic } from "./osint-routes.js";
 import {
@@ -812,6 +813,8 @@ export function registerPublicRoutes(
     /** Своя база знаний в Mini App; нет — функция выключена, вкладка скрыта. */
     knowledgeDocuments?: KnowledgeDocumentsPublic;
     osint?: OsintPublic;
+    /** Архив своих данных в Excel; нет или выключен — раздел скрыт. */
+    archive?: DataArchivePublic;
     /**
      * Подписка в Mini App. Отсутствует — раздел честно говорит, что
      * оплата не настроена, вместо кнопки, которая ничего не делает.
@@ -1081,6 +1084,12 @@ export function registerPublicRoutes(
     publicApp.post("/research/:id/cancel",async(request)=>{if(!input.knowledgeResearch)throw badRequest("Исследования отключены");return await input.knowledgeResearch.researchCancel(publicUser(request).id,String((request.params as {id?:string}).id??""));});
     registerKnowledgePublicRoutes(publicApp, input.knowledgeDocuments, (request) => publicUser(request as FastifyRequest).id);
     registerOsintPublicRoutes(publicApp, input.osint, (request) => publicUser(request as FastifyRequest).id);
+    registerArchivePublicRoutes(
+      publicApp,
+      input.archive,
+      (request) => publicUser(request as FastifyRequest).id,
+      async (bucket, limit, windowSeconds) => await enforceRateLimit(limiter, bucket, { limit, windowSeconds }),
+    );
 
     // ---- Контроль памяти (шаг 16) ---------------------------------
     //

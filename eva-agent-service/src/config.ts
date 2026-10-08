@@ -315,6 +315,18 @@ export interface Config {
    */
   audioFileTranscriptsEnabled: boolean;
   /**
+   * Архив своих данных в Mini App: выгрузка в Excel и загрузка обратно
+   * только дополнением (docs/data-archive.md). Выключен по умолчанию:
+   * включает владелец в панели, действует без перезапуска.
+   */
+  dataArchiveEnabled: boolean;
+  /**
+   * Лист «Память Евы» в архиве — блоки `human` и `current_state`.
+   * Отдельный флаг: это исключение из правила о нераскрытии memory blocks
+   * (docs/INVARIANT_DIVERGENCES.md), и включается оно отдельно.
+   */
+  dataArchiveMemoryEnabled: boolean;
+  /**
    * Предел аудиофайла, МБ, когда его отдаёт свой сервер Bot API.
    * Облачный Bot API отдаёт ботам не больше 20 МБ, и этот предел там не
    * действует. Распознаёт запись media-service частями не больше 20 МБ.
@@ -599,6 +611,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     toolApprovalsEnabled: bool("EVA_TOOL_APPROVALS", false),
     miniAppJournalEnabled: bool("EVA_MINIAPP_JOURNAL_V2", false),
     audioFileTranscriptsEnabled: bool("EVA_AUDIO_FILE_TRANSCRIPTS", false),
+    dataArchiveEnabled: bool("EVA_DATA_ARCHIVE", false),
+    dataArchiveMemoryEnabled: bool("EVA_DATA_ARCHIVE_MEMORY", false),
     audioFileMaxMb: clampedInt("EVA_AUDIO_FILE_MAX_MB", 350, 1, 2_000),
     telegramStreamMode: parseLiveStreamMode(str("EVA_TELEGRAM_STREAM_MODE", "edit")),
     telegramTypingSpeed: parseLiveTypingSpeed(str("EVA_TELEGRAM_TYPING_SPEED", "calm")),
