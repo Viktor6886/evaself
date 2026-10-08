@@ -24,6 +24,7 @@ import pg from "../../eva-agent-service/node_modules/pg/lib/index.js";
 import { Database } from "../../eva-agent-service/dist/db.js";
 import { DataArchiveService } from "../../eva-agent-service/dist/archive/service.js";
 import { readWorkbook } from "../../eva-agent-service/dist/archive/xlsx-reader.js";
+import { writeWorkbook } from "../../eva-agent-service/dist/archive/xlsx-writer.js";
 
 const url = process.env.DATABASE_URL;
 if (!url) throw new Error("DATABASE_URL не задан");
@@ -187,7 +188,7 @@ try {
   // Единственный пункт с запятой внутри должен вернуться одним пунктом.
   await admin.query(
     `INSERT INTO onboarding_fields (user_id, field_key, field_json, status, sensitivity)
-     VALUES ($1, 'recovery_methods', '["прогулка, сон"]'::jsonb, 'confirmed', 'sensitive')`, [aliceId]);
+     VALUES ($1, 'recovery_methods', '["прогулка, сон; чтение"]'::jsonb, 'confirmed', 'sensitive')`, [aliceId]);
   // Перевод строки `\r\n` ровно на стыке частей ячейки (32 000 знаков).
   await admin.query(`INSERT INTO eva_notes (user_id, title, content) VALUES ($1, 'Стык', $2)`,
     [aliceId, `${"а".repeat(31_999)}\r\n${"б".repeat(10)}`]);
@@ -307,7 +308,7 @@ try {
   assert(bobAfter.onboarding_fields.length === 3, "ответы анкеты добавлены, отказ отвечать — нет");
   const { rows: [methods] } = await admin.query(
     "SELECT field_json FROM onboarding_fields WHERE user_id = $1 AND field_key = 'recovery_methods'", [bobId]);
-  assert(JSON.stringify(methods?.field_json) === JSON.stringify(["прогулка, сон"]),
+  assert(JSON.stringify(methods?.field_json) === JSON.stringify(["прогулка, сон; чтение"]),
     `пункт анкеты с запятой вернулся одним пунктом: ${JSON.stringify(methods?.field_json)}`);
   const { rows: [seam] } = await admin.query("SELECT content FROM eva_notes WHERE user_id = $1 AND title = 'Стык'", [bobId]);
   assert(seam?.content === `${"а".repeat(31_999)}\n${"б".repeat(10)}`, "перевод строки на стыке частей ячейки не задвоился");
@@ -354,6 +355,21 @@ try {
   assert(daveAgain.added_total === 0 && daveAgain.filled_total === 0 && daveUser.timezone_source === null,
     `свой архив с поясом UTC ничего не «дополнил» (${daveAgain.filled_total}, ${daveUser.timezone_source})`);
   assert(JSON.stringify(await snapshot(dave.id)) === JSON.stringify(daveBefore), "строка пользователя не переписана");
+
+  // ---- ответ анкеты с `\u0000` и половиной суррогатной пары в JSON -------
+  // JSON.parse их пропускает, jsonb — нет: запись не должна падать после
+  // предпросмотра, который прошёл.
+  const { bytes: crafted } = await writeWorkbook([{
+    name: "Анкета",
+    columns: [{ header: "Код поля", kind: "text" }, { header: "Ответ", kind: "longtext" }],
+    rows: [["interests", '["бег\\u0000", "\\ud800горы"]']],
+  }], { title: "t", creator: "t", created: NOW });
+  const craftedPreview = await service().preview(DAVE, crafted);
+  const craftedApplied = await service().apply(DAVE, crafted, craftedPreview.file_sha256);
+  const { rows: [interests] } = await admin.query(
+    "SELECT field_json FROM onboarding_fields WHERE user_id = $1 AND field_key = 'interests'", [dave.id]);
+  assert(craftedApplied.added_total === 1 && JSON.stringify(interests?.field_json) === JSON.stringify(["бег", "\ufffdгоры"]),
+    `ответ с \\u0000 и половиной пары записан очищенным: ${JSON.stringify(interests?.field_json)}`);
 
   // ---- повтор той же загрузки ---------------------------------------
   const repeat = await service().apply(BOB, archive, mark);

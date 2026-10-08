@@ -106,39 +106,111 @@ export const CONTROL_CODES: readonly number[] = [
 ];
 
 const EDGE = new Set(EDGE_SPACE_CODES);
+/** Управляющий ли знак — одно обращение к таблице по коду. */
+const CONTROL = new Uint8Array(0x10000);
+for (const code of CONTROL_CODES) CONTROL[code] = 1;
 const controlClass = `[${CONTROL_CODES.map((code) => `\\u${code.toString(16).padStart(4, "0")}`).join("")}]`;
 const HAS_CONTROL = new RegExp(controlClass);
-const CONTROLS = new RegExp(controlClass, "g");
+const NEEDS_SCRUB = new RegExp(`${controlClass}|\\r`);
+
+type WellFormed = { isWellFormed(): boolean; toWellFormed(): string };
+
+/**
+ * Половина суррогатной пары → «�». Так её записал бы и UTF-8 при
+ * сохранении, а в JSON она уходила бы экранированной, и jsonb её не
+ * принимает.
+ */
+function wellFormed(value: string): string {
+  const text = value as unknown as WellFormed;
+  return text.isWellFormed() ? value : text.toWellFormed();
+}
+
+/**
+ * Управляющие символы прочь, затем (если `lines`) `\r\n` и `\r` → `\n` —
+ * в том же порядке, что в SQL хэша. Код за кодом по массиву: регулярное
+ * выражение на тексте, где управляющий символ или `\r` через знак, тратит
+ * на каждое совпадение в десять раз больше, а такой текст в файле стоит
+ * копейки.
+ */
+function scrub(value: string, lines: boolean): string {
+  const bytes = Buffer.from(value, "utf16le");
+  const codes = bytes.byteOffset % 2 === 0
+    ? new Uint16Array(bytes.buffer, bytes.byteOffset, bytes.length / 2)
+    : new Uint16Array(new Uint8Array(bytes).buffer);
+  let size = 0;
+  for (let index = 0; index < codes.length; index += 1) {
+    const code = codes[index]!;
+    if (CONTROL[code] === 0) codes[size++] = code;
+  }
+  if (lines) {
+    let kept = 0;
+    for (let index = 0; index < size; index += 1) {
+      const code = codes[index]!;
+      if (code !== 0x0d) {
+        codes[kept++] = code;
+        continue;
+      }
+      codes[kept++] = 0x0a;
+      if (index + 1 < size && codes[index + 1] === 0x0a) index += 1;
+    }
+    size = kept;
+  }
+  return Buffer.from(codes.buffer, codes.byteOffset, size * 2).toString("utf16le");
+}
 
 /**
  * Текст в том виде, в каком его сравнивают и хранят: без управляющих
- * символов, с `\n` вместо `\r\n` и `\r` и без пробелов по краям — в том
- * же порядке шагов, что `hashSql` в базе. Управляющие символы вырезает
- * одно регулярное выражение по классу символов (линейно), а края —
- * цикл: `\s+$` на длинной строке пробелов квадратичен.
+ * символов, с `\n` вместо `\r\n` и `\r`, без половин суррогатных пар и
+ * без пробелов по краям — в том же порядке шагов, что `hashSql` в базе.
+ * Края — циклом: `\s+$` на длинной строке пробелов квадратичен.
  */
 export function cleanText(value: string): string {
-  const withoutControls = HAS_CONTROL.test(value) ? value.replace(CONTROLS, "") : value;
-  const lines = withoutControls.includes("\r") ? withoutControls.replace(/\r\n?/g, "\n") : withoutControls;
+  const text = wellFormed(NEEDS_SCRUB.test(value) ? scrub(value, true) : value);
   let start = 0;
-  let end = lines.length;
-  while (start < end && EDGE.has(lines.charCodeAt(start))) start += 1;
-  while (end > start && EDGE.has(lines.charCodeAt(end - 1))) end -= 1;
-  return start === 0 && end === lines.length ? lines : lines.slice(start, end);
+  let end = text.length;
+  while (start < end && EDGE.has(text.charCodeAt(start))) start += 1;
+  while (end > start && EDGE.has(text.charCodeAt(end - 1))) end -= 1;
+  return start === 0 && end === text.length ? text : text.slice(start, end);
 }
-
-const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
 
 /** Глубже этого JSON из файла не бывает у выгрузки; глубже — не данные, а ловушка для стека. */
 const MAX_JSON_DEPTH = 32;
 
 /**
+ * Скобок и запятых в одном значении JSON больше этого у выгрузки не
+ * бывает. Больше — не данные, а способ заставить разбор создать сотни
+ * тысяч объектов из килобайтов текста: отказ до `JSON.parse`.
+ */
+export const MAX_JSON_STRUCTURE = 4_000;
+
+/**
+ * JSON из ячейки: сначала счёт скобок и запятых (их число — в `spend`, в
+ * бюджет разбора), потом `JSON.parse`. Не JSON — `undefined`.
+ */
+export function parseJsonCell(value: string, name: string, spend: (structure: number) => void = () => undefined): unknown {
+  let structure = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code === 0x2c || code === 0x5b || code === 0x7b) structure += 1;
+  }
+  spend(structure);
+  if (structure > MAX_JSON_STRUCTURE) throw new CellError(`«${name}»: слишком сложное значение`);
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Строки внутри JSON из файла. `JSON.parse` пропускает `\u0000` и
  * одиночную половину суррогатной пары, а jsonb PostgreSQL их не принимает:
  * запись падала бы целиком уже после предпросмотра, который их не видит.
+ * Узлов не больше, чем скобок и запятых, а их число уже ограничено
+ * `parseJsonCell`.
  */
 export function cleanJson(value: unknown, depth = 0): unknown {
-  if (typeof value === "string") return value.replace(CONTROLS, "").replace(LONE_SURROGATE, "\ufffd");
+  if (typeof value === "string") return wellFormed(HAS_CONTROL.test(value) ? scrub(value, false) : value);
   if (value === null || typeof value !== "object") return value;
   if (depth >= MAX_JSON_DEPTH) throw new CellError("слишком глубокая вложенность JSON");
   if (Array.isArray(value)) return value.map((item) => cleanJson(item, depth + 1));
@@ -262,17 +334,20 @@ export function list(cell: ReadCell, maxItems: number, maxLength: number, name: 
  * Список строк из ячейки: построчно или JSON-массивом строк — так его
  * пишет выгрузка, если в пункте есть перевод строки.
  */
-export function stringList(cell: ReadCell, maxItems: number, maxLength: number, name: string): string[] {
+export function stringList(
+  cell: ReadCell,
+  maxItems: number,
+  maxLength: number,
+  name: string,
+  spend?: (structure: number) => void,
+): string[] {
   const value = text(cell, maxItems * (maxLength + 8));
   if (value === null) return [];
   if (value.startsWith("[")) {
-    let parsed: unknown = null;
-    try {
-      parsed = JSON.parse(value) as unknown;
-    } catch {
-      parsed = null;
-    }
+    const parsed = parseJsonCell(value, name, spend);
     if (Array.isArray(parsed) && parsed.every((item) => typeof item === "string")) {
+      // Число пунктов — до очистки каждого.
+      if (parsed.length > maxItems) throw new CellError(`«${name}»: больше ${maxItems} пунктов`);
       const items = (cleanJson(parsed) as string[]).map((item) => item.trim()).filter(Boolean);
       if (items.length > maxItems) throw new CellError(`«${name}»: больше ${maxItems} пунктов`);
       if (items.some((item) => item.length > maxLength)) throw new CellError(`«${name}»: пункт длиннее ${maxLength} знаков`);
@@ -286,21 +361,39 @@ export function stringList(cell: ReadCell, maxItems: number, maxLength: number, 
  * Значение jsonb: выгрузка пишет список строк построчно, а всё прочее —
  * JSON. Разбор возвращает то же, что было в базе.
  */
-export function jsonValue(cell: ReadCell, name: string): unknown {
+export function jsonValue(cell: ReadCell, name: string, spend?: (structure: number) => void): unknown {
   const value = text(cell, 100_000);
   if (value === null) return null;
-  if (/^[[{"]/.test(value)) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(value) as unknown;
-    } catch {
-      // Не JSON — обычный текст, который начинается со скобки.
-    }
-    if (parsed !== undefined) return cleanJson(parsed);
+  // Не JSON — обычный текст, который начинается со скобки: он делится на
+  // пункты построчно, как список.
+  const parsed = /^[[{"]/.test(value) ? parseJsonCell(value, name, spend) : undefined;
+  if (parsed !== undefined) {
+    if (Array.isArray(parsed) && parsed.length > 200) throw new CellError(`«${name}»: больше 200 пунктов`);
+    return cleanJson(parsed);
   }
   const items = value.split("\n").map((item) => item.trim()).filter(Boolean);
   if (items.length > 200) throw new CellError(`«${name}»: больше 200 пунктов`);
-  return cleanJson(items);
+  return items;
+}
+
+/**
+ * Свёрнутые подписи и коды → код, один раз на набор подписей: свёртка —
+ * `toLocaleLowerCase`, и сворачивать весь набор на каждую ячейку дорого.
+ * Первая запись набора выигрывает, как и при переборе по порядку.
+ */
+const labelIndexes = new WeakMap<object, Map<string, string>>();
+function labelIndex(labels: Readonly<Record<string, string>>): Map<string, string> {
+  let index = labelIndexes.get(labels);
+  if (!index) {
+    index = new Map();
+    for (const [code, label] of Object.entries(labels)) {
+      for (const key of [fold(code), fold(label)]) {
+        if (!index.has(key)) index.set(key, code);
+      }
+    }
+    labelIndexes.set(labels, index);
+  }
+  return index;
 }
 
 /** Значение из подписи: принимает и подпись, и исходный код. */
@@ -311,10 +404,8 @@ export function labelled<T extends string>(
 ): T | null {
   const value = text(cell, 200);
   if (value === null) return null;
-  const wanted = fold(value);
-  for (const [code, label] of Object.entries(labels) as Array<[T, string]>) {
-    if (fold(code) === wanted || fold(label) === wanted) return code;
-  }
+  const code = labelIndex(labels).get(fold(value));
+  if (code !== undefined) return code as T;
   throw new CellError(`«${name}»: значение «${value.slice(0, 40)}» не из списка (${Object.values(labels).join(", ")})`);
 }
 

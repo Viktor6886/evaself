@@ -81,8 +81,9 @@ const FORMAT_ERRORS: Record<string, string> = {
   xlsx_doctype_forbidden: "Файл повреждён или небезопасен — загрузка отклонена.",
   xlsx_part_missing: "Файл повреждён — в нём не хватает частей.",
   xlsx_rows_unordered: "Файл повреждён: строки листа идут не по порядку.",
-  xlsx_too_many_rows: "В листе слишком много строк. Раздели архив на несколько файлов.",
+  xlsx_too_many_rows: "В листе слишком много строк. Сделай копии файла и раздели строки листа между ними.",
   xlsx_too_many_strings: "Файл слишком большой для архива Евы.",
+  xlsx_too_many_sheets: "В файле слишком много листов для архива Евы.",
   xlsx_xml_malformed: "Файл повреждён — его разметка не читается.",
 };
 
@@ -117,6 +118,8 @@ export class DataArchiveService {
     /** После записи: сбросить кэш продуктового контекста человека. */
     onImported?: (userId: number) => void;
     now?: () => Date;
+    /** Предел документа в Telegram; меньше — только в тестах. */
+    maxDocumentBytes?: number;
   }) {
     this.now = deps.now ?? (() => new Date());
   }
@@ -148,7 +151,7 @@ export class DataArchiveService {
         creator: "Evaself",
         created: now,
       });
-      if (bytes.length > TELEGRAM_DOCUMENT_LIMIT) {
+      if (bytes.length > (this.deps.maxDocumentBytes ?? TELEGRAM_DOCUMENT_LIMIT)) {
         throw badRequest("Архив получился больше 50 МБ — Telegram не передаёт такие файлы, поэтому он не отправлен.");
       }
       const day = (wallClock(now, user.zone) ?? now.toISOString()).slice(0, 10);
@@ -214,7 +217,7 @@ export class DataArchiveService {
       return await this.scoped(telegramId, options.apply ? "miniapp.archive.import" : "miniapp.archive.preview", async (user) => {
         let parsed;
         try {
-          parsed = parseArchive(book, { zone: user.zone });
+          parsed = await parseArchive(book, { zone: user.zone });
         } catch (error) {
           if (error instanceof ArchiveRejected) throw badRequest(error.message);
           throw error;

@@ -167,8 +167,8 @@ test("маршруты: файл приходит в сервис как ест�
 const ZONE = "Europe/Moscow";
 const sheetOf = (name: string, rows: Array<Array<string | number | boolean | null>>) => ({ name, rows });
 
-test("разбор: столбцы — по заголовку в любом порядке, ошибки — с номером строки Excel", () => {
-  const parsed = parseArchive({
+test("разбор: столбцы — по заголовку в любом порядке, ошибки — с номером строки Excel", async () => {
+  const parsed = await parseArchive({
     date1904: false,
     sheets: [sheetOf("Задачи и напоминания", [
       ["Статус", "Лишний столбец", "Название", "Напомнить", "Повтор (cron)", "Повторять", "Часовой пояс", "Вид"],
@@ -195,13 +195,13 @@ test("разбор: столбцы — по заголовку в любом п�
   assert.match(parsed.errors[2]!.message, /Название/);
 });
 
-test("разбор: «О файле» — чужой формат и более новая версия отклоняются, пояс берётся из файла", () => {
+test("разбор: «О файле» — чужой формат и более новая версия отклоняются, пояс берётся из файла", async () => {
   const about = (format: string, version: string, zone = "Asia/Yekaterinburg") => sheetOf("О файле", [
     ["Поле", "Значение"], ["Формат", format], ["Версия формата", version], ["Часовой пояс времени в файле", zone],
   ]);
-  assert.throws(() => parseArchive({ date1904: false, sheets: [about("чужой", "1")] }, { zone: ZONE }), /не архив Евы/);
-  assert.throws(() => parseArchive({ date1904: false, sheets: [about("evaself-archive", "2")] }, { zone: ZONE }), /более новой версией/);
-  const parsed = parseArchive({
+  await assert.rejects(parseArchive({ date1904: false, sheets: [about("чужой", "1")] }, { zone: ZONE }), /не архив Евы/);
+  await assert.rejects(parseArchive({ date1904: false, sheets: [about("evaself-archive", "2")] }, { zone: ZONE }), /более новой версией/);
+  const parsed = await parseArchive({
     date1904: false,
     sheets: [about("evaself-archive", "1"), sheetOf("Дневник", [
       ["Дата", "Запись", "Создана", "Люди"],
@@ -215,15 +215,15 @@ test("разбор: «О файле» — чужой формат и более 
   assert.deepEqual(parsed.journal[0]!.value.people, ["Мама", "Папа"]);
 });
 
-test("разбор: нет обязательного столбца — лист пропущен с понятной причиной", () => {
-  const parsed = parseArchive({ date1904: false, sheets: [sheetOf("Цели", [["Ключ", "Статус"], ["Ц1", "черновик"]])] }, { zone: ZONE });
+test("разбор: нет обязательного столбца — лист пропущен с понятной причиной", async () => {
+  const parsed = await parseArchive({ date1904: false, sheets: [sheetOf("Цели", [["Ключ", "Статус"], ["Ц1", "черновик"]])] }, { zone: ZONE });
   assert.deepEqual(parsed.goals, []);
   assert.equal(parsed.errors[0]!.row, 1);
   assert.match(parsed.errors[0]!.message, /«Название»/);
 });
 
-test("разбор: продолжения длинного текста склеиваются без потери пробелов на стыке", () => {
-  const parsed = parseArchive({
+test("разбор: продолжения длинного текста склеиваются без потери пробелов на стыке", async () => {
+  const parsed = await parseArchive({
     date1904: true,
     sheets: [sheetOf("Заметки", [
       ["Заголовок", "Текст", "Текст (продолжение 1)", "Создана"],
@@ -234,8 +234,8 @@ test("разбор: продолжения длинного текста скл�
   assert.equal(parsed.notes[0]!.value.created_at, "2026-10-07T12:00", "календарь 1904 года");
 });
 
-test("разбор: продолжений столько, сколько в файле, и в любом порядке столбцов", () => {
-  const parsed = parseArchive({
+test("разбор: продолжений столько, сколько в файле, и в любом порядке столбцов", async () => {
+  const parsed = await parseArchive({
     date1904: false,
     sheets: [sheetOf("Заметки", [
       ["Текст (продолжение 2)", "Заголовок", "Текст", "Текст (продолжение 1)", "Текст (продолжение 999)"],
@@ -245,8 +245,8 @@ test("разбор: продолжений столько, сколько в ф�
   assert.equal(parsed.notes[0]!.value.content, "первая вторая третья");
 });
 
-test("разбор: суммы, подписи и статус анкеты", () => {
-  const parsed = parseArchive({
+test("разбор: суммы, подписи и статус анкеты", async () => {
+  const parsed = await parseArchive({
     date1904: false,
     sheets: [
       sheetOf("Бюджет", [
@@ -287,8 +287,8 @@ test("разбор: суммы, подписи и статус анкеты", ()
   ]);
 });
 
-test("разбор: память Евы читается, но только как текст для передачи", () => {
-  const parsed = parseArchive({
+test("разбор: память Евы читается, но только как текст для передачи", async () => {
+  const parsed = await parseArchive({
     date1904: false,
     sheets: [sheetOf("Память Евы", [
       ["Раздел", "Содержание", "Содержание (продолжение 1)"],
@@ -347,6 +347,7 @@ function service(options: {
   memorySource?: () => Promise<unknown>;
   /** Доставка ждёт этого обещания — так выгрузка остаётся «в работе». */
   delivery?: Promise<void>;
+  maxDocumentBytes?: number;
 } = {}) {
   const sent: Array<{ chatId: number; bytes: Buffer; filename: string; mimeType?: string }> = [];
   const { db, queries } = guardedDb();
@@ -361,6 +362,7 @@ function service(options: {
     flags: { enabled: () => options.enabled ?? true, memory: () => options.memory ?? false },
     memory: { read: async () => (options.memorySource ? await options.memorySource() : null) as never },
     now: () => NOW,
+    ...(options.maxDocumentBytes ? { maxDocumentBytes: options.maxDocumentBytes } : {}),
   });
   return { archive, sent, queries };
 }
@@ -384,6 +386,12 @@ test("сервис: выгрузка — каждый запрос в облас
   assert.equal(book.sheets.some((sheet) => sheet.name.includes("OSINT")), false);
 });
 
+test("сервис: архив больше предела Telegram не отправляется — отказ с объяснением", async () => {
+  const { archive, sent } = service({ maxDocumentBytes: 1_000 });
+  await assert.rejects(archive.export(USER.id), /больше 50 МБ/);
+  assert.equal(sent.length, 0);
+});
+
 test("сервис: память по флагу — только human и current_state; недоступный runtime не ломает выгрузку", async () => {
   const withMemory = service({
     memory: true,
@@ -402,7 +410,7 @@ test("сервис: память по флагу — только human и curre
   const memorySheet = (await readWorkbook(spilled.sent[0]!.bytes)).sheets.find((sheet) => sheet.name === "Память Евы")!;
   assert.deepEqual(memorySheet.rows[0], ["Раздел", "Содержание", "Содержание (продолжение 1)", "Содержание (продолжение 2)"]);
   assert.equal(memorySheet.rows[1]!.slice(1).join(""), long);
-  const reparsed = parseArchive(await readWorkbook(spilled.sent[0]!.bytes), { zone: ZONE });
+  const reparsed = await parseArchive(await readWorkbook(spilled.sent[0]!.bytes), { zone: ZONE });
   assert.equal(reparsed.memory[0]!.value, long);
 
   const broken = service({ memory: true, memorySource: async () => { throw new Error("runtime down"); } });

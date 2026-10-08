@@ -18,7 +18,7 @@
  */
 
 import { normalizeProfileValue } from "../profile/profile-service.js";
-import { fold } from "./format.js";
+import { cleanJson, fold, parseJsonCell } from "./format.js";
 import { createContext, type ApplyClient, type ApplyContext, type ApplyMode } from "./import-context.js";
 import { applyEntries } from "./import-entries.js";
 import { applyGoals, applyTasks } from "./import-goals.js";
@@ -218,6 +218,7 @@ async function applyQuestionnaire(ctx: ApplyContext): Promise<void> {
   );
   const present = new Map(answers.map((row) => [row.field_key, row.empty]));
   for (const { row, value } of ctx.parsed.questionnaire) {
+    await ctx.pace();
     const definition = byKey.get(value.field_key);
     if (!definition) {
       ctx.errors.push({ sheet: sheet("questionnaire").name, row, message: `поле «${value.field_key}» Еве неизвестно` });
@@ -316,16 +317,17 @@ async function applyNorth(ctx: ApplyContext): Promise<void> {
  * делится, как в разговоре, — по запятым.
  */
 function answer(raw: string, type: "string" | "string_array" | "object"): unknown {
-  if (type === "object") return JSON.parse(raw) as unknown;
-  if (type !== "string_array") return raw;
-  if (raw.startsWith("[")) {
-    try {
-      const parsed = JSON.parse(raw) as unknown;
-      if (Array.isArray(parsed)) return parsed;
-    } catch {
-      // Не JSON — обычный текст, который начинается со скобки.
-    }
+  // JSON из файла — с теми же пределами и той же очисткой строк, что у
+  // листов: `\u0000` в ответе ронял бы запись уже после предпросмотра.
+  if (type === "object") {
+    const parsed = parseJsonCell(raw, "Ответ");
+    if (parsed === undefined) throw new Error("ответ должен быть JSON-объектом");
+    return cleanJson(parsed);
   }
+  if (type !== "string_array") return raw;
+  // Не JSON — обычный текст, который начинается со скобки.
+  const parsed = raw.startsWith("[") ? parseJsonCell(raw, "Ответ") : undefined;
+  if (Array.isArray(parsed)) return cleanJson(parsed);
   return raw.includes("\n") ? raw.split("\n") : raw;
 }
 

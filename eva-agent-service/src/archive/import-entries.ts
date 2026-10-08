@@ -40,6 +40,7 @@ export async function applyEntries(ctx: ApplyContext): Promise<void> {
       )).rows.map((row) => row.normalized)
       : [];
     for (const [index, { value }] of parsed.people.entries()) {
+      await ctx.pace();
       const keyOf = keys[index] ?? "";
       if (ctx.mode === "preview") {
         const empty = known.get(keyOf);
@@ -77,6 +78,7 @@ export async function applyEntries(ctx: ApplyContext): Promise<void> {
     // его ни упоминали.
     const personIds = new Map<string, number>();
     for (const { value } of parsed.journal) {
+      await ctx.pace();
       if (existing.take(`${value.local_date}|${contentHash(value.content)}`) !== undefined) {
         counter.existing += 1;
         continue;
@@ -113,6 +115,7 @@ export async function applyEntries(ctx: ApplyContext): Promise<void> {
     const existing = new Multiset();
     for (const row of rows) existing.add(`${fold(row.title)}|${row.hash}`, true);
     for (const { value } of parsed.notes) {
+      await ctx.pace();
       if (existing.take(`${fold(value.title)}|${contentHash(value.content)}`) !== undefined) {
         counter.existing += 1;
         continue;
@@ -135,6 +138,7 @@ export async function applyEntries(ctx: ApplyContext): Promise<void> {
     );
     const days = new Set(rows.map((row) => row.local_date));
     for (const { value } of parsed.checkins) {
+      await ctx.pace();
       if (days.has(value.local_date)) {
         counter.existing += 1;
         continue;
@@ -174,6 +178,7 @@ export async function applyEntries(ctx: ApplyContext): Promise<void> {
     const existing = new Multiset();
     for (const row of rows) existing.add(fingerprint(row), true);
     for (const { value } of parsed.budget) {
+      await ctx.pace();
       if (existing.take(fingerprint({ ...value })) !== undefined) {
         counter.existing += 1;
         continue;
@@ -201,6 +206,7 @@ export async function applyEntries(ctx: ApplyContext): Promise<void> {
     const existing = new Multiset();
     for (const row of rows) existing.add(fold(row.question), true);
     for (const { value } of parsed.decisions) {
+      await ctx.pace();
       if (existing.take(fold(value.question)) !== undefined) {
         counter.existing += 1;
         continue;

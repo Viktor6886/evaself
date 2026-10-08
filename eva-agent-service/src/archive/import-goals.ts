@@ -9,7 +9,7 @@
  */
 
 import { assertCronExpression, cronFieldMatches, nextCronDate } from "../time/cron.js";
-import { fold, wallClock } from "./format.js";
+import { fold } from "./format.js";
 import { Multiset, type ApplyContext } from "./import-context.js";
 import { sheet } from "./sheets.js";
 
@@ -73,6 +73,7 @@ export async function applyGoals(ctx: ApplyContext): Promise<GoalLinks> {
     for (const row of rows) existing.add(fold(row.title), Number(row.id));
     let downgraded = 0;
     for (const { row, value } of ordered(parsed.goals)) {
+      await ctx.pace();
       const parentRef = value.parent && value.parent !== value.ref ? value.parent : null;
       const parentId = parentRef ? links.goals.get(parentRef) ?? null : null;
       if (parentRef && parentId === null) ctx.notice("Цели: родительская цель не найдена — цель загружается без неё", row);
@@ -122,6 +123,7 @@ export async function applyGoals(ctx: ApplyContext): Promise<GoalLinks> {
     const existing = new Multiset<number>();
     for (const row of rows) existing.add(`${row.goal_id}|${fold(row.title)}`, Number(row.id));
     for (const { row, value } of ordered(parsed.results)) {
+      await ctx.pace();
       const goalId = links.goals.get(value.goal);
       if (goalId === undefined) {
         ctx.errors.push({ sheet: sheet("results").name, row, message: `цель «${value.goal}» не найдена на листе «Цели»` });
@@ -201,7 +203,7 @@ export async function applyTasks(ctx: ApplyContext, links: GoalLinks): Promise<{
   const key = (title: string, wall: string | null, cron: string | null) => `${fold(title)}|${wall ?? ""}|${cron ?? ""}`;
   const existing = new Multiset();
   for (const row of rows) {
-    existing.add(key(row.title, wallClock(row.remind_at ?? row.due_at, parsed.zone), row.cron_expression), true);
+    existing.add(key(row.title, ctx.wall(row.remind_at ?? row.due_at), row.cron_expression), true);
   }
   // Повтор проверяется и считается один раз на выражение и пояс.
   const schedules = new Map<string, Date | Error>();
@@ -210,7 +212,7 @@ export async function applyTasks(ctx: ApplyContext, links: GoalLinks): Promise<{
     let known = schedules.get(id);
     if (known === undefined) {
       if (schedules.size >= MAX_SCHEDULES) {
-        throw new Error(`больше ${MAX_SCHEDULES} разных повторов в одном файле — эту задачу загрузи отдельным файлом`);
+        throw new Error(`больше ${MAX_SCHEDULES} разных повторов в одном файле — загрузи этот же файл ещё раз, добавятся следующие`);
       }
       try {
         assertCronExpression(cron, zone);
@@ -229,8 +231,9 @@ export async function applyTasks(ctx: ApplyContext, links: GoalLinks): Promise<{
   for (const { row, value } of parsed.tasks) {
     // Время из файла — через момент и обратно: несуществующее 02:30 ночи
     // перевода часов база хранит как 03:30, и сравнивать надо с ним.
+    await ctx.pace();
     const wall = value.remind_at ?? value.due_at;
-    const stored = wall === null ? null : wallClock(ctx.instant(wall), parsed.zone);
+    const stored = wall === null ? null : ctx.wall(ctx.instant(wall));
     if (existing.take(key(value.title, stored, value.cron_expression)) !== undefined) {
       counter.existing += 1;
       continue;

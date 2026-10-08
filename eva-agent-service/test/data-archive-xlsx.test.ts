@@ -271,6 +271,45 @@ test("чтение: большой честный лист разбираетс�
   assert.ok(largeSpent < smallSpent * 8, spent);
 });
 
+/** Книга, в которой `workbook.xml` и связи заданы целиком. */
+async function bookWithSheets(sheets: string, rels: string, parts: Record<string, string>): Promise<Buffer> {
+  return await zipOf({
+    "[Content_Types].xml": CONTENT_TYPES,
+    "xl/workbook.xml": `<workbook><sheets>${sheets}</sheets></workbook>`,
+    "xl/_rels/workbook.xml.rels": `<Relationships>${rels}</Relationships>`,
+    ...parts,
+  });
+}
+
+test("чтение: тысячи листов в книге отвергаются, одно имя и одна часть читаются один раз", async () => {
+  // 20 000 листов на одну часть: прежнее чтение разбирало её 20 000 раз —
+  // секунды процессора из 50 КБ файла. Номера разные, чтобы файл не
+  // сжимался как zip-бомба и дошёл до счёта листов.
+  const many = await bookWithSheets(
+    Array.from({ length: 20_000 }, (_, index) => `<sheet name="Заметки" sheetId="${index * 7919 % 100_003}" r:id="rId1"/>`).join(""),
+    `<Relationship Id="rId1" Type="x/worksheet" Target="s.xml"/>`,
+    { "xl/s.xml": `<worksheet><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData></worksheet>` },
+  );
+  const spent = await cpuMs(() => assert.rejects(readWorkbook(many), (error: unknown) =>
+    error instanceof WorkbookFormatError && error.code === "xlsx_too_many_sheets"));
+  assert.ok(spent < 1_500, `${Math.round(spent)} мс процессора`);
+
+  const sheet = (value: number) => `<worksheet><sheetData><row r="1"><c r="A1"><v>${value}</v></c></row></sheetData></worksheet>`;
+  const twins = await bookWithSheets(
+    `<sheet name="Заметки" r:id="rId1"/><sheet name="заметки" r:id="rId2"/>`,
+    `<Relationship Id="rId1" Type="x/worksheet" Target="a.xml"/><Relationship Id="rId2" Type="x/worksheet" Target="b.xml"/>`,
+    { "xl/a.xml": sheet(1), "xl/b.xml": sheet(2) },
+  );
+  assert.deepEqual((await readWorkbook(twins)).sheets.map((item) => [item.name, item.rows[0]![0]]), [["Заметки", 1]]);
+
+  const shared = await bookWithSheets(
+    `<sheet name="Заметки" r:id="rId1"/><sheet name="Решения" r:id="rId2"/>`,
+    `<Relationship Id="rId1" Type="x/worksheet" Target="a.xml"/><Relationship Id="rId2" Type="x/worksheet" Target="a.xml"/>`,
+    { "xl/a.xml": sheet(1) },
+  );
+  await assert.rejects(readWorkbook(shared), (error: unknown) => error instanceof WorkbookFormatError && error.code === "xlsx_xml_malformed");
+});
+
 test("чтение: `>` внутри значения атрибута и CDATA не ломают разбор", async () => {
   const bytes = await bookWithSheet(
     `<worksheet><sheetData><row r="1" note="a > b"><c r="A1" t="inlineStr"><is><t><![CDATA[<не тег> & текст]]></t></is></c></row></sheetData></worksheet>`,

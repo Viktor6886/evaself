@@ -42,6 +42,7 @@ export interface ReadLimits {
   maxRows: number;
   maxColumns: number;
   maxSharedStrings: number;
+  maxSheets: number;
 }
 
 export const DEFAULT_READ_LIMITS: ReadLimits = {
@@ -53,6 +54,9 @@ export const DEFAULT_READ_LIMITS: ReadLimits = {
   maxRows: 20_000,
   maxColumns: 100,
   maxSharedStrings: 500_000,
+  // В архиве Евы 27 листов; тысячи `<sheet>` в книге — не таблица, а
+  // способ заставить разбор читать одно и то же раз за разом.
+  maxSheets: 256,
 };
 
 /** Ошибка формата с кодом: текст для человека подбирает вызывающий. */
@@ -216,7 +220,10 @@ async function relationships(xml: string): Promise<Array<{ id: string; type: str
   return found;
 }
 
-async function workbookInfo(xml: string): Promise<{ date1904: boolean; sheets: Array<{ name: string; relId: string | undefined }> }> {
+async function workbookInfo(
+  xml: string,
+  limits: ReadLimits,
+): Promise<{ date1904: boolean; sheets: Array<{ name: string; relId: string | undefined }> }> {
   let date1904 = false;
   const sheets: Array<{ name: string; relId: string | undefined }> = [];
   const due = pacer();
@@ -227,6 +234,7 @@ async function workbookInfo(xml: string): Promise<{ date1904: boolean; sheets: A
       const value = token.attrs.get("date1904");
       date1904 = value === "1" || value === "true";
     } else if (token.name === "sheet") {
+      if (sheets.length >= limits.maxSheets) throw new WorkbookFormatError("xlsx_too_many_sheets");
       sheets.push({ name: token.attrs.get("name") ?? "", relId: attribute(token.attrs, "id") });
     }
   }
@@ -473,7 +481,7 @@ export async function readWorkbook(
     const office = rootRels.find((rel) => /\/officeDocument$/.test(rel.type));
     const workbookPath = office ? joinPath("", office.target) : "xl/workbook.xml";
     if (!zip.entries.has(workbookPath)) throw new WorkbookFormatError("xlsx_not_workbook");
-    const workbook = await workbookInfo(await zip.read(workbookPath));
+    const workbook = await workbookInfo(await zip.read(workbookPath), limits);
     const baseDir = workbookPath.includes("/") ? workbookPath.slice(0, workbookPath.lastIndexOf("/")) : "";
     const rels = zip.entries.has(relsPath(workbookPath)) ? await relationships(await zip.read(relsPath(workbookPath))) : [];
     const date1904 = workbook.date1904;
@@ -482,13 +490,27 @@ export async function readWorkbook(
     const sharedPath = sharedRel ? joinPath(baseDir, sharedRel.target) : null;
     const strings = sharedPath && zip.entries.has(sharedPath) ? await sharedStrings(await zip.read(sharedPath), limits) : [];
 
+    const relById = new Map<string, { id: string; type: string; target: string }>();
+    for (const rel of rels) {
+      if (!relById.has(rel.id)) relById.set(rel.id, rel);
+    }
     const sheets: ReadSheet[] = [];
+    const names = new Set<string>();
+    const parts = new Set<string>();
     for (const item of workbook.sheets) {
       if (!item.name || (options.wanted && !options.wanted(item.name))) continue;
-      const rel = rels.find((candidate) => candidate.id === item.relId);
+      // Имена листов Excel уникальны без учёта регистра: второй лист с тем
+      // же именем не читается.
+      const name = item.name.toLocaleLowerCase("ru");
+      if (names.has(name)) continue;
+      names.add(name);
+      const rel = item.relId === undefined ? undefined : relById.get(item.relId);
       if (!rel || !/\/worksheet$/.test(rel.type)) continue;
       const path = joinPath(baseDir, rel.target);
       if (!zip.entries.has(path)) continue;
+      // Одна часть — один лист: иначе большую часть читали бы раз за разом.
+      if (parts.has(path)) throw new WorkbookFormatError("xlsx_xml_malformed");
+      parts.add(path);
       sheets.push({ name: item.name, rows: await parseSheet(await zip.read(path), strings, limits) });
     }
     return { sheets, date1904 };

@@ -36,15 +36,20 @@ interface Context {
   errors: RowError[];
   warnings: string[];
   budget: Budget;
+  /** Пауза для цикла событий раз в `PACE_EVERY` строк. */
+  pace(): Promise<void>;
 }
 
-function tableRows<T>(
+/** Столько строк разбор проходит подряд, не отдавая цикл событий. */
+const PACE_EVERY = 500;
+
+async function tableRows<T>(
   definition: ArchiveSheet,
   source: ReadSheet,
   context: Context,
   required: string[],
   parse: (get: Get) => T | null,
-): Array<Parsed<T>> {
+): Promise<Array<Parsed<T>>> {
   const [header = [], ...rest] = source.rows;
   const positions = columnsOf(definition, header);
   const missing = required.filter((key) => !positions?.has(key));
@@ -61,10 +66,12 @@ function tableRows<T>(
   }
   const parsed: Array<Parsed<T>> = [];
   let taken = 0;
-  rest.forEach((row, index) => {
-    if (taken > SHEET_ROW_LIMIT || isEmptyRow(row, context.budget)) return;
+  for (let index = 0; index < rest.length && taken <= SHEET_ROW_LIMIT; index += 1) {
+    await context.pace();
+    const row = rest[index] ?? [];
+    if (isEmptyRow(row, context.budget)) continue;
     taken += 1;
-    if (taken > SHEET_ROW_LIMIT) return;
+    if (taken > SHEET_ROW_LIMIT) break;
     // Строка с ошибкой — тоже в счёт: разбор её стоит столько же.
     context.budget.rows(1);
     const excelRow = index + 2;
@@ -77,7 +84,7 @@ function tableRows<T>(
       if (!(error instanceof CellError)) throw error;
       context.errors.push({ sheet: definition.name, row: excelRow, message: error.message });
     }
-  });
+  }
   if (taken > SHEET_ROW_LIMIT) {
     context.warnings.push(`Лист «${definition.name}»: больше ${SHEET_ROW_LIMIT} строк, остальные не прочитаны.`);
   }
@@ -85,6 +92,20 @@ function tableRows<T>(
 }
 
 const ref = (value: string | null): string | null => (value === null ? null : fold(value));
+
+/**
+ * Проверка пояса создаёт `Intl.DateTimeFormat` — десятки микросекунд; у
+ * десяти тысяч задач файла пояс обычно один и тот же.
+ */
+const zoneValidity = new Map<string, boolean>();
+function validZone(value: string): boolean {
+  let valid = zoneValidity.get(value);
+  if (valid === undefined) {
+    valid = isValidIanaTimezone(value);
+    if (zoneValidity.size < 1_000) zoneValidity.set(value, valid);
+  }
+  return valid;
+}
 
 function parseAbout(
   source: ReadSheet | undefined,
@@ -116,7 +137,7 @@ function parseAbout(
   const zone = cell(ABOUT_FIELDS.zone, 100);
   return {
     recognized: format === ARCHIVE_FORMAT,
-    zone: zone && isValidIanaTimezone(zone) ? zone : fallbackZone,
+    zone: zone && validZone(zone) ? zone : fallbackZone,
   };
 }
 
@@ -140,7 +161,7 @@ function parseProfile(source: ReadSheet, context: Context): ProfileImport | null
         }
         case "timezone": {
           const value = text(cell, 100);
-          if (value && !isValidIanaTimezone(value)) throw new CellError(`часовой пояс «${value}» неизвестен`);
+          if (value && !validZone(value)) throw new CellError(`часовой пояс «${value}» неизвестен`);
           if (value) profile.timezone = value;
           break;
         }
@@ -179,6 +200,7 @@ function parseProfile(source: ReadSheet, context: Context): ProfileImport | null
 
 function parseNorth(source: ReadSheet, context: Context): NorthImport | null {
   const values = keyValues(source, context.budget, context.errors);
+  const spend = (structure: number) => context.budget.json(structure);
   let row = 1;
   const get = (key: string): ReadCell => {
     const field = NORTH_FIELDS.find((item) => item.key === key)!;
@@ -190,9 +212,9 @@ function parseNorth(source: ReadSheet, context: Context): NorthImport | null {
     const north: NorthImport = {
       desired_direction: text(get("desired_direction"), 5_000),
       why_it_matters: text(get("why_it_matters"), 5_000),
-      values: jsonValue(get("values"), "Ценности") ?? [],
-      conflicts: jsonValue(get("conflicts"), "Что мешает") ?? [],
-      reduce_list: jsonValue(get("reduce_list"), "Что сократить") ?? [],
+      values: jsonValue(get("values"), "Ценности", spend) ?? [],
+      conflicts: jsonValue(get("conflicts"), "Что мешает", spend) ?? [],
+      reduce_list: jsonValue(get("reduce_list"), "Что сократить", spend) ?? [],
       acceptable_cost: text(get("acceptable_cost"), 5_000),
       unacceptable_cost: text(get("unacceptable_cost"), 5_000),
       user_confirmed: yesNo(get("user_confirmed"), "Подтверждено мной") ?? false,
@@ -212,15 +234,27 @@ function parseNorth(source: ReadSheet, context: Context): NorthImport | null {
  * Разобрать книгу. `zone` — текущий пояс человека: им читаются даты
  * файла, в котором пояс не указан.
  */
-export function parseArchive(book: ReadWorkbook, options: { zone: string }): ParsedArchive {
+export async function parseArchive(book: ReadWorkbook, options: { zone: string }): Promise<ParsedArchive> {
   const byName = new Map(book.sheets.map((item) => [fold(item.name), item]));
   const find = (id: SheetId) => {
     const definition = SHEETS.find((item) => item.id === id)!;
     return { definition, source: byName.get(fold(definition.name)) };
   };
   const budget = new Budget();
+  const spend = (structure: number) => budget.json(structure);
   const about = parseAbout(find("about").source, options.zone, budget);
-  const context: Context = { date1904: book.date1904, zone: about.zone, errors: [], warnings: [], budget };
+  let paced = 0;
+  const context: Context = {
+    date1904: book.date1904,
+    zone: about.zone,
+    errors: [],
+    warnings: [],
+    budget,
+    async pace() {
+      paced += 1;
+      if (paced % PACE_EVERY === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+    },
+  };
   const when = { date1904: book.date1904, zone: about.zone };
   const parsed: ParsedArchive = {
     recognized: about.recognized,
@@ -250,9 +284,9 @@ export function parseArchive(book: ReadWorkbook, options: { zone: string }): Par
     parsed.sheetsFound.push(definition.id);
     if (!definition.importable && definition.id !== "memory") parsed.readOnlySheets.push(definition.name);
   }
-  const each = <T>(id: SheetId, required: string[], parse: (get: Get) => T | null): Array<Parsed<T>> => {
+  const each = async <T>(id: SheetId, required: string[], parse: (get: Get) => T | null): Promise<Array<Parsed<T>>> => {
     const { definition, source } = find(id);
-    return source ? tableRows(definition, source, context, required, parse) : [];
+    return source ? await tableRows(definition, source, context, required, parse) : [];
   };
 
   const profileSheet = find("profile").source;
@@ -260,7 +294,7 @@ export function parseArchive(book: ReadWorkbook, options: { zone: string }): Par
   const northSheet = find("north").source;
   if (northSheet) parsed.north = parseNorth(northSheet, context);
 
-  parsed.questionnaire = each("questionnaire", ["field_key", "value"], (get) => {
+  parsed.questionnaire = await each("questionnaire", ["field_key", "value"], (get) => {
     const key = requiredText(get("field_key"), 100, "Код поля");
     if (!/^[a-z][a-z0-9_]{0,99}$/.test(key)) throw new CellError("код поля — латиница, например city");
     const status = labelled(get("status"), LABELS.profileStatus, "Статус");
@@ -278,7 +312,7 @@ export function parseArchive(book: ReadWorkbook, options: { zone: string }): Par
     };
   });
 
-  parsed.goals = each("goals", ["title"], (get) => ({
+  parsed.goals = await each("goals", ["title"], (get) => ({
     ref: ref(text(get("ref"), 50)),
     parent: ref(text(get("parent"), 50)),
     title: requiredText(get("title"), 500, "Название"),
@@ -287,10 +321,10 @@ export function parseArchive(book: ReadWorkbook, options: { zone: string }): Par
     why_it_matters: text(get("why_it_matters"), 5_000),
     result_artifact: text(get("result_artifact"), 5_000),
     target_date: date(get("target_date"), when, "Срок"),
-    success_criteria: jsonValue(get("success_criteria"), "Критерии успеха") ?? [],
+    success_criteria: jsonValue(get("success_criteria"), "Критерии успеха", spend) ?? [],
     minimum_version: text(get("minimum_version"), 5_000),
     target_version: text(get("target_version"), 5_000),
-    constraints: jsonValue(get("constraints"), "Ограничения") ?? [],
+    constraints: jsonValue(get("constraints"), "Ограничения", spend) ?? [],
     learning_goal: text(get("learning_goal"), 5_000),
     review_condition: text(get("review_condition"), 2_000),
     stop_condition: text(get("stop_condition"), 2_000),
@@ -302,13 +336,13 @@ export function parseArchive(book: ReadWorkbook, options: { zone: string }): Par
     completed_at: dateTime(get("completed_at"), when, "Завершена"),
   }));
 
-  parsed.results = each("results", ["goal", "title"], (get) => ({
+  parsed.results = await each("results", ["goal", "title"], (get) => ({
     ref: ref(text(get("ref"), 50)),
     goal: ref(requiredText(get("goal"), 50, "Цель"))!,
     parent: ref(text(get("parent"), 50)),
     title: requiredText(get("title"), 500, "Название"),
     result_artifact: text(get("result_artifact"), 5_000),
-    success_criteria: jsonValue(get("success_criteria"), "Критерии успеха") ?? [],
+    success_criteria: jsonValue(get("success_criteria"), "Критерии успеха", spend) ?? [],
     minimum_version: text(get("minimum_version"), 5_000),
     target_date: date(get("target_date"), when, "Срок"),
     sort_order: integer(get("sort_order"), -100_000, 100_000, "Порядок") ?? 100,
@@ -323,9 +357,9 @@ export function parseArchive(book: ReadWorkbook, options: { zone: string }): Par
     completed_at: dateTime(get("completed_at"), when, "Готов"),
   }));
 
-  parsed.tasks = each("tasks", ["title"], (get) => {
+  parsed.tasks = await each("tasks", ["title"], (get) => {
     const timezone = text(get("timezone"), 100);
-    if (timezone && !isValidIanaTimezone(timezone)) throw new CellError(`часовой пояс «${timezone}» неизвестен`);
+    if (timezone && !validZone(timezone)) throw new CellError(`часовой пояс «${timezone}» неизвестен`);
     const cron = text(get("cron_expression"), 100);
     // «Повторять» без выражения повтора — разовая задача: без cron
     // планировщику не из чего считать следующий срок.
@@ -351,7 +385,7 @@ export function parseArchive(book: ReadWorkbook, options: { zone: string }): Par
     };
   });
 
-  parsed.journal = each("journal", ["local_date", "content"], (get) => {
+  parsed.journal = await each("journal", ["local_date", "content"], (get) => {
     const localDate = date(get("local_date"), when, "Дата");
     if (!localDate) throw new CellError("не заполнено поле «Дата»");
     const people = list(get("people"), 20, 200, "Люди");
@@ -371,12 +405,12 @@ export function parseArchive(book: ReadWorkbook, options: { zone: string }): Par
     };
   });
 
-  parsed.people = each("people", ["display_name"], (get) => ({
+  parsed.people = await each("people", ["display_name"], (get) => ({
     display_name: requiredText(get("display_name"), 200, "Имя"),
     relation: text(get("relation"), 200),
   }));
 
-  parsed.notes = each("notes", ["title", "content"], (get) => ({
+  parsed.notes = await each("notes", ["title", "content"], (get) => ({
     title: requiredText(get("title"), 500, "Заголовок"),
     content: requiredText(get("content"), 100_000, "Текст"),
     category: text(get("category"), 200),
@@ -387,7 +421,7 @@ export function parseArchive(book: ReadWorkbook, options: { zone: string }): Par
     created_at: dateTime(get("created_at"), when, "Создана"),
   }));
 
-  parsed.checkins = each("checkins", ["local_date", "mood", "energy", "tension"], (get) => {
+  parsed.checkins = await each("checkins", ["local_date", "mood", "energy", "tension"], (get) => {
     const localDate = date(get("local_date"), when, "Дата");
     const mood = labelled(get("mood"), LABELS.mood, "Настроение");
     const energy = integer(get("energy"), 1, 10, "Энергия");
@@ -398,7 +432,7 @@ export function parseArchive(book: ReadWorkbook, options: { zone: string }): Par
     return { local_date: localDate, mood, energy, tension, note: text(get("note"), 2_000) };
   });
 
-  parsed.budget = each("budget", ["occurred_on", "amount"], (get) => {
+  parsed.budget = await each("budget", ["occurred_on", "amount"], (get) => {
     const occurred = date(get("occurred_on"), when, "Дата");
     const amount = decimal(get("amount"), "Сумма");
     if (!occurred || amount === null) throw new CellError("нужны дата и сумма");
@@ -425,13 +459,13 @@ export function parseArchive(book: ReadWorkbook, options: { zone: string }): Par
     };
   });
 
-  parsed.decisions = each("decisions", ["question"], (get) => ({
+  parsed.decisions = await each("decisions", ["question"], (get) => ({
     question: requiredText(get("question"), 2_000, "Вопрос"),
-    options: stringList(get("options"), 50, 1_000, "Варианты"),
-    facts: stringList(get("facts"), 50, 1_000, "Факты"),
-    assumptions: stringList(get("assumptions"), 50, 1_000, "Допущения"),
-    criteria: stringList(get("criteria"), 50, 1_000, "Критерии"),
-    risks: stringList(get("risks"), 50, 1_000, "Риски"),
+    options: stringList(get("options"), 50, 1_000, "Варианты", spend),
+    facts: stringList(get("facts"), 50, 1_000, "Факты", spend),
+    assumptions: stringList(get("assumptions"), 50, 1_000, "Допущения", spend),
+    criteria: stringList(get("criteria"), 50, 1_000, "Критерии", spend),
+    risks: stringList(get("risks"), 50, 1_000, "Риски", spend),
     selected_option: text(get("selected_option"), 1_000),
     confidence: integer(get("confidence"), 0, 100, "Уверенность"),
     reversible: yesNo(get("reversible"), "Обратимо"),

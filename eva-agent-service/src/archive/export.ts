@@ -105,12 +105,13 @@ function lineFeeds(row: Row): Row {
 }
 
 /**
- * Ответ анкеты-список. Ответ одной строкой загрузка делит по запятым, как в
- * разговоре, поэтому единственный пункт с запятой внутри уходит
- * JSON-массивом — иначе «Москва, Питер» вернулся бы двумя пунктами.
+ * Ответ анкеты-список. Ответ одной строкой загрузка делит по запятым и
+ * точкам с запятой, как в разговоре, поэтому единственный пункт с ними
+ * внутри уходит JSON-массивом — иначе «Москва, Питер» вернулся бы двумя
+ * пунктами.
  */
 function answerCell(value: unknown): string | null {
-  if (Array.isArray(value) && value.length === 1 && typeof value[0] === "string" && value[0].includes(",")) {
+  if (Array.isArray(value) && value.length === 1 && typeof value[0] === "string" && /[,;]/.test(value[0])) {
     return JSON.stringify(value);
   }
   return jsonCell(value);

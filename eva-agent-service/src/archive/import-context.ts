@@ -12,7 +12,7 @@
 
 import { createHash } from "node:crypto";
 
-import { CONTROL_CODES, EDGE_SPACE_CODES, cleanText, instantOf } from "./format.js";
+import { CONTROL_CODES, EDGE_SPACE_CODES, cleanText, instantOf, wallClock } from "./format.js";
 import type { ParsedArchive, RowError } from "./import-types.js";
 import type { SheetId } from "./sheets.js";
 
@@ -45,6 +45,13 @@ export interface ApplyContext {
   notice(message: string, row: number): void;
   /** Стенные часы файла → момент времени. */
   instant(wall: string | null): Date | null;
+  /** Момент → стенные часы пояса файла. */
+  wall(moment: Date | null): string | null;
+  /**
+   * Пауза для цикла событий раз в `PACE_EVERY` строк: предпросмотр не
+   * ждёт базы, и без пауз десятки тысяч строк шли бы одним куском.
+   */
+  pace(): Promise<void>;
   /** Момент создания из файла; будущее — опечатка, а не история. */
   createdAt(wall: string | null): string | null;
   /** Вставка с `RETURNING id`: при записи — настоящий id, в предпросмотре — условный. */
@@ -52,6 +59,9 @@ export interface ApplyContext {
   /** Запись без результата; в предпросмотре не выполняется. */
   run(sql: string, values: unknown[]): Promise<void>;
 }
+
+const PACE_EVERY = 500;
+const CACHE_LIMIT = 50_000;
 
 export function createContext(input: {
   client: ApplyClient;
@@ -63,7 +73,20 @@ export function createContext(input: {
   const counters = new Map<SheetId, Counter>();
   const notices = new Map<string, number[]>();
   let simulated = 0;
-  const instant = (wall: string | null): Date | null => (wall === null ? null : instantOf(wall, input.parsed.zone));
+  let paced = 0;
+  // Перевод времени между поясами — форматирование Intl, десятки
+  // микросекунд; в файле одни и те же сроки повторяются.
+  const instants = new Map<string, Date | null>();
+  const walls = new Map<number, string | null>();
+  const instant = (wall: string | null): Date | null => {
+    if (wall === null) return null;
+    let value = instants.get(wall);
+    if (value === undefined) {
+      value = instantOf(wall, input.parsed.zone);
+      if (instants.size < CACHE_LIMIT) instants.set(wall, value);
+    }
+    return value;
+  };
   return {
     ...input,
     errors: [...input.parsed.errors],
@@ -83,6 +106,20 @@ export function createContext(input: {
       notices.set(message, rows);
     },
     instant,
+    wall(moment) {
+      if (moment === null) return null;
+      const key = moment.getTime();
+      let value = walls.get(key);
+      if (value === undefined) {
+        value = wallClock(moment, input.parsed.zone);
+        if (walls.size < CACHE_LIMIT) walls.set(key, value);
+      }
+      return value;
+    },
+    async pace() {
+      paced += 1;
+      if (paced % PACE_EVERY === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+    },
     createdAt(wall) {
       const value = instant(wall);
       return value && value.getTime() <= input.now.getTime() ? value.toISOString() : null;

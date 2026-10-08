@@ -27,6 +27,12 @@ export const ARCHIVE_ROW_LIMIT = 30_000;
  */
 export const TEXT_BUDGET = 50_000_000;
 
+/**
+ * Скобок и запятых во всех значениях JSON файла вместе: столько объектов
+ * разбор JSON может создать самое большее. Честный архив — десятки тысяч.
+ */
+export const JSON_BUDGET = 1_000_000;
+
 /** Больше частей значению длиной `MAX_VALUE_LENGTH` не нужно. */
 const MAX_PARTS = Math.ceil(MAX_VALUE_LENGTH / SPILL_CHUNK);
 
@@ -37,18 +43,30 @@ const MAX_LABEL = 200;
 export class Budget {
   private textUsed = 0;
   private rowsUsed = 0;
+  private jsonUsed = 0;
 
   text(length: number): void {
     this.textUsed += length;
     if (this.textUsed > TEXT_BUDGET) {
-      throw new ArchiveRejected("В файле слишком много текста. Раздели архив на несколько файлов по листам.");
+      throw new ArchiveRejected("В файле слишком много текста. Сделай копии файла, оставь в каждой часть листов и загрузи их по очереди.");
+    }
+  }
+
+  json(structure: number): void {
+    this.jsonUsed += structure;
+    if (this.jsonUsed > JSON_BUDGET) {
+      throw new ArchiveRejected(
+        "В файле слишком много списков и вложенных значений. Сделай копии файла, оставь в каждой часть листов и загрузи их по очереди.",
+      );
     }
   }
 
   rows(count: number): void {
     this.rowsUsed += count;
     if (this.rowsUsed > ARCHIVE_ROW_LIMIT) {
-      throw new ArchiveRejected(`В файле больше ${ARCHIVE_ROW_LIMIT} записей. Раздели архив на несколько файлов по листам.`);
+      throw new ArchiveRejected(
+        `В файле больше ${ARCHIVE_ROW_LIMIT} записей. Сделай копии файла, оставь в каждой часть листов и загрузи их по очереди.`,
+      );
     }
   }
 }
