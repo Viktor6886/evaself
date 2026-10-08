@@ -152,14 +152,15 @@ async function applyProfile(ctx: ApplyContext): Promise<void> {
       counter.filled += 1;
     }
     // Пояс «UTC» без источника — значение по умолчанию, а не выбор
-    // человека: его можно заполнить. Выбранный пояс не трогается.
+    // человека: его можно заполнить. Выбранный пояс не трогается, и тот же
+    // «UTC» из файла — не заполнение, а то же значение.
     if (profile.timezone) {
-      let filled = current.timezone_source === null && current.timezone === "UTC";
+      let filled = current.timezone_source === null && current.timezone === "UTC" && profile.timezone !== "UTC";
       if (filled && ctx.mode === "apply") {
         const { rows } = await client.query(
           `UPDATE users
               SET timezone = $2, timezone_source = 'import', timezone_updated_at = now(), updated_at = now()
-            WHERE id = $1 AND timezone_source IS NULL AND timezone = 'UTC'
+            WHERE id = $1 AND timezone_source IS NULL AND timezone = 'UTC' AND $2 <> 'UTC'
             RETURNING id`,
           [userId, profile.timezone],
         );

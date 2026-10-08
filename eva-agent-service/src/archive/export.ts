@@ -60,8 +60,12 @@ export type DbRow = Record<string, unknown>;
 class Builder {
   truncated = 0;
 
-  sheet(id: SheetId, rows: Row[]): WorkbookSheet {
+  sheet(id: SheetId, input: Row[]): WorkbookSheet {
     const definition = sheet(id);
+    // Переводы строк — `\n` до деления на части: `\r\n` на стыке частей
+    // становился двумя переводами, и повторная загрузка той же заметки
+    // находила «другой» текст.
+    const rows = input.map(lineFeeds);
     // Частей у столбца столько, сколько нужно самому длинному значению:
     // текст длиннее ячейки Excel не обрезается, а продолжается рядом.
     const parts = new Map<string, number>();
@@ -92,6 +96,24 @@ class Builder {
       })),
     };
   }
+}
+
+function lineFeeds(row: Row): Row {
+  if (!Object.values(row).some((value) => typeof value === "string" && value.includes("\r"))) return row;
+  return Object.fromEntries(Object.entries(row).map(([key, value]) =>
+    [key, typeof value === "string" ? value.replace(/\r\n?/g, "\n") : value]));
+}
+
+/**
+ * Ответ анкеты-список. Ответ одной строкой загрузка делит по запятым, как в
+ * разговоре, поэтому единственный пункт с запятой внутри уходит
+ * JSON-массивом — иначе «Москва, Питер» вернулся бы двумя пунктами.
+ */
+function answerCell(value: unknown): string | null {
+  if (Array.isArray(value) && value.length === 1 && typeof value[0] === "string" && value[0].includes(",")) {
+    return JSON.stringify(value);
+  }
+  return jsonCell(value);
 }
 
 /**
@@ -178,7 +200,7 @@ export async function collectArchive(input: ExportInput): Promise<ExportResult> 
   put("questionnaire", answers.map((row) => ({
     field_key: str(row.field_key),
     title: str(row.title),
-    value: str(row.field_value) ?? jsonCell(row.field_json),
+    value: str(row.field_value) ?? answerCell(row.field_json),
     status: labelCell(row.status, LABELS.profileStatus),
     updated_at: at(row.updated_at),
   })));

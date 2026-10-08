@@ -30,7 +30,7 @@ import { collectArchive, type MemorySnapshot } from "./export.js";
 import { fold, wallClock } from "./format.js";
 import { applyArchive, ArchiveBusy, type ImportReport } from "./import-apply.js";
 import { parseArchive } from "./import-parse.js";
-import { ArchiveRejected, type ParsedArchive } from "./import-types.js";
+import { ArchiveRejected } from "./import-types.js";
 import { SHEETS } from "./sheets.js";
 import { readWorkbook, WorkbookFormatError } from "./xlsx-reader.js";
 import { writeWorkbook } from "./xlsx-writer.js";
@@ -94,8 +94,13 @@ const FORMAT_ERRORS: Record<string, string> = {
  */
 const MAX_PARALLEL = 2;
 
-/** Записей в одном файле больше этого — делите архив: одна загрузка не должна держать базу минутами. */
-export const ARCHIVE_ROW_LIMIT = 30_000;
+/**
+ * Предел файла в Telegram для бота — 50 МБ. Больше — документ не дойдёт,
+ * и человек ждал бы его напрасно: отказ сразу, с объяснением.
+ */
+const TELEGRAM_DOCUMENT_LIMIT = 49 * 1024 * 1024;
+
+export { ARCHIVE_ROW_LIMIT } from "./import-parse.js";
 
 const SHEET_NAMES = new Set(SHEETS.map((item) => fold(item.name)));
 
@@ -143,6 +148,9 @@ export class DataArchiveService {
         creator: "Evaself",
         created: now,
       });
+      if (bytes.length > TELEGRAM_DOCUMENT_LIMIT) {
+        throw badRequest("Архив получился больше 50 МБ — Telegram не передаёт такие файлы, поэтому он не отправлен.");
+      }
       const day = (wallClock(now, user.zone) ?? now.toISOString()).slice(0, 10);
       const filename = `eva-archive-${day}.xlsx`;
       const rows = Object.values(collected.counts).reduce((sum, value) => sum + (value ?? 0), 0);
@@ -213,10 +221,6 @@ export class DataArchiveService {
         }
         if (parsed.sheetsFound.length === 0) {
           throw badRequest("В файле нет листов архива Евы. Загрузи файл, выгруженный в разделе «Мои данные».");
-        }
-        const rows = parsedRows(parsed);
-        if (rows > ARCHIVE_ROW_LIMIT) {
-          throw badRequest(`В файле ${rows} записей — больше ${ARCHIVE_ROW_LIMIT}. Раздели архив на несколько файлов по листам.`);
         }
         const now = this.now();
         let report: ImportReport;
@@ -332,13 +336,6 @@ function busy(): EvaError {
     statusCode: 409,
     retryable: true,
   });
-}
-
-/** Сколько записей файл просит загрузить — всех листов вместе. */
-function parsedRows(parsed: ParsedArchive): number {
-  return parsed.questionnaire.length + parsed.goals.length + parsed.results.length + parsed.tasks.length
-    + parsed.journal.length + parsed.people.length + parsed.notes.length + parsed.checkins.length
-    + parsed.budget.length + parsed.decisions.length;
 }
 
 /**

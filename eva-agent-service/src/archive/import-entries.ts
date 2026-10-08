@@ -14,9 +14,6 @@ import { contentHash, hashSql, Multiset, type ApplyContext } from "./import-cont
 
 export { contentHash, hashSql } from "./import-context.js";
 
-/** Имя человека так, как его сводит `normalizeSql`: регистр и пробелы. */
-const personKey = (name: string) => name.replace(/\s+/g, " ").trim().toLowerCase();
-
 export async function applyEntries(ctx: ApplyContext): Promise<void> {
   const { client, userId, parsed } = ctx;
 
@@ -30,8 +27,20 @@ export async function applyEntries(ctx: ApplyContext): Promise<void> {
       [userId],
     );
     const known = new Map(rows.map((row) => [row.normalized, row.empty]));
-    for (const { value } of parsed.people) {
-      const keyOf = personKey(value.display_name);
+    // Имя сводится тем же выражением, что и при записи (`normalizeSql`), и
+    // одним запросом на весь лист: у JavaScript и PostgreSQL разные
+    // представления о пробелах (неразрывный, например), и предпросмотр
+    // расходился бы с записью.
+    const keys = ctx.mode === "preview"
+      ? (await client.query<{ normalized: string }>(
+        `SELECT ${normalizeSql("name")} AS normalized
+           FROM unnest($1::text[]) WITH ORDINALITY AS item(name, position)
+          ORDER BY position`,
+        [parsed.people.map(({ value }) => value.display_name)],
+      )).rows.map((row) => row.normalized)
+      : [];
+    for (const [index, { value }] of parsed.people.entries()) {
+      const keyOf = keys[index] ?? "";
       if (ctx.mode === "preview") {
         const empty = known.get(keyOf);
         if (empty === undefined) counter.added += 1;
@@ -64,6 +73,9 @@ export async function applyEntries(ctx: ApplyContext): Promise<void> {
     );
     const existing = new Multiset();
     for (const row of rows) existing.add(`${row.local_date}|${row.hash}`, true);
+    // Одно имя — один поиск карточки на всю загрузку, сколько бы записей
+    // его ни упоминали.
+    const personIds = new Map<string, number>();
     for (const { value } of parsed.journal) {
       if (existing.take(`${value.local_date}|${contentHash(value.content)}`) !== undefined) {
         counter.existing += 1;
@@ -83,7 +95,7 @@ export async function applyEntries(ctx: ApplyContext): Promise<void> {
             `INSERT INTO journal_entry_people (user_id, entry_id, person_id)
              VALUES ($1, $2, $3)
              ON CONFLICT (entry_id, person_id) DO NOTHING`,
-            [userId, entryId, await person(ctx, name)],
+            [userId, entryId, await person(ctx, name, personIds)],
           );
         }
       }
@@ -214,7 +226,15 @@ export async function applyEntries(ctx: ApplyContext): Promise<void> {
 }
 
 /** Карточка человека по имени: есть — её id, нет — новая. Существующая не меняется. */
-async function person(ctx: ApplyContext, name: string): Promise<number> {
+async function person(ctx: ApplyContext, name: string, cache: Map<string, number>): Promise<number> {
+  const cached = cache.get(name);
+  if (cached !== undefined) return cached;
+  const id = await findOrCreatePerson(ctx, name);
+  cache.set(name, id);
+  return id;
+}
+
+async function findOrCreatePerson(ctx: ApplyContext, name: string): Promise<number> {
   const inserted = await ctx.client.query<{ id: string }>(
     `INSERT INTO journal_people (user_id, display_name, normalized)
      VALUES ($1, $2, ${normalizeSql("$2")})

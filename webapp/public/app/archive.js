@@ -85,7 +85,7 @@
         <h3>Выгрузить в Excel</h3>
         <p>Цели, задачи и напоминания, дневник, заметки, анкета, самочувствие, бюджет, решения и история работы — в одном файле, по листу на раздел${state.memory ? ", и то, что Ева знает о тебе" : ""}.</p>
         <p class="archive-hint">Файл придёт в чат с Евой — оттуда его можно сохранить на телефон или компьютер.</p>
-        ${state.exported ? `<p class="archive-done" id="archive-exported">Готово: «${escapeHtml(state.exported.filename)}» отправлен в чат.</p>
+        ${state.exported ? `<p class="archive-done" id="archive-exported">Готово: «${escapeHtml(state.exported.filename)}» придёт в чат через несколько секунд.</p>
           ${state.exported.truncated > 0 ? `<p class="archive-note">Очень длинных значений: ${state.exported.truncated} — в файле их начало, подробности на листе «О файле».</p>` : ""}
           <div class="action-row"><button class="secondary-action" id="archive-open-chat" type="button">Открыть чат</button></div>` : ""}
         <button class="primary-action" id="archive-export" type="button" ${state.busy ? "disabled" : ""}>
@@ -222,7 +222,7 @@
     try {
       const result = await app().api("/public/archive/export", { method: "POST", body: "{}" });
       state.exported = { filename: result?.filename || "архив.xlsx", truncated: Number(result?.truncated) || 0 };
-      app().toast("Архив отправлен в чат с Евой");
+      app().toast("Архив придёт в чат с Евой");
     } catch (error) {
       app().toast(app().friendlyError(error), true);
     } finally {

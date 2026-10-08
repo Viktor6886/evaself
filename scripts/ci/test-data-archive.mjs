@@ -43,6 +43,7 @@ const NOW = new Date("2026-10-07T09:00:00Z");
 const ALICE = 9_870_001;
 const BOB = 9_870_002;
 const CAROL = 9_870_003;
+const DAVE = 9_870_004;
 const sent = [];
 const service = (telegramIdNow = NOW) => new DataArchiveService({
   db,
@@ -53,7 +54,7 @@ const service = (telegramIdNow = NOW) => new DataArchiveService({
 });
 
 async function cleanup() {
-  await admin.query("DELETE FROM users WHERE telegram_id = ANY($1::bigint[])", [[ALICE, BOB, CAROL]]);
+  await admin.query("DELETE FROM users WHERE telegram_id = ANY($1::bigint[])", [[ALICE, BOB, CAROL, DAVE]]);
 }
 
 /** Снимок пользовательских таблиц: число строк и их содержимое без служебных полей. */
@@ -183,15 +184,27 @@ try {
   await admin.query(`INSERT INTO eva_notes (user_id, title, content) VALUES ($1, 'Края', $2)`,
     [aliceId, "\u00a0Текст с особыми краями\u3000"]);
   // Чувствительное поле, подтверждённое когда-то: из файла — предположением.
+  // Единственный пункт с запятой внутри должен вернуться одним пунктом.
   await admin.query(
     `INSERT INTO onboarding_fields (user_id, field_key, field_json, status, sensitivity)
-     VALUES ($1, 'recovery_methods', '["прогулка"]'::jsonb, 'confirmed', 'sensitive')`, [aliceId]);
+     VALUES ($1, 'recovery_methods', '["прогулка, сон"]'::jsonb, 'confirmed', 'sensitive')`, [aliceId]);
+  // Перевод строки `\r\n` ровно на стыке частей ячейки (32 000 знаков).
+  await admin.query(`INSERT INTO eva_notes (user_id, title, content) VALUES ($1, 'Стык', $2)`,
+    [aliceId, `${"а".repeat(31_999)}\r\n${"б".repeat(10)}`]);
+  // Имя с неразрывным пробелом: у JavaScript и PostgreSQL разное мнение о
+  // том, пробел ли это, — предпросмотр обязан считать, как запись.
+  await admin.query(
+    `INSERT INTO journal_people (user_id, display_name, normalized) VALUES ($1, $2, btrim(lower(regexp_replace($2, '\\s+', ' ', 'g'))))`,
+    [aliceId, "Анна\u00a0Ли"]);
   // Повтор каждые пять минут из файла не принимается.
   await admin.query(
     `INSERT INTO tasks (user_id, title, cron_expression, repeat_enabled, timezone, next_run_at)
      VALUES ($1, 'Слишком часто', '*/5 * * * *', true, 'Europe/Moscow', '2026-10-07T09:05:00Z')`, [aliceId]);
   // Строка Боба: выгрузка Алисы обязана её не увидеть.
   await admin.query(`INSERT INTO eva_notes (user_id, title, content) VALUES ($1, 'Секрет Боба', 'не для Алисы')`, [bobId]);
+  // У Боба есть «Анна Ли» с обычным пробелом — для базы это другой человек.
+  await admin.query(
+    `INSERT INTO journal_people (user_id, display_name, normalized) VALUES ($1, 'Анна Ли', 'анна ли')`, [bobId]);
 
   // ---- выгрузка --------------------------------------------------------
   const exported = await service().export(ALICE);
@@ -292,6 +305,14 @@ try {
   assert(bobAfter.users[0].timezone === "Europe/Moscow", "пояс по умолчанию заполнен из архива");
   assert(bobAfter.user_preferences[0]?.response_mode === "both", "настройки созданы, раз их не было");
   assert(bobAfter.onboarding_fields.length === 3, "ответы анкеты добавлены, отказ отвечать — нет");
+  const { rows: [methods] } = await admin.query(
+    "SELECT field_json FROM onboarding_fields WHERE user_id = $1 AND field_key = 'recovery_methods'", [bobId]);
+  assert(JSON.stringify(methods?.field_json) === JSON.stringify(["прогулка, сон"]),
+    `пункт анкеты с запятой вернулся одним пунктом: ${JSON.stringify(methods?.field_json)}`);
+  const { rows: [seam] } = await admin.query("SELECT content FROM eva_notes WHERE user_id = $1 AND title = 'Стык'", [bobId]);
+  assert(seam?.content === `${"а".repeat(31_999)}\n${"б".repeat(10)}`, "перевод строки на стыке частей ячейки не задвоился");
+  assert(bobAfter.journal_people.filter((item) => item.display_name.startsWith("Анна")).length === 2,
+    "«Анна Ли» с неразрывным пробелом — отдельная карточка, как и в предпросмотре");
   assert(bobAfter.onboarding_fields.find((item) => item.field_key === "recovery_methods")?.status === "candidate",
     "чувствительное поле из файла пришло предположением");
   assert(bobAfter.budget_entries.filter((item) => Number(item.amount_minor) === 20000).length === 2,
@@ -320,6 +341,19 @@ try {
   const carolArchive = sent[0].bytes;
   const carolAgain = await service().apply(CAROL, carolArchive, createHash("sha256").update(carolArchive).digest("hex"));
   assert(carolAgain.added_total === 0, `задача в повторяющемся часе не задвоилась (${carolAgain.added_total})`);
+
+  // ---- пояс «UTC» из файла тому, у кого он по умолчанию, — не заполнение ---
+  const { rows: [dave] } = await admin.query(
+    "INSERT INTO users (telegram_id, first_name, city) VALUES ($1, 'Дэйв', 'Лондон') RETURNING id", [DAVE]);
+  sent.length = 0;
+  await service().export(DAVE);
+  const daveArchive = sent[0].bytes;
+  const daveBefore = await snapshot(dave.id);
+  const daveAgain = await service().apply(DAVE, daveArchive, createHash("sha256").update(daveArchive).digest("hex"));
+  const { rows: [daveUser] } = await admin.query("SELECT timezone, timezone_source FROM users WHERE id = $1", [dave.id]);
+  assert(daveAgain.added_total === 0 && daveAgain.filled_total === 0 && daveUser.timezone_source === null,
+    `свой архив с поясом UTC ничего не «дополнил» (${daveAgain.filled_total}, ${daveUser.timezone_source})`);
+  assert(JSON.stringify(await snapshot(dave.id)) === JSON.stringify(daveBefore), "строка пользователя не переписана");
 
   // ---- повтор той же загрузки ---------------------------------------
   const repeat = await service().apply(BOB, archive, mark);

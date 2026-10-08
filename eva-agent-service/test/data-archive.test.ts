@@ -480,7 +480,7 @@ test("сервис: файл больше предела записей откл
     { name: "Люди из дневника", columns: [{ header: "Имя", kind: "text" }], rows: [["Мама"]] },
   ], { title: "t", creator: "t", created: NOW });
   const { archive, queries } = service();
-  await assert.rejects(archive.preview(USER.id, bytes), /30001 записей/);
+  await assert.rejects(archive.preview(USER.id, bytes), /больше 30000 записей/);
   assert.equal(queries.some((sql) => sql.includes("eva_notes")), false);
 });
 

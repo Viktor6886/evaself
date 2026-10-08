@@ -8,13 +8,20 @@
  * принимаются.
  */
 
-import { assertCronExpression, nextCronDate } from "../time/cron.js";
+import { assertCronExpression, cronFieldMatches, nextCronDate } from "../time/cron.js";
 import { fold, wallClock } from "./format.js";
 import { Multiset, type ApplyContext } from "./import-context.js";
 import { sheet } from "./sheets.js";
 
 /** Чаще этого повтор из файла не принимается: «каждую минуту» — не напоминание, а поток. */
 const MIN_REPEAT_MINUTES = 15;
+
+/**
+ * Столько разных повторов (выражение и пояс) один файл может принести.
+ * Проверка каждого — поиск следующего срабатывания по календарю, у
+ * «раз в год» это сотни шагов; одинаковые повторы считаются один раз.
+ */
+const MAX_SCHEDULES = 50;
 
 export interface GoalLinks {
   goals: Map<string, number>;
@@ -23,30 +30,30 @@ export interface GoalLinks {
 
 /**
  * Порядок записи: родитель раньше потомка. Строка, чей родитель есть в
- * файле, ждёт его; цикл или ссылка в никуда записываются без родителя.
+ * файле, ставится после него; цикл или ссылка в никуда записываются без
+ * родителя. Один проход вверх по цепочке на строку: цепочка из тысяч
+ * целей «потомок раньше родителя» не превращается в тысячи проходов.
  */
 function ordered<T extends { ref: string | null; parent: string | null }>(
   items: Array<{ row: number; value: T }>,
 ): Array<{ row: number; value: T }> {
-  const refs = new Set(items.map((item) => item.value.ref).filter((ref): ref is string => ref !== null));
-  const result: Array<{ row: number; value: T }> = [];
-  const placed = new Set<string>();
-  let pending = items.slice();
-  while (pending.length > 0) {
-    const next = pending.filter((item) => {
-      const parent = item.value.parent;
-      const ready = !parent || parent === item.value.ref || !refs.has(parent) || placed.has(parent);
-      if (ready) {
-        result.push(item);
-        if (item.value.ref) placed.add(item.value.ref);
-      }
-      return !ready;
-    });
-    if (next.length === pending.length) {
-      result.push(...next);
-      break;
+  type Item = { row: number; value: T };
+  const byRef = new Map<string, Item>();
+  for (const item of items) {
+    if (item.value.ref && !byRef.has(item.value.ref)) byRef.set(item.value.ref, item);
+  }
+  const result: Item[] = [];
+  const seen = new Set<Item>();
+  for (const item of items) {
+    const chain: Item[] = [];
+    let current: Item | undefined = item;
+    while (current && !seen.has(current)) {
+      seen.add(current);
+      chain.push(current);
+      const parent: string | null = current.value.parent;
+      current = parent && parent !== current.value.ref ? byRef.get(parent) : undefined;
     }
-    pending = next;
+    for (let index = chain.length - 1; index >= 0; index -= 1) result.push(chain[index]!);
   }
   return result;
 }
@@ -151,15 +158,28 @@ export async function applyGoals(ctx: ApplyContext): Promise<GoalLinks> {
   return links;
 }
 
-/** Повтор не чаще `MIN_REPEAT_MINUTES`: проверяются ближайшие срабатывания. */
-function repeatsTooOften(cron: string, zone: string, now: Date): boolean {
-  let previous = nextCronDate(cron, zone, now);
-  for (let step = 0; step < 4; step += 1) {
-    const next = nextCronDate(cron, zone, previous);
-    if (next.getTime() - previous.getTime() < MIN_REPEAT_MINUTES * 60_000) return true;
-    previous = next;
+/**
+ * Повтор чаще `MIN_REPEAT_MINUTES` — по самим полям минут и часов, без
+ * перебора срабатываний: две разрешённые минуты ближе предела, или
+ * последняя минута часа близко к первой, а часы идут подряд.
+ */
+export function repeatsTooOften(cron: string): boolean {
+  const [minuteField = "", hourField = ""] = cron.trim().split(/\s+/);
+  const minutes: number[] = [];
+  for (let minute = 0; minute < 60; minute += 1) {
+    if (cronFieldMatches(minuteField, minute, 0, 59)) minutes.push(minute);
   }
-  return false;
+  const hours = new Set<number>();
+  for (let hour = 0; hour < 24; hour += 1) {
+    if (cronFieldMatches(hourField, hour, 0, 23)) hours.add(hour);
+  }
+  for (let index = 1; index < minutes.length; index += 1) {
+    if (minutes[index]! - minutes[index - 1]! < MIN_REPEAT_MINUTES) return true;
+  }
+  const consecutiveHours = [...hours].some((hour) => hours.has((hour + 1) % 24));
+  const first = minutes[0];
+  const last = minutes.at(-1);
+  return consecutiveHours && first !== undefined && last !== undefined && 60 - last + first < MIN_REPEAT_MINUTES;
 }
 
 /**
@@ -183,19 +203,42 @@ export async function applyTasks(ctx: ApplyContext, links: GoalLinks): Promise<{
   for (const row of rows) {
     existing.add(key(row.title, wallClock(row.remind_at ?? row.due_at, parsed.zone), row.cron_expression), true);
   }
+  // Повтор проверяется и считается один раз на выражение и пояс.
+  const schedules = new Map<string, Date | Error>();
+  const schedule = (cron: string, zone: string, repeating: boolean): Date => {
+    const id = `${zone} ${cron}`;
+    let known = schedules.get(id);
+    if (known === undefined) {
+      if (schedules.size >= MAX_SCHEDULES) {
+        throw new Error(`больше ${MAX_SCHEDULES} разных повторов в одном файле — эту задачу загрузи отдельным файлом`);
+      }
+      try {
+        assertCronExpression(cron, zone);
+        known = nextCronDate(cron, zone, now);
+      } catch (error) {
+        known = error as Error;
+      }
+      schedules.set(id, known);
+    }
+    if (known instanceof Error) throw known;
+    if (repeating && repeatsTooOften(cron)) {
+      throw new Error(`повтор чаще раза в ${MIN_REPEAT_MINUTES} минут из файла не загружается`);
+    }
+    return known;
+  };
   for (const { row, value } of parsed.tasks) {
-    if (existing.take(key(value.title, value.remind_at ?? value.due_at, value.cron_expression)) !== undefined) {
+    // Время из файла — через момент и обратно: несуществующее 02:30 ночи
+    // перевода часов база хранит как 03:30, и сравнивать надо с ним.
+    const wall = value.remind_at ?? value.due_at;
+    const stored = wall === null ? null : wallClock(ctx.instant(wall), parsed.zone);
+    if (existing.take(key(value.title, stored, value.cron_expression)) !== undefined) {
       counter.existing += 1;
       continue;
     }
     const zone = value.timezone ?? parsed.zone;
+    let next: Date | null = null;
     try {
-      if (value.cron_expression) {
-        assertCronExpression(value.cron_expression, zone);
-        if (value.repeat_enabled && repeatsTooOften(value.cron_expression, zone, now)) {
-          throw new Error(`повтор чаще раза в ${MIN_REPEAT_MINUTES} минут из файла не загружается`);
-        }
-      }
+      if (value.cron_expression) next = schedule(value.cron_expression, zone, value.repeat_enabled);
     } catch (error) {
       ctx.errors.push({ sheet: sheet("tasks").name, row, message: `«Повтор (cron)»: ${(error as Error).message}` });
       continue;
@@ -214,8 +257,8 @@ export async function applyTasks(ctx: ApplyContext, links: GoalLinks): Promise<{
     let nextRunAt: Date | null = null;
     let lastRunAt: Date | null = null;
     if (open) {
-      if (value.repeat_enabled && value.cron_expression) {
-        nextRunAt = nextCronDate(value.cron_expression, zone, now);
+      if (value.repeat_enabled && next) {
+        nextRunAt = next;
       } else {
         nextRunAt = remindAt ?? dueAt;
         // Прошедший срок из архива — история, а не повод написать сейчас:

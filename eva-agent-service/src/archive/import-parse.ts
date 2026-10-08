@@ -18,73 +18,24 @@ import {
   CellError, date, dateTime, decimal, fold, integer, jsonValue, labelled, list,
   requiredText, stringList, text, yesNo,
 } from "./format.js";
+import { Budget, columnsOf, getter, isEmptyRow, keyValues, type Get } from "./import-cells.js";
 import {
   ABOUT_FIELDS, ARCHIVE_FORMAT, ARCHIVE_VERSION, LABELS, MEMORY_FIELDS, NORTH_FIELDS, PROFILE_FIELDS,
-  CONTINUATION, SHEETS, SHEET_ROW_LIMIT, type ArchiveSheet, type SheetId,
+  SHEETS, SHEET_ROW_LIMIT, type ArchiveSheet, type SheetId,
 } from "./sheets.js";
 import {
   ArchiveRejected, type NorthImport, type Parsed, type ParsedArchive, type ProfileImport, type RowError,
 } from "./import-types.js";
 import type { ReadCell, ReadSheet, ReadWorkbook } from "./xlsx-reader.js";
 
-type Get = (key: string) => ReadCell;
-
-/**
- * Позиции столбцов листа по заголовкам. Столбцов-продолжений «…
- * (продолжение N)» у длинного текста столько, сколько понадобилось
- * выгрузке, — их число не задано заранее.
- */
-function columnsOf(definition: ArchiveSheet, header: ReadCell[]): Map<string, number[]> | null {
-  const byHeader = new Map<string, string>();
-  for (const column of definition.columns) {
-    byHeader.set(fold(column.header), column.key);
-    byHeader.set(fold(column.key), column.key);
-  }
-  const positions = new Map<string, number[]>();
-  header.forEach((cell, index) => {
-    if (typeof cell !== "string") return;
-    let key = byHeader.get(fold(cell));
-    let part = 0;
-    if (key === undefined) {
-      const match = CONTINUATION.exec(cell.trim());
-      if (!match) return;
-      key = byHeader.get(fold(match[1]!));
-      part = Number(match[2]);
-      if (key === undefined || part < 1) return;
-    }
-    const parts = positions.get(key) ?? [];
-    if (parts[part] === undefined) parts[part] = index;
-    positions.set(key, parts);
-  });
-  return positions.size > 0 ? positions : null;
-}
-
-function getter(row: ReadCell[], positions: Map<string, number[]>): Get {
-  return (key) => {
-    const parts = positions.get(key);
-    if (!parts || parts[0] === undefined) return null;
-    if (parts.length === 1) return row[parts[0]] ?? null;
-    // Продолжения склеиваются по порядку и как есть, без обрезки
-    // пробелов на стыке.
-    let joined = "";
-    for (const index of parts) {
-      if (index === undefined) continue;
-      const value = row[index];
-      if (value !== null && value !== undefined) joined += String(value);
-    }
-    return joined || null;
-  };
-}
-
-function isEmptyRow(row: ReadCell[] | undefined): boolean {
-  return !row || row.every((cell) => cell === null || cell === undefined || (typeof cell === "string" && cell.trim() === ""));
-}
+export { ARCHIVE_ROW_LIMIT, TEXT_BUDGET } from "./import-cells.js";
 
 interface Context {
   date1904: boolean;
   zone: string;
   errors: RowError[];
   warnings: string[];
+  budget: Budget;
 }
 
 function tableRows<T>(
@@ -111,14 +62,16 @@ function tableRows<T>(
   const parsed: Array<Parsed<T>> = [];
   let taken = 0;
   rest.forEach((row, index) => {
-    if (isEmptyRow(row)) return;
+    if (taken > SHEET_ROW_LIMIT || isEmptyRow(row, context.budget)) return;
     taken += 1;
     if (taken > SHEET_ROW_LIMIT) return;
+    // Строка с ошибкой — тоже в счёт: разбор её стоит столько же.
+    context.budget.rows(1);
     const excelRow = index + 2;
     try {
       // `null` — строка законная, но загружать в ней нечего (например,
       // отказ отвечать в анкете): это не ошибка.
-      const value = parse(getter(row, positions));
+      const value = parse(getter(row, positions, context.budget));
       if (value !== null) parsed.push({ row: excelRow, value });
     } catch (error) {
       if (!(error instanceof CellError)) throw error;
@@ -131,36 +84,36 @@ function tableRows<T>(
   return parsed;
 }
 
-/** Лист «поле — значение»: подпись поля → значение и номер строки Excel. */
-function keyValues(source: ReadSheet): Map<string, { cell: ReadCell; row: number }> {
-  const values = new Map<string, { cell: ReadCell; row: number }>();
-  source.rows.forEach((row, index) => {
-    if (index === 0) return;
-    const label = typeof row?.[0] === "string" ? fold(row[0]) : "";
-    if (!label) return;
-    // Продолжения длинного значения лежат в соседних столбцах.
-    const parts = (row ?? []).slice(1).filter((cell) => cell !== null && cell !== undefined);
-    if (parts.length === 0) return;
-    values.set(label, { cell: parts.length === 1 ? parts[0]! : parts.map(String).join(""), row: index + 1 });
-  });
-  return values;
-}
-
 const ref = (value: string | null): string | null => (value === null ? null : fold(value));
 
-function parseAbout(source: ReadSheet | undefined, fallbackZone: string): { recognized: boolean; zone: string } {
+function parseAbout(
+  source: ReadSheet | undefined,
+  fallbackZone: string,
+  budget: Budget,
+): { recognized: boolean; zone: string } {
   if (!source) return { recognized: false, zone: fallbackZone };
-  const values = keyValues(source);
-  const cell = (label: string): ReadCell => values.get(fold(label))?.cell ?? null;
-  const format = text(cell(ABOUT_FIELDS.format), 100);
+  // Ошибки «О файле» человеку не показываются: из листа берутся только
+  // формат, версия и пояс, а остальное в нём — справка.
+  const values = keyValues(source, budget, []);
+  // Неразборчивое значение справки — как пустое: файл без формата
+  // разбирается как чужая таблица, а не падает.
+  const cell = (label: string, max: number): string | null => {
+    try {
+      return text(values.get(fold(label))?.cell ?? null, max);
+    } catch (error) {
+      if (error instanceof CellError) return null;
+      throw error;
+    }
+  };
+  const format = cell(ABOUT_FIELDS.format, 100);
   if (format !== null && format !== ARCHIVE_FORMAT) {
     throw new ArchiveRejected("Это не архив Евы: в листе «О файле» указан другой формат.");
   }
-  const version = Number(text(cell(ABOUT_FIELDS.version), 10));
+  const version = Number(cell(ABOUT_FIELDS.version, 10));
   if (format !== null && Number.isFinite(version) && version > ARCHIVE_VERSION) {
     throw new ArchiveRejected("Архив сделан более новой версией Евы. Обновите сервис и загрузите файл снова.");
   }
-  const zone = text(cell(ABOUT_FIELDS.zone), 100);
+  const zone = cell(ABOUT_FIELDS.zone, 100);
   return {
     recognized: format === ARCHIVE_FORMAT,
     zone: zone && isValidIanaTimezone(zone) ? zone : fallbackZone,
@@ -168,7 +121,7 @@ function parseAbout(source: ReadSheet | undefined, fallbackZone: string): { reco
 }
 
 function parseProfile(source: ReadSheet, context: Context): ProfileImport | null {
-  const values = keyValues(source);
+  const values = keyValues(source, context.budget, context.errors);
   const profile: ProfileImport = {};
   const sheetName = "Профиль";
   for (const field of PROFILE_FIELDS) {
@@ -225,7 +178,7 @@ function parseProfile(source: ReadSheet, context: Context): ProfileImport | null
 }
 
 function parseNorth(source: ReadSheet, context: Context): NorthImport | null {
-  const values = keyValues(source);
+  const values = keyValues(source, context.budget, context.errors);
   let row = 1;
   const get = (key: string): ReadCell => {
     const field = NORTH_FIELDS.find((item) => item.key === key)!;
@@ -265,8 +218,9 @@ export function parseArchive(book: ReadWorkbook, options: { zone: string }): Par
     const definition = SHEETS.find((item) => item.id === id)!;
     return { definition, source: byName.get(fold(definition.name)) };
   };
-  const about = parseAbout(find("about").source, options.zone);
-  const context: Context = { date1904: book.date1904, zone: about.zone, errors: [], warnings: [] };
+  const budget = new Budget();
+  const about = parseAbout(find("about").source, options.zone, budget);
+  const context: Context = { date1904: book.date1904, zone: about.zone, errors: [], warnings: [], budget };
   const when = { date1904: book.date1904, zone: about.zone };
   const parsed: ParsedArchive = {
     recognized: about.recognized,
@@ -400,6 +354,10 @@ export function parseArchive(book: ReadWorkbook, options: { zone: string }): Par
   parsed.journal = each("journal", ["local_date", "content"], (get) => {
     const localDate = date(get("local_date"), when, "Дата");
     if (!localDate) throw new CellError("не заполнено поле «Дата»");
+    const people = list(get("people"), 20, 200, "Люди");
+    // Каждое упоминание человека — запись в базе (карточка и связь), и
+    // считается оно наравне со строками.
+    budget.rows(people.length);
     return {
       local_date: localDate,
       title: text(get("title"), 500),
@@ -408,7 +366,7 @@ export function parseArchive(book: ReadWorkbook, options: { zone: string }): Par
       content: requiredText(get("content"), 64_000, "Запись"),
       mood: labelled(get("mood"), LABELS.mood, "Настроение"),
       energy: integer(get("energy"), 1, 10, "Энергия"),
-      people: list(get("people"), 20, 200, "Люди"),
+      people,
       created_at: dateTime(get("created_at"), when, "Создана"),
     };
   });
@@ -486,7 +444,7 @@ export function parseArchive(book: ReadWorkbook, options: { zone: string }): Par
 
   const memorySheet = find("memory").source;
   if (memorySheet) {
-    const values = keyValues(memorySheet);
+    const values = keyValues(memorySheet, budget, context.errors);
     for (const field of MEMORY_FIELDS) {
       const value = text(values.get(fold(field.label))?.cell ?? null, 200_000);
       if (value) parsed.memory.push({ label: field.label, value });

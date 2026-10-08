@@ -248,7 +248,11 @@ export async function writeWorkbook(
   if (sheets.length === 0) throw new Error("Книга без листов");
   assertSheetNames(sheets);
   const strings = new SharedStrings();
-  const zip = new JSZip();
+  const archive = new JSZip();
+  // Части уходят в архив готовыми байтами UTF-8. Строку jszip кодирует
+  // кусками по 16 384 знака, и эмодзи на стыке кусков превращался в два
+  // «�» — молча, в файле, который выглядит как «все данные».
+  const zip = { file: (path: string, xml: string) => archive.file(path, Buffer.from(xml, "utf8")) };
   const built = sheets.map((sheet) => sheetXml(sheet, strings));
   const overrides = sheets.map((_, index) =>
     `<Override PartName="/xl/worksheets/sheet${index + 1}.xml" ContentType="${SHEET_MIME}"/>`);
@@ -299,7 +303,7 @@ export async function writeWorkbook(
   zip.file("xl/styles.xml", STYLES_XML);
   built.forEach((sheet, index) => zip.file(`xl/worksheets/sheet${index + 1}.xml`, sheet.xml));
   zip.file("xl/sharedStrings.xml", strings.xml());
-  const bytes = await zip.generateAsync({
+  const bytes = await archive.generateAsync({
     type: "nodebuffer",
     compression: "DEFLATE",
     compressionOptions: { level: 6 },

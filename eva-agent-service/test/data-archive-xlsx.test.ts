@@ -83,6 +83,20 @@ test("запись: предел Excel — в символах, экраниро
   assert.equal((await readWorkbook(bytes)).sheets[0]!.rows[1]![0], value);
 });
 
+/**
+ * jszip кодирует строку кусками по 16 384 знака: суррогатная пара на стыке
+ * превращалась в два «�». Сдвиг на один знак гарантирует, что на одном из
+ * двух прогонов эмодзи окажется ровно на стыке.
+ */
+test("запись: эмодзи на стыке кусков архива доходит целым", async () => {
+  for (const shift of [0, 1]) {
+    const value = `${"x".repeat(shift)}${"😀".repeat(15_000)}`;
+    const { bytes } = await writeWorkbook([{ name: "Эмодзи", columns: [{ header: "Текст", kind: "longtext" }], rows: [[value]] }], META);
+    const back = (await readWorkbook(bytes)).sheets[0]!.rows[1]![0];
+    assert.equal(back === value, true, `сдвиг ${shift}: ${String(back).split("\ufffd").length - 1} знаков «�»`);
+  }
+});
+
 test("запись: имя листа проверяется по правилам Excel", async () => {
   await assert.rejects(writeWorkbook([{ name: "a/b", columns: [], rows: [] }], META));
   await assert.rejects(writeWorkbook([{ name: "x".repeat(32), columns: [], rows: [] }], META));

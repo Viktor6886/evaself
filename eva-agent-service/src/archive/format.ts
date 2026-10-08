@@ -18,7 +18,12 @@ import { serialToLocal, type ReadCell } from "./xlsx-reader.js";
 /** Ошибка значения ячейки; текст показывается человеку как есть. */
 export class CellError extends Error {
   constructor(message: string) {
+    // Стек не собирается: это ответ человеку, а не сбой кода, а в файле на
+    // десятки тысяч строк с ошибками сбор стека стоил секунды процессора.
+    const limit = Error.stackTraceLimit;
+    Error.stackTraceLimit = 0;
     super(message);
+    Error.stackTraceLimit = limit;
     this.name = "CellError";
   }
 }
@@ -101,34 +106,51 @@ export const CONTROL_CODES: readonly number[] = [
 ];
 
 const EDGE = new Set(EDGE_SPACE_CODES);
-const CONTROL = new Set(CONTROL_CODES);
+const controlClass = `[${CONTROL_CODES.map((code) => `\\u${code.toString(16).padStart(4, "0")}`).join("")}]`;
+const HAS_CONTROL = new RegExp(controlClass);
+const CONTROLS = new RegExp(controlClass, "g");
 
 /**
  * Текст в том виде, в каком его сравнивают и хранят: без управляющих
  * символов, с `\n` вместо `\r\n` и `\r` и без пробелов по краям — в том
- * же порядке шагов, что `hashSql` в базе. Циклом, а не регулярным
- * выражением на краях: `\s+$` на длинной строке пробелов квадратичен.
+ * же порядке шагов, что `hashSql` в базе. Управляющие символы вырезает
+ * одно регулярное выражение по классу символов (линейно), а края —
+ * цикл: `\s+$` на длинной строке пробелов квадратичен.
  */
 export function cleanText(value: string): string {
-  let withoutControls = "";
-  let last = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    if (!CONTROL.has(value.charCodeAt(index))) continue;
-    withoutControls += value.slice(last, index);
-    last = index + 1;
-  }
-  withoutControls += value.slice(last);
-  const lines = withoutControls.replace(/\r\n?/g, "\n");
+  const withoutControls = HAS_CONTROL.test(value) ? value.replace(CONTROLS, "") : value;
+  const lines = withoutControls.includes("\r") ? withoutControls.replace(/\r\n?/g, "\n") : withoutControls;
   let start = 0;
   let end = lines.length;
   while (start < end && EDGE.has(lines.charCodeAt(start))) start += 1;
   while (end > start && EDGE.has(lines.charCodeAt(end - 1))) end -= 1;
-  return lines.slice(start, end);
+  return start === 0 && end === lines.length ? lines : lines.slice(start, end);
+}
+
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
+
+/** Глубже этого JSON из файла не бывает у выгрузки; глубже — не данные, а ловушка для стека. */
+const MAX_JSON_DEPTH = 32;
+
+/**
+ * Строки внутри JSON из файла. `JSON.parse` пропускает `\u0000` и
+ * одиночную половину суррогатной пары, а jsonb PostgreSQL их не принимает:
+ * запись падала бы целиком уже после предпросмотра, который их не видит.
+ */
+export function cleanJson(value: unknown, depth = 0): unknown {
+  if (typeof value === "string") return value.replace(CONTROLS, "").replace(LONE_SURROGATE, "\ufffd");
+  if (value === null || typeof value !== "object") return value;
+  if (depth >= MAX_JSON_DEPTH) throw new CellError("слишком глубокая вложенность JSON");
+  if (Array.isArray(value)) return value.map((item) => cleanJson(item, depth + 1));
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [cleanJson(key) as string, cleanJson(item, depth + 1)]));
 }
 
 export function text(cell: ReadCell, max: number): string | null {
   if (cell === null || cell === undefined) return null;
   const value = typeof cell === "boolean" ? (cell ? "да" : "нет") : String(cell);
+  // Заведомо длинное значение отвергается до очистки: очистка — проход по
+  // всему тексту, а одна длинная строка файла может стоять в тысяче ячеек.
+  if (value.length > max * 2) throw new CellError(`длиннее ${max} знаков`);
   const clean = cleanText(value);
   if (!clean) return null;
   if (clean.length > max) throw new CellError(`длиннее ${max} знаков`);
@@ -140,6 +162,12 @@ export function requiredText(cell: ReadCell, max: number, name: string): string 
   if (value === null) throw new CellError(`не заполнено поле «${name}»`);
   return value;
 }
+
+/**
+ * Длиннее этого число, дата или «да/нет» не бывают: длинная строка в таком
+ * столбце — ошибка сразу, без прохода по ней.
+ */
+const SHORT_CELL = 100;
 
 export function integer(cell: ReadCell, min: number, max: number, name: string): number | null {
   const value = decimal(cell, name);
@@ -154,7 +182,7 @@ export function integer(cell: ReadCell, min: number, max: number, name: string):
 export function decimal(cell: ReadCell, name: string): number | null {
   if (cell === null || cell === undefined || cell === "") return null;
   if (typeof cell === "number") return cell;
-  if (typeof cell === "boolean") throw new CellError(`«${name}»: нужно число`);
+  if (typeof cell === "boolean" || cell.length > SHORT_CELL) throw new CellError(`«${name}»: нужно число`);
   const normalized = cell.trim().replace(/[\s\u00a0\u202f]/g, "").replace(",", ".");
   if (!normalized) return null;
   if (!/^[-+]?\d+(?:\.\d+)?$/.test(normalized)) throw new CellError(`«${name}»: нужно число`);
@@ -167,6 +195,7 @@ const NO = new Set(["нет", "no", "false", "0", "ложь", "выкл", "-", "
 export function yesNo(cell: ReadCell, name: string): boolean | null {
   if (cell === null || cell === undefined || cell === "") return null;
   if (typeof cell === "boolean") return cell;
+  if (typeof cell === "string" && cell.length > SHORT_CELL) throw new CellError(`«${name}»: ожидается «да» или «нет»`);
   const value = String(cell).trim().toLocaleLowerCase("ru");
   if (YES.has(value)) return true;
   if (NO.has(value)) return false;
@@ -193,7 +222,7 @@ export function dateTime(cell: ReadCell, options: { date1904: boolean; zone: str
     if (!value) throw new CellError(`«${name}»: не похоже на дату`);
     return value;
   }
-  if (typeof cell === "boolean") throw new CellError(`«${name}»: не похоже на дату`);
+  if (typeof cell === "boolean" || cell.length > SHORT_CELL) throw new CellError(`«${name}»: не похоже на дату`);
   const value = cell.trim();
   if (/[zZ]$|[+-]\d{2}:?\d{2}$/.test(value) && /^\d{4}-\d{2}-\d{2}T/.test(value)) {
     const moment = DateTime.fromISO(value, { setZone: true });
@@ -244,7 +273,7 @@ export function stringList(cell: ReadCell, maxItems: number, maxLength: number, 
       parsed = null;
     }
     if (Array.isArray(parsed) && parsed.every((item) => typeof item === "string")) {
-      const items = (parsed as string[]).map((item) => item.trim()).filter(Boolean);
+      const items = (cleanJson(parsed) as string[]).map((item) => item.trim()).filter(Boolean);
       if (items.length > maxItems) throw new CellError(`«${name}»: больше ${maxItems} пунктов`);
       if (items.some((item) => item.length > maxLength)) throw new CellError(`«${name}»: пункт длиннее ${maxLength} знаков`);
       return items;
@@ -261,15 +290,17 @@ export function jsonValue(cell: ReadCell, name: string): unknown {
   const value = text(cell, 100_000);
   if (value === null) return null;
   if (/^[[{"]/.test(value)) {
+    let parsed: unknown;
     try {
-      return JSON.parse(value) as unknown;
+      parsed = JSON.parse(value) as unknown;
     } catch {
       // Не JSON — обычный текст, который начинается со скобки.
     }
+    if (parsed !== undefined) return cleanJson(parsed);
   }
   const items = value.split("\n").map((item) => item.trim()).filter(Boolean);
   if (items.length > 200) throw new CellError(`«${name}»: больше 200 пунктов`);
-  return items;
+  return cleanJson(items);
 }
 
 /** Значение из подписи: принимает и подпись, и исходный код. */
