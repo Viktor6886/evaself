@@ -76,10 +76,60 @@ export function numberCell(value: unknown): number | null {
 // ячейка → значение для записи
 // ---------------------------------------------------------------------
 
+/**
+ * Пробелы по краям — тот же набор, что срезает `String.prototype.trim`.
+ * Он же — в SQL хэша содержания (`hashSql`): у кода и базы одно и то же
+ * представление «того же текста», иначе неразрывный пробел на краю
+ * заметки превращал повторную загрузку в новую заметку.
+ */
+export const EDGE_SPACE_CODES: readonly number[] = [
+  0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x20, 0xa0, 0x1680,
+  0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a,
+  0x2028, 0x2029, 0x202f, 0x205f, 0x3000, 0xfeff,
+];
+
+/**
+ * Управляющие символы, которых нет в XML 1.0: файл Excel их не переносит
+ * (запись вырезает их), а PostgreSQL не хранит NUL. Они вырезаются из
+ * всего, что пришло из файла, и не учитываются при сравнении.
+ */
+export const CONTROL_CODES: readonly number[] = [
+  ...Array.from({ length: 9 }, (_, index) => index),
+  0x0b, 0x0c,
+  ...Array.from({ length: 18 }, (_, index) => 0x0e + index),
+  0xfffe, 0xffff,
+];
+
+const EDGE = new Set(EDGE_SPACE_CODES);
+const CONTROL = new Set(CONTROL_CODES);
+
+/**
+ * Текст в том виде, в каком его сравнивают и хранят: без управляющих
+ * символов, с `\n` вместо `\r\n` и `\r` и без пробелов по краям — в том
+ * же порядке шагов, что `hashSql` в базе. Циклом, а не регулярным
+ * выражением на краях: `\s+$` на длинной строке пробелов квадратичен.
+ */
+export function cleanText(value: string): string {
+  let withoutControls = "";
+  let last = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    if (!CONTROL.has(value.charCodeAt(index))) continue;
+    withoutControls += value.slice(last, index);
+    last = index + 1;
+  }
+  withoutControls += value.slice(last);
+  const lines = withoutControls.replace(/\r\n?/g, "\n");
+  let start = 0;
+  let end = lines.length;
+  while (start < end && EDGE.has(lines.charCodeAt(start))) start += 1;
+  while (end > start && EDGE.has(lines.charCodeAt(end - 1))) end -= 1;
+  return lines.slice(start, end);
+}
+
 export function text(cell: ReadCell, max: number): string | null {
   if (cell === null || cell === undefined) return null;
   const value = typeof cell === "boolean" ? (cell ? "да" : "нет") : String(cell);
-  const clean = value.replace(/\r\n?/g, "\n").trim();
+  const clean = cleanText(value);
   if (!clean) return null;
   if (clean.length > max) throw new CellError(`длиннее ${max} знаков`);
   return clean;
@@ -177,6 +227,30 @@ export function list(cell: ReadCell, maxItems: number, maxLength: number, name: 
   if (items.length > maxItems) throw new CellError(`«${name}»: больше ${maxItems} пунктов`);
   if (items.some((item) => item.length > maxLength)) throw new CellError(`«${name}»: пункт длиннее ${maxLength} знаков`);
   return items;
+}
+
+/**
+ * Список строк из ячейки: построчно или JSON-массивом строк — так его
+ * пишет выгрузка, если в пункте есть перевод строки.
+ */
+export function stringList(cell: ReadCell, maxItems: number, maxLength: number, name: string): string[] {
+  const value = text(cell, maxItems * (maxLength + 8));
+  if (value === null) return [];
+  if (value.startsWith("[")) {
+    let parsed: unknown = null;
+    try {
+      parsed = JSON.parse(value) as unknown;
+    } catch {
+      parsed = null;
+    }
+    if (Array.isArray(parsed) && parsed.every((item) => typeof item === "string")) {
+      const items = (parsed as string[]).map((item) => item.trim()).filter(Boolean);
+      if (items.length > maxItems) throw new CellError(`«${name}»: больше ${maxItems} пунктов`);
+      if (items.some((item) => item.length > maxLength)) throw new CellError(`«${name}»: пункт длиннее ${maxLength} знаков`);
+      return items;
+    }
+  }
+  return list(cell, maxItems, maxLength, name);
 }
 
 /**

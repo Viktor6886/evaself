@@ -16,11 +16,11 @@
 import { isValidIanaTimezone } from "../time/local-date-time.js";
 import {
   CellError, date, dateTime, decimal, fold, integer, jsonValue, labelled, list,
-  requiredText, text, yesNo,
+  requiredText, stringList, text, yesNo,
 } from "./format.js";
 import {
   ABOUT_FIELDS, ARCHIVE_FORMAT, ARCHIVE_VERSION, LABELS, MEMORY_FIELDS, NORTH_FIELDS, PROFILE_FIELDS,
-  SHEETS, SHEET_ROW_LIMIT, physicalColumns, type ArchiveSheet, type SheetId,
+  CONTINUATION, SHEETS, SHEET_ROW_LIMIT, type ArchiveSheet, type SheetId,
 } from "./sheets.js";
 import {
   ArchiveRejected, type NorthImport, type Parsed, type ParsedArchive, type ProfileImport, type RowError,
@@ -29,21 +29,32 @@ import type { ReadCell, ReadSheet, ReadWorkbook } from "./xlsx-reader.js";
 
 type Get = (key: string) => ReadCell;
 
-/** Значения листа по ключам столбцов; продолжения длинного текста склеиваются. */
+/**
+ * Позиции столбцов листа по заголовкам. Столбцов-продолжений «…
+ * (продолжение N)» у длинного текста столько, сколько понадобилось
+ * выгрузке, — их число не задано заранее.
+ */
 function columnsOf(definition: ArchiveSheet, header: ReadCell[]): Map<string, number[]> | null {
-  const wanted = new Map<string, { key: string; part: number }>();
-  for (const physical of physicalColumns(definition)) {
-    wanted.set(fold(physical.header), { key: physical.column.key, part: physical.part });
-    if (physical.part === 0) wanted.set(fold(physical.column.key), { key: physical.column.key, part: 0 });
+  const byHeader = new Map<string, string>();
+  for (const column of definition.columns) {
+    byHeader.set(fold(column.header), column.key);
+    byHeader.set(fold(column.key), column.key);
   }
   const positions = new Map<string, number[]>();
   header.forEach((cell, index) => {
     if (typeof cell !== "string") return;
-    const match = wanted.get(fold(cell));
-    if (!match) return;
-    const parts = positions.get(match.key) ?? [];
-    if (parts[match.part] === undefined) parts[match.part] = index;
-    positions.set(match.key, parts);
+    let key = byHeader.get(fold(cell));
+    let part = 0;
+    if (key === undefined) {
+      const match = CONTINUATION.exec(cell.trim());
+      if (!match) return;
+      key = byHeader.get(fold(match[1]!));
+      part = Number(match[2]);
+      if (key === undefined || part < 1) return;
+    }
+    const parts = positions.get(key) ?? [];
+    if (parts[part] === undefined) parts[part] = index;
+    positions.set(key, parts);
   });
   return positions.size > 0 ? positions : null;
 }
@@ -53,11 +64,14 @@ function getter(row: ReadCell[], positions: Map<string, number[]>): Get {
     const parts = positions.get(key);
     if (!parts || parts[0] === undefined) return null;
     if (parts.length === 1) return row[parts[0]] ?? null;
-    // Продолжения склеиваются как есть, без обрезки пробелов на стыке.
-    const joined = parts.map((index) => {
-      const value = index === undefined ? null : row[index];
-      return value === null || value === undefined ? "" : String(value);
-    }).join("");
+    // Продолжения склеиваются по порядку и как есть, без обрезки
+    // пробелов на стыке.
+    let joined = "";
+    for (const index of parts) {
+      if (index === undefined) continue;
+      const value = row[index];
+      if (value !== null && value !== undefined) joined += String(value);
+    }
     return joined || null;
   };
 }
@@ -78,7 +92,7 @@ function tableRows<T>(
   source: ReadSheet,
   context: Context,
   required: string[],
-  parse: (get: Get) => T,
+  parse: (get: Get) => T | null,
 ): Array<Parsed<T>> {
   const [header = [], ...rest] = source.rows;
   const positions = columnsOf(definition, header);
@@ -102,7 +116,10 @@ function tableRows<T>(
     if (taken > SHEET_ROW_LIMIT) return;
     const excelRow = index + 2;
     try {
-      parsed.push({ row: excelRow, value: parse(getter(row, positions)) });
+      // `null` — строка законная, но загружать в ней нечего (например,
+      // отказ отвечать в анкете): это не ошибка.
+      const value = parse(getter(row, positions));
+      if (value !== null) parsed.push({ row: excelRow, value });
     } catch (error) {
       if (!(error instanceof CellError)) throw error;
       context.errors.push({ sheet: definition.name, row: excelRow, message: error.message });
@@ -279,7 +296,7 @@ export function parseArchive(book: ReadWorkbook, options: { zone: string }): Par
     parsed.sheetsFound.push(definition.id);
     if (!definition.importable && definition.id !== "memory") parsed.readOnlySheets.push(definition.name);
   }
-  const each = <T>(id: SheetId, required: string[], parse: (get: Get) => T): Array<Parsed<T>> => {
+  const each = <T>(id: SheetId, required: string[], parse: (get: Get) => T | null): Array<Parsed<T>> => {
     const { definition, source } = find(id);
     return source ? tableRows(definition, source, context, required, parse) : [];
   };
@@ -293,6 +310,11 @@ export function parseArchive(book: ReadWorkbook, options: { zone: string }): Par
     const key = requiredText(get("field_key"), 100, "Код поля");
     if (!/^[a-z][a-z0-9_]{0,99}$/.test(key)) throw new CellError("код поля — латиница, например city");
     const status = labelled(get("status"), LABELS.profileStatus, "Статус");
+    // Отказ отвечать, «не относится» и устаревший ответ — не ответы: их
+    // выгрузка показывает, а загрузка пропускает молча. Иначе собственный
+    // архив человека возвращался бы с «ошибками» в каждой такой строке.
+    if (status !== null && status !== "candidate" && status !== "confirmed") return null;
+    if (text(get("value"), 10_000) === null && status === null) return null;
     return {
       field_key: key,
       value: requiredText(get("value"), 10_000, "Ответ"),
@@ -351,8 +373,9 @@ export function parseArchive(book: ReadWorkbook, options: { zone: string }): Par
     const timezone = text(get("timezone"), 100);
     if (timezone && !isValidIanaTimezone(timezone)) throw new CellError(`часовой пояс «${timezone}» неизвестен`);
     const cron = text(get("cron_expression"), 100);
-    const repeat = yesNo(get("repeat_enabled"), "Повторять") ?? false;
-    if (repeat && !cron) throw new CellError("для повтора нужен «Повтор (cron)»");
+    // «Повторять» без выражения повтора — разовая задача: без cron
+    // планировщику не из чего считать следующий срок.
+    const repeat = (yesNo(get("repeat_enabled"), "Повторять") ?? false) && cron !== null;
     return {
       title: requiredText(get("title"), 500, "Название"),
       description: text(get("description"), 5_000),
@@ -380,7 +403,9 @@ export function parseArchive(book: ReadWorkbook, options: { zone: string }): Par
     return {
       local_date: localDate,
       title: text(get("title"), 500),
-      content: requiredText(get("content"), 20_000, "Запись"),
+      // Предел — не форма дневника (20 000), а то, что вмещает файл:
+      // запись, сохранённая раньше другим путём, возвращается целиком.
+      content: requiredText(get("content"), 64_000, "Запись"),
       mood: labelled(get("mood"), LABELS.mood, "Настроение"),
       energy: integer(get("energy"), 1, 10, "Энергия"),
       people: list(get("people"), 20, 200, "Люди"),
@@ -425,8 +450,10 @@ export function parseArchive(book: ReadWorkbook, options: { zone: string }): Par
     if (!/^[A-Z]{3}$/.test(currency)) throw new CellError("«Валюта»: три латинские буквы, например RUB");
     // Отрицательная сумма — обычная запись расхода в таблицах; в базе сумма без знака.
     const type = labelled(get("entry_type"), LABELS.budgetType, "Тип") ?? "expense";
-    const quantity = decimal(get("quantity"), "Количество");
-    if (quantity !== null && (quantity < 0 || quantity > 1e9)) throw new CellError("«Количество»: от 0 до 10⁹");
+    const raw = decimal(get("quantity"), "Количество");
+    // Столбец — numeric(12,3): три знака после запятой и меньше миллиарда.
+    const quantity = raw === null ? null : Math.round(raw * 1_000) / 1_000;
+    if (quantity !== null && (quantity < 0 || quantity >= 1e9)) throw new CellError("«Количество»: от 0 до 999 999 999");
     return {
       occurred_on: occurred,
       entry_type: type,
@@ -442,11 +469,11 @@ export function parseArchive(book: ReadWorkbook, options: { zone: string }): Par
 
   parsed.decisions = each("decisions", ["question"], (get) => ({
     question: requiredText(get("question"), 2_000, "Вопрос"),
-    options: list(get("options"), 50, 1_000, "Варианты"),
-    facts: list(get("facts"), 50, 1_000, "Факты"),
-    assumptions: list(get("assumptions"), 50, 1_000, "Допущения"),
-    criteria: list(get("criteria"), 50, 1_000, "Критерии"),
-    risks: list(get("risks"), 50, 1_000, "Риски"),
+    options: stringList(get("options"), 50, 1_000, "Варианты"),
+    facts: stringList(get("facts"), 50, 1_000, "Факты"),
+    assumptions: stringList(get("assumptions"), 50, 1_000, "Допущения"),
+    criteria: stringList(get("criteria"), 50, 1_000, "Критерии"),
+    risks: stringList(get("risks"), 50, 1_000, "Риски"),
     selected_option: text(get("selected_option"), 1_000),
     confidence: integer(get("confidence"), 0, 100, "Уверенность"),
     reversible: yesNo(get("reversible"), "Обратимо"),

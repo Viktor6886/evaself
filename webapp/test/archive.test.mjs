@@ -20,12 +20,15 @@ const PREVIEW = {
   applied: false,
   file_sha256: SHA,
   sheets: [
-    { id: "goals", name: "Цели", added: 2, existing: 1 },
-    { id: "tasks", name: "Задачи и напоминания", added: 3, existing: 0 },
-    { id: "journal", name: "Дневник", added: 0, existing: 4 },
+    { id: "profile", name: "Профиль", added: 0, existing: 2, filled: 1 },
+    { id: "goals", name: "Цели", added: 2, existing: 1, filled: 0 },
+    { id: "tasks", name: "Задачи и напоминания", added: 3, existing: 0, filled: 0 },
+    { id: "journal", name: "Дневник", added: 0, existing: 4, filled: 0 },
   ],
   added_total: 5,
-  existing_total: 5,
+  existing_total: 7,
+  filled_total: 1,
+  active_reminders: 2,
   errors: [{ sheet: "Задачи и напоминания", row: 7, message: "«Срок»: такой даты нет" }],
   error_count: 1,
   warnings: ["Цели «в работе» без отметки «Подтверждена мной» загружены черновиками: 1."],
@@ -105,13 +108,15 @@ test("загрузка: предпросмотр, затем запись тог
 
     const text = await app.page.textContent("#archive-preview");
     assert.match(text, /Цели\s*\+2\s*уже есть: 1/);
+    assert.match(text, /Профиль\s*—\s*дополнено: 1 · уже есть: 2/);
+    assert.match(text, /Напоминаний, которые начнут срабатывать: 2/);
     assert.match(text, /Дневник\s*—\s*уже есть: 4/);
     assert.match(text, /Поручений Еве: 1/);
     assert.match(text, /черновиками: 1/);
     assert.match(text, /Строки с ошибками: 1/);
     assert.match(text, /«Рабочие блоки», «Платежи»/);
     assert.match(text, /Память Евы из файла сама в память не записывается/);
-    assert.match(await app.page.textContent("#archive-apply"), /Добавить 5 записей/);
+    assert.match(await app.page.textContent("#archive-apply"), /Добавить 6 записей/);
 
     await app.page.click("#archive-apply");
     await app.page.waitForSelector("#archive-result");
@@ -119,7 +124,7 @@ test("загрузка: предпросмотр, затем запись тог
     assert.ok(applied, "запись не ушла");
     assert.equal(applied.search, `?sha256=${SHA}`);
     assert.match(String(applied.body), /name="file"; filename="eva-archive-2026-10-07\.xlsx"/);
-    assert.match(await app.page.textContent("#archive-result"), /Добавлено: 5 записей/);
+    assert.match(await app.page.textContent("#archive-result"), /Добавлено: 5 записей, дополнено: 1/);
 
     await app.page.click("#archive-handoff");
     await app.page.waitForSelector("#open-eva-chat");
@@ -138,8 +143,9 @@ test("загрузка: всё уже есть — кнопки «Добавит
       "POST /public/archive/import/preview": () => {
         calls += 1;
         return calls === 1
-          ? { ...PREVIEW, sheets: [{ id: "goals", name: "Цели", added: 0, existing: 3 }], added_total: 0, existing_total: 3,
-            errors: [], error_count: 0, warnings: [], paused_actions: 0, read_only_sheets: [], memory_handoff: null }
+          ? { ...PREVIEW, sheets: [{ id: "goals", name: "Цели", added: 0, existing: 3, filled: 0 }], added_total: 0, existing_total: 3,
+            filled_total: 0, active_reminders: 0, errors: [], error_count: 0, warnings: [], paused_actions: 0,
+            read_only_sheets: [], memory_handoff: null }
           : { __status: 400, __body: { error: { code: "bad_request", message: "Это не файл Excel (.xlsx). Загрузи архив, выгруженный из Евы." } } };
       },
     },

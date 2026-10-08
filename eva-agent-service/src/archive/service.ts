@@ -9,9 +9,11 @@
  * сам человек. Из чата файл сохраняется на телефон или компьютер обычным
  * образом.
  *
- * Загрузка идёт в два шага: предпросмотр (та же запись с откатом в конце)
- * и запись. Между шагами файл не хранится: человек присылает его снова, а
- * хэш из предпросмотра подтверждает, что записывается тот же файл.
+ * Загрузка идёт в два шага: предпросмотр (тот же код записи в транзакции
+ * только для чтения, без единой записи) и запись. Между шагами файл не
+ * хранится: человек присылает его снова, а хэш из предпросмотра
+ * подтверждает, что записывается тот же файл. Одна архивная операция на
+ * человека, не больше двух на процесс, не больше 30 000 записей на файл.
  *
  * Обе операции выключены, пока владелец не включит флаг в панели. Память
  * Евы в архиве — отдельный флаг: это решение владельца (2026-10-07),
@@ -22,18 +24,21 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import type { Database } from "../db.js";
-import { badRequest, EvaError, notFound } from "../errors.js";
+import { badRequest, EvaError } from "../errors.js";
 import { isValidIanaTimezone } from "../time/local-date-time.js";
 import { collectArchive, type MemorySnapshot } from "./export.js";
 import { fold, wallClock } from "./format.js";
-import { applyArchive, type ImportReport } from "./import-apply.js";
+import { applyArchive, ArchiveBusy, type ImportReport } from "./import-apply.js";
 import { parseArchive } from "./import-parse.js";
-import { ArchiveRejected } from "./import-types.js";
+import { ArchiveRejected, type ParsedArchive } from "./import-types.js";
 import { SHEETS } from "./sheets.js";
 import { readWorkbook, WorkbookFormatError } from "./xlsx-reader.js";
 import { writeWorkbook } from "./xlsx-writer.js";
 
 export const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
+/** Сколько выгрузка ждёт память Евы от runtime. */
+const MEMORY_TIMEOUT_MS = 15_000;
 
 /** Предел присланного файла — тот же, что у приёма файлов Mini App. */
 export const ARCHIVE_MAX_BYTES = 10 * 1024 * 1024;
@@ -78,19 +83,26 @@ const FORMAT_ERRORS: Record<string, string> = {
   xlsx_rows_unordered: "Файл повреждён: строки листа идут не по порядку.",
   xlsx_too_many_rows: "В листе слишком много строк. Раздели архив на несколько файлов.",
   xlsx_too_many_strings: "Файл слишком большой для архива Евы.",
+  xlsx_xml_malformed: "Файл повреждён — его разметка не читается.",
 };
+
+/**
+ * Сколько архивных операций (выгрузка, предпросмотр, запись) идёт в
+ * процессе одновременно. Каждая держит соединение пула и процессор:
+ * без предела несколько больших загрузок заняли бы весь пул, и ход Евы
+ * ждал бы соединения.
+ */
+const MAX_PARALLEL = 2;
+
+/** Записей в одном файле больше этого — делите архив: одна загрузка не должна держать базу минутами. */
+export const ARCHIVE_ROW_LIMIT = 30_000;
 
 const SHEET_NAMES = new Set(SHEETS.map((item) => fold(item.name)));
 
-/** Откат предпросмотра: запись выполнена, но транзакция не фиксируется. */
-class PreviewRollback extends Error {
-  constructor(readonly report: ImportReport) {
-    super("preview");
-  }
-}
-
 export class DataArchiveService {
   private readonly now: () => Date;
+  /** Люди, у которых сейчас идёт архивная операция, — по одной на человека. */
+  private readonly running = new Set<number>();
 
   constructor(private readonly deps: {
     db: ArchiveDatabase;
@@ -114,9 +126,11 @@ export class DataArchiveService {
   }
 
   /** Собрать архив и отправить его человеку в чат с ботом. */
-  async export(telegramId: number): Promise<{ sent: true; filename: string; sheets: number; rows: number; bytes: number }> {
+  async export(telegramId: number): Promise<{
+    sent: true; filename: string; sheets: number; rows: number; bytes: number; truncated: number;
+  }> {
     this.requireEnabled();
-    return await this.scoped(telegramId, "miniapp.archive.export", async (user) => {
+    return await this.exclusive(telegramId, async () => await this.scoped(telegramId, "miniapp.archive.export", async (user) => {
       const memory = await this.memory(user.id);
       const now = this.now();
       const collected = await this.deps.db.transaction(async (client) => {
@@ -124,7 +138,7 @@ export class DataArchiveService {
         await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY");
         return await collectArchive({ db: client, userId: user.id, zone: user.zone, now, memory });
       });
-      const { bytes } = await writeWorkbook(collected.sheets, {
+      const { bytes, truncatedCells } = await writeWorkbook(collected.sheets, {
         title: "Архив данных Евы",
         creator: "Evaself",
         created: now,
@@ -138,14 +152,20 @@ export class DataArchiveService {
           + "его можно загрузить обратно в разделе «Мои данные».",
       });
       await this.audit("archive.export", {
+        user_id: user.id,
         sheets: collected.sheets.length,
         rows,
         bytes: bytes.length,
         memory: memory !== null,
         capped: collected.capped.length,
+        truncated: collected.truncated + truncatedCells,
       });
-      return { sent: true as const, filename, sheets: collected.sheets.length, rows, bytes: bytes.length };
-    });
+      return {
+        sent: true as const, filename, sheets: collected.sheets.length, rows, bytes: bytes.length,
+        // Обрезанное не теряется молча: число — в ответе и в «О файле».
+        truncated: collected.truncated + truncatedCells,
+      };
+    }));
   }
 
   /** Показать, что добавится, ничего не записывая. */
@@ -153,68 +173,102 @@ export class DataArchiveService {
     return await this.importFile(telegramId, file, { apply: false });
   }
 
-  /** Записать архив. `expectedSha256` — хэш из предпросмотра. */
-  async apply(telegramId: number, file: Buffer, expectedSha256: string | null): Promise<ImportOutcome> {
+  /** Записать архив. `expectedSha256` — хэш файла из предпросмотра, без него записи нет. */
+  async apply(telegramId: number, file: Buffer, expectedSha256: string): Promise<ImportOutcome> {
     return await this.importFile(telegramId, file, { apply: true, expectedSha256 });
   }
 
   private async importFile(
     telegramId: number,
     file: Buffer,
-    options: { apply: boolean; expectedSha256?: string | null },
+    options: { apply: boolean; expectedSha256?: string },
   ): Promise<ImportOutcome> {
     this.requireEnabled();
     if (file.length === 0) throw badRequest("Файл пустой");
     if (file.length > ARCHIVE_MAX_BYTES) throw badRequest("Файл больше 10 МБ");
     const sha256 = createHash("sha256").update(file).digest("hex");
-    if (options.apply && options.expectedSha256 && options.expectedSha256 !== sha256) {
+    if (options.apply && options.expectedSha256 !== sha256) {
       throw new EvaError("Это другой файл, не тот, что был в предпросмотре. Выбери файл заново.", {
         code: "archive_file_changed",
         statusCode: 409,
       });
     }
-    let book;
-    try {
-      book = await readWorkbook(file, { wanted: (name) => SHEET_NAMES.has(fold(name)) });
-    } catch (error) {
-      if (error instanceof WorkbookFormatError) throw badRequest(FORMAT_ERRORS[error.code] ?? "Файл не читается как Excel.");
-      throw error;
-    }
-    return await this.scoped(telegramId, options.apply ? "miniapp.archive.import" : "miniapp.archive.preview", async (user) => {
-      let parsed;
+    // Разбор — тоже под пределом: он занимает процессор, и параллельные
+    // предпросмотры одного человека не должны разбирать файлы разом.
+    return await this.exclusive(telegramId, async () => {
+      let book;
       try {
-        parsed = parseArchive(book, { zone: user.zone });
+        book = await readWorkbook(file, { wanted: (name) => SHEET_NAMES.has(fold(name)) });
       } catch (error) {
-        if (error instanceof ArchiveRejected) throw badRequest(error.message);
+        if (error instanceof WorkbookFormatError) throw badRequest(FORMAT_ERRORS[error.code] ?? "Файл не читается как Excel.");
         throw error;
       }
-      if (parsed.sheetsFound.length === 0) {
-        throw badRequest("В файле нет листов архива Евы. Загрузи файл, выгруженный в разделе «Мои данные».");
-      }
-      const now = this.now();
-      let report: ImportReport;
-      try {
-        report = await this.deps.db.transaction(async (client) => {
-          const result = await applyArchive(client, { userId: user.id, parsed, now });
-          if (!options.apply) throw new PreviewRollback(result);
-          return result;
-        });
-      } catch (error) {
-        if (!(error instanceof PreviewRollback)) throw error;
-        report = error.report;
-      }
-      if (options.apply) {
-        this.deps.onImported?.(user.id);
-        await this.audit("archive.import", {
-          added: report.added_total,
-          existing: report.existing_total,
-          errors: report.error_count,
-          paused_actions: report.paused_actions,
-          sheets: report.sheets.map((item) => ({ id: item.id, added: item.added, existing: item.existing })),
-        });
-      }
-      return { ...report, file_sha256: sha256, applied: options.apply };
+      return await this.scoped(telegramId, options.apply ? "miniapp.archive.import" : "miniapp.archive.preview", async (user) => {
+        let parsed;
+        try {
+          parsed = parseArchive(book, { zone: user.zone });
+        } catch (error) {
+          if (error instanceof ArchiveRejected) throw badRequest(error.message);
+          throw error;
+        }
+        if (parsed.sheetsFound.length === 0) {
+          throw badRequest("В файле нет листов архива Евы. Загрузи файл, выгруженный в разделе «Мои данные».");
+        }
+        const rows = parsedRows(parsed);
+        if (rows > ARCHIVE_ROW_LIMIT) {
+          throw badRequest(`В файле ${rows} записей — больше ${ARCHIVE_ROW_LIMIT}. Раздели архив на несколько файлов по листам.`);
+        }
+        const now = this.now();
+        let report: ImportReport;
+        try {
+          report = await this.deps.db.transaction(async (client) => {
+            // Предпросмотр только читает: транзакция «только для чтения»
+            // гарантирует это и на стороне базы.
+            if (!options.apply) await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY");
+            return await applyArchive(client, { userId: user.id, parsed, now, mode: options.apply ? "apply" : "preview" });
+          });
+        } catch (error) {
+          if (error instanceof ArchiveBusy) throw busy();
+          throw error;
+        }
+        if (options.apply) {
+          this.deps.onImported?.(user.id);
+          await this.audit("archive.import", {
+            user_id: user.id,
+            added: report.added_total,
+            existing: report.existing_total,
+            filled: report.filled_total,
+            errors: report.error_count,
+            paused_actions: report.paused_actions,
+            active_reminders: report.active_reminders,
+            sheets: report.sheets.map((item) => ({ id: item.id, added: item.added, existing: item.existing, filled: item.filled })),
+          });
+        }
+        return { ...report, file_sha256: sha256, applied: options.apply };
+      });
     });
+  }
+
+  /**
+   * Одна архивная операция на человека и не больше `MAX_PARALLEL` на
+   * процесс. Проверка — до разбора файла и до соединения с базой: занятая
+   * очередь отвечает сразу, а не ждёт.
+   */
+  private async exclusive<T>(telegramId: number, work: () => Promise<T>): Promise<T> {
+    if (this.running.has(telegramId)) throw busy();
+    if (this.running.size >= MAX_PARALLEL) {
+      throw new EvaError("Сейчас идёт много выгрузок и загрузок — попробуй через минуту.", {
+        code: "archive_capacity",
+        statusCode: 429,
+        retryable: true,
+      });
+    }
+    this.running.add(telegramId);
+    try {
+      return await work();
+    } finally {
+      this.running.delete(telegramId);
+    }
   }
 
   private requireEnabled(): void {
@@ -225,7 +279,18 @@ export class DataArchiveService {
     if (this.deps.flags.memory() !== true) return null;
     if (!this.deps.memory) return "unavailable";
     try {
-      return (await this.deps.memory.read(userId)) ?? "unavailable";
+      // Выгрузка не ждёт runtime дольше этого: без памяти архив всё
+      // равно нужен, а лист скажет, что её сейчас нет.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), MEMORY_TIMEOUT_MS);
+        timer.unref?.();
+      });
+      try {
+        return (await Promise.race([this.deps.memory.read(userId), timeout])) ?? "unavailable";
+      } finally {
+        clearTimeout(timer);
+      }
     } catch {
       // Runtime недоступен — архив всё равно собирается, а лист честно
       // говорит, что памяти в нём нет.
@@ -243,7 +308,7 @@ export class DataArchiveService {
         "SELECT id, timezone FROM users WHERE telegram_id = $1",
         [telegramId],
       );
-      if (!rows[0]) throw notFound("Пользователь не найден: начни разговор с Евой в Telegram");
+      if (!rows[0]) throw badRequest("Сначала начни разговор с Евой в Telegram — тогда здесь появятся твои данные.");
       const id = Number(rows[0].id);
       this.deps.db.bindScopeUserId(id);
       const zone = rows[0].timezone && isValidIanaTimezone(rows[0].timezone) ? rows[0].timezone : "UTC";
@@ -259,6 +324,21 @@ export class DataArchiveService {
       [operation, JSON.stringify(params), randomUUID()],
     );
   }
+}
+
+function busy(): EvaError {
+  return new EvaError("Загрузка или выгрузка уже идёт — дождись её окончания.", {
+    code: "archive_busy",
+    statusCode: 409,
+    retryable: true,
+  });
+}
+
+/** Сколько записей файл просит загрузить — всех листов вместе. */
+function parsedRows(parsed: ParsedArchive): number {
+  return parsed.questionnaire.length + parsed.goals.length + parsed.results.length + parsed.tasks.length
+    + parsed.journal.length + parsed.people.length + parsed.notes.length + parsed.checkins.length
+    + parsed.budget.length + parsed.decisions.length;
 }
 
 /**

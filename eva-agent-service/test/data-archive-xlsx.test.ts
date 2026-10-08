@@ -73,6 +73,16 @@ test("запись: длинный текст обрезается до пред
   assert.equal(rows[1]![1], "abc");
 });
 
+test("запись: предел Excel — в символах, экранирование `_xHHHH_` его не съедает", async () => {
+  const value = `${"_x000D_".repeat(4_000)}${"я".repeat(EXCEL_CELL_LIMIT - 28_000)}`;
+  assert.equal(value.length, EXCEL_CELL_LIMIT);
+  const { bytes, truncatedCells } = await writeWorkbook([{
+    name: "Лист", columns: [{ header: "Текст", kind: "longtext" }], rows: [[value]],
+  }], META);
+  assert.equal(truncatedCells, 0);
+  assert.equal((await readWorkbook(bytes)).sheets[0]!.rows[1]![0], value);
+});
+
 test("запись: имя листа проверяется по правилам Excel", async () => {
   await assert.rejects(writeWorkbook([{ name: "a/b", columns: [], rows: [] }], META));
   await assert.rejects(writeWorkbook([{ name: "x".repeat(32), columns: [], rows: [] }], META));
@@ -173,6 +183,59 @@ test("чтение: враждебные файлы отвергаются с к
     "xl/s.xml": `<worksheet><sheetData><row r="5"><c><v>1</v></c></row><row r="2"><c><v>2</v></c></row></sheetData></worksheet>`,
   });
   assert.equal(await code(unordered), "xlsx_rows_unordered");
+});
+
+/** Книга с одним листом, XML которого задан целиком. */
+async function bookWithSheet(sheetXml: string, extra: Record<string, string> = {}): Promise<Buffer> {
+  return await zipOf({
+    "[Content_Types].xml": CONTENT_TYPES,
+    "xl/workbook.xml": `<workbook><sheets><sheet name="A" sheetId="1" r:id="rId1"/></sheets></workbook>`,
+    "xl/_rels/workbook.xml.rels": `<Relationships><Relationship Id="rId1" Type="x/worksheet" Target="s.xml"/>`
+      + `<Relationship Id="rId2" Type="x/sharedStrings" Target="strings.xml"/></Relationships>`,
+    "xl/s.xml": sheetXml,
+    ...extra,
+  });
+}
+
+/**
+ * Враждебный XML разбирается за линейное время. Прежний разбор
+ * регулярными выражениями перечитывал хвост от каждого незакрытого тега:
+ * 80 000 незакрытых `<row>` — 10 секунд, атрибут в 200 000 знаков — 36.
+ */
+test("чтение: незакрытые теги и огромные атрибуты отвергаются быстро, а не перечитываются", async () => {
+  const cases: Array<[string, Buffer]> = [
+    ["80 000 незакрытых <row>", await bookWithSheet(`<worksheet><sheetData>${"<row>".repeat(80_000)}</sheetData></worksheet>`)],
+    ["атрибут без значения на 200 000 знаков", await bookWithSheet(`<worksheet><sheetData><row><c ${"a".repeat(200_000)}/></row></sheetData></worksheet>`)],
+    ["тег без конца", await bookWithSheet(`<worksheet><sheetData><row${" a".repeat(100_000)}`)],
+    ["значение атрибута без закрывающей кавычки", await bookWithSheet(`<worksheet><sheetData><row r="${"1".repeat(200_000)}`)],
+    ["40 000 незакрытых <si><t>", await bookWithSheet("<worksheet/>", { "xl/strings.xml": `<sst>${"<si><t>x".repeat(40_000)}</sst>` })],
+    ["DOCTYPE в середине", await bookWithSheet(`<worksheet><!DOCTYPE x [<!ENTITY a "b">]><sheetData/></worksheet>`)],
+  ];
+  for (const [name, bytes] of cases) {
+    const started = performance.now();
+    await assert.rejects(readWorkbook(bytes), (error: unknown) => error instanceof WorkbookFormatError, name);
+    const elapsed = performance.now() - started;
+    assert.ok(elapsed < 1_500, `${name}: ${Math.round(elapsed)} мс`);
+  }
+});
+
+test("чтение: большой честный лист разбирается за линейное время", async () => {
+  const rows = Array.from({ length: 20_000 }, (_, index) =>
+    `<row r="${index + 1}"><c r="A${index + 1}" t="inlineStr"><is><t>строка ${index}</t></is></c><c r="B${index + 1}"><v>${index}</v></c></row>`);
+  const bytes = await bookWithSheet(`<worksheet><sheetData>${rows.join("")}</sheetData></worksheet>`);
+  const started = performance.now();
+  const book = await readWorkbook(bytes);
+  const elapsed = performance.now() - started;
+  assert.equal(book.sheets[0]!.rows.length, 20_000);
+  assert.deepEqual(book.sheets[0]!.rows[19_999], ["строка 19999", 19_999]);
+  assert.ok(elapsed < 3_000, `20 000 строк: ${Math.round(elapsed)} мс`);
+});
+
+test("чтение: `>` внутри значения атрибута и CDATA не ломают разбор", async () => {
+  const bytes = await bookWithSheet(
+    `<worksheet><sheetData><row r="1" note="a > b"><c r="A1" t="inlineStr"><is><t><![CDATA[<не тег> & текст]]></t></is></c></row></sheetData></worksheet>`,
+  );
+  assert.deepEqual((await readWorkbook(bytes)).sheets[0]!.rows, [["<не тег> & текст"]]);
 });
 
 test("чтение: обход каталогов в имени части отвергается", async () => {

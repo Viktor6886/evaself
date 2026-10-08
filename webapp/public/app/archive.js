@@ -7,7 +7,7 @@
  * только сам человек.
  *
  * Загрузка обратно — в два шага: сначала сервер показывает, что именно
- * добавится (та же запись с откатом), и только по второму нажатию пишет.
+ * добавится (ничего не записывая), и только по второму нажатию пишет.
  * Загрузка только добавляет: существующие записи не меняются, повторы
  * пропускаются. Память Евы из файла сама в память не пишется — её можно
  * передать Еве в чате, и Ева решит, что запомнить.
@@ -86,6 +86,7 @@
         <p>Цели, задачи и напоминания, дневник, заметки, анкета, самочувствие, бюджет, решения и история работы — в одном файле, по листу на раздел${state.memory ? ", и то, что Ева знает о тебе" : ""}.</p>
         <p class="archive-hint">Файл придёт в чат с Евой — оттуда его можно сохранить на телефон или компьютер.</p>
         ${state.exported ? `<p class="archive-done" id="archive-exported">Готово: «${escapeHtml(state.exported.filename)}» отправлен в чат.</p>
+          ${state.exported.truncated > 0 ? `<p class="archive-note">Очень длинных значений: ${state.exported.truncated} — в файле их начало, подробности на листе «О файле».</p>` : ""}
           <div class="action-row"><button class="secondary-action" id="archive-open-chat" type="button">Открыть чат</button></div>` : ""}
         <button class="primary-action" id="archive-export" type="button" ${state.busy ? "disabled" : ""}>
           ${state.busy === "export" ? "Собираю архив…" : state.exported ? "Выгрузить ещё раз" : "Выгрузить в Excel"}
@@ -108,13 +109,19 @@
     return `<ul class="archive-sheets">${sheets.map((sheet) => `<li>
       <span>${escapeHtml(sheet.name)}</span>
       <strong>${sheet.added > 0 ? `+${sheet.added}` : "—"}</strong>
-      ${sheet.existing > 0 ? `<small>уже есть: ${sheet.existing}</small>` : ""}
+      ${sheet.filled > 0 || sheet.existing > 0 ? `<small>${[
+        sheet.filled > 0 ? `дополнено: ${sheet.filled}` : "",
+        sheet.existing > 0 ? `уже есть: ${sheet.existing}` : "",
+      ].filter(Boolean).join(" · ")}</small>` : ""}
     </li>`).join("")}</ul>`;
   }
 
   function notes(report) {
     const { escapeHtml } = app();
     const parts = [];
+    if (report.active_reminders > 0) {
+      parts.push(`<p class="archive-note">Напоминаний, которые начнут срабатывать: ${report.active_reminders}.</p>`);
+    }
     if (report.paused_actions > 0) {
       parts.push(`<p class="archive-note">Поручений Еве: ${report.paused_actions}. Они придут выключенными — если они твои, попроси Еву включить их.</p>`);
     }
@@ -142,7 +149,7 @@
   function previewHtml() {
     const { escapeHtml } = app();
     const report = state.preview;
-    const added = Number(report.added_total) || 0;
+    const added = (Number(report.added_total) || 0) + (Number(report.filled_total) || 0);
     return `<article class="section-card archive-card" id="archive-preview">
       <h3>Что добавится</h3>
       <p class="archive-hint">Из файла «${escapeHtml(state.file?.name || "архив")}». Существующие записи не изменятся.</p>
@@ -162,9 +169,10 @@
   function resultHtml() {
     const report = state.result;
     const added = Number(report.added_total) || 0;
+    const filled = Number(report.filled_total) || 0;
     return `<article class="section-card archive-card" id="archive-result">
       <h3>Готово</h3>
-      <p class="archive-done">Добавлено: ${records(added)}. То, что уже было, осталось как было.</p>
+      <p class="archive-done">Добавлено: ${records(added)}${filled > 0 ? `, дополнено: ${filled}` : ""}. Остальное осталось как было.</p>
       ${report.sheets?.length ? sheetList(report.sheets) : ""}
       ${notes(report)}
       <div class="action-row">
@@ -213,7 +221,7 @@
     paint();
     try {
       const result = await app().api("/public/archive/export", { method: "POST", body: "{}" });
-      state.exported = { filename: result?.filename || "архив.xlsx" };
+      state.exported = { filename: result?.filename || "архив.xlsx", truncated: Number(result?.truncated) || 0 };
       app().toast("Архив отправлен в чат с Евой");
     } catch (error) {
       app().toast(app().friendlyError(error), true);
@@ -259,7 +267,7 @@
       const sha = encodeURIComponent(state.preview.file_sha256 || "");
       state.result = await app().api(`/public/archive/import?sha256=${sha}`, { method: "POST", body: upload(state.file) });
       state.preview = null;
-      app().toast(`Добавлено: ${records(Number(state.result.added_total) || 0)}`);
+      app().toast(`Добавлено: ${records((Number(state.result.added_total) || 0) + (Number(state.result.filled_total) || 0))}`);
     } catch (error) {
       app().toast(app().friendlyError(error), true);
     } finally {

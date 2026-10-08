@@ -18,6 +18,8 @@ import { readWorkbook } from "../dist/archive/xlsx-reader.js";
 import { writeWorkbook } from "../dist/archive/xlsx-writer.js";
 import { parseArchive } from "../dist/archive/import-parse.js";
 import { contentHash } from "../dist/archive/import-entries.js";
+import { Multiset } from "../dist/archive/import-context.js";
+import { cleanText } from "../dist/archive/format.js";
 import { DataArchiveService, memoryBlocksOf } from "../dist/archive/service.js";
 import type { DataArchivePublic } from "../dist/public/archive-routes.js";
 import { registerPublicRoutes } from "../dist/public/routes.js";
@@ -143,6 +145,11 @@ test("маршруты: файл приходит в сервис как ест�
     assert.equal((await fastify.inject({ method: "POST", url: "/public/archive/import/preview", payload: wrong.body, headers: wrong.headers })).statusCode, 400);
 
     const sha = "b".repeat(64);
+    const unmarked = multipart("архив.xlsx", Buffer.from("x"));
+    const refused = await fastify.inject({ method: "POST", url: "/public/archive/import", payload: unmarked.body, headers: unmarked.headers });
+    assert.equal(refused.statusCode, 400, "запись без отметки предпросмотра отклоняется");
+    assert.match(refused.json().error.message, /Сначала посмотри/);
+    assert.equal(calls.some((call) => call.startsWith("apply:")), false);
     const bad = multipart("архив.xlsx", Buffer.from("x"));
     assert.equal((await fastify.inject({ method: "POST", url: "/public/archive/import?sha256=../../etc", payload: bad.body, headers: bad.headers })).statusCode, 400);
     const good = multipart("архив.xlsx", Buffer.from("данные"));
@@ -177,14 +184,15 @@ test("разбор: столбцы — по заголовку в любом п�
   assert.deepEqual(parsed.tasks.map((item) => [item.row, item.value.title, item.value.status]), [
     [2, "Позвонить маме", "in_progress"],
     [4, "Старая", "done"],
+    [5, "Без cron", "open"],
   ]);
+  assert.equal(parsed.tasks[2]!.value.repeat_enabled, false, "«повторять» без расписания — разовая задача");
   assert.equal(parsed.tasks[0]!.value.remind_at, "2026-10-07T18:30");
   assert.equal(parsed.tasks[1]!.value.remind_at, "2026-10-07T12:00", "номер дня Excel читается как дата");
-  assert.deepEqual(parsed.errors.map((error) => error.row), [5, 6, 7, 8]);
-  assert.match(parsed.errors[0]!.message, /cron/);
-  assert.match(parsed.errors[1]!.message, /Mars\/Base/);
-  assert.match(parsed.errors[2]!.message, /не из списка/);
-  assert.match(parsed.errors[3]!.message, /Название/);
+  assert.deepEqual(parsed.errors.map((error) => error.row), [6, 7, 8]);
+  assert.match(parsed.errors[0]!.message, /Mars\/Base/);
+  assert.match(parsed.errors[1]!.message, /не из списка/);
+  assert.match(parsed.errors[2]!.message, /Название/);
 });
 
 test("разбор: «О файле» — чужой формат и более новая версия отклоняются, пояс берётся из файла", () => {
@@ -226,6 +234,17 @@ test("разбор: продолжения длинного текста скл�
   assert.equal(parsed.notes[0]!.value.created_at, "2026-10-07T12:00", "календарь 1904 года");
 });
 
+test("разбор: продолжений столько, сколько в файле, и в любом порядке столбцов", () => {
+  const parsed = parseArchive({
+    date1904: false,
+    sheets: [sheetOf("Заметки", [
+      ["Текст (продолжение 2)", "Заголовок", "Текст", "Текст (продолжение 1)", "Текст (продолжение 999)"],
+      ["третья", "Порядок", "первая ", "вторая ", null],
+    ])],
+  }, { zone: ZONE });
+  assert.equal(parsed.notes[0]!.value.content, "первая вторая третья");
+});
+
 test("разбор: суммы, подписи и статус анкеты", () => {
   const parsed = parseArchive({
     date1904: false,
@@ -241,6 +260,13 @@ test("разбор: суммы, подписи и статус анкеты", ()
         ["city", "Пермь", "подтверждено"],
         ["interests", "бег\nгоры", "предположение"],
         ["Город", "Пермь", null],
+        ["work_schedule", null, "отказ отвечать"],
+        ["quiet_hours", null, "не относится"],
+      ]),
+      sheetOf("Решения", [
+        ["Вопрос", "Варианты"],
+        ["Бежать ли весной?", JSON.stringify(["да", "нет, осенью\nесли не успею"])],
+        ["Переезжать?", "да\nнет"],
       ]),
     ],
   }, { zone: ZONE });
@@ -254,6 +280,11 @@ test("разбор: суммы, подписи и статус анкеты", ()
     ["interests", "candidate"],
   ]);
   assert.match(parsed.errors.find((error) => error.sheet === "Анкета")!.message, /латиница/);
+  assert.equal(parsed.errors.filter((error) => error.sheet === "Анкета").length, 1, "отказ отвечать — не ошибка");
+  assert.deepEqual(parsed.decisions.map((item) => item.value.options), [
+    ["да", "нет, осенью\nесли не успею"],
+    ["да", "нет"],
+  ]);
 });
 
 test("разбор: память Евы читается, но только как текст для передачи", () => {
@@ -296,6 +327,8 @@ function guardedDb(rows: (sql: string) => unknown[] = () => []) {
     const flat = sql.replace(/\s+/gu, " ").trim();
     queries.push(flat);
     if (flat.startsWith("SELECT id, timezone FROM users")) return { rows: [{ id: String(INTERNAL), timezone: ZONE }], rowCount: 1 };
+    if (flat.includes("pg_try_advisory_xact_lock")) return { rows: [{ locked: true }], rowCount: 1 };
+    if (flat.startsWith("INSERT INTO") && flat.includes("RETURNING id")) return { rows: [{ id: "1" }], rowCount: 1 };
     return { rows: rows(flat), rowCount: 0 };
   };
   const db = {
@@ -308,13 +341,20 @@ function guardedDb(rows: (sql: string) => unknown[] = () => []) {
   return { db, queries };
 }
 
-function service(options: { enabled?: boolean; memory?: boolean; memorySource?: () => Promise<unknown> } = {}) {
+function service(options: {
+  enabled?: boolean;
+  memory?: boolean;
+  memorySource?: () => Promise<unknown>;
+  /** Доставка ждёт этого обещания — так выгрузка остаётся «в работе». */
+  delivery?: Promise<void>;
+} = {}) {
   const sent: Array<{ chatId: number; bytes: Buffer; filename: string; mimeType?: string }> = [];
   const { db, queries } = guardedDb();
   const archive = new DataArchiveService({
     db: db as never,
     telegram: {
       sendDocument: async (chatId, bytes, filename, extra) => {
+        await options.delivery;
         sent.push({ chatId, bytes: Buffer.from(bytes), filename, ...(extra?.mimeType ? { mimeType: extra.mimeType } : {}) });
       },
     },
@@ -355,6 +395,16 @@ test("сервис: память по флагу — только human и curre
   assert.ok(memory);
   assert.deepEqual(memory.rows.slice(1).map((row) => row[0]), ["Что Ева знает обо мне", "Моё текущее состояние"]);
 
+  const long = `${"Длинная память. ".repeat(4_500)}конец`;
+  const spilled = service({ memory: true, memorySource: async () => ({ human: long, current_state: null }) });
+  const exported = await spilled.archive.export(USER.id);
+  assert.equal(exported.truncated, 0, "длинная память не обрезана");
+  const memorySheet = (await readWorkbook(spilled.sent[0]!.bytes)).sheets.find((sheet) => sheet.name === "Память Евы")!;
+  assert.deepEqual(memorySheet.rows[0], ["Раздел", "Содержание", "Содержание (продолжение 1)", "Содержание (продолжение 2)"]);
+  assert.equal(memorySheet.rows[1]!.slice(1).join(""), long);
+  const reparsed = parseArchive(await readWorkbook(spilled.sent[0]!.bytes), { zone: ZONE });
+  assert.equal(reparsed.memory[0]!.value, long);
+
   const broken = service({ memory: true, memorySource: async () => { throw new Error("runtime down"); } });
   await broken.archive.export(USER.id);
   const fallback = (await readWorkbook(broken.sent[0]!.bytes)).sheets.find((sheet) => sheet.name === "Память Евы");
@@ -380,12 +430,71 @@ test("сервис: предпросмотр ничего не фиксируе�
   assert.equal(preview.applied, false);
   assert.equal(preview.added_total, 1);
   assert.equal(preview.file_sha256, createHash("sha256").update(bytes).digest("hex"));
-  assert.ok(queries.some((sql) => sql.startsWith("INSERT INTO eva_notes")), "предпросмотр выполняет ту же запись");
-  assert.equal(queries.some((sql) => sql.startsWith("INSERT INTO audit_log")), false, "предпросмотр не пишет аудит");
+  // Предпросмотр — транзакция только для чтения и ни одной записи.
+  assert.ok(queries.includes("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"));
+  assert.equal(queries.some((sql) => /^(INSERT|UPDATE|DELETE)\b/.test(sql)), false, "предпросмотр ничего не пишет");
+  assert.equal(queries.some((sql) => sql.includes("pg_try_advisory_xact_lock")), false, "предпросмотру блокировка не нужна");
+
+  const sha = createHash("sha256").update(bytes).digest("hex");
+  const applied = await archive.apply(USER.id, bytes, sha);
+  assert.equal(applied.applied, true);
+  assert.ok(queries.some((sql) => sql.startsWith("SELECT pg_try_advisory_xact_lock")), "запись не ждёт чужую блокировку");
+  assert.ok(queries.some((sql) => sql.startsWith("INSERT INTO eva_notes")));
+  assert.ok(queries.some((sql) => sql.startsWith("INSERT INTO audit_log")), "запись — в аудите");
 
   await assert.rejects(archive.apply(USER.id, bytes, "c".repeat(64)), (error: { statusCode?: number }) => error.statusCode === 409);
   await assert.rejects(archive.preview(USER.id, Buffer.from("not a workbook at all")), /не файл Excel/);
   const empty = await writeWorkbook([{ name: "Чужой лист", columns: [{ header: "А", kind: "text" }], rows: [["1"]] }],
     { title: "t", creator: "t", created: NOW });
   await assert.rejects(archive.preview(USER.id, empty.bytes), /нет листов архива Евы/);
+});
+
+test("сервис: одна архивная операция на человека и не больше двух на процесс — отказ сразу, без ожидания", async () => {
+  const { bytes } = await writeWorkbook([{
+    name: "Заметки",
+    columns: [{ header: "Заголовок", kind: "text" }, { header: "Текст", kind: "longtext" }],
+    rows: [["Идея", "Текст"]],
+  }], { title: "t", creator: "t", created: NOW });
+  let release: () => void = () => undefined;
+  const delivery = new Promise<void>((resolve) => { release = resolve; });
+  const { archive } = service({ delivery });
+  const first = archive.export(USER.id);
+  await new Promise((resolve) => setImmediate(resolve));
+  await assert.rejects(archive.preview(USER.id, bytes), (error: { statusCode?: number }) => error.statusCode === 409);
+  const second = archive.export(USER.id + 1);
+  await new Promise((resolve) => setImmediate(resolve));
+  await assert.rejects(archive.export(USER.id + 2), (error: { statusCode?: number }) => error.statusCode === 429);
+  release();
+  await Promise.all([first, second]);
+  assert.equal((await archive.preview(USER.id, bytes)).added_total, 1, "после окончания — снова можно");
+});
+
+test("сервис: файл больше предела записей отклоняется до базы", async () => {
+  // На листе читается не больше 10 000 строк, поэтому предел всего файла
+  // (30 000) превышают четыре листа.
+  const many = (prefix: string) => Array.from({ length: 10_000 }, (_, index) => [`${prefix} ${index}`, "текст"]);
+  const { bytes } = await writeWorkbook([
+    { name: "Заметки", columns: [{ header: "Заголовок", kind: "text" }, { header: "Текст", kind: "longtext" }], rows: many("Заметка") },
+    { name: "Решения", columns: [{ header: "Вопрос", kind: "longtext" }], rows: many("Вопрос") },
+    { name: "Задачи и напоминания", columns: [{ header: "Название", kind: "text" }], rows: many("Задача") },
+    { name: "Люди из дневника", columns: [{ header: "Имя", kind: "text" }], rows: [["Мама"]] },
+  ], { title: "t", creator: "t", created: NOW });
+  const { archive, queries } = service();
+  await assert.rejects(archive.preview(USER.id, bytes), /30001 записей/);
+  assert.equal(queries.some((sql) => sql.includes("eva_notes")), false);
+});
+
+test("нормализация текста: управляющие символы, переводы строк и края — как в SQL хэша", () => {
+  assert.equal(cleanText("\u00a0 текст\u0001 с\r\nкраями\r\u3000\ufeff"), "текст с\nкраями");
+  assert.equal(cleanText("\r\u0002\nстрока"), "строка", "управляющий символ убирается раньше, чем склеивается \\r\\n");
+  assert.equal(cleanText(`${" ".repeat(50_000)}x${" ".repeat(50_000)}`), "x");
+  assert.equal(contentHash("\u00a0Текст\u3000"), contentHash("Текст"));
+});
+
+test("повторы по количеству: два одинаковых в файле при одном в базе — один новый", () => {
+  const existing = new Multiset<number>();
+  existing.add("аптека|200", 1);
+  assert.equal(existing.take("аптека|200"), 1);
+  assert.equal(existing.take("аптека|200"), undefined);
+  assert.equal(existing.take("другое"), undefined);
 });

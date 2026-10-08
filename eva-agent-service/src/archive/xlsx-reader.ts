@@ -16,6 +16,10 @@
 
 import yauzl from "yauzl";
 
+import { attribute, scanXml, XmlFormatError, type XmlToken } from "./xml-scan.js";
+
+export { decodeXml } from "./xml-scan.js";
+
 export type ReadCell = string | number | boolean | null;
 
 export interface ReadSheet {
@@ -142,59 +146,32 @@ function openZip(buffer: Buffer, limits: ReadLimits): Promise<OpenedZip> {
   });
 }
 
-const XML_ENTITY = /&(?:#(\d{1,7})|#x([0-9a-fA-F]{1,6})|(lt|gt|amp|quot|apos));/g;
-const NAMED: Record<string, string> = { lt: "<", gt: ">", amp: "&", quot: "\"", apos: "'" };
-
-export function decodeXml(text: string): string {
-  return text.replace(XML_ENTITY, (whole, decimal?: string, hex?: string, name?: string) => {
-    if (name) return NAMED[name] ?? whole;
-    const code = decimal !== undefined ? Number(decimal) : Number.parseInt(hex ?? "", 16);
-    if (!Number.isFinite(code) || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return "";
-    return String.fromCodePoint(code);
-  });
-}
-
 /** Обратное к экранированию Excel `_xHHHH_` (так он пишет, например, `\r`). */
 function excelUnescape(text: string): string {
-  return text.replace(/_x([0-9A-Fa-f]{4})_/g, (_, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)));
+  return text.includes("_x")
+    ? text.replace(/_x([0-9A-Fa-f]{4})_/g, (_, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)))
+    : text;
 }
 
-function attributes(raw: string): Map<string, string> {
-  const result = new Map<string, string>();
-  const pattern = /([A-Za-z_][\w.:-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
-  let match: RegExpExecArray | null;
-  while ((match = pattern.exec(raw)) !== null) {
-    result.set(match[1]!, decodeXml(match[2] ?? match[3] ?? ""));
+/**
+ * Разбор отдаёт управление циклу событий каждые столько токенов: большой
+ * лист не должен замораживать остальные запросы сервиса.
+ */
+const YIELD_EVERY = 20_000;
+const pause = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+async function* tokens(xml: string): AsyncGenerator<XmlToken> {
+  let count = 0;
+  try {
+    for (const token of scanXml(xml)) {
+      yield token;
+      count += 1;
+      if (count % YIELD_EVERY === 0) await pause();
+    }
+  } catch (error) {
+    if (error instanceof XmlFormatError) throw new WorkbookFormatError("xlsx_xml_malformed");
+    throw error;
   }
-  return result;
-}
-
-/** Атрибут без учёта префикса: `r:id` у одних и `x:id`/`id` у других. */
-function attribute(attrs: Map<string, string>, local: string): string | undefined {
-  if (attrs.has(local)) return attrs.get(local);
-  for (const [key, value] of attrs) {
-    if (key.endsWith(`:${local}`)) return value;
-  }
-  return undefined;
-}
-
-const P = "(?:[A-Za-z_][\\w.-]*:)?";
-
-function elements(xml: string, tag: string): Array<{ attrs: string; body: string | null }> {
-  const pattern = new RegExp(`<${P}${tag}\\b([^>]*?)(?:/>|>([\\s\\S]*?)</${P}${tag}>)`, "g");
-  const found: Array<{ attrs: string; body: string | null }> = [];
-  let match: RegExpExecArray | null;
-  while ((match = pattern.exec(xml)) !== null) {
-    found.push({ attrs: match[1] ?? "", body: match[2] ?? null });
-  }
-  return found;
-}
-
-/** Текст строки: все `<t>`, кроме фонетических подсказок `<rPh>`. */
-function stringItem(body: string): string {
-  const withoutPhonetic = body.replace(new RegExp(`<${P}rPh\\b[\\s\\S]*?</${P}rPh>`, "g"), "");
-  const parts = elements(withoutPhonetic, "t").map((item) => decodeXml(item.body ?? ""));
-  return excelUnescape(parts.join(""));
 }
 
 function joinPath(base: string, target: string): string {
@@ -212,15 +189,75 @@ function relsPath(part: string): string {
   return slash < 0 ? `_rels/${part}.rels` : `${part.slice(0, slash)}/_rels/${part.slice(slash + 1)}.rels`;
 }
 
-function relationships(xml: string): Array<{ id: string; type: string; target: string }> {
-  return elements(xml, "Relationship").map((item) => {
-    const attrs = attributes(item.attrs);
-    return { id: attrs.get("Id") ?? "", type: attrs.get("Type") ?? "", target: attrs.get("Target") ?? "" };
-  });
+async function relationships(xml: string): Promise<Array<{ id: string; type: string; target: string }>> {
+  const found: Array<{ id: string; type: string; target: string }> = [];
+  for await (const token of tokens(xml)) {
+    if (token.kind !== "open" || token.name !== "Relationship") continue;
+    found.push({
+      id: token.attrs.get("Id") ?? "",
+      type: token.attrs.get("Type") ?? "",
+      target: token.attrs.get("Target") ?? "",
+    });
+  }
+  return found;
 }
 
+async function workbookInfo(xml: string): Promise<{ date1904: boolean; sheets: Array<{ name: string; relId: string | undefined }> }> {
+  let date1904 = false;
+  const sheets: Array<{ name: string; relId: string | undefined }> = [];
+  for await (const token of tokens(xml)) {
+    if (token.kind !== "open") continue;
+    if (token.name === "workbookPr") {
+      const value = token.attrs.get("date1904");
+      date1904 = value === "1" || value === "true";
+    } else if (token.name === "sheet") {
+      sheets.push({ name: token.attrs.get("name") ?? "", relId: attribute(token.attrs, "id") });
+    }
+  }
+  return { date1904, sheets };
+}
+
+/** Общие строки: все `<t>` элемента `<si>`, кроме фонетических подсказок `<rPh>`. */
+async function sharedStrings(xml: string, limits: ReadLimits): Promise<string[]> {
+  const strings: string[] = [];
+  let item: string[] | null = null;
+  let phonetic = 0;
+  let text: string[] | null = null;
+  for await (const token of tokens(xml)) {
+    if (token.kind === "text") {
+      if (text) text.push(token.text);
+    } else if (token.kind === "open") {
+      if (token.name === "si") {
+        if (item) throw new WorkbookFormatError("xlsx_xml_malformed");
+        if (strings.length >= limits.maxSharedStrings) throw new WorkbookFormatError("xlsx_too_many_strings");
+        if (token.selfClosing) strings.push("");
+        else item = [];
+      } else if (item && token.name === "rPh" && !token.selfClosing) {
+        phonetic += 1;
+      } else if (item && token.name === "t" && !token.selfClosing) {
+        if (text) throw new WorkbookFormatError("xlsx_xml_malformed");
+        text = [];
+      }
+    } else if (token.name === "t" && text) {
+      if (phonetic === 0) item?.push(text.join(""));
+      text = null;
+    } else if (token.name === "rPh" && phonetic > 0) {
+      phonetic -= 1;
+    } else if (token.name === "si" && item) {
+      strings.push(excelUnescape(item.join("")));
+      item = null;
+      phonetic = 0;
+    }
+  }
+  if (item || text) throw new WorkbookFormatError("xlsx_xml_malformed");
+  return strings;
+}
+
+/** Адрес ячейки длиннее этого — не адрес, а мусор. */
+const MAX_REF = 16;
+
 function columnIndex(ref: string): number | null {
-  const match = /^([A-Z]{1,3})\d*$/i.exec(ref);
+  const match = ref.length <= MAX_REF ? /^([A-Z]{1,3})\d*$/i.exec(ref) : null;
   if (!match) return null;
   let value = 0;
   for (const letter of match[1]!.toUpperCase()) value = value * 26 + (letter.charCodeAt(0) - 64);
@@ -228,74 +265,174 @@ function columnIndex(ref: string): number | null {
 }
 
 function rowIndex(ref: string): number | null {
-  const match = /^[A-Z]{0,3}(\d+)$/i.exec(ref);
+  const match = ref.length <= MAX_REF ? /^[A-Z]{0,3}(\d+)$/i.exec(ref) : null;
   return match ? Number(match[1]) - 1 : null;
 }
 
-function cellValue(attrs: Map<string, string>, body: string | null, strings: readonly string[]): ReadCell {
-  if (body === null) return null;
-  const type = attrs.get("t") ?? "n";
-  if (type === "inlineStr") {
-    const inline = elements(body, "is")[0]?.body;
-    return inline === undefined || inline === null ? null : stringItem(inline);
-  }
-  const raw = elements(body, "v")[0]?.body;
-  if (raw === undefined || raw === null) return null;
-  const text = decodeXml(raw);
+function cellValue(type: string, raw: string | null, inline: string | null, strings: readonly string[]): ReadCell {
+  if (type === "inlineStr") return inline === null ? null : excelUnescape(inline);
+  if (raw === null) return null;
   switch (type) {
     case "s": {
-      const index = Number(text);
+      const index = Number(raw);
       return Number.isSafeInteger(index) && index >= 0 && index < strings.length ? strings[index]! : null;
     }
     case "str":
     case "d":
-      return excelUnescape(text);
+      return excelUnescape(raw);
     case "b":
-      return text.trim() === "1" || text.trim().toLowerCase() === "true";
+      return raw.trim() === "1" || raw.trim().toLowerCase() === "true";
     case "e":
       return null;
     default: {
-      const number = Number(text);
-      return text.trim() !== "" && Number.isFinite(number) ? number : null;
+      const number = Number(raw);
+      return raw.trim() !== "" && Number.isFinite(number) ? number : null;
     }
   }
 }
 
-function parseSheet(xml: string, strings: readonly string[], limits: ReadLimits): ReadCell[][] {
-  const data = new RegExp(`<${P}sheetData\\b[^>]*?(?:/>|>([\\s\\S]*?)</${P}sheetData>)`).exec(xml);
-  const body = data?.[1] ?? "";
+/**
+ * Строки листа. Вложенность проверяется по ходу: строка внутри строки или
+ * ячейка вне строки — ошибка формата, а не повод искать закрывающий тег
+ * где-то дальше.
+ */
+async function parseSheet(xml: string, strings: readonly string[], limits: ReadLimits): Promise<ReadCell[][]> {
   const rows: ReadCell[][] = [];
+  const malformed = () => new WorkbookFormatError("xlsx_xml_malformed");
+  type RowState = { index: number; values: ReadCell[]; nextColumn: number };
+  type CellState = { column: number | null; type: string; raw: string[] | null; inline: string[] | null };
+  let inData = false;
+  let row = null as RowState | null;
   let nextRow = 0;
-  for (const row of elements(body, "row")) {
-    const rowAttrs = attributes(row.attrs);
-    const declared = rowAttrs.get("r");
-    const index = declared && /^\d+$/.test(declared) ? Number(declared) - 1 : nextRow;
+  let cell = null as CellState | null;
+  // Текущая ячейка читается через функцию: её меняют вложенные функции,
+  // и сужение типа по месту объявления здесь было бы неверным.
+  const currentCell = (): CellState | null => cell;
+  let capture: string[] | null = null;
+  let inInline = false;
+  let phonetic = 0;
+
+  const openRow = (attrs: Map<string, string>) => {
+    if (row) throw malformed();
+    const declared = attrs.get("r");
+    const index = declared && /^\d{1,7}$/.test(declared) ? Number(declared) - 1 : nextRow;
     // Номер строки только растёт: файл, где строка 5 идёт после 9-й,
     // склеивал бы чужие ячейки в одну запись.
     if (index < nextRow) throw new WorkbookFormatError("xlsx_rows_unordered");
     if (index >= limits.maxRows) throw new WorkbookFormatError("xlsx_too_many_rows");
     nextRow = index + 1;
-    const values: ReadCell[] = [];
-    let nextColumn = 0;
-    for (const item of elements(row.body ?? "", "c")) {
-      const attrs = attributes(item.attrs);
-      const ref = attrs.get("r");
-      const column = ref ? columnIndex(ref) : nextColumn;
-      if (column === null) continue;
-      if (ref) {
-        const referenced = rowIndex(ref);
-        if (referenced !== null && referenced !== index) continue;
-      }
-      nextColumn = column + 1;
-      if (column >= limits.maxColumns) continue;
-      const value = cellValue(attrs, item.body, strings);
-      if (value === null) continue;
-      while (values.length < column) values.push(null);
-      values[column] = value;
+    row = { index, values: [], nextColumn: 0 };
+  };
+  const closeRow = () => {
+    if (!row) return;
+    while (rows.length < row.index) rows.push([]);
+    rows[row.index] = row.values;
+    row = null;
+  };
+  const openCell = (attrs: Map<string, string>) => {
+    if (!row || cell) throw malformed();
+    const ref = attrs.get("r");
+    let column: number | null = ref ? columnIndex(ref) : row.nextColumn;
+    if (ref && column !== null) {
+      const referenced = rowIndex(ref);
+      // Ячейка с адресом чужой строки — не этой строки.
+      if (referenced !== null && referenced !== row.index) column = null;
     }
-    while (rows.length < index) rows.push([]);
-    rows[index] = values;
+    if (column !== null) row.nextColumn = column + 1;
+    cell = { column, type: attrs.get("t") ?? "n", raw: null, inline: null };
+  };
+  const closeCell = () => {
+    if (!row || !cell) throw malformed();
+    const { column } = cell;
+    if (column !== null && column < limits.maxColumns) {
+      const value = cellValue(cell.type, cell.raw ? cell.raw.join("") : null, cell.inline ? cell.inline.join("") : null, strings);
+      if (value !== null) {
+        while (row.values.length < column) row.values.push(null);
+        row.values[column] = value;
+      }
+    }
+    cell = null;
+  };
+
+  for await (const token of tokens(xml)) {
+    if (token.kind === "text") {
+      if (capture) capture.push(token.text);
+      continue;
+    }
+    if (token.name === "sheetData") {
+      if (token.kind === "open") inData = !token.selfClosing;
+      else inData = false;
+      continue;
+    }
+    if (!inData) continue;
+    if (token.kind === "open") {
+      switch (token.name) {
+        case "row":
+          openRow(token.attrs);
+          if (token.selfClosing) closeRow();
+          break;
+        case "c":
+          openCell(token.attrs);
+          if (token.selfClosing) closeCell();
+          break;
+        case "v": {
+          const active = currentCell();
+          if (!active || capture) throw malformed();
+          if (!token.selfClosing) capture = active.raw = [];
+          break;
+        }
+        case "is": {
+          const active = currentCell();
+          if (!active) throw malformed();
+          if (!token.selfClosing) {
+            inInline = true;
+            active.inline = [];
+          }
+          break;
+        }
+        case "rPh":
+          if (inInline && !token.selfClosing) phonetic += 1;
+          break;
+        case "t":
+          if (inInline && !token.selfClosing) {
+            if (capture) throw malformed();
+            capture = [];
+          }
+          break;
+        default:
+          break;
+      }
+      continue;
+    }
+    switch (token.name) {
+      case "row":
+        if (currentCell()) throw malformed();
+        closeRow();
+        break;
+      case "c":
+        closeCell();
+        break;
+      case "v":
+        capture = null;
+        break;
+      case "t":
+        if (inInline && capture) {
+          if (phonetic === 0) currentCell()?.inline?.push(capture.join(""));
+          capture = null;
+        }
+        break;
+      case "rPh":
+        if (phonetic > 0) phonetic -= 1;
+        break;
+      case "is":
+        inInline = false;
+        phonetic = 0;
+        break;
+      default:
+        break;
+    }
   }
+  if (row || currentCell()) throw malformed();
   return rows;
 }
 
@@ -312,38 +449,27 @@ export async function readWorkbook(
   const zip = await openZip(buffer, limits);
   try {
     if (!zip.entries.has("[Content_Types].xml")) throw new WorkbookFormatError("xlsx_not_workbook");
-    const rootRels = zip.entries.has("_rels/.rels") ? relationships(await zip.read("_rels/.rels")) : [];
+    const rootRels = zip.entries.has("_rels/.rels") ? await relationships(await zip.read("_rels/.rels")) : [];
     const office = rootRels.find((rel) => /\/officeDocument$/.test(rel.type));
     const workbookPath = office ? joinPath("", office.target) : "xl/workbook.xml";
     if (!zip.entries.has(workbookPath)) throw new WorkbookFormatError("xlsx_not_workbook");
-    const workbook = await zip.read(workbookPath);
+    const workbook = await workbookInfo(await zip.read(workbookPath));
     const baseDir = workbookPath.includes("/") ? workbookPath.slice(0, workbookPath.lastIndexOf("/")) : "";
-    const rels = zip.entries.has(relsPath(workbookPath)) ? relationships(await zip.read(relsPath(workbookPath))) : [];
-    const pr = elements(workbook, "workbookPr")[0];
-    const date1904Value = pr ? attributes(pr.attrs).get("date1904") : undefined;
-    const date1904 = date1904Value === "1" || date1904Value === "true";
+    const rels = zip.entries.has(relsPath(workbookPath)) ? await relationships(await zip.read(relsPath(workbookPath))) : [];
+    const date1904 = workbook.date1904;
 
     const sharedRel = rels.find((rel) => /\/sharedStrings$/.test(rel.type));
     const sharedPath = sharedRel ? joinPath(baseDir, sharedRel.target) : null;
-    const strings: string[] = [];
-    if (sharedPath && zip.entries.has(sharedPath)) {
-      for (const item of elements(await zip.read(sharedPath), "si")) {
-        if (strings.length >= limits.maxSharedStrings) throw new WorkbookFormatError("xlsx_too_many_strings");
-        strings.push(stringItem(item.body ?? ""));
-      }
-    }
+    const strings = sharedPath && zip.entries.has(sharedPath) ? await sharedStrings(await zip.read(sharedPath), limits) : [];
 
     const sheets: ReadSheet[] = [];
-    for (const item of elements(workbook, "sheet")) {
-      const attrs = attributes(item.attrs);
-      const name = attrs.get("name") ?? "";
-      if (!name || (options.wanted && !options.wanted(name))) continue;
-      const relId = attribute(attrs, "id");
-      const rel = rels.find((candidate) => candidate.id === relId);
+    for (const item of workbook.sheets) {
+      if (!item.name || (options.wanted && !options.wanted(item.name))) continue;
+      const rel = rels.find((candidate) => candidate.id === item.relId);
       if (!rel || !/\/worksheet$/.test(rel.type)) continue;
       const path = joinPath(baseDir, rel.target);
       if (!zip.entries.has(path)) continue;
-      sheets.push({ name, rows: parseSheet(await zip.read(path), strings, limits) });
+      sheets.push({ name: item.name, rows: await parseSheet(await zip.read(path), strings, limits) });
     }
     return { sheets, date1904 };
   } finally {

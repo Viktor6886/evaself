@@ -79,7 +79,7 @@ function xmlAttr(value: string): string {
  * вернулся бы из файла другим: подчёркивание экранируется само.
  */
 function excelString(value: string): string {
-  return value.replace(/\r\n?/g, "\n").replace(/_(x[0-9A-Fa-f]{4}_)/g, "_x005F_$1");
+  return value.replace(/_(x[0-9A-Fa-f]{4}_)/g, "_x005F_$1");
 }
 
 export function columnLetter(index: number): string {
@@ -153,9 +153,11 @@ interface CellBuild {
 }
 
 function textCell(ref: string, value: string, strings: SharedStrings, style: number | null): CellBuild {
-  const clean = excelString(value).replace(INVALID_XML, "");
+  // Предел Excel — в символах ячейки, а `_xHHHH_` — лишь запись символа в
+  // файле: обрезка до экранирования, иначе экранирование съедало бы место.
+  const clean = value.replace(/\r\n?/g, "\n").replace(INVALID_XML, "");
   const truncated = clean.length > EXCEL_CELL_LIMIT;
-  const text = truncated ? `${clean.slice(0, EXCEL_CELL_LIMIT - 1)}…` : clean;
+  const text = excelString(truncated ? `${clean.slice(0, EXCEL_CELL_LIMIT - 1)}…` : clean);
   const styleAttr = style === null ? "" : ` s="${style}"`;
   return { xml: `<c r="${ref}" t="s"${styleAttr}><v>${strings.add(text)}</v></c>`, truncated };
 }

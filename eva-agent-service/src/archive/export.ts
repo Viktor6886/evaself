@@ -19,7 +19,7 @@ import {
 } from "./format.js";
 import {
   LABELS, MEMORY_FIELDS, NORTH_FIELDS, PROFILE_FIELDS,
-  SHEETS, SHEET_ROW_LIMIT, SPILL_CHUNK, physicalColumns, sheet, type SheetId,
+  MAX_VALUE_LENGTH, SHEETS, SHEET_ROW_LIMIT, SPILL_CHUNK, physicalColumns, sheet, type SheetId,
 } from "./sheets.js";
 import type { CellInput, WorkbookSheet } from "./xlsx-writer.js";
 
@@ -62,7 +62,20 @@ class Builder {
 
   sheet(id: SheetId, rows: Row[]): WorkbookSheet {
     const definition = sheet(id);
-    const columns = physicalColumns(definition);
+    // Частей у столбца столько, сколько нужно самому длинному значению:
+    // текст длиннее ячейки Excel не обрезается, а продолжается рядом.
+    const parts = new Map<string, number>();
+    for (const column of definition.columns) {
+      let needed = 1;
+      for (const row of rows) {
+        const value = row[column.key];
+        if (typeof value === "string" && value.length > SPILL_CHUNK) {
+          needed = Math.max(needed, Math.ceil(Math.min(value.length, MAX_VALUE_LENGTH) / SPILL_CHUNK));
+        }
+      }
+      parts.set(column.key, needed);
+    }
+    const columns = physicalColumns(definition, parts);
     return {
       name: definition.name,
       columns: columns.map(({ column, header }) => ({
@@ -72,12 +85,26 @@ class Builder {
       })),
       rows: rows.map((row) => columns.map(({ column, part }) => {
         const value = row[column.key];
-        if (!column.spill || typeof value !== "string") return part === 0 ? value : null;
-        if (part === column.spill && value.length > (part + 1) * SPILL_CHUNK) this.truncated += 1;
-        return value.slice(part * SPILL_CHUNK, (part + 1) * SPILL_CHUNK) || null;
+        if (typeof value !== "string") return part === 0 ? value : null;
+        if (part === 0 && value.length > MAX_VALUE_LENGTH) this.truncated += 1;
+        if ((parts.get(column.key) ?? 1) === 1) return part === 0 ? value : null;
+        return chunkOf(value.slice(0, MAX_VALUE_LENGTH), part) || null;
       })),
     };
   }
+}
+
+/**
+ * Часть длинного текста. Граница не режет суррогатную пару: эмодзи на
+ * стыке частей уходит целиком в следующую часть, а не теряется.
+ */
+function chunkOf(value: string, part: number): string {
+  const edge = (position: number) => {
+    if (position <= 0 || position >= value.length) return Math.max(0, Math.min(position, value.length));
+    const code = value.charCodeAt(position - 1);
+    return code >= 0xd800 && code <= 0xdbff ? position - 1 : position;
+  };
+  return value.slice(edge(part * SPILL_CHUNK), edge((part + 1) * SPILL_CHUNK));
 }
 
 /** Ключи целей и результатов внутри файла: по ним листы ссылаются друг на друга. */
@@ -172,12 +199,13 @@ export async function collectArchive(input: ExportInput): Promise<ExportResult> 
     : []);
 
   // ---- цели и результаты --------------------------------------------
-  const goals = await select("goals",
+  // Свежие — при обрезке; ключи «Ц1», «Ц2» — по порядку создания.
+  const goals = (await select("goals",
     `SELECT id, parent_goal_id, title, life_area, horizon, why_it_matters, result_artifact,
             target_date::text AS target_date, success_criteria, minimum_version, target_version,
             constraints, learning_goal, review_condition, stop_condition, priority, status,
             vector_stage, user_confirmed, created_at, completed_at
-       FROM goals WHERE user_id = $1 ORDER BY id LIMIT $2`);
+       FROM goals WHERE user_id = $1 ORDER BY id DESC LIMIT $2`)).reverse();
   const keys: Keys = { goals: new Map(), goalTitles: new Map(), results: new Map() };
   goals.forEach((row, index) => {
     keys.goals.set(String(row.id), `Ц${index + 1}`);
@@ -207,11 +235,11 @@ export async function collectArchive(input: ExportInput): Promise<ExportResult> 
     completed_at: at(row.completed_at),
   })));
 
-  const results = await select("results",
+  const results = (await select("results",
     `SELECT id, goal_id, parent_result_id, title, result_artifact, success_criteria, minimum_version,
             target_date::text AS target_date, sort_order, status, is_checkpoint, is_external,
             external_dependency, is_critical_path, fallback_plan, first_action, progress_percent, completed_at
-       FROM goal_results WHERE user_id = $1 ORDER BY id LIMIT $2`);
+       FROM goal_results WHERE user_id = $1 ORDER BY id DESC LIMIT $2`)).reverse();
   results.forEach((row, index) => keys.results.set(String(row.id), `Р${index + 1}`));
   put("results", results.map((row) => ({
     ref: resultRef(keys, row.id),
@@ -386,6 +414,7 @@ export async function collectArchive(input: ExportInput): Promise<ExportResult> 
     readOnly: ordered.filter((item) => !item.importable).map((item) => item.name),
     capped: capped.map((id) => sheet(id).name),
     memoryIncluded: input.memory !== null,
+    truncated: builder.truncated,
   }));
   return {
     sheets: [sheets.get("about")!, ...ordered.map((definition) => sheets.get(definition.id)!)],

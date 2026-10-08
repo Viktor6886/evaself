@@ -18,6 +18,8 @@
  * Скрипт заводит собственных пользователей и убирает за собой.
  */
 
+import { createHash } from "node:crypto";
+
 import pg from "../../eva-agent-service/node_modules/pg/lib/index.js";
 import { Database } from "../../eva-agent-service/dist/db.js";
 import { DataArchiveService } from "../../eva-agent-service/dist/archive/service.js";
@@ -40,6 +42,7 @@ function assert(condition, message) {
 const NOW = new Date("2026-10-07T09:00:00Z");
 const ALICE = 9_870_001;
 const BOB = 9_870_002;
+const CAROL = 9_870_003;
 const sent = [];
 const service = (telegramIdNow = NOW) => new DataArchiveService({
   db,
@@ -50,7 +53,7 @@ const service = (telegramIdNow = NOW) => new DataArchiveService({
 });
 
 async function cleanup() {
-  await admin.query("DELETE FROM users WHERE telegram_id = ANY($1::bigint[])", [[ALICE, BOB]]);
+  await admin.query("DELETE FROM users WHERE telegram_id = ANY($1::bigint[])", [[ALICE, BOB, CAROL]]);
 }
 
 /** Снимок пользовательских таблиц: число строк и их содержимое без служебных полей. */
@@ -98,6 +101,11 @@ try {
   await admin.query(
     `INSERT INTO onboarding_fields (user_id, field_key, field_json, status, sensitivity)
      VALUES ($1, 'interests', '["бег", "горы"]'::jsonb, 'candidate', 'normal')`, [aliceId]);
+  // Отказ отвечать — не ответ: собственный архив не должен возвращаться
+  // с «ошибкой» в этой строке.
+  await admin.query(
+    `INSERT INTO onboarding_fields (user_id, field_key, status, declined_at, sensitivity)
+     VALUES ($1, 'work_schedule', 'declined', now(), 'normal')`, [aliceId]);
   await admin.query(
     `INSERT INTO user_north (user_id, desired_direction, values, user_confirmed)
      VALUES ($1, 'Здоровье и спокойствие', '["здоровье", "семья"]'::jsonb, true)`, [aliceId]);
@@ -134,6 +142,13 @@ try {
   await admin.query(
     `INSERT INTO tasks (user_id, title, remind_at, next_run_at, timezone)
      VALUES ($1, 'Выпить воды', '2026-12-03T07:00:42.123Z', '2026-12-03T07:00:42.123Z', 'Europe/Moscow')`, [aliceId]);
+  // Запись длиннее ячейки Excel: сохранена раньше другим путём.
+  await admin.query(
+    `INSERT INTO journal_entries (user_id, local_date, content) VALUES ($1, '2026-09-01', $2)`,
+    [aliceId, `${"Длинный день. ".repeat(3_000)}конец`]);
+  await admin.query(
+    `INSERT INTO tasks (user_id, title, repeat_enabled, timezone) VALUES ($1, 'Повтор без расписания', true, 'Europe/Moscow')`,
+    [aliceId]);
   const { rows: [entry] } = await admin.query(
     `INSERT INTO journal_entries (user_id, local_date, title, content, mood, energy)
      VALUES ($1, '2026-10-01', 'Пробежка', E'Пробежала 10 км.\r\nУстала, но довольна.', 'good', 7) RETURNING id`, [aliceId]);
@@ -153,10 +168,28 @@ try {
      VALUES ($1, '2026-10-03', 'expense', 1234550, 'спорт', 'Спортмастер')`, [aliceId]);
   await admin.query(
     `INSERT INTO eva_decisions (user_id, question, options, confidence)
-     VALUES ($1, 'Бежать ли весной?', '["да", "нет, осенью"]'::jsonb, 70)`, [aliceId]);
+     VALUES ($1, 'Бежать ли весной?', $2::jsonb, 70)`, [aliceId, JSON.stringify(["да", "нет, осенью\nесли не успею"])]);
   await admin.query(
     `INSERT INTO work_blocks (user_id, goal_id, intention, status) VALUES ($1, $2, 'Интервалы', 'planned')`,
-    [aliceId, childGoal.id]).catch(() => undefined);
+    [aliceId, childGoal.id]);
+  // Две одинаковые покупки — две строки: на чистом аккаунте их тоже две.
+  for (let index = 0; index < 2; index += 1) {
+    await admin.query(
+      `INSERT INTO budget_entries (user_id, occurred_on, entry_type, amount_minor, category, store)
+       VALUES ($1, '2026-10-04', 'expense', 20000, 'здоровье', 'Аптека')`, [aliceId]);
+  }
+  // Края текста — неразрывный и идеографический пробелы: повторная загрузка
+  // не должна счесть такую заметку новой.
+  await admin.query(`INSERT INTO eva_notes (user_id, title, content) VALUES ($1, 'Края', $2)`,
+    [aliceId, "\u00a0Текст с особыми краями\u3000"]);
+  // Чувствительное поле, подтверждённое когда-то: из файла — предположением.
+  await admin.query(
+    `INSERT INTO onboarding_fields (user_id, field_key, field_json, status, sensitivity)
+     VALUES ($1, 'recovery_methods', '["прогулка"]'::jsonb, 'confirmed', 'sensitive')`, [aliceId]);
+  // Повтор каждые пять минут из файла не принимается.
+  await admin.query(
+    `INSERT INTO tasks (user_id, title, cron_expression, repeat_enabled, timezone, next_run_at)
+     VALUES ($1, 'Слишком часто', '*/5 * * * *', true, 'Europe/Moscow', '2026-10-07T09:05:00Z')`, [aliceId]);
   // Строка Боба: выгрузка Алисы обязана её не увидеть.
   await admin.query(`INSERT INTO eva_notes (user_id, title, content) VALUES ($1, 'Секрет Боба', 'не для Алисы')`, [bobId]);
 
@@ -175,18 +208,42 @@ try {
   const aliceBefore = await snapshot(aliceId);
 
   // ---- обратно тому же человеку: ничего не добавляется и не меняется ---
-  const again = await service().apply(ALICE, archive, null);
+  const mark = createHash("sha256").update(archive).digest("hex");
+  const again = await service().apply(ALICE, archive, mark);
   assert(again.added_total === 0, `повторная загрузка тому же человеку ничего не добавила (${again.added_total})`);
   assert(again.existing_total > 10, "все записи узнаны как уже существующие");
   assert(JSON.stringify(await snapshot(aliceId)) === JSON.stringify(aliceBefore), "ни одна строка Алисы не изменилась");
   assert(again.memory_handoff && again.memory_handoff.includes("Готовится к марафону"), "память предлагается передать Еве");
+  assert(again.error_count === 0, `собственный архив загружается без ошибок строк: ${JSON.stringify(again.errors)}`);
 
   // ---- другому человеку: предпросмотр ничего не пишет --------------------
   const bobBefore = await snapshot(bobId);
+  // Предпросмотр идёт в транзакции только для чтения: любая вставка в нём
+  // упала бы с ошибкой PostgreSQL, а не тихо откатилась.
   const preview = await service().preview(BOB, archive);
   assert(preview.applied === false && preview.added_total > 15, `предпросмотр насчитал добавления (${preview.added_total})`);
   assert(JSON.stringify(await snapshot(bobId)) === JSON.stringify(bobBefore), "предпросмотр ничего не записал");
-  assert(preview.errors.length === 0, `в архиве нет ошибок строк: ${JSON.stringify(preview.errors)}`);
+  assert(preview.errors.length === 1 && /чаще раза/.test(preview.errors[0].message),
+    `единственная ошибка — слишком частый повтор: ${JSON.stringify(preview.errors)}`);
+  assert(preview.active_reminders === 3, `предпросмотр называет напоминания, которые начнут срабатывать (${preview.active_reminders})`);
+
+  // Загрузка уже идёт (блокировка взята другим соединением) — отказ сразу, без ожидания.
+  const holder = await admin.connect();
+  let refused = false;
+  try {
+    await holder.query("BEGIN");
+    await holder.query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))", [`evaself.archive.import:${bobId}`]);
+    const started = Date.now();
+    try {
+      await service().apply(BOB, archive, createHash("sha256").update(archive).digest("hex"));
+    } catch (error) {
+      refused = error?.statusCode === 409 && Date.now() - started < 5_000;
+    }
+  } finally {
+    await holder.query("ROLLBACK");
+    holder.release();
+  }
+  assert(refused, "вторая загрузка того же человека отклонена сразу (409)");
 
   let changed = false;
   try {
@@ -234,11 +291,38 @@ try {
     "профиль: имя не перезаписано, пустой город заполнен");
   assert(bobAfter.users[0].timezone === "Europe/Moscow", "пояс по умолчанию заполнен из архива");
   assert(bobAfter.user_preferences[0]?.response_mode === "both", "настройки созданы, раз их не было");
-  assert(bobAfter.onboarding_fields.length === 2, "ответы анкеты добавлены");
+  assert(bobAfter.onboarding_fields.length === 3, "ответы анкеты добавлены, отказ отвечать — нет");
+  assert(bobAfter.onboarding_fields.find((item) => item.field_key === "recovery_methods")?.status === "candidate",
+    "чувствительное поле из файла пришло предположением");
+  assert(bobAfter.budget_entries.filter((item) => Number(item.amount_minor) === 20000).length === 2,
+    "две одинаковые покупки на чистом аккаунте — две записи");
+  assert(!bobAfter.tasks.some((item) => item.title === "Слишком часто"), "повтор каждые пять минут не загружен");
+  const { rows: [decision] } = await admin.query("SELECT options FROM eva_decisions WHERE user_id = $1", [bobId]);
+  assert(JSON.stringify(decision.options) === JSON.stringify(["да", "нет, осенью\nесли не успею"]),
+    "вариант решения с переводом строки вернулся одним пунктом");
+  const longEntry = bobAfter.journal_entries.find((item) => item.content.startsWith("Длинный день"));
+  assert(longEntry && longEntry.content.length === aliceBefore.journal_entries.find((item) => item.content.startsWith("Длинный день")).content.length,
+    "запись дневника длиннее ячейки Excel вернулась целиком");
+  assert(tasks["Повтор без расписания"] && tasks["Повтор без расписания"].next_run_at === null,
+    "«повторять» без расписания загружено разовой задачей без срока");
   assert(bobAfter.eva_notes.some((item) => item.title === "Секрет Боба"), "своя заметка Боба на месте");
 
+  // ---- час перевода часов: 01:30 бывает дважды -------------------------
+  const { rows: [carol] } = await admin.query(
+    `INSERT INTO users (telegram_id, first_name, timezone, timezone_source) VALUES ($1, 'Кэрол', 'America/New_York', 'iana') RETURNING id`,
+    [CAROL]);
+  // 06:30Z 1 ноября 2026 — второе 01:30 по Нью-Йорку (после перевода).
+  await admin.query(
+    `INSERT INTO tasks (user_id, title, remind_at, next_run_at, timezone)
+     VALUES ($1, 'Ночной звонок', '2026-11-01T06:30:00Z', '2026-11-01T06:30:00Z', 'America/New_York')`, [carol.id]);
+  sent.length = 0;
+  await service().export(CAROL);
+  const carolArchive = sent[0].bytes;
+  const carolAgain = await service().apply(CAROL, carolArchive, createHash("sha256").update(carolArchive).digest("hex"));
+  assert(carolAgain.added_total === 0, `задача в повторяющемся часе не задвоилась (${carolAgain.added_total})`);
+
   // ---- повтор той же загрузки ---------------------------------------
-  const repeat = await service().apply(BOB, archive, null);
+  const repeat = await service().apply(BOB, archive, mark);
   assert(repeat.added_total === 0, "повторная загрузка Бобу ничего не добавила");
   assert(JSON.stringify(await snapshot(bobId)) === JSON.stringify(bobAfter), "повторная загрузка ничего не изменила");
   assert(JSON.stringify(await snapshot(aliceId)) === JSON.stringify(aliceBefore), "данные Алисы не тронуты загрузкой Боба");

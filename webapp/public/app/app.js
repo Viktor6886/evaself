@@ -108,9 +108,12 @@
       document.getElementById("journal-add-top").hidden = !state.journalEnabled;
       // Вкладка «База знаний» появляется, только если сервер её включил.
       // Отказ пробы запуск не прерывает: он означает «вкладки нет».
-      await window.EvaKnowledge?.probe?.().catch(() => undefined);
-      // «Мои данные» (архив в Excel) — тоже только при включённой функции.
-      await window.EvaArchive?.probe?.().catch(() => undefined);
+      // «Мои данные» (архив в Excel) — тоже только при включённой функции;
+      // пробы независимы и идут параллельно.
+      await Promise.all([
+        window.EvaKnowledge?.probe?.().catch(() => undefined),
+        window.EvaArchive?.probe?.().catch(() => undefined),
+      ]);
       // Окна инициативы подгружаются вместе с остальным профилем, чтобы
       // строка настроек сразу показывала выбранное, а не «Открыть».
       // Отказ не мешает запуску: раздел просто откроется пустым.

@@ -16,16 +16,20 @@ export const ARCHIVE_VERSION = 1;
 /** Сколько строк одного листа уходит в файл и принимается из файла. */
 export const SHEET_ROW_LIMIT = 10_000;
 
-/** Текст длиннее ячейки Excel продолжается в соседних столбцах. */
+/**
+ * Текст длиннее ячейки Excel (32 767 знаков) продолжается в соседних
+ * столбцах «… (продолжение N)» — столько, сколько нужно самому длинному
+ * значению столбца. Предел одного значения — защита размера файла: длиннее
+ * в базе ничего не пишется, и выгрузка называет обрезанное в «О файле».
+ */
 export const SPILL_CHUNK = 32_000;
+export const MAX_VALUE_LENGTH = 1_000_000;
 
 export interface ArchiveColumn {
   key: string;
   header: string;
   kind: ColumnKind;
   width?: number;
-  /** Число столбцов-продолжений для текста длиннее ячейки Excel. */
-  spill?: number;
 }
 
 export type SheetId =
@@ -242,7 +246,7 @@ export const SHEETS: readonly ArchiveSheet[] = [
   {
     id: "notes", name: "Заметки", importable: true, columns: [
       { key: "title", header: "Заголовок", kind: "text", width: 32 },
-      { key: "content", header: "Текст", kind: "longtext", width: 80, spill: 3 },
+      { key: "content", header: "Текст", kind: "longtext", width: 80 },
       { key: "category", header: "Категория", kind: "text", width: 16 },
       { key: "tags", header: "Теги", kind: "text", width: 20 },
       { key: "pinned", header: "Закреплена", kind: "bool" },
@@ -399,7 +403,7 @@ export const SHEETS: readonly ArchiveSheet[] = [
     id: "research", name: "Исследования", importable: false, columns: [
       { key: "query", header: "Запрос", kind: "longtext", width: 40 },
       { key: "status", header: "Статус", kind: "text", width: 12 },
-      { key: "summary", header: "Итог", kind: "longtext", width: 60, spill: 1 },
+      { key: "summary", header: "Итог", kind: "longtext", width: 60 },
       created("Начато"),
       { key: "completed_at", header: "Завершено", kind: "datetime" },
     ],
@@ -436,7 +440,7 @@ export const SHEETS: readonly ArchiveSheet[] = [
   {
     id: "memory", name: "Память Евы", importable: false, columns: [
       { key: "field", header: "Раздел", kind: "text", width: 28 },
-      { key: "value", header: "Содержание", kind: "longtext", width: 100, spill: 2 },
+      { key: "value", header: "Содержание", kind: "longtext", width: 100 },
     ],
   },
 ];
@@ -447,14 +451,23 @@ export function sheet(id: SheetId): ArchiveSheet {
   return SHEET_BY_ID.get(id)!;
 }
 
-/** Столбцы листа с продолжениями длинного текста — так они лежат в файле. */
-export function physicalColumns(definition: ArchiveSheet): Array<{ column: ArchiveColumn; part: number; header: string }> {
-  return definition.columns.flatMap((column) => [
-    { column, part: 0, header: column.header },
-    ...Array.from({ length: column.spill ?? 0 }, (_, index) => ({
-      column,
-      part: index + 1,
-      header: `${column.header} (продолжение ${index + 1})`,
-    })),
-  ]);
+/** Заголовок столбца-продолжения: по нему загрузка склеивает текст обратно. */
+export function continuationHeader(header: string, part: number): string {
+  return `${header} (продолжение ${part})`;
+}
+
+export const CONTINUATION = /^(.*\S)\s+\(продолжение\s+(\d{1,3})\)$/u;
+
+/**
+ * Столбцы листа так, как они лежат в файле: `parts` — сколько частей
+ * нужно каждому столбцу (по самому длинному значению), по умолчанию одна.
+ */
+export function physicalColumns(
+  definition: ArchiveSheet,
+  parts: ReadonlyMap<string, number> = new Map(),
+): Array<{ column: ArchiveColumn; part: number; header: string }> {
+  return definition.columns.flatMap((column) => Array.from(
+    { length: Math.max(parts.get(column.key) ?? 1, 1) },
+    (_, part) => ({ column, part, header: part === 0 ? column.header : continuationHeader(column.header, part) }),
+  ));
 }

@@ -16,7 +16,7 @@ export interface DataArchivePublic {
   overview(): { enabled: boolean; memory: boolean; max_bytes: number };
   export(telegramId: number): Promise<unknown>;
   preview(telegramId: number, file: Buffer): Promise<unknown>;
-  apply(telegramId: number, file: Buffer, expectedSha256: string | null): Promise<unknown>;
+  apply(telegramId: number, file: Buffer, expectedSha256: string): Promise<unknown>;
 }
 
 /** Лимит по человеку поверх общего: сборка архива — дорогая операция. */
@@ -72,11 +72,13 @@ export function registerArchivePublicRoutes(
   publicApp.post("/archive/import", { bodyLimit: FILE_LIMIT + 64 * 1024 }, async (request) => {
     const archiveService = service();
     const telegramId = telegramIdOf(request);
+    // Запись — только второй шаг после предпросмотра: отметка того файла,
+    // который человек видел, обязательна.
     const expected = (request.query as { sha256?: unknown } | undefined)?.sha256;
-    if (expected !== undefined && (typeof expected !== "string" || !SHA256.test(expected))) {
-      throw badRequest("Некорректная отметка предпросмотра");
+    if (typeof expected !== "string" || !SHA256.test(expected)) {
+      throw badRequest("Сначала посмотри, что добавится: загрузи файл ещё раз");
     }
     await rateLimit(`public:archive:import:${telegramId}`, 5, 600);
-    return await archiveService.apply(telegramId, await uploadedFile(request), typeof expected === "string" ? expected : null);
+    return await archiveService.apply(telegramId, await uploadedFile(request), expected);
   });
 }
