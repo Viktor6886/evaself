@@ -198,6 +198,18 @@ async function bookWithSheet(sheetXml: string, extra: Record<string, string> = {
 }
 
 /**
+ * Процессорное время вызова, а не время по часам: под нагрузкой CI
+ * (параллельные тесты и сборки образов) часы идут втрое-вдесятеро
+ * быстрее работы самого разбора, а процессорное время — нет.
+ */
+async function cpuMs(run: () => Promise<unknown>): Promise<number> {
+  const before = process.cpuUsage();
+  await run();
+  const spent = process.cpuUsage(before);
+  return (spent.user + spent.system) / 1000;
+}
+
+/**
  * Враждебный XML разбирается за линейное время. Прежний разбор
  * регулярными выражениями перечитывал хвост от каждого незакрытого тега:
  * 80 000 незакрытых `<row>` — 10 секунд, атрибут в 200 000 знаков — 36.
@@ -212,23 +224,37 @@ test("чтение: незакрытые теги и огромные атриб
     ["DOCTYPE в середине", await bookWithSheet(`<worksheet><!DOCTYPE x [<!ENTITY a "b">]><sheetData/></worksheet>`)],
   ];
   for (const [name, bytes] of cases) {
-    const started = performance.now();
-    await assert.rejects(readWorkbook(bytes), (error: unknown) => error instanceof WorkbookFormatError, name);
-    const elapsed = performance.now() - started;
-    assert.ok(elapsed < 1_500, `${name}: ${Math.round(elapsed)} мс`);
+    const spent = await cpuMs(() =>
+      assert.rejects(readWorkbook(bytes), (error: unknown) => error instanceof WorkbookFormatError, name));
+    assert.ok(spent < 1_500, `${name}: ${Math.round(spent)} мс процессора`);
   }
 });
 
+/**
+ * Самый большой разрешённый лист — меньше трёх секунд процессора, а
+ * вчетверо больше строк — меньше чем в восемь раз больше процессора:
+ * линейный разбор тратит примерно вчетверо больше (с постоянными
+ * затратами — меньше), квадратичный — до шестнадцати раз. Отношение не
+ * зависит ни от скорости машины, ни от соседей по CI.
+ */
 test("чтение: большой честный лист разбирается за линейное время", async () => {
-  const rows = Array.from({ length: 20_000 }, (_, index) =>
-    `<row r="${index + 1}"><c r="A${index + 1}" t="inlineStr"><is><t>строка ${index}</t></is></c><c r="B${index + 1}"><v>${index}</v></c></row>`);
-  const bytes = await bookWithSheet(`<worksheet><sheetData>${rows.join("")}</sheetData></worksheet>`);
-  const started = performance.now();
-  const book = await readWorkbook(bytes);
-  const elapsed = performance.now() - started;
+  const sheetOf = (count: number) => bookWithSheet(`<worksheet><sheetData>${Array.from({ length: count }, (_, index) =>
+    `<row r="${index + 1}"><c r="A${index + 1}" t="inlineStr"><is><t>строка ${index}</t></is></c><c r="B${index + 1}"><v>${index}</v></c></row>`,
+  ).join("")}</sheetData></worksheet>`);
+  const small = await sheetOf(5_000);
+  const large = await sheetOf(20_000);
+  // Первый разбор компилирует сканер — в замер он не входит; из двух
+  // замеров берётся меньший, чтобы случайная сборка мусора не решала исход.
+  await readWorkbook(small);
+  const cheapest = async (bytes: Buffer) => Math.min(await cpuMs(() => readWorkbook(bytes)), await cpuMs(() => readWorkbook(bytes)));
+  const smallSpent = await cheapest(small);
+  const largeSpent = await cheapest(large);
+  const book = await readWorkbook(large);
   assert.equal(book.sheets[0]!.rows.length, 20_000);
   assert.deepEqual(book.sheets[0]!.rows[19_999], ["строка 19999", 19_999]);
-  assert.ok(elapsed < 3_000, `20 000 строк: ${Math.round(elapsed)} мс`);
+  const spent = `20 000 строк — ${Math.round(largeSpent)} мс процессора, 5 000 — ${Math.round(smallSpent)} мс`;
+  assert.ok(largeSpent < 3_000, spent);
+  assert.ok(largeSpent < smallSpent * 8, spent);
 });
 
 test("чтение: `>` внутри значения атрибута и CDATA не ломают разбор", async () => {

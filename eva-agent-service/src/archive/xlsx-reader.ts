@@ -160,18 +160,30 @@ function excelUnescape(text: string): string {
 const YIELD_EVERY = 20_000;
 const pause = () => new Promise<void>((resolve) => setImmediate(resolve));
 
-async function* tokens(xml: string): AsyncGenerator<XmlToken> {
-  let count = 0;
+/**
+ * Токены части книги. Перебор синхронный, а паузу делает вызывающий
+ * (`pacer`): асинхронный генератор создавал по промису на каждый токен,
+ * а под AsyncLocalStorage сервиса каждый промис ещё проходит через async
+ * hooks — разбор большого листа становился в 2,5–10 раз дороже.
+ */
+function* tokens(xml: string): Generator<XmlToken> {
   try {
-    for (const token of scanXml(xml)) {
-      yield token;
-      count += 1;
-      if (count % YIELD_EVERY === 0) await pause();
-    }
+    yield* scanXml(xml);
   } catch (error) {
     if (error instanceof XmlFormatError) throw new WorkbookFormatError("xlsx_xml_malformed");
     throw error;
   }
+}
+
+/** Счётчик токенов: `true` раз в `YIELD_EVERY` — пора отдать цикл событий. */
+function pacer(): () => boolean {
+  let count = 0;
+  return () => {
+    count += 1;
+    if (count < YIELD_EVERY) return false;
+    count = 0;
+    return true;
+  };
 }
 
 function joinPath(base: string, target: string): string {
@@ -191,7 +203,9 @@ function relsPath(part: string): string {
 
 async function relationships(xml: string): Promise<Array<{ id: string; type: string; target: string }>> {
   const found: Array<{ id: string; type: string; target: string }> = [];
-  for await (const token of tokens(xml)) {
+  const due = pacer();
+  for (const token of tokens(xml)) {
+    if (due()) await pause();
     if (token.kind !== "open" || token.name !== "Relationship") continue;
     found.push({
       id: token.attrs.get("Id") ?? "",
@@ -205,7 +219,9 @@ async function relationships(xml: string): Promise<Array<{ id: string; type: str
 async function workbookInfo(xml: string): Promise<{ date1904: boolean; sheets: Array<{ name: string; relId: string | undefined }> }> {
   let date1904 = false;
   const sheets: Array<{ name: string; relId: string | undefined }> = [];
-  for await (const token of tokens(xml)) {
+  const due = pacer();
+  for (const token of tokens(xml)) {
+    if (due()) await pause();
     if (token.kind !== "open") continue;
     if (token.name === "workbookPr") {
       const value = token.attrs.get("date1904");
@@ -223,7 +239,9 @@ async function sharedStrings(xml: string, limits: ReadLimits): Promise<string[]>
   let item: string[] | null = null;
   let phonetic = 0;
   let text: string[] | null = null;
-  for await (const token of tokens(xml)) {
+  const due = pacer();
+  for (const token of tokens(xml)) {
+    if (due()) await pause();
     if (token.kind === "text") {
       if (text) text.push(token.text);
     } else if (token.kind === "open") {
@@ -354,7 +372,9 @@ async function parseSheet(xml: string, strings: readonly string[], limits: ReadL
     cell = null;
   };
 
-  for await (const token of tokens(xml)) {
+  const due = pacer();
+  for (const token of tokens(xml)) {
+    if (due()) await pause();
     if (token.kind === "text") {
       if (capture) capture.push(token.text);
       continue;
