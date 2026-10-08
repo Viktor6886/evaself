@@ -132,6 +132,13 @@
     return parts.join("");
   }
 
+  /** Почему добавлять нечего: всё уже есть, строки с ошибками или записей нет. */
+  function nothingToAdd(report) {
+    if (report.error_count > 0) return "Добавить нечего: новые строки с ошибками — поправь их в файле и загрузи снова.";
+    if (Number(report.existing_total) > 0) return "Новых записей нет — всё из файла уже есть у Евы.";
+    return "В файле нет записей, которые можно загрузить.";
+  }
+
   function previewHtml() {
     const { escapeHtml } = app();
     const report = state.preview;
@@ -140,7 +147,7 @@
       <h3>Что добавится</h3>
       <p class="archive-hint">Из файла «${escapeHtml(state.file?.name || "архив")}». Существующие записи не изменятся.</p>
       ${report.sheets?.length ? sheetList(report.sheets) : ""}
-      ${added === 0 ? '<p class="archive-done">Новых записей нет — всё из файла уже есть у Евы.</p>' : ""}
+      ${added === 0 ? `<p class="archive-done">${nothingToAdd(report)}</p>` : ""}
       ${notes(report)}
       ${report.memory_handoff ? '<p class="archive-hint">Память Евы из файла сама в память не записывается — её можно передать Еве в чате.</p>' : ""}
       <div class="action-row">

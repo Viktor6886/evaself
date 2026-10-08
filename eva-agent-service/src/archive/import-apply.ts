@@ -324,8 +324,11 @@ export async function applyArchive(
       "SELECT title, due_at, remind_at, cron_expression FROM tasks WHERE user_id = $1",
       [userId],
     );
+    // Время сравнивается с точностью до минуты: в файле оно до минуты, а
+    // «напомни через десять минут» хранит и секунды. Иначе тот же архив,
+    // загруженный тому же человеку, добавил бы такие задачи второй раз.
     const fingerprint = (title: string, at: Date | null, cron: string | null) =>
-      `${fold(title)}|${at ? at.getTime() : ""}|${cron ?? ""}`;
+      `${fold(title)}|${at ? Math.floor(at.getTime() / 60_000) : ""}|${cron ?? ""}`;
     const known = new Set(rows.map((row) => fingerprint(row.title, row.remind_at ?? row.due_at, row.cron_expression)));
     for (const { row, value } of parsed.tasks) {
       const zone = value.timezone ?? parsed.zone;
@@ -446,7 +449,7 @@ function gender(value: string): string {
   const folded = fold(value);
   if (["masculine", "мужской", "м"].includes(folded)) return "masculine";
   if (["feminine", "женский", "ж"].includes(folded)) return "feminine";
-  return value;
+  throw new Error("грамматический род — «мужской» или «женский»");
 }
 
 /** Обращение к Еве с памятью из файла — его человек отправит сам. */

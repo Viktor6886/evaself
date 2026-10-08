@@ -129,6 +129,11 @@ try {
      VALUES ($1, 'Найти лучший план тренировок', 'action', '2026-12-02T07:00:00Z', '2026-12-02T07:00:00Z', 'Europe/Moscow')`,
     [aliceId]);
   await admin.query(`INSERT INTO tasks (user_id, title, status, completed_at) VALUES ($1, 'Старая задача', 'done', now())`, [aliceId]);
+  // «Напомни через десять минут» хранит секунды, а файл — минуты: тот же
+  // архив, загруженный тому же человеку, не должен задвоить такую задачу.
+  await admin.query(
+    `INSERT INTO tasks (user_id, title, remind_at, next_run_at, timezone)
+     VALUES ($1, 'Выпить воды', '2026-12-03T07:00:42.123Z', '2026-12-03T07:00:42.123Z', 'Europe/Moscow')`, [aliceId]);
   const { rows: [entry] } = await admin.query(
     `INSERT INTO journal_entries (user_id, local_date, title, content, mood, energy)
      VALUES ($1, '2026-10-01', 'Пробежка', E'Пробежала 10 км.\r\nУстала, но довольна.', 'good', 7) RETURNING id`, [aliceId]);
