@@ -1,0 +1,252 @@
+/**
+ * Архив данных человека на НАСТОЯЩЕЙ базе (docs/data-archive.md).
+ *
+ * Поддельная база в тестах сервиса не исполняет ни `ON CONFLICT ... DO
+ * UPDATE ... WHERE`, ни ограничения таблиц, ни хэш содержания в SQL, а
+ * загрузка архива держится именно на них:
+ *
+ *   • выгрузка проходит через настоящую границу арендатора (`Database`
+ *     с проверкой каждого запроса) и не берёт чужих строк;
+ *   • архив, загруженный обратно тому же человеку, ничего не добавляет и
+ *     ничего не меняет — ни одна существующая строка не переписана;
+ *   • другой человек получает все записи, связи цель → результат →
+ *     задача и запись дневника → люди сохраняются;
+ *   • прошедшее напоминание из архива не срабатывает, повторяющееся
+ *     ждёт следующего срока, а поручение Еве приходит выключенным;
+ *   • повторная загрузка идемпотентна, предпросмотр ничего не пишет.
+ *
+ * Скрипт заводит собственных пользователей и убирает за собой.
+ */
+
+import pg from "../../eva-agent-service/node_modules/pg/lib/index.js";
+import { Database } from "../../eva-agent-service/dist/db.js";
+import { DataArchiveService } from "../../eva-agent-service/dist/archive/service.js";
+import { readWorkbook } from "../../eva-agent-service/dist/archive/xlsx-reader.js";
+
+const url = process.env.DATABASE_URL;
+if (!url) throw new Error("DATABASE_URL не задан");
+const admin = new pg.Pool({ connectionString: url });
+const db = new Database(url);
+await db.connect();
+
+function assert(condition, message) {
+  if (!condition) {
+    console.error(`::error::${message}`);
+    throw new Error(message);
+  }
+  console.log(`  ✔ ${message}`);
+}
+
+const NOW = new Date("2026-10-07T09:00:00Z");
+const ALICE = 9_870_001;
+const BOB = 9_870_002;
+const sent = [];
+const service = (telegramIdNow = NOW) => new DataArchiveService({
+  db,
+  telegram: { sendDocument: async (chatId, bytes, filename) => { sent.push({ chatId, bytes: Buffer.from(bytes), filename }); } },
+  flags: { enabled: () => true, memory: () => true },
+  memory: { read: async () => ({ human: "Любит горы. Гипотеза: устаёт от шума.", current_state: "Готовится к марафону." }) },
+  now: () => telegramIdNow,
+});
+
+async function cleanup() {
+  await admin.query("DELETE FROM users WHERE telegram_id = ANY($1::bigint[])", [[ALICE, BOB]]);
+}
+
+/** Снимок пользовательских таблиц: число строк и их содержимое без служебных полей. */
+async function snapshot(userId) {
+  const tables = {
+    goals: "SELECT id, parent_goal_id, title, status, user_confirmed, updated_at FROM goals",
+    goal_results: "SELECT id, goal_id, parent_result_id, title, updated_at FROM goal_results",
+    tasks: "SELECT id, title, status, kind, next_run_at, last_run_at, reminders_enabled, goal_id, goal_result_id, updated_at FROM tasks",
+    journal_entries: "SELECT id, local_date, content, share_state, updated_at FROM journal_entries",
+    journal_people: "SELECT id, display_name, relation, updated_at FROM journal_people",
+    journal_entry_people: "SELECT entry_id, person_id FROM journal_entry_people",
+    eva_notes: "SELECT id, title, length(content) AS length, updated_at FROM eva_notes",
+    user_checkins: "SELECT id, local_date, mood, updated_at FROM user_checkins",
+    budget_entries: "SELECT id, occurred_on, amount_minor, updated_at FROM budget_entries",
+    eva_decisions: "SELECT id, question, updated_at FROM eva_decisions",
+    onboarding_fields: "SELECT id, field_key, field_value, status, updated_at FROM onboarding_fields",
+    user_north: "SELECT desired_direction, updated_at FROM user_north",
+    user_preferences: "SELECT response_mode, agent_mode, updated_at FROM user_preferences",
+  };
+  const result = {};
+  for (const [table, sql] of Object.entries(tables)) {
+    const { rows } = await admin.query(`${sql} WHERE user_id = $1 ORDER BY 1`, [userId]);
+    result[table] = rows;
+  }
+  const { rows } = await admin.query("SELECT first_name, last_name, city, timezone, updated_at FROM users WHERE id = $1", [userId]);
+  result.users = rows;
+  return result;
+}
+
+await cleanup();
+try {
+  const { rows: [alice] } = await admin.query(
+    `INSERT INTO users (telegram_id, first_name, timezone, timezone_source, city)
+     VALUES ($1, 'Алиса', 'Europe/Moscow', 'iana', 'Москва') RETURNING id`, [ALICE]);
+  const { rows: [bob] } = await admin.query(
+    "INSERT INTO users (telegram_id, first_name) VALUES ($1, 'Боб') RETURNING id", [BOB]);
+  const aliceId = Number(alice.id);
+  const bobId = Number(bob.id);
+
+  // ---- данные Алисы ---------------------------------------------------
+  await admin.query(`INSERT INTO user_preferences (user_id, response_mode, agent_mode) VALUES ($1, 'both', 'coach')`, [aliceId]);
+  await admin.query(
+    `INSERT INTO onboarding_fields (user_id, field_key, field_value, status, sensitivity)
+     VALUES ($1, 'preferred_name', 'Аля', 'confirmed', 'normal')`, [aliceId]);
+  await admin.query(
+    `INSERT INTO onboarding_fields (user_id, field_key, field_json, status, sensitivity)
+     VALUES ($1, 'interests', '["бег", "горы"]'::jsonb, 'candidate', 'normal')`, [aliceId]);
+  await admin.query(
+    `INSERT INTO user_north (user_id, desired_direction, values, user_confirmed)
+     VALUES ($1, 'Здоровье и спокойствие', '["здоровье", "семья"]'::jsonb, true)`, [aliceId]);
+  const { rows: [parentGoal] } = await admin.query(
+    `INSERT INTO goals (user_id, title, status, user_confirmed, success_criteria)
+     VALUES ($1, 'Пробежать марафон', 'active', true, '["42 км", "без травм"]'::jsonb) RETURNING id`, [aliceId]);
+  const { rows: [childGoal] } = await admin.query(
+    `INSERT INTO goals (user_id, parent_goal_id, title, status) VALUES ($1, $2, 'Набрать базу', 'draft') RETURNING id`,
+    [aliceId, parentGoal.id]);
+  const { rows: [result] } = await admin.query(
+    `INSERT INTO goal_results (user_id, goal_id, title, status) VALUES ($1, $2, 'Полумарафон', 'in_progress') RETURNING id`,
+    [aliceId, parentGoal.id]);
+  await admin.query(
+    `INSERT INTO goal_results (user_id, goal_id, parent_result_id, title) VALUES ($1, $2, $3, 'Десятка')`,
+    [aliceId, parentGoal.id, result.id]);
+  // Прошедшее разовое, будущее разовое, повторяющееся и поручение Еве.
+  await admin.query(
+    `INSERT INTO tasks (user_id, title, remind_at, next_run_at, timezone, goal_id, goal_result_id)
+     VALUES ($1, 'Купить кроссовки', '2026-09-01T07:00:00Z', '2026-09-01T07:00:00Z', 'Europe/Moscow', $2, $3)`,
+    [aliceId, parentGoal.id, result.id]);
+  await admin.query(
+    `INSERT INTO tasks (user_id, title, remind_at, next_run_at, timezone)
+     VALUES ($1, 'Записаться к врачу', '2026-12-01T07:00:00Z', '2026-12-01T07:00:00Z', 'Europe/Moscow')`, [aliceId]);
+  await admin.query(
+    `INSERT INTO tasks (user_id, title, cron_expression, repeat_enabled, timezone, next_run_at)
+     VALUES ($1, 'Утренняя пробежка', '0 7 * * *', true, 'Europe/Moscow', '2026-10-08T04:00:00Z')`, [aliceId]);
+  await admin.query(
+    `INSERT INTO tasks (user_id, title, kind, remind_at, next_run_at, timezone)
+     VALUES ($1, 'Найти лучший план тренировок', 'action', '2026-12-02T07:00:00Z', '2026-12-02T07:00:00Z', 'Europe/Moscow')`,
+    [aliceId]);
+  await admin.query(`INSERT INTO tasks (user_id, title, status, completed_at) VALUES ($1, 'Старая задача', 'done', now())`, [aliceId]);
+  const { rows: [entry] } = await admin.query(
+    `INSERT INTO journal_entries (user_id, local_date, title, content, mood, energy)
+     VALUES ($1, '2026-10-01', 'Пробежка', E'Пробежала 10 км.\r\nУстала, но довольна.', 'good', 7) RETURNING id`, [aliceId]);
+  const { rows: [mom] } = await admin.query(
+    `INSERT INTO journal_people (user_id, display_name, normalized, relation) VALUES ($1, 'Мама', 'мама', 'мама') RETURNING id`, [aliceId]);
+  await admin.query(`INSERT INTO journal_entry_people (user_id, entry_id, person_id) VALUES ($1, $2, $3)`, [aliceId, entry.id, mom.id]);
+  await admin.query(
+    `INSERT INTO eva_notes (user_id, title, content, tags) VALUES ($1, 'Длинная', $2, ARRAY['бег','план'])`,
+    [aliceId, `${"Абзац про тренировки. ".repeat(3_000)}конец`]);
+  await admin.query(
+    `INSERT INTO eva_notes (user_id, title, content) VALUES ($1, '=формула?', '_x000D_ буквально и <тег>')`, [aliceId]);
+  await admin.query(
+    `INSERT INTO user_checkins (user_id, local_date, mood, energy, tension, note) VALUES ($1, '2026-10-02', 'neutral', 5, 4, 'ок')`,
+    [aliceId]);
+  await admin.query(
+    `INSERT INTO budget_entries (user_id, occurred_on, entry_type, amount_minor, category, store)
+     VALUES ($1, '2026-10-03', 'expense', 1234550, 'спорт', 'Спортмастер')`, [aliceId]);
+  await admin.query(
+    `INSERT INTO eva_decisions (user_id, question, options, confidence)
+     VALUES ($1, 'Бежать ли весной?', '["да", "нет, осенью"]'::jsonb, 70)`, [aliceId]);
+  await admin.query(
+    `INSERT INTO work_blocks (user_id, goal_id, intention, status) VALUES ($1, $2, 'Интервалы', 'planned')`,
+    [aliceId, childGoal.id]).catch(() => undefined);
+  // Строка Боба: выгрузка Алисы обязана её не увидеть.
+  await admin.query(`INSERT INTO eva_notes (user_id, title, content) VALUES ($1, 'Секрет Боба', 'не для Алисы')`, [bobId]);
+
+  // ---- выгрузка --------------------------------------------------------
+  const exported = await service().export(ALICE);
+  assert(sent.length === 1 && sent[0].chatId === ALICE, "архив отправлен Алисе в её чат");
+  assert(exported.filename === "eva-archive-2026-10-07.xlsx", "имя файла — дата по поясу человека");
+  const archive = sent[0].bytes;
+  const book = await readWorkbook(archive);
+  const names = book.sheets.map((sheet) => sheet.name);
+  assert(names[0] === "О файле" && names.includes("Задачи и напоминания") && names.includes("Память Евы"),
+    "в книге лист «О файле», задачи и память");
+  const flat = JSON.stringify(book);
+  assert(!flat.includes("Секрет Боба"), "чужая заметка в архив не попала");
+  assert(flat.includes("Любит горы"), "память Евы выгружена по флагу");
+  const aliceBefore = await snapshot(aliceId);
+
+  // ---- обратно тому же человеку: ничего не добавляется и не меняется ---
+  const again = await service().apply(ALICE, archive, null);
+  assert(again.added_total === 0, `повторная загрузка тому же человеку ничего не добавила (${again.added_total})`);
+  assert(again.existing_total > 10, "все записи узнаны как уже существующие");
+  assert(JSON.stringify(await snapshot(aliceId)) === JSON.stringify(aliceBefore), "ни одна строка Алисы не изменилась");
+  assert(again.memory_handoff && again.memory_handoff.includes("Готовится к марафону"), "память предлагается передать Еве");
+
+  // ---- другому человеку: предпросмотр ничего не пишет --------------------
+  const bobBefore = await snapshot(bobId);
+  const preview = await service().preview(BOB, archive);
+  assert(preview.applied === false && preview.added_total > 15, `предпросмотр насчитал добавления (${preview.added_total})`);
+  assert(JSON.stringify(await snapshot(bobId)) === JSON.stringify(bobBefore), "предпросмотр ничего не записал");
+  assert(preview.errors.length === 0, `в архиве нет ошибок строк: ${JSON.stringify(preview.errors)}`);
+
+  let changed = false;
+  try {
+    await service().apply(BOB, Buffer.concat([archive, Buffer.from([0])]), preview.file_sha256);
+  } catch (error) {
+    changed = error?.statusCode === 409;
+  }
+  assert(changed, "запись другого файла после предпросмотра отклонена (409)");
+
+  const applied = await service().apply(BOB, archive, preview.file_sha256);
+  assert(applied.added_total === preview.added_total, "запись добавила ровно то, что обещал предпросмотр");
+  assert(applied.paused_actions === 1, "поручение Еве из архива пришло выключенным");
+  const bobAfter = await snapshot(bobId);
+  const goals = bobAfter.goals;
+  const marathon = goals.find((goal) => goal.title === "Пробежать марафон");
+  const base = goals.find((goal) => goal.title === "Набрать базу");
+  assert(marathon && marathon.status === "active" && marathon.user_confirmed, "активная подтверждённая цель осталась активной");
+  assert(base && String(base.parent_goal_id) === String(marathon.id), "подцель связана с новой целью Боба");
+  const halfMarathon = bobAfter.goal_results.find((item) => item.title === "Полумарафон");
+  const ten = bobAfter.goal_results.find((item) => item.title === "Десятка");
+  assert(halfMarathon && String(halfMarathon.goal_id) === String(marathon.id), "результат связан с целью");
+  assert(ten && String(ten.parent_result_id) === String(halfMarathon.id), "вложенный результат связан с родителем");
+  const tasks = Object.fromEntries(bobAfter.tasks.map((task) => [task.title, task]));
+  assert(String(tasks["Купить кроссовки"].goal_result_id) === String(halfMarathon.id), "задача связана с результатом цели");
+  assert(tasks["Купить кроссовки"].last_run_at?.getTime() === tasks["Купить кроссовки"].next_run_at?.getTime(),
+    "прошедшее напоминание помечено отработавшим");
+  assert(tasks["Записаться к врачу"].last_run_at === null && tasks["Записаться к врачу"].next_run_at.toISOString() === "2026-12-01T07:00:00.000Z",
+    "будущее напоминание ждёт своего срока");
+  assert(tasks["Утренняя пробежка"].next_run_at.toISOString() === "2026-10-08T04:00:00.000Z",
+    "повторяющаяся задача ждёт следующего утра по поясу задачи");
+  assert(tasks["Найти лучший план тренировок"].reminders_enabled === false, "поручение Еве выключено");
+  const { rows: due } = await admin.query(
+    `SELECT id FROM tasks
+      WHERE user_id = $1 AND status IN ('open', 'in_progress') AND reminders_enabled
+        AND COALESCE(next_run_at, remind_at, due_at) <= $2
+        AND (last_run_at IS NULL OR last_run_at < COALESCE(next_run_at, remind_at, due_at))`,
+    [bobId, NOW]);
+  assert(due.length === 0, "после загрузки ни одна задача не наступила сразу");
+  const note = bobAfter.eva_notes.find((item) => item.title === "Длинная");
+  assert(note && Number(note.length) === aliceBefore.eva_notes.find((item) => item.title === "Длинная").length,
+    "длинная заметка вернулась целиком через столбцы-продолжения");
+  assert(bobAfter.journal_entry_people.length === 1, "запись дневника связана с человеком");
+  assert(bobAfter.journal_entries[0].share_state === "saved", "запись дневника вернулась сохранённой");
+  assert(bobAfter.users[0].first_name === "Боб" && bobAfter.users[0].city === "Москва",
+    "профиль: имя не перезаписано, пустой город заполнен");
+  assert(bobAfter.users[0].timezone === "Europe/Moscow", "пояс по умолчанию заполнен из архива");
+  assert(bobAfter.user_preferences[0]?.response_mode === "both", "настройки созданы, раз их не было");
+  assert(bobAfter.onboarding_fields.length === 2, "ответы анкеты добавлены");
+  assert(bobAfter.eva_notes.some((item) => item.title === "Секрет Боба"), "своя заметка Боба на месте");
+
+  // ---- повтор той же загрузки ---------------------------------------
+  const repeat = await service().apply(BOB, archive, null);
+  assert(repeat.added_total === 0, "повторная загрузка Бобу ничего не добавила");
+  assert(JSON.stringify(await snapshot(bobId)) === JSON.stringify(bobAfter), "повторная загрузка ничего не изменила");
+  assert(JSON.stringify(await snapshot(aliceId)) === JSON.stringify(aliceBefore), "данные Алисы не тронуты загрузкой Боба");
+
+  const { rows: audit } = await admin.query(
+    `SELECT operation, params_redacted_json FROM audit_log
+      WHERE target = 'user_data_archive' AND at > now() - interval '5 minutes' ORDER BY at`);
+  assert(audit.some((row) => row.operation === "archive.export") && audit.some((row) => row.operation === "archive.import"),
+    "выгрузка и загрузка записаны в аудит");
+  assert(!JSON.stringify(audit).includes("марафон"), "в аудите нет содержания");
+  console.log("архив данных: выгрузка и дополняющая загрузка проверены на PostgreSQL");
+} finally {
+  await cleanup();
+  await db.close();
+  await admin.end();
+}
