@@ -109,6 +109,8 @@
       // Вкладка «База знаний» появляется, только если сервер её включил.
       // Отказ пробы запуск не прерывает: он означает «вкладки нет».
       await window.EvaKnowledge?.probe?.().catch(() => undefined);
+      // «Мои данные» (архив в Excel) — тоже только при включённой функции.
+      await window.EvaArchive?.probe?.().catch(() => undefined);
       // Окна инициативы подгружаются вместе с остальным профилем, чтобы
       // строка настроек сразу показывала выбранное, а не «Открыть».
       // Отказ не мешает запуску: раздел просто откроется пустым.
@@ -1209,6 +1211,7 @@
         ${settingsRow("conversations", "Диалоги с Евой", "Создать, выбрать или архивировать диалог", "Открыть")}
         ${settingsRow("subscription", "Подписка и квоты", "Текущий доступ и остаток квоты", state.session?.plan || "free")}
         ${settingsRow("voice", "Формат ответов", "Текст, голос или оба", responseModeTitle(user.response_mode))}
+        ${window.EvaArchive?.state?.enabled ? settingsRow("archive", "Мои данные", "Выгрузить всё в Excel или загрузить обратно", "Excel") : ""}
         ${settingsRow("initiative", "Когда Ева пишет первой", "Промежутки, в которые Ева может начать разговор", window.EvaInitiative ? window.EvaInitiative.summary() : "Открыть")}
         ${settingsRow("notifications", "Уведомления", "Конкретные поводы вернуться к Еве", state.dashboard?.next_reminder ? "Есть ближайшее" : "Открыть")}
         ${settingsRow("privacy", "Приватность", "Как хранятся данные и память Евы", "Открыть")}
@@ -1223,7 +1226,7 @@
   }
 
   function settingsRow(code, title, note, status) {
-    const icons = { conversations: "chat", subscription: "card", voice: "voice", initiative: "bell", notifications: "bell", privacy: "shield" };
+    const icons = { conversations: "chat", subscription: "card", voice: "voice", archive: "archive", initiative: "bell", notifications: "bell", privacy: "shield" };
     return `<button class="settings-row" data-setting="${code}" type="button">
       <span data-icon="${icons[code]}"></span>
       <span><strong>${title}</strong><small>${note}</small></span>
@@ -1284,6 +1287,7 @@
     // Окна инициативы живут отдельным модулем: `app.js` уже слишком
     // велик, чтобы дописывать в него разделы.
     if (code === "initiative") return void window.EvaInitiative?.open();
+    if (code === "archive") return void window.EvaArchive?.open();
     if (code === "notifications") return openNotificationsSheet();
     if (code === "privacy") return openPrivacySheet();
   }
@@ -1727,6 +1731,7 @@
       card: '<rect x="4" y="8" width="32" height="23" rx="4"/><path d="M4 15h32M9 25h8"/>',
       voice: '<rect x="13" y="4" width="12" height="21" rx="6"/><path d="M8 18c0 7 5 11 11 11s11-4 11-11M19 29v6M13 35h12"/>',
       shield: '<path d="M18 3 32 8v10c0 9-6 14-14 17C10 32 4 27 4 18V8Z"/><path d="m11 19 5 5 10-11"/>',
+      archive: '<path d="M4 7h28v7H4Z"/><path d="M6 14v16h24V14M18 18v8M14 22l4 4 4-4"/>',
       spark: '<path d="M18 3c1.5 7 4 9.5 11 11-7 1.5-9.5 4-11 11-1.5-7-4-9.5-11-11 7-1.5 9.5-4 11-11Z"/><path d="M29 24c.8 3.6 2.1 4.9 5.7 5.7-3.6.8-4.9 2.1-5.7 5.7-.8-3.6-2.1-4.9-5.7-5.7 3.6-.8 4.9-2.1 5.7-5.7Z"/>',
       flame: '<path d="M20 3c1 7-5 8-3 14 1-3 4-4 5-7 5 4 8 8 8 13 0 7-5 11-12 11S6 30 6 23c0-6 4-10 9-14 0 5 1 7 2 8-1-6 4-8 3-14Z"/>',
       award: '<circle cx="18" cy="14" r="8"/><path d="m13 21-2 12 7-4 7 4-2-12"/><path d="m18 9 1.5 3 3.3.5-2.4 2.3.6 3.3-3-1.6-3 1.6.6-3.3-2.4-2.3 3.3-.5Z"/>',

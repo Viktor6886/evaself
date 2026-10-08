@@ -58,6 +58,7 @@ const DEFAULT_WIDTH: Record<ColumnKind, number> = {
 
 // XML 1.0 не допускает управляющих символов и одиноких суррогатов:
 // файл с ними Excel отказывается открывать целиком, а не одну ячейку.
+// eslint-disable-next-line no-control-regex -- вырезаются именно они
 const INVALID_XML = /[\u0000-\u0008\u000B\u000C\u000E-\u001F￾￿]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
 
 function xmlText(value: string): string {

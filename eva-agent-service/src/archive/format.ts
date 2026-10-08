@@ -105,7 +105,7 @@ export function decimal(cell: ReadCell, name: string): number | null {
   if (cell === null || cell === undefined || cell === "") return null;
   if (typeof cell === "number") return cell;
   if (typeof cell === "boolean") throw new CellError(`«${name}»: нужно число`);
-  const normalized = cell.trim().replace(/[\s  ]/g, "").replace(",", ".");
+  const normalized = cell.trim().replace(/[\s\u00a0\u202f]/g, "").replace(",", ".");
   if (!normalized) return null;
   if (!/^[-+]?\d+(?:\.\d+)?$/.test(normalized)) throw new CellError(`«${name}»: нужно число`);
   return Number(normalized);

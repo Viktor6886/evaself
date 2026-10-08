@@ -105,12 +105,12 @@ export class DataArchiveService {
   }
 
   enabled(): boolean {
-    return this.deps.flags.enabled();
+    return this.deps.flags.enabled() === true;
   }
 
   overview(): { enabled: boolean; memory: boolean; max_bytes: number } {
     const enabled = this.enabled();
-    return { enabled, memory: enabled && this.deps.flags.memory(), max_bytes: ARCHIVE_MAX_BYTES };
+    return { enabled, memory: enabled && this.deps.flags.memory() === true, max_bytes: ARCHIVE_MAX_BYTES };
   }
 
   /** Собрать архив и отправить его человеку в чат с ботом. */
@@ -222,7 +222,7 @@ export class DataArchiveService {
   }
 
   private async memory(userId: number): Promise<MemorySnapshot> {
-    if (!this.deps.flags.memory()) return null;
+    if (this.deps.flags.memory() !== true) return null;
     if (!this.deps.memory) return "unavailable";
     try {
       return (await this.deps.memory.read(userId)) ?? "unavailable";

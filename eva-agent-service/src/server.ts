@@ -55,6 +55,7 @@ import { LlmRouterClient } from "./router/client.js";
 import type { PrefixInput } from "./letta/prefix-size.js";
 import type { PersonaSyncResult } from "./letta/persona-sync.js";
 import { webhookSecretMatches } from "./telegram.js";
+import { DataArchiveService, lettaMemorySource } from "./archive/service.js";
 
 export const VERSION = "0.3.0";
 
@@ -246,6 +247,18 @@ export function buildServer(services: Services): FastifyInstance {
     ...(services.knowledgeResearch ? { knowledgeResearch: services.knowledgeResearch } : {}),
     ...(services.knowledgeDocuments ? { knowledgeDocuments: services.knowledgeDocuments } : {}),
     ...(services.osint ? { osint: services.osint } : {}),
+    // Архив своих данных (docs/data-archive.md). Флаги читаются при каждом
+    // запросе: переключатель панели действует без перезапуска.
+    archive: new DataArchiveService({
+      db,
+      telegram,
+      flags: {
+        enabled: () => config.dataArchiveEnabled,
+        memory: () => config.dataArchiveMemoryEnabled,
+      },
+      memory: lettaMemorySource(db, letta),
+      onImported: (userId) => services.runtimeContext?.invalidate(userId),
+    }),
     // Подписка в Mini App: тот же прайс и тот же счёт, что в чате.
     // Ссылку на счёт делает Bot API — Mini App открывает её, не выходя
     // из приложения, и платёж дальше идёт обычным путём.
