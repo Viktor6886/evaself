@@ -68,7 +68,7 @@ export async function applyGoals(ctx: ApplyContext): Promise<GoalLinks> {
     for (const { row, value } of ordered(parsed.goals)) {
       const parentRef = value.parent && value.parent !== value.ref ? value.parent : null;
       const parentId = parentRef ? links.goals.get(parentRef) ?? null : null;
-      if (parentRef && parentId === null) ctx.notice("Цели: родительская цель не найдена — цель загружена без неё", row);
+      if (parentRef && parentId === null) ctx.notice("Цели: родительская цель не найдена — цель загружается без неё", row);
       const known = existing.take(fold(value.title));
       if (known !== undefined) {
         if (value.ref) links.goals.set(value.ref, known);
@@ -101,7 +101,7 @@ export async function applyGoals(ctx: ApplyContext): Promise<GoalLinks> {
       counter.added += 1;
     }
     if (downgraded > 0) {
-      ctx.warnings.push(`Цели «в работе» без отметки «Подтверждена мной» загружены черновиками: ${downgraded}.`);
+      ctx.warnings.push(`Цели «в работе» без отметки «Подтверждена мной» загружаются черновиками: ${downgraded}.`);
     }
   }
 
@@ -204,7 +204,7 @@ export async function applyTasks(ctx: ApplyContext, links: GoalLinks): Promise<{
     const remindAt = ctx.instant(value.remind_at);
     let goalId = value.goal ? links.goals.get(value.goal) ?? null : null;
     const result = value.result ? links.results.get(value.result) ?? null : null;
-    if (value.goal && goalId === null) ctx.notice("Задачи: цель не найдена — задача загружена без цели", row);
+    if (value.goal && goalId === null) ctx.notice("Задачи: цель не найдена — задача загружается без цели", row);
     if (result) goalId = result.goalId;
     const open = value.status === "open" || value.status === "in_progress";
     // Задача-действие — поручение Еве. Из файла поручение не включается
