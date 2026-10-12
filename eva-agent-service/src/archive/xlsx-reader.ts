@@ -64,7 +64,7 @@ export const DEFAULT_READ_LIMITS: ReadLimits = {
   maxSheets: 256,
   // Предел байтов не ограничивает работу: 4 МБ пустых `<c/>` — миллион
   // ячеек, а 32 МБ — восемь миллионов и секунды процессора. Честный архив
-  // в 30 000 строк (больше загрузка не примет) — около 1,1 млн единиц;
+  // в 30 000 строк (больше загрузка не примет) — около 1,2 млн единиц;
   // почти втрое больше — уже не архив, и чтение останавливается, не
   // дочитав.
   maxWork: 3_000_000,
@@ -330,6 +330,10 @@ async function sharedStrings(xml: string, limits: ReadLimits, work: Meter): Prom
     } else if (token.name === "rPh" && phonetic > 0) {
       phonetic -= 1;
     } else if (token.name === "si" && item) {
+      // Незакрытый `<t>` пережил бы свою строку: счёт длины начинается с
+      // каждой `<si>` заново, а текст копился бы дальше — десятки
+      // мегабайт мимо предела.
+      if (text) throw new WorkbookFormatError("xlsx_xml_malformed");
       strings.push(excelUnescape(item.join(""), work.spend));
       item = null;
       phonetic = 0;
@@ -431,6 +435,9 @@ async function parseSheet(xml: string, strings: readonly string[], limits: ReadL
   };
   const closeCell = () => {
     if (!row || !cell) throw malformed();
+    // Незакрытые `<v>`, `<t>` и `<is>` не переживают ячейку: счёт длины
+    // начинается с каждой `<c>` заново, а текст копился бы дальше.
+    if (capture || inInline) throw malformed();
     const { column } = cell;
     if (column !== null && column < limits.maxColumns) {
       const value = cellValue(cell.type, cell.raw ? cell.raw.join("") : null, cell.inline ? cell.inline.join("") : null, strings, work.spend);

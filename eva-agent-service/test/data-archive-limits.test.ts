@@ -380,6 +380,7 @@ test("цикл событий: чтение книги — огромный те
   const cases: Record<string, Buffer> = {
     "тег из 20 млн пробелов": await bookOf(`<worksheet><sheetData><row${block.repeat(200)}r="1"/></sheetData></worksheet>`),
     "строка из 40 кусков": await bookOf("<worksheet/>", `<sst><si>${`<r><t>${run}</t></r>`.repeat(40)}</si></sst>`),
+    "незакрытый `<t>` через 40 строк": await bookOf("<worksheet/>", `<sst><si><t>${`${run}</si><si>`.repeat(40)}</t></si></sst>`),
     "узлы из одних сущностей": await bookOf("<worksheet/>", `<sst>${`<si><t>${node}</t></si>`.repeat(40)}</sst>`),
     "миллион пустых ячеек": await bookOf(`<worksheet><sheetData>${Array.from({ length: 10_000 }, (_, index) =>
       `<row r="${index + 1}">${"<c/>".repeat(100)}</row>`).join("")}</sheetData></worksheet>`),

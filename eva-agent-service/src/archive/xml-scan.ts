@@ -56,8 +56,11 @@ export const MAX_TAG_LENGTH = 65_536;
  */
 export type Spend = (units: number) => void;
 
-/** Знаков тега на единицу работы: тег читается дважды, знак за знаком. */
-export const TAG_CHARS_PER_UNIT = 32;
+/**
+ * Знаков тега на единицу работы: тег читается дважды, знак за знаком, и
+ * 16 знаков стоят столько же, сколько пустая ячейка.
+ */
+export const TAG_CHARS_PER_UNIT = 16;
 
 /**
  * Столько атрибутов у тега — в цене самого тега: у ячейки их три
@@ -157,7 +160,9 @@ function parseAttributes(source: string, start: number, spend: Spend): ReadonlyM
     if (quote !== "\"" && quote !== "'") throw new XmlFormatError();
     const end = source.indexOf(quote, index + 1);
     if (end < 0) throw new XmlFormatError();
-    if (attrs.size >= MAX_ATTRIBUTES || end - index > MAX_ATTRIBUTE_LENGTH) throw new XmlFormatError();
+    // Повтор имени запрещён самим XML; без проверки тег из тысяч `a=""`
+    // не рос бы в таблице и обходил и предел, и плату за атрибуты.
+    if (attrs.has(name) || attrs.size >= MAX_ATTRIBUTES || end - index > MAX_ATTRIBUTE_LENGTH) throw new XmlFormatError();
     attrs.set(name, decodeXml(source.slice(index + 1, end), spend));
     if (attrs.size > FREE_ATTRIBUTES) spend(1);
     index = end + 1;

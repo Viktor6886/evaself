@@ -408,6 +408,22 @@ test("чтение: строка и ячейка из кусков считаю�
   assert.equal(fits.sheets[0]!.rows[0]![0], piece + piece);
 });
 
+test("чтение: незакрытые `<t>`, `<v>` и `<is>` не переживают строку и ячейку, повтор атрибута — ошибка формата", async () => {
+  // Счёт длины начинается с каждой `<si>` и `<c>` заново: незакрытый
+  // `<t>` копил бы текст дальше, мимо предела, — секунда без паузы.
+  const piece = "к".repeat(100_000);
+  const malformed = (error: unknown) => error instanceof WorkbookFormatError && error.code === "xlsx_xml_malformed";
+  const sheet = `<worksheet><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c></row></sheetData></worksheet>`;
+  const cases: Array<[string, Buffer]> = [
+    ["`<t>` через `</si>`", await bookWithSheet(sheet, { "xl/strings.xml": `<sst><si><t>${`${piece}</si><si>`.repeat(3)}</t></si></sst>` })],
+    ["`<t>` через `</c>`", await bookWithSheet(`<worksheet><sheetData><row r="1"><c t="inlineStr"><is><t>${`${piece}</c><c>`.repeat(3)}</t></is></c></row></sheetData></worksheet>`)],
+    ["`<v>` через `</c>`", await bookWithSheet(`<worksheet><sheetData><row r="1"><c><v>1</c></row></sheetData></worksheet>`)],
+    ["`<is>` через `</c>`", await bookWithSheet(`<worksheet><sheetData><row r="1"><c t="inlineStr"><is><t>a</t></c></row></sheetData></worksheet>`)],
+    ["повтор атрибута", await bookWithSheet(`<worksheet><sheetData><row r="1" r="2"/></sheetData></worksheet>`)],
+  ];
+  for (const [name, bytes] of cases) await assert.rejects(readWorkbook(bytes), malformed, name);
+});
+
 test("книга: атрибуты сверх четырёх платят за себя — тег из 64 атрибутов дороже своих знаков", async () => {
   // Тег из 64 коротких атрибутов читается вдвое дольше, чем стоят его
   // знаки: две части по 39 МБ таких тегов — 2,5 с процессора в пределе.
