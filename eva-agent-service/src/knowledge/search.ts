@@ -18,9 +18,10 @@
  *                                         в бюджете → источники
  *
  * Отказ векторной половины (провайдер эмбеддингов, Qdrant) не роняет
- * поиск: остаются слова, ответ помечен `degraded`. Отказ reranker — порядок
- * RRF. Теневой режим ищет вторым источником векторов в фоне и пишет только
- * метрики совпадения.
+ * поиск: остаются слова, ответ помечен `degraded`; не ответила модель
+ * включённой версии, а новая построена, — векторы из новой. Отказ reranker —
+ * порядок RRF. Теневой режим ищет вторым источником векторов в фоне и пишет
+ * только метрики совпадения.
  */
 
 import type { Database } from "../db.js";
@@ -46,6 +47,7 @@ import {
   lexicalCandidates,
   neighborChunks,
   pgvectorCandidates,
+  standbyEmbeddingVersion,
   type ActiveVersion,
   type ChunkRow,
   type SearchScope,
@@ -106,6 +108,8 @@ export interface KnowledgeSearchResult {
   diagnostics?: {
     vectorBackend: KnowledgeVectorBackend | null;
     rerank: "off" | "ok" | "failed";
+    /** Модель включённой версии не ответила: векторы — из построенной новой. */
+    vectorStandby?: number;
     candidates: number;
     /** Запрос триграмм не уложился в свою границу времени: остались слова FTS. */
     trigram?: "timeout";
@@ -155,7 +159,8 @@ const SHADOW_TIMEOUT_MS = 10_000;
 const SHADOW_DEPTH = 10;
 
 type VectorOutcome =
-  | { ok: true; list: RankedList }
+  /** `standby` — версия, которой искали вместо включённой (её модель не ответила). */
+  | { ok: true; list: RankedList; standby?: number }
   | { ok: false };
 
 export class KnowledgeSearch {
@@ -364,6 +369,7 @@ export class KnowledgeSearch {
       diagnostics: {
         vectorBackend: wantsVector ? settings.vectorBackend : null,
         rerank,
+        ...(vector?.ok && vector.standby ? { vectorStandby: vector.standby } : {}),
         candidates: candidates.length,
         ...(words?.trigramTimedOut ? { trigram: "timeout" as const } : {}),
         timings,
@@ -408,9 +414,21 @@ export class KnowledgeSearch {
       // Индекс не включали — векторной половины нет; это та же
       // урезанная выдача, что и при отказе Qdrant.
       if (!catalog.version) return { ok: false };
-      const version = catalog.version;
+      const active = catalog.version;
       // Задержку эмбеддинга версии пишет клиент роутера (`embedMany`).
-      const vector = await this.deps.embedVersion(clean, { version: version.version, dimension: version.dimension }, signal);
+      const embedIn = async (space: ActiveVersion) =>
+        ({ space, vector: await this.deps.embedVersion!(clean, { version: space.version, dimension: space.dimension }, signal) });
+      const { space: version, vector } = await embedIn(active).catch(async (error: unknown) => {
+        // Модель включённой версии не посчитала вектор (кончились средства,
+        // провайдера выключили) — так и начинают смену модели. Построенная
+        // новая версия — целое своё пространство: запрос считается её
+        // моделью и ищется в её коллекциях.
+        if (turn?.aborted || deadline.aborted) throw error;
+        const fallback = await standbyEmbeddingVersion(this.db, active.version);
+        if (!fallback) throw error;
+        return await embedIn(fallback);
+      });
+      const standby = version.version === active.version ? undefined : version.version;
       // Версия называется явно, а не через alias: вектор запроса посчитан
       // моделью этой версии, и искать им в другом пространстве нельзя.
       const options = { limit: CANDIDATES, version: version.version, ...(signal ? { signal } : {}) };
@@ -425,6 +443,7 @@ export class KnowledgeSearch {
       const hits = [...mine, ...shared].sort((a, b) => order * (a.score - b.score)).slice(0, CANDIDATES);
       return {
         ok: true,
+        ...(standby ? { standby } : {}),
         list: {
           signal: "vector",
           ids: hits.map((hit) => String(hit.chunkId)),

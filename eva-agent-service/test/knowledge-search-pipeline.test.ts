@@ -58,7 +58,12 @@ interface Lists {
   pgvector?: string[];
 }
 
-function searchDb(lists: Lists, neighbors: Array<Record<string, unknown>> = [], options: { distance?: string; activeVersion?: () => { version: number; dimension: number } } = {}) {
+function searchDb(lists: Lists, neighbors: Array<Record<string, unknown>> = [], options: {
+  distance?: string;
+  activeVersion?: () => { version: number; dimension: number };
+  /** Построенная, но не включённая версия — запасная, если модель включённой не ответила. */
+  standby?: { version: number; dimension: number; distance?: string };
+} = {}) {
   return guardedDb((sql, values) => {
     if (sql.includes("SET LOCAL")) return [];
     if (sql.includes("websearch_to_tsquery('russian'")) {
@@ -73,6 +78,9 @@ function searchDb(lists: Lists, neighbors: Array<Record<string, unknown>> = [], 
       return (values[3] as string[]).flatMap((id) => (CHUNKS[id] ? [CHUNKS[id]!] : []));
     }
     if (sql.includes("unnest($2::uuid[]")) return neighbors;
+    if (sql.includes("FROM knowledge_embedding_versions") && sql.includes("status = 'ready'")) {
+      return options.standby ? [{ distance: "Cosine", ...options.standby }] : [];
+    }
     if (sql.includes("FROM knowledge_embedding_versions")) return [{ ...(options.activeVersion?.() ?? { version: 3, dimension: 4 }), distance: options.distance ?? "Cosine" }];
     if (sql.includes("FROM knowledge_collections")) return [{ id: "col-1" }];
     throw new Error(`неожиданный запрос: ${sql.slice(0, 60)}`);
@@ -361,6 +369,76 @@ test("K7: следующий поиск сразу берёт новую акт�
   assert.equal((await search.search(77, "штраф")).degraded, false);
   assert.deepEqual(embedded, [{ version: 3, dimension: 4 }, { version: 4, dimension: 8 }]);
   assert.deepEqual(searched, [[77, 3, 4], [77, 4, 8]]);
+});
+
+test("модель включённой версии не отвечает — векторы из построенной новой версии, а не одни слова", async () => {
+  // Смена модели после того, как у провайдера включённой версии кончились
+  // средства: до переключения поиск по смыслу пропадал целиком, и вопрос
+  // без слов из документа не находил ничего.
+  const db = searchDb({}, [], { standby: { version: 4, dimension: 8 } });
+  const embedded: number[] = [];
+  const searched: Array<[string, number, number]> = [];
+  const vectors = {
+    searchPrivate: async (_userId: number, vector: number[], options: { version: number }) => {
+      searched.push(["private", options.version, vector.length]);
+      return [{ chunkId: 1, documentId: "doc-a", score: 0.8, payload: {} }];
+    },
+    searchGlobal: async (vector: number[], _collections: string[], options: { version: number }) => {
+      searched.push(["global", options.version, vector.length]);
+      return [];
+    },
+  };
+  const found = await new KnowledgeSearch(db as never, embed, {
+    settings: settings({ mode: "vector", vectorBackend: "qdrant" }),
+    vectors: vectors as never,
+    embedVersion: async (_text, version) => {
+      embedded.push(version.version);
+      if (version.version === 3) throw Object.assign(new Error("LLM Router HTTP 502 (embedding_payment_required)"), { code: "embedding_payment_required" });
+      return new Array(version.dimension).fill(0.1);
+    },
+  }).search(77, "почему я откладываю дела");
+  assert.equal(found.degraded, false);
+  assert.deepEqual(found.hits.map((hit) => [hit.documentName, hit.matched]), [["Договор.pdf", "vector"]]);
+  assert.equal(found.diagnostics?.vectorStandby, 4);
+  assert.deepEqual(embedded, [3, 4], "запрос посчитан моделью запасной версии");
+  assert.deepEqual(searched, [["private", 4, 8], ["global", 4, 8]], "и искался в её коллекциях, а не в чужом пространстве");
+  const standby = db.queries.find((entry) => entry.sql.includes("status = 'ready'"))!;
+  assert.deepEqual(standby.values, [3], "включённая версия запасной не бывает");
+  assert.match(standby.sql, /built_at IS NOT NULL AND error_code IS NULL/);
+  assert.match(standby.sql, /build_started_at IS NULL OR build_started_at <= built_at/);
+});
+
+test("запасной версии нет, отказал Qdrant или отменён ход — прежнее поведение", async () => {
+  const dead = async () => { throw new Error("embedding_payment_required"); };
+  // Построенной новой версии нет: слова и degraded, как раньше.
+  const alone = searchDb({ fts: ["1"] });
+  const words = await new KnowledgeSearch(alone as never, embed, {
+    settings: settings({ vectorBackend: "qdrant" }), vectors: { searchPrivate: async () => [], searchGlobal: async () => [] } as never, embedVersion: dead,
+  }).search(77, "штраф");
+  assert.equal(words.degraded, true);
+  assert.deepEqual(words.hits.map((hit) => hit.matched), ["fts"]);
+  assert.equal(words.diagnostics?.vectorStandby, undefined);
+
+  // Отказ Qdrant — не отказ модели: другая версия живёт в том же Qdrant.
+  const qdrantDown = searchDb({ fts: ["1"] }, [], { standby: { version: 4, dimension: 8 } });
+  const down = await new KnowledgeSearch(qdrantDown as never, embed, {
+    settings: settings({ vectorBackend: "qdrant" }),
+    vectors: { searchPrivate: async () => { throw new QdrantError("qdrant_unavailable", null, "нет"); }, searchGlobal: async () => [] } as never,
+    embedVersion: async () => [1, 0, 0, 0],
+  }).search(77, "штраф");
+  assert.equal(down.degraded, true);
+  assert.ok(!qdrantDown.queries.some((entry) => entry.sql.includes("status = 'ready'")));
+
+  // Отменённый ход запасную модель не зовёт.
+  const controller = new AbortController();
+  const asked: number[] = [];
+  const cancelled = new KnowledgeSearch(searchDb({ fts: ["1"] }, [], { standby: { version: 4, dimension: 8 } }) as never, embed, {
+    settings: settings({ vectorBackend: "qdrant" }),
+    vectors: { searchPrivate: async () => [], searchGlobal: async () => [] } as never,
+    embedVersion: async (_text, version) => { asked.push(version.version); controller.abort(new Error("cancelled")); throw new Error("aborted"); },
+  });
+  await assert.rejects(cancelled.search(77, "штраф", { signal: controller.signal }), /cancelled|aborted/);
+  assert.deepEqual(asked, [3]);
 });
 
 /** Тот же договор сборки инструмента, что и у Agent SDK, но без него. */

@@ -230,7 +230,7 @@ export class KnowledgeIndexer {
       // оставалась без него, а её включение отклоняла проверка полноты —
       // ни прежняя модель, ни новая. Задание всё равно уходит на повтор
       // с кодом первого отказа.
-      let failure: unknown = null;
+      let failure: Error | null = null;
       for (const version of versions) {
         signal?.throwIfAborted();
         try {
@@ -240,7 +240,7 @@ export class KnowledgeIndexer {
           // сервиса): при следующей попытке она создаётся заново, а не
           // считается существующей до рестарта.
           this.ensured.delete(version.version);
-          failure ??= error;
+          failure ??= error instanceof Error ? error : new Error(errorCode(error));
         }
       }
       if (failure) throw failure;

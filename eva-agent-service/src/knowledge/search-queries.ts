@@ -329,6 +329,28 @@ export async function activeEmbeddingVersion(db: Database): Promise<ActiveVersio
   return rows[0] ? { version: Number(rows[0].version), dimension: Number(rows[0].dimension), distance: String(rows[0].distance) } : null;
 }
 
+/**
+ * Запасная версия — самая новая построенная, но ещё не включённая: та,
+ * про которую панель говорит «Новая модель построена — переключите».
+ * Поиск идёт к ней, только когда модель активной версии не посчитала
+ * вектор запроса. Её пространство целое: построение прошло все документы,
+ * а индексация пишет новые и в неё. Признаки «построена» — те же, что в
+ * панели: готова, `built_at` есть, перестройка не идёт, ошибки нет.
+ */
+export async function standbyEmbeddingVersion(db: Database, active: number): Promise<ActiveVersion | null> {
+  const { rows } = await db.query<ActiveVersion>(
+    `SELECT version, dimension, distance
+       FROM knowledge_embedding_versions
+      WHERE status = 'ready' AND version <> $1
+        AND built_at IS NOT NULL AND error_code IS NULL
+        AND (build_started_at IS NULL OR build_started_at <= built_at)
+      ORDER BY version DESC
+      LIMIT 1`,
+    [active],
+  );
+  return rows[0] ? { version: Number(rows[0].version), dimension: Number(rows[0].dimension), distance: String(rows[0].distance) } : null;
+}
+
 /** Включённые коллекции общей базы: только по ним ищет Qdrant. */
 export async function enabledCollections(db: Database): Promise<string[]> {
   const { rows } = await db.query<{ id: string }>(

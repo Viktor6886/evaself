@@ -138,7 +138,7 @@ test("неполный ответ и чужая размерность — от�
 
 test("отказ провайдера — код, без текста его ответа", async () => {
   const cases: Array<[number, string]> = [
-    [401, "embedding_auth"], [404, "embedding_not_found"], [400, "embedding_bad_request"],
+    [401, "embedding_auth"], [402, "embedding_payment_required"], [404, "embedding_not_found"], [400, "embedding_bad_request"],
     [429, "embedding_rate_limited"], [503, "embedding_unavailable"],
   ];
   for (const [status, code] of cases) {
