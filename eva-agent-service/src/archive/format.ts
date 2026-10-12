@@ -254,21 +254,41 @@ const MAX_JSON_DEPTH = 32;
  */
 export const MAX_JSON_STRUCTURE = 4_000;
 
-const isStructure = (code: number): number => (code === 0x2c || code === 0x5b || code === 0x7b ? 1 : 0);
+/** Таблица «этот знак считается» по коду. */
+function marks(...codes: number[]): Uint8Array {
+  const table = new Uint8Array(0x10000);
+  for (const code of codes) table[code] = 1;
+  return table;
+}
 
-/**
- * Скобок `[`, `{` и запятых в тексте: столько объектов самое большее
- * создаст `JSON.parse`. Длинный текст — по массиву кодов (`codesOf`).
- */
-export function jsonStructure(value: string): number {
-  let structure = 0;
+/** Сколько в тексте знаков из таблицы. Длинный текст — по массиву кодов (`codesOf`). */
+function countMarks(value: string, table: Uint8Array): number {
+  let count = 0;
   if (LITTLE_ENDIAN && value.length > SHORT_TEXT) {
     const codes = codesOf(value);
-    for (let index = 0; index < codes.length; index += 1) structure += isStructure(codes[index]!);
-    return structure;
+    for (let index = 0; index < codes.length; index += 1) count += table[codes[index]!]!;
+    return count;
   }
-  for (let index = 0; index < value.length; index += 1) structure += isStructure(value.charCodeAt(index));
-  return structure;
+  for (let index = 0; index < value.length; index += 1) count += table[value.charCodeAt(index)]!;
+  return count;
+}
+
+const JSON_MARKS = marks(0x2c, 0x5b, 0x7b);
+/** Ответ анкеты делится на пункты по запятой, `;` и строке, а объект и список — JSON. */
+const ANSWER_MARKS = marks(0x2c, 0x3b, 0x0a, 0x5b, 0x7b);
+
+/** Скобок `[`, `{` и запятых в тексте: столько объектов самое большее создаст `JSON.parse`. */
+export function jsonStructure(value: string): number {
+  return countMarks(value, JSON_MARKS);
+}
+
+/**
+ * На сколько частей самое большее разойдётся ответ анкеты: запятые, `;`,
+ * переводы строк и скобки JSON. Делит его запись, а не разбор, — и
+ * ответ с ошибкой делила бы заново в каждой строке файла.
+ */
+export function answerStructure(value: string): number {
+  return countMarks(value, ANSWER_MARKS);
 }
 
 /**
@@ -404,10 +424,28 @@ export function date(cell: ReadCell, options: { date1904: boolean; zone: string 
   return value === null ? null : value.slice(0, 10);
 }
 
+/**
+ * Строк больше `limit`? Счёт останавливается на пределе: ячейка из
+ * десятков тысяч пустых строк делилась бы на столько же кусков, хотя
+ * пунктов в ней два.
+ */
+function moreLines(value: string, limit: number): boolean {
+  let count = 0;
+  for (let at = value.indexOf("\n"); at >= 0; at = value.indexOf("\n", at + 1)) {
+    count += 1;
+    if (count > limit) return true;
+  }
+  return false;
+}
+
+/** Строк в списке из `maxItems` пунктов, даже с пустыми строками между ними. */
+const linesFor = (maxItems: number) => maxItems * 4 + 4;
+
 /** Список: по пункту на строку ячейки. */
 export function list(cell: ReadCell, maxItems: number, maxLength: number, name: string): string[] {
   const value = text(cell, maxItems * (maxLength + 1));
   if (value === null) return [];
+  if (moreLines(value, linesFor(maxItems))) throw new CellError(`«${name}»: слишком много строк — пунктов не больше ${maxItems}`);
   const items = value.split("\n").map((item) => item.trim()).filter(Boolean);
   if (items.length > maxItems) throw new CellError(`«${name}»: больше ${maxItems} пунктов`);
   if (items.some((item) => item.length > maxLength)) throw new CellError(`«${name}»: пункт длиннее ${maxLength} знаков`);
@@ -455,6 +493,7 @@ export function jsonValue(cell: ReadCell, name: string, spend?: (structure: numb
     if (Array.isArray(parsed) && parsed.length > 200) throw new CellError(`«${name}»: больше 200 пунктов`);
     return cleanJson(parsed);
   }
+  if (moreLines(value, linesFor(200))) throw new CellError(`«${name}»: слишком много строк — пунктов не больше 200`);
   const items = value.split("\n").map((item) => item.trim()).filter(Boolean);
   if (items.length > 200) throw new CellError(`«${name}»: больше 200 пунктов`);
   return items;

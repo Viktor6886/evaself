@@ -84,7 +84,8 @@ const FORMAT_ERRORS: Record<string, string> = {
   xlsx_too_many_rows: "В листе слишком много строк. Сделай копии файла и раздели строки листа между ними.",
   xlsx_too_many_strings: "Файл слишком большой для архива Евы.",
   xlsx_too_many_sheets: "В файле слишком много листов для архива Евы.",
-  xlsx_text_too_long: "В файле есть ячейка длиннее миллиона знаков — такой файл Ева не загружает.",
+  xlsx_text_too_long: "В файле есть ячейка длиннее, чем вмещает Excel, — такой файл Ева не загружает.",
+  xlsx_too_much_data: "В файле слишком много данных для одной загрузки. Сделай копии файла, оставь в каждой часть листов и загрузи их по очереди.",
   xlsx_xml_malformed: "Файл повреждён — его разметка не читается.",
 };
 
@@ -105,6 +106,12 @@ const TELEGRAM_DOCUMENT_LIMIT = 49 * 1024 * 1024;
 export { ARCHIVE_ROW_LIMIT } from "./import-parse.js";
 
 const SHEET_NAMES = new Set(SHEETS.map((item) => fold(item.name)));
+/**
+ * Листы только для просмотра: загрузка их не читает, а предпросмотр
+ * называет. Выгрузка кладёт в каждый до 10 000 строк, и разбор их
+ * содержимого был бы работой впустую — и в счёт предела работы книги.
+ */
+const LISTED_ONLY = new Set(SHEETS.filter((item) => !item.importable && item.id !== "about" && item.id !== "memory").map((item) => fold(item.name)));
 
 export class DataArchiveService {
   private readonly now: () => Date;
@@ -210,7 +217,10 @@ export class DataArchiveService {
     return await this.exclusive(telegramId, async () => {
       let book;
       try {
-        book = await readWorkbook(file, { wanted: (name) => SHEET_NAMES.has(fold(name)) });
+        book = await readWorkbook(file, {
+          wanted: (name) => SHEET_NAMES.has(fold(name)),
+          listOnly: (name) => LISTED_ONLY.has(fold(name)),
+        });
       } catch (error) {
         if (error instanceof WorkbookFormatError) throw badRequest(FORMAT_ERRORS[error.code] ?? "Файл не читается как Excel.");
         throw error;

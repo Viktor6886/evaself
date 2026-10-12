@@ -12,7 +12,7 @@ import { test } from "node:test";
 
 import JSZip from "jszip";
 
-import { readWorkbook, serialToLocal, WorkbookFormatError } from "../dist/archive/xlsx-reader.js";
+import { decodeXml, DEFAULT_READ_LIMITS, readWorkbook, serialToLocal, WorkbookFormatError } from "../dist/archive/xlsx-reader.js";
 import { columnLetter, excelSerial, writeWorkbook, EXCEL_CELL_LIMIT } from "../dist/archive/xlsx-writer.js";
 
 const META = { title: "Архив", creator: "Evaself", created: new Date("2026-10-07T10:00:00Z") };
@@ -310,12 +310,13 @@ test("чтение: тысячи листов в книге отвергаютс
   await assert.rejects(readWorkbook(shared), (error: unknown) => error instanceof WorkbookFormatError && error.code === "xlsx_xml_malformed");
 });
 
-test("чтение: текстовый узел длиннее миллиона знаков и огромный атрибут отвергаются до раскодирования", async () => {
+test("чтение: текстовый узел длиннее предела и огромный атрибут отвергаются до раскодирования", async () => {
   // Узел на десятки мегабайт раскодировался одним куском — секунды без
-  // паузы для цикла событий. Текст разнообразный, чтобы файл не сжимался
-  // как zip-бомба и дошёл до разбора.
+  // паузы для цикла событий. Ячейка Excel вмещает 32 767 знаков, в XML —
+  // до семи на знак; предел узла — 262 144. Текст разнообразный, чтобы
+  // файл не сжимался как zip-бомба и дошёл до разбора.
   let seed = 1;
-  const varied = Array.from({ length: 1_100_000 }, () => {
+  const varied = Array.from({ length: 270_000 }, () => {
     seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648;
     return String.fromCharCode(0x430 + (seed % 32));
   }).join("");
@@ -325,6 +326,81 @@ test("чтение: текстовый узел длиннее миллиона 
   assert.ok(spent < 500, `${Math.round(spent)} мс процессора`);
   const name = await bookWithSheets(`<sheet name="${"Л".repeat(100_000)}" r:id="rId1"/>`, `<Relationship Id="rId1" Type="x/worksheet" Target="s.xml"/>`, {});
   await assert.rejects(readWorkbook(name), (error: unknown) => error instanceof WorkbookFormatError && error.code === "xlsx_xml_malformed");
+});
+
+/**
+ * `;` сущности ищется только в её пределах. Поиск до конца текста от
+ * каждого `&` делал узел из `&` с одной `;` в конце квадратичным: 400 000
+ * знаков — секунда, сотня таких узлов — минуты. Десятикратно длиннее
+ * текст стоит не больше чем вчетверо дороже десятка коротких, а при
+ * квадратичном поиске — вдесятеро.
+ */
+test("XML: `;` сущности ищется в её пределах — `&` подряд с одной `;` в конце линейны", async () => {
+  assert.equal(decodeXml("&amp;&lt;&#x41;&#66;&bogus;&verylongname;&"), "&<AB&bogus;&verylongname;&");
+  assert.equal(decodeXml(`${"&".repeat(5)}&amp;`), "&&&&&&");
+  const short = `${"&".repeat(25_000)};`;
+  const long = `${"&".repeat(250_000)};`;
+  assert.equal(decodeXml(long), long);
+  const cheapest = async (run: () => Promise<unknown>) => Math.min(await cpuMs(run), await cpuMs(run));
+  const shortSpent = await cheapest(async () => {
+    for (let round = 0; round < 100; round += 1) decodeXml(short);
+  });
+  const longSpent = await cheapest(async () => {
+    for (let round = 0; round < 10; round += 1) decodeXml(long);
+  });
+  assert.ok(longSpent < shortSpent * 4, `250 000 знаков ×10 — ${Math.round(longSpent)} мс, 25 000 ×100 — ${Math.round(shortSpent)} мс`);
+});
+
+test("XML: тег длиннее 64 К — ошибка формата, а не мегабайты, прочитанные одним шагом", async () => {
+  const spaces = " ".repeat(70_000);
+  for (const [name, sheetXml] of [
+    ["закрывающий тег", `<worksheet><sheetData></sheetData${spaces}></worksheet>`],
+    ["пробелы перед атрибутом", `<worksheet><sheetData><row${spaces}r="1"/></sheetData></worksheet>`],
+    ["имя тега", `<worksheet><sheetData><${"r".repeat(70_000)}/></sheetData></worksheet>`],
+  ]) {
+    await assert.rejects(readWorkbook(await bookWithSheet(sheetXml!)), (error: unknown) =>
+      error instanceof WorkbookFormatError && error.code === "xlsx_xml_malformed", name);
+  }
+  // Длинный, но в пределе тег — обычный тег.
+  const near = await readWorkbook(await bookWithSheet(`<worksheet><sheetData><row${" ".repeat(60_000)}r="1"><c r="A1"><v>7</v></c></row></sheetData></worksheet>`));
+  assert.deepEqual(near.sheets[0]!.rows, [[7]]);
+});
+
+test("книга: работа чтения считается на весь файл — пустые ячейки в разных листах складываются", async () => {
+  // Предел байтов работу не ограничивает: 4 МБ пустых `<c/>` — миллион
+  // ячеек и полсекунды процессора; восемь листов — секунды.
+  const empties = (cells: number) => `<worksheet><sheetData>${Array.from({ length: cells / 100 }, (_, index) =>
+    `<row r="${index + 1}">${"<c/>".repeat(100)}</row>`).join("")}</sheetData></worksheet>`;
+  const sheets = `<sheet name="A" r:id="rId1"/><sheet name="B" r:id="rId2"/>`;
+  const rels = `<Relationship Id="rId1" Type="x/worksheet" Target="a.xml"/><Relationship Id="rId2" Type="x/worksheet" Target="b.xml"/>`;
+  const one = await bookWithSheets(sheets, rels, { "xl/a.xml": empties(20_000), "xl/b.xml": "<worksheet/>" });
+  const two = await bookWithSheets(sheets, rels, { "xl/a.xml": empties(20_000), "xl/b.xml": empties(20_000) });
+  const limits = { maxWork: 30_000 };
+  assert.equal((await readWorkbook(one, { limits })).sheets.length, 2);
+  await assert.rejects(readWorkbook(two, { limits }), (error: unknown) =>
+    error instanceof WorkbookFormatError && error.code === "xlsx_too_much_data");
+
+  // По умолчанию — около трёх честных архивов в 30 000 строк: четыре листа
+  // по миллиону пустых ячеек в него не укладываются.
+  assert.equal(DEFAULT_READ_LIMITS.maxWork, 3_000_000);
+  const four = await bookWithSheets(
+    ["A", "B", "C", "D"].map((name, index) => `<sheet name="${name}" r:id="rId${index + 1}"/>`).join(""),
+    ["a", "b", "c", "d"].map((part, index) => `<Relationship Id="rId${index + 1}" Type="x/worksheet" Target="${part}.xml"/>`).join(""),
+    Object.fromEntries(["a", "b", "c", "d"].map((part) => [`xl/${part}.xml`, empties(1_000_000)])),
+  );
+  await assert.rejects(readWorkbook(four), (error: unknown) => error instanceof WorkbookFormatError && error.code === "xlsx_too_much_data");
+});
+
+test("книга: лист «только имя» не распаковывается — в результате он без строк", async () => {
+  const book = await bookWithSheets(
+    `<sheet name="Заметки" r:id="rId1"/><sheet name="Диалоги" r:id="rId2"/>`,
+    `<Relationship Id="rId1" Type="x/worksheet" Target="a.xml"/><Relationship Id="rId2" Type="x/worksheet" Target="b.xml"/>`,
+    { "xl/a.xml": `<worksheet><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData></worksheet>`, "xl/b.xml": "<worksheet><sheetData><row>" },
+  );
+  const read = await readWorkbook(book, { listOnly: (name) => name === "Диалоги" });
+  assert.deepEqual(read.sheets.map((item) => [item.name, item.rows]), [["Заметки", [[1]]], ["Диалоги", []]]);
+  // Без `listOnly` та же книга — ошибка формата: лист и правда не читался.
+  await assert.rejects(readWorkbook(book), (error: unknown) => error instanceof WorkbookFormatError && error.code === "xlsx_xml_malformed");
 });
 
 test("чтение: `>` внутри значения атрибута и CDATA не ломают разбор", async () => {

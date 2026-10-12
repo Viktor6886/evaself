@@ -21,7 +21,7 @@ export class XmlFormatError extends Error {
 }
 
 export type XmlToken =
-  | { kind: "open"; name: string; attrs: Map<string, string>; selfClosing: boolean }
+  | { kind: "open"; name: string; attrs: ReadonlyMap<string, string>; selfClosing: boolean }
   | { kind: "close"; name: string }
   | { kind: "text"; text: string };
 
@@ -33,11 +33,32 @@ const MAX_ATTRIBUTE_LENGTH = 65_536;
 
 /**
  * Текст одного узла длиннее этого Евой не загружается: ячейка Excel
- * вмещает 32 767 знаков, а у записи в архиве нет поля длиннее миллиона.
- * Без предела один узел на десятки мегабайт раскодировался бы одним
+ * вмещает 32 767 знаков (выгрузка Евы пишет не больше 32 000, Google
+ * Таблицы — 50 000), а в XML каждый знак самое большее семь: `_x000D_`,
+ * `&quot;`. Без предела один узел на мегабайты раскодировался бы одним
  * куском, не отдавая цикл событий.
  */
-export const MAX_TEXT_LENGTH = 1_048_576;
+export const MAX_TEXT_LENGTH = 262_144;
+
+/**
+ * Тег длиннее этого — не тег книги: у Excel самый длинный — корневой, с
+ * объявлениями пространств имён, на пару килобайт. Без предела тег из
+ * мегабайтов пробелов читался бы одним шагом, без паузы для цикла
+ * событий.
+ */
+export const MAX_TAG_LENGTH = 65_536;
+
+/**
+ * Работа сканера, которую оплачивает вызывающий: токен — единица,
+ * каждый `&` — единица, каждые `TAG_CHARS_PER_UNIT` знаков внутри тега —
+ * единица. Отказ — исключение из `spend`.
+ */
+export type Spend = (units: number) => void;
+
+/** Знаков тега на единицу работы: тег читается дважды, знак за знаком. */
+export const TAG_CHARS_PER_UNIT = 32;
+
+const free: Spend = () => undefined;
 
 const NAMED = new Map([["lt", "<"], ["gt", ">"], ["amp", "&"], ["quot", "\""], ["apos", "'"]]);
 const DECIMAL = /^\d{1,7}$/;
@@ -54,21 +75,33 @@ function entity(body: string): string | undefined {
   return String.fromCodePoint(code);
 }
 
+/** Длиннее `&#1114111;` и `&#x10FFFF;` сущности не бывает: `;` — не дальше девятого знака от `&`. */
+const ENTITY_REACH = 9;
+
 /**
  * Пять стандартных сущностей и числовые. Один проход по `&`: регулярное
  * выражение с функцией замены на тексте из одних сущностей тратило по
- * микросекунде на каждую.
+ * микросекунде на каждую. `;` ищется только в пределах сущности: поиск
+ * до конца текста от каждого `&` делал строку из `&` и одной `;` в конце
+ * квадратичной. Каждый `&` — единица работы в `spend`.
  */
-export function decodeXml(text: string): string {
+export function decodeXml(text: string, spend: Spend = free): string {
   let amp = text.indexOf("&");
   if (amp < 0) return text;
   let out = "";
   let last = 0;
+  let seen = 0;
   while (amp >= 0) {
-    const end = text.indexOf(";", amp + 2);
-    if (end < 0) break;
-    // Длиннее `&#1114111;` сущности не бывает.
-    const decoded = end - amp <= 9 ? entity(text.slice(amp + 1, end)) : undefined;
+    seen += 1;
+    const reach = Math.min(text.length - 1, amp + ENTITY_REACH);
+    let end = -1;
+    for (let index = amp + 2; index <= reach; index += 1) {
+      if (text.charCodeAt(index) === 0x3b) {
+        end = index;
+        break;
+      }
+    }
+    const decoded = end < 0 ? undefined : entity(text.slice(amp + 1, end));
     if (decoded === undefined) {
       amp = text.indexOf("&", amp + 1);
       continue;
@@ -77,6 +110,7 @@ export function decodeXml(text: string): string {
     last = end + 1;
     amp = text.indexOf("&", last);
   }
+  spend(seen);
   return out + text.slice(last);
 }
 
@@ -88,10 +122,15 @@ function localName(name: string): string {
   return colon < 0 ? name : name.slice(colon + 1);
 }
 
-function parseAttributes(source: string, start: number): Map<string, string> {
-  const attrs = new Map<string, string>();
+/** Атрибуты тега без атрибутов — одна общая пустая таблица: у большинства тегов книги атрибутов нет. */
+const NO_ATTRIBUTES: ReadonlyMap<string, string> = new Map();
+
+function parseAttributes(source: string, start: number, spend: Spend): ReadonlyMap<string, string> {
   const length = source.length;
   let index = start;
+  while (index < length && isSpace(source.charCodeAt(index))) index += 1;
+  if (index >= length) return NO_ATTRIBUTES;
+  const attrs = new Map<string, string>();
   while (index < length) {
     while (index < length && isSpace(source.charCodeAt(index))) index += 1;
     if (index >= length) break;
@@ -111,7 +150,7 @@ function parseAttributes(source: string, start: number): Map<string, string> {
     const end = source.indexOf(quote, index + 1);
     if (end < 0) throw new XmlFormatError();
     if (attrs.size >= MAX_ATTRIBUTES || end - index > MAX_ATTRIBUTE_LENGTH) throw new XmlFormatError();
-    attrs.set(name, decodeXml(source.slice(index + 1, end)));
+    attrs.set(name, decodeXml(source.slice(index + 1, end), spend));
     index = end + 1;
   }
   return attrs;
@@ -119,9 +158,11 @@ function parseAttributes(source: string, start: number): Map<string, string> {
 
 /**
  * Токены XML по порядку. Текст между тегами отдаётся уже раскодированным;
- * CDATA — как есть.
+ * CDATA — как есть. Работу сканер списывает в `spend` по ходу: шаг — до
+ * того, как отдать токен, тег и сущности — как только видна их длина, а
+ * она уже ограничена (`MAX_TAG_LENGTH`, `MAX_TEXT_LENGTH`).
  */
-export function* scanXml(xml: string): Generator<XmlToken> {
+export function* scanXml(xml: string, spend: Spend = free): Generator<XmlToken> {
   const length = xml.length;
   let index = 0;
   while (index < length) {
@@ -129,11 +170,18 @@ export function* scanXml(xml: string): Generator<XmlToken> {
     const textEnd = open < 0 ? length : open;
     if (textEnd - index > MAX_TEXT_LENGTH) throw new XmlFormatError("xlsx_text_too_long");
     if (open < 0) {
-      yield { kind: "text", text: decodeXml(xml.slice(index)) };
+      spend(1);
+      yield { kind: "text", text: decodeXml(xml.slice(index), spend) };
       return;
     }
-    if (open > index) yield { kind: "text", text: decodeXml(xml.slice(index, open)) };
+    if (open > index) {
+      spend(1);
+      yield { kind: "text", text: decodeXml(xml.slice(index, open), spend) };
+    }
     const next = xml.charCodeAt(open + 1);
+    // Комментарий и объявление — тоже шаг: миллионы `<!---->` иначе
+    // обходили бы счёт работы.
+    if (next === 0x3f || next === 0x21) spend(1);
     if (next === 0x3f) {
       // <?xml … ?>
       const end = xml.indexOf("?>", open + 2);
@@ -160,10 +208,11 @@ export function* scanXml(xml: string): Generator<XmlToken> {
       throw new XmlFormatError();
     }
     // Конец тега — первый `>` вне кавычек: внутри значения атрибута `>`
-    // допустим.
+    // допустим. Дальше `MAX_TAG_LENGTH` от начала тега его не ищут.
+    const reach = Math.min(length, open + MAX_TAG_LENGTH);
     let cursor = open + 1;
     let quote = 0;
-    while (cursor < length) {
+    while (cursor < reach) {
       const code = xml.charCodeAt(cursor);
       if (quote !== 0) {
         if (code === quote) quote = 0;
@@ -176,7 +225,8 @@ export function* scanXml(xml: string): Generator<XmlToken> {
       }
       cursor += 1;
     }
-    if (cursor >= length) throw new XmlFormatError();
+    if (cursor >= reach) throw new XmlFormatError();
+    spend(1 + Math.floor((cursor - open) / TAG_CHARS_PER_UNIT));
     const inner = xml.slice(open + 1, cursor);
     index = cursor + 1;
     if (inner.charCodeAt(0) === 0x2f) {
@@ -188,12 +238,12 @@ export function* scanXml(xml: string): Generator<XmlToken> {
     let nameEnd = 0;
     while (nameEnd < body.length && !isSpace(body.charCodeAt(nameEnd))) nameEnd += 1;
     if (nameEnd === 0) throw new XmlFormatError();
-    yield { kind: "open", name: localName(body.slice(0, nameEnd)), attrs: parseAttributes(body, nameEnd), selfClosing };
+    yield { kind: "open", name: localName(body.slice(0, nameEnd)), attrs: parseAttributes(body, nameEnd, spend), selfClosing };
   }
 }
 
 /** Атрибут без учёта префикса: `r:id` у одних и `x:id`/`id` у других. */
-export function attribute(attrs: Map<string, string>, local: string): string | undefined {
+export function attribute(attrs: ReadonlyMap<string, string>, local: string): string | undefined {
   if (attrs.has(local)) return attrs.get(local);
   for (const [key, value] of attrs) {
     if (key.endsWith(`:${local}`)) return value;

@@ -19,7 +19,7 @@ import { StringDecoder } from "node:string_decoder";
 import yauzl from "yauzl";
 
 import { clock, pause } from "./pace.js";
-import { attribute, scanXml, XmlFormatError, type XmlToken } from "./xml-scan.js";
+import { attribute, scanXml, XmlFormatError, type Spend } from "./xml-scan.js";
 
 export { decodeXml } from "./xml-scan.js";
 
@@ -46,6 +46,8 @@ export interface ReadLimits {
   maxColumns: number;
   maxSharedStrings: number;
   maxSheets: number;
+  /** Работы сканера на всю книгу (`Spend` в `xml-scan.ts`). */
+  maxWork: number;
 }
 
 export const DEFAULT_READ_LIMITS: ReadLimits = {
@@ -60,6 +62,12 @@ export const DEFAULT_READ_LIMITS: ReadLimits = {
   // В архиве Евы 27 листов; тысячи `<sheet>` в книге — не таблица, а
   // способ заставить разбор читать одно и то же раз за разом.
   maxSheets: 256,
+  // Предел байтов не ограничивает работу: 4 МБ пустых `<c/>` — миллион
+  // ячеек, а 32 МБ — восемь миллионов и секунды процессора. Честный архив
+  // в 30 000 строк (больше загрузка не примет) — около 1,1 млн единиц;
+  // почти втрое больше — уже не архив, и чтение останавливается, не
+  // дочитав.
+  maxWork: 3_000_000,
 };
 
 /** Ошибка формата с кодом: текст для человека подбирает вызывающий. */
@@ -164,14 +172,17 @@ const HEX4 = /^[0-9A-Fa-f]{4}$/;
 /**
  * Обратное к экранированию Excel `_xHHHH_` (так он пишет, например, `\r`).
  * Один проход по `_x`: регулярное выражение с функцией замены на тексте из
- * одних экранирований тратило по полмикросекунды на каждое.
+ * одних экранирований тратило по полмикросекунды на каждое. Каждый `_x` —
+ * единица работы в `spend`.
  */
-export function excelUnescape(text: string): string {
+export function excelUnescape(text: string, spend: Spend = () => undefined): string {
   let at = text.indexOf("_x");
   if (at < 0) return text;
   let out = "";
   let last = 0;
+  let seen = 0;
   while (at >= 0) {
+    seen += 1;
     const hex = text.slice(at + 2, at + 6);
     if (text.charCodeAt(at + 6) === 0x5f && HEX4.test(hex)) {
       out += text.slice(last, at) + String.fromCharCode(Number.parseInt(hex, 16));
@@ -181,22 +192,47 @@ export function excelUnescape(text: string): string {
       at = text.indexOf("_x", at + 1);
     }
   }
+  spend(seen);
   return out + text.slice(last);
 }
 
 /**
- * Токены части книги. Перебор синхронный, а паузу по часам (`clock`)
- * делает вызывающий: асинхронный генератор создавал по промису на каждый
- * токен, а под AsyncLocalStorage сервиса каждый промис ещё проходит через
- * async hooks — разбор большого листа становился в 2,5–10 раз дороже.
+ * Работа чтения всей книги. `spend` списывает работу сканера (`Spend` в
+ * `xml-scan.ts`), `due` говорит, пора ли отдать цикл событий.
+ *
+ * Перебор токенов синхронный, а паузу по часам делает цикл чтения:
+ * асинхронный генератор создавал по промису на каждый токен, а под
+ * AsyncLocalStorage сервиса каждый промис ещё проходит через async hooks —
+ * разбор большого листа становился в 2,5–10 раз дороже.
  */
-function* tokens(xml: string): Generator<XmlToken> {
-  try {
-    yield* scanXml(xml);
-  } catch (error) {
-    if (error instanceof XmlFormatError) throw new WorkbookFormatError(error.code);
-    throw error;
-  }
+interface Meter {
+  spend: Spend;
+  due: () => boolean;
+}
+
+/**
+ * Часы смотрятся раз в столько единиц работы, а не на каждом токене:
+ * `performance.now()` на каждом пустом `<c/>` — седьмая часть его цены. Дорогой
+ * токен (тег, текст с сущностями) списывает много единиц и проверяет часы
+ * сразу.
+ */
+const UNITS_PER_CLOCK = 16;
+
+function meter(limits: ReadLimits): Meter {
+  let work = 0;
+  let checked = 0;
+  const elapsed = clock();
+  return {
+    spend: (units) => {
+      work += units;
+      if (work > limits.maxWork) throw new WorkbookFormatError("xlsx_too_much_data");
+    },
+    due: () => {
+      if (work - checked < UNITS_PER_CLOCK) return false;
+      checked = work;
+      return elapsed();
+    },
+  };
 }
 
 function joinPath(base: string, target: string): string {
@@ -214,11 +250,10 @@ function relsPath(part: string): string {
   return slash < 0 ? `_rels/${part}.rels` : `${part.slice(0, slash)}/_rels/${part.slice(slash + 1)}.rels`;
 }
 
-async function relationships(xml: string): Promise<Array<{ id: string; type: string; target: string }>> {
+async function relationships(xml: string, work: Meter): Promise<Array<{ id: string; type: string; target: string }>> {
   const found: Array<{ id: string; type: string; target: string }> = [];
-  const due = clock();
-  for (const token of tokens(xml)) {
-    if (due()) await pause();
+  for (const token of scanXml(xml, work.spend)) {
+    if (work.due()) await pause();
     if (token.kind !== "open" || token.name !== "Relationship") continue;
     found.push({
       id: token.attrs.get("Id") ?? "",
@@ -232,12 +267,12 @@ async function relationships(xml: string): Promise<Array<{ id: string; type: str
 async function workbookInfo(
   xml: string,
   limits: ReadLimits,
+  work: Meter,
 ): Promise<{ date1904: boolean; sheets: Array<{ name: string; relId: string | undefined }> }> {
   let date1904 = false;
   const sheets: Array<{ name: string; relId: string | undefined }> = [];
-  const due = clock();
-  for (const token of tokens(xml)) {
-    if (due()) await pause();
+  for (const token of scanXml(xml, work.spend)) {
+    if (work.due()) await pause();
     if (token.kind !== "open") continue;
     if (token.name === "workbookPr") {
       const value = token.attrs.get("date1904");
@@ -251,14 +286,13 @@ async function workbookInfo(
 }
 
 /** Общие строки: все `<t>` элемента `<si>`, кроме фонетических подсказок `<rPh>`. */
-async function sharedStrings(xml: string, limits: ReadLimits): Promise<string[]> {
+async function sharedStrings(xml: string, limits: ReadLimits, work: Meter): Promise<string[]> {
   const strings: string[] = [];
   let item: string[] | null = null;
   let phonetic = 0;
   let text: string[] | null = null;
-  const due = clock();
-  for (const token of tokens(xml)) {
-    if (due()) await pause();
+  for (const token of scanXml(xml, work.spend)) {
+    if (work.due()) await pause();
     if (token.kind === "text") {
       if (text) text.push(token.text);
     } else if (token.kind === "open") {
@@ -279,7 +313,7 @@ async function sharedStrings(xml: string, limits: ReadLimits): Promise<string[]>
     } else if (token.name === "rPh" && phonetic > 0) {
       phonetic -= 1;
     } else if (token.name === "si" && item) {
-      strings.push(excelUnescape(item.join("")));
+      strings.push(excelUnescape(item.join(""), work.spend));
       item = null;
       phonetic = 0;
     }
@@ -304,8 +338,8 @@ function rowIndex(ref: string): number | null {
   return match ? Number(match[1]) - 1 : null;
 }
 
-function cellValue(type: string, raw: string | null, inline: string | null, strings: readonly string[]): ReadCell {
-  if (type === "inlineStr") return inline === null ? null : excelUnescape(inline);
+function cellValue(type: string, raw: string | null, inline: string | null, strings: readonly string[], spend: Spend): ReadCell {
+  if (type === "inlineStr") return inline === null ? null : excelUnescape(inline, spend);
   if (raw === null) return null;
   switch (type) {
     case "s": {
@@ -314,7 +348,7 @@ function cellValue(type: string, raw: string | null, inline: string | null, stri
     }
     case "str":
     case "d":
-      return excelUnescape(raw);
+      return excelUnescape(raw, spend);
     case "b":
       return raw.trim() === "1" || raw.trim().toLowerCase() === "true";
     case "e":
@@ -331,7 +365,7 @@ function cellValue(type: string, raw: string | null, inline: string | null, stri
  * ячейка вне строки — ошибка формата, а не повод искать закрывающий тег
  * где-то дальше.
  */
-async function parseSheet(xml: string, strings: readonly string[], limits: ReadLimits): Promise<ReadCell[][]> {
+async function parseSheet(xml: string, strings: readonly string[], limits: ReadLimits, work: Meter): Promise<ReadCell[][]> {
   const rows: ReadCell[][] = [];
   const malformed = () => new WorkbookFormatError("xlsx_xml_malformed");
   type RowState = { index: number; values: ReadCell[]; nextColumn: number };
@@ -347,7 +381,7 @@ async function parseSheet(xml: string, strings: readonly string[], limits: ReadL
   let inInline = false;
   let phonetic = 0;
 
-  const openRow = (attrs: Map<string, string>) => {
+  const openRow = (attrs: ReadonlyMap<string, string>) => {
     if (row) throw malformed();
     const declared = attrs.get("r");
     const index = declared && /^\d{1,7}$/.test(declared) ? Number(declared) - 1 : nextRow;
@@ -364,7 +398,7 @@ async function parseSheet(xml: string, strings: readonly string[], limits: ReadL
     rows[row.index] = row.values;
     row = null;
   };
-  const openCell = (attrs: Map<string, string>) => {
+  const openCell = (attrs: ReadonlyMap<string, string>) => {
     if (!row || cell) throw malformed();
     const ref = attrs.get("r");
     let column: number | null = ref ? columnIndex(ref) : row.nextColumn;
@@ -380,7 +414,7 @@ async function parseSheet(xml: string, strings: readonly string[], limits: ReadL
     if (!row || !cell) throw malformed();
     const { column } = cell;
     if (column !== null && column < limits.maxColumns) {
-      const value = cellValue(cell.type, cell.raw ? cell.raw.join("") : null, cell.inline ? cell.inline.join("") : null, strings);
+      const value = cellValue(cell.type, cell.raw ? cell.raw.join("") : null, cell.inline ? cell.inline.join("") : null, strings, work.spend);
       if (value !== null) {
         while (row.values.length < column) row.values.push(null);
         row.values[column] = value;
@@ -389,9 +423,8 @@ async function parseSheet(xml: string, strings: readonly string[], limits: ReadL
     cell = null;
   };
 
-  const due = clock();
-  for (const token of tokens(xml)) {
-    if (due()) await pause();
+  for (const token of scanXml(xml, work.spend)) {
+    if (work.due()) await pause();
     if (token.kind === "text") {
       if (capture) capture.push(token.text);
       continue;
@@ -475,29 +508,38 @@ async function parseSheet(xml: string, strings: readonly string[], limits: ReadL
 
 /**
  * Прочитать книгу. `wanted` ограничивает разбор нужными листами: лист,
- * который вызывающему не нужен, не распаковывается вовсе.
+ * который вызывающему не нужен, не распаковывается вовсе. Лист, для
+ * которого `listOnly` — да, тоже не распаковывается: он попадает в
+ * результат именем, без строк.
  */
 export async function readWorkbook(
   buffer: Buffer,
-  options: { wanted?: (sheetName: string) => boolean; limits?: Partial<ReadLimits> } = {},
+  options: {
+    wanted?: (sheetName: string) => boolean;
+    listOnly?: (sheetName: string) => boolean;
+    limits?: Partial<ReadLimits>;
+  } = {},
 ): Promise<ReadWorkbook> {
   const limits = { ...DEFAULT_READ_LIMITS, ...options.limits };
   if (buffer.length < 22 || buffer.readUInt32LE(0) !== 0x04034b50) throw new WorkbookFormatError("xlsx_not_zip");
+  // Работа сканера на всю книгу — одним счётом: предел на часть книги
+  // файл повторил бы в каждой.
+  const work = meter(limits);
   const zip = await openZip(buffer, limits);
   try {
     if (!zip.entries.has("[Content_Types].xml")) throw new WorkbookFormatError("xlsx_not_workbook");
-    const rootRels = zip.entries.has("_rels/.rels") ? await relationships(await zip.read("_rels/.rels")) : [];
+    const rootRels = zip.entries.has("_rels/.rels") ? await relationships(await zip.read("_rels/.rels"), work) : [];
     const office = rootRels.find((rel) => /\/officeDocument$/.test(rel.type));
     const workbookPath = office ? joinPath("", office.target) : "xl/workbook.xml";
     if (!zip.entries.has(workbookPath)) throw new WorkbookFormatError("xlsx_not_workbook");
-    const workbook = await workbookInfo(await zip.read(workbookPath), limits);
+    const workbook = await workbookInfo(await zip.read(workbookPath), limits, work);
     const baseDir = workbookPath.includes("/") ? workbookPath.slice(0, workbookPath.lastIndexOf("/")) : "";
-    const rels = zip.entries.has(relsPath(workbookPath)) ? await relationships(await zip.read(relsPath(workbookPath))) : [];
+    const rels = zip.entries.has(relsPath(workbookPath)) ? await relationships(await zip.read(relsPath(workbookPath)), work) : [];
     const date1904 = workbook.date1904;
 
     const sharedRel = rels.find((rel) => /\/sharedStrings$/.test(rel.type));
     const sharedPath = sharedRel ? joinPath(baseDir, sharedRel.target) : null;
-    const strings = sharedPath && zip.entries.has(sharedPath) ? await sharedStrings(await zip.read(sharedPath), limits) : [];
+    const strings = sharedPath && zip.entries.has(sharedPath) ? await sharedStrings(await zip.read(sharedPath), limits, work) : [];
 
     const relById = new Map<string, { id: string; type: string; target: string }>();
     for (const rel of rels) {
@@ -513,6 +555,10 @@ export async function readWorkbook(
       const name = item.name.toLocaleLowerCase("ru");
       if (names.has(name)) continue;
       names.add(name);
+      if (options.listOnly?.(item.name)) {
+        sheets.push({ name: item.name, rows: [] });
+        continue;
+      }
       const rel = item.relId === undefined ? undefined : relById.get(item.relId);
       if (!rel || !/\/worksheet$/.test(rel.type)) continue;
       const path = joinPath(baseDir, rel.target);
@@ -520,9 +566,12 @@ export async function readWorkbook(
       // Одна часть — один лист: иначе большую часть читали бы раз за разом.
       if (parts.has(path)) throw new WorkbookFormatError("xlsx_xml_malformed");
       parts.add(path);
-      sheets.push({ name: item.name, rows: await parseSheet(await zip.read(path), strings, limits) });
+      sheets.push({ name: item.name, rows: await parseSheet(await zip.read(path), strings, limits, work) });
     }
     return { sheets, date1904 };
+  } catch (error) {
+    if (error instanceof XmlFormatError) throw new WorkbookFormatError(error.code);
+    throw error;
   } finally {
     zip.close();
   }

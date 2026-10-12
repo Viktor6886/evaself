@@ -8,11 +8,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import JSZip from "jszip";
+
 import { cleanJson, cleanText, jsonValue, stringList } from "../dist/archive/format.js";
 import { applyArchive } from "../dist/archive/import-apply.js";
 import { repeatsTooOften } from "../dist/archive/import-goals.js";
 import { ARCHIVE_ROW_LIMIT, parseArchive } from "../dist/archive/import-parse.js";
 import { ArchiveRejected } from "../dist/archive/import-types.js";
+import { readWorkbook } from "../dist/archive/xlsx-reader.js";
 
 const ZONE = "Europe/Moscow";
 const NOW = new Date("2026-10-07T12:00:00.000Z");
@@ -339,6 +342,75 @@ test("цикл событий: дорогие строки не держат е�
     const longest = await longestChunk(async () => await preview(await parseArchive(input, { zone: ZONE })));
     assert.ok(longest < 150, `${name}: ${Math.round(longest)} мс без паузы`);
   }
+});
+
+test("цикл событий: чтение книги — огромный тег, узлы из одних сущностей и миллион пустых ячеек — тоже с паузами", async () => {
+  const bookOf = async (sheet: string, strings = "<sst/>") => {
+    const zip = new JSZip();
+    zip.file("[Content_Types].xml", "<Types/>");
+    zip.file("xl/workbook.xml", `<workbook><sheets><sheet name="Заметки" r:id="rId1"/></sheets></workbook>`);
+    zip.file("xl/_rels/workbook.xml.rels", `<Relationships><Relationship Id="rId1" Type="x/worksheet" Target="s.xml"/>`
+      + `<Relationship Id="rId2" Type="x/sharedStrings" Target="strings.xml"/></Relationships>`);
+    zip.file("xl/s.xml", sheet);
+    zip.file("xl/strings.xml", strings);
+    return await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
+  };
+  // Сущности вперемешку, чтобы файл не сжимался как zip-бомба: узел — 260
+  // тысяч знаков, 50 000 сущностей, под самым пределом узла.
+  let seed = 7;
+  const entities = ["&amp;", "&lt;", "&#65;", "&#x42;", "&quot;"];
+  const node = Array.from({ length: 50_000 }, () => {
+    seed = (Math.imul(seed, 1_103_515_245) + 12_345) >>> 0;
+    return entities[(seed >>> 16) % entities.length];
+  }).join("");
+  // Тег из 20 миллионов пробельных знаков вперемешку (иначе файл сожмётся
+  // как zip-бомба): прежнее чтение проходило его одним шагом — 0,2–0,4 с
+  // без паузы.
+  const block = Array.from({ length: 100_000 }, () => {
+    seed = (Math.imul(seed, 1_103_515_245) + 12_345) >>> 0;
+    return " \t\n\r"[(seed >>> 16) % 4];
+  }).join("");
+  const cases: Record<string, Buffer> = {
+    "тег из 20 млн пробелов": await bookOf(`<worksheet><sheetData><row${block.repeat(200)}r="1"/></sheetData></worksheet>`),
+    "узлы из одних сущностей": await bookOf("<worksheet/>", `<sst>${`<si><t>${node}</t></si>`.repeat(40)}</sst>`),
+    "миллион пустых ячеек": await bookOf(`<worksheet><sheetData>${Array.from({ length: 10_000 }, (_, index) =>
+      `<row r="${index + 1}">${"<c/>".repeat(100)}</row>`).join("")}</sheetData></worksheet>`),
+  };
+  for (const [name, bytes] of Object.entries(cases)) {
+    const longest = await longestChunk(() => readWorkbook(bytes));
+    assert.ok(longest < 150, `${name}: ${Math.round(longest)} мс без паузы`);
+  }
+});
+
+test("анкета: ответ из тысяч запятых в тысячах строк — отказ при разборе, а не деление при каждой записи", async () => {
+  // Ответ с ошибкой запись делила заново в каждой строке: 2 000 строк
+  // `interests` по 10 000 запятых — 2–3 секунды из файла в 18 КБ.
+  for (const separator of [",", ", ", ";", "а\n"]) {
+    const rows = [["Код поля", "Ответ"], ...Array.from({ length: 2_000 }, () => ["interests", separator.repeat(9_000).slice(0, 9_999)])];
+    const error = await rejection(() => parseArchive(book({ name: "Анкета", rows }), { zone: ZONE }));
+    assert.match(error.message, /списков и вложенных значений/, JSON.stringify(separator));
+  }
+  // Честный ответ-список проходит.
+  const parsed = await parseArchive(book({ name: "Анкета", rows: [["Код поля", "Ответ"], ["interests", "чтение, музыка; прогулки"]] }), { zone: ZONE });
+  assert.equal(parsed.questionnaire.length, 1);
+});
+
+test("списки: ячейка из тысяч пустых строк — ошибка строки до деления на куски", async () => {
+  // «x», 16 600 пустых строк и «y» в пяти столбцах сотен строк — две
+  // секунды процессора, хотя пунктов в каждой ячейке два.
+  const blank = `x${"\n \n".repeat(16_600)}y`;
+  const columns = ["Вопрос", "Варианты", "Факты", "Допущения", "Критерии", "Риски"];
+  const rows = [columns, ...Array.from({ length: 190 }, (_, index) => [`Вопрос ${index}`, blank, blank, blank, blank, blank])];
+  let parsed: Awaited<ReturnType<typeof parseArchive>> | null = null;
+  const spent = await cpuMs(async () => {
+    parsed = await parseArchive(book({ name: "Решения", rows }), { zone: ZONE });
+  });
+  assert.equal(parsed!.decisions.length, 0);
+  assert.match(parsed!.errors[0]!.message, /слишком много строк/);
+  assert.ok(spent < 1_000, `${Math.round(spent)} мс процессора`);
+  // Пустые строки между пунктами честного списка — не повод для отказа.
+  const honest = await parseArchive(book({ name: "Решения", rows: [columns, ["Вопрос", "а\n\nб\n\nв", "", "", "", ""]] }), { zone: ZONE });
+  assert.deepEqual(honest.decisions[0]?.value.options, ["а", "б", "в"]);
 });
 
 test("анкета: ответ-JSON платит из бюджета файла и для уже принятого поля не разбирается", async () => {

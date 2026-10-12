@@ -15,7 +15,7 @@
 
 import { isValidIanaTimezone } from "../time/local-date-time.js";
 import {
-  CellError, date, dateTime, decimal, fold, integer, jsonStructure, jsonValue, labelled, list,
+  CellError, answerStructure, date, dateTime, decimal, fold, integer, jsonValue, labelled, list,
   requiredText, stringList, text, yesNo,
 } from "./format.js";
 import { Budget, columnsOf, getter, isEmptyRow, keyValues, type Get } from "./import-cells.js";
@@ -296,11 +296,16 @@ export async function parseArchive(book: ReadWorkbook, options: { zone: string }
     // выгрузка показывает, а загрузка пропускает молча. Иначе собственный
     // архив человека возвращался бы с «ошибками» в каждой такой строке.
     if (status !== null && status !== "candidate" && status !== "confirmed") return null;
-    if (text(get("value"), 10_000) === null && status === null) return null;
-    const value = requiredText(get("value"), 10_000, "Ответ");
-    // Ответ-объект или список JSON разбирается при записи — и платит за
-    // это из того же бюджета файла, что и JSON листов.
-    if (value.startsWith("[") || value.startsWith("{")) spend(jsonStructure(value));
+    // Ячейка читается один раз: каждое чтение платит из бюджета текста.
+    const value = text(get("value"), 10_000);
+    if (value === null) {
+      if (status === null) return null;
+      throw new CellError("не заполнено поле «Ответ»");
+    }
+    // Ответ делится на пункты и разбирается как JSON при записи — и
+    // платит за каждый разделитель из того же бюджета файла, что и JSON
+    // листов: ответ с ошибкой запись делила бы заново в каждой строке.
+    spend(answerStructure(value));
     return {
       field_key: key,
       value,
