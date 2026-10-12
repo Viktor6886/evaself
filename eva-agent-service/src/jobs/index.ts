@@ -54,8 +54,8 @@ import { jobProcessor } from "./consumer.js";
 import type { JobQueueDriver, JobQueueName } from "./queue-registry.js";
 import { KnowledgeIngestWorker, KNOWLEDGE_INGEST_JOB, KNOWLEDGE_INGEST_TIMING } from "../knowledge/lifecycle.js";
 import { scanKnowledgeDocument } from "../knowledge/ingestion.js";
-import { parseJobEnvelope } from "./envelope.js";
-import { KNOWLEDGE_INDEX_JOB, KNOWLEDGE_INDEX_TIMING, KnowledgeIndexer, knowledgeIndexScheduler } from "../knowledge/indexer.js";
+import { parseJobEnvelope, type JobEnvelope } from "./envelope.js";
+import { KNOWLEDGE_INDEX_JOB, KNOWLEDGE_INDEX_TIMING, KNOWLEDGE_PUBLISH_FAILED, KnowledgeIndexer, knowledgeIndexScheduler } from "../knowledge/indexer.js";
 import {
   KNOWLEDGE_MAINTENANCE_TIMING,
   KNOWLEDGE_REBUILD_JOB,
@@ -138,6 +138,10 @@ export function buildJobLayer(
   const outbox = new JobOutbox(db, registry, logger, {
     batchSize: config.jobOutboxBatchSize,
     pollMs: config.jobOutboxPollMs,
+    // Загрузка или построение индекса, чьё задание не удалось
+    // опубликовать, получает ошибку и кнопку повтора, а не висит «в
+    // очереди» или «строится» до перезапуска сервиса.
+    onDead: async (envelope) => await knowledgeRejected(envelope, KNOWLEDGE_PUBLISH_FAILED),
   });
   /**
    * Очереди, которые этот процесс исполняет, и сколько заданий каждой
@@ -186,6 +190,15 @@ export function buildJobLayer(
     outbox,
     index: scheduler,
   });
+  /**
+   * Задание базы знаний не дошло до обработчика: не опубликовано или
+   * просрочено в очереди. Его запись получает код отказа — иначе она так
+   * и оставалась бы «в очереди» или «строится».
+   */
+  const knowledgeRejected = async (envelope: JobEnvelope, code: string): Promise<void> => {
+    if (envelope.type === KNOWLEDGE_INGEST_JOB) await knowledge.reject(envelope, code);
+    else if (envelope.type === KNOWLEDGE_REBUILD_JOB) await maintenance.rejectRebuild(envelope, code);
+  };
   registry.queue("memory");
   runtime.register(KNOWLEDGE_INGEST_JOB, async (context) => await knowledge.run(context), KNOWLEDGE_INGEST_TIMING);
   runtime.register(KNOWLEDGE_INDEX_JOB, async (context) => { await indexer.run(context); }, KNOWLEDGE_INDEX_TIMING);
@@ -366,8 +379,23 @@ export function buildJobLayer(
       // томом Valkey, должно вернуться раньше, чем слой начнёт работу.
       const summary = await schedules.reconcile();
       logger.info("Расписания заданий сверены", { ...summary });
-      const expiredUploads = await knowledge.recoverExpiredUploads();
-      if (expiredUploads) logger.warn("Просроченные загрузки доступны для повтора", { count: expiredUploads });
+      // Восстановление — по возможности и по отдельности: отказ одного не
+      // отменяет другое и не оставляет процесс без публикатора и
+      // потребителей, иначе «в очереди» осталось бы вообще всё.
+      for (const [recovery, message, recover] of [
+        ["uploads", "Просроченные загрузки доступны для повтора", () => knowledge.recoverExpiredUploads()],
+        ["builds", "Незавершённые построения индекса доступны для повтора", () => maintenance.recoverStalledBuilds()],
+      ] as const) {
+        try {
+          const count = await recover();
+          if (count) logger.warn(message, { count });
+        } catch (error) {
+          logger.warn("Восстановление заданий базы знаний не выполнено", {
+            recovery,
+            code: error instanceof Error ? error.name : "unknown_error",
+          });
+        }
+      }
       logger.info("Ступень переноса проактивных задач", {
         stage,
         legacyScheduler: legacySchedulerActive(stage),
@@ -376,9 +404,7 @@ export function buildJobLayer(
       outbox.start();
       const processor = jobProcessor(runtime, async (data, code) => {
         const parsed = parseJobEnvelope(data);
-        if (parsed.ok && parsed.envelope.type === KNOWLEDGE_INGEST_JOB) {
-          await knowledge.reject(parsed.envelope, code);
-        }
+        if (parsed.ok) await knowledgeRejected(parsed.envelope, code);
       });
       for (const [queue, concurrency] of consumed) registry.consume(queue, processor, concurrency);
     },

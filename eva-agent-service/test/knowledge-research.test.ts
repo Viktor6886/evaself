@@ -4,7 +4,10 @@ import { mkdtemp, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sanitizeUntrustedContent, StructuredOutput } from "../dist/knowledge/security.js";
-import { DocumentIngestor } from "../dist/knowledge/ingestion.js";
+import { DocumentIngestor, KNOWLEDGE_SCAN_TIMEOUT_MS } from "../dist/knowledge/ingestion.js";
+import { KNOWLEDGE_INDEX_TIMING, KNOWLEDGE_JOB_DEADLINE_MS, knowledgeIndexScheduler } from "../dist/knowledge/indexer.js";
+import { KNOWLEDGE_INGEST_TIMING, recordKnowledgeIngest } from "../dist/knowledge/lifecycle.js";
+import { scheduleKnowledgeRebuild, scheduleKnowledgeReconcile } from "../dist/knowledge/maintenance.js";
 import { ResearchOrchestrator } from "../dist/research/orchestrator.js";
 
 test("untrusted sanitizer removes hidden and authority/tool injection", () => {
@@ -35,6 +38,31 @@ test("ingestion rejects type size and AV failure and always cleans temp", async 
   await assert.rejects(unavailable.ingest({ userId: 1, name: "x.txt", mime: "text/plain", bytes: Buffer.from("x") }), /document_antivirus_unavailable/u);
   assert.equal(persisted, false);
   assert.deepEqual(await readdir(root), []);
+});
+
+/**
+ * Очередь memory одна и идёт по одному заданию: срок задания базы знаний
+ * покрывает ожидание за другими файлами, индексацией и сверкой, а одно
+ * выполнение по-прежнему ограничено сроком своего типа. Scanner грузит
+ * всю базу сигнатур на каждый файл и укладывается в мягкий срок разбора.
+ */
+test("сроки базы знаний: очередь ждёт часами, scanner — внутри мягкого срока разбора", async () => {
+  const deadlines: number[] = [];
+  const outbox = { record: async (_client: unknown, intent: { deadlineMs: number }) => {
+    deadlines.push(intent.deadlineMs);
+    return { idempotencyKey: "", duplicate: false };
+  } };
+  const id = "0b0e5a62-3d2f-4f7c-9a55-6a9e3a1f0c11";
+  await recordKnowledgeIngest(outbox as never, null as never, { uploadId: id, userId: null, attempt: "retry-1" });
+  await knowledgeIndexScheduler(outbox as never, () => true).schedule(null as never, { documentId: id, userId: 7, reason: "ingest" });
+  await scheduleKnowledgeRebuild(outbox as never, null as never, { version: 2, started: 1, full: true, after: null });
+  await scheduleKnowledgeReconcile(outbox as never, null as never, 1);
+  assert.deepEqual(deadlines, Array(4).fill(KNOWLEDGE_JOB_DEADLINE_MS));
+  // Полсотни файлов одной загрузки, по минуте на антивирус и разбор.
+  assert.ok(KNOWLEDGE_JOB_DEADLINE_MS >= 50 * 60_000);
+  assert.ok(KNOWLEDGE_JOB_DEADLINE_MS > KNOWLEDGE_INGEST_TIMING.hardDeadlineMs! && KNOWLEDGE_JOB_DEADLINE_MS > KNOWLEDGE_INDEX_TIMING.hardDeadlineMs!);
+  assert.ok(KNOWLEDGE_SCAN_TIMEOUT_MS > 60_000, "запас на загрузку базы сигнатур больше минуты");
+  assert.ok(KNOWLEDGE_SCAN_TIMEOUT_MS < KNOWLEDGE_INGEST_TIMING.softTimeoutMs!, "разбору и векторам остаётся время");
 });
 
 test("research enforces domain limit, citations and cancellation without report", async () => {

@@ -79,6 +79,12 @@ export interface JobOutboxOptions {
   maxAttempts?: number;
   /** Период фонового публикатора. */
   pollMs?: number;
+  /**
+   * Задание признано мёртвым, так и не попав в очередь. Владелец записи
+   * узнаёт об этом сразу: иначе загрузка базы знаний оставалась бы
+   * «в очереди» до перезапуска сервиса, без ошибки и без «Повторить».
+   */
+  onDead?: (envelope: JobEnvelope, code: string) => Promise<void>;
 }
 
 /**
@@ -119,6 +125,7 @@ export class JobOutbox {
   private readonly leaseSeconds: number;
   private readonly maxAttempts: number;
   private readonly pollMs: number;
+  private readonly onDead: JobOutboxOptions["onDead"];
   private readonly workerId = `${process.pid}-${randomUUID()}`;
   private timer: NodeJS.Timeout | null = null;
   private ticking = false;
@@ -133,6 +140,7 @@ export class JobOutbox {
     this.leaseSeconds = options.leaseSeconds ?? 60;
     this.maxAttempts = options.maxAttempts ?? 8;
     this.pollMs = options.pollMs ?? 1_000;
+    this.onDead = options.onDead;
   }
 
   /**
@@ -231,6 +239,7 @@ export class JobOutbox {
         // (запрещённая очередь, неверные сроки), а не занятости брокера.
         if (failure.failureClass === "permanent" || row.attempts >= this.maxAttempts) {
           await this.markDead(row, failure.code, failure.failureClass);
+          await this.notifyDead(envelope, failure.code);
           summary.dead += 1;
           continue;
         }
@@ -371,6 +380,24 @@ export class JobOutbox {
       attempts: row.attempts,
       code,
     });
+  }
+
+  /**
+   * Строка уже `dead` и в DLQ. Отказ уведомления не срывает заход по
+   * остальным строкам: запись владельца поправит восстановление при
+   * старте слоя.
+   */
+  private async notifyDead(envelope: JobEnvelope, code: string): Promise<void> {
+    if (!this.onDead) return;
+    try {
+      await this.onDead(envelope, code);
+    } catch (error) {
+      this.logger.warn("Отказ публикации не доведён до записи задания", {
+        queue: envelope.queue,
+        type: envelope.type,
+        code: error instanceof Error ? error.name : "unknown_error",
+      });
+    }
   }
 }
 

@@ -62,6 +62,24 @@ export const KNOWLEDGE_INDEX_TIMING: Partial<JobTimingPolicy> = {
   externalRequestTimeoutMs: 60_000,
 };
 
+/**
+ * Срок задания базы знаний от постановки: ожидание в очереди плюс
+ * выполнение. Очередь memory одна и идёт по одному заданию, поэтому
+ * несколько файлов одной загрузки, их индексация и сверка (до 500
+ * заданий за проход) стоят друг за другом часами. Срок, равный одному
+ * выполнению, обрывал хвост такой очереди `job_deadline_exceeded`:
+ * загрузки падали, документы навсегда оставались «ждёт индексации».
+ * Одно выполнение по-прежнему ограничено hardDeadlineMs своего типа.
+ */
+export const KNOWLEDGE_JOB_DEADLINE_MS = 6 * 3_600_000;
+
+/**
+ * Задание базы знаний так и не попало в очередь (`job_outbox.status =
+ * dead`). Точная причина — в строке outbox и DLQ; в панели — понятный
+ * код и кнопка повтора, а не родовое имя исключения брокера.
+ */
+export const KNOWLEDGE_PUBLISH_FAILED = "job_publish_failed";
+
 /** Точек в одном запросе записи: ответ Qdrant ждёт применения, большая пачка — долгий ответ. */
 const UPSERT_BATCH = 128;
 
@@ -91,7 +109,7 @@ export function knowledgeIndexScheduler(outbox: Pick<JobOutbox, "record">, enabl
         }),
         payloadRef: input.documentId,
         payload: { document_id: input.documentId, reason: input.reason },
-        deadlineMs: 30 * 60_000,
+        deadlineMs: KNOWLEDGE_JOB_DEADLINE_MS,
         timezone: "UTC",
         source: input.userId === null ? "system" : "user",
         privacy: "restricted",
@@ -149,6 +167,13 @@ export interface KnowledgeIndexerOptions {
 /** Только перечисленные версии — перестройка одной версии (`maintenance.ts`). */
 export interface KnowledgeIndexRequest {
   versions?: number[];
+  /**
+   * Перестраивается активная версия: записанный в неё документ найден
+   * поиском, и это видно в его состоянии; прежняя версия документа
+   * снимается, как после его собственного задания. Отказ состояние не
+   * трогает — его отметит собственное задание документа.
+   */
+  markReady?: boolean;
 }
 
 export class KnowledgeIndexer {
@@ -214,7 +239,10 @@ export class KnowledgeIndexer {
       if (tracked) await this.mark(documentId, owner, "failed", null, errorCode(error)).catch(() => undefined);
       throw error;
     }
-    if (tracked) {
+    // Готовая новая версия снимает прежнюю — и в перестройке активной
+    // версии: иначе замена, загруженная, пока индексировать было некуда,
+    // стала бы «готовой», а прежняя осталась бы в поиске рядом с ней.
+    if (tracked || request.markReady) {
       await this.mark(documentId, owner, "ready", Math.max(...versions.map((row) => row.version)), null);
       if (document.replaces_document_id) await this.retire(document.replaces_document_id, owner);
     }

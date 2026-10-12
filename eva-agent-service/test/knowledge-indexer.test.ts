@@ -371,6 +371,27 @@ test("перестройка одной версии: пишется тольк�
   assert.ok(!queries.some((query) => /^(UPDATE|DELETE) knowledge_documents|^DELETE FROM knowledge_documents/u.test(query.sql)));
 });
 
+test("перестройка активной версии: записанный документ готов, прежняя версия снимается", async () => {
+  // Замена, загруженная, пока индексировать было некуда: её собственное
+  // задание кончилось no_version, и прежнюю версию больше никто не снимет.
+  // Объяви перестройка новую готовой без этого — в поиске остались бы обе.
+  const { db, queries } = fakeDb({
+    versions: [VERSION],
+    document: { ...PRIVATE_DOC, replaces_document_id: PREVIOUS },
+    chunks: CHUNKS,
+  });
+  const { store } = fakeStore();
+  await new KnowledgeIndexer(db as never, router().router as never, store as never, options())
+    .index("doc-1", 7, undefined, { versions: [2], markReady: true });
+  const marks = queries.filter((query) => /^UPDATE knowledge_documents/u.test(query.sql));
+  assert.equal(marks.length, 1, "только итоговая отметка: «indexing» и «failed» перестройка не ставит");
+  assert.deepEqual(marks[0]!.params, ["doc-1", 7, "ready", 2, null]);
+  const ready = queries.findIndex((query) => /^UPDATE knowledge_documents/u.test(query.sql));
+  const removal = queries.findIndex((query) => /^DELETE FROM knowledge_documents/u.test(query.sql));
+  assert.ok(removal > ready, "прежняя версия снимается после отметки новой");
+  assert.deepEqual(queries[removal]!.params, [[PREVIOUS], 7]);
+});
+
 test("планировщик: задание индексации без текста, ключ повтора — документ и причина", async () => {
   const recorded: Array<Record<string, unknown>> = [];
   const scheduler = knowledgeIndexScheduler({ record: async (_client: unknown, intent: Record<string, unknown>) => { recorded.push(intent); return { idempotencyKey: "", duplicate: false }; } } as never, () => true);

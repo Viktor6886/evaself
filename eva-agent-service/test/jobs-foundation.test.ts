@@ -455,6 +455,44 @@ test("недоступный брокер откладывает публика�
   assert.equal(recovered.published, 1);
 });
 
+test("задание, так и не попавшее в очередь, доводит отказ до своей записи", async () => {
+  const dead: Array<{ key: string; code: string }> = [];
+  const layer = buildLayer({ outbox: {
+    maxAttempts: 1,
+    onDead: async (envelope, code) => { dead.push({ key: envelope.idempotencyKey, code }); },
+  } });
+  await layer.db.withUserScope({ userId: 42, label: "test.intent" }, async () =>
+    await layer.db.transaction(async (client: never) =>
+      await layer.outbox.record(client, intent() as never)));
+  layer.registry.queue("memory");
+  layer.driver.queues.get("memory")!.failNextAdds = 1;
+
+  const summary = await layer.outbox.publishPending();
+  assert.equal(summary.dead, 1);
+  assert.equal(layer.fake.outbox[0]?.status, "dead");
+  assert.deepEqual(dead, [{ key: layer.fake.outbox[0]!.idempotency_key, code: "ECONNREFUSED" }]);
+});
+
+test("отказ уведомления о мёртвом задании не срывает заход публикатора", async () => {
+  const layer = buildLayer({ outbox: {
+    maxAttempts: 1,
+    onDead: async () => { throw new Error("database unavailable"); },
+  } });
+  for (const discriminator of ["first", "second"]) {
+    await layer.db.withUserScope({ userId: 42, label: "test.intent" }, async () =>
+      await layer.db.transaction(async (client: never) =>
+        await layer.outbox.record(client, intent({
+          idempotencyKey: jobIdempotencyKey({ type: "memory_compaction", userId: 42, discriminator }),
+        }) as never)));
+  }
+  layer.registry.queue("memory");
+  layer.driver.queues.get("memory")!.failNextAdds = 1;
+
+  const summary = await layer.outbox.publishPending();
+  assert.deepEqual({ dead: summary.dead, published: summary.published }, { dead: 1, published: 1 });
+  assert.deepEqual(layer.fake.outbox.map((row) => row.status), ["dead", "published"]);
+});
+
 test("испорченный конверт уходит в DLQ без повторов", async () => {
   const layer = buildLayer();
   await layer.db.withUserScope({ userId: 42, label: "test.intent" }, async () =>

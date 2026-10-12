@@ -31,6 +31,28 @@ import type {
   JobSchedulerState,
 } from "./queue-registry.js";
 
+/**
+ * Идентификатор задания в BullMQ по ключу идемпотентности.
+ *
+ * BullMQ отклоняет `jobId` с двоеточием, если частей не ровно три
+ * (`Custom Id cannot contain :` — совместимость с `repeat:<key>:<ms>`).
+ * Ключ `тип:арендатор:различитель` с двоеточием в различителе — повтор
+ * загрузки, индексация, перестройка и сверка базы знаний — поэтому не
+ * публиковался ни разу: публикатор повторял отказ до `dead`, загрузка
+ * висела «в очереди», а Qdrant не получал ни одного документа.
+ *
+ * Ключ, который BullMQ принимает, остаётся байт в байт: задания, уже
+ * поставленные под ним, не задваиваются при повторной публикации.
+ * Остальные кодируются обратимо (`%` → `%25`, `:` → `%3A`): двоеточий
+ * не остаётся, а «%» есть всегда — в неизменённых ключах его нет, и два
+ * разных ключа не дают одного идентификатора.
+ */
+export function bullJobId(key: string): string {
+  const parts = key.split(":").length;
+  if (!key.includes("%") && (parts === 1 || parts === 3)) return key;
+  return key.replace(/%/g, "%25").replace(/:/g, "%3A");
+}
+
 class BullQueueHandle implements JobQueueHandle {
   private readonly queue: Queue;
 
@@ -41,14 +63,16 @@ class BullQueueHandle implements JobQueueHandle {
   /**
    * Поставить задание.
    *
-   * Идентификатор задания — ключ идемпотентности из конверта. BullMQ по
-   * совпадающему `jobId` второе задание не создаёт, поэтому повторный
-   * публикатор второго бизнес-эффекта не вызывает. Предварительная
-   * проверка нужна только для честного ответа «это был повтор»: сам
-   * факт недублирования обеспечивает не она, а BullMQ.
+   * Идентификатор задания — ключ идемпотентности из конверта (в форме,
+   * которую принимает BullMQ, см. `bullJobId`). BullMQ по совпадающему
+   * `jobId` второе задание не создаёт, поэтому повторный публикатор
+   * второго бизнес-эффекта не вызывает. Предварительная проверка нужна
+   * только для честного ответа «это был повтор»: сам факт
+   * недублирования обеспечивает не она, а BullMQ.
    */
   async add(jobType: string, data: unknown, options: JobAddOptions): Promise<JobAddResult> {
-    const existing = await this.queue.getJob(options.jobId);
+    const jobId = bullJobId(options.jobId);
+    const existing = await this.queue.getJob(jobId);
     if (existing) {
       if (!options.replacePending) return { jobId: options.jobId, duplicate: true };
       // debounce и keep-last-if-active: актуальнее последнее намерение,
@@ -62,7 +86,7 @@ class BullQueueHandle implements JobQueueHandle {
       if (!removed) return { jobId: options.jobId, duplicate: true };
     }
     await this.queue.add(jobType, data, {
-      jobId: options.jobId,
+      jobId,
       delay: options.delayMs,
       attempts: options.attempts,
       backoff: options.backoffMs
