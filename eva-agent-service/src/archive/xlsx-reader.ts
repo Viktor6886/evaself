@@ -1,0 +1,660 @@
+/**
+ * Чтение книги Excel, которую прислал человек.
+ *
+ * Файл — недоверенные данные. Это zip, и с ним приходит всё, что умеет
+ * zip: бомба сжатия, тысячи частей, обход каталогов. Поэтому архив
+ * сначала осматривается по оглавлению, распаковываются только нужные
+ * части и каждая — с пересчётом настоящих байтов, а не заявленных.
+ *
+ * XML разбирается узким сканером, а не парсером общего назначения: DTD и
+ * сущности здесь не раскрываются вовсе (книга с `<!DOCTYPE` отвергается),
+ * поэтому «миллиард смешков» негде устроить. Понимает он то, что пишут
+ * Excel, LibreOffice, Google Таблицы и Numbers: общие и встроенные
+ * строки, форматированный текст, ячейки без адреса, префиксы пространств
+ * имён, кавычки обоих видов и календарь 1904 года.
+ */
+
+import { StringDecoder } from "node:string_decoder";
+
+import yauzl from "yauzl";
+
+import { clock, pause } from "./pace.js";
+import { attribute, MAX_TEXT_LENGTH, scanXml, XmlFormatError, type Spend } from "./xml-scan.js";
+
+export { decodeXml } from "./xml-scan.js";
+
+export type ReadCell = string | number | boolean | null;
+
+export interface ReadSheet {
+  name: string;
+  /** Строки листа по порядку; пустые строки сохраняют своё место. */
+  rows: ReadCell[][];
+}
+
+export interface ReadWorkbook {
+  sheets: ReadSheet[];
+  /** Даты книги считаются от 1904 года (старые Numbers и Excel для Mac). */
+  date1904: boolean;
+}
+
+export interface ReadLimits {
+  maxEntries: number;
+  maxEntryBytes: number;
+  maxTotalBytes: number;
+  maxRatio: number;
+  maxRows: number;
+  maxColumns: number;
+  maxSharedStrings: number;
+  maxSheets: number;
+  /** Работы сканера на всю книгу (`Spend` в `xml-scan.ts`). */
+  maxWork: number;
+}
+
+export const DEFAULT_READ_LIMITS: ReadLimits = {
+  maxEntries: 500,
+  maxEntryBytes: 40 * 1024 * 1024,
+  maxTotalBytes: 80 * 1024 * 1024,
+  // XML таблицы сжимается в десятки раз; сотни — уже признак бомбы.
+  maxRatio: 200,
+  maxRows: 20_000,
+  maxColumns: 100,
+  maxSharedStrings: 500_000,
+  // В архиве Евы 27 листов; тысячи `<sheet>` в книге — не таблица, а
+  // способ заставить разбор читать одно и то же раз за разом.
+  maxSheets: 256,
+  // Предел байтов не ограничивает работу: 4 МБ пустых `<c/>` — миллион
+  // ячеек, а 32 МБ — восемь миллионов и секунды процессора. Честный архив
+  // в 30 000 строк (больше загрузка не примет) — около 1,2 млн единиц,
+  // плотный, пересохранённый LibreOffice, — до 3,1 млн; дальше — уже не
+  // архив, и чтение останавливается, не дочитав.
+  maxWork: 5_000_000,
+};
+
+/** Ошибка формата с кодом: текст для человека подбирает вызывающий. */
+export class WorkbookFormatError extends Error {
+  constructor(readonly code: string) {
+    super(code);
+    this.name = "WorkbookFormatError";
+  }
+}
+
+interface ZipEntry {
+  fileName: string;
+  compressedSize: number;
+  uncompressedSize: number;
+}
+
+interface OpenedZip {
+  entries: Map<string, ZipEntry>;
+  read(name: string): Promise<string>;
+  close(): void;
+}
+
+function openZip(buffer: Buffer, limits: ReadLimits): Promise<OpenedZip> {
+  return new Promise((resolve, reject) => {
+    yauzl.fromBuffer(buffer, { lazyEntries: true, validateEntrySizes: true }, (error, zip) => {
+      if (error || !zip) return reject(new WorkbookFormatError("xlsx_not_zip"));
+      const entries = new Map<string, ZipEntry & { raw: yauzl.Entry }>();
+      let declared = 0;
+      const fail = (code: string): void => {
+        zip.close();
+        reject(new WorkbookFormatError(code));
+      };
+      zip.on("entry", (entry: yauzl.Entry) => {
+        if (entries.size + 1 > limits.maxEntries) return fail("xlsx_too_many_parts");
+        const name = entry.fileName;
+        if (name.includes("..") || name.startsWith("/") || name.includes("\\") || name.includes("\0")) {
+          return fail("xlsx_part_name_invalid");
+        }
+        declared += entry.uncompressedSize;
+        if (
+          entry.uncompressedSize > limits.maxEntryBytes
+          || declared > limits.maxTotalBytes
+          || entry.uncompressedSize > Math.max(4096, entry.compressedSize) * limits.maxRatio
+        ) return fail("xlsx_zip_bomb");
+        entries.set(name, {
+          fileName: name,
+          compressedSize: entry.compressedSize,
+          uncompressedSize: entry.uncompressedSize,
+          raw: entry,
+        });
+        zip.readEntry();
+      });
+      zip.on("error", () => reject(new WorkbookFormatError("xlsx_zip_malformed")));
+      zip.on("end", () => {
+        let spent = 0;
+        resolve({
+          entries,
+          close: () => zip.close(),
+          read: async (name: string) => {
+            const entry = entries.get(name);
+            if (!entry) throw new WorkbookFormatError("xlsx_part_missing");
+            // Текст раскодируется по мере распаковки, кусками: часть в
+            // десятки мегабайт, раскодированная целиком, — сотня
+            // миллисекунд без паузы для цикла событий.
+            const text = await new Promise<string>((done, failed) => {
+              zip.openReadStream(entry.raw, (streamError, stream) => {
+                if (streamError || !stream) return failed(new WorkbookFormatError("xlsx_zip_malformed"));
+                const decoder = new StringDecoder("utf8");
+                const pieces: string[] = [];
+                let size = 0;
+                stream.on("data", (chunk: Buffer) => {
+                  size += chunk.length;
+                  // Заявленный размер проверен по оглавлению, но верить
+                  // ему нельзя: считаются настоящие байты распаковки.
+                  if (size > limits.maxEntryBytes || spent + size > limits.maxTotalBytes) {
+                    stream.destroy();
+                    failed(new WorkbookFormatError("xlsx_zip_bomb"));
+                    return;
+                  }
+                  pieces.push(decoder.write(chunk));
+                });
+                stream.on("error", () => failed(new WorkbookFormatError("xlsx_zip_malformed")));
+                stream.on("end", () => {
+                  spent += size;
+                  pieces.push(decoder.end());
+                  done(pieces.join(""));
+                });
+              });
+            });
+            if (/<!DOCTYPE/i.test(text.slice(0, 2048))) throw new WorkbookFormatError("xlsx_doctype_forbidden");
+            return text;
+          },
+        });
+      });
+      zip.readEntry();
+    });
+  });
+}
+
+const HEX4 = /^[0-9A-Fa-f]{4}$/;
+
+/**
+ * Обратное к экранированию Excel `_xHHHH_` (так он пишет, например, `\r`).
+ * Один проход по `_x`: регулярное выражение с функцией замены на тексте из
+ * одних экранирований тратило по полмикросекунды на каждое. Куски — в
+ * массив и одним `join`: `+=` строил цепочку строк по объекту на
+ * экранирование, значение ячейки держало её до первого чтения, и
+ * миллионы таких объектов будили полную сборку мусора на сотни
+ * миллисекунд. Каждый `_x` — две единицы работы в `spend`.
+ */
+export function excelUnescape(text: string, spend: Spend = () => undefined): string {
+  let at = text.indexOf("_x");
+  if (at < 0) return text;
+  const pieces: string[] = [];
+  let last = 0;
+  let seen = 0;
+  while (at >= 0) {
+    seen += 1;
+    const hex = text.slice(at + 2, at + 6);
+    if (text.charCodeAt(at + 6) === 0x5f && HEX4.test(hex)) {
+      pieces.push(text.slice(last, at), String.fromCharCode(Number.parseInt(hex, 16)));
+      last = at + 7;
+      at = text.indexOf("_x", last);
+    } else {
+      at = text.indexOf("_x", at + 1);
+    }
+  }
+  spend(seen * 2);
+  pieces.push(text.slice(last));
+  return pieces.join("");
+}
+
+/**
+ * Работа чтения всей книги. `spend` списывает работу сканера (`Spend` в
+ * `xml-scan.ts`), `due` говорит, пора ли отдать цикл событий.
+ *
+ * Перебор токенов синхронный, а паузу по часам делает цикл чтения:
+ * асинхронный генератор создавал по промису на каждый токен, а под
+ * AsyncLocalStorage сервиса каждый промис ещё проходит через async hooks —
+ * разбор большого листа становился в 2,5–10 раз дороже.
+ */
+interface Meter {
+  spend: Spend;
+  due: () => boolean;
+}
+
+/**
+ * Часы смотрятся раз в столько единиц работы, а не на каждом токене:
+ * `performance.now()` на каждом пустом `<c/>` — седьмая часть его цены. Дорогой
+ * токен (тег, текст с сущностями) списывает много единиц и проверяет часы
+ * сразу.
+ */
+const UNITS_PER_CLOCK = 16;
+
+function meter(limits: ReadLimits): Meter {
+  let work = 0;
+  let checked = 0;
+  const elapsed = clock();
+  return {
+    spend: (units) => {
+      work += units;
+      if (work > limits.maxWork) throw new WorkbookFormatError("xlsx_too_much_data");
+    },
+    due: () => {
+      if (work - checked < UNITS_PER_CLOCK) return false;
+      checked = work;
+      return elapsed();
+    },
+  };
+}
+
+function joinPath(base: string, target: string): string {
+  if (target.startsWith("/")) return target.slice(1);
+  const parts = base.split("/").filter(Boolean);
+  for (const segment of target.split("/")) {
+    if (segment === "..") parts.pop();
+    else if (segment && segment !== ".") parts.push(segment);
+  }
+  return parts.join("/");
+}
+
+function relsPath(part: string): string {
+  const slash = part.lastIndexOf("/");
+  return slash < 0 ? `_rels/${part}.rels` : `${part.slice(0, slash)}/_rels/${part.slice(slash + 1)}.rels`;
+}
+
+async function relationships(xml: string, work: Meter): Promise<Array<{ id: string; type: string; target: string }>> {
+  const found: Array<{ id: string; type: string; target: string }> = [];
+  for (const token of scanXml(xml, work.spend)) {
+    if (work.due()) await pause();
+    if (token.kind !== "open" || token.name !== "Relationship") continue;
+    found.push({
+      id: token.attrs.get("Id") ?? "",
+      type: token.attrs.get("Type") ?? "",
+      target: token.attrs.get("Target") ?? "",
+    });
+  }
+  return found;
+}
+
+async function workbookInfo(
+  xml: string,
+  limits: ReadLimits,
+  work: Meter,
+): Promise<{ date1904: boolean; sheets: Array<{ name: string; relId: string | undefined }> }> {
+  let date1904 = false;
+  const sheets: Array<{ name: string; relId: string | undefined }> = [];
+  for (const token of scanXml(xml, work.spend)) {
+    if (work.due()) await pause();
+    if (token.kind !== "open") continue;
+    if (token.name === "workbookPr") {
+      const value = token.attrs.get("date1904");
+      date1904 = value === "1" || value === "true";
+    } else if (token.name === "sheet") {
+      if (sheets.length >= limits.maxSheets) throw new WorkbookFormatError("xlsx_too_many_sheets");
+      sheets.push({ name: token.attrs.get("name") ?? "", relId: attribute(token.attrs, "id") });
+    }
+  }
+  return { date1904, sheets };
+}
+
+/**
+ * Текст одной строки или ячейки из кусков — `<r><t>`, текст вокруг
+ * комментариев, CDATA — считается по мере накопления, с тем же пределом,
+ * что у одного узла: иначе сотня кусков под пределом склеивалась бы в
+ * десятки мегабайт и раскрывалась одним вызовом, секунду без паузы.
+ */
+function grow(length: number, piece: string): number {
+  const total = length + piece.length;
+  if (total > MAX_TEXT_LENGTH) throw new WorkbookFormatError("xlsx_text_too_long");
+  return total;
+}
+
+/** Общие строки: все `<t>` элемента `<si>`, кроме фонетических подсказок `<rPh>`. */
+async function sharedStrings(xml: string, limits: ReadLimits, work: Meter): Promise<string[]> {
+  const strings: string[] = [];
+  let item: string[] | null = null;
+  let phonetic = 0;
+  let text: string[] | null = null;
+  let itemLength = 0;
+  for (const token of scanXml(xml, work.spend)) {
+    if (work.due()) await pause();
+    if (token.kind === "text") {
+      if (text) {
+        itemLength = grow(itemLength, token.text);
+        text.push(token.text);
+      }
+    } else if (token.kind === "open") {
+      if (token.name === "si") {
+        if (item) throw new WorkbookFormatError("xlsx_xml_malformed");
+        if (strings.length >= limits.maxSharedStrings) throw new WorkbookFormatError("xlsx_too_many_strings");
+        itemLength = 0;
+        if (token.selfClosing) strings.push("");
+        else item = [];
+      } else if (item && token.name === "rPh" && !token.selfClosing) {
+        phonetic += 1;
+      } else if (item && token.name === "t" && !token.selfClosing) {
+        if (text) throw new WorkbookFormatError("xlsx_xml_malformed");
+        text = [];
+      }
+    } else if (token.name === "t" && text) {
+      if (phonetic === 0) item?.push(text.join(""));
+      text = null;
+    } else if (token.name === "rPh" && phonetic > 0) {
+      phonetic -= 1;
+    } else if (token.name === "si" && item) {
+      // Незакрытый `<t>` пережил бы свою строку: счёт длины начинается с
+      // каждой `<si>` заново, а текст копился бы дальше — десятки
+      // мегабайт мимо предела.
+      if (text) throw new WorkbookFormatError("xlsx_xml_malformed");
+      strings.push(excelUnescape(item.join(""), work.spend));
+      item = null;
+      phonetic = 0;
+    }
+  }
+  if (item || text) throw new WorkbookFormatError("xlsx_xml_malformed");
+  return strings;
+}
+
+/** Адрес ячейки длиннее этого — не адрес, а мусор. */
+const MAX_REF = 16;
+
+/** Номер латинской буквы (1–26) без учёта регистра; не буква — 0. */
+function letter(code: number): number {
+  const lower = code | 0x20;
+  return lower >= 0x61 && lower <= 0x7a ? lower - 0x60 : 0;
+}
+
+const isDigit = (code: number) => code >= 0x30 && code <= 0x39;
+
+/**
+ * Адрес ячейки `AB12` — одним проходом, без регулярных выражений: адрес
+ * разбирается у каждой ячейки, и два выражения на ячейку были её
+ * заметной ценой. Столбец — от одной до трёх букв и цифры (или ничего),
+ * строка — до трёх букв и хотя бы одна цифра.
+ */
+function cellRef(ref: string): { column: number | null; row: number | null } {
+  if (ref.length > MAX_REF) return { column: null, row: null };
+  let column = 0;
+  let index = 0;
+  while (index < ref.length && index < 4) {
+    const value = letter(ref.charCodeAt(index));
+    if (value === 0) break;
+    column = column * 26 + value;
+    index += 1;
+  }
+  if (index > 3) return { column: null, row: null };
+  for (let rest = index; rest < ref.length; rest += 1) {
+    if (!isDigit(ref.charCodeAt(rest))) return { column: null, row: null };
+  }
+  return {
+    column: index === 0 ? null : column - 1,
+    row: index === ref.length ? null : Number(ref.slice(index)) - 1,
+  };
+}
+
+function cellValue(type: string, raw: string | null, inline: string | null, strings: readonly string[], spend: Spend): ReadCell {
+  if (type === "inlineStr") return inline === null ? null : excelUnescape(inline, spend);
+  if (raw === null) return null;
+  switch (type) {
+    case "s": {
+      const index = Number(raw);
+      return Number.isSafeInteger(index) && index >= 0 && index < strings.length ? strings[index]! : null;
+    }
+    case "str":
+    case "d":
+      return excelUnescape(raw, spend);
+    case "b":
+      return raw.trim() === "1" || raw.trim().toLowerCase() === "true";
+    case "e":
+      return null;
+    default: {
+      const number = Number(raw);
+      return raw.trim() !== "" && Number.isFinite(number) ? number : null;
+    }
+  }
+}
+
+/**
+ * Строки листа. Вложенность проверяется по ходу: строка внутри строки или
+ * ячейка вне строки — ошибка формата, а не повод искать закрывающий тег
+ * где-то дальше.
+ */
+async function parseSheet(xml: string, strings: readonly string[], limits: ReadLimits, work: Meter): Promise<ReadCell[][]> {
+  const rows: ReadCell[][] = [];
+  const malformed = () => new WorkbookFormatError("xlsx_xml_malformed");
+  type RowState = { index: number; values: ReadCell[]; nextColumn: number };
+  type CellState = { column: number | null; type: string; raw: string[] | null; inline: string[] | null };
+  let inData = false;
+  let row = null as RowState | null;
+  let nextRow = 0;
+  let cell = null as CellState | null;
+  // Текущая ячейка читается через функцию: её меняют вложенные функции,
+  // и сужение типа по месту объявления здесь было бы неверным.
+  const currentCell = (): CellState | null => cell;
+  let capture: string[] | null = null;
+  let captured = 0;
+  let inInline = false;
+  let phonetic = 0;
+
+  const openRow = (attrs: ReadonlyMap<string, string>) => {
+    if (row) throw malformed();
+    const declared = attrs.get("r");
+    const index = declared && /^\d{1,7}$/.test(declared) ? Number(declared) - 1 : nextRow;
+    // Номер строки только растёт: файл, где строка 5 идёт после 9-й,
+    // склеивал бы чужие ячейки в одну запись.
+    if (index < nextRow) throw new WorkbookFormatError("xlsx_rows_unordered");
+    if (index >= limits.maxRows) throw new WorkbookFormatError("xlsx_too_many_rows");
+    nextRow = index + 1;
+    row = { index, values: [], nextColumn: 0 };
+  };
+  const closeRow = () => {
+    if (!row) return;
+    // Пропуск строк — тоже работа: `<row r="20000">` одна добивает лист
+    // двадцатью тысячами пустых строк.
+    if (row.index > rows.length) work.spend(Math.ceil((row.index - rows.length) / 64));
+    while (rows.length < row.index) rows.push([]);
+    rows[row.index] = row.values;
+    row = null;
+  };
+  const openCell = (attrs: ReadonlyMap<string, string>) => {
+    if (!row || cell) throw malformed();
+    const ref = attrs.get("r");
+    // Ячейка — ещё единица работы: адрес, объект и запись значения стоят
+    // столько же, сколько её тег.
+    work.spend(1);
+    const address = ref ? cellRef(ref) : null;
+    let column: number | null = address ? address.column : row.nextColumn;
+    // Ячейка с адресом чужой строки — не этой строки.
+    if (address && column !== null && address.row !== null && address.row !== row.index) column = null;
+    if (column !== null) row.nextColumn = column + 1;
+    cell = { column, type: attrs.get("t") ?? "n", raw: null, inline: null };
+    captured = 0;
+  };
+  const closeCell = () => {
+    if (!row || !cell) throw malformed();
+    // Незакрытые `<v>`, `<t>` и `<is>` не переживают ячейку: счёт длины
+    // начинается с каждой `<c>` заново, а текст копился бы дальше.
+    if (capture || inInline) throw malformed();
+    const { column } = cell;
+    if (column !== null && column < limits.maxColumns) {
+      const value = cellValue(cell.type, cell.raw ? cell.raw.join("") : null, cell.inline ? cell.inline.join("") : null, strings, work.spend);
+      if (value !== null) {
+        // Добивка до столбца — тоже работа: ячейка в столбце CV одна
+        // добивает строку 99 пустыми значениями.
+        if (column > row.values.length) work.spend(Math.ceil((column - row.values.length) / 8));
+        while (row.values.length < column) row.values.push(null);
+        row.values[column] = value;
+      }
+    }
+    cell = null;
+  };
+
+  for (const token of scanXml(xml, work.spend)) {
+    if (work.due()) await pause();
+    if (token.kind === "text") {
+      if (capture) {
+        captured = grow(captured, token.text);
+        capture.push(token.text);
+      }
+      continue;
+    }
+    if (token.name === "sheetData") {
+      if (token.kind === "open") inData = !token.selfClosing;
+      else inData = false;
+      continue;
+    }
+    if (!inData) continue;
+    if (token.kind === "open") {
+      switch (token.name) {
+        case "row":
+          openRow(token.attrs);
+          if (token.selfClosing) closeRow();
+          break;
+        case "c":
+          openCell(token.attrs);
+          if (token.selfClosing) closeCell();
+          break;
+        case "v": {
+          const active = currentCell();
+          if (!active || capture) throw malformed();
+          if (!token.selfClosing) capture = active.raw = [];
+          break;
+        }
+        case "is": {
+          const active = currentCell();
+          if (!active) throw malformed();
+          // Встроенная строка — ещё две единицы: текст копится, склеивается
+          // и раскрывается в самой ячейке, а не берётся готовым из общей
+          // таблицы. Excel, LibreOffice и выгрузка Евы так текст не пишут.
+          work.spend(2);
+          if (!token.selfClosing) {
+            inInline = true;
+            active.inline = [];
+          }
+          break;
+        }
+        case "rPh":
+          if (inInline && !token.selfClosing) phonetic += 1;
+          break;
+        case "t":
+          if (inInline && !token.selfClosing) {
+            if (capture) throw malformed();
+            capture = [];
+          }
+          break;
+        default:
+          break;
+      }
+      continue;
+    }
+    switch (token.name) {
+      case "row":
+        if (currentCell()) throw malformed();
+        closeRow();
+        break;
+      case "c":
+        closeCell();
+        break;
+      case "v":
+        capture = null;
+        break;
+      case "t":
+        if (inInline && capture) {
+          if (phonetic === 0) currentCell()?.inline?.push(capture.join(""));
+          capture = null;
+        }
+        break;
+      case "rPh":
+        if (phonetic > 0) phonetic -= 1;
+        break;
+      case "is":
+        inInline = false;
+        phonetic = 0;
+        break;
+      default:
+        break;
+    }
+  }
+  if (row || currentCell()) throw malformed();
+  return rows;
+}
+
+/**
+ * Прочитать книгу. `wanted` ограничивает разбор нужными листами: лист,
+ * который вызывающему не нужен, не распаковывается вовсе. Лист, для
+ * которого `listOnly` — да, тоже не распаковывается: он попадает в
+ * результат именем, без строк.
+ */
+export async function readWorkbook(
+  buffer: Buffer,
+  options: {
+    wanted?: (sheetName: string) => boolean;
+    listOnly?: (sheetName: string) => boolean;
+    limits?: Partial<ReadLimits>;
+  } = {},
+): Promise<ReadWorkbook> {
+  const limits = { ...DEFAULT_READ_LIMITS, ...options.limits };
+  if (buffer.length < 22 || buffer.readUInt32LE(0) !== 0x04034b50) throw new WorkbookFormatError("xlsx_not_zip");
+  // Работа сканера на всю книгу — одним счётом: предел на часть книги
+  // файл повторил бы в каждой.
+  const work = meter(limits);
+  const zip = await openZip(buffer, limits);
+  try {
+    if (!zip.entries.has("[Content_Types].xml")) throw new WorkbookFormatError("xlsx_not_workbook");
+    const rootRels = zip.entries.has("_rels/.rels") ? await relationships(await zip.read("_rels/.rels"), work) : [];
+    const office = rootRels.find((rel) => /\/officeDocument$/.test(rel.type));
+    const workbookPath = office ? joinPath("", office.target) : "xl/workbook.xml";
+    if (!zip.entries.has(workbookPath)) throw new WorkbookFormatError("xlsx_not_workbook");
+    const workbook = await workbookInfo(await zip.read(workbookPath), limits, work);
+    const baseDir = workbookPath.includes("/") ? workbookPath.slice(0, workbookPath.lastIndexOf("/")) : "";
+    const rels = zip.entries.has(relsPath(workbookPath)) ? await relationships(await zip.read(relsPath(workbookPath)), work) : [];
+    const date1904 = workbook.date1904;
+
+    const sharedRel = rels.find((rel) => /\/sharedStrings$/.test(rel.type));
+    const sharedPath = sharedRel ? joinPath(baseDir, sharedRel.target) : null;
+    const strings = sharedPath && zip.entries.has(sharedPath) ? await sharedStrings(await zip.read(sharedPath), limits, work) : [];
+
+    const relById = new Map<string, { id: string; type: string; target: string }>();
+    for (const rel of rels) {
+      if (!relById.has(rel.id)) relById.set(rel.id, rel);
+    }
+    const sheets: ReadSheet[] = [];
+    const names = new Set<string>();
+    const parts = new Set<string>();
+    for (const item of workbook.sheets) {
+      if (!item.name || (options.wanted && !options.wanted(item.name))) continue;
+      // Имена листов Excel уникальны без учёта регистра: второй лист с тем
+      // же именем не читается.
+      const name = item.name.toLocaleLowerCase("ru");
+      if (names.has(name)) continue;
+      names.add(name);
+      if (options.listOnly?.(item.name)) {
+        sheets.push({ name: item.name, rows: [] });
+        continue;
+      }
+      const rel = item.relId === undefined ? undefined : relById.get(item.relId);
+      if (!rel || !/\/worksheet$/.test(rel.type)) continue;
+      const path = joinPath(baseDir, rel.target);
+      if (!zip.entries.has(path)) continue;
+      // Одна часть — один лист: иначе большую часть читали бы раз за разом.
+      if (parts.has(path)) throw new WorkbookFormatError("xlsx_xml_malformed");
+      parts.add(path);
+      sheets.push({ name: item.name, rows: await parseSheet(await zip.read(path), strings, limits, work) });
+    }
+    return { sheets, date1904 };
+  } catch (error) {
+    if (error instanceof XmlFormatError) throw new WorkbookFormatError(error.code);
+    throw error;
+  } finally {
+    zip.close();
+  }
+}
+
+const EPOCH_1900 = Date.UTC(1899, 11, 30);
+const EPOCH_1904 = Date.UTC(1904, 0, 1);
+
+/**
+ * Номер дня Excel → стенные часы `YYYY-MM-DDTHH:mm`. Время округляется
+ * до минуты: дробная часть дня в файле хранится с погрешностью.
+ */
+export function serialToLocal(serial: number, date1904 = false): string | null {
+  if (!Number.isFinite(serial) || serial < 0 || serial > 2_958_465) return null;
+  const epoch = date1904 ? EPOCH_1904 : EPOCH_1900;
+  const minutes = Math.round(serial * 24 * 60);
+  const date = new Date(epoch + minutes * 60_000);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`
+    + `T${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}`;
+}

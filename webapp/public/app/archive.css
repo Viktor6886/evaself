@@ -1,0 +1,15 @@
+/* «Мои данные»: выгрузка в Excel и загрузка архива обратно. */
+.archive-card{display:grid;gap:10px}
+.archive-card>.primary-action,.archive-card>.secondary-action{margin-top:4px}
+/* ui-v12 красит любой абзац карточки в приглушённый цвет с !important:
+   итог и предупреждение без него сливались бы с пояснениями. */
+.section-card p.archive-done{color:var(--accent-2)!important;font-weight:600}
+.section-card p.archive-note{color:var(--text)!important}
+.archive-sheets{list-style:none;margin:0;padding:0;display:grid;gap:6px}
+.archive-sheets li{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 10px;align-items:baseline;padding:8px 12px;border-radius:12px;background:var(--surface-soft)}
+.archive-sheets span{overflow-wrap:anywhere}
+.archive-sheets strong{color:var(--accent-2);font-variant-numeric:tabular-nums}
+.archive-sheets small{grid-column:1 / -1;color:var(--muted);font-size:12px}
+.archive-errors{border-radius:12px;padding:8px 12px;background:color-mix(in srgb,var(--danger) 9%,transparent)}
+.archive-errors summary{cursor:pointer;color:var(--danger);font-weight:600;min-height:32px;display:flex;align-items:center}
+.archive-errors ul{margin:8px 0 0;padding-left:18px;display:grid;gap:4px;font-size:13px;overflow-wrap:anywhere}

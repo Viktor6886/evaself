@@ -28,6 +28,7 @@ function boolean(value: unknown, fallback: boolean): boolean {
 type LiveSettings = Pick<
   Config,
   | "audioFileTranscriptsEnabled" | "telegramStreamMode" | "telegramTypingSpeed"
+  | "dataArchiveEnabled" | "dataArchiveMemoryEnabled"
   | "osintEnabled" | "osintRuRegistriesEnabled" | "osintDailyLimit"
   | "osintCollectorMaigret" | "osintCollectorWeb" | "osintCollectorInfrastructure"
   | "osintCollectorHarvester" | "osintCollectorSpiderfoot"
@@ -83,6 +84,8 @@ export async function readKnowledgeUploadsSetting(db: Pick<Database, "query">, b
 
 const LIVE_SETTING_FIELDS: Array<[string, keyof LiveSettings]> = [
   ["runtime.audio_file_transcripts", "audioFileTranscriptsEnabled"],
+  ["runtime.data_archive_enabled", "dataArchiveEnabled"],
+  ["runtime.data_archive_memory", "dataArchiveMemoryEnabled"],
   ["runtime.telegram_stream_mode", "telegramStreamMode"],
   ["runtime.telegram_typing_speed", "telegramTypingSpeed"],
   ...OSINT_FLAGS,
@@ -98,6 +101,8 @@ export async function applyManagedRuntimeConfig(
   if (!bootstrapLiveSettings.has(config)) {
     bootstrapLiveSettings.set(config, {
       audioFileTranscriptsEnabled: config.audioFileTranscriptsEnabled,
+      dataArchiveEnabled: config.dataArchiveEnabled,
+      dataArchiveMemoryEnabled: config.dataArchiveMemoryEnabled,
       telegramStreamMode: config.telegramStreamMode,
       telegramTypingSpeed: config.telegramTypingSpeed,
       osintEnabled: config.osintEnabled,
@@ -159,6 +164,13 @@ export async function applyManagedRuntimeConfig(
       // панели действует сразу, без перезапуска.
       case "runtime.audio_file_transcripts":
         config.audioFileTranscriptsEnabled = boolean(value, config.audioFileTranscriptsEnabled);
+        break;
+      // Архив данных: маршруты Mini App читают флаги при каждом запросе.
+      case "runtime.data_archive_enabled":
+        config.dataArchiveEnabled = boolean(value, config.dataArchiveEnabled);
+        break;
+      case "runtime.data_archive_memory":
+        config.dataArchiveMemoryEnabled = boolean(value, config.dataArchiveMemoryEnabled);
         break;
       // Режим и темп показа читаются при каждом ответе: переключатель в
       // панели действует со следующего сообщения.

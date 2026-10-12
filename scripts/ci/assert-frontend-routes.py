@@ -27,6 +27,7 @@ SENTINEL = "\x00"
 SOURCES = [
     ("webapp/public/app/app.js", ""),
     ("webapp/public/app/journal.js", ""),
+    ("webapp/public/app/archive.js", ""),
     ("webapp/public/assets/bot-link.js", ""),
 ]
 
@@ -46,6 +47,8 @@ ROUTE_FILES = [
     ("eva-agent-service/src/public/webapp-core.ts", "/public/v2"),
     # Маршруты дневника регистрируются внутри той же группы /public/v2.
     ("eva-agent-service/src/public/journal/routes.ts", "/public/v2"),
+    # Архив данных («Мои данные») — отдельный модуль той же группы /public.
+    ("eva-agent-service/src/public/archive-routes.ts", "/public"),
     ("eva-agent-service/src/admin/server.ts", "/api/admin/v1"),
     # Разделы единой панели регистрируются отдельным модулем: он такая
     # же часть административного API, и без него каждый его маршрут

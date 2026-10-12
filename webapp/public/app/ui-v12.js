@@ -132,7 +132,7 @@
     list.setAttribute('data-ui-v13-grouped', '1');
     list.className = 'ios-profile-groups';
     while (list.firstChild) list.removeChild(list.firstChild);
-    list.appendChild(makeProfileGroup('Ева и данные', [personal, rows.conversations, rows.voice]));
+    list.appendChild(makeProfileGroup('Ева и данные', [personal, rows.conversations, rows.voice, rows.archive]));
     list.appendChild(makeProfileGroup('Приложение', [rows.notifications, rows.initiative, rows.privacy]));
     list.appendChild(makeProfileGroup('Подписка', [rows.subscription]));
   }
