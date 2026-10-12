@@ -375,14 +375,15 @@ test("книга: работа чтения считается на весь ф�
   const rels = `<Relationship Id="rId1" Type="x/worksheet" Target="a.xml"/><Relationship Id="rId2" Type="x/worksheet" Target="b.xml"/>`;
   const one = await bookWithSheets(sheets, rels, { "xl/a.xml": empties(20_000), "xl/b.xml": "<worksheet/>" });
   const two = await bookWithSheets(sheets, rels, { "xl/a.xml": empties(20_000), "xl/b.xml": empties(20_000) });
-  const limits = { maxWork: 30_000 };
+  // Пустая ячейка — две единицы (тег и сама ячейка): лист — около 40 000.
+  const limits = { maxWork: 50_000 };
   assert.equal((await readWorkbook(one, { limits })).sheets.length, 2);
   await assert.rejects(readWorkbook(two, { limits }), (error: unknown) =>
     error instanceof WorkbookFormatError && error.code === "xlsx_too_much_data");
 
   // По умолчанию — около трёх честных архивов в 30 000 строк: четыре листа
   // по миллиону пустых ячеек в него не укладываются.
-  assert.equal(DEFAULT_READ_LIMITS.maxWork, 3_000_000);
+  assert.equal(DEFAULT_READ_LIMITS.maxWork, 3_500_000);
   const four = await bookWithSheets(
     ["A", "B", "C", "D"].map((name, index) => `<sheet name="${name}" r:id="rId${index + 1}"/>`).join(""),
     ["a", "b", "c", "d"].map((part, index) => `<Relationship Id="rId${index + 1}" Type="x/worksheet" Target="${part}.xml"/>`).join(""),
@@ -420,8 +421,15 @@ test("чтение: незакрытые `<t>`, `<v>` и `<is>` не переж�
     ["`<v>` через `</c>`", await bookWithSheet(`<worksheet><sheetData><row r="1"><c><v>1</c></row></sheetData></worksheet>`)],
     ["`<is>` через `</c>`", await bookWithSheet(`<worksheet><sheetData><row r="1"><c t="inlineStr"><is><t>a</t></c></row></sheetData></worksheet>`)],
     ["повтор атрибута", await bookWithSheet(`<worksheet><sheetData><row r="1" r="2"/></sheetData></worksheet>`)],
+    // Тег из тысяч `a=""` без пробелов — одно имя: мегабайты по цене знаков тега.
+    ["имя тега длиннее 256", await bookWithSheet(`<worksheet><sheetData><x${'a=""'.repeat(100)}/></sheetData></worksheet>`)],
+    ["имя закрывающего тега", await bookWithSheet(`<worksheet><sheetData></${"x".repeat(300)}></sheetData></worksheet>`)],
+    ["имя атрибута", await bookWithSheet(`<worksheet><sheetData><row ${"r".repeat(300)}="1"/></sheetData></worksheet>`)],
   ];
   for (const [name, bytes] of cases) await assert.rejects(readWorkbook(bytes), malformed, name);
+  // Имя в пределе — обычный неизвестный тег, его пропускают.
+  const near = await readWorkbook(await bookWithSheet(`<worksheet><sheetData><${"x".repeat(200)} ${"a".repeat(200)}="1"/><row r="1"><c r="A1"><v>3</v></c></row></sheetData></worksheet>`));
+  assert.deepEqual(near.sheets[0]!.rows, [[3]]);
 });
 
 test("книга: атрибуты сверх четырёх платят за себя — тег из 64 атрибутов дороже своих знаков", async () => {

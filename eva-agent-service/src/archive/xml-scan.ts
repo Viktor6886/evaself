@@ -56,11 +56,15 @@ export const MAX_TAG_LENGTH = 65_536;
  */
 export type Spend = (units: number) => void;
 
+/** Знаков тега на единицу работы: тег читается дважды, знак за знаком. */
+export const TAG_CHARS_PER_UNIT = 32;
+
 /**
- * Знаков тега на единицу работы: тег читается дважды, знак за знаком, и
- * 16 знаков стоят столько же, сколько пустая ячейка.
+ * Имя тега или атрибута длиннее этого — не имя SpreadsheetML (самое
+ * длинное там — десятки знаков), а способ провести мегабайты текста по
+ * цене знаков тега: тег из тысяч `a=""` без пробелов — одно имя.
  */
-export const TAG_CHARS_PER_UNIT = 16;
+export const MAX_NAME_LENGTH = 256;
 
 /**
  * Столько атрибутов у тега — в цене самого тега: у ячейки их три
@@ -151,6 +155,7 @@ function parseAttributes(source: string, start: number, spend: Spend): ReadonlyM
       if (isSpace(code) || code === 0x3d) break;
       index += 1;
     }
+    if (index - nameStart > MAX_NAME_LENGTH) throw new XmlFormatError();
     const name = source.slice(nameStart, index);
     while (index < length && isSpace(source.charCodeAt(index))) index += 1;
     if (!name || source.charCodeAt(index) !== 0x3d) throw new XmlFormatError();
@@ -244,14 +249,16 @@ export function* scanXml(xml: string, spend: Spend = free): Generator<XmlToken> 
     const inner = xml.slice(open + 1, cursor);
     index = cursor + 1;
     if (inner.charCodeAt(0) === 0x2f) {
-      yield { kind: "close", name: localName(inner.slice(1).trim()) };
+      const name = inner.slice(1).trim();
+      if (name.length > MAX_NAME_LENGTH) throw new XmlFormatError();
+      yield { kind: "close", name: localName(name) };
       continue;
     }
     const selfClosing = inner.charCodeAt(inner.length - 1) === 0x2f;
     const body = selfClosing ? inner.slice(0, -1) : inner;
     let nameEnd = 0;
     while (nameEnd < body.length && !isSpace(body.charCodeAt(nameEnd))) nameEnd += 1;
-    if (nameEnd === 0) throw new XmlFormatError();
+    if (nameEnd === 0 || nameEnd > MAX_NAME_LENGTH) throw new XmlFormatError();
     yield { kind: "open", name: localName(body.slice(0, nameEnd)), attrs: parseAttributes(body, nameEnd, spend), selfClosing };
   }
 }

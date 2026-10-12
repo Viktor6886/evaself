@@ -64,10 +64,10 @@ export const DEFAULT_READ_LIMITS: ReadLimits = {
   maxSheets: 256,
   // Предел байтов не ограничивает работу: 4 МБ пустых `<c/>` — миллион
   // ячеек, а 32 МБ — восемь миллионов и секунды процессора. Честный архив
-  // в 30 000 строк (больше загрузка не примет) — около 1,2 млн единиц;
-  // почти втрое больше — уже не архив, и чтение останавливается, не
-  // дочитав.
-  maxWork: 3_000_000,
+  // в 30 000 строк (больше загрузка не примет) — около 1,2 млн единиц,
+  // плотный, пересохранённый LibreOffice, — до 3,1 млн; дальше — уже не
+  // архив, и чтение останавливается, не дочитав.
+  maxWork: 3_500_000,
 };
 
 /** Ошибка формата с кодом: текст для человека подбирает вызывающий. */
@@ -346,17 +346,38 @@ async function sharedStrings(xml: string, limits: ReadLimits, work: Meter): Prom
 /** Адрес ячейки длиннее этого — не адрес, а мусор. */
 const MAX_REF = 16;
 
-function columnIndex(ref: string): number | null {
-  const match = ref.length <= MAX_REF ? /^([A-Z]{1,3})\d*$/i.exec(ref) : null;
-  if (!match) return null;
-  let value = 0;
-  for (const letter of match[1]!.toUpperCase()) value = value * 26 + (letter.charCodeAt(0) - 64);
-  return value - 1;
+/** Номер латинской буквы (1–26) без учёта регистра; не буква — 0. */
+function letter(code: number): number {
+  const lower = code | 0x20;
+  return lower >= 0x61 && lower <= 0x7a ? lower - 0x60 : 0;
 }
 
-function rowIndex(ref: string): number | null {
-  const match = ref.length <= MAX_REF ? /^[A-Z]{0,3}(\d+)$/i.exec(ref) : null;
-  return match ? Number(match[1]) - 1 : null;
+const isDigit = (code: number) => code >= 0x30 && code <= 0x39;
+
+/**
+ * Адрес ячейки `AB12` — одним проходом, без регулярных выражений: адрес
+ * разбирается у каждой ячейки, и два выражения на ячейку были её
+ * заметной ценой. Столбец — от одной до трёх букв и цифры (или ничего),
+ * строка — до трёх букв и хотя бы одна цифра.
+ */
+function cellRef(ref: string): { column: number | null; row: number | null } {
+  if (ref.length > MAX_REF) return { column: null, row: null };
+  let column = 0;
+  let index = 0;
+  while (index < ref.length && index < 4) {
+    const value = letter(ref.charCodeAt(index));
+    if (value === 0) break;
+    column = column * 26 + value;
+    index += 1;
+  }
+  if (index > 3) return { column: null, row: null };
+  for (let rest = index; rest < ref.length; rest += 1) {
+    if (!isDigit(ref.charCodeAt(rest))) return { column: null, row: null };
+  }
+  return {
+    column: index === 0 ? null : column - 1,
+    row: index === ref.length ? null : Number(ref.slice(index)) - 1,
+  };
 }
 
 function cellValue(type: string, raw: string | null, inline: string | null, strings: readonly string[], spend: Spend): ReadCell {
@@ -423,12 +444,13 @@ async function parseSheet(xml: string, strings: readonly string[], limits: ReadL
   const openCell = (attrs: ReadonlyMap<string, string>) => {
     if (!row || cell) throw malformed();
     const ref = attrs.get("r");
-    let column: number | null = ref ? columnIndex(ref) : row.nextColumn;
-    if (ref && column !== null) {
-      const referenced = rowIndex(ref);
-      // Ячейка с адресом чужой строки — не этой строки.
-      if (referenced !== null && referenced !== row.index) column = null;
-    }
+    // Ячейка — ещё единица работы: адрес, объект и запись значения стоят
+    // столько же, сколько её тег.
+    work.spend(1);
+    const address = ref ? cellRef(ref) : null;
+    let column: number | null = address ? address.column : row.nextColumn;
+    // Ячейка с адресом чужой строки — не этой строки.
+    if (address && column !== null && address.row !== null && address.row !== row.index) column = null;
     if (column !== null) row.nextColumn = column + 1;
     cell = { column, type: attrs.get("t") ?? "n", raw: null, inline: null };
     captured = 0;
