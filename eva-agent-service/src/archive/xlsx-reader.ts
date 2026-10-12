@@ -172,28 +172,32 @@ const HEX4 = /^[0-9A-Fa-f]{4}$/;
 /**
  * Обратное к экранированию Excel `_xHHHH_` (так он пишет, например, `\r`).
  * Один проход по `_x`: регулярное выражение с функцией замены на тексте из
- * одних экранирований тратило по полмикросекунды на каждое. Каждый `_x` —
- * единица работы в `spend`.
+ * одних экранирований тратило по полмикросекунды на каждое. Куски — в
+ * массив и одним `join`: `+=` строил цепочку строк по объекту на
+ * экранирование, значение ячейки держало её до первого чтения, и
+ * миллионы таких объектов будили полную сборку мусора на сотни
+ * миллисекунд. Каждый `_x` — две единицы работы в `spend`.
  */
 export function excelUnescape(text: string, spend: Spend = () => undefined): string {
   let at = text.indexOf("_x");
   if (at < 0) return text;
-  let out = "";
+  const pieces: string[] = [];
   let last = 0;
   let seen = 0;
   while (at >= 0) {
     seen += 1;
     const hex = text.slice(at + 2, at + 6);
     if (text.charCodeAt(at + 6) === 0x5f && HEX4.test(hex)) {
-      out += text.slice(last, at) + String.fromCharCode(Number.parseInt(hex, 16));
+      pieces.push(text.slice(last, at), String.fromCharCode(Number.parseInt(hex, 16)));
       last = at + 7;
       at = text.indexOf("_x", last);
     } else {
       at = text.indexOf("_x", at + 1);
     }
   }
-  spend(seen);
-  return out + text.slice(last);
+  spend(seen * 2);
+  pieces.push(text.slice(last));
+  return pieces.join("");
 }
 
 /**
@@ -437,6 +441,9 @@ async function parseSheet(xml: string, strings: readonly string[], limits: ReadL
   };
   const closeRow = () => {
     if (!row) return;
+    // Пропуск строк — тоже работа: `<row r="20000">` одна добивает лист
+    // двадцатью тысячами пустых строк.
+    if (row.index > rows.length) work.spend(Math.ceil((row.index - rows.length) / 64));
     while (rows.length < row.index) rows.push([]);
     rows[row.index] = row.values;
     row = null;
@@ -464,6 +471,9 @@ async function parseSheet(xml: string, strings: readonly string[], limits: ReadL
     if (column !== null && column < limits.maxColumns) {
       const value = cellValue(cell.type, cell.raw ? cell.raw.join("") : null, cell.inline ? cell.inline.join("") : null, strings, work.spend);
       if (value !== null) {
+        // Добивка до столбца — тоже работа: ячейка в столбце CV одна
+        // добивает строку 99 пустыми значениями.
+        if (column > row.values.length) work.spend(Math.ceil((column - row.values.length) / 8));
         while (row.values.length < column) row.values.push(null);
         row.values[column] = value;
       }

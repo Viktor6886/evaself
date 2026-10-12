@@ -96,7 +96,9 @@ const ENTITY_REACH = 9;
 export function decodeXml(text: string, spend: Spend = free): string {
   let amp = text.indexOf("&");
   if (amp < 0) return text;
-  let out = "";
+  // Куски — в массив и одним `join`, а не `+=`: цепочка строк по объекту
+  // на сущность — работа сборщику мусора (см. `excelUnescape`).
+  const pieces: string[] = [];
   let last = 0;
   let seen = 0;
   while (amp >= 0) {
@@ -114,12 +116,14 @@ export function decodeXml(text: string, spend: Spend = free): string {
       amp = text.indexOf("&", amp + 1);
       continue;
     }
-    out += text.slice(last, amp) + decoded;
+    pieces.push(text.slice(last, amp), decoded);
     last = end + 1;
     amp = text.indexOf("&", last);
   }
   spend(seen);
-  return out + text.slice(last);
+  if (pieces.length === 0) return text;
+  pieces.push(text.slice(last));
+  return pieces.join("");
 }
 
 const isSpace = (code: number) => code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0d;

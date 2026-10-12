@@ -464,6 +464,31 @@ test("чтение: адрес ячейки — столбец из 1–3 бук
   assert.deepEqual(read.sheets[0]!.rows[0], [null, 1, 2, null, 5, 6, null, null, 10]);
 });
 
+test("книга: встроенная строка, экранирование `_xHHHH_` и добивка пустыми ячейками платят за себя", async () => {
+  const tooMuch = (error: unknown) => error instanceof WorkbookFormatError && error.code === "xlsx_too_much_data";
+  const sheetOf = (rows: number, cell: (index: number) => string) => `<worksheet><sheetData>${Array.from({ length: rows }, (_, index) =>
+    `<row r="${index + 1}">${cell(index + 1)}</row>`).join("")}</sheetData></worksheet>`;
+  const strings = { "xl/strings.xml": "<sst><si><t>x</t></si></sst>" };
+  // Встроенная строка копится и раскрывается в самой ячейке — дороже
+  // ссылки на общую: 1 500 строк общих укладываются в предел, встроенных — нет.
+  const limits = { maxWork: 20_000 };
+  const shared = await readWorkbook(await bookWithSheet(sheetOf(1_500, (row) => `<c r="A${row}" t="s"><v>0</v></c>`), strings), { limits });
+  assert.equal(shared.sheets[0]!.rows.length, 1_500);
+  await assert.rejects(readWorkbook(await bookWithSheet(sheetOf(1_500, (row) => `<c r="A${row}" t="inlineStr"><is><t>x</t></is></c>`)), { limits }), tooMuch, "встроенные строки");
+
+  // Экранирование — две единицы: значение из тысяч `_x000D_` держало
+  // миллионы кусков строки до первого чтения — полная сборка мусора на
+  // сотни миллисекунд.
+  const escaped = sheetOf(1, (row) => `<c r="A${row}" t="str"><v>${"a_x000D_".repeat(2_000)}</v></c>`);
+  await assert.rejects(readWorkbook(await bookWithSheet(escaped), { limits: { maxWork: 3_000 } }), tooMuch, "экранирования");
+  assert.equal((await readWorkbook(await bookWithSheet(escaped))).sheets[0]!.rows[0]![0], "a\r".repeat(2_000));
+
+  // Ячейка в столбце CV добивает строку 99 пустыми значениями, строка
+  // 20 000 — лист двадцатью тысячами пустых строк.
+  await assert.rejects(readWorkbook(await bookWithSheet(sheetOf(1_000, (row) => `<c r="CV${row}"><v>1</v></c>`)), { limits: { maxWork: 15_000 } }), tooMuch, "дальний столбец");
+  await assert.rejects(readWorkbook(await bookWithSheet(`<worksheet><sheetData><row r="20000"/></sheetData></worksheet>`), { limits: { maxWork: 200 } }), tooMuch, "пропуск строк");
+});
+
 test("книга: лист «только имя» не распаковывается — в результате он без строк", async () => {
   const book = await bookWithSheets(
     `<sheet name="Заметки" r:id="rId1"/><sheet name="Диалоги" r:id="rId2"/>`,
