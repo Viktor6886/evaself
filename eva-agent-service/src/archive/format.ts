@@ -130,21 +130,37 @@ function wellFormed(value: string): string {
 }
 
 /**
+ * Коды знаков строки — массив 16-битных кодов поверх её байтов UTF-16LE.
+ * Проход по массиву стоит одинаково для любой строки, а `charCodeAt` в
+ * цикле — смотря по тому, строки каких представлений функция видела
+ * раньше: 199 000 знаков `\r` после разных коротких строк — втрое дороже,
+ * чем в первый раз, а на процессоре раннера CI — в пять раз.
+ */
+function codesOf(value: string): Uint16Array {
+  const bytes = Buffer.from(value, "utf16le");
+  return bytes.byteOffset % 2 === 0
+    ? new Uint16Array(bytes.buffer, bytes.byteOffset, bytes.length / 2)
+    : new Uint16Array(new Uint8Array(bytes).buffer);
+}
+
+/** `codes[from, to)` — строкой. */
+function stringOf(codes: Uint16Array, from: number, to: number): string {
+  return Buffer.from(codes.buffer, codes.byteOffset + from * 2, (to - from) * 2).toString("utf16le");
+}
+
+/**
  * Управляющие символы прочь, затем (если `lines`) `\r\n` и `\r` → `\n` —
  * тот же результат, что у двух шагов SQL хэша по очереди, за один проход:
  * `\n` после `\r` пропускается, сколько бы управляющих знаков ни стояло
- * между ними. Код за кодом по массиву: регулярное выражение на тексте, где
- * управляющий символ или `\r` через знак, тратит на каждое совпадение в
- * десять раз больше, а такой текст в файле стоит копейки.
+ * между ними. На месте: `codes[from, to)` → `codes[from, конец)`, конец
+ * возвращается. Код за кодом по массиву: регулярное выражение на тексте,
+ * где управляющий символ или `\r` через знак, тратит на каждое совпадение
+ * в десять раз больше, а такой текст в файле стоит копейки.
  */
-function scrubCodes(value: string, lines: boolean): string {
-  const bytes = Buffer.from(value, "utf16le");
-  const codes = bytes.byteOffset % 2 === 0
-    ? new Uint16Array(bytes.buffer, bytes.byteOffset, bytes.length / 2)
-    : new Uint16Array(new Uint8Array(bytes).buffer);
-  let size = 0;
+function scrubRange(codes: Uint16Array, from: number, to: number, lines: boolean): number {
+  let size = from;
   let afterReturn = false;
-  for (let index = 0; index < codes.length; index += 1) {
+  for (let index = from; index < to; index += 1) {
     const code = codes[index]!;
     if (CONTROL[code] === 1) continue;
     if (lines) {
@@ -161,7 +177,12 @@ function scrubCodes(value: string, lines: boolean): string {
     }
     codes[size++] = code;
   }
-  return Buffer.from(codes.buffer, codes.byteOffset, size * 2).toString("utf16le");
+  return size;
+}
+
+function scrubCodes(value: string, lines: boolean): string {
+  const codes = codesOf(value);
+  return stringOf(codes, 0, scrubRange(codes, 0, codes.length, lines));
 }
 
 const CONTROLS = new RegExp(controlClass, "g");
@@ -173,11 +194,29 @@ function scrubPatterns(value: string, lines: boolean): string {
 }
 
 /**
- * `scrubCodes` читает байты UTF-16LE как массив 16-битных кодов, а это
+ * `codesOf` читает байты UTF-16LE как массив 16-битных кодов, а это
  * верно только на машине с прямым порядком байтов (x86, ARM).
  */
 const LITTLE_ENDIAN = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
 const scrub = LITTLE_ENDIAN ? scrubCodes : scrubPatterns;
+
+/**
+ * Длиннее этого текст обходится по массиву кодов (`codesOf`), короче —
+ * `charCodeAt`: на короткой строке массив дороже самого обхода.
+ */
+const SHORT_TEXT = 64;
+
+/** `cleanText` длинной строки: края, очистка и строка — по одному массиву кодов. */
+function cleanCodes(value: string): string {
+  const codes = codesOf(value);
+  let start = 0;
+  let end = codes.length;
+  while (start < end && BEYOND_EDGE[codes[start]!] === 1) start += 1;
+  while (end > start && BEYOND_EDGE[codes[end - 1]!] === 1) end -= 1;
+  if (start === end) return "";
+  if (!NEEDS_SCRUB.test(value)) return wellFormed(value.slice(start, end));
+  return wellFormed(stringOf(codes, start, scrubRange(codes, start, end, true)));
+}
 
 /**
  * Текст в том виде, в каком его сравнивают и хранят: без управляющих
@@ -191,6 +230,12 @@ const scrub = LITTLE_ENDIAN ? scrubCodes : scrubPatterns;
  * краями. Края — циклом: `\s+$` на длинной строке пробелов квадратичен.
  */
 export function cleanText(value: string): string {
+  const last = value.length - 1;
+  // Самый частый случай: на краях обычные знаки, чистить нечего.
+  if (last < 0 || (BEYOND_EDGE[value.charCodeAt(0)] === 0 && BEYOND_EDGE[value.charCodeAt(last)] === 0 && !NEEDS_SCRUB.test(value))) {
+    return wellFormed(value);
+  }
+  if (LITTLE_ENDIAN && value.length > SHORT_TEXT) return cleanCodes(value);
   let start = 0;
   let end = value.length;
   while (start < end && BEYOND_EDGE[value.charCodeAt(start)] === 1) start += 1;
@@ -209,13 +254,20 @@ const MAX_JSON_DEPTH = 32;
  */
 export const MAX_JSON_STRUCTURE = 4_000;
 
-/** Скобок `[`, `{` и запятых в тексте: столько объектов самое большее создаст `JSON.parse`. */
+const isStructure = (code: number): number => (code === 0x2c || code === 0x5b || code === 0x7b ? 1 : 0);
+
+/**
+ * Скобок `[`, `{` и запятых в тексте: столько объектов самое большее
+ * создаст `JSON.parse`. Длинный текст — по массиву кодов (`codesOf`).
+ */
 export function jsonStructure(value: string): number {
   let structure = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code === 0x2c || code === 0x5b || code === 0x7b) structure += 1;
+  if (LITTLE_ENDIAN && value.length > SHORT_TEXT) {
+    const codes = codesOf(value);
+    for (let index = 0; index < codes.length; index += 1) structure += isStructure(codes[index]!);
+    return structure;
   }
+  for (let index = 0; index < value.length; index += 1) structure += isStructure(value.charCodeAt(index));
   return structure;
 }
 

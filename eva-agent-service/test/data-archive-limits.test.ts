@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { cleanJson, jsonValue, stringList } from "../dist/archive/format.js";
+import { cleanJson, cleanText, jsonValue, stringList } from "../dist/archive/format.js";
 import { applyArchive } from "../dist/archive/import-apply.js";
 import { repeatsTooOften } from "../dist/archive/import-goals.js";
 import { ARCHIVE_ROW_LIMIT, parseArchive } from "../dist/archive/import-parse.js";
@@ -255,9 +255,18 @@ test("разбор: текст из `\\r` и управляющих символ
   // Регулярное выражение тратило на каждое совпадение до 90 нс: 250 ссылок
   // на одну такую строку держали сервис 5 секунд — в 20–60 раз дольше, чем
   // обычный текст того же размера. Порог — отношение к обычному тексту в
-  // том же процессе, а не миллисекунды: раннер CI в 2–3 раза медленнее
-  // этой машины, и порог в миллисекундах на нём краснел на линейной
-  // очистке (1,1–1,2 с при пороге 1 с).
+  // том же процессе, а не миллисекунды.
+  //
+  // Цикл `charCodeAt` по строке дорожает в 3–5 раз, когда в функцию уже
+  // приходили строки других представлений (так в настоящем разборе и во
+  // всём этом файле): в CI «\r» стоил 1,1 с при 123 мс обычного текста,
+  // а отдельно от файла этот тест того не видел. Прогрев ниже ставит
+  // разбор в это состояние при любом запуске.
+  const shapes = [" a ", " а ", `${"x".repeat(40)} `.slice(9), `${"a".repeat(20)}${" b".repeat(20)}`, Buffer.from(" q\r").toString("utf8"), JSON.parse('"\\u0001 ж "') as string, String(12_345)];
+  for (let round = 0; round < 20_000; round += 1) {
+    const shape = shapes[round % shapes.length]!;
+    cleanText(round % 3 === 0 ? shape.repeat(5) : shape);
+  }
   const parse = async (filler: string) => {
     const dense = filler.repeat(Math.floor(199_000 / filler.length));
     const notes = [["Заголовок", "Текст"], ...Array.from({ length: 250 }, (_, index) => [`Заметка ${index}`, dense])];

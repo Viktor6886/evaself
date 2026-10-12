@@ -502,7 +502,8 @@ test("нормализация текста: управляющие символ
 test("нормализация текста: края до очистки и один проход дают то же, что шаги SQL хэша по очереди", () => {
   // Эталон — шаги `hashSql` буквально: управляющие символы, `\r\n?`,
   // половины пар, края. `cleanText` срезает края раньше и чистит за один
-  // проход; случайные строки из знаков на стыке этих шагов.
+  // проход; случайные строки из знаков на стыке этих шагов, короткие и
+  // длиннее 64 знаков (там края ищутся по массиву кодов).
   const controls = new RegExp(`[${CONTROL_CODES.map((code) => `\\u${code.toString(16).padStart(4, "0")}`).join("")}]`, "g");
   const edge = new Set(EDGE_SPACE_CODES);
   const reference = (value: string) => {
@@ -521,7 +522,7 @@ test("нормализация текста: края до очистки и о�
   };
   for (let round = 0; round < 20_000; round += 1) {
     let value = "";
-    for (let length = next(14); length > 0; length -= 1) value += parts[next(parts.length)];
+    for (let length = round % 2 === 0 ? next(14) : 40 + next(80); length > 0; length -= 1) value += parts[next(parts.length)];
     assert.equal(cleanText(value), reference(value), JSON.stringify(value));
   }
 });
