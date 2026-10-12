@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -34,6 +34,7 @@ import { KnowledgeIngestWorker, KnowledgeUploadService } from "../../eva-agent-s
 import { KnowledgeIndexer, knowledgeIndexScheduler } from "../../eva-agent-service/dist/knowledge/indexer.js";
 import { KnowledgeMaintenance } from "../../eva-agent-service/dist/knowledge/maintenance.js";
 import { KnowledgeSearch } from "../../eva-agent-service/dist/knowledge/search.js";
+import { legacyCandidates } from "../../eva-agent-service/dist/knowledge/search-queries.js";
 import { withKnowledgeIndexWrite } from "../../eva-agent-service/dist/knowledge/version-validation.js";
 import { CoreToolFactory } from "../../eva-agent-service/dist/tools/core-tools.js";
 import { recordJobIntent } from "../../eva-agent-service/dist/jobs/job-outbox.js";
@@ -249,8 +250,11 @@ try {
   assert.equal(await store.documentPoints("private", first.version, racedDoc), 0, "устаревшая загрузка не создала точки-сироты");
   const answer = await tool.execute({ query, user_id: ownUsers[1] }, { userId: ownUsers[0] });
   assert.equal(answer.untrusted, true); assert.equal(answer.degraded, false);
-  assert.ok(answer.results.some((hit) => hit.document === "Саморегуляция.md" && hit.base === "shared" && hit.cite.includes("Прокрастинация")));
+  // Общая база — справочные знания Евы: текст есть, происхождения нет.
+  assert.ok(answer.results.some((hit) => hit.content.includes("маленький первый шаг")
+    && !["document", "base", "cite", "pages", "section"].some((key) => key in hit)));
   assert.ok(answer.results.every((hit) => !["Чужой документ CI", "Без коллекции CI"].includes(hit.document)));
+  assert.ok(answer.results.every((hit) => !/чужой секрет CI|скрытый материал без коллекции/u.test(hit.content)));
   // Id Qdrant не разрешает чтение: поддельный payload владельца не
   // проведёт чужой фрагмент через гидратацию PostgreSQL.
   const foreignPoint = (await store.scrollPoints("private", first.version, null, 256)).points[0];
@@ -282,6 +286,20 @@ try {
   await maintenance.rejectRebuild(stalled, "job_deadline_exceeded");
   assert.deepEqual(await secondState(), { status: "building", error_code: null }, "отказ старой порции не трогает новое построение");
   await build(second.version);
+  // Документ, загруженный, пока индексировать было некуда, оставался
+  // «ждёт индексации» и после построения версии. Полная проверка при
+  // активации доказывает, что его векторы в Qdrant есть, — она и закрывает
+  // статус. Материал без коллекции проверку не проходит и готовым не становится.
+  const indexState = async (id) => (await admin(async () => await pool.query(
+    "SELECT index_status, indexed_version FROM knowledge_documents WHERE id=$1 AND user_id IS NULL", [id]))).rows[0];
+  await admin(async () => await pool.query(
+    "UPDATE knowledge_documents SET index_status='pending', indexed_version=NULL WHERE id=$1 AND user_id IS NULL", [uploaded.id]));
+  // Новая версия, чья прежняя ещё жива: прежнюю снимает задание индексации
+  // новой, поэтому активация ставит его, а не объявляет замену готовой.
+  const replacement = randomUUID(); ownDocuments.push(replacement);
+  await admin(async () => await pool.query(
+    "INSERT INTO knowledge_documents(id,user_id,product_verified,collection_id,name,mime,content_hash,status,chunk_count,replaces_document_id,source) VALUES($1,NULL,true,$2,'Саморегуляция v2.md','text/markdown','ci-replacement','ready',0,$3,'admin')",
+    [replacement, collection.id, uploaded.id]));
   const switched = await Promise.allSettled([
     admin(async () => await documents.activate(second.version, { expected_active_version: first.version })),
     admin(async () => await documents.activate(second.version, { expected_active_version: first.version })),
@@ -289,6 +307,26 @@ try {
   assert.equal(switched.filter((r) => r.status === "fulfilled").length, 1, "переключение сериализуется в PostgreSQL");
   assert.equal(switched.filter((r) => r.status === "rejected").length, 1, "устаревшее действие не проходит");
   assert.deepEqual(await store.activeVersions(), { private: second.version, global: second.version });
+  assert.deepEqual(await indexState(uploaded.id), { index_status: "ready", indexed_version: second.version }, "активация закрывает «ждёт индексации»");
+  assert.equal((await indexState(unscoped)).index_status, "pending", "непроверенный материал не объявлен проиндексированным");
+  assert.equal((await indexState(replacement)).index_status, "pending", "замена с живой прежней версией не объявлена готовой");
+  assert.equal((await job("knowledge_index", replacement)).envelope.payload.reason.startsWith(`activate-${second.version}-`), true,
+    "замену доводит её задание индексации");
+  await admin(async () => await pool.query("DELETE FROM knowledge_documents WHERE id=$1 AND user_id IS NULL", [replacement]));
+  // Прежний режим поиска отдаёт признак общей базы: по нему модель
+  // получает фрагмент без названия документа.
+  const legacy = await legacyCandidates(db, { userId: ownUsers[0], privateEnabled: true, globalEnabled: true }, "Прокрастинация", 10, null);
+  assert.ok(legacy.some((row) => row.document_id === uploaded.id && row.global === true), "legacy помечает фрагмент общей базы");
+  // «Удалить» у неудавшейся загрузки: запись и исходный файл; разобранную
+  // загрузку так не удалить — она уходит вместе со своим документом.
+  const doomed = await admin(async () => await documents.upload({ collectionId: collection.id, name: "Неудачная загрузка.txt", mime: "text/plain",
+    stream: Readable.from([Buffer.from("Загрузка, которая не разобралась")]) }));
+  ownDocuments.push(doomed.id);
+  await admin(async () => await pool.query("UPDATE knowledge_uploads SET status='failed', error_code='document_antivirus_unavailable' WHERE id=$1 AND user_id IS NULL", [doomed.id]));
+  await assert.rejects(() => admin(async () => await documents.deleteUpload(uploaded.id)), /неудавшуюся или отменённую/u);
+  assert.deepEqual(await admin(async () => await documents.deleteUpload(doomed.id)), { deleted: doomed.id });
+  assert.equal((await admin(async () => await pool.query("SELECT 1 FROM knowledge_uploads WHERE id=$1 AND user_id IS NULL", [doomed.id]))).rows.length, 0);
+  await assert.rejects(() => stat(join(root, "global", doomed.id)), { code: "ENOENT" }, "исходный файл удалён");
   assert.equal((await pool.query("SELECT status FROM knowledge_embedding_versions WHERE version=$1", [first.version])).rows[0].status, "retired");
   assert.equal((await search.search(ownUsers[0], question)).degraded, false, "новая модель видна сразу при другой размерности");
   await admin(async () => await documents.activate(first.version, { expected_active_version: second.version }));

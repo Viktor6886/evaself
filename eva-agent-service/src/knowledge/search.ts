@@ -233,6 +233,7 @@ export class KnowledgeSearch {
         content: row.content,
         score: Number(row.score),
         matched: row.matched === "both" || row.matched === "vector" ? row.matched : "fts",
+        base: row.global === true ? "shared" as const : "personal" as const,
       })),
       degraded: vector === null,
       mode: "legacy",

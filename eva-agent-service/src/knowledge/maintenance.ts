@@ -468,7 +468,7 @@ export class KnowledgeMaintenance {
         cursor = document.id;
         const scope: KnowledgeScope = document.userId === null ? "global" : "private";
         if (!full && (await this.pointsOf(scope, version, document.id)) === document.chunks) continue;
-        await this.indexer.index(document.id, document.userId, signal, { versions: [version] });
+        await this.indexer.index(document.id, document.userId, signal, { versions: [version], markReady: row.status === "active" });
         processed += 1;
         if (this.now() >= deadline) {
           await this.progress(version);

@@ -22,7 +22,7 @@ import type { Readable } from "node:stream";
 import type pg from "pg";
 
 import { recordJobIntent, type JobOutboxClient } from "../jobs/job-outbox.js";
-import { deleteKnowledgeDocuments, isKnowledgeId } from "../knowledge/documents.js";
+import { deleteKnowledgeDocuments, isKnowledgeId, knowledgeUploadPath } from "../knowledge/documents.js";
 import { knowledgeIndexScheduler } from "../knowledge/indexer.js";
 import { KNOWLEDGE_UPLOAD_MIME, recordKnowledgeIngest } from "../knowledge/lifecycle.js";
 import { KnowledgeIndexService } from "./knowledge-index-service.js";
@@ -432,6 +432,36 @@ export class KnowledgeDocumentsService {
       if (!rows[0]) throw adminConflict("Повторить можно только неудавшуюся или отменённую загрузку");
       await recordKnowledgeIngest(outbox, client, { uploadId, userId: null, attempt: `retry-${this.now()}` });
       return { id: uploadId, status: "queued" };
+    });
+  }
+
+  /**
+   * Удалить неудавшуюся или отменённую загрузку: запись приёма и исходный
+   * файл на томе. В индекс такая загрузка не попадала; разобранная уходит
+   * вместе со своим документом («Удалить» у документа). Строка заперта до
+   * COMMIT: «Повторить» в это время ждёт и потом её не находит.
+   */
+  async deleteUpload(id: unknown): Promise<{ deleted: string }> {
+    const uploadId = uuid(id, "id");
+    return await this.transaction(async (client) => {
+      const { rows } = await client.query<{ id: string }>(
+        `SELECT id FROM knowledge_uploads
+          -- tenant: system — загрузка администратора в общую базу
+          WHERE id = $1 AND user_id IS NULL AND status IN ('failed', 'cancelled')
+          FOR UPDATE`,
+        [uploadId],
+      );
+      if (!rows[0]) throw adminConflict("Удалить можно только неудавшуюся или отменённую загрузку");
+      // Сначала файл: не удалился — ROLLBACK оставит запись, и повтор её
+      // найдёт. Наоборот файл с данными остался бы на томе без записи.
+      await rm(knowledgeUploadPath(this.options.uploadsRoot, { kind: "global" }, uploadId), { force: true });
+      await client.query(
+        `DELETE FROM knowledge_uploads
+          -- tenant: system — загрузка администратора в общую базу
+          WHERE id = $1 AND user_id IS NULL`,
+        [uploadId],
+      );
+      return { deleted: uploadId };
     });
   }
 

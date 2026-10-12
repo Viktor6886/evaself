@@ -94,7 +94,8 @@ async function loadKnowledge() {
 
 /**
  * Обновлять раз в 5 секунд, только пока что-то действительно идёт:
- * разбор загрузки, индексация документа, построение версии. «Ждёт
+ * разбор загрузки, индексация документа, построение версии — в том числе
+ * повтор неудавшейся попытки, который очередь сделает сама. «Ждёт
  * индексации» при выключенном индексе не меняется само — по нему не
  * опрашиваем. Вкладка в фоне не опрашивает вовсе.
  */
@@ -103,7 +104,7 @@ function scheduleKnowledgeRefresh() {
   const k = state.knowledge;
   const busy = (k.uploads || []).some((item) => ["queued", "processing"].includes(item.status))
     || (k.documents || []).some((item) => item.index_status === "indexing")
-    || (k.index?.versions || []).some((item) => item.building);
+    || (k.index?.versions || []).some((item) => item.building || knowledgeBuildRetrying(item));
   if (!busy) return;
   scheduleKnowledgeRefresh.timer = setTimeout(() => {
     if (state.page !== "knowledge") return;
@@ -114,6 +115,27 @@ function scheduleKnowledgeRefresh() {
 
 function knowledgeUnavailable(what) {
   return `<p class="warn-value">${what} сейчас недоступны — нажмите «Обновить» позже.</p>`;
+}
+
+/**
+ * Почему документы не попадают в Qdrant. Без ключа, при выключенной
+ * индексации и без построенной модели задание индексации ничего не
+ * делает, и «ждёт индексации» висело вечно — хотя поиск по словам в
+ * PostgreSQL документ уже находил. null — индексировать есть куда.
+ */
+function knowledgeIndexBlocker() {
+  const k = state.knowledge;
+  if (k.failed?.index || !k.index) return null;
+  if (k.index.qdrant === false) return { reason: "Qdrant не настроен", hint: "Задайте QDRANT_API_KEY и перезапустите сервисы." };
+  if (knowledgeSetting("index_enabled") === false) {
+    return { reason: "индексация выключена", hint: "Следующий шаг — кнопка в блоке «Поиск по смыслу» вверху страницы." };
+  }
+  const versions = knowledgeVersions();
+  if (!versions.length && k.failed?.embeddings) return null;
+  if (!versions.some((v) => ["building", "ready", "active"].includes(v.status))) {
+    return { reason: "нет построенной модели эмбеддингов", hint: "Следующий шаг — кнопка в блоке «Поиск по смыслу» вверху страницы." };
+  }
+  return null;
 }
 
 function renderKnowledge() {
@@ -211,8 +233,9 @@ function renderKnowledgeUploads() {
           ${item.error_code ? `<br><small class="warn-value">${escapeHtml(item.error_code)}</small>` : ""}</td>
         <td>${escapeHtml(KNOWLEDGE_OUTCOME[item.outcome] || "—")}</td>
         <td>${localDate(item.created_at)}</td>
-        ${knowledgeEditable() ? `<td>${["failed", "cancelled"].includes(item.status)
-          ? `<button class="button tiny ghost" data-upload-retry="${escapeHtml(item.id)}">Повторить</button>` : ""}</td>` : ""}
+        ${knowledgeEditable() ? `<td class="row-actions">${["failed", "cancelled"].includes(item.status)
+          ? `<button class="button tiny ghost" data-upload-retry="${escapeHtml(item.id)}">Повторить</button>
+            <button class="button tiny danger" data-upload-delete="${escapeHtml(item.id)}">Удалить</button>` : ""}</td>` : ""}
       </tr>`).join("")}
     </tbody></table></div>` : '<p class="knowledge-empty">Загрузок пока не было.</p>';
 }
@@ -228,12 +251,18 @@ function renderKnowledgeDocuments() {
   k.documents = k.documents || [];
   const titles = new Map((k.collections || []).map((item) => [item.id, item.title]));
   k.selected = new Set([...k.selected].filter((id) => k.documents.some((doc) => doc.id === id)));
+  const blocker = knowledgeIndexBlocker();
+  // «Ждёт индексации» — только когда индексация действительно впереди.
+  const indexCell = (doc) => doc.index_status === "pending" && blocker
+    ? `<span class="status-pill state-yellow">не в Qdrant</span><br><small>${escapeHtml(blocker.reason)} — поиск по словам работает и без Qdrant</small>`
+    : `<span class="status-pill ${doc.index_status === "failed" ? "state-red" : doc.index_status === "ready" ? "state-green" : "state-yellow"}">${escapeHtml(KNOWLEDGE_INDEX_STATUS[doc.index_status] || doc.index_status)}</span>
+            ${doc.index_error ? `<br><small class="warn-value">${escapeHtml(doc.index_error)}</small>` : ""}`;
   $("#knowledge-documents").innerHTML = k.documents.length ? `
     <p class="block-caption">Показано ${k.documents.length} из ${k.total}.${k.total > k.documents.length && k.limit >= KNOWLEDGE_PAGE_MAX ? " Остальные — через коллекцию, состояние или поиск." : ""}</p>
     <div class="table-wrap"><table>
       <thead><tr>
         ${editable ? '<th><input type="checkbox" id="knowledge-select-all" aria-label="Выбрать все"></th>' : ""}
-        <th>Документ</th><th>Коллекция</th><th>Фрагменты</th><th>Индекс</th><th>Версия</th><th>Обновлён</th>
+        <th>Документ</th><th>Коллекция</th><th>Фрагменты</th><th>Индекс</th><th>Версия</th><th>Обновлён</th>${editable ? "<th></th>" : ""}
       </tr></thead>
       <tbody>${k.documents.map((doc) => `
         <tr data-document-row="${escapeHtml(doc.id)}">
@@ -241,10 +270,10 @@ function renderKnowledgeDocuments() {
           <td>${escapeHtml(doc.name)}<br><small>${bytes(doc.size_bytes)}</small></td>
           <td>${escapeHtml(titles.get(doc.collection_id) || "—")}</td>
           <td>${doc.chunk_count}</td>
-          <td><span class="status-pill ${doc.index_status === "failed" ? "state-red" : doc.index_status === "ready" ? "state-green" : "state-yellow"}">${escapeHtml(KNOWLEDGE_INDEX_STATUS[doc.index_status] || doc.index_status)}</span>
-            ${doc.index_error ? `<br><small class="warn-value">${escapeHtml(doc.index_error)}</small>` : ""}</td>
+          <td>${indexCell(doc)}</td>
           <td>${doc.revision > 1 ? `v${doc.revision}` : "v1"}</td>
           <td>${localDate(doc.updated_at)}</td>
+          ${editable ? `<td class="row-actions"><button class="button tiny danger" data-document-delete="${escapeHtml(doc.id)}">Удалить</button></td>` : ""}
         </tr>`).join("")}
       </tbody></table></div>` : '<p class="knowledge-empty">Документов нет. Загрузите файлы в коллекцию выше.</p>';
   $("#knowledge-more").hidden = !(k.total > k.documents.length && k.limit < KNOWLEDGE_PAGE_MAX);
@@ -261,14 +290,15 @@ function renderKnowledgeIndex() {
   }
   const index = state.knowledge.index || {};
   const scopes = index.scopes || {};
+  const blocker = knowledgeIndexBlocker();
   const scope = (name, title) => {
     const item = scopes[name] || { documents: 0, chunks: 0, by_status: {}, lag_seconds: 0 };
     return `<article class="knowledge-metric">
       <span>${title}</span>
       <strong>${item.documents}</strong>
       <small>документов, ${item.chunks} фрагментов</small>
-      <small>готово ${item.by_status?.ready || 0}, в очереди ${(item.by_status?.pending || 0) + (item.by_status?.indexing || 0)}, ошибок ${item.by_status?.failed || 0}</small>
-      ${item.lag_seconds ? `<small>ждёт дольше всех: ${duration(item.lag_seconds)}</small>` : ""}
+      <small>готово ${item.by_status?.ready || 0}, ${blocker ? "не в Qdrant" : "в очереди"} ${(item.by_status?.pending || 0) + (item.by_status?.indexing || 0)}, ошибок ${item.by_status?.failed || 0}</small>
+      ${item.lag_seconds && !blocker ? `<small>ждёт дольше всех: ${duration(item.lag_seconds)}</small>` : ""}
     </article>`;
   };
   const editable = knowledgeEditable();
@@ -276,6 +306,7 @@ function renderKnowledgeIndex() {
   const hasActive = versions.some((item) => item.status === "active");
   $("#knowledge-index").innerHTML = `
     ${index.qdrant ? "" : '<p class="warn-value">QDRANT_API_KEY не задан: векторного индекса нет, поиск идёт по словам. Документы при этом принимаются и хранятся.</p>'}
+    ${blocker && index.qdrant ? `<p class="warn-value">Документы не попадают в Qdrant: ${escapeHtml(blocker.reason)}. ${escapeHtml(blocker.hint)}</p>` : ""}
     <div class="knowledge-metrics">
       ${scope("global", "Общая база")}
       ${scope("private", `Личные базы (людей: ${index.private_owners || 0})`)}
@@ -290,14 +321,13 @@ function renderKnowledgeIndex() {
           <td>${item.progress === null || item.progress === undefined ? "—" : `${Math.round(item.progress * 100)}%`}</td>
           ${editable ? `<td class="row-actions">
             ${!item.building && ["draft", "building", "ready", "active", "retired", "failed"].includes(item.status)
-              ? `<button class="button tiny ghost" data-version-build="${item.version}" ${knowledgeSetting("index_enabled") === false ? "disabled" : ""}>${item.status === "draft" ? "Построить индекс" : item.status === "failed" ? "Построить заново" : "Перестроить"}</button>` : ""}
+              ? `<button class="button tiny ghost" data-version-build="${item.version}">${item.status === "draft" ? "Построить индекс" : item.status === "failed" ? "Построить заново" : "Перестроить"}</button>` : ""}
             ${["ready", "retired"].includes(item.status) && !item.building && item.built_at && !item.error_code
               ? `<button class="button tiny" data-version-activate="${item.version}">${item.status === "retired" ? "Откатить на эту версию" : hasActive ? "Активировать новую модель" : "Активировать"}</button>` : ""}
             ${item.status === "active" && index.aliases_match_active === false ? `<button class="button tiny" data-version-activate="${item.version}">Восстановить aliases</button>` : ""}
           </td>` : ""}
         </tr>`).join("")}
-      </tbody></table></div>` : '<p class="knowledge-empty">Версий эмбеддингов ещё нет: создайте её в блоке «Embedding-модель» выше.</p>'}
-    ${editable && knowledgeSetting("index_enabled") === false ? '<p class="warn-value">Для построения сначала включите индексацию в параметрах базы выше. Поиск на Qdrant включается отдельно после активации.</p>' : ""}
+      </tbody></table></div>` : '<p class="knowledge-empty">Версий модели ещё нет: подключите модель в блоке «Поиск по смыслу» вверху страницы.</p>'}
     ${editable ? '<div class="knowledge-actions"><button class="button ghost" id="knowledge-reconcile">Сверить с Qdrant сейчас</button></div>' : ""}`;
 }
 
@@ -478,6 +508,29 @@ function bindKnowledge() {
     } else if (button.dataset.uploadRetry) {
       request(`/knowledge/uploads/${encodeURIComponent(button.dataset.uploadRetry)}/retry`, { method: "POST" })
         .then(() => loadKnowledge()).catch(handleError);
+    } else if (button.dataset.uploadDelete) {
+      const upload = (k.uploads || []).find((item) => item.id === button.dataset.uploadDelete);
+      askConfirm({
+        title: "Удалить загрузку?",
+        description: `«${upload?.name || ""}» не разобрался: запись и исходный файл будут удалены. В базу знаний и Qdrant он не попадал.`,
+        action: async () => {
+          await request(`/knowledge/uploads/${encodeURIComponent(button.dataset.uploadDelete)}/delete`, { method: "POST" });
+          toast("Загрузка удалена");
+          await loadKnowledge();
+        },
+      });
+    } else if (button.dataset.documentDelete) {
+      const doc = (k.documents || []).find((item) => item.id === button.dataset.documentDelete);
+      askConfirm({
+        title: "Удалить документ?",
+        description: `«${doc?.name || ""}», его фрагменты и векторы в Qdrant будут удалены из базы знаний вместе с исходным файлом. Ева перестанет его находить.`,
+        action: async () => {
+          const { payload } = await request("/knowledge/documents/delete", { method: "POST", body: JSON.stringify({ ids: [button.dataset.documentDelete] }) });
+          toast(payload.deleted.length ? "Документ удалён" : "Документ уже удалён");
+          k.selected.delete(button.dataset.documentDelete);
+          await loadKnowledge();
+        },
+      });
     } else if (button.id === "knowledge-bulk-delete") {
       const ids = [...k.selected];
       askConfirm({
@@ -498,9 +551,11 @@ function bindKnowledge() {
       askConfirm({
         eyebrow: "ИНДЕКС",
         title: `Перестроить индекс v${button.dataset.versionBuild}?`,
-        description: "Все документы этой версии переиндексируются из PostgreSQL в фоне, включая пересчёт векторов. Поиск по активной версии продолжает работать.",
+        description: `Все документы этой версии переиндексируются из PostgreSQL в фоне, включая пересчёт векторов. Поиск по активной версии продолжает работать.${knowledgeSetting("index_enabled") === false ? " Выключенная индексация включится." : ""}`,
         action: async () => {
-          await request(`/knowledge/embeddings/versions/${encodeURIComponent(button.dataset.versionBuild)}/build`, { method: "POST", body: JSON.stringify({ full: true }) });
+          // Как и шаги «Поиска по смыслу»: при выключенной индексации
+          // построение остановилось бы сразу, поэтому она включается до него.
+          await knowledgeStartBuild(button.dataset.versionBuild);
           toast("Построение поставлено в очередь");
           await loadKnowledge();
         },
@@ -510,7 +565,7 @@ function bindKnowledge() {
       askConfirm({
         eyebrow: "ИНДЕКС",
         title: `Активировать embedding-версию v${button.dataset.versionActivate}?`,
-        description: "Сервер проверит каждый фрагмент по PostgreSQL и переведёт оба Qdrant alias атомарно. Прежняя версия останется для проверяемого отката. Режим поиска меняется отдельно кнопкой «Включить Hybrid + Qdrant».",
+        description: "Сервер проверит каждый фрагмент по PostgreSQL и переведёт оба Qdrant alias атомарно. Прежняя версия останется для проверяемого отката. Режим поиска здесь не меняется — его включает шаг «Включение» в блоке «Поиск по смыслу».",
         action: async () => {
           await request(`/knowledge/embeddings/versions/${encodeURIComponent(button.dataset.versionActivate)}/activate`, {
             method: "POST", body: JSON.stringify({ expected_active_version: expectedActive }),
