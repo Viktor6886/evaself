@@ -111,6 +111,8 @@ for (const code of EDGE_SPACE_CODES) EDGE[code] = 1;
 /** Управляющий ли знак — одно обращение к таблице по коду. */
 const CONTROL = new Uint8Array(0x10000);
 for (const code of CONTROL_CODES) CONTROL[code] = 1;
+/** Что очистка оставит за краем текста: пробел края или управляющий знак. */
+const BEYOND_EDGE = EDGE.map((edge, code) => edge | CONTROL[code]!);
 const controlClass = `[${CONTROL_CODES.map((code) => `\\u${code.toString(16).padStart(4, "0")}`).join("")}]`;
 const HAS_CONTROL = new RegExp(controlClass);
 const NEEDS_SCRUB = new RegExp(`${controlClass}|\\r`);
@@ -129,10 +131,11 @@ function wellFormed(value: string): string {
 
 /**
  * Управляющие символы прочь, затем (если `lines`) `\r\n` и `\r` → `\n` —
- * в том же порядке, что в SQL хэша. Код за кодом по массиву: регулярное
- * выражение на тексте, где управляющий символ или `\r` через знак, тратит
- * на каждое совпадение в десять раз больше, а такой текст в файле стоит
- * копейки.
+ * тот же результат, что у двух шагов SQL хэша по очереди, за один проход:
+ * `\n` после `\r` пропускается, сколько бы управляющих знаков ни стояло
+ * между ними. Код за кодом по массиву: регулярное выражение на тексте, где
+ * управляющий символ или `\r` через знак, тратит на каждое совпадение в
+ * десять раз больше, а такой текст в файле стоит копейки.
  */
 function scrubCodes(value: string, lines: boolean): string {
   const bytes = Buffer.from(value, "utf16le");
@@ -140,22 +143,23 @@ function scrubCodes(value: string, lines: boolean): string {
     ? new Uint16Array(bytes.buffer, bytes.byteOffset, bytes.length / 2)
     : new Uint16Array(new Uint8Array(bytes).buffer);
   let size = 0;
+  let afterReturn = false;
   for (let index = 0; index < codes.length; index += 1) {
     const code = codes[index]!;
-    if (CONTROL[code] === 0) codes[size++] = code;
-  }
-  if (lines) {
-    let kept = 0;
-    for (let index = 0; index < size; index += 1) {
-      const code = codes[index]!;
-      if (code !== 0x0d) {
-        codes[kept++] = code;
+    if (CONTROL[code] === 1) continue;
+    if (lines) {
+      const linefeed = code === 0x0a;
+      if (linefeed && afterReturn) {
+        afterReturn = false;
         continue;
       }
-      codes[kept++] = 0x0a;
-      if (index + 1 < size && codes[index + 1] === 0x0a) index += 1;
+      afterReturn = code === 0x0d;
+      if (afterReturn) {
+        codes[size++] = 0x0a;
+        continue;
+      }
     }
-    size = kept;
+    codes[size++] = code;
   }
   return Buffer.from(codes.buffer, codes.byteOffset, size * 2).toString("utf16le");
 }
@@ -178,16 +182,21 @@ const scrub = LITTLE_ENDIAN ? scrubCodes : scrubPatterns;
 /**
  * Текст в том виде, в каком его сравнивают и хранят: без управляющих
  * символов, с `\n` вместо `\r\n` и `\r`, без половин суррогатных пар и
- * без пробелов по краям — в том же порядке шагов, что `hashSql` в базе.
- * Края — циклом: `\s+$` на длинной строке пробелов квадратичен.
+ * без пробелов по краям — тот же результат, что у шагов `hashSql` в базе.
+ *
+ * Края срезаются первыми, по исходному тексту: управляющий знак очистка
+ * убрала бы, `\r` стал бы `\n` и ушёл бы с края вместе с пробелами, а
+ * первый и последний знаки, что остаются, очистка не меняет. Текст из
+ * одних `\r` и пробелов не очищается вовсе, остальной — только между
+ * краями. Края — циклом: `\s+$` на длинной строке пробелов квадратичен.
  */
 export function cleanText(value: string): string {
-  const text = wellFormed(NEEDS_SCRUB.test(value) ? scrub(value, true) : value);
   let start = 0;
-  let end = text.length;
-  while (start < end && EDGE[text.charCodeAt(start)] === 1) start += 1;
-  while (end > start && EDGE[text.charCodeAt(end - 1)] === 1) end -= 1;
-  return start === 0 && end === text.length ? text : text.slice(start, end);
+  let end = value.length;
+  while (start < end && BEYOND_EDGE[value.charCodeAt(start)] === 1) start += 1;
+  while (end > start && BEYOND_EDGE[value.charCodeAt(end - 1)] === 1) end -= 1;
+  const inner = start === 0 && end === value.length ? value : value.slice(start, end);
+  return wellFormed(NEEDS_SCRUB.test(inner) ? scrub(inner, true) : inner);
 }
 
 /** Глубже этого JSON из файла не бывает у выгрузки; глубже — не данные, а ловушка для стека. */

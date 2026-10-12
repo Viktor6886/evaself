@@ -19,7 +19,7 @@ import { writeWorkbook } from "../dist/archive/xlsx-writer.js";
 import { parseArchive } from "../dist/archive/import-parse.js";
 import { contentHash } from "../dist/archive/import-entries.js";
 import { Multiset } from "../dist/archive/import-context.js";
-import { cleanText } from "../dist/archive/format.js";
+import { CONTROL_CODES, EDGE_SPACE_CODES, cleanText } from "../dist/archive/format.js";
 import { DataArchiveService, memoryBlocksOf } from "../dist/archive/service.js";
 import type { DataArchivePublic } from "../dist/public/archive-routes.js";
 import { registerPublicRoutes } from "../dist/public/routes.js";
@@ -497,6 +497,33 @@ test("нормализация текста: управляющие символ
   assert.equal(cleanText("\r\u0002\nстрока"), "строка", "управляющий символ убирается раньше, чем склеивается \\r\\n");
   assert.equal(cleanText(`${" ".repeat(50_000)}x${" ".repeat(50_000)}`), "x");
   assert.equal(contentHash("\u00a0Текст\u3000"), contentHash("Текст"));
+});
+
+test("нормализация текста: края до очистки и один проход дают то же, что шаги SQL хэша по очереди", () => {
+  // Эталон — шаги `hashSql` буквально: управляющие символы, `\r\n?`,
+  // половины пар, края. `cleanText` срезает края раньше и чистит за один
+  // проход; случайные строки из знаков на стыке этих шагов.
+  const controls = new RegExp(`[${CONTROL_CODES.map((code) => `\\u${code.toString(16).padStart(4, "0")}`).join("")}]`, "g");
+  const edge = new Set(EDGE_SPACE_CODES);
+  const reference = (value: string) => {
+    const lines = (value.replace(controls, "").replace(/\r\n?/g, "\n") as unknown as { toWellFormed(): string }).toWellFormed();
+    let start = 0;
+    let end = lines.length;
+    while (start < end && edge.has(lines.charCodeAt(start))) start += 1;
+    while (end > start && edge.has(lines.charCodeAt(end - 1))) end -= 1;
+    return lines.slice(start, end);
+  };
+  const parts = ["а", "x", " ", "\t", "\n", "\r", "\r\n", "\u0000", "\u0001", "\u000b", "\u000c", "\u00a0", "\u3000", "\ufeff", "\ufffe", "\uffff", "\ud800", "\udc00", "\u2028", "😀"];
+  let seed = 417;
+  const next = (limit: number) => {
+    seed = (Math.imul(seed, 1_103_515_245) + 12_345) >>> 0;
+    return (seed >>> 16) % limit;
+  };
+  for (let round = 0; round < 20_000; round += 1) {
+    let value = "";
+    for (let length = next(14); length > 0; length -= 1) value += parts[next(parts.length)];
+    assert.equal(cleanText(value), reference(value), JSON.stringify(value));
+  }
 });
 
 test("повторы по количеству: два одинаковых в файле при одном в базе — один новый", () => {
