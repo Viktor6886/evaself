@@ -375,7 +375,8 @@ test("книга: работа чтения считается на весь ф�
   const rels = `<Relationship Id="rId1" Type="x/worksheet" Target="a.xml"/><Relationship Id="rId2" Type="x/worksheet" Target="b.xml"/>`;
   const one = await bookWithSheets(sheets, rels, { "xl/a.xml": empties(20_000), "xl/b.xml": "<worksheet/>" });
   const two = await bookWithSheets(sheets, rels, { "xl/a.xml": empties(20_000), "xl/b.xml": empties(20_000) });
-  // Пустая ячейка — две единицы (тег и сама ячейка): лист — около 40 000.
+  // Пустая ячейка — две единицы (тег и сама ячейка), строка с адресом —
+  // ещё две: лист — около 40 000.
   const limits = { maxWork: 50_000 };
   assert.equal((await readWorkbook(one, { limits })).sheets.length, 2);
   await assert.rejects(readWorkbook(two, { limits }), (error: unknown) =>
@@ -383,7 +384,7 @@ test("книга: работа чтения считается на весь ф�
 
   // По умолчанию — около трёх честных архивов в 30 000 строк: четыре листа
   // по миллиону пустых ячеек в него не укладываются.
-  assert.equal(DEFAULT_READ_LIMITS.maxWork, 3_500_000);
+  assert.equal(DEFAULT_READ_LIMITS.maxWork, 5_000_000);
   const four = await bookWithSheets(
     ["A", "B", "C", "D"].map((name, index) => `<sheet name="${name}" r:id="rId${index + 1}"/>`).join(""),
     ["a", "b", "c", "d"].map((part, index) => `<Relationship Id="rId${index + 1}" Type="x/worksheet" Target="${part}.xml"/>`).join(""),
@@ -432,18 +433,35 @@ test("чтение: незакрытые `<t>`, `<v>` и `<is>` не переж�
   assert.deepEqual(near.sheets[0]!.rows, [[3]]);
 });
 
-test("книга: атрибуты сверх четырёх платят за себя — тег из 64 атрибутов дороже своих знаков", async () => {
-  // Тег из 64 коротких атрибутов читается вдвое дольше, чем стоят его
-  // знаки: две части по 39 МБ таких тегов — 2,5 с процессора в пределе.
+test("книга: каждый атрибут платит за себя — тег из коротких атрибутов дороже своих знаков", async () => {
+  // Атрибут стоит дороже своих знаков (таблица, срезы, раскодирование):
+  // тег из 64 атрибутов — 2,5 с процессора в пределе, тег из четырёх
+  // атрибутов в 28 знаков — 3–4 с из файла 9,7 МБ, пока платил одну
+  // единицу.
+  const tooMuch = (error: unknown) => error instanceof WorkbookFormatError && error.code === "xlsx_too_much_data";
   const attributes = Array.from({ length: 64 }, (_, index) => `a${index}="1"`).join(" ");
   const tags = `<worksheet><sheetData>${`<x ${attributes}/>`.repeat(1_000)}<row r="1"><c r="A1" s="1" t="n"><v>1</v></c></row></sheetData></worksheet>`;
   const limits = { maxWork: 40_000 };
-  await assert.rejects(readWorkbook(await bookWithSheet(tags), { limits }), (error: unknown) =>
-    error instanceof WorkbookFormatError && error.code === "xlsx_too_much_data");
-  // Три атрибута ячейки — в цене тега: тысяча ячеек укладывается в тот же предел.
+  await assert.rejects(readWorkbook(await bookWithSheet(tags), { limits }), tooMuch, "64 атрибута");
+  const four = `<worksheet><sheetData>${'<x a="1" b="1" c="1" d="1"/>'.repeat(10_000)}</sheetData></worksheet>`;
+  await assert.rejects(readWorkbook(await bookWithSheet(four), { limits }), tooMuch, "четыре атрибута");
+  // Тысяча обычных ячеек укладывается в тот же предел.
   const cells = `<worksheet><sheetData>${Array.from({ length: 1_000 }, (_, index) =>
     `<row r="${index + 1}"><c r="A${index + 1}" s="1" t="n"><v>${index}</v></c></row>`).join("")}</sheetData></worksheet>`;
   assert.equal((await readWorkbook(await bookWithSheet(cells), { limits })).sheets[0]!.rows.length, 1_000);
+});
+
+test("чтение: адрес ячейки — столбец из 1–3 букв в любом регистре, строка — цифры, чужая строка и мусор пропускаются", async () => {
+  const cells = [
+    `<c r="B1"><v>1</v></c>`, `<c r="c1"><v>2</v></c>`, `<c r="AAAA1"><v>3</v></c>`, `<c r="A1B"><v>4</v></c>`,
+    `<c r="E"><v>5</v></c>`, `<c><v>6</v></c>`, `<c r="F2"><v>7</v></c>`, `<c r="G${"1".repeat(16)}"><v>8</v></c>`,
+    `<c r="ZZZ1"><v>9</v></c>`, `<c r="I1"><v>10</v></c>`,
+  ].join("");
+  const read = await readWorkbook(await bookWithSheet(`<worksheet><sheetData><row r="1">${cells}</row></sheetData></worksheet>`));
+  // B1 и c1 — по адресу; AAAA1 и A1B — не адреса; E — столбец без строки;
+  // ячейка без адреса — следом за E; F2 — чужая строка; адрес длиннее 16
+  // знаков и столбец за пределом — пропуск; I1 — снова по адресу.
+  assert.deepEqual(read.sheets[0]!.rows[0], [null, 1, 2, null, 5, 6, null, null, 10]);
 });
 
 test("книга: лист «только имя» не распаковывается — в результате он без строк", async () => {

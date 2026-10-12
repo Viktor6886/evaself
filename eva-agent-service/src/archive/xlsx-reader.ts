@@ -67,7 +67,7 @@ export const DEFAULT_READ_LIMITS: ReadLimits = {
   // в 30 000 строк (больше загрузка не примет) — около 1,2 млн единиц,
   // плотный, пересохранённый LibreOffice, — до 3,1 млн; дальше — уже не
   // архив, и чтение останавливается, не дочитав.
-  maxWork: 3_500_000,
+  maxWork: 5_000_000,
 };
 
 /** Ошибка формата с кодом: текст для человека подбирает вызывающий. */
@@ -505,6 +505,10 @@ async function parseSheet(xml: string, strings: readonly string[], limits: ReadL
         case "is": {
           const active = currentCell();
           if (!active) throw malformed();
+          // Встроенная строка — ещё две единицы: текст копится, склеивается
+          // и раскрывается в самой ячейке, а не берётся готовым из общей
+          // таблицы. Excel, LibreOffice и выгрузка Евы так текст не пишут.
+          work.spend(2);
           if (!token.selfClosing) {
             inInline = true;
             active.inline = [];
