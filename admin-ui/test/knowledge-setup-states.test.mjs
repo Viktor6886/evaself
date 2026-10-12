@@ -236,6 +236,9 @@ test("у провайдера включённой модели кончилис
     assert.match(status, /через построенную модель v3/);
     assert.equal(await stepState(built, 3), "current");
     assert.equal(await built.page.textContent("#knowledge-use-qdrant"), "Переключить на новую модель");
+    const live = await built.page.textContent('[data-setup-step="3"]');
+    assert.match(live, /уже ищет по ней: прежняя не отвечает/);
+    assert.doesNotMatch(live, /Прежняя работает/, "шаг не противоречит статусу");
   } finally { await built.close(); }
 
   // Проверка прошла через запасного провайдера или устарела для другой версии — работает.

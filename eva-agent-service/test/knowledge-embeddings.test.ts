@@ -8,7 +8,7 @@
  */
 
 import assert from "node:assert/strict";
-import { beforeEach, test } from "node:test";
+import { beforeEach, mock, test } from "node:test";
 
 import Fastify from "fastify";
 
@@ -283,6 +283,27 @@ test("проверка активной модели: запасной пров�
   assert.equal((await broken.service.overview()).active_check, null);
   assert.equal((await broken.service.overview()).active_check, null);
   assert.equal(calls, 3, "неизвестное не кэшируется");
+});
+
+test("проверка активной модели не ждёт зависшего провайдера дольше 8 секунд", async () => {
+  let hang = false;
+  const { service, versions } = adminService(() => hang ? new Promise(() => {}) : { ok: true, dimension: 8, latency_ms: 1 });
+  await service.createVersion({ provider_id: "p1", model: "m" });
+  versions[0]!.status = "active";
+  hang = true;
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const pending = service.overview();
+    // Обзор сперва читает версии и провайдеров; таймер проверки ставится после.
+    for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
+    mock.timers.tick(7_999);
+    for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
+    mock.timers.tick(1);
+    const check = (await pending).active_check!;
+    assert.deepEqual([check.ok, check.error_code], [false, "embedding_timeout"]);
+  } finally {
+    mock.timers.reset();
+  }
 });
 
 test("embedMany: нечисловой размер пачки — пачка по умолчанию, а не пустой ответ", async () => {

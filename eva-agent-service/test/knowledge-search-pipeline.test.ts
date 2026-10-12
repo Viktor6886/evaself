@@ -419,6 +419,13 @@ test("запасной версии нет, отказал Qdrant или отм�
   assert.deepEqual(words.hits.map((hit) => hit.matched), ["fts"]);
   assert.equal(words.diagnostics?.vectorStandby, undefined);
 
+  // Запасная версия есть, но и её модель не отвечает — тоже слова.
+  const both = await new KnowledgeSearch(searchDb({ fts: ["1"] }, [], { standby: { version: 4, dimension: 8 } }) as never, embed, {
+    settings: settings({ vectorBackend: "qdrant" }), vectors: { searchPrivate: async () => [], searchGlobal: async () => [] } as never, embedVersion: dead,
+  }).search(77, "штраф");
+  assert.equal(both.degraded, true);
+  assert.deepEqual(both.hits.map((hit) => hit.matched), ["fts"]);
+
   // Отказ Qdrant — не отказ модели: другая версия живёт в том же Qdrant.
   const qdrantDown = searchDb({ fts: ["1"] }, [], { standby: { version: 4, dimension: 8 } });
   const down = await new KnowledgeSearch(qdrantDown as never, embed, {

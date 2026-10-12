@@ -314,7 +314,9 @@ function renderKnowledgeSetup() {
       : "<p>✓ Включено: Ева ищет и по словам, и по смыслу.</p>";
   } else if (setup.live === "current") {
     const label = candidate && active ? "Переключить на новую модель" : "Включить поиск по смыслу";
-    liveBody = `<p>${candidate && active ? "Новая модель построена. Прежняя работает, пока вы не переключите." : "Индекс готов. Включите — и Ева начнёт искать и по смыслу."}</p>${button("knowledge-use-qdrant", label)}`;
+    const before = dead ? "Новая модель построена, и Ева уже ищет по ней: прежняя не отвечает. Переключите, чтобы закрепить."
+      : "Новая модель построена. Прежняя работает, пока вы не переключите.";
+    liveBody = `<p>${candidate && active ? before : "Индекс готов. Включите — и Ева начнёт искать и по смыслу."}</p>${button("knowledge-use-qdrant", label)}`;
   } else if (setup.liveReason) {
     liveBody = `<p${setup.live === "error" ? ' class="warn-value"' : ""}>${escapeHtml(setup.liveReason)}</p>`;
   } else {

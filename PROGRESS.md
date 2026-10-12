@@ -9,7 +9,7 @@
 2026-10-12: база знаний в Qdrant работала с OpenRouter (эмбеддинги OpenAI),
 у OpenRouter кончились кредиты, после пополнения подключены другая модель и
 другая модель эмбеддингов — и Ева перестала искать по уже построенной базе.
-Статус: в работе — PR открывается.
+Статус: выполнен — PR [#418](https://github.com/Viktor6886/evaself/pull/418), CI зелёный, независимое ревью — три «да» (итог комментарием в PR), слияние в main через PR #418. Флагов не добавлено: запасная версия работает только при отказе модели включённой.
 
 - Анализ (воспроизведено на PostgreSQL 17 + Qdrant 1.19): вектор запроса
   считает модель включённой версии; её провайдер отвечал 402, и каждый
@@ -29,6 +29,16 @@
   статус «Поиска по смыслу» (`knowledge-embedding-service.ts`,
   `ui-knowledge-embeddings.js`); сценарий в
   `scripts/ci/test-knowledge-lifecycle.mjs`; документация.
+- Проверки: `npm run lint`, `npm run typecheck` → PASS; сервис → PASS
+  (1907, 8 skipped); admin-ui в Chromium → PASS (170);
+  `test-knowledge-lifecycle.mjs` на PostgreSQL 17 + Qdrant 1.19 → PASS,
+  на прежнем коде → FAIL; `assert-tenant-scope.py`,
+  `assert-admin-route-access.py`, `assert-env-plumbing.py`,
+  `assert-doc-paths.py`, `gen-knowledge-search-probes.mjs --check` → PASS.
+- Ревью (Sonnet, чистый контекст): да / да / лишних нет. Учтены
+  необязательные: отмена задания важнее раннего отказа версии, тест
+  таймаута проверки модели, шаг «Включение» не противоречит статусу,
+  зависший провайдер — в документации.
 
 ## Архив данных: выгрузка в Excel и загрузка только дополнением — 2026-10-08
 

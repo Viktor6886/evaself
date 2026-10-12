@@ -19,7 +19,8 @@ import type { KnowledgeEmbeddingService } from "./knowledge-embedding-service.js
 export function registerKnowledgeRoutes(app: FastifyInstance, service: KnowledgeEmbeddingService): void {
   // Ключей и адресов провайдеров в ответе нет — только имена и id.
   // Отвечает ли модель включённой версии, обзор проверяет сам: один
-  // вектор служебной строки не чаще раза в минуту, без выбора модели.
+  // вектор служебной строки не чаще раза в минуту, без выбора модели, —
+  // и для читающих ролей: это состояние, а не настройка.
   app.get("/api/admin/v1/knowledge/embeddings", {
     config: { roles: ["owner", "admin", "operator", "viewer"] },
   }, async () => await service.overview());

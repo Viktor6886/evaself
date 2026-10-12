@@ -243,6 +243,8 @@ export class KnowledgeIndexer {
           failure ??= error instanceof Error ? error : new Error(errorCode(error));
         }
       }
+      // Отменённое задание — отмена, а не отказ модели, случившийся раньше.
+      signal?.throwIfAborted();
       if (failure) throw failure;
     } catch (error) {
       if (tracked) await this.mark(documentId, owner, "failed", null, errorCode(error)).catch(() => undefined);
