@@ -344,7 +344,7 @@ test("цикл событий: дорогие строки не держат е�
   }
 });
 
-test("цикл событий: чтение книги — огромный тег, узлы из одних сущностей и миллион пустых ячеек — тоже с паузами", async () => {
+test("цикл событий: чтение книги — огромный тег, строка из кусков, узлы из одних сущностей и миллион пустых ячеек — тоже с паузами", async () => {
   const bookOf = async (sheet: string, strings = "<sst/>") => {
     const zip = new JSZip();
     zip.file("[Content_Types].xml", "<Types/>");
@@ -370,8 +370,16 @@ test("цикл событий: чтение книги — огромный те
     seed = (Math.imul(seed, 1_103_515_245) + 12_345) >>> 0;
     return " \t\n\r"[(seed >>> 16) % 4];
   }).join("");
+  // Строка общей таблицы из 40 кусков по 255 000 знаков, каждый — `_x`
+  // вперемешку с буквами: прежнее чтение склеивало их и раскрывало одним
+  // вызовом.
+  const run = Array.from({ length: 255_000 / 32 }, () => {
+    seed = (Math.imul(seed, 1_103_515_245) + 12_345) >>> 0;
+    return `${"_x".repeat(15)}${String.fromCharCode(0x61 + ((seed >>> 16) % 26), 0x61 + ((seed >>> 8) % 26))}`;
+  }).join("");
   const cases: Record<string, Buffer> = {
     "тег из 20 млн пробелов": await bookOf(`<worksheet><sheetData><row${block.repeat(200)}r="1"/></sheetData></worksheet>`),
+    "строка из 40 кусков": await bookOf("<worksheet/>", `<sst><si>${`<r><t>${run}</t></r>`.repeat(40)}</si></sst>`),
     "узлы из одних сущностей": await bookOf("<worksheet/>", `<sst>${`<si><t>${node}</t></si>`.repeat(40)}</sst>`),
     "миллион пустых ячеек": await bookOf(`<worksheet><sheetData>${Array.from({ length: 10_000 }, (_, index) =>
       `<row r="${index + 1}">${"<c/>".repeat(100)}</row>`).join("")}</sheetData></worksheet>`),

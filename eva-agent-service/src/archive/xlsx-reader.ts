@@ -19,7 +19,7 @@ import { StringDecoder } from "node:string_decoder";
 import yauzl from "yauzl";
 
 import { clock, pause } from "./pace.js";
-import { attribute, scanXml, XmlFormatError, type Spend } from "./xml-scan.js";
+import { attribute, MAX_TEXT_LENGTH, scanXml, XmlFormatError, type Spend } from "./xml-scan.js";
 
 export { decodeXml } from "./xml-scan.js";
 
@@ -285,20 +285,37 @@ async function workbookInfo(
   return { date1904, sheets };
 }
 
+/**
+ * Текст одной строки или ячейки из кусков — `<r><t>`, текст вокруг
+ * комментариев, CDATA — считается по мере накопления, с тем же пределом,
+ * что у одного узла: иначе сотня кусков под пределом склеивалась бы в
+ * десятки мегабайт и раскрывалась одним вызовом, секунду без паузы.
+ */
+function grow(length: number, piece: string): number {
+  const total = length + piece.length;
+  if (total > MAX_TEXT_LENGTH) throw new WorkbookFormatError("xlsx_text_too_long");
+  return total;
+}
+
 /** Общие строки: все `<t>` элемента `<si>`, кроме фонетических подсказок `<rPh>`. */
 async function sharedStrings(xml: string, limits: ReadLimits, work: Meter): Promise<string[]> {
   const strings: string[] = [];
   let item: string[] | null = null;
   let phonetic = 0;
   let text: string[] | null = null;
+  let itemLength = 0;
   for (const token of scanXml(xml, work.spend)) {
     if (work.due()) await pause();
     if (token.kind === "text") {
-      if (text) text.push(token.text);
+      if (text) {
+        itemLength = grow(itemLength, token.text);
+        text.push(token.text);
+      }
     } else if (token.kind === "open") {
       if (token.name === "si") {
         if (item) throw new WorkbookFormatError("xlsx_xml_malformed");
         if (strings.length >= limits.maxSharedStrings) throw new WorkbookFormatError("xlsx_too_many_strings");
+        itemLength = 0;
         if (token.selfClosing) strings.push("");
         else item = [];
       } else if (item && token.name === "rPh" && !token.selfClosing) {
@@ -378,6 +395,7 @@ async function parseSheet(xml: string, strings: readonly string[], limits: ReadL
   // и сужение типа по месту объявления здесь было бы неверным.
   const currentCell = (): CellState | null => cell;
   let capture: string[] | null = null;
+  let captured = 0;
   let inInline = false;
   let phonetic = 0;
 
@@ -409,6 +427,7 @@ async function parseSheet(xml: string, strings: readonly string[], limits: ReadL
     }
     if (column !== null) row.nextColumn = column + 1;
     cell = { column, type: attrs.get("t") ?? "n", raw: null, inline: null };
+    captured = 0;
   };
   const closeCell = () => {
     if (!row || !cell) throw malformed();
@@ -426,7 +445,10 @@ async function parseSheet(xml: string, strings: readonly string[], limits: ReadL
   for (const token of scanXml(xml, work.spend)) {
     if (work.due()) await pause();
     if (token.kind === "text") {
-      if (capture) capture.push(token.text);
+      if (capture) {
+        captured = grow(captured, token.text);
+        capture.push(token.text);
+      }
       continue;
     }
     if (token.name === "sheetData") {

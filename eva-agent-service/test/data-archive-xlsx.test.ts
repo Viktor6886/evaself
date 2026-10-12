@@ -391,6 +391,37 @@ test("книга: работа чтения считается на весь ф�
   await assert.rejects(readWorkbook(four), (error: unknown) => error instanceof WorkbookFormatError && error.code === "xlsx_too_much_data");
 });
 
+test("чтение: строка и ячейка из кусков считаются целиком — сумма кусков не длиннее узла", async () => {
+  // Сотня кусков под пределом узла склеивалась в десятки мегабайт и
+  // раскрывалась одним вызовом: секунда без паузы для цикла событий.
+  const piece = "к".repeat(100_000);
+  const runs = (count: number) => Array.from({ length: count }, () => `<r><t>${piece}</t></r>`).join("");
+  const tooLong = (error: unknown) => error instanceof WorkbookFormatError && error.code === "xlsx_text_too_long";
+  const sheet = `<worksheet><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c></row></sheetData></worksheet>`;
+  await assert.rejects(readWorkbook(await bookWithSheet(sheet, { "xl/strings.xml": `<sst><si>${runs(3)}</si></sst>` })), tooLong, "строка общей таблицы");
+  const inline = `<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>${`${piece}<!---->`.repeat(3)}</t></is></c></row></sheetData></worksheet>`;
+  await assert.rejects(readWorkbook(await bookWithSheet(inline)), tooLong, "ячейка с текстом вокруг комментариев");
+  const value = `<worksheet><sheetData><row r="1"><c r="A1" t="str"><v>${`${piece}<![CDATA[x]]>`.repeat(3)}</v></c></row></sheetData></worksheet>`;
+  await assert.rejects(readWorkbook(await bookWithSheet(value)), tooLong, "значение ячейки из кусков");
+  // Два куска в пределе — одна строка.
+  const fits = await readWorkbook(await bookWithSheet(sheet, { "xl/strings.xml": `<sst><si>${runs(2)}</si></sst>` }));
+  assert.equal(fits.sheets[0]!.rows[0]![0], piece + piece);
+});
+
+test("книга: атрибуты сверх четырёх платят за себя — тег из 64 атрибутов дороже своих знаков", async () => {
+  // Тег из 64 коротких атрибутов читается вдвое дольше, чем стоят его
+  // знаки: две части по 39 МБ таких тегов — 2,5 с процессора в пределе.
+  const attributes = Array.from({ length: 64 }, (_, index) => `a${index}="1"`).join(" ");
+  const tags = `<worksheet><sheetData>${`<x ${attributes}/>`.repeat(1_000)}<row r="1"><c r="A1" s="1" t="n"><v>1</v></c></row></sheetData></worksheet>`;
+  const limits = { maxWork: 40_000 };
+  await assert.rejects(readWorkbook(await bookWithSheet(tags), { limits }), (error: unknown) =>
+    error instanceof WorkbookFormatError && error.code === "xlsx_too_much_data");
+  // Три атрибута ячейки — в цене тега: тысяча ячеек укладывается в тот же предел.
+  const cells = `<worksheet><sheetData>${Array.from({ length: 1_000 }, (_, index) =>
+    `<row r="${index + 1}"><c r="A${index + 1}" s="1" t="n"><v>${index}</v></c></row>`).join("")}</sheetData></worksheet>`;
+  assert.equal((await readWorkbook(await bookWithSheet(cells), { limits })).sheets[0]!.rows.length, 1_000);
+});
+
 test("книга: лист «только имя» не распаковывается — в результате он без строк", async () => {
   const book = await bookWithSheets(
     `<sheet name="Заметки" r:id="rId1"/><sheet name="Диалоги" r:id="rId2"/>`,

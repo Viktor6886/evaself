@@ -51,12 +51,20 @@ export const MAX_TAG_LENGTH = 65_536;
 /**
  * Работа сканера, которую оплачивает вызывающий: токен — единица,
  * каждый `&` — единица, каждые `TAG_CHARS_PER_UNIT` знаков внутри тега —
- * единица. Отказ — исключение из `spend`.
+ * единица, каждый атрибут сверх `FREE_ATTRIBUTES` — единица. Отказ —
+ * исключение из `spend`.
  */
 export type Spend = (units: number) => void;
 
 /** Знаков тега на единицу работы: тег читается дважды, знак за знаком. */
 export const TAG_CHARS_PER_UNIT = 32;
+
+/**
+ * Столько атрибутов у тега — в цене самого тега: у ячейки их три
+ * (`r`, `s`, `t`). Каждый следующий — единица: тег из 64 коротких
+ * атрибутов читается вдвое дольше, чем стоят его знаки.
+ */
+export const FREE_ATTRIBUTES = 4;
 
 const free: Spend = () => undefined;
 
@@ -151,6 +159,7 @@ function parseAttributes(source: string, start: number, spend: Spend): ReadonlyM
     if (end < 0) throw new XmlFormatError();
     if (attrs.size >= MAX_ATTRIBUTES || end - index > MAX_ATTRIBUTE_LENGTH) throw new XmlFormatError();
     attrs.set(name, decodeXml(source.slice(index + 1, end), spend));
+    if (attrs.size > FREE_ATTRIBUTES) spend(1);
     index = end + 1;
   }
   return attrs;
