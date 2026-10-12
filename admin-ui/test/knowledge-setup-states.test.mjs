@@ -203,6 +203,53 @@ test("новая модель готовится рядом с включённ�
   } finally { await panel.close(); }
 });
 
+test("у провайдера включённой модели кончились средства: не «работает», а причина и что делать", async () => {
+  // Индекс построен, Qdrant доступен — а вектор запроса не считается.
+  // Прежде статус говорил «работает», пока Ева искала одними словами.
+  const dead = { version: 2, ok: false, error_code: "embedding_payment_required", fallback: false, checked_at: "2026-10-12T10:00:00Z" };
+  const alone = await openPanel({ routes: { ...ROUTES, "/settings": LIVE_SETTINGS, ...ACTIVE_ROUTES,
+    "/knowledge/embeddings": { ...ACTIVE_ROUTES["/knowledge/embeddings"], active_check: dead },
+  } });
+  try {
+    await enterKnowledge(alone);
+    const status = await alone.page.textContent("#knowledge-setup-status");
+    assert.match(status, /не работает/);
+    assert.match(status, /Модель v2 не отвечает: у провайдера закончились средства \(embedding_payment_required\)/);
+    assert.match(status, /только по словам/);
+    assert.match(status, /Сменить модель/);
+    assert.match(await alone.page.textContent('[data-setup-step="3"]'), /модель v2 не отвечает/);
+    assert.match(await alone.page.textContent("#knowledge-active-embedding"), /не отвечает/);
+    assert.equal(await alone.page.locator("#knowledge-setup-change").count(), 1, "смена модели — под рукой");
+    assert.deepEqual(alone.errors, []);
+  } finally { await alone.close(); }
+
+  // Новая модель уже построена: поиск идёт по ней, пока её не переключат.
+  const next = { ...VERSION, version: 3, model: "text-embedding-3-small", dimension: 1536 };
+  const built = await openPanel({ routes: { ...ROUTES, "/settings": LIVE_SETTINGS,
+    "/knowledge/embeddings": { ...EMBEDDINGS, active: 2, versions: [next, ACTIVE], active_check: dead },
+    "/knowledge/index": { ...INDEX, aliases: { private: 2, global: 2 }, versions: [next, ACTIVE] },
+  } });
+  try {
+    await enterKnowledge(built);
+    const status = await built.page.textContent("#knowledge-setup-status");
+    assert.match(status, /на новой модели/);
+    assert.match(status, /через построенную модель v3/);
+    assert.equal(await stepState(built, 3), "current");
+    assert.equal(await built.page.textContent("#knowledge-use-qdrant"), "Переключить на новую модель");
+  } finally { await built.close(); }
+
+  // Проверка прошла через запасного провайдера или устарела для другой версии — работает.
+  const rescued = await openPanel({ routes: { ...ROUTES, "/settings": LIVE_SETTINGS, ...ACTIVE_ROUTES,
+    "/knowledge/embeddings": { ...ACTIVE_ROUTES["/knowledge/embeddings"], active_check: { ...dead, version: 1 } },
+  } });
+  try {
+    await enterKnowledge(rescued);
+    const status = await rescued.page.textContent("#knowledge-setup-status");
+    assert.match(status, /работает/);
+    assert.doesNotMatch(status, /не отвечает/);
+  } finally { await rescued.close(); }
+});
+
 test("смена модели при выключенном поиске по смыслу: подтверждение говорит, что включится и он", async () => {
   const next = { ...VERSION, version: 3, model: "openai/text-embedding-3-large", dimension: 3072 };
   const panel = await openPanel({ routes: { ...ROUTES,

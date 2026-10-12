@@ -30,6 +30,7 @@ const KNOWLEDGE_BUILD_ERRORS = {
   job_publish_failed: "задание не попало в очередь",
   job_deadline_exceeded: "задание не дождалось очереди",
   embedding_auth: "провайдер эмбеддингов отклонил ключ",
+  embedding_payment_required: "у провайдера закончились средства",
   embedding_not_found: "провайдер не нашёл модель",
   embedding_bad_request: "провайдер отклонил запрос",
   embedding_rate_limited: "провайдер ограничил частоту запросов",
@@ -99,6 +100,19 @@ function knowledgeQdrantBlocker() {
   if (k.index?.aliases_match_active === false) return "Aliases Qdrant расходятся с включённой версией — нажмите «Восстановить aliases» в блоке «Векторный индекс».";
   if (k.index?.aliases_match_active !== true) return "Qdrant не сообщил, на какую версию указывают aliases, — нажмите «Обновить» и повторите.";
   return null;
+}
+
+/**
+ * Модель включённой версии не посчитала проверочный вектор: у провайдера
+ * кончились средства, его выключили, модель сняли. Индекс построен и Qdrant
+ * доступен, а вектор запроса не считается — без этой проверки панель
+ * говорила «работает», пока Ева искала одними словами. null — отвечает
+ * или неизвестно.
+ */
+function knowledgeActiveDead() {
+  const check = state.knowledge.embeddings?.active_check;
+  const active = knowledgeActiveVersion();
+  return check && active && check.version === active.version && check.ok === false ? check : null;
 }
 
 /**
@@ -230,7 +244,7 @@ function renderKnowledgeEmbedding() {
   // Подробности включённой модели; что её нет, уже говорит «Поиск по смыслу».
   knowledgeRender($("#knowledge-active-embedding"), active ? `<dl class="knowledge-summary">
     ${field("Модель поиска по смыслу", `v${active.version} · ${active.model} · ${active.dimension} · ${active.provider_name || active.provider_id}`)}
-    ${field("Состояние модели", `${KNOWLEDGE_VERSION_STATUS[active.status]}${active.building ? " · перестраивается" : ""}`)}
+    ${field("Состояние модели", `${KNOWLEDGE_VERSION_STATUS[active.status]}${active.building ? " · перестраивается" : ""}${knowledgeActiveDead() ? ` · не отвечает: ${knowledgeBuildError(knowledgeActiveDead().error_code)}` : ""}`)}
   </dl>` : "");
   const editable = knowledgeEditable();
   $("#knowledge-runtime-editor").hidden = !editable;
@@ -292,10 +306,12 @@ function renderKnowledgeSetup() {
     indexBody = "<p>Начнётся после подключения модели.</p>";
   }
   let liveBody;
+  const dead = knowledgeActiveDead();
   if (setup.live === "done") {
-    liveBody = knowledgeQdrantServing()
-      ? "<p>✓ Включено: Ева ищет и по словам, и по смыслу.</p>"
-      : '<p class="warn-value">Включено, но Qdrant сейчас недоступен — Ева ищет только по словам. Подробности — в блоке «Векторный индекс».</p>';
+    liveBody = !knowledgeQdrantServing()
+      ? '<p class="warn-value">Включено, но Qdrant сейчас недоступен — Ева ищет только по словам. Подробности — в блоке «Векторный индекс».</p>'
+      : dead ? `<p class="warn-value">Включено, но модель v${active.version} не отвечает — смените модель в первом шаге.</p>`
+      : "<p>✓ Включено: Ева ищет и по словам, и по смыслу.</p>";
   } else if (setup.live === "current") {
     const label = candidate && active ? "Переключить на новую модель" : "Включить поиск по смыслу";
     liveBody = `<p>${candidate && active ? "Новая модель построена. Прежняя работает, пока вы не переключите." : "Индекс готов. Включите — и Ева начнёт искать и по смыслу."}</p>${button("knowledge-use-qdrant", label)}`;
@@ -304,7 +320,8 @@ function renderKnowledgeSetup() {
   } else {
     liveBody = `<p>${auto ? "Включится само, когда индекс построится." : "Станет доступно, когда индекс построится."}</p>`;
   }
-  const working = !!active && knowledgeSearchOnQdrant() && knowledgeQdrantServing();
+  const serving = !!active && knowledgeSearchOnQdrant() && knowledgeQdrantServing();
+  const working = serving && !dead;
   const meanwhile = escapeHtml(knowledgeMeanwhile());
   const next = !candidate ? ""
     : setup.index === "busy" ? "Новая модель строится рядом."
@@ -318,8 +335,18 @@ function renderKnowledgeSetup() {
     state.knowledge.index?.aliases_match_active === false ? "Aliases Qdrant расходятся с включённой версией — «Восстановить aliases» в блоке «Векторный индекс»." : "",
     setup.index === "off" ? "Новые документы в Qdrant не попадают — включите индексацию." : next,
   ].filter(Boolean).map((note) => ` ${note}`).join("") : "";
+  // Модель включённой версии не отвечает. Построенной новой модели поиск
+  // пользуется сам, пока её не переключат; без неё остаются слова.
+  const deadNote = () => {
+    const reason = `Модель v${active.version} не отвечает: ${escapeHtml(knowledgeBuildError(dead.error_code))}.`;
+    if (setup.index === "done" && candidate) return `<span class="status-pill state-yellow">на новой модели</span> ${reason} Пока вы не переключите, Ева ищет по смыслу через построенную модель v${candidate.version} — переключите её в шаге «Включение».`;
+    const then = !candidate ? "Подключите модель у работающего провайдера: «Сменить модель» в первом шаге."
+      : setup.index === "busy" ? "Новая модель строится — когда построится, Ева начнёт искать по ней." : next;
+    return `<span class="status-pill state-red">не работает</span> ${reason} Ева ищет только по словам. ${then}`;
+  };
   knowledgeRender(status, working
     ? `<span class="status-pill state-green">работает</span> Ева ищет по словам и по смыслу.${notes}`
+    : serving && dead ? deadNote()
     : active && knowledgeSearchOnQdrant() ? '<span class="status-pill state-red">не работает</span> Qdrant сейчас недоступен — Ева ищет только по словам.'
     : setup.index === "busy" ? `<span class="status-pill state-yellow">строится индекс</span> ${meanwhile}`
     : `<span class="status-pill state-yellow">не настроен</span> ${meanwhile}`);

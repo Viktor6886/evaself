@@ -98,7 +98,7 @@ test("маршрут агента: проверка модели уходит в
 
 interface VersionRow extends Record<string, unknown> { version: number; status: string }
 
-function adminService(probe: Record<string, unknown>) {
+function adminService(probe: Record<string, unknown> | ((body: any) => unknown), now?: () => number) {
   const versions: VersionRow[] = [];
   const probes: unknown[] = [];
   let sequence = 0;
@@ -135,8 +135,12 @@ function adminService(probe: Record<string, unknown>) {
     return { rows: [] };
   };
   const pool = { query };
-  const agent = { request: async (path: string, init?: RequestInit) => { probes.push({ path, body: JSON.parse(String(init?.body)) }); return probe; } };
-  return { service: new KnowledgeEmbeddingService(pool as never, agent as never), versions, probes, statements };
+  const agent = { request: async (path: string, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body));
+    probes.push({ path, body });
+    return typeof probe === "function" ? probe(body) : probe;
+  } };
+  return { service: new KnowledgeEmbeddingService(pool as never, agent as never, now), versions, probes, statements };
 }
 
 test("версия заводится после проверки: размерность — из ответа провайдера", async () => {
@@ -230,6 +234,55 @@ test("обзор: активная версия и провайдеры без �
     { id: "p2", name: "Jina", chat_model: "jina-chat" },
   ]);
   assert.doesNotMatch(JSON.stringify(overview), /api_key|base_url/u);
+});
+
+test("обзор проверяет модель активной версии: у провайдера кончились средства — так и сказано", async () => {
+  let clock = Date.parse("2026-10-12T10:00:00Z");
+  let answer: Record<string, unknown> = { ok: true, dimension: 8, latency_ms: 1 };
+  const { service, versions, probes } = adminService(() => answer, () => clock);
+  assert.equal((await service.overview()).active_check, null, "без активной версии проверять нечего");
+  await service.createVersion({ provider_id: "p1", model: "openai/text-embedding-3-small" });
+  probes.length = 0;
+  versions[0]!.status = "active";
+  answer = { ok: false, error_code: "embedding_payment_required", message: "У провайдера закончились средства" };
+  const dead = await service.overview();
+  assert.deepEqual(dead.active_check, {
+    version: 1, ok: false, error_code: "embedding_payment_required", fallback: false, checked_at: "2026-10-12T10:00:00.000Z",
+  });
+  // Та же цель, что у поиска: модель и размерность версии, без сравнения.
+  assert.deepEqual(probes, [{ path: "/v1/knowledge/embeddings/probe", body: {
+    provider_id: "p1", model: "openai/text-embedding-3-small", dimension: 8, request_dimensions: false, compare: null,
+  } }]);
+  // Обзор опрашивают раз в 5 секунд: провайдер — не чаще раза в минуту.
+  clock += 30_000;
+  await service.overview();
+  assert.equal(probes.length, 1);
+  clock += 31_000;
+  answer = { ok: true, dimension: 8, latency_ms: 1 };
+  assert.equal((await service.overview()).active_check?.ok, true);
+  assert.equal(probes.length, 2);
+});
+
+test("проверка активной модели: запасной провайдер выручает; агент недоступен — неизвестно, а не отказ", async () => {
+  let primaryDead = false;
+  const { service, versions } = adminService((body) => primaryDead && body.provider_id === "p1"
+    ? { ok: false, error_code: "embedding_auth" }
+    : { ok: true, dimension: 8, latency_ms: 1, compare: { ok: true, dimension: 8, latency_ms: 1, similarity: 1, same_space: true } });
+  await service.createVersion({ provider_id: "p1", model: "m", fallback_provider_id: "p2", fallback_model: "m" });
+  versions[0]!.status = "active";
+  primaryDead = true;
+  assert.deepEqual(
+    (({ ok, error_code, fallback }) => ({ ok, error_code, fallback }))((await service.overview()).active_check!),
+    { ok: true, error_code: "embedding_auth", fallback: true },
+  );
+
+  let calls = 0;
+  const broken = adminService(() => { calls += 1; if (calls > 1) throw new Error("agent down"); return { ok: true, dimension: 8, latency_ms: 1 }; });
+  await broken.service.createVersion({ provider_id: "p1", model: "m" });
+  broken.versions[0]!.status = "active";
+  assert.equal((await broken.service.overview()).active_check, null);
+  assert.equal((await broken.service.overview()).active_check, null);
+  assert.equal(calls, 3, "неизвестное не кэшируется");
 });
 
 test("embedMany: нечисловой размер пачки — пачка по умолчанию, а не пустой ответ", async () => {
