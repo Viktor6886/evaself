@@ -24,6 +24,15 @@ const UPLOADS = [
 ];
 const ENABLED = { enabled: true, documents: DOCS, total: 2, uploads: UPLOADS };
 
+/**
+ * Ответ на загрузку файла. Ожидание по событию, а не по часам: 300 мс
+ * хватало на свободной машине, а под нагрузкой раннера CI запрос уходил
+ * позже, и тест падал «загрузка не ушла» на исправном коде. К ответу
+ * запрос уже записан в `app.requests`: запись идёт до `route.fulfill`.
+ */
+const uploadAnswered = (page) => page.waitForResponse((response) =>
+  response.request().method() === "POST" && new URL(response.url()).pathname === "/api/public/knowledge/uploads");
+
 test("выключенная функция: вкладки «База знаний» нет", async () => {
   const app = await openApp({ routes: { "/public/knowledge": { enabled: false, documents: [], uploads: [] } } });
   try {
@@ -69,8 +78,9 @@ test("загрузка уходит multipart-запросом с полем fil
   try {
     await app.openScreen("knowledge");
     await app.page.waitForSelector("#knowledge-upload");
+    const sent = uploadAnswered(app.page);
     await app.page.setInputFiles("#knowledge-file", { name: "план.md", mimeType: "text/markdown", buffer: Buffer.from("# План") });
-    await app.page.waitForTimeout(300);
+    await sent;
     const upload = app.requests.find((item) => item.method === "POST" && item.path === "/public/knowledge/uploads");
     assert.ok(upload, "загрузка не ушла");
     assert.match(String(upload.body), /name="file"; filename="план\.md"/);
@@ -86,8 +96,9 @@ test("«Обновить» загружает новую версию: id док
     await app.page.waitForSelector("[data-knowledge-document]");
     const chooser = app.page.waitForEvent("filechooser");
     await app.page.click('[data-knowledge-replace="0a000000-0000-4000-8000-00000000000a"]');
+    const sent = uploadAnswered(app.page);
     await (await chooser).setFiles({ name: "Договор аренды.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.4") });
-    await app.page.waitForTimeout(300);
+    await sent;
     const upload = app.requests.find((item) => item.method === "POST" && item.path === "/public/knowledge/uploads");
     assert.ok(upload, "загрузка не ушла");
     assert.equal(upload.search, "?replaces=0a000000-0000-4000-8000-00000000000a");
