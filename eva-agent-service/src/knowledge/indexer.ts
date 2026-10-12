@@ -223,6 +223,14 @@ export class KnowledgeIndexer {
     if (tracked) await this.mark(documentId, owner, "indexing", null, null);
     let reused = 0;
     try {
+      // Отказ одной версии не останавливает остальные. Смену модели чаще
+      // всего начинают, когда прежний провайдер перестал отвечать (кончились
+      // средства, ключ отозван): прежняя версия — первая по номеру, и при
+      // первом же отказе документ не попадал и в новую. Новая версия
+      // оставалась без него, а её включение отклоняла проверка полноты —
+      // ни прежняя модель, ни новая. Задание всё равно уходит на повтор
+      // с кодом первого отказа.
+      let failure: unknown = null;
       for (const version of versions) {
         signal?.throwIfAborted();
         try {
@@ -232,9 +240,10 @@ export class KnowledgeIndexer {
           // сервиса): при следующей попытке она создаётся заново, а не
           // считается существующей до рестарта.
           this.ensured.delete(version.version);
-          throw error;
+          failure ??= error;
         }
       }
+      if (failure) throw failure;
     } catch (error) {
       if (tracked) await this.mark(documentId, owner, "failed", null, errorCode(error)).catch(() => undefined);
       throw error;
