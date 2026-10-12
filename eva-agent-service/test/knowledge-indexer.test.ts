@@ -247,6 +247,56 @@ test("отказ Qdrant или провайдера: документ failed с 
   assert.ok(!queries.some((query) => query.params.some((param) => String(param).includes("секрет"))), "текст ошибки не пишется в базу");
 });
 
+test("провайдер прежней модели не отвечает: документ всё равно попадает в новую версию, задание — на повтор", async () => {
+  // Смена модели после того, как у прежнего провайдера кончились средства:
+  // v1 — первая по номеру. Раньше её отказ обрывал цикл, документ не
+  // попадал в v2, и включение v2 отклоняла проверка полноты.
+  const { db, queries } = fakeDb({ versions: [{ ...VERSION, version: 1 }, VERSION], document: PRIVATE_DOC, chunks: CHUNKS });
+  const { calls, store } = fakeStore();
+  const embedded: number[] = [];
+  const failing = {
+    embedMany: async (texts: string[], options: { version: number }) => {
+      embedded.push(options.version);
+      if (options.version === 1) throw Object.assign(new Error("LLM Router HTTP 502 (embedding_payment_required)"), { code: "embedding_payment_required" });
+      return texts.map(() => [0.5, 0.5, 0.5]);
+    },
+  };
+  await assert.rejects(() => new KnowledgeIndexer(db as never, failing as never, store as never, options()).index("doc-1", 7), /embedding_payment_required/u);
+  assert.deepEqual(embedded, [1, 2], "после отказа v1 индексируется и v2");
+  assert.deepEqual(calls.filter((call) => call.method === "upsert").map((call) => (call.args[1] as { version: number }).version), [2]);
+  assert.deepEqual(calls.filter((call) => call.method === "pruneDocument").map((call) => call.args[1]), [2]);
+  // Состояние — про активный индекс: отказ виден с кодом первого отказа.
+  const last = queries.filter((query) => query.sql.startsWith("UPDATE")).at(-1)!;
+  assert.deepEqual([last.params[2], last.params[4]], ["failed", "embedding_payment_required"]);
+});
+
+test("отменённое задание не идёт в следующую версию", async () => {
+  const { db } = fakeDb({ versions: [{ ...VERSION, version: 1 }, VERSION], document: PRIVATE_DOC, chunks: CHUNKS });
+  const { store } = fakeStore();
+  const controller = new AbortController();
+  const embedded: number[] = [];
+  const cancelling = {
+    embedMany: async (_texts: string[], options: { version: number }) => {
+      embedded.push(options.version);
+      controller.abort(new Error("job_cancelled"));
+      throw new Error("aborted");
+    },
+  };
+  await assert.rejects(() => new KnowledgeIndexer(db as never, cancelling as never, store as never, options()).index("doc-1", 7, controller.signal), /job_cancelled/u);
+  assert.deepEqual(embedded, [1]);
+
+  // Отказ v1, а v2 отменили посреди: наружу — отмена, а не отказ модели.
+  const late = new AbortController();
+  const failThenCancel = {
+    embedMany: async (_texts: string[], options: { version: number }) => {
+      if (options.version === 1) throw Object.assign(new Error("payment"), { code: "embedding_payment_required" });
+      late.abort(new Error("job_cancelled"));
+      throw new Error("aborted");
+    },
+  };
+  await assert.rejects(() => new KnowledgeIndexer(db as never, failThenCancel as never, store as never, options()).index("doc-1", 7, late.signal), /job_cancelled/u);
+});
+
 const DOC_X = "0b6f3c1e-5a1d-4c8e-9f21-7d3a2b1c0e99";
 
 test("документа нет в области владельца: снимаются его точки под этим владельцем во всех версиях и исходный файл", async () => {

@@ -61,6 +61,31 @@ interface ProbeInput {
 
 type ProbeResult = Record<string, unknown> & { ok?: unknown; dimension?: unknown; compare?: unknown };
 
+/**
+ * Считает ли модель включённой версии векторы прямо сейчас. Построенный
+ * индекс и доступный Qdrant ещё не значат, что поиск по смыслу работает:
+ * у провайдера могли кончиться средства или его выключили, и тогда каждый
+ * вектор запроса не считается, а панель говорила «работает».
+ */
+export interface ActiveEmbeddingCheck {
+  version: number;
+  ok: boolean;
+  /** Код отказа основного провайдера; при `ok` через запасной — тоже его. */
+  error_code: string | null;
+  /** Основной не ответил, запасной того же пространства — да. */
+  fallback: boolean;
+  checked_at: string;
+}
+
+/**
+ * Проверка — один вектор фиксированной строки (`PROBE_TEXT`, без данных
+ * людей) не чаще раза в минуту: обзор открывают и опрашивают раз в
+ * 5 секунд, пока идёт построение.
+ */
+const ACTIVE_CHECK_TTL_MS = 60_000;
+/** Обзор не ждёт зависшего провайдера дольше этого: поиск ждёт его 8 с. */
+const ACTIVE_CHECK_TIMEOUT_MS = 8_000;
+
 function text(value: unknown, field: string, pattern?: RegExp): string {
   const result = typeof value === "string" ? value.trim() : "";
   if (!result || (pattern && !pattern.test(result))) throw adminBadRequest(`Поле ${field} задано неверно`, { field });
@@ -77,18 +102,28 @@ function integer(value: unknown, field: string, min: number, max: number, fallba
 }
 
 export class KnowledgeEmbeddingService {
+  private activeChecked: { at: number; result: ActiveEmbeddingCheck } | null = null;
+
   constructor(
     private readonly pool: Pick<pg.Pool, "query">,
     private readonly agent: Pick<InternalAgentClient, "request">,
+    private readonly now: () => number = Date.now,
   ) {}
 
-  /** Версии, активная версия и провайдеры, которыми можно считать векторы. */
-  async overview(): Promise<{ active: number | null; versions: EmbeddingVersionView[]; providers: EmbeddingProviderOption[] }> {
+  /** Версии, активная версия, провайдеры и отвечает ли модель активной. */
+  async overview(): Promise<{
+    active: number | null;
+    versions: EmbeddingVersionView[];
+    providers: EmbeddingProviderOption[];
+    active_check: ActiveEmbeddingCheck | null;
+  }> {
     const [versions, providers] = await Promise.all([this.versions(), this.providers()]);
+    const active = versions.find((row) => row.status === "active") ?? null;
     return {
-      active: versions.find((row) => row.status === "active")?.version ?? null,
+      active: active?.version ?? null,
       versions,
       providers,
+      active_check: active ? await this.activeCheck(active) : null,
     };
   }
 
@@ -206,6 +241,50 @@ export class KnowledgeEmbeddingService {
       request_dimensions: requestDimensions,
       compare: fallbackProvider && fallbackModel ? { provider_id: fallbackProvider, model: fallbackModel } : null,
     };
+  }
+
+  /**
+   * Та же цель, что у поиска: модель, размерность и `dimensions` версии;
+   * основной провайдер, при отказе — запасной (так считает роутер).
+   * Агент недоступен — null: неизвестно, а не «не работает».
+   */
+  private async activeCheck(version: EmbeddingVersionView): Promise<ActiveEmbeddingCheck | null> {
+    const cached = this.activeChecked;
+    if (cached && cached.result.version === version.version && this.now() - cached.at < ACTIVE_CHECK_TTL_MS) return cached.result;
+    const attempt = async (providerId: string, model: string): Promise<string | null> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<ProbeResult>((resolve) => {
+        timer = setTimeout(() => resolve({ ok: false, error_code: "embedding_timeout" }), ACTIVE_CHECK_TIMEOUT_MS);
+      });
+      try {
+        const probe = await Promise.race([this.runProbe({
+          provider_id: providerId, model, dimension: version.dimension, request_dimensions: version.request_dimensions, compare: null,
+        }), timeout]);
+        if (probe.ok === true) return null;
+        return typeof probe.error_code === "string" && /^[a-z_]{1,64}$/u.test(probe.error_code) ? probe.error_code : "embedding_unavailable";
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+    let primary: string | null;
+    let fallback: string | null = "embedding_unavailable";
+    try {
+      primary = await attempt(version.provider_id, version.model);
+      if (primary && version.fallback_provider_id && version.fallback_model) {
+        fallback = await attempt(version.fallback_provider_id, version.fallback_model);
+      }
+    } catch {
+      return null;
+    }
+    const result: ActiveEmbeddingCheck = {
+      version: version.version,
+      ok: primary === null || fallback === null,
+      error_code: primary,
+      fallback: primary !== null && fallback === null,
+      checked_at: new Date(this.now()).toISOString(),
+    };
+    this.activeChecked = { at: this.now(), result };
+    return result;
   }
 
   private async runProbe(input: ProbeInput): Promise<ProbeResult> {

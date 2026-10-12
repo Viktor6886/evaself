@@ -39,6 +39,7 @@ export type EmbeddingErrorCode =
   | "embedding_provider_missing"
   | "embedding_protocol_unsupported"
   | "embedding_auth"
+  | "embedding_payment_required"
   | "embedding_not_found"
   | "embedding_bad_request"
   | "embedding_rate_limited"
@@ -58,6 +59,7 @@ const MESSAGES: Record<EmbeddingErrorCode, string> = {
   embedding_provider_missing: "Провайдер embeddings не найден или выключен",
   embedding_protocol_unsupported: "Провайдер не OpenAI-совместимый: embeddings считаются только через /embeddings",
   embedding_auth: "Провайдер отклонил ключ",
+  embedding_payment_required: "У провайдера закончились средства или исчерпан лимит расходов",
   embedding_not_found: "Модель или адрес embeddings у провайдера не найдены",
   embedding_bad_request: "Провайдер отклонил запрос: модель не считает embeddings или не принимает параметр dimensions",
   embedding_rate_limited: "Провайдер ограничил частоту запросов",
@@ -73,6 +75,9 @@ function fail(code: EmbeddingErrorCode, detail?: string): EmbeddingError {
 
 function codeForStatus(status: number): EmbeddingErrorCode {
   if (status === 401 || status === 403) return "embedding_auth";
+  // 402 — кончились кредиты (так отвечает OpenRouter). Под «отклонил
+  // запрос» это читалось как неверная модель, и искали не там.
+  if (status === 402) return "embedding_payment_required";
   if (status === 404) return "embedding_not_found";
   if (status === 429) return "embedding_rate_limited";
   if (status >= 500) return "embedding_unavailable";

@@ -63,8 +63,11 @@ const outbox = { record: recordJobIntent };
 const indexJobs = knowledgeIndexScheduler(outbox, () => true);
 
 let beforeEmbeddingResponse = async () => {};
+/** Модель, у провайдера которой «кончились кредиты»: 402, как у OpenRouter. */
+let deadModel = null;
 const fixtureFetch = async (_url, init) => {
   const body = JSON.parse(init.body);
+  if (body.model === deadModel) return new Response(JSON.stringify({ error: { message: "Insufficient credits" } }), { status: 402 });
   const dimension = body.model === "ci-psychology-8" ? 8 : body.model === "ci-psychology-12" ? 12 : 0;
   assert.ok(dimension, "используется модель конкретной версии");
   await beforeEmbeddingResponse();
@@ -80,10 +83,11 @@ const router = new LlmRouterClient("http://ci-router", "ci", async (_url, init) 
   const result = await embedding.embed(body.model, body.input);
   return new Response(JSON.stringify({ data: result.vectors.map((vector, index) => ({ index, embedding: vector })) }));
 });
-const versions = new KnowledgeEmbeddingService(pool, { request: async (_path, init) => {
+const versionsAgent = { request: async (_path, init) => {
   const b = JSON.parse(init.body);
   return await embedding.probe({ providerId: b.provider_id, model: b.model, dimension: b.dimension, requestDimensions: b.request_dimensions });
-} });
+} };
+const versions = new KnowledgeEmbeddingService(pool, versionsAgent);
 const uploadSettingKey = "runtime.knowledge_uploads_enabled";
 const originalUploadSetting = (await pool.query("SELECT value_json FROM system_settings WHERE key=$1", [uploadSettingKey])).rows[0];
 const uploadOptions = { uploadsRoot: root, store, uploadsEnabled: async () => await readKnowledgeUploadsSetting(pool, false), uploadsWorkerEnabled: true };
@@ -286,6 +290,32 @@ try {
   await maintenance.rejectRebuild(stalled, "job_deadline_exceeded");
   assert.deepEqual(await secondState(), { status: "building", error_code: null }, "отказ старой порции не трогает новое построение");
   await build(second.version);
+  // У провайдера включённой модели кончились кредиты, новая модель
+  // построена, но не переключена. Раньше каждый поиск шёл одними словами,
+  // документ, загруженный в это время, не попадал и в новую версию, а её
+  // включение отклоняла проверка полноты — ни прежней модели, ни новой.
+  const lateDoc = randomUUID(); ownDocuments.push(lateDoc);
+  await admin(async () => {
+    await pool.query("INSERT INTO knowledge_documents(id,user_id,name,mime,content_hash,status,chunk_count) VALUES($1,$2,'Загружено без кредитов','text/plain','ci-late','ready',1)", [lateDoc, ownUsers[0]]);
+    await pool.query("INSERT INTO knowledge_chunks(document_id,user_id,product_verified,ordinal,content,content_hash,embedding,embedding_model) VALUES($1,$2,false,0,'Прокрастинация: запись без кредитов CI','ci-late',NULL,'router')", [lateDoc, ownUsers[0]]);
+  });
+  deadModel = "ci-psychology-8";
+  try {
+    const rescued = await search.search(ownUsers[0], question);
+    assert.equal(rescued.degraded, false, "поиск по смыслу идёт через построенную новую модель");
+    assert.equal(rescued.diagnostics.vectorStandby, second.version);
+    assert.ok(rescued.hits.some((hit) => hit.matched.includes("vector")));
+    await assert.rejects(() => indexer.index(lateDoc, ownUsers[0]), (error) => error.code === "embedding_payment_required");
+    assert.equal(await store.documentPoints("private", second.version, lateDoc), 1, "документ попал в новую версию");
+    assert.equal(await store.documentPoints("private", first.version, lateDoc), 0);
+    const check = (await new KnowledgeEmbeddingService(pool, versionsAgent).overview()).active_check;
+    assert.deepEqual([check.version, check.ok, check.error_code], [first.version, false, "embedding_payment_required"], "панель видит, что модель не отвечает");
+  } finally {
+    deadModel = null;
+  }
+  // Кредиты вернулись: повтор задания дописывает и прежнюю версию.
+  assert.equal((await indexer.index(lateDoc, ownUsers[0])).status, "ready");
+  assert.equal(await store.documentPoints("private", first.version, lateDoc), 1);
   // Документ, загруженный, пока индексировать было некуда, оставался
   // «ждёт индексации» и после построения версии. Полная проверка при
   // активации доказывает, что его векторы в Qdrant есть, — она и закрывает
@@ -363,7 +393,7 @@ try {
   const fallback = await tool.execute({ query }, { userId: ownUsers[0] });
   assert.equal(fallback.degraded, true);
   assert.ok(fallback.results.some((hit) => hit.content.includes("маленький первый шаг")));
-  console.log("PASS: registry/probe/persist/build/outbox/first activation/K7/rollback/upload setting persistence/live admission/semantic tool/citations/tenant hydration/disabled collection/paused Qdrant fallback/recovery/missing collection fallback");
+  console.log("PASS: registry/probe/persist/build/outbox/first activation/K7/dead provider standby/rollback/upload setting persistence/live admission/semantic tool/citations/tenant hydration/disabled collection/paused Qdrant fallback/recovery/missing collection fallback");
   console.log("Embedding upstream and AV are fixtures; autonomous Letta tool choice and final prose require the documented live canary.");
 } finally {
   if (originalUploadSetting) await setUploads(originalUploadSetting.value_json);
