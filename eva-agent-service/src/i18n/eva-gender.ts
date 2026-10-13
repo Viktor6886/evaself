@@ -240,7 +240,7 @@ function shortFormIsSelf(following: string): boolean {
   return !lower || SELF_FOLLOWERS.has(lower) || INFINITIVE.test(lower);
 }
 
-const CLAUSE_TOKEN = /([,—–:;(])|([а-яёА-ЯЁ-]+)/gu;
+const CLAUSE_TOKEN = /([,—–:;(]|\p{Extended_Pictographic})|([а-яёА-ЯЁ-]+)/gu;
 
 const CYRILLIC_WORD = /^[а-яёА-ЯЁ-]+$/u;
 
@@ -341,19 +341,19 @@ const NEXT_WORD = /[\s,—-]*([а-яёА-ЯЁ-]+)/yu;
  * самые частые у Евы — оставались мужскими. Тире и запятая сюда не
  * входят: «— Понял, — сказал он» — чужая реплика в диалоге.
  */
-const OPENER = /(^|[.!?…\n]|\p{Extended_Pictographic})([^\p{L}\p{N}\n,:;—–-]*)([А-ЯЁа-яё]+)/gu;
+const OPENER = /(^|[.!?…\n])([^\p{L}\p{N}\n,:;—–-]*)([А-ЯЁа-яё]+)/gu;
 
 /**
  * Слова, открывающие фразу.
  *
- * Emoji разделяет фразы, только когда за ним заглавная буква: «Поняла
- * тебя 💛 Записала на завтра». За строчной оно стоит внутри фразы —
- * «Иван 🙂 понял, что…», — и подлежащее там уже названо.
+ * Emoji посреди строки фразу не открывает: в «Иван: ✅ Сделал задачу»
+ * подлежащее названо до значка, и заглавная буква после него этого не
+ * меняет. Ряд, который начала сама Ева, — «Поняла тебя 💛 Записала», —
+ * продолжает `continueClause`.
  */
 function* sentenceOpeners(input: string): Generator<{ at: number; word: string }> {
   for (const match of input.matchAll(OPENER)) {
-    const [whole, boundary = "", , word = ""] = match;
-    if (/\p{Extended_Pictographic}/u.test(boundary) && word[0] === word[0]!.toLocaleLowerCase("ru")) continue;
+    const [whole, , , word = ""] = match;
     yield { at: (match.index ?? 0) + whole.length - word.length, word };
   }
 }
@@ -470,7 +470,9 @@ export function feminizeSelfReference(input: string): GenderFix {
       const token = tokens[index]!;
       const punctuation = token[1];
       if (punctuation) {
-        if (punctuation !== ",") return;
+        // Emoji в ряду Евы разделяет сказуемые, как запятая: «Поняла
+        // тебя 💛 Записала на завтра».
+        if (punctuation !== "," && !/\p{Extended_Pictographic}/u.test(punctuation)) return;
         // После «знаю/вижу» запятая часто начинает косвенный вопрос:
         // «я знаю, готов результат или нет». Нужен явный союз.
         if (conjunctionOnly && !/^\s*(?:и|но)\s/u.test(segment.slice((token.index ?? 0) + 1))) return;
@@ -586,7 +588,14 @@ export function feminizeSelfReference(input: string): GenderFix {
     // «Понял-принял»: парная реплика через дефис — обе половины о Еве.
     const paired = /^-([А-ЯЁа-яё]+)/u.exec(after)?.[1] ?? "";
     if (paired && OPENERS.has(word.toLocaleLowerCase("ru")) && OPENERS.has(paired.toLocaleLowerCase("ru"))) {
-      if (sentenceEnd(input, wordAt) === "?") continue;
+      // «Понял-принял он», «…Иван»: подлежащее после пары — чужое.
+      const tail = input.slice(wordAt + word.length + 1 + paired.length);
+      const afterPair = /^\s*([А-ЯЁа-яё-]+)/u.exec(tail)?.[1] ?? "";
+      const pairClause = tail.split(/[,.!?…\n;:—–]/u)[0] ?? "";
+      if (sentenceEnd(input, wordAt) === "?" || !isSelfPastPredicate(paired, afterPair)
+        || pairClause.split(/\s+/u).some((token) => ANIMATE_SUBJECTS.has(token.toLocaleLowerCase("ru")))) {
+        continue;
+      }
       add(wordAt, word);
       add(wordAt + word.length + 1, paired);
       continue;

@@ -202,8 +202,22 @@ test("подтверждения не трогают чужие слова, за
 });
 
 test("вопрос человеку после emoji согласуется с его родом, а не с Евой", () => {
-  assert.equal(normalizeReplyGender("Отлично 👍 Готов?", "feminine").text, "Отлично 👍 Готова?");
-  assert.equal(normalizeReplyGender("Отлично 👍 Готов?", null).text, "Отлично 👍 Готов?");
+  assert.equal(normalizeReplyGender("Отлично! 👍 Готов?", "feminine").text, "Отлично! 👍 Готова?");
+  assert.equal(normalizeReplyGender("Отлично! 👍 Готов?", null).text, "Отлично! 👍 Готов?");
+});
+
+test("emoji и парная реплика не отменяют чужое подлежащее", () => {
+  // Ревью Codex #421: значок посреди строки — не граница фразы, а у
+  // «понял-принял» подлежащее может стоять после пары.
+  for (const input of [
+    "Иван: ✅ Сделал задачу.",
+    "Клиент 👍 Записал заказ.",
+    "Понял-принял он наконец.",
+    "Понял-принял Иван.",
+  ]) {
+    assert.deepEqual(feminizeSelfReference(input), { text: input, corrections: [] }, input);
+  }
+  assert.equal(feminizeSelfReference("Понял-принял наконец.").text, "Поняла-приняла наконец.");
 });
 
 test("графа документа и глагол с подлежащим после него не правятся", () => {
