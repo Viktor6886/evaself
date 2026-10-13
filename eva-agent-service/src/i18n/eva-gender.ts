@@ -52,6 +52,7 @@ import {
   USER_QUESTION_OPENERS,
   SELF_FOLLOWERS,
   INFINITIVE,
+  NEVER_MASCULINE_SUBJECTS,
 } from "./eva-gender-lexicon.js";
 import { selfRoleEdits } from "./eva-self-role.js";
 
@@ -105,7 +106,7 @@ export function isSelfPastPredicate(word: string, next: string): boolean {
     if (next.toLocaleLowerCase("ru") === "ли") return false;
     // «Позвонил Иван», «Сделал он» — подлежащее стоит после глагола.
     if (next[0] !== next[0]!.toLocaleLowerCase("ru")) return false;
-    if (SUBJECT_PRONOUNS.has(next.toLocaleLowerCase("ru"))) return false;
+    if (isSubjectPronoun(next)) return false;
     // «Стамбул встретил», «Кабул остался»: если сразу за словом стоит
     // глагол прошедшего времени, само слово — подлежащее, а не глагол.
     // Словарём топонимы и имена на «-ул», «-ал» не перечислить.
@@ -125,8 +126,20 @@ export function isSelfPastPredicate(word: string, next: string): boolean {
   }
   if (OPENERS.has(lower)) return true;
   if (lower.length < 5 || !CYRILLIC_WORD.test(word)) return false;
-  if (!/[аяиеуы]л$/u.test(lower)) return false;
+  // «Провёл анализ», «Подвёл итоги» — тот же глагол, что «проверил».
+  if (!/[аяиеуыё]л$/u.test(lower)) return false;
   return !NOUNS_LIKE_PAST.has(lower) && !INVERTED_SUBJECT_VERBS.has(lower);
+}
+
+/**
+ * Местоимение, которое может быть подлежащим глагола мужского рода.
+ *
+ * «Сделал он» — подлежащее чужое; «Запомнил это» — «это» дополнение:
+ * подлежащим оно потребовало бы «запомнило».
+ */
+function isSubjectPronoun(word: string): boolean {
+  const lower = word.toLocaleLowerCase("ru");
+  return SUBJECT_PRONOUNS.has(lower) && !NEVER_MASCULINE_SUBJECTS.has(lower);
 }
 
 /**
@@ -142,7 +155,7 @@ function isSelfContinuation(word: string, next: string): boolean {
   // «…, и пришёл он»: подлежащее за сказуемым — чужое, даже когда
   // форма нерегулярная и в общем правиле не проверяется.
   if (next && (next.toLocaleLowerCase("ru") === "ли"
-    || SUBJECT_PRONOUNS.has(next.toLocaleLowerCase("ru"))
+    || isSubjectPronoun(next)
     || next[0] !== next[0]!.toLocaleLowerCase("ru"))) return false;
   if (IRREGULAR.has(lower) || isSelfPastPredicate(word, next)) return true;
   return /лся$/u.test(lower) && isSelfPastPredicate(word.slice(0, -2), next);
@@ -192,8 +205,33 @@ function determinerAgrees(rest: string): boolean {
 function isShortForm(word: string): boolean {
   const lower = word.toLocaleLowerCase("ru");
   const known = IRREGULAR.has(lower) || REVERSE_IRREGULAR.has(lower);
+  // «Перенёс», «стёр» — прошедшее время, а не краткая форма.
   return known && !describesOther(lower) && !DETERMINERS.has(lower)
-    && !/(?:[лгзк]|ла|ся|сь)$/u.test(lower);
+    && !/(?:[лгзкср]|ла|ся|сь)$/u.test(lower);
+}
+
+/**
+ * Отчёт о сделанном перед двоеточием или тире: «Записала: завтра в 10:00»,
+ * «Поняла — давай разберём». Так Ева подтверждает задачу и напоминание
+ * чаще всего, а правка принимала эту форму за заголовок и молчала.
+ *
+ * Заголовок с тем же знаком — «Сигнал — это…», «Михаил: привет» —
+ * существительное или имя; глагол из закрытого списка реплик о себе
+ * заголовком не бывает. Краткие формы и «был» исключены: «Готов: отчёт»,
+ * «Был: 80 кг» — о предмете, а не о Еве.
+ */
+/**
+ * Графа документа: за знаком — имя или пустое поле. «Подготовил: Иванов
+ * И.И.», «Составил: ________» — подпись в составленном Евой документе,
+ * а не её реплика. Проверяется по исходному тексту: в разборе
+ * подчёркивания уже заменены пробелами.
+ */
+const DOCUMENT_FIELD =
+  /^\s*[—:–-]\s*(?:_{2,}|[А-ЯЁ]\.\s?(?:[А-ЯЁ]\.\s?)?[А-ЯЁ][а-яё]+|[А-ЯЁ][а-яё]+\s+[А-ЯЁ](?:\.|[а-яё]+))/u;
+
+function reportsAction(word: string): boolean {
+  const lower = word.toLocaleLowerCase("ru");
+  return OPENERS.has(lower) && !isShortForm(word) && lower !== "был" && lower !== "начал";
 }
 
 /** За краткой формой — её дополнение, а не подлежащее: «готова помочь», «рада за тебя». */
@@ -202,7 +240,7 @@ function shortFormIsSelf(following: string): boolean {
   return !lower || SELF_FOLLOWERS.has(lower) || INFINITIVE.test(lower);
 }
 
-const CLAUSE_TOKEN = /([,—–:;(])|([а-яёА-ЯЁ-]+)/gu;
+const CLAUSE_TOKEN = /([,—–:;(]|\p{Extended_Pictographic})|([а-яёА-ЯЁ-]+)/gu;
 
 const CYRILLIC_WORD = /^[а-яёА-ЯЁ-]+$/u;
 
@@ -211,6 +249,12 @@ export function feminineForm(word: string): string | null {
   const lower = word.toLocaleLowerCase("ru");
   const irregular = IRREGULAR.get(lower);
   if (irregular) return matchCase(word, irregular);
+  // «Понял-принял»: у каждой половины своё окончание. По окончанию
+  // целого слова правилась только вторая — «понял-приняла».
+  if (word.includes("-")) {
+    const parts = word.split("-").map((part) => feminineForm(part));
+    return parts.every(Boolean) ? parts.join("-") : null;
+  }
   if (lower.length < 3 || !CYRILLIC_WORD.test(word)) return null;
   for (const [from, to] of SUFFIXES) {
     if (!lower.endsWith(from)) continue;
@@ -290,8 +334,36 @@ const NEXT_WORD = /[\s,—-]*([а-яёА-ЯЁ-]+)/yu;
  * та же реплика о себе, и без этого она оставалась мужской. Вместо
  * этого отбрасывается предложение-вопрос: «Понял?» и «Готов ли ты?»
  * обращены к человеку, и род в них не её.
+ *
+ * Между границей фразы и словом допускаются emoji, значки и скобки:
+ * «✅ Записал напоминание», «👌 Понял», «(понял)». Раньше слово должно было
+ * стоять вплотную к началу строки, и так оформленные подтверждения —
+ * самые частые у Евы — оставались мужскими. Тире и запятая сюда не
+ * входят: «— Понял, — сказал он» — чужая реплика в диалоге.
  */
-const OPENER = /(^[ \t]*|[.!?\n]\s*)([А-ЯЁа-яё]+)/gu;
+const OPENER = /(^|[.!?…\n])([^\p{L}\p{N}\n,:;—–-]*)([А-ЯЁа-яё]+)/gu;
+
+/**
+ * Слова, открывающие фразу.
+ *
+ * Emoji посреди строки фразу не открывает: в «Иван: ✅ Сделал задачу»
+ * подлежащее названо до значка, и заглавная буква после него этого не
+ * меняет. Ряд, который начала сама Ева, — «Поняла тебя 💛 Записала», —
+ * продолжает `continueClause`.
+ */
+function* sentenceOpeners(input: string): Generator<{ at: number; word: string }> {
+  for (const match of input.matchAll(OPENER)) {
+    const [whole, , , word = ""] = match;
+    yield { at: (match.index ?? 0) + whole.length - word.length, word };
+  }
+}
+
+/**
+ * Между вводным словом и сказуемым — запятая, двоеточие, тире или emoji:
+ * «Хорошо, записала», «Готово: отправила», «Окей 👍 записала». Без знака
+ * вводное читается как обстоятельство, и правило за ним не применяется.
+ */
+const INTERJECTION_GAP = /^((?:\s*(?:[,:—–]|[^\p{L}\p{N}\s.,!?…:;—–-]))+\s*)([А-ЯЁа-яё]+)/u;
 
 /** Продолжение однородного ряда: «, записала», « и решила». */
 const SERIES = /[\s,]*(?:и[\s]+)?([а-яёА-ЯЁ-]+)/yu;
@@ -398,7 +470,9 @@ export function feminizeSelfReference(input: string): GenderFix {
       const token = tokens[index]!;
       const punctuation = token[1];
       if (punctuation) {
-        if (punctuation !== ",") return;
+        // Emoji в ряду Евы разделяет сказуемые, как запятая: «Поняла
+        // тебя 💛 Записала на завтра».
+        if (punctuation !== "," && !/\p{Extended_Pictographic}/u.test(punctuation)) return;
         // После «знаю/вижу» запятая часто начинает косвенный вопрос:
         // «я знаю, готов результат или нет». Нужен явный союз.
         if (conjunctionOnly && !/^\s*(?:и|но)\s/u.test(segment.slice((token.index ?? 0) + 1))) return;
@@ -412,7 +486,11 @@ export function feminizeSelfReference(input: string): GenderFix {
         continue;
       }
       if (joined && PREDICATE_MODIFIERS.has(lower)) continue;
-      if (CLAUSE_BREAKERS.has(lower) || SUBJECT_PRONOUNS.has(lower)) return;
+      if (CLAUSE_BREAKERS.has(lower)) return;
+      // «Записала это и поставила напоминание»: до союза «это» и «всё» —
+      // дополнение сказуемого. Подлежащим они становятся только после
+      // союза или запятой: «…, и это помогло».
+      if (SUBJECT_PRONOUNS.has(lower) && (joined || isSubjectPronoun(lower))) return;
       if (!joined) continue;
       const next = tokens[index + 1]?.[2] ?? "";
       const at = from + (token.index ?? 0);
@@ -489,18 +567,15 @@ export function feminizeSelfReference(input: string): GenderFix {
     }
   }
 
-  for (const match of input.matchAll(OPENER)) {
-    const start = match.index ?? 0;
-    const [, lead = "", opening = ""] = match;
-    let word = opening;
-    let wordAt = start + lead.length;
+  for (const opener of sentenceOpeners(input)) {
+    let { word, at: wordAt } = opener;
     if (guarded(wordAt) || handedOver(wordAt)) continue;
     // «Да, уже проверил», «Пока не уверен»: несколько вводных подряд.
     for (let step = 0; step < MAX_SELF_FILLERS; step += 1) {
       const lower = word.toLocaleLowerCase("ru");
       const rest = input.slice(wordAt + word.length);
-      const shifted = LEADING_INTERJECTIONS.has(lower) && /^\s*,/u.test(rest)
-        ? /^(\s*,\s*)([А-ЯЁа-яё]+)/u.exec(rest)
+      const shifted = LEADING_INTERJECTIONS.has(lower) && INTERJECTION_GAP.test(rest)
+        ? INTERJECTION_GAP.exec(rest)
         : (LEADING_ADVERBS.has(lower) || PREDICATE_MODIFIERS.has(lower))
           ? /^(\s+)([А-ЯЁа-яё]+)/u.exec(rest)
           : null;
@@ -509,9 +584,26 @@ export function feminizeSelfReference(input: string): GenderFix {
       word = shifted[2]!;
     }
     if (guarded(wordAt)) continue;
-    // Заголовок или определение («Сигнал — это…», «Итог:») — не реплика.
     const after = input.slice(wordAt + word.length);
-    if (/^\s*[—:–-]/u.test(after)) continue;
+    // «Понял-принял»: парная реплика через дефис — обе половины о Еве.
+    const paired = /^-([А-ЯЁа-яё]+)/u.exec(after)?.[1] ?? "";
+    if (paired && OPENERS.has(word.toLocaleLowerCase("ru")) && OPENERS.has(paired.toLocaleLowerCase("ru"))) {
+      // «Понял-принял он», «…Иван»: подлежащее после пары — чужое.
+      const tail = input.slice(wordAt + word.length + 1 + paired.length);
+      const afterPair = /^\s*([А-ЯЁа-яё-]+)/u.exec(tail)?.[1] ?? "";
+      const pairClause = tail.split(/[,.!?…\n;:—–]/u)[0] ?? "";
+      if (sentenceEnd(input, wordAt) === "?" || !isSelfPastPredicate(paired, afterPair)
+        || pairClause.split(/\s+/u).some((token) => ANIMATE_SUBJECTS.has(token.toLocaleLowerCase("ru")))) {
+        continue;
+      }
+      add(wordAt, word);
+      add(wordAt + word.length + 1, paired);
+      continue;
+    }
+    // Заголовок или определение («Сигнал — это…», «Итог:») — не реплика.
+    // Отчёт о сделанном с тем же знаком — реплика: «Записал: завтра в 10».
+    if (/^\s*[—:–-]/u.test(after)
+      && (!reportsAction(word) || DOCUMENT_FIELD.test(original.slice(wordAt + word.length)))) continue;
     // Подлежащее после глагола стоит без запятой: «Сделал он». После
     // запятой начинается другое: «Проверила, всё ли работает».
     const following = /^\s*([А-ЯЁа-яё-]+)/u.exec(after)?.[1] ?? "";
@@ -638,10 +730,7 @@ export function alignUserReference(
 
   // Без «ты» безопасен только вопрос: «Поняла?», «Готова продолжить?».
   // Утверждение «Понял.» по-прежнему относится к самой Еве.
-  for (const match of input.matchAll(OPENER)) {
-    const start = match.index ?? 0;
-    const [, lead = "", word = ""] = match;
-    const at = start + lead.length;
+  for (const { at, word } of sentenceOpeners(input)) {
     if (guarded(at) || sentenceEnd(input, at) !== "?") continue;
     if (!USER_QUESTION_OPENERS.has(word.toLocaleLowerCase("ru"))) continue;
     add(at, word);
