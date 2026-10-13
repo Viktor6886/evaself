@@ -5,9 +5,11 @@
 
 ## Женский род Евы: подтверждения задач, порча слов, записи в память — 2026-10-13
 
-Ветка: `ccr-2d60c762-kmwfdj`. Статус: реализация и локальные проверки
-завершены; PR [#421](https://github.com/Viktor6886/evaself/pull/421), CI и
-независимое ревью.
+Ветка: `ccr-2d60c762-kmwfdj`. Статус: выполнен — PR
+[#421](https://github.com/Viktor6886/evaself/pull/421), CI зелёный,
+независимое ревью — три «да» (итог комментарием в PR), замечания Codex
+исправлены, слияние в main через PR #421. Флага нет; откат — `git revert`
+коммита слияния.
 
 Жалоба: Ева снова иногда пишет о себе «понял», «записал». Разбор причин:
 
@@ -33,6 +35,9 @@
   необязательные замечания: графа документа («Подготовил: Иванов И.И.»,
   «Составил: ____») не правится; «Пришел ответ», «Прошел месяц» без «ё» —
   подлежащее после глагола, не Ева.
+- [x] Ревью Codex (два P2): emoji посреди строки больше не открывает
+  фразу («Иван: ✅ Сделал задачу»), ряд самой Евы через emoji продолжает
+  `continueClause`; у «Понял-принял» проверяется подлежащее после пары.
 
 Проверка эквивалента (правило 20): новых модулей, таблиц и реестров нет —
 изменены правка `eva-gender.ts`, её словари и системный промпт. Флага нет:
@@ -41,7 +46,8 @@
 Проверки (2026-10-13):
 
 ```
-eva-agent-service: node --test test/*.test.ts → PASS (1941, 0 fail, 8 skip — нужен PostgreSQL)
+eva-agent-service: node --test test/*.test.ts → PASS (1942, 0 fail, 8 skip — нужен PostgreSQL)
+CI PR #421 (b22e5d8) → PASS
 eva-agent-service: npm run lint → PASS; npm run typecheck → PASS
 test/eva-*.test.ts, persona-ux, letta, turn-lifecycle, locale, canonical-context, persona-sync → PASS (285)
 assert-tenant-scope.py, assert-admin-route-access.py, assert-env-plumbing.py, assert-doc-paths.py → PASS
