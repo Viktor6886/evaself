@@ -220,6 +220,15 @@ function isShortForm(word: string): boolean {
  * заголовком не бывает. Краткие формы и «был» исключены: «Готов: отчёт»,
  * «Был: 80 кг» — о предмете, а не о Еве.
  */
+/**
+ * Графа документа: за знаком — имя или пустое поле. «Подготовил: Иванов
+ * И.И.», «Составил: ________» — подпись в составленном Евой документе,
+ * а не её реплика. Проверяется по исходному тексту: в разборе
+ * подчёркивания уже заменены пробелами.
+ */
+const DOCUMENT_FIELD =
+  /^\s*[—:–-]\s*(?:_{2,}|[А-ЯЁ]\.\s?(?:[А-ЯЁ]\.\s?)?[А-ЯЁ][а-яё]+|[А-ЯЁ][а-яё]+\s+[А-ЯЁ](?:\.|[а-яё]+))/u;
+
 function reportsAction(word: string): boolean {
   const lower = word.toLocaleLowerCase("ru");
   return OPENERS.has(lower) && !isShortForm(word) && lower !== "был" && lower !== "начал";
@@ -584,7 +593,8 @@ export function feminizeSelfReference(input: string): GenderFix {
     }
     // Заголовок или определение («Сигнал — это…», «Итог:») — не реплика.
     // Отчёт о сделанном с тем же знаком — реплика: «Записал: завтра в 10».
-    if (/^\s*[—:–-]/u.test(after) && !reportsAction(word)) continue;
+    if (/^\s*[—:–-]/u.test(after)
+      && (!reportsAction(word) || DOCUMENT_FIELD.test(original.slice(wordAt + word.length)))) continue;
     // Подлежащее после глагола стоит без запятой: «Сделал он». После
     // запятой начинается другое: «Проверила, всё ли работает».
     const following = /^\s*([А-ЯЁа-яё-]+)/u.exec(after)?.[1] ?? "";

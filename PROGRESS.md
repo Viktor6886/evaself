@@ -29,6 +29,11 @@
   заметки) стоит в каждом ходе. Системный промпт теперь требует женского
   рода и в этих записях.
 
+- [x] Ревью (Sonnet, чистый контекст): да / да / лишних нет. Учтены
+  необязательные замечания: графа документа («Подготовил: Иванов И.И.»,
+  «Составил: ____») не правится; «Пришел ответ», «Прошел месяц» без «ё» —
+  подлежащее после глагола, не Ева.
+
 Проверка эквивалента (правило 20): новых модулей, таблиц и реестров нет —
 изменены правка `eva-gender.ts`, её словари и системный промпт. Флага нет:
 это исправление существующего выходного барьера, как #380.
@@ -36,7 +41,7 @@
 Проверки (2026-10-13):
 
 ```
-eva-agent-service: node --test test/*.test.ts → PASS (1940, 0 fail, 8 skip — нужен PostgreSQL)
+eva-agent-service: node --test test/*.test.ts → PASS (1941, 0 fail, 8 skip — нужен PostgreSQL)
 eva-agent-service: npm run lint → PASS; npm run typecheck → PASS
 test/eva-*.test.ts, persona-ux, letta, turn-lifecycle, locale, canonical-context, persona-sync → PASS (285)
 assert-tenant-scope.py, assert-admin-route-access.py, assert-env-plumbing.py, assert-doc-paths.py → PASS
