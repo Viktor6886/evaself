@@ -245,6 +245,7 @@ function renderKnowledgeEmbedding() {
   knowledgeRender($("#knowledge-active-embedding"), active ? `<dl class="knowledge-summary">
     ${field("Модель поиска по смыслу", `v${active.version} · ${active.model} · ${active.dimension} · ${active.provider_name || active.provider_id}`)}
     ${field("Состояние модели", `${KNOWLEDGE_VERSION_STATUS[active.status]}${active.building ? " · перестраивается" : ""}${knowledgeActiveDead() ? ` · не отвечает: ${knowledgeBuildError(knowledgeActiveDead().error_code)}` : ""}`)}
+    ${field("Запасной провайдер", active.fallback_model ? `${active.fallback_provider_name || active.fallback_provider_id} · ${active.fallback_model}${k.embeddings?.active_check?.fallback ? " · сейчас считает он" : ""}` : "нет")}
   </dl>` : "");
   const editable = knowledgeEditable();
   $("#knowledge-runtime-editor").hidden = !editable;
@@ -252,10 +253,54 @@ function renderKnowledgeEmbedding() {
   renderKnowledgeSetup();
   if (!editable) {
     $("#knowledge-embedding-editor").hidden = true;
+    $("#knowledge-fallback-editor").hidden = true;
     return;
   }
   renderKnowledgeRuntime();
   renderKnowledgeModelForm();
+  renderKnowledgeFallback();
+}
+
+/**
+ * Запасной провайдер включённой модели — та же модель у другого
+ * поставщика. Индекс остаётся: сервер сверяет векторы модели с теми, что
+ * уже лежат в Qdrant, и другую модель не примет. Форма пересоздаётся,
+ * только когда меняется версия, её запасной или список провайдеров: опрос
+ * раз в 5 секунд введённое не стирает.
+ */
+function renderKnowledgeFallback() {
+  const k = state.knowledge;
+  const editor = $("#knowledge-fallback-editor");
+  const active = knowledgeActiveVersion();
+  const providers = k.embeddings?.providers || [];
+  editor.hidden = !active;
+  if (!active) { editor.innerHTML = ""; editor.dataset.form = ""; return; }
+  const dead = !!knowledgeActiveDead();
+  const key = JSON.stringify([active.version, active.fallback_provider_id, active.fallback_model, dead, providers.map((p) => p.id)]);
+  if (editor.dataset.form !== key) {
+    editor.dataset.form = key;
+    const selected = active.fallback_provider_id || providers.find((p) => p.id !== active.provider_id)?.id || "";
+    editor.innerHTML = `<details class="knowledge-advanced" id="knowledge-fallback" ${dead ? "open" : ""}>
+      <summary>Запасной провайдер модели v${active.version}</summary>
+      <p class="block-caption">Та же модель у другого поставщика — например, text-embedding-3-small напрямую у OpenAI вместо OpenRouter. Индекс остаётся: сервер сверит векторы модели с векторами, которые уже лежат в Qdrant, и примет только то же пространство. Другой модели нужна новая версия — «Сменить модель».</p>
+      <form id="knowledge-fallback-form">
+        <div class="knowledge-fields">
+          <label>Провайдер <select name="fallback_provider_id" required><option value="">Выберите провайдера</option>${providers.map((p) =>
+            `<option value="${escapeHtml(p.id)}" ${p.id === selected ? "selected" : ""}>${escapeHtml(p.name)}</option>`).join("")}</select></label>
+          <label>Модель <input name="fallback_model" value="${escapeHtml(active.fallback_model || active.model)}" required maxlength="200"></label>
+        </div>
+        <div class="knowledge-actions">
+          <button class="button primary" type="submit" id="knowledge-fallback-save">Проверить и подключить</button>
+          ${active.fallback_model ? '<button class="button ghost" type="button" id="knowledge-fallback-remove">Убрать запасного</button>' : ""}
+        </div>
+        <p id="knowledge-fallback-result" aria-live="polite"></p>
+      </form>
+    </details>`;
+  }
+  const result = $("#knowledge-fallback-result");
+  result.className = k.fallbackError ? "warn-value" : "block-caption";
+  result.textContent = k.fallbackBusy || k.fallbackError || "";
+  editor.querySelectorAll("button").forEach((button) => { button.disabled = !!k.fallbackBusy; });
 }
 
 /**
@@ -342,7 +387,7 @@ function renderKnowledgeSetup() {
   const deadNote = () => {
     const reason = `Модель v${active.version} не отвечает: ${escapeHtml(knowledgeBuildError(dead.error_code))}.`;
     if (setup.index === "done" && candidate) return `<span class="status-pill state-yellow">на новой модели</span> ${reason} Пока вы не переключите, Ева ищет по смыслу через построенную модель v${candidate.version} — переключите её в шаге «Включение».`;
-    const then = !candidate ? "Подключите модель у работающего провайдера: «Сменить модель» в первом шаге."
+    const then = !candidate ? "Та же модель есть у другого поставщика — подключите его запасным в «Состоянии базы знаний», без переиндексации; другая модель — «Сменить модель» в первом шаге."
       : setup.index === "busy" ? "Новая модель строится — когда построится, Ева начнёт искать по ней." : next;
     return `<span class="status-pill state-red">не работает</span> ${reason} Ева ищет только по словам. ${then}`;
   };

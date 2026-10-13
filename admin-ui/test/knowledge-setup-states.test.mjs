@@ -253,6 +253,62 @@ test("у провайдера включённой модели кончилис
   } finally { await rescued.close(); }
 });
 
+test("та же модель у другого поставщика: запасной провайдер подключается к построенной версии без переиндексации", async () => {
+  const dead = { version: 2, ok: false, error_code: "embedding_payment_required", fallback: false, checked_at: "2026-10-13T10:00:00Z" };
+  let saved = null;
+  let panel;
+  const panelRef = () => panel;
+  // Обзор индекса, как настоящий, полей запасного провайдера не несёт.
+  const { fallback_provider_id: _p, fallback_provider_name: _n, fallback_model: _m, ...indexed } = ACTIVE;
+  panel = await openPanel({ routes: { ...ROUTES, "/settings": LIVE_SETTINGS, ...ACTIVE_ROUTES,
+    "/knowledge/index": { ...INDEX, aliases: { private: 2, global: 2 }, versions: [indexed] },
+    "/knowledge/embeddings": () => ({ ...ACTIVE_ROUTES["/knowledge/embeddings"],
+      versions: [saved ? { ...ACTIVE, fallback_provider_id: "p2", fallback_provider_name: "Jina", fallback_model: "bge-m3" } : ACTIVE],
+      active_check: saved ? { ...dead, ok: true, fallback: true } : dead }),
+    "PUT /knowledge/embeddings/versions/2/fallback": () => {
+      // Обработчик harness вызывается без аргументов; запрос уже записан.
+      const request = panelRef().requests.at(-1);
+      if (request.body.fallback_model !== "bge-m3") {
+        return { __status: 400, __body: { error: { code: "bad_request", message: "Модель даёт другие векторы, чем в индексе этой версии: это другая модель, ей нужна новая версия" } } };
+      }
+      saved = request.body;
+      return { ...ACTIVE, fallback_provider_id: "p2", fallback_model: "bge-m3" };
+    },
+  } });
+  try {
+    await enterKnowledge(panel);
+    assert.match(await panel.page.textContent("#knowledge-setup-status"), /подключите его запасным/);
+    // Модель не отвечает — блок раскрыт сам; по умолчанию — другой провайдер и та же модель.
+    assert.equal(await panel.page.getAttribute("#knowledge-fallback", "open"), "");
+    assert.equal(await panel.page.inputValue('#knowledge-fallback-form [name="fallback_provider_id"]'), "p2");
+    assert.equal(await panel.page.inputValue('#knowledge-fallback-form [name="fallback_model"]'), "bge-m3");
+
+    // Другая модель — сервер отказывает, причина видна у формы.
+    await panel.page.fill('#knowledge-fallback-form [name="fallback_model"]', "other-model");
+    await panel.page.click("#knowledge-fallback-save");
+    await panel.page.waitForFunction(() => document.querySelector("#knowledge-fallback-result")?.textContent.includes("другие векторы"));
+    assert.equal(saved, null);
+
+    await panel.page.fill('#knowledge-fallback-form [name="fallback_model"]', "bge-m3");
+    await panel.page.click("#knowledge-fallback-save");
+    const put = await panel.waitForRequest((r) => r.method === "PUT" && r.path.endsWith("/2/fallback") && r.body.fallback_model === "bge-m3");
+    assert.deepEqual(put.body, { fallback_provider_id: "p2", fallback_model: "bge-m3" });
+    await panel.page.waitForFunction(() => document.querySelector("#knowledge-active-embedding")?.textContent.includes("сейчас считает он"));
+    assert.match(await panel.page.textContent("#knowledge-active-embedding"), /Jina · bge-m3/);
+    assert.match(await panel.page.textContent("#knowledge-setup-status"), /работает/);
+    assert.equal(await panel.page.locator("#knowledge-fallback-remove").count(), 1);
+    assert.deepEqual(panel.errors, []);
+  } finally { await panel.close(); }
+
+  // Читающая роль видит запасного, но не форму.
+  const reader = await openPanel({ role: "viewer", routes: { ...ROUTES, "/settings": LIVE_SETTINGS, ...ACTIVE_ROUTES } });
+  try {
+    await enterKnowledge(reader);
+    assert.match(await reader.page.textContent("#knowledge-active-embedding"), /Запасной провайдер\s*нет/);
+    assert.equal(await reader.page.locator("#knowledge-fallback-form").count(), 0);
+  } finally { await reader.close(); }
+});
+
 test("смена модели при выключенном поиске по смыслу: подтверждение говорит, что включится и он", async () => {
   const next = { ...VERSION, version: 3, model: "openai/text-embedding-3-large", dimension: 3072 };
   const panel = await openPanel({ routes: { ...ROUTES,
