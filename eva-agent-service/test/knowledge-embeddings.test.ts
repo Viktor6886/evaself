@@ -424,6 +424,10 @@ test("запасной провайдер к построенной версии
   space = { ok: true, basis: "index", same_space: false, similarity: 0.42, error_code: null, samples: 3 };
   await assert.rejects(() => service.setFallback("1", { fallback_provider_id: "p2", fallback_model: "bge-m3" }), /другие векторы/u);
   assert.equal(versions[0]!.fallback_model, "text-embedding-3-small");
+  space = { ok: false, basis: "index", same_space: false, similarity: null, error_code: "embedding_dimension_mismatch", samples: 3 };
+  await assert.rejects(() => service.setFallback("1", { fallback_provider_id: "p2", fallback_model: "wide" }), /другие векторы/u);
+  space = { ok: false, basis: "index", same_space: false, similarity: null, error_code: "embedding_auth", samples: 3 };
+  await assert.rejects(() => service.setFallback("1", { fallback_provider_id: "p2", fallback_model: "wide" }), /не ответила/u);
   // Индекс пуст, а основной не ответил — сравнить не с чем.
   space = { ok: false, basis: "primary", same_space: false, similarity: null, error_code: "embedding_payment_required", samples: 0 };
   await assert.rejects(() => service.setFallback("1", { fallback_provider_id: "p2", fallback_model: "m2" }), /сравнить модель не с чем/u);

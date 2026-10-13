@@ -242,11 +242,13 @@ export class KnowledgeEmbeddingService {
         body: JSON.stringify({ provider_id: providerId, model }),
       }) as Record<string, unknown> | null;
       if (check?.ok !== true || check.same_space !== true) {
-        const message = check?.ok !== true
-          ? check?.basis === "primary"
+        // Другая длина вектора — тоже другая модель, а не «не ответила».
+        const otherSpace = check?.ok === true || check?.error_code === "embedding_dimension_mismatch";
+        const message = otherSpace
+          ? "Модель даёт другие векторы, чем в индексе этой версии: это другая модель, ей нужна новая версия"
+          : check?.basis === "primary"
             ? "Индекс версии пуст, а основной провайдер не ответил: сравнить модель не с чем"
-            : "Модель не ответила: проверьте провайдера и имя модели"
-          : "Модель даёт другие векторы, чем в индексе этой версии: это другая модель, ей нужна новая версия";
+            : "Модель не ответила: проверьте провайдера и имя модели";
         throw adminBadRequest(message, { field: "fallback_model", check });
       }
     }
