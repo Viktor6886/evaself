@@ -178,6 +178,26 @@ test("проверка пространства: индекс пуст — ср�
     "версии нет — Qdrant не спрашивается");
 });
 
+test("проверка пространства: неверный запрос — 400; без Qdrant — сравнение с основным", async () => {
+  const { app, seen } = spaceCheckApp({ points: { global: [11], private: [] }, probe: () => ({ ok: true, dimension: 8, compare: { ok: true, similarity: 1, same_space: true } }) });
+  for (const payload of [{ provider_id: "p2" }, { model: "m" }, { provider_id: " ", model: "m" }]) {
+    assert.equal((await app.inject({ method: "POST", url: "/v1/knowledge/embeddings/versions/1/space-check", payload })).statusCode, 400);
+  }
+  assert.equal((await app.inject({ method: "POST", url: "/v1/knowledge/embeddings/versions/x/space-check", payload: { provider_id: "p2", model: "m" } })).statusCode, 400);
+  assert.equal(seen.length, 0);
+
+  const noQdrant = Fastify();
+  const asked: any[] = [];
+  registerKnowledgeRoutes(noQdrant, {
+    router: { probeEmbeddings: async (request) => { asked.push(request); return { ok: true, dimension: 8, compare: { ok: true, similarity: 0.999, same_space: true } }; } },
+    db: { query: async () => ({ rows: [{ provider_id: "p1", model: "m1", dimension: 8, request_dimensions: false }] }), withSystemScope: async () => ({ rows: [] }) } as never,
+    vectors: null,
+  });
+  const response = await noQdrant.inject({ method: "POST", url: "/v1/knowledge/embeddings/versions/1/space-check", payload: { provider_id: "p2", model: "m" } });
+  assert.deepEqual(response.json(), { ok: true, basis: "primary", same_space: true, similarity: 0.999, error_code: null, samples: 0 });
+  assert.equal(asked[0].reference, undefined);
+});
+
 // ---------------------------------------------------------------------
 // Сервис версий в admin-api
 // ---------------------------------------------------------------------
@@ -430,13 +450,32 @@ test("запасной провайдер к построенной версии
   await assert.rejects(() => service.setFallback("1", { fallback_provider_id: "p2", fallback_model: "wide" }), /не ответила/u);
   // Индекс пуст, а основной не ответил — сравнить не с чем.
   space = { ok: false, basis: "primary", same_space: false, similarity: null, error_code: "embedding_payment_required", samples: 0 };
-  await assert.rejects(() => service.setFallback("1", { fallback_provider_id: "p2", fallback_model: "m2" }), /сравнить модель не с чем/u);
+  await assert.rejects(() => service.setFallback("1", { fallback_provider_id: "p2", fallback_model: "m2" }), /Сравнить модель не с чем/u);
 
   // Снять запасного — без проверки.
   probes.length = 0;
   const removed = await service.setFallback("1", { fallback_provider_id: "", fallback_model: "" });
   assert.equal(removed.fallback_provider_id, null);
   assert.equal(probes.length, 0);
+});
+
+test("проверка, начатая до смены запасного, не кэширует устаревший вердикт", async () => {
+  let release: (value: unknown) => void = () => {};
+  let probes = 0;
+  const { service, versions } = adminService((_body, path) => {
+    if (path.endsWith("/space-check")) return { ok: true, basis: "index", same_space: true, similarity: 1, error_code: null, samples: 1 };
+    probes += 1;
+    // Первая проверка активной модели висит, пока её не отпустят.
+    return probes === 2 ? new Promise((resolve) => { release = resolve; }) : { ok: true, dimension: 8, latency_ms: 1 };
+  });
+  await service.createVersion({ provider_id: "p1", model: "m" });
+  versions[0]!.status = "active";
+  const inFlight = service.overview();
+  await service.setFallback("1", { fallback_provider_id: "p2", fallback_model: "m" });
+  release({ ok: false, error_code: "embedding_payment_required" });
+  assert.equal((await inFlight).active_check?.ok, false);
+  await service.overview();
+  assert.equal(probes, 3, "следующий обзор проверяет заново, а не берёт вердикт до смены запасного");
 });
 
 test("запасной провайдер: основной вместо запасного, провайдер вне реестра, половина полей — отказ до проверки", async () => {

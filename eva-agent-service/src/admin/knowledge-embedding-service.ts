@@ -103,6 +103,8 @@ function integer(value: unknown, field: string, min: number, max: number, fallba
 
 export class KnowledgeEmbeddingService {
   private activeChecked: { at: number; result: ActiveEmbeddingCheck } | null = null;
+  /** Растёт при смене запасного: проверка, начатая раньше, свой вердикт не кэширует. */
+  private activeGeneration = 0;
 
   constructor(
     private readonly pool: Pick<pg.Pool, "query">,
@@ -247,7 +249,7 @@ export class KnowledgeEmbeddingService {
         const message = otherSpace
           ? "Модель даёт другие векторы, чем в индексе этой версии: это другая модель, ей нужна новая версия"
           : check?.basis === "primary"
-            ? "Индекс версии пуст, а основной провайдер не ответил: сравнить модель не с чем"
+            ? "Сравнить модель не с чем: в индексе версии нет векторов (или Qdrant не настроен), а основной провайдер не ответил"
             : "Модель не ответила: проверьте провайдера и имя модели";
         throw adminBadRequest(message, { field: "fallback_model", check });
       }
@@ -259,6 +261,7 @@ export class KnowledgeEmbeddingService {
     if (!rows[0]) throw adminNotFound("Версия эмбеддингов не найдена");
     // Проверка активной модели учитывает запасного: прежний вердикт устарел.
     this.activeChecked = null;
+    this.activeGeneration += 1;
     return (await this.versions()).find((row) => row.version === version)!;
   }
 
@@ -303,6 +306,7 @@ export class KnowledgeEmbeddingService {
   private async activeCheck(version: EmbeddingVersionView): Promise<ActiveEmbeddingCheck | null> {
     const cached = this.activeChecked;
     if (cached && cached.result.version === version.version && this.now() - cached.at < ACTIVE_CHECK_TTL_MS) return cached.result;
+    const generation = this.activeGeneration;
     const attempt = async (providerId: string, model: string): Promise<string | null> => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const timeout = new Promise<ProbeResult>((resolve) => {
@@ -335,7 +339,7 @@ export class KnowledgeEmbeddingService {
       fallback: primary !== null && fallback === null,
       checked_at: new Date(this.now()).toISOString(),
     };
-    this.activeChecked = { at: this.now(), result };
+    if (generation === this.activeGeneration) this.activeChecked = { at: this.now(), result };
     return result;
   }
 

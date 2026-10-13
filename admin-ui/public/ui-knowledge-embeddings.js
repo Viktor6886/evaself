@@ -282,7 +282,7 @@ function renderKnowledgeFallback() {
     const selected = active.fallback_provider_id || providers.find((p) => p.id !== active.provider_id)?.id || "";
     editor.innerHTML = `<details class="knowledge-advanced" id="knowledge-fallback" ${dead ? "open" : ""}>
       <summary>Запасной провайдер модели v${active.version}</summary>
-      <p class="block-caption">Та же модель у другого поставщика — например, text-embedding-3-small напрямую у OpenAI вместо OpenRouter. Индекс остаётся: сервер сверит векторы модели с векторами, которые уже лежат в Qdrant, и примет только то же пространство. Другой модели нужна новая версия — «Сменить модель».</p>
+      <p class="block-caption">Та же модель у другого поставщика — например, text-embedding-3-small напрямую у OpenAI вместо OpenRouter. Индекс остаётся: сервер сверит векторы модели с векторами, которые уже лежат в Qdrant, и примет только то же пространство. Для сверки до трёх фрагментов индекса (сначала общей базы) уходят проверяемому провайдеру — как при индексации. Другой модели нужна новая версия — «Сменить модель».</p>
       <form id="knowledge-fallback-form">
         <div class="knowledge-fields">
           <label>Провайдер <select name="fallback_provider_id" required><option value="">Выберите провайдера</option>${providers.map((p) =>

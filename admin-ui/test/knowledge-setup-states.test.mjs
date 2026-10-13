@@ -268,6 +268,7 @@ test("та же модель у другого поставщика: запас�
     "PUT /knowledge/embeddings/versions/2/fallback": () => {
       // Обработчик harness вызывается без аргументов; запрос уже записан.
       const request = panelRef().requests.at(-1);
+      if (request.body.fallback_model === "") return { ...ACTIVE };
       if (request.body.fallback_model !== "bge-m3") {
         return { __status: 400, __body: { error: { code: "bad_request", message: "Модель даёт другие векторы, чем в индексе этой версии: это другая модель, ей нужна новая версия" } } };
       }
@@ -296,7 +297,13 @@ test("та же модель у другого поставщика: запас�
     await panel.page.waitForFunction(() => document.querySelector("#knowledge-active-embedding")?.textContent.includes("сейчас считает он"));
     assert.match(await panel.page.textContent("#knowledge-active-embedding"), /Jina · bge-m3/);
     assert.match(await panel.page.textContent("#knowledge-setup-status"), /работает/);
-    assert.equal(await panel.page.locator("#knowledge-fallback-remove").count(), 1);
+    // Модель снова отвечает — блок свёрнут; «Убрать запасного» — те же
+    // поля пустыми, сервер снимает без проверки.
+    assert.equal(await panel.page.getAttribute("#knowledge-fallback", "open"), null);
+    await panel.page.click("#knowledge-fallback summary");
+    await panel.page.click("#knowledge-fallback-remove");
+    const removed = await panel.waitForRequest((r) => r.method === "PUT" && r.path.endsWith("/2/fallback") && r.body.fallback_model === "");
+    assert.deepEqual(removed.body, { fallback_provider_id: "", fallback_model: "" });
     assert.deepEqual(panel.errors, []);
   } finally { await panel.close(); }
 
