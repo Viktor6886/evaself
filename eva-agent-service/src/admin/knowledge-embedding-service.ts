@@ -210,6 +210,56 @@ export class KnowledgeEmbeddingService {
     throw adminConflict("Удалить можно только версию-черновик или неудавшуюся: у остальных есть индекс", { status: rows[0].status });
   }
 
+  /**
+   * Запасной провайдер построенной версии — без переиндексации. Принимается
+   * только то же пространство: сервер сверяет векторы модели с теми, что
+   * уже лежат в индексе версии (пустой индекс — с основным провайдером).
+   * Так меняют поставщика той же модели, когда у прежнего кончились
+   * средства: индекс остаётся, вектор запроса считает запасной. Пустые
+   * поля — снять запасного. Роутер видит изменение в течение 30 секунд
+   * (кэш конфигурации версии).
+   */
+  async setFallback(value: unknown, body: unknown): Promise<EmbeddingVersionView> {
+    const version = integer(value, "version", 1, 999_999, null);
+    if (version === null) throw adminBadRequest("Номер версии обязателен", { field: "version" });
+    const current = (await this.versions()).find((row) => row.version === version);
+    if (!current) throw adminNotFound("Версия эмбеддингов не найдена");
+    const input = body && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : {};
+    const providerId = typeof input.fallback_provider_id === "string" && input.fallback_provider_id.trim() ? input.fallback_provider_id.trim() : null;
+    const model = typeof input.fallback_model === "string" && input.fallback_model.trim() ? text(input.fallback_model, "fallback_model", MODEL_NAME) : null;
+    if ((providerId === null) !== (model === null)) {
+      throw adminBadRequest("Запасной провайдер задаётся вместе с моделью", { field: "fallback_model" });
+    }
+    if (providerId && model) {
+      if (!(await this.providers()).some((provider) => provider.id === providerId)) {
+        throw adminBadRequest("Провайдер не найден, выключен или не OpenAI-совместимый", { field: "fallback_provider_id" });
+      }
+      if (providerId === current.provider_id && model === current.model) {
+        throw adminBadRequest("Это основной провайдер версии, а не запасной", { field: "fallback_provider_id" });
+      }
+      const check = await this.agent.request(`/v1/knowledge/embeddings/versions/${version}/space-check`, {
+        method: "POST",
+        body: JSON.stringify({ provider_id: providerId, model }),
+      }) as Record<string, unknown> | null;
+      if (check?.ok !== true || check.same_space !== true) {
+        const message = check?.ok !== true
+          ? check?.basis === "primary"
+            ? "Индекс версии пуст, а основной провайдер не ответил: сравнить модель не с чем"
+            : "Модель не ответила: проверьте провайдера и имя модели"
+          : "Модель даёт другие векторы, чем в индексе этой версии: это другая модель, ей нужна новая версия";
+        throw adminBadRequest(message, { field: "fallback_model", check });
+      }
+    }
+    const { rows } = await this.pool.query<{ version: number }>(
+      "UPDATE knowledge_embedding_versions SET fallback_provider_id = $2, fallback_model = $3 WHERE version = $1 RETURNING version",
+      [version, providerId, model],
+    );
+    if (!rows[0]) throw adminNotFound("Версия эмбеддингов не найдена");
+    // Проверка активной модели учитывает запасного: прежний вердикт устарел.
+    this.activeChecked = null;
+    return (await this.versions()).find((row) => row.version === version)!;
+  }
+
   private async probeInput(body: unknown): Promise<ProbeInput> {
     const input = body && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : {};
     const providerId = text(input.provider_id, "provider_id");

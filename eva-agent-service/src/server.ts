@@ -51,6 +51,8 @@ import type { CanonicalContextStore } from "./runtime/canonical-context.js";
 import { registerCanonicalRoutes } from "./runtime/canonical-routes.js";
 import { registerToolCatalogRoutes, type ToolCatalogContext } from "./tools/catalog-routes.js";
 import { registerKnowledgeRoutes } from "./knowledge/routes.js";
+import { QdrantClient } from "./knowledge/qdrant-client.js";
+import { KnowledgeVectorStore } from "./knowledge/vector-store.js";
 import { LlmRouterClient } from "./router/client.js";
 import type { PrefixInput } from "./letta/prefix-size.js";
 import type { PersonaSyncResult } from "./letta/persona-sync.js";
@@ -307,8 +309,15 @@ export function buildServer(services: Services): FastifyInstance {
 
   if (services.toolCatalog) registerToolCatalogRoutes(app, services.toolCatalog);
 
-  // База знаний: проверка модели эмбеддингов идёт через роутер агента.
-  registerKnowledgeRoutes(app, { router: new LlmRouterClient(config.routerUrl, config.routerApiKey) });
+  // База знаний: проверка модели эмбеддингов идёт через роутер агента;
+  // пространство запасного провайдера сверяется с векторами индекса.
+  registerKnowledgeRoutes(app, {
+    router: new LlmRouterClient(config.routerUrl, config.routerApiKey),
+    db: services.db,
+    vectors: config.qdrantApiKey
+      ? new KnowledgeVectorStore(new QdrantClient({ url: config.qdrantUrl || "http://qdrant:6333", apiKey: config.qdrantApiKey, timeoutMs: 5_000 }))
+      : null,
+  });
 
   // Канонические источники личности Евы. Регистрируются, только когда
   // владелец текстов передан: без реестра артефактов править нечего, а

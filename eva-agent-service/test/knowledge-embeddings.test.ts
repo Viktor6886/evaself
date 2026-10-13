@@ -15,6 +15,8 @@ import Fastify from "fastify";
 import { KnowledgeEmbeddingService } from "../dist/admin/knowledge-embedding-service.js";
 import { registerKnowledgeRoutes } from "../dist/knowledge/routes.js";
 import { knowledgeMetrics, resetKnowledgeMetrics } from "../dist/knowledge/metrics.js";
+import { QdrantError } from "../dist/knowledge/qdrant-client.js";
+import { assertQueryAllowed, runInScope, systemScope } from "../dist/tenancy/scope.js";
 import { LlmRouterClient, LlmRouterError } from "../dist/router/client.js";
 
 beforeEach(() => resetKnowledgeMetrics());
@@ -92,13 +94,97 @@ test("маршрут агента: проверка модели уходит в
   });
 });
 
+/**
+ * Агент для проверки пространства: база с настоящей границей арендатора
+ * (фрагменты читаются в системной области с `crossUser`) и индекс Qdrant.
+ */
+function spaceCheckApp(options: {
+  points: Record<"global" | "private", number[] | Error>;
+  vectors?: Record<number, number[]>;
+  probe: (request: any) => Record<string, unknown>;
+}) {
+  const seen: any[] = [];
+  const scrolls: Array<[string, number]> = [];
+  const chunks: Record<string, Record<string, unknown>> = {
+    "11": { id: "11", content: "Прокрастинация — избегание", section: "Глава 1", subsection: null, heading: null },
+    "21": { id: "21", content: "Личная запись", section: null, subsection: null, heading: null },
+    "22": { id: "22", content: "Ещё запись", section: null, subsection: null, heading: null },
+  };
+  const query = async (sql: string, params: unknown[] = []) => {
+    assertQueryAllowed(sql, params);
+    if (/FROM knowledge_embedding_versions/u.test(sql)) {
+      return { rows: params[0] === 1 ? [{ provider_id: "p1", model: "openai/text-embedding-3-small", dimension: 8, request_dimensions: false }] : [] };
+    }
+    if (/FROM knowledge_chunks/u.test(sql)) return { rows: (params[0] as string[]).map((id) => chunks[String(id)]).filter(Boolean) };
+    throw new Error(`неожиданный запрос: ${sql.slice(0, 40)}`);
+  };
+  const app = Fastify();
+  registerKnowledgeRoutes(app, {
+    router: { probeEmbeddings: async (request) => { seen.push(request); return options.probe(request); } },
+    db: {
+      query,
+      withSystemScope: async (reason: string, work: () => Promise<unknown>, scope: { crossUser?: boolean } = {}) => await runInScope(systemScope(reason, scope), work),
+    } as never,
+    vectors: {
+      scrollPoints: async (scope: "global" | "private", _version: number, _offset: unknown, limit: number) => {
+        scrolls.push([scope, limit]);
+        const found = options.points[scope];
+        if (found instanceof Error) throw found;
+        return { points: found.slice(0, limit).map((id) => ({ id, payload: {} })), next: null };
+      },
+      vectorsOf: async (_scope: string, _version: number, ids: number[]) =>
+        new Map(ids.map((id) => [id, options.vectors?.[id] ?? new Array(8).fill(id / 100)])),
+    } as never,
+  });
+  return { app, seen, scrolls };
+}
+
+const missing = () => new QdrantError("qdrant_not_found", 404, "Not found");
+
+test("проверка пространства: модель сравнивается с векторами индекса — сначала общая база, текста в ответе нет", async () => {
+  const { app, seen, scrolls } = spaceCheckApp({
+    points: { global: [11], private: [21, 22] },
+    vectors: { 22: new Array(16).fill(0.1) },
+    probe: () => ({ ok: true, dimension: 8, latency_ms: 1, reference: { ok: true, samples: 2, similarity: 0.9993, same_space: true } }),
+  });
+  const response = await app.inject({ method: "POST", url: "/v1/knowledge/embeddings/versions/1/space-check", payload: { provider_id: "p2", model: "text-embedding-3-small" } });
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.json(), { ok: true, basis: "index", same_space: true, similarity: 0.9993, error_code: null, samples: 2 });
+  assert.doesNotMatch(response.body, /Прокрастинация|Личная запись/u);
+  assert.deepEqual(scrolls, [["global", 3], ["private", 2]], "личные документы — только добором");
+  // Проверяется кандидат в размерности версии; образец — текст с путём
+  // заголовков, как его считала индексация; вектор чужой длины не берётся.
+  assert.equal(seen[0].provider_id, "p2");
+  assert.equal(seen[0].dimension, 8);
+  assert.deepEqual(seen[0].reference.map((sample: { text: string }) => sample.text), ["Глава 1\nПрокрастинация — избегание", "Личная запись"]);
+  assert.equal(seen[0].reference[0].vector.length, 8);
+});
+
+test("проверка пространства: индекс пуст — сравнение с основным; основной не отвечает — код его отказа", async () => {
+  const { app, seen } = spaceCheckApp({
+    points: { global: missing(), private: [] },
+    probe: () => ({ ok: false, error_code: "embedding_payment_required", message: "нет средств" }),
+  });
+  const response = await app.inject({ method: "POST", url: "/v1/knowledge/embeddings/versions/1/space-check", payload: { provider_id: "p2", model: "m" } });
+  assert.deepEqual(response.json(), { ok: false, basis: "primary", same_space: false, similarity: null, error_code: "embedding_payment_required", samples: 0 });
+  assert.deepEqual(seen[0], {
+    provider_id: "p1", model: "openai/text-embedding-3-small", dimension: 8, request_dimensions: false,
+    compare: { provider_id: "p2", model: "m" },
+  });
+
+  const down = spaceCheckApp({ points: { global: new QdrantError("qdrant_unavailable", null, "down"), private: [] }, probe: () => ({ ok: true }) });
+  assert.equal((await down.app.inject({ method: "POST", url: "/v1/knowledge/embeddings/versions/1/space-check", payload: { provider_id: "p2", model: "m" } })).statusCode, 503);
+  assert.equal((await down.app.inject({ method: "POST", url: "/v1/knowledge/embeddings/versions/9/space-check", payload: { provider_id: "p2", model: "m" } })).statusCode, 404,
+    "версии нет — Qdrant не спрашивается");
+});
+
 // ---------------------------------------------------------------------
 // Сервис версий в admin-api
 // ---------------------------------------------------------------------
 
 interface VersionRow extends Record<string, unknown> { version: number; status: string }
 
-function adminService(probe: Record<string, unknown> | ((body: any) => unknown), now?: () => number) {
+function adminService(probe: Record<string, unknown> | ((body: any, path: string) => unknown), now?: () => number) {
   const versions: VersionRow[] = [];
   const probes: unknown[] = [];
   let sequence = 0;
@@ -131,6 +217,12 @@ function adminService(probe: Record<string, unknown> | ((body: any) => unknown),
       versions.splice(index, 1);
       return { rows: [{ version: params[0] }] };
     }
+    if (/^UPDATE knowledge_embedding_versions SET fallback_provider_id/u.test(sql)) {
+      const row = versions.find((item) => item.version === params[0]);
+      if (!row) return { rows: [] };
+      Object.assign(row, { fallback_provider_id: params[1], fallback_model: params[2], fallback_provider_name: params[1] ? "Jina" : null });
+      return { rows: [{ version: params[0] }] };
+    }
     if (/FROM knowledge_embedding_versions v/u.test(sql)) return { rows: [...versions].sort((a, b) => b.version - a.version) };
     return { rows: [] };
   };
@@ -138,7 +230,7 @@ function adminService(probe: Record<string, unknown> | ((body: any) => unknown),
   const agent = { request: async (path: string, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body));
     probes.push({ path, body });
-    return typeof probe === "function" ? probe(body) : probe;
+    return typeof probe === "function" ? probe(body, path) : probe;
   } };
   return { service: new KnowledgeEmbeddingService(pool as never, agent as never, now), versions, probes, statements };
 }
@@ -306,6 +398,54 @@ test("проверка активной модели не ждёт зависш�
   }
 });
 
+test("запасной провайдер к построенной версии: то же пространство — сохраняется без переиндексации", async () => {
+  let space: Record<string, unknown> = { ok: true, basis: "index", same_space: true, similarity: 0.9995, error_code: null, samples: 3 };
+  let primaryDead = false;
+  const { service, versions, probes, statements } = adminService((body, path) => {
+    if (path.endsWith("/space-check")) return space;
+    return primaryDead && body.provider_id === "p1" ? { ok: false, error_code: "embedding_payment_required" } : { ok: true, dimension: 8, latency_ms: 1 };
+  });
+  await service.createVersion({ provider_id: "p1", model: "openai/text-embedding-3-small" });
+  versions[0]!.status = "active";
+  primaryDead = true;
+  assert.equal((await service.overview()).active_check?.ok, false, "у OpenRouter кончились средства");
+  probes.length = 0;
+
+  const saved = await service.setFallback("1", { fallback_provider_id: "p2", fallback_model: "text-embedding-3-small" });
+  assert.equal(saved.fallback_provider_id, "p2");
+  assert.equal(saved.fallback_model, "text-embedding-3-small");
+  assert.deepEqual(probes[0], { path: "/v1/knowledge/embeddings/versions/1/space-check", body: { provider_id: "p2", model: "text-embedding-3-small" } });
+  assert.ok(statements.some((sql) => sql.startsWith("UPDATE knowledge_embedding_versions SET fallback_provider_id")));
+  // Проверка активной модели сразу учитывает запасного, а не ждёт минуту.
+  const check = (await service.overview()).active_check!;
+  assert.deepEqual([check.ok, check.fallback], [true, true]);
+
+  // Другая модель — отказ с объяснением; запись не меняется.
+  space = { ok: true, basis: "index", same_space: false, similarity: 0.42, error_code: null, samples: 3 };
+  await assert.rejects(() => service.setFallback("1", { fallback_provider_id: "p2", fallback_model: "bge-m3" }), /другие векторы/u);
+  assert.equal(versions[0]!.fallback_model, "text-embedding-3-small");
+  // Индекс пуст, а основной не ответил — сравнить не с чем.
+  space = { ok: false, basis: "primary", same_space: false, similarity: null, error_code: "embedding_payment_required", samples: 0 };
+  await assert.rejects(() => service.setFallback("1", { fallback_provider_id: "p2", fallback_model: "m2" }), /сравнить модель не с чем/u);
+
+  // Снять запасного — без проверки.
+  probes.length = 0;
+  const removed = await service.setFallback("1", { fallback_provider_id: "", fallback_model: "" });
+  assert.equal(removed.fallback_provider_id, null);
+  assert.equal(probes.length, 0);
+});
+
+test("запасной провайдер: основной вместо запасного, провайдер вне реестра, половина полей — отказ до проверки", async () => {
+  const { service, probes } = adminService({ ok: true, dimension: 8, latency_ms: 1 });
+  await service.createVersion({ provider_id: "p1", model: "m" });
+  probes.length = 0;
+  await assert.rejects(() => service.setFallback("1", { fallback_provider_id: "p1", fallback_model: "m" }), /основной провайдер/u);
+  await assert.rejects(() => service.setFallback("1", { fallback_provider_id: "p9", fallback_model: "m" }), /не найден/u);
+  await assert.rejects(() => service.setFallback("1", { fallback_provider_id: "p2" }), /вместе с моделью/u);
+  await assert.rejects(() => service.setFallback("7", { fallback_provider_id: "p2", fallback_model: "m" }), /не найдена/u);
+  assert.equal(probes.length, 0);
+});
+
 test("embedMany: нечисловой размер пачки — пачка по умолчанию, а не пустой ответ", async () => {
   const { calls, client } = router((body) => answer(body.input, 4));
   const vectors = await client.embedMany(["a", "b", "c"], { version: 1, dimension: 4, batchSize: Number.NaN });
@@ -324,7 +464,8 @@ test("маршруты панели объявляют роли; изменен�
   await app.ready();
   assert.deepEqual(declared.get("GET /api/admin/v1/knowledge/embeddings")?.roles, ["owner", "admin", "operator", "viewer"]);
   assert.deepEqual(declared.get("POST /api/admin/v1/knowledge/embeddings/probe")?.roles, ["owner", "admin"]);
-  for (const key of ["POST /api/admin/v1/knowledge/embeddings/versions", "DELETE /api/admin/v1/knowledge/embeddings/versions/:version"]) {
+  for (const key of ["POST /api/admin/v1/knowledge/embeddings/versions", "DELETE /api/admin/v1/knowledge/embeddings/versions/:version",
+    "PUT /api/admin/v1/knowledge/embeddings/versions/:version/fallback"]) {
     assert.deepEqual(declared.get(key)?.roles, ["owner", "admin"], key);
     assert.equal(declared.get(key)?.sudoScope, "settings:write", key);
   }

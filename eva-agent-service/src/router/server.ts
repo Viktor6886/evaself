@@ -15,7 +15,7 @@ import type { FastifyInstance, FastifyPluginAsync, FastifyReply } from "fastify"
 
 import type { Logger } from "../logger.js";
 import { EmbeddingError } from "./embeddings.js";
-import { EmbeddingRequestError, type EmbeddingService } from "./embedding-service.js";
+import { EmbeddingRequestError, probeReference, type EmbeddingService } from "./embedding-service.js";
 import { RERANK_DOCUMENT_CHARS, RERANK_DOCUMENT_LIMIT, RERANK_QUERY_CHARS, RerankError, type RouterReranker } from "./rerank.js";
 import { LlmRouter, NoProviderAvailable } from "./router.js";
 import { containsImage, parseContent, pickProviderState } from "./content.js";
@@ -176,9 +176,10 @@ export function createRouterServer(input: RouterServerInput): FastifyInstance {
     const compare = body.compare && typeof body.compare === "object" ? body.compare as Record<string, unknown> : null;
     const compareProvider = compare ? text(compare.provider_id, 64) : null;
     const compareModel = compare ? text(compare.model, 200) : null;
+    const reference = probeReference(body.reference);
     if (!providerId || !model || (dimension !== null && (!Number.isInteger(dimension) || dimension < 8 || dimension > 8192))
-      || (compare && (!compareProvider || !compareModel))) {
-      return reply.code(400).send({ error: { message: "provider_id, model, dimension (8–8192) и compare{provider_id, model} заданы неверно", type: "invalid_request_error" } });
+      || (compare && (!compareProvider || !compareModel)) || reference === false) {
+      return reply.code(400).send({ error: { message: "provider_id, model, dimension (8–8192), compare{provider_id, model} и reference заданы неверно", type: "invalid_request_error" } });
     }
     return await embeddings.probe({
       providerId,
@@ -186,6 +187,7 @@ export function createRouterServer(input: RouterServerInput): FastifyInstance {
       dimension,
       requestDimensions: body.request_dimensions === true,
       compare: compareProvider && compareModel ? { providerId: compareProvider, model: compareModel } : null,
+      reference,
     });
   });
 
