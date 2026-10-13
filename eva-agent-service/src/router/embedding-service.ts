@@ -8,13 +8,16 @@
  * Проверка модели («Настройки → Проверить модель») считает вектор
  * фиксированной строки — не текста человека — и сообщает размерность,
  * задержку и, если задан второй провайдер, похожи ли их векторы: запасной
- * провайдер годится, только если он даёт то же пространство.
+ * провайдер годится, только если он даёт то же пространство. Запасной к
+ * построенной версии сверяется с её индексом: тогда в проверку приходят
+ * до трёх фрагментов документов (`reference`) — к проверяемому провайдеру,
+ * как при индексации; в ответ — только сходство.
  */
 
 import { EmbeddingError, type EmbeddingTarget, type RouterEmbeddings } from "./embeddings.js";
 import { embeddingVersionOf, type EmbeddingVersionStore } from "./embedding-versions.js";
 
-/** Строка проверки. Константа: в проверку не попадает ничего из данных людей. */
+/** Строка проверки. Константа: сама проверка модели не несёт данных людей (сверка с индексом — `reference`). */
 export const PROBE_TEXT = "Проверка модели эмбеддингов Evaself: договор аренды, Р-168-5УН, 2026.";
 
 /** Порог сходства векторов основного и запасного провайдера: то же пространство. */
@@ -35,6 +38,13 @@ export interface ProbeRequest {
   requestDimensions?: boolean;
   /** Второй провайдер — сравнить пространство (запасной для версии). */
   compare?: { providerId: string; model: string } | null;
+  /**
+   * Фрагменты построенного индекса с их векторами: модель проверяется
+   * против того, что уже лежит в Qdrant. Так запасной провайдер можно
+   * подключить к готовой версии, когда основной не отвечает и сравнивать
+   * не с чем.
+   */
+  reference?: ReadonlyArray<{ text: string; vector: readonly number[] }> | null;
 }
 
 export type ProbeResult =
@@ -43,6 +53,9 @@ export type ProbeResult =
     dimension: number;
     latency_ms: number;
     compare?: { ok: true; dimension: number; latency_ms: number; similarity: number; same_space: boolean }
+      | { ok: false; error_code: string; message: string };
+    /** Сходство с векторами индекса — наименьшее по фрагментам. */
+    reference?: { ok: true; samples: number; similarity: number; same_space: boolean }
       | { ok: false; error_code: string; message: string };
   }
   | { ok: false; error_code: string; message: string };
@@ -135,6 +148,22 @@ export class EmbeddingService {
       return { ok: false, ...describe(error) };
     }
     const result: ProbeResult = { ok: true, dimension: primary.length, latency_ms: Math.max(0, this.now() - started) };
+    if (request.reference?.length) {
+      try {
+        // Размерность — та, что у векторов индекса: другая длина — уже
+        // другое пространство, и это отказ провайдера, а не сходство 0.
+        const vectors = await this.embeddings.embedWith(
+          { ...target, dimension: request.reference[0]!.vector.length },
+          request.reference.map((sample) => sample.text),
+          signal,
+        );
+        const similarity = Math.round(Math.min(...vectors.map((vector, index) =>
+          cosine(vector, request.reference![index]!.vector as number[]))) * 10_000) / 10_000;
+        result.reference = { ok: true, samples: vectors.length, similarity, same_space: similarity >= SAME_SPACE_SIMILARITY };
+      } catch (error) {
+        result.reference = { ok: false, ...describe(error) };
+      }
+    }
     if (request.compare) {
       const compareStarted = this.now();
       try {
@@ -158,4 +187,27 @@ export class EmbeddingService {
     }
     return result;
   }
+}
+
+/** Фрагментов индекса в одной проверке — хватает, чтобы отличить модель. */
+const PROBE_REFERENCE_LIMIT = 3;
+
+/**
+ * Образцы индекса для проверки пространства: до трёх фрагментов с их
+ * векторами одной длины. null — образцов нет; false — заданы неверно.
+ */
+export function probeReference(value: unknown): Array<{ text: string; vector: number[] }> | null | false {
+  if (value === undefined || value === null) return null;
+  if (!Array.isArray(value) || !value.length || value.length > PROBE_REFERENCE_LIMIT) return false;
+  const samples: Array<{ text: string; vector: number[] }> = [];
+  for (const item of value as unknown[]) {
+    const sample = item && typeof item === "object" ? item as { text?: unknown; vector?: unknown } : {};
+    if (typeof sample.text !== "string" || !sample.text.trim() || sample.text.length > 8_000) return false;
+    const vector = sample.vector;
+    if (!Array.isArray(vector) || vector.length < 8 || vector.length > 8192
+      || vector.some((number) => typeof number !== "number" || !Number.isFinite(number))) return false;
+    if (samples.length && samples[0]!.vector.length !== vector.length) return false;
+    samples.push({ text: sample.text, vector: vector as number[] });
+  }
+  return samples;
 }

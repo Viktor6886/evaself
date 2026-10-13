@@ -257,6 +257,32 @@ test("проверка запасного: то же пространство �
   assert.equal(differentResult.ok && differentResult.compare?.ok && differentResult.compare.same_space, false);
 });
 
+test("проверка против индекса: та же модель у другого поставщика — то же пространство, другая — нет", async () => {
+  // Векторы индекса посчитала прежняя модель; основной провайдер для
+  // сравнения не нужен — он как раз и не отвечает.
+  const indexed = [{ text: "Прокрастинация — избегание", vector: [1, 0, 0, 0, 0, 0, 0, 0] }, { text: "Сон", vector: [0, 1, 0, 0, 0, 0, 0, 0] }];
+  const unit = (text: string) => text.startsWith("Прокрастинация") ? [1, 0, 0, 0, 0, 0, 0, 0] : text.startsWith("Сон") ? [0, 1, 0, 0, 0, 0, 0, 0] : [0, 0, 1, 0, 0, 0, 0, 0];
+  const same = upstream((call) => ok({ data: (call.body.input as string[]).map((text, index) => ({ index, embedding: unit(text) })) }));
+  const sameResult = await new EmbeddingService(embeddings(same.fetcher), versionStore({}).store)
+    .probe({ providerId: "b", model: "openai/text-embedding-3-small", dimension: 8, reference: indexed });
+  assert.ok(sameResult.ok);
+  assert.deepEqual(sameResult.ok && sameResult.reference, { ok: true, samples: 2, similarity: 1, same_space: true });
+  assert.deepEqual(same.sent[1]!.body.input, ["Прокрастинация — избегание", "Сон"], "образцы считаются одним запросом");
+
+  // Другая модель: на один образец похоже, на другой нет — решает худший.
+  const other = upstream((call) => ok({ data: (call.body.input as string[]).map((text, index) => ({ index, embedding: text === "Сон" ? [1, 0, 0, 0, 0, 0, 0, 0] : unit(text) })) }));
+  const otherResult = await new EmbeddingService(embeddings(other.fetcher), versionStore({}).store)
+    .probe({ providerId: "b", model: "other", dimension: 8, reference: indexed });
+  assert.equal(otherResult.ok && otherResult.reference?.ok && otherResult.reference.same_space, false);
+  assert.equal(otherResult.ok && otherResult.reference?.ok && otherResult.reference.similarity, 0);
+
+  // Другая длина вектора — отказ проверки, а не «похожесть ноль».
+  const wide = upstream((call) => ok({ data: (call.body.input as string[]).map((_text, index) => ({ index, embedding: new Array(8).fill(0.1) })) }));
+  const wideResult = await new EmbeddingService(embeddings(wide.fetcher), versionStore({}).store)
+    .probe({ providerId: "b", model: "m", reference: [{ text: "Сон", vector: new Array(16).fill(0.1) }] });
+  assert.equal(wideResult.ok && wideResult.reference?.ok === false && wideResult.reference.error_code, "embedding_dimension_mismatch");
+});
+
 test("проверка: отказ провайдера — ответ проверки с кодом, а не исключение", async () => {
   const { fetcher } = upstream(() => new Response("nope", { status: 401 }));
   const result = await new EmbeddingService(embeddings(fetcher), versionStore({}).store).probe({ providerId: "a", model: "m" });
@@ -304,7 +330,10 @@ test("маршрут /embeddings/probe: неверный запрос — 400 б
   const { fetcher, sent } = upstream(() => ok(vectors(1, 4)));
   const app = routerApp(new EmbeddingService(embeddings(fetcher), versionStore({}).store));
   const headers = { authorization: "Bearer router-key" };
-  for (const payload of [{ model: "m" }, { provider_id: "a" }, { provider_id: "a", model: "m", dimension: 3 }, { provider_id: "a", model: "m", compare: { provider_id: "b" } }]) {
+  const sample = (vector: unknown, text: unknown = "фрагмент") => ({ provider_id: "a", model: "m", reference: [{ text, vector }] });
+  for (const payload of [{ model: "m" }, { provider_id: "a" }, { provider_id: "a", model: "m", dimension: 3 }, { provider_id: "a", model: "m", compare: { provider_id: "b" } },
+    sample([1, 2]), sample(new Array(8).fill("x")), sample(new Array(8).fill(1), ""), { provider_id: "a", model: "m", reference: new Array(4).fill({ text: "a", vector: new Array(8).fill(1) }) },
+    { provider_id: "a", model: "m", reference: [{ text: "a", vector: new Array(8).fill(1) }, { text: "b", vector: new Array(9).fill(1) }] }]) {
     assert.equal((await app.inject({ method: "POST", url: "/embeddings/probe", headers, payload })).statusCode, 400);
   }
   assert.equal(sent.length, 0);

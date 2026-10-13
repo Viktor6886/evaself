@@ -35,6 +35,12 @@ export function registerKnowledgeRoutes(app: FastifyInstance, service: Knowledge
     config: { roles: ["owner", "admin"], sudoScope: "settings:write" },
   }, async (request, reply) => reply.code(201).send(await service.createVersion(request.body)));
 
+  // Запасной провайдер построенной версии: то же пространство, без
+  // переиндексации. Меняет, кем считается вектор запроса, — под sudo.
+  app.put("/api/admin/v1/knowledge/embeddings/versions/:version/fallback", {
+    config: { roles: ["owner", "admin"], sudoScope: "settings:write" },
+  }, async (request) => await service.setFallback((request.params as { version?: string }).version, request.body));
+
   app.delete("/api/admin/v1/knowledge/embeddings/versions/:version", {
     config: { roles: ["owner", "admin"], sudoScope: "settings:write" },
   }, async (request) => await service.deleteVersion((request.params as { version?: string }).version));

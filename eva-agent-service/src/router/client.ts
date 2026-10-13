@@ -27,6 +27,8 @@ export interface EmbeddingProbeRequest {
   dimension?: number | null;
   request_dimensions?: boolean;
   compare?: { provider_id: string; model: string } | null;
+  /** Фрагменты индекса с векторами: проверка модели против построенной версии. */
+  reference?: Array<{ text: string; vector: number[] }> | null;
 }
 
 /** Canonical HTTP client for callers that live in the agent-service process. */

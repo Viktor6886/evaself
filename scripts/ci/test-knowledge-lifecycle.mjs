@@ -37,6 +37,8 @@ import { KnowledgeSearch } from "../../eva-agent-service/dist/knowledge/search.j
 import { legacyCandidates } from "../../eva-agent-service/dist/knowledge/search-queries.js";
 import { withKnowledgeIndexWrite } from "../../eva-agent-service/dist/knowledge/version-validation.js";
 import { CoreToolFactory } from "../../eva-agent-service/dist/tools/core-tools.js";
+import { registerKnowledgeRoutes } from "../../eva-agent-service/dist/knowledge/routes.js";
+import Fastify from "../../eva-agent-service/node_modules/fastify/fastify.js";
 import { recordJobIntent } from "../../eva-agent-service/dist/jobs/job-outbox.js";
 
 assert.equal(process.env.KNOWLEDGE_INTEGRATION_TEST, "true", "только изолированная CI-база");
@@ -50,6 +52,8 @@ const pool = guardPool(raw);
 const db = new Database(connectionString);
 const root = await mkdtemp(join(tmpdir(), "eva-kb-ci-"));
 const providerId = randomUUID();
+/** Второй поставщик той же модели — запасной провайдер без переиндексации. */
+const secondProviderId = randomUUID();
 const ownDocuments = [];
 const ownCollections = [];
 const ownVersions = [];
@@ -63,11 +67,13 @@ const outbox = { record: recordJobIntent };
 const indexJobs = knowledgeIndexScheduler(outbox, () => true);
 
 let beforeEmbeddingResponse = async () => {};
-/** Модель, у провайдера которой «кончились кредиты»: 402, как у OpenRouter. */
+/** Модель, у основного провайдера которой «кончились кредиты»: 402, как у OpenRouter. */
 let deadModel = null;
-const fixtureFetch = async (_url, init) => {
+const fixtureFetch = async (url, init) => {
   const body = JSON.parse(init.body);
-  if (body.model === deadModel) return new Response(JSON.stringify({ error: { message: "Insufficient credits" } }), { status: 402 });
+  if (body.model === deadModel && !String(url).startsWith("http://ci-upstream-b.invalid")) {
+    return new Response(JSON.stringify({ error: { message: "Insufficient credits" } }), { status: 402 });
+  }
   const dimension = body.model === "ci-psychology-8" ? 8 : body.model === "ci-psychology-12" ? 12 : 0;
   assert.ok(dimension, "используется модель конкретной версии");
   await beforeEmbeddingResponse();
@@ -75,7 +81,10 @@ const fixtureFetch = async (_url, init) => {
     embedding: Array.from({ length: dimension }, (_, i) => i === (dimension === 8 ? 0 : 1) ? 1 : 0),
   })) }));
 };
-const embedding = new EmbeddingService(new RouterEmbeddings(routerStore, { model: "ci-psychology-8", dimension: 8, fetch: fixtureFetch }), new EmbeddingVersionStore(pool));
+// Кэш конфигурации версий роутера (30 с): после смены запасного тест его
+// сбрасывает, а не ждёт.
+const routerVersions = new EmbeddingVersionStore(pool);
+const embedding = new EmbeddingService(new RouterEmbeddings(routerStore, { model: "ci-psychology-8", dimension: 8, fetch: fixtureFetch }), routerVersions);
 // Канонический клиент и канонический EmbeddingService: transport заменён,
 // маршрутизация модели по версии и реестр провайдера остаются настоящими.
 const router = new LlmRouterClient("http://ci-router", "ci", async (_url, init) => {
@@ -88,6 +97,18 @@ const versionsAgent = { request: async (_path, init) => {
   return await embedding.probe({ providerId: b.provider_id, model: b.model, dimension: b.dimension, requestDimensions: b.request_dimensions });
 } };
 const versions = new KnowledgeEmbeddingService(pool, versionsAgent);
+// Настоящий маршрут агента «то же пространство»: образцы из Qdrant и
+// PostgreSQL, сравнение в EmbeddingService роутера.
+const agentApp = Fastify();
+registerKnowledgeRoutes(agentApp, {
+  router: { probeEmbeddings: async (b) => await embedding.probe({ providerId: b.provider_id, model: b.model, dimension: b.dimension,
+    requestDimensions: b.request_dimensions, compare: b.compare ? { providerId: b.compare.provider_id, model: b.compare.model } : null, reference: b.reference ?? null }) },
+  db,
+  vectors: store,
+});
+const spaceAgent = { request: async (path, init) => path.endsWith("/space-check")
+  ? (await agentApp.inject({ method: "POST", url: path, payload: JSON.parse(init.body) })).json()
+  : await versionsAgent.request(path, init) };
 const uploadSettingKey = "runtime.knowledge_uploads_enabled";
 const originalUploadSetting = (await pool.query("SELECT value_json FROM system_settings WHERE key=$1", [uploadSettingKey])).rows[0];
 const uploadOptions = { uploadsRoot: root, store, uploadsEnabled: async () => await readKnowledgeUploadsSetting(pool, false), uploadsWorkerEnabled: true };
@@ -141,6 +162,9 @@ try {
   await pool.query(`INSERT INTO llm_providers(id, name, protocol, base_url, model, context_window, api_key_encrypted, enabled)
     VALUES ($1, $2, 'openai-compatible', 'http://ci-upstream.invalid', 'ci-chat', 4096, $3, true)`,
   [providerId, `CI knowledge ${providerId}`, new SecretBox(master).encrypt("ci-placeholder")]);
+  await pool.query(`INSERT INTO llm_providers(id, name, protocol, base_url, model, context_window, api_key_encrypted, enabled)
+    VALUES ($1, $2, 'openai-compatible', 'http://ci-upstream-b.invalid', 'ci-chat', 4096, $3, true)`,
+  [secondProviderId, `CI knowledge B ${secondProviderId}`, new SecretBox(master).encrypt("ci-placeholder")]);
   const overview = await versions.overview();
   assert.ok(overview.providers.some((p) => p.id === providerId));
   assert.doesNotMatch(JSON.stringify(overview), /api_key|ci-placeholder|base_url/u);
@@ -310,6 +334,27 @@ try {
     assert.equal(await store.documentPoints("private", first.version, lateDoc), 0);
     const check = (await new KnowledgeEmbeddingService(pool, versionsAgent).overview()).active_check;
     assert.deepEqual([check.version, check.ok, check.error_code], [first.version, false, "embedding_payment_required"], "панель видит, что модель не отвечает");
+
+    // Та же модель у другого поставщика — запасным к построенной версии,
+    // без переиндексации. Сверка — с векторами в Qdrant: основной не
+    // отвечает, и сравнивать с ним нечего. Другую модель сервер не примет.
+    const direct = await spaceAgent.request(`/v1/knowledge/embeddings/versions/${first.version}/space-check`,
+      { body: JSON.stringify({ provider_id: secondProviderId, model: "ci-psychology-8" }) });
+    assert.deepEqual([direct.ok, direct.basis, direct.same_space], [true, "index", true], "сверка — по векторам индекса");
+    assert.ok(direct.samples > 0);
+    assert.doesNotMatch(JSON.stringify(direct), /Прокрастинация/u, "текста фрагментов в ответе нет");
+    const panel = new KnowledgeEmbeddingService(pool, spaceAgent);
+    await assert.rejects(() => panel.setFallback(first.version, { fallback_provider_id: secondProviderId, fallback_model: "ci-psychology-12" }), /другие векторы/u);
+    const attached = await panel.setFallback(first.version, { fallback_provider_id: secondProviderId, fallback_model: "ci-psychology-8" });
+    assert.deepEqual([attached.fallback_provider_id, attached.fallback_model, attached.status], [secondProviderId, "ci-psychology-8", "active"]);
+    routerVersions.invalidate();
+    const viaFallback = await search.search(ownUsers[0], question);
+    assert.equal(viaFallback.degraded, false, "включённая версия снова ищет по смыслу");
+    assert.equal(viaFallback.diagnostics.vectorStandby, undefined, "без запасной версии — через запасного провайдера");
+    const rescuedCheck = (await panel.overview()).active_check;
+    assert.deepEqual([rescuedCheck.ok, rescuedCheck.fallback], [true, true]);
+    await panel.setFallback(first.version, { fallback_provider_id: "", fallback_model: "" });
+    routerVersions.invalidate();
   } finally {
     deadModel = null;
   }
@@ -393,7 +438,7 @@ try {
   const fallback = await tool.execute({ query }, { userId: ownUsers[0] });
   assert.equal(fallback.degraded, true);
   assert.ok(fallback.results.some((hit) => hit.content.includes("маленький первый шаг")));
-  console.log("PASS: registry/probe/persist/build/outbox/first activation/K7/dead provider standby/rollback/upload setting persistence/live admission/semantic tool/citations/tenant hydration/disabled collection/paused Qdrant fallback/recovery/missing collection fallback");
+  console.log("PASS: registry/probe/persist/build/outbox/first activation/K7/dead provider standby/same-space fallback provider/rollback/upload setting persistence/live admission/semantic tool/citations/tenant hydration/disabled collection/paused Qdrant fallback/recovery/missing collection fallback");
   console.log("Embedding upstream and AV are fixtures; autonomous Letta tool choice and final prose require the documented live canary.");
 } finally {
   if (originalUploadSetting) await setUploads(originalUploadSetting.value_json);
@@ -410,7 +455,7 @@ try {
       for (const v of ownVersions) await store.dropVersion(v);
       await pool.query("DELETE FROM knowledge_embedding_versions WHERE version=ANY($1::integer[])", [ownVersions]);
     }
-    await pool.query("DELETE FROM llm_providers WHERE id=$1", [providerId]);
+    await pool.query("DELETE FROM llm_providers WHERE id = ANY($1::uuid[])", [[providerId, secondProviderId]]);
     await pool.query("DELETE FROM job_outbox WHERE envelope->>'payloadRef' = ANY($1::text[]) -- tenant: system — только задания CI-артефактов", [[...ownDocuments, ...ownVersions.map(String)]]);
   });
   await routerStore.close(); await db.close(); await raw.end();

@@ -166,6 +166,30 @@ async function knowledgeEnableIndexing() {
   await loadKnowledge().catch(handleError);
 }
 
+/** Запасной провайдер включённой модели: проверка пространства по индексу и запись; пустые поля — снять. */
+async function knowledgeSaveFallback(remove = false) {
+  const k = state.knowledge;
+  const active = knowledgeActiveVersion();
+  const form = $("#knowledge-fallback-form");
+  if (!active || !form || k.fallbackBusy || !knowledgeEditable() || (!remove && !form.reportValidity())) return;
+  const body = remove
+    ? { fallback_provider_id: "", fallback_model: "" }
+    : { fallback_provider_id: form.elements.fallback_provider_id.value, fallback_model: form.elements.fallback_model.value.trim() };
+  k.fallbackBusy = remove ? "Снимаем запасного…" : "Сверяем модель с векторами индекса…";
+  k.fallbackError = null;
+  renderKnowledgeFallback();
+  try {
+    await request(`/knowledge/embeddings/versions/${encodeURIComponent(active.version)}/fallback`, { method: "PUT", body: JSON.stringify(body) });
+    toast(remove ? "Запасной провайдер снят" : "Запасной провайдер подключён: то же пространство, индекс остаётся");
+  } catch (error) {
+    if (error.status === 401) { handleError(error); return; }
+    k.fallbackError = error.message;
+  } finally {
+    k.fallbackBusy = false;
+  }
+  await loadKnowledge().catch(handleError);
+}
+
 function bindKnowledgeEmbeddings() {
   const page = $("#page-knowledge");
   page.addEventListener("input", (event) => {
@@ -208,12 +232,17 @@ function bindKnowledgeEmbeddings() {
       knowledgeEnableIndexing();
     } else if (button.id === "knowledge-use-qdrant") {
       knowledgeGoLive();
+    } else if (button.id === "knowledge-fallback-remove") {
+      knowledgeSaveFallback(true);
     }
   });
   page.addEventListener("submit", (event) => {
     if (event.target.id === "knowledge-embedding-form") {
       event.preventDefault();
       knowledgeConnectModel();
+    } else if (event.target.id === "knowledge-fallback-form") {
+      event.preventDefault();
+      knowledgeSaveFallback();
     } else if (event.target.id === "knowledge-runtime-form") {
       event.preventDefault();
       const values = {};

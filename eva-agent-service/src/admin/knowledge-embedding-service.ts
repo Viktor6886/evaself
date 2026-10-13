@@ -103,6 +103,8 @@ function integer(value: unknown, field: string, min: number, max: number, fallba
 
 export class KnowledgeEmbeddingService {
   private activeChecked: { at: number; result: ActiveEmbeddingCheck } | null = null;
+  /** Растёт при смене запасного: проверка, начатая раньше, свой вердикт не кэширует. */
+  private activeGeneration = 0;
 
   constructor(
     private readonly pool: Pick<pg.Pool, "query">,
@@ -210,6 +212,59 @@ export class KnowledgeEmbeddingService {
     throw adminConflict("Удалить можно только версию-черновик или неудавшуюся: у остальных есть индекс", { status: rows[0].status });
   }
 
+  /**
+   * Запасной провайдер построенной версии — без переиндексации. Принимается
+   * только то же пространство: сервер сверяет векторы модели с теми, что
+   * уже лежат в индексе версии (пустой индекс — с основным провайдером).
+   * Так меняют поставщика той же модели, когда у прежнего кончились
+   * средства: индекс остаётся, вектор запроса считает запасной. Пустые
+   * поля — снять запасного. Роутер видит изменение в течение 30 секунд
+   * (кэш конфигурации версии).
+   */
+  async setFallback(value: unknown, body: unknown): Promise<EmbeddingVersionView> {
+    const version = integer(value, "version", 1, 999_999, null);
+    if (version === null) throw adminBadRequest("Номер версии обязателен", { field: "version" });
+    const current = (await this.versions()).find((row) => row.version === version);
+    if (!current) throw adminNotFound("Версия эмбеддингов не найдена");
+    const input = body && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : {};
+    const providerId = typeof input.fallback_provider_id === "string" && input.fallback_provider_id.trim() ? input.fallback_provider_id.trim() : null;
+    const model = typeof input.fallback_model === "string" && input.fallback_model.trim() ? text(input.fallback_model, "fallback_model", MODEL_NAME) : null;
+    if ((providerId === null) !== (model === null)) {
+      throw adminBadRequest("Запасной провайдер задаётся вместе с моделью", { field: "fallback_model" });
+    }
+    if (providerId && model) {
+      if (!(await this.providers()).some((provider) => provider.id === providerId)) {
+        throw adminBadRequest("Провайдер не найден, выключен или не OpenAI-совместимый", { field: "fallback_provider_id" });
+      }
+      if (providerId === current.provider_id && model === current.model) {
+        throw adminBadRequest("Это основной провайдер версии, а не запасной", { field: "fallback_provider_id" });
+      }
+      const check = await this.agent.request(`/v1/knowledge/embeddings/versions/${version}/space-check`, {
+        method: "POST",
+        body: JSON.stringify({ provider_id: providerId, model }),
+      }) as Record<string, unknown> | null;
+      if (check?.ok !== true || check.same_space !== true) {
+        // Другая длина вектора — тоже другая модель, а не «не ответила».
+        const otherSpace = check?.ok === true || check?.error_code === "embedding_dimension_mismatch";
+        const message = otherSpace
+          ? "Модель даёт другие векторы, чем в индексе этой версии: это другая модель, ей нужна новая версия"
+          : check?.basis === "primary"
+            ? "Сравнить модель не с чем: в индексе версии нет векторов (или Qdrant не настроен), а основной провайдер не ответил"
+            : "Модель не ответила: проверьте провайдера и имя модели";
+        throw adminBadRequest(message, { field: "fallback_model", check });
+      }
+    }
+    const { rows } = await this.pool.query<{ version: number }>(
+      "UPDATE knowledge_embedding_versions SET fallback_provider_id = $2, fallback_model = $3 WHERE version = $1 RETURNING version",
+      [version, providerId, model],
+    );
+    if (!rows[0]) throw adminNotFound("Версия эмбеддингов не найдена");
+    // Проверка активной модели учитывает запасного: прежний вердикт устарел.
+    this.activeChecked = null;
+    this.activeGeneration += 1;
+    return (await this.versions()).find((row) => row.version === version)!;
+  }
+
   private async probeInput(body: unknown): Promise<ProbeInput> {
     const input = body && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : {};
     const providerId = text(input.provider_id, "provider_id");
@@ -251,6 +306,7 @@ export class KnowledgeEmbeddingService {
   private async activeCheck(version: EmbeddingVersionView): Promise<ActiveEmbeddingCheck | null> {
     const cached = this.activeChecked;
     if (cached && cached.result.version === version.version && this.now() - cached.at < ACTIVE_CHECK_TTL_MS) return cached.result;
+    const generation = this.activeGeneration;
     const attempt = async (providerId: string, model: string): Promise<string | null> => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const timeout = new Promise<ProbeResult>((resolve) => {
@@ -283,7 +339,7 @@ export class KnowledgeEmbeddingService {
       fallback: primary !== null && fallback === null,
       checked_at: new Date(this.now()).toISOString(),
     };
-    this.activeChecked = { at: this.now(), result };
+    if (generation === this.activeGeneration) this.activeChecked = { at: this.now(), result };
     return result;
   }
 
