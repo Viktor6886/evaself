@@ -1,12 +1,14 @@
 # SpiderFoot master @ 0f815a2 (MIT) под Python 3.12 и обёртка FastAPI.
 # cryptography, pyOpenSSL, lxml и networkx подняты выше пинов upstream
 # (cryptography<4 и pyOpenSSL<22 — версии с известными уязвимостями).
+# 2026-11-16, уязвимости из pip-audit: certifi 2026.10.18, dnspython 2.9.2,
+# pillow 13.0.0, setuptools 84.1.0, soupsieve 4.0.0.
 adblockparser==0.7
 annotated-doc==0.0.5
 annotated-types==0.8.0
 anyio==4.15.1
 beautifulsoup4==4.15.0
-certifi==2026.7.22
+certifi==2026.10.18
 cffi==2.1.1
 charset-normalizer==3.5.1
 cheroot==11.1.2
@@ -14,7 +16,7 @@ CherryPy==18.10.0
 cherrypy-cors==1.7.0
 click==8.5.0
 cryptography==50.0.1
-dnspython==2.8.0
+dnspython==2.9.2
 et_xmlfile==2.0.0
 ExifRead==2.3.2
 fastapi==0.141.1
@@ -40,7 +42,7 @@ netaddr==0.10.1
 networkx==3.7
 openpyxl==3.1.5
 phonenumbers==8.13.55
-pillow==12.3.0
+pillow==13.0.0
 portend==3.2.1
 publicsuffixlist==0.9.4
 pycparser==3.0
@@ -59,10 +61,10 @@ PyYAML==6.0.3
 requests==2.34.2
 rich==15.0.0
 secure==0.3.0
-setuptools==84.0.0
+setuptools==84.1.0
 shellingham==1.5.4
 six==1.17.0
-soupsieve==2.10
+soupsieve==4.0.0
 starlette==1.7.0
 tempora==5.12.0
 typer==0.27.2
