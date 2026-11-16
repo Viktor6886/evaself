@@ -47,9 +47,40 @@ sharp
 #     MCP-клиент letta-code серверов не получает. Снимает тот, кто
 #     обновляет SDK (scripts/ci/sync-letta-versions.py), — когда
 #     letta-code перейдёт на @modelcontextprotocol/sdk >= 1.31.0.
+#
+#   eva-agent-service @modelcontextprotocol/sdk GHSA-22jm-h49p-29qw,
+#   GHSA-46jr-4wx8-v453, GHSA-f897-62hf-6gxq
+#     (2026-11-16) Серверная сторона MCP: экспериментальные задачи не
+#     привязаны к сессии на сервере; один HTTP-запрос исчерпывает память
+#     сервера при проверке; серверные HTTP-транспорты не ограничивали тело
+#     запроса и длину пакета JSON-RPC. Тот же путь letta-agent-sdk ->
+#     letta-code -> 1.30.0 в сборке letta.js. В сборке есть только клиент
+#     MCP (модули client/*, единственный класс протокола — Client): ни
+#     McpServer, ни серверных транспортов и обработчиков, то есть кода,
+#     к которому относятся эти advisory. Снимает тот же, кто обновляет SDK, —
+#     когда letta-code перейдёт на @modelcontextprotocol/sdk >= 1.32.0.
 ALLOWED_ADVISORIES="
 eva-agent-service @modelcontextprotocol/sdk GHSA-6qxp-vccf-f47h
+eva-agent-service @modelcontextprotocol/sdk GHSA-22jm-h49p-29qw
+eva-agent-service @modelcontextprotocol/sdk GHSA-46jr-4wx8-v453
+eva-agent-service @modelcontextprotocol/sdk GHSA-f897-62hf-6gxq
 "
+
+# Уязвимости pip, принятые поимённо для osint-worker (идентификаторы,
+# которые печатает pip-audit).
+#
+#   soupsieve CVE-2026-126190, CVE-2026-126191, CVE-2026-126193
+#     (2026-11-16) Полиномиальное время сопоставления селектора с
+#     потомками на глубоко вложенном HTML, экспоненциальный откат регулярки
+#     и неограниченная рекурсия при разборе селектора. Исправлено в
+#     soupsieve 3.0.2 и 4.0.0, а maigret 0.6.6 (последний выпуск) требует
+#     soupsieve<3.0, так что поднять его в этом наборе нельзя. Путь не
+#     используется: maigret beautifulsoup4 не вызывает, socid-extractor
+#     берёт поля через find(); CSS-селекторов (select, select_one,
+#     soupsieve) нет ни в одном из пакетов. В osint-harvester и
+#     osint-spiderfoot soupsieve поднят до 4.0.0. Снимает тот, кто обновляет
+#     maigret, — когда он разрешит soupsieve >= 4.0.
+PIP_IGNORED_OSINT_WORKER="CVE-2026-126190 CVE-2026-126191 CVE-2026-126193"
 
 failures=0
 
@@ -142,7 +173,12 @@ fi
 # osint-worker проверяется по полному закреплённому набору: разрешать
 # requirements.txt заново значило бы собирать PyICU на раннере.
 echo "== pip-audit: osint-worker"
-if with_retry 600 python3 -m pip_audit --strict --disable-pip --no-deps \
+worker_ignored=()
+for vuln in $PIP_IGNORED_OSINT_WORKER; do
+	echo "  принято поимённо: $vuln"
+	worker_ignored+=(--ignore-vuln "$vuln")
+done
+if with_retry 600 python3 -m pip_audit --strict --disable-pip --no-deps "${worker_ignored[@]}" \
 	--requirement "$REPO_ROOT/osint-worker/requirements.lock"; then
 	echo "  уязвимостей нет"
 elif [ $? -eq 124 ]; then
